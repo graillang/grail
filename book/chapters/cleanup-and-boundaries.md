@@ -1,4 +1,101 @@
-# Cleanup and current boundaries
+
+## Unsafe code: raw pointers
+
+`unsafe { ... }` is the hatch for work the checker cannot follow. It already gated foreign calls
+and the C pointer builtins; it now also gates raw pointers, `*T` and `*mut T`.
+
+A raw pointer is one word, `Copy`, and drops nothing. It is written `*T` or `*mut T`, and `**T` is a
+pointer to a pointer. The type can be spelled anywhere - a parameter, a field, a return - but every
+operation on it needs an `unsafe` block, and each one is refused by name outside one:
+
+```grl
+fn main() {
+    mut x: u64 = 41;
+    unsafe {
+        p := ptr_of(&mut x);     // *mut u64: the address a reference already carries
+        p.write(p.read() + 1);
+        q := alloc(u64, 4);      // *mut u64 over four zeroed elements
+        q.add(1).write(9);       // steps by the element width
+        println(q.add(1).read());
+        free(q);
+    }
+    println(x);                  // 42
+}
+```
+
+| operation | what it is |
+| --- | --- |
+| `ptr_of(&x)` / `ptr_of(&mut x)` | `*T` / `*mut T`: the address of the slot holding the value |
+| `alloc(T, n)` | `*mut T` over `n` zeroed elements; `free(p)` releases it |
+| `p.addr()` / `ptr_from_addr(T, a)` | the address as a `u64`, and a `*mut T` at one |
+| `p.add(n)` / `p.sub(n)` | step by the element width: the natural width of a sized integer, f32 and f64, one word for everything else |
+| `p.read()` / `p.write(v)` | load and store at that width; `write` needs `*mut T` |
+| `p.is_null()` / `p.cast(U)` | the null pointer, and the same address as `*U` |
+
+`p.read()` on an owned value duplicates ownership and `p.write(v)` moves `v` in without dropping
+what was there - the same contract as Rust's `ptr::read` and `ptr::write`. The compiler enforces that
+contract in both directions: the value `read` hands out is an owner (so it can be dropped or moved
+on with the ordinary rules), and the operand of `write` is consumed (so an owned local written into a
+block is not also dropped where it came from). A pointer also pins what
+it names: a pointer made from a reference keeps that reference's loan for the rest of the function,
+so the storage cannot be moved or freed underneath it. A record holding a raw pointer is
+thread-affine, so it cannot cross to another thread.
+
+### Handing a borrow back out
+
+`p.as_ref()` and `p.as_mut()` turn a pointer into a reference again. They may only be the *returned*
+value of a function whose result is a reference of the same type, because that result is what names
+the lifetime the borrow gets:
+
+```grl
+unsafe fn value_of<a>(p: *mut u64, anchor: &a u64) -> &a u64 {
+    return p.as_ref();
+}
+```
+
+The pointer is the assertion that the storage there holds the pointee; the region comes from the
+declared result, so the caller's borrow checking still applies (here the reference lives no longer
+than `anchor`). `as_mut` gives `&mut T`, needs a `*mut T`, and the result must be `&mut T`. Used
+anywhere else - a binding, an argument, a longer chain - both are refused by name.
+
+### `unsafe fn`
+
+A function whose contract the checker cannot see is declared `unsafe fn`. Its body sits one level
+down, so it needs no inner `unsafe` block, and every call from safe code must be inside one:
+
+```grl
+unsafe fn bump(p: *mut u64) -> u64 {
+    q := p.read() + 1;      // no inner `unsafe` needed
+    p.write(q);
+    return q;
+}
+
+fn main() {
+    mut x: u64 = 41;
+    unsafe { println(bump(ptr_of(&mut x))); }   // 42
+}
+```
+
+### Audited records
+
+A record that holds a raw pointer (or other foreign state) is thread-affine, which is the right
+default but wrong for a type that is *designed* to be shared. `unsafe struct` states the audited
+contract where the type is declared:
+
+```grl
+unsafe struct Arcish<T>: transferable, shareable {
+    p: *mut T,
+    n: u64
+}
+```
+
+The classification takes `unsafe` on purpose - a plain `struct` cannot claim one - and only a struct
+can take it (`shareable` implies `transferable`). The type arguments must still classify, as Rust
+requires of `unsafe impl<T: Send + Sync>`: `Arcish<Handle>` is accepted only for handles that are
+safe to move and to share. What the declaration buys is the walk of the fields skipped; what it does
+not buy is anything the foreign code itself does behind that pointer.
+
+
 
 Owned values are released deterministically on normal control flow. You usually do not write
 `drop`; an explicit drop simply requests an earlier end when no live borrow prevents it.
@@ -9,6 +106,101 @@ Generated cleanup handles scope exits, partial moves, active enum payloads, vect
 early returns, propagation and loop transfers. Native programs check for zero live runtime
 allocations at normal exit. This is not a guarantee about resident memory: the allocator caches
 small slabs for reuse, while large single-object arenas are released immediately.
+
+## Cleanup you can write: `impl Drop`
+
+A type's fields say what it holds. A type that owns something its fields do not describe - a count in
+someone else's memory, a resource a foreign library handed out - says so itself, with Rust's `Drop`:
+
+```grl
+struct Session {
+    id: u64,
+    tags: string
+}
+impl Drop for Session {
+    fn drop(self: &mut Session) {
+        println("closing session {} ({})", self.id, self.tags);
+    }
+}
+```
+
+`Drop` is a built-in interface, like `Send` and `Share`: the name is reserved, nothing imports it, and
+`fn drop(self: &mut Self)` is its only method. An implementation that does not have that shape is
+refused at the `impl`, and so is one for a type declared in another module.
+
+The method runs at the head of the cleanup the compiler generates anyway, before the fields are
+released, and the fields are released afterwards exactly as they would be without it. The order is
+fixed:
+
+```grl
+fn main() {
+    s := Session { id: 7, tags: "beta" };
+    println("work");
+    drop(s);                 // ends the storage now, not at the end of the scope
+    println("done");
+}
+```
+
+- a value's own `drop` first, then its fields in declaration order;
+- a scope's locals in reverse declaration order;
+- vector elements front to back; an interface object's `drop` goes through its vtable to the same
+  helper, so a `dyn` carrying the value runs it too.
+
+`drop` is the compiler's to call, so `x.drop()` is refused by name: the call belongs to the glue, and
+`drop(x)` is how a program ends a value's storage early. A value that implements `Drop` is also
+opaque to partial moves, as in Rust: a field cannot be taken out of an owned value of that type, and
+`match p { Session { .. } => ... }` cannot take it apart, because the fields the glue would walk
+afterwards are no longer there. `match &p { Session { .. } => ... }` binds them as references and is
+fine.
+
+Generic code inherits the hook: `impl<T> Drop for Holder<T>` runs for every `Holder<U>` that is
+dropped, because each instantiation's glue calls that instantiation's `drop`.
+
+## Shared ownership: `rc` and `arena`
+
+Two standard-library modules put owned values behind handles, so a structure can name its members
+without a tree of references.
+
+### `Rc<T>` and `Weak<T>`
+
+`rc::new(v)` puts one read-only value in a shared block, and every handle on it is one word:
+
+```grl
+use rc;
+a := rc::new(load_config());
+b := a.clone();                 // strong count 2
+println("{}", a.strong_count()); // 2
+println("{}", b.get().retries);  // the value, borrowed from the handle
+```
+
+`r.get()` hands out `&T`, borrowed for as long as the handle lives, and there is no way to write
+through it: shared mutation is `Arc<Mutex<T>>`, not interior mutability. The last handle to leave
+drops the value and frees the block; a `Weak<T>` (`rc::downgrade(&r)`) keeps the block without
+keeping the value alive, so `w.upgrade()` answers `None` once the last strong handle has gone.
+
+`Rc<T>` holds a raw pointer, so the language's own rule makes it thread-affine: it cannot cross to
+another thread. `Arc<T>` is the same value with atomic counts, declared `unsafe struct Arc<T>:
+transferable, shareable`, and its type argument must be shareable too - `Arc<T>` over a record that
+holds a bare pointer is refused where it would cross a thread.
+
+### `Arena<T>`
+
+`arena::new()` collects values and hands out a generational `Key` for each one:
+
+```grl
+use arena;
+mut a = arena::new<Node>();
+root := arena::insert(&mut a, Node { weight: 1 });
+child := arena::insert(&mut a, Node { weight: 2 });
+println("{}", arena::get(&a, &root)!.weight);
+taken := arena::remove(&mut a, &child)!;   // the value comes back, still owned
+```
+
+`get`/`get_mut` borrow the value, `remove` returns it, and a key whose value is gone answers `None`:
+slots are reused with their generation bumped, so a key kept past its value's end can never name
+whatever is stored there next. Insertion, lookup and removal are the vector operations underneath -
+`insert` moves the value in, `remove` moves it back out - so the arena is ordinary safe Grail with no
+pointer of its own.
 
 ## Calling C
 
