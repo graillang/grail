@@ -3,6 +3,14 @@
 ## Unreleased
 
 - Added: refinement types - a predicate a value must satisfy, written where the value enters: `fn sample(v: &f32[], i: u64 where i < v.len())`, `struct Ray { t_max: f32 where t_max.is_finite() && t_max > 0.0 }` and `fn normalize(x: f32) -> f32 ensures result.is_finite()`. Every obligation is checked: a parameter's predicate at its entry (so the values are the arguments', and a failure names the call site), a field's at a record literal and at `r.f = v`, and `ensures` at each `return` with `result` naming the value. A failure stops the program through the runtime-error path - `error: refinement violated: i < v.len()`, the ` --> ` call site, then ` = required by sample at src/lib.grl:3:1`. A predicate may not call a user function or have a side effect: only `len()`, `is_finite()` and `is_nan()` are pure enough, and anything else is refused by name. Predicates travel in interface files, so a module's invariants cross a separately compiled boundary.
+- Added: the refinement prover. An obligation the compiler can discharge from what it can read at the
+  site - an `if`/`while` condition (and its negation in `else`), an `assert`, a `for` loop's bounds, a
+  binding of a constant, a refined parameter of the function being compiled - compiles to nothing: the
+  call jumps to a second entry, `<sym>.proved`, that runs the frame and the parameter stores and skips
+  the checks. `take(16)` against `align % 16 == 0`, a ray built under `t.is_finite() && t > 0.0`, and
+  `return x` for `ensures result.is_finite()` are all discharged. Anything the prover cannot read - a
+  `||`, an unreadable term, an argument that is not a name or a constant, an indirect call - keeps its
+  check, so a program is never weaker than the checked one.
 
 - Added: tuples. `(u64, string)` types and `(1, "a")` values (each tuple size is a generic record with fields `0`, `1`, ...), `t.0` / `t.0.1`, `(q, r) := divmod(17, 5);` destructuring, and `(A, B)[...]` literals. `iter::enumerate` and `iter::zip` yield tuples; `iter::Indexed` and `iter::Pair` are gone (`p.index`/`p.value` and `z.left`/`z.right` become `.0`/`.1`). The book no longer calls tuples deliberately absent.
 - Added: generic interface methods. `fn wrap<U>(self: &Self, u: U) -> U[];` in an interface, implemented with the same parameters, is specialised per call through bounds, `Interface::method` calls and default methods; an implementation with different type parameters is refused, and (Rust's rule) an interface with one cannot be `dyn`.
