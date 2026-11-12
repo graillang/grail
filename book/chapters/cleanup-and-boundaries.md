@@ -33,7 +33,10 @@ fn main() {
 | `p.is_null()` / `p.cast(U)` | the null pointer, and the same address as `*U` |
 
 `p.read()` on an owned value duplicates ownership and `p.write(v)` moves `v` in without dropping
-what was there - the same contract as Rust's `ptr::read` and `ptr::write`. A pointer also pins what
+what was there - the same contract as Rust's `ptr::read` and `ptr::write`. The compiler enforces that
+contract in both directions: the value `read` hands out is an owner (so it can be dropped or moved
+on with the ordinary rules), and the operand of `write` is consumed (so an owned local written into a
+block is not also dropped where it came from). A pointer also pins what
 it names: a pointer made from a reference keeps that reference's loan for the rest of the function,
 so the storage cannot be moved or freed underneath it. A record holding a raw pointer is
 thread-affine, so it cannot cross to another thread.
@@ -152,6 +155,60 @@ fine.
 
 Generic code inherits the hook: `impl<T> Drop for Holder<T>` runs for every `Holder<U>` that is
 dropped, because each instantiation's glue calls that instantiation's `drop`.
+
+## Shared ownership: `rc` and `arena`
+
+Two standard-library modules put owned values behind handles, so a structure can name its members
+without a tree of references.
+
+### `Rc<T>` and `Weak<T>`
+
+`rc::new(v)` puts one read-only value in a shared block, and every handle on it is one word:
+
+```grl
+use rc;
+a := rc::new(load_config());
+b := a.clone();                 // strong count 2
+println("{}", a.strong_count()); // 2
+println("{}", b.get().retries);  // the value, borrowed from the handle
+```
+
+`r.get()` hands out `&T`, borrowed for as long as the handle lives, and there is no way to write
+through it: shared mutation is `Arc<Mutex<T>>`, not interior mutability. The last handle to leave
+drops the value and frees the block; a `Weak<T>` (`rc::downgrade(&r)`) keeps the block without
+keeping the value alive, so `w.upgrade()` answers `None` once the last strong handle has gone.
+
+`Rc<T>` holds a raw pointer, so the language's own rule makes it thread-affine: it cannot cross to
+another thread. `Arc<T>` is the same value with atomic counts, declared `unsafe struct Arc<T>:
+transferable, shareable`, and its type argument must be shareable too - `Arc<T>` over a record that
+holds a bare pointer is refused where it would cross a thread.
+
+### `Arena<T>`
+
+`arena::new()` collects values and hands out a generational `Key` for each one:
+
+```grl
+use arena;
+mut a = arena::new<Node>();
+root := arena::insert(&mut a, Node { weight: 1 });
+child := arena::insert(&mut a, Node { weight: 2 });
+println("{}", arena::get(&a, &root)!.weight);
+taken := arena::remove(&mut a, &child)!;   // the value comes back, still owned
+```
+
+`get`/`get_mut` borrow the value, `remove` returns it, and a key whose value is gone answers `None`:
+slots are reused with their generation bumped, so a key kept past its value's end can never name
+whatever is stored there next. Insertion, lookup and removal are the vector operations underneath -
+`insert` moves the value in, `remove` moves it back out - so the arena is ordinary safe Grail with no
+pointer of its own.
+
+### What is not there yet
+
+`Arc<T>`'s teardown frees its two count cells and the block, but the exit-time allocation check still
+reports a leak when the last handle drops, so an `Arc` program is not yet corpus-clean; `Rc<T>` and
+`Weak<T>` are. An `Arena<T>` compiles, but a program using one fails to link on a helper the compiler
+does not emit for the vector field of a generic slot record (`.D` symbol of the element type); that
+is a compiler fix, not a library one.
 
 ## Calling C
 

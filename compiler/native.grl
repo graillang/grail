@@ -550,6 +550,9 @@ struct C {
     // (an implementation no declaration's `drop` bit can answer for).
     drop_iface: u64,
     drop_generic: u64,
+    // Every type a drop call names. emit_drops emits a helper for each of these as well as for every
+    // interned type, so a reference can never outrun its definition.
+    drop_refs: u64[],
     drop_names: u8[][],
     spec_emitted: u8[][],
     spell_lenient: u64,
@@ -4852,8 +4855,23 @@ fn drop_hook_symbol<a>(c: (&a mut C), ty: u64) -> u8[] {
     }
     iface := c.drop_iface;
     actual := resolve_interface_method(&mut c, iface, ty, view("drop"));
-    mut own = u64[];
-    label := interface_symbol(&mut c, iface, ty, actual, &own);
+    mut label = c.funcs[actual].name.copy();
+    if c.funcs[actual].types != 0 {
+        if !concrete_type(&mut c, ty) {
+            return u8[];
+        }
+        // A generic implementation's parameters are the declaration's own, in order, so the type's
+        // arguments are the bindings. (`interface_symbol` would ask the match for them, and a match
+        // whose arguments are themselves type parameters - the body of a generic function - binds
+        // nothing, because the two parameter slots compare equal.)
+        base := base_type(&mut c, ty);
+        mut bindings = type_args(&mut c, base);
+        if bindings.len() != c.funcs[actual].types {
+            fail(&mut c, view("a Drop implementation's parameters must be the type's own"));
+        }
+        spec := specialize(&mut c, actual, &bindings);
+        label = special_name(&mut c, spec);
+    }
     module := c.funcs[actual].module.copy();
     unit := symbol_unit(&mut c, view(module));
     return body_label(&c, view(unit), view(label), view(""), 0);
@@ -4909,6 +4927,7 @@ fn drop_taken<a>(c: (&a mut C), ty: u64) -> u64 {
 }
 
 fn drop_name<a>(c: (&a mut C), ty: u64) -> unit {
+    c.drop_refs.push(ty);
     name := drop_symbol(&mut c, ty);
     push_bytes(&mut c.out, view(name));
     return ();
@@ -4946,10 +4965,14 @@ fn release<a>(c: (&a mut C), index: u64) -> unit {
     o(&mut c, view("movq $0,"));
     stack_slot(&mut c, flag - 1);
     c.out.push(10);
-    get(&mut c, slot, view("%rdi"));
-    o(&mut c, view("call "));
-    drop_name(&mut c, ty);
-    c.out.push(10);
+    // A body emitted without its bindings cannot name a helper (the name would be keyed by a type
+    // parameter, and no helper exists for one); the body that is kept is the replayed one.
+    if concrete_type(&mut c, ty) {
+        get(&mut c, slot, view("%rdi"));
+        o(&mut c, view("call "));
+        drop_name(&mut c, ty);
+        c.out.push(10);
+    }
     mark(&mut c, done);
     close_loans(&mut c);
     return ();
@@ -22471,6 +22494,10 @@ fn pointer_method<a, d>(c: (&a mut C), value: Val, pty: u64, name: &d [u8]) -> V
     if same(view(name), view("read")) {
         expect(&mut c, view(")"));
         slot := ptr_load(&mut c, address, pointee);
+        // The value read out is the reader's: `ptr::read` duplicates ownership, so the result is an
+        // owner with a drop flag of its own, which is what lets it be dropped or moved with the
+        // ordinary rules (the reader owes the source a value it will not use twice).
+        own(&mut c, slot, pointee);
         release_temporary(&mut c, word);
         return val(slot, pointee);
     }
@@ -22481,6 +22508,9 @@ fn pointer_method<a, d>(c: (&a mut C), value: Val, pty: u64, name: &d [u8]) -> V
         v := expr(&mut c, 0);
         expect(&mut c, view(")"));
         ptr_store(&mut c, address, v.t, pointee);
+        // And `ptr::write` hands it over: the operand is moved into the destination, so an owned
+        // local argument is consumed and not also dropped where it came from.
+        move_out(&mut c, val(v.t, v.ty));
         release_temporary(&mut c, word);
         return val(imm(&mut c, 0), intern(&mut c, 2, 0));
     }
@@ -29308,7 +29338,13 @@ fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
     return ();
 }
 fn drop_call<a>(c: (&a mut C), ty: u64) -> unit {
+    // A body emitted without its bindings (a template's validation replay) cannot name a helper: the
+    // name would be keyed by a type parameter, and no helper is emitted for one. The body that is
+    // kept is the replayed one, where the type is the instantiation's.
     if needs_drop(&mut c, ty) {
+        if !concrete_type(&mut c, ty) {
+            return ();
+        }
         o(&mut c, view("call "));
         drop_name(&mut c, ty);
         c.out.push(10);
@@ -29339,8 +29375,22 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
     // their own. A build made of several objects takes each module's code from exactly one object
     // and merges the helper parts, which is what the weak binding below allows.
     part(&mut c, view(".helpers"));
-    mut ty = 0;
-    while ty < c.types.len() {
+    mut all = u64[];
+    for i in c.types.len() {
+        all.push(i);
+    }
+    for i in c.drop_refs.len() {
+        all.push(c.drop_refs[i]);
+    }
+    mut at = 0;
+    // The walk interns types of its own (a field's type is built on demand), so it keeps absorbing
+    // what it adds: a helper whose element or field helper was never emitted is an undefined symbol.
+    while (at < all.len()) || (all.len() < c.types.len()) {
+        while all.len() < c.types.len() {
+            all.push(all.len());
+        }
+        ty := all[at];
+        at = at + 1;
         kind := ty_kind(&mut c, ty);
         arg := ty_arg(&mut c, ty);
         if concrete_type(&mut c, ty) {
@@ -29350,7 +29400,6 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                 // backing store - and the key is what decides identity. The body is a function of
                 // exactly the components the key records, so the first definition serves both.
                 if drop_taken(&mut c, ty) != 0 {
-                    ty += 1;
                     continue;
                 }
                 done := label(&mut c);
@@ -29471,7 +29520,6 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                 o(&mut c, view("ret\n"));
             }
         }
-        ty = ty + 1;
     }
     return ();
 }
@@ -33113,6 +33161,7 @@ pub fn main() -> u64 {
         body_module: u8[],
         drop_iface: 0,
         drop_generic: 0,
+        drop_refs: u64[],
         drop_names: u8[][],
         spec_emitted: u8[][],
         spell_lenient: 0,
@@ -33538,6 +33587,9 @@ pub fn main() -> u64 {
         emit_drops(&mut c);
     }
     emit_vtables(&mut c);
+    // A vtable's drop slot is a helper too, and the bodies emitted above were the first to name
+    // some types: one more sweep costs a walk of the type table and leaves no symbol undefined.
+    emit_drops(&mut c);
     if c.skip_bodies.len() != 0 {
         // Every error this compile has is reported; the program is still rejected, and nothing it
         // would have written is.

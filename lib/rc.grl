@@ -1,0 +1,224 @@
+module rc;
+
+// ---- shared ownership ----------------------------------------------------------------------------
+//
+// `Rc<T>` shares one read-only value between handles in one thread; `Arc<T>` does the same across
+// threads with atomic counts. Neither is interior mutability: a shared value cannot be written
+// through either handle, and shared *mutation* is `Arc<Mutex<T>>`.
+//
+// One heap block holds the counts and the value - `[strong, weak, value]` - because every Grail
+// value is one word (a record, string or vector is a pointer to its own storage), so one layout
+// serves every `T`. A handle's field points at the *value* word, so its `*mut T` mentions `T` (a
+// record literal has to infer it) and `r.get()` is that pointer; the two counts are the words
+// before it. `Rc<T>` holds a raw pointer and is therefore thread-affine by the language's own rule;
+// `Arc<T>` is the audited exception.
+//
+// The plumbing relies on the raw-pointer ownership contract: `p.read()` hands the value out as an
+// owner and `p.write(v)` moves `v` in, so a value can be moved into the block once and read back
+// out once. Reading a word out and writing the same word back is how an `Atomic` count is used
+// without its owner freeing the cell under the other handles.
+
+// `Rc<T>`: shared within one thread.
+pub struct Rc<T> {
+    block: *mut T
+}
+
+impl<T> Drop for Rc<T> {
+    fn drop(self: &mut Rc<T>) {
+        unsafe {
+            p := self.block;
+            counts := p.cast(u64).sub(2);
+            n := counts.read() - 1;
+            counts.write(n);
+            if n == 0 {
+                // The last strong handle: the value goes now, the block stays while a Weak needs it.
+                v := p.read();
+                drop(v);
+                w := counts.add(1).read() - 1;
+                counts.add(1).write(w);
+                if w == 0 {
+                    free(counts);
+                }
+            }
+        }
+    }
+}
+
+pub fn new<T>(v: T) -> Rc<T> {
+    unsafe {
+        p := alloc(u64, 3);
+        p.write(1);
+        p.add(1).write(1);
+        slot := p.add(2).cast(T);
+        slot.write(v);
+        return Rc { block: slot };
+    }
+}
+
+impl<T> Rc<T> {
+    // The shared value. The borrow lives no longer than the handle, which the region says.
+    pub fn get<a>(self: &a Rc<T>) -> &a T {
+        unsafe {
+            return self.block.as_ref();
+        }
+    }
+
+    // Another handle on the same value.
+    pub fn clone(self: &Rc<T>) -> Rc<T> {
+        unsafe {
+            counts := self.block.cast(u64).sub(2);
+            n := counts.read();
+            counts.write(n + 1);
+            return Rc { block: self.block };
+        }
+    }
+
+    pub fn strong_count(self: &Rc<T>) -> u64 {
+        unsafe {
+            return self.block.cast(u64).sub(2).read();
+        }
+    }
+
+    pub fn weak_count(self: &Rc<T>) -> u64 {
+        unsafe {
+            return self.block.cast(u64).sub(1).read() - 1;
+        }
+    }
+}
+
+// `Weak<T>`: a handle that does not keep the value alive. It keeps the *block*, so `upgrade` can
+// tell "the value is gone" from "the value was never here".
+pub struct Weak<T> {
+    block: *mut T
+}
+
+impl<T> Drop for Weak<T> {
+    fn drop(self: &mut Weak<T>) {
+        unsafe {
+            counts := self.block.cast(u64).sub(2);
+            w := counts.add(1).read() - 1;
+            counts.add(1).write(w);
+            if w == 0 {
+                // No strong handle left either, or the Rc would own the block.
+                if counts.read() == 0 {
+                    free(counts);
+                }
+            }
+        }
+    }
+}
+
+pub fn downgrade<a, T>(r: &a Rc<T>) -> Weak<T> {
+    unsafe {
+        counts := r.block.cast(u64).sub(2);
+        w := counts.add(1).read();
+        counts.add(1).write(w + 1);
+        return Weak { block: r.block };
+    }
+}
+
+impl<T> Weak<T> {
+    // `Some` while a strong handle exists; the count is bumped atomically with the check under the
+    // same handle, which is enough because `Rc` is single-threaded by construction.
+    pub fn upgrade(self: &Weak<T>) -> Rc<T>? {
+        unsafe {
+            counts := self.block.cast(u64).sub(2);
+            n := counts.read();
+            if n == 0 {
+                return None;
+            }
+            counts.write(n + 1);
+            return Some(Rc { block: self.block });
+        }
+    }
+
+    pub fn strong_count(self: &Weak<T>) -> u64 {
+        unsafe {
+            return self.block.cast(u64).sub(2).read();
+        }
+    }
+}
+
+// ---- Arc: the same across threads ----------------------------------------------------------------
+
+// Word 0 and word 1 are the `Atomic` counts, word 2 the value. Every count operation reads the
+// `Atomic` out of the block, uses it and writes it back, so the block owns each cell exactly once
+// and the last handle frees it.
+pub unsafe struct Arc<T>: transferable, shareable {
+    block: *mut T
+}
+
+impl<T> Drop for Arc<T> {
+    fn drop(self: &mut Arc<T>) {
+        unsafe {
+            p := self.block;
+            base := p.cast(u64).sub(2);
+            strong := base.cast(Atomic<u64>).read();
+            prev := strong.fetch_sub(1);
+            if prev != 1 {
+                base.cast(Atomic<u64>).write(strong);
+            } else {
+                base.cast(Atomic<u64>).write(strong);
+                v := p.read();
+                drop(v);
+                weak := base.add(1).cast(Atomic<u64>).read();
+                wprev := weak.fetch_sub(1);
+                if wprev != 1 {
+                    base.add(1).cast(Atomic<u64>).write(weak);
+                } else {
+                    // The last handle of any kind: both count cells and the block go.
+                    cell := base.cast(Atomic<u64>).read();
+                    drop(cell);
+                    cell2 := base.add(1).cast(Atomic<u64>).read();
+                    drop(cell2);
+                    free(base);
+                }
+            }
+        }
+    }
+}
+
+pub fn arc_new<T>(v: T) -> Arc<T> {
+    unsafe {
+        p := alloc(u64, 3);
+        p.cast(Atomic<u64>).write(Atomic::new(1));
+        p.add(1).cast(Atomic<u64>).write(Atomic::new(1));
+        slot := p.add(2).cast(T);
+        slot.write(v);
+        return Arc { block: slot };
+    }
+}
+
+impl<T> Arc<T> {
+    pub fn get<a>(self: &a Arc<T>) -> &a T {
+        unsafe {
+            return self.block.as_ref();
+        }
+    }
+
+    pub fn clone(self: &Arc<T>) -> Arc<T> {
+        unsafe {
+            base := self.block.cast(u64).sub(2);
+            strong := base.cast(Atomic<u64>).read();
+            strong.fetch_add(1);
+            base.cast(Atomic<u64>).write(strong);
+            return Arc { block: self.block };
+        }
+    }
+
+    pub fn strong_count(self: &Arc<T>) -> u64 {
+        unsafe {
+            base := self.block.cast(u64).sub(2);
+            strong := base.cast(Atomic<u64>).read();
+            n := strong.load();
+            base.cast(Atomic<u64>).write(strong);
+            return n;
+        }
+    }
+}
+
+// `Arc<T>` may cross threads only when the value may: the audited classification skips the fields,
+// so the type argument is what carries the requirement.
+pub fn arc_share<T: Share>(a: &Arc<T>) -> u64 {
+    return a.strong_count();
+}
