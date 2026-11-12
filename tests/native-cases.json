@@ -6510,12 +6510,6 @@
     "diagnostic": "cannot be used as dyn: method `get`"
   },
   {
-    "name": "dyn-reject-associated-types",
-    "source": "interface S{type Item;fn get(self:&Self)->u64;}fn f(x:&dyn S){}fn main(){}",
-    "reject": true,
-    "diagnostic": "cannot be used as dyn: it has associated types"
-  },
-  {
     "name": "dyn-reject-not-implemented",
     "source": "interface S{fn get(self:&Self)->u64;}struct A{x:u64}fn main(){d: dyn S := A{x:1};}",
     "reject": true,
@@ -6663,5 +6657,61 @@
     ],
     "reject": true,
     "diagnostic": "type mismatch"
+  },
+  {
+    "name": "assoc-equality-bound",
+    "source": "use iter;\nfn total<I: iter::Iterator<Item = u64>>(it: &mut I) -> u64 {\n    mut t = 0;\n    while let Some(x) = it.next() {\n        t = t + x;\n    }\n    return t;\n}\nfn main() -> u64 {\n    mut i = iter::upto(1, 5);\n    println(total(&mut i));\n    return 0;\n}\n",
+    "modules": [
+      "lib/iter.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "10\n",
+    "note": "I: iter::Iterator<Item = u64> fixes I::Item inside the function"
+  },
+  {
+    "name": "assoc-equality-bound-rejects-other",
+    "source": "use iter;\nfn total<I: iter::Iterator<Item = u64>>(it: &mut I) -> u64 {\n    return 0;\n}\nfn main() -> u64 {\n    v := u64[1];\n    mut i = iter::refs(&v);\n    println(total(&mut i));\n    return 0;\n}\n",
+    "modules": [
+      "lib/iter.grl",
+      "lib/core.grl"
+    ],
+    "reject": true,
+    "diagnostic": "associated type mismatch: the bound requires `u64`"
+  },
+  {
+    "name": "dyn-fixed-associated-type",
+    "source": "use iter;\nstruct Countdown {\n    n: u64,\n}\nimpl iter::Iterator for Countdown {\n    type Item = u64;\n    fn next(self: &mut Self) -> u64? {\n        if self.n == 0 {\n            return None;\n        }\n        self.n = self.n - 1;\n        return Some(self.n);\n    }\n}\nfn sum(it: &mut dyn iter::Iterator<Item = u64>) -> u64 {\n    mut t = 0;\n    while let Some(x) = it.next() {\n        t = t + x;\n    }\n    return t;\n}\nfn main() -> u64 {\n    mut a: dyn iter::Iterator<Item = u64> = Countdown { n: 4 };\n    mut b: dyn iter::Iterator<Item = u64> = iter::upto(10, 13);\n    println(sum(&mut a));\n    println(sum(&mut b));\n    return 0;\n}\n",
+    "modules": [
+      "lib/iter.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "6\n33\n",
+    "note": "dyn iter::Iterator<Item = u64> over a user type and over iter::Iter<u64> (a generic implementation)"
+  },
+  {
+    "name": "assoc-type-bound",
+    "source": "use order;\ninterface Source {\n    type Item: order::Ord;\n    fn pull(self: &mut Self) -> Self::Item?;\n}\nstruct Nums {\n    left: u64,\n}\nimpl Source for Nums {\n    type Item = u64;\n    fn pull(self: &mut Self) -> u64? {\n        if self.left == 0 {\n            return None;\n        }\n        self.left = self.left - 1;\n        return Some(self.left * 7 % 5);\n    }\n}\nfn largest<S: Source>(s: &mut S) -> S::Item? {\n    mut best: S::Item? = None;\n    while let Some(x) = s.pull() {\n        match best {\n            Some(b) => {\n                if b < x {\n                    best = Some(x);\n                } else {\n                    best = Some(b);\n                }\n            },\n            None => {\n                best = Some(x);\n            },\n        }\n    }\n    return best;\n}\nfn main() -> u64 {\n    mut n = Nums { left: 6 };\n    println(largest(&mut n)!);\n    return 0;\n}\n",
+    "modules": [
+      "lib/order.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "4\n",
+    "note": "type Item: order::Ord; lets generic code compare S::Item values with <"
+  },
+  {
+    "name": "assoc-type-bound-rejects-unmet",
+    "source": "use order;\ninterface Source {\n    type Item: order::Ord;\n    fn pull(self: &mut Self) -> Self::Item?;\n}\nstruct P {\n    x: u64,\n}\nstruct S {\n    v: u64,\n}\nimpl Source for S {\n    type Item = P;\n    fn pull(self: &mut Self) -> P? {\n        return None;\n    }\n}\nfn main() -> u64 {\n    return 0;\n}\n",
+    "modules": [
+      "lib/order.grl",
+      "lib/core.grl"
+    ],
+    "reject": true,
+    "diagnostic": "associated type `Item` does not implement `Ord`, which the interface requires"
+  },
+  {
+    "name": "dyn-reject-unfixed-associated-type",
+    "source": "interface S{type Item;fn get(self:&Self)->u64;}fn f(x:&dyn S){}fn main(){}",
+    "reject": true,
+    "diagnostic": "a dyn type names every associated type of its interface"
   }
 ]

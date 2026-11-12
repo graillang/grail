@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added: associated-type bounds and constraints. `type Item: order::Ord;` in an interface lets generic code use the bound on `T::Item` (an implementation giving a type without it is refused); `I: iter::Iterator<Item = u64>` pins it for a function; `dyn iter::Iterator<Item = u64>` is an interface object of an interface with associated types.
 - Added: operator interfaces. `lib/ops.grl` has `Add`, `Sub`, `Mul`, `Div`, `Rem` and `Eq`; implementing one makes `+ - * / %` or `==`/`!=` work on a record or enum type, and `order::Ord` gives `<`, `<=`, `>`, `>=`. The built-in numbers implement them too, so `T: ops::Add` code takes records and numbers alike.
 - Added: generic interface implementations. `impl<T: Show> Show for Box<T>` implements an interface for every instantiation whose parameters meet the bounds; its methods are specialised per type and dispatch through calls, method syntax, generic bounds, default methods, associated types and `dyn` vtables. `iter::Iterator` (`type Item; fn next(...)`) is the standard iterator interface, implemented for `iter::Iter<T>`. Interface methods also work with method syntax on non-record types (`impl Show for u64` makes `x.show()` work).
 - Added: iterator adapters as methods. `iter::Iter<T>` has `map`, `filter`, `take`, `enumerate`, `zip`, `collect`, `count` and `fold` methods, so chains read left to right: `iter::of(v).filter(...).map(...).collect()`.
