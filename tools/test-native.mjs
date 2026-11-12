@@ -145,15 +145,19 @@ for (const [position, test] of cases.entries()) {
     // A case that dies by signal can still pin its output: an abort must not resume the foreign or
     // Grail code that ran before it, so what was printed up to the abort is part of the contract.
     // A diagnostic the runtime promises (once per process) is part of the observable contract.
-    if (test.stderr !== undefined) {
+    if (test.stderr !== undefined || test.stderrAbsent !== undefined) {
       const errors = result.stderr.toString();
       // One substring, carried `stderrCount` times (once by default), or a list of substrings, each
       // carried once: a backtrace pins its frames apart because a file's absolute path sits between
       // them, and on qemu targets the emulator appends a line of its own.
-      for (const pin of [test.stderr].flat()) {
+      for (const pin of [test.stderr ?? []].flat()) {
         const wanted = Array.isArray(test.stderr) ? 1 : (test.stderrCount ?? 1);
         const occurrences = errors.split(pin).length - 1;
         assert.equal(occurrences, wanted, `${test.name}: expected ${wanted} x ${JSON.stringify(pin)} in ${JSON.stringify(errors)}`);
+      }
+      // And what must never appear: a failure report names the program's frames, never the runtime's.
+      for (const pin of [test.stderrAbsent ?? []].flat()) {
+        assert.ok(!errors.includes(pin), `${test.name}: unexpected ${JSON.stringify(pin)} in ${JSON.stringify(errors)}`);
       }
     }
     if (interfaceExecutable) {

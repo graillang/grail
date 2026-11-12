@@ -151,6 +151,17 @@ export async function check(compiler) {
       const run = runWine(wine, built.executable, test.args ?? [], directory, test.env ?? {});
       assert.equal(run.status, test.status ?? 0, `${test.name}: wine exit ${run.status}: ${run.stderr}`);
       assert.equal(run.stdout.toString(), test.stdout, `${test.name}: wine stdout`);
+      // A program that aborts leaves a message and a backtrace on stderr: one substring carried
+      // `stderrCount` times (once by default), or a list each carried once, as the native suite
+      // pins it.
+      if (test.stderr !== undefined) {
+        const errors = run.stderr.toString();
+        for (const pin of [test.stderr].flat()) {
+          const wanted = Array.isArray(test.stderr) ? 1 : (test.stderrCount ?? 1);
+          const occurrences = errors.split(pin).length - 1;
+          assert.equal(occurrences, wanted, `${test.name}: expected ${wanted} x ${JSON.stringify(pin)} in ${JSON.stringify(errors)}`);
+        }
+      }
       executed++;
     }
     passed++;
@@ -159,7 +170,7 @@ export async function check(compiler) {
 
   // windows-aarch64: PE/COFF for ARM64. There is no ARM64 Windows runner on this host, so these
   // cases are validated statically: assembly shape, COFF machine, relocations and the image.
-  const armCases = ['hello', 'integer-print', 'file-write-read', 'argument-list', 'com-interop', 'ffi-call-abi', 'thread-join', 'ffi-call-records', 'command-with-env'];
+  const armCases = ['hello', 'integer-print', 'file-write-read', 'argument-list', 'com-interop', 'ffi-call-abi', 'thread-join', 'ffi-call-records', 'command-with-env', 'runtime-error-backtrace'];
   for (const name of armCases) {
     const test = cases.find(c => c.name === name);
     const directory = join(work, `arm64-${name}`);
