@@ -6713,5 +6713,34 @@
     "source": "interface S{type Item;fn get(self:&Self)->u64;}fn f(x:&dyn S){}fn main(){}",
     "reject": true,
     "diagnostic": "a dyn type names every associated type of its interface"
+  },
+  {
+    "name": "copy-reference-through-reference",
+    "source": "use iter;\nfn main() -> u64 {\n    v := u64[1, 2, 3, 4];\n    mut t = 0;\n    for x in iter::filter(iter::refs(&v), |x: &&u64| -> bool {\n        r := *x;\n        return *r % 2 == 0;\n    }) {\n        t = t + *x;\n    }\n    println(t);\n    return 0;\n}\n",
+    "modules": [
+      "lib/iter.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "6\n",
+    "note": "r := *x for x: &&u64 copies the inner shared reference (Rust's &T: Copy)"
+  },
+  {
+    "name": "copy-reference-through-reference-signature",
+    "source": "fn pick<a, b>(rr: &a (&b u64[])) -> &b u64[] {\n    return *rr;\n}\nfn main() -> u64 {\n    return 0;\n}\n",
+    "stdout": "",
+    "note": "the copy carries the inner lifetime b, not the outer a"
+  },
+  {
+    "name": "copy-reference-through-reference-rejects-escape",
+    "source": "fn leak<a>(v: &a u64[]) -> &a u64 {\n    w := u64[7];\n    r := &w[0];\n    rr := &r;\n    return *rr;\n}\nfn main() -> u64 {\n    v := u64[1];\n    println(*leak(&v));\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "type mismatch",
+    "note": "a copy of a reference to local storage cannot be returned"
+  },
+  {
+    "name": "copy-exclusive-reference-through-reference-rejected",
+    "source": "fn pick<a, b>(rr: &a (&b mut u64[])) -> &b mut u64[] {\n    return *rr;\n}\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "indirect reference copies require explicit reborrow"
   }
 ]

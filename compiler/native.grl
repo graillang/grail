@@ -4321,7 +4321,7 @@ fn backedge_ok<a, b>(c: (&a mut C), entry: (&b ownership::State)) -> bool {
     }
     return true;
 }
-fn view_bonds<a>(c: (&a mut C), slot: u64, source: u64, mode: u64) -> unit {
+fn view_bonds<a>(c: (&a mut C), slot: u64, source: u64, mode: u64, copied_ref: bool) -> unit {
     if c.raw != 0 {
         return ();
     }
@@ -4333,7 +4333,9 @@ fn view_bonds<a>(c: (&a mut C), slot: u64, source: u64, mode: u64) -> unit {
     source_index := resource(&mut c, source);
     mut r = &c.resources[source_index - 1];
     ty := r.ty;
-    if (ty_kind(&mut c, ty) == 5) || (ty_kind(&mut c, ty) == 27) {
+    // A shared reference copied out through a shared reference (deref_value) reborrows the loans
+    // that cover where it was read from, as a shared view does.
+    if (ty_kind(&mut c, ty) == 5) || (ty_kind(&mut c, ty) == 27) || copied_ref {
         if mode != 0 {
             index := resource(&mut c, source);
             mut r = &c.resources[index - 1];
@@ -13822,7 +13824,7 @@ fn static_literal_view<a>(c: (&a mut C)) -> Val {
     slot := save(&mut c);
     ty := intern_full(&mut c, 5, 0, 0, u64[]);
     own(&mut c, slot, ty);
-    view_bonds(&mut c, slot, source, 0);
+    view_bonds(&mut c, slot, source, 0, false);
     release_temporary(&mut c, source);
     return val(slot, ty);
 }
@@ -14277,7 +14279,7 @@ fn coerce_view<a>(c: (&a mut C), v: Val, formal: u64) -> Val {
         vty := intern_full(&mut c, 5, 0, mode, u64[]);
         slot := apply(&mut c, view("rt_view"), one(x.t));
         own(&mut c, slot, vty);
-        view_bonds(&mut c, slot, x.t, mode);
+        view_bonds(&mut c, slot, x.t, mode, false);
         return val(slot, vty);
     }
     // Direct owned byte/text arguments may be viewed for an immutable view parameter.
@@ -14287,7 +14289,7 @@ fn coerce_view<a>(c: (&a mut C), v: Val, formal: u64) -> Val {
             vty := intern_full(&mut c, 5, 0, 0, u64[]);
             slot := apply(&mut c, view("rt_view"), one(v.t));
             own(&mut c, slot, vty);
-            view_bonds(&mut c, slot, v.t, 0);
+            view_bonds(&mut c, slot, v.t, 0, false);
             return val(slot, vty);
         }
     }
@@ -17344,7 +17346,7 @@ fn print_value<a>(c: (&a mut C), input: Val, newline: u64) -> unit {
                 ty := intern_full(&mut c, 5, 0, 0, u64[]);
                 slot := apply(&mut c, view("rt_view"), one(value.t));
                 own(&mut c, slot, ty);
-                view_bonds(&mut c, slot, value.t, 0);
+                view_bonds(&mut c, slot, value.t, 0, false);
                 move_out(&mut c, val(slot, ty));
                 invoke(&mut c, view("f_host_print"), one(slot));
                 close_loans(&mut c);
@@ -18068,7 +18070,7 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
         ty := intern_full(&mut c, 5, 0, write, u64[]);
         slot := apply(&mut c, view("rt_view"), one(xt));
         own(&mut c, slot, ty);
-        view_bonds(&mut c, slot, xt, write);
+        view_bonds(&mut c, slot, xt, write, false);
         release_temporary(&mut c, input);
         return val(slot, ty);
     }
@@ -18189,15 +18191,25 @@ fn deref_value<a>(c: (&a mut C), a: Val) -> Val {
     n := ref_load(&mut c, a.t, ty);
     if c.raw == 0 {
         k := ty_kind(&mut c, ty);
-        if k == 7 {
+        // A shared reference behind a shared reference is copied out like a shared view (Rust's
+        // `&T: Copy`): the copy holds a shared reborrow of what the inner reference borrows. An
+        // exclusive one would be a second `&mut`.
+        if (k == 7) && ((ty_mode(&mut c, ty) != 0) || (ty_mode(&mut c, a.ty) != 0)) {
             fail(&mut c, view("indirect reference copies require explicit reborrow"));
         }
-        if (k == 5) || (k == 27) {
+        if (k == 5) || (k == 27) || (k == 7) {
             if ty_mode(&mut c, ty) != 0 {
                 fail(&mut c, view("cannot copy an exclusive view out of a reference; reborrow explicitly"));
             }
-            slot := invoke(&mut c, view("rt_view"), one(n));
-            own(&mut c, slot, ty);
+            mut slot = 0;
+            if k == 7 {
+                get(&mut c, n, view("%rax"));
+                slot = save(&mut c);
+                own(&mut c, slot, ty);
+            } else {
+                slot = invoke(&mut c, view("rt_view"), one(n));
+                own(&mut c, slot, ty);
+            }
             target := target_of(&mut c, a.t);
             c
                 .resources
@@ -18226,7 +18238,14 @@ fn deref_value<a>(c: (&a mut C), a: Val) -> Val {
                 }
             }
             stored_source(&mut c, n, ty);
-            view_bonds(&mut c, slot, n, 0);
+            view_bonds(&mut c, slot, n, 0, k == 7);
+            if k == 7 {
+                // The copy points where the inner reference points.
+                inner_target := target_of(&mut c, n);
+                if inner_target != 0 {
+                    set_target(&mut c, slot, inner_target, 0);
+                }
+            }
             release_temporary(&mut c, a.t);
             return val(slot, ty);
         }
@@ -22162,7 +22181,7 @@ fn reference_borrow<a>(c: (&a mut C), write: u64) -> Val {
                 elem := ty_arg(&mut c, lt);
                 sty := intern_full(&mut c, 27, elem, write, u64[]);
                 own(&mut c, result, sty);
-                view_bonds(&mut c, result, source, write);
+                view_bonds(&mut c, result, source, write, false);
                 return val(result, sty);
             }
         }
@@ -22369,7 +22388,7 @@ fn view_borrow<a>(c: (&a mut C)) -> Val {
     ty := intern_full(&mut c, 5, 0, write, u64[]);
     slot := apply(&mut c, view("rt_view"), one(xt));
     own(&mut c, slot, ty);
-    view_bonds(&mut c, slot, xt, write);
+    view_bonds(&mut c, slot, xt, write, false);
     release_temporary(&mut c, input);
     return val(slot, ty);
 }
@@ -24177,7 +24196,7 @@ fn vector_slice<a>(c: (&a mut C), x: Val, input: u64, access: u64) -> Val {
     result := apply(&mut c, view("rt_vslice"), args);
     sty := intern_full(&mut c, 27, elem, write, u64[]);
     own(&mut c, result, sty);
-    view_bonds(&mut c, result, xt, write);
+    view_bonds(&mut c, result, xt, write, false);
     return val(result, sty);
 }
 // From just after `[`: whether the brackets hold a single index (no `:` at their own depth).
@@ -24354,7 +24373,7 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
     vty := intern_full(&mut c, 5, 0, 0, u64[]);
     slot := apply(&mut c, view("rt_view"), one(x.t));
     own(&mut c, slot, vty);
-    view_bonds(&mut c, slot, x.t, 0);
+    view_bonds(&mut c, slot, x.t, 0, false);
     release_temporary(&mut c, input);
     mut start = 0;
     if is(&mut c, view(":")) {
@@ -24389,7 +24408,7 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
         args.push(end);
         result := apply(&mut c, view("rt_slice"), args);
         own(&mut c, result, vty);
-        view_bonds(&mut c, result, slot, 0);
+        view_bonds(&mut c, result, slot, 0, false);
         release_temporary(&mut c, slot);
         return val(result, vty);
     }

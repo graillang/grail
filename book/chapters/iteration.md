@@ -35,7 +35,7 @@ The closures passed to adapters are `FnMut`, so they may update their own captur
 yields references into a vector you keep, so a loop or a chain such as `take` can use borrowed items
 without copying them; the vector stays borrowed while the chain or any item from it is in use.
 `filter` over reference items hands its predicate a reference to each item, as Rust does, so it
-takes `&&T` and reads through both with `**x`:
+takes `&&T` and reads through both with `**x` (or copies the inner reference out, `r := *x`):
 
 ```grl
 for x in iter::filter(iter::refs(&v), |x: &&u64| -> bool **x % 2 == 1) {
