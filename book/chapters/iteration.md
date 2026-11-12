@@ -26,7 +26,9 @@ The `iter` module chains work lazily over an `Iter<T>` - a closure that yields t
 
 `upto(lo, hi)` counts, `of(v)` moves the elements out of a vector, and `map`, `filter`, `take`,
 `enumerate` and `zip` wrap one iterator in another; `collect` pulls everything into a vector.
-`Iter<T>` is itself an iterator by the protocol above, so any adapter chain can sit in a `for`. Each adapter is also a method, so a chain reads left to right:
+`Iter<T>` is itself an iterator by the protocol above, so any adapter chain can sit in a `for`. `iter::Iterator` is the interface behind them (`type Item; fn next(self: &mut Self) -> Self::Item?`):
+implement it for your own type and generic code takes `I: iter::Iterator` and names `I::Item`.
+Each adapter is also a method, so a chain reads left to right:
 `iter::of(v).filter(|x: &u64| -> bool *x > 1).map(|x: u64| -> u64 x * 2).collect()`; `count()` and
 `fold(init, f)` consume one.
 The closures passed to adapters are `FnMut`, so they may update their own captures. `refs(&v)`

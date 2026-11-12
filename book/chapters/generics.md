@@ -62,6 +62,19 @@ Inside `show`, `s.name()` is the bound's method; `Shape::name(s)` is the same ca
 pick one when two bounds declare the same name. An implementation must write every method that has
 no default, and only methods the interface declares.
 
+## Generic implementations
+
+An implementation can be generic itself: `impl<T: Show> Show for Box<T>` makes every `Box<T>` a
+`Show` whose `T` is one, and its methods are compiled for each `T` used:
+
+```grl
+impl<T: Show> Show for Box<T> {
+    fn show(self: &Self) -> u64 {
+        return self.v.show() + 100;
+    }
+}
+```
+
 ## Associated types
 
 An interface can leave a type for each implementation to choose: `type Item;` declares it, the

@@ -6622,5 +6622,27 @@
     ],
     "stdout": "3\n90\n4\n",
     "note": "adapters as methods: of(v).filter(..).map(..).collect(), fold, take, count"
+  },
+  {
+    "name": "generic-interface-implementation",
+    "source": "interface Show {\n    fn show(self: &Self) -> u64;\n    fn twice(self: &Self) -> u64 {\n        return self.show() * 2;\n    }\n}\nimpl Show for u64 {\n    fn show(self: &Self) -> u64 {\n        return *self;\n    }\n}\nstruct Box<T> {\n    v: T,\n}\nimpl<T: Show> Show for Box<T> {\n    fn show(self: &Self) -> u64 {\n        return self.v.show() + 100;\n    }\n}\nfn total<T: Show>(x: &T) -> u64 {\n    return x.show();\n}\nfn main() -> u64 {\n    b := Box { v: 3 };\n    println(Show::show(&b));\n    println(b.show());\n    println(total(&b));\n    println(b.twice());\n    bb := Box { v: Box { v: 5 } };\n    println(total(&bb));\n    return 0;\n}\n",
+    "stdout": "103\n103\n103\n206\n205\n",
+    "note": "impl<T: Show> Show for Box<T>: calls, method syntax, generic bounds, a default method and nested Box<Box<u64>>"
+  },
+  {
+    "name": "iterator-interface",
+    "source": "use iter;\nstruct Countdown {\n    n: u64,\n}\nimpl iter::Iterator for Countdown {\n    type Item = u64;\n    fn next(self: &mut Self) -> u64? {\n        if self.n == 0 {\n            return None;\n        }\n        self.n = self.n - 1;\n        return Some(self.n);\n    }\n}\nfn drain<I: iter::Iterator>(it: &mut I) -> I::Item[] {\n    mut out = I::Item[];\n    while let Some(x) = it.next() {\n        out.push(x);\n    }\n    return out;\n}\nfn main() -> u64 {\n    mut c = Countdown { n: 3 };\n    println(drain(&mut c).len());\n    mut i = iter::upto(0, 5);\n    println(drain(&mut i).len());\n    return 0;\n}\n",
+    "modules": [
+      "lib/iter.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "3\n5\n",
+    "note": "iter::Iterator with type Item, implemented by a user type and generically by Iter<T>"
+  },
+  {
+    "name": "generic-implementation-rejects-unmet-bound",
+    "source": "interface Show{fn show(self:&Self)->u64;}struct Box<T>{v:T}impl<T: Show> Show for Box<T>{fn show(self:&Self)->u64{return 1;}}struct P{x:u64}fn main(){b:=Box{v:P{x:1}};println(Show::show(&b));}",
+    "reject": true,
+    "diagnostic": "type does not satisfy interface bound `main::Show`"
   }
 ]

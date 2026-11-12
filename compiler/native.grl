@@ -5911,9 +5911,136 @@ fn find_implementation<a>(c: (&a mut C), contract: u64, ty: u64) -> u64 {
             if same_type(&mut c, actual, other) != 0 {
                 return i + 1;
             }
+            // `impl<T: B> I for X<T>` answers for every X<U> with U satisfying B.
+            if impl_record(&mut c, generic_impl_key(i + 1)) != 0 {
+                bindings := impl_bindings(&mut c, i + 1, actual);
+                if bindings.len() != 0 {
+                    return i + 1;
+                }
+            }
         }
     }
     return 0;
+}
+// The implementation's parameters bound so its type is `actual`, with their bounds met; empty when
+// it does not match (or is not generic).
+fn impl_bindings<a>(c: (&a mut C), id: u64, actual: u64) -> u64[] {
+    r := impl_record(&mut c, generic_impl_key(id));
+    if r == 0 {
+        return u64[];
+    }
+    count := c.impl_params[r - 1].tnames.len();
+    pattern := c.implementations[id - 1].ty;
+    mut map = u64[];
+    for i in count {
+        map.push(18446744073709551615);
+    }
+    if !type_matches(&mut c, pattern, actual, &mut map) {
+        return u64[];
+    }
+    sets := copy_constraints(&c.impl_params[r - 1].interfaces);
+    for i in count {
+        if map[i] == 18446744073709551615 {
+            return u64[];
+        }
+        if i < sets.len() {
+            for k in sets[i].len() {
+                bound := map[i];
+                if !satisfies_interface(&mut c, bound, sets[i][k]) {
+                    return u64[];
+                }
+            }
+        }
+    }
+    return map;
+}
+// Structural match of an implementation's type, whose parameters are type parameters, against a
+// type; binds the parameters in `map`.
+fn type_matches<a, b>(c: (&a mut C), pattern: u64, actual: u64, map: (&b mut u64[])) -> bool {
+    pk := ty_kind(&mut c, pattern);
+    if pk == 9 {
+        i := ty_arg(&mut c, pattern);
+        if map.len() <= i {
+            return false;
+        }
+        if map[i] == 18446744073709551615 {
+            exchange(&mut map[i], actual);
+            return true;
+        }
+        old := map[i];
+        return same_type(&mut c, old, actual) != 0;
+    }
+    if same_type(&mut c, pattern, actual) != 0 {
+        return true;
+    }
+    a := base_type(&mut c, actual);
+    if pk != ty_kind(&mut c, a) {
+        return false;
+    }
+    if (pk == 6) || (pk == 7) || (pk == 27) || (pk == 13) || (pk == 14) || (pk == 16) || (pk == 29) {
+        if ty_mode(&mut c, pattern) != ty_mode(&mut c, a) {
+            return false;
+        }
+        pa := ty_arg(&mut c, pattern);
+        aa := ty_arg(&mut c, a);
+        return type_matches(&mut c, pa, aa, &mut map);
+    }
+    if pk == 8 {
+        if ty_arg(&mut c, pattern) != ty_arg(&mut c, a) {
+            return false;
+        }
+        pargs := type_args(&mut c, pattern);
+        aargs := type_args(&mut c, a);
+        if pargs.len() != aargs.len() {
+            return false;
+        }
+        for k in pargs.len() {
+            if !type_matches(&mut c, pargs[k], aargs[k], &mut map) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return false;
+}
+// The symbol an interface method resolves to for `ty`: the method itself, or - in a generic
+// implementation - its specialisation for the bindings that make the implementation fit `ty`.
+fn interface_symbol<a>(c: (&a mut C), contract: u64, ty: u64, actual: u64) -> u8[] {
+    if c.funcs[actual].types == 0 {
+        return c.funcs[actual].name.copy();
+    }
+    implementation := find_implementation(&mut c, contract, ty);
+    base := base_type(&mut c, ty);
+    bindings := impl_bindings(&mut c, implementation, base);
+    index := specialize(&mut c, actual, &bindings);
+    return special_name(&mut c, index);
+}
+// The implementation's parameters as type parameters (kind 9), in order: the identity binding.
+fn impl_param_types<a>(c: (&a mut C), id: u64) -> u64[] {
+    r := impl_record(&mut c, generic_impl_key(id));
+    mut out = u64[];
+    if r == 0 {
+        return out;
+    }
+    count := c.impl_params[r - 1].tnames.len();
+    bounds := copy_numbers(&c.impl_params[r - 1].bounds);
+    sets := copy_constraints(&c.impl_params[r - 1].interfaces);
+    for i in count {
+        mut proofs = u64[];
+        if i < sets.len() {
+            for k in sets[i].len() {
+                proof := intern(&mut c, 15, sets[i][k]);
+                proofs.push(proof);
+            }
+        }
+        mut bound = 0;
+        if i < bounds.len() {
+            bound = bounds[i];
+        }
+        t := intern_args(&mut c, 9, i, bound, u64[], proofs);
+        out.push(t);
+    }
+    return out;
 }
 fn satisfies_interface<a>(c: (&a mut C), ty: u64, contract: u64) -> bool {
     actual := base_type(&mut c, ty);
@@ -6301,7 +6428,7 @@ fn emit_vtables<a>(c: (&a mut C)) -> unit {
             name := c.funcs[methods[j]].name.copy();
             actual := resolve_interface_method(&mut c, id, concrete, view(name));
             module := c.funcs[actual].module.copy();
-            symbol := c.funcs[actual].name.copy();
+            symbol := interface_symbol(&mut c, id, concrete, actual);
             o(&mut c, view(".quad "));
             mangle(&mut c, view(module), view(symbol));
             c.out.push(10);
@@ -6418,13 +6545,24 @@ fn assoc_type<a, b>(c: (&a mut C), base: u64, name: &b [u8]) -> u64 {
         ity := item.ty;
         names := copy_names(&item.assoc_names);
         types := copy_numbers(&item.assoc_types);
-        if same_type(&mut c, ity, b) != 0 {
+        mut fits = same_type(&mut c, ity, b) != 0;
+        // A generic implementation gives its associated type with its parameters bound.
+        mut bindings = u64[];
+        if !fits {
+            bindings = impl_bindings(&mut c, i + 1, b);
+            fits = bindings.len() != 0;
+        }
+        if fits {
             for j in names.len() {
                 if same(view(names[j]), view(name)) {
-                    if any && (same_type(&mut c, found, types[j]) == 0) {
+                    mut given = types[j];
+                    if bindings.len() != 0 {
+                        given = bind_types(&mut c, given, &bindings);
+                    }
+                    if any && (same_type(&mut c, found, given) == 0) {
                         fail(&mut c, view("ambiguous associated type: several implementations give it"));
                     }
-                    found = types[j];
+                    found = given;
                     any = true;
                 }
             }
@@ -6453,8 +6591,12 @@ fn project<a>(c: (&a mut C), base: u64, mode: u64) -> u64 {
     item := &c.implementations[implementation - 1];
     names := copy_names(&item.assoc_names);
     types := copy_numbers(&item.assoc_types);
+    bindings := impl_bindings(&mut c, implementation, b);
     for j in names.len() {
         if same(view(names[j]), view(name)) {
+            if bindings.len() != 0 {
+                return bind_types(&mut c, types[j], &bindings);
+            }
             return types[j];
         }
     }
@@ -9408,7 +9550,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     exchange(&mut c.receiver_region, 0);
     exchange(&mut c.output_region, 0);
     exchange(&mut c.parsing_input, 1);
-    if c.inherent != 0 {
+    if (c.inherent != 0) || (c.current_impl != 0) {
         prepend_impl_params(&mut c);
     }
     if same(view(name), view("print")) || same(view(name), view("println")) {
@@ -9611,6 +9753,12 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         constraints := copy_constraints(&c.type_interfaces);
         // A method of an interface implementation is as visible as the interface it implements.
         item_public_8 := public | u64(c.current_impl != 0);
+        // Whose parameters a template replay restores: an inherent impl's type, or a generic
+        // interface implementation (replay_function).
+        mut method_owner = c.inherent;
+        if (method_owner == 0) && (c.current_impl != 0) && (typecount != 0) {
+            method_owner = generic_impl_key(c.current_impl);
+        }
         item_home_8 := module_copy(&mut c);
         c
             .funcs
@@ -9631,7 +9779,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                     bounds: bounds,
                     constraints: constraints,
                     contract: 0,
-                    owner: c.inherent,
+                    owner: method_owner,
                     ext: export,
                     symbol: export_symbol,
                     body: u8[],
@@ -10152,6 +10300,11 @@ fn impl_has_for<a>(c: (&a mut C)) -> bool {
     }
     return false;
 }
+// The impl_params key of a generic interface implementation (implementation id, 1-based): above
+// every declaration index, which is what an inherent impl's key is.
+fn generic_impl_key(id: u64) -> u64 {
+    return 1000000000 + id;
+}
 fn impl_record<a>(c: (&a mut C), owner: u64) -> u64 {
     for i in c.impl_params.len() {
         p := &c.impl_params[i];
@@ -10170,7 +10323,10 @@ fn impl_self<a>(c: (&a mut C), owner: u64) -> u64 {
     return intern_args(&mut c, 8, owner - 1, 0, u64[], u64[]);
 }
 fn prepend_impl_params<a>(c: (&a mut C)) -> unit {
-    owner := c.inherent;
+    mut owner = c.inherent;
+    if (owner == 0) && (c.current_impl != 0) {
+        owner = generic_impl_key(c.current_impl);
+    }
     r := impl_record(&mut c, owner);
     if r == 0 {
         return ();
@@ -10213,7 +10369,7 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
     expect(&mut c, view("impl"));
     // `impl Type { fn ... }`: methods and associated functions of a nominal type in this module.
     if ((kind(&mut c) == 1) & (next_kind(&mut c) == 123))
-        || is(&mut c, view("<"))
+        || (is(&mut c, view("<")) & !impl_has_for(&mut c))
         || (
             (kind(&mut c) == 1)
                 & (next_kind(&mut c) == 60)
@@ -10294,6 +10450,14 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
     exchange(&mut c.tnames, u8[][]);
     exchange(&mut c.type_bounds, u64[]);
     exchange(&mut c.type_interfaces, u64[][]);
+    // `impl<T: B> I for X<T>`: a generic implementation, its methods templates over T.
+    if is(&mut c, view("<")) {
+        lifetime_parameters(&mut c);
+    }
+    impl_rnames := copy_names(&c.rnames);
+    impl_tnames := copy_names(&c.tnames);
+    impl_bounds := copy_numbers(&c.type_bounds);
+    impl_ifaces := copy_constraints(&c.type_interfaces);
     mut module = module_copy(&mut c);
     mut name = ident(&mut c);
     mut qualified = 0;
@@ -10348,6 +10512,20 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
                 }
             );
         id = c.implementations.len();
+        if impl_tnames.len() != 0 {
+            c
+                .impl_params
+                .push(
+                    ImplParams {
+                        decl: generic_impl_key(id),
+                        rnames: copy_names(&impl_rnames),
+                        tnames: copy_names(&impl_tnames),
+                        bounds: copy_numbers(&impl_bounds),
+                        interfaces: copy_constraints(&impl_ifaces),
+                        self_ty: ty,
+                    }
+                );
+        }
     }
     if id == 0 {
         fail(&mut c, view("implementation header missing"));
@@ -10376,9 +10554,10 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
             continue;
         }
         before := c.funcs.len();
+        // func prepends the implementation's own parameters (prepend_impl_params).
         func(&mut c, pass, 0);
-        if c.tnames.len() != 0 {
-            fail(&mut c, view("generic implementation methods are not implemented yet"));
+        if c.tnames.len() != impl_tnames.len() {
+            fail(&mut c, view("an interface method cannot have type parameters of its own"));
         }
         if pass == 2 {
             item := &mut c.implementations[id - 1];
@@ -10544,8 +10723,8 @@ fn check_interfaces<a>(c: (&a mut C)) -> unit {
             actual := resolve_interface_method(&mut c, contract, ty, view(name));
             mut arguments = u64[ty];
             signature := bound_signature(&mut c, abstract, &arguments);
-            mut empty = u64[];
-            concrete := bound_signature(&mut c, actual, &empty);
+            mut own = impl_param_types(&mut c, i + 1);
+            concrete := bound_signature(&mut c, actual, &own);
             if same_type(&mut c, concrete, signature) == 0 {
                 // Report at the implementing method, not wherever parsing ended.
                 g := &c.funcs[actual];
@@ -14221,8 +14400,18 @@ fn replay_function<a>(c: (&a mut C), template: u64) -> unit {
     pos := f.pos;
     raw := f.raw;
     mut module = f.module.copy();
+    home := f.home.copy();
     owner := f.owner;
-    if owner != 0 {
+    mut generic_impl = 0;
+    if owner >= generic_impl_key(0) {
+        // A method of a generic interface implementation: its home module, and the implementation
+        // it belongs to (so its own parameters are prepended again).
+        generic_impl = owner - generic_impl_key(0);
+        module = home;
+        exchange(&mut c.current_impl, generic_impl);
+        st := impl_self(&mut c, owner);
+        exchange(&mut c.self_type, st + 1);
+    } else if owner != 0 {
         d := &c.decls[owner - 1];
         module = d.module.copy();
         exchange(&mut c.inherent, owner);
@@ -14240,6 +14429,9 @@ fn replay_function<a>(c: (&a mut C), template: u64) -> unit {
     func(&mut c, 4, 0);
     exchange(&mut c.inherent, 0);
     exchange(&mut c.self_type, 0);
+    if generic_impl != 0 {
+        exchange(&mut c.current_impl, 0);
+    }
     return ();
 }
 fn emit_specializations<a>(c: (&a mut C)) -> unit {
@@ -14955,9 +15147,8 @@ fn emit_resolved_call<a>(
                 }
             } else {
                 actual := resolve_interface_method(&mut c, contract, self, view(name));
-                f := &c.funcs[actual];
-                destination = f.module.copy();
-                symbol = f.name.copy();
+                destination = c.funcs[actual].module.copy();
+                symbol = interface_symbol(&mut c, contract, self, actual);
             }
         }
     }
@@ -15048,9 +15239,8 @@ fn specialized_function_value<a>(c: (&a mut C), index: u64, map: u64[]) -> Val {
     if contract != 0 {
         self := map[0];
         actual := resolve_interface_method(&mut c, contract, self, view(name));
-        f := &c.funcs[actual];
-        module := f.module.copy();
-        symbol := f.name.copy();
+        module := c.funcs[actual].module.copy();
+        symbol := interface_symbol(&mut c, contract, self, actual);
         o(&mut c, view("leaq "));
         mangle(&mut c, view(module), view(symbol));
         o(&mut c, view("(%rip),%rax\n"));
@@ -20966,7 +21156,11 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             for i in c.implementations.len() {
                 item := &c.implementations[i];
                 ity := item.ty;
-                if same_type(&mut c, ity, xty) != 0 {
+                mut fits = same_type(&mut c, ity, xty) != 0;
+                if !fits {
+                    fits = impl_bindings(&mut c, i + 1, xty).len() != 0;
+                }
+                if fits {
                     candidate := private_module(view(".impl_"), i + 1);
                     m2 := find_func(&mut c, view(candidate), view(name));
                     if m2 != 0 {
@@ -21069,6 +21263,45 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             }
             formal := c.params[first];
             prepared := method_receiver(&mut c, input, inty, xty, formal);
+            rv := prepared.t;
+            rty := prepared.ty;
+            exchange(&mut c.receiver, rv);
+            exchange(&mut c.receiver_ty, rty);
+            exchange(&mut c.has_receiver, 1);
+            return call(&mut c, view(owner), view(name));
+        }
+    }
+    // An interface method implemented for a non-record type (`impl Show for u64`, or a bound
+    // parameter specialised to one): `x.show()`.
+    if k != 8 {
+        concrete := base_type(&mut c, xty);
+        mut owner = u8[];
+        mut method = 0;
+        for i in c.implementations.len() {
+            ity := c.implementations[i].ty;
+            mut fits = same_type(&mut c, ity, concrete) != 0;
+            if !fits {
+                fits = impl_bindings(&mut c, i + 1, concrete).len() != 0;
+            }
+            if fits {
+                candidate := private_module(view(".impl_"), i + 1);
+                m2 := find_func(&mut c, view(candidate), view(name));
+                if m2 != 0 {
+                    if method != 0 {
+                        fail(&mut c, view("ambiguous method: several interfaces define it (use Interface::method)"));
+                    }
+                    owner = candidate;
+                    method = m2;
+                }
+            }
+        }
+        if method != 0 {
+            first := c.funcs[method - 1].first;
+            if c.funcs[method - 1].count == 0 {
+                fail(&mut c, view("associated function called as a method (use Interface::name)"));
+            }
+            formal := c.params[first];
+            prepared := method_receiver(&mut c, input, inty, concrete, formal);
             rv := prepared.t;
             rty := prepared.ty;
             exchange(&mut c.receiver, rv);
