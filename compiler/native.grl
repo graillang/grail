@@ -13367,7 +13367,18 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
             // A reference or view binding passed by name is reborrowed, not moved, exactly as at a
             // direct call (reborrow_argument): `k(x)` leaves `x` usable afterwards.
             mut value = val(0, 0);
-            reborrow := reborrow_argument(&mut c);
+            mut reborrow = reborrow_argument(&mut c);
+            if reborrow != 0 {
+                // Only references take this path here: a view argument is already a copy the
+                // closure's parameter type expects.
+                here_tok := c.pos;
+                arg_name := tok_text(&mut c, here_tok);
+                l := find_local(&mut c, view(arg_name));
+                lty := local_ty(&mut c, l - 1);
+                if ty_kind(&mut c, lty) != 7 {
+                    reborrow = 0;
+                }
+            }
             if reborrow != 0 {
                 value = place(&mut c, reborrow - 1, 0);
             } else {
