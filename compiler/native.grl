@@ -26430,6 +26430,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         concrete := base_type(&mut c, xty);
         mut owner = u8[];
         mut method = 0;
+        mut picked = 0;
         for i in c.implementations.len() {
             ity := c.implementations[i].ty;
             mut fits = same_type(&mut c, ity, concrete) != 0;
@@ -26445,6 +26446,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
                     }
                     owner = candidate;
                     method = m2;
+                    picked = i + 1;
                 }
             }
         }
@@ -26460,7 +26462,34 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             exchange(&mut c.receiver, rv);
             exchange(&mut c.receiver_ty, rty);
             exchange(&mut c.has_receiver, 1);
-            return call(&mut c, view(owner), view(name));
+            v := call(&mut c, view(owner), view(name));
+            // A specialisation binds a parameter (kind 10) to the concrete type it stands for, and
+            // the implementation is found for that concrete type - but a method the interface
+            // declares as *returning* `Self` gives back the parameter, not the concrete type it
+            // stands for. The word is unchanged: kind 10 and its argument have one layout, and a
+            // result the implementation declared for the concrete type carries no drop record when
+            // that type has none, while the parameter owns whatever it stands for - so the record
+            // is added (once).
+            mut self_result = 0;
+            if (ty_kind(&mut c, xty) == 10) & (picked != 0) {
+                contract := c.implementations[picked - 1].contract;
+                header := private_module(view(".interface_"), contract);
+                declared := find_func(&mut c, view(header), view(name));
+                if declared != 0 {
+                    // `Self` in an interface signature is its implicit first parameter.
+                    declared_ret := c.funcs[declared - 1].ret;
+                    if ty_kind(&mut c, declared_ret) == 9 {
+                        self_result = 1;
+                    }
+                }
+            }
+            if (self_result != 0) & (same_type(&mut c, v.ty, concrete) != 0) {
+                if resource(&mut c, v.t) == 0 {
+                    own(&mut c, v.t, xty);
+                }
+                return val(v.t, xty);
+            }
+            return v;
         }
     }
     if k == 11 {
