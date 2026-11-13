@@ -8914,5 +8914,16 @@
     "reject": true,
     "diagnostic": "`?` needs a shape with one success member and one failure member; `Three<u64, string, u64>` has 3 variants (Ok, Err, Also)",
     "note": "the same refusal for an enum: the diagnostic names the instantiated type and all three variants"
+  },
+  {
+    "name": "resgen-stdlib-result-boundary",
+    "source": "module resgen;\nuse result;\nuse core;\nuse fs;\n\n// The stdlib answers `T |? fs::Error`; a caller that wants the generic shape converts once, in\n// writing, and from there `?` carries the same `fs::Error` through every layer.\nfn read(path: (&[u8])) -> result::Result<u8[], fs::Error> {\n    match fs::read(path) {\n        u8[](data) => { return result::Result::Ok(data); },\n        fs::Error(e) => { return result::Result::Err(e); }\n    }\n}\nfn size(path: (&[u8])) -> result::Result<u64, fs::Error> {\n    data := read(path)?;\n    return result::Result::Ok(data.len());\n}\nfn describe(path: (&[u8])) -> u8[] {\n    match size(path) {\n        Ok(n) => { return format(\"read {} bytes\", n).copy(); },\n        Err(e) => { return e.show().copy(); }\n    }\n}\nfn main() {\n    println(\"{}\", describe(view(\"definitely-missing.txt\")));\n    println(\"{}\", describe(view(\"no/such/dir/file.txt\")));\n}\n",
+    "modules": [
+      "lib/result.grl",
+      "lib/core.grl",
+      "lib/fs.grl"
+    ],
+    "stdout": "definitely-missing.txt: not found\nno/such/dir/file.txt: not found\n",
+    "note": "the stdlib's `T |? fs::Error` and the generic `Result<T, fs::Error>` meet at one written conversion, after which `?` carries the same fs::Error through every generic layer"
   }
 ]

@@ -216,9 +216,12 @@ by an explicit conversion the caller writes.
 ## Evidence and limits
 
 Cases (`tests/native-cases.json`, `resgen-`): success and failure with both generic enums; a payload
-that is itself a generic instance; `?` through three layers; the three-member refusal with its
-diagnostic; an interface-first build of a function returning `Result<T, E>`; and a drop/leak case
-whose payload owns memory on both arms, under the runtime's end-of-main live-allocation check.
+that is itself a generic instance and one that is a reference; a two-member enum whose variants are
+not named `Ok`/`Err` (propagating by declaration order, in both orders); `?` through three layers; the
+three-member union and three-variant enum refusals with their diagnostics; an interface-first build
+of a function returning `Result<T, E>`; the stdlib's `T |? fs::Error` meeting `Result<T, fs::Error>`
+at one written conversion; and a drop/leak case whose payload owns memory on both arms, under the
+runtime's end-of-main live-allocation check.
 
 Not claimed: variance or subtyping between instances, inference of a generic constructor's type
 arguments outside the written-result rule (`Result::Ok(x)` in a `let` still needs its type), implicit
