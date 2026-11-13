@@ -354,6 +354,146 @@ pub fn rt_thread(flags: u64, slot: u64, handle: u64) -> u64 {
 fn rt_os_reactor() -> u64 {
     return 1;
 }
+// ---- reactor: kqueue ---------------------------------------------------------------------------
+// kqueue is the readiness source: EVFILT_READ/EVFILT_WRITE one-shots carry the task to wake in
+// udata, EVFILT_TIMER one-shots are the sleeps, and an EVFILT_USER event with ident 1 is the fence
+// that makes the reactor complete a batch. A struct kevent is {ident, filter, flags, fflags, data,
+// udata}: 32 bytes on both Mach-O targets, little-endian, with filter and flags adjacent at offset
+// 8, which is why they are written together as one 32-bit word.
+fn rt_os_ready() -> u64 {
+    return 1;
+}
+fn rt_os_evfilt_read() -> u64 {
+    return wrapping_sub(0, 1);
+}
+fn rt_os_evfilt_write() -> u64 {
+    return wrapping_sub(0, 2);
+}
+fn rt_os_evfilt_timer() -> u64 {
+    return wrapping_sub(0, 7);
+}
+fn rt_os_evfilt_user() -> u64 {
+    return wrapping_sub(0, 10);
+}
+fn rt_os_kevent(kq: u64, changes: u64, nchanges: u64, events: u64, nevents: u64, timeout: u64) -> u64 {
+    return rt_os_result(raw_import("kevent", kq, changes, nchanges, events, nevents, timeout));
+}
+fn rt_os_kevent_set(ev: u64, ident: u64, filter: u64, flags: u64, fflags: u64, data: u64, udata: u64) -> u64 {
+    raw_store(ev, ident);
+    raw_store32(ev + 8, (filter & 65535) + (flags * 65536));
+    raw_store32(ev + 12, fflags);
+    raw_store(ev + 16, data);
+    raw_store(ev + 24, udata);
+    return 0;
+}
+fn rt_os_reactor_open(s: u64) -> u64 {
+    kq := rt_os_result(raw_import("kqueue", 0, 0, 0));
+    if negative(kq) {
+        return 0;
+    }
+    ev := rt_alloc(64);
+    rt_os_kevent_set(ev, 1, rt_os_evfilt_user(), 33, 0, 0, 0); // EV_ADD|EV_CLEAR
+    r := rt_os_kevent(kq, ev, 1, 0, 0, 0);
+    rt_free(ev);
+    if negative(r) {
+        raw_import("close", kq, 0, 0);
+        return 0;
+    }
+    return kq;
+}
+fn rt_os_reactor_fence(s: u64) -> u64 {
+    kq := raw_load(s + 40);
+    if kq == 0 {
+        return 0;
+    }
+    ev := rt_alloc(64);
+    // EV_ENABLE plus NOTE_TRIGGER fires the registered user event.
+    rt_os_kevent_set(ev, 1, rt_os_evfilt_user(), 4, 16777216, 0, 0);
+    rt_os_kevent(kq, ev, 1, 0, 0, 0);
+    rt_free(ev);
+    return 0;
+}
+fn rt_os_reactor_loop(s: u64) -> u64 {
+    kq := raw_load(s + 40);
+    events := raw_map(4096);
+    while true {
+        n := rt_os_kevent(kq, 0, 0, events, 64, 0);
+        if negative(n) == 0 {
+            mut i = 0;
+            while i < n {
+                at := events + i * 32;
+                task := raw_load(at + 24);
+                if task != 0 {
+                    rt_wake(task);
+                }
+                i += 1;
+            }
+        }
+        rt_atomic_fetch_add(s + 56, 1);
+    }
+    return 0;
+}
+fn rt_os_wait_fd(s: u64, fd: u64, events: u64, task: u64) -> u64 {
+    kq := raw_load(s + 40);
+    if kq == 0 {
+        return 1;
+    }
+    mut filter = rt_os_evfilt_read();
+    if (events & 4) != 0 {
+        filter = rt_os_evfilt_write();
+    }
+    ev := rt_alloc(64);
+    rt_os_kevent_set(ev, fd, filter, 17, 0, 0, task); // EV_ADD|EV_ONESHOT
+    r := rt_os_kevent(kq, ev, 1, 0, 0, 0);
+    rt_free(ev);
+    if negative(r) {
+        return 1;
+    }
+    return 0;
+}
+fn rt_os_wait_done(s: u64, fd: u64) -> u64 {
+    kq := raw_load(s + 40);
+    if kq == 0 {
+        return 0;
+    }
+    ev := rt_alloc(64);
+    rt_os_kevent_set(ev, fd, rt_os_evfilt_read(), 2, 0, 0, 0); // EV_DELETE
+    rt_os_kevent(kq, ev, 1, 0, 0, 0);
+    rt_os_kevent_set(ev, fd, rt_os_evfilt_write(), 2, 0, 0, 0);
+    rt_os_kevent(kq, ev, 1, 0, 0, 0);
+    rt_free(ev);
+    return 0;
+}
+// A relative timer as an EVFILT_TIMER one-shot keyed by the task pointer; milliseconds are the
+// default unit when no NOTE_*UNIT flag is given.
+fn rt_os_timer(s: u64, task: u64, ms: u64) -> u64 {
+    kq := raw_load(s + 40);
+    if kq == 0 {
+        return 1;
+    }
+    ev := rt_alloc(64);
+    rt_os_kevent_set(ev, task, rt_os_evfilt_timer(), 17, 0, ms, task); // EV_ADD|EV_ONESHOT
+    r := rt_os_kevent(kq, ev, 1, 0, 0, 0);
+    rt_free(ev);
+    if negative(r) {
+        return 1;
+    }
+    return 0;
+}
+fn rt_os_timer_done(s: u64, task: u64) -> u64 {
+    kq := raw_load(s + 40);
+    if kq == 0 {
+        return 0;
+    }
+    ev := rt_alloc(64);
+    rt_os_kevent_set(ev, task, rt_os_evfilt_timer(), 2, 0, 0, 0); // EV_DELETE
+    rt_os_kevent(kq, ev, 1, 0, 0, 0);
+    rt_free(ev);
+    return 0;
+}
+fn rt_os_complete(task: u64) -> u64 {
+    return rt_wake(task);
+}
 // One scheduler worker per CPU, with a floor of two (a cooperative single-core host must still be
 // able to run a task beside one that spins) and a ceiling that bounds the per-worker caches.
 fn rt_os_workers() -> u64 {

@@ -706,19 +706,27 @@ fn rt_os_init() -> u64 {
 }
 
 // ---- green-task execution contexts (Win32 fibers) -------------------------------------------
-// A task is a fiber, not an OS thread: one scheduler thread owns every task in the process and a
-// switch is SwitchToFiber. So `spawn` behaves as it does on Linux - the task runs until it yields
-// or blocks, a parked task lets the others run, and the number of tasks is bounded by memory
-// rather than by threads. The switch itself is the operating system's, so no stack pointer is saved
-// and no register is hand-spilled; the fiber keeps its own context.
+// A task is a fiber, not an OS thread: a worker switches onto it with SwitchToFiber and a
+// suspension switches back, so the task keeps its own stack across a park. Several workers switch
+// fibers concurrently (M:N): a fiber is not owned by the thread that created it - Win32 lets any
+// thread switch to any fiber - so a stolen task runs on whichever worker took it. The one thing a
+// migrated task must not rely on is OS thread local storage; the runtime's own per-thread state
+// (the thread record) is read through raw_tp_get, which follows the OS thread, so the portable
+// code always sees the worker that is actually running it.
 //
-// Windows has no epoll, eventfd or timerfd, so rt_os_reactor() is 0. The runtime parks a task
-// inside the operation it handed to a helper thread (rt_offload: host::read_file, host::write_file,
-// host::command, host::read_fd, host::write_fd and host::sleep_ms) rather than on a readiness
-// registration. That is the only mechanism difference from Linux; the observable scheduling is the
-// same and docs/ffi.md states it.
+// Readiness is a completion port: CreateIoCompletionPort where the Linux build creates epoll. A
+// blocking host operation is still handed to a helper thread (rt_offload), but its completion is
+// posted to the port and the reactor wakes the parked task, instead of the helper waking it
+// directly; sleeps live on a timer heap the reactor waits on through GetQueuedCompletionStatus's
+// timeout. So a task program does not need an epoll, an eventfd, a timerfd or a WaitForMultipleObjects
+// set, and a reactor that cannot be created is not fatal: rt_sleep_ms falls back to offloading.
 //
-// These four entry points are declared here rather than in the compiler's Win32 table
+// The fiber stack is lazily committed by the OS: CreateFiberEx commits `commit` bytes inside a
+// `reserve`-byte range and grows it through guard pages, exactly as a thread stack grows, which is
+// what lets a 1 MiB reservation cost 64 KiB until a task needs more. Exhausting it raises
+// STATUS_STACK_OVERFLOW, caught by the vectored exception handler installed below.
+//
+// These entry points are declared here rather than in the compiler's Win32 table
 // (compiler/native.grl), because they are runtime-only: the import library records them as
 // `// grail-link: import kernel32 ...` from this declaration.
 extern "C" lib "kernel32" fn ConvertThreadToFiber(parameter: u64) -> u64;
@@ -727,16 +735,34 @@ extern "C" lib "kernel32" fn ConvertThreadToFiber(parameter: u64) -> u64;
 extern "C" lib "kernel32" fn CreateFiberEx(commit: u64, reserve: u64, flags: u64, start: cfn(u64) -> u64, parameter: u64) -> u64;
 extern "C" lib "kernel32" fn DeleteFiber(fiber: u64) -> unit;
 extern "C" lib "kernel32" fn SwitchToFiber(fiber: u64) -> unit;
+extern "C" lib "kernel32" fn CreateIoCompletionPort(handle: u64, existing: u64, key: u64, threads: u64) -> u64;
+extern "C" lib "kernel32" fn GetQueuedCompletionStatus(port: u64, bytes: u64, key: u64, overlapped: u64, ms: u64) -> u64;
+extern "C" lib "kernel32" fn PostQueuedCompletionStatus(port: u64, bytes: u64, key: u64, overlapped: u64) -> u64;
+extern "C" lib "kernel32" fn AddVectoredExceptionHandler(first: u64, handler: cfn(u64) -> u64) -> u64;
+extern "C" lib "kernel32" fn GetActiveProcessorCount(group: u64) -> u64;
 
 fn rt_os_reactor() -> u64 {
-    return 0;
-}
-// One scheduler thread: every task is a fiber on it, so there is no pool to size.
-fn rt_os_workers() -> u64 {
     return 1;
 }
-// Turn the calling scheduler thread into a fiber, so a task can be switched onto and off it.
+// One scheduler worker per core, with the same floor of two the ELF targets use.
+fn rt_os_workers() -> u64 {
+    mut workers = GetActiveProcessorCount(65535); // ALL_PROCESSOR_GROUPS
+    if workers < 2 {
+        workers = 2;
+    }
+    if 64 < workers {
+        workers = 64;
+    }
+    return workers;
+}
+// Turn the calling scheduler thread into a fiber, so a task can be switched onto and off it. The
+// first worker also installs the vectored exception handler that turns a stack overflow into the
+// runtime's report.
 fn rt_os_sched_prepare() -> u64 {
+    words := rt_state_stack_guard();
+    if raw_atomic_cas(words + 8, 0, 2) == 0 {
+        AddVectoredExceptionHandler(1, rt_win_vectored);
+    }
     w := raw_tp_get();
     if raw_load(w + 8) == 0 {
         fiber := ConvertThreadToFiber(0);
@@ -747,13 +773,32 @@ fn rt_os_sched_prepare() -> u64 {
     }
     return 0;
 }
-// 64 KiB committed inside 256 KiB reserved: the same per-task stack footprint as a Linux task.
+// EXCEPTION_POINTERS is {ExceptionRecord, ContextRecord}; the record's first member is the DWORD
+// code. 0xC00000FD is STATUS_STACK_OVERFLOW, the fault a fiber raises once its reserve is gone.
+// Everything else keeps searching (0 = EXCEPTION_CONTINUE_SEARCH), so an ordinary fault still ends
+// the process the way it always did.
+extern "C" fn rt_win_vectored(pointers: u64) -> u64 {
+    if pointers != 0 {
+        record := raw_load(pointers);
+        if record != 0 {
+            if (raw_load(record) & 4294967295) == 3221225725 {
+                rt_stack_overflow();
+            }
+        }
+    }
+    return 0;
+}
+// 64 KiB committed inside 1 MiB reserved, grown by the OS through guard pages. A fiber cannot be
+// reinitialised, so its stack is released by DeleteFiber rather than recycled; the Linux/macOS
+// builds recycle their raw mappings through the per-worker free list.
 fn rt_os_ctx_new(t: u64) -> u64 {
-    fiber := CreateFiberEx(65536, 262144, 0, rt_win_fiber_start, t);
+    fiber := CreateFiberEx(65536, 1048576, 0, rt_win_fiber_start, t);
     if fiber == 0 {
         rt_abort();
     }
     raw_store(t, fiber);
+    raw_store(t + 8, 0);
+    raw_store(t + 16, 1048576);
     return fiber;
 }
 fn rt_os_ctx_enter(t: u64) -> u64 {
@@ -779,4 +824,144 @@ extern "C" fn rt_win_fiber_start(t: u64) -> u64 {
         rt_os_ctx_leave(t);
     }
     return 0;
+}
+
+// ---- reactor: an I/O completion port plus a timer heap -----------------------------------------
+// Timers are entries in a small heap in the scheduler block; the reactor waits in
+// GetQueuedCompletionStatus for at most the time until the earliest one. A completion key is the
+// task to wake (0 is the fence, 1 says the heap changed and the timeout must be recomputed).
+fn rt_os_ready() -> u64 {
+    return 0; // no descriptor readiness: blocking operations are completed, not waited on
+}
+fn rt_os_reactor_open(s: u64) -> u64 {
+    port := CreateIoCompletionPort(wrapping_sub(0, 1), 0, 0, raw_load(s + 32));
+    if port == 0 {
+        return 0;
+    }
+    heap := raw_map(65536);
+    if rt_error(heap) {
+        raw_win32(CloseHandle, port);
+        return 0;
+    }
+    raw_store(s + 128, heap);
+    raw_store(s + 120, 4096);
+    return port;
+}
+fn rt_os_reactor_fence(s: u64) -> u64 {
+    if raw_load(s + 40) != 0 {
+        PostQueuedCompletionStatus(raw_load(s + 40), 0, 0, 0);
+    }
+    return 0;
+}
+fn rt_win_millis() -> u64 {
+    return raw_win32(GetTickCount64);
+}
+fn rt_os_timer(s: u64, task: u64, ms: u64) -> u64 {
+    port := raw_load(s + 40);
+    if port == 0 {
+        return 1;
+    }
+    deadline := rt_win_millis() + ms;
+    rt_spin_lock(s + 104);
+    count := raw_load(s + 112);
+    if raw_load(s + 120) <= count {
+        rt_spin_unlock(s + 104);
+        return 1;
+    }
+    heap := raw_load(s + 128);
+    raw_store(heap + count * 16, deadline);
+    raw_store(heap + count * 16 + 8, task);
+    raw_store(s + 112, count + 1);
+    rt_spin_unlock(s + 104);
+    // Recompute the wait timeout: wake the reactor out of GetQueuedCompletionStatus.
+    PostQueuedCompletionStatus(port, 0, 1, 0);
+    return 0;
+}
+fn rt_os_timer_done(s: u64, task: u64) -> u64 {
+    return 0; // the entry was removed when it fired
+}
+fn rt_win_timer_next(s: u64) -> u64 {
+    rt_spin_lock(s + 104);
+    count := raw_load(s + 112);
+    heap := raw_load(s + 128);
+    mut i = 0;
+    mut best = 0;
+    while i < count {
+        d := raw_load(heap + i * 16);
+        if (best == 0) || (d < best) {
+            best = d;
+        }
+        i += 1;
+    }
+    rt_spin_unlock(s + 104);
+    return best;
+}
+fn rt_win_timers_fire(s: u64) -> u64 {
+    now := rt_win_millis();
+    rt_spin_lock(s + 104);
+    mut count = raw_load(s + 112);
+    heap := raw_load(s + 128);
+    mut i = 0;
+    while i < count {
+        if raw_load(heap + i * 16) <= now {
+            task := raw_load(heap + i * 16 + 8);
+            count = count - 1;
+            raw_store(heap + i * 16, raw_load(heap + count * 16));
+            raw_store(heap + i * 16 + 8, raw_load(heap + count * 16 + 8));
+            raw_store(s + 112, count);
+            rt_wake(task);
+        } else {
+            i += 1;
+        }
+    }
+    rt_spin_unlock(s + 104);
+    return 0;
+}
+fn rt_os_reactor_loop(s: u64) -> u64 {
+    port := raw_load(s + 40);
+    scratch := rt_win_scratch() + 16;
+    while true {
+        rt_win_timers_fire(s);
+        mut timeout = 4294967295; // INFINITE
+        earliest := rt_win_timer_next(s);
+        if earliest != 0 {
+            now := rt_win_millis();
+            if earliest <= now {
+                timeout = 0;
+            } else {
+                timeout = earliest - now;
+            }
+        }
+        // A timeout leaves the key word untouched, so it is cleared before every wait.
+        raw_store(scratch + 8, 0);
+        GetQueuedCompletionStatus(port, scratch, scratch + 8, scratch + 16, timeout);
+        key := raw_load(scratch + 8);
+        if (key != 0) && (key != 1) {
+            rt_wake(key);
+        }
+        if key == 1 {
+            rt_win_timers_fire(s); // an earlier deadline may already be due
+        }
+        rt_atomic_fetch_add(s + 56, 1);
+    }
+    return 0;
+}
+fn rt_os_wait_fd(s: u64, fd: u64, events: u64, task: u64) -> u64 {
+    return 1; // readiness is not offered; rt_wait_fd reports ready and the caller retries
+}
+fn rt_os_wait_done(s: u64, fd: u64) -> u64 {
+    return 0;
+}
+// A blocking operation completed on its helper thread: hand the task to the reactor through the
+// completion port, exactly as an overlapped operation's completion would arrive.
+fn rt_os_complete(task: u64) -> u64 {
+    mut port = raw_load(raw_state() + 72);
+    if port != 0 {
+        port = raw_load(port + 40); // the scheduler block's reactor handle
+    }
+    if port != 0 {
+        PostQueuedCompletionStatus(port, 0, task, 0);
+        return 0;
+    }
+    return rt_wake(task);
 }

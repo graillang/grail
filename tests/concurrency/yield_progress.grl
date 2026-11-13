@@ -1,0 +1,25 @@
+// A yield re-queues the calling task: two tasks that yield in a loop both finish the whole loop and
+// the joined sum of their completed rounds proves nothing was lost, dropped or run twice. The
+// *order* is deliberately not pinned - with one worker per core the two tasks can be running on two
+// workers at once, so a printed trace would depend on the host - which is why the fixture counts
+// instead of spelling out a sequence.
+//
+// What this still pins is the cooperative contract: a task only gives up its worker at a yield, a
+// yield puts it back on a deque, and the join observes both completed loops.
+unsafe module runtime;
+fn step(n: u64, unused: u64) -> u64 {
+    mut i = 0;
+    while i < 1000 {
+        rt_yield();
+        i += 1;
+    }
+    return i + n;
+}
+fn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {
+    first := spawn(sc, 1, step);
+    second := spawn(sc, 2, step);
+    return join(first) + join(second);
+}
+fn main() {
+    println(task_scope(0, body));
+}

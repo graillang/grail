@@ -327,6 +327,144 @@ fn rt_os_sched_prepare() -> u64 {
     return 0;
 }
 
+// ---- reactor: epoll, eventfd and timerfd --------------------------------------------------------
+// The portable scheduler owns the task states; this module owns the file descriptors. Readiness and
+// timers are one-shot epoll registrations whose data word is the task to wake, and the eventfd is
+// the fence that makes the reactor complete a batch.
+fn rt_os_ready() -> u64 {
+    return 1;
+}
+fn rt_os_reactor_open(s: u64) -> u64 {
+    epoll := rt_syscall(291, 524288, 0, 0);
+    if rt_error(epoll) {
+        return 0;
+    }
+    fence := rt_syscall(290, 0, 526336, 0);
+    if rt_error(fence) {
+        rt_syscall(3, epoll, 0, 0);
+        return 0;
+    }
+    ev := raw_map(4096);
+    if rt_error(ev) {
+        rt_syscall(3, fence, 0, 0);
+        rt_syscall(3, epoll, 0, 0);
+        return 0;
+    }
+    raw_store(ev, 1); // EPOLLIN, data 0 marks the fence descriptor
+    if rt_error(rt_syscall4(233, epoll, 1, fence, ev)) {
+        rt_syscall(11, ev, 4096, 0);
+        rt_syscall(3, fence, 0, 0);
+        rt_syscall(3, epoll, 0, 0);
+        return 0;
+    }
+    rt_syscall(11, ev, 4096, 0);
+    raw_store(s + 48, fence);
+    return epoll;
+}
+fn rt_os_reactor_fence(s: u64) -> u64 {
+    one := rt_alloc(8);
+    raw_store(one, 1);
+    rt_syscall(1, raw_load(s + 48), one, 8);
+    rt_free(one);
+    return 0;
+}
+fn rt_os_reactor_loop(s: u64) -> u64 {
+    events := raw_map(4096);
+    scratch := events + 2048;
+    epoll := raw_load(s + 40);
+    // epoll_event is packed on x86-64 (12 bytes) and padded on the other targets (16).
+    mut width = 16;
+    if raw_target() == 0 {
+        width = 12;
+    }
+    while true {
+        n := rt_syscall4(281, epoll, events, 64, wrapping_sub(0, 1));
+        if rt_error(n) == 0 {
+            mut i = 0;
+            while i < n {
+                mut at = events + i * width + 8;
+                if width == 12 {
+                    at = events + i * 12 + 4;
+                }
+                task := raw_load(at);
+                if task == 0 {
+                    rt_syscall(0, raw_load(s + 48), scratch, 8);
+                } else {
+                    rt_wake(task);
+                }
+                i += 1;
+            }
+        }
+        rt_atomic_fetch_add(s + 56, 1);
+    }
+    return 0;
+}
+// One-shot readiness registration for `task`. Returns 0 when armed, non-zero when the descriptor
+// cannot be watched (the caller then retries the operation instead of parking).
+fn rt_os_wait_fd(s: u64, fd: u64, events: u64, task: u64) -> u64 {
+    epoll := raw_load(s + 40);
+    if epoll == 0 {
+        return 1;
+    }
+    ev := rt_alloc(16);
+    raw_store(ev, events + 1073741824); // EPOLLONESHOT
+    if raw_target() == 0 {
+        raw_store(ev + 4, task);
+    } else {
+        raw_store(ev + 8, task);
+    }
+    mut r = rt_syscall4(233, epoll, 1, fd, ev);
+    if r == wrapping_sub(0, 17) {
+        r = rt_syscall4(233, epoll, 3, fd, ev);
+    }
+    rt_free(ev);
+    if rt_error(r) {
+        return 1;
+    }
+    return 0;
+}
+fn rt_os_wait_done(s: u64, fd: u64) -> u64 {
+    rt_syscall4(233, raw_load(s + 40), 2, fd, 0);
+    return 0;
+}
+// A relative timer over the reactor: one timerfd per sleep, registered like any other readiness
+// source, with its descriptor remembered in the task's wait key so the caller can close it.
+fn rt_os_timer(s: u64, task: u64, ms: u64) -> u64 {
+    fd := rt_syscall(283, 1, 526336, 0);
+    if rt_error(fd) {
+        return 1;
+    }
+    spec := rt_alloc(32);
+    raw_store(spec + 16, rt_div(ms, 1000));
+    raw_store(spec + 24, (ms % 1000) * 1000000);
+    if rt_error(rt_syscall4(286, fd, 0, spec, 0)) {
+        rt_free(spec);
+        rt_syscall(3, fd, 0, 0);
+        return 1;
+    }
+    rt_free(spec);
+    if rt_os_wait_fd(s, fd, 1, task) != 0 {
+        rt_syscall(3, fd, 0, 0);
+        return 1;
+    }
+    raw_store(task + 32, fd);
+    return 0;
+}
+fn rt_os_timer_done(s: u64, task: u64) -> u64 {
+    fd := raw_load(task + 32);
+    if fd != 0 {
+        rt_os_wait_done(s, fd);
+        rt_syscall(3, fd, 0, 0);
+        raw_store(task + 32, 0);
+    }
+    return 0;
+}
+// A completion for an offload thread's task: Linux has no completion port, so the task goes back on
+// a deque directly.
+fn rt_os_complete(task: u64) -> u64 {
+    return rt_wake(task);
+}
+
 // ---- task stacks -------------------------------------------------------------------------------
 // A task stack is a 1 MiB anonymous reservation whose lowest page is PROT_NONE. mmap is lazy, so the
 // kernel commits pages on first touch and a task that only uses a few KiB costs a few pages, while

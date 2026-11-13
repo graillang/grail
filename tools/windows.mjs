@@ -66,9 +66,14 @@ export const imports = {
 // cross-checked against those declarations by tools/test-windows.mjs.
 export const runtimeImports = {
   'kernel32.dll': [
+    'AddVectoredExceptionHandler',
     'ConvertThreadToFiber',
     'CreateFiberEx',
+    'CreateIoCompletionPort',
     'DeleteFiber',
+    'GetActiveProcessorCount',
+    'GetQueuedCompletionStatus',
+    'PostQueuedCompletionStatus',
     'SwitchToFiber',
   ],
 };
