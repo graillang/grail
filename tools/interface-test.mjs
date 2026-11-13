@@ -199,51 +199,77 @@ function skipType(bytes, at) {
   const [n, next] = readVar(bytes, at + 1);
   return next + n;
 }
-// Where the `no_alloc` and `no_panic` bytes of one function's record are.
-function fnEffects(bytes, name) {
+function writeVar(n) {
+  const out = [];
+  let v = n;
+  while (v > 127) {
+    out.push((v & 127) | 128);
+    v >>>= 7;
+  }
+  out.push(v);
+  return Buffer.from(out);
+}
+// Replace one record's payload with `body`, re-encoding the tag and the length around it: how a test
+// builds the file a slightly different writer would have produced.
+function replacePayload(bytes, record, body) {
+  return Buffer.concat([
+    bytes.subarray(0, record.tagAt),
+    Buffer.from([record.tag]),
+    writeVar(body.length),
+    body,
+    bytes.subarray(record.end),
+  ]);
+}
+// The payload offsets of one function record: its effects bytes and the start of its body field.
+function fnLayout(bytes, name) {
   for (const record of frame(bytes)) {
     if (record.tag !== 13) continue;
     const p = payload(bytes, record);
     if (p.str().toString() !== name) continue;
-    let at = p.at;
-    at += 1;
-    at = skipVar(bytes, at);
-    at = skipVar(bytes, at);
-    at = skipVar(bytes, at);
-    at = skipStr(bytes, at);
-    at += 1;
-    const [np, afterParams] = readVar(bytes, at);
-    at = afterParams;
-    for (let i = 0; i < np; i += 1) at = skipType(bytes, at);
-    at = skipType(bytes, at);
-    const [nb, afterBounds] = readVar(bytes, at);
-    at = afterBounds;
-    for (let i = 0; i < nb; i += 1) {
-      at = skipVar(bytes, at);
-      at = skipVar(bytes, at);
-    }
-    const [nr, afterReqs] = readVar(bytes, at);
-    at = afterReqs;
-    for (let i = 0; i < nr; i += 1) {
-      at = skipVar(bytes, at);
-      const [refs, afterRefs] = readVar(bytes, at);
-      at = afterRefs;
-      for (let j = 0; j < refs; j += 1) {
-        at = skipStr(bytes, at);
-        at = skipStr(bytes, at);
-      }
-    }
-    const [nw, afterWhere] = readVar(bytes, at);
-    at = afterWhere;
-    for (let i = 0; i < nw; i += 1) {
-      at = skipVar(bytes, at);
-      at = skipStr(bytes, at);
-      at = skipStr(bytes, at);
-    }
-    at = skipStr(bytes, at);
-    return { noAlloc: at, noPanic: at + 1 };
+    const at = effectsAt(bytes, p.at);
+    return { record, noAlloc: at.noAlloc, noPanic: at.noPanic, body: at.noPanic + 1 };
   }
   assert.fail(`no function record named ${name}`);
+}
+// Where the `no_alloc` and `no_panic` bytes of one function's record are.
+function effectsAt(bytes, from) {
+  let at = from;
+  at += 1; // public
+  at = skipVar(bytes, at); // generic parameters
+  at = skipVar(bytes, at); // lifetimes
+  at = skipVar(bytes, at); // extern kind
+  at = skipStr(bytes, at); // extern symbol
+  at += 1; // @strict
+  const [params, afterParams] = readVar(bytes, at);
+  at = afterParams;
+  for (let i = 0; i < params; i += 1) at = skipType(bytes, at);
+  at = skipType(bytes, at); // result
+  const [bounds, afterBounds] = readVar(bytes, at);
+  at = afterBounds;
+  for (let i = 0; i < bounds; i += 1) {
+    at = skipVar(bytes, at);
+    at = skipVar(bytes, at);
+  }
+  const [required, afterReqs] = readVar(bytes, at);
+  at = afterReqs;
+  for (let i = 0; i < required; i += 1) {
+    at = skipVar(bytes, at);
+    const [refs, afterRefs] = readVar(bytes, at);
+    at = afterRefs;
+    for (let j = 0; j < refs; j += 1) {
+      at = skipStr(bytes, at);
+      at = skipStr(bytes, at);
+    }
+  }
+  const [wheres, afterWhere] = readVar(bytes, at);
+  at = afterWhere;
+  for (let i = 0; i < wheres; i += 1) {
+    at = skipVar(bytes, at);
+    at = skipStr(bytes, at);
+    at = skipStr(bytes, at);
+  }
+  at = skipStr(bytes, at); // ensures
+  return { noAlloc: at, noPanic: at + 1 };
 }
 
 // (0) Every digest an interface records is the real SHA-256 of what it covers, checked with the
@@ -886,13 +912,16 @@ function proveGenericBodies() {
   assert.equal(ran.status, expected.status, `generics: the separately compiled program exits ${ran.status}, the source build ${expected.status}`);
   assert.equal(ran.stdout, expected.stdout, 'generics: the separately compiled program prints something else');
 
-  // (e4) The interface is checked, not trusted: a template without its body is refused by name.
+  // (e4) The interface is checked, not trusted: a template without its body is refused by name. The
+  // body is the last field of the template's record, so emptying it is one byte: the record is
+  // rebuilt with its payload cut at the body, the length re-encoded, the file re-sealed.
   const edited = join(work, 'generics-nobody');
   mkdirSync(edited, { recursive: true });
   for (const file of interfaceFiles(ifaces)) writeFileSync(join(edited, file.split('/').pop()), readFileSync(file));
-  const stripped = readFileSync(generic, 'utf8').replace(/^body \d+\n(?:line .*\n)+/gm, '');
-  const at = stripped.indexOf('\ndigest "');
-  writeFileSync(join(edited, 'generic.iface'), `${stripped.slice(0, at + 1)}digest "${sha256(stripped.slice(0, at + 1))}"\n`);
+  const whole = readFileSync(generic);
+  const layout = fnLayout(whole, 'twice');
+  const cut = Buffer.concat([whole.subarray(layout.record.at, layout.body), Buffer.from([0])]);
+  writeFileSync(join(edited, 'generic.iface'), seal(replacePayload(whole, layout.record, cut)));
   const refused = compile([fixtures('generic_a.grl'), runtime, platform], join(directory, 'nobody'), ['--use', edited]);
   assert.equal(refused.status, 1, 'generics: a template without a body must be refused');
   assert.match(refused.output, /carries no body for the generic template `twice`/, `generics: the refusal must name the template: ${refused.output}`);
@@ -1160,14 +1189,14 @@ function proveEffectsTravel() {
   const plainEmit = compile([plain, runtime, platform], join(directory, 'plain_emit'), ['--emit-interface', plainIfaces]);
   assert.equal(plainEmit.status, 0, `effects: the unclaimed module does not compile\n${plainEmit.output}`);
   assert.ok(
-    !/^\s*effects /m.test(dump(join(plainIfaces, 'fx_eff_plain.iface'))),
+    !/^\s*effects [^0]|^\s*effects 0 [^0]/m.test(dump(join(plainIfaces, 'fx_eff_plain.iface'))),
     'effects: an unclaimed function published an `effects` row',
   );
   // (c) A claimed effect is a byte in the record stream, so a false claim is one changed byte -
   // re-sealed and re-pinned, `--verify` is what has to refuse it, and it names the declaration.
   const original = readFileSync(claimedPath);
   const edited = Buffer.from(original);
-  const effects = fnEffects(edited, 'total');
+  const effects = fnLayout(edited, 'total');
   assert.equal(edited[effects.noAlloc], 1, 'effects: the claim is not where the format says it is');
   edited[effects.noAlloc] = 0;
   writeFileSync(claimedPath, seal(edited));
@@ -1177,7 +1206,8 @@ function proveEffectsTravel() {
   const tampered = compile(files, join(directory, 'tampered'), ['--interface', ifaces, '--verify-interface']);
   assert.equal(tampered.status, 1, 'effects: an interface whose `effects` row was removed was accepted');
   assert.match(tampered.output, /does not match this interface/, `effects: the refusal must name the interface\n${tampered.output}`);
-  assert.match(tampered.output, /effects 0 0/, 'effects: the refusal must show the row that differs');
+  assert.match(tampered.output, /effects 0 0 0/, 'effects: the refusal must show the row it read');
+  assert.match(tampered.output, /effects 1 0 0/, 'effects: the refusal must show what the sources give');
   writeFileSync(claimedPath, original);
   writeFileSync(manifest, pinned);
   return 'recorded when claimed, absent when not, refused once edited';
