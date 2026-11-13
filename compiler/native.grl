@@ -29887,6 +29887,30 @@ fn simple_index_ahead<a>(c: (&a mut C)) -> bool {
     }
     return false;
 }
+// `..` at the caret: the half-open range a `for` header spells. Inside brackets it means the same
+// as `:` (docs/design/range-values.md), so both spellings share one parser and one code path.
+fn dotdot_at<a>(c: (&a mut C)) -> bool {
+    return (kind(&mut c) == 46) & (next_kind(&mut c) == 46);
+}
+fn eat_dotdot<a>(c: (&a mut C)) -> bool {
+    if !dotdot_at(&mut c) {
+        return false;
+    }
+    advance(&mut c);
+    advance(&mut c);
+    return true;
+}
+// The separator between a range's two ends inside brackets: `:` or `..`. One place, so the two
+// spellings cannot drift apart.
+fn range_sep<a>(c: (&a mut C)) -> unit {
+    if eat(&mut c, view(":")) {
+        return ();
+    }
+    if !eat_dotdot(&mut c) {
+        fail(&mut c, view("a slice's bounds are separated by `:` or `..`"));
+    }
+    return ();
+}
 // `v[a: b]` (either bound optional) on a vector or slice: a typed slice borrowing those elements,
 // exclusive when the access writes (docs/design/typed-slices.md).
 fn vector_slice<a>(c: (&a mut C), x: Val, input: u64, access: u64) -> Val {
@@ -29901,7 +29925,7 @@ fn vector_slice<a>(c: (&a mut C), x: Val, input: u64, access: u64) -> Val {
         require_mutable_binding(&mut c, xt, 0);
     }
     mut start = 0;
-    if is(&mut c, view(":")) {
+    if is(&mut c, view(":")) || dotdot_at(&mut c) {
         start = imm(&mut c, 0);
     } else {
         bstart := c.pos;
@@ -29910,7 +29934,7 @@ fn vector_slice<a>(c: (&a mut C), x: Val, input: u64, access: u64) -> Val {
         require_type(&mut c, bound.ty, 0);
         start = bound.t;
     }
-    expect(&mut c, view(":"));
+    range_sep(&mut c);
     mut end = 0;
     if is(&mut c, view("]")) {
         end = apply(&mut c, view("rt_len"), one(xt));
@@ -29956,9 +29980,34 @@ fn element_index_ahead<a>(c: (&a mut C)) -> bool {
         if (k == 58) & (depth == 0) {
             return false;
         }
+        if (k == 46) & (depth == 0) & (kind_at(&mut c, i + 1) == 46) {
+            return false;
+        }
         i += 1;
     }
     return false;
+}
+// A `span_of` range carries the slice it was made from, so `s[r]` has nothing left for `s` to say
+// and would need the belong-to-this-slice check `Span` exists to remove (docs/design/range-values.md).
+// The spellings that mean something are `r.bytes()` and `s[a: b]` / `s[a..b]`.
+fn refuse_span_index<a>(c: (&a mut C), ty: u64) -> unit {
+    mut base = ty;
+    if ty_kind(&mut c, base) == 10 {
+        base = base_type(&mut c, base);
+    }
+    if ty_kind(&mut c, base) != 8 {
+        return ();
+    }
+    decl := ty_arg(&mut c, base);
+    named := same(view(c.decls[decl].name), view("Span"));
+    if !named {
+        return ();
+    }
+    fail(
+        &mut c,
+        view("a `Span` is a range over the slice it was made from, so it cannot index another sequence: write `r.bytes()` for its bytes, or `s[a: b]` / `s[a..b]` for a slice of this one")
+    );
+    return ();
 }
 fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
     unchecked := (c.raw == 0) & proven_index(&mut c, val(value.t, value.ty));
@@ -29984,6 +30033,7 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
         }
         index := bound.t;
         expect(&mut c, view("]"));
+        refuse_span_index(&mut c, bound.ty);
         elem := ty_arg(&mut c, xty);
         if c.raw == 0 {
             require_type(&mut c, bound.ty, 0);
@@ -30092,9 +30142,12 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
         bend := c.pos;
         if c.raw == 0 {
             bound = adopt_value(&mut c, bound, bstart, bend, 0);
-            require_type(&mut c, bound.ty, 0);
         }
         expect(&mut c, view("]"));
+        refuse_span_index(&mut c, bound.ty);
+        if c.raw == 0 {
+            require_type(&mut c, bound.ty, 0);
+        }
         mut f = "rt_atb";
         if unchecked {
             f = "rt_atbu";
@@ -30111,7 +30164,7 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
     view_bonds(&mut c, slot, x.t, 0, false);
     release_temporary(&mut c, input);
     mut start = 0;
-    if is(&mut c, view(":")) {
+    if is(&mut c, view(":")) || dotdot_at(&mut c) {
         start = imm(&mut c, 0);
     } else {
         bstart := c.pos;
@@ -30124,7 +30177,7 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
         get(&mut c, bound.t, view("%rax"));
         start = save(&mut c);
     }
-    if eat(&mut c, view(":")) {
+    if eat(&mut c, view(":")) || eat_dotdot(&mut c) {
         mut end = 0;
         if is(&mut c, view("]")) {
             end = apply(&mut c, view("rt_len"), one(slot));

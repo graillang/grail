@@ -1,4 +1,5 @@
 module optimize;
+use span;
 
 // Word-stream optimizer: runs on the x86-64-spelled stream before target lowering, so every CPU
 // benefits. Per function it (1) forwards frame-slot values already held in a register or known
@@ -70,22 +71,22 @@ struct O {
 fn put<a>(v: (&a mut u64[]), i: u64, x: u64) {
     exchange(&mut v[i], x);
 }
-fn same<b, d>(s: &b [u8], a: u64, e: u64, w: &d [u8]) -> bool {
-    // The range must lie inside `s` as well as be as long as `w`: the callers compare a name
-    // against a longer stored name (`same(view(stored), 0, name.len(), name)`), and a longer range
-    // than the slice it indexes is a read past the end, not an unequal answer.
-    if (a > e) || (e > s.len()) {
-        return false;
-    }
-    if e - a != w.len() {
-        return false;
-    }
-    for i in w.len() {
-        if s[a + i] != w[i] {
-            return false;
-        }
-    }
-    return true;
+// `s[a..e]` equals `w`. The range is a `Span`: it carries the slice it was made from, so the only
+// bytes it can name are that slice's (`docs/design/range-values.md`). `span_of` refuses a range the
+// slice does not have when the span is made, which is why no guard here checks `e` against `s.len()`
+// any more: there is no second, unwritten end left for a caller to supply.
+fn same<b, d>(r: span::Span<b>, w: &d [u8]) -> bool {
+    return r.same_as(w);
+}
+// `span_of` is `lib/span.grl`'s constructor (the compiler builds with that module); the range it
+// makes is the same value user code gets, not a private copy of the idea.
+fn span_of<a>(s: &a [u8], start: u64, end: u64) -> span::Span<a> {
+    return span::span_of(s, start, end);
+}
+// `s` at `a` opens with `w`: the extent comes from the needle, so the window cannot be wider than
+// the thing it is compared with, and `span_of` refuses one that runs past the end of `s`.
+fn at<b, d>(s: &b [u8], a: u64, w: &d [u8]) -> bool {
+    return span_of(s, a, a + w.len()).same_as(w);
 }
 fn app<a, b>(out: (&a mut u8[]), s: &b [u8]) {
     for i in s.len() {
@@ -519,7 +520,7 @@ fn classify<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64, second: u64) {
                 }
                 // -N(%rbp) with decimal N is a frame slot.
                 if (c == 45) & (e - a > 7) {
-                    if same(view(s), e - 6, e, view("(%rbp)")) {
+                    if same(span_of(view(s), e - 6, e), view("(%rbp)")) {
                         mut n = 0;
                         mut ok = 1;
                         for i in e - 7 - a {
@@ -566,7 +567,7 @@ fn classify<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64, second: u64) {
 // (`.Lopt` expansions, refinement strings, `.Lret` in an inlined body). A stream with no marker -
 // a caller that hands the optimizer text it produced itself - keeps the old `.L<n>` numbering.
 fn label_number<a, b, d>(s: &a [u8], a: u64, e: u64, uprefix: &d [u8]) -> u64 {
-    if (e <= a + 2) || !same(view(s), a, a + 2, view(".L")) {
+    if (e <= a + 2) || !at(view(s), a, view(".L")) {
         return 0;
     }
     mut at = a + 2;
@@ -587,7 +588,7 @@ fn label_number<a, b, d>(s: &a [u8], a: u64, e: u64, uprefix: &d [u8]) -> u64 {
         }
         return n + 1;
     }
-    if !same(view(s), at, e, view(uprefix)) | (e <= at + uprefix.len() + 1) {
+    if !same(span_of(view(s), at, e), view(uprefix)) | (e <= at + uprefix.len() + 1) {
         return 0;
     }
     mut i = 0;
@@ -616,7 +617,7 @@ fn label_number<a, b, d>(s: &a [u8], a: u64, e: u64, uprefix: &d [u8]) -> u64 {
 // The marker line: `.grail_part <unit> <label prefix>`, and the unit fields it sets. 1 when the
 // line was one.
 fn marker<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64) -> u64 {
-    if (e - a < 14) || (s[a] != 46) || !same(view(s), a, a + 12, view(".grail_part ")) {
+    if (e - a < 14) || (s[a] != 46) || !at(view(s), a, view(".grail_part ")) {
         return 0;
     }
     mut unit = u8[];
@@ -635,7 +636,7 @@ fn marker<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64) -> u64 {
     // where it left them, or start at zero the first time.
     mut k = 0;
     while k < o.uniq_units.len() {
-        if same(view(o.uniq_units[k]), 0, unit.len(), view(unit)) {
+        if same(span_of(view(o.uniq_units[k]), 0, unit.len()), view(unit)) {
             break;
         }
         k += 1;
@@ -717,9 +718,9 @@ fn parse<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64) {
     o.lab.push(lab);
     if op == 101 {
         // `.gpair -N(%rbp)`: the two-word value whose first word lives at that frame address.
-        if (e - a > 7) & same(view(s), a, a + 7, view(".gpair ")) {
+        if (e - a > 7) & at(view(s), a, view(".gpair ")) {
             last := o.op.len() - 1;
-            if same(view(s), a + 7, e, view("ret")) {
+            if same(span_of(view(s), a + 7, e), view("ret")) {
                 exchange(&mut o.op[last], 102);
                 exchange(&mut o.ret2, 1);
                 classify(&mut o, view(s), e, e, 0);
@@ -796,31 +797,31 @@ fn parse<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64) {
     if (op == 15) & (comma == e) & (e - first > 5) & (e - first < 9) {
         if (s[first] == 114) & (s[first + 1] == 116) & (s[first + 2] == 95) {
             mut fast = 0;
-            if same(view(s), first, e, view("rt_slot")) {
+            if same(span_of(view(s), first, e), view("rt_slot")) {
                 fast = 40;
             }
-            if same(view(s), first, e, view("rt_at")) {
+            if same(span_of(view(s), first, e), view("rt_at")) {
                 fast = 41;
             }
-            if same(view(s), first, e, view("rt_len")) {
+            if same(span_of(view(s), first, e), view("rt_len")) {
                 fast = 42;
             }
-            if same(view(s), first, e, view("rt_xchg")) {
+            if same(span_of(view(s), first, e), view("rt_xchg")) {
                 fast = 43;
             }
-            if same(view(s), first, e, view("rt_atb")) {
+            if same(span_of(view(s), first, e), view("rt_atb")) {
                 fast = 44;
             }
-            if same(view(s), first, e, view("rt_push")) {
+            if same(span_of(view(s), first, e), view("rt_push")) {
                 fast = 45;
             }
-            if same(view(s), first, e, view("rt_pushb")) {
+            if same(span_of(view(s), first, e), view("rt_pushb")) {
                 fast = 46;
             }
-            if same(view(s), first, e, view("rt_slotu")) {
+            if same(span_of(view(s), first, e), view("rt_slotu")) {
                 fast = 47;
             }
-            if same(view(s), first, e, view("rt_atbu")) {
+            if same(span_of(view(s), first, e), view("rt_atbu")) {
                 fast = 48;
             }
             if fast != 0 {
@@ -1653,7 +1654,7 @@ fn peephole<a, b>(o: (&a mut O), s: &b [u8], first: u64, last: u64) {
                     if c < last {
                         if (o.op[c] == 15)
                             & (o.k0[c] == 4)
-                            & same(view(s), o.s0[c], o.e0[c], view("rt_abort")) {
+                            & same(span_of(view(s), o.s0[c], o.e0[c]), view("rt_abort")) {
                             x := next_insn(&o, c, last);
                             if x < last {
                                 if (o.op[x] == 10)
@@ -1996,7 +1997,7 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
             }
         }
         if ((o.m0[i] >> 5) & 1) != 0 {
-            if (op == 3) & (o.k0[i] == 4) & same(view(s), o.s0[i], o.s0[i] + 3, view("-.F")) {} else {
+            if (op == 3) & (o.k0[i] == 4) & at(view(s), o.s0[i], view("-.F")) {} else {
                 exchange(&mut o.weird, 1);
             }
         }
@@ -2004,7 +2005,7 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
             exchange(&mut o.weird, 1);
         }
         if (op == 5) & (prologue == 0) & (o.k1[i] == 1) & (o.v1[i] == 4) & (i == 4) {
-            if same(view(s), o.s0[i], o.s0[i] + 3, view("$.F")) {
+            if at(view(s), o.s0[i], view("$.F")) {
                 prologue = i;
             }
         }
@@ -2090,7 +2091,7 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
                 j := next_live(&o, i, last);
                 if j < last {
                     if (o.op[j] == 15) & (o.k0[j] == 4) {
-                        if same(view(s), o.s0[j], o.e0[j], view("rt_abort")) {
+                        if same(span_of(view(s), o.s0[j], o.e0[j]), view("rt_abort")) {
                             if (o.lab[t] != 0)
                                 & (next_live(&o, j, last) == t)
                                 & (refs[o.lab[t] - 1 - base] == 1) {
@@ -2307,7 +2308,7 @@ fn inline_candidate<a, b>(o: (&a mut O), s: &b [u8], prologue: u64) {
                         if o.k0[i] != 4 {
                             return ();
                         }
-                        if !same(view(s), o.s0[i], o.e0[i], view("rt_abort")) {
+                        if !same(span_of(view(s), o.s0[i], o.e0[i]), view("rt_abort")) {
                             return ();
                         }
                     }
@@ -2446,7 +2447,7 @@ fn inline_calls<a>(o: (&a mut O), split: u64, marks: (&a mut u64[])) {
             start = i + 1;
             mut done = 0;
             if (e - a > 5) & (text[a] == 99) {
-                if same(view(text), a, a + 5, view("call ")) {
+                if at(view(text), a, view("call ")) {
                     h := name_hash(view(text), a + 5, e);
                     mut k = o.inl_head[h];
                     while k != 0 {
@@ -2459,11 +2460,11 @@ fn inline_calls<a>(o: (&a mut O), split: u64, marks: (&a mut u64[])) {
                         ul := u.len();
                         if ul != 0 {
                             // `same` is this module's slice-vs-token comparison: whole, so 0..len.
-                            if !same(view(o.inl_units[k - 1]), 0, ul, view(u)) {
+                            if !same(span_of(view(o.inl_units[k - 1]), 0, ul), view(u)) {
                                 here = 0;
                             }
                         }
-                        if (here != 0) & same(view(text), a + 5, e, view(n)) {
+                        if (here != 0) & same(span_of(view(text), a + 5, e), view(n)) {
                             site += 1;
                             emit_body(&mut o, k - 1, site, view(uprefix));
                             done = 1;
@@ -2474,7 +2475,7 @@ fn inline_calls<a>(o: (&a mut O), split: u64, marks: (&a mut u64[])) {
                 }
             }
             if done == 0 {
-                if (e - a > 12) & (text[a] == 46) & same(view(text), a, a + 12, view(".grail_part ")) {
+                if (e - a > 12) & (text[a] == 46) & at(view(text), a, view(".grail_part ")) {
                     mut fresh = u8[];
                     mut at = a + 12;
                     while (at < e) & (text[at] != 32) {
@@ -2641,7 +2642,7 @@ fn compact<a, b>(o: (&a mut O), s: &b [u8], prologue: u64, ns: u64) -> u64 {
     if words < params + 17 {
         for i in last {
             if (o.op[i] == 3) & (o.k1[i] == 1) & (o.v1[i] == 7) & (o.k0[i] == 4) {
-                if same(view(s), o.s0[i], o.s0[i] + 3, view("-.F")) {
+                if at(view(s), o.s0[i], view("-.F")) {
                     a := next_live(&o, i, last);
                     if a < last {
                         b := next_live(&o, a, last);
@@ -2653,8 +2654,8 @@ fn compact<a, b>(o: (&a mut O), s: &b [u8], prologue: u64, ns: u64) -> u64 {
                                     & (o.v1[a] == 1)
                                     & (o.op[b] == 0)
                                     & (o.op[d] == 0)
-                                    & same(view(s), o.ls[d], o.le[d], view("rep stosq"))
-                                    & same(view(s), o.ls[b], o.le[b], view("xorl %eax,%eax")) {
+                                    & same(span_of(view(s), o.ls[d], o.le[d]), view("rep stosq"))
+                                    & same(span_of(view(s), o.ls[b], o.le[b]), view("xorl %eax,%eax")) {
                                     kill(&mut o, i);
                                     kill(&mut o, a);
                                     kill(&mut o, b);
@@ -2773,8 +2774,8 @@ pub fn optimize_parts<b>(s: &b [u8], split: u64, marks: (&mut u64[]), names: (&m
             start = i + 1;
             if inside == 0 {
                 if (e - a > 15) & (s[a] == 46) & (s[a + 1] == 116) {
-                    if !same(view(s), a, a + 6, view(".type ")) {} else {
-                        if same(view(s), e - 9, e, view("@function")) {
+                    if !at(view(s), a, view(".type ")) {} else {
+                        if same(span_of(view(s), e - 9, e), view("@function")) {
                             inside = 1;
                         }
                     }
