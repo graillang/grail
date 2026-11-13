@@ -145,7 +145,11 @@ struct Func {
     rpred: Pred,
     // The parameters' source names, parallel to `ppreds`: a call site needs them to put the
     // arguments' terms in the predicate's place, and an interface carries the ones a predicate uses.
-    pnames: u8[][]
+    pnames: u8[][],
+    // `@strict` before this declaration. It stays with the declaration, so a specialisation and a
+    // body replayed from an interface are compiled in the mode the source asked for - not in
+    // whatever mode the file that happens to instantiate them was scanned in.
+    strict: u64
 }
 struct Interface {
     module: u8[],
@@ -529,6 +533,9 @@ struct C {
     strict_refinements: u64,
     strict_modules: u8[][],
     strict_next: u64,
+    // The mode this body is compiled in: the declaration's `@strict`, or its template's when the
+    // body is a specialisation or a replay.
+    strict_here: u64,
     cur_name: u8[],
     cur_file: u64,
     cur_pos: u64,
@@ -7299,6 +7306,9 @@ fn ref_strict<a>(c: (&a C)) -> bool {
     if c.strict_next != 0 {
         return true;
     }
+    if c.strict_here != 0 {
+        return true;
+    }
     m := c.module.copy();
     return ref_module_strict(&c, view(m));
 }
@@ -12268,6 +12278,7 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                 ppreds: Pred[],
                 rpred: no_pred(),
                 pnames: u8[][],
+                strict: 0,
             }
         );
     return ();
@@ -12276,6 +12287,16 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // A body's synthesised declarations (closure environments) are not the function's to hide.
     exchange(&mut c.decl_public, 1);
     position := c.pos;
+    // The mode this body is compiled in. `@strict` on the declaration reaches it from the source or,
+    // when the body is a specialisation or a replay, from the template that carries the flag.
+    mut strict_here = c.strict_next;
+    if c.current_spec != 0 {
+        template := c.specs[c.current_spec - 1].template;
+        if template < c.funcs.len() {
+            strict_here = c.funcs[template].strict;
+        }
+    }
+    exchange(&mut c.strict_here, strict_here);
     out_mark := c.out.len();
     fact_mark := llvm::facts_len(&c.facts);
     part_mark := c.part.copy();
@@ -12552,6 +12573,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                     ppreds: copy_preds(&ppreds),
                     rpred: Pred { file: rpred.file, lo: rpred.lo, hi: rpred.hi },
                     pnames: copy_names(&pnames),
+                    strict: c.strict_next,
                 }
             );
         index := c.funcs.len();
@@ -13095,6 +13117,7 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
                     ppreds: Pred[],
                     rpred: no_pred(),
                     pnames: u8[][],
+                    strict: 0,
                 }
             );
         index := c.funcs.len() - 1;
@@ -23720,6 +23743,7 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         exchange(&mut c.body_hi, 0);
         exchange(&mut c.cur_ppreds, Pred[]);
         exchange(&mut c.cur_rpred, no_pred());
+        exchange(&mut c.strict_here, 0);
         exchange(&mut c.resources, Resource[]);
         exchange(&mut c.next, 0);
         exchange(&mut c.scope_end, 0);
@@ -31445,6 +31469,7 @@ fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
                 ppreds: Pred[],
                 rpred: no_pred(),
                 pnames: u8[][],
+                strict: 0,
             }
         );
     return ();
@@ -32453,6 +32478,12 @@ fn iface_emit_func<a, b>(c: (&a mut C), out: (&a mut u8[]), index: u64, m: &b [u
     if lifetimes != 0 {
         push_bytes(&mut out, view("lifetimes "));
         decimal(&mut out, lifetimes);
+        out.push(10);
+    }
+    // `@strict` travels with the declaration too: a caller that instantiates this template gets the
+    // mode the module that wrote it asked for.
+    if c.funcs[index].strict != 0 {
+        push_bytes(&mut out, view("strict 1"));
         out.push(10);
     }
     for i in own.len() {
@@ -34658,6 +34689,14 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
         exchange(&mut c.funcs[st.last_func - 1].regions, count);
         return ();
     }
+    if same(view(word), view("strict")) {
+        flag := ip_number(&mut p);
+        if st.last_func == 0 {
+            iface_fail(&p, view("`strict` must follow a function"));
+        }
+        exchange(&mut c.funcs[st.last_func - 1].strict, flag);
+        return ();
+    }
     if same(view(word), view("bound")) {
         at := ip_number(&mut p);
         bits := ip_number(&mut p);
@@ -35092,6 +35131,7 @@ fn iface_define_func<a>(c: (&a mut C), st: (&a mut IState), p: (&a mut IPos)) ->
                 ppreds: Pred[],
                 rpred: no_pred(),
                 pnames: u8[][],
+                strict: 0,
             }
         );
     index := c.funcs.len() - 1;
@@ -35386,6 +35426,7 @@ pub fn main() -> u64 {
         strict_refinements: 0,
         strict_modules: u8[][],
         strict_next: 0,
+        strict_here: 0,
         cur_name: u8[],
         cur_file: 0,
         cur_pos: 0,
