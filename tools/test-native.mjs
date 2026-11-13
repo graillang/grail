@@ -68,7 +68,7 @@ for (const file of readdirSync(join(root, 'lib')).filter(f => f.endsWith('.grl')
   writeFileSync(join(stdSnapshot, file), readFileSync(join(root, 'lib', file)));
 }
 for (let i = 0; i < cases.length; i++) {
-  for (const field of ['files', 'modules']) if (cases[i][field]) cases[i][field] = cases[i][field].map((file, j) => {
+  for (const field of ['files', 'modules', 'interfaceFiles']) if (cases[i][field]) cases[i][field] = cases[i][field].map((file, j) => {
     const source = resolve(root, file);
     if (dirname(source) === join(root, 'lib')) return join(stdSnapshot, basename(source));
     const path = join(snapshot, `${i}-${field}-${j}-${basename(file)}`);
@@ -120,6 +120,22 @@ for (const [position, test] of cases.entries()) {
       assert.equal(occurrences, test.diagnosticCount, `${test.name}: expected ${test.diagnosticCount} x ${JSON.stringify(diagnostics[0])} in ${JSON.stringify(`${result.stdout}${result.stderr}`)}`);
     }
     assert.equal(readFileSync(assembly, 'utf8'), 'prior valid artifact', `${test.name}: invalid program overwrote prior output`);
+    // A rejection that must also hold when the modules are read from their interfaces: the
+    // interface has to carry everything the refusal rests on.
+    if (test.interfaces) {
+      const ifaces = join(directory, 'ifaces');
+      // The interface comes from the library modules alone: the entry may be the very thing the
+      // rejection is about.
+      const modules = test.modules ?? [];
+      assert.ok(modules.length !== 0, `${test.name}: an interface rejection needs module sources`);
+      const emit = execute(compiler, ['--target', target, '--emit-interface', ifaces, join(directory, 'emit.s'), ...modules, ...(test.interfaceFiles ?? []), runtime, osRuntime]);
+      assert.equal(emit.status, 0, `${test.name}: emitting interfaces failed: ${emit.stdout}${emit.stderr}`);
+      const viaInterface = execute(compiler, ['--target', target, '--interface', ifaces, join(directory, 'iface.s'), ...files, runtime, osRuntime]);
+      assert.equal(viaInterface.status, 1, `${test.name}: the interface build must refuse it too: ${viaInterface.stdout}${viaInterface.stderr}`);
+      for (const fragment of diagnostics) {
+        assert.ok(`${viaInterface.stdout}${viaInterface.stderr}`.includes(fragment), `${test.name}: expected diagnostic ${fragment} from the interface build: ${viaInterface.stdout}${viaInterface.stderr}`);
+      }
+    }
   } else {
     // Interface-first: emit one interface per module, then compile the same program against them.
     // The interface build is the build this case's behaviour is asserted on when the case asks for
