@@ -1,10 +1,9 @@
 # Bindings and reassignment
 
-`name := value` declares an immutable binding. `mut name = value` declares a mutable one;
-`mut name := value` is the same declaration with the `:=` spelling. `=` after an existing name
-updates a mutable binding; with a type in front of it (`name: T = value`, or `name: T := value`)
-it declares instead. Types are inferred for the untyped declarations. Statements end with
-semicolons.
+`name := value` declares an immutable binding. `mut name = value` declares a mutable one.
+`=` after an existing name updates a mutable binding; with a type in front of it
+(`name: T = value`) it declares instead. Types are inferred for the untyped declarations.
+Statements end with semicolons.
 
 {{example:bindings}}
 
