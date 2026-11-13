@@ -62,6 +62,9 @@ testkit = "0.4"                                    # tests only
 | `entry` | no | the program's entry source; default `src/main.grl` |
 | `description`, `license`, `repository` | no | metadata; recorded, not used for resolution |
 
+`[registry] index = "URL"` (or `$GRAIL_REGISTRY`) names the index the registry dependencies come
+from; it is required only when the manifest has one, and the error says so.
+
 `[dependencies]` and `[dev-dependencies]` map a *name* to either a requirement string (registry
 source) or an inline table with exactly one source key and at most one pin:
 
@@ -85,8 +88,8 @@ resolved, exactly as in Cargo).
 ### 2.2 How packages are found
 
 `grail build` looks for `grail.toml` in the working directory only. No walking up parent
-directories: a build either runs in the package it belongs to or it is an error. `-f/--manifest
-PATH` exists for tools that need to name one explicitly.
+directories: a build either runs in the package it belongs to or it is an error. (`grail build
+FILE.grl` still compiles one file with no project at all, as it always did.)
 
 ### 2.3 The TOML reader
 
@@ -99,9 +102,9 @@ refuses everything outside it by name and line. Accepted:
 * keys that are bare (`name`, `dev-dependencies`, letters/digits/`_`/`-`) or basic-quoted
   (`"name"`), and dotted key paths on the left of `=` (`package.name = "x"`);
 * values: basic strings with `\" \\ \n \t \r \uXXXX`, literal strings (`'...'`), integers
-  (decimal only, optional `+`/`-`), booleans, arrays of any accepted value (with an optional
-  trailing comma, as the spec allows), and inline tables `{ k = v, ... }` (no trailing comma,
-  as the spec forbids).
+  (decimal only, optional `+`/`-`), booleans, arrays of any accepted value on one line (with an
+  optional trailing comma, as the spec allows), and inline tables `{ k = v, ... }` (no trailing
+  comma, as the spec forbids).
 
 Refused with an explicit message naming the construct and the line: floats, dates and times,
 multi-line (`"""`/`'''`) strings, array-of-tables (`[[x]]`), dotted-array syntax, escaped
@@ -501,10 +504,10 @@ grail build|check|run|test        use the lock (no resolution, no network)
 
 Behaviour details that matter:
 
-* `grail add` writes the manifest, resolves, fetches, and writes the lock, in that order. If
-  resolution fails the manifest is left as it was (it is written last before the lock, and the
-  old text is restored on failure), so a failed `add` never leaves a project that will not
-  build.
+* `grail add` resolves and fetches *first* and writes `grail.toml` and `grail.lock` only when
+  both succeeded, so a failed `add` never leaves a project that will not build. The edit is
+  textual (a line inserted into `[dependencies]`, or the table appended), it is re-parsed before
+  it is written, and comments elsewhere in the file survive.
 * `grail add NAME` with no requirement means `^` of the highest non-pre-release version in the
   store's index, written out explicitly (`logging = "1.2.0"`), so the manifest says what was
   meant rather than "latest".
