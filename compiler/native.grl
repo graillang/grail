@@ -13628,11 +13628,25 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                         view("an out-parameter is only for an extern \"C\" declaration parameter; a C callback cannot take one")
                     );
                 }
+                // A byte view is two C argument words (pointer then length) and this entry reads one
+                // word per parameter, so a view parameter would take the next parameter's word - and
+                // where the pair lands differs by target (Win64 splits registers from the fifth
+                // argument). There is no second word to read it from, so the shape is refused by
+                // name with the spelling that works, before the generic type list below would admit
+                // it as a legal foreign parameter.
+                if 1 < ffi_words(&mut c, formal) {
+                    mut text = copy_bytes(view("parameter `"));
+                    push_bytes(&mut text, view(pnames[i]));
+                    push_bytes(&mut text, view("` is a byte view, which C passes in two argument words (pointer then length); a C callback entry reads one argument word per parameter - take `"));
+                    push_bytes(&mut text, view(pnames[i]));
+                    push_bytes(&mut text, view(": CPtr` and a `u64` length, and copy the bytes with `cslice(u8, p, n)` inside an unsafe block"));
+                    fail(&mut c, view(text));
+                }
                 if !(is_float(&mut c, formal) || ffi_narrow(&mut c, formal).len() != 0) {
                     ffi_param(
                         &mut c,
                         formal,
-                        view("extern C callback parameters must be an integer, f32, f64, CStr, handle, byte view or cfn")
+                        view("extern C callback parameters must be an integer, f32, f64, CStr, handle or cfn")
                     );
                 }
             }

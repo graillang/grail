@@ -158,6 +158,15 @@ regression fails at runtime as well as at C compile time.
   callback result; `thread_detach` consumes it without a result. The callback runs on a native
   thread without Grail task/TLS bootstrap, so it must remain self-contained: no allocation,
   printing, panic or runtime service until the runtime thread bootstrap is integrated.
+- **Narrow integers are caller-extended.** A `u32`/`i32` (the socket lengths and the statuses)
+  crosses as the type's canonical word: zero-extended when unsigned, sign-extended when signed.
+  That is what System V x86-64, Win64 and AAPCS64 ask of the caller, whose only obligation is the
+  32-bit extension; RISC-V 64 LP64D also wants the value sign-extended to XLEN, which the call does
+  at the boundary for a `u32`. A narrow *result* is re-extended from the declaration, because every
+  one of those ABIs leaves the upper bits C did not set unspecified. `docs/ffi.md` states the rule
+  per target; `tests/ffi/narrow_upper.grl` (C twins declared `unsigned long long`) and the
+  `ffin-narrow-arguments`, `ffin-narrow-arguments-riscv64`, `ffin-narrow-results` and
+  `ffin-narrow-record-fields` corpus cases pin it on x86-64, AArch64 and RISC-V 64.
 - **Sockets are blocking.** `accept`, `connect`, `send` and `recv` have no timeout or
   non-blocking flag in this surface. `socket_shutdown` is explicit and separate from
   `socket_close`. Only TCP/IPv4 loopback is exposed; UDP, `send_to`/`recv_from`, DNS and

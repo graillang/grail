@@ -15,6 +15,16 @@ extern "C" lib "shim.o" fn c_add(a: i64, b: i64) -> i64;
 extern "C" lib "shim.o" fn c_strlen(s: CStr) -> i64;
 ```
 
+A narrow integer fills a whole integer register, and the ABI decides what the rest of it holds. In
+Grail a `u8`..`u32`/`i8`..`i32` is a canonical word - zero-extended when unsigned, sign-extended when
+signed - which is exactly what x86-64 System V, Win64 and AArch64 ask of a caller (the value
+extended to 32 bits, the upper half the caller's to leave unspecified). RISC-V 64 LP64D is the one
+target that wants more: the value zero- or sign-extended to 32 bits and then *sign*-extended to 64,
+so a `u32` with bit 31 set arrives as `0xffffffffffffffff` there and as `0x00000000ffffffff`
+elsewhere. The call does that conversion; your code sees the same `u32` on every target. A narrow
+*result* is re-extended from the declared type, because C may leave the bits above the value in the
+result register untouched. `docs/ffi.md` has the rule for each target.
+
 A call sits in an `unsafe` block because the C function may do anything with its arguments, and
 because the compiler cannot check that a `CStr` is NUL-terminated or that a buffer is as large as C
 expects. `unsafe` marks that boundary; it does not switch off moves, drops or borrow checking.
