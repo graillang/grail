@@ -684,6 +684,87 @@ on the stack is refused. RISC-V objects use the hard-float `lp64d` ABI, which Li
 use. `tests/ffi/call_abi.grl` executes on x86-64, AArch64 and RISC-V Linux and, through
 `tests/windows-cases.json`, on Windows x86-64 under Wine; Windows ARM64 is checked statically.
 
+## Importing a C header: `grail bindgen`
+
+`grail bindgen HEADER.h -o OUT.grl` writes the declarations a Grail program needs to call a C
+library: `extern "C"` functions, C-layout records, enum constants, `pub const` macros that are
+integer constants, and a `SIZE`/`ALIGN`/`OFFSET_<field>` constant per record so `sizeof` and
+`offsetof` are available without C.
+
+```console
+$ grail bindgen /usr/include/zlib.h -o src/zlib.grl
+```
+
+| Option | Effect |
+| --- | --- |
+| `-o OUT.grl` | output file; `--print` writes to stdout instead |
+| `-I DIR`, `-isystem DIR` | `#include` search path, in that order before the defaults |
+| `-D NAME[=VALUE]` | define a macro before reading the header |
+| `-l LIB` | emit `pub extern "C" lib "LIB";` for every declaration |
+| `-M lp64\|llp64` | `long` is 64 bits (Unix, the default) or 32 (Win64) |
+| `--module NAME` | the `module NAME;` the output declares (default: the `-o` file's stem) |
+| `--strict` | refuse file-scope variables and function-like macros instead of noting them |
+| `--dump-tokens` | print the preprocessed token stream and stop |
+
+The importer is a preprocessor and declaration parser, not a C compiler: it resolves `#include`
+(quote and angle forms, with include guards de-duplicated by path), expands object-like and
+function-like macros — `##` pasting included — so a header's own `#define`s work, honours
+`#if`/`#ifdef`/`#ifndef`/`#elif`/`#else`/`#endif` with a C constant-expression evaluator
+(`defined`, arithmetic, shifts, casts, `sizeof`/`_Alignof` of a type, `?:`), and parses typedefs,
+struct/union/enum declarations, function declarations, function definitions (`static inline`
+helpers, which are not linkable symbols and are reported rather than emitted) and the attributes
+that do not change layout. It does **not** use libclang: linking a C parser into the compiler would
+make it a build dependency of every Grail install and of the bootstrap seed, and this importer has
+to refuse by name rather than silently mistype.
+
+The mapping is the one in "Supported types":
+
+| C | Grail | Note |
+| --- | --- | --- |
+| `char` | `u8` | a plain `char` is the byte type; `signed char` is `i8`, `unsigned char` is `u8` |
+| `short`, `int`, `long long` | `i16`, `i32`, `i64` | `long` is 64 bits on a 64-bit LP64 host, 32 under `-M llp64` |
+| `size_t`, `ssize_t`, `int64_t`, `uint32_t`, … | `u64`, `i64`, `i64`, `u32`, … | the C library's typedefs are preloaded, so a header that uses `size_t` without `<stddef.h>` parses |
+| `float`, `double` | `f32`, `f64` | |
+| `T *` (not `char`) | `CPtr` / `CMutPtr` | const pointee → `CPtr`; the type is a one-word C pointer |
+| `const char *` | `CStr` | `char *` (non-const) is `CMutPtr`: it may be an output buffer |
+| `R *`, `struct R *` | `CPtr` | `cptr(&r)` supplies a record's address, `cnull()` a null |
+| `R f(...)` | `-> R` | a record result by value, classified per ABI |
+| `R (*)(...)` | `cfn(...) -> ...` | in a parameter or result; a record *field* of that type is `CMutPtr` (a field cannot hold a `cfn`) |
+| `struct { ... }` | `extern "C" record` | C size, alignment, offsets and padding |
+| a union | `extern "C" record { bytes: [E; n] }` | overlapping members have no Grail spelling, so only the exact size and alignment are exported |
+| an incomplete `struct` | `pub handle` | the type can be named and passed by pointer |
+| `enum` | `i32` (or `i64` when a value needs it) plus `pub const` per enumerator | |
+| `#define FOO (1u << 3)` | `pub const FOO: i64 = 8;` | any object-like macro whose expansion is a pure number expression |
+
+Refusals, each naming the construct and its `file:line`, and leaving no output file behind: a
+bit-field, `__attribute__((packed))`/`aligned`, `#pragma pack`, `long double`, `_Complex`,
+`__int128`, `_Atomic`, `typeof`, an anonymous struct/union member (which would have to be
+flattened), a multi-dimensional array member, `#error`, an `#if` condition the evaluator cannot
+fold, and a type the importer does not model (`__builtin_va_list` is the exception: it is modelled
+as an opaque pointer, which is how x86-64 passes a `va_list` parameter).
+
+Reported as `note:` lines and left out of the binding — not mistyped, simply not expressible:
+a **file-scope variable** (Grail has no extern globals; read it through an accessor function) and a
+**function-like macro** (Grail has no macros). `--strict` turns both into refusals, so a caller can
+choose.
+
+Limits: the importer describes the host target's ABI (`__x86_64__`, `__LP64__`, `__linux__` and the
+other predefines are supplied; `-M llp64` changes the integer model only), it does not model
+`va_list` passed by value (AArch64), it expands macros a header redefines in the usual way but
+refuses `#` stringize, a declaration split by a macro invocation across a newline, and any header
+that needs a GCC/Clang-specific type or attribute to declare its API. A generated binding is C's
+statement of the API; the header's own `#if` branches decide what that statement is, so
+`-D`/`-I` arguments matter as much as they do for `cc`.
+
+`tools/bindgen-test.mjs` (or `just bindgen-test`) covers it: the binding for
+`tests/bindgen/fixture.h` is committed (`tests/bindgen/fixture_binding.grl`) and regenerated byte
+for byte; that binding is compiled and executed against `tests/bindgen/fixture_shim.c`, and every
+`SIZE`/`OFFSET` constant is compared with the C compiler's own `sizeof`/`offsetof`; the system's
+real `<zlib.h>` is imported and used to call a C `crc32`, whose value (`0xCBF43926` for
+`"123456789"`) proves the generated pointer and length types; and each refusal above is asserted to
+name its construct and file:line. The corpus case `cimp-fixture-layout` runs the generated binding
+on every target.
+
 ## Limits
 
 Not implemented yet, and each rejected rather than approximated:

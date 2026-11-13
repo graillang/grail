@@ -1,3 +1,22 @@
+## Unreleased
+
+- Added: `grail bindgen HEADER.h -o OUT.grl`, a C header importer. It is a compiler module
+  (`compiler/bindgen.grl`) with its own preprocessor - `#include` resolution through `-I`/`-isystem`,
+  object-like and function-like macros with `##` pasting, `#if`/`#ifdef`/`#elif` with a C constant
+  expression evaluator (`defined`, arithmetic, shifts, casts, `sizeof`/`_Alignof`, `?:`) - and a
+  declaration parser for typedefs, structs, unions, enums, function declarations and `static inline`
+  definitions. Output: `pub extern "C"` functions, C-layout records with `SIZE`/`ALIGN`/`OFFSET_<field>`
+  constants, enum constants, and object-like macros that are integer constants. Constructs Grail
+  cannot express (bit-fields, `packed`, `#pragma pack`, `long double`, `_Complex`, `__int128`,
+  `_Atomic`, anonymous union members, multi-dimensional array members, `#error`) are refused with
+  `file:line` and no output file; file-scope variables and function-like macros are reported and
+  omitted, or refused under `--strict`. `-D`, `-l`, `-M lp64|llp64` and `--module` are supported.
+  No libclang: nothing new links into the compiler or the seed. Verified by `bun tools/bindgen-test.mjs`
+  (the committed binding for `tests/bindgen/fixture.h` regenerates byte for byte, its layout constants
+  are compared with the C compiler's `sizeof`/`offsetof`, the real `<zlib.h>` binding calls a C `crc32`
+  and returns `0xCBF43926`, and every refusal is asserted) and by the `cimp-fixture-layout` corpus case
+  on every target.
+
 # Changelog
 
 ## Unreleased

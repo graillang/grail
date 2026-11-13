@@ -1,0 +1,182 @@
+module bindgen_fixture_test;
+
+// The generated binding for tests/bindgen/fixture.h, used the way a Grail program would: take the
+// C layout the header declares, then call the C functions with records and pointers of those types.
+use fixture;
+
+extern "C" lib "shim.o" fn fix_add(a: i32, b: i32) -> i32;
+extern "C" lib "shim.o" fn fix_mask(value: u32, flags: u32) -> u32;
+extern "C" lib "shim.o" fn fix_text() -> CStr;
+extern "C" lib "shim.o" fn fix_open(path: CStr, flags: i32) -> CMutPtr;
+extern "C" lib "shim.o" fn fix_sum_bytes(data: CPtr, length: u32) -> i32;
+extern "C" lib "shim.o" fn fix_names(names: CMutPtr, count: i32) -> i32;
+extern "C" lib "shim.o" fn fix_call(ops: CPtr, code: i32, user: CPtr) -> i32;
+extern "C" lib "shim.o" fn fix_vsum(count: i32, ...) -> i32;
+extern "C" lib "shim.o" fn fix_record_tag(record: CPtr) -> u32;
+extern "C" lib "shim.o" fn fix_make_record(tag: u8, value: i32) -> fixture::fix_record;
+extern "C" lib "shim.o" fn fix_shim_checksum(record: CPtr) -> i64;
+
+// The C compiler's own view of the same layout, so the constants in the generated file are checked
+// against C rather than against themselves.
+extern "C" lib "shim.o" fn fix_shim_sizeof_record() -> i64;
+extern "C" lib "shim.o" fn fix_shim_sizeof_nested() -> i64;
+extern "C" lib "shim.o" fn fix_shim_sizeof_ops() -> i64;
+extern "C" lib "shim.o" fn fix_shim_sizeof_bits() -> i64;
+extern "C" lib "shim.o" fn fix_shim_align_record() -> i64;
+extern "C" lib "shim.o" fn fix_shim_offset_tag() -> i64;
+extern "C" lib "shim.o" fn fix_shim_offset_value() -> i64;
+extern "C" lib "shim.o" fn fix_shim_offset_small() -> i64;
+extern "C" lib "shim.o" fn fix_shim_offset_name() -> i64;
+extern "C" lib "shim.o" fn fix_shim_offset_weight() -> i64;
+extern "C" lib "shim.o" fn fix_shim_offset_id() -> i64;
+extern "C" lib "shim.o" fn fix_shim_offset_inner() -> i64;
+extern "C" lib "shim.o" fn fix_shim_offset_tail() -> i64;
+extern "C" lib "shim.o" fn fix_shim_offset_ratio() -> i64;
+
+// `char **names`: an array of C strings, spelled as a record of CStr fields whose address is the
+// array C indexes (the documented shape for an array of pointers).
+extern "C" record NameSlots { a: CStr, b: CStr }
+
+// An empty C string for an unset `const char *` field: a literal's bytes live in static storage,
+// so the pointer can outlive this call.
+fn empty_cstr() -> CStr {
+    unsafe {
+        return cstr("\0");
+    }
+}
+fn main() -> u64 {
+    mut bad: u64 = 0;
+    // Every layout constant the binding exports, next to the C compiler's sizeof/offsetof of the
+    // same struct: this is what makes the check a comparison with C, not with itself.
+    mut c = i64[];
+    unsafe {
+        c.push(fix_shim_sizeof_record());
+        c.push(fix_shim_sizeof_nested());
+        c.push(fix_shim_sizeof_ops());
+        c.push(fix_shim_sizeof_bits());
+        c.push(fix_shim_align_record());
+        c.push(fix_shim_offset_tag());
+        c.push(fix_shim_offset_value());
+        c.push(fix_shim_offset_small());
+        c.push(fix_shim_offset_name());
+        c.push(fix_shim_offset_weight());
+        c.push(fix_shim_offset_id());
+        c.push(fix_shim_offset_inner());
+        c.push(fix_shim_offset_tail());
+        c.push(fix_shim_offset_ratio());
+    }
+    mut g = i64[];
+    g.push(i64(fixture::FIX_RECORD_SIZE));
+    g.push(i64(fixture::FIX_NESTED_SIZE));
+    g.push(i64(fixture::FIX_OPS_SIZE));
+    g.push(i64(fixture::FIX_BITS_SIZE));
+    g.push(i64(fixture::FIX_RECORD_ALIGN));
+    g.push(i64(fixture::FIX_RECORD_OFFSET_TAG));
+    g.push(i64(fixture::FIX_RECORD_OFFSET_VALUE));
+    g.push(i64(fixture::FIX_RECORD_OFFSET_SMALL));
+    g.push(i64(fixture::FIX_RECORD_OFFSET_NAME));
+    g.push(i64(fixture::FIX_RECORD_OFFSET_WEIGHT));
+    g.push(i64(fixture::FIX_RECORD_OFFSET_ID));
+    g.push(i64(fixture::FIX_NESTED_OFFSET_INNER));
+    g.push(i64(fixture::FIX_NESTED_OFFSET_TAIL));
+    g.push(i64(fixture::FIX_NESTED_OFFSET_RATIO));
+    for i in c.len() {
+        if c[i] != g[i] {
+            bad = bad + 1;
+        }
+    }
+    // Scalars, a masked u32, a CStr result and a byte buffer read through CPtr.
+    mut sum: i32 = 0;
+    mut text_length: u64 = 0;
+    mut bytes = u8[1, 2, 3, 4];
+    mut added: i32 = 0;
+    mut masked: u32 = 0;
+    mut slots = NameSlots { a: empty_cstr(), b: empty_cstr() };
+    unsafe {
+        slots = NameSlots { a: cstr("abc\0"), b: cstr("de\0") };
+    }
+    mut names_sum: i32 = 0;
+    mut opened: CMutPtr;
+    unsafe {
+        added = fix_add(19, 23);
+        masked = fix_mask(4294967295, 24);
+        text_length = cstr_bytes(fix_text()).len();
+        sum = fix_sum_bytes(cptr(&bytes), 4);
+        names_sum = fix_names(cptr(&slots), 2);
+        opened = fix_open(cstr("path\0"), 7);
+    }
+    println(text_length);
+    println(sum);
+    println(names_sum);
+    if added != 42 {
+        bad = bad + 1;
+    }
+    if masked != 25 {
+        bad = bad + 1;
+    }
+    if text_length != 7 {
+        bad = bad + 1;
+    }
+    // 1*1 + 2*2 + 3*3 + 4*4
+    if sum != 30 {
+        bad = bad + 1;
+    }
+    // strlen("abc")*1 + strlen("de")*2
+    if names_sum != 7 {
+        bad = bad + 1;
+    }
+    // A record returned by value to the generated layout, read field by field.
+    mut made = fixture::fix_record {
+        tag: 0,
+        value: 0,
+        small: 0,
+        name: u8[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        weight: 0.0,
+        id: 0
+    };
+    mut checksum: i64 = 0;
+    mut called: i32 = 0;
+    mut summed: i32 = 0;
+    unsafe {
+        made = fix_make_record(2, 7);
+        checksum = fix_shim_checksum(cptr(&made));
+    }
+    println(i64(made.value));
+    println(i32(made.small));
+    println(checksum);
+    if made.value != 7 {
+        bad = bad + 1;
+    }
+    if made.small != 14 {
+        bad = bad + 1;
+    }
+    if made.tag != 2 {
+        bad = bad + 1;
+    }
+    if checksum == 0 {
+        bad = bad + 1;
+    }
+    // A record with a function-pointer member (a CMutPtr in the binding) and a variadic call.
+    mut ops = fixture::fix_ops { on_event: cnull(), label: empty_cstr(), count: 5 };
+    unsafe {
+        ops.label = cstr("ops\0");
+    }
+    unsafe {
+        called = fix_call(cptr(&ops), 21, cnull());
+        summed = fix_vsum(3, 10, 20, 30);
+    }
+    println(called);
+    println(summed);
+    // 5 (count) + 3 (strlen "ops")
+    if called != 8 {
+        bad = bad + 1;
+    }
+    // 10*1 + 20*2 + 30*3
+    if summed != 140 {
+        bad = bad + 1;
+    }
+    if bad != 0 {
+        return 1;
+    }
+    return 0;
+}

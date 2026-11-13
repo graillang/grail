@@ -65,6 +65,10 @@ abundance-test:
 test-ffi:
     bun tools/test-ffi.mjs
 
+# C header importer (`grail bindgen`): fixture binding, a real <zlib.h> call, and the refusals.
+bindgen-test:
+    bun tools/bindgen-test.mjs
+
 # Run the Borg Agent CPU-port suites: JSON, TOML, protocol, ownership, framing, supervision,
 # transport, journal, transcript events and permission gates against their references.
 borg-test:

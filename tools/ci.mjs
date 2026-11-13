@@ -489,6 +489,16 @@ function lint() {
   }
   check('LSP/debugger/profiler plan exists', existsSync(join(root, 'docs/tooling/lsp-debugger-profiler.md')));
   check('FFI test runner exists', existsSync(join(root, 'tools/test-ffi.mjs')));
+  check('C header importer exists', existsSync(join(root, 'compiler/bindgen.grl')));
+  check('C header importer is in the compiler source list',
+    readFileSync(join(root, 'tools/native.mjs'), 'utf8').includes("'bindgen'"));
+  check('C header importer test exists', existsSync(join(root, 'tools/bindgen-test.mjs')));
+  check('CI runs the C header importer test',
+    readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8').includes('tools/bindgen-test.mjs'));
+  check('the committed generated binding is the fixture module',
+    readFileSync(join(root, 'tests/bindgen/fixture_binding.grl'), 'utf8').startsWith('module fixture;'));
+  check('the importer corpus case compiles the committed binding',
+    readFileSync(join(root, 'tests/native-cases.json'), 'utf8').includes('tests/bindgen/fixture_binding.grl'));
   check('CI runs the FFI shim test', readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8').includes('tools/test-ffi.mjs'));
   check('module interface test exists', existsSync(join(root, 'tools/interface-test.mjs')));
   check('CI runs the module interface test', readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8').includes('tools/interface-test.mjs'));

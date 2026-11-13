@@ -150,6 +150,43 @@ soundness bug.
   returned 0. A callback's record parameter is the `const R *` the caller owns, so it is registered
   as a borrow now and the fields stay readable under the ordinary rules.
 
+## Bindings can be generated
+
+Writing `extern "C"` declarations by hand is the right way to bind a small surface. A whole C
+library is a different job: `grail bindgen` reads the header and writes the declarations, the
+C-layout records and the constants `sizeof`/`offsetof` would have given you.
+
+```console
+$ grail bindgen /usr/include/zlib.h -o src/zlib.grl
+$ rg 'fn crc32|record z_stream|Z_STREAM_SIZE' src/zlib.grl
+pub extern "C" record z_stream { next_in: CMutPtr, avail_in: u32, ... }
+pub const Z_STREAM_SIZE: u64 = 112;
+pub extern "C" fn crc32(a0: u64, a1: CPtr, a2: u32) -> u64;
+```
+
+The file is a normal module, so a program imports it and calls C with the generated types:
+
+```grail
+module bindings_demo;
+use zlib;
+
+fn crc_of(data: &[u8]) -> u64 {
+    unsafe {
+        return zlib::crc32(0, cptr(data), u32(data.len()));
+    }
+}
+```
+
+`cptr(data)` is the `const Bytef *` the header declares, and the length is the `uInt`. Every field
+of `z_stream` is at the offset C puts it at, which is what `Z_STREAM_SIZE`/`Z_STREAM_OFFSET_*`
+record, and `grail bindgen` compares them with the C compiler's own `sizeof`/`offsetof` in
+`tools/bindgen-test.mjs`.
+
+What it refuses, it refuses by name: a bit-field, a packed struct, `#pragma pack`, `long double`,
+an anonymous union member - each with its `file:line`, because a binding that silently disagrees
+with C is worse than no binding. A file-scope variable or a function-like macro has no Grail
+spelling at all, so it is reported as a note and left out (`--strict` refuses those too).
+
 What still has no expression: pointer arithmetic (an array of dynamic length is a fixed-capacity
 record with its count checked afterwards). A C callback writes into the struct C hands it by taking
 `p: &mut R`, and `byval` records work on every ABI, Windows included. `docs/ffi.md` states each

@@ -71,3 +71,68 @@ long long c_byval_mix_stack(long long a0, long long a1, long long a2, long long 
     return a0 + a1 * 10 + a2 * 100 + a3 * 1000 + a4 * 10000 + a5 * 100000 + s.a + s.b * 1000 +
            g * 10000000;
 }
+/* ---- 12- and 40-byte records, a callee that writes its copy, and records returned by value ---- */
+/* 12 bytes is the smallest size that is neither a power of two nor a whole number of eightbyte
+ * register words: SysV packs it into two INTEGER eightbytes (the last one 4 bytes wide), AAPCS64
+ * passes it in two x registers, Win64 and RV64 pass it by reference because it is not 1/2/4/8
+ * bytes (Win64) or because it is over 2*XLEN (RV64). */
+struct bv12 { int a; int b; int c; };
+/* 40 bytes: both integer register files are out of eightbytes even from a cold start, so SysV
+ * uses MEMORY, AAPCS64 and RV64 pass by reference, and Win64 passes by reference. */
+struct bv40 { long long a, b, c, d, e; };
+/* A 12-byte record whose fields are floats: an AAPCS64 homogeneous float aggregate of three
+ * fields in v0-v2, a SysV SSE eightbyte plus an INTEGER one, by reference on Win64. */
+struct bv3f { float a, b, c; };
+
+long long c_byval12(struct bv12 s)
+{
+    return (long long)s.a + (long long)s.b * 1000 + (long long)s.c * 1000000;
+}
+long long c_byval40(struct bv40 s)
+{
+    return s.a + s.b * 10 + s.c * 100 + s.d * 1000 + s.e * 10000;
+}
+long long c_byval_3f(struct bv3f s)
+{
+    return (long long)(s.a * 100.0f) + (long long)(s.b * 10000.0f) + (long long)(s.c * 1000000.0f);
+}
+/* The callee mutates its own copy: none of it may reach the caller's record, which the caller
+ * checks after the call, and the checksum proves the callee received real field values first. */
+long long c_byval_mutate(struct bv16 s)
+{
+    long long sum = s.a + s.b * 1000;
+    s.a = -7;
+    s.b = -9;
+    return sum;
+}
+/* Records returned by value, one per size class of the byval shapes above. */
+struct bv4 c_bv_ret4(void) { struct bv4 r = { 17 }; return r; }
+struct bv12 c_bv_ret12(long long seed)
+{
+    struct bv12 r = { (int)seed, (int)(seed + 1), (int)(seed + 2) };
+    return r;
+}
+struct bv16 c_bv_ret16(long long a, long long b) { struct bv16 r = { a, b }; return r; }
+struct bv24 c_bv_ret24(long long a)
+{
+    struct bv24 r = { a, a * 2, a * 3 };
+    return r;
+}
+struct bv40 c_bv_ret40(long long seed)
+{
+    struct bv40 r = { seed, seed + 1, seed + 2, seed + 3, seed + 4 };
+    return r;
+}
+/* Both directions in one call: a record arrives by value and a record goes back by value. On Win64
+ * the argument is a pointer to a caller copy and the result a hidden result pointer, so the two
+ * address registers are live at once. */
+struct bv12 c_bv_roundtrip12(struct bv12 s)
+{
+    struct bv12 r = { s.c, s.b, s.a };
+    return r;
+}
+struct bv40 c_bv_roundtrip40(struct bv40 s)
+{
+    struct bv40 r = { s.e, s.d, s.c, s.b, s.a };
+    return r;
+}
