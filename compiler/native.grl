@@ -959,7 +959,33 @@ struct C {
     // body being emitted did the thing (`fn_uses`, read by fn_marks), and how many bodies each rule
     // excluded in this run (`fn_why`, printed with the run's account).
     fn_uses: u64[],
-    fn_why: u64[]
+    fn_why: u64[],
+    // Sources that came from the command line with a `@derive` expansion appended to them
+    // (docs/design/derives.md). The expansion is part of the file from the pass that can see the
+    // declaration's fields, and every later load has to return the same bytes: a generic body is
+    // replayed from its file after the passes are over, and its token positions must still name the
+    // text they were recorded against.
+    file_text: u8[][],
+    // The derives `@derive(...)` asked of the declaration that follows, as a bit per derive, and
+    // where the attribute was written (a diagnostic about the declaration points at it).
+    derive_pending: u64,
+    dr_pos: u64,
+    // The generic parameters of the declaration a pending derive applies to - captured where the
+    // declaration reads them, because a generated implementation repeats them - and which of them
+    // occur in a field, which is where the derive's interface becomes a bound.
+    dr_rnames: u8[][],
+    dr_tnames: u8[][],
+    dr_bounds: u64[],
+    dr_constraints: u64[][],
+    dr_used: u64[],
+    // (declaration, derives) pairs, recorded when an expansion was generated and read again in the
+    // pass where every implementation is known and the derives can be checked field by field.
+    dr_applied: u64[],
+    // The pass a derive is being expanded in, for --show-derives and for the call trace.
+    dr_pass: u64,
+    // The expansions this file's declarations asked for in the pass being parsed (dr_parse_tail).
+    dr_tail: u8[],
+    dr_trace: u64
 }
 
 fn same<a, b>(x: &a [u8], y: &b [u8]) -> bool {
@@ -9852,7 +9878,25 @@ fn load_file<a>(c: (&a mut C), index: u64) -> unit {
             host::exit(1);
         }
         push_bytes(&mut path, view(arg));
-        src = host::read_file(view(path));
+        mut cached = 0;
+        if index < c.file_text.len() {
+            // A file a `@derive` expanded into: the bytes this build has already seen, expansion
+            // included, so a token position recorded in an earlier pass still names the same text.
+            held := c.file_text[index].copy();
+            if held.len() != 0 {
+                src = held;
+                cached = 1;
+            }
+        }
+        if cached == 0 {
+            if host::exists(view(arg)) == 0 {
+                host::print(view("grail: cannot read input file "));
+                host::print(view(arg));
+                host::print(view("\n"));
+                host::exit(1);
+            }
+            src = host::read_file(view(path));
+        }
     }
     mut toks = Tok[];
     lexed := lexer::tokenize(view(src));
@@ -14239,7 +14283,25 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
     types := c.tnames.len();
     bounds := copy_numbers(&c.type_bounds);
     constraints := copy_constraints(&c.type_interfaces);
+    // `@derive(...)` before this declaration: the derives belong to it, and the parameters a
+    // generated implementation repeats are the ones it just read.
+    derive_bits := exchange(&mut c.derive_pending, 0);
+    if derive_bits != 0 {
+        exchange(&mut c.dr_rnames, copy_names(&c.rnames));
+        exchange(&mut c.dr_tnames, copy_names(&c.tnames));
+        exchange(&mut c.dr_bounds, copy_numbers(&c.type_bounds));
+        exchange(&mut c.dr_constraints, copy_constraints(&c.type_interfaces));
+    }
     if pass != 2 {
+        if (pass == 3) & (derive_bits != 0) {
+            // Every implementation in the build is known by the last pass, which is where a derive
+            // is checked: a field whose type cannot do what the derive needs names itself.
+            here := module_copy(&mut c);
+            found := find_decl(&mut c, view(here), view(name));
+            if found != 0 {
+                dr_check(&mut c, found - 1, derive_bits);
+            }
+        }
         if pass == 1 {
             m := module_copy(&mut c);
             mut kind = copy_bytes(view("struct"));
@@ -14408,6 +14470,10 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
             constraints: constraints,
         }
     );
+    if derive_bits != 0 {
+        exchange(&mut c.dr_pass, pass);
+        dr_expand(&mut c, d - 1, derive_bits);
+    }
     return ();
 }
 // Words that start a statement or expression inside a body; they cannot name a binding or
@@ -20969,6 +21035,9 @@ fn toplevel<a>(c: (&a mut C), pass: u64) -> unit {
     while kind(&mut c) != 0 {
         toplevel_item(&mut c, pass);
     }
+    if c.dr_tail.len() != 0 {
+        dr_parse_tail(&mut c, pass);
+    }
     return ();
 }
 // One module-level item.
@@ -20998,6 +21067,977 @@ fn ref_strict_form<a>(c: (&a mut C)) -> u64 {
     exchange(&mut c.strict_next, 1);
     return 1;
 }
+// ---- derives (docs/design/derives.md) --------------------------------------------------------------
+//
+// `@derive(Eq, Ord, Hash, Clone, Debug)` before a `struct` or an `enum` writes the implementations
+// the type would otherwise spell by hand. There is no macro system: the compiler renders fixed Grail
+// source for the derives that were asked for, appends it to the file's own text and lets the
+// ordinary parser read it, so the generated methods are checked, borrowed and dropped exactly like
+// hand-written ones. What makes them field-wise is the comptime `@for` over the type's fields, which
+// the generated source carries.
+//
+// The implementations are the standard library's own interfaces - `ops::Eq`, `order::Ord`,
+// `hash::Hash` and `clone::Clone` (lib/clone.grl) - and `Debug` is the inherent `show` the formatter
+// already calls, so `println("{}", v)` picks it up with no new mechanism.
+fn dr_eq() -> u64 {
+    return 1;
+}
+fn dr_ord() -> u64 {
+    return 2;
+}
+fn dr_hash() -> u64 {
+    return 4;
+}
+fn dr_clone() -> u64 {
+    return 8;
+}
+fn dr_debug() -> u64 {
+    return 16;
+}
+// The bit one derive name asks for, 0 when the name is not a derive.
+fn dr_bit<a>(name: &a [u8]) -> u64 {
+    if same(view(name), view("Eq")) {
+        return dr_eq();
+    }
+    if same(view(name), view("Ord")) {
+        return dr_ord();
+    }
+    if same(view(name), view("Hash")) {
+        return dr_hash();
+    }
+    if same(view(name), view("Clone")) {
+        return dr_clone();
+    }
+    if same(view(name), view("Debug")) {
+        return dr_debug();
+    }
+    return 0;
+}
+// The name one derive bit is written as, for a diagnostic.
+fn dr_name(bit: u64) -> string {
+    if bit == dr_eq() {
+        return "Eq";
+    }
+    if bit == dr_ord() {
+        return "Ord";
+    }
+    if bit == dr_hash() {
+        return "Hash";
+    }
+    if bit == dr_clone() {
+        return "Clone";
+    }
+    return "Debug";
+}
+// `@derive(Eq, Ord, Hash, Clone, Debug)`: the derives the next declaration asks for. The shape is
+// `@strict`'s - no `;` form, further attributes may follow, the next declaration consumes them. 1
+// when one was consumed.
+fn dr_attr_form<a>(c: (&a mut C)) -> u64 {
+    next := c.pos + 1;
+    if kind_at(&mut c, next) != 1 {
+        return 0;
+    }
+    word := tok_text(&mut c, next);
+    if !same(view(word), view("derive")) {
+        return 0;
+    }
+    at := c.pos;
+    if c.derive_pending != 0 {
+        fail(&mut c, view("`@derive` is written once: list every derive inside it"));
+    }
+    advance(&mut c);
+    advance(&mut c);
+    expect(&mut c, view("("));
+    mut bits = 0;
+    while true {
+        here := c.pos;
+        if kind(&mut c) != 1 {
+            fail(&mut c, view("`@derive` names derives: Eq, Ord, Hash, Clone or Debug"));
+        }
+        name := tok_text(&mut c, here);
+        bit := dr_bit(view(name));
+        if bit == 0 {
+            mut msg = copy_bytes(view("unknown derive `"));
+            push_bytes(&mut msg, view(name));
+            push_bytes(&mut msg, view("`: the derives are Eq, Ord, Hash, Clone and Debug"));
+            exchange(&mut c.pos, here);
+            fail(&mut c, view(msg));
+        }
+        if (bits & bit) != 0 {
+            mut msg = copy_bytes(view("derive `"));
+            push_bytes(&mut msg, view(name));
+            push_bytes(&mut msg, view("` is listed twice"));
+            exchange(&mut c.pos, here);
+            fail(&mut c, view(msg));
+        }
+        bits = bits | bit;
+        advance(&mut c);
+        if eat(&mut c, view(")")) {
+            break;
+        }
+        expect(&mut c, view(","));
+    }
+    exchange(&mut c.derive_pending, bits);
+    exchange(&mut c.dr_pos, at);
+    return 1;
+}
+// The interface a derive implements, as the module and name the generated header names: 0 when that
+// interface is not part of this build.
+fn dr_interface<a, b>(c: (&a mut C), module: &b [u8], name: &b [u8]) -> u64 {
+    return find_interface(&c, view(module), view(name));
+}
+// Whether a field type mentions the type parameter `index`, directly or inside a vector, reference
+// or nominal type: the derived implementation has to carry the derive's interface as a bound on
+// those parameters only, so a type that never compares one is not restricted by it.
+fn dr_uses<a>(c: (&a mut C), ty: u64, index: u64, depth: u64) -> bool {
+    if depth > 8 {
+        return true;
+    }
+    k := ty_kind(&mut c, ty);
+    if k == 9 {
+        return ty_arg(&mut c, ty) == index;
+    }
+    if (k == 10) || (k == 6) || (k == 7) || (k == 27) || (k == 13) || (k == 14) || (k == 16) || (k == 20) || (k == 29) || (k == 30) || (k == 33) || (k == 35) {
+        inner := ty_arg(&mut c, ty);
+        if dr_uses(&mut c, inner, index, depth + 1) {
+            return true;
+        }
+    }
+    args := type_args(&mut c, ty);
+    for i in args.len() {
+        t := args[i];
+        if dr_uses(&mut c, t, index, depth + 1) {
+            return true;
+        }
+    }
+    return false;
+}
+// The generated implementation headers repeat the declaration's own parameters - its `Send`/`Share`
+// classifications, its interface bounds and, on the parameters a field mentions, the interface this
+// derive implements - so an instantiation of the type has exactly the constraints it was declared
+// with. `iface` names that interface (empty for the inherent `show`, which needs no bound).
+fn dr_head<a, b, d>(c: (&a mut C), out: (&b mut u8[]), name: &d [u8], iface: &d [u8], iface_id: u64) -> unit {
+    types := c.dr_tnames.len();
+    lifes := c.dr_rnames.len();
+    push_bytes(&mut out, view("impl"));
+    if (types + lifes) != 0 {
+        push_bytes(&mut out, view("<"));
+        for i in lifes {
+            rname := c.dr_rnames[i].copy();
+            if i != 0 {
+                push_bytes(&mut out, view(", "));
+            }
+            push_bytes(&mut out, view(rname));
+        }
+        for i in types {
+            if (i != 0) || (lifes != 0) {
+                push_bytes(&mut out, view(", "));
+            }
+            tname := c.dr_tnames[i].copy();
+            push_bytes(&mut out, view(tname));
+            bits := c.dr_bounds[i];
+            mut more = 0;
+            if (bits & 1) != 0 {
+                push_bytes(&mut out, view(": Send"));
+                more = 1;
+            }
+            if (bits & 2) != 0 {
+                if more != 0 {
+                    push_bytes(&mut out, view(" + Share"));
+                } else {
+                    push_bytes(&mut out, view(": Share"));
+                }
+                more = 1;
+            }
+            reqs := copy_numbers(&c.dr_constraints[i]);
+            for k in reqs.len() {
+                id := reqs[k];
+                if (id != 0) & (id <= c.interfaces.len()) {
+                    imod := c.interfaces[id - 1].module.copy();
+                    iname := c.interfaces[id - 1].name.copy();
+                    if more != 0 {
+                        push_bytes(&mut out, view(" + "));
+                    } else {
+                        push_bytes(&mut out, view(": "));
+                    }
+                    push_bytes(&mut out, view(imod));
+                    push_bytes(&mut out, view("::"));
+                    push_bytes(&mut out, view(iname));
+                    more = 1;
+                }
+            }
+            used := c.dr_used[i];
+            if (iface_id != 0) & (used != 0) {
+                if more != 0 {
+                    push_bytes(&mut out, view(" + "));
+                } else {
+                    push_bytes(&mut out, view(": "));
+                }
+                push_bytes(&mut out, view(iface));
+            }
+        }
+        push_bytes(&mut out, view(">"));
+    }
+    push_bytes(&mut out, view(" "));
+    if iface.len() != 0 {
+        push_bytes(&mut out, view(iface));
+        push_bytes(&mut out, view(" for "));
+    }
+    push_bytes(&mut out, view(name));
+    if (types + lifes) != 0 {
+        push_bytes(&mut out, view("<"));
+        for i in lifes {
+            rname := c.dr_rnames[i].copy();
+            if i != 0 {
+                push_bytes(&mut out, view(", "));
+            }
+            push_bytes(&mut out, view(rname));
+        }
+        for i in types {
+            tname := c.dr_tnames[i].copy();
+            if (i != 0) || (lifes != 0) {
+                push_bytes(&mut out, view(", "));
+            }
+            push_bytes(&mut out, view(tname));
+        }
+        push_bytes(&mut out, view(">"));
+    }
+    push_bytes(&mut out, view(" {\n"));
+    return ();
+}
+// The `N`th variant (or field) name of a declaration, and its payload type (unit for a variant with
+// no payload and for a record field that has one).
+fn dr_field_name<a>(c: (&a mut C), d: u64, index: u64) -> u8[] {
+    first := c.decls[d].first;
+    return c.fields[first + index].name.copy();
+}
+fn dr_field_type<a>(c: (&a mut C), d: u64, index: u64) -> u64 {
+    return field_ty(&mut c, d, index);
+}
+// `aN`/`bN`: the payload a match arm binds, and the one the other side's arm binds.
+fn dr_bind<a, b>(c: (&a mut C), out: (&b mut u8[]), prefix: &b [u8], index: u64) -> unit {
+    push_bytes(&mut out, view(prefix));
+    decimal(&mut out, index);
+    return ();
+}
+// One payload comparison for an enum arm. A nominal payload (a record, an enum, a type parameter) is
+// reached through a reference, so it compares through its own implementation; a scalar, text or
+// bytes payload is compared with the operator the language gives it, and a scalar payload binds by
+// value, so the interface form takes its address.
+fn dr_eq_payload<a, b>(c: (&a mut C), out: (&b mut u8[]), pty: u64, left: &b [u8], right: &b [u8]) -> unit {
+    k := ty_kind(&mut c, pty);
+    if (k == 8) || (k == 9) || (k == 10) {
+        push_bytes(&mut out, view("ops::Eq::eq("));
+        push_bytes(&mut out, view(left));
+        push_bytes(&mut out, view(", "));
+        push_bytes(&mut out, view(right));
+        push_bytes(&mut out, view(")"));
+    } else {
+        push_bytes(&mut out, view(left));
+        push_bytes(&mut out, view(" == "));
+        push_bytes(&mut out, view(right));
+    }
+    return ();
+}
+fn dr_ord_payload<a, b>(c: (&a mut C), out: (&b mut u8[]), pty: u64, left: &b [u8], right: &b [u8]) -> unit {
+    k := ty_kind(&mut c, pty);
+    if (k == 8) || (k == 9) || (k == 10) {
+        push_bytes(&mut out, view("order::Ord::less("));
+        push_bytes(&mut out, view(left));
+        push_bytes(&mut out, view(", "));
+        push_bytes(&mut out, view(right));
+        push_bytes(&mut out, view(")"));
+    } else {
+        push_bytes(&mut out, view(left));
+        push_bytes(&mut out, view(" < "));
+        push_bytes(&mut out, view(right));
+    }
+    return ();
+}
+// The address a payload binding needs: a scalar binds by value, everything else as a reference to
+// the payload.
+fn dr_bind_ref<a, b>(c: (&a mut C), out: (&b mut u8[]), pty: u64, name: &b [u8]) -> unit {
+    if scalar(&mut c, pty) {
+        push_bytes(&mut out, view("&"));
+    }
+    push_bytes(&mut out, view(name));
+    return ();
+}
+// The implementation `@derive(Eq)` writes: field by field in declaration order, or variant by
+// variant with the payloads compared per variant.
+fn dr_eq_block<a, b, d>(c: (&a mut C), out: (&b mut u8[]), d: u64, name: &d [u8], is_enum: u64, count: u64) -> unit {
+    dr_head(&mut c, &mut out, view(name), view("ops::Eq"), dr_eq());
+    push_bytes(&mut out, view("    fn eq(self: &Self, other: &Self) -> bool {\n"));
+    if is_enum == 0 {
+        push_bytes(&mut out, view("        mut equal = true;\n"));
+        push_bytes(&mut out, view("        @for f in fields(Self) {\n"));
+        push_bytes(&mut out, view("            if !(self.@f == other.@f) { equal = false; }\n"));
+        push_bytes(&mut out, view("        }\n"));
+        push_bytes(&mut out, view("        return equal;\n"));
+    } else {
+        push_bytes(&mut out, view("        match self {\n"));
+        for i in count {
+            vname := dr_field_name(&mut c, d, i);
+            pty := dr_field_type(&mut c, d, i);
+            has := pty != 1;
+            push_bytes(&mut out, view("            "));
+            push_bytes(&mut out, view(vname));
+            if has {
+                mut a = u8[];
+                dr_bind(&mut c, &mut a, view("a"), i);
+                push_bytes(&mut out, view("("));
+                push_bytes(&mut out, view(a));
+                push_bytes(&mut out, view(")"));
+            }
+            push_bytes(&mut out, view(" => { match other { "));
+            for j in count {
+                wname := dr_field_name(&mut c, d, j);
+                push_bytes(&mut out, view(wname));
+                if has {
+                    mut b = u8[];
+                    dr_bind(&mut c, &mut b, view("b"), j);
+                    push_bytes(&mut out, view("("));
+                    push_bytes(&mut out, view(b));
+                    push_bytes(&mut out, view(")"));
+                }
+                push_bytes(&mut out, view(" => { return "));
+                if i != j {
+                    push_bytes(&mut out, view("false"));
+                } else if !has {
+                    push_bytes(&mut out, view("true"));
+                } else {
+                    mut a = u8[];
+                    dr_bind(&mut c, &mut a, view("a"), i);
+                    mut b = u8[];
+                    dr_bind(&mut c, &mut b, view("b"), j);
+                    dr_eq_payload(&mut c, &mut out, pty, view(a), view(b));
+                }
+                push_bytes(&mut out, view("; }, "));
+            }
+            push_bytes(&mut out, view("} },\n"));
+        }
+        push_bytes(&mut out, view("        }\n"));
+    }
+    push_bytes(&mut out, view("    }\n}\n"));
+    return ();
+}
+// `@derive(Ord)`: lexicographic over the fields, and over the variants by declaration order first.
+fn dr_ord_block<a, b, d>(c: (&a mut C), out: (&b mut u8[]), d: u64, name: &d [u8], is_enum: u64, count: u64) -> unit {
+    dr_head(&mut c, &mut out, view(name), view("order::Ord"), dr_ord());
+    push_bytes(&mut out, view("    fn less<a, b>(left: (&a Self), right: (&b Self)) -> bool {\n"));
+    if is_enum == 0 {
+        push_bytes(&mut out, view("        @for f in fields(Self) {\n"));
+        push_bytes(&mut out, view("            if left.@f < right.@f { return true; }\n"));
+        push_bytes(&mut out, view("            if right.@f < left.@f { return false; }\n"));
+        push_bytes(&mut out, view("        }\n"));
+        push_bytes(&mut out, view("        return false;\n"));
+    } else {
+        push_bytes(&mut out, view("        match left {\n"));
+        for i in count {
+            vname := dr_field_name(&mut c, d, i);
+            pty := dr_field_type(&mut c, d, i);
+            has := pty != 1;
+            push_bytes(&mut out, view("            "));
+            push_bytes(&mut out, view(vname));
+            if has {
+                mut a = u8[];
+                dr_bind(&mut c, &mut a, view("a"), i);
+                push_bytes(&mut out, view("("));
+                push_bytes(&mut out, view(a));
+                push_bytes(&mut out, view(")"));
+            }
+            push_bytes(&mut out, view(" => { match right { "));
+            for j in count {
+                wname := dr_field_name(&mut c, d, j);
+                push_bytes(&mut out, view(wname));
+                if has {
+                    mut b = u8[];
+                    dr_bind(&mut c, &mut b, view("b"), j);
+                    push_bytes(&mut out, view("("));
+                    push_bytes(&mut out, view(b));
+                    push_bytes(&mut out, view(")"));
+                }
+                push_bytes(&mut out, view(" => { return "));
+                if i < j {
+                    push_bytes(&mut out, view("true"));
+                } else if i > j {
+                    push_bytes(&mut out, view("false"));
+                } else if !has {
+                    push_bytes(&mut out, view("false"));
+                } else {
+                    mut a = u8[];
+                    dr_bind(&mut c, &mut a, view("a"), i);
+                    mut b = u8[];
+                    dr_bind(&mut c, &mut b, view("b"), j);
+                    dr_ord_payload(&mut c, &mut out, pty, view(a), view(b));
+                }
+                push_bytes(&mut out, view("; }, "));
+            }
+            push_bytes(&mut out, view("} },\n"));
+        }
+        push_bytes(&mut out, view("        }\n"));
+    }
+    push_bytes(&mut out, view("    }\n}\n"));
+    return ();
+}
+// `@derive(Hash)`: every field's hash is written into one `hash::Hasher` in declaration order, and an
+// enum writes its variant index first. The fold is the hasher's own - the fields' bytes are the
+// stream - so two values that `Eq` reports equal always produce the same stream.
+fn dr_hash_block<a, b, d>(c: (&a mut C), out: (&b mut u8[]), d: u64, name: &d [u8], is_enum: u64, count: u64) -> unit {
+    dr_head(&mut c, &mut out, view(name), view("hash::Hash"), dr_hash());
+    push_bytes(&mut out, view("    fn hash<a, b>(self: (&a Self), state: (&b mut hash::Hasher)) {\n"));
+    if is_enum == 0 {
+        push_bytes(&mut out, view("        @for f in fields(Self) {\n"));
+        push_bytes(&mut out, view("            hash::Hash::hash(&self.@f, state);\n"));
+        push_bytes(&mut out, view("        }\n"));
+    } else {
+        push_bytes(&mut out, view("        match self {\n"));
+        for i in count {
+            vname := dr_field_name(&mut c, d, i);
+            pty := dr_field_type(&mut c, d, i);
+            has := pty != 1;
+            push_bytes(&mut out, view("            "));
+            push_bytes(&mut out, view(vname));
+            if has {
+                mut a = u8[];
+                dr_bind(&mut c, &mut a, view("a"), i);
+                push_bytes(&mut out, view("("));
+                push_bytes(&mut out, view(a));
+                push_bytes(&mut out, view(")"));
+            }
+            push_bytes(&mut out, view(" => { hash::write_num(state, "));
+            decimal(&mut out, i);
+            push_bytes(&mut out, view("); "));
+            if has {
+                push_bytes(&mut out, view("hash::Hash::hash("));
+                mut a = u8[];
+                dr_bind(&mut c, &mut a, view("a"), i);
+                dr_bind_ref(&mut c, &mut out, pty, view(a));
+                push_bytes(&mut out, view(", state); "));
+            }
+            push_bytes(&mut out, view("},\n"));
+        }
+        push_bytes(&mut out, view("        }\n"));
+    }
+    push_bytes(&mut out, view("    }\n}\n"));
+    return ();
+}
+// `@derive(Clone)`: a field-wise copy through each field type's own `clone`. A borrowed view has
+// nothing to copy into, so it is refused rather than shared.
+fn dr_clone_block<a, b, d>(c: (&a mut C), out: (&b mut u8[]), d: u64, name: &d [u8], is_enum: u64, count: u64) -> unit {
+    dr_head(&mut c, &mut out, view(name), view("clone::Clone"), dr_clone());
+    push_bytes(&mut out, view("    fn clone(self: &Self) -> Self {\n"));
+    if is_enum == 0 {
+        push_bytes(&mut out, view("        return "));
+        push_bytes(&mut out, view(name));
+        push_bytes(&mut out, view(" { "));
+        for i in count {
+            fname := dr_field_name(&mut c, d, i);
+            if i != 0 {
+                push_bytes(&mut out, view(", "));
+            }
+            push_bytes(&mut out, view(fname));
+            push_bytes(&mut out, view(": self."));
+            push_bytes(&mut out, view(fname));
+            push_bytes(&mut out, view(".clone()"));
+        }
+        push_bytes(&mut out, view(" };\n"));
+    } else {
+        push_bytes(&mut out, view("        match self {\n"));
+        for i in count {
+            vname := dr_field_name(&mut c, d, i);
+            pty := dr_field_type(&mut c, d, i);
+            has := pty != 1;
+            push_bytes(&mut out, view("            "));
+            push_bytes(&mut out, view(vname));
+            if has {
+                mut a = u8[];
+                dr_bind(&mut c, &mut a, view("a"), i);
+                push_bytes(&mut out, view("("));
+                push_bytes(&mut out, view(a));
+                push_bytes(&mut out, view(")"));
+            }
+            push_bytes(&mut out, view(" => { return "));
+            push_bytes(&mut out, view(name));
+            push_bytes(&mut out, view("::"));
+            push_bytes(&mut out, view(vname));
+            if has {
+                push_bytes(&mut out, view("(clone::Clone::clone("));
+                mut a = u8[];
+                dr_bind(&mut c, &mut a, view("a"), i);
+                dr_bind_ref(&mut c, &mut out, pty, view(a));
+                push_bytes(&mut out, view("))"));
+            }
+            push_bytes(&mut out, view("; },\n"));
+        }
+        push_bytes(&mut out, view("        }\n"));
+    }
+    push_bytes(&mut out, view("    }\n}\n"));
+    return ();
+}
+// `@derive(Debug)`: a `debug::Debug` implementation that renders the value as
+// `Name { field: value, ... }` (and a variant as `Name(payload)`), plus the inherent `show` the
+// formatter already calls - so `println("{}", v)` and `v.debug()` are the same text. The body
+// concatenates text instead of using `format`, because a generic field's `.debug()` is only known
+// to be text once the type is instantiated.
+fn dr_debug_block<a, b, d>(c: (&a mut C), out: (&b mut u8[]), d: u64, name: &d [u8], is_enum: u64, count: u64) -> unit {
+    dr_head(&mut c, &mut out, view(name), view("debug::Debug"), dr_debug());
+    push_bytes(&mut out, view("    fn debug(self: &Self) -> string {\n"));
+    if is_enum == 0 {
+        push_bytes(&mut out, view("        return format(\""));
+        push_bytes(&mut out, view(name));
+        push_bytes(&mut out, view(" {{ "));
+        for i in count {
+            fname := dr_field_name(&mut c, d, i);
+            if i != 0 {
+                push_bytes(&mut out, view(", "));
+            }
+            push_bytes(&mut out, view(fname));
+            push_bytes(&mut out, view(": {}"));
+        }
+        push_bytes(&mut out, view(" }}\", "));
+        for i in count {
+            fname := dr_field_name(&mut c, d, i);
+            if i != 0 {
+                push_bytes(&mut out, view(", "));
+            }
+            push_bytes(&mut out, view("self."));
+            push_bytes(&mut out, view(fname));
+            push_bytes(&mut out, view(".debug()"));
+        }
+        push_bytes(&mut out, view(");\n"));
+    } else {
+        push_bytes(&mut out, view("        match self {\n"));
+        for i in count {
+            vname := dr_field_name(&mut c, d, i);
+            pty := dr_field_type(&mut c, d, i);
+            has := pty != 1;
+            push_bytes(&mut out, view("            "));
+            push_bytes(&mut out, view(vname));
+            mut a = u8[];
+            if has {
+                dr_bind(&mut c, &mut a, view("a"), i);
+                push_bytes(&mut out, view("("));
+                push_bytes(&mut out, view(a));
+                push_bytes(&mut out, view(")"));
+            }
+            push_bytes(&mut out, view(" => { return "));
+            if !has {
+                push_bytes(&mut out, view("\""));
+                push_bytes(&mut out, view(vname));
+                push_bytes(&mut out, view("\".text()"));
+            } else {
+                push_bytes(&mut out, view("format(\""));
+                push_bytes(&mut out, view(vname));
+                push_bytes(&mut out, view("({})\", "));
+                push_bytes(&mut out, view(a));
+                push_bytes(&mut out, view(".debug())"));
+            }
+            push_bytes(&mut out, view("; },\n"));
+        }
+        push_bytes(&mut out, view("        }\n"));
+    }
+    push_bytes(&mut out, view("    }\n}\n"));
+    // The formatter's own hook: `{}` meets a value of this type, and `show` is what it calls.
+    dr_head(&mut c, &mut out, view(name), view(""), 0);
+    push_bytes(&mut out, view("    fn show(self: &Self) -> string {\n"));
+    push_bytes(&mut out, view("        return debug::Debug::debug(self);\n"));
+    push_bytes(&mut out, view("    }\n}\n"));
+    return ();
+}
+// The derives a declaration asked for, checked against its fields where the impl table is complete.
+// A missing implementation names the field (or variant) and its type, because a silent omission
+// would make `==` or `hash` quietly wrong.
+fn dr_check<a>(c: (&a mut C), d: u64, bits: u64) -> unit {
+    name := c.decls[d].name.copy();
+    is_enum := c.decls[d].is_enum;
+    count := c.decls[d].count;
+    mut where_ = u8[];
+    if is_enum != 0 {
+        push_bytes(&mut where_, view("variant"));
+    } else {
+        push_bytes(&mut where_, view("field"));
+    }
+    mut every = 0;
+    if (bits & dr_eq()) != 0 {
+        every = dr_eq();
+    }
+    if (bits & dr_ord()) != 0 {
+        every = every | dr_ord();
+    }
+    if (bits & dr_hash()) != 0 {
+        every = every | dr_hash();
+    }
+    if (bits & dr_clone()) != 0 {
+        every = every | dr_clone();
+    }
+    if (bits & dr_debug()) != 0 {
+        every = every | dr_debug();
+    }
+    if count == 0 {
+        dr_fail(&mut c, view(name), every, view(""), view(""), view(""), view("the type has no fields or variants to derive from"));
+        return ();
+    }
+    if (bits & dr_eq()) != 0 {
+        if dr_interface(&mut c, view("ops"), view("Eq")) == 0 {
+            dr_need_module(&mut c, view(name), view("Eq"), view("ops"));
+        }
+    }
+    if (bits & dr_ord()) != 0 {
+        if dr_interface(&mut c, view("order"), view("Ord")) == 0 {
+            dr_need_module(&mut c, view(name), view("Ord"), view("order"));
+        }
+    }
+    if (bits & dr_hash()) != 0 {
+        if dr_interface(&mut c, view("hash"), view("Hash")) == 0 {
+            dr_need_module(&mut c, view(name), view("Hash"), view("hash"));
+        }
+    }
+    if (bits & dr_clone()) != 0 {
+        if dr_interface(&mut c, view("clone"), view("Clone")) == 0 {
+            dr_need_module(&mut c, view(name), view("Clone"), view("clone"));
+        }
+    }
+    if (bits & dr_debug()) != 0 {
+        if dr_interface(&mut c, view("debug"), view("Debug")) == 0 {
+            dr_need_module(&mut c, view(name), view("Debug"), view("debug"));
+        }
+    }
+    for i in count {
+        fname := dr_field_name(&mut c, d, i);
+        fty := dr_field_type(&mut c, d, i);
+        // A variant with no payload carries nothing to compare, order, hash, clone or print.
+        if (is_enum != 0) & (fty == 1) {
+            continue;
+        }
+        ftype := source_type_name(&mut c, fty);
+        if (bits & dr_eq()) != 0 {
+            if !dr_eq_ok(&mut c, fty, is_enum) {
+                if (is_enum != 0) & (ty_kind(&mut c, fty) == 8) {
+                    // A payload is reached through a reference, so it compares through its own
+                    // implementation rather than the built-in structural comparison.
+                    dr_fail(&mut c, view(name), dr_eq(), view(where_), view(fname), view(ftype), view("it has no `ops::Eq` implementation: add `@derive(Eq)` to its type"));
+                } else {
+                    dr_fail(&mut c, view(name), dr_eq(), view(where_), view(fname), view(ftype), view("it cannot be compared: equality needs a scalar, text, bytes, a record or an enum"));
+                }
+            }
+        }
+        if (bits & dr_ord()) != 0 {
+            if !dr_ord_ok(&mut c, fty, is_enum) {
+                dr_fail(&mut c, view(name), dr_ord(), view(where_), view(fname), view(ftype), view("it has no total order: order a field whose type does, or add `@derive(Ord)` to it"));
+            }
+        }
+        if (bits & dr_hash()) != 0 {
+            if !dr_hash_ok(&mut c, fty) {
+                dr_fail(&mut c, view(name), dr_hash(), view(where_), view(fname), view(ftype), view("it has no `hash::Hash` implementation: add `@derive(Hash)` to its type"));
+            }
+        }
+        if (bits & dr_clone()) != 0 {
+            if !dr_clone_ok(&mut c, fty) {
+                if dr_borrowed(&mut c, fty) {
+                    dr_fail(&mut c, view(name), dr_clone(), view(where_), view(fname), view(ftype), view("a borrowed view cannot be deep-cloned: `@derive(Clone)` needs owned fields"));
+                } else {
+                    dr_fail(&mut c, view(name), dr_clone(), view(where_), view(fname), view(ftype), view("it has no `clone::Clone` implementation: add `@derive(Clone)` to its type"));
+                }
+            }
+        }
+        if (bits & dr_debug()) != 0 {
+            if !dr_debug_ok(&mut c, fty) {
+                dr_fail(&mut c, view(name), dr_debug(), view(where_), view(fname), view(ftype), view("it has no `debug::Debug` implementation: add `@derive(Debug)` to its type"));
+            }
+        }
+    }
+    return ();
+}
+fn dr_borrowed<a>(c: (&a mut C), ty: u64) -> bool {
+    k := ty_kind(&mut c, ty);
+    return (k == 5) || (k == 7) || (k == 27);
+}
+// Equality: the operator the language gives the field type. A record or an enum compares
+// structurally when it has no implementation, so only a type with no `==` at all is refused here -
+// and a variant payload, reached through a reference, needs the implementation.
+fn dr_eq_ok<a>(c: (&a mut C), ty: u64, payload: u64) -> bool {
+    k := ty_kind(&mut c, ty);
+    if (k == 9) || (k == 10) {
+        return true;
+    }
+    if (k == 8) {
+        if payload == 0 {
+            return true;
+        }
+        id := dr_interface(&mut c, view("ops"), view("Eq"));
+        return find_implementation(&mut c, id, ty) != 0;
+    }
+    if (ty == 0) || (k == 3) || (k == 4) || (k == 18) || (k == 19) || (k == 21) || (k == 22) {
+        return true;
+    }
+    return false;
+}
+// Order: the built-in orderings, or the field type's own `order::Ord` implementation.
+fn dr_ord_ok<a>(c: (&a mut C), ty: u64, payload: u64) -> bool {
+    k := ty_kind(&mut c, ty);
+    if (k == 9) || (k == 10) {
+        return true;
+    }
+    if (k == 8) {
+        id := dr_interface(&mut c, view("order"), view("Ord"));
+        return find_implementation(&mut c, id, ty) != 0;
+    }
+    return (ty == 0) || (k == 3) || (k == 4) || (k == 18) || (k == 21);
+}
+fn dr_hash_ok<a>(c: (&a mut C), ty: u64) -> bool {
+    k := ty_kind(&mut c, ty);
+    if (k == 9) || (k == 10) {
+        return true;
+    }
+    id := dr_interface(&mut c, view("hash"), view("Hash"));
+    if id == 0 {
+        return true;
+    }
+    return find_implementation(&mut c, id, ty) != 0;
+}
+fn dr_clone_ok<a>(c: (&a mut C), ty: u64) -> bool {
+    k := ty_kind(&mut c, ty);
+    if (k == 9) || (k == 10) {
+        return true;
+    }
+    id := dr_interface(&mut c, view("clone"), view("Clone"));
+    if id == 0 {
+        return true;
+    }
+    return find_implementation(&mut c, id, ty) != 0;
+}
+// Formatting: the field type's own `debug::Debug` implementation.
+fn dr_debug_ok<a>(c: (&a mut C), ty: u64) -> bool {
+    k := ty_kind(&mut c, ty);
+    if (k == 9) || (k == 10) {
+        return true;
+    }
+    id := dr_interface(&mut c, view("debug"), view("Debug"));
+    if id == 0 {
+        return true;
+    }
+    return find_implementation(&mut c, id, ty) != 0;
+}
+// `@derive(NAME)` on `T`: variant `v` has ... . One message shape for every refusal, so the reader
+// learns where the derive is, which derive refused and which field it was about.
+fn dr_fail<a, b, d, e>(c: (&a mut C), name: &b [u8], bit: u64, where_: &d [u8], field: &e [u8], ty: &e [u8], why: &e [u8]) -> unit {
+    mut msg = copy_bytes(view("`@derive("));
+    push_bytes(&mut msg, view(dr_name(bit)));
+    push_bytes(&mut msg, view(")` on `"));
+    push_bytes(&mut msg, view(name));
+    push_bytes(&mut msg, view("`"));
+    if field.len() != 0 {
+        push_bytes(&mut msg, view(": "));
+        push_bytes(&mut msg, view(where_));
+        push_bytes(&mut msg, view(" `"));
+        push_bytes(&mut msg, view(field));
+        push_bytes(&mut msg, view("`"));
+        if ty.len() != 0 {
+            push_bytes(&mut msg, view(" of type `"));
+            push_bytes(&mut msg, view(ty));
+            push_bytes(&mut msg, view("`"));
+        }
+        push_bytes(&mut msg, view(": "));
+    } else {
+        push_bytes(&mut msg, view(": "));
+    }
+    push_bytes(&mut msg, view(why));
+    fail(&mut c, view(msg));
+    return ();
+}
+fn dr_need_module<a, b, d>(c: (&a mut C), name: &b [u8], bit_name: &d [u8], module: &d [u8]) -> unit {
+    mut msg = copy_bytes(view("`@derive("));
+    push_bytes(&mut msg, view(bit_name));
+    push_bytes(&mut msg, view(")` on `"));
+    push_bytes(&mut msg, view(name));
+    push_bytes(&mut msg, view("` needs the `"));
+    push_bytes(&mut msg, view(module));
+    push_bytes(&mut msg, view("` module in the build: pass its file (`lib/"));
+    push_bytes(&mut msg, view(module));
+    push_bytes(&mut msg, view(".grl`)"));
+    fail(&mut c, view(msg));
+    return ();
+}
+// The generated source becomes part of the file it was asked for: it is appended to the file's own
+// text and parsed, in the same pass and by the same parser, right after the file's own items. Every
+// later load of that file returns the same bytes, so a token position recorded in one pass still
+// names the same text in the next - which is what a generic body replayed from its file needs.
+fn dr_append<a>(c: (&a mut C), text: u8[]) -> unit {
+    push_bytes(&mut c.dr_tail, view(text));
+    return ();
+}
+// Parse the expansions this file's declarations asked for. The text goes onto the end of the file's
+// own source, the whole file is lexed again (the prefix is unchanged, so every earlier position is
+// still valid) and the parser walks the new tail as ordinary top-level items.
+fn dr_parse_tail<a>(c: (&a mut C), pass: u64) -> unit {
+    text := exchange(&mut c.dr_tail, u8[]);
+    mut before = c.toks.len();
+    while before != 0 {
+        before = before - 1;
+        if kind_at(&mut c, before) == 0 {
+            break;
+        }
+    }
+    if c.dr_trace != 0 {
+        mut mark = u8[];
+        push_bytes(&mut mark, view("// tail pass "));
+        decimal(&mut mark, pass);
+        push_bytes(&mut mark, view(" before "));
+        decimal(&mut mark, before);
+        push_bytes(&mut mark, view(" src "));
+        decimal(&mut mark, c.src.len());
+        push_bytes(&mut mark, view("\n"));
+        host::print(view(mark));
+    }
+    push_bytes(&mut c.src, view(text));
+    here := c.file;
+    mut held = c.file_text.len();
+    while held < here {
+        c.file_text.push(u8[]);
+        held = held + 1;
+    }
+    if held == here {
+        c.file_text.push(c.src.copy());
+    } else {
+        push_bytes(&mut c.file_text[here], view(text));
+    }
+    lexed := lexer::tokenize(view(c.src));
+    mut toks = Tok[];
+    mut line = 1;
+    mut col = 1;
+    mut at = 0;
+    for i in lexed.len() {
+        t := &lexed[i];
+        while at < t.start {
+            if c.src[at] == 10 {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+            at += 1;
+        }
+        toks.push(Tok { kind: t.kind, start: t.start, end: t.end, line: line, col: col });
+    }
+    drop(lexed);
+    exchange(&mut c.toks, toks);
+    exchange(&mut c.pos, before);
+    while kind(&mut c) != 0 {
+        toplevel_item(&mut c, pass);
+    }
+    return ();
+}
+// The whole expansion of one declaration: every derive it asked for, in a fixed order, rendered as
+// source and spliced after the declaration.
+fn dr_expand<a>(c: (&a mut C), d: u64, bits: u64) -> unit {
+    if dr_recorded(&mut c, d) != 0 {
+        // Already expanded for this declaration: a file can be walked more than once in a pass,
+        // and the expansion belongs to the declaration, not to the walk.
+        return ();
+    }
+    name := c.decls[d].name.copy();
+    count := c.decls[d].count;
+    is_enum := c.decls[d].is_enum;
+    for i in c.dr_bounds.len() {
+        if (c.dr_bounds[i] & 4) != 0 {
+            mut msg = copy_bytes(view("`@derive` on `"));
+            push_bytes(&mut msg, view(name));
+            push_bytes(&mut msg, view("`: a value parameter (`@"));
+            push_bytes(&mut msg, view(c.dr_tnames[i]));
+            push_bytes(&mut msg, view("`) cannot be repeated in a generated implementation"));
+            fail(&mut c, view(msg));
+        }
+    }
+    // Each derive implements a standard-library interface, and the generated `impl` names it: a
+    // build without that module cannot have the derive, and says which file to add.
+    if (bits & dr_eq()) != 0 {
+        if dr_interface(&mut c, view("ops"), view("Eq")) == 0 {
+            dr_need_module(&mut c, view(name), view("Eq"), view("ops"));
+        }
+    }
+    if (bits & dr_ord()) != 0 {
+        if dr_interface(&mut c, view("order"), view("Ord")) == 0 {
+            dr_need_module(&mut c, view(name), view("Ord"), view("order"));
+        }
+    }
+    if (bits & dr_hash()) != 0 {
+        if dr_interface(&mut c, view("hash"), view("Hash")) == 0 {
+            dr_need_module(&mut c, view(name), view("Hash"), view("hash"));
+        }
+    }
+    if (bits & dr_clone()) != 0 {
+        if dr_interface(&mut c, view("clone"), view("Clone")) == 0 {
+            dr_need_module(&mut c, view(name), view("Clone"), view("clone"));
+        }
+    }
+    if (bits & dr_debug()) != 0 {
+        if dr_interface(&mut c, view("debug"), view("Debug")) == 0 {
+            dr_need_module(&mut c, view(name), view("Debug"), view("debug"));
+        }
+    }
+    mut used = u64[];
+    for i in c.dr_tnames.len() {
+        mut hit = 0;
+        for k in count {
+            fty := dr_field_type(&mut c, d, k);
+            if dr_uses(&mut c, fty, i, 0) {
+                hit = 1;
+            }
+        }
+        used.push(hit);
+    }
+    exchange(&mut c.dr_used, used);
+    c.dr_applied.push(d);
+    c.dr_applied.push(bits);
+    mut out = u8[];
+    push_bytes(&mut out, view("\n"));
+    if (bits & dr_eq()) != 0 {
+        dr_eq_block(&mut c, &mut out, d, view(name), is_enum, count);
+    }
+    if (bits & dr_ord()) != 0 {
+        dr_ord_block(&mut c, &mut out, d, view(name), is_enum, count);
+    }
+    if (bits & dr_hash()) != 0 {
+        dr_hash_block(&mut c, &mut out, d, view(name), is_enum, count);
+    }
+    if (bits & dr_clone()) != 0 {
+        dr_clone_block(&mut c, &mut out, d, view(name), is_enum, count);
+    }
+    if (bits & dr_debug()) != 0 {
+        dr_debug_block(&mut c, &mut out, d, view(name), is_enum, count);
+    }
+    if c.dr_trace != 0 {
+        // `--show-derives`: the source each `@derive` generated, labelled with the declaration it
+        // belongs to and the file it was written in.
+        mut mark = u8[];
+        push_bytes(&mut mark, view("// @derive on "));
+        push_bytes(&mut mark, view(name));
+        push_bytes(&mut mark, view(" pass "));
+        decimal(&mut mark, c.dr_pass);
+        push_bytes(&mut mark, view(" ("));
+        paths := file_path(&mut c, c.file);
+        push_bytes(&mut mark, view(paths));
+        push_bytes(&mut mark, view(")\n"));
+        host::print(view(mark));
+        host::print(view(out));
+    }
+    dr_append(&mut c, out);
+    return ();
+}
+// The derives a declaration recorded when it was expanded, and the check they imply. A declaration
+// without derives answers 0.
+fn dr_recorded<a>(c: (&a mut C), d: u64) -> u64 {
+    mut i = 0;
+    while i < c.dr_applied.len() {
+        if c.dr_applied[i] == d {
+            return c.dr_applied[i + 1];
+        }
+        i = i + 2;
+    }
+    return 0;
+}
+
 // ---- checked effects (G26, docs/design/effects.md) ------------------------------------------------
 //
 // `@no_alloc` and `@no_panic` are claims about a function *and everything it calls*, and the compiler
@@ -22194,8 +23234,12 @@ fn toplevel_item<a>(c: (&a mut C), pass: u64) -> unit {
                     if fx_attr_form(&mut c) != 0 {
                         attrs = 1;
                     } else {
-                        ct_form(&mut c, pass, 1);
-                        return ();
+                        if dr_attr_form(&mut c) != 0 {
+                            attrs = 1;
+                        } else {
+                            ct_form(&mut c, pass, 1);
+                            return ();
+                        }
                     }
                 }
             }
@@ -22229,6 +23273,10 @@ fn toplevel_item<a>(c: (&a mut C), pass: u64) -> unit {
         }
         if c.fx_pending_panic != 0 {
             fail(&mut c, view("`@no_panic` applies to a function"));
+        }
+        if c.derive_pending != 0 {
+            exchange(&mut c.pos, c.dr_pos);
+            fail(&mut c, view("`@derive(...)` applies to a struct or an enum"));
         }
         exchange(&mut c.strict_next, 0);
         return ();
@@ -46750,6 +47798,18 @@ pub fn main() -> u64 {
         debug_vars: DebugVar[],
         debug_types: DebugType[],
         arg_offset: 0,
+        file_text: u8[][],
+        derive_pending: 0,
+        dr_pos: 0,
+        dr_rnames: u8[][],
+        dr_tnames: u8[][],
+        dr_bounds: u64[],
+        dr_constraints: u64[][],
+        dr_used: u64[],
+        dr_applied: u64[],
+        dr_pass: 0,
+        dr_tail: u8[],
+        dr_trace: 0,
         overflow: 1,
         strict_bool_report: 0,
         exports: u8[][],
@@ -47142,7 +48202,12 @@ pub fn main() -> u64 {
     }
     while offset + 1 < argc {
         option := host::arg(offset + 1);
-        if same(view(option), view("--comptime-probe")) {
+        if same(view(option), view("--show-derives")) {
+            // `--show-derives`: print the source `@derive` wrote for each declaration, so a program
+            // can see what the compiler generated without a debugger (docs/design/derives.md).
+            exchange(&mut c.dr_trace, 1);
+            offset += 1;
+        } else if same(view(option), view("--comptime-probe")) {
             // Internal: this compile builds the probe for a compile-time call. The probe file comes
             // first, so the program's own entry file (which may omit its `module` line) is second.
             exchange(&mut c.probe_mode, 1);

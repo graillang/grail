@@ -15330,5 +15330,194 @@
       "riscv64"
     ],
     "note": "an owned parameter beside a refined one, called with a proved argument, then the heap is used again and the end-of-main allocator balance check runs: the old second entry restored callee-saved registers it never saved and corrupted the caller"
+  },
+  {
+    "name": "derives-eq-record",
+    "source": "module derives_eq_record;\nstruct Inner { n: u64 }\n@derive(Eq)\nstruct Tagged { n: u64, tag: string }\n@derive(Eq)\nstruct Outer { left: Tagged, other: u64 }\nfn main() {\n    a := Outer { left: Tagged { n: 1, tag: \"x\".text() }, other: 2 };\n    b := Outer { left: Tagged { n: 1, tag: \"x\".text() }, other: 2 };\n    c := Outer { left: Tagged { n: 1, tag: \"y\".text() }, other: 2 };\n    println(\"{} {} {}\", a == b, a == c, a != c);\n}\n",
+    "modules": [
+      "lib/ops.grl"
+    ],
+    "stdout": "true false true\n",
+    "note": "structural equality, field by field and recursively"
+  },
+  {
+    "name": "derives-ord-record",
+    "source": "module derives_ord_record;\n@derive(Eq, Ord)\nstruct P { x: u64, y: u64 }\nfn main() {\n    a := P { x: 1, y: 5 };\n    b := P { x: 1, y: 6 };\n    c := P { x: 2, y: 0 };\n    println(\"{} {} {} {}\", a < b, b < a, a < c, c < a);\n    println(\"{} {}\", a.less(&a), a <= b);\n}\n",
+    "modules": [
+      "lib/order.grl",
+      "lib/ops.grl"
+    ],
+    "stdout": "true false true false\nfalse true\n",
+    "note": "lexicographic over the fields, agreeing with Eq"
+  },
+  {
+    "name": "derives-hash-record",
+    "source": "module derives_hash_record;\nuse hash;\n@derive(Eq, Hash)\nstruct P { x: u64, name: string }\nfn fingerprint<a>(v: (&a P)) -> u64 {\n    mut st = hash::hasher(3, 5);\n    hash::Hash::hash(v, &mut st);\n    return hash::finish(st);\n}\nfn main() {\n    a := P { x: 1, name: \"ada\".text() };\n    b := P { x: 1, name: \"ada\".text() };\n    c := P { x: 1, name: \"bob\".text() };\n    println(\"{} {} {}\", a == b, fingerprint(&a) == fingerprint(&b), fingerprint(&a) == fingerprint(&c));\n}\n",
+    "modules": [
+      "lib/hash.grl",
+      "lib/ops.grl"
+    ],
+    "stdout": "true true false\n",
+    "note": "equal values hash equally; the fields are the hasher's stream in declaration order"
+  },
+  {
+    "name": "derives-clone-record",
+    "source": "module derives_clone_record;\n@derive(Clone, Eq, Hash)\nstruct P { x: u64, name: string }\n@derive(Clone, Eq)\nstruct Q { p: P, n: u64 }\nfn main() {\n    a := P { x: 7, name: \"ada\".text() };\n    b := a.clone();\n    println(\"{} {} {}\", b.x, b.name, a == b);\n    q := Q { p: a, n: 1 };\n    r := q.clone();\n    println(\"{} {} {}\", r.n, r.p.name, q == r);\n}\n",
+    "modules": [
+      "lib/ops.grl",
+      "lib/order.grl",
+      "lib/hash.grl",
+      "lib/clone.grl",
+      "lib/debug.grl"
+    ],
+    "stdout": "7 ada true\n1 ada true\n",
+    "note": "field-wise clone through each field type's own `clone`"
+  },
+  {
+    "name": "derives-debug-record",
+    "source": "module derives_debug_record;\n@derive(Debug)\nstruct Inner { n: u64, tag: string }\n@derive(Debug)\nstruct Outer { left: Inner, count: u64, ok: bool }\nfn main() {\n    v := Outer { left: Inner { n: 5, tag: \"x\".text() }, count: 2, ok: true };\n    println(\"{}\", v);\n    println(v.left.debug());\n}\n",
+    "modules": [
+      "lib/debug.grl"
+    ],
+    "stdout": "Outer { left: Inner { n: 5, tag: \"x\" }, count: 2, ok: true }\nInner { n: 5, tag: \"x\" }\n",
+    "note": "`Type { field: value, ... }`, and `println` uses it through the derived `show`"
+  },
+  {
+    "name": "derives-eq-enum",
+    "source": "module derives_eq_enum;\n@derive(Eq)\nstruct Inner { n: u64 }\n@derive(Eq)\nenum Shape { Circle(Inner), Label(string), Point }\nfn main() {\n    a := Shape::Circle(Inner { n: 2 });\n    b := Shape::Circle(Inner { n: 2 });\n    c := Shape::Circle(Inner { n: 3 });\n    println(\"{} {} {} {}\", a == b, a == c, Shape::Label(\"hi\".text()) == Shape::Label(\"hi\".text()), Shape::Point == Shape::Point);\n}\n",
+    "modules": [
+      "lib/ops.grl"
+    ],
+    "stdout": "true false true true\n",
+    "note": "per variant: same variant compares payloads, different variants are never equal"
+  },
+  {
+    "name": "derives-ord-enum",
+    "source": "module derives_ord_enum;\n@derive(Ord)\nenum Shape { Circle(u64), Square(u64), Point }\nfn main() {\n    a := Shape::Circle(2);\n    b := Shape::Circle(3);\n    s := Shape::Square(1);\n    p := Shape::Point;\n    println(\"{} {} {} {}\", a < b, b < a, a < s, s < p);\n}\n",
+    "modules": [
+      "lib/order.grl"
+    ],
+    "stdout": "true false true true\n",
+    "note": "variants compare in declaration order, then their payloads"
+  },
+  {
+    "name": "derives-hash-enum",
+    "source": "module derives_hash_enum;\nuse hash;\n@derive(Hash)\nenum Shape { Circle(u64), Square(string) }\nfn fingerprint<a>(v: (&a Shape)) -> u64 {\n    mut st = hash::hasher(3, 5);\n    hash::Hash::hash(v, &mut st);\n    return hash::finish(st);\n}\nfn main() {\n    x := Shape::Square(\"x\".text());\n    println(\"{} {} {}\", fingerprint(&Shape::Circle(2)) == fingerprint(&Shape::Circle(2)), fingerprint(&Shape::Circle(2)) == fingerprint(&Shape::Square(\"x\".text())), fingerprint(&x) == fingerprint(&x));\n}\n",
+    "modules": [
+      "lib/hash.grl"
+    ],
+    "stdout": "true false true\n",
+    "note": "the variant index is written first, then the payload"
+  },
+  {
+    "name": "derives-clone-enum",
+    "source": "module derives_clone_enum;\n@derive(Clone, Eq)\nenum Shape { Circle(u64), Label(string), Point }\nfn main() {\n    a := Shape::Circle(2);\n    b := a.clone();\n    l := Shape::Label(\"hi\".text());\n    m := l.clone();\n    p := Shape::Point;\n    q := p.clone();\n    println(\"{} {} {}\", a == b, l == m, p == q);\n}\n",
+    "modules": [
+      "lib/clone.grl",
+      "lib/ops.grl"
+    ],
+    "stdout": "true true true\n",
+    "note": "each variant clones its payload, a unit variant copies itself"
+  },
+  {
+    "name": "derives-debug-enum",
+    "source": "module derives_debug_enum;\n@derive(Debug)\nenum Shape { Circle(u64), Label(string), Point }\nfn main() {\n    println(\"{}\", Shape::Circle(2));\n    println(\"{}\", Shape::Label(\"hi\".text()));\n    println(\"{}\", Shape::Point);\n}\n",
+    "modules": [
+      "lib/debug.grl"
+    ],
+    "stdout": "Circle(2)\nLabel(\"hi\")\nPoint\n",
+    "note": "a variant shows as `Name(payload)`, a unit variant as `Name`"
+  },
+  {
+    "name": "derives-generic-record",
+    "source": "module derives_generic_record;\nuse hash;\n@derive(Eq, Ord, Hash, Clone, Debug)\nstruct Pair<T> { first: T, second: T }\nfn main() {\n    a := Pair<u64> { first: 1, second: 2 };\n    b := Pair<u64> { first: 1, second: 2 };\n    c := Pair<u64> { first: 1, second: 3 };\n    println(\"{} {} {} {}\", a == b, a == c, a < c, a.clone() == a);\n    s := Pair<string> { first: \"a\".text(), second: \"b\".text() };\n    t := s.clone();\n    println(\"{} {}\", s == t, s < t);\n    println(\"{}\", s);\n    mut st = hash::hasher(1, 2);\n    hash::Hash::hash(&a, &mut st);\n    mut st2 = hash::hasher(1, 2);\n    hash::Hash::hash(&b, &mut st2);\n    println(\"{}\", hash::finish(st) == hash::finish(st2));\n}\n",
+    "modules": [
+      "lib/ops.grl",
+      "lib/order.grl",
+      "lib/hash.grl",
+      "lib/clone.grl",
+      "lib/debug.grl"
+    ],
+    "stdout": "true false true true\ntrue false\nPair { first: \"a\", second: \"b\" }\ntrue\n",
+    "note": "a derived implementation is checked per specialisation: `Pair<u64>` and `Pair<string>` both work"
+  },
+  {
+    "name": "derives-partial",
+    "source": "module derives_partial;\n@derive(Clone, Debug)\nstruct P { x: u64, name: string }\nfn main() {\n    a := P { x: 1, name: \"ada\".text() };\n    b := a.clone();\n    println(\"{}\", b);\n}\n",
+    "modules": [
+      "lib/clone.grl",
+      "lib/debug.grl"
+    ],
+    "stdout": "P { x: 1, name: \"ada\" }\n",
+    "note": "only the derives asked for are generated"
+  },
+  {
+    "name": "derives-nested",
+    "source": "module derives_nested;\n@derive(Eq, Clone, Debug)\nstruct Inner { n: u64, tag: string }\n@derive(Eq, Clone, Debug)\nstruct Outer { inner: Inner, n: u64 }\nfn main() {\n    a := Outer { inner: Inner { n: 1, tag: \"x\".text() }, n: 2 };\n    b := a.clone();\n    println(\"{} {} {}\", a == b, b.inner.tag, a);\n}\n",
+    "modules": [
+      "lib/ops.grl",
+      "lib/clone.grl",
+      "lib/debug.grl"
+    ],
+    "stdout": "true x Outer { inner: Inner { n: 1, tag: \"x\" }, n: 2 }\n",
+    "note": "a derived field compares, clones and prints through its own derived implementation"
+  },
+  {
+    "name": "derives-reject-non-clone-field",
+    "source": "module derives_reject_non_clone_field;\nstruct Inner { n: u64 }\n@derive(Clone)\nstruct Outer { inner: Inner }\nfn main() {}\n",
+    "modules": [
+      "lib/clone.grl"
+    ],
+    "reject": true,
+    "diagnostic": "`@derive(Clone)` on `Outer`: field `inner` of type `Inner`"
+  },
+  {
+    "name": "derives-reject-view-field",
+    "source": "module derives_reject_view_field;\n@derive(Clone)\nstruct Held<a> { right: (&a u64) }\nfn main() {}\n",
+    "modules": [
+      "lib/clone.grl"
+    ],
+    "reject": true,
+    "diagnostic": "a borrowed view cannot be deep-cloned"
+  },
+  {
+    "name": "derives-reject-no-fields",
+    "source": "module derives_reject_no_fields;\n@derive(Eq)\nstruct Empty {}\nfn main() {}\n",
+    "modules": [
+      "lib/ops.grl"
+    ],
+    "reject": true,
+    "diagnostic": "`@derive(Eq)` on `Empty`: the type has no fields or variants to derive from"
+  },
+  {
+    "name": "derives-reject-unknown-name",
+    "source": "module derives_reject_unknown_name;\n@derive(Eq, Bogus)\nstruct P { x: u64 }\nfn main() {}\n",
+    "modules": [
+      "lib/ops.grl"
+    ],
+    "reject": true,
+    "diagnostic": "unknown derive `Bogus`"
+  },
+  {
+    "name": "derives-reject-not-a-type",
+    "source": "module derives_reject_not_a_type;\n@derive(Eq)\nfn f() {}\nfn main() {}\n",
+    "modules": [
+      "lib/ops.grl"
+    ],
+    "reject": true,
+    "diagnostic": "`@derive(...)` applies to a struct or an enum"
+  },
+  {
+    "name": "derives-show-derives",
+    "source": "module derives_show_derives;\n@derive(Eq)\nstruct P { x: u64 }\nfn main() {\n    missing();\n}\n",
+    "modules": [
+      "lib/ops.grl"
+    ],
+    "flags": [
+      "--show-derives"
+    ],
+    "reject": true,
+    "diagnostic": "fn eq(self: &Self, other: &Self) -> bool",
+    "note": "--show-derives prints the source a `@derive` generated"
   }
 ]
