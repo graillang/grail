@@ -10162,12 +10162,14 @@ fn source_type_name<a>(c: (&a mut C), ty: u64) -> u8[] {
         push_bytes(&mut out, view("char"));
         return out;
     }
+    // Kind 3 is `bytes` (a `u8[]`) and kind 4 is `string`: the two were swapped here, so a
+    // diagnostic spelled `string` where the value was a byte vector and the other way round.
     if k == 3 {
-        push_bytes(&mut out, view("string"));
+        push_bytes(&mut out, view("u8[]"));
         return out;
     }
     if k == 4 {
-        push_bytes(&mut out, view("u8[]"));
+        push_bytes(&mut out, view("string"));
         return out;
     }
     if k == 6 {
@@ -10485,9 +10487,6 @@ fn tuple_destructure<a>(c: (&a mut C)) -> unit {
 // These declarations back concise syntax and are not public nominal types.
 fn find_decl<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> u64 {
     here := module_copy(&mut c);
-    if same(view(m), view("core")) & same(view(n), view("OptionStorage")) & !same(view(here), view("core")) {
-        return 0;
-    }
     if same(view(m), view("hashmap")) & same(view(n), view("Map")) & !same(view(here), view("hashmap")) {
         return 0;
     }
@@ -10744,7 +10743,8 @@ fn parse_type<a>(c: (&a mut C)) -> u64 {
         }
         mut oa = u64[];
         oa.push(t);
-        t = named_type(&mut c, copy_bytes(view("core")), copy_bytes(view("OptionStorage")), oa);
+        // `T?` is the concise spelling of `result::Option<T>`, the one option type the language has.
+        t = named_type(&mut c, copy_bytes(view("result")), copy_bytes(view("Option")), oa);
     }
     if c.no_union == 0 {
         mut members = u64[];
@@ -24575,13 +24575,25 @@ fn adopt_literal<a>(c: (&a mut C), start: u64, end: u64, ty: u64) -> bool {
     }
     return true;
 }
+// Whether `ty` is the option type `T?` names (`result::Option`, which is also the type
+// `Option::Some`/`Option::None` construct).
+// The tag a bare `None` stores in `ty`. The option type is an ordinary two-member enum, so the tag
+// is the `None` variant's declared position - not a constant: the stdlib declares `Some` first, and
+// a declaration that ordered them the other way would still be a two-member shape `?` reads.
+fn none_tag<a>(c: (&a mut C), ty: u64) -> u64 {
+    if ty_kind(&mut c, ty) != 8 {
+        return 0;
+    }
+    d := ty_arg(&mut c, ty);
+    return 1 - success_variant(&mut c, d);
+}
 fn is_option_storage<a>(c: (&a mut C), ty: u64) -> bool {
     if ty_kind(&mut c, ty) != 8 {
         return false;
     }
     d := ty_arg(&mut c, ty);
     decl := &c.decls[d];
-    return same(view(decl.module), view("core")) & same(view(decl.name), view("OptionStorage"));
+    return same(view(decl.module), view("result")) & same(view(decl.name), view("Option"));
 }
 // A bare literal (including a negated one) takes a sized integer type from its context.
 fn adopt_value<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) -> Val {
@@ -24613,7 +24625,7 @@ fn adopt_value<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) ->
         return widen_to_u64(&mut c, v);
     }
     if (c.none_start == start) & (c.none_end == end) & is_option_storage(&mut c, expected) {
-        tag := imm(&mut c, 0);
+        tag := imm(&mut c, none_tag(&mut c, expected));
         payload := imm(&mut c, 0);
         slot := invoke(&mut c, view("rt_enum"), two(tag, payload));
         own(&mut c, slot, expected);
@@ -29451,49 +29463,124 @@ fn propagate_union<a>(c: (&a mut C), x: Val, unwrap: u64) -> Val {
     stored_source(&mut c, n, ty);
     return val(n, ty);
 }
-// `?` returns a failure unchanged (payload layout is shared); `!` aborts on it.
-fn propagate<a>(c: (&a mut C), v: Val, unwrap: u64) -> Val {
-    x := deref(&mut c, v);
-    if is_result_union(&mut c, x.ty) {
-        return propagate_result_union(&mut c, x, unwrap);
-    }
-    if is_union(&mut c, x.ty) {
-        return propagate_union(&mut c, x, unwrap);
-    }
-    xt := x.t;
-    if ty_kind(&mut c, x.ty) != 8 {
-        fail(&mut c, view("unwrap/propagate requires enum"));
-    }
-    d := ty_arg(&mut c, x.ty);
-    mut k = 0;
-    shape := &c.decls[d];
-    if (shape.is_enum == 0) || (shape.count != 2) {
-        fail(&mut c, view("unwrap requires two-variant Option/Result"));
-    }
+// The success variant of a two-variant enum: the conventional names decide (`Ok`, `Some`),
+// otherwise the first declared variant. So `enum Out<V, F> { Good(V), Bad(F) }` propagates `Good`,
+// and `enum E { Err(F), Ok(T) }` still propagates `Ok` - the name-based rule is kept exactly where
+// the names carry meaning, and declaration order answers everywhere else.
+fn success_variant<a>(c: (&a mut C), d: u64) -> u64 {
     dd := &c.decls[d];
     fi := dd.first;
     f := &c.fields[fi];
     first := f.name.copy();
-    second := &c.fields[fi + 1];
-    last := second.name.copy();
-    mut valid = 0;
+    s := &c.fields[fi + 1];
+    last := s.name.copy();
     if same(view(first), view("Ok")) & same(view(last), view("Err")) {
-        valid = 1;
+        return 0;
+    }
+    if same(view(first), view("Err")) & same(view(last), view("Ok")) {
+        return 1;
     }
     if same(view(first), view("Some")) & same(view(last), view("None")) {
-        valid = 1;
+        return 0;
     }
-    if same(view(last), view("Ok")) & same(view(first), view("Err")) {
-        valid = 1;
-        k = 1;
+    if same(view(first), view("None")) & same(view(last), view("Some")) {
+        return 1;
     }
-    if same(view(last), view("Some")) & same(view(first), view("None")) {
-        valid = 1;
-        k = 1;
+    return 0;
+}
+// The operator a refusal is about: `?` propagates, `!` aborts. It starts the refusal message, which
+// is why it is a value rather than a word inside each string.
+fn propagate_operator(unwrap: u64) -> u8[] {
+    if unwrap != 0 {
+        return copy_bytes(view("`!`"));
     }
-    if valid == 0 {
-        fail(&mut c, view("unwrap requires Ok/Err or Some/None variants"));
+    return copy_bytes(view("`?`"));
+}
+// A shape with more than two members cannot answer which member is the failure, so `?`/`!` refuse
+// it - naming the shape and every member, because "needs two members" without saying which shape
+// was the unhelpful half of the old refusal.
+fn refuse_shape_union<a>(c: (&a mut C), ty: u64, unwrap: u64) -> unit {
+    members := type_args(&mut c, ty);
+    mut said = propagate_operator(unwrap);
+    push_bytes(&mut said, view(" needs a shape with one success member and one failure member; `"));
+    for i in members.len() {
+        if i != 0 {
+            push_bytes(&mut said, view(" | "));
+        }
+        name := source_type_name(&mut c, members[i]);
+        push_bytes(&mut said, view(name));
     }
+    push_bytes(&mut said, view("` has "));
+    decimal(&mut said, members.len());
+    push_bytes(&mut said, view(" members"));
+    fail(&mut c, view(said));
+    return ();
+}
+fn refuse_shape_enum<a>(c: (&a mut C), ty: u64, d: u64, unwrap: u64) -> unit {
+    count := c.decls[d].count;
+    first := c.decls[d].first;
+    mut said = propagate_operator(unwrap);
+    push_bytes(&mut said, view(" needs a shape with one success member and one failure member; `"));
+    name := source_type_name(&mut c, ty);
+    push_bytes(&mut said, view(name));
+    push_bytes(&mut said, view("` has "));
+    decimal(&mut said, count);
+    push_bytes(&mut said, view(" variants ("));
+    for i in count {
+        if i != 0 {
+            push_bytes(&mut said, view(", "));
+        }
+        vname := c.fields[first + i].name.copy();
+        push_bytes(&mut said, view(vname));
+    }
+    push_bytes(&mut said, view(")"));
+    fail(&mut c, view(said));
+    return ();
+}
+// `?` returns the failure member unchanged (payload layout is shared); `!` aborts on it. Any shape
+// with exactly one success member and one failure member qualifies: a two-member enum, an ordinary
+// two-member union, or a result union (`S |? F`). Which member is the success is decided once, by
+// `success_variant` for an enum and by position for a union.
+fn propagate<a>(c: (&a mut C), v: Val, unwrap: u64) -> Val {
+    x := deref(&mut c, v);
+    xt := x.t;
+    if ty_kind(&mut c, x.ty) != 8 {
+        mut said = propagate_operator(unwrap);
+        push_bytes(&mut said, view(" needs a shape with one success member and one failure member; this value is not an enum or a union"));
+        fail(&mut c, view(said));
+    }
+    if is_union(&mut c, x.ty) {
+        // A result union (`S |? F`) states which members are failures, so `?` reads that partition
+        // whatever its arity. An ordinary union does not: its only signal is position, which says
+        // one success and one failure and nothing more, so a third member is refused rather than
+        // guessed at.
+        if is_result_union(&mut c, x.ty) {
+            return propagate_result_union(&mut c, x, unwrap);
+        }
+        if unwrap == 0 {
+            members := type_args(&mut c, x.ty);
+            if members.len() != 2 {
+                refuse_shape_union(&mut c, x.ty, unwrap);
+            }
+        }
+        return propagate_union(&mut c, x, unwrap);
+    }
+    d := ty_arg(&mut c, x.ty);
+    is_enum := c.decls[d].is_enum;
+    variant_count := c.decls[d].count;
+    if is_enum == 0 {
+        mut said = propagate_operator(unwrap);
+        push_bytes(&mut said, view(" needs a shape with one success member and one failure member; `"));
+        name := source_type_name(&mut c, x.ty);
+        push_bytes(&mut said, view(name));
+        push_bytes(&mut said, view("` is a record"));
+        fail(&mut c, view(said));
+    }
+    if variant_count != 2 {
+        refuse_shape_enum(&mut c, x.ty, d, unwrap);
+    }
+    k := success_variant(&mut c, d);
+    failure := 1 - k;
     get(&mut c, xt, view("%rax"));
     o(&mut c, view("cmpq $"));
     on(&mut c, k);
@@ -29510,7 +29597,7 @@ fn propagate<a>(c: (&a mut C), v: Val, unwrap: u64) -> Val {
             // The failure branch is None: it carries no payload and therefore no loan.
             // Rebuild it at the declared optional type rather than returning an
             // Option<&T> object whose conservative source bonds would escape.
-            tag := imm(&mut c, 1 - k);
+            tag := imm(&mut c, failure);
             payload := imm(&mut c, 0);
             returned := invoke(&mut c, view("rt_enum"), two(tag, payload));
             own(&mut c, returned, result);
@@ -29525,7 +29612,6 @@ fn propagate<a>(c: (&a mut C), v: Val, unwrap: u64) -> Val {
                 // whose failure payload has the same type (the success payload is unused on this path).
                 mut compatible = 0;
                 if (ty_kind(&mut c, result) == 8) & (ty_arg(&mut c, result) == d) {
-                    failure := 1 - k;
                     mine := field_type(&mut c, x.ty, failure);
                     theirs := field_type(&mut c, result, failure);
                     if same_type(&mut c, mine, theirs) != 0 {

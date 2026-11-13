@@ -76,11 +76,18 @@ no new cap and no new invalidation rule.
 
 The operand must be a **shape with exactly one success member and one failure member**:
 
-| operand | two members are | success member |
+| operand | members | success member |
 | --- | --- | --- |
 | enum, two variants | its first and second variant | `Ok`/`Some` by name; otherwise the first declared variant |
-| ordinary union `S \| F` | its two members | the first member |
-| result union `S \|? F` | its success and failure partition | its success member(s) |
+| ordinary union `S \| F` | exactly two | the first member |
+| result union `S \|? F` | its declared success and failure partition | its success member(s) |
+
+The three rows differ in exactly one thing: whether the type *states* which member is the failure.
+A result union states it (`|?` separates the failure alternatives), so `?` reads that partition
+whatever its arity - `u64 | bool |? string` still propagates its two success members, and a union
+with several failure members still maps each to a matching alternative in the caller. An ordinary
+union does not state it: position says "the first member is the success", and with a third member
+nothing says whether it is a success or a failure, so it is refused rather than guessed at.
 
 The variant-name knowledge is kept **only** for the two conventional families: `Ok`/`Err` and
 `Some`/`None` mean what they have always meant, in either declaration order (`enum E { Err(F),
@@ -117,17 +124,18 @@ on that path has the same type either way.
 
 ### Three members: refused, naming the shape
 
-A shape with three or more members is refused, because `?` cannot answer which member is the
-failure without guessing:
+A shape that leaves the failure ambiguous is refused: an enum with three or more variants, an
+ordinary union with three or more members, and a record (which is not a shape for `?` at all):
 
 ```
-error: `?` needs a shape with one success and one failure member; `u64 | string | bool` has 3 members
+error: `?` needs a shape with one success member and one failure member; `u64 | string | bool` has 3 members
+error: `?` needs a shape with one success member and one failure member; `e4::Three` has 3 variants (Ok, Err, Also)
 ```
 
-The diagnostic names the type, its member (or variant) names, and the count. It is the same message
-for an enum with three variants and for a union with three members, and it replaces the old
+The diagnostic names the type, every member (or variant) name, and the count. It replaces the old
 "unwrap requires two-variant Option/Result" / "unwrap requires Ok/Err or Some/None variants" pair,
-which named neither the type nor its members.
+which named neither the type nor its members; and it is what makes `?` a rule about shape rather
+than about the spelling of two variant names.
 
 Multi-failure result unions (`S |? F1 |? F2`) are therefore no longer propagatable; a layer that can
 fail two ways names one error type (`errs::Report`, or a module's own error enum) and matches the
@@ -156,11 +164,26 @@ Combinators, all in ordinary Grail and all instantiated per use:
 | type | method |
 | --- | --- |
 | `Result<T, E>` | `is_ok`, `is_err`, `ok`, `err`, `unwrap_or`, `map`, `map_err` |
-| `Option<T>` | `is_some`, `is_none`, `unwrap_or`, `map`, `ok_or` (→ `Result<T, E>`), `to_result` (alias of `ok_or`) |
+| `Option<T>` | `is_some`, `is_none`, `unwrap_or`, `map`, `ok_or` (→ `T \| E`), `to_result` (→ `Result<T, E>`) |
 
 `map` takes `FnMut(T) -> U` and returns a new value, so it composes with closures; `ok`/`err`
 consume the value and return an `Option` holding the chosen payload. No combinator panics: the ones
 that cannot fail return a value or a shape, and `!` stays the explicit abort.
+
+`ok_or` answers the union `T | E` rather than a `Result`, and that is deliberate: it is what the
+method has always answered (it lived in `core` before), a caller that matches it by member type
+(`u64(n) => ...`) keeps compiling, and a union needs no type argument at the call site. `to_result`
+is the same conversion into the generic enum for a pipeline that is `Result`-shaped throughout, so
+both shapes are one method away from an optional value and neither is privileged.
+
+### One option type, and where its tag comes from
+
+`Option<T>` is declared `{ Some(T), None }` - success first, like `Result`. Nothing may assume a
+tag: a bare `None` used to store tag `0` in `adopt_value` because the old storage enum happened to
+declare `None` first. That constant is gone; `none_tag` reads the variant's position from the
+declaration, so the tag follows the type. (This is also why `Option` could not simply be a second
+name for the old storage enum: hiding one builtin assumption behind another is how the two types
+would have drifted apart.)
 
 ### Why the concrete error types stay
 
