@@ -157,6 +157,15 @@ stop linking. `lib/tls.grl` is a top-level standard-library module, so it is com
 program says `use tls;`: a program that does not use TLS is byte-for-byte what it was, and a program
 that does gets OpenSSL on its link line and nothing else.
 
+Measured on this host, and pinned by `tls-link-notes-absent-without-import` (a program that never
+imports `tls` must emit neither note) and by the `asm` pin on `tls-trust-store-empty-refuses` (a
+program that does must emit exactly `// grail-link: ssl` and `// grail-link: crypto`):
+
+| Build | Link notes in the assembly |
+| --- | --- |
+| `fn main(){ println(1); }` | none |
+| the same program with `use tls;` | `// grail-link: ssl`, `// grail-link: crypto` |
+
 The same file also has to be the one place where the three libraries are described, because Grail
 has no conditional *import*: a module is compiled for every target its program is built for, so
 per-target code has to sit behind `@if target.os`, whose untaken branch is parsed but neither
@@ -273,3 +282,40 @@ host was available. The Windows branch is a compile-time refusal, so there is no
 - session resumption across processes (no session ticket cache on disk);
 - runtime reactor integration for the macOS/Windows branches beyond what `host::read_fd`/
   `host::write_fd` already give (both branches are written against those two operations).
+
+## Appendix: a runtime finding, for the owner of the reactor and sockets
+
+Not a TLS bug, but this workstream found it and it is easy to lose. A loopback server started by the
+same process, on a port that process *first obtained with `bind("127.0.0.1", 0)` and released*, is
+unreachable: the TLS handshake completes on both sides, the first application write disappears, and
+the next read ends the connection. The same program against a port it never bound works. Reproduced
+3/3 and 3/3 on x86-64 Linux, with `openssl s_server -rev` as the peer (it is only there to be a
+second process on the port; the failure is in the transport, not in TLS - the server logs
+`CONNECTION ESTABLISHED` and then `CONNECTION CLOSED`, and never echoes).
+
+```grl
+// bad: port from bind(0)+close, then a child process listens on it
+probe := net::bind("127.0.0.1", 0)!;
+port := probe.port();
+probe.close();
+host::command(command_argv("openssl s_server -accept <port> ... &"));   // or any server
+mut s = client.connect("127.0.0.1", port, "127.0.0.1")!;                 // handshake succeeds
+s.write_all(view("abcdefg\n"))!;                                        // returns 8
+s.read(&mut buf);                                                        // never sees the echo
+
+// good: exactly the same, with a port this process never bound
+mut s = client.connect("127.0.0.1", 24571, "127.0.0.1")!;                // echo is returned
+```
+
+Two controls narrow it. A listener in the *same* process on that reused port is fine (a task-based
+Grail echo over it works, so it is not the port number alone), and a fixed port is fine, so it is
+not "a server started by `host::command`". What is left is the port coming from `bind(0)` and the
+server being another process. A plausible mechanism, which the owner can confirm: the runtime's
+listener sets `SO_REUSEADDR`, and the ephemeral port just released is then handed to this process's
+own outgoing connection as its local port while that port is also the destination - a self-connection
+or a 4-tuple collision, in which case the write goes where the server never looks. `net::TcpStream`
+has no local-port accessor, so this note cannot show that directly.
+
+The fixture is `tls-local-server-verification-pair`'s port handling in `tests/native-cases.json`:
+that case deliberately starts at 24131 and moves up rather than probing, with the reason in a
+comment, so the workaround is pinned even though the bug is not fixed here.
