@@ -98,9 +98,9 @@ is not reported would leave a fact standing after it stopped being true. Every w
 reaches one of the hooks above, `bind` and the statement wrapper most of all, because every binding
 and every statement goes through them.
 
-`--prover=tokens` kept the old re-walk (scan the tokens from the body's `{` to the obligation) for
-one release so the two could be compared on the corpus; the comparison is in the Verification
-section, and the walk was removed once the facts over the IR were green.
+The switch was made behind a flag that kept the old re-walk (scan the tokens from the body's `{` to
+the obligation) so the two could be compared on the corpus; the numbers are in the Verification
+section, and the walk and its flag were removed once the facts over the IR were green.
 
 An obligation is proved when it follows from the facts by transitivity of `<`/`<=` over a small
 difference graph (Floyd-Warshall over at most twenty terms, literals as exact vertices), by `%` facts
@@ -115,6 +115,11 @@ the bound stale before it is used. Folding that into the fact set is the next st
 walker already refuses to reuse a shadowed name.
 
 ## Verification
+
+A `--use DIR` build is the one place a proof is not available: the interface carries the predicate's
+text but not the file it was written in, so `pv_read_pred` cannot read it for either side of a proof.
+Every refinement obligation in such a build keeps its runtime check - sound, and the reason a
+separately compiled caller never loses a check it should have kept.
 
 `--verify-facts` already checks every range fact the LLVM lifter is told, and the LLVM lifter still
 needs it for that. On the native backend the flag now means this instead: each refinement obligation
