@@ -7,6 +7,12 @@ import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { root, buildCompiler } from './native.mjs';
 
+// One summary line either way, so the suite is usable standalone and from a gate: the assertion
+// that failed has already named itself on stderr.
+process.on('exit', (code) => {
+  if (code !== 0) console.log('FAIL');
+});
+
 const grail = buildCompiler();
 const work = join(root, '.work/pkg-tests');
 rmSync(work, { recursive: true, force: true });
