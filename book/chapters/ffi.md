@@ -150,6 +150,18 @@ soundness bug.
   returned 0. A callback's record parameter is the `const R *` the caller owns, so it is registered
   as a borrow now and the fields stay readable under the ordinary rules.
 
+### Text at the operating-system boundary
+
+A Grail string is UTF-8 and Windows spells a path in UTF-16, so the platform layer converts in one
+place instead of at each call site. On Windows every file and process entry point takes UTF-8 and
+answers UTF-8; the wide form exists only between a conversion helper and the `-W` call that follows
+it. A path that is not valid UTF-8 is refused with `EINVAL` rather than replaced - a program that
+builds a name out of bytes that are not text gets an error it can report, not a differently-spelled
+file - while text the *system* hands back (a command line, an environment entry) decodes an unpaired
+surrogate to U+FFFD, because rejecting `argv[0]` would leave the process with no arguments at all.
+An argument and an environment entry reach a child process as UTF-16 too, which is what makes
+`host::command` behave the same on every platform.
+
 What still has no expression: pointer arithmetic (an array of dynamic length is a fixed-capacity
 record with its count checked afterwards). A C callback writes into the struct C hands it by taking
 `p: &mut R`, and `byval` records work on every ABI, Windows included. `docs/ffi.md` states each

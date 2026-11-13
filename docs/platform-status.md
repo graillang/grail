@@ -81,11 +81,30 @@ it, and each one made a real program fail:
 - **Paths and the console.** `grail build` treats `\` as a separator and `C:` as an absolute path,
   so source paths, module search and link inputs work in both spellings, and the Win32 console is
   set to UTF-8 (`SetConsoleOutputCP`) so a Grail string prints as UTF-8 rather than as ANSI.
+- **Wide-character paths.** Every file and process entry point is the `-W` one, so a name outside
+  the system code page is no longer mangled: `CreateFileW`, `CreateDirectoryW`, `DeleteFileW`,
+  `RemoveDirectoryW`, `GetFileAttributesW`, `GetCurrentDirectoryW`, `GetModuleFileNameW`,
+  `CreateProcessW`, `GetCommandLineW` and `GetEnvironmentStringsW`, plus `FindFirstFileW` for
+  directory streams (which `host::list_dir` never had on Windows). Conversion happens in one place:
+  the platform layer takes UTF-8 and produces UTF-16 in a fixed arena, refuses a path that is not
+  UTF-8 with `EINVAL` instead of replacing bytes, and turns a wide result back into UTF-8. A child
+  process gets a UTF-16 command line (MSVC quoting rules applied to units) and a UTF-16 environment
+  block with `CREATE_UNICODE_ENVIRONMENT`. `bun tools/windows.mjs check` runs
+  `win-unicode-paths` under Wine: Latin-1, CJK and emoji file names, a non-ASCII directory and
+  working directory, a non-ASCII argument, and the `EINVAL` refusal. `tools/test-windows.mjs` also
+  fails the suite if any case's object imports an ANSI entry point.
 
-Still open on Windows: file names go through the `-A` Win32 calls, so they are limited to the ANSI
-code page (a `-W` path is the fix); sockets, directory streams and an IOCP reactor are unimplemented
-(the scheduler work is a separate lane), and nothing here has run on Windows hardware yet - the
-native CI lane is the first place it will.
+- **TCP sockets.** Winsock is started once per process, sockets are overlapped, a receive or a send
+  is settled from the request's own event by an offload thread (a task parks and a worker stays
+  free), `connect` is ConnectEx (with `SO_UPDATE_CONNECT_CONTEXT`), and an accept is a blocking
+  `accept` on an offload thread. `lib/net.grl` works unchanged: `win-sockets-echo` runs a full loopback echo under Wine,
+  non-ASCII text included. UDP has no portable operation to reach it and stays unimplemented, and a
+  server task that accepts in a loop while other tasks connect does not finish under Wine - see
+  *Sockets: what is verified, and what is not* in docs/design/windows-backend.md.
+
+Still open on Windows: UDP, cancellation of a task blocked in a socket call, `host::pipe`, and file
+metadata beyond existence. Nothing here has run on Windows hardware yet - the native CI lane is the
+first place it will, though the Wine suite executes the path cases.
 
 macOS has a libSystem layer and a platform-module runtime, and links frameworks and ad-hoc
 signatures with static LC_LOAD_DYLIB/CodeDirectory verification. It also emits shared Mach-O

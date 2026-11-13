@@ -416,5 +416,23 @@
     "stdout": "Gr\u00fc\u00dfe aus Grail \u2014 \u2713\n\u65e5\u672c\u8a9e\n",
     "status": 0,
     "note": "UTF-8 bytes on stdout: the runtime switches the Win32 console to UTF-8 (SetConsoleOutputCP), so a Grail string is not mangled by the ANSI code page"
+  },
+  {
+    "name": "win-unicode-paths",
+    "source": "use host;\n\n// True when `text` ends with `suffix`. Used to prove the working directory reached the program\n// through GetCurrentDirectoryW, without pinning the drive letter a Wine prefix decides.\nfn tail_is<a>(text: &a [u8], suffix: string) -> u64 {\n    if text.len() < suffix.len() {\n        return 0;\n    }\n    mut i = 0;\n    while i < suffix.len() {\n        if text[text.len() - suffix.len() + i] != suffix[i] {\n            return 0;\n        }\n        i += 1;\n    }\n    return 1;\n}\n\n// Paths a Grail program can produce and the file system can hold: Latin-1, CJK, and a code point\n// past the BMP (four UTF-8 bytes, a UTF-16 surrogate pair). Each one goes through the platform\n// layer's single UTF-8 to UTF-16 conversion on its way to a -W entry point, so the name the program\n// wrote is the name the file system holds - and a name that is not UTF-8 is refused, not replaced.\nfn main() {\n    name := \"caf\\u{e9}-\\u{4e2d}\\u{6587}-\\u{1f600}.txt\";\n    println(host::write_file(name, \"wide \\u{1f600}\\n\"));\n    println(host::exists(name));\n    print(host::read_file(name));\n    mut listed = 0;\n    for e in host::list_dir(\".\") {\n        if e.text() == name {\n            listed = 1;\n        }\n    }\n    println(listed);\n    println(host::remove(name, 0));\n    println(host::exists(name));\n    dir := \"\\u{30c6}\\u{30b9}\\u{30c8}\";\n    println(host::create_dir(dir));\n    println(host::write_file(\"\\u{30c6}\\u{30b9}\\u{30c8}/inner-\\u{00fc}.txt\", \"inner\\n\"));\n    print(host::read_file(\"\\u{30c6}\\u{30b9}\\u{30c8}/inner-\\u{00fc}.txt\"));\n    mut inner = 0;\n    for e in host::list_dir(dir) {\n        if e.text() == \"inner-\\u{00fc}.txt\" {\n            inner = 1;\n        }\n    }\n    println(inner);\n    println(host::remove(\"\\u{30c6}\\u{30b9}\\u{30c8}/inner-\\u{00fc}.txt\", 0));\n    println(host::remove(dir, 1));\n    // 0xff can never appear in UTF-8: the write is refused with EINVAL and no file appears.\n    mut bad = u8[];\n    bad.push(98);\n    bad.push(97);\n    bad.push(100);\n    bad.push(45);\n    bad.push(255);\n    println(host::write_file(view(bad), \"x\\n\"));\n    println(host::exists(view(bad)));\n    println(tail_is(view(\"caf\\u{e9}-c\\u{e9}sar\"), \"caf\\u{e9}-c\\u{e9}sar\"));\n    println(tail_is(host::env(\"PWD\"), \"caf\\u{e9}-c\\u{e9}sar\"));\n    print(host::arg(1));\n    print(\"\\n\");\n}\n",
+    "args": [
+      "caf\u00e9-argument"
+    ],
+    "cwd": "caf\u00e9-c\u00e9sar",
+    "stdout": "0\n1\nwide \ud83d\ude00\n1\n0\n0\n0\n0\ninner\n1\n0\n0\n22\n0\n1\n1\ncaf\u00e9-argument\n",
+    "status": 0,
+    "note": "the platform layer takes UTF-8 paths and converts at the FFI boundary: an emoji/CJK/Latin-1 name round-trips through CreateFileW, FindFirstFileW, GetCurrentDirectoryW and the command line, and a path that is not UTF-8 is refused with EINVAL instead of being replaced"
+  },
+  {
+    "name": "win-sockets-echo",
+    "source": "use host;\n\n// TCP over the runtime's socket layer on Windows: the platform layer creates Winsock sockets,\n// connects with an overlapped ConnectEx, accepts, and moves bytes with overlapped WSARecv/WSASend\n// whose completions the reactor delivers. One thread does all four calls, in the order a loopback\n// echo needs: the connect completes before the accept looks for it.\nfn main() {\n    listener := host::tcp_listen(0);\n    port := host::tcp_port(listener);\n    println(port > 0);\n    client := host::tcp_connect(view(\"127.0.0.1\"), port);\n    println(client < 9223372036854775807);\n    server := host::tcp_accept(listener);\n    println(server < 9223372036854775807);\n    host::write_fd(client, view(\"ping\\u{1f600}\\n\"));\n    print(host::read_fd(server, 64));\n    host::write_fd(server, view(\"pong\\n\"));\n    print(host::read_fd(client, 64));\n    // A closed peer is end of stream, not an error.\n    host::close(client);\n    println(host::read_fd(server, 64).len());\n    host::close(server);\n    host::close(listener);\n    println(\"closed\");\n}\n",
+    "stdout": "true\ntrue\ntrue\nping\ud83d\ude00\npong\n0\nclosed\n",
+    "status": 0,
+    "note": "the Windows socket layer end to end: Winsock startup, bind/listen, an overlapped ConnectEx connect, an accept, overlapped WSARecv/WSASend carrying non-ASCII text, a peer close read as end of stream, and close"
   }
 ]
