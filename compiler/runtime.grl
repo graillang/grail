@@ -11,13 +11,13 @@ unsafe module runtime;
 // chunks all writing one past their own slice is the regression fixture), and a racing second
 // reporter used to print its own message and then raise its own SIGABRT. A signal sent to the
 // process is delivered to whichever thread the kernel picks - often a parked worker returning to
-// user space - so the process died by SIGABRT instead of the 134 exit the contract promises. A
-// single atomic claim word now decides the reporter; every other failing thread parks on that word
+// user space - so the process died by SIGABRT instead of the 134 exit the contract promises. Now a
+// single atomic claim word decides the reporter; every other failing thread parks on that word
 // forever, and the reporter's exit ends the process.
 //
-// SIGABRT is raised only from a thread whose failure cannot race another reporter - the main thread,
-// an offload helper, a thread foreign code created. A scheduler or pool worker exits 134 directly:
-// it is one of several to fail at once, and the signal would race the hard exit for the same reason.
+// SIGABRT is raised only from the main thread, where it is the documented, deterministic outcome
+// (a parent sees the signal). A runtime thread does not raise it: it would race the hard exit for
+// the same reason, and the abort status 134 is what a task or pool failure promises.
 fn rt_abort_claim() -> u64 {
     return raw_state() + 3456;
 }
@@ -40,8 +40,12 @@ fn rt_abort_final() -> u64 {
     rt_hard_exit(134);
     return 0;
 }
-// Whether this failure is reported as SIGABRT. Record word 24 is a runtime-worker marker: it is the
-// thread's entry until rt_thread_main has read it, and a pool worker then stores non-zero there.
+// Whether this failure is reported as SIGABRT. A thread the runtime created to run tasks or pool
+// jobs opens the possibility of two such threads failing at once, and a process-wide signal from
+// one of them may be delivered to a parked sibling before the hard exit runs, turning the promised
+// status 134 into death by SIGABRT. Those threads therefore exit directly; the main thread, an
+// offload thread and a thread foreign code created keep the signal (record word 24 is non-zero only
+// on a runtime worker, see rt_thread_start).
 fn rt_abort_signals() -> u64 {
     w := raw_tp_get();
     if w == 0 {
@@ -1581,8 +1585,8 @@ fn rt_thread_spawn_detached(entry: u64, arg: u64) -> u64 {
 // One OS thread running entry(arg) on its own worker record. The record is the top 64 bytes of a
 // mapped region: {0 self, 8 scheduler sp, 16 current task, 24 entry then the runtime-worker marker,
 // 32 arg, 40 TID word of a persistent thread, 48 Windows wait value, 56 host TLS base}. Word 24 is
-// the entry only until rt_thread_main has read it; a pool worker then stores a non-zero marker there
-// so rt_abort_signals can tell a runtime worker from any other thread. Word 56 is this thread's libc TCB,
+// the entry only until rt_thread_main has read it; a scheduler or pool worker then stores a non-zero
+// marker there so rt_abort_signals can tell a runtime worker from any other thread. Word 56 is this thread's libc TCB,
 // which every foreign call made on the thread switches to (0: there is none, the call runs on the
 // record). The two words under the record are the start block {rt_thread_main, record}.
 //
@@ -2370,12 +2374,25 @@ fn rt_env_is(name: u64, value: u64) -> u64 {
     return 0;
 }
 
-// Scheduler (raw_state()+72): 0 queue lock, 8 head, 16 tail, 24 idle sequence (futex),
-// 32 worker count, 40 epoll fd, 48 fence eventfd, 56 reactor batch epoch, 64 blocking-call warning
-// flag. Infrastructure is mapped, not counted as user allocation.
+// Scheduler block (raw_state()+72, raw_map: infrastructure, not counted as user allocation):
+//   0 injection lock  8 injection head  16 injection tail  24 park/wake sequence (futex word)
+//  32 worker count  40 reactor handle  48 fence eventfd  56 reactor batch epoch
+//  64 blocking-call warning flag  72 worker array  80 injection ring  88 injection capacity
+//  96 parked workers (atomic)
+// Worker block (raw_map, one page per worker):
+//   0 deque buffer  8 deque head (atomic)  16 deque tail (atomic)  24 deque mask
+//  32 scheduler  40 index  48 thread record  56 free-stack list head  64 free-stack count
+//  72 steal random state  80 deque capacity
 //
-// Green mode creates rt_os_workers() scheduler threads and, only on a platform that has one, an
-// epoll reactor beside them. Thread-per-task mode creates neither: each task brings its own thread.
+// The deque is a Chase-Lev deque with a fixed capacity (rt_deque_capacity, 131072 entries): the
+// owner pushes and pops at the bottom, a thief steals at the top with a CAS on the head. A fixed
+// buffer is what makes it sound without memory reclamation - no thread ever frees a slot a thief may
+// be reading - and 131072 entries cover a burst of 100k spawns; a push that does not fit spills to
+// the shared injection ring, which is also where a spawn from a thread that is not a worker (the
+// main thread, the reactor, an offload helper) and a wake from one of those goes.
+//
+// Green mode creates rt_os_workers() scheduler threads and, only on a platform that has one, a
+// reactor beside them. Thread-per-task mode creates neither: each task brings its own thread.
 fn rt_sched() -> u64 {
     state := raw_state();
     s := raw_atomic_load(state + 72);
@@ -2412,10 +2429,24 @@ fn rt_sched() -> u64 {
         }
         workers := rt_os_workers();
         raw_store(made + 32, workers);
-        raw_atomic_store(state + 72, made);
+        raw_store(made + 80, raw_map(65536));
+        raw_store(made + 88, 8192);
+        array := raw_map(workers * 8);
+        if rt_error(array) {
+            rt_abort();
+        }
+        raw_store(made + 72, array);
         mut i = 0;
         while i < workers {
-            rt_thread_spawn_detached(rt_worker_loop, made);
+            raw_store(array + i * 8, rt_sched_worker_new(made, i));
+            i += 1;
+        }
+        // Workers start only once the array and the injection ring they are reachable through are
+        // complete, and the block is published first: rt_sched's other callers spin on word 72.
+        raw_atomic_store(state + 72, made);
+        i = 0;
+        while i < workers {
+            rt_thread_spawn_detached(rt_worker_loop, raw_load(array + i * 8));
             i += 1;
         }
         if rt_os_reactor() != 0 {
@@ -2428,39 +2459,203 @@ fn rt_sched() -> u64 {
     }
     return raw_atomic_load(state + 72);
 }
-fn rt_enqueue(t: u64) -> u64 {
-    s := rt_sched();
-    rt_spin_lock(s);
-    raw_store(t + 32, 0);
-    tail := raw_load(wrapping_add(s, 16));
-    if tail == 0 {
-        raw_store(wrapping_add(s, 8), t);
-    } else {
-        raw_store(tail + 32, t);
+fn rt_deque_capacity() -> u64 {
+    return 131072;
+}
+fn rt_sched_worker_new(s: u64, index: u64) -> u64 {
+    w := raw_map(4096);
+    if rt_error(w) {
+        rt_abort();
     }
-    raw_store(wrapping_add(s, 16), t);
-    rt_spin_unlock(s);
+    cap := rt_deque_capacity();
+    buf := raw_map(cap * 8);
+    if rt_error(buf) {
+        rt_abort();
+    }
+    raw_store(w, buf);
+    raw_store(w + 24, cap - 1);
+    raw_store(w + 32, s);
+    raw_store(w + 40, index);
+    raw_store(w + 80, cap);
+    return w;
+}
+// The worker block of the calling thread, or 0 for every other thread (the main thread, the
+// reactor, an offload helper, a pool worker). Words 24 and 32 of the thread record are the
+// scheduler worker's to claim - rt_thread_main has already consumed the entry/argument words - and
+// the marker in word 24 says which kind of runtime thread this is: 2 is a scheduler worker with a
+// deque, 1 is a pool worker (whose argument word holds a pool block, not a deque).
+fn rt_worker_self() -> u64 {
+    tp := raw_tp_get();
+    if tp == 0 {
+        return 0;
+    }
+    if raw_load(tp + 24) != 2 {
+        return 0;
+    }
+    return raw_load(tp + 32);
+}
+// Bump the sequence unconditionally and wake a parked worker when there may be one: a worker that
+// read the sequence before looking for work either finds the new work or its wait fails with the
+// changed value, so no wake can be lost even when the parked count read is stale.
+fn rt_notify(s: u64) -> u64 {
     rt_atomic_fetch_add(s + 24, 1);
-    rt_syscall(202, s + 24, 129, 1);
+    if raw_atomic_load(s + 96) != 0 {
+        rt_syscall(202, s + 24, 129, 1);
+    }
     return 0;
 }
-fn rt_dequeue(s: u64) -> u64 {
-    while true {
-        seq := raw_atomic_load(s + 24);
-        rt_spin_lock(s);
-        t := raw_load(wrapping_add(s, 8));
-        if t != 0 {
-            next := raw_load(t + 32);
-            raw_store(wrapping_add(s, 8), next);
-            if next == 0 {
-                raw_store(wrapping_add(s, 16), 0);
+// ---- Chase-Lev deques ---------------------------------------------------------------------
+// Owner push and pop at the bottom (the tail), thieves steal at the top (the head) with a CAS. The
+// owner's tail store is the release that publishes the slot; a thief's CAS on the head is what
+// claims it, and a lost CAS means somebody else has the task.
+fn rt_deque_push(w: u64, t: u64) -> u64 {
+    tail := raw_atomic_load(w + 16);
+    head := raw_atomic_load(w + 8);
+    // Full when the tail has advanced a capacity past the head. Addition, not subtraction: an
+    // emptied deque is left with head == tail, but a thief may advance the head between the two
+    // loads, and tail - head must not wrap (checked arithmetic would abort).
+    if head + raw_load(w + 80) <= tail {
+        return 0;
+    }
+    raw_store(raw_load(w) + (tail & raw_load(w + 24)) * 8, t);
+    raw_atomic_store_release(w + 16, tail + 1);
+    return 1;
+}
+fn rt_deque_pop(w: u64) -> u64 {
+    mut tail = raw_atomic_load(w + 16);
+    if tail == 0 {
+        return 0;
+    }
+    tail = tail - 1;
+    raw_atomic_store(w + 16, tail);
+    head := raw_atomic_load(w + 8);
+    if head <= tail {
+        task := raw_load(raw_load(w) + (tail & raw_load(w + 24)) * 8);
+        if head == tail {
+            // The last entry: the owner and a thief may race for it, and only the CAS decides.
+            // Tail is restored whether or not the CAS wins, so an emptied deque is left with
+            // head == tail; leaving tail one below head would make the next push's size
+            // computation go negative.
+            if raw_atomic_cas(w + 8, head, head + 1) != head {
+                raw_atomic_store(w + 16, tail + 1);
+                return 0;
             }
+            raw_atomic_store(w + 16, tail + 1);
+        }
+        return task;
+    }
+    raw_atomic_store(w + 16, tail + 1);
+    return 0;
+}
+fn rt_deque_steal(v: u64) -> u64 {
+    head := raw_atomic_load(v + 8);
+    tail := raw_atomic_load(v + 16);
+    if head < tail {
+        task := raw_load(raw_load(v) + (head & raw_load(v + 24)) * 8);
+        if raw_atomic_cas(v + 8, head, head + 1) == head {
+            return task;
+        }
+    }
+    return 0;
+}
+// A ring for every push that is not the owner's: spawns and wakeups from a thread without a deque,
+// and a deque that is full. The lock is the only shared state, and it is held for one slot.
+fn rt_inject_push(s: u64, t: u64) -> u64 {
+    while true {
+        rt_spin_lock(s);
+        head := raw_load(s + 8);
+        tail := raw_load(s + 16);
+        if tail - head < raw_load(s + 88) {
+            raw_store(raw_load(s + 80) + (tail % raw_load(s + 88)) * 8, t);
+            raw_atomic_store_release(s + 16, tail + 1);
             rt_spin_unlock(s);
-            return t;
+            return 0;
         }
         rt_spin_unlock(s);
-        rt_syscall(202, s + 24, 128, seq);
+        // Full: the other workers are draining it, so let them run and try again.
+        rt_notify(s);
+        rt_syscall(24, 0, 0, 0);
     }
+    return 0;
+}
+fn rt_inject_pop(s: u64) -> u64 {
+    rt_spin_lock(s);
+    head := raw_load(s + 8);
+    tail := raw_load(s + 16);
+    if head == tail {
+        rt_spin_unlock(s);
+        return 0;
+    }
+    task := raw_load(raw_load(s + 80) + (head % raw_load(s + 88)) * 8);
+    raw_store(s + 8, head + 1);
+    rt_spin_unlock(s);
+    return task;
+}
+// xorshift64 with per-worker state: the victim order is spread without a shared cursor, and the
+// generator costs three shifts.
+fn rt_worker_random(w: u64) -> u64 {
+    mut x = raw_load(w + 72);
+    if x == 0 {
+        x = wrapping_add(wrapping_mul(raw_load(w + 40) + 1, 2654435761), 2463534242);
+    }
+    x = x ^ (x << 13);
+    x = x ^ (x >> 7);
+    x = x ^ (x << 17);
+    raw_store(w + 72, x);
+    return x;
+}
+// Own deque first (locality and LIFO for fork-join), then the injection ring, then one steal pass
+// over the other workers starting at a random victim.
+fn rt_worker_take(s: u64, w: u64) -> u64 {
+    mut t = rt_deque_pop(w);
+    if t != 0 {
+        return t;
+    }
+    t = rt_inject_pop(s);
+    if t != 0 {
+        return t;
+    }
+    return rt_worker_steal(s, w);
+}
+fn rt_worker_steal(s: u64, w: u64) -> u64 {
+    workers := raw_load(s + 32);
+    if 1 < workers {
+        array := raw_load(s + 72);
+        start := rt_worker_random(w) % workers;
+        mut i = 0;
+        while i < workers {
+            victim := (start + i) % workers;
+            if victim != raw_load(w + 40) {
+                t := rt_deque_steal(raw_load(array + victim * 8));
+                if t != 0 {
+                    return t;
+                }
+            }
+            i += 1;
+        }
+    }
+    return 0;
+}
+fn rt_enqueue(t: u64) -> u64 {
+    s := rt_sched();
+    w := rt_worker_self();
+    mut placed = 0;
+    if w != 0 {
+        placed = rt_deque_push(w, t);
+    }
+    if placed == 0 {
+        rt_inject_push(s, t);
+    }
+    rt_notify(s);
+    return 0;
+}
+// Park until the sequence changes. The caller has already looked for work; a push after that look
+// bumps the sequence, so the wait either finds work on the next pass or returns immediately.
+fn rt_worker_park(s: u64) -> u64 {
+    seq := raw_atomic_load(s + 24);
+    rt_atomic_fetch_add(s + 96, 1);
+    rt_syscall(202, s + 24, 128, seq);
+    rt_atomic_fetch_sub(s + 96, 1);
     return 0;
 }
 // Task words: 0 saved sp (Windows: the fiber handle), 8 stack base, 16 stack size,
@@ -2470,36 +2665,56 @@ fn rt_dequeue(s: u64) -> u64 {
 // 96 finished (futex word for OS-thread joiners), 104 handle (0 live, 1 joined, 2 abandoned),
 // 112 result drop function, 120 scope link, 128 in cancellable wait, 136 yield request,
 // 144 completed (set by the task itself before its last switch).
-fn rt_worker_loop(s: u64) -> u64 {
-    w := raw_tp_get();
+fn rt_worker_loop(worker: u64) -> u64 {
+    s := raw_load(worker + 32);
+    tp := raw_tp_get();
+    raw_store(tp + 24, 2); // runtime worker with a deque: rt_abort_signals, rt_worker_self
+    raw_store(tp + 32, worker);
     // Give this scheduler thread whatever it needs to switch onto a task's stack (nothing on a
     // platform whose switch is a stack swap, a fiber conversion on Windows).
     rt_os_sched_prepare();
     while true {
-        t := rt_dequeue(s);
-        raw_store(w + 16, t);
-        rt_os_ctx_enter(t);
-        raw_store(w + 16, 0);
-        if raw_load(t + 144) {
-            // Now off the task's stack: release it, then publish completion (the joiner may free t).
-            rt_os_ctx_release(t);
-            raw_atomic_store(t + 96, 1);
-            rt_syscall(202, t + 96, 129, 2147483647);
-            joiner := rt_atomic_swap(t + 88, 1);
-            if 1 < joiner {
-                rt_wake(joiner);
-            }
+        t := rt_worker_take(s, worker);
+        if t == 0 {
+            rt_worker_park(s);
         } else {
-            if raw_load(t + 136) {
-                raw_store(t + 136, 0);
+            rt_worker_run(s, worker, t);
+        }
+    }
+    return 0;
+}
+fn rt_worker_run(s: u64, w: u64, t: u64) -> u64 {
+    tp := raw_tp_get();
+    raw_store(tp + 16, t);
+    if raw_load(t) == 0 {
+        rt_os_ctx_new(t);
+    }
+    rt_os_ctx_enter(t);
+    raw_store(tp + 16, 0);
+    if raw_load(t + 144) {
+        // Now off the task's stack: release it, then publish completion (the joiner may free t).
+        rt_os_ctx_release(t);
+        raw_atomic_store(t + 96, 1);
+        rt_syscall(202, t + 96, 129, 2147483647);
+        joiner := rt_atomic_swap(t + 88, 1);
+        if 1 < joiner {
+            rt_wake(joiner);
+        }
+    } else {
+        if raw_load(t + 136) {
+            raw_store(t + 136, 0);
+            rt_enqueue(t);
+        } else {
+            if raw_atomic_cas(t + 24, 1, 2) != 1 {
+                raw_atomic_store(t + 24, 0);
                 rt_enqueue(t);
-            } else {
-                if raw_atomic_cas(t + 24, 1, 2) != 1 {
-                    raw_atomic_store(t + 24, 0);
-                    rt_enqueue(t);
-                }
             }
         }
+    }
+    // Work still queued here means a stopped sibling can help: this is what spreads a spawn burst
+    // across every worker instead of one push, one wake.
+    if raw_load(w + 16) != raw_load(w + 8) {
+        rt_notify(s);
     }
     return 0;
 }
@@ -2666,10 +2881,10 @@ fn rt_task_spawn(s: u64, f: u64, item: u64, arity: u64, dropper: u64) -> u64 {
         raw_store(t + 152, rt_thread_spawn(rt_task_thread_main, t));
         return t;
     }
-    // Green: the platform builds the task's execution context (a stack whose initial frame enters
-    // rt_green_main on Linux and macOS, a fiber started in rt_win_fiber_start on Windows) and stores
-    // it in word 0.
-    rt_os_ctx_new(t);
+    // Green: the task's execution context (a stack whose initial frame enters rt_green_main on Linux
+    // and macOS, a fiber started in rt_win_fiber_start on Windows) is built the first time a worker
+    // runs it (rt_worker_run), not here. A burst of 100k spawns therefore costs records and queue
+    // slots, not 100k stack mappings, and only the tasks that actually run hold a stack.
     rt_enqueue(t);
     return t;
 }
@@ -2904,6 +3119,25 @@ fn f_host_sleep_ms(ms: u64) -> u64 {
     rt_free(buf);
     rt_free(spec);
     return 0;
+}
+// Which scheduler worker is running this call, numbered from 1, or 0 when the caller is not on one
+// (the main thread, a thread-per-task task, an offload helper). A fork-join test records the
+// distinct values it sees; it is also the cheapest way to confirm that work actually spreads.
+fn f_host_worker_id() -> u64 {
+    w := rt_worker_self();
+    if w == 0 {
+        return 0;
+    }
+    return raw_load(w + 40) + 1;
+}
+// How many scheduler workers the process created (0 in thread-per-task mode, which has none). A
+// program uses it to tell "this host is sequential" from "work did not spread".
+fn f_host_workers() -> u64 {
+    if rt_task_threads() {
+        return 0;
+    }
+    s := rt_sched();
+    return raw_load(s + 32);
 }
 fn f_host_now_ms() -> u64 {
     spec := rt_alloc(16);

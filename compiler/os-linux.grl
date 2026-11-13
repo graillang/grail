@@ -300,11 +300,13 @@ fn rt_comptime_check(n: u64, a: u64) -> u64 {
 fn rt_os_reactor() -> u64 {
     return 1;
 }
-// Scheduler threads behind the shared run queue: one per CPU, clamped to [4, 64].
+// One scheduler worker per CPU. The floor of two keeps a cooperative program making progress on a
+// single-core host (a task that spins waiting for a sibling must have a sibling thread to run on),
+// and the ceiling bounds the per-worker deque and stack caches.
 fn rt_os_workers() -> u64 {
     mut workers = rt_cpus();
-    if workers < 4 {
-        workers = 4;
+    if workers < 2 {
+        workers = 2;
     }
     if 64 < workers {
         workers = 64;
