@@ -10,6 +10,28 @@ an integer is never a truth value on its own: write `if count != 0`, not `if cou
 
 {{example:strict-condition}}
 
+## `if` as a value
+
+`if` also produces a value where one is required: an initializer, an argument, a `return`, a record
+field, a match arm expression.
+
+```grl
+label := if n == 0 { "none" } else if n == 1 { "one" } else { "many" };
+show(if c { a } else { b });
+```
+
+Each arm is one expression in braces, and `else` is required - without it there would be no value
+when the condition is false. Both arms must have the same type, and when they do not the diagnostic
+names both. An arm may instead be a block of statements that always leaves the branch (`return`,
+`break`): it needs no value, so the other arm decides the type.
+
+Three shapes are refused by name rather than guessed at. An arm that is a block of statements with
+no such exit has no value. An arm that writes (`{ x = 1; }`) is a statement, not a value. And an arm
+whose value borrows - `if c { &a } else { &b }` - would have to name both loans in one result, so the
+reference stays inside its arm.
+
+{{example:if-values}}
+
 `for i in n` visits `0` through `n-1`; `for i in a..b` visits `a` up to but not including `b`.
 Both are counted loops, not an iterator protocol. `while` repeats while its condition is `bool`.
 `break` and `continue` apply to the innermost loop.
