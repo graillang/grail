@@ -4,6 +4,42 @@ Every suite runs from the repository root with Bun. The compiler is built on dem
 content under `.work/native/<hash>/`; the tools print the compiler path when `GRAIL_COMPILER` is not
 set.
 
+## `grail test`: one command, two corpora
+
+`grail test` is the front door, and what it runs depends on where it runs:
+
+- **In the Grail tree** (a `tests/native-cases.json` and a `tools/test-native.mjs` beside the working
+  directory) it forwards every argument to `tools/test-native.mjs`. That is one engine, not two: the
+  semantics of `grail test --filter ffi- --jobs 8` and `bun tools/test-native.mjs --filter ffi- --jobs 8`
+  are the same by construction, and every gate that calls the tool directly keeps working.
+- **In a project** (`grail new`, a `grail.pkg` and programs under `tests/`) it compiles each selected
+  program and runs it; a non-zero exit is the failure. Paths on the command line are files or
+  directories, and the default is `tests/`.
+
+Both print the same report: one `test NAME ... ok` line per case, a `FAIL NAME` block for each
+failure (the name, its source path, the exit status and signal, and what the program printed), and a
+final `passed X failed Y skipped Z` line. The exit status is 0 when nothing failed, 1 when something
+did, so `grail test` is a gate in a script.
+
+| flag | meaning |
+|---|---|
+| `--filter TEXT` | only cases whose name (corpus) or path (project) contains TEXT |
+| `--list` | print the selected names and run nothing |
+| `--shard i/n` | run shard i of n, by position |
+| `--jobs N` | run N in flight: the corpus engine starts N child processes, one stripe of cases each, and a project starts one child per test with a per-test log. The report is still in case order, `--fail-fast` included |
+| `--fail-fast` | stop at the first failure. With `--jobs N` the tests already running finish, and the ones that never started are reported as `skipped` |
+| `--update` | corpus only: rewrite the expectations of the selected cases that differ, and nothing else |
+
+`--update` rewrites a case's `stdout` and `status`, because those are what a run observes exactly. A
+`stderr` pin and a `signal` pin are contracts of their own (a rejection's diagnostic above all), so a
+case whose other pins still disagree is reported as not rewritten instead of being made to pass.
+Nothing is rewritten without `--update`, and the file keeps its generated formatting (JSON escapes for
+non-ASCII, two-space indent, one trailing newline).
+
+The `GRAIL_TEST_FILTER`, `GRAIL_TEST_SHARD`, `GRAIL_TEST_RESUME=1` and `GRAIL_TEST_JOBS` environment
+knobs still work and mean what they always did; the flags are the same selections spelled on the
+command line.
+
 ## The full gate
 
 ```sh
@@ -33,7 +69,7 @@ wrong number. It is off by default because the check costs a compare per fact us
 **Do not set `GRAIL_SYSROOT_*` unless you have a real glibc sysroot.** The cross targets link
 statically by default, which needs no libc. Without a sysroot, a case that declares
 `extern "C"` cannot link on aarch64/riscv64 (there is no `-lc` to find), so those fixtures carry
-`"targets": ["x86_64"]` and the runner reports them as `skipped (host-only)`. Pointing
+`"targets": ["x86_64"]` and the runner counts them in the summary's `skipped`. Pointing
 `GRAIL_SYSROOT_AARCH64` at a tree that only holds QEMU binaries *causes* the `-lc` failure, because
 it switches the link to dynamic.
 
@@ -134,11 +170,20 @@ corpus; a native arm64 runner does them in minutes. Run them locally when the ta
 changing, not as part of every gate.
 
 **Slice a suite instead of waiting for it.** A full native run is minutes per backend, so the runner
-takes three opt-in knobs (a plain invocation is unchanged):
+takes opt-in selection and reporting flags (a plain invocation is unchanged; the older environment
+knobs, `GRAIL_TEST_FILTER` / `GRAIL_TEST_SHARD` / `GRAIL_TEST_RESUME=1` / `GRAIL_TEST_JOBS`, still mean
+the same thing):
 
-    GRAIL_TEST_FILTER='^ffi-' bun tools/test-native.mjs x86_64      # one area, seconds
-    GRAIL_TEST_SHARD=2/4 bun tools/test-native.mjs x86_64            # a quarter, for parallel gates
+    bun tools/test-native.mjs x86_64 --filter '^ffi-'                # one area, seconds
+    bun tools/test-native.mjs x86_64 --shard 2/4                     # a quarter, for parallel gates
+    bun tools/test-native.mjs x86_64 --jobs 8 --filter '^ffi-'        # the same area, eight stripes
+    bun tools/test-native.mjs x86_64 --list --filter 'doc-'           # what a filter selects
     GRAIL_TEST_RESUME=1 bun tools/test-native.mjs x86_64             # skip cases that already passed
+
+`--jobs N` splits the selection into N stripes, one child process each, with their own case
+directories, snapshots and resume markers; the parent merges the reports and prints them in case
+order. It is a different axis from `--shard`: shards partition a selection for *separate* gates,
+stripes partition it inside *one* run.
 
 Shards are safe to run **in parallel with each other** in one worktree: each case owns
 `.work/native-tests/<target>/<case>`, and a shard's case set is disjoint from every other shard's. Native and LLVM runs of one target use separate directories (`x86_64`, `x86_64-llvm`, `x86_64-llvm+facts`), so they may overlap too. What

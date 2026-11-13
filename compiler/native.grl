@@ -319,15 +319,15 @@ struct DebugVar {
     slot: u64,
     line: u64,
     param: u64,
-    // DWARF base type of the value in the 8-byte slot: name, DW_ATE encoding, byte size.
-    tname: u8[],
-    tenc: u64,
-    tsize: u64,
     // The variable's full DWARF type: an index into c.debug_types.
     ty: u64
 }
-// One DWARF type of the program's debug information. kind 0 is a base type (enc, size); 1 a
-// pointer to `pointee`; 2 a structure of `size` bytes with `members`.
+// One DWARF type of the program's debug information:
+//   kind 0 base type (enc, size)
+//   kind 1 pointer to `pointee`
+//   kind 2 structure of `size` bytes with `members`
+//   kind 3 enumeration: `members` are its enumerators (name, offset = the tag value)
+//   kind 4 typedef of `pointee`, named as the Grail type it names
 struct DebugType {
     name: u8[],
     kind: u64,
@@ -1299,6 +1299,23 @@ fn debug_type_add<a>(c: (&a mut C), t: DebugType) -> u64 {
 fn debug_base<a, b>(c: (&a mut C), name: &b [u8], enc: u64, size: u64) -> u64 {
     return debug_type_add(&mut c, DebugType { name: copy_bytes(name), kind: 0, enc: enc, size: size, pointee: 0, members: DebugMember[] });
 }
+fn debug_typedef<a, b>(c: (&a mut C), name: &b [u8], to: u64) -> u64 {
+    return debug_type_add(&mut c, DebugType { name: copy_bytes(name), kind: 4, enc: 0, size: 0, pointee: to, members: DebugMember[] });
+}
+// The enumeration type of an enum's tag word: one enumerator per variant, valued by the tag the
+// variant constructor stores (the variant's index in the declaration).
+fn debug_enum_tag<a>(c: (&a mut C), ty: u64) -> u64 {
+    d := ty_arg(&mut c, ty);
+    mut name = c.decls[d].name.copy();
+    push_bytes(&mut name, view(".tag"));
+    mut members = DebugMember[];
+    count := c.decls[d].count;
+    for i in count {
+        vname := c.fields[c.decls[d].first + i].name.copy();
+        members.push(DebugMember { name: vname, ty: 0, offset: i });
+    }
+    return debug_type_add(&mut c, DebugType { name: name, kind: 3, enc: 0, size: 8, pointee: 0, members: members });
+}
 fn debug_pointer<a>(c: (&a mut C), to: u64) -> u64 {
     mut name = copy_bytes(view("*"));
     push_bytes(&mut name, view(c.debug_types[to].name));
@@ -1306,6 +1323,9 @@ fn debug_pointer<a>(c: (&a mut C), to: u64) -> u64 {
 }
 fn debug_header<a, b>(c: (&a mut C), name: &b [u8], data: u64) -> u64 {
     word := debug_base(&mut c, view("u64"), 7, 8);
+    // `data` is a pointer to the first element, so `print *v.data@v.len` walks the elements at the
+    // right stride. It is deliberately not a DW_TAG_array_type with a count: the length lives in
+    // `len`, and an array type would have to state a length the header does not carry.
     mut members = DebugMember[];
     members.push(DebugMember { name: copy_bytes(view("data")), ty: debug_pointer(&mut c, data), offset: 0 });
     members.push(DebugMember { name: copy_bytes(view("len")), ty: word, offset: 8 });
@@ -1396,6 +1416,27 @@ fn debug_type_of<a>(c: (&a mut C), ty: u64, c_layout: u64) -> u64 {
             return debug_base(&mut c, view("float"), 4, 4);
         }
     }
+    // An enum value is a pointer to {tag, payload}: the tag is an enumeration type with the variant
+    // names as enumerators, and the payload is left as the word it is, because which variant's type
+    // it holds is the tag's answer, not this type's.
+    mut enum_value = false;
+    if k == 8 {
+        ed := ty_arg(&mut c, ty);
+        enum_value = c.decls[ed].is_enum != 0;
+    }
+    if enum_value {
+        ed := ty_arg(&mut c, ty);
+        name := c.decls[ed].name.copy();
+        tag := debug_enum_tag(&mut c, ty);
+        word := debug_base(&mut c, view("u64"), 7, 8);
+        mut members = DebugMember[];
+        members.push(DebugMember { name: copy_bytes(view("tag")), ty: tag, offset: 0 });
+        members.push(DebugMember { name: copy_bytes(view("payload")), ty: word, offset: 8 });
+        mut value_name = copy_bytes(view(name));
+        push_bytes(&mut value_name, view(".value"));
+        s := debug_type_add(&mut c, DebugType { name: value_name, kind: 2, enc: 0, size: 16, pointee: 0, members: members });
+        return debug_typedef(&mut c, view(name), debug_pointer(&mut c, s));
+    }
     if k == 5 {
         // A view: a pointer into someone else's bytes, and a length.
         text := debug_base(&mut c, view("char"), 8, 1);
@@ -1431,9 +1472,6 @@ fn record_debug_func<a, b, d>(c: (&a mut C), name: &b [u8], module: &d [u8], sit
                 slot: l.slot,
                 line: l.line,
                 param: l.param,
-                tname: copy_bytes(view(l.tname)),
-                tenc: l.tenc,
-                tsize: l.tsize,
                 ty: l.ty
             }
         );
@@ -1591,6 +1629,19 @@ fn codeview_types<a>(c: &a C, index: (&mut u64[])) -> u8[] {
         t := &c.debug_types[i];
         if t.kind == 0 {
             index[i] = cv_base(&t);
+        }
+        if t.kind == 3 {
+            // CodeView has no tagged-enum record here: the tag word is an 8-byte unsigned integer.
+            index[i] = 35;
+        }
+        if t.kind == 4 {
+            // A typedef is transparent: the index of what it names is already known (a typedef of a
+            // structure names the structure's forward reference).
+            mut to = index[t.pointee];
+            if c.debug_types[t.pointee].kind == 2 {
+                to = fwd[t.pointee];
+            }
+            index[i] = to;
         }
         if t.kind == 2 {
             cv_structure(&mut out, 0, 0, 0, view(t.name), 1);
@@ -1776,6 +1827,24 @@ fn debug_sections<a, b>(c: &a C, entry: &b [u8]) -> u8[] {
     dattr(&mut out, 0x49, 0x13);
     dattr(&mut out, 0x38, 0x0f);
     dput(&mut out, view(".byte 0\n.byte 0\n"));
+    // 9: enumeration type: name, byte size; enumerators as children.
+    duleb(&mut out, 9);
+    dput(&mut out, view(".uleb128 4\n.byte 1\n"));
+    dattr(&mut out, 0x03, 0x08);
+    dattr(&mut out, 0x0b, 0x0f);
+    dput(&mut out, view(".byte 0\n.byte 0\n"));
+    // 10: enumerator: name, constant value (the tag the constructor stores).
+    duleb(&mut out, 10);
+    dput(&mut out, view(".uleb128 40\n.byte 0\n"));
+    dattr(&mut out, 0x03, 0x08);
+    dattr(&mut out, 0x1c, 0x0b);
+    dput(&mut out, view(".byte 0\n.byte 0\n"));
+    // 11: typedef: name, type.
+    duleb(&mut out, 11);
+    dput(&mut out, view(".uleb128 22\n.byte 0\n"));
+    dattr(&mut out, 0x03, 0x08);
+    dattr(&mut out, 0x49, 0x13);
+    dput(&mut out, view(".byte 0\n.byte 0\n"));
     dput(&mut out, view(".byte 0\n"));
 
     dput(&mut out, view(".section .debug_info,\"\",@progbits\n"));
@@ -1843,6 +1912,25 @@ fn debug_sections<a, b>(c: &a C, entry: &b [u8]) -> u8[] {
                 duleb(&mut out, m.offset);
             }
             dput(&mut out, view(".byte 0\n"));
+        }
+        if t.kind == 3 {
+            duleb(&mut out, 9);
+            dstring(&mut out, view(t.name));
+            duleb(&mut out, t.size);
+            for j in t.members.len() {
+                m := &t.members[j];
+                duleb(&mut out, 10);
+                dstring(&mut out, view(m.name));
+                duleb(&mut out, m.offset);
+            }
+            dput(&mut out, view(".byte 0\n"));
+        }
+        if t.kind == 4 {
+            duleb(&mut out, 11);
+            dstring(&mut out, view(t.name));
+            dput(&mut out, view(".long .Ldebug_type_"));
+            dnum(&mut out, t.pointee);
+            dput(&mut out, view("-.Ldebug_cu_start+4\n"));
         }
     }
 
@@ -11656,9 +11744,6 @@ fn bind<a>(c: (&a mut C), name: u8[], ty: u64, id: u64, mutable: u64) -> unit {
                     slot: id,
                     line: line,
                     param: 0,
-                    tname: debug_type_name(&mut c, ty),
-                    tenc: debug_type_encoding(&mut c, ty),
-                    tsize: debug_type_size(&mut c, ty),
                     ty: debug_type_of(&mut c, ty, 0)
                 }
             );

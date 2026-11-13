@@ -1,0 +1,1410 @@
+module docgen;
+use host;
+
+// `grail doc`: the documentation a Grail source tree already carries, rendered as one HTML page per
+// module plus a JSON index.
+//
+// Grail has no doc-comment syntax, and the compiler drops every comment before a declaration exists.
+// The convention this generator reads is therefore a `//` comment block directly above a declaration
+// (and above a field), which is what the standard library and the compiler itself already write; the
+// compiler is unchanged, and `grail doc` prints the same thing for the same bytes.
+//
+// The scanner is source-level, deliberately: it reads declarations, members, refinement clauses,
+// effect claims and comments, and it never needs a type checker to run. A construct it does not
+// understand is simply not documented - it never aborts on a file it cannot classify.
+//
+// Determinism is a requirement, because a generated tree is reviewed as a diff: files are sorted by
+// path, modules by name, anchors are `<kind>-<name>`, and nothing depends on a clock or a directory
+// listing order.
+
+pub struct Field {
+    name: u8[],
+    ty: u8[],
+    doc: u8[]
+}
+// kind: 0 function, 1 struct, 2 enum, 3 interface, 4 impl, 5 alias.
+pub struct Item {
+    kind: u64,
+    name: u8[],
+    signature: u8[],
+    doc: u8[],
+    line: u64,
+    // `where`/`ensures` clauses of the signature, one per line; empty when there are none.
+    clauses: u8[],
+    // `@no_alloc`, `@no_panic`, `@strict`: the claims the declaration makes, one per line.
+    effects: u8[],
+    members: Field[]
+}
+pub struct Module {
+    name: u8[],
+    path: u8[],
+    doc: u8[],
+    items: Item[]
+}
+struct Scan {
+    sig_end: u64,
+    block_start: u64,
+    block_end: u64,
+    end: u64
+}
+struct Ref {
+    name: u8[],
+    module: u8[],
+    anchor: u8[],
+    // 1 when exactly one declaration in the tree has this name. A name that two modules both declare
+    // is left as plain text: linking "len" to whichever came first would be a wrong answer guessed
+    // confidently, which is worse than no link.
+    unique: u64
+}
+
+// ---- bytes -------------------------------------------------------------------------------------
+fn put<a, b>(out: (&a mut u8[]), text: &b [u8]) -> unit {
+    for i in text.len() {
+        out.push(text[i]);
+    }
+    return ();
+}
+fn putn<a>(out: (&a mut u8[]), n: u64) -> unit {
+    put(&mut out, view(num_text(n)));
+    return ();
+}
+fn at<a>(v: (&a u8[][]), i: u64) -> u8[] {
+    x := &v[i];
+    return x.copy();
+}
+fn num_text(n: u64) -> u8[] {
+    if n == 0 {
+        mut zero = u8[];
+        zero.push(48);
+        return zero;
+    }
+    mut digits = u8[];
+    mut v = n;
+    while 0 < v {
+        digits.push(48 + v % 10);
+        v = v / 10;
+    }
+    mut out = u8[];
+    mut i = digits.len();
+    while 0 < i {
+        i -= 1;
+        out.push(digits[i]);
+    }
+    return out;
+}
+fn blank(ch: u64) -> bool {
+    return (ch == 32) || (ch == 9) || (ch == 13);
+}
+fn alpha(ch: u64) -> bool {
+    return ((65 <= ch) && (ch <= 90)) || ((97 <= ch) && (ch <= 122)) || (ch == 95);
+}
+fn digit(ch: u64) -> bool {
+    return (48 <= ch) && (ch <= 57);
+}
+fn ident_char(ch: u64) -> bool {
+    return alpha(ch) || digit(ch);
+}
+fn same<a, b>(x: &a [u8], y: &b [u8]) -> bool {
+    if x.len() != y.len() {
+        return false;
+    }
+    for i in x.len() {
+        if x[i] != y[i] {
+            return false;
+        }
+    }
+    return true;
+}
+fn begins<a, b>(text: &a [u8], from: u64, word: &b [u8]) -> bool {
+    if text.len() < from + word.len() {
+        return false;
+    }
+    for i in word.len() {
+        if text[from + i] != word[i] {
+            return false;
+        }
+    }
+    return true;
+}
+fn copy_span<a>(text: &a [u8], from: u64, to: u64) -> u8[] {
+    mut out = u8[];
+    mut i = from;
+    while i < to {
+        out.push(text[i]);
+        i += 1;
+    }
+    return out;
+}
+// Trimmed copy of [from, to).
+fn span<a>(text: &a [u8], from: u64, to: u64) -> u8[] {
+    mut start = from;
+    mut end = to;
+    while (start < end) && blank(text[start]) {
+        start += 1;
+    }
+    while (start < end) && blank(text[end - 1]) {
+        end -= 1;
+    }
+    return copy_span(view(text), start, end);
+}
+// Trimmed copy with every whitespace run collapsed to one space: a signature is one line.
+fn collapsed<a>(text: &a [u8], from: u64, to: u64) -> u8[] {
+    mut out = u8[];
+    mut i = from;
+    mut pending = 0;
+    while i < to {
+        ch := text[i];
+        if blank(ch) || (ch == 10) {
+            pending = 1;
+        } else {
+            if (pending != 0) && (out.len() != 0) {
+                out.push(32);
+            }
+            pending = 0;
+            out.push(ch);
+        }
+        i += 1;
+    }
+    return out;
+}
+fn split_lines<a>(text: &a [u8]) -> u8[][] {
+    mut rows = u8[][];
+    mut start: u64 = 0;
+    mut i: u64 = 0;
+    while i <= text.len() {
+        if (i == text.len()) || (text[i] == 10) {
+            rows.push(copy_span(view(text), start, i));
+            start = i + 1;
+        }
+        i += 1;
+    }
+    return rows;
+}
+fn row_starts<a>(text: &a [u8]) -> u64[] {
+    mut out = u64[];
+    out.push(0);
+    for i in text.len() {
+        if text[i] == 10 {
+            out.push(i + 1);
+        }
+    }
+    return out;
+}
+// The line a byte offset falls on, counting from 0.
+fn line_of<a>(starts: (&a u64[]), offset: u64) -> u64 {
+    mut lo: u64 = 0;
+    mut hi = starts.len();
+    while lo + 1 < hi {
+        mid := (lo + hi) / 2;
+        if starts[mid] <= offset {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+// ---- comments ----------------------------------------------------------------------------------
+// The offset of `//` on a line that holds nothing but a comment, or the line's length otherwise.
+fn comment_at<a>(row: &a [u8]) -> u64 {
+    mut i: u64 = 0;
+    while (i < row.len()) && blank(row[i]) {
+        i += 1;
+    }
+    if (i + 1 < row.len()) && (row[i] == 47) && (row[i + 1] == 47) {
+        return i;
+    }
+    return row.len();
+}
+fn comment_text<a>(row: &a [u8]) -> u8[] {
+    at := comment_at(view(row));
+    if at == row.len() {
+        return u8[];
+    }
+    mut from = at + 2;
+    if (from < row.len()) && (row[from] == 32) {
+        from += 1;
+    }
+    return span(view(row), from, row.len());
+}
+// The comment block directly above `line` (0-based), joined with newlines, and its first line.
+fn doc_above(rows: (&u8[][]), line: u64) -> u8[] {
+    mut first = line;
+    while (0 < first) && (comment_at(view(at(&rows, first - 1))) != at(&rows, first - 1).len()) {
+        first -= 1;
+    }
+    mut out = u8[];
+    mut i = first;
+    while i < line {
+        text := comment_text(view(at(&rows, i)));
+        if text.len() != 0 {
+            if out.len() != 0 {
+                out.push(10);
+            }
+            put(&mut out, view(text));
+        }
+        i += 1;
+    }
+    return out;
+}
+// The line the comment block above `line` starts at; `line` itself when there is none.
+fn comments_start(rows: (&u8[][]), line: u64) -> u64 {
+    mut first = line;
+    while (0 < first) && (comment_at(view(at(&rows, first - 1))) != at(&rows, first - 1).len()) {
+        first -= 1;
+    }
+    return first;
+}
+// The contiguous comment block that starts at `from`.
+fn comment_block(rows: (&u8[][]), from: u64) -> u8[] {
+    mut out = u8[];
+    mut i = from;
+    while (i < rows.len()) && (comment_at(view(at(&rows, i))) != at(&rows, i).len()) {
+        text := comment_text(view(at(&rows, i)));
+        if text.len() != 0 {
+            if out.len() != 0 {
+                out.push(10);
+            }
+            put(&mut out, view(text));
+        }
+        i += 1;
+    }
+    return out;
+}
+
+// ---- the scanner -------------------------------------------------------------------------------
+// The offset of the `}` matching the `{` at `open`; strings and line comments are skipped, so a
+// brace inside a literal cannot end a block early.
+fn match_brace<a>(text: &a [u8], open: u64) -> u64 {
+    mut i = open + 1;
+    mut depth: u64 = 1;
+    while i < text.len() {
+        ch := text[i];
+        if ch == 34 {
+            i += 1;
+            while i < text.len() {
+                if text[i] == 92 {
+                    i += 2;
+                    continue;
+                }
+                if text[i] == 34 {
+                    break;
+                }
+                i += 1;
+            }
+        } else if (ch == 47) && (i + 1 < text.len()) && (text[i + 1] == 47) {
+            while (i < text.len()) && (text[i] != 10) {
+                i += 1;
+            }
+            continue;
+        } else if ch == 123 {
+            depth += 1;
+        } else if ch == 125 {
+            depth -= 1;
+            if depth == 0 {
+                return i;
+            }
+        }
+        i += 1;
+    }
+    return text.len();
+}
+// Where a declaration's signature ends and its body begins: the first `{` or `;` at parenthesis
+// depth 0, outside strings and comments.
+fn scan_signature<a>(text: &a [u8], start: u64) -> Scan {
+    mut i = start;
+    mut depth: u64 = 0;
+    while i < text.len() {
+        ch := text[i];
+        if ch == 34 {
+            i += 1;
+            while i < text.len() {
+                if text[i] == 92 {
+                    i += 2;
+                    continue;
+                }
+                if text[i] == 34 {
+                    break;
+                }
+                i += 1;
+            }
+        } else if (ch == 47) && (i + 1 < text.len()) && (text[i + 1] == 47) {
+            while (i < text.len()) && (text[i] != 10) {
+                i += 1;
+            }
+            continue;
+        } else if (ch == 40) || (ch == 91) {
+            depth += 1;
+        } else if (ch == 41) || (ch == 93) {
+            if 0 < depth {
+                depth -= 1;
+            }
+        } else if (ch == 123) && (depth == 0) {
+            return Scan { sig_end: i, block_start: i + 1, block_end: match_brace(view(text), i), end: match_brace(view(text), i) + 1 };
+        } else if (ch == 59) && (depth == 0) {
+            return Scan { sig_end: i, block_start: 0, block_end: 0, end: i + 1 };
+        }
+        i += 1;
+    }
+    return Scan { sig_end: text.len(), block_start: 0, block_end: 0, end: text.len() };
+}
+// The identifier that starts at `from`.
+fn ident_at<a>(text: &a [u8], from: u64) -> u8[] {
+    mut i = from;
+    while (i < text.len()) && blank(text[i]) {
+        i += 1;
+    }
+    mut end = i;
+    while (end < text.len()) && ident_char(text[end]) {
+        end += 1;
+    }
+    return copy_span(view(text), i, end);
+}
+// `fn`, `struct`, `enum`, `interface`, `impl`, `alias` at the start of a line (after attributes and
+// `pub`), as a kind code; 6 when the line starts no declaration this generator documents.
+fn kind_of<a>(row: &a [u8]) -> u64 {
+    mut i: u64 = 0;
+    while (i < row.len()) && blank(row[i]) {
+        i += 1;
+    }
+    // A declaration's claims (`@no_alloc`, `@bounded(8)`) come first and are part of its signature.
+    while (i < row.len()) && (row[i] == 64) {
+        i += 1;
+        while (i < row.len()) && (ident_char(row[i]) || (row[i] == 40) || (row[i] == 41) || (row[i] == 44) || digit(row[i])) {
+            i += 1;
+        }
+        while (i < row.len()) && blank(row[i]) {
+            i += 1;
+        }
+    }
+    if begins(view(row), i, view("pub")) {
+        i += 3;
+        while (i < row.len()) && blank(row[i]) {
+            i += 1;
+        }
+    }
+    if begins(view(row), i, view("fn")) {
+        return 0;
+    }
+    if begins(view(row), i, view("struct")) {
+        return 1;
+    }
+    if begins(view(row), i, view("enum")) {
+        return 2;
+    }
+    if begins(view(row), i, view("interface")) {
+        return 3;
+    }
+    if begins(view(row), i, view("impl")) {
+        return 4;
+    }
+    if begins(view(row), i, view("alias")) {
+        return 5;
+    }
+    return 6;
+}
+// The name a declaration introduces, and where it starts.
+fn decl_name<a>(text: &a [u8], start: u64, kind: u64) -> u8[] {
+    mut i = start;
+    // Skip the claims, then `pub`, then the keyword itself.
+    while (i < text.len()) && (text[i] == 64) {
+        i += 1;
+        while (i < text.len()) && (ident_char(text[i]) || (text[i] == 40) || (text[i] == 41) || (text[i] == 44)) {
+            i += 1;
+        }
+        while (i < text.len()) && blank(text[i]) {
+            i += 1;
+        }
+    }
+    if begins(view(text), i, view("pub")) {
+        i += 3;
+        while (i < text.len()) && blank(text[i]) {
+            i += 1;
+        }
+    }
+    word := keyword(kind);
+    i += word.len();
+    return ident_at(view(text), i);
+}
+fn keyword(kind: u64) -> u8[] {
+    if kind == 0 {
+        return copy_span(view("fn"), 0, 2);
+    }
+    if kind == 1 {
+        return copy_span(view("struct"), 0, 6);
+    }
+    if kind == 2 {
+        return copy_span(view("enum"), 0, 4);
+    }
+    if kind == 3 {
+        return copy_span(view("interface"), 0, 9);
+    }
+    if kind == 4 {
+        return copy_span(view("impl"), 0, 4);
+    }
+    return copy_span(view("alias"), 0, 5);
+}
+// `where ...` and `ensures ...` clauses of a signature, one per line.
+fn clauses_of<a>(signature: &a [u8]) -> u8[] {
+    mut out = u8[];
+    mut i: u64 = 0;
+    while i < signature.len() {
+        mut found = 0;
+        if begins(view(signature), i, view("where")) {
+            found = 1;
+        }
+        if begins(view(signature), i, view("ensures")) {
+            found = 1;
+        }
+        // A keyword only counts at a word boundary.
+        if found != 0 {
+            if (0 < i) && ident_char(signature[i - 1]) {
+                found = 0;
+            }
+        }
+        if found != 0 {
+            mut end = i;
+            mut depth: u64 = 0;
+            while end < signature.len() {
+                ch := signature[end];
+                if (ch == 40) || (ch == 91) {
+                    depth += 1;
+                }
+                if ((ch == 41) || (ch == 93)) && (0 < depth) {
+                    depth -= 1;
+                }
+                if (depth == 0) && ((ch == 44) || (ch == 125) || (ch == 59)) {
+                    break;
+                }
+                end += 1;
+            }
+            if out.len() != 0 {
+                out.push(10);
+            }
+            put(&mut out, view(span(view(signature), i, end)));
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+    return out;
+}
+// The claims a declaration makes: every `@name` word in its signature.
+fn effects_of<a>(signature: &a [u8]) -> u8[] {
+    mut out = u8[];
+    mut i: u64 = 0;
+    while i < signature.len() {
+        if signature[i] == 64 {
+            mut end = i + 1;
+            while (end < signature.len()) && (ident_char(signature[end]) || ((signature[end] == 40) && (end + 1 < signature.len()) && digit(signature[end + 1]))) {
+                if signature[end] == 40 {
+                    end += 1;
+                    break;
+                }
+                end += 1;
+            }
+            if out.len() != 0 {
+                out.push(10);
+            }
+            put(&mut out, view(copy_span(view(signature), i, end)));
+        }
+        i += 1;
+    }
+    return out;
+}
+// `impl I for T` and `impl<K> T` both need a name, and the head as written is the honest one:
+// `Hash for u64` says what the block implements, where the first identifier alone would not.
+fn impl_name<a>(signature: &a [u8]) -> u8[] {
+    mut i: u64 = 0;
+    while (i + 4 < signature.len()) && !(begins(view(signature), i, view("impl")) && ((i == 0) || !ident_char(signature[i - 1]))) {
+        i += 1;
+    }
+    mut from = i + 4;
+    while (from < signature.len()) && blank(signature[from]) {
+        from += 1;
+    }
+    if (from < signature.len()) && (signature[from] == 60) {
+        mut depth: u64 = 0;
+        while from < signature.len() {
+            if signature[from] == 60 {
+                depth += 1;
+            }
+            if signature[from] == 62 {
+                depth -= 1;
+                if depth == 0 {
+                    from += 1;
+                    break;
+                }
+            }
+            from += 1;
+        }
+    }
+    return span(view(signature), from, signature.len());
+}
+// An anchor is derived from the kind and the name, and stays URL-safe: `impl Hash for u64` becomes
+// `impl-Hash-for-u64`.
+fn sanitized<a>(text: &a [u8]) -> u8[] {
+    mut out = u8[];
+    mut dash = 0;
+    for i in text.len() {
+        ch := text[i];
+        if ident_char(ch) {
+            out.push(ch);
+            dash = 0;
+        } else {
+            if (out.len() != 0) && (dash == 0) {
+                out.push(45);
+                dash = 1;
+            }
+        }
+    }
+    while (0 < out.len()) && (out[out.len() - 1] == 45) {
+        out.pop();
+    }
+    return out;
+}
+// The members of a struct, enum or interface block: one entry per top-level `,` (records and enums)
+// or `;` (interface methods).
+fn member_fields<a>(text: &a [u8], from: u64, to: u64, kind: u64, decl_line: u64, starts: (&a u64[]), rows: (&a u8[][])) -> Field[] {
+    mut out = Field[];
+    mut i = from;
+    mut start = from;
+    mut depth: u64 = 0;
+    while i < to {
+        ch := text[i];
+        if ch == 34 {
+            i += 1;
+            while (i < to) && (text[i] != 34) {
+                if text[i] == 92 {
+                    i += 1;
+                }
+                i += 1;
+            }
+        } else if (ch == 47) && (i + 1 < to) && (text[i + 1] == 47) {
+            while (i < to) && (text[i] != 10) {
+                i += 1;
+            }
+            continue;
+        } else if (ch == 40) || (ch == 91) || (ch == 123) || (ch == 60) {
+            depth += 1;
+        } else if (ch == 41) || (ch == 93) || (ch == 125) || (ch == 62) {
+            if 0 < depth {
+                depth -= 1;
+            }
+        } else if (depth == 0) && (((ch == 44) && (kind != 3)) || ((ch == 59) && (kind == 3))) {
+            out.push(make_field(view(text), start, i, kind, decl_line, starts, rows));
+            start = i + 1;
+        }
+        i += 1;
+    }
+    if start < to {
+        field := make_field(view(text), start, to, kind, decl_line, starts, rows);
+        if field.name.len() != 0 {
+            out.push(field);
+        }
+    }
+    return out;
+}
+fn make_field<a>(text: &a [u8], from: u64, to: u64, kind: u64, decl_line: u64, starts: (&a u64[]), rows: (&a u8[][])) -> Field {
+    body := collapsed(view(text), from, to);
+    if body.len() == 0 {
+        return Field { name: u8[], ty: u8[], doc: u8[] };
+    }
+    // A member's documentation is the comment block above the line it starts on.
+    mut first = from;
+    while (first < to) && blank(text[first]) {
+        first += 1;
+    }
+    mut doc = u8[];
+    member_line := line_of(&starts, first) + 1;
+    // A member on the declaration's own line has no documentation of its own: the block above that
+    // line documents the declaration, not its first field.
+    if decl_line < member_line {
+        doc = doc_above(&rows, member_line - 1);
+    }
+    if kind == 3 {
+        // `fn name<a>(...)->R`: the whole signature is the member's type.
+        mut i: u64 = 0;
+        while (i + 2 < body.len()) && !(begins(view(body), i, view("fn")) && ((i == 0) || !ident_char(body[i - 1]))) {
+            i += 1;
+        }
+        return Field { name: ident_at(view(body), i + 2), ty: body, doc: doc };
+    }
+    if kind == 2 {
+        // An enum variant: the name, and the payload of `Name(T)` when it has one.
+        mut end: u64 = 0;
+        while (end < body.len()) && ident_char(body[end]) {
+            end += 1;
+        }
+        mut ty = u8[];
+        if (end < body.len()) && (body[end] == 40) {
+            ty = span(view(body), end + 1, body.len() - 1);
+        }
+        return Field { name: copy_span(view(body), 0, end), ty: ty, doc: doc };
+    }
+    // A record field: `name: type`, with any refinement clause kept as part of the type.
+    mut colon: u64 = 0;
+    mut depth: u64 = 0;
+    while colon < body.len() {
+        ch := body[colon];
+        if (ch == 40) || (ch == 91) || (ch == 60) {
+            depth += 1;
+        }
+        if ((ch == 41) || (ch == 93) || (ch == 62)) && (0 < depth) {
+            depth -= 1;
+        }
+        if (ch == 58) && (depth == 0) {
+            break;
+        }
+        colon += 1;
+    }
+    if body.len() <= colon {
+        return Field { name: body, ty: u8[], doc: doc };
+    }
+    return Field { name: span(view(body), 0, colon), ty: span(view(body), colon + 1, body.len()), doc: doc };
+}
+
+// ---- one module --------------------------------------------------------------------------------
+fn scan_module<a>(path: &a [u8], text: &a [u8]) -> Module {
+    rows := split_lines(view(text));
+    starts := row_starts(view(text));
+    mut name = copy_span(view(""), 0, 0);
+    mut line: u64 = 0;
+    while line < rows.len() {
+        row := at(&rows, line);
+        if begins(view(row), 0, view("module ")) {
+            name = ident_at(view(row), 7);
+            break;
+        }
+        line += 1;
+    }
+    if name.len() == 0 {
+        // No declaration: the file stem is the module name, as the language treats it.
+        base := file_stem(view(path));
+        name = base;
+    }
+    // The module's own documentation: the block above `module NAME;`, or - because the declaration
+    // is usually the first line of the file - the first comment block after it, as long as it comes
+    // before the first declaration.
+    mut doc = u8[];
+    if line < rows.len() {
+        doc = doc_above(&rows, line);
+    }
+    // A block taken from below the declaration documents the module: it must not be read a second
+    // time as the documentation of the first declaration it happens to sit above.
+    mut module_doc_start: u64 = 0;
+    if doc.len() == 0 {
+        mut l = line + 1;
+        while l < rows.len() {
+            if comment_at(view(at(&rows, l))) != at(&rows, l).len() {
+                doc = comment_block(&rows, l);
+                module_doc_start = l + 1;
+                break;
+            }
+            if kind_of(view(at(&rows, l))) != 6 {
+                break;
+            }
+            l += 1;
+        }
+    }
+    mut items = Item[];
+    mut l: u64 = 0;
+    while l < rows.len() {
+        kind := kind_of(view(at(&rows, l)));
+        if kind == 6 {
+            l += 1;
+            continue;
+        }
+        // Attributes on their own line belong to the declaration below them.
+        mut first = l;
+        while 0 < first {
+            above := at(&rows, first - 1);
+            mut k: u64 = 0;
+            while (k < above.len()) && blank(above[k]) {
+                k += 1;
+            }
+            if (k < above.len()) && (above[k] == 64) {
+                first -= 1;
+            } else {
+                break;
+            }
+        }
+        start := starts[first] + first_blank(view(at(&rows, first)));
+        scan := scan_signature(view(text), start);
+        signature := collapsed(view(text), start, scan.sig_end);
+        clauses := clauses_of(view(signature));
+        effects := effects_of(view(signature));
+        mut item_doc = doc_above(&rows, first);
+        if (module_doc_start != 0) && (comments_start(&rows, first) + 1 == module_doc_start) {
+            item_doc = u8[];
+        }
+        // A declaration's own name (the identifier after the keyword), and its members.
+        mut dname = decl_name(view(text), start, kind);
+        if kind == 4 {
+            dname = impl_name(view(signature));
+        }
+        mut members = Field[];
+        if (scan.block_start != 0) && ((kind == 1) || (kind == 2) || (kind == 3)) {
+            members = member_fields(view(text), scan.block_start, scan.block_end, kind, first + 1, &starts, &rows);
+        }
+        items.push(
+            Item {
+                kind: kind,
+                name: dname,
+                signature: signature,
+                doc: item_doc,
+                line: first + 1,
+                clauses: clauses,
+                effects: effects,
+                members: members
+            }
+        );
+        // Continue after the declaration's own body, so a nested `fn` inside a method block is not
+        // reported as a second top-level item.
+        mut advance = line_of(&starts, scan.end);
+        if advance <= l {
+            advance = l + 1;
+        }
+        l = advance;
+    }
+    return Module { name: name, path: copy_span(view(path), 0, path.len()), doc: doc, items: items };
+}
+fn first_blank<a>(row: &a [u8]) -> u64 {
+    mut i: u64 = 0;
+    while (i < row.len()) && blank(row[i]) {
+        i += 1;
+    }
+    return i;
+}
+fn file_stem<a>(path: &a [u8]) -> u8[] {
+    mut slash: u64 = 0;
+    mut dot = path.len();
+    for i in path.len() {
+        if (path[i] == 47) || (path[i] == 92) {
+            slash = i + 1;
+        }
+        if (path[i] == 46) && (dot == path.len()) {
+            dot = i;
+        }
+    }
+    if dot < slash {
+        dot = path.len();
+    }
+    return copy_span(view(path), slash, dot);
+}
+
+// ---- rendering ---------------------------------------------------------------------------------
+fn esc_html<a, b>(out: (&a mut u8[]), text: &b [u8]) -> unit {
+    for i in text.len() {
+        ch := text[i];
+        if ch == 38 {
+            put(&mut out, view("&amp;"));
+        } else if ch == 60 {
+            put(&mut out, view("&lt;"));
+        } else if ch == 62 {
+            put(&mut out, view("&gt;"));
+        } else if ch == 34 {
+            put(&mut out, view("&quot;"));
+        } else {
+            out.push(ch);
+        }
+    }
+    return ();
+}
+fn json_str<a, b>(out: (&a mut u8[]), text: &b [u8]) -> unit {
+    out.push(34);
+    for i in text.len() {
+        ch := text[i];
+        if ch == 34 {
+            put(&mut out, view("\\\""));
+        } else if ch == 92 {
+            put(&mut out, view("\\\\"));
+        } else if ch == 10 {
+            put(&mut out, view("\\n"));
+        } else if ch == 9 {
+            put(&mut out, view("\\t"));
+        } else if ch == 13 {
+            put(&mut out, view("\\r"));
+        } else if ch < 32 {
+            put(&mut out, view("\\u00"));
+            out.push(hex(16 + ch / 16));
+            out.push(hex(16 + ch % 16));
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push(34);
+    return ();
+}
+fn hex(n: u64) -> u64 {
+    if n < 26 {
+        return 65 + n;
+    }
+    return 97 + n - 26;
+}
+fn anchor_of<a>(item: (&a Item)) -> u8[] {
+    mut out = u8[];
+    put(&mut out, view(anchor_prefix(item.kind)));
+    out.push(45);
+    put(&mut out, view(sanitized(view(item.name))));
+    return out;
+}
+fn anchor_prefix(kind: u64) -> u8[] {
+    if kind == 0 {
+        return copy_span(view("fn"), 0, 2);
+    }
+    if kind == 1 {
+        return copy_span(view("struct"), 0, 6);
+    }
+    if kind == 2 {
+        return copy_span(view("enum"), 0, 4);
+    }
+    if kind == 3 {
+        return copy_span(view("interface"), 0, 9);
+    }
+    if kind == 4 {
+        return copy_span(view("impl"), 0, 4);
+    }
+    return copy_span(view("alias"), 0, 5);
+}
+fn kind_word(kind: u64) -> u8[] {
+    if kind == 0 {
+        return copy_span(view("fn"), 0, 2);
+    }
+    if kind == 1 {
+        return copy_span(view("struct"), 0, 6);
+    }
+    if kind == 2 {
+        return copy_span(view("enum"), 0, 4);
+    }
+    if kind == 3 {
+        return copy_span(view("interface"), 0, 9);
+    }
+    if kind == 4 {
+        return copy_span(view("impl"), 0, 4);
+    }
+    return copy_span(view("alias"), 0, 5);
+}
+fn pages_for(modules: (&Module[])) -> u8[][] {
+    mut pages = u8[][];
+    for i in modules.len() {
+        module := &modules[i];
+        mut name = module.name.copy();
+        if pages_taken(&pages, view(name)) {
+            mut unique = module.name.copy();
+            unique.push(45);
+            put(&mut unique, view(num_text(i + 1)));
+            name = unique;
+        }
+        pages.push(name);
+    }
+    return pages;
+}
+fn pages_taken(pages: (&u8[][]), name: (&[u8])) -> bool {
+    for i in pages.len() {
+        if same(view(pages[i]), view(name)) {
+            return true;
+        }
+    }
+    return false;
+}
+fn ref_find(refs: (&Ref[]), word: (&[u8])) -> u64 {
+    for i in refs.len() {
+        if same(view(refs[i].name), view(word)) {
+            if refs[i].unique != 0 {
+                return i;
+            }
+            return refs.len();
+        }
+    }
+    return refs.len();
+}
+// A doc body: escaped, with every identifier that names a documented declaration linked to its page.
+fn render_doc<a>(out: (&a mut u8[]), doc: &a [u8], refs: (&a Ref[]), pages: (&a u8[][]), pages_of: (&a u64[])) -> unit {
+    mut i: u64 = 0;
+    while i < doc.len() {
+        ch := doc[i];
+        if alpha(ch) {
+            mut end = i;
+            while (end < doc.len()) && ident_char(doc[end]) {
+                end += 1;
+            }
+            word := copy_span(view(doc), i, end);
+            at := ref_find(&refs, view(word));
+            if at < refs.len() {
+                put(&mut out, view("<a href=\""));
+                esc_html(&mut out, view(at(&pages, pages_of[at])));
+                put(&mut out, view(".html#"));
+                esc_html(&mut out, view(refs[at].anchor));
+                put(&mut out, view("\">"));
+                esc_html(&mut out, view(word));
+                put(&mut out, view("</a>"));
+            } else {
+                esc_html(&mut out, view(word));
+            }
+            i = end;
+        } else if ch == 10 {
+            put(&mut out, view("<br>\n"));
+            i += 1;
+        } else {
+            esc_html(&mut out, view(copy_span(view(doc), i, i + 1)));
+            i += 1;
+        }
+    }
+    return ();
+}
+fn html_head<a, b>(out: (&a mut u8[]), title: &b [u8]) -> unit {
+    put(&mut out, view("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<title>"));
+    esc_html(&mut out, view(title));
+    put(&mut out, view(" - Grail API</title>\n<style>\n"));
+    put(&mut out, view("body{font:16px/1.5 system-ui,sans-serif;max-width:60rem;margin:2rem auto;padding:0 1rem;color:#1b1b1b}\n"));
+    put(&mut out, view("code,pre{font:13px/1.45 ui-monospace,monospace;background:#f5f5f5;border-radius:4px}\n"));
+    put(&mut out, view("pre{padding:.6rem .8rem;overflow-x:auto}\n"));
+    put(&mut out, view("h1{margin-bottom:.2rem}h3{margin-bottom:.1rem}\n"));
+    put(&mut out, view(".kind{font:12px ui-monospace,monospace;color:#666;text-transform:uppercase;letter-spacing:.05em}\n"));
+    put(&mut out, view(".note{color:#444;margin:.2rem 0 .6rem}\n"));
+    put(&mut out, view("table{border-collapse:collapse;margin:.4rem 0 .8rem;width:100%}\n"));
+    put(&mut out, view("td,th{border-top:1px solid #e2e2e2;padding:.25rem .5rem;text-align:left;vertical-align:top}\n"));
+    put(&mut out, view("#search{width:100%;padding:.4rem;margin:.6rem 0 1rem}\n"));
+    put(&mut out, view("</style>\n</head>\n<body>\n"));
+    return ();
+}
+fn html_tail<a>(out: (&a mut u8[])) -> unit {
+    put(&mut out, view("</body>\n</html>\n"));
+    return ();
+}
+// The search index and its filter: every documented name in one list, filtered by substring, so the
+// page works from the file system with no server and no network.
+fn write_search<a>(out: (&a mut u8[]), modules: (&a Module[]), pages: (&a u8[][])) -> unit {
+    put(&mut out, view("<input id=\"search\" type=\"search\" placeholder=\"filter by name\" aria-label=\"filter by name\">\n"));
+    put(&mut out, view("<ul id=\"names\">\n"));
+    for m in modules.len() {
+        module := &modules[m];
+        for j in module.items.len() {
+            item_ref := &module.items[j];
+            if item_ref.name.len() == 0 {
+                continue;
+            }
+            anchor := anchor_of(&item_ref);
+            put(&mut out, view("<li data-name=\""));
+            esc_html(&mut out, view(module.name));
+            put(&mut out, view(" "));
+            esc_html(&mut out, view(item_ref.name));
+            put(&mut out, view("\"><a href=\""));
+            esc_html(&mut out, view(at(&pages, m)));
+            put(&mut out, view(".html#"));
+            esc_html(&mut out, view(anchor));
+            put(&mut out, view("\">"));
+            esc_html(&mut out, view(kind_word(item_ref.kind)));
+            put(&mut out, view(" "));
+            esc_html(&mut out, view(item_ref.name));
+            put(&mut out, view("</a> <span class=\"kind\">"));
+            esc_html(&mut out, view(module.name));
+            put(&mut out, view("</span></li>\n"));
+        }
+    }
+    put(&mut out, view("</ul>\n"));
+    put(&mut out, view("<script>\n"));
+    put(&mut out, view("const box=document.getElementById('search');\n"));
+    put(&mut out, view("const items=[...document.querySelectorAll('#names li')];\n"));
+    put(&mut out, view("box.addEventListener('input',()=>{const q=box.value.toLowerCase();for(const li of items){li.hidden=!li.dataset.name.toLowerCase().includes(q);}});\n"));
+    put(&mut out, view("</script>\n"));
+    return ();
+}
+fn render_item<a>(out: (&a mut u8[]), item_ref: (&a Item), refs: (&a Ref[]), pages: (&a u8[][]), pages_of: (&a u64[])) -> unit {
+    put(&mut out, view("<h3 id=\""));
+    esc_html(&mut out, view(anchor_of(&item_ref)));
+    put(&mut out, view("\"><span class=\"kind\">"));
+    esc_html(&mut out, view(kind_word(item_ref.kind)));
+    put(&mut out, view("</span> "));
+    esc_html(&mut out, view(item_ref.name));
+    put(&mut out, view("</h3>\n<pre><code>"));
+    esc_html(&mut out, view(item_ref.signature));
+    put(&mut out, view("</code></pre>\n"));
+    if item_ref.effects.len() != 0 {
+        put(&mut out, view("<p class=\"note\">claims: <code>"));
+        esc_html(&mut out, view(collapse_lines(view(item_ref.effects))));
+        put(&mut out, view("</code></p>\n"));
+    }
+    if item_ref.clauses.len() != 0 {
+        put(&mut out, view("<p class=\"note\">refinements: <code>"));
+        esc_html(&mut out, view(collapse_lines(view(item_ref.clauses))));
+        put(&mut out, view("</code></p>\n"));
+    }
+    if item_ref.doc.len() != 0 {
+        put(&mut out, view("<p>"));
+        render_doc(&mut out, view(item_ref.doc), &refs, &pages, &pages_of);
+        put(&mut out, view("</p>\n"));
+    }
+    if item_ref.members.len() != 0 {
+        put(&mut out, view("<table>\n<tr><th>member</th><th>type</th><th>documentation</th></tr>\n"));
+        for i in item_ref.members.len() {
+            member := &item_ref.members[i];
+            put(&mut out, view("<tr><td><code>"));
+            esc_html(&mut out, view(member.name));
+            put(&mut out, view("</code></td><td><code>"));
+            esc_html(&mut out, view(member.ty));
+            put(&mut out, view("</code></td><td>"));
+            if member.doc.len() != 0 {
+                render_doc(&mut out, view(member.doc), &refs, &pages, &pages_of);
+            }
+            put(&mut out, view("</td></tr>\n"));
+        }
+        put(&mut out, view("</table>\n"));
+    }
+    return ();
+}
+// One line per clause, for a table cell or a note.
+fn collapse_lines<a>(text: &a [u8]) -> u8[] {
+    mut out = u8[];
+    for i in text.len() {
+        if text[i] == 10 {
+            put(&mut out, view(", "));
+        } else {
+            out.push(text[i]);
+        }
+    }
+    return out;
+}
+fn render_module_page<a>(out: (&a mut u8[]), module: (&a Module), refs: (&a Ref[]), pages: (&a u8[][]), pages_of: (&a u64[])) -> unit {
+    html_head(&mut out, view(module.name));
+    put(&mut out, view("<h1>module "));
+    esc_html(&mut out, view(module.name));
+    put(&mut out, view("</h1>\n<p class=\"kind\">"));
+    esc_html(&mut out, view(module.path));
+    put(&mut out, view("</p>\n<p><a href=\"index.html\">all modules</a></p>\n"));
+    if module.doc.len() != 0 {
+        put(&mut out, view("<p>"));
+        render_doc(&mut out, view(module.doc), &refs, &pages, &pages_of);
+        put(&mut out, view("</p>\n"));
+    }
+    // Functions, then types, then interfaces, then implementations: a reviewer reads the same order
+    // every run, and so does a diff.
+    mut pass: u64 = 0;
+    while pass < 6 {
+        for i in module.items.len() {
+            item_ref := &module.items[i];
+            if item_ref.kind != pass {
+                continue;
+            }
+            if item_ref.name.len() == 0 {
+                continue;
+            }
+            render_item(&mut out, &item_ref, &refs, &pages, &pages_of);
+        }
+        pass += 1;
+    }
+    html_tail(&mut out);
+    return ();
+}
+fn render_index<a>(out: (&a mut u8[]), modules: (&a Module[]), pages: (&a u8[][]), sources: (&a [u8])) -> unit {
+    html_head(&mut out, view("index"));
+    put(&mut out, view("<h1>Grail API</h1>\n<p class=\"kind\">generated from "));
+    esc_html(&mut out, view(sources));
+    put(&mut out, view(" by <code>grail doc</code></p>\n"));
+    write_search(&mut out, &modules, &pages);
+    put(&mut out, view("<h2>modules</h2>\n<ul>\n"));
+    for i in modules.len() {
+        module := &modules[i];
+        put(&mut out, view("<li><a href=\""));
+        esc_html(&mut out, view(at(&pages, i)));
+        put(&mut out, view(".html\">"));
+        esc_html(&mut out, view(module.name));
+        put(&mut out, view("</a> <span class=\"kind\">"));
+        esc_html(&mut out, view(module.path));
+        put(&mut out, view("</span>"));
+        if module.doc.len() != 0 {
+            put(&mut out, view("<br><small>"));
+            esc_html(&mut out, view(first_line(view(module.doc))));
+            put(&mut out, view("</small>"));
+        }
+        put(&mut out, view("</li>\n"));
+    }
+    put(&mut out, view("</ul>\n"));
+    html_tail(&mut out);
+    return ();
+}
+fn first_line<a>(text: &a [u8]) -> u8[] {
+    mut end: u64 = 0;
+    while (end < text.len()) && (text[end] != 10) {
+        end += 1;
+    }
+    return span(view(text), 0, end);
+}
+
+// ---- the JSON index ----------------------------------------------------------------------------
+fn render_json<a>(out: (&a mut u8[]), modules: (&a Module[]), pages: (&a u8[][]), sources: (&a [u8])) -> unit {
+    put(&mut out, view("{\n  \"schema\": 1,\n  \"generator\": \"grail doc\",\n  \"sources\": "));
+    json_str(&mut out, view(sources));
+    put(&mut out, view(",\n  \"modules\": ["));
+    for m in modules.len() {
+        module := &modules[m];
+        if 0 < m {
+            out.push(44);
+        }
+        put(&mut out, view("\n    {\n      \"name\": "));
+        json_str(&mut out, view(module.name));
+        put(&mut out, view(",\n      \"path\": "));
+        json_str(&mut out, view(module.path));
+        put(&mut out, view(",\n      \"page\": "));
+        json_str(&mut out, view(at(&pages, m)));
+        put(&mut out, view(",\n      \"doc\": "));
+        json_str(&mut out, view(module.doc));
+        put(&mut out, view(",\n      \"items\": ["));
+        for j in module.items.len() {
+            item_ref := &module.items[j];
+            if 0 < j {
+                out.push(44);
+            }
+            put(&mut out, view("\n        {\"kind\": "));
+            json_str(&mut out, view(kind_word(item_ref.kind)));
+            put(&mut out, view(", \"name\": "));
+            json_str(&mut out, view(item_ref.name));
+            put(&mut out, view(", \"anchor\": "));
+            json_str(&mut out, view(anchor_of(&item_ref)));
+            put(&mut out, view(", \"line\": "));
+            putn(&mut out, item_ref.line);
+            put(&mut out, view(", \"signature\": "));
+            json_str(&mut out, view(item_ref.signature));
+            put(&mut out, view(", \"doc\": "));
+            json_str(&mut out, view(item_ref.doc));
+            put(&mut out, view(", \"clauses\": "));
+            json_str(&mut out, view(item_ref.clauses));
+            put(&mut out, view(", \"effects\": "));
+            json_str(&mut out, view(item_ref.effects));
+            put(&mut out, view(", \"members\": ["));
+            for k in item_ref.members.len() {
+                member := &item_ref.members[k];
+                if 0 < k {
+                    out.push(44);
+                }
+                put(&mut out, view("{\"name\": "));
+                json_str(&mut out, view(member.name));
+                put(&mut out, view(", \"type\": "));
+                json_str(&mut out, view(member.ty));
+                put(&mut out, view(", \"doc\": "));
+                json_str(&mut out, view(member.doc));
+                out.push(125);
+            }
+            put(&mut out, view("]}"));
+        }
+        put(&mut out, view("\n      ]\n    }"));
+    }
+    put(&mut out, view("\n  ]\n}\n"));
+    return ();
+}
+
+// ---- writing -----------------------------------------------------------------------------------
+fn byte_less<a, b>(x: &a [u8], y: &b [u8]) -> bool {
+    mut i: u64 = 0;
+    while (i < x.len()) && (i < y.len()) {
+        if x[i] != y[i] {
+            return x[i] < y[i];
+        }
+        i += 1;
+    }
+    return x.len() < y.len();
+}
+fn item_module_name(modules: (&Module[]), i: u64) -> u8[] {
+    module := &modules[i];
+    return module.name.copy();
+}
+fn taken(used: (&u64[]), i: u64) -> bool {
+    for j in used.len() {
+        if used[j] == i {
+            return true;
+        }
+    }
+    return false;
+}
+// Selection order, copying each element once: two elements of one vector are never borrowed at the
+// same time, which is what a swap would need and what the checker refuses.
+fn sorted_bytes(v: (&u8[][])) -> u8[][] {
+    mut out = u8[][];
+    mut used = u64[];
+    for k in v.len() {
+        mut best: u64 = 0;
+        mut chosen = 0;
+        for i in v.len() {
+            if taken(&used, i) {
+                continue;
+            }
+            if chosen == 0 {
+                best = i;
+                chosen = 1;
+            } else {
+                candidate := &v[i];
+                current := &v[best];
+                if byte_less(view(candidate), view(current)) {
+                    best = i;
+                }
+            }
+        }
+        out.push(at(&v, best));
+        used.push(best);
+    }
+    return out;
+}
+fn copy_module(m: (&Module)) -> Module {
+    mut items = Item[];
+    for i in m.items.len() {
+        it := &m.items[i];
+        mut members = Field[];
+        for j in it.members.len() {
+            member := &it.members[j];
+            members.push(Field { name: member.name.copy(), ty: member.ty.copy(), doc: member.doc.copy() });
+        }
+        items.push(
+            Item {
+                kind: it.kind,
+                name: it.name.copy(),
+                signature: it.signature.copy(),
+                doc: it.doc.copy(),
+                line: it.line,
+                clauses: it.clauses.copy(),
+                effects: it.effects.copy(),
+                members: members
+            }
+        );
+    }
+    return Module { name: m.name.copy(), path: m.path.copy(), doc: m.doc.copy(), items: items };
+}
+fn sorted_modules(v: (&Module[])) -> Module[] {
+    mut out = Module[];
+    mut used = u64[];
+    for k in v.len() {
+        mut best: u64 = 0;
+        mut chosen = 0;
+        for i in v.len() {
+            if taken(&used, i) {
+                continue;
+            }
+            if chosen == 0 {
+                best = i;
+                chosen = 1;
+            } else {
+                candidate := &v[i];
+                current := &v[best];
+                if byte_less(view(candidate.name), view(current.name)) {
+                    best = i;
+                }
+            }
+        }
+        out.push(copy_module(&v[best]));
+        used.push(best);
+    }
+    return out;
+}
+fn ensure_dir<a>(dir: &a [u8]) -> u64 {
+    if dir.len() == 0 {
+        return 0;
+    }
+    if host::exists(view(dir)) != 0 {
+        return 0;
+    }
+    mut prefix = u8[];
+    mut i: u64 = 0;
+    while i < dir.len() {
+        prefix.push(dir[i]);
+        if (dir[i] == 47) || (dir[i] == 92) {
+            if 1 < prefix.len() {
+                host::mkdir(view(prefix));
+            }
+        }
+        i += 1;
+    }
+    return host::mkdir(view(dir));
+}
+fn write_page<a, b>(dir: &a [u8], name: &b [u8], body: &b [u8]) -> u64 {
+    mut path = u8[];
+    put(&mut path, view(dir));
+    if 0 < dir.len() {
+        path.push(47);
+    }
+    put(&mut path, view(name));
+    path.push(46);
+    path.push(104);
+    path.push(116);
+    path.push(109);
+    path.push(108);
+    return host::write_file(view(path), view(body));
+}
+// The public entry point: `files` are the Grail sources, `dir` the output tree. Returns 1 on a write
+// failure, 0 otherwise; a file this generator cannot read is reported and skipped, never fatal.
+pub fn write<a, b>(files: (&a u8[][]), dir: &a [u8], sources_label: &b [u8]) -> u64 {
+    sources := sorted_bytes(&files);
+    if ensure_dir(view(dir)) != 0 {
+        host::print(view("grail doc: cannot create "));
+        host::print(view(dir));
+        host::print(view("\n"));
+        return 1;
+    }
+    mut modules = Module[];
+    for i in sources.len() {
+        path := at(&sources, i);
+        text := host::read_file(view(path));
+        modules.push(scan_module(view(path), view(text)));
+    }
+    modules = sorted_modules(&modules);
+    // One page name per module, unique even when two files declare the same module name.
+    pages := pages_for(&modules);
+    // The cross-reference table: first declaration of a name wins, in module order, which is stable.
+    mut refs = Ref[];
+    mut pages_of = u64[];
+    for i in modules.len() {
+        for j in modules[i].items.len() {
+            item_ref := &modules[i].items[j];
+            if item_ref.name.len() == 0 {
+                continue;
+            }
+            refs.push(Ref { name: copy_span(view(item_ref.name), 0, item_ref.name.len()), module: item_module_name(&modules, i), anchor: anchor_of(&item_ref), unique: 0 });
+            pages_of.push(i);
+        }
+    }
+    // A name declared more than once in the tree is not linked (see `Ref.unique`).
+    for i in refs.len() {
+        mut seen: u64 = 0;
+        for j in refs.len() {
+            if same(view(refs[i].name), view(refs[j].name)) {
+                seen += 1;
+            }
+        }
+        if seen == 1 {
+            refs[i].unique = 1;
+        }
+    }
+    mut items_count: u64 = 0;
+    for i in modules.len() {
+        items_count += modules[i].items.len();
+        mut body = u8[];
+        render_module_page(&mut body, &modules[i], &refs, &pages, &pages_of);
+        if write_page(view(dir), view(at(&pages, i)), view(body)) != 0 {
+            host::print(view("grail doc: cannot write page for "));
+            host::print(view(modules[i].name));
+            host::print(view("\n"));
+            return 1;
+        }
+    }
+    mut index = u8[];
+    render_index(&mut index, &modules, &pages, view(sources_label));
+    if write_page(view(dir), view("index"), view(index)) != 0 {
+        return 1;
+    }
+    mut json = u8[];
+    render_json(&mut json, &modules, &pages, view(sources_label));
+    mut json_path = u8[];
+    put(&mut json_path, view(dir));
+    put(&mut json_path, view("/index.json"));
+    if host::write_file(view(json_path), view(json)) != 0 {
+        return 1;
+    }
+    host::print(view("grail doc: "));
+    host::print_num(modules.len());
+    host::print(view(" modules, "));
+    host::print_num(items_count);
+    host::print(view(" declarations -> "));
+    host::print(view(dir));
+    host::print(view("\n"));
+    return 0;
+}
