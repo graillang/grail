@@ -59,8 +59,9 @@ instead of a symlink works too: VS Code loads any directory under `~/.vscode/ext
 a `package.json`.
 
 The extension has no runtime dependencies: `extension.js` speaks the language server protocol to
-the server's stdin/stdout directly (`lib/rpc.js`), because the server advertises full-text
-synchronisation and definition and nothing else.
+the server's stdin/stdout directly (`lib/rpc.js`), because the server advertises a handful of
+methods — full-text synchronisation, definition, hover, completion and rename — and forwarding
+those needs no client library.
 
 ## Pointing the client at the server
 
@@ -95,7 +96,16 @@ Open a `.grl` file inside the workspace folder and you get:
 - highlighting, from the grammar;
 - diagnostics — the compiler's own message for the first error, refreshed on every change, cleared
   when the buffer is fixed;
-- *Go to Definition* (`F12`) to a same-file function, local, `for` binding or parameter.
+- *Go to Definition* (`F12`) to a same-file function, local, `for` binding or parameter;
+- hover — the type of a name, the signature and `///` documentation of a call, a field's type, an
+  enum variant, a literal;
+- completion (`Ctrl+Space`, and after `.` or `:`) — keywords, locals in scope, a record's fields and
+  methods, an enum's variants after `Type.`, a call's parameters;
+- *Rename Symbol* (`F2`) for a local, a parameter, a function, a record, an enum, an alias, a
+  constant and a record field, in every open document; it is refused, with the reason, for a
+  keyword, a builtin, an `extern` declaration, or a name whose module is not open.
+
+What the server will not answer, and why, is in [docs/tooling/lsp.md](../docs/tooling/lsp.md).
 
 Command Palette: *Grail: Restart Language Server*, *Grail: Show Language Server Output`.
 

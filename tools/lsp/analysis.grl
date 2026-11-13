@@ -48,17 +48,6 @@ fn put<a, b>(out: &a mut u8[], text: &b [u8]) {
         out.push(text[i]);
     }
 }
-fn has_prefix<a, b>(text: &a [u8], prefix: &b [u8]) -> bool {
-    if text.len() < prefix.len() {
-        return false;
-    }
-    for i in prefix.len() {
-        if text[i] != prefix[i] {
-            return false;
-        }
-    }
-    return true;
-}
 fn is_space(c: u64) -> bool {
     return (c == 32) || (c == 9) || (c == 10) || (c == 12) || (c == 13);
 }
@@ -504,7 +493,6 @@ pub struct Source {
     items: Item[],
     imports: Import[],
     bindings: Binding[],
-    impls: Impl[],
     module: u8[],
     scopes: u64[]
 }
@@ -1376,7 +1364,6 @@ pub fn source_new<a>(text: &a [u8]) -> Source {
         items: items,
         imports: imports,
         bindings: bindings,
-        impls: impls,
         module: module,
         scopes: scopes
     };
@@ -1487,13 +1474,6 @@ fn strip_refs(ty: &[u8]) -> u8[] {
         }
     }
     return t;
-}
-fn is_optional(ty: &[u8]) -> bool {
-    t := strip_refs(ty);
-    if t.len() == 0 {
-        return false;
-    }
-    return t[t.len() - 1] == 63;
 }
 fn strip_optional(ty: &[u8]) -> u8[] {
     t := strip_refs(ty);
@@ -3733,6 +3713,30 @@ pub fn rename_target(s: &Source, others: (&Item[]), offset: u64) -> Target {
             decl = item.token;
         }
         return target_item(&item, view(owner), decl);
+    }
+    // A field's label in a record literal or pattern: the field, not a binding.
+    if is_label_position(s, at) || is_pun_position(s, at) {
+        head := literal_head(s, at);
+        if 0 < head.len() {
+            rec := resolve_item(s, others, view(head), 1, 4);
+            if rec.kind == K_RECORD {
+                field := field_of(s, others, view(rec.name), view(name), 4);
+                if 0 < field.name.len() {
+                    mut decl = no_index();
+                    if own_record(s, view(rec.name)).kind != 0 {
+                        decl = field.token;
+                    }
+                    return Target {
+                        kind: R_FIELD,
+                        name: copy_bytes(field.name),
+                        record: copy_bytes(rec.name),
+                        module: copy_bytes(rec.module),
+                        decl: decl,
+                        refusal: u8[]
+                    };
+                }
+            }
+        }
     }
     // A declaration written here.
     declared := item_with_token(s, at);

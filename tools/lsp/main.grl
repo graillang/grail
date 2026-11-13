@@ -8,18 +8,28 @@ use analysis;
 // Scope, stated plainly because `initialize` advertises exactly this and nothing else:
 //
 //   * full-text synchronisation (open/change/close) and pushed diagnostics;
-//   * `textDocument/definition` for declarations in the same file.
+//   * `textDocument/definition` for declarations in the same document;
+//   * `textDocument/hover` for the type, signature and documentation at a position;
+//   * `textDocument/completion` for names in scope, fields, variants and parameters;
+//   * `textDocument/rename` and `textDocument/prepareRename`, across the open documents.
+//
+// The last four are answered by `analysis.grl`, which reads the open buffers: the
+// declarations they make, the bindings in scope and the type of an expression. Where it
+// cannot be sure - a module whose source is not open, an expression it cannot type - the
+// answer is nothing, never a guess.
 //
 // Diagnostics are not invented here. The open buffer is written to a scratch file and
-// `grail check <file>` is run on it; the compiler prints `file:line:column: message`
-// and this server maps that text into an LSP range. A clean check publishes `[]`, which
-// is how a fixed buffer clears its squiggles. Nothing is published when the compiler
-// cannot be run at all: that is reported with `window/showMessage` instead.
+// `grail check <file>` is run on it; the compiler prints `error[CODE]: message`, a
+// ` --> file:line:column` line and an excerpt whose carets give the width, and this
+// server maps that block into an LSP range in UTF-16 code units. A clean check publishes
+// `[]`, which is how a fixed buffer clears its squiggles. Nothing is published when the
+// compiler cannot be run at all: that is reported with `window/showMessage` instead.
 //
 // Requests are answered from `lib/json.grl` (strict parsing, exact integers) and every
 // response is written as bytes built by hand, so an id, a uri or a compiler message can
-// never break the framing. Malformed input is answered with the JSON-RPC error that
-// describes it; the server has no path that aborts on a client message.
+// never break the framing. Malformed input - a bad frame, a bad position, a name that
+// cannot be renamed - is answered with the JSON-RPC error that describes it; the server
+// has no path that aborts on a client message.
 
 // ---------------------------------------------------------------------------
 // bytes

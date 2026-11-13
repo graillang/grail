@@ -381,6 +381,10 @@ const URI = 'file:///virtual/session.grl';
     '    Second(u64)',
     '}',
     '',
+    'fn area(p: &Point) -> u64 {',
+    '    return p.x;',
+    '}',
+    '',
     'fn main() {',
     '    p := Point { x: 1, y: 2 };',
     '    total := add(p.x, 3);',
@@ -423,6 +427,11 @@ const URI = 'file:///virtual/session.grl';
   {
     const answer = await hover(pointIn(HOVER, 'x: 1, y: 2', 0));
     ok(answer.result.contents.value.includes('x: u64'), 'a record-literal label shows the field type');
+  }
+  // A field reached through a reference parameter: `p: &Point` still ends at `Point`.
+  {
+    const answer = await hover(pointIn(HOVER, 'p.x;\n}', 'p.x;\n}'.length - 3));
+    ok(answer.result.contents.value.includes('x: u64'), 'a field through a reference parameter');
   }
   // A literal.
   {
@@ -610,6 +619,15 @@ const URI = 'file:///virtual/session.grl';
     '    println(trinket);',
     '}',
     '',
+    'struct Pair {',
+    '    x: string',
+    '}',
+    '',
+    'fn pair() {',
+    '    pair := Pair { x: "text" };',
+    '    println(pair.x);',
+    '}',
+    '',
   ].join('\n');
   const uri = 'file:///virtual/rename.grl';
   await client.open(uri, 1, RENAME);
@@ -666,6 +684,12 @@ const URI = 'file:///virtual/session.grl';
     equal(record.length, 2, 'a record renames its declaration and literal');
     equal(record.map(span => span.range.start.line), [1, 9], 'record declaration and literal');
   }
+  // A rename asked for at the literal's label reaches the same field.
+  {
+    const atLabel = await edits(pointIn(RENAME, 'x: 1, y: 2', 0));
+    const atAccess = await edits(pointIn(RENAME, 'p.x, a', 2));
+    equal(atLabel, atAccess, 'the label and the access resolve to the same field');
+  }
   {
     const field = await edits(pointIn(RENAME, 'p.x, a', 2));
     equal(field.length, 3, 'a field renames its declaration, the literal label and the access');
@@ -673,6 +697,8 @@ const URI = 'file:///virtual/session.grl';
     for (const span of field) {
       equal(sliceRange(RENAME, span.range), 'x', 'each field edit is the field name');
     }
+    // `Pair` has a field of the same name and is a different field: untouched.
+    ok(!field.some(span => span.range.start.line >= 22), 'a same-named field of another record is not renamed');
   }
   // Refusals: a keyword, a builtin, and anything the server cannot name.
   {
@@ -699,8 +725,16 @@ const URI = 'file:///virtual/session.grl';
 {
   const client = new Client();
   await client.initialize();
-  const LIB = ['module mathlib;', '', 'pub fn helper(a: u64) -> u64 {', '    return a;', '}', ''].join('\n');
-  const APP = ['module app;', '', 'use mathlib;', '', 'fn main() {', '    x := mathlib::helper(1);', '    println(x);', '}', ''].join('\n');
+  const LIB = [
+    'module mathlib;', '', 'pub struct Bundle {', '    item: u64,', '    other: u64', '}', '',
+    'pub fn helper(a: u64) -> u64 {', '    return a;', '}', '',
+  ].join('\n');
+  const APP = [
+    'module app;', '', 'use mathlib;', 'use mathlib::Bundle;', '',
+    'fn main() {', '    x := mathlib::helper(1);',
+    '    b := Bundle { item: 2, other: 3 };',
+    '    println(b.item);', '    println(x);', '}', '',
+  ].join('\n');
   const OTHER = ['module other;', '', 'use somewhere;', '', 'fn main() {', '    y := somewhere::thing(1);', '    println(y);', '}', ''].join('\n');
   const lib = 'file:///virtual/mathlib.grl';
   const app = 'file:///virtual/app.grl';
@@ -736,6 +770,17 @@ const URI = 'file:///virtual/session.grl';
     const answer = await renameAt(app, pointIn(APP, 'x := mathlib', 1));
     equal(Object.keys(answer.result.changes), [app], 'a local rename stays in its document');
     equal(answer.result.changes[app].length, 2, 'its declaration and use');
+  }
+  // A record field across documents: the declaration, the literal label and the access.
+  {
+    const answer = await renameAt(lib, pointIn(LIB, 'item: u64', 1), 'part');
+    const changes = answer.result.changes;
+    equal(Object.keys(changes).sort(), [app, lib].sort(), 'the field rename reaches both documents');
+    equal(changes[lib].length, 1, 'the field declaration');
+    equal(changes[app].length, 2, 'the literal label and the access in the other document');
+    for (const span of changes[app]) {
+      equal(sliceRange(APP, span.range), 'item', 'each edit covers the field name');
+    }
   }
   // A module that is not open cannot be renamed soundly, and its members are not guessed.
   {
