@@ -59,6 +59,27 @@ fn rt_abort() -> u64 {
     }
     return rt_abort_final();
 }
+// A task ran past the bottom of its stack into the guard page. The platform calls this from its
+// fault handler (a POSIX signal handler on the alternate stack, a Windows vectored exception
+// handler), so it may neither allocate nor take the allocator lock: the message goes into
+// process-state scratch and straight to fd 2, and the exit goes through the same one-reporter claim
+// as a failed runtime check. The stack pointer is already at the guard, so a normal report that
+// walks frames could not run.
+fn rt_stack_overflow() -> u64 {
+    if rt_abort_begin() == 0 {
+        rt_abort_park();
+    }
+    words := rt_state_stack_guard();
+    text := view("error: stack overflow\n");
+    mut n = 0;
+    for i in text.len() {
+        raw_putbyte(words + 16 + n, u64(text[i]));
+        n = n + 1;
+    }
+    rt_write_all(2, words + 16, n);
+    rt_hard_exit(134);
+    return 0;
+}
 // ---- runtime errors ----------------------------------------------------------------------------
 // A check that fails stops the program the way it always has (SIGABRT, exit status 134), but first
 // says what failed and where, then names its callers, as a Rust panic does:
@@ -1741,12 +1762,20 @@ fn rt_thread_join(handle: u64) -> u64 {
 //   3392         Windows thread bridge        os-windows: rt_win_bridge  --
 //   3400         call-site table helper       _start; rt_fail_where      runtime-errors
 //   3456         abort report claim           rt_abort                   abort-once
+//   3464..3576   task-stack fault handler     rt_state_stack_guard       stack-guard
 //   3840         Windows fiber state          os-windows                 --
 //   3856..       Windows fiber table          os-windows                 --
 //
 // Not a claim: thread-record word 48 (raw_state() + 176 for the main thread). os-windows keeps the
 // per-thread WaitOnAddress expected value there, so nothing else may use it. The pool did, which was
 // the same disease as the 88 collision: an unowned word in a shared structure.
+// The task-stack fault handler's state: 0 restorer code page (x86-64), 8 install state
+// (0 none, 1 installing, 2 ready), 16 a 32-byte message scratch, 48 the sigaction the handler is
+// installed with, 80 the zeroed SIG_DFL action the handler swaps in for a fault that is not a task
+// overflow. Nothing here is allocated at fault time.
+fn rt_state_stack_guard() -> u64 {
+    return raw_state() + 3464;
+}
 fn rt_state_pool() -> u64 {
     return raw_state() + 3200;
 }
@@ -2383,6 +2412,7 @@ fn rt_env_is(name: u64, value: u64) -> u64 {
 //   0 deque buffer  8 deque head (atomic)  16 deque tail (atomic)  24 deque mask
 //  32 scheduler  40 index  48 thread record  56 free-stack list head  64 free-stack count
 //  72 steal random state  80 deque capacity
+//  88 fault-handler alternate stack  96..112 its sigaltstack record (sp, flags, size)
 //
 // The deque is a Chase-Lev deque with a fixed capacity (rt_deque_capacity, 131072 entries): the
 // owner pushes and pops at the bottom, a thief steals at the top with a CAS on the head. A fixed

@@ -313,6 +313,24 @@ pub fn rt_call(n: u64, a: u64, b: u64, c: u64) -> u64 {
     if n == 293 {
         return rt_os_result(raw_import("pipe", a, 0, 0));
     }
+    if n == 202 {
+        // The portable scheduler's futex encoding: bit 7 private, bit 0 wake. __ulock_wait compares
+        // the low 32 bits of the word with `value` and sleeps; ULF_WAKE_ALL (0x100) is used unless
+        // the caller asked for exactly one waiter. __ulock_wait/__ulock_wake are libSystem entry
+        // points (the ones pthread_cond uses), and both report failure as -1/errno like the rest of
+        // the libc boundary.
+        if (b & 128) == 0 {
+            return 0; // only rt_thread_join uses the plain form, and Darwin has no clone threads
+        }
+        if (b & 1) != 0 {
+            mut flags = 1;
+            if c != 1 {
+                flags = 257; // UL_COMPARE_AND_WAIT | ULF_WAKE_ALL
+            }
+            return rt_os_result(raw_import("___ulock_wake", flags, a, 0, 0));
+        }
+        return rt_os_result(raw_import("___ulock_wait", 1, a, c, 0));
+    }
     return wrapping_sub(0, 38);
 }
 // Four-argument operations: only the arena growth path and the unsupported readiness family.
@@ -329,9 +347,10 @@ pub fn rt_thread(flags: u64, slot: u64, handle: u64) -> u64 {
 }
 
 // ---- green-task execution contexts ----
-// The same shape as the Linux boundary: a Mach-O build has a direct stack switch (raw_switch) and
-// asks for a reactor, which the platform still answers with -ENOSYS, so a green task there fails
-// loudly at scheduler start exactly as it did before this was split out by platform.
+// The same shape as the Linux boundary: a Mach-O build has a direct stack switch (raw_switch), its
+// readiness source is kqueue instead of epoll (rt_os_reactor_open/loop), and a task stack is a
+// reservation whose lowest page is PROT_NONE. Parking uses __ulock_wait/__ulock_wake through
+// operation 202.
 fn rt_os_reactor() -> u64 {
     return 1;
 }
@@ -348,10 +367,17 @@ fn rt_os_workers() -> u64 {
     return workers;
 }
 fn rt_os_sched_prepare() -> u64 {
+    rt_os_stack_guard_install();
     return 0;
 }
-fn rt_os_ctx_new(t: u64) -> u64 {
-    size := 262144;
+// ---- task stacks -------------------------------------------------------------------------------
+// 1 MiB reserved, lowest page PROT_NONE as the guard, pages committed by the kernel on first touch,
+// and finished stacks recycled through the finishing worker's free list (link in the top word).
+fn rt_os_stack_size() -> u64 {
+    return 1048576;
+}
+fn rt_os_stack_reserve() -> u64 {
+    size := rt_os_stack_size();
     stack := raw_map(size);
     if rt_error(stack) {
         rt_abort();
@@ -359,12 +385,116 @@ fn rt_os_ctx_new(t: u64) -> u64 {
     if rt_error(rt_syscall(10, stack, 4096, 0)) {
         rt_abort();
     }
+    return stack;
+}
+fn rt_os_stack_take() -> u64 {
+    w := rt_worker_self();
+    if w != 0 {
+        head := raw_load(w + 56);
+        if head != 0 {
+            raw_store(w + 56, raw_load(head + rt_os_stack_size() - 8));
+            raw_store(w + 64, raw_load(w + 64) - 1);
+            return head;
+        }
+    }
+    return rt_os_stack_reserve();
+}
+fn rt_os_stack_give(stack: u64) -> u64 {
+    w := rt_worker_self();
+    if (w != 0) && (raw_load(w + 64) < 32) {
+        raw_store(stack + rt_os_stack_size() - 8, raw_load(w + 56));
+        raw_store(w + 56, stack);
+        raw_store(w + 64, raw_load(w + 64) + 1);
+        return 0;
+    }
+    if rt_error(rt_syscall(11, stack, rt_os_stack_size(), 0)) {
+        rt_abort();
+    }
+    return 0;
+}
+fn rt_os_stack_guard_hit(addr: u64) -> u64 {
+    tp := raw_tp_get();
+    if tp == 0 {
+        return 0;
+    }
+    t := raw_load(tp + 16);
+    if t == 0 {
+        return 0;
+    }
+    base := raw_load(t + 8);
+    size := raw_load(t + 16);
+    if size <= 4096 {
+        return 0;
+    }
+    return (base <= addr) && (addr < base + 4096);
+}
+// Darwin's siginfo_t is not Linux's: si_addr sits after si_signo, si_errno, si_code, si_pid, si_uid
+// and si_status, so it is at offset 24. A Mach-O fault that is not a task-stack overflow keeps the
+// default action (SIG_DFL), which kills the process exactly as it did before this handler existed.
+fn rt_os_stack_handler(sig: u64, info: u64, ctx: u64) -> u64 {
+    mut addr = 0;
+    if info != 0 {
+        addr = raw_load(info + 24);
+    }
+    if rt_os_stack_guard_hit(addr) != 0 {
+        rt_stack_overflow();
+    }
+    raw_import("signal", sig, 0, 0);
+    return 0;
+}
+// Darwin's struct sigaction is {handler, sigset_t mask (4 bytes), int flags}: the flags live in the
+// high half of the second word. SA_ONSTACK | SA_SIGINFO.
+fn rt_os_stack_guard_signal(sig: u64, words: u64) -> u64 {
+    sa := words + 48;
+    raw_store(sa, rt_os_stack_handler);
+    raw_store(sa + 8, 279172874240);
+    return rt_os_result(raw_import("sigaction", sig, sa, 0));
+}
+fn rt_os_stack_guard_install() -> u64 {
+    words := rt_state_stack_guard();
+    if raw_atomic_load(words + 8) != 2 {
+        if raw_atomic_cas(words + 8, 0, 1) == 0 {
+            mut i = 0;
+            while i < 4 {
+                raw_store(words + 80 + i * 8, 0);
+                i += 1;
+            }
+            raw_atomic_store_release(words + 8, 2);
+        } else {
+            while raw_atomic_load(words + 8) != 2 {
+                rt_syscall(24, 0, 0, 0);
+            }
+        }
+    }
+    w := rt_worker_self();
+    if w != 0 {
+        mut base = raw_load(w + 88);
+        if base == 0 {
+            base = raw_map(65536);
+            if rt_error(base) == 0 {
+                raw_store(w + 88, base);
+            } else {
+                return 0;
+            }
+        }
+        // Darwin stack_t: {sp, size, flags}.
+        raw_store(w + 96, base);
+        raw_store(w + 104, 65536);
+        raw_store(w + 112, 0);
+        rt_os_result(raw_import("sigaltstack", w + 96, 0, 0));
+        rt_os_stack_guard_signal(11, words); // SIGSEGV
+        rt_os_stack_guard_signal(10, words); // SIGBUS on Darwin
+    }
+    return 0;
+}
+// A task's initial switch frame: x86-64 8 words (resume first), AArch64 22 words (resume first).
+fn rt_os_ctx_new(t: u64) -> u64 {
+    size := rt_os_stack_size();
+    stack := rt_os_stack_take();
     raw_store(t + 8, stack);
     raw_store(t + 16, size);
-    // x86-64 8 words (resume first); AArch64 22 words (resume first).
-    target := raw_target();
     mut words = 8;
-    if target == 1 {
+    if raw_target() == 1 {
         words = 22;
     }
     frame := stack + size - words * 8;
@@ -383,8 +513,5 @@ fn rt_os_ctx_leave(t: u64) -> u64 {
     return 0;
 }
 fn rt_os_ctx_release(t: u64) -> u64 {
-    if rt_error(rt_syscall(11, raw_load(t + 8), raw_load(t + 16), 0)) {
-        rt_abort();
-    }
-    return 0;
+    return rt_os_stack_give(raw_load(t + 8));
 }
