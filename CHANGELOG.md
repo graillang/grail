@@ -27,6 +27,23 @@
 
 ## Unreleased
 
+- Fixed: a contained task failure corrupted the allocator header of the block that followed the
+  task record, so the scope exit aborted (`book/examples/task-failure.grl` printed `bad input` and
+  exited 134 instead of printing its sibling's `7`). `rt_site_here` handed the compiler's `rt_sites`
+  helper the record's 24-byte walk scratch, but the helper writes five words - both tables' bounds
+  and the caller's frame - so its last two stores landed on the record's word 232 and word 240. The
+  record is 240 bytes, and with the allocator's 16-byte block header that is exactly one 256-byte
+  size class, so word 240 is the *next* block's size word, not padding. That block was free at the
+  time and `rt_alloc_unlocked` writes a size only on the bump path, so the next 240-byte allocation
+  was handed a record whose header read `__stop_grail_funcs`; `rt_free_unlocked` read that as a
+  >= 512 KiB arena, did not find it in the arena list and aborted. The walk's scratch is now the
+  record's words 200..240 - the five words the helper writes, inside the record - and the "these
+  are already texts" flag moved to bit 0 of the site word (a table entry is 8-byte aligned in a
+  24-byte stride, an allocation is more so), which keeps the record at 240 bytes and in its size
+  class. `rt_site_here`'s contract now says its area is sized by what the helper writes, not by
+  what the walk reads. Corpus: `tmem-contained-then-joined` (the book example's shape) and
+  `tmem-contained-then-joined-thrice` (the same scope three times, so the overlapped block comes
+  back from the free list); both abort 5 times out of 5 before this fix.
 - Fixed: the debug tables named local labels by number alone (`.L<n>`), but a label is minted in
   its unit's namespace (`.L<unit>_<n>`, the separate-compilation change), so a `--debug` build whose
   program spans more than one unit asked the assembler to subtract a label no unit had emitted

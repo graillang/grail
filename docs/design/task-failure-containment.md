@@ -240,60 +240,112 @@ because the failing instruction killed the process.
 - Windows and macOS are the same code path (the platform supplies the context switch); only Linux
   x86-64 is verified by the test cases in this change.
 
-## Known integration failure (open, gaps-int3)
+## The integration failure, and the word that wrote the header (fixed, gaps2-tmem)
 
-Reproduce with `grail run book/examples/task-failure.grl` (prints `bad input`, then exits 134 with
-no message and without the sibling task's `7`).
+Reproduced with `grail run book/examples/task-failure.grl`: it printed `bad input`, then exited 134
+with no message instead of printing the sibling task's `7`. It is fixed; this section records what
+the writer was, because the answer is a contract between two branches rather than a bug in either.
 
-What gdb established on the merged tree (an optimized native build; `--debug` exits normally, and
-`--backend=llvm` fails identically, so this is runtime logic, not the word optimizer or the emitter):
+The failure was a **16-byte overrun of the task record by the site walk**, and it took the two
+branches that touched this area to make it: this one gave the walk a scratch area sized by what the
+walk *reads*, and the errors branch's table helper writes more than that.
+
+`rt_sites` (emitted by `compiler/native.grl`) writes **five** words into the buffer it is handed:
 
 ```
-#0 rt_syscall  #1 rt_abort_final  #2 rt_abort  #3 rt_free_unlocked  #4 rt_free
-#5 rt_scope_end   (the FIRST `rt_free(t)` in the reap loop)  #6 f_main_main  #7 _start
+0  __start_grail_sites   8  __stop_grail_sites   16  the caller's rbp
+24 __start_grail_funcs   32 __stop_grail_funcs
 ```
 
-`t` is a real task record (`f=0x2208a8 item=5 arity=2` - the second task), but the 16 bytes before
-it, which hold the allocator's block header, read `size=0x21f8a8 kind=1` where a 240-byte block
-should read `size=0xf0`. `0x21f8a8` is a **text address** (close to the task's own function
-pointer), so a code address was written into the record's block header - or the record's memory was
-clobbered by the discarded stack. `rt_free_unlocked` then treats the block as a >=512 KiB arena,
-does not find it in the arena list, and aborts.
+`rt_site_here` reads only the first three - both statement-table bounds and the frame - and it was
+documented and called as a 24-byte scratch: `rt_site_here(t + 208)` on a record whose words
+208..232 were called "scratch for the site walk". The record is **240 bytes**, and 240 bytes of
+payload plus the allocator's 16-byte block header is *exactly* one 256-byte size class. There is no
+slack after word 232: word 240 is not padding, it is the first byte of the **next block**, and word
+248 is that block's kind. So the helper's fourth word landed in the record's dead word 232 and its
+fifth - `__stop_grail_funcs`, a static address in `grail_funcs`' address range - landed on the next
+block's **size** word. That is the observed value: `0x21f7a0` in the build measured here, which is
+`__stop_grail_funcs` (and was `0x21f8a8` in the build the earlier write-up measured - the same
+symbol, the layout shifted by `0x108`).
 
-So the open question is narrow: **who writes 16 bytes before the task record** - the containment
-path, the stack discard (`rt_os_ctx_leave` in `rt_contain_tail`), or the allocation of the record
-itself. A breakpoint on `rt_free if $rdi == <record>` shows the first free of the record is
-`rt_scope_end`'s own, so nothing frees it twice; the header is already wrong by then.
+Everything the earlier measurements reported follows from that one write:
 
-Two branches touched this path: this one (`rt_fail`, `rt_contain_site`, `rt_contain_tail`,
-`rt_leak_exit`, the task record, state word 3584) and the errors branch (`rt_backtrace`, the site
-and function tables, `rt_sites`). Compare the merged `rt_fail`/`rt_task_spawn`/`rt_scope_end`
-against both parents (`git diff origin/gaps2-taskfail -- compiler/runtime.grl`,
-`git diff origin/gaps2-errs -- compiler/runtime.grl`).
+- **`kind` was correct and `size` was not.** The helper's last store ends at byte 247, so word 248
+  (the next block's kind) is untouched; `rt_alloc_unlocked` also writes word 8 to 1 on both the
+  reuse and the bump path, while it writes word 0 only on the bump path. A block taken from the
+  per-size free list therefore keeps a word 0 written *while it was free* - which is exactly the
+  last write the walk's fifth word makes - and `rt_free_unlocked` reads it as a size. As
+  `>= 512 KiB` the block is treated as its own arena, the arena list does not contain it, and
+  `rt_abort` fires. The stack is `rt_scope_end` -> `rt_free` -> `rt_free_unlocked` -> `rt_abort`
+  because the first `rt_free(t)` in the reap loop is the first free of a record that came off the
+  free list.
+- **A watchpoint on the header stayed silent afterwards** because the write happens before the
+  record exists: at `rt_site_here`'s call, the block after the failing record is not yet that
+  task's record. A watchpoint set on `t + 240` at `rt_contain_site`'s entry is already too late -
+  the site argument is evaluated in the caller, which is why the earlier investigation concluded
+  the block "was written while free" and could not catch the writer.
+- **`--debug` passed** because it changes block adjacency and the free list's contents, so the
+  overrun lands somewhere that is later bump-allocated (and so re-labelled with a size).
+- **The second record was the bad one**, because only a record that *follows* a failing record is
+  inside the overrun.
+- **The free list's use of word 1 is not the defect.** `rt_alloc_unlocked` overwrites word 8 with 1
+  on both paths, so a link word is never handed out as a kind; the header that goes stale is word 0,
+  which nothing restores because nothing is supposed to write it while the block is free.
 
-### What the corruption is (measured, not inferred)
+### The fix
 
-A hardware watchpoint on the block header 16 bytes before the first record never fires: that record's
-header is fine (`size=0x100`, `kind=1` for a 240-byte request rounded to 256). The **second** record
-of the same scope is the bad one, and its header is already wrong the moment `rt_task_spawn`
-returns: `size=0x21f8a8`, `kind=1` (`0x21f8a8` is an address inside `.text` - not a symbol start, since `f_main_work` is `0x2208a8` - i.e. the shape of a saved return address). Nothing writes that header afterwards (a watchpoint on it stays
-silent through the crash).
+The walk's scratch is the **five words the helper writes**, `200..240`, entirely inside the record:
+`rt_site_here(t + 200)`. The record's containment area is now:
 
-`rt_alloc_unlocked` writes `block+0 = size` only on the **bump** path; a block taken from the
-per-size free list keeps whatever size word it had. `block+8` is written to 1 on both paths, so
-`kind` looks right even for a reused block. Therefore the bad `size` was written into that block
-**while it was free** - a use-after-free write into a freed block's header, 16 bytes before its old
-payload - and the next `rt_alloc(240)` handed it out with the stale word, which `rt_free_unlocked`
-then read: as `>= 512 KiB` it is treated as its own arena, the arena list does not contain it, and
-`rt_abort` fires.
+```
+160 kind   168 a   176 b   184 the site   192 the message   200..240 the site walk's scratch
+```
 
-Beware two hypotheses that the measurements rule out: the running stack is **not** inside the heap
-(`%rsp` is `0x7fffffffc940` at both spawns), and the word optimizer is not implicated (the LLVM
-backend fails identically, `--debug` does not).
+Word 184 has to give up one bit for the "184 and 192 are already texts" flag that used to be its own
+word 200: the walk needs those 40 bytes, and 240 bytes is the largest record that stays in the
+256-byte size class. A statement-table entry is an 8-byte-aligned address in a 24-byte stride and an
+allocation is at least 16-byte aligned, so bit 0 of the site word is free: `rt_contain_site` stores
+the entry with bit 0 clear, `rt_contain_text` stores its text with bit 0 set, and `rt_task_site`
+masks it. `rt_site_here`'s comment now says its scratch is sized by what the helper writes, not by
+what the walk reads, and why (a helper emitted before the function table existed writes fewer -
+never more - so a caller must not size the area from its own needs).
 
-So the open question is precise: **who frees a block and then writes 16 bytes before the payload it
-used to point at**. The two branches that touched memory near there are this one (the containment
-record and its `t + 160..208` writes, `rt_contain_tail`, `rt_leak_exit`) and the errors branch
-(`rt_backtrace`'s capture and the site/function tables). Compare them with
-`git diff origin/gaps2-taskfail -- compiler/runtime.grl` and the same against `origin/gaps2-errs`,
-and check every `raw_store(x - 16, ...)`.
+Rejected, in order of how tempting they were:
+
+- **Grow the record to 248 bytes.** Correct and one line, but 248 + 16 crosses into the 512-byte
+  class and doubles the heap cost of every live task, which is the one thing the record layout is
+  tuned for (a 100k spawn burst costs records, not stacks). The bit is cheaper than the doubling
+  and is where the record's two-word header says the limit is.
+- **Re-store the size word on the reuse path** (`raw_store(block, size)` next to the kind store).
+  This makes the bug disappear without fixing it: word 0 is an allocator invariant, so a stale value
+  there is real corruption somewhere, and re-writing it on reuse converts every future overrun into
+  silent aliasing. `rt_free_unlocked` keeps its abort.
+- **A canary in `rt_alloc_unlocked`** (abort when a reused block's size word does not match its
+  bin). It would have named this bug at allocation instead of at free, but the free path already
+  aborts on the same corruption and the canary adds a new way for unrelated latent damage to end a
+  process; the overrun was the bug, not the reporting.
+- **A three-word helper contract** (make `rt_sites` write only the statement table and the frame,
+  and give `rt_backtrace` its function-table bounds another way). The runtime is deliberately the
+  tolerant side of this contract - `rt_backtrace` already reads the function-table words of a helper
+  "emitted before the function table existed" as zeros - because the helper comes from the compiler
+  and a checked-in seed's helper is older than the runtime it is compiled with. Sizing the scratch
+  from what the walk reads is precisely the assumption that failed.
+
+### Verification
+
+`tmem-contained-then-joined` is the book example's shape as a corpus case: a scope whose first task
+is contained and whose second task is spawned after that join and joined. `tmem-contained-then-
+joined-thrice` runs the same scope three times, so the block the walk's fifth word lands on is one
+the allocator has already handed out and reclaimed - the reuse path that reads the size word instead
+of writing it. Both abort 5 times out of 5 against the runtime before this fix and pass after it,
+and `book/examples/task-failure.grl` prints `bad input` then `7` and exits 0.
+
+The command that reproduces it, in one line, is worth keeping:
+
+```
+C=$(bun tools/native.mjs build 2>&1 | tail -1); GRAIL_COMPILER=$C $C run book/examples/task-failure.grl
+```
+
+The runtime is read from the tree by every build (`compiler/cli.grl` locates `compiler/runtime.grl`
+beside the compiler), so reverting `compiler/runtime.grl` alone reproduces the abort without
+rebuilding the compiler - which is how the before/after counts above were taken.
