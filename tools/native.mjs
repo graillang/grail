@@ -1,7 +1,7 @@
 // Build/test orchestration only. Language checking and instruction selection live in Grail.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, statSync, accessSync, constants as fsConstants } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { constants as zlibConstants, zstdCompressSync, zstdDecompressSync } from 'node:zlib';
@@ -332,30 +332,52 @@ export function seedAssemblyPath(target) {
 export function compilerEnvironment() {
   return { ...process.env, PWD: root };
 }
-export function buildCompiler() {
-  // Explicit development bootstrap, used while a new intrinsic is staged before artifact refresh.
+// The compiler that compiles the tree's sources: an explicit development bootstrap when
+// GRAIL_COMPILER names one (a two-step reseed, or a seed that predates a syntax change), else the
+// checked-in seed assembled for this host. This is the only place GRAIL_COMPILER is honoured, and
+// it is deliberately NOT what `build` returns.
+export function bootstrapCompiler() {
   if (process.env.GRAIL_COMPILER) {
     const supplied = resolve(root, process.env.GRAIL_COMPILER);
-    if (!existsSync(supplied)) throw new Error(`Missing development compiler ${supplied}`);
+    if (!existsSync(supplied)) {
+      throw new Error(`GRAIL_COMPILER names ${supplied}, which does not exist`);
+    }
+    const stat = statSync(supplied);
+    if (!stat.isFile()) throw new Error(`GRAIL_COMPILER names ${supplied}, which is not a file`);
+    try {
+      accessSync(supplied, fsConstants.X_OK);
+    } catch {
+      throw new Error(`GRAIL_COMPILER names ${supplied}, which is not executable`);
+    }
     return supplied;
   }
   if (process.platform !== 'linux' || !hostTarget) throw new Error('Grail currently supports Linux on x86-64, ARM64 and RISC-V 64; other operating systems are not implemented');
-  const boot = join(seedDirectory, seedFile(hostTarget));
   const assembly = seedAssemblyPath(hostTarget);
+  const directory = join(root, '.work/native', 'seed');
+  mkdirSync(directory, { recursive: true });
+  return assemble(assembly, join(directory, 'bootstrap'));
+}
+// The tree's compiler: ALWAYS built from compilerSources by the bootstrap, cached by a hash of
+// what went into it. It never hands back the bootstrap itself - a `build` that printed a supplied
+// path and succeeded looked like a build and was not one, which cost two people a debugging
+// session. Use `bootstrapCompiler()` when you want the compiler to build WITH, and
+// `bun tools/native.mjs compiler` to print a path without building anything.
+export function buildCompiler() {
+  const base = bootstrapCompiler();
+  const baseStat = statSync(base);
   const hash = createHash('sha256');
   hash.update(readFileSync(fileURLToPath(import.meta.url)));
-  hash.update(readFileSync(boot));
+  hash.update(`${base}\u0000${baseStat.size}\u0000${baseStat.mtimeMs}\u0000`);
   for (const file of compilerSources) hash.update(readFileSync(file));
   const directory = join(root, '.work/native', hash.digest('hex').slice(0, 24));
   const executable = join(directory, 'grail');
   if (existsSync(executable)) return executable;
   mkdirSync(directory, { recursive: true });
-  const bootstrap = assemble(assembly, join(directory, 'bootstrap'));
   const output = join(directory, 'compiler.s');
-  // The checked-in seed is a compiler from before typed references and the u64 default became the
-  // only modes, so it still needs the switches to read today's compiler sources. This is the one
-  // invocation that must keep them until the seed is reseeded from a compiler that has neither.
-  command([bootstrap, '--default-u64', '--typed-refs', output, ...compilerSources], { env: compilerEnvironment() });
+  // A seed from before typed references and the u64 default became the only modes still needs the
+  // switches to read today's sources; a newer bootstrap accepts them too, so they are passed
+  // unconditionally until the reseed drops them.
+  command([base, '--default-u64', '--typed-refs', output, ...compilerSources], { env: compilerEnvironment() });
   const pending = assemble(output, join(directory, 'grail.pending'));
   renameSync(pending, executable);
   return executable;
@@ -411,6 +433,12 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const mode = process.argv[2] ?? 'build';
+  if (mode === 'compiler' || mode === 'which') {
+    // The compiler you would build with, without building anything: the development bootstrap when
+    // GRAIL_COMPILER names one, else the checked-in seed assembled for this host.
+    process.stdout.write(bootstrapCompiler() + '\n');
+    process.exit(0);
+  }
   if (mode === 'build') {
     console.log(buildCompiler());
   } else if (mode === 'compiler') {

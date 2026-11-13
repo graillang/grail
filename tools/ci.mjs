@@ -479,6 +479,23 @@ function lint() {
     const executable = existsSync(path) && (statSync(path).size > 0) && ((statSync(path).mode & 0o111) !== 0);
     check(`${script} is executable`, executable);
   }
+  // `build` must always build the tree's compiler: a supplied GRAIL_COMPILER that does not exist
+  // has to fail the build, not be handed back as if it had been built. That trap read as success.
+  {
+    const probe = spawnSync(process.execPath, [join(root, 'tools/native.mjs'), 'build'], {
+      cwd: root,
+      env: { ...process.env, GRAIL_COMPILER: join(root, '.work/no-such-compiler') },
+      encoding: 'utf8',
+    });
+    check('native.mjs build refuses a missing GRAIL_COMPILER', probe.status !== 0,
+          (probe.stderr ?? '').split('\n').find(line => line.includes('GRAIL_COMPILER')) ?? '');
+  }
+  // `compiler` names a usable compiler without building one.
+  {
+    const probe = spawnSync(process.execPath, [join(root, 'tools/native.mjs'), 'compiler'], { cwd: root, encoding: 'utf8' });
+    const path = (probe.stdout ?? '').trim();
+    check('native.mjs compiler prints a usable path without building', probe.status === 0 && existsSync(path), path);
+  }
   check('install.ps1 exists', existsSync(join(root, 'packaging/install.ps1')));
   check('windows-x86_64 has a required cross lane', LANES.some(lane => lane.required && lane.target === 'windows-x86_64'));
   check('windows-x86_64 lane is static-only', LANES.filter(lane => lane.target === 'windows-x86_64').every(lane => lane.execution === 'static'));
