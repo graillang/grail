@@ -36497,7 +36497,16 @@ fn iface_w_type<a>(c: (&a mut C), out: (&a mut u8[]), deps: (&a mut u64[]), ty: 
     args := type_args(&mut c, ty);
     env := ty_env(&mut c, ty);
     arg := ty_arg(&mut c, ty);
-    iface_wv(&mut body, mode);
+    // An associated type's `mode` is `interface id * 1024 + item index`, and the id is a position in
+    // this run's interface table: the record writes the interface by name and the index, so the mode
+    // slot carries nothing (a zero) and the reader rebuilds it. Writing the id here would make the
+    // same declaration re-encode differently in a run that registered its interfaces in another
+    // order - which is what `grail iface roundtrip` caught on an `assoc` type bound.
+    mut written_mode = mode;
+    if k == 30 {
+        written_mode = 0;
+    }
+    iface_wv(&mut body, written_mode);
     iface_w_num_list(&mut body, &rs);
     if (k == 1) || (k == 2) || (k == 3) || (k == 4) || (k == 11) || (k == 17) || (k == 19)
         || (k == 22) || (k == 24) {
