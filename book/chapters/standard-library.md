@@ -43,6 +43,80 @@ and overflow; `parse_i64` also accepts a leading `-` and checks the signed range
 `from_i64` are their inverse. Building a line from parts needs no library call: `format("{} of {}",
 done, total)` is a builtin and returns a `string`, which is what `println` uses.
 
+
+## Addresses, IPv6 and DNS
+
+`ip` is the address module. `ip::parse_ipv6(view("::ffff:192.168.0.1"))` answers an `Ipv6?` from the
+text `inet_pton` accepts - `::` compression, an embedded dotted quad, a `%N` zone - and
+`ip::format_ipv6` writes RFC 5952's canonical text: lowercase hex, no leading zeros, the longest run
+of two or more zero groups as `::`, and an IPv4-mapped address as `::ffff:a.b.c.d`. `Ipv4` is the
+other family, `Ip` is one address of either (`parse` picks the family by the presence of a `:`), and
+`Ipv6::scope`, `Scope::name`, `is_ipv4_mapped` and `ipv4_mapped` classify and unwrap it.
+
+`socket` is TCP and UDP over both families, which is what `net` cannot do: it takes an `ip::Ip`, and
+`bind`'s third argument is the dual-stack switch (`IPV6_V6ONLY`), so a listener on `::` that refuses
+it accepts an IPv4 peer as `::ffff:127.0.0.1`. `accept`, `connect`, `read`, `read_all`, `write_all`,
+`peer` and `local` are the stream side; `bound_datagram`, `send_to` and `recv_packet` (a datagram and
+its sender) are the UDP side. Every socket is non-blocking and every wait is a poll in one-millisecond
+slices, so a waiting task suspends and the other tasks on the worker keep running. This module calls
+the C library, so a program that uses it is linked against `-lc`: it builds where the host's libc is
+available, not in a static cross build.
+
+```grl
+use ip;
+use socket;
+
+fn main() {
+    everything := ip::parse(view("::"))!;
+    listener := socket::bind(&everything, 0, false)!;   // dual-stack: :: plus mapped IPv4
+    println(listener.family());                          // 6
+    println(listener.port() > 0);                        // the kernel picked a port
+    listener.close();
+    match ip::parse_ipv6(view("fe80::1%2")) {
+        Some(link) => {
+            kind := link.scope();
+            println(kind.name());                       // link-local
+            println(ip::format_ipv6(&link));            // fe80::1%2
+        },
+        None => {
+            println("not an address");
+        }
+    }
+}
+```
+
+`dns` resolves a name the way the system does: it reads the `nameserver` lines of
+`/etc/resolv.conf`, asks for the A records over UDP and then the AAAA ones, moves on to the next
+nameserver when one times out, and repeats a truncated answer over TCP. `dns::configured()` is that
+resolver with a one-second timeout; `dns::with_servers` takes explicit ones, which is how a program
+points at a local stub. `resolve_all` answers the addresses in the order a default `getaddrinfo`
+returns them - A first, then AAAA - and `resolve4`/`resolve6` answer one family; a name that does not
+exist is `dns::Error::NxDomain`, a silent server is `Error::Timeout`, and a mangled reply is
+`Error::Malformed`. A numeric address answers itself without a query.
+
+```grl
+use dns;
+use ip;
+
+fn main() {
+    resolver := dns::configured();
+    match dns::resolve_all(&resolver, view("example.com")) {
+        found: ip::Ip[] => {
+            for addr in found {
+                println(ip::format(&addr));
+            }
+        },
+        error: dns::Error => {
+            println(error.show());
+        }
+    }
+}
+```
+
+The wire format is public too: `encode_query` builds a question and `parse_response` reads a header,
+the questions and the answer records, following compression pointers only backwards and only a
+bounded number of times, so a hostile message is `Error::Malformed` rather than a loop.
+
 ## Time
 
 `time::now()` reads the monotonic clock. Only differences of an `Instant` mean anything; the wall

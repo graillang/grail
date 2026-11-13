@@ -1,0 +1,711 @@
+module dns;
+
+use core;
+use fs;
+use io;
+use ip;
+use socket;
+use strings;
+
+// ---- a stub resolver: DNS wire messages over UDP, with a TCP retry ----------------------------
+//
+// The wire format is RFC 1035. A message is a header (id, flags, four counts), the questions, then
+// the resource records; a name is a sequence of length-prefixed labels and a resource record may
+// repeat a name already in the message as a pointer into it. This module encodes a query, parses an
+// answer, and resolves a name against the nameservers `/etc/resolv.conf` lists: A and AAAA over UDP,
+// the next nameserver when one times out, and a TCP retry when the answer comes back truncated.
+//
+// Compression is parsed with two guards, so a hostile message cannot make the parser loop: a pointer
+// must point strictly backwards, and a message may follow at most MAX_POINTERS of them. A message
+// that would run past its end, count differently from its header, or break either guard is
+// `Error::Malformed` rather than a hang or a guess.
+
+pub const TYPE_A: u64 = 1;
+pub const TYPE_CNAME: u64 = 5;
+pub const TYPE_AAAA: u64 = 28;
+pub const CLASS_IN: u64 = 1;
+
+// A message may follow this many compression pointers before the parser gives up.
+const MAX_POINTERS: u64 = 64;
+// A name is at most 255 bytes of labels (RFC 1035 section 2.3.4).
+const MAX_NAME: u64 = 255;
+const MAX_LABEL: u64 = 63;
+
+// What a message's header says, and the resource records it carries.
+pub struct Answer {
+    rtype: u64,
+    ttl: u64,
+    data: u8[]
+}
+
+pub struct Response {
+    id: u64,
+    // The header flags word, in host order.
+    flags: u64,
+    // The response code: 0 is no error, 3 is NXDOMAIN.
+    rcode: u64,
+    // 1 when the answer did not fit and the query has to be repeated over TCP (the TC bit).
+    truncated: u64,
+    answers: Answer[]
+}
+
+// What went wrong asking a nameserver.
+pub enum Error {
+    // `/etc/resolv.conf` named no nameserver this module can use.
+    NoNameServer,
+    // The name does not exist (rcode 3).
+    NxDomain,
+    // No nameserver answered before the deadline.
+    Timeout,
+    // The reply was not a well-formed message, or not an answer to this query.
+    Malformed,
+    // The server answered with a failure code other than 0 or 3.
+    ServerFailure(u64),
+    // The name exists but has no address of the family asked for.
+    NoAddress,
+    // The socket layer could not open, send or connect.
+    Transport
+}
+
+impl Error {
+    pub fn show<a>(self: (&a Error)) -> string {
+        match self {
+            NoNameServer => {
+                return "no nameserver in /etc/resolv.conf".text();
+            },
+            NxDomain => {
+                return "no such name".text();
+            },
+            Timeout => {
+                return "nameserver timed out".text();
+            },
+            Malformed => {
+                return "malformed DNS message".text();
+            },
+            ServerFailure(code) => {
+                return format("nameserver failure {}", code);
+            },
+            NoAddress => {
+                return "no address of that family".text();
+            },
+            Transport => {
+                return "socket error".text();
+            }
+        }
+    }
+}
+
+fn malformed() -> Error {
+    return Error::Malformed;
+}
+
+// 1 for a name that does not exist: nothing is gained by asking another nameserver or another family.
+fn nxdomain<a>(error: (&a Error)) -> bool {
+    match error {
+        NxDomain => {
+            return true;
+        },
+        _ => {
+            return false;
+        }
+    }
+}
+
+// 1 for a failure that another nameserver might not repeat: a timeout or a mangled reply.
+fn temporary<a>(error: (&a Error)) -> bool {
+    match error {
+        Timeout => {
+            return true;
+        },
+        Malformed => {
+            return true;
+        },
+        _ => {
+            return false;
+        }
+    }
+}
+
+// ---- encoding ---------------------------------------------------------------------------------
+
+fn push_u16(out: (&mut u8[]), value: u64) {
+    out.push(value / 256 % 256);
+    out.push(value % 256);
+    return ();
+}
+
+fn push_u32(out: (&mut u8[]), value: u64) {
+    out.push(value / 16777216 % 256);
+    out.push(value / 65536 % 256);
+    out.push(value / 256 % 256);
+    out.push(value % 256);
+    return ();
+}
+
+// True when `text` ends with a dot (an absolute name); one trailing dot is not part of any label.
+fn absolute<a>(text: (&a [u8])) -> bool {
+    if text.len() == 0 {
+        return false;
+    }
+    return text[text.len() - 1] == 46;
+}
+
+// A name in wire form: one length-prefixed label per dotted part, then the root's zero byte. A
+// trailing dot is dropped; a leading dot or an empty label is refused (None).
+fn encode_name<a>(text: (&a [u8])) -> u8[]? {
+    mut out = u8[];
+    if text.len() == 0 {
+        return None;
+    }
+    if text[0] == 46 {
+        return None;
+    }
+    mut length = text.len();
+    if absolute(text) {
+        length -= 1;
+    }
+    if length == 0 {
+        // The root name is one zero byte.
+        out.push(0);
+        return Some(out);
+    }
+    mut start = 0;
+    mut i = 0;
+    while i < length {
+        if text[i] == 46 {
+            label := i - start;
+            if label == 0 || label > MAX_LABEL {
+                return None;
+            }
+            out.push(label);
+            mut k = start;
+            while k < i {
+                out.push(text[k]);
+                k += 1;
+            }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    last := length - start;
+    if last == 0 || last > MAX_LABEL {
+        return None;
+    }
+    out.push(last);
+    mut k = start;
+    while k < length {
+        out.push(text[k]);
+        k += 1;
+    }
+    out.push(0);
+    if out.len() > MAX_NAME {
+        return None;
+    }
+    return Some(out);
+}
+
+// A query for `name`: a header with one question, recursion requested, then the question itself.
+pub fn encode_query(id: u64, name: (&[u8]), qtype: u64) -> u8[]? {
+    wire := encode_name(name)?;
+    mut out = u8[];
+    push_u16(&mut out, id);
+    // RD set: "recursion desired".
+    push_u16(&mut out, 256);
+    push_u16(&mut out, 1);
+    push_u16(&mut out, 0);
+    push_u16(&mut out, 0);
+    push_u16(&mut out, 0);
+    append_bytes(&mut out, &wire);
+    push_u16(&mut out, qtype);
+    push_u16(&mut out, CLASS_IN);
+    return Some(out);
+}
+
+fn append_bytes(out: (&mut u8[]), data: (&u8[])) {
+    for b in data {
+        out.push(b);
+    }
+    return ();
+}
+
+// ---- parsing ----------------------------------------------------------------------------------
+
+fn read_u16<a>(message: (&a [u8]), at: u64) -> u64 {
+    return message[at] * 256 + message[at + 1];
+}
+
+fn read_u32<a>(message: (&a [u8]), at: u64) -> u64 {
+    return message[at] * 16777216 + message[at + 1] * 65536 + message[at + 2] * 256 + message[at + 3];
+}
+
+// The dotted name at `start`, and the offset just past it in the sequence that holds it. A pointer
+// jumps to an earlier offset, so the walk always moves backwards through the message: at most
+// MAX_POINTERS jumps and never to an offset at or after the current one.
+fn read_name<a>(message: (&a [u8]), start: u64) -> (u8[], u64)? {
+    mut out = u8[];
+    mut at = start;
+    mut after = start;
+    mut followed = 0;
+    mut jumping = 0;
+    loop {
+        if at >= message.len() {
+            return None;
+        }
+        length := message[at];
+        if length == 0 {
+            at += 1;
+            if jumping == 0 {
+                after = at;
+            }
+            break;
+        }
+        if length >= 192 {
+            // A pointer: 14 bits of offset into the message.
+            if at + 1 >= message.len() {
+                return None;
+            }
+            target := (length - 192) * 256 + message[at + 1];
+            if target >= at {
+                // A forward or repeated pointer could loop: refuse it.
+                return None;
+            }
+            followed += 1;
+            if followed > MAX_POINTERS {
+                return None;
+            }
+            if jumping == 0 {
+                after = at + 2;
+            }
+            jumping = 1;
+            at = target;
+        } else {
+            if length > MAX_LABEL {
+                return None;
+            }
+            if at + 1 + length > message.len() {
+                return None;
+            }
+            if out.len() != 0 {
+                out.push(46);
+            }
+            mut k = 0;
+            while k < length {
+                out.push(message[at + 1 + k]);
+                k += 1;
+            }
+            if out.len() > MAX_NAME {
+                return None;
+            }
+            at = at + 1 + length;
+        }
+    }
+    return Some((out, after));
+}
+
+// The message as a header plus its answer section; every section counts against the message length.
+pub fn parse_response<a>(message: (&a [u8])) -> Response |? Error {
+    if message.len() < 12 {
+        return malformed();
+    }
+    id := read_u16(message, 0);
+    flags := read_u16(message, 2);
+    questions := read_u16(message, 4);
+    answers := read_u16(message, 6);
+    mut at = 12;
+    mut q = 0;
+    while q < questions {
+        match read_name(message, at) {
+            Some(question) => {
+                at = question.1;
+            },
+            None => {
+                return malformed();
+            }
+        }
+        if at + 4 > message.len() {
+            return malformed();
+        }
+        at += 4;
+        q += 1;
+    }
+    mut records = Answer[];
+    mut a = 0;
+    while a < answers {
+        match read_name(message, at) {
+            Some(name) => {
+                at = name.1;
+            },
+            None => {
+                return malformed();
+            }
+        }
+        if at + 10 > message.len() {
+            return malformed();
+        }
+        rtype := read_u16(message, at);
+        ttl := read_u32(message, at + 4);
+        rdlength := read_u16(message, at + 8);
+        at += 10;
+        if at + rdlength > message.len() {
+            return malformed();
+        }
+        mut data = u8[];
+        mut k = 0;
+        while k < rdlength {
+            data.push(message[at + k]);
+            k += 1;
+        }
+        records.push(Answer { rtype: rtype, ttl: ttl, data: data });
+        at += rdlength;
+        a += 1;
+    }
+    return Response {
+        id: id,
+        flags: flags,
+        rcode: flags % 16,
+        truncated: (flags / 512) % 2,
+        answers: records
+    };
+}
+
+// The address a record carries, when it is one this module decodes.
+fn record_address(record: (&Answer)) -> ip::Ip? {
+    if record.rtype == TYPE_A {
+        if record.data.len() != 4 {
+            return None;
+        }
+        bits := record.data[0] * 16777216 + record.data[1] * 65536 + record.data[2] * 256 + record.data[3];
+        return Some(ip::Ip::V4(ip::Ipv4 { bits: bits }));
+    }
+    if record.rtype == TYPE_AAAA {
+        if record.data.len() != 16 {
+            return None;
+        }
+        hi := record.data[0] * 72057594037927936 + record.data[1] * 281474976710656 + record.data[2] * 1099511627776 + record.data[3] * 4294967296 + record.data[4] * 16777216 + record.data[5] * 65536 + record.data[6] * 256 + record.data[7];
+        lo := record.data[8] * 72057594037927936 + record.data[9] * 281474976710656 + record.data[10] * 1099511627776 + record.data[11] * 4294967296 + record.data[12] * 16777216 + record.data[13] * 65536 + record.data[14] * 256 + record.data[15];
+        return Some(ip::Ip::V6(ip::Ipv6 { hi: hi, lo: lo, zone: 0 }));
+    }
+    return None;
+}
+
+// Every address in the answer section, in the order the server sent them.
+pub fn addresses(response: (&Response)) -> ip::Ip[] {
+    mut out = ip::Ip[];
+    mut i = 0;
+    while i < response.answers.len() {
+        if let Some(addr) = record_address(&response.answers[i]) {
+            out.push(addr);
+        }
+        i += 1;
+    }
+    return out;
+}
+
+// ---- the resolver ----------------------------------------------------------------------------
+
+// Where to ask and how long to wait. `servers` is in the order to try them.
+pub struct Resolver {
+    servers: ip::Ip[],
+    port: u64,
+    timeout_ms: u64
+}
+
+// The resolver `/etc/resolv.conf` describes: its `nameserver` lines in order, port 53, one second.
+// A file that names no usable server answers `Error::NoNameServer` at the first lookup.
+pub fn configured() -> Resolver {
+    mut servers = ip::Ip[];
+    data := read_conf();
+    mut i = 0;
+    while i < data.len() {
+        // One line at a time.
+        start := i;
+        while i < data.len() {
+            if data[i] == 10 {
+                break;
+            }
+            i += 1;
+        }
+        line := data[start: i];
+        i += 1;
+        trimmed := strings::trim(line);
+        if trimmed.len() > 10 {
+            if strings::starts_with(&trimmed, view("nameserver")) {
+                text := strings::trim(&trimmed[10:]);
+                if let Some(addr) = ip::parse(&text) {
+                    servers.push(addr);
+                }
+            }
+        }
+    }
+    return Resolver { servers: servers, port: 53, timeout_ms: 1000 };
+}
+
+fn read_conf() -> u8[] {
+    match fs::read(view("/etc/resolv.conf")) {
+        data: u8[] => {
+            return data;
+        },
+        error: io::Error => {
+            return u8[];
+        }
+    }
+}
+
+// A resolver with explicit servers, for a program that reads its own configuration or points at a
+// local stub server.
+pub fn with_servers(servers: ip::Ip[], port: u64, timeout_ms: u64) -> Resolver {
+    return Resolver { servers: servers, port: port, timeout_ms: timeout_ms };
+}
+
+impl Resolver {
+    // The nameservers this resolver asks, in order.
+    pub fn servers<a>(self: (&a Resolver)) -> (&a ip::Ip[]) {
+        return &self.servers;
+    }
+
+    // True when a server is configured; a resolver without one cannot answer.
+    pub fn usable(self: (&Resolver)) -> bool {
+        return self.servers.len() != 0;
+    }
+}
+
+// One UDP exchange with `server`:`port`: the reply's bytes, or `Error::Timeout` when nothing arrives
+// before `timeout_ms`.
+fn exchange_udp(query: (&u8[]), server: (&ip::Ip), port: u64, timeout_ms: u64) -> u8[] |? Error {
+    mut dgram: socket::Datagram? = None;
+    match socket::datagram(server.family()) {
+        opened: socket::Datagram => {
+            dgram = Some(opened);
+        },
+        error: io::Error => {
+            return Error::Transport;
+        }
+    }
+    socket := dgram!;
+    if !socket.send_to(server, port, query) {
+        socket.close();
+        return Error::Transport;
+    }
+    mut buffer = u8[0; 4096];
+    got := socket.recv_from(&mut buffer, timeout_ms);
+    socket.close();
+    if got == 0 {
+        return Error::Timeout;
+    }
+    mut out = u8[];
+    mut i = 0;
+    while i < got {
+        out.push(buffer[i]);
+        i += 1;
+    }
+    return out;
+}
+
+// One TCP exchange: the two-byte length prefix RFC 1035 section 4.2.2 puts in front of the message,
+// then the reply in the same framing. What a truncated UDP answer is retried with.
+fn exchange_tcp(query: (&u8[]), server: (&ip::Ip), port: u64, timeout_ms: u64) -> u8[] |? Error {
+    mut stream = match_connect(server, port, timeout_ms)?;
+    mut framed = u8[];
+    framed.push(query.len() / 256 % 256);
+    framed.push(query.len() % 256);
+    append_bytes(&mut framed, query);
+    if !stream.write_all(&framed) {
+        stream.close();
+        return Error::Transport;
+    }
+    mut header = u8[0; 2];
+    mut have = 0;
+    while have < 2 {
+        got := stream.read(&mut header, timeout_ms);
+        if got == 0 {
+            stream.close();
+            return Error::Timeout;
+        }
+        have += got;
+    }
+    length := u64(header[0]) * 256 + u64(header[1]);
+    mut out = u8[];
+    while out.len() < length {
+        // Never ask for more than the message still owes: the next message starts right after it.
+        room := length - out.len();
+        mut window = room;
+        if window > 4096 {
+            window = 4096;
+        }
+        mut chunk = u8[0; window];
+        got := stream.read(&mut chunk, timeout_ms);
+        if got == 0 {
+            stream.close();
+            return Error::Timeout;
+        }
+        mut i = 0;
+        while i < got {
+            out.push(chunk[i]);
+            i += 1;
+        }
+    }
+    stream.close();
+    return out;
+}
+
+// A connection to a nameserver, with a socket failure reported as this module's `Transport`.
+fn match_connect(server: (&ip::Ip), port: u64, timeout_ms: u64) -> socket::Stream |? Error {
+    match socket::connect(server, port, timeout_ms) {
+        stream: socket::Stream => {
+            return stream;
+        },
+        error: io::Error => {
+            return Error::Transport;
+        }
+    }
+}
+
+// Asks one server one question and answers the message, retrying over TCP when it came back
+// truncated. `our_id` is the id the reply must repeat.
+fn ask(server: (&ip::Ip), port: u64, query: (&u8[]), our_id: u64, timeout_ms: u64) -> Response |? Error {
+    reply := exchange_udp(query, server, port, timeout_ms)?;
+    parsed := parse_response(&reply)?;
+    if parsed.id != our_id {
+        // A stray reply, not an answer to this query: treat it like a lost one.
+        return Error::Timeout;
+    }
+    if parsed.truncated == 1 {
+        larger := exchange_tcp(query, server, port, timeout_ms)?;
+        again := parse_response(&larger)?;
+        if again.id != our_id {
+            return Error::Malformed;
+        }
+        return again;
+    }
+    return parsed;
+}
+
+// The addresses `name` has in one family (1 for A, 28 for AAAA), asked of each configured nameserver
+// in turn until one answers. A name that is already a numeric address answers itself, as
+// `getaddrinfo` does.
+fn lookup(resolver: (&Resolver), name: (&[u8]), rtype: u64) -> ip::Ip[] |? Error {
+    if let Some(literal) = ip::parse(name) {
+        mut one = ip::Ip[];
+        family := literal.family();
+        if (rtype == TYPE_A && family == 4) || (rtype == TYPE_AAAA && family == 6) {
+            one.push(literal);
+            return one;
+        }
+        return Error::NoAddress;
+    }
+    mut query = u8[];
+    match encode_query(0x5A17, name, rtype) {
+        Some(encoded) => {
+            query = encoded;
+        },
+        None => {
+            return Error::Malformed;
+        }
+    }
+    mut tried = 0;
+    while tried < resolver.servers.len() {
+        server := &resolver.servers[tried];
+        tried += 1;
+        match ask(server, resolver.port, &query, 0x5A17, resolver.timeout_ms) {
+            response: Response => {
+                if response.rcode == 3 {
+                    return Error::NxDomain;
+                }
+                if response.rcode != 0 {
+                    return Error::ServerFailure(response.rcode);
+                }
+                found := addresses(&response);
+                if found.len() == 0 {
+                    return Error::NoAddress;
+                }
+                return found;
+            },
+            error: Error => {
+                // Timeouts and mangled replies move on to the next nameserver; nothing else does.
+                if temporary(&error) == false {
+                    return error;
+                }
+            }
+        }
+    }
+    if resolver.servers.len() == 0 {
+        return Error::NoNameServer;
+    }
+    return Error::Timeout;
+}
+
+// Every address `name` has: the A records first, then the AAAA ones, which is the order a default
+// `getaddrinfo` returns them in. A name with no address of either family is `Error::NoAddress`;
+// a name that does not exist is `Error::NxDomain`.
+pub fn resolve_all(resolver: (&Resolver), host: (&[u8])) -> ip::Ip[] |? Error {
+    if let Some(literal) = ip::parse(host) {
+        mut one = ip::Ip[];
+        one.push(literal);
+        return one;
+    }
+    mut out = ip::Ip[];
+    mut first_error: Error? = None;
+    match lookup(resolver, host, TYPE_A) {
+        found: ip::Ip[] => {
+            for addr in found {
+                out.push(addr);
+            }
+        },
+        error: Error => {
+            if nxdomain(&error) {
+                return error;
+            }
+            first_error = Some(error);
+        }
+    }
+    match lookup(resolver, host, TYPE_AAAA) {
+        found: ip::Ip[] => {
+            for addr in found {
+                out.push(addr);
+            }
+        },
+        error: Error => {
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
+    }
+    if out.len() == 0 {
+        return first_error!;
+    }
+    return out;
+}
+
+// The IPv4 addresses of `name`, in the order the server answered.
+pub fn resolve4(resolver: (&Resolver), host: (&[u8])) -> ip::Ipv4[] |? Error {
+    found := lookup(resolver, host, TYPE_A)?;
+    mut out = ip::Ipv4[];
+    for addr in found {
+        match addr {
+            V4(v4) => {
+                out.push(v4);
+            },
+            V6(v6) => {
+                return Error::NoAddress;
+            }
+        }
+    }
+    return out;
+}
+
+// The IPv6 addresses of `name`, in the order the server answered.
+pub fn resolve6(resolver: (&Resolver), host: (&[u8])) -> ip::Ipv6[] |? Error {
+    found := lookup(resolver, host, TYPE_AAAA)?;
+    mut out = ip::Ipv6[];
+    for addr in found {
+        match addr {
+            V4(v4) => {
+                return Error::NoAddress;
+            },
+            V6(v6) => {
+                out.push(v6);
+            }
+        }
+    }
+    return out;
+}
