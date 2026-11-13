@@ -96,6 +96,8 @@ round-trips `if` expressions in initializers, arguments, returns, record fields 
 
 Corpus: `exprif-initializer`, `exprif-else-if-chain`, `exprif-argument`, `exprif-record-field`,
 `exprif-declared-type`, `exprif-diverging-arm`, `exprif-drops-value`, `exprif-nested-in-match-arm`,
-and the refusals `exprif-type-mismatch`, `exprif-missing-else`, `exprif-statement-arm`,
-`exprif-statement-block`, `exprif-no-value`, `exprif-borrows`, `exprif-statement-word`.
+`exprif-nested-arms` (a nested `if` and a nested `match` as a function's very first expression,
+which is frame word zero - the word number is not the "is there a word" answer), and the refusals
+`exprif-type-mismatch`, `exprif-missing-else`, `exprif-statement-arm`, `exprif-statement-block`,
+`exprif-no-value`, `exprif-borrows`, `exprif-statement-word`.
 Book: *Branches and loops*.

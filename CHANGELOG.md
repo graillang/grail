@@ -19,7 +19,7 @@
   value"). Also fixed: a statement word where a value was required used to report
   `error[E0001]: undefined name` under the keyword - it now says *`for` is a statement, not an
   expression: it has no value*. Reasoning and the lowering in docs/design/if-expression.md; book:
-  *Branches and loops* with the `if-values` example; corpus: the fifteen `exprif-` cases.
+  *Branches and loops* with the `if-values` example; corpus: the sixteen `exprif-` cases.
 - Ergonomics: `match` is an expression too - `x := match n { 0 => 1, _ => 2 };`,
   `return match k { Rate(n) => n * 2, Empty => 0 };`, `show(match e { A(v) => v, B => 0 })`. The
   statement `match` is unchanged: `match_statement` is that same code (scrutinee, patterns, per-arm
