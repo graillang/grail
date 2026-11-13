@@ -6135,7 +6135,11 @@ fn ref_pred_count<a>(c: (&a mut C)) -> u64 {
 // Only a call site that proved every parameter predicate reaches it. An indirect call - a function
 // value, a vtable entry, a foreign call - has proved nothing, and uses the checked entry.
 fn ref_entry<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &d [u8], export: u64, body: u64, prologue: (&a [u8])) -> unit {
-    if (ref_pred_count(&mut c) == 0) || (export == 2) || (prologue.len() == 0) {
+    // The LLVM backend lifts this assembly into IR, and the prologue it copies here is written in
+    // frame-symbol arithmetic (`subq $.F7,%rsp`) the lifter does not model. So that build keeps the
+    // checked entry, which is what `--verify-facts` does too: every obligation is still checked, the
+    // proof only saves the check.
+    if (c.backend != 0) || (ref_pred_count(&mut c) == 0) || (export == 2) || (prologue.len() == 0) {
         return ();
     }
     // The binding is stated here, as it is for the checked entry: a specialisation is emitted by
@@ -19570,7 +19574,10 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
     // discharged here. A method call, an interface method solved to an implementation, and a foreign
     // call proved nothing about the code they reach, and keep the checked entry.
     mut proved = 0;
-    if (c.raw == 0) & (c.validating == 0) & (method == 0) & (c.funcs[f - 1].ext == 0) & (c.funcs[f - 1].contract == 0) {
+    // `ref_entry` emits no second entry for the LLVM backend (its prologue is written in frame-symbol
+    // arithmetic the lifter does not model), so nothing is proved here either: an effect that a proof
+    // would have discharged is refused by name instead of being discharged and then left checked.
+    if (c.raw == 0) & (c.validating == 0) & (method == 0) & (c.funcs[f - 1].ext == 0) & (c.funcs[f - 1].contract == 0) & (c.backend == 0) {
         strict := u64(ref_strict(&c));
         proved = pv_call_proved(&mut c, f, count, &spans, call_at, strict);
     }
