@@ -319,7 +319,7 @@ many and refuses a count it did not offer - so the record's five-word area is si
 verified by the answer, and a caller that offers nothing (`0`, which is what a runtime emitted before
 the argument existed sends) is answered with the three words its 24-byte scratch holds. What each
 side may write and read is in
-[runtime-api.md](runtime-api.md#what-the-compiler-hands-the-runtime-a-handshake-that-carries-its-length);
+[runtime-abi.md](runtime-abi.md#what-the-compiler-hands-the-runtime-a-handshake-that-carries-its-length);
 the record's area is unchanged, because the descriptor is still five words when it is asked for in
 full.
 

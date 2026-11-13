@@ -55,7 +55,7 @@
   the-statement` and `rth-offer-two-refuses-the-descriptor` - the last two drive the capacity through
   `GRAIL_RT_SITES_OFFER`, a test-only fault injection read once into process-state word 3408, which
   is how a buffer smaller than the helper writes is shown to be refused rather than corrupted.
-  docs/design/runtime-api.md, "What the compiler hands the runtime: a handshake that carries its
+  docs/design/runtime-abi.md, "What the compiler hands the runtime: a handshake that carries its
   length".
 - Fixed: a contained task failure corrupted the allocator header of the block that followed the
   task record, so the scope exit aborted (`book/examples/task-failure.grl` printed `bad input` and

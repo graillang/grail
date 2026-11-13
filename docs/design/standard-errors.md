@@ -112,7 +112,7 @@ two function-table words it cleared beforehand read as absent, which is the same
 fault - and a helper emitted by newer code than the runtime calling it writes three words for the call
 a seed's runtime makes, which passes no capacity at all. The size is the caller's, not an assumption
 either side makes about the other.
-([runtime-api.md](runtime-api.md#what-the-compiler-hands-the-runtime-a-handshake-that-carries-its-length))
+([runtime-abi.md](runtime-abi.md#what-the-compiler-hands-the-runtime-a-handshake-that-carries-its-length))
 
 Assumptions, stated because a wrong one would print garbage:
 
