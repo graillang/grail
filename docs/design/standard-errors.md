@@ -113,6 +113,8 @@ Assumptions, stated because a wrong one would print garbage:
   emitter does this on every target, and `rt_fail_where` already depends on it.
 - `[%rbp]` is the caller's frame pointer and `[%rbp + 8]` the return address.
 - The walk stops after 64 frames or 32 named lines, and at the failure buffer's limit.
+- The tables' helper is stored in the process state the entry sets, which every thread and task shares,
+  so a capture inside a spawned task names that task's frames too (checked against `task_scope`).
 
 Refusal rather than guessing: `rt_backtrace` returns empty text when the build carries no tables
 (macOS, the LLVM backend, `--debug`, `--split`, a seed-built compiler) or when the tables are unusable
