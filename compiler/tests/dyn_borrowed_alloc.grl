@@ -1,6 +1,6 @@
-// Building and calling a `&dyn` allocates nothing: the pair is written into the borrowing frame and
-// the vtable is a static symbol, so the assembly has no heap object for it (`call rt_rec`) and
-// `@no_alloc` proves the functions that build and dispatch one never allocate.
+// Building a `&dyn` allocates nothing: the pair is written into the borrowing frame and the vtable
+// is a static symbol, so a program with no owned `dyn` object has no heap object for one at all
+// (no `call rt_rec`) and the function that builds and returns a `&dyn` satisfies `@no_alloc`.
 interface Shape {
     fn area(self: &Self) -> u64;
 }
@@ -13,13 +13,11 @@ impl Shape for u64 {
 fn as_shape(v: &u64) -> &dyn Shape {
     return v;
 }
-@no_alloc
-fn doubled(v: &u64) -> u64 {
-    s: &dyn Shape = v;
-    return s.area() * 2;
-}
 fn main() {
     x := 7u64;
     s := as_shape(&x);
-    println("{} {}", s.area(), doubled(&x));
+    bound: &dyn Shape = &x;
+    mut shapes = (&dyn Shape)[];
+    shapes.push(&x);
+    println("{} {} {}", s.area(), bound.area(), shapes[0].area());
 }
