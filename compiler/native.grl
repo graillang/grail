@@ -5424,11 +5424,7 @@ fn drop_impl_registered<a>(c: (&a mut C), ty: u64) -> unit {
         counted = 1;
     }
     if counted != 0 {
-        // stays: `exchange` is a builtin, not a call, so its `&mut` is taken before `n + 1` reads
-        // the field (a two-phase borrow covers call arguments only).
-        // stays: exchange is a builtin, so its &mut is taken before this read.
-        n := c.drop_generic;
-        exchange(&mut c.drop_generic, n + 1);
+        exchange(&mut c.drop_generic, c.drop_generic + 1);
     }
     return ();
 }
@@ -5750,9 +5746,7 @@ fn kind_at<a>(c: (&a mut C), i: u64) -> u64 {
     return t.kind;
 }
 fn advance<a>(c: (&a mut C)) -> unit {
-    // stays: `exchange` is a builtin, not a call (see drop_impl_registered).
-    p := c.pos + 1;
-    exchange(&mut c.pos, p);
+    exchange(&mut c.pos, c.pos + 1);
     return ();
 }
 fn tok_text<a>(c: (&a mut C), i: u64) -> u8[] {
@@ -13210,9 +13204,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         label = special_name(&mut c, c.current_spec - 1);
     }
     sym_unit := symbol_unit(&mut c, view(m));
-    // stays: exchange is a builtin, so its &mut is taken before this read.
-    sym := body_label(&c, view(sym_unit), view(label), view(export_symbol), export);
-    exchange(&mut c.facts_fn, sym);
+    exchange(&mut c.facts_fn, body_label(&c, view(sym_unit), view(label), view(export_symbol), export));
     exchange(&mut c.f64_ops, 0);
     exchange(&mut c.call_ord, 0);
     // The F1 call ordinals are per callee *and per function*, exactly as the lifter counts them.
@@ -13689,9 +13681,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         exchange(&mut c.spec_closures, spec_closure_mark);
         exchange(&mut c.retry, 0);
         exchange(&mut c.tolerant, 0);
-        // stays: exchange is a builtin, so its &mut is taken before this read.
-        a := c.attempts + 1;
-        exchange(&mut c.attempts, a);
+        exchange(&mut c.attempts, c.attempts + 1);
         exchange(&mut c.pos, position);
         func(&mut c, pass, public);
         exchange(&mut c.attempts, 0);
@@ -14020,9 +14010,7 @@ fn default_methods<a>(c: (&a mut C), pass: u64) -> unit {
             exchange(&mut c.pos, defaults[j] - 1);
             exchange(&mut c.raw, 0);
             exchange(&mut c.module, home.copy());
-            // stays: exchange is a builtin, so its &mut is taken before this read.
-            opted := u64(host_opted(&c, view(c.module)));
-            exchange(&mut c.host_optin, opted);
+            exchange(&mut c.host_optin, u64(host_opted(&c, view(c.module))));
             exchange(&mut c.rnames, u8[][]);
             exchange(&mut c.tnames, u8[][]);
             exchange(&mut c.type_bounds, u64[]);
@@ -14045,9 +14033,7 @@ fn default_methods<a>(c: (&a mut C), pass: u64) -> unit {
         exchange(&mut c.file, saved_file);
         exchange(&mut c.module, saved_module);
         exchange(&mut c.raw, saved_raw);
-        // stays: exchange is a builtin, so its &mut is taken before this read.
-        opted := u64(host_opted(&c, view(c.module)));
-        exchange(&mut c.host_optin, opted);
+        exchange(&mut c.host_optin, u64(host_opted(&c, view(c.module))));
     }
     return ();
 }
@@ -14124,7 +14110,8 @@ fn prepend_impl_params<a>(c: (&a mut C)) -> unit {
     // The function's own parameters now follow the implementation's.
     shift := tn.len() - own_t.len();
     for k in c.assoc_eqs.len() / 3 {
-        // stays: exchange is a builtin, so its &mut is taken before this read.
+        // stays: the written place is indexed (`&mut c.assoc_eqs[3 * k]`), and two-phase defers
+        // only a plain `&mut path`, so this read is part of taking the place.
         old := c.assoc_eqs[3 * k];
         exchange(&mut c.assoc_eqs[3 * k], old + shift);
     }
@@ -19178,10 +19165,8 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
                 if local == 0 {
                     fail(&mut c, view("field shorthand needs a variable with the field's name"));
                 }
-                // stays: exchange is a builtin, so its &mut is taken before this read.
-                back := c.pos - 1;
-                exchange(&mut c.pos, back);
-                v = primary(&mut c, NO_TYPE);
+                exchange(&mut c.pos, c.pos - 1);
+                v = primary(&mut c);
             }
             aend := c.pos;
             for i in seen.len() {
@@ -19491,9 +19476,7 @@ fn replay_function<a>(c: (&a mut C), template: u64) -> unit {
     exchange(&mut c.pos, pos);
     exchange(&mut c.raw, raw);
     exchange(&mut c.module, module);
-    // stays: exchange is a builtin, so its &mut is taken before this read.
-    opted := u64(host_opted(&c, view(c.module)));
-    exchange(&mut c.host_optin, opted);
+    exchange(&mut c.host_optin, u64(host_opted(&c, view(c.module))));
     func(&mut c, 4, 0);
     exchange(&mut c.inherent, 0);
     exchange(&mut c.self_type, NO_TYPE);
@@ -19675,6 +19658,79 @@ fn argument_ranges<a>(c: (&a mut C)) -> u64[] {
 }
 // The order to take the arguments in: unchanged (empty) unless an argument is `&mut path` and
 // another argument mentions the path's root, in which case such arguments go last.
+// The dotted fields of an argument that is a plain `&mut x` or `&mut x.f.g` - a path with no call
+// or index, so taking its address later changes nothing but the loan's start - or empty when the
+// argument is anything else.
+fn mut_path<a, b>(c: (&a mut C), ranges: (&b u64[]), i: u64) -> u8[][] {
+    a := ranges[2 * i];
+    b := ranges[2 * i + 1];
+    mut simple = (b >= a + 3) && (kind_at(&mut c, a) == 38) && is_at(&mut c, a + 1, view("mut")) && (kind_at(&mut c, a + 2) == 1);
+    mut q = a + 3;
+    while simple && (q < b) {
+        if (kind_at(&mut c, q) == 46) && (q + 1 < b) && (kind_at(&mut c, q + 1) == 1) {
+            q += 2;
+        } else {
+            simple = false;
+        }
+    }
+    mut path = u8[][];
+    if !simple {
+        return path;
+    }
+    path.push(tok_text(&mut c, a + 2));
+    mut p = a + 3;
+    while p < b {
+        path.push(tok_text(&mut c, p + 1));
+        p += 2;
+    }
+    return path;
+}
+// 1 when argument `i` names `root` as a plain identifier anywhere among its tokens.
+fn argument_mentions<a, b, d>(c: (&a mut C), ranges: (&b u64[]), i: u64, root: &d [u8]) -> bool {
+    start := ranges[2 * i];
+    end := ranges[2 * i + 1];
+    for q in start..end {
+        if (kind_at(&mut c, q) == 1) && same(view(tok_text(&mut c, q)), view(root)) {
+            return true;
+        }
+    }
+    return false;
+}
+// 1 when argument `i` names a place that overlaps `path`: a dotted path in it that `path` is a
+// prefix of, or that is a prefix of `path`, since a loan of one then covers the other. `c.r[i]`
+// counts as `c.r`, and a sibling field (`c.g` against `c.f`) does not overlap.
+fn path_mentioned<a, b, d>(c: (&a mut C), ranges: (&b u64[]), i: u64, path: (&d u8[][])) -> bool {
+    start := ranges[2 * i];
+    end := ranges[2 * i + 1];
+    root := path[0].copy();
+    mut q = start;
+    while q < end {
+        if (kind_at(&mut c, q) == 1) && same(view(tok_text(&mut c, q)), view(root)) {
+            mut j = 1;
+            mut r = q + 1;
+            mut mismatch = false;
+            while (j < path.len()) & !mismatch {
+                if (kind_at(&mut c, r) == 46) && (kind_at(&mut c, r + 1) == 1) {
+                    if same(view(tok_text(&mut c, r + 1)), view(path[j])) {
+                        j += 1;
+                        r += 2;
+                    } else {
+                        mismatch = true;
+                    }
+                } else {
+                    break;
+                }
+            }
+            if !mismatch {
+                return true;
+            }
+            q = r;
+        } else {
+            q += 1;
+        }
+    }
+    return false;
+}
 fn two_phase_order<a, b>(c: (&a mut C), ranges: (&b u64[])) -> u64[] {
     if ranges.len() < 5 {
         return u64[];
@@ -19683,21 +19739,11 @@ fn two_phase_order<a, b>(c: (&a mut C), ranges: (&b u64[])) -> u64[] {
     mut late = u64[];
     mut roots = u8[][];
     for i in n {
-        a := ranges[2 * i];
-        b := ranges[2 * i + 1];
-        mut simple = (b >= a + 3) && (kind_at(&mut c, a) == 38) && is_at(&mut c, a + 1, view("mut")) && (kind_at(&mut c, a + 2) == 1);
-        // `&mut x` or `&mut x.f.g`: a path with no call or index, so taking it later changes nothing.
-        mut q = a + 3;
-        while simple && (q < b) {
-            if (kind_at(&mut c, q) == 46) && (q + 1 < b) && (kind_at(&mut c, q + 1) == 1) {
-                q += 2;
-            } else {
-                simple = false;
-            }
-        }
-        if simple {
+        path := mut_path(&mut c, ranges, i);
+        if path.len() != 0 {
+            root := path[0].copy();
             late.push(i);
-            roots.push(tok_text(&mut c, a + 2));
+            roots.push(root);
         }
     }
     if late.len() == 0 {
@@ -19708,10 +19754,8 @@ fn two_phase_order<a, b>(c: (&a mut C), ranges: (&b u64[])) -> u64[] {
     for j in late.len() {
         for i in n {
             if i != late[j] {
-                for q in ranges[2 * i]..ranges[2 * i + 1] {
-                    if (kind_at(&mut c, q) == 1) && same(view(tok_text(&mut c, q)), view(roots[j])) {
-                        needed = true;
-                    }
+                if argument_mentions(&mut c, ranges, i, view(roots[j])) {
+                    needed = true;
                 }
             }
         }
@@ -22293,6 +22337,66 @@ fn print_value<a>(c: (&a mut C), input: Val, newline: u64) -> unit {
     }
     return ();
 }
+// `exchange(&mut place, value)` is two-phase like an ordinary call: when the value argument names a
+// place the written one overlaps, it is evaluated before the `&mut` is taken, so that read sees the
+// value from before the swap (`exchange(&mut p, p + 1)` stores the old `p` plus one and returns the
+// old `p`). Only a plain `&mut path` is deferred, exactly as for call arguments: the address of
+// anything else was already computed where that reference was made. A sibling field does not make
+// the value a reader of the place (`exchange(&mut c.f, c.g)` keeps the order it is written in), so
+// every exchange that needs no temporary compiles as it did before. A value taken from the very
+// place that is written is still refused - `exchange(&mut a, a)` names the same storage twice.
+fn exchange_builtin<a>(c: (&a mut C)) -> Val {
+    ranges := argument_ranges(&mut c);
+    mut defer = false;
+    if ranges.len() == 5 {
+        path := mut_path(&mut c, &ranges, 0);
+        if path.len() != 0 {
+            if path_mentioned(&mut c, &ranges, 1, &path) {
+                defer = true;
+            }
+        }
+    }
+    mut a = val(0, 0);
+    mut b = val(0, 0);
+    mut start = 0;
+    mut end = 0;
+    if defer {
+        // The value argument first: its reads and loans end before the `&mut` starts.
+        exchange(&mut c.pos, ranges[2]);
+        start = c.pos;
+        b = expr(&mut c, 0);
+        end = c.pos;
+        after := c.pos;
+        exchange(&mut c.pos, ranges[0]);
+        a = expr(&mut c, 0);
+        observe(&mut c, a.t);
+        exchange(&mut c.pos, after);
+    } else {
+        a = expr(&mut c, 0);
+        observe(&mut c, a.t);
+        expect(&mut c, view(","));
+        start = c.pos;
+        b = expr(&mut c, 0);
+        end = c.pos;
+    }
+    expect(&mut c, view(")"));
+    if c.raw == 0 {
+        if ty_kind(&mut c, a.ty) != 7 {
+            fail(&mut c, view("exchange requires typed reference"));
+        }
+        expected := ty_arg(&mut c, a.ty);
+        b = adopt_value(&mut c, b, start, end, expected);
+        // The write would discard the value the argument named, so the place itself is refused.
+        // (`exchange(&mut a, &mut a)` already fails while the second `&mut` is taken.)
+        destination := target_of(&mut c, a.t);
+        source := place_of(&mut c, b.t);
+        if (source != 0) & (source == destination) {
+            exchange(&mut c.pos, start);
+            fail(&mut c, view("exchange cannot take its new value from the place it replaces"));
+        }
+    }
+    return exchange_into(&mut c, a, b);
+}
 // Stores b through the mutable reference a and returns the previous (owned) value.
 fn exchange_into<a>(c: (&a mut C), a: Val, b: Val) -> Val {
     ty := ty_arg(&mut c, a.ty);
@@ -22992,6 +23096,9 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
     if (id == 40) || (id == 41) {
         exchange(&mut c.cptr_address, id - 39);
     }
+    if id == 16 {
+        return exchange_builtin(&mut c);
+    }
     a := expr(&mut c, 0);
     exchange(&mut c.cptr_address, 0);
     if (id == 40) || (id == 41) {
@@ -23160,24 +23267,6 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
             o(&mut c, view("imulq %rcx,%rax\n"));
         }
         return val(save(&mut c), 0);
-    }
-    if id == 16 {
-        observe(&mut c, a.t);
-        if c.raw == 0 {
-            if ty_kind(&mut c, a.ty) != 7 {
-                fail(&mut c, view("exchange requires typed reference"));
-            }
-        }
-        expect(&mut c, view(","));
-        start := c.pos;
-        mut b = expr(&mut c, 0);
-        end := c.pos;
-        expect(&mut c, view(")"));
-        if c.raw == 0 {
-            expected := ty_arg(&mut c, a.ty);
-            b = adopt_value(&mut c, b, start, end, expected);
-        }
-        return exchange_into(&mut c, a, b);
     }
     if id == 15 {
         expect(&mut c, view(")"));
@@ -28827,9 +28916,7 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
     }
     // `dyn I[...]`: a sequence literal of interface objects.
     if same(view(first), view("dyn")) && (kind(&mut c) == 1) && (find_local(&mut c, view(first)) == 0) {
-        // stays: exchange is a builtin, so its &mut is taken before this read.
-        back := c.pos - 1;
-        exchange(&mut c.pos, back);
+        exchange(&mut c.pos, c.pos - 1);
         ty := parse_type_base(&mut c);
         return finish_type_literal(&mut c, ty);
     }
@@ -28843,18 +28930,14 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
             }
         }
         if generic && (find_local(&mut c, view(first)) == 0) {
-            // stays: exchange is a builtin, so its &mut is taken before this read.
-            back := c.pos - 1;
-            exchange(&mut c.pos, back);
+            exchange(&mut c.pos, c.pos - 1);
             ty := parse_type_base(&mut c);
             return finish_type_literal(&mut c, ty);
         }
     }
     if type_literal_ahead(&mut c, view(first)) {
         // Rewind and re-read the whole head as a type so `<...>` arguments work.
-        // stays: exchange is a builtin, so its &mut is taken before this read.
-        back := c.pos - 1;
-        exchange(&mut c.pos, back);
+        exchange(&mut c.pos, c.pos - 1);
         mut ty = parse_type_base(&mut c);
         return finish_type_literal(&mut c, ty);
     }
@@ -28892,9 +28975,7 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
     if is(&mut c, view("::")) & (kind_at(&mut c, c.pos + 2) == 91) {
         qname := tok_text(&mut c, c.pos + 1);
         if find_decl(&mut c, view(first), view(qname)) != 0 {
-            // stays: exchange is a builtin, so its &mut is taken before this read.
-            back := c.pos - 1;
-            exchange(&mut c.pos, back);
+            exchange(&mut c.pos, c.pos - 1);
             mut qty = parse_type_base(&mut c);
             return finish_type_literal(&mut c, qty);
         }
@@ -33842,9 +33923,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
                 push_bytes(&mut help, view(name));
                 push_bytes(&mut help, view(" = ...`"));
                 diag_help(&mut c, view(help));
-                // stays: exchange is a builtin, so its &mut is taken before this read.
-                here := c.pos;
-                exchange(&mut c.pos, here - 1);
+                exchange(&mut c.pos, c.pos - 1);
                 fail(&mut c, view("assignment requires mut"));
             }
         }
@@ -35064,7 +35143,8 @@ fn s256_block(h: (&mut u64[]), text: &[u8], at: u64, w: (&mut u64[]), k: (&u64[]
         y := w[t - 2];
         s0 := s256_rotr(x, 7) ^ s256_rotr(x, 18) ^ (x >> 3);
         s1 := s256_rotr(y, 17) ^ s256_rotr(y, 19) ^ (y >> 10);
-        // stays: exchange is a builtin, so its &mut is taken before this read.
+        // stays: the written place is indexed (`&mut w[t]`), and two-phase defers only a plain
+        // `&mut path`, so the value's reads of `w` are part of taking the place.
         packed := w[t - 16] + s0 + w[t - 7] + s1;
         exchange(&mut w[t], packed & S256MASK);
     }
@@ -36186,9 +36266,7 @@ fn ip_done<a>(p: (&a IPos)) -> bool {
 }
 fn ip_take<a>(p: (&a mut IPos)) -> u8[] {
     t := ip_txt(&p);
-    // stays: exchange is a builtin, so its &mut is taken before this read.
-    at := p.at + 1;
-    exchange(&mut p.at, at);
+    exchange(&mut p.at, p.at + 1);
     return t;
 }
 fn ip_word<a>(p: (&a mut IPos)) -> u8[] {
@@ -36217,9 +36295,7 @@ fn ip_quoted<a>(p: (&a mut IPos)) -> u8[] {
         iface_fail(&p, view("expected a quoted value"));
     }
     t := ip_txt(&p);
-    // stays: exchange is a builtin, so its &mut is taken before this read.
-    at := p.at + 1;
-    exchange(&mut p.at, at);
+    exchange(&mut p.at, p.at + 1);
     mut out = u8[];
     mut i = 1;
     while i + 1 < t.len() {
@@ -36276,9 +36352,7 @@ fn ip_is<a, b>(p: (&a IPos), word: &b [u8]) -> bool {
 }
 fn ip_eat<a, b>(p: (&a mut IPos), word: &b [u8]) -> bool {
     if ip_is(&p, view(word)) {
-        // stays: exchange is a builtin, so its &mut is taken before this read.
-        at := p.at + 1;
-        exchange(&mut p.at, at);
+        exchange(&mut p.at, p.at + 1);
         return true;
     }
     return false;
@@ -37308,7 +37382,8 @@ fn iface_load<a, b>(c: (&a mut C), path: &a [u8], source_path: &b [u8], phase: u
         } else if same(view(key), view("link")) {
             input := ip_quoted(&mut p);
             ffi_link(&mut c, view(input));
-            // stays: exchange is a builtin, so its &mut is taken before this read.
+            // stays: the written place is indexed (`&mut c.lib_owner[last]`), and two-phase
+            // defers only a plain `&mut path`, so the length read is part of taking the place.
             last := c.lib_owner.len() - 1;
             exchange(&mut c.lib_owner[last], module.copy());
         }

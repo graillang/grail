@@ -229,8 +229,10 @@ A call's `&mut place` argument, and a `&mut self` receiver, is borrowed after th
 are evaluated (Rust's two-phase borrows), so those arguments may still read the place:
 `bump(&mut c, c.pos)`, `ty_kind(&mut c, ty_arg(&mut c, t))` and `c.bump(c.pos)` compile, and the
 read sees the state from before the call. There is no need for a temporary: write the read where
-it is used. Two shapes keep one - `exchange` is a builtin whose `&mut` is taken first, and a read
-through a borrowed vector element (`c.rows[i].field` of a record element) is a loan, not a copy.
+it is used. `exchange` follows the same rule, so `exchange(&mut c.pos, c.pos + 1)` stores the old
+position plus one and returns the old position, while the place itself as the value
+(`exchange(&mut a, a)`) is refused. One shape keeps a temporary: a read through a borrowed vector
+element (`c.rows[i].field` of a record element) is a loan, not a copy.
 Typed storage references remain `borrow(value)` / `borrow_mut(value)`.
 
 Byte buffers, strings and views support `value[index]` and readonly `value[start:end]` slices.
