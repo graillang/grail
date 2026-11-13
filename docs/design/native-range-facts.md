@@ -32,7 +32,10 @@ collects for its obligations (`pv_scope`), so a fact is established by
   `len(v) == 2`, `w = v.copy()` states `len(w) == len(v)`;
 - a **counted fill loop**: `for i in n { .. v.push(x) .. }` runs n times and pushes once per trip, so
   it leaves `len(v) >= n` behind. Read only when the body has no control flow (nothing can skip a
-  push), no loan, and no other mention of `v` (nothing else can move the length).
+  push), no loan, and no other mention of `v` (nothing else can move the length) - and only when the
+  count is a plain local name the body never writes, because the head read it once: a body that moved
+  the name would leave the fact about the new value, and a length term as the count (`a.len`) names
+  something the body could grow. `rng-fill-loop-count-written` pins the refusal.
 
 and a fact is **dropped** on a write, a binding of the name, a loan, a method call on it, a call that
 can reach it - so anything that can move a length between the guard and the access takes the proof
