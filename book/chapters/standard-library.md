@@ -203,6 +203,63 @@ releases it - use it exactly once. The runtime's listener covers every local int
 and a bind the operating system refuses stops the program; `bind` validates the address text and the
 port instead.
 
+## TLS over the system stack
+
+`tls` puts a client TLS connection over the operating system's own implementation - OpenSSL or
+LibreSSL on Linux and the BSDs, SChannel on Windows, SecureTransport on macOS - behind the same
+ownership rules as `net`. The whole foreign surface is inside the module, so a program never names a
+C type and never writes `unsafe` to use TLS.
+
+```grl
+use tls;
+
+fn main() -> u64 {
+    mut cfg = tls::config();
+    cfg.add_alpn("h2,http/1.1");
+    cfg.set_min_version(tls::VERSION_TLS12);
+    match tls::client(&cfg) {
+        ready: tls::TlsClient => {
+            mut client = ready;
+            // The address is a dotted quad: the runtime has no name lookup. The third argument is
+            // the name the certificate must carry, and it is what SNI sends.
+            mut s = client.connect("93.184.216.34", 443, "example.com")!;
+            println(s.version());       // TLSv1.3
+            println(s.alpn());          // h2
+            mut request: string = "GET / HTTP/1.0\r\nHost: example.com\r\n\r\n";
+            s.write_all(view(request))!;
+            body := s.read_all()!;
+            println(body.len() > 0);
+            s.close();
+        },
+        error: tls::Error => {
+            println(error.show());
+        }
+    }
+    return 0;
+}
+```
+
+Peer verification is not optional and has no switch: `tls::client` loads a trust store and **refuses
+to build a context whose store is empty** (`Error::NoTrustStore`) rather than one that verifies
+nothing, and the name or address passed to `connect` is always checked against the certificate. A
+private CA is trusted by naming it: `cfg.set_ca_file("ca.pem")`.
+
+`Error` keeps four classes apart because callers act on them differently. `Verify` is a security
+result - the chain or the name was rejected - and is never retried. `Protocol` is a conversation
+that cannot continue. `Io` is the transport. `Closed` means the stream was already closed, or the
+peer's connection ended without a `close_notify`: `read` returns `0` **only** for a clean
+`close_notify`, so a truncated response cannot pass for an ordinary end of stream.
+
+One `TlsClient` holds one TLS context, and that is where the library's session cache lives: create
+one per process (per policy) and connections through it can resume, while a client per connection
+resumes nothing. A `TlsStream` owns the socket it was given - `connect_over` consumes a
+`net::TcpStream`, so the same descriptor cannot be closed twice - and `close` sends `close_notify`
+and releases both. `shutdown` sends `close_notify` and leaves the socket open for reading.
+
+A TLS stream suspends its task exactly like `net::TcpStream`: the socket is never handed to the C
+library, which drives a memory BIO on Linux while the module waits with the runtime's own
+`host::read_fd`/`host::write_fd`. The negotiated version, the ALPN protocol and the peer's
+certificate subject are available as `version()`, `alpn()` and `peer_subject()`.
 ## Files
 
 `fs` answers a value or an `fs::Error`, and the error names the path it happened on: a program says

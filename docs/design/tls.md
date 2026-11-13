@@ -1,9 +1,10 @@
 # TLS over the system TLS stack
 
-Status: **agreed; implementation follows this note** (Linux/OpenSSL first, then the Windows and
-macOS branches; the verification section records what was actually run at the end). This note fixes the API, the error taxonomy, the trust
-store rules and the lifetime of a session before any of it was written, and records where the
-platform code had to live and why.
+Status: **Linux/OpenSSL implemented and executed; macOS/SecureTransport implemented and
+compile-checked only; Windows/SChannel not implemented, and a Windows build of a program that uses
+`tls` stops with a compile-time message that says so.** This note fixes the API, the error taxonomy,
+the trust store rules and the lifetime of a session, and records where the platform code had to live
+and why.
 
 ## What the standard library promises
 
@@ -186,33 +187,58 @@ which is the ctrl the macro expands to.
 ALPN is `SSL_CTX_set_alpn_protos` with the length-prefixed wire list; the negotiated protocol is
 read back with `SSL_get0_alpn_selected`.
 
-### Windows: SChannel
+### Windows: SChannel - not in this increment
 
-`AcquireCredentialsHandleA` with `SCHANNEL_CRED` (`SCH_CREDENTIALS_VERSION`, protocol flags for TLS
-1.2/1.3, `SCH_USE_STRONG_CRYPTO`), `InitializeSecurityContextA` driven to completion for the
-handshake and per message, `QueryContextAttributesA` for the stream sizes
-(`SECPKG_ATTR_STREAM_SIZES`) and the negotiated protocol (`SECPKG_ATTR_CONNECTION_INFO`),
-`EncryptMessage`/`DecryptMessage` for the records, `SECBUFFER_SNI` for the server name, and chain
-verification through `CertGetCertificateChain` against the machine `ROOT` store. The credential and
-context handles are the C-owned opaque handles the module releases with
-`FreeCredentialsHandle`/`DeleteSecurityContext`. `secur32` and `crypt32` are named as the link
-inputs, which the compiler turns into `// grail-link: import secur32 AcquireCredentialsHandleA`
-notes that the Windows driver turns into import objects.
+`@if target.os == .windows { @assert(false, ...) }` in `lib/tls.grl`: a program that imports `tls`
+for Windows stops at a compile-time message instead of linking a layer nobody could run here. That
+is deliberate. SChannel is not a library with a client-context API; it is a message-layer protocol
+driver, and a binding is roughly: `AcquireCredentialsHandleA` with a `SCHANNEL_CRED` (no
+`SCH_CRED_MANUAL_CRED_VALIDATION`, `grbitEnabledProtocols` for TLS 1.2/1.3),
+`InitializeSecurityContextA` driven to completion for the handshake, `QueryContextAttributesA` for
+`SECPKG_ATTR_STREAM_SIZES` and `SECPKG_ATTR_REMOTE_CERT_CONTEXT`, `EncryptMessage`/`DecryptMessage`
+with a four-buffer `SecBufferDesc` per record, and - because SChannel validates the chain but *not*
+the name - a `CertGetCertificateChain` + `CertVerifyCertificateChainPolicy` with
+`CERT_CHAIN_POLICY_SSL` and a UTF-16 `pwszServerName` for the host check. Every one of those is a
+byte-exact struct whose failure mode is a crash or a silently skipped name check, and none of it can
+be executed on this host. Shipping that unrun would be a claim this increment cannot support, so the
+plan is recorded here and the build refuses. A Windows runner is the prerequisite for the code, not
+more careful writing.
 
-### macOS: SecureTransport
+What the layer will need from the rest of the runtime when it lands: the record pump wants the
+handshake's `SEC_I_CONTINUE_NEEDED` loop to wait on `host::read_fd` (already there), and the
+credential and context handles are sixteen bytes each, so the four state words in `PlatformState`
+hold two addresses (a two-word allocation each) or the handle is copied into a local record per
+call.
 
-SecureTransport rather than Network.framework: Network.framework is an asynchronous,
-dispatch-queue API, and this layer is a synchronous pump over a file descriptor - adopting it would
-mean running a dispatch queue and bridging callbacks back into a blocking call, for no gain. The
-deprecation of SecureTransport is a compile-time warning in C and not a removal; the symbols are
-present in every macOS SDK Grail targets.
+### macOS: SecureTransport (compile-checked only)
 
-`SSLCreateContext` (`kSSLClientSide`), `SSLSetIOFuncs` with the two callbacks reading and writing
-the descriptor, `SSLSetPeerDomainName` for the name, `SSLSetProtocolVersionMin`, `SSLSetALPNProtocols`,
-`SSLSetCertificate` for a client cert, `SSLHandshake`, `SSLRead`/`SSLWrite`, `SSLClose`,
-`SSLGetNegotiatedProtocolVersion`, `SSLGetNegotiatedProtocol`. The trust evaluation is the default
-one: the handshake fails with `errSSLXCertChainInvalid` (or
-`errSSLPeerCertVerificationFailed`) and the module maps that result to `Error::Verify`.
+SecureTransport rather than Network.framework: Network.framework is an asynchronous, queue-driven
+API and this layer is a synchronous pump over one descriptor - adopting it would mean owning a
+dispatch queue and bridging callbacks back into a blocking call, for no gain. SecureTransport's
+deprecation is a compile-time warning in C, not a removal, and the symbols are in every macOS SDK
+Grail targets.
+
+`SSLCreateContext` (`kSSLClientSide`), `SSLSetIOFuncs` with two `extern "C"` callbacks,
+`SSLSetConnection`, `SSLSetPeerDomainName` (which drives both SNI and the name check inside the
+system trust evaluation), `SSLSetProtocolVersionMin`, `SSLHandshake`, `SSLRead`/`SSLWrite`,
+`SSLClose`, `SSLGetNegotiatedProtocolVersion`. The trust evaluation is the system's default one: a
+rejected chain or name fails the handshake and becomes `Error::Verify`.
+
+Four limits, all stated rather than hidden:
+
+- **A CA file refuses.** SecureTransport has no CA-file switch; anchoring on a private CA means
+  building a `SecTrust` by hand. `set_ca_file` therefore returns `Error::NoTrustStore` instead of
+  silently trusting the system's anchors less (or more) strictly than the caller asked.
+- **ALPN and the peer subject report nothing.** Both need CoreFoundation (`CFArray` of `CFStrings`,
+  and `SecTrust` for the certificate), which this layer does not do yet, so `alpn()` and
+  `peer_subject()` return `""`.
+- **The IO callbacks wait by polling.** They are called by the C library, and a foreign callback
+  must not suspend the green task that made the call, so a would-block descriptor is retried with a
+  1 ms sleep instead of parking on the reactor. The Linux path suspends properly; this one differs
+  and says so.
+- **The link is not automatic.** `lib "Security"` becomes `-lSecurity` for a Mach-O build, and ld64
+  cannot resolve a framework that way: a macOS build of a `tls` program needs `-framework Security`
+  from the tooling (for the no-SDK cross link, a `Security.tbd` stub beside the libSystem one).
 
 ## Verification
 
@@ -234,9 +260,9 @@ Executed on x86-64 Linux against OpenSSL 3.6.5, in `tests/native-cases.json`:
   subject and that verification succeeded. It skips (and says so, exiting 0) when the network is
   unavailable.
 
-The Windows and macOS branches are cross-compiled (`--target windows-x86_64`, `--target
-macos-x86_64`) on every corpus run: the branch has to type-check, lower and emit its `import`
-notes. Nothing of SChannel or SecureTransport was executed; no Windows or macOS host was available.
+The macOS branch is cross-compiled for `macos-x86_64` and `macos-aarch64` (it emits its
+SecureTransport calls and the `// grail-link: Security` request) but was never executed: no macOS
+host was available. The Windows branch is a compile-time refusal, so there is nothing to run.
 
 ## Not in this increment
 
