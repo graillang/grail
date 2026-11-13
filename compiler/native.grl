@@ -37095,12 +37095,17 @@ fn iface_impl_owner<a>(c: (&a mut C), index: u64, ty: u64) -> u64 {
     }
     return 0;
 }
+// An implementation's own parameters. The record states whether there are any; the *key* it is
+// filed under is derived by the reader from the declaration or the implementation it belongs to,
+// because the writer's key is an index into the writer's store and would name a different
+// declaration in the reader's. (The text format wrote the fields and derived the key too.)
 fn iface_enc_impl_params<a>(c: (&a mut C), out: (&a mut u8[]), deps: (&a mut u64[]), owner: u64) -> unit {
-    iface_wv(&mut out, owner);
     record := impl_record(&mut c, owner);
     if record == 0 {
+        iface_w1(&mut out, 0);
         return ();
     }
+    iface_w1(&mut out, 1);
     p := &c.impl_params[record - 1];
     types := p.tnames.len();
     lifetimes := p.rnames.len();
@@ -37214,8 +37219,6 @@ fn iface_enc_fn<a>(c: (&a mut C), index: u64, deps: (&a mut u64[]), text: (&a mu
     iface_wv(&mut body_bytes, ext);
     iface_ws(&mut body_bytes, view(symbol));
     iface_w1(&mut body_bytes, strict);
-    iface_wv(&mut body_bytes, owner);
-    iface_wv(&mut body_bytes, contract);
     iface_wv(&mut body_bytes, params.len());
     for i in params.len() {
         iface_type(&mut c, &mut body_bytes, &mut deps, params[i]);
@@ -38225,7 +38228,7 @@ fn iface_rec_const<a>(c: (&a mut C), p: (&a mut IR)) -> unit {
 // A function record. `module` is where it is filed (the module itself, `.inherent_N`, `.interface_N`
 // or `.impl_N`) and `home` is the module whose interface carries it; `owner` and `contract` travel in
 // the record, so the reader installs exactly what the writer wrote instead of re-deriving them.
-fn iface_rec_fn<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], module: &a [u8], indent: &a [u8], source_index: u64, raw_flag: u64, section: u64, implementation: u64) -> unit {
+fn iface_rec_fn<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], module: &a [u8], indent: &a [u8], source_index: u64, raw_flag: u64, section: u64, implementation: u64, owner: u64, contract: u64) -> unit {
     name := iface_rs(&mut p);
     public := iface_r1(&mut p);
     types := iface_rv(&mut p);
@@ -38233,8 +38236,6 @@ fn iface_rec_fn<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], module: &a [u8]
     ext := iface_rv(&mut p);
     symbol := iface_rs(&mut p);
     strict := iface_r1(&mut p);
-    owner := iface_rv(&mut p);
-    contract := iface_rv(&mut p);
     if p.phase == 0 {
         iface_rt_indent(&mut p, view(indent));
         push_bytes(&mut p.rtext, view("fn "));
@@ -38445,14 +38446,12 @@ fn iface_rec_fn<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], module: &a [u8]
     }
     return ();
 }
-fn iface_r_impl_params<a>(c: (&a mut C), p: (&a mut IR)) -> u64 {
-    owner := iface_rv(&mut p);
-    if p.phase == 0 {
-        if owner != 0 {
-                iface_rt_indent(&mut p, view("  params"));
-        }
+fn iface_r_impl_params<a>(c: (&a mut C), p: (&a mut IR), key_params: u64, key_plain: u64) -> u64 {
+    present := iface_r1(&mut p);
+    if (p.phase == 0) & (present != 0) {
+        push_bytes(&mut p.rtext, view(" params"));
     }
-    if owner == 0 {
+    if present == 0 {
         return 0;
     }
     ntypes := iface_rv(&mut p);
@@ -38466,27 +38465,32 @@ fn iface_r_impl_params<a>(c: (&a mut C), p: (&a mut IR)) -> u64 {
         rnames.push(iface_rs(&mut p));
     }
     if p.phase == 0 {
-        iface_rt_num(&mut p, view("="), ntypes);
+        push_bytes(&mut p.rtext, view("="));
+        decimal(&mut p.rtext, ntypes);
         iface_rt_num(&mut p, view(" lifetimes="), nlifetimes);
         for i in tnames.len() {
-                iface_rt_indent(&mut p, view("  ptype "));
+            iface_rt_indent(&mut p, view("  ptype "));
             push_bytes(&mut p.rtext, view(tnames[i]));
         }
         for i in rnames.len() {
-                iface_rt_indent(&mut p, view("  rname "));
+            iface_rt_indent(&mut p, view("  rname "));
             push_bytes(&mut p.rtext, view(rnames[i]));
         }
     }
     bounds := iface_r_bounds(&mut p, ntypes);
     reqs := iface_r_reqs(&mut p, &mut c, ntypes);
-    if p.phase != 2 {
+    mut key = key_params;
+    if ntypes == 0 {
+        key = key_plain;
+    }
+    if (p.phase != 2) || (key == 0) {
         return 0;
     }
     c
         .impl_params
         .push(
             ImplParams {
-                decl: owner,
+                decl: key,
                 rnames: rnames,
                 tnames: tnames,
                 bounds: bounds,
@@ -38506,21 +38510,18 @@ fn iface_rec_inherent<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], source_in
         push_bytes(&mut p.rtext, view("::"));
         push_bytes(&mut p.rtext, view(name));
     }
-    iface_r_impl_params(&mut c, &mut p);
-    if p.phase == 0 {
-    }
-    n := iface_rv(&mut p);
     mut owner = 0;
     mut filed = u8[];
     if p.phase == 2 {
-        found := iface_find_decl(&mut c, &mut p, view(module), view(name));
-        owner = found;
+        owner = iface_find_decl(&mut c, &mut p, view(module), view(name));
         filed = private_module(view(".inherent_"), owner);
     }
+    iface_r_impl_params(&mut c, &mut p, owner + 1, owner + 1);
+    n := iface_rv(&mut p);
     for i in n {
         saved := p.stop;
         iface_rec(&mut p, IFACE_TAG_FN);
-        iface_rec_fn(&mut c, &mut p, view(home), view(filed), view("  "), source_index, raw_flag, 1, 0);
+        iface_rec_fn(&mut c, &mut p, view(home), view(filed), view("  "), source_index, raw_flag, 1, 0, owner + 1, 0);
         p.stop = saved;
     }
     return ();
@@ -38543,7 +38544,7 @@ fn iface_rec_iface<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], source_index
         sup_module := iface_rs(&mut p);
         sup_name := iface_rs(&mut p);
         if p.phase == 0 {
-                iface_rt_indent(&mut p, view("  super "));
+            iface_rt_indent(&mut p, view("  super "));
             push_bytes(&mut p.rtext, view(sup_module));
             push_bytes(&mut p.rtext, view("::"));
             push_bytes(&mut p.rtext, view(sup_name));
@@ -38556,11 +38557,9 @@ fn iface_rec_iface<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], source_index
     for i in nassoc {
         assoc.push(iface_rs(&mut p));
         if p.phase == 0 {
-                iface_rt_indent(&mut p, view("  assoc "));
+            iface_rt_indent(&mut p, view("  assoc "));
             push_bytes(&mut p.rtext, view(assoc[assoc.len() - 1]));
         }
-    }
-    if p.phase == 0 {
     }
     mut id = 0;
     if p.phase == 1 {
@@ -38601,15 +38600,13 @@ fn iface_rec_iface<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], source_index
     }
     n := iface_rv(&mut p);
     mut filed = u8[];
-    mut contract = 0;
     if p.phase == 2 {
-        contract = id;
         filed = private_module(view(".interface_"), id);
     }
     for i in n {
         saved := p.stop;
         iface_rec(&mut p, IFACE_TAG_FN);
-        iface_rec_fn(&mut c, &mut p, view(home), view(filed), view("  "), source_index, raw_flag, 2, 0);
+        iface_rec_fn(&mut c, &mut p, view(home), view(filed), view("  "), source_index, raw_flag, 2, 0, 0, id);
         p.stop = saved;
     }
     return ();
@@ -38626,24 +38623,33 @@ fn iface_rec_impl<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], source_index:
         push_bytes(&mut p.rtext, view(" for "));
     }
     ty := iface_r_type(&mut p, &mut c);
-    if p.phase == 0 {
+    mut implementation = 0;
+    mut plain_key = 0;
+    if p.phase == 2 {
+        plain_key = 0;
+        if ty_kind(&mut c, ty) == 8 {
+            plain_key = ty_arg(&mut c, ty) + 1;
+        }
     }
-    record := iface_r_impl_params(&mut c, &mut p);
+    mut key_params = 0;
+    if p.phase == 2 {
+        // The implementation's own parameter record is filed under the implementation, exactly as
+        // the source parse files it, so a replayed generic method finds its parameters.
+        key_params = generic_impl_key(c.implementations.len() + 1);
+    }
+    record := iface_r_impl_params(&mut c, &mut p, key_params, plain_key);
     n := iface_rv(&mut p);
     mut names = u8[][];
     mut types = u64[];
     for i in n {
         names.push(iface_rs(&mut p));
         if p.phase == 0 {
-                iface_rt_indent(&mut p, view("  assoctype "));
+            iface_rt_indent(&mut p, view("  assoctype "));
             push_bytes(&mut p.rtext, view(names[names.len() - 1]));
             p.rtext.push(32);
         }
         types.push(iface_r_type(&mut p, &mut c));
-        if p.phase == 0 {
-            }
     }
-    mut implementation = 0;
     if p.phase == 2 {
         id := iface_find_iface(&mut c, &mut p, view(contract_module), view(contract_name));
         c
@@ -38678,7 +38684,7 @@ fn iface_rec_impl<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], source_index:
     for i in nf {
         saved := p.stop;
         iface_rec(&mut p, IFACE_TAG_FN);
-        iface_rec_fn(&mut c, &mut p, view(home), view(filed), view("  "), source_index, raw_flag, 3, implementation);
+        iface_rec_fn(&mut c, &mut p, view(home), view(filed), view("  "), source_index, raw_flag, 3, implementation, key_params, 0);
         p.stop = saved;
     }
     return ();
@@ -38803,7 +38809,7 @@ fn iface_walk<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], source_index: u64
         } else if tag == IFACE_TAG_CONST {
             iface_rec_const(&mut c, &mut p);
         } else if tag == IFACE_TAG_FN {
-            iface_rec_fn(&mut c, &mut p, view(home), view(home), view(""), source_index, raw_flag, 0, 0);
+            iface_rec_fn(&mut c, &mut p, view(home), view(home), view(""), source_index, raw_flag, 0, 0, 0, 0);
         } else if tag == IFACE_TAG_INHERENT {
             iface_rec_inherent(&mut c, &mut p, view(home), source_index, raw_flag);
         } else if tag == IFACE_TAG_IFACE {
