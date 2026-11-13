@@ -723,9 +723,8 @@ struct C {
     diag_primary: u8[],
     lib_owner: u8[][],
     // ---- checked effects (G26, docs/design/effects.md) --------------------------------------------
-    // One record per function symbol, whether a body was emitted for it in this build or only a
-    // declaration was read: the claims `@no_alloc`/`@no_panic` make, the allocation sites and checks
-    // its own body emitted, the call edges read out of that body, and the facts the fixpoint settles.
+    // One record per emitted body or read declaration: the claim `@no_alloc`/`@no_panic` makes, the
+    // call edges the emitter recorded as it wrote the body, and the facts the fixpoint settles.
     fx_any: u64,
     fx_cur: u64,
     fx_syms: u8[][],
@@ -734,13 +733,6 @@ struct C {
     fx_attr_panic: u64[],
     fx_own_alloc: u64[],
     fx_own_panic: u64[],
-    fx_alloc_what: u8[][],
-    fx_alloc_file: u64[],
-    fx_alloc_pos: u64[],
-    fx_panic_what: u8[][],
-    fx_panic_hint: u8[][],
-    fx_panic_file: u64[],
-    fx_panic_pos: u64[],
     fx_alloc: u64[],
     fx_panic: u64[],
     fx_alloc_thru: u64[],
@@ -757,14 +749,19 @@ struct C {
     fx_pending_alloc: u64,
     fx_pending_panic: u64,
     fx_bounded: u64,
-    // Where the body being recorded starts in `c.out`, and whether it is trusted code (the runtime, a
-    // drop helper), whose indirect calls are the compiler's own dispatch rather than user code.
+    // Where the body being recorded starts in `c.out`, whether it is trusted code (the runtime, a drop
+    // helper), how many calls it has recorded, and the byte range of its `.proved` entry's replayed
+    // prologue: bytes `fx_end`'s consistency check skips, because the checked entry already counted
+    // them.
     fx_out_start: u64,
     fx_trusted: u64,
-    // The end of the checked entry's parameter checks: a refined parameter's check belongs to the
-    // entry, so it fails only for a caller that did not prove it (and so called the checked entry).
-    fx_entry_end: u64,
-    fx_entry_panic: u64[]
+    fx_calls: u64,
+    fx_skip_lo: u64,
+    fx_skip_hi: u64,
+    // A refined parameter's check in the checked entry: the caller's obligation, not a body edge.
+    fx_entry_panic: u64[],
+    // Where the body's edge list started, so a retried body's discarded edges go with its bytes.
+    fx_edge_mark: u64
 }
 
 fn same<a, b>(x: &a [u8], y: &b [u8]) -> bool {
@@ -2374,11 +2371,18 @@ fn darwin<a>(c: (&a mut C)) -> u64 {
 }
 // Mach-O names every C symbol with a leading underscore; ELF does not.
 fn sym<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
-    if c.plat == 1 {
-        c.out.push(95);
-    }
-    o(&mut c, name);
+    spelling := sym_name(&c, view(name));
+    push_bytes(&mut c.out, view(spelling));
     return ();
+}
+// The symbol `sym` writes, as a value: the effect facts have to name the bytes the emitter wrote.
+fn sym_name<a, b>(c: (&a C), name: &b [u8]) -> u8[] {
+    mut out = u8[];
+    if c.plat == 1 {
+        out.push(95);
+    }
+    push_bytes(&mut out, view(name));
+    return out;
 }
 fn rodata<a>(c: (&a mut C)) -> unit {
     if c.plat == 1 {
@@ -2645,7 +2649,8 @@ fn tls_enter_callback<a>(c: (&a mut C), slot: u64, adopt: u64) -> unit {
     tls_record_address(&mut c);
     o(&mut c, view("movq (%rax),%rsi\ntestq %rsi,%rsi\n"));
     jump(&mut c, view("jne"), have);
-    o(&mut c, view("call rt_adopt_record\nmovq %rax,"));
+    call_out(&mut c, view("rt_adopt_record"));
+    o(&mut c, view("movq %rax,"));
     stack_slot(&mut c, adopt);
     c.out.push(10);
     tls_record_address(&mut c);
@@ -2674,7 +2679,8 @@ fn tls_leave_callback<a>(c: (&a mut C), slot: u64, adopt: u64) -> unit {
     tls_record_address(&mut c);
     o(&mut c, view("xorl %ecx,%ecx\nmovq %rcx,(%rax)\nmovq "));
     stack_slot(&mut c, adopt);
-    o(&mut c, view(",%rdi\ncall rt_release_record\n"));
+    o(&mut c, view(",%rdi\n"));
+    call_out(&mut c, view("rt_release_record"));
     mark(&mut c, done);
     return ();
 }
@@ -3489,7 +3495,8 @@ fn store_params<a>(c: (&a mut C), count: u64) -> unit {
             stack_slot(&mut c, 5 + k);
             c.out.push(10);
         }
-        o(&mut c, view("movq %r9,%rdi\ncall rt_free\n"));
+        o(&mut c, view("movq %r9,%rdi\n"));
+    call_out(&mut c, view("rt_free"));
     }
     return ();
 }
@@ -3502,9 +3509,7 @@ fn invoke<a, b>(c: (&a mut C), name: &b [u8], args: u64[]) -> u64 {
         mut r = argreg(i);
         get(&mut c, args[i], view(r));
     }
-    o(&mut c, view("call "));
-    o(&mut c, name);
-    c.out.push(10);
+    call_out(&mut c, view(name));
     if same(view(name), view("rt_f64_op")) {
         n := c.f64_ops;
         exchange(&mut c.call_ord, n);
@@ -5399,9 +5404,19 @@ fn drop_taken<a>(c: (&a mut C), ty: u64) -> u64 {
 }
 
 fn drop_name<a>(c: (&a mut C), ty: u64) -> unit {
-    c.drop_refs.push(ty);
-    name := drop_symbol(&mut c, ty);
+    name := drop_ref_name(&mut c, ty);
     push_bytes(&mut c.out, view(name));
+    return ();
+}
+// A drop helper's name, and the request for its body: naming one is what makes the drop walk emit it.
+fn drop_ref_name<a>(c: (&a mut C), ty: u64) -> u8[] {
+    c.drop_refs.push(ty);
+    return drop_symbol(&mut c, ty);
+}
+// A call to a type's drop helper: the `Drop` reached through the compiler's glue is a real edge.
+fn drop_call_out<a>(c: (&a mut C), ty: u64) -> unit {
+    name := drop_ref_name(&mut c, ty);
+    call_out(&mut c, view(name));
     return ();
 }
 fn release<a>(c: (&a mut C), index: u64) -> unit {
@@ -5441,9 +5456,7 @@ fn release<a>(c: (&a mut C), index: u64) -> unit {
     // parameter, and no helper exists for one); the body that is kept is the replayed one.
     if concrete_type(&mut c, ty) {
         get(&mut c, slot, view("%rdi"));
-        o(&mut c, view("call "));
-        drop_name(&mut c, ty);
-        c.out.push(10);
+        drop_call_out(&mut c, ty);
     }
     mark(&mut c, done);
     close_loans(&mut c);
@@ -6285,7 +6298,7 @@ fn ref_requirement<a>(c: (&a mut C), fn_name: &a [u8], at: &a [u8]) -> u8[] {
 // One obligation: `pred` must hold of the values in `slots`, or the program stops saying which
 // predicate it violated and which function required it. An obligation the prover discharges emits no
 // check at all (step 3's hook is `ref_proved`, which is false for now).
-fn ref_check<a, b, d, e>(c: (&a mut C), pred: Pred, names: (&b u8[][]), slots: (&d u64[]), tys: (&e u64[]), fn_name: u8[], at_file: u64, at_pos: u64, proved: u64) -> unit {
+fn ref_check<a, b, d, e>(c: (&a mut C), pred: Pred, names: (&b u8[][]), slots: (&d u64[]), tys: (&e u64[]), fn_name: u8[], at_file: u64, at_pos: u64, proved: u64, at_entry: u64) -> unit {
     if !has_pred(&pred) {
         return ();
     }
@@ -6328,7 +6341,12 @@ fn ref_check<a, b, d, e>(c: (&a mut C), pred: Pred, names: (&b u8[][]), slots: (
     o(&mut c, view(pred_label));
     o(&mut c, view("(%rip),%rdi\nleaq "));
     o(&mut c, view(req_label));
-    o(&mut c, view("(%rip),%rsi\ncall rt_refine\n"));
+    if at_entry != 0 {
+        call_entry_out(&mut c, view("(%rip),%rsi\ncall rt_refine\n"));
+    } else {
+        o(&mut c, view("(%rip),%rsi\n"));
+        call_out(&mut c, view("rt_refine"));
+    }
     mark(&mut c, ok);
     return ();
 }
@@ -6361,7 +6379,10 @@ fn ref_params<a>(c: (&a mut C)) -> unit {
         ty := local_ty(&mut c, i);
         slots.push(slot);
         tys.push(ty);
-        ref_check(&mut c, Pred { file: pf, lo: plo, hi: phi }, &none, &slots, &tys, c.cur_name.copy(), c.cur_file, c.cur_pos, 0);
+        name := c.cur_name.copy();
+        at_file := c.cur_file;
+        at_pos := c.cur_pos;
+        ref_check(&mut c, Pred { file: pf, lo: plo, hi: phi }, &none, &slots, &tys, name, at_file, at_pos, 0, 1);
         emitted = emitted + 1;
     }
     if emitted != 0 {
@@ -6416,7 +6437,13 @@ fn ref_entry<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &d 
     }
     export_name(&mut c, view(m), view(name), view(body_symbol), export);
     o(&mut c, view(".proved:\n"));
+    // The prologue's calls were recorded - and counted - when the checked entry emitted them; this is
+    // a copy of those bytes, so the consistency check in `fx_end` steps over them.
+    lo := c.out.len();
     push_bytes(&mut c.out, view(prologue));
+    hi := c.out.len();
+    exchange(&mut c.fx_skip_lo, lo);
+    exchange(&mut c.fx_skip_hi, hi);
     jump(&mut c, view("jmp"), body);
     return ();
 }
@@ -6464,7 +6491,7 @@ fn ref_field<a, b>(c: (&a mut C), d: u64, k: u64, slot: u64, term: &b [u8], pos:
         // No term to read means no proof: strict mode refuses the literal itself.
         pv_strict_fail_why(&mut c, Pred { file: pf, lo: plo, hi: phi }, pos, view(need), view("the value is not a name or a constant"));
     }
-    ref_check(&mut c, Pred { file: pf, lo: plo, hi: phi }, &names, &slots, &tys, who, pf, plo, proved);
+    ref_check(&mut c, Pred { file: pf, lo: plo, hi: phi }, &names, &slots, &tys, who, pf, plo, proved, 0);
     return ();
 }
 // The same obligation at `r.f = v`: the field is named in the source, so its predicate is found by
@@ -6522,7 +6549,7 @@ fn ref_result<a, b>(c: (&a mut C), slot: u64, ty: u64, term: &b [u8], pos: u64) 
     if (report != 0) & (proved == 0) {
         pv_strict_fail_why(&mut c, Pred { file: pf, lo: plo, hi: phi }, pos, view(need), view("the returned value is not a name or a constant"));
     }
-    ref_check(&mut c, Pred { file: pf, lo: plo, hi: phi }, &names, &slots, &tys, name, at_file, at_pos, proved);
+    ref_check(&mut c, Pred { file: pf, lo: plo, hi: phi }, &names, &slots, &tys, name, at_file, at_pos, proved, 0);
     return ();
 }
 // ---- the prover (docs/design/refinements.md, "The prover") ----------------------------------------
@@ -11202,10 +11229,17 @@ fn symbol_unit<a, b>(c: (&a mut C), m: &b [u8]) -> u8[] {
     return m.copy();
 }
 fn mangle<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> unit {
+    spelling := mangle_name(&mut c, view(m), view(n));
+    push_bytes(&mut c.out, view(spelling));
+    return ();
+}
+// The symbol `mangle` writes, as a value: a call's edge has to name the symbol the call names.
+fn mangle_name<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> u8[] {
     plat := c.plat;
     unit := symbol_unit(&mut c, m);
-    mangle_into(&mut c.out, plat, view(unit), n);
-    return ();
+    mut out = u8[];
+    mangle_into(&mut out, plat, view(unit), n);
+    return out;
 }
 // The symbol a function body is emitted under, as a value: the one thing the fact table is keyed
 // by, and the only part of a body that is known before the body is parsed.
@@ -12179,11 +12213,9 @@ fn ffi_emit_call<a, b, d, e, f>(
     }
     if symbol.len() == 0 {
         get(&mut c, target, view("%rax"));
-        o(&mut c, view("call *%rax\n"));
+        call_slot_out(&mut c, view("call *%rax\n"));
     } else {
-        o(&mut c, view("call "));
-        o(&mut c, view(symbol));
-        c.out.push(10);
+        call_out(&mut c, view(symbol));
     }
     if (ret != 1) & (rmode == 0) {
         if is_float(&mut c, ret) {
@@ -13344,8 +13376,6 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         prologue.push(c.out[i]);
     }
     ref_params(&mut c);
-    entry_end := c.out.len();
-    exchange(&mut c.fx_entry_end, entry_end);
     // The body begins after the checks: the second entry jumps here.
     body_lbl := label(&mut c);
     mark(&mut c, body_lbl);
@@ -13420,6 +13450,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         }
         // Facts describe the text just discarded, so they go with it.
         llvm::facts_truncate(&mut c.facts, fact_mark);
+        edge_mark := c.fx_edge_mark;
+        fx_edges_truncate(&mut c, edge_mark);
         while closure_mark < c.closures.len() {
             c.closures.pop();
         }
@@ -15723,17 +15755,38 @@ fn ref_strict_form<a>(c: (&a mut C)) -> u64 {
 // ---- checked effects (G26, docs/design/effects.md) ------------------------------------------------
 //
 // `@no_alloc` and `@no_panic` are claims about a function *and everything it calls*, and the compiler
-// proves them rather than trusting them: while a body is emitted it records the allocation sites and
-// the checks of its own code, its finished bytes are read back for the calls it makes, and the facts
-// settle by a fixpoint over that graph. Allocation is anything that reaches `rt_alloc` - a `push`, a
-// string built by `format`, a record or vector literal, an `alloc` block, a boxed closure, an `Rc` -
-// because the runtime's `rt_alloc` is the one place the heap is asked for. The runtime's failure path
-// (`rt_abort`, `rt_fail`, `rt_refine`) is not followed: a program that aborts allocates nothing a
-// surviving program can observe.
+// proves them rather than trusting them: the facts are recorded where the front end emits the call,
+// and settle by a fixpoint over the call graph. Allocation is anything that reaches `rt_alloc` - a
+// `push`, a string built by `format`, a record or vector literal, an `alloc` block, a boxed closure,
+// an `Rc` - because the runtime's `rt_alloc` is the one place the heap is asked for. The runtime's
+// failure path (`rt_abort`, `rt_fail`, `rt_trap`, `rt_refine`, `rt_error`) is a root of the second
+// graph: reaching one is what `@no_panic` refuses.
 //
-// `@bounded(n)` on a `while`/`for` is proved from the loop's own tokens: a counter that strictly
-// increases toward a constant (or refined) bound and that nothing else in the body assigns, or a
-// `for i in a..b` whose span is at most n.
+// The edges come from the statement the emitter is writing, not from the assembly it wrote.
+// `call_out`, `call_proved_out`, `call_slot_out`, `call_dispatch_out` and `call_entry_out` are the
+// only places a `call` line is emitted, and each records what the front end knows at that point:
+//
+// - a direct call records the callee's linker symbol, including the runtime's helpers and a drop
+//   helper the compiler itself named;
+// - `call *%rax` in user code (a closure, a function value, a `dyn` method slot) records an *unknown*
+//   edge, which the solver treats as allocating and failing;
+// - the compiler's own dispatch inside trusted code (a closure's drop through the slot its body
+//   installed) records nothing: every body it can reach is a body of this build already;
+// - a refined parameter's check in the checked entry records an entry fact, not a body edge, because
+//   it is the caller's obligation (a caller that proved the predicate enters at `.proved`).
+//
+// What this buys over reading the emitted text back:
+//
+// - a check the prover removed is not in the IR at all, so it is not an edge; a scan cannot tell a
+//   live call from one inside the bytes the optimizer is about to delete;
+// - the callee is the symbol the front end chose, so dispatch the compiler built itself - a vtable's
+//   drop slot - is resolved from recorded vtables (`fx_vtable_drop`) instead of a register name;
+// - two instances of one generic are two records: the template's claim is the obligation, the
+//   instance's own body is what proves it, and the refusal names the instance.
+//
+// `fx_end` counts the `call` lines in the bytes the body emitted and refuses a body whose count
+// disagrees with the calls recorded for it: a call site that bypasses the recording helpers is a
+// compiler bug, and a bug here is a silently weaker proof, so it is loud.
 
 // `@no_alloc` and `@no_panic` on a declaration. The shape is `@strict`'s: no `;` form, further
 // attributes may follow, and the next declaration consumes them. 1 when one was consumed.
@@ -15772,13 +15825,6 @@ fn fx_sym<a, b>(c: (&a mut C), sym: &b [u8]) -> u64 {
     c.fx_attr_panic.push(0);
     c.fx_own_alloc.push(0);
     c.fx_own_panic.push(0);
-    c.fx_alloc_what.push(u8[]);
-    c.fx_alloc_file.push(0);
-    c.fx_alloc_pos.push(0);
-    c.fx_panic_what.push(u8[]);
-    c.fx_panic_hint.push(u8[]);
-    c.fx_panic_file.push(0);
-    c.fx_panic_pos.push(0);
     c.fx_alloc.push(0);
     c.fx_panic.push(0);
     c.fx_alloc_thru.push(0);
@@ -15789,8 +15835,25 @@ fn fx_sym<a, b>(c: (&a mut C), sym: &b [u8]) -> u64 {
     c.fx_entry_panic.push(0);
     return c.fx_syms.len();
 }
-// A body starts being recorded: its symbol is known before its bytes are, which is what the fact
-// table is keyed by. `name` is the source name a diagnostic shows.
+// The name a diagnostic shows for a specialisation: the template's name and this instance's type
+// arguments, so a refusal names `fill<main::File>` rather than the template it came from.
+fn fx_instance_name<a, b>(c: (&a mut C), name: &b [u8], spec: u64) -> u8[] {
+    mut out = copy_bytes(view(name));
+    out.push(60);
+    args := type_args_for_spec(&mut c, spec);
+    for i in args.len() {
+        if i != 0 {
+            push_bytes(&mut out, view(", "));
+        }
+        spelling := type_name(&mut c, args[i]);
+        push_bytes(&mut out, view(spelling));
+    }
+    out.push(62);
+    return out;
+}
+// A body starts being recorded: one record per *emitted* body, so a generic's instances are judged
+// apart. A specialisation inherits the template's claim - that is the obligation - and its own body
+// is what proves or refuses it.
 fn fx_begin<a, b, d>(c: (&a mut C), sym: &b [u8], name: &d [u8], file: u64, pos: u64, no_alloc: u64, no_panic: u64) -> unit {
     if c.fx_any == 0 {
         return ();
@@ -15803,24 +15866,45 @@ fn fx_begin<a, b, d>(c: (&a mut C), sym: &b [u8], name: &d [u8], file: u64, pos:
     // A retried body starts over: facts from the discarded attempt are not this body's.
     c.fx_own_alloc[k] = 0;
     c.fx_own_panic[k] = 0;
+    mut display = copy_bytes(view(name));
+    mut claim_alloc = no_alloc;
+    mut claim_panic = no_panic;
+    if c.current_spec != 0 {
+        spec := c.current_spec - 1;
+        template := c.specs[spec].template;
+        // The template's source name, not the specialisation's symbol: the diagnostic says
+        // `fill<main::File>`, which is the code the author has to change.
+        source := c.funcs[template].name.copy();
+        display = fx_instance_name(&mut c, view(source), spec);
+        if c.funcs[template].no_alloc != 0 {
+            claim_alloc = 1;
+        }
+        if c.funcs[template].no_panic != 0 {
+            claim_panic = 1;
+        }
+    }
+    if claim_alloc != 0 {
+        c.fx_attr_alloc[k] = 1;
+    }
+    if claim_panic != 0 {
+        c.fx_attr_panic[k] = 1;
+    }
+    c.fx_fn_name[k] = display;
+    c.fx_fn_file[k] = file;
+    c.fx_fn_pos[k] = pos;
+    c.fx_entry_panic[k] = 0;
     trusted := c.raw;
     exchange(&mut c.fx_trusted, trusted);
     out_len := c.out.len();
     exchange(&mut c.fx_out_start, out_len);
-    exchange(&mut c.fx_entry_end, 0);
-    c.fx_entry_panic[k] = 0;
+    edges := c.fx_edge_from.len();
+    exchange(&mut c.fx_edge_mark, edges);
+    exchange(&mut c.fx_calls, 0);
+    exchange(&mut c.fx_skip_lo, 0);
+    exchange(&mut c.fx_skip_hi, 0);
     if trusted != 0 {
         fx_root(&mut c, k, view(sym));
     }
-    if no_alloc != 0 {
-        c.fx_attr_alloc[k] = 1;
-    }
-    if no_panic != 0 {
-        c.fx_attr_panic[k] = 1;
-    }
-    c.fx_fn_name[k] = copy_bytes(view(name));
-    c.fx_fn_file[k] = file;
-    c.fx_fn_pos[k] = pos;
     exchange(&mut c.fx_cur, k + 1);
     return ();
 }
@@ -15837,64 +15921,131 @@ fn fx_root<a, b>(c: (&a mut C), k: u64, sym: &b [u8]) -> unit {
     }
     if same(view(name), view("rt_alloc")) || same(view(name), view("rt_alloc_unlocked")) || same(view(name), view("rt_grow")) {
         c.fx_own_alloc[k] = 1;
-        c.fx_alloc_what[k] = copy_bytes(view("a heap allocation"));
-        c.fx_alloc_file[k] = 0;
-        c.fx_alloc_pos[k] = 0;
     }
     if same(view(name), view("rt_abort")) || same(view(name), view("rt_fail")) || same(view(name), view("rt_trap")) || same(view(name), view("rt_refine")) || same(view(name), view("rt_error")) {
         c.fx_own_panic[k] = 1;
-        c.fx_panic_what[k] = copy_bytes(view("a runtime failure"));
-        c.fx_panic_hint[k] = copy_bytes(view("prove the check away, or keep the attribute off the function"));
-        c.fx_panic_file[k] = 0;
-        c.fx_panic_pos[k] = 0;
     }
     return ();
 }
-// An allocation point of the body being emitted, named the way the language spells it.
-fn fx_alloc_here<a, b>(c: (&a mut C), what: &b [u8]) -> unit {
+// One edge of the body being emitted. `name` empty is a call nothing names - an indirect one in user
+// code - and the solver assumes it allocates and fails. `proved` marks a call that entered the
+// callee past its parameter checks.
+fn fx_edge<a, b>(c: (&a mut C), name: &b [u8], proved: u64) -> unit {
     cur := c.fx_cur;
     if cur == 0 {
         return ();
     }
-    k := cur - 1;
-    if k >= c.fx_own_alloc.len() {
-        return ();
+    c.fx_edge_from.push(cur - 1);
+    c.fx_edge_name.push(copy_bytes(view(name)));
+    c.fx_edge_to.push(0);
+    mut kind = proved;
+    if c.fx_trusted != 0 {
+        kind = kind | 4;
     }
-    if c.fx_own_alloc[k] != 0 {
-        return ();
-    }
-    c.fx_own_alloc[k] = 1;
-    c.fx_alloc_what[k] = copy_bytes(view(what));
-    c.fx_alloc_file[k] = c.file;
-    c.fx_alloc_pos[k] = c.pos;
+    c.fx_edge_kind.push(kind);
+    f := c.file;
+    p := c.pos;
+    c.fx_edge_file.push(f);
+    c.fx_edge_pos.push(p);
     return ();
 }
-// A runtime check of the body being emitted: what it is, where it is, and what would prove it away.
-fn fx_check_here<a, b, d>(c: (&a mut C), what: &b [u8], hint: &d [u8]) -> unit {
-    fx_check_at(&mut c, view(what), view(hint), c.file, c.pos);
+// The edge list back to where a body started: an attempt whose bytes were discarded does not get to
+// leave its calls behind for the attempt that replaces them.
+fn fx_edges_truncate<a>(c: (&a mut C), mark: u64) -> unit {
+    while mark < c.fx_edge_from.len() {
+        c.fx_edge_from.pop();
+        c.fx_edge_name.pop();
+        c.fx_edge_to.pop();
+        c.fx_edge_kind.pop();
+        c.fx_edge_file.pop();
+        c.fx_edge_pos.pop();
+    }
     return ();
 }
-fn fx_check_at<a, b, d>(c: (&a mut C), what: &b [u8], hint: &d [u8], file: u64, pos: u64) -> unit {
+// A `call` line the emitter writes that is not an edge, counted so the consistency check in `fx_end`
+// still sees it.
+fn fx_called<a>(c: (&a mut C)) -> unit {
+    n := c.fx_calls;
+    c.fx_calls = n + 1;
+    return ();
+}
+// A direct call: recorded as an edge, then emitted. This is the only place a direct `call` line is
+// written, so the record cannot disagree with the code.
+fn call_out<a, b>(c: (&a mut C), callee: &b [u8]) -> unit {
+    fx_edge(&mut c, view(callee), 0);
+    fx_called(&mut c);
+    o(&mut c, view("call "));
+    o(&mut c, callee);
+    c.out.push(10);
+    return ();
+}
+// A direct call whose arguments proved every refinement of the callee's parameters: it enters at the
+// callee's `.proved` entry, so the callee's entry checks are not this body's to answer for.
+fn call_proved_out<a, b>(c: (&a mut C), callee: &b [u8]) -> unit {
+    fx_edge(&mut c, view(callee), 8);
+    fx_called(&mut c);
+    o(&mut c, view("call "));
+    o(&mut c, callee);
+    o(&mut c, view(".proved\n"));
+    return ();
+}
+// An indirect call in user code: `text` is the instruction (`call *%rax`, an import thunk). Nothing
+// names what it reaches, so it is an unknown edge.
+fn call_slot_out<a, b>(c: (&a mut C), text: &b [u8]) -> unit {
+    fx_edge(&mut c, view(""), 0);
+    fx_called(&mut c);
+    o(&mut c, text);
+    return ();
+}
+// The compiler's own dispatch inside trusted code (a closure's drop through the slot its own body
+// installed): every body it can reach is recorded itself, so it is not an unknown.
+fn call_dispatch_out<a, b>(c: (&a mut C), text: &b [u8]) -> unit {
+    if c.fx_cur != 0 {
+        fx_called(&mut c);
+    }
+    o(&mut c, text);
+    return ();
+}
+// A refined parameter's check in the checked entry: it is the caller's obligation, so it is an entry
+// fact of this body rather than an edge of it.
+fn call_entry_out<a, b>(c: (&a mut C), text: &b [u8]) -> unit {
     cur := c.fx_cur;
-    if cur == 0 {
-        return ();
+    if cur != 0 {
+        c.fx_entry_panic[cur - 1] = 1;
+        fx_called(&mut c);
     }
-    k := cur - 1;
-    if k >= c.fx_own_panic.len() {
-        return ();
-    }
-    if c.fx_own_panic[k] != 0 {
-        return ();
-    }
-    c.fx_own_panic[k] = 1;
-    c.fx_panic_what[k] = copy_bytes(view(what));
-    c.fx_panic_hint[k] = copy_bytes(view(hint));
-    c.fx_panic_file[k] = file;
-    c.fx_panic_pos[k] = pos;
+    o(&mut c, text);
     return ();
 }
-fn fx_is_refine<a>(name: &a [u8]) -> bool {
-    return same(view(name), view("rt_refine")) || same(view(name), view("_rt_refine"));
+// A `dyn` value's drop: the vtable's first word. The vtable is the compiler's own, built from the
+// entries `register_vtable` recorded, so the slot is resolved to the drop helper of every concrete
+// type a vtable of this interface holds - a real edge each, not an unknown. It is deliberately an
+// over-approximation: which of them the value is cannot be known, so any of them that allocates or
+// fails makes the claim false. A `dyn` value that arrived from another object has no vtable in this
+// build, and that single case stays an unknown (docs/design/effects.md, "Limits").
+fn fx_vtable_drop<a>(c: (&a mut C), iface: u64) -> unit {
+    if c.fx_cur == 0 {
+        return ();
+    }
+    mut found = 0;
+    for i in c.vtables.len() / 2 {
+        if c.vtables[2 * i] == iface {
+            found = 1;
+            concrete := c.vtables[2 * i + 1];
+            if needs_drop(&mut c, concrete) {
+                // Naming the helper is what asks the drop walk for it.
+                c.drop_refs.push(concrete);
+                name := drop_symbol(&mut c, concrete);
+                fx_edge(&mut c, view(name), 0);
+            }
+        }
+    }
+    if found == 0 {
+        fx_edge(&mut c, view(""), 0);
+    }
+    // One `call *%rax` line is what the site emits, however many helpers the slot may hold.
+    fx_called(&mut c);
+    return ();
 }
 // A drop helper's body starts: trusted code, recorded like a function so a caller's claim is followed
 // through it to the user `Drop` it calls.
@@ -15909,12 +16060,17 @@ fn fx_helper<a, b>(c: (&a mut C), sym: &b [u8]) -> unit {
     exchange(&mut c.fx_trusted, 1);
     out_len := c.out.len();
     exchange(&mut c.fx_out_start, out_len);
+    exchange(&mut c.fx_calls, 0);
+    exchange(&mut c.fx_skip_lo, 0);
+    exchange(&mut c.fx_skip_hi, 0);
     exchange(&mut c.fx_cur, k + 1);
     return ();
 }
-// The body ends: its bytes are read back for the calls it makes. A `call` only counts at the start of
-// a line, so a string or predicate literal's bytes cannot fake one; `call *reg` is an indirect call,
-// recorded as `*` because nothing known is named there.
+// The body ends, and the one thing that is still read from the bytes is checked: the number of `call`
+// lines the body emitted has to be the number of calls it recorded. A disagreement means a call site
+// exists that does not go through the recording helpers - a compiler bug that would otherwise be a
+// silently weaker proof. The replayed prologue of the `.proved` entry is skipped: those are bytes
+// already accounted for, copied to the second entry.
 fn fx_end<a>(c: (&a mut C)) -> unit {
     cur := c.fx_cur;
     if cur == 0 {
@@ -15922,148 +16078,61 @@ fn fx_end<a>(c: (&a mut C)) -> unit {
     }
     exchange(&mut c.fx_cur, 0);
     from := cur - 1;
-    trusted := c.fx_trusted;
+    lo := c.fx_skip_lo;
+    hi := c.fx_skip_hi;
+    mut seen = 0;
     mut i = c.fx_out_start;
     while i < c.out.len() {
-        line_start := (i == 0) || (c.out[i - 1] == 10);
-        if line_start && (c.out[i] == 99) {
-            mut ok = true;
-            if i + 4 >= c.out.len() {
-                ok = false;
-            } else {
-                if (c.out[i + 1] != 97) || (c.out[i + 2] != 108) || (c.out[i + 3] != 108) || (c.out[i + 4] != 32) {
-                    ok = false;
-                }
+        if (lo != 0) && (i >= lo) && (i < hi) {
+            i = hi;
+            continue;
+        }
+        if i < c.out.len() {
+            mut line_start = i == 0;
+            if i != 0 {
+                line_start = c.out[i - 1] == 10;
             }
-            if ok {
-                mut j = i + 5;
-                mut indirect = false;
-                if j < c.out.len() {
-                    if c.out[j] == 42 {
-                        indirect = true;
-                        j = j + 1;
+            if line_start && (c.out[i] == 99) {
+                mut ok = i + 4 < c.out.len();
+                if ok {
+                    if (c.out[i + 1] != 97) || (c.out[i + 2] != 108) || (c.out[i + 3] != 108) || (c.out[i + 4] != 32) {
+                        ok = false;
                     }
                 }
-                mut name = u8[];
-                while (j < c.out.len()) && (c.out[j] != 10) {
-                    name.push(c.out[j]);
-                    j = j + 1;
-                }
-                mut proved = 0;
-                if indirect {
-                    name = copy_bytes(view("*"));
-                } else {
-                    stripped := fx_strip_proved(view(name));
-                    if stripped.len() != name.len() {
-                        proved = 8;
+                if ok {
+                    seen = seen + 1;
+                    while (i < c.out.len()) && (c.out[i] != 10) {
+                        i = i + 1;
                     }
-                    name = stripped;
                 }
-                if (i < c.fx_entry_end) && fx_is_refine(view(name)) {
-                    // The checked entry's own parameter check: it is the caller's obligation.
-                    c.fx_entry_panic[from] = 1;
-                    name = u8[];
-                }
-                // Trusted code's indirect calls are the compiler's own dispatch (an element's drop
-                // helper, a vtable's drop slot); every body they can reach is registered itself.
-                if (name.len() != 0) && !(indirect && (trusted != 0)) {
-                    c.fx_edge_from.push(from);
-                    c.fx_edge_name.push(name);
-                    c.fx_edge_to.push(0);
-                    mut kind = proved;
-                    if trusted != 0 {
-                        kind = kind | 4;
-                    }
-                    c.fx_edge_kind.push(kind);
-                    ef := c.fx_fn_file[from];
-                    ep := c.fx_fn_pos[from];
-                    c.fx_edge_file.push(ef);
-                    c.fx_edge_pos.push(ep);
-                }
-                i = j;
             }
         }
         i = i + 1;
+    }
+    if seen != c.fx_calls {
+        mut msg = copy_bytes(view("internal: the body of `"));
+        if c.fx_fn_name[from].len() != 0 {
+            push_bytes(&mut msg, view(c.fx_fn_name[from]));
+        } else {
+            push_bytes(&mut msg, view(c.fx_syms[from]));
+        }
+        push_bytes(&mut msg, view("` emitted "));
+        decimal(&mut msg, seen);
+        push_bytes(&mut msg, view(" call instructions but the effect checker recorded "));
+        decimal(&mut msg, c.fx_calls);
+        push_bytes(&mut msg, view(": a call site is not going through call_out, call_slot_out, call_dispatch_out or call_entry_out"));
+        fail(&mut c, view(msg));
     }
     return ();
 }
-// A direct call whose refined parameters were all proved enters at `<symbol>.proved`; the callee is
-// the same function either way.
-fn fx_strip_proved<a>(name: &a [u8]) -> u8[] {
-    mut out = copy_bytes(view(name));
-    mut cut = 0;
-    mut i = 0;
-    while i < out.len() {
-        if out[i] == 46 {
-            cut = i;
-        }
-        i = i + 1;
-    }
-    if (cut != 0) && (cut + 7 == out.len()) {
-        mut hit = true;
-        if (out[cut + 1] != 112) || (out[cut + 2] != 114) || (out[cut + 3] != 111) || (out[cut + 4] != 118) || (out[cut + 5] != 101) || (out[cut + 6] != 100) {
-            hit = false;
-        }
-        if hit {
-            mut trimmed = u8[];
-            for i in cut {
-                trimmed.push(out[i]);
-            }
-            out = trimmed;
-        }
-    }
-    return out;
-}
-// The symbol a declared function is emitted (and called) under.
-fn fx_func_symbol<a>(c: (&a mut C), i: u64) -> u8[] {
-    mut out = u8[];
-    plat := c.plat;
-    m := c.funcs[i].module.copy();
-    n := c.funcs[i].name.copy();
-    ext := c.funcs[i].ext;
-    symbol := c.funcs[i].symbol.copy();
-    if ext == 2 {
-        // A C callback is called through the C name it was given, under the platform prefix.
-        if plat == 1 {
-            out.push(95);
-        }
-        push_bytes(&mut out, view(symbol));
-        return out;
-    }
-    mangle_into(&mut out, plat, view(m), view(n));
-    return out;
-}
-// The record a callee symbol names: a body emitted for it, a declaration read for it, or nothing.
+// The record a callee symbol names: a body emitted for it, or a declaration read for it.
 fn fx_lookup<a, b>(c: (&a mut C), name: &b [u8]) -> u64 {
     if name.len() == 0 {
-        return 0;
-    }
-    if name[0] == 42 {
         return 0;
     }
     for i in c.fx_syms.len() {
         if same(view(c.fx_syms[i]), view(name)) {
             return i + 1;
-        }
-    }
-    // `<symbol>#<digest>` is a specialisation of the template `<symbol>`: same source body.
-    mut cut = 0;
-    mut i = 0;
-    while i < name.len() {
-        if (name[i] == 35) && (cut == 0) {
-            cut = i;
-        }
-        i = i + 1;
-    }
-    if cut != 0 {
-        mut base = u8[];
-        for j in cut {
-            base.push(name[j]);
-        }
-        for j in c.fx_syms.len() {
-            if same(view(c.fx_syms[j]), view(base)) {
-                return j + 1;
-            }
         }
     }
     return 0;
@@ -16091,9 +16160,30 @@ fn fx_callee_panic<a>(c: (&a C), k: u64) -> u64 {
     }
     return 1;
 }
-// The declarations' attributes, then the call graph, then the fixpoint over it. A function's own
-// allocation sites and checks are its starting facts; a call passes its callee's facts on, so a chain
-// of plain functions is followed to the `rt_alloc` at the end of it.
+// The symbol a declared function is emitted (and called) under.
+fn fx_func_symbol<a>(c: (&a mut C), i: u64) -> u8[] {
+    mut out = u8[];
+    plat := c.plat;
+    m := c.funcs[i].module.copy();
+    n := c.funcs[i].name.copy();
+    ext := c.funcs[i].ext;
+    symbol := c.funcs[i].symbol.copy();
+    if ext == 2 {
+        // A C callback is called through the C name it was given, under the platform prefix.
+        if plat == 1 {
+            out.push(95);
+        }
+        push_bytes(&mut out, view(symbol));
+        return out;
+    }
+    mangle_into(&mut out, plat, view(m), view(n));
+    return out;
+}
+// The declarations' attributes, then the edges, then the fixpoint over them. A function's own
+// allocation and failure (the runtime's roots) are its starting facts; a call passes its callee's
+// facts on, so a chain of plain functions is followed to the `rt_alloc` (or the `rt_abort`) at the end
+// of it. A symbol nothing defines or emits is unknown - an extern, a stub - unless the body that calls
+// it is trusted code, whose unresolved names are the assembly stubs of the system-call gate.
 fn fx_solve<a>(c: (&a mut C)) -> unit {
     if c.fx_any == 0 {
         return ();
@@ -16125,13 +16215,16 @@ fn fx_solve<a>(c: (&a mut C)) -> unit {
         k := fx_lookup(&mut c, view(name));
         c.fx_edge_to[e] = k;
         if k == 0 {
-            // A name no body or declaration answers for: assumed to allocate and to fail - except
-            // from the runtime, whose unknown callees are its assembly stubs (the system-call gate).
             mut unknown = 1;
-            if (c.fx_edge_kind[e] & 4) != 0 {
-                unknown = 0;
+            if name.len() != 0 {
+                if (c.fx_edge_kind[e] & 4) != 0 {
+                    unknown = 0;
+                }
             }
-            c.fx_edge_kind[e] = unknown;
+            if unknown != 0 {
+                kind := c.fx_edge_kind[e];
+                c.fx_edge_kind[e] = kind | 1;
+            }
         }
     }
     mut changed = 1;
@@ -16152,7 +16245,7 @@ fn fx_solve<a>(c: (&a mut C)) -> unit {
                     p = 1;
                 }
             } else {
-                if kind == 1 {
+                if (kind & 1) != 0 {
                     a = 1;
                     p = 1;
                 }
@@ -16222,91 +16315,6 @@ fn fx_fail<a>(c: (&a mut C), file: u64, pos: u64, msg: u8[]) -> unit {
     fail(&mut c, view(msg));
     return ();
 }
-// Where a fact's own site is: the site the body recorded, else the function's declaration.
-fn fx_site_file<a>(c: (&a mut C), k: u64) -> u64 {
-    if c.fx_alloc_file[k] != 0 {
-        return c.fx_alloc_file[k];
-    }
-    return c.fx_fn_file[k];
-}
-fn fx_site_pos<a>(c: (&a mut C), k: u64) -> u64 {
-    if c.fx_alloc_file[k] != 0 {
-        return c.fx_alloc_pos[k];
-    }
-    return c.fx_fn_pos[k];
-}
-// Every claim is checked here, after the whole program - including the drop helpers and the
-// specialisations it asked for - has been emitted.
-fn fx_report<a>(c: (&a mut C)) -> unit {
-    if c.fx_any == 0 {
-        return ();
-    }
-    for k in c.fx_syms.len() {
-        if k >= c.fx_attr_alloc.len() {
-            continue;
-        }
-        if (c.fx_body[k] == 0) || (c.fx_attr_alloc[k] == 0) {
-            continue;
-        }
-        if c.fx_alloc[k] == 0 {
-            continue;
-        }
-        name := c.fx_fn_name[k].copy();
-        mut msg = copy_bytes(view("`@no_alloc` function `"));
-        push_bytes(&mut msg, view(name));
-        thru := c.fx_alloc_thru[k];
-        if c.fx_own_alloc[k] != 0 {
-            push_bytes(&mut msg, view("` performs a heap allocation: "));
-            push_bytes(&mut msg, view(c.fx_alloc_what[k]));
-            push_bytes(&mut msg, view("\n = move that out of the function, or keep the attribute off it"));
-        } else {
-            push_bytes(&mut msg, view("` performs a heap allocation: it calls "));
-            chain := fx_chain(&mut c, k, 8);
-            push_bytes(&mut msg, view(chain));
-            push_bytes(&mut msg, view("\n = the call chain above reaches something that allocates"));
-        }
-        mut at_file = fx_site_file(&mut c, k);
-        mut at_pos = fx_site_pos(&mut c, k);
-        if thru != 0 {
-            at_file = fx_edge_file_of(&mut c, k, thru);
-            at_pos = fx_edge_pos_of(&mut c, k, thru);
-        }
-        fx_fail(&mut c, at_file, at_pos, msg);
-    }
-    for k in c.fx_syms.len() {
-        if k >= c.fx_attr_panic.len() {
-            continue;
-        }
-        if (c.fx_body[k] == 0) || (c.fx_attr_panic[k] == 0) {
-            continue;
-        }
-        if c.fx_panic[k] == 0 {
-            continue;
-        }
-        name := c.fx_fn_name[k].copy();
-        mut msg = copy_bytes(view("`@no_panic` function `"));
-        push_bytes(&mut msg, view(name));
-        mut at_file = c.fx_fn_file[k];
-        mut at_pos = c.fx_fn_pos[k];
-        if c.fx_own_panic[k] != 0 {
-            push_bytes(&mut msg, view("` can fail: "));
-            push_bytes(&mut msg, view(c.fx_panic_what[k]));
-            if c.fx_panic_hint[k].len() != 0 {
-                push_bytes(&mut msg, view("\n = "));
-                push_bytes(&mut msg, view(c.fx_panic_hint[k]));
-            }
-            at_file = c.fx_panic_file[k];
-            at_pos = c.fx_panic_pos[k];
-        } else {
-            chain := fx_chain_panic(&mut c, k, 8);
-            push_bytes(&mut msg, view("` can fail: it calls "));
-            push_bytes(&mut msg, view(chain));
-            push_bytes(&mut msg, view("\n = a callee leaves a runtime check, so the whole chain has to be check-free"));
-        }
-        fx_fail(&mut c, at_file, at_pos, msg);
-    }
-    return ();
-}
 // The edge of `from` that names `to`: the call site a diagnostic points at.
 fn fx_edge_file_of<a>(c: (&a mut C), from: u64, to: u64) -> u64 {
     for e in c.fx_edge_from.len() {
@@ -16327,6 +16335,108 @@ fn fx_edge_pos_of<a>(c: (&a mut C), from: u64, to: u64) -> u64 {
         }
     }
     return c.fx_fn_pos[from];
+}
+// The site of the indirect call a fact travelled through, when it has no chain to show.
+fn fx_unknown_file_of<a>(c: (&a mut C), from: u64) -> u64 {
+    for e in c.fx_edge_from.len() {
+        if c.fx_edge_from[e] == from {
+            if (c.fx_edge_kind[e] & 1) != 0 {
+                return c.fx_edge_file[e];
+            }
+        }
+    }
+    return c.fx_fn_file[from];
+}
+fn fx_unknown_pos_of<a>(c: (&a mut C), from: u64) -> u64 {
+    for e in c.fx_edge_from.len() {
+        if c.fx_edge_from[e] == from {
+            if (c.fx_edge_kind[e] & 1) != 0 {
+                return c.fx_edge_pos[e];
+            }
+        }
+    }
+    return c.fx_fn_pos[from];
+}
+// Every claim is checked here, after the whole program - the drop helpers, the vtables' drop slots and
+// the specialisations - has been emitted and settled. A claim on a generic is checked per emitted
+// instance, so the refusal names the instance whose body reaches the root.
+fn fx_report<a>(c: (&a mut C)) -> unit {
+    if c.fx_any == 0 {
+        return ();
+    }
+    for k in c.fx_syms.len() {
+        if k >= c.fx_attr_alloc.len() {
+            continue;
+        }
+        if (c.fx_body[k] == 0) || (c.fx_attr_alloc[k] == 0) {
+            continue;
+        }
+        if c.fx_alloc[k] == 0 {
+            continue;
+        }
+        name := c.fx_fn_name[k].copy();
+        mut msg = copy_bytes(view("`@no_alloc` function `"));
+        push_bytes(&mut msg, view(name));
+        thru := c.fx_alloc_thru[k];
+        mut at_file = c.fx_fn_file[k];
+        mut at_pos = c.fx_fn_pos[k];
+        if thru != 0 {
+            push_bytes(&mut msg, view("` performs a heap allocation: it calls "));
+            chain := fx_chain(&mut c, k, 8);
+            push_bytes(&mut msg, view(chain));
+            push_bytes(&mut msg, view("\n = the call chain above reaches something that allocates"));
+            at_file = fx_edge_file_of(&mut c, k, thru);
+            at_pos = fx_edge_pos_of(&mut c, k, thru);
+        } else {
+            if c.fx_own_alloc[k] != 0 {
+                push_bytes(&mut msg, view("` performs a heap allocation"));
+                push_bytes(&mut msg, view("\n = move the allocation out of the function, or keep the attribute off it"));
+            } else {
+                push_bytes(&mut msg, view("` performs a heap allocation: it makes an indirect call the compiler cannot follow"));
+                push_bytes(&mut msg, view("\n = a call through a function value or a vtable may allocate; name the callee, or keep the attribute off"));
+                at_file = fx_unknown_file_of(&mut c, k);
+                at_pos = fx_unknown_pos_of(&mut c, k);
+            }
+        }
+        fx_fail(&mut c, at_file, at_pos, msg);
+    }
+    for k in c.fx_syms.len() {
+        if k >= c.fx_attr_panic.len() {
+            continue;
+        }
+        if (c.fx_body[k] == 0) || (c.fx_attr_panic[k] == 0) {
+            continue;
+        }
+        if c.fx_panic[k] == 0 {
+            continue;
+        }
+        name := c.fx_fn_name[k].copy();
+        mut msg = copy_bytes(view("`@no_panic` function `"));
+        push_bytes(&mut msg, view(name));
+        thru := c.fx_panic_thru[k];
+        mut at_file = c.fx_fn_file[k];
+        mut at_pos = c.fx_fn_pos[k];
+        if thru != 0 {
+            push_bytes(&mut msg, view("` can fail: it calls "));
+            chain := fx_chain_panic(&mut c, k, 8);
+            push_bytes(&mut msg, view(chain));
+            push_bytes(&mut msg, view("\n = a callee leaves a runtime check, so the whole chain has to be check-free"));
+            at_file = fx_edge_file_of(&mut c, k, thru);
+            at_pos = fx_edge_pos_of(&mut c, k, thru);
+        } else {
+            if c.fx_own_panic[k] != 0 {
+                push_bytes(&mut msg, view("` can fail"));
+                push_bytes(&mut msg, view("\n = prove the check away, or keep the attribute off the function"));
+            } else {
+                push_bytes(&mut msg, view("` can fail: it makes an indirect call the compiler cannot follow"));
+                push_bytes(&mut msg, view("\n = a call through a function value or a vtable may fail; name the callee, or keep the attribute off"));
+                at_file = fx_unknown_file_of(&mut c, k);
+                at_pos = fx_unknown_pos_of(&mut c, k);
+            }
+        }
+        fx_fail(&mut c, at_file, at_pos, msg);
+    }
+    return ();
 }
 // `@bounded(N)`: the whole form is consumed, and the count lands in `c.fx_bounded`. 1 when the tokens
 // were this attribute, 0 when they are something else.
@@ -19954,25 +20064,27 @@ fn emit_resolved_call<a>(
             // `&Self` the implementation expects) and word 1 the vtable.
             o(&mut c, view("movq 8(%rdi),%rax\nmovq "));
             on(&mut c, (dyn_entry - 1) * 8);
-            o(&mut c, view("(%rax),%rax\nmovq (%rdi),%rdi\ncall *%rax\n"));
+            o(&mut c, view("(%rax),%rax\nmovq (%rdi),%rdi\n"));
+            call_slot_out(&mut c, view("call *%rax\n"));
         } else {
             // The receiver is a reference to the object's slot: the cell it holds starts with the
             // value, so the cell is the `&Self` the implementation expects; word 1 is the vtable.
             o(&mut c, view("movq (%rdi),%rdi\nmovq 8(%rdi),%rax\nmovq "));
             on(&mut c, (dyn_entry - 1) * 8);
-            o(&mut c, view("(%rax),%rax\ncall *%rax\n"));
+            o(&mut c, view("(%rax),%rax\n"));
+            call_slot_out(&mut c, view("call *%rax\n"));
         }
     } else {
-        o(&mut c, view("call "));
-        mangle(&mut c, view(destination), view(symbol));
+        callee := mangle_name(&mut c, view(destination), view(symbol));
         // A direct call whose refined parameters were all proved enters past the checks. Anything
         // indirect (a vtable's entry, a function value) proved nothing, and a call through an
         // interface may reach an implementation with predicates of its own.
         // `--verify-facts` keeps the check the proof removed, so the call keeps the checked entry.
         if (proved != 0) & (dyn_entry == 0) & (contract == 0) & (c.verify_facts == 0) {
-            o(&mut c, view(".proved"));
+            call_proved_out(&mut c, view(callee));
+        } else {
+            call_out(&mut c, view(callee));
         }
-        c.out.push(10);
     }
     slot := save_result(&mut c, ret);
     own(&mut c, slot, ret);
@@ -20456,7 +20568,7 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
         get(&mut c, envp, view("%rdi"));
     }
     get(&mut c, target, view("%rax"));
-    o(&mut c, view("call *%rax\n"));
+    call_slot_out(&mut c, view("call *%rax\n"));
     slot := save_result(&mut c, resulttype);
     own(&mut c, slot, resulttype);
     shape_pair_result(&mut c, slot, resulttype);
@@ -20861,9 +20973,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
                 get(&mut c, args[3], view("%rcx"));
             }
         }
-        o(&mut c, view("call "));
-        o(&mut c, view(api));
-        c.out.push(10);
+        call_out(&mut c, view(api));
         return val(save(&mut c), 0);
     }
     if id == 135 {
@@ -20886,7 +20996,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
                 get(&mut c, args[4], view("%r9"));
             }
             get(&mut c, args[0], view("%r11"));
-            o(&mut c, view("call *%r11\n"));
+            call_slot_out(&mut c, view("call *%r11\n"));
         } else {
             if 0 < count {
                 get(&mut c, args[1], view("%rdi"));
@@ -20969,7 +21079,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
             get(&mut c, args[3], view("%r9"));
         }
         win32_link(&mut c, view(api));
-        o(&mut c, view("call *__imp_"));
+        call_slot_out(&mut c, view("call *__imp_"));
         o(&mut c, view(api));
         o(&mut c, view("(%rip)\n"));
         o(&mut c, view("addq $"));
@@ -20989,13 +21099,13 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
                 reg := argreg(i);
                 get(&mut c, args[i], view(reg));
             }
-            o(&mut c, view("call "));
+            mut callee = u8[];
             if (name.len() != 0) & (name[0] == 95) {
-                o(&mut c, view(name));
+                push_bytes(&mut callee, view(name));
             } else {
-                sym(&mut c, view(name));
+                push_bytes(&mut callee, view(sym_name(&c, view(name))));
             }
-            c.out.push(10);
+            call_out(&mut c, view(callee));
         } else {
             o(&mut c, view("xorq %rax,%rax\n"));
         }
@@ -21044,7 +21154,12 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
             win32_link(&mut c, view("VirtualAlloc"));
             o(
                 &mut c,
-                view("subq $48,%rsp\nxorl %ecx,%ecx\nmovl $12288,%r8d\nmovl $4,%r9d\ncall *__imp_VirtualAlloc(%rip)\naddq $48,%rsp\n")
+                view("subq $48,%rsp\nxorl %ecx,%ecx\nmovl $12288,%r8d\nmovl $4,%r9d\n")
+            );
+            call_slot_out(&mut c, view("call *__imp_VirtualAlloc(%rip)\n"));
+            o(
+                &mut c,
+                view("addq $48,%rsp\n")
             );
         
         } else {
@@ -21052,8 +21167,9 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
                 get(&mut c, args[0], view("%rsi"));
                 o(
                     &mut c,
-                    view("xorl %edi,%edi\nmovl $3,%edx\nmovl $4098,%ecx\nmovq $-1,%r8\nxorl %r9d,%r9d\ncall _mmap\n")
+                    view("xorl %edi,%edi\nmovl $3,%edx\nmovl $4098,%ecx\nmovq $-1,%r8\nxorl %r9d,%r9d\n")
                 );
+                call_out(&mut c, view("_mmap"));
             } else {
                 get(&mut c, args[0], view("%rsi"));
                 mut number = 9;
@@ -21120,7 +21236,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
             // start slot and tid word; flags are a Linux clone detail.
             get(&mut c, args[1], view("%rdi"));
             get(&mut c, args[2], view("%rsi"));
-            o(&mut c, view("call rt_win_thread_clone\n"));
+            call_out(&mut c, view("rt_win_thread_clone"));
             return val(save(&mut c), 0);
         }
         get(&mut c, args[0], view("%rdi"));
@@ -21134,9 +21250,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         } else {
             if c.plat == 1 {
                 // The darwin platform module owns thread creation; it reports ENOSYS today.
-                o(&mut c, view("call "));
-                sym(&mut c, view("rt_thread"));
-                c.out.push(10);
+                call_out(&mut c, view(sym_name(&c, view("rt_thread"))));
             } else {
             if c.target == 0 {
                 parent := label(&mut c);
@@ -21144,7 +21258,12 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
                 jump(&mut c, view("jnz"), parent);
                 o(
                     &mut c,
-                    view("xorl %ebp,%ebp\npopq %rax\npopq %rdi\ncall *%rax\nmovl $60,%eax\nxorl %edi,%edi\nsyscall\nud2\n")
+                    view("xorl %ebp,%ebp\npopq %rax\npopq %rdi\n")
+                );
+                call_slot_out(&mut c, view("call *%rax\n"));
+                o(
+                    &mut c,
+                    view("movl $60,%eax\nxorl %edi,%edi\nsyscall\nud2\n")
                 );
                 mark(&mut c, parent);
             } else {
@@ -21303,13 +21422,13 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         get(&mut c, args[2], view("%rsi"));
         get(&mut c, args[3], view("%rdx"));
         get(&mut c, args[0], view("%rax"));
-        o(&mut c, view("call *%rax\n"));
+        call_slot_out(&mut c, view("call *%rax\n"));
     }
     if id == 118 {
         get(&mut c, args[1], view("%rdi"));
         get(&mut c, args[2], view("%rsi"));
         get(&mut c, args[0], view("%rax"));
-        o(&mut c, view("call *%rax\n"));
+        call_slot_out(&mut c, view("call *%rax\n"));
     }
     if id == 112 {
         get(&mut c, args[0], view("%rdi"));
@@ -23303,7 +23422,7 @@ fn task_scope_builtin<a>(c: (&a mut C), context: Val) -> Val {
     get(&mut c, handle, view("%rdi"));
     get(&mut c, context.t, view("%rsi"));
     get(&mut c, body.t, view("%rax"));
-    o(&mut c, view("call *%rax\n"));
+    call_slot_out(&mut c, view("call *%rax\n"));
     slot := save(&mut c);
     invoke(&mut c, view("rt_scope_end"), one(handle));
     observe(&mut c, context.t);
@@ -24183,7 +24302,7 @@ fn adopt_value<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) ->
                     mark(&mut c, next);
                 }
                 site_kind(&mut c, 4);
-                o(&mut c, view("call rt_abort\n"));
+                call_out(&mut c, view("rt_abort"));
                 mark(&mut c, done);
                 slot := held.t;
                 source := place_of(&mut c, slot);
@@ -24317,7 +24436,7 @@ fn widen_to_u64<a>(c: (&a mut C), v: Val) -> Val {
     ok := label(&mut c);
     jump(&mut c, view("jz"), ok);
     site_kind(&mut c, 3);
-    o(&mut c, view("call rt_abort\n"));
+    call_out(&mut c, view("rt_abort"));
     mark(&mut c, ok);
     return val(slot, 0);
 }
@@ -24388,7 +24507,7 @@ fn int_binary<a>(c: (&a mut C), k: u64, left: u64, right: u64, ty: u64) -> Val {
         ok := label(&mut c);
         jump(&mut c, view("jb"), ok);
         site_kind(&mut c, 2);
-        o(&mut c, view("call rt_abort\n"));
+        call_out(&mut c, view("rt_abort"));
         mark(&mut c, ok);
         return val(save(&mut c), ty);
     }
@@ -24412,7 +24531,7 @@ fn int_binary<a>(c: (&a mut C), k: u64, left: u64, right: u64, ty: u64) -> Val {
         ok := label(&mut c);
         jump(&mut c, view("jz"), ok);
         site_kind(&mut c, 2);
-        o(&mut c, view("call rt_abort\n"));
+        call_out(&mut c, view("rt_abort"));
         mark(&mut c, ok);
         return val(save(&mut c), ty);
     }
@@ -24424,7 +24543,7 @@ fn int_binary<a>(c: (&a mut C), k: u64, left: u64, right: u64, ty: u64) -> Val {
         nz := label(&mut c);
         jump(&mut c, view("jnz"), nz);
         site_kind(&mut c, 5);
-        o(&mut c, view("call rt_abort\n"));
+        call_out(&mut c, view("rt_abort"));
         mark(&mut c, nz);
         if signed != 0 {
             o(&mut c, view("movq %rax,%r10\nshrq $63,%r10\ntestq %r10,%r10\n"));
@@ -24470,7 +24589,7 @@ fn int_binary<a>(c: (&a mut C), k: u64, left: u64, right: u64, ty: u64) -> Val {
                 o(&mut c, view(",%rcx\ncmpq %rcx,%rax\n"));
                 jump(&mut c, view("jb"), done);
                 site_kind(&mut c, 2);
-                o(&mut c, view("call rt_abort\n"));
+                call_out(&mut c, view("rt_abort"));
                 mark(&mut c, done);
             }
         }
@@ -25650,7 +25769,7 @@ fn mutex_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
     get(&mut c, pointer, view("%rdi"));
     get(&mut c, heldslot, view("%rsi"));
     get(&mut c, target, view("%rax"));
-    o(&mut c, view("call *%rax\n"));
+    call_slot_out(&mut c, view("call *%rax\n"));
     slot := save(&mut c);
     invoke(&mut c, view("rt_mutex_unlock"), one(cell));
     own(&mut c, slot, result);
@@ -28698,7 +28817,7 @@ fn propagate_result_union<a>(c: (&a mut C), x: Val, unwrap: u64) -> Val {
     mark(&mut c, failure);
     if unwrap != 0 {
         site_kind(&mut c, 6);
-        o(&mut c, view("call rt_abort\n"));
+        call_out(&mut c, view("rt_abort"));
     } else {
         for i in s..args.len() {
             next := label(&mut c);
@@ -28721,7 +28840,7 @@ fn propagate_result_union<a>(c: (&a mut C), x: Val, unwrap: u64) -> Val {
             o(&mut c, view("leave\nret\n"));
             mark(&mut c, next);
         }
-        o(&mut c, view("call rt_abort\n"));
+        call_out(&mut c, view("rt_abort"));
     }
     ownership::restore(&mut c.check, &before);
     // Success path.
@@ -28784,7 +28903,7 @@ fn propagate_union<a>(c: (&a mut C), x: Val, unwrap: u64) -> Val {
     before := ownership::snapshot(&c.check);
     if unwrap != 0 {
         site_kind(&mut c, 6);
-        o(&mut c, view("call rt_abort\n"));
+        call_out(&mut c, view("rt_abort"));
     } else {
         endmap := label(&mut c);
         for i in args.len() {
@@ -28802,7 +28921,7 @@ fn propagate_union<a>(c: (&a mut C), x: Val, unwrap: u64) -> Val {
                 mark(&mut c, next);
             }
         }
-        o(&mut c, view("call rt_abort\n"));
+        call_out(&mut c, view("rt_abort"));
         mark(&mut c, endmap);
         validate_return(&mut c, val(xt, x.ty));
         move_out(&mut c, val(xt, x.ty));
@@ -28877,7 +28996,7 @@ fn propagate<a>(c: (&a mut C), v: Val, unwrap: u64) -> Val {
     before := ownership::snapshot(&c.check);
     if unwrap != 0 {
         site_kind(&mut c, 6);
-        o(&mut c, view("call rt_abort\n"));
+        call_out(&mut c, view("rt_abort"));
     } else {
         result := c.result;
         if is_option_storage(&mut c, x.ty) & is_option_storage(&mut c, result) {
@@ -28959,7 +29078,7 @@ fn binary<a>(c: (&a mut C), k: u64, left: u64, right: u64) -> u64 {
         ok := label(&mut c);
         jump(&mut c, view("jnc"), ok);
         site_kind(&mut c, 2);
-        o(&mut c, view("call rt_abort\n"));
+        call_out(&mut c, view("rt_abort"));
         mark(&mut c, ok);
     }
     if k == 38 {
@@ -28977,7 +29096,7 @@ fn binary<a>(c: (&a mut C), k: u64, left: u64, right: u64) -> u64 {
             ok := label(&mut c);
             jump(&mut c, view("jnc"), ok);
             site_kind(&mut c, 2);
-            o(&mut c, view("call rt_abort\n"));
+            call_out(&mut c, view("rt_abort"));
             mark(&mut c, ok);
             get(&mut c, right, view("%rcx"));
             get(&mut c, left, view("%rax"));
@@ -29001,7 +29120,7 @@ fn binary<a>(c: (&a mut C), k: u64, left: u64, right: u64) -> u64 {
         ok := label(&mut c);
         jump(&mut c, view("jnz"), ok);
         site_kind(&mut c, 5);
-        o(&mut c, view("call rt_abort\n"));
+        call_out(&mut c, view("rt_abort"));
         mark(&mut c, ok);
         o(&mut c, view("xorq %rdx,%rdx\ndivq %rcx\n"));
         if k == 37 {
@@ -30904,7 +31023,7 @@ fn index_assignment<a>(c: (&a mut C)) -> unit {
             ok := label(&mut c);
             jump(&mut c, view("jb"), ok);
             site_kind(&mut c, 11);
-            o(&mut c, view("call rt_abort\n"));
+            call_out(&mut c, view("rt_abort"));
             mark(&mut c, ok);
         }
         invoke(&mut c, view("rt_write"), args);
@@ -31307,7 +31426,7 @@ fn scalar_match<a>(c: (&a mut C), s: Val, term: u8[]) -> unit {
     if !complete {
         fail(&mut c, view("non-exhaustive match (add a _ arm)"));
     }
-    o(&mut c, view("call rt_abort\n"));
+    call_out(&mut c, view("rt_abort"));
     mark(&mut c, end);
     if have != 0 {
         ownership::restore(&mut c.check, &exits);
@@ -32584,7 +32703,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         if default != 0 && seen.len() == count {
             fail(&mut c, view("unreachable _ arm (all variants are covered)"));
         }
-        o(&mut c, view("call rt_abort\n"));
+        call_out(&mut c, view("rt_abort"));
         mark(&mut c, end);
         if have != 0 {
             ownership::restore(&mut c.check, &exits);
@@ -32697,7 +32816,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         ok := label(&mut c);
         jump(&mut c, view("jnz"), ok);
         site_kind(&mut c, 12);
-        o(&mut c, view("call rt_abort\n"));
+        call_out(&mut c, view("rt_abort"));
         mark(&mut c, ok);
         // An assertion is a fact for the rest of the block, exactly as an `if` condition is for its
         // body - and a call inside it states nothing, since it may write what it names.
@@ -33402,9 +33521,7 @@ fn drop_call<a>(c: (&a mut C), ty: u64) -> unit {
         if !concrete_type(&mut c, ty) {
             return ();
         }
-        o(&mut c, view("call "));
-        drop_name(&mut c, ty);
-        c.out.push(10);
+        drop_call_out(&mut c, ty);
     }
     return ();
 }
@@ -33494,36 +33611,40 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                     // A record's `&mut T` is the address of a cell holding the record pointer, not the
                     // pointer itself, so the receiver is one scratch word (two, to keep the call
                     // 16-byte aligned).
-                    o(&mut c, view("subq $16,%rsp\nmovq %r12,(%rsp)\nmovq %rsp,%rdi\ncall "));
-                    push_bytes(&mut c.out, view(hook));
-                    o(&mut c, view("\naddq $16,%rsp\n"));
+                    o(&mut c, view("subq $16,%rsp\nmovq %r12,(%rsp)\nmovq %rsp,%rdi\n"));
+                    call_out(&mut c, view(hook));
+                    o(&mut c, view("addq $16,%rsp\n"));
                 }
                 if (kind == 3) || (kind == 4) {
-                    o(&mut c, view("call rt_drop_seq\n"));
+                    call_out(&mut c, view("rt_drop_seq"));
                 }
                 if (kind == 5) || (kind == 11) || (kind == 27) {
-                    o(&mut c, view("call rt_free\n"));
+                    call_out(&mut c, view("rt_free"));
                 }
                 if kind == 16 {
-                    o(&mut c, view("movq %r12,%rdi\ncall rt_task_abandon\n"));
+                    o(&mut c, view("movq %r12,%rdi\n"));
+                    call_out(&mut c, view("rt_task_abandon"));
                 }
                 if kind == 29 {
                     // A job handle is never abandoned: the wait is what owns the record, so dropping
                     // it takes the result and drops that. Leaving it to a leak would keep the job's
                     // captures and its result alive for the life of the process.
-                    o(&mut c, view("movq %r12,%rdi\ncall rt_pool_wait\n"));
+                    o(&mut c, view("movq %r12,%rdi\n"));
+                    call_out(&mut c, view("rt_pool_wait"));
                     if needs_drop(&mut c, arg) {
                         o(&mut c, view("movq %rax,%rdi\n"));
                         drop_call(&mut c, arg);
                     }
                 }
                 if kind == 20 {
-                    o(&mut c, view("movq %r12,%rdi\nmovq 8(%r12),%rax\ncall *%rax\n"));
+                    o(&mut c, view("movq %r12,%rdi\nmovq 8(%r12),%rax\n"));
+                    call_dispatch_out(&mut c, view("call *%rax\n"));
                 }
                 if kind == 13 {
                     o(&mut c, view("movq 8(%r12),%rdi\n"));
                     drop_call(&mut c, arg);
-                    o(&mut c, view("movq %r12,%rdi\ncall rt_free\n"));
+                    o(&mut c, view("movq %r12,%rdi\n"));
+                    call_out(&mut c, view("rt_free"));
                 }
                 if kind == 10 {
                     drop_call(&mut c, arg);
@@ -33533,9 +33654,12 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                     skip := label(&mut c);
                     o(&mut c, view("movq 8(%r12),%rax\nmovq (%rax),%rax\ntestq %rax,%rax\n"));
                     jump(&mut c, view("jz"), skip);
-                    o(&mut c, view("movq (%r12),%rdi\ncall *%rax\n"));
+                    o(&mut c, view("movq (%r12),%rdi\n"));
+                    fx_vtable_drop(&mut c, arg);
+                    o(&mut c, view("call *%rax\n"));
                     mark(&mut c, skip);
-                    o(&mut c, view("movq %r12,%rdi\ncall rt_free\n"));
+                    o(&mut c, view("movq %r12,%rdi\n"));
+                    call_out(&mut c, view("rt_free"));
                 }
                 if kind == 6 {
                     if needs_drop(&mut c, arg) {
@@ -33551,7 +33675,8 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                         jump(&mut c, view("jmp"), head);
                         mark(&mut c, end);
                     }
-                    o(&mut c, view("movq %r12,%rdi\ncall rt_drop_seq\n"));
+                    o(&mut c, view("movq %r12,%rdi\n"));
+                call_out(&mut c, view("rt_drop_seq"));
                 }
                 if kind == 8 {
                     d := &c.decls[arg];
@@ -33582,7 +33707,8 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                             }
                         }
                     }
-                    o(&mut c, view("movq %r12,%rdi\ncall rt_free\n"));
+                    o(&mut c, view("movq %r12,%rdi\n"));
+                    call_out(&mut c, view("rt_free"));
                 }
                 o(&mut c, view("popq %r13\npopq %r12\nleave\n"));
                 mark(&mut c, done);
@@ -37510,13 +37636,6 @@ pub fn main() -> u64 {
         fx_attr_panic: u64[],
         fx_own_alloc: u64[],
         fx_own_panic: u64[],
-        fx_alloc_what: u8[][],
-        fx_alloc_file: u64[],
-        fx_alloc_pos: u64[],
-        fx_panic_what: u8[][],
-        fx_panic_hint: u8[][],
-        fx_panic_file: u64[],
-        fx_panic_pos: u64[],
         fx_alloc: u64[],
         fx_panic: u64[],
         fx_alloc_thru: u64[],
@@ -37535,8 +37654,11 @@ pub fn main() -> u64 {
         fx_bounded: 0,
         fx_out_start: 0,
         fx_trusted: 0,
-        fx_entry_end: 0,
+        fx_calls: 0,
+        fx_skip_lo: 0,
+        fx_skip_hi: 0,
         fx_entry_panic: u64[],
+        fx_edge_mark: 0,
     };
     exchange(&mut c.target, host::target());
     for k in 5 {
@@ -38088,7 +38210,7 @@ pub fn main() -> u64 {
     o(&mut c, view("call rt_live\ntestq %rax,%rax\n"));
     balanced := label(&mut c);
     jump(&mut c, view("jz"), balanced);
-    o(&mut c, view("call rt_abort\n"));
+    call_out(&mut c, view("rt_abort"));
     mark(&mut c, balanced);
     o(&mut c, view("call rt_shutdown\n"));
     emit_exit(&mut c, view("movq %r14,%rdi\n"));
