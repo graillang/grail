@@ -14,6 +14,31 @@
   `native.same` byte-for-byte untouched. The count-only range in a loop header (`for i in 0..n`) is
   unchanged and still drives the bounds-check elimination. docs/design/range-values.md; cases
   `rng2-*` and `tests/lib/span.grl`.
+- Added: `lib/result.grl` - `pub enum Result<T, E> { Ok(T), Err(E) }` and
+  `pub enum Option<T> { Some(T), None }` with the combinators that do not panic (`is_ok`/`is_err`,
+  `ok`, `err`, `unwrap_or`, `map`, `map_err`; `is_some`/`is_none`, `unwrap_or`, `map`, `ok_or`,
+  `to_result`). `T?` is now the concise spelling of `result::Option<T>`: the internal
+  `core::OptionStorage` enum it used to name moved here, was renamed and made public, so `Some(5)`,
+  `Option::Some(5)` and a `u64?` are one type rather than two lookalikes; `lib/core.grl` imports
+  `result`, which keeps `T?` reachable everywhere it was. A payload may itself be another instance
+  (`Result<u64?, string>`), a reference, or a record.
+- Changed: `?` (and `!`) read a shape, not a variant-name convention. Any type with exactly one
+  success member and one failure member propagates: a two-member enum (`Ok`/`Some` by name, otherwise
+  the first declared variant is the success), a two-member ordinary union (the first member), and a
+  result union `S |? F` (its declared success members, any arity). A shape that cannot say which
+  member fails - an enum with three or more variants, an ordinary union with three or more members -
+  is refused with a diagnostic that names the type, its members and the count, replacing
+  "unwrap requires two-variant Option/Result" and "unwrap requires Ok/Err or Some/None variants",
+  which named neither. No implicit conversion was added: the failure type must still match exactly.
+  docs/design/generic-results.md records the rule, the specialisation keys and why the concrete
+  error shapes (`io::Error`, `fs::Error`, `errs::Report`, `dns::Error`, `net`'s `io::Error`) stay
+  concrete.
+- Fixed: a type-mismatch diagnostic named a `string` value `u8[]` and a `u8[]` value `string`:
+  `source_type_name` had the two store kinds swapped. Passing a string literal to `fn half(x: u64)`
+  now reports the found type as `string`, which is what the source wrote.
+- Fixed: a bare `None` stored tag `0` whatever the option declaration's variant order, so it was read
+  back as its sibling; the tag now comes from the declaration (`none_tag`), which is what let `Option`
+  be declared `{ Some(T), None }` at all.
 - Tooling: `grail test` gained the ergonomics a regression run needs. Selection: `--filter TEXT`, `--list`, `--shard i/n`, `--jobs N`; reporting: a `FAIL NAME` block per failure (the case, its source path, what the exit status and the output pins expected, the actual status/signal and stdout/stderr), a stable `passed X failed Y skipped Z` line, and `--fail-fast`. `--update` rewrites a corpus case's `stdout`/`status` from the observed run, only when it is asked for - a `stderr` pin or a `signal` pin is never rewritten. Inside the Grail tree `grail test` forwards every argument to `tools/test-native.mjs`, which is now the same engine behind those flags; a project runs its `tests/` programs through one child per test with a per-test log. docs/testing.md says which command owns what.
 - Added: `grail doc` generates the reference documentation of a Grail source tree - one HTML page per module, a searchable index and an `index.json` model - from the comments and declarations the sources already carry. Grail has no doc-comment syntax, so a `//` comment block directly above a declaration or a field is its documentation, read from the source text (compiler/docgen.grl). Each function carries its signature with its `where`/`ensures` clauses and its `@no_alloc`/`@no_panic` claims, each record/enum/interface its members, variant payloads and method signatures, and `impl`s and aliases are listed. A doc body links an identifier when exactly one declaration in the tree has that name. The tree is deterministic (sorted, `<kind>-<name>` anchors, no clock), so it reviews as a diff; `grail doc` documents `lib/` (29 modules, 582 declarations) and the compiler (124 modules, 2532 declarations) without building either. docs/tooling/doc.md; pinned by tools/test-cli.mjs.
 - Debug info: the DWARF a `--debug` build emits now names an enum's variants, not just its layout. An enum gains a `DW_TAG_enumeration_type` (the tag word's type, one enumerator per variant valued by the tag the constructor stores), a `DW_TAG_structure_type` for the value `{tag, payload}` and a `DW_TAG_typedef` for the enum itself, so `gdb` prints `{tag = Square, payload = 7}` by name. A sequence's `data` stays a pointer to the first element - an array type would have to state a length the header does not carry - which is what gives `print *values->data@values->len`. The variable's unused base-type fields are gone. Verified with `llvm-dwarfdump --verify`, `readelf --debug-dump=info` and a real `gdb --batch` session on a record, a nested record, a string, a vector, a C record and an enum tag, for x86-64 and the AArch64/RISC-V 64 units; Windows CodeView keeps its records, symbols and PDB (an enum's word maps to the integer it is). `tools/test-debug-lines.mjs` pins all of it; docs/tooling/debugging.md is the tested gdb/lldb recipe and says plainly that macOS Mach-O DWARF is not emitted and that the DAP adapter is a WIP that is not shippable this round.

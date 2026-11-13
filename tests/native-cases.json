@@ -8924,5 +8924,101 @@
       "lib/span.grl"
     ],
     "stdout": "span ok: 19 checks\n"
+  },
+  {
+    "name": "option-storage-name-is-gone",
+    "source": "module test; fn f(x:core::OptionStorage<u64>){} fn main(){}\n",
+    "modules": [
+      "lib/core.grl"
+    ],
+    "reject": true,
+    "diagnostic": "unknown type",
+    "note": "the internal storage enum is gone: `T?` names `result::Option`, the stdlib type, and no other optional type exists"
+  },
+  {
+    "name": "resgen-result-and-option-both-arms",
+    "source": "module resgen;\nuse result;\nuse core;\n\n// Both standard shapes, both arms. `Result` carries its failure in `Err`; `Option` is the type `T?`\n// names, so `Some`/`None` and `u64?` are the same values.\nfn halve(n: u64) -> result::Result<u64, string> {\n    if n % 2 != 0 {\n        return result::Result::Err(\"odd\".text());\n    }\n    return result::Result::Ok(n / 2);\n}\nfn maybe(n: u64) -> u64? {\n    if n > 3 {\n        return None;\n    }\n    return Some(n);\n}\nfn main() {\n    match halve(8) {\n        Ok(v) => { println(\"ok {}\", v); },\n        Err(e) => { println(\"err {}\", e); }\n    }\n    match halve(9) {\n        Ok(v) => { println(\"ok {}\", v); },\n        Err(e) => { println(\"err {}\", e); }\n    }\n    match maybe(2) {\n        Some(v) => { println(\"some {}\", v); },\n        None => { println(\"none\"); }\n    }\n    match maybe(7) {\n        Some(v) => { println(\"some {}\", v); },\n        None => { println(\"none\"); }\n    }\n    a := halve(4);\n    println(\"{}\", a.is_ok());\n    println(\"{}\", a.map(|n: u64| n * 3).unwrap_or(0));\n    b := result::Option::Some(5);\n    println(\"{}\", b.is_some());\n    println(\"{}\", b.map(|n: u64| n + 1).unwrap_or(0));\n    c := halve(3);\n    println(\"{}\", c.unwrap_or(7));\n}\n",
+    "modules": [
+      "lib/result.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "ok 4\nerr odd\nsome 2\nnone\ntrue\n6\ntrue\n6\n7\n",
+    "note": "generic Result and Option: both arms, plus map/is_ok/unwrap_or; `u64?` is the same type `Some`/`None` build"
+  },
+  {
+    "name": "resgen-shape-by-position",
+    "source": "module resgen;\nuse result;\nuse core;\n\n// Two members with names the compiler has never heard of: the success is the first declared variant,\n// the failure the second, and `?` still propagates. `Out2` declares them the other way round to show\n// that position - not the payload type - decides.\nenum Out<V, F> { Good(V), Bad(F) }\nenum Out2<V, F> { Bad(F), Good(V) }\n\nfn inner(n: u64) -> Out<u64, string> {\n    if n == 0 {\n        return Out::Bad(\"zero\".text());\n    }\n    return Out::Good(n);\n}\nfn outer(n: u64) -> Out<u64, string> {\n    v := inner(n)?;\n    return Out::Good(v + 1);\n}\nfn reversed(n: u64) -> Out2<u64, string> {\n    if n == 0 {\n        return Out2::Bad(\"zero\".text());\n    }\n    return Out2::Good(n);\n}\nfn main() {\n    match outer(2) {\n        Good(v) => { println(\"good {}\", v); },\n        Bad(e) => { println(\"bad {}\", e); }\n    }\n    match outer(0) {\n        Good(v) => { println(\"good {}\", v); },\n        Bad(e) => { println(\"bad {}\", e); }\n    }\n    match reversed(4) {\n        Good(v) => { println(\"good {}\", v); },\n        Bad(e) => { println(\"bad {}\", e); }\n    }\n}\n",
+    "modules": [
+      "lib/result.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "good 3\nbad zero\ngood 4\n",
+    "note": "`?` over a two-member enum whose variants are not named Ok/Err: the first declared variant is the success (Out2 declares them the other way round and is still read by position)"
+  },
+  {
+    "name": "resgen-generic-payload-and-reference",
+    "source": "module resgen;\nuse result;\nuse core;\n\n// A payload that is itself a generic instance, a payload that is an optional value, and a payload\n// that is a reference: each is an ordinary substituted field type, and the reference keeps its loan.\nfn inner(n: u64) -> result::Result<u64, string> {\n    if n == 0 {\n        return result::Result::Err(\"zero\".text());\n    }\n    return result::Result::Ok(n);\n}\nfn nested(n: u64) -> result::Result<result::Result<u64, string>, string> {\n    if n > 9 {\n        return result::Result::Err(\"too big\".text());\n    }\n    return result::Result::Ok(inner(n));\n}\nfn wrapped(n: u64) -> result::Result<u64?, string> {\n    if n > 9 {\n        return result::Result::Err(\"too big\".text());\n    }\n    if n == 0 {\n        return result::Result::Ok(None);\n    }\n    return result::Result::Ok(Some(n));\n}\nfn first<a>(items: (&a u64[])) -> result::Result<&a u64, string> {\n    if items.len() == 0 {\n        return result::Result::Err(\"empty\".text());\n    }\n    return result::Result::Ok(&items[0]);\n}\nfn main() {\n    match nested(3) {\n        Ok(r) => {\n            match r {\n                Ok(v) => { println(\"deep {}\", v); },\n                Err(e) => { println(\"deep err {}\", e); }\n            }\n        },\n        Err(e) => { println(\"outer err {}\", e); }\n    }\n    match nested(5) {\n        Ok(r) => {\n            match r {\n                Ok(v) => { println(\"deep {}\", v); },\n                Err(e) => { println(\"deep err {}\", e); }\n            }\n        },\n        Err(e) => { println(\"outer err {}\", e); }\n    }\n    match nested(12) {\n        Ok(r) => { println(\"unexpected\"); },\n        Err(e) => { println(\"outer err {}\", e); }\n    }\n    match wrapped(0) {\n        Ok(o) => {\n            match o {\n                Some(v) => { println(\"wrapped some {}\", v); },\n                None => { println(\"wrapped none\"); }\n            }\n        },\n        Err(e) => { println(\"wrapped err {}\", e); }\n    }\n    items := u64[4, 8];\n    match first(&items) {\n        Ok(p) => { println(\"first {}\", *p); },\n        Err(e) => { println(\"first err {}\", e); }\n    }\n    none := u64[];\n    match first(&none) {\n        Ok(p) => { println(\"unexpected {}\", *p); },\n        Err(e) => { println(\"first err {}\", e); }\n    }\n}\n",
+    "modules": [
+      "lib/result.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "deep 3\ndeep 5\nouter err too big\nwrapped none\nfirst 4\nfirst err empty\n",
+    "note": "a generic enum payload that is itself a generic instance, one that is an optional value, and one that is a reference whose loan survives extraction"
+  },
+  {
+    "name": "resgen-nested-question-three-layers",
+    "source": "module resgen;\nuse result;\nuse core;\n\n// `?` through three layers, once over the generic enum and once over a two-member union, ending at\n// different success types: the failure type is what every layer agrees on.\nfn read_number(text: (&[u8])) -> u64 |? string {\n    if text.len() == 0 {\n        return \"empty\".text();\n    }\n    mut n = 0;\n    for b in text {\n        if b < 48 || 57 < b {\n            return \"not a number\".text();\n        }\n        n = n * 10 + u64(b - 48);\n    }\n    return n;\n}\nfn third(value: u64) -> u64 |? string {\n    if value == 0 {\n        return \"zero\".text();\n    }\n    return value;\n}\nfn second(text: (&[u8])) -> u64 |? string {\n    n := read_number(text)?;\n    return third(n)?;\n}\nfn first(text: (&[u8])) -> bool | u64 |? string {\n    v := second(text)?;\n    return v > 10;\n}\nfn stage3(n: u64) -> result::Result<u64, string> {\n    if n == 0 {\n        return result::Result::Err(\"zero\".text());\n    }\n    return result::Result::Ok(n);\n}\nfn stage2(n: u64) -> result::Result<u64, string> {\n    v := stage3(n)?;\n    return result::Result::Ok(v + 1);\n}\nfn stage1(n: u64) -> result::Result<u64, string> {\n    v := stage2(n)?;\n    return result::Result::Ok(v * 10);\n}\nfn main() {\n    match first(view(\"42\")) {\n        bool(b) => { println(\"bool {}\", b); },\n        u64(n) => { println(\"num {}\", n); },\n        string(e) => { println(\"err {}\", e); },\n    }\n    match first(view(\"0\")) {\n        bool(b) => { println(\"bool {}\", b); },\n        u64(n) => { println(\"num {}\", n); },\n        string(e) => { println(\"err {}\", e); },\n    }\n    match first(view(\"x1\")) {\n        bool(b) => { println(\"bool {}\", b); },\n        u64(n) => { println(\"num {}\", n); },\n        string(e) => { println(\"err {}\", e); },\n    }\n    match stage1(4) {\n        Ok(v) => { println(\"chain {}\", v); },\n        Err(e) => { println(\"chain err {}\", e); }\n    }\n    match stage1(0) {\n        Ok(v) => { println(\"chain {}\", v); },\n        Err(e) => { println(\"chain err {}\", e); }\n    }\n}\n",
+    "modules": [
+      "lib/result.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "bool true\nerr zero\nerr not a number\nchain 50\nchain err zero\n",
+    "note": "`?` through three layers, over a two-member result union and over the generic Result; the failure type is what every layer agrees on"
+  },
+  {
+    "name": "resgen-interface-first-result",
+    "source": "module resgen;\nuse result;\nuse core;\n\n// Interface-first: the module that declares the generic result is emitted to an interface, and the\n// program is then built against those declarations alone.\npub fn parse_digit(b: u64) -> result::Result<u64, string> {\n    if b < 48 || 57 < b {\n        return result::Result::Err(\"not a digit\".text());\n    }\n    return result::Result::Ok(b - 48);\n}\npub fn two_digits(high: u64, low: u64) -> result::Result<u64, string> {\n    h := parse_digit(high)?;\n    l := parse_digit(low)?;\n    return result::Result::Ok(h * 10 + l);\n}\npub fn main() {\n    match two_digits(52, 55) {\n        Ok(v) => { println(\"digits {}\", v); },\n        Err(e) => { println(\"digits err {}\", e); }\n    }\n    match two_digits(52, 120) {\n        Ok(v) => { println(\"digits {}\", v); },\n        Err(e) => { println(\"digits err {}\", e); }\n    }\n}\n",
+    "modules": [
+      "lib/result.grl",
+      "lib/core.grl"
+    ],
+    "interfaces": true,
+    "stdout": "digits 47\ndigits err not a digit\n",
+    "note": "interface-first: the program is emitted to interfaces and rebuilt against the declarations alone, including `Result<T, E>` and a `?` chain of two calls"
+  },
+  {
+    "name": "resgen-drop-owning-payload",
+    "source": "module resgen;\nuse result;\nuse core;\n\n// A payload that owns memory on both arms: the payload is released exactly once whichever arm runs,\n// and the runtime's end-of-main live-allocation check fails the program if anything is left over.\nstruct Held {\n    n: u64\n}\nimpl Drop for Held {\n    fn drop(self: (&mut Held)) {\n        println(\"drop {}\", self.n);\n    }\n}\nfn take(n: u64) -> result::Result<Held, Held> {\n    if n == 0 {\n        return result::Result::Err(Held { n: 99 });\n    }\n    return result::Result::Ok(Held { n: n });\n}\nfn words(n: u64) -> u64? {\n    mut v = u8[];\n    v.push(65);\n    v.push(66);\n    if n == 0 {\n        return None;\n    }\n    return Some(u64(v.len()));\n}\nfn main() {\n    match take(1) {\n        Ok(h) => { println(\"ok {}\", h.n); },\n        Err(e) => { println(\"err {}\", e.n); }\n    }\n    match take(0) {\n        Ok(h) => { println(\"ok {}\", h.n); },\n        Err(e) => { println(\"err {}\", e.n); }\n    }\n    match words(1) {\n        Some(n) => { println(\"some {}\", n); },\n        None => { println(\"none\"); }\n    }\n    match words(0) {\n        Some(n) => { println(\"some {}\", n); },\n        None => { println(\"none\"); }\n    }\n    dropped := take(2);\n    assert(dropped.is_ok());\n}\n",
+    "modules": [
+      "lib/result.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "ok 1\ndrop 1\nerr 99\ndrop 99\nsome 2\nnone\ndrop 2\n",
+    "note": "both arms of both generic shapes hold a payload that owns memory and has its own Drop; the runtime's end-of-main live-allocation check leaves the process with status 0 only if each payload was released once"
+  },
+  {
+    "name": "resgen-three-member-union-refused",
+    "source": "module resgen;\n\n// `?` cannot tell which of three members is the failure, so the shape is refused by name.\nfn inner(n: u64) -> u64 | string | bool {\n    if n == 0 {\n        return \"zero\".text();\n    }\n    if n == 1 {\n        return true;\n    }\n    return n;\n}\nfn outer(n: u64) -> u64 | string | bool {\n    v := inner(n)?;\n    return v + 1;\n}\nfn main() {\n    mut n = 0;\n    if 3 > 2 {\n        n = 1;\n    }\n    println(\"{}\", n);\n}\n",
+    "reject": true,
+    "diagnostic": "`?` needs a shape with one success member and one failure member; `u64 | string | bool` has 3 members",
+    "note": "an ordinary union with three members leaves the failure ambiguous, so `?` refuses it and names the shape and every member"
+  },
+  {
+    "name": "resgen-three-variant-enum-refused",
+    "source": "module resgen;\n\n// The same refusal for an enum: a third variant leaves the failure ambiguous.\nenum Three<V, F, G> { Ok(V), Err(F), Also(G) }\nfn inner(n: u64) -> Three<u64, string, u64> {\n    if n == 0 {\n        return Three::Err(\"zero\".text());\n    }\n    return Three::Ok(n);\n}\nfn outer(n: u64) -> Three<u64, string, u64> {\n    v := inner(n)?;\n    return Three::Ok(v + 1);\n}\nfn main() {\n    println(\"hi\");\n}\n",
+    "reject": true,
+    "diagnostic": "`?` needs a shape with one success member and one failure member; `Three<u64, string, u64>` has 3 variants (Ok, Err, Also)",
+    "note": "the same refusal for an enum: the diagnostic names the instantiated type and all three variants"
+  },
+  {
+    "name": "resgen-stdlib-result-boundary",
+    "source": "module resgen;\nuse result;\nuse core;\nuse fs;\n\n// The stdlib answers `T |? fs::Error`; a caller that wants the generic shape converts once, in\n// writing, and from there `?` carries the same `fs::Error` through every layer.\nfn read(path: (&[u8])) -> result::Result<u8[], fs::Error> {\n    match fs::read(path) {\n        u8[](data) => { return result::Result::Ok(data); },\n        fs::Error(e) => { return result::Result::Err(e); }\n    }\n}\nfn size(path: (&[u8])) -> result::Result<u64, fs::Error> {\n    data := read(path)?;\n    return result::Result::Ok(data.len());\n}\nfn describe(path: (&[u8])) -> u8[] {\n    match size(path) {\n        Ok(n) => { return format(\"read {} bytes\", n).copy(); },\n        Err(e) => { return e.show().copy(); }\n    }\n}\nfn main() {\n    println(\"{}\", describe(view(\"definitely-missing.txt\")));\n    println(\"{}\", describe(view(\"no/such/dir/file.txt\")));\n}\n",
+    "modules": [
+      "lib/result.grl",
+      "lib/core.grl",
+      "lib/fs.grl"
+    ],
+    "stdout": "definitely-missing.txt: not found\nno/such/dir/file.txt: not found\n",
+    "note": "the stdlib's `T |? fs::Error` and the generic `Result<T, fs::Error>` meet at one written conversion, after which `?` carries the same fs::Error through every generic layer"
   }
 ]

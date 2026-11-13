@@ -1,0 +1,122 @@
+module result;
+
+// The two standard shapes of "a value or a failure", and their combinators.
+//
+// Both are ordinary generic enums, so they specialise per use exactly like any other generic type
+// and `?` accepts them through the same rule it applies to every two-member shape: one success
+// member, one failure member. `Option<T>` is the type `T?` names - `T?` is the concise spelling,
+// not a second type - so `Some(5)`, `Option::Some(5)` and a plain `u64?` all describe one value.
+//
+// Neither type panics. A combinator that cannot fail returns a value or a shape, and `!` stays the
+// explicit, caller-written abort.
+
+// ---- Result ------------------------------------------------------------------------------------
+
+// Exactly two members: `Ok` carries the success, `Err` the failure. Which variant is the failure is
+// part of the shape, so `?` on a `Result` needs no naming convention to read it.
+pub enum Result<T, E> { Ok(T), Err(E) }
+
+impl<T, E> Result<T, E> {
+    pub fn is_ok(self: (&Result<T, E>)) -> bool {
+        match self {
+            Ok(v) => { return true; },
+            Err(e) => { return false; }
+        }
+    }
+    pub fn is_err(self: (&Result<T, E>)) -> bool {
+        match self {
+            Ok(v) => { return false; },
+            Err(e) => { return true; }
+        }
+    }
+    // The success payload as an optional value; the failure is dropped.
+    pub fn ok(self: Result<T, E>) -> T? {
+        match self {
+            Ok(v) => { return Some(v); },
+            Err(e) => { return None; }
+        }
+    }
+    // The failure payload as an optional value; the success is dropped.
+    pub fn err(self: Result<T, E>) -> E? {
+        match self {
+            Ok(v) => { return None; },
+            Err(e) => { return Some(e); }
+        }
+    }
+    pub fn unwrap_or(self: Result<T, E>, fallback: T) -> T {
+        match self {
+            Ok(v) => { return v; },
+            Err(e) => { return fallback; }
+        }
+    }
+    // Only the success is transformed: the failure is carried through as the same value of the same
+    // type, so a `map` never needs a conversion for the error path.
+    pub fn map<U>(self: Result<T, E>, f: FnMut(T) -> U) -> Result<U, E> {
+        mut call = f;
+        match self {
+            Ok(v) => { return Result::Ok(call(v)); },
+            Err(e) => { return Result::Err(e); }
+        }
+    }
+    // Only the failure is transformed: what a layer writes when it converts an error type, in the
+    // one place where the conversion is visible.
+    pub fn map_err<F>(self: Result<T, E>, f: FnMut(E) -> F) -> Result<T, F> {
+        mut call = f;
+        match self {
+            Ok(v) => { return Result::Ok(v); },
+            Err(e) => { return Result::Err(call(e)); }
+        }
+    }
+}
+
+// ---- Option ------------------------------------------------------------------------------------
+
+// The type `T?` names: `Some` carries the value, `None` carries nothing. `Option` is declared here
+// and the concise spelling resolves to it, so the two names denote one type and `?`/`!` work on
+// both spellings alike.
+pub enum Option<T> { Some(T), None }
+
+impl<T> Option<T> {
+    pub fn is_some<a>(self: (&a T?)) -> bool {
+        match self {
+            Some(v) => { return true; },
+            None => { return false; }
+        }
+    }
+    pub fn is_none<a>(self: (&a T?)) -> bool {
+        match self {
+            Some(v) => { return false; },
+            None => { return true; }
+        }
+    }
+    pub fn unwrap_or(self: T?, fallback: T) -> T {
+        match self {
+            Some(v) => { return v; },
+            None => { return fallback; }
+        }
+    }
+    pub fn map<U>(self: T?, f: FnMut(T) -> U) -> U? {
+        mut call = f;
+        match self {
+            Some(v) => { return Some(call(v)); },
+            None => { return None; }
+        }
+    }
+    // `None` becomes the failure the caller writes, as a *union*: `T | E` is the shape that needs no
+    // type argument at the call site, and it is what this method has always returned, so a caller
+    // that matches members (`u64(n) => ...`) keeps working. The error value is an argument rather
+    // than a closure because producing it is the caller's choice, and often costs nothing.
+    pub fn ok_or<E>(self: T?, error: E) -> T | E {
+        match self {
+            Some(v) => { return v; },
+            None => { return error; }
+        }
+    }
+    // The same conversion into the generic enum, for a pipeline that is `Result`-shaped throughout.
+    pub fn to_result<E>(self: T?, error: E) -> Result<T, E> {
+        match self {
+            Some(v) => { return Result::Ok(v); },
+            None => { return Result::Err(error); }
+        }
+    }
+}

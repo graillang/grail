@@ -16,13 +16,13 @@ under the existing join rules. Field projection cannot bypass the tag check; nes
 becomes available after extracting the selected payload. General recursive/nested patterns,
 wildcard arms and direct multi-field variant syntax remain to implement.
 
-Postfix `value!` consumes a two-variant `Ok/Err` or `Some/None` value, transfers the success payload,
-and aborts on failure. It has higher precedence than arithmetic and may chain. There is no implicit
-error conversion and no cleanup promise after abort. Postfix `?` now propagates matching errors or
-None through ordinary checked return cleanup; see [propagation](error-propagation.md). Current
-Result/Option-shaped enums have concrete payload types; generic `Result<T,E>` / `Option<T>` and
-standard-library constructors remain subsequent v0 work, not a concession to permanent monomorphic
-APIs. `unit` / `()` are genuine scalar unit type/value operations, including function interfaces.
+Postfix `value!` consumes a two-member result shape, transfers the success payload, and aborts on
+failure. It has higher precedence than arithmetic and may chain. There is no implicit error
+conversion and no cleanup promise after abort. Postfix `?` propagates matching errors or None through
+ordinary checked return cleanup; see [propagation](error-propagation.md). Generic `Result<T, E>` and
+`Option<T>` are standard-library types (`lib/result.grl`), and `?`/`!` accept them through the
+shape rule rather than through variant names; see [generic results](generic-results.md). `unit` /
+`()` are genuine scalar unit type/value operations, including function interfaces.
 
 ## Ownership and representation
 
