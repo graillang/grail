@@ -480,7 +480,13 @@ fn rt_os_stack_reserve() -> u64 {
     if rt_error(stack) {
         rt_abort();
     }
-    if rt_error(rt_syscall(10, stack, 4096, 0)) {
+    // The range is reserved PROT_NONE, then only the usable part is made writable: the low page
+    // stays PROT_NONE as the guard, and the kernel commits the writable pages on first touch (no
+    // page of a task stack is backed until the task uses it).
+    if rt_error(rt_syscall(10, stack, size, 0)) {
+        rt_abort();
+    }
+    if rt_error(rt_syscall(10, stack + 4096, size - 4096, 3)) {
         rt_abort();
     }
     return stack;
