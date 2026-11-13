@@ -419,17 +419,168 @@ jobs:
       - name: Handshake, diagnostics, definition and malformed input over stdio
         run: bun tools/lsp-test.mjs
 
+  # ---- native toolchains ---------------------------------------------------------------------
+  # One Linux job cross-builds the compiler for the two operating systems whose own binaries this
+  # workflow then exercises: grail.exe (PE/COFF) and the Mach-O grail. tools/windows.mjs and
+  # tools/native.mjs are the same entry points a developer runs locally.
+  native-toolchains:
+    name: cross-built native compilers
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install clang, LLD and LLVM inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm
+      - name: Build grail.exe and the Mach-O grail
+        run: |
+          mkdir -p native
+          cp "$(bun tools/windows.mjs compiler)" native/grail.exe
+          cp "$(bun tools/native.mjs compiler --target macos-aarch64)" native/grail-macos-aarch64
+          file native/grail.exe native/grail-macos-aarch64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-compilers
+          path: native/
+          if-no-files-found: error
+
+  # Windows x86-64, natively. The downloaded grail.exe is the compiler; every step below is a
+  # command tools/windows.mjs runs under Wine on Linux, so what CI exercises is exactly what the
+  # local Wine check exercises, with real Win32 underneath. LLVM is the whole toolchain: clang
+  # assembles, llvm-ar writes the import library and lld-link links - no Visual Studio is installed
+  # or needed.
+  windows-native:
+    name: windows-x86_64 native
+    needs: native-toolchains
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-compilers
+          path: native
+      - name: LLVM toolchain (clang, lld-link, llvm-ar)
+        run: |
+          if command -v clang >/dev/null 2>&1; then
+            echo "LLVM found on PATH"
+          else
+            choco install llvm -y --no-progress
+            echo "C:/Program Files/LLVM/bin" >> "$GITHUB_PATH"
+          fi
+          clang --version | head -1
+          lld-link --version | head -1
+          llvm-ar --version | head -1
+      - name: The native compiler builds and runs book examples
+        run: |
+          mkdir -p out
+          ./native/grail.exe build --target windows-x86_64 book/examples/hello.grl -o out/hello.exe
+          ./out/hello.exe > out/hello.txt
+          grep -qx "Hello, world!" out/hello.txt
+          ./native/grail.exe build --target windows-x86_64 book/examples/numbers.grl -o out/numbers.exe
+          ./out/numbers.exe > out/numbers.txt
+          grep -qx "42" out/numbers.txt
+          ./native/grail.exe build --target windows-x86_64 book/examples/arguments.grl -o out/arguments.exe
+          ./out/arguments.exe alpha > out/arguments.txt
+          grep -qx "5" out/arguments.txt
+      - name: The native compiler builds and runs corpus cases
+        run: |
+          ./native/grail.exe build --target windows-x86_64 tests/concurrency/scope_tasks.grl -o out/tasks.exe
+          ./out/tasks.exe > out/tasks.txt
+          printf '42\n9\n' > out/tasks.expected
+          diff out/tasks.txt out/tasks.expected
+          ./native/grail.exe build --target windows-x86_64 tests/ffi/record_pointers.grl -o out/ffi.exe
+          ./out/ffi.exe > out/ffi.txt
+          head -1 out/ffi.txt | grep -qx "13"
+      - name: Self-compile, then run the compiler it produced
+        env:
+          # No Wine: the compiler binary runs directly on this host.
+          GRAIL_WINE: ''
+        run: bun tools/windows.mjs selfhost --existing native/grail.exe --full
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-native-output
+          path: out/
+          if-no-files-found: error
+
+  # macOS arm64, natively, on Apple hardware: same shape as the Windows lane, with the SDK the
+  # runner already has. GRAIL_LINKER=ld uses Apple's own ld64, which is what a macOS user has;
+  # LLVM's ld64.lld works too and is the default.
+  macos-native:
+    name: macos-aarch64 native
+    needs: native-toolchains
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-compilers
+          path: native
+      - name: SDK and toolchain
+        run: |
+          xcode-select -p
+          echo "GRAIL_SDK=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
+          clang --version | head -1
+          ld -v 2>&1 | head -1
+      - name: The native compiler builds and runs book examples
+        env:
+          GRAIL_LINKER: ld
+        run: |
+          chmod +x native/grail-macos-aarch64
+          mkdir -p out
+          ./native/grail-macos-aarch64 build --target macos-aarch64 book/examples/hello.grl -o out/hello
+          ./out/hello > out/hello.txt
+          grep -qx "Hello, world!" out/hello.txt
+          ./native/grail-macos-aarch64 build --target macos-aarch64 book/examples/numbers.grl -o out/numbers
+          ./out/numbers > out/numbers.txt
+          grep -qx "42" out/numbers.txt
+          ./native/grail-macos-aarch64 build --target macos-aarch64 book/examples/floats.grl -o out/floats
+          ./out/floats | head -1 | grep -qx "0.30000000000000004"
+      - name: The native compiler builds and runs corpus cases
+        env:
+          GRAIL_LINKER: ld
+        run: |
+          ./native/grail-macos-aarch64 build --target macos-aarch64 tests/concurrency/scope_tasks.grl -o out/tasks
+          ./out/tasks > out/tasks.txt
+          printf '42\n9\n' > out/tasks.expected
+          diff out/tasks.txt out/tasks.expected
+      - name: Self-compile
+        env:
+          GRAIL_LINKER: ld
+        run: |
+          ./native/grail-macos-aarch64 --target macos-aarch64 out/stage2.s \
+            compiler/native.grl compiler/lexer.grl compiler/ownership.grl compiler/machine.grl \
+            compiler/optimize.grl compiler/llvm.grl compiler/fmt.grl compiler/explain.grl \
+            compiler/cli.grl compiler/runtime.grl compiler/darwin.grl
+          test -s out/stage2.s
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-native-output
+          path: out/
+          if-no-files-found: error
+
   # Planned lanes run detection and scaffolding only. `--allow-blocked` turns
   # the expected "compiler backend not implemented" result into a green job, so
   # the matrix stays covered without pretending a Windows/macOS binary exists.
+  # windows-x86_64 is a native lane above; windows-aarch64 stays a planned lane (the compiler's
+  # ARM64 Win32 codegen is not implemented yet, so there is nothing to run).
   windows:
     name: windows ${{ matrix.platform }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: windows-x86_64
-            runner: windows-2022
           - platform: windows-aarch64
             runner: windows-11-arm
     runs-on: ${{ matrix.runner }}
@@ -447,14 +598,13 @@ jobs:
         shell: bash
         run: bun tools/ci.mjs plan
 
+  # macos-aarch64 is a native lane above; macos-x86_64 stays here as the signing dry-run lane.
   macos:
     name: macos ${{ matrix.platform }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-aarch64
-            runner: macos-14
           - platform: macos-x86_64
             runner: macos-13
     runs-on: ${{ matrix.runner }}
