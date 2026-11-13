@@ -6606,8 +6606,8 @@ fn pv_negation<a>(atoms: (&a Atom[]), out: (&a mut Atom[])) -> unit {
     b := x.b.copy();
     k := x.k;
     if rel == 0 {
-        // `!(a < b + k)` is `b <= a - k - 1`.
-        pv_add(&mut out, 1, view(b), view(a), 0 - k - 1);
+        // `!(a < b + k)` is `b + k <= a`, i.e. `b <= a - k`.
+        pv_add(&mut out, 1, view(b), view(a), 0 - k);
         return ();
     }
     if rel == 1 {
@@ -6919,13 +6919,21 @@ fn pv_seed_params<a>(c: (&a mut C), facts: (&a mut Atom[])) -> unit {
     }
     return ();
 }
-// Kill the facts about every name a call's arguments mention: the callee may write through them.
+// Kill the facts about every name a call's arguments can reach: the callee may write through them.
+// `&NAME` is a shared loan, which forbids a write, so it says nothing is lost; `&mut NAME` and a
+// bare name stay kills.
 fn pv_kill_spans<a>(c: (&a mut C), facts: (&a mut Atom[]), lo: u64, hi: u64) -> unit {
     mut i = lo;
     while i < hi {
         if kind_at(&mut c, i) == 1 {
             n := tok_text(&mut c, i);
-            pv_kill(&mut facts, view(n));
+            mut shared = false;
+            if (lo < i) & (kind_at(&mut c, i - 1) == 38) {
+                shared = true;
+            }
+            if !shared {
+                pv_kill(&mut facts, view(n));
+            }
         }
         i += 1;
     }
@@ -7191,10 +7199,26 @@ fn pv_scope<a>(c: (&a mut C), start: u64, pos: u64, facts: (&a mut Atom[])) -> u
                 i += 2;
                 continue;
             }
-            // `NAME := VALUE`
-            if kind_at(&mut c, i + 1) == 261 {
+            // `NAME := VALUE`, and `NAME: TY := VALUE` with the type written out.
+            mut bind = i + 1;
+            if kind_at(&mut c, bind) == 58 {
+                mut q = i + 2;
+                while q < pos {
+                    kk := kind_at(&mut c, q);
+                    if (kk == 261) || (kk == 59) || (kk == 123) {
+                        break;
+                    }
+                    q += 1;
+                }
+                if (q < pos) & (kind_at(&mut c, q) == 261) {
+                    bind = q;
+                } else {
+                    bind = 0;
+                }
+            }
+            if (bind != 0) & (kind_at(&mut c, bind) == 261) {
                 pv_kill(&mut facts, view(t));
-                mut j = i + 2;
+                mut j = bind + 1;
                 mut depth = 0;
                 while j < pos {
                     kk := kind_at(&mut c, j);
@@ -7209,11 +7233,11 @@ fn pv_scope<a>(c: (&a mut C), start: u64, pos: u64, facts: (&a mut Atom[])) -> u
                     }
                     j += 1;
                 }
-                term := pv_span_term(&mut c, i + 2, j);
+                term := pv_span_term(&mut c, bind + 1, j);
                 if term.len() != 0 {
                     pv_add(&mut facts, 2, view(t), view(term), 0);
                 }
-                pv_bind_len(&mut c, &mut facts, view(t), i + 1, pos);
+                pv_bind_len(&mut c, &mut facts, view(t), bind, pos);
                 i = j + 1;
                 continue;
             }
@@ -8137,7 +8161,11 @@ fn pv_fill_loop<a>(c: (&a mut C), cnt_lo: u64, cnt_hi: u64, open: u64, facts: (&
     mut at = open + 1;
     while at < close {
         k := kind_at(&mut c, at);
-        if (k == 124) || (k == 274) || (k == 33) || (k == 38) {
+        if (k == 124) || (k == 274) || (k == 33) {
+            return ();
+        }
+        // `&` is a loan only when a name follows it; `x & 255` is a bitwise and and reaches nothing.
+        if (k == 38) & (kind_at(&mut c, at + 1) == 1) {
             return ();
         }
         if (k == 1) & (kind_at(&mut c, at + 1) == 46) & (kind_at(&mut c, at + 2) == 1) & (kind_at(&mut c, at + 3) == 40) {
@@ -8161,12 +8189,22 @@ fn pv_fill_loop<a>(c: (&a mut C), cnt_lo: u64, cnt_hi: u64, open: u64, facts: (&
         x := &facts[q];
         snap.push(copy_atom_value(&x));
     }
-    mut trips: i64 = 0;
-    if !pv_span_bound(&mut c, &snap, cnt_lo, cnt_hi, 0, &mut trips) {
-        return ();
+    // The count's own term when it is one (`len(v) >= n`), else its floor: a term keeps the fact
+    // usable against a guard stated in the same name, which is the shape a fill loop usually has.
+    mut k0: i64 = 0;
+    ct := pv_index_term(&mut c, cnt_lo, cnt_hi, &mut k0);
+    mut symbolic = false;
+    if (ct.len() != 0) & (k0 <= 0) {
+        symbolic = true;
     }
-    if trips < 0 {
-        return ();
+    mut trips: i64 = 0;
+    if !symbolic {
+        if !pv_span_bound(&mut c, &snap, cnt_lo, cnt_hi, 0, &mut trips) {
+            return ();
+        }
+        if trips < 0 {
+            return ();
+        }
     }
     for b in bodies.len() {
         nm := bodies[b].copy();
@@ -8195,11 +8233,15 @@ fn pv_fill_loop<a>(c: (&a mut C), cnt_lo: u64, cnt_hi: u64, open: u64, facts: (&
         if find_local(&mut c, view(nm)) == 0 {
             return ();
         }
-        mut lit = u8[];
-        decimal(&mut lit, u64(trips));
         mut len_term = copy_bytes(view(nm));
         push_bytes(&mut len_term, view(".len"));
-        pv_add(&mut post, 1, view(lit), view(len_term), 0);
+        if symbolic {
+            pv_add(&mut post, 1, view(ct), view(len_term), k0);
+        } else {
+            mut lit = u8[];
+            decimal(&mut lit, u64(trips));
+            pv_add(&mut post, 1, view(lit), view(len_term), 0);
+        }
     }
     return ();
 }
