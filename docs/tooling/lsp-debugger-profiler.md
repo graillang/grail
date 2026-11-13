@@ -24,8 +24,8 @@ one language server, in the language it serves.
 
 - `grail check`, `grail build`, `grail run`, `grail fmt`, `grail test`,
   `grail debug lines|info` and `grail profile` in `compiler/cli.grl`;
-  diagnostics already use `file:line:column: message` on stdout with a non-zero
-  exit.
+  diagnostics print `error[CODE]: message`, a ` --> file:line:column` line and an
+  excerpt with carets under the offending token, on stdout with a non-zero exit.
 - A token-level formatter (`compiler/fmt.grl`) that is idempotent and
   byte-preserving for compilation.
 - Direct assembly emission (`native.grl` -> `machine.grl`) with no source map,
@@ -33,9 +33,12 @@ one language server, in the language it serves.
 - Distribution packages from `tools/ci.mjs` with `bin/grail`,
   `lib/grail/{runtime.grl,std/}` and `share/doc/grail/`.
 
-A richer machine-readable compiler service is the prerequisite for hover,
-symbols, debugger variables and profiling annotations. The LSP MVP deliberately
-uses the existing text interface rather than blocking on that work.
+A richer machine-readable compiler service is the prerequisite for cross-file
+symbols, debugger variables and profiling annotations. The server answers hover,
+completion and rename from the open buffers themselves
+(`tools/lsp/analysis.grl`, documented in [lsp.md](lsp.md)) rather than blocking
+on that work; what is left for a compiler service is everything that needs the
+whole program.
 
 ## Phase 0: compiler service surface (partially implemented for LSP)
 
@@ -75,9 +78,9 @@ Capabilities by milestone:
 | Milestone | Capabilities | Data source |
 | --- | --- | --- |
 | L1 (**done**) | `publishDiagnostics`, `didOpen/didChange/didClose` | `grail check` text diagnostics |
-| L2 | `hover`, `definition`, `references`, `documentSymbol` | `symbols --json` |
+| L2 (hover, definition **done**) | `hover`, `definition`, `references`, `documentSymbol` | the open buffers; `symbols --json` for the rest |
 | L3 | `textDocument/formatting`, `rangeFormatting`, `codeAction` | `fmt --check --json` |
-| L4 | `completion`, `rename`, `signatureHelp`, semantic tokens | compiler service API |
+| L4 (completion, rename **done**) | `completion`, `rename`, `signatureHelp`, semantic tokens | the open buffers; compiler service API for the rest |
 
 Remaining implementation rules:
 
@@ -201,7 +204,7 @@ Still future work:
 ## Delivery order and CI impact
 
 1. Phase 0 JSON diagnostics/symbols (text diagnostics already back L1).
-2. LSP L2: hover, definition, references and document symbols.
+2. LSP L2: hover and definition (done); references and document symbols next.
 3. Sampling profiler (done: in-runtime SIGPROF sampler, Linux x86-64).
 4. Debugger D1 attach/breakpoints on the now-emitted Linux x86-64 line table.
 5. LSP L3/L4, DWARF variable info, instrumentation profiler.
