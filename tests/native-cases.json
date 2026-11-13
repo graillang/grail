@@ -8430,6 +8430,22 @@
     "note": "the ABI of docs/design/fat-dyn.md, pinned: a `&dyn Shape` is one word, the address of a 16-byte pair whose word 0 is the data pointer and whose word 1 is the vtable, and dispatch reads `8(handle)` for the vtable and `16(vtable)` for the interface's second method (word 0 of the vtable is the drop slot, word 1 is method 0). The program pins what word 0 reaches: a `&mut dyn` method writes through it, so the object the borrowing frame passed is what holds the mutation afterwards"
   },
   {
+    "name": "dynf-pair-c-boundary",
+    "files": [
+      "compiler/tests/dyn_fat_callee.grl"
+    ],
+    "stdout": "9 12 18\n",
+    "targets": [
+      "x86_64"
+    ],
+    "asm": [
+      "movq 8(%rdi),%rax",
+      "movq (%rdi),%rdi",
+      "call c_area"
+    ],
+    "note": "the ABI crossing into C, pinned by a call rather than by an assertion: a shared `&dyn Shape` parameter of an `extern \"C\"` function is the C `const DynPair *` - the call site passes exactly one word (`movq ...,%rdi; call c_area`), and the callee reads word 0 at `(%rdi)` for the object and word 1 at `8(%rdi)` for the vtable it dispatches through. One callee serves two concrete types, so the vtable really travels with the pointer, and two calls in one callee show the pair is stable across them"
+  },
+  {
     "name": "dynf-borrowed-mut-method",
     "files": [
       "compiler/tests/dyn_fat_mut.grl"
@@ -8473,12 +8489,12 @@
   },
   {
     "name": "dynf-reject-c-boundary",
-    "source": "interface Shape {\n    fn area(self: &Self) -> u64;\n}\nstruct Sq {\n    side: u64,\n}\nimpl Shape for Sq {\n    fn area(self: &Self) -> u64 {\n        return self.side * self.side;\n    }\n}\nextern \"C\" fn c_area(p: &dyn Shape) -> u64 {\n    return p.area();\n}\nfn main() {\n    q := Sq { side: 2 };\n    println(\"{}\", unsafe { c_area(&q) });\n}\n",
+    "source": "interface Shape {\n    fn area(self: &Self) -> u64;\n    fn grow(self: &mut Self, by: u64) -> unit;\n}\nstruct Sq {\n    side: u64,\n}\nimpl Shape for Sq {\n    fn area(self: &Self) -> u64 {\n        return self.side * self.side;\n    }\n    fn grow(self: &mut Self, by: u64) -> unit {\n        self.side = self.side + by;\n        return ();\n    }\n}\nextern \"C\" fn c_grow(p: &mut dyn Shape, by: u64) {\n    p.grow(by);\n}\nfn main() {\n    mut q = Sq { side: 2 };\n    unsafe {\n        c_grow(&mut q, 1);\n    }\n    println(\"{}\", q.side);\n}\n",
     "reject": true,
     "diagnostic": [
       "an extern C out-parameter must be &mut a handle, CPtr, CMutPtr or extern \"C\" record"
     ],
-    "note": "the ABI says a `&dyn I` is one pointer, but a reference parameter of an `extern \"C\"` function is an out-parameter (C writes through it) and a `&dyn` is not one of the shapes that admits, so a borrowed trait object cannot cross a C boundary yet. Pinned here so that admitting it is a decision with a test to update, not a silent change; docs/design/fat-dyn.md records the gap"
+    "note": "a shared `&dyn I` is admitted as the C `const DynPair *` (dynf-pair-c-boundary), but the other two-word shapes are still refused: `&mut dyn I` would mean C writes a 16-byte pair, which is not part of the ABI, and every other reference parameter is an out-parameter and must be `&mut` a handle, `CPtr`, `CMutPtr` or an `extern \"C\"` record. Pinned so admitting one of them later is a decision with a test to update"
   },
   {
     "name": "tfail-explicit-failure-at-join",

@@ -1,0 +1,54 @@
+// The `dyn` ABI crossing into C (docs/design/fat-dyn.md): a shared `&dyn Shape` parameter of an
+// `extern "C"` function is the C `const DynPair *` - one pointer argument, the address of a 16-byte
+// `{data@0, vtable@8}` pair. The callee reaches the object through word 0 and dispatches through
+// word 1, so the same callee serves two concrete types: the vtable travels with the pointer, which
+// is the whole claim of the layout. (`&mut dyn Shape` is still refused: C writing a pair is not part
+// of the ABI.)
+interface Shape {
+    fn area(self: &Self) -> u64;
+    fn grow(self: &mut Self, by: u64) -> unit;
+}
+struct Sq {
+    side: u64,
+}
+struct Ci {
+    r: u64,
+}
+impl Shape for Sq {
+    fn area(self: &Self) -> u64 {
+        return self.side * self.side;
+    }
+    fn grow(self: &mut Self, by: u64) -> unit {
+        self.side = self.side + by;
+        return ();
+    }
+}
+impl Shape for Ci {
+    fn area(self: &Self) -> u64 {
+        return 3 * self.r * self.r;
+    }
+    fn grow(self: &mut Self, by: u64) -> unit {
+        self.r = self.r + by;
+        return ();
+    }
+}
+// C-ABI callees: one pointer argument, no Grail-side convention beyond it.
+extern "C" fn c_area(p: &dyn Shape) -> u64 {
+    return p.area();
+}
+extern "C" fn c_twice(p: &dyn Shape) -> u64 {
+    return p.area() + p.area();
+}
+fn main() {
+    q := Sq { side: 3 };
+    c := Ci { r: 2 };
+    mut squared = 0;
+    mut rounded = 0;
+    mut doubled = 0;
+    unsafe {
+        squared = c_area(&q);
+        rounded = c_area(&c);
+        doubled = c_twice(&q);
+    }
+    println("{} {} {}", squared, rounded, doubled);
+}

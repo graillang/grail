@@ -12946,6 +12946,13 @@ fn ffi_param<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
         }
     }
     if k == 7 {
+        // A shared `&dyn I` is the C `const DynPair *`: one pointer to the 16-byte
+        // `{data@0, vtable@8}` pair the handle already is (docs/design/fat-dyn.md), so it is the one
+        // reference parameter that is a *reader* rather than an out-parameter. `&mut dyn I` is not
+        // admitted: C writing a 16-byte pair is not part of the ABI.
+        if (ty_mode(&mut c, ty) == 0) & (borrowed_object(&mut c, ty) != 0) {
+            return ();
+        }
         inner := ty_arg(&mut c, ty);
         if ffi_out_slot_type(&mut c, inner) {
             if ty_mode(&mut c, ty) != 0 {

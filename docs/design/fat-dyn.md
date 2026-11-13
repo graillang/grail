@@ -75,16 +75,21 @@ the drop slot. `dynf-pair-layout` pins it in the corpus - the program pins what 
 assertions pin the offsets: dispatch reads `8(%rdi)` for the vtable, `8(%rax)` for method 0 and
 `16(%rax)` for method 1, which is the `{drop@0, method0@8, method1@16}` statement.
 
-A C callee that reads those two words itself is *not* expressible yet, and the reason is worth
-stating because the ABI alone suggests otherwise: every reference parameter of an `extern "C"`
-function is an out-parameter (C writes through it), and the checker admits only `&mut` handles,
-`CPtr`, `CMutPtr` and `extern "C"` records there, so a `&dyn I` or `&mut dyn I` parameter is
-refused ("an extern C out-parameter must be &mut a handle, CPtr, CMutPtr or extern "C" record").
-Nor can a program reach the pair's address to pass it as a `CPtr`: `cptr` takes a byte sequence or
-view, and a reference does not convert to an integer. `dynf-reject-c-boundary` pins that refusal, so
-admitting the form later is a decision with a test to update. When it is admitted, the shape is
-already settled by this note: a `&dyn I` parameter is one pointer to a `const DynPair *`, because the
-value is one pointer, which is the whole argument for the choice below.
+The layout is pinned by a *call*, too: a shared `&dyn I` parameter of an `extern "C"` function is
+the C `const DynPair *` - one pointer argument, the address of the pair - so a C callee reads word 0
+at `*(void **)p` for the object and word 1 at `*((void **)p + 1)` for its table, and calls the
+method it finds at `table[1]` (or `table[0]` to drop it). `dynf-pair-c-boundary` pins that from the
+Grail side: the call site passes exactly one word (`movq ...,%rdi; call c_area`), the callee reads
+word 0 at `(%rdi)` and word 1 at `8(%rdi)`, and one callee serves two concrete types - so the table
+really travels with the pointer.
+
+That admission is the *only* one: every other reference parameter of an `extern "C"` function is an
+out-parameter (C writes through it) and the checker admits only `&mut` handles, `CPtr`, `CMutPtr`
+and `extern "C"` records there, which is why `&mut dyn I` stays refused - C writing a 16-byte pair
+is not part of this ABI, and a pair a callee may rewrite would need its own statement and its own
+ownership rules. `dynf-reject-c-boundary` pins that refusal. The `&dyn I` parameter is unlike the
+rest in being a *reader*: it is passed as the value rather than as an out-parameter's address, which
+is the same one-word-is-one-pointer argument the next section makes.
 
 ## Two modules must agree: the interface carries the ABI
 
@@ -154,6 +159,9 @@ the one the rest of the compiler uses.
 
 - `dynf-pair-layout` - word 0 reaches the object (a `&mut dyn` method writes through it) and the
   offsets: `8(handle)` is the vtable, `8(vtable)` method 0, `16(vtable)` method 1.
+- `dynf-pair-c-boundary` - the layout through an `extern "C"` call: one pointer argument, and the
+  callee reads word 0 at `(%rdi)` and word 1 at `8(%rdi)`, for two concrete types through the same
+  callee.
 - `dynf-borrowed-mut-method` - a `&mut dyn` method mutating through the object, observed after the
   borrow ends; two objects of different concrete types through the same interface.
 - `dynf-owned-dyn-field` - an owned `dyn I` in a record field, passed by value, returned from a

@@ -202,8 +202,12 @@ and dropping it runs the concrete type's destructor through the table's first sl
 
 Interface files carry the form, so a separately compiled module can take a `&dyn Shape` as
 naturally as it takes a `&u64` - and they state the pair's layout, so two modules built for
-different layouts are refused rather than linked together. A borrowed object cannot yet cross into
-a C function: a reference parameter of an `extern "C"` function means "C writes through this" and a
-`&dyn` is not one of the shapes that admits.
+different layouts are refused rather than linked together.
+
+A borrowed object can cross into C: a shared `&dyn Shape` parameter of an `extern "C"` function is a
+`const DynPair *`, one pointer to the two words, so C reads the object at `p->data` and its table at
+`p->vtable`. `&mut dyn Shape` is not admitted there - a reference parameter of an `extern "C"`
+function otherwise means "C writes through this", and a C callee rewriting a pair is not part of the
+ABI.
 
 **Try it:** instantiate identity with a string, then consume the returned string exactly once.

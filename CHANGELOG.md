@@ -22,9 +22,12 @@
   differs, so separately compiled modules cannot be built for different `dyn` layouts; a v3 file
   meeting this compiler is refused with the version it was written in. Cases: `dynf-pair-layout`
   (the offsets, by assembly), `dynf-borrowed-mut-method`, `dynf-owned-dyn-field`,
-  `dynf-pair-fields-and-vectors`, `dynf-pair-optimized`, and `dynf-reject-c-boundary`, which pins the
-  gap that a `&dyn` cannot yet be an `extern "C"` parameter (a reference parameter there is an
-  out-parameter and a `&dyn` is not one of the shapes it admits).
+  `dynf-pair-fields-and-vectors`, `dynf-pair-optimized`, and `dynf-pair-c-boundary`, which pins the
+  layout by a *call*: a shared `&dyn I` parameter of an `extern "C"` function is now the C
+  `const DynPair *` - one pointer argument, the pair's address - so a callee reads the object at word
+  0 and its table at word 1, and one callee serves two concrete types. That is the only reference
+  parameter that is a reader rather than an out-parameter; `&mut dyn I` stays refused (C writing a
+  16-byte pair is not part of the ABI), which `dynf-reject-c-boundary` pins.
 
 - Ranges: a range value is now a `Span` (`lib/span.grl`) that carries the slice it was made from - a
   byte view plus its two ends - so a range its slice does not have is refused where the span is made
