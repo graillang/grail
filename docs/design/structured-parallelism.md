@@ -92,6 +92,13 @@ plain value or shared reference that satisfies Share; items/results are owned Se
 borrows and no task handles; the body result and mutex payloads cannot contain handles, so a
 handle cannot outlive its scope; scope references are neither Send nor Share.
 
+A task that fails - a failed check inside it, or an explicit `task_fail(text)` - is contained at its
+own top frame and delivered to the join as a value: `try_join(handle)` returns `R |? TaskFailure`
+instead of ending the process, while `join(handle)` keeps "must have succeeded" and reports the
+failure at the join. The value cannot be dropped unhandled. Nothing is unwound and nothing is
+allocated on the failure path; the discarded stack's owners are the accepted leak. See
+[task-failure-containment.md](task-failure-containment.md).
+
 Cancellation is cooperative and observable: `sc.cancel()` sets the scope flag, `sc.cancelled()` /
 `token.cancelled()` read it, and tasks waiting in cancellable operations (pipe reads/writes,
 `host::sleep_ms`) are woken and return early. Cancellation never abandons a stack: the task

@@ -38,8 +38,9 @@ So the containment point is **the task's own top frame**, installed by the tramp
 task (`rt_green_main`), and a check failure inside the task does exactly what a suspension does,
 except that the task is never resumed:
 
-1. the failure is written into a small fixed-size area of the **task record** - kind, message text,
-   call site text (see below);
+1. the failure is written into a small fixed-size area of the **task record** - the check kind, its
+   two operands, and the address of the *statement entry* that failed, taken from the compiler's
+   site table (static data, valid forever; see below);
 2. the task is marked finished;
 3. control returns to the scheduler on the worker's stack (`rt_os_ctx_leave`);
 4. the scheduler takes its ordinary "this task is done" path: it releases the task's stack, publishes
@@ -48,6 +49,14 @@ except that the task is never resumed:
 
 Nothing is thrown, nothing is caught, no frame is unwound: the stack is *discarded whole*, exactly
 the cost B5 already accepts for an abort, scaled down from the process to one task.
+
+**Nothing is allocated at the containment point**, which is a soundness property rather than an
+optimization: a check can fail inside a runtime function, and a path that reached the allocator would
+turn a contained failure into a deadlock if the failing thread already held the allocator lock. The
+kind, the operands and the site entry are numbers, the site walk uses the task record's own scratch
+words, and the human-readable text is built later, by the joiner that asked for it. The one exception
+is an explicit `task_fail(text)`: it copies the caller's bytes into an owned text *before* leaving
+the stack, in ordinary compiled code where no runtime lock is held.
 
 ## The join result
 
@@ -78,16 +87,21 @@ match try_join(t) {           // or inspect both arms
 
 | field | type | meaning |
 | --- | --- | --- |
-| `kind` | `u64` | which failure: 1 index, 2 arithmetic overflow, 5 division by zero, 6 unwrap, 12 assertion, 13 explicit `task_fail`, ... (the numbers `rt_fail` already uses) |
-| `message` | `string` | the human text without its `error: ` prefix and without the location, e.g. `index 7 out of bounds for length 3` |
-| `site` | `string` | the location lines `rt_fail` would print: ` --> file:line:col` and any ` = called from` lines; empty when the program has no site table |
+| `kind` | `u64` | which failure: 1 index, 2 arithmetic overflow, 3 negative-to-unsigned, 4 no matching variant, 5 division by zero, 6 unwrap of None/Err, 7 range, 8 pop from empty, 9 byte range, 10 C array length, 11 index, 12 assertion, 13 explicit `task_fail` - the numbers `rt_fail` already uses |
+| `message` | `string` | the human text without its `error: ` prefix and without the location, e.g. `index 7 out of bounds for length 3`, or the text an explicit `task_fail` gave |
+| `site` | `string` | ` --> file:line:col` of the statement that failed, the line the report would print first; empty when the program carries no site table |
 
-The union value and the `TaskFailure` record are heap records of 2 and 3 words. `try_join`
-allocates the union record on both arms; the failure record only on the failure arm; the success
-arm of `join` allocates nothing at all. The **success path of a task is untouched**: same
-trampoline, same result word, same one published store, no added check. Containment is armed for
-every task, but arming costs one load of the current-task word, which the check-failure path
-already has to know.
+The site is the innermost program location only, not the whole ` = called from` chain: walking the
+chain needs the failing frames, and by the time a program looks at the value those frames are gone.
+Capturing the chain instead would mean formatting text on the failure path, which is the allocation
+the containment point must not do.
+
+The union value and the `TaskFailure` record are heap records of 2 and 3 words, and the two texts
+are built when the join produces them - the union record on both arms, the failure record and its
+texts only on the failure arm. The **success path of a task is untouched**: same trampoline, same
+result word, same one published store, no added check, and `join` allocates nothing at all.
+Containment is armed for every green task, and arming costs nothing per task: the decision is one
+load of the current-task word inside `rt_fail`, which only a failing program reaches.
 
 ### Discarding the value is a compile error
 
@@ -166,9 +180,10 @@ Two consequences are stated rather than hidden:
   per-frame slot map, and reconstructing one is exactly the unwind data B5 refuses to emit), so the
   counter cannot subtract them exactly. The epilogue therefore still aborts - with exit 134 - when
   nothing was contained, and after a contained failure it writes
-  `note: N allocation(s) still live after a contained task failure` to fd 2 and exits normally. The
-  leak is *reported*, never silently accepted. Programs that do not contain a failure are unaffected
-  byte for byte.
+  `note: N allocation(s) still live after M contained task failure(s); the owners of a discarded
+  stack are not released` to fd 2 and exits normally. The leak is *reported*, never silently
+  accepted, and the note does not claim the count is exactly the discarded frames' owners - it is
+  everything still live. Programs that contain nothing are unaffected byte for byte.
 
 ## Alternatives considered
 
@@ -194,19 +209,32 @@ Two consequences are stated rather than hidden:
 
 ## Verification
 
-`tests/native-cases.json`, all prefixed `tfail-`: an explicit failure observed at the join with its
-message; a trapped task (out-of-bounds) whose process survives and whose join sees the site; one
-failing and one succeeding task in the same scope; a task spawning a child that fails, with the
-documented scope-exit propagation; a success-path case whose output is unchanged; and a reject case
-for a discarded outcome. `compiler/tests/tasks.grl` keeps the unchanged `join` behaviour, and
-`abort-in-green-task-ends-process` still ends the process 134 - now at the join rather than at the
-failing instruction.
+`tests/native-cases.json`, all prefixed `tfail-`, each also compiled a second time against emitted
+module interfaces:
+
+- `tfail-explicit-failure-at-join` - an explicit failure, its kind and its message at the join;
+- `tfail-trap-contained-at-join` - an out-of-bounds index: the process survives, the join reports
+  the message, the kind and a non-empty site;
+- `tfail-scope-one-fails-one-succeeds` - a failure is one task's outcome: the siblings finish and
+  their joins return their values;
+- `tfail-child-failure-propagates-to-parent-join` - an unjoined failure inside a nested scope is
+  re-raised at that scope exit and contained by the parent task, so the parent's join sees it;
+- `tfail-success-path-unchanged` - the same output as before containment existed;
+- `tfail-reject-discarded-outcome` - a dropped `try_join` is refused.
+
+`task-scopes-join-cancel-abandon`, `abort-in-green-task-ends-process`, `task-100k-spawn-join-checksum`
+and the pool cases keep the `join` and scheduler behaviour they pinned: `abort-in-green-task-ends-process`
+still ends the process with status 134 and the same stdout - now because the join re-raises, not
+because the failing instruction killed the process.
 
 ## Limits
 
-- Green scheduler only; thread-per-task keeps the process abort.
-- The failure is a value, not a backtrace: `site` carries the location lines the runtime can walk
-  from the failing frame, which is what `rt_fail` prints today.
+- Green scheduler only; `GRAIL_TASKS=thread` keeps the process abort (a task owns its OS thread
+  there, so there is no scheduler frame to return to).
+- The failure is a value, not a backtrace: `site` is the failing statement's location, not the
+  caller chain (see above).
+- A check failure that happens while a task is *not* running (the main thread, an offload thread, a
+  C callback) is not contained: there is no task boundary there.
 - Child tasks are not cancelled by a parent's failure; a nested scope exit re-raises instead.
 - A program that never calls `try_join` behaves exactly as before, including the leak counter.
 - Windows and macOS are the same code path (the platform supplies the context switch); only Linux

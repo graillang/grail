@@ -421,6 +421,13 @@ level), since `task_scope`'s result type has no failure arm to carry it. `rt_abo
 invariants, allocation failure, the end-of-main leak check, stack overflow - are **not** contained:
 they are not values.
 
+**Mechanism, as implemented.** `rt_fail` asks whether the current thread is running a green task and,
+if it is, records the check kind, its operands and the failing statement's static site-table entry in
+the task record - **allocating nothing**, so a trap cannot deadlock on the allocator lock - marks the
+task finished and returns to the scheduler's saved context. The scheduler's ordinary completion path
+releases the (recyclable) stack and publishes the task to its joiner. The message and site texts are
+built later, by the joiner that asked for them.
+
 **Accepted cost.** The dead frames' owned heap values leak. The stack mapping is recycled (stack
 bytes are scratch, not ownership), and the end-of-main leak counter cannot subtract the leaked blocks
 exactly (no per-frame slot map exists, and building one is the unwind data B5 refuses to emit), so
@@ -448,8 +455,9 @@ failure disappears - which is why the check is a property of the type and the op
 the source, not a default. If the leak accounting is relied on after a containment, the note on fd 2
 is the only evidence; nothing subtracts an exact figure.
 
-**Enforced by.** `rt_fail`'s containment branch and `rt_contain`,
-`rt_task_outcome`/`rt_task_failure`, the extended task record in `compiler/runtime.grl`;
+**Enforced by.** `rt_fail`'s containment branch, `rt_contain_site`/`rt_contain_text`, `rt_site_here`,
+`rt_task_outcome`/`rt_task_message`/`rt_task_site` and the extended (240-byte) task record in
+`compiler/runtime.grl`;
 `rt_scope_end`'s re-raise; the `try_join`, `task_fail` and `ignore_failure` builtins,
 `make_union`'s `.outcome` decl, `.outcome::Failure`, and the drop check in `release`
 (`compiler/native.grl`); the `tfail-` cases in `tests/native-cases.json`; and the unchanged
