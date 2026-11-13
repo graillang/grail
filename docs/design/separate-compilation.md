@@ -6,7 +6,11 @@ is today, so every claim about current behaviour can be checked in `compiler/nat
 ## What the compiler does today
 
 - Every module named on the command line is parsed into one program: `c.decls` (records, enums,
-  unions), `c.funcs` (functions, with `module` and `name`), `c.aliases`, `c.types`.
+  unions), `c.funcs` (functions, with `module` and `name`), `c.aliases`, `c.types`. The set is not
+  the command line's alone any more: the compiler resolves `use NAME;` through its module roots and
+  compiles what it finds, so a driver passes roots rather than a hand-maintained list
+  (`docs/design/module-resolution.md`). A module's *index* is still its argument index, which is what
+  the rest of this note means by "the file's index".
 - Name resolution is by `(module, name)` (`find_decl`, `find_func`), so nominal identity across
   modules already exists — two records with the same name in different modules are different types.
 - Symbols mangle to `f_<module>_<name>` (with a leading `_` on Mach-O), except `runtime`, whose

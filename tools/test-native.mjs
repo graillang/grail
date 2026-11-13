@@ -157,11 +157,36 @@ function failureBlock(result) {
   return lines.join('\n');
 }
 
+// A codegen pin is a string the emitted assembly must (or must not) contain, or an object
+// `{"in": "SYMBOL", "text": "..."}` that looks only at that function's body. The scoped form is what
+// a pin about one function means: every program compiles the standard library, whose own checked
+// arithmetic contains the traps a pin about the program's code is trying to see or not see.
+function pinnedAssembly(text, pin) {
+  if (typeof pin === 'string') return text;
+  const head = `\n${pin.in}:`;
+  const at = text.indexOf(head);
+  if (at < 0) throw new Error(`the emitted assembly has no function \`${pin.in}\``);
+  const lines = text.slice(at + 1).split('\n');
+  const body = [lines[0]];
+  for (const line of lines.slice(1)) {
+    // The next symbol at column 0 ends the body; `SYMBOL.suffix:` (a refinement's proved entry) and
+    // `.L` local labels stay in it.
+    if (/^[^\s.][^\s]*:$/.test(line) && !line.startsWith(`${pin.in}.`)) break;
+    body.push(line);
+  }
+  return body.join('\n');
+}
+function pinText(pin) {
+  return typeof pin === 'string' ? pin : pin.text;
+}
+
 // ---- one case --------------------------------------------------------------------------------
 // `observed` is filled in as the case runs, so a failure report can show the actual values even
 // when the assertion that failed only named one of them.
 function runCase(test, position, context) {
-  const { compiler, target, work, snapshot, runtime, osRuntime } = context;
+  const { compiler, target, work, snapshot, runtime, osRuntime, roots } = context;
+  // `noRoots` is the compile the compiler's own diagnostic is about: no module root at all.
+  const caseRoots = test.noRoots ? [] : [...roots, ...(test.moduleRoots ?? [])];
   const observed = { source: context.sources[position], stdout: null, stderr: null, status: null, signal: null };
   const result = { position, name: test.name, test, observed, message: '' };
   try {
@@ -172,11 +197,10 @@ function runCase(test, position, context) {
     let files;
     if (test.files) files = [...test.files, ...(test.modules ?? [])];
     else { const input = join(directory, 'input.grl'); writeFileSync(input, test.source); files = [input, ...(test.modules ?? [])]; }
-    files = stdClosure(files, snapshot);
     if (test.reject) {
       const assembly = join(directory, 'prior.s');
       writeFileSync(assembly, 'prior valid artifact');
-      const rejected = execute(compiler, ['--target', target, ...(test.flags ?? []), assembly, ...files, runtime, osRuntime]);
+      const rejected = execute(compiler, [...caseRoots, '--target', target, ...(test.flags ?? []), assembly, ...files, runtime, osRuntime]);
       observed.status = rejected.status;
       observed.signal = rejected.signal;
       observed.stdout = `${rejected.stdout}${rejected.stderr}`;
@@ -215,13 +239,13 @@ function runCase(test, position, context) {
         // The interface files come first: the first source after OUT.s is the entry of the emit run,
         // and a reject case's own entry is the thing the rejection is about - so the interface is
         // emitted from these files, which pull in the modules they use.
-        const emit = execute(compiler, ['--target', target, '--emit-interface', ifaces, join(directory, 'emit.s'), ...stdClosure(stand, snapshot), ...stdClosure(modules, snapshot), runtime, osRuntime]);
+        const emit = execute(compiler, [...caseRoots, '--target', target, '--emit-interface', ifaces, join(directory, 'emit.s'), ...stand, ...modules, runtime, osRuntime]);
         assert.equal(emit.status, 0, `${test.name}: emitting interfaces failed: ${emit.stdout}${emit.stderr}`);
         const separate = stand.length !== 0;
         const mode = separate ? ['--use', ifaces] : ['--interface', ifaces];
         const entry = separate ? (test.files ?? []) : files;
         assert.ok(entry.length !== 0, `${test.name}: an interface build needs an entry file`);
-        const viaInterface = execute(compiler, ['--target', target, ...mode, join(directory, 'iface.s'), ...entry, runtime, osRuntime]);
+        const viaInterface = execute(compiler, [...caseRoots, '--target', target, ...mode, join(directory, 'iface.s'), ...entry, runtime, osRuntime]);
         assert.equal(viaInterface.status, 1, `${test.name}: the interface build must refuse it too: ${viaInterface.stdout}${viaInterface.stderr}`);
         for (const fragment of diagnostics) {
           assert.ok(`${viaInterface.stdout}${viaInterface.stderr}`.includes(fragment), `${test.name}: expected diagnostic ${fragment} from the interface build: ${viaInterface.stdout}${viaInterface.stderr}`);
@@ -236,13 +260,13 @@ function runCase(test, position, context) {
     let viaInterface;
     if (test.interfaces) {
       const ifaces = join(directory, 'ifaces');
-      const emit = execute(compiler, ['--target', target, '--overflow=' + (test.overflow ?? 'checked'), '--emit-interface', ifaces, join(directory, 'emit.s'), ...stdClosure(files, snapshot), runtime, osRuntime]);
+      const emit = execute(compiler, [...caseRoots, '--target', target, '--overflow=' + (test.overflow ?? 'checked'), '--emit-interface', ifaces, join(directory, 'emit.s'), ...files, runtime, osRuntime]);
       assert.equal(emit.status, 0, `${test.name}: emitting interfaces failed: ${emit.stdout}${emit.stderr}`);
-      const verify = execute(compiler, ['--target', target, '--interface', ifaces, '--verify-interface', join(directory, 'verify.s'), ...files, runtime, osRuntime]);
+      const verify = execute(compiler, [...caseRoots, '--target', target, '--interface', ifaces, '--verify-interface', join(directory, 'verify.s'), ...files, runtime, osRuntime]);
       assert.equal(verify.status, 0, `${test.name}: interfaces disagree with their sources: ${verify.stdout}${verify.stderr}`);
       viaInterface = { ifaces };
     }
-    const executable = compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', runtime, osRuntime, extra: test.flags ?? [] });
+    const executable = compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', runtime, osRuntime, extra: [...caseRoots, ...(test.flags ?? [])] });
     // A codegen case pins what a build must (and must not) find in the assembly it emitted: a proved
     // entry point, or a bounds check the refinements removed. `compileProgram` leaves the `.s` beside
     // the program.
@@ -250,11 +274,11 @@ function runCase(test, position, context) {
     // removed, so that build is not what they describe.
     if ((test.asm || test.asmAbsent) && process.env.GRAIL_VERIFY_FACTS !== '1') {
       const text = readFileSync(join(directory, 'program.s'), 'utf8');
-      for (const pin of test.asm ?? []) assert.ok(text.includes(pin), `${test.name}: expected assembly to contain ${JSON.stringify(pin)}`);
-      for (const pin of test.asmAbsent ?? []) assert.ok(!text.includes(pin), `${test.name}: expected assembly not to contain ${JSON.stringify(pin)}`);
+      for (const pin of test.asm ?? []) assert.ok(pinnedAssembly(text, pin).includes(pinText(pin)), `${test.name}: expected assembly to contain ${JSON.stringify(pin)}`);
+      for (const pin of test.asmAbsent ?? []) assert.ok(!pinnedAssembly(text, pin).includes(pinText(pin)), `${test.name}: expected assembly not to contain ${JSON.stringify(pin)}`);
     }
     // The interface build is a second program from the same sources; it has to behave the same.
-    const interfaceExecutable = viaInterface ? compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', runtime, osRuntime, name: 'program-interface', interfaces: viaInterface.ifaces }) : null;
+    const interfaceExecutable = viaInterface ? compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', runtime, osRuntime, name: 'program-interface', interfaces: viaInterface.ifaces, extra: caseRoots }) : null;
     if (test.compileOnly) { result.outcome = 'pass'; return result; }
     // A case may pin the environment it needs (`"env": {"GRAIL_POOL_WORKERS": "1"}`), which is how a
     // test proves a pool size the host would not otherwise choose. Everything else is inherited.
@@ -366,33 +390,25 @@ function stage(context) {
       return path;
     });
   }
+  // A case's `roots` are fixtures a `use NAME;` reaches: staged under their own names in a directory
+  // of their own, which the compiler is given as a module root (docs/design/module-resolution.md).
+  // This is the one staging that must keep a fixture's name - `modules` and `files` are named on the
+  // command line, so their staged names do not matter.
+  for (const [i, test] of context.cases.entries()) {
+    if (!test.roots) continue;
+    const byName = join(snapshot, `${i}-root`);
+    mkdirSync(byName, { recursive: true });
+    for (const file of test.roots) writeFileSync(join(byName, basename(file)), readFileSync(resolve(root, file)));
+    test.moduleRoots = ['--module-root', byName];
+  }
   // A case's `data` files (what an `@embed` reads) are staged under their own names beside its
   // sources, so a path relative to the source resolves as it does in a project.
   for (const test of context.cases) for (const file of test.data ?? []) writeFileSync(join(snapshot, basename(file)), readFileSync(resolve(root, file)));
-  return { ...context, snapshot, runtime, osRuntime };
+  // The compiler resolves `use NAME;` through its module roots, so a case's stdlib modules are
+  // reached by name from the staged std snapshot (docs/design/module-resolution.md).
+  return { ...context, snapshot, runtime, osRuntime, roots: ['--module-root', stdSnapshot] };
 }
 
-
-// A stdlib module may import other stdlib modules (`lib/fs.grl` uses `time`), and a case that names
-// only the top-level one would leave `time::Timestamp` unresolved inside it. The staged std snapshot
-// holds every module, so the dependency set is closed over its own `use` lines.
-function stdClosure(list, snapshot) {
-  const stdDir = join(snapshot, 'lib');
-  const out = [...list];
-  const seen = new Set(out.map(file => basename(file)));
-  for (let i = 0; i < out.length; i++) {
-    if (dirname(out[i]) !== stdDir) continue;
-    for (const line of readFileSync(out[i], 'utf8').split('\n')) {
-      const m = /^\s*use\s+([A-Za-z_][A-Za-z0-9_]*)\s*;/.exec(line);
-      if (!m) continue;
-      const dep = join(stdDir, `${m[1]}.grl`);
-      if (!existsSync(dep) || seen.has(`${m[1]}.grl`)) continue;
-      seen.add(`${m[1]}.grl`);
-      out.push(dep);
-    }
-  }
-  return out;
-}
 
 // Runs the selection in this process. The report is a value: a --jobs parent merges one per stripe.
 function runSelection(options, context) {

@@ -728,6 +728,17 @@ struct C {
     // Interfaces read with `--use`, waiting for their definition sweep.
     iface_loaded: u8[][],
     iface_loaded_path: u8[][],
+    // Module roots (`--module-root DIR`, repeatable) and what they resolved
+    // (docs/design/module-resolution.md). `mod_names` is every module the program has - the command
+    // line's own names first - so a `use` of a name already there resolves to that file and no
+    // other; `mod_files` holds the sources resolution added, after the command line's own, and
+    // `mod_base` is how many arguments the command line gave, which is where that list starts.
+    mod_roots: u8[][],
+    mod_names: u8[][],
+    mod_files: u8[][],
+    mod_base: u64,
+    mod_list: u64,
+    mod_list_file: u8[],
     // Environment records (module `.closure`) the surface being emitted reaches, and the name each
     // is given inside the interface, so a reader can rebuild a closure type's captures exactly.
     iface_env: u64[],
@@ -2124,10 +2135,7 @@ fn site_words<a>(line: &a [u8]) -> u64[] {
 }
 // A position's file name: a command-line input, or a generic body an interface carried (load_file).
 fn site_path<a>(c: (&a C), index: u64) -> u8[] {
-    if 1000000 <= index {
-        return c.virt_path[index - 1000000].copy();
-    }
-    return host::arg(index + c.arg_offset);
+    return input_path(&c, index);
 }
 // Names a position's file relative to the working directory when it lies under it - `src/main.grl`,
 // the form a reader wants, and the one that keeps a checkout's own location out of what the compiler
@@ -8282,7 +8290,8 @@ fn file_path<a>(c: (&a mut C), index: u64) -> u8[] {
         return c.virt_path[index - 1000000].copy();
     }
     mut out = u8[];
-    push_bytes(&mut out, view(host::arg(index + c.arg_offset)));
+    path := input_path(&c, index);
+    push_bytes(&mut out, view(path));
     return out;
 }
 // A literal the lexer could not finish arrives as a token (kind 998 a character literal, 996 an
@@ -8343,8 +8352,7 @@ fn load_file<a>(c: (&a mut C), index: u64) -> unit {
         path = c.virt_path[index - 1000000].copy();
         src = c.virt_text[index - 1000000].copy();
     } else {
-        offset := c.arg_offset;
-        arg := host::arg(index + offset);
+        arg := input_path(&c, index);
         if host::exists(view(arg)) == 0 {
             host::print(view("grail: cannot read input file "));
             host::print(view(arg));
@@ -14720,7 +14728,11 @@ fn check_interfaces<a>(c: (&a mut C)) -> unit {
         if defined == 0 {
             fail(&mut c, view("unknown interface in generic bound"));
         }
-        if find_decl(&mut c, view(module), view(name)) != 0 {
+        // A census of the module's names, not a reference to one: `find_decl` would report that a
+        // private nominal type is not visible from whichever module happened to be parsed last, which
+        // is not what this rule is about (`interface Same {} struct Same {}` in one module is the
+        // conflict, wherever the file sits in the program).
+        if find_decl_internal(&mut c, view(module), view(name)) != 0 {
             fail(&mut c, view("interface and nominal type names conflict"));
         }
     }
@@ -15660,6 +15672,14 @@ fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [
         push_bytes(&mut keyed, view(host::read_file(view(path))));
         fi += 1;
     }
+    // The files the module roots added are inputs of the value too: the probe is compiled with the
+    // same roots, so a change to a resolved module changes what the call computes.
+    for i in c.mod_files.len() {
+        path := c.mod_files[i];
+        files.push(path.copy());
+        push_bytes(&mut keyed, view(path));
+        push_bytes(&mut keyed, view(host::read_file(view(path))));
+    }
     digest := iface_digest(&keyed);
     mut dir = copy_bytes(view(".work/comptime/"));
     for i in 24 {
@@ -15687,9 +15707,17 @@ fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [
         mut opt = 1;
         while opt < offset + 1 {
             a := host::arg(opt);
+            // The probe is a compile of the same program, so it resolves `use` in the same roots; the
+            // options that change what the code means travel with it.
             if starts_with(view(a), view("--overflow=")) {
                 cmd.push(32);
                 push_bytes(&mut cmd, view(a));
+            } else if same(view(a), view("--module-root")) {
+                cmd.push(32);
+                push_bytes(&mut cmd, view("--module-root"));
+                cmd.push(32);
+                push_bytes(&mut cmd, view(ct_shell_quote(view(host::arg(opt + 1)))));
+                opt += 1;
             }
             opt += 1;
         }
@@ -16204,6 +16232,338 @@ fn in_std_dir<a>(path: &a [u8]) -> u64 {
     }
     return host::exists(view(probe));
 }
+// ---- module roots: the compiler resolves `use` (docs/design/module-resolution.md) ---------------
+//
+// `use NAME;` names a module. Until this existed every module of a program had to be named on the
+// command line, so every driver had to guess the set by scanning `use` lines itself - and a guess
+// that missed a transitive import surfaced as an unknown type inside somebody else's module. The
+// compiler now closes the set: a name the command line does not provide is looked for as
+// `ROOT/NAME.grl` in every module root, in order, and the file that answers is compiled after the
+// command line's own. The closure is a queue, so a chain of imports resolves transitively, and a
+// name enters the set before its own `use` lines are read, so a cycle ends instead of looping.
+//
+// A source's header - its `module` line and its `use` lines - is scanned before anything is parsed,
+// when the module set is computed. `header_of` reads only that region of the text.
+struct Header {
+    module: u8[],
+    uses: u8[][]
+}
+fn hdr_skip_space<a>(text: &a [u8], from: u64, end: u64) -> u64 {
+    mut i = from;
+    while i < end {
+        if (text[i] == 32) || (text[i] == 9) {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    return i;
+}
+fn hdr_word<a>(text: &a [u8], from: u64, end: u64) -> u8[] {
+    mut i = from;
+    mut out = u8[];
+    while i < end {
+        ch := text[i];
+        ok := ((ch >= 97) & (ch <= 122))
+            | ((ch >= 65) & (ch <= 90))
+            | ((ch >= 48) & (ch <= 57))
+            | (ch == 95);
+        if !ok {
+            break;
+        }
+        out.push(ch);
+        i += 1;
+    }
+    return out;
+}
+// The header of one source: the module it declares (empty when it declares none, which only the
+// entry file may do) and the module names its `use` lines name. A `use NAME::item;` line names
+// module `NAME`: the scan stops at the first character that is not in an identifier, which is `:`.
+fn header_of<a>(text: &a [u8]) -> Header {
+    mut h = Header { module: u8[], uses: u8[][] };
+    mut pos: u64 = 0;
+    mut stop = false;
+    while (pos < text.len()) & !stop {
+        mut end = pos;
+        while end < text.len() {
+            if text[end] == 10 {
+                break;
+            }
+            end += 1;
+        }
+        a := hdr_skip_space(text, pos, end);
+        if a < end {
+            if text[a] == 47 {
+                // `//` comment: not a header item, and nothing else in a header starts with `/`.
+            } else {
+                w := hdr_word(text, a, end);
+                if same(view(w), view("use")) {
+                    b := hdr_skip_space(text, a + w.len(), end);
+                    name := hdr_word(text, b, end);
+                    if name.len() != 0 {
+                        h.uses.push(name);
+                    }
+                } else if same(view(w), view("module")) {
+                    b := hdr_skip_space(text, a + w.len(), end);
+                    name := hdr_word(text, b, end);
+                    if name.len() != 0 {
+                        h.module = name;
+                    }
+                } else if same(view(w), view("unsafe")) {
+                    b := hdr_skip_space(text, a + w.len(), end);
+                    w2 := hdr_word(text, b, end);
+                    if !same(view(w2), view("module")) {
+                        stop = true;
+                    } else {
+                        s := hdr_skip_space(text, b + w2.len(), end);
+                        name := hdr_word(text, s, end);
+                        if name.len() != 0 {
+                            h.module = name;
+                        }
+                    }
+                } else {
+                    // The first item: the header is over.
+                    stop = true;
+                }
+            }
+        }
+        pos = end + 1;
+    }
+    return h;
+}
+// The directory *containing* `path`, separator included, or empty for a bare name.
+fn mod_dirname<a>(path: &a [u8]) -> u8[] {
+    mut cut = 0;
+    mut found = 0;
+    for i in path.len() {
+        if (path[i] == 47) || (path[i] == 92) {
+            cut = i + 1;
+            found = 1;
+        }
+    }
+    mut out = u8[];
+    if found != 0 {
+        for i in cut {
+            out.push(path[i]);
+        }
+    }
+    return out;
+}
+// `dir` with a separator on its end, so a name can be appended without checking again.
+fn mod_dir<a>(dir: &a [u8]) -> u8[] {
+    mut out = copy_bytes(view(dir));
+    if out.len() != 0 {
+        last := out[out.len() - 1];
+        if (last != 47) & (last != 92) {
+            out.push(47);
+        }
+    }
+    return out;
+}
+fn mod_add_root<a>(c: (&a mut C), dir: &a [u8]) -> unit {
+    if dir.len() == 0 {
+        return ();
+    }
+    for i in c.mod_roots.len() {
+        if same(view(c.mod_roots[i]), view(dir)) {
+            return ();
+        }
+    }
+    c.mod_roots.push(copy_bytes(view(dir)));
+    return ();
+}
+// The file a module name resolves to, or empty: `ROOT/NAME.grl` in the first root that holds it.
+fn mod_find<a>(c: (&a C), name: &a [u8]) -> u8[] {
+    for i in c.mod_roots.len() {
+        mut path = mod_dir(view(c.mod_roots[i]));
+        push_bytes(&mut path, view(name));
+        push_bytes(&mut path, view(".grl"));
+        if host::exists(view(path)) != 0 {
+            return path;
+        }
+    }
+    return u8[];
+}
+fn mod_known<a>(c: (&a C), name: &a [u8]) -> bool {
+    for i in c.mod_names.len() {
+        if same(view(c.mod_names[i]), view(name)) {
+            return true;
+        }
+    }
+    return false;
+}
+// `--use DIR` answers for this module already: its interface is in DIR, so its source is not added.
+fn mod_from_iface<a>(c: (&a C), name: &a [u8]) -> bool {
+    if c.iface_use.len() == 0 {
+        return false;
+    }
+    path := iface_join(view(c.iface_use), view(name), view(".iface"));
+    return host::exists(view(path)) != 0;
+}
+// A `use` line no root answers for. The message names the module, the file that asked, and every
+// root that was searched; the behaviour it replaces was an unknown type inside a module the reader
+// did not write.
+fn unresolved_module<a>(c: (&a mut C), name: &a [u8], from: &a [u8]) -> unit {
+    mut msg = u8[];
+    push_bytes(&mut msg, view("cannot resolve module `"));
+    push_bytes(&mut msg, view(name));
+    push_bytes(&mut msg, view("` used by "));
+    push_bytes(&mut msg, view(from));
+    if c.mod_roots.len() == 0 {
+        push_bytes(&mut msg, view(": no module root was given (--module-root DIR), and "));
+        push_bytes(&mut msg, view(name));
+        push_bytes(&mut msg, view(" is not named on the command line"));
+    } else {
+        push_bytes(&mut msg, view(": no module root holds `"));
+        push_bytes(&mut msg, view(name));
+        push_bytes(&mut msg, view(".grl`; searched "));
+        for i in c.mod_roots.len() {
+            if i != 0 {
+                push_bytes(&mut msg, view(", "));
+            }
+            push_bytes(&mut msg, view(c.mod_roots[i]));
+        }
+    }
+    fail_option(&mut c, view(msg));
+    return ();
+}
+// The module set of a program: the command line's own files, then every module their `use` lines
+// reach through the roots. `mod_base` is how many arguments the command line gave, which is where
+// the added files start, so a file's index stays the argument index it always was.
+fn resolve_modules<a>(c: (&a mut C), offset: u64) -> unit {
+    base := host::argc() - offset;
+    exchange(&mut c.mod_base, base);
+    if base < 3 {
+        return ();
+    }
+    if c.separate != 0 {
+        // One part of a build whose module set is already settled (the per-module shape): every module
+        // the program has is another part, so resolving `use` here would compile a module into this
+        // part that the build also compiles into its own. The driver names the whole set (it asks with
+        // `--print-inputs`), and a part whose `use` is not in it is a build error, not a new module.
+        return ();
+    }
+    // The roots, in the order `use` lines are tried against them: `--module-root DIR` as given (the
+    // option loop added those already), then the stdlib layout the command line itself names - a file
+    // beside core.grl is a standard module, so its directory is a std root (`in_std_dir`) - and then
+    // the project's own `src/`, when the working directory holds a grail.toml.
+    mut i = 2;
+    while i < base {
+        path := host::arg(i + offset);
+        if in_std_dir(view(path)) != 0 {
+            dir := mod_dirname(view(path));
+            mod_add_root(&mut c, view(dir));
+        }
+        i += 1;
+    }
+    if host::exists(view("grail.toml")) != 0 {
+        mod_add_root(&mut c, view("src"));
+    }
+    // The command line's files open the set: their declared names are what a `use` line resolves to,
+    // so naming a module explicitly is never wrong - it only stops being necessary.
+    mut queue = u8[][];
+    i = 2;
+    while i < base {
+        path := host::arg(i + offset);
+        if host::exists(view(path)) == 0 {
+            // A missing input is `load_file`'s error to report, with its name.
+            i += 1;
+            continue;
+        }
+        text := host::read_file(view(path));
+        h := header_of(view(text));
+        mut name = h.module.copy();
+        // The entry file is the one file that may omit its `module` line: index 2, or index 3 in a
+        // compile-time probe, where the probe's own synthesized file comes first (toplevel's rule).
+        entry_at := 2 + c.probe_mode;
+        if (i == entry_at) & (name.len() == 0) {
+            name = "main".copy();
+        }
+        if name.len() != 0 {
+            c.mod_names.push(name);
+        }
+        queue.push(path.copy());
+        i += 1;
+    }
+    // `core` is part of every program that has it: `Some(x)` and `None` lower to its constructors.
+    // It is the one name asked for without a `use` line, and a root with no core.grl has no core.
+    if !mod_known(&c, view("core")) {
+        found := mod_find(&c, view("core"));
+        if found.len() != 0 {
+            c.mod_names.push(copy_bytes(view("core")));
+            queue.push(found.copy());
+            c.mod_files.push(found);
+        }
+    }
+    mut k = 0;
+    while k < queue.len() {
+        file := queue[k].copy();
+        k += 1;
+        text := host::read_file(view(file));
+        h := header_of(view(text));
+        for j in h.uses.len() {
+            name := h.uses[j];
+            // `use host;` is a module's opt-in to the ambient host:: interface, not a file, and a
+            // name that is already in the set is that module: no second file is read for it.
+            if same(view(name), view("host")) | mod_known(&c, view(name)) {
+                continue;
+            }
+            if mod_from_iface(&c, view(name)) {
+                c.mod_names.push(name.copy());
+                continue;
+            }
+            found := mod_find(&c, view(name));
+            if found.len() == 0 {
+                unresolved_module(&mut c, view(name), view(file));
+                return ();
+            }
+            // In the set before its own `use` lines are read: that is what ends a cycle.
+            c.mod_names.push(name.copy());
+            c.mod_files.push(found.copy());
+            queue.push(found);
+        }
+    }
+    return ();
+}
+// The path of the `index`-th input: the command line's own argument, or one of the files the roots
+// added above. A file an interface carried is a virtual input and keeps its own numbering.
+fn input_path<a>(c: (&a C), index: u64) -> u8[] {
+    if 1000000 <= index {
+        return c.virt_path[index - 1000000].copy();
+    }
+    if index < c.mod_base {
+        return host::arg(index + c.arg_offset);
+    }
+    return c.mod_files[index - c.mod_base].copy();
+}
+// `--print-inputs FILE`: every file this run reads and the module it declares, one `NAME PATH` line
+// each, and nothing built. A driver that has to group a program by module - a per-module build asks
+// which modules the program is made of - gets the answer from the compiler that resolves them instead
+// of keeping a second copy of the rule.
+fn print_inputs<a>(c: (&a mut C), count: u64) -> unit {
+    mut out = u8[];
+    mut i = 2;
+    while i < count {
+        path := input_path(&c, i);
+        text := host::read_file(view(path));
+        h := header_of(view(text));
+        mut name = h.module.copy();
+        if name.len() == 0 {
+            // Only the entry file may omit its `module` line (the parser's rule), and it is `main`.
+            name = copy_bytes(view("main"));
+        }
+        push_bytes(&mut out, view(name));
+        out.push(9);
+        push_bytes(&mut out, view(path));
+        out.push(10);
+        i += 1;
+    }
+    if host::write_file(view(c.mod_list_file), view(out)) != 0 {
+        fail_option(&mut c, view("cannot write the input list"));
+    }
+    return ();
+}
+
 // Modules that declared `use host;`. Recorded per module so a replayed generic body is checked
 // against its defining module, not against whichever file was parsed last.
 fn host_opted<a, b>(c: (&a C), m: &b [u8]) -> bool {
@@ -18984,8 +19344,7 @@ fn embed_file<a>(c: (&a mut C)) -> Val {
     if (rel.len() == 0) || (rel[0] != 47) {
         mut base = u8[];
         if c.file < 1000000 {
-            offset := c.arg_offset;
-            base = host::arg(c.file + offset);
+            base = input_path(&c, c.file);
         }
         mut cut = 0;
         for i in base.len() {
@@ -37980,10 +38339,10 @@ fn iface_load<a, b>(c: (&a mut C), path: &a [u8], source_path: &b [u8], phase: u
 fn iface_load_used<a, b>(c: (&a mut C), dir: &b [u8]) -> unit {
     entries := host::list_dir(view(dir));
     mut known = u8[][];
-    count := host::argc() - c.arg_offset;
+    count := c.mod_base + c.mod_files.len();
     mut i = 2;
     while i < count {
-        path := host::arg(i + c.arg_offset);
+        path := input_path(&c, i);
         mut name = iface_scan(view(path));
         if name.len() == 0 {
             // The entry file is the one file that may omit its `module` line, and it is module
@@ -38861,10 +39220,10 @@ fn iface_nibble(b: u64) -> u64 {
     return b - 87;
 }
 fn iface_file_index<a, b>(c: (&a mut C), path: &b [u8]) -> u64 {
-    argc := host::argc();
+    count := c.mod_base + c.mod_files.len();
     mut i = 2;
-    while i < argc - c.arg_offset {
-        if same(view(host::arg(i + c.arg_offset)), view(path)) {
+    while i < count {
+        if same(view(input_path(&c, i)), view(path)) {
             return i;
         }
         i += 1;
@@ -39377,6 +39736,12 @@ pub fn main() -> u64 {
         iface_list: IModule[],
         iface_loaded: u8[][],
         iface_loaded_path: u8[][],
+        mod_roots: u8[][],
+        mod_names: u8[][],
+        mod_files: u8[][],
+        mod_base: 0,
+        mod_list: 0,
+        mod_list_file: u8[],
         iface_env: u64[],
         iface_env_names: u8[][],
         virt_path: u8[][],
@@ -39558,6 +39923,24 @@ pub fn main() -> u64 {
             }
             exchange(&mut c.iface_use, host::arg(offset + 2));
             offset += 2;
+        } else if same(view(option), view("--module-root")) {
+            // A directory a `use NAME;` is resolved in: `DIR/NAME.grl`. Repeatable, and tried in the
+            // order given (docs/design/module-resolution.md).
+            if argc < offset + 3 {
+                fail_option(&mut c, view("--module-root needs a directory"));
+            }
+            c.mod_roots.push(copy_bytes(view(host::arg(offset + 2))));
+            offset += 2;
+        } else if same(view(option), view("--print-inputs")) {
+            // Internal, for the driver: write the inputs this run would read - the command line's
+            // files and the ones the module roots resolve, one `NAME PATH` line each - and build
+            // nothing. A multi-module build groups by module, so it asks rather than guesses.
+            if argc < offset + 3 {
+                fail_option(&mut c, view("--print-inputs needs a file"));
+            }
+            exchange(&mut c.mod_list, 1);
+            exchange(&mut c.mod_list_file, host::arg(offset + 2));
+            offset += 2;
         } else if same(view(option), view("--no-entry")) {
             // A run that emits one module's code for a link, not a program: no entry stub, so the
             // process state is defined once, by the run that holds the entry.
@@ -39702,6 +40085,11 @@ pub fn main() -> u64 {
         }
     }
     exchange(&mut c.arg_offset, offset);
+    // The program's files: the command line's own, then every module their `use` lines reach through
+    // the module roots. This settles the module set before any interface is checked or read, so an
+    // interface directory is compared against the sources the build really compiles; `use fs;` is
+    // enough to build a program that uses fs (docs/design/module-resolution.md).
+    resolve_modules(&mut c, offset);
     // Interfaces are checked against the manifest the emitting run wrote before anything reads one.
     mut iface_dir = c.iface_dir.copy();
     if iface_dir.len() != 0 {
@@ -39710,7 +40098,13 @@ pub fn main() -> u64 {
     if c.iface_use.len() != 0 {
         iface_load_used(&mut c, view(c.iface_use.copy()));
     }
-    n := argc - offset;
+    // `n` is the last input index + 1, as it always was, so the passes below read one list: the
+    // command line's files and the ones resolution added after them.
+    n := c.mod_base + c.mod_files.len();
+    if c.mod_list != 0 {
+        print_inputs(&mut c, n);
+        return 0;
+    }
     if !(2 < n) {
         fail_option(
             &mut c,
@@ -39751,7 +40145,7 @@ pub fn main() -> u64 {
             if c.debug != 0 {
                 mut f = 2;
                 while f < n {
-                    path := host::arg(f + offset);
+                    path := input_path(&c, f);
                     number := f - 1;
                     if c.target == 3 {
                         o(&mut c, view(".cv_file "));
@@ -39772,7 +40166,7 @@ pub fn main() -> u64 {
         }
         mut i = 2;
         while i < n {
-            path := host::arg(i + offset);
+            path := input_path(&c, i);
             load_file(&mut c, i);
             exchange(&mut c.file, i);
             toplevel(&mut c, pass + 1);

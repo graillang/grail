@@ -116,6 +116,28 @@
   the first, seventh and ninth integer word), `ffin-narrow-arguments-riscv64` (the RISC-V sign
   extension), `ffin-narrow-results` and `ffin-narrow-record-fields`, which need no C toolchain: their
   C-ABI callee is a Grail `extern "C" fn` returning the whole 64-bit word.
+- Added: the compiler resolves `use` itself. `--module-root DIR` (repeatable) names a directory a
+  `use NAME;` is looked up in as `DIR/NAME.grl`, and the closure is transitive and cycle-safe, so a
+  program that says `use fs;` builds without listing `lib/fs.grl` - or anything fs uses - on the
+  command line. Roots are tried in order: `--module-root` as given, then the stdlib directory of every
+  input file that sits beside `core.grl` (the layout the compiler already recognises as a standard
+  module), then a project's `src/` when the working directory holds a `grail.toml`. A module the
+  command line names explicitly still wins, so naming a file is never wrong, only unnecessary; and an
+  unresolvable `use` is a hard error naming the module, the file that asked and every root searched,
+  instead of the unknown type deep inside an imported module it used to be. `core` (which `Some`/`None`
+  lower to) and `use host;` are handled as before: core is compiled when a root holds it, and `host`
+  is the ambient interface, not a file. `grail build`/`check`/`run`/`test` pass the stdlib root
+  automatically, and the project root needs nothing. The three copies of "scan `use` lines and guess
+  the module set" - `stdClosure` in `tools/test-native.mjs`, `stdNames` in `tools/book.mjs` and
+  `used_std` in `compiler/cli.grl` - are gone, with 547 `lib/...` entries in
+  `tests/native-cases.json` and 13 `std` lists in `book/book.json`; `grail build --watch` watches
+  every standard module instead of a copy of the answer. `lib/json.grl` now says `use hashmap;`, the
+  module its concise map type needs. docs/design/module-resolution.md; cases `useres-*` pin the
+  std-by-name build, a transitive chain, a cycle, the searched-roots diagnostic and explicit-name
+  precedence. The corpus's `asm`/`asmAbsent` pins may now be scoped to one function
+  (`{"in": "f_main_get", "text": "call rt_trap"}`), because the standard library is part of every
+  program and its own checked arithmetic traps.
+
 - Tooling: `grail test` gained the ergonomics a regression run needs. Selection: `--filter TEXT`, `--list`, `--shard i/n`, `--jobs N`; reporting: a `FAIL NAME` block per failure (the case, its source path, what the exit status and the output pins expected, the actual status/signal and stdout/stderr), a stable `passed X failed Y skipped Z` line, and `--fail-fast`. `--update` rewrites a corpus case's `stdout`/`status` from the observed run, only when it is asked for - a `stderr` pin or a `signal` pin is never rewritten. Inside the Grail tree `grail test` forwards every argument to `tools/test-native.mjs`, which is now the same engine behind those flags; a project runs its `tests/` programs through one child per test with a per-test log. docs/testing.md says which command owns what.
 - Added: `grail doc` generates the reference documentation of a Grail source tree - one HTML page per module, a searchable index and an `index.json` model - from the comments and declarations the sources already carry. Grail has no doc-comment syntax, so a `//` comment block directly above a declaration or a field is its documentation, read from the source text (compiler/docgen.grl). Each function carries its signature with its `where`/`ensures` clauses and its `@no_alloc`/`@no_panic` claims, each record/enum/interface its members, variant payloads and method signatures, and `impl`s and aliases are listed. A doc body links an identifier when exactly one declaration in the tree has that name. The tree is deterministic (sorted, `<kind>-<name>` anchors, no clock), so it reviews as a diff; `grail doc` documents `lib/` (29 modules, 582 declarations) and the compiler (124 modules, 2532 declarations) without building either. docs/tooling/doc.md; pinned by tools/test-cli.mjs.
 - Debug info: the DWARF a `--debug` build emits now names an enum's variants, not just its layout. An enum gains a `DW_TAG_enumeration_type` (the tag word's type, one enumerator per variant valued by the tag the constructor stores), a `DW_TAG_structure_type` for the value `{tag, payload}` and a `DW_TAG_typedef` for the enum itself, so `gdb` prints `{tag = Square, payload = 7}` by name. A sequence's `data` stays a pointer to the first element - an array type would have to state a length the header does not carry - which is what gives `print *values->data@values->len`. The variable's unused base-type fields are gone. Verified with `llvm-dwarfdump --verify`, `readelf --debug-dump=info` and a real `gdb --batch` session on a record, a nested record, a string, a vector, a C record and an enum tag, for x86-64 and the AArch64/RISC-V 64 units; Windows CodeView keeps its records, symbols and PDB (an enum's word maps to the integer it is). `tools/test-debug-lines.mjs` pins all of it; docs/tooling/debugging.md is the tested gdb/lldb recipe and says plainly that macOS Mach-O DWARF is not emitted and that the DAP adapter is a WIP that is not shippable this round.

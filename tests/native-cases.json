@@ -9652,5 +9652,64 @@
     "reject": true,
     "diagnostic": "extern C callback results must be an integer, f32, f64, unit, CStr or handle",
     "note": "the result position: C returns one value in one register, so a buffer answer is a length or a status, never a Grail vector (a view result needs a lifetime parameter, which an extern C definition does not accept either)"
+  },
+  {
+    "name": "useres-std-by-name",
+    "source": "use strings;\n\nfn main() -> u64 {\n    println(strings::char_count(view(\"grail\")));\n    return 0;\n}\n",
+    "stdout": "5\n",
+    "note": "no file is named: `use strings;` is resolved through the std root the harness passes a build, and strings' own `use core;` and `use iter;` come with it (docs/design/module-resolution.md)"
+  },
+  {
+    "name": "useres-transitive-chain",
+    "source": "use chain;\n\nfn main() -> u64 {\n    println(chain::twice(21));\n    return 0;\n}\n",
+    "roots": [
+      "tests/useres/chain.grl",
+      "tests/useres/chain_dep.grl"
+    ],
+    "stdout": "42\n",
+    "note": "program -> chain -> chain_dep: the first `use` resolves from the module root, and chain's own `use chain_dep;` resolves from the same root without either file being named on the command line"
+  },
+  {
+    "name": "useres-cycle-compiles-once",
+    "source": "use cycle_a;\n\nfn main() -> u64 {\n    println(cycle_a::a());\n    return 0;\n}\n",
+    "roots": [
+      "tests/useres/cycle_a.grl",
+      "tests/useres/cycle_b.grl"
+    ],
+    "stdout": "1\n",
+    "note": "cycle_a uses cycle_b and cycle_b uses cycle_a: each module is added to the set once, before its own `use` lines are read, so the closure ends instead of looping (and both files compile once, so no duplicate definition)"
+  },
+  {
+    "name": "useres-unresolved-names-roots",
+    "source": "use nosuch;\n\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot resolve module `nosuch`",
+      "; searched "
+    ],
+    "note": "an unresolvable `use` names the module, the file that asked and every root searched, instead of failing later with an unknown type inside an imported module"
+  },
+  {
+    "name": "useres-no-roots-is-an-error",
+    "source": "use nosuch;\n\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "noRoots": true,
+    "diagnostic": [
+      "cannot resolve module `nosuch`",
+      "no module root was given"
+    ],
+    "note": "the same program with no module root at all: the diagnostic says that rather than naming an empty list of places it looked"
+  },
+  {
+    "name": "useres-explicit-name-wins",
+    "source": "use dup;\n\nfn main() -> u64 {\n    println(dup::answer());\n    return 0;\n}\n",
+    "modules": [
+      "tests/useres/dup_explicit.grl"
+    ],
+    "roots": [
+      "tests/useres/dup.grl"
+    ],
+    "stdout": "1\n",
+    "note": "two files declare module `dup`: the one the command line names answers, and the root's copy is not read, so naming a file explicitly is never wrong - only unnecessary"
   }
 ]
