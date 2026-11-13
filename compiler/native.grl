@@ -38112,8 +38112,10 @@ fn iface_rec_type<a>(c: (&a mut C), p: (&a mut IR)) -> unit {
             regions: lifetimes,
             types: params,
             success: 0,
-            bounds: bounds,
-            constraints: reqs
+            // A copy: the definition phase installs the resolved ones, because a requirement names
+            // an interface and only that phase can look one up.
+            bounds: copy_numbers(&bounds),
+            constraints: copy_constraints(&reqs)
         });
     }
     if p.phase == 2 {
@@ -38121,6 +38123,12 @@ fn iface_rec_type<a>(c: (&a mut C), p: (&a mut IR)) -> unit {
         first = c.fields.len();
         exchange(&mut c.decls[index].first, first);
         exchange(&mut c.decls[index].count, 0);
+        // The bounds and the interface requirements of the declaration itself. They are read in the
+        // name phase too, but a requirement names another interface and only the definition phase
+        // can resolve one, so they are installed here - `Map<K, V>`'s `Hash`/`Equal` are the case
+        // this was written for.
+        exchange(&mut c.decls[index].bounds, bounds);
+        exchange(&mut c.decls[index].constraints, reqs);
     }
     if p.phase == 0 {
     }
