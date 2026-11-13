@@ -39073,6 +39073,11 @@ fn iface_dump<a>(c: (&a mut C), path: &a [u8]) -> unit {
 // Write, read, write again: the bytes have to come back identical. This is the property that makes
 // one writer and one reader enough - the reader rebuilds the model the writer started from, so a
 // field either travels or the second write differs and says where.
+// Write, read, write again: the bytes have to come back identical. This is the property that makes
+// one writer and one reader enough - the reader rebuilds the model the writer started from, so a
+// field either travels or the second write differs and says where. The file's *dependencies* are the
+// interfaces beside it, which are registered (name phase only) first: a declaration it names belongs
+// to another module and is spelled by name in the file.
 fn iface_roundtrip<a>(c: (&a mut C), path: &a [u8]) -> unit {
     mut bytes = u8[];
     if host::exists(view(path)) != 0 {
@@ -39082,7 +39087,21 @@ fn iface_roundtrip<a>(c: (&a mut C), path: &a [u8]) -> unit {
         iface_refuse(view(path), view("cannot read interface file"));
     }
     head := iface_r_head(view(path), view(bytes));
+    dir := iface_dirname(view(path));
+    base := iface_basename(view(path));
     mut rtext = u8[];
+    entries := host::list_dir(view(dir));
+    for i in entries.len() {
+        entry := entries[i].copy();
+        if !iface_suffix(view(entry), view(".iface")) | same(view(entry), view(base)) {
+            continue;
+        }
+        mut beside = u8[];
+        push_bytes(&mut beside, view(dir));
+        beside.push(47);
+        push_bytes(&mut beside, view(entry));
+        iface_decode(&mut c, view(beside), view(host::read_file(view(beside))), view(""), 1, &mut rtext);
+    }
     module := iface_decode(&mut c, view(path), view(bytes), view(""), 1, &mut rtext);
     iface_decode(&mut c, view(path), view(bytes), view(""), 2, &mut rtext);
     again := iface_module_bytes(&mut c, view(module), view(head.source), head.std, head.unsafe, head.host, view(head.digest));
@@ -39109,6 +39128,39 @@ fn iface_roundtrip<a>(c: (&a mut C), path: &a [u8]) -> unit {
     push_bytes(&mut msg, view(" bytes)"));
     iface_refuse(view(path), view(msg));
     return ();
+}
+// The directory and the file name of a path: what `grail iface roundtrip` reads the dependencies of
+// a file from.
+fn iface_dirname<a>(path: &a [u8]) -> u8[] {
+    mut cut = 0;
+    for i in path.len() {
+        if path[i] == 47 {
+            cut = i;
+        }
+    }
+    if cut == 0 {
+        return copy_bytes(view("."));
+    }
+    mut out = u8[];
+    for i in cut {
+        out.push(path[i]);
+    }
+    return out;
+}
+fn iface_basename<a>(path: &a [u8]) -> u8[] {
+    mut cut = 0;
+    for i in path.len() {
+        if path[i] == 47 {
+            cut = i + 1;
+        }
+    }
+    mut out = u8[];
+    mut i = cut;
+    while i < path.len() {
+        out.push(path[i]);
+        i += 1;
+    }
+    return out;
 }
 fn decimal_print(n: u64) -> unit {
     mut out = u8[];

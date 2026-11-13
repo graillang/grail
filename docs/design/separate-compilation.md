@@ -529,9 +529,10 @@ under a name local to the file (`.closure`/`envN`).
   version bump, and an old reader refuses the file instead of misreading it.
 - **The reader is checked against the writer.** `--verify-interface` re-decodes every type it writes
   and refuses one that does not come back as the same interned type.
-- **The whole file is checked against itself.** `grail iface roundtrip FILE` reads a file, encodes the
-  model it built, and requires the bytes to be identical - "write, read, write again" as one command.
-  `tools/interface-test.mjs` runs it over every interface the corpus emits.
+- **The whole file is checked against itself.** `grail iface roundtrip FILE` reads a file (and the
+  interfaces beside it, which it needs only for the names of the declarations it refers to), encodes
+  the model it built, and requires the bytes to be identical - "write, read, write again" as one
+  command. `tools/interface-test.mjs` runs it over every interface the corpus and the compiler emit.
 
 ### Inspectability without a second parser
 
