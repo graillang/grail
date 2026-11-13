@@ -14,7 +14,9 @@
   nbody 32 -> 15, matmul 4 -> 1, sort 8 -> 8 (its merge-loop bounds only hold at a join). The pass is
   on by default for the native backend, `--no-range-facts` turns it off, and `--verify-facts` keeps
   every check so a verifying build aborts where a proof would be wrong. Docs:
-  `docs/design/native-range-facts.md`; corpus: the ten `rng-` cases.
+  `docs/design/native-range-facts.md`; corpus: the eleven `rng-` cases; tooling:
+  `bun tools/checks-native.mjs PROGRAM.s...` counts the checks a native build carries, which is how the
+  before/after column was measured.
 - Fixed: what an `else` may assume from a comparison that failed. `!(a < b + k)` was read as
   `b <= a - k - 1`, one tighter than the truth (`b <= a - k`), so an `else` could discharge a
   refinement - or, with range facts, a bounds check - that the program does not actually meet.

@@ -78,17 +78,24 @@ column below was measured.
 
 `bench/` compiled with one compiler built from this branch; "before" is the same compiler built with
 `--no-range-facts`, so the two sides differ only in the checks. A check is counted in the program's
-own functions (`f_main*`): a call to a checking accessor (`rt_slot`, `rt_slot4`, `rt_slotb`, `rt_at`,
+own functions (`f_*`): a call to a checking accessor (`rt_slot`, `rt_slot4`, `rt_slotb`, `rt_at`,
 `rt_at4`, `rt_atb`, `rt_write`) or the arm the optimizer inlined out of one
-(`movq $1,%rdx; call rt_trap`).
+(`movq $1,%rdx; call rt_trap`). `bun tools/checks-native.mjs PROGRAM.s...` does the counting, so the
+table below is reproducible from two builds of the same tree:
 
-| benchmark | checks before | checks after |
-| --- | --- | --- |
-| fnv     | 1 | 0 |
-| sieve   | 2 | 1 |
-| sort    | 8 | 8 |
-| nbody   | 32 | 15 |
-| matmul  | 4 | 1 |
+    for b in fnv sieve sort nbody matmul; do
+      grail --no-range-facts /tmp/off-$b.s bench/$b.grl compiler/runtime.grl compiler/os-linux.grl
+      grail /tmp/on-$b.s           bench/$b.grl compiler/runtime.grl compiler/os-linux.grl
+    done
+    bun tools/checks-native.mjs /tmp/off-*.s ; bun tools/checks-native.mjs /tmp/on-*.s
+
+| benchmark | checks before | checks after | shape |
+| --- | --- | --- | --- |
+| fnv     | 1 | 0 | inlined arm |
+| sieve   | 2 | 1 | one inlined arm removed, `rt_write` call kept |
+| sort    | 8 | 8 | inlined arms, none proved |
+| nbody   | 32 | 15 | inlined arms, all 17 in `main`'s update loop |
+| matmul  | 4 | 1 | accessor calls (the kernel's accessors are too big to inline) |
 
 `nbody` keeps 15 checks inside `energy`, whose three parameters are shared views: their lengths are not
 known there, which is the fact that function does not have. `sort` keeps all 8: its merge loop bounds
