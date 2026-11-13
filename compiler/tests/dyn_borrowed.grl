@@ -1,0 +1,81 @@
+// Borrowed trait objects: `&dyn I` / `&mut dyn I` over values that stay where they are, with no
+// allocation. The pair {data, vtable} lives in the frame that borrows, and dispatch reads it.
+interface Shape {
+    fn area(self: &Self) -> u64;
+    fn name(self: &Self) -> string {
+        return "shape";
+    }
+    fn grow(self: &mut Self, by: u64) -> unit;
+}
+struct Square {
+    side: u64,
+}
+struct Circle {
+    r: u64,
+}
+struct Wrapper<a> {
+    shape: &a dyn Shape,
+}
+impl Shape for Square {
+    fn area(self: &Self) -> u64 {
+        return self.side * self.side;
+    }
+    fn name(self: &Self) -> string {
+        return "square";
+    }
+    fn grow(self: &mut Self, by: u64) -> unit {
+        self.side = self.side + by;
+        return ();
+    }
+}
+impl Shape for Circle {
+    fn area(self: &Self) -> u64 {
+        return 3 * self.r * self.r;
+    }
+    fn grow(self: &mut Self, by: u64) -> unit {
+        self.r = self.r + by;
+        return ();
+    }
+}
+fn area_of(s: &dyn Shape) -> u64 {
+    return s.area();
+}
+fn grow_twice(s: &mut dyn Shape) {
+    s.grow(1);
+    s.grow(1);
+    return ();
+}
+fn as_shape(c: &Circle) -> &dyn Shape {
+    return c;
+}
+fn bigger<T: Shape>(dynamic: &dyn Shape, concrete: &T) -> u64 {
+    a := dynamic.area();
+    b := concrete.area();
+    if a > b {
+        return a;
+    }
+    return b;
+}
+fn main() {
+    c := Circle { r: 2 };
+    mut q = Square { side: 3 };
+    r: &dyn Shape = &c;
+    println("{} {} {}", area_of(&c), area_of(&q), r.name());
+    grow_twice(&mut q);
+    println("{}", q.side);
+    mut shapes = (&dyn Shape)[];
+    shapes.push(&c);
+    shapes.push(&q);
+    mut total = 0;
+    for i in shapes.len() {
+        total = total + shapes[i].area();
+    }
+    println("{} {}", shapes.len(), total);
+    s := as_shape(&c);
+    println("{}", s.area());
+    println("{}", bigger(s, &q));
+    w := Wrapper { shape: &q };
+    println("{}", w.shape.area());
+    grow_twice(&mut q);
+    println("{}", q.side);
+}
