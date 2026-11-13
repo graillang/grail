@@ -24939,12 +24939,15 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         unit := c.closures[i].unit.copy();
         weak := c.closures[i].weak;
         part(&mut c, view(unit));
-        func_directive(&mut c, view(".closure"), view(symbol), view(symbol), 0);
+        // A closure of a specialisation is weak like the specialisation: func_directive states the
+        // binding once, so a per-module object never sees `.globl` turn `.weak`.
+        mut mark = 0;
         if weak != 0 {
-            o(&mut c, view(".weak "));
-            mangle(&mut c, view(".closure"), view(symbol));
-            c.out.push(10);
+            mark = 1;
         }
+        saved_spec := exchange(&mut c.current_spec, mark);
+        func_directive(&mut c, view(".closure"), view(symbol), view(symbol), 0);
+        exchange(&mut c.current_spec, saved_spec);
         mangle(&mut c, view(".closure"), view(symbol));
         o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\n"));
         frame := label(&mut c);
@@ -35778,8 +35781,19 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
         exchange(&mut st.implementation, c.implementations.len());
         exchange(&mut st.last_func, 0);
         exchange(&mut st.last_decl, 0);
-        owner := ty_arg(&mut c, ty) + 1;
+        // The source keys a generic interface implementation by its implementation id, not by
+        // the declaration its type names (which is an inherent impl's key): an importer has to
+        // find `impl<T> I for X<T>`'s parameters where `impl_param_types` looks for them.
+        mut owner = ty_arg(&mut c, ty) + 1;
+        if params[0] != 0 {
+            owner = generic_impl_key(c.implementations.len());
+        }
         iface_impl_record(&mut c, &mut st, owner, params[0], lifetimes[0]);
+        if (params[0] != 0) && (c.impl_params.len() > st.impl_first) {
+            // Keyed by the implementation, so the self type cannot be rebuilt from the key.
+            last := c.impl_params.len() - 1;
+            c.impl_params[last].self_ty = ty;
+        }
         return ();
     }
     if same(view(word), view("assoc")) {
@@ -36270,6 +36284,14 @@ fn iface_define_func<a>(c: (&a mut C), st: (&a mut IState), p: (&a mut IPos)) ->
     mut contract = 0;
     if st.section == 1 {
         owner = st.owner + 1;
+    }
+    if (st.section == 3) && (st.implementation != 0) {
+        // A generic implementation's method replays with the implementation's parameters, as the
+        // source parse records them (method_owner).
+        key := generic_impl_key(st.implementation);
+        if impl_record(&mut c, key) != 0 {
+            owner = key;
+        }
     }
     if st.section == 2 {
         // An interface method is checked against its contract: one implicit type parameter and the
