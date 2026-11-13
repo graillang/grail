@@ -3,19 +3,13 @@ use host;
 use fmt;
 use explain;
 use bindgen;
+use pkg;
 
 // The `grail` command-line tool. The same binary is the compiler: subcommands drive it by
 // re-invoking itself (`grail [--target T] OUT.s ENTRY.grl MODULE.grl...`), then assemble and link.
 struct Home {
     runtime: u8[],
     std: u8[]
-}
-struct Project {
-    name: u8[],
-    entry: u8[],
-    deps: u8[][],
-    urls: u8[][],
-    revs: u8[][]
 }
 
 fn eq<a, b>(x: &a [u8], y: &b [u8]) -> bool {
@@ -193,17 +187,11 @@ fn home() -> Home {
     if env.len() != 0 {
         installed := path_join(view(env), view("runtime.grl"));
         if host::exists(view(installed)) != 0 {
-            return Home {
-                runtime: installed,
-                std: path_join(view(env), view("std"))
-            };
+            return Home { runtime: installed, std: path_join(view(env), view("std")) };
         }
         repo := path_join(view(env), view("compiler/runtime.grl"));
         if host::exists(view(repo)) != 0 {
-            return Home {
-                runtime: repo,
-                std: path_join(view(env), view("lib"))
-            };
+            return Home { runtime: repo, std: path_join(view(env), view("lib")) };
         }
     }
     exe := host::exe_path();
@@ -212,17 +200,11 @@ fn home() -> Home {
         installed := path_join(view(dir), view("lib/grail/runtime.grl"));
         if host::exists(view(installed)) != 0 {
             prefix := path_join(view(dir), view("lib/grail"));
-            return Home {
-                runtime: installed,
-                std: path_join(view(prefix), view("std"))
-            };
+            return Home { runtime: installed, std: path_join(view(prefix), view("std")) };
         }
         repo := path_join(view(dir), view("compiler/runtime.grl"));
         if host::exists(view(repo)) != 0 {
-            return Home {
-                runtime: repo,
-                std: path_join(view(dir), view("lib"))
-            };
+            return Home { runtime: repo, std: path_join(view(dir), view("lib")) };
         }
         dir = path_join(view(dir), view(".."));
     }
@@ -256,7 +238,11 @@ fn use_names<a>(text: &a [u8]) -> u8[][] {
             while (a < i) && ((text[a] == 32) || (text[a] == 9)) {
                 a += 1;
             }
-            if (i - a > 4) && (text[a] == 117) && (text[a + 1] == 115) && (text[a + 2] == 101) && (text[a + 3] == 32) {
+            if (i - a > 4)
+                && (text[a] == 117)
+                && (text[a + 1] == 115)
+                && (text[a + 2] == 101)
+                && (text[a + 3] == 32) {
                 mut b = a + 4;
                 while (b < i) && (text[b] == 32) {
                     b += 1;
@@ -264,7 +250,10 @@ fn use_names<a>(text: &a [u8]) -> u8[][] {
                 mut name = u8[];
                 while b < i {
                     ch := text[b];
-                    ok := ((ch >= 97) && (ch <= 122)) || ((ch >= 65) && (ch <= 90)) || ((ch >= 48) && (ch <= 57)) || (ch == 95);
+                    ok := ((ch >= 97) && (ch <= 122))
+                        || ((ch >= 65) && (ch <= 90))
+                        || ((ch >= 48) && (ch <= 57))
+                        || (ch == 95);
                     if ok == false {
                         break;
                     }
@@ -380,18 +369,25 @@ fn link_inputs<a, b>(asm: &a [u8], base: &b [u8]) -> u8[][] {
             }
             // A PE import note names a symbol in a DLL, not a linker input: windows_link turns it
             // into a short-import object. Every other note is an input.
-            if starts(view(line), view(prefix)) & !starts(view(line), view("// grail-link: import ")) {
+            if starts(view(line), view(prefix))
+                & !starts(view(line), view("// grail-link: import ")) {
                 mut input = u8[];
                 mut k = prefix.len();
                 while k < line.len() {
                     input.push(line[k]);
                     k += 1;
                 }
-                while (input.len() > 0) && ((input[input.len() - 1] == 32) || (input[input.len() - 1] == 13)) {
+                while (input.len() > 0)
+                    && ((input[input.len() - 1] == 32) || (input[input.len() - 1] == 13)) {
                     input.pop();
                 }
                 mut arg = u8[];
-                if (input.len() > 0) && ((input[0] == 47) || (input[0] == 45) || ((input[0] == 92) || drive_letter(input))) {
+                if (input.len() > 0)
+                    && (
+                        (input[0] == 47)
+                            || (input[0] == 45)
+                            || ((input[0] == 92) || drive_letter(input))
+                    ) {
                     arg = input.copy();
                 } else {
                     mut has_slash = false;
@@ -400,7 +396,11 @@ fn link_inputs<a, b>(asm: &a [u8], base: &b [u8]) -> u8[][] {
                             has_slash = true;
                         }
                     }
-                    if has_slash || ends(view(input), view(".o")) || ends(view(input), view(".a")) || ends(view(input), view(".so")) || ends(view(input), view(".dylib")) {
+                    if has_slash
+                        || ends(view(input), view(".o"))
+                        || ends(view(input), view(".a"))
+                        || ends(view(input), view(".so"))
+                        || ends(view(input), view(".dylib")) {
                         arg = path_join(view(base), view(input));
                     } else {
                         arg = cat(view("-l"), view(input));
@@ -435,12 +435,18 @@ fn dynamic_link_flags<a, b>(target: &a [u8], inputs: (&b u8[][])) -> u8[][] {
     if shared == 0 {
         return out;
     }
-    mut loaders = u8[][copy(view("/lib64/ld-linux-x86-64.so.2")), copy(view("/lib/ld-linux-x86-64.so.2"))];
+    mut loaders = u8[][
+        copy(view("/lib64/ld-linux-x86-64.so.2")),
+        copy(view("/lib/ld-linux-x86-64.so.2"))
+    ];
     if eq(view(target), view("aarch64")) {
         loaders = u8[][copy(view("/lib/ld-linux-aarch64.so.1"))];
     }
     if eq(view(target), view("riscv64")) {
-        loaders = u8[][copy(view("/lib/ld-linux-riscv64-lp64d.so.1")), copy(view("/lib/ld-linux-riscv64-lp64.so.1"))];
+        loaders = u8[][
+            copy(view("/lib/ld-linux-riscv64-lp64d.so.1")),
+            copy(view("/lib/ld-linux-riscv64-lp64.so.1"))
+        ];
     }
     for i in loaders.len() {
         candidate := item(&loaders, i);
@@ -679,7 +685,13 @@ fn import_library<a, b>(dir: &a [u8], objects: (&b u8[][])) -> u8[] {
 }
 // The PE link: lld-link with the entry the compiler defines, no CRT, and the stack reserve a
 // recursively written program needs (Windows gives a thread 1 MiB by default, Linux 8).
-fn windows_link<a, b, d, e>(asm: &a [u8], output: &b [u8], object: &d [u8], entry: &e [u8], debug: u64) -> u64 {
+fn windows_link<a, b, d, e>(
+    asm: &a [u8],
+    output: &b [u8],
+    object: &d [u8],
+    entry: &e [u8],
+    debug: u64
+) -> u64 {
     dir := path_join(view(dirname(view(object))), view(".grail-win"));
     host::mkdir(view(dir));
     imports := windows_imports(view(asm), view(dir));
@@ -784,7 +796,12 @@ fn macho_libsystem<a, b, d>(object: &a [u8], arch: &b [u8], asm: &d [u8]) -> u8[
     mut body = u8[];
     put(&mut body, view("--- !tapi-tbd\ntbd-version: 4\ntargets: [ "));
     put(&mut body, view(platform));
-    put(&mut body, view(" ]\ninstall-name: '/usr/lib/libSystem.B.dylib'\ncurrent-version: 1311\nexports:\n  - targets: [ "));
+    put(
+        &mut body,
+        view(
+            " ]\ninstall-name: '/usr/lib/libSystem.B.dylib'\ncurrent-version: 1311\nexports:\n  - targets: [ "
+        )
+    );
     put(&mut body, view(platform));
     put(&mut body, view(" ]\n    symbols: [ "));
     put(&mut body, view(symbols));
@@ -816,7 +833,16 @@ fn compile<a, b, d, e, g>(
 // or an input that the driver passes is in the key by construction and cannot be forgotten there.
 //   grail [--target T] [--debug] [--deny-ambient-host] [--split] [--overflow=...]
 //         [--interface DIR [--verify-interface]] OUT.s ENTRY.grl MODULE.grl... RUNTIME PLATFORM
-fn build_argv<a, b, d, e, g>(h: (&a Home), entry: &b [u8], modules: (&d u8[][]), asm: &e [u8], target: &g [u8], flags: u64, iface: &d [u8], verify: u64) -> u8[][] {
+fn build_argv<a, b, d, e, g>(
+    h: (&a Home),
+    entry: &b [u8],
+    modules: (&d u8[][]),
+    asm: &e [u8],
+    target: &g [u8],
+    flags: u64,
+    iface: &d [u8],
+    verify: u64
+) -> u8[][] {
     check_only := flags % 2;
     debug := (flags / 2) % 2;
     deny := (flags / 4) % 2;
@@ -932,7 +958,11 @@ fn compile_mode<a, b, d, e, g>(
     whole := (flags / 128) % 2;
     if (cache != 0) && sources_embed(view(entry), &modules) {
         // `@embed` reads a file the cache does not key on, so its result cannot be reused safely.
-        say(view("grail: --cache is skipped: a source uses @embed, whose file the cache does not track"));
+        say(
+            view(
+                "grail: --cache is skipped: a source uses @embed, whose file the cache does not track"
+            )
+        );
         cache = 0;
     }
     asm := cat(view(output), view(".s"));
@@ -983,7 +1013,12 @@ fn compile_mode<a, b, d, e, g>(
     mut per_module = 0;
     mut groups = ModuleGroup[];
     at := source_start(&command, view(asm));
-    if (whole == 0) & (split == 0) & (check_only == 0) & (iface.len() == 0) & (at < command.len()) & linux_target(view(target)) {
+    if (whole == 0)
+        & (split == 0)
+        & (check_only == 0)
+        & (iface.len() == 0)
+        & (at < command.len())
+        & linux_target(view(target)) {
         groups = source_groups(&command, at);
         if (cache != 0) || (program_modules(&groups) > 1) {
             per_module = 1;
@@ -996,7 +1031,14 @@ fn compile_mode<a, b, d, e, g>(
     }
     // B1 stage 4: an unchanged program is not rebuilt at all, and what is rebuilt assembles and links
     // through the content-addressed store. Without --cache nothing below changes a thing.
-    mut store = Cache { root: cache_root(view(target)), fast: 0, tmp: u8[], hits: 0, misses: 0, names: u8[][] };
+    mut store = Cache {
+        root: cache_root(view(target)),
+        fast: 0,
+        tmp: u8[],
+        hits: 0,
+        misses: 0,
+        names: u8[][],
+    };
     mut id = BuildId {
         flags: u8[],
         compiler: u8[],
@@ -1005,7 +1047,7 @@ fn compile_mode<a, b, d, e, g>(
         ifaces: u8[],
         iface_dir: u8[],
         sources: u8[][],
-        digests: u8[][]
+        digests: u8[][],
     };
     mut program = u8[];
     if cache != 0 {
@@ -1052,9 +1094,24 @@ fn compile_mode<a, b, d, e, g>(
     }
     if split != 0 {
         if cache != 0 {
-            return cache_split(&mut store, &id, view(dirname(view(entry))), view(output), view(target), view(emulation), &assemble, view(program));
+            return cache_split(
+                &mut store,
+                &id,
+                view(dirname(view(entry))),
+                view(output),
+                view(target),
+                view(emulation),
+                &assemble,
+                view(program)
+            );
         }
-        return build_split(view(dirname(view(entry))), view(output), view(target), view(emulation), &assemble);
+        return build_split(
+            view(dirname(view(entry))),
+            view(output),
+            view(target),
+            view(emulation),
+            &assemble
+        );
     }
     assemble.push(copy(view(asm)));
     assemble.push(copy(view("-o")));
@@ -1087,7 +1144,11 @@ fn compile_mode<a, b, d, e, g>(
             // No SDK on this host: the stub stands in for libSystem (see macho_libsystem).
             stub := macho_libsystem(view(object), view(arch), view(asm));
             if stub.len() == 0 {
-                say(view("grail: the Mach-O object is assembled, but no libSystem to link it against"));
+                say(
+                    view(
+                        "grail: the Mach-O object is assembled, but no libSystem to link it against"
+                    )
+                );
                 say(view("grail: set GRAIL_SDK to a macOS SDK, or put llvm-nm on PATH"));
                 return 1;
             }
@@ -1174,7 +1235,10 @@ struct ModuleGroup {
     done: u64
 }
 fn ident_byte(c: u8) -> bool {
-    return ((c >= 97) & (c <= 122)) || ((c >= 65) & (c <= 90)) || ((c >= 48) & (c <= 57)) || (c == 95);
+    return ((c >= 97) & (c <= 122))
+        || ((c >= 65) & (c <= 90))
+        || ((c >= 48) & (c <= 57))
+        || (c == 95);
 }
 // The word after each line-leading `keyword` of a source file (`module NAME;`, `use NAME;`).
 fn scan_words<a, b>(path: &a [u8], keyword: &b [u8]) -> u8[][] {
@@ -1287,7 +1351,14 @@ fn bytes_less<a, b>(x: &a [u8], y: &b [u8]) -> bool {
 // the target, the module's name and its own source files, and every interface the run can read - the
 // ones written by the runs before it, by name and content. An edit that leaves a module's interface
 // unchanged therefore reruns that module alone; one that changes it reruns the modules after it.
-fn unit_key<a, b, d, e, g, k>(store: (&a mut Cache), id: (&b BuildId), target: &d [u8], name: &e [u8], files: (&g u8[][]), ifaces: &k [u8]) -> u8[] {
+fn unit_key<a, b, d, e, g, k>(
+    store: (&a mut Cache),
+    id: (&b BuildId),
+    target: &d [u8],
+    name: &e [u8],
+    files: (&g u8[][]),
+    ifaces: &k [u8]
+) -> u8[] {
     mut buf = u8[];
     push_bytes(&mut buf, view("grail-cache-unit 1\ntarget "));
     push_bytes(&mut buf, view(target));
@@ -1346,7 +1417,13 @@ fn unit_key<a, b, d, e, g, k>(store: (&a mut Cache), id: (&b BuildId), target: &
 // Put a module run's outputs back from the store: its object, the link inputs its own sources ask
 // for, and its interface. Any missing or damaged blob makes it a miss (nothing is half-restored that
 // a later step would trust: the run that follows rewrites all of it).
-fn unit_restore<a, b, d, e, g>(store: (&a mut Cache), key: &b [u8], stem: &d [u8], ifaces: &e [u8], name: &g [u8]) -> bool {
+fn unit_restore<a, b, d, e, g>(
+    store: (&a mut Cache),
+    key: &b [u8],
+    stem: &d [u8],
+    ifaces: &e [u8],
+    name: &g [u8]
+) -> bool {
     path := cache_record_path(view(store.root), view("unit"), view(key));
     if host::exists(view(path)) == 0 {
         return false;
@@ -1416,7 +1493,13 @@ fn write_unit_links<a>(stem: &a [u8], asm: &a [u8], files: (&a u8[][])) -> u64 {
 }
 // File a module run's outputs under its key, after they assembled: the object, the link inputs and
 // the interface.
-fn unit_file<a, b, d, e, g>(store: (&a mut Cache), key: &b [u8], stem: &d [u8], ifaces: &e [u8], name: &g [u8]) -> unit {
+fn unit_file<a, b, d, e, g>(
+    store: (&a mut Cache),
+    key: &b [u8],
+    stem: &d [u8],
+    ifaces: &e [u8],
+    name: &g [u8]
+) -> unit {
     links_blob := cache_blob_put(&mut store, view(unit_links_path(view(stem))));
     if links_blob.len() != 64 {
         return ();
@@ -1525,7 +1608,11 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
             }
         }
         if pick == groups.len() {
-            say(view("grail: --per-module found a cycle of `use` between modules; build without --per-module"));
+            say(
+                view(
+                    "grail: --per-module found a cycle of `use` between modules; build without --per-module"
+                )
+            );
             return 1;
         }
         name := groups[pick].name.copy();
@@ -1535,7 +1622,14 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
         mut key = u8[];
         mut reused = false;
         if cache != 0 {
-            key = unit_key(&mut store, id, view(target), view(name), &groups[pick].files, view(ifaces));
+            key = unit_key(
+                &mut store,
+                id,
+                view(target),
+                view(name),
+                &groups[pick].files,
+                view(ifaces)
+            );
             reused = unit_restore(&mut store, view(key), view(stem), view(ifaces), view(name));
             if reused {
                 store.hits += 1;
@@ -1654,7 +1748,13 @@ fn add_link<a, b>(link: (&a mut u8[][]), input: &b [u8]) -> unit {
 }
 // One link, from objects already on disk: the cache reuses exactly this, so a cached image and an
 // uncached one are the same link of the same objects.
-fn link_objects<a, b, d, e, g>(output: &a [u8], target: &b [u8], emulation: &d [u8], objects: (&e u8[][]), inputs: (&g u8[][])) -> u64 {
+fn link_objects<a, b, d, e, g>(
+    output: &a [u8],
+    target: &b [u8],
+    emulation: &d [u8],
+    objects: (&e u8[][]),
+    inputs: (&g u8[][])
+) -> u64 {
     mut link = u8[][
         tool(view("GRAIL_LINKER"), view("ld.lld")),
         copy(view("-m")),
@@ -1863,7 +1963,12 @@ fn cache_rest<a>(row: &a [u8], start: u64) -> u8[] {
     return out;
 }
 // Publish a record: write it in `stage/`, then rename it into place.
-fn cache_record_put<a, b, d, e>(c: (&a mut Cache), kind: &b [u8], key: &d [u8], body: &e [u8]) -> unit {
+fn cache_record_put<a, b, d, e>(
+    c: (&a mut Cache),
+    kind: &b [u8],
+    key: &d [u8],
+    body: &e [u8]
+) -> unit {
     stage := cache_stage(&mut c);
     name := cat(view("rec."), view(key));
     pending := path_join(view(stage), view(name));
@@ -2032,7 +2137,12 @@ fn cache_blob_ok<a, b>(c: (&a mut Cache), digest: &b [u8]) -> bool {
     return eq(view(actual), view(digest));
 }
 // Put a filed artifact back at `dest`, through a staging name so `dest` is only ever the whole file.
-fn cache_blob_restore<a, b, d>(c: (&a mut Cache), digest: &b [u8], dest: &d [u8], executable: u64) -> u64 {
+fn cache_blob_restore<a, b, d>(
+    c: (&a mut Cache),
+    digest: &b [u8],
+    dest: &d [u8],
+    executable: u64
+) -> u64 {
     blobs := path_join(view(c.root), view("blob"));
     blob := path_join(view(blobs), view(digest));
     if host::exists(view(blob)) == 0 {
@@ -2173,7 +2283,13 @@ fn cache_mentions<a, b>(text: &a [u8], name: &b [u8]) -> bool {
 }
 // The key material of one build: the flag vector as the compiler will see it, the compiler's own
 // digest, the inputs in command-line order with their digests, the interfaces read, and the tools.
-fn cache_build_id<a, b, d, e, g>(c: (&a mut Cache), argv: (&b u8[][]), asm: &d [u8], emulation: &e [u8], assemble: (&g u8[][])) -> BuildId {
+fn cache_build_id<a, b, d, e, g>(
+    c: (&a mut Cache),
+    argv: (&b u8[][]),
+    asm: &d [u8],
+    emulation: &e [u8],
+    assemble: (&g u8[][])
+) -> BuildId {
     mut id = BuildId {
         flags: u8[],
         compiler: u8[],
@@ -2182,7 +2298,7 @@ fn cache_build_id<a, b, d, e, g>(c: (&a mut Cache), argv: (&b u8[][]), asm: &d [
         ifaces: u8[],
         iface_dir: u8[],
         sources: u8[][],
-        digests: u8[][]
+        digests: u8[][],
     };
     mut flagbuf = u8[];
     push_bytes(&mut flagbuf, view("grail-cache-flags 1\n"));
@@ -2195,7 +2311,8 @@ fn cache_build_id<a, b, d, e, g>(c: (&a mut Cache), argv: (&b u8[][]), asm: &d [
             flagbuf.push(10);
             i += 2;
         } else {
-            if (eq(view(a), view("--interface")) || eq(view(a), view("--emit-interface"))) & (i + 1 < argv.len()) {
+            if (eq(view(a), view("--interface")) || eq(view(a), view("--emit-interface")))
+                & (i + 1 < argv.len()) {
                 id.iface_dir = item(&argv, i + 1);
                 // The interfaces a module reads are named one by one in its own key, so the set as a
                 // whole belongs to the program key and not to the flag vector every module shares.
@@ -2222,11 +2339,20 @@ fn cache_build_id<a, b, d, e, g>(c: (&a mut Cache), argv: (&b u8[][]), asm: &d [
     exe := host::exe_path();
     id.compiler = cache_digest_file(&mut c, view(exe));
     id.assembler = cache_tool_id(&mut c, assemble);
-    mut linker = u8[][tool(view("GRAIL_LINKER"), view("ld.lld")), copy(view("-m")), copy(view(emulation))];
+    mut linker = u8[][
+        tool(view("GRAIL_LINKER"), view("ld.lld")),
+        copy(view("-m")),
+        copy(view(emulation))
+    ];
     id.linker = cache_tool_id(&mut c, &linker);
     return id;
 }
-fn cache_program_key<a, b, d, e>(c: (&a mut Cache), id: (&b BuildId), target: &d [u8], asm: &e [u8]) -> u8[] {
+fn cache_program_key<a, b, d, e>(
+    c: (&a mut Cache),
+    id: (&b BuildId),
+    target: &d [u8],
+    asm: &e [u8]
+) -> u8[] {
     mut buf = u8[];
     push_bytes(&mut buf, view("grail-cache-program 1\ntarget "));
     push_bytes(&mut buf, view(target));
@@ -2251,7 +2377,13 @@ fn cache_program_key<a, b, d, e>(c: (&a mut Cache), id: (&b BuildId), target: &d
     }
     return native::iface_digest(&buf);
 }
-fn cache_module_key<a, b, d, e, g>(c: (&a mut Cache), id: (&b BuildId), target: &d [u8], part: &e [u8], parts: (&g u8[][])) -> u8[] {
+fn cache_module_key<a, b, d, e, g>(
+    c: (&a mut Cache),
+    id: (&b BuildId),
+    target: &d [u8],
+    part: &e [u8],
+    parts: (&g u8[][])
+) -> u8[] {
     name := part_module(view(part));
     mut buf = u8[];
     push_bytes(&mut buf, view("grail-cache-module 1\npart "));
@@ -2275,7 +2407,9 @@ fn cache_module_key<a, b, d, e, g>(c: (&a mut Cache), id: (&b BuildId), target: 
     // The trusted base: every module is emitted against the runtime and the platform module.
     for k in id.sources.len() {
         base_name := basename(view(item(&id.sources, k)));
-        if eq(view(base_name), view("runtime")) || eq(view(base_name), view("os-linux")) || eq(view(base_name), view("darwin")) {
+        if eq(view(base_name), view("runtime"))
+            || eq(view(base_name), view("os-linux"))
+            || eq(view(base_name), view("darwin")) {
             push_bytes(&mut buf, view("base "));
             push_bytes(&mut buf, view(base_name));
             buf.push(32);
@@ -2409,7 +2543,9 @@ fn cache_split<a, b, d, e, g, k, m>(
         recorded := cache_field(view(c.root), view("mod"), view(key), view("asm"));
         blob := cache_field(view(c.root), view("mod"), view(key), view("blob"));
         mut reused = 0;
-        if (recorded.len() == 64) & eq(view(recorded), view(asm_digest)) & cache_blob_ok(&mut c, view(blob)) {
+        if (recorded.len() == 64)
+            & eq(view(recorded), view(asm_digest))
+            & cache_blob_ok(&mut c, view(blob)) {
             if cache_blob_restore(&mut c, view(blob), view(object), 0) == 0 {
                 reused = 1;
             }
@@ -2492,7 +2628,8 @@ fn cache_split<a, b, d, e, g, k, m>(
         linked = 1;
     }
     if linked != 0 {
-        if link_objects(view(output), view(target), view(emulation), &parts.objects, &parts.link) != 0 {
+        if link_objects(view(output), view(target), view(emulation), &parts.objects, &parts.link)
+            != 0 {
             return 1;
         }
         final = cache_blob_put(&mut c, view(output));
@@ -2529,65 +2666,6 @@ fn cache_split<a, b, d, e, g, k, m>(
     return 0;
 }
 
-fn load_project() -> Project {
-    mut p = Project {
-        name: u8[],
-        entry: copy(view("src/main.grl")),
-        deps: u8[][],
-        urls: u8[][],
-        revs: u8[][],
-    };
-    if host::exists(view("grail.pkg")) == 0 {
-        return p;
-    }
-    text := host::read_file(view("grail.pkg"));
-    rows := lines(view(text));
-    for i in rows.len() {
-        row := item(&rows, i);
-        w := words(view(row));
-        if 1 < w.len() {
-            key := item(&w, 0);
-            value := item(&w, 1);
-            if eq(view(key), view("name")) {
-                p.name = value;
-            } else {
-                if eq(view(key), view("entry")) {
-                    p.entry = value;
-                } else {
-                    if eq(view(key), view("dep")) & (2 < w.len()) {
-                        p.deps.push(value);
-                        p.urls.push(item(&w, 2));
-                        mut rev = u8[];
-                        if 3 < w.len() {
-                            rev = item(&w, 3);
-                        }
-                        p.revs.push(rev);
-                    }
-                }
-            }
-        }
-    }
-    return p;
-}
-// Project modules: every .grl under src/ except the entry, plus every fetched dependency's src/.
-fn project_modules<a>(p: (&a Project), skip_entry: u64) -> u8[][] {
-    mut all = u8[][];
-    collect(view("src"), &mut all);
-    for i in p.deps.len() {
-        name := item(&p.deps, i);
-        d := path_join(view(".grail/deps"), view(name));
-        src := path_join(view(d), view("src"));
-        collect(view(src), &mut all);
-    }
-    mut out = u8[][];
-    for i in all.len() {
-        f := item(&all, i);
-        if !(skip_entry != 0 && eq(view(f), view(p.entry))) {
-            out.push(f);
-        }
-    }
-    return out;
-}
 struct Options {
     file: u8[],
     output: u8[],
@@ -2616,7 +2694,20 @@ struct Options {
 // cache keys on. Bit 0 check only, 1 debug, 2 deny ambient host, 3 split, 4/5 overflow, 6 cache,
 // 7 whole program, 8 no runtime-error location table.
 fn flag_bits<a>(o: (&a Options)) -> u64 {
-    return o.debug * 2 + o.deny * 4 + o.split * 8 + o.overflow * 16 + o.cache * 64 + o.whole * 128 + o.no_sites * 256;
+    return o.debug
+        * 2
+        + o.deny
+        * 4
+        + o.split
+        * 8
+        + o.overflow
+        * 16
+        + o.cache
+        * 64
+        + o.whole
+        * 128
+        + o.no_sites
+        * 256;
 }
 fn options<a>(args: (&a u8[][])) -> Options {
     mut o = Options {
@@ -2660,65 +2751,76 @@ fn options<a>(args: (&a u8[][])) -> Options {
                             if eq(view(a), view("--debug")) {
                                 o.debug = 1;
                             } else {
-                            if eq(view(a), view("--deny-ambient-host")) {
-                                o.deny = 1;
-                            } else {
-                            if eq(view(a), view("--split")) {
-                                // One object per module, assembled concurrently (B1 stage 1).
-                                o.split = 1;
-                            } else {
-                            if eq(view(a), view("--per-module")) {
-                                // One compiler invocation per module was B1 stage 4's opt-in; it is how
-                                // a multi-module program is built now, so the flag says nothing new.
-                            } else {
-                            if eq(view(a), view("--whole-program")) {
-                                // Ask for the one-run build that per-module replaced.
-                                o.whole = 1;
-                            } else {
-                            if eq(view(a), view("--cache")) {
-                                // Reuse a module's compiler run and its object, and an unchanged
-                                // program (B1 stage 4).
-                                o.cache = 1;
-                            } else {
-                            if eq(view(a), view("--overflow=wrap")) {
-                                o.overflow = 1;
-                            } else {
-                            if eq(view(a), view("--no-error-sites")) {
-                                o.no_sites = 1;
-                            } else {
-                            if eq(view(a), view("--overflow=checked")) {
-                                o.overflow = 2;
-                            } else {
-                            if eq(view(a), view("--interface")) & (i + 1 < args.len()) {
-                                // Module interfaces (B1 stage 2): the directory holding them.
-                                i += 1;
-                                o.iface = item(&args, i);
-                            } else {
-                            if eq(view(a), view("--verify")) {
-                                o.verify = 1;
-                            } else {
-                            if ends(view(a), view(".grl")) & (o.file.len() == 0) {
-                                o.file = copy(view(a));
-                                o.paths.push(a);
-                            } else {
-                                o.paths.push(a);
-                            }
-                            }
-                            }
-                            }
-                            }
-                            }
-                            }
-                            }
-                            }
-                            }
-                            }
-                            }
+                                if eq(view(a), view("--deny-ambient-host")) {
+                                    o.deny = 1;
+                                } else {
+                                    if eq(view(a), view("--split")) {
+                                        // One object per module, assembled concurrently (B1 stage 1).
+                                        o.split = 1;
+                                    } else {
+                                        if eq(view(a), view("--per-module")) {
+                                            // One compiler invocation per module was B1 stage 4's opt-in; it is how
+                                            // a multi-module program is built now, so the flag says nothing new.
+                                        } else {
+                                            if eq(view(a), view("--whole-program")) {
+                                                // Ask for the one-run build that per-module replaced.
+                                                o.whole = 1;
+                                            } else {
+                                                if eq(view(a), view("--cache")) {
+                                                    // Reuse a module's compiler run and its object, and an unchanged
+                                                    // program (B1 stage 4).
+                                                    o.cache = 1;
+                                                } else {
+                                                    if eq(view(a), view("--overflow=wrap")) {
+                                                        o.overflow = 1;
+                                                    } else {
+                                                        if eq(view(a), view("--no-error-sites")) {
+                                                            o.no_sites = 1;
+                                                        } else {
+                                                            if eq(
+                                                                view(a),
+                                                                view("--overflow=checked")
+                                                            ) {
+                                                                o.overflow = 2;
+                                                            } else {
+                                                                if eq(view(a), view("--interface"))
+                                                                    & (i + 1 < args.len()) {
+                                                                    // Module interfaces (B1 stage 2): the directory holding them.
+                                                                    i += 1;
+                                                                    o.iface = item(&args, i);
+                                                                } else {
+                                                                    if eq(
+                                                                        view(a),
+                                                                        view("--verify")
+                                                                    ) {
+                                                                        o.verify = 1;
+                                                                    } else {
+                                                                        if ends(
+                                                                            view(a),
+                                                                            view(".grl")
+                                                                        )
+                                                                            & (o.file.len() == 0) {
+                                                                            o.file = copy(view(a));
+                                                                            o.paths.push(a);
+                                                                        } else {
+                                                                            o.paths.push(a);
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
+        }
         i += 1;
     }
     // The whole-program cache reuses the objects `--split` writes, so it is that shape's cache. An
@@ -2743,7 +2845,11 @@ fn build<a, b>(args: (&a u8[][]), o: (&b mut Options)) -> u64 {
             return 1;
         }
         if (o.whole != 0) & !eq(view(o.target), view("x86_64")) {
-            say(view("grail: --cache --whole-program reuses the objects --split writes, which is the linux x86_64 assembler path"));
+            say(
+                view(
+                    "grail: --cache --whole-program reuses the objects --split writes, which is the linux x86_64 assembler path"
+                )
+            );
             return 1;
         }
         if o.debug != 0 {
@@ -2758,18 +2864,38 @@ fn build<a, b>(args: (&a u8[][]), o: (&b mut Options)) -> u64 {
             o.output = path_join(view("target"), view(stem));
         }
         mut none = u8[][];
-        return compile(&h, view(o.file), &none, view(o.output), view(o.target), flag_bits(&o), view(o.iface), o.verify);
+        return compile(
+            &h,
+            view(o.file),
+            &none,
+            view(o.output),
+            view(o.target),
+            flag_bits(&o),
+            view(o.iface),
+            o.verify
+        );
     }
-    p := load_project();
+    // A project build reads grail.lock: the package manager has already resolved, fetched and
+    // verified the graph, and hands back the entry file plus every module file (B1's module list,
+    // unchanged). No resolution and no network happen here.
+    p := pkg::plan(0);
     if p.name.len() == 0 {
-        say(view("grail: no .grl file given and no grail.pkg here (try `grail new NAME`)"));
         return 1;
     }
     if o.output.len() == 0 {
-        o.output = path_join(view("target"), view(p.name));
+        name := copy(view(p.name));
+        o.output = path_join(view("target"), view(name));
     }
-    modules := project_modules(&p, 1);
-    return compile(&h, view(p.entry), &modules, view(o.output), view(o.target), flag_bits(&o), view(o.iface), o.verify);
+    return compile(
+        &h,
+        view(p.entry),
+        &p.modules,
+        view(o.output),
+        view(o.target),
+        flag_bits(&o),
+        view(o.iface),
+        o.verify
+    );
 }
 fn check_command<a>(args: (&a u8[][])) -> u64 {
     o := options(&args);
@@ -2783,16 +2909,33 @@ fn check_command<a>(args: (&a u8[][])) -> u64 {
         stem := basename(view(o.file));
         out := path_join(view("target"), view(stem));
         mut none = u8[][];
-        status = compile_mode(&h, view(o.file), &none, view(out), view(o.target), 1 + flag_bits(&o), view(o.iface), o.verify);
+        status = compile_mode(
+            &h,
+            view(o.file),
+            &none,
+            view(out),
+            view(o.target),
+            1 + flag_bits(&o),
+            view(o.iface),
+            o.verify
+        );
     } else {
-        p := load_project();
+        p := pkg::plan(0);
         if p.name.len() == 0 {
-            say(view("grail: no .grl file given and no grail.pkg here"));
             return 1;
         }
-        out := path_join(view("target"), view(p.name));
-        modules := project_modules(&p, 1);
-        status = compile_mode(&h, view(p.entry), &modules, view(out), view(o.target), 1 + flag_bits(&o), view(o.iface), o.verify);
+        name := copy(view(p.name));
+        out := path_join(view("target"), view(name));
+        status = compile_mode(
+            &h,
+            view(p.entry),
+            &p.modules,
+            view(out),
+            view(o.target),
+            1 + flag_bits(&o),
+            view(o.iface),
+            o.verify
+        );
     }
     if status == 0 {
         say(view("ok"));
@@ -2804,7 +2947,9 @@ fn run_command<a>(args: (&a u8[][])) -> u64 {
     host_target := target_name(host::target());
     if !eq(view(o.target), view(host_target)) {
         say(
-            view("grail run: cross-target executables must be run with an emulator; use grail build --target")
+            view(
+                "grail run: cross-target executables must be run with an emulator; use grail build --target"
+            )
         );
         return 1;
     }
@@ -2842,8 +2987,11 @@ fn test_command<a>(args: (&a u8[][])) -> u64 {
     } else {
         collect(view("tests"), &mut files);
     }
-    p := load_project();
-    modules := project_modules(&p, 1);
+    // `grail test` is the one build that sees the root's dev-dependencies (section 8).
+    p := pkg::plan(1);
+    if p.name.len() == 0 {
+        return 1;
+    }
     host::mkdir(view("target"));
     host::mkdir(view("target/tests"));
     mut failed = 0;
@@ -2854,7 +3002,16 @@ fn test_command<a>(args: (&a u8[][])) -> u64 {
         host::print(view("test "));
         host::print(view(f));
         host::print(view(" ... "));
-        mut status = compile(&h, view(f), &modules, view(out), view(o.target), flag_bits(&o), view(o.iface), o.verify);
+        mut status = compile(
+            &h,
+            view(f),
+            &p.modules,
+            view(out),
+            view(o.target),
+            flag_bits(&o),
+            view(o.iface),
+            o.verify
+        );
         if status == 0 {
             exe := path_join(view("."), view(out));
             status = host::command(u8[][exe]);
@@ -2924,155 +3081,20 @@ fn new_command<a>(args: (&a u8[][])) -> u64 {
     host::mkdir(view(src));
     tests := path_join(view(name), view("tests"));
     host::mkdir(view(tests));
-    mut manifest = copy(view("name "));
-    for i in name.len() {
-        manifest.push(name[i]);
-    }
-    manifest.push(10);
-    pkg := path_join(view(name), view("grail.pkg"));
+    manifest := cat(
+        view("[package]\nname = \""),
+        view(cat(view(copy(view(name))), view("\"\nversion = \"0.1.0\"\n")))
+    );
+    pkg := path_join(view(name), view("grail.toml"));
     host::write_file(view(pkg), view(manifest));
     main := path_join(view(src), view("main.grl"));
     host::write_file(view(main), view("fn main() {\n    println(\"Hello, world!\");\n}\n"));
     test := path_join(view(tests), view("smoke.grl"));
     host::write_file(view(test), view("fn main() {\n    assert(1 + 1 == 2);\n}\n"));
     ignore := path_join(view(name), view(".gitignore"));
-    host::write_file(view(ignore), view("target/\n.grail/\n"));
+    host::write_file(view(ignore), view("target/\n"));
     say2(view("created project "), view(name));
     return 0;
-}
-fn lock_lookup<a, b>(lock: &a [u8], name: &b [u8]) -> u8[] {
-    rows := lines(view(lock));
-    for i in rows.len() {
-        row := item(&rows, i);
-        w := words(view(row));
-        if 1 < w.len() {
-            k := item(&w, 0);
-            if eq(view(k), view(name)) {
-                return item(&w, 1);
-            }
-        }
-    }
-    return u8[];
-}
-fn fetch_command() -> u64 {
-    p := load_project();
-    if p.name.len() == 0 {
-        say(view("grail: no grail.pkg here"));
-        return 1;
-    }
-    mut lock = u8[];
-    if host::exists(view("grail.lock")) != 0 {
-        lock = host::read_file(view("grail.lock"));
-    }
-    host::mkdir(view(".grail"));
-    host::mkdir(view(".grail/deps"));
-    mut newlock = u8[];
-    for i in p.deps.len() {
-        name := item(&p.deps, i);
-        url := item(&p.urls, i);
-        rev := item(&p.revs, i);
-        dir := path_join(view(".grail/deps"), view(name));
-        if host::exists(view(dir)) == 0 {
-            say2(view("fetching "), view(name));
-            if host::command(
-                u8[][copy(view("git")), copy(view("clone")), copy(view("--quiet")), copy(view(url)), copy(view(dir))]
-            )
-                != 0 {
-                say2(view("grail: git clone failed for "), view(url));
-                return 1;
-            }
-            mut pin = lock_lookup(view(lock), view(name));
-            if pin.len() == 0 {
-                pin = copy(view(rev));
-            }
-            if pin.len() != 0 {
-                if host::command(
-                    u8[][
-                        copy(view("git")),
-                        copy(view("-C")),
-                        copy(view(dir)),
-                        copy(view("checkout")),
-                        copy(view("--quiet")),
-                        pin
-                    ]
-                )
-                    != 0 {
-                    say2(view("grail: cannot check out revision for "), view(name));
-                    return 1;
-                }
-            }
-        }
-        record := path_join(view(dir), view(".grail-commit"));
-        mut script = copy(view("git -C '"));
-        for j in dir.len() {
-            script.push(dir[j]);
-        }
-        tail := cat(view("' rev-parse HEAD > '"), view(record));
-        for j in tail.len() {
-            script.push(tail[j]);
-        }
-        script.push(39);
-        if host::command(u8[][copy(view("sh")), copy(view("-c")), script]) != 0 {
-            return 1;
-        }
-        commit := host::read_file(view(record));
-        for j in name.len() {
-            newlock.push(name[j]);
-        }
-        newlock.push(32);
-        for j in commit.len() {
-            if commit[j] != 10 {
-                newlock.push(commit[j]);
-            }
-        }
-        newlock.push(10);
-    }
-    host::write_file(view("grail.lock"), view(newlock));
-    return 0;
-}
-fn add_command<a>(args: (&a u8[][])) -> u64 {
-    if args.len() < 2 {
-        say(view("usage: grail add NAME GIT-URL [REVISION]"));
-        return 1;
-    }
-    if host::exists(view("grail.pkg")) == 0 {
-        say(view("grail: no grail.pkg here"));
-        return 1;
-    }
-    name := item(&args, 0);
-    url := item(&args, 1);
-    p := load_project();
-    for i in p.deps.len() {
-        d := item(&p.deps, i);
-        if eq(view(d), view(name)) {
-            say2(view("grail add: dependency already listed: "), view(name));
-            return fetch_command();
-        }
-    }
-    mut text = host::read_file(view("grail.pkg"));
-    if text.len() != 0 {
-        if text[text.len() - 1] != 10 {
-            text.push(10);
-        }
-    }
-    line := cat(view("dep "), view(name));
-    for i in line.len() {
-        text.push(line[i]);
-    }
-    text.push(32);
-    for i in url.len() {
-        text.push(url[i]);
-    }
-    if 2 < args.len() {
-        rev := item(&args, 2);
-        text.push(32);
-        for i in rev.len() {
-            text.push(rev[i]);
-        }
-    }
-    text.push(10);
-    host::write_file(view("grail.pkg"), view(text));
-    return fetch_command();
 }
 fn debug_command<a>(args: (&a u8[][])) -> u64 {
     if args.len() < 2 {
@@ -3523,7 +3545,9 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
         return 1;
     }
     if (data[0] != 71) || (data[6] != 50) {
-        say(view("grail profile: unsupported sample format; rebuild the program with this compiler"));
+        say(
+            view("grail profile: unsupported sample format; rebuild the program with this compiler")
+        );
         return 1;
     }
     sample_rate := le64(view(data), 8);
@@ -3545,7 +3569,10 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
         }
     }
     if !elf {
-        push_line(&mut out, view("  not an ELF image: no symbols to attribute, every sample is [unknown]"));
+        push_line(
+            &mut out,
+            view("  not an ELF image: no symbols to attribute, every sample is [unknown]")
+        );
     } else if kind == 3 {
         push_line(
             &mut out,
@@ -3662,12 +3689,24 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
 fn help() {
     say(view("grail - the Grail compiler and project tool\n"));
     say(view("usage:"));
-    say(view("  grail build [FILE.grl] [-o OUT] [--target x86_64|aarch64|riscv64|macos-x86_64|macos-aarch64] [--split] [--cache] [--overflow=wrap|checked] [--interface DIR [--verify]]"));
+    say(
+        view(
+            "  grail build [FILE.grl] [-o OUT] [--target x86_64|aarch64|riscv64|macos-x86_64|macos-aarch64] [--split] [--cache] [--overflow=wrap|checked] [--interface DIR [--verify]]"
+        )
+    );
     say(view("  grail check [FILE.grl]            type-check without building"));
     say(view("  grail check --interface DIR       write one checked interface per module"));
-    say(view("  grail check --interface DIR --verify   refuse an interface that disagrees with its sources"));
+    say(
+        view(
+            "  grail check --interface DIR --verify   refuse an interface that disagrees with its sources"
+        )
+    );
     say(view("  grail debug lines|info BINARY     print DWARF line rows or .debug_info"));
-    say(view("  grail cache prune [--keep N]       drop cache entries no build used in the last N (10)"));
+    say(
+        view(
+            "  grail cache prune [--keep N]       drop cache entries no build used in the last N (10)"
+        )
+    );
     say(view("  grail cache clear                  empty the build cache"));
     say(view("  grail explain CODE                 what an error code means (error[E0004])"));
     say(view("  grail bindgen HEADER.h -o OUT.grl  import a C header as extern \"C\" declarations [-I DIR] [-l LIB]"));
@@ -3675,11 +3714,27 @@ fn help() {
     say(view("  grail run [FILE.grl] [-- ARGS...]"));
     say(view("  grail test [FILES or DIRS]        compile and run tests/ (exit status 0 = pass)"));
     say(view("  grail fmt [--check] [FILES or DIRS]"));
-    say(view("  grail new NAME                    create a project (grail.pkg, src/, tests/)"));
-    say(view("  grail add NAME GIT-URL [REV]      add a dependency and fetch it"));
-    say(view("  grail fetch                       fetch dependencies pinned in grail.lock"));
+    say(view("  grail new NAME                    create a project (grail.toml, src/, tests/)"));
     say(
-        view("  grail [--target T] [--overflow=checked|wrap] OUT.s ENTRY.grl MODULE.grl...  (compiler)")
+        view(
+            "  grail add NAME[@REQ]              add a registry dependency (resolves and locks it)"
+        )
+    );
+    say(view("  grail add --path DIR              add a path dependency"));
+    say(
+        view("  grail add --git URL [--rev R]     add a git dependency (--rev, --tag or --branch)")
+    );
+    say(view("  grail remove NAME                 drop a dependency and re-resolve"));
+    say(view("  grail update [NAME...]            re-resolve, then fetch what the lock names"));
+    say(
+        view("  grail fetch [--force]             make the store hold exactly what grail.lock says")
+    );
+    say(view("  grail tree                        print the resolved dependency graph"));
+    say(view("  (--offline works on add, update and fetch: no git or curl is run)"));
+    say(
+        view(
+            "  grail [--target T] [--overflow=checked|wrap] OUT.s ENTRY.grl MODULE.grl...  (compiler)"
+        )
     );
 }
 pub fn is_command<a>(name: &a [u8]) -> bool {
@@ -3691,6 +3746,9 @@ pub fn is_command<a>(name: &a [u8]) -> bool {
         || eq(view(name), view("new"))
         || eq(view(name), view("add"))
         || eq(view(name), view("fetch"))
+        || eq(view(name), view("remove"))
+        || eq(view(name), view("update"))
+        || eq(view(name), view("tree"))
         || eq(view(name), view("debug"))
         || eq(view(name), view("profile"))
         || eq(view(name), view("cache"))
@@ -3729,11 +3787,14 @@ pub fn run() -> u64 {
     if eq(view(name), view("new")) {
         return new_command(&args);
     }
-    if eq(view(name), view("add")) {
-        return add_command(&args);
+    // The package manager owns these five commands (module pkg, docs/design/package-manager.md).
+    if eq(view(name), view("add")) || eq(view(name), view("remove")) {
+        return pkg::command(view(name), &args);
     }
-    if eq(view(name), view("fetch")) || eq(view(name), view("install")) {
-        return fetch_command();
+    if eq(view(name), view("update"))
+        || eq(view(name), view("fetch"))
+        || eq(view(name), view("tree")) {
+        return pkg::command(view(name), &args);
     }
     if eq(view(name), view("debug")) {
         return debug_command(&args);
@@ -3762,7 +3823,8 @@ pub fn run() -> u64 {
         return profile_command(&args);
     }
     if eq(view(name), view("version")) || eq(view(name), view("--version")) {
-        say(view("grail 0.1.0"));
+        out := cat(view("grail "), view(pkg::grail_version()));
+        say(view(out));
         return 0;
     }
     help();

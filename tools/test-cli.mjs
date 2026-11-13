@@ -59,14 +59,17 @@ writeFileSync(join(demo, 'src/main.grl'), 'use mathlib;\nfn main(){println(mathl
 assert.equal(run(['fmt', '--check'], demo, false).status, 1, 'fmt --check must fail on unformatted code');
 run(['fmt'], demo); assert.equal(run(['fmt', '--check'], demo).status, 0);
 const lib = join(work, 'mathlib'); mkdirSync(join(lib, 'src'), { recursive: true });
+writeFileSync(join(lib, 'grail.toml'), '[package]\nname = "mathlib"\nversion = "0.1.0"\n');
 writeFileSync(join(lib, 'src/mathlib.grl'), 'module mathlib;\npub fn triple(n: u64) -> u64 {\n    return n * 3;\n}\n');
 const git = args => assert.equal(spawnSync('git', args, { cwd: lib }).status, 0, `git ${args.join(' ')}`);
 git(['init', '-q']); git(['add', '.']); git(['commit', '-qm', 'init']);
-run(['add', 'mathlib', lib], demo);
-assert.match(readFileSync(join(demo, 'grail.pkg'), 'utf8'), /^dep mathlib /m);
-assert.match(readFileSync(join(demo, 'grail.lock'), 'utf8'), /^mathlib [0-9a-f]{40}$/m);
+const branch = spawnSync('git', ['symbolic-ref', '--short', 'HEAD'], { cwd: lib, encoding: 'utf8' }).stdout.trim();
+run(['add', '--git', `file://${lib}`, '--branch', branch], demo);
+assert.match(readFileSync(join(demo, 'grail.toml'), 'utf8'), /^mathlib = \{ git = "file:\/\/.*", rev = "[0-9a-f]{40}" \}$/m);
+const lock = JSON.parse(readFileSync(join(demo, 'grail.lock'), 'utf8'));
+assert.equal(lock.packages.find(p => p.name === 'mathlib').source, 'git');
 assert.equal(run(['run'], demo).stdout.trim(), '42');
-rmSync(join(demo, '.grail'), { recursive: true }); run(['fetch'], demo);
+run(['fetch', '--force'], demo);
 assert.equal(run(['run'], demo).stdout.trim(), '42');
 writeFileSync(join(demo, 'tests/bad.grl'), 'fn main() {\n    assert(1 == 2);\n}\n');
 const failing = run(['test'], demo, false); assert.equal(failing.status, 1); assert.match(failing.stdout, /1 passed, 1 failed/);
@@ -96,7 +99,7 @@ for (const target of ['x86_64', 'aarch64', 'riscv64']) {
 // 5. Foreign link inputs: `grail run` links a shared library (libc's strlen, so the executable
 // needs the dynamic loader) and a C object named relative to the entry file.
 const clink = join(work, 'clink'); mkdirSync(join(clink, 'src'), { recursive: true });
-writeFileSync(join(clink, 'grail.pkg'), 'name clink\n');
+writeFileSync(join(clink, 'grail.toml'), '[package]\nname = "clink"\nversion = "0.1.0"\n');
 writeFileSync(join(clink, 'src/add.c'), 'long long c_add3(long long a, long long b, long long c) { return a + b + c; }\n');
 command(['clang', '-c', join(clink, 'src/add.c'), '-o', join(clink, 'src/add.o')]);
 writeFileSync(join(clink, 'src/main.grl'), [

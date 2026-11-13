@@ -19,21 +19,25 @@ The compiler binary is also the project tool:
 
 ```sh
 just install                  # grail -> ~/.local/bin, runtime/std -> ~/.local/lib/grail
-grail new hello && cd hello   # grail.pkg, src/main.grl, tests/smoke.grl
+grail new hello && cd hello   # grail.toml, src/main.grl, tests/smoke.grl
 grail check                   # type-check only (fast feedback, no assembler needed)
 grail run                     # build target/hello and run it (arguments after --)
 grail test                    # compile and run every program in tests/ (exit 0 = pass)
 grail fmt                     # format every .grl file; grail fmt --check for CI
 grail build --target aarch64  # cross-compile (x86_64, aarch64, riscv64)
-grail add json https://example.org/json.git v1.0   # git dependency, pinned in grail.lock
-grail fetch                   # re-fetch dependencies at the locked commits
+grail add NAME[@REQ]          # registry dependency, resolved and locked
+grail add --path ../lib        # local dependency
+grail add --git URL --tag v1.0 # git dependency, locked to the commit the tag named
+grail update                  # re-resolve and fetch; grail fetch fills the store from the lock
 ```
 
-A project is a directory with `grail.pkg` (`name NAME`, optional `entry PATH`, and
-`dep NAME GIT-URL [REV]` lines). Its modules are all `.grl` files under `src/`, the `src/`
-directories of fetched dependencies (`.grail/deps/NAME`) and the standard library. Dependencies
-are cloned with git and their commits are recorded in `grail.lock`; `grail fetch` checks out
-the locked commits. There is no registry yet. The runtime/standard library are found through
+A project is a directory with `grail.toml` (`[package]` name and version, `[dependencies]`,
+optional `[dev-dependencies]` and `[registry] index`). `grail update` resolves the manifest
+against the registry index, path directories and git repositories, and writes `grail.lock`:
+exact versions, sources, commit ids and checksums. `grail build`, `check`, `run` and `test`
+read the lock, verify the content-addressed store, and compile the module set it names — they
+never resolve and never use the network. `docs/design/package-manager.md` is the design and
+`docs/packages.md` is the user-facing reference. The runtime/standard library are found through
 `GRAIL_HOME`, `PREFIX/lib/grail` next to an installed binary, or the source tree.
 
 `grail fmt` produces the canonical layout: 4-space indentation, one statement per line, braces

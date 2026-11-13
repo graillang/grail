@@ -239,7 +239,7 @@ for (const test of cases) {
 {
   const project = join(work, 'project');
   mkdirSync(join(project, 'src'), { recursive: true });
-  writeFileSync(join(project, 'grail.pkg'), 'name split-demo\n');
+  writeFileSync(join(project, 'grail.toml'), '[package]\nname = "split-demo\n"\nversion = "0.1.0"\n');
   writeFileSync(join(project, 'src/util.grl'), 'module util;\n\npub fn twice(x: u64) -> u64 {\n    return x * 2;\n}\n\npub fn report(name: &[u8], value: u64) {\n    print(name);\n    print(" = ");\n    println(value);\n}\n');
   writeFileSync(join(project, 'src/main.grl'), 'use util;\n\npub fn main() -> u64 {\n    util::report("twice(21)", util::twice(21));\n    return 0;\n}\n');
   const env = { ...process.env, GRAIL_HOME: root };
