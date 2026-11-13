@@ -1821,7 +1821,12 @@
       "lib/io.grl",
       "lib/core.grl"
     ],
-    "stdout": "not found\nnot found\nhello\nnot found\nalready exists\n1\ndirectory not empty\nfs ok\n"
+    "stdout": "definitely-missing.txt: not found\nno/such/dir/x.txt: not found\nhello\nmissing: not found\ntmpdir: already exists\n1\ntmpdir: directory not empty\nfs ok\n",
+    "modules": [
+      "lib/strings.grl",
+      "lib/time.grl",
+      "lib/iter.grl"
+    ]
   },
   {
     "name": "unwrap-then-equals-lexing",
@@ -4549,7 +4554,10 @@
       "lib/zlib.grl",
       "lib/fs.grl",
       "lib/io.grl",
-      "lib/core.grl"
+      "lib/core.grl",
+      "lib/strings.grl",
+      "lib/time.grl",
+      "lib/iter.grl"
     ],
     "args": [
       "../../../../tests/lib/zlib"
@@ -4567,7 +4575,10 @@
       "lib/zlib.grl",
       "lib/fs.grl",
       "lib/io.grl",
-      "lib/core.grl"
+      "lib/core.grl",
+      "lib/strings.grl",
+      "lib/time.grl",
+      "lib/iter.grl"
     ],
     "args": [
       "../../../../tests/lib/png"
@@ -4584,7 +4595,10 @@
       "lib/jpeg.grl",
       "lib/fs.grl",
       "lib/io.grl",
-      "lib/core.grl"
+      "lib/core.grl",
+      "lib/strings.grl",
+      "lib/time.grl",
+      "lib/iter.grl"
     ],
     "args": [
       "../../../../tests/lib/jpeg"
@@ -4602,7 +4616,10 @@
       "lib/zlib.grl",
       "lib/fs.grl",
       "lib/io.grl",
-      "lib/core.grl"
+      "lib/core.grl",
+      "lib/strings.grl",
+      "lib/time.grl",
+      "lib/iter.grl"
     ],
     "args": [
       "../../../../tests/lib/png"
@@ -4630,7 +4647,10 @@
       "lib/xxhash.grl",
       "lib/fs.grl",
       "lib/io.grl",
-      "lib/core.grl"
+      "lib/core.grl",
+      "lib/strings.grl",
+      "lib/time.grl",
+      "lib/iter.grl"
     ],
     "args": [
       "../../../../tests/lib/zstd"
@@ -8621,5 +8641,145 @@
     ],
     "stdout": "{\n  \"name\": \"demo\",\n  \"n\": 42,\n  \"ok\": true,\n  \"deps\": [\n    {\n      \"n\": \"a\"\n    }\n  ]\n}\nerror: byte 3: unexpected byte\nerror: byte 6: only integer numbers are accepted here (no fraction or exponent)\nerror: byte 12: duplicate key <a>\n[]\n\"tab\\there\"\n",
     "status": 0
+  },
+  {
+    "name": "fsx-tree-lifecycle",
+    "source": "use fs;\nuse core;\nuse strings;\n\n// A real tree in the case's own scratch directory: create, write, read, stat, walk, list, rename,\n// copy and remove, with every step observed.\nfn main(){\n    match fs::remove_dir_all(view(\"tree\")) {\n        e: fs::Error => {},\n        _ => {}\n    }\n    fs::create_dir_all(view(\"tree/a/b\"))!;\n    fs::create_dir_all(view(\"tree/c\"))!;\n    fs::write(view(\"tree/a/b/one.txt\"), view(\"hello\"))!;\n    fs::write(view(\"tree/a/two.txt\"), view(\"second\"))!;\n    fs::write_atomic(view(\"tree/c/atomic.txt\"), view(\"all at once\"))!;\n    println(fs::read_text(view(\"tree/c/atomic.txt\"))!);\n    md := fs::metadata(view(\"tree/a/b/one.txt\"))!;\n    println(md.size());\n    println(md.is_file());\n    println(md.is_dir());\n    println(md.permissions() != 0);\n    println(md.modified.unix_seconds() > 1600000000);\n    entries := fs::walk(view(\"tree\"), fs::walk_options())!;\n    mut i = 0;\n    while i < entries.len() {\n        println(entries[i].path());\n        i = i + 1;\n    }\n    names := fs::list_dir(view(\"tree/a\"))!;\n    println(names.len());\n    println(names[0].text());\n    fs::rename(view(\"tree/a/two.txt\"), view(\"tree/a/renamed.txt\"))!;\n    println(fs::exists(view(\"tree/a/renamed.txt\")));\n    println(fs::exists(view(\"tree/a/two.txt\")));\n    fs::copy(view(\"tree/a/b/one.txt\"), view(\"tree/c/copy.txt\"))!;\n    println(fs::read_text(view(\"tree/c/copy.txt\"))!);\n    fs::remove_dir_all(view(\"tree\"))!;\n    println(fs::exists(view(\"tree\")));\n    match fs::read_text(view(\"tree/one.txt\")) {\n        e: fs::Error => { println(e.show()); },\n        t: string => { println(t); }\n    }\n    println(\"done\");\n}\n",
+    "modules": [
+      "lib/fs.grl",
+      "lib/io.grl",
+      "lib/core.grl",
+      "lib/strings.grl",
+      "lib/time.grl",
+      "lib/iter.grl"
+    ],
+    "stdout": "all at once\n5\ntrue\nfalse\ntrue\ntrue\ntree/a\ntree/a/b\ntree/a/b/one.txt\ntree/a/two.txt\ntree/c\ntree/c/atomic.txt\n2\nb\ntrue\nfalse\nhello\nfalse\ntree/one.txt: not found\ndone\n"
+  },
+  {
+    "name": "fsx-paths-lexical",
+    "source": "use fs;\nuse core;\n\n// Every path operation is lexical: these answers need no file to exist.\nfn main(){\n    p := fs::path(view(\"a/./b/../c//d/\"));\n    println(p.show());\n    println(p.is_absolute());\n    println(p.parent()!.show());\n    println(p.file_name()!.text());\n    println(p.file_stem()!.text());\n    q := fs::path(view(\"archive.tar.gz\"));\n    println(q.extension()!.text());\n    r := fs::path(view(\".bashrc\"));\n    println(r.extension() == None);\n    root := fs::path(view(\"/usr//local/../share/./zoneinfo/\"));\n    println(root.normalize().show());\n    println(root.normalize().parent()!.show());\n    joined := fs::path(view(\"/tmp\")).join(view(\"x/y.txt\"));\n    println(joined.show());\n    println(fs::path(view(\"/tmp\")).join(view(\"/etc/hosts\")).show());\n    here := fs::path(view(\".\")).canonicalize()!;\n    println(here.is_absolute());\n    println(here.file_name() != None);\n    println(fs::path(view(\"\")).is_absolute());\n    println(fs::path(view(\"..\")).normalize().show());\n    println(\"done\");\n}\n",
+    "modules": [
+      "lib/fs.grl",
+      "lib/io.grl",
+      "lib/core.grl",
+      "lib/strings.grl",
+      "lib/time.grl",
+      "lib/iter.grl"
+    ],
+    "stdout": "a/./b/../c//d/\nfalse\na/c\nd\nd\ngz\ntrue\n/usr/share/zoneinfo\n/usr/share\n/tmp/x/y.txt\n/etc/hosts\ntrue\ntrue\nfalse\n..\ndone\n"
+  },
+  {
+    "name": "fsx-text-handles-and-errors",
+    "source": "use fs;\nuse core;\nuse io;\nuse strings;\n\n// Text that is not UTF-8 is refused with the offset of the first ill-formed byte, a file handle is\n// closed exactly once, and a name that is not ASCII is a name like any other.\nfn main(){\n    raw := u8[111, 107, 255, 254]; // \"ok\" then two bytes that are not UTF-8\n    fs::write(view(\"bad.txt\"), view(raw))!;\n    match fs::read_text(view(\"bad.txt\")) {\n        e: fs::Error => { println(e.show()); },\n        t: string => { println(t); }\n    }\n    match fs::metadata(view(\"missing.txt\")) {\n        e: fs::Error => { println(e.is_not_found()); },\n        m: fs::Metadata => { println(false); }\n    }\n    match fs::list_dir(view(\"missing\")) {\n        e: fs::Error => { println(e.is_not_found()); },\n        names: u8[][] => { println(false); }\n    }\n    match fs::read_text(view(\"missing.txt\")) {\n        e: fs::Error => { println(e.show()); },\n        t: string => { println(t); }\n    }\n    mut writer = fs::create(view(\"handles.txt\"))!;\n    writer.write(view(\"first line\"))!;\n    writer.close()!;\n    println(writer.is_open());\n    match writer.close() {\n        e: fs::Error => { println(e.show()); },\n        _ => { println(\"closed twice\"); }\n    }\n    mut reader = fs::open(view(\"handles.txt\"))!;\n    data := reader.read_all()!;\n    println(data.len());\n    reader.close()!;\n    name := \"a file with spaces \\u{e9}\\u{4e16}.txt\";\n    fs::write(view(name), view(\"payload\"))!;\n    println(fs::read_text(view(name))!);\n    println(fs::path_of(name).file_name()!.len() > 20);\n    println(\"done\");\n}\n",
+    "modules": [
+      "lib/fs.grl",
+      "lib/io.grl",
+      "lib/core.grl",
+      "lib/strings.grl",
+      "lib/time.grl",
+      "lib/iter.grl"
+    ],
+    "stdout": "bad.txt: text is not valid UTF-8 (ill-formed at byte 2)\ntrue\ntrue\nmissing.txt: not found\nfalse\nhandles.txt: os error 9\n10\npayload\ntrue\ndone\n"
+  },
+  {
+    "name": "fsx-walk-symlink-policy",
+    "source": "use fs;\nuse core;\n\n// The walker's symbolic-link policy: a link is an entry of its own; following enters the target,\n// and a link back to an ancestor is not entered again - so the walk always ends.\nfn main(){\n    fs::create_dir_all(view(\"real/inner\"))!;\n    fs::write(view(\"real/inner/file.txt\"), view(\"x\"))!;\n    fs::symlink(view(\"real\"), view(\"alias\"))!;\n    fs::symlink(view(\"..\"), view(\"real/inner/up\"))!;\n    plain := fs::walk(view(\"real\"), fs::walk_options())!;\n    println(plain.len());\n    mut links = 0;\n    mut i = 0;\n    while i < plain.len() {\n        if plain[i].is_symlink() {\n            links = links + 1;\n        }\n        i = i + 1;\n    }\n    println(links);\n    following := fs::follow_links(fs::walk_options(), true);\n    followed := fs::walk(view(\"real\"), following)!;\n    println(followed.len());\n    mut files = 0;\n    i = 0;\n    while i < followed.len() {\n        if followed[i].is_file() {\n            files = files + 1;\n        }\n        i = i + 1;\n    }\n    println(files);\n    target := fs::metadata(view(\"alias/inner/file.txt\"))!;\n    println(target.is_file());\n    link_md := fs::symlink_metadata(view(\"alias\"))!;\n    println(link_md.is_symlink());\n    fs::remove_dir_all(view(\"real\"))!;\n    fs::remove_file(view(\"alias\"))!;\n    println(fs::exists(view(\"real\")));\n    println(\"done\");\n}\n",
+    "modules": [
+      "lib/fs.grl",
+      "lib/io.grl",
+      "lib/core.grl",
+      "lib/strings.grl",
+      "lib/time.grl",
+      "lib/iter.grl"
+    ],
+    "stdout": "3\n1\n3\n1\ntrue\ntrue\nfalse\ndone\n"
+  },
+  {
+    "name": "fsx-process-capture-and-status",
+    "source": "use process;\nuse core;\nuse strings;\n\n// A child is started from an argument vector, its two output streams are captured separately, and\n// how it ended is a value: an exit code, or the signal that killed it.\nfn argv2(program: string, argument: string) -> u8[][] {\n    mut args = u8[][];\n    args.push(view(program).copy());\n    args.push(view(argument).copy());\n    return args;\n}\nfn main(){\n    mut ok = argv2(\"/bin/sh\", \"-c\");\n    mut args = u8[][];\n    mut i = 0;\n    while i < ok.len() {\n        args.push(ok[i].copy());\n        i = i + 1;\n    }\n    args.push(\"echo out; echo err 1>&2; exit 3\".copy());\n    captured := process::run(&args)!;\n    println(captured.code());\n    println(captured.succeeded());\n    println(captured.out());\n    println(captured.err());\n    println(captured.is_truncated());\n    println(captured.show_status());\n    mut killed_args = u8[][];\n    killed_args.push(\"/bin/sh\".copy());\n    killed_args.push(\"-c\".copy());\n    killed_args.push(\"kill -9 $$\".copy());\n    killed := process::run(&killed_args)!;\n    println(killed.signal());\n    println(killed.show_status());\n    println(killed.code());\n    mut echo_args = u8[][];\n    echo_args.push(\"/bin/echo\".copy());\n    echo_args.push(\"hello world\".copy());\n    plain := process::spawn(&echo_args)!;\n    println(plain.id() > 0);\n    status := plain.wait()!;\n    println(status.code());\n    println(status.is_success());\n    println(status.show());\n    mut missing = u8[][];\n    missing.push(\"/nonexistent/grail-test-program\".copy());\n    match process::run(&missing) {\n        e: process::Error => { println(e.show()); },\n        out: process::Output => { println(out.code()); }\n    }\n    println(\"done\");\n}\n",
+    "modules": [
+      "lib/process.grl",
+      "lib/io.grl",
+      "lib/core.grl",
+      "lib/strings.grl",
+      "lib/iter.grl"
+    ],
+    "stdout": "3\nfalse\nout\n\nerr\n\nfalse\nexited with status 3\n9\nkilled by signal 9 (SIGKILL)\n0\ntrue\nhello world\n0\ntrue\nexited with status 0\n127\ndone\n",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "fsx-process-env-and-capture-limit",
+    "source": "use process;\nuse core;\nuse strings;\n\n// The environment a child starts with is a value: capture what is inherited, change it, and the\n// child sees exactly that. A capture that reaches its limit says so.\nfn main(){\n    mut env = process::environment();\n    println(env.len() > 0);\n    println(env.has(view(\"GRAIL_STDUTIL_NOT_SET\")));\n    env.set(view(\"GRAIL_STDUTIL\"), view(\"one\"));\n    value := env.get(view(\"GRAIL_STDUTIL\"))!;\n    println(value.text());\n    env.set(view(\"GRAIL_STDUTIL\"), view(\"two\"));\n    println(env.get(view(\"GRAIL_STDUTIL\"))!.text());\n    println(env.remove(view(\"GRAIL_STDUTIL\")));\n    println(env.has(view(\"GRAIL_STDUTIL\")));\n    mut args = u8[][];\n    args.push(\"/bin/sh\".copy());\n    args.push(\"-c\".copy());\n    args.push(\"printf %s \\\"$GRAIL_STDUTIL\\\"\".copy());\n    mut child_env = process::environment();\n    child_env.set(view(\"GRAIL_STDUTIL\"), view(\"passed through\"));\n    seen := process::run_in(&args, &child_env)!;\n    println(seen.out());\n    limited := process::run_with(&args, &child_env, 4)!;\n    println(limited.is_truncated());\n    dir := process::current_dir()!;\n    println(dir.len() > 0);\n    println(process::executable().len() > 0);\n    println(process::signal_name(9).text());\n    println(process::signal_name(64).len());\n    println(\"done\");\n}\n",
+    "modules": [
+      "lib/process.grl",
+      "lib/io.grl",
+      "lib/core.grl",
+      "lib/strings.grl",
+      "lib/iter.grl"
+    ],
+    "stdout": "true\nfalse\none\ntwo\ntrue\nfalse\npassed through\ntrue\ntrue\ntrue\nSIGKILL\n0\ndone\n",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "utf8-validated-string-operations",
+    "source": "use utf8;\nuse core;\nuse io;\nuse strings;\n\n// A validated value: construction refuses ill-formed bytes with the offset, every operation\n// preserves validity, and the bytes come back out without a copy.\nfn main(){\n    good := utf8::from_bytes(view(\"g\\u{e4}ns\"))!;\n    println(good.len());\n    println(good.char_count());\n    println(good.show());\n    match utf8::from_bytes(view(\"ab\")) {\n        e: utf8::Error => { println(e.show()); },\n        v: utf8::Utf8String => { println(v.show()); }\n    }\n    mut broken = u8[];\n    broken.push(97);\n    broken.push(197);\n    broken.push(44);\n    match utf8::from_bytes(view(broken)) {\n        e: utf8::Error => { println(e.show()); },\n        v: utf8::Utf8String => { println(v.show()); }\n    }\n    // slices at character boundaries, and one that is not\n    left := good.slice_chars(0, 1)!;\n    println(left.show());\n    match good.slice_chars(1, 2) {\n        e: utf8::Error => { println(e.show()); },\n        v: utf8::Utf8String => { println(v.show()); }\n    }\n    whole := good.slice_chars(0, good.len())!;\n    println(whole.same(&good));\n    // concatenation and replacement preserve the invariant\n    joined := left.concat(&good);\n    println(joined.show());\n    replaced := good.replace(&left, &utf8::from_text(\"x\".text()));\n    println(replaced.show());\n    println(joined.same(&joined.copy()));\n    // ASCII case mapping is total, anything else is refused by code point\n    println(utf8::from_text(\"Hello\".text()).to_upper()!.show());\n    println(utf8::from_text(\"Hello\".text()).to_ascii_lower().show());\n    match good.to_upper() {\n        e: utf8::Error => { println(e.show()); },\n        v: utf8::Utf8String => { println(v.show()); }\n    }\n    // every code point of valid text decodes: no U+FFFD substitution can occur\n    mut codepoints = u64[];\n    for c in good.chars() {\n        codepoints.push(u64(c));\n    }\n    println(codepoints.len());\n    println(codepoints[1]);\n    // the view is the bytes, not a copy\n    raw := good.as_bytes();\n    println(raw.len());\n    println(strings::is_utf8(raw));\n    // the unchecked hatch, used where the bytes are known good\n    mut hatched = utf8::empty();\n    unsafe {\n        hatched = utf8::from_unchecked(view(\"safe\"));\n    }\n    println(hatched.show());\n    println(\"done\");\n}\n",
+    "modules": [
+      "lib/utf8.grl",
+      "lib/strings.grl",
+      "lib/io.grl",
+      "lib/core.grl",
+      "lib/iter.grl"
+    ],
+    "stdout": "5\n4\ng\u00e4ns\nab\nnot valid UTF-8 at byte 1\ng\nnot a character boundary at 2\ntrue\ngg\u00e4ns\nx\u00e4ns\ntrue\nHELLO\nhello\nno case mapping for code point 228 (ASCII only)\n4\n228\n5\ntrue\nsafe\ndone\n"
+  },
+  {
+    "name": "utf8-fuzz-construction-invariant",
+    "source": "use utf8;\nuse core;\nuse strings;\n\n// The invariant, checked by construction from arbitrary bytes: a deterministic pseudo-random walk\n// over 10,000 mutations of a valid string. Every value the constructor accepts must re-validate,\n// and every refusal must name an offset that is really there.\nfn next(slot: (&mut u64)) -> u64 {\n    // xorshift64: deterministic, and no table to keep in step.\n    mut x = exchange(slot, 0);\n    x = x ^ wrapping_mul(x, 8192);\n    x = x ^ (x / 131072);\n    x = x ^ wrapping_mul(x, 32);\n    exchange(slot, x);\n    return x;\n}\nfn main(){\n    mut seed = 88172645463325252;\n    base := utf8::from_text(\"Grail \\u{4e16}\\u{754c} caf\\u{e9} \\u{1f600}\".text());\n    mut accepted = 0;\n    mut refused = 0;\n    mut round = 0;\n    while round < 10000 {\n        mut mutant = base.as_bytes().copy();\n        roll := next(&mut seed) % 4;\n        at := next(&mut seed) % (mutant.len() + 1);\n        if roll == 0 {\n            mutant.push(u8(next(&mut seed) % 256));\n        } else {\n            if roll == 1 {\n                if mutant.len() != 0 {\n                    mutant.pop();\n                }\n            } else {\n                if mutant.len() != 0 {\n                    index := next(&mut seed) % mutant.len();\n                    mutant[index] = u8(next(&mut seed) % 256);\n                }\n            }\n        }\n        match utf8::from_bytes(view(mutant)) {\n            e: utf8::Error => {\n                refused = refused + 1;\n                // the offset is inside the byte string the constructor was handed\n                mut check_offset = 0;\n                match e {\n                    InvalidUtf8(at) => { check_offset = at; },\n                    _ => { check_offset = 0; }\n                }\n                if check_offset > mutant.len() {\n                    println(\"offset out of range\");\n                    return ();\n                }\n            },\n            value: utf8::Utf8String => {\n                accepted = accepted + 1;\n                if !strings::is_utf8(value.as_bytes()) {\n                    println(\"accepted invalid UTF-8\");\n                    return ();\n                }\n                // re-validation through the checked constructor agrees\n                again := utf8::from_bytes(value.as_bytes())!;\n                if !again.same(&value) {\n                    println(\"re-validation disagreed\");\n                    return ();\n                }\n                if value.char_count() == 0 {\n                    println(\"char count lost\");\n                    return ();\n                }\n            }\n        }\n        round = round + 1;\n    }\n    println(accepted > 0);\n    println(refused > 0);\n    println(accepted + refused == 10000);\n    println(\"done\");\n}\n",
+    "modules": [
+      "lib/utf8.grl",
+      "lib/strings.grl",
+      "lib/io.grl",
+      "lib/core.grl",
+      "lib/iter.grl"
+    ],
+    "stdout": "true\ntrue\ntrue\ndone\n"
+  },
+  {
+    "name": "tz-tzif-fixture-and-posix-footer",
+    "source": "use tz;\nuse core;\nuse strings;\n\n// A TZif file built here, byte by byte: one transition at 1000000000 (2001-09-09T01:46:40Z) from\n// STD at +0 to DST at +3600, both tables (32-bit and 64-bit), and the POSIX footer\n// \"STD-0DST-1,M3.5.0,M10.5.0/3\" for every time after the last recorded transition. The file has the\n// shape /usr/share/zoneinfo holds, so the parser is exercised without depending on the machine.\nfn fixture() -> u8[] {\n    return u8[84,90,105,102,50,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,2,0,0,0,8,59,154,202,0,1,0,0,0,0,0,0,0,0,14,16,1,4,83,84,68,0,68,83,84,0,84,90,105,102,50,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,2,0,0,0,8,0,0,0,0,59,154,202,0,1,0,0,0,0,0,0,0,0,14,16,1,4,83,84,68,0,68,83,84,0,10,83,84,68,45,48,68,83,84,45,49,44,77,51,46,53,46,48,44,77,49,48,46,53,46,48,47,51,10];\n}\n\nfn main(){\n    data := fixture();\n    println(data.len());\n    zone := tz::parse(view(data))!;\n    println(zone.transition_count());\n    println(zone.type_count());\n    println(zone.has_footer());\n    // before the first transition the first standard type applies\n    println(zone.offset_at(0));\n    println(zone.abbreviation_at(0).text());\n    println(zone.is_dst_at(0));\n    // after it, the recorded DST type\n    println(zone.offset_at(1500000000));\n    println(zone.abbreviation_at(1500000000).text());\n    println(zone.is_dst_at(1500000000));\n    // past the last recorded transition the footer's rule decides. Its first transition in 2033 is\n    // 2033-03-27T02:00Z (the last Sunday of March at 02:00 local) and its last is 2033-10-30T02:00Z.\n    println(zone.offset_at(1995501599));\n    println(zone.offset_at(1995501600));\n    println(zone.offset_at(2000000000));\n    println(zone.offset_at(2050000000));\n    println(zone.offset_at(2100000000));\n    // the local reading of an instant\n    local := zone.to_local(2100000000);\n    println(local.to_datetime().format());\n    println(local.offset());\n    println(local.abbreviation().text());\n    // a wall-clock reading the jump forward leaves out (2033-03-27 02:15 local)\n    skipped := tz::local(2033, 3, 27, 2, 15, 0);\n    match zone.from_local(&skipped) {\n        Skipped(gap) => {\n            println(gap.start());\n            println(gap.seconds());\n        },\n        Unique(instant) => { println(\"unique\"); },\n        Ambiguous(pair) => { println(\"ambiguous\"); }\n    }\n    // and one the fall-back gives twice (2033-10-30 02:15 local)\n    twice := tz::local(2033, 10, 30, 2, 15, 0);\n    match zone.from_local(&twice) {\n        Ambiguous(pair) => {\n            println(pair.earlier());\n            println(pair.later());\n        },\n        Unique(instant) => { println(\"unique\"); },\n        Skipped(gap) => { println(\"skipped\"); }\n    }\n    unique := tz::local(2033, 7, 1, 12, 0, 0);\n    resolved := zone.from_local(&unique);\n    println(resolved.is_unique());\n    println(resolved.instant()! > 2000000000);\n    // something that is not a TZif file is refused, and so is a truncated one\n    match tz::parse(view(\"not a zone\")) {\n        e: tz::Error => { println(e.show()); },\n        z: tz::TimeZone => { println(\"parsed\"); }\n    }\n    mut short = u8[84, 90, 105, 102, 50];\n    match tz::parse(view(short)) {\n        e: tz::Error => { println(e.show()); },\n        z: tz::TimeZone => { println(\"parsed\"); }\n    }\n    // and the rule text on its own: the number in a TZ string counts west, so CET's \"-1\" is one hour\n    // east of UTC\n    rule := tz::parse_posix(view(\"CET-1CEST,M3.5.0,M10.5.0/3\"))!;\n    println(rule.standard_offset);\n    println(rule.daylight_offset);\n    println(rule.has_daylight);\n    custom := tz::parse_posix(view(\"<+1030>-10:30<+11>-11,M10.1.0,M4.1.0\"))!;\n    println(custom.standard_offset);\n    println(custom.daylight_offset);\n    println(\"done\");\n}\n",
+    "modules": [
+      "lib/tz.grl",
+      "lib/fs.grl",
+      "lib/io.grl",
+      "lib/core.grl",
+      "lib/strings.grl",
+      "lib/time.grl",
+      "lib/iter.grl"
+    ],
+    "stdout": "171\n1\n2\ntrue\n0\nSTD\nfalse\n3600\nDST\ntrue\n0\n3600\n3600\n0\n3600\n2036-07-18T14:20:00Z\n3600\nDST\n1995501600\n3600\n2014247700\n2014251300\ntrue\ntrue\n: not a TZif file\n: truncated TZif header\n3600\n7200\ntrue\n37800\n39600\ndone\n",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "tz-system-berlin-and-lord-howe",
+    "source": "use tz;\nuse fs;\nuse core;\nuse strings;\nuse time;\n\n// Facts about the machine's own tzdata, pinned where the files are there and skipped cleanly where\n// they are not: Europe/Berlin across both 2026 DST changes, and Australia/Lord_Howe, whose saving\n// is thirty minutes rather than an hour.\nfn main(){\n    mut loaded = 0;\n    if fs::exists(view(\"/usr/share/zoneinfo/Europe/Berlin\")) {\n        zone := tz::load(view(\"Europe/Berlin\"))!;\n        println(zone.name().len());\n        println(zone.transition_count() > 100);\n        println(zone.has_footer());\n        println(zone.offset_at(1767222000));\n        println(zone.abbreviation_at(1767222000).text());\n        println(zone.offset_at(1780000000));\n        println(zone.abbreviation_at(1780000000).text());\n        // 2026-10-25 02:30 happens twice, an hour apart\n        twice := tz::local(2026, 10, 25, 2, 30, 0);\n        match zone.from_local(&twice) {\n            Ambiguous(pair) => {\n                println(pair.earlier());\n                println(pair.later());\n            },\n            Unique(instant) => { println(\"unique\"); },\n            Skipped(gap) => { println(\"skipped\"); }\n        }\n        // 2026-03-29 02:30 never happens\n        missing := tz::local(2026, 3, 29, 2, 30, 0);\n        match zone.from_local(&missing) {\n            Skipped(gap) => { println(gap.seconds()); },\n            Unique(instant) => { println(\"unique\"); },\n            Ambiguous(pair) => { println(\"ambiguous\"); }\n        }\n        winter := tz::local(2026, 1, 1, 12, 0, 0);\n        println(zone.to_local(zone.instant_of(&winter)!).show());\n        loaded = loaded + 1;\n    } else {\n        println(\"no system zoneinfo\");\n    }\n    if fs::exists(view(\"/usr/share/zoneinfo/Australia/Lord_Howe\")) {\n        lord := tz::load(view(\"Australia/Lord_Howe\"))!;\n        println(lord.offset_at(1767222000));\n        println(lord.abbreviation_at(1767222000).text());\n        println(lord.offset_at(1780000000));\n        println(lord.abbreviation_at(1780000000).text());\n        loaded = loaded + 1;\n    } else {\n        println(\"no Lord Howe\");\n    }\n    if fs::exists(view(\"/usr/share/zoneinfo/UTC\")) {\n        utc := tz::load(view(\"UTC\"))!;\n        println(utc.offset_at(0));\n        println(utc.abbreviation_at(0).text());\n        loaded = loaded + 1;\n    }\n    println(loaded > 0);\n    // a name may not escape the zone directory, and a missing zone is reported\n    match tz::load(view(\"../etc/passwd\")) {\n        e: tz::Error => { println(e.show()); },\n        z: tz::TimeZone => { println(\"loaded\"); }\n    }\n    match tz::load(view(\"Europe/NotAZone\")) {\n        e: tz::Error => { println(e.show()); },\n        z: tz::TimeZone => { println(\"loaded\"); }\n    }\n    println(\"done\");\n}\n",
+    "modules": [
+      "lib/tz.grl",
+      "lib/fs.grl",
+      "lib/io.grl",
+      "lib/core.grl",
+      "lib/strings.grl",
+      "lib/time.grl",
+      "lib/iter.grl"
+    ],
+    "stdout": "13\ntrue\ntrue\n3600\nCET\n7200\nCEST\n1792888200\n1792891800\n3600\n2026-01-01T12:00:00Z+01:00\n39600\n+11\n37800\n+1030\n0\nUTC\ntrue\n../etc/passwd: not a zone name\nEurope/NotAZone: no such zone\ndone\n",
+    "targets": [
+      "x86_64"
+    ]
   }
 ]

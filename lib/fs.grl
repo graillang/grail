@@ -2,29 +2,1017 @@ module fs;
 use host;
 use core;
 use io;
+use strings;
+use time;
 
-// Fallible file-system access: failures are io::Error values instead of stopping the program.
-pub fn read(path:&a [u8])->u8[] | io::Error{
-    fd:=host::open(path,0);
-    if fd>9223372036854775807{return io::from_errno(wrapping_sub(0,fd));}
-    mut out=u8[];
-    while true{chunk:=host::read_fd(fd,65536);if chunk.len()==0{break;}for b in chunk{out.push(b);}}
-    host::close(fd);return out;
+// File-system access. Every fallible operation answers a value or an `Error`, which names the path
+// it happened on and the failure underneath it; nothing stops the program and nothing is silently
+// ignored.
+//
+// Text is bytes, so a path is a `&[u8]` view or an owned `Path`, and a name that is not UTF-8 is a
+// name like any other. The module is a layer over `host`: `open` and friends take a view, reading
+// answers an owned vector, and a descriptor is released with `File::close`.
+
+// ---- errors ------------------------------------------------------------------------------------
+
+// A failure of one file-system operation: the path it was about, and the error underneath.
+pub struct Error {
+    path: u8[],
+    kind: io::Error
 }
-pub fn read_text<a>(path:&a [u8])->string | io::Error{data:=read(path)?;return data.text();}
-pub fn write<a,b>(path:&a [u8],data:&b [u8])->unit | io::Error{
-    error:=host::write_file(path,data);
-    if error!=0{return io::from_errno(error);}return ();
+
+impl Error {
+    // The path the operation was given, as the caller handed it over.
+    pub fn path<a>(self: (&a Error)) -> (&a [u8]) {
+        return view(self.path);
+    }
+    pub fn is_not_found(self: (&Error)) -> bool {
+        return self.kind.is_not_found();
+    }
+    // `path: reason`, with the path rendered as text even when its bytes are not UTF-8.
+    pub fn show<a>(self: (&a Error)) -> string {
+        return format("{}: {}", strings::to_text_lossy(view(self.path)), self.kind.show());
+    }
 }
-pub fn exists<a>(path:&a [u8])->bool{return host::exists(path)!=0;}
-pub fn create_dir<a>(path:&a [u8])->unit | io::Error{
-    error:=host::create_dir(path);if error!=0{return io::from_errno(error);}return ();
+
+fn failed<a>(path: &a [u8], code: u64) -> Error {
+    return Error { path: path.copy(), kind: io::from_errno(code) };
 }
-// Entry names (directories end with "/"), sorted by the caller if order matters.
-pub fn list_dir<a>(path:&a [u8])->u8[][]{return host::list_dir(path);}
-pub fn remove_file<a>(path:&a [u8])->unit | io::Error{
-    error:=host::remove(path,0);if error!=0{return io::from_errno(error);}return ();
+fn invalid_utf8<a>(path: &a [u8], at: u64) -> Error {
+    return Error { path: path.copy(), kind: io::Error::InvalidUtf8(at) };
 }
-pub fn remove_dir<a>(path:&a [u8])->unit | io::Error{
-    error:=host::remove(path,1);if error!=0{return io::from_errno(error);}return ();
+fn moved_path<a>(path: &a [u8]) -> Error {
+    return Error { path: path.copy(), kind: io::Error::Other(0) };
+}
+
+// ---- kinds and metadata ------------------------------------------------------------------------
+
+// What an entry is, as the file system reports it. `Symlink` is a link itself, so a walker that
+// follows links still reports what it found.
+pub enum Kind { File, Dir, Symlink, Other }
+
+// Who owns an entry, where the platform has owners. Windows reports 0 for both.
+pub struct Owner {
+    uid: u64,
+    gid: u64
+}
+
+impl Owner {
+    pub fn uid(self: (&Owner)) -> u64 {
+        return self.uid;
+    }
+    pub fn gid(self: (&Owner)) -> u64 {
+        return self.gid;
+    }
+}
+
+// One entry's metadata. Times are the file system's own as a `time::Timestamp`; `mode` keeps the
+// type and permission bits together, so `permissions()` is the low twelve of them.
+pub struct Metadata {
+    size: u64,
+    code: u64,
+    mode: u64,
+    modified: time::Timestamp,
+    accessed: time::Timestamp,
+    owner: Owner,
+    inode: u64,
+    device: u64
+}
+
+pub fn kind_of(code: u64) -> Kind {
+    if code == 1 {
+        return Kind::File;
+    }
+    if code == 2 {
+        return Kind::Dir;
+    }
+    if code == 3 {
+        return Kind::Symlink;
+    }
+    return Kind::Other;
+}
+
+impl Metadata {
+    pub fn size(self: (&Metadata)) -> u64 {
+        return self.size;
+    }
+    pub fn kind(self: (&Metadata)) -> Kind {
+        return kind_of(self.code);
+    }
+    pub fn is_file(self: (&Metadata)) -> bool {
+        return self.code == 1;
+    }
+    pub fn is_dir(self: (&Metadata)) -> bool {
+        return self.code == 2;
+    }
+    pub fn is_symlink(self: (&Metadata)) -> bool {
+        return self.code == 3;
+    }
+    // The permission bits without the type: 493 (0o755) for a directory anyone may enter.
+    pub fn permissions(self: (&Metadata)) -> u64 {
+        return self.mode & 4095;
+    }
+    pub fn mode(self: (&Metadata)) -> u64 {
+        return self.mode;
+    }
+    // Whether no write bit is set. Windows has no POSIX mode, so this is always false there.
+    pub fn is_readonly(self: (&Metadata)) -> bool {
+        return (self.mode & 146) == 0;
+    }
+    pub fn is_executable(self: (&Metadata)) -> bool {
+        return (self.mode & 73) != 0;
+    }
+    // The device and inode name one entry: two entries with the same pair are the same entry, which
+    // is how the walker recognises a symbolic-link cycle. Windows reports 0 for both.
+    pub fn inode(self: (&Metadata)) -> u64 {
+        return self.inode;
+    }
+    pub fn device(self: (&Metadata)) -> u64 {
+        return self.device;
+    }
+}
+
+fn metadata_at<a>(path: &a [u8], follow: bool) -> Metadata | Error {
+    mut wanted = 0;
+    if follow {
+        wanted = 1;
+    }
+    parts := host::stat(path, wanted);
+    code := parts[0];
+    if code != 0 {
+        return failed(path, code);
+    }
+    return Metadata {
+        size: parts[2],
+        code: parts[1],
+        mode: parts[3],
+        modified: time::timestamp(core::as_i64(parts[4]), parts[5]),
+        accessed: time::timestamp(core::as_i64(parts[6]), parts[7]),
+        owner: Owner { uid: parts[8], gid: parts[9] },
+        inode: parts[10],
+        device: parts[11]
+    };
+}
+
+// The entry `path` names, following a symbolic link to what it points at.
+pub fn metadata<a>(path: &a [u8]) -> Metadata | Error {
+    return metadata_at(path, true);
+}
+// The entry `path` names, without following a final symbolic link: a link is reported as a link.
+pub fn symlink_metadata<a>(path: &a [u8]) -> Metadata | Error {
+    return metadata_at(path, false);
+}
+// Whether anything exists at `path`, of any kind. A dangling symbolic link exists.
+pub fn exists<a>(path: &a [u8]) -> bool {
+    return host::exists(path) != 0;
+}
+
+// ---- paths -------------------------------------------------------------------------------------
+
+// A path as text: a byte string with `/` separators. Everything here except `canonicalize` is
+// lexical - it rewrites the bytes and never touches the file system.
+pub struct Path {
+    bytes: u8[]
+}
+
+// A path from any byte view.
+pub fn path<a>(bytes: &a [u8]) -> Path {
+    return Path { bytes: bytes.copy() };
+}
+// A path from owned string text.
+pub fn path_of(text: string) -> Path {
+    return Path { bytes: view(text).copy() };
+}
+
+impl Path {
+    // The path's bytes, without copying them.
+    pub fn bytes<a>(self: (&a Path)) -> (&a [u8]) {
+        return view(self.bytes);
+    }
+    // The path as owned bytes, for a call that keeps or modifies them.
+    pub fn to_bytes(self: (&Path)) -> u8[] {
+        return self.bytes.copy();
+    }
+    // The path as text, with U+FFFD where its bytes are not UTF-8.
+    pub fn show(self: (&Path)) -> string {
+        return strings::to_text_lossy(view(self.bytes));
+    }
+    pub fn len(self: (&Path)) -> u64 {
+        return self.bytes.len();
+    }
+    pub fn is_empty(self: (&Path)) -> bool {
+        return self.bytes.len() == 0;
+    }
+    // A path is absolute when it starts with a separator, and on Windows also after a drive letter
+    // (`C:/`) or with a leading double separator (`//server`).
+    pub fn is_absolute(self: (&Path)) -> bool {
+        n := self.bytes.len();
+        if n == 0 {
+            return false;
+        }
+        if self.bytes[0] == 47 {
+            return true;
+        }
+        if is_windows() {
+            if n > 2 {
+                if self.bytes[1] == 58 {
+                    if (self.bytes[2] == 47) || (self.bytes[2] == 92) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+    // `self` followed by `other`; a separator is added only when one is missing, and an absolute
+    // `other` replaces the base, as `Path::join` does in Rust.
+    pub fn join<a>(self: (&Path), other: (&a [u8])) -> Path {
+        if other.len() == 0 {
+            return Path { bytes: self.bytes.copy() };
+        }
+        other_path := Path { bytes: other.copy() };
+        if other_path.is_absolute() {
+            return other_path;
+        }
+        mut out = self.bytes.copy();
+        if out.len() != 0 {
+            last := out[out.len() - 1];
+            if (last != 47) & (last != 92) {
+                out.push(47);
+            }
+        }
+        for i in other.len() {
+            out.push(other[i]);
+        }
+        return Path { bytes: out };
+    }
+    // The path with `.` removed, `..` folded into the component before it, repeated separators
+    // collapsed and a trailing separator dropped. A `..` that would climb above the root of a
+    // relative path is kept, because nothing here knows what the parent of the working directory is.
+    pub fn normalize(self: (&Path)) -> Path {
+        return Path { bytes: normalize_bytes(view(self.bytes)) };
+    }
+    // The path made absolute against the working directory, then normalized. The lexical part needs
+    // the path to exist nowhere; resolving symbolic links would, and `metadata` is what follows one.
+    pub fn canonicalize(self: (&Path)) -> Path | Error {
+        if self.is_absolute() {
+            return Path { bytes: normalize_bytes(view(self.bytes)) };
+        }
+        here := current_dir()?;
+        return Path { bytes: normalize_bytes(view(here.join(view(self.bytes)).bytes())) };
+    }
+    // The directory holding this path, or None for a bare name (`notes.txt`) and for a root.
+    pub fn parent(self: (&Path)) -> Path? {
+        p := normalize_bytes(view(self.bytes));
+        n := p.len();
+        if n == 0 {
+            return None;
+        }
+        if (n == 1) & (p[0] == 47) {
+            return None;
+        }
+        mut end = n;
+        while end > 0 {
+            if p[end - 1] == 47 {
+                break;
+            }
+            end = end - 1;
+        }
+        if end == 0 {
+            return None;
+        }
+        mut stop = end;
+        while stop > 0 {
+            if p[stop - 1] != 47 {
+                break;
+            }
+            stop = stop - 1;
+        }
+        mut out = u8[];
+        if stop == 0 {
+            out.push(47);
+            first := Path { bytes: out };
+            return Some(first);
+        }
+        for i in stop {
+            out.push(p[i]);
+        }
+        rest := Path { bytes: out };
+        return Some(rest);
+    }
+    // The last component, or None when the path names a root or is empty.
+    pub fn file_name(self: (&Path)) -> u8[]? {
+        p := normalize_bytes(view(self.bytes));
+        n := p.len();
+        if n == 0 {
+            return None;
+        }
+        if (n == 1) & (p[0] == 47) {
+            return None;
+        }
+        mut start = n;
+        while start > 0 {
+            if p[start - 1] == 47 {
+                break;
+            }
+            start = start - 1;
+        }
+        if start == n {
+            return None; // a trailing separator with nothing after it
+        }
+        mut out = u8[];
+        for i in start..n {
+            out.push(p[i]);
+        }
+        return Some(out);
+    }
+    // The text after the last `.` of the file name, when there is one at least one character long
+    // and not at the start of the name: `archive.tar.gz` has `gz`, `.bashrc` has none.
+    pub fn extension(self: (&Path)) -> u8[]? {
+        mut name = u8[];
+        match self.file_name() {
+            Some(found) => { name = found; },
+            None => { return None; }
+        }
+        n := name.len();
+        mut i = n;
+        while i > 1 {
+            if name[i - 1] == 46 {
+                mut out = u8[];
+                for k in i..n {
+                    out.push(name[k]);
+                }
+                return Some(out);
+            }
+            i = i - 1;
+        }
+        return None;
+    }
+    // The file name without its extension, for building a sibling name.
+    pub fn file_stem(self: (&Path)) -> u8[]? {
+        mut name = u8[];
+        match self.file_name() {
+            Some(found) => { name = found; },
+            None => { return None; }
+        }
+        n := name.len();
+        mut end = n;
+        mut i = n;
+        while i > 1 {
+            if name[i - 1] == 46 {
+                end = i - 1;
+                break;
+            }
+            i = i - 1;
+        }
+        mut out = u8[];
+        for k in end {
+            out.push(name[k]);
+        }
+        return Some(out);
+    }
+}
+
+fn is_windows() -> bool {
+    t := host::target();
+    return (t == 3) || (t == 4);
+}
+
+// The process's working directory.
+pub fn current_dir() -> Path | Error {
+    here := host::cwd();
+    if here.len() == 0 {
+        return failed(view("."), 2);
+    }
+    return Path { bytes: here };
+}
+// `base` followed by `other`, as `Path::join` does.
+pub fn join<a, b>(base: &a [u8], other: &b [u8]) -> Path {
+    return path(base).join(other);
+}
+// The lexical form of a path: `a//b/./c/../d/` is `a/b/d`.
+pub fn normalize<a>(source: &a [u8]) -> Path {
+    return Path { bytes: normalize_bytes(source) };
+}
+
+fn normalize_bytes<a>(source: &a [u8]) -> u8[] {
+    n := source.len();
+    mut absolute = false;
+    if n != 0 {
+        if source[0] == 47 {
+            absolute = true;
+        }
+        if n > 2 {
+            if source[1] == 58 {
+                absolute = true; // C:/... on Windows
+            }
+        }
+    }
+    mut parts = u8[][];
+    mut at = 0;
+    while at < n {
+        while at < n {
+            if source[at] != 47 {
+                break;
+            }
+            at = at + 1;
+        }
+        start := at;
+        while at < n {
+            if source[at] == 47 {
+                break;
+            }
+            at = at + 1;
+        }
+        if start == at {
+            break;
+        }
+        mut part = u8[];
+        for i in start..at {
+            part.push(source[i]);
+        }
+        if is_dot(view(part)) {
+            continue;
+        }
+        if is_dot_dot(view(part)) {
+            if parts.len() != 0 {
+                if !is_dot_dot(view(parts[parts.len() - 1])) {
+                    parts.pop();
+                    continue;
+                }
+            }
+            if absolute {
+                continue;
+            }
+        }
+        parts.push(part);
+    }
+    mut out = u8[];
+    if absolute {
+        out.push(47);
+    }
+    mut i = 0;
+    while i < parts.len() {
+        if i != 0 {
+            out.push(47);
+        }
+        part := &parts[i];
+        for b in part {
+            out.push(b);
+        }
+        i = i + 1;
+    }
+    if out.len() == 0 {
+        out.push(46);
+    }
+    return out;
+}
+
+fn is_dot<a>(part: &a [u8]) -> bool {
+    if part.len() != 1 {
+        return false;
+    }
+    return part[0] == 46;
+}
+fn is_dot_dot<a>(part: &a [u8]) -> bool {
+    if part.len() != 2 {
+        return false;
+    }
+    return (part[0] == 46) & (part[1] == 46);
+}
+
+// `dir` and `name` with exactly one separator between them.
+fn joined<a, b>(dir: &a [u8], name: &b [u8]) -> u8[] {
+    mut out = dir.copy();
+    n := out.len();
+    mut needs = true;
+    if n != 0 {
+        if out[n - 1] == 47 {
+            needs = false;
+        }
+    }
+    if needs {
+        out.push(47);
+    }
+    for i in name.len() {
+        out.push(name[i]);
+    }
+    return out;
+}
+
+// `name` without a trailing separator, which is how `host::list_dir` marks a directory.
+fn without_separator<a>(name: &a [u8]) -> u8[] {
+    n := name.len();
+    mut end = n;
+    while end > 0 {
+        if name[end - 1] != 47 {
+            break;
+        }
+        end = end - 1;
+    }
+    mut out = u8[];
+    for i in end {
+        out.push(name[i]);
+    }
+    return out;
+}
+
+// ---- reading and writing -----------------------------------------------------------------------
+
+// Every byte of the file at `path`.
+pub fn read(path: (&[u8])) -> u8[] | Error {
+    fd := host::open(path, 0);
+    if fd > 9223372036854775807 {
+        return failed(path, wrapping_sub(0, fd));
+    }
+    mut out = u8[];
+    loop {
+        chunk := host::read_fd(fd, 65536);
+        if chunk.len() == 0 {
+            break;
+        }
+        for b in chunk {
+            out.push(b);
+        }
+    }
+    host::close(fd);
+    return out;
+}
+
+// The file at `path` as text, or `InvalidUtf8` holding the offset of the first ill-formed sequence.
+pub fn read_text(path: (&[u8])) -> string | Error {
+    data := read(path)?;
+    match strings::utf8_error(view(data)) {
+        Some(at) => { return invalid_utf8(path, at); },
+        None => { return data.text(); }
+    }
+}
+
+// `data` into the file at `path`, creating it or replacing what it held.
+pub fn write<a, b>(path: &a [u8], data: &b [u8]) -> unit | Error {
+    code := host::write_file(path, data);
+    if code != 0 {
+        return failed(path, code);
+    }
+    return ();
+}
+
+// The name a temporary file beside `path` takes: the destination's own name with a suffix that is
+// unique enough to keep two writers apart, in the same directory so the rename stays on one file
+// system.
+fn temporary_name<a>(path: &a [u8]) -> u8[] {
+    mut out = path.copy();
+    text := format(".tmp{}.{}", host::now_ms(), host::wall_ms());
+    for b in view(text) {
+        out.push(b);
+    }
+    return out;
+}
+
+// `data` into `path` in one step: the bytes go to a temporary file beside the destination, which is
+// then renamed over it. A reader therefore sees either the old contents or the new ones, never a
+// partly written file, and a failure removes the temporary file instead of leaving it behind.
+pub fn write_atomic<a, b>(path: &a [u8], data: &b [u8]) -> unit | Error {
+    temp := temporary_name(path);
+    match write(view(temp), data) {
+        e: Error => { return e; },
+        _ => {}
+    }
+    match rename(view(temp), path) {
+        e: Error => {
+            match remove_file(view(temp)) {
+                e: Error => { return e; },
+                _ => { return e; }
+            }
+        },
+        _ => { return (); }
+    }
+}
+
+// ---- open files --------------------------------------------------------------------------------
+
+// An open file, from `open` or `create`. The descriptor is released exactly once, by `close`; a
+// `File` that is dropped without closing leaks it, because the language runs no destructor for it.
+pub struct File {
+    fd: u64,
+    path: u8[],
+    open: bool
+}
+
+// `path` opened for reading.
+pub fn open<a>(path: &a [u8]) -> File | Error {
+    fd := host::open(path, 0);
+    if fd > 9223372036854775807 {
+        return failed(path, wrapping_sub(0, fd));
+    }
+    return File { fd: fd, path: path.copy(), open: true };
+}
+// `path` opened for writing, created when missing and truncated when present.
+pub fn create<a>(path: &a [u8]) -> File | Error {
+    fd := host::open(path, 1);
+    if fd > 9223372036854775807 {
+        return failed(path, wrapping_sub(0, fd));
+    }
+    return File { fd: fd, path: path.copy(), open: true };
+}
+
+impl File {
+    pub fn path<a>(self: (&a File)) -> (&a [u8]) {
+        return view(self.path);
+    }
+    // The descriptor, for a `host::` call this module does not wrap.
+    pub fn fd(self: (&File)) -> u64 {
+        return self.fd;
+    }
+    pub fn is_open(self: (&File)) -> bool {
+        return self.open;
+    }
+    // Up to `max` bytes. An empty answer is end-of-file; a read failure on an open descriptor has no
+    // separate answer at this layer, which is why `read_all` is what a whole-file read uses.
+    pub fn read(self: (&mut File), max: u64) -> u8[] | Error {
+        if !self.open {
+            return failed(view(self.path), 9); // EBADF
+        }
+        return host::read_fd(self.fd, max);
+    }
+    pub fn read_all(self: (&mut File)) -> u8[] | Error {
+        if !self.open {
+            return failed(view(self.path), 9);
+        }
+        mut out = u8[];
+        loop {
+            chunk := host::read_fd(self.fd, 65536);
+            if chunk.len() == 0 {
+                break;
+            }
+            for b in chunk {
+                out.push(b);
+            }
+        }
+        return out;
+    }
+    // Every byte of `data`, or `ShortWrite` naming how many the platform accepted.
+    pub fn write<a>(self: (&mut File), data: (&a [u8])) -> unit | Error {
+        if !self.open {
+            return failed(view(self.path), 9);
+        }
+        written := host::write_fd(self.fd, data);
+        if written != data.len() {
+            return Error { path: self.path.copy(), kind: io::Error::ShortWrite(written) };
+        }
+        return ();
+    }
+    // Releases the descriptor. Closing twice is `EBADF`, not a silent no-op.
+    pub fn close(self: (&mut File)) -> unit | Error {
+        if !self.open {
+            return failed(view(self.path), 9);
+        }
+        self.open = false;
+        code := host::close(self.fd);
+        if code > 9223372036854775807 {
+            return failed(view(self.path), wrapping_sub(0, code));
+        }
+        return ();
+    }
+}
+
+// ---- directories -------------------------------------------------------------------------------
+
+fn bytes_less<a, b>(x: &a [u8], y: &b [u8]) -> bool {
+    n := x.len();
+    m := y.len();
+    mut i = 0;
+    while (i < n) & (i < m) {
+        if x[i] != y[i] {
+            return x[i] < y[i];
+        }
+        i = i + 1;
+    }
+    return n < m;
+}
+
+// The entries of `names` in byte order, as new vectors.
+fn sorted_names<a>(names: (&a u8[][])) -> u8[][] {
+    n := names.len();
+    mut used = u64[];
+    mut i = 0;
+    while i < n {
+        used.push(0);
+        i = i + 1;
+    }
+    mut out = u8[][];
+    mut k = 0;
+    while k < n {
+        mut best = 0;
+        mut have = false;
+        mut j = 0;
+        while j < n {
+            if used[j] == 0 {
+                if !have || bytes_less(names[j], names[best]) {
+                    best = j;
+                    have = true;
+                }
+            }
+            j = j + 1;
+        }
+        out.push(names[best].copy());
+        used[best] = 1;
+        k = k + 1;
+    }
+    return out;
+}
+
+// The names in `dir`, sorted, with the trailing `/` that marks a directory removed. A path that is
+// not a directory is `ENOTDIR` and a missing one is `ENOENT`; on POSIX the directory is also opened,
+// so a directory this process may not read is a `PermissionDenied` rather than an empty listing.
+fn names_of<a>(path: &a [u8]) -> u8[][] | Error {
+    md := symlink_metadata(path)?;
+    if !md.is_dir() {
+        return failed(path, 20);
+    }
+    if !is_windows() {
+        fd := host::open(path, 0);
+        if fd > 9223372036854775807 {
+            return failed(path, wrapping_sub(0, fd));
+        }
+        host::close(fd);
+    }
+    raw := host::list_dir(path);
+    mut trimmed = u8[][];
+    mut i = 0;
+    while i < raw.len() {
+        trimmed.push(without_separator(view(raw[i])));
+        i = i + 1;
+    }
+    return sorted_names(&trimmed);
+}
+
+// The names in `path`, sorted by byte: `host::list_dir` order is the file system's, which is not.
+pub fn list_dir<a>(path: &a [u8]) -> u8[][] | Error {
+    return names_of(path);
+}
+
+// One entry of a directory listing or of a walk: its path, what it is, and how deep it was found.
+pub struct WalkEntry {
+    path: u8[],
+    code: u64,
+    depth: u64
+}
+
+impl WalkEntry {
+    pub fn path<a>(self: (&a WalkEntry)) -> (&a [u8]) {
+        return view(self.path);
+    }
+    pub fn to_path(self: (&WalkEntry)) -> u8[] {
+        return self.path.copy();
+    }
+    pub fn kind(self: (&WalkEntry)) -> Kind {
+        return kind_of(self.code);
+    }
+    pub fn is_file(self: (&WalkEntry)) -> bool {
+        return self.code == 1;
+    }
+    pub fn is_dir(self: (&WalkEntry)) -> bool {
+        return self.code == 2;
+    }
+    pub fn is_symlink(self: (&WalkEntry)) -> bool {
+        return self.code == 3;
+    }
+    // 1 for a direct child of the root, 2 for its grandchildren.
+    pub fn depth(self: (&WalkEntry)) -> u64 {
+        return self.depth;
+    }
+}
+
+// The entries of one directory, sorted, without descending into subdirectories.
+pub fn read_dir<a>(path: &a [u8]) -> WalkEntry[] | Error {
+    names := names_of(path)?;
+    mut out = WalkEntry[];
+    mut i = 0;
+    while i < names.len() {
+        child := joined(path, view(names[i]));
+        md := symlink_metadata(view(child))?;
+        out.push(WalkEntry { path: child, code: md.code, depth: 1 });
+        i = i + 1;
+    }
+    return out;
+}
+
+// How a walk treats symbolic links and how deep it goes.
+pub struct WalkOptions {
+    follow_links: bool,
+    max_depth: u64
+}
+
+// The default policy: a symbolic link is an entry like any other and is not followed, and the walk
+// stops 32 levels below the root.
+pub fn walk_options() -> WalkOptions {
+    return WalkOptions { follow_links: false, max_depth: 32 };
+}
+// The same options with `follow` set: a symbolic link to a directory is descended into as well as
+// reported, and a directory reached twice through links is not entered again.
+pub fn follow_links(options: WalkOptions, follow: bool) -> WalkOptions {
+    return WalkOptions { follow_links: follow, max_depth: options.max_depth };
+}
+// The same options with another depth limit; 0 removes the limit, which is only safe without
+// symbolic links.
+pub fn max_depth(options: WalkOptions, depth: u64) -> WalkOptions {
+    return WalkOptions { follow_links: options.follow_links, max_depth: depth };
+}
+
+// Every entry below `root`, depth first, with each directory's entries in byte order. The root
+// itself is not an entry. A symbolic link is reported as `Symlink`; following one is the caller's
+// choice through `WalkOptions`, and a link that cannot be followed (a dangling one) is reported and
+// not descended into.
+//
+// Cycles cannot run away: a directory whose device and inode repeat one already on the path is not
+// entered again, and `max_depth` bounds what inode-less platforms (Windows) can reach.
+pub fn walk<a>(root: &a [u8], options: WalkOptions) -> WalkEntry[] | Error {
+    md := symlink_metadata(root)?;
+    mut out = WalkEntry[];
+    if !md.is_dir() {
+        return out;
+    }
+    mut ancestors = u64[];
+    ancestors.push(md.device);
+    ancestors.push(md.inode);
+    walk_into(&mut out, root, 1, &options, &mut ancestors)?;
+    return out;
+}
+
+fn walk_into<a>(out: (&mut WalkEntry[]), dir: (&a [u8]), depth: u64, options: (&WalkOptions), ancestors: (&mut u64[])) -> unit | Error {
+    names := names_of(dir)?;
+    mut i = 0;
+    while i < names.len() {
+        child := joined(dir, view(names[i]));
+        md := symlink_metadata(view(child))?;
+        is_dir := md.is_dir();
+        is_link := md.is_symlink();
+        out.push(WalkEntry { path: child.copy(), code: md.code, depth: depth });
+        if is_dir {
+            descent(out, view(child), &md, depth, options, ancestors)?;
+        }
+        if is_link & options.follow_links {
+            match metadata(view(child)) {
+                target: Metadata => {
+                    if target.is_dir() {
+                        descent(out, view(child), &target, depth, options, ancestors)?;
+                    }
+                },
+                e: Error => {
+                    if !e.is_not_found() {
+                        return e; // a dangling link is reported and left alone
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return ();
+}
+
+fn descent<a>(out: (&mut WalkEntry[]), dir: (&a [u8]), md: (&Metadata), depth: u64, options: (&WalkOptions), ancestors: (&mut u64[])) -> unit | Error {
+    if options.max_depth != 0 {
+        if depth >= options.max_depth {
+            return ();
+        }
+    }
+    if (md.inode != 0) || (md.device != 0) {
+        mut at = 0;
+        while at < ancestors.len() {
+            if (ancestors[at] == md.device) & (ancestors[at + 1] == md.inode) {
+                return (); // this directory is already on the path: a cycle
+            }
+            at = at + 2;
+        }
+    }
+    ancestors.push(md.device);
+    ancestors.push(md.inode);
+    walk_into(out, dir, depth + 1, options, ancestors)?;
+    ancestors.pop();
+    ancestors.pop();
+    return ();
+}
+
+// ---- changing the tree -------------------------------------------------------------------------
+
+// Creates one directory. A missing parent is `NotFound` and an existing directory `AlreadyExists`;
+// `create_dir_all` is the call that makes a whole tree.
+pub fn create_dir<a>(path: &a [u8]) -> unit | Error {
+    code := host::create_dir(path);
+    if code != 0 {
+        return failed(path, code);
+    }
+    return ();
+}
+
+// Creates `path` and every parent that is missing. An existing directory is not an error, so calling
+// it twice is harmless.
+pub fn create_dir_all<a>(path: &a [u8]) -> unit | Error {
+    if path.len() == 0 {
+        return failed(path, 2);
+    }
+    mut at = 0;
+    while at < path.len() {
+        if path[at] == 47 {
+            if at > 0 {
+                ensure_dir(path[0:at])?;
+            }
+        }
+        at = at + 1;
+    }
+    return ensure_dir(path);
+}
+
+fn ensure_dir<a>(path: &a [u8]) -> unit | Error {
+    match symlink_metadata(path) {
+        md: Metadata => {
+            if md.is_dir() {
+                return ();
+            }
+            return failed(path, 20); // something else is in the way
+        },
+        e: Error => {
+            if !e.is_not_found() {
+                return e;
+            }
+        }
+    }
+    code := host::create_dir(path);
+    if code != 0 {
+        if code == 17 {
+            return (); // another task created it between the check and the call
+        }
+        return failed(path, code);
+    }
+    return ();
+}
+
+// Removes a file, or a symbolic link itself (a link is removed, never what it points at).
+pub fn remove_file<a>(path: &a [u8]) -> unit | Error {
+    code := host::remove(path, 0);
+    if code != 0 {
+        return failed(path, code);
+    }
+    return ();
+}
+
+// Removes an empty directory.
+pub fn remove_dir<a>(path: &a [u8]) -> unit | Error {
+    code := host::remove(path, 1);
+    if code != 0 {
+        return failed(path, code);
+    }
+    return ();
+}
+
+// Removes `path` and everything below it. A symbolic link inside the tree is removed, and what it
+// points at is left alone: this never follows a link out of the tree.
+pub fn remove_dir_all<a>(path: &a [u8]) -> unit | Error {
+    md := symlink_metadata(path)?;
+    if !md.is_dir() {
+        return remove_file(path);
+    }
+    names := names_of(path)?;
+    mut i = 0;
+    while i < names.len() {
+        child := joined(path, view(names[i]));
+        remove_dir_all(view(child))?;
+        i = i + 1;
+    }
+    return remove_dir(path);
+}
+
+// Moves `from` to `to`. A file the destination names is replaced atomically, by the operating
+// system's own rule; a non-empty destination directory is refused with `NotEmpty`. A failure names
+// `from`, the entry being moved.
+pub fn rename<a, b>(from: &a [u8], to: &b [u8]) -> unit | Error {
+    code := host::rename(from, to);
+    if code != 0 {
+        return failed(from, code);
+    }
+    return ();
+}
+
+// Creates a symbolic link at `link` holding `target` as its text. Neither path needs to exist:
+// a link to a name that is not there is a dangling link, which `symlink_metadata` reports as
+// `Symlink` and `walk` follows only when it is asked to.
+pub fn symlink<a, b>(target: &a [u8], link: &b [u8]) -> unit | Error {
+    code := host::symlink(target, link);
+    if code != 0 {
+        return failed(link, code);
+    }
+    return ();
+}
+
+// Copies the file `from` to `to`, creating `to` or replacing its contents. Only a regular file can be
+// copied: a directory is `EISDIR`, and a symbolic link is copied as the bytes it points at
+// (`metadata` follows it).
+pub fn copy<a, b>(from: &a [u8], to: &b [u8]) -> unit | Error {
+    md := metadata(from)?;
+    if !md.is_file() {
+        return failed(from, 21);
+    }
+    data := read(from)?;
+    return write(to, view(data));
 }

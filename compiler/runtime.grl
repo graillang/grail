@@ -3528,15 +3528,16 @@ fn f_host_wall_ms() -> u64 {
     return ms;
 }
 fn f_host_pipe() -> u64 {
-    buf := rt_alloc(8);
+    // Two descriptors: eight bytes on POSIX, two handles on Windows, so the platform layer is what
+    // reads them back (rt_pipe_push).
+    buf := rt_alloc(16);
     if rt_error(rt_syscall(293, buf, 526336, 0)) {
+        rt_free(buf);
         rt_abort();
     }
-    pair := raw_load(buf);
-    rt_free(buf);
     out := rt_new();
-    rt_push(out, pair & 4294967295);
-    rt_push(out, rt_div(pair, 4294967296));
+    rt_pipe_push(buf, out);
+    rt_free(buf);
     return out;
 }
 // Reads up to max bytes; suspends (green) while no data is available. Empty on end/cancel.
@@ -5315,6 +5316,165 @@ fn f_host_create_dir(path: u64) -> u64 {
         return wrapping_sub(0, r);
     }
     return 0;
+}
+
+// `stat(path, follow)` answers twelve numbers: the errno (0 on success, positive otherwise and the
+// remaining eleven entries zero), then kind (0 other, 1 regular file, 2 directory, 3 symbolic link),
+// size, mode (type and permission bits), modified seconds, modified nanoseconds, accessed seconds,
+// accessed nanoseconds, owner uid, group gid, inode and device. Times are seconds since the Unix
+// epoch as a word: a date before 1970 reads back through i64(). A platform without a field reports
+// 0 for it (Windows has no POSIX mode, owner or inode).
+fn f_host_stat(path: u64, follow: u64) -> u64 {
+    out := rt_new();
+    name := rt_cstr(path);
+    rt_free(path); // a byte-view argument belongs to the host function, as in f_host_open
+    mut code = 22;
+    if name != 0 {
+        code = rt_stat(name, follow, out);
+        rt_free(name);
+    }
+    if code != 0 {
+        // The platform pushed nothing: answer the errno and eleven zeroes.
+        rt_push(out, code);
+        mut i = 0;
+        while i < 11 {
+            rt_push(out, 0);
+            i = i + 1;
+        }
+    }
+    return out;
+}
+// rename(2) from one path to another; 0 or a positive errno. A destination file is replaced
+// atomically and a destination directory must be empty, which is the kernel's rule, not a policy
+// this layer adds.
+fn f_host_rename(from: u64, to: u64) -> u64 {
+    a := rt_cstr(from);
+    b := rt_cstr(to);
+    rt_free(from);
+    rt_free(to);
+    mut code = 22;
+    if (a != 0) & (b != 0) {
+        code = rt_rename(a, b);
+    }
+    if a != 0 {
+        rt_free(a);
+    }
+    if b != 0 {
+        rt_free(b);
+    }
+    return code;
+}
+// Starts `args` (a vector of byte strings, the program first) without a shell and without waiting.
+// `env` is the child's whole environment or 0 to inherit this process's. The child's stdout is
+// connected to `out_fd` and its stderr to `err_fd` when they are descriptors; 1 and 2 leave them
+// inherited, which is the cheap path. The answer is the child's id, or a wrapped negative errno when
+// the child could not be started - unlike `command`, which waits and reports a status.
+fn f_host_spawn(args: u64, env: u64, out_fd: u64, err_fd: u64) -> u64 {
+    n := rt_len(args);
+    mut envc = 0;
+    if env != 0 {
+        envc = rt_len(env);
+    }
+    mut result = wrapping_sub(0, 22);
+    mut made = 0;
+    argv := rt_alloc((n + 1) * 8);
+    raw_store(argv + n * 8, 0);
+    if n != 0 {
+        while made < n {
+            p := rt_cstr(rt_at(args, made));
+            if p == 0 {
+                break;
+            }
+            raw_store(argv + made * 8, p);
+            made = made + 1;
+        }
+        if made == n {
+            mut envp = 0;
+            mut usable = 1;
+            if env != 0 {
+                envp = rt_env_table(env);
+                if envp == 0 {
+                    usable = 0; // an entry is not NAME=VALUE: never start the child with no environment
+                }
+            }
+            if usable != 0 {
+                paths := rt_exec_paths(raw_load(argv));
+                result = rt_spawn_redirect(paths, argv, envp, out_fd, err_fd);
+                rt_drop_exec_paths(paths);
+            }
+            if envp != 0 {
+                rt_drop_env_table(envp, envc);
+            }
+        }
+    }
+    mut i = 0;
+    while i < made {
+        rt_free(raw_load(argv + i * 8));
+        i = i + 1;
+    }
+    rt_free(argv);
+    i = 0;
+    while i < n {
+        rt_drop_seq(rt_at(args, i));
+        i = i + 1;
+    }
+    rt_drop_seq(args);
+    i = 0;
+    while i < envc {
+        rt_drop_seq(rt_at(env, i));
+        i = i + 1;
+    }
+    if env != 0 {
+        rt_drop_seq(env);
+    }
+    return result;
+}
+// Creates the symbolic link `link` holding the text `target`; 0 or a positive errno. Both byte-view
+// arguments belong to this function, as with every other host operation.
+fn f_host_symlink(target: u64, link: u64) -> u64 {
+    a := rt_cstr(target);
+    b := rt_cstr(link);
+    rt_free(target);
+    rt_free(link);
+    mut code = 22;
+    if (a != 0) & (b != 0) {
+        code = rt_symlink(a, b);
+    }
+    if a != 0 {
+        rt_free(a);
+    }
+    if b != 0 {
+        rt_free(b);
+    }
+    return code;
+}
+// Waits for `pid` and reaps it: the status word wait4(2) reports (`code << 8` for an exit, the
+// signal number in the low bits when one ended the child) or a wrapped negative errno.
+fn f_host_wait(pid: u64) -> u64 {
+    return rt_wait_pid(pid);
+}
+// Whether `fd` has data or has reached its end within `timeout_ms` milliseconds: 1, 0, or a wrapped
+// negative errno. A capture uses it to read two pipes without waiting on one while the child fills
+// the other, which is the one blocking order that can deadlock.
+fn f_host_ready(fd: u64, timeout_ms: u64) -> u64 {
+    return rt_ready(fd, timeout_ms);
+}
+// The process's working directory, or an empty vector when the platform cannot report it (a deleted
+// directory, say); the caller turns that into an error.
+fn f_host_cwd() -> u64 {
+    size := 4096;
+    buf := rt_alloc(size);
+    n := rt_cwd(buf, size - 1);
+    out := rt_new();
+    if rt_error(n) == 0 {
+        mut i = 0;
+        while i < n {
+            rt_pushb(out, raw_byte(buf + i));
+            i = i + 1;
+        }
+    }
+    rt_free(buf);
+    return out;
 }
 
 // Appends tmp to acc padded to `width` characters (UTF-8 aware); align 1 left, 2 right, 3 center.

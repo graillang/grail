@@ -201,6 +201,10 @@ fn rt_syscall(n: u64, a: u64, b: u64, c: u64) -> u64 {
     if n == 258 {
         return rt_win_mkdir(b, c);
     }
+    if n == 293 {
+        // `a` is the caller's two-word pair: CreatePipe writes the read and the write handle.
+        return rt_win_pipe(a);
+    }
     if n == 263 {
         return rt_win_remove(b, c);
     }
@@ -235,7 +239,7 @@ fn rt_syscall4(n: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
 fn rt_cwd(buf: u64, size: u64) -> u64 {
     n := raw_win32(GetCurrentDirectoryA, size - 1, buf);
     if n == 0 {
-        return rt_win_errno();
+        return wrapping_sub(0, rt_win_errno());
     }
     raw_putbyte(buf + n, 0);
     return n;
@@ -260,6 +264,201 @@ fn rt_faccessat(path: u64) -> u64 {
 }
 fn rt_accept4(fd: u64) -> u64 {
     return wrapping_sub(0, 38);
+}
+
+// ---- file metadata, rename, and a spawn that redirects stdio -----------------------------------
+// The Win32 half of the operations os-linux.grl implements with newfstatat, renameat and a
+// fork/exec with dup3. A descriptor above 2 is already a HANDLE here (rt_win_handle), which is what
+// the redirected spawn hands to CreateProcess.
+
+// FILETIMEs count 100-nanosecond ticks from 1601-01-01 UTC; Unix time starts 11644473600 seconds
+// later. A time before 1970 wraps, which is exactly how the runtime spells a negative second count.
+fn rt_win_ticks(at: u64) -> u64 {
+    high := raw_load(at + 4) & 4294967295;
+    low := raw_load(at) & 4294967295;
+    return high * 4294967296 + low;
+}
+fn rt_win_unix_seconds(at: u64) -> u64 {
+    return wrapping_sub(rt_div(rt_win_ticks(at), 10000000), 11644473600);
+}
+fn rt_win_unix_nanos(at: u64) -> u64 {
+    return (rt_win_ticks(at) & 9999999) * 100;
+}
+// The kind of an entry from its attributes: FILE_ATTRIBUTE_DIRECTORY and FILE_ATTRIBUTE_REPARSE_POINT
+// (a symbolic link or a junction) are the two the standard library distinguishes.
+fn rt_win_kind(attributes: u64) -> u64 {
+    if (attributes & 16) != 0 {
+        return 2;
+    }
+    if (attributes & 1024) != 0 {
+        return 3;
+    }
+    return 1;
+}
+// GetFileAttributesExA, whose WIN32_FILE_ATTRIBUTE_DATA is 36 bytes: attributes at 0, last access at
+// 12, last write at 20, size high at 28 and size low at 32. Windows has no POSIX permission bits, no
+// owner and no inode, so those fields are 0; both `follow` values report the entry itself, which is
+// what a reparse point's attributes describe.
+fn rt_stat(path: u64, follow: u64, fields: u64) -> u64 {
+    data := rt_alloc(64);
+    if raw_win32(GetFileAttributesExA, path, 0, data) == 0 {
+        errno := rt_win_errno();
+        rt_free(data);
+        return errno;
+    }
+    rt_push(fields, 0); // the errno slot: this call succeeded
+    attributes := raw_load(data) & 4294967295;
+    size_high := raw_load(data + 28) & 4294967295;
+    size_low := raw_load(data + 32) & 4294967295;
+    rt_push(fields, rt_win_kind(attributes));
+    rt_push(fields, size_high * 4294967296 + size_low);
+    rt_push(fields, 0);
+    rt_push(fields, rt_win_unix_seconds(data + 20));
+    rt_push(fields, rt_win_unix_nanos(data + 20));
+    rt_push(fields, rt_win_unix_seconds(data + 12));
+    rt_push(fields, rt_win_unix_nanos(data + 12));
+    rt_push(fields, 0);
+    rt_push(fields, 0);
+    rt_push(fields, 0);
+    rt_push(fields, 0);
+    rt_free(data);
+    return 0;
+}
+// CreateSymbolicLinkA: a symbolic link to a file (flag 0) - Windows decides junctions for
+// directories itself, so a link to a directory needs the privilege the platform asks for.
+fn rt_symlink(target: u64, link: u64) -> u64 {
+    if raw_win32(CreateSymbolicLinkA, link, target, 0) == 0 {
+        return rt_win_errno();
+    }
+    return 0;
+}
+// MoveFileExA with MOVEFILE_REPLACE_EXISTING: the destination file is replaced, a directory is only
+// renamed when it is absent, and 0 or a positive errno comes back.
+fn rt_rename(from: u64, to: u64) -> u64 {
+    if raw_win32(MoveFileExA, from, to, 1) == 0 {
+        return rt_win_errno();
+    }
+    return 0;
+}
+// Waits for the process handle `pid` (what rt_spawn_redirect answers) and closes it. Windows has no
+// signals, so the status is always an exit code in the wait4 position - `code << 8` - which keeps one
+// decoder for every platform.
+fn rt_wait_pid(pid: u64) -> u64 {
+    scratch := rt_win_scratch();
+    raw_store(scratch, 0);
+    raw_win32(WaitForSingleObject, pid, 4294967295);
+    if raw_win32(GetExitCodeProcess, pid, scratch) == 0 {
+        errno := rt_win_errno();
+        raw_win32(CloseHandle, pid);
+        return wrapping_sub(0, errno);
+    }
+    code := raw_load(scratch) & 255;
+    raw_win32(CloseHandle, pid);
+    return code * 256;
+}
+// CreateProcessA with STARTF_USESTDHANDLES: the STARTUPINFOA's hStdInput/hStdOutput/hStdError (at 80,
+// 88 and 96) name the child's standard handles and bInheritHandles is set, so a descriptor the caller
+// opened is the child's stdout or stderr. The answer is the process handle, or a wrapped negative
+// errno; rt_wait_pid closes it.
+fn rt_spawn_redirect(paths: u64, argv: u64, envp: u64, out_fd: u64, err_fd: u64) -> u64 {
+    if raw_target() == 4 {
+        // windows-aarch64: the ARM64 Win32 call path passes seven register arguments and
+        // CreateProcessA needs ten, so it is reported as unimplemented instead of mis-called.
+        return wrapping_sub(0, 38);
+    }
+    mut size = 1;
+    mut count = 0;
+    while raw_load(argv + count * 8) != 0 {
+        p := raw_load(argv + count * 8);
+        mut n = 0;
+        while raw_byte(p + n) != 0 {
+            n += 1;
+        }
+        size += n * 2 + 4;
+        count += 1;
+    }
+    line := rt_alloc(size);
+    mut at = 0;
+    mut i = 0;
+    while i < count {
+        if i != 0 {
+            raw_putbyte(line + at, 32);
+            at += 1;
+        }
+        at = rt_win_quote(line, at, raw_load(argv + i * 8));
+        i += 1;
+    }
+    raw_putbyte(line + at, 0);
+    mut block = 0;
+    if envp != 0 {
+        block = rt_win_env_block(envp);
+    }
+    startup := rt_alloc(128);
+    info := rt_alloc(32);
+    i = 0;
+    while i < 128 {
+        raw_store(startup + i, 0);
+        i += 8;
+    }
+    i = 0;
+    while i < 32 {
+        raw_store(info + i, 0);
+        i += 8;
+    }
+    raw_store(startup, 104);
+    raw_store(startup + 60, 256); // STARTF_USESTDHANDLES
+    raw_store(startup + 80, rt_win_handle(0));
+    raw_store(startup + 88, rt_win_handle(out_fd));
+    raw_store(startup + 96, rt_win_handle(err_fd));
+    started := raw_win32(CreateProcessA, 0, line, 0, 0, 1, 0, block, 0, startup, info);
+    mut result = wrapping_sub(0, 22);
+    if started == 0 {
+        result = wrapping_sub(0, rt_win_errno());
+    } else {
+        raw_win32(CloseHandle, raw_load(info + 8)); // the thread handle is not needed
+        result = raw_load(info); // the process handle: the child's id
+    }
+    rt_free(line);
+    rt_free(startup);
+    rt_free(info);
+    if block != 0 {
+        rt_free(block);
+    }
+    return result;
+}
+// CreatePipe: two inheritable handles, because a child only inherits what its STARTUPINFO names when
+// the handle itself allows it. Fills the caller's two-word pair with the read and the write end.
+// Whether a pipe handle has data or has been closed by its writer, within `timeout_ms`.
+fn rt_ready(fd: u64, timeout_ms: u64) -> u64 {
+    r := raw_win32(WaitForSingleObject, rt_win_handle(fd), timeout_ms);
+    if r == 0 {
+        return 1;
+    }
+    if r == 258 {
+        return 0; // WAIT_TIMEOUT
+    }
+    if r == 4294967295 {
+        return wrapping_sub(0, rt_win_errno()); // WAIT_FAILED
+    }
+    return 1; // WAIT_ABANDONED: treat it as readable and let the read report what happened
+}
+// The two handles CreatePipe wrote into `pair`.
+fn rt_pipe_push(pair: u64, out: u64) -> u64 {
+    rt_push(out, raw_load(pair));
+    rt_push(out, raw_load(pair + 8));
+    return 0;
+}
+fn rt_win_pipe(pair: u64) -> u64 {
+    attributes := rt_alloc(32);
+    raw_store(attributes, 24); // nLength
+    raw_store(attributes + 8, 1); // bInheritHandle
+    if raw_win32(CreatePipe, pair, pair + 8, attributes, 0) == 0 {
+        errno := rt_win_errno();
+        rt_free(attributes);
+        return wrapping_sub(0, errno);
+    }
+    rt_free(attributes);
+    return 0;
 }
 // Splits a copy of the Win32 command line into a NUL-terminated argv array. Backslash and quote
 // handling follows the CommandLineToArgv rules the C runtime uses.
