@@ -8838,5 +8838,37 @@
     "reject": true,
     "diagnostic": "borrow conflicts with active access",
     "note": "a non-numeric element stays borrowed, so reading g.rows[0].ty inside the call is a live loan, not a copy: that read keeps its temporary"
+  },
+  {
+    "name": "exch-inline-field-read",
+    "source": "struct C {\n    f: u64,\n    g: u64,\n}\nfn main() -> u64 {\n    mut c = C { f: 1, g: 9 };\n    old := exchange(&mut c.f, c.g);\n    println(old);\n    println(c.f);\n    println(c.g);\n    return 0;\n}\n",
+    "stdout": "1\n9\n9\n",
+    "note": "exchange takes its &mut after the value argument, so a sibling field read stays in the argument list: exchange(&mut c.f, c.g) stores c.g and returns the old c.f"
+  },
+  {
+    "name": "exch-reads-old-value",
+    "source": "fn main() -> u64 {\n    mut p = 5;\n    a := exchange(&mut p, p + 1);\n    println(a);\n    println(p);\n    b := exchange(&mut p, p * 10);\n    println(b);\n    println(p);\n    return 0;\n}\n",
+    "stdout": "5\n6\n6\n60\n",
+    "note": "the value argument is read before the swap, so p + 1 and p * 10 use the value p already holds, and exchange returns the old p"
+  },
+  {
+    "name": "exch-rejects-same-place",
+    "source": "fn main() -> u64 {\n    mut a = 5;\n    x := exchange(&mut a, a);\n    return x;\n}\n",
+    "reject": true,
+    "diagnostic": "exchange cannot take its new value from the place it replaces",
+    "note": "the place itself as the value is refused: the write would discard the value the argument named"
+  },
+  {
+    "name": "exch-rejects-same-ref",
+    "source": "fn main() -> u64 {\n    mut a = 5;\n    x := exchange(&mut a, &mut a);\n    return x;\n}\n",
+    "reject": true,
+    "diagnostic": "borrow conflicts with active access",
+    "note": "two exclusive borrows of one place in one exchange are refused, as for a call's arguments"
+  },
+  {
+    "name": "exch-record-field-swap",
+    "source": "struct Pair {\n    left: u64,\n    right: u64,\n}\nfn main() -> u64 {\n    mut p = Pair { left: 1, right: 2 };\n    old := exchange(&mut p.left, p.right);\n    p.right = old;\n    println(p.left);\n    println(p.right);\n    return 0;\n}\n",
+    "stdout": "2\n1\n",
+    "note": "a field swap through a record: the second field is read before the first is written, so no temporary is needed"
   }
 ]

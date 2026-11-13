@@ -63,10 +63,11 @@ corpus.
 A call's `&mut place` argument and a `&mut self` receiver are borrowed after the other arguments are
 evaluated, so an argument may still read that place: `bump(&mut c, c.pos)`,
 `ty_kind(&mut c, ty_arg(&mut c, t))`, `c.push(c.len())`. Keep such a read in the argument list -
-hoisting it into a temporary reads as if the order mattered, and it does not. Only a plain path is
-deferred (`&mut x`, `&mut x.f`); two shapes are not, and there the temporary stays: the `exchange`
-builtin takes its `&mut` before its other argument, and a read through a borrowed vector element
-(`c.rows[i].field` of a record element) is a loan rather than a copy.
+hoisting it into a temporary reads as if the order mattered, and it does not. `exchange` is
+two-phase the same way: `exchange(&mut c.pos, c.pos + 1)` reads the position from before the swap,
+and only the place itself as the value, `exchange(&mut a, a)`, is refused. Only a plain path is
+deferred (`&mut x`, `&mut x.f`); one shape is not, and there the temporary stays: a read through a
+borrowed vector element (`c.rows[i].field` of a record element) is a loan rather than a copy.
 
 The checked-in bootstrap seed predates this, so it still needs both switches to read today's
 sources; `tools/native.mjs` passes them to that one invocation and to nothing else. Until the seed

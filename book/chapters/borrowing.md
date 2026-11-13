@@ -32,9 +32,14 @@ The value read is copied before the borrow starts. Any plain path works there, i
 computes (`bump(&mut c, c.pos + 1)`) or a call that only reads (`bump(&mut c, peek(&mut c))`). A
 borrow that lives through the call is still a conflict: `take(&mut c, &c.pos)` is refused.
 
-Two shapes are not covered, and there the value must reach the call in a local: the `exchange`
-builtin takes its `&mut` before its other argument, and a read through a borrowed vector element
-(`c.rows[i].field`, where `Row` is a record) is a loan of that element rather than a copy.
+`exchange(&mut place, value)` is two-phase the same way, so its value argument may read the place:
+`x := exchange(&mut p, p + 1)` stores the old `p` plus one, returns the old `p`, and needs no
+temporary. The place itself as the value is refused, because the write would discard what the
+argument named: `exchange(&mut a, a)` and `exchange(&mut a, &mut a)` are errors.
+
+One shape is not covered, and there the value must reach the call in a local: a read through a
+borrowed vector element (`c.rows[i].field`, where `Row` is a record) is a loan of that element
+rather than a copy.
 
 ## Borrowing a temporary
 

@@ -19653,6 +19653,79 @@ fn argument_ranges<a>(c: (&a mut C)) -> u64[] {
 }
 // The order to take the arguments in: unchanged (empty) unless an argument is `&mut path` and
 // another argument mentions the path's root, in which case such arguments go last.
+// The dotted fields of an argument that is a plain `&mut x` or `&mut x.f.g` - a path with no call
+// or index, so taking its address later changes nothing but the loan's start - or empty when the
+// argument is anything else.
+fn mut_path<a, b>(c: (&a mut C), ranges: (&b u64[]), i: u64) -> u8[][] {
+    a := ranges[2 * i];
+    b := ranges[2 * i + 1];
+    mut simple = (b >= a + 3) && (kind_at(&mut c, a) == 38) && is_at(&mut c, a + 1, view("mut")) && (kind_at(&mut c, a + 2) == 1);
+    mut q = a + 3;
+    while simple && (q < b) {
+        if (kind_at(&mut c, q) == 46) && (q + 1 < b) && (kind_at(&mut c, q + 1) == 1) {
+            q += 2;
+        } else {
+            simple = false;
+        }
+    }
+    mut path = u8[][];
+    if !simple {
+        return path;
+    }
+    path.push(tok_text(&mut c, a + 2));
+    mut p = a + 3;
+    while p < b {
+        path.push(tok_text(&mut c, p + 1));
+        p += 2;
+    }
+    return path;
+}
+// 1 when argument `i` names `root` as a plain identifier anywhere among its tokens.
+fn argument_mentions<a, b, d>(c: (&a mut C), ranges: (&b u64[]), i: u64, root: &d [u8]) -> bool {
+    start := ranges[2 * i];
+    end := ranges[2 * i + 1];
+    for q in start..end {
+        if (kind_at(&mut c, q) == 1) && same(view(tok_text(&mut c, q)), view(root)) {
+            return true;
+        }
+    }
+    return false;
+}
+// 1 when argument `i` names a place that overlaps `path`: a dotted path in it that `path` is a
+// prefix of, or that is a prefix of `path`, since a loan of one then covers the other. `c.r[i]`
+// counts as `c.r`, and a sibling field (`c.g` against `c.f`) does not overlap.
+fn path_mentioned<a, b, d>(c: (&a mut C), ranges: (&b u64[]), i: u64, path: (&d u8[][])) -> bool {
+    start := ranges[2 * i];
+    end := ranges[2 * i + 1];
+    root := path[0].copy();
+    mut q = start;
+    while q < end {
+        if (kind_at(&mut c, q) == 1) && same(view(tok_text(&mut c, q)), view(root)) {
+            mut j = 1;
+            mut r = q + 1;
+            mut mismatch = false;
+            while (j < path.len()) & !mismatch {
+                if (kind_at(&mut c, r) == 46) && (kind_at(&mut c, r + 1) == 1) {
+                    if same(view(tok_text(&mut c, r + 1)), view(path[j])) {
+                        j += 1;
+                        r += 2;
+                    } else {
+                        mismatch = true;
+                    }
+                } else {
+                    break;
+                }
+            }
+            if !mismatch {
+                return true;
+            }
+            q = r;
+        } else {
+            q += 1;
+        }
+    }
+    return false;
+}
 fn two_phase_order<a, b>(c: (&a mut C), ranges: (&b u64[])) -> u64[] {
     if ranges.len() < 5 {
         return u64[];
@@ -19661,21 +19734,11 @@ fn two_phase_order<a, b>(c: (&a mut C), ranges: (&b u64[])) -> u64[] {
     mut late = u64[];
     mut roots = u8[][];
     for i in n {
-        a := ranges[2 * i];
-        b := ranges[2 * i + 1];
-        mut simple = (b >= a + 3) && (kind_at(&mut c, a) == 38) && is_at(&mut c, a + 1, view("mut")) && (kind_at(&mut c, a + 2) == 1);
-        // `&mut x` or `&mut x.f.g`: a path with no call or index, so taking it later changes nothing.
-        mut q = a + 3;
-        while simple && (q < b) {
-            if (kind_at(&mut c, q) == 46) && (q + 1 < b) && (kind_at(&mut c, q + 1) == 1) {
-                q += 2;
-            } else {
-                simple = false;
-            }
-        }
-        if simple {
+        path := mut_path(&mut c, ranges, i);
+        if path.len() != 0 {
+            root := path[0].copy();
             late.push(i);
-            roots.push(tok_text(&mut c, a + 2));
+            roots.push(root);
         }
     }
     if late.len() == 0 {
@@ -19686,10 +19749,8 @@ fn two_phase_order<a, b>(c: (&a mut C), ranges: (&b u64[])) -> u64[] {
     for j in late.len() {
         for i in n {
             if i != late[j] {
-                for q in ranges[2 * i]..ranges[2 * i + 1] {
-                    if (kind_at(&mut c, q) == 1) && same(view(tok_text(&mut c, q)), view(roots[j])) {
-                        needed = true;
-                    }
+                if argument_mentions(&mut c, ranges, i, view(roots[j])) {
+                    needed = true;
                 }
             }
         }
@@ -22271,6 +22332,64 @@ fn print_value<a>(c: (&a mut C), input: Val, newline: u64) -> unit {
     }
     return ();
 }
+// `exchange(&mut place, value)` is two-phase like an ordinary call: when the value argument reads
+// the place's root, it is evaluated before the `&mut` is taken, so that read sees the value from
+// before the swap (`exchange(&mut p, p + 1)` stores the old `p` plus one and returns the old `p`).
+// Only a plain `&mut path` is deferred, exactly as for call arguments: the address of anything else
+// was already computed where that reference was made. A value taken from the very place that is
+// written is still refused - `exchange(&mut a, a)` names the same storage twice.
+fn exchange_builtin<a>(c: (&a mut C)) -> Val {
+    ranges := argument_ranges(&mut c);
+    mut defer = false;
+    if ranges.len() == 5 {
+        path := mut_path(&mut c, &ranges, 0);
+        if path.len() != 0 {
+            if path_mentioned(&mut c, &ranges, 1, &path) {
+                defer = true;
+            }
+        }
+    }
+    mut a = val(0, 0);
+    mut b = val(0, 0);
+    mut start = 0;
+    mut end = 0;
+    if defer {
+        // The value argument first: its reads and loans end before the `&mut` starts.
+        exchange(&mut c.pos, ranges[2]);
+        start = c.pos;
+        b = expr(&mut c, 0);
+        end = c.pos;
+        after := c.pos;
+        exchange(&mut c.pos, ranges[0]);
+        a = expr(&mut c, 0);
+        observe(&mut c, a.t);
+        exchange(&mut c.pos, after);
+    } else {
+        a = expr(&mut c, 0);
+        observe(&mut c, a.t);
+        expect(&mut c, view(","));
+        start = c.pos;
+        b = expr(&mut c, 0);
+        end = c.pos;
+    }
+    expect(&mut c, view(")"));
+    if c.raw == 0 {
+        if ty_kind(&mut c, a.ty) != 7 {
+            fail(&mut c, view("exchange requires typed reference"));
+        }
+        expected := ty_arg(&mut c, a.ty);
+        b = adopt_value(&mut c, b, start, end, expected);
+        // The write would discard the value the argument named, so the place itself is refused.
+        // (`exchange(&mut a, &mut a)` already fails while the second `&mut` is taken.)
+        destination := target_of(&mut c, a.t);
+        source := place_of(&mut c, b.t);
+        if (source != 0) & (source == destination) {
+            exchange(&mut c.pos, start);
+            fail(&mut c, view("exchange cannot take its new value from the place it replaces"));
+        }
+    }
+    return exchange_into(&mut c, a, b);
+}
 // Stores b through the mutable reference a and returns the previous (owned) value.
 fn exchange_into<a>(c: (&a mut C), a: Val, b: Val) -> Val {
     ty := ty_arg(&mut c, a.ty);
@@ -22970,6 +23089,9 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
     if (id == 40) || (id == 41) {
         exchange(&mut c.cptr_address, id - 39);
     }
+    if id == 16 {
+        return exchange_builtin(&mut c);
+    }
     a := expr(&mut c, 0);
     exchange(&mut c.cptr_address, 0);
     if (id == 40) || (id == 41) {
@@ -23138,24 +23260,6 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
             o(&mut c, view("imulq %rcx,%rax\n"));
         }
         return val(save(&mut c), 0);
-    }
-    if id == 16 {
-        observe(&mut c, a.t);
-        if c.raw == 0 {
-            if ty_kind(&mut c, a.ty) != 7 {
-                fail(&mut c, view("exchange requires typed reference"));
-            }
-        }
-        expect(&mut c, view(","));
-        start := c.pos;
-        mut b = expr(&mut c, 0);
-        end := c.pos;
-        expect(&mut c, view(")"));
-        if c.raw == 0 {
-            expected := ty_arg(&mut c, a.ty);
-            b = adopt_value(&mut c, b, start, end, expected);
-        }
-        return exchange_into(&mut c, a, b);
     }
     if id == 15 {
         expect(&mut c, view(")"));

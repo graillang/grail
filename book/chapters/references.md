@@ -14,7 +14,9 @@ reference is rejected ("use exchange"), and an exclusive view cannot be copied e
 view descriptor copying retains checked provenance. `*r = v` drops the old value.
 
 `exchange(reference, new_value)` replaces the stored value and returns the old one instead of
-dropping it: use it to move an owned value out of a reference.
+dropping it: use it to move an owned value out of a reference. Its value argument is read before
+the swap, so `x := exchange(&mut p, p + 1)` leaves the old `p` in `x`; naming the place itself as
+the value, `exchange(&mut a, a)`, is refused.
 
 Any element or field can be borrowed, whatever its size: `&mut v[i]` for an `f32[]`, `u32[]`,
 `i32[]` or byte vector, `for x in &mut v`, and `&mut rec.x` for a narrow field of an
