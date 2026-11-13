@@ -12,7 +12,7 @@
 //   bun tools/ssair-bytes.mjs --old A --new B --self      the compiler's own sources
 //
 // Exit status is 0 only when every unit matched.
-import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, symlinkSync, copyFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { availableParallelism } from 'node:os';
@@ -59,14 +59,16 @@ function parse(argv) {
 }
 
 // Resolves with the exit status and the merged output; never rejects on a non-zero compiler exit.
-function run(argv) {
+function run(argv, timeout = 600_000) {
   return new Promise((done, fail) => {
     const child = spawn(argv[0], argv.slice(1), { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
+    // A compiler that hangs is a result too: report it rather than wait forever.
+    const deadline = setTimeout(() => { child.kill('SIGKILL'); out += '\n[timed out]'; }, timeout);
     child.stdout.on('data', d => { out += d; });
     child.stderr.on('data', d => { out += d; });
-    child.on('error', fail);
-    child.on('close', status => done({ status, out }));
+    child.on('error', error => { clearTimeout(deadline); fail(error); });
+    child.on('close', status => { clearTimeout(deadline); done({ status, out }); });
   });
 }
 
@@ -148,28 +150,72 @@ function compare(oldText, newText, show) {
   return { identical: false, total: after.length, differing, lines };
 }
 
+// The standard library is recognised by location (the directory holding core.grl), so every case
+// directory gets `lib` pointing at one staged copy: a case that imports `core` resolves it the same
+// way under both compilers.
+function stageStd(work) {
+  const std = join(work, 'lib');
+  mkdirSync(std, { recursive: true });
+  for (const file of readdirSync(join(root, 'lib')).filter(f => f.endsWith('.grl'))) {
+    copyFileSync(join(root, 'lib', file), join(std, file));
+  }
+  return std;
+}
+
 // One corpus case: the same source in the same directory for both compilers, so a relative path in
 // the source cannot resolve differently between them.
 async function corpusCase(test, o, work) {
   const dir = join(work, `case-${test.name}`);
   mkdirSync(dir, { recursive: true });
+  if (!existsSync(join(dir, 'lib'))) symlinkSync(join(work, 'lib'), join(dir, 'lib'));
+  // A case's own data files (what an `@embed` reads) sit beside its sources, under their own names.
+  for (const file of test.data ?? []) copyFileSync(resolve(root, file), join(dir, file.split('/').pop()));
+  // A module that lives in lib/ resolves from the staged copy, as the compiler recognises the
+  // standard library by the directory holding core.grl.
+  // A module in lib/ resolves from the staged copy, which keeps the standard library's shape (the
+  // compiler recognises it by the directory holding core.grl).
+  const modulePath = (file) => {
+    const source = resolve(root, file);
+    if (source.startsWith(join(root, 'lib') + '/')) return join(work, 'lib', source.split('/').pop());
+    return source;
+  };
   let files;
-  if (test.files) files = test.files.map(f => resolve(root, f));
+  if (test.files) files = test.files.map(modulePath);
   else {
     const input = join(dir, 'input.grl');
     writeFileSync(input, test.source);
-    files = [input, ...(test.modules ?? []).map(m => resolve(root, m))];
+    files = [input, ...(test.modules ?? []).map(modulePath)];
   }
   const flags = test.flags ?? [];
   const overflow = test.overflow ?? 'checked';
-  const sources = [...files, resolve(root, 'compiler/runtime.grl'), resolve(root, 'compiler/os-linux.grl')];
+  // Every case is compiled with the whole standard library beside its own modules: a case that
+  // writes `T?` or names `result::Option` needs the module that declares it, and the reference
+  // suite reaches the same set through its own staging. Both compilers get this list, so the
+  // comparison is unaffected; a module the case already lists is not passed twice.
+  const named = new Set(files.map(f => f.split('/').pop()));
+  const std = readdirSync(join(root, 'lib')).filter(f => f.endsWith('.grl') && !named.has(f)).sort()
+    .map(f => join(root, 'lib', f));
+  const sources = [...files, ...std, resolve(root, 'compiler/runtime.grl'), resolve(root, 'compiler/os-linux.grl')];
   const emit = async (compiler, name) => {
     const out = join(dir, `${name}.s`);
     const result = await run([compiler, ...flags, '--target', 'x86_64', `--overflow=${overflow}`, out, ...sources]);
-    if (result.status !== 0) throw new Error(`${name} compiler refused the case: ${result.out.trim().split('\n').slice(0, 3).join(' | ')}`);
-    return readFileSync(out, 'utf8');
+    if (result.status !== 0) return { refused: result.out.trim().split('\n').slice(0, 3).join(' | ') };
+    return { text: readFileSync(out, 'utf8') };
   };
-  return compare(await emit(o.old, 'old'), await emit(o.new, 'new'), o.show);
+  const before = await emit(o.old, 'old');
+  const after = await emit(o.new, 'new');
+  // A case neither compiler can build here is not a difference; both refusing identically is
+  // reported (once, by name) so the count of compared cases stays honest.
+  if (before.refused !== undefined && after.refused !== undefined) {
+    if (before.refused === after.refused) return { identical: true, total: 0, differing: 0, lines: [], skipped: before.refused };
+    return { identical: false, total: 0, differing: 1, lines: [`  old refused: ${before.refused}`, `  new refused: ${after.refused}`] };
+  }
+  if (before.refused !== undefined) return { identical: false, total: 0, differing: 1, lines: [`  old refused, new did not: ${before.refused}`] };
+  if (after.refused !== undefined) return { identical: false, total: 0, differing: 1, lines: [`  new refused, old did not: ${after.refused}`] };
+  const difference = compare(before.text, after.text, o.show);
+  // A case's assembly is compared and then dropped: a few hundred of them are gigabytes.
+  if (!o.keep) rmSync(dir, { recursive: true, force: true });
+  return difference;
 }
 
 async function selfCheck(o, work) {
@@ -190,9 +236,10 @@ async function main() {
   if (existsSync(work)) rmSync(work, { recursive: true, force: true });
   mkdirSync(work, { recursive: true });
   const started = Date.now();
-  const report = (ok, what, cases, units, differingCases, differingUnits) => {
+  const report = (ok, what, cases, units, differingCases, differingUnits, skipped) => {
     const seconds = ((Date.now() - started) / 1000).toFixed(1);
-    console.log(`${ok ? 'identical' : 'DIFFERENT'}  ${what}  ${cases} cases, ${units} function units, ${differingCases} differing cases, ${differingUnits} differing units  ${seconds}s`);
+    const tail = skipped ? `, ${skipped} cases neither compiler builds here` : '';
+    console.log(`${ok ? 'identical' : 'DIFFERENT'}  ${what}  ${cases} cases, ${units} function units, ${differingCases} differing cases, ${differingUnits} differing units${tail}  ${seconds}s`);
   };
   if (o.self) {
     const diff = await selfCheck(o, work);
@@ -214,9 +261,11 @@ async function main() {
     .slice(0, o.limit || undefined);
   if (selected.length === 0) throw new Error('no cases selected');
   if (o.list) { for (const t of selected) console.log(t.name); process.exit(0); }
+  stageStd(work);
   const failures = [];
   let completed = 0;
   let unitsCompared = 0;
+  let skipped = 0;
   let next = 0;
   const worker = async () => {
     for (;;) {
@@ -227,6 +276,7 @@ async function main() {
         const diff = await corpusCase(test, o, work);
         completed += 1;
         unitsCompared += diff.total;
+        if (diff.skipped !== undefined) skipped += 1;
         if (!diff.identical) failures.push({ name: test.name, diff });
       } catch (error) {
         completed += 1;
@@ -243,7 +293,7 @@ async function main() {
   }
   if (failures.length > 8) console.error(`... and ${failures.length - 8} more differing cases`);
   report(failures.length === 0, 'corpus x86_64', completed, unitsCompared, failures.length,
-    failures.reduce((n, f) => n + (f.diff ? f.diff.differing : 0), 0));
+    failures.reduce((n, f) => n + (f.diff ? f.diff.differing : 0), 0), skipped);
   if (o.keep) console.log(`emitted assembly kept under ${work}`);
   else rmSync(work, { recursive: true, force: true });
   process.exit(failures.length === 0 ? 0 : 1);

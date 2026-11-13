@@ -1,5 +1,7 @@
 module optimize;
 use span;
+use ir;
+use llvm;
 
 // Word-stream optimizer: runs on the x86-64-spelled stream before target lowering, so every CPU
 // benefits. Per function it (1) forwards frame-slot values already held in a register or known
@@ -7,214 +9,16 @@ use span;
 // definitions that are never used, (3) promotes the hottest non-escaping slots into callee-saved
 // registers (weighted by loop depth), and (4) fuses set/test/branch sequences and turns division
 // by a power-of-two constant into shift/mask. Unrecognized functions are copied unchanged.
-// Kinds: 0 none, 1 register, 2 frame slot -N(%rbp), 3 immediate/other text, 4 other operand,
-// 5 generated text (range in O.gen). Ops: see opcode(); 100 label, 101 directive, 102 two-word
-// slot declaration, 0 unknown.
 //
-// A slot is one word unless a `.gpair -N(%rbp)` line declares it the first word of a two-word
-// value (native.grl emits one where a borrowed interface object's {data, vtable} pair is built), and
-// a result is one word unless `.gpair ret` declares it the two-word %rax:%rdx form.
-// The two words are one value with one identity: allocated together, written directly, addressed
-// from the first word, kept adjacent when the frame is compacted, and never promoted, forwarded or
-// dropped - the second word's only reader is the pair's address, which no pass reasons about. Every
-// pass that looks at a slot obeys `pair[n]`, so width 1 and width 2 are handled uniformly and a
-// pass that cannot reason about the second word is conservative for both.
-struct O {
-    ls: u64[],
-    le: u64[],
-    op: u64[],
-    chg: u64[],
-    del: u64[],
-    lab: u64[],
-    tr: u64[],
-    k0: u64[],
-    v0: u64[],
-    s0: u64[],
-    e0: u64[],
-    m0: u64[],
-    k1: u64[],
-    v1: u64[],
-    s1: u64[],
-    e1: u64[],
-    m1: u64[],
-    gen: u8[],
-    out: u8[],
-    weird: u64,
-    maxslot: u64,
-    table: u64[],
-    base: u64,
-    data: u64,
-    uniq: u64,
-    zline: u64,
-    zfrom: u64,
-    zto: u64,
-    pairs: u64[],
-    pair: u64[],
-    ret2: u64,
-    inl_names: u8[][],
-    inl_bodies: u8[][],
-    inl_units: u8[][],
-    inl_head: u64[],
-    inl_next: u64[],
-    // The emission unit the stream is inside: its name and its label prefix, both from the
-    // `.grail_part` marker `native.grl` writes. A label is numbered only when it is this unit's.
-    unit: u8[],
-    uprefix: u8[],
-    // 1 when the stream carried any marker, so a single-file build knows to strip them.
-    marked: u64,
-    // The expansion-label counter of each unit (1-based index into `uniq_units` of the one being
-    // emitted, 0 before the first). Per unit and kept across a re-entry, like the emitter's own.
-    uniq_index: u64,
-    uniq_units: u8[][],
-    uniq_next: u64[]
-}
-fn put<a>(v: (&a mut u64[]), i: u64, x: u64) {
-    exchange(&mut v[i], x);
-}
-// `s[a..e]` equals `w`. The range is a `Span`: it carries the slice it was made from, so the only
-// bytes it can name are that slice's (`docs/design/range-values.md`). `span_of` refuses a range the
-// slice does not have when the span is made, which is why no guard here checks `e` against `s.len()`
-// any more: there is no second, unwritten end left for a caller to supply.
-fn same<b, d>(r: span::Span<b>, w: &d [u8]) -> bool {
-    return r.same_as(w);
-}
-// `span_of` is `lib/span.grl`'s constructor (the compiler builds with that module); the range it
-// makes is the same value user code gets, not a private copy of the idea.
-fn span_of<a>(s: &a [u8], start: u64, end: u64) -> span::Span<a> {
-    return span::span_of(s, start, end);
-}
-// `s` at `a` opens with `w`: the extent comes from the needle, so the window cannot be wider than
-// the thing it is compared with, and `span_of` refuses one that runs past the end of `s`.
-fn at<b, d>(s: &b [u8], a: u64, w: &d [u8]) -> bool {
-    return span_of(s, a, a + w.len()).same_as(w);
-}
+// What a body *is* lives in `compiler/ir.grl`: the instruction record, the parser, the operand
+// algebra and the typed-IR layer. This module is the passes and the printer that run over it.
+
 fn app<a, b>(out: (&a mut u8[]), s: &b [u8]) {
     for i in s.len() {
         out.push(s[i]);
     }
 }
-fn bit(r: u64) -> u64 {
-    return 1 << r;
-}
-// 0xFFCF: every general register except rsp/rbp; caller-saved; argument registers.
-fn all_regs() -> u64 {
-    return 65487;
-}
-fn caller_saved() -> u64 {
-    return 4039;
-}
-// A call reads every register an argument can arrive in: rdi, rsi, rdx, rcx, r8, r9 and - because
-// machine.grl maps the seventh and eighth AAPCS64/RV64 argument registers to their x86-64 spelling -
-// r10 and r11 too. Without them a store to %r10 before a call looks dead and is deleted.
-fn arg_regs() -> u64 {
-    return 4038;
-}
-fn opcode_key(k: u64) -> u64 {
-    if k == 1903587181 {
-        return 1;
-    }
-    if k == 31933538747445101 {
-        return 2;
-    }
-    if k == 1902208364 {
-        return 3;
-    }
-    if k == 1902404705 {
-        return 4;
-    }
-    if k == 1902278003 {
-        return 5;
-    }
-    if k == 1903193443 {
-        return 6;
-    }
-    if k == 487285024116 {
-        return 7;
-    }
-    if k == 1902407265 {
-        return 8;
-    }
-    if k == 7434863 {
-        return 9;
-    }
-    if k == 1903325048 {
-        return 10;
-    }
-    if k == 1902341737 {
-        return 11;
-    }
-    if k == 1902933357 {
-        return 12;
-    }
-    if k == 1903585636 {
-        return 13;
-    }
-    if k == 487150939497 {
-        return 14;
-    }
-    if k == 1819042147 {
-        return 15;
-    }
-    if k == 7368042 {
-        return 16;
-    }
-    if k == 25962 {
-        return 17;
-    }
-    if k == 31338 {
-        return 18;
-    }
-    if k == 6647402 {
-        return 19;
-    }
-    if k == 8023658 {
-        return 20;
-    }
-    if k == 6516330 {
-        return 21;
-    }
-    if k == 6644074 {
-        return 22;
-    }
-    if k == 25194 {
-        return 23;
-    }
-    if k == 25450 {
-        return 24;
-    }
-    if k == 1702126963 {
-        return 25;
-    }
-    if k == 435644818803 {
-        return 26;
-    }
-    if k == 1651795315 {
-        return 27;
-    }
-    if k == 124667775315821 {
-        return 28;
-    }
-    if k == 435777791340 {
-        return 29;
-    }
-    if k == 7628146 {
-        return 30;
-    }
-    if k == 487083701616 {
-        return 31;
-    }
-    if k == 1903193968 {
-        return 32;
-    }
-    if k == 1902930035 {
-        return 33;
-    }
-    if k == 1903323251 {
-        return 34;
-    }
-    return 0;
-}
-fn opname<a>(o: (&a mut O), op: u64) {
+fn opname<a>(o: (&a mut ir::Body), op: u64) {
     mut t = "";
     if op == 1 {
         t = "movq";
@@ -321,690 +125,29 @@ fn opname<a>(o: (&a mut O), op: u64) {
     assert(t.len() != 0);
     app(&mut o.out, view(t));
 }
-// 0..15 for 64-bit names, 16+n for a narrower spelling of register n, 99 otherwise.
-fn reg_key(k: u64) -> u64 {
-    if k == 7889266 {
-        return 0;
-    }
-    if k == 7889778 {
-        return 1;
-    }
-    if k == 7890034 {
-        return 2;
-    }
-    if k == 7889522 {
-        return 3;
-    }
-    if k == 7369586 {
-        return 4;
-    }
-    if k == 7365234 {
-        return 5;
-    }
-    if k == 6910834 {
-        return 6;
-    }
-    if k == 6906994 {
-        return 7;
-    }
-    if k == 14450 {
-        return 8;
-    }
-    if k == 14706 {
-        return 9;
-    }
-    if k == 3158386 {
-        return 10;
-    }
-    if k == 3223922 {
-        return 11;
-    }
-    if k == 3289458 {
-        return 12;
-    }
-    if k == 3354994 {
-        return 13;
-    }
-    if k == 3420530 {
-        return 14;
-    }
-    if k == 3486066 {
-        return 15;
-    }
-    if k == 7889253 {
-        return 16;
-    }
-    if k == 27745 {
-        return 16;
-    }
-    if k == 7889765 {
-        return 17;
-    }
-    if k == 27747 {
-        return 17;
-    }
-    if k == 7890021 {
-        return 18;
-    }
-    if k == 27748 {
-        return 18;
-    }
-    if k == 7889509 {
-        return 19;
-    }
-    if k == 27746 {
-        return 19;
-    }
-    if k == 7369573 {
-        return 20;
-    }
-    if k == 7365221 {
-        return 21;
-    }
-    if k == 6910821 {
-        return 22;
-    }
-    if k == 7104883 {
-        return 22;
-    }
-    if k == 6906981 {
-        return 23;
-    }
-    if k == 7104868 {
-        return 23;
-    }
-    if k == 6568050 {
-        return 24;
-    }
-    if k == 6568306 {
-        return 25;
-    }
-    if k == 1680879986 {
-        return 26;
-    }
-    if k == 1680945522 {
-        return 27;
-    }
-    if k == 1681011058 {
-        return 28;
-    }
-    if k == 1681076594 {
-        return 29;
-    }
-    if k == 1681142130 {
-        return 30;
-    }
-    if k == 1681207666 {
-        return 31;
-    }
-    return 99;
-}
-fn regcode<b>(s: &b [u8], a: u64, e: u64) -> u64 {
-    if e <= a || e - a > 4 {
-        return 99;
-    }
-    mut k = 0;
-    for i in e - a {
-        k = k | (s[a + i] << (8 * i));
-    }
-    return reg_key(k);
-}
-fn alnum(c: u64) -> bool {
-    return ((47 < c) && (c < 58)) || ((96 < c) && (c < 123)) || ((64 < c) && (c < 91));
-}
-// Registers mentioned anywhere in s[a:e] (bit 5 marks an rbp use).
-fn mentions<b>(s: &b [u8], a: u64, e: u64) -> u64 {
-    mut m = 0;
-    mut i = a;
-    while i < e {
-        if s[i] == 37 {
-            mut j = i + 1;
-            while j < e {
-                if !alnum(s[j]) {
-                    break;
-                }
-                j += 1;
-            }
-            r := regcode(view(s), i + 1, j);
-            if r < 32 {
-                m = m | bit(r % 16);
-            }
-            i = j;
-        } else {
-            i += 1;
-        }
-    }
-    return m;
-}
-// Classifies one operand: returns kind and fills value/mask through the pair encoding.
-fn classify<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64, second: u64) {
-    mut k = 4;
-    mut v = 0;
-    mut m = 0;
-    if a < e {
-        c := s[a];
-        if c == 37 {
-            r := regcode(view(s), a + 1, e);
-            if r < 16 {
-                k = 1;
-                v = r;
-            } else {
-                k = 6;
-                if r < 32 {
-                    m = bit(r - 16);
-                }
-            }
-        } else {
-            if c == 36 {
-                k = 3;
-            } else {
-                m = mentions(view(s), a, e);
-                if (c == 46) & (e - a > 2) {
-                    if s[a + 1] == 76 {
-                        mut n = 0;
-                        mut digits = 0;
-                        mut i = a + 2;
-                        while i < e {
-                            d := s[i];
-                            if d < 48 || 57 < d {
-                                break;
-                            }
-                            n = n * 10 + d - 48;
-                            digits += 1;
-                            i += 1;
-                        }
-                        if digits != 0 {
-                            v = n + 1;
-                        }
-                    }
-                }
-                // -N(%rbp) with decimal N is a frame slot.
-                if (c == 45) & (e - a > 7) {
-                    if same(span_of(view(s), e - 6, e), view("(%rbp)")) {
-                        mut n = 0;
-                        mut ok = 1;
-                        for i in e - 7 - a {
-                            d := s[a + 1 + i];
-                            if d < 48 || 57 < d {
-                                ok = 0;
-                            } else {
-                                n = n * 10 + d - 48;
-                            }
-                        }
-                        if ok != 0 && n != 0 {
-                            k = 2;
-                            v = n;
-                            m = 0;
-                            if n % 8 != 0 {
-                                exchange(&mut o.weird, 1);
-                            }
-                            if o.maxslot < n {
-                                exchange(&mut o.maxslot, n);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    } else {
-        k = 0;
-    }
-    if second != 0 {
-        o.k1.push(k);
-        o.v1.push(v);
-        o.s1.push(a);
-        o.e1.push(e);
-        o.m1.push(m);
-    } else {
-        o.k0.push(k);
-        o.v0.push(v);
-        o.s0.push(a);
-        o.e0.push(e);
-        o.m0.push(m);
-    }
-}
-// The counter a label carries: `.L<unit prefix>_<n>` is numbered, everything else is opaque text
-// (`.Lopt` expansions, refinement strings, `.Lret` in an inlined body). A stream with no marker -
-// a caller that hands the optimizer text it produced itself - keeps the old `.L<n>` numbering.
-fn label_number<a, b, d>(s: &a [u8], a: u64, e: u64, uprefix: &d [u8]) -> u64 {
-    if (e <= a + 2) || !at(view(s), a, view(".L")) {
-        return 0;
-    }
-    mut at = a + 2;
-    if uprefix.len() == 0 {
-        mut n = 0;
-        mut ok = 1;
-        while at < e {
-            d := s[at];
-            if (d < 48) || (57 < d) {
-                ok = 0;
-                break;
-            }
-            n = n * 10 + (d - 48);
-            at += 1;
-        }
-        if (ok == 0) || (at == a + 2) {
-            return 0;
-        }
-        return n + 1;
-    }
-    if !same(span_of(view(s), at, e), view(uprefix)) | (e <= at + uprefix.len() + 1) {
-        return 0;
-    }
-    mut i = 0;
-    while i < uprefix.len() {
-        if s[at + i] != uprefix[i] {
-            return 0;
-        }
-        i += 1;
-    }
-    at += uprefix.len();
-    if s[at] != 95 {
-        return 0;
-    }
-    at += 1;
-    mut n = 0;
-    while at < e {
-        d := s[at];
-        if (d < 48) || (57 < d) {
-            return 0;
-        }
-        n = n * 10 + (d - 48);
-        at += 1;
-    }
-    return n + 1;
-}
-// The marker line: `.grail_part <unit> <label prefix>`, and the unit fields it sets. 1 when the
-// line was one.
-fn marker<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64) -> u64 {
-    if (e - a < 14) || (s[a] != 46) || !at(view(s), a, view(".grail_part ")) {
-        return 0;
-    }
-    mut unit = u8[];
-    mut at = a + 12;
-    while (at < e) & (s[at] != 32) {
-        unit.push(s[at]);
-        at += 1;
-    }
-    mut prefix = u8[];
-    at += 1;
-    while at < e {
-        prefix.push(s[at]);
-        at += 1;
-    }
-    // Labels and the optimizer's own expansion labels are per unit: this unit's counters resume
-    // where it left them, or start at zero the first time.
-    mut k = 0;
-    while k < o.uniq_units.len() {
-        if same(span_of(view(o.uniq_units[k]), 0, unit.len()), view(unit)) {
-            break;
-        }
-        k += 1;
-    }
-    if k == o.uniq_units.len() {
-        o.uniq_units.push(unit.copy());
-        o.uniq_next.push(0);
-    }
-    o.uniq_index = k + 1;
-    exchange(&mut o.uniq, o.uniq_next[k]);
-    exchange(&mut o.unit, unit);
-    exchange(&mut o.uprefix, prefix);
-    exchange(&mut o.marked, 1);
-    return 1;
-}
-// The next expansion label number of the unit being emitted, kept with that unit.
-fn uniq_take<a>(o: (&a mut O)) -> u64 {
-    n := o.uniq + 1;
-    exchange(&mut o.uniq, n);
-    k := o.uniq_index;
-    if (k != 0) & (k <= o.uniq_next.len()) {
-        o.uniq_next[k - 1] = n;
-    }
-    return n;
-}
-fn parse<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64) {
-    o.ls.push(a);
-    o.le.push(e);
-    o.chg.push(0);
-    o.del.push(0);
-    o.tr.push(0);
-    mut op = 0;
-    mut lab = 0;
-    mut space = e;
-    // String data between .pushsection/.popsection is inert, including its labels.
-    if (e - a > 10) & (s[a] == 46) {
-        if s[a + 1] == 112 {
-            if s[a + 2] == 117 {
-                exchange(&mut o.data, 1);
-            }
-            if s[a + 2] == 111 {
-                exchange(&mut o.data, 0);
-                op = 101;
-            }
-        }
-    }
-    if o.data != 0 {
-        op = 101;
-    }
-    if op == 101 {} else {
-        if a < e {
-            if s[e - 1] == 58 {
-                op = 100;
-                lab = label_number(view(s), a, e - 1, view(o.uprefix));
-            } else {
-                if s[a] == 46 {
-                    op = 101;
-                } else {
-                    for i in e - a {
-                        if s[a + i] == 32 {
-                            space = a + i;
-                            break;
-                        }
-                    }
-                    mut k = 0;
-                    if space - a < 8 {
-                        for x in space - a {
-                            k = k | (s[a + x] << (8 * x));
-                        }
-                    }
-                    op = opcode_key(k);
-                }
-            }
-        } else {
-            op = 101;
-        }
-    }
-    o.op.push(op);
-    o.lab.push(lab);
-    if op == 101 {
-        // `.gpair -N(%rbp)`: the two-word value whose first word lives at that frame address.
-        if (e - a > 7) & at(view(s), a, view(".gpair ")) {
-            last := o.op.len() - 1;
-            if same(span_of(view(s), a + 7, e), view("ret")) {
-                exchange(&mut o.op[last], 102);
-                exchange(&mut o.ret2, 1);
-                classify(&mut o, view(s), e, e, 0);
-                classify(&mut o, view(s), e, e, 1);
-                return ();
-            }
-            exchange(&mut o.op[last], 102);
-            classify(&mut o, view(s), a + 7, e, 0);
-            classify(&mut o, view(s), e, e, 1);
-            n := o.v0[o.v0.len() - 1];
-            o.pairs.push(n / 8);
-            return ();
-        }
-    }
-    if op == 100 || op == 101 {
-        classify(&mut o, view(s), e, e, 0);
-        classify(&mut o, view(s), e, e, 1);
-        return ();
-    }
-    // Split operands at the top-level comma.
-    mut first = e;
-    mut comma = e;
-    mut depth = 0;
-    if space < e {
-        first = space + 1;
-    }
-    mut i = first;
-    while i < e {
-        c := s[i];
-        if c == 40 {
-            depth += 1;
-        }
-        if c == 41 {
-            depth -= 1;
-        }
-        if (c == 44) & (depth == 0) {
-            comma = i;
-            break;
-        }
-        i += 1;
-    }
-    mut extra = 0;
-    if comma < e {
-        i = comma + 1;
-        while i < e {
-            c := s[i];
-            if c == 40 {
-                depth += 1;
-            }
-            if c == 41 {
-                depth -= 1;
-            }
-            if (c == 44) & (depth == 0) {
-                extra = 1;
-            }
-            i += 1;
-        }
-    }
-    if extra != 0 {
-        // stays: the written place is indexed (`&mut o.op[last]`), and two-phase defers only a
-        // plain `&mut path`, so the length read is part of taking the place.
-        last := o.op.len() - 1;
-        exchange(&mut o.op[last], 0);
-    }
-    classify(&mut o, view(s), first, comma, 0);
-    if comma < e {
-        classify(&mut o, view(s), comma + 1, e, 1);
-    } else {
-        classify(&mut o, view(s), e, e, 1);
-    }
-    // Calls to the leaf runtime accessors become pseudo-instructions expanded inline at emission:
-    // 40 rt_slot, 41 rt_at (bounds-checked element address / load), 42 rt_len, 43 rt_xchg, 44 rt_atb (byte load),
-    // 45 rt_push / 46 rt_pushb (inline store when capacity remains, runtime call to grow),
-    // 47 rt_slotu / 48 rt_atbu (proven in-bounds element address / byte load).
-    if (op == 15) & (comma == e) & (e - first > 5) & (e - first < 9) {
-        if (s[first] == 114) & (s[first + 1] == 116) & (s[first + 2] == 95) {
-            mut fast = 0;
-            if same(span_of(view(s), first, e), view("rt_slot")) {
-                fast = 40;
-            }
-            if same(span_of(view(s), first, e), view("rt_at")) {
-                fast = 41;
-            }
-            if same(span_of(view(s), first, e), view("rt_len")) {
-                fast = 42;
-            }
-            if same(span_of(view(s), first, e), view("rt_xchg")) {
-                fast = 43;
-            }
-            if same(span_of(view(s), first, e), view("rt_atb")) {
-                fast = 44;
-            }
-            if same(span_of(view(s), first, e), view("rt_push")) {
-                fast = 45;
-            }
-            if same(span_of(view(s), first, e), view("rt_pushb")) {
-                fast = 46;
-            }
-            if same(span_of(view(s), first, e), view("rt_slotu")) {
-                fast = 47;
-            }
-            if same(span_of(view(s), first, e), view("rt_atbu")) {
-                fast = 48;
-            }
-            if fast != 0 {
-                // stays: the written place is indexed (`&mut o.op[last]`), and two-phase defers
-                // only a plain `&mut path`, so the length read is part of taking the place.
-                last := o.op.len() - 1;
-                exchange(&mut o.op[last], fast);
-            }
-        }
-    }
-}
-fn movelike(op: u64) -> bool {
-    return (op == 1) || (op == 2) || (op == 3) || (op == 28);
-}
-fn arith(op: u64) -> bool {
-    return (op == 4)
-        || (op == 5)
-        || (op == 8)
-        || (op == 9)
-        || (op == 10)
-        || (op == 14)
-        || (op == 33)
-        || (op == 34);
-}
-fn is_jump(op: u64) -> bool {
-    return (15 < op) && (op < 25);
-}
-fn mask_of(k: u64, v: u64, m: u64) -> u64 {
-    if k == 1 {
-        return bit(v);
-    }
-    return m;
-}
-// Registers written by a destination operand (narrow register spellings count as written).
-fn dst_writes<a>(o: (&a O), i: u64) -> u64 {
-    k := o.k1[i];
-    if k == 1 {
-        return bit(o.v1[i]);
-    }
-    if k == 6 {
-        return o.m1[i];
-    }
-    return 0;
-}
-fn dst_address<a>(o: (&a O), i: u64) -> u64 {
-    if o.k1[i] == 1 {
-        return 0;
-    }
-    return o.m1[i];
-}
-fn reads<a>(o: (&a O), i: u64) -> u64 {
-    op := o.op[i];
-    src := mask_of(o.k0[i], o.v0[i], o.m0[i]);
-    dst := mask_of(o.k1[i], o.v1[i], o.m1[i]);
-    if op == 15 {
-        return arg_regs() | src;
-    }
-    if op == 100 || op == 101 || op == 102 || op == 29 || op == 32 || is_jump(op) {
-        return 0;
-    }
-    if movelike(op) {
-        return src | dst_address(&o, i);
-    }
-    if op == 10 {
-        if (o.k0[i] == 1) & (o.k1[i] == 1) & (o.v0[i] == o.v1[i]) {
-            return 0;
-        }
-    }
-    if arith(op) || (op == 6) || (op == 7) {
-        return src | dst;
-    }
-    if op == 11 {
-        return dst;
-    }
-    if op == 12 {
-        return src | 1;
-    }
-    if op == 13 {
-        return src | 5;
-    }
-    if op == 25 || op == 26 || op == 27 {
-        return 1;
-    }
-    if op == 30 {
-        return result_live(&o);
-    }
-    if op == 31 {
-        return src;
-    }
-    if op == 40
-        || op == 41
-        || op == 43
-        || op == 44
-        || op == 45
-        || op == 46
-        || op == 47
-        || op == 48 {
-        return 192;
-    }
-    if op == 42 {
-        return 128;
-    }
-    return all_regs();
-}
-fn writes<a>(o: (&a O), i: u64) -> u64 {
-    op := o.op[i];
-    if op == 100 || op == 101 || op == 102 || op == 29 || op == 30 || op == 31 || op == 6 || op == 7 {
-        return 0;
-    }
-    if op == 15 {
-        return caller_saved();
-    }
-    if is_jump(op) {
-        return 0;
-    }
-    if movelike(op) || arith(op) || (op == 11) || (op == 32) {
-        return dst_writes(&o, i);
-    }
-    if op == 12 || op == 13 {
-        return 5;
-    }
-    if op == 25 || op == 26 || op == 27 {
-        return 1;
-    }
-    if (39 < op) & (op < 45) {
-        return 1;
-    }
-    if op == 45 || op == 46 {
-        return caller_saved();
-    }
-    if op == 47 || op == 48 {
-        return 1;
-    }
-    return all_regs();
-}
-// Whether operand j of instruction i reads / writes a frame slot.
-fn slot_read<a>(o: (&a O), i: u64, j: u64) -> bool {
-    op := o.op[i];
-    if op == 101 || op == 102 {
-        return false;
-    }
+fn set_operand<a>(o: (&a mut ir::Body), i: u64, j: u64, k: u64, v: u64) {
     if j == 0 {
-        return o.k0[i] == 2;
-    }
-    if o.k1[i] != 2 {
-        return false;
-    }
-    if movelike(op) {
-        return false;
-    }
-    return true;
-}
-fn slot_written<a>(o: (&a O), i: u64) -> bool {
-    op := o.op[i];
-    if o.k1[i] != 2 {
-        return false;
-    }
-    return movelike(op) || arith(op) || (op == 11) || (op == 0);
-}
-fn set_operand<a>(o: (&a mut O), i: u64, j: u64, k: u64, v: u64) {
-    if j == 0 {
-        put(&mut o.k0, i, k);
-        put(&mut o.v0, i, v);
-        put(&mut o.m0, i, 0);
+        ir::put(&mut o.k0, i, k);
+        ir::put(&mut o.v0, i, v);
+        ir::put(&mut o.m0, i, 0);
     } else {
-        put(&mut o.k1, i, k);
-        put(&mut o.v1, i, v);
-        put(&mut o.m1, i, 0);
+        ir::put(&mut o.k1, i, k);
+        ir::put(&mut o.v1, i, v);
+        ir::put(&mut o.m1, i, 0);
     }
-    put(&mut o.chg, i, 1);
+    ir::put(&mut o.chg, i, 1);
 }
-fn set_range<a>(o: (&a mut O), i: u64, j: u64, a: u64, e: u64) {
+fn set_range<a>(o: (&a mut ir::Body), i: u64, j: u64, a: u64, e: u64) {
     if j == 0 {
-        put(&mut o.s0, i, a);
-        put(&mut o.e0, i, e);
+        ir::put(&mut o.s0, i, a);
+        ir::put(&mut o.e0, i, e);
     } else {
-        put(&mut o.s1, i, a);
-        put(&mut o.e1, i, e);
+        ir::put(&mut o.s1, i, a);
+        ir::put(&mut o.e1, i, e);
     }
 }
-fn kill<a>(o: (&a mut O), i: u64) {
-    put(&mut o.del, i, 1);
+fn kill<a>(o: (&a mut ir::Body), i: u64) {
+    ir::put(&mut o.del, i, 1);
 }
 struct F {
     // Slot facts (index N/8): register holding the value (+1) and its version, known
@@ -1033,17 +176,17 @@ fn facts_valid<a>(f: (&a F), n: u64) -> bool {
     return (f.sep[n] == f.epoch) && (f.sfv[n] == f.sver[n]);
 }
 fn fresh_facts<a>(f: (&a mut F), n: u64) {
-    put(&mut f.sep, n, f.epoch);
-    put(&mut f.sfv, n, f.sver[n]);
-    put(&mut f.sreg, n, 0);
-    put(&mut f.simm, n, 0);
-    put(&mut f.scopy, n, 0);
+    ir::put(&mut f.sep, n, f.epoch);
+    ir::put(&mut f.sfv, n, f.sver[n]);
+    ir::put(&mut f.sreg, n, 0);
+    ir::put(&mut f.simm, n, 0);
+    ir::put(&mut f.scopy, n, 0);
 }
 fn reg_written<a>(f: (&a mut F), r: u64) {
-    put(&mut f.rver, r, f.rver[r] + 1);
-    put(&mut f.rimm, r, 0);
-    put(&mut f.rslot, r, 0);
-    put(&mut f.rcopy, r, 0);
+    ir::put(&mut f.rver, r, f.rver[r] + 1);
+    ir::put(&mut f.rimm, r, 0);
+    ir::put(&mut f.rslot, r, 0);
+    ir::put(&mut f.rcopy, r, 0);
 }
 fn reg_fact_valid<a>(f: (&a F), r: u64) -> bool {
     return f.rep[r] == f.epoch;
@@ -1063,7 +206,7 @@ fn copy_source<a>(f: (&a F), q: u64) -> u64 {
     return r;
 }
 // Replace a read of slot n (operand j of i) by a register or constant already holding it.
-fn forward_read<a, c>(o: (&a mut O), f: (&c mut F), i: u64, j: u64, n: u64) {
+fn forward_read<a, c>(o: (&a mut ir::Body), f: (&c mut F), i: u64, j: u64, n: u64) {
     if !facts_valid(&f, n) {
         return ();
     }
@@ -1076,7 +219,7 @@ fn forward_read<a, c>(o: (&a mut O), f: (&c mut F), i: u64, j: u64, n: u64) {
         le := o.e0[l];
         set_operand(&mut o, i, 0, lk, lv);
         set_range(&mut o, i, 0, la, le);
-        put(&mut o.op, i, 2);
+        ir::put(&mut o.op, i, 2);
         return ();
     }
     if f.sreg[n] != 0 {
@@ -1147,7 +290,7 @@ fn new_facts(ns: u64) -> F {
     }
     return f;
 }
-fn forward<a, b, c>(o: (&a mut O), f: (&c mut F), s: &b [u8], first: u64, last: u64) {
+fn forward<a, b, c>(o: (&a mut ir::Body), f: (&c mut F), s: &b [u8], first: u64, last: u64) {
     mut i = first;
     while i < last {
         op := o.op[i];
@@ -1169,13 +312,13 @@ fn forward<a, b, c>(o: (&a mut O), f: (&c mut F), s: &b [u8], first: u64, last: 
         if (o.k0[i] == 2) & promotable_use(&o, i) {
             n := o.v0[i] / 8;
             if f.bad[n] == 0 {
-                if movelike(op) & (o.k1[i] == 1) {
+                if ir::movelike(op) & (o.k1[i] == 1) {
                     loaded = n + 1;
                 }
                 forward_read(&mut o, &mut f, i, 0, n);
             }
         }
-        if slot_read(&o, i, 1) & promotable_use(&o, i) {
+        if ir::slot_read(&o, i, 1) & promotable_use(&o, i) {
             n := o.v1[i] / 8;
             if f.bad[n] == 0 {
                 forward_read(&mut o, &mut f, i, 1, n);
@@ -1218,7 +361,7 @@ fn forward<a, b, c>(o: (&a mut O), f: (&c mut F), s: &b [u8], first: u64, last: 
                     set_operand(&mut o, i, 0, 3, 0);
                     set_range(&mut o, i, 0, la, le);
                     if wide {
-                        put(&mut o.op, i, 2);
+                        ir::put(&mut o.op, i, 2);
                     }
                 }
             }
@@ -1229,7 +372,7 @@ fn forward<a, b, c>(o: (&a mut O), f: (&c mut F), s: &b [u8], first: u64, last: 
             i += 1;
             continue;
         }
-        w := writes(&o, i);
+        w := ir::writes(&o, i);
         // Facts of the source register, captured before the destination is invalidated.
         mut src_imm = 0;
         mut src_slot = 0;
@@ -1247,68 +390,68 @@ fn forward<a, b, c>(o: (&a mut O), f: (&c mut F), s: &b [u8], first: u64, last: 
                 reg_written(&mut f, r);
             }
         }
-        if slot_written(&o, i) {
+        if ir::slot_written(&o, i) {
             n := o.v1[i] / 8;
-            put(&mut f.sver, n, f.sver[n] + 1);
+            ir::put(&mut f.sver, n, f.sver[n] + 1);
             if (op2 == 1) & (f.bad[n] == 0) {
                 fresh_facts(&mut f, n);
                 if o.k0[i] == 1 {
                     r := o.v0[i];
-                    put(&mut f.sreg, n, r + 1);
-                    put(&mut f.sregv, n, f.rver[r]);
+                    ir::put(&mut f.sreg, n, r + 1);
+                    ir::put(&mut f.sregv, n, f.rver[r]);
                     if src_imm != 0 {
-                        put(&mut f.simm, n, src_imm);
+                        ir::put(&mut f.simm, n, src_imm);
                     }
                     if src_slot != 0 {
                         m := src_slot - 1;
                         if (m != n) & (src_slotv == f.sver[m]) {
-                            put(&mut f.scopy, n, m + 1);
-                            put(&mut f.scopyv, n, f.sver[m]);
+                            ir::put(&mut f.scopy, n, m + 1);
+                            ir::put(&mut f.scopyv, n, f.sver[m]);
                         }
                     }
                 }
                 if o.k0[i] == 3 {
-                    put(&mut f.simm, n, i + 1);
+                    ir::put(&mut f.simm, n, i + 1);
                 }
             }
         }
         if (op2 == 1 || op2 == 2) && o.k1[i] == 1 {
             q := o.v1[i];
-            put(&mut f.rep, q, f.epoch);
+            ir::put(&mut f.rep, q, f.epoch);
             if o.k0[i] == 3 {
-                put(&mut f.rimm, q, i + 1);
+                ir::put(&mut f.rimm, q, i + 1);
             }
             if o.k0[i] == 1 {
-                put(&mut f.rimm, q, src_imm);
-                put(&mut f.rslot, q, src_slot);
-                put(&mut f.rslotv, q, src_slotv);
+                ir::put(&mut f.rimm, q, src_imm);
+                ir::put(&mut f.rslot, q, src_slot);
+                ir::put(&mut f.rslotv, q, src_slotv);
                 r := o.v0[i];
                 if r != q {
-                    put(&mut f.rcopy, q, r + 1);
-                    put(&mut f.rcopyv, q, f.rver[r]);
+                    ir::put(&mut f.rcopy, q, r + 1);
+                    ir::put(&mut f.rcopyv, q, f.rver[r]);
                 }
             }
             if o.k0[i] == 2 {
                 n := o.v0[i] / 8;
                 if f.bad[n] == 0 {
-                    put(&mut f.rslot, q, n + 1);
-                    put(&mut f.rslotv, q, f.sver[n]);
+                    ir::put(&mut f.rslot, q, n + 1);
+                    ir::put(&mut f.rslotv, q, f.sver[n]);
                     if !facts_valid(&f, n) {
                         fresh_facts(&mut f, n);
                     }
-                    put(&mut f.sreg, n, q + 1);
-                    put(&mut f.sregv, n, f.rver[q]);
+                    ir::put(&mut f.sreg, n, q + 1);
+                    ir::put(&mut f.sregv, n, f.rver[q]);
                 }
             }
             if loaded != 0 {
                 n := loaded - 1;
                 if o.k0[i] != 2 {
-                    put(&mut f.rslot, q, n + 1);
-                    put(&mut f.rslotv, q, f.sver[n]);
+                    ir::put(&mut f.rslot, q, n + 1);
+                    ir::put(&mut f.rslotv, q, f.sver[n]);
                 }
             }
         }
-        if is_jump(op2) && op2 != 15 {
+        if ir::is_jump(op2) && op2 != 15 {
             exchange(&mut f.epoch, f.epoch + 1);
         }
         if op2 == 29 || op2 == 30 {
@@ -1317,32 +460,25 @@ fn forward<a, b, c>(o: (&a mut O), f: (&c mut F), s: &b [u8], first: u64, last: 
         i += 1;
     }
 }
-// Registers a result is read from: %rax, plus %rdx when the function returns a two-word value.
-fn result_live<a>(o: (&a O)) -> u64 {
-    if o.ret2 != 0 {
-        return 5;
-    }
-    return 1;
-}
-fn count_reads<a, c>(o: (&a O), f: (&c mut F), first: u64, last: u64) {
+fn count_reads<a, c>(o: (&a ir::Body), f: (&c mut F), first: u64, last: u64) {
     for n in f.reads.len() {
-        put(&mut f.reads, n, 0);
+        ir::put(&mut f.reads, n, 0);
     }
     for i in last - first {
         j := first + i;
         if o.del[j] == 0 {
-            if slot_read(&o, j, 0) {
+            if ir::slot_read(&o, j, 0) {
                 n := o.v0[j] / 8;
-                put(&mut f.reads, n, f.reads[n] + 1);
+                ir::put(&mut f.reads, n, f.reads[n] + 1);
             }
-            if slot_read(&o, j, 1) {
+            if ir::slot_read(&o, j, 1) {
                 n := o.v1[j] / 8;
-                put(&mut f.reads, n, f.reads[n] + 1);
+                ir::put(&mut f.reads, n, f.reads[n] + 1);
             }
         }
     }
 }
-fn dead_stores<a, c>(o: (&a mut O), f: (&c mut F), first: u64, last: u64) {
+fn dead_stores<a, c>(o: (&a mut ir::Body), f: (&c mut F), first: u64, last: u64) {
     count_reads(&o, &mut f, first, last);
     for i in last - first {
         j := first + i;
@@ -1356,7 +492,7 @@ fn dead_stores<a, c>(o: (&a mut O), f: (&c mut F), first: u64, last: u64) {
 }
 // Function-wide backward liveness over the label graph (iterated to a fixed point); unknown
 // jump targets and unrecognized instructions make every register live.
-fn live_pass<a, c>(o: (&a mut O), lin: (&c mut u64[]), remove: u64) -> u64 {
+fn live_pass<a, c>(o: (&a mut ir::Body), lin: (&c mut u64[]), remove: u64) -> u64 {
     last := o.op.len();
     mut live = 0;
     mut i = last;
@@ -1367,14 +503,14 @@ fn live_pass<a, c>(o: (&a mut O), lin: (&c mut u64[]), remove: u64) -> u64 {
             op := o.op[i];
             if op == 100 {
                 if lin[i] != live {
-                    put(&mut lin, i, live);
+                    ir::put(&mut lin, i, live);
                     changed = 1;
                 }
             } else {
                 if (op != 101) & (op != 102) {
                     if op == 16 || (16 < op && op < 25) {
                         t := jump_target(&o, i);
-                        mut there = all_regs();
+                        mut there = ir::all_regs();
                         if t < last {
                             there = lin[t];
                         }
@@ -1385,13 +521,13 @@ fn live_pass<a, c>(o: (&a mut O), lin: (&c mut u64[]), remove: u64) -> u64 {
                         }
                     } else {
                         if op == 29 || op == 30 {
-                            live = result_live(&o);
+                            live = ir::result_live(&o);
                         } else {
                             if op == 0 {
-                                live = all_regs();
+                                live = ir::all_regs();
                             } else {
                                 mut removable = 0;
-                                if remove != 0 && movelike(op) && o.k1[i] == 1 {
+                                if remove != 0 && ir::movelike(op) && o.k1[i] == 1 {
                                     q := o.v1[i];
                                     if ((live >> q) & 1) == 0 && q != 4 && q != 5 {
                                         removable = 1;
@@ -1403,8 +539,8 @@ fn live_pass<a, c>(o: (&a mut O), lin: (&c mut u64[]), remove: u64) -> u64 {
                                 if removable != 0 {
                                     kill(&mut o, i);
                                 } else {
-                                    live = (live & (all_regs() - writes(&o, i)))
-                                        | reads(&o, i);
+                                    live = (live & (ir::all_regs() - ir::writes(&o, i)))
+                                        | ir::reads(&o, i);
                                 }
                             }
                         }
@@ -1415,7 +551,7 @@ fn live_pass<a, c>(o: (&a mut O), lin: (&c mut u64[]), remove: u64) -> u64 {
     }
     return changed;
 }
-fn dead_defs<a, b>(o: (&a mut O), s: &b [u8], first: u64, last: u64) {
+fn dead_defs<a, b>(o: (&a mut ir::Body), s: &b [u8], first: u64, last: u64) {
     mut lin = u64[];
     for i in last {
         lin.push(0);
@@ -1431,7 +567,7 @@ fn dead_defs<a, b>(o: (&a mut O), s: &b [u8], first: u64, last: u64) {
         live_pass(&mut o, &mut lin, 1);
     }
 }
-fn next_live<a>(o: (&a O), i: u64, last: u64) -> u64 {
+fn next_live<a>(o: (&a ir::Body), i: u64, last: u64) -> u64 {
     mut j = i + 1;
     while j < last {
         if (o.del[j] == 0) & (o.op[j] != 101) & (o.op[j] != 102) {
@@ -1441,7 +577,7 @@ fn next_live<a>(o: (&a O), i: u64, last: u64) -> u64 {
     }
     return last;
 }
-fn next_insn<a>(o: (&a O), i: u64, last: u64) -> u64 {
+fn next_insn<a>(o: (&a ir::Body), i: u64, last: u64) -> u64 {
     mut j = next_live(&o, i, last);
     while j < last {
         if o.op[j] != 100 {
@@ -1452,7 +588,7 @@ fn next_insn<a>(o: (&a O), i: u64, last: u64) -> u64 {
     return last;
 }
 // Whether register r is dead after instruction i: followed forward through jumps (bounded).
-fn dead_after<a>(o: (&a O), i: u64, r: u64, budget: u64) -> bool {
+fn dead_after<a>(o: (&a ir::Body), i: u64, r: u64, budget: u64) -> bool {
     last := o.op.len();
     if budget == 0 {
         return false;
@@ -1466,18 +602,18 @@ fn dead_after<a>(o: (&a O), i: u64, r: u64, budget: u64) -> bool {
             return false;
         }
         op := o.op[j];
-        rd := reads(&o, j);
+        rd := ir::reads(&o, j);
         if ((rd >> r) & 1) != 0 {
             return false;
         }
         if op == 0 {
             return false;
         }
-        wr := writes(&o, j);
+        wr := ir::writes(&o, j);
         if ((wr >> r) & 1) != 0 {
             return true;
         }
-        if is_jump(op) && op != 15 {
+        if ir::is_jump(op) && op != 15 {
             t := jump_target(&o, j);
             if t >= last {
                 return false;
@@ -1496,7 +632,7 @@ fn dead_after<a>(o: (&a O), i: u64, r: u64, budget: u64) -> bool {
     }
     return false;
 }
-fn jump_target<a>(o: (&a O), j: u64) -> u64 {
+fn jump_target<a>(o: (&a ir::Body), j: u64) -> u64 {
     last := o.op.len();
     if o.k0[j] != 4 || o.v0[j] == 0 {
         return last;
@@ -1518,7 +654,7 @@ fn jump_target<a>(o: (&a O), j: u64) -> u64 {
     }
     return t - 1;
 }
-fn gen_number<a>(o: (&a mut O), n: u64) -> u64 {
+fn gen_number<a>(o: (&a mut ir::Body), n: u64) -> u64 {
     start := o.gen.len();
     if 9 < n {
         gen_number(&mut o, n / 10);
@@ -1526,7 +662,7 @@ fn gen_number<a>(o: (&a mut O), n: u64) -> u64 {
     o.gen.push(48 + n % 10);
     return start;
 }
-fn gen_imm<a>(o: (&a mut O), n: u64, i: u64, j: u64) {
+fn gen_imm<a>(o: (&a mut ir::Body), n: u64, i: u64, j: u64) {
     start := o.gen.len();
     o.gen.push(36);
     gen_number(&mut o, n);
@@ -1534,7 +670,7 @@ fn gen_imm<a>(o: (&a mut O), n: u64, i: u64, j: u64) {
     set_operand(&mut o, i, j, 5, 0);
     set_range(&mut o, i, j, start, end);
 }
-fn imm_value<a, b>(o: (&a O), s: &b [u8], i: u64) -> u64 {
+fn imm_value<a, b>(o: (&a ir::Body), s: &b [u8], i: u64) -> u64 {
     // Decimal immediate of operand 0 (+1), or 0.
     if o.k0[i] != 3 {
         return 0;
@@ -1554,7 +690,7 @@ fn imm_value<a, b>(o: (&a O), s: &b [u8], i: u64) -> u64 {
     }
     return n + 1;
 }
-fn peephole<a, b>(o: (&a mut O), s: &b [u8], first: u64, last: u64) {
+fn peephole<a, b>(o: (&a mut ir::Body), s: &b [u8], first: u64, last: u64) {
     mut i = first;
     while i < last {
         if o.del[i] != 0 {
@@ -1619,8 +755,8 @@ fn peephole<a, b>(o: (&a mut O), s: &b [u8], first: u64, last: u64) {
                                                     nj = 22;
                                                 }
                                             }
-                                            put(&mut o.op, c, nj);
-                                            put(&mut o.chg, c, 1);
+                                            ir::put(&mut o.op, c, nj);
+                                            ir::put(&mut o.chg, c, 1);
                                             kill(&mut o, i);
                                             kill(&mut o, a);
                                             kill(&mut o, b);
@@ -1650,7 +786,7 @@ fn peephole<a, b>(o: (&a mut O), s: &b [u8], first: u64, last: u64) {
                     if c < last {
                         if (o.op[c] == 15)
                             & (o.k0[c] == 4)
-                            & same(span_of(view(s), o.s0[c], o.e0[c]), view("rt_abort")) {
+                            & ir::same(ir::span_of(view(s), o.s0[c], o.e0[c]), view("rt_abort")) {
                             x := next_insn(&o, c, last);
                             if x < last {
                                 if (o.op[x] == 10)
@@ -1670,10 +806,10 @@ fn peephole<a, b>(o: (&a mut O), s: &b [u8], first: u64, last: u64) {
                                                 steps += 1;
                                                 if o.del[k] == 0 {
                                                     kop := o.op[k];
-                                                    if kop == 100 || kop == 0 || is_jump(kop) {
+                                                    if kop == 100 || kop == 0 || ir::is_jump(kop) {
                                                         break;
                                                     }
-                                                    if ((writes(&o, k) >> 1) & 1) != 0 {
+                                                    if ((ir::writes(&o, k) >> 1) & 1) != 0 {
                                                         if (kop == 1 || kop == 2)
                                                             && o.k1[k] == 1 {
                                                             value = imm_value(&o, view(s), k);
@@ -1689,20 +825,20 @@ fn peephole<a, b>(o: (&a mut O), s: &b [u8], first: u64, last: u64) {
                                                     while (1 << shift) < v {
                                                         shift += 1;
                                                     }
-                                                    put(&mut o.op, i, 1);
+                                                    ir::put(&mut o.op, i, 1);
                                                     set_operand(&mut o, i, 0, 1, 0);
                                                     set_operand(&mut o, i, 1, 1, 2);
-                                                    put(&mut o.op, j, 8);
+                                                    ir::put(&mut o.op, j, 8);
                                                     gen_imm(&mut o, v - 1, j, 0);
                                                     set_operand(&mut o, j, 1, 1, 2);
-                                                    put(&mut o.op, c, 34);
+                                                    ir::put(&mut o.op, c, 34);
                                                     gen_imm(&mut o, shift, c, 0);
                                                     set_operand(&mut o, c, 1, 1, 0);
                                                     kill(&mut o, x);
                                                     kill(&mut o, d);
-                                                    put(&mut o.tr, i, 0);
-                                                    put(&mut o.tr, j, 0);
-                                                    put(&mut o.tr, c, 0);
+                                                    ir::put(&mut o.tr, i, 0);
+                                                    ir::put(&mut o.tr, j, 0);
+                                                    ir::put(&mut o.tr, c, 0);
                                                 }
                                             }
                                         }
@@ -1718,7 +854,7 @@ fn peephole<a, b>(o: (&a mut O), s: &b [u8], first: u64, last: u64) {
     }
 }
 // Slot use permitted after promotion: the instruction stays valid with a register operand.
-fn promotable_use<a>(o: (&a O), i: u64) -> bool {
+fn promotable_use<a>(o: (&a ir::Body), i: u64) -> bool {
     op := o.op[i];
     if op == 1
         || op == 4
@@ -1737,7 +873,7 @@ fn promotable_use<a>(o: (&a O), i: u64) -> bool {
     }
     return (op == 11) || (op == 12) || (op == 13);
 }
-fn emit_operand<a, b>(o: (&a mut O), s: &b [u8], i: u64, j: u64) {
+fn emit_operand<a, b>(o: (&a mut ir::Body), s: &b [u8], i: u64, j: u64) {
     mut k = o.k0[i];
     mut v = o.v0[i];
     mut a = o.s0[i];
@@ -1770,7 +906,7 @@ fn emit_operand<a, b>(o: (&a mut O), s: &b [u8], i: u64, j: u64) {
         o.out.push(s[a + x]);
     }
 }
-fn reg_name<a>(o: (&a mut O), r: u64) {
+fn reg_name<a>(o: (&a mut ir::Body), r: u64) {
     mut t = "";
     if r == 0 {
         t = "rax";
@@ -1822,19 +958,19 @@ fn reg_name<a>(o: (&a mut O), r: u64) {
     }
     app(&mut o.out, view(t));
 }
-fn out_number<a>(o: (&a mut O), n: u64) {
+fn out_number<a>(o: (&a mut ir::Body), n: u64) {
     if 9 < n {
         out_number(&mut o, n / 10);
     }
     o.out.push(48 + n % 10);
 }
-fn emit_line<a, b>(o: (&a mut O), s: &b [u8], i: u64) {
+fn emit_line<a, b>(o: (&a mut ir::Body), s: &b [u8], i: u64) {
     op := o.op[i];
     if op == 102 {
         return ();
     }
     if op == 40 || op == 41 || op == 44 {
-        n := uniq_take(&mut o);
+        n := ir::uniq_take(&mut o);
         app(&mut o.out, view("cmpq 8(%rdi),%rsi\njb .L"));
         opt_label(&mut o);
         out_number(&mut o, n);
@@ -1865,8 +1001,8 @@ fn emit_line<a, b>(o: (&a mut O), s: &b [u8], i: u64) {
         return ();
     }
     if op == 45 || op == 46 {
-        fast := uniq_take(&mut o);
-        done := uniq_take(&mut o);
+        fast := ir::uniq_take(&mut o);
+        done := ir::uniq_take(&mut o);
         app(&mut o.out, view("movq 8(%rdi),%rcx\ncmpq 16(%rdi),%rcx\njb .L"));
         opt_label(&mut o);
         out_number(&mut o, fast);
@@ -1921,13 +1057,13 @@ fn emit_line<a, b>(o: (&a mut O), s: &b [u8], i: u64) {
 }
 // `opt<unit prefix>_`: the namespace of the optimizer's own expansion labels, so a unit's `.Lopt`
 // numbers do not depend on the expansions the units before it emitted.
-fn opt_label<a>(o: (&a mut O)) {
+fn opt_label<a>(o: (&a mut ir::Body)) {
     app(&mut o.out, view("opt"));
     prefix := o.uprefix.copy();
     app(&mut o.out, view(prefix));
     o.out.push(95);
 }
-fn emit_frame_slot<a, b>(o: (&a mut O), s: &b [u8], p: u64, k: u64) {
+fn emit_frame_slot<a, b>(o: (&a mut ir::Body), s: &b [u8], p: u64, k: u64) {
     // -.FN-8(k+1)(%rbp), where .FN is the frame constant named by the prologue subq.
     app(&mut o.out, view("-"));
     for x in o.e0[p] - o.s0[p] - 1 {
@@ -1940,7 +1076,7 @@ fn emit_frame_slot<a, b>(o: (&a mut O), s: &b [u8], p: u64, k: u64) {
 // Turn the declared pairs into slot widths: 0 scalar, 1 first word, 2 second word. A pair whose
 // second word would not be a frame slot cannot be modelled, so the function is copied unchanged
 // rather than mis-lowered.
-fn build_pairs<a>(o: (&a mut O), ns: u64) {
+fn build_pairs<a>(o: (&a mut ir::Body), ns: u64) {
     exchange(&mut o.pair, u64[]);
     if o.pairs.len() == 0 {
         return ();
@@ -1951,14 +1087,25 @@ fn build_pairs<a>(o: (&a mut O), ns: u64) {
     for i in o.pairs.len() {
         n := o.pairs[i];
         if (0 < n) & (n < ns) {
-            put(&mut o.pair, n, 1);
-            put(&mut o.pair, n - 1, 2);
+            ir::put(&mut o.pair, n, 1);
+            ir::put(&mut o.pair, n - 1, 2);
         } else {
             exchange(&mut o.weird, 1);
         }
     }
 }
-fn function<a, b>(o: (&a mut O), s: &b [u8]) {
+// One parsed body: the typed IR layer first, then the serialisation if the caller asked for it,
+// then the passes. The layer is built before the passes because the front end's type facts are
+// keyed by the frame slot numbers the passes go on to compact
+// (docs/design/typed-ir.md, "The serializer").
+fn body<a, b, c, d>(o: (&a mut ir::Body), s: &b [u8], facts: (&c llvm::Facts), ix: (&d ir::FactIndex), want_ir: u64, ir_text: (&mut u8[])) {
+    ir::build(&mut o, view(s), facts, ix);
+    if want_ir != 0 {
+        ir::write_body(&o, view(s), &mut ir_text);
+    }
+    function(&mut o, view(s));
+}
+fn function<a, b>(o: (&a mut ir::Body), s: &b [u8]) {
     first := 0;
     last := o.op.len();
     ns := o.maxslot / 8 + 1;
@@ -1969,7 +1116,7 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
     if o.pairs.len() != 0 {
         for n in ns {
             if o.pair[n] != 0 {
-                put(&mut f.bad, n, 1);
+                ir::put(&mut f.bad, n, 1);
             }
         }
     }
@@ -1981,19 +1128,19 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
     for i in last {
         op := o.op[i];
         regs_used = regs_used
-            | mask_of(o.k0[i], o.v0[i], o.m0[i])
-            | mask_of(o.k1[i], o.v1[i], o.m1[i]);
+            | ir::mask_of(o.k0[i], o.v0[i], o.m0[i])
+            | ir::mask_of(o.k1[i], o.v1[i], o.m1[i]);
         if op == 0 || op == 3 {
             if o.k0[i] == 2 {
                 n := o.v0[i];
-                put(&mut f.bad, n / 8, 1);
+                ir::put(&mut f.bad, n / 8, 1);
             }
             if o.k1[i] == 2 {
-                put(&mut f.bad, o.v1[i] / 8, 1);
+                ir::put(&mut f.bad, o.v1[i] / 8, 1);
             }
         }
         if ((o.m0[i] >> 5) & 1) != 0 {
-            if (op == 3) & (o.k0[i] == 4) & at(view(s), o.s0[i], view("-.F")) {} else {
+            if (op == 3) & (o.k0[i] == 4) & ir::at(view(s), o.s0[i], view("-.F")) {} else {
                 exchange(&mut o.weird, 1);
             }
         }
@@ -2001,7 +1148,7 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
             exchange(&mut o.weird, 1);
         }
         if (op == 5) & (prologue == 0) & (o.k1[i] == 1) & (o.v1[i] == 4) & (i == 4) {
-            if at(view(s), o.s0[i], view("$.F")) {
+            if ir::at(view(s), o.s0[i], view("$.F")) {
                 prologue = i;
             }
         }
@@ -2053,7 +1200,7 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
         }
         for i in last {
             if o.lab[i] != 0 {
-                put(&mut o.table, o.lab[i] - 1 - base, i + 1);
+                ir::put(&mut o.table, o.lab[i] - 1 - base, i + 1);
             }
         }
         for i in last {
@@ -2070,7 +1217,7 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
                     n := v - 1;
                     if n >= base {
                         if n - base < refs.len() {
-                            put(&mut refs, n - base, refs[n - base] + 1);
+                            ir::put(&mut refs, n - base, refs[n - base] + 1);
                         }
                     }
                 }
@@ -2087,13 +1234,13 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
                 j := next_live(&o, i, last);
                 if j < last {
                     if (o.op[j] == 15) & (o.k0[j] == 4) {
-                        if same(span_of(view(s), o.s0[j], o.e0[j]), view("rt_abort")) {
+                        if ir::same(ir::span_of(view(s), o.s0[j], o.e0[j]), view("rt_abort")) {
                             if (o.lab[t] != 0)
                                 & (next_live(&o, j, last) == t)
                                 & (refs[o.lab[t] - 1 - base] == 1) {
-                                put(&mut o.tr, i, 1);
-                                put(&mut o.tr, j, 1);
-                                put(&mut o.tr, t, 1);
+                                ir::put(&mut o.tr, i, 1);
+                                ir::put(&mut o.tr, j, 1);
+                                ir::put(&mut o.tr, t, 1);
                             }
                         }
                     }
@@ -2116,11 +1263,11 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
         }
         for i in last {
             op := o.op[i];
-            if is_jump(op) && op != 15 && o.del[i] == 0 {
+            if ir::is_jump(op) && op != 15 && o.del[i] == 0 {
                 t := jump_target(&o, i);
                 if t < i {
-                    put(&mut opens, t, opens[t] + 1);
-                    put(&mut closes, i + 1, closes[i + 1] + 1);
+                    ir::put(&mut opens, t, opens[t] + 1);
+                    ir::put(&mut closes, i + 1, closes[i + 1] + 1);
                 }
             }
         }
@@ -2149,9 +1296,9 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
                         n := v / 8;
                         if f.bad[n] == 0 {
                             if promotable_use(&o, i) {
-                                put(&mut f.weight, n, f.weight[n] + w);
+                                ir::put(&mut f.weight, n, f.weight[n] + w);
                             } else {
-                                put(&mut f.bad, n, 1);
+                                ir::put(&mut f.bad, n, 1);
                             }
                         }
                     }
@@ -2173,7 +1320,7 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
                 if best != 0 {
                     chosen.push(reg);
                     slots.push(best);
-                    put(&mut f.bad, best, 1);
+                    ir::put(&mut f.bad, best, 1);
                 }
             }
         }
@@ -2200,7 +1347,7 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
             mut g = new_facts(ns);
             for n in ns {
                 b := f.bad[n];
-                put(&mut g.bad, n, b);
+                ir::put(&mut g.bad, n, b);
             }
             forward(&mut o, &mut g, view(s), first, last);
             dead_defs(&mut o, view(s), first, last);
@@ -2275,7 +1422,7 @@ fn name_hash<b>(s: &b [u8], a: u64, e: u64) -> u64 {
 // A small leaf (no calls but rt_abort, no callee-saved registers, small cleared frame) gets a
 // frameless copy of its body: slots move to free scratch registers, returns jump to the end.
 // Calls to it are replaced by that body after all functions are optimized.
-fn inline_candidate<a, b>(o: (&a mut O), s: &b [u8], prologue: u64) {
+fn inline_candidate<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64) {
     if o.pairs.len() != 0 {
         return ();
     }
@@ -2304,11 +1451,11 @@ fn inline_candidate<a, b>(o: (&a mut O), s: &b [u8], prologue: u64) {
                         if o.k0[i] != 4 {
                             return ();
                         }
-                        if !same(span_of(view(s), o.s0[i], o.e0[i]), view("rt_abort")) {
+                        if !ir::same(ir::span_of(view(s), o.s0[i], o.e0[i]), view("rt_abort")) {
                             return ();
                         }
                     }
-                    m := mask_of(o.k0[i], o.v0[i], o.m0[i]) | mask_of(o.k1[i], o.v1[i], o.m1[i]);
+                    m := ir::mask_of(o.k0[i], o.v0[i], o.m0[i]) | ir::mask_of(o.k1[i], o.v1[i], o.m1[i]);
                     if (m & forbidden) != 0 {
                         return ();
                     }
@@ -2424,12 +1571,12 @@ fn inline_candidate<a, b>(o: (&a mut O), s: &b [u8], prologue: u64) {
     o.inl_units.push(o.unit.copy());
     old := o.inl_head[h];
     o.inl_next.push(old);
-    put(&mut o.inl_head, h, index + 1);
+    ir::put(&mut o.inl_head, h, index + 1);
 }
 // Replaces `call NAME` lines for inlinable functions by their bodies with per-site labels.
 // Inlining rewrites the output, so the `--split` marker offsets recorded on the way through are
 // rewritten with it: markers are copied in stream order, and each one takes its new offset here.
-fn inline_calls<a>(o: (&a mut O), split: u64, marks: (&a mut u64[])) {
+fn inline_calls<a>(o: (&a mut ir::Body), split: u64, marks: (&a mut u64[])) {
     text := exchange(&mut o.out, u8[]);
     mut start = 0;
     mut site = 0;
@@ -2443,7 +1590,7 @@ fn inline_calls<a>(o: (&a mut O), split: u64, marks: (&a mut u64[])) {
             start = i + 1;
             mut done = 0;
             if (e - a > 5) & (text[a] == 99) {
-                if at(view(text), a, view("call ")) {
+                if ir::at(view(text), a, view("call ")) {
                     h := name_hash(view(text), a + 5, e);
                     mut k = o.inl_head[h];
                     while k != 0 {
@@ -2456,11 +1603,11 @@ fn inline_calls<a>(o: (&a mut O), split: u64, marks: (&a mut u64[])) {
                         ul := u.len();
                         if ul != 0 {
                             // `same` is this module's slice-vs-token comparison: whole, so 0..len.
-                            if !same(span_of(view(o.inl_units[k - 1]), 0, ul), view(u)) {
+                            if !ir::same(ir::span_of(view(o.inl_units[k - 1]), 0, ul), view(u)) {
                                 here = 0;
                             }
                         }
-                        if (here != 0) & same(span_of(view(text), a + 5, e), view(n)) {
+                        if (here != 0) & ir::same(ir::span_of(view(text), a + 5, e), view(n)) {
                             site += 1;
                             emit_body(&mut o, k - 1, site, view(uprefix));
                             done = 1;
@@ -2471,7 +1618,7 @@ fn inline_calls<a>(o: (&a mut O), split: u64, marks: (&a mut u64[])) {
                 }
             }
             if done == 0 {
-                if (e - a > 12) & (text[a] == 46) & at(view(text), a, view(".grail_part ")) {
+                if (e - a > 12) & (text[a] == 46) & ir::at(view(text), a, view(".grail_part ")) {
                     mut fresh = u8[];
                     mut at = a + 12;
                     while (at < e) & (text[at] != 32) {
@@ -2516,7 +1663,7 @@ fn inline_calls<a>(o: (&a mut O), split: u64, marks: (&a mut u64[])) {
 // `_i<unit prefix>_<site>` on every `.L` in the body: the site number disambiguates two copies of
 // one body, and the unit prefix keeps a body label without a prefix of its own (`.Lret`) apart from
 // the same label minted by another unit of the same file.
-fn emit_body<a, b>(o: (&a mut O), k: u64, site: u64, prefix: &b [u8]) {
+fn emit_body<a, b>(o: (&a mut ir::Body), k: u64, site: u64, prefix: &b [u8]) {
     body := o.inl_bodies[k].copy();
     mut i = 0;
     n := body.len();
@@ -2529,7 +1676,7 @@ fn emit_body<a, b>(o: (&a mut O), k: u64, site: u64, prefix: &b [u8]) {
                     label = 1;
                 } else {
                     p := body[i - 1];
-                    if !alnum(p) && p != 95 {
+                    if !ir::alnum(p) && p != 95 {
                         label = 1;
                     }
                 }
@@ -2538,7 +1685,7 @@ fn emit_body<a, b>(o: (&a mut O), k: u64, site: u64, prefix: &b [u8]) {
         if label != 0 {
             while i < n {
                 d := body[i];
-                if !(alnum(d) || d == 95 || d == 46) {
+                if !(ir::alnum(d) || d == 95 || d == 46) {
                     break;
                 }
                 o.out.push(d);
@@ -2556,7 +1703,7 @@ fn emit_body<a, b>(o: (&a mut O), k: u64, site: u64, prefix: &b [u8]) {
 }
 // Renumber the slots still referenced into a dense frame (parameters keep the top slots), so
 // the entry zeroing only clears live storage. Returns the new frame size, or 0 if unchanged.
-fn compact<a, b>(o: (&a mut O), s: &b [u8], prologue: u64, ns: u64) -> u64 {
+fn compact<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64, ns: u64) -> u64 {
     if prologue == 0 {
         return 0;
     }
@@ -2601,15 +1748,15 @@ fn compact<a, b>(o: (&a mut O), s: &b [u8], prologue: u64, ns: u64) -> u64 {
         map.push(0);
     }
     for n in params + 1 {
-        put(&mut map, n, 1);
+        ir::put(&mut map, n, 1);
     }
     for i in last {
         if o.del[i] == 0 {
             if o.k0[i] == 2 {
-                put(&mut map, o.v0[i] / 8, 1);
+                ir::put(&mut map, o.v0[i] / 8, 1);
             }
             if o.k1[i] == 2 {
-                put(&mut map, o.v1[i] / 8, 1);
+                ir::put(&mut map, o.v1[i] / 8, 1);
             }
         }
     }
@@ -2619,7 +1766,7 @@ fn compact<a, b>(o: (&a mut O), s: &b [u8], prologue: u64, ns: u64) -> u64 {
     if o.pair.len() != 0 {
         for n in ns {
             if o.pair[n] != 0 {
-                put(&mut map, n, 1);
+                ir::put(&mut map, n, 1);
             }
         }
     }
@@ -2628,7 +1775,7 @@ fn compact<a, b>(o: (&a mut O), s: &b [u8], prologue: u64, ns: u64) -> u64 {
         if n != 0 {
             if map[n] != 0 {
                 used += 1;
-                put(&mut map, n, used);
+                ir::put(&mut map, n, used);
             }
         }
     }
@@ -2638,7 +1785,7 @@ fn compact<a, b>(o: (&a mut O), s: &b [u8], prologue: u64, ns: u64) -> u64 {
     if words < params + 17 {
         for i in last {
             if (o.op[i] == 3) & (o.k1[i] == 1) & (o.v1[i] == 7) & (o.k0[i] == 4) {
-                if at(view(s), o.s0[i], view("-.F")) {
+                if ir::at(view(s), o.s0[i], view("-.F")) {
                     a := next_live(&o, i, last);
                     if a < last {
                         b := next_live(&o, a, last);
@@ -2650,8 +1797,8 @@ fn compact<a, b>(o: (&a mut O), s: &b [u8], prologue: u64, ns: u64) -> u64 {
                                     & (o.v1[a] == 1)
                                     & (o.op[b] == 0)
                                     & (o.op[d] == 0)
-                                    & same(span_of(view(s), o.ls[d], o.le[d]), view("rep stosq"))
-                                    & same(span_of(view(s), o.ls[b], o.le[b]), view("xorl %eax,%eax")) {
+                                    & ir::same(ir::span_of(view(s), o.ls[d], o.le[d]), view("rep stosq"))
+                                    & ir::same(ir::span_of(view(s), o.ls[b], o.le[b]), view("xorl %eax,%eax")) {
                                     kill(&mut o, i);
                                     kill(&mut o, a);
                                     kill(&mut o, b);
@@ -2679,88 +1826,21 @@ fn compact<a, b>(o: (&a mut O), s: &b [u8], prologue: u64, ns: u64) -> u64 {
     }
     return (used * 8 + 15) / 16 * 16;
 }
-fn reset<a>(o: (&a mut O)) {
-    o.ls.clear();
-    o.le.clear();
-    o.op.clear();
-    o.chg.clear();
-    o.del.clear();
-    o.lab.clear();
-    o.tr.clear();
-    o.k0.clear();
-    o.v0.clear();
-    o.s0.clear();
-    o.e0.clear();
-    o.m0.clear();
-    o.k1.clear();
-    o.v1.clear();
-    o.s1.clear();
-    o.e1.clear();
-    o.m1.clear();
-    exchange(&mut o.gen, u8[]);
-    exchange(&mut o.pairs, u64[]);
-    exchange(&mut o.pair, u64[]);
-    exchange(&mut o.ret2, 0);
-    exchange(&mut o.weird, 0);
-    exchange(&mut o.zline, 0);
-    exchange(&mut o.maxslot, 0);
-}
-pub fn optimize<b>(s: &b [u8]) -> u8[] {
+pub fn optimize<b, c>(s: &b [u8], facts: (&c llvm::Facts), want_ir: u64, ir_text: (&mut u8[])) -> u8[] {
     mut marks = u64[];
     mut names = u8[][];
-    return optimize_parts(view(s), 0, &mut marks, &mut names);
+    return optimize_parts(view(s), 0, &mut marks, &mut names, facts, want_ir, ir_text);
 }
 // `optimize` plus the positions of the `--split` module markers it kept: for each marker line, the
 // output offset of the line and the module name it carries. A single-file build passes `split` 0 and
 // pays nothing. `native.grl` splits at these offsets, so the stream never has to be scanned again.
-pub fn optimize_parts<b>(s: &b [u8], split: u64, marks: (&mut u64[]), names: (&mut u8[][])) -> u8[] {
-    mut o = O {
-        ls: u64[],
-        le: u64[],
-        op: u64[],
-        chg: u64[],
-        del: u64[],
-        lab: u64[],
-        tr: u64[],
-        k0: u64[],
-        v0: u64[],
-        s0: u64[],
-        e0: u64[],
-        m0: u64[],
-        k1: u64[],
-        v1: u64[],
-        s1: u64[],
-        e1: u64[],
-        m1: u64[],
-        gen: u8[],
-        out: u8[],
-        weird: 0,
-        maxslot: 0,
-        table: u64[],
-        base: 0,
-        data: 0,
-        uniq: 0,
-        zline: 0,
-        zfrom: 0,
-        zto: 0,
-        pairs: u64[],
-        pair: u64[],
-        ret2: 0,
-        inl_names: u8[][],
-        inl_bodies: u8[][],
-        inl_units: u8[][],
-        inl_head: u64[],
-        inl_next: u64[],
-        unit: u8[],
-        uprefix: u8[],
-        marked: 0,
-        uniq_index: 0,
-        uniq_units: u8[][],
-        uniq_next: u64[],
-    };
+pub fn optimize_parts<b, c>(s: &b [u8], split: u64, marks: (&mut u64[]), names: (&mut u8[][]), facts: (&c llvm::Facts), want_ir: u64, ir_text: (&mut u8[])) -> u8[] {
+    mut o = ir::new_body();
     for i in 4096 {
         o.inl_head.push(0);
     }
+    // The type facts, indexed by body symbol once: the table is complete before any body is walked.
+    ix := ir::index_facts(facts);
     mut start = 0;
     mut inside = 0;
     for i in s.len() {
@@ -2770,14 +1850,16 @@ pub fn optimize_parts<b>(s: &b [u8], split: u64, marks: (&mut u64[]), names: (&m
             start = i + 1;
             if inside == 0 {
                 if (e - a > 15) & (s[a] == 46) & (s[a + 1] == 116) {
-                    if !at(view(s), a, view(".type ")) {} else {
-                        if same(span_of(view(s), e - 9, e), view("@function")) {
+                    if !ir::at(view(s), a, view(".type ")) {} else {
+                        if ir::same(ir::span_of(view(s), e - 9, e), view("@function")) {
+                            // The body's symbol, which is the key its type facts are filed under.
+                            o.name = ir::type_symbol(view(s), a, e);
                             inside = 1;
                         }
                     }
                 }
                 if inside == 0 {
-                    if marker(&mut o, view(s), a, e) != 0 {
+                    if ir::marker(&mut o, view(s), a, e) != 0 {
                         if split != 0 {
                             marks.push(o.out.len());
                             names.push(o.unit.copy());
@@ -2790,18 +1872,18 @@ pub fn optimize_parts<b>(s: &b [u8], split: u64, marks: (&mut u64[]), names: (&m
                     continue;
                 }
             }
-            parse(&mut o, view(s), a, e);
+            ir::parse(&mut o, view(s), a, e);
             if (e - a > 6) & (inside != 0) {
                 if (s[a] == 46) & (s[a + 1] == 115) & (s[a + 5] == 46) {
-                    function(&mut o, view(s));
-                    reset(&mut o);
+                    body(&mut o, view(s), facts, &ix, want_ir, ir_text);
+                    ir::reset(&mut o);
                     inside = 0;
                 }
             }
         }
     }
     if inside != 0 {
-        function(&mut o, view(s));
+        body(&mut o, view(s), facts, &ix, want_ir, ir_text);
     }
     for x in s.len() - start {
         o.out.push(s[start + x]);
