@@ -2959,6 +2959,16 @@ fn engine_advance<a>(e: (&a mut Engine)) -> u64 {
     }
     return NEED_NONE;
 }
+// `pkg-resolve-*` regression cases: a graph written as text, resolved by the same engine.
+//
+//   avail NAME VERSION [VERSION...]   versions that exist for NAME
+//   dep NAME VERSION DEP REQ          a version's own requirement on DEP
+//   need NAME REQ                     a root requirement
+//   lock NAME VERSION                 a version a lockfile already holds
+//
+// Every line is one fact about a registry-sourced graph; the first failure is printed and stops
+// the run. This is the unit-test surface for section 3: the engine, with a text catalog instead of
+// a store and a network.
 pub fn resolve_report<a>(spec: &a [u8]) -> u8[] {
     rows := split_lines(view(spec));
     mut roots = Edge[];
@@ -4438,28 +4448,37 @@ fn project_lock<a, b, c, d, f>(
         }
         l.nodes.push(node);
     }
-    lock_mark_dev(&mut l);
+    lock_mark_dev(&mut l, &e);
     return l;
 }
-// A package reachable only through dev-dependencies is marked `"dev": true`, so a plain build can
-// leave it out of the module set without re-deriving reachability.
-fn lock_mark_dev<a>(l: (&a mut Lock)) {
-    ri := lock_find(&l, view(l.root));
-    if ri == NO_INDEX {
-        return ();
-    }
+// A package reachable only through the root's dev-dependencies is marked `"dev": true`, so a plain
+// build leaves it out of the module set without re-deriving reachability. Reachability is walked
+// from the root's *non-dev* edges: a package's own dev-dependencies are never resolved, so every
+// edge out of a dependency is a normal one.
+fn lock_mark_dev<a, b>(l: (&a mut Lock), e: (&b Engine)) {
     mut reach = u8[][];
     reach.push(copyb(view(l.root)));
+    for i in e.roots.len() {
+        d := &e.roots[i];
+        if d.dev == 0 {
+            reach.push(copyb(view(d.name)));
+        }
+    }
     mut at: u64 = 0;
     while at < reach.len() {
-        mut name = item(&reach, at);
+        name := item(&reach, at);
         at += 1;
-        ni := lock_find(&l, view(name));
-        if ni == NO_INDEX {
+        pi := engine_pick_index(&e, view(name));
+        if pi == NO_INDEX {
             continue;
         }
-        for j in l.nodes[ni].dep_names.len() {
-            dep := copyb(view(l.nodes[ni].dep_names[j]));
+        ci := e.picks[pi].cand;
+        if ci == NO_INDEX {
+            continue;
+        }
+        c := &e.cands[ci];
+        for j in c.deps.len() {
+            dep := copyb(view(c.deps[j].name));
             mut seen = false;
             for k in reach.len() {
                 if eqb(view(reach[k]), view(dep)) {
@@ -4472,13 +4491,12 @@ fn lock_mark_dev<a>(l: (&a mut Lock)) {
         }
     }
     for i in l.nodes.len() {
-        node := &l.nodes[i];
-        if eqb(view(node.source), view("root")) {
+        if eqb(view(l.nodes[i].source), view("root")) {
             continue;
         }
         mut found = false;
         for k in reach.len() {
-            if eqb(view(reach[k]), view(node.name)) {
+            if eqb(view(reach[k]), view(l.nodes[i].name)) {
                 found = true;
             }
         }

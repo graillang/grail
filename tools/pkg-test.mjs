@@ -311,5 +311,25 @@ const distDir = join(work, 'dist');
   ok(/already a dependency/.test(refused.text), 'adding an existing dependency is an error');
 }
 
+// 15. dev-dependencies are locked, marked, and seen by `grail test` only.
+{
+  const project = join(work, 'devtest');
+  makePackage(join(work, 'dev-libs', 'kit'), 'kit', '0.1.0', 'module kit;\npub fn answer() -> u64 {\n    return 41;\n}\n');
+  mkdirs(join(project, 'src'));
+  mkdirs(join(project, 'tests'));
+  writeFileSync(
+    join(project, 'grail.toml'),
+    '[package]\nname = "devtest"\nversion = "0.1.0"\n\n[dev-dependencies]\nkit = { path = "../dev-libs/kit" }\n',
+  );
+  writeFileSync(join(project, 'src/main.grl'), 'fn main() {\n    println(1);\n}\n');
+  writeFileSync(join(project, 'tests/smoke.grl'), 'use kit;\nfn main() {\n    assert(kit::answer() + 1 == 42);\n}\n');
+  run(['update'], project);
+  const node = JSON.parse(lockOf(project)).packages.find((p) => p.name === 'kit');
+  ok(node.dev === true, 'a package only the root dev-depends on is marked dev in the lock');
+  ok(run(['build'], project).status === 0, 'a plain build does not need the dev-dependency');
+  ok(/1 passed, 0 failed/.test(run(['test'], project).stdout), 'grail test sees the dev-dependency');
+  checks++;
+}
+
 console.log(`pkg: ${checks} package-manager checks passed`);
 console.log('ok');

@@ -34,5 +34,5 @@ requires a supported Linux CPU, Clang used only as an assembler, and LLD. Checki
 
 **Your own programs:** `just install` puts the `grail` tool on your path. `grail new hello`
 creates a project, `grail run` builds and runs it, `grail test` runs the programs in `tests/`,
-`grail fmt` applies the canonical layout used in this book, and `grail add NAME GIT-URL` adds a
-dependency pinned in `grail.lock`.
+`grail fmt` applies the canonical layout used in this book, and `grail add NAME` adds a
+dependency (`--path` and `--git` for a directory or a repository) resolved into `grail.lock`.
