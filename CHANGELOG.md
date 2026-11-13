@@ -1,5 +1,25 @@
 ## Unreleased
 
+- Ergonomics: `if` produces a value where one is required - an initializer, an argument, a `return`, a
+  record field, a match arm expression: `x := if c { 1 } else { 2 };`, `else if` chains included. The
+  statement form is untouched (`statement_body` sees an `if` that begins a statement first), and the
+  lowering is the statement `if`'s - same condition check, same per-arm ownership snapshots, same merge
+  at the join - plus one frame word every arm stores its expression into, owned once *after* the merge
+  so exactly one value exists however many arms wrote it (per-arm slots would leave two places where
+  the program has one value, which the place model is not path-sensitive enough to join). `primary`
+  now takes the type its context expects, so a literal, a `None` or a narrower integer adopts it
+  before the arms are compared: `n: u8 := if c { 1 } else { 2 };` is two `u8`s. Refused by name: an
+  `if` with no `else` ("an `if` in expression position needs an `else`... add `else { ... }`, or write
+  the `if` as a statement"), two arms of different types (the primary line names both: "the other arm
+  is `u64`, this one is `u8[]`", labelled at the other arm), an arm that is a block of statements or
+  holds statements before a value, an arm that writes (`{ x = 1; }`), and an arm whose value borrows
+  ("the result is one word, so it cannot name both arms' loans: use the reference inside each arm" -
+  documented limitation, not a semantic rule). A diverging arm (`return`, `break`) needs no value and
+  the other arm decides the type; both arms diverging is refused ("neither arm of this `if` produces a
+  value"). Also fixed: a statement word where a value was required used to report
+  `error[E0001]: undefined name` under the keyword - it now says *`for` is a statement, not an
+  expression: it has no value*. Reasoning and the lowering in docs/design/if-expression.md; book:
+  *Branches and loops* with the `if-values` example; corpus: the fifteen `exprif-` cases.
 - Tooling: `grail test` gained the ergonomics a regression run needs. Selection: `--filter TEXT`, `--list`, `--shard i/n`, `--jobs N`; reporting: a `FAIL NAME` block per failure (the case, its source path, what the exit status and the output pins expected, the actual status/signal and stdout/stderr), a stable `passed X failed Y skipped Z` line, and `--fail-fast`. `--update` rewrites a corpus case's `stdout`/`status` from the observed run, only when it is asked for - a `stderr` pin or a `signal` pin is never rewritten. Inside the Grail tree `grail test` forwards every argument to `tools/test-native.mjs`, which is now the same engine behind those flags; a project runs its `tests/` programs through one child per test with a per-test log. docs/testing.md says which command owns what.
 - Added: `grail doc` generates the reference documentation of a Grail source tree - one HTML page per module, a searchable index and an `index.json` model - from the comments and declarations the sources already carry. Grail has no doc-comment syntax, so a `//` comment block directly above a declaration or a field is its documentation, read from the source text (compiler/docgen.grl). Each function carries its signature with its `where`/`ensures` clauses and its `@no_alloc`/`@no_panic` claims, each record/enum/interface its members, variant payloads and method signatures, and `impl`s and aliases are listed. A doc body links an identifier when exactly one declaration in the tree has that name. The tree is deterministic (sorted, `<kind>-<name>` anchors, no clock), so it reviews as a diff; `grail doc` documents `lib/` (29 modules, 582 declarations) and the compiler (124 modules, 2532 declarations) without building either. docs/tooling/doc.md; pinned by tools/test-cli.mjs.
 - Debug info: the DWARF a `--debug` build emits now names an enum's variants, not just its layout. An enum gains a `DW_TAG_enumeration_type` (the tag word's type, one enumerator per variant valued by the tag the constructor stores), a `DW_TAG_structure_type` for the value `{tag, payload}` and a `DW_TAG_typedef` for the enum itself, so `gdb` prints `{tag = Square, payload = 7}` by name. A sequence's `data` stays a pointer to the first element - an array type would have to state a length the header does not carry - which is what gives `print *values->data@values->len`. The variable's unused base-type fields are gone. Verified with `llvm-dwarfdump --verify`, `readelf --debug-dump=info` and a real `gdb --batch` session on a record, a nested record, a string, a vector, a C record and an enum tag, for x86-64 and the AArch64/RISC-V 64 units; Windows CodeView keeps its records, symbols and PDB (an enum's word maps to the integer it is). `tools/test-debug-lines.mjs` pins all of it; docs/tooling/debugging.md is the tested gdb/lldb recipe and says plainly that macOS Mach-O DWARF is not emitted and that the DAP adapter is a WIP that is not shippable this round.

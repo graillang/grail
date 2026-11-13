@@ -8838,5 +8838,104 @@
     "reject": true,
     "diagnostic": "borrow conflicts with active access",
     "note": "a non-numeric element stays borrowed, so reading g.rows[0].ty inside the call is a live loan, not a copy: that read keeps its temporary"
+  },
+  {
+    "name": "exprif-initializer",
+    "source": "fn pick(c: bool) -> u64 {\n    x := if c { 10 } else { 20 };\n    return x;\n}\nfn main() {\n    println(\"{}\", pick(1 == 1));\n    println(\"{}\", pick(2 < 1));\n}\n",
+    "stdout": "10\n20\n"
+  },
+  {
+    "name": "exprif-else-if-chain",
+    "source": "fn word(n: u64) -> string {\n    return if n == 0 { \"zero\" } else if n == 1 { \"one\" } else { \"many\" };\n}\nfn main() {\n    for i in 3 {\n        println(\"{}\", word(i));\n    }\n}\n",
+    "stdout": "zero\none\nmany\n"
+  },
+  {
+    "name": "exprif-argument",
+    "source": "fn show(n: u64) {\n    println(\"{}\", n);\n}\nfn main() {\n    c := 2 < 3;\n    show(if c { 1 } else { 2 });\n    show(if 2 < 1 { 1 } else { 2 });\n}\n",
+    "stdout": "1\n2\n"
+  },
+  {
+    "name": "exprif-record-field",
+    "source": "struct P { x: u64, y: u64 }\nfn main() {\n    c := 2 < 3;\n    p := P { x: if c { 1 } else { 2 }, y: 5 };\n    println(\"{} {}\", p.x, p.y);\n}\n",
+    "stdout": "1 5\n"
+  },
+  {
+    "name": "exprif-declared-type",
+    "source": "fn main() {\n    c := 1 == 1;\n    n: u8 := if c { 1 } else { 2 };\n    d := if n == 1 { 10 } else { 20 };\n    println(\"{} {}\", d, if c { 3 } else { 4 });\n}\n",
+    "stdout": "10 3\n"
+  },
+  {
+    "name": "exprif-diverging-arm",
+    "source": "fn need(c: bool) -> u64 {\n    n := if c { 7 } else { return 3; };\n    return n;\n}\nfn main() {\n    println(\"{}\", need(1 == 1));\n    println(\"{}\", need(2 < 1));\n}\n",
+    "stdout": "7\n3\n"
+  },
+  {
+    "name": "exprif-drops-value",
+    "source": "struct P { n: u64 }\nimpl Drop for P {\n    fn drop(self: &mut P) {\n        println(\"drop {}\", self.n);\n    }\n}\nfn make(n: u64) -> P {\n    return P { n: n };\n}\nfn main() {\n    c := 1 == 1;\n    p := if c { make(1) } else { make(2) };\n    println(\"took {}\", p.n);\n}\n",
+    "stdout": "took 1\ndrop 1\n"
+  },
+  {
+    "name": "exprif-nested-in-match-arm",
+    "source": "fn show(n: u64) {\n    println(\"{}\", n);\n}\nfn main() {\n    c := 1 == 1;\n    n := 1;\n    match n {\n        0 => show(if c { 10 } else { 20 }),\n        _ => show(if c { 30 } else { 40 }),\n    }\n}\n",
+    "stdout": "30\n"
+  },
+  {
+    "name": "exprif-type-mismatch",
+    "source": "fn main() {\n    c := 1 == 1;\n    x := if c { 1 } else { \"two\" };\n    println(\"{}\", x);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "the two arms of an `if` expression must have the same type",
+      "the other arm is `u64`, this one is `u8[]`"
+    ]
+  },
+  {
+    "name": "exprif-missing-else",
+    "source": "fn main() {\n    c := 1 == 1;\n    x := if c { 1 };\n    println(\"{}\", x);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "an `if` in expression position needs an `else`",
+      "add `else { ... }`, or write the `if` as a statement"
+    ]
+  },
+  {
+    "name": "exprif-statement-arm",
+    "source": "fn main() {\n    c := 1 == 1;\n    mut y = 0;\n    x := if c { y = 5; 1 } else { 2 };\n    println(\"{} {}\", x, y);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "this arm of an `if` expression holds statements and then a value"
+    ]
+  },
+  {
+    "name": "exprif-statement-block",
+    "source": "fn main() {\n    c := 1 == 1;\n    mut y = 0;\n    x := if c { y = 5; } else { 2 };\n    println(\"{} {}\", x, y);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "this arm of an `if` expression is a block of statements, so it has no value"
+    ]
+  },
+  {
+    "name": "exprif-no-value",
+    "source": "fn skip(c: bool) {\n    x := if c { return (); } else { return (); };\n    println(\"{}\", x);\n}\nfn main() {\n    skip(1 == 1);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "neither arm of this `if` produces a value, so it is not an expression"
+    ]
+  },
+  {
+    "name": "exprif-borrows",
+    "source": "fn main() {\n    a := 1;\n    b := 2;\n    c := 1 == 1;\n    r := if c { &a } else { &b };\n    println(\"{}\", *r);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "an `if` expression cannot produce a value that borrows",
+      "use the reference inside each arm"
+    ]
+  },
+  {
+    "name": "exprif-statement-word",
+    "source": "fn main() {\n    n := 3;\n    x := for i in n { i };\n    println(\"{}\", x);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "`for` is a statement, not an expression: it has no value"
+    ]
   }
 ]
