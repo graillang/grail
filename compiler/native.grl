@@ -590,6 +590,9 @@ struct C {
     loop_start: u64,
     loop_end: u64,
     no_union: u64,
+    // Set while the operand of `ignore_failure(...)` is evaluated: a join outcome may be dropped
+    // there and nowhere else (docs/design/task-failure-containment.md).
+    ignored_failure: u64,
     parsing_input: u64,
     output_region: u64,
     receiver_region: u64,
@@ -5169,6 +5172,9 @@ fn release<a>(c: (&a mut C), index: u64) -> unit {
         }
         return ();
     }
+    // A join outcome that is still owned here is about to be dropped: that is a discarded failure
+    // unless the program says `ignore_failure` (docs/design/task-failure-containment.md).
+    require_handled(&mut c, ty, place);
     if place != 0 {
         if ownership::cleanup(&mut c.check, place) != 0 {
             pointer_conflict(&mut c, place, view(""), 0);
@@ -8120,6 +8126,21 @@ fn type_name<a>(c: (&a mut C), ty: u64) -> u8[] {
         push_bytes(&mut out, view(iface_plain_word(k)));
         return out;
     }
+    if k == 8 {
+        d := ty_arg(&mut c, ty);
+        if same(view(c.decls[d].module), view(".outcome")) {
+            if same(view(c.decls[d].name), view("Failure")) {
+                push_bytes(&mut out, view("TaskFailure"));
+                return out;
+            }
+            args := type_args(&mut c, ty);
+            if args.len() == 2 {
+                push_bytes(&mut out, view(type_name(&mut c, args[0])));
+                push_bytes(&mut out, view(" |? TaskFailure"));
+                return out;
+            }
+        }
+    }
     // Only a type the interface format can spell is handed to the writer: naming a type for a
     // diagnostic must not be able to fail where the diagnostic itself is the point.
     if iface_spellable(&mut c, ty) {
@@ -10126,6 +10147,11 @@ fn is_result_union<a>(c: (&a mut C), ty: u64) -> bool {
     }
     d := ty_arg(&mut c, ty);
     decl := &c.decls[d];
+    // `.outcome` is a join's result union: `?` and member-type arms work on it exactly as on
+    // `T |? E`, which is why containment needed no new type machinery.
+    if same(view(decl.module), view(".outcome")) {
+        return same(view(decl.name), view("Failure")) == false;
+    }
     return same(view(decl.module), view(".result"));
 }
 fn is_union<a>(c: (&a mut C), ty: u64) -> bool {
@@ -10844,6 +10870,11 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
     }
     if (shadowed == false) & same(view(first), view("CancelToken")) {
         return intern(&mut c, 17, 0);
+    }
+    if (shadowed == false) & same(view(first), view("TaskFailure")) {
+        // What a `try_join` produces when the task failed: kind, message and site. A synthesized
+        // record, named like the other built-in types (see task_failure_type).
+        return task_failure_type(&mut c);
     }
     if (shadowed == false) & same(view(first), view("Mutex")) {
         expect(&mut c, view("<"));
@@ -20271,6 +20302,15 @@ fn builtin_id<a>(n: &a [u8]) -> u64 {
     if same(view(n), view("join")) {
         return 35;
     }
+    if same(view(n), view("try_join")) {
+        return 55;
+    }
+    if same(view(n), view("task_fail")) {
+        return 56;
+    }
+    if same(view(n), view("ignore_failure")) {
+        return 57;
+    }
     if same(view(n), view("format")) {
         return 36;
     }
@@ -22471,6 +22511,15 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
     if id == 35 {
         return join_builtin(&mut c, a);
     }
+    if id == 55 {
+        return try_join_builtin(&mut c, a);
+    }
+    if id == 56 {
+        return task_fail_builtin(&mut c, a);
+    }
+    if id == 57 {
+        return ignore_failure_builtin(&mut c, a);
+    }
     if id == 31 {
         expect(&mut c, view(")"));
         ty := mutex_type(&mut c, a.ty);
@@ -23142,6 +23191,144 @@ fn join_builtin<a>(c: (&a mut C), handle: Val) -> Val {
     }
     slot := invoke(&mut c, view("rt_task_join"), one(value));
     return own(&mut c, slot, result);
+}
+// `try_join(t) -> R |? TaskFailure`: the join that contains. It never aborts for a failed task; the
+// failure (or the result) is the value it returns, and the compiler refuses to drop that value
+// unless the program writes `ignore_failure(...)`. See docs/design/task-failure-containment.md.
+fn try_join_builtin<a>(c: (&a mut C), handle: Val) -> Val {
+    expect(&mut c, view(")"));
+    if ty_kind(&mut c, handle.ty) != 16 {
+        fail(&mut c, view("try_join requires an owned Task handle"));
+    }
+    result := ty_arg(&mut c, handle.ty);
+    value := handle.t;
+    if c.raw == 0 {
+        move_out(&mut c, handle);
+    }
+    slot := invoke(&mut c, view("rt_task_outcome"), one(value));
+    ty := task_outcome_type(&mut c, result);
+    return own(&mut c, slot, ty);
+}
+// `task_fail(text)`: fail the running task explicitly. Contained like a failed check - a value at
+// the join, or the end of the process when there is no containment point.
+fn task_fail_builtin<a>(c: (&a mut C), text: Val) -> Val {
+    expect(&mut c, view(")"));
+    k := ty_kind(&mut c, text.ty);
+    if (k != 3) & (k != 4) & (k != 5) & (k != 6) {
+        fail(&mut c, view("task_fail takes text (string, view or u8[])"));
+    }
+    if c.raw == 0 {
+        if ty_kind(&mut c, text.ty) == 7 {
+            fail(&mut c, view("task_fail takes text by value, not a reference"));
+        }
+    }
+    invoke(&mut c, view("rt_task_fail"), one(text.t));
+    release_temporary(&mut c, text.t);
+    return val(imm(&mut c, 0), 1);
+}
+// `ignore_failure(e)`: the explicit opt-out. The value is dropped by the ordinary rules - its
+// failure record and text are released, nothing leaks - and the "must handle" diagnostic that
+// `release_temporary`/`expire_locals` would otherwise report for a join outcome is suppressed.
+fn ignore_failure_builtin<a>(c: (&a mut C), value: Val) -> Val {
+    expect(&mut c, view(")"));
+    old := exchange(&mut c.ignored_failure, 1);
+    release_temporary(&mut c, value.t);
+    exchange(&mut c.ignored_failure, old);
+    return val(imm(&mut c, 0), 1);
+}
+// The join outcome of a task whose result is `result`: the structural result union the language
+// already has for `T |? E`, with the synthesized `.outcome::Failure` as its failure member.
+fn task_outcome_type<a>(c: (&a mut C), result: u64) -> u64 {
+    mut args = u64[];
+    args.push(result);
+    args.push(task_failure_type(&mut c));
+    return make_union(&mut c, args, 1, copy_bytes(view(".outcome")), view("Outcome"));
+}
+// `.outcome::Failure`: what a join produces when the task failed. A plain record - kind, message,
+// site - so the value a join sees carries the words a report would have printed.
+fn task_failure_type<a>(c: (&a mut C)) -> u64 {
+    // The two texts are `string`: the runtime builds them with rt_lit, which is the descriptor shape
+    // a text value has, and a program can print, compare and pass one on like any other.
+    mut text = intern(&mut c, 3, 0);
+    mut args = u64[];
+    args.push(0);
+    args.push(text);
+    args.push(text);
+    mut d = find_decl_internal(&mut c, view(".outcome"), view("Failure"));
+    if d == 0 {
+        first := c.fields.len();
+        push_failure_field(&mut c, 0, view("kind"));
+        push_failure_field(&mut c, 1, view("message"));
+        push_failure_field(&mut c, 2, view("site"));
+        mut bounds = u64[];
+        mut constraints = u64[][];
+        for i in 3 {
+            bounds.push(0);
+            constraints.push(u64[]);
+        }
+        item_public_1 := c.decl_public;
+        c
+            .decls
+            .push(
+                Decl {
+                    public: item_public_1,
+                    module: copy_bytes(view(".outcome")),
+                    name: copy_bytes(view("Failure")),
+                    is_enum: 0,
+                    opaque: 0,
+                    transfer: 0,
+                    share: 0,
+                    c_layout: 0,
+                    first: first,
+                    count: 3,
+                    drop: 0,
+                    regions: 0,
+                    types: 3,
+                    success: 0,
+                    bounds: bounds,
+                    constraints: constraints,
+                }
+            );
+        d = c.decls.len();
+    }
+    return intern_args(&mut c, 8, d - 1, 0, u64[], args);
+}
+fn push_failure_field<a, b>(c: (&a mut C), index: u64, name: &b [u8]) -> unit {
+    param := intern_args(&mut c, 9, index, 0, u64[], u64[]);
+    c.fields.push(Field { name: copy_bytes(view(name)), ty: param, pred: no_pred() });
+    return ();
+}
+// A join outcome may not be dropped where it is still owned: the program must look at it, or say
+// `ignore_failure`. Called from the two places that discard a live temporary or local.
+fn require_handled<a>(c: (&a mut C), ty: u64, place: u64) -> unit {
+    if c.raw != 0 {
+        return ();
+    }
+    if c.ignored_failure != 0 {
+        return ();
+    }
+    // Only a place that still holds its value is being discarded here: a moved or cleaned value has
+    // already been dealt with (`move_out`, `?` and a consumed `match` all mark it).
+    if ownership::status(&c.check, place) == 2 {
+        return ();
+    }
+    if ty_kind(&mut c, ty) != 8 {
+        return ();
+    }
+    d := ty_arg(&mut c, ty);
+    if same(view(c.decls[d].module), view(".outcome")) == false {
+        return ();
+    }
+    if same(view(c.decls[d].name), view("Failure")) {
+        return ();
+    }
+    fail(
+        &mut c,
+        view(
+            "the outcome of a joined task must be handled: the failure is a value (`?` it, `match` it), or write ignore_failure() to discard it"
+        )
+    );
+    return ();
 }
 fn scope_method<a, b>(c: (&a mut C), value: u64, kind: u64, name: &b [u8]) -> Val {
     expect(&mut c, view(")"));
@@ -33639,9 +33826,18 @@ fn iface_type_raw<a, b>(out: (&a mut u8[]), c: (&b mut C), ty: u64) -> unit {
         // count (`.union::Union2`, `.result::Result2_1`), so an interface states the members and
         // the reader rebuilds the same declaration by the same rule instead of naming an index.
         owner := c.decls[arg].module.copy();
-        if same(view(owner), view(".union")) || same(view(owner), view(".result")) {
+        if same(view(owner), view(".outcome")) & same(view(c.decls[arg].name), view("Failure")) {
+            // The synthesized failure record: rebuilt by the reader from its own rule, like the
+            // union declarations beside it.
+            push_bytes(&mut out, view("(outcomefail)"));
+            return ();
+        }
+        if same(view(owner), view(".union")) || same(view(owner), view(".result"))
+            || same(view(owner), view(".outcome")) {
             if same(view(owner), view(".union")) {
                 push_bytes(&mut out, view("(union "));
+            } else if same(view(owner), view(".outcome")) {
+                push_bytes(&mut out, view("(outcome "));
             } else {
                 push_bytes(&mut out, view("(result "));
             }
@@ -34702,7 +34898,12 @@ fn iface_parse_type<a>(c: (&a mut C), p: (&a mut IPos)) -> u64 {
             }
             return intern_args(&mut c, 9, n, bounds, proofs, args);
         }
-        if same(view(head), view("union")) || same(view(head), view("result")) {
+        if same(view(head), view("outcomefail")) {
+            ip_expect(&mut p, view(")"));
+            return task_failure_type(&mut c);
+        }
+        if same(view(head), view("union")) || same(view(head), view("result"))
+            || same(view(head), view("outcome")) {
             // `T?` / `T | E`: the member list is the whole type, and the compiler rebuilds the
             // declaration it synthesises for that member count.
             success := ip_number(&mut p);
@@ -34710,6 +34911,9 @@ fn iface_parse_type<a>(c: (&a mut C), p: (&a mut IPos)) -> u64 {
             ip_expect(&mut p, view(")"));
             if same(view(head), view("union")) {
                 return make_union(&mut c, members, success, copy_bytes(view(".union")), view("Union"));
+            }
+            if same(view(head), view("outcome")) {
+                return make_union(&mut c, members, success, copy_bytes(view(".outcome")), view("Outcome"));
             }
             return make_union(&mut c, members, success, copy_bytes(view(".result")), view("Result"));
         }
@@ -37085,6 +37289,7 @@ pub fn main() -> u64 {
         loop_start: 0,
         loop_end: 0,
         no_union: 0,
+        ignored_failure: 0,
         parsing_input: 0,
         output_region: 0,
         receiver_region: 0,
@@ -37702,11 +37907,9 @@ pub fn main() -> u64 {
     } else {
         o(&mut c, view("\nmovq %rax,%rdi\ncall rt_print_num\nxorq %r14,%r14\n"));
     }
-    o(&mut c, view("call rt_live\ntestq %rax,%rax\n"));
-    balanced := label(&mut c);
-    jump(&mut c, view("jz"), balanced);
-    o(&mut c, view("call rt_abort\n"));
-    mark(&mut c, balanced);
+    // The leak check: balanced -> return, a leak -> abort, a leak after a contained task failure ->
+    // a note on fd 2 and a normal exit (rt_leak_exit; see task-failure-containment.md).
+    o(&mut c, view("call rt_leak_exit\n"));
     o(&mut c, view("call rt_shutdown\n"));
     emit_exit(&mut c, view("movq %r14,%rdi\n"));
     if c.target == 3 {
