@@ -96,6 +96,33 @@ slice's length inside it. The one case that escapes the borrow checker is a span
 bytes: `span_of` yields `1..0` for a range its slice does not have, `same_as` answers false, and
 `bytes()` stops the program on the language's own slice check rather than reading a neighbour.
 
+## Which guards stay
+
+`rg -n 'len\(\)' compiler/*.grl` finds three kinds of hand-written bound:
+
+- **The range pair through a call** - `same(s, a, e, w)`'s `e > s.len()`. Gone: the range is a span
+  built from `s`, so the check happens once, where the span is made, and the callee cannot be handed
+  a second, unwritten end. The comparison helper that only needs a window (`at`) derives its end from
+  the needle, so its window cannot even be spelled wider than the thing it is compared with.
+- **A loop's own bound** - `while end < text.len() { ... text[end] ... }` (`docgen`, `llvm`, `fmt`).
+  Kept: the length is *live* - the loop exists to walk whatever the slice holds now - and there is no
+  value to carry, merely an index and the length it is checked against on the same line.
+- **A caller's range clamped to the slice** - `bg_slice`/`bg_lex` in `bindgen.grl`
+  (`if end > text.len() { end = text.len(); }`). Kept, deliberately: the intent is *truncation* ("lex
+  to the end of what there is"), and a span says either "inside this slice" or "nothing at all". A
+  span cannot express "as much as fits", and pretending it can would replace a visible clamp with a
+  silent refusal. These are the guards a range cannot express.
+
+## Things a user of the library should know
+
+- `Span` is not copyable (it holds a loan, like the view it contains): a helper takes it as
+  `r: &b span::Span<c>` and the caller writes `&r`. The compiler's own `same`/`at` take it by value
+  because every call site builds a fresh temporary.
+- Names from `lib/span.grl` are module-qualified like every other std module: `use span;` then
+  `span::span_of`, `span::Span<c>`. The corpus compiles single-file programs, so its cases list the
+  module (`"modules": ["lib/span.grl"]`); the compiler's own build lists it in
+  `tools/native.mjs`'s `compilerStdSources`, beside `xxhash`.
+
 ## Staged, not in this round
 
 - **Typed slices.** `&[u8]` (a byte view) and `&[T]` (a typed slice) are different types in this
