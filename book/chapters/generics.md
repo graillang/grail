@@ -160,4 +160,37 @@ dropping a `dyn Shape` drops what it holds. An interface can be used this way wh
 takes `self: &Self` or `self: &mut Self` first and mentions `Self` nowhere else, and it has no
 associated types unless the `dyn` type fixes them (`dyn I<Item = u64>`) (Rust's object safety); a `dyn` value cannot hold borrowed data.
 
+### Borrowing an object
+
+`dyn Shape` owns what it holds: `shapes.push(Square { side: 2 })` moves the square into storage the
+compiler allocates for it. When the value is already somewhere and you only want to run its methods,
+borrow it instead. `&dyn Shape` and `&mut dyn Shape` are *borrowed interface objects*: `&value` (and
+`&mut value`) becomes one wherever a `&dyn Shape` is expected - a typed binding, an argument, a
+return - when the value's type implements the interface.
+
+```grl
+fn area_of(s: &dyn Shape) -> u64 { return s.area(); }
+fn grow_twice(s: &mut dyn Shape) { s.grow(1); s.grow(1); }
+
+mut q = Square { side: 3 };
+println("{}", area_of(&q));      // 9
+grow_twice(&mut q);              // the mutation reaches q
+println("{}", q.side);           // 5
+
+mut shapes = (&dyn Shape)[];
+shapes.push(&q);                 // a vector of borrowed objects
+for i in shapes.len() { println("{}", shapes[i].area()); }
+```
+
+A borrowed object is a pair of words - where the value is, and the table of its methods - kept in
+the frame that borrowed it, so building one allocates nothing and the value itself never moves or
+copies. `&mut dyn Shape` mutates the original, never a copy. The rules are `&T`'s: the value cannot
+be moved or dropped while the borrow lives, a function may return a `&dyn Shape` borrowed from its
+inputs, and one borrowed from a local is refused (`fn made() -> &dyn Shape { c := Circle { r: 1 };
+return &c; }` does not compile). A record or a vector may hold one, and a struct that stores one
+names the lifetime: `struct Wrapper<a> { shape: &a dyn Shape }`.
+
+Interface files carry the form, so a separately compiled module can take a `&dyn Shape` as
+naturally as it takes a `&u64`.
+
 **Try it:** instantiate identity with a string, then consume the returned string exactly once.

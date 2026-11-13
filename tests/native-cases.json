@@ -7668,5 +7668,56 @@
     "source": "fn spin(n: u64) -> u64 {\n    mut i = 0;\n    @bounded(8)\n    while i != n {\n        i += 1;\n    }\n    return i;\n}\nfn main() -> u64 { println(spin(3)); return 0; }\n",
     "reject": true,
     "diagnostic": "cannot prove `@bounded(8)`"
+  },
+  {
+    "name": "dyn-borrowed-objects",
+    "files": [
+      "compiler/tests/dyn_borrowed.grl"
+    ],
+    "stdout": "12 9 shape\n5\n2 37\n12\n25\n25\n7\n"
+  },
+  {
+    "name": "dyn-borrowed-no-alloc",
+    "files": [
+      "compiler/tests/dyn_borrowed_alloc.grl"
+    ],
+    "stdout": "7 7 7\n",
+    "asm": [
+      "leaq .V",
+      "movq %rax,8(%rcx)\nmovq %rcx,%rax"
+    ],
+    "asmAbsent": [
+      "call f_main_as_shape.pair"
+    ]
+  },
+  {
+    "name": "dyn-borrowed-reject-move",
+    "source": "interface S{fn get(self:&Self)->u64;}struct A{x:u64}impl S for A{fn get(self:&Self)->u64{return self.x;}}fn main(){a:=A{x:1};r:&dyn S=&a;b:=a;println(\"{}\",r.get());}",
+    "reject": true,
+    "diagnostic": "move of unavailable or borrowed value"
+  },
+  {
+    "name": "dyn-borrowed-reject-escape",
+    "source": "interface S{fn get(self:&Self)->u64;}struct A{x:u64}impl S for A{fn get(self:&Self)->u64{return self.x;}}fn made()->&dyn S{c:=A{x:1};return &c;}fn main(){s:=made();println(\"{}\",s.get());}",
+    "reject": true,
+    "diagnostic": "returned borrow escapes its declared input lifetime"
+  },
+  {
+    "name": "dyn-borrowed-reject-not-implemented",
+    "source": "interface S{fn get(self:&Self)->u64;}struct B{n:u64}fn main(){o:=B{n:1};r:&dyn S=&o;}",
+    "reject": true,
+    "diagnostic": "this type does not implement the interface the dyn type names"
+  },
+  {
+    "name": "dyn-borrowed-interface-form",
+    "files": [
+      "tests/dyn/shape_user.grl"
+    ],
+    "modules": [
+      "tests/dyn/shape.grl"
+    ],
+    "interfaces": true,
+    "stdout": "12 9\n5\n37\n",
+    "note": "`&dyn Shape` and `&mut dyn Shape` in a module's signatures travel through its interface file: the program is built interface-first and prints what the source build prints"
   }
 ]
