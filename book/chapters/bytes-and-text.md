@@ -8,7 +8,9 @@ length. Read an individual byte with `data[index]`.
 {{example:bytes}}
 
 `&data` is a readonly byte view and `&mut data` is an exclusive one. A quoted literal is already an
-owned UTF-8 `string`; no `.text()` call is needed. `.text()` converts borrowed bytes into owned text.
+owned UTF-8 `string`; no `.text()` call is needed. A `string` is read-only text: `mut s = "x"` makes
+the binding reassignable (`s = "y"`), not the bytes writable (`s[0] = 65` is refused, as in Rust's
+`let mut s = "x"`). Copy it to edit bytes — `mut b: u8[] = s.copy()` — and write through the vector. `.text()` converts borrowed bytes into owned text.
 Text length is measured in **bytes**, not Unicode characters or grapheme clusters.
 `greeting.append(text)` appends validated text; arbitrary byte sequences and text are deliberately
 different concepts.

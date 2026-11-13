@@ -60,3 +60,31 @@ GRAIL_NATIVE_TEST_BACKEND=tcc \
 Next library gates include recoverable conversion errors, borrowed text abstractions, equality,
 search/splitting, input/output and generic containers. Do not count this primitive as a finished
 String standard library or completion of the full v0 goal.
+
+## Mutability of a binding that holds text
+
+2026-11-13. Recorded while making the diagnostics for this case precise.
+
+A string literal constructs an owned `string`: UTF-8-validated, immutable text. `mut` on the
+binding therefore makes the **binding** reassignable — it may name a different string — and never
+makes the bytes writable. This is exactly Rust's rule for `let mut s = "x"`, whose type is
+`&'static str`: `s = "y"` compiles, `s[0] = 65` does not, and `&mut s[0]` does not borrow writable
+bytes. Grail keeps the same prior art because the alternative — `mut` reaching through a handle
+into read-only text — would make the checker's `mut` mean two different things depending on the
+type behind it, and a literal's bytes are shared static data anyway.
+
+Editing bytes is a separate, explicit step. `s.copy()` produces an independently owned `u8[]`
+(already documented above as the way to make mutable byte storage without weakening the string
+invariant), and that vector's elements can be written. `view("literal")` is the same rule without
+an allocation: a static readonly byte view, writable only by copying it into mutable storage.
+
+The two places that used to report only the shape of the place now name the reason:
+
+- `s[0] = 65` and `&mut s[0]` on a `string` report `a string's bytes are immutable: a string
+  literal is read-only text, and `mut` on a binding makes the binding reassignable, not the
+  bytes; copy them into a mutable byte vector to edit`.
+- Writing through a readonly byte view (`&[u8]`) keeps its own message: it needs an exclusive
+  view, `&mut [u8]`.
+
+Corpus: `ergo-mut-string-literal-reassign`, `-typed-reassign`, `-copy-editable`,
+`-refuse-write`, `-refuse-mut-borrow`.

@@ -73,6 +73,24 @@ assumptions.
 `errs::Error` is the interface underneath: one method, `message`, implemented by `errs::Report`,
 `errs::Message` (a message-carrying record) and `io::Error`, for code that reports whatever error it
 was handed without knowing which one it was.
+## Arm bodies
+
+An arm body is one expression, or a block of statements in braces:
+
+```grl
+match n {
+    0 => println("zero"),
+    1 => { println("one"); println("only one"); },
+    _ => println("many"),
+}
+```
+
+The expression form releases its temporaries at the end of the arm, exactly as the same expression
+with a semicolon inside the block form does, and the last arm before `}` may omit its comma. A body
+that is a statement (`if`, `while`, `for`, `loop`, `match`, `let`, `return`, `break`, `continue`,
+`drop`, `write`, `assert`, or an assignment) needs the braces: `_ => if c { ... }` is refused with
+that reason. A record literal needs no parentheses in an arm: `_ => Point { x: 1, y: 2 }` is the
+literal, and `_ => { Point { x: 1, y: 2 } }` is the block that builds and drops it.
 
 ## Matching through a borrow
 

@@ -111,5 +111,18 @@ These are refusals with a diagnostic, not silent behaviour:
 
 A closure passed to a function, or bound with a function type, takes its parameter types from that
 type, and its result from that type or its body, as in Rust: `iter::of(v).map(|x| x * 2)` and
-`f: Fn(u64, u64) -> u64 = |a, b| a * b`. Where nothing fixes a parameter's type (`f := |x| x + 1`),
-write it: `|x: u64|`.
+`f: Fn(u64, u64) -> u64 = |a, b| a * b`.
+
+A closure called immediately takes them from the call's arguments:
+
+```grl
+println((|x| x + 1)(41));          // x is u64
+n: u32 = 20;
+println((|x| x + 1)(n));           // x is u32
+println((|p| p.x)(Point { x: 2, y: 3 }));
+```
+
+An argument that is itself a closure, and an argument borrowed (`&buf`) whose parameter would then
+be a reference, do not fix the parameter: write it out, `|v: &[u8]|`. Where nothing fixes a
+parameter's type at all (`f := |x| x + 1`), the error names the parameter and suggests its
+annotation: ``write |x: T|``.

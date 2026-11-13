@@ -18622,9 +18622,13 @@ fn constructor_hint<a>(c: (&a mut C), decl: u64, explicit: u64) -> u64 {
         return explicit;
     }
     result := c.result;
-    if ty_kind(&mut c, result) == 8 {
-        if ty_arg(&mut c, result) == decl {
-            return result;
+    // No `-> T` to read the type from: `c.result` is unknown where nothing is being returned
+    // (a top-level statement, and every expression compiled in isolation for inference).
+    if result != 18446744073709551615 {
+        if ty_kind(&mut c, result) == 8 {
+            if ty_arg(&mut c, result) == decl {
+                return result;
+            }
         }
     }
     return NO_TYPE;
@@ -24938,6 +24942,18 @@ fn mentions_unbound<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> bool {
 // body names to theirs, as emit_closures binds them; nothing it does survives.
 fn closure_body_type<a, b, d>(c: (&a mut C), names: (&b u8[][]), params: (&d u64[])) -> u64 {
     start := c.pos;
+    found := isolated_body_type(&mut c, start, &names, &params);
+    return found[0];
+}
+// The type of the expression starting at `start` and its end token, found by compiling it once in
+// isolation: [type, end]. `names` and `params` are a closure's own parameters (empty for a call
+// argument); every other enclosing local the expression names is bound to its type, as a capture
+// would be. The expression's end is the first token at depth zero that cannot continue it - a `,`,
+// a `;`, or a closing bracket - which is exactly where a call argument ends.
+fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), params: (&d u64[])) -> u64[] {
+    // The token this call was made at: the parse below starts at `start` and gives the position back,
+    // so a caller that only asks for a type (an argument) leaves the real parse where it was.
+    enter := c.pos;
     // The body's end, as closure_literal finds it.
     mut end = start;
     mut depth = 0;
@@ -25012,9 +25028,10 @@ fn closure_body_type<a, b, d>(c: (&a mut C), names: (&b u8[][]), params: (&d u64
         own(&mut c, slot, ty);
         init_parameter(&mut c, slot, ty);
     }
+    exchange(&mut c.pos, start);
     v := expr(&mut c, 0);
     result := v.ty;
-    exchange(&mut c.pos, start);
+    exchange(&mut c.pos, enter);
     while out_mark < c.out.len() {
         c.out.pop();
     }
@@ -25042,7 +25059,81 @@ fn closure_body_type<a, b, d>(c: (&a mut C), names: (&b u8[][]), params: (&d u64
     exchange(&mut c.cf_end, saved_cf_end);
     exchange(&mut c.cf_local, saved_cf_local);
     // An unsuffixed literal body is u64, as a binding of it would be.
-    return result;
+    return u64[result, end];
+}
+// `(|x| x + 1)(41)`: the call written directly after a parenthesised closure fixes the closure's
+// parameter types. The callee is parsed before the arguments, so they are typed ahead of time by
+// compiling each one in isolation (isolated_body_type) and throwing the code away; the real call
+// compiles them again with its own expected types. Nothing is set when the shape is not that, or
+// when an argument is itself a closure - that one's type would need the callee's parameter type,
+// which is what this is computing.
+fn immediate_call_hint<a>(c: (&a mut C)) -> unit {
+    open := c.pos;
+    if kind_at(&mut c, open) != 40 {
+        return ();
+    }
+    if (kind_at(&mut c, open + 1) != 124) & (kind_at(&mut c, open + 1) != 274) {
+        return ();
+    }
+    close := matching_paren(&mut c, open);
+    if close == 0 {
+        return ();
+    }
+    call := close + 1;
+    if kind_at(&mut c, call) != 40 {
+        return ();
+    }
+    stop := matching_paren(&mut c, call);
+    if stop == 0 {
+        return ();
+    }
+    mut at = call + 1;
+    mut types = u64[];
+    while at < stop {
+        if (kind_at(&mut c, at) == 124) | (kind_at(&mut c, at) == 274) {
+            return ();
+        }
+        mut no_names = u8[][];
+        mut no_params = u64[];
+        found := isolated_body_type(&mut c, at, &no_names, &no_params);
+        // A parameter type that holds a borrow needs the closure's own input lifetime, which the
+        // caller's argument type cannot supply: leave the hint unset and let the annotation error
+        // name the parameter (`|v: &[u8]|` is written out for exactly this reason).
+        if contains_borrow(&mut c, found[0], 0) {
+            return ();
+        }
+        types.push(found[0]);
+        at = found[1];
+        if at < stop {
+            if kind_at(&mut c, at) != 44 {
+                return ();
+            }
+            at += 1;
+        }
+    }
+    exchange(&mut c.hint_params, types);
+    exchange(&mut c.hint_ret, 18446744073709551615);
+    exchange(&mut c.hint_set, 1);
+    return ();
+}
+// The index of the `)` that closes the `(` at `open`, or 0 when the source never closes it.
+fn matching_paren<a>(c: (&a mut C), open: u64) -> u64 {
+    mut depth = 0;
+    mut j = open;
+    while kind_at(&mut c, j) != 0 {
+        k := kind_at(&mut c, j);
+        if k == 40 {
+            depth += 1;
+        }
+        if k == 41 {
+            depth -= 1;
+            if depth == 0 {
+                return j;
+            }
+        }
+        j += 1;
+    }
+    return 0;
 }
 fn closure_literal<a>(c: (&a mut C)) -> Val {
     // Inside a generic function the closure is compiled once per specialization, with its bindings.
@@ -25075,7 +25166,16 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                     // `|x|`: the parameter's type is the expected function type's.
                     index := params.len();
                     if !hinted || (hint_params.len() <= index) || (hint_params[index] == NO_TYPE) {
-                        fail(&mut c, view("closure parameter needs a type here (nothing fixes it): write |x: T|"));
+                        // Name the parameter and show the annotation: nothing at this position fixes
+                        // its type, and a later use cannot (a closure's parameters are explicit).
+                        mut text = copy_bytes(view("closure parameter `"));
+                        push_bytes(&mut text, view(n));
+                        push_bytes(&mut text, view("` needs a type here (nothing fixes it): write |"));
+                        push_bytes(&mut text, view(n));
+                        push_bytes(&mut text, view(": T|"));
+                        here := c.pos;
+                        exchange(&mut c.pos, here - 1);
+                        fail(&mut c, view(text));
                     }
                     ty = hint_params[index];
                 }
@@ -29574,7 +29674,7 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
         k := ty_kind(&mut c, x.ty);
         if access == 2 {
             if k == 4 {
-                fail(&mut c, view("a string's bytes are immutable"));
+                refuse_string_bytes(&mut c);
             }
             if (k == 5) & (ty_mode(&mut c, x.ty) == 0) {
                 fail(&mut c, view("writing a byte needs a mutable byte view (&mut [u8])"));
@@ -29795,6 +29895,10 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
         if expected != NO_TYPE {
             none := u64[];
             closure_hint(&mut c, expected, &none);
+        }
+    } else {
+        if (expected == 18446744073709551615) & (kind(&mut c) == 40) {
+            immediate_call_hint(&mut c);
         }
     }
     mut first = val(0, 0);
@@ -30903,6 +31007,16 @@ fn chained_field_assignment<a>(c: (&a mut C)) -> unit {
     assignment_tail(&mut c, 0, base.t, base.ty, target, u64[1, fieldty], view(fname), record_ty);
     return ();
 }
+// Writing or mutably borrowing a string's bytes. A string literal is a `string` (read-only,
+// UTF-8-validated text), so `mut` on the binding makes the binding reassignable - the handle may
+// name a different string - and never makes the bytes writable. Rust's `let mut s = "x"` is the
+// same rule for `&'static str`. docs/design/string-literals.md records the choice.
+fn refuse_string_bytes<a>(c: (&a mut C)) -> unit {
+    fail(
+        &mut c,
+        view("a string's bytes are immutable: a string literal is read-only text, and `mut` on a binding makes the binding reassignable, not the bytes; copy them into a mutable byte vector to edit (`mut b: u8[] = s.copy()`)")
+    );
+}
 // Legacy vector/byte assignment evaluates RHS before parsing its mutable target.
 fn index_assignment<a>(c: (&a mut C)) -> unit {
     start := c.pos;
@@ -31007,6 +31121,14 @@ fn index_assignment<a>(c: (&a mut C)) -> unit {
         // Bytes: buf[i] = b stores the low byte of a u8/u64 value.
         if c.raw == 0 {
             if (k != 3) && ((k != 5) || (ty_mode(&mut c, x.ty) == 0)) {
+                if k == 4 {
+                    // A `string` is validated, immutable text: `mut` on the binding only makes the
+                    // binding reassignable, exactly as Rust's `let mut s: &'static str` does.
+                    refuse_string_bytes(&mut c);
+                }
+                if k == 5 {
+                    fail(&mut c, view("writing through a readonly view needs an exclusive byte view (&mut [u8])"));
+                }
                 fail(
                     &mut c,
                     view("index assignment needs a vector, bytes or a mutable byte view")
@@ -31214,6 +31336,69 @@ fn if_let<a>(c: (&a mut C)) -> unit {
     return ();
 }
 // match on an integer or bool: `0 => {..}`, `1 | 2 => {..}`, `'a' => {..}`, `_ => {..}`.
+// A keyword that starts a statement, never an expression: an arm body written that way needs the
+// braces of the block form. `true`/`false` are values, so they are not here.
+fn arm_statement_word<a>(c: (&a mut C)) -> bool {
+    if kind(&mut c) != 1 {
+        return false;
+    }
+    return is(&mut c, view("if"))
+        || is(&mut c, view("while"))
+        || is(&mut c, view("for"))
+        || is(&mut c, view("loop"))
+        || is(&mut c, view("match"))
+        || is(&mut c, view("let"))
+        || is(&mut c, view("return"))
+        || is(&mut c, view("break"))
+        || is(&mut c, view("continue"))
+        || is(&mut c, view("mut"))
+        || is(&mut c, view("unsafe"))
+        || is(&mut c, view("drop"))
+        || is(&mut c, view("write"))
+        || is(&mut c, view("assert"));
+}
+// A match arm's body: a block, or one expression (`Pat => f(x),`), which reaches the same code as
+// the block form `Pat => { f(x) }` because the expression's temporaries are released here and the
+// arm's cleanup runs afterwards either way. The ambiguous shapes are refused by name: a statement
+// body needs braces (`=> if ...` was the case that read as an expression and could not be one),
+// and a body that continues as a statement (`=> x = 1;`) is not an expression arm.
+fn arm_body<a>(c: (&a mut C)) -> unit {
+    if is(&mut c, view("{")) {
+        block(&mut c);
+        return ();
+    }
+    if arm_statement_word(&mut c) {
+        fail(
+            &mut c,
+            view("this arm body is a statement, so it needs braces: write `Pat => { if ... }`")
+        );
+    }
+    v := expr(&mut c, 0);
+    if kind(&mut c) == 61 {
+        fail(
+            &mut c,
+            view("an arm body is one expression, not a statement: write `Pat => { x = 1; }`")
+        );
+    }
+    if (261 < kind(&mut c)) & (kind(&mut c) < 267) {
+        fail(
+            &mut c,
+            view("an arm body is one expression, not a statement: write `Pat => { x += 1; }`")
+        );
+    }
+    discard_value(&mut c, v);
+    if kind(&mut c) == 59 {
+        fail(
+            &mut c,
+            view("an expression arm ends at `,` or `}`: for a statement body write `Pat => { stmt; }`")
+        );
+    }
+    if (kind(&mut c) != 44) & (kind(&mut c) != 125) {
+        fail(&mut c, view("expected `,` or `}` after this match arm"));
+    }
+    return ();
+}
+fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
 fn scalar_match<a>(c: (&a mut C), s: Val, term: u8[]) -> unit {
     xt := s.t;
     ty := s.ty;
@@ -31432,6 +31617,7 @@ fn scalar_match<a>(c: (&a mut C), s: Val, term: u8[]) -> unit {
         expect(&mut c, view("=>"));
         pv_ir_pending(&mut c, &arm_atoms);
         block(&mut c);
+        arm_body(&mut c);
         pop_locals(&mut c, mark);
         if c.terminated == 0 {
             edge := ownership::snapshot(&c.check);
@@ -31644,7 +31830,7 @@ fn record_match<a>(c: (&a mut C), sslot: u64, sty: u64, x: Val, byref: u64, refm
     if byref != 0 {
         arm_scrutinee(&mut c, sslot, sty);
     }
-    block(&mut c);
+    arm_body(&mut c);
     cleanup(&mut c, payloads);
     pop_locals(&mut c, mark);
     eaten := eat(&mut c, view(","));
@@ -31670,7 +31856,7 @@ fn record_match<a>(c: (&a mut C), sslot: u64, sty: u64, x: Val, byref: u64, refm
             get(&mut c, xt, view("%rdi"));
             drop_call(&mut c, x.ty);
         }
-        block(&mut c);
+        arm_body(&mut c);
         eat(&mut c, view(","));
         expect(&mut c, view("}"));
         mark(&mut c, end);
@@ -32589,7 +32775,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
                 if byref != 0 || borrowed {
                     arm_scrutinee(&mut c, sslot, sty);
                 }
-                block(&mut c);
+                arm_body(&mut c);
                 cleanup(&mut c, payloads);
                 pop_locals(&mut c, mark);
                 if c.terminated == 0 {
@@ -32707,7 +32893,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
             if byref != 0 || borrowed {
                 arm_scrutinee(&mut c, sslot, sty);
             }
-            block(&mut c);
+            arm_body(&mut c);
             cleanup(&mut c, payloads);
             pop_locals(&mut c, mark);
             if c.terminated == 0 {
@@ -32986,6 +33172,12 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
     }
     mut v = expr(&mut c, 0);
     expect(&mut c, view(";"));
+    discard_value(&mut c, v);
+    return ();
+}
+// An expression whose value nobody keeps (`expr;`, or a single-expression match arm): release
+// whatever temporary it produced, dropping an owned one it evaluates to.
+fn discard_value<a>(c: (&a mut C), v: Val) -> unit {
     mut r = resource(&mut c, v.t);
     if r != 0 {
         info := &c.resources[r - 1];

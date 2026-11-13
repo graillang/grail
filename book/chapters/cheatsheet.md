@@ -16,7 +16,7 @@ is checked to agree.
 | `fn largest<T: Shape>(items: &[T])` | `fn largest<T: Shape>(items: &T[])` | `T[]` is a vector, `&T[]` its view. |
 | `vec![a, b]` | `Rect[a, b]` | The element type leads the literal. |
 | `Option<u64>`, `Some(x)`, `None` | `u64?`, `Some(x)`, `None` | `x!` insists, `?` propagates. |
-| `match t { Token::Num(n) => ... }` | `match t { Num(n) => { ... }, }` | Arms are blocks. |
+| `match t { Token::Num(n) => ..., }` | `match t { Num(n) => ..., }` | An arm body is an expression or a block. |
 | `(a, b)`, `let (q, r) = ...;` | `(a, b)`, `(q, r) := ...;` | |
 | `\|n\| n > 4` | `\|n: &u64\| -> bool *n > 4` | Written out here; inferred where the call fixes them. |
 | `iter().filter(..).collect()` | `iter::collect(iter::filter(iter::of(v), ..))` | Adapters are lazy in both, and also chain as methods. |

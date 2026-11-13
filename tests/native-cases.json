@@ -6738,7 +6738,7 @@
     "name": "closure-parameter-inference-rejects-unknown",
     "source": "fn main() -> u64 {\n    f := |x| x + 1;\n    return 0;\n}\n",
     "reject": true,
-    "diagnostic": "closure parameter needs a type here (nothing fixes it): write |x: T|"
+    "diagnostic": "closure parameter `x` needs a type here (nothing fixes it): write |x: T|"
   },
   {
     "name": "interface-inheritance",
@@ -8156,5 +8156,229 @@
     "source": "interface Shape {\n    fn area(self: &Self) -> u64;\n}\ninterface Maker {\n    fn make(self: &Self) -> &dyn Shape;\n}\nstruct Sq {\n    side: u64,\n}\nimpl Shape for Sq {\n    fn area(self: &Self) -> u64 {\n        return self.side * self.side;\n    }\n}\nstruct Factory {\n    v: Sq,\n}\nimpl Maker for Factory {\n    fn make(self: &Self) -> &dyn Shape {\n        return &self.v;\n    }\n}\nfn main() -> u64 {\n    f := Factory { v: Sq { side: 6 } };\n    m: &dyn Maker = &f;\n    s: &dyn Shape = m.make();\n    println(\"{}\", s.area());\n    return 0;\n}\n",
     "stdout": "36\n",
     "note": "a `&dyn Shape` returned through a dyn-dispatched (indirect) call: the pair comes back in %rax:%rdx and the caller builds it in its own frame, so both words have to be live at the return of a function the optimizer compressed"
+  },
+  {
+    "name": "ergo-mut-string-literal-reassign",
+    "source": "fn main() {\n    mut s = \"x\";\n    s = \"y\";\n    println(s);\n}\n",
+    "stdout": "y\n"
+  },
+  {
+    "name": "ergo-mut-string-literal-typed-reassign",
+    "source": "fn main() {\n    mut s: string = \"x\";\n    s = \"yz\";\n    println(s);\n}\n",
+    "stdout": "yz\n"
+  },
+  {
+    "name": "ergo-mut-string-literal-refuse-write",
+    "reject": true,
+    "source": "fn main() {\n    mut s = \"x\";\n    s[0] = 65;\n    println(s);\n}\n",
+    "diagnostic": [
+      "a string's bytes are immutable",
+      "string literal"
+    ]
+  },
+  {
+    "name": "ergo-mut-string-literal-refuse-mut-borrow",
+    "reject": true,
+    "source": "fn main() {\n    mut s = \"x\";\n    p := &mut s[0];\n    println(p.len());\n}\n",
+    "diagnostic": [
+      "a string's bytes are immutable",
+      "string literal"
+    ]
+  },
+  {
+    "name": "ergo-mut-string-literal-copy-editable",
+    "source": "fn main() {\n    mut s = \"x\";\n    mut b: u8[] = s.copy();\n    b[0] = 65;\n    println(b);\n    println(s);\n}\n",
+    "stdout": "A\nx\n"
+  },
+  {
+    "name": "ergo-match-expr-arm-scalar",
+    "source": "fn main() {\n    for n in 3 {\n        match n {\n            0 => println(\"zero\"),\n            1 => println(\"one\"),\n            _ => println(\"many\"),\n        }\n    }\n}\n",
+    "stdout": "zero\none\nmany\n"
+  },
+  {
+    "name": "ergo-match-expr-arm-last-comma-omitted",
+    "source": "fn main() {\n    n := 1;\n    match n {\n        0 => println(\"zero\"),\n        _ => println(\"many\")\n    }\n}\n",
+    "stdout": "many\n"
+  },
+  {
+    "name": "ergo-match-expr-arm-enum-payload",
+    "source": "enum E { A(u64), B }\nfn main() {\n    for i in 2 {\n        e := E::A(i);\n        match e {\n            A(x) => println(\"a {}\", x),\n            B => println(\"b\"),\n        }\n    }\n}\n",
+    "stdout": "a 0\na 1\n"
+  },
+  {
+    "name": "ergo-match-expr-arm-nested",
+    "source": "fn main() {\n    outer := 1;\n    inner := 0;\n    match outer {\n        0 => println(\"outer zero\"),\n        _ => {\n            match inner {\n                0 => println(\"inner zero\"),\n                _ => println(\"inner other\"),\n            }\n        }\n    }\n    match outer {\n        1 => {\n            match inner {\n                0 => println(\"deep zero\"),\n                _ => println(\"deep other\"),\n            }\n        },\n        _ => println(\"outer other\"),\n    }\n}\n",
+    "stdout": "inner zero\ndeep zero\n"
+  },
+  {
+    "name": "ergo-match-expr-arm-struct-literal",
+    "source": "struct P { x: u64, y: u64 }\nfn show(p: P) {\n    println(\"show {} {}\", p.x, p.y);\n}\nfn main() {\n    n := 0;\n    match n {\n        0 => { p := P { x: 1, y: 2 }; println(\"{} {}\", p.x, p.y); },\n        _ => println(\"other\"),\n    }\n    match n {\n        _ => show(P { x: 3, y: 4 }),\n    }\n}\n",
+    "stdout": "1 2\nshow 3 4\n"
+  },
+  {
+    "name": "ergo-match-expr-arm-drops-value",
+    "source": "struct P { x: u64 }\nimpl Drop for P {\n    fn drop(self: &mut P) {\n        println(\"drop {}\", self.x);\n    }\n}\nfn make() -> P {\n    return P { x: 7 };\n}\nfn eat(p: P) {\n    println(\"eat {}\", p.x);\n}\nfn main() {\n    n := 0;\n    match n {\n        0 => make(),\n        _ => println(\"other\"),\n    }\n    v := P { x: 3 };\n    match n {\n        0 => eat(v),\n        _ => println(\"no\"),\n    }\n    println(\"end\");\n}\n",
+    "stdout": "drop 7\neat 3\ndrop 3\nend\n"
+  },
+  {
+    "name": "ergo-match-expr-arm-reject-keyword",
+    "reject": true,
+    "source": "fn main() {\n    n := 1;\n    match n {\n        _ => if n == 1 { println(\"one\") }\n    }\n}\n",
+    "diagnostic": [
+      "this arm body is a statement, so it needs braces"
+    ]
+  },
+  {
+    "name": "ergo-match-expr-arm-reject-semicolon",
+    "reject": true,
+    "source": "fn main() {\n    n := 1;\n    match n {\n        _ => println(\"one\");\n    }\n}\n",
+    "diagnostic": [
+      "an expression arm ends at `,` or `}`"
+    ]
+  },
+  {
+    "name": "ergo-match-expr-arm-reject-missing-comma",
+    "reject": true,
+    "source": "fn main() {\n    n := 1;\n    match n {\n        0 => println(\"zero\")\n        _ => println(\"many\")\n    }\n}\n",
+    "diagnostic": [
+      "expected `,` or `}` after this match arm"
+    ]
+  },
+  {
+    "name": "ergo-mut-binding-requires-equals",
+    "reject": true,
+    "source": "fn main() {\n    mut s := \"x\";\n    s = \"y\";\n    println(s);\n}\n",
+    "diagnostic": [
+      "expected ="
+    ]
+  },
+  {
+    "name": "ergo-closure-infer-call-scalar",
+    "source": "fn main() {\n    println((|x| x + 1)(41));\n    a := 41;\n    println((|x| x + 1)(a));\n    b: u32 = 20;\n    println((|x| x + 1)(b));\n}\n",
+    "stdout": "42\n42\n21\n"
+  },
+  {
+    "name": "ergo-closure-infer-call-two-params",
+    "source": "fn main() {\n    println((|x, y| x + y)(1, 2));\n    n := 10;\n    println((|x, y| x * y)(n, 4));\n}\n",
+    "stdout": "3\n40\n"
+  },
+  {
+    "name": "ergo-closure-infer-call-record-arg",
+    "source": "struct P { x: u64, y: u64 }\nfn main() {\n    println((|p| p.x + p.y)(P { x: 2, y: 3 }));\n}\n",
+    "stdout": "5\n"
+  },
+  {
+    "name": "ergo-closure-infer-call-string-arg",
+    "source": "fn main() {\n    s := \"hello\";\n    println((|t| t.len())(s));\n    println((|t| t.len())(\"four\"));\n}\n",
+    "stdout": "5\n4\n"
+  },
+  {
+    "name": "ergo-closure-infer-call-no-params",
+    "source": "fn main() {\n    println((|| 7)());\n    n := 3;\n    println((|| n * 2)());\n}\n",
+    "stdout": "7\n6\n"
+  },
+  {
+    "name": "ergo-closure-infer-argument-position",
+    "source": "fn apply(f: Fn(u64) -> u64, x: u64) -> u64 {\n    return f(x);\n}\nfn main() {\n    println(apply(|x| x + 1, 41));\n    println(apply(|x| x * 2, 21));\n}\n",
+    "stdout": "42\n42\n"
+  },
+  {
+    "name": "ergo-closure-infer-typed-binding",
+    "source": "fn main() {\n    f: Fn(u64) -> u64 = |x| x + 1;\n    g: Fn(u64, u64) -> u64 = |a, b| a * b;\n    println(f(41));\n    println(g(6, 7));\n}\n",
+    "stdout": "42\n42\n"
+  },
+  {
+    "name": "ergo-closure-infer-reject-untyped-local",
+    "reject": true,
+    "source": "fn main() {\n    f := |x| x + 1;\n    println(f(41));\n}\n",
+    "diagnostic": [
+      "closure parameter `x` needs a type here (nothing fixes it): write |x: T|"
+    ]
+  },
+  {
+    "name": "ergo-closure-infer-reject-invocation-borrow",
+    "reject": true,
+    "source": "fn main() {\n    buf := u8[1, 2];\n    println((|v| v.len())(&buf));\n}\n",
+    "diagnostic": [
+      "closure parameter `v` needs a type here (nothing fixes it): write |v: T|"
+    ]
+  },
+  {
+    "name": "ergo-rc-dyn-object",
+    "modules": [
+      "lib/rc.grl",
+      "lib/core.grl"
+    ],
+    "source": "use rc;\ninterface Shape {\n    fn area(self: &Self) -> u64;\n}\nstruct Rect {\n    w: u64,\n    h: u64\n}\nimpl Shape for Rect {\n    fn area(self: &Self) -> u64 {\n        return self.w * self.h;\n    }\n}\nimpl Drop for Rect {\n    fn drop(self: &mut Rect) {\n        println(\"drop rect {}\", self.w);\n    }\n}\nfn main() {\n    o: dyn Shape = Rect { w: 3, h: 4 };\n    r: rc::Rc<dyn Shape> = rc::new(o);\n    println(\"area {}\", r.get().area());\n    println(\"strong {}\", r.strong_count());\n}\n",
+    "stdout": "area 12\nstrong 1\ndrop rect 3\n"
+  },
+  {
+    "name": "ergo-rc-dyn-clones-keep-alive",
+    "modules": [
+      "lib/rc.grl",
+      "lib/core.grl"
+    ],
+    "source": "use rc;\ninterface Shape {\n    fn area(self: &Self) -> u64;\n}\nstruct Rect {\n    w: u64,\n    h: u64\n}\nimpl Shape for Rect {\n    fn area(self: &Self) -> u64 {\n        return self.w * self.h;\n    }\n}\nimpl Drop for Rect {\n    fn drop(self: &mut Rect) {\n        println(\"drop rect {}\", self.w);\n    }\n}\nfn main() {\n    o: dyn Shape = Rect { w: 2, h: 5 };\n    r: rc::Rc<dyn Shape> = rc::new(o);\n    b := r.clone();\n    println(\"both {} {}\", r.get().area(), b.get().area());\n    drop(r);\n    println(\"alive after one {} {}\", b.strong_count(), b.get().area());\n    drop(b);\n    println(\"end\");\n}\n",
+    "stdout": "both 10 10\nalive after one 1 10\ndrop rect 2\nend\n"
+  },
+  {
+    "name": "ergo-rc-dyn-explicit-type-argument",
+    "modules": [
+      "lib/rc.grl",
+      "lib/core.grl"
+    ],
+    "source": "use rc;\ninterface Shape {\n    fn area(self: &Self) -> u64;\n}\nstruct Rect {\n    w: u64,\n    h: u64\n}\nimpl Shape for Rect {\n    fn area(self: &Self) -> u64 {\n        return self.w * self.h;\n    }\n}\nfn main() {\n    r := rc::new<dyn Shape>(Rect { w: 6, h: 7 });\n    println(\"area {}\", r.get().area());\n}\n",
+    "stdout": "area 42\n"
+  },
+  {
+    "name": "ergo-rc-dyn-record-field",
+    "modules": [
+      "lib/rc.grl",
+      "lib/core.grl"
+    ],
+    "source": "use rc;\ninterface Shape {\n    fn area(self: &Self) -> u64;\n}\nstruct Rect {\n    w: u64,\n    h: u64\n}\nimpl Shape for Rect {\n    fn area(self: &Self) -> u64 {\n        return self.w * self.h;\n    }\n}\nstruct Drawing {\n    main: rc::Rc<dyn Shape>\n}\nfn describe(d: Drawing) -> u64 {\n    return d.main.get().area();\n}\nfn main() {\n    o: dyn Shape = Rect { w: 4, h: 4 };\n    d := Drawing { main: rc::new(o) };\n    println(\"area {}\", describe(d));\n}\n",
+    "stdout": "area 16\n"
+  },
+  {
+    "name": "ergo-rc-dyn-weak-upgrade",
+    "modules": [
+      "lib/rc.grl",
+      "lib/core.grl"
+    ],
+    "source": "use rc;\ninterface Shape {\n    fn area(self: &Self) -> u64;\n}\nstruct Rect {\n    w: u64,\n    h: u64\n}\nimpl Shape for Rect {\n    fn area(self: &Self) -> u64 {\n        return self.w * self.h;\n    }\n}\nfn main() {\n    o: dyn Shape = Rect { w: 1, h: 9 };\n    r: rc::Rc<dyn Shape> = rc::new(o);\n    w := rc::downgrade(&r);\n    match w.upgrade() {\n        Some(live) => println(\"live {}\", live.get().area()),\n        None => println(\"gone\"),\n    }\n    drop(r);\n    match w.upgrade() {\n        Some(live) => println(\"live {}\", live.get().area()),\n        None => println(\"gone\"),\n    }\n}\n",
+    "stdout": "live 9\ngone\n"
+  },
+  {
+    "name": "ergo-arc-dyn-object",
+    "modules": [
+      "lib/rc.grl",
+      "lib/core.grl"
+    ],
+    "source": "use rc;\ninterface Shape {\n    fn area(self: &Self) -> u64;\n}\nstruct Rect {\n    w: u64,\n    h: u64\n}\nimpl Shape for Rect {\n    fn area(self: &Self) -> u64 {\n        return self.w * self.h;\n    }\n}\nimpl Drop for Rect {\n    fn drop(self: &mut Rect) {\n        println(\"drop rect {}\", self.w);\n    }\n}\nfn main() {\n    o: dyn Shape = Rect { w: 5, h: 5 };\n    a: rc::Arc<dyn Shape> = rc::arc_new(o);\n    b := a.clone();\n    println(\"both {} {}\", a.get().area(), b.get().area());\n    drop(a);\n    println(\"alive {}\", b.strong_count());\n    drop(b);\n    println(\"end\");\n}\n",
+    "stdout": "both 25 25\nalive 1\ndrop rect 5\nend\n"
+  },
+  {
+    "name": "ergo-rc-dyn-reject-cross-thread",
+    "modules": [
+      "lib/rc.grl",
+      "lib/core.grl"
+    ],
+    "reject": true,
+    "source": "use rc;\ninterface Shape {\n    fn area(self: &Self) -> u64;\n}\nstruct Rect {\n    w: u64,\n    h: u64\n}\nimpl Shape for Rect {\n    fn area(self: &Self) -> u64 {\n        return self.w * self.h;\n    }\n}\nfn work(item: u64, shape: &rc::Rc<dyn Shape>) -> u64 {\n    return item + shape.get().area();\n}\nfn main() {\n    o: dyn Shape = Rect { w: 3, h: 3 };\n    r: rc::Rc<dyn Shape> = rc::new(o);\n    results := parallel_map(u64[1, 2], &r, work);\n    println(\"{}\", results[0]);\n}\n",
+    "diagnostic": [
+      "cannot share parallel_map context"
+    ]
+  },
+  {
+    "name": "ergo-arc-dyn-reject-not-shared",
+    "modules": [
+      "lib/rc.grl",
+      "lib/core.grl"
+    ],
+    "reject": true,
+    "source": "use rc;\ninterface Shape {\n    fn area(self: &Self) -> u64;\n}\nstruct Rect {\n    w: u64,\n    h: u64\n}\nimpl Shape for Rect {\n    fn area(self: &Self) -> u64 {\n        return self.w * self.h;\n    }\n}\nfn work(item: u64, shape: &rc::Arc<dyn Shape>) -> u64 {\n    return item + shape.get().area();\n}\nfn main() {\n    o: dyn Shape = Rect { w: 3, h: 3 };\n    a: rc::Arc<dyn Shape> = rc::arc_new(o);\n    results := parallel_map(u64[1, 2], &a, work);\n    println(\"{}\", results[0]);\n}\n",
+    "diagnostic": [
+      "no capability proof for the type parameter"
+    ]
   }
 ]
