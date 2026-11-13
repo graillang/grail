@@ -276,7 +276,7 @@ against both parents (`git diff origin/gaps2-taskfail -- compiler/runtime.grl`,
 A hardware watchpoint on the block header 16 bytes before the first record never fires: that record's
 header is fine (`size=0x100`, `kind=1` for a 240-byte request rounded to 256). The **second** record
 of the same scope is the bad one, and its header is already wrong the moment `rt_task_spawn`
-returns: `size=0x21f8a8`, `kind=1`. Nothing writes that header afterwards (a watchpoint on it stays
+returns: `size=0x21f8a8`, `kind=1` (`0x21f8a8` is an address inside `.text` - not a symbol start, since `f_main_work` is `0x2208a8` - i.e. the shape of a saved return address). Nothing writes that header afterwards (a watchpoint on it stays
 silent through the crash).
 
 `rt_alloc_unlocked` writes `block+0 = size` only on the **bump** path; a block taken from the
