@@ -773,8 +773,12 @@ fn part<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
         o(&mut c, view("\n.text\n"));
     }
     // Each module's literals start eight-aligned, in one file as in parts: a part object's section
-    // is aligned on its own, so the single build pads where the split link will.
-    o(&mut c, view(".pushsection .rodata\n.p2align 3\n.popsection\n"));
+    // is aligned on its own, so the single build pads where the split link will. Only an ELF build
+    // is split, so only it needs the pad; a Mach-O build leaves the section to its literals, because
+    // an empty pad must not bring one into being (`.rodata` is not a section name there at all).
+    if c.plat == 0 {
+        o(&mut c, view(".pushsection .rodata\n.p2align 3\n.popsection\n"));
+    }
     return ();
 }
 // Decimal digits of a synthetic module suffix plus one, or 0 when the suffix is not a number.
@@ -2144,6 +2148,16 @@ fn rodata<a>(c: (&a mut C)) -> unit {
         return ();
     }
     o(&mut c, view(".pushsection .rodata\n"));
+    return ();
+}
+// A weak definition. ELF spells it `.weak`; Mach-O has no `.weak` for a definition - Darwin's
+// assembler rejects it as an unknown directive - and spells it `.weak_definition`.
+fn weak_def<a>(c: (&a mut C)) -> unit {
+    if c.plat == 1 {
+        o(&mut c, view(".weak_definition "));
+        return ();
+    }
+    o(&mut c, view(".weak "));
     return ();
 }
 fn copy_to<a, b>(out: (&a mut u8[]), s: &b [u8]) -> unit {
@@ -5869,9 +5883,14 @@ fn src_where<a>(c: (&a mut C), file: u64, pos: u64) -> u8[] {
     }
     return out;
 }
-// A NUL-terminated string in .rodata, labelled so the check can name it.
+// A NUL-terminated string in read-only data, labelled so the check can name it. Mach-O puts a C
+// string in __TEXT,__cstring, the section `cstr` uses; ELF has one .rodata for both.
 fn ref_data<a, b, d>(c: (&a mut C), label: &b [u8], text: &d [u8]) -> unit {
-    o(&mut c, view(".pushsection .rodata\n"));
+    if c.plat == 1 {
+        o(&mut c, view(".pushsection __TEXT,__cstring\n"));
+    } else {
+        o(&mut c, view(".pushsection .rodata\n"));
+    }
     o(&mut c, view(label));
     o(&mut c, view(":\n.asciz \""));
     for i in text.len() {
@@ -8871,7 +8890,7 @@ fn emit_vtables<a>(c: (&a mut C)) -> unit {
         id := c.vtables[2 * i];
         concrete := c.vtables[2 * i + 1];
         vt := vtable_symbol(&mut c, id, concrete);
-        o(&mut c, view(".weak "));
+        weak_def(&mut c);
         push_bytes(&mut c.out, view(vt));
         c.out.push(10);
         push_bytes(&mut c.out, view(vt));
@@ -32713,7 +32732,7 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                 fx_end(&mut c);
                 helper_sym := drop_symbol(&mut c, ty);
                 fx_helper(&mut c, view(helper_sym));
-                o(&mut c, view(".weak "));
+                weak_def(&mut c);
                 drop_name(&mut c, ty);
                 c.out.push(10);
                 drop_name(&mut c, ty);

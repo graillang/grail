@@ -41,6 +41,10 @@ const programs = [
 ];
 const cputypes = { 'macos-x86_64': 'X86_64', 'macos-aarch64': 'ARM64' };
 const files = { 'macos-x86_64': 'x86_64', 'macos-aarch64': 'arm64' };
+// Every section a Grail Mach-O object may carry: code, read-only data (constants and the runtime's
+// diagnostic strings), C strings and zero-fill. A section outside this set means an ELF name or a
+// typo reached the assembler.
+const machoSections = new Set(['__text', '__const', '__cstring', '__bss', '__DATA', '__data']);
 let objects = 0, executables = 0;
 
 for (const target of machoTargets) {
@@ -78,7 +82,12 @@ for (const target of machoTargets) {
     for (const section of expectedSections) {
       has(sections, new RegExp(`${section}\\s+[0-9a-f]{8}`), `${label}: missing section ${section}`);
     }
-    if (!program.literal) lacks(sections, /__const\s/, `${label}: unexpected __const section`);
+    // The runtime's own diagnostic strings are read-only data in every program, so the object's
+    // sections are checked against the whole set a Mach-O Grail image may have rather than against
+    // the program's own literals.
+    for (const found of sections.matchAll(/^\s*\d+\s+(__\w+)/gm)) {
+      check(machoSections.has(found[1]), `${label}: unexpected Mach-O section ${found[1]}`);
+    }
     const symbols = tool('llvm-nm', [object]);
     has(symbols, /T _main$/m, `${label}: _main is not a defined text symbol`);
     has(symbols, / b _rt_state$/m, `${label}: _rt_state is not zero-fill storage`);
@@ -340,4 +349,41 @@ for (const target of machoTargets) {
   loaderLinks += 1;
 }
 
-console.log(`macos: ${objects} Mach-O objects and ${executables} executables verified on ${machoTargets.join(', ')}; ${frameworkLinks} framework links, ${frameworkLinks * 2} unknown-framework rejections, ${frameworkLinks * 3} signature checks, ${dylibsBuilt} shared dylibs, ${rpathLinks} @rpath links and ${loaderLinks} dlopen images`);
+// The driver itself, not just the tooling: `grail build --target macos-*` has to assemble and link
+// a Mach-O executable on a host with no macOS SDK. This is the path a user (and the CI job on
+// macos-14) takes, and it failed at the assembler until the emitter stopped writing ELF directives
+// and Darwin spelled weak definitions `.weak_definition`.
+let driverBuilds = 0;
+for (const target of machoTargets) {
+  const directory = join(work, target, 'driver');
+  rmSync(directory, { recursive: true, force: true });
+  mkdirSync(directory, { recursive: true });
+  const source = join(directory, 'hello.grl');
+  writeFileSync(source, programs[0].source);
+  const executable = join(directory, 'hello');
+  const env = { ...process.env };
+  // No SDK: the driver has to build its own libSystem stub from the object's undefined symbols.
+  delete env.GRAIL_SDK;
+  const built = spawnSync(compiler, ['build', '--target', target, source, '-o', executable], {
+    cwd: root, encoding: 'utf8', env, maxBuffer: 64 * 1024 * 1024,
+  });
+  check(built.status === 0, `${target}: grail build failed\n${built.stdout}${built.stderr}`);
+  check(!/set GRAIL_SDK/.test(built.stdout), `${target}: grail build still asks for an SDK`);
+  check(existsSync(executable), `${target}: grail build wrote no executable`);
+  has(tool('file', [executable]), new RegExp(`Mach-O 64-bit ${files[target]} executable`), `${target}: grail build did not link a Mach-O executable`);
+  has(tool('file', [executable]), /NOUNDEFS/, `${target}: grail build left undefined imports`);
+  const commands = tool('llvm-objdump', ['--macho', '--private-headers', executable]);
+  has(commands, /platform macos/, `${target}: grail build image has no LC_BUILD_VERSION`);
+  has(commands, /cmd LC_MAIN/, `${target}: grail build image has no LC_MAIN`);
+  check(dylibs(executable).includes('/usr/lib/libSystem.B.dylib'), `${target}: grail build image does not load libSystem (${dylibs(executable).join(', ')})`);
+  // The stub it wrote is linkage scaffolding, not a claim about Apple's library: it exports the
+  // object's own imports and nothing else.
+  const stub = join(directory, '.grail-macos', 'libSystem.tbd');
+  check(existsSync(stub), `${target}: grail build did not write its libSystem stub`);
+  const stubText = readFileSync(stub, 'utf8');
+  has(stubText, /install-name: '\/usr\/lib\/libSystem\.B\.dylib'/, `${target}: the stub has the wrong install name`);
+  has(stubText, /_write/, `${target}: the stub does not export the runtime's libSystem imports`);
+  driverBuilds += 1;
+}
+
+console.log(`macos: ${objects} Mach-O objects and ${executables} executables verified on ${machoTargets.join(', ')}; ${frameworkLinks} framework links, ${frameworkLinks * 2} unknown-framework rejections, ${frameworkLinks * 3} signature checks, ${dylibsBuilt} shared dylibs, ${rpathLinks} @rpath links, ${loaderLinks} dlopen images and ${driverBuilds} driver links`);

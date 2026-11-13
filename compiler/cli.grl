@@ -555,6 +555,86 @@ fn target_name(t: u64) -> u8[] {
 fn is_macho<a>(target: &a [u8]) -> bool {
     return eq(view(target), view("macos-x86_64")) || eq(view(target), view("macos-aarch64"));
 }
+fn put<a, b>(out: (&a mut u8[]), text: &b [u8]) -> unit {
+    for i in text.len() {
+        out.push(text[i]);
+    }
+    return ();
+}
+// The undefined C symbols of one object, exactly as the linker sees them: `nm -u` prints one per
+// line. The shell passes the two paths as positional parameters, so a directory with a space in it
+// is just a path here, and GRAIL_NM names the nm to use, as tools/native.mjs does. Returns 0 when
+// the list was written.
+fn macho_undefined<a, b>(object: &a [u8], out: &b [u8]) -> u64 {
+    script := "nm=${GRAIL_NM:-llvm-nm}; \"$nm\" -u \"$1\" > \"$2\"";
+    mut argv = u8[][
+        copy(view("sh")),
+        copy(view("-c")),
+        copy(view(script)),
+        copy(view("sh")),
+        copy(view(object)),
+        copy(view(out))
+    ];
+    return host::command(argv);
+}
+// A macOS link without an SDK: ld64.lld needs a libSystem, and a text-based stub that exports the C
+// symbols the object leaves undefined is the whole of what a cross-link needs - the same linkage
+// scaffolding tools/macos.mjs builds. The image still records the real /usr/lib/libSystem.B.dylib
+// dependency, so a program linked here is inspected (and released) like a native one. Writes
+// <object dir>/.grail-macos/libSystem.tbd and returns that directory, or nothing when the object
+// has no imports to export or no nm could be run.
+fn macho_libsystem<a, b, d>(object: &a [u8], arch: &b [u8], asm: &d [u8]) -> u8[] {
+    dir := path_join(view(dirname(view(object))), view(".grail-macos"));
+    host::mkdir(view(dir));
+    names := path_join(view(dir), view("undefined"));
+    if macho_undefined(view(object), view(names)) != 0 {
+        return u8[];
+    }
+    text := host::read_file(view(names));
+    host::remove(view(names), 0);
+    mut symbols = u8[];
+    mut count = 0;
+    mut start: u64 = 0;
+    mut i: u64 = 0;
+    while i <= text.len() {
+        if (i == text.len()) || (text[i] == 10) {
+            mut name = u8[];
+            for j in i - start {
+                ch := text[start + j];
+                if ch != 13 {
+                    name.push(ch);
+                }
+            }
+            if name.len() != 0 {
+                if count != 0 {
+                    symbols.push(44);
+                    symbols.push(32);
+                }
+                put(&mut symbols, view(name));
+                count += 1;
+            }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    if count == 0 {
+        return u8[];
+    }
+    // The binder is the one symbol every Mach-O image needs and no object names.
+    put(&mut symbols, view(", dyld_stub_binder"));
+    platform := cat(view(arch), view("-macos"));
+    mut body = u8[];
+    put(&mut body, view("--- !tapi-tbd\ntbd-version: 4\ntargets: [ "));
+    put(&mut body, view(platform));
+    put(&mut body, view(" ]\ninstall-name: '/usr/lib/libSystem.B.dylib'\ncurrent-version: 1311\nexports:\n  - targets: [ "));
+    put(&mut body, view(platform));
+    put(&mut body, view(" ]\n    symbols: [ "));
+    put(&mut body, view(symbols));
+    put(&mut body, view(" ]\n...\n"));
+    stub := path_join(view(dir), view("libSystem.tbd"));
+    host::write_file(view(stub), view(body));
+    return dir;
+}
 fn tool<a, b>(variable: &a [u8], fallback: &b [u8]) -> u8[] {
     v := host::env(variable);
     if v.len() != 0 {
@@ -825,37 +905,44 @@ fn compile_mode<a, b, d, e, g>(
         return 1;
     }
     if macho != 0 {
-        // Without an SDK there is no libSystem stub to link against, so the object is the result.
-        root := host::env(view("GRAIL_SDK"));
-        if root.len() == 0 {
-            say(view("grail: wrote a Mach-O object; set GRAIL_SDK to a macOS SDK to link it"));
-            return 1;
-        }
-        libs := path_join(view(root), view("usr/lib"));
         mut link = u8[][
             tool(view("GRAIL_LINKER"), view("ld64.lld")),
             copy(view("-arch")),
-            arch,
+            copy(view(arch)),
             copy(view("-platform_version")),
             copy(view("macos")),
             copy(view("11.0")),
-            copy(view("11.0")),
-            copy(view("-syslibroot")),
-            copy(view(root)),
-            cat(view("-L"), view(libs)),
-            copy(view("-lSystem")),
-            copy(view("-e")),
-            copy(view("_main")),
-            copy(view(object)),
-            copy(view("-o")),
-            copy(view(output))
+            copy(view("11.0"))
         ];
+        sdk := host::env(view("GRAIL_SDK"));
+        if sdk.len() != 0 {
+            libs := path_join(view(sdk), view("usr/lib"));
+            link.push(copy(view("-syslibroot")));
+            link.push(copy(view(sdk)));
+            link.push(cat(view("-L"), view(libs)));
+            link.push(copy(view("-lSystem")));
+        } else {
+            // No SDK on this host: the stub stands in for libSystem (see macho_libsystem).
+            stub := macho_libsystem(view(object), view(arch), view(asm));
+            if stub.len() == 0 {
+                say(view("grail: the Mach-O object is assembled, but no libSystem to link it against"));
+                say(view("grail: set GRAIL_SDK to a macOS SDK, or put llvm-nm on PATH"));
+                return 1;
+            }
+            link.push(cat(view("-L"), view(stub)));
+            link.push(copy(view("-lSystem")));
+        }
+        link.push(copy(view("-e")));
+        link.push(copy(view("_main")));
+        link.push(copy(view(object)));
+        link.push(copy(view("-o")));
+        link.push(copy(view(output)));
         inputs := link_inputs(view(asm), view(dirname(view(entry))));
         for i in inputs.len() {
             link.push(item(&inputs, i));
         }
         if host::command(link) != 0 {
-            say(view("grail: linking failed (needs ld64.lld and a macOS SDK)"));
+            say(view("grail: linking failed (needs ld64.lld, and an SDK or llvm-nm)"));
             return 1;
         }
         return 0;
