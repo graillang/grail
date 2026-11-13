@@ -31,6 +31,9 @@ function tool(name, argv) {
 
 // The libSystem entry points the runtime and the darwin module are allowed to import.
 const libSystem = new Set([
+  // _NSGetExecutablePath is dyld's, re-exported through libSystem: the running image's own path,
+  // which is what lets the driver re-invoke itself for `grail build`.
+  '_NSGetExecutablePath',
   '_access', '_clock_gettime', '_close', '___error', '_execve', '_exit', '_fork', '_getdirentries64',
   '_getpid', '_kill', '_mkdir', '_mmap', '_mprotect', '_munmap', '_nanosleep', '_open', '_pipe',
   '_poll', '_read', '_readlink', '_rmdir', '_sched_yield', '_sysconf', '_unlink', '_wait4', '_write',

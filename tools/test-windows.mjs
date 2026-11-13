@@ -129,6 +129,11 @@ export async function check(compiler) {
     const entry = image.match(/AddressOfEntryPoint\s+([0-9a-f]+)/)[1];
     assert.notEqual(Number.parseInt(entry, 16), 0, `${test.name}: image has no entry point`);
     const imported = [...inspectImage(built.executable).matchAll(/^\s+Symbol: (\S+)/gm)].map(m => m[1]);
+    // The runtime's own Win32 calls: the console is set to UTF-8 at startup and the working
+    // directory is published as PWD, which is what a diagnostic path is trimmed with.
+    for (const name of ['SetConsoleOutputCP', 'SetConsoleCP', 'GetCurrentDirectoryA']) {
+      assert.ok(imported.includes(name), `${test.name}: expected ${name} in the import table`);
+    }
     for (const name of ['ExitProcess', 'WriteFile', 'GetCommandLineA', 'CreateFileA']) {
       if (test.name === 'hello' || test.name === 'file-write-read') {
         assert.ok(imported.includes(name), `${test.name}: expected ${name} in the import table`);

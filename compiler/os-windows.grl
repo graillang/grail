@@ -207,11 +207,47 @@ fn rt_syscall(n: u64, a: u64, b: u64, c: u64) -> u64 {
     // Threads, sockets, epoll, futex and directory streams are not implemented for PE yet.
     return wrapping_sub(0, 38);
 }
+// Windows has no mremap(2): a grow moves the payload to a fresh mapping and releases the old one,
+// the way the Darwin module does it. rt_grow keeps every block of 512 KiB or more in a mapping of
+// its own and grows it in place, so without this a vector or string cannot pass that size at all -
+// the compiler's own token tables do, which is what made a PE host unable to compile anything larger
+// than a toy program.
+fn rt_win_remap(old: u64, oldsize: u64, newsize: u64) -> u64 {
+    fresh := raw_map(newsize);
+    if (fresh == 0) || rt_error(fresh) {
+        return wrapping_sub(0, 12); // ENOMEM, as mremap reports it
+    }
+    mut n = oldsize;
+    if newsize < n {
+        n = newsize;
+    }
+    rt_copy_bytes(fresh, old, n);
+    rt_win_unmap(old);
+    return fresh;
+}
 fn rt_syscall4(n: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
     if n == 25 {
-        return wrapping_sub(0, 38); // mremap
+        return rt_win_remap(a, b, c);
     }
     return wrapping_sub(0, 38);
+}
+// The current directory: GetCurrentDirectoryA writes it and returns its length in characters.
+fn rt_cwd(buf: u64, size: u64) -> u64 {
+    n := raw_win32(GetCurrentDirectoryA, size - 1, buf);
+    if n == 0 {
+        return rt_win_errno();
+    }
+    raw_putbyte(buf + n, 0);
+    return n;
+}
+// The running image: GetModuleFileNameA writes its full path, and the return value is its length.
+fn rt_exe_path(buf: u64, size: u64) -> u64 {
+    n := raw_win32(GetModuleFileNameA, 0, buf, size - 1);
+    if n == 0 {
+        return rt_win_errno();
+    }
+    raw_putbyte(buf + n, 0);
+    return n;
 }
 fn rt_readlinkat(path: u64, buf: u64, size: u64) -> u64 {
     return wrapping_sub(0, 38);
@@ -343,9 +379,29 @@ fn rt_win_take(addr: u64) -> u64 {
 // Waits for a joined thread that is still registered for this stack, then its stack is safe to
 // release. Detached threads are never registered, so this is a no-op for them.
 fn rt_win_reap(stack: u64) -> u64 {
-    rt_allocator_lock();
+    // This runs on the unmap path, which two callers reach: a thread's own teardown, with no
+    // allocator lock held, and the allocator releasing a block of 512 KiB or more, with the lock
+    // held. Taking the lock before knowing there is a stack to reap deadlocked the second caller,
+    // so the scan below decides first and only a registered stack claims its handle under the lock.
     mut i = 0;
+    mut found = 0;
+    while i < 15 {
+        slot := rt_win_slot(i);
+        tid := raw_load(slot);
+        if tid != 0 {
+            if raw_load(tid + 8) == stack {
+                found = 1;
+                i = 15;
+            }
+        }
+        i = i + 1;
+    }
+    if found == 0 {
+        return 0;
+    }
+    rt_allocator_lock();
     mut handle = 0;
+    i = 0;
     while i < 15 {
         slot := rt_win_slot(i);
         tid := raw_load(slot);
@@ -664,6 +720,11 @@ fn rt_spawn_wait(paths: u64, argv: u64, envp: u64) -> u64 {
 // Process setup for the PE entry: argv from GetCommandLineA, envp from GetEnvironmentStringsA.
 // Both live in untracked mappings so they do not count as user allocations at shutdown.
 fn rt_os_init() -> u64 {
+    // Grail strings are UTF-8, so the console is told to read and write UTF-8 rather than the
+    // ANSI code page: without this every non-ASCII character printed through WriteFile arrives
+    // as mojibake (cp1252 has no mapping for most of it).
+    raw_win32(SetConsoleOutputCP, 65001);
+    raw_win32(SetConsoleCP, 65001);
     line := raw_win32(GetCommandLineA);
     mut length = 0;
     while raw_byte(line + length) != 0 {
@@ -699,6 +760,24 @@ fn rt_os_init() -> u64 {
             p = p + 1;
         }
         p = p + 1;
+    }
+    // `host::env("PWD")` is how the compiler reads the working directory - the site table trims
+    // source paths with it, so a diagnostic names `compiler/native.grl` rather than an absolute
+    // path. Windows has no PWD (a POSIX shell exports one), so the process publishes its own, and
+    // everything that reads the environment sees it exactly as on Linux.
+    if count < 1022 {
+        pwd := raw_map(8192);
+        if rt_error(pwd) == 0 {
+            raw_putbyte(pwd, 80); // 'P'
+            raw_putbyte(pwd + 1, 87); // 'W'
+            raw_putbyte(pwd + 2, 68); // 'D'
+            raw_putbyte(pwd + 3, 61); // '='
+            n := rt_cwd(pwd + 4, 8188);
+            if rt_error(n) == 0 {
+                raw_store(envtable + count * 8, pwd);
+                count = count + 1;
+            }
+        }
     }
     raw_store(envtable + count * 8, 0);
     raw_store(raw_state() + 16, envtable);
