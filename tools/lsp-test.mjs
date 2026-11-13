@@ -497,7 +497,9 @@ const URI = 'file:///virtual/session.grl';
     '    poi',
     '    Po',
     '    other := point.',
+    '    s := point.sum();',
     '    w := Word.',
+    '    W := Word::',
     '    total := area(',
     '    ghost.',
     '}',
@@ -568,6 +570,11 @@ const URI = 'file:///virtual/session.grl';
     equal(itemFor(answer, 'Second').kind, 20, 'a variant is an EnumMember');
     equal(itemFor(answer, 'Second').detail, 'Word::Second(u64)', 'a variant carries its payload');
   }
+  // `Type::` is the same context as `Type.`.
+  {
+    const answer = await complete(pointIn(COMPLETE, 'W := Word::\n', 'W := Word::\n'.length - 1));
+    equal(labels(answer).sort(), ['First', 'Second'], 'a variant is offered after `::` too');
+  }
   // After `name(`: the call's parameters.
   {
     const answer = await complete(pointIn(COMPLETE, 'area(\n', 'area(\n'.length - 1));
@@ -586,6 +593,13 @@ const URI = 'file:///virtual/session.grl';
     equal(itemFor(inner, 'value').detail, 'string', 'the innermost binding wins');
     const outer = await complete(pointIn(COMPLETE, '\n    va\n}', '\n    va'.length));
     equal(itemFor(outer, 'value').detail, 'u64', 'outside the block the outer binding is offered');
+  }
+  // A method call's hover is its signature.
+  {
+    const answer = await client.request(nextId(), 'textDocument/hover', {
+      textDocument: { uri }, position: pointIn(COMPLETE, 'point.sum()', 7),
+    });
+    ok(answer.result.contents.value.includes('fn sum(self: &Point) -> u64'), 'a method call shows its signature');
   }
   equal((await complete({ line: 90, character: 0 })).error.code, -32602, 'a bad completion position is an error');
   equal(await client.stop(), 0, 'clean exit');
@@ -626,6 +640,10 @@ const URI = 'file:///virtual/session.grl';
     'fn pair() {',
     '    pair := Pair { x: "text" };',
     '    println(pair.x);',
+    '}',
+    '',
+    'fn lone(b: u64) -> u64 {',
+    '    return b;',
     '}',
     '',
   ].join('\n');
@@ -669,9 +687,11 @@ const URI = 'file:///virtual/session.grl';
   }
   // A parameter.
   {
-    const found = await edits(pointIn(RENAME, 'b: u64)', 0));
+    const found = await edits(pointIn(RENAME, 'b: u64)', 0), 'renamed');
     equal(found.length, 2, 'a parameter renames its declaration and use');
     equal(found.map(span => span.range.start.line), [5, 6], 'parameter declaration and use');
+    ok(!found.some(span => span.range.start.line > 20), 'a same-named parameter of another function is untouched');
+    equal(found[0].newText, 'renamed', 'the edit carries the new name');
   }
   // A function, a record and a field.
   {
