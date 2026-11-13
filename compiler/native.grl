@@ -13,7 +13,9 @@ use cli;
 // first file is the entry; it takes nothing or argv[1] as a byte view. Move/initialization
 // checks, loans/lifetimes, captured-storage writeback and deterministic drops are active.
 // Generic types/functions use typed specialization. Include runtime.grl as source.
-// Type ids: 0 u64, 1 unit, 2 bytes, 3 string, 4 view; others are interned below.
+// Type ids: 0 u64, 1 unit, 2 bytes, 3 string, 4 view; others are interned below. Id 0 is a real
+// type, so no id can mean "no type": `NO_TYPE` answers that, and every site that asks whether a
+// type is known asks it directly instead of keeping a second flag beside the id (NO_TYPE below).
 // Type kinds: 1 u64, 2 unit, 3 bytes, 4 string, 5 view, 6 vec(arg), 7 ref(arg),
 // 8 named(decl, args), 9 opaque template parameter, 10 opaque bound parameter (arg, identity),
 // 11 Atomic<u64>, 12 capture-free typed function pointer, 13 Mutex<T>, 14 Scope<C>, 15 interface proof,
@@ -29,6 +31,24 @@ use cli;
 //    `dyn` type, kind 33). A `&dyn I` value is one word, a handle to a 16-byte {data, vtable} pair in
 //    the frame that built it (borrow_dyn): building one allocates nothing, and dispatch loads the
 //    entry from the pair's vtable (call_typed), exactly as an owned `dyn I` does through its cell.
+
+// ---- the "no type" sentinel ----------------------------------------------------------------------
+// A type is an index into `c.types`, interned on demand: id 0 is u64, 1 unit, 2 bytes, 3 string,
+// 4 view (the five every compile seeds, in `main`), so every id is a real type and an id can never
+// also mean "no type". `NO_TYPE` is that answer instead: a value no table can hold, so one id
+// carries both the answer and whether there is one, and no site needs a `found`/`have` flag beside
+// it. Every `== 0` on a type id means u64 and only u64; every "is there a type?" is
+// `== NO_TYPE`, and an accessor refuses a sentinel rather than indexing the table with it.
+const NO_TYPE: u64 = 18446744073709551615;
+// Two more values above the id space are pseudo-types, not ids: a compile-time target tag such as
+// `.windows` (ct_tag_ty), and a constant whose value a compile-time call has not produced yet
+// (ct_pending). Neither is ever an index into `c.types`.
+const CT_TAG: u64 = 18446744073709551614;
+const CT_PENDING: u64 = 18446744073709551613;
+// Whether an id names a type a table can be indexed by. The three sentinels above are not types.
+fn is_type_id(ty: u64) -> bool {
+    return ty < CT_PENDING;
+}
 
 struct Tok {
     kind: u64,
@@ -220,6 +240,8 @@ struct ImplParams {
     tnames: u8[][],
     bounds: u64[],
     interfaces: u64[][],
+    // The self type this implementation's parameters build, or NO_TYPE until iface_impl_self
+    // builds it: the id says whether it exists, so there is no second flag to keep in step.
     self_ty: u64
 }
 struct Constant {
@@ -499,9 +521,12 @@ struct C {
     fn_thunk_used: u64,
     closure_env: u64,
     // What the next closure literal is expected to be (closure_hint): its parameter types and result,
-    // each 18446744073709551615 when not known yet.
+    // each NO_TYPE when not known yet.
     hint_params: u64[],
     hint_ret: u64,
+    // Whether closure_hint set a hint at all. Not a "is there a type" flag: every element of the
+    // hint says NO_TYPE itself; this says whether a hint was given, which a hint that fixes nothing
+    // does not tell apart from no hint.
     hint_set: u64,
     inherent: u64,
     constants: Constant[],
@@ -561,6 +586,8 @@ struct C {
     type_interfaces: u64[][],
     interfaces: Interface[],
     implementations: Implementation[],
+    // The type `Self` names inside the `impl` being parsed, or NO_TYPE outside one. The id itself
+    // says whether there is a `Self`: no separate flag, no +1 offset to keep it clear of u64.
     self_type: u64,
     current_impl: u64,
     // Functions default_methods copied into an implementation from its interface.
@@ -576,6 +603,8 @@ struct C {
     headers_complete: u64,
     resources: Resource[],
     loopmark: u64,
+    // The result type of the function whose body is being compiled, or NO_TYPE before any signature
+    // has been read. Id 0 is u64, so a default of 0 would read as a u64 result.
     result: u64,
     check: ownership::State,
     members: Member[],
@@ -4715,7 +4744,7 @@ fn validate_return<a>(c: (&a mut C), v: Val) -> unit {
     // A specialisation's result may carry its type arguments' lifetimes (captured_bonds).
     bound := copy_numbers(&c.bindings);
     for i in bound.len() {
-        if bound[i] != 18446744073709551615 {
+        if bound[i] != NO_TYPE {
             more := type_caps(&mut c, bound[i], 0);
             for j in more.len() {
                 add_region(&mut rs, more[j]);
@@ -7728,6 +7757,9 @@ fn intern_args<a>(c: (&a mut C), k: u64, arg: u64, mode: u64, regions: u64[], ar
 }
 // The environment record of a closure type, or 0 when it carries no captures.
 fn ty_env<a>(c: (&a mut C), ty: u64) -> u64 {
+    if !is_type_id(ty) {
+        fail(&mut c, view("internal: no type where one is required"));
+    }
     t := &c.types[ty];
     return t.env;
 }
@@ -7736,6 +7768,9 @@ fn intern_full<a>(c: (&a mut C), k: u64, arg: u64, mode: u64, regions: u64[]) ->
 }
 fn type_args<a>(c: (&a mut C), ty: u64) -> u64[] {
     mut args = u64[];
+    if !is_type_id(ty) {
+        fail(&mut c, view("internal: no type where one is required"));
+    }
     t := &c.types[ty];
     for i in t.args.len() {
         args.push(t.args[i]);
@@ -8362,14 +8397,14 @@ fn impl_bindings<a>(c: (&a mut C), id: u64, actual: u64) -> u64[] {
     pattern := c.implementations[id - 1].ty;
     mut map = u64[];
     for i in count {
-        map.push(18446744073709551615);
+        map.push(NO_TYPE);
     }
     if !type_matches(&mut c, pattern, actual, &mut map) {
         return u64[];
     }
     sets := copy_constraints(&c.impl_params[r - 1].interfaces);
     for i in count {
-        if map[i] == 18446744073709551615 {
+        if map[i] == NO_TYPE {
             return u64[];
         }
         if i < sets.len() {
@@ -8392,7 +8427,7 @@ fn type_matches<a, b>(c: (&a mut C), pattern: u64, actual: u64, map: (&b mut u64
         if map.len() <= i {
             return false;
         }
-        if map[i] == 18446744073709551615 {
+        if map[i] == NO_TYPE {
             exchange(&mut map[i], actual);
             return true;
         }
@@ -8830,19 +8865,31 @@ fn nominal_type<a>(c: (&a mut C), d: u64) -> u64 {
     return intern_args(&mut c, 8, d, 0, rs, args);
 }
 fn ty_kind<a>(c: (&a mut C), ty: u64) -> u64 {
+    if !is_type_id(ty) {
+        fail(&mut c, view("internal: no type where one is required"));
+    }
     t := &c.types[ty];
     return t.kind;
 }
 fn ty_arg<a>(c: (&a mut C), ty: u64) -> u64 {
+    if !is_type_id(ty) {
+        fail(&mut c, view("internal: no type where one is required"));
+    }
     t := &c.types[ty];
     return t.arg;
 }
 fn ty_mode<a>(c: (&a mut C), ty: u64) -> u64 {
+    if !is_type_id(ty) {
+        fail(&mut c, view("internal: no type where one is required"));
+    }
     t := &c.types[ty];
     return t.mode;
 }
 fn type_regions<a>(c: (&a mut C), ty: u64) -> u64[] {
     mut rs = u64[];
+    if !is_type_id(ty) {
+        fail(&mut c, view("internal: no type where one is required"));
+    }
     t := &c.types[ty];
     for i in t.regions.len() {
         rs.push(t.regions[i]);
@@ -9179,7 +9226,7 @@ fn assoc_type<a, b>(c: (&a mut C), base: u64, name: &b [u8]) -> u64 {
     k := ty_kind(&mut c, b);
     if (k == 9) || (k == 30) {
         proofs := type_args(&mut c, b);
-        mut found = 0;
+        mut found = NO_TYPE;
         // `T: Source<Item = u64>` in this signature: T::Item is u64.
         if k == 9 {
             param := ty_arg(&mut c, b);
@@ -9200,7 +9247,7 @@ fn assoc_type<a, b>(c: (&a mut C), base: u64, name: &b [u8]) -> u64 {
                 assoc := copy_names(&c.interfaces[id - 1].assoc);
                 for j in assoc.len() {
                     if same(view(assoc[j]), view(name)) {
-                        if found != 0 {
+                        if found != NO_TYPE {
                             fail(&mut c, view("ambiguous associated type: several bounds declare it"));
                         }
                         found = intern_full(&mut c, 30, b, id * 1024 + j, u64[]);
@@ -9208,14 +9255,14 @@ fn assoc_type<a, b>(c: (&a mut C), base: u64, name: &b [u8]) -> u64 {
                 }
             }
         }
-        if found == 0 {
+        if found == NO_TYPE {
             fail(&mut c, view("no associated type of that name in this parameter's bounds"));
         }
         return found;
     }
-    // Type id 0 is u64, so whether one was found is its own flag.
-    mut found = 0;
-    mut any = false;
+    // A concrete base: the answer is the one type the implementation gives, or NO_TYPE. The id
+    // carries "found" itself, so there is no second flag to forget.
+    mut found = NO_TYPE;
     for i in c.implementations.len() {
         item := &c.implementations[i];
         ity := item.ty;
@@ -9235,16 +9282,15 @@ fn assoc_type<a, b>(c: (&a mut C), base: u64, name: &b [u8]) -> u64 {
                     if bindings.len() != 0 {
                         given = bind_types(&mut c, given, &bindings);
                     }
-                    if any && (same_type(&mut c, found, given) == 0) {
+                    if (found != NO_TYPE) && (same_type(&mut c, found, given) == 0) {
                         fail(&mut c, view("ambiguous associated type: several implementations give it"));
                     }
                     found = given;
-                    any = true;
                 }
             }
         }
     }
-    if !any {
+    if found == NO_TYPE {
         fail(&mut c, view("no implementation of this type gives an associated type of that name"));
     }
     return found;
@@ -10546,7 +10592,7 @@ fn parse_type_base<a>(c: (&a mut C)) -> u64 {
         assoc := copy_names(&c.interfaces[id - 1].assoc);
         mut fixed = u64[];
         for j in assoc.len() {
-            fixed.push(18446744073709551615);
+            fixed.push(NO_TYPE);
         }
         if eat(&mut c, view("<")) {
             while true {
@@ -10570,7 +10616,7 @@ fn parse_type_base<a>(c: (&a mut C)) -> u64 {
             }
         }
         for j in fixed.len() {
-            if fixed[j] == 18446744073709551615 {
+            if fixed[j] == NO_TYPE {
                 fail(&mut c, view("a dyn type names every associated type of its interface: dyn I<Item = T>"));
             }
         }
@@ -10661,8 +10707,8 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
             return param;
         }
     }
-    if same(view(first), view("Self")) & ((c.self_type != 0)) {
-        mut st = c.self_type - 1;
+    if same(view(first), view("Self")) & ((c.self_type != NO_TYPE)) {
+        mut st = c.self_type;
         if c.bindings.len() != 0 {
             b := copy_numbers(&c.bindings);
             st = bind_types(&mut c, st, &b);
@@ -10679,7 +10725,9 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
         a := find_alias(&mut c, view(first), view(n));
         if a != 0 {
             aty := c.aliases[a - 1].ty;
-            if aty == 0 {
+            // An alias that names u64 has type id 0, so only NO_TYPE is unresolved here. Reading 0
+            // as "no type" refused `module::Word` for `type Word = u64;`; this is the hazard.
+            if aty == NO_TYPE {
                 fail(&mut c, view("recursive or unresolved type alias"));
             }
             return aty;
@@ -10856,7 +10904,7 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
     a := find_alias(&mut c, view(m), view(first));
     if a != 0 {
         aty := c.aliases[a - 1].ty;
-        if aty == 18446744073709551615 {
+        if aty == NO_TYPE {
             fail(&mut c, view("recursive or unresolved type alias"));
         }
         return aty;
@@ -10988,7 +11036,7 @@ fn alias_declaration<a>(c: (&a mut C), pass: u64) -> unit {
             fail(&mut c, view("duplicate type alias"));
         }
         alias_public := c.decl_public;
-        c.aliases.push(Alias { module: module, name: name, public: alias_public, ty: 18446744073709551615 });
+        c.aliases.push(Alias { module: module, name: name, public: alias_public, ty: NO_TYPE });
         return ();
     }
     if pass == 3 {
@@ -13286,7 +13334,7 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     mut proofs = u64[];
     proofs.push(proof);
     self := intern_args(&mut c, 9, 0, 0, u64[], proofs);
-    exchange(&mut c.self_type, self + 1);
+    exchange(&mut c.self_type, self);
     while !eat(&mut c, view("}")) {
         if eat(&mut c, view("type")) {
             assoc_name := ident(&mut c);
@@ -13448,7 +13496,7 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
         item.defaults.push(default);
         item.default_files.push(here_file);
     }
-    exchange(&mut c.self_type, 0);
+    exchange(&mut c.self_type, NO_TYPE);
     return ();
 }
 // ---- default interface methods ---------------------------------------------------------------------
@@ -13503,11 +13551,11 @@ fn default_methods<a>(c: (&a mut C), pass: u64) -> unit {
             exchange(&mut c.type_bounds, u64[]);
             exchange(&mut c.type_interfaces, u64[][]);
             exchange(&mut c.current_impl, k + 1);
-            exchange(&mut c.self_type, ty + 1);
+            exchange(&mut c.self_type, ty);
             before := c.funcs.len();
             func(&mut c, pass, 0);
             exchange(&mut c.current_impl, 0);
-            exchange(&mut c.self_type, 0);
+            exchange(&mut c.self_type, NO_TYPE);
             if pass == 2 {
                 item := &mut c.implementations[k];
                 item.methods.push(before);
@@ -13681,14 +13729,14 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
                 );
         }
         exchange(&mut c.inherent, d);
-        exchange(&mut c.self_type, ty + 1);
+        exchange(&mut c.self_type, ty);
         expect(&mut c, view("{"));
         while !eat(&mut c, view("}")) {
             public := u64(eat(&mut c, view("pub")));
             func(&mut c, pass, public);
         }
         exchange(&mut c.inherent, 0);
-        exchange(&mut c.self_type, 0);
+        exchange(&mut c.self_type, NO_TYPE);
         return ();
     }
     if pass == 1 {
@@ -13793,7 +13841,7 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
         fail(&mut c, view("implementation header missing"));
     }
     exchange(&mut c.current_impl, id);
-    exchange(&mut c.self_type, ty + 1);
+    exchange(&mut c.self_type, ty);
     expect(&mut c, view("{"));
     while !eat(&mut c, view("}")) {
         // `type Item = u64;`: an associated type, before the methods that name it.
@@ -13824,7 +13872,7 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
         }
     }
     exchange(&mut c.current_impl, 0);
-    exchange(&mut c.self_type, 0);
+    exchange(&mut c.self_type, NO_TYPE);
     return ();
 }
 fn bound_signature<a, b>(c: (&a mut C), index: u64, arguments: (&b u64[])) -> u64 {
@@ -14110,10 +14158,10 @@ fn value_param_value<a>(c: (&a mut C), i: u64) -> CVal {
     if i < c.bindings.len() {
         mut b = c.bindings[i];
         // A binding may arrive behind an indirection (kind 10), as canonical_type also unwraps.
-        while (b != 0) && (b != 18446744073709551615) && (ty_kind(&mut c, b) == 10) {
+        while (b != 0) && (b != NO_TYPE) && (ty_kind(&mut c, b) == 10) {
             b = ty_arg(&mut c, b);
         }
-        if (b != 0) && (b != 18446744073709551615) && (ty_kind(&mut c, b) == 31) {
+        if (b != 0) && (b != NO_TYPE) && (ty_kind(&mut c, b) == 31) {
             value = ty_arg(&mut c, b);
         } else {
             exchange(&mut c.ct_unbound, 1);
@@ -14268,7 +14316,7 @@ fn ct_primary<a>(c: (&a mut C)) -> CVal {
             text := ct_take_call_text(&mut c);
             here_module := module_copy(&mut c);
             r := run_tier(&mut c, view(here_module), view(text), view(""));
-            if (r.ty == 3) || ((r.ty != 0) && (ct_seq_elem(&mut c, r.ty) != 18446744073709551615)) {
+            if (r.ty == 3) || ((r.ty != 0) && (ct_seq_elem(&mut c, r.ty) != NO_TYPE)) {
                 fail(&mut c, view("a compile-time call in an expression must give an integer or a bool; bind a string or a table with NAME := f();"));
             }
             return ct_val(r.value, r.ty);
@@ -14649,7 +14697,7 @@ fn ct_pending_type<a>(c: (&a mut C), i: u64) -> u64 {
     m := c.constants[i].module.copy();
     toks := lexer::tokenize(view(text));
     if toks.len() == 0 {
-        return 0;
+        return NO_TYPE;
     }
     mut fmod = m.copy();
     mut fname = slice_bytes(view(text), toks[0].start, toks[0].end);
@@ -14659,16 +14707,23 @@ fn ct_pending_type<a>(c: (&a mut C), i: u64) -> u64 {
     }
     f := ct_module_names(&mut c, view(fmod), view(fname));
     if f == 0 {
-        return 0;
+        // No such function: the constant's type is unknown, not u64 (id 0 is u64, so returning 0
+        // here typed an unresolvable constant as an integer).
+        return NO_TYPE;
     }
     ret := c.funcs[f - 1].ret;
-    if is_bool(&mut c, ret) || (ret == 3) || (ct_seq_elem(&mut c, ret) != 18446744073709551615) {
+    if is_bool(&mut c, ret) || (ret == 3) || (ct_seq_elem(&mut c, ret) != NO_TYPE) {
         return ret;
     }
     return 0;
 }
 // The element type of a vector of integers (bytes count as u8), or the "none" word.
 fn ct_seq_elem<a>(c: (&a mut C), ty: u64) -> u64 {
+    // A sentinel is not a type to look inside: asking about one is answered "not a sequence", which
+    // is what the caller's NO_TYPE test then reads.
+    if !is_type_id(ty) {
+        return NO_TYPE;
+    }
     if ty == 2 {
         return int_type(&mut c, 8, 0);
     }
@@ -14678,7 +14733,7 @@ fn ct_seq_elem<a>(c: (&a mut C), ty: u64) -> u64 {
             return elem;
         }
     }
-    return 18446744073709551615;
+    return NO_TYPE;
 }
 fn ct_list_has<a, b>(list: &a [u8], item: &b [u8]) -> bool {
     mut start = 0;
@@ -14751,7 +14806,7 @@ fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [
         rty = bool_type(&mut c);
     } else if ret == 3 {
         rty = 3;
-    } else if ct_seq_elem(&mut c, ret) != 18446744073709551615 {
+    } else if ct_seq_elem(&mut c, ret) != NO_TYPE {
         // A vector of integers, or bytes: a table, which is what running code early is for.
         rty = ret;
     } else if !integer(&mut c, ret) {
@@ -14787,7 +14842,7 @@ fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [
     push_bytes(&mut probe, view(qualified));
     if rty == 3 {
         push_bytes(&mut probe, view(";\n    print(v);\n    return 0;\n}\n"));
-    } else if (rty != 0) && (ct_seq_elem(&mut c, rty) != 18446744073709551615) {
+    } else if (rty != 0) && (ct_seq_elem(&mut c, rty) != NO_TYPE) {
         // One element per line, as an unsigned word.
         push_bytes(&mut probe, view(";\n    for i in v.len() {\n        println(u64(v[i]));\n    }\n    return 0;\n}\n"));
     } else {
@@ -14920,7 +14975,7 @@ fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [
     if rty == 3 {
         return CTRes { ty: 3, value: 0, text: printed };
     }
-    if (rty != 0) && (ct_seq_elem(&mut c, rty) != 18446744073709551615) {
+    if (rty != 0) && (ct_seq_elem(&mut c, rty) != NO_TYPE) {
         // The elements, laid out at the element's C width (little-endian), for read-only data.
         elem := ct_seq_elem(&mut c, rty);
         width := ffi_field_size(&mut c, elem);
@@ -15009,10 +15064,10 @@ fn ct_for<a>(c: (&a mut C)) -> unit {
     }
     close := block_end(&mut c, open);
     mut t = ty;
-    while (t != 0) && (t != 18446744073709551615) && (ty_kind(&mut c, t) == 10) {
+    while (t != 0) && (t != NO_TYPE) && (ty_kind(&mut c, t) == 10) {
         t = ty_arg(&mut c, t);
     }
-    if (t == 18446744073709551615) || (ty_kind(&mut c, t) == 9) {
+    if (t == NO_TYPE) || (ty_kind(&mut c, t) == 9) {
         exchange(&mut c.pos, close + 1);
         return ();
     }
@@ -15269,7 +15324,7 @@ fn constant_value<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> Val
                         empty := u8[];
                         return string_from_bytes(&mut c, &empty);
                     }
-                    if (pty != 0) && (ct_seq_elem(&mut c, pty) != 18446744073709551615) {
+                    if (pty != 0) && (ct_seq_elem(&mut c, pty) != NO_TYPE) {
                         fresh := invoke(&mut c, view("rt_new"), u64[]);
                         return own(&mut c, fresh, pty);
                     }
@@ -15290,7 +15345,7 @@ fn constant_value<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> Val
             if kpublic == 0 {
                 require_visible(&mut c, view(khome), view(name));
             }
-            if (ty != 3) && (ty != 0) && (ct_seq_elem(&mut c, ty) != 18446744073709551615) {
+            if (ty != 3) && (ty != 0) && (ct_seq_elem(&mut c, ty) != NO_TYPE) {
                 // A compile-time table: its elements in read-only data, copied into a fresh vector
                 // at each use (as a string constant is).
                 elem := ct_seq_elem(&mut c, ty);
@@ -15336,7 +15391,7 @@ fn constant_value<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> Val
             return val(imm(&mut c, value), ty);
         }
     }
-    return val(0, 18446744073709551615);
+    return val(0, NO_TYPE);
 }
 // 1 when `path` is in a directory that also holds core.grl: the standard-library directory in
 // the repository (lib/) and in every installed layout (std/). Both separators are accepted.
@@ -18126,7 +18181,7 @@ fn infer_type<a, b>(c: (&a mut C), formal: u64, actual: u64, map: (&b mut u64[])
     }
     if k == 9 {
         old := map[arg];
-        if old == 18446744073709551615 {
+        if old == NO_TYPE {
             exchange(&mut map[arg], actual);
         } else {
             require_type(&mut c, actual, old);
@@ -18202,7 +18257,7 @@ fn infer_union_member<a, b>(
             if kind == 9 {
                 idx := ty_arg(&mut c, member);
                 bound := map[idx];
-                if bound == 18446744073709551615 {
+                if bound == NO_TYPE {
                     candidates += 1;
                     parameter = idx;
                 } else {
@@ -18225,7 +18280,7 @@ fn infer_union_member<a, b>(
     return ();
 }
 fn constructor_hint<a>(c: (&a mut C), decl: u64, explicit: u64) -> u64 {
-    if explicit != 18446744073709551615 {
+    if explicit != NO_TYPE {
         return explicit;
     }
     result := c.result;
@@ -18234,28 +18289,28 @@ fn constructor_hint<a>(c: (&a mut C), decl: u64, explicit: u64) -> u64 {
             return result;
         }
     }
-    return 18446744073709551615;
+    return NO_TYPE;
 }
 fn constructor_map<a>(c: (&a mut C), decl: u64, hint: u64) -> u64[] {
     d := &c.decls[decl];
     count := d.types;
     mut map = u64[];
-    if hint != 18446744073709551615 {
+    if hint != NO_TYPE {
         return type_args(&mut c, hint);
     }
     for i in count {
-        map.push(18446744073709551615);
+        map.push(NO_TYPE);
     }
     return map;
 }
 fn constructed_type<a>(c: (&a mut C), decl: u64, hint: u64, map: u64[]) -> u64 {
     for i in map.len() {
-        if map[i] == 18446744073709551615 {
+        if map[i] == NO_TYPE {
             fail(&mut c, view("cannot infer generic type argument"));
         }
     }
     mut rs = u64[];
-    if hint != 18446744073709551615 {
+    if hint != NO_TYPE {
         regions := type_regions(&mut c, hint);
         for i in regions.len() {
             rs.push(regions[i]);
@@ -18549,10 +18604,10 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
             astart := c.pos;
             k := find_field(&mut c, d, view(f));
             field := surface_field_ty(&mut c, d, k);
-            mut context = 18446744073709551615;
+            mut context = NO_TYPE;
             mut known = 1;
             for i in map.len() {
-                if map[i] == 18446744073709551615 {
+                if map[i] == NO_TYPE {
                     known = 0;
                 }
             }
@@ -18592,7 +18647,7 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
             infer_union_member(&mut c, ft, v.ty, &mut map);
             mut resolved = 1;
             for i in map.len() {
-                if map[i] == 18446744073709551615 {
+                if map[i] == NO_TYPE {
                     resolved = 0;
                 }
             }
@@ -18711,7 +18766,7 @@ fn variant<a, b>(c: (&a mut C), d: u64, name: &b [u8], explicit: u64) -> Val {
         infer_union_member(&mut c, expected, v.ty, &mut map);
         mut resolved = 1;
         for i in map.len() {
-            if map[i] == 18446744073709551615 {
+            if map[i] == NO_TYPE {
                 resolved = 0;
             }
         }
@@ -18872,13 +18927,13 @@ fn replay_function<a>(c: (&a mut C), template: u64) -> unit {
         module = home;
         exchange(&mut c.current_impl, generic_impl);
         st := impl_self(&mut c, owner);
-        exchange(&mut c.self_type, st + 1);
+        exchange(&mut c.self_type, st);
     } else if owner != 0 {
         d := &c.decls[owner - 1];
         module = d.module.copy();
         exchange(&mut c.inherent, owner);
         st := impl_self(&mut c, owner);
-        exchange(&mut c.self_type, st + 1);
+        exchange(&mut c.self_type, st);
     }
     load_file(&mut c, file);
     exchange(&mut c.file, file);
@@ -18889,7 +18944,7 @@ fn replay_function<a>(c: (&a mut C), template: u64) -> unit {
     exchange(&mut c.host_optin, opted);
     func(&mut c, 4, 0);
     exchange(&mut c.inherent, 0);
-    exchange(&mut c.self_type, 0);
+    exchange(&mut c.self_type, NO_TYPE);
     if generic_impl != 0 {
         exchange(&mut c.current_impl, 0);
     }
@@ -19198,7 +19253,7 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
         for i in types {
             // A value parameter is inferred like a type when an argument's type fixes it
             // (`capacity(&r)` with `r: Ring<u64, 8>`); one left open is refused after inference.
-            map.push(18446744073709551615);
+            map.push(NO_TYPE);
         }
     }
     method := c.has_receiver;
@@ -19267,11 +19322,11 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                 argi = first_arg + order[slot_k];
             }
             astart := c.pos;
-            mut context = 18446744073709551615;
+            mut context = NO_TYPE;
             if argi < count {
                 mut known = 1;
                 for j in map.len() {
-                    if map[j] == 18446744073709551615 {
+                    if map[j] == NO_TYPE {
                         known = 0;
                     }
                 }
@@ -19369,7 +19424,7 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                     infer_union_member(&mut c, formal, v.ty, &mut map);
                     mut resolved = 1;
                     for i in map.len() {
-                        if map[i] == 18446744073709551615 {
+                        if map[i] == NO_TYPE {
                             resolved = 0;
                         }
                     }
@@ -19516,7 +19571,7 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
         fail(&mut c, view("function argument count"));
     }
     for i in map.len() {
-        if map[i] == 18446744073709551615 {
+        if map[i] == NO_TYPE {
             if deferred.len() != 0 {
                 fail(&mut c, view("ambiguous union type inference"));
             }
@@ -19742,7 +19797,7 @@ fn captured_bonds<a, b, d, e>(c: (&a mut C), result: Val, map: (&b u64[]), sourc
     // Only when a type argument holds a borrow: otherwise the result can carry none.
     mut borrowed = false;
     for i in map.len() {
-        if map[i] != 18446744073709551615 {
+        if map[i] != NO_TYPE {
             t := map[i];
             if contains_borrow(&mut c, t, 0) {
                 borrowed = true;
@@ -19795,7 +19850,7 @@ fn specialized_function_value<a>(c: (&a mut C), index: u64, map: u64[]) -> Val {
         fail(&mut c, view("function value type argument count"));
     }
     for i in map.len() {
-        if map[i] == 18446744073709551615 {
+        if map[i] == NO_TYPE {
             fail(&mut c, view("generic function values need explicit type arguments"));
         }
     }
@@ -21277,7 +21332,7 @@ fn format_arg<a>(c: (&a mut C), acc: u64, input: Val) -> bool {
     observe(&mut c, value.t);
     kind0 := k;
     shown := show_value(&mut c, original, inty, value.ty);
-    if shown.ty != 18446744073709551615 {
+    if shown.ty != NO_TYPE {
         invoke(&mut c, view("rt_fmt_seq"), two(acc, shown.t));
         release_temporary(&mut c, shown.t);
         k = 0;
@@ -21604,7 +21659,7 @@ fn print_value<a>(c: (&a mut C), input: Val, newline: u64) -> unit {
     k := ty_kind(&mut c, value.ty);
     observe(&mut c, value.t);
     shown := show_value(&mut c, original, inty, value.ty);
-    if shown.ty != 18446744073709551615 {
+    if shown.ty != NO_TYPE {
         print_value(&mut c, shown, newline);
         return ();
     }
@@ -23839,7 +23894,7 @@ fn is_option_storage<a>(c: (&a mut C), ty: u64) -> bool {
 }
 // A bare literal (including a negated one) takes a sized integer type from its context.
 fn adopt_value<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) -> Val {
-    if (c.raw == 0) & (expected != 0) & (expected != 18446744073709551615) {
+    if (c.raw == 0) & (expected != 0) & (expected != NO_TYPE) {
         if borrowed_object(&mut c, expected) != 0 {
             if borrowed_object(&mut c, v.ty) == 0 {
                 return borrow_dyn(&mut c, v, expected);
@@ -24466,7 +24521,7 @@ fn capture_place<a, b>(c: (&a mut C), name: &b [u8], write: u64) -> Val {
         }
     }
     v := capture_field(&mut c, view(name), 1, write);
-    if v.ty == 18446744073709551615 {
+    if v.ty == NO_TYPE {
         fail(
             &mut c,
             view("reference needs a variable or field (bind the value first: x := ...; &x)")
@@ -24514,7 +24569,7 @@ fn bound_or_unknown<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> u64 {
         return ty;
     }
     if mentions_unbound(&mut c, ty, &map) {
-        return 18446744073709551615;
+        return NO_TYPE;
     }
     return bind_types(&mut c, ty, &map);
 }
@@ -24522,7 +24577,7 @@ fn mentions_unbound<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> bool {
     k := ty_kind(&mut c, ty);
     if k == 9 {
         i := ty_arg(&mut c, ty);
-        return (map.len() <= i) || (map[i] == 18446744073709551615);
+        return (map.len() <= i) || (map[i] == NO_TYPE);
     }
     if k == 15 {
         return false;
@@ -24600,7 +24655,7 @@ fn closure_body_type<a, b, d>(c: (&a mut C), names: (&b u8[][]), params: (&d u64
     saved_loop_start := exchange(&mut c.loop_start, 0);
     saved_loop_end := exchange(&mut c.loop_end, 0);
     saved_terminated := exchange(&mut c.terminated, 0);
-    saved_result := exchange(&mut c.result, 18446744073709551615);
+    saved_result := exchange(&mut c.result, NO_TYPE);
     saved_validating := exchange(&mut c.validating, 1);
     saved_cf_start := exchange(&mut c.cf_start, 0);
     saved_cf_end := exchange(&mut c.cf_end, 0);
@@ -24660,7 +24715,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
     }
     hinted := exchange(&mut c.hint_set, 0) != 0;
     hint_params := exchange(&mut c.hint_params, u64[]);
-    hint_ret := exchange(&mut c.hint_ret, 18446744073709551615);
+    hint_ret := exchange(&mut c.hint_ret, NO_TYPE);
     mut names = u8[][];
     mut params = u64[];
     mut param_regions = 0;
@@ -24683,7 +24738,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                 } else {
                     // `|x|`: the parameter's type is the expected function type's.
                     index := params.len();
-                    if !hinted || (hint_params.len() <= index) || (hint_params[index] == 18446744073709551615) {
+                    if !hinted || (hint_params.len() <= index) || (hint_params[index] == NO_TYPE) {
                         fail(&mut c, view("closure parameter needs a type here (nothing fixes it): write |x: T|"));
                     }
                     ty = hint_params[index];
@@ -24705,7 +24760,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
     mut ret = 1;
     if eat(&mut c, view("->")) {
         ret = parse_type(&mut c);
-    } else if hinted && (hint_ret != 18446744073709551615) {
+    } else if hinted && (hint_ret != NO_TYPE) {
         ret = hint_ret;
     } else if hinted && !is(&mut c, view("{")) {
         // An expression body whose type nothing fixes yet (`map`'s U): its type is the result.
@@ -25046,7 +25101,7 @@ fn capture_assignment<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
     // The old value for `op=` comes from a shared read of the field: reading through a reference
     // ends that reference's temporary, so the exclusive one is created only for the store.
     read := capture_field(&mut c, view(name), 0, 0);
-    if read.ty == 18446744073709551615 {
+    if read.ty == NO_TYPE {
         fail(&mut c, view("undefined assignment"));
     }
     fty := read.ty;
@@ -25079,7 +25134,7 @@ fn capture_assignment<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
 fn capture_field<a, b>(c: (&a mut C), name: &b [u8], address: u64, mode: u64) -> Val {
     current := c.closure_env;
     if current == 0 {
-        return val(0, 18446744073709551615);
+        return val(0, NO_TYPE);
     }
     cl := &c.closures[current - 1];
     mut index = 18446744073709551615;
@@ -25090,7 +25145,7 @@ fn capture_field<a, b>(c: (&a mut C), name: &b [u8], address: u64, mode: u64) ->
         }
     }
     if index == 18446744073709551615 {
-        return val(0, 18446744073709551615);
+        return val(0, NO_TYPE);
     }
     writable := capture_writable(&mut c, view(name));
     env := local_id(&mut c, 0);
@@ -25611,13 +25666,13 @@ fn method_receiver<a>(c: (&a mut C), input: u64, inty: u64, xty: u64, formal: u6
 // Values whose type has an inherent `show(self: &a Self) -> string` print through it.
 fn show_value<a>(c: (&a mut C), input: u64, inty: u64, xty: u64) -> Val {
     if ty_kind(&mut c, xty) != 8 {
-        return val(0, 18446744073709551615);
+        return val(0, NO_TYPE);
     }
     d := ty_arg(&mut c, xty);
     owner := private_module(view(".inherent_"), d);
     f := find_func(&mut c, view(owner), view("show"));
     if f == 0 {
-        return val(0, 18446744073709551615);
+        return val(0, NO_TYPE);
     }
     info := &c.funcs[f - 1];
     first := info.first;
@@ -25932,7 +25987,7 @@ fn text_method<a, b>(c: (&a mut C), xt: u64, k: u64, name: &b [u8]) -> Val {
         vt := intern(&mut c, 6, result);
         return own(&mut c, r, vt);
     }
-    return val(0, 18446744073709551615);
+    return val(0, NO_TYPE);
 }
 fn char_method<a>(n: &a [u8]) -> bool {
     return same(view(n), view("is_alphabetic"))
@@ -26651,7 +26706,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     }
     if (c.raw == 0) & (k != 6) & (k != 27) {
         text := text_method(&mut c, xt, k, view(name));
-        if text.ty != 18446744073709551615 {
+        if text.ty != NO_TYPE {
             release_temporary(&mut c, input);
             return text;
         }
@@ -27308,7 +27363,7 @@ fn simple_type_head<a, b>(c: (&a mut C), name: &b [u8]) -> bool {
     if same(view(n), view("read")) {
         return true;
     }
-    if same(view(n), view("Self")) & ((c.self_type != 0)) {
+    if same(view(n), view("Self")) & ((c.self_type != NO_TYPE)) {
         return true;
     }
     for i in c.tnames.len() {
@@ -27377,7 +27432,7 @@ fn finish_type_literal<a>(c: (&a mut C), ty: u64) -> Val {
 }
 // Maps remain ordinary nominal library values; only their concise surface is compiler-owned.
 fn is_map_type<a>(c: (&a mut C), ty: u64) -> bool {
-    if ty == 18446744073709551615 {
+    if ty == NO_TYPE {
         return false;
     }
     if ty_kind(&mut c, ty) != 8 {
@@ -27429,7 +27484,7 @@ fn context_value<a>(c: (&a mut C), expected: u64) -> Val {
     start := c.pos;
     mut v = expr_expected(&mut c, 0, expected);
     end := c.pos;
-    if expected != 18446744073709551615 {
+    if expected != NO_TYPE {
         v = adopt_value(&mut c, v, start, end, expected);
         require_type(&mut c, v.ty, expected);
     } else {
@@ -27500,20 +27555,20 @@ fn map_expression<a>(c: (&a mut C), expected: u64) -> Val {
     }
     expect(&mut c, view("["));
     mut ty = expected;
-    mut keyty = 18446744073709551615;
-    mut valuety = 18446744073709551615;
+    mut keyty = NO_TYPE;
+    mut valuety = NO_TYPE;
     if is_map_type(&mut c, ty) {
         types := type_args(&mut c, ty);
         keyty = types[0];
         valuety = types[1];
     } else {
-        if expected != 18446744073709551615 {
+        if expected != NO_TYPE {
             fail(&mut c, view("map literal needs a map expected type"));
         }
     }
     if eat(&mut c, view(":")) {
         expect(&mut c, view("]"));
-        if keyty == 18446744073709551615 {
+        if keyty == NO_TYPE {
             fail(&mut c, view("empty map [:] needs a map expected type"));
         }
         return map_new(&mut c, ty);
@@ -27521,7 +27576,7 @@ fn map_expression<a>(c: (&a mut C), expected: u64) -> Val {
     key := context_value(&mut c, keyty);
     expect(&mut c, view(":"));
     value := context_value(&mut c, valuety);
-    if keyty == 18446744073709551615 {
+    if keyty == NO_TYPE {
         keyty = key.ty;
         valuety = value.ty;
         mut types = u64[];
@@ -27702,7 +27757,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
             }
             d := tuple_decl(&mut c, count);
             exchange(&mut c.positional, 1);
-            return record(&mut c, d, 18446744073709551615);
+            return record(&mut c, d, NO_TYPE);
         }
         advance(&mut c);
         if eat(&mut c, view(")")) {
@@ -27930,7 +27985,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
     // `T::Item[...]` / `Self::Item[...]`: a sequence literal of an associated type.
     here_pos := c.pos;
     if is(&mut c, view("::")) && (kind_at(&mut c, here_pos + 1) == 1) && (kind_at(&mut c, here_pos + 2) == 91) {
-        mut generic = same(view(first), view("Self")) && (c.self_type != 0);
+        mut generic = same(view(first), view("Self")) && (c.self_type != NO_TYPE);
         for i in c.tnames.len() {
             if same(view(c.tnames[i]), view(first)) {
                 generic = true;
@@ -28033,7 +28088,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
             if d == 0 {
                 fail(&mut c, view("unknown enum"));
             }
-            return variant(&mut c, d - 1, view(third), 18446744073709551615);
+            return variant(&mut c, d - 1, view(third), NO_TYPE);
         }
         interface := find_interface(&c, view(m), view(first));
         if interface != 0 {
@@ -28047,11 +28102,11 @@ fn primary<a>(c: (&a mut C)) -> Val {
             }
         }
         if d != 0 {
-            return variant(&mut c, d - 1, view(second), 18446744073709551615);
+            return variant(&mut c, d - 1, view(second), NO_TYPE);
         }
         mut r = find_decl(&mut c, view(first), view(second));
         if (r != 0) & is(&mut c, view("{")) {
-            return record(&mut c, r - 1, 18446744073709551615);
+            return record(&mut c, r - 1, NO_TYPE);
         }
         if !(is(&mut c, view("(")) || is(&mut c, view("<"))) {
             function := find_func(&mut c, view(first), view(second));
@@ -28059,7 +28114,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
                 return function_value(&mut c, function - 1);
             }
             constant := constant_value(&mut c, view(first), view(second));
-            if constant.ty != 18446744073709551615 {
+            if constant.ty != NO_TYPE {
                 return constant;
             }
         }
@@ -28282,7 +28337,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
         }
         if local == 0 {
             captured := capture_field(&mut c, view(first), 0, 0);
-            if captured.ty != 18446744073709551615 {
+            if captured.ty != NO_TYPE {
                 ck := ty_kind(&mut c, captured.ty);
                 if (ck == 12) || (ck == 20) || (ck == 25) {
                     return indirect_call(&mut c, captured, 0);
@@ -28333,11 +28388,11 @@ fn primary<a>(c: (&a mut C)) -> Val {
         return field_path(&mut c, id, ty, 0);
     }
     captured := capture_field(&mut c, view(first), 0, 0);
-    if captured.ty != 18446744073709551615 {
+    if captured.ty != NO_TYPE {
         return captured;
     }
     constant := constant_value(&mut c, view(m), view(first));
-    if constant.ty != 18446744073709551615 {
+    if constant.ty != NO_TYPE {
         return constant;
     }
     vp := value_param(&mut c, view(first));
@@ -28353,7 +28408,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
     }
     mut r = find_decl(&mut c, view(m), view(first));
     if r != 0 {
-        return record(&mut c, r - 1, 18446744073709551615);
+        return record(&mut c, r - 1, NO_TYPE);
     }
     // Point at the name itself, and offer the closest one in scope.
     mut back = c.pos;
@@ -29297,10 +29352,10 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
 }
 // ---- operator interfaces (lib/ops.grl) ------------------------------------------------------------
 // `a + b` on a type with `impl ops::Add` is `ops::Add::add(a, b)`; `==`/`!=` use `ops::Eq::eq` and
-// the orderings `order::Ord::less`. Returns ty 18446744073709551615 when the operator is the
+// the orderings `order::Ord::less`. Returns ty NO_TYPE when the operator is the
 // built-in one (no such interface in the program, or a type without an implementation).
 fn operator_call<a>(c: (&a mut C), k: u64, left: Val, right: Val) -> Val {
-    none := val(0, 18446744073709551615);
+    none := val(0, NO_TYPE);
     mut lty = left.ty;
     lk := ty_kind(&mut c, lty);
     if lk == 10 {
@@ -29405,12 +29460,12 @@ fn operator_call<a>(c: (&a mut C), k: u64, left: Val, right: Val) -> Val {
     return result;
 }
 fn expr<a>(c: (&a mut C), min: u64) -> Val {
-    return expr_expected(&mut c, min, 18446744073709551615);
+    return expr_expected(&mut c, min, NO_TYPE);
 }
 fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
     lstart := c.pos;
     if (kind(&mut c) == 124) || (kind(&mut c) == 274) {
-        if expected != 18446744073709551615 {
+        if expected != NO_TYPE {
             none := u64[];
             closure_hint(&mut c, expected, &none);
         }
@@ -29585,7 +29640,7 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
                             if c.raw == 0 {
                                 rt0 := right.t;
                                 over := operator_call(&mut c, k, val(t, ty), val(rt0, rty));
-                                if over.ty != 18446744073709551615 {
+                                if over.ty != NO_TYPE {
                                     t = over.t;
                                     ty = over.ty;
                                     left_lit = false;
@@ -34339,7 +34394,7 @@ fn iface_emit_alias<a, b>(c: (&a mut C), out: (&a mut u8[]), index: u64) -> unit
     module := a.module.copy();
     name := a.name.copy();
     ty := a.ty;
-    if ty == 18446744073709551615 {
+    if ty == NO_TYPE {
         iface_refuse(view("<interface>"), view("an unresolved type alias cannot be written to an interface"));
     }
     push_bytes(&mut out, view("alias "));
@@ -34359,7 +34414,7 @@ fn iface_emit_const<a, b>(c: (&a mut C), out: (&a mut u8[]), index: u64, m: &b [
     iface_ref(&mut out, view(module), view(name));
     out.push(32);
     iface_type(&mut out, &mut c, ty);
-    if (ty != 3) && (ty != 0) && (ct_seq_elem(&mut c, ty) != 18446744073709551615) {
+    if (ty != 3) && (ty != 0) && (ct_seq_elem(&mut c, ty) != NO_TYPE) {
         push_bytes(&mut out, view(" seq "));
         decimal(&mut out, value);
         out.push(32);
@@ -35721,7 +35776,7 @@ fn iface_load<a, b>(c: (&a mut C), path: &a [u8], source_path: &b [u8], phase: u
     // Now that every parameter name, bound and requirement is in place, give each implementation the
     // self type the source parse would have built (with its proofs), exactly once.
     for i in c.impl_params.len() {
-        if c.impl_params[i].self_ty == 0 {
+        if c.impl_params[i].self_ty == NO_TYPE {
             iface_impl_self(&mut c, i);
         }
     }
@@ -35915,7 +35970,7 @@ fn iface_register<a, b, d>(c: (&a mut C), line: &b [u8], path: &d [u8], n: u64, 
             iface_fail(&p, view("declares a type alias twice"));
         }
         alias_public := c.decl_public;
-        c.aliases.push(Alias { module: m, name: name, public: alias_public, ty: 18446744073709551615 });
+        c.aliases.push(Alias { module: m, name: name, public: alias_public, ty: NO_TYPE });
         return ();
     }
     if same(view(word), view("interface")) {
@@ -36089,7 +36144,7 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
             value = ip_number(&mut p);
             hex := ip_quoted(&mut p);
             text = iface_unhex(&hex);
-            if ct_seq_elem(&mut c, ty) == 18446744073709551615 {
+            if ct_seq_elem(&mut c, ty) == NO_TYPE {
                 iface_fail(&p, view("a table constant needs a vector of integers or bytes"));
             }
         } else if same(view(kind), view("str")) {
@@ -36587,7 +36642,7 @@ fn iface_impl_record<a>(c: (&a mut C), st: (&a mut IState), owner: u64, params: 
                 tnames: u8[][],
                 bounds: bounds,
                 interfaces: requirements,
-                self_ty: 0,
+                self_ty: NO_TYPE,
             }
         );
     return ();
@@ -37014,7 +37069,7 @@ pub fn main() -> u64 {
         fn_thunk_used: 0,
         closure_env: 0,
         hint_params: u64[],
-        hint_ret: 18446744073709551615,
+        hint_ret: NO_TYPE,
         hint_set: 0,
         inherent: 0,
         constants: Constant[],
@@ -37061,7 +37116,7 @@ pub fn main() -> u64 {
         type_interfaces: u64[][],
         interfaces: Interface[],
         implementations: Implementation[],
-        self_type: 0,
+        self_type: NO_TYPE,
         current_impl: 0,
         default_copies: u64[],
         assoc_eqs: u64[],
@@ -37071,7 +37126,7 @@ pub fn main() -> u64 {
         headers_complete: 0,
         resources: Resource[],
         loopmark: 0,
-        result: 0,
+        result: NO_TYPE,
         check: ownership::new(),
         members: Member[],
         terminated: 0,
