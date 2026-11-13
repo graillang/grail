@@ -31,6 +31,20 @@ fn rt_hard_exit(code: u64) -> u64 {
     rt_syscall(231, code, 0, 0);
     return 0;
 }
+// The running image: _NSGetExecutablePath fills the caller's buffer and reports its size, so the
+// buffer is handed over as a one-word out-parameter holding `size`.
+fn rt_exe_path(buf: u64, size: u64) -> u64 {
+    slot := rt_alloc(16);
+    raw_store(slot, size - 1);
+    r := raw_import("NSGetExecutablePath", buf, slot);
+    n := raw_load(slot);
+    rt_free(slot);
+    if r != 0 {
+        return wrapping_sub(0, 34);
+    }
+    raw_putbyte(buf + n, 0);
+    return n;
+}
 fn rt_readlinkat(path: u64, buf: u64, size: u64) -> u64 {
     return rt_os_result(raw_import("readlink", path, buf, size));
 }

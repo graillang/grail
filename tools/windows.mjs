@@ -3,9 +3,9 @@
 // only orchestrates the COFF assembler and LLD, exactly as tools/native.mjs orchestrates ELF.
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildCompiler, command, root } from './native.mjs';
+import { buildCompiler, command, compilerSources, root } from './native.mjs';
 
 export const windowsTarget = 'windows-x86_64';
 export const windowsAarch64 = 'windows-aarch64';
@@ -29,8 +29,10 @@ export const imports = {
     'ExitThread',
     'FlushFileBuffers',
     'GetCommandLineA',
+    'GetCurrentDirectoryA',
     'GetCurrentProcessId',
     'GetEnvironmentStringsA',
+    'GetModuleFileNameA',
     'GetEnvironmentVariableA',
     'GetExitCodeProcess',
     'GetFileAttributesA',
@@ -41,6 +43,8 @@ export const imports = {
     'MoveFileA',
     'ReadFile',
     'RemoveDirectoryA',
+    'SetConsoleCP',
+    'SetConsoleOutputCP',
     'SetFilePointerEx',
     'Sleep',
     'SwitchToThread',
@@ -146,6 +150,11 @@ export function link(objects, executable, { entry = 'grail_entry', subsystem = '
     `/machine:${machine}`,
     `/entry:${entry}`,
     `/subsystem:${subsystem}`,
+    // A Grail program is as deeply recursive as its data (the compiler is the extreme case), and
+    // Windows gives a thread 1 MiB of stack by default against Linux's 8 MiB. CreateThread(0, 0)
+    // inherits this reserve from the image, so one flag covers the main thread and every thread the
+    // runtime starts.
+    '/stack:8388608',
     '/nodefaultlib',
     '/dynamicbase',
     '/nxcompat',
@@ -210,13 +219,128 @@ export function headers(executable) {
   return command(['llvm-objdump', '-p', executable]).stdout.toString();
 }
 
+// The compiler's own sources without the Linux platform module: compileProgram appends the portable
+// runtime and the target's platform module, so the list here stops at cli.grl.
+export function compilerInputs() {
+  return compilerSources.filter(file => !/(runtime|os-linux)\.grl$/.test(file));
+}
+
+// The compiler itself as a PE image: `grail.exe`, cross-built from the seed-built compiler.
+export function buildWindowsCompiler(compiler = buildCompiler(), { target = windowsTarget, directory = join(workDirectory, 'compiler') } = {}) {
+  return compileProgram(compiler, compilerInputs(), directory, { name: 'grail', target });
+}
+
+// A native Windows compiler is only credible if it runs, so this proves it where it can: under Wine
+// on a Linux host (which needs `wine <exe>`), or natively on Windows when GRAIL_WINE is empty. Two
+// proofs, because "it starts" proves nothing:
+//   1. it compiles hello-world end to end - assemble, import library, lld-link - and the image
+//      prints its line when run;
+//   2. it compiles the compiler's own sources, and what came out is checked: against the Linux-built
+//      compiler's assembly for the same target when that compiler can run here, and otherwise by
+//      linking stage 2 and letting it compile hello itself (which is what --full always does).
+export function selfhost({ full = false, target = windowsTarget, existing = null } = {}) {
+  const configured = process.env.GRAIL_WINE;
+  // Unset: prefix the compiler's own binary with `wine`. Empty: run it directly (a Windows host).
+  const prefix = configured === undefined ? ['wine'] : (configured.trim() ? configured.trim().split(/\s+/) : []);
+  const env = { ...process.env, WINEDEBUG: process.env.WINEDEBUG ?? '-all' };
+  const path = file => (prefix.length ? file.replace(/\//g, '\\') : file);
+  const run = argv => command([...prefix, ...argv], { env, maxBuffer: 256 * 1024 * 1024 });
+
+  // `existing` is a grail.exe already built for Windows (the CI job downloads one): building it
+  // again would need the Linux seed compiler, which a Windows host does not have.
+  const built = existing ? { executable: resolve(root, existing) } : buildWindowsCompiler(buildCompiler(), { target });
+  const directory = dirname(built.executable);
+  const platform = './compiler/os-windows.grl';
+
+  // 1. hello through the Windows compiler, then through the same assembler and linker the driver
+  // runs natively on Windows.
+  const helloDirectory = join(directory, 'hello');
+  mkdirSync(helloDirectory, { recursive: true });
+  const source = join(helloDirectory, 'hello.grl');
+  writeFileSync(source, 'fn main() {\n    println("Hello, Windows!");\n}\n');
+  const assembly = join(helloDirectory, 'hello.s');
+  const object = join(helloDirectory, 'hello.obj');
+  const runtime = join(root, 'compiler/runtime.grl');
+  run([built.executable, '--target', target, path(assembly), path(source), path(runtime), path(join(root, platform))]);
+  const library = writeImportLibrary(join(helloDirectory, 'lib'), targets[target].machine,
+    programImports(readFileSync(assembly, 'utf8')));
+  assemble(assembly, object, target);
+  const hello = join(helloDirectory, 'hello.exe');
+  link([object, library], hello, { machine: targets[target].linkMachine });
+  const printed = run([hello]).stdout.toString();
+  if (!printed.split(/\r?\n/).includes('Hello, Windows!')) {
+    throw new Error(`windows selfhost: the program the Windows compiler produced printed ${JSON.stringify(printed)}`);
+  }
+  console.error(`windows selfhost: ${basename(built.executable)} compiled, linked and ran hello-world`);
+
+  // The same compile with the source spelled the other way: a Windows path is accepted as
+  // `C:\dir\x.grl` or `C:/dir/x.grl`, and the compiler's module search and diagnostics do not care
+  // which. Under Wine the drive-letter spelling is Z:\..., which no Unix call would accept; on a
+  // Windows host it is the forward-slash spelling of the native C:\... path.
+  const other = join(helloDirectory, 'hello-spelled.s');
+  const spelled = prefix.length
+    ? `Z:${helloDirectory.replace(/\//g, '\\')}\\hello.grl`
+    : `${helloDirectory.replace(/\\/g, '/')}/hello.grl`;
+  run([built.executable, '--target', target, path(other), spelled, path(runtime), path(join(root, platform))]);
+  if (!/^\.globl grail_entry$/m.test(readFileSync(other, 'utf8'))) {
+    throw new Error('windows selfhost: a forward-slash source path produced no grail_entry');
+  }
+  console.error('windows selfhost: the compiler accepts both path spellings');
+
+  // 2. the compiler compiling itself. The file list is relative to the repository, as a user would
+  // write it, so both compilers see the same paths and neither embeds a host-specific absolute one
+  // (the site table records the path it was given).
+  const sources = [...compilerInputs(), runtime, join(root, platform)].map(file => relative(root, file));
+  console.error('windows selfhost: the Windows compiler is compiling the compiler (this takes minutes)...');
+  const fromWindows = join(directory, 'stage2-windows.s');
+  run([built.executable, '--target', target, relative(root, fromWindows), ...sources]);
+  const stage2 = readFileSync(fromWindows);
+  if (stage2.length === 0) throw new Error('windows selfhost: the self-compile wrote no assembly');
+
+  // The Linux-built compiler is the reference when it can run here: same target, same file list, so
+  // the two answers must be byte for byte the same.
+  const reference = !existing && process.platform === 'linux' ? buildCompiler() : null;
+  if (reference) {
+    const fromLinux = join(directory, 'stage2-linux.s');
+    command([reference, '--target', target, relative(root, fromLinux), ...sources]);
+    const linux = readFileSync(fromLinux);
+    if (!stage2.equals(linux)) {
+      throw new Error(`windows selfhost: the Windows compiler's stage 2 differs from the Linux compiler's (${stage2.length} vs ${linux.length} bytes)`);
+    }
+    console.error(`windows selfhost: stage 2 from the Windows compiler is byte-identical to the Linux compiler's (${stage2.length} bytes)`);
+  } else {
+    console.error('windows selfhost: no runnable Linux reference here; stage 2 is checked by running it (--full)');
+  }
+
+  if (full || !reference) {
+    // Stage 2 is the compiler the Windows compiler wrote: link it and let it compile hello itself.
+    // Equal output is the self-host fixpoint; a stage 2 that only looks right fails here.
+    const stage2Library = writeImportLibrary(join(directory, 'lib2'), targets[target].machine,
+      programImports(stage2.toString('utf8')));
+    const stage2Object = join(directory, 'stage2.obj');
+    assemble(fromWindows, stage2Object, target);
+    const stage2Exe = join(directory, 'grail2.exe');
+    link([stage2Object, stage2Library], stage2Exe, { machine: targets[target].linkMachine });
+    const stage3 = join(directory, 'stage2-hello.s');
+    run([stage2Exe, '--target', target, path(stage3), path(source), path(runtime), path(join(root, platform))]);
+    if (!readFileSync(stage3).equals(readFileSync(assembly))) {
+      throw new Error("windows selfhost: stage 2 (built by the Windows compiler) compiles hello to different assembly");
+    }
+    console.error('windows selfhost: stage 2, built by the Windows compiler, compiles hello to the same assembly');
+  }
+  return { built, hello };
+}
+
 function usage() {
-  throw new Error('usage: bun tools/windows.mjs <build|check|implib> [args]');
+  throw new Error('usage: bun tools/windows.mjs <build|check|implib|selfhost> [args]');
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [mode, ...rest] = process.argv.slice(2);
-  if (mode === 'implib') {
+  if (mode === 'compiler') {
+    // The compiler as a PE image: what `windows.mjs selfhost` and the native CI job start from.
+    console.log(buildWindowsCompiler(buildCompiler()).executable);
+  } else if (mode === 'implib') {
     console.log(writeImportLibrary(rest[0]));
   } else if (mode === 'build') {
     let target = windowsTarget;
@@ -238,6 +362,11 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   } else if (mode === 'check') {
     const { check } = await import('./test-windows.mjs');
     process.exitCode = await check(buildCompiler());
+  } else if (mode === 'selfhost') {
+    const at = rest.indexOf('--existing');
+    const existing = at === -1 ? null : rest[at + 1];
+    const result = selfhost({ full: rest.includes('--full'), existing });
+    console.log(result.built.executable);
   } else {
     usage();
   }

@@ -7,7 +7,6 @@ use explain;
 // re-invoking itself (`grail [--target T] OUT.s ENTRY.grl MODULE.grl...`), then assemble and link.
 struct Home {
     runtime: u8[],
-    os: u8[],
     std: u8[]
 }
 struct Project {
@@ -79,7 +78,8 @@ fn path_join<a, b>(dir: &a [u8], name: &b [u8]) -> u8[] {
     if (dir.len() == 0) || eq(view(dir), view(".")) {
         return copy(view(name));
     }
-    if ends(view(dir), view("/")) {
+    // A Windows path ends in either separator, and both are accepted by every Win32 call.
+    if is_sep(dir[dir.len() - 1]) {
         return cat(view(dir), view(name));
     }
     mut o = copy(view(dir));
@@ -89,11 +89,25 @@ fn path_join<a, b>(dir: &a [u8], name: &b [u8]) -> u8[] {
     }
     return o;
 }
+// `/` on Linux and macOS, `/` or `\\` on Windows: one predicate for every path split below.
+// `C:` / `c:`: a Win32 path is absolute without a leading separator.
+fn drive_letter<a>(path: &a [u8]) -> bool {
+    if path.len() < 2 {
+        return false;
+    }
+    if path[1] != 58 {
+        return false;
+    }
+    return (65 <= path[0]) && (path[0] <= 90) || (97 <= path[0]) && (path[0] <= 122);
+}
+fn is_sep(ch: u64) -> bool {
+    return (ch == 47) || (ch == 92);
+}
 fn dirname<a>(p: &a [u8]) -> u8[] {
     mut i = p.len();
     while 0 < i {
         i -= 1;
-        if p[i] == 47 {
+        if is_sep(p[i]) {
             mut o = u8[];
             for j in i {
                 o.push(p[j]);
@@ -109,7 +123,7 @@ fn dirname<a>(p: &a [u8]) -> u8[] {
 fn basename<a>(p: &a [u8]) -> u8[] {
     mut start = 0;
     for i in p.len() {
-        if p[i] == 47 {
+        if is_sep(p[i]) {
             start = i + 1;
         }
     }
@@ -178,19 +192,15 @@ fn home() -> Home {
     if env.len() != 0 {
         installed := path_join(view(env), view("runtime.grl"));
         if host::exists(view(installed)) != 0 {
-            os := path_join(view(dirname(view(installed))), view("os-linux.grl"));
             return Home {
                 runtime: installed,
-                os: os,
                 std: path_join(view(env), view("std"))
             };
         }
         repo := path_join(view(env), view("compiler/runtime.grl"));
         if host::exists(view(repo)) != 0 {
-            os := path_join(view(dirname(view(repo))), view("os-linux.grl"));
             return Home {
                 runtime: repo,
-                os: os,
                 std: path_join(view(env), view("lib"))
             };
         }
@@ -201,26 +211,22 @@ fn home() -> Home {
         installed := path_join(view(dir), view("lib/grail/runtime.grl"));
         if host::exists(view(installed)) != 0 {
             prefix := path_join(view(dir), view("lib/grail"));
-            os := path_join(view(prefix), view("os-linux.grl"));
             return Home {
                 runtime: installed,
-                os: os,
                 std: path_join(view(prefix), view("std"))
             };
         }
         repo := path_join(view(dir), view("compiler/runtime.grl"));
         if host::exists(view(repo)) != 0 {
-            os := path_join(view(dirname(view(repo))), view("os-linux.grl"));
             return Home {
                 runtime: repo,
-                os: os,
                 std: path_join(view(dir), view("lib"))
             };
         }
         dir = path_join(view(dir), view(".."));
     }
     say(view("grail: cannot find the Grail runtime; set GRAIL_HOME"));
-    return Home { runtime: u8[], os: u8[], std: u8[] };
+    return Home { runtime: u8[], std: u8[] };
 }
 fn collect<a, b>(dir: &a [u8], out: (&b mut u8[][])) {
     entries := host::list_dir(view(dir));
@@ -371,7 +377,9 @@ fn link_inputs<a, b>(asm: &a [u8], base: &b [u8]) -> u8[][] {
             for j in i - start {
                 line.push(text[start + j]);
             }
-            if starts(view(line), view(prefix)) {
+            // A PE import note names a symbol in a DLL, not a linker input: windows_link turns it
+            // into a short-import object. Every other note is an input.
+            if starts(view(line), view(prefix)) & !starts(view(line), view("// grail-link: import ")) {
                 mut input = u8[];
                 mut k = prefix.len();
                 while k < line.len() {
@@ -382,12 +390,12 @@ fn link_inputs<a, b>(asm: &a [u8], base: &b [u8]) -> u8[][] {
                     input.pop();
                 }
                 mut arg = u8[];
-                if (input.len() > 0) && ((input[0] == 47) || (input[0] == 45)) {
+                if (input.len() > 0) && ((input[0] == 47) || (input[0] == 45) || ((input[0] == 92) || drive_letter(input))) {
                     arg = input.copy();
                 } else {
                     mut has_slash = false;
                     for j in input.len() {
-                        if input[j] == 47 {
+                        if is_sep(input[j]) {
                             has_slash = true;
                         }
                     }
@@ -551,9 +559,238 @@ fn target_name(t: u64) -> u8[] {
     }
     return copy(view("x86_64"));
 }
+// The platform module a target is built with, as a file name next to runtime.grl.
+fn platform_module<a>(target: &a [u8]) -> u8[] {
+    if is_macho(view(target)) {
+        return copy(view("darwin.grl"));
+    }
+    if starts(view(target), view("windows")) {
+        return copy(view("os-windows.grl"));
+    }
+    return copy(view("os-linux.grl"));
+}
 // Mach-O targets compile the darwin module, which owns every libSystem call.
 fn is_macho<a>(target: &a [u8]) -> bool {
     return eq(view(target), view("macos-x86_64")) || eq(view(target), view("macos-aarch64"));
+}
+
+// ---- Windows (PE/COFF) linking ----------------------------------------------------------------
+// The image needs one import descriptor per Win32 entry point it calls, and lld-link builds those
+// from COFF short-import objects - what an import library (.lib) is a collection of. The compiler
+// already names every pair: `// grail-link: import DLL SYMBOL`, so the driver writes the objects
+// itself and no Visual Studio, Windows SDK or checked-in .lib is needed. LLVM alone is enough:
+// clang assembles, lld-link links.
+fn push_le16<a>(out: (&a mut u8[]), v: u64) -> unit {
+    out.push(v % 256);
+    out.push((v / 256) % 256);
+    return ();
+}
+fn push_le32<a>(out: (&a mut u8[]), v: u64) -> unit {
+    out.push(v % 256);
+    out.push((v / 256) % 256);
+    out.push((v / 65536) % 256);
+    out.push((v / 16777216) % 256);
+    return ();
+}
+// One 20-byte COFF short import: the header lld reads, then "SYMBOL\0DLL.DLL\0".
+fn pe_short_import<a, b>(dll: &a [u8], symbol: &b [u8]) -> u8[] {
+    mut out = u8[];
+    push_le16(&mut out, 0); // Sig1
+    push_le16(&mut out, 65535); // Sig2: 0xFFFF marks a short import
+    push_le16(&mut out, 0); // Version
+    push_le16(&mut out, 34404); // Machine: IMAGE_FILE_MACHINE_AMD64
+    push_le32(&mut out, 0); // TimeDateStamp
+    push_le32(&mut out, symbol.len() + dll.len() + 6); // SizeOfData
+    push_le16(&mut out, 0); // Ordinal/hint
+    push_le16(&mut out, 4); // IMPORT_NAME_NOPREFIX
+    for i in symbol.len() {
+        out.push(symbol[i]);
+    }
+    out.push(0);
+    for i in dll.len() {
+        out.push(dll[i]);
+    }
+    // The import descriptor names a file: the DLL's own name, with the extension Win32 loads.
+    out.push(46); // '.'
+    out.push(100); // 'd'
+    out.push(108); // 'l'
+    out.push(108); // 'l'
+    out.push(0);
+    return out;
+}
+// Every `// grail-link: import DLL SYMBOL` note of one assembly file as a short-import object, in
+// the order the notes appear. The compiler emits one note per entry point, so there is nothing to
+// deduplicate here.
+fn windows_imports<a, b>(asm: &a [u8], dir: &b [u8]) -> u8[][] {
+    text := host::read_file(view(asm));
+    prefix := "// grail-link: import ";
+    mut out = u8[][];
+    mut start: u64 = 0;
+    mut i: u64 = 0;
+    while i <= text.len() {
+        if (i == text.len()) || (text[i] == 10) {
+            mut line = u8[];
+            for j in i - start {
+                line.push(text[start + j]);
+            }
+            if starts(view(line), view(prefix)) {
+                mut cut = line.len();
+                for k in line.len() {
+                    if (line[k] == 32) && (prefix.len() <= k) {
+                        cut = k;
+                        break;
+                    }
+                }
+                dll := (line[prefix.len(): cut]).copy();
+                mut symbol = u8[];
+                for k in line.len() - (cut + 1) {
+                    ch := line[cut + 1 + k];
+                    if (ch != 32) && (ch != 13) {
+                        symbol.push(ch);
+                    }
+                }
+                image := pe_short_import(view(dll), view(symbol));
+                path := path_join(view(dir), cat(cat(view("imp-"), view(symbol)), view(".obj")));
+                host::write_file(view(path), view(image));
+                out.push(path);
+            }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    return out;
+}
+// The short-import objects as the archive lld-link takes them in: a standalone import object is
+// refused ("not a COFF file"), while a member of an archive is read as an import. That archive is
+// what an import library is, and llvm-ar writes it, so the toolchain stays LLVM-only.
+fn import_library<a, b>(dir: &a [u8], objects: (&b u8[][])) -> u8[] {
+    lib := path_join(view(dir), view("imports.lib"));
+    host::remove(view(lib), 0);
+    mut argv = u8[][tool(view("GRAIL_AR"), view("llvm-ar")), copy(view("rcs")), copy(view(lib))];
+    for i in objects.len() {
+        argv.push(item(objects, i));
+    }
+    if host::command(argv) != 0 {
+        say(view("grail: cannot write the import library (needs llvm-ar, which ships with LLVM)"));
+        return u8[];
+    }
+    return lib;
+}
+// The PE link: lld-link with the entry the compiler defines, no CRT, and the stack reserve a
+// recursively written program needs (Windows gives a thread 1 MiB by default, Linux 8).
+fn windows_link<a, b, d, e>(asm: &a [u8], output: &b [u8], object: &d [u8], entry: &e [u8], debug: u64) -> u64 {
+    dir := path_join(view(dirname(view(object))), view(".grail-win"));
+    host::mkdir(view(dir));
+    imports := windows_imports(view(asm), view(dir));
+    mut link = u8[][
+        tool(view("GRAIL_WIN_LINKER"), view("lld-link")),
+        copy(view("/nologo")),
+        copy(view("/machine:x64")),
+        copy(view("/entry:grail_entry")),
+        copy(view("/subsystem:console")),
+        copy(view("/nodefaultlib")),
+        copy(view("/dynamicbase")),
+        copy(view("/nxcompat")),
+        copy(view("/stack:8388608"))
+    ];
+    if debug != 0 {
+        link.push(copy(view("/debug")));
+        link.push(cat(view("/pdb:"), view(output)));
+    }
+    link.push(cat(view("/out:"), view(output)));
+    link.push(copy(view(object)));
+    if imports.len() != 0 {
+        link.push(import_library(view(dir), &imports));
+    }
+    inputs := link_inputs(view(asm), view(dirname(view(entry))));
+    for i in inputs.len() {
+        link.push(item(&inputs, i));
+    }
+    if host::command(link) != 0 {
+        say(view("grail: linking failed (needs lld-link, which ships with LLVM)"));
+        return 1;
+    }
+    return 0;
+}
+fn put<a, b>(out: (&a mut u8[]), text: &b [u8]) -> unit {
+    for i in text.len() {
+        out.push(text[i]);
+    }
+    return ();
+}
+// The undefined C symbols of one object, exactly as the linker sees them: `nm -u` prints one per
+// line. The shell passes the two paths as positional parameters, so a directory with a space in it
+// is just a path here, and GRAIL_NM names the nm to use, as tools/native.mjs does. Returns 0 when
+// the list was written.
+fn macho_undefined<a, b>(object: &a [u8], out: &b [u8]) -> u64 {
+    script := "nm=${GRAIL_NM:-llvm-nm}; \"$nm\" -u \"$1\" > \"$2\"";
+    mut argv = u8[][
+        copy(view("sh")),
+        copy(view("-c")),
+        copy(view(script)),
+        copy(view("sh")),
+        copy(view(object)),
+        copy(view(out))
+    ];
+    return host::command(argv);
+}
+// A macOS link without an SDK: ld64.lld needs a libSystem, and a text-based stub that exports the C
+// symbols the object leaves undefined is the whole of what a cross-link needs - the same linkage
+// scaffolding tools/macos.mjs builds. The image still records the real /usr/lib/libSystem.B.dylib
+// dependency, so a program linked here is inspected (and released) like a native one. Writes
+// <object dir>/.grail-macos/libSystem.tbd and returns that directory, or nothing when the object
+// has no imports to export or no nm could be run.
+fn macho_libsystem<a, b, d>(object: &a [u8], arch: &b [u8], asm: &d [u8]) -> u8[] {
+    dir := path_join(view(dirname(view(object))), view(".grail-macos"));
+    host::mkdir(view(dir));
+    names := path_join(view(dir), view("undefined"));
+    if macho_undefined(view(object), view(names)) != 0 {
+        return u8[];
+    }
+    text := host::read_file(view(names));
+    host::remove(view(names), 0);
+    mut symbols = u8[];
+    mut count = 0;
+    mut start: u64 = 0;
+    mut i: u64 = 0;
+    while i <= text.len() {
+        if (i == text.len()) || (text[i] == 10) {
+            mut name = u8[];
+            for j in i - start {
+                ch := text[start + j];
+                if ch != 13 {
+                    name.push(ch);
+                }
+            }
+            if name.len() != 0 {
+                if count != 0 {
+                    symbols.push(44);
+                    symbols.push(32);
+                }
+                put(&mut symbols, view(name));
+                count += 1;
+            }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    if count == 0 {
+        return u8[];
+    }
+    // The binder is the one symbol every Mach-O image needs and no object names.
+    put(&mut symbols, view(", dyld_stub_binder"));
+    platform := cat(view(arch), view("-macos"));
+    mut body = u8[];
+    put(&mut body, view("--- !tapi-tbd\ntbd-version: 4\ntargets: [ "));
+    put(&mut body, view(platform));
+    put(&mut body, view(" ]\ninstall-name: '/usr/lib/libSystem.B.dylib'\ncurrent-version: 1311\nexports:\n  - targets: [ "));
+    put(&mut body, view(platform));
+    put(&mut body, view(" ]\n    symbols: [ "));
+    put(&mut body, view(symbols));
+    put(&mut body, view(" ]\n...\n"));
+    stub := path_join(view(dir), view("libSystem.tbd"));
+    host::write_file(view(stub), view(body));
+    return dir;
 }
 fn tool<a, b>(variable: &a [u8], fallback: &b [u8]) -> u8[] {
     v := host::env(variable);
@@ -636,13 +873,11 @@ fn build_argv<a, b, d, e, g>(h: (&a Home), entry: &b [u8], modules: (&d u8[][]),
         command.push(item(&used, i));
     }
     command.push(copy(view(h.runtime)));
-    // One platform module per target: darwin.grl owns the libSystem boundary, os-linux.grl the
-    // Linux syscalls. They define the same rt_syscall* set, so only one may be compiled.
-    if is_macho(view(target)) {
-        command.push(path_join(view(dirname(view(h.runtime))), view("darwin.grl")));
-    } else {
-        command.push(copy(view(h.os)));
-    }
+    // One platform module per target, and the target decides which: darwin.grl owns the libSystem
+    // boundary, os-windows.grl the Win32 one, os-linux.grl the Linux syscalls. They define the same
+    // rt_syscall* set, so only one may be compiled. Choosing by target is what lets a Linux host
+    // build a Windows or macOS program, and a Windows host native ones.
+    command.push(path_join(view(dirname(view(h.runtime))), view(platform_module(view(target)))));
     return command;
 }
 // True when the entry or any module source mentions `@embed(`.
@@ -720,6 +955,13 @@ fn compile_mode<a, b, d, e, g>(
     if eq(view(target), view("aarch64")) {
         triple = copy(view("--target=aarch64-linux-gnu"));
         emulation = copy(view("aarch64elf"));
+    }
+    // A PE/COFF object is not an ELF one: the assembler has to be told which object format to
+    // write, and the link below is lld-link's, not ld.lld's.
+    mut pe = 0;
+    if eq(view(target), view("windows-x86_64")) {
+        triple = copy(view("--target=x86_64-pc-windows-msvc"));
+        pe = 1;
     }
     mut assemble = u8[][tool(view("GRAIL_ASSEMBLER"), view("clang"))];
     if eq(view(target), view("riscv64")) {
@@ -807,10 +1049,6 @@ fn compile_mode<a, b, d, e, g>(
         }
         return 0;
     }
-    if eq(view(target), view("windows-x86_64")) {
-        say(view("grail: windows-x86_64 images are cross-built with `bun tools/windows.mjs`"));
-        return 1;
-    }
     if split != 0 {
         if cache != 0 {
             return cache_split(&mut store, &id, view(dirname(view(entry))), view(output), view(target), view(emulation), &assemble, view(program));
@@ -824,38 +1062,48 @@ fn compile_mode<a, b, d, e, g>(
         say(view("grail: assembling failed (needs clang)"));
         return 1;
     }
+    if pe != 0 {
+        return windows_link(view(asm), view(output), view(object), view(entry), debug);
+    }
     if macho != 0 {
-        // Without an SDK there is no libSystem stub to link against, so the object is the result.
-        root := host::env(view("GRAIL_SDK"));
-        if root.len() == 0 {
-            say(view("grail: wrote a Mach-O object; set GRAIL_SDK to a macOS SDK to link it"));
-            return 1;
-        }
-        libs := path_join(view(root), view("usr/lib"));
         mut link = u8[][
             tool(view("GRAIL_LINKER"), view("ld64.lld")),
             copy(view("-arch")),
-            arch,
+            copy(view(arch)),
             copy(view("-platform_version")),
             copy(view("macos")),
             copy(view("11.0")),
-            copy(view("11.0")),
-            copy(view("-syslibroot")),
-            copy(view(root)),
-            cat(view("-L"), view(libs)),
-            copy(view("-lSystem")),
-            copy(view("-e")),
-            copy(view("_main")),
-            copy(view(object)),
-            copy(view("-o")),
-            copy(view(output))
+            copy(view("11.0"))
         ];
+        sdk := host::env(view("GRAIL_SDK"));
+        if sdk.len() != 0 {
+            libs := path_join(view(sdk), view("usr/lib"));
+            link.push(copy(view("-syslibroot")));
+            link.push(copy(view(sdk)));
+            link.push(cat(view("-L"), view(libs)));
+            link.push(copy(view("-lSystem")));
+        } else {
+            // No SDK on this host: the stub stands in for libSystem (see macho_libsystem).
+            stub := macho_libsystem(view(object), view(arch), view(asm));
+            if stub.len() == 0 {
+                say(view("grail: the Mach-O object is assembled, but no libSystem to link it against"));
+                say(view("grail: set GRAIL_SDK to a macOS SDK, or put llvm-nm on PATH"));
+                return 1;
+            }
+            link.push(cat(view("-L"), view(stub)));
+            link.push(copy(view("-lSystem")));
+        }
+        link.push(copy(view("-e")));
+        link.push(copy(view("_main")));
+        link.push(copy(view(object)));
+        link.push(copy(view("-o")));
+        link.push(copy(view(output)));
         inputs := link_inputs(view(asm), view(dirname(view(entry))));
         for i in inputs.len() {
             link.push(item(&inputs, i));
         }
         if host::command(link) != 0 {
-            say(view("grail: linking failed (needs ld64.lld and a macOS SDK)"));
+            say(view("grail: linking failed (needs ld64.lld, and an SDK or llvm-nm)"));
             return 1;
         }
         return 0;

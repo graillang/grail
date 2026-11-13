@@ -777,8 +777,12 @@ fn part<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
         o(&mut c, view("\n.text\n"));
     }
     // Each module's literals start eight-aligned, in one file as in parts: a part object's section
-    // is aligned on its own, so the single build pads where the split link will.
-    o(&mut c, view(".pushsection .rodata\n.p2align 3\n.popsection\n"));
+    // is aligned on its own, so the single build pads where the split link will. Only an ELF build
+    // is split, so only it needs the pad; a Mach-O build leaves the section to its literals, because
+    // an empty pad must not bring one into being (`.rodata` is not a section name there at all).
+    if c.plat == 0 {
+        o(&mut c, view(".pushsection .rodata\n.p2align 3\n.popsection\n"));
+    }
     return ();
 }
 // Decimal digits of a synthetic module suffix plus one, or 0 when the suffix is not a number.
@@ -2150,6 +2154,16 @@ fn rodata<a>(c: (&a mut C)) -> unit {
     o(&mut c, view(".pushsection .rodata\n"));
     return ();
 }
+// A weak definition. ELF spells it `.weak`; Mach-O has no `.weak` for a definition - Darwin's
+// assembler rejects it as an unknown directive - and spells it `.weak_definition`.
+fn weak_def<a>(c: (&a mut C)) -> unit {
+    if c.plat == 1 {
+        o(&mut c, view(".weak_definition "));
+        return ();
+    }
+    o(&mut c, view(".weak "));
+    return ();
+}
 fn copy_to<a, b>(out: (&a mut u8[]), s: &b [u8]) -> unit {
     for i in s.len() {
         out.push(s[i]);
@@ -2527,6 +2541,30 @@ fn jump<a, b>(c: (&a mut C), op: &b [u8], n: u64) -> unit {
 
 // Win32 imports the compiler may name. The value is the fixed argument count; the runtime layer
 // passes exactly that many words. Unknown names are rejected at compile time.
+// The DLL that exports a Win32 entry point. The compiler names an import by symbol, but a PE image
+// binds every symbol through an import descriptor of a named DLL, so the link request has to carry
+// the pair - the same grouping tools/windows.mjs keeps for its cross-check.
+fn win32_dll<a>(name: &a [u8]) -> u8[] {
+    if same(view(name), view("WaitOnAddress")) || same(view(name), view("WakeByAddressSingle")) || same(view(name), view("WakeByAddressAll")) {
+        return copy_bytes(view("kernelbase"));
+    }
+    if same(view(name), view("CoInitializeEx")) || same(view(name), view("CoUninitialize")) {
+        return copy_bytes(view("combase"));
+    }
+    return copy_bytes(view("kernel32"));
+}
+// `// grail-link: import DLL SYMBOL` for one Win32 entry point the image calls, so a driver can build
+// the import objects without a table of its own.
+fn win32_link<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
+    dll := win32_dll(view(name));
+    mut note = u8[];
+    push_bytes(&mut note, view("import "));
+    push_bytes(&mut note, view(dll));
+    note.push(32);
+    push_bytes(&mut note, view(name));
+    ffi_link(&mut c, view(note));
+    return ();
+}
 fn win32_arity<a>(name: (&a [u8])) -> u64 {
     if same(view(name), view("ExitProcess")) {
         return 1;
@@ -2535,6 +2573,15 @@ fn win32_arity<a>(name: (&a [u8])) -> u64 {
         return 1;
     }
     if same(view(name), view("GetStdHandle")) {
+        return 1;
+    }
+    if same(view(name), view("GetModuleFileNameA")) {
+        return 3;
+    }
+    if same(view(name), view("GetCurrentDirectoryA")) {
+        return 2;
+    }
+    if same(view(name), view("SetConsoleOutputCP")) || same(view(name), view("SetConsoleCP")) {
         return 1;
     }
     if same(view(name), view("GetCommandLineA")) {
@@ -5904,9 +5951,14 @@ fn src_where<a>(c: (&a mut C), file: u64, pos: u64) -> u8[] {
     }
     return out;
 }
-// A NUL-terminated string in .rodata, labelled so the check can name it.
+// A NUL-terminated string in read-only data, labelled so the check can name it. Mach-O puts a C
+// string in __TEXT,__cstring, the section `cstr` uses; ELF has one .rodata for both.
 fn ref_data<a, b, d>(c: (&a mut C), label: &b [u8], text: &d [u8]) -> unit {
-    o(&mut c, view(".pushsection .rodata\n"));
+    if c.plat == 1 {
+        o(&mut c, view(".pushsection __TEXT,__cstring\n"));
+    } else {
+        o(&mut c, view(".pushsection .rodata\n"));
+    }
     o(&mut c, view(label));
     o(&mut c, view(":\n.asciz \""));
     for i in text.len() {
@@ -9023,7 +9075,7 @@ fn emit_vtables<a>(c: (&a mut C)) -> unit {
         id := c.vtables[2 * i];
         concrete := c.vtables[2 * i + 1];
         vt := vtable_symbol(&mut c, id, concrete);
-        o(&mut c, view(".weak "));
+        weak_def(&mut c);
         push_bytes(&mut c.out, view(vt));
         c.out.push(10);
         push_bytes(&mut c.out, view(vt));
@@ -20668,6 +20720,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         if 3 < count {
             get(&mut c, args[3], view("%r9"));
         }
+        win32_link(&mut c, view(api));
         o(&mut c, view("call *__imp_"));
         o(&mut c, view(api));
         o(&mut c, view("(%rip)\n"));
@@ -20740,6 +20793,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         if c.target == 3 {
             // Win64 anonymous mapping: VirtualAlloc(0, size, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE).
             get(&mut c, args[0], view("%rdx"));
+            win32_link(&mut c, view("VirtualAlloc"));
             o(
                 &mut c,
                 view("subq $48,%rsp\nxorl %ecx,%ecx\nmovl $12288,%r8d\nmovl $4,%r9d\ncall *__imp_VirtualAlloc(%rip)\naddq $48,%rsp\n")
@@ -33055,7 +33109,7 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                 fx_end(&mut c);
                 helper_sym := drop_symbol(&mut c, ty);
                 fx_helper(&mut c, view(helper_sym));
-                o(&mut c, view(".weak "));
+                weak_def(&mut c);
                 drop_name(&mut c, ty);
                 c.out.push(10);
                 drop_name(&mut c, ty);
@@ -33178,6 +33232,7 @@ fn emit_exit<a, b>(c: (&a mut C), argument: &b [u8]) -> unit {
     }
     if c.target == 3 {
         // Win64 passes the exit code in ECX; the import slot is a real indirect IAT call.
+        win32_link(&mut c, view("ExitProcess"));
         o(&mut c, argument);
         o(&mut c, view("movl %edi,%ecx\ncall *__imp_ExitProcess(%rip)\nud2\n"));
         return ();

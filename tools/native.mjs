@@ -356,6 +356,17 @@ export function buildCompiler() {
   renameSync(pending, executable);
   return executable;
 }
+// The compiler's own sources without the portable runtime and the host's platform module:
+// compileProgram appends those per target, so this is what "the compiler, as a program" means.
+export function targetCompilerInputs() {
+  return compilerSources.filter(file => !/(runtime|os-linux)\.grl$/.test(file));
+}
+// The compiler itself, cross-built for a target this host can assemble and link for. The Windows
+// image is tools/windows.mjs's (an ELF orchestrator writes no COFF), the Mach-O one is here.
+export function buildTargetCompiler(target = hostTarget, { directory = join(root, `.work/compiler-${target}`) } = {}) {
+  if (!machoTargets.includes(target)) throw new Error(`buildTargetCompiler handles the Mach-O targets; ${target} has its own tool`);
+  return compileProgram(buildCompiler(), targetCompilerInputs(), directory, { target, name: 'grail' });
+}
 // Emit assembly only: shared libraries and link-only tests need the object without a program link.
 export function compileOnly(compiler, inputs, directory, { target = hostTarget, name = 'module', exports = [], runtime = join(root, 'compiler/runtime.grl'), osRuntime = join(root, 'compiler/os-linux.grl'), darwin = join(root, 'compiler/darwin.grl') } = {}) {
   targetName(target);
@@ -396,6 +407,14 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const mode = process.argv[2] ?? 'build';
-  if (mode === 'build') console.log(buildCompiler());
-  else throw new Error('usage: bun tools/native.mjs build');
+  if (mode === 'build') {
+    console.log(buildCompiler());
+  } else if (mode === 'compiler') {
+    // `bun tools/native.mjs compiler --target macos-aarch64`: the compiler as a Mach-O binary.
+    const at = process.argv.indexOf('--target');
+    const target = at === -1 ? hostTarget : process.argv[at + 1];
+    console.log(buildTargetCompiler(target).executable ?? buildTargetCompiler(target));
+  } else {
+    throw new Error('usage: bun tools/native.mjs <build|compiler> [--target T]');
+  }
 }

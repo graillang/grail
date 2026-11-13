@@ -1,8 +1,10 @@
 # Cross-platform status
 
-Last verified: 2026-11-10. The FFI, tooling and language rows were re-checked on `main` at
-`ca88104` (`bun tools/book.mjs check`, `bun tools/test-ffi.mjs`, `bun tools/ci.mjs lint`); the target
-matrix and graphics numbers are the earlier evidence, which these increments do not change.
+Last verified: 2026-11-13 on branch `gaps-native-platforms` (base `b336d65`). The Windows and macOS
+rows below are new evidence: the compiler itself now runs natively on both, and both operating
+systems have a native CI lane. The FFI, tooling and language rows were re-checked on `main` at
+`ca88104` (`bun tools/book.mjs check`, `bun tools/test-ffi.mjs`, `bun tools/ci.mjs lint`); the
+graphics numbers are the earlier evidence, which these increments do not change.
 
 This page distinguishes what has actually been built and executed from scaffolding and
 static inspection. A cross-built object is not platform support. A header parsing is not a
@@ -11,19 +13,21 @@ backend. A project that has a port plan is not a port.
 ## Target matrix
 
 The compiler emits for the six target rows below: the three Linux ELF targets, Windows x86-64,
-Windows AArch64, and macOS x86-64/AArch64. Only Linux x86-64 executes natively here; Windows
-x86-64 executes under Wine. Linux AArch64 and RISC-V 64 are runnable targets whose qemu lanes need
-a runner, Windows AArch64 has no ARM64 runner and its release lane is planned, and both macOS
-targets are static-only.
+Windows AArch64, and macOS x86-64/AArch64, and the *compiler itself* is a native program on Windows
+x86-64 and on both macOS targets. On this host Linux x86-64 executes natively and the Windows
+compiler executes under Wine; the native lanes in
+[.github/workflows/ci.yml](../../.github/workflows/ci.yml) run the same binaries on
+`windows-latest` and `macos-14`. Linux AArch64 and RISC-V 64 are runnable targets whose qemu lanes
+need a runner, and Windows AArch64 has no ARM64 runner.
 
 | Target | Compiler output | Execution evidence | Status |
 | --- | --- | --- | --- |
 | Linux x86-64 | ELF | native tests, CLI checks, book checks, byte-identical self-host | **Executed (native)** |
 | Linux AArch64 | ELF cross-image | cross-build and ELF machine checks; qemu-static used for self-host and the FFI fixtures | **Cross-build + qemu checks** |
 | Linux RISC-V 64 | ELF cross-image | cross-build and ELF machine checks; qemu-static used for self-host and the FFI fixtures | **Cross-build + qemu checks** |
-| Windows x86-64 | PE32+ console images, COFF objects, kernel32 imports, Win32 OS layer, C runtime shims | `bun tools/windows.mjs check` 20/20; the programs in `tests/windows-cases.json` execute under Wine, including thread join, producer/consumer wake, FFI out-parameters, seven-word calls and a C callback abort | **Executed under Wine; not native Windows** |
+| Windows x86-64 | PE32+ console images, COFF objects, kernel32 imports, Win32 OS layer; the **compiler itself** as `grail.exe` | `bun tools/windows.mjs check` (the `tests/windows-cases.json` programs execute under Wine: thread join, wake, FFI out-parameters, seven-word calls, a C callback abort); `bun tools/windows.mjs selfhost` runs the native compiler under Wine: it builds hello end to end, and its stage 2 is byte-identical to the Linux compiler's; `grail build` on this host links a PE image with lld-link that runs under Wine | **Executed (under Wine); native CI lane on windows-latest** |
 | Windows AArch64 | ARM64 PE/COFF objects and images, Win64 ARM64 imports | 4 ARM64 images statically verified; no ARM64 runner | **Cross-build only; not executable** |
-| macOS x86-64 / AArch64 | Mach-O objects and executables, libSystem layer, platform-module runtime | 4 objects + 4 images, framework links and ad-hoc signatures checked statically; **not executed** | **Cross-build only; not executable** |
+| macOS x86-64 / AArch64 | Mach-O objects and executables, libSystem layer, platform-module runtime; the **compiler itself** as a Mach-O binary | `bun tools/test-macos.mjs` (objects, images, frameworks, dylibs, signatures) plus both driver links; the compiler cross-builds and links for both targets | **Executed objects; native CI lane on macos-14** |
 
 Linux x86-64 is the only target with full compiler and runtime execution evidence on this host.
 Linux AArch64 and RISC-V 64 build and pass ELF checks; qemu-static was used for both self-hosting
@@ -60,17 +64,41 @@ others. Three things a Linux program may have relied on by accident do not carry
   nothing keeps two tasks off the same memory. It is the right mode for CPU-bound fan-out once a
   `Send`/`Sync` check exists, and the wrong mode for anything that assumed the cooperative tick.
 
-Unrelated porting concerns (ANSI-only paths, missing sockets/directory streams/`exe_path`, `mremap`
-emulation) stay listed in the Windows rows above and in
-[windows-backend.md](design/windows-backend.md).
+The Windows machine-level gaps this increment closed were found by running the compiler itself on
+it, and each one made a real program fail:
+
+- **`mremap` emulation.** The allocator keeps every block of 512 KiB or more in a mapping of its own
+  and grows it in place with `mremap`. Windows now moves the payload to a fresh mapping and releases
+  the old one, as the Darwin module already did, so a vector or string can pass 512 KiB.
+- **Freeing a large block.** The unmap path reaped a joined thread's handle and took the allocator
+  lock to do it, while the allocator's own free of a large block already holds that lock - a
+  self-deadlock, so the process hung at scope exit.
+- **`host::exe_path`.** It read `/proc/self/exe`, so on Windows it answered with nothing and `grail
+  build` could not re-invoke itself. It is now a platform hook: `GetModuleFileNameA` on Windows,
+  `_NSGetExecutablePath` on macOS, `/proc/self/exe` on Linux.
+- **Stack reserve.** A PE image reserved 1 MiB of stack (Linux gives 8 MiB) and the compiler
+  overflowed it. `tools/windows.mjs` and `grail build` link with `/stack:8388608`.
+- **Paths and the console.** `grail build` treats `\` as a separator and `C:` as an absolute path,
+  so source paths, module search and link inputs work in both spellings, and the Win32 console is
+  set to UTF-8 (`SetConsoleOutputCP`) so a Grail string prints as UTF-8 rather than as ANSI.
+
+Still open on Windows: file names go through the `-A` Win32 calls, so they are limited to the ANSI
+code page (a `-W` path is the fix); sockets, directory streams and an IOCP reactor are unimplemented
+(the scheduler work is a separate lane), and nothing here has run on Windows hardware yet - the
+native CI lane is the first place it will.
 
 macOS has a libSystem layer and a platform-module runtime, and links frameworks and ad-hoc
 signatures with static LC_LOAD_DYLIB/CodeDirectory verification. It also emits shared Mach-O
 dylibs with explicit `--export` symbol lists, `@rpath/...` install names and `LC_RPATH` entries;
-`tools/macos.mjs` reads back `LC_ID_DYLIB`, the export/import sets and RPATHs. There is still no
-Apple-hardware execution, and signing proves integrity, not trust or notarization. Grail-internal
-calls still use the private register convention; the C ABI is used at imports. The macOS images
-must not be run on Linux.
+`tools/macos.mjs` reads back `LC_ID_DYLIB`, the export/import sets and RPATHs. `grail build
+--target macos-aarch64|x86_64` assembles and links to a finish on a Linux host: with `GRAIL_SDK`
+it links against a real SDK, and without one the driver writes the libSystem `.tbd` stub
+`tools/macos.mjs` uses (exported from the object's own `nm -u` list), so the image carries the
+`/usr/lib/libSystem.B.dylib` dependency and a valid ad-hoc signature. On Apple hardware the same
+path runs with `GRAIL_LINKER=ld` (the system ld64) and the SDK `xcrun` reports. There is still no
+Apple-hardware execution on this host, and signing proves integrity, not trust or notarization.
+Grail-internal calls still use the private register convention; the C ABI is used at imports. The
+macOS images must not be run on Linux.
 
 ## Runtime ABI
 
@@ -188,8 +216,11 @@ is what the verification commands below do.
 ```sh
 bun tools/test-native.mjs       # Linux native/rejection corpus
 bun tools/abi-test.mjs          # runtime C ABI and reference backend
-bun tools/windows.mjs check     # Windows COFF/PE static checks + 10 Wine executions
-bun tools/test-macos.mjs        # Mach-O objects/images, frameworks, signatures (static)
+bun tools/windows.mjs check     # Windows COFF/PE static checks + the Wine executions
+bun tools/windows.mjs selfhost   # grail.exe under Wine: hello end to end, self-compile == Linux
+bun tools/windows.mjs compiler   # the compiler as grail.exe (PE), cross-built
+bun tools/native.mjs compiler --target macos-aarch64   # the compiler as Mach-O
+bun tools/test-macos.mjs        # Mach-O objects/images, frameworks, signatures, driver links
 bun tools/test-ffi.mjs          # extern "C" records/handles/callbacks/byval/out-params
 bun tools/test-ffi-runtime.mjs  # Grail File/Error wrapper over the C ABI
 bun test tools/platforms.test.mjs tools/archive.test.mjs tools/sign.test.mjs
