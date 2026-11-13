@@ -270,3 +270,22 @@ Two branches touched this path: this one (`rt_fail`, `rt_contain_site`, `rt_cont
 and function tables, `rt_sites`). Compare the merged `rt_fail`/`rt_task_spawn`/`rt_scope_end`
 against both parents (`git diff origin/gaps2-taskfail -- compiler/runtime.grl`,
 `git diff origin/gaps2-errs -- compiler/runtime.grl`).
+
+### Where the corruption comes from (narrowed)
+
+A hardware watchpoint on the block header 16 bytes before the first task record fires **at the entry
+of the second `rt_task_spawn` of the same scope**, with `%rdi` = the scope and `%rsi` = the task
+function - i.e. it is the *prologue of an ordinary call* spilling registers, not a stray
+`raw_store`. The records sit in a heap arena (`0x7ffff7df7020`, `0x7ffff7df7120`); the scope record
+is a megabyte away (`0x7ffff7ef7020`).
+
+The reading that fits every observation: after the contained failure, the context that carries on
+executing has its stack pointer **inside that arena** - a recycled/discarded task stack - so the
+next call's register spills land on heap metadata. That explains all of it at once: the header
+becomes a text address (a saved return address), `--debug` survives (different frame layout and
+allocation order), the LLVM backend fails the same way (same runtime logic), and the abort appears
+only at `rt_scope_end`, where the corrupted size is finally read.
+
+The place to look is therefore the resume path in `rt_contain_tail` / the scheduler: which context
+the joining thread continues on once `rt_os_ctx_leave(t)` has discarded the failing task's stack,
+and whether the joiner's saved context is restored before that mapping is recycled.
