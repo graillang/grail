@@ -17939,13 +17939,21 @@ fn ffi_byval_emit<a>(c: (&a mut C), slot: u64, plan: (&FFIPlan), copy_base: u64,
             continue;
         }
         get(&mut c, slot, view("%rax"));
-        if (m.dst == 2) & (m.size == 4) {
+        // A half-filled SSE eightbyte - a 12-byte record of floats, say - is 4 bytes wide: load it
+        // with the matching width, because `movl ...,%rax` is not an instruction.
+        mut wide = 1;
+        if m.size < 8 {
             o(&mut c, view("movl "));
+            wide = 0;
         } else {
             o(&mut c, view("movq "));
         }
         on(&mut c, m.off);
-        o(&mut c, view("(%rax),%rax\n"));
+        if wide != 0 {
+            o(&mut c, view("(%rax),%rax\n"));
+        } else {
+            o(&mut c, view("(%rax),%eax\n"));
+        }
         if m.dst == 1 {
             o(&mut c, view("movq %rax,"));
             o(&mut c, view(ffi_int_reg(abi, m.index)));

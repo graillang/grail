@@ -15,6 +15,14 @@ module ffi_byval_records;
 //   BvArr  int[4], 16 bytes       an embedded array, in registers or by reference
 //   Bv4f   float x4, 16 bytes     a four-field float aggregate: four v registers, two xmm, two
 //                                 packed integer registers on RV64
+//   Bv12   int x3, 12 bytes       neither a power of two nor whole eightbytes: two INTEGER
+//                                 eightbytes on SysV (the last 4 bytes wide), two x registers on
+//                                 AAPCS64, by reference on Win64 (not 1/2/4/8 bytes) and RV64
+//   Bv40   long long x5, 40 bytes register files exhausted: MEMORY on SysV, by reference elsewhere
+//   Bv3f   float x3, 12 bytes     AAPCS64 HFA in v0-v2, SysV SSE+INTEGER, by reference on Win64
+//
+// and the shapes that go back out: records of 4, 12, 16, 24 and 40 bytes returned by value, a
+// callee that writes its own copy, and a record that arrives by value and leaves by value.
 extern "C" record Bv4 { a: i32 }
 extern "C" record Bv8 { a: i32, b: i32 }
 extern "C" record Bv16 { a: i64, b: i64 }
@@ -26,6 +34,9 @@ extern "C" record Bv2f { x: f32, y: f32 }
 // so the element list is spelled out, which is the same bytes.
 extern "C" record BvArr { v0: i32, v1: i32, v2: i32, v3: i32 }
 extern "C" record Bv4f { a: f32, b: f32, c: f32, d: f32 }
+extern "C" record Bv12 { a: i32, b: i32, c: i32 }
+extern "C" record Bv40 { a: i64, b: i64, c: i64, d: i64, e: i64 }
+extern "C" record Bv3f { a: f32, b: f32, c: f32 }
 
 extern "C" lib "shim.o" fn c_byval4(s: byval Bv4) -> i64;
 extern "C" lib "shim.o" fn c_byval8(s: byval Bv8) -> i64;
@@ -43,6 +54,23 @@ extern "C" lib "shim.o" fn c_byval_mix_stack(a0: i64, a1: i64, a2: i64, a3: i64,
 // The same signature as a C function pointer: Grail calls a resolved address with the byval
 // classification, not only a declared symbol.
 extern "C" lib "shim.o" as "c_byval_slot" fn byval_slot() -> cfn(byval Bv16) -> i64;
+extern "C" lib "shim.o" fn c_byval12(s: byval Bv12) -> i64;
+extern "C" lib "shim.o" fn c_byval40(s: byval Bv40) -> i64;
+extern "C" lib "shim.o" fn c_byval_3f(s: byval Bv3f) -> i64;
+extern "C" lib "shim.o" fn c_byval_mutate(s: byval Bv16) -> i64;
+// Records returned by value: one per size class, so each target's result rule is exercised next to
+// its argument rule. Win64 returns only a 1/2/4/8-byte record in rax and any other size through a
+// hidden result pointer in rcx; SysV uses rax:rdx up to 16 bytes and MEMORY above it; AAPCS64
+// returns 16 bytes in x0:x1 and by reference above that.
+extern "C" lib "shim.o" fn c_bv_ret4() -> Bv4;
+extern "C" lib "shim.o" fn c_bv_ret12(seed: i64) -> Bv12;
+extern "C" lib "shim.o" fn c_bv_ret16(a: i64, b: i64) -> Bv16;
+extern "C" lib "shim.o" fn c_bv_ret24(a: i64) -> Bv24;
+extern "C" lib "shim.o" fn c_bv_ret40(seed: i64) -> Bv40;
+// Both directions at once: the argument copy's address and the hidden result pointer are live in
+// the same call.
+extern "C" lib "shim.o" fn c_bv_roundtrip12(s: byval Bv12) -> Bv12;
+extern "C" lib "shim.o" fn c_bv_roundtrip40(s: byval Bv40) -> Bv40;
 
 fn main() -> u64 {
     mut bad: u64 = 0;
@@ -55,6 +83,9 @@ fn main() -> u64 {
     mut v2 = Bv2f { x: 1.5, y: 2.25 };
     mut arr = BvArr { v0: 1, v1: 2, v2: 3, v3: 4 };
     mut f4 = Bv4f { a: 1.5, b: 2.5, c: 3.5, d: 4.5 };
+    mut s12 = Bv12 { a: 7, b: 8, c: 9 };
+    mut s40 = Bv40 { a: 1, b: 2, c: 3, d: 4, e: 5 };
+    mut s3f = Bv3f { a: 1.5, b: 2.25, c: 3.125 };
     mut r4: i64 = 0;
     mut r8: i64 = 0;
     mut r16: i64 = 0;
@@ -69,6 +100,17 @@ fn main() -> u64 {
     mut rtail: i64 = 0;
     mut rstack: i64 = 0;
     mut rslot: i64 = 0;
+    mut r12: i64 = 0;
+    mut r40: i64 = 0;
+    mut r3f: i64 = 0;
+    mut rmut: i64 = 0;
+    mut rret4: i64 = 0;
+    mut rret12: i64 = 0;
+    mut rret16: i64 = 0;
+    mut rret24: i64 = 0;
+    mut rret40: i64 = 0;
+    mut rq12: i64 = 0;
+    mut rq40: i64 = 0;
     unsafe {
         r4 = c_byval4(s4);
         r8 = c_byval8(s8);
@@ -89,6 +131,26 @@ fn main() -> u64 {
         rstack = c_byval_mix_stack(1, 2, 3, 4, 5, 6, Bv8 { a: 7, b: 8 }, 9);
         slot := byval_slot();
         rslot = slot(s16);
+        r12 = c_byval12(s12);
+        r40 = c_byval40(s40);
+        r3f = c_byval_3f(s3f);
+        // The callee writes its copy; the caller's record must not change.
+        rmut = c_byval_mutate(s16);
+        p4 := c_bv_ret4();
+        p12 := c_bv_ret12(100);
+        p16 := c_bv_ret16(-3, 42);
+        p24 := c_bv_ret24(5);
+        p40 := c_bv_ret40(1000);
+        q12 := c_bv_roundtrip12(s12);
+        q40 := c_bv_roundtrip40(s40);
+        // The returned records are ordinary Grail values: read and combine their fields.
+        rret4 = i64(p4.a);
+        rret12 = i64(p12.a) + i64(p12.b) * 1000 + i64(p12.c) * 1000000;
+        rret16 = p16.a + p16.b * 1000;
+        rret24 = p24.a + p24.b * 1000 + p24.c * 1000000;
+        rret40 = p40.a + p40.b * 10 + p40.c * 100 + p40.d * 1000 + p40.e * 10000;
+        rq12 = i64(q12.a) + i64(q12.b) * 1000 + i64(q12.c) * 1000000;
+        rq40 = q40.a + q40.b * 10 + q40.c * 100 + q40.d * 1000 + q40.e * 10000;
     }
     println(r4);
     println(r8);
@@ -104,6 +166,17 @@ fn main() -> u64 {
     println(rslot);
     println(rtail);
     println(rstack);
+    println(r12);
+    println(r40);
+    println(r3f);
+    println(rmut);
+    println(rret4);
+    println(rret12);
+    println(rret16);
+    println(rret24);
+    println(rret40);
+    println(rq12);
+    println(rq40);
     // 21*3
     if r4 != 63 {
         bad = bad + 1;
@@ -163,6 +236,59 @@ fn main() -> u64 {
         bad = bad + 1;
     }
     if v2.y != 2.25 {
+        bad = bad + 1;
+    }
+    // 7 + 8*1000 + 9*1000000
+    if r12 != 9008007 {
+        bad = bad + 1;
+    }
+    // 1 + 2*10 + 3*100 + 4*1000 + 5*10000
+    if r40 != 54321 {
+        bad = bad + 1;
+    }
+    // 1.5*100 + 2.25*10000 + 3.125*1000000
+    if r3f != 3147650 {
+        bad = bad + 1;
+    }
+    // 7 + 9000*1000: the value the callee received before it overwrote its copy.
+    if rmut != 9000007 {
+        bad = bad + 1;
+    }
+    if rret4 != 17 {
+        bad = bad + 1;
+    }
+    // 100 + 101*1000 + 102*1000000
+    if rret12 != 102101100 {
+        bad = bad + 1;
+    }
+    // -3 + 42*1000
+    if rret16 != 41997 {
+        bad = bad + 1;
+    }
+    // 5 + 10*1000 + 15*1000000
+    if rret24 != 15010005 {
+        bad = bad + 1;
+    }
+    // 1000 + 1001*10 + 1002*100 + 1003*1000 + 1004*10000
+    if rret40 != 11154210 {
+        bad = bad + 1;
+    }
+    // {7,8,9} reversed
+    if rq12 != 7008009 {
+        bad = bad + 1;
+    }
+    // {1,2,3,4,5} reversed
+    if rq40 != 12345 {
+        bad = bad + 1;
+    }
+    // The callee's writes stayed in its copy.
+    if s16.b != 9000 {
+        bad = bad + 1;
+    }
+    if s12.a != 7 {
+        bad = bad + 1;
+    }
+    if s40.e != 5 {
         bad = bad + 1;
     }
     if bad != 0 {

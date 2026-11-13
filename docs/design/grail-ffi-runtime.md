@@ -185,6 +185,23 @@ The tests run on the unmodified runtime: `rt_thread_init` installs Grail's worke
 the thread pointer, and the compiler's host-TLS bridge (see `docs/ffi.md`) switches to the C
 library's TLS for every foreign call and back to Grail's for exported callbacks.
 
+## The C header importer
+
+`grail bindgen` (`compiler/bindgen.grl`, documented in `docs/ffi.md`) is the other end of this file:
+where `lib/sys/grail_ffi.grl` *wraps* a C ABI by hand, the importer generates the declarations for a
+C library from its header - `extern "C"` functions, C-layout records with `SIZE`/`ALIGN`/`OFFSET`
+constants, enum constants and integer macros. It is a compiler module (a subcommand of the `grail`
+binary), not a build-time dependency: the preprocessor and declaration parser live in plain Grail,
+so nothing new is linked into the compiler or the bootstrap seed, and the tool can be run on the
+machine that installs the bindings.
+
+The same policy as this layer applies: a construct the importer cannot represent is refused with
+its `file:line` rather than approximated, and a construct that simply has no Grail spelling (a
+file-scope variable, a function-like macro) is reported and left out, or refused under `--strict`.
+The layout it emits is checked against the C compiler's own `sizeof`/`offsetof` by
+`tools/bindgen-test.mjs`, and the generated declarations are executed against a C crc32 from the
+system's `<zlib.h>`, so "the binding works" is a test rather than a claim.
+
 ## Verification and limits
 
 Executed: x86-64 Linux. The file test creates `ffi_note.txt`, writes `hello ffi`, reads it

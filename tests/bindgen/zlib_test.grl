@@ -1,0 +1,50 @@
+module bindgen_zlib_test;
+
+// The binding generated from the system's own <zlib.h>, used to call a C implementation of crc32.
+use zlib;
+
+// The link input for the symbol (the generated module names no library, so a program supplies one).
+extern "C" lib "shim.o" fn crc32(crc: u64, buf: CPtr, len: u32) -> u64;
+extern "C" lib "shim.o" fn zlib_shim_sizeof_stream() -> u64;
+extern "C" lib "shim.o" fn zlib_shim_offset_next_in() -> u64;
+extern "C" lib "shim.o" fn zlib_shim_offset_msg() -> u64;
+
+fn main() -> u64 {
+    mut bad: u64 = 0;
+    mut input = u8[49, 50, 51, 52, 53, 54, 55, 56, 57]; // "123456789"
+    mut crc: u64 = 0;
+    unsafe {
+        crc = zlib::crc32(0, cptr(&input), 9);
+    }
+    println(crc);
+    // The CRC-32 of "123456789" is 0xCBF43926; a binding with the wrong pointer or length type
+    // cannot produce it.
+    if crc != 3421780262 {
+        bad = bad + 1;
+    }
+    // The generated record is the C struct: compare its size and two offsets with C's own.
+    mut c_size: u64 = 0;
+    mut c_next_in: u64 = 0;
+    mut c_msg: u64 = 0;
+    unsafe {
+        c_size = zlib_shim_sizeof_stream();
+        c_next_in = zlib_shim_offset_next_in();
+        c_msg = zlib_shim_offset_msg();
+    }
+    println(zlib::Z_STREAM_SIZE);
+    println(zlib::Z_STREAM_OFFSET_NEXT_IN);
+    println(zlib::Z_STREAM_OFFSET_MSG);
+    if u64(zlib::Z_STREAM_SIZE) != c_size {
+        bad = bad + 1;
+    }
+    if u64(zlib::Z_STREAM_OFFSET_NEXT_IN) != c_next_in {
+        bad = bad + 1;
+    }
+    if u64(zlib::Z_STREAM_OFFSET_MSG) != c_msg {
+        bad = bad + 1;
+    }
+    if bad != 0 {
+        return 1;
+    }
+    return 0;
+}

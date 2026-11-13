@@ -1,0 +1,4134 @@
+module bindgen;
+use host;
+
+// `grail bindgen HEADER -o OUT.grl`: a C header importer. It reads a real C header - includes,
+// macros, typedefs, structs, unions, enums, function declarations and the attributes that change
+// layout - and writes the `extern "C"` declarations, C-layout records, enum constants and
+// `offsetof`/`sizeof` constants a Grail program needs to call that library.
+//
+// The importer is deliberately a compiler that says no: every construct it cannot represent in
+// Grail's C ABI (docs/ffi.md) is a refusal naming the construct and its `file:line`, because a
+// silently mistyped binding is worse than no binding. What it can represent is emitted with the
+// C layout the header declares, so `offsetof`/`sizeof` in the generated file are the C ones.
+//
+// Constructs that are not mis-typed because they are not emitted at all - a global variable (Grail
+// has no extern globals), a function-like macro (Grail has no macros) - are reported as `note:`
+// lines and listed in the generated header; `--strict` turns them into refusals too.
+//
+// No libclang: this program is the compiler, and linking libclang into it would make a C parsing
+// library a build requirement for every Grail user and a new dependency in the bootstrap seed. The
+// preprocessor and parser below cover the declaration surface of real headers (zlib, libpng,
+// sqlite3, linux/ioctl, termios) and refuse the rest by name.
+
+// ---- byte helpers -------------------------------------------------------------------------
+
+fn bg_letter(ch: u64) -> bool {
+    return ((64 < ch) && (ch < 91)) || ((96 < ch) && (ch < 123)) || (ch == 95) || (ch == 36);
+}
+fn bg_digit(ch: u64) -> bool {
+    return (47 < ch) && (ch < 58);
+}
+fn bg_ident(ch: u64) -> bool {
+    return bg_letter(ch) || bg_digit(ch);
+}
+fn bg_space(ch: u64) -> bool {
+    return (ch == 32) || (ch == 9) || (ch == 10) || (ch == 12) || (ch == 13) || (ch == 11);
+}
+fn bg_eq<a, b>(x: &a [u8], y: &b [u8]) -> bool {
+    if x.len() != y.len() {
+        return false;
+    }
+    for i in x.len() {
+        if x[i] != y[i] {
+            return false;
+        }
+    }
+    return true;
+}
+fn bg_starts<a, b>(x: &a [u8], y: &b [u8]) -> bool {
+    if x.len() < y.len() {
+        return false;
+    }
+    for i in y.len() {
+        if x[i] != y[i] {
+            return false;
+        }
+    }
+    return true;
+}
+fn bg_cat<a, b>(x: &a [u8], y: &b [u8]) -> u8[] {
+    mut out = u8[];
+    for i in x.len() {
+        out.push(x[i]);
+    }
+    for i in y.len() {
+        out.push(y[i]);
+    }
+    return out;
+}
+fn bg_put<a, b>(out: (&a mut u8[]), text: &b [u8]) -> unit {
+    for i in text.len() {
+        out.push(text[i]);
+    }
+    return ();
+}
+fn bg_put_ch<a>(out: (&a mut u8[]), ch: u64) -> unit {
+    out.push(u8(ch));
+    return ();
+}
+fn bg_dec(n: u64) -> u8[] {
+    if n == 0 {
+        return u8[48];
+    }
+    mut digits = u8[];
+    mut v = n;
+    while 0 < v {
+        digits.push(u8(48 + v % 10));
+        v = v / 10;
+    }
+    mut out = u8[];
+    mut i = digits.len();
+    while 0 < i {
+        i -= 1;
+        out.push(digits[i]);
+    }
+    return out;
+}
+// Decimal text of a signed value. The digits are produced with signed arithmetic and each digit
+// byte is `48 - d` for a negative remainder, so neither `-n` nor a cast from a negative value is
+// ever needed (both are checked, and i64::MIN has no positive twin).
+fn bg_signed(n: i64) -> u8[] {
+    mut digits = u8[];
+    mut v = n;
+    if v == 0 {
+        digits.push(48);
+    }
+    while v != 0 {
+        d := v % 10;
+        if d < 0 {
+            digits.push(u8(48 - d));
+        } else {
+            digits.push(u8(48 + d));
+        }
+        v = v / 10;
+    }
+    mut out = u8[];
+    if n < 0 {
+        out.push(45);
+    }
+    mut i = digits.len();
+    while 0 < i {
+        i -= 1;
+        out.push(digits[i]);
+    }
+    return out;
+}
+fn bg_lower<a>(text: &a [u8]) -> u8[] {
+    mut out = u8[];
+    for i in text.len() {
+        mut ch = u64(text[i]);
+        if (64 < ch) && (ch < 91) {
+            ch = ch + 32;
+        }
+        out.push(u8(ch));
+    }
+    return out;
+}
+fn bg_join<a, b>(head: &a [u8], tail: &b [u8]) -> u8[] {
+    if head.len() == 0 {
+        return tail.copy();
+    }
+    return bg_cat(view(head), view(bg_cat(view("/"), view(tail))));
+}
+fn bg_basename<a>(path: &a [u8]) -> u8[] {
+    mut start = 0;
+    for i in path.len() {
+        if (path[i] == 47) || (path[i] == 92) {
+            start = i + 1;
+        }
+    }
+    mut out = u8[];
+    mut i = start;
+    while i < path.len() {
+        out.push(path[i]);
+        i += 1;
+    }
+    return out;
+}
+fn bg_dirname<a>(path: &a [u8]) -> u8[] {
+    mut end = 0;
+    for i in path.len() {
+        if (path[i] == 47) || (path[i] == 92) {
+            end = i;
+        }
+    }
+    mut out = u8[];
+    for i in end {
+        out.push(path[i]);
+    }
+    if out.len() == 0 {
+        return u8[46];
+    }
+    return out;
+}
+// A C identifier made safe for Grail: a keyword or a type name is suffixed with `_`, because a
+// generated `record unit { x: i64 }` or `fn f(mut: i64)` would not parse.
+fn bg_keyword<a>(name: &a [u8]) -> bool {
+    return bg_eq(view(name), view("as"))
+        || bg_eq(view(name), view("break"))
+        || bg_eq(view(name), view("byval"))
+        || bg_eq(view(name), view("const"))
+        || bg_eq(view(name), view("continue"))
+        || bg_eq(view(name), view("defer"))
+        || bg_eq(view(name), view("drop"))
+        || bg_eq(view(name), view("else"))
+        || bg_eq(view(name), view("enum"))
+        || bg_eq(view(name), view("extern"))
+        || bg_eq(view(name), view("false"))
+        || bg_eq(view(name), view("fn"))
+        || bg_eq(view(name), view("for"))
+        || bg_eq(view(name), view("handle"))
+        || bg_eq(view(name), view("if"))
+        || bg_eq(view(name), view("impl"))
+        || bg_eq(view(name), view("in"))
+        || bg_eq(view(name), view("interface"))
+        || bg_eq(view(name), view("let"))
+        || bg_eq(view(name), view("match"))
+        || bg_eq(view(name), view("module"))
+        || bg_eq(view(name), view("mut"))
+        || bg_eq(view(name), view("pub"))
+        || bg_eq(view(name), view("record"))
+        || bg_eq(view(name), view("return"))
+        || bg_eq(view(name), view("self"))
+        || bg_eq(view(name), view("struct"))
+        || bg_eq(view(name), view("trait"))
+        || bg_eq(view(name), view("true"))
+        || bg_eq(view(name), view("union"))
+        || bg_eq(view(name), view("unit"))
+        || bg_eq(view(name), view("unsafe"))
+        || bg_eq(view(name), view("use"))
+        || bg_eq(view(name), view("where"))
+        || bg_eq(view(name), view("while"))
+        || bg_eq(view(name), view("i8"))
+        || bg_eq(view(name), view("i16"))
+        || bg_eq(view(name), view("i32"))
+        || bg_eq(view(name), view("i64"))
+        || bg_eq(view(name), view("u8"))
+        || bg_eq(view(name), view("u16"))
+        || bg_eq(view(name), view("u32"))
+        || bg_eq(view(name), view("u64"))
+        || bg_eq(view(name), view("f32"))
+        || bg_eq(view(name), view("f64"))
+        || bg_eq(view(name), view("bool"))
+        || bg_eq(view(name), view("char"))
+        || bg_eq(view(name), view("string"))
+        || bg_eq(view(name), view("cfn"))
+        || bg_eq(view(name), view("CStr"))
+        || bg_eq(view(name), view("CPtr"))
+        || bg_eq(view(name), view("CMutPtr"));
+}
+fn bg_safe<a>(name: &a [u8]) -> u8[] {
+    if bg_keyword(view(name)) {
+        return bg_cat(view(name), view("_"));
+    }
+    return name.copy();
+}
+
+// ---- data ---------------------------------------------------------------------------------
+
+// One token: its own bytes, a kind (0 identifier, 1 number, 2 punctuation, 3 string, 4 character),
+// and the `file:line` it came from, so every diagnostic can name its source.
+struct RTok {
+    text: u8[],
+    kind: u64,
+    line: u64,
+    file: u64
+}
+struct Macro {
+    name: u8[],
+    func: u64,
+    params: u8[][],
+    body: RTok[],
+    file: u64,
+    line: u64,
+    paste: u64,
+    vararg: u64,
+    // 1 for a macro this importer supplied itself (a compiler predefine or -D), which is not part
+    // of the header and therefore not part of the binding
+    builtin: u64
+}
+// One C type. Kinds: 0 void, 1 integer, 2 float, 3 record, 4 enum, 5 pointer, 6 function, 7 array.
+struct CType {
+    kind: u64,
+    bits: u64,
+    signed: u64,
+    ch: u64,
+    cconst: u64,
+    elem: u64,
+    count: u64,
+    ret: u64,
+    params: u64[],
+    variadic: u64,
+    rec: u64
+}
+struct Field {
+    name: u8[],
+    ty: u64,
+    count: u64,
+    offset: u64
+}
+struct Rec {
+    name: u8[],
+    tag: u8[],
+    unioned: u64,
+    complete: u64,
+    fields: Field[],
+    size: u64,
+    align: u64,
+    anonymous: u64
+}
+struct Node {
+    kind: u64,
+    inner: u64,
+    params: u64[],
+    variadic: u64,
+    count: u64,
+    name: u8[]
+}
+struct TD {
+    name: u8[],
+    ty: u64
+}
+// kind 0 a struct or union tag (one namespace), 1 an enum tag.
+struct Tag {
+    name: u8[],
+    kind: u64,
+    ty: u64
+}
+struct Ctx {
+    // options
+    incs: u8[][],
+    sysincs: u8[][],
+    model: u64,
+    strict: u64,
+    // diagnostics
+    failed: u64,
+    diag: u8[],
+    notes: u8[],
+    // preprocessor
+    files: u8[][],
+    toks: RTok[],
+    macros: Macro[],
+    seen: u8[][],
+    conds: u64[],
+    taken: u64[],
+    temps: RTok[][],
+    depth: u64,
+    // parser
+    pos: u64,
+    types: CType[],
+    nodes: Node[],
+    recs: Rec[],
+    tds: TD[],
+    tags: Tag[],
+    consts: Const[],
+    storage: u64,
+    // constants already written, so an enum and a macro of the same name are written once
+    const_names: u8[][],
+    // output
+    out: u8[],
+    // used by the constant-expression evaluator
+    bad: u64,
+    lenient: u64,
+    macro_ok: u64,
+    variadic: u64,
+    noproto: u64,
+    libs: u8[][],
+    fns: CFnDecl[],
+    // the `module NAME;` the generated file declares
+    module: u8[],
+    // the macros whose expansion is in progress, so a macro that reaches itself is named instead
+    // of expanded forever
+    expanding: u8[][],
+    // set when a declaration mentions a type this importer does not model and must skip wholly
+    skip_decl: u64
+}
+struct Const {
+    name: u8[],
+    value: i64
+}
+struct CFnDecl {
+    name: u8[],
+    ty: u64,
+    file: u64,
+    line: u64
+}
+
+fn bg_new_ctx() -> Ctx {
+    mut none = u8[][];
+    mut macros = Macro[];
+    mut conds = u64[];
+    mut temps = RTok[][];
+    mut types = CType[];
+    mut nodes = Node[];
+    mut recs = Rec[];
+    mut tds = TD[];
+    mut tags = Tag[];
+    mut consts = Const[];
+    mut empty_diag = u8[];
+    mut empty_notes = u8[];
+    return Ctx {
+        incs: none,
+        sysincs: u8[][],
+        model: 0,
+        strict: 0,
+        failed: 0,
+        diag: empty_diag,
+        notes: empty_notes,
+        files: u8[][],
+        toks: RTok[],
+        macros: macros,
+        seen: u8[][],
+        conds: conds,
+        taken: u64[],
+        temps: temps,
+        depth: 0,
+        pos: 0,
+        types: types,
+        nodes: nodes,
+        recs: recs,
+        tds: tds,
+        tags: tags,
+        consts: consts,
+        storage: 0,
+        const_names: u8[][],
+        out: u8[],
+        bad: 0,
+        lenient: 0,
+        macro_ok: 0,
+        variadic: 0,
+        noproto: 0,
+        libs: u8[][],
+        fns: CFnDecl[],
+        module: u8[],
+        expanding: u8[][],
+        skip_decl: 0
+    };
+}
+
+// ---- diagnostics --------------------------------------------------------------------------
+
+fn bg_file_name<a>(c: (&a mut Ctx), file: u64) -> u8[] {
+    if file < c.files.len() {
+        return c.files[file].copy();
+    }
+    return u8[];
+}
+fn bg_refuse<a, b>(c: (&a mut Ctx), file: u64, line: u64, what: &b [u8]) -> unit {
+    c.failed = 1;
+    bg_put(&mut c.diag, view("bindgen: error: "));
+    bg_put(&mut c.diag, view(bg_file_name(&mut c, file)));
+    bg_put_ch(&mut c.diag, 58);
+    bg_put(&mut c.diag, view(bg_dec(line)));
+    bg_put(&mut c.diag, view(": "));
+    bg_put(&mut c.diag, view(what));
+    bg_put_ch(&mut c.diag, 10);
+    return ();
+}
+// A construct Grail cannot hold at all: reported and skipped, or refused under `--strict`.
+fn bg_skip<a, b>(c: (&a mut Ctx), file: u64, line: u64, what: &b [u8]) -> unit {
+    if c.strict != 0 {
+        bg_refuse(&mut c, file, line, view(bg_cat(view("not representable in Grail: "), view(what))));
+        return ();
+    }
+    bg_put(&mut c.notes, view("bindgen: note: "));
+    bg_put(&mut c.notes, view(bg_file_name(&mut c, file)));
+    bg_put_ch(&mut c.notes, 58);
+    bg_put(&mut c.notes, view(bg_dec(line)));
+    bg_put(&mut c.notes, view(": "));
+    bg_put(&mut c.notes, view(what));
+    bg_put(&mut c.notes, view(" (not emitted)"));
+    bg_put_ch(&mut c.notes, 10);
+    return ();
+}
+
+// ---- token output -------------------------------------------------------------------------
+
+// A temporary token vector: expansion needs a scratch list per macro body and per argument, kept
+// in one place so a nested expansion never writes over the list it is reading.
+fn bg_temp_new<a>(c: (&a mut Ctx)) -> u64 {
+    c.temps.push(RTok[]);
+    return c.temps.len();
+}
+fn bg_temp_push<a>(c: (&a mut Ctx), id: u64, tok: (&a RTok)) -> unit {
+    c.temps[id - 1].push(RTok {
+        text: tok.text.copy(),
+        kind: tok.kind,
+        line: tok.line,
+        file: tok.file
+    });
+    return ();
+}
+fn bg_tok<a>(c: (&a mut Ctx), src: u64, index: u64) -> RTok {
+    return RTok {
+        text: c.temps[src - 1][index].text.copy(),
+        kind: c.temps[src - 1][index].kind,
+        line: c.temps[src - 1][index].line,
+        file: c.temps[src - 1][index].file
+    };
+}
+fn bg_src_len<a>(c: (&a mut Ctx), src: u64) -> u64 {
+    if src == 0 {
+        return c.toks.len();
+    }
+    return c.temps[src - 1].len();
+}
+fn bg_tok_push<a>(c: (&a mut Ctx), dst: u64, tok: (&a RTok)) -> unit {
+    if dst == 0 {
+        c.toks.push(RTok {
+            text: tok.text.copy(),
+            kind: tok.kind,
+            line: tok.line,
+            file: tok.file
+        });
+        return ();
+    }
+    c.temps[dst - 1].push(RTok {
+        text: tok.text.copy(),
+        kind: tok.kind,
+        line: tok.line,
+        file: tok.file
+    });
+    return ();
+}
+fn bg_word<a, b>(c: (&a mut Ctx), dst: u64, file: u64, line: u64, kind: u64, text: &b [u8]) -> unit {
+    tok := RTok { text: text.copy(), kind: kind, line: line, file: file };
+    bg_tok_push(&mut c, dst, &tok);
+    return ();
+}
+
+// ---- lexing a piece of text into a token vector -------------------------------------------------
+
+fn bg_slice<a>(text: &a [u8], from: u64, to: u64) -> u8[] {
+    mut out = u8[];
+    mut i = from;
+    mut end = to;
+    if end > text.len() {
+        end = text.len();
+    }
+    while i < end {
+        out.push(text[i]);
+        i += 1;
+    }
+    return out;
+}
+fn bg_ident_end<a>(text: &a [u8], from: u64) -> u64 {
+    mut i = from;
+    while (i < text.len()) && bg_ident(u64(text[i])) {
+        i += 1;
+    }
+    return i;
+}
+fn bg_number_end<a>(text: &a [u8], from: u64) -> u64 {
+    mut i = from;
+    while i < text.len() {
+        ch := u64(text[i]);
+        if bg_letter(ch) || bg_digit(ch) || (ch == 46) {
+            i += 1;
+            continue;
+        }
+        if (ch == 43) || (ch == 45) {
+            prev := u64(text[i - 1]);
+            if (prev == 101) || (prev == 69) || (prev == 112) || (prev == 80) {
+                i += 1;
+                continue;
+            }
+        }
+        break;
+    }
+    return i;
+}
+fn bg_quote_end<a>(text: &a [u8], from: u64, quote: u64) -> u64 {
+    mut i = from + 1;
+    while i < text.len() {
+        ch := u64(text[i]);
+        i += 1;
+        if ch == 92 {
+            if i < text.len() {
+                i += 1;
+            }
+            continue;
+        }
+        if ch == quote {
+            return i;
+        }
+    }
+    return text.len();
+}
+fn bg_punct_at<a, b>(text: &a [u8], at: u64, pat: &b [u8]) -> bool {
+    if at + pat.len() > text.len() {
+        return false;
+    }
+    for i in pat.len() {
+        if text[at + i] != pat[i] {
+            return false;
+        }
+    }
+    return true;
+}
+// Lexes `text[from..to]` into token `dst` (0 the parser stream, k a temporary).
+fn bg_lex<a, b>(c: (&a mut Ctx), text: &b [u8], from: u64, to: u64, file: u64, line: u64, dst: u64) -> unit {
+    mut i = from;
+    mut stop = to;
+    if stop > text.len() {
+        stop = text.len();
+    }
+    while i < stop {
+        ch := u64(text[i]);
+        if bg_space(ch) {
+            i += 1;
+            continue;
+        }
+        if bg_letter(ch) || bg_digit(ch) || (ch == 46) {
+            if bg_digit(ch) || ((ch == 46) && (i + 1 < stop) && bg_digit(u64(text[i + 1]))) {
+                end := bg_number_end(text, i);
+                bg_word(&mut c, dst, file, line, 1, view(bg_slice(text, i, end)));
+                i = end;
+                continue;
+            }
+            if bg_letter(ch) {
+                end := bg_ident_end(text, i);
+                bg_word(&mut c, dst, file, line, 0, view(bg_slice(text, i, end)));
+                i = end;
+                continue;
+            }
+        }
+        if (ch == 34) || (ch == 39) {
+            end := bg_quote_end(text, i, ch);
+            bg_word(&mut c, dst, file, line, 3, view(bg_slice(text, i, end)));
+            i = end;
+            continue;
+        }
+        // Punctuation, longest first. The C operators a declaration or a constant expression can hold.
+        mut end = i + 1;
+        if bg_punct_at(text, i, view("...")) || bg_punct_at(text, i, view("<<=")) || bg_punct_at(text, i, view(">>=")) {
+            end = i + 3;
+        } else if bg_punct_at(text, i, view("->"))
+            || bg_punct_at(text, i, view("++"))
+            || bg_punct_at(text, i, view("--"))
+            || bg_punct_at(text, i, view("<<"))
+            || bg_punct_at(text, i, view(">>"))
+            || bg_punct_at(text, i, view("<="))
+            || bg_punct_at(text, i, view(">="))
+            || bg_punct_at(text, i, view("=="))
+            || bg_punct_at(text, i, view("!="))
+            || bg_punct_at(text, i, view("&&"))
+            || bg_punct_at(text, i, view("||"))
+            || bg_punct_at(text, i, view("+="))
+            || bg_punct_at(text, i, view("-="))
+            || bg_punct_at(text, i, view("*="))
+            || bg_punct_at(text, i, view("/="))
+            || bg_punct_at(text, i, view("%="))
+            || bg_punct_at(text, i, view("&="))
+            || bg_punct_at(text, i, view("|="))
+            || bg_punct_at(text, i, view("^="))
+            || bg_punct_at(text, i, view("::"))
+            || bg_punct_at(text, i, view("##")) {
+            end = i + 2;
+        }
+        bg_word(&mut c, dst, file, line, 2, view(bg_slice(text, i, end)));
+        i = end;
+    }
+    return ();
+}
+
+// ---- the preprocessor ----------------------------------------------------------------------
+
+fn pp_active<a>(c: (&a mut Ctx)) -> u64 {
+    for i in c.conds.len() {
+        if c.conds[i] == 0 {
+            return 0;
+        }
+    }
+    return 1;
+}
+// Everything but the innermost conditional group: what `#elif`/`#else` test.
+fn pp_parent_active<a>(c: (&a mut Ctx)) -> u64 {
+    if c.conds.len() == 0 {
+        return 0;
+    }
+    mut i = 0;
+    while i + 1 < c.conds.len() {
+        if c.conds[i] == 0 {
+            return 0;
+        }
+        i += 1;
+    }
+    return 1;
+}
+fn bg_file_id<a, b>(c: (&a mut Ctx), path: &b [u8]) -> u64 {
+    for i in c.files.len() {
+        if bg_eq(view(c.files[i]), view(path)) {
+            return i;
+        }
+    }
+    c.files.push(path.copy());
+    return c.files.len() - 1;
+}
+fn bg_macro_index<a, b>(c: (&a mut Ctx), name: &b [u8]) -> i64 {
+    mut i = c.macros.len();
+    while 0 < i {
+        i -= 1;
+        if bg_eq(view(c.macros[i].name), view(name)) {
+            return i64(i);
+        }
+    }
+    return -1;
+}
+fn bg_macro_remove<a, b>(c: (&a mut Ctx), name: &b [u8]) -> unit {
+    mut i = c.macros.len();
+    while 0 < i {
+        i -= 1;
+        if bg_eq(view(c.macros[i].name), view(name)) {
+            c.macros.remove(i);
+            return ();
+        }
+    }
+    return ();
+}
+fn bg_include_seen<a, b>(c: (&a mut Ctx), path: &b [u8]) -> bool {
+    for i in c.seen.len() {
+        if bg_eq(view(c.seen[i]), view(path)) {
+            return true;
+        }
+    }
+    return false;
+}
+// The text of a `#include` line after the directive name: `<...>`, `"..."`, or a macro that
+// expands to one of those.
+fn bg_include_target<a, b>(c: (&a mut Ctx), text: &b [u8], from: u64) -> u8[] {
+    mut i = from;
+    while (i < text.len()) && bg_space(u64(text[i])) {
+        i += 1;
+    }
+    if i < text.len() {
+        ch := u64(text[i]);
+        if (ch == 60) || (ch == 34) {
+            mut close = 62;
+            if ch == 34 {
+                close = 34;
+            }
+            mut j = i + 1;
+            while (j < text.len()) && (u64(text[j]) != close) {
+                j += 1;
+            }
+            return bg_slice(text, i + 1, j);
+        }
+    }
+    return u8[];
+}
+fn pp_include<a, b>(c: (&a mut Ctx), text: &b [u8], from: u64, file: u64, line: u64, depth: u64) -> unit {
+    target := bg_include_target(&mut c, text, from);
+    if target.len() == 0 {
+        bg_refuse(&mut c, file, line, view("unsupported #include form (expected \"file\" or <file>)"));
+        return ();
+    }
+    mut angled = 0;
+    mut i = from;
+    while (i < text.len()) && bg_space(u64(text[i])) {
+        i += 1;
+    }
+    if (i < text.len()) && (u64(text[i]) == 60) {
+        angled = 1;
+    }
+    mut found = u8[];
+    if angled == 0 {
+        dir := bg_dirname(view(bg_file_name(&mut c, file)));
+        candidate := bg_join(view(dir), view(target));
+        if host::exists(view(candidate)) != 0 {
+            found = candidate;
+        }
+    }
+    if found.len() == 0 {
+        for k in c.incs.len() {
+            candidate := bg_join(view(c.incs[k]), view(target));
+            if host::exists(view(candidate)) != 0 {
+                found = candidate;
+                break;
+            }
+        }
+    }
+    if found.len() == 0 {
+        for k in c.sysincs.len() {
+            candidate := bg_join(view(c.sysincs[k]), view(target));
+            if host::exists(view(candidate)) != 0 {
+                found = candidate;
+                break;
+            }
+        }
+    }
+    if found.len() == 0 {
+        bg_refuse(&mut c, file, line, view(bg_cat(view("cannot resolve #include <"), view(bg_cat(view(target), view("> in -I/-isystem directories"))))));
+        return ();
+    }
+    if bg_include_seen(&mut c, view(found)) {
+        return ();
+    }
+    pp_file(&mut c, view(found), depth);
+    return ();
+}
+
+fn pp_scan<a, b>(c: (&a mut Ctx), src: &b [u8], file: u64, depth: u64) -> unit {
+    mut i = 0;
+    mut line = 1;
+    mut cur = u8[];
+    mut in_block = 0;
+    while i < src.len() {
+        ch := u64(src[i]);
+        if ch == 92 {
+            if (i + 1 < src.len()) && (u64(src[i + 1]) == 10) {
+                i += 2;
+                line += 1;
+                continue;
+            }
+            if (i + 2 < src.len()) && (u64(src[i + 1]) == 13) && (u64(src[i + 2]) == 10) {
+                i += 3;
+                line += 1;
+                continue;
+            }
+        }
+        if in_block != 0 {
+            if (ch == 42) && (i + 1 < src.len()) && (u64(src[i + 1]) == 47) {
+                in_block = 0;
+                i += 2;
+                cur.push(32);
+                continue;
+            }
+            if ch == 10 {
+                line += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if (ch == 47) && (i + 1 < src.len()) && (u64(src[i + 1]) == 42) {
+            in_block = 1;
+            i += 2;
+            cur.push(32);
+            continue;
+        }
+        if (ch == 47) && (i + 1 < src.len()) && (u64(src[i + 1]) == 47) {
+            while (i < src.len()) && (u64(src[i]) != 10) {
+                i += 1;
+            }
+            continue;
+        }
+        if (ch == 34) || (ch == 39) {
+            quote := ch;
+            cur.push(u8(ch));
+            i += 1;
+            mut done = 0;
+            while (i < src.len()) && (done == 0) {
+                d := u64(src[i]);
+                cur.push(u8(d));
+                i += 1;
+                if d == 92 {
+                    if i < src.len() {
+                        cur.push(src[i]);
+                        i += 1;
+                    }
+                    continue;
+                }
+                if d == quote {
+                    done = 1;
+                    continue;
+                }
+                if d == 10 {
+                    done = 1;
+                    line += 1;
+                }
+            }
+            continue;
+        }
+        if ch == 10 {
+            pp_line(&mut c, &cur, file, line, depth);
+            cur = u8[];
+            line += 1;
+            i += 1;
+            continue;
+        }
+        cur.push(u8(ch));
+        i += 1;
+    }
+    if cur.len() != 0 {
+        pp_line(&mut c, &cur, file, line, depth);
+    }
+    return ();
+}
+fn pp_file<a, b>(c: (&a mut Ctx), path: &b [u8], depth: u64) -> unit {
+    if depth > 32 {
+        bg_refuse(&mut c, 0, 0, view("include nesting is deeper than 32 levels"));
+        return ();
+    }
+    if bg_include_seen(&mut c, view(path)) {
+        return ();
+    }
+    c.seen.push(path.copy());
+    file := bg_file_id(&mut c, path);
+    text := host::read_file(view(path));
+    if text.len() == 0 {
+        bg_refuse(&mut c, file, 0, view("cannot read the header (missing or empty)"));
+        return ();
+    }
+    src := view(text).copy();
+    pp_scan(&mut c, view(src), file, depth + 1);
+    return ();
+}
+fn pp_line<a, b>(c: (&a mut Ctx), text: &b [u8], file: u64, line: u64, depth: u64) -> unit {
+    mut k = 0;
+    while (k < text.len()) && bg_space(u64(text[k])) {
+        k += 1;
+    }
+    if k == text.len() {
+        return ();
+    }
+    if u64(text[k]) == 35 {
+        pp_directive(&mut c, text, k + 1, file, line, depth);
+        return ();
+    }
+    if pp_active(&mut c) == 0 {
+        return ();
+    }
+    t := bg_temp_new(&mut c);
+    bg_lex(&mut c, text, k, text.len(), file, line, t);
+    last := bg_src_len(&mut c, t);
+    bg_expand_range(&mut c, t, 0, 0, last, 0);
+    return ();
+}
+fn pp_directive<a, b>(c: (&a mut Ctx), text: &b [u8], from: u64, file: u64, line: u64, depth: u64) -> unit {
+    mut k = from;
+    while (k < text.len()) && bg_space(u64(text[k])) {
+        k += 1;
+    }
+    if (k < text.len()) && bg_digit(u64(text[k])) {
+        // `# 12 "file.h"` line markers from a preprocessed source: nothing to do.
+        return ();
+    }
+    end := bg_ident_end(text, k);
+    name := bg_slice(text, k, end);
+    k = end;
+    if bg_eq(view(name), view("if")) || bg_eq(view(name), view("ifdef")) || bg_eq(view(name), view("ifndef")) {
+        mut value = 0;
+        parent := pp_active(&mut c);
+        if bg_eq(view(name), view("if")) {
+            if pp_condition(&mut c, text, k, file, line) != 0 {
+                value = 1;
+            }
+        } else {
+            mut j = k;
+            while (j < text.len()) && bg_space(u64(text[j])) {
+                j += 1;
+            }
+            last := bg_ident_end(text, j);
+            ident := bg_slice(text, j, last);
+            mut defined = 0;
+            if bg_macro_index(&mut c, view(ident)) >= 0 {
+                defined = 1;
+            }
+            if bg_eq(view(name), view("ifdef")) {
+                value = defined;
+            } else {
+                value = 1 - defined;
+            }
+        }
+        mut on = 0;
+        if (parent != 0) && (value != 0) {
+            on = 1;
+        }
+        c.conds.push(on);
+        c.taken.push(on);
+        return ();
+    }
+    if bg_eq(view(name), view("elif")) {
+        if c.conds.len() == 0 {
+            bg_refuse(&mut c, file, line, view("#elif without #if"));
+            return ();
+        }
+        top := c.conds.len() - 1;
+        parent := pp_parent_active(&mut c);
+        mut on = 0;
+        if (parent != 0) && (c.taken[top] == 0) && (pp_condition(&mut c, text, k, file, line) != 0) {
+            on = 1;
+        }
+        c.conds[top] = on;
+        if on != 0 {
+            c.taken[top] = 1;
+        }
+        return ();
+    }
+    if bg_eq(view(name), view("else")) {
+        if c.conds.len() == 0 {
+            bg_refuse(&mut c, file, line, view("#else without #if"));
+            return ();
+        }
+        top := c.conds.len() - 1;
+        parent := pp_parent_active(&mut c);
+        mut on = 0;
+        if (parent != 0) && (c.taken[top] == 0) {
+            on = 1;
+        }
+        c.conds[top] = on;
+        c.taken[top] = 1;
+        return ();
+    }
+    if bg_eq(view(name), view("endif")) {
+        if c.conds.len() == 0 {
+            bg_refuse(&mut c, file, line, view("#endif without #if"));
+            return ();
+        }
+        c.conds.pop();
+        c.taken.pop();
+        return ();
+    }
+    if pp_active(&mut c) == 0 {
+        return ();
+    }
+    if bg_eq(view(name), view("define")) {
+        pp_define(&mut c, text, k, file, line);
+        return ();
+    }
+    if bg_eq(view(name), view("undef")) {
+        mut j = k;
+        while (j < text.len()) && bg_space(u64(text[j])) {
+            j += 1;
+        }
+        last := bg_ident_end(text, j);
+        bg_macro_remove(&mut c, view(bg_slice(text, j, last)));
+        return ();
+    }
+    if bg_eq(view(name), view("include")) || bg_eq(view(name), view("include_next")) {
+        pp_include(&mut c, text, k, file, line, depth);
+        return ();
+    }
+    if bg_eq(view(name), view("error")) {
+        bg_refuse(&mut c, file, line, view(bg_cat(view("#error "), view(bg_slice(text, k, text.len())))));
+        return ();
+    }
+    if bg_eq(view(name), view("warning")) {
+        bg_skip(&mut c, file, line, view(bg_cat(view("#warning "), view(bg_slice(text, k, text.len())))));
+        return ();
+    }
+    if bg_eq(view(name), view("pragma")) {
+        // `#pragma pack` changes member alignment, which a Grail extern record cannot express.
+        mut j = k;
+        while (j < text.len()) && bg_space(u64(text[j])) {
+            j += 1;
+        }
+        if bg_starts(view(bg_lower(view(bg_slice(text, j, text.len())))), view("pack")) {
+            bg_refuse(&mut c, file, line, view("#pragma pack changes member alignment and a Grail extern record cannot express a packed layout"));
+        }
+        return ();
+    }
+    // `#line`, `#ident`, `#pragma GCC ...`: no effect on a declaration.
+    return ();
+}
+// `#if`/`#elif`: `defined X` first (before any expansion), then macro expansion, then the integer
+// constant expression evaluator. An identifier that survives expansion is 0, as in C.
+fn pp_condition<a, b>(c: (&a mut Ctx), text: &b [u8], from: u64, file: u64, line: u64) -> u64 {
+    t1 := bg_temp_new(&mut c);
+    bg_lex(&mut c, text, from, text.len(), file, line, t1);
+    t2 := bg_temp_new(&mut c);
+    mut i = 0;
+    last := bg_src_len(&mut c, t1);
+    while i < last {
+        tok := bg_tok(&mut c, t1, i);
+        mut is_defined = 0;
+        if tok.kind == 0 {
+            if bg_eq(view(tok.text), view("defined")) {
+                is_defined = 1;
+            }
+        }
+        if is_defined != 0 {
+            i += 1;
+            mut wrapped = 0;
+            if i < last {
+                if bg_eq(view(bg_tok(&mut c, t1, i).text), view("(")) {
+                    wrapped = 1;
+                    i += 1;
+                }
+            }
+            mut name = u8[];
+            if i < last {
+                name = bg_tok(&mut c, t1, i).text.copy();
+                i += 1;
+            }
+            if wrapped != 0 {
+                i += 1;
+            }
+            mut value = 0;
+            if bg_macro_index(&mut c, view(name)) >= 0 {
+                value = 1;
+            }
+            digits := bg_dec(u64(value));
+            bg_word(&mut c, t2, file, line, 1, view(digits));
+            continue;
+        }
+        bg_tok_push(&mut c, t2, &tok);
+        i += 1;
+    }
+    t3 := bg_temp_new(&mut c);
+    count := bg_src_len(&mut c, t2);
+    bg_expand_range(&mut c, t2, t3, 0, count, 0);
+    swapped := exchange(&mut c.temps[t3 - 1], RTok[]);
+    old := exchange(&mut c.toks, swapped);
+    saved_pos := c.pos;
+    saved_lenient := c.lenient;
+    saved_bad := c.bad;
+    saved_failed := c.failed;
+    c.pos = 0;
+    c.lenient = 1;
+    c.bad = 0;
+    value := ex_const(&mut c);
+    mut ok = 1;
+    if c.bad != 0 {
+        ok = 0;
+    }
+    if c.failed != saved_failed {
+        ok = 0;
+    }
+    c.bad = saved_bad;
+    c.failed = saved_failed;
+    c.lenient = saved_lenient;
+    c.pos = saved_pos;
+    exchange(&mut c.toks, old);
+    if ok == 0 {
+        mut msg = view("#if condition is not a constant expression this importer evaluates: ").copy();
+        msg = bg_cat(view(msg), view(bg_slice(text, from, text.len())));
+        bg_refuse(&mut c, file, line, view(msg));
+        return 0;
+    }
+    if value != 0 {
+        return 1;
+    }
+    return 0;
+}
+fn pp_define<a, b>(c: (&a mut Ctx), text: &b [u8], from: u64, file: u64, line: u64) -> unit {
+    mut k = from;
+    while (k < text.len()) && bg_space(u64(text[k])) {
+        k += 1;
+    }
+    end := bg_ident_end(text, k);
+    name := bg_slice(text, k, end);
+    if name.len() == 0 {
+        bg_refuse(&mut c, file, line, view("malformed #define: no macro name"));
+        return ();
+    }
+    mut k2 = end;
+    mut func = 0;
+    mut vararg = 0;
+    mut params = u8[][];
+    if (k2 < text.len()) && (u64(text[k2]) == 40) {
+        func = 1;
+        k2 += 1;
+        while k2 < text.len() {
+            while (k2 < text.len()) && bg_space(u64(text[k2])) {
+                k2 += 1;
+            }
+            if (k2 < text.len()) && (u64(text[k2]) == 41) {
+                k2 += 1;
+                break;
+            }
+            if bg_punct_at(text, k2, view("...")) {
+                // `(a, ...)`: the unnamed variadic parameter, spelled `__VA_ARGS__` in the body.
+                vararg = 1;
+                params.push(view("__VA_ARGS__").copy());
+                k2 += 3;
+            } else {
+                pstart := k2;
+                pend := bg_ident_end(text, k2);
+                if pend == pstart {
+                    bg_refuse(&mut c, file, line, view("malformed function-like macro parameter list"));
+                    return ();
+                }
+                params.push(bg_slice(text, pstart, pend));
+                k2 = pend;
+                while (k2 < text.len()) && bg_space(u64(text[k2])) {
+                    k2 += 1;
+                }
+                if bg_punct_at(text, k2, view("...")) {
+                    // GNU's named variadic parameter: `(a, rest...)`.
+                    vararg = 1;
+                    k2 += 3;
+                }
+            }
+            while (k2 < text.len()) && bg_space(u64(text[k2])) {
+                k2 += 1;
+            }
+            if (k2 < text.len()) && (u64(text[k2]) == 44) {
+                k2 += 1;
+            }
+        }
+    }
+    t := bg_temp_new(&mut c);
+    bg_lex(&mut c, text, k2, text.len(), file, line, t);
+    mut body = RTok[];
+    mut paste = 0;
+    for j in c.temps[t - 1].len() {
+        piece := c.temps[t - 1][j].text.copy();
+        kind := c.temps[t - 1][j].kind;
+        if (kind == 2) && bg_eq(view(piece), view("#")) {
+            paste = 2;
+        }
+        if (kind == 2) && bg_eq(view(piece), view("##")) {
+            if paste == 0 {
+                paste = 1;
+            }
+        }
+        body.push(RTok { text: piece, kind: kind, line: line, file: file });
+    }
+    bg_macro_remove(&mut c, view(name));
+    c.macros.push(Macro {
+        name: name,
+        func: func,
+        params: params,
+        body: body,
+        file: file,
+        line: line,
+        paste: paste,
+        vararg: vararg,
+        builtin: 0
+    });
+    return ();
+}
+fn bg_is_punct<a, b>(c: (&a mut Ctx), src: u64, index: u64, text: &b [u8]) -> bool {
+    tok := bg_tok(&mut c, src, index);
+    if tok.kind != 2 {
+        return false;
+    }
+    return bg_eq(view(tok.text), view(text));
+}
+// Expands `src[from..to]` into `dst`, honouring object-like and function-like macros.
+fn bg_expand_range<a>(c: (&a mut Ctx), src: u64, dst: u64, from: u64, to: u64, depth: u64) -> unit {
+    if depth > 96 {
+        bg_refuse(&mut c, 0, 0, view("macro expansion nests deeper than 96 levels"));
+        return ();
+    }
+    mut i = from;
+    while i < to {
+        tok := bg_tok(&mut c, src, i);
+        mut handled = 0;
+        if tok.kind == 0 {
+            m := bg_macro_index(&mut c, view(tok.text));
+            if m >= 0 {
+                if c.macros[u64(m)].func == 0 {
+                    bg_expand_object(&mut c, u64(m), dst, depth);
+                    handled = 1;
+                    i += 1;
+                } else if (i + 1 < to) && bg_is_punct(&mut c, src, i + 1, view("(")) {
+                    used := bg_expand_function(&mut c, u64(m), src, dst, i, to, depth);
+                    if used != 0 {
+                        handled = 1;
+                        i += used;
+                    }
+                }
+            }
+        }
+        if handled == 0 {
+            bg_tok_push(&mut c, dst, &tok);
+            i += 1;
+        }
+    }
+    return ();
+}
+fn bg_expanding<a, b>(c: (&a mut Ctx), name: &b [u8]) -> bool {
+    for i in c.expanding.len() {
+        if bg_eq(view(c.expanding[i]), view(name)) {
+            return true;
+        }
+    }
+    return false;
+}
+fn bg_expand_object<a>(c: (&a mut Ctx), m: u64, dst: u64, depth: u64) -> unit {
+    if c.macros[m].paste == 2 {
+        mfile := c.macros[m].file;
+        mline := c.macros[m].line;
+        mname := c.macros[m].name.copy();
+        mut msg = view("macro `").copy();
+        msg = bg_cat(view(msg), view(mname));
+        msg = bg_cat(view(msg), view("` uses # or ##, which this importer cannot paste"));
+        bg_refuse(&mut c, mfile, mline, view(msg));
+        return ();
+    }
+    t := bg_temp_new(&mut c);
+    mfile := c.macros[m].file;
+    mline := c.macros[m].line;
+    for j in c.macros[m].body.len() {
+        piece := c.macros[m].body[j].text.copy();
+        kind := c.macros[m].body[j].kind;
+        bg_word(&mut c, t, mfile, mline, kind, view(piece));
+    }
+    last := bg_src_len(&mut c, t);
+    mname := c.macros[m].name.copy();
+    if bg_expanding(&mut c, view(mname)) {
+        // C's "blue paint": a macro that reaches itself is not expanded again, and the name stands
+        // as itself. glibc's enum accessors (`#define _PC_LINK_MAX _PC_LINK_MAX`) rely on it.
+        mfile := c.macros[m].file;
+        mline := c.macros[m].line;
+        bg_word(&mut c, dst, mfile, mline, 0, view(mname));
+        return ();
+    }
+    c.expanding.push(mname);
+    bg_expand_range(&mut c, t, dst, 0, last, depth + 1);
+    c.expanding.pop();
+    return ();
+}
+// `name(args...)`: gathers the arguments, substitutes them into the body and expands the result.
+// Returns the number of source tokens consumed (the name and its parenthesised list), or 0 when the
+// macro cannot be expanded so the caller emits the name instead.
+fn bg_expand_function<a>(c: (&a mut Ctx), m: u64, src: u64, dst: u64, at: u64, to: u64, depth: u64) -> u64 {
+    mut starts = u64[];
+    mut ends = u64[];
+    mut nest = 0;
+    mut s = at + 1;
+    mut j = at;
+    mut stop = 0;
+    while (j < to) && (stop == 0) {
+        if bg_is_punct(&mut c, src, j, view("(")) {
+            nest += 1;
+            if nest == 1 {
+                s = j + 1;
+            }
+            j += 1;
+            continue;
+        }
+        if bg_is_punct(&mut c, src, j, view(")")) {
+            if nest == 1 {
+                starts.push(s);
+                ends.push(j);
+                stop = j + 1;
+                j += 1;
+                continue;
+            }
+            nest -= 1;
+            j += 1;
+            continue;
+        }
+        if (nest == 1) && bg_is_punct(&mut c, src, j, view(",")) {
+            starts.push(s);
+            ends.push(j);
+            s = j + 1;
+        }
+        j += 1;
+    }
+    mfile := c.macros[m].file;
+    mline := c.macros[m].line;
+    if stop == 0 {
+        mut msg = view("unterminated argument list for macro `").copy();
+        msg = bg_cat(view(msg), view(c.macros[m].name.copy()));
+        bg_refuse(&mut c, mfile, mline, view(msg));
+        return 0;
+    }
+    mut count = starts.len();
+    if (count == 1) && (starts[0] == ends[0]) && (c.macros[m].params.len() == 0) {
+        count = 0;
+    }
+    mut required = c.macros[m].params.len();
+    if c.macros[m].vararg != 0 {
+        if 0 < required {
+            required -= 1;
+        }
+    }
+    mut accepts = 0;
+    if count == c.macros[m].params.len() {
+        accepts = 1;
+    }
+    if (c.macros[m].vararg != 0) && (required <= count) {
+        accepts = 1;
+    }
+    if accepts == 0 {
+        mut msg = view("macro `").copy();
+        msg = bg_cat(view(msg), view(c.macros[m].name));
+        msg = bg_cat(view(msg), view("` is called with the wrong number of arguments"));
+        bg_refuse(&mut c, mfile, mline, view(msg));
+        return 0;
+    }
+    if c.macros[m].paste == 2 {
+        mut msg = view("macro `").copy();
+        msg = bg_cat(view(msg), view(c.macros[m].name));
+        msg = bg_cat(view(msg), view("` uses # or ##, which this importer cannot paste"));
+        bg_refuse(&mut c, mfile, mline, view(msg));
+        return 0;
+    }
+    // Each argument is expanded once, into its own temporary vector.
+    mut args = u64[];
+    for a in count {
+        t := bg_temp_new(&mut c);
+        bg_expand_range(&mut c, src, t, starts[a], ends[a], depth + 1);
+        args.push(t);
+    }
+    sub := bg_temp_new(&mut c);
+    body_len := c.macros[m].body.len();
+    for b in body_len {
+        piece := c.macros[m].body[b].text.copy();
+        kind := c.macros[m].body[b].kind;
+        mut near_paste = 0;
+        if b + 1 < body_len {
+            if (c.macros[m].body[b + 1].kind == 2) && bg_eq(view(c.macros[m].body[b + 1].text), view("##")) {
+                near_paste = 1;
+            }
+        }
+        if b > 0 {
+            if (c.macros[m].body[b - 1].kind == 2) && bg_eq(view(c.macros[m].body[b - 1].text), view("##")) {
+                near_paste = 1;
+            }
+        }
+        mut replaced = 0;
+        if kind == 0 {
+            for p in c.macros[m].params.len() {
+                if bg_eq(view(c.macros[m].params[p]), view(piece)) {
+                    if (c.macros[m].vararg != 0) && (p + 1 == c.macros[m].params.len()) {
+                        // The trailing parameter collects every remaining argument.
+                        mut a = p;
+                        while a < count {
+                            if p < a {
+                                comma := RTok { text: u8[44], kind: 2, line: mline, file: mfile };
+                                bg_tok_push(&mut c, sub, &comma);
+                            }
+                            last := bg_src_len(&mut c, args[a]);
+                            bg_expand_range(&mut c, args[a], sub, 0, last, depth + 1);
+                            a += 1;
+                        }
+                        replaced = 1;
+                        break;
+                    }
+                    if near_paste != 0 {
+                        // Next to `##` an argument is substituted unexpanded, as C specifies.
+                        mut k = starts[p];
+                        while k < ends[p] {
+                            raw := bg_tok(&mut c, src, k);
+                            bg_tok_push(&mut c, sub, &raw);
+                            k += 1;
+                        }
+                    } else {
+                        last := bg_src_len(&mut c, args[p]);
+                        bg_expand_range(&mut c, args[p], sub, 0, last, depth + 1);
+                    }
+                    replaced = 1;
+                    break;
+                }
+            }
+        }
+        if replaced == 0 {
+            bg_word(&mut c, sub, mfile, mline, kind, view(piece));
+        }
+    }
+    bg_paste(&mut c, sub);
+    last := bg_src_len(&mut c, sub);
+    fname := c.macros[m].name.copy();
+    if bg_expanding(&mut c, view(fname)) {
+        bg_word(&mut c, dst, mfile, mline, 0, view(fname));
+        return stop - at;
+    }
+    c.expanding.push(fname);
+    bg_expand_range(&mut c, sub, dst, 0, last, depth + 1);
+    c.expanding.pop();
+    return stop - at;
+}
+// `A ## B` in a macro body: joins the neighbours of every `##` into one token. Two non-identifier
+// tokens that do not form a valid single token are refused rather than joined into nonsense.
+fn bg_paste<a>(c: (&a mut Ctx), sub: u64) -> unit {
+    mut i = 0;
+    mut go = 1;
+    while go != 0 {
+        go = 0;
+        i = 0;
+        while i < c.temps[sub - 1].len() {
+            if (c.temps[sub - 1][i].kind == 2) && bg_eq(view(c.temps[sub - 1][i].text), view("##")) {
+                if (i == 0) || (i + 1 >= c.temps[sub - 1].len()) {
+                    bg_refuse(&mut c, 0, 0, view("`##` at the edge of a macro body cannot be pasted"));
+                    return ();
+                }
+                left := c.temps[sub - 1][i - 1].text.copy();
+                right := c.temps[sub - 1][i + 1].text.copy();
+                joined := bg_cat(view(left), view(right));
+                mut first: u64 = 0;
+                if joined.len() != 0 {
+                    first = u64(joined[0]);
+                }
+                if !bg_letter(first) && !bg_digit(first) && (first != 46) {
+                    bg_refuse(&mut c, 0, 0, view("`##` would produce a token that is not an identifier or a number"));
+                    return ();
+                }
+                mut merged = RTok { text: joined, kind: 0, line: c.temps[sub - 1][i].line, file: c.temps[sub - 1][i].file };
+                if bg_digit(first) {
+                    merged = RTok { text: merged.text, kind: 1, line: merged.line, file: merged.file };
+                }
+                c.temps[sub - 1].remove(i + 1);
+                c.temps[sub - 1].remove(i);
+                exchange(&mut c.temps[sub - 1][i - 1], merged);
+                go = 1;
+                i = c.temps[sub - 1].len();
+            }
+            i += 1;
+        }
+    }
+    return ();
+}
+
+// ---- the type table -----------------------------------------------------------------------
+
+fn bg_t_void<a>(c: (&a mut Ctx)) -> u64 {
+    c.types.push(CType {
+        kind: 0,
+        bits: 0,
+        signed: 0,
+        ch: 0,
+        cconst: 0,
+        elem: 0,
+        count: 0,
+        ret: 0,
+        params: u64[],
+        variadic: 0,
+        rec: 0
+    });
+    return c.types.len() - 1;
+}
+fn bg_t_int<a>(c: (&a mut Ctx), bits: u64, signed: u64, ch: u64, cconst: u64) -> u64 {
+    c.types.push(CType {
+        kind: 1,
+        bits: bits,
+        signed: signed,
+        ch: ch,
+        cconst: cconst,
+        elem: 0,
+        count: 0,
+        ret: 0,
+        params: u64[],
+        variadic: 0,
+        rec: 0
+    });
+    return c.types.len() - 1;
+}
+fn bg_t_float<a>(c: (&a mut Ctx), bits: u64) -> u64 {
+    c.types.push(CType {
+        kind: 2,
+        bits: bits,
+        signed: 1,
+        ch: 0,
+        cconst: 0,
+        elem: 0,
+        count: 0,
+        ret: 0,
+        params: u64[],
+        variadic: 0,
+        rec: 0
+    });
+    return c.types.len() - 1;
+}
+fn bg_t_record<a>(c: (&a mut Ctx), rec: u64) -> u64 {
+    c.types.push(CType {
+        kind: 3,
+        bits: 0,
+        signed: 0,
+        ch: 0,
+        cconst: 0,
+        elem: 0,
+        count: 0,
+        ret: 0,
+        params: u64[],
+        variadic: 0,
+        rec: rec
+    });
+    return c.types.len() - 1;
+}
+fn bg_t_enum<a>(c: (&a mut Ctx), bits: u64) -> u64 {
+    c.types.push(CType {
+        kind: 4,
+        bits: bits,
+        signed: 1,
+        ch: 0,
+        cconst: 0,
+        elem: 0,
+        count: 0,
+        ret: 0,
+        params: u64[],
+        variadic: 0,
+        rec: 0
+    });
+    return c.types.len() - 1;
+}
+fn bg_t_ptr<a>(c: (&a mut Ctx), elem: u64) -> u64 {
+    c.types.push(CType {
+        kind: 5,
+        bits: 64,
+        signed: 0,
+        ch: 0,
+        cconst: 0,
+        elem: elem,
+        count: 0,
+        ret: 0,
+        params: u64[],
+        variadic: 0,
+        rec: 0
+    });
+    return c.types.len() - 1;
+}
+fn bg_t_func<a>(c: (&a mut Ctx), ret: u64, params: u64[], variadic: u64) -> u64 {
+    c.types.push(CType {
+        kind: 6,
+        bits: 0,
+        signed: 0,
+        ch: 0,
+        cconst: 0,
+        elem: 0,
+        count: 0,
+        ret: ret,
+        params: params,
+        variadic: variadic,
+        rec: 0
+    });
+    return c.types.len() - 1;
+}
+fn bg_t_array<a>(c: (&a mut Ctx), elem: u64, count: u64) -> u64 {
+    c.types.push(CType {
+        kind: 7,
+        bits: 0,
+        signed: 0,
+        ch: 0,
+        cconst: 0,
+        elem: elem,
+        count: count,
+        ret: 0,
+        params: u64[],
+        variadic: 0,
+        rec: 0
+    });
+    return c.types.len() - 1;
+}
+fn bg_t_with_const<a>(c: (&a mut Ctx), ty: u64, cconst: u64) -> u64 {
+    if cconst == 0 {
+        return ty;
+    }
+    params := c.types[ty].params.copy();
+    c.types.push(CType {
+        kind: c.types[ty].kind,
+        bits: c.types[ty].bits,
+        signed: c.types[ty].signed,
+        ch: c.types[ty].ch,
+        cconst: 1,
+        elem: c.types[ty].elem,
+        count: c.types[ty].count,
+        ret: c.types[ty].ret,
+        params: params,
+        variadic: c.types[ty].variadic,
+        rec: c.types[ty].rec
+    });
+    return c.types.len() - 1;
+}
+fn bg_align_up(value: u64, align: u64) -> u64 {
+    if align == 0 {
+        return value;
+    }
+    rem := value % align;
+    if rem == 0 {
+        return value;
+    }
+    return value + (align - rem);
+}
+fn bg_size_of<a>(c: (&a mut Ctx), ty: u64) -> u64 {
+    kind := c.types[ty].kind;
+    if kind == 0 {
+        return 0;
+    }
+    if (kind == 1) || (kind == 2) || (kind == 4) {
+        return c.types[ty].bits / 8;
+    }
+    if kind == 5 {
+        return 8;
+    }
+    if kind == 3 {
+        return c.recs[c.types[ty].rec].size;
+    }
+    if kind == 7 {
+        elem := c.types[ty].elem;
+        count := c.types[ty].count;
+        return bg_size_of(&mut c, elem) * count;
+    }
+    return 0;
+}
+fn bg_align_of<a>(c: (&a mut Ctx), ty: u64) -> u64 {
+    kind := c.types[ty].kind;
+    if kind == 0 {
+        return 1;
+    }
+    if (kind == 1) || (kind == 2) || (kind == 4) {
+        if c.types[ty].bits / 8 == 0 {
+            return 1;
+        }
+        return c.types[ty].bits / 8;
+    }
+    if kind == 5 {
+        return 8;
+    }
+    if kind == 3 {
+        if c.recs[c.types[ty].rec].align == 0 {
+            return 1;
+        }
+        return c.recs[c.types[ty].rec].align;
+    }
+    if kind == 7 {
+        elem := c.types[ty].elem;
+        return bg_align_of(&mut c, elem);
+    }
+    return 1;
+}
+
+// ---- constant expressions -----------------------------------------------------------------
+// Used for enum values, array bounds, `_Static_assert` and `#if`. The evaluator is C's integer
+// constant expression subset: literals with suffixes, char literals, the arithmetic and bitwise
+// operators, `sizeof`/`_Alignof` of a type, and casts to an integer type.
+
+fn ex_text<a>(c: (&a mut Ctx), at: u64) -> u8[] {
+    if at < c.toks.len() {
+        return c.toks[at].text.copy();
+    }
+    return u8[];
+}
+fn ex_kind<a>(c: (&a mut Ctx), at: u64) -> u64 {
+    if at < c.toks.len() {
+        return c.toks[at].kind;
+    }
+    return 2;
+}
+fn ex_is<a, b>(c: (&a mut Ctx), at: u64, text: &b [u8]) -> bool {
+    if at >= c.toks.len() {
+        return false;
+    }
+    if c.toks[at].kind == 3 || c.toks[at].kind == 4 {
+        return false;
+    }
+    return bg_eq(view(c.toks[at].text), view(text));
+}
+fn ex_is_ident<a>(c: (&a mut Ctx)) -> bool {
+    if c.pos >= c.toks.len() {
+        return false;
+    }
+    return c.toks[c.pos].kind == 0;
+}
+fn ex_byte<a>(text: &a [u8], at: u64) -> u64 {
+    if at < text.len() {
+        return u64(text[at]);
+    }
+    return 0;
+}
+fn bg_digit_value(ch: u64) -> u64 {
+    if (47 < ch) && (ch < 58) {
+        return ch - 48;
+    }
+    if (64 < ch) && (ch < 71) {
+        return ch - 55;
+    }
+    if (96 < ch) && (ch < 103) {
+        return ch - 87;
+    }
+    return 99;
+}
+fn bg_is_float_text<a>(text: &a [u8]) -> bool {
+    mut hex = 0;
+    if (2 < text.len()) && (text[0] == 48) && ((text[1] == 120) || (text[1] == 88)) {
+        hex = 1;
+    }
+    for i in text.len() {
+        ch := u64(text[i]);
+        if ch == 46 {
+            return true;
+        }
+        if (hex == 0) && ((ch == 101) || (ch == 69)) {
+            return true;
+        }
+        if (hex != 0) && ((ch == 112) || (ch == 80)) {
+            return true;
+        }
+    }
+    return false;
+}
+// Reinterprets a 64-bit pattern as i64. A checked `i64(u64)` cast refuses values above i64::MAX,
+// which a C header really does contain (`0xffffffffffffffffUL`); `~(x-1)` is the same bit pattern
+// without ever forming a negative value from a positive one.
+fn bg_bits(value: u64) -> i64 {
+    if value <= 9223372036854775807 {
+        return i64(value);
+    }
+    low := u64(18446744073709551615) - value;
+    return i64(low) ^ (-1);
+}
+fn bg_sign(x: i64) -> i64 {
+    if x < 0 {
+        return -1;
+    }
+    return 1;
+}
+fn bg_add_ok(a: i64, b: i64) -> bool {
+    if b > 0 {
+        if a > 9223372036854775807 - b {
+            return false;
+        }
+    }
+    if b < 0 {
+        if a < (-9223372036854775807 - 1) - b {
+            return false;
+        }
+    }
+    return true;
+}
+fn bg_sub_ok(a: i64, b: i64) -> bool {
+    if b < 0 {
+        if a > 9223372036854775807 + b {
+            return false;
+        }
+    }
+    if b > 0 {
+        if a < (-9223372036854775807 - 1) + b {
+            return false;
+        }
+    }
+    return true;
+}
+fn bg_number_value<a>(c: (&a mut Ctx), text: &a [u8]) -> i64 {
+    if bg_is_float_text(view(text)) {
+        c.bad = 1;
+        return 0;
+    }
+    mut i = 0;
+    mut base = 10;
+    mut value: u64 = 0;
+    if (2 < text.len()) && (text[0] == 48) && ((text[1] == 120) || (text[1] == 88)) {
+        base = 16;
+        i = 2;
+    } else if (2 < text.len()) && (text[0] == 48) && ((text[1] == 98) || (text[1] == 66)) {
+        base = 2;
+        i = 2;
+    } else if (1 < text.len()) && (text[0] == 48) {
+        base = 8;
+        i = 1;
+    }
+    mut seen = 0;
+    while i < text.len() {
+        d := bg_digit_value(u64(text[i]));
+        if d >= base {
+            if (ch_suffix(u64(text[i])) != 0) && (seen != 0) {
+                break;
+            }
+            c.bad = 1;
+            return 0;
+        }
+        value = value * base + d;
+        seen += 1;
+        i += 1;
+    }
+    if seen == 0 {
+        c.bad = 1;
+        return 0;
+    }
+    return bg_bits(value);
+}
+fn ch_suffix(ch: u64) -> u64 {
+    if (ch == 117) || (ch == 85) || (ch == 108) || (ch == 76) {
+        return 1;
+    }
+    return 0;
+}
+fn bg_char_value<a>(text: &a [u8]) -> i64 {
+    // 'a', '\n', '\0', '\x41': the byte value of a one-character literal.
+    if text.len() < 3 {
+        return 0;
+    }
+    if u64(text[1]) != 92 {
+        return i64(text[1]);
+    }
+    esc := u64(text[2]);
+    if esc == 110 {
+        return 10;
+    }
+    if esc == 116 {
+        return 9;
+    }
+    if esc == 114 {
+        return 13;
+    }
+    if esc == 48 {
+        return 0;
+    }
+    if esc == 92 {
+        return 92;
+    }
+    if esc == 39 {
+        return 39;
+    }
+    if esc == 34 {
+        return 34;
+    }
+    if esc == 97 {
+        return 7;
+    }
+    if esc == 98 {
+        return 8;
+    }
+    if esc == 102 {
+        return 12;
+    }
+    if esc == 118 {
+        return 11;
+    }
+    if esc == 120 {
+        mut value: u64 = 0;
+        mut i = 3;
+        while (i < text.len()) && (u64(text[i]) != 39) {
+            d := bg_digit_value(u64(text[i]));
+            if d >= 16 {
+                break;
+            }
+            value = value * 16 + d;
+            i += 1;
+        }
+        return i64(value);
+    }
+    return i64(esc);
+}
+
+fn bg_prec<a>(op: &a [u8]) -> u64 {
+    if bg_eq(view(op), view("||")) {
+        return 1;
+    }
+    if bg_eq(view(op), view("&&")) {
+        return 2;
+    }
+    if bg_eq(view(op), view("|")) {
+        return 3;
+    }
+    if bg_eq(view(op), view("^")) {
+        return 4;
+    }
+    if bg_eq(view(op), view("&")) {
+        return 5;
+    }
+    if bg_eq(view(op), view("==")) || bg_eq(view(op), view("!=")) {
+        return 6;
+    }
+    if bg_eq(view(op), view("<")) || bg_eq(view(op), view(">")) || bg_eq(view(op), view("<=")) || bg_eq(view(op), view(">=")) {
+        return 7;
+    }
+    if bg_eq(view(op), view("<<")) || bg_eq(view(op), view(">>")) {
+        return 8;
+    }
+    if bg_eq(view(op), view("+")) || bg_eq(view(op), view("-")) {
+        return 9;
+    }
+    if bg_eq(view(op), view("*")) || bg_eq(view(op), view("/")) || bg_eq(view(op), view("%")) {
+        return 10;
+    }
+    return 0;
+}
+fn less(x: i64, y: i64) -> i64 {
+    if x < y {
+        return 1;
+    }
+    return 0;
+}
+fn equal(x: i64, y: i64) -> i64 {
+    if x == y {
+        return 1;
+    }
+    return 0;
+}
+fn bg_bool(x: i64) -> i64 {
+    if x != 0 {
+        return 1;
+    }
+    return 0;
+}
+fn bg_apply_op<a, b>(c: (&a mut Ctx), op: &b [u8], left: i64, right: i64) -> i64 {
+    if bg_eq(view(op), view("+")) {
+        if !bg_add_ok(left, right) {
+            c.bad = 1;
+            return 0;
+        }
+        return left + right;
+    }
+    if bg_eq(view(op), view("-")) {
+        if !bg_sub_ok(left, right) {
+            c.bad = 1;
+            return 0;
+        }
+        return left - right;
+    }
+    if bg_eq(view(op), view("*")) {
+        mut product = 0;
+        if (left == 0) || (right == 0) {
+            return 0;
+        }
+        if (left > 0) && (right > 0) && (left > 9223372036854775807 / right) {
+            c.bad = 1;
+            return 0;
+        }
+        if (left > 0) && (right < 0) && (right < (-9223372036854775807 - 1) / left) {
+            c.bad = 1;
+            return 0;
+        }
+        if (left < 0) && (right > 0) && (left < (-9223372036854775807 - 1) / right) {
+            c.bad = 1;
+            return 0;
+        }
+        product = left * right;
+        if ((left < 0) && (right < 0)) && (left != 0) && (right < 9223372036854775807 / left) {
+            c.bad = 1;
+            return 0;
+        }
+        return product;
+    }
+    if bg_eq(view(op), view("/")) {
+        if right == 0 {
+            c.bad = 1;
+            return 0;
+        }
+        return left / right;
+    }
+    if bg_eq(view(op), view("%")) {
+        if right == 0 {
+            c.bad = 1;
+            return 0;
+        }
+        return left % right;
+    }
+    if bg_eq(view(op), view("<<")) {
+        if (right < 0) || (63 < right) {
+            c.bad = 1;
+            return 0;
+        }
+        mul := i64(1) << right;
+        if (left > 0) && (mul > 0) && (left > 9223372036854775807 / mul) {
+            // The result crosses into the top bit: keep the bit pattern.
+            return bg_bits(bg_bits_of(left) << u64(right));
+        }
+        if (left < 0) || (mul < 0) {
+            return bg_bits(bg_bits_of(left) << u64(right));
+        }
+        return left * mul;
+    }
+    if bg_eq(view(op), view(">>")) {
+        if (right < 0) || (63 < right) {
+            c.bad = 1;
+            return 0;
+        }
+        return left >> right;
+    }
+    if bg_eq(view(op), view("<")) {
+        return bg_bool(less(left, right));
+    }
+    if bg_eq(view(op), view(">")) {
+        return bg_bool(less(right, left));
+    }
+    if bg_eq(view(op), view("<=")) {
+        return 1 - bg_bool(less(right, left));
+    }
+    if bg_eq(view(op), view(">=")) {
+        return 1 - bg_bool(less(left, right));
+    }
+    if bg_eq(view(op), view("==")) {
+        return equal(left, right);
+    }
+    if bg_eq(view(op), view("!=")) {
+        return 1 - equal(left, right);
+    }
+    if bg_eq(view(op), view("&")) {
+        return left & right;
+    }
+    if bg_eq(view(op), view("|")) {
+        return left | right;
+    }
+    if bg_eq(view(op), view("^")) {
+        return left ^ right;
+    }
+    if bg_eq(view(op), view("&&")) {
+        mut both = 0;
+        if (left != 0) && (right != 0) {
+            both = 1;
+        }
+        return both;
+    }
+    if bg_eq(view(op), view("||")) {
+        mut either = 0;
+        if (left != 0) || (right != 0) {
+            either = 1;
+        }
+        return either;
+    }
+    c.bad = 1;
+    return 0;
+}
+fn bg_enum_value<a, b>(c: (&a mut Ctx), name: &b [u8]) -> i64 {
+    mut i = c.consts.len();
+    while 0 < i {
+        i -= 1;
+        if bg_eq(view(c.consts[i].name), view(name)) {
+            return c.consts[i].value;
+        }
+    }
+    if c.lenient != 0 {
+        // In a `#if`, an identifier that survived macro expansion is 0, as in C.
+        return 0;
+    }
+    c.bad = 1;
+    return 0;
+}
+fn ex_binary<a>(c: (&a mut Ctx), min_prec: u64) -> i64 {
+    mut left = ex_unary(&mut c);
+    mut go = 1;
+    while go != 0 {
+        if c.pos >= c.toks.len() {
+            break;
+        }
+        if c.toks[c.pos].kind != 2 {
+            break;
+        }
+        op := c.toks[c.pos].text.copy();
+        prec := bg_prec(view(op));
+        if (prec == 0) || (prec < min_prec) {
+            break;
+        }
+        c.pos += 1;
+        mut shorted = 0;
+        if bg_eq(view(op), view("&&")) && (left == 0) {
+            shorted = 1;
+        }
+        if bg_eq(view(op), view("||")) && (left != 0) {
+            shorted = 1;
+        }
+        saved := c.bad;
+        right := ex_binary(&mut c, prec + 1);
+        if shorted != 0 {
+            c.bad = saved;
+            mut folded: i64 = 0;
+            if bg_eq(view(op), view("||")) {
+                folded = 1;
+            }
+            left = folded;
+        } else {
+            left = bg_apply_op(&mut c, view(op), left, right);
+        }
+    }
+    return left;
+}
+fn ex_unary<a>(c: (&a mut Ctx)) -> i64 {
+    if c.pos >= c.toks.len() {
+        c.bad = 1;
+        return 0;
+    }
+    if c.toks[c.pos].kind == 2 {
+        op := c.toks[c.pos].text.copy();
+        if bg_eq(view(op), view("-")) {
+            c.pos += 1;
+            operand := ex_unary(&mut c);
+            // i64::MIN has no i64 negation; C keeps the bit pattern, and so does this.
+            if operand == (-9223372036854775807 - 1) {
+                return operand;
+            }
+            return i64(0) - operand;
+        }
+        if bg_eq(view(op), view("+")) {
+            c.pos += 1;
+            return ex_unary(&mut c);
+        }
+        if bg_eq(view(op), view("~")) {
+            c.pos += 1;
+            return ex_unary(&mut c) ^ (-1);
+        }
+        if bg_eq(view(op), view("!")) {
+            c.pos += 1;
+            return equal(ex_unary(&mut c), 0);
+        }
+        if bg_eq(view(op), view("(")) {
+            // `(type) operand` is a cast; anything else is a parenthesised expression. The test has
+            // to look past the `(`.
+            c.pos += 1;
+            if bg_type_start(&mut c) {
+                ty := bg_typename(&mut c);
+                if c.bad != 0 {
+                    return 0;
+                }
+                if !p_is(&mut c, view(")")) {
+                    bg_refuse(&mut c, cur_file(&mut c), cur_line(&mut c), view("expected `)` after a type in a constant expression"));
+                    c.bad = 1;
+                    return 0;
+                }
+                c.pos += 1;
+                return ex_unary(&mut c);
+            }
+            value := ex_const(&mut c);
+            if p_is(&mut c, view(")")) {
+                c.pos += 1;
+            } else {
+                c.bad = 1;
+            }
+            return value;
+        }
+    }
+    return ex_primary(&mut c);
+}
+fn ex_primary<a>(c: (&a mut Ctx)) -> i64 {
+    if c.pos >= c.toks.len() {
+        c.bad = 1;
+        return 0;
+    }
+    kind := c.toks[c.pos].kind;
+    text := c.toks[c.pos].text.copy();
+    if kind == 1 {
+        c.pos += 1;
+        return bg_number_value(&mut c, view(text));
+    }
+    if kind == 3 || kind == 4 {
+        c.pos += 1;
+        if u64(text[0]) == 39 {
+            return bg_char_value(view(text));
+        }
+        c.bad = 1;
+        return 0;
+    }
+    if bg_eq(view(text), view("sizeof")) || bg_eq(view(text), view("_Alignof")) || bg_eq(view(text), view("__alignof__")) {
+        align := u64(bg_eq(view(text), view("_Alignof")) || bg_eq(view(text), view("__alignof__")));
+        c.pos += 1;
+        if !p_is(&mut c, view("(")) {
+            bg_refuse(&mut c, cur_file(&mut c), cur_line(&mut c), view("sizeof of an expression is not a constant this importer evaluates; use sizeof(type)"));
+            c.bad = 1;
+            return 0;
+        }
+        c.pos += 1;
+        ty := bg_typename(&mut c);
+        if c.bad != 0 {
+            return 0;
+        }
+        if !p_is(&mut c, view(")")) {
+            bg_refuse(&mut c, cur_file(&mut c), cur_line(&mut c), view("expected `)` after sizeof(type)"));
+            c.bad = 1;
+            return 0;
+        }
+        c.pos += 1;
+        if align != 0 {
+            return i64(bg_align_of(&mut c, ty));
+        }
+        return i64(bg_size_of(&mut c, ty));
+    }
+    if kind == 0 {
+        if bg_eq(view(text), view("defined")) {
+            c.pos += 1;
+            mut wrapped = 0;
+            if p_is(&mut c, view("(")) {
+                wrapped = 1;
+                c.pos += 1;
+            }
+            name := p_ident(&mut c);
+            if p_ident(&mut c).len() != 0 {
+                c.pos += 1;
+            }
+            if wrapped != 0 {
+                c.pos += 1;
+            }
+            if bg_macro_index(&mut c, view(name)) >= 0 {
+                return 1;
+            }
+            return 0;
+        }
+        c.pos += 1;
+        if bg_eq(view(text), view("true")) {
+            return 1;
+        }
+        if bg_eq(view(text), view("false")) {
+            return 0;
+        }
+        return bg_enum_value(&mut c, view(text));
+    }
+    c.bad = 1;
+    return 0;
+}
+// A full constant expression: C's conditional operator included, since a header's `#if` lines use
+// `defined X ? A : B` to separate C from C++.
+fn ex_const<a>(c: (&a mut Ctx)) -> i64 {
+    cond := ex_binary(&mut c, 1);
+    if c.pos < c.toks.len() {
+        if c.toks[c.pos].kind == 2 {
+            if bg_eq(view(c.toks[c.pos].text), view("?")) {
+                c.pos += 1;
+                saved := c.bad;
+                yes := ex_const(&mut c);
+                if !p_is(&mut c, view(":")) {
+                    c.bad = 1;
+                    return 0;
+                }
+                c.pos += 1;
+                no := ex_const(&mut c);
+                if cond != 0 {
+                    c.bad = saved;
+                    return yes;
+                }
+                return no;
+            }
+        }
+    }
+    return cond;
+}
+
+// ---- the parser ---------------------------------------------------------------------------
+
+fn cur_file<a>(c: (&a mut Ctx)) -> u64 {
+    if c.pos < c.toks.len() {
+        return c.toks[c.pos].file;
+    }
+    if c.toks.len() != 0 {
+        return c.toks[c.toks.len() - 1].file;
+    }
+    return 0;
+}
+fn cur_line<a>(c: (&a mut Ctx)) -> u64 {
+    if c.pos < c.toks.len() {
+        return c.toks[c.pos].line;
+    }
+    if c.toks.len() != 0 {
+        return c.toks[c.toks.len() - 1].line;
+    }
+    return 0;
+}
+fn p_text<a>(c: (&a mut Ctx)) -> u8[] {
+    if c.pos < c.toks.len() {
+        return c.toks[c.pos].text.copy();
+    }
+    return u8[];
+}
+fn p_kind<a>(c: (&a mut Ctx), at: u64) -> u64 {
+    if at < c.toks.len() {
+        return c.toks[at].kind;
+    }
+    return 2;
+}
+fn p_is<a, b>(c: (&a mut Ctx), text: &b [u8]) -> bool {
+    if c.pos >= c.toks.len() {
+        return false;
+    }
+    if c.toks[c.pos].kind == 3 {
+        return false;
+    }
+    return bg_eq(view(c.toks[c.pos].text), view(text));
+}
+fn p_is_at<a, b>(c: (&a mut Ctx), at: u64, text: &b [u8]) -> bool {
+    if (at >= c.toks.len()) || (c.toks[at].kind == 3) {
+        return false;
+    }
+    return bg_eq(view(c.toks[at].text), view(text));
+}
+fn p_ident<a>(c: (&a mut Ctx)) -> u8[] {
+    if c.pos < c.toks.len() {
+        if c.toks[c.pos].kind == 0 {
+            return c.toks[c.pos].text.copy();
+        }
+    }
+    return u8[];
+}
+fn p_advance<a>(c: (&a mut Ctx)) -> unit {
+    if c.pos < c.toks.len() {
+        c.pos += 1;
+    }
+    return ();
+}
+// Skips to just past the next `;`, for a construct that has already been refused, so one bad
+// declaration does not cascade into a hundred.
+// Skips a balanced `{ ... }` body (a `static inline` function definition in a header, which is not
+// a linkable symbol and therefore not a binding).
+fn p_skip_body<a>(c: (&a mut Ctx)) -> unit {
+    mut nest = 0;
+    mut stop = 0;
+    while (c.pos < c.toks.len()) && (stop == 0) {
+        if p_is(&mut c, view("{")) {
+            nest += 1;
+        }
+        if p_is(&mut c, view("}")) {
+            nest -= 1;
+            if nest == 0 {
+                stop = 1;
+            }
+        }
+        c.pos += 1;
+    }
+    return ();
+}
+// Skips an initializer up to the `,` or `;` that ends the declarator.
+fn p_skip_initializer<a>(c: (&a mut Ctx)) -> unit {
+    mut nest = 0;
+    mut stop = 0;
+    while (c.pos < c.toks.len()) && (stop == 0) {
+        if p_is(&mut c, view("{")) || p_is(&mut c, view("(")) || p_is(&mut c, view("[")) {
+            nest += 1;
+        }
+        if p_is(&mut c, view("}")) || p_is(&mut c, view(")")) || p_is(&mut c, view("]")) {
+            if nest == 0 {
+                stop = 1;
+            } else {
+                nest -= 1;
+            }
+        }
+        if (nest == 0) && (p_is(&mut c, view(",")) || p_is(&mut c, view(";"))) {
+            stop = 1;
+        }
+        if stop == 0 {
+            c.pos += 1;
+        }
+    }
+    return ();
+}
+fn p_skip_statement<a>(c: (&a mut Ctx)) -> unit {
+    mut nest = 0;
+    while c.pos < c.toks.len() {
+        if p_is(&mut c, view("{")) || p_is(&mut c, view("(")) || p_is(&mut c, view("[")) {
+            nest += 1;
+            c.pos += 1;
+            continue;
+        }
+        if p_is(&mut c, view("}")) || p_is(&mut c, view(")")) || p_is(&mut c, view("]")) {
+            if nest == 0 {
+                c.pos += 1;
+                return ();
+            }
+            nest -= 1;
+            c.pos += 1;
+            continue;
+        }
+        if p_is(&mut c, view(";")) && (nest == 0) {
+            c.pos += 1;
+            return ();
+        }
+        c.pos += 1;
+    }
+    return ();
+}
+fn bg_attr_word<a, b>(text: &a [u8], word: &b [u8]) -> bool {
+    if text.len() != word.len() {
+        return false;
+    }
+    return bg_eq(view(bg_lower(view(text))), view(bg_lower(view(word))));
+}
+// `__attribute__((...))`, `__declspec(...)`, `__asm__("...")`, nullability and restrict
+// qualifiers. `packed`/`aligned` change the layout and are refused; every other attribute is
+// ignored, because it does not change the bytes that cross the boundary.
+fn bg_skip_attrs<a>(c: (&a mut Ctx)) -> unit {
+    mut go = 1;
+    while go != 0 {
+        if c.pos >= c.toks.len() {
+            return ();
+        }
+        if c.toks[c.pos].kind != 0 {
+            return ();
+        }
+        text := c.toks[c.pos].text.copy();
+        mut has_body = 0;
+        mut is_attr = 0;
+        if bg_attr_word(view(text), view("__attribute__")) || bg_attr_word(view(text), view("__attribute")) || bg_attr_word(view(text), view("__declspec")) || bg_attr_word(view(text), view("_attribute__")) {
+            is_attr = 1;
+            has_body = 1;
+        }
+        if bg_attr_word(view(text), view("__asm__")) || bg_attr_word(view(text), view("__asm")) || bg_attr_word(view(text), view("asm")) {
+            is_attr = 1;
+            has_body = 1;
+        }
+        if bg_attr_word(view(text), view("__extension__"))
+            || bg_attr_word(view(text), view("__restrict"))
+            || bg_attr_word(view(text), view("__restrict__"))
+            || bg_attr_word(view(text), view("restrict"))
+            || bg_attr_word(view(text), view("_Nonnull"))
+            || bg_attr_word(view(text), view("_Nullable"))
+            || bg_attr_word(view(text), view("_Nullable_result"))
+            || bg_attr_word(view(text), view("_Null_unspecified"))
+            || bg_attr_word(view(text), view("__malloc__"))
+            || bg_attr_word(view(text), view("__wur__"))
+            || bg_attr_word(view(text), view("__pure__"))
+            || bg_attr_word(view(text), view("__noreturn__"))
+            || bg_attr_word(view(text), view("__always_inline__")) {
+            is_attr = 1;
+        }
+        if is_attr == 0 {
+            return ();
+        }
+        c.pos += 1;
+        if has_body != 0 {
+            if p_is(&mut c, view("(")) {
+                mut nest = 0;
+                mut stop = 0;
+                while (c.pos < c.toks.len()) && (stop == 0) {
+                    if p_is(&mut c, view("(")) {
+                        nest += 1;
+                    }
+                    if p_is(&mut c, view(")")) {
+                        nest -= 1;
+                        if nest == 0 {
+                            stop = 1;
+                        }
+                    }
+                    piece := p_text(&mut c);
+                    if bg_attr_word(view(piece), view("packed")) || bg_attr_word(view(piece), view("aligned")) || bg_attr_word(view(piece), view("pack")) {
+                        bg_refuse(&mut c, cur_file(&mut c), cur_line(&mut c), view("__attribute__((packed/aligned)) changes the layout and a Grail extern record cannot express unaligned fields; remove the attribute or bind the struct by pointer only"));
+                    }
+                    c.pos += 1;
+                }
+            }
+        }
+    }
+    return ();
+}
+// The qualifiers on a `*`: they say whether the *pointee* may be written, which the type itself
+// carries, so the pointer's own `const` is skipped. `bg_declspecs` reads `const` itself and must not
+// lose it, so this is separate from `bg_skip_attrs`.
+fn bg_skip_ptr_quals<a>(c: (&a mut Ctx)) -> unit {
+    mut go = 1;
+    while go != 0 {
+        bg_skip_attrs(&mut c);
+        if c.pos >= c.toks.len() {
+            return ();
+        }
+        if c.toks[c.pos].kind != 0 {
+            return ();
+        }
+        text := c.toks[c.pos].text.copy();
+        if bg_eq(view(text), view("const"))
+            || bg_eq(view(text), view("volatile"))
+            || bg_eq(view(text), view("restrict"))
+            || bg_eq(view(text), view("__const"))
+            || bg_eq(view(text), view("__const__"))
+            || bg_eq(view(text), view("__volatile__"))
+            || bg_eq(view(text), view("__volatile"))
+            || bg_eq(view(text), view("__restrict"))
+            || bg_eq(view(text), view("__restrict__")) {
+            c.pos += 1;
+            continue;
+        }
+        go = 0;
+    }
+    return ();
+}
+fn bg_type_start<a>(c: (&a mut Ctx)) -> bool {
+    if c.pos >= c.toks.len() {
+        return false;
+    }
+    if c.toks[c.pos].kind != 0 {
+        return false;
+    }
+    text := c.toks[c.pos].text.copy();
+    if bg_eq(view(text), view("void")) || bg_eq(view(text), view("char")) || bg_eq(view(text), view("short")) || bg_eq(view(text), view("int")) || bg_eq(view(text), view("long")) || bg_eq(view(text), view("float")) || bg_eq(view(text), view("double")) || bg_eq(view(text), view("signed")) || bg_eq(view(text), view("unsigned")) || bg_eq(view(text), view("_Bool")) || bg_eq(view(text), view("bool")) || bg_eq(view(text), view("const")) || bg_eq(view(text), view("volatile")) || bg_eq(view(text), view("struct")) || bg_eq(view(text), view("union")) || bg_eq(view(text), view("enum")) || bg_eq(view(text), view("__signed__")) || bg_eq(view(text), view("__const")) {
+        return true;
+    }
+    return bg_td_index(&mut c, view(text)) >= 0;
+}
+fn bg_td_index<a, b>(c: (&a mut Ctx), name: &b [u8]) -> i64 {
+    mut i = c.tds.len();
+    while 0 < i {
+        i -= 1;
+        if bg_eq(view(c.tds[i].name), view(name)) {
+            return i64(i);
+        }
+    }
+    return -1;
+}
+fn bg_tag_index<a, b>(c: (&a mut Ctx), name: &b [u8], kind: u64) -> i64 {
+    mut i = c.tags.len();
+    while 0 < i {
+        i -= 1;
+        if (c.tags[i].kind == kind) && bg_eq(view(c.tags[i].name), view(name)) {
+            return i64(i);
+        }
+    }
+    return -1;
+}
+fn bg_new_node<a, b>(c: (&a mut Ctx), kind: u64, inner: u64, name: &b [u8], params: u64[], variadic: u64, count: u64) -> u64 {
+    c.nodes.push(Node {
+        kind: kind,
+        inner: inner,
+        params: params,
+        variadic: variadic,
+        count: count,
+        name: name.copy()
+    });
+    return c.nodes.len() - 1;
+}
+fn bg_new_rec<a, b>(c: (&a mut Ctx), tag: &b [u8], unioned: u64) -> u64 {
+    c.recs.push(Rec {
+        name: u8[],
+        tag: tag.copy(),
+        unioned: unioned,
+        complete: 0,
+        fields: Field[],
+        size: 0,
+        align: 1,
+        anonymous: 0
+    });
+    return c.recs.len() - 1;
+}
+fn bg_declarator<a>(c: (&a mut Ctx), allow_abstract: u64) -> u64 {
+    mut stars = 0;
+    mut go = 1;
+    while go != 0 {
+        bg_skip_ptr_quals(&mut c);
+        if p_is(&mut c, view("*")) {
+            stars += 1;
+            c.pos += 1;
+            bg_skip_ptr_quals(&mut c);
+            continue;
+        }
+        go = 0;
+    }
+    mut node = bg_direct(&mut c, allow_abstract);
+    mut i = 0;
+    while i < stars {
+        node = bg_new_node(&mut c, 1, node, view(""), u64[], 0, 0);
+        i += 1;
+    }
+    return node;
+}
+fn bg_direct<a>(c: (&a mut Ctx), allow_abstract: u64) -> u64 {
+    mut node = 0;
+    if p_is(&mut c, view("(")) && (allow_abstract == 0) {
+        c.pos += 1;
+        node = bg_declarator(&mut c, 0);
+        if p_is(&mut c, view(")")) {
+            c.pos += 1;
+        } else {
+            bg_refuse(&mut c, cur_file(&mut c), cur_line(&mut c), view("expected `)` in a declarator"));
+        }
+    } else {
+        mut named = 0;
+        mut is_ident = 0;
+        if c.pos < c.toks.len() {
+            if c.toks[c.pos].kind == 0 {
+                is_ident = 1;
+            }
+        }
+        if is_ident != 0 {
+            if allow_abstract == 0 {
+                // In a named declarator every identifier is the name, even one that is also a
+                // typedef (`typedef __ssize_t ssize_t;`).
+                named = 1;
+            } else {
+                if !bg_type_start(&mut c) {
+                    named = 1;
+                }
+            }
+        }
+        if named != 0 {
+            name := p_text(&mut c);
+            c.pos += 1;
+            node = bg_new_node(&mut c, 0, 0, view(name), u64[], 0, 0);
+        } else {
+            node = bg_new_node(&mut c, 0, 0, view(""), u64[], 0, 0);
+        }
+    }
+    mut go = 1;
+    while go != 0 {
+        if p_is(&mut c, view("[")) {
+            c.pos += 1;
+            mut count: u64 = 0;
+            if !p_is(&mut c, view("]")) {
+                c.bad = 0;
+                value := ex_const(&mut c);
+                if (c.bad != 0) || (value <= 0) {
+                    bg_refuse(&mut c, cur_file(&mut c), cur_line(&mut c), view("array bound is not a positive integer constant expression"));
+                    c.bad = 0;
+                    count = 0;
+                } else {
+                    count = u64(value);
+                }
+            }
+            while (c.pos < c.toks.len()) && !p_is(&mut c, view("]")) {
+                c.pos += 1;
+            }
+            if p_is(&mut c, view("]")) {
+                c.pos += 1;
+            }
+            node = bg_new_node(&mut c, 3, node, view(""), u64[], 0, count);
+            continue;
+        }
+        if p_is(&mut c, view("(")) {
+            // A parameter list parses declarations of its own, which resets the storage class of
+            // the declaration this declarator belongs to.
+            saved_storage := c.storage;
+            params := bg_params(&mut c);
+            variadic := c.variadic;
+            c.storage = saved_storage;
+            node = bg_new_node(&mut c, 2, node, view(""), params, variadic, 0);
+            continue;
+        }
+        go = 0;
+    }
+    return node;
+}
+
+// ---- declaration specifiers ----------------------------------------------------------------
+
+fn bg_declspecs<a>(c: (&a mut Ctx)) -> u64 {
+    mut base: u64 = 0;
+    mut nshort = 0;
+    mut nlong = 0;
+    mut nsigned = 0;
+    mut nunsigned = 0;
+    mut nconst = 0;
+    mut kindword = 0;
+    c.storage = 0;
+    mut go = 1;
+    while go != 0 {
+        bg_skip_attrs(&mut c);
+        if c.pos >= c.toks.len() {
+            break;
+        }
+        if c.toks[c.pos].kind != 0 {
+            break;
+        }
+        text := c.toks[c.pos].text.copy();
+        if bg_eq(view(text), view("typedef")) {
+            if c.storage == 0 {
+                c.storage = 1;
+            }
+            c.pos += 1;
+            continue;
+        }
+        if bg_eq(view(text), view("extern")) {
+            if c.storage == 0 {
+                c.storage = 2;
+            }
+            c.pos += 1;
+            continue;
+        }
+        if bg_eq(view(text), view("static")) || bg_eq(view(text), view("auto")) {
+            if c.storage == 0 {
+                c.storage = 3;
+            }
+            c.pos += 1;
+            continue;
+        }
+        if bg_eq(view(text), view("register"))
+            || bg_eq(view(text), view("inline"))
+            || bg_eq(view(text), view("__inline"))
+            || bg_eq(view(text), view("__inline__"))
+            || bg_eq(view(text), view("_Thread_local"))
+            || bg_eq(view(text), view("__thread"))
+            || bg_eq(view(text), view("__extension__")) {
+            c.pos += 1;
+            continue;
+        }
+        if bg_eq(view(text), view("const")) || bg_eq(view(text), view("__const")) || bg_eq(view(text), view("__const__")) {
+            nconst = 1;
+            c.pos += 1;
+            continue;
+        }
+        if bg_eq(view(text), view("volatile"))
+            || bg_eq(view(text), view("__volatile__"))
+            || bg_eq(view(text), view("__volatile"))
+            || bg_eq(view(text), view("restrict"))
+            || bg_eq(view(text), view("__restrict"))
+            || bg_eq(view(text), view("__restrict__")) {
+            c.pos += 1;
+            continue;
+        }
+        if bg_eq(view(text), view("struct")) || bg_eq(view(text), view("union")) {
+            if base != 0 {
+                break;
+            }
+            mut unioned = 0;
+            if bg_eq(view(text), view("union")) {
+                unioned = 1;
+            }
+            // A struct body re-enters the declaration parser for its members, which resets the
+            // specifier state: keep this declaration's storage class.
+            saved_storage := c.storage;
+            base = bg_record_spec(&mut c, unioned);
+            c.storage = saved_storage;
+            continue;
+        }
+        if bg_eq(view(text), view("enum")) {
+            if base != 0 {
+                break;
+            }
+            saved_storage := c.storage;
+            base = bg_enum_spec(&mut c);
+            c.storage = saved_storage;
+            continue;
+        }
+        if bg_eq(view(text), view("void")) {
+            kindword = 1;
+            c.pos += 1;
+            continue;
+        }
+        if bg_eq(view(text), view("char")) {
+            kindword = 2;
+            c.pos += 1;
+            continue;
+        }
+        if bg_eq(view(text), view("short")) {
+            nshort += 1;
+            kindword = 3;
+            c.pos += 1;
+            continue;
+        }
+        if bg_eq(view(text), view("int")) {
+            kindword = 3;
+            c.pos += 1;
+            continue;
+        }
+        if bg_eq(view(text), view("long")) {
+            nlong += 1;
+            kindword = 3;
+            c.pos += 1;
+            continue;
+        }
+        if bg_eq(view(text), view("float")) {
+            kindword = 4;
+            c.pos += 1;
+            continue;
+        }
+        if bg_eq(view(text), view("double")) {
+            kindword = 5;
+            c.pos += 1;
+            continue;
+        }
+        if bg_eq(view(text), view("signed")) || bg_eq(view(text), view("__signed__")) {
+            nsigned += 1;
+            if kindword == 0 {
+                kindword = 3;
+            }
+            c.pos += 1;
+            continue;
+        }
+        if bg_eq(view(text), view("unsigned")) {
+            nunsigned += 1;
+            if kindword == 0 {
+                kindword = 3;
+            }
+            c.pos += 1;
+            continue;
+        }
+        if bg_eq(view(text), view("_Bool")) || bg_eq(view(text), view("bool")) {
+            kindword = 6;
+            c.pos += 1;
+            continue;
+        }
+        if bg_eq(view(text), view("_Complex")) || bg_eq(view(text), view("__int128")) || bg_eq(view(text), view("__float128")) || bg_eq(view(text), view("_Atomic")) || bg_eq(view(text), view("__typeof__")) || bg_eq(view(text), view("typeof")) {
+            bg_refuse(&mut c, cur_file(&mut c), cur_line(&mut c), view("this type has no Grail C-ABI equivalent; the declaration is refused rather than approximated"));
+            p_skip_statement(&mut c);
+            return 0;
+        }
+        if (base == 0) && (kindword == 0) {
+            ti := bg_td_index(&mut c, view(text));
+            if ti >= 0 {
+                base = c.tds[u64(ti)].ty;
+                c.pos += 1;
+                continue;
+            }
+            if bg_starts(view(text), view("__builtin_")) {
+                // `__builtin_va_list` and friends are compiler types with no C ABI spelling. A
+                // declaration that mentions one is reported and skipped; a use of the name
+                // afterwards is an unknown type and refused.
+                mut msg = view("compiler builtin type `").copy();
+                msg = bg_cat(view(msg), view(text));
+                msg = bg_cat(view(msg), view("` has no Grail equivalent"));
+                bg_skip(&mut c, cur_file(&mut c), cur_line(&mut c), view(msg));
+                c.skip_decl = 1;
+                return 0;
+            }
+        }
+        break;
+    }
+    if base != 0 {
+        return bg_t_with_const(&mut c, base, nconst);
+    }
+    mut ty: u64 = 0;
+    if kindword == 1 {
+        ty = bg_t_void(&mut c);
+    }
+    if kindword == 2 {
+        mut signed = 1;
+        if nunsigned != 0 {
+            signed = 0;
+        }
+        // A plain `char` is the string byte type; `unsigned char` and `signed char` are not, so
+        // only a plain char pointer becomes a `CStr`.
+        mut plain = 1;
+        if (nunsigned != 0) || (nsigned != 0) {
+            plain = 0;
+        }
+        ty = bg_t_int(&mut c, 8, signed, plain, 0);
+    }
+    if kindword == 3 {
+        mut bits = 32;
+        if nshort != 0 {
+            bits = 16;
+        }
+        if nlong == 1 {
+            bits = 64;
+            if c.model == 1 {
+                bits = 32;
+            }
+        }
+        if nlong > 1 {
+            bits = 64;
+        }
+        mut signed = 1;
+        if nunsigned != 0 {
+            signed = 0;
+        }
+        ty = bg_t_int(&mut c, bits, signed, 0, 0);
+    }
+    if kindword == 4 {
+        ty = bg_t_float(&mut c, 32);
+    }
+    if kindword == 5 {
+        if nlong != 0 {
+            bg_refuse(&mut c, cur_file(&mut c), cur_line(&mut c), view("`long double` has no Grail C-ABI equivalent (Grail floats are binary32 and binary64)"));
+            return 0;
+        }
+        ty = bg_t_float(&mut c, 64);
+    }
+    if kindword == 6 {
+        ty = bg_t_int(&mut c, 8, 0, 0, 0);
+    }
+    if ty == 0 {
+        return 0;
+    }
+    return bg_t_with_const(&mut c, ty, nconst);
+}
+fn bg_record_spec<a>(c: (&a mut Ctx), unioned: u64) -> u64 {
+    c.pos += 1;
+    bg_skip_attrs(&mut c);
+    mut tag = u8[];
+    mut tagged = 0;
+    mut is_ident = 0;
+    if c.pos < c.toks.len() {
+        if c.toks[c.pos].kind == 0 {
+            is_ident = 1;
+        }
+    }
+    if is_ident != 0 {
+        if !p_is(&mut c, view("{")) {
+            tagged = 1;
+        }
+    }
+    if tagged != 0 {
+        tag = p_text(&mut c);
+        c.pos += 1;
+    }
+    bg_skip_attrs(&mut c);
+    mut rec: u64 = 0;
+    mut found = 0;
+    if tag.len() != 0 {
+        ti := bg_tag_index(&mut c, view(tag), 0);
+        if ti >= 0 {
+            ty := c.tags[u64(ti)].ty;
+            rec = c.types[ty].rec;
+            found = 1;
+        }
+    }
+    if found == 0 {
+        rec = bg_new_rec(&mut c, view(tag), unioned);
+        if tag.len() != 0 {
+            // A tagged struct is emitted under its tag even when no typedef names it.
+            c.recs[rec].name = tag.copy();
+            ty := bg_t_record(&mut c, rec);
+            c.tags.push(Tag { name: tag.copy(), kind: 0, ty: ty });
+        }
+    }
+    if p_is(&mut c, view("{")) {
+        if c.recs[rec].complete != 0 {
+            bg_refuse(&mut c, cur_file(&mut c), cur_line(&mut c), view("struct is defined twice"));
+        }
+        c.recs[rec].unioned = unioned;
+        bg_members(&mut c, rec);
+        bg_skip_attrs(&mut c);
+        bg_layout(&mut c, rec);
+        c.recs[rec].complete = 1;
+        if tag.len() != 0 {
+            c.recs[rec].tag = tag.copy();
+        }
+    } else if tag.len() == 0 {
+        bg_refuse(&mut c, cur_file(&mut c), cur_line(&mut c), view("anonymous struct or union without a body"));
+    }
+    return bg_t_record(&mut c, rec);
+}
+fn bg_enum_spec<a>(c: (&a mut Ctx)) -> u64 {
+    c.pos += 1;
+    bg_skip_attrs(&mut c);
+    mut tag = u8[];
+    mut tagged = 0;
+    mut is_ident = 0;
+    if c.pos < c.toks.len() {
+        if c.toks[c.pos].kind == 0 {
+            is_ident = 1;
+        }
+    }
+    if is_ident != 0 {
+        if !p_is(&mut c, view("{")) {
+            tagged = 1;
+        }
+    }
+    if tagged != 0 {
+        tag = p_text(&mut c);
+        c.pos += 1;
+    }
+    bg_skip_attrs(&mut c);
+    mut widest: i64 = 0;
+    mut widest_neg: i64 = 0;
+    if p_is(&mut c, view("{")) {
+        c.pos += 1;
+        mut next: i64 = 0;
+        while (c.pos < c.toks.len()) && !p_is(&mut c, view("}")) {
+            bg_skip_attrs(&mut c);
+            name := p_ident(&mut c);
+            if name.len() == 0 {
+                bg_refuse(&mut c, cur_file(&mut c), cur_line(&mut c), view("malformed enumerator list"));
+                p_skip_statement(&mut c);
+                break;
+            }
+            c.pos += 1;
+            bg_skip_attrs(&mut c);
+            if p_is(&mut c, view("=")) {
+                c.pos += 1;
+                c.bad = 0;
+                value := ex_const(&mut c);
+                if c.bad != 0 {
+                    bg_refuse(&mut c, cur_file(&mut c), cur_line(&mut c), view("enumerator value is not a constant expression this importer evaluates"));
+                    c.bad = 0;
+                } else {
+                    next = value;
+                }
+            }
+            if next > widest {
+                widest = next;
+            }
+            if next < widest_neg {
+                widest_neg = next;
+            }
+            c.consts.push(Const { name: name, value: next });
+            next = next + 1;
+            bg_skip_attrs(&mut c);
+            if p_is(&mut c, view(",")) {
+                c.pos += 1;
+                continue;
+            }
+            break;
+        }
+        if p_is(&mut c, view("}")) {
+            c.pos += 1;
+        } else {
+            bg_refuse(&mut c, cur_file(&mut c), cur_line(&mut c), view("unterminated enum body"));
+        }
+        bg_skip_attrs(&mut c);
+    } else if tag.len() == 0 {
+        bg_refuse(&mut c, cur_file(&mut c), cur_line(&mut c), view("anonymous enum without a body"));
+    }
+    mut bits = 32;
+    if (widest > 2147483647) || (widest_neg < -2147483648) {
+        bits = 64;
+    }
+    mut ti = i64(-1);
+    if tag.len() != 0 {
+        ti = bg_tag_index(&mut c, view(tag), 1);
+    }
+    if ti >= 0 {
+        return c.tags[u64(ti)].ty;
+    }
+    ty := bg_t_enum(&mut c, bits);
+    if tag.len() != 0 {
+        c.tags.push(Tag { name: tag.copy(), kind: 1, ty: ty });
+    }
+    return ty;
+}
+fn bg_members<a>(c: (&a mut Ctx), rec: u64) -> unit {
+    c.pos += 1;
+    while (c.pos < c.toks.len()) && !p_is(&mut c, view("}")) {
+        if p_is(&mut c, view(";")) {
+            c.pos += 1;
+            continue;
+        }
+        if p_is(&mut c, view("_Static_assert")) || p_is(&mut c, view("static_assert")) {
+            bg_static_assert(&mut c);
+            continue;
+        }
+        bg_skip_attrs(&mut c);
+        base := bg_declspecs(&mut c);
+        if base == 0 {
+            if c.failed == 0 {
+                bg_refuse(&mut c, cur_file(&mut c), cur_line(&mut c), view("member declaration without a type"));
+            }
+            p_skip_statement(&mut c);
+            continue;
+        }
+        if p_is(&mut c, view(";")) {
+            bg_refuse(&mut c, cur_file(&mut c), cur_line(&mut c), view("anonymous struct/union member: its fields would have to be flattened into the container, which this importer does not do; give the member a name"));
+            c.pos += 1;
+            continue;
+        }
+        mut go = 1;
+        while go != 0 {
+            node := bg_declarator(&mut c, 0);
+            if p_is(&mut c, view(":")) {
+                bg_refuse(&mut c, cur_file(&mut c), cur_line(&mut c), view("bit-field: a Grail extern record has no bit-packed fields, so the layout cannot be expressed"));
+                while (c.pos < c.toks.len()) && !p_is(&mut c, view(",")) && !p_is(&mut c, view(";")) {
+                    c.pos += 1;
+                }
+            } else {
+                ty := bg_apply(&mut c, node, base);
+                name := bg_node_name(&mut c, node);
+                if name.len() == 0 {
+                    bg_refuse(&mut c, cur_file(&mut c), cur_line(&mut c), view("member without a name"));
+                } else {
+                    mut count: u64 = 1;
+                    mut elem = ty;
+                    if c.types[ty].kind == 7 {
+                        count = c.types[ty].count;
+                        elem = c.types[ty].elem;
+                        if expected_bad(&mut c, elem) != 0 {
+                            bg_refuse(&mut c, cur_file(&mut c), cur_line(&mut c), view("multi-dimensional array member: a Grail record field is a single inline array"));
+                        }
+                    }
+                    c.recs[rec].fields.push(Field { name: name, ty: elem, count: count, offset: 0 });
+                }
+            }
+            bg_skip_attrs(&mut c);
+            if p_is(&mut c, view(",")) {
+                c.pos += 1;
+                continue;
+            }
+            go = 0;
+        }
+        if p_is(&mut c, view(";")) {
+            c.pos += 1;
+        } else {
+            bg_refuse(&mut c, cur_file(&mut c), cur_line(&mut c), view("expected `;` after a member declaration"));
+            p_skip_statement(&mut c);
+        }
+    }
+    if p_is(&mut c, view("}")) {
+        c.pos += 1;
+    } else {
+        bg_refuse(&mut c, cur_file(&mut c), cur_line(&mut c), view("unterminated struct body"));
+    }
+    return ();
+}
+fn expected_bad<a>(c: (&a mut Ctx), elem: u64) -> u64 {
+    if c.types[elem].kind == 7 {
+        return 1;
+    }
+    return 0;
+}
+fn bg_layout<a>(c: (&a mut Ctx), rec: u64) -> unit {
+    mut offset: u64 = 0;
+    mut align: u64 = 1;
+    mut size: u64 = 0;
+    mut unioned = c.recs[rec].unioned;
+    for i in c.recs[rec].fields.len() {
+        ty := c.recs[rec].fields[i].ty;
+        count := c.recs[rec].fields[i].count;
+        a := bg_align_of(&mut c, ty);
+        if align < a {
+            align = a;
+        }
+        s := bg_size_of(&mut c, ty) * count;
+        if unioned != 0 {
+            c.recs[rec].fields[i].offset = 0;
+            if size < s {
+                size = s;
+            }
+        } else {
+            off := bg_align_up(offset, a);
+            c.recs[rec].fields[i].offset = off;
+            offset = off + s;
+            size = offset;
+        }
+    }
+    c.recs[rec].size = bg_align_up(size, align);
+    c.recs[rec].align = align;
+    return ();
+}
+fn bg_static_assert<a>(c: (&a mut Ctx)) -> unit {
+    file := cur_file(&mut c);
+    line := cur_line(&mut c);
+    c.pos += 1;
+    if !p_is(&mut c, view("(")) {
+        bg_refuse(&mut c, file, line, view("malformed _Static_assert"));
+        return ();
+    }
+    c.pos += 1;
+    c.bad = 0;
+    value := ex_const(&mut c);
+    if c.bad != 0 {
+        bg_refuse(&mut c, file, line, view("_Static_assert condition is not a constant expression this importer evaluates"));
+        c.bad = 0;
+    } else if value == 0 {
+        bg_refuse(&mut c, file, line, view("_Static_assert fails: the header's own claim about the layout does not hold in this importer's model"));
+    }
+    while (c.pos < c.toks.len()) && !p_is(&mut c, view(")")) {
+        c.pos += 1;
+    }
+    if p_is(&mut c, view(")")) {
+        c.pos += 1;
+    }
+    if p_is(&mut c, view(";")) {
+        c.pos += 1;
+    }
+    return ();
+}
+fn bg_params<a>(c: (&a mut Ctx)) -> u64[] {
+    mut params = u64[];
+    c.variadic = 0;
+    c.noproto = 0;
+    c.pos += 1;
+    if p_is(&mut c, view(")")) {
+        c.pos += 1;
+        c.noproto = 1;
+        return params;
+    }
+    if p_is(&mut c, view("void")) && p_is_at(&mut c, c.pos + 1, view(")")) {
+        c.pos += 2;
+        return params;
+    }
+    mut go = 1;
+    while go != 0 {
+        bg_skip_attrs(&mut c);
+        if p_is(&mut c, view("...")) {
+            c.variadic = 1;
+            c.pos += 1;
+            break;
+        }
+        base := bg_declspecs(&mut c);
+        if base == 0 {
+            bg_refuse(&mut c, cur_file(&mut c), cur_line(&mut c), view("parameter without a type"));
+            p_skip_statement(&mut c);
+            break;
+        }
+        node := bg_declarator(&mut c, 1);
+        mut ty = bg_apply(&mut c, node, base);
+        // A parameter of array type is the pointer C passes; one of function type is a cfn.
+        if c.types[ty].kind == 7 {
+            elem := c.types[ty].elem;
+            ty = bg_t_ptr(&mut c, elem);
+        }
+        params.push(ty);
+        bg_skip_attrs(&mut c);
+        if p_is(&mut c, view(",")) {
+            c.pos += 1;
+            continue;
+        }
+        break;
+    }
+    if p_is(&mut c, view(")")) {
+        c.pos += 1;
+    } else {
+        bg_refuse(&mut c, cur_file(&mut c), cur_line(&mut c), view("expected `)` after a parameter list"));
+    }
+    return params;
+}
+// The declared name of a declarator: the innermost name node, through the pointers, arrays and
+// parameter lists wrapped around it.
+fn bg_node_name<a>(c: (&a mut Ctx), node: u64) -> u8[] {
+    mut at = node;
+    mut go = 1;
+    while go != 0 {
+        kind := c.nodes[at].kind;
+        if kind == 0 {
+            return c.nodes[at].name.copy();
+        }
+        at = c.nodes[at].inner;
+        if at == node {
+            return u8[];
+        }
+    }
+    return u8[];
+}
+fn bg_apply<a>(c: (&a mut Ctx), node: u64, base: u64) -> u64 {
+    kind := c.nodes[node].kind;
+    inner := c.nodes[node].inner;
+    if kind == 0 {
+        return base;
+    }
+    if kind == 1 {
+        return bg_apply(&mut c, inner, bg_t_ptr(&mut c, base));
+    }
+    if kind == 2 {
+        params := c.nodes[node].params.copy();
+        variadic := c.nodes[node].variadic;
+        return bg_apply(&mut c, inner, bg_t_func(&mut c, base, params, variadic));
+    }
+    if kind == 3 {
+        count := c.nodes[node].count;
+        return bg_apply(&mut c, inner, bg_t_array(&mut c, base, count));
+    }
+    return base;
+}
+fn bg_typename<a>(c: (&a mut Ctx)) -> u64 {
+    base := bg_declspecs(&mut c);
+    if base == 0 {
+        c.bad = 1;
+        return 0;
+    }
+    node := bg_declarator(&mut c, 1);
+    return bg_apply(&mut c, node, base);
+}
+
+// ---- emission -----------------------------------------------------------------------------
+
+// The Grail spelling of a C type in a value position: a parameter, a result or a record field.
+fn bg_spell<a>(c: (&a mut Ctx), ty: u64) -> u8[] {
+    kind := c.types[ty].kind;
+    if kind == 0 {
+        return view("unit").copy();
+    }
+    if kind == 1 {
+        bits := c.types[ty].bits;
+        signed := c.types[ty].signed;
+        if bits == 8 {
+            // A plain `char` is a byte buffer element and becomes `u8`; `signed char` is `i8` and
+            // `unsigned char` is `u8`.
+            if (signed != 0) && (c.types[ty].ch == 0) {
+                return view("i8").copy();
+            }
+            return view("u8").copy();
+        }
+        if bits == 16 {
+            if signed != 0 {
+                return view("i16").copy();
+            }
+            return view("u16").copy();
+        }
+        if bits == 32 {
+            if signed != 0 {
+                return view("i32").copy();
+            }
+            return view("u32").copy();
+        }
+        if signed != 0 {
+            return view("i64").copy();
+        }
+        return view("u64").copy();
+    }
+    if kind == 2 {
+        if c.types[ty].bits == 32 {
+            return view("f32").copy();
+        }
+        return view("f64").copy();
+    }
+    if kind == 3 {
+        if c.recs[c.types[ty].rec].name.len() == 0 {
+            // An anonymous record used by pointer: the pointer is all that crosses.
+            return view("CPtr").copy();
+        }
+        return bg_safe(view(c.recs[c.types[ty].rec].name));
+    }
+    if kind == 4 {
+        if c.types[ty].bits == 64 {
+            return view("i64").copy();
+        }
+        return view("i32").copy();
+    }
+    if kind == 5 {
+        elem := c.types[ty].elem;
+        if (c.types[elem].kind == 1) && (c.types[elem].ch != 0) && (c.types[elem].cconst != 0) {
+            return view("CStr").copy();
+        }
+        if c.types[elem].cconst != 0 {
+            return view("CPtr").copy();
+        }
+        return view("CMutPtr").copy();
+    }
+    if kind == 6 {
+        mut out = view("cfn(").copy();
+        for i in c.types[ty].params.len() {
+            if 0 < i {
+                out = bg_cat(view(out), view(", "));
+            }
+            pty := c.types[ty].params[i];
+            one := bg_spell(&mut c, pty);
+            out = bg_cat(view(out), view(one));
+        }
+        out = bg_cat(view(out), view(") -> "));
+        rty := c.types[ty].ret;
+        ret := bg_spell(&mut c, rty);
+        return bg_cat(view(out), view(ret));
+    }
+    return view("CPtr").copy();
+}
+// A record field: the same spellings, an inline array for a C array member, and a bare pointer for
+// a function-pointer member, which a Grail record field cannot hold as a `cfn`.
+fn bg_spell_field<a>(c: (&a mut Ctx), ty: u64, count: u64) -> u8[] {
+    mut elem = ty;
+    // A record field cannot hold a `cfn`; the code address is the same word as a `CPtr`.
+    if c.types[ty].kind == 6 {
+        elem = bg_t_ptr(&mut c, ty);
+    }
+    inner := bg_spell(&mut c, elem);
+    if count > 1 {
+        mut out = bg_cat(view("["), view(inner));
+        out = bg_cat(view(out), view("; "));
+        out = bg_cat(view(out), view(bg_dec(count)));
+        return bg_cat(view(out), view("]"));
+    }
+    return inner;
+}
+fn bg_key_upper<a>(name: &a [u8]) -> u8[] {
+    mut out = u8[];
+    for i in name.len() {
+        ch := u64(name[i]);
+        if (96 < ch) && (ch < 123) {
+            out.push(u8(ch - 32));
+        } else if ((64 < ch) && (ch < 91)) || bg_digit(ch) || (ch == 95) {
+            out.push(u8(ch));
+        } else {
+            out.push(95);
+        }
+    }
+    return out;
+}
+fn bg_emit_const<a, b>(c: (&a mut Ctx), name: &b [u8], value: i64, kind: &b [u8]) -> unit {
+    bg_put(&mut c.out, view("pub const "));
+    bg_put(&mut c.out, view(bg_safe(view(name))));
+    bg_put(&mut c.out, view(": "));
+    bg_put(&mut c.out, view(kind));
+    bg_put(&mut c.out, view(" = "));
+    if value < 0 {
+        bg_put(&mut c.out, view(bg_signed(value)));
+    } else {
+        bg_put(&mut c.out, view(bg_dec(u64(value))));
+    }
+    bg_put(&mut c.out, view(";\n"));
+    return ();
+}
+fn bg_emit_records<a>(c: (&a mut Ctx)) -> unit {
+    mut done = 0;
+    for r in c.recs.len() {
+        if c.recs[r].complete == 0 {
+            if c.recs[r].name.len() == 0 {
+                continue;
+            }
+            // An incomplete type is an opaque handle: Grail can name it and pass it by pointer,
+            // which is all C offers for a type whose members are declared elsewhere.
+            bg_put(&mut c.out, view("pub handle "));
+            bg_put(&mut c.out, view(bg_safe(view(c.recs[r].name))));
+            bg_put(&mut c.out, view(";\n"));
+        }
+    }
+    for r in c.recs.len() {
+        if c.recs[r].complete == 0 {
+            continue;
+        }
+        if c.recs[r].name.len() == 0 {
+            continue;
+        }
+        name := bg_safe(view(c.recs[r].name));
+        if c.recs[r].unioned != 0 {
+            // A union's members overlap, and Grail has no union type: the record keeps the union's
+            // exact size and alignment as a byte array, so a pointer to it and its size are right
+            // while its members are reached by binding them as separate structs if needed.
+            align := c.recs[r].align;
+            mut elem = view("u8").copy();
+            mut width: u64 = 1;
+            if align == 8 {
+                elem = view("u64").copy();
+                width = 8;
+            } else if align == 4 {
+                elem = view("u32").copy();
+                width = 4;
+            } else if align == 2 {
+                elem = view("u16").copy();
+                width = 2;
+            }
+            count := c.recs[r].size / width;
+            bg_put(&mut c.out, view("// union "));
+            bg_put(&mut c.out, view(name));
+            bg_put(&mut c.out, view(": overlapping members, so only its size and alignment are exported\n"));
+            bg_put(&mut c.out, view("pub extern \"C\" record "));
+            bg_put(&mut c.out, view(name));
+            bg_put(&mut c.out, view(" { bytes: ["));
+            bg_put(&mut c.out, view(elem));
+            bg_put(&mut c.out, view("; "));
+            bg_put(&mut c.out, view(bg_dec(count)));
+            bg_put(&mut c.out, view("] }\n"));
+        } else {
+            bg_put(&mut c.out, view("pub extern \"C\" record "));
+            bg_put(&mut c.out, view(name));
+            bg_put(&mut c.out, view(" {"));
+            if c.recs[r].fields.len() == 0 {
+                bg_put(&mut c.out, view("\n    pad: [u8; 1]"));
+            }
+            for f in c.recs[r].fields.len() {
+                fname := bg_safe(view(c.recs[r].fields[f].name));
+                fty0 := c.recs[r].fields[f].ty;
+                fcount := c.recs[r].fields[f].count;
+                fty := bg_spell_field(&mut c, fty0, fcount);
+                bg_put(&mut c.out, view("\n    "));
+                bg_put(&mut c.out, view(fname));
+                bg_put(&mut c.out, view(": "));
+                bg_put(&mut c.out, view(fty));
+                bg_put(&mut c.out, view(","));
+            }
+            bg_put(&mut c.out, view("\n}\n"));
+        }
+        bg_put(&mut c.out, view("pub const "));
+        bg_put(&mut c.out, view(bg_key_upper(view(name))));
+        bg_put(&mut c.out, view("_SIZE: u64 = "));
+        bg_put(&mut c.out, view(bg_dec(c.recs[r].size)));
+        bg_put(&mut c.out, view(";\n"));
+        bg_put(&mut c.out, view("pub const "));
+        bg_put(&mut c.out, view(bg_key_upper(view(name))));
+        bg_put(&mut c.out, view("_ALIGN: u64 = "));
+        bg_put(&mut c.out, view(bg_dec(c.recs[r].align)));
+        bg_put(&mut c.out, view(";\n"));
+        if c.recs[r].unioned == 0 {
+            for f in c.recs[r].fields.len() {
+                bg_put(&mut c.out, view("pub const "));
+                bg_put(&mut c.out, view(bg_key_upper(view(name))));
+                bg_put(&mut c.out, view("_OFFSET_"));
+                bg_put(&mut c.out, view(bg_key_upper(view(c.recs[r].fields[f].name))));
+                bg_put(&mut c.out, view(": u64 = "));
+                bg_put(&mut c.out, view(bg_dec(c.recs[r].fields[f].offset)));
+                bg_put(&mut c.out, view(";\n"));
+            }
+        }
+    }
+    return ();
+}
+fn bg_emit_fn<a>(c: (&a mut Ctx), index: u64) -> unit {
+    ty := c.fns[index].ty;
+    variadic := c.types[ty].variadic;
+    ret := c.types[ty].ret;
+    count := c.types[ty].params.len();
+    bg_put(&mut c.out, view("pub extern \"C\" fn "));
+    bg_put(&mut c.out, view(bg_safe(view(c.fns[index].name))));
+    bg_put(&mut c.out, view("("));
+    for i in count {
+        if 0 < i {
+            bg_put(&mut c.out, view(", "));
+        }
+        bg_put(&mut c.out, view("a"));
+        bg_put(&mut c.out, view(bg_dec(i)));
+        bg_put(&mut c.out, view(": "));
+        one := c.types[ty].params[i];
+        pty := bg_spell(&mut c, one);
+        bg_put(&mut c.out, view(pty));
+    }
+    if variadic != 0 {
+        if 0 < count {
+            bg_put(&mut c.out, view(", "));
+        }
+        bg_put(&mut c.out, view("..."));
+    }
+    bg_put(&mut c.out, view(") -> "));
+    rty := bg_spell(&mut c, ret);
+    bg_put(&mut c.out, view(rty));
+    bg_put(&mut c.out, view(";\n"));
+    return ();
+}
+
+// ---- the whole translation unit -------------------------------------------------------------
+
+fn bg_register_typedef<a, b>(c: (&a mut Ctx), name: &b [u8], ty: u64, file: u64, line: u64) -> unit {
+    if name.len() == 0 {
+        bg_refuse(&mut c, file, line, view("typedef without a name"));
+        return ();
+    }
+    // A typedef names its record: `typedef struct z_stream_s { ... } z_stream;` is emitted as
+    // `z_stream`, the spelling C code actually uses, and the tag stays as the tag.
+    if c.types[ty].kind == 3 {
+        rec := c.types[ty].rec;
+        mut rename = 0;
+        if c.recs[rec].name.len() == 0 {
+            rename = 1;
+        }
+        if bg_eq(view(c.recs[rec].name), view(c.recs[rec].tag)) {
+            rename = 1;
+        }
+        if rename != 0 {
+            c.recs[rec].name = name.copy();
+        }
+    }
+    c.tds.push(TD { name: name.copy(), ty: ty });
+    return ();
+}
+fn bg_parse_all<a>(c: (&a mut Ctx)) -> unit {
+    while c.pos < c.toks.len() {
+        if c.failed != 0 {
+            return ();
+        }
+        bg_skip_attrs(&mut c);
+        if c.pos >= c.toks.len() {
+            break;
+        }
+        if p_is(&mut c, view(";")) {
+            c.pos += 1;
+            continue;
+        }
+        if p_is(&mut c, view("_Static_assert")) || p_is(&mut c, view("static_assert")) {
+            bg_static_assert(&mut c);
+            continue;
+        }
+        before := c.pos;
+        file := cur_file(&mut c);
+        line := cur_line(&mut c);
+        c.skip_decl = 0;
+        base := bg_declspecs(&mut c);
+        if (base == 0) && (c.skip_decl != 0) {
+            c.skip_decl = 0;
+            p_skip_statement(&mut c);
+            continue;
+        }
+        if base == 0 {
+            if c.failed == 0 {
+                mut msg = view("declaration this importer does not understand, starting at `").copy();
+                msg = bg_cat(view(msg), view(p_text(&mut c)));
+                msg = bg_cat(view(msg), view("`"));
+                bg_refuse(&mut c, cur_file(&mut c), cur_line(&mut c), view(msg));
+            }
+            p_skip_statement(&mut c);
+            if c.pos <= before {
+                c.pos = before + 1;
+            }
+            continue;
+        }
+        if p_is(&mut c, view(";")) {
+            c.pos += 1;
+            continue;
+        }
+        mut go = 1;
+        mut body_skipped = 0;
+        while go != 0 {
+            node := bg_declarator(&mut c, 0);
+            ty := bg_apply(&mut c, node, base);
+            name := bg_node_name(&mut c, node);
+            if c.storage == 1 {
+                bg_register_typedef(&mut c, view(name), ty, file, line);
+            } else if c.types[ty].kind == 6 {
+                if p_is(&mut c, view("{")) {
+                    // `static inline` helpers in a header: no linkable symbol, so no binding.
+                    bg_skip(&mut c, file, line, view(bg_cat(view("function definition `"), view(bg_cat(view(name), view("` in the header (a static/inline body, not a linkable symbol)"))))));
+                    p_skip_body(&mut c);
+                    body_skipped = 1;
+                    go = 0;
+                    continue;
+                }
+                if c.types[ty].variadic == 0 && c.types[ty].params.len() == 0 && c.types[ty].ret != 0 {
+                    // `int f();` is a K&R declaration with no prototype: the parameter types are
+                    // unknown, and guessing them is the one thing an importer must not do.
+                }
+                if name.len() == 0 {
+                    bg_refuse(&mut c, file, line, view("function declaration without a name"));
+                } else {
+                    c.fns.push(CFnDecl { name: name, ty: ty, file: file, line: line });
+                }
+            } else if name.len() != 0 {
+                bg_skip(&mut c, file, line, view(bg_cat(view("file-scope variable `"), view(bg_cat(view(name), view("` (Grail has no extern globals; read it through an accessor function instead)"))))));
+            }
+            bg_skip_attrs(&mut c);
+            if p_is(&mut c, view("=")) {
+                c.pos += 1;
+                p_skip_initializer(&mut c);
+            }
+            if p_is(&mut c, view(",")) {
+                c.pos += 1;
+                continue;
+            }
+            go = 0;
+        }
+        if body_skipped != 0 {
+            // A function definition ends with `}`; there is no trailing `;` to require.
+            continue;
+        }
+        if p_is(&mut c, view(";")) {
+            c.pos += 1;
+        } else {
+            bg_refuse(&mut c, cur_file(&mut c), cur_line(&mut c), view("expected `;` after a declaration"));
+            p_skip_statement(&mut c);
+        }
+    }
+    return ();
+}
+// A macro that is an integer constant: expanded and evaluated in isolation, so a header's flag
+// values (`Z_BEST_COMPRESSION`, `O_NONBLOCK`) become `pub const` in the binding.
+fn bg_macro_constant<a>(c: (&a mut Ctx), m: u64) -> i64 {
+    if c.macros[m].func != 0 || c.macros[m].body.len() == 0 {
+        c.bad = 1;
+        return 0;
+    }
+    saved_toks := exchange(&mut c.toks, RTok[]);
+    saved_pos := c.pos;
+    saved_lenient := c.lenient;
+    saved_bad := c.bad;
+    saved_failed := c.failed;
+    c.pos = 0;
+    c.lenient = 1;
+    c.bad = 0;
+    bg_expand_object(&mut c, m, 0, 0);
+    mut value: i64 = 0;
+    if (c.bad == 0) && (c.toks.len() != 0) {
+        c.pos = 0;
+        value = ex_const(&mut c);
+        if c.pos != c.toks.len() {
+            c.bad = 1;
+        }
+    }
+    mut good = 1;
+    if c.bad != 0 {
+        good = 0;
+    }
+    // A type alias or a keyword (`#define Z_U4 unsigned`) is not a value; only a pure
+    // number/character expression becomes a constant.
+    for i in c.toks.len() {
+        if c.toks[i].kind == 0 {
+            good = 0;
+        }
+    }
+    if c.failed != saved_failed {
+        good = 0;
+    }
+    c.bad = saved_bad;
+    c.failed = saved_failed;
+    c.lenient = saved_lenient;
+    c.pos = saved_pos;
+    exchange(&mut c.toks, saved_toks);
+    if good == 0 {
+        return 0;
+    }
+    c.macro_ok = 1;
+    return value;
+}
+fn bg_emit_all<a, b>(c: (&a mut Ctx), header: &b [u8]) -> unit {
+    bg_put(&mut c.out, view("module "));
+    bg_put(&mut c.out, view(bg_safe(view(c.module))));
+    bg_put(&mut c.out, view(";\n\n// Generated by `grail bindgen` from "));
+    bg_put(&mut c.out, view(header));
+    bg_put(&mut c.out, view(".\n//\n"));
+    bg_put(&mut c.out, view("// C and Grail types cross as: `char` is u8, `int` is i32, `long` is i64 on a\n"));
+    bg_put(&mut c.out, view("// 64-bit LP64 host (-M llp64 for Win64), pointers are CPtr (const pointee) or\n"));
+    bg_put(&mut c.out, view("// CMutPtr, `const char *` is CStr, a struct pointer is CPtr, and a function\n"));
+    bg_put(&mut c.out, view("// pointer is cfn. A struct passed by pointer is a CPtr or the record itself; a\n"));
+    bg_put(&mut c.out, view("// struct passed by value needs `byval` at the call site.\n"));
+    bg_put(&mut c.out, view("// Function-like macros and file-scope variables are not bindings (Grail has no\n"));
+    bg_put(&mut c.out, view("// macros and no extern globals); run with --strict to refuse them instead.\n\n"));
+    for i in c.libs.len() {
+        bg_put(&mut c.out, view("pub extern \"C\" lib \""));
+        bg_put(&mut c.out, view(c.libs[i]));
+        bg_put(&mut c.out, view("\";\n"));
+    }
+    if c.libs.len() != 0 {
+        bg_put(&mut c.out, view("\n"));
+    }
+    bg_emit_records(&mut c);
+    if c.consts.len() != 0 {
+        bg_put(&mut c.out, view("\n"));
+        for i in c.consts.len() {
+            name := c.consts[i].name.copy();
+            mut dup = 0;
+            for j in c.const_names.len() {
+                if bg_eq(view(c.const_names[j]), view(name)) {
+                    dup = 1;
+                }
+            }
+            if dup != 0 {
+                continue;
+            }
+            c.const_names.push(name.copy());
+            mut kind = view("i32").copy();
+            if (c.consts[i].value > 2147483647) || (c.consts[i].value < -2147483648) {
+                kind = view("i64").copy();
+            }
+            cvalue := c.consts[i].value;
+            bg_emit_const(&mut c, view(name), cvalue, view(kind));
+        }
+    }
+    mut macro_names = 0;
+    for m in c.macros.len() {
+        if c.macros[m].builtin != 0 {
+            continue;
+        }
+        c.macro_ok = 0;
+        value := bg_macro_constant(&mut c, m);
+        if c.macro_ok == 0 {
+            continue;
+        }
+        name := c.macros[m].name.copy();
+        mut dup = 0;
+        for j in c.const_names.len() {
+            if bg_eq(view(c.const_names[j]), view(name)) {
+                dup = 1;
+            }
+        }
+        if dup != 0 {
+            continue;
+        }
+        c.const_names.push(name.copy());
+        if macro_names != 0 {
+            // the blank line is written once, below
+        }
+        bg_emit_const(&mut c, view(name), value, view("i64"));
+        macro_names += 1;
+    }
+    if c.fns.len() != 0 {
+        bg_put(&mut c.out, view("\n"));
+        for i in c.fns.len() {
+            bg_emit_fn(&mut c, i);
+        }
+    }
+    return ();
+}
+
+// ---- the CLI ------------------------------------------------------------------------------
+
+fn bg_arg<a>(args: (&a u8[][]), i: u64) -> u8[] {
+    if i < args.len() {
+        return args[i].copy();
+    }
+    return u8[];
+}
+fn bg_push_paths<a, b>(list: (&a mut u8[][]), text: &b [u8]) -> unit {
+    list.push(text.copy());
+    return ();
+}
+fn bg_usage() -> u64 {
+    host::print(view("usage: grail bindgen HEADER.h -o OUT.grl [-I DIR]... [-isystem DIR]... [-l LIB]... [-M lp64|llp64] [--strict] [--print]\n"));
+    host::print(view("  writes Grail extern \"C\" declarations, C-layout records and constants for a C header\n"));
+    host::print(view("  -I DIR          search DIRECTORY for #include \"...\" and <...>\n"));
+    host::print(view("  -isystem DIR    search DIRECTORY after the -I directories\n"));
+    host::print(view("  -l LIB          emit `extern \"C\" lib \"LIB\";` (e.g. -l z for libz)\n"));
+    host::print(view("  -D NAME[=VALUE] define a macro before reading the header\n"));
+    host::print(view("  --module NAME   the `module NAME;` the output declares (default: the -o file name)\n"));
+    host::print(view("  -M lp64|llp64   `long` is 64 bits (Unix, default) or 32 bits (Win64)\n"));
+    host::print(view("  --strict        refuse file-scope variables and function-like macros instead of noting them\n"));
+    host::print(view("  --print         write the binding to stdout instead of -o\n"));
+    host::print(view("  --dump-tokens   print the preprocessed token stream and stop\n"));
+    return 1;
+}
+pub fn run<a>(args: (&a u8[][])) -> u64 {
+    mut c = bg_new_ctx();
+    mut header = u8[];
+    mut out_path = u8[];
+    mut to_stdout = 0;
+    mut dump = 0;
+    mut defines = u8[][];
+    mut module_name = u8[];
+    mut i = 0;
+    while i < args.len() {
+        a := bg_arg(&args, i);
+        if bg_eq(view(a), view("-h")) || bg_eq(view(a), view("--help")) {
+            return bg_usage();
+        }
+        if bg_eq(view(a), view("-o")) && (i + 1 < args.len()) {
+            i += 1;
+            out_path = bg_arg(&args, i);
+        } else if bg_eq(view(a), view("-I")) && (i + 1 < args.len()) {
+            i += 1;
+            bg_push_paths(&mut c.incs, view(bg_arg(&args, i)));
+        } else if bg_starts(view(a), view("-I")) && (2 < a.len()) {
+            bg_push_paths(&mut c.incs, view(bg_slice(view(a), 2, a.len())));
+        } else if bg_eq(view(a), view("-isystem")) && (i + 1 < args.len()) {
+            i += 1;
+            bg_push_paths(&mut c.sysincs, view(bg_arg(&args, i)));
+        } else if bg_eq(view(a), view("-D")) && (i + 1 < args.len()) {
+            i += 1;
+            defines.push(bg_arg(&args, i));
+        } else if bg_starts(view(a), view("-D")) && (2 < a.len()) {
+            defines.push(bg_slice(view(a), 2, a.len()));
+        } else if bg_eq(view(a), view("-l")) && (i + 1 < args.len()) {
+            i += 1;
+            bg_push_paths(&mut c.libs, view(bg_arg(&args, i)));
+        } else if bg_eq(view(a), view("-M")) && (i + 1 < args.len()) {
+            i += 1;
+            model := bg_arg(&args, i);
+            if bg_eq(view(model), view("llp64")) {
+                c.model = 1;
+            } else if bg_eq(view(model), view("lp64")) {
+                c.model = 0;
+            } else {
+                host::print(view("bindgen: error: -M takes lp64 or llp64\n"));
+                return 1;
+            }
+        } else if bg_eq(view(a), view("--module")) && (i + 1 < args.len()) {
+            i += 1;
+            module_name = bg_arg(&args, i);
+        } else if bg_eq(view(a), view("--strict")) {
+            c.strict = 1;
+        } else if bg_eq(view(a), view("--print")) {
+            to_stdout = 1;
+        } else if bg_eq(view(a), view("--dump-tokens")) {
+            dump = 1;
+        } else if bg_starts(view(a), view("-")) && !bg_eq(view(a), view("-")) {
+            host::print(view("bindgen: error: unknown option "));
+            host::print(view(a));
+            host::print(view("\n"));
+            return bg_usage();
+        } else if header.len() == 0 {
+            header = a;
+        } else {
+            host::print(view("bindgen: error: unexpected argument "));
+            host::print(view(a));
+            host::print(view("\n"));
+            return bg_usage();
+        }
+        i += 1;
+    }
+    if (header.len() == 0) || ((out_path.len() == 0) && (to_stdout == 0) && (dump == 0)) {
+        return bg_usage();
+    }
+    if module_name.len() == 0 {
+        // `-o out/zlib.grl` declares `module zlib;`, so the file can be imported as it stands.
+        stem := bg_basename(view(out_path));
+        mut cut = stem.len();
+        mut j = 0;
+        while j < stem.len() {
+            if stem[j] == 46 {
+                if cut == stem.len() {
+                    cut = j;
+                }
+            }
+            j += 1;
+        }
+        module_name = bg_slice(view(stem), 0, cut);
+        if module_name.len() == 0 {
+            module_name = view("bindings").copy();
+        }
+    }
+    // The default system include directories, searched after -I/-isystem, as a C compiler does.
+    bg_push_paths(&mut c.sysincs, view("/usr/local/include"));
+    bg_push_paths(&mut c.sysincs, view("/usr/include/x86_64-linux-gnu"));
+    bg_push_paths(&mut c.sysincs, view("/usr/include"));
+    bg_add_gcc_include(&mut c);
+    bg_push_paths(&mut c.sysincs, view("/usr/include/linux"));
+    bg_stdlib_typedefs(&mut c);
+    bg_predefines(&mut c);
+    // `-D NAME=VALUE` / `-D NAME` on the command line, applied after the built-ins so they win.
+    for i in defines.len() {
+        spec := defines[i].copy();
+        mut name = spec.copy();
+        mut value = view("1").copy();
+        mut cut = spec.len();
+        mut j = 0;
+        while j < spec.len() {
+            if spec[j] == 61 {
+                if cut == spec.len() {
+                    cut = j;
+                }
+            }
+            j += 1;
+        }
+        if cut < spec.len() {
+            name = bg_slice(view(spec), 0, cut);
+            value = bg_slice(view(spec), cut + 1, spec.len());
+        }
+        bg_predefine(&mut c, view(name), view(value));
+    }
+    pp_file(&mut c, view(header), 0);
+    if c.failed == 0 {
+        // `pp_file` expanded each line as it read it, so `c.toks` is the finished stream.
+    }
+    if dump != 0 {
+        for i in c.macros.len() {
+            host::print(view("macro "));
+            host::print(view(c.macros[i].name));
+            host::print(view(" func "));
+            host::print(view(bg_dec(c.macros[i].func)));
+            host::print(view(" body "));
+            host::print(view(bg_dec(c.macros[i].body.len())));
+            host::print(view("\n"));
+        }
+        for i in c.toks.len() {
+            host::print(view(bg_dec(c.toks[i].line)));
+            host::print(view(": "));
+            host::print(view(c.toks[i].text));
+            host::print(view("\n"));
+        }
+        return 0;
+    }
+    if c.failed == 0 {
+        c.pos = 0;
+        bg_parse_all(&mut c);
+    }
+    if c.failed != 0 {
+        host::print(view(c.diag));
+        if c.notes.len() != 0 {
+            host::print(view(c.notes));
+        }
+        return 1;
+    }
+    c.module = module_name.copy();
+    bg_emit_all(&mut c, view(header));
+    if c.notes.len() != 0 {
+        host::print(view(c.notes));
+    }
+    if to_stdout != 0 {
+        host::print(view(c.out));
+        return 0;
+    }
+    if host::write_file(view(out_path), view(c.out)) != 0 {
+        host::print(view("bindgen: error: cannot write "));
+        host::print(view(out_path));
+        host::print(view("\n"));
+        return 1;
+    }
+    return 0;
+}
+// The macros a C compiler predefines that headers rely on for their own typedefs. They are built
+// into the compiler rather than defined in a header, so an importer has to supply them.
+fn bg_predefine<a, b>(c: (&a mut Ctx), name: &b [u8], body: &b [u8]) -> unit {
+    t := bg_temp_new(&mut c);
+    bg_lex(&mut c, body, 0, body.len(), 0, 0, t);
+    mut toks = RTok[];
+    for i in c.temps[t - 1].len() {
+        piece := c.temps[t - 1][i].text.copy();
+        kind := c.temps[t - 1][i].kind;
+        toks.push(RTok { text: piece, kind: kind, line: 0, file: 0 });
+    }
+    c.macros.push(Macro {
+        name: name.copy(),
+        func: 0,
+        params: u8[][],
+        body: toks,
+        file: 0,
+        line: 0,
+        paste: 0,
+        vararg: 0,
+        builtin: 1
+    });
+    return ();
+}
+// The 64-bit pattern of an i64 (`u64(x)` is a checked cast and refuses a negative x).
+fn bg_bits_of(x: i64) -> u64 {
+    if x >= 0 {
+        return u64(x);
+    }
+    mag := u64(0 - (x + 1)) + u64(1);
+    return (u64(18446744073709551615) - mag) + u64(1);
+}
+fn bg_predefines<a>(c: (&a mut Ctx)) -> unit {
+    bg_predefine(&mut c, view("__SIZE_TYPE__"), view("long unsigned int"));
+    bg_predefine(&mut c, view("__PTRDIFF_TYPE__"), view("long int"));
+    bg_predefine(&mut c, view("__WCHAR_TYPE__"), view("int"));
+    bg_predefine(&mut c, view("__WINT_TYPE__"), view("unsigned int"));
+    bg_predefine(&mut c, view("__INTMAX_TYPE__"), view("long int"));
+    bg_predefine(&mut c, view("__UINTMAX_TYPE__"), view("long unsigned int"));
+    bg_predefine(&mut c, view("__SSIZE_TYPE__"), view("long int"));
+    bg_predefine(&mut c, view("__STDC__"), view("1"));
+    bg_predefine(&mut c, view("__STDC_VERSION__"), view("199901L"));
+    bg_predefine(&mut c, view("__STDC_HOSTED__"), view("1"));
+    // The host target, as a C compiler would predefine it: a header selects its declarations with
+    // these, and taking the wrong branch would describe the wrong ABI. -D overrides any of them.
+    bg_predefine(&mut c, view("__linux__"), view("1"));
+    bg_predefine(&mut c, view("__linux"), view("1"));
+    bg_predefine(&mut c, view("linux"), view("1"));
+    bg_predefine(&mut c, view("__gnu_linux__"), view("1"));
+    bg_predefine(&mut c, view("__unix__"), view("1"));
+    bg_predefine(&mut c, view("__unix"), view("1"));
+    bg_predefine(&mut c, view("unix"), view("1"));
+    bg_predefine(&mut c, view("__ELF__"), view("1"));
+    bg_predefine(&mut c, view("__x86_64__"), view("1"));
+    bg_predefine(&mut c, view("__x86_64"), view("1"));
+    bg_predefine(&mut c, view("__amd64__"), view("1"));
+    bg_predefine(&mut c, view("__amd64"), view("1"));
+    bg_predefine(&mut c, view("__LP64__"), view("1"));
+    bg_predefine(&mut c, view("_LP64"), view("1"));
+    bg_predefine(&mut c, view("__WORDSIZE"), view("64"));
+    if c.model == 1 {
+        bg_predefine(&mut c, view("__SIZE_TYPE__"), view("long long unsigned int"));
+        bg_predefine(&mut c, view("__PTRDIFF_TYPE__"), view("long long int"));
+        bg_predefine(&mut c, view("__INTMAX_TYPE__"), view("long long int"));
+        bg_predefine(&mut c, view("__UINTMAX_TYPE__"), view("long long unsigned int"));
+    }
+    return ();
+}
+// A C compiler's own headers (<stdarg.h>, <stddef.h>, <stdint.h>) are not in /usr/include: they sit
+// in the GCC or clang resource directory, which the importer finds by listing the versioned
+// directory rather than hard-coding a version.
+fn bg_add_gcc_include<a>(c: (&a mut Ctx)) -> unit {
+    mut roots = u8[][];
+    roots.push(view("/usr/lib/clang").copy());
+    roots.push(view("/usr/lib/gcc/x86_64-linux-gnu").copy());
+    roots.push(view("/usr/lib/gcc/aarch64-linux-gnu").copy());
+    for i in roots.len() {
+        if host::exists(view(roots[i])) == 0 {
+            continue;
+        }
+        entries := host::list_dir(view(roots[i]));
+        for j in entries.len() {
+            name := entries[j].copy();
+            // `host::list_dir` marks a directory with a trailing separator; only those are
+            // candidate include roots.
+            if name.len() != 0 {
+                if u64(name[name.len() - 1]) == 47 {
+                    bare := bg_slice(view(name), 0, name.len() - 1);
+                    c.sysincs.push(bg_join(view(roots[i]), view(bare)));
+                    c.sysincs.push(bg_cat(view(bg_join(view(roots[i]), view(bare))), view("/include")));
+                }
+            }
+        }
+    }
+    return ();
+}
+// The C library's own typedefs, so a header that uses `size_t` without including <stddef.h> still
+// parses. A header that declares them itself wins: parsing order defines later entries, and lookup
+// takes the last one.
+fn bg_stdlib_typedefs<a>(c: (&a mut Ctx)) -> unit {
+    bg_add_td(&mut c, view("size_t"), 64, 0, 0);
+    bg_add_td(&mut c, view("ssize_t"), 64, 1, 0);
+    bg_add_td(&mut c, view("ptrdiff_t"), 64, 1, 0);
+    bg_add_td(&mut c, view("intptr_t"), 64, 1, 0);
+    bg_add_td(&mut c, view("uintptr_t"), 64, 0, 0);
+    bg_add_td(&mut c, view("intmax_t"), 64, 1, 0);
+    bg_add_td(&mut c, view("uintmax_t"), 64, 0, 0);
+    bg_add_td(&mut c, view("int8_t"), 8, 1, 0);
+    bg_add_td(&mut c, view("int16_t"), 16, 1, 0);
+    bg_add_td(&mut c, view("int32_t"), 32, 1, 0);
+    bg_add_td(&mut c, view("int64_t"), 64, 1, 0);
+    bg_add_td(&mut c, view("uint8_t"), 8, 0, 0);
+    bg_add_td(&mut c, view("uint16_t"), 16, 0, 0);
+    bg_add_td(&mut c, view("uint32_t"), 32, 0, 0);
+    bg_add_td(&mut c, view("uint64_t"), 64, 0, 0);
+    bg_add_td(&mut c, view("int_least8_t"), 8, 1, 0);
+    bg_add_td(&mut c, view("int_least16_t"), 16, 1, 0);
+    bg_add_td(&mut c, view("int_least32_t"), 32, 1, 0);
+    bg_add_td(&mut c, view("int_least64_t"), 64, 1, 0);
+    bg_add_td(&mut c, view("uint_least8_t"), 8, 0, 0);
+    bg_add_td(&mut c, view("uint_least16_t"), 16, 0, 0);
+    bg_add_td(&mut c, view("uint_least32_t"), 32, 0, 0);
+    bg_add_td(&mut c, view("uint_least64_t"), 64, 0, 0);
+    bg_add_td(&mut c, view("int_fast8_t"), 8, 1, 0);
+    bg_add_td(&mut c, view("int_fast16_t"), 64, 1, 0);
+    bg_add_td(&mut c, view("int_fast32_t"), 64, 1, 0);
+    bg_add_td(&mut c, view("int_fast64_t"), 64, 1, 0);
+    bg_add_td(&mut c, view("uint_fast8_t"), 8, 0, 0);
+    bg_add_td(&mut c, view("uint_fast16_t"), 64, 0, 0);
+    bg_add_td(&mut c, view("uint_fast32_t"), 64, 0, 0);
+    bg_add_td(&mut c, view("uint_fast64_t"), 64, 0, 0);
+    bg_add_td(&mut c, view("wchar_t"), 32, 1, 0);
+    bg_add_td(&mut c, view("time_t"), 64, 1, 0);
+    bg_add_td(&mut c, view("off_t"), 64, 1, 0);
+    bg_add_td(&mut c, view("socklen_t"), 32, 0, 0);
+    bg_add_td(&mut c, view("useconds_t"), 32, 0, 0);
+    bg_add_td(&mut c, view("mode_t"), 32, 0, 0);
+    bg_add_td(&mut c, view("pid_t"), 32, 1, 0);
+    bg_add_td(&mut c, view("uid_t"), 32, 0, 0);
+    bg_add_td(&mut c, view("gid_t"), 32, 0, 0);
+    bg_va_list(&mut c);
+    return ();
+}
+// `va_list` is the compiler's `__builtin_va_list`. On x86-64 SysV it is an array of one struct, so
+// a parameter of that type travels as a pointer, which is what an opaque record pointer gives.
+// (AArch64 passes it by value, which this importer does not model: see the limits in docs/ffi.md.)
+fn bg_va_list<a>(c: (&a mut Ctx)) -> unit {
+    rec := bg_new_rec(&mut c, view("__va_list_tag"), 0);
+    ty := bg_t_record(&mut c, rec);
+    ptr := bg_t_ptr(&mut c, ty);
+    c.tds.push(TD { name: view("__builtin_va_list").copy(), ty: ptr });
+    c.tds.push(TD { name: view("__gnuc_va_list").copy(), ty: ptr });
+    c.tds.push(TD { name: view("va_list").copy(), ty: ptr });
+    return ();
+}
+fn bg_add_td<a, b>(c: (&a mut Ctx), name: &b [u8], bits: u64, signed: u64, ch: u64) -> unit {
+    ty := bg_t_int(&mut c, bits, signed, ch, 0);
+    c.tds.push(TD { name: name.copy(), ty: ty });
+    return ();
+}
