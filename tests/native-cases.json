@@ -7622,6 +7622,135 @@
     ]
   },
   {
+    "name": "pv-match-pattern-proves",
+    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\nfn pick(n: u64) -> u64 {\n    match n {\n        16 => {\n            return take(n);\n        },\n        _ => {\n            return 0;\n        }\n    }\n}\n\nfn main() -> u64 {\n    println(pick(16));\n    return 0;\n}\n",
+    "stdout": "16\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asm": [
+      "call f_main_take.proved"
+    ],
+    "asmAbsent": [
+      "call f_main_take\n"
+    ],
+    "note": "an arm whose pattern is one literal states `n == 16` in that arm: the call's `align % 16 == 0` is settled there and enters the proved entry"
+  },
+  {
+    "name": "pv-match-pattern-scoped",
+    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\nfn pick(n: u64) -> u64 {\n    match n {\n        16 => {\n            return take(n);\n        },\n        _ => {\n            return take(n);\n        }\n    }\n}\n\nfn main() -> u64 {\n    println(pick(16));\n    println(pick(3));\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "16\n",
+    "stderr": [
+      "error: refinement violated: align % 16 == 0\n --> ",
+      " = required by take at "
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "the pattern's fact is the arm's own: the `_` arm is not about 16, so its call keeps the check and refuses 3 - a walker that leaked the fact would prove it"
+  },
+  {
+    "name": "pv-match-guard-proves",
+    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\nfn pick(n: u64) -> u64 {\n    match n {\n        _ if n % 16 == 0 => {\n            return take(n);\n        },\n        _ => {\n            return 0;\n        }\n    }\n}\n\nfn main() -> u64 {\n    println(pick(32));\n    return 0;\n}\n",
+    "stdout": "32\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asm": [
+      "call f_main_take.proved"
+    ],
+    "asmAbsent": [
+      "call f_main_take\n"
+    ],
+    "note": "a guard is what reaching the arm's body means: `_ if n % 16 == 0` states it there, and the call enters the proved entry"
+  },
+  {
+    "name": "pv-let-shadow-proves",
+    "source": "fn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\n\nfn pick(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    {\n        mut i = 9;\n        println(i);\n    }\n    return get(v, i);\n}\n\nfn main() -> u64 {\n    v := u64[10, 20, 30];\n    println(pick(&v, 1));\n    return 0;\n}\n",
+    "stdout": "9\n20\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asm": [
+      "call f_main_get.proved"
+    ],
+    "asmAbsent": [
+      "call f_main_get\n"
+    ],
+    "note": "a shadowing binding kills the facts about the name it shadows for its own block only: after the block the refined parameter's `i < v.len()` is back, and the call needs no check"
+  },
+  {
+    "name": "pv-let-shadow-scoped",
+    "source": "fn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\n\nfn pick(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    {\n        mut i = 9;\n        return get(v, i);\n    }\n}\n\nfn main() -> u64 {\n    v := u64[10, 20, 30];\n    println(pick(&v, 1));\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "",
+    "stderr": [
+      "error: refinement violated: i < v.len()\n --> ",
+      " = required by get at "
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "inside the block the name means the new binding, so the refined parameter's bound is not about it: the call keeps its check and refuses 9"
+  },
+  {
+    "name": "pv-for-guard-proves",
+    "source": "fn at(n: u64, k: u64 where k < n) -> u64 {\n    return k;\n}\n\nfn total(n: u64) -> u64 {\n    mut sum = 0;\n    for k in 0..n {\n        sum += at(n, k);\n    }\n    return sum;\n}\n\nfn main() -> u64 {\n    println(total(5));\n    return 0;\n}\n",
+    "stdout": "10\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asm": [
+      "call f_main_at.proved"
+    ],
+    "asmAbsent": [
+      "call f_main_at\n"
+    ],
+    "note": "`for k in 0..n` states `0 <= k < n` inside the body, which is exactly at's `k < n`: the call enters the proved entry"
+  },
+  {
+    "name": "pv-for-guard-scoped",
+    "source": "fn at(n: u64, k: u64 where k < n) -> u64 {\n    return k;\n}\n\nfn total(n: u64) -> u64 {\n    mut k = 7;\n    for k in 0..n {\n        println(k);\n    }\n    return at(n, k);\n}\n\nfn main() -> u64 {\n    println(total(5));\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "0\n1\n2\n3\n4\n",
+    "stderr": [
+      "error: refinement violated: k < n\n --> ",
+      " = required by at at "
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "the loop guard's facts end with the body: after the loop `k` is the outer binding again, so the call keeps its check and refuses 7 of 5"
+  },
+  {
     "name": "effects-accepted",
     "source": "@no_alloc\nfn sum(v: &u64[]) -> u64 {\n    mut t = 0;\n    for i in v.len() {\n        t = t + v[i];\n    }\n    return t;\n}\n\n@no_panic\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\n\n@no_panic\nfn largest(v: &u64[]) -> u64 {\n    mut t = 0;\n    for i in v.len() {\n        if v[i] > t {\n            t = v[i];\n        }\n    }\n    return t;\n}\n\nfn count() -> u64 {\n    mut i = 0;\n    @bounded(16)\n    while i < 16 {\n        i += 1;\n    }\n    return i;\n}\n\n@no_panic\nfn pick(v: &u64[]) -> u64 {\n    if v.len() > 2 {\n        return get(v, 2);\n    }\n    return 0;\n}\n\nfn main() -> u64 {\n    v := u64[1, 2, 3];\n    println(\"{}\", pick(&v));\n    println(\"{} {} {} {}\", sum(&v), get(&v, 2), largest(&v), count());\n    return 0;\n}\n",
     "stdout": "3\n6 3 3 16\n",
