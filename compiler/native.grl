@@ -553,12 +553,15 @@ struct C {
     constants: Constant[],
     impl_params: ImplParams[],
     receiver: u64,
+    // The receiver type of the call being compiled, or NO_TYPE before it is prepared: id 0 is u64,
+    // so a default of 0 would read as a u64 receiver.
     receiver_ty: u64,
     has_receiver: u64,
     // The next record() builds a tuple positionally.
     positional: u64,
     // A `&mut self` receiver call() borrows after its arguments (has_receiver 3).
     lazy_input: u64,
+    // An operand whose call is deferred (`lazy_input`): its type, or NO_TYPE before it is taken.
     lazy_inty: u64,
     lazy_xty: u64,
     lit_start: u64,
@@ -14314,7 +14317,7 @@ struct CVal {
     ty: u64
 }
 fn ct_tag_ty() -> u64 {
-    return 18446744073709551614;
+    return CT_TAG;
 }
 // A tag's type is a sentinel, not an index into the type table, so it is never handed to is_bool.
 fn ct_is_bool<a>(c: (&a mut C), ty: u64) -> bool {
@@ -14839,7 +14842,7 @@ fn ct_take_call_text<a>(c: (&a mut C)) -> u8[] {
 // Module constants whose value is a call are evaluated on first use.
 fn resolve_pending_named<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> unit {
     for i in c.constants.len() {
-        if (c.constants[i].ty == 18446744073709551613) && same(view(c.constants[i].module), module) && same(view(c.constants[i].name), name) {
+        if (c.constants[i].ty == CT_PENDING) && same(view(c.constants[i].module), module) && same(view(c.constants[i].name), name) {
             resolve_pending(&mut c, i);
         }
     }
@@ -14872,7 +14875,7 @@ fn resolve_all_pending<a>(c: (&a mut C)) -> unit {
         return ();
     }
     for i in c.constants.len() {
-        if c.constants[i].ty == 18446744073709551613 {
+        if c.constants[i].ty == CT_PENDING {
             resolve_pending(&mut c, i);
         }
     }
@@ -15343,7 +15346,7 @@ fn module_binding<a>(c: (&a mut C), pass: u64) -> unit {
         text = ct_take_call_text(&mut c);
         expect(&mut c, view(";"));
         constant_public := c.decl_public;
-        c.constants.push(Constant { module: module, name: name, public: constant_public, ty: 18446744073709551613, value: 0, text: text });
+        c.constants.push(Constant { module: module, name: name, public: constant_public, ty: CT_PENDING, value: 0, text: text });
         return ();
     }
     if kind(&mut c) == 3 {
@@ -37373,12 +37376,12 @@ pub fn main() -> u64 {
         constants: Constant[],
         impl_params: ImplParams[],
         receiver: 0,
-        receiver_ty: 0,
+        receiver_ty: NO_TYPE,
         has_receiver: 0,
         positional: 0,
         lazy_input: 0,
-        lazy_inty: 0,
-        lazy_xty: 0,
+        lazy_inty: NO_TYPE,
+        lazy_xty: NO_TYPE,
         lit_start: 0,
         lit_end: 0,
         lit_value: 0,
