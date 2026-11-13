@@ -100,6 +100,21 @@ fn main() -> u64 {
 }
 `;
 
+// A `--split` build writes the IR beside each module's part, and the parts still exist for the
+// linker; the units are the same units.
+function compileSplit(source, name) {
+  const dir = join(work, name);
+  mkdirSync(dir, { recursive: true });
+  const input = join(dir, 'input.grl');
+  writeFileSync(input, source);
+  const out = join(dir, 'out.s');
+  const result = spawnSync(o.compiler, ['--target', 'x86_64', '--emit-ir', '--split', out,
+    input, resolve(root, 'compiler/runtime.grl'), resolve(root, 'compiler/os-linux.grl')],
+    { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  if (result.status !== 0) return { failed: true };
+  return { failed: false, text: readFileSync(`${out}.tir`, 'utf8') };
+}
+
 const withIr = compile(fixture, 'fixture', true);
 const withoutIr = compile(fixture, 'fixture-plain', false);
 const text = withIr.ir.endsWith('\n') ? withIr.ir : `${withIr.ir}\n`;
@@ -139,6 +154,8 @@ const types = new Set(all.flatMap(u => u.body.filter(l => l.startsWith('v ')).ma
 check(types.has('1'), 'an f32 slot reaches the IR as a typed value');
 check(types.has('2'), 'a sequence header reaches the IR as a typed value');
 const typed = all.flatMap(u => u.body.filter(l => l.startsWith('v ') && !/ ty=0,/.test(l))).length;
+const split = compileSplit(fixture, 'fixture-split');
+check(split.failed || (split.text.startsWith('ssair 1') && split.text.includes('\nend\n')), 'a --split build writes units too');
 console.log(`${all.length} units, ${all.reduce((n, u) => n + u.body.filter(l => l.startsWith('i ')).length, 0)} instructions, ${typed} typed values, types ${[...types].sort().join(',')}`);
 
 if (!o.keep) rmSync(work, { recursive: true, force: true });
