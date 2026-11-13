@@ -932,6 +932,19 @@
         "output": "3\nwhile loading app: while parsing config: while opening /x: not found\nwhile opening config: not found\ntrue\n",
         "note": "Both print the same three things: the depth of a three-frame context chain, the chain itself with the cause last, and a failure that crossed a layer boundary. The difference is where the chain lives. Grail's stdlib has errs::Report - one owned value holding the frames, the root message, a typed stdlib origin and an optional captured stack - and ? carries that same type up through any number of layers unchanged, with no implicit From, so errs::from_os is the conversion the boundary writes. Rust's std has no such type: an error is a Box<dyn Error> chain whose `source` the caller walks, and adding context needs a crate (anyhow, eyre) or a type like the one this control spells out. Both programs report to stderr here; Rust's io::Error prints the operating system's message for a missing file, so the control maps ErrorKind::NotFound to Grail's `not found`."
       }
+    },
+    {
+      "id": "task-failure",
+      "entry": "examples/task-failure.grl",
+      "std": [
+        "core"
+      ],
+      "output": "bad input\n7\n",
+      "rust": {
+        "source": "rust/task-failure.rs",
+        "output": "bad input\n7\n",
+        "note": "A failed task is an ordinary result in both: `try_join` hands back the language's result union `R |? TaskFailure`, `Result<u64, String>` is the same two outcomes, and the sibling task's value arrives through `join`/`?` as usual. Three differences matter. Grail refuses to drop an outcome that was never looked at (`ignore_failure(...)` is the explicit opt-out), and its failure record carries the check's `kind` and the failing statement's `site`, which a `Result` has to be given by hand. And the *same* path contains a failed runtime check - an out-of-bounds index, an overflow, a division by zero - while a Rust panic cannot be caught by anything the book can compile: the examples are built with `-C panic=abort`, and even with unwinding a panicking thread's destructors run, where Grail discards the task's stack whole and never unwinds a frame."
+      }
     }
   ]
 }
