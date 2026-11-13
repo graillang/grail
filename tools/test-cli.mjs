@@ -54,7 +54,7 @@ assert.equal(withoutSites(readFileSync(original, 'utf8')), withoutSites(readFile
 // 3. Project workflow: new / run / test / fmt / add / fetch / build.
 run(['new', 'demo']); const demo = join(work, 'demo');
 assert.equal(run(['run'], demo).stdout.trim(), 'Hello, world!');
-assert.match(run(['test'], demo).stdout, /1 passed, 0 failed/);
+assert.match(run(['test'], demo).stdout, /passed 1 failed 0 skipped 0/);
 writeFileSync(join(demo, 'src/main.grl'), 'use mathlib;\nfn main(){println(mathlib::triple(14));}\n');
 assert.equal(run(['fmt', '--check'], demo, false).status, 1, 'fmt --check must fail on unformatted code');
 run(['fmt'], demo); assert.equal(run(['fmt', '--check'], demo).status, 0);
@@ -69,7 +69,26 @@ assert.equal(run(['run'], demo).stdout.trim(), '42');
 rmSync(join(demo, '.grail'), { recursive: true }); run(['fetch'], demo);
 assert.equal(run(['run'], demo).stdout.trim(), '42');
 writeFileSync(join(demo, 'tests/bad.grl'), 'fn main() {\n    assert(1 == 2);\n}\n');
-const failing = run(['test'], demo, false); assert.equal(failing.status, 1); assert.match(failing.stdout, /1 passed, 1 failed/);
+const failing = run(['test'], demo, false); assert.equal(failing.status, 1); assert.match(failing.stdout, /passed 1 failed 1 skipped 0/);
+// `grail test` ergonomics: selection is by name/path and by position, `--list` runs nothing, and a
+// failing case is reported with its own path and what it printed. The tests' directory order is the
+// filesystem's, so these assertions are about the report's shape, not about which test comes first.
+writeFileSync(join(demo, 'tests/second.grl'), 'fn main() {\n    println("second");\n}\n');
+const listed = run(['test', '--list'], demo).stdout;
+for (const name of ['tests/smoke.grl', 'tests/bad.grl', 'tests/second.grl']) assert.ok(listed.includes(name), `--list names ${name}: ${listed}`);
+assert.match(listed, /3 tests selected/);
+assert.match(run(['test', '--filter', 'smoke'], demo).stdout, /passed 1 failed 0 skipped 0/);
+assert.match(run(['test', '--shard', '1/2'], demo).stdout, /passed [0-9]+ failed [0-9]+ skipped 0/);
+assert.match(run(['test', '--jobs', '2'], demo, false).stdout, /passed 2 failed 1 skipped 0/);
+// --fail-fast stops the project run at the first failure: the tests after it never start, and they
+// are reported as skipped rather than silently missing.
+const stopped = run(['test', '--fail-fast', '--jobs', '1'], demo, false);
+assert.equal(stopped.status, 1, 'a failing project test exits 1');
+assert.match(stopped.stdout, /FAIL tests\/bad\.grl[\s\S]*assertion failed/, 'the failure block names the case and prints its output');
+const counts = /passed ([0-9]+) failed ([0-9]+) skipped ([0-9]+)/.exec(stopped.stdout);
+assert.ok(counts, `the summary line is stable: ${stopped.stdout}`);
+assert.equal(Number(counts[2]), 1, 'exactly one failure');
+assert.equal(Number(counts[1]) + Number(counts[3]), 2, 'every test after the failure is skipped, not lost');
 writeFileSync(join(work, 'args.grl'), 'fn main(argument: &[u8]) -> u64 {\n    return argument.len();\n}\n');
 assert.equal(run(['run', 'args.grl', '--', 'seven!!'], work, false).status, 7);
 writeFileSync(join(work, 'bad.grl'), 'fn main() {\n    x := 1;\n    x = 2;\n}\n');

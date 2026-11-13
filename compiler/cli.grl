@@ -2822,8 +2822,317 @@ fn run_command<a>(args: (&a u8[][])) -> u64 {
     }
     return host::command(command);
 }
+// ---- `grail test` -------------------------------------------------------------------------------
+// Two corpora, one command. Inside this repository `tests/native-cases.json` is the regression
+// corpus and `tools/test-native.mjs` is its engine, so `grail test` forwards every argument there:
+// the semantics are the engine's, not a copy of them (docs/testing.md says which command owns what).
+// A project - a grail.pkg and tests/*.grl programs - runs those programs instead, with the same
+// selection flags, the same summary line and the same failure report shape.
+struct TestOptions {
+    paths: u8[][],
+    filter: u8[],
+    list: u64,
+    // `--one FILE`: the mode `--jobs` uses to run exactly one test in a child process.
+    one: u8[],
+    fail_fast: u64,
+    update: u64,
+    jobs: u64,
+    // 0 when --shard is absent; otherwise the 1-based index of this shard of `count`.
+    shard_index: u64,
+    shard_count: u64,
+    target: u8[],
+    debug: u64,
+    deny: u64,
+    overflow: u64,
+    no_sites: u64,
+    // Set when an argument cannot be understood: `grail test` then prints its usage.
+    bad: u64
+}
+fn tail_from<a>(text: &a [u8], n: u64) -> u8[] {
+    mut out = u8[];
+    mut i = n;
+    while i < text.len() {
+        out.push(text[i]);
+        i += 1;
+    }
+    return out;
+}
+fn contains<a, b>(text: &a [u8], part: &b [u8]) -> bool {
+    if part.len() == 0 {
+        return true;
+    }
+    if text.len() < part.len() {
+        return false;
+    }
+    for i in text.len() - part.len() + 1 {
+        mut same = true;
+        for j in part.len() {
+            if text[i + j] != part[j] {
+                same = false;
+                break;
+            }
+        }
+        if same {
+            return true;
+        }
+    }
+    return false;
+}
+fn test_usage() -> unit {
+    say(view("usage: grail test [FILES or DIRS] [--filter TEXT] [--list] [--shard i/n] [--jobs N] [--fail-fast]"));
+    say(view("       in the Grail repository this forwards to tools/test-native.mjs (--update, --target, --shard, --jobs)"));
+}
+fn set_test_shard<a>(o: (&a mut TestOptions), text: &a [u8]) -> unit {
+    mut slash: u64 = 0;
+    for i in text.len() {
+        if text[i] == 47 {
+            slash = i + 1;
+        }
+    }
+    if slash == 0 {
+        o.bad = 1;
+        return ();
+    }
+    mut left = u8[];
+    for i in slash - 1 {
+        left.push(text[i]);
+    }
+    o.shard_index = number_of(view(left));
+    o.shard_count = number_of(view(tail_from(view(text), slash)));
+    if (o.shard_count == 0) || (o.shard_index == 0) || (o.shard_count < o.shard_index) {
+        o.bad = 1;
+    }
+    return ();
+}
+fn test_options<a>(args: (&a u8[][])) -> TestOptions {
+    mut o = TestOptions {
+        paths: u8[][],
+        filter: u8[],
+        list: 0,
+        one: u8[],
+        fail_fast: 0,
+        update: 0,
+        jobs: 1,
+        shard_index: 0,
+        shard_count: 0,
+        target: target_name(host::target()),
+        debug: 0,
+        deny: 0,
+        overflow: 0,
+        no_sites: 0,
+        bad: 0
+    };
+    mut i: u64 = 0;
+    while i < args.len() {
+        a := item(&args, i);
+        if eq(view(a), view("--filter")) & (i + 1 < args.len()) {
+            i += 1;
+            o.filter = item(&args, i);
+        } else if starts(view(a), view("--filter=")) {
+            o.filter = tail_from(view(a), 9);
+        } else if eq(view(a), view("--list")) {
+            o.list = 1;
+        } else if eq(view(a), view("--one")) & (i + 1 < args.len()) {
+            i += 1;
+            o.one = item(&args, i);
+        } else if eq(view(a), view("--fail-fast")) {
+            o.fail_fast = 1;
+        } else if eq(view(a), view("--update")) {
+            o.update = 1;
+        } else if eq(view(a), view("--jobs")) & (i + 1 < args.len()) {
+            i += 1;
+            o.jobs = number_of(view(item(&args, i)));
+            if o.jobs == 0 {
+                o.bad = 1;
+            }
+        } else if starts(view(a), view("--jobs=")) {
+            o.jobs = number_of(view(tail_from(view(a), 7)));
+            if o.jobs == 0 {
+                o.bad = 1;
+            }
+        } else if eq(view(a), view("--shard")) & (i + 1 < args.len()) {
+            i += 1;
+            set_test_shard(&mut o, view(item(&args, i)));
+        } else if starts(view(a), view("--shard=")) {
+            set_test_shard(&mut o, view(tail_from(view(a), 8)));
+        } else if eq(view(a), view("--target")) & (i + 1 < args.len()) {
+            i += 1;
+            o.target = item(&args, i);
+        } else if eq(view(a), view("--debug")) {
+            o.debug = 1;
+        } else if eq(view(a), view("--deny-ambient-host")) {
+            o.deny = 1;
+        } else if eq(view(a), view("--no-error-sites")) {
+            o.no_sites = 1;
+        } else if eq(view(a), view("--overflow=wrap")) {
+            o.overflow = 1;
+        } else if eq(view(a), view("--overflow=checked")) {
+            o.overflow = 2;
+        } else if starts(view(a), view("--")) {
+            o.bad = 1;
+        } else {
+            o.paths.push(a);
+        }
+        i += 1;
+    }
+    return o;
+}
+// The code-generation bits a test binary is built with: the same flags `grail build` takes, so a
+// test can pin debug-info, overflow or authority behaviour.
+fn test_bits<a>(o: (&a TestOptions)) -> u64 {
+    return o.debug * 2 + o.deny * 4 + o.overflow * 16 + o.no_sites * 256;
+}
+// The flags a `--jobs` child needs to build the same binary its parent would have built.
+fn test_build_flags<a>(o: (&a TestOptions)) -> u8[][] {
+    mut flags = u8[][];
+    flags.push(copy(view("--target")));
+    flags.push(copy(view(o.target)));
+    if o.debug != 0 {
+        flags.push(copy(view("--debug")));
+    }
+    if o.deny != 0 {
+        flags.push(copy(view("--deny-ambient-host")));
+    }
+    if o.no_sites != 0 {
+        flags.push(copy(view("--no-error-sites")));
+    }
+    if o.overflow == 1 {
+        flags.push(copy(view("--overflow=wrap")));
+    }
+    if o.overflow == 2 {
+        flags.push(copy(view("--overflow=checked")));
+    }
+    return flags;
+}
+// One binary name per test program, derived from its own path: `tests/a/x.grl` is
+// `target/tests/tests-a-x.grl`, so two tests with the same file name never share an output and a
+// `--jobs` child's build cannot collide with another's.
+fn test_binary<a>(file: &a [u8]) -> u8[] {
+    mut out = copy(view("target/tests/"));
+    for i in file.len() {
+        ch := file[i];
+        if is_sep(ch) {
+            out.push(45);
+        } else {
+            out.push(ch);
+        }
+    }
+    return out;
+}
+fn test_log<a>(file: &a [u8]) -> u8[] {
+    mut out = test_binary(view(file));
+    push_bytes(&mut out, view(".log"));
+    return out;
+}
+fn test_rc<a>(file: &a [u8]) -> u8[] {
+    mut out = test_binary(view(file));
+    push_bytes(&mut out, view(".rc"));
+    return out;
+}
+fn has_shell() -> bool {
+    mut probe = u8[][copy(view("sh")), copy(view("-c")), copy(view("exit 0"))];
+    return host::command(probe) == 0;
+}
+// The test program's output is captured, not interleaved: a passing test says one line, and a
+// failing one says what the program printed, which is where a test's diagnostics are.
+fn run_captured<a, b>(exe: &a [u8], log_path: &b [u8]) -> u64 {
+    mut script = u8[];
+    sh_word(&mut script, view(exe));
+    push_bytes(&mut script, view(" > "));
+    sh_word(&mut script, view(log_path));
+    push_bytes(&mut script, view(" 2>&1"));
+    mut command = u8[][copy(view("sh")), copy(view("-c")), script];
+    return host::command(command);
+}
+// `FAIL FILE`, then the source, what was expected, what happened and what the program printed.
+fn test_failure<a, b>(file: &a [u8], status: u64, log_path: &b [u8], note: &b [u8]) -> unit {
+    say2(view("FAIL "), view(file));
+    say2(view("  source: "), view(file));
+    mut wanted = copy(view("  exit:   status "));
+    push_bytes(&mut wanted, view(decimal(status)));
+    if 128 < status {
+        push_bytes(&mut wanted, view(" (a signal: 128 + the signal)"));
+    }
+    push_bytes(&mut wanted, view(", expected 0"));
+    say(view(wanted));
+    if note.len() != 0 {
+        say2(view("  note:   "), view(note));
+    }
+    if (log_path.len() != 0) & (host::exists(view(log_path)) != 0) {
+        body := host::read_file(view(log_path));
+        if body.len() != 0 {
+            say(view("  output:"));
+            rows := lines(view(body));
+            for i in rows.len() {
+                row := item(&rows, i);
+                if row.len() != 0 {
+                    say2(view("    "), view(row));
+                }
+            }
+        }
+    }
+    return ();
+}
+// Build and run one test program in this process. With `log` non-empty its output is captured.
+fn test_run_here<a, b, d>(h: (&a Home), o: (&a TestOptions), file: &a [u8], log: &b [u8]) -> u64 {
+    modules := u8[][];
+    out := test_binary(view(file));
+    status := compile(h, view(file), &modules, view(out), view(o.target), test_bits(&o), view(""), 0);
+    if status != 0 {
+        return status;
+    }
+    exe := path_join(view("."), view(out));
+    if log.len() != 0 {
+        return run_captured(view(exe), view(log));
+    }
+    mut one = u8[][exe];
+    return host::command(one);
+}
+// `--test`'s one-program mode: the same build and run, and its exit status is the program's, so a
+// `--jobs` child can hand it back through `$?`.
+fn test_one_mode<a>(o: (&a TestOptions)) -> u64 {
+    h := home();
+    if h.runtime.len() == 0 {
+        return 1;
+    }
+    host::mkdir(view("target"));
+    host::mkdir(view("target/tests"));
+    return test_run_here(&h, &o, view(o.one), view(""));
+}
+fn test_summary(passed: u64, failed: u64, skipped: u64) -> unit {
+    mut line = copy(view("passed "));
+    push_bytes(&mut line, view(decimal(passed)));
+    push_bytes(&mut line, view(" failed "));
+    push_bytes(&mut line, view(decimal(failed)));
+    push_bytes(&mut line, view(" skipped "));
+    push_bytes(&mut line, view(decimal(skipped)));
+    say(view(line));
+    return ();
+}
 fn test_command<a>(args: (&a u8[][])) -> u64 {
-    o := options(&args);
+    // The repository's regression corpus: one engine, driven by tools/test-native.mjs. Inside the
+    // tree that is what `grail test` means; the tree's tests/ directory is not a project's tests.
+    if host::exists(view("tests/native-cases.json")) != 0 && host::exists(view("tools/test-native.mjs")) != 0 {
+        say(view("grail test: the repository regression corpus (tools/test-native.mjs)"));
+        mut command = u8[][copy(view("bun")), copy(view("tools/test-native.mjs"))];
+        for i in args.len() {
+            command.push(item(&args, i));
+        }
+        return host::command(command);
+    }
+    o := test_options(&args);
+    if o.bad != 0 {
+        test_usage();
+        return 1;
+    }
+    if o.one.len() != 0 {
+        return test_one_mode(&o);
+    }
+    if o.update != 0 {
+        say(view("grail test: --update rewrites expectations in the regression corpus (tests/native-cases.json)"));
+        say(view("            a project test asserts inside its own program, so there is nothing to update here"));
+        return 1;
+    }
     h := home();
     if h.runtime.len() == 0 {
         return 1;
@@ -2841,37 +3150,150 @@ fn test_command<a>(args: (&a u8[][])) -> u64 {
     } else {
         collect(view("tests"), &mut files);
     }
-    p := load_project();
-    modules := project_modules(&p, 1);
-    host::mkdir(view("target"));
-    host::mkdir(view("target/tests"));
-    mut failed = 0;
+    // Selection: a substring of the program's path, then one shard of the survivors, both by
+    // position, which is what the corpus engine's --filter and --shard mean as well.
+    mut selected = u8[][];
     for i in files.len() {
         f := item(&files, i);
-        stem := basename(view(f));
-        out := path_join(view("target/tests"), view(stem));
+        if !contains(view(f), view(o.filter)) {
+            continue;
+        }
+        if o.shard_count != 0 {
+            if i % o.shard_count != o.shard_index - 1 {
+                continue;
+            }
+        }
+        selected.push(f);
+    }
+    if o.list != 0 {
+        for i in selected.len() {
+            say(view(item(&selected, i)));
+        }
+        mut line = copy(view(""));
+        push_bytes(&mut line, view(decimal(selected.len())));
+        push_bytes(&mut line, view(" tests selected"));
+        say(view(line));
+        return 0;
+    }
+    if selected.len() == 0 {
+        say(view("grail test: no tests found (put programs in tests/)"));
+        test_summary(0, 0, 0);
+        return 0;
+    }
+    host::mkdir(view("target"));
+    host::mkdir(view("target/tests"));
+    if !has_shell() {
+        // No POSIX shell (Windows): run in process, one at a time, with the programs' own output
+        // going to the terminal instead of a per-test log.
+        mut passed: u64 = 0;
+        mut failed: u64 = 0;
+        for i in selected.len() {
+            f := item(&selected, i);
+            status := test_run_here(&h, &o, view(f), view(""));
+            host::print(view("test "));
+            host::print(view(f));
+            if status == 0 {
+                say(view(" ... ok"));
+                passed += 1;
+            } else {
+                say(view(" ... FAILED"));
+                test_failure(view(f), status, view(""), view("no shell: the program's output went to the terminal"));
+                failed += 1;
+                if o.fail_fast != 0 {
+                    test_summary(passed, failed, selected.len() - i - 1);
+                    return 1;
+                }
+            }
+        }
+        test_summary(passed, failed, 0);
+        return failed != 0;
+    }
+    // One `sh` script, `--jobs N` tests in flight, each a child process running exactly one test
+    // (`--one`) with its output in a per-test log and its exit status in a per-test `.rc` file. The
+    // parent reports in case order, so the report does not depend on which test finished first.
+    mut stop = copy(view("target/tests/.stop"));
+    host::remove(view(stop), 0);
+    // A status or log left by an earlier run would let a test this run never started report as ok;
+    // the child writes both, so their absence is the only evidence that it ran.
+    for i in selected.len() {
+        host::remove(view(test_rc(view(item(&selected, i)))), 0);
+        host::remove(view(test_log(view(item(&selected, i)))), 0);
+    }
+    mut jobs = o.jobs;
+    if (jobs == 0) || (selected.len() < jobs) {
+        jobs = selected.len();
+    }
+    exe := host::exe_path();
+    mut script = u8[];
+    mut w: u64 = 0;
+    while w < jobs {
+        push_bytes(&mut script, view("(\n"));
+        mut i = w;
+        while i < selected.len() {
+            f := item(&selected, i);
+            log_path := test_log(view(f));
+            rc_path := test_rc(view(f));
+            if o.fail_fast != 0 {
+                push_bytes(&mut script, view("if [ ! -e "));
+                sh_word(&mut script, view(stop));
+                push_bytes(&mut script, view(" ]; then\n"));
+            }
+            sh_word(&mut script, view(exe));
+            push_bytes(&mut script, view(" test --one "));
+            sh_word(&mut script, view(f));
+            flags := test_build_flags(&o);
+            for j in flags.len() {
+                script.push(32);
+                sh_word(&mut script, view(item(&flags, j)));
+            }
+            push_bytes(&mut script, view(" > "));
+            sh_word(&mut script, view(log_path));
+            push_bytes(&mut script, view(" 2>&1\nprintf '%s' \"$?\" > "));
+            sh_word(&mut script, view(rc_path));
+            push_bytes(&mut script, view("\n"));
+            if o.fail_fast != 0 {
+                push_bytes(&mut script, view("if [ 0 != \"$(cat "));
+                sh_word(&mut script, view(rc_path));
+                push_bytes(&mut script, view(")\" ]; then printf 1 > "));
+                sh_word(&mut script, view(stop));
+                push_bytes(&mut script, view("; fi\nfi\n"));
+            }
+            i += jobs;
+        }
+        push_bytes(&mut script, view(") &\n"));
+        w += 1;
+    }
+    push_bytes(&mut script, view("wait\n"));
+    mut shell = u8[][copy(view("sh")), copy(view("-c")), script];
+    host::command(shell);
+    mut passed: u64 = 0;
+    mut failed: u64 = 0;
+    mut skipped: u64 = 0;
+    mut i: u64 = 0;
+    while i < selected.len() {
+        f := item(&selected, i);
         host::print(view("test "));
         host::print(view(f));
-        host::print(view(" ... "));
-        mut status = compile(&h, view(f), &modules, view(out), view(o.target), flag_bits(&o), view(o.iface), o.verify);
-        if status == 0 {
-            exe := path_join(view("."), view(out));
-            status = host::command(u8[][exe]);
+        // No status file: --fail-fast stopped the run before this test started. (`host::read_file`
+        // aborts on a missing file, so the check is the file's existence, not its length.)
+        if host::exists(view(test_rc(view(f)))) == 0 {
+            say(view(" ... skipped"));
+            skipped += 1;
+            i += 1;
+            continue;
         }
+        status := number_of(view(host::read_file(view(test_rc(view(f))))));
         if status == 0 {
-            say(view("ok"));
+            say(view(" ... ok"));
+            passed += 1;
         } else {
-            say(view("FAILED"));
+            say(view(" ... FAILED"));
             failed += 1;
+            test_failure(view(f), status, view(test_log(view(f))), view(""));
         }
+        i += 1;
     }
-    host::print_num(files.len() - failed);
-    host::print(view(" passed, "));
-    host::print_num(failed);
-    say(view(" failed"));
-    if files.len() == 0 {
-        say(view("grail test: no tests found (put programs in tests/)"));
-    }
+    test_summary(passed, failed, skipped);
     return failed != 0;
 }
 fn fmt_command<a>(args: (&a u8[][])) -> u64 {
@@ -3671,7 +4093,8 @@ fn help() {
     say(view("  grail explain CODE                 what an error code means (error[E0004])"));
     say(view("  grail profile [--rate N] [--out FILE] -- PROGRAM [ARGS]   sampling profile"));
     say(view("  grail run [FILE.grl] [-- ARGS...]"));
-    say(view("  grail test [FILES or DIRS]        compile and run tests/ (exit status 0 = pass)"));
+    say(view("  grail test [FILES or DIRS] [--filter TEXT] [--list] [--shard i/n] [--jobs N] [--fail-fast]"));
+    say(view("                                    compile and run tests/ (in the Grail tree: the regression corpus)"));
     say(view("  grail fmt [--check] [FILES or DIRS]"));
     say(view("  grail new NAME                    create a project (grail.pkg, src/, tests/)"));
     say(view("  grail add NAME GIT-URL [REV]      add a dependency and fetch it"));

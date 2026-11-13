@@ -1,142 +1,221 @@
+// The native regression corpus (tests/native-cases.json) against a freshly built compiler.
+//
+// `grail test` at the repository root forwards to this file, so the flags documented here are the
+// ones `grail test` takes there (docs/testing.md says which command owns which semantics). A project
+// outside this repository runs its own tests/ programs instead; that is `grail test` in
+// compiler/cli.grl.
+//
+// Selection: --filter REGEX, --shard i/n, positional literal name fragments, --list, --jobs N.
+// Reporting: one block per failing case (source path, expected vs actual stdout/stderr, exit
+// status and signal, the failed assertion), then a stable summary line
+// `passed X failed Y skipped Z`. `--update` rewrites the expectations of the selected cases that
+// differ, and only when it is asked for.
 import { readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync, existsSync } from 'node:fs';
 import { join, basename, resolve, dirname } from 'node:path';
+import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { root, compilerSources, hostTarget, targetName, buildCompiler, compileProgram, execute } from './native.mjs';
 
 const legacyReferenceSyntax = /\b(?:borrow|borrow_mut)\s*\(|\b(?:read|mut)\s*</;
+const targetNames = ['x86_64', 'aarch64', 'riscv64', 'macos-x86_64', 'macos-aarch64'];
+const usage = `usage: bun tools/test-native.mjs [TARGET] [PATHS...] [--filter REGEX] [--shard i/n]
+                                  [--jobs N] [--list] [--fail-fast] [--update]
 
-// Keep internal source on the modern dialect, including comments and diagnostics.
-for (const file of [...compilerSources, ...readdirSync(join(root, 'lib')).filter(f => f.endsWith('.grl')).map(f => join(root, 'lib', f))]) {
-  assert.doesNotMatch(readFileSync(file, 'utf8'), legacyReferenceSyntax, `${file}: legacy internal reference syntax`);
+A case is selected when TARGET and its "targets"/"backends" admit this run, its name matches every
+--filter and every positional PATH fragment (plain substrings, so no escaping), and its position
+falls in --shard. --list prints the selected names instead of running them. --jobs N runs the
+selection in N child processes, one stripe each, and merges the reports in case order; --fail-fast
+then stops each stripe, not the whole run.
+
+Environment (kept for the gates that predate the flags): GRAIL_TEST_FILTER, GRAIL_TEST_SHARD,
+GRAIL_TEST_RESUME=1, GRAIL_TEST_JOBS, GRAIL_BACKEND, GRAIL_VERIFY_FACTS.`;
+
+function parseArguments(argv) {
+  const options = {
+    target: process.env.GRAIL_TEST_TARGET ?? null,
+    filter: process.env.GRAIL_TEST_FILTER ?? null,
+    shard: process.env.GRAIL_TEST_SHARD ?? null,
+    jobs: process.env.GRAIL_TEST_JOBS ?? '1',
+    stripe: process.env.GRAIL_TEST_STRIPE ?? null,
+    resume: process.env.GRAIL_TEST_RESUME === '1',
+    resultFile: process.env.GRAIL_TEST_RESULT_FILE ?? null,
+    list: false,
+    failFast: false,
+    update: false,
+    paths: [],
+  };
+  const value = (flag, i) => {
+    if (i + 1 >= argv.length) throw new Error(`${flag} needs a value\n${usage}`);
+    return argv[i + 1];
+  };
+  let targetSeen = false;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--list') options.list = true;
+    else if (arg === '--fail-fast') options.failFast = true;
+    else if (arg === '--update') options.update = true;
+    else if (arg === '--filter') { options.filter = value(arg, i); i++; }
+    else if (arg.startsWith('--filter=')) options.filter = arg.slice('--filter='.length);
+    else if (arg === '--shard') { options.shard = value(arg, i); i++; }
+    else if (arg.startsWith('--shard=')) options.shard = arg.slice('--shard='.length);
+    else if (arg === '--jobs') { options.jobs = value(arg, i); i++; }
+    else if (arg.startsWith('--jobs=')) options.jobs = arg.slice('--jobs='.length);
+    else if (arg === '--target') { options.target = value(arg, i); i++; }
+    else if (arg.startsWith('--target=')) options.target = arg.slice('--target='.length);
+    else if (arg === '--help' || arg === '-h') { console.log(usage); process.exit(0); }
+    else if (arg.startsWith('-')) throw new Error(`unknown flag ${arg}\n${usage}`);
+    // A positional that names a target is the target, exactly as `test-native.mjs x86_64` always
+    // meant; only then do the remaining positionals name cases.
+    else if (targetNames.includes(arg) && !targetSeen) { options.target = arg; targetSeen = true; }
+    else options.paths.push(arg);
+  }
+  if (options.target === null) options.target = hostTarget;
+  if (!targetNames.includes(options.target)) throw new Error(`unknown target ${options.target}\n${usage}`);
+  options.filter = options.filter ? new RegExp(options.filter) : null;
+  if (options.shard) {
+    const match = /^(\d+)\/(\d+)$/.exec(options.shard);
+    if (!match) throw new Error(`--shard must be i/n, got ${options.shard}`);
+    const [index, count] = [Number(match[1]), Number(match[2])];
+    if (!(count >= 1 && index >= 1 && index <= count)) throw new Error(`--shard ${options.shard}: index must be 1..${count}`);
+    options.shard = { index: index - 1, count };
+  }
+  if (options.stripe) {
+    const match = /^(\d+)\/(\d+)$/.exec(options.stripe);
+    if (!match) throw new Error(`GRAIL_TEST_STRIPE must be i/n, got ${options.stripe}`);
+    const [index, count] = [Number(match[1]), Number(match[2])];
+    if (!(count >= 1 && index >= 1 && index <= count)) throw new Error(`GRAIL_TEST_STRIPE ${options.stripe}: index must be 1..${count}`);
+    options.stripe = { index: index - 1, count };
+  }
+  options.jobs = Number(options.jobs);
+  if (!Number.isInteger(options.jobs) || options.jobs < 1) throw new Error(`--jobs must be a positive integer, got ${options.jobs}`);
+  return options;
 }
 
-const target = targetName(process.argv[2] ?? hostTarget);
-const compiler = buildCompiler();
-const cases = JSON.parse(readFileSync(join(root, 'tests/native-cases.json'), 'utf8'));
-
-// A full run is minutes per backend, so the runner is sliceable. All three knobs are opt-in and a
-// plain invocation behaves exactly as before:
-//   GRAIL_TEST_FILTER=<regex>   only cases whose name matches (iterate on one area)
-//   GRAIL_TEST_SHARD=<i>/<n>     run shard i of n, chosen by position (parallel gates)
-//   GRAIL_TEST_RESUME=1          skip cases that already passed for this compiler + backend
-const filterArg = process.env.GRAIL_TEST_FILTER;
-const filter = filterArg ? new RegExp(filterArg) : null;
-const shardArg = process.env.GRAIL_TEST_SHARD;
-let shard = null;
-if (shardArg) {
-  const match = /^(\d+)\/(\d+)$/.exec(shardArg);
-  assert.ok(match, `GRAIL_TEST_SHARD must be i/n, got ${shardArg}`);
-  const [index, count] = [Number(match[1]), Number(match[2])];
-  assert.ok(count >= 1 && index >= 1 && index <= count, `GRAIL_TEST_SHARD ${shardArg}: index must be 1..${count}`);
-  shard = { index: index - 1, count };
-}
-const resume = process.env.GRAIL_TEST_RESUME === '1';
-// The marker names the compiler (its path is a content hash) and the backend, so a rebuilt compiler
-// or a different --backend never reuses another run's passes.
-const backend = `${process.env.GRAIL_BACKEND ?? 'native'}${process.env.GRAIL_VERIFY_FACTS === '1' ? '+facts' : ''}`;
-// The backend also names the work directory, so a native and an LLVM run of one target can overlap.
-const work = join(root, '.work/native-tests', backend === 'native' ? target : `${target}-${backend}`);
-mkdirSync(work, { recursive: true });
-// Key by the compiler's content-addressed directory, not its file name: every build is named `grail`.
-const markers = join(work, 'pass', basename(dirname(compiler)) + '-' + backend);
-if (resume) mkdirSync(markers, { recursive: true });
-for (const test of cases) {
-  if (test.removedSyntax !== undefined) assert.ok(test.removedSyntax === true && test.reject, `${test.name}: removedSyntax requires an intentional rejection`);
-  if (test.source && legacyReferenceSyntax.test(test.source)) {
-    assert.ok(test.reject && test.removedSyntax === true, `${test.name}: legacy syntax is only allowed as intentional removed-syntax rejection input`);
+// ---- the corpus's own invariants -------------------------------------------------------------
+// Kept internal source on the modern dialect, including comments and diagnostics.
+function checkSources(cases) {
+  for (const file of [...compilerSources, ...readdirSync(join(root, 'lib')).filter(f => f.endsWith('.grl')).map(f => join(root, 'lib', f))]) {
+    assert.doesNotMatch(readFileSync(file, 'utf8'), legacyReferenceSyntax, `${file}: legacy internal reference syntax`);
+  }
+  for (const test of cases) {
+    if (test.removedSyntax !== undefined) assert.ok(test.removedSyntax === true && test.reject, `${test.name}: removedSyntax requires an intentional rejection`);
+    if (test.source && legacyReferenceSyntax.test(test.source)) {
+      assert.ok(test.reject && test.removedSyntax === true, `${test.name}: legacy syntax is only allowed as intentional removed-syntax rejection input`);
+    }
+  }
+  for (const directory of ['compiler/tests', 'book/examples', 'abundance/src', 'abundance/tests']) {
+    for (const file of readdirSync(join(root, directory)).filter(f => f.endsWith('.grl'))) {
+      const path = join(root, directory, file);
+      assert.doesNotMatch(readFileSync(path, 'utf8'), legacyReferenceSyntax, `${path}: legacy fixture reference syntax`);
+    }
   }
 }
-for (const directory of ['compiler/tests', 'book/examples', 'abundance/src', 'abundance/tests']) {
-  for (const file of readdirSync(join(root, directory)).filter(f => f.endsWith('.grl'))) {
-    const path = join(root, directory, file);
-    assert.doesNotMatch(readFileSync(path, 'utf8'), legacyReferenceSyntax, `${path}: legacy fixture reference syntax`);
-  }
+
+// ---- selection -------------------------------------------------------------------------------
+// A case is skipped (not a failure) when it names another host or backend, and not selected at all
+// when a filter, a positional fragment, a shard or a job stripe excludes it.
+function selected(test, position, options) {
+  for (const path of options.paths) if (!test.name.includes(path)) return false;
+  if (options.filter && !options.filter.test(test.name)) return false;
+  if (options.shard && position % options.shard.count !== options.shard.index) return false;
+  if (options.stripe && position % options.stripe.count !== options.stripe.index) return false;
+  return true;
+}
+function hostOnly(test, target) {
+  if (test.targets && !test.targets.includes(target)) return true;
+  if (test.backends && !test.backends.includes(process.env.GRAIL_BACKEND ?? 'native')) return true;
+  return false;
 }
 
-// A long cross run must not combine source revisions while development continues.
-const snapshot = join(work, 'inputs');
-mkdirSync(snapshot, { recursive: true });
-const runtime = join(snapshot, 'runtime.grl');
-writeFileSync(runtime, readFileSync(join(root, 'compiler/runtime.grl')));
-const osRuntime = join(snapshot, 'os-linux.grl');
-writeFileSync(osRuntime, readFileSync(join(root, 'compiler/os-linux.grl')));
-// The standard library keeps its layout (a directory holding core.grl), because the compiler
-// recognises stdlib modules by location and compiles them in the stdlib's own modes.
-const stdSnapshot = join(snapshot, 'lib');
-mkdirSync(stdSnapshot, { recursive: true });
-for (const file of readdirSync(join(root, 'lib')).filter(f => f.endsWith('.grl'))) {
-  writeFileSync(join(stdSnapshot, file), readFileSync(join(root, 'lib', file)));
+// ---- reporting -------------------------------------------------------------------------------
+const clip = (text, limit = 4000) => (text.length > limit ? `${text.slice(0, limit)}\n    [... ${text.length - limit} more bytes; the run's own directory has the full output]` : text);
+function indent(text) {
+  return text.replace(/\n$/, '').split('\n').map(line => `    ${line}`).join('\n');
 }
-for (let i = 0; i < cases.length; i++) {
-  for (const field of ['files', 'modules', 'interfaceFiles']) if (cases[i][field]) cases[i][field] = cases[i][field].map((file, j) => {
-    const source = resolve(root, file);
-    if (dirname(source) === join(root, 'lib')) return join(stdSnapshot, basename(source));
-    const path = join(snapshot, `${i}-${field}-${j}-${basename(file)}`);
-    writeFileSync(path, readFileSync(source));
-    return path;
-  });
-}
-// A case's `data` files (what an `@embed` reads) are staged under their own names beside its
-// sources, so a path relative to the source resolves as it does in a project.
-for (const test of cases) for (const file of test.data ?? []) writeFileSync(join(snapshot, basename(file)), readFileSync(resolve(root, file)));
-let passed = 0;
-let skipped = 0;
-let filtered = 0;
-let resumed = 0;
-for (const [position, test] of cases.entries()) {
-  // A case may name the targets it applies to (`"targets": ["x86_64"]`), for fixtures that link a
-  // host C library or exercise a host-only facility.
-  if (test.targets && !test.targets.includes(target)) { skipped++; continue; }
-  // A case that pins native-backend output (runtime error locations) names its backends.
-  if (test.backends && !test.backends.includes(process.env.GRAIL_BACKEND ?? 'native')) { skipped++; continue; }
-  if (filter && !filter.test(test.name)) { filtered++; continue; }
-  if (shard && position % shard.count !== shard.index) { filtered++; continue; }
-  if (resume && existsSync(join(markers, test.name))) { resumed++; continue; }
-  const directory = join(work, test.name);
-  rmSync(directory, { recursive: true, force: true });
-  mkdirSync(directory, { recursive: true });
-  // A case's own files (or its inline source) come first, then the modules it lists.
-  let files;
-  if (test.files) files = [...test.files, ...(test.modules ?? [])];
-  else { const input = join(directory, 'input.grl'); writeFileSync(input, test.source); files = [input, ...(test.modules ?? [])]; }
+// What this case claims about its program: the expectation side of the report below.
+function expectations(test) {
   if (test.reject) {
-    const assembly = join(directory, 'prior.s');
-    writeFileSync(assembly, 'prior valid artifact');
-    const result = execute(compiler, ['--target', target, ...(test.flags ?? []), assembly, ...files, runtime, osRuntime]);
-    assert.equal(result.signal, null, `${test.name}: compiler crashed (${result.signal}): ${result.stdout}${result.stderr}`);
-    assert.equal(result.status, 1, `${test.name}: a rejected program must exit 1: ${result.stdout}${result.stderr}`);
-    // `diagnostic` is one required fragment of the error output, or a list of them (the message and
-    // its location are on different lines of a rendered error).
-    const diagnostics = [test.diagnostic ?? []].flat();
-    for (const fragment of diagnostics) {
-      assert.ok(`${result.stdout}${result.stderr}`.includes(fragment), `${test.name}: expected diagnostic ${fragment}: ${result.stdout}${result.stderr}`);
-    }
-    // A rejection may pin how many times its diagnostic is printed, exactly as `stderrCount` does for
-    // runtime output: a replayed generic body reaches the same source line again, and it has to be
-    // reported - and counted - once (docs/diagnostics.md).
-    if (test.diagnosticCount !== undefined) {
-      assert.equal(diagnostics.length, 1, `${test.name}: diagnosticCount needs exactly one diagnostic`);
-      const occurrences = `${result.stdout}${result.stderr}`.split(diagnostics[0]).length - 1;
-      assert.equal(occurrences, test.diagnosticCount, `${test.name}: expected ${test.diagnosticCount} x ${JSON.stringify(diagnostics[0])} in ${JSON.stringify(`${result.stdout}${result.stderr}`)}`);
-    }
-    assert.equal(readFileSync(assembly, 'utf8'), 'prior valid artifact', `${test.name}: invalid program overwrote prior output`);
-    // A rejection that must also hold when the modules are read from their interfaces: the
-    // interface has to carry everything the refusal rests on.
-    if (test.interfaces) {
-      const ifaces = join(directory, 'ifaces');
-      // The interface comes from the library modules alone: the entry may be the very thing the
-      // rejection is about.
-      const modules = test.modules ?? [];
-      assert.ok(modules.length !== 0, `${test.name}: an interface rejection needs module sources`);
-      const emit = execute(compiler, ['--target', target, '--emit-interface', ifaces, join(directory, 'emit.s'), ...modules, ...(test.interfaceFiles ?? []), runtime, osRuntime]);
-      assert.equal(emit.status, 0, `${test.name}: emitting interfaces failed: ${emit.stdout}${emit.stderr}`);
-      const viaInterface = execute(compiler, ['--target', target, '--interface', ifaces, join(directory, 'iface.s'), ...files, runtime, osRuntime]);
-      assert.equal(viaInterface.status, 1, `${test.name}: the interface build must refuse it too: ${viaInterface.stdout}${viaInterface.stderr}`);
+    const diagnostics = [test.diagnostic ?? []].flat().filter(Boolean);
+    return diagnostics.length ? diagnostics.map(fragment => `diagnostic contains ${JSON.stringify(fragment)}`).join(', ') : 'the compiler exits 1';
+  }
+  const parts = [];
+  parts.push(`status ${test.signal ? `(no status; signal ${test.signal})` : (test.status ?? 0)}`);
+  if (test.stdout !== undefined) parts.push(`stdout ${JSON.stringify(test.stdout)}`);
+  for (const pin of [test.stderr ?? []].flat().filter(Boolean)) {
+    parts.push(`stderr carries ${JSON.stringify(pin)} ${Array.isArray(test.stderr) ? 1 : (test.stderrCount ?? 1)}x`);
+  }
+  for (const pin of [test.stderrAbsent ?? []].flat().filter(Boolean)) parts.push(`stderr never carries ${JSON.stringify(pin)}`);
+  return parts.join('\n    ');
+}
+function failureBlock(result) {
+  const lines = [`FAIL ${result.name}`, `  source: ${result.observed.source}`];
+  lines.push(`  exit:   status ${result.observed.status}, signal ${result.observed.signal}`);
+  lines.push(`  wanted: ${expectations(result.test)}`);
+  if (result.observed.stdout !== null && !result.test.reject) lines.push(`  stdout: ${JSON.stringify(clip(result.observed.stdout))}`);
+  if (result.observed.stderr !== null && result.observed.stderr !== '') lines.push(`  stderr: ${JSON.stringify(clip(result.observed.stderr))}`);
+  lines.push(`  why:    ${indent(result.message).trim()}`);
+  return lines.join('\n');
+}
+
+// ---- one case --------------------------------------------------------------------------------
+// `observed` is filled in as the case runs, so a failure report can show the actual values even
+// when the assertion that failed only named one of them.
+function runCase(test, position, context) {
+  const { compiler, target, work, snapshot, runtime, osRuntime } = context;
+  const observed = { source: context.sources[position], stdout: null, stderr: null, status: null, signal: null };
+  const result = { position, name: test.name, test, observed, message: '' };
+  try {
+    const directory = join(work, test.name);
+    rmSync(directory, { recursive: true, force: true });
+    mkdirSync(directory, { recursive: true });
+    // A case's own files (or its inline source) come first, then the modules it lists.
+    let files;
+    if (test.files) files = [...test.files, ...(test.modules ?? [])];
+    else { const input = join(directory, 'input.grl'); writeFileSync(input, test.source); files = [input, ...(test.modules ?? [])]; }
+    if (test.reject) {
+      const assembly = join(directory, 'prior.s');
+      writeFileSync(assembly, 'prior valid artifact');
+      const rejected = execute(compiler, ['--target', target, ...(test.flags ?? []), assembly, ...files, runtime, osRuntime]);
+      observed.status = rejected.status;
+      observed.signal = rejected.signal;
+      observed.stdout = `${rejected.stdout}${rejected.stderr}`;
+      observed.stderr = rejected.stderr.toString();
+      assert.equal(rejected.signal, null, `${test.name}: compiler crashed (${rejected.signal}): ${rejected.stdout}${rejected.stderr}`);
+      assert.equal(rejected.status, 1, `${test.name}: a rejected program must exit 1: ${rejected.stdout}${rejected.stderr}`);
+      // `diagnostic` is one required fragment of the error output, or a list of them (the message and
+      // its location are on different lines of a rendered error).
+      const diagnostics = [test.diagnostic ?? []].flat();
       for (const fragment of diagnostics) {
-        assert.ok(`${viaInterface.stdout}${viaInterface.stderr}`.includes(fragment), `${test.name}: expected diagnostic ${fragment} from the interface build: ${viaInterface.stdout}${viaInterface.stderr}`);
+        assert.ok(`${rejected.stdout}${rejected.stderr}`.includes(fragment), `${test.name}: expected diagnostic ${fragment}: ${rejected.stdout}${rejected.stderr}`);
       }
+      // A rejection may pin how many times its diagnostic is printed, exactly as `stderrCount` does for
+      // runtime output: a replayed generic body reaches the same source line again, and it has to be
+      // reported - and counted - once (docs/diagnostics.md).
+      if (test.diagnosticCount !== undefined) {
+        assert.equal(diagnostics.length, 1, `${test.name}: diagnosticCount needs exactly one diagnostic`);
+        const occurrences = `${rejected.stdout}${rejected.stderr}`.split(diagnostics[0]).length - 1;
+        assert.equal(occurrences, test.diagnosticCount, `${test.name}: expected ${test.diagnosticCount} x ${JSON.stringify(diagnostics[0])} in ${JSON.stringify(`${rejected.stdout}${rejected.stderr}`)}`);
+      }
+      assert.equal(readFileSync(assembly, 'utf8'), 'prior valid artifact', `${test.name}: invalid program overwrote prior output`);
+      // A rejection that must also hold when the modules are read from their interfaces: the
+      // interface has to carry everything the refusal rests on.
+      if (test.interfaces) {
+        const ifaces = join(directory, 'ifaces');
+        // The interface comes from the library modules alone: the entry may be the very thing the
+        // rejection is about.
+        const modules = test.modules ?? [];
+        assert.ok(modules.length !== 0, `${test.name}: an interface rejection needs module sources`);
+        const emit = execute(compiler, ['--target', target, '--emit-interface', ifaces, join(directory, 'emit.s'), ...modules, ...(test.interfaceFiles ?? []), runtime, osRuntime]);
+        assert.equal(emit.status, 0, `${test.name}: emitting interfaces failed: ${emit.stdout}${emit.stderr}`);
+        const viaInterface = execute(compiler, ['--target', target, '--interface', ifaces, join(directory, 'iface.s'), ...files, runtime, osRuntime]);
+        assert.equal(viaInterface.status, 1, `${test.name}: the interface build must refuse it too: ${viaInterface.stdout}${viaInterface.stderr}`);
+        for (const fragment of diagnostics) {
+          assert.ok(`${viaInterface.stdout}${viaInterface.stderr}`.includes(fragment), `${test.name}: expected diagnostic ${fragment} from the interface build: ${viaInterface.stdout}${viaInterface.stderr}`);
+        }
+      }
+      result.outcome = 'pass';
+      return result;
     }
-  } else {
     // Interface-first: emit one interface per module, then compile the same program against them.
     // The interface build is the build this case's behaviour is asserted on when the case asks for
     // it, so a gap in an interface is a test failure rather than a silent difference.
@@ -162,17 +241,21 @@ for (const [position, test] of cases.entries()) {
     }
     // The interface build is a second program from the same sources; it has to behave the same.
     const interfaceExecutable = viaInterface ? compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', runtime, osRuntime, name: 'program-interface', interfaces: viaInterface.ifaces }) : null;
-    if (test.compileOnly) { passed++; continue; }
+    if (test.compileOnly) { result.outcome = 'pass'; return result; }
     // A case may pin the environment it needs (`"env": {"GRAIL_POOL_WORKERS": "1"}`), which is how a
     // test proves a pool size the host would not otherwise choose. Everything else is inherited.
     const options = test.env ? { cwd: directory, env: { ...process.env, ...test.env } } : { cwd: directory };
-    const result = execute(executable, test.args ?? [], target, options);
-    if (result.error) throw result.error;
+    const ran = execute(executable, test.args ?? [], target, options);
+    if (ran.error) throw ran.error;
+    observed.stdout = ran.stdout.toString();
+    observed.stderr = ran.stderr.toString();
+    observed.status = ran.status;
+    observed.signal = ran.signal;
     // A case that dies by signal can still pin its output: an abort must not resume the foreign or
     // Grail code that ran before it, so what was printed up to the abort is part of the contract.
     // A diagnostic the runtime promises (once per process) is part of the observable contract.
     if (test.stderr !== undefined || test.stderrAbsent !== undefined) {
-      const errors = result.stderr.toString();
+      const errors = ran.stderr.toString();
       // One substring, carried `stderrCount` times (once by default), or a list of substrings, each
       // carried once: a backtrace pins its frames apart because a file's absolute path sits between
       // them, and on qemu targets the emulator appends a line of its own.
@@ -188,18 +271,262 @@ for (const [position, test] of cases.entries()) {
     }
     if (interfaceExecutable) {
       const ifaceResult = execute(interfaceExecutable, test.args ?? [], target, options);
-      assert.equal(ifaceResult.status, result.status, `${test.name}: the interface build exits differently: ${ifaceResult.stderr}`);
-      assert.equal(ifaceResult.stdout.toString(), result.stdout.toString(), `${test.name}: the interface build prints something else`);
+      assert.equal(ifaceResult.status, ran.status, `${test.name}: the interface build exits differently: ${ifaceResult.stderr}`);
+      assert.equal(ifaceResult.stdout.toString(), ran.stdout.toString(), `${test.name}: the interface build prints something else`);
     }
     if (test.signal) {
-      assert.equal(result.signal, test.signal, `${test.name}: ${result.status}: ${result.stderr}`);
-      if (test.stdout !== undefined) assert.equal(result.stdout.toString(), test.stdout, test.name);
-    } else { assert.equal(result.status, test.status ?? 0, `${test.name}: ${result.signal}: ${result.stderr}`); assert.equal(result.stdout.toString(), test.stdout, test.name); }
+      assert.equal(ran.signal, test.signal, `${test.name}: ${ran.status}: ${ran.stderr}`);
+      if (test.stdout !== undefined) assert.equal(ran.stdout.toString(), test.stdout, test.name);
+    } else {
+      assert.equal(ran.status, test.status ?? 0, `${test.name}: ${ran.signal}: ${ran.stderr}`);
+      assert.equal(ran.stdout.toString(), test.stdout, test.name);
+    }
+    result.outcome = 'pass';
+    return result;
+  } catch (error) {
+    result.outcome = 'fail';
+    result.message = error?.message ?? String(error);
+    return result;
   }
-  if (resume) writeFileSync(join(markers, test.name), '');
-  passed++;
 }
-console.log(`${target}: ${passed} native execution/rejection regressions passed`
-  + (skipped ? `, ${skipped} skipped (host-only)` : '')
-  + (filtered ? `, ${filtered} not selected (filter/shard)` : '')
-  + (resumed ? `, ${resumed} already passed (resumed)` : ''));
+
+// ---- --update ---------------------------------------------------------------------------------
+// Only the fields a run can observe exactly are rewritten: `stdout`, and `status` when the case pins
+// one. A `signal` pin and a `stderr` pin are contracts in their own right - a rejection's diagnostic
+// above all - so a case whose other pins still disagree is reported instead of rewritten, and
+// docs/testing.md says why.
+function updateCase(result) {
+  const test = result.test;
+  if (test.reject) return { fields: {}, reason: 'a rejection pins its own diagnostic; edit it by hand' };
+  const fields = {};
+  if (result.observed.stdout !== test.stdout) fields.stdout = result.observed.stdout;
+  if (test.signal === undefined && result.observed.signal === null && result.observed.status !== (test.status ?? 0)) fields.status = result.observed.status;
+  const pins = [test.stderr ?? []].flat().filter(Boolean);
+  const stderrAgrees = pins.every(pin => (result.observed.stderr ?? '').split(pin).length - 1 === (Array.isArray(test.stderr) ? 1 : (test.stderrCount ?? 1)))
+    && [test.stderrAbsent ?? []].flat().every(pin => !(result.observed.stderr ?? '').includes(pin));
+  const stdout = fields.stdout !== undefined ? fields.stdout : test.stdout;
+  const status = fields.status !== undefined ? fields.status : (test.status ?? 0);
+  const statusAgrees = test.signal !== undefined ? test.signal === result.observed.signal : (status === result.observed.status && result.observed.signal === null);
+  if (stdout === result.observed.stdout && statusAgrees && stderrAgrees) {
+    return { fields, reason: Object.keys(fields).length ? '' : 'no expectation changed' };
+  }
+  const left = [];
+  if (!stderrAgrees) left.push('stderr pins');
+  if (!statusAgrees) left.push(test.signal !== undefined ? 'signal pin' : 'exit status');
+  return { fields, reason: `not rewritten: ${left.join(', ')} still disagree; edit by hand` };
+}
+function applyUpdates(failures) {
+  const updates = [];
+  for (const failure of failures) {
+    const update = updateCase(failure);
+    Object.assign(failure.test, update.fields);
+    updates.push({ position: failure.position, name: failure.name, fields: update.fields, reason: update.reason });
+  }
+  return updates;
+}
+
+// ---- the run ----------------------------------------------------------------------------------
+// Every path in a case is rewritten to a staged copy, so a run in progress cannot mix source
+// revisions; the report still names the case's own path, captured here before staging.
+function stage(context) {
+  mkdirSync(context.work, { recursive: true });
+  const snapshot = join(context.work, 'inputs');
+  mkdirSync(snapshot, { recursive: true });
+  const runtime = join(snapshot, 'runtime.grl');
+  writeFileSync(runtime, readFileSync(join(root, 'compiler/runtime.grl')));
+  const osRuntime = join(snapshot, 'os-linux.grl');
+  writeFileSync(osRuntime, readFileSync(join(root, 'compiler/os-linux.grl')));
+  // The standard library keeps its layout (a directory holding core.grl), because the compiler
+  // recognises stdlib modules by location and compiles them in the stdlib's own modes.
+  const stdSnapshot = join(snapshot, 'lib');
+  mkdirSync(stdSnapshot, { recursive: true });
+  for (const file of readdirSync(join(root, 'lib')).filter(f => f.endsWith('.grl'))) {
+    writeFileSync(join(stdSnapshot, file), readFileSync(join(root, 'lib', file)));
+  }
+  for (let i = 0; i < context.cases.length; i++) {
+    for (const field of ['files', 'modules', 'interfaceFiles']) if (context.cases[i][field]) context.cases[i][field] = context.cases[i][field].map((file, j) => {
+      const source = resolve(root, file);
+      if (dirname(source) === join(root, 'lib')) return join(stdSnapshot, basename(source));
+      const path = join(snapshot, `${i}-${field}-${j}-${basename(file)}`);
+      writeFileSync(path, readFileSync(source));
+      return path;
+    });
+  }
+  // A case's `data` files (what an `@embed` reads) are staged under their own names beside its
+  // sources, so a path relative to the source resolves as it does in a project.
+  for (const test of context.cases) for (const file of test.data ?? []) writeFileSync(join(snapshot, basename(file)), readFileSync(resolve(root, file)));
+  return { ...context, snapshot, runtime, osRuntime };
+}
+
+// Runs the selection in this process. The report is a value: a --jobs parent merges one per stripe.
+function runSelection(options, context) {
+  const report = { passed: 0, failed: 0, skipped: 0, resumed: 0, failures: [] };
+  for (const [position, test] of context.cases.entries()) {
+    if (hostOnly(test, options.target)) { report.skipped++; continue; }
+    if (!selected(test, position, options)) continue;
+    const marker = join(context.markers, test.name);
+    if (options.resume && existsSync(marker)) { report.resumed++; continue; }
+    const result = runCase(test, position, context);
+    if (result.outcome === 'pass') {
+      report.passed++;
+      if (options.resume) writeFileSync(marker, '');
+    } else {
+      report.failed++;
+      report.failures.push(result);
+      if (options.failFast) break;
+    }
+  }
+  return report;
+}
+
+function summaryLine(options, report, updated, filtered) {
+  const parts = [`passed ${report.passed} failed ${report.failed} skipped ${report.skipped}`];
+  if (updated) parts.push(`updated ${updated}`);
+  if (report.resumed) parts.push(`resumed ${report.resumed}`);
+  if (filtered) parts.push(`not-selected ${filtered}`);
+  return `${options.target}: ${parts.join(' ')}`;
+}
+
+// The corpus file is generated with JSON escapes for every non-ASCII byte (unicode-escape output, as
+// Python's json.dump(ensure_ascii=True) writes it), so an --update rewrites only the lines it changed.
+function writeCases(cases) {
+  const file = join(root, 'tests/native-cases.json');
+  const text = JSON.stringify(cases, null, 2).replace(/[\u0080-\uffff]/g, ch => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`);
+  writeFileSync(file, `${text}\n`);
+  return file;
+}
+
+function printUpdates(updates) {
+  for (const update of updates) {
+    console.log(`UPDATE ${update.name}: ${Object.keys(update.fields).length ? Object.keys(update.fields).join(', ') : update.reason}`);
+  }
+}
+
+// One child per stripe, all started together, each writing its report to a file the parent reads.
+// The parent built the compiler first and names it in the environment, so no two children race to
+// build the same content-addressed directory.
+function spawnStripe(options, argv, stripe, compiler) {
+  return new Promise((settle) => {
+    mkdirSync(join(root, '.work/native-tests'), { recursive: true });
+    const resultFile = join(root, `.work/native-tests/stripe-${stripe}-${process.pid}.json`);
+    const env = {
+      ...process.env,
+      GRAIL_COMPILER: compiler,
+      GRAIL_TEST_JOBS: '1',
+      GRAIL_TEST_STRIPE: `${stripe}/${options.jobs}`,
+      GRAIL_TEST_RESULT_FILE: resultFile,
+      GRAIL_TEST_TARGET: options.target,
+    };
+    const child = spawn(process.execPath, [process.argv[1], ...argv], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('close', (code, signal) => {
+      let report = null;
+      try { report = JSON.parse(readFileSync(resultFile, 'utf8')); } catch (error) { report = null; }
+      rmSync(resultFile, { force: true });
+      settle({ stripe, code, signal, stdout, stderr, report });
+    });
+  });
+}
+
+const argv = process.argv.slice(2);
+let options;
+try {
+  options = parseArguments(argv);
+} catch (error) {
+  // A bad invocation is not a test failure: say what is wrong and which line the run did not reach.
+  console.error(`test-native: ${error?.message ?? error}`);
+  process.exit(2);
+}
+const cases = JSON.parse(readFileSync(join(root, 'tests/native-cases.json'), 'utf8'));
+// --update writes this copy: staging rewrites a case's paths to snapshot files, and those must never
+// reach the corpus file.
+const pristine = JSON.parse(JSON.stringify(cases));
+const isChild = options.stripe !== null;
+if (!isChild) checkSources(cases);
+// The report names a case's own source, before staging rewrites the paths to snapshot copies.
+const sources = cases.map(test => test.files?.[0] ?? 'inline source');
+// The backend names the work directory, so a native and an LLVM run of one target can overlap; a
+// stripe gets its own subdirectory, so two children never share a case directory or a snapshot.
+const backend = `${process.env.GRAIL_BACKEND ?? 'native'}${process.env.GRAIL_VERIFY_FACTS === '1' ? '+facts' : ''}`;
+const backendLabel = backend === 'native' ? options.target : `${options.target}-${backend}`;
+const baseWork = join(root, '.work/native-tests', backendLabel);
+const work = options.stripe ? join(baseWork, `stripe-${options.stripe.index + 1}-${options.stripe.count}`) : baseWork;
+
+if (options.list) {
+  if (!isChild) {
+    const names = [];
+    for (const [position, test] of cases.entries()) if (!hostOnly(test, options.target) && selected(test, position, options)) names.push(test.name);
+    for (const name of names) console.log(name);
+    console.error(`${options.target}: ${names.length} cases selected`);
+  }
+  process.exit(0);
+}
+
+// --jobs N: N children, one stripe each, merged and printed here so the report is identical to a
+// sequential run of the same selection, in case order.
+if (!isChild && options.jobs > 1) {
+  const compiler = buildCompiler();
+  const childArgv = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--jobs') { i++; continue; }
+    if (argv[i].startsWith('--jobs=')) continue;
+    childArgv.push(argv[i]);
+  }
+  const stripes = await Promise.all(Array.from({ length: options.jobs }, (_, index) => spawnStripe(options, childArgv, index + 1, compiler)));
+  const merged = { passed: 0, failed: 0, skipped: 0, resumed: 0, failures: [] };
+  const updates = [];
+  let crashed = 0;
+  for (const stripe of stripes) {
+    if (!stripe.report) {
+      crashed++;
+      console.log(`FAIL worker ${stripe.stripe}/${options.jobs} (${stripe.signal ?? `exit ${stripe.code}`})\n${indent(clip(stripe.stderr || stripe.stdout, 2000)).trim()}`);
+      continue;
+    }
+    for (const field of ['passed', 'failed', 'skipped', 'resumed']) merged[field] += stripe.report[field];
+    merged.failures.push(...stripe.report.failures);
+    updates.push(...(stripe.report.updates ?? []));
+  }
+  merged.failures.sort((a, b) => a.position - b.position);
+  for (const failure of merged.failures) console.log(failureBlock(failure));
+  let updated = 0;
+  if (options.update && updates.length) {
+    printUpdates(updates);
+    for (const stripe of stripes) for (const change of stripe.report?.changes ?? []) Object.assign(pristine[change.position], change.fields);
+    updated = updates.filter(update => Object.keys(update.fields).length).length;
+    if (updated) console.log(`updated ${updated} cases in ${writeCases(pristine)}`);
+  }
+  const filtered = cases.length - merged.passed - merged.failed - merged.skipped - merged.resumed;
+  console.log(summaryLine(options, merged, updated, filtered));
+  const unresolved = updates.filter(update => update.reason !== '').length;
+  process.exit(crashed || (options.update ? unresolved : merged.failed) ? 1 : 0);
+}
+
+const compiler = buildCompiler();
+// Key by the compiler's content-addressed directory, not its file name: every build is named
+// `grail`. The markers are shared by every stripe: a pass is a property of the compiler, not of the
+// process that observed it.
+const markers = join(baseWork, 'pass', `${basename(dirname(compiler))}-${backend}`);
+mkdirSync(markers, { recursive: true });
+const context = stage({ cases, compiler, target: options.target, work, markers, sources });
+const report = runSelection(options, context);
+const updates = options.update ? applyUpdates(report.failures) : [];
+const changes = updates.filter(update => Object.keys(update.fields).length).map(update => ({ position: update.position, fields: update.fields }));
+if (isChild) {
+  // A child runs no corpora policy of its own: the parent prints, writes the corpus file and exits.
+  writeFileSync(options.resultFile, JSON.stringify({ ...report, updates, changes }));
+  process.exit(report.failed ? 1 : 0);
+}
+for (const failure of report.failures) console.log(failureBlock(failure));
+let updated = 0;
+if (options.update && updates.length) {
+  printUpdates(updates);
+  updated = changes.length;
+  for (const change of changes) Object.assign(pristine[change.position], change.fields);
+  if (updated) console.log(`updated ${updated} cases in ${writeCases(pristine)}`);
+}
+const filtered = cases.length - report.passed - report.failed - report.skipped - report.resumed;
+console.log(summaryLine(options, report, updated, filtered));
+const unresolved = updates.filter(update => update.reason !== '').length;
+process.exit(options.update ? (unresolved ? 1 : 0) : (report.failed ? 1 : 0));
