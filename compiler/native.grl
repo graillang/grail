@@ -37015,6 +37015,12 @@ fn iface_emit_func<a, b>(c: (&a mut C), out: (&a mut u8[]), index: u64, m: &b [u
         reqs.push(copy_numbers(&c.funcs[index].constraints[i]));
     }
     params := iface_params(&mut c, index);
+    // Every parameter's name travels, and each default with it: a caller in another module names the
+    // slot it fills and, when it leaves one out, compiles the value the declaration wrote
+    // (docs/design/named-arguments.md). The default is carried as its *text*, because it is compiled
+    // where the call is; a value frozen here would be evaluated once, in this module's context.
+    mut pnames_here = copy_names(&c.funcs[index].pnames);
+    mut pdefaults_here = copy_preds(&c.funcs[index].pdefaults);
     push_bytes(&mut out, view("fn "));
     if named != 0 {
         iface_ref(&mut out, view(m), view(name));
@@ -37042,6 +37048,26 @@ fn iface_emit_func<a, b>(c: (&a mut C), out: (&a mut u8[]), index: u64, m: &b [u
         push_bytes(&mut out, view(symbol));
     }
     out.push(10);
+    for i in pnames_here.len() {
+        if pnames_here[i].len() != 0 {
+            push_bytes(&mut out, view("param "));
+            decimal(&mut out, i);
+            out.push(32);
+            iface_quoted(&mut out, view(pnames_here[i]));
+            out.push(10);
+        }
+    }
+    for i in pdefaults_here.len() {
+        pd := &pdefaults_here[i];
+        if has_pred(pd) {
+            dtext := pred_text(&mut c, Pred { file: pd.file, lo: pd.lo, hi: pd.hi });
+            push_bytes(&mut out, view("default "));
+            decimal(&mut out, i);
+            out.push(32);
+            iface_quoted(&mut out, view(dtext));
+            out.push(10);
+        }
+    }
     if lifetimes != 0 {
         push_bytes(&mut out, view("lifetimes "));
         decimal(&mut out, lifetimes);
@@ -37092,17 +37118,6 @@ fn iface_emit_func<a, b>(c: (&a mut C), out: (&a mut u8[]), index: u64, m: &b [u
         out.push(32);
         iface_quoted(&mut out, view(text));
         out.push(10);
-        // The parameter's own name: a proof at a call site substitutes the arguments for it.
-        if i < c.funcs[index].pnames.len() {
-            pname := c.funcs[index].pnames[i].copy();
-            if pname.len() != 0 {
-                push_bytes(&mut out, view("pname "));
-                decimal(&mut out, i);
-                out.push(32);
-                iface_quoted(&mut out, view(pname));
-                out.push(10);
-            }
-        }
     }
     mut rpf = 0;
     mut rplo = 0;
@@ -39392,13 +39407,13 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
         exchange(&mut f.ppreds[at], pred);
         return ();
     }
-    if same(view(word), view("pname")) {
-        // A refined parameter's source name, so a call site in another module can prove the
-        // predicate by substituting its own terms.
+    if same(view(word), view("param")) {
+        // A parameter's source name: a named argument in another module fills the slot this names,
+        // and a proof at a call site substitutes the arguments for it.
         at := ip_number(&mut p);
         name := ip_quoted(&mut p);
         if st.last_func == 0 {
-            iface_fail(&p, view("`pname` must follow a function"));
+            iface_fail(&p, view("`param` must follow a function"));
         }
         index := st.last_func - 1;
         f := &mut c.funcs[index];
@@ -39406,6 +39421,32 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
             f.pnames.push(u8[]);
         }
         exchange(&mut f.pnames[at], name);
+        return ();
+    }
+    if same(view(word), view("default")) {
+        // A parameter's default value, carried as text and rebuilt as a virtual source of its own, so
+        // the importer compiles exactly the expression the declaring module wrote, in the context of
+        // the call it fills (docs/design/named-arguments.md).
+        at := ip_number(&mut p);
+        text := ip_quoted(&mut p);
+        if st.last_func == 0 {
+            iface_fail(&p, view("`default` must follow a function"));
+        }
+        index := st.last_func - 1;
+        mut label = u8[];
+        push_bytes(&mut label, view(path));
+        label.push(58);
+        push_bytes(&mut label, view(c.funcs[index].module));
+        push_bytes(&mut label, view("::"));
+        push_bytes(&mut label, view(c.funcs[index].name));
+        push_bytes(&mut label, view("#default"));
+        decimal(&mut label, at);
+        d := pred_of_text(&mut c, view(label), view(text));
+        f := &mut c.funcs[index];
+        while f.pdefaults.len() <= at {
+            f.pdefaults.push(no_pred());
+        }
+        exchange(&mut f.pdefaults[at], d);
         return ();
     }
     if same(view(word), view("effects")) {
