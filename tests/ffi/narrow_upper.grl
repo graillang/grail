@@ -1,0 +1,92 @@
+module ffi_narrow_upper;
+
+// Narrow integers cross the C ABI in a full integer word, and every one of these ABIs leaves the
+// caller responsible for what the upper half holds: System V x86-64 and AAPCS64 extend a value
+// narrower than 32 bits to 32 bits (unsigned zero, signed sign) and leave bits 63:32 unspecified,
+// and RV64 LP64D extends to 32 bits by the type's signedness and then sign-extends to XLEN. Grail
+// holds a sized integer as a canonical word - unsigned zero-extended, signed sign-extended - so what
+// it passes is already the type's value, and a `u32` is converted for RV64 where the ABI wants it
+// sign-extended.
+//
+// The twins in narrow_shim.c declare the parameter as a 64-bit word, so the C side sees exactly
+// what Grail put in the register: that is the only way for a test to tell an extended argument from
+// one whose upper half is stale, and it is the whole point of the case. `connect` appears twice,
+// narrow and wide, as it was reported.
+extern "C" lib "shim.o" as "ns_u8" fn upper_u8(v: u8) -> u64;
+extern "C" lib "shim.o" as "ns_i8" fn upper_i8(v: i8) -> u64;
+extern "C" lib "shim.o" as "ns_u16" fn upper_u16(v: u16) -> u64;
+extern "C" lib "shim.o" as "ns_i16" fn upper_i16(v: i16) -> u64;
+extern "C" lib "shim.o" as "ns_u32" fn upper_u32(v: u32) -> u64;
+extern "C" lib "shim.o" as "ns_i32" fn upper_i32(v: i32) -> u64;
+extern "C" lib "shim.o" as "ns_connect_u32" fn connect_u32(fd: i64, addr: &[u8], len: u32) -> i64;
+extern "C" lib "shim.o" as "ns_connect_u64" fn connect_u64(fd: i64, addr: &[u8], len: u64) -> i64;
+
+// Results, in the same six widths: the callee writes only the low bits and Grail re-extends.
+extern "C" lib "shim.o" as "ns_ret_u32" fn ret_u32() -> u32;
+extern "C" lib "shim.o" as "ns_ret_i32" fn ret_i32() -> i32;
+extern "C" lib "shim.o" as "ns_ret_u16" fn ret_u16() -> u16;
+extern "C" lib "shim.o" as "ns_ret_i16" fn ret_i16() -> i16;
+extern "C" lib "shim.o" as "ns_ret_u8" fn ret_u8() -> u8;
+extern "C" lib "shim.o" as "ns_ret_i8" fn ret_i8() -> i8;
+
+// Narrow scalars inside a record passed by value: 16 bytes, one eightbyte of narrow fields and one
+// of 32-bit fields, in registers or by reference depending on the target.
+extern "C" record Narrow { a: u8, b: i8, c: u16, d: i16, e: u32, f: i32 }
+extern "C" lib "shim.o" as "ns_field_u8" fn field_u8(v: byval Narrow) -> i64;
+extern "C" lib "shim.o" as "ns_field_i8" fn field_i8(v: byval Narrow) -> i64;
+extern "C" lib "shim.o" as "ns_field_u16" fn field_u16(v: byval Narrow) -> i64;
+extern "C" lib "shim.o" as "ns_field_i16" fn field_i16(v: byval Narrow) -> i64;
+extern "C" lib "shim.o" as "ns_field_u32" fn field_u32(v: byval Narrow) -> i64;
+extern "C" lib "shim.o" as "ns_field_i32" fn field_i32(v: byval Narrow) -> i64;
+
+fn main() -> u64 {
+    mut ok: u64 = 0;
+    addr := "abcdefg";
+    mut narrow = Narrow { a: 200, b: -56, c: 65535, d: -3, e: 4000000000, f: -7 };
+    unsafe {
+        // What the register holds, width by width: the canonical word of the declared type.
+        if upper_u8(255) == 255 {
+            ok += 1;
+        }
+        if upper_i8(-56) == 18446744073709551560 {
+            ok += 1;
+        }
+        if upper_u16(65535) == 65535 {
+            ok += 1;
+        }
+        if upper_i16(-2) == 18446744073709551614 {
+            ok += 1;
+        }
+        if upper_u32(2147483647) == 2147483647 {
+            ok += 1;
+        }
+        if upper_i32(-2147483648) == 18446744071562067968 {
+            ok += 1;
+        }
+        // One symbol, two declarations, differing only in the narrow parameter's width, with a
+        // `u32` of all ones as the argument: each twin answers 1 when the register held the word
+        // its own ABI requires - zero-extended on x86-64 and AAPCS64, sign-extended on RV64 - so
+        // this line reads 1 on every target and the difference stays out of the expectation.
+        println(connect_u32(3, view(addr), 4294967295));
+        println(connect_u64(3, view(addr), 4294967295));
+        // Results: the callee sets only the low bits, and Grail re-extends from the declared width.
+        println(ret_u32());
+        println(ret_i32());
+        println(ret_u16());
+        println(ret_i16());
+        println(ret_u8());
+        println(ret_i8());
+        // A record's narrow fields, read by C out of the argument the ABI passed.
+        println(field_u8(narrow));
+        println(field_i8(narrow));
+        println(field_u16(narrow));
+        println(field_i16(narrow));
+        println(field_u32(narrow));
+        println(field_i32(narrow));
+    }
+    println(ok);
+    if ok != 6 {
+        return 1;
+    }
+    return 0;
+}

@@ -139,6 +139,22 @@ const fixtures = [
       'c_s8', 'c_u16', 'c_u32_above'],
   },
   {
+    // Narrow integers in argument, result and record position, observed through the whole 64-bit
+    // register: the twins in narrow_shim.c were declared `unsigned long long` in C, so they see
+    // exactly what Grail put there. A u8/i8/u16/i16/u32/i32 argument must arrive as the type's
+    // canonical word (6), a `connect` declared twice - narrow and wide - must each receive the word
+    // its own ABI requires (1, 1: zero-extended on x86-64/AAPCS64, sign-extended on RV64), a result
+    // the callee left unextended must be re-extended (2147483649, -2147483647, 65535, -3, 200,
+    // -56), and narrow fields of a 16-byte byval record must arrive at their own offsets
+    // (200, -56, 65535, -3, 4000000000, -7).
+    name: 'narrow_upper',
+    stdout: '1\n1\n2147483649\n-2147483647\n65535\n-3\n200\n-56\n200\n-56\n65535\n-3\n4000000000\n-7\n6\n',
+    symbols: ['ns_u8', 'ns_i8', 'ns_u16', 'ns_i16', 'ns_u32', 'ns_i32', 'ns_connect_u32',
+      'ns_connect_u64', 'ns_ret_u32', 'ns_ret_i32', 'ns_ret_u16', 'ns_ret_i16', 'ns_ret_u8',
+      'ns_ret_i8', 'ns_field_u8', 'ns_field_i8', 'ns_field_u16', 'ns_field_i16', 'ns_field_u32',
+      'ns_field_i32'],
+  },
+  {
     // Out-parameters: C writes a handle or a bare pointer through `&mut` slot the Grail side owns,
     // and the Grail side reads it back. Every C twin checksums the value it found in the slot, so
     // these values change if the slot arrives uninitialized, if it is passed by value, or if the

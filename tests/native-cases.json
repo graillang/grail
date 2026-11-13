@@ -3864,7 +3864,7 @@
     "name": "ffi-reject-callback-string",
     "source": "module ffi_reject;extern \"C\" fn cb(v: string) -> u64 { return 0; }fn main(){}",
     "reject": true,
-    "diagnostic": "extern C callback parameters must be an integer, f32, f64, CStr, handle, byte view or cfn",
+    "diagnostic": "extern C callback parameters must be an integer, f32, f64, CStr, handle or cfn",
     "note": "floats and narrow integers are accepted callback parameters; an owned Grail string is not"
   },
   {
@@ -8838,5 +8838,62 @@
     "reject": true,
     "diagnostic": "borrow conflicts with active access",
     "note": "a non-numeric element stays borrowed, so reading g.rows[0].ty inside the call is a live loan, not a copy: that read keeps its temporary"
+  },
+  {
+    "name": "ffin-narrow-arguments",
+    "source": "module ffin_narrow_arguments;\n\nextern \"C\" fn word1(a: u64) -> u64 { return a; }\nextern \"C\" fn word7(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64) -> u64 { return g; }\nextern \"C\" fn word9(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64, i: u64) -> u64 {\n    return i;\n}\n\nextern \"C\" as \"word1\" fn pos1_u8(a: u8) -> u64;\nextern \"C\" as \"word1\" fn pos1_i8(a: i8) -> u64;\nextern \"C\" as \"word1\" fn pos1_u16(a: u16) -> u64;\nextern \"C\" as \"word1\" fn pos1_i16(a: i16) -> u64;\nextern \"C\" as \"word1\" fn pos1_u32(a: u32) -> u64;\nextern \"C\" as \"word1\" fn pos1_i32(a: i32) -> u64;\n\nextern \"C\" as \"word7\" fn pos7_u32(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u32) -> u64;\nextern \"C\" as \"word7\" fn pos7_i8(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: i8) -> u64;\nextern \"C\" as \"word7\" fn pos7_u16(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u16) -> u64;\n\nextern \"C\" as \"word9\" fn pos9_u32(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64, i: u32) -> u64;\nextern \"C\" as \"word9\" fn pos9_i8(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64, i: i8) -> u64;\n\nextern \"C\" fn connect_like(fd: u64, addr: u64, addrlen: u64, len: u64) -> u64 { return 1000 * fd + len; }\nextern \"C\" as \"connect_like\" fn connect_u32(fd: i64, addr: &[u8], len: u32) -> u64;\nextern \"C\" as \"connect_like\" fn connect_u64(fd: i64, addr: &[u8], len: u64) -> u64;\n\nfn main() -> u64 {\n    addr := \"abcdefg\";\n    mut agree = 0;\n    unsafe {\n        println(pos1_u8(255));\n        println(pos1_i8(-56));\n        println(pos1_u16(65535));\n        println(pos1_i16(-2));\n        println(pos1_u32(2147483647));\n        println(pos1_i32(-2147483648));\n        println(pos7_u32(1, 2, 3, 4, 5, 6, 2147483647));\n        println(pos7_i8(1, 2, 3, 4, 5, 6, -56));\n        println(pos7_u16(1, 2, 3, 4, 5, 6, 65535));\n        println(pos9_u32(1, 2, 3, 4, 5, 6, 7, 8, 2147483647));\n        println(pos9_i8(1, 2, 3, 4, 5, 6, 7, 8, -56));\n        narrow := connect_u32(3, view(addr), 2147483647);\n        wide := connect_u64(3, view(addr), 2147483647);\n        println(narrow);\n        println(wide);\n        agree = 1;\n    }\n    return 0;\n}",
+    "stdout": "255\n18446744073709551560\n65535\n18446744073709551614\n2147483647\n18446744071562067968\n2147483647\n18446744073709551560\n65535\n2147483647\n18446744073709551560\n2147486647\n2147486647\n",
+    "note": "an extern function declared twice, narrow and wide, in the shape the stdlib reported for connect, and every narrow width in the first integer word plus u32/i8/u16 at the seventh word (the outgoing stack on x86-64) and u32/i8 at the ninth (the stack on every target); the Grail C-ABI callee returns the whole 64-bit word, so a width passed with a stale or missing extension changes the answer"
+  },
+  {
+    "name": "ffin-narrow-arguments-riscv64",
+    "source": "module ffin_narrow_arguments_riscv64;\n\nextern \"C\" fn word1(a: u64) -> u64 { return a; }\nextern \"C\" as \"word1\" fn pos1_u32(a: u32) -> u64;\nextern \"C\" as \"word1\" fn pos1_u16(a: u16) -> u64;\nextern \"C\" as \"word1\" fn pos1_u8(a: u8) -> u64;\n\nfn main() -> u64 {\n    unsafe {\n        println(pos1_u32(4294967295));\n        println(pos1_u32(2147483648));\n        println(pos1_u16(65535));\n        println(pos1_u8(255));\n    }\n    return 0;\n}",
+    "stdout": "18446744073709551615\n18446744071562067968\n65535\n255\n",
+    "note": "RV64 LP64D zero-extends a narrow argument by its type up to 32 bits and then sign-extends to XLEN, so a u32 with bit 31 set arrives sign-extended while u16/u8 do not change - the one target where the canonical word is converted at the boundary (docs/ffi.md)",
+    "targets": [
+      "riscv64"
+    ]
+  },
+  {
+    "name": "ffin-narrow-results",
+    "source": "module ffin_narrow_results;\n\nextern \"C\" fn raw_bits() -> u64 { return 12297829382473034410; }\nextern \"C\" as \"raw_bits\" fn ret_u32() -> u32;\nextern \"C\" as \"raw_bits\" fn ret_i32() -> i32;\nextern \"C\" as \"raw_bits\" fn ret_u16() -> u16;\nextern \"C\" as \"raw_bits\" fn ret_i16() -> i16;\nextern \"C\" as \"raw_bits\" fn ret_u8() -> u8;\nextern \"C\" as \"raw_bits\" fn ret_i8() -> i8;\n\nfn main() -> u64 {\n    unsafe {\n        println(ret_u32());\n        println(ret_i32());\n        println(ret_u16());\n        println(ret_i16());\n        println(ret_u8());\n        println(ret_i8());\n    }\n    return 0;\n}",
+    "stdout": "2863311530\n-1431655766\n43690\n-21846\n170\n-86\n",
+    "note": "a C-ABI callee leaves every bit above the declared width set in the result register, as a C function of that type may, and the caller re-extends from the declared type: u32, i32, u16, i16, u8 and i8"
+  },
+  {
+    "name": "ffin-narrow-record-fields",
+    "source": "module ffin_narrow_record_fields;\n\nextern \"C\" record Fields { a: u8, b: i8, c: u16, d: i16, e: u32, f: i32, tail: u64 }\n\nextern \"C\" fn sum_fields(p: Fields) -> i64 {\n    mut total: i64 = 0;\n    total = total + i64(p.a);\n    total = total + i64(p.b) * 256;\n    total = total + i64(p.c) * 65536;\n    total = total + i64(p.d) * 16777216;\n    total = total + i64(p.e);\n    total = total + i64(p.f) * 3;\n    return i64(p.tail) * 1000000000 + total;\n}\n\nextern \"C\" fn fill_fields(p: &mut Fields) -> i64 {\n    p.a = 200;\n    p.b = -1;\n    p.c = 65535;\n    p.d = -32768;\n    p.e = 4294967295;\n    p.f = -2147483648;\n    p.tail = 9;\n    return 1;\n}\n\nfn main() -> u64 {\n    mut f = Fields { a: 255, b: -56, c: 65535, d: -3, e: 4294967295, f: -2147483647, tail: 7 };\n    mut first: i64 = 0;\n    mut second: i64 = 0;\n    unsafe {\n        first = sum_fields(f);\n        fill_fields(&mut f);\n        second = sum_fields(f);\n    }\n    println(first);\n    println(second);\n    println(f.a);\n    println(f.b);\n    println(f.c);\n    println(f.d);\n    println(f.e);\n    println(f.f);\n    println(f.tail);\n    return 0;\n}",
+    "stdout": "9097072385\n-538608395833\n200\n-1\n65535\n-32768\n4294967295\n-2147483648\n9\n",
+    "note": "narrow scalars inside an extern C record: the callee reads every field at its C offset both before and after writing them through `&mut`, and Grail reads the same fields back, so a field stored at the wrong width (a word store over a byte) changes the answered total or the neighbouring field"
+  },
+  {
+    "name": "ffin-c-definition-pointer-length",
+    "source": "module ffin_c_definition_pointer_length;\n\n// The pair C actually passes, spelled as two parameters: a pointer and a length. The body copies\n// them with `cslice` inside `unsafe`, which is the documented way to read C memory, so an exported\n// C function keeps a working way to receive a buffer now that a byte view parameter is refused.\nextern \"C\" fn sum_bytes(p: CPtr, n: u64) -> u64 {\n    mut total: u64 = 0;\n    unsafe {\n        bytes := cslice(u8, p, n);\n        for i in bytes.len() {\n            total = total + u64(bytes[i]);\n        }\n    }\n    return total;\n}\n\n// The pair in the middle of the list, with a word after it: (a, pointer, length, z) is four argument\n// words, and the fourth must still arrive as the fourth.\nextern \"C\" fn tagged(a: u64, p: CPtr, n: u64, z: u64) -> u64 {\n    mut total: u64 = 0;\n    unsafe {\n        bytes := cslice(u8, p, n);\n        for i in bytes.len() {\n            total = total + u64(bytes[i]);\n        }\n    }\n    return a * 1000000 + total * 100 + z;\n}\n\nextern \"C\" as \"sum_bytes\" fn csum(p: CPtr, n: u64) -> u64;\nextern \"C\" as \"tagged\" fn ctagged(a: u64, p: CPtr, n: u64, z: u64) -> u64;\n\nfn main() -> u64 {\n    data := \"ABC\";\n    mut first: u64 = 0;\n    mut second: u64 = 0;\n    mut shared = 0;\n    unsafe {\n        first = csum(cptr(data), 3);\n        second = ctagged(7, cptr(data), 3, 9);\n    }\n    println(first);\n    println(second);\n    return 0;\n}",
+    "stdout": "198\n7019809\n",
+    "note": "the pair C really passes, spelled as two parameters: (CPtr, u64) copied with cslice inside unsafe, as the refusal of a byte view parameter tells the author to do; the second callee has the pair in the middle with a word after it, so the fourth argument must still arrive as the fourth (7*1000000 + 198*100 + 9)"
+  },
+  {
+    "name": "ffin-reject-c-definition-slice",
+    "source": "module ffin_reject_slice;\nextern \"C\" fn cb(v: &[u8]) -> u64 { return 0; }\nfn main() {}",
+    "reject": true,
+    "diagnostic": [
+      "parameter `v` is a byte view",
+      "cslice(u8, p, n)` inside an unsafe block"
+    ],
+    "note": "a C callback entry reads one argument word per parameter, so a byte view - two words, pointer then length - has no second word to arrive in; refused by name with the spelling that works"
+  },
+  {
+    "name": "ffin-reject-c-definition-slice-mut",
+    "source": "module ffin_reject_slice_mut;\nextern \"C\" fn cb(n: u64, buf: &mut [u8], m: u64) -> u64 { return 0; }\nfn main() {}",
+    "reject": true,
+    "diagnostic": "parameter `buf` is a byte view",
+    "note": "the same refusal for a mutable view, in the middle of the parameter list: position does not matter, and the diagnostic names the parameter that is wrong"
+  },
+  {
+    "name": "ffin-reject-c-definition-slice-result",
+    "source": "module ffin_reject_slice_result;extern \"C\" fn cb() -> u8[] { return u8[3]; }fn main() {}",
+    "reject": true,
+    "diagnostic": "extern C callback results must be an integer, f32, f64, unit, CStr or handle",
+    "note": "the result position: C returns one value in one register, so a buffer answer is a length or a status, never a Grail vector (a view result needs a lifetime parameter, which an extern C definition does not accept either)"
   }
 ]

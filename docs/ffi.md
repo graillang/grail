@@ -549,7 +549,24 @@ generated Grail functions preserve the callee-saved registers they allocate (the
 saves and restores them), which is what lets C call back into an `extern "C"` definition.
 
 The reverse direction — C calling a Grail callback — reads each parameter from where the target's
-C ABI put it: the argument registers first, then the caller's stack. Past the registers, arguments sit
+C ABI put it: the argument registers first, then the caller's stack. It reads **one argument word
+per parameter**, which is why a byte view parameter is refused on a definition: C passes a view as
+two words (pointer, then length), there is no second word for the entry to read, and where such a
+pair would land differs by target (Win64 splits registers from the fifth argument). Declare the pair
+instead — `p: CPtr, n: u64` — and copy the bytes with `cslice(u8, p, n)` inside an `unsafe` block;
+`ffin-c-definition-pointer-length` executes that shape on all three targets, with the pair in the
+middle of the argument list. The refusal names the parameter and that fix:
+
+```
+error: parameter `v` is a byte view, which C passes in two argument words (pointer then length); a
+C callback entry reads one argument word per parameter - take `v: CPtr` and a `u64` length, and copy
+the bytes with `cslice(u8, p, n)` inside an unsafe block
+```
+
+A `cfn` *type* may still declare a byte view: a `cfn` describes a callee Grail calls, and a call
+emits the pair, so only a definition (a callee C calls) cannot take one. The result position has no
+buffer shape either — a callback result is an integer, `f32`/`f64`, a `CStr` or a handle, and a
+buffer answer is a length or a status. Past the registers, arguments sit
 one 8-byte slot each above the callback's frame record, at `16(%rbp)` onward on SysV x86-64, AAPCS64 and
 RV64 (the frame pointer is `x29`/`s0` there). On Win64 a thunk under the C symbol moves the four
 registers and the fifth and sixth stack words into Grail's registers, and the body reads argument
@@ -702,14 +719,43 @@ A direct call to an `extern "C"` declaration is lowered per platform convention:
 | RISC-V 64 (LP64D) | `a0`-`a7` | `fa0`-`fa7`, then integer registers | 8-byte slots |
 
 Parameters and results of direct calls may be `f64` and `f32` (an `f32` crosses as a real
-binary32: narrowed on the way in, widened on the way out), and `i8`..`i32`/`u8`..`u32` (Grail keeps
-them sign- or zero-extended in a word, so they pass as is; results are re-extended after the
-call because C leaves the upper bits unspecified; RV64 receives `u32` sign-extended as its ABI
-requires). Up to 64 argument words are accepted and the outgoing stack area is limited to 2 KiB.
+binary32: narrowed on the way in, widened on the way out) and `i8`..`i32`/`u8`..`u32` (see narrow
+integers below). Up to 64 argument words are accepted and the outgoing stack area is limited to 2 KiB.
 On macOS arm64, which packs stack arguments by size, a narrow or `f32` argument that would land
 on the stack is refused. RISC-V objects use the hard-float `lp64d` ABI, which Linux C libraries
 use. `tests/ffi/call_abi.grl` executes on x86-64, AArch64 and RISC-V Linux and, through
 `tests/windows-cases.json`, on Windows x86-64 under Wine; Windows ARM64 is checked statically.
+
+### Narrow integers: what the caller puts in the register
+
+A narrow integer occupies one integer register, and each of these ABIs is explicit about the bits
+above the value: they are the *caller's* business on the way in and the *callee's* on the way out,
+and neither side may assume the other left them alone.
+
+| Target | The caller's obligation | What Grail passes | A narrow result |
+| --- | --- | --- | --- |
+| Linux/macOS x86-64 (SysV) | extend the value to 32 bits - zero for an unsigned type, sign for a signed one; bits 63:32 are unspecified | the type's canonical word, so the upper half is zero for an unsigned type and all sign for a signed one | re-extended from the declared width: C leaves the upper bits of `%rax` unspecified, and a `u32` result must not be read as a 64-bit word |
+| Windows x86-64 (Win64) | the register holds an eight-byte slot; the upper half may be anything | the canonical word | re-extended from the declared width |
+| AArch64 (AAPCS64) | the same 32-bit extension; bits 63:32 are unspecified | the canonical word | re-extended from the declared width |
+| RISC-V 64 (LP64D) | zero- or sign-extend the value to 32 bits by its type, then **sign-extend it to XLEN** | the canonical word, converted where the two differ | re-extended from the declared width |
+
+Grail holds a sized integer as a canonical word - unsigned zero-extended, signed sign-extended - so
+passing it as it stands satisfies the first three rows, and RISC-V 64 is the one target where the
+canonical word is not yet what the ABI wants: a `u32` is sign-extended at the boundary (`cext s32`).
+Concretely, a `u32` of `0xffffffff` arrives as `0x00000000ffffffff` on x86-64 and AArch64 and as
+`0xffffffffffffffff` on RISC-V 64; a `u32` with bit 31 clear, and every `u8`/`u16`/`i8`/`i16`/`i32`,
+arrive identical on all three. A C callee of that width reads only the low 32 bits, so both are
+correct for it. A callee that inspects the whole register sees exactly the word above - and an
+`extern "C" fn` *defined in Grail* is one of those: its prologue extends the parameter from the
+declared width itself and ignores the upper half, so a Grail callback and a Grail direct call cannot
+disagree about a narrow value no matter which ABI carried it.
+
+`tests/ffi/narrow_upper.grl` pins all of it with C twins declared `unsigned long long`, including
+one `connect`-shaped symbol declared twice (narrow and wide), the six widths in result position, and
+the narrow fields of a record passed by value; the corpus cases `ffin-narrow-arguments`,
+`ffin-narrow-arguments-riscv64` (the RISC-V sign extension), `ffin-narrow-results` and
+`ffin-narrow-record-fields` execute on x86-64, AArch64 and RISC-V 64 with no C toolchain, using a
+Grail-defined C-ABI callee that returns the whole 64-bit word.
 
 ## Importing a C header: `grail bindgen`
 
@@ -800,6 +846,10 @@ Not implemented yet, and each rejected rather than approximated:
   linked only (no macOS runner);
 - an out-parameter on a C callback or a `cfn` type: only a declaration Grail calls can write a slot
   (see Out-parameters above);
+- a byte view parameter on a C callback (refused by name, with the `CPtr` + `u64` spelling and
+  `cslice`), because a definition's entry reads one argument word per parameter and C passes a view
+  in two; and any buffer-shaped callback result, for the same reason. A `cfn` type may declare a
+  view, because only Grail calls through one;
 - a `byval` record parameter on a C callback. Record results are
   returned by value on every ABI, float fields included, embedded records included: the register
   classification runs over the flattened field list, so a float inside an embedded record is
@@ -912,14 +962,15 @@ compiles `tests/ffi/call_scalars.grl` with the FFI build, links the two through 
   one count record across two declarations of one symbol), `record_field_refs` `&mut` of an extern
   record held in a plain record's field, written by a Grail callee and by C, with the neighbouring
   fields unchanged (`7`, `102`, `307`, `40`, `41`, `60`, `61`, `5`), `call_words` seven, eight and nine word
-  arguments with literal and computed values, and `byval_records` the by-value record shapes with a
-  checksum over every field each C twin received.
-- the suite holds 20 executable fixtures: each executes on x86-64 and, through
-  `qemu-<target>-static`, on AArch64 and RISC-V 64 as well, so a host with both runners reports 60
-  executed fixture instances and none link-only; without a runner the cross targets link and are
-  reported as link-only (21 executed, 42 link-only here). Two more fixtures, `dlopen` and `threads`,
-  need the target's glibc: they execute on the host and, with a sysroot (below), under qemu on
-  AArch64 and RISC-V 64; without one they are cross-compiled only. `callback_words` executes the eight-register
+  arguments with literal and computed values, `byval_records` the by-value record shapes with a
+  checksum over every field each C twin received, and `narrow_upper` the narrow integer rules of the
+  section above through C twins declared `unsigned long long` (the six widths in argument and result
+  position, one `connect`-shaped symbol declared twice, and the narrow fields of a by-value record).
+- every fixture executes on x86-64 and, through `qemu-<target>-static`, on AArch64 and RISC-V 64 as
+  well, so a host with both runners executes each one three times; without a runner the cross
+  targets link and are reported as link-only. Two fixtures, `dlopen` and `threads`, need the
+  target's glibc: they execute on the host and, with a sysroot (below), under qemu on AArch64 and
+  RISC-V 64; without one they are cross-compiled only. `callback_words` executes the eight-register
   callback on AArch64 and RISC-V 64 and asserts that x86-64 and Windows refuse it by name. Without a
   qemu runner the cross targets are linked and the ABI-level check is reported as link-only. The same
   `out_params` and `call_words` sources are `ffi-out-params` and `ffi-call-words` cases in
@@ -933,7 +984,9 @@ Rejections are part of the normal native corpus (`tests/native-cases.json`):
 `ffi-reject-handle-null-seed`, `ffi-reject-out-shared-borrow`, `ffi-reject-out-scalar`,
 `ffi-reject-out-callback`, `ffi-reject-out-cfn`, `ffi-reject-out-double-borrow`,
 `ffi-reject-byval-plain-record`, `ffi-reject-byval-scalar`, `ffi-reject-byval-callback`,
-`handle-reject-arithmetic`, `ffi-reject-handle-construction`,
+`ffin-reject-c-definition-slice`, `ffin-reject-c-definition-slice-mut`,
+`ffin-reject-c-definition-slice-result`, `handle-reject-arithmetic`,
+`ffi-reject-handle-construction`,
 `ffi-reject-record-address-temporary`, `ffi-reject-record-address-plain`,
 `ffi-reject-record-pointer-alias-writable`, `ffi-reject-record-pointer-alias-shared`,
 `ffi-reject-record-out-plain`, `ffi-reject-record-out-shared`, `ffi-reject-record-out-temporary`,
