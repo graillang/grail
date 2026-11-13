@@ -2,6 +2,56 @@
 
 ## Unreleased
 
+- Added: `lib/fs` grew the file-system surface a program actually needs, on seven new runtime
+  operations (`stat`, `rename`, `symlink`, `spawn` with redirected stdio, `wait`, `ready` and `cwd` -
+  newfstatat/renameat/symlinkat/ppoll, `MoveFileExA`/`CreateSymbolicLinkA`/`WaitForSingleObject`,
+  and the Darwin equivalents). `fs::Error` now names the path and the reason (`tree/one.txt: not
+  found`) and every operation answers one instead of stopping: `Path` with join/normalize/canonicalize
+  (lexical, no file needs to exist), parent/file_name/extension/file_stem and Windows-aware
+  `is_absolute`; `Metadata` with size, kind, mode, `time::Timestamp` mtime/atime, owner and
+  inode/device; `read_text` refuses bytes that are not UTF-8 with the offset (`io::Error::InvalidUtf8`);
+  `write_atomic` (temporary file beside the destination, then rename); `create_dir`/`create_dir_all`;
+  `remove_dir_all`; sorted `list_dir`/`read_dir`; `walk` with a symbolic-link policy that is explicit
+  (`walk_options()`, `follow_links`, `max_depth`) and cycle-safe by device and inode; `rename` and
+  `copy` with their overwrite rules documented; `symlink`; and a `File` handle whose `close` is
+  explicit, whose double close is `EBADF` and whose short write is `ShortWrite`. `lib/process` adds
+  `spawn`/`spawn_with` from an argv vector (never a shell), `Child::wait` (consuming the child), a
+  `Status` of `Exited(code)`/`Signaled(signal)` with signal names, `run`/`run_with`/`run_in` which
+  capture stdout and stderr separately up to a size cap, an `Environment` with get/set/remove/all
+  whose names are case-insensitive on Windows, and `current_dir`/`executable`. Both were exercised on
+  a real temporary tree, on children that exit non-zero and on one killed by `SIGKILL`, and on a path
+  holding spaces and non-ASCII text (`fsx-*` cases). Book: *The standard library* gains *Files*,
+  *Processes*; mechanism: `docs/design/stdlib-utilities.md`.
+- Added: `lib/tz`, time zones from the system's tzdata. `TimeZone` parses TZif v1, v2 and v3 (the
+  64-bit table when a file has one, the POSIX `TZ` footer for every time after the last recorded
+  transition, leap-second records read past on purpose because `time::Timestamp` counts POSIX
+  seconds) and answers `offset_at`, `abbreviation_at`, `is_dst_at`, `to_local` and `from_local`.
+  `load(name)` reads `$TZDIR` or `/usr/share/zoneinfo` and refuses a name that is not a relative path
+  of ordinary components. A wall-clock reading is not always a unique instant, and the ambiguity is
+  data: `Unique(instant)`, `Ambiguous(earlier, later)` or `Skipped(gap start, gap seconds)`, the last
+  one also for a gap the footer rule creates. `parse` takes bytes, so a zone can come from anywhere;
+  `parse_posix` reads a rule string on its own. `time` gained `Timestamp`, `DateTime` and their UTC
+  calendar conversion. Cases: `tz-*`, including a TZif file built in the test itself and the
+  machine's Europe/Berlin and Australia/Lord_Howe (its thirty-minute saving) skipped cleanly where
+  the machine has no tzdata.
+- Added: `lib/utf8`, validated text. `Utf8String`'s invariant is "valid UTF-8"; `from_bytes` is the
+  checked constructor and answers the offset of the first ill-formed sequence, `from_text` takes the
+  language's owned text, and `unsafe fn from_unchecked` is the escape hatch a caller must open an
+  `unsafe` block for. `concat`, `slice_chars` (checked character boundaries), `replace` and
+  `to_ascii_upper`/`to_ascii_lower` cannot produce invalid UTF-8; `to_upper`/`to_lower` refuse text
+  with a code point above U+007F rather than half-mapping it; `chars`/`char_indices` decode without
+  substituting U+FFFD, and `as_bytes` hands the bytes out as a view without copying. The invariant is
+  pinned by a seeded 10,000-mutation fuzz case that re-validates every accepted value
+  (`utf8-fuzz-construction-invariant`). Book: *Bytes and text* says why this type exists beside the
+  byte-slice string.
+- Fixed: the runtime's host operations take ownership of a byte-view argument, and the new file and
+  process operations were not releasing it: every `fs::metadata` call leaked a block, which the
+  entry-time allocation check reports as exit status 134 after a program has finished its work.
+  `stat`, `rename` and `symlink` now free the view they are handed, as `open` and `list_dir` already
+  did. `host::pipe` also exists on Windows now (CreatePipe), so a captured child works there.
+- Fixed: seven corpus cases listed `lib/strings.grl` without `lib/iter.grl`, which its `chars`
+  signature needs, and `lib/fs.grl` gained `lib/time.grl`/`lib/strings.grl`/`lib/iter.grl` as
+  dependencies; the case lists follow.
 - Fixed: `bun tools/bootstrap.mjs stage ARCH` no longer requires the published manifest to describe the current sources. Splitting a reseed into `stage` and `publish` left the old `verify`-only manifest comparison on a bare `else`, so every `stage` run ended in `bootstrap source manifest is stale` - exactly the case a reseed exists for, and `tools/gate.sh --reseed` stopped at its first target after the self-hosting check had already passed. The comparison now runs only for `verify`; `bun tools/ci.mjs lint` pins the guard.
 - Tooling: `bootstrap.mjs stage ARCH` and `bootstrap.mjs publish` split a reseed into one step per target plus a publish that requires every seed to come from the current sources, and `tools/gate.sh --reseed` uses them, so an interrupted gate resumes at the target it stopped on rather than redoing an up-to-90-minute reseed.
 - Added: borrowed interface objects - `&dyn I` and `&mut dyn I` of a value that stays where it is, with no allocation (Rust's `&dyn Trait`). `&x` and `&mut x` become one at a typed binding, an argument and a return when `T` implements `I`, and a reference to an owned `dyn I` converts too. The value is a pair {data, vtable} written into the frame that borrows it, so the object never moves and nothing is allocated; a method call dispatches through that pair exactly as an owned `dyn I` dispatches through its cell, and a `&mut dyn` method mutates the original. The lifetime rules are `&T`'s: the value cannot be moved or dropped while the borrow lives, and a `&dyn` borrowed from a local cannot be returned (`returned borrow escapes its declared input lifetime`) while one borrowed from an input can. Records, vectors of borrowed objects (`(&dyn I)[]`) and generic code hold them; interface files carry the form as `(bobj (dyn ...))`. A function that builds one is left to the assembler as written - the word optimizer models frame slots as scalars, and a pair's second word is only reachable through the pair's address. Book: *Borrowing an object* in *Generics*; corpus: `dyn-borrowed-objects`, `dyn-borrowed-no-alloc` (an `@no_alloc` builder and a static-vtable pin), `dyn-borrowed-interface-form`, and `dyn-borrowed-reject-move`/`-escape`/`-not-implemented`.
