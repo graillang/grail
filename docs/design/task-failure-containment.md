@@ -310,6 +310,19 @@ masks it. `rt_site_here`'s comment now says its scratch is sized by what the hel
 what the walk reads, and why (a helper emitted before the function table existed writes fewer -
 never more - so a caller must not size the area from its own needs).
 
+The scratch fix removed the overrun; it did not remove the *shape* that produced it. The contract
+was still "a bare pointer and fixed offsets", so the next word either branch added to the helper
+would land past the caller's area again, and a caller sizing its area from its own needs is a
+mistake the code cannot see. `gaps3-rthand` replaced the contract itself: `rt_sites(out, capacity)`
+writes only what the capacity admits, returns the count it wrote, and the runtime reads only that
+many and refuses a count it did not offer - so the record's five-word area is sized by the offer and
+verified by the answer, and a caller that offers nothing (`0`, which is what a runtime emitted before
+the argument existed sends) is answered with the three words its 24-byte scratch holds. What each
+side may write and read is in
+[runtime-abi.md](runtime-abi.md#what-the-compiler-hands-the-runtime-a-handshake-that-carries-its-length);
+the record's area is unchanged, because the descriptor is still five words when it is asked for in
+full.
+
 Rejected, in order of how tempting they were:
 
 - **Grow the record to 248 bytes.** Correct and one line, but 248 + 16 crosses into the 512-byte

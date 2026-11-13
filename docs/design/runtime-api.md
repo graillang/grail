@@ -341,6 +341,10 @@ runtime, FFI and tests:
 | `host::exit` | runtime exit | not an OS service; cleanup checks stay in the runtime |
 | `host::target` | compiler target query | not an OS service |
 
+> The contract between the generated code and the runtime - the call-site descriptor and the
+> room it is given - is in
+> [runtime-abi.md](runtime-abi.md#what-the-compiler-hands-the-runtime-a-handshake-that-carries-its-length).
+
 ## Prerequisites and non-goals
 
 Prerequisites owned by other lanes: the frozen `extern "C"` contract (declarations, `&[u8]`

@@ -167,19 +167,141 @@ fn rt_fail_site_full() -> u64 {
     raw_store(s + 8, n);
     return s;
 }
-// The innermost statement entry of the frame that failed, found through the same rbp walk the
-// report uses, and written through `scratch` so the walk allocates nothing. `scratch` must be the
-// five words `rt_sites` writes - both tables' bounds and the caller's frame, 40 bytes - even though
-// the walk reads only the first three: the helper is emitted by the compiler, and one built before
-// the function table existed writes fewer, never more, so a caller that sizes its area from what
-// this walk reads is one table away from writing past it. A captured entry is static data: it stays
-// valid long after the task's stack is gone, which is what lets the join format the site later.
-fn rt_site_here(scratch: u64) -> u64 {
+// ---- the call-site descriptor: the compiler's helper, and the room it is given ----------------
+// The program's entry publishes, in state word 3400, the address of a helper the compiler emits
+// beside the two tables it builds (native.grl site_table). It is the one handshake in this runtime
+// where generated code fills a buffer the runtime owns, and it carries its length:
+//
+//     words_written = rt_sites(out, capacity_words)
+//
+// The descriptor is append-only, so any prefix of it is meaningful:
+//
+//     0 __start_grail_sites   8 __stop_grail_sites   16 the caller's frame pointer
+//    24 __start_grail_funcs  32 __stop_grail_funcs
+//
+// The helper writes the first three words - the statement table and the frame, all rt_site_here
+// needs - and the last two as well when it is offered room for five, and it answers how many words
+// it wrote. It never writes more than it was offered, with one deliberate exception: an offer of
+// **zero** means "this caller predates the capacity argument", and is answered with the three words
+// that every runtime since the statement table existed has room for. That exception is the whole
+// compatibility direction: a checked-in seed's runtime calls `helper(scratch, 0)` on a 24-byte
+// scratch, so a helper emitted by newer code must answer three words and not five, or it writes
+// past that scratch into whatever follows it - which is exactly the 16-byte overrun that corrupted
+// an allocator header (docs/design/task-failure-containment.md).
+//
+// The other direction - a runtime newer than the helper that compiled it - is answered by the
+// count: a helper emitted before this argument existed writes its words and answers nothing (rax 0
+// from the `xorq %rax,%rax` every emitted helper ends with on that path), so 0 is read as "the five
+// words this runtime offered", which is what such a helper writes. rt_sites_fill clears the two
+// function-table words first, so a helper that writes only three leaves them zero rather than the
+// block's previous contents, and "this build has no function table" stays a fact instead of a guess.
+//
+// Nothing is read past the count: `have` is what the caller may read, and 0 means the descriptor was
+// refused - no helper, fewer words than a statement entry needs, or a count larger than the offer
+// (a helper that ignored its capacity). Refusing loses the location line; reading on would walk a
+// table that is not there.
+fn rt_sites_words() -> u64 {
+    return 5;
+}
+// The capacity this runtime offers the helper. Five words, so the descriptor is one shape for every
+// caller and rt_backtrace gets the function table. A test injects a smaller offer through
+// GRAIL_RT_SITES_OFFER (read once, kept in state word 3408) to prove the refusal is taken rather
+// than assumed; the values are 0 "not asked", 1 "no override", n+1 "an offer of n words".
+fn rt_sites_offer() -> u64 {
+    mut mode = raw_load(rt_state_sites_offer());
+    if mode == 0 {
+        mode = 1;
+        want := rt_sites_offer_env();
+        if (0 < want) & (want < 4096) {
+            mode = want + 1;
+        }
+        raw_store(rt_state_sites_offer(), mode);
+    }
+    if mode == 1 {
+        return rt_sites_words();
+    }
+    return mode - 1;
+}
+// The decimal value of GRAIL_RT_SITES_OFFER, or 0. It reads envp directly, as rt_comptime_on does,
+// because the offer is asked on a failure path, where the runtime is not allowed to allocate.
+fn rt_sites_offer_env() -> u64 {
+    envp := raw_load(raw_state() + 16);
+    if envp == 0 {
+        return 0;
+    }
+    name := view("GRAIL_RT_SITES_OFFER=");
+    ptr := raw_load(name);
+    len := raw_load(wrapping_add(name, 8));
+    mut i = 0;
+    while raw_load(envp + i * 8) != 0 {
+        e := raw_load(envp + i * 8);
+        mut k = 0;
+        while k < len {
+            if raw_byte(e + k) != raw_byte(ptr + k) {
+                break;
+            }
+            k = k + 1;
+        }
+        if k == len {
+            return rt_sites_offer_digits(e + len);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+fn rt_sites_offer_digits(p: u64) -> u64 {
+    mut v = 0;
+    mut i = 0;
+    while i < 8 {
+        d := raw_byte(p + i);
+        if (d < 48) || (57 < d) {
+            break;
+        }
+        v = v * 10 + d - 48;
+        i = i + 1;
+    }
+    return v;
+}
+// Fill the descriptor at `out` - rt_sites_words() words of the caller's own buffer - from the
+// program's helper, and answer how many of those words may be read. 0 means the descriptor was
+// refused: no helper, fewer words than a statement entry needs, or a count larger than the offer.
+// The two function-table words are cleared first, so a helper that writes only the first three
+// leaves zeros there instead of the memory's previous contents.
+fn rt_sites_fill(out: u64) -> u64 {
     helper := raw_load(raw_state() + 3400);
     if helper == 0 {
         return 0;
     }
-    raw_call2(helper, scratch, 0);
+    raw_store(out + 24, 0);
+    raw_store(out + 32, 0);
+    cap := rt_sites_offer();
+    written := raw_call2(helper, out, cap);
+    mut have = written;
+    if have == 0 {
+        // A helper emitted before this handshake carried a count answers nothing and writes the
+        // words it always wrote. The offer says how many those are: this runtime asked for the
+        // whole five-word descriptor, so five is what it wrote.
+        have = cap;
+    }
+    if cap < have {
+        return 0;
+    }
+    if have < 3 {
+        return 0;
+    }
+    return have;
+}
+// The innermost statement entry of the frame that failed, found through the same rbp walk the
+// report uses, and written through `scratch` so the walk allocates nothing. `scratch` is the
+// descriptor buffer of rt_sites_words() words that rt_sites_fill fills - both tables' bounds and the
+// caller's frame, then the function table's - and the walk reads only the first three, bounded by
+// the count the helper answered. A captured entry is static data: it stays valid long after the
+// task's stack is gone, which is what lets the join format the site later.
+fn rt_site_here(scratch: u64) -> u64 {
+    have := rt_sites_fill(scratch);
+    if have < 3 {
+        return 0;
+    }
     begin := raw_load(scratch);
     end := raw_load(scratch + 8);
     if (begin == 0) + (end <= begin) {
@@ -392,17 +514,19 @@ fn rt_refine(msg: u64, req: u64) -> u64 {
 // ` --> file:line:col` for the frame that failed, then one ` = called from` line per further frame
 // that lies in a statement - at most 32 of them.
 fn rt_fail_where(buf: u64, n: u64) -> u64 {
-    // The program's entry stores the compiler-emitted rt_sites in state word 3400; it fills in the
-    // table's start, end and the caller's frame pointer. No table: no word, or zeros.
-    helper := raw_load(raw_state() + 3400);
-    if helper == 0 {
+    // The program's entry stores the compiler-emitted rt_sites in state word 3400; asked for the
+    // descriptor (rt_sites_fill), it fills in the tables' bounds and the caller's frame pointer. No
+    // table, a refused descriptor or zeros: no location lines.
+    info := rt_alloc(rt_sites_words() * 8);
+    have := rt_sites_fill(info);
+    if have < 3 {
+        rt_free(info);
         return n;
     }
-    info := rt_alloc(40);
-    raw_call2(helper, info, 0);
     begin := raw_load(info);
     end := raw_load(info + 8);
     if (begin == 0) + (end <= begin) {
+        rt_free(info);
         return n;
     }
     mut frame = raw_load(info + 16);
@@ -540,20 +664,21 @@ fn rt_no_backtrace() -> u64 {
 // It refuses rather than guesses: no helper in process state (a seed-built compiler, macOS, the LLVM
 // backend, --debug, --split), or a zero-length or absent function table, returns no text at all.
 fn rt_backtrace() -> u64 {
-    helper := raw_load(raw_state() + 3400);
-    if helper == 0 {
-        return rt_no_backtrace();
-    }
-    info := rt_alloc(40);
-    raw_call2(helper, info, 0);
+    info := rt_alloc(rt_sites_words() * 8);
+    have := rt_sites_fill(info);
     begin := raw_load(info);
     end := raw_load(info + 8);
     fbegin := raw_load(info + 24);
     fend := raw_load(info + 32);
     mut frame = raw_load(info + 16);
     rt_free(info);
-    // A runtime that reads the first three words of a helper emitted before the function table
-    // existed sees zeros here, which is the same refusal.
+    // Five words are needed: a helper offered three, one emitted before the function table existed
+    // (rt_sites_fill cleared those two words, so they read as absent), or a descriptor refused
+    // outright all answer the same - no text, rather than a stack named from a table that is not
+    // there.
+    if have < 5 {
+        return rt_no_backtrace();
+    }
     if ((begin == 0) + (end <= begin) + (fbegin == 0) + (fend <= fbegin)) != 0 {
         return rt_no_backtrace();
     }
@@ -2073,7 +2198,8 @@ fn rt_thread_join(handle: u64) -> u64 {
 //   3224         compile-time probe mode      os-linux: rt_comptime_on   comptime-c3
 //   3232..3384   compile-time refusal text    os-linux: rt_comptime_check comptime-c3
 //   3392         Windows thread bridge        os-windows: rt_win_bridge  --
-//   3400         call-site table helper       _start; rt_fail_where      runtime-errors
+//   3400         call-site table helper       _start; rt_sites_fill      runtime-errors
+//   3408         site descriptor capacity     rt_state_sites_offer       rth-sites
 //   3456         abort report claim           rt_abort                   abort-once
 //   3464..3576   task-stack fault handler     rt_state_stack_guard       stack-guard
 //   3584         contained task failures      rt_contained              task-fail-containment
@@ -2092,6 +2218,11 @@ fn rt_state_stack_guard() -> u64 {
 }
 fn rt_state_pool() -> u64 {
     return raw_state() + 3200;
+}
+// The capacity the site descriptor is asked for, once decided (rt_sites_offer): 0 not asked, 1 the
+// five-word descriptor, n+1 an injected offer of n words.
+fn rt_state_sites_offer() -> u64 {
+    return raw_state() + 3408;
 }
 // rt_host_thread's address, written by _start when the process loaded libc and links
 // pthread_create; 0 everywhere else, and then the runtime clones its own threads.
@@ -3204,11 +3335,12 @@ fn rt_cancel(s: u64) -> u64 {
 //       re-raised failure, its owned site text - bit 0 says which, and costs no word, because a
 //       table entry is 8-byte aligned and an allocation is more so
 //   192 message text (0 when the message is dictated by the kind)
-//   200..240 the site walk's scratch: the FIVE words `rt_sites` writes (statement table start and
-//       end, caller frame, function table start and end). The walk reads three, but this area is
-//       sized by what the helper writes, never by what the walk reads: 240 bytes of payload and a
-//       16-byte block header are exactly one 256-byte size class, so a walk area one word short
-//       writes into the block that follows.
+//   200..240 the site walk's descriptor buffer, rt_sites_words() words (statement table start and
+//       end, caller frame, function table start and end). It is handed to the compiler's helper with
+//       its capacity (rt_sites_fill), so the helper writes a prefix of it and the walk reads three;
+//       neither side sizes the area from what it reads. 240 bytes of payload and a 16-byte block
+//       header are exactly one 256-byte size class, so an area one word short would write into the
+//       block that follows - which is the overrun that once landed on the next block's header.
 // A failed task has no result: word 80 is never written and its dropper is never called.
 fn rt_task_spawn(s: u64, f: u64, item: u64, arity: u64, dropper: u64) -> u64 {
     // Word 152 holds the task's OS thread handle in thread-per-task mode (0 in green mode).
