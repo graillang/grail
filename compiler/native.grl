@@ -11188,12 +11188,10 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
     while reverse.len() != 0 {
         c.fields.push(reverse.pop());
     }
-    // stays: exchange is a builtin, so its &mut is taken before this read.
-    item_public_4 := c.decl_public;
     exchange(
         &mut c.decls[d - 1],
         Decl {
-            public: item_public_4,
+            public: c.decl_public,
             module: m,
             name: name,
             is_enum: is_enum,
@@ -12304,12 +12302,10 @@ fn ffi_record<a>(c: (&a mut C), pass: u64) -> unit {
     while reverse.len() != 0 {
         c.fields.push(reverse.pop());
     }
-    // stays: exchange is a builtin, so its &mut is taken before this read.
-    item_public_6 := c.decl_public;
     exchange(
         &mut c.decls[d - 1],
         Decl {
-            public: item_public_6,
+            public: c.decl_public,
             module: m,
             name: name,
             is_enum: 0,
@@ -12883,10 +12879,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         if typecount != 0 {
             from := c.toks[position].start;
             skip_braces(&mut c);
-            // stays: exchange is a builtin, so its &mut is taken before this read.
-            to := c.toks[c.pos - 1].end;
             // `index` is `c.funcs.len()` after the push, so the record is at `index - 1`.
-            exchange(&mut c.funcs[index - 1].body, (c.src[from: to]).copy());
+            exchange(&mut c.funcs[index - 1].body, (c.src[from: c.toks[c.pos - 1].end]).copy());
         } else {
             skip_braces(&mut c);
         }
@@ -13077,9 +13071,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         prologue.push(c.out[i]);
     }
     ref_params(&mut c);
-    // stays: exchange is a builtin, so its &mut is taken before this read.
-    entry_end := c.out.len();
-    exchange(&mut c.fx_entry_end, entry_end);
+    exchange(&mut c.fx_entry_end, c.out.len());
     // The body begins after the checks: the second entry jumps here.
     body_lbl := label(&mut c);
     mark(&mut c, body_lbl);
@@ -15522,9 +15514,7 @@ fn fx_begin<a, b, d>(c: (&a mut C), sym: &b [u8], name: &d [u8], file: u64, pos:
     c.fx_own_panic[k] = 0;
     trusted := c.raw;
     exchange(&mut c.fx_trusted, trusted);
-    // stays: exchange is a builtin, so its &mut is taken before this read.
-    out_len := c.out.len();
-    exchange(&mut c.fx_out_start, out_len);
+    exchange(&mut c.fx_out_start, c.out.len());
     exchange(&mut c.fx_entry_end, 0);
     c.fx_entry_panic[k] = 0;
     if trusted != 0 {
@@ -15625,9 +15615,7 @@ fn fx_helper<a, b>(c: (&a mut C), sym: &b [u8]) -> unit {
     c.fx_own_alloc[k] = 0;
     c.fx_own_panic[k] = 0;
     exchange(&mut c.fx_trusted, 1);
-    // stays: exchange is a builtin, so its &mut is taken before this read.
-    out_len := c.out.len();
-    exchange(&mut c.fx_out_start, out_len);
+    exchange(&mut c.fx_out_start, c.out.len());
     exchange(&mut c.fx_cur, k + 1);
     return ();
 }
@@ -15840,9 +15828,7 @@ fn fx_solve<a>(c: (&a mut C)) -> unit {
         c.fx_panic[i] = c.fx_own_panic[i];
     }
     for e in c.fx_edge_name.len() {
-        // stays: a vector element read is a loan, so it conflicts with the call's &mut.
-        name := c.fx_edge_name[e].copy();
-        k := fx_lookup(&mut c, view(name));
+        k := fx_lookup(&mut c, view(c.fx_edge_name[e].copy()));
         c.fx_edge_to[e] = k;
         if k == 0 {
             // A name no body or declaration answers for: assumed to allocate and to fail - except
@@ -25672,9 +25658,7 @@ fn pattern_loop<a>(
     loopend := block_end(&mut c, open);
     exchange(&mut c.loop_start, loopstart);
     exchange(&mut c.loop_end, loopend);
-    // stays: exchange is a builtin, so its &mut is taken before this read.
-    loopmark := c.resources.len();
-    exchange(&mut c.loopmark, loopmark);
+    exchange(&mut c.loopmark, c.resources.len());
     oldloop := exchange(&mut c.loopcheck, ownership::snapshot(&c.check));
     oldbreak := exchange(&mut c.breaks, ownership::new());
     oldhas := c.hasbreak;
@@ -27684,9 +27668,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
         bits := float_bits_p(&mut c, view(t), precision);
         if suffixed == 0 {
             exchange(&mut c.flit_start, p);
-            // stays: exchange is a builtin, so its &mut is taken before this read.
-            q := c.pos;
-            exchange(&mut c.flit_end, q);
+            exchange(&mut c.flit_end, c.pos);
             exchange(&mut c.flit_tok, p);
             exchange(&mut c.flit_neg, 0);
         }
@@ -27853,9 +27835,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
         return call(&mut c, view("core"), view("some"));
     }
     if same(view(first), view("None")) {
-        // stays: exchange is a builtin, so its &mut is taken before this read.
-        p := c.pos - 1;
-        exchange(&mut c.none_start, p);
+        exchange(&mut c.none_start, c.pos - 1);
         exchange(&mut c.none_end, c.pos);
         return val(imm(&mut c, 0), 0);
     }
@@ -35228,10 +35208,7 @@ fn iface_module_text<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std: 
     mut at = 0;
     env_start := out.len();
     while at < c.iface_env.len() {
-        decl := c.iface_env[at];
-        // stays: a vector element read is a loan, so it conflicts with the call's &mut.
-        local := c.iface_env_names[at].copy();
-        iface_emit_env(&mut c, &mut out, decl, view(local));
+        iface_emit_env(&mut c, &mut out, c.iface_env[at], view(c.iface_env_names[at].copy()));
         at += 1;
     }
     iface_span(&mut spans, env_start, out.len(), 9, 0, 1, 0);
@@ -37451,9 +37428,7 @@ pub fn main() -> u64 {
         // when its names were registered.
         if (pass == 0) & (c.iface_verify == 0) {
             for k in c.iface_loaded.len() {
-                // stays: a vector element read is a loan, so it conflicts with the call's &mut.
-                file := c.iface_loaded_path[k].copy();
-                iface_load(&mut c, view(file), view(""), 2);
+                iface_load(&mut c, view(c.iface_loaded_path[k].copy()), view(""), 2);
             }
         }
         if pass == 1 {
