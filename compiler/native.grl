@@ -8196,11 +8196,26 @@ fn pv_fill_loop<a>(c: (&a mut C), cnt_lo: u64, cnt_hi: u64, open: u64, facts: (&
     }
     // The count's own term when it is one (`len(v) >= n`), else its floor: a term keeps the fact
     // usable against a guard stated in the same name, which is the shape a fill loop usually has.
+    // Only a plain local name that the body never writes can stand for the count: the loop read the
+    // count once at its head, so a body that moved that name would leave the fact about the new
+    // value, and a length term (`a.len`) names something the body could grow.
     mut k0: i64 = 0;
     ct := pv_index_term(&mut c, cnt_lo, cnt_hi, &mut k0);
     mut symbolic = false;
-    if (ct.len() != 0) & (k0 <= 0) {
-        symbolic = true;
+    if (ct.len() != 0) & (k0 <= 0) & (find_local(&mut c, view(ct)) != 0) {
+        mut mentioned = 0;
+        mut at3 = open + 1;
+        while at3 < close {
+            if kind_at(&mut c, at3) == 1 {
+                if same(view(tok_text(&mut c, at3)), view(ct)) {
+                    mentioned += 1;
+                }
+            }
+            at3 += 1;
+        }
+        if mentioned == 0 {
+            symbolic = true;
+        }
     }
     mut trips: i64 = 0;
     if !symbolic {
