@@ -68,11 +68,23 @@ fact) so that the second word stays live at the `ret`.
 
 ## The layout is observable, and pinned
 
-Because the handle points at a real object, the layout is part of the language's foreign
-interface: a C function handed a `&dyn I` reads the data pointer at offset 0 and the vtable at
-offset 8. `dynf-pair-layout-extern-c` does exactly that through `extern "C"` (it prints the
-concrete value, the first method's slot and the drop slot the C side can see), so the note is not
-the only statement of the ABI: a test pins it, and it fails if either word moves.
+Because the handle points at a real object of a stated size, the layout is not private to the
+compiler: offset 0 is the data pointer and offset 8 is the vtable, and the vtable's own word 0 is
+the drop slot. `dynf-pair-layout` pins it in the corpus - the program pins what word 0 *reaches* (a
+`&mut dyn` method writes through it, so the object holds the mutation afterwards), and the assembly
+assertions pin the offsets: dispatch reads `8(%rdi)` for the vtable, `8(%rax)` for method 0 and
+`16(%rax)` for method 1, which is the `{drop@0, method0@8, method1@16}` statement.
+
+A C callee that reads those two words itself is *not* expressible yet, and the reason is worth
+stating because the ABI alone suggests otherwise: every reference parameter of an `extern "C"`
+function is an out-parameter (C writes through it), and the checker admits only `&mut` handles,
+`CPtr`, `CMutPtr` and `extern "C"` records there, so a `&dyn I` or `&mut dyn I` parameter is
+refused ("an extern C out-parameter must be &mut a handle, CPtr, CMutPtr or extern "C" record").
+Nor can a program reach the pair's address to pass it as a `CPtr`: `cptr` takes a byte sequence or
+view, and a reference does not convert to an integer. `dynf-reject-c-boundary` pins that refusal, so
+admitting the form later is a decision with a test to update. When it is admitted, the shape is
+already settled by this note: a `&dyn I` parameter is one pointer to a `const DynPair *`, because the
+value is one pointer, which is the whole argument for the choice below.
 
 ## Two modules must agree: the interface carries the ABI
 
@@ -140,14 +152,34 @@ the one the rest of the compiler uses.
 
 ## Cases
 
-- `dynf-pair-layout-extern-c` - the layout through `extern "C"`: data at 0, vtable at 8, the first
-  method at `VTable+8`, the drop slot at `VTable+0`.
+- `dynf-pair-layout` - word 0 reaches the object (a `&mut dyn` method writes through it) and the
+  offsets: `8(handle)` is the vtable, `8(vtable)` method 0, `16(vtable)` method 1.
 - `dynf-borrowed-mut-method` - a `&mut dyn` method mutating through the object, observed after the
-  borrow ends.
+  borrow ends; two objects of different concrete types through the same interface.
 - `dynf-owned-dyn-field` - an owned `dyn I` in a record field, passed by value, returned from a
-  call and dropped with the record, with the destructor running once.
-- `dynf-pair-fields-and-vectors` - a `&dyn` in a record field and in a vector, and a `&dyn`
-  returned from a function, all one word.
-- `dynf-pair-optimized` - a function that builds pairs is optimized (its accumulator is promoted;
-  the frame shape shows it), i.e. building a `&dyn` does not opt a function out of the optimizer.
+  call and dropped with the record, the destructor running once per object.
+- `dynf-pair-fields-and-vectors` - a `&dyn` in a record field, in a vector, as an argument and as a
+  result, all one word.
+- `dynf-pair-optimized` - a function that builds pairs is optimized (its accumulator is promoted
+  into a callee-saved register, the frame is compacted), i.e. building a `&dyn` does not opt a
+  function out of the optimizer.
+- `dynf-reject-c-boundary` - the C-parameter gap above, pinned as a refusal.
 - `dyn-borrowed-no-alloc` (existing) - the pair costs no allocation.
+
+## Measurement
+
+The shape `opt2` measured, against a compiler built from this branch's base revision (so the only
+difference is this change): instructions per function, `.type ...,@function` to `.size`. Before and
+after are equal in every function of the three programs - `opt2-dyn-pair-loop`'s source (a pair built,
+copied, passed and returned in a loop), `dynf-pair-layout` and `dynf-pair-fields-and-vectors` - and
+the assembly of the loop program is byte-identical. That is the expected result for a change that
+moves *where the pair is declared* and not what is emitted, and it is why the cost of the one
+indirection did not move either.
+
+One thing did have to be got right for that to hold: the two slot conventions. The front end numbers
+a slot by the value `fresh` hands out (slot `k` is at `-8(k+1)(%rbp)`); `optimize.grl` numbers it by
+address (`N/8` from a `-N(%rbp)` operand, i.e. the front end's `k+1`); `llvm.grl` uses the front
+end's. The fact carries the front end's, and `optimize.grl` converts. Getting it wrong costs six
+instructions in a pair-building `main` (`optpair`: 412 against 406), because the model then protects
+the slot above word 0 instead of word 1 - the pair's second word - and the MIR `opt2` found stays
+lost.
