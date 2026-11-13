@@ -11,10 +11,12 @@ use lexer;
 //   * `textDocument/definition` for declarations in the same file.
 //
 // Diagnostics are not invented here. The open buffer is written to a scratch file and
-// `grail check <file>` is run on it; the compiler prints `file:line:column: message`
-// and this server maps that text into an LSP range. A clean check publishes `[]`, which
-// is how a fixed buffer clears its squiggles. Nothing is published when the compiler
-// cannot be run at all: that is reported with `window/showMessage` instead.
+// `grail check --diagnostics-json <file> <buffer>` is run on it; the compiler appends one JSON
+// record per diagnostic - `file`, `line`, `col`, `code`, `message` - and this server turns the
+// position and the message into an LSP range. Nothing is parsed out of the compiler's printed
+// text. A clean check publishes `[]`, which is how a fixed buffer clears its squiggles. Nothing is
+// published when the compiler cannot be run at all: that is reported with
+// `window/showMessage` instead.
 //
 // Requests are answered from `lib/json.grl` (strict parsing, exact integers) and every
 // response is written as bytes built by hand, so an id, a uri or a compiler message can
@@ -33,17 +35,6 @@ fn eq<a, b>(x: &a [u8], y: &b [u8]) -> bool {
         return false;
     }
     for i in x.len() {
-        if x[i] != y[i] {
-            return false;
-        }
-    }
-    return true;
-}
-fn has_prefix<a, b>(x: &a [u8], y: &b [u8]) -> bool {
-    if x.len() < y.len() {
-        return false;
-    }
-    for i in y.len() {
         if x[i] != y[i] {
             return false;
         }
@@ -437,95 +428,76 @@ fn buffer_name(uri: &[u8]) -> u8[] {
     return name;
 }
 
-// One `file:line:column: message` diagnostic line, mapped back onto the buffer.
-fn diagnostic_from(line: &[u8], offset: u64, text: &[u8]) -> (Diagnostic)? {
-    mut i = offset;
-    if line.len() <= i {
-        return None;
+// One record of the compiler's structured diagnostics, mapped onto the buffer. The record names the
+// file it is about, so a diagnostic the compiler found somewhere else is not put on this buffer; the
+// column is a byte-style source position, which becomes the UTF-16 offset an LSP range wants.
+fn diagnostic_record(record: &[u8], name: &[u8], text: &[u8]) -> (Diagnostic)? {
+    match json::parse(record) {
+        value: json::Value => {
+            file := text_or(&value, view("file"));
+            if !eq(view(file), view(name)) {
+                return None;
+            }
+            line := int_or(&value, view("line"), 0);
+            column := int_or(&value, view("col"), 0);
+            if (line < 1) || (column < 1) {
+                return None;
+            }
+            message := text_or(&value, view("message"));
+            if message.len() == 0 {
+                return None;
+            }
+            number := u64(line);
+            doc_line := line_bytes(text, number - 1);
+            total := utf16_len(doc_line);
+            mut start = utf16_prefix(doc_line, u64(column) - 1);
+            if total < start {
+                start = total;
+            }
+            mut end = start + 1;
+            if total < end {
+                end = total;
+            }
+            return Some(Diagnostic { line: number - 1, start: start, end: end, message: message });
+        },
+        error: json::Error => {
+            return None;
+        }
     }
-    if line[i] != 58 {
-        return None;
-    }
-    i += 1;
-    mut number = 0;
-    mut digits = 0;
-    while (i < line.len()) && is_digit(line[i]) {
-        number = number * 10 + (line[i] - 48);
-        digits += 1;
-        i += 1;
-    }
-    if (digits == 0) || (line.len() <= i) {
-        return None;
-    }
-    if line[i] != 58 {
-        return None;
-    }
-    i += 1;
-    mut column = 0;
-    digits = 0;
-    while (i < line.len()) && is_digit(line[i]) {
-        column = column * 10 + (line[i] - 48);
-        digits += 1;
-        i += 1;
-    }
-    if (digits == 0) || (line.len() <= i) || (number == 0) {
-        return None;
-    }
-    if line[i] != 58 {
-        return None;
-    }
-    i += 1;
-    if (i < line.len()) && (line[i] == 32) {
-        i += 1;
-    }
-    message := line[i: line.len()];
-    if message.len() == 0 {
-        return None;
-    }
-    doc_line := line_bytes(text, number - 1);
-    total := utf16_len(doc_line);
-    mut start = utf16_prefix(doc_line, column - 1);
-    if total < start {
-        start = total;
-    }
-    mut end = start + 1;
-    if total < end {
-        end = total;
-    }
-    return Some(Diagnostic { line: number - 1, start: start, end: end, message: message.copy() });
 }
-fn parse_diagnostics(output: &[u8], name: &[u8], text: &[u8]) -> Diagnostic[] {
+// One record per line, in the order the compiler reported them.
+fn parse_records(records: &[u8], name: &[u8], text: &[u8]) -> Diagnostic[] {
     mut found = Diagnostic[];
     mut i = 0;
-    while i < output.len() {
+    while i < records.len() {
         start := i;
-        while (i < output.len()) && (output[i] != 10) {
+        while (i < records.len()) && (records[i] != 10) {
             i += 1;
         }
         mut end = i;
-        if i < output.len() {
+        if i < records.len() {
             i += 1;
         }
-        if (start < end) && (output[end - 1] == 13) {
+        if (start < end) && (records[end - 1] == 13) {
             end -= 1;
         }
-        line := output[start: end];
-        if has_prefix(line, name) {
-            match diagnostic_from(line, name.len(), text) {
+        record := records[start: end];
+        if 0 < record.len() {
+            match diagnostic_record(record, name, text) {
                 Some(diagnostic) => {
                     found.push(diagnostic);
                 },
-                None => {},
+                None => {}
             }
         }
     }
     return found;
 }
 
-// Compile the buffer in a scratch directory and read the diagnostics back. The compiler
-// writes `file:line:column: message` to stdout; `host::command` inherits this process's
-// stdio, so the check runs under `sh -c` with both streams redirected to a file inside
-// its own working directory. Nothing is written into the user's tree.
+// Compile the buffer in a scratch directory and read the records back. `host::command` inherits
+// this process's stdio, and this process's stdout is the JSON-RPC channel, so the check runs under
+// `sh -c` with the child's own output redirected to a log inside its own working directory; the
+// diagnostics arrive in the records file instead. Nothing is written into the user's tree.
 fn run_check(uri: &[u8], text: &[u8], serial: u64) -> Check {
     root := temp_root();
     // Unique per process (start time) and per check (serial), so two servers never share
@@ -534,7 +506,8 @@ fn run_check(uri: &[u8], text: &[u8], serial: u64) -> Check {
     dir := path_join(view(root), &stamp);
     name := buffer_name(uri);
     path := path_join(view(dir), view(name));
-    out_path := path_join(view(dir), view("diagnostics.txt"));
+    out_path := path_join(view(dir), view("diagnostics.log"));
+    records_path := path_join(view(dir), view("diagnostics.jsonl"));
     host::mkdir(view(dir));
     written := host::write_file(view(path), text);
     if written != 0 {
@@ -545,16 +518,18 @@ fn run_check(uri: &[u8], text: &[u8], serial: u64) -> Check {
     mut command = u8[][];
     command.push(copy_bytes(view("sh")));
     command.push(copy_bytes(view("-c")));
-    command.push(copy_bytes(view("cd \"$1\" || exit 125; exec \"$2\" check \"$3\" >\"$4\" 2>&1")));
+    command.push(copy_bytes(view("cd \"$1\" || exit 125; exec \"$2\" check --diagnostics-json \"$5\" \"$3\" >\"$4\" 2>&1")));
     command.push(copy_bytes(view("grail-lsp")));
     command.push(copy_bytes(view(dir)));
     command.push(exe);
     command.push(copy_bytes(view(name)));
     command.push(copy_bytes(view(out_path)));
+    command.push(copy_bytes(view(records_path)));
     status := host::command(command);
-    output := host::read_file(view(out_path));
-    diagnostics := parse_diagnostics(view(output), view(name), text);
+    records := host::read_file(view(records_path));
+    diagnostics := parse_records(view(records), view(name), text);
     target_dir := path_join(view(dir), view("target"));
+    host::remove(view(records_path), 0);
     host::remove(view(out_path), 0);
     host::remove(view(target_dir), 1);
     host::remove(view(path), 0);

@@ -120,4 +120,30 @@ it reads, not the bodies behind them - which is what makes a body edit cheap, an
 is conservative. The cache also claims no authenticity: anything that can write `.work/` can plant an
 entry whose bytes match its name.
 
-**Try it:** add another helper and change the call. Keep all source files in the invocation.
+Watching instead of rebuilding by hand (`grail check --watch`, `grail build --watch`). One process
+stays alive and re-runs the cycle when an input changes: the sources named on the command line (or,
+in a project, the entry, `src/` and every fetched dependency's sources), the standard modules they
+reach through `use`, and every file in an `--interface DIR`. Change detection is a content hash of
+each input, not a timestamp, so an editor that writes a file back unchanged spends no cycle and a
+file restored with an old timestamp still does. A burst of writes is one cycle: the loop waits for
+the files to go quiet (120 ms, `--debounce MS`) before it runs, and it polls every 100 ms
+(`--interval MS`). The first cycle runs immediately, an error does not end the process, and each
+cycle prints its diagnostics followed by exactly one summary line:
+
+```
+check ok 24 ms
+error 1 diagnostic 31 ms
+built target/app 210 ms
+```
+
+No lock is held between cycles, so a `grail build` in the same directory runs while the watching
+process waits. `--json` replaces the summary with one JSON object per line per cycle - `cycle`,
+`status`, `ms`, `output` for a build, and a `diagnostics` array of `{file, line, col, code,
+message}` - which is what an editor or a language server reads; the compiler's own
+`--diagnostics-json` seam supplies those fields, so nothing parses printed text. A watch process
+ends on a signal, and because the runtime installs no handler the status on termination is the
+signal's (130 for SIGINT), not the last cycle's; `docs/design/incremental-compilation.md` states
+that limit with the reason. This is a driver loop the book cannot execute, like the flags above.
+
+**Try it:** add another helper and change the call. Keep all source files in the invocation. Then run
+`grail check --watch` with the same files, break one, and watch the next cycle report it.

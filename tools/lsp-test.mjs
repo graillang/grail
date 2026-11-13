@@ -189,8 +189,9 @@ const URI = 'file:///virtual/session.grl';
   equal(bad.params.version, 2, 'diagnostics carry the document version');
   equal(bad.params.diagnostics.length, 1, 'the compiler reports one error');
   const [first] = bad.params.diagnostics;
-  equal(first.range.start, { line: 1, character: 11 }, 'the range is the compiler position, in UTF-16');
-  equal(first.range.end, { line: 1, character: 12 }, 'the range covers the offending token');
+  // The compiler points at the name it could not resolve: line 2 (0-based 1), column 5.
+  equal(first.range.start, { line: 1, character: 4 }, 'the range is the compiler position, in UTF-16');
+  equal(first.range.end, { line: 1, character: 5 }, 'the range covers the offending token');
   equal(first.severity, 1, 'severity is Error');
   equal(first.source, 'grail', 'source is grail');
   equal(first.code, 'compiler', 'code names the compiler');
@@ -204,7 +205,7 @@ const URI = 'file:///virtual/session.grl';
   // A different error on a different line, to prove the mapping is not fixed at line 1.
   const arity = await client.change(URI, 4, WRONG_ARITY);
   equal(arity.params.diagnostics.length, 1, 'the arity error is reported');
-  equal(arity.params.diagnostics[0].range.start.line, 4, 'line 5 (1-based) is reported as line 4');
+  equal(arity.params.diagnostics[0].range.start, { line: 4, character: 18 }, 'line 5 (1-based) is line 4, at the closing paren');
   ok(arity.params.diagnostics[0].message.includes('argument count'), `arity message: ${arity.params.diagnostics[0].message}`);
 
   equal(await client.stop(), 0, 'clean exit');

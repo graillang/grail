@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- Added: `grail check --watch` and `grail build --watch` - one driver process that re-runs the cycle
+  when an input changes. The input set is the sources named on the command line (or the project's
+  entry, `src/` and every fetched dependency's sources), the standard modules they reach through
+  `use`, and every file in an `--interface DIR`, recomputed on every poll so a new file or a new
+  `use` is a change like any other. Change detection is a 128-bit content stamp (XXH64 with two
+  seeds, `lib/xxhash.grl`), never a timestamp: a file written back unchanged is not a change, and a
+  source restored with an old mtime still is. A burst of writes collapses into one cycle through a
+  quiet period (120 ms, `--debounce MS`) over a 100 ms poll (`--interval MS`); the first cycle runs
+  immediately, an error keeps the process alive, and each cycle prints its diagnostics followed by
+  exactly one summary line - `check ok 24 ms`, `error 3 diagnostics 31 ms`, `built target/app 210
+  ms`. No lock is held between cycles, so a concurrent `grail build` in the same directory runs
+  while the process waits. `--json` makes a cycle one JSON object per line (`cycle`, `status`, `ms`,
+  `output` for a build, and a `diagnostics` array of `{file, line, col, code, message}`), which is
+  the seam an editor or the language server reads; the fields come from a new structured-diagnostics
+  channel - the compiler's internal `--diagnostics-json FILE`, written where a diagnostic is built,
+  carrying the caret form as `rendered` - so nothing parses printed text. `--watch` is refused on
+  `run`/`test` and `--cache` is refused with it, since a cache hit is a cycle that does not run the
+  compiler. Limit, stated with its reason: the runtime installs no SIGINT/SIGTERM handler and a new
+  `host::` builtin cannot land from this branch (the published bootstrap compiler would not know
+  it), so a watch process ends on the signal with the shell status 130/143 rather than the last
+  cycle's; the last cycle's status is in the summary line and in `--json`. Design and the
+  rejected alternatives: `docs/design/incremental-compilation.md`, watch mode. Book: *Building
+  modules: the work a build can skip* in *Modules*. Tests: a watch section in
+  `tools/test-cli.mjs`, since the behaviour is a process loop.
 - Fixed: `bun tools/bootstrap.mjs stage ARCH` no longer requires the published manifest to describe the current sources. Splitting a reseed into `stage` and `publish` left the old `verify`-only manifest comparison on a bare `else`, so every `stage` run ended in `bootstrap source manifest is stale` - exactly the case a reseed exists for, and `tools/gate.sh --reseed` stopped at its first target after the self-hosting check had already passed. The comparison now runs only for `verify`; `bun tools/ci.mjs lint` pins the guard.
 - Tooling: `bootstrap.mjs stage ARCH` and `bootstrap.mjs publish` split a reseed into one step per target plus a publish that requires every seed to come from the current sources, and `tools/gate.sh --reseed` uses them, so an interrupted gate resumes at the target it stopped on rather than redoing an up-to-90-minute reseed.
 - Added: borrowed interface objects - `&dyn I` and `&mut dyn I` of a value that stays where it is, with no allocation (Rust's `&dyn Trait`). `&x` and `&mut x` become one at a typed binding, an argument and a return when `T` implements `I`, and a reference to an owned `dyn I` converts too. The value is a pair {data, vtable} written into the frame that borrows it, so the object never moves and nothing is allocated; a method call dispatches through that pair exactly as an owned `dyn I` dispatches through its cell, and a `&mut dyn` method mutates the original. The lifetime rules are `&T`'s: the value cannot be moved or dropped while the borrow lives, and a `&dyn` borrowed from a local cannot be returned (`returned borrow escapes its declared input lifetime`) while one borrowed from an input can. Records, vectors of borrowed objects (`(&dyn I)[]`) and generic code hold them; interface files carry the form as `(bobj (dyn ...))`. A function that builds one is left to the assembler as written - the word optimizer models frame slots as scalars, and a pair's second word is only reachable through the pair's address. Book: *Borrowing an object* in *Generics*; corpus: `dyn-borrowed-objects`, `dyn-borrowed-no-alloc` (an `@no_alloc` builder and a static-vtable pin), `dyn-borrowed-interface-form`, and `dyn-borrowed-reject-move`/`-escape`/`-not-implemented`.
