@@ -3,14 +3,57 @@ unsafe module runtime;
 // Abort: the process dies here and control never returns to the caller, not even when a foreign
 // frame called in (a C callback that aborts). The rule is "abort never unwinds, and nothing may
 // unwind across the C boundary": no atexit handler, C++ destructor, DLL detach, stack unwind or
-// foreign cleanup of any kind runs. SIGABRT (POSIX) makes the termination visible to the parent;
-// rt_hard_exit is the platform's cleanup-free exit (exit_group, TerminateProcess, _exit), because
-// exit(2) would run foreign cleanup. This is the only abort entry point in the runtime.
-fn rt_abort() -> u64 {
+// foreign cleanup of any kind runs. rt_hard_exit is the platform's cleanup-free exit (exit_group,
+// TerminateProcess, _exit), because exit(2) would run foreign cleanup. This is the only abort entry
+// point in the runtime.
+//
+// Exactly one thread reports and exits. Several tasks can fail at the same time (eight parallel
+// chunks all writing one past their own slice is the regression fixture), and a racing second
+// reporter used to print its own message and then raise its own SIGABRT. A signal sent to the
+// process is delivered to whichever thread the kernel picks - often a parked worker returning to
+// user space - so the process died by SIGABRT instead of the 134 exit the contract promises. A
+// single atomic claim word now decides the reporter; every other failing thread parks on that word
+// forever, and the reporter's exit ends the process.
+//
+// SIGABRT is raised only from a thread whose failure cannot race another reporter - the main thread,
+// an offload helper, a thread foreign code created. A scheduler or pool worker exits 134 directly:
+// it is one of several to fail at once, and the signal would race the hard exit for the same reason.
+fn rt_abort_claim() -> u64 {
+    return raw_state() + 3456;
+}
+fn rt_abort_begin() -> u64 {
+    return raw_atomic_cas(rt_abort_claim(), 0, 1) == 0;
+}
+// Never returns: nothing wakes this word, and the reporter's exit_group/TerminateProcess ends the
+// process. Parking instead of spinning keeps a failing pool's other workers off the CPU.
+fn rt_abort_park() -> u64 {
+    while true {
+        rt_syscall(202, rt_abort_claim(), 128, 1);
+    }
+    return 0;
+}
+fn rt_abort_final() -> u64 {
     rt_prof_dump();
-    rt_syscall(62, rt_syscall(39, 0, 0, 0), 6, 0);
+    if rt_abort_signals() != 0 {
+        rt_syscall(62, rt_syscall(39, 0, 0, 0), 6, 0);
+    }
     rt_hard_exit(134);
     return 0;
+}
+// Whether this failure is reported as SIGABRT. Record word 24 is a runtime-worker marker: it is the
+// thread's entry until rt_thread_main has read it, and a pool worker then stores non-zero there.
+fn rt_abort_signals() -> u64 {
+    w := raw_tp_get();
+    if w == 0 {
+        return 1;
+    }
+    return raw_load(w + 24) == 0;
+}
+fn rt_abort() -> u64 {
+    if rt_abort_begin() == 0 {
+        rt_abort_park();
+    }
+    return rt_abort_final();
 }
 // ---- runtime errors ----------------------------------------------------------------------------
 // A check that fails stops the program the way it always has (SIGABRT, exit status 134), but first
@@ -24,6 +67,11 @@ fn rt_abort() -> u64 {
 // outside the runtime adds a line. Without a table (debug builds, the LLVM backend, macOS) the
 // message is printed alone.
 fn rt_fail(kind: u64, a: u64, b: u64) -> u64 {
+    // The report is written once per process: a second failing thread parks before it builds or
+    // prints anything (see rt_abort).
+    if rt_abort_begin() == 0 {
+        rt_abort_park();
+    }
     // The message writers stop at the limit; a site line's own tail (`:line:col` and the newline) is
     // what the reserve past it is for.
     buf := rt_alloc(rt_fail_limit() + 196);
@@ -71,8 +119,7 @@ fn rt_fail(kind: u64, a: u64, b: u64) -> u64 {
     n = n + 1;
     n = rt_fail_where(buf, n);
     rt_write_all(2, buf, n);
-    rt_abort();
-    return 0;
+    return rt_abort_final();
 }
 // An inline check in compiled code failed (the compiler rewrote its `call rt_abort`): for an index
 // check the vector is in `a` and the index in `b`.
@@ -122,6 +169,9 @@ fn rt_fail_num(buf: u64, n: u64, v: u64) -> u64 {
 // data beside the check: the predicate's own text and ` = required by <fn> at <where>`. The location
 // line is the call site - the frame above this function - exactly as a failed check reports it.
 fn rt_refine(msg: u64, req: u64) -> u64 {
+    if rt_abort_begin() == 0 {
+        rt_abort_park();
+    }
     buf := rt_alloc(1024);
     mut n = rt_fail_put(buf, 0, "error: refinement violated: ");
     mut i = 0;
@@ -140,8 +190,7 @@ fn rt_refine(msg: u64, req: u64) -> u64 {
         j = j + 1;
     }
     rt_write_all(2, buf, n);
-    rt_abort();
-    return 0;
+    return rt_abort_final();
 }
 // ` --> file:line:col` for the frame that failed, then one ` = called from` line per further frame
 // that lies in a statement - at most 32 of them.
@@ -1530,8 +1579,10 @@ fn rt_thread_spawn_detached(entry: u64, arg: u64) -> u64 {
     return 0;
 }
 // One OS thread running entry(arg) on its own worker record. The record is the top 64 bytes of a
-// mapped region: {0 self, 8 scheduler sp, 16 current task, 24 entry, 32 arg, 40 TID word of a
-// persistent thread, 48 Windows wait value, 56 host TLS base}. Word 56 is this thread's libc TCB,
+// mapped region: {0 self, 8 scheduler sp, 16 current task, 24 entry then the runtime-worker marker,
+// 32 arg, 40 TID word of a persistent thread, 48 Windows wait value, 56 host TLS base}. Word 24 is
+// the entry only until rt_thread_main has read it; a pool worker then stores a non-zero marker there
+// so rt_abort_signals can tell a runtime worker from any other thread. Word 56 is this thread's libc TCB,
 // which every foreign call made on the thread switches to (0: there is none, the call runs on the
 // record). The two words under the record are the start block {rt_thread_main, record}.
 //
@@ -1685,6 +1736,7 @@ fn rt_thread_join(handle: u64) -> u64 {
 //   3232..3384   compile-time refusal text    os-linux: rt_comptime_check comptime-c3
 //   3392         Windows thread bridge        os-windows: rt_win_bridge  --
 //   3400         call-site table helper       _start; rt_fail_where      runtime-errors
+//   3456         abort report claim           rt_abort                   abort-once
 //   3840         Windows fiber state          os-windows                 --
 //   3856..       Windows fiber table          os-windows                 --
 //
@@ -1843,6 +1895,7 @@ fn rt_pool_worker_main(w: u64) -> u64 {
     // Publish this thread's record so rt_pool_self can find `w` from the thread itself. It is
     // written before the worker takes any work, and no other thread reads it until it does.
     raw_store(w + 56, raw_tp_get());
+    raw_store(raw_tp_get() + 24, w); // runtime-worker marker for rt_abort_signals
     p := raw_load(w + 32);
     while true {
         mut j = rt_pool_take(w);
