@@ -145,7 +145,12 @@ struct Func {
     rpred: Pred,
     // The parameters' source names, parallel to `ppreds`: a call site needs them to put the
     // arguments' terms in the predicate's place, and an interface carries the ones a predicate uses.
-    pnames: u8[][]
+    pnames: u8[][],
+    // 1 for `@no_alloc` and `@no_panic`: claims the compiler proves of the body and of everything it
+    // calls (docs/design/effects.md). An interface carries them, so a caller in another module
+    // relies on the definition's own proof.
+    no_alloc: u64,
+    no_panic: u64
 }
 struct Interface {
     module: u8[],
@@ -636,7 +641,42 @@ struct C {
     diag_help: u8[][],
     // Text under the primary span (`expected `u64`, found `string``).
     diag_primary: u8[],
-    lib_owner: u8[][]
+    lib_owner: u8[][],
+    // ---- checked effects (G26, docs/design/effects.md) --------------------------------------------
+    // One record per function symbol, whether a body was emitted for it in this build or only a
+    // declaration was read: the claims `@no_alloc`/`@no_panic` make, the allocation sites and checks
+    // its own body emitted, the call edges read out of that body, and the facts the fixpoint settles.
+    fx_any: u64,
+    fx_cur: u64,
+    fx_syms: u8[][],
+    fx_body: u64[],
+    fx_attr_alloc: u64[],
+    fx_attr_panic: u64[],
+    fx_own_alloc: u64[],
+    fx_own_panic: u64[],
+    fx_alloc_what: u8[][],
+    fx_alloc_file: u64[],
+    fx_alloc_pos: u64[],
+    fx_panic_what: u8[][],
+    fx_panic_hint: u8[][],
+    fx_panic_file: u64[],
+    fx_panic_pos: u64[],
+    fx_alloc: u64[],
+    fx_panic: u64[],
+    fx_alloc_thru: u64[],
+    fx_panic_thru: u64[],
+    fx_fn_name: u8[][],
+    fx_fn_file: u64[],
+    fx_fn_pos: u64[],
+    fx_edge_from: u64[],
+    fx_edge_name: u8[][],
+    fx_edge_to: u64[],
+    fx_edge_kind: u64[],
+    fx_edge_file: u64[],
+    fx_edge_pos: u64[],
+    fx_pending_alloc: u64,
+    fx_pending_panic: u64,
+    fx_bounded: u64
 }
 
 fn same<a, b>(x: &a [u8], y: &b [u8]) -> bool {
@@ -8164,6 +8204,8 @@ fn builtin_drop_interface<a>(c: (&a mut C)) -> unit {
                 ppreds: Pred[],
                 rpred: no_pred(),
                 pnames: u8[][],
+                no_alloc: 0,
+                no_panic: 0,
             }
         );
     index := c.funcs.len() - 1;
@@ -12268,6 +12310,8 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                 ppreds: Pred[],
                 rpred: no_pred(),
                 pnames: u8[][],
+                no_alloc: 0,
+                no_panic: 0,
             }
         );
     return ();
@@ -12286,6 +12330,9 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     expect(&mut c, view("fn"));
     // `unsafe fn`: consumed here, whatever pass this is, so the next item does not inherit it.
     unsafe_fn := exchange(&mut c.pending_unsafe, 0);
+    // `@no_alloc`/`@no_panic`: the claims this body has to prove (docs/design/effects.md).
+    claimed_alloc := exchange(&mut c.fx_pending_alloc, 0);
+    claimed_panic := exchange(&mut c.fx_pending_panic, 0);
     mut name = ident(&mut c);
     c.cur_name = name.copy();
     c.cur_file = c.file;
@@ -12552,6 +12599,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                     ppreds: copy_preds(&ppreds),
                     rpred: Pred { file: rpred.file, lo: rpred.lo, hi: rpred.hi },
                     pnames: copy_names(&pnames),
+                    no_alloc: claimed_alloc,
+                    no_panic: claimed_panic,
                 }
             );
         index := c.funcs.len();
@@ -13095,6 +13144,8 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
                     ppreds: Pred[],
                     rpred: no_pred(),
                     pnames: u8[][],
+                    no_alloc: 0,
+                    no_panic: 0,
                 }
             );
         index := c.funcs.len() - 1;
@@ -15115,23 +15166,988 @@ fn ref_strict_form<a>(c: (&a mut C)) -> u64 {
     exchange(&mut c.strict_next, 1);
     return 1;
 }
+// ---- checked effects (G26, docs/design/effects.md) ------------------------------------------------
+//
+// `@no_alloc` and `@no_panic` are claims about a function *and everything it calls*, and the compiler
+// proves them rather than trusting them: while a body is emitted it records the allocation sites and
+// the checks of its own code, its finished bytes are read back for the calls it makes, and the facts
+// settle by a fixpoint over that graph. Allocation is anything that reaches `rt_alloc` - a `push`, a
+// string built by `format`, a record or vector literal, an `alloc` block, a boxed closure, an `Rc` -
+// because the runtime's `rt_alloc` is the one place the heap is asked for. The runtime's failure path
+// (`rt_abort`, `rt_fail`, `rt_refine`) is not followed: a program that aborts allocates nothing a
+// surviving program can observe.
+//
+// `@bounded(n)` on a `while`/`for` is proved from the loop's own tokens: a counter that strictly
+// increases toward a constant (or refined) bound and that nothing else in the body assigns, or a
+// `for i in a..b` whose span is at most n.
+
+// `@no_alloc` and `@no_panic` on a declaration. The shape is `@strict`'s: no `;` form, further
+// attributes may follow, and the next declaration consumes them. 1 when one was consumed.
+fn fx_attr_form<a>(c: (&a mut C)) -> u64 {
+    next := c.pos + 1;
+    if kind_at(&mut c, next) != 1 {
+        return 0;
+    }
+    word := tok_text(&mut c, next);
+    if same(view(word), view("no_alloc")) {
+        advance(&mut c);
+        advance(&mut c);
+        exchange(&mut c.fx_pending_alloc, 1);
+        exchange(&mut c.fx_any, 1);
+        return 1;
+    }
+    if same(view(word), view("no_panic")) {
+        advance(&mut c);
+        advance(&mut c);
+        exchange(&mut c.fx_pending_panic, 1);
+        exchange(&mut c.fx_any, 1);
+        return 1;
+    }
+    return 0;
+}
+// The record of one function symbol: index + 1, appending a fresh one when this is its first mention.
+fn fx_sym<a, b>(c: (&a mut C), sym: &b [u8]) -> u64 {
+    for i in c.fx_syms.len() {
+        if same(view(c.fx_syms[i]), view(sym)) {
+            return i + 1;
+        }
+    }
+    c.fx_syms.push(copy_bytes(view(sym)));
+    c.fx_body.push(0);
+    c.fx_attr_alloc.push(0);
+    c.fx_attr_panic.push(0);
+    c.fx_own_alloc.push(0);
+    c.fx_own_panic.push(0);
+    c.fx_alloc_what.push(u8[]);
+    c.fx_alloc_file.push(0);
+    c.fx_alloc_pos.push(0);
+    c.fx_panic_what.push(u8[]);
+    c.fx_panic_hint.push(u8[]);
+    c.fx_panic_file.push(0);
+    c.fx_panic_pos.push(0);
+    c.fx_alloc.push(0);
+    c.fx_panic.push(0);
+    c.fx_alloc_thru.push(0);
+    c.fx_panic_thru.push(0);
+    c.fx_fn_name.push(u8[]);
+    c.fx_fn_file.push(0);
+    c.fx_fn_pos.push(0);
+    return c.fx_syms.len();
+}
+// A body starts being recorded: its symbol is known before its bytes are, which is what the fact
+// table is keyed by. `name` is the source name a diagnostic shows.
+fn fx_begin<a, b, d>(c: (&a mut C), sym: &b [u8], name: &d [u8], file: u64, pos: u64, no_alloc: u64, no_panic: u64) -> unit {
+    if c.fx_any == 0 {
+        return ();
+    }
+    k := fx_sym(&mut c, view(sym)) - 1;
+    c.fx_body[k] = 1;
+    if no_alloc != 0 {
+        c.fx_attr_alloc[k] = 1;
+    }
+    if no_panic != 0 {
+        c.fx_attr_panic[k] = 1;
+    }
+    c.fx_fn_name[k] = copy_bytes(view(name));
+    c.fx_fn_file[k] = file;
+    c.fx_fn_pos[k] = pos;
+    exchange(&mut c.fx_cur, k + 1);
+    return ();
+}
+// An allocation point of the body being emitted, named the way the language spells it.
+fn fx_alloc_here<a, b>(c: (&a mut C), what: &b [u8]) -> unit {
+    cur := c.fx_cur;
+    if cur == 0 {
+        return ();
+    }
+    k := cur - 1;
+    if k >= c.fx_own_alloc.len() {
+        return ();
+    }
+    if c.fx_own_alloc[k] != 0 {
+        return ();
+    }
+    c.fx_own_alloc[k] = 1;
+    c.fx_alloc_what[k] = copy_bytes(view(what));
+    c.fx_alloc_file[k] = c.file;
+    c.fx_alloc_pos[k] = c.pos;
+    return ();
+}
+// A runtime check of the body being emitted: what it is, where it is, and what would prove it away.
+fn fx_check_here<a, b, d>(c: (&a mut C), what: &b [u8], hint: &d [u8]) -> unit {
+    fx_check_at(&mut c, view(what), view(hint), c.file, c.pos);
+    return ();
+}
+fn fx_check_at<a, b, d>(c: (&a mut C), what: &b [u8], hint: &d [u8], file: u64, pos: u64) -> unit {
+    cur := c.fx_cur;
+    if cur == 0 {
+        return ();
+    }
+    k := cur - 1;
+    if k >= c.fx_own_panic.len() {
+        return ();
+    }
+    if c.fx_own_panic[k] != 0 {
+        return ();
+    }
+    c.fx_own_panic[k] = 1;
+    c.fx_panic_what[k] = copy_bytes(view(what));
+    c.fx_panic_hint[k] = copy_bytes(view(hint));
+    c.fx_panic_file[k] = file;
+    c.fx_panic_pos[k] = pos;
+    return ();
+}
+// The body ends: its bytes are read back for the calls it makes. A `call` only counts at the start of
+// a line, so a string or predicate literal's bytes cannot fake one; `call *reg` is an indirect call,
+// recorded as `*` because nothing known is named there.
+fn fx_end<a>(c: (&a mut C)) -> unit {
+    cur := c.fx_cur;
+    if cur == 0 {
+        return ();
+    }
+    exchange(&mut c.fx_cur, 0);
+    from := cur - 1;
+    mut i = 0;
+    while i < c.out.len() {
+        line_start := (i == 0) || (c.out[i - 1] == 10);
+        if line_start && (c.out[i] == 99) {
+            ok := true;
+            if i + 4 >= c.out.len() {
+                ok = false;
+            } else {
+                if (c.out[i + 1] != 97) || (c.out[i + 2] != 108) || (c.out[i + 3] != 108) || (c.out[i + 4] != 32) {
+                    ok = false;
+                }
+            }
+            if ok {
+                mut j = i + 5;
+                indirect := false;
+                if j < c.out.len() {
+                    if c.out[j] == 42 {
+                        indirect = true;
+                        j = j + 1;
+                    }
+                }
+                mut name = u8[];
+                while (j < c.out.len()) && (c.out[j] != 10) {
+                    name.push(c.out[j]);
+                    j = j + 1;
+                }
+                if indirect {
+                    name = copy_bytes(view("*"));
+                } else {
+                    stripped := fx_strip_proved(view(name));
+                    name = stripped;
+                }
+                if name.len() != 0 {
+                    c.fx_edge_from.push(from);
+                    c.fx_edge_name.push(name);
+                    c.fx_edge_to.push(0);
+                    c.fx_edge_kind.push(0);
+                    c.fx_edge_file.push(c.file);
+                    c.fx_edge_pos.push(c.pos);
+                }
+                i = j;
+            }
+        }
+        i = i + 1;
+    }
+    return ();
+}
+// A direct call whose refined parameters were all proved enters at `<symbol>.proved`; the callee is
+// the same function either way.
+fn fx_strip_proved<a>(name: &a [u8]) -> u8[] {
+    mut out = copy_bytes(view(name));
+    mut cut = 0;
+    mut i = 0;
+    while i < out.len() {
+        if out[i] == 46 {
+            cut = i;
+        }
+        i = i + 1;
+    }
+    if (cut != 0) && (cut + 7 == out.len()) {
+        mut hit = true;
+        if (out[cut + 1] != 112) || (out[cut + 2] != 114) || (out[cut + 3] != 111) || (out[cut + 4] != 118) || (out[cut + 5] != 101) || (out[cut + 6] != 100) {
+            hit = false;
+        }
+        if hit {
+            mut trimmed = u8[];
+            for i in cut {
+                trimmed.push(out[i]);
+            }
+            out = trimmed;
+        }
+    }
+    return out;
+}
+// The symbol a declared function is emitted (and called) under.
+fn fx_func_symbol<a>(c: (&a mut C), i: u64) -> u8[] {
+    mut out = u8[];
+    plat := c.plat;
+    m := c.funcs[i].module.copy();
+    n := c.funcs[i].name.copy();
+    ext := c.funcs[i].ext;
+    symbol := c.funcs[i].symbol.copy();
+    if ext == 2 {
+        // A C callback is called through the C name it was given, under the platform prefix.
+        if plat == 1 {
+            out.push(95);
+        }
+        push_bytes(&mut out, view(symbol));
+        return out;
+    }
+    mangle_into(&mut out, plat, view(m), view(n));
+    return out;
+}
+// The record a callee symbol names: a body emitted for it, a declaration read for it, or nothing.
+fn fx_lookup<a, b>(c: (&a mut C), name: &b [u8]) -> u64 {
+    if name.len() == 0 {
+        return 0;
+    }
+    if name[0] == 42 {
+        return 0;
+    }
+    for i in c.fx_syms.len() {
+        if same(view(c.fx_syms[i]), view(name)) {
+            return i + 1;
+        }
+    }
+    // `<symbol>#<digest>` is a specialisation of the template `<symbol>`: same source body.
+    mut cut = 0;
+    mut i = 0;
+    while i < name.len() {
+        if (name[i] == 35) && (cut == 0) {
+            cut = i;
+        }
+        i = i + 1;
+    }
+    if cut != 0 {
+        mut base = u8[];
+        for j in cut {
+            base.push(name[j]);
+        }
+        for j in c.fx_syms.len() {
+            if same(view(c.fx_syms[j]), view(base)) {
+                return j + 1;
+            }
+        }
+    }
+    return 0;
+}
+// The fact of a callee: proved by its own body in this build, or claimed by an attribute that its own
+// module verified. Anything else is unknown, and unknown means it has to be assumed to allocate and to
+// fail.
+fn fx_callee_alloc<a>(c: (&a C), k: u64) -> u64 {
+    kk := k - 1;
+    if c.fx_body[kk] != 0 {
+        return c.fx_alloc[kk];
+    }
+    if c.fx_attr_alloc[kk] != 0 {
+        return 0;
+    }
+    return 1;
+}
+fn fx_callee_panic<a>(c: (&a C), k: u64) -> u64 {
+    kk := k - 1;
+    if c.fx_body[kk] != 0 {
+        return c.fx_panic[kk];
+    }
+    if c.fx_attr_panic[kk] != 0 {
+        return 0;
+    }
+    return 1;
+}
+// The declarations' attributes, then the call graph, then the fixpoint over it. A function's own
+// allocation sites and checks are its starting facts; a call passes its callee's facts on, so a chain
+// of plain functions is followed to the `rt_alloc` at the end of it.
+fn fx_solve<a>(c: (&a mut C)) -> unit {
+    if c.fx_any == 0 {
+        return ();
+    }
+    for i in c.funcs.len() {
+        na := c.funcs[i].no_alloc;
+        np := c.funcs[i].no_panic;
+        if (na != 0) || (np != 0) {
+            sym := fx_func_symbol(&mut c, i);
+            if sym.len() != 0 {
+                k := fx_sym(&mut c, view(sym)) - 1;
+                if k < c.fx_attr_alloc.len() {
+                    if na != 0 {
+                        c.fx_attr_alloc[k] = 1;
+                    }
+                    if np != 0 {
+                        c.fx_attr_panic[k] = 1;
+                    }
+                }
+            }
+        }
+    }
+    for i in c.fx_syms.len() {
+        c.fx_alloc[i] = c.fx_own_alloc[i];
+        c.fx_panic[i] = c.fx_own_panic[i];
+    }
+    for e in c.fx_edge_name.len() {
+        name := c.fx_edge_name[e].copy();
+        k := fx_lookup(&mut c, view(name));
+        c.fx_edge_to[e] = k;
+        if k == 0 {
+            c.fx_edge_kind[e] = 1;
+        }
+    }
+    mut changed = 1;
+    mut rounds = 0;
+    while (changed != 0) && (rounds <= c.fx_syms.len() + 1) {
+        changed = 0;
+        rounds = rounds + 1;
+        for e in c.fx_edge_from.len() {
+            from := c.fx_edge_from[e];
+            to := c.fx_edge_to[e];
+            kind := c.fx_edge_kind[e];
+            mut a = 0;
+            mut p = 0;
+            if to != 0 {
+                a = fx_callee_alloc(&c, to);
+                p = fx_callee_panic(&c, to);
+            } else {
+                if kind != 0 {
+                    a = 1;
+                    p = 1;
+                }
+            }
+            if (a != 0) && (c.fx_alloc[from] == 0) {
+                c.fx_alloc[from] = 1;
+                c.fx_alloc_thru[from] = to;
+                changed = 1;
+            }
+            if (p != 0) && (c.fx_panic[from] == 0) {
+                c.fx_panic[from] = 1;
+                c.fx_panic_thru[from] = to;
+                changed = 1;
+            }
+        }
+    }
+    return ();
+}
+// The chain a fact travelled, for a diagnostic: `f -> g -> ...`. At most 8 links, so a cycle in the
+// call graph still terminates.
+fn fx_chain<a>(c: (&a mut C), first: u64, spending: u64) -> u8[] {
+    mut out = u8[];
+    k := first + 1;
+    mut n = 0;
+    while (k != 0) && (n < spending) {
+        idx := k - 1;
+        if n != 0 {
+            push_bytes(&mut out, view(" -> "));
+        }
+        push_bytes(&mut out, view(c.fx_syms[idx]));
+        n = n + 1;
+        k = c.fx_alloc_thru[idx];
+    }
+    return out;
+}
+fn fx_chain_panic<a>(c: (&a mut C), first: u64, spending: u64) -> u8[] {
+    mut out = u8[];
+    k := first + 1;
+    mut n = 0;
+    while (k != 0) && (n < spending) {
+        idx := k - 1;
+        if n != 0 {
+            push_bytes(&mut out, view(" -> "));
+        }
+        push_bytes(&mut out, view(c.fx_syms[idx]));
+        n = n + 1;
+        k = c.fx_panic_thru[idx];
+    }
+    return out;
+}
+// One diagnostic, at the position of the offending site (which may be in another file than the one
+// the compile stopped in).
+fn fx_fail<a>(c: (&a mut C), file: u64, pos: u64, msg: u8[]) -> unit {
+    load_file(&mut c, file);
+    exchange(&mut c.file, file);
+    exchange(&mut c.pos, pos);
+    fail(&mut c, view(msg));
+    return ();
+}
+// Where a fact's own site is: the site the body recorded, else the function's declaration.
+fn fx_site_file<a>(c: (&a mut C), k: u64) -> u64 {
+    if c.fx_alloc_file[k] != 0 {
+        return c.fx_alloc_file[k];
+    }
+    return c.fx_fn_file[k];
+}
+fn fx_site_pos<a>(c: (&a mut C), k: u64) -> u64 {
+    if c.fx_alloc_file[k] != 0 {
+        return c.fx_alloc_pos[k];
+    }
+    return c.fx_fn_pos[k];
+}
+// Every claim is checked here, after the whole program - including the drop helpers and the
+// specialisations it asked for - has been emitted.
+fn fx_report<a>(c: (&a mut C)) -> unit {
+    if c.fx_any == 0 {
+        return ();
+    }
+    for k in c.fx_syms.len() {
+        if k >= c.fx_attr_alloc.len() {
+            continue;
+        }
+        if (c.fx_body[k] == 0) || (c.fx_attr_alloc[k] == 0) {
+            continue;
+        }
+        if c.fx_alloc[k] == 0 {
+            continue;
+        }
+        name := c.fx_fn_name[k].copy();
+        mut msg = copy_bytes(view("`@no_alloc` function `"));
+        push_bytes(&mut msg, view(name));
+        thru := c.fx_alloc_thru[k];
+        if c.fx_own_alloc[k] != 0 {
+            push_bytes(&mut msg, view("` performs a heap allocation: "));
+            push_bytes(&mut msg, view(c.fx_alloc_what[k]));
+            push_bytes(&mut msg, view("\n = move that out of the function, or keep the attribute off it"));
+        } else {
+            push_bytes(&mut msg, view("` performs a heap allocation: it calls "));
+            chain := fx_chain(&mut c, k, 8);
+            push_bytes(&mut msg, view(chain));
+            push_bytes(&mut msg, view("\n = the call chain above reaches something that allocates"));
+        }
+        at_file := fx_site_file(&mut c, k);
+        at_pos := fx_site_pos(&mut c, k);
+        if thru != 0 {
+            at_file = fx_edge_file_of(&mut c, k, thru);
+            at_pos = fx_edge_pos_of(&mut c, k, thru);
+        }
+        fx_fail(&mut c, at_file, at_pos, msg);
+    }
+    for k in c.fx_syms.len() {
+        if k >= c.fx_attr_panic.len() {
+            continue;
+        }
+        if (c.fx_body[k] == 0) || (c.fx_attr_panic[k] == 0) {
+            continue;
+        }
+        if c.fx_panic[k] == 0 {
+            continue;
+        }
+        name := c.fx_fn_name[k].copy();
+        mut msg = copy_bytes(view("`@no_panic` function `"));
+        push_bytes(&mut msg, view(name));
+        mut at_file = c.fx_fn_file[k];
+        mut at_pos = c.fx_fn_pos[k];
+        if c.fx_own_panic[k] != 0 {
+            push_bytes(&mut msg, view("` can fail: "));
+            push_bytes(&mut msg, view(c.fx_panic_what[k]));
+            if c.fx_panic_hint[k].len() != 0 {
+                push_bytes(&mut msg, view("\n = "));
+                push_bytes(&mut msg, view(c.fx_panic_hint[k]));
+            }
+            at_file = c.fx_panic_file[k];
+            at_pos = c.fx_panic_pos[k];
+        } else {
+            chain := fx_chain_panic(&mut c, k, 8);
+            push_bytes(&mut msg, view("` can fail: it calls "));
+            push_bytes(&mut msg, view(chain));
+            push_bytes(&mut msg, view("\n = a callee leaves a runtime check, so the whole chain has to be check-free"));
+        }
+        fx_fail(&mut c, at_file, at_pos, msg);
+    }
+    return ();
+}
+// The edge of `from` that names `to`: the call site a diagnostic points at.
+fn fx_edge_file_of<a>(c: (&a mut C), from: u64, to: u64) -> u64 {
+    for e in c.fx_edge_from.len() {
+        if c.fx_edge_from[e] == from {
+            if c.fx_edge_to[e] == to {
+                return c.fx_edge_file[e];
+            }
+        }
+    }
+    return c.fx_fn_file[from];
+}
+fn fx_edge_pos_of<a>(c: (&a mut C), from: u64, to: u64) -> u64 {
+    for e in c.fx_edge_from.len() {
+        if c.fx_edge_from[e] == from {
+            if c.fx_edge_to[e] == to {
+                return c.fx_edge_pos[e];
+            }
+        }
+    }
+    return c.fx_fn_pos[from];
+}
+// `@bounded(N)`: the whole form is consumed, and the count lands in `c.fx_bounded`. 1 when the tokens
+// were this attribute, 0 when they are something else.
+fn fx_bounded_form<a>(c: (&a mut C)) -> u64 {
+    next := c.pos + 1;
+    if kind_at(&mut c, next) != 1 {
+        return 0;
+    }
+    word := tok_text(&mut c, next);
+    if !same(view(word), view("bounded")) {
+        return 0;
+    }
+    advance(&mut c);
+    advance(&mut c);
+    if !eat(&mut c, view("(")) {
+        fail(&mut c, view("`@bounded` takes an iteration count: `@bounded(16) while ...`"));
+    }
+    text := tok_text(&mut c, c.pos);
+    if !pv_digits(view(text)) {
+        fail(&mut c, view("`@bounded` takes a decimal iteration count"));
+    }
+    n := literal_value(&mut c, view(text));
+    advance(&mut c);
+    if !eat(&mut c, view(")")) {
+        fail(&mut c, view("`@bounded` takes exactly one iteration count: `@bounded(16)`"));
+    }
+    exchange(&mut c.fx_bounded, n);
+    return 1;
+}
+// The payload of `@bounded(N)`, 0 when no attribute is in force. `fx_pending_bound` says one is.
+fn fx_bound<a>(c: (&a mut C)) -> u64 {
+    return c.fx_bounded;
+}
+// The index of the `}` matching the `{` at `open`, or `to` when it never closes.
+fn fx_match_brace<a>(c: (&a mut C), open: u64, to: u64) -> u64 {
+    mut depth = 0;
+    mut q = open;
+    while q < to {
+        k := kind_at(&mut c, q);
+        if k == 0 {
+            return to;
+        }
+        if k == 123 {
+            depth = depth + 1;
+        }
+        if k == 125 {
+            depth = depth - 1;
+            if depth == 0 {
+                return q;
+            }
+        }
+        q = q + 1;
+    }
+    return to;
+}
+// The proof of `@bounded(n)` for the loop that starts at `c.pos`: a counter that strictly increases
+// toward a constant (or refined) bound and that nothing else in the body assigns, or `for i in a..b`
+// with a constant span of at most n. Anything else is refused, naming what is missing.
+fn fx_bounded_loop<a>(c: (&a mut C), n: u64) -> unit {
+    start := c.pos;
+    word := tok_text(&mut c, start);
+    if same(view(word), view("loop")) {
+        fx_bounded_refuse(
+            &mut c,
+            n,
+            view("this `loop` has no counter: it repeats until a `break` that the compiler cannot count"),
+            view("use `while i < K` with an unsigned counter `i` that only the loop increments, or a `for i in 0..K`")
+        );
+    }
+    if same(view(word), view("for")) {
+        fx_bounded_for(&mut c, n, start);
+        return ();
+    }
+    if !same(view(word), view("while")) {
+        fail(&mut c, view("`@bounded` applies to a `while` or a `for` loop"));
+    }
+    // The condition's tokens, up to the body's `{`.
+    mut q = start + 1;
+    mut depth = 0;
+    mut cond_hi = 0;
+    while q < c.toks.len() {
+        k := kind_at(&mut c, q);
+        if k == 0 {
+            break;
+        }
+        if k == 40 {
+            depth = depth + 1;
+        }
+        if k == 41 {
+            depth = depth - 1;
+        }
+        if (k == 123) && (depth == 0) {
+            cond_hi = q;
+            break;
+        }
+        q = q + 1;
+    }
+    if cond_hi == 0 {
+        fail(&mut c, view("`@bounded` needs a loop with a body"));
+    }
+    // `while NAME < BOUND` (or `<=`, or the same with the bound on the left).
+    mut name = u8[];
+    mut rel = 0;
+    mut bound = u8[];
+    mut bound_at = 0;
+    if cond_hi - (start + 1) == 3 {
+        left := tok_text(&mut c, start + 1);
+        op := tok_text(&mut c, start + 2);
+        right := tok_text(&mut c, start + 3);
+        mut left_is_name = false;
+        if kind_at(&mut c, start + 1) == 1 {
+            left_is_name = true;
+        }
+        mut right_is_name = false;
+        if kind_at(&mut c, start + 3) == 1 {
+            right_is_name = true;
+        }
+        if same(view(op), view("<")) {
+            rel = 0;
+        }
+        if same(view(op), view("<=")) {
+            rel = 1;
+        }
+        if same(view(op), view(">")) {
+            rel = 2;
+        }
+        if same(view(op), view(">=")) {
+            rel = 3;
+        }
+        if same(view(op), view("!=")) {
+            rel = 4;
+        }
+        if (rel == 0) || (rel == 1) {
+            if left_is_name & !right_is_name {
+                name = left;
+                bound = right;
+                bound_at = start + 3;
+            }
+        }
+        if (rel == 2) || (rel == 3) {
+            if right_is_name & !left_is_name {
+                name = right;
+                bound = left;
+                bound_at = start + 1;
+            }
+        }
+    }
+    if name.len() == 0 {
+        fx_bounded_refuse(
+            &mut c,
+            n,
+            view("its condition is not `i < K`, `i <= K` or the same with the bound on the left"),
+            view("write the loop as `while i < K` with an unsigned counter `i`")
+        );
+    }
+    // The bound has to be a constant, or a parameter the enclosing function's refinement bounds.
+    limit := fx_bound_value(&mut c, view(bound), rel);
+    if limit == 0 {
+        mut msg = copy_bytes(view("the bound `"));
+        push_bytes(&mut msg, view(bound));
+        push_bytes(&mut msg, view("` is neither a constant nor bounded by a refinement of this function"));
+        mut hint = copy_bytes(view("add `where "));
+        push_bytes(&mut hint, view(bound));
+        push_bytes(&mut hint, view(" <= "));
+        push_bytes(&mut hint, view(decimal_bytes(n)));
+        push_bytes(&mut hint, view("` to the parameter, or use a constant bound"));
+        exchange(&mut c.pos, bound_at);
+        fail(&mut c, view(msg));
+        return ();
+    }
+    if n < limit {
+        mut msg = copy_bytes(view("its bound allows "));
+        push_bytes(&mut msg, view(decimal_bytes(limit)));
+        push_bytes(&mut msg, view(" iterations, more than the "));
+        push_bytes(&mut msg, view(decimal_bytes(n)));
+        push_bytes(&mut msg, view(" `@bounded` claims"));
+        exchange(&mut c.pos, bound_at);
+        fail(&mut c, view(msg));
+        return ();
+    }
+    // The body: the counter may only be assigned by its own increment, and that increment has to be a
+    // positive constant step.
+    body_lo := cond_hi;
+    limit_toks := c.toks.len();
+    body_hi := fx_match_brace(&mut c, body_lo, limit_toks);
+    mut step = 0;
+    mut bad = 0;
+    mut q = body_lo + 1;
+    while q < body_hi {
+        t := tok_text(&mut c, q);
+        if same(view(t), view(name)) {
+            mut op = u8[];
+            if q + 1 < body_hi {
+                op = tok_text(&mut c, q + 1);
+            }
+            if fx_assign_op(view(op)) != 0 {
+                mut good = 0;
+                if same(view(op), view("+=")) {
+                    if q + 2 < body_hi {
+                        val := tok_text(&mut c, q + 2);
+                        if pv_digits(view(val)) {
+                            k := literal_value(&mut c, view(val));
+                            if k != 0 {
+                                if step == 0 {
+                                    step = k;
+                                }
+                                good = 1;
+                            }
+                        }
+                    }
+                }
+                if same(view(op), view("=")) {
+                    if q + 4 < body_hi {
+                        again := tok_text(&mut c, q + 2);
+                        plus := tok_text(&mut c, q + 3);
+                        val := tok_text(&mut c, q + 4);
+                        if same(view(again), view(name)) & same(view(plus), view("+")) {
+                            if pv_digits(view(val)) {
+                                k := literal_value(&mut c, view(val));
+                                if k != 0 {
+                                    if step == 0 {
+                                        step = k;
+                                    }
+                                    good = 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                if good == 0 {
+                    bad = 1;
+                }
+            }
+        }
+        q = q + 1;
+    }
+    if bad != 0 {
+        fx_bounded_refuse(
+            &mut c,
+            n,
+            view("the body assigns the counter somewhere other than its own increment"),
+            view("keep the counter's only assignment as `i = i + 1` (or `i += 1`)")
+        );
+    }
+    if step == 0 {
+        mut msg = copy_bytes(view("the counter `"));
+        push_bytes(&mut msg, view(name));
+        push_bytes(&mut msg, view("` is never incremented in the body, so the loop's iteration count is not bounded"));
+        exchange(&mut c.pos, start);
+        fail(&mut c, view(msg));
+    }
+    // `i` starts at zero or more and grows by at least `step`, so it reaches a bound of `limit` in at
+    // most `limit` iterations (a negative start cannot make that worse for an unsigned counter).
+    if !fx_unsigned_counter(&mut c, view(name)) {
+        mut msg = copy_bytes(view("the counter `"));
+        push_bytes(&mut msg, view(name));
+        push_bytes(&mut msg, view("` is signed: a negative start makes the iteration count unbounded"));
+        exchange(&mut c.pos, start);
+        fail(&mut c, view(msg));
+    }
+    return ();
+}
+// `for i in a..b { }` with constants: `b - a <= n` is the whole proof.
+fn fx_bounded_for<a>(c: (&a mut C), n: u64, start: u64) -> unit {
+    mut q = start + 1;
+    if kind_at(&mut c, q) != 1 {
+        fx_bounded_refuse(
+            &mut c,
+            n,
+            view("this `for` does not name a counter"),
+            view("use `for i in 0..K` with a constant K at most the claimed bound")
+        );
+    }
+    name := tok_text(&mut c, start + 1);
+    ink := tok_text(&mut c, start + 2);
+    if !same(view(ink), view("in")) {
+        fx_bounded_refuse(
+            &mut c,
+            n,
+            view("this `for` does not iterate over a range"),
+            view("use `for i in 0..K` with a constant K at most the claimed bound")
+        );
+    }
+    // The range's two ends, up to the body's `{`.
+    mut depth = 0;
+    mut hi = 0;
+    q = start + 3;
+    while q < c.toks.len() {
+        k := kind_at(&mut c, q);
+        if k == 0 {
+            break;
+        }
+        if k == 40 {
+            depth = depth + 1;
+        }
+        if k == 41 {
+            depth = depth - 1;
+        }
+        if (k == 123) && (depth == 0) {
+            hi = q;
+            break;
+        }
+        q = q + 1;
+    }
+    if hi == 0 {
+        fail(&mut c, view("`@bounded` needs a loop with a body"));
+    }
+    if hi - (start + 3) != 3 {
+        fx_bounded_refuse(
+            &mut c,
+            n,
+            view("its range is not spelled with two constants"),
+            view("use `for i in 0..K` with a constant K at most the claimed bound")
+        );
+    }
+    lo_text := tok_text(&mut c, start + 3);
+    dots := tok_text(&mut c, start + 4);
+    hi_text := tok_text(&mut c, start + 5);
+    if !same(view(dots), view("..")) || !pv_digits(view(lo_text)) || !pv_digits(view(hi_text)) {
+        fx_bounded_refuse(
+            &mut c,
+            n,
+            view("its range is not spelled with two constants"),
+            view("use `for i in 0..K` with a constant K at most the claimed bound")
+        );
+    }
+    lo := literal_value(&mut c, view(lo_text));
+    up := literal_value(&mut c, view(hi_text));
+    mut span = 0;
+    if lo < up {
+        span = up - lo;
+    }
+    if n < span {
+        mut msg = copy_bytes(view("its range spans "));
+        push_bytes(&mut msg, view(decimal_bytes(span)));
+        push_bytes(&mut msg, view(" iterations, more than the "));
+        push_bytes(&mut msg, view(decimal_bytes(n)));
+        push_bytes(&mut msg, view(" `@bounded` claims"));
+        exchange(&mut c.pos, start + 5);
+        fail(&mut c, view(msg));
+    }
+    if !fx_unsigned_counter(&mut c, view(name)) {
+        mut msg = copy_bytes(view("the counter `"));
+        push_bytes(&mut msg, view(name));
+        push_bytes(&mut msg, view("` is signed: a negative start makes the iteration count unbounded"));
+        exchange(&mut c.pos, start);
+        fail(&mut c, view(msg));
+    }
+    return ();
+}
+// The iterations a `while` condition allows: `i < K` and `i <= K` with a constant `K`, or a parameter
+// the enclosing function's `where` bounds (`n: u64 where n <= 16`). 0 when neither holds.
+fn fx_bound_value<a, b>(c: (&a mut C), bound: &b [u8], rel: u64) -> u64 {
+    if pv_digits(view(bound)) {
+        k := literal_value(&mut c, view(bound));
+        if rel == 1 {
+            return k + 1;
+        }
+        return k;
+    }
+    mut out = 0;
+    for i in c.cur_ppreds.len() {
+        mut pf = 0;
+        mut plo = 0;
+        mut phi = 0;
+        if i < c.cur_ppreds.len() {
+            p := &c.cur_ppreds[i];
+            pf = p.file;
+            plo = p.lo;
+            phi = p.hi;
+        }
+        if phi == 0 {
+            continue;
+        }
+        mut atoms = Atom[];
+        ok := pv_read_pred(&mut c, Pred { file: pf, lo: plo, hi: phi }, &mut atoms);
+        if ok {
+            for a in atoms.len() {
+                item := &atoms[a];
+                if same(view(item.a), view(bound)) {
+                    if (item.rel == 0) || (item.rel == 1) {
+                        if pv_digits(view(item.b)) {
+                            k := literal_value(&mut c, view(item.b));
+                            if item.k <= 0 {
+                                sub := u64(0 - item.k);
+                                if sub < k {
+                                    k = k - sub;
+                                } else {
+                                    k = 0;
+                                }
+                            }
+                            if item.rel == 1 {
+                                k = k + 1;
+                            }
+                            if (out == 0) || (k < out) {
+                                out = k;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return out;
+}
+// Whether the loop's counter is unsigned: a signed counter could start below zero and so run for
+// longer than its bound allows.
+fn fx_unsigned_counter<a, b>(c: (&a mut C), name: &b [u8]) -> bool {
+    l := find_local(&mut c, view(name));
+    if l == 0 {
+        return false;
+    }
+    ty := local_ty(&mut c, l - 1);
+    if ty == 0 {
+        return true;
+    }
+    if ty_kind(&mut c, ty) != 18 {
+        return false;
+    }
+    if ty_mode(&mut c, ty) != 0 {
+        return false;
+    }
+    return true;
+}
+fn fx_assign_op<a, b>(c: (&a [u8])) -> u64 {
+    if same(view(c), view("=")) || same(view(c), view("+=")) || same(view(c), view("-=")) || same(view(c), view("*=")) || same(view(c), view("/=")) || same(view(c), view("%=")) || same(view(c), view("&=")) || same(view(c), view("|=")) || same(view(c), view("^=")) || same(view(c), view("<<=")) || same(view(c), view(">>=")) {
+        return 1;
+    }
+    return 0;
+}
+// A refused `@bounded`: the loop, what defeats the proof, and the shape that would prove it.
+fn fx_bounded_refuse<a, b, d>(c: (&a mut C), n: u64, why: &b [u8], hint: &d [u8]) -> unit {
+    mut msg = copy_bytes(view("cannot prove `@bounded("));
+    push_bytes(&mut msg, view(decimal_bytes(n)));
+    push_bytes(&mut msg, view(")`: "));
+    push_bytes(&mut msg, view(why));
+    push_bytes(&mut msg, view("\n = "));
+    push_bytes(&mut msg, view(hint));
+    fail(&mut c, view(msg));
+    return ();
+}
 fn toplevel_item<a>(c: (&a mut C), pass: u64) -> unit {
     if true {
         if kind(&mut c) == 64 {
-            mode := ref_strict_form(&mut c);
-            if mode != 0 {
-                if mode == 1 {
-                    // `@strict` before a declaration: that declaration's obligations only.
-                    public := u64(eat(&mut c, view("pub")));
-                    exchange(&mut c.decl_public, public);
-                    declaration_item(&mut c, pass, public);
-                    exchange(&mut c.decl_public, 1);
-                    exchange(&mut c.strict_next, 0);
+            // Attributes a declaration carries: `@strict` (refinements), `@no_alloc` and `@no_panic`
+            // (effects). They chain, and `@strict;` alone is the module-wide form.
+            mut attrs = 0;
+            mut strict_decl = 0;
+            while kind(&mut c) == 64 {
+                mode := ref_strict_form(&mut c);
+                if mode == 2 {
+                    // `@strict;`: every refinement obligation in this module is an error.
+                    return ();
                 }
+                if mode == 1 {
+                    strict_decl = 1;
+                    attrs = 1;
+                } else {
+                    if fx_attr_form(&mut c) != 0 {
+                        attrs = 1;
+                    } else {
+                        ct_form(&mut c, pass, 1);
+                        return ();
+                    }
+                }
+            }
+            if attrs == 0 {
+                ct_form(&mut c, pass, 1);
                 return ();
             }
-            ct_form(&mut c, pass, 1);
-            return ();
+            if strict_decl != 0 {
+                exchange(&mut c.strict_next, 1);
+            }
         }
         if (kind(&mut c) == 1) & (next_kind(&mut c) == 261) {
             module_binding(&mut c, pass);
@@ -15150,6 +16166,13 @@ fn toplevel_item<a>(c: (&a mut C), pass: u64) -> unit {
         }
         exchange(&mut c.pending_unsafe, saved_unsafe);
         exchange(&mut c.decl_public, 1);
+        if c.fx_pending_alloc != 0 {
+            fail(&mut c, view("`@no_alloc` applies to a function"));
+        }
+        if c.fx_pending_panic != 0 {
+            fail(&mut c, view("`@no_panic` applies to a function"));
+        }
+        exchange(&mut c.strict_next, 0);
         return ();
     }
     return ();
@@ -31445,6 +32468,8 @@ fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
                 ppreds: Pred[],
                 rpred: no_pred(),
                 pnames: u8[][],
+                no_alloc: 0,
+                no_panic: 0,
             }
         );
     return ();
@@ -35092,6 +36117,8 @@ fn iface_define_func<a>(c: (&a mut C), st: (&a mut IState), p: (&a mut IPos)) ->
                 ppreds: Pred[],
                 rpred: no_pred(),
                 pnames: u8[][],
+                no_alloc: 0,
+                no_panic: 0,
             }
         );
     index := c.funcs.len() - 1;
@@ -35462,6 +36489,37 @@ pub fn main() -> u64 {
         diag_help: u8[][],
         diag_primary: u8[],
         lib_owner: u8[][],
+        fx_any: 0,
+        fx_cur: 0,
+        fx_syms: u8[][],
+        fx_body: u64[],
+        fx_attr_alloc: u64[],
+        fx_attr_panic: u64[],
+        fx_own_alloc: u64[],
+        fx_own_panic: u64[],
+        fx_alloc_what: u8[][],
+        fx_alloc_file: u64[],
+        fx_alloc_pos: u64[],
+        fx_panic_what: u8[][],
+        fx_panic_hint: u8[][],
+        fx_panic_file: u64[],
+        fx_panic_pos: u64[],
+        fx_alloc: u64[],
+        fx_panic: u64[],
+        fx_alloc_thru: u64[],
+        fx_panic_thru: u64[],
+        fx_fn_name: u8[][],
+        fx_fn_file: u64[],
+        fx_fn_pos: u64[],
+        fx_edge_from: u64[],
+        fx_edge_name: u8[][],
+        fx_edge_to: u64[],
+        fx_edge_kind: u64[],
+        fx_edge_file: u64[],
+        fx_edge_pos: u64[],
+        fx_pending_alloc: 0,
+        fx_pending_panic: 0,
+        fx_bounded: 0,
     };
     exchange(&mut c.target, host::target());
     for k in 5 {
