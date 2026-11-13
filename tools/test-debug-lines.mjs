@@ -144,6 +144,34 @@ try {
     }
   }
 
+  // Enumerations and typedefs: an enum value is a pointer to {tag, payload}, the tag is a
+  // DW_TAG_enumeration_type whose enumerators are the variants (valued by the tag the constructor
+  // stores), and the value's own type is a DW_TAG_typedef, so a debugger prints `tag = Variant`.
+  {
+    const source = join(work, 'shape.grl');
+    writeFileSync(source, 'enum Shape {\n    Circle(f64),\n    Square(u64)\n}\nfn main() {\n    s := Shape::Square(7);\n    println(1);\n}\n');
+    const asm = join(work, 'shape.s');
+    const exe = join(work, 'shape');
+    ok([compiler, '--target', 'x86_64', '--debug', asm, source, runtime, osLinux]);
+    ok(['clang', '--target=x86_64-linux-gnu', '-c', asm, '-o', `${exe}.o`]);
+    ok(['ld.lld', '-m', 'elf_x86_64', `${exe}.o`, '-o', exe]);
+    const info = ok(['llvm-dwarfdump', '--debug-info', exe]).stdout;
+    assert.match(info, /DW_TAG_enumeration_type[\s\S]*?DW_AT_name\s+\("Shape\.tag"\)/, 'no enumeration type for the tag');
+    for (const [variant, value] of [['Circle', 0], ['Square', 1]]) {
+      assert.match(info, new RegExp(`DW_TAG_enumerator\\s+DW_AT_name\\s+\\("${variant}"\\)\\s+DW_AT_const_value\\s+\\(0x0?${value}\\)`), `enumerator ${variant} = ${value}`);
+    }
+    assert.match(info, /DW_TAG_typedef[\s\S]*?DW_AT_name\s+\("Shape"\)/, 'the enum value type is not a typedef named Shape');
+    assert.match(info, /DW_TAG_structure_type[\s\S]*?DW_AT_name\s+\("Shape\.value"\)[\s\S]*?DW_TAG_member\s+DW_AT_name\s+\("tag"\)/, 'the value is not a structure with a tag');
+    assert.match(ok(['llvm-dwarfdump', '--verify', exe]).stdout, /No errors\./, 'enum DWARF does not verify');
+    if (run(['gdb', '--version']).status === 0) {
+      const line = readFileSync(source, 'utf8').split('\n').findIndex(row => row.includes('println(1)')) + 1;
+      const shown = run(['gdb', '-q', '-batch', '-ex', 'set debuginfod enabled off', '-ex', `break shape.grl:${line}`, '-ex', 'run',
+        '-ex', 'print *s', exe]).stdout;
+      assert.ok(shown.includes('tag = Square, payload = 7'), `gdb did not print the tag by name:\n${shown}`);
+      console.log('debug-lines: gdb prints an enum tag by its variant name');
+    }
+  }
+
   const plainBinary = build(join(work, 'plain.s'), join(work, 'plain'), false);
   const plainDump = ok(['llvm-dwarfdump', '--debug-line', plainBinary]).stdout;
   assert.equal(rows(plainDump).length, 0, 'a normal build unexpectedly contains .debug_line rows');

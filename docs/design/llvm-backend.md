@@ -82,7 +82,10 @@ What mattered, in order:
 Requirements found on the way: LLVM may emit `memset`/`memcpy` calls, so the backend supplies
 them (Grail programs have no libc); `.L` data labels and inline constant pools must be renamed or
 hoisted before two objects can link; debug sections that name function-local labels keep those
-functions native.
+functions native. Debug *information* is the native backend's (`compiler/native.grl`: DWARF on
+Linux x86-64/AArch64/RISC-V 64, CodeView on Windows x86-64), so `--backend=llvm` refuses
+`--debug`; what those sections describe, and how to use them, is
+[docs/tooling/debugging.md](../tooling/debugging.md).
 
 The remaining gap to C is front-end output: a view allocated and freed per byte access in some
 loops (fnv), 8-byte elements for `f32[]`, and bounds checks without loop versioning.

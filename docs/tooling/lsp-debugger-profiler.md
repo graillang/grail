@@ -1,10 +1,12 @@
 # LSP, debugger and profiler integration plan
 
 Status: **LSP MVP implemented** (JSON-RPC lifecycle, didOpen/didChange and
-compiler-sourced diagnostics), **DWARF `.debug_line` + `.debug_info`
-implemented for Linux x86-64**, and a **sampling profiler implemented for Linux
-x86-64** ([profiler.md](profiler.md)). Debugger attach, breakpoints and the
-instrumentation profiler remain design only.
+compiler-sourced diagnostics), **DWARF `.debug_line` + `.debug_info` with type
+DIEs implemented for Linux x86-64/AArch64/RISC-V 64, CodeView for Windows
+x86-64**, and a **sampling profiler implemented for Linux x86-64**
+([profiler.md](profiler.md)). macOS Mach-O DWARF, variable lifetime ranges and
+the instrumentation profiler remain design only; debugging a built program is
+[debugging.md](debugging.md).
 The build, test and distribution foundation in
 [cross-platform-ci.md](cross-platform-ci.md) defines the artifact and lane
 contract these tools ship through.
@@ -93,11 +95,11 @@ Remaining implementation rules:
 - CI: the tooling job runs the protocol tests; the preflight-gated `lsp` job
   builds the compiler and runs the compiler-backed stdio session.
 
-## Implemented DWARF line tables (Linux x86-64)
+## Implemented: DWARF line tables and types (Linux x86-64, AArch64, RISC-V 64)
 
 `grail build --debug` and the raw `grail --debug ...` compiler form emit
-`.file`/`.loc` directives plus a `.debug_info` compile unit for Linux x86-64
-only; clang's assembler turns the locations into `.debug_line`. Statement
+`.file`/`.loc` directives plus a `.debug_info` compile unit for the three Linux
+targets; clang's assembler turns the locations into `.debug_line`. Statement
 granularity is line/column accurate, including statements that begin by
 pushing a string literal (the compiler re-asserts the last `.loc` after each
 `.popsection`).
@@ -111,21 +113,67 @@ llvm-dwarfdump --debug-info target/hello
 ```
 
 `grail debug lines|info` use `llvm-dwarfdump` and fall back to `readelf`
-(`GRAIL_DWARFDUMP`/`GRAIL_READELF` override the tools). `.debug_info` contains
-a DWARF v4 compile unit naming the entry source, and one `DW_TAG_subprogram`
-per emitted function with `DW_AT_name`, `DW_AT_linkage_name`, `DW_AT_low_pc`,
-`DW_AT_high_pc`, `DW_AT_decl_file`, `DW_AT_decl_line` and
-`DW_AT_frame_base` (`DW_OP_reg6`/rbp). Parameters and locals are
-`DW_TAG_formal_parameter`/`DW_TAG_variable` DIEs with declaration lines and
-`DW_OP_fbreg` stack locations. Optimisation is skipped in debug builds so slots
-stay live. `tools/test-debug-lines.mjs` verifies line rows, subprogram ranges,
-parameter/local names and locations, the `grail debug info` output, the plain
-build's lack of debug sections, and the AArch64 rejection.
+(`GRAIL_DWARFDUMP`/`GRAIL_READELF` override the tools). The unit is DWARF v4
+and names the entry source; each emitted function gets a `DW_TAG_subprogram`
+with `DW_AT_name`, `DW_AT_linkage_name`, `DW_AT_low_pc`, `DW_AT_high_pc`,
+`DW_AT_decl_file`, `DW_AT_decl_line` and `DW_AT_frame_base`
+(`DW_OP_reg6`/rbp on x86-64, `DW_OP_reg29`/x29 on AArch64, `DW_OP_reg8`/s0 on
+RISC-V). Parameters and locals are `DW_TAG_formal_parameter`/`DW_TAG_variable`
+DIEs with declaration lines, a `DW_AT_type` and a `DW_OP_fbreg` stack
+location. Optimisation is skipped in debug builds so a slot stays live for the
+whole function: a location is the frame slot, and there are no lifetime ranges
+yet, so a variable read after its scope ends shows the slot's last value rather
+than nothing.
 
-Not implemented yet: type DIEs, inlining/column-accurate expression mapping,
-variable lifetime ranges, gdb/lldb/DAP attach, breakpoints and profiling
-annotations. `--debug` deliberately fails on Windows and macOS instead of
-emitting a half-supported table.
+The types are what a debugger needs to walk a value:
+
+| DIE | what it describes |
+|---|---|
+| `DW_TAG_base_type` | integers (signed/unsigned, byte size), `f64`, `f32` (as the 8-byte word a slot holds), `bool`, `char` |
+| `DW_TAG_pointer_type` | `&T`, `&mut T`, and the handle of every owned value |
+| `DW_TAG_structure_type` + `DW_TAG_member` | a record's fields at their offsets (a Grail record is a pointer to its words; an `extern "C"` record is its C layout, inline) |
+| `DW_TAG_enumeration_type` + `DW_TAG_enumerator` | an enum's tag word, enumerators named after the variants and valued by the tag the constructor stores |
+| `DW_TAG_typedef` | the enum's value type, so a debugger prints `Shape` and `*s` shows `{tag = Square, payload = 7}` |
+
+A sequence (`string`, `u8[]`, `T[]`) is a pointer to the runtime's 24-byte
+header `{data, len, cap}`; `data` is a pointer to the first element, not a
+`DW_TAG_array_type` with a count, because the length lives in `len` and an
+array type would have to state a length the header does not carry. That is the
+description Go and Rust emit too, and it gives a debugger the syntactic form it
+slices with: `print *values->data@values->len`.
+
+`tools/test-debug-lines.mjs` verifies line rows, subprogram ranges,
+parameter/local names and locations, every type DIE above, `llvm-dwarfdump
+--verify`, and a real `gdb --batch` session that prints a record, a nested
+record, a string, a vector, a C record and an enum tag by name. See
+[debugging.md](debugging.md) for the command lines.
+
+### Windows x86-64: CodeView
+
+`--debug --target windows-x86_64` emits the CodeView equivalent: `.cv_loc` line
+records (a PDB through `lld-link /DEBUG`), `.debug$T` type records
+(`LF_STRUCTURE`, `LF_FIELDLIST`, `LF_MEMBER`, `LF_POINTER`, and the predefined
+base-type indices) and a `.debug$S` symbol stream with `S_GPROC32`,
+`S_FRAMEPROC` (rbp as the frame register) and one `S_REGREL32` per parameter
+and local at `rbp-8*(slot+1)`. `llvm-pdbutil dump --types/--symbols` shows
+them; the test asserts the record layouts, the typed locals and the debug PDB's
+line rows. CodeView has no record for a Grail enum's tag here, so an enum's word
+is the 8-byte unsigned integer it is - labelled as such rather than guessed.
+
+### macOS: not emitted
+
+`--debug` refuses `macos-x86_64`/`macos-aarch64` rather than emitting a
+half-supported table. The writer's sections are written in ELF's syntax
+(`.section .debug_info,"",@progbits`) and Mach-O names them
+`__DWARF,__debug_info` with a different assembler directive; getting from there
+to a debugger also needs the `dsymutil` step that collects them into a `.dSYM`.
+That is its own piece of work, and until it is done the refusal is the honest
+answer. Windows AArch64 is refused for the same reason (its CodeView layout
+differs from x86-64's).
+
+Not implemented yet: variable lifetime ranges, inlined frames, expression-level
+spans, register-allocated variables (debug builds keep everything in a frame
+slot), macOS Mach-O DWARF, and a Debug Adapter Protocol server.
 
 ## Phase 2: debugger (DAP)
 
