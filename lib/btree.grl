@@ -1,0 +1,833 @@
+module btree;
+
+use core;
+use order;
+
+// ---- ordered map: a B-tree keyed by `order::Ord` ------------------------------------------------
+//
+// `BTreeMap<K, V>` keeps every pair in key order, so `iter` walks the pairs sorted, `range` walks a
+// window of them, and `first`/`last` answer the smallest and largest key. Nodes live in one vector
+// and refer to their children by index, so a node is a fixed set of three vectors and the tree needs
+// no pointer type: `nodes` is the whole allocation, and a node freed by a merge goes on the free
+// list for the next insert to reuse.
+//
+// Layout (a B-tree of order 8): every node holds at most MAX_KEYS keys with MAX_KEYS+1 children, and
+// every node except the root holds at least MIN_KEYS. A node with n keys holds n+1 children when it
+// is internal and none when it is a leaf; `values` is parallel to `keys`. Every leaf sits at the same
+// depth because a split grows the tree one level from the root only. All operations are O(log n) in
+// the number of stored pairs (O(log n) node visits, each a binary search over at most 7 keys), except
+// the walks, which are O(k) for the k pairs they yield, and `shrink`, which is O(n log n).
+
+const MAX_KEYS: u64 = 7;
+const MIN_KEYS: u64 = 3;
+// Keys above this index move to the new right node in a split: keys[0..SPLIT_AT] stay, keys[SPLIT_AT]
+// is promoted, keys[SPLIT_AT+1..] move right.
+const SPLIT_AT: u64 = 3;
+
+struct Node<K: order::Ord, V> {
+    keys: K[],
+    values: V[],
+    // Empty in a leaf; otherwise keys.len() + 1 child node indices.
+    children: u64[],
+    leaf: u64
+}
+
+pub struct BTreeMap<K: order::Ord, V> {
+    nodes: Node<K, V>[],
+    root: u64,
+    count: u64,
+    // Node indices released by a merge or a root collapse, ready to be reused.
+    free: u64[]
+}
+
+// ---- vector helpers (index surgery a B-tree needs and the built-in vector does not) ------------
+
+// Moves every element from `keep` on out of `items`, in order, and leaves the first `keep` behind.
+fn take_tail<a, T>(items: (&a mut T[]), keep: u64) -> T[] {
+    mut back = T[];
+    while items.len() > keep {
+        back.push(items.pop());
+    }
+    mut out = T[];
+    while back.len() > 0 {
+        out.push(back.pop());
+    }
+    return out;
+}
+
+// Moves the element at `index` out, shifting the elements after it down: O(node size).
+fn take_at<a, T>(items: (&a mut T[]), index: u64) -> T {
+    rest := take_tail(items, index + 1);
+    taken := items.pop();
+    append(items, rest);
+    return taken;
+}
+
+// Moves every element of `source` (consumed) onto the end of `items`, in order.
+fn append<T>(items: (&mut T[]), source: T[]) {
+    mut src = source;
+    mut back = T[];
+    while src.len() > 0 {
+        back.push(src.pop());
+    }
+    while back.len() > 0 {
+        items.push(back.pop());
+    }
+}
+
+// Inserts `value` before the first element: O(node size).
+fn push_front<T>(items: (&mut T[]), value: T) {
+    rest := take_tail(items, 0);
+    items.push(value);
+    append(items, rest);
+}
+
+fn empty_node<K: order::Ord, V>() -> Node<K, V> {
+    return Node { keys: K[], values: V[], children: u64[], leaf: 1 };
+}
+
+// True when the two keys are equal under the interface's strict order (neither is less).
+fn same_key<K: order::Ord>(left: (&K), right: (&K)) -> bool {
+    if order::less(left, right) {
+        return false;
+    }
+    if order::less(right, left) {
+        return false;
+    }
+    return true;
+}
+
+// The first key index whose key is not less than `key`: the insertion point in one node.
+fn slot_of<K: order::Ord, V>(node: (&Node<K, V>), key: (&K)) -> u64 {
+    mut lo = 0;
+    mut hi = node.keys.len();
+    while lo < hi {
+        mid := lo + (hi - lo) / 2;
+        if order::less(&node.keys[mid], key) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+// Where `key` sits in one node, as (slot, found, leaf, child): `slot` is the first key that is not
+// less than `key`, `found` is 1 when that key is equal to it, `leaf` is 1 for a leaf, and `child` is
+// the child to descend into (meaningless in a leaf). Reading a node through this one call keeps a
+// lookup to one shared borrow, which the write paths need before they take the node exclusively.
+fn locate<K: order::Ord, V>(node: (&Node<K, V>), key: (&K)) -> (u64, u64, u64, u64) {
+    at := slot_of(node, key);
+    mut found = 0;
+    mut leaf = node.leaf;
+    mut child = 0;
+    if at < node.keys.len() {
+        if same_key(&node.keys[at], key) {
+            found = 1;
+        }
+    }
+    if leaf == 0 {
+        child = node.children[at];
+    }
+    return (at, found, leaf, child);
+}
+
+// ---- construction and node management ---------------------------------------------------------
+
+// A fresh node, reusing a released one when there is one. `leaf` is 1 or 0.
+fn alloc_node<K: order::Ord, V>(map: (&mut BTreeMap<K, V>), leaf: u64) -> u64 {
+    if map.free.len() > 0 {
+        index := map.free.pop();
+        node := &mut map.nodes[index];
+        node.leaf = leaf;
+        node.keys.clear();
+        node.values.clear();
+        node.children.clear();
+        return index;
+    }
+    map.nodes.push(empty_node<K, V>());
+    last := map.nodes.len() - 1;
+    node := &mut map.nodes[last];
+    node.leaf = leaf;
+    return last;
+}
+
+// Empties a node and releases its index for reuse: what a merge does to the node it absorbs.
+fn free_node<K: order::Ord, V>(map: (&mut BTreeMap<K, V>), index: u64) {
+    node := &mut map.nodes[index];
+    node.keys.clear();
+    node.values.clear();
+    node.children.clear();
+    node.leaf = 1;
+    map.free.push(index);
+}
+
+// Splits the full child `at` of `parent`: the middle key rises into the parent, the keys above it
+// move into a new right sibling, and the child keeps the keys below it.
+fn split_child<K: order::Ord, V>(map: (&mut BTreeMap<K, V>), parent: u64, at: u64) {
+    child := map.nodes[parent].children[at];
+    leaf := map.nodes[child].leaf;
+    right := alloc_node(map, leaf);
+    mut middle_key: K? = None;
+    mut middle_value: V? = None;
+    mut tail_keys = K[];
+    mut tail_values = V[];
+    mut tail_children = u64[];
+    node := &mut map.nodes[child];
+    tail_keys = take_tail(&mut node.keys, SPLIT_AT + 1);
+    middle_key = Some(node.keys.pop());
+    tail_values = take_tail(&mut node.values, SPLIT_AT + 1);
+    middle_value = Some(node.values.pop());
+    if leaf == 0 {
+        tail_children = take_tail(&mut node.children, SPLIT_AT + 1);
+    }
+    rnode := &mut map.nodes[right];
+    append(&mut rnode.keys, tail_keys);
+    append(&mut rnode.values, tail_values);
+    append(&mut rnode.children, tail_children);
+    pnode := &mut map.nodes[parent];
+    pnode.keys.insert(at, middle_key!);
+    pnode.values.insert(at, middle_value!);
+    pnode.children.insert(at + 1, right);
+    return ();
+}
+
+// Grows the tree by one level: the old root becomes the first child of a new root, then splits.
+fn split_root<K: order::Ord, V>(map: (&mut BTreeMap<K, V>)) {
+    old := map.root;
+    fresh := alloc_node(map, 0);
+    root := &mut map.nodes[fresh];
+    root.children.push(old);
+    map.root = fresh;
+    split_child(map, fresh, 0);
+}
+
+// ---- an ordered map ---------------------------------------------------------------------------
+
+pub fn new<K: order::Ord, V>() -> BTreeMap<K, V> {
+    return BTreeMap { nodes: Node<K, V>[], root: 0, count: 0, free: u64[] };
+}
+
+impl<K: order::Ord, V> BTreeMap<K, V> {
+    // How many pairs are stored. O(1).
+    pub fn len(self: (&BTreeMap<K, V>)) -> u64 {
+        return self.count;
+    }
+
+    // True when nothing is stored. O(1).
+    pub fn is_empty(self: (&BTreeMap<K, V>)) -> bool {
+        return self.count == 0;
+    }
+
+    // Node slots the tree has allocated, freed ones included: the tree's memory, in nodes of at
+    // most MAX_KEYS pairs. O(1). `shrink` brings it down to the live node count.
+    pub fn nodes_used(self: (&BTreeMap<K, V>)) -> u64 {
+        return self.nodes.len();
+    }
+
+    // The value stored for `key`, borrowed from the map. O(log n), no allocation.
+    pub fn get<a, b>(self: (&a BTreeMap<K, V>), key: (&b K)) -> (&a V)? {
+        if self.count == 0 {
+            return None;
+        }
+        mut cur = self.root;
+        loop {
+            here := &self.nodes[cur];
+            spot := locate(here, key);
+            if spot.1 == 1 {
+                found := &self.nodes[cur];
+                return Some(&found.values[spot.0]);
+            }
+            if spot.2 == 1 {
+                return None;
+            }
+            cur = spot.3;
+        }
+    }
+
+    // True when `key` is stored. O(log n).
+    pub fn contains_key<a, b>(self: (&a BTreeMap<K, V>), key: (&b K)) -> bool {
+        if let Some(value) = self.get(key) {
+            return true;
+        }
+        return false;
+    }
+
+    // The value stored for `key`, for writing; holding it keeps the exclusive map borrow alive.
+    // O(log n).
+    pub fn get_mut<a, b>(self: (&a mut BTreeMap<K, V>), key: (&b K)) -> (&a mut V)? {
+        if self.count == 0 {
+            return None;
+        }
+        mut cur = self.root;
+        loop {
+            here := &self.nodes[cur];
+            spot := locate(here, key);
+            if spot.1 == 1 {
+                node := &mut self.nodes[cur];
+                slot := &mut node.values[spot.0];
+                return Some(slot);
+            }
+            if spot.2 == 1 {
+                return None;
+            }
+            cur = spot.3;
+        }
+    }
+
+    // Stores `value` under `key`, replacing the old value and returning it, or `None` when the key
+    // is new. A stored key is never replaced: the tree keeps the key it already holds and only the
+    // value changes. O(log n).
+    pub fn insert<a>(self: (&mut BTreeMap<K, V>), key: K, value: V) -> V? {
+        if self.count == 0 {
+            root := alloc_node(self, 1);
+            self.root = root;
+            node := &mut self.nodes[root];
+            node.keys.push(key);
+            node.values.push(value);
+            self.count = 1;
+            return None;
+        }
+        root := self.root;
+        if self.nodes[root].keys.len() == MAX_KEYS {
+            split_root(self);
+        }
+        mut cur = self.root;
+        loop {
+            here := &self.nodes[cur];
+            spot := locate(here, &key);
+            if spot.1 == 1 {
+                node := &mut self.nodes[cur];
+                slot := &mut node.values[spot.0];
+                old := exchange(slot, value);
+                return Some(old);
+            }
+            if spot.2 == 1 {
+                node := &mut self.nodes[cur];
+                node.keys.insert(spot.0, key);
+                node.values.insert(spot.0, value);
+                self.count += 1;
+                return None;
+            }
+            mut at = spot.0;
+            // A full child is split before the walk enters it, so every descent has room.
+            if self.nodes[spot.3].keys.len() == MAX_KEYS {
+                split_child(self, cur, at);
+                again := &self.nodes[cur];
+                spot2 := locate(again, &key);
+                if spot2.1 == 1 {
+                    node := &mut self.nodes[cur];
+                    slot := &mut node.values[spot2.0];
+                    old := exchange(slot, value);
+                    return Some(old);
+                }
+                at = spot2.0;
+            }
+            down := &self.nodes[cur];
+            cur = down.children[at];
+        }
+    }
+
+    // The value stored for `key`, inserting `missing` under it first when it is absent: Rust's
+    // `entry(k).or_insert(v)` for the case that needs no view of the absence. The key is kept when it
+    // was already stored, so a repeated call with an equal key does not replace it. O(log n).
+    pub fn get_or_insert<a>(self: (&a mut BTreeMap<K, V>), key: K, missing: V) -> (&a mut V) {
+        if self.count == 0 {
+            root := alloc_node(self, 1);
+            self.root = root;
+            node := &mut self.nodes[root];
+            node.keys.push(key);
+            node.values.push(missing);
+            self.count = 1;
+            fresh := &mut self.nodes[root];
+            return &mut fresh.values[0];
+        }
+        root := self.root;
+        if self.nodes[root].keys.len() == MAX_KEYS {
+            split_root(self);
+        }
+        mut cur = self.root;
+        loop {
+            here := &self.nodes[cur];
+            spot := locate(here, &key);
+            if spot.1 == 1 {
+                node := &mut self.nodes[cur];
+                slot := &mut node.values[spot.0];
+                return slot;
+            }
+            if spot.2 == 1 {
+                node_k := &mut self.nodes[cur];
+                node_k.keys.insert(spot.0, key);
+                node_v := &mut self.nodes[cur];
+                node_v.values.insert(spot.0, missing);
+                self.count += 1;
+                fresh := &mut self.nodes[cur];
+                return &mut fresh.values[spot.0];
+            }
+            mut at = spot.0;
+            if self.nodes[spot.3].keys.len() == MAX_KEYS {
+                split_child(self, cur, at);
+                again := &self.nodes[cur];
+                spot2 := locate(again, &key);
+                if spot2.1 == 1 {
+                    node := &mut self.nodes[cur];
+                    slot := &mut node.values[spot2.0];
+                    return slot;
+                }
+                at = spot2.0;
+            }
+            down := &self.nodes[cur];
+            cur = down.children[at];
+        }
+    }
+}
+
+// ---- deletion: borrow from a sibling, or merge and release a node ----------------------------
+//
+// Removal is bottom-up: the walk records the nodes it passed through, the pair is taken out, and
+// `fix_up` repairs any node left under MIN_KEYS on the way back to the root. A node with a sibling
+// that can spare a key takes one through the parent (a rotation); otherwise two siblings merge into
+// one and the other node returns to the free list. Both keep every leaf at the same depth, and the
+// merge path is what makes a removal reclaim storage: the free list hands a released node straight
+// back to the next split.
+
+// The parent separator between two children moves down; the left sibling's last pair moves up.
+fn borrow_left<K: order::Ord, V>(map: (&mut BTreeMap<K, V>), parent: u64, at: u64) {
+    sibling := map.nodes[parent].children[at - 1];
+    child := map.nodes[parent].children[at];
+    inner := map.nodes[sibling].leaf;
+    pnode := &mut map.nodes[parent];
+    down_key := take_at(&mut pnode.keys, at - 1);
+    down_value := take_at(&mut pnode.values, at - 1);
+    lnode := &mut map.nodes[sibling];
+    up_key := lnode.keys.pop();
+    up_value := lnode.values.pop();
+    mut moved_child = 0;
+    if inner == 0 {
+        moved_child = lnode.children.pop();
+    }
+    cnode := &mut map.nodes[child];
+    push_front(&mut cnode.keys, down_key);
+    push_front(&mut cnode.values, down_value);
+    if inner == 0 {
+        push_front(&mut cnode.children, moved_child);
+    }
+    back := &mut map.nodes[parent];
+    back.keys.insert(at - 1, up_key);
+    back.values.insert(at - 1, up_value);
+    return ();
+}
+
+// The parent separator moves down into the child; the right sibling's first pair moves up.
+fn borrow_right<K: order::Ord, V>(map: (&mut BTreeMap<K, V>), parent: u64, at: u64) {
+    sibling := map.nodes[parent].children[at + 1];
+    child := map.nodes[parent].children[at];
+    inner := map.nodes[sibling].leaf;
+    pnode := &mut map.nodes[parent];
+    down_key := take_at(&mut pnode.keys, at);
+    down_value := take_at(&mut pnode.values, at);
+    rnode := &mut map.nodes[sibling];
+    up_key := take_at(&mut rnode.keys, 0);
+    up_value := take_at(&mut rnode.values, 0);
+    mut moved_child = 0;
+    if inner == 0 {
+        moved_child = take_at(&mut rnode.children, 0);
+    }
+    cnode := &mut map.nodes[child];
+    cnode.keys.push(down_key);
+    cnode.values.push(down_value);
+    if inner == 0 {
+        cnode.children.push(moved_child);
+    }
+    back := &mut map.nodes[parent];
+    back.keys.insert(at, up_key);
+    back.values.insert(at, up_value);
+    return ();
+}
+
+// Folds children[sep] and children[sep+1] into one node with keys[sep] between them, then releases
+// the right node: the one place a removal gives storage back.
+fn merge_children<K: order::Ord, V>(map: (&mut BTreeMap<K, V>), parent: u64, sep: u64) {
+    left := map.nodes[parent].children[sep];
+    right := map.nodes[parent].children[sep + 1];
+    inner := map.nodes[left].leaf;
+    pnode := &mut map.nodes[parent];
+    down_key := take_at(&mut pnode.keys, sep);
+    down_value := take_at(&mut pnode.values, sep);
+    pnode.children.remove(sep + 1);
+    rnode := &mut map.nodes[right];
+    rkeys := take_tail(&mut rnode.keys, 0);
+    rvalues := take_tail(&mut rnode.values, 0);
+    mut rchildren = u64[];
+    if inner == 0 {
+        rchildren = take_tail(&mut rnode.children, 0);
+    }
+    lnode := &mut map.nodes[left];
+    lnode.keys.push(down_key);
+    lnode.values.push(down_value);
+    append(&mut lnode.keys, rkeys);
+    append(&mut lnode.values, rvalues);
+    append(&mut lnode.children, rchildren);
+    free_node(map, right);
+    return ();
+}
+
+// Gives an under-full child a key from a sibling that can spare one, or merges it with a sibling.
+fn rebalance<K: order::Ord, V>(map: (&mut BTreeMap<K, V>), parent: u64, at: u64) {
+    mut spare = 0;
+    if at > 0 {
+        left := map.nodes[parent].children[at - 1];
+        if map.nodes[left].keys.len() > MIN_KEYS {
+            spare = 1;
+        }
+    }
+    if spare == 1 {
+        borrow_left(map, parent, at);
+        return ();
+    }
+    siblings := map.nodes[parent].children.len();
+    if at + 1 < siblings {
+        right := map.nodes[parent].children[at + 1];
+        if map.nodes[right].keys.len() > MIN_KEYS {
+            spare = 2;
+        }
+    }
+    if spare == 2 {
+        borrow_right(map, parent, at);
+        return ();
+    }
+    if at > 0 {
+        merge_children(map, parent, at - 1);
+    } else {
+        merge_children(map, parent, at);
+    }
+    return ();
+}
+
+// Repairs the recorded path bottom-up, then collapses a root that a merge emptied.
+fn fix_up<K: order::Ord, V>(map: (&mut BTreeMap<K, V>), path: (&u64[]), steps: (&u64[])) {
+    mut depth = path.len();
+    while depth > 0 {
+        depth -= 1;
+        parent := path[depth];
+        at := steps[depth];
+        child := map.nodes[parent].children[at];
+        if map.nodes[child].keys.len() >= MIN_KEYS {
+            // Every node above is fine: it lost no key on this path.
+            depth = 0;
+        } else {
+            rebalance(map, parent, at);
+        }
+    }
+    root := map.root;
+    internal := map.nodes[root].leaf;
+    held := map.nodes[root].keys.len();
+    mut only = 0;
+    if held == 0 {
+        only = map.nodes[root].children[0];
+    }
+    if internal == 0 {
+        if held == 0 {
+            // The tree lost its last level: the only child becomes the root.
+            map.root = only;
+            free_node(map, root);
+        }
+    }
+    return ();
+}
+
+// ---- removal, ends, and reclamation -----------------------------------------------------------
+
+impl<K: order::Ord, V> BTreeMap<K, V> {
+    // Takes the pair stored under `key` out of the map and answers its value, or `None` when the key
+    // is absent. The tree stays balanced: a node left short borrows a key from a sibling or merges
+    // with one. O(log n).
+    pub fn remove<a, b>(self: (&a mut BTreeMap<K, V>), key: (&b K)) -> V? {
+        if self.count == 0 {
+            return None;
+        }
+        mut path = u64[];
+        mut steps = u64[];
+        mut cur = self.root;
+        mut found = 0;
+        mut pos = 0;
+        loop {
+            here := &self.nodes[cur];
+            spot := locate(here, key);
+            pos = spot.0;
+            if spot.1 == 1 {
+                found = 1;
+                break;
+            }
+            if spot.2 == 1 {
+                break;
+            }
+            path.push(cur);
+            steps.push(spot.0);
+            cur = spot.3;
+        }
+        if found == 0 {
+            return None;
+        }
+        in_leaf := self.nodes[cur].leaf;
+        mut out_key: K? = None;
+        mut out_value: V? = None;
+        if in_leaf == 1 {
+            node := &mut self.nodes[cur];
+            kslot := &mut node.keys;
+            vkey := take_at(kslot, pos);
+            vnode := &mut self.nodes[cur];
+            vslot := &mut vnode.values;
+            out_key = Some(vkey);
+            out_value = Some(take_at(vslot, pos));
+        } else {
+            // The key sits in an internal node: the smallest pair of its right subtree takes its
+            // place, so nothing has to be duplicated.
+            right := self.nodes[cur].children[pos + 1];
+            path.push(cur);
+            steps.push(pos + 1);
+            mut down = right;
+            loop {
+                level := &self.nodes[down];
+                if level.leaf == 1 {
+                    break;
+                }
+                child := level.children[0];
+                path.push(down);
+                steps.push(0);
+                down = child;
+            }
+            leaf := down;
+            fnode := &mut self.nodes[leaf];
+            fkeys := &mut fnode.keys;
+            succ_key := take_at(fkeys, 0);
+            fvalues := &mut self.nodes[leaf];
+            fvals := &mut fvalues.values;
+            succ_value := take_at(fvals, 0);
+            inode := &mut self.nodes[cur];
+            place_key := &mut inode.keys[pos];
+            out_key = Some(exchange(place_key, succ_key));
+            ivalues := &mut self.nodes[cur];
+            place_value := &mut ivalues.values[pos];
+            out_value = Some(exchange(place_value, succ_value));
+        }
+        self.count -= 1;
+        if self.count == 0 {
+            self.clear();
+        } else {
+            fix_up(self, &path, &steps);
+        }
+        return out_value;
+    }
+
+    // The smallest stored pair, in key order. O(log n).
+    pub fn first<a>(self: (&a BTreeMap<K, V>)) -> ((&a K), (&a V))? {
+        if self.count == 0 {
+            return None;
+        }
+        mut cur = self.root;
+        loop {
+            node := &self.nodes[cur];
+            if node.leaf == 1 {
+                return Some((&node.keys[0], &node.values[0]));
+            }
+            cur = node.children[0];
+        }
+    }
+
+    // The largest stored pair, in key order. O(log n).
+    pub fn last<a>(self: (&a BTreeMap<K, V>)) -> ((&a K), (&a V))? {
+        if self.count == 0 {
+            return None;
+        }
+        mut cur = self.root;
+        loop {
+            node := &self.nodes[cur];
+            if node.leaf == 1 {
+                end := node.keys.len() - 1;
+                return Some((&node.keys[end], &node.values[end]));
+            }
+            end := node.keys.len();
+            cur = node.children[end];
+        }
+    }
+
+    // Drops every pair and every node. O(n).
+    pub fn clear(self: (&mut BTreeMap<K, V>)) {
+        exchange(&mut self.nodes, Node<K, V>[]);
+        exchange(&mut self.free, u64[]);
+        self.root = 0;
+        self.count = 0;
+        return ();
+    }
+
+    // Rebuilds the tree as small as the stored pairs allow, giving the nodes a fragmentation or an
+    // over-large root held back to the allocator. `nodes_used` is the measure. O(n log n); merges
+    // already reuse released nodes, so this is only worth calling after a burst of removals.
+    pub fn shrink(self: (&mut BTreeMap<K, V>)) {
+        mut keys = K[];
+        mut values = V[];
+        held := self.nodes.len();
+        for i in held {
+            node := &mut self.nodes[i];
+            while node.keys.len() > 0 {
+                values.push(node.values.pop());
+                keys.push(node.keys.pop());
+            }
+            node.children.clear();
+            node.leaf = 1;
+        }
+        exchange(&mut self.nodes, Node<K, V>[]);
+        exchange(&mut self.free, u64[]);
+        self.root = 0;
+        self.count = 0;
+        while keys.len() > 0 {
+            key := keys.pop();
+            value := values.pop();
+            self.insert(key, value);
+        }
+        return ();
+    }
+}
+
+// ---- walking the pairs in key order -----------------------------------------------------------
+
+// An in-order walk over every pair, handed out by `iter`. The path is the chain of nodes from the
+// root down to the node whose next key is due, and `slots[i]` is the index of that node's next key,
+// so a step costs one descent at most and the walk allocates nothing after it starts. A step that
+// yields a pair is O(1) amortised; the whole walk is O(n).
+pub struct Cursor<a, K: order::Ord, V> {
+    map: (&a BTreeMap<K, V>),
+    path: u64[],
+    slots: u64[]
+}
+
+// The same walk, starting at the first key that is not less than a bound and stopping before an
+// exclusive upper bound: what `range` hands out.
+pub struct Range<a, K: order::Ord, V> {
+    walk: Cursor<a, K, V>,
+    limit: (&a K),
+    done: u64
+}
+
+// The last use of the key at the deepest node is a filled slot: advance the slot, and when that node
+// still has children, step into the child to its right and take its leftmost path.
+fn step_cursor<a, K: order::Ord, V>(walk: (&mut Cursor<a, K, V>)) -> ((&a K), (&a V))? {
+    while walk.path.len() > 0 {
+        top := walk.path.len() - 1;
+        index := walk.path[top];
+        node := &walk.map.nodes[index];
+        pos := walk.slots[top];
+        if pos < node.keys.len() {
+            walk.slots[top] = pos + 1;
+            if node.leaf == 0 {
+                mut cur = node.children[pos + 1];
+                loop {
+                    walk.path.push(cur);
+                    walk.slots.push(0);
+                    inner := &walk.map.nodes[cur];
+                    if inner.leaf == 1 {
+                        break;
+                    }
+                    cur = inner.children[0];
+                }
+            }
+            return Some((&node.keys[pos], &node.values[pos]));
+        }
+        walk.path.pop();
+        walk.slots.pop();
+    }
+    return None;
+}
+
+fn cursor_next<a, K: order::Ord, V>(walk: (&mut Cursor<a, K, V>)) -> ((&a K), (&a V))? {
+    return step_cursor(walk);
+}
+
+// True when `key` is below the walk's upper bound; reading the bound here, rather than copying it
+// out of the record, is what leaves the walk usable afterwards.
+fn within<a, K: order::Ord, V>(walk: (&mut Range<a, K, V>), key: (&K)) -> bool {
+    held := &walk.limit;
+    return order::less(key, *held);
+}
+
+fn range_next<a, K: order::Ord, V>(walk: (&mut Range<a, K, V>)) -> ((&a K), (&a V))? {
+    if walk.done != 0 {
+        return None;
+    }
+    pair := cursor_next(&mut walk.walk);
+    if pair.is_none() {
+        walk.done = 1;
+        return None;
+    }
+    found := pair!;
+    key := found.0;
+    value := found.1;
+    if !within(walk, key) {
+        walk.done = 1;
+        return None;
+    }
+    return Some((key, value));
+}
+
+impl<a, K: order::Ord, V> Cursor<a, K, V> {
+    // The next pair, or `None` once every pair has been walked.
+    pub fn next(self: (&mut Cursor<a, K, V>)) -> ((&a K), (&a V))? {
+        return cursor_next(self);
+    }
+}
+
+impl<a, K: order::Ord, V> Range<a, K, V> {
+    // The next pair in the range, or `None` at its end.
+    pub fn next(self: (&mut Range<a, K, V>)) -> ((&a K), (&a V))? {
+        return range_next(self);
+    }
+}
+
+impl<K: order::Ord, V> BTreeMap<K, V> {
+    // Walks every pair in key order, smallest first: `for pair in map.iter() { k := pair.0; }` and
+    // every `iter` adapter (`count`, `take`, `map`, `filter`) work on it. The walk borrows the map
+    // for as long as it lives, so the body cannot insert or remove. O(1) to start.
+    pub fn iter<a>(self: (&a BTreeMap<K, V>)) -> Cursor<a, K, V> {
+        mut path = u64[];
+        mut slots = u64[];
+        if self.count > 0 {
+            mut cur = self.root;
+            loop {
+                path.push(cur);
+                slots.push(0);
+                node := &self.nodes[cur];
+                if node.leaf == 1 {
+                    break;
+                }
+                cur = node.children[0];
+            }
+        }
+        return Cursor { map: self, path: path, slots: slots };
+    }
+
+    // Walks the pairs whose key is in `lo..hi` in key order: at least `lo` and below `hi`, comparing
+    // with the same `order::Ord` the map is keyed by. O(log n) to start, then O(1) a pair.
+    pub fn range<a, b>(self: (&a BTreeMap<K, V>), lo: (&b K), hi: (&a K)) -> Range<a, K, V> {
+        mut path = u64[];
+        mut slots = u64[];
+        mut done = 0;
+        if self.count == 0 {
+            done = 1;
+        } else {
+            mut cur = self.root;
+            loop {
+                node := &self.nodes[cur];
+                at := slot_of(node, lo);
+                path.push(cur);
+                slots.push(at);
+                if node.leaf == 1 {
+                    break;
+                }
+                cur = node.children[at];
+            }
+        }
+        walk := Cursor { map: self, path: path, slots: slots };
+        return Range { walk: walk, limit: hi, done: done };
+    }
+}

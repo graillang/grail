@@ -79,6 +79,26 @@ for (let i = 0; i < cases.length; i++) {
 // A case's `data` files (what an `@embed` reads) are staged under their own names beside its
 // sources, so a path relative to the source resolves as it does in a project.
 for (const test of cases) for (const file of test.data ?? []) writeFileSync(join(snapshot, basename(file)), readFileSync(resolve(root, file)));
+// A stdlib module may import other stdlib modules (`lib/fs.grl` uses `time`), and a case that
+// names only the top-level one would leave `time::Timestamp` unresolved inside it. The staged std
+// snapshot holds every module, so the dependency set is closed over its own `use` lines.
+const stdClosure = (list) => {
+  const out = [...list];
+  const seen = new Set(out.map(p => basename(p)));
+  for (let i = 0; i < out.length; i++) {
+    const p = out[i];
+    if (dirname(p) !== stdSnapshot) continue;
+    for (const line of readFileSync(p, 'utf8').split('\n')) {
+      const m = /^\s*use\s+([A-Za-z_][A-Za-z0-9_]*)\s*;/.exec(line);
+      if (!m) continue;
+      const dep = join(stdSnapshot, `${m[1]}.grl`);
+      if (!existsSync(dep) || seen.has(`${m[1]}.grl`)) continue;
+      seen.add(`${m[1]}.grl`);
+      out.push(dep);
+    }
+  }
+  return out;
+};
 let passed = 0;
 let skipped = 0;
 let filtered = 0;
@@ -99,6 +119,7 @@ for (const [position, test] of cases.entries()) {
   let files;
   if (test.files) files = [...test.files, ...(test.modules ?? [])];
   else { const input = join(directory, 'input.grl'); writeFileSync(input, test.source); files = [input, ...(test.modules ?? [])]; }
+  files = stdClosure(files);
   if (test.reject) {
     const assembly = join(directory, 'prior.s');
     writeFileSync(assembly, 'prior valid artifact');
@@ -125,12 +146,25 @@ for (const [position, test] of cases.entries()) {
     if (test.interfaces) {
       const ifaces = join(directory, 'ifaces');
       // The interface comes from the library modules alone: the entry may be the very thing the
-      // rejection is about.
+      // rejection is about, so it cannot be what the emit run compiles. `interfaceFiles` is the
+      // stand-in entry for that run, and it changes the second leg too: a program whose own entry
+      // is refused has no `main.iface` to check it against, so that leg builds with `--use` - the
+      // entry from its source, the modules' declarations and generic bodies from the interfaces.
+      // `--interface DIR` is the verification mode: it compares every module given as source with
+      // its interface, the entry included, which is exactly the file that cannot be emitted here.
       const modules = test.modules ?? [];
       assert.ok(modules.length !== 0, `${test.name}: an interface rejection needs module sources`);
-      const emit = execute(compiler, ['--target', target, '--emit-interface', ifaces, join(directory, 'emit.s'), ...modules, ...(test.interfaceFiles ?? []), runtime, osRuntime]);
+const stand = test.interfaceFiles ?? [];
+      // The interface files come first: the first source after OUT.s is the entry of the emit run, and
+      // a reject case's own entry is the thing the rejection is about - so the interface is emitted
+      // from these files, which pull in the modules they use.
+      const emit = execute(compiler, ['--target', target, '--emit-interface', ifaces, join(directory, 'emit.s'), ...stdClosure(test.interfaceFiles ?? []), ...stdClosure(modules), runtime, osRuntime]);
       assert.equal(emit.status, 0, `${test.name}: emitting interfaces failed: ${emit.stdout}${emit.stderr}`);
-      const viaInterface = execute(compiler, ['--target', target, '--interface', ifaces, join(directory, 'iface.s'), ...files, runtime, osRuntime]);
+      const separate = stand.length !== 0;
+      const mode = separate ? ['--use', ifaces] : ['--interface', ifaces];
+      const entry = separate ? (test.files ?? []) : files;
+      assert.ok(entry.length !== 0, `${test.name}: an interface build needs an entry file`);
+      const viaInterface = execute(compiler, ['--target', target, ...mode, join(directory, 'iface.s'), ...entry, runtime, osRuntime]);
       assert.equal(viaInterface.status, 1, `${test.name}: the interface build must refuse it too: ${viaInterface.stdout}${viaInterface.stderr}`);
       for (const fragment of diagnostics) {
         assert.ok(`${viaInterface.stdout}${viaInterface.stderr}`.includes(fragment), `${test.name}: expected diagnostic ${fragment} from the interface build: ${viaInterface.stdout}${viaInterface.stderr}`);

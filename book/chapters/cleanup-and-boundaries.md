@@ -183,6 +183,26 @@ another thread. `Arc<T>` is the same value with atomic counts, declared `unsafe 
 transferable, shareable`, and its type argument must be shareable too - `Arc<T>` over a record that
 holds a bare pointer is refused where it would cross a thread.
 
+An interface object can sit behind either handle. Build the object with the typed binding (the
+language's cast form) or name the type argument, then put it in the handle; `get()` gives a `&dyn`
+whose method calls dispatch through the object, cloning keeps it alive, and the last handle drops
+the concrete value through its vtable, so an `impl Drop` runs once:
+
+```grl
+use rc;
+interface Shape { fn area(self: &Self) -> u64; }
+o: dyn Shape = Rect { w: 3, h: 4 };
+r: rc::Rc<dyn Shape> = rc::new(o);
+b := r.clone();                            // strong count 2
+println("{}", b.get().area());             // the method through the object
+drop(r);                                   // the value stays alive in b
+```
+
+A `dyn` object's concrete type is not known where it would cross a thread, so it is neither
+transferable nor shareable: `Rc<dyn I>` and `Arc<dyn I>` stay local, and passing either to a worker
+is refused by name. `Arc` gives shared *ownership*, not shared *mutation* - that is
+`Arc<Mutex<T>>`, and a `&mut self` method is not reachable through a shared handle.
+
 ### `Arena<T>`
 
 `arena::new()` collects values and hands out a generational `Key` for each one:

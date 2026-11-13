@@ -7,7 +7,17 @@ module optimize;
 // registers (weighted by loop depth), and (4) fuses set/test/branch sequences and turns division
 // by a power-of-two constant into shift/mask. Unrecognized functions are copied unchanged.
 // Kinds: 0 none, 1 register, 2 frame slot -N(%rbp), 3 immediate/other text, 4 other operand,
-// 5 generated text (range in O.gen). Ops: see opcode(); 100 label, 101 directive, 0 unknown.
+// 5 generated text (range in O.gen). Ops: see opcode(); 100 label, 101 directive, 102 two-word
+// slot declaration, 0 unknown.
+//
+// A slot is one word unless a `.gpair -N(%rbp)` line declares it the first word of a two-word
+// value (native.grl emits one where a borrowed interface object's {data, vtable} pair is built), and
+// a result is one word unless `.gpair ret` declares it the two-word %rax:%rdx form.
+// The two words are one value with one identity: allocated together, written directly, addressed
+// from the first word, kept adjacent when the frame is compacted, and never promoted, forwarded or
+// dropped - the second word's only reader is the pair's address, which no pass reasons about. Every
+// pass that looks at a slot obeys `pair[n]`, so width 1 and width 2 are handled uniformly and a
+// pass that cannot reason about the second word is conservative for both.
 struct O {
     ls: u64[],
     le: u64[],
@@ -37,10 +47,25 @@ struct O {
     zline: u64,
     zfrom: u64,
     zto: u64,
+    pairs: u64[],
+    pair: u64[],
+    ret2: u64,
     inl_names: u8[][],
     inl_bodies: u8[][],
+    inl_units: u8[][],
     inl_head: u64[],
-    inl_next: u64[]
+    inl_next: u64[],
+    // The emission unit the stream is inside: its name and its label prefix, both from the
+    // `.grail_part` marker `native.grl` writes. A label is numbered only when it is this unit's.
+    unit: u8[],
+    uprefix: u8[],
+    // 1 when the stream carried any marker, so a single-file build knows to strip them.
+    marked: u64,
+    // The expansion-label counter of each unit (1-based index into `uniq_units` of the one being
+    // emitted, 0 before the first). Per unit and kept across a re-entry, like the emitter's own.
+    uniq_index: u64,
+    uniq_units: u8[][],
+    uniq_next: u64[]
 }
 fn put<a>(v: (&a mut u64[]), i: u64, x: u64) {
     exchange(&mut v[i], x);
@@ -531,6 +556,105 @@ fn classify<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64, second: u64) {
         o.m0.push(m);
     }
 }
+// The counter a label carries: `.L<unit prefix>_<n>` is numbered, everything else is opaque text
+// (`.Lopt` expansions, refinement strings, `.Lret` in an inlined body). A stream with no marker -
+// a caller that hands the optimizer text it produced itself - keeps the old `.L<n>` numbering.
+fn label_number<a, b, d>(s: &a [u8], a: u64, e: u64, uprefix: &d [u8]) -> u64 {
+    if (e <= a + 2) || !same(view(s), a, a + 2, view(".L")) {
+        return 0;
+    }
+    mut at = a + 2;
+    if uprefix.len() == 0 {
+        mut n = 0;
+        mut ok = 1;
+        while at < e {
+            d := s[at];
+            if (d < 48) || (57 < d) {
+                ok = 0;
+                break;
+            }
+            n = n * 10 + (d - 48);
+            at += 1;
+        }
+        if (ok == 0) || (at == a + 2) {
+            return 0;
+        }
+        return n + 1;
+    }
+    if !same(view(s), at, e, view(uprefix)) | (e <= at + uprefix.len() + 1) {
+        return 0;
+    }
+    mut i = 0;
+    while i < uprefix.len() {
+        if s[at + i] != uprefix[i] {
+            return 0;
+        }
+        i += 1;
+    }
+    at += uprefix.len();
+    if s[at] != 95 {
+        return 0;
+    }
+    at += 1;
+    mut n = 0;
+    while at < e {
+        d := s[at];
+        if (d < 48) || (57 < d) {
+            return 0;
+        }
+        n = n * 10 + (d - 48);
+        at += 1;
+    }
+    return n + 1;
+}
+// The marker line: `.grail_part <unit> <label prefix>`, and the unit fields it sets. 1 when the
+// line was one.
+fn marker<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64) -> u64 {
+    if (e - a < 14) || (s[a] != 46) || !same(view(s), a, a + 12, view(".grail_part ")) {
+        return 0;
+    }
+    mut unit = u8[];
+    mut at = a + 12;
+    while (at < e) & (s[at] != 32) {
+        unit.push(s[at]);
+        at += 1;
+    }
+    mut prefix = u8[];
+    at += 1;
+    while at < e {
+        prefix.push(s[at]);
+        at += 1;
+    }
+    // Labels and the optimizer's own expansion labels are per unit: this unit's counters resume
+    // where it left them, or start at zero the first time.
+    mut k = 0;
+    while k < o.uniq_units.len() {
+        if same(view(o.uniq_units[k]), 0, unit.len(), view(unit)) {
+            break;
+        }
+        k += 1;
+    }
+    if k == o.uniq_units.len() {
+        o.uniq_units.push(unit.copy());
+        o.uniq_next.push(0);
+    }
+    o.uniq_index = k + 1;
+    exchange(&mut o.uniq, o.uniq_next[k]);
+    exchange(&mut o.unit, unit);
+    exchange(&mut o.uprefix, prefix);
+    exchange(&mut o.marked, 1);
+    return 1;
+}
+// The next expansion label number of the unit being emitted, kept with that unit.
+fn uniq_take<a>(o: (&a mut O)) -> u64 {
+    n := o.uniq + 1;
+    exchange(&mut o.uniq, n);
+    k := o.uniq_index;
+    if (k != 0) & (k <= o.uniq_next.len()) {
+        o.uniq_next[k - 1] = n;
+    }
+    return n;
+}
 fn parse<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64) {
     o.ls.push(a);
     o.le.push(e);
@@ -559,21 +683,7 @@ fn parse<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64) {
         if a < e {
             if s[e - 1] == 58 {
                 op = 100;
-                if same(view(s), a, a + 2, view(".L")) & (e - a > 3) {
-                    mut n = 0;
-                    mut ok = 1;
-                    for i in e - a - 3 {
-                        d := s[a + 2 + i];
-                        if d < 48 || 57 < d {
-                            ok = 0;
-                        } else {
-                            n = n * 10 + d - 48;
-                        }
-                    }
-                    if ok != 0 {
-                        lab = n + 1;
-                    }
-                }
+                lab = label_number(view(s), a, e - 1, view(o.uprefix));
             } else {
                 if s[a] == 46 {
                     op = 101;
@@ -599,6 +709,25 @@ fn parse<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64) {
     }
     o.op.push(op);
     o.lab.push(lab);
+    if op == 101 {
+        // `.gpair -N(%rbp)`: the two-word value whose first word lives at that frame address.
+        if (e - a > 7) & same(view(s), a, a + 7, view(".gpair ")) {
+            last := o.op.len() - 1;
+            if same(view(s), a + 7, e, view("ret")) {
+                exchange(&mut o.op[last], 102);
+                exchange(&mut o.ret2, 1);
+                classify(&mut o, view(s), e, e, 0);
+                classify(&mut o, view(s), e, e, 1);
+                return ();
+            }
+            exchange(&mut o.op[last], 102);
+            classify(&mut o, view(s), a + 7, e, 0);
+            classify(&mut o, view(s), e, e, 1);
+            n := o.v0[o.v0.len() - 1];
+            o.pairs.push(n / 8);
+            return ();
+        }
+    }
     if op == 100 || op == 101 {
         classify(&mut o, view(s), e, e, 0);
         classify(&mut o, view(s), e, e, 1);
@@ -644,6 +773,7 @@ fn parse<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64) {
         }
     }
     if extra != 0 {
+        // stays: exchange is a builtin, so its &mut is taken before this read.
         last := o.op.len() - 1;
         exchange(&mut o.op[last], 0);
     }
@@ -688,6 +818,7 @@ fn parse<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64) {
                 fast = 48;
             }
             if fast != 0 {
+                // stays: exchange is a builtin, so its &mut is taken before this read.
                 last := o.op.len() - 1;
                 exchange(&mut o.op[last], fast);
             }
@@ -740,7 +871,7 @@ fn reads<a>(o: (&a O), i: u64) -> u64 {
     if op == 15 {
         return arg_regs() | src;
     }
-    if op == 100 || op == 101 || op == 29 || op == 32 || is_jump(op) {
+    if op == 100 || op == 101 || op == 102 || op == 29 || op == 32 || is_jump(op) {
         return 0;
     }
     if movelike(op) {
@@ -763,8 +894,11 @@ fn reads<a>(o: (&a O), i: u64) -> u64 {
     if op == 13 {
         return src | 5;
     }
-    if op == 25 || op == 26 || op == 27 || op == 30 {
+    if op == 25 || op == 26 || op == 27 {
         return 1;
+    }
+    if op == 30 {
+        return result_live(&o);
     }
     if op == 31 {
         return src;
@@ -786,7 +920,7 @@ fn reads<a>(o: (&a O), i: u64) -> u64 {
 }
 fn writes<a>(o: (&a O), i: u64) -> u64 {
     op := o.op[i];
-    if op == 100 || op == 101 || op == 29 || op == 30 || op == 31 || op == 6 || op == 7 {
+    if op == 100 || op == 101 || op == 102 || op == 29 || op == 30 || op == 31 || op == 6 || op == 7 {
         return 0;
     }
     if op == 15 {
@@ -818,6 +952,9 @@ fn writes<a>(o: (&a O), i: u64) -> u64 {
 // Whether operand j of instruction i reads / writes a frame slot.
 fn slot_read<a>(o: (&a O), i: u64, j: u64) -> bool {
     op := o.op[i];
+    if op == 101 || op == 102 {
+        return false;
+    }
     if j == 0 {
         return o.k0[i] == 2;
     }
@@ -888,15 +1025,13 @@ fn facts_valid<a>(f: (&a F), n: u64) -> bool {
 }
 fn fresh_facts<a>(f: (&a mut F), n: u64) {
     put(&mut f.sep, n, f.epoch);
-    t1 := f.sver[n];
-    put(&mut f.sfv, n, t1);
+    put(&mut f.sfv, n, f.sver[n]);
     put(&mut f.sreg, n, 0);
     put(&mut f.simm, n, 0);
     put(&mut f.scopy, n, 0);
 }
 fn reg_written<a>(f: (&a mut F), r: u64) {
-    t2 := f.rver[r] + 1;
-    put(&mut f.rver, r, t2);
+    put(&mut f.rver, r, f.rver[r] + 1);
     put(&mut f.rimm, r, 0);
     put(&mut f.rslot, r, 0);
     put(&mut f.rcopy, r, 0);
@@ -1007,11 +1142,12 @@ fn forward<a, b, c>(o: (&a mut O), f: (&c mut F), s: &b [u8], first: u64, last: 
     mut i = first;
     while i < last {
         op := o.op[i];
-        if o.del[i] != 0 || op == 101 || o.tr[i] != 0 {
+        if o.del[i] != 0 || op == 101 || op == 102 || o.tr[i] != 0 {
             i += 1;
             continue;
         }
         if op == 100 || op == 0 {
+            // stays: exchange is a builtin, so its &mut is taken before this read.
             ep := f.epoch + 1;
             exchange(&mut f.epoch, ep);
             if op == 0 {
@@ -1106,15 +1242,13 @@ fn forward<a, b, c>(o: (&a mut O), f: (&c mut F), s: &b [u8], first: u64, last: 
         }
         if slot_written(&o, i) {
             n := o.v1[i] / 8;
-            t3 := f.sver[n] + 1;
-            put(&mut f.sver, n, t3);
+            put(&mut f.sver, n, f.sver[n] + 1);
             if (op2 == 1) & (f.bad[n] == 0) {
                 fresh_facts(&mut f, n);
                 if o.k0[i] == 1 {
                     r := o.v0[i];
                     put(&mut f.sreg, n, r + 1);
-                    t4 := f.rver[r];
-                    put(&mut f.sregv, n, t4);
+                    put(&mut f.sregv, n, f.rver[r]);
                     if src_imm != 0 {
                         put(&mut f.simm, n, src_imm);
                     }
@@ -1122,8 +1256,7 @@ fn forward<a, b, c>(o: (&a mut O), f: (&c mut F), s: &b [u8], first: u64, last: 
                         m := src_slot - 1;
                         if (m != n) & (src_slotv == f.sver[m]) {
                             put(&mut f.scopy, n, m + 1);
-                            t5 := f.sver[m];
-                            put(&mut f.scopyv, n, t5);
+                            put(&mut f.scopyv, n, f.sver[m]);
                         }
                     }
                 }
@@ -1145,43 +1278,48 @@ fn forward<a, b, c>(o: (&a mut O), f: (&c mut F), s: &b [u8], first: u64, last: 
                 r := o.v0[i];
                 if r != q {
                     put(&mut f.rcopy, q, r + 1);
-                    cv := f.rver[r];
-                    put(&mut f.rcopyv, q, cv);
+                    put(&mut f.rcopyv, q, f.rver[r]);
                 }
             }
             if o.k0[i] == 2 {
                 n := o.v0[i] / 8;
                 if f.bad[n] == 0 {
                     put(&mut f.rslot, q, n + 1);
-                    t6 := f.sver[n];
-                    put(&mut f.rslotv, q, t6);
+                    put(&mut f.rslotv, q, f.sver[n]);
                     if !facts_valid(&f, n) {
                         fresh_facts(&mut f, n);
                     }
                     put(&mut f.sreg, n, q + 1);
-                    t7 := f.rver[q];
-                    put(&mut f.sregv, n, t7);
+                    put(&mut f.sregv, n, f.rver[q]);
                 }
             }
             if loaded != 0 {
                 n := loaded - 1;
                 if o.k0[i] != 2 {
                     put(&mut f.rslot, q, n + 1);
-                    t8 := f.sver[n];
-                    put(&mut f.rslotv, q, t8);
+                    put(&mut f.rslotv, q, f.sver[n]);
                 }
             }
         }
         if is_jump(op2) && op2 != 15 {
+            // stays: exchange is a builtin, so its &mut is taken before this read.
             ep := f.epoch + 1;
             exchange(&mut f.epoch, ep);
         }
         if op2 == 29 || op2 == 30 {
+            // stays: exchange is a builtin, so its &mut is taken before this read.
             ep := f.epoch + 1;
             exchange(&mut f.epoch, ep);
         }
         i += 1;
     }
+}
+// Registers a result is read from: %rax, plus %rdx when the function returns a two-word value.
+fn result_live<a>(o: (&a O)) -> u64 {
+    if o.ret2 != 0 {
+        return 5;
+    }
+    return 1;
 }
 fn count_reads<a, c>(o: (&a O), f: (&c mut F), first: u64, last: u64) {
     for n in f.reads.len() {
@@ -1192,13 +1330,11 @@ fn count_reads<a, c>(o: (&a O), f: (&c mut F), first: u64, last: u64) {
         if o.del[j] == 0 {
             if slot_read(&o, j, 0) {
                 n := o.v0[j] / 8;
-                t9 := f.reads[n] + 1;
-                put(&mut f.reads, n, t9);
+                put(&mut f.reads, n, f.reads[n] + 1);
             }
             if slot_read(&o, j, 1) {
                 n := o.v1[j] / 8;
-                t10 := f.reads[n] + 1;
-                put(&mut f.reads, n, t10);
+                put(&mut f.reads, n, f.reads[n] + 1);
             }
         }
     }
@@ -1232,7 +1368,7 @@ fn live_pass<a, c>(o: (&a mut O), lin: (&c mut u64[]), remove: u64) -> u64 {
                     changed = 1;
                 }
             } else {
-                if op != 101 {
+                if (op != 101) & (op != 102) {
                     if op == 16 || (16 < op && op < 25) {
                         t := jump_target(&o, i);
                         mut there = all_regs();
@@ -1246,7 +1382,7 @@ fn live_pass<a, c>(o: (&a mut O), lin: (&c mut u64[]), remove: u64) -> u64 {
                         }
                     } else {
                         if op == 29 || op == 30 {
-                            live = 1;
+                            live = result_live(&o);
                         } else {
                             if op == 0 {
                                 live = all_regs();
@@ -1295,7 +1431,7 @@ fn dead_defs<a, b>(o: (&a mut O), s: &b [u8], first: u64, last: u64) {
 fn next_live<a>(o: (&a O), i: u64, last: u64) -> u64 {
     mut j = i + 1;
     while j < last {
-        if (o.del[j] == 0) & (o.op[j] != 101) {
+        if (o.del[j] == 0) & (o.op[j] != 101) & (o.op[j] != 102) {
             return j;
         }
         j += 1;
@@ -1691,12 +1827,16 @@ fn out_number<a>(o: (&a mut O), n: u64) {
 }
 fn emit_line<a, b>(o: (&a mut O), s: &b [u8], i: u64) {
     op := o.op[i];
+    if op == 102 {
+        return ();
+    }
     if op == 40 || op == 41 || op == 44 {
-        n := o.uniq + 1;
-        exchange(&mut o.uniq, n);
-        app(&mut o.out, view("cmpq 8(%rdi),%rsi\njb .Lopt"));
+        n := uniq_take(&mut o);
+        app(&mut o.out, view("cmpq 8(%rdi),%rsi\njb .L"));
+        opt_label(&mut o);
         out_number(&mut o, n);
-        app(&mut o.out, view("\ncall rt_abort\n.Lopt"));
+        app(&mut o.out, view("\ncall rt_abort\n.L"));
+        opt_label(&mut o);
         out_number(&mut o, n);
         if op == 40 {
             app(&mut o.out, view(":\nmovq (%rdi),%rax\nleaq (%rax,%rsi,8),%rax\n"));
@@ -1722,18 +1862,20 @@ fn emit_line<a, b>(o: (&a mut O), s: &b [u8], i: u64) {
         return ();
     }
     if op == 45 || op == 46 {
-        fast := o.uniq + 1;
-        done := o.uniq + 2;
-        exchange(&mut o.uniq, done);
-        app(&mut o.out, view("movq 8(%rdi),%rcx\ncmpq 16(%rdi),%rcx\njb .Lopt"));
+        fast := uniq_take(&mut o);
+        done := uniq_take(&mut o);
+        app(&mut o.out, view("movq 8(%rdi),%rcx\ncmpq 16(%rdi),%rcx\njb .L"));
+        opt_label(&mut o);
         out_number(&mut o, fast);
         if op == 45 {
-            app(&mut o.out, view("\ncall rt_push\njmp .Lopt"));
+            app(&mut o.out, view("\ncall rt_push\njmp .L"));
         } else {
-            app(&mut o.out, view("\ncall rt_pushb\njmp .Lopt"));
+            app(&mut o.out, view("\ncall rt_pushb\njmp .L"));
         }
+        opt_label(&mut o);
         out_number(&mut o, done);
-        app(&mut o.out, view("\n.Lopt"));
+        app(&mut o.out, view("\n.L"));
+        opt_label(&mut o);
         out_number(&mut o, fast);
         if op == 45 {
             app(
@@ -1746,7 +1888,8 @@ fn emit_line<a, b>(o: (&a mut O), s: &b [u8], i: u64) {
                 view(":\nleaq 1(%rcx),%rdx\nmovq %rdx,8(%rdi)\naddq (%rdi),%rcx\nmovq %rsi,%rax\nmovb %al,(%rcx)\n")
             );
         }
-        app(&mut o.out, view("movq $0,%rax\n.Lopt"));
+        app(&mut o.out, view("movq $0,%rax\n.L"));
+        opt_label(&mut o);
         out_number(&mut o, done);
         app(&mut o.out, view(":\n"));
         return ();
@@ -1762,8 +1905,7 @@ fn emit_line<a, b>(o: (&a mut O), s: &b [u8], i: u64) {
         o.out.push(10);
         return ();
     }
-    code := o.op[i];
-    opname(&mut o, code);
+    opname(&mut o, o.op[i]);
     if o.k0[i] != 0 {
         o.out.push(32);
         emit_operand(&mut o, view(s), i, 0);
@@ -1773,6 +1915,14 @@ fn emit_line<a, b>(o: (&a mut O), s: &b [u8], i: u64) {
         }
     }
     o.out.push(10);
+}
+// `opt<unit prefix>_`: the namespace of the optimizer's own expansion labels, so a unit's `.Lopt`
+// numbers do not depend on the expansions the units before it emitted.
+fn opt_label<a>(o: (&a mut O)) {
+    app(&mut o.out, view("opt"));
+    prefix := o.uprefix.copy();
+    app(&mut o.out, view(prefix));
+    o.out.push(95);
 }
 fn emit_frame_slot<a, b>(o: (&a mut O), s: &b [u8], p: u64, k: u64) {
     // -.FN-8(k+1)(%rbp), where .FN is the frame constant named by the prologue subq.
@@ -1784,11 +1934,42 @@ fn emit_frame_slot<a, b>(o: (&a mut O), s: &b [u8], p: u64, k: u64) {
     out_number(&mut o, 8 * (k + 1));
     app(&mut o.out, view("(%rbp)"));
 }
+// Turn the declared pairs into slot widths: 0 scalar, 1 first word, 2 second word. A pair whose
+// second word would not be a frame slot cannot be modelled, so the function is copied unchanged
+// rather than mis-lowered.
+fn build_pairs<a>(o: (&a mut O), ns: u64) {
+    exchange(&mut o.pair, u64[]);
+    if o.pairs.len() == 0 {
+        return ();
+    }
+    for i in ns {
+        o.pair.push(0);
+    }
+    for i in o.pairs.len() {
+        n := o.pairs[i];
+        if (0 < n) & (n < ns) {
+            put(&mut o.pair, n, 1);
+            put(&mut o.pair, n - 1, 2);
+        } else {
+            exchange(&mut o.weird, 1);
+        }
+    }
+}
 fn function<a, b>(o: (&a mut O), s: &b [u8]) {
     first := 0;
     last := o.op.len();
     ns := o.maxslot / 8 + 1;
     mut f = new_facts(ns);
+    // Both words of a two-word value are opaque to the value passes: not promoted (bad), not
+    // forwarded, and their stores are not dead - the handle names them, not the frame.
+    build_pairs(&mut o, ns);
+    if o.pairs.len() != 0 {
+        for n in ns {
+            if o.pair[n] != 0 {
+                put(&mut f.bad, n, 1);
+            }
+        }
+    }
     // Frame shape: escaping slots, prologue position, label table and loop depth.
     mut prologue = 0;
     mut regs_used = 0;
@@ -1869,8 +2050,7 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
         }
         for i in last {
             if o.lab[i] != 0 {
-                li := o.lab[i] - 1 - base;
-                put(&mut o.table, li, i + 1);
+                put(&mut o.table, o.lab[i] - 1 - base, i + 1);
             }
         }
         for i in last {
@@ -1887,8 +2067,7 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
                     n := v - 1;
                     if n >= base {
                         if n - base < refs.len() {
-                            x := refs[n - base] + 1;
-                            put(&mut refs, n - base, x);
+                            put(&mut refs, n - base, refs[n - base] + 1);
                         }
                     }
                 }
@@ -1906,7 +2085,8 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
                 if j < last {
                     if (o.op[j] == 15) & (o.k0[j] == 4) {
                         if same(view(s), o.s0[j], o.e0[j], view("rt_abort")) {
-                            if (next_live(&o, j, last) == t)
+                            if (o.lab[t] != 0)
+                                & (next_live(&o, j, last) == t)
                                 & (refs[o.lab[t] - 1 - base] == 1) {
                                 put(&mut o.tr, i, 1);
                                 put(&mut o.tr, j, 1);
@@ -1936,10 +2116,8 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
             if is_jump(op) && op != 15 && o.del[i] == 0 {
                 t := jump_target(&o, i);
                 if t < i {
-                    x := opens[t] + 1;
-                    put(&mut opens, t, x);
-                    y := closes[i + 1] + 1;
-                    put(&mut closes, i + 1, y);
+                    put(&mut opens, t, opens[t] + 1);
+                    put(&mut closes, i + 1, closes[i + 1] + 1);
                 }
             }
         }
@@ -1968,8 +2146,7 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
                         n := v / 8;
                         if f.bad[n] == 0 {
                             if promotable_use(&o, i) {
-                                t11 := f.weight[n] + w;
-                                put(&mut f.weight, n, t11);
+                                put(&mut f.weight, n, f.weight[n] + w);
                             } else {
                                 put(&mut f.bad, n, 1);
                             }
@@ -2096,6 +2273,9 @@ fn name_hash<b>(s: &b [u8], a: u64, e: u64) -> u64 {
 // frameless copy of its body: slots move to free scratch registers, returns jump to the end.
 // Calls to it are replaced by that body after all functions are optimized.
 fn inline_candidate<a, b>(o: (&a mut O), s: &b [u8], prologue: u64) {
+    if o.pairs.len() != 0 {
+        return ();
+    }
     last := o.op.len();
     mut count = 0;
     mut used = 0;
@@ -2238,6 +2418,7 @@ fn inline_candidate<a, b>(o: (&a mut O), s: &b [u8], prologue: u64) {
     index := o.inl_names.len();
     o.inl_names.push(name);
     o.inl_bodies.push(body);
+    o.inl_units.push(o.unit.copy());
     old := o.inl_head[h];
     o.inl_next.push(old);
     put(&mut o.inl_head, h, index + 1);
@@ -2250,6 +2431,8 @@ fn inline_calls<a>(o: (&a mut O), split: u64, marks: (&a mut u64[])) {
     mut start = 0;
     mut site = 0;
     mut next = 0;
+    mut unit = u8[];
+    mut uprefix = u8[];
     for i in text.len() {
         if text[i] == 10 {
             a := start;
@@ -2262,9 +2445,21 @@ fn inline_calls<a>(o: (&a mut O), split: u64, marks: (&a mut u64[])) {
                     mut k = o.inl_head[h];
                     while k != 0 {
                         n := &o.inl_names[k - 1];
-                        if same(view(text), a + 5, e, view(n)) {
+                        // Only a body this unit emits: inlining across a module boundary would make
+                        // the caller's text a function of a body its own module never declares, and
+                        // a module compiled alone has no other module's bodies anyway.
+                        mut here = 1;
+                        u := &unit;
+                        ul := u.len();
+                        if ul != 0 {
+                            // `same` is this module's slice-vs-token comparison: whole, so 0..len.
+                            if !same(view(o.inl_units[k - 1]), 0, ul, view(u)) {
+                                here = 0;
+                            }
+                        }
+                        if (here != 0) & same(view(text), a + 5, e, view(n)) {
                             site += 1;
-                            emit_body(&mut o, k - 1, site);
+                            emit_body(&mut o, k - 1, site, view(uprefix));
                             done = 1;
                             break;
                         }
@@ -2273,16 +2468,41 @@ fn inline_calls<a>(o: (&a mut O), split: u64, marks: (&a mut u64[])) {
                 }
             }
             if done == 0 {
-                if (split != 0) & (next < marks.len()) {
-                    if (e - a > 12) & (text[a] == 46) & same(view(text), a, a + 12, view(".grail_part ")) {
-                        exchange(&mut marks[next], o.out.len());
-                        next += 1;
+                if (e - a > 12) & (text[a] == 46) & same(view(text), a, a + 12, view(".grail_part ")) {
+                    mut fresh = u8[];
+                    mut at = a + 12;
+                    while (at < e) & (text[at] != 32) {
+                        fresh.push(text[at]);
+                        at += 1;
+                    }
+                    exchange(&mut unit, fresh);
+                    mut fresh_prefix = u8[];
+                    at += 1;
+                    while at < e {
+                        fresh_prefix.push(text[at]);
+                        at += 1;
+                    }
+                    exchange(&mut uprefix, fresh_prefix);
+                    // A unit starts its own inline-site numbers, so one unit's text does not depend
+                    // on how many sites the units before it expanded.
+                    site = 0;
+                    if split != 0 {
+                        if next < marks.len() {
+                            exchange(&mut marks[next], o.out.len());
+                            next += 1;
+                        }
+                    } else {
+                        // A single-file build keeps no markers: they are the splitter's, and the
+                        // units they name exist only for the optimizer's own decisions.
+                        done = 1;
                     }
                 }
-                for x in e - a {
-                    o.out.push(text[a + x]);
+                if done == 0 {
+                    for x in e - a {
+                        o.out.push(text[a + x]);
+                    }
+                    o.out.push(10);
                 }
-                o.out.push(10);
             }
         }
     }
@@ -2290,7 +2510,10 @@ fn inline_calls<a>(o: (&a mut O), split: u64, marks: (&a mut u64[])) {
         o.out.push(text[start + x]);
     }
 }
-fn emit_body<a>(o: (&a mut O), k: u64, site: u64) {
+// `_i<unit prefix>_<site>` on every `.L` in the body: the site number disambiguates two copies of
+// one body, and the unit prefix keeps a body label without a prefix of its own (`.Lret`) apart from
+// the same label minted by another unit of the same file.
+fn emit_body<a, b>(o: (&a mut O), k: u64, site: u64, prefix: &b [u8]) {
     body := o.inl_bodies[k].copy();
     mut i = 0;
     n := body.len();
@@ -2319,6 +2542,8 @@ fn emit_body<a>(o: (&a mut O), k: u64, site: u64) {
                 i += 1;
             }
             app(&mut o.out, view("_i"));
+            app(&mut o.out, view(prefix));
+            o.out.push(95);
             out_number(&mut o, site);
         } else {
             o.out.push(c);
@@ -2385,6 +2610,16 @@ fn compact<a, b>(o: (&a mut O), s: &b [u8], prologue: u64, ns: u64) -> u64 {
             }
         }
     }
+    // A two-word value keeps both slots whether or not each has a direct reader, and slots are
+    // renumbered in ascending order, so its words stay adjacent and in order: word 1 keeps the slot
+    // above word 0, where `8(%handle)` finds it.
+    if o.pair.len() != 0 {
+        for n in ns {
+            if o.pair[n] != 0 {
+                put(&mut map, n, 1);
+            }
+        }
+    }
     mut used = 0;
     for n in ns {
         if n != 0 {
@@ -2432,12 +2667,10 @@ fn compact<a, b>(o: (&a mut O), s: &b [u8], prologue: u64, ns: u64) -> u64 {
     for i in last {
         if o.del[i] == 0 {
             if o.k0[i] == 2 {
-                v := map[o.v0[i] / 8] * 8;
-                set_operand(&mut o, i, 0, 2, v);
+                set_operand(&mut o, i, 0, 2, map[o.v0[i] / 8] * 8);
             }
             if o.k1[i] == 2 {
-                v := map[o.v1[i] / 8] * 8;
-                set_operand(&mut o, i, 1, 2, v);
+                set_operand(&mut o, i, 1, 2, map[o.v1[i] / 8] * 8);
             }
         }
     }
@@ -2462,6 +2695,9 @@ fn reset<a>(o: (&a mut O)) {
     o.e1.clear();
     o.m1.clear();
     exchange(&mut o.gen, u8[]);
+    exchange(&mut o.pairs, u64[]);
+    exchange(&mut o.pair, u64[]);
+    exchange(&mut o.ret2, 0);
     exchange(&mut o.weird, 0);
     exchange(&mut o.zline, 0);
     exchange(&mut o.maxslot, 0);
@@ -2504,10 +2740,20 @@ pub fn optimize_parts<b>(s: &b [u8], split: u64, marks: (&mut u64[]), names: (&m
         zline: 0,
         zfrom: 0,
         zto: 0,
+        pairs: u64[],
+        pair: u64[],
+        ret2: 0,
         inl_names: u8[][],
         inl_bodies: u8[][],
+        inl_units: u8[][],
         inl_head: u64[],
         inl_next: u64[],
+        unit: u8[],
+        uprefix: u8[],
+        marked: 0,
+        uniq_index: 0,
+        uniq_units: u8[][],
+        uniq_next: u64[],
     };
     for i in 4096 {
         o.inl_head.push(0);
@@ -2528,14 +2774,10 @@ pub fn optimize_parts<b>(s: &b [u8], split: u64, marks: (&mut u64[]), names: (&m
                     }
                 }
                 if inside == 0 {
-                    if split != 0 {
-                        if (e - a > 12) & (s[a] == 46) & same(view(s), a, a + 12, view(".grail_part ")) {
+                    if marker(&mut o, view(s), a, e) != 0 {
+                        if split != 0 {
                             marks.push(o.out.len());
-                            mut name = u8[];
-                            for k in e - a - 12 {
-                                name.push(s[a + 12 + k]);
-                            }
-                            names.push(name);
+                            names.push(o.unit.copy());
                         }
                     }
                     for x in e - a {
@@ -2561,7 +2803,8 @@ pub fn optimize_parts<b>(s: &b [u8], split: u64, marks: (&mut u64[]), names: (&m
     for x in s.len() - start {
         o.out.push(s[start + x]);
     }
-    if o.inl_names.len() != 0 {
+    // Either something inlines, or the markers have to be taken out of a single-file build.
+    if (o.inl_names.len() != 0) || (o.marked != 0) {
         inline_calls(&mut o, split, marks);
     }
     return exchange(&mut o.out, u8[]);

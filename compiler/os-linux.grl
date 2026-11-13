@@ -55,6 +55,9 @@ fn rt_syscall(n: u64, a: u64, b: u64, c: u64) -> u64 {
     if n == 293 {
         return raw_syscall(59, a, b, c);
     }
+    if n == 292 {
+        return raw_syscall(24, a, b, c);
+    }
     if n == 271 {
         return raw_syscall(73, a, b, c);
     }
@@ -134,6 +137,18 @@ fn rt_syscall4(n: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
     }
     if n == 131 {
         return raw_syscall4(132, a, b, c, d);
+    }
+    if n == 262 {
+        return raw_syscall4(79, a, b, c, d); // newfstatat
+    }
+    if n == 264 {
+        return raw_syscall4(38, a, b, c, d); // renameat
+    }
+    if n == 266 {
+        return raw_syscall4(36, a, b, c, d); // symlinkat
+    }
+    if n == 271 {
+        return raw_syscall4(73, a, b, c, d); // ppoll
     }
     return wrapping_sub(0, 38);
 }
@@ -659,4 +674,196 @@ fn rt_os_ctx_leave(t: u64) -> u64 {
 }
 fn rt_os_ctx_release(t: u64) -> u64 {
     return rt_os_stack_give(raw_load(t + 8));
+}
+
+// ---- file metadata, rename, and a spawn that redirects stdio -----------------------------------
+// The three operations the standard library's `fs` and `process` modules need beyond open/read/
+// write. They live here because each one names a syscall and a structure layout; the portable half
+// is in runtime.grl.
+
+// The file's type, from the permission-and-type word of `stat`.
+fn rt_stat_kind(mode: u64) -> u64 {
+    t := mode & 61440;
+    if t == 32768 {
+        return 1; // S_IFREG
+    }
+    if t == 16384 {
+        return 2; // S_IFDIR
+    }
+    if t == 40960 {
+        return 3; // S_IFLNK
+    }
+    return 0; // fifo, socket, device, or nothing these callers distinguish
+}
+
+// newfstatat(2) on `path` (a NUL-terminated string): the link itself when `follow` is 0, what it
+// names otherwise. `fields` receives eleven numbers - kind, size, mode, mtime seconds and
+// nanoseconds, atime seconds and nanoseconds, uid, gid, inode, device - and the result is 0 or a
+// positive errno. The x86-64 and generic `struct stat` layouts differ, so the offsets are next to
+// the syscall that fills them.
+fn rt_stat(path: u64, follow: u64, fields: u64) -> u64 {
+    buf := rt_alloc(160);
+    mut flags = 256; // AT_SYMLINK_NOFOLLOW
+    if follow != 0 {
+        flags = 0;
+    }
+    r := rt_syscall4(262, wrapping_sub(0, 100), path, buf, flags);
+    if rt_error(r) {
+        rt_free(buf);
+        return wrapping_sub(0, r);
+    }
+    rt_push(fields, 0); // the errno slot: this call succeeded
+    mut word = 0;
+    mut mode = 0;
+    mut uid = 0;
+    mut gid = 0;
+    if raw_target() == 0 {
+        word = raw_load(buf + 24);
+        mode = word & 65535;
+        uid = rt_div(word, 4294967296);
+        gid = raw_load(buf + 32) & 4294967295;
+    } else {
+        word = raw_load(buf + 16);
+        mode = word & 65535;
+        uid = raw_load(buf + 24) & 4294967295;
+        gid = rt_div(raw_load(buf + 24), 4294967296);
+    }
+    rt_push(fields, rt_stat_kind(mode));
+    rt_push(fields, raw_load(buf + 48));
+    rt_push(fields, mode);
+    rt_push(fields, raw_load(buf + 88));
+    rt_push(fields, raw_load(buf + 96));
+    rt_push(fields, raw_load(buf + 72));
+    rt_push(fields, raw_load(buf + 80));
+    rt_push(fields, uid);
+    rt_push(fields, gid);
+    rt_push(fields, raw_load(buf + 8));
+    rt_push(fields, raw_load(buf));
+    rt_free(buf);
+    return 0;
+}
+
+// renameat(2) with both paths in the working directory. A file the destination names is replaced
+// atomically; a non-empty directory is refused by the kernel. 0 or a positive errno.
+fn rt_rename(from: u64, to: u64) -> u64 {
+    r := rt_syscall4(264, wrapping_sub(0, 100), from, wrapping_sub(0, 100), to);
+    if rt_error(r) {
+        return wrapping_sub(0, r);
+    }
+    return 0;
+}
+
+// symlinkat(2): `target` is the text the link holds. 0 or a positive errno.
+fn rt_symlink(target: u64, link: u64) -> u64 {
+    r := rt_syscall4(266, target, wrapping_sub(0, 100), link, 0);
+    if rt_error(r) {
+        return wrapping_sub(0, r);
+    }
+    return 0;
+}
+
+// Waits for the child `pid` and reaps it. The answer is the status word wait4(2) reports - the exit
+// code in bits 8.., or the signal number when one ended the child - or a wrapped negative errno.
+fn rt_wait_pid(pid: u64) -> u64 {
+    status := rt_alloc(8);
+    mut waited = 0;
+    while 1 {
+        waited = rt_syscall(61, pid, status, 0);
+        if waited != wrapping_sub(0, 4) {
+            break; // not EINTR
+        }
+    }
+    if rt_error(waited) {
+        rt_free(status);
+        return waited;
+    }
+    word := raw_load(status);
+    rt_free(status);
+    return word;
+}
+
+// Runs `argv` once per candidate in `paths`, with the child's stdout connected to `out_fd` and its
+// stderr to `err_fd` (1 and 2 leave that one inherited), and returns the child's id without waiting.
+// The descriptors stay the caller's: a capture closes its own copies of the write ends after this
+// returns, which is what lets the reading side see end-of-file.
+//
+// As in rt_spawn_wait, everything the child needs is built by the caller: after the fork it only
+// rearranges descriptors and executes, so it takes no runtime lock and allocates nothing.
+fn rt_spawn_redirect(paths: u64, argv: u64, envp: u64, out_fd: u64, err_fd: u64) -> u64 {
+    mut environment = envp;
+    if environment == 0 {
+        environment = raw_load(raw_state() + 16);
+    }
+    child := rt_syscall(57, 0, 0, 0);
+    if child == 0 {
+        if out_fd != 1 {
+            rt_syscall(292, out_fd, 1, 0); // dup3(out_fd, 1, 0)
+        }
+        if err_fd != 2 {
+            rt_syscall(292, err_fd, 2, 0);
+        }
+        n := rt_len(paths);
+        mut i = 0;
+        while i < n {
+            rt_syscall(59, rt_at(paths, i), argv, environment);
+            i += 1;
+        }
+        rt_syscall(60, 127, 0, 0);
+    }
+    return child;
+}
+
+// The working directory, length without its terminator, or a wrapped negative errno. Linux keeps it
+// reachable as the /proc/self/cwd link, which needs no buffer-size guessing.
+fn rt_cwd(buf: u64, size: u64) -> u64 {
+    link := rt_alloc(16);
+    raw_putbyte(link, 47); // '/'
+    raw_putbyte(link + 1, 112); // 'p'
+    raw_putbyte(link + 2, 114); // 'r'
+    raw_putbyte(link + 3, 111); // 'o'
+    raw_putbyte(link + 4, 99); // 'c'
+    raw_putbyte(link + 5, 47); // '/'
+    raw_putbyte(link + 6, 115); // 's'
+    raw_putbyte(link + 7, 101); // 'e'
+    raw_putbyte(link + 8, 108); // 'l'
+    raw_putbyte(link + 9, 102); // 'f'
+    raw_putbyte(link + 10, 47); // '/'
+    raw_putbyte(link + 11, 99); // 'c'
+    raw_putbyte(link + 12, 119); // 'w'
+    raw_putbyte(link + 13, 100); // 'd'
+    n := rt_readlinkat(link, buf, size - 1);
+    rt_free(link);
+    if rt_error(n) {
+        return n;
+    }
+    raw_putbyte(buf + n, 0);
+    return n;
+}
+
+// Whether `fd` has data (or has reached its end) within `timeout_ms` milliseconds: 1 when it does,
+// 0 when the time passed first, or a wrapped negative errno. ppoll with one pollfd and a timespec,
+// on both ABIs: the generic table has no poll(2).
+fn rt_ready(fd: u64, timeout_ms: u64) -> u64 {
+    fds := rt_alloc(8);
+    raw_store(fds, fd | 4294967296); // POLLIN in the low half of the events field
+    spec := rt_alloc(16);
+    raw_store(spec, rt_div(timeout_ms, 1000));
+    raw_store(spec + 8, (timeout_ms % 1000) * 1000000);
+    // sigmask is 0, which is what makes the fifth argument - one raw_syscall4 does not carry - the
+    // only one the kernel may ignore.
+    r := rt_syscall4(271, fds, 1, spec, 0);
+    rt_free(fds);
+    rt_free(spec);
+    if rt_error(r) {
+        return r;
+    }
+    return r;
+}
+// The two descriptors pipe2(2) wrote into `buf`, as the numbers a `host::pipe()` vector holds. The
+// generic ABI writes them the same way, so only the Windows module overrides this.
+fn rt_pipe_push(buf: u64, out: u64) -> u64 {
+    word := raw_load(buf);
+    rt_push(out, word & 4294967295);
+    rt_push(out, rt_div(word, 4294967296));
+    return 0;
 }

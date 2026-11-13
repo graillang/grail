@@ -489,6 +489,16 @@ function lint() {
   }
   check('LSP/debugger/profiler plan exists', existsSync(join(root, 'docs/tooling/lsp-debugger-profiler.md')));
   check('FFI test runner exists', existsSync(join(root, 'tools/test-ffi.mjs')));
+  check('C header importer exists', existsSync(join(root, 'compiler/bindgen.grl')));
+  check('C header importer is in the compiler source list',
+    readFileSync(join(root, 'tools/native.mjs'), 'utf8').includes("'bindgen'"));
+  check('C header importer test exists', existsSync(join(root, 'tools/bindgen-test.mjs')));
+  check('CI runs the C header importer test',
+    readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8').includes('tools/bindgen-test.mjs'));
+  check('the committed generated binding is the fixture module',
+    readFileSync(join(root, 'tests/bindgen/fixture_binding.grl'), 'utf8').startsWith('module fixture;'));
+  check('the importer corpus case compiles the committed binding',
+    readFileSync(join(root, 'tests/native-cases.json'), 'utf8').includes('tests/bindgen/fixture_binding.grl'));
   check('CI runs the FFI shim test', readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8').includes('tools/test-ffi.mjs'));
   check('module interface test exists', existsSync(join(root, 'tools/interface-test.mjs')));
   check('CI runs the module interface test', readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8').includes('tools/interface-test.mjs'));
@@ -508,7 +518,11 @@ function lint() {
   check('sampling profiler test exists', existsSync(join(root, 'tools/test-profile.mjs')));
   check('sampling profiler doc exists', existsSync(join(root, 'docs/tooling/profiler.md')));
   check('CI runs the sampling profiler test', readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8').includes('tools/test-profile.mjs'));
-  check('VERSION file matches compiler --version', readFileSync(join(root, 'compiler/cli.grl'), 'utf8').includes(`grail ${version ?? '0.0.0'}`), version ?? '');
+  // The reported version is `pkg::grail_version()` (compiler/pkg.grl); `grail version` prints it as
+  // "grail <that>". Check the function body, not the whole file: an unrelated 0.1.0 must not pass.
+  const pkgSource = readFileSync(join(root, 'compiler/pkg.grl'), 'utf8');
+  const versionBody = /pub fn grail_version\(\)[^{]*\{([\s\S]*?)\n\}/.exec(pkgSource)?.[1] ?? '';
+  check('VERSION file matches compiler --version', versionBody.includes(version ?? '0.0.0'), version ?? '');
 
   // Release pipeline: one tag-triggered workflow that covers every platform,
   // builds from the checked-in seed and publishes checksums plus the generated

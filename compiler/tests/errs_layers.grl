@@ -1,0 +1,46 @@
+module errs_layers;
+use errs;
+use io;
+use fs;
+
+// The payload is the standard error type at every layer, so `?` returns it unchanged - through two
+// layers, with nothing converted and nothing copied.
+fn load<a>(path: &a [u8]) -> u8[] |? errs::Report {
+    match fs::read(path) {
+        u8[](data) => { return data; },
+        io::Error(e) => {
+            return errs::from_os(e, view("while opening config"));
+        }
+    }
+}
+fn section<a>(path: &a [u8]) -> u64 |? errs::Report {
+    data := load(path)?;
+    return data.len();
+}
+// A layer that adds context does it on the failure path. The report is consumed and returned, so the
+// cause and the stdlib origin it came from stay walkable.
+fn start<a>(path: &a [u8]) -> u64 |? errs::Report {
+    match section(path) {
+        u64(n) => { return n; },
+        errs::Report(e) => {
+            return e.context(view("while loading app"));
+        }
+    }
+}
+fn main() {
+    match start(view("definitely-missing.txt")) {
+        u64(n) => { println(n); },
+        errs::Report(e) => {
+            assert(e.depth() == 2);
+            assert(e.show() == view("while loading app: while opening config: not found"));
+            match e.origin() {
+                Os(os_error) => {
+                    assert(os_error.is_not_found());
+                },
+                None => { assert(false); }
+            }
+            e.to_stderr();
+        }
+    }
+    println("layers ok");
+}

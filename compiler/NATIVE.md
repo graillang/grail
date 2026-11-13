@@ -164,6 +164,20 @@ lowers it, so all three targets share it. It is not a general optimizing middle 
   instructions): their slots move to free scratch registers and each call site gets a copy with
   its own labels. The function itself is still emitted for indirect calls.
 
+A slot is one word unless the emitter declares it the first word of a **two-word value** with a
+`.gpair -N(%rbp)` line, which is how a borrowed interface object's `{data, vtable}` pair is written
+into the frame. The line is consumed (no other part of the toolchain sees it) and the two slots
+become one value with one identity: both words are opaque to the value passes (never promoted, never
+forwarded, their stores never dead), the frame compaction reserves both and keeps them adjacent and
+in order, so the handle `-N(%rbp)` still names word 0 with word 1 eight bytes above it. `.gpair ret`
+declares the other place a two-word value lives - the result registers - and keeps `%rdx` live at a
+`ret` that a one-word result would leave dead. A pass that cannot reason about the second word is
+conservative for both words, and a function that declares a pair is not inlined (its slots would
+move to registers) or sent down the copy-unchanged path.
+
+Since the average function declares no pair, the model costs nothing there: with no declaration the
+pass reads none of the pair state and the emitted code of a pair-free function is byte-identical.
+
 The compiler also emits sized-integer comparisons, `& | ^`, checked `+ - *` (8–32 bit, and `+ -` on
 `i64`) and division/remainder inline instead of calling `rt_int`, and drops the bounds check of
 `v[i]` inside `for i in a..v.len()` / `for i in v.len()` when the body names `v` only as `v[..]` or
@@ -211,6 +225,12 @@ Use `mut name = value` for mutable declarations and `name := value` for fixed bi
 `&value` creates a readonly byte view; `&mut value` creates an exclusive writable byte view.
 The latter requires mutable owned storage or an existing writable capability. Prefix borrowing
 binds tighter than binary operators, including bitwise `&`; postfix indexing binds tighter still.
+A call's `&mut place` argument, and a `&mut self` receiver, is borrowed after the other arguments
+are evaluated (Rust's two-phase borrows), so those arguments may still read the place:
+`bump(&mut c, c.pos)`, `ty_kind(&mut c, ty_arg(&mut c, t))` and `c.bump(c.pos)` compile, and the
+read sees the state from before the call. There is no need for a temporary: write the read where
+it is used. Two shapes keep one - `exchange` is a builtin whose `&mut` is taken first, and a read
+through a borrowed vector element (`c.rows[i].field` of a record element) is a loan, not a copy.
 Typed storage references remain `borrow(value)` / `borrow_mut(value)`.
 
 Byte buffers, strings and views support `value[index]` and readonly `value[start:end]` slices.

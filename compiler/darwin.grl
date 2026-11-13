@@ -290,6 +290,9 @@ pub fn rt_call(n: u64, a: u64, b: u64, c: u64) -> u64 {
     if n == 57 {
         return rt_os_result(raw_import("fork", 0, 0, 0));
     }
+    if n == 293 {
+        return rt_os_result(raw_import("pipe", a, 0, 0));
+    }
     if n == 59 {
         return rt_os_result(raw_import("execve", a, b, c));
     }
@@ -674,4 +677,154 @@ fn rt_os_ctx_leave(t: u64) -> u64 {
 }
 fn rt_os_ctx_release(t: u64) -> u64 {
     return rt_os_stack_give(raw_load(t + 8));
+}
+
+// ---- file metadata, rename, and a spawn that redirects stdio -----------------------------------
+// The Mach-O half of the operations os-linux.grl implements with newfstatat, renameat and dup3.
+// libSystem's struct stat is 144 bytes: dev at 0, mode (a 16-bit field) at 4, inode at 8, uid at 16,
+// gid at 20, atime at 32, mtime at 48, size at 96 - each timespec two 64-bit words.
+
+// The file's type, from the permission-and-type word of `stat`.
+fn rt_stat_kind(mode: u64) -> u64 {
+    t := mode & 61440;
+    if t == 32768 {
+        return 1; // S_IFREG
+    }
+    if t == 16384 {
+        return 2; // S_IFDIR
+    }
+    if t == 40960 {
+        return 3; // S_IFLNK
+    }
+    return 0;
+}
+// stat or lstat; `fields` receives eleven numbers and the result is 0 or a positive errno.
+fn rt_stat(path: u64, follow: u64, fields: u64) -> u64 {
+    buf := rt_alloc(160);
+    mut r = 0;
+    if follow != 0 {
+        r = raw_import("stat", path, buf);
+    } else {
+        r = raw_import("lstat", path, buf);
+    }
+    e := rt_os_result(r);
+    if rt_error(e) {
+        rt_free(buf);
+        return wrapping_sub(0, e);
+    }
+    rt_push(fields, 0); // the errno slot: this call succeeded
+    mut word = raw_load(buf);
+    mode := rt_div(word, 4294967296) & 65535;
+    rt_push(fields, rt_stat_kind(mode));
+    rt_push(fields, raw_load(buf + 96));
+    rt_push(fields, mode);
+    rt_push(fields, raw_load(buf + 48));
+    rt_push(fields, raw_load(buf + 56));
+    rt_push(fields, raw_load(buf + 32));
+    rt_push(fields, raw_load(buf + 40));
+    rt_push(fields, raw_load(buf + 16) & 4294967295);
+    rt_push(fields, rt_div(raw_load(buf + 16), 4294967296));
+    rt_push(fields, raw_load(buf + 8));
+    rt_push(fields, word & 4294967295);
+    rt_free(buf);
+    return 0;
+}
+// rename(2): a destination file is replaced atomically and a destination directory must be empty.
+fn rt_rename(from: u64, to: u64) -> u64 {
+    e := rt_os_result(raw_import("rename", from, to, 0));
+    if rt_error(e) {
+        return wrapping_sub(0, e);
+    }
+    return 0;
+}
+// symlink(2): `target` is the text the link holds.
+fn rt_symlink(target: u64, link: u64) -> u64 {
+    e := rt_os_result(raw_import("symlink", target, link, 0));
+    if rt_error(e) {
+        return wrapping_sub(0, e);
+    }
+    return 0;
+}
+// wait4(2) for one child: the status word, or a wrapped negative errno.
+fn rt_wait_pid(pid: u64) -> u64 {
+    status := rt_alloc(8);
+    mut waited = 0;
+    while 1 {
+        waited = rt_os_result(raw_import("wait4", pid, status, 0, 0));
+        if rt_error(waited) {
+            if waited != wrapping_sub(0, 4) {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    if rt_error(waited) {
+        rt_free(status);
+        return waited;
+    }
+    word := raw_load(status);
+    rt_free(status);
+    return word;
+}
+// fork + dup2 + execve, as rt_spawn_wait does it, with the child's stdout and stderr connected to
+// `out_fd` and `err_fd`. The descriptors stay the caller's; the answer is the child's id.
+fn rt_spawn_redirect(paths: u64, argv: u64, envp: u64, out_fd: u64, err_fd: u64) -> u64 {
+    mut environment = envp;
+    if environment == 0 {
+        environment = raw_load(raw_state() + 16);
+    }
+    child := rt_syscall(57, 0, 0, 0);
+    if child == 0 {
+        if out_fd != 1 {
+            raw_import("dup2", out_fd, 1, 0);
+        }
+        if err_fd != 2 {
+            raw_import("dup2", err_fd, 2, 0);
+        }
+        n := rt_len(paths);
+        mut i = 0;
+        while i < n {
+            rt_syscall(59, rt_at(paths, i), argv, environment);
+            i += 1;
+        }
+        rt_syscall(60, 127, 0, 0);
+    }
+    return child;
+}
+// getcwd(3) writes the path it is handed; the answer is its length or a wrapped negative errno.
+fn rt_cwd(buf: u64, size: u64) -> u64 {
+    r := raw_import("getcwd", buf, size, 0);
+    e := rt_os_result(r);
+    if rt_error(e) {
+        return e;
+    }
+    mut n = 0;
+    while raw_byte(buf + n) != 0 {
+        n += 1;
+    }
+    return n;
+}
+// Whether `fd` has data or has reached its end within `timeout_ms`, through libSystem's poll(2).
+fn rt_ready(fd: u64, timeout_ms: u64) -> u64 {
+    fds := rt_alloc(8);
+    raw_store(fds, fd | 4294967296); // POLLIN in the low half of the events field
+    r := raw_os_result_helper(fds, timeout_ms);
+    rt_free(fds);
+    return r;
+}
+fn raw_os_result_helper(fds: u64, timeout_ms: u64) -> u64 {
+    r := raw_import("poll", fds, 1, timeout_ms);
+    e := rt_os_result(r);
+    if rt_error(e) {
+        return e;
+    }
+    return r;
+}
+// The two descriptors pipe(2) wrote into `buf`.
+fn rt_pipe_push(buf: u64, out: u64) -> u64 {
+    word := raw_load(buf);
+    rt_push(out, word & 4294967295);
+    rt_push(out, rt_div(word, 4294967296));
+    return 0;
 }

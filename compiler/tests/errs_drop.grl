@@ -1,0 +1,28 @@
+module errs_drop;
+use errs;
+
+// The chain owns its message, every context frame and the captured stack, so dropping one releases
+// all of it. The runtime abort a program that frees a block twice, and its entry shim aborts one
+// that leaks an allocation at exit, so this case passing at all is the check.
+fn build(round: u64) -> u64 |? errs::Report {
+    mut r = errs::traced(view("root"));
+    r = r.context(view("while opening /x"));
+    r = r.context(view("while parsing config"));
+    // Even rounds return the chain, so the caller drops it; odd rounds return a success and this
+    // function drops it on the way out.
+    if round % 2 == 0 {
+        return r;
+    }
+    return round;
+}
+fn main() {
+    mut i = 0;
+    while i < 2000 {
+        match build(i) {
+            u64(n) => { assert(n == i); },
+            errs::Report(e) => { assert(e.depth() == 2); }
+        }
+        i = i + 1;
+    }
+    println("drop ok");
+}

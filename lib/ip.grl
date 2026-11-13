@@ -1,0 +1,613 @@
+module ip;
+
+use core;
+use order;
+use hash;
+
+// ---- addresses: IPv4 and IPv6 -----------------------------------------------------------------
+//
+// `Ipv4` is the 32 bits as one word, `Ipv6` the 128 bits as two plus the numeric zone of RFC 4007.
+// Parsing accepts everything `inet_pton` accepts for both families (`::` compression, an embedded
+// dotted-quad tail, `%N` zones); formatting is RFC 5952's canonical text: lowercase hex, no leading
+// zeros in a group, the longest run of two or more zero groups compressed to `::` (the first such run
+// on a tie), and an IPv4-mapped address written `::ffff:a.b.c.d`. `Ip` is one address of either
+// family, which is what resolution answers and a socket connects to.
+
+pub struct Ipv4 {
+    // The four octets in order, most significant first.
+    bits: u64
+}
+
+pub struct Ipv6 {
+    // The 128 bits, most significant word first.
+    hi: u64,
+    lo: u64,
+    // The numeric zone of `fe80::1%2`, or 0 when the address has none.
+    zone: u64
+}
+
+// One address of either family.
+pub enum Ip { V4(Ipv4), V6(Ipv6) }
+
+// What an address is reachable from (RFC 4007, RFC 4193).
+pub enum Scope { Unspecified, Loopback, LinkLocal, UniqueLocal, Multicast, Global }
+
+fn hex_digit(c: u64) -> u64 {
+    if c >= 48 {
+        if c <= 57 {
+            return c - 48;
+        }
+    }
+    if c >= 97 {
+        if c <= 102 {
+            return c - 87;
+        }
+    }
+    if c >= 65 {
+        if c <= 70 {
+            return c - 55;
+        }
+    }
+    return 16;
+}
+
+fn push_text(out: (&mut u8[]), text: (&[u8])) {
+    for b in text {
+        out.push(b);
+    }
+    return ();
+}
+
+// 0..255 as decimal, no leading zeros.
+fn push_num(out: (&mut u8[]), value: u64) {
+    if value >= 100 {
+        out.push(48 + value / 100);
+    }
+    if value >= 10 {
+        out.push(48 + value / 10 % 10);
+    }
+    out.push(48 + value % 10);
+    return ();
+}
+
+// One 16-bit group as lowercase hex, no leading zeros.
+fn push_hex(out: (&mut u8[]), value: u64) {
+    mut started = 0;
+    mut place = 4096;
+    while place > 0 {
+        digit := value / place % 16;
+        if digit != 0 || started == 1 || place == 1 {
+            started = 1;
+            if digit < 10 {
+                out.push(48 + digit);
+            } else {
+                out.push(87 + digit);
+            }
+        }
+        place = place / 16;
+    }
+    return ();
+}
+
+// A dotted quad between `start` and `end`, as its 32 bits, or none.
+fn quad_bits<a>(text: (&a [u8]), start: u64, end: u64) -> u64? {
+    if start == end {
+        return None;
+    }
+    mut bits = 0;
+    mut parts = 0;
+    mut digits = 0;
+    mut value = 0;
+    mut i = start;
+    while i < end {
+        c := text[i];
+        if c == 46 {
+            if digits == 0 {
+                return None;
+            }
+            if parts == 3 {
+                return None;
+            }
+            bits = bits * 256 + value;
+            parts += 1;
+            value = 0;
+            digits = 0;
+        } else {
+            if c < 48 || c > 57 {
+                return None;
+            }
+            if digits == 3 {
+                return None;
+            }
+            value = value * 10 + c - 48;
+            if value > 255 {
+                return None;
+            }
+            digits += 1;
+        }
+        i += 1;
+    }
+    if parts != 3 || digits == 0 {
+        return None;
+    }
+    return Some(bits * 256 + value);
+}
+
+pub fn parse_ipv4<a>(text: (&a [u8])) -> Ipv4? {
+    match quad_bits(text, 0, text.len()) {
+        Some(bits) => {
+            return Some(Ipv4 { bits: bits });
+        },
+        None => {
+            return None;
+        }
+    }
+}
+
+pub fn format_ipv4(a: (&Ipv4)) -> string {
+    mut out = u8[];
+    bits := a.bits;
+    push_num(&mut out, bits / 16777216);
+    out.push(46);
+    push_num(&mut out, bits / 65536 % 256);
+    out.push(46);
+    push_num(&mut out, bits / 256 % 256);
+    out.push(46);
+    push_num(&mut out, bits % 256);
+    return out.text();
+}
+
+impl Ipv4 {
+    pub fn is_loopback(self: (&Ipv4)) -> bool {
+        return self.bits / 16777216 == 127;
+    }
+
+    // The four octets, in order.
+    pub fn octets(self: (&Ipv4)) -> u8[] {
+        mut out = u8[];
+        bits := self.bits;
+        out.push(bits / 16777216);
+        out.push(bits / 65536 % 256);
+        out.push(bits / 256 % 256);
+        out.push(bits % 256);
+        return out;
+    }
+}
+
+pub fn parse_ipv6<a>(text: (&a [u8])) -> Ipv6? {
+    n := text.len();
+    if n == 0 {
+        return None;
+    }
+    // The zone comes last, after a `%`.
+    mut end = n;
+    mut zone = 0;
+    mut i = 0;
+    while i < n {
+        if text[i] == 37 {
+            end = i;
+            i = n;
+        } else {
+            i += 1;
+        }
+    }
+    if end == 0 {
+        return None;
+    }
+    if end < n {
+        if end + 1 == n {
+            return None;
+        }
+        mut j = end + 1;
+        while j < n {
+            c := text[j];
+            if c < 48 || c > 57 {
+                return None;
+            }
+            zone = zone * 10 + c - 48;
+            if zone > 4294967295 {
+                return None;
+            }
+            j += 1;
+        }
+    }
+    mut groups = u64[0; 8];
+    mut count = 0;
+    // Where `::` stands, in groups; 99 when the address has no gap.
+    mut gap_at = 99;
+    mut i = 0;
+    while i < end {
+        if text[i] == 58 {
+            mut doubled = 0;
+            if i + 1 < end {
+                if text[i + 1] == 58 {
+                    doubled = 1;
+                }
+            }
+            if doubled == 1 {
+                if gap_at != 99 {
+                    return None;
+                }
+                gap_at = count;
+                i += 2;
+            } else {
+                // A single colon separates two groups: it cannot lead or end the address.
+                if i == 0 || i + 1 == end {
+                    return None;
+                }
+                i += 1;
+            }
+        } else {
+            start := i;
+            mut dotted = 0;
+            while i < end {
+                d := text[i];
+                if d == 46 {
+                    dotted = 1;
+                    i += 1;
+                } else {
+                    if hex_digit(d) == 16 {
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            span := i - start;
+            if span == 0 {
+                return None;
+            }
+            if dotted == 1 {
+                // An embedded IPv4 address ends the text and fills the last two groups.
+                if i != end || count > 6 {
+                    return None;
+                }
+                v4 := quad_bits(text, start, i)?;
+                groups[count] = v4 / 65536;
+                groups[count + 1] = v4 % 65536;
+                count += 2;
+            } else {
+                if span > 4 || count >= 8 {
+                    return None;
+                }
+                mut value = 0;
+                mut k = start;
+                while k < i {
+                    value = value * 16 + hex_digit(text[k]);
+                    k += 1;
+                }
+                groups[count] = value;
+                count += 1;
+            }
+            if i < end {
+                if text[i] != 58 {
+                    return None;
+                }
+            }
+        }
+    }
+    mut full = u64[0; 8];
+    if gap_at == 99 {
+        if count != 8 {
+            return None;
+        }
+        for k in 8 {
+            full[k] = groups[k];
+        }
+    } else {
+        // `::` stands for one or more zero groups.
+        if count > 7 {
+            return None;
+        }
+        tail := count - gap_at;
+        mut k = 0;
+        while k < gap_at {
+            full[k] = groups[k];
+            k += 1;
+        }
+        mut m = 0;
+        while m < tail {
+            full[8 - tail + m] = groups[gap_at + m];
+            m += 1;
+        }
+    }
+    hi := full[0] * 281474976710656 + full[1] * 4294967296 + full[2] * 65536 + full[3];
+    lo := full[4] * 281474976710656 + full[5] * 4294967296 + full[6] * 65536 + full[7];
+    return Some(Ipv6 { hi: hi, lo: lo, zone: zone });
+}
+
+pub fn format_ipv6(a: (&Ipv6)) -> string {
+    mut g = u64[0; 8];
+    hi := a.hi;
+    lo := a.lo;
+    g[0] = hi / 281474976710656;
+    g[1] = hi / 4294967296 % 65536;
+    g[2] = hi / 65536 % 65536;
+    g[3] = hi % 65536;
+    g[4] = lo / 281474976710656;
+    g[5] = lo / 4294967296 % 65536;
+    g[6] = lo / 65536 % 65536;
+    g[7] = lo % 65536;
+    mut out = u8[];
+    // RFC 5952 section 5: an IPv4-mapped address keeps the dotted tail.
+    if hi == 0 {
+        if g[5] == 65535 {
+            push_text(&mut out, view("::ffff:"));
+            v4 := lo % 4294967296;
+            push_num(&mut out, v4 / 16777216);
+            out.push(46);
+            push_num(&mut out, v4 / 65536 % 256);
+            out.push(46);
+            push_num(&mut out, v4 / 256 % 256);
+            out.push(46);
+            push_num(&mut out, v4 % 256);
+            if a.zone != 0 {
+                out.push(37);
+                push_num(&mut out, a.zone);
+            }
+            return out.text();
+        }
+    }
+    // The longest run of two or more zero groups; the first one on a tie.
+    mut best_at = 0;
+    mut best_len = 0;
+    mut i = 0;
+    while i < 8 {
+        if g[i] == 0 {
+            start := i;
+            mut run = 0;
+            while i < 8 {
+                if g[i] != 0 {
+                    break;
+                }
+                i += 1;
+                run += 1;
+            }
+            if run > best_len {
+                best_len = run;
+                best_at = start;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    if best_len < 2 {
+        best_len = 0;
+    }
+    mut k = 0;
+    mut need_colon = 0;
+    while k < 8 {
+        if best_len > 0 {
+            if k == best_at {
+                out.push(58);
+                out.push(58);
+                k += best_len;
+                need_colon = 0;
+                continue;
+            }
+        }
+        if need_colon == 1 {
+            out.push(58);
+        }
+        push_hex(&mut out, g[k]);
+        need_colon = 1;
+        k += 1;
+    }
+    if a.zone != 0 {
+        out.push(37);
+        push_num(&mut out, a.zone);
+    }
+    return out.text();
+}
+
+// The IPv4-mapped IPv6 form of an IPv4 address: what a dual-stack socket reports for an IPv4 peer.
+pub fn ipv6_from_ipv4(value: (&Ipv4)) -> Ipv6 {
+    return Ipv6 { hi: 0, lo: 4294967296 * 65535 + value.bits, zone: 0 };
+}
+
+impl Ipv6 {
+    // The numeric zone of `%N`, or 0 when the text carried none.
+    pub fn zone(self: (&Ipv6)) -> u64 {
+        return self.zone;
+    }
+
+    // ::1
+    pub fn is_loopback(self: (&Ipv6)) -> bool {
+        return self.hi == 0 && self.lo == 1;
+    }
+
+    // ::
+    pub fn is_unspecified(self: (&Ipv6)) -> bool {
+        return self.hi == 0 && self.lo == 0;
+    }
+
+    // fe80::/10
+    pub fn is_link_local(self: (&Ipv6)) -> bool {
+        return self.hi / 18014398509481984 == 1018;
+    }
+
+    // fc00::/7
+    pub fn is_unique_local(self: (&Ipv6)) -> bool {
+        return self.hi / 144115188075855872 == 126;
+    }
+
+    // ff00::/8
+    pub fn is_multicast(self: (&Ipv6)) -> bool {
+        return self.hi / 72057594037927936 == 255;
+    }
+
+    // ::ffff:0:0/96, the IPv4 address an IPv4 socket sees on a dual-stack one.
+    pub fn is_ipv4_mapped(self: (&Ipv6)) -> bool {
+        if self.hi != 0 {
+            return false;
+        }
+        return self.lo / 4294967296 == 65535;
+    }
+
+    // The IPv4 address inside an IPv4-mapped one.
+    pub fn ipv4_mapped(self: (&Ipv6)) -> Ipv4? {
+        if !self.is_ipv4_mapped() {
+            return None;
+        }
+        return Some(Ipv4 { bits: self.lo % 4294967296 });
+    }
+
+    pub fn scope(self: (&Ipv6)) -> Scope {
+        if self.is_unspecified() {
+            return Scope::Unspecified;
+        }
+        if self.is_loopback() {
+            return Scope::Loopback;
+        }
+        if self.is_multicast() {
+            return Scope::Multicast;
+        }
+        if self.is_link_local() {
+            return Scope::LinkLocal;
+        }
+        if self.is_unique_local() {
+            return Scope::UniqueLocal;
+        }
+        return Scope::Global;
+    }
+}
+
+impl Scope {
+    pub fn name(self: (&Scope)) -> string {
+        match self {
+            Unspecified => {
+                return "unspecified".text();
+            },
+            Loopback => {
+                return "loopback".text();
+            },
+            LinkLocal => {
+                return "link-local".text();
+            },
+            UniqueLocal => {
+                return "unique-local".text();
+            },
+            Multicast => {
+                return "multicast".text();
+            },
+            Global => {
+                return "global".text();
+            }
+        }
+    }
+}
+
+// One address of either family, parsed from text: a `:` anywhere means IPv6.
+pub fn parse<a>(text: (&a [u8])) -> Ip? {
+    mut colon = 0;
+    for b in text {
+        if b == 58 {
+            colon = 1;
+        }
+    }
+    if colon == 1 {
+        match parse_ipv6(text) {
+            Some(v6) => {
+                return Some(Ip::V6(v6));
+            },
+            None => {
+                return None;
+            }
+        }
+    }
+    match parse_ipv4(text) {
+        Some(v4) => {
+            return Some(Ip::V4(v4));
+        },
+        None => {
+            return None;
+        }
+    }
+}
+
+pub fn format(a: (&Ip)) -> string {
+    match a {
+        V4(v4) => {
+            return format_ipv4(v4);
+        },
+        V6(v6) => {
+            return format_ipv6(v6);
+        }
+    }
+}
+
+impl Ip {
+    // 4 or 6: the address family a socket for this address is created with.
+    pub fn family(self: (&Ip)) -> u64 {
+        match self {
+            V4(v4) => {
+                return 4;
+            },
+            V6(v6) => {
+                return 6;
+            }
+        }
+    }
+
+    pub fn is_loopback(self: (&Ip)) -> bool {
+        match self {
+            V4(v4) => {
+                return v4.is_loopback();
+            },
+            V6(v6) => {
+                return v6.is_loopback();
+            }
+        }
+    }
+}
+
+// ---- ordering and hashing, so an address can key a map ----------------------------------------
+
+impl order::Ord for Ipv4 {
+    fn less<a, b>(left: (&a Self), right: (&b Self)) -> bool {
+        return left.bits < right.bits;
+    }
+}
+
+impl hash::Equal for Ipv4 {
+    fn equal<a, b>(left: (&a Self), right: (&b Self)) -> bool {
+        return left.bits == right.bits;
+    }
+}
+
+impl hash::Hash for Ipv4 {
+    fn hash<a, b>(value: (&a Self), state: (&b mut hash::Hasher)) {
+        hash::write_num(state, value.bits);
+    }
+}
+
+impl order::Ord for Ipv6 {
+    fn less<a, b>(left: (&a Self), right: (&b Self)) -> bool {
+        if left.hi != right.hi {
+            return left.hi < right.hi;
+        }
+        if left.lo != right.lo {
+            return left.lo < right.lo;
+        }
+        return left.zone < right.zone;
+    }
+}
+
+impl hash::Equal for Ipv6 {
+    fn equal<a, b>(left: (&a Self), right: (&b Self)) -> bool {
+        if left.hi != right.hi {
+            return false;
+        }
+        if left.lo != right.lo {
+            return false;
+        }
+        return left.zone == right.zone;
+    }
+}
+
+impl hash::Hash for Ipv6 {
+    fn hash<a, b>(value: (&a Self), state: (&b mut hash::Hasher)) {
+        hash::write_num(state, value.hi);
+        hash::write_num(state, value.lo);
+        hash::write_num(state, value.zone);
+    }
+}

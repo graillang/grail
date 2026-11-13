@@ -1,0 +1,38 @@
+use errs;
+use io;
+use fs;
+
+// A layer that converts a standard-library failure explicitly: there is no implicit From, so this is
+// where the payload type is chosen, and the io::Error itself stays reachable through origin().
+fn read_config<a>(path: &a [u8]) -> u8[] |? errs::Report {
+    match fs::read(path) {
+        u8[](data) => { return data; },
+        fs::Error(e) => { return errs::from_os(e.into_io(), view("while opening config")); }
+    }
+}
+
+fn main() {
+    // One failure, reported where it is created: a message and nothing else.
+    errs::report(view("cannot open /etc/app.conf")).to_stderr();
+
+    // The same failure with the framing each layer adds. The chain prints outermost first and the
+    // cause last, and every frame in it is owned by the report.
+    mut chain = errs::report(view("not found"));
+    chain = chain.context(view("while opening /x"));
+    chain = chain.context(view("while parsing config"));
+    chain = chain.context(view("while loading app"));
+    println(chain.depth());
+    println(chain.show());
+
+    // A conversion at a layer boundary, and the typed origin it kept.
+    match read_config(view("missing.conf")) {
+        u8[](data) => { println(data.len()); },
+        errs::Report(e) => {
+            println(e.show());
+            match e.origin() {
+                Os(os_error) => { println(os_error.is_not_found()); },
+                None => { println(false); }
+            }
+        }
+    }
+}

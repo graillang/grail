@@ -51,3 +51,26 @@ Three local repeats give median host release-seed checking times of 406 ms → 4
 branches, and 1.69 s → 12 ms for 1,000 propagation sites. Timings are wall-clock observations;
 byte identity/acceptance comparison and conformance checks are the hard gates. No schema/native
 ABI change is needed. This is not a self-hosted compiler result or a formal safety proof.
+
+## The no-type sentinel
+
+A type is an index into the compiler's interned type table, and the first five ids every compile
+seeds are real types: 0 u64, 1 unit, 2 bytes, 3 string, 4 view. "No type" therefore cannot be 0 - an
+id that means u64 is exactly the id a site most needs to tell apart from "nothing known" - and until
+the sentinel was introduced every such site carried a second flag (`found`, `any`, a `+1` offset on
+`Self`) that the next person could forget, silently reading "no type" as an integer.
+
+`NO_TYPE` (`compiler/native.grl`) is the one answer instead: a value above every id a table can hold,
+so the id itself says whether there is a type. `== 0` on a type id means u64 and only u64;
+`== NO_TYPE` is "none". Two more values above the id space are pseudo-types, not ids - a
+compile-time target tag (`CT_TAG`) and a constant whose value a compile-time call has not produced
+yet (`CT_PENDING`) - and `is_type_id` is the test for a value a table may be indexed by. The
+accessors (`ty_kind`, `ty_arg`, `ty_mode`, `ty_env`, `type_args`, `type_regions`) refuse a sentinel
+with a diagnostic rather than indexing the table, so a leak is a precise error and not a bounds crash
+or a wrong type.
+
+The flags are gone with the collision: `assoc_type` returns `NO_TYPE` instead of `0` plus a `found`
+flag, `Self` is a type id or `NO_TYPE` (no `+1` offset), and an unbuilt implementation self type is
+`NO_TYPE` rather than 0. Two user-visible bugs the old convention caused are pinned by the corpus:
+`type Word = u64;` named as `module::Word` was refused as "recursive or unresolved type alias", and a
+recursive alias used qualified crashed the compiler instead of naming the alias.

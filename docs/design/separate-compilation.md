@@ -803,3 +803,162 @@ one module's body is 7 hit, 1 miss (that module); changing its surface reruns it
 it. The key names every interface present, not just the ones a module reads, so a surface change
 reruns some modules that do not import it - conservative, never stale.
 
+
+## Stage 5 as built: a per-module label namespace and module-local inlining
+
+Implemented on `gaps2-sepcomp`, and the two things this section exists for are the two things that
+made one module's edit re-emit the text of every module after it. Both are recorded in
+`tools/cache-test.mjs` (the `(b) precision` case) as numbers, and the tool fails if either comes
+back.
+
+### Labels are minted per module
+
+The emitter numbered its local labels over one stream: `.L1`, `.L2`, … from the first byte of the
+program, so a change in an early module re-spelled the text of every module emitted after it — the
+exact bug the opening comment of `tools/cache-test.mjs` recorded. Every label is now minted from a
+per-module counter and spelled in that module's namespace:
+
+```
+.L<module>_<hash>_<n>          e.g. .Lutil_1f3a9c02_7
+```
+
+- the prefix is the emission unit's own name (`util`, `.helpers`, `__start`, or the module a
+  synthetic `.impl_N`/`.inherent_N` belongs to), sanitised to identifier characters, followed by
+  eight hex digits of a hash of that name, so no two units can collide even after sanitising;
+- the counter restarts at 1 in each unit. `part()` — the one place that switches emission unit —
+  resets it, and everything that mints a label goes through `label(c)` and `lname(c, n)`, so there
+  is no second place to forget;
+- the two counters whose values were spelled into a label without going through `lname` are scoped
+  the same way: the refinement-obligation counter (`c.ref_next`, `.Lrfp<n>` / `.Lrfr<n>`) is reset
+  by `part()`, and the inliner's per-site counter (`_i<n>`, which disambiguates two inline sites of
+  one body) restarts at every unit marker;
+- the module markers the splitter reads (`.grail_part <module>`) are now emitted whenever the
+  optimizer runs, not only with `--split`, and the optimizer records the emission unit of every
+  function from them. A single-file build drops the marker lines from its output; a split build
+  keeps them, exactly as before, so `tools/split-test.mjs`'s "the parts are the single stream"
+  invariant still holds.
+
+### Inlining does not cross a module boundary
+
+`optimize.grl` inlines a small leaf's body at its call sites. That is sound and fast inside a module
+and *not* separate compilation across one: it makes a caller's text depend on a body the caller's
+module never declared, and once modules are cached separately it makes the caller's object depend on
+a source its key does not name.
+
+The gate is therefore: **inline only when the callee's emitted body is in the caller's own emission
+unit** — same module, or a body the caller itself emits (a specialisation it requested, a drop
+helper). The interface-level door stays open in the same place the format already has one: a body
+carried in an interface (`body N` / `line "…"` rows) is available to an importer, so a future
+explicit *inline-body* option can permit a cross-module inline exactly where the importer can see
+the body it is copying. Nothing is silently inlined from a module whose body is not there.
+
+Consequences, stated rather than discovered:
+
+- the generated code of a whole-program `--split` build is slightly different from before (a small
+  leaf called across a boundary is a call now), and it is *the same code* the per-module build
+  produces — which is the property that matters, because those two shapes are what
+  `tools/split-test.mjs` compares;
+- the single-file build keeps cross-module inlining only where the optimizer knows no unit
+  boundaries; it emits the same markers, so both shapes inline identically.
+
+### The frame constant, which was a latent miscompile
+
+The per-unit change found a real defect that had nothing to do with caching. A function's frame
+constant was `.F<label>`, minted from the same counter, and `.set` defines *one symbol per file*:
+
+```
+subq $.F1,%rsp        # this function's frame
+...
+.set .F1,656          # this function's size
+...
+.set .F1,80           # another function's size, same name
+```
+
+A single-file build whose label counter happened to give two functions the same `.F` name therefore
+had one function's frame size decide another function's displacements — silently, because the
+assembler resolves the symbol and the program merely addresses the wrong part of its frame. It was
+reachable before this stage (any program where two functions were minted the same frame number) and
+`--split` made it worse, because a part's `.set` lines are a subset and the last definition in the
+file can differ between the two shapes. `tools/split-test.mjs` caught it as a `.text` length
+difference between the split and single shapes for a generic-heavy program; the frames are now named
+in the unit's namespace too (`.F<unit>_<n>`), so a frame constant is unique per file in both shapes.
+`tools/cache-test.mjs` and `tools/split-test.mjs` both compare bytes, which is what made it visible.
+
+### The two interface modes, and who must have an interface
+
+There are two ways a build meets an interface, and they ask different things:
+
+- **`--interface DIR` is verification mode.** Every module given as *source* is compared with
+  `DIR/<module>.iface`: the interface must be present, must record that module's source digest, and
+  must say line for line what the sources say, or the build refuses by name. Nothing comes *from*
+  the directory - the build has the sources. This is the mode that catches a stale or edited
+  interface, and it is the mode every source module of the program is checked in.
+- **`--use DIR` is substitution mode.** A module not given as source on the command line has its
+  declarations and its generic bodies taken from `DIR/<module>.iface`; the module named as the
+  entry is compiled from its source. This is the build shape `grail build` uses per module: the
+  modules built before it were compiled from source into interfaces, and this run reads those.
+
+So *every module whose surface is read by something else must have an interface* - that is what the
+per-module build writes as it goes - and a module that is given as source in verification mode must
+match the interface it has. A reject case that means "the entry from its source, the library from
+its interface" is a `--use` case, not an `--interface` one; using the verification mode there asks
+the entry to match an interface nothing wrote, which is a different question and not the one the
+case is about.
+
+One strength limit belongs here, next to the effect-fact transport. In a `--use` build a refined
+parameter's predicate text is in the interface, but the *file* it was written in is not, so an
+obligation in a separately compiled caller cannot be located in that file and keeps its runtime
+check: sound, and weaker than the same call compiled from source. Refinements therefore survive
+separate compilation as contracts, not (yet) as proofs across it.
+
+### What is still coupled, honestly
+
+The whole-program shape emits a generic specialisation into the part of the *module that asked for
+it first*, so the set of instantiations in the program decides which part carries it, and its site
+table (`.Lgs<n>`) numbers statements over one stream. Neither exists in the default per-module
+build, where each run emits its own weak copy of every specialisation it uses and each object
+carries its own site table. The whole-program cache therefore still records the digest of the
+assembly each object came from and requires it to match — a stale object remains impossible, and the
+cost is a miss, not a wrong binary.
+
+## Stage 6 as built: effect facts in interfaces
+
+`@no_alloc` and `@no_panic` are claims about a function *and everything it calls*
+(`docs/design/effects.md`), proved by a fixpoint over the call graph the run emitted. Separate
+compilation breaks the fixpoint's premise: the callee's body is not in this run.
+
+The transport is a per-function row, and it is a row *about the symbol*, not about the source text:
+
+```
+fn util::touch (u64) -> u64
+effects 1 0 0
+```
+
+`effects <no_alloc> <no_panic> <strict>` follows the `fn` line of the function it belongs to, so it
+is keyed by `module::name` (whose mangled symbol the `fn` line already states) rather than by a
+table index or by anything derived from the order this run met declarations in. The reader installs
+it on the declaration, so a callee whose body is absent answers the fixpoint with the fact its own
+module computed and its own module verified (`fx_callee_alloc` / `fx_callee_panic` consult the
+declaration when there is no body in this run).
+
+That gives three properties, and each has a case:
+
+1. **A program that claims `@no_alloc` builds per module.** The claim is proved in the module that
+   owns the body, and the importer's claim is proved against the transported fact. `sep-*` cases in
+   `tests/native-cases.json` build such a program through the default (one run per module) shape and
+   an `--interface` build, and require the same answer.
+2. **A missing row is not silently a fact.** A callee with no row and no body in this run is assumed
+   to allocate and to fail, so a caller's claim is *refused* with the chain naming the callee rather
+   than accepted on an unknown. Conservatism in the safe direction.
+3. **A stale row is impossible.** The row lives in the interface, and the interface is pinned by the
+   source digest, the file's own digest and the manifest; `--verify` re-emits the module and compares
+   the row. A row that survives to a build is a row the module's own run wrote, so it describes a
+   body that run proved.
+
+The effects worker owns the proof itself (what the facts are computed from, and the typed-IR change
+under it). This note owns the transport: a row per function symbol, spelled in the interface, with
+the module's own verification standing behind it — so a change in how facts are computed changes the
+*values* in the row, never the shape of the transport.
+
+Incremental compilation — edit cost, the content-addressed store, the function-level unit and watch
+mode — is designed in `docs/design/incremental-compilation.md`.

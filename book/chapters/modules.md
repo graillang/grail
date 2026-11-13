@@ -121,9 +121,9 @@ is conservative. The cache also claims no authenticity: anything that can write 
 entry whose bytes match its name.
 
 Watching instead of rebuilding by hand (`grail check --watch`, `grail build --watch`). One process
-stays alive and re-runs the cycle when an input changes: the source named on the command line (or,
-in a project, the entry, `src/` and every fetched dependency's sources), the standard modules it
-reaches through `use`, and every file in an `--interface DIR`. Change detection is a content hash of
+stays alive and re-runs the cycle when an input changes: the source named on the command line, or,
+in a project, the plan the manifest and the lock resolve (the entry plus every module the lock
+names), the standard modules it reaches through `use`, and every file in an `--interface DIR`. Change detection is a content hash of
 each input, not a timestamp, so an editor that writes a file back unchanged spends no cycle and a
 file restored with an old timestamp still does. A burst of writes is one cycle: the loop waits for
 the files to go quiet (120 ms, `--debounce MS`) before it runs, and it polls every 100 ms

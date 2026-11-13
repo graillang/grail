@@ -1,12 +1,13 @@
 'use strict';
 // Grail for VS Code: the TextMate grammar in syntaxes/ highlights the language, and this file
 // starts the Grail language server (tools/lsp/main.grl in a checkout, run by tools/lsp.mjs) and
-// wires its diagnostics and definition support into the editor.
+// wires its diagnostics, definition, hover, completion and rename support into the editor.
 //
 // The client is written here rather than pulled from `vscode-languageclient` because the server
-// advertises two things: full-text synchronisation and textDocument/definition. Sending those and
-// publishing textDocument/publishDiagnostics is all this extension has to do, so it carries no
-// runtime dependency at all.
+// advertises a handful of methods: full-text synchronisation, definition, hover, completion and
+// rename. Sending those, forwarding didOpen/didChange/didClose and publishing
+// textDocument/publishDiagnostics is all this extension has to do, so it carries no runtime
+// dependency at all.
 const path = require('node:path');
 const vscode = require('vscode');
 const { Connection } = require('./lib/rpc');
@@ -89,9 +90,14 @@ function publish(params) {
   diagnostics?.set(uri, items);
 }
 
+function toRange(range) {
+  const start = range?.start ?? { line: 0, character: 0 };
+  const end = range?.end ?? start;
+  return new vscode.Range(start.line, start.character, end.line, end.character);
+}
+
 function toDiagnostic(item) {
-  const { start, end } = item.range ?? { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } };
-  const range = new vscode.Range(start.line, start.character, end.line, end.character);
+  const range = toRange(item.range);
   const diagnostic = new vscode.Diagnostic(range, item.message ?? '', severity(item.severity));
   if (item.source) diagnostic.source = item.source;
   return diagnostic;
@@ -161,6 +167,9 @@ async function start() {
         textDocument: {
           synchronization: { dynamicRegistration: false, didSave: false, willSave: false },
           definition: { dynamicRegistration: false, linkSupport: false },
+          hover: { dynamicRegistration: false, contentFormat: ['markdown', 'plaintext'] },
+          completion: { dynamicRegistration: false, completionItem: { snippetSupport: false } },
+          rename: { dynamicRegistration: false, prepareSupport: true },
           publishDiagnostics: { relatedInformation: false, versionSupport: true },
         },
         workspace: { workspaceFolders: false, configuration: false },
@@ -199,6 +208,79 @@ function definitionProvider() {
   };
 }
 
+function locationParams(document, position) {
+  return {
+    textDocument: { uri: document.uri.toString() },
+    position: { line: position.line, character: position.character },
+  };
+}
+
+// The server answers `null` when it has nothing to say, and an error when it refuses; both
+// become "no answer" here, never a popup.
+async function ask(method, params) {
+  if (!connection) return undefined;
+  try {
+    return await connection.request(method, params);
+  } catch (error) {
+    log(`${method}: ${error.message}`);
+    return undefined;
+  }
+}
+
+function hoverProvider() {
+  return {
+    async provideHover(document, position) {
+      const result = await ask('textDocument/hover', locationParams(document, position));
+      if (!result || !result.contents || typeof result.contents.value !== 'string') return undefined;
+      return new vscode.Hover(new vscode.MarkdownString(result.contents.value), toRange(result.range));
+    },
+  };
+}
+
+// LSP completion kinds are VS Code's plus one.
+function completionKind(value) {
+  if (typeof value !== 'number' || value < 1) return vscode.CompletionItemKind.Text;
+  return value - 1;
+}
+
+function completionProvider() {
+  return {
+    async provideCompletionItems(document, position) {
+      const result = await ask('textDocument/completion', locationParams(document, position));
+      if (!result || !Array.isArray(result.items)) return undefined;
+      const items = result.items.map(item => {
+        const completion = new vscode.CompletionItem(item.label, completionKind(item.kind));
+        if (typeof item.detail === 'string' && item.detail) completion.detail = item.detail;
+        if (typeof item.sortText === 'string' && item.sortText) completion.sortText = item.sortText;
+        completion.insertText = item.label;
+        return completion;
+      });
+      return new vscode.CompletionList(items, !!result.isIncomplete);
+    },
+  };
+}
+
+function renameProvider() {
+  return {
+    async prepareRename(document, position) {
+      const result = await ask('textDocument/prepareRename', locationParams(document, position));
+      if (!result || !result.range) return undefined;
+      return toRange(result.range);
+    },
+    async provideRenameEdits(document, position, newName) {
+      const result = await ask('textDocument/rename', { ...locationParams(document, position), newName });
+      if (!result || !result.changes) return undefined;
+      const edit = new vscode.WorkspaceEdit();
+      for (const [uri, changes] of Object.entries(result.changes)) {
+        for (const change of changes) {
+          edit.replace(vscode.Uri.parse(uri), toRange(change.range), change.newText ?? newName);
+        }
+      }
+      return edit;
+    },
+  };
+}
+
 function activate(context) {
   output = vscode.window.createOutputChannel('Grail language server');
   diagnostics = vscode.languages.createDiagnosticCollection('grail');
@@ -206,6 +288,9 @@ function activate(context) {
 
   context.subscriptions.push(
     vscode.languages.registerDefinitionProvider(SELECTOR, definitionProvider()),
+    vscode.languages.registerHoverProvider(SELECTOR, hoverProvider()),
+    vscode.languages.registerCompletionItemProvider(SELECTOR, completionProvider(), '.', ':'),
+    vscode.languages.registerRenameProvider(SELECTOR, renameProvider()),
     vscode.commands.registerCommand('grail.restartServer', () => start()),
     vscode.workspace.onDidOpenTextDocument(document => {
       if (document.languageId === LANGUAGE) open(document);

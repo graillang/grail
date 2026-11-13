@@ -43,3 +43,37 @@ Semantics (v1):
 - Not yet: mutable/borrowed closure parameters (a by-value `FnMut` parameter cannot be called
   because parameters are not mutable storage; take `&mut FnMut(...)`), Send/Share for closures, and
   coercing named functions to `Fn`.
+
+## Inferring the parameters of an immediately invoked closure
+
+`(|x| x + 1)(41)` is a closure literal whose only use is the call written directly after it. The
+call fixes the parameter types, so the literal may leave them out, on the same "the expected
+function type says what the parameters are" rule as an argument or a typed binding
+(`closure_hint`). The shape is one the literal cannot see on its own: the callee is parsed before
+the arguments.
+
+Mechanically, `expr_expected` recognises `( | ... ) (` before parsing the primary and types each
+argument ahead of time (`immediate_call_hint`). Each argument is compiled once in isolation by
+`isolated_body_type` - the same machinery that infers an expression-bodied closure's result - with
+the enclosing locals it names bound to their types, and the emitted code and checker state thrown
+away. The resulting types become the closure's `hint_params`; the result stays unknown so the body
+decides it, exactly as for a closure passed to a generic call. The real call then compiles each
+argument again with its own expected type (an unsuffixed literal may still adopt a parameter type
+there), so nothing the probe decided is trusted beyond the parameter types.
+
+Refusals, each with the parameter named:
+
+- An argument that is itself a closure is not used: its type would need the callee's parameter
+  type, which is what this is computing, and general closure-to-closure inference is not part of
+  this increment. `(|f| 1)(|y| y)` reports that `f` needs a type.
+- A parameter type that holds a borrow is not inferred from the argument. A reference parameter is
+  borrowed afresh on every call, so its type needs the closure's own input lifetime rather than the
+  caller's; `(|v| v.len())(&buf)` reports that `v` needs a type and suggests `|v: T|`. Write the
+  reference explicitly (`|v: &[u8]|`) as before.
+- Anything else that fixes nothing keeps the existing diagnostic, which now names the parameter
+  and repeats it in the suggested annotation: "closure parameter `x` needs a type here (nothing
+  fixes it): write |x: T|".
+
+Corpus: `ergo-closure-infer-call-{scalar,two-params,record-arg,string-arg,no-params}`,
+`ergo-closure-infer-argument-position`, `ergo-closure-infer-typed-binding`, and the rejections
+`ergo-closure-infer-reject-untyped-local` / `-invocation-borrow`.

@@ -97,15 +97,20 @@ const fixtures = [
     symbols: ['c_vsum', 'c_vmix'],
   },
   {
-    // Records passed to C by value (`v: byval R`): 4, 8, 16 and 24 bytes, mixed int/float fields,
-    // an ImVec2-shaped float pair and an embedded array, plus a byval parameter after six integer
-    // arguments, a byval record sharing the stack area with a following scalar, and a call through
-    // a `cfn` whose signature declares the byval parameter.
+    // Records passed to C by value (`v: byval R`): 4, 8, 12, 16, 24 and 40 bytes, mixed int/float
+    // fields, an ImVec2-shaped float pair and an embedded array, plus a byval parameter after six
+    // integer arguments, a byval record sharing the stack area with a following scalar, and a call
+    // through a `cfn` whose signature declares the byval parameter. Then records back out by value
+    // (4, 12, 16, 24, 40 bytes), a callee that writes its own copy, and a record that arrives and
+    // leaves by value in the same call.
     name: 'byval_records',
-    stdout: '63\n-2995\n9000007\n3002001\n7006\n10025\n22650\n4321\n9000015\n176\n4876\n7009000\n3656322\n90662328\n',
-    symbols: ['c_byval4', 'c_byval8', 'c_byval16', 'c_byval24', 'c_byval_mix', 'c_byval_md',
-      'c_byval_2f', 'c_byval_arr', 'c_byval_4f', 'c_byval_after', 'c_byval_two', 'c_byval_slot', 'c_byval_tail',
-      'c_byval_mix_stack'],
+    stdout: '63\n-2995\n9000007\n3002001\n7006\n10025\n22650\n4321\n9000015\n176\n4876\n7009000\n3656322\n90662328\n'
+      + '9008007\n54321\n3147650\n9000007\n17\n102101100\n41997\n15010005\n11154210\n7008009\n12345\n',
+    symbols: ['c_byval4', 'c_byval8', 'c_byval12', 'c_byval16', 'c_byval24', 'c_byval40', 'c_byval_3f',
+      'c_byval_mix', 'c_byval_md', 'c_byval_2f', 'c_byval_arr', 'c_byval_4f', 'c_byval_after',
+      'c_byval_two', 'c_byval_slot', 'c_byval_tail', 'c_byval_mix_stack', 'c_byval_mutate',
+      'c_bv_ret4', 'c_bv_ret12', 'c_bv_ret16', 'c_bv_ret24', 'c_bv_ret40', 'c_bv_roundtrip12',
+      'c_bv_roundtrip40'],
   },
   {
     // `!` on None inside an `extern "C"` callback: the unwrap reaches the checked abort path, so C

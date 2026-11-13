@@ -1,7 +1,9 @@
 module io;
 
-// Operating-system errors returned by fs and other I/O functions.
-pub enum Error{NotFound,PermissionDenied,AlreadyExists,NotADirectory,IsADirectory,NotEmpty,Other(u64)}
+// Errors returned by fs and other I/O functions: the operating system's, plus the two failures a
+// library layer of its own can detect - text that is not UTF-8, and a write the platform accepted
+// only partly.
+pub enum Error{NotFound,PermissionDenied,AlreadyExists,NotADirectory,IsADirectory,NotEmpty,InvalidUtf8(u64),ShortWrite(u64),Other(u64)}
 pub fn from_errno(code:u64)->Error{
     match code{
         2=>{return Error::NotFound;},13=>{return Error::PermissionDenied;},1=>{return Error::PermissionDenied;},17=>{return Error::AlreadyExists;},
@@ -13,6 +15,8 @@ impl Error{
         match self{
             NotFound=>{return "not found".text();},PermissionDenied=>{return "permission denied".text();},AlreadyExists=>{return "already exists".text();},
             NotADirectory=>{return "not a directory".text();},IsADirectory=>{return "is a directory".text();},NotEmpty=>{return "directory not empty".text();},
+            InvalidUtf8(at)=>{return format("text is not valid UTF-8 (ill-formed at byte {})", at);},
+            ShortWrite(written)=>{return format("short write: {} bytes accepted", written);},
             Other(code)=>{return format("os error {}", code);}
         }
     }

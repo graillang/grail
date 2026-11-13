@@ -1,27 +1,36 @@
 module grail_lsp;
 use host;
 use json;
-use lexer;
+use analysis;
 
 // The Grail language server: JSON-RPC 2.0 over stdio (`Content-Length` framing).
 //
 // Scope, stated plainly because `initialize` advertises exactly this and nothing else:
 //
 //   * full-text synchronisation (open/change/close) and pushed diagnostics;
-//   * `textDocument/definition` for declarations in the same file.
+//   * `textDocument/definition` for declarations in the same document;
+//   * `textDocument/hover` for the type, signature and documentation at a position;
+//   * `textDocument/completion` for names in scope, fields, variants and parameters;
+//   * `textDocument/rename` and `textDocument/prepareRename`, across the open documents.
+//
+// The last four are answered by `analysis.grl`, which reads the open buffers: the
+// declarations they make, the bindings in scope and the type of an expression. Where it
+// cannot be sure - a module whose source is not open, an expression it cannot type - the
+// answer is nothing, never a guess.
 //
 // Diagnostics are not invented here. The open buffer is written to a scratch file and
-// `grail check --diagnostics-json <file> <buffer>` is run on it; the compiler appends one JSON
-// record per diagnostic - `file`, `line`, `col`, `code`, `message` - and this server turns the
-// position and the message into an LSP range. Nothing is parsed out of the compiler's printed
-// text. A clean check publishes `[]`, which is how a fixed buffer clears its squiggles. Nothing is
-// published when the compiler cannot be run at all: that is reported with
-// `window/showMessage` instead.
+// `grail check --diagnostics-json <records> <file>` is run on it; the compiler appends one
+// JSON record per diagnostic - `file`, `line`, `col`, `col_end`, `code`, `message` - and
+// this server maps the position into an LSP range in UTF-16 code units. Nothing is parsed
+// out of the compiler's printed text. A clean check publishes `[]`, which is how a fixed
+// buffer clears its squiggles. Nothing is published when the
+// compiler cannot be run at all: that is reported with `window/showMessage` instead.
 //
 // Requests are answered from `lib/json.grl` (strict parsing, exact integers) and every
 // response is written as bytes built by hand, so an id, a uri or a compiler message can
-// never break the framing. Malformed input is answered with the JSON-RPC error that
-// describes it; the server has no path that aborts on a client message.
+// never break the framing. Malformed input - a bad frame, a bad position, a name that
+// cannot be renamed - is answered with the JSON-RPC error that describes it; the server
+// has no path that aborts on a client message.
 
 // ---------------------------------------------------------------------------
 // bytes
@@ -429,8 +438,8 @@ fn buffer_name(uri: &[u8]) -> u8[] {
 }
 
 // One record of the compiler's structured diagnostics, mapped onto the buffer. The record names the
-// file it is about, so a diagnostic the compiler found somewhere else is not put on this buffer; the
-// column is a byte-style source position, which becomes the UTF-16 offset an LSP range wants.
+// file it is about, so a diagnostic the compiler found somewhere else is not put on this buffer; its
+// `col` and `col_end` are 1-based byte positions, which become the UTF-16 offsets an LSP range wants.
 fn diagnostic_record(record: &[u8], name: &[u8], text: &[u8]) -> (Diagnostic)? {
     match json::parse(record) {
         value: json::Value => {
@@ -440,8 +449,12 @@ fn diagnostic_record(record: &[u8], name: &[u8], text: &[u8]) -> (Diagnostic)? {
             }
             line := int_or(&value, view("line"), 0);
             column := int_or(&value, view("col"), 0);
+            finish := int_or(&value, view("col_end"), 0);
             if (line < 1) || (column < 1) {
                 return None;
+            }
+            if finish <= column {
+                finish = column + 1;
             }
             message := text_or(&value, view("message"));
             if message.len() == 0 {
@@ -450,15 +463,23 @@ fn diagnostic_record(record: &[u8], name: &[u8], text: &[u8]) -> (Diagnostic)? {
             number := u64(line);
             doc_line := line_bytes(text, number - 1);
             total := utf16_len(doc_line);
-            mut start = utf16_prefix(doc_line, u64(column) - 1);
-            if total < start {
-                start = total;
+            mut units_start = utf16_prefix(doc_line, u64(column) - 1);
+            mut units_stop = utf16_prefix(doc_line, u64(finish) - 1);
+            if total < units_start {
+                units_start = total;
             }
-            mut end = start + 1;
-            if total < end {
-                end = total;
+            if total < units_stop {
+                units_stop = total;
             }
-            return Some(Diagnostic { line: number - 1, start: start, end: end, message: message });
+            if units_stop <= units_start {
+                units_stop = units_start + 1;
+                if total < units_stop {
+                    units_stop = total;
+                }
+            }
+            return Some(
+                Diagnostic { line: number - 1, start: units_start, end: units_stop, message: message }
+            );
         },
         error: json::Error => {
             return None;
@@ -873,176 +894,35 @@ fn handle_close(s: &mut Server, msg: &json::Value) {
 }
 
 // ---------------------------------------------------------------------------
-// definition
+// requests answered from the open documents
 // ---------------------------------------------------------------------------
 
-// The lexer's token stream with the brace depth in front of each token. Names are not
-// copied: a token's text is the document slice it spans.
-struct Token {
-    kind: u64,
-    start: u64,
-    end: u64,
-    depth: u64
+// Every open document, analysed. A request re-reads them instead of caching anything, so
+// what an answer reflects is exactly what the editor last sent - there is no index to go
+// stale and no state to invalidate.
+fn sources_of(s: &mut Server) -> analysis::Source[] {
+    mut sources = analysis::Source[];
+    for i in s.docs.len() {
+        d := &s.docs[i];
+        sources.push(analysis::source_new(view(d.text)));
+    }
+    return sources;
 }
-struct Declaration {
-    token: u64,
-    depth: u64,
-    function: bool
-}
-fn tokenize<a>(text: &a [u8]) -> Token[] {
-    lexed := lexer::tokenize(text);
-    mut tokens = Token[];
-    mut depth = 0;
-    for i in lexed.len() {
-        t := &lexed[i];
-        if t.kind == 125 {
-            if 0 < depth {
-                depth -= 1;
-            }
-        }
-        tokens.push(Token { kind: t.kind, start: t.start, end: t.end, depth: depth });
-        if t.kind == 123 {
-            depth += 1;
-        }
-    }
-    return tokens;
-}
-fn prev_is<a, b, c>(text: &a [u8], tokens: (&b Token[]), index: u64, word: &c [u8]) -> bool {
-    if index == 0 {
-        return false;
-    }
-    t := &tokens[index - 1];
-    if t.kind != 1 {
-        return false;
-    }
-    return eq(text[t.start: t.end], word);
-}
-fn next_kind<a>(tokens: (&a Token[]), index: u64) -> u64 {
-    if tokens.len() <= index + 1 {
-        return 0;
-    }
-    return tokens[index + 1].kind;
-}
-// The brace depth of the `fn NAME(...)` header an identifier sits in as a parameter, or
-// `no_index()` when it is not a plain parameter name.
-fn parameter_depth<a, b>(text: &a [u8], tokens: (&b Token[]), index: u64) -> u64 {
-    if index == 0 {
-        return no_index();
-    }
-    if (tokens[index - 1].kind != 40) && (tokens[index - 1].kind != 44) {
-        return no_index();
-    }
-    mut i = index;
-    mut depth = 0;
-    mut angles = 0;
-    while 0 < i {
-        i -= 1;
-        k := tokens[i].kind;
-        if k == 41 {
-            depth += 1;
-        } else if k == 40 {
-            if depth == 0 {
-                if (2 <= i) && (tokens[i - 1].kind == 1) {
-                    if prev_is(text, tokens, i - 1, view("fn")) {
-                        return tokens[i - 2].depth;
-                    }
-                }
-                return no_index();
-            }
-            depth -= 1;
-        } else if k == 62 {
-            angles += 1;
-        } else if k == 60 {
-            if angles == 0 {
-                // a generic list, not the parameter list
-                return no_index();
-            }
-            angles -= 1;
-        } else if (k == 123) || (k == 125) || (k == 59) {
-            return no_index();
-        }
-    }
-    return no_index();
-}
-// Every name this file declares: `fn NAME`, `NAME :=`, `mut NAME`, `for NAME in` and a
-// parameter of a function header.
-fn collect_declarations<a, b>(text: &a [u8], tokens: (&b Token[])) -> Declaration[] {
-    mut out = Declaration[];
-    for i in tokens.len() {
-        t := &tokens[i];
-        if t.kind != 1 {
-            continue;
-        }
-        if prev_is(text, tokens, i, view("fn")) {
-            out.push(Declaration { token: i, depth: t.depth, function: true });
-        } else if prev_is(text, tokens, i, view("mut")) || prev_is(text, tokens, i, view("for")) {
-            out.push(Declaration { token: i, depth: t.depth, function: false });
-        } else if next_kind(tokens, i) == 261 {
-            out.push(Declaration { token: i, depth: t.depth, function: false });
-        }
-        depth := parameter_depth(text, tokens, i);
-        if depth != no_index() {
-            out.push(Declaration { token: i, depth: depth, function: false });
-        }
-    }
-    return out;
-}
-// The declaration a use at `offset` refers to: the nearest preceding declaration of that
-// name in an enclosing block, else a function of that name anywhere in the file.
-fn resolve<a, b, c>(
-    text: &a [u8],
-    tokens: (&b Token[]),
-    declarations: (&c Declaration[]),
-    offset: u64
-) -> u64 {
-    mut at = no_index();
-    for i in tokens.len() {
-        t := &tokens[i];
-        if (t.kind == 1) && (t.start <= offset) && (offset < t.end) {
-            at = i;
-        }
-    }
-    if at == no_index() {
-        return no_index();
-    }
-    if 0 < at {
-        before := tokens[at - 1].kind;
-        // A field, a method or a module-qualified name is not answered from this file.
-        if (before == 46) || (before == 260) {
-            return no_index();
-        }
-    }
-    for i in declarations.len() {
-        d := &declarations[i];
-        if d.token == at {
-            return at;
-        }
-    }
-    name := text[tokens[at].start: tokens[at].end];
-    depth := tokens[at].depth;
-    mut best = no_index();
-    for i in declarations.len() {
-        d := &declarations[i];
-        if (d.token < at) && (d.depth <= depth) {
-            if eq(text[tokens[d.token].start: tokens[d.token].end], name) {
-                best = d.token;
+// The declarations of every document except `skip`: the world a request may consult for a
+// type, a field or an imported name.
+fn world_of(sources: (&analysis::Source[]), skip: u64) -> analysis::Item[] {
+    mut items = analysis::Item[];
+    for i in sources.len() {
+        if i != skip {
+            for k in sources[i].items.len() {
+                items.push(analysis::item_copy(&sources[i].items[k]));
             }
         }
     }
-    if best != no_index() {
-        return best;
-    }
-    for i in declarations.len() {
-        d := &declarations[i];
-        if d.function {
-            if eq(text[tokens[d.token].start: tokens[d.token].end], name) {
-                return d.token;
-            }
-        }
-    }
-    return no_index();
+    return items;
 }
-fn line_start<a>(text: &a [u8], line: u64) -> u64 {
+// The byte offset where document line `line` (0-based) starts, or no_index() past the end.
+fn line_start(text: &[u8], line: u64) -> u64 {
     mut current = 0;
     mut start = 0;
     mut i = 0;
@@ -1061,10 +941,13 @@ fn line_start<a>(text: &a [u8], line: u64) -> u64 {
     }
     return no_index();
 }
-fn line_of<a>(text: &a [u8], offset: u64) -> u64 {
+fn line_of(text: &[u8], offset: u64) -> u64 {
     mut line = 0;
     mut i = 0;
-    while (i < text.len()) && (i < offset) {
+    while i < text.len() {
+        if offset <= i {
+            break;
+        }
         if text[i] == 10 {
             line += 1;
         }
@@ -1072,9 +955,11 @@ fn line_of<a>(text: &a [u8], offset: u64) -> u64 {
     }
     return line;
 }
-// Byte offset of an LSP position, or `no_index()` when the position is outside the buffer.
-fn document_offset<a>(text: &a [u8], line: i64, character: i64) -> u64 {
-    if (line < 0) || (character < 0) {
+// Byte offset of an LSP position, or no_index() when the position is outside the buffer.
+// The character is a UTF-16 code unit count, so it is converted through the line it lands
+// on: a line with non-ASCII text has fewer bytes than code units for its tail.
+fn document_offset(text: &[u8], line: i64, character: i64) -> u64 {
+    if line < 0 || character < 0 {
         return no_index();
     }
     row := u64(line);
@@ -1083,39 +968,46 @@ fn document_offset<a>(text: &a [u8], line: i64, character: i64) -> u64 {
         return no_index();
     }
     content := line_bytes(text, row);
+    units := utf16_len(content);
+    if u64(character) > units {
+        return no_index();
+    }
     return start + utf16_offset(content, u64(character));
 }
-fn answer_location(id: u8[], uri: &[u8], text: &[u8], line: i64, character: i64) {
-    offset := document_offset(text, line, character);
-    if offset == no_index() {
-        send_result(id, view("null"));
-        return ();
-    }
-    tokens := tokenize(text);
-    declarations := collect_declarations(text, &tokens);
-    target := resolve(text, &tokens, &declarations, offset);
-    if target == no_index() {
-        send_result(id, view("null"));
-        return ();
-    }
-    t := &tokens[target];
-    row := line_of(text, t.start);
-    column := utf16_prefix(line_bytes(text, row), t.start - line_start(text, row));
-    mut result = u8[];
-    put(&mut result, view("{\"uri\":"));
-    put_string(&mut result, uri);
-    put(&mut result, view(",\"range\":{\"start\":{\"line\":"));
-    put_num(&mut result, row);
-    put(&mut result, view(",\"character\":"));
-    put_num(&mut result, column);
-    put(&mut result, view("},\"end\":{\"line\":"));
-    put_num(&mut result, row);
-    put(&mut result, view(",\"character\":"));
-    put_num(&mut result, column + (t.end - t.start));
-    put(&mut result, view("}}}"));
-    send_result(id, view(result));
+fn put_position(out: (&mut u8[]), text: &[u8], offset: u64) {
+    row := line_of(text, offset);
+    start := line_start(text, row);
+    content := line_bytes(text, row);
+    column := utf16_prefix(content, offset - start);
+    put(out, view("{\"line\":"));
+    put_num(out, row);
+    put(out, view(",\"character\":"));
+    put_num(out, column);
+    put(out, view("}"));
 }
-fn handle_definition(s: &mut Server, msg: &json::Value) {
+fn put_range(out: (&mut u8[]), text: &[u8], lo: u64, hi: u64) {
+    put(out, view("{\"start\":"));
+    put_position(out, text, lo);
+    put(out, view(",\"end\":"));
+    put_position(out, text, hi);
+    put(out, view("}"));
+}
+struct Request {
+    uri: u8[],
+    index: u64,
+    offset: u64
+}
+fn invalid<a>(msg: &json::Value, method: &[u8], what: &a [u8]) {
+    mut note = u8[];
+    put(&mut note, view("invalid params: "));
+    put(&mut note, method);
+    put(&mut note, view(" "));
+    put(&mut note, what);
+    answer_error(msg, -32602, view(note));
+}
+// The document and position a request names. Answers the request itself when it is
+// malformed, so a bad position is an LSP error and never a crash; None means "answered".
+fn prepare(s: &mut Server, msg: &json::Value, method: &[u8]) -> (Request)? {
     match msg.get(view("params")) {
         Some(params) => {
             match params.get(view("textDocument")) {
@@ -1123,47 +1015,374 @@ fn handle_definition(s: &mut Server, msg: &json::Value) {
                     match params.get(view("position")) {
                         Some(position) => {
                             uri := text_or(document, view("uri"));
-                            line := int_or(position, view("line"), 0);
-                            character := int_or(position, view("character"), 0);
-                            answer_definition(s, msg, view(uri), line, character);
+                            if uri.len() == 0 {
+                                invalid(msg, method, view("needs a textDocument with a uri"));
+                                return None;
+                            }
+                            line := int_or(position, view("line"), -1);
+                            character := int_or(position, view("character"), -1);
+                            if line < 0 || character < 0 {
+                                invalid(msg, method, view("needs a position with line and character"));
+                                return None;
+                            }
+                            index := find_document(&s.docs, view(uri));
+                            if index == no_index() {
+                                match id_bytes(msg) {
+                                    Some(id) => {
+                                        send_result(id, view("null"));
+                                    },
+                                    None => {}
+                                }
+                                return None;
+                            }
+                            d := &s.docs[index];
+                            offset := document_offset(view(d.text), line, character);
+                            if offset == no_index() {
+                                invalid(msg, method, view("names a position outside the document"));
+                                return None;
+                            }
+                            return Some(Request { uri: uri, index: index, offset: offset });
                         },
                         None => {
-                            answer_error(
-                                msg,
-                                -32602,
-                                view("invalid params: textDocument/definition needs a position")
+                            invalid(msg, method, view("needs a position"));
+                            return None;
+                        }
+                    }
+                },
+                None => {
+                    invalid(msg, method, view("needs a textDocument"));
+                    return None;
+                }
+            }
+        },
+        None => {
+            invalid(msg, method, view("needs params"));
+            return None;
+        }
+    }
+}
+
+// --- definition -------------------------------------------------------------
+
+fn handle_definition(s: &mut Server, msg: &json::Value) {
+    match prepare(s, msg, view("textDocument/definition")) {
+        Some(request) => {
+            match id_bytes(msg) {
+                Some(id) => {
+                    sources := sources_of(s);
+                    target := analysis::definition(&sources[request.index], request.offset);
+                    if target == no_index() {
+                        send_result(id, view("null"));
+                        return ();
+                    }
+                    src := &sources[request.index];
+                    lo := src.tokens[target].start;
+                    hi := src.tokens[target].end;
+                    d := &s.docs[request.index];
+                    mut result = u8[];
+                    put(&mut result, view("{\"uri\":"));
+                    put_string(&mut result, view(d.uri));
+                    put(&mut result, view(",\"range\":"));
+                    put_range(&mut result, view(d.text), lo, hi);
+                    put(&mut result, view("}"));
+                    send_result(id, view(result));
+                },
+                None => {
+                    return ();
+                }
+            }
+        },
+        None => {}
+    }
+}
+
+// --- hover ------------------------------------------------------------------
+
+fn handle_hover(s: &mut Server, msg: &json::Value) {
+    match prepare(s, msg, view("textDocument/hover")) {
+        Some(request) => {
+            match id_bytes(msg) {
+                Some(id) => {
+                    sources := sources_of(s);
+                    others := world_of(&sources, request.index);
+                    hit := analysis::hover(&sources[request.index], &others, request.offset);
+                    if hit.text.len() == 0 {
+                        send_result(id, view("null"));
+                        return ();
+                    }
+                    d := &s.docs[request.index];
+                    mut result = u8[];
+                    put(&mut result, view("{\"contents\":{\"kind\":\"markdown\",\"value\":"));
+                    put_string(&mut result, view(hit.text));
+                    put(&mut result, view("},\"range\":"));
+                    put_range(&mut result, view(d.text), hit.lo, hit.hi);
+                    put(&mut result, view("}"));
+                    send_result(id, view(result));
+                },
+                None => {
+                    return ();
+                }
+            }
+        },
+        None => {}
+    }
+}
+
+// --- completion -------------------------------------------------------------
+
+fn handle_completion(s: &mut Server, msg: &json::Value) {
+    match prepare(s, msg, view("textDocument/completion")) {
+        Some(request) => {
+            match id_bytes(msg) {
+                Some(id) => {
+                    sources := sources_of(s);
+                    others := world_of(&sources, request.index);
+                    items := analysis::completions(&sources[request.index], &others, request.offset);
+                    mut result = u8[];
+                    put(&mut result, view("{\"isIncomplete\":false,\"items\":["));
+                    for i in items.len() {
+                        if 0 < i {
+                            result.push(44);
+                        }
+                        put(&mut result, view("{\"label\":"));
+                        put_string(&mut result, view(items[i].label));
+                        put(&mut result, view(",\"kind\":"));
+                        put_num(&mut result, items[i].kind);
+                        if 0 < items[i].detail.len() {
+                            put(&mut result, view(",\"detail\":"));
+                            put_string(&mut result, view(items[i].detail));
+                        }
+                        put(&mut result, view(",\"sortText\":"));
+                        put_string(&mut result, view(items[i].sort));
+                        put(&mut result, view("}"));
+                    }
+                    put(&mut result, view("]}"));
+                    send_result(id, view(result));
+                },
+                None => {
+                    return ();
+                }
+            }
+        },
+        None => {}
+    }
+}
+
+// --- rename -----------------------------------------------------------------
+
+// The document that declares a target. A target resolved from a use names the module it
+// came from; more than one document with that name is ambiguous and is refused.
+fn defining_document(sources: (&analysis::Source[]), target: (&analysis::Target)) -> u64 {
+    mut found = no_index();
+    for i in sources.len() {
+        for k in sources[i].items.len() {
+            item := &sources[i].items[k];
+            if eq(item.name, view(target.name)) {
+                if eq(item.module, view(target.module)) {
+                    if found != no_index() {
+                        return no_index();
+                    }
+                    found = i;
+                }
+            }
+        }
+    }
+    return found;
+}
+fn rename_edit(
+    s: &mut Server,
+    sources: (&analysis::Source[]),
+    request: (&Request),
+    target: (&analysis::Target),
+    new_name: &[u8]
+) -> (u8[])? {
+    mut home = no_index();
+    if target.decl != no_index() {
+        home = request.index;
+    } else {
+        home = defining_document(sources, target);
+        if home == no_index() {
+            return None;
+        }
+    }
+    mut body = u8[];
+    put(&mut body, view("{\"changes\":{"));
+    mut files = 0;
+    for i in s.docs.len() {
+        src := &sources[i];
+        mut spans = analysis::Span[];
+        if target.kind == analysis::R_LOCAL {
+            if i == request.index {
+                spans = analysis::local_spans(src, target.decl);
+            }
+        } else {
+            if target.kind == analysis::R_ITEM {
+                mut others = world_of(sources, i);
+                mut decl = no_index();
+                if i == home {
+                    decl = target.decl;
+                    if decl == no_index() {
+                        decl = item_token(&sources[i], view(target.name));
+                    }
+                }
+                spans = analysis::item_spans(src, view(target.module), view(target.name), decl, i == home);
+            } else {
+                if target.kind == analysis::R_FIELD {
+                    mut others = world_of(sources, i);
+                    spans = analysis::field_spans(
+                        src,
+                        &others,
+                        view(target.module),
+                        view(target.record),
+                        view(target.name)
+                    );
+                }
+            }
+        }
+        if 0 < spans.len() {
+            if 0 < files {
+                body.push(44);
+            }
+            files += 1;
+            d := &s.docs[i];
+            put_string(&mut body, view(d.uri));
+            put(&mut body, view(":["));
+            for k in spans.len() {
+                if 0 < k {
+                    body.push(44);
+                }
+                put(&mut body, view("{\"range\":"));
+                put_range(&mut body, view(d.text), spans[k].lo, spans[k].hi);
+                put(&mut body, view(",\"newText\":"));
+                put_string(&mut body, new_name);
+                body.push(125);
+            }
+            body.push(93);
+        }
+    }
+    put(&mut body, view("}}"));
+    if files == 0 {
+        return None;
+    }
+    return Some(body);
+}
+fn item_token(s: &analysis::Source, name: &[u8]) -> u64 {
+    for i in s.items.len() {
+        if eq(s.items[i].name, name) {
+            return s.items[i].token;
+        }
+    }
+    return no_index();
+}
+fn handle_prepare_rename(s: &mut Server, msg: &json::Value) {
+    match prepare(s, msg, view("textDocument/prepareRename")) {
+        Some(request) => {
+            match id_bytes(msg) {
+                Some(id) => {
+                    sources := sources_of(s);
+                    others := world_of(&sources, request.index);
+                    target := analysis::rename_target(&sources[request.index], &others, request.offset);
+                    if target.kind == 0 {
+                        if 0 < target.refusal.len() {
+                            send_error(id, -32001, view(target.refusal));
+                        } else {
+                            send_result(id, view("null"));
+                        }
+                        return ();
+                    }
+                    at := analysis::ident_at(&sources[request.index], request.offset);
+                    src := &sources[request.index];
+                    if at == no_index() {
+                        send_result(id, view("null"));
+                        return ();
+                    }
+                    d := &s.docs[request.index];
+                    mut result = u8[];
+                    put(&mut result, view("{\"range\":"));
+                    put_range(&mut result, view(d.text), src.tokens[at].start, src.tokens[at].end);
+                    put(&mut result, view(",\"placeholder\":"));
+                    put_string(&mut result, view(target.name));
+                    put(&mut result, view("}"));
+                    send_result(id, view(result));
+                },
+                None => {
+                    return ();
+                }
+            }
+        },
+        None => {}
+    }
+}
+// A rename's new name must be something the language can spell as an identifier.
+fn name_is_identifier(name: &[u8]) -> bool {
+    if name.len() == 0 {
+        return false;
+    }
+    for i in name.len() {
+        c := name[i];
+        if !((64 < c) && (c < 91)) {
+            if !((96 < c) && (c < 123)) {
+                if !((47 < c) && (c < 58)) {
+                    if c != 95 {
+                        return false;
+                    }
+                }
+            }
+        }
+        if i == 0 {
+            if (47 < c) && (c < 58) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+fn handle_rename(s: &mut Server, msg: &json::Value) {
+    match prepare(s, msg, view("textDocument/rename")) {
+        Some(request) => {
+            match id_bytes(msg) {
+                Some(id) => {
+                    mut new_name = u8[];
+                    match msg.get(view("params")) {
+                        Some(params) => {
+                            new_name = text_or(params, view("newName"));
+                        },
+                        None => {}
+                    }
+                    if !name_is_identifier(view(new_name)) {
+                        send_error(id, -32602, view("invalid params: textDocument/rename needs an identifier as newName"));
+                        return ();
+                    }
+                    sources := sources_of(s);
+                    others := world_of(&sources, request.index);
+                    target := analysis::rename_target(&sources[request.index], &others, request.offset);
+                    if target.kind == 0 {
+                        if 0 < target.refusal.len() {
+                            send_error(id, -32001, view(target.refusal));
+                        } else {
+                            send_error(id, -32001, view("nothing here can be renamed"));
+                        }
+                        return ();
+                    }
+                    match rename_edit(s, &sources, &request, &target, view(new_name)) {
+                        Some(edit) => {
+                            send_result(id, view(edit));
+                        },
+                        None => {
+                            send_error(
+                                id,
+                                -32001,
+                                view("the declaration of this name is not in an open document")
                             );
                         }
                     }
                 },
                 None => {
-                    answer_error(
-                        msg,
-                        -32602,
-                        view("invalid params: textDocument/definition needs a textDocument")
-                    );
+                    return ();
                 }
             }
         },
-        None => {
-            answer_error(msg, -32602, view("invalid params: textDocument/definition needs params"));
-        }
-    }
-}
-fn answer_definition(s: &mut Server, msg: &json::Value, uri: &[u8], line: i64, character: i64) {
-    match id_bytes(msg) {
-        Some(id) => {
-            index := find_document(&s.docs, uri);
-            if index == no_index() {
-                send_result(id, view("null"));
-                return ();
-            }
-            snapshot := snapshot_at(&s.docs, index);
-            answer_location(id, view(snapshot.uri), view(snapshot.text), line, character);
-        },
-        None => {
-            return ();
-        }
+        None => {}
     }
 }
 
@@ -1174,7 +1393,7 @@ fn initialize_result() -> u8[] {
     put(
         &mut out,
         view(
-            "{\"capabilities\":{\"textDocumentSync\":{\"openClose\":true,\"change\":1},\"definitionProvider\":true},\"serverInfo\":{\"name\":\"grail-lsp\",\"version\":\""
+            "{\"capabilities\":{\"textDocumentSync\":{\"openClose\":true,\"change\":1},\"definitionProvider\":true,\"hoverProvider\":true,\"completionProvider\":{\"triggerCharacters\":[\".\",\":\"],\"resolveProvider\":false},\"renameProvider\":{\"prepareProvider\":true}},\"serverInfo\":{\"name\":\"grail-lsp\",\"version\":\""
         )
     );
     put(&mut out, view(SERVER_VERSION));
@@ -1255,6 +1474,22 @@ fn route_named<a>(s: &mut Server, msg: &json::Value, name: &a string) {
     }
     if name == "textDocument/definition" {
         handle_definition(s, msg);
+        return ();
+    }
+    if name == "textDocument/hover" {
+        handle_hover(s, msg);
+        return ();
+    }
+    if name == "textDocument/completion" {
+        handle_completion(s, msg);
+        return ();
+    }
+    if name == "textDocument/prepareRename" {
+        handle_prepare_rename(s, msg);
+        return ();
+    }
+    if name == "textDocument/rename" {
+        handle_rename(s, msg);
         return ();
     }
     answer_error(msg, -32601, view("method not found"));

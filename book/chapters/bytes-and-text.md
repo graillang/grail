@@ -8,7 +8,9 @@ length. Read an individual byte with `data[index]`.
 {{example:bytes}}
 
 `&data` is a readonly byte view and `&mut data` is an exclusive one. A quoted literal is already an
-owned UTF-8 `string`; no `.text()` call is needed. `.text()` converts borrowed bytes into owned text.
+owned UTF-8 `string`; no `.text()` call is needed. A `string` is read-only text: `mut s = "x"` makes
+the binding reassignable (`s = "y"`), not the bytes writable (`s[0] = 65` is refused, as in Rust's
+`let mut s = "x"`). Copy it to edit bytes — `mut b: u8[] = s.copy()` — and write through the vector. `.text()` converts borrowed bytes into owned text.
 Text length is measured in **bytes**, not Unicode characters or grapheme clusters.
 `greeting.append(text)` appends validated text; arbitrary byte sequences and text are deliberately
 different concepts.
@@ -86,3 +88,22 @@ it.
 
 **Try it:** add a five-byte sequence such as `F8 88 80 80 80` to `bad` and watch the replacement
 count grow by one per byte, then feed the result of `push_char` back into `is_utf8`.
+
+## Why a validated string type beside the bytes
+
+A `string` is text the language checks at its own boundaries, and a `&[u8]` is bytes: a slice of a
+file, a socket's buffer, a piece of a packet. Handing those bytes to a function that wants text means
+deciding when to check them - too early and a caller pays for a validation it already did, too late
+and the check is missing somewhere, and "we always validate here" is a comment rather than a rule.
+
+`utf8::Utf8String` makes the decision part of a type. It can only be built by a constructor that
+validates (`from_bytes`), from text the language already validated (`from_text`), or through an
+`unsafe fn from_unchecked` that a caller must open an `unsafe` block for. Its operations keep the
+invariant by construction - a concatenation of valid text is valid, a slice at character boundaries is
+valid, and a replacement of valid text by valid text cannot break a sequence, because a valid sequence
+never appears at a non-boundary offset of valid text - so a function that takes one never has to
+validate again, and a function that returns one proves it did.
+
+The cost is a copy at the boundary and one rule to remember: bytes are the interface, and a validated
+value is what crosses into code that must not re-check. The byte-slice API stays for everything that
+does not need the promise, including `&[u8]` views of a `Utf8String`'s own storage.
