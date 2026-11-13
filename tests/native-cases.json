@@ -7768,5 +7768,11 @@
       "tests/bindgen/fixture_binding.grl"
     ],
     "stdout": "48\n8\n0\n4\n8\n10\n32\n40\n56\n48\n24\n4\n6\n-3\n24\n3\n-7\n1200\n97\n98\n2.5\n9000000000\n"
+  },
+  {
+    "name": "cbstk-callback-stack-arguments",
+    "note": "a C-ABI caller passes 24 arguments to a Grail callback, so the prologue reads the arguments past the register files from the caller's stack: 10 integers, 10 doubles, an i16, an f32, a u8 and a final i64, with every parameter position-weighted so a word read from the wrong register or slot changes the sum (4560)",
+    "source": "module cbstk_stack_args;\n\n// A C caller with more arguments than the register files hold, without a C toolchain: the caller is\n// an `extern \"C\" fn` (Grail code with the C ABI), so the callback prologue is what this exercises.\n// SysV x86-64 spills the 7th integer argument and the 9th double, AAPCS64 and RV64 the 9th of each,\n// and Win64 the 5th of each; RV64 first moves floats that find no vector register into integer ones.\nextern \"C\" fn target(\n    a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64, a6: i64, a7: i64, a8: i64, a9: i64,\n    f0: f64, f1: f64, f2: f64, f3: f64, f4: f64, f5: f64, f6: f64, f7: f64, f8: f64, f9: f64,\n    b: i16, s: f32, u: u8, last: i64\n) -> f64 {\n    ints := a0 + 2 * a1 + 3 * a2 + 4 * a3 + 5 * a4 + 6 * a5 + 7 * a6 + 8 * a7 + 9 * a8 + 10 * a9\n        + 11 * i64(b) + 12 * i64(u) + 13 * last;\n    floats := f0 + 2.0 * f1 + 3.0 * f2 + 4.0 * f3 + 5.0 * f4 + 6.0 * f5 + 7.0 * f6 + 8.0 * f7\n        + 9.0 * f8 + 10.0 * f9 + 11.0 * f64(s);\n    return f64(ints) + 4.0 * floats;\n}\nextern \"C\" fn caller(\n    cb: cfn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, i16, f32, u8, i64) -> f64\n) -> f64 {\n    return cb(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, -3, 2.25, 200, 13);\n}\nfn main() -> u64 {\n    mut value: f64 = 0.0;\n    unsafe {\n        value = caller(target);\n    }\n    println(value);\n    return 0;\n}\n",
+    "stdout": "4560\n"
   }
 ]

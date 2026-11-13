@@ -292,6 +292,15 @@ extern "C" fn c_apply(callback: cfn(i64) -> i64, value: i64) -> i64;
 - A record parameter of an `extern "C" fn` definition is the `const R *` the C caller passes: it is
   *borrowed*, never freed. Its fields are readable and the storage belongs to C, so a callback that
   receives an 800-byte `VkPhysicalDeviceProperties`-shaped struct neither copies nor releases it.
+- A callback may take more arguments than the register files hold: the prologue reads the rest
+  from the caller's frame (SysV x86-64 after six integer and eight vector registers, AAPCS64 and
+  RV64 after eight of each, Win64 after four of each, which its thunk moves as well). `cbstk-callback-stack-arguments`
+  in `tests/native-cases.json` calls a 24-parameter callback from a C-ABI Grail caller with no C
+  toolchain needed, and `tests/ffi/callback_stack.grl` does the same through a C shim.
+- A record **by value** into a callback is still refused (`a C callback cannot take a record by
+  value yet`), because the copy the callee is owed would have to be materialised in the callback's
+  own frame from register halves and stack words. That is the one remaining callback shape with no
+  implementation; `byval` on a declaration Grail *calls* works on every ABI.
 - The callback's parameter types are a promise the compiler cannot verify against the
   actual C function-pointer type (a function pointer carries no signature at run time),
   so the declaration and the C prototype must agree; a mismatch is an ABI bug the
