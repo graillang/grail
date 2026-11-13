@@ -19,10 +19,11 @@ use analysis;
 // answer is nothing, never a guess.
 //
 // Diagnostics are not invented here. The open buffer is written to a scratch file and
-// `grail check <file>` is run on it; the compiler prints `error[CODE]: message`, a
-// ` --> file:line:column` line and an excerpt whose carets give the width, and this
-// server maps that block into an LSP range in UTF-16 code units. A clean check publishes
-// `[]`, which is how a fixed buffer clears its squiggles. Nothing is published when the
+// `grail check --diagnostics-json <records> <file>` is run on it; the compiler appends one
+// JSON record per diagnostic - `file`, `line`, `col`, `col_end`, `code`, `message` - and
+// this server maps the position into an LSP range in UTF-16 code units. Nothing is parsed
+// out of the compiler's printed text. A clean check publishes `[]`, which is how a fixed
+// buffer clears its squiggles. Nothing is published when the
 // compiler cannot be run at all: that is reported with `window/showMessage` instead.
 //
 // Requests are answered from `lib/json.grl` (strict parsing, exact integers) and every
@@ -43,17 +44,6 @@ fn eq<a, b>(x: &a [u8], y: &b [u8]) -> bool {
         return false;
     }
     for i in x.len() {
-        if x[i] != y[i] {
-            return false;
-        }
-    }
-    return true;
-}
-fn has_prefix<a, b>(x: &a [u8], y: &b [u8]) -> bool {
-    if x.len() < y.len() {
-        return false;
-    }
-    for i in y.len() {
         if x[i] != y[i] {
             return false;
         }
@@ -447,280 +437,88 @@ fn buffer_name(uri: &[u8]) -> u8[] {
     return name;
 }
 
-// A compiler diagnostic block, mapped back onto the buffer:
-//
-//   error[E0002]: unknown function
-//    --> session.grl:2:5
-//     |
-//   2 |     missing(1);
-//     |     ^^^^^^^
-//
-// The `-->` line gives a 1-based line and a 1-based byte column; the carets under the
-// excerpt give the width, which the location alone does not. The excerpt repeats the
-// source line after its gutter (`  | `), so the caret offsets are byte offsets into the
-// document's own line, converted to UTF-16 exactly like a request position.
-struct Sure {
-    line: u64,
-    column: u64
-}
-fn line_end_at<a>(output: &a [u8], from: u64) -> u64 {
-    mut i = from;
-    while i < output.len() {
-        if output[i] == 10 {
-            break;
-        }
-        i += 1;
-    }
-    return i;
-}
-fn line_slice<a>(output: &a [u8], from: u64, to: u64) -> (&a [u8]) {
-    mut end = to;
-    if from < end {
-        if output[end - 1] == 13 {
-            end -= 1;
-        }
-    }
-    return output[from: end];
-}
-// The position of a ` --> path:line:column` line, when the path is the buffer's own name.
-fn diagnostic_location<a, b>(line: &a [u8], name: &b [u8]) -> (Sure)? {
-    mut i = 0;
-    while i < line.len() {
-        if line[i] == 32 {
-            i += 1;
-        } else {
-            break;
-        }
-    }
-    if line.len() < i + 4 {
-        return None;
-    }
-    if !((line[i] == 45) && (line[i + 1] == 45) && (line[i + 2] == 62) && (line[i + 3] == 32)) {
-        return None;
-    }
-    i += 4;
-    // path:line:column - the path may contain no colon, so split from the right.
-    mut last = no_index();
-    mut k = i;
-    while k < line.len() {
-        if line[k] == 58 {
-            last = k;
-        }
-        k += 1;
-    }
-    if last == no_index() || last <= i {
-        return None;
-    }
-    mut middle = no_index();
-    mut j = i;
-    while j < last {
-        if line[j] == 58 {
-            middle = j;
-        }
-        j += 1;
-    }
-    if middle == no_index() || middle <= i {
-        return None;
-    }
-    path := line[i: middle];
-    if !eq(path, name) {
-        return None;
-    }
-    mut number = 0;
-    mut digits = 0;
-    j = middle + 1;
-    while j < last {
-        if !is_digit(line[j]) {
-            return None;
-        }
-        number = number * 10 + (line[j] - 48);
-        digits += 1;
-        j += 1;
-    }
-    if digits == 0 || number == 0 {
-        return None;
-    }
-    mut column = 0;
-    digits = 0;
-    j = last + 1;
-    while j < line.len() {
-        if !is_digit(line[j]) {
-            return None;
-        }
-        column = column * 10 + (line[j] - 48);
-        digits += 1;
-        j += 1;
-    }
-    if digits == 0 || column == 0 {
-        return None;
-    }
-    return Some(Sure { line: number - 1, column: column - 1 });
-}
-// The caret run of an excerpt line, as byte offsets inside the excerpted source line.
-fn caret_span<a>(line: &a [u8]) -> (u64, u64)? {
-    mut bar = no_index();
-    mut i = 0;
-    while i < line.len() {
-        if line[i] == 124 {
-            bar = i;
-            break;
-        }
-        i += 1;
-    }
-    if bar == no_index() {
-        return None;
-    }
-    mut start = bar + 1;
-    if start < line.len() {
-        if line[start] == 32 {
-            start += 1;
-        }
-    }
-    mut first = no_index();
-    i = start;
-    while i < line.len() {
-        if line[i] == 94 {
-            first = i;
-            break;
-        }
-        i += 1;
-    }
-    if first == no_index() || first < start {
-        return None;
-    }
-    mut width = 0;
-    i = first;
-    while i < line.len() {
-        if line[i] != 94 {
-            break;
-        }
-        width += 1;
-        i += 1;
-    }
-    return Some((first - start, width));
-}
-// The message of an `error[CODE]: text` or `error: text` line.
-fn diagnostic_message(line: &[u8]) -> u8[] {
-    if line.len() < 6 {
-        return u8[];
-    }
-    mut i = 5;
-    if line[i] == 91 {
-        // `[E0002]: ` - the code is not part of the message.
-        i += 1;
-        while i < line.len() {
-            if line[i] == 93 {
-                break;
+// One record of the compiler's structured diagnostics, mapped onto the buffer. The record names the
+// file it is about, so a diagnostic the compiler found somewhere else is not put on this buffer; its
+// `col` and `col_end` are 1-based byte positions, which become the UTF-16 offsets an LSP range wants.
+fn diagnostic_record(record: &[u8], name: &[u8], text: &[u8]) -> (Diagnostic)? {
+    match json::parse(record) {
+        value: json::Value => {
+            file := text_or(&value, view("file"));
+            if !eq(view(file), view(name)) {
+                return None;
             }
-            i += 1;
-        }
-        if line.len() <= i {
-            return u8[];
-        }
-        i += 1;
-    } else {
-        if line[i] != 58 {
-            return u8[];
-        }
-        i += 1;
-    }
-    if i < line.len() {
-        if line[i] == 32 {
-            i += 1;
-        }
-    }
-    return copy_bytes(line[i: line.len()]);
-}
-fn parse_diagnostics(output: &[u8], name: &[u8], text: &[u8]) -> Diagnostic[] {
-    mut found = Diagnostic[];
-    mut i = 0;
-    while i < output.len() {
-        end := line_end_at(view(output), i);
-        line := line_slice(view(output), i, end);
-        mut next = end;
-        if next < output.len() {
-            next += 1;
-        }
-        if has_prefix(line, view("error")) {
-            message := diagnostic_message(line);
-            mut sure = Sure { line: 0, column: 0 };
-            mut located = false;
-            mut lo = 0;
-            mut hi = 0;
-            mut caret = false;
-            mut j = next;
-            while j < output.len() {
-                bend := line_end_at(view(output), j);
-                body := line_slice(view(output), j, bend);
-                if has_prefix(body, view("error")) {
-                    break;
-                }
-                if !located {
-                    match diagnostic_location(body, name) {
-                        Some(where) => {
-                            sure = where;
-                            located = true;
-                        },
-                        None => {}
-                    }
-                } else {
-                    if !caret {
-                        match caret_span(body) {
-                            Some(pair) => {
-                                lo = pair.0;
-                                hi = pair.0 + pair.1;
-                                caret = true;
-                            },
-                            None => {}
-                        }
-                    }
-                }
-                j = bend;
-                if j < output.len() {
-                    j += 1;
-                }
+            line := int_or(&value, view("line"), 0);
+            column := int_or(&value, view("col"), 0);
+            finish := int_or(&value, view("col_end"), 0);
+            if (line < 1) || (column < 1) {
+                return None;
             }
-            if located {
-                doc_line := line_bytes(text, sure.line);
-                total := utf16_len(doc_line);
-                mut start = sure.column;
-                mut stop = sure.column + 1;
-                if caret {
-                    start = lo;
-                    stop = hi;
-                }
-                mut units_start = utf16_prefix(doc_line, start);
-                mut units_stop = utf16_prefix(doc_line, stop);
-                if total < units_start {
-                    units_start = total;
-                }
+            if finish <= column {
+                finish = column + 1;
+            }
+            message := text_or(&value, view("message"));
+            if message.len() == 0 {
+                return None;
+            }
+            number := u64(line);
+            doc_line := line_bytes(text, number - 1);
+            total := utf16_len(doc_line);
+            mut units_start = utf16_prefix(doc_line, u64(column) - 1);
+            mut units_stop = utf16_prefix(doc_line, u64(finish) - 1);
+            if total < units_start {
+                units_start = total;
+            }
+            if total < units_stop {
+                units_stop = total;
+            }
+            if units_stop <= units_start {
+                units_stop = units_start + 1;
                 if total < units_stop {
                     units_stop = total;
                 }
-                if units_stop <= units_start {
-                    units_stop = units_start + 1;
-                    if total < units_stop {
-                        units_stop = total;
-                    }
-                }
-                if 0 < message.len() {
-                    found.push(
-                        Diagnostic { line: sure.line, start: units_start, end: units_stop, message: message }
-                    );
-                }
             }
-            i = j;
-        } else {
-            i = next;
+            return Some(
+                Diagnostic { line: number - 1, start: units_start, end: units_stop, message: message }
+            );
+        },
+        error: json::Error => {
+            return None;
+        }
+    }
+}
+// One record per line, in the order the compiler reported them.
+fn parse_records(records: &[u8], name: &[u8], text: &[u8]) -> Diagnostic[] {
+    mut found = Diagnostic[];
+    mut i = 0;
+    while i < records.len() {
+        start := i;
+        while (i < records.len()) && (records[i] != 10) {
+            i += 1;
+        }
+        mut end = i;
+        if i < records.len() {
+            i += 1;
+        }
+        if (start < end) && (records[end - 1] == 13) {
+            end -= 1;
+        }
+        record := records[start: end];
+        if 0 < record.len() {
+            match diagnostic_record(record, name, text) {
+                Some(diagnostic) => {
+                    found.push(diagnostic);
+                },
+                None => {}
+            }
         }
     }
     return found;
 }
 
-// Compile the buffer in a scratch directory and read the diagnostics back. The compiler
-// writes `file:line:column: message` to stdout; `host::command` inherits this process's
-// stdio, so the check runs under `sh -c` with both streams redirected to a file inside
-// its own working directory. Nothing is written into the user's tree.
+// Compile the buffer in a scratch directory and read the records back. `host::command` inherits
+// this process's stdio, and this process's stdout is the JSON-RPC channel, so the check runs under
+// `sh -c` with the child's own output redirected to a log inside its own working directory; the
+// diagnostics arrive in the records file instead. Nothing is written into the user's tree.
 fn run_check(uri: &[u8], text: &[u8], serial: u64) -> Check {
     root := temp_root();
     // Unique per process (start time) and per check (serial), so two servers never share
@@ -729,7 +527,8 @@ fn run_check(uri: &[u8], text: &[u8], serial: u64) -> Check {
     dir := path_join(view(root), &stamp);
     name := buffer_name(uri);
     path := path_join(view(dir), view(name));
-    out_path := path_join(view(dir), view("diagnostics.txt"));
+    out_path := path_join(view(dir), view("diagnostics.log"));
+    records_path := path_join(view(dir), view("diagnostics.jsonl"));
     host::mkdir(view(dir));
     written := host::write_file(view(path), text);
     if written != 0 {
@@ -740,16 +539,18 @@ fn run_check(uri: &[u8], text: &[u8], serial: u64) -> Check {
     mut command = u8[][];
     command.push(copy_bytes(view("sh")));
     command.push(copy_bytes(view("-c")));
-    command.push(copy_bytes(view("cd \"$1\" || exit 125; exec \"$2\" check \"$3\" >\"$4\" 2>&1")));
+    command.push(copy_bytes(view("cd \"$1\" || exit 125; exec \"$2\" check --diagnostics-json \"$5\" \"$3\" >\"$4\" 2>&1")));
     command.push(copy_bytes(view("grail-lsp")));
     command.push(copy_bytes(view(dir)));
     command.push(exe);
     command.push(copy_bytes(view(name)));
     command.push(copy_bytes(view(out_path)));
+    command.push(copy_bytes(view(records_path)));
     status := host::command(command);
-    output := host::read_file(view(out_path));
-    diagnostics := parse_diagnostics(view(output), view(name), text);
+    records := host::read_file(view(records_path));
+    diagnostics := parse_records(view(records), view(name), text);
     target_dir := path_join(view(dir), view("target"));
+    host::remove(view(records_path), 0);
     host::remove(view(out_path), 0);
     host::remove(view(target_dir), 1);
     host::remove(view(path), 0);

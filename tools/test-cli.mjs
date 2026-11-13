@@ -2,7 +2,7 @@
 import * as fs from 'node:fs';
 import { readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync, copyFileSync, existsSync } from 'node:fs';
 import { join, basename } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { root, compilerSources, hostTarget, buildCompiler, assemble, command, execute } from './native.mjs';
 
@@ -159,4 +159,165 @@ writeFileSync(join(clink, 'src/main.grl'), [
 ].join('\n'));
 assert.equal(run(['run'], clink).stdout.trim(), '13', 'grail run links a shared library and a relative C object');
 checks++;
+// 6. Watch mode: `grail check --watch` and `grail build --watch`. A warm process re-runs the cycle
+// when an input changes. Every wait below is on the process's own output, not on a sleep: a cycle
+// prints exactly one summary line, so "cycle N arrived" and "no further cycle arrived" are both
+// assertions about lines. The poll and quiet periods are made short through the flags, and the
+// settle window is a generous multiple of them.
+// A text cycle prints its diagnostics and then one summary line, so a cycle is counted by its
+// summary; a `--json` cycle is one line, and every line of it is a summary.
+const textSummary = line => /^(check ok|built \S+) \d+ ms$/.test(line) || /^error (\d+ diagnostics? )?\d+ ms$/.test(line);
+const jsonSummary = line => { try { return JSON.parse(line).cycle !== undefined; } catch { return false; } };
+class Watcher {
+  constructor(args, cwd, isSummary = textSummary) {
+    this.args = args;
+    this.isSummary = isSummary;
+    this.lines = [];
+    this.summaries = [];
+    this.errors = '';
+    this.buffer = '';
+    this.child = spawn(grail, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    this.child.stdout.setEncoding('utf8');
+    this.child.stdout.on('data', chunk => {
+      this.buffer += chunk;
+      for (;;) {
+        const at = this.buffer.indexOf('\n');
+        if (at === -1) break;
+        const line = this.buffer.slice(0, at);
+        this.lines.push(line);
+        if (this.isSummary(line)) this.summaries.push(line);
+        this.buffer = this.buffer.slice(at + 1);
+      }
+    });
+    this.child.stderr.on('data', chunk => { this.errors += chunk; });
+    this.exited = new Promise(resolve => this.child.on('exit', (code, signal) => resolve({ code, signal })));
+  }
+  // The n-th cycle's summary line, waiting for the process to print it.
+  async at(count, what) {
+    const deadline = Date.now() + 60_000;
+    while (this.summaries.length < count) {
+      if (this.child.exitCode !== null) throw new Error(`grail ${this.args.join(' ')} exited during ${what}: ${JSON.stringify(this.lines)}${this.errors}`);
+      if (Date.now() > deadline) throw new Error(`grail ${this.args.join(' ')}: waited for ${what} (cycle ${count}) and saw ${JSON.stringify(this.summaries)}${this.errors}`);
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    return this.summaries[count - 1];
+  }
+  // A window several quiet periods wide in which nothing new is printed: one change, one cycle.
+  async settled(what, window = 900) {
+    const summaries = this.summaries.length;
+    const lines = this.lines.length;
+    await new Promise(resolve => setTimeout(resolve, window));
+    assert.equal(this.summaries.length, summaries, `${what}: a change produced more than one cycle, or an unchanged tree did: ${JSON.stringify(this.summaries.slice(summaries))}`);
+    assert.equal(this.lines.length, lines, `${what}: the process printed between cycles: ${JSON.stringify(this.lines.slice(lines))}`);
+  }
+  stop() {
+    const started = Date.now();
+    this.child.kill('SIGINT');
+    return this.exited.then(ending => ({ ...ending, ms: Date.now() - started }));
+  }
+}
+const settle = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const fast = ['--interval', '40', '--debounce', '60'];
+{
+  const dir = join(work, 'watch'); mkdirSync(dir, { recursive: true });
+  const ok = 'fn main() {\n    println(42);\n}\n';
+  const broken = 'fn main() {\n    x := 1;\n    x = 2;\n}\n';
+  const file = join(dir, 'main.grl');
+  writeFileSync(file, ok);
+  const watching = new Watcher(['check', '--watch', ...fast, 'main.grl'], dir);
+  assert.match(await watching.at(1, 'the first cycle'), /^check ok \d+ ms$/, 'the first cycle runs before any change, and is one line'); checks++;
+  writeFileSync(file, broken);
+  const failed = await watching.at(2, 'the cycle after one change');
+  assert.match(failed, /^error 1 diagnostic \d+ ms$/, `one summary line per error cycle: ${failed}`); checks++;
+  assert.equal(watching.child.exitCode, null, 'an error keeps the watch process alive'); checks++;
+  assert.match(watching.lines.join('\n'), /assignment requires mut[\s\S]*\|\s+\^/, "the cycle prints the compiler's own diagnostic, caret and all"); checks++;
+  await watching.settled('one change');
+  writeFileSync(file, ok);
+  assert.match(await watching.at(3, 'the cycle after the fix'), /^check ok \d+ ms$/, 'fixing the file clears the error'); checks++;
+  assert.equal(watching.child.exitCode, null, 'the process is still alive after an error and a fix');
+  // A concurrent `grail build` in the same directory: no lock is held between cycles.
+  const beside = spawnSync(grail, ['build', 'main.grl', '-o', 'target/beside'], { cwd: dir, encoding: 'utf8', timeout: 300_000 });
+  assert.equal(beside.status, 0, `a build beside a watching process: ${beside.stdout}${beside.stderr}`); checks++;
+  // A burst of writes is one cycle, not one per write.
+  const settledAt = watching.summaries.length;
+  for (let i = 0; i < 5; i++) { writeFileSync(file, `${ok}// write ${i}\n`); await settle(15); }
+  assert.match(await watching.at(settledAt + 1, 'the cycle after a burst'), /^check ok \d+ ms$/, 'a burst of writes settles into a cycle'); checks++;
+  await watching.settled('a burst of writes');
+  // Every cycle removes its structured-diagnostics file: nothing accumulates in target/.
+  const litter = readdirSync(join(dir, 'target')).filter(name => name.startsWith('watch-'));
+  assert.deepEqual(litter, [], 'a cycle removes the diagnostics file it read'); checks++;
+
+  // Content, not timestamps: a file written back with the same bytes is not a change (an mtime
+  // comparison would spend a cycle here), and one whose bytes do change is.
+  const unchangedAt = watching.summaries.length;
+  writeFileSync(file, `${ok}// write 4\n`);
+  await watching.settled('a rewrite with the same bytes');
+  assert.equal(watching.summaries.length, unchangedAt, 'a rewrite with the same bytes spends no cycle'); checks++;
+  writeFileSync(file, `${ok}// write 5\n`);
+  assert.match(await watching.at(unchangedAt + 1, 'the cycle after the bytes changed'), /^check ok \d+ ms$/, 'a change of bytes is a cycle'); checks++;
+
+  // Project mode: the entry, `src/` and a fetched dependency's sources are the input set.
+  const demoDir = join(work, 'demo');
+  const project = new Watcher(['check', '--watch', ...fast], demoDir);
+  assert.match(await project.at(1, 'the first project cycle'), /^check ok \d+ ms$/); checks++;
+  writeFileSync(join(demoDir, 'src/main.grl'), 'use mathlib;\nfn main() {\n    println(mathlib::triple(15));\n}\n');
+  assert.match(await project.at(2, 'the cycle after a project source changed'), /^check ok \d+ ms$/, 'a project cycle watches the project sources'); checks++;
+  await project.stop();
+
+  // `--json`: one JSON object per line per cycle, and nothing else on that stream.
+  writeFileSync(file, broken);
+  const stream = new Watcher(['check', '--watch', '--json', ...fast, 'main.grl'], dir, jsonSummary);
+  const record = JSON.parse(await stream.at(1, 'the first json cycle'));
+  assert.equal(record.cycle, 1); assert.equal(record.status, 'error'); assert.equal(typeof record.ms, 'number');
+  assert.equal(record.diagnostics.length, 1, 'one diagnostic, from the compiler\'s structured record');
+  assert.equal(record.diagnostics[0].file, 'main.grl');
+  assert.equal(record.diagnostics[0].line, 3);
+  assert.equal(record.diagnostics[0].col, 5);
+  assert.match(record.diagnostics[0].message, /assignment requires mut/);
+  checks += 6;
+  await stream.settled('the json stream');
+  writeFileSync(file, ok);
+  const fixed = JSON.parse(await stream.at(2, 'the json cycle after the fix'));
+  assert.equal(fixed.cycle, 2); assert.equal(fixed.status, 'ok'); assert.deepEqual(fixed.diagnostics, []);
+  assert.ok(stream.lines.every(line => { try { JSON.parse(line); return true; } catch { return false; } }), 'every line of the stream is one JSON object');
+  checks += 3;
+  await stream.stop();
+
+  // The channel itself: the compiler writes one record per diagnostic to the file and prints
+  // nothing, so a driver never reads the caret form back.
+  writeFileSync(file, broken);
+  const channel = join(dir, 'target/channel.jsonl');
+  const compiled = spawnSync(grail, ['--diagnostics-json', channel, join(dir, 'target/channel.s'), file], { cwd: dir, encoding: 'utf8' });
+  assert.equal(compiled.status, 1, `a rejected program keeps status 1: ${compiled.stdout}${compiled.stderr}`);
+  assert.equal(compiled.stdout.trim(), '', 'a listener means the compiler prints no caret form');
+  const records = readFileSync(channel, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(records.length, 1, 'one record per diagnostic');
+  assert.deepEqual({ file: records[0].file, line: records[0].line, col: records[0].col, code: records[0].code }, { file, line: 3, col: 5, code: 'E0005' });
+  assert.match(records[0].message, /assignment requires mut/);
+  assert.match(records[0].rendered, /^error\[E0005\][\s\S]*\^/, 'the record carries the caret form for a human');
+  checks += 5;
+
+  // `grail build --watch`: one summary line naming the image, and a rebuilt one on change.
+  writeFileSync(file, ok);
+  const building = new Watcher(['build', '--watch', ...fast, 'main.grl'], dir);
+  assert.match(await building.at(1, 'the first build cycle'), /^built target\/main \d+ ms$/, 'a build cycle names what it built'); checks++;
+  assert.equal(String(execute(join(dir, 'target/main'), [], hostTarget).stdout), '42\n', 'the first cycle wrote a runnable image'); checks++;
+  writeFileSync(file, 'fn main() {\n    println(43);\n}\n');
+  assert.match(await building.at(2, 'the build cycle after a change'), /^built target\/main \d+ ms$/); checks++;
+  assert.equal(String(execute(join(dir, 'target/main'), [], hostTarget).stdout), '43\n', 'the rebuild replaced the image'); checks++;
+
+  // SIGINT ends every watcher promptly. A signal has no handler to catch it (the runtime installs
+  // none, and a builtin cannot be added without breaking the published bootstrap), so the process
+  // ends on the signal and the status on termination is the signal's, not the last cycle's; that
+  // limit is written down in docs/design/incremental-compilation.md.
+  const endings = await Promise.all([watching.stop(), building.stop()]);
+  for (const ending of endings) {
+    assert.ok(ending.signal === 'SIGINT' || ending.code === 130, `a watcher ends on SIGINT, not on an abort: ${JSON.stringify(ending)}`);
+    assert.ok(ending.ms < 10_000, `a watcher ends promptly on SIGINT: ${ending.ms} ms`);
+  }
+  checks += 2;
+  // `--watch` on a command with no cycle to repeat is refused, not silently ignored.
+  const refused = spawnSync(grail, ['run', '--watch', 'main.grl'], { cwd: dir, encoding: 'utf8' });
+  assert.equal(refused.status, 1); assert.match(refused.stdout, /watch mode is `grail build --watch`/); checks++;
+}
 console.log(`cli: ${checks} formatter/tool checks passed`);

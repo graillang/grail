@@ -538,6 +538,10 @@ struct C {
     // by `--reported` from one re-run to the next. A replayed generic body that reaches the same
     // error again is silent, and it counts once (docs/diagnostics.md).
     reported: u8[][],
+    // A file to append structured diagnostics to (`--diagnostics-json FILE`), or empty. A driver
+    // (watch mode, the language server) reads the fields it needs from it instead of parsing the
+    // caret form; the caret form is still in the record, as `rendered`.
+    diag_json: u8[],
     // Copy-backs for `p: &mut R` callback parameters: (C pointer slot, copy slot, bytes) triples.
     export_copyback: u64[],
     rnames: u8[][],
@@ -5922,6 +5926,15 @@ fn diag_excerpt<a, b, d>(c: (&a mut C), width: u64, at: &d DiagPos, span: u64, m
 fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
     p := c.pos;
     m := tok_text(&mut c, p);
+    // The offending token's width: the caret run under the primary line, and the width a driver
+    // draws for the diagnostic. Clamped the way the excerpt clamps it.
+    mut span = m.len();
+    if span == 0 {
+        span = 1;
+    }
+    if 60 < span {
+        span = 60;
+    }
     st := c.toks[p].start;
     exchange(&mut c.out, u8[]);
     here := diag_pos(&c.src, st);
@@ -6008,13 +6021,6 @@ fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
             if (last_line != 0) & (last_line + 1 < here.line) {
                 o(&mut c, view("...\n"));
             }
-            mut span = m.len();
-            if span == 0 {
-                span = 1;
-            }
-            if 60 < span {
-                span = 60;
-            }
             diag_excerpt(&mut c, width, &here, span, 94, view(primary));
             last_line = here.line;
             done = true;
@@ -6048,10 +6054,48 @@ fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
         o(&mut c, view(helps[i]));
         c.out.push(10);
     }
-    host::print(view(c.out));
+    if c.diag_json.len() != 0 {
+        diag_record(&mut c, view(path), here, span, view(code), view(msg));
+    } else {
+        host::print(view(c.out));
+    }
     next_error(&mut c, view(key));
     // A rejected program is an ordinary failure (status 1), not a crash of the compiler.
     host::exit(1);
+    return ();
+}
+// One diagnostic as a JSON object on its own line, appended to the listener's file
+// (`--diagnostics-json FILE`). The fields come from the diagnostic itself - the position it was
+// built with and the width of the token it points at, the message, and the code `grail explain`
+// knows - not from the text the compiler would have printed; `rendered` carries that text for a driver that shows a human what the compiler had
+// to say. One compile run appends the diagnostics it is the first to report: the re-runs that report
+// the next error carry `--diagnostics-json` along, so a cycle's file holds every one of them.
+fn diag_record<a, b, d, e>(c: (&a mut C), path: &b [u8], here: DiagPos, span: u64, code: &d [u8], msg: &e [u8]) -> unit {
+    mut out = u8[];
+    push_bytes(&mut out, view("{\"file\":\""));
+    cli::json_text(&mut out, view(path));
+    push_bytes(&mut out, view("\",\"line\":"));
+    decimal(&mut out, here.line);
+    push_bytes(&mut out, view(",\"col\":"));
+    decimal(&mut out, here.column);
+    // The end of the token the diagnostic points at: `col` plus its width, so a reader draws the
+    // range the compiler underlines without reading the caret form.
+    push_bytes(&mut out, view(",\"col_end\":"));
+    decimal(&mut out, here.column + span);
+    push_bytes(&mut out, view(",\"code\":\""));
+    cli::json_text(&mut out, view(code));
+    push_bytes(&mut out, view("\",\"message\":\""));
+    cli::json_text(&mut out, view(msg));
+    push_bytes(&mut out, view("\",\"rendered\":\""));
+    rendered := copy_bytes(view(c.out));
+    cli::json_text(&mut out, view(rendered));
+    push_bytes(&mut out, view("\"}\n"));
+    mut text = u8[];
+    if host::exists(view(c.diag_json)) != 0 {
+        text = host::read_file(view(c.diag_json));
+    }
+    push_bytes(&mut text, view(out));
+    host::write_file(view(c.diag_json), view(text));
     return ();
 }
 // After an error in a function body: run this compile again with that body skipped, so it reports
@@ -6062,12 +6106,12 @@ fn next_error<a, b>(c: (&a mut C), key: &b [u8]) -> unit {
     // The cap is on runs, not on printed diagnostics: a chain that makes no progress still ends.
     attempts := c.skip_bodies.len() / 2 + 1;
     if (c.body_pos == 0) || (20 <= attempts) {
-        error_summary(c.reported.len());
+        error_summary(c.reported.len(), u64(c.diag_json.len() != 0));
         return ();
     }
     for i in c.skip_bodies.len() / 2 {
         if (c.skip_bodies[2 * i] == c.body_file) & (c.skip_bodies[2 * i + 1] == c.body_pos) {
-            error_summary(c.reported.len());
+            error_summary(c.reported.len(), u64(c.diag_json.len() != 0));
             return ();
         }
     }
@@ -6091,8 +6135,14 @@ fn next_error<a, b>(c: (&a mut C), key: &b [u8]) -> unit {
     host::command(run);
     return ();
 }
-fn error_summary(count: u64) -> unit {
+// `listener` is non-zero when a structured-diagnostics listener owns the output: the count below
+// would be printed text, and the records already carry every diagnostic it would count.
+fn error_summary(count: u64, listener: u64) -> unit {
     if count < 2 {
+        return ();
+    }
+    if listener != 0 {
+        // The records already say how many, one per diagnostic; a driver counts them.
         return ();
     }
     mut line = copy_bytes(view("error: aborting due to "));
@@ -38085,6 +38135,7 @@ pub fn main() -> u64 {
         body_file: 0,
         body_pos: 0,
         reported: u8[][],
+        diag_json: u8[],
         export_copyback: u64[],
         rnames: u8[][],
         tnames: u8[][],
@@ -38360,6 +38411,15 @@ pub fn main() -> u64 {
             } else {
                 exchange(&mut c.iface_emit, host::arg(offset + 2));
             }
+            offset += 2;
+        } else if same(view(option), view("--diagnostics-json")) {
+            // A structured diagnostics listener: every diagnostic this compile reports is appended
+            // to FILE as one JSON object per line, and nothing is printed. The driver truncates the
+            // file before it starts a compile, so the re-runs below append to one cycle's records.
+            if argc < offset + 3 {
+                fail_option(&mut c, view("--diagnostics-json needs FILE"));
+            }
+            exchange(&mut c.diag_json, host::arg(offset + 2));
             offset += 2;
         } else if same(view(option), view("--use")) {
             // B1 stage 3: a directory of interfaces to build *against*. A module whose source is not
@@ -38678,7 +38738,7 @@ pub fn main() -> u64 {
     if c.skip_bodies.len() != 0 {
         // Every error this compile has is reported; the program is still rejected, and nothing it
         // would have written is.
-        error_summary(c.reported.len());
+        error_summary(c.reported.len(), u64(c.diag_json.len() != 0));
         host::exit(1);
     }
     if c.no_entry != 0 {

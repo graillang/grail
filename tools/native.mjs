@@ -16,6 +16,10 @@ export const hostTarget = ({ x64: 'x86_64', arm64: 'aarch64', riscv64: 'riscv64'
 // The compiler itself is a Linux host binary: its platform module is os-linux. darwin.grl (and
 // os-windows.grl) are per-target platform modules selected when building for those targets.
 export const compilerSources = ['native', 'lexer', 'ownership', 'machine', 'optimize', 'llvm', 'fmt', 'explain', 'bindgen', 'pkg', 'docgen', 'cli', 'runtime', 'os-linux'].map(n => join(root, 'compiler', `${n}.grl`));
+// A standard module the compiler itself uses: `grail build --watch` hashes its inputs with XXH64
+// (lib/xxhash.grl), so the compiler is built with that module in its source list.
+const compilerStdSources = ['xxhash'].map(n => join(root, 'lib', `${n}.grl`));
+compilerSources.push(...compilerStdSources);
 export const triples = { x86_64: 'x86_64-linux-gnu', aarch64: 'aarch64-linux-gnu', riscv64: 'riscv64-linux-gnu', 'macos-x86_64': 'x86_64-apple-macos11', 'macos-aarch64': 'arm64-apple-macos11' };
 export const emulations = { x86_64: 'elf_x86_64', aarch64: 'aarch64elf', riscv64: 'elf64lriscv' };
 export const machoArchitectures = { 'macos-x86_64': 'x86_64', 'macos-aarch64': 'arm64' };

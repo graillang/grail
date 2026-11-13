@@ -5,6 +5,7 @@ use fmt;
 use explain;
 use bindgen;
 use pkg;
+use xxhash;
 
 // The `grail` command-line tool. The same binary is the compiler: subcommands drive it by
 // re-invoking itself (`grail [--target T] OUT.s ENTRY.grl MODULE.grl...`), then assemble and link.
@@ -56,6 +57,53 @@ fn cat<a, b>(x: &a [u8], y: &b [u8]) -> u8[] {
         o.push(y[i]);
     }
     return o;
+}
+// `text` as the inside of a JSON string: quotes, backslashes and control characters escaped, so a
+// record stays on one line whatever the source or the message holds. Both structured-diagnostic
+// writers use it - the compiler's per-diagnostic record and the driver's per-cycle object.
+pub fn json_text<a>(out: (&mut u8[]), text: &a [u8]) -> unit {
+    mut i = 0;
+    while i < text.len() {
+        ch := text[i];
+        if (ch == 34) || (ch == 92) {
+            out.push(92);
+            out.push(ch);
+        } else {
+            if ch == 10 {
+                out.push(92);
+                out.push(110);
+            } else {
+                if ch == 9 {
+                    out.push(92);
+                    out.push(116);
+                } else {
+                    if ch == 13 {
+                        out.push(92);
+                        out.push(114);
+                    } else {
+                        if ch < 32 {
+                            out.push(92);
+                            out.push(117);
+                            out.push(48);
+                            out.push(48);
+                            out.push(hex_digit(ch / 16));
+                            out.push(hex_digit(ch % 16));
+                        } else {
+                            out.push(ch);
+                        }
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    return ();
+}
+fn hex_digit(n: u64) -> u8 {
+    if n < 10 {
+        return 48 + u8(n);
+    }
+    return 87 + u8(n);
 }
 fn copy<a>(x: &a [u8]) -> u8[] {
     mut o = u8[];
@@ -818,7 +866,7 @@ fn tool<a, b>(variable: &a [u8], fallback: &b [u8]) -> u8[] {
     }
     return copy(fallback);
 }
-fn compile<a, b, d, e, g>(
+fn compile<a, b, d, e, g, k>(
     h: (&a Home),
     entry: &b [u8],
     modules: (&d u8[][]),
@@ -826,15 +874,16 @@ fn compile<a, b, d, e, g>(
     target: &g [u8],
     flags: u64,
     iface: &d [u8],
-    verify: u64
+    verify: u64,
+    diag: &k [u8]
 ) -> u64 {
-    return compile_mode(h, entry, modules, output, target, flags, iface, verify);
+    return compile_mode(h, entry, modules, output, target, flags, iface, verify, diag);
 }
 // The compiler invocation, spelled out in one place: the build cache keys on this vector, so a flag
 // or an input that the driver passes is in the key by construction and cannot be forgotten there.
 //   grail [--target T] [--debug] [--deny-ambient-host] [--split] [--overflow=...]
 //         [--interface DIR [--verify-interface]] OUT.s ENTRY.grl MODULE.grl... RUNTIME PLATFORM
-fn build_argv<a, b, d, e, g>(
+fn build_argv<a, b, d, e, g, k>(
     h: (&a Home),
     entry: &b [u8],
     modules: (&d u8[][]),
@@ -842,7 +891,8 @@ fn build_argv<a, b, d, e, g>(
     target: &g [u8],
     flags: u64,
     iface: &d [u8],
-    verify: u64
+    verify: u64,
+    diag: &k [u8]
 ) -> u8[][] {
     check_only := flags % 2;
     debug := (flags / 2) % 2;
@@ -883,6 +933,12 @@ fn build_argv<a, b, d, e, g>(
         if (emit == 0) & (verify != 0) {
             command.push(copy(view("--verify-interface")));
         }
+    }
+    // A driver that asked for records gets them as well as a human-readable rendering:
+    // `--diagnostics-json FILE` appends one JSON object per diagnostic there and prints nothing.
+    if diag.len() != 0 {
+        command.push(copy(view("--diagnostics-json")));
+        command.push(copy(view(diag)));
     }
     command.push(copy(view(asm)));
     command.push(copy(view(entry)));
@@ -939,7 +995,7 @@ fn sources_embed<a, b>(entry: &a [u8], modules: (&b u8[][])) -> bool {
     return false;
 }
 // check_only: type-check and generate code, but do not assemble or link.
-fn compile_mode<a, b, d, e, g>(
+fn compile_mode<a, b, d, e, g, k>(
     h: (&a Home),
     entry: &b [u8],
     modules: (&d u8[][]),
@@ -947,7 +1003,8 @@ fn compile_mode<a, b, d, e, g>(
     target: &g [u8],
     flags: u64,
     iface: &d [u8],
-    verify: u64
+    verify: u64,
+    diag: &k [u8]
 ) -> u64 {
     check_only := flags % 2;
     debug := (flags / 2) % 2;
@@ -1004,7 +1061,7 @@ fn compile_mode<a, b, d, e, g>(
     }
     assemble.push(triple);
     assemble.push(copy(view("-c")));
-    command := build_argv(&h, view(entry), &modules, view(asm), view(target), flags, iface, verify);
+    command := build_argv(&h, view(entry), &modules, view(asm), view(target), flags, iface, verify, diag);
     // The shape of the build. A program of more than one module of its own is built one compiler run
     // per module, each reading the interfaces the runs before it wrote (B1 stage 4). `--whole-program`
     // and `--split` ask for the one-run shapes, an `--interface` build checks every module against its
@@ -2689,6 +2746,17 @@ struct Options {
     // `--verify` compares the two instead of trusting either.
     iface: u8[],
     verify: u64,
+    // Watch mode (`grail check --watch`, `grail build --watch`): re-run the cycle on change, with
+    // the poll period (`--interval MS`) and the quiet period that collapses a burst of writes
+    // (`--debounce MS`), and the cycle stream as one JSON object per line (`--json`).
+    watch: u64,
+    interval: u64,
+    debounce: u64,
+    json: u64,
+    // `--diagnostics-json FILE`: the compiler appends one JSON object per diagnostic to FILE and
+    // prints nothing, and the driver prints no summary, so a driver (an editor, the language
+    // server) reads fields instead of text. Watch mode settles on its own file when this is empty.
+    diag: u8[],
     paths: u8[][]
 }
 // The code-generation flag vector, in one place: it is what the compiler is told, and what the build
@@ -2710,6 +2778,34 @@ fn flag_bits<a>(o: (&a Options)) -> u64 {
         + o.no_sites
         * 256;
 }
+// The watch flags: `--watch`, `--json`, `--interval MS`, `--debounce MS` and
+// `--diagnostics-json FILE`. Returns 0 for a word that is not one of them, otherwise 1 plus the
+// number of value arguments it took.
+fn watch_option<a, b>(o: (&a mut Options), word: &b [u8], args: (&b u8[][]), at: u64) -> u64 {
+    if eq(view(word), view("--watch")) {
+        // Watch mode: stay alive and re-run the cycle on change.
+        o.watch = 1;
+        return 1;
+    }
+    if eq(view(word), view("--json")) {
+        // One JSON object per line per cycle, for editors and the LSP.
+        o.json = 1;
+        return 1;
+    }
+    if eq(view(word), view("--diagnostics-json")) & (at + 1 < args.len()) {
+        o.diag = item(args, at + 1);
+        return 2;
+    }
+    if eq(view(word), view("--interval")) & (at + 1 < args.len()) {
+        o.interval = number_of(view(item(args, at + 1)));
+        return 2;
+    }
+    if eq(view(word), view("--debounce")) & (at + 1 < args.len()) {
+        o.debounce = number_of(view(item(args, at + 1)));
+        return 2;
+    }
+    return 0;
+}
 fn options<a>(args: (&a u8[][])) -> Options {
     mut o = Options {
         file: u8[],
@@ -2726,6 +2822,11 @@ fn options<a>(args: (&a u8[][])) -> Options {
         no_sites: 0,
         iface: u8[],
         verify: 0,
+        watch: 0,
+        interval: 0,
+        debounce: 0,
+        json: 0,
+        diag: u8[],
         paths: u8[][],
     };
     mut i = 0;
@@ -2735,6 +2836,10 @@ fn options<a>(args: (&a u8[][])) -> Options {
         if passthrough != 0 {
             o.rest.push(a);
         } else {
+            consumed := watch_option(&mut o, view(a), &args, i);
+            if consumed != 0 {
+                i += consumed - 1;
+            } else {
             if eq(view(a), view("--")) {
                 passthrough = 1;
             } else {
@@ -2822,6 +2927,7 @@ fn options<a>(args: (&a u8[][])) -> Options {
                 }
             }
         }
+            }
         i += 1;
     }
     // The whole-program cache reuses the objects `--split` writes, so it is that shape's cache. An
@@ -2858,7 +2964,22 @@ fn build<a, b>(args: (&a u8[][]), o: (&b mut Options)) -> u64 {
             return 1;
         }
     }
+    if o.watch != 0 {
+        // Watch mode: the same build, once per cycle, in this process (`watch`).
+        return watch(&h, o, 2);
+    }
     host::mkdir(view("target"));
+    // `--diagnostics-json FILE`: the driver starts the file, the compiler appends to it. Read out
+    // of the options once, because the call below holds the options mutably.
+    mut listener = copy(view(o.diag));
+    if listener.len() != 0 {
+        host::write_file(view(listener), view(""));
+    }
+    return build_pass(&h, o, view(listener));
+}
+// One build, in this process: the named file, or the project's entry, into `-o` or `target/`. `diag`
+// is the file the compiler appends structured diagnostics to, and is empty for a plain `grail build`.
+fn build_pass<a, b, c>(h: (&a Home), o: (&b mut Options), diag: &c [u8]) -> u64 {
     if o.file.len() != 0 {
         if o.output.len() == 0 {
             stem := basename(view(o.file));
@@ -2873,7 +2994,8 @@ fn build<a, b>(args: (&a u8[][]), o: (&b mut Options)) -> u64 {
             view(o.target),
             flag_bits(&o),
             view(o.iface),
-            o.verify
+            o.verify,
+            diag
         );
     }
     // A project build reads grail.lock: the package manager has already resolved, fetched and
@@ -2895,22 +3017,41 @@ fn build<a, b>(args: (&a u8[][]), o: (&b mut Options)) -> u64 {
         view(o.target),
         flag_bits(&o),
         view(o.iface),
-        o.verify
+        o.verify,
+        diag
     );
 }
 fn check_command<a>(args: (&a u8[][])) -> u64 {
-    o := options(&args);
+    mut o = options(&args);
     h := home();
     if h.runtime.len() == 0 {
         return 1;
     }
+    if o.watch != 0 {
+        return watch(&h, &mut o, 1);
+    }
     host::mkdir(view("target"));
-    mut status = 0;
+    // `--diagnostics-json FILE`: the driver starts the file, the compiler appends to it, and nothing
+    // is printed - the file is the whole report. Read out of the options once, because the call
+    // below holds them.
+    mut listener = copy(view(o.diag));
+    if listener.len() != 0 {
+        host::write_file(view(listener), view(""));
+    }
+    status := check_pass(&h, &o, view(listener));
+    if (status == 0) & (listener.len() == 0) {
+        say(view("ok"));
+    }
+    return status;
+}
+// One check, in this process: type-check the named file, or the project, without assembling or
+// linking. `diag` is the file the compiler appends structured diagnostics to.
+fn check_pass<a, b, c>(h: (&a Home), o: (&b Options), diag: &c [u8]) -> u64 {
     if o.file.len() != 0 {
         stem := basename(view(o.file));
         out := path_join(view("target"), view(stem));
         mut none = u8[][];
-        status = compile_mode(
+        return compile_mode(
             &h,
             view(o.file),
             &none,
@@ -2918,33 +3059,464 @@ fn check_command<a>(args: (&a u8[][])) -> u64 {
             view(o.target),
             1 + flag_bits(&o),
             view(o.iface),
-            o.verify
-        );
-    } else {
-        p := pkg::plan(0);
-        if p.name.len() == 0 {
-            return 1;
-        }
-        name := copy(view(p.name));
-        out := path_join(view("target"), view(name));
-        status = compile_mode(
-            &h,
-            view(p.entry),
-            &p.modules,
-            view(out),
-            view(o.target),
-            1 + flag_bits(&o),
-            view(o.iface),
-            o.verify
+            o.verify,
+            diag
         );
     }
+    p := pkg::plan(0);
+    if p.name.len() == 0 {
+        return 1;
+    }
+    name := copy(view(p.name));
+    out := path_join(view("target"), view(name));
+    return compile_mode(
+        &h,
+        view(p.entry),
+        &p.modules,
+        view(out),
+        view(o.target),
+        1 + flag_bits(&o),
+        view(o.iface),
+        o.verify,
+        diag
+    );
+}
+
+// ---- watch mode: `grail check --watch`, `grail build --watch` -------------------------------------
+// A warm process that re-runs the cycle when an input changes. The design is
+// docs/design/incremental-compilation.md, "Watch mode"; the shape it settles on is:
+//
+//   * the input set is the files the cycle reads - the source named on the command line, or, for a
+//     project, the entry and module list `grail.lock` resolves (through `pkg::plan`) plus the
+//     standard modules the sources reach through `use`, and every interface in `--interface DIR`.
+//     It is recomputed on every poll, so a file that appears or a new `use` is a change like any
+//     other;
+//   * change detection is a content hash (XXH64, two seeds), never a timestamp: a file rewritten
+//     with the same bytes is not a change, and a source restored from a backup with an old mtime is;
+//   * a burst of writes is collapsed by a quiet period: one cycle per burst, not per write;
+//   * a cycle runs in this process, prints its diagnostics and then exactly one summary line
+//     (`check ok 24 ms`, `error 3 diagnostics 31 ms`, `built target/app 210 ms`), and with `--json`
+//     prints one JSON object and nothing else;
+//   * a failed cycle does not end the process: the next change re-runs it;
+//   * no lock is held between cycles, so a concurrent `grail build` in the same directory runs while
+//     this process waits.
+const WATCH_POLL_MS: u64 = 100;
+const WATCH_QUIET_MS: u64 = 120;
+// One diagnostic, as the compiler's structured channel writes it.
+struct Diag {
+    file: u8[],
+    line: u64,
+    col: u64,
+    code: u8[],
+    message: u8[],
+    // The compiler's own rendering, verbatim: what a plain `grail check` would have printed.
+    rendered: u8[]
+}
+// The project's files as the package manager resolves them: the entry and every module the lock
+// names, the root's and its dependencies'. Planning reports the manifest's problems, so it runs once
+// per cycle rather than on every poll.
+fn planned_files() -> u8[][] {
+    mut files = u8[][];
+    p := pkg::plan(0);
+    if p.name.len() == 0 {
+        return files;
+    }
+    files.push(copy(view(p.entry)));
+    for i in p.modules.len() {
+        files.push(item(&p.modules, i));
+    }
+    return files;
+}
+// The 128-bit content stamp of one file: XXH64 twice, with different seeds. Two zero words for a
+// file that is not there, which is a state like any other - a source appearing or disappearing is a
+// change.
+fn watch_stamp<a>(path: &a [u8]) -> u64[] {
+    mut out = u64[];
+    if host::exists(view(path)) == 0 {
+        out.push(0);
+        out.push(0);
+        return out;
+    }
+    text := host::read_file(view(path));
+    out.push(xxhash::hash64(view(text), 0));
+    out.push(xxhash::hash64(view(text), 1099511628211));
+    return out;
+}
+fn watch_stamps<a>(files: (&a u8[][])) -> u64[][] {
+    mut out = u64[][];
+    for i in files.len() {
+        out.push(watch_stamp(view(item(files, i))));
+    }
+    return out;
+}
+fn watch_settled<a, b>(before: (&a u64[][]), after: (&b u64[][])) -> bool {
+    if before.len() != after.len() {
+        return false;
+    }
+    for i in before.len() {
+        was := before[i];
+        now := after[i];
+        if (was[0] != now[0]) | (was[1] != now[1]) {
+            return false;
+        }
+    }
+    return true;
+}
+// The files the next cycle reads, in the order it reads them. `used_std` reads every file it is
+// given, so only sources go there: the manifest, the lock and the interface directory are watched
+// for changes but not scanned for `use` lines - and a project that has no lock yet has no lock to
+// read.
+fn watch_inputs<a, b, c>(h: (&a Home), o: (&b Options), project: (&c u8[][])) -> u8[][] {
+    mut files = u8[][];
+    mut sources = u8[][];
+    if o.file.len() != 0 {
+        // The source a one-shot `grail check FILE` / `grail build FILE` compiles: the file named on
+        // the command line, and no other (a second FILE argument is not a module of the first - the
+        // driver compiles only the named entry, and watch mode watches what the cycle reads).
+        files.push(copy(view(o.file)));
+        sources.push(copy(view(o.file)));
+    } else {
+        // The plan is the set. The manifest, the lock and a listing of `src/` are only how a change
+        // to the plan itself - a new dependency, a new module - is noticed: the next cycle re-plans.
+        files.push(copy(view("grail.toml")));
+        files.push(copy(view("grail.lock")));
+        mut listed = u8[][];
+        collect(view("src"), &mut listed);
+        for i in listed.len() {
+            files.push(item(&listed, i));
+            sources.push(item(&listed, i));
+        }
+        for i in project.len() {
+            found := item(project, i);
+            files.push(copy(view(found)));
+            sources.push(found);
+        }
+    }
+    // The standard modules the sources reach: `used_std` reads their `use` lines, so the set follows
+    // the sources rather than a list of guesses.
+    reached := used_std(view(h.std), &sources);
+    for i in reached.len() {
+        files.push(item(&reached, i));
+    }
+    if o.iface.len() != 0 {
+        mut interfaces = u8[][];
+        collect(view(o.iface), &mut interfaces);
+        for i in interfaces.len() {
+            files.push(item(&interfaces, i));
+        }
+    }
+    return files;
+}
+// The image a build writes: `-o`, or target/<entry stem> for a named file, target/<project> for a
+// project. Read, not written, so the summary line names what the cycle produced.
+fn build_output<a>(o: (&a Options)) -> u8[] {
+    if o.output.len() != 0 {
+        return copy(view(o.output));
+    }
+    if o.file.len() != 0 {
+        return path_join(view("target"), view(basename(view(o.file))));
+    }
+    p := pkg::plan(0);
+    if p.name.len() == 0 {
+        return u8[];
+    }
+    name := copy(view(p.name));
+    return path_join(view("target"), view(name));
+}
+// One cycle: a fresh structured-diagnostics file, the check or build in this process, then the
+// report. `mode` is 1 for check, 2 for build.
+fn watch_cycle<a, b>(h: (&a Home), o: (&b mut Options), mode: u64, cycle: u64) -> u64 {
+    host::mkdir(view("target"));
+    // A listener the caller named is theirs: every cycle starts it, the file stays. Otherwise the
+    // cycle gets its own - named after the moment, so two watch processes in one directory never
+    // share it, and removed when the cycle ends.
+    mut diag = copy(view(o.diag));
+    mut own_listener = 0;
+    if diag.len() == 0 {
+        diag = path_join(view("target"), view(cat(view("watch-"), view(decimal(host::wall_ms())))));
+        own_listener = 1;
+    }
+    host::write_file(view(diag), view(""));
+    start := host::now_ms();
+    mut status = 0;
+    if mode == 1 {
+        status = check_pass(h, &o, view(diag));
+    } else {
+        status = build_pass(h, o, view(diag));
+    }
+    elapsed := host::now_ms() - start;
+    records := read_diagnostics(view(diag));
+    if own_listener != 0 {
+        host::remove(view(diag), 0);
+    }
+    produced := build_output(&o);
+    if o.json != 0 {
+        report_json(mode, cycle, status, elapsed, &records, view(produced));
+    } else {
+        report_text(mode, status, elapsed, &records, view(produced));
+    }
+    return status;
+}
+fn read_diagnostics<a>(path: &a [u8]) -> Diag[] {
+    mut out = Diag[];
+    if host::exists(view(path)) == 0 {
+        return out;
+    }
+    text := host::read_file(view(path));
+    rows := lines(view(text));
+    for i in rows.len() {
+        row := item(&rows, i);
+        if 0 < row.len() {
+            out.push(parse_diagnostic(view(row)));
+        }
+    }
+    return out;
+}
+fn parse_diagnostic<a>(row: &a [u8]) -> Diag {
+    return Diag {
+        file: json_string(view(row), view("file")),
+        line: json_uint(view(row), view("line")),
+        col: json_uint(view(row), view("col")),
+        code: json_string(view(row), view("code")),
+        message: json_string(view(row), view("message")),
+        rendered: json_string(view(row), view("rendered")),
+    };
+}
+// The byte after `"key":` in one record, or the record's length when the key is not there. The
+// records are this program's own (native.grl's `diag_record`), so the scan is the whole reader.
+fn json_after<a, b>(row: &a [u8], key: &b [u8]) -> u64 {
+    mut i = 0;
+    while i < row.len() {
+        if row[i] == 34 {
+            mut j = 0;
+            mut hit = true;
+            while j < key.len() {
+                at := i + 1 + j;
+                if at < row.len() {
+                    if row[at] != key[j] {
+                        hit = false;
+                    }
+                } else {
+                    hit = false;
+                }
+                j += 1;
+            }
+            q := i + 1 + key.len();
+            if hit {
+                if (q + 1 < row.len()) & (row[q] == 34) & (row[q + 1] == 58) {
+                    return q + 2;
+                }
+            }
+        }
+        i += 1;
+    }
+    return row.len();
+}
+fn json_string<a, b>(row: &a [u8], key: &b [u8]) -> u8[] {
+    mut out = u8[];
+    at := json_after(view(row), view(key));
+    if (at + 1 < row.len()) & (row[at] == 34) {
+        mut i = at + 1;
+        mut done = false;
+        while (i < row.len()) & !done {
+            ch := row[i];
+            if ch == 34 {
+                done = true;
+            } else {
+                if ch == 92 {
+                    if i + 1 < row.len() {
+                        esc := row[i + 1];
+                        i += 1;
+                        if esc == 110 {
+                            out.push(10);
+                        } else {
+                            if esc == 116 {
+                                out.push(9);
+                            } else {
+                                if esc == 114 {
+                                    out.push(13);
+                                } else {
+                                    if esc == 117 {
+                                        out.push(json_hex(view(row), i + 1));
+                                        i += 4;
+                                    } else {
+                                        out.push(esc);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    out.push(ch);
+                }
+            }
+            i += 1;
+        }
+    }
+    return out;
+}
+// The single byte of a `\u00XX` escape: control characters are the only thing written that way.
+fn json_hex<a>(row: &a [u8], at: u64) -> u8 {
+    mut out = u64(0);
+    mut i = 0;
+    while (i < 4) & (at + i < row.len()) {
+        ch := u64(row[at + i]);
+        mut digit = ch - 48;
+        if 9 < digit {
+            digit = ch - 87;
+        }
+        out = out * 16 + digit;
+        i += 1;
+    }
+    return u8(out);
+}
+fn json_uint<a, b>(row: &a [u8], key: &b [u8]) -> u64 {
+    at := json_after(view(row), view(key));
+    mut out: u64 = 0;
+    mut i = at;
+    while (i < row.len()) & (row[i] != 44) & (row[i] != 125) {
+        ch := u64(row[i]);
+        if (ch < 48) || (57 < ch) {
+            return out;
+        }
+        out = out * 10 + (ch - 48);
+        i += 1;
+    }
+    return out;
+}
+// The cycle's report on a terminal: the diagnostics in the compiler's own rendering, then one
+// summary line.
+fn report_text<a, b>(mode: u64, status: u64, elapsed: u64, diags: (&a Diag[]), out: (&b [u8])) -> unit {
+    for i in diags.len() {
+        d := diags[i];
+        host::print(view(d.rendered));
+    }
     if status == 0 {
-        say(view("ok"));
+        if mode == 1 {
+            host::print(view("check ok "));
+        } else {
+            host::print(view("built "));
+            host::print(view(out));
+            host::print(view(" "));
+        }
+    } else {
+        host::print(view("error "));
+        if 0 < diags.len() {
+            host::print_num(diags.len());
+            if diags.len() == 1 {
+                host::print(view(" diagnostic "));
+            } else {
+                host::print(view(" diagnostics "));
+            }
+        }
+    }
+    host::print_num(elapsed);
+    say(view(" ms"));
+    return ();
+}
+// The cycle's report as one JSON object on one line: `cycle`, `status`, `ms`, `output` for a build,
+// and `diagnostics` with the fields an editor needs. Nothing else is printed for a cycle, so a
+// reader can take every line as an object.
+fn report_json<a, b>(mode: u64, cycle: u64, status: u64, elapsed: u64, diags: (&a Diag[]), out: (&b [u8])) -> unit {
+    mut line = u8[];
+    push_bytes(&mut line, view("{\"cycle\":"));
+    push_bytes(&mut line, view(decimal(cycle)));
+    if status == 0 {
+        push_bytes(&mut line, view(",\"status\":\"ok\""));
+    } else {
+        push_bytes(&mut line, view(",\"status\":\"error\""));
+    }
+    push_bytes(&mut line, view(",\"ms\":"));
+    push_bytes(&mut line, view(decimal(elapsed)));
+    if mode == 2 {
+        push_bytes(&mut line, view(",\"output\":\""));
+        json_text(&mut line, view(out));
+        push_bytes(&mut line, view("\""));
+    }
+    push_bytes(&mut line, view(",\"diagnostics\":["));
+    for i in diags.len() {
+        d := diags[i];
+        if i != 0 {
+            line.push(44);
+        }
+        push_bytes(&mut line, view("{\"file\":\""));
+        json_text(&mut line, view(d.file));
+        push_bytes(&mut line, view("\",\"line\":"));
+        push_bytes(&mut line, view(decimal(d.line)));
+        push_bytes(&mut line, view(",\"col\":"));
+        push_bytes(&mut line, view(decimal(d.col)));
+        push_bytes(&mut line, view(",\"code\":\""));
+        json_text(&mut line, view(d.code));
+        push_bytes(&mut line, view("\",\"message\":\""));
+        json_text(&mut line, view(d.message));
+        push_bytes(&mut line, view("\"}"));
+    }
+    push_bytes(&mut line, view("]}"));
+    say(view(line));
+    return ();
+}
+// The loop: one cycle now, then one per settled change. The process ends when a signal ends it, so
+// the return below is the shape of the function, not a path it takes.
+fn watch<a, b>(h: (&a Home), o: (&b mut Options), mode: u64) -> u64 {
+    if o.cache != 0 {
+        // A cache hit is a cycle that does not run the compiler, and a watch cycle always does: the
+        // point of watching is that every change is checked, and its report is one line.
+        say(view("grail: --watch re-runs the compiler every cycle, so --cache is not used with it"));
+        return 1;
+    }
+    mut poll = WATCH_POLL_MS;
+    if o.interval != 0 {
+        poll = o.interval;
+    }
+    mut quiet = WATCH_QUIET_MS;
+    if o.debounce != 0 {
+        quiet = o.debounce;
+    }
+    // The project's plan, refreshed after every cycle: it is what `grail build` and `grail check`
+    // resolve from the lock, so the watcher polls the same files the cycle compiles. In file mode
+    // there is no plan to resolve (and asking for one would report that there is no manifest).
+    mut project = u8[][];
+    if o.file.len() == 0 {
+        project = planned_files();
+    }
+    // The first cycle runs before the first poll: a watch that said nothing until a file changed
+    // would look broken on the program that is already correct.
+    mut status = watch_cycle(h, o, mode, 1);
+    mut cycle = 1;
+    if o.file.len() == 0 {
+        project = planned_files();
+    }
+    mut current = watch_stamps(&watch_inputs(h, &o, &project));
+    // 0 while the files are settled, else the moment the last change was seen.
+    mut changed_at = 0;
+    while true {
+        host::sleep_ms(poll);
+        next := watch_stamps(&watch_inputs(h, &o, &project));
+        now := host::now_ms();
+        if watch_settled(&current, &next) {
+            if changed_at != 0 {
+                if quiet <= now - changed_at {
+                    status = watch_cycle(h, o, mode, cycle + 1);
+                    cycle += 1;
+                    changed_at = 0;
+                    if o.file.len() == 0 {
+                        project = planned_files();
+                    }
+                }
+            }
+        } else {
+            changed_at = now;
+        }
+        current = next;
     }
     return status;
 }
 fn run_command<a>(args: (&a u8[][])) -> u64 {
     mut o = options(&args);
+    if o.watch != 0 {
+        say(view("grail run: watch mode is `grail build --watch` and `grail check --watch`"));
+        return 1;
+    }
     host_target := target_name(host::target());
     if !eq(view(o.target), view(host_target)) {
         say(
@@ -4164,6 +4736,9 @@ fn help() {
         )
     );
     say(view("  grail check [FILE.grl]            type-check without building"));
+    say(view("  grail check --watch [--json] [--interval MS] [--debounce MS]   re-check on every change"));
+    say(view("  grail build --watch [--json] [--interval MS] [--debounce MS]   re-build on every change"));
+    say(view("  grail check --diagnostics-json FILE   diagnostics as JSON records, nothing printed"));
     say(view("  grail check --interface DIR       write one checked interface per module"));
     say(
         view(

@@ -47,6 +47,35 @@
   what the walk reads. Corpus: `tmem-contained-then-joined` (the book example's shape) and
   `tmem-contained-then-joined-thrice` (the same scope three times, so the overlapped block comes
   back from the free list); both abort 5 times out of 5 before this fix.
+- Added: `grail check --watch` and `grail build --watch` - one driver process that re-runs the cycle
+  when an input changes. The input set is the source named on the command line, or, for a project,
+  the plan the package manager resolves from `grail.toml` and the lock - the entry plus every module
+  `grail.lock` names, the root's and its dependencies' - with the manifest, the lock and a listing of
+  `src/` polled so a new dependency, module or re-lock re-plans the next cycle. The standard modules
+  the sources reach through `use` and every file in an `--interface DIR` are in the set too, and it
+  is recomputed on every poll, so a new file or a new `use` is a change like any other. Change detection is a 128-bit content stamp (XXH64 with two
+  seeds, `lib/xxhash.grl`), never a timestamp: a file written back unchanged is not a change, and a
+  source restored with an old mtime still is. A burst of writes collapses into one cycle through a
+  quiet period (120 ms, `--debounce MS`) over a 100 ms poll (`--interval MS`); the first cycle runs
+  immediately, an error keeps the process alive, and each cycle prints its diagnostics followed by
+  exactly one summary line - `check ok 24 ms`, `error 3 diagnostics 31 ms`, `built target/app 210
+  ms`. No lock is held between cycles, so a concurrent `grail build` in the same directory runs
+  while the process waits. `--json` makes a cycle one JSON object per line (`cycle`, `status`, `ms`,
+  `output` for a build, and a `diagnostics` array of `{file, line, col, code, message}`), which is
+  the seam an editor or the language server reads (the LSP now does, instead of parsing the caret
+  block); the fields come from a new structured-diagnostics
+  channel - `--diagnostics-json FILE`, written at the one place a diagnostic is built, carrying
+  `file`, `line`, `col`, `col_end` (the width of the token it points at), `code`, `message` and the
+  caret form as `rendered`, and exposed to any driver as `grail check --diagnostics-json FILE`, which
+  prints nothing and reports only through the exit status - so nothing parses printed text. `--watch` is refused on
+  `run`/`test` and `--cache` is refused with it, since a cache hit is a cycle that does not run the
+  compiler. Limit, stated with its reason: the runtime installs no SIGINT/SIGTERM handler and a new
+  `host::` builtin cannot land from this branch (the published bootstrap compiler would not know
+  it), so a watch process ends on the signal with the shell status 130/143 rather than the last
+  cycle's; the last cycle's status is in the summary line and in `--json`. Design and the
+  rejected alternatives: `docs/design/incremental-compilation.md`, watch mode. Book: *Building
+  modules: the work a build can skip* in *Modules*. Tests: a watch section in
+  `tools/test-cli.mjs`, since the behaviour is a process loop.
 - Fixed: the debug tables named local labels by number alone (`.L<n>`), but a label is minted in
   its unit's namespace (`.L<unit>_<n>`, the separate-compilation change), so a `--debug` build whose
   program spans more than one unit asked the assembler to subtract a label no unit had emitted

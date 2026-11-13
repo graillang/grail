@@ -138,26 +138,163 @@ the same key reach the same unit.
 
 ## Watch mode
 
-`grail build --watch` and `grail check --watch` keep one process warm and rebuild on change:
+`grail check --watch` and `grail build --watch` keep one driver process alive and re-run the cycle
+when an input changes. The cycle is exactly what one-shot `grail check` or `grail build` does - the
+same code path, in the watching process - so watch mode adds no second definition of "check" or
+"build" that could drift from the first. This section describes what landed; the plan it replaced
+(polling mtimes, a `watch: rebuilding (3 files)` line per cycle, `Ctrl-C` reporting the last status)
+differed on every point, and where it did the reason is stated.
 
-- it watches the project's sources, its manifest and the interfaces directory, polling mtimes with a
-  short interval (no platform-specific event layer), debounced so a burst of writes is one build;
-- each cycle prints one line — `watch: rebuilding (3 files)` then the build's own output, or
-  `watch: up to date` — and nothing when nothing changed, so the terminal does not scroll;
-- the first error is reported with its diagnostics and the *exit code of the build that failed* is
-  what `--watch` leaves behind if it is used non-interactively; in the loop it reports and keeps
-  watching, because that is the point of a watcher;
-- it does not hold the compiler's file lock across cycles: the lock is taken inside each build and
-  released before sleeping, so a second `grail build` in another terminal is never blocked;
-- `Ctrl-C` exits with the last cycle's status.
+### The input set
 
-The LSP (`tools/lsp/main.grl`) already re-drives `grail check` per buffer edit. It is *not* rewired
-onto the watch process in this stage, and the reason is the shape of the interface rather than the
-size of the change: the LSP needs a request/response channel with a document version, while watch
-mode is a fire-and-forget loop over the file system. The seam is `--watch --json` emitting one JSON
-object per cycle (`{"ok":bool,"diagnostics":[…]}`), which the LSP can read from the same fd it
-already reads `grail check`'s stderr from; that is recorded here as the next step, not claimed as
-done.
+The files a cycle reads:
+
+- a file invocation (`grail check --watch main.grl`): the source named on the command line, and no
+  other. A second `FILE` argument is not a module of the first - the driver compiles only the named
+  entry - so watching a file the cycle never reads would be a cycle for nothing;
+- a project: the plan the package manager resolves from `grail.toml` **and the lock** - the entry
+  file plus every module file `grail.lock` names, the root's and its dependencies'. The lock is the
+  authority for that list, so the watcher polls the plan's files rather than a hand-built one. Since
+  re-planning prints the manifest's problems, the plan runs once per cycle, not once per poll; the
+  manifest, the lock and a listing of `src/` are polled as well, and a change to any of them makes
+  the next cycle re-plan - which is how a new dependency, a new module or a re-locked version enters
+  the set;
+- plus the standard modules the sources reach through `use` (found by reading the `use` lines, so a
+  new import brings its module into the set on the next poll), and every file in an `--interface
+  DIR`.
+
+### Change detection: content, not timestamps
+
+A file's identity is a 128-bit content stamp: XXH64 of its bytes with two different seeds
+(`lib/xxhash.grl`, the standard library's content hash). A missing file stamps as two zero words,
+which is a state like any other.
+
+Content, not mtime, on purpose:
+
+- an editor that writes a file back unchanged, or a formatter that rewrites it with the same bytes,
+  is not a change, so it does not spend a cycle;
+- a source restored from a backup or copied with `cp -p` *is* a change, and a timestamp comparison
+  would miss it;
+- there is no `stat` in the `host::` surface, so a timestamp scheme would have to shell out.
+
+The cost is that each poll reads every input file and hashes it: a few megabytes for a program of a
+few modules, once per `--interval` (default 100 ms), paid while the process would otherwise be idle.
+
+### Debounce
+
+Writing a file often means several writes, and a burst of saves across a few files is one intent.
+After a change is seen the loop keeps polling; a cycle runs only when the stamps have been unchanged
+for the quiet period - 120 ms by default, `--debounce MS` to change it. One burst is one cycle. A
+change that lands *while* a cycle runs is not lost: the poll after the cycle compares against the
+pre-cycle stamps, and runs one more cycle once it settles.
+
+### One cycle, one line
+
+The first cycle runs immediately, before the first poll: a watch that said nothing until a file
+changed would look broken on the program that is already correct.
+
+Each cycle prints its diagnostics - the compiler's own rendering, caret and all - followed by exactly
+one summary line:
+
+```
+check ok 24 ms
+error 3 diagnostics 31 ms
+built target/app 210 ms
+```
+
+`error` carries the number of distinct diagnostics (`diagnostic` when there is one) and the cycle's
+elapsed time; a cycle that failed for a reason that is not a diagnostic (no assembler, no linker)
+reports the status without a count. Nothing is printed between cycles: an idle watch process is
+silent, so every line on its output is a cycle. (The plan's `watch: rebuilding (3 files)` and
+`watch: up to date` lines did not survive: the summary line already says which cycle ran and what it
+did, and two lines per cycle is the scrolling the one-line rule exists to avoid.)
+
+### `--json`, and where the diagnostics come from
+
+`--json` makes a cycle one JSON object on one line, built from the diagnostic structures rather than
+from printed text:
+
+```
+{"cycle":2,"status":"error","ms":31,"diagnostics":[{"file":"src/main.grl","line":3,"col":5,"code":"E0005","message":"assignment requires mut"}]}
+{"cycle":3,"status":"ok","ms":28,"diagnostics":[]}
+```
+
+A build cycle adds `"output":"target/app"`. `status` is `ok` or `error`, `ms` is a number, and
+`diagnostics` is always present (empty when the cycle is clean).
+
+The channel behind it is the compiler's `--diagnostics-json FILE`. At the one place a diagnostic is
+built (`fail` in `compiler/native.grl`), the compiler appends one JSON object per diagnostic to
+`FILE` instead of printing the caret form, and prints nothing. The object carries `file`, `line`,
+`col`, `col_end` (the end of the token the diagnostic points at - the caret run's width, taken from
+the token, not from the rendering), `code` (the code `grail explain` knows, or empty), `message`, and
+`rendered`, the caret form the compiler would have printed. The re-runs that report one compile's
+next error carry the flag, so one cycle's file holds every diagnostic the cycle had. The driver
+truncates the file at the start of a cycle, reads the records back when the cycle ends, deletes its
+own file, and both report forms are built from those fields. No part of the driver parses printed
+text. `grail check --diagnostics-json FILE` exposes the same channel to any other driver, and prints
+nothing of its own then: the file is the report and the exit status is the verdict.
+
+### Locking
+
+No lock is held between cycles, and none across a cycle boundary. Nothing in the driver takes a lock
+today - the build cache stages every write and renames it into place, so two builds in one directory
+produce either the old entry or the new one, never a torn one - so a `grail build`, a `grail check`
+or another watching process in the same directory runs while this one waits. That is a case in
+`tools/test-cli.mjs`.
+
+The structured-diagnostics file is named after the moment the cycle started
+(`target/watch-<wall-ms>`), so two watching processes never read each other's records, and it is
+removed when the cycle ends. A listener the caller named (`--diagnostics-json FILE`) is theirs: each
+cycle starts it and leaves it in place.
+
+### Exit status, and the signal limit
+
+A cycle's status is the command's: 0 when it passed, 1 when it did not, and a failed cycle keeps the
+process alive - the next change re-runs it.
+
+A watch process ends when a signal ends it. **It has no SIGINT/SIGTERM handler, so the default
+disposition applies: the process dies on the signal and the status the shell sees is 130 (SIGINT) or
+143 (SIGTERM), not the last cycle's.** This is the one requirement of the watch design that is not
+met, and the reason is a boundary rather than an omission: catching the signal needs a runtime seam -
+a handler that sets a state word, plus a `host::` builtin to read it - in `compiler/runtime.grl` and
+in all three platform modules. A new builtin cannot land from this branch, because the published
+bootstrap compiler in `compiler/bootstrap/` would not know it and the compiler could not be built
+from its own sources again until a reseed. Until then the last cycle's status is in the summary line
+and in `--json`, and the status on termination is the signal's. (The plan said `Ctrl-C` exits with
+the last cycle's status; that part was not implementable as described.)
+
+### The LSP seam
+
+The language server (`tools/lsp/main.grl`) checks the open buffer by running `grail check` on a
+scratch file. It used to map the printed `error[CODE]: message` block, its `-->` line and its caret
+run onto the buffer; it now passes `--diagnostics-json`, reads the records, and takes `line`, `col`,
+`col_end` and `message` from them, so no diagnostic position comes from parsing text. The plan
+deferred this ("recorded here as the next step, not claimed as done"); it is done, and the JSON
+object shape is the one documented above, per cycle, plus the per-diagnostic records the server
+reads.
+
+### Flags
+
+| flag | meaning |
+| --- | --- |
+| `--watch` | stay alive and re-run the cycle on change (`build`, `check` only) |
+| `--interval MS` | poll period, default 100 |
+| `--debounce MS` | quiet period that collapses a burst, default 120 |
+| `--json` | one JSON object per line per cycle, and nothing else |
+| `--diagnostics-json FILE` | diagnostics as records in FILE, nothing printed |
+
+`--watch` is refused by name on `run` and `test`, which have no cycle to repeat, and `--cache` is
+refused with `--watch`: a cache hit is a cycle that does not run the compiler, and the point of
+watching is that every change is checked.
+
+### What is not here
+
+- Watch does not make a cycle cheaper: each cycle re-runs the compiler the way a one-shot command
+  does. Shortening the cycle is the build cache's axis, not watch mode's.
+- mtime is never consulted, so every poll reads every input file. A cheap `stat` in the `host::`
+  surface would let a poll skip files whose size and timestamp are unchanged; the hash would still
+  decide.
+- `--watch` is on `build` and `check` only.
 
 ## Measured: what a per-function unit could skip, and what it cannot
 
