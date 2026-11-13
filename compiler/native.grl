@@ -4572,13 +4572,13 @@ fn require_mutable_binding<a>(c: (&a mut C), slot: u64, storage: u64) -> unit {
                 if mode != 0 {
                     return ();
                 }
-                fail(&mut c, view("mutation through readonly reference"));
+                fail_readonly(&mut c, place, view("reference"));
             }
             if ((k == 5) || (k == 27)) && (storage == 0) {
                 if mode != 0 {
                     return ();
                 }
-                fail(&mut c, view("mutation through readonly view"));
+                fail_readonly(&mut c, place, view("view"));
             }
             if authority != 0 {
                 a := resource(&mut c, authority - 1);
@@ -4589,7 +4589,7 @@ fn require_mutable_binding<a>(c: (&a mut C), slot: u64, storage: u64) -> unit {
                         if ty_mode(&mut c, at) != 0 {
                             return ();
                         }
-                        fail(&mut c, view("mutation through readonly frame"));
+                        fail_readonly(&mut c, place, view("frame"));
                     }
                 }
             }
@@ -4660,7 +4660,7 @@ fn require_write<a>(c: (&a mut C), slot: u64) -> unit {
     }
     if (k == 5) || (k == 7) || (k == 27) {
         if ty_mode(&mut c, ty) == 0 {
-            fail(&mut c, view("mutation through readonly reference"));
+            fail_readonly(&mut c, place, view("reference"));
         }
         mut allowed = 0;
         for i in c.bonds.len() {
@@ -4686,7 +4686,7 @@ fn require_write<a>(c: (&a mut C), slot: u64) -> unit {
             info := &c.resources[r - 1];
             ty := info.ty;
             if ty_mode(&mut c, ty) == 0 {
-                fail(&mut c, view("mutation through readonly frame"));
+                fail_readonly(&mut c, place, view("frame"));
             }
             loan := authority_loan(&mut c, authority, place);
             if loan == 0 {
@@ -5126,6 +5126,108 @@ fn place_of<a>(c: (&a mut C), slot: u64) -> u64 {
     mut r = &c.resources[r - 1];
     return r.place;
 }
+// E0006: a read of storage that holds no value. "use of moved, borrowed or partially initialized
+// value" named no value and no state; the clause after the colon says which binding and which of the
+// three it is, and the help line says what to do about it.
+fn fail_unusable<a>(c: (&a mut C), place: u64) -> unit {
+    name := place_name(&mut c, place);
+    state := ownership::status(&c.check, place);
+    mut msg = copy_bytes(view("use of moved, borrowed or partially initialized value"));
+    if name.len() != 0 {
+        push_bytes(&mut msg, view(": `"));
+        push_bytes(&mut msg, view(name));
+        if state == 0 {
+            push_bytes(&mut msg, view("` is read before it was assigned"));
+            mut help = copy_bytes(view("assign it first (`"));
+            push_bytes(&mut help, view(name));
+            push_bytes(&mut help, view(" = ...`), or give the declaration a value (`mut "));
+            push_bytes(&mut help, view(name));
+            push_bytes(&mut help, view(" = ...`)"));
+            diag_help(&mut c, view(help));
+        } else if state == 3 {
+            push_bytes(&mut msg, view("` may have been moved on another path"));
+            mut help = copy_bytes(view("move it on every path or on none, or copy it (`"));
+            push_bytes(&mut help, view(name));
+            push_bytes(&mut help, view(".copy()`)"));
+            diag_help(&mut c, view(help));
+        } else if state == 1 {
+            push_bytes(&mut msg, view("` holds no value yet"));
+            mut help = copy_bytes(view("write it (`"));
+            push_bytes(&mut help, view(name));
+            push_bytes(&mut help, view(" = ...`) before reading it"));
+            diag_help(&mut c, view(help));
+        } else {
+            push_bytes(&mut msg, view("` was moved, so it cannot be read here"));
+            mut help = copy_bytes(view("copy it (`"));
+            push_bytes(&mut help, view(name));
+            push_bytes(&mut help, view(".copy()`), borrow it (`view("));
+            push_bytes(&mut help, view(name));
+            push_bytes(&mut help, view(")`), or keep the value the move produced"));
+            diag_help(&mut c, view(help));
+        }
+    }
+    fail(&mut c, view(msg));
+}
+// E0009: a write through a shared borrow. "mutation through readonly frame" named neither the
+// binding nor the way out; this names the binding and says how to get a writable one.
+fn fail_readonly<a, b>(c: (&a mut C), place: u64, kind: &b [u8]) -> unit {
+    mut name = place_name(&mut c, place);
+    // `place_name` answers `*v` for storage reached through a reference; the binding the reader
+    // wrote is `v`, and that is the one to change.
+    if name.len() != 0 {
+        if name[0] == 42 {
+            mut bare = u8[];
+            for i in name.len() {
+                if i != 0 {
+                    bare.push(name[i]);
+                }
+            }
+            name = bare;
+        }
+    }
+    mut msg = copy_bytes(view("mutation through readonly "));
+    push_bytes(&mut msg, view(kind));
+    if name.len() != 0 {
+        push_bytes(&mut msg, view(": `"));
+        push_bytes(&mut msg, view(name));
+        push_bytes(&mut msg, view("` is a shared borrow, so it cannot be written through"));
+        mut hint = copy_bytes(view("take an exclusive borrow of it if the change is intended: `"));
+        push_bytes(&mut hint, view(name));
+        push_bytes(&mut hint, view("` as `&mut T`, passed as `&mut value` at the call"));
+        if same(view(kind), view("view")) {
+            hint = copy_bytes(view("make the view exclusive: `view_mut("));
+            push_bytes(&mut hint, view(name));
+            push_bytes(&mut hint, view(")`"));
+        }
+        diag_help(&mut c, view(hint));
+    }
+    fail(&mut c, view(msg));
+}
+// The ", found `X`" tail of a parse error: the token the parser actually stopped on, or the end of
+// the file. A parse error used to say only what it wanted ("expected ;"), never what it got.
+fn found_msg<a>(c: (&a mut C)) -> u8[] {
+    k := c.pos;
+    mut out = u8[];
+    if kind_at(&mut c, k) != 0 {
+        push_bytes(&mut out, view(", found `"));
+        push_bytes(&mut out, view(tok_text(&mut c, k)));
+        out.push(96);
+    } else {
+        push_bytes(&mut out, view(", found the end of the file"));
+    }
+    return out;
+}
+// "`f` takes 2, this call passes 1": the callee and both counts. "function argument count" left the
+// reader to compare the signature with the call by hand.
+fn call_arity_msg<a, b>(c: (&a mut C), name: &b [u8], want: u64, got: u64) -> u8[] {
+    mut msg = copy_bytes(view("wrong number of arguments: `"));
+    push_bytes(&mut msg, view(name));
+    push_bytes(&mut msg, view("` takes "));
+    push_bytes(&mut msg, view(decimal_bytes(want)));
+    push_bytes(&mut msg, view(", this call passes "));
+    push_bytes(&mut msg, view(decimal_bytes(got)));
+    return msg;
+}
 fn observe<a>(c: (&a mut C), slot: u64) -> unit {
     if c.raw != 0 {
         return ();
@@ -5150,7 +5252,7 @@ fn observe<a>(c: (&a mut C), slot: u64) -> unit {
     } else {
         if ownership::read(&c.check, place) != 0 {
             pointer_conflict(&mut c, place, view("use"), 1);
-            fail(&mut c, view("use of moved, borrowed or partially initialized value"));
+            fail_unusable(&mut c, place);
         }
     }
     k := ty_kind(&mut c, ty);
@@ -6175,8 +6277,10 @@ fn eat<a, b>(c: (&a mut C), s: &b [u8]) -> bool {
 fn expect<a, b>(c: (&a mut C), s: &b [u8]) -> unit {
     want := s.copy();
     if !eat(&mut c, s) {
-        mut msg = "expected ";
-        msg.append(view(want));
+        mut msg = copy_bytes(view("expected `"));
+        push_bytes(&mut msg, view(want));
+        msg.push(96);
+        push_bytes(&mut msg, view(found_msg(&mut c)));
         fail(&mut c, view(msg));
     }
     return ();
@@ -8025,7 +8129,9 @@ fn pv_bce<a>(c: (&a mut C)) -> unit {
 }
 fn ident<a>(c: (&a mut C)) -> u8[] {
     if kind(&mut c) != 1 {
-        fail(&mut c, view("expected identifier"));
+        mut msg = copy_bytes(view("expected a name here"));
+        push_bytes(&mut msg, view(found_msg(&mut c)));
+        fail(&mut c, view(msg));
     }
     t := tok_text(&mut c, c.pos);
     if same(view(t), view("true")) || same(view(t), view("false")) {
@@ -8037,6 +8143,7 @@ fn ident<a>(c: (&a mut C)) -> u8[] {
 // Skips a balanced {...} group starting at the current '{'.
 fn skip_braces<a>(c: (&a mut C)) -> unit {
     mut depth = 0;
+    opened := c.pos;
     while true {
         k := kind(&mut c);
         if k == 123 {
@@ -8046,7 +8153,8 @@ fn skip_braces<a>(c: (&a mut C)) -> unit {
             depth = depth - 1;
         }
         if k == 0 {
-            fail(&mut c, view("unclosed {"));
+            diag_label(&mut c, opened, view("this `{` is never closed"));
+            fail(&mut c, view("unclosed `{`: the block that starts here runs to the end of the file"));
         }
         advance(&mut c);
         if depth == 0 {
@@ -10546,8 +10654,17 @@ fn require_visible<a, b, d>(c: (&a mut C), home: &b [u8], name: &d [u8]) -> unit
     fail(&mut c, view(text));
     return ();
 }
+// "`f` is declared twice": "duplicate function" named neither the name nor what a reader should do
+// about the second one.
+fn duplicate_msg<a, b>(c: (&a mut C), name: &b [u8]) -> u8[] {
+    mut msg = copy_bytes(view("`"));
+    push_bytes(&mut msg, view(name));
+    push_bytes(&mut msg, view("` is declared twice in this module: rename one, or remove it"));
+    return msg;
+}
 // Field index within decl, failing when absent.
 fn find_field<a, b>(c: (&a mut C), decl: u64, n: &b [u8]) -> u64 {
+    home := c.decls[decl].name.copy();
     d := &c.decls[decl];
     first := d.first;
     count := d.count;
@@ -10557,7 +10674,17 @@ fn find_field<a, b>(c: (&a mut C), decl: u64, n: &b [u8]) -> u64 {
             return i;
         }
     }
-    fail(&mut c, view("unknown field or variant"));
+    enum := c.decls[decl].is_enum;
+    mut msg = copy_bytes(view("`"));
+    push_bytes(&mut msg, view(home));
+    if enum != 0 {
+        push_bytes(&mut msg, view("` has no variant `"));
+    } else {
+        push_bytes(&mut msg, view("` has no field `"));
+    }
+    push_bytes(&mut msg, view(n));
+    push_bytes(&mut msg, view("`"));
+    fail(&mut c, view(msg));
     return 0;
 }
 fn field_ty<a>(c: (&a mut C), decl: u64, index: u64) -> u64 {
@@ -11170,7 +11297,12 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
         }
         d := find_decl(&mut c, view(first), view(n));
         if d == 0 {
-            fail(&mut c, view("unknown type"));
+            mut msg = copy_bytes(view("unknown type `"));
+            push_bytes(&mut msg, view(first));
+            push_bytes(&mut msg, view("::"));
+            push_bytes(&mut msg, view(n));
+            push_bytes(&mut msg, view("`"));
+            fail(&mut c, view(msg));
         }
         return nominal_type(&mut c, d - 1);
     }
@@ -11356,7 +11488,10 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
     }
     d := find_decl(&mut c, view(m), view(first));
     if d == 0 {
-        fail(&mut c, view("unknown type"));
+        mut msg = copy_bytes(view("unknown type `"));
+        push_bytes(&mut msg, view(first));
+        push_bytes(&mut msg, view("`"));
+        fail(&mut c, view(msg));
     }
     return nominal_type(&mut c, d - 1);
 }
@@ -13020,7 +13155,7 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     expect(&mut c, view(";"));
     m := module_copy(&mut c);
     if find_func(&mut c, view(m), view(name)) != 0 {
-        fail(&mut c, view("duplicate function"));
+        fail(&mut c, view(duplicate_msg(&mut c, view(name))));
     }
     if 0 < input.len() {
         if (c.target == 3) || (c.target == 4) {
@@ -13276,7 +13411,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     exchange(&mut c.result, ret);
     if pass == 2 {
         if find_func(&mut c, view(m), view(name)) != 0 {
-            fail(&mut c, view("duplicate function"));
+            fail(&mut c, view(duplicate_msg(&mut c, view(name))));
         }
         if export != 0 {
             // The body is Grail, but C will call it: every parameter and the result
@@ -15691,7 +15826,7 @@ fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
             fail(&mut c, view("integer constant needs an integer type"));
         }
         if literal_fits(&mut c, ty, value, negative) == 0 {
-            fail(&mut c, view("integer literal out of range for its type"));
+            fail(&mut c, view(literal_range_msg_v(&mut c, ty, value, negative)));
         }
         value = wrapping_sub(0, value);
     } else if (k != 5) & (k != 3) & (negative == 0) {
@@ -19747,7 +19882,12 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
             push_bytes(&mut help, view("`"));
             diag_help(&mut c, view(help));
         }
-        fail(&mut c, view("unknown function"));
+        mut msg = copy_bytes(view("unknown function `"));
+        push_bytes(&mut msg, view(name));
+        push_bytes(&mut msg, view("` in `"));
+        push_bytes(&mut msg, view(m));
+        push_bytes(&mut msg, view("`"));
+        fail(&mut c, view(msg));
     }
     // An `unsafe fn` is called from inside an `unsafe` block, like the foreign calls it stands for.
     if c.funcs[f - 1].unsafe_fn != 0 {
@@ -19927,7 +20067,7 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
             index := argi;
             variadic := c.funcs[f - 1].ext == 2;
             if count < index + 1 && !variadic {
-                fail(&mut c, view("function argument count"));
+                fail(&mut c, view(call_arity_msg(&mut c, view(name), count, index + 1)));
             }
             if (count < index + 1) & variadic {
                 // A variadic argument: C default promotions; integers widen to 64 bits, floats to
@@ -20100,10 +20240,10 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
         sources = s2;
     }
     if (args.len() != count) && (!(c.funcs[f - 1].ext == 2)) {
-        fail(&mut c, view("function argument count"));
+        fail(&mut c, view(call_arity_msg(&mut c, view(name), count, args.len())));
     }
     if (args.len() < count) & (c.funcs[f - 1].ext == 2) {
-        fail(&mut c, view("function argument count"));
+        fail(&mut c, view(call_arity_msg(&mut c, view(name), count, args.len())));
     }
     for i in map.len() {
         if map[i] == NO_TYPE {
@@ -22629,6 +22769,41 @@ fn place_name<a>(c: (&a mut C), place: u64) -> u8[] {
     }
     return u8[];
 }
+// The loop backedge check (`ownership::backedge`) refuses a body that consumes what the loop
+// entered with: the second iteration would use a moved value. It names the value it refuses, offers
+// the three ways out of it, and puts the caret on the loop's closing brace - the edge that repeats.
+// `what` describes the edge ("loop backedge consumes entry storage", "continue consumes ...").
+fn fail_backedge<a, b>(c: (&a mut C), what: &b [u8]) -> unit {
+    entry := ownership::snapshot(&c.loopcheck);
+    place := ownership::consumed_entry(&c.check, &entry);
+    name := place_name(&mut c, place);
+    mut msg = copy_bytes(view(what));
+    mut help = u8[];
+    if name.len() == 0 {
+        push_bytes(&mut msg, view(": a value the loop enters with is moved in the body, so a second iteration would use a moved value"));
+        help = copy_bytes(view("copy it (`x.copy()`), borrow it (`view(x)`), or move it before the loop"));
+    } else {
+        push_bytes(&mut msg, view(": `"));
+        push_bytes(&mut msg, view(name));
+        push_bytes(&mut msg, view("` is moved out of it, so a second iteration would use a moved value"));
+        help = copy_bytes(view("copy it (`"));
+        push_bytes(&mut help, view(name));
+        push_bytes(&mut help, view(".copy()`), borrow it (`view("));
+        push_bytes(&mut help, view(name));
+        push_bytes(&mut help, view(")`), or move it before the loop"));
+    }
+    diag_help(&mut c, view(help));
+    // The check runs once the body has been parsed, so the position is one token past the loop's
+    // last token. The statement that repeats is the loop, so the caret belongs on its `}`.
+    mut at = c.pos;
+    if 0 < at {
+        if kind_at(&mut c, at - 1) == 125 {
+            at = at - 1;
+        }
+    }
+    exchange(&mut c.pos, at);
+    fail(&mut c, view(msg));
+}
 // The line of the token at `at`, for "made by cptr at line N".
 fn token_line<a>(c: (&a mut C), at: u64) -> u64 {
     t := &c.toks[at];
@@ -24571,9 +24746,68 @@ fn adopt_literal<a>(c: (&a mut C), start: u64, end: u64, ty: u64) -> bool {
         return false;
     }
     if literal_fits(&mut c, ty, c.lit_value, c.lit_negative) == 0 {
-        fail(&mut c, view("integer literal out of range for its type"));
+        // The caret belongs under the literal, not at whatever the caller parsed after it.
+        if start < c.pos {
+            exchange(&mut c.pos, start);
+        }
+        fail(&mut c, view(literal_range_msg(&mut c, ty)));
     }
     return true;
+}
+// `integer 300 is out of range for u8 (0..=255)`: the literal, the type it has to fit and the range
+// it missed. "integer literal out of range for its type" named neither the value nor the type, so a
+// reader had to count the bytes themselves.
+fn literal_range_msg<a>(c: (&a mut C), ty: u64) -> u8[] {
+    value := c.lit_value;
+    negative := c.lit_negative;
+    return literal_range_msg_v(&mut c, ty, value, negative);
+}
+fn literal_range_msg_v<a>(c: (&a mut C), ty: u64, value: u64, negative: u64) -> u8[] {
+    mut msg = copy_bytes(view("integer "));
+    if negative != 0 {
+        msg.push(45);
+    }
+    push_bytes(&mut msg, view(decimal_bytes(value)));
+    name := source_type_name(&mut c, ty);
+    push_bytes(&mut msg, view(" is out of range for "));
+    push_bytes(&mut msg, view(name));
+    push_bytes(&mut msg, view(" ("));
+    push_bytes(&mut msg, view(int_range_msg(&mut c, ty)));
+    push_bytes(&mut msg, view(")"));
+    mut help = copy_bytes(view("write a value that fits, or convert explicitly (`"));
+    push_bytes(&mut help, view(name));
+    push_bytes(&mut help, view("(x)`), which truncates and so says the narrowing is intended"));
+    diag_help(&mut c, view(help));
+    return msg;
+}
+// `0..=255` for an unsigned type, `-128..=127` for a signed one: the range the literal missed.
+fn int_range_msg<a>(c: (&a mut C), ty: u64) -> u8[] {
+    mut out = u8[];
+    if is_char(&mut c, ty) {
+        return copy_bytes(view("0..=1114111, excluding surrogate code points"));
+    }
+    bits := ty_arg(&mut c, ty);
+    signed := ty_mode(&mut c, ty);
+    mut max = 18446744073709551615;
+    if bits < 64 {
+        max = 1;
+        for i in bits {
+            max = max * 2;
+        }
+        max = max - 1;
+    }
+    half := max / 2;
+    mut top = max;
+    if signed != 0 {
+        out.push(45);
+        push_bytes(&mut out, view(decimal_bytes(half + 1)));
+        top = half;
+    } else {
+        out.push(48);
+    }
+    push_bytes(&mut out, view("..="));
+    push_bytes(&mut out, view(decimal_bytes(top)));
+    return out;
 }
 fn is_option_storage<a>(c: (&a mut C), ty: u64) -> bool {
     if ty_kind(&mut c, ty) != 8 {
@@ -26659,7 +26893,7 @@ fn pattern_loop<a>(
     }
     if terminated == 0 {
         if !backedge_ok(&mut c, &ownership::snapshot(&c.loopcheck)) {
-            fail(&mut c, view("loop backedge consumes entry storage"));
+            fail_backedge(&mut c, view("loop backedge consumes entry storage"));
         }
     }
     // A body that always returns or continues reaches the exit only through the entry state
@@ -27560,7 +27794,13 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         || same(view(name), view("push_char"))
         || same(view(name), view("append"));
     if !known {
-        fail(&mut c, view("unknown collection method"));
+        recv := source_type_name(&mut c, xty);
+        mut msg = copy_bytes(view("`"));
+        push_bytes(&mut msg, view(recv));
+        push_bytes(&mut msg, view("` has no method `"));
+        push_bytes(&mut msg, view(name));
+        push_bytes(&mut msg, view("`"));
+        fail(&mut c, view(msg));
     }
     if k == 27 {
         fail(&mut c, view("a slice cannot change length; use the vector it borrows"));
@@ -27764,9 +28004,15 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             fail(&mut c, view("push requires bytes/vector"));
         }
         if k == 3 {
-            // A byte buffer takes a u8 (always fits) or any other integer, which stops the
-            // program at run time if it does not fit a byte, like `buf[i] = b`.
-            if (b.ty != int_type(&mut c, 8, 0)) & (b.ty != 0) {
+            // A byte buffer holds `u8`: a literal that does not fit is refused here, exactly as
+            // `buf[i] = 300` and `u8[300]` are. It used to be accepted and then die in the run-time
+            // range check with no message at all. A wider *value* is still checked at run time,
+            // like a byte store.
+            byte := int_type(&mut c, 8, 0);
+            if adopt_literal(&mut c, pstart, pend, byte) {
+                b = val(b.t, byte);
+            }
+            if (b.ty != byte) & (b.ty != 0) {
                 if !integer(&mut c, b.ty) {
                     require_type(&mut c, b.ty, 0);
                 }
@@ -27820,10 +28066,7 @@ fn collection_literal<a>(c: (&a mut C), ty: u64, bytes: u64) -> Val {
                     require_type(&mut c, v.ty, expected);
                 }
                 if bytes != 0 {
-                    lit := (c.lit_start == estart) & (c.lit_end == eend);
-                    if lit & (c.lit_value > 255) {
-                        fail(&mut c, view("integer literal out of range for u8"));
-                    }
+                    adopt_literal(&mut c, estart, eend, int_type(&mut c, 8, 0));
                 }
             }
             if first != 0 && is(&mut c, view(";")) {
@@ -28665,7 +28908,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
                     advance(&mut c);
                     ty := int_type_named(&mut c, named);
                     if literal_fits(&mut c, ty, value, 0) == 0 {
-                        fail(&mut c, view("integer literal out of range for its type"));
+                        fail(&mut c, view(literal_range_msg_v(&mut c, ty, value, 0)));
                     }
                     return val(slot, ty);
                 }
@@ -28716,7 +28959,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
                         fail(&mut c, view("unary minus needs a signed integer"));
                     }
                     if literal_fits(&mut c, ty, value, 1) == 0 {
-                        fail(&mut c, view("integer literal out of range for its type"));
+                        fail(&mut c, view(literal_range_msg_v(&mut c, ty, value, 1)));
                     }
                     advance(&mut c);
                     advance(&mut c);
@@ -28736,7 +28979,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
             exchange(&mut c.lit_negative, 1);
             ty := int_type(&mut c, 64, 1);
             if literal_fits(&mut c, ty, value, 1) == 0 {
-                fail(&mut c, view("integer literal out of range for its type"));
+                fail(&mut c, view(literal_range_msg_v(&mut c, ty, value, 1)));
             }
             zero := imm(&mut c, 0);
             get(&mut c, operand.t, view("%rcx"));
@@ -29234,7 +29477,10 @@ fn primary<a>(c: (&a mut C)) -> Val {
         push_bytes(&mut help, view("`"));
         diag_help(&mut c, view(help));
     }
-    fail(&mut c, view("undefined name"));
+    mut msg = copy_bytes(view("undefined name `"));
+    push_bytes(&mut msg, view(first));
+    push_bytes(&mut msg, view("`"));
+    fail(&mut c, view(msg));
     return val(0, 0);
 }
 fn is_comparison(k: u64) -> bool {
@@ -30046,7 +30292,10 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
     if c.raw == 0 {
         k := ty_kind(&mut c, x.ty);
         if (k != 3) & (k != 4) & (k != 5) {
-            fail(&mut c, view("index/slice requires byte sequence/view"));
+            mut msg = copy_bytes(view("`"));
+            push_bytes(&mut msg, view(type_name(&mut c, x.ty)));
+            push_bytes(&mut msg, view("` cannot be indexed: `[]` takes a byte sequence, a vector or a view"));
+            fail(&mut c, view(msg));
         }
     }
     if (access != 0) & (c.raw == 0) & element_index_ahead(&mut c) {
@@ -30495,7 +30744,7 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
                                     if literal_fits(&mut c, rty, lvalue, lneg) == 0 {
                                         fail(
                                             &mut c,
-                                            view("integer literal out of range for its type")
+                                            view(literal_range_msg_v(&mut c, rty, lvalue, lneg))
                                         );
                                     }
                                     ty = rty;
@@ -32361,7 +32610,7 @@ fn map_loop<a, b, d>(c: (&a mut C), name: &b [u8], value_name: &d [u8]) -> unit 
     }
     if c.terminated == 0 {
         if !backedge_ok(&mut c, &ownership::snapshot(&c.loopcheck)) {
-            fail(&mut c, view("loop backedge consumes entry storage"));
+            fail_backedge(&mut c, view("loop backedge consumes entry storage"));
         }
     }
     // A body that always returns or continues reaches the exit only through the entry state.
@@ -32484,7 +32733,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
             }
         } else {
             if !backedge_ok(&mut c, &ownership::snapshot(&c.loopcheck)) {
-                fail(&mut c, view("continue consumes loop-entry storage"));
+                fail_backedge(&mut c, view("continue consumes loop-entry storage"));
             }
         }
         jump(&mut c, view("jmp"), dst);
@@ -33016,7 +33265,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         }
         if c.terminated == 0 {
             if !backedge_ok(&mut c, &ownership::snapshot(&c.loopcheck)) {
-                fail(&mut c, view("loop backedge consumes entry storage"));
+                fail_backedge(&mut c, view("loop backedge consumes entry storage"));
             }
         }
         // A body that always returns or continues reaches the exit only through the entry state
