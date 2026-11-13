@@ -62,7 +62,9 @@ if (mode === 'update') {
   for (const { file } of staged) renameSync(`${file}.pending`, file);
   writeFileSync(join(seedDirectory, 'manifest.json'), `${JSON.stringify(seedManifest(sources), null, 2)}\n`);
 }
-else {
+else if (mode === 'verify') {
+  // `verify` is held to what is published; `stage` must not be, because the whole reason it exists is
+  // to park a seed for sources the manifest does not describe yet.
   const recorded = readSeedManifest();
   const actual = seedManifest(sources);
   assert.deepEqual(recorded.sources, actual.sources, 'bootstrap source manifest is stale');

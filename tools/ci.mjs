@@ -495,6 +495,8 @@ function lint() {
   check('build cache test exists', existsSync(join(root, 'tools/cache-test.mjs')));
   check('CI runs the build cache test', readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8').includes('tools/cache-test.mjs'));
   check('native cases cover an interface-first build', readFileSync(join(root, 'tests/native-cases.json'), 'utf8').includes('"interfaces": true'));
+  const bootstrapTool = readFileSync(join(root, 'tools/bootstrap.mjs'), 'utf8');
+  check('bootstrap stage parks a seed without the published manifest being current', /if \(mode === 'update'\)[\s\S]*?else if \(mode === 'verify'\)/.test(bootstrapTool));
   check('LSP server exists', existsSync(join(root, 'tools/lsp/main.grl')));
   check('LSP stdio test exists', existsSync(join(root, 'tools/lsp-test.mjs')));
   check('CI runs the LSP stdio test', readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8').includes('tools/lsp-test.mjs'));
