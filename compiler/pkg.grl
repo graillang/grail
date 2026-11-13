@@ -1,0 +1,1301 @@
+module pkg;
+use host;
+
+// The package manager: grail.toml manifests, a unification resolver, grail.lock, a
+// content-addressed store and a static git index as the registry. docs/design/package-manager.md
+// is the specification; `section N` in these comments refers to it.
+//
+// The compiler is built from compiler/*.grl alone, with no standard library on the module path,
+// so the byte, string and digest helpers below are local (BUILTIN). lib/sha256.grl is the same
+// FIPS 180-4 construction for programs that do have the stdlib; a tree digest is one of the few
+// things the package manager cannot borrow from anywhere else, so it carries its own copy.
+//
+// Errors are values (`|? Err`), never aborts: a manifest typo, an unresolvable requirement or a
+// checksum mismatch each name their location, and the caller decides what to print.
+
+// ---- bytes (BUILTIN) ----
+fn eqb<a, b>(x: &a [u8], y: &b [u8]) -> bool {
+    if x.len() != y.len() {
+        return false;
+    }
+    for i in x.len() {
+        if x[i] != y[i] {
+            return false;
+        }
+    }
+    return true;
+}
+fn startsb<a, b>(x: &a [u8], y: &b [u8]) -> bool {
+    if x.len() < y.len() {
+        return false;
+    }
+    for i in y.len() {
+        if x[i] != y[i] {
+            return false;
+        }
+    }
+    return true;
+}
+fn endsb<a, b>(x: &a [u8], y: &b [u8]) -> bool {
+    if x.len() < y.len() {
+        return false;
+    }
+    d := x.len() - y.len();
+    for i in y.len() {
+        if x[d + i] != y[i] {
+            return false;
+        }
+    }
+    return true;
+}
+fn copyb<a>(x: &a [u8]) -> u8[] {
+    mut o = u8[];
+    for i in x.len() {
+        o.push(x[i]);
+    }
+    return o;
+}
+fn catb<a, b>(x: &a [u8], y: &b [u8]) -> u8[] {
+    mut o = copyb(view(x));
+    for i in y.len() {
+        o.push(y[i]);
+    }
+    return o;
+}
+fn cat3<a, b, d>(x: &a [u8], y: &b [u8], z: &d [u8]) -> u8[] {
+    return catb(view(catb(view(x), view(y))), view(z));
+}
+fn pushb<a, b>(out: (&a mut u8[]), x: &b [u8]) {
+    for i in x.len() {
+        out.push(x[i]);
+    }
+}
+fn item<a>(v: (&a u8[][]), i: u64) -> u8[] {
+    x := &v[i];
+    return x.copy();
+}
+fn is_digit(c: u64) -> bool {
+    return (c >= '0') & (c <= '9');
+}
+fn is_ident(c: u64) -> bool {
+    return is_digit(c) || (c >= 'a') & (c <= 'z') || (c >= 'A') & (c <= 'Z') || (c == '_') || (c == '-');
+}
+fn dec(n: u64) -> u8[] {
+    mut out = u8[];
+    if n == 0 {
+        out.push('0');
+        return out;
+    }
+    mut v = n;
+    while 0 < v {
+        out.push(u8(48 + v % 10));
+        v = v / 10;
+    }
+    mut o = u8[];
+    mut i = out.len();
+    while 0 < i {
+        i -= 1;
+        o.push(out[i]);
+    }
+    return o;
+}
+// Decimal digits only, and at least one: `num` reads what this accepts.
+fn digits_only<a>(x: &a [u8]) -> bool {
+    if x.len() == 0 {
+        return false;
+    }
+    for i in x.len() {
+        if !is_digit(x[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+fn num<a>(x: &a [u8]) -> u64 {
+    mut v: u64 = 0;
+    for i in x.len() {
+        v = v * 10 + u64(x[i] - '0');
+    }
+    return v;
+}
+fn hex_of<a>(data: &a [u8]) -> u8[] {
+    mut out = u8[];
+    mut digits = u8[0u8, 0u8];
+    for i in data.len() {
+        b := data[i];
+        lo := b & 15;
+        hi := (b >> 4) & 15;
+        if hi < 10 {
+            out.push(u8(48 + hi));
+        } else {
+            out.push(u8(97 + hi - 10));
+        }
+        if lo < 10 {
+            out.push(u8(48 + lo));
+        } else {
+            out.push(u8(97 + lo - 10));
+        }
+    }
+    return out;
+}
+// The index of `needle` in `hay`, or NO_INDEX. Empty needles are refused by callers.
+const NO_INDEX: u64 = 18446744073709551615;
+fn indexb<a, b>(hay: &a [u8], needle: &b [u8]) -> u64 {
+    if needle.len() == 0 {
+        return NO_INDEX;
+    }
+    if hay.len() < needle.len() {
+        return NO_INDEX;
+    }
+    mut i: u64 = 0;
+    while i + needle.len() <= hay.len() {
+        mut hit = true;
+        for j in needle.len() {
+            if hay[i + j] != needle[j] {
+                hit = false;
+            }
+        }
+        if hit {
+            return i;
+        }
+        i += 1;
+    }
+    return NO_INDEX;
+}
+fn trim<a>(x: &a [u8]) -> u8[] {
+    mut start: u64 = 0;
+    mut end: u64 = x.len();
+    while start < end {
+        c := x[start];
+        if (c == ' ') || (c == '\t') || (c == '\r') || (c == '\n') {
+            start += 1;
+        } else {
+            break;
+        }
+    }
+    while start < end {
+        c := x[end - 1];
+        if (c == ' ') || (c == '\t') || (c == '\r') || (c == '\n') {
+            end -= 1;
+        } else {
+            break;
+        }
+    }
+    mut o = u8[];
+    mut i = start;
+    while i < end {
+        o.push(x[i]);
+        i += 1;
+    }
+    return o;
+}
+fn lower<a>(x: &a [u8]) -> u8[] {
+    mut o = u8[];
+    for i in x.len() {
+        c := x[i];
+        if (c >= 'A') & (c <= 'Z') {
+            o.push(u8(c + 32));
+        } else {
+            o.push(c);
+        }
+    }
+    return o;
+}
+fn split_char<a>(x: &a [u8], sep: u64) -> u8[][] {
+    mut out = u8[][];
+    mut cur = u8[];
+    for i in x.len() {
+        c := x[i];
+        if c == sep {
+            out.push(exchange(&mut cur, u8[]));
+        } else {
+            cur.push(c);
+        }
+    }
+    out.push(cur);
+    return out;
+}
+fn split_lines<a>(text: &a [u8]) -> u8[][] {
+    return split_char(view(text), '\n');
+}
+
+// ---- SHA-256 (section 5.3) ----
+// FIPS 180-4, one-shot. A tree digest is SHA-256 over a canonical file listing, so the package
+// manager needs the primitive before it can trust anything it wrote.
+const MASK32: u64 = 4294967295;
+fn sha_rotr(x: u64, n: u64) -> u64 {
+    return ((x >> n) | (x << (32 - n))) & MASK32;
+}
+fn sha_constants() -> u64[] {
+    return u64[
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+    ];
+}
+// Compresses data[at:at+64] into the eight-word state.
+fn sha_block<a, b, d>(state: (&a mut u64[]), k: (&b u64[]), data: &d [u8], at: u64) {
+    mut w: u64[] = u64[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    for t in 16 {
+        w.push(0u64);
+    }
+    for t in 16 {
+        o := at + t * 4;
+        w[t] = (u64(data[o]) << 24) | (u64(data[o + 1]) << 16) | (u64(data[o + 2]) << 8) | u64(data[o + 3]);
+    }
+    for t in 16..64 {
+        x := w[t - 15];
+        y := w[t - 2];
+        s0 := sha_rotr(x, 7) ^ sha_rotr(x, 18) ^ (x >> 3);
+        s1 := sha_rotr(y, 17) ^ sha_rotr(y, 19) ^ (y >> 10);
+        w[t] = (w[t - 16] + s0 + w[t - 7] + s1) & MASK32;
+    }
+    mut a = state[0];
+    mut b = state[1];
+    mut c = state[2];
+    mut d = state[3];
+    mut e = state[4];
+    mut f = state[5];
+    mut g = state[6];
+    mut h = state[7];
+    for t in 64 {
+        s1 := sha_rotr(e, 6) ^ sha_rotr(e, 11) ^ sha_rotr(e, 25);
+        ch := (e & f) ^ ((e ^ MASK32) & g);
+        t1 := h + s1 + ch + k[t] + w[t];
+        s0 := sha_rotr(a, 2) ^ sha_rotr(a, 13) ^ sha_rotr(a, 22);
+        maj := (a & b) ^ (a & c) ^ (b & c);
+        h = g;
+        g = f;
+        f = e;
+        e = (d + t1) & MASK32;
+        d = c;
+        c = b;
+        b = a;
+        a = (t1 + s0 + maj) & MASK32;
+    }
+    state[0] = (state[0] + a) & MASK32;
+    state[1] = (state[1] + b) & MASK32;
+    state[2] = (state[2] + c) & MASK32;
+    state[3] = (state[3] + d) & MASK32;
+    state[4] = (state[4] + e) & MASK32;
+    state[5] = (state[5] + f) & MASK32;
+    state[6] = (state[6] + g) & MASK32;
+    state[7] = (state[7] + h) & MASK32;
+}
+fn sha256_bytes<a>(data: &a [u8]) -> u8[] {
+    k := sha_constants();
+    mut state = u64[0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+    mut msg = copyb(view(data));
+    msg.push(u8(128));
+    while msg.len() % 64 != 56 {
+        msg.push(u8(0));
+    }
+    bit_length := data.len() * 8;
+    for i in 8 {
+        msg.push(u8((bit_length >> (56 - i * 8)) & 255));
+    }
+    mut at: u64 = 0;
+    while at < msg.len() {
+        sha_block(&mut state, &k, &msg, at);
+        at += 64;
+    }
+    mut out = u8[];
+    for i in 8 {
+        h := state[i];
+        for j in 4 {
+            out.push(u8((h >> (24 - j * 8)) & 255));
+        }
+    }
+    return out;
+}
+fn sha256_hex<a>(data: &a [u8]) -> u8[] {
+    d := sha256_bytes(view(data));
+    return hex_of(view(d));
+}
+
+// ---- TOML (section 2.3) ----
+// A reader for the subset of TOML a manifest and a lockfile writer need, and an explicit refusal
+// for everything else. Each refusal names the construct and the line: a configuration file that is
+// silently half-understood is worse than one that is rejected.
+struct Err {
+    line: u64,
+    message: u8[]
+}
+fn err(line: u64, message: u8[]) -> Err {
+    return Err { line: line, message: message };
+}
+fn err_text(e: (&a Err)) -> u8[] {
+    n := dec(e.line);
+    head := catb(view("line "), view(n));
+    body := catb(view(head), view(": "));
+    return catb(view(body), view(e.message));
+}
+enum Toml {
+    TStr(u8[]),
+    TInt(i64),
+    TBool(bool),
+    TArr(Toml[]),
+    TTab(TomlEntry[])
+}
+struct TomlEntry {
+    key: u8[],
+    value: Toml
+}
+struct TomlTable {
+    path: u8[],
+    line: u64,
+    entries: TomlEntry[]
+}
+struct TomlDoc {
+    tables: TomlTable[]
+}
+struct Cur {
+    pos: u64,
+    line: u64
+}
+fn toml_doc() -> TomlDoc {
+    mut d = TomlDoc { tables: TomlTable[] };
+    d.tables.push(TomlTable { path: u8[], line: 0, entries: TomlEntry[] });
+    return d;
+}
+fn toml_table_index<a, b>(doc: (&a TomlDoc), path: &b [u8]) -> u64 {
+    for i in doc.tables.len() {
+        t := &doc.tables[i];
+        if eqb(view(t.path), view(path)) {
+            return i;
+        }
+    }
+    return NO_INDEX;
+}
+fn toml_has<a, b>(doc: (&a TomlDoc), ti: u64, key: &b [u8]) -> bool {
+    t := &doc.tables[ti];
+    for i in t.entries.len() {
+        e := &t.entries[i];
+        if eqb(view(e.key), view(key)) {
+            return true;
+        }
+    }
+    return false;
+}
+fn toml_put(doc: (&a mut TomlDoc), ti: u64, key: u8[], value: Toml) {
+    entry := TomlEntry { key: key, value: value };
+    slot := &mut doc.tables[ti];
+    slot.entries.push(entry);
+}
+fn toml_strip_comment<a>(line: &a [u8]) -> u8[] {
+    mut out = u8[];
+    mut quote: u64 = 0;
+    mut escaped = false;
+    for i in line.len() {
+        c := line[i];
+        if quote != 0 {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else {
+                if c == '\\' {
+                    escaped = true;
+                } else {
+                    if c == quote {
+                        quote = 0;
+                    }
+                }
+            }
+        } else {
+            if c == '#' {
+                break;
+            }
+            out.push(c);
+            if (c == '"') || (c == '\'') {
+                quote = c;
+            }
+        }
+    }
+    return out;
+}
+fn toml_skip<a, b>(text: &a [u8], cur: (&b mut Cur)) {
+    while cur.pos < text.len() {
+        c := text[cur.pos];
+        if (c == ' ') || (c == '\t') {
+            cur.pos += 1;
+        } else {
+            break;
+        }
+    }
+}
+fn utf8_of(code: u64) -> u8[] {
+    mut out = u8[];
+    if code < 128 {
+        out.push(u8(code));
+        return out;
+    }
+    if code < 2048 {
+        out.push(u8(192 + code / 64));
+        out.push(u8(128 + code % 64));
+        return out;
+    }
+    out.push(u8(224 + code / 4096));
+    out.push(u8(128 + (code / 64) % 64));
+    out.push(u8(128 + code % 64));
+    return out;
+}
+fn hex_value(c: u64) -> u64 {
+    if is_digit(c) {
+        return u64(c - '0');
+    }
+    if (c >= 'a') & (c <= 'f') {
+        return u64(c - 'a') + 10;
+    }
+    if (c >= 'A') & (c <= 'F') {
+        return u64(c - 'A') + 10;
+    }
+    return NO_INDEX;
+}
+// One escape sequence, positioned after its backslash.
+fn toml_escape<a, b>(text: &a [u8], cur: (&b mut Cur)) -> u8[] |? Err {
+    if cur.pos >= text.len() {
+        return err(cur.line, copyb(view("unterminated escape sequence")));
+    }
+    c := text[cur.pos];
+    cur.pos += 1;
+    if c == 'n' {
+        return u8[10];
+    }
+    if c == 't' {
+        return u8[9];
+    }
+    if c == 'r' {
+        return u8[13];
+    }
+    if c == 'b' {
+        return u8[8];
+    }
+    if c == 'f' {
+        return u8[12];
+    }
+    if (c == '"') || (c == '\\') {
+        return u8[c];
+    }
+    if c == 'u' {
+        mut code: u64 = 0;
+        for i in 4 {
+            if cur.pos >= text.len() {
+                return err(cur.line, copyb(view("truncated \\u escape")));
+            }
+            d := hex_value(text[cur.pos]);
+            cur.pos += 1;
+            if d == NO_INDEX {
+                return err(cur.line, copyb(view("\\u escape needs four hex digits")));
+            }
+            code = code * 16 + d;
+        }
+        if (code >= 55296) & (code <= 57343) {
+            return err(cur.line, copyb(view("surrogate escapes are not supported (no \\U escapes)")));
+        }
+        return utf8_of(code);
+    }
+    return err(cur.line, copyb(view("unsupported escape sequence")));
+}
+fn toml_string<a, b>(text: &a [u8], cur: (&b mut Cur), quote: u64) -> u8[] |? Err {
+    if cur.pos + 2 < text.len() {
+        if (text[cur.pos + 1] == quote) && (text[cur.pos + 2] == quote) {
+            return err(cur.line, copyb(view("multi-line strings are not supported")));
+        }
+    }
+    cur.pos += 1;
+    mut out = u8[];
+    while true {
+        if cur.pos >= text.len() {
+            return err(cur.line, copyb(view("unterminated string")));
+        }
+        c := text[cur.pos];
+        if c == quote {
+            cur.pos += 1;
+            return out;
+        }
+        if (c == '\\') && (quote == '"') {
+            cur.pos += 1;
+            piece := toml_escape(text, &mut cur)?;
+            pushb(&mut out, view(piece));
+        } else {
+            out.push(c);
+            cur.pos += 1;
+        }
+    }
+    return out;
+}
+fn toml_key_part<a, b>(text: &a [u8], cur: (&b mut Cur)) -> u8[] |? Err {
+    if cur.pos >= text.len() {
+        return err(cur.line, copyb(view("expected a key")));
+    }
+    c := text[cur.pos];
+    if (c == '"') || (c == '\'') {
+        return toml_string(text, &mut cur, c)?;
+    }
+    mut out = u8[];
+    while cur.pos < text.len() {
+        ch := text[cur.pos];
+        if is_ident(ch) {
+            out.push(ch);
+            cur.pos += 1;
+        } else {
+            break;
+        }
+    }
+    if out.len() == 0 {
+        return err(cur.line, copyb(view("expected a bare or quoted key")));
+    }
+    return out;
+}
+// A dotted key path, as "a.b.c".
+fn toml_key<a, b>(text: &a [u8], cur: (&b mut Cur)) -> u8[] |? Err {
+    mut out = u8[];
+    mut first = true;
+    while true {
+        part := toml_key_part(text, &mut cur)?;
+        if !first {
+            out.push('.');
+        }
+        pushb(&mut out, view(part));
+        first = false;
+        toml_skip(text, &mut cur);
+        if (cur.pos < text.len()) && (text[cur.pos] == '.') {
+            cur.pos += 1;
+        } else {
+            break;
+        }
+    }
+    return out;
+}
+fn toml_int<a, b>(text: &a [u8], cur: (&b mut Cur)) -> i64 |? Err {
+    mut negative = false;
+    if text[cur.pos] == '+' {
+        cur.pos += 1;
+    } else {
+        if text[cur.pos] == '-' {
+            negative = true;
+            cur.pos += 1;
+        }
+    }
+    start := cur.pos;
+    while cur.pos < text.len() {
+        if is_digit(text[cur.pos]) {
+            cur.pos += 1;
+        } else {
+            break;
+        }
+    }
+    if cur.pos == start {
+        return err(cur.line, copyb(view("expected a digit")));
+    }
+    if cur.pos < text.len() {
+        c := text[cur.pos];
+        if (c == '.') || (c == 'e') || (c == 'E') {
+            return err(cur.line, copyb(view("floats are not supported (integers only)")));
+        }
+        if c == '_' {
+            return err(cur.line, copyb(view("digit separators are not supported")));
+        }
+        if (c == '-') || (c == ':') {
+            return err(cur.line, copyb(view("dates and times are not supported")));
+        }
+    }
+    mut v: u64 = 0;
+    mut i = start;
+    while i < cur.pos {
+        v = v * 10 + u64(text[i] - '0');
+        i += 1;
+    }
+    if negative {
+        return 0i64 - i64(v);
+    }
+    return i64(v);
+}
+fn tail_from<a>(text: &a [u8], at: u64) -> u8[] {
+    mut out = u8[];
+    mut i = at;
+    while i < text.len() {
+        out.push(text[i]);
+        i += 1;
+    }
+    return out;
+}
+fn toml_value<a, b>(text: &a [u8], cur: (&b mut Cur)) -> Toml |? Err {
+    if cur.pos >= text.len() {
+        return err(cur.line, copyb(view("expected a value")));
+    }
+    c := text[cur.pos];
+    if (c == '"') || (c == '\'') {
+        s := toml_string(text, &mut cur, c)?;
+        return Toml::TStr(s);
+    }
+    if c == '[' {
+        items := toml_array(text, &mut cur)?;
+        return Toml::TArr(items);
+    }
+    if c == '{' {
+        entries := toml_inline(text, &mut cur)?;
+        return Toml::TTab(entries);
+    }
+    tail := tail_from(text, cur.pos);
+    if startsb(view(tail), view("true")) {
+        cur.pos += 4;
+        return Toml::TBool(true);
+    }
+    if startsb(view(tail), view("false")) {
+        cur.pos += 5;
+        return Toml::TBool(false);
+    }
+    if is_digit(c) || (c == '-') || (c == '+') {
+        n := toml_int(text, &mut cur)?;
+        return Toml::TInt(n);
+    }
+    return err(cur.line, copyb(view("unsupported value: strings, integers, booleans, arrays and inline tables only")));
+}
+fn toml_array<a, b>(text: &a [u8], cur: (&b mut Cur)) -> Toml[] |? Err {
+    cur.pos += 1;
+    mut out = Toml[];
+    while true {
+        toml_skip(text, &mut cur);
+        if cur.pos >= text.len() {
+            return err(cur.line, copyb(view("unterminated array")));
+        }
+        if text[cur.pos] == ']' {
+            cur.pos += 1;
+            return out;
+        }
+        v := toml_value(text, &mut cur)?;
+        out.push(v);
+        toml_skip(text, &mut cur);
+        if cur.pos >= text.len() {
+            return err(cur.line, copyb(view("unterminated array")));
+        }
+        c := text[cur.pos];
+        if c == ',' {
+            cur.pos += 1;
+        } else {
+            if c == ']' {
+                cur.pos += 1;
+                return out;
+            }
+            return err(cur.line, copyb(view("expected ',' or ']' in an array")));
+        }
+    }
+    return out;
+}
+fn toml_inline<a, b>(text: &a [u8], cur: (&b mut Cur)) -> TomlEntry[] |? Err {
+    cur.pos += 1;
+    mut out = TomlEntry[];
+    toml_skip(text, &mut cur);
+    if (cur.pos < text.len()) && (text[cur.pos] == '}') {
+        cur.pos += 1;
+        return out;
+    }
+    while true {
+        toml_skip(text, &mut cur);
+        key := toml_key_part(text, &mut cur)?;
+        toml_skip(text, &mut cur);
+        if cur.pos >= text.len() {
+            return err(cur.line, copyb(view("unterminated inline table")));
+        }
+        if text[cur.pos] != '=' {
+            return err(cur.line, copyb(view("expected '=' in an inline table")));
+        }
+        cur.pos += 1;
+        toml_skip(text, &mut cur);
+        value := toml_value(text, &mut cur)?;
+        for i in out.len() {
+            e := &out[i];
+            if eqb(view(e.key), view(key)) {
+                return err(cur.line, copyb(view("duplicate key in an inline table")));
+            }
+        }
+        entry := TomlEntry { key: key, value: value };
+        out.push(entry);
+        toml_skip(text, &mut cur);
+        if cur.pos >= text.len() {
+            return err(cur.line, copyb(view("unterminated inline table")));
+        }
+        c := text[cur.pos];
+        if c == ',' {
+            cur.pos += 1;
+            toml_skip(text, &mut cur);
+            if (cur.pos < text.len()) && (text[cur.pos] == '}') {
+                return err(cur.line, copyb(view("an inline table may not end with a comma")));
+            }
+        } else {
+            if c == '}' {
+                cur.pos += 1;
+                return out;
+            }
+            return err(cur.line, copyb(view("expected ',' or '}' in an inline table")));
+        }
+    }
+    return out;
+}
+pub fn toml_parse<a>(text: &a [u8]) -> TomlDoc |? Err {
+    mut doc = toml_doc();
+    rows := split_lines(view(text));
+    mut current: u64 = 0;
+    mut ln: u64 = 0;
+    for r in rows.len() {
+        ln += 1;
+        raw := item(&rows, r);
+        stripped := toml_strip_comment(&raw);
+        t := trim(&stripped);
+        if t.len() == 0 {
+            continue;
+        }
+        if t[0] == '[' {
+            if (1 < t.len()) && (t[1] == '[') {
+                return err(ln, copyb(view("arrays of tables ([[name]]) are not supported")));
+            }
+            mut cur = Cur { pos: 1, line: ln };
+            path := toml_key(&t, &mut cur)?;
+            toml_skip(&t, &mut cur);
+            if (cur.pos >= t.len()) || (t[cur.pos] != ']') {
+                return err(ln, copyb(view("expected ']' to close a table header")));
+            }
+            cur.pos += 1;
+            toml_skip(&t, &mut cur);
+            if cur.pos < t.len() {
+                return err(ln, copyb(view("unexpected text after a table header")));
+            }
+            if toml_table_index(&doc, &path) != NO_INDEX {
+                head := catb(view("table ["), view(path));
+                return err(ln, catb(view(head), view("] is defined twice")));
+            }
+            doc.tables.push(TomlTable { path: path, line: ln, entries: TomlEntry[] });
+            current = doc.tables.len() - 1;
+        } else {
+            mut cur = Cur { pos: 0, line: ln };
+            key := toml_key(&t, &mut cur)?;
+            toml_skip(&t, &mut cur);
+            if (cur.pos >= t.len()) || (t[cur.pos] != '=') {
+                return err(ln, copyb(view("expected '=' after a key")));
+            }
+            cur.pos += 1;
+            toml_skip(&t, &mut cur);
+            value := toml_value(&t, &mut cur)?;
+            toml_skip(&t, &mut cur);
+            if cur.pos < t.len() {
+                return err(ln, copyb(view("unexpected text after a value")));
+            }
+            if toml_has(&doc, current, &key) {
+                head := catb(view("duplicate key "), view(key));
+                return err(ln, head);
+            }
+            toml_put(&mut doc, current, key, value);
+        }
+    }
+    return doc;
+}
+// The canonical rendering `pkg-toml-*` regression cases compare: one line per table, one line per
+// entry, values printed in a fixed shape. It is the reader's observable behaviour in a form a test
+// can hold to a golden string.
+pub fn toml_dump<a>(text: &a [u8]) -> u8[] {
+    match toml_parse(view(text)) {
+        doc: TomlDoc => {
+            return toml_doc_text(&doc);
+        },
+        e: Err => {
+            return catb(view("error: "), view(err_text(&e)));
+        }
+    }
+}
+fn toml_doc_text(doc: (&a TomlDoc)) -> u8[] {
+    mut out = u8[];
+    for i in doc.tables.len() {
+        t := &doc.tables[i];
+        head := catb(view("["), view(t.path));
+        pushb(&mut out, view(head));
+        out.push(']');
+        out.push('\n');
+        for j in t.entries.len() {
+            e := &t.entries[j];
+            pushb(&mut out, view(e.key));
+            out.push(' ');
+            pushb(&mut out, view(toml_value_text(&e.value)));
+            out.push('\n');
+        }
+    }
+    return out;
+}
+fn toml_value_text(v: (&a Toml)) -> u8[] {
+    match v {
+        TStr(s) => {
+            x := catb(view("\""), view(s));
+            return catb(view(x), view("\""));
+        },
+        TInt(n) => {
+            return dec_signed(n);
+        },
+        TBool(b) => {
+            if b {
+                return copyb(view("true"));
+            }
+            return copyb(view("false"));
+        },
+        TArr(items) => {
+            mut out = u8[];
+            out.push('[');
+            for i in items.len() {
+                if i != 0 {
+                    out.push(',');
+                }
+                item_text := toml_value_text(&items[i]);
+                pushb(&mut out, view(item_text));
+            }
+            out.push(']');
+            return out;
+        },
+        TTab(entries) => {
+            mut out = u8[];
+            out.push('{');
+            for i in entries.len() {
+                if i != 0 {
+                    out.push(',');
+                }
+                pushb(&mut out, view(entries[i].key));
+                out.push('=');
+                pushb(&mut out, view(toml_value_text(&entries[i].value)));
+            }
+            out.push('}');
+            return out;
+        }
+    }
+}
+fn dec_signed(n: i64) -> u8[] {
+    if 0i64 <= n {
+        return dec(u64(n));
+    }
+    body := dec(u64(0i64 - n));
+    return catb(view("-"), view(body));
+}
+
+// ---- versions and requirements (section 2.5) ----
+// semver 2.0.0: MAJOR.MINOR.PATCH[-PRE][+BUILD]. Requirements are comparator conjunctions;
+// a bare version means caret, which is what a manifest author almost always means.
+struct Ver {
+    major: u64,
+    minor: u64,
+    patch: u64,
+    pre: u8[][],
+    text: u8[]
+}
+struct Cmp {
+    // 0 exact, 1 >=, 2 >, 3 <=, 4 <, 5 caret, 6 tilde.
+    op: u64,
+    ver: Ver,
+    // How many numeric segments the requirement wrote: `~1` and `~1.2` bound differently.
+    parts: u64
+}
+struct Req {
+    text: u8[],
+    cmps: Cmp[],
+    any: u64
+}
+// An error with no line: semantic problems in a version or requirement string.
+fn verr(message: u8[]) -> Err {
+    return Err { line: 0, message: message };
+}
+fn ver_new(major: u64, minor: u64, patch: u64, text: u8[]) -> Ver {
+    return Ver { major: major, minor: minor, patch: patch, pre: u8[][], text: text };
+}
+// Numeric segments must be decimal with no leading zero (semver 2.0.0 §2).
+fn seg_num<a>(seg: &a [u8], what: &b [u8]) -> u64 |? Err {
+    if !digits_only(view(seg)) {
+        return verr(catb(view("version part is not a decimal number: <"), view(catb(view(seg), view(">")))));
+    }
+    if (1 < seg.len()) && (seg[0] == '0') {
+        return verr(catb(view("version part has a leading zero: <"), view(catb(view(seg), view(">")))));
+    }
+    return num(view(seg));
+}
+pub fn version_parse<a>(text: &a [u8]) -> Ver |? Err {
+    return version_parse_full(text, 1);
+}
+// `exact` = 1: exactly MAJOR.MINOR.PATCH (a version on its own). `exact` = 0: a requirement may
+// write `1` or `1.2`, and the missing segments are zero (`~1.2` is `~1.2.0`).
+fn version_parse_full<a>(text: &a [u8], exact: u64) -> Ver |? Err {
+    if text.len() == 0 {
+        return verr(copyb(view("empty version")));
+    }
+    mut head = trim(view(text));
+    plus := indexb(view(head), view("+"));
+    if plus != NO_INDEX {
+        build := tail_from(&head, plus + 1);
+        if build.len() == 0 {
+            return verr(copyb(view("empty build metadata after '+'")));
+        }
+        for i in build.len() {
+            if !is_ident(build[i]) && (build[i] != '.') {
+                return verr(copyb(view("build metadata may only hold [0-9A-Za-z-.] identifiers")));
+            }
+        }
+        cut := head_from(&head, 0, plus);
+        head = cut;
+    }
+    mut pre = u8[][];
+    dash := indexb(view(head), view("-"));
+    mut core = copyb(view(head));
+    if dash != NO_INDEX {
+        pretail := tail_from(&head, dash + 1);
+        if pretail.len() == 0 {
+            return verr(copyb(view("empty pre-release after '-'")));
+        }
+        ids := split_char(view(pretail), '.');
+        for i in ids.len() {
+            id := item(&ids, i);
+            if id.len() == 0 {
+                return verr(copyb(view("empty pre-release identifier")));
+            }
+            for j in id.len() {
+                if !is_ident(id[j]) {
+                    return verr(copyb(view("pre-release identifiers may only hold [0-9A-Za-z-]")));
+                }
+            }
+            if digits_only(view(id)) && (1 < id.len()) && (id[0] == '0') {
+                return verr(copyb(view("pre-release numeric identifier has a leading zero")));
+            }
+            pre.push(id);
+        }
+        cut := head_from(&head, 0, dash);
+        core = cut;
+    }
+    segs := split_char(view(core), '.');
+    if 3 < segs.len() {
+        return verr(catb(view("a version has at most MAJOR.MINOR.PATCH, got <"), view(catb(view(core), view(">")))));
+    }
+    if (segs.len() != 3) && (exact != 0) {
+        return verr(catb(view("a version needs exactly MAJOR.MINOR.PATCH, got <"), view(catb(view(core), view(">")))));
+    }
+    major_seg := item(&segs, 0);
+    major := seg_num(view(major_seg), view("major"))?;
+    mut minor: u64 = 0;
+    mut patch: u64 = 0;
+    if 1 < segs.len() {
+        minor_seg := item(&segs, 1);
+        minor = seg_num(view(minor_seg), view("minor"))?;
+    }
+    if 2 < segs.len() {
+        patch_seg := item(&segs, 2);
+        patch = seg_num(view(patch_seg), view("patch"))?;
+    }
+    return Ver { major: major, minor: minor, patch: patch, pre: pre, text: copyb(view(text)) };
+}
+// The first `count` bytes of `x`.
+fn head_from<a>(x: &a [u8], at: u64, count: u64) -> u8[] {
+    mut out = u8[];
+    mut i = at;
+    while (i < x.len()) && (i < count) {
+        out.push(x[i]);
+        i += 1;
+    }
+    return out;
+}
+fn is_numeric_id<a>(x: &a [u8]) -> bool {
+    return digits_only(view(x));
+}
+// -1/0/1 as 2/0/1: `left` smaller, equal, greater.
+fn version_cmp<a, b>(left: &a Ver, right: &b Ver) -> u64 {
+    if left.major != right.major {
+        if left.major < right.major {
+            return 2;
+        }
+        return 1;
+    }
+    if left.minor != right.minor {
+        if left.minor < right.minor {
+            return 2;
+        }
+        return 1;
+    }
+    if left.patch != right.patch {
+        if left.patch < right.patch {
+            return 2;
+        }
+        return 1;
+    }
+    // A pre-release sorts before the release it precedes.
+    if (left.pre.len() == 0) && (right.pre.len() == 0) {
+        return 0;
+    }
+    if left.pre.len() == 0 {
+        return 1;
+    }
+    if right.pre.len() == 0 {
+        return 2;
+    }
+    mut i: u64 = 0;
+    while (i < left.pre.len()) && (i < right.pre.len()) {
+        l := item(&left.pre, i);
+        r := item(&right.pre, i);
+        lnum := is_numeric_id(view(l));
+        rnum := is_numeric_id(view(r));
+        if lnum && rnum {
+            lv := num(view(l));
+            rv := num(view(r));
+            if lv != rv {
+                if lv < rv {
+                    return 2;
+                }
+                return 1;
+            }
+        } else {
+            // A numeric identifier always sorts before an alphanumeric one.
+            if lnum && !rnum {
+                return 2;
+            }
+            if rnum && !lnum {
+                return 1;
+            }
+            if !eqb(view(l), view(r)) {
+                return bytes_cmp(view(l), view(r));
+            }
+        }
+        i += 1;
+    }
+    if left.pre.len() < right.pre.len() {
+        return 2;
+    }
+    if right.pre.len() < left.pre.len() {
+        return 1;
+    }
+    return 0;
+}
+fn bytes_cmp<a, b>(left: &a [u8], right: &b [u8]) -> u64 {
+    mut i: u64 = 0;
+    while (i < left.len()) && (i < right.len()) {
+        if left[i] != right[i] {
+            if left[i] < right[i] {
+                return 2;
+            }
+            return 1;
+        }
+        i += 1;
+    }
+    if left.len() < right.len() {
+        return 2;
+    }
+    if right.len() < left.len() {
+        return 1;
+    }
+    return 0;
+}
+fn cmp_new(op: u64, ver: Ver, parts: u64) -> Cmp {
+    return Cmp { op: op, ver: ver, parts: parts };
+}
+fn req_any() -> Req {
+    return Req { text: copyb(view("*")), cmps: Cmp[], any: 1 };
+}
+// How many dot-separated numeric segments a requirement wrote before any pre-release or build.
+fn numeric_parts<a>(text: &a [u8]) -> u64 {
+    mut count: u64 = 1;
+    for i in text.len() {
+        c := text[i];
+        if c == '.' {
+            count += 1;
+        }
+        if (c == '-') || (c == '+') {
+            break;
+        }
+    }
+    return count;
+}
+struct OpRead {
+    op: u64,
+    at: u64
+}
+fn req_op<a>(text: &a [u8]) -> OpRead {
+    if startsb(view(text), view(">=")) {
+        return OpRead { op: 1, at: 2 };
+    }
+    if startsb(view(text), view("<=")) {
+        return OpRead { op: 3, at: 2 };
+    }
+    if startsb(view(text), view(">")) {
+        return OpRead { op: 2, at: 1 };
+    }
+    if startsb(view(text), view("<")) {
+        return OpRead { op: 4, at: 1 };
+    }
+    if startsb(view(text), view("=")) {
+        return OpRead { op: 0, at: 1 };
+    }
+    if startsb(view(text), view("^")) {
+        return OpRead { op: 5, at: 1 };
+    }
+    if startsb(view(text), view("~")) {
+        return OpRead { op: 6, at: 1 };
+    }
+    return OpRead { op: 5, at: 0 };
+}
+pub fn requirement_parse<a>(text: &a [u8]) -> Req |? Err {
+    t := trim(view(text));
+    if t.len() == 0 {
+        return verr(copyb(view("empty version requirement")));
+    }
+    if eqb(view(t), view("*")) {
+        return req_any();
+    }
+    pieces := split_char(view(t), ',');
+    mut cmps = Cmp[];
+    for i in pieces.len() {
+        piece := trim(&item(&pieces, i));
+        if piece.len() == 0 {
+            return err(0, catb(view("empty comparator in requirement <"), view(catb(view(t), view(">")))));
+        }
+        read := req_op(&piece);
+        op := read.op;
+        body := trim(&tail_from(&piece, read.at));
+        if body.len() == 0 {
+            return err(0, catb(view("comparator with no version in <"), view(catb(view(t), view(">")))));
+        }
+        match version_parse_full(view(body), 0) {
+            v: Ver => {
+                cmps.push(cmp_new(op, v, numeric_parts(view(body))));
+            },
+            e: Err => {
+                return err(0, catb(view("bad version in <"), view(catb(view(piece), view(">")))));
+            }
+        }
+    }
+    return Req { text: copyb(view(text)), cmps: cmps, any: 0 };
+}
+fn caret_upper(c: (&a Cmp)) -> Ver {
+    v := &c.ver;
+    mut out = ver_new(v.major + 1, 0, 0, u8[]);
+    if v.major == 0 {
+        if c.parts == 1 {
+            return ver_new(1, 0, 0, u8[]);
+        }
+        if 0 < v.minor {
+            return ver_new(0, v.minor + 1, 0, u8[]);
+        }
+        if c.parts == 2 {
+            return ver_new(0, 1, 0, u8[]);
+        }
+        return ver_new(0, 0, v.patch + 1, u8[]);
+    }
+    return out;
+}
+fn tilde_upper(c: (&a Cmp)) -> Ver {
+    v := &c.ver;
+    if 1 < c.parts {
+        return ver_new(v.major, v.minor + 1, 0, u8[]);
+    }
+    return ver_new(v.major + 1, 0, 0, u8[]);
+}
+fn cmp_match(c: (&a Cmp), v: (&b Ver)) -> bool {
+    cv := &c.ver;
+    order := version_cmp(v, cv);
+    if c.op == 0 {
+        return order == 0;
+    }
+    if c.op == 1 {
+        return order != 2;
+    }
+    if c.op == 2 {
+        return order == 1;
+    }
+    if c.op == 3 {
+        return order != 1;
+    }
+    if c.op == 4 {
+        return order == 2;
+    }
+    if order == 2 {
+        return false;
+    }
+    if c.op == 5 {
+        hi := caret_upper(c);
+        return version_cmp(v, &hi) == 2;
+    }
+    if c.op == 6 {
+        hi := tilde_upper(c);
+        return version_cmp(v, &hi) == 2;
+    }
+    return false;
+}
+// A pre-release candidate only matches a requirement that itself names a pre-release of the same
+// MAJOR.MINOR.PATCH: `1.2` never quietly selects `1.3.0-alpha.1`.
+fn pre_release_ok(r: (&a Req), v: (&b Ver)) -> bool {
+    if v.pre.len() == 0 {
+        return true;
+    }
+    for i in r.cmps.len() {
+        c := &r.cmps[i];
+        if c.ver.pre.len() != 0 {
+            if (c.ver.major == v.major) && (c.ver.minor == v.minor) && (c.ver.patch == v.patch) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+pub fn requirement_match(r: (&a Req), v: (&b Ver)) -> bool {
+    if !pre_release_ok(r, v) {
+        return false;
+    }
+    if r.any != 0 {
+        return true;
+    }
+    for i in r.cmps.len() {
+        if !cmp_match(&r.cmps[i], v) {
+            return false;
+        }
+    }
+    return true;
+}
+// `pkg-semver-*` regression cases: parse two versions and say how they order.
+pub fn semver_order<a, b>(left: &a [u8], right: &b [u8]) -> u8[] {
+    match version_parse(view(left)) {
+        x: Ver => {
+            match version_parse(view(right)) {
+                y: Ver => {
+                    order := version_cmp(&x, &y);
+                    if order == 0 {
+                        return copyb(view("equal"));
+                    }
+                    if order == 1 {
+                        return copyb(view("greater"));
+                    }
+                    return copyb(view("less"));
+                },
+                e: Err => {
+                    return catb(view("error: "), view(err_text(&e)));
+                }
+            }
+        },
+        e: Err => {
+            return catb(view("error: "), view(err_text(&e)));
+        }
+    }
+}
+// `pkg-req-*` regression cases: does a version satisfy a requirement?
+pub fn semver_match<a, b>(version: &a [u8], requirement: &b [u8]) -> u8[] {
+    match version_parse(view(version)) {
+        v: Ver => {
+            match requirement_parse(view(requirement)) {
+                r: Req => {
+                    if requirement_match(&r, &v) {
+                        return copyb(view("match"));
+                    }
+                    return copyb(view("no match"));
+                },
+                e: Err => {
+                    return catb(view("error: "), view(err_text(&e)));
+                }
+            }
+        },
+        e: Err => {
+            return catb(view("error: "), view(err_text(&e)));
+        }
+    }
+}
