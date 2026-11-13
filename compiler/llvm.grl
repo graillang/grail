@@ -2022,8 +2022,7 @@ fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit
         v := value(&mut l, view(o[0]), 64);
         hk := header_operand(&l, view(o[1]));
         store(&mut l, view(o[1]), view(v), 64);
-        dn := storage_of(&l, view(o[1]));
-        set_chain(&mut l, dn, sk, ss, so);
+        set_chain(&mut l, storage_of(&l, view(o[1])), sk, ss, so);
         if hk != 0 {
             // The fact is established here: this word is the header, so `data` and `len` are read
             // once on this path and the region that follows uses those two words.
@@ -2055,8 +2054,7 @@ fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit
         p := address(&mut l, view(o[0]));
         v := def(&mut l, view("ptrtoint ptr {} to i64"), &u8[][p]);
         store(&mut l, view(o[1]), view(v), 64);
-        ln := storage_of(&l, view(o[1]));
-        set_chain(&mut l, ln, 0, 0, 0);
+        set_chain(&mut l, storage_of(&l, view(o[1])), 0, 0, 0);
         if hk != 0 {
             // The slot's address escapes: the callee may rebind it and it may grow the header.
             stale(&mut l, hk - 1);
@@ -3076,8 +3074,7 @@ fn rg_lset(rc: (&RC), st: (&mut u64[]), k: u64, have: u64, lb: u64, gen: u64) ->
 // The length of identity k may have changed: the lower bound is gone and every bound stated
 // against the old length is invalid.
 fn rg_kill_len(rc: (&RC), st: (&mut u64[]), k: u64) -> unit {
-    g := rg_lgen(&rc, &st, k);
-    rg_lset(&rc, &mut st, k, 0, 0, wrapping_add(g, 1));
+    rg_lset(&rc, &mut st, k, 0, 0, wrapping_add(rg_lgen(&rc, &st, k), 1));
     return ();
 }
 // The length of identity k grows by `n`: a bound that was known stays known, and the generation
@@ -3089,14 +3086,12 @@ fn rg_grow_len(rc: (&RC), st: (&mut u64[]), k: u64, n: u64) -> unit {
         have = 1;
         lb = wrapping_add(rg_lb(&rc, &st, k), n);
     }
-    g := rg_lgen(&rc, &st, k);
-    rg_lset(&rc, &mut st, k, have, lb, wrapping_add(g, 1));
+    rg_lset(&rc, &mut st, k, have, lb, wrapping_add(rg_lgen(&rc, &st, k), 1));
     return ();
 }
 // The length of identity k is exactly `n`, which is what a fill of a constant count says.
 fn rg_set_len(rc: (&RC), st: (&mut u64[]), k: u64, n: u64) -> unit {
-    g := rg_lgen(&rc, &st, k);
-    rg_lset(&rc, &mut st, k, 1, n, wrapping_add(g, 1));
+    rg_lset(&rc, &mut st, k, 1, n, wrapping_add(rg_lgen(&rc, &st, k), 1));
     return ();
 }
 // dst |= src over both halves of the state; 1 when dst changed. With `widen` set - from the fourth
@@ -3322,8 +3317,7 @@ fn rg_wrote(rc: (&RC), st: (&mut u64[]), op: (&[u8])) -> unit {
         return ();
     }
     if rg_k(&st, m.base) == 3 {
-        sk := rg_lo(&st, m.base);
-        rg_clear(&mut st, 14 + sk);
+        rg_clear(&mut st, 14 + rg_lo(&st, m.base));
     }
     for k in rc.esc.len() {
         if rc.esc[k] != 0 {
@@ -3522,9 +3516,7 @@ fn rg_call(rc: (&RC), st: (&mut u64[]), target: (&[u8]), seed: u64, trip: u64) -
             rg_header(&mut st, 0, seed - 1);
             if h != 0 {
                 hv := rg_have(&rc, &st, h - 1);
-                lb := rg_lb(&rc, &st, h - 1);
-                g := rg_lgen(&rc, &st, seed - 1);
-                rg_lset(&rc, &mut st, seed - 1, hv, lb, g);
+                rg_lset(&rc, &mut st, seed - 1, hv, rg_lb(&rc, &st, h - 1), rg_lgen(&rc, &st, seed - 1));
             }
         }
         return ();
@@ -3688,9 +3680,7 @@ fn rg_step(rc: (&RC), st: (&mut u64[]), line: (&[u8]), seed: u64, trip: u64, at:
             if rg_sym(&st, dloc) == 0 {
                 neg = 1;
             }
-            price := rg_lo(&st, dloc);
-            prel := rg_hi(&st, dloc);
-            rg_put(&mut st, dloc, 5, price, prel, neg, 0);
+            rg_put(&mut st, dloc, 5, rg_lo(&st, dloc), rg_hi(&st, dloc), neg, 0);
             return ();
         }
         if dloc != rg_none() {
@@ -4084,8 +4074,7 @@ fn rg_bound(rc: (&RC), st: (&mut u64[]), x: (&[u8]), y: (&[u8]), rel: u64) -> un
     if yr.ok == 4 {
         // `x < len(k)`: a bound against the length word itself, valid while that length stands.
         if rel == 1 {
-            g := rg_lgen(&rc, &st, yr.lo);
-            rg_word(&mut st, loc, lo, hi, yr.lo + 1, g);
+            rg_word(&mut st, loc, lo, hi, yr.lo + 1, rg_lgen(&rc, &st, yr.lo));
         }
         return ();
     }
@@ -4333,8 +4322,7 @@ fn rg_fill_exit(rc: (&RC), st: (&mut u64[]), first: u64) -> unit {
                 if (rg_have(&rc, &st, k) != 0) && (rg_lb(&rc, &st, k) > lb) {
                     lb = rg_lb(&rc, &st, k);
                 }
-                g := rg_lgen(&rc, &st, k);
-                rg_lset(&rc, &mut st, k, 1, lb, wrapping_add(g, 1));
+                rg_lset(&rc, &mut st, k, 1, lb, wrapping_add(rg_lgen(&rc, &st, k), 1));
             }
         }
         if rc.fill_next[e] == 0 {

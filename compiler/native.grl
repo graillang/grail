@@ -10485,8 +10485,7 @@ fn parse_reference<a>(c: (&a mut C)) -> u64 {
 }
 // Whether the type before the parser is `dyn I`: what `&dyn I` in a body borrows.
 fn dyn_type_ahead<a>(c: (&a mut C)) -> bool {
-    p := c.pos;
-    return is(&mut c, view("dyn")) && (kind_at(&mut c, p + 1) == 1);
+    return is(&mut c, view("dyn")) && (kind_at(&mut c, c.pos + 1) == 1);
 }
 // `*T` / `*mut T`: a raw pointer (kind 34, argument T, mode 1 when mutable). It is one word, Copy
 // and has no drop; every operation on it needs an `unsafe` block (docs/design/unsafe.md).
@@ -10511,8 +10510,7 @@ fn parse_type_base<a>(c: (&a mut C)) -> u64 {
         return parse_raw_pointer(&mut c);
     }
     // `dyn I` / `dyn module::I`: a value of any type implementing I, chosen at run time.
-    here_dyn := c.pos;
-    if is(&mut c, view("dyn")) && (kind_at(&mut c, here_dyn + 1) == 1) {
+    if is(&mut c, view("dyn")) && (kind_at(&mut c, c.pos + 1) == 1) {
         advance(&mut c);
         first := ident(&mut c);
         mut m = module_copy(&mut c);
@@ -14403,8 +14401,7 @@ fn ct_if<a>(c: (&a mut C), pass: u64, top: u64) -> unit {
         if !eat(&mut c, view("else")) {
             return ();
         }
-        after := c.pos + 1;
-        if (kind(&mut c) == 64) & is_at(&mut c, after, view("if")) {
+        if (kind(&mut c) == 64) & is_at(&mut c, c.pos + 1, view("if")) {
             advance(&mut c);
             advance(&mut c);
             continue;
@@ -19428,8 +19425,7 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
     }
     if method == 3 {
         formal := c.params[template_first];
-        lin := c.lazy_input;
-        prepared := method_receiver(&mut c, lin, c.lazy_inty, c.lazy_xty, formal);
+        prepared := method_receiver(&mut c, c.lazy_input, c.lazy_inty, c.lazy_xty, formal);
         if c.raw == 0 {
             require_type(&mut c, prepared.ty, formal);
         }
@@ -23764,8 +23760,7 @@ fn adopt_literal<a>(c: (&a mut C), start: u64, end: u64, ty: u64) -> bool {
     if (c.lit_start != start) || (c.lit_end != end) {
         return false;
     }
-    value := c.lit_value;
-    if literal_fits(&mut c, ty, value, c.lit_negative) == 0 {
+    if literal_fits(&mut c, ty, c.lit_value, c.lit_negative) == 0 {
         fail(&mut c, view("integer literal out of range for its type"));
     }
     return true;
@@ -23981,8 +23976,7 @@ fn adopt_float<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) ->
     if is_f32(&mut c, v.ty) {
         return v;
     }
-    ftok := c.flit_tok;
-    slot := float_literal_slot(&mut c, ftok, c.flit_neg);
+    slot := float_literal_slot(&mut c, c.flit_tok, c.flit_neg);
     return val(slot, expected);
 }
 fn float_literal_slot<a>(c: (&a mut C), tok: u64, negative: u64) -> u64 {
@@ -27491,8 +27485,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
                 return string_from_bytes(&mut c, &field_name);
             }
             if same(view(what), view("index")) {
-                index := c.ct_loop_index[b - 1];
-                return val(imm(&mut c, index), int_type(&mut c, 64, 0));
+                return val(imm(&mut c, c.ct_loop_index[b - 1]), int_type(&mut c, 64, 0));
             }
             fail(&mut c, view("a field from @for has .name and .index (and x.@f for the value)"));
         }
@@ -27905,8 +27898,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
     }
     // `module::Type[...]` / `module::Type[]`: a type-first collection literal of another
     // module's type (the head re-read as a type, as for an unqualified `Type[`).
-    q2 := c.pos + 2;
-    if is(&mut c, view("::")) & (kind_at(&mut c, q2) == 91) {
+    if is(&mut c, view("::")) & (kind_at(&mut c, c.pos + 2) == 91) {
         qname := tok_text(&mut c, c.pos + 1);
         if find_decl(&mut c, view(first), view(qname)) != 0 {
             back := c.pos - 1;
@@ -31385,8 +31377,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
         if dst == 0 {
             fail(&mut c, view("jump outside loop"));
         }
-        mark := c.loopmark;
-        cleanup(&mut c, mark);
+        cleanup(&mut c, c.loopmark);
         if b {
             edge := ownership::snapshot(&c.check);
             if c.hasbreak != 0 {
@@ -31396,8 +31387,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
                 exchange(&mut c.hasbreak, 1);
             }
         } else {
-            loopstate := ownership::snapshot(&c.loopcheck);
-            if !backedge_ok(&mut c, &loopstate) {
+            if !backedge_ok(&mut c, &ownership::snapshot(&c.loopcheck)) {
                 fail(&mut c, view("continue consumes loop-entry storage"));
             }
         }
@@ -31431,8 +31421,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
         cleanup(&mut c, 0);
         restore := c.export_tls;
         if restore != 0 {
-            adopted := c.export_adopt;
-            tls_leave_callback(&mut c, restore, adopted);
+            tls_leave_callback(&mut c, restore, c.export_adopt);
         }
         if borrowed_object(&mut c, v.ty) != 0 {
             // The pair travels by value: data in %rax, vtable in %rdx. The caller stores both in its
@@ -31810,8 +31799,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
         exchange(&mut c.loop_end, loopend);
         loopmark := c.resources.len();
         exchange(&mut c.loopmark, loopmark);
-        current := ownership::snapshot(&c.check);
-        oldloop := exchange(&mut c.loopcheck, current);
+        oldloop := exchange(&mut c.loopcheck, ownership::snapshot(&c.check));
         oldbreak := exchange(&mut c.breaks, ownership::new());
         oldhas := c.hasbreak;
         exchange(&mut c.hasbreak, 0);
@@ -31888,8 +31876,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
             }
         }
         if c.terminated == 0 {
-            loopstate := ownership::snapshot(&c.loopcheck);
-            if !backedge_ok(&mut c, &loopstate) {
+            if !backedge_ok(&mut c, &ownership::snapshot(&c.loopcheck)) {
                 fail(&mut c, view("loop backedge consumes entry storage"));
             }
         }
@@ -31902,8 +31889,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
             ownership::merge(&mut c.check, &entry);
         }
         if c.hasbreak != 0 {
-            broken := ownership::snapshot(&c.breaks);
-            ownership::merge(&mut c.check, &broken);
+            ownership::merge(&mut c.check, &ownership::snapshot(&c.breaks));
         }
         exchange(&mut c.terminated, 0);
         pop_locals(&mut c, mark);
@@ -32293,8 +32279,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
                 current := deref_value(&mut c, val(rt, rty));
                 rstart := c.pos;
                 mut rhs = expr(&mut c, 0);
-                rend := c.pos;
-                rhs = adopt_value(&mut c, rhs, rstart, rend, current.ty);
+                rhs = adopt_value(&mut c, rhs, rstart, c.pos, current.ty);
                 v = compound_value(&mut c, compound_operator(op), current.t, rhs, current.ty);
             } else {
                 fail(&mut c, view("expected = after *reference"));
@@ -32412,8 +32397,7 @@ fn carray_assign<a>(c: (&a mut C), id: u64, ty: u64) -> u64 {
         return 0;
     }
     name_at := c.pos + 1;
-    eq_at := c.pos + 2;
-    if (kind_at(&mut c, name_at) != 1) || (kind_at(&mut c, eq_at) != 61) {
+    if (kind_at(&mut c, name_at) != 1) || (kind_at(&mut c, c.pos + 2) != 61) {
         return 0;
     }
     d := ty_arg(&mut c, rty);
@@ -37341,8 +37325,7 @@ pub fn main() -> u64 {
         iface_check_manifest(&mut c, view(iface_dir));
     }
     if c.iface_use.len() != 0 {
-        used := c.iface_use.copy();
-        iface_load_used(&mut c, view(used));
+        iface_load_used(&mut c, view(c.iface_use.copy()));
     }
     n := argc - offset;
     if !(2 < n) {
