@@ -2055,6 +2055,27 @@ fn site_entry<a>(entries: (&a mut u8[]), count: u64, file: u64, flags: u64) -> u
     entries.push(10);
     return ();
 }
+// A function's start address, which names the range a return address falls in.
+fn site_func_label<a>(out: (&a mut u8[]), count: u64) -> unit {
+    push_bytes(&mut out, view(".Lgn"));
+    decimal(&mut out, count);
+    push_bytes(&mut out, view(":\n"));
+    return ();
+}
+// One function range: its start, and its name - zero for the runtime's own functions, whose frames
+// a backtrace leaves out.
+fn site_func_entry<a>(entries: (&a mut u8[]), count: u64, name: u64) -> unit {
+    push_bytes(&mut entries, view(".quad .Lgn"));
+    decimal(&mut entries, count);
+    if name == 0 {
+        push_bytes(&mut entries, view("\n.quad 0\n"));
+        return ();
+    }
+    push_bytes(&mut entries, view("\n.quad .Lgh"));
+    decimal(&mut entries, name);
+    entries.push(10);
+    return ();
+}
 // Turns the markers into the site table. Each statement gets a label, and the code from that label to
 // the next names the statement: a frame whose return address is in it was called from there, which
 // says where a check failed (the innermost such frame) and where it was called from (each frame
@@ -2077,6 +2098,15 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
     mut pending_site = false;
     mut count = 0;
     mut line = u8[];
+    // The function table (grail_funcs): one (start, name) entry per function, name 0 for the
+    // runtime's own. A frame's return address names the function it lies in, so a backtrace of a
+    // returned error can say which function created it.
+    mut funcs = u8[];
+    mut names = u8[];
+    mut name_count = 0;
+    mut func_count = 0;
+    mut pending_func = 0;
+    mut pending_name = u8[];
     for i in text.len() {
         b := text[i];
         if b != 10 {
@@ -2097,6 +2127,28 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
                     cur_line = w[1];
                     cur_col = w[2];
                     cur_internal = internal;
+                }
+                // The pending function's first statement names its table entry: the runtime's own
+                // functions have none, so a backtrace never prints `rt_` frames.
+                if pending_func != 0 {
+                    mut func_name = 0;
+                    if !internal {
+                        name_count += 1;
+                        func_name = name_count;
+                        push_bytes(&mut names, view(".Lgh"));
+                        decimal(&mut names, name_count);
+                        push_bytes(&mut names, view(":\n.asciz \""));
+                        for k in pending_name.len() {
+                            ch := pending_name[k];
+                            if (ch == 34) || (ch == 92) {
+                                names.push(92);
+                            }
+                            names.push(ch);
+                        }
+                        push_bytes(&mut names, view("\"\n"));
+                    }
+                    site_func_entry(&mut funcs, pending_func, func_name);
+                    pending_func = 0;
                 }
                 // Held until the statement's first instruction: two statements with no code between
                 // them would otherwise open the same address, and the later one owns it.
@@ -2126,6 +2178,16 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
                 site_label(&mut out, count);
                 site_entry(&mut entries, count, 0, 0);
                 count += 1;
+                // This function's table entry waits for its first statement: only a `.gpos` says
+                // whether the function belongs to the unsafe runtime, whose frames a backtrace skips
+                // exactly as a failure report skips their statements.
+                if pending_func != 0 {
+                    site_func_entry(&mut funcs, pending_func, 0);
+                }
+                func_count += 1;
+                site_func_label(&mut out, func_count);
+                pending_func = func_count;
+                pending_name = span_copy(view(line), 0, line.len() - 1);
             }
         }
         if pending_site && !site_starts(view(line), view(".")) {
@@ -2172,6 +2234,12 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
     if line.len() != 0 {
         push_bytes(&mut out, view(line));
     }
+    // A last function whose body holds no statement (the entry shim, a body of only calls emitted
+    // without positions) keeps its range and no name.
+    if pending_func != 0 {
+        site_func_entry(&mut funcs, pending_func, 0);
+        pending_func = 0;
+    }
     // rt_sites(out): the table's bounds and the caller's frame pointer, for runtime.grl
     // rt_fail_where. The body is Grail's pseudo text: it is x86-64 as it stands, and machine::lower
     // turns it into AArch64 or RISC-V for those targets.
@@ -2180,9 +2248,12 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
     if !pe {
         // An ELF or Mach-O linker gives the section its start and stop symbols; the helper is weak
         // because every object of a separately compiled program carries one and the linker keeps one.
-        push_bytes(&mut out, view(".weak __start_grail_sites\n.weak __stop_grail_sites\n.weak rt_sites\n"));
+        push_bytes(&mut out, view(".weak __start_grail_sites\n.weak __stop_grail_sites\n.weak __start_grail_funcs\n.weak __stop_grail_funcs\n.weak rt_sites\n"));
     }
-    push_bytes(&mut out, view("rt_sites:\nleaq __start_grail_sites(%rip),%rax\nmovq %rax,(%rdi)\nleaq __stop_grail_sites(%rip),%rax\nmovq %rax,8(%rdi)\nmovq %rbp,16(%rdi)\nxorq %rax,%rax\nret\n"));
+    // The five words are the two tables' bounds and the caller's frame pointer. A runtime that only
+    // reads the first three (a seed-built one) is unaffected; one that reads all five names the
+    // functions a stack walk finds.
+    push_bytes(&mut out, view("rt_sites:\nleaq __start_grail_sites(%rip),%rax\nmovq %rax,(%rdi)\nleaq __stop_grail_sites(%rip),%rax\nmovq %rax,8(%rdi)\nmovq %rbp,16(%rdi)\nleaq __start_grail_funcs(%rip),%rax\nmovq %rax,24(%rdi)\nleaq __stop_grail_funcs(%rip),%rax\nmovq %rax,32(%rdi)\nxorq %rax,%rax\nret\n"));
     // Past the end of the text the table says nothing: a frame whose return address is out there (in
     // libc above the image, say) is not one of the program's own.
     site_label(&mut out, count);
@@ -2203,6 +2274,15 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
         push_bytes(&mut out, view(entries));
         push_bytes(&mut out, view(".section .rodata\n"));
     }
+    if pe {
+        push_bytes(&mut out, view("\n.section grail_funcs$a,\"dr\"\n__start_grail_funcs:\n.section grail_funcs$b,\"dr\"\n.p2align 3\n"));
+        push_bytes(&mut out, view(funcs));
+        push_bytes(&mut out, view(".section grail_funcs$z,\"dr\"\n__stop_grail_funcs:\n.section .rdata,\"dr\"\n"));
+    } else {
+        push_bytes(&mut out, view("\n.section grail_funcs,\"a\"\n.p2align 3\n"));
+        push_bytes(&mut out, view(funcs));
+        push_bytes(&mut out, view(".section .rodata\n"));
+    }
     cwd := host::env(view("PWD"));
     for f in files.len() {
         push_bytes(&mut out, view(".Lgf"));
@@ -2219,6 +2299,7 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
         }
         push_bytes(&mut out, view("\"\n"));
     }
+    push_bytes(&mut out, view(names));
     push_bytes(&mut out, view(".text\n"));
     return out;
 }
@@ -28165,6 +28246,12 @@ fn primary<a>(c: (&a mut C)) -> Val {
             if d == 0 {
                 fail(&mut c, view("unknown enum"));
             }
+            // `module::Type::method(...)`: the type's own function, as the two-part spelling finds it,
+            // before the variant constructor of the same name (a type may have both).
+            owner := private_module(view(".inherent_"), d - 1);
+            if find_func(&mut c, view(owner), view(third)) != 0 {
+                return call(&mut c, view(owner), view(third));
+            }
             return variant(&mut c, d - 1, view(third), NO_TYPE);
         }
         interface := find_interface(&c, view(m), view(first));
@@ -37471,6 +37558,9 @@ pub fn main() -> u64 {
     host_fn(&mut c, view("exit"), 1);
     host_fn(&mut c, view("remove"), 0);
     host_fn(&mut c, view("create_dir"), 0);
+    // The stack where it is called, one `  at NAME (FILE:LINE:COL)` line per frame, or no text when
+    // this build carries no tables (runtime.grl rt_backtrace). Empty argument list, owned bytes.
+    host_fn(&mut c, view("backtrace"), 2);
     argc := host::argc();
     mut offset = 0;
     if 1 < argc {

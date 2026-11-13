@@ -158,6 +158,9 @@ fn rt_trap(a: u64, b: u64, kind: u64) -> u64 {
 fn rt_fail_limit() -> u64 {
     return 3900;
 }
+// A literal at the call site is a heap value in this module and no dropper releases it; that is
+// invisible to rt_fail, which ends the process, and rt_backtrace therefore writes its punctuation
+// byte by byte instead of calling this.
 fn rt_fail_put(buf: u64, n: u64, text: string) -> u64 {
     mut at = n;
     for i in text.len() {
@@ -226,7 +229,7 @@ fn rt_fail_where(buf: u64, n: u64) -> u64 {
     if helper == 0 {
         return n;
     }
-    info := rt_alloc(24);
+    info := rt_alloc(40);
     raw_call2(helper, info, 0);
     begin := raw_load(info);
     end := raw_load(info + 8);
@@ -277,16 +280,22 @@ fn rt_fail_where(buf: u64, n: u64) -> u64 {
     }
     return at;
 }
+// A NUL-terminated string at `p`, written up to the failure buffer's limit.
+fn rt_fail_cstr(buf: u64, n: u64, p: u64) -> u64 {
+    mut at = n;
+    mut i = 0;
+    while (raw_byte(p + i) != 0) & (at < rt_fail_limit()) {
+        raw_putbyte(buf + at, raw_byte(p + i));
+        at = at + 1;
+        i = i + 1;
+    }
+    return at;
+}
 // One backtrace line: `mark`, then the entry's file, line and column.
 fn rt_fail_line(buf: u64, n: u64, e: u64, mark: string) -> u64 {
     mut at = rt_fail_put(buf, n, mark);
     name := raw_load(e + 8);
-    mut i = 0;
-    while (raw_byte(name + i) != 0) & (at < rt_fail_limit()) {
-        raw_putbyte(buf + at, raw_byte(name + i));
-        at = at + 1;
-        i = i + 1;
-    }
+    at = rt_fail_cstr(buf, at, name);
     flags := raw_load(e + 16);
     raw_putbyte(buf + at, 58);
     at = rt_fail_num(buf, at + 1, flags & 4294967295);
@@ -294,6 +303,114 @@ fn rt_fail_line(buf: u64, n: u64, e: u64, mark: string) -> u64 {
     at = rt_fail_num(buf, at + 1, (flags >> 32) & 2147483647);
     raw_putbyte(buf + at, 10);
     return at + 1;
+}
+// The table entry with the greatest address not past `addr`, or 0 when the table names none.
+// `stride` is 24 for a statement entry (address, file, line | column << 32) and 16 for a function
+// entry (address, name).
+fn rt_site_find(begin: u64, end: u64, addr: u64, stride: u64) -> u64 {
+    mut hit = 0;
+    mut hit_at = 0;
+    mut e = begin;
+    while e < end {
+        a := raw_load(e);
+        mut take = a <= addr;
+        if take && (hit != 0) {
+            take = hit_at < a;
+        }
+        if take {
+            hit = e;
+            hit_at = a;
+        }
+        e = e + stride;
+    }
+    return hit;
+}
+// One stack line: `  at NAME (FILE:LINE:COL)`. The position is left off when the frame's return
+// address is in a prologue, which the statement table enters with no file. The fixed text is written
+// a byte at a time: a literal in this module becomes a heap value no dropper releases, which a
+// capture that returns cannot afford (rt_fail_put's callers all end the process).
+fn rt_bt_line(buf: u64, n: u64, name: u64, site: u64) -> u64 {
+    raw_putbyte(buf + n, 32);
+    raw_putbyte(buf + n + 1, 32);
+    raw_putbyte(buf + n + 2, 97);
+    raw_putbyte(buf + n + 3, 116);
+    raw_putbyte(buf + n + 4, 32);
+    mut at = rt_fail_cstr(buf, n + 5, name);
+    if site == 0 {
+        raw_putbyte(buf + at, 10);
+        return at + 1;
+    }
+    file := raw_load(site + 8);
+    if file == 0 {
+        raw_putbyte(buf + at, 10);
+        return at + 1;
+    }
+    raw_putbyte(buf + at, 32);
+    raw_putbyte(buf + at + 1, 40);
+    at = rt_fail_cstr(buf, at + 2, file);
+    flags := raw_load(site + 16);
+    raw_putbyte(buf + at, 58);
+    at = rt_fail_num(buf, at + 1, flags & 4294967295);
+    raw_putbyte(buf + at, 58);
+    at = rt_fail_num(buf, at + 1, (flags >> 32) & 2147483647);
+    raw_putbyte(buf + at, 41);
+    raw_putbyte(buf + at + 1, 10);
+    return at + 2;
+}
+// An empty owned text: what a capture returns when this build carries no tables, so a caller prints
+// its message alone instead of a stack it had to guess.
+fn rt_no_backtrace() -> u64 {
+    return rt_lit(0, 0);
+}
+// The call stack now, one `  at NAME (FILE:LINE:COL)` line per program frame, innermost first
+// (host::backtrace). It walks the frame-pointer chain exactly as rt_fail_where does and names each
+// frame from the compiler's two tables: the function whose range holds the return address, and the
+// statement it is in. A frame in the runtime's own functions, in libc or in a function prologue the
+// statement table cannot name is left out, so what is printed is the program's own stack.
+//
+// It refuses rather than guesses: no helper in process state (a seed-built compiler, macOS, the LLVM
+// backend, --debug, --split), or a zero-length or absent function table, returns no text at all.
+fn rt_backtrace() -> u64 {
+    helper := raw_load(raw_state() + 3400);
+    if helper == 0 {
+        return rt_no_backtrace();
+    }
+    info := rt_alloc(40);
+    raw_call2(helper, info, 0);
+    begin := raw_load(info);
+    end := raw_load(info + 8);
+    fbegin := raw_load(info + 24);
+    fend := raw_load(info + 32);
+    mut frame = raw_load(info + 16);
+    rt_free(info);
+    // A runtime that reads the first three words of a helper emitted before the function table
+    // existed sees zeros here, which is the same refusal.
+    if ((begin == 0) + (end <= begin) + (fbegin == 0) + (fend <= fbegin)) != 0 {
+        return rt_no_backtrace();
+    }
+    buf := rt_alloc(rt_fail_limit());
+    mut n = 0;
+    mut depth = 0;
+    mut lines = 0;
+    while (frame != 0) & (depth < 64) & (lines < 32) & (n + 256 < rt_fail_limit()) {
+        ret := raw_load(frame + 8);
+        f := rt_site_find(fbegin, fend, ret, 16);
+        if f != 0 {
+            name := raw_load(f + 8);
+            if name != 0 {
+                n = rt_bt_line(buf, n, name, rt_site_find(begin, end, ret, 24));
+                lines = lines + 1;
+            }
+        }
+        frame = raw_load(frame);
+        depth = depth + 1;
+    }
+    text := rt_lit(buf, n);
+    rt_free(buf);
+    return text;
+}
+fn f_host_backtrace() -> u64 {
+    return rt_backtrace();
 }
 fn rt_error(n: u64) -> u64 {
     return 18446744073709547520 < n;

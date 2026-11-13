@@ -43,6 +43,21 @@ and overflow; `parse_i64` also accepts a leading `-` and checks the signed range
 `from_i64` are their inverse. Building a line from parts needs no library call: `format("{} of {}",
 done, total)` is a builtin and returns a `string`, which is what `println` uses.
 
+## Errors
+
+`errs` is the standard error layer: `errs::Report` owns a root message, the context frames each layer
+added, a typed `io::Error` origin and - when the caller asks - the stack where it was created.
+`errs::report(text)` is the error path that allocates one value, `errs::traced(text)` the one that
+also captures a backtrace, and `errs::from_os(error, what)` the explicit conversion from a
+standard-library failure (there is no implicit `From`). `r.context(text)` consumes the report and
+returns it with one more frame, `show()` is the deterministic one-line chain (`outer: inner: cause`),
+`to_stderr()` prints that line and the captured stack, and `depth()`, `frame(i)`, `cause()` and
+`origin()` walk it. `errs::Error` is the interface behind it - one `message` method - for code that
+reports an error it did not create.
+
+An error reported from a returned value is a value, not a panic: nothing unwinds, and the report
+carries where it came from instead of stopping the program.
+
 ## Time
 
 `time::now()` reads the monotonic clock. Only differences of an `Instant` mean anything; the wall
