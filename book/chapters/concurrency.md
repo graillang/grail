@@ -63,6 +63,17 @@ cancelled before the scope ends. `scope.cancel()` cancels the scope, and an opti
 and `host::command` inside a green task hand the blocking work to a dedicated OS thread and suspend
 the task until it finishes, so other tasks keep running. A foreign (`extern "C"`) call does not get
 that treatment: it occupies the thread that makes it, and foreign calls stay on the main thread.
+Each `spawn` puts the task on the current worker's deque, and idle workers steal from each other's
+deques; there is one worker per CPU on every platform, Windows included. `host::worker_id()` returns
+the worker a task is running on (from 1, or 0 off a worker) and `host::workers()` the worker count,
+which is how a program can check that its work really spread.
+
+What is guaranteed is that a task runs until it yields or blocks and that a yield re-queues it. The
+*order* is not: with one worker per CPU two tasks can be running at the same time, so two tasks that
+print see whatever interleaving the host produced. A task's stack is a 1 MiB reservation that commits
+only the pages it touches, and recursing past the bottom of it is a named runtime error,
+`error: stack overflow`, with exit status 134 rather than a write into the neighbouring mapping.
+
 General `async`/`await` syntax is not provided; the scope and task APIs are the current surface.
 
 ## What this month added
@@ -79,6 +90,12 @@ Three things, and one of them removed work rather than adding it.
   two statements, with the pool's submit and wait underneath. The handle is move-only, its captures
   move into the job, its result is owned, and its drop waits - so dropping a handle is a
   wait-and-discard, not a leak and not a double free.
+- **One worker per CPU, on Windows too, with guarded stacks.** Windows used to multiplex every task
+  on one scheduler thread because it had no reactor; it now runs one worker per core with Win32
+  fibers and an I/O completion port, so a `spawn`ned CPU-bound task really runs beside another one.
+  Task stacks are reservations with a guard page (recycled on Linux and macOS), and running past the
+  bottom is `error: stack overflow` with exit 134. `host::worker_id()` and `host::workers()` expose
+  the scheduler; `docs/design/scheduler.md` is the mechanism.
 - **Classification instead of a guess.** Transferable and shareable are derived from a type's
   structure, default-denied for foreign handles, and they reach a closure's captures, which are now
   part of the closure's type. The practical effect is that a reference to thread-affine foreign state

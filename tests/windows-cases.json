@@ -227,7 +227,7 @@
     "linux": true,
     "stdout": "42\n9\n",
     "status": 0,
-    "note": "spawn/task_scope/parallel_map on the green scheduler: fibers on one scheduler thread, the same cooperative semantics Linux has",
+    "note": "spawn/task_scope/parallel_map on the M:N scheduler: fibers multiplexed over one worker per core, the same semantics Linux has",
     "tasks": true
   },
   {
@@ -236,7 +236,7 @@
     "linux": true,
     "stdout": "6\ntrue\n",
     "status": 0,
-    "note": "four sleeping tasks overlap: each parks the task and lets the others run (the sleep runs on a helper thread because Windows has no timerfd)",
+    "note": "four sleeping tasks overlap: each parks the task and lets the others run on other workers; the sleep is a completion port timer, not a blocked scheduler thread",
     "tasks": true
   },
   {
@@ -251,13 +251,13 @@
     "note": "extern records embedded by value at C offsets"
   },
   {
-    "name": "tasks-interleave-at-yield",
-    "file": "tests/concurrency/interleave.grl",
+    "name": "tasks-yield-both-progress",
+    "file": "tests/concurrency/yield_progress.grl",
     "entry": "main",
     "tasks": true,
-    "stdout": "aaabbbaaabbb3\n",
+    "stdout": "2003\n",
     "status": 0,
-    "note": "one scheduler thread, FIFO run queue: a task runs until it yields, so the two tasks alternate in a fixed order and neither is preempted mid-run. Not run as ELF: a Linux queue has a worker per CPU, where the order is deliberately free."
+    "note": "a yield re-queues the task: two tasks that yield in a loop both finish, so nothing is lost or duplicated. The interleaving order is deliberately not pinned any more - Windows now runs one worker per core, exactly like Linux, so two tasks really do run at once."
   },
   {
     "name": "tasks-sleep-progress",
@@ -383,5 +383,31 @@
       "input.grl:10:5\n"
     ],
     "note": "a failed check names its location and the frames above it: the call-site table sits in grouped PE sections (grail_sites$a/$b/$z) because a PE linker has no __start/__stop symbols"
+  },
+  {
+    "name": "tasks-many-spawn-join",
+    "source": "use host;\n// 2000 tasks spawned before the first join: the deques and the injection ring must not lose one, and\n// the checksum must be the same one the x86-64 native case computes from the same recurrence.\nfn unit(n: u64, unused: u64) -> u64 {\n    return (n * 2654435761) % 1000003;\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    mut many = Task<u64>[];\n    for i in 2000 {\n        many.push(spawn(sc, i, unit));\n    }\n    mut total = 0;\n    while many.len() != 0 {\n        total += join(many.pop());\n    }\n    return total;\n}\nfn main() {\n    println(task_scope(0, body));\n}\n",
+    "stdout": "1002638505\n",
+    "status": 0,
+    "tasks": true,
+    "note": "2000 tasks spawned and then joined, checksummed: the completion port, the deques and the fiber switch do not lose a task (the checksum is computed from the same recurrence as the native 100k case)"
+  },
+  {
+    "name": "tasks-workers-share-work",
+    "source": "use host;\n// A start barrier makes the spread a fact: a spinning task occupies its worker, so a second task\n// can only pass the barrier on another worker. With one worker per core there must be at least two\n// workers, so more than one worker id is seen; on a single-worker build the assertion degrades.\nstruct Ctx {\n    started: Atomic<u64>\n}\nfn work(n: u64, c: (&Ctx)) -> u64 {\n    c.started.fetch_add(1);\n    while c.started.load() < 2 {}\n    mut total = 0;\n    for i in n {\n        total += i % 7;\n    }\n    return total * 64 + (host::worker_id() & 63);\n}\nfn body<s>(sc: (&s Scope<(&Ctx)>), c: (&Ctx)) -> u64 {\n    mut many = Task<u64>[];\n    for i in 8 {\n        many.push(spawn(sc, 4000, work));\n    }\n    mut total = 0;\n    mut ids = 0;\n    while many.len() != 0 {\n        r := join(many.pop());\n        total += r / 64;\n        ids = ids | (r % 64);\n    }\n    mut distinct = 0;\n    mut m = ids;\n    for i in 64 {\n        distinct += m & 1;\n        m = m / 2;\n    }\n    assert(0 < distinct);\n    if 1 < host::workers() {\n        assert(1 < distinct);\n    }\n    return total;\n}\nfn main() {\n    println(task_scope(&Ctx { started: Atomic::new(0) }, body));\n}\n",
+    "stdout": "95952\n",
+    "status": 0,
+    "tasks": true,
+    "note": "a fork-join over fib-sized work records the worker id of every task; the start barrier forces two tasks onto two workers, so the Windows scheduler is M:N, not a single scheduler thread"
+  },
+  {
+    "name": "tasks-stack-overflow",
+    "source": "// Deep recursion in a task exhausts its fiber stack: the vectored exception handler names the\n// overflow and exits 134 instead of dying with an unexplained status.\nfn deep(n: u64, unused: u64) -> u64 {\n    if n == 0 {\n        return 0;\n    }\n    return deep(n - 1, 0) + 1;\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    t := spawn(sc, 1000000, deep);\n    return join(t);\n}\nfn main() {\n    println(\"before\");\n    println(task_scope(0, body));\n}\n",
+    "stdout": "before\n",
+    "status": 134,
+    "stderr": "error: stack overflow\n",
+    "tasks": true,
+    "note": "a task recurses past its fiber stack: STATUS_STACK_OVERFLOW reaches the vectored exception handler, which reports once and exits 134. Not executed under Wine: Wine cannot set up an exception frame on an exhausted fiber stack (its virtual_setup_exception reports 'stack overflow' and kills the process before any user handler runs; verified with a standalone fiber probe), so the case is verified statically here and runs on a real Windows host. The Linux/macOS guard-page path is executed by the native case of the same name.",
+    "noWineRun": true
   }
 ]

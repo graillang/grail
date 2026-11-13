@@ -63,37 +63,49 @@ or exposing Future state machines. This does **not** erase scheduling semantics:
 - Abort (a checked-arithmetic failure, an index bound, a failed `!`, `assert`, or an explicit
   abort) terminates the whole process immediately: it never unwinds, never returns to its caller,
   and runs no foreign cleanup. A blocking foreign call still blocks its thread (see below); an abort
-  inside a C callback therefore kills the process instead of returning into C. `rt_abort` sends
-  SIGABRT on POSIX and then calls the platform's cleanup-free exit (`exit_group` on Linux,
-  `TerminateProcess` on Windows, `_exit` on macOS); `exit(2)` and `ExitProcess` are never used on
-  this path because they run atexit handlers, C++ destructors or DLL detach. This work does not
-  claim panic isolation or unwinding that the language does not implement.
+  inside a C callback therefore kills the process instead of returning into C. Exactly one thread
+  reports: an atomic claim decides which, and the others park until the reporter's exit ends the
+  process, so two tasks failing at once print one message, not two. The main thread, an offload
+  helper and a thread foreign code created raise SIGABRT on POSIX (the platform's cleanup-free exit
+  then follows: `exit_group` on Linux, `TerminateProcess` on Windows, `_exit` on macOS); a scheduler
+  or pool worker exits with status 134 directly, because a signal raised from one of several
+  threads that may fail together is delivered to whichever thread the kernel picks and can race the
+  exit. `exit(2)` and `ExitProcess` are never used on this path because they run atexit handlers,
+  C++ destructors or DLL detach. This work does not claim panic isolation or unwinding that the
+  language does not implement.
 
 ## Platform mechanism: the same task semantics, a different switch
 
-A task is green on every platform. Windows used to run a thread-per-task scheduler because it has
-no epoll, eventfd or timerfd and the ELF backend's stack switch is not reachable there; that was a
-semantic divergence, not a porting detail, so it is gone. What a program may rely on is now the
-same everywhere:
+A task is green on every platform, and it is multiplexed over **one worker per CPU** on every
+platform, Windows included. What a program may rely on is the same everywhere:
 
-- `spawn` creates a task that runs on a scheduler thread until it *yields or blocks*. Suspension
-  parks the task, not the scheduler thread: the other tasks keep running.
+- `spawn` creates a task that is queued on the spawning worker's deque and runs there - or on
+  another worker that steals it - until it *yields or blocks*. Suspension parks the task, not the
+  worker: the other tasks keep running.
 - `sleep_ms`, `read_fd`, `write_fd` and the blocking host operations (`read_file`, `write_file`,
-  `command`) park the calling task. On Linux the reactor suspends it on an epoll registration or a
-  timer; on Windows the blocking call runs on a helper thread (`rt_offload`) and the task parks on
-  its park word. The observable behaviour is the same; only the mechanism is.
+  `command`) park the calling task. On Linux and macOS the reactor suspends it on a descriptor or
+  timer registration; on Windows it parks on the task's park word and is woken by a completion (the
+  blocking call runs on a helper thread) or by a timer on the reactor's heap. The observable
+  behaviour is the same; only the mechanism is.
 - `join`, task-scope exit, cancellation, result publication and the abort rules behave identically.
-- The interleaving *order* is not a portable guarantee. Linux works the run queue with one
-  scheduler thread per CPU (clamped to 4-64), so two ready tasks can run at the same time; Windows
-  has one scheduler thread, so its queue is FIFO and an interleaving there is deterministic.
+- The interleaving *order* is not a portable guarantee, and it is not deterministic anywhere: with
+  one worker per CPU two ready tasks really do run at the same time. What is guaranteed is that a
+  task gives up its worker only at a yield or a block, and that a yield re-queues it.
+- `host::worker_id()` and `host::workers()` expose the scheduler: the worker running the call (from
+  1, or 0 off a worker) and the worker count.
 
-Mechanically, the platform module supplies five functions (`rt_os_reactor`, `rt_os_workers`,
-`rt_os_sched_prepare`, `rt_os_ctx_new/enter/leave/release`): Linux switches stacks with
-`raw_switch` under an epoll reactor with one worker per CPU; Windows switches Win32 fibers
-(`CreateFiberEx`/`SwitchToFiber`) on a single scheduler thread and answers `rt_os_reactor()` with 0,
-so the runtime parks tasks inside offloaded operations instead of on readiness registrations. The
-`Scope`/`Task` API and its type rules above this line are unchanged, and so are the tests that pin
-them.
+Mechanically the platform module supplies the readiness source and the switch: Linux switches stacks
+with `raw_switch` under an epoll reactor with one worker per CPU, Windows switches Win32 fibers
+(`CreateFiberEx`/`SwitchToFiber`) with an I/O completion port as the reactor, and macOS switches with
+`raw_switch` under kqueue. A task stack is a 1 MiB reservation with a guard page at its low end on
+Linux and macOS (committed lazily, recycled through a per-worker free list), and a 64 KiB-committed
+in 1 MiB-reserved fiber stack on Windows (grown by the OS through guard pages). Running past the
+bottom is a named runtime error, `error: stack overflow`, and exit status 134 - not a silent write
+into a neighbouring mapping.
+
+A reactor that cannot be created is not fatal: the scheduler runs without it and the operations
+that wanted it fall back to offload. `docs/design/scheduler.md` states the deques, the parking
+protocol, the stacks, the reactors and what each platform is verified by.
 
 ### The opt-in thread-per-task scheduler
 

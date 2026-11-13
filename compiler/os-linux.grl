@@ -127,6 +127,14 @@ fn rt_syscall4(n: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
     if n == 25 {
         return raw_syscall4(216, a, b, c, d);
     }
+    // Signal setup: the portable runtime asks with the x86-64 numbers, and every other ELF target
+    // uses the generic table (rt_sigaction 134, sigaltstack 132).
+    if n == 13 {
+        return raw_syscall4(134, a, b, c, d);
+    }
+    if n == 131 {
+        return raw_syscall4(132, a, b, c, d);
+    }
     return wrapping_sub(0, 38);
 }
 // Abort's last step. Operation 231 is exit_group on every Linux target: it runs no atexit handlers,
@@ -300,11 +308,13 @@ fn rt_comptime_check(n: u64, a: u64) -> u64 {
 fn rt_os_reactor() -> u64 {
     return 1;
 }
-// Scheduler threads behind the shared run queue: one per CPU, clamped to [4, 64].
+// One scheduler worker per CPU. The floor of two keeps a cooperative program making progress on a
+// single-core host (a task that spins waiting for a sibling must have a sibling thread to run on),
+// and the ceiling bounds the per-worker deque and stack caches.
 fn rt_os_workers() -> u64 {
     mut workers = rt_cpus();
-    if workers < 4 {
-        workers = 4;
+    if workers < 2 {
+        workers = 2;
     }
     if 64 < workers {
         workers = 64;
@@ -312,19 +322,300 @@ fn rt_os_workers() -> u64 {
     return workers;
 }
 fn rt_os_sched_prepare() -> u64 {
+    // Installs the process-wide task-stack fault handler and this worker's alternate signal stack.
+    rt_os_stack_guard_install();
     return 0;
 }
-// A task stack with a guard page below it. Its initial switch frame is what the target's switch
-// saves, and the address it resumes into is rt_green_main.
-fn rt_os_ctx_new(t: u64) -> u64 {
-    size := 262144;
+
+// ---- reactor: epoll, eventfd and timerfd --------------------------------------------------------
+// The portable scheduler owns the task states; this module owns the file descriptors. Readiness and
+// timers are one-shot epoll registrations whose data word is the task to wake, and the eventfd is
+// the fence that makes the reactor complete a batch.
+fn rt_os_ready() -> u64 {
+    return 1;
+}
+fn rt_os_reactor_open(s: u64) -> u64 {
+    epoll := rt_syscall(291, 524288, 0, 0);
+    if rt_error(epoll) {
+        return 0;
+    }
+    fence := rt_syscall(290, 0, 526336, 0);
+    if rt_error(fence) {
+        rt_syscall(3, epoll, 0, 0);
+        return 0;
+    }
+    ev := raw_map(4096);
+    if rt_error(ev) {
+        rt_syscall(3, fence, 0, 0);
+        rt_syscall(3, epoll, 0, 0);
+        return 0;
+    }
+    raw_store(ev, 1); // EPOLLIN, data 0 marks the fence descriptor
+    if rt_error(rt_syscall4(233, epoll, 1, fence, ev)) {
+        rt_syscall(11, ev, 4096, 0);
+        rt_syscall(3, fence, 0, 0);
+        rt_syscall(3, epoll, 0, 0);
+        return 0;
+    }
+    rt_syscall(11, ev, 4096, 0);
+    raw_store(s + 48, fence);
+    return epoll;
+}
+fn rt_os_reactor_fence(s: u64) -> u64 {
+    one := rt_alloc(8);
+    raw_store(one, 1);
+    rt_syscall(1, raw_load(s + 48), one, 8);
+    rt_free(one);
+    return 0;
+}
+fn rt_os_reactor_loop(s: u64) -> u64 {
+    events := raw_map(4096);
+    scratch := events + 2048;
+    epoll := raw_load(s + 40);
+    // epoll_event is packed on x86-64 (12 bytes) and padded on the other targets (16).
+    mut width = 16;
+    if raw_target() == 0 {
+        width = 12;
+    }
+    while true {
+        n := rt_syscall4(281, epoll, events, 64, wrapping_sub(0, 1));
+        if rt_error(n) == 0 {
+            mut i = 0;
+            while i < n {
+                mut at = events + i * width + 8;
+                if width == 12 {
+                    at = events + i * 12 + 4;
+                }
+                task := raw_load(at);
+                if task == 0 {
+                    rt_syscall(0, raw_load(s + 48), scratch, 8);
+                } else {
+                    rt_wake(task);
+                }
+                i += 1;
+            }
+        }
+        rt_atomic_fetch_add(s + 56, 1);
+    }
+    return 0;
+}
+// One-shot readiness registration for `task`. Returns 0 when armed, non-zero when the descriptor
+// cannot be watched (the caller then retries the operation instead of parking).
+fn rt_os_wait_fd(s: u64, fd: u64, events: u64, task: u64) -> u64 {
+    epoll := raw_load(s + 40);
+    if epoll == 0 {
+        return 1;
+    }
+    ev := rt_alloc(16);
+    raw_store(ev, events + 1073741824); // EPOLLONESHOT
+    if raw_target() == 0 {
+        raw_store(ev + 4, task);
+    } else {
+        raw_store(ev + 8, task);
+    }
+    mut r = rt_syscall4(233, epoll, 1, fd, ev);
+    if r == wrapping_sub(0, 17) {
+        r = rt_syscall4(233, epoll, 3, fd, ev);
+    }
+    rt_free(ev);
+    if rt_error(r) {
+        return 1;
+    }
+    return 0;
+}
+fn rt_os_wait_done(s: u64, fd: u64) -> u64 {
+    rt_syscall4(233, raw_load(s + 40), 2, fd, 0);
+    return 0;
+}
+// A relative timer over the reactor: one timerfd per sleep, registered like any other readiness
+// source, with its descriptor remembered in the task's wait key so the caller can close it.
+fn rt_os_timer(s: u64, task: u64, ms: u64) -> u64 {
+    fd := rt_syscall(283, 1, 526336, 0);
+    if rt_error(fd) {
+        return 1;
+    }
+    spec := rt_alloc(32);
+    raw_store(spec + 16, rt_div(ms, 1000));
+    raw_store(spec + 24, (ms % 1000) * 1000000);
+    if rt_error(rt_syscall4(286, fd, 0, spec, 0)) {
+        rt_free(spec);
+        rt_syscall(3, fd, 0, 0);
+        return 1;
+    }
+    rt_free(spec);
+    if rt_os_wait_fd(s, fd, 1, task) != 0 {
+        rt_syscall(3, fd, 0, 0);
+        return 1;
+    }
+    raw_store(task + 32, fd);
+    return 0;
+}
+fn rt_os_timer_done(s: u64, task: u64) -> u64 {
+    fd := raw_load(task + 32);
+    if fd != 0 {
+        rt_os_wait_done(s, fd);
+        rt_syscall(3, fd, 0, 0);
+        raw_store(task + 32, 0);
+    }
+    return 0;
+}
+// A completion for an offload thread's task: Linux has no completion port, so the task goes back on
+// a deque directly.
+fn rt_os_complete(task: u64) -> u64 {
+    return rt_wake(task);
+}
+
+// ---- task stacks -------------------------------------------------------------------------------
+// A task stack is a 1 MiB anonymous reservation whose lowest page is PROT_NONE. mmap is lazy, so the
+// kernel commits pages on first touch and a task that only uses a few KiB costs a few pages, while
+// the guard page turns an overflow into SIGSEGV (or SIGBUS) instead of a silent write into whatever
+// mapping happens to sit below. Finished stacks go on the finishing worker's free list and are
+// reused, so a spawn/wake storm does not pay an mmap and mprotect per task.
+fn rt_os_stack_size() -> u64 {
+    return 1048576;
+}
+fn rt_os_stack_reserve() -> u64 {
+    size := rt_os_stack_size();
     stack := raw_map(size);
     if rt_error(stack) {
         rt_abort();
     }
-    if rt_error(rt_syscall(10, stack, 4096, 0)) {
+    // The range is reserved PROT_NONE, then only the usable part is made writable: the low page
+    // stays PROT_NONE as the guard, and the kernel commits the writable pages on first touch (no
+    // page of a task stack is backed until the task uses it).
+    if rt_error(rt_syscall(10, stack, size, 0)) {
         rt_abort();
     }
+    if rt_error(rt_syscall(10, stack + 4096, size - 4096, 3)) {
+        rt_abort();
+    }
+    return stack;
+}
+// The free-list link lives in the top word of the stack, never in the guard page.
+fn rt_os_stack_take() -> u64 {
+    w := rt_worker_self();
+    if w != 0 {
+        head := raw_load(w + 56);
+        if head != 0 {
+            raw_store(w + 56, raw_load(head + rt_os_stack_size() - 8));
+            raw_store(w + 64, raw_load(w + 64) - 1);
+            return head;
+        }
+    }
+    return rt_os_stack_reserve();
+}
+fn rt_os_stack_give(stack: u64) -> u64 {
+    w := rt_worker_self();
+    if (w != 0) && (raw_load(w + 64) < 32) {
+        raw_store(stack + rt_os_stack_size() - 8, raw_load(w + 56));
+        raw_store(w + 56, stack);
+        raw_store(w + 64, raw_load(w + 64) + 1);
+        return 0;
+    }
+    if rt_error(rt_syscall(11, stack, rt_os_stack_size(), 0)) {
+        rt_abort();
+    }
+    return 0;
+}
+// True when the fault address lies in the guard page at the low end of the task that is running on
+// this thread. Anything else is the program's own fault and keeps the default action.
+fn rt_os_stack_guard_hit(addr: u64) -> u64 {
+    tp := raw_tp_get();
+    if tp == 0 {
+        return 0;
+    }
+    t := raw_load(tp + 16);
+    if t == 0 {
+        return 0;
+    }
+    base := raw_load(t + 8);
+    size := raw_load(t + 16);
+    if size <= 4096 {
+        return 0;
+    }
+    return (base <= addr) && (addr < base + 4096);
+}
+// Runs on the alternate stack: the faulting task stack has no room for a frame. si_addr is the
+// fourth member of the Linux siginfo_t union (offset 16 on every ELF target).
+fn rt_os_stack_handler(sig: u64, info: u64, ctx: u64) -> u64 {
+    mut addr = 0;
+    if info != 0 {
+        addr = raw_load(info + 16);
+    }
+    if rt_os_stack_guard_hit(addr) != 0 {
+        rt_stack_overflow();
+    }
+    words := rt_state_stack_guard();
+    rt_syscall4(13, sig, words + 80, 0, 8);
+    return 0;
+}
+// SA_ONSTACK | SA_SIGINFO, plus SA_RESTORER on x86-64, which requires the restorer trampoline.
+fn rt_os_stack_signal_flags() -> u64 {
+    mut flags = 134217732;
+    if raw_target() == 0 {
+        flags = 201326596;
+    }
+    return flags;
+}
+fn rt_os_stack_guard_signal(sig: u64, words: u64) -> u64 {
+    sa := words + 48;
+    raw_store(sa, rt_os_stack_handler);
+    raw_store(sa + 8, rt_os_stack_signal_flags());
+    raw_store(sa + 16, raw_load(words));
+    raw_store(sa + 24, 0);
+    return rt_syscall4(13, sig, sa, 0, 8);
+}
+fn rt_os_stack_guard_install() -> u64 {
+    words := rt_state_stack_guard();
+    if raw_atomic_load(words + 8) != 2 {
+        if raw_atomic_cas(words + 8, 0, 1) == 0 {
+            // The restorer the kernel returns through: movl $__NR_rt_sigreturn,%eax; syscall; ud2.
+            code := raw_map(4096);
+            if rt_error(code) == 0 {
+                raw_store(code, 1082287778126892984);
+                raw_putbyte(code + 8, 11);
+                if rt_error(rt_syscall4(10, code, 4096, 5, 0)) == 0 {
+                    raw_store(words, code);
+                }
+            }
+            mut i = 0;
+            while i < 4 {
+                raw_store(words + 80 + i * 8, 0);
+                i += 1;
+            }
+            raw_atomic_store_release(words + 8, 2);
+        } else {
+            while raw_atomic_load(words + 8) != 2 {
+                rt_syscall(24, 0, 0, 0);
+            }
+        }
+    }
+    w := rt_worker_self();
+    if w != 0 {
+        mut base = raw_load(w + 88);
+        if base == 0 {
+            base = raw_map(65536);
+            if rt_error(base) == 0 {
+                raw_store(w + 88, base);
+            } else {
+                return 0;
+            }
+        }
+        // Linux sigaltstack: {sp, flags, size}.
+        raw_store(w + 96, base);
+        raw_store(w + 104, 0);
+        raw_store(w + 112, 65536);
+        rt_syscall4(131, w + 96, 0, 0, 0);
+        rt_os_stack_guard_signal(11, words);
+        rt_os_stack_guard_signal(7, words);
+    }
+    return 0;
+}
+// A task's initial switch frame is what the target's switch saves, and the address it resumes into
+// is rt_green_main.
+fn rt_os_ctx_new(t: u64) -> u64 {
+    size := rt_os_stack_size();
+    stack := rt_os_stack_take();
     raw_store(t + 8, stack);
     raw_store(t + 16, size);
     // x86-64 8 words (resume first); AArch64 22 words (resume first); RISC-V 26 words (resume
@@ -355,8 +646,5 @@ fn rt_os_ctx_leave(t: u64) -> u64 {
     return 0;
 }
 fn rt_os_ctx_release(t: u64) -> u64 {
-    if rt_error(rt_syscall(11, raw_load(t + 8), raw_load(t + 16), 0)) {
-        rt_abort();
-    }
-    return 0;
+    return rt_os_stack_give(raw_load(t + 8));
 }

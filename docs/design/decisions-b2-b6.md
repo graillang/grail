@@ -20,7 +20,7 @@ decision without a stated trigger is what made these items outstanding for so lo
 | B1 | Separate compilation with checked module interfaces: **accepted**. The plan of record is [separate-compilation.md](separate-compilation.md); this record fixes the decision and its obligations, not the format. | Implementation starting |
 | B2 | Ambient `host::` stays for v1 as a **recorded deviation** from the capability model, with the conditions that force the change listed below. | Decided |
 | B3 | A foreign call **blocks the executing thread**; no green-task scheduling integration is promised for v1. Foreign calls are valid on every runtime thread (per-thread host TLS; runtime threads are glibc threads); callbacks on C-created threads abort by name. | Decided; task semantics now identical on Linux and Windows |
-| B4 | Windows runs **the same green scheduler as Linux** (Win32 fibers on one scheduler thread); thread-per-task is an explicit opt-in (`GRAIL_TASKS=thread`). IOCP stays a named future work item. | Decided and implemented |
+| B4 | Windows runs **the same green scheduler as Linux** (Win32 fibers on one scheduler thread); thread-per-task is an explicit opt-in (`GRAIL_TASKS=thread`). IOCP stays a named future work item. **Amended by G23:** Windows now runs one worker per core with Win32 fibers, and the reactor *is* an IOCP (see the amendment at the end of B4). | Decided and implemented; amended |
 | B5 | **Abort never unwinds**; nothing may unwind across the C boundary. There is no `defer` and no cleanup runs on an abort path. | Decided |
 | B6 | Closures capture references and views and cannot outlive the borrow; **`FnMut`/mutable captures are implemented** under the six rules fixed below. | Implemented |
 | B7 | Records passed by value to C: **accepted**, spelling `v: byval R`. | Implemented on every ABI: SysV x86-64, AAPCS64, RV64, Win64 and Windows ARM64 |
@@ -307,6 +307,35 @@ imports for task cases, `GRAIL_TASKS` for the opt-in case). Executed evidence un
 `tasks-sleep-progress`, `tasks-read-file-offload`, `tasks-thread-mode`. Documentation:
 [docs/ffi.md](../ffi.md) ("Task scheduling is the same on both platforms"),
 [concurrency-v1.md](concurrency-v1.md), [windows-backend.md](windows-backend.md).
+
+### Amendment (G23): M:N workers, an IOCP reactor, guarded stacks
+
+The scheduler grew up after this record. The parts of B4 above that are still true: Windows runs the
+same cooperative tasks as Linux, thread-per-task is the opt-in mode, and a blocking host operation
+is still offloaded to a helper thread. What changed:
+
+- **One worker per core on Windows too.** A Win32 fiber is not owned by the thread that created it,
+  so a stolen task runs on whichever worker took it; fibers are multiplexed with per-worker
+  Chase-Lev deques and work stealing like the ELF targets. The single-scheduler-thread shape is
+  gone, so the "Windows interleaving is deterministic" consequence no longer holds anywhere.
+- **The reactor is an I/O completion port.** `CreateIoCompletionPort`/`GetQueuedCompletionStatus`
+  replace the "no reactor" answer: offload completions are posted to the port and the reactor wakes
+  the parked task, and sleeps live on a timer heap whose earliest deadline sets the wait timeout, so
+  `host::sleep_ms` no longer brings a helper thread. This is the IOCP work item B4 named, not a new
+  decision.
+- **Reactor creation is not fatal.** The old portable `rt_sched` aborted when its socket call failed;
+  a platform whose reactor cannot be created now runs without one and falls back to offload. That
+  failure as it appeared on Windows (exit 134, no output) is the bug this amendment closes.
+- **Stacks are reservations with a guard page** (Linux/macOS: `mmap` + `mprotect PROT_NONE` at the
+  low end, recycled per worker; Windows: `CreateFiberEx`'s committed-in-reserved fiber stack). An
+  overflow is `error: stack overflow` and status 134 through an alternate-stack signal handler on
+  POSIX and a vectored exception handler on Windows, not the silent stack scribble B4 accepted.
+- **macOS is a full target**, not compile-only: kqueue for readiness and timers, `__ulock_wait`/
+  `__ulock_wake` for parking, and the same guard-page stacks.
+
+Mechanism and verification: `docs/design/scheduler.md`. This amendment changes no task-visible
+semantics that B4 promised except the one it explicitly could not promise: interleaving order.
+
 
 ## B5: abort never unwinds
 

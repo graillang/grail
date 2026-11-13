@@ -7719,5 +7719,45 @@
     "interfaces": true,
     "stdout": "12 9\n5\n37\n",
     "note": "`&dyn Shape` and `&mut dyn Shape` in a module's signatures travel through its interface file: the program is built interface-first and prints what the source build prints"
+  },
+  {
+    "name": "task-100k-spawn-join-checksum",
+    "note": "A 100k-task spawn burst joined afterwards: every result arrives, the checksum is stable, and the deques hold a burst larger than any per-worker cache.",
+    "source": "use host;\n// 100k tasks spawned before the first join: the deque (or the injection ring behind it) has to hold\n// a burst that is much larger than one worker's stack cache, and every result must still arrive.\nfn unit(n: u64, unused: u64) -> u64 {\n    return (n * 2654435761) % 1000003;\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    mut many = Task<u64>[];\n    for i in 100000 {\n        many.push(spawn(sc, i, unit));\n    }\n    mut total = 0;\n    while many.len() != 0 {\n        total += join(many.pop());\n    }\n    return total;\n}\nfn main() {\n    println(task_scope(0, body));\n}\n",
+    "stdout": "50005298436\n"
+  },
+  {
+    "name": "task-fib-spreads-across-workers",
+    "note": "A fork-join over fib-sized work records the worker id of every task; a start barrier forces two tasks to run at once, which requires two workers, so more than one worker id must be seen whenever the scheduler has more than one worker. On a single-worker/thread mode the assertion degrades to 'at least one id'.",
+    "source": "use host;\nstruct Ctx {\n    started: Atomic<u64>\n}\n// The barrier is what makes the spread a fact rather than a hope: a task that starts spins until a\n// second task has started, and a spinning task occupies its worker, so the second one must be on a\n// different worker (the floor in rt_os_workers guarantees at least two exist).\nfn work(n: u64, c: (&Ctx)) -> u64 {\n    c.started.fetch_add(1);\n    while c.started.load() < 2 {}\n    mut total = 0;\n    for i in n {\n        total += i % 7;\n    }\n    return total * 64 + (host::worker_id() & 63);\n}\nfn body<s>(sc: (&s Scope<(&Ctx)>), c: (&Ctx)) -> u64 {\n    mut many = Task<u64>[];\n    for i in 8 {\n        many.push(spawn(sc, 4000, work));\n    }\n    mut total = 0;\n    mut ids = 0;\n    while many.len() != 0 {\n        r := join(many.pop());\n        total += r / 64;\n        ids = ids | (r % 64);\n    }\n    mut distinct = 0;\n    mut m = ids;\n    for i in 64 {\n        distinct += m & 1;\n        m = m / 2;\n    }\n    assert(0 < distinct);\n    if 1 < host::workers() {\n        assert(1 < distinct);\n    }\n    return total;\n}\nfn main() {\n    println(task_scope(&Ctx { started: Atomic::new(0) }, body));\n}\n",
+    "stdout": "95952\n"
+  },
+  {
+    "name": "task-sleep-timers-overlap",
+    "note": "Green tasks sleep on the platform timer and wake in parallel: eight 30 ms sleeps finish in far less than the serial 240 ms.",
+    "source": "use host;\n// Eight sleeping tasks must overlap: a serial sleep would take 8 * 30 ms, and the assertion below\n// fails long before that.\nfn nap(n: u64, unused: u64) -> u64 {\n    host::sleep_ms(30);\n    return n;\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    mut many = Task<u64>[];\n    for i in 8 {\n        many.push(spawn(sc, i, nap));\n    }\n    mut total = 0;\n    while many.len() != 0 {\n        total += join(many.pop());\n    }\n    return total;\n}\nfn main() {\n    start := host::now_ms();\n    println(task_scope(0, body));\n    elapsed := host::now_ms() - start;\n    assert(elapsed < 400);\n}\n",
+    "stdout": "28\n"
+  },
+  {
+    "name": "task-steal-stress-tree",
+    "note": "A four-level fork-join tree spawned from stolen tasks: 2048 leaves cross the deques, so a lost or doubled push/pop/steal changes the checksum.",
+    "source": "// A fork-join tree four levels deep, spawned from tasks that are themselves stolen: 2048 leaves\n// cross the deques, which is where a Chase-Lev push/pop/steal race shows up as a lost or duplicated\n// task (the checksum changes) rather than as a crash.\nfn leaf(n: u64, unused: u64) -> u64 {\n    mut x = n;\n    for i in 100 {\n        x = (x * 31 + 7) % 1000003;\n    }\n    return x;\n}\nfn level(n: u64, unused: u64) -> u64 {\n    if n == 0 {\n        return leaf(1, 0);\n    }\n    return task_scope(n, tree);\n}\nfn tree<s>(sc: (&s Scope<u64>), n: u64) -> u64 {\n    mut many = Task<u64>[];\n    for i in 4 {\n        many.push(spawn(sc, n - 1, level));\n    }\n    mut total = 0;\n    while many.len() != 0 {\n        total += join(many.pop());\n    }\n    return total;\n}\nfn main() {\n    mut total = 0;\n    for i in 8 {\n        total += level(4, 0);\n    }\n    println(total);\n}\n",
+    "stdout": "1068945408\n"
+  },
+  {
+    "name": "pool-abort-eight-chunks-reports-once",
+    "note": "Eight parallel chunks write one past their own slice at once. The abort is reported exactly once and the process exits 134 instead of dying by SIGABRT from a second reporter.",
+    "source": "fn main() {\n    mut v = u64[1, 2, 3, 4, 5, 6, 7, 8];\n    println(\"before\");\n    parallel_for_chunks(&mut v[0: 8], 8, |s: &mut [u64]| -> unit { s[s.len()] = 9; });\n    println(v);\n}\n",
+    "stdout": "before\n",
+    "status": 134,
+    "stderr": "error: "
+  },
+  {
+    "name": "task-stack-overflow-reports-and-exits-134",
+    "note": "A task recurses past the bottom of its 1 MiB stack into the PROT_NONE guard page: the alternate-stack fault handler names the overflow and exits 134, and the program never reaches its join.",
+    "source": "// Deep recursion inside a task runs into the guard page at the bottom of its stack. The fault is\n// recognised as a task-stack overflow and reported once, by name, with status 134 - not as a silent\n// write into the neighbouring mapping and not as an unexplained SIGSEGV.\nfn deep(n: u64, unused: u64) -> u64 {\n    if n == 0 {\n        return 0;\n    }\n    return deep(n - 1, 0) + 1;\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    t := spawn(sc, 1000000, deep);\n    return join(t);\n}\nfn main() {\n    println(\"before\");\n    println(task_scope(0, body));\n}\n",
+    "stdout": "before\n",
+    "status": 134,
+    "stderr": "error: stack overflow\n"
   }
 ]
