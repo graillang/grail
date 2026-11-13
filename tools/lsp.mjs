@@ -9,7 +9,7 @@ import { buildCompiler, compileProgram, root } from './native.mjs';
 // lib/json.grl is the server's JSON reader; it needs core and the map module to compile.
 export const serverSources = [
   'tools/lsp/main.grl',
-  'compiler/lexer.grl',
+  'tools/lsp/analysis.grl',
   'lib/core.grl',
   'lib/hash.grl',
   'lib/hashmap.grl',

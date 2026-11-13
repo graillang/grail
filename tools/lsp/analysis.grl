@@ -1,0 +1,3935 @@
+module analysis;
+use core;
+
+// Static analysis for the Grail language server: the token stream of one buffer, the
+// declarations that buffer makes, and the questions an editor asks about a position.
+//
+// Everything here is a source-reading approximation, never a compiler. Where it cannot be
+// sure of an answer it returns nothing, and the server sends nothing: a wrong type or a
+// wrong rename is worse than no answer. Two rules make that possible:
+//
+//   * a declaration is only trusted when this file (or one of the other open documents)
+//     declares it - an unknown module's types, fields and functions are not guessed;
+//   * a name resolves to the nearest preceding binding in an enclosing block of the same
+//     function, so a shadowed binding is never confused with the one it hides.
+//
+// The lexer is `compiler/lexer.grl`'s token stream with one difference: a buffer being
+// edited is often not lexable (an unterminated string literal, a half-typed character
+// literal), and the strict lexer asserts on those. Here every byte is consumed exactly
+// once instead, so a bad literal never hides the rest of the file or aborts the server.
+
+// ---------------------------------------------------------------------------
+// bytes
+// ---------------------------------------------------------------------------
+
+fn no_index() -> u64 {
+    return 9223372036854775807;
+}
+fn eq<a, b>(x: &a [u8], y: &b [u8]) -> bool {
+    if x.len() != y.len() {
+        return false;
+    }
+    for i in x.len() {
+        if x[i] != y[i] {
+            return false;
+        }
+    }
+    return true;
+}
+fn copy_bytes<a>(text: &a [u8]) -> u8[] {
+    mut out = u8[];
+    for i in text.len() {
+        out.push(text[i]);
+    }
+    return out;
+}
+fn put<a, b>(out: &a mut u8[], text: &b [u8]) {
+    for i in text.len() {
+        out.push(text[i]);
+    }
+}
+fn has_prefix<a, b>(text: &a [u8], prefix: &b [u8]) -> bool {
+    if text.len() < prefix.len() {
+        return false;
+    }
+    for i in prefix.len() {
+        if text[i] != prefix[i] {
+            return false;
+        }
+    }
+    return true;
+}
+fn is_space(c: u64) -> bool {
+    return (c == 32) || (c == 9) || (c == 10) || (c == 12) || (c == 13);
+}
+fn trim<a>(text: &a [u8]) -> u8[] {
+    mut start = 0;
+    mut end = text.len();
+    while start < end {
+        c := text[start];
+        if !is_space(c) {
+            break;
+        }
+        start += 1;
+    }
+    while start < end {
+        c := text[end - 1];
+        if !is_space(c) {
+            break;
+        }
+        end -= 1;
+    }
+    mut out = u8[];
+    for i in start .. end {
+        out.push(text[i]);
+    }
+    return out;
+}
+fn letter(c: u64) -> bool {
+    if (64 < c) && (c < 91) {
+        return true;
+    }
+    if (96 < c) && (c < 123) {
+        return true;
+    }
+    return c == 95;
+}
+fn digit(c: u64) -> bool {
+    return (47 < c) && (c < 58);
+}
+fn punctuation(c: u64) -> bool {
+    return (c == 40)
+        || (c == 41)
+        || (c == 91)
+        || (c == 93)
+        || (c == 123)
+        || (c == 125)
+        || (c == 60)
+        || (c == 62)
+        || (c == 44)
+        || (c == 58)
+        || (c == 59)
+        || (c == 61)
+        || (c == 43)
+        || (c == 45)
+        || (c == 42)
+        || (c == 47)
+        || (c == 37)
+        || (c == 38)
+        || (c == 94)
+        || (c == 46)
+        || (c == 33)
+        || (c == 63)
+        || (c == 124)
+        || (c == 64);
+}
+fn pair_kind(c: u64, d: u64) -> u64 {
+    if (c == 45) & (d == 62) {
+        return 256;
+    }
+    if (c == 61) & (d == 62) {
+        return 257;
+    }
+    if (c == 61) & (d == 61) {
+        return 258;
+    }
+    if (c == 33) & (d == 61) {
+        return 259;
+    }
+    if (c == 58) & (d == 58) {
+        return 260;
+    }
+    if (c == 58) & (d == 61) {
+        return 261;
+    }
+    if (c == 43) & (d == 61) {
+        return 262;
+    }
+    if (c == 45) & (d == 61) {
+        return 263;
+    }
+    if (c == 42) & (d == 61) {
+        return 264;
+    }
+    if (c == 47) & (d == 61) {
+        return 265;
+    }
+    if (c == 37) & (d == 61) {
+        return 266;
+    }
+    if (c == 42) & (d == 42) {
+        return 267;
+    }
+    if (c == 61) & (d == 61) {
+        return 258;
+    }
+    if (c == 60) & (d == 61) {
+        return 269;
+    }
+    if (c == 62) & (d == 61) {
+        return 270;
+    }
+    if (c == 38) & (d == 38) {
+        return 273;
+    }
+    if (c == 124) & (d == 124) {
+        return 274;
+    }
+    return 0;
+}
+
+// A token with the brace depth in front of it, exactly as `compiler/lexer.grl` numbers
+// them: kind 0 EOF, 1 identifier (keywords included), 2 number, 3 string, 4 character
+// literal, 5 float, ASCII punctuation as its byte value, 256 `->`, 257 `=>`, 258 `==`,
+// 259 `!=`, 260 `::`, 261 `:=`, 262-266 compound assignment, 267 `**`, 269 `<=`,
+// 270 `>=`, 273 `&&`, 274 `||`, 999 a character the language has no use for.
+pub struct Token {
+    kind: u64,
+    start: u64,
+    end: u64,
+    depth: u64
+}
+
+pub fn scan<a>(text: &a [u8]) -> Token[] {
+    mut tokens = Token[];
+    mut depth = 0;
+    size := text.len();
+    mut i = 0;
+    while i < size {
+        c := text[i];
+        if is_space(c) {
+            i += 1;
+            continue;
+        }
+        if c == 47 {
+            if i + 1 < size {
+                if text[i + 1] == 47 {
+                    i += 2;
+                    while i < size {
+                        if text[i] == 10 {
+                            break;
+                        }
+                        i += 1;
+                    }
+                    continue;
+                }
+            }
+        }
+        start := i;
+        mut kind = 0;
+        if c == 39 {
+            // 'a', '\n', '\u{e9}': a character literal, or - while the buffer is being
+            // typed - a lone quote or one with no closing quote on its line.
+            kind = 39;
+            mut j = i + 1;
+            if j < size {
+                if text[j] == 92 {
+                    j += 1;
+                    if j < size {
+                        if text[j] == 117 {
+                            while j < size {
+                                if text[j] == 125 {
+                                    break;
+                                }
+                                if text[j] == 10 {
+                                    break;
+                                }
+                                j += 1;
+                            }
+                            if j < size {
+                                if text[j] == 125 {
+                                    j += 1;
+                                }
+                            }
+                        } else {
+                            j += 1;
+                        }
+                    }
+                } else {
+                    if text[j] != 10 {
+                        lead := text[j];
+                        j += 1;
+                        if 191 < lead {
+                            while j < size {
+                                if (text[j] & 192) != 128 {
+                                    break;
+                                }
+                                j += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            if j < size {
+                if text[j] == 39 {
+                    kind = 4;
+                    i = j + 1;
+                } else {
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+        } else {
+            if c == 34 {
+                // A string ends at its closing quote, or - unterminated - at the end of
+                // its line, so one stray quote cannot swallow the rest of the buffer.
+                kind = 3;
+                i += 1;
+                while i < size {
+                    b := text[i];
+                    if b == 34 {
+                        i += 1;
+                        break;
+                    }
+                    if b == 10 {
+                        break;
+                    }
+                    if b == 92 {
+                        i += 1;
+                        if i < size {
+                            if text[i] != 10 {
+                                i += 1;
+                            }
+                        }
+                        continue;
+                    }
+                    i += 1;
+                }
+            } else {
+                if letter(c) {
+                    kind = 1;
+                    i += 1;
+                    while i < size {
+                        b := text[i];
+                        if !letter(b) {
+                            if !digit(b) {
+                                break;
+                            }
+                        }
+                        i += 1;
+                    }
+                } else {
+                    if digit(c) {
+                        kind = 2;
+                        after_dot := (i > 0) && (text[i - 1] == 46);
+                        i += 1;
+                        mut radix = 0;
+                        if (c == 48) && (i < size) {
+                            r := text[i];
+                            if (r == 120) || (r == 98) || (r == 111) {
+                                radix = 1;
+                                i += 1;
+                            }
+                        }
+                        while i < size {
+                            b := text[i];
+                            if radix != 0 {
+                                if !(digit(b)
+                                    || ((96 < b) && (b < 103))
+                                    || ((64 < b) && (b < 71))
+                                    || (b == 95)) {
+                                    break;
+                                }
+                            } else {
+                                if !digit(b) {
+                                    if b != 95 {
+                                        break;
+                                    }
+                                }
+                            }
+                            i += 1;
+                        }
+                        if (radix == 0) && (i + 1 < size) {
+                            if (text[i] == 101) || (text[i] == 69) {
+                                mut j = i + 1;
+                                if (text[j] == 43) || (text[j] == 45) {
+                                    j += 1;
+                                }
+                                if j < size {
+                                    if digit(text[j]) {
+                                        kind = 5;
+                                        i = j;
+                                        while i < size {
+                                            if !digit(text[i]) {
+                                                break;
+                                            }
+                                            i += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (i + 1 < size) && !after_dot {
+                            if text[i] == 46 {
+                                if digit(text[i + 1]) {
+                                    kind = 5;
+                                    i += 1;
+                                    while i < size {
+                                        if !digit(text[i]) {
+                                            break;
+                                        }
+                                        i += 1;
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        if i + 1 < size {
+                            kind = pair_kind(c, text[i + 1]);
+                        }
+                        if (kind == 259) && (i + 2 < size) {
+                            if text[i + 2] == 61 {
+                                kind = 0;
+                            }
+                        }
+                        if kind != 0 {
+                            i += 2;
+                            if kind == 267 {
+                                if i < size {
+                                    if text[i] == 61 {
+                                        kind = 268;
+                                        i += 1;
+                                    }
+                                }
+                            }
+                        } else {
+                            kind = c;
+                            if !punctuation(c) {
+                                kind = 999;
+                            }
+                            i += 1;
+                            if 191 < c {
+                                while i < size {
+                                    if (text[i] & 192) != 128 {
+                                        break;
+                                    }
+                                    i += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if kind == 125 {
+            if 0 < depth {
+                depth -= 1;
+            }
+        }
+        tokens.push(Token { kind: kind, start: start, end: i, depth: depth });
+        if kind == 123 {
+            depth += 1;
+        }
+    }
+    tokens.push(Token { kind: 0, start: size, end: size, depth: depth });
+    return tokens;
+}
+
+// ---------------------------------------------------------------------------
+// declarations
+// ---------------------------------------------------------------------------
+
+// What an item is. Methods keep the type their `impl` heads, so `value.method()` can be
+// answered from the receiver's type.
+const K_FN: u64 = 1;
+const K_RECORD: u64 = 2;
+const K_ENUM: u64 = 3;
+const K_ALIAS: u64 = 4;
+const K_CONST: u64 = 5;
+const K_METHOD: u64 = 6;
+const K_HANDLE: u64 = 7;
+
+const B_PARAM: u64 = 1;
+const B_LOCAL: u64 = 2;
+const B_FOR: u64 = 3;
+
+pub struct Param {
+    name: u8[],
+    ty: u8[],
+    token: u64
+}
+pub struct FieldDecl {
+    name: u8[],
+    ty: u8[],
+    token: u64
+}
+pub struct VariantDecl {
+    name: u8[],
+    payload: u8[],
+    typed: bool,
+    token: u64
+}
+pub struct Item {
+    kind: u64,
+    name: u8[],
+    token: u64,
+    start: u64,
+    depth: u64,
+    params: Param[],
+    fields: FieldDecl[],
+    variants: VariantDecl[],
+    ty: u8[],
+    ret: u8[],
+    generics: u8[][],
+    doc: u8[],
+    receiver: u8[],
+    has_self: bool,
+    external: bool,
+    module: u8[]
+}
+pub struct Import {
+    module: u8[],
+    name: u8[],
+    token: u64
+}
+pub struct Binding {
+    name: u8[],
+    token: u64,
+    depth: u64,
+    owner: u64,
+    kind: u64,
+    ty: u8[],
+    annotated: bool
+}
+pub struct Impl {
+    lo: u64,
+    hi: u64,
+    receiver: u8[],
+    generics: u8[][]
+}
+pub struct Source {
+    text: u8[],
+    tokens: Token[],
+    items: Item[],
+    imports: Import[],
+    bindings: Binding[],
+    impls: Impl[],
+    module: u8[],
+    scopes: u64[]
+}
+
+pub fn item_copy<a>(item: &a Item) -> Item {
+    mut params = Param[];
+    for i in item.params.len() {
+        p := &item.params[i];
+        params.push(Param { name: copy_bytes(p.name), ty: copy_bytes(p.ty), token: p.token });
+    }
+    mut fields = FieldDecl[];
+    for i in item.fields.len() {
+        f := &item.fields[i];
+        fields.push(FieldDecl { name: copy_bytes(f.name), ty: copy_bytes(f.ty), token: f.token });
+    }
+    mut variants = VariantDecl[];
+    for i in item.variants.len() {
+        v := &item.variants[i];
+        variants.push(
+            VariantDecl { name: copy_bytes(v.name), payload: copy_bytes(v.payload), typed: v.typed, token: v.token }
+        );
+    }
+    mut generics = u8[][];
+    for i in item.generics.len() {
+        generics.push(copy_bytes(item.generics[i]));
+    }
+    return Item {
+        kind: item.kind,
+        name: copy_bytes(item.name),
+        token: item.token,
+        start: item.start,
+        depth: item.depth,
+        params: params,
+        fields: fields,
+        variants: variants,
+        ty: copy_bytes(item.ty),
+        ret: copy_bytes(item.ret),
+        generics: generics,
+        doc: copy_bytes(item.doc),
+        receiver: copy_bytes(item.receiver),
+        has_self: item.has_self,
+        external: item.external,
+        module: copy_bytes(item.module)
+    };
+}
+fn empty_item() -> Item {
+    return Item {
+        kind: 0,
+        name: u8[],
+        token: no_index(),
+        start: no_index(),
+        depth: 0,
+        params: Param[],
+        fields: FieldDecl[],
+        variants: VariantDecl[],
+        ty: u8[],
+        ret: u8[],
+        generics: u8[][],
+        doc: u8[],
+        receiver: u8[],
+        has_self: false,
+        external: false,
+        module: u8[]
+    };
+}
+
+fn tok_is<a>(text: &a [u8], tokens: (&Token[]), i: u64, word: &[u8]) -> bool {
+    if tokens.len() <= i {
+        return false;
+    }
+    if tokens[i].kind != 1 {
+        return false;
+    }
+    return eq(text[tokens[i].start: tokens[i].end], word);
+}
+// The token that closes the group opened at `open`, or the last token when it is unclosed.
+fn close_index(tokens: (&Token[]), open: u64) -> u64 {
+    mut depth = 0;
+    mut i = open;
+    while i < tokens.len() {
+        k := tokens[i].kind;
+        if (k == 40) || (k == 91) || (k == 123) {
+            depth += 1;
+        } else {
+            if (k == 41) || (k == 93) || (k == 125) {
+                if depth == 0 {
+                    return i;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    return i;
+                }
+            }
+        }
+        i += 1;
+    }
+    return tokens.len() - 1;
+}
+fn skip_angles(tokens: (&Token[]), open: u64) -> u64 {
+    mut depth = 0;
+    mut i = open;
+    while i < tokens.len() {
+        k := tokens[i].kind;
+        if (k == 60) || (k == 40) || (k == 91) {
+            depth += 1;
+        } else {
+            if (k == 62) || (k == 41) || (k == 93) {
+                if depth == 0 {
+                    return i;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    return i;
+                }
+            }
+        }
+        i += 1;
+    }
+    return tokens.len() - 1;
+}
+// The source text of a token range, with every gap between tokens collapsed to one space.
+// Comments never reach it: only token text is copied.
+fn render<a>(text: &a [u8], tokens: (&Token[]), lo: u64, hi: u64) -> u8[] {
+    mut out = u8[];
+    mut i = lo;
+    while i < hi {
+        if tokens.len() <= i {
+            break;
+        }
+        start := tokens[i].start;
+        end := tokens[i].end;
+        if lo < i {
+            if tokens[i - 1].end < start {
+                out.push(32);
+            }
+        }
+        for j in start .. end {
+            out.push(text[j]);
+        }
+        i += 1;
+    }
+    return out;
+}
+fn copy_names<a>(names: (&a u8[][])) -> u8[][] {
+    mut out = u8[][];
+    for i in names.len() {
+        out.push(copy_bytes(names[i]));
+    }
+    return out;
+}
+// The names declared by a generic parameter list, in order. A bound (`T: Ord`) contributes
+// its parameter, never the bound.
+fn append_names<a>(text: &a [u8], tokens: (&Token[]), lo: u64, hi: u64, out: (&mut u8[][])) {
+    mut angle = 0;
+    mut i = lo;
+    mut expect = true;
+    while i < hi {
+        k := tokens[i].kind;
+        if k == 60 {
+            angle += 1;
+        } else {
+            if k == 62 {
+                if 0 < angle {
+                    angle -= 1;
+                }
+            } else {
+                if k == 1 {
+                    if angle == 0 && expect {
+                        out.push(render(text, tokens, i, i + 1));
+                        expect = false;
+                    }
+                } else {
+                    if k == 44 && angle == 0 {
+                        expect = true;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+}
+// The first token after the type that starts at `start`: a separator, a closing bracket, a
+// body brace or the refinement keyword. Angle brackets are tracked, so `Foo<Bar, Baz>` and
+// `(A | B)` stay one type.
+fn type_end<a>(text: &a [u8], tokens: (&Token[]), start: u64) -> u64 {
+    mut nest = 0;
+    mut i = start;
+    while i < tokens.len() {
+        k := tokens[i].kind;
+        if (k == 40) || (k == 91) || (k == 60) {
+            nest += 1;
+        } else {
+            if (k == 41) || (k == 93) {
+                if nest == 0 {
+                    return i;
+                }
+                nest -= 1;
+            } else {
+                if k == 62 {
+                    if nest == 0 {
+                        return i;
+                    }
+                    nest -= 1;
+                } else {
+                    if (k == 123) || (k == 125) || (k == 59) || (k == 61) || (k == 256) || (k == 257) || (k == 44) {
+                        if nest == 0 {
+                            return i;
+                        }
+                    } else {
+                        if k == 1 && nest == 0 {
+                            if tok_is(text, tokens, i, view("where")) || tok_is(text, tokens, i, view("ensures")) {
+                                return i;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    return i;
+}
+// The first top-level comma at or after `from`, or `close`.
+fn next_comma<a>(text: &a [u8], tokens: (&Token[]), from: u64, close: u64) -> u64 {
+    mut nest = 0;
+    mut i = from;
+    while i < close {
+        k := tokens[i].kind;
+        if (k == 40) || (k == 91) || (k == 123) || (k == 60) {
+            nest += 1;
+        } else {
+            if (k == 41) || (k == 93) || (k == 125) || (k == 62) {
+                if 0 < nest {
+                    nest -= 1;
+                }
+            } else {
+                if k == 44 && nest == 0 {
+                    return i;
+                }
+            }
+        }
+        i += 1;
+    }
+    return close;
+}
+fn parse_params<a>(text: &a [u8], tokens: (&Token[]), open: u64, close: u64) -> Param[] {
+    mut out = Param[];
+    mut i = open + 1;
+    while i < close {
+        if tokens[i].kind == 1 {
+            name_token := i;
+            mut ty = u8[];
+            mut j = i + 1;
+            if j < close {
+                if tokens[j].kind == 58 {
+                    mut thi = type_end(text, tokens, j + 1);
+                    if close < thi {
+                        thi = close;
+                    }
+                    ty = render(text, tokens, j + 1, thi);
+                    j = thi;
+                }
+            }
+            out.push(Param { name: render(text, tokens, name_token, name_token + 1), ty: ty, token: name_token });
+            i = next_comma(text, tokens, j, close) + 1;
+        } else {
+            i += 1;
+        }
+    }
+    return out;
+}
+fn line_start_at(text: &[u8], offset: u64) -> u64 {
+    mut start = 0;
+    mut i = 0;
+    while i < offset {
+        if text[i] == 10 {
+            start = i + 1;
+        }
+        i += 1;
+    }
+    return start;
+}
+// The `///` lines directly above an item, joined with newlines: the documentation an editor
+// shows on hover. Nothing is invented when there is none.
+fn doc_before(text: &[u8], offset: u64) -> u8[] {
+    mut start = line_start_at(text, offset);
+    mut lines = u8[][];
+    while 0 < start {
+        prev := line_start_at(text, start - 1);
+        mut end = start - 1;
+        if prev < end {
+            if text[end - 1] == 13 {
+                end -= 1;
+            }
+        }
+        line := trim(text[prev: end]);
+        if line.len() < 3 {
+            break;
+        }
+        if !((line[0] == 47) && (line[1] == 47) && (line[2] == 47)) {
+            break;
+        }
+        mut body = u8[];
+        mut k = 3;
+        if k < line.len() {
+            if line[k] == 32 {
+                k += 1;
+            }
+        }
+        while k < line.len() {
+            body.push(line[k]);
+            k += 1;
+        }
+        lines.push(body);
+        start = prev;
+    }
+    mut out = u8[];
+    mut i = lines.len();
+    while 0 < i {
+        i -= 1;
+        if out.len() != 0 {
+            out.push(10);
+        }
+        put(&mut out, lines[i]);
+    }
+    return out;
+}
+fn parse_fn_item<a>(
+    text: &a [u8],
+    tokens: (&Token[]),
+    at: u64,
+    module: &[u8],
+    impls: (&Impl[]),
+    impl_at: u64,
+    external: bool
+) -> Item {
+    mut item = empty_item();
+    item.start = at;
+    item.depth = tokens[at].depth;
+    item.external = external;
+    item.module = copy_bytes(module);
+    item.kind = K_FN;
+    if impl_at != no_index() {
+        item.kind = K_METHOD;
+        item.receiver = copy_bytes(impls[impl_at].receiver);
+        item.generics = copy_names(&impls[impl_at].generics);
+    }
+    name_token := at + 1;
+    if tokens.len() <= name_token {
+        return item;
+    }
+    if tokens[name_token].kind != 1 {
+        return item;
+    }
+    item.name = render(text, tokens, name_token, name_token + 1);
+    item.token = name_token;
+    mut cursor = name_token + 1;
+    if tokens.len() <= cursor {
+        return item;
+    }
+    if tokens[cursor].kind == 60 {
+        close := skip_angles(tokens, cursor);
+        append_names(text, tokens, cursor + 1, close, &mut item.generics);
+        cursor = close + 1;
+    }
+    if tokens.len() <= cursor {
+        return item;
+    }
+    if tokens[cursor].kind == 40 {
+        close := close_index(tokens, cursor);
+        item.params = parse_params(text, tokens, cursor, close);
+        if 0 < item.params.len() {
+            first := &item.params[0];
+            if eq(first.name, view("self")) {
+                item.has_self = true;
+            }
+        }
+        cursor = close + 1;
+    }
+    if tokens.len() <= cursor {
+        return item;
+    }
+    if tokens[cursor].kind == 256 {
+        mut thi = type_end(text, tokens, cursor + 1);
+        item.ret = render(text, tokens, cursor + 1, thi);
+        cursor = thi;
+    }
+    item.doc = doc_before(text, tokens[at].start);
+    return item;
+}
+fn scan_module<a>(text: &a [u8], tokens: (&Token[])) -> u8[] {
+    mut i = 0;
+    while i < tokens.len() {
+        if tokens[i].kind == 1 {
+            if tokens[i].depth == 0 {
+                if tok_is(text, tokens, i, view("module")) {
+                    if tokens[i + 1].kind == 1 {
+                        return render(text, tokens, i + 1, i + 2);
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    return u8[];
+}
+fn scan_imports<a>(text: &a [u8], tokens: (&Token[])) -> Import[] {
+    mut out = Import[];
+    mut i = 0;
+    while i < tokens.len() {
+        if tokens[i].kind == 1 {
+            if tokens[i].depth == 0 {
+                if tok_is(text, tokens, i, view("use")) {
+                    mut names = u8[][];
+                    mut last = no_index();
+                    mut j = i + 1;
+                    while j < tokens.len() {
+                        k := tokens[j].kind;
+                        if k == 59 {
+                            break;
+                        }
+                        if k == 1 {
+                            last = j;
+                            names.push(render(text, tokens, j, j + 1));
+                        }
+                        j += 1;
+                    }
+                    if last != no_index() {
+                        if names.len() == 1 {
+                            out.push(Import { module: u8[], name: copy_bytes(names[0]), token: last });
+                        } else {
+                            if 1 < names.len() {
+                                out.push(
+                                    Import {
+                                        module: copy_bytes(names[names.len() - 2]),
+                                        name: copy_bytes(names[names.len() - 1]),
+                                        token: last
+                                    }
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    return out;
+}
+fn impl_containing(impls: (&Impl[]), token: u64) -> u64 {
+    for i in impls.len() {
+        if impls[i].lo <= token {
+            if token < impls[i].hi {
+                return i;
+            }
+        }
+    }
+    return no_index();
+}
+fn scan_impls<a>(text: &a [u8], tokens: (&Token[])) -> Impl[] {
+    mut out = Impl[];
+    mut i = 0;
+    while i + 2 < tokens.len() {
+        if tokens[i].kind == 1 {
+            if tok_is(text, tokens, i, view("impl")) {
+                mut angle = 0;
+                mut brace = no_index();
+                mut k = i + 1;
+                while k < tokens.len() {
+                    kind := tokens[k].kind;
+                    if kind == 60 {
+                        angle += 1;
+                    } else {
+                        if kind == 62 {
+                            if 0 < angle {
+                                angle -= 1;
+                            }
+                        } else {
+                            if kind == 123 {
+                                if angle == 0 {
+                                    brace = k;
+                                    break;
+                                }
+                            } else {
+                                if kind == 59 {
+                                    if angle == 0 {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    k += 1;
+                }
+                if brace != no_index() {
+                    mut lo = i + 1;
+                    mut generics = u8[][];
+                    if tokens[lo].kind == 60 {
+                        close := skip_angles(tokens, lo);
+                        append_names(text, tokens, lo + 1, close, &mut generics);
+                        lo = close + 1;
+                    }
+                    mut recv_lo = lo;
+                    mut j = lo;
+                    while j < brace {
+                        if tokens[j].kind == 1 {
+                            if tok_is(text, tokens, j, view("for")) {
+                                recv_lo = j + 1;
+                            }
+                        }
+                        j += 1;
+                    }
+                    out.push(
+                        Impl {
+                            lo: brace + 1,
+                            hi: close_index(tokens, brace),
+                            receiver: render(text, tokens, recv_lo, brace),
+                            generics: generics
+                        }
+                    );
+                }
+            }
+        }
+        i += 1;
+    }
+    return out;
+}
+fn parse_fields<a>(text: &a [u8], tokens: (&Token[]), brace: u64, close: u64, is_enum: bool) -> Item {
+    mut item = empty_item();
+    if is_enum {
+        item.kind = K_ENUM;
+    } else {
+        item.kind = K_RECORD;
+    }
+    mut k = brace + 1;
+    while k < close {
+        if tokens[k].kind != 1 {
+            k += 1;
+            continue;
+        }
+        decl_token := k;
+        name := render(text, tokens, k, k + 1);
+        if is_enum {
+            mut m = k + 1;
+            mut payload = u8[];
+            mut typed = false;
+            if tokens[m].kind == 40 {
+                c2 := close_index(tokens, m);
+                payload = render(text, tokens, m + 1, c2);
+                typed = true;
+                m = c2 + 1;
+            }
+            item.variants.push(
+                VariantDecl { name: name, payload: payload, typed: typed, token: decl_token }
+            );
+            while m < close {
+                if tokens[m].kind == 44 {
+                    break;
+                }
+                m += 1;
+            }
+            k = m + 1;
+        } else {
+            mut ty = u8[];
+            mut m = k + 1;
+            if tokens[m].kind == 58 {
+                mut thi = type_end(text, tokens, m + 1);
+                if close < thi {
+                    thi = close;
+                }
+                ty = render(text, tokens, m + 1, thi);
+                m = thi;
+            }
+            item.fields.push(FieldDecl { name: name, ty: ty, token: decl_token });
+            k = next_comma(text, tokens, m, close) + 1;
+        }
+    }
+    return item;
+}
+fn scan_items<a>(text: &a [u8], tokens: (&Token[]), impls: (&Impl[]), module: (&[u8])) -> Item[] {
+    mut items = Item[];
+    mut i = 0;
+    while i < tokens.len() {
+        if tokens[i].kind == 1 {
+            depth := tokens[i].depth;
+            impl_at := impl_containing(impls, i);
+            if tok_is(text, tokens, i, view("fn")) {
+                mut external = false;
+                if 1 < i {
+                    if tokens[i - 1].kind == 3 {
+                        if tok_is(text, tokens, i - 2, view("extern")) {
+                            external = true;
+                        }
+                    }
+                }
+                if impl_at != no_index() {
+                    items.push(parse_fn_item(text, tokens, i, module, impls, impl_at, external));
+                } else {
+                    if depth == 0 {
+                        items.push(parse_fn_item(text, tokens, i, module, impls, no_index(), external));
+                    }
+                }
+            } else {
+                if depth == 0 && impl_at == no_index() {
+                    if tok_is(text, tokens, i, view("struct")) || tok_is(text, tokens, i, view("enum")) {
+                        mut is_enum = false;
+                        if tok_is(text, tokens, i, view("enum")) {
+                            is_enum = true;
+                        }
+                        mut brace = no_index();
+                        mut k = i + 1;
+                        while k < tokens.len() {
+                            kind := tokens[k].kind;
+                            if kind == 123 {
+                                brace = k;
+                                break;
+                            }
+                            if kind == 59 {
+                                break;
+                            }
+                            k += 1;
+                        }
+                        if brace != no_index() {
+                            close := close_index(tokens, brace);
+                            parsed := parse_fields(text, tokens, brace, close, is_enum);
+                            mut item = parsed;
+                            item.start = i;
+                            item.token = i + 1;
+                            item.depth = depth;
+                            item.module = copy_bytes(module);
+                            if tokens[i + 1].kind == 1 {
+                                item.name = render(text, tokens, i + 1, i + 2);
+                            }
+                            item.doc = doc_before(text, tokens[i].start);
+                            items.push(item);
+                        }
+                    } else {
+                        if tok_is(text, tokens, i, view("type")) {
+                            if tokens[i + 1].kind == 1 {
+                                mut item = empty_item();
+                                item.kind = K_ALIAS;
+                                item.start = i;
+                                item.token = i + 1;
+                                item.depth = depth;
+                                item.module = copy_bytes(module);
+                                item.name = render(text, tokens, i + 1, i + 2);
+                                if tokens[i + 2].kind == 61 {
+                                    mut thi = type_end(text, tokens, i + 3);
+                                    item.ty = render(text, tokens, i + 3, thi);
+                                }
+                                item.doc = doc_before(text, tokens[i].start);
+                                items.push(item);
+                            }
+                        } else {
+                            if tok_is(text, tokens, i, view("const")) {
+                                if tokens[i + 1].kind == 1 {
+                                    mut item = empty_item();
+                                    item.kind = K_CONST;
+                                    item.token = i;
+                                    item.depth = depth;
+                                    item.module = copy_bytes(module);
+                                    item.name = render(text, tokens, i + 1, i + 2);
+                                    if tokens[i + 2].kind == 58 {
+                                        mut thi = type_end(text, tokens, i + 3);
+                                        item.ty = render(text, tokens, i + 3, thi);
+                                    }
+                                    item.doc = doc_before(text, tokens[i].start);
+                                    items.push(item);
+                                }
+                            } else {
+                                if tok_is(text, tokens, i, view("handle")) {
+                                    if tokens[i + 1].kind == 1 {
+                                        mut item = empty_item();
+                                        item.kind = K_HANDLE;
+                                        item.start = i;
+                                        item.token = i + 1;
+                                        item.depth = depth;
+                                        item.module = copy_bytes(module);
+                                        item.name = render(text, tokens, i + 1, i + 2);
+                                        item.doc = doc_before(text, tokens[i].start);
+                                        items.push(item);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    return items;
+}
+// The `fn` token governing each token: a name can only bind inside its own function.
+fn scan_scopes(tokens: (&Token[]), items: (&Item[])) -> u64[] {
+    mut scopes = u64[];
+    for i in tokens.len() {
+        scopes.push(no_index());
+    }
+    for k in items.len() {
+        kind := items[k].kind;
+        if kind == K_FN || kind == K_METHOD {
+            start := items[k].start;
+            mut j = start + 1;
+            while j < tokens.len() {
+                if tokens[j].kind == 123 {
+                    if tokens[j].depth == tokens[start].depth {
+                        close := close_index(tokens, j);
+                        mut t = start;
+                        while t <= close {
+                            if t < scopes.len() {
+                                scopes[t] = start;
+                            }
+                            t += 1;
+                        }
+                        break;
+                    }
+                }
+                if tokens[j].kind == 59 {
+                    break;
+                }
+                j += 1;
+            }
+        }
+    }
+    return scopes;
+}
+fn owner_of(scopes: (&u64[]), at: u64) -> u64 {
+    if scopes.len() <= at {
+        return no_index();
+    }
+    return scopes[at];
+}
+fn scan_bindings<a>(text: &a [u8], tokens: (&Token[]), items: (&Item[]), scopes: (&u64[])) -> Binding[] {
+    mut out = Binding[];
+    for k in items.len() {
+        kind := items[k].kind;
+        if kind == K_FN || kind == K_METHOD {
+            for p in items[k].params.len() {
+                param := &items[k].params[p];
+                out.push(
+                    Binding {
+                        name: copy_bytes(param.name),
+                        token: param.token,
+                        depth: items[k].depth,
+                        owner: items[k].start,
+                        kind: B_PARAM,
+                        ty: copy_bytes(param.ty),
+                        annotated: true
+                    }
+                );
+            }
+        }
+    }
+    mut i = 0;
+    while i < tokens.len() {
+        if tokens[i].kind == 1 {
+            depth := tokens[i].depth;
+            mut next_kind = 0;
+            if i + 1 < tokens.len() {
+                next_kind = tokens[i + 1].kind;
+            }
+            // A declaration keyword in front means this name heads a declaration, not a
+            // binding: `const LIMIT: u64 = 10` is an item, not a local.
+            mut heads_declaration = false;
+            if 0 < i {
+                if tokens[i - 1].kind == 1 {
+                    text_view := view(text);
+                    token_view := &tokens;
+                    if tok_is(text_view, token_view, i - 1, view("const"))
+                        || tok_is(text_view, token_view, i - 1, view("type"))
+                        || tok_is(text_view, token_view, i - 1, view("fn"))
+                        || tok_is(text_view, token_view, i - 1, view("struct"))
+                        || tok_is(text_view, token_view, i - 1, view("enum"))
+                        || tok_is(text_view, token_view, i - 1, view("handle"))
+                        || tok_is(text_view, token_view, i - 1, view("interface"))
+                        || tok_is(text_view, token_view, i - 1, view("impl"))
+                        || tok_is(text_view, token_view, i - 1, view("extern")) {
+                        heads_declaration = true;
+                    }
+                }
+            }
+            if !heads_declaration {
+                // NAME := value
+                if next_kind == 261 {
+                    out.push(
+                        Binding {
+                            name: render(text, tokens, i, i + 1),
+                            token: i,
+                            depth: depth,
+                            owner: owner_of(scopes, i),
+                            kind: B_LOCAL,
+                            ty: u8[],
+                            annotated: false
+                        }
+                    );
+                }
+                // NAME: T = value, and mut NAME: T = value
+                if next_kind == 58 {
+                    mut thi = type_end(text, tokens, i + 2);
+                    if tokens.len() <= thi {
+                        thi = tokens.len() - 1;
+                    }
+                    if tokens[thi].kind == 61 {
+                        out.push(
+                            Binding {
+                                name: render(text, tokens, i, i + 1),
+                                token: i,
+                                depth: depth,
+                                owner: owner_of(scopes, i),
+                                kind: B_LOCAL,
+                                ty: render(text, tokens, i + 2, thi),
+                                annotated: true
+                            }
+                        );
+                    }
+                }
+                // mut NAME = value
+                if 0 < i {
+                    if tok_is(view(text), &tokens, i - 1, view("mut")) {
+                        if next_kind == 61 {
+                            out.push(
+                                Binding {
+                                    name: render(text, tokens, i, i + 1),
+                                    token: i,
+                                    depth: depth,
+                                    owner: owner_of(scopes, i),
+                                    kind: B_LOCAL,
+                                    ty: u8[],
+                                    annotated: false
+                                }
+                            );
+                        }
+                    }
+                }
+                // for NAME in ...
+                if 0 < i {
+                    if tok_is(view(text), &tokens, i - 1, view("for")) {
+                        out.push(
+                            Binding {
+                                name: render(text, tokens, i, i + 1),
+                                token: i,
+                                depth: depth,
+                                owner: owner_of(scopes, i),
+                                kind: B_FOR,
+                                ty: u8[],
+                                annotated: false
+                            }
+                        );
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    return out;
+}
+pub fn source_new<a>(text: &a [u8]) -> Source {
+    tokens := scan(text);
+    module := scan_module(text, &tokens);
+    impls := scan_impls(text, &tokens);
+    items := scan_items(text, &tokens, &impls, view(module));
+    imports := scan_imports(text, &tokens);
+    scopes := scan_scopes(&tokens, &items);
+    bindings := scan_bindings(text, &tokens, &items, &scopes);
+    return Source {
+        text: copy_bytes(text),
+        tokens: tokens,
+        items: items,
+        imports: imports,
+        bindings: bindings,
+        impls: impls,
+        module: module,
+        scopes: scopes
+    };
+}
+
+
+// ---------------------------------------------------------------------------
+// types, written as source text
+// ---------------------------------------------------------------------------
+
+// Every query in this file reports "not known" with an empty value: an empty type text, an
+// item whose kind is 0, an index that is no_index(). Nothing is ever guessed, so a caller
+// can always tell an answer from the absence of one.
+
+fn word_bytes(text: &[u8]) -> bool {
+    if text.len() == 0 {
+        return false;
+    }
+    for i in text.len() {
+        b := text[i];
+        if !letter(b) {
+            if !digit(b) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+fn has_word_prefix(text: &[u8], word: &[u8]) -> bool {
+    if text.len() < word.len() {
+        return false;
+    }
+    for i in word.len() {
+        if text[i] != word[i] {
+            return false;
+        }
+    }
+    if text.len() == word.len() {
+        return true;
+    }
+    return is_space(text[word.len()]);
+}
+fn first_space(text: &[u8]) -> u64 {
+    mut i = 0;
+    while i < text.len() {
+        if is_space(text[i]) {
+            return i;
+        }
+        i += 1;
+    }
+    return no_index();
+}
+// The type with its leading references, regions and `mut` removed, and redundant
+// parentheses dropped: `&a mut (Circle)` is `Circle`.
+fn strip_refs(ty: &[u8]) -> u8[] {
+    mut t = trim(ty);
+    mut again = 1;
+    while again != 0 {
+        again = 0;
+        if 0 < t.len() {
+            if t[0] == 38 {
+                mut rest = trim(t[1: t.len()]);
+                mut more = 1;
+                while more != 0 {
+                    more = 0;
+                    if has_word_prefix(rest, view("mut")) {
+                        rest = trim(rest[3: rest.len()]);
+                        more = 1;
+                    } else {
+                        sp := first_space(rest);
+                        if sp != no_index() {
+                            w := rest[0: sp];
+                            if word_bytes(w) {
+                                rest = trim(rest[sp: rest.len()]);
+                                more = 1;
+                            }
+                        }
+                    }
+                }
+                t = rest;
+                again = 1;
+            } else {
+                if t[0] == 40 {
+                    mut depth = 0;
+                    mut k = 0;
+                    mut close = no_index();
+                    while k < t.len() {
+                        b := t[k];
+                        if b == 40 {
+                            depth += 1;
+                        } else {
+                            if b == 41 {
+                                depth -= 1;
+                                if depth == 0 {
+                                    close = k;
+                                    break;
+                                }
+                            }
+                        }
+                        k += 1;
+                    }
+                    if close == t.len() - 1 {
+                        t = trim(t[1: close]);
+                        again = 1;
+                    }
+                }
+            }
+        }
+    }
+    return t;
+}
+fn is_optional(ty: &[u8]) -> bool {
+    t := strip_refs(ty);
+    if t.len() == 0 {
+        return false;
+    }
+    return t[t.len() - 1] == 63;
+}
+fn strip_optional(ty: &[u8]) -> u8[] {
+    t := strip_refs(ty);
+    if t.len() == 0 {
+        return t;
+    }
+    if t[t.len() - 1] == 63 {
+        return trim(t[0: t.len() - 1]);
+    }
+    return t;
+}
+// The type's own name, module-qualified when it is written that way (`shapes::Circle`),
+// or empty when the type is a slice, a tuple, a unit or something this file cannot name.
+fn outer_name(ty: &[u8]) -> u8[] {
+    t := strip_refs(ty);
+    mut i = 0;
+    while i < t.len() {
+        b := t[i];
+        if !letter(b) {
+            if !digit(b) {
+                break;
+            }
+        }
+        i += 1;
+    }
+    if i == 0 {
+        return u8[];
+    }
+    mut name = u8[];
+    mut j = 0;
+    while j < i {
+        name.push(t[j]);
+        j += 1;
+    }
+    if i + 2 < t.len() {
+        if (t[i] == 58) && (t[i + 1] == 58) {
+            mut k = i + 2;
+            while k < t.len() {
+                b := t[k];
+                if !letter(b) {
+                    if !digit(b) {
+                        break;
+                    }
+                }
+                k += 1;
+            }
+            if i + 2 < k {
+                name.push(58);
+                name.push(58);
+                mut m = i + 2;
+                while m < k {
+                    name.push(t[m]);
+                    m += 1;
+                }
+            }
+        }
+    }
+    return name;
+}
+// `Map<K, V>` -> the arguments, when the type carries them.
+fn outer_args(ty: &[u8]) -> u8[][] {
+    t := strip_refs(ty);
+    mut out = u8[][];
+    mut i = 0;
+    while i < t.len() {
+        b := t[i];
+        if !letter(b) {
+            if !digit(b) {
+                break;
+            }
+        }
+        i += 1;
+    }
+    if i + 2 < t.len() {
+        if (t[i] == 58) && (t[i + 1] == 58) {
+            i += 2;
+            while i < t.len() {
+                b := t[i];
+                if !letter(b) {
+                    if !digit(b) {
+                        break;
+                    }
+                }
+                i += 1;
+            }
+        }
+    }
+    if t.len() <= i {
+        return out;
+    }
+    if t[i] != 60 {
+        return out;
+    }
+    mut nest = 0;
+    mut k = i;
+    mut start = i + 1;
+    while k < t.len() {
+        b := t[k];
+        if (b == 60) || (b == 40) || (b == 91) {
+            nest += 1;
+        } else {
+            if (b == 62) || (b == 41) || (b == 93) {
+                if nest == 1 && b == 62 {
+                    out.push(trim(t[start: k]));
+                    return out;
+                }
+                if 0 < nest {
+                    nest -= 1;
+                }
+            } else {
+                if b == 44 && nest == 1 {
+                    out.push(trim(t[start: k]));
+                    start = k + 1;
+                }
+            }
+        }
+        k += 1;
+    }
+    return out;
+}
+// A generic declaration's parameters replaced by the arguments at this use: the field of
+// `Map<u64, string>` has the field's declared type with `K` and `V` filled in.
+fn substitute(ty: &[u8], names: (&u8[][]), args: (&u8[][])) -> u8[] {
+    if names.len() != args.len() || names.len() == 0 {
+        return copy_bytes(ty);
+    }
+    mut out = u8[];
+    mut i = 0;
+    while i < ty.len() {
+        b := ty[i];
+        if letter(b) {
+            mut k = i;
+            while k < ty.len() {
+                c := ty[k];
+                if !letter(c) {
+                    if !digit(c) {
+                        break;
+                    }
+                }
+                k += 1;
+            }
+            word := ty[i: k];
+            mut replaced = false;
+            mut n = 0;
+            while n < names.len() {
+                if eq(word, names[n]) {
+                    put(&mut out, args[n]);
+                    replaced = true;
+                    break;
+                }
+                n += 1;
+            }
+            if !replaced {
+                put(&mut out, word);
+            }
+            i = k;
+        } else {
+            out.push(b);
+            i += 1;
+        }
+    }
+    return trim(out);
+}
+// The element type of a slice, vector or array: `u8` for `u8[]`, `[u8]` and `u8[4]`,
+// `u8[]` for `u8[][]`. Empty when the type is not indexable.
+fn element_type(ty: &[u8]) -> u8[] {
+    t := strip_refs(ty);
+    if t.len() == 0 {
+        return u8[];
+    }
+    if t[t.len() - 1] != 93 {
+        return u8[];
+    }
+    mut depth = 0;
+    mut k = t.len();
+    while 0 < k {
+        k -= 1;
+        b := t[k];
+        if b == 93 {
+            depth += 1;
+        } else {
+            if b == 91 {
+                depth -= 1;
+                if depth == 0 {
+                    if k == 0 {
+                        return strip_refs(t[1: t.len() - 1]);
+                    }
+                    return strip_refs(t[0: k]);
+                }
+            }
+        }
+    }
+    return u8[];
+}
+pub struct Qualified {
+    module: u8[],
+    name: u8[]
+}
+fn split_qualified(name: &[u8]) -> Qualified {
+    mut i = 0;
+    while i + 1 < name.len() {
+        if (name[i] == 58) && (name[i + 1] == 58) {
+            return Qualified { module: trim(name[0: i]), name: trim(name[i + 2: name.len()]) };
+        }
+        i += 1;
+    }
+    return Qualified { module: u8[], name: copy_bytes(name) };
+}
+fn want_match(kind: u64, want: u64) -> bool {
+    if want == 0 {
+        return true;
+    }
+    if want == 1 {
+        return (kind == K_RECORD) || (kind == K_ENUM) || (kind == K_ALIAS) || (kind == K_HANDLE);
+    }
+    if want == 2 {
+        return (kind == K_FN) || (kind == K_METHOD);
+    }
+    if want == 3 {
+        return (kind == K_RECORD) || (kind == K_ENUM);
+    }
+    return true;
+}
+fn own_item(s: &Source, qualified: &[u8], want: u64) -> Item {
+    q := split_qualified(qualified);
+    if 0 < q.module.len() {
+        return empty_item();
+    }
+    for i in s.items.len() {
+        if want_match(s.items[i].kind, want) {
+            if eq(s.items[i].name, view(q.name)) {
+                return item_copy(&s.items[i]);
+            }
+        }
+    }
+    return empty_item();
+}
+fn foreign_item(others: (&Item[]), module: &[u8], name: &[u8], want: u64) -> Item {
+    for i in others.len() {
+        if want_match(others[i].kind, want) {
+            if eq(others[i].module, module) {
+                if eq(others[i].name, name) {
+                    return item_copy(&others[i]);
+                }
+            }
+        }
+    }
+    return empty_item();
+}
+// The declaration a written type name refers to: this file's own items, an imported one,
+// or - stated in full - another open document's `module::Name`.
+fn resolve_item(s: &Source, others: (&Item[]), qualified: &[u8], want: u64, budget: u64) -> Item {
+    if budget == 0 {
+        return empty_item();
+    }
+    q := split_qualified(qualified);
+    if 0 < q.module.len() {
+        mut found = empty_item();
+        if eq(q.module, view(s.module)) {
+            found = own_item(s, view(q.name), want);
+        } else {
+            found = foreign_item(others, view(q.module), view(q.name), want);
+        }
+        if found.kind == 0 {
+            return empty_item();
+        }
+        if found.kind == K_ALIAS {
+            target := copy_bytes(found.ty);
+            return resolve_item(s, others, view(target), want, budget - 1);
+        }
+        return found;
+    }
+    found := own_item(s, view(q.name), want);
+    if found.kind != 0 {
+        if found.kind == K_ALIAS {
+            target := copy_bytes(found.ty);
+            return resolve_item(s, others, view(target), want, budget - 1);
+        }
+        return found;
+    }
+    // A name another module exported, imported into this one by `use m::Name;`.
+    mut i = 0;
+    while i < s.imports.len() {
+        if eq(s.imports[i].name, view(q.name)) {
+            mut other = foreign_item(others, view(s.imports[i].module), view(q.name), want);
+            if other.kind != 0 {
+                if other.kind == K_ALIAS {
+                    target := copy_bytes(other.ty);
+                    return resolve_item(s, others, view(target), want, budget - 1);
+                }
+                return other;
+            }
+        }
+        i += 1;
+    }
+    return empty_item();
+}
+fn find_record(s: &Source, others: (&Item[]), ty: &[u8], budget: u64) -> Item {
+    name := outer_name(ty);
+    if name.len() == 0 {
+        return empty_item();
+    }
+    found := resolve_item(s, others, view(name), 1, budget);
+    if found.kind == K_RECORD {
+        return found;
+    }
+    return empty_item();
+}
+// The field of a record type, with the record's generic parameters filled in from the
+// receiver. Empty when the receiver is not a record this server can see.
+fn field_of(s: &Source, others: (&Item[]), ty: &[u8], field: &[u8], budget: u64) -> FieldDecl {
+    rec := find_record(s, others, ty, budget);
+    if rec.kind == 0 {
+        return FieldDecl { name: u8[], ty: u8[], token: no_index() };
+    }
+    args := outer_args(ty);
+    mut i = 0;
+    while i < rec.fields.len() {
+        if eq(rec.fields[i].name, field) {
+            return FieldDecl {
+                name: copy_bytes(rec.fields[i].name),
+                ty: substitute(rec.fields[i].ty, &rec.generics, &args),
+                token: rec.fields[i].token
+            };
+        }
+        i += 1;
+    }
+    return FieldDecl { name: u8[], ty: u8[], token: no_index() };
+}
+fn method_of(s: &Source, others: (&Item[]), ty: &[u8], name: &[u8], budget: u64) -> Item {
+    if budget == 0 {
+        return empty_item();
+    }
+    recv := outer_name(ty);
+    if recv.len() == 0 {
+        return empty_item();
+    }
+    mut i = 0;
+    while i < s.items.len() {
+        if s.items[i].kind == K_METHOD {
+            if eq(s.items[i].name, name) {
+                impl_name := outer_name(view(s.items[i].receiver));
+                if eq(view(impl_name), view(recv)) {
+                    return item_copy(&s.items[i]);
+                }
+            }
+        }
+        i += 1;
+    }
+    i = 0;
+    while i < others.len() {
+        if others[i].kind == K_METHOD {
+            if eq(others[i].name, name) {
+                impl_name := outer_name(view(others[i].receiver));
+                if eq(view(impl_name), view(recv)) {
+                    return item_copy(&others[i]);
+                }
+            }
+        }
+        i += 1;
+    }
+    return empty_item();
+}
+fn expr_end(s: &Source, start: u64, depth: u64) -> u64 {
+    mut i = start;
+    while i < s.tokens.len() {
+        if start < i {
+            d := s.tokens[i].depth;
+            if d < depth {
+                break;
+            }
+            if d == depth {
+                k := s.tokens[i].kind;
+                if (k == 59) || (k == 261) {
+                    break;
+                }
+            }
+        }
+        i += 1;
+    }
+    return i;
+}
+fn binding_index(s: &Source, decl: u64) -> u64 {
+    for i in s.bindings.len() {
+        if s.bindings[i].token == decl {
+            return i;
+        }
+    }
+    return no_index();
+}
+// The declared type a binding gives a name; inferred from its initializer when it has no
+// annotation, and from what the loop walks for a `for` binding.
+fn binding_ty(s: &Source, others: (&Item[]), decl: u64, budget: u64) -> u8[] {
+    if budget == 0 {
+        return u8[];
+    }
+    index := binding_index(s, decl);
+    if index == no_index() {
+        return u8[];
+    }
+    binding := &s.bindings[index];
+    if binding.annotated {
+        return copy_bytes(binding.ty);
+    }
+    if binding.kind == B_FOR {
+        mut j = decl + 1;
+        while j < s.tokens.len() {
+            if tok_is(view(s.text), &s.tokens, j, view("in")) {
+                break;
+            }
+            if s.tokens[j].kind == 123 {
+                return u8[];
+            }
+            j += 1;
+        }
+        if s.tokens.len() <= j {
+            return u8[];
+        }
+        mut end = expr_end(s, j + 1, s.tokens[decl].depth);
+        mut brace = j + 1;
+        while brace < end {
+            if s.tokens[brace].kind == 123 {
+                if s.tokens[brace].depth == s.tokens[decl].depth {
+                    end = brace;
+                    break;
+                }
+            }
+            brace += 1;
+        }
+        mut range_op = no_index();
+        mut k = j + 1;
+        while k < end {
+            if s.tokens[k].kind == 46 {
+                if k + 1 < end {
+                    if s.tokens[k + 1].kind == 46 {
+                        range_op = k;
+                        break;
+                    }
+                }
+            }
+            k += 1;
+        }
+        if range_op != no_index() {
+            return ty_of(s, others, j + 1, range_op, budget - 1);
+        }
+        walked := ty_of(s, others, j + 1, end, budget - 1);
+        if walked.len() == 0 {
+            return u8[];
+        }
+        return element_type(view(walked));
+    }
+    mut j = decl + 1;
+    if s.tokens.len() <= j {
+        return u8[];
+    }
+    if s.tokens[j].kind != 261 {
+        if s.tokens[j].kind != 61 {
+            return u8[];
+        }
+    }
+    end := expr_end(s, j + 1, s.tokens[decl].depth);
+    return ty_of(s, others, j + 1, end, budget - 1);
+}
+// The declaration a name at `at` refers to, by block depth and function: the nearest
+// preceding binding of that name in an enclosing block of the same function.
+fn resolve_binding(s: &Source, at: u64) -> u64 {
+    if s.tokens.len() <= at {
+        return no_index();
+    }
+    if s.tokens[at].kind != 1 {
+        return no_index();
+    }
+    owner := owner_of(&s.scopes, at);
+    depth := s.tokens[at].depth;
+    name := s.text[s.tokens[at].start: s.tokens[at].end];
+    mut best = no_index();
+    mut i = 0;
+    while i < s.bindings.len() {
+        b := &s.bindings[i];
+        if b.token == at {
+            return at;
+        }
+        if b.owner == owner {
+            if b.token < at && b.depth <= depth {
+                if eq(view(b.name), name) {
+                    best = b.token;
+                }
+            }
+        }
+        i += 1;
+    }
+    return best;
+}
+fn token_is_number(s: &Source, lo: u64, hi: u64) -> bool {
+    mut start = lo;
+    if start + 1 < hi {
+        if s.tokens[start].kind == 45 {
+            start += 1;
+        }
+    }
+    if start + 1 != hi {
+        return false;
+    }
+    k := s.tokens[start].kind;
+    return (k == 2) || (k == 5);
+}
+fn literal_ty(s: &Source, at: u64) -> u8[] {
+    k := s.tokens[at].kind;
+    if k == 2 {
+        return copy_bytes(view("u64"));
+    }
+    if k == 5 {
+        return copy_bytes(view("f64"));
+    }
+    if k == 3 {
+        return copy_bytes(view("string"));
+    }
+    if k == 4 {
+        // An ASCII character literal is an untyped byte value that adopts the type its
+        // context asks for, so it has no type of its own to show.
+        start := s.tokens[at].start;
+        end := s.tokens[at].end;
+        mut i = start;
+        while i < end {
+            if 127 < s.text[i] {
+                return copy_bytes(view("char"));
+            }
+            i += 1;
+        }
+        return u8[];
+    }
+    return u8[];
+}
+fn ident_ty(s: &Source, others: (&Item[]), at: u64, budget: u64) -> u8[] {
+    decl := resolve_binding(s, at);
+    if decl != no_index() {
+        return binding_ty(s, others, decl, budget);
+    }
+    name := s.text[s.tokens[at].start: s.tokens[at].end];
+    found := resolve_item(s, others, name, 0, 4);
+    if found.kind == K_CONST {
+        return copy_bytes(found.ty);
+    }
+    return u8[];
+}
+fn binary_kind(k: u64) -> bool {
+    return (k == 61)
+        || (k == 258)
+        || (k == 259)
+        || (k == 269)
+        || (k == 270)
+        || (k == 43)
+        || (k == 45)
+        || (k == 42)
+        || (k == 47)
+        || (k == 37)
+        || (k == 273)
+        || (k == 274);
+}
+fn compare_kind(k: u64) -> bool {
+    return (k == 258) || (k == 259) || (k == 269) || (k == 270) || (k == 273) || (k == 274);
+}
+// The last binary operator at bracket depth zero, or no_index() when there is none.
+fn last_binary(tokens: (&Token[]), lo: u64, hi: u64) -> u64 {
+    mut nest = 0;
+    mut i = lo;
+    mut last = no_index();
+    mut want_operand = true;
+    while i < hi {
+        k := tokens[i].kind;
+        if (k == 40) || (k == 91) || (k == 123) {
+            nest += 1;
+            want_operand = true;
+        } else {
+            if (k == 41) || (k == 93) || (k == 125) {
+                if 0 < nest {
+                    nest -= 1;
+                }
+                want_operand = false;
+            } else {
+                if nest == 0 {
+                    if binary_kind(k) {
+                        if !want_operand {
+                            last = i;
+                            want_operand = true;
+                        }
+                    } else {
+                        want_operand = false;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    return last;
+}
+fn last_dot(tokens: (&Token[]), lo: u64, hi: u64) -> u64 {
+    mut nest = 0;
+    mut i = lo;
+    mut last = no_index();
+    while i < hi {
+        k := tokens[i].kind;
+        if (k == 40) || (k == 91) || (k == 123) {
+            nest += 1;
+        } else {
+            if (k == 41) || (k == 93) || (k == 125) {
+                if 0 < nest {
+                    nest -= 1;
+                }
+            } else {
+                if k == 46 && nest == 0 {
+                    last = i;
+                }
+            }
+        }
+        i += 1;
+    }
+    return last;
+}
+fn call_open(tokens: (&Token[]), lo: u64, hi: u64) -> u64 {
+    mut nest = 0;
+    mut i = lo;
+    while i < hi {
+        k := tokens[i].kind;
+        if (k == 40) || (k == 91) || (k == 123) {
+            if nest == 0 && k == 40 {
+                close := close_index(tokens, i);
+                if close == hi - 1 {
+                    return i;
+                }
+                i = close + 1;
+                continue;
+            }
+            nest += 1;
+        } else {
+            if (k == 41) || (k == 93) || (k == 125) {
+                if 0 < nest {
+                    nest -= 1;
+                }
+            }
+        }
+        i += 1;
+    }
+    return no_index();
+}
+fn tuple_ty(s: &Source, others: (&Item[]), lo: u64, hi: u64, budget: u64) -> u8[] {
+    mut out = u8[];
+    out.push(40);
+    mut start = lo;
+    mut nest = 0;
+    mut i = lo;
+    mut count = 0;
+    while i < hi {
+        k := s.tokens[i].kind;
+        if (k == 40) || (k == 91) || (k == 123) {
+            nest += 1;
+        } else {
+            if (k == 41) || (k == 93) || (k == 125) {
+                if 0 < nest {
+                    nest -= 1;
+                }
+            } else {
+                if k == 44 && nest == 0 {
+                    part := ty_of(s, others, start, i, budget - 1);
+                    if part.len() == 0 {
+                        return u8[];
+                    }
+                    if 0 < count {
+                        put(&mut out, view(", "));
+                    }
+                    put(&mut out, part);
+                    count += 1;
+                    start = i + 1;
+                }
+            }
+        }
+        i += 1;
+    }
+    last := ty_of(s, others, start, hi, budget - 1);
+    if last.len() == 0 {
+        return u8[];
+    }
+    if 0 < count {
+        put(&mut out, view(", "));
+    }
+    put(&mut out, last);
+    out.push(41);
+    return out;
+}
+// The type of the expression in tokens [lo, hi): a literal, a name, a field, a call, a
+// reference or a binary operation. Empty when this server cannot be sure.
+fn ty_of(s: &Source, others: (&Item[]), lo: u64, hi: u64, budget: u64) -> u8[] {
+    if budget == 0 {
+        return u8[];
+    }
+    if hi <= lo {
+        return u8[];
+    }
+    if s.tokens.len() <= lo {
+        return u8[];
+    }
+    if hi <= lo + 1 {
+        return ty_of_token(s, others, lo, budget);
+    }
+    text := view(s.text);
+    tokens := &s.tokens;
+    last_kind := s.tokens[hi - 1].kind;
+    // (expr) and (a, b)
+    if s.tokens[lo].kind == 40 {
+        close := close_index(tokens, lo);
+        if close == hi - 1 {
+            mut comma = no_index();
+            mut nest = 0;
+            mut i = lo + 1;
+            while i < close {
+                k := s.tokens[i].kind;
+                if (k == 40) || (k == 91) || (k == 123) {
+                    nest += 1;
+                } else {
+                    if (k == 41) || (k == 93) || (k == 125) {
+                        if 0 < nest {
+                            nest -= 1;
+                        }
+                    } else {
+                        if k == 44 && nest == 0 {
+                            comma = i;
+                            break;
+                        }
+                    }
+                }
+                i += 1;
+            }
+            if comma == no_index() {
+                return ty_of(s, others, lo + 1, hi - 1, budget - 1);
+            }
+            return tuple_ty(s, others, lo + 1, hi - 1, budget - 1);
+        }
+    }
+    // x! and x?
+    if last_kind == 33 {
+        inner := ty_of(s, others, lo, hi - 1, budget - 1);
+        if inner.len() == 0 {
+            return u8[];
+        }
+        return strip_optional(view(inner));
+    }
+    if last_kind == 63 {
+        return ty_of(s, others, lo, hi - 1, budget - 1);
+    }
+    // a binary operation
+    op := last_binary(tokens, lo, hi);
+    if op != no_index() {
+        if compare_kind(s.tokens[op].kind) {
+            return copy_bytes(view("bool"));
+        }
+        if lo < op {
+            left := ty_of(s, others, lo, op, budget - 1);
+            right := ty_of(s, others, op + 1, hi, budget - 1);
+            if left.len() != 0 {
+                if right.len() != 0 {
+                    if eq(view(left), view(right)) {
+                        return left;
+                    }
+                }
+            }
+            if left.len() != 0 {
+                if token_is_number(s, op + 1, hi) {
+                    return left;
+                }
+            }
+            if right.len() != 0 {
+                if token_is_number(s, lo, op) {
+                    return right;
+                }
+            }
+        }
+        return u8[];
+    }
+    // a call: callee(args)
+    open := call_open(tokens, lo, hi);
+    if open != no_index() {
+        return call_ty(s, others, lo, open, open + 1, hi - 1, budget - 1);
+    }
+    // a record literal: Name { field: value, ... }
+    if last_kind == 125 {
+        mut brace = no_index();
+        mut i = hi - 1;
+        mut nest = 0;
+        while 0 < i {
+            k := s.tokens[i].kind;
+            if k == 125 {
+                nest += 1;
+            } else {
+                if k == 123 {
+                    nest -= 1;
+                    if nest == 0 {
+                        brace = i;
+                        break;
+                    }
+                }
+            }
+            i -= 1;
+        }
+        if brace == lo + 1 {
+            if s.tokens[lo].kind == 1 {
+                name := render(text, tokens, lo, lo + 1);
+                found := resolve_item(s, others, view(name), 1, 4);
+                if found.kind == K_RECORD {
+                    return name;
+                }
+            }
+        }
+        return u8[];
+    }
+    // a field: receiver.field
+    dot := last_dot(tokens, lo, hi);
+    if dot != no_index() {
+        if 0 < dot {
+            if dot + 1 == hi - 1 {
+                if s.tokens[dot + 1].kind == 1 {
+                    field := render(text, tokens, dot + 1, hi);
+                    recv := ty_of(s, others, lo, dot, budget - 1);
+                    if recv.len() == 0 {
+                        return u8[];
+                    }
+                    found := field_of(s, others, view(recv), view(field), budget - 1);
+                    return copy_bytes(found.ty);
+                }
+            }
+        }
+        return u8[];
+    }
+    // a leading reference: &T, &a mut T
+    if s.tokens[lo].kind == 38 {
+        mut start = lo + 1;
+        mut out = u8[];
+        out.push(38);
+        if start < hi {
+            // A region name is a word followed by more of the type; the next token is an
+            // identifier or a slice bracket.
+            mut region = no_index();
+            if s.tokens[start].kind == 1 {
+                if start + 1 < hi {
+                    nk := s.tokens[start + 1].kind;
+                    if nk == 1 || nk == 91 {
+                        region = start;
+                    }
+                }
+            }
+            if region != no_index() {
+                w := render(text, tokens, region, region + 1);
+                put(&mut out, view(w));
+                mut next = region + 1;
+                if next < hi {
+                    if tok_is(text, tokens, next, view("mut")) {
+                        put(&mut out, view(" mut"));
+                        next += 1;
+                    }
+                }
+                out.push(32);
+                inner := ty_of(s, others, next, hi, budget - 1);
+                if inner.len() == 0 {
+                    return u8[];
+                }
+                put(&mut out, inner);
+                return trim(out);
+            }
+            if tok_is(text, tokens, start, view("mut")) {
+                put(&mut out, view("mut "));
+                inner := ty_of(s, others, start + 1, hi, budget - 1);
+                if inner.len() == 0 {
+                    return u8[];
+                }
+                put(&mut out, inner);
+                return trim(out);
+            }
+        }
+        inner := ty_of(s, others, start, hi, budget - 1);
+        if inner.len() == 0 {
+            return u8[];
+        }
+        put(&mut out, inner);
+        return trim(out);
+    }
+    // Type::Variant
+    if s.tokens[hi - 2].kind == 260 {
+        if s.tokens[hi - 1].kind == 1 {
+            owner := render(text, tokens, lo, hi - 2);
+            found := resolve_item(s, others, view(owner), 3, 4);
+            if found.kind == K_ENUM {
+                variant := render(text, tokens, hi - 1, hi);
+                for v in found.variants.len() {
+                    if eq(found.variants[v].name, view(variant)) {
+                        return copy_bytes(found.name);
+                    }
+                }
+            }
+            return u8[];
+        }
+    }
+    return u8[];
+}
+fn ty_of_token(s: &Source, others: (&Item[]), at: u64, budget: u64) -> u8[] {
+    k := s.tokens[at].kind;
+    if k == 1 {
+        if 0 < at {
+            prev := s.tokens[at - 1].kind;
+            if prev == 46 || prev == 260 {
+                return u8[];
+            }
+        }
+        text := view(s.text);
+        tokens := &s.tokens;
+        if tok_is(text, tokens, at, view("true")) || tok_is(text, tokens, at, view("false")) {
+            return copy_bytes(view("bool"));
+        }
+        return ident_ty(s, others, at, budget);
+    }
+    return literal_ty(s, at);
+}
+// The type a call produces, given its callee and its argument token range.
+fn call_ty(s: &Source, others: (&Item[]), lo: u64, open: u64, alo: u64, ahi: u64, budget: u64) -> u8[] {
+    text := view(s.text);
+    tokens := &s.tokens;
+    if open <= lo {
+        return u8[];
+    }
+    // f(...)
+    if open == lo + 1 {
+        if s.tokens[lo].kind != 1 {
+            return u8[];
+        }
+        name := render(text, tokens, lo, open);
+        if eq(view(name), view("Some")) {
+            inner := ty_of(s, others, alo, ahi, budget - 1);
+            if inner.len() == 0 {
+                return u8[];
+            }
+            mut out = copy_bytes(view(inner));
+            out.push(63);
+            return out;
+        }
+        found := resolve_item(s, others, view(name), 2, 4);
+        if found.kind == 0 {
+            return u8[];
+        }
+        if found.ret.len() == 0 {
+            return copy_bytes(view("unit"));
+        }
+        return copy_bytes(found.ret);
+    }
+    // receiver.method(...)
+    dot := last_dot(tokens, lo, open);
+    if dot != no_index() {
+        if dot + 2 == open {
+            member := render(text, tokens, dot + 1, open);
+            recv := ty_of(s, others, lo, dot, budget - 1);
+            if recv.len() == 0 {
+                return u8[];
+            }
+            method := method_of(s, others, view(recv), view(member), budget - 1);
+            if method.kind == 0 {
+                return u8[];
+            }
+            args := outer_args(view(recv));
+            if method.ret.len() == 0 {
+                return copy_bytes(view("unit"));
+            }
+            return substitute(view(method.ret), &method.generics, &args);
+        }
+        return u8[];
+    }
+    // Type::member(...)
+    if 2 < open - lo {
+        if s.tokens[open - 1].kind == 1 {
+            if s.tokens[open - 2].kind == 260 {
+                owner := render(text, tokens, lo, open - 2);
+                member := render(text, tokens, open - 1, open);
+                found := resolve_item(s, others, view(owner), 1, 4);
+                if found.kind == K_ENUM {
+                    for v in found.variants.len() {
+                        if eq(found.variants[v].name, view(member)) {
+                            return copy_bytes(found.name);
+                        }
+                    }
+                }
+                method := method_of(s, others, view(owner), view(member), budget - 1);
+                if method.kind == 0 {
+                    return u8[];
+                }
+                args := outer_args(view(owner));
+                if method.ret.len() == 0 {
+                    return copy_bytes(view("unit"));
+                }
+                return substitute(view(method.ret), &method.generics, &args);
+            }
+        }
+    }
+    return u8[];
+}
+
+// ---------------------------------------------------------------------------
+// hover
+// ---------------------------------------------------------------------------
+
+pub struct Hover {
+    text: u8[],
+    lo: u64,
+    hi: u64
+}
+pub fn no_hover() -> Hover {
+    return Hover { text: u8[], lo: 0, hi: 0 };
+}
+fn hit_hover(body: &[u8], lo: u64, hi: u64) -> Hover {
+    return Hover { text: copy_bytes(body), lo: lo, hi: hi };
+}
+fn code_block(body: &[u8]) -> u8[] {
+    mut out = u8[];
+    put(&mut out, view("```grail\n"));
+    put(&mut out, body);
+    put(&mut out, view("\n```"));
+    return out;
+}
+fn with_doc(body: &[u8], doc: &[u8]) -> u8[] {
+    mut out = code_block(body);
+    if 0 < doc.len() {
+        put(&mut out, view("\n\n"));
+        put(&mut out, doc);
+    }
+    return out;
+}
+fn render_generics(item: &Item) -> u8[] {
+    mut out = u8[];
+    if item.generics.len() == 0 {
+        return out;
+    }
+    out.push(60);
+    for i in item.generics.len() {
+        if 0 < i {
+            put(&mut out, view(", "));
+        }
+        put(&mut out, item.generics[i]);
+    }
+    out.push(62);
+    return out;
+}
+fn render_params(item: &Item) -> u8[] {
+    mut out = u8[];
+    for i in item.params.len() {
+        if 0 < i {
+            put(&mut out, view(", "));
+        }
+        put(&mut out, item.params[i].name);
+        if 0 < item.params[i].ty.len() {
+            put(&mut out, view(": "));
+            put(&mut out, item.params[i].ty);
+        }
+    }
+    return out;
+}
+// The one-line form an editor shows on hover: `fn parse(s: &[u8]) -> u64`.
+pub fn signature(item: &Item) -> u8[] {
+    mut out = u8[];
+    if item.kind == K_FN || item.kind == K_METHOD {
+        put(&mut out, view("fn "));
+        put(&mut out, item.name);
+        put(&mut out, render_generics(item));
+        out.push(40);
+        put(&mut out, render_params(item));
+        out.push(41);
+        if 0 < item.ret.len() {
+            put(&mut out, view(" -> "));
+            put(&mut out, item.ret);
+        }
+        return out;
+    }
+    if item.kind == K_RECORD {
+        put(&mut out, view("struct "));
+        put(&mut out, item.name);
+        put(&mut out, render_generics(item));
+        put(&mut out, view(" { "));
+        for i in item.fields.len() {
+            if 0 < i {
+                put(&mut out, view(", "));
+            }
+            put(&mut out, item.fields[i].name);
+            put(&mut out, view(": "));
+            put(&mut out, item.fields[i].ty);
+        }
+        put(&mut out, view(" }"));
+        return out;
+    }
+    if item.kind == K_ENUM {
+        put(&mut out, view("enum "));
+        put(&mut out, item.name);
+        put(&mut out, render_generics(item));
+        put(&mut out, view(" { "));
+        for i in item.variants.len() {
+            if 0 < i {
+                put(&mut out, view(", "));
+            }
+            put(&mut out, item.variants[i].name);
+            if item.variants[i].typed {
+                out.push(40);
+                put(&mut out, item.variants[i].payload);
+                out.push(41);
+            }
+        }
+        put(&mut out, view(" }"));
+        return out;
+    }
+    if item.kind == K_ALIAS {
+        put(&mut out, view("type "));
+        put(&mut out, item.name);
+        put(&mut out, view(" = "));
+        put(&mut out, item.ty);
+        return out;
+    }
+    if item.kind == K_CONST {
+        put(&mut out, view("const "));
+        put(&mut out, item.name);
+        put(&mut out, view(": "));
+        put(&mut out, item.ty);
+        return out;
+    }
+    if item.kind == K_HANDLE {
+        put(&mut out, view("handle "));
+        put(&mut out, item.name);
+        return out;
+    }
+    return out;
+}
+fn item_with_token(s: &Source, at: u64) -> Item {
+    for i in s.items.len() {
+        if s.items[i].token == at {
+            return item_copy(&s.items[i]);
+        }
+    }
+    return empty_item();
+}
+pub struct FieldHit {
+    field: FieldDecl,
+    record: u8[]
+}
+pub struct VariantHit {
+    variant: VariantDecl,
+    record: u8[]
+}
+fn field_decl_hit(s: &Source, at: u64) -> FieldHit {
+    for i in s.items.len() {
+        if s.items[i].kind == K_RECORD {
+            for f in s.items[i].fields.len() {
+                if s.items[i].fields[f].token == at {
+                    return FieldHit {
+                        field: FieldDecl {
+                            name: copy_bytes(s.items[i].fields[f].name),
+                            ty: copy_bytes(s.items[i].fields[f].ty),
+                            token: at
+                        },
+                        record: copy_bytes(s.items[i].name)
+                    };
+                }
+            }
+        }
+    }
+    return FieldHit { field: FieldDecl { name: u8[], ty: u8[], token: no_index() }, record: u8[] };
+}
+fn variant_decl_hit(s: &Source, at: u64) -> VariantHit {
+    for i in s.items.len() {
+        if s.items[i].kind == K_ENUM {
+            for v in s.items[i].variants.len() {
+                if s.items[i].variants[v].token == at {
+                    return VariantHit {
+                        variant: VariantDecl {
+                            name: copy_bytes(s.items[i].variants[v].name),
+                            payload: copy_bytes(s.items[i].variants[v].payload),
+                            typed: s.items[i].variants[v].typed,
+                            token: at
+                        },
+                        record: copy_bytes(s.items[i].name)
+                    };
+                }
+            }
+        }
+    }
+    return VariantHit { variant: VariantDecl { name: u8[], payload: u8[], typed: false, token: no_index() }, record: u8[] };
+}
+// The item a name token names: its own declaration, or a declaration it refers to.
+fn item_for(s: &Source, others: (&Item[]), at: u64) -> Item {
+    declared := item_with_token(s, at);
+    if declared.kind != 0 {
+        return declared;
+    }
+    name := s.text[s.tokens[at].start: s.tokens[at].end];
+    if 1 < at {
+        if s.tokens[at - 1].kind == 260 {
+            prefix := at - 2;
+            if s.tokens[prefix].kind != 1 {
+                return empty_item();
+            }
+            mut full = render(view(s.text), &s.tokens, prefix, prefix + 1);
+            put(&mut full, view("::"));
+            put(&mut full, name);
+            return resolve_item(s, others, view(full), 0, 4);
+        }
+    }
+    return resolve_item(s, others, name, 0, 4);
+}
+fn field_body(s: &Source, others: (&Item[]), recv: &[u8], name: &[u8]) -> Hover {
+    found := field_of(s, others, recv, name, 8);
+    if found.name.len() == 0 {
+        return no_hover();
+    }
+    mut line = u8[];
+    put(&mut line, found.name);
+    put(&mut line, view(": "));
+    put(&mut line, found.ty);
+    mut body = code_block(view(line));
+    put(&mut body, view("\n\nfield of `"));
+    put(&mut body, view(outer_name(recv)));
+    put(&mut body, view("`"));
+    return Hover { text: body, lo: 0, hi: 0 };
+}
+pub fn hover(s: &Source, others: (&Item[]), offset: u64) -> Hover {
+    at := ident_at(s, offset);
+    if at == no_index() {
+        lit := token_at(s, offset);
+        if lit == no_index() {
+            return no_hover();
+        }
+        ty := literal_ty(s, lit);
+        if ty.len() == 0 {
+            return no_hover();
+        }
+        return hit_hover(view(code_block(view(ty))), s.tokens[lit].start, s.tokens[lit].end);
+    }
+    text := view(s.text);
+    tokens := &s.tokens;
+    lo := s.tokens[at].start;
+    hi := s.tokens[at].end;
+    mut prev = 0;
+    if 0 < at {
+        prev = s.tokens[at - 1].kind;
+    }
+    // A field or a method of the receiver's type.
+    if prev == 46 {
+        dot := at - 1;
+        start := expr_start(s, dot);
+        if start == no_index() {
+            return no_hover();
+        }
+        recv := ty_of(s, others, start, dot, 12);
+        if recv.len() == 0 {
+            return no_hover();
+        }
+        name := render(text, tokens, at, at + 1);
+        if is_call_at(s, at) {
+            method := method_of(s, others, view(recv), view(name), 8);
+            if method.kind == 0 {
+                return no_hover();
+            }
+            return hit_hover(view(with_doc(&signature(&method), view(method.doc))), lo, hi);
+        }
+        found := field_body(s, others, view(recv), view(name));
+        if found.text.len() == 0 {
+            return no_hover();
+        }
+        return hit_hover(view(found.text), lo, hi);
+    }
+    // A variant or a member of another module, named in full.
+    if prev == 260 {
+        if at < 2 {
+            return no_hover();
+        }
+        owner := at - 2;
+        if s.tokens[owner].kind != 1 {
+            return no_hover();
+        }
+        owner_name := render(text, tokens, owner, owner + 1);
+        name := render(text, tokens, at, at + 1);
+        enum_item := own_item(s, view(owner_name), 3);
+        if enum_item.kind == K_ENUM {
+            for v in enum_item.variants.len() {
+                if eq(enum_item.variants[v].name, view(name)) {
+                    mut line = u8[];
+                    put(&mut line, enum_item.name);
+                    put(&mut line, view("::"));
+                    put(&mut line, enum_item.variants[v].name);
+                    if enum_item.variants[v].typed {
+                        line.push(40);
+                        put(&mut line, enum_item.variants[v].payload);
+                        line.push(41);
+                    }
+                    mut body = code_block(view(line));
+                    put(&mut body, view("\n\nvariant of `"));
+                    put(&mut body, enum_item.name);
+                    put(&mut body, view("`"));
+                    return hit_hover(view(body), lo, hi);
+                }
+            }
+        }
+        mut full = copy_bytes(view(owner_name));
+        put(&mut full, view("::"));
+        put(&mut full, name);
+        found := resolve_item(s, others, view(full), 0, 4);
+        if found.kind == 0 {
+            return no_hover();
+        }
+        return hit_hover(view(with_doc(&signature(&found), view(found.doc))), lo, hi);
+    }
+    // A field declaration, shown where it is written.
+    hit := field_decl_hit(s, at);
+    if hit.record.len() != 0 {
+        mut line = u8[];
+        put(&mut line, hit.field.name);
+        put(&mut line, view(": "));
+        put(&mut line, hit.field.ty);
+        mut body = code_block(view(line));
+        put(&mut body, view("\n\nfield of `"));
+        put(&mut body, hit.record);
+        put(&mut body, view("`"));
+        return hit_hover(view(body), lo, hi);
+    }
+    // A variant declaration.
+    vhit := variant_decl_hit(s, at);
+    if vhit.record.len() != 0 {
+        mut line = u8[];
+        put(&mut line, vhit.record);
+        put(&mut line, view("::"));
+        put(&mut line, vhit.variant.name);
+        if vhit.variant.typed {
+            line.push(40);
+            put(&mut line, vhit.variant.payload);
+            line.push(41);
+        }
+        mut body = code_block(view(line));
+        put(&mut body, view("\n\nvariant of `"));
+        put(&mut body, vhit.record);
+        put(&mut body, view("`"));
+        return hit_hover(view(body), lo, hi);
+    }
+    // A field label in a record literal or pattern: the field's declared type.
+    if is_label_position(s, at) {
+        head := literal_head(s, at);
+        if 0 < head.len() {
+            rec := resolve_item(s, others, view(head), 1, 4);
+            if rec.kind == K_RECORD {
+                name := render(text, tokens, at, at + 1);
+                found := field_body(s, others, view(rec.name), view(name));
+                if 0 < found.text.len() {
+                    return hit_hover(view(found.text), lo, hi);
+                }
+            }
+        }
+    }
+    // A binding: its type comes from its annotation or its initializer.
+    decl := resolve_binding(s, at);
+    if decl != no_index() {
+        ty := binding_ty(s, others, decl, 12);
+        if ty.len() == 0 {
+            return no_hover();
+        }
+        mut line = u8[];
+        put(&mut line, render(text, tokens, at, at + 1));
+        put(&mut line, view(": "));
+        put(&mut line, ty);
+        return hit_hover(view(code_block(view(line))), lo, hi);
+    }
+    // A keyword has no type to show.
+    keyword_name := render(text, tokens, at, at + 1);
+    if is_keyword(view(keyword_name)) {
+        return no_hover();
+    }
+    // A function, record, enum, alias, constant or handle.
+    item := item_for(s, others, at);
+    if item.kind == 0 {
+        return no_hover();
+    }
+    return hit_hover(view(with_doc(&signature(&item), view(item.doc))), lo, hi);
+}
+
+// ---------------------------------------------------------------------------
+// positions and names
+// ---------------------------------------------------------------------------
+
+// The identifier token at a byte offset. A position just after a word still names that
+// word: an editor sends the caret between two tokens when the user clicks there.
+pub fn ident_at(s: &Source, offset: u64) -> u64 {
+    mut i = 0;
+    while i < s.tokens.len() {
+        if s.tokens[i].kind == 1 {
+            if s.tokens[i].start <= offset && offset < s.tokens[i].end {
+                return i;
+            }
+        }
+        i += 1;
+    }
+    i = 0;
+    while i < s.tokens.len() {
+        if s.tokens[i].kind == 1 {
+            if offset == s.tokens[i].end {
+                return i;
+            }
+        }
+        i += 1;
+    }
+    return no_index();
+}
+pub fn token_at(s: &Source, offset: u64) -> u64 {
+    mut i = 0;
+    while i < s.tokens.len() {
+        if s.tokens[i].start <= offset && offset < s.tokens[i].end {
+            return i;
+        }
+        i += 1;
+    }
+    return no_index();
+}
+fn is_keyword(name: &[u8]) -> bool {
+    words := u8[][
+        copy_bytes(view("mut")),
+        copy_bytes(view("if")),
+        copy_bytes(view("else")),
+        copy_bytes(view("while")),
+        copy_bytes(view("for")),
+        copy_bytes(view("in")),
+        copy_bytes(view("loop")),
+        copy_bytes(view("match")),
+        copy_bytes(view("return")),
+        copy_bytes(view("break")),
+        copy_bytes(view("continue")),
+        copy_bytes(view("unsafe")),
+        copy_bytes(view("true")),
+        copy_bytes(view("false")),
+        copy_bytes(view("fn")),
+        copy_bytes(view("struct")),
+        copy_bytes(view("enum")),
+        copy_bytes(view("type")),
+        copy_bytes(view("const")),
+        copy_bytes(view("impl")),
+        copy_bytes(view("use")),
+        copy_bytes(view("module")),
+        copy_bytes(view("pub")),
+        copy_bytes(view("extern")),
+        copy_bytes(view("handle")),
+        copy_bytes(view("interface")),
+        copy_bytes(view("where")),
+        copy_bytes(view("ensures")),
+        copy_bytes(view("as")),
+        copy_bytes(view("lib")),
+        copy_bytes(view("Self")),
+        copy_bytes(view("unit"))
+    ];
+    for i in words.len() {
+        if eq(words[i], name) {
+            return true;
+        }
+    }
+    return false;
+}
+fn ends_operand(k: u64) -> bool {
+    if k == 59 || k == 44 || k == 61 || k == 261 || k == 256 || k == 257 {
+        return true;
+    }
+    if k == 262 || k == 263 || k == 264 || k == 265 || k == 266 {
+        return true;
+    }
+    if k == 43 || k == 45 || k == 42 || k == 47 || k == 37 {
+        return true;
+    }
+    if k == 273 || k == 274 || k == 58 || k == 260 {
+        return true;
+    }
+    return false;
+}
+// Where the expression ending at `stop` begins: the receiver of a field access, or the
+// callee of a call.
+fn expr_start(s: &Source, stop: u64) -> u64 {
+    mut i = stop;
+    mut depth = 0;
+    while 0 < i {
+        i -= 1;
+        k := s.tokens[i].kind;
+        if (k == 41) || (k == 93) || (k == 125) {
+            depth += 1;
+        } else {
+            if (k == 40) || (k == 91) || (k == 123) {
+                if 0 < depth {
+                    depth -= 1;
+                } else {
+                    return i + 1;
+                }
+            } else {
+                if depth == 0 {
+                    if ends_operand(k) {
+                        return i + 1;
+                    }
+                    if k == 1 {
+                        text := view(s.text);
+                        tokens := &s.tokens;
+                        if tok_is(text, tokens, i, view("return"))
+                            || tok_is(text, tokens, i, view("if"))
+                            || tok_is(text, tokens, i, view("else"))
+                            || tok_is(text, tokens, i, view("while"))
+                            || tok_is(text, tokens, i, view("in"))
+                            || tok_is(text, tokens, i, view("for"))
+                            || tok_is(text, tokens, i, view("match"))
+                            || tok_is(text, tokens, i, view("mut"))
+                            || tok_is(text, tokens, i, view("unsafe")) {
+                            return i + 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+fn is_call_at(s: &Source, at: u64) -> bool {
+    mut j = at + 1;
+    if s.tokens.len() <= j {
+        return false;
+    }
+    return s.tokens[j].kind == 40;
+}
+
+// ---------------------------------------------------------------------------
+// completion
+// ---------------------------------------------------------------------------
+
+pub struct Completion {
+    label: u8[],
+    kind: u64,
+    detail: u8[],
+    sort: u8[]
+}
+fn completion_add(out: (&mut Completion[]), label: &[u8], kind: u64, detail: &[u8], sort: &[u8]) {
+    if 0 < label.len() {
+        out.push(
+            Completion { label: copy_bytes(label), kind: kind, detail: copy_bytes(detail), sort: copy_bytes(sort) }
+        );
+    }
+}
+fn has_completion(seen: (&Completion[]), label: &[u8]) -> bool {
+    for i in seen.len() {
+        if eq(seen[i].label, label) {
+            return true;
+        }
+    }
+    return false;
+}
+// The last token that ends at or before `offset`, or no_index().
+fn token_before(s: &Source, offset: u64) -> u64 {
+    mut best = no_index();
+    mut best_end = 0;
+    mut i = 0;
+    while i < s.tokens.len() {
+        if s.tokens[i].end <= offset {
+            if best == no_index() || best_end < s.tokens[i].end {
+                best = i;
+                best_end = s.tokens[i].end;
+            }
+        }
+        i += 1;
+    }
+    return best;
+}
+fn depth_at(s: &Source, offset: u64) -> u64 {
+    at := token_at(s, offset);
+    if at != no_index() {
+        return s.tokens[at].depth;
+    }
+    before := token_before(s, offset);
+    if before == no_index() {
+        return 0;
+    }
+    return s.tokens[before].depth;
+}
+fn keyword_list() -> u8[][] {
+    return u8[][
+        copy_bytes(view("mut")),
+        copy_bytes(view("if")),
+        copy_bytes(view("else")),
+        copy_bytes(view("while")),
+        copy_bytes(view("for")),
+        copy_bytes(view("in")),
+        copy_bytes(view("loop")),
+        copy_bytes(view("match")),
+        copy_bytes(view("return")),
+        copy_bytes(view("break")),
+        copy_bytes(view("continue")),
+        copy_bytes(view("unsafe")),
+        copy_bytes(view("true")),
+        copy_bytes(view("false")),
+        copy_bytes(view("fn")),
+        copy_bytes(view("struct")),
+        copy_bytes(view("enum")),
+        copy_bytes(view("impl")),
+        copy_bytes(view("use")),
+        copy_bytes(view("const")),
+        copy_bytes(view("type")),
+        copy_bytes(view("pub")),
+        copy_bytes(view("where")),
+        copy_bytes(view("unit")),
+        copy_bytes(view("u8")),
+        copy_bytes(view("u16")),
+        copy_bytes(view("u32")),
+        copy_bytes(view("u64")),
+        copy_bytes(view("i8")),
+        copy_bytes(view("i16")),
+        copy_bytes(view("i32")),
+        copy_bytes(view("i64")),
+        copy_bytes(view("f32")),
+        copy_bytes(view("f64")),
+        copy_bytes(view("bool")),
+        copy_bytes(view("string")),
+        copy_bytes(view("char"))
+    ];
+}
+fn starts_with_prefix(label: &[u8], prefix: &[u8]) -> bool {
+    if label.len() < prefix.len() {
+        return false;
+    }
+    for i in prefix.len() {
+        if label[i] != prefix[i] {
+            return false;
+        }
+    }
+    return true;
+}
+fn function_detail(item: &Item, detail: (&mut u8[])) {
+    put(detail, view("fn "));
+    put(detail, item.name);
+    put(detail, render_generics(item));
+    detail.push(40);
+    put(detail, render_params(item));
+    detail.push(41);
+    if 0 < item.ret.len() {
+        put(detail, view(" -> "));
+        put(detail, item.ret);
+    }
+}
+fn item_completion(item: &Item, rank: u8, out: (&mut Completion[])) {
+    mut kind = 3;
+    mut detail = u8[];
+    mut sort = u8[];
+    sort.push(rank);
+    put(&mut sort, item.name);
+    if item.kind == K_RECORD {
+        kind = 22;
+        put(&mut detail, view("struct "));
+        put(&mut detail, item.name);
+    } else {
+        if item.kind == K_ENUM {
+            kind = 13;
+            put(&mut detail, view("enum "));
+            put(&mut detail, item.name);
+        } else {
+            if item.kind == K_ALIAS {
+                kind = 25;
+                put(&mut detail, view("type "));
+                put(&mut detail, item.name);
+                put(&mut detail, view(" = "));
+                put(&mut detail, item.ty);
+            } else {
+                if item.kind == K_CONST {
+                    kind = 21;
+                    put(&mut detail, view("const "));
+                    put(&mut detail, item.name);
+                    put(&mut detail, view(": "));
+                    put(&mut detail, item.ty);
+                } else {
+                    if item.kind == K_HANDLE {
+                        kind = 22;
+                        put(&mut detail, view("handle "));
+                        put(&mut detail, item.name);
+                    } else {
+                        kind = 3;
+                        if item.kind == K_METHOD {
+                            kind = 2;
+                        }
+                        function_detail(item, &mut detail);
+                    }
+                }
+            }
+        }
+    }
+    completion_add(out, view(item.name), kind, view(detail), view(sort));
+}
+fn method_completion(item: &Item, out: (&mut Completion[])) {
+    mut sort = u8[];
+    sort.push(49);
+    put(&mut sort, item.name);
+    mut detail = u8[];
+    function_detail(item, &mut detail);
+    completion_add(out, view(item.name), 2, view(detail), view(sort));
+}
+fn method_matches(item: &Item, record: &[u8]) -> bool {
+    name := outer_name(view(item.receiver));
+    return eq(view(name), record);
+}
+fn field_completions(s: &Source, others: (&Item[]), recv: &[u8], out: (&mut Completion[])) {
+    rec := find_record(s, others, recv, 4);
+    if rec.kind == 0 {
+        return ();
+    }
+    args := outer_args(recv);
+    for i in rec.fields.len() {
+        detail := substitute(rec.fields[i].ty, &rec.generics, &args);
+        mut sort = u8[];
+        sort.push(48);
+        put(&mut sort, rec.fields[i].name);
+        completion_add(out, view(rec.fields[i].name), 5, view(detail), view(sort));
+    }
+    mut k = 0;
+    while k < s.items.len() {
+        if s.items[k].kind == K_METHOD && s.items[k].has_self && method_matches(&s.items[k], view(rec.name)) {
+            method_completion(&s.items[k], out);
+        }
+        k += 1;
+    }
+    k = 0;
+    while k < others.len() {
+        if others[k].kind == K_METHOD && others[k].has_self && method_matches(&others[k], view(rec.name)) {
+            method_completion(&others[k], out);
+        }
+        k += 1;
+    }
+}
+fn static_completions(s: &Source, others: (&Item[]), record: &[u8], out: (&mut Completion[])) {
+    mut k = 0;
+    while k < s.items.len() {
+        if s.items[k].kind == K_METHOD && !s.items[k].has_self && method_matches(&s.items[k], record) {
+            method_completion(&s.items[k], out);
+        }
+        k += 1;
+    }
+    k = 0;
+    while k < others.len() {
+        if others[k].kind == K_METHOD && !others[k].has_self && method_matches(&others[k], record) {
+            method_completion(&others[k], out);
+        }
+        k += 1;
+    }
+}
+fn variant_completions(item: &Item, out: (&mut Completion[])) {
+    for i in item.variants.len() {
+        mut detail = u8[];
+        put(&mut detail, item.name);
+        put(&mut detail, view("::"));
+        put(&mut detail, item.variants[i].name);
+        if item.variants[i].typed {
+            detail.push(40);
+            put(&mut detail, item.variants[i].payload);
+            detail.push(41);
+        }
+        mut sort = u8[];
+        sort.push(48);
+        put(&mut sort, item.variants[i].name);
+        completion_add(out, view(item.variants[i].name), 20, view(detail), view(sort));
+    }
+}
+// The parameters of the call whose `(` was just typed.
+fn parameter_completions(s: &Source, others: (&Item[]), at: u64, out: (&mut Completion[])) {
+    if s.tokens[at].kind != 1 {
+        return ();
+    }
+    name := s.text[s.tokens[at].start: s.tokens[at].end];
+    mut found = empty_item();
+    if 0 < at {
+        if s.tokens[at - 1].kind == 46 {
+            start := expr_start(s, at - 1);
+            if start != no_index() {
+                recv := ty_of(s, others, start, at - 1, 8);
+                if recv.len() != 0 {
+                    found = method_of(s, others, view(recv), name, 8);
+                }
+            }
+        }
+    }
+    if found.kind == 0 {
+        found = resolve_item(s, others, name, 2, 4);
+    }
+    if found.kind == 0 {
+        return ();
+    }
+    for i in found.params.len() {
+        detail := copy_bytes(found.params[i].ty);
+        mut sort = u8[];
+        sort.push(48);
+        sort.push(48);
+        sort.push(48);
+        put(&mut sort, found.params[i].name);
+        completion_add(out, view(found.params[i].name), 6, view(detail), view(sort));
+    }
+}
+// Everything an editor offers at `offset`, in the context the text before it states.
+pub fn completions(s: &Source, others: (&Item[]), offset: u64) -> Completion[] {
+    mut out = Completion[];
+    mut start = offset;
+    while 0 < start {
+        b := s.text[start - 1];
+        if letter(b) || digit(b) {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    mut prefix = u8[];
+    for i in start .. offset {
+        prefix.push(s.text[i]);
+    }
+    tokens := &s.tokens;
+    prev := token_before(s, start);
+    if prev != no_index() {
+        kind := s.tokens[prev].kind;
+        if kind == 46 {
+            // `.` is field access unless it is the first half of `..`.
+            mut range_dot = false;
+            if 0 < prev {
+                if s.tokens[prev - 1].kind == 46 {
+                    range_dot = true;
+                }
+            }
+            if !range_dot {
+                dot := prev;
+                expr_open := expr_start(s, dot);
+                if expr_open != no_index() {
+                    recv := ty_of(s, others, expr_open, dot, 12);
+                    if recv.len() != 0 {
+                        field_completions(s, others, view(recv), &mut out);
+                    } else {
+                        // `Type.`: an enum variant, or a function an `impl` attaches.
+                        if dot == expr_open + 1 {
+                            if s.tokens[expr_open].kind == 1 {
+                                name := render(view(s.text), tokens, expr_open, dot);
+                                owner := resolve_item(s, others, view(name), 1, 4);
+                                if owner.kind == K_ENUM {
+                                    variant_completions(&owner, &mut out);
+                                } else {
+                                    if owner.kind == K_RECORD {
+                                        static_completions(s, others, view(owner.name), &mut out);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                return out;
+            }
+        }
+        if kind == 260 {
+            // `Type::`: enum variants, or the functions an `impl` attaches to the type.
+            if 1 < prev {
+                if s.tokens[prev - 1].kind == 1 {
+                    owner := render(view(s.text), tokens, prev - 1, prev);
+                    owner_item := resolve_item(s, others, view(owner), 1, 4);
+                    if owner_item.kind == K_ENUM {
+                        variant_completions(&owner_item, &mut out);
+                        return out;
+                    }
+                    if owner_item.kind != 0 {
+                        static_completions(s, others, view(owner_item.name), &mut out);
+                        return out;
+                    }
+                    // A module named in full: its declarations, when they are open.
+                    if eq(s.module, view(owner)) {
+                        for i in s.items.len() {
+                            item_completion(&s.items[i], 50, &mut out);
+                        }
+                        return out;
+                    }
+                    for i in others.len() {
+                        if eq(others[i].module, view(owner)) {
+                            item_completion(&others[i], 50, &mut out);
+                        }
+                    }
+                    return out;
+                }
+            }
+            return out;
+        }
+        if kind == 40 {
+            if 0 < prev {
+                parameter_completions(s, others, prev - 1, &mut out);
+                if 0 < out.len() {
+                    return out;
+                }
+            }
+        }
+    }
+    // The general list: names in scope, this file's declarations, keywords.
+    depth := depth_at(s, offset);
+    before := token_before(s, start);
+    mut owner = no_index();
+    if before != no_index() {
+        owner = owner_of(&s.scopes, before);
+    }
+    mut i = s.bindings.len();
+    while 0 < i {
+        i -= 1;
+        b := &s.bindings[i];
+        if b.token < s.tokens.len() {
+            if s.tokens[b.token].end <= start {
+                if b.owner == owner && b.depth <= depth && starts_with_prefix(view(b.name), view(prefix)) {
+                    if !has_completion(&out, view(b.name)) {
+                        mut detail = copy_bytes(b.ty);
+                        if detail.len() == 0 {
+                            detail = binding_ty(s, others, b.token, 8);
+                        }
+                        mut sort = u8[];
+                        if b.kind == B_PARAM {
+                            sort.push(48);
+                        } else {
+                            sort.push(49);
+                        }
+                        put(&mut sort, b.name);
+                        completion_add(&mut out, view(b.name), 6, view(detail), view(sort));
+                    }
+                }
+            }
+        }
+    }
+    for i in s.items.len() {
+        // A method is reached through its receiver or its impl, never as a bare name.
+        if s.items[i].kind != K_METHOD {
+            if !s.items[i].external && starts_with_prefix(view(s.items[i].name), view(prefix)) {
+                if !has_completion(&out, view(s.items[i].name)) {
+                    item_completion(&s.items[i], 50, &mut out);
+                }
+            }
+        }
+    }
+    // Names imported from other open documents.
+    for i in s.imports.len() {
+        if 0 < s.imports[i].name.len() {
+            if starts_with_prefix(view(s.imports[i].name), view(prefix)) {
+                if !has_completion(&out, view(s.imports[i].name)) {
+                    item := foreign_item(others, view(s.imports[i].module), view(s.imports[i].name), 0);
+                    if item.kind != 0 {
+                        item_completion(&item, 50, &mut out);
+                    }
+                }
+            }
+        }
+    }
+    keywords := keyword_list();
+    for i in keywords.len() {
+        if starts_with_prefix(keywords[i], view(prefix)) {
+            if !has_completion(&out, keywords[i]) {
+                mut sort = u8[];
+                sort.push(57);
+                put(&mut sort, keywords[i]);
+                completion_add(&mut out, keywords[i], 14, view(""), view(sort));
+            }
+        }
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// definition and rename
+// ---------------------------------------------------------------------------
+
+// The declaration a position refers to, in this document: a name in a `fn` header, a field
+// or variant where it is declared, a local binding, a parameter. no_index() for anything
+// that resolves elsewhere or not at all.
+pub fn definition(s: &Source, offset: u64) -> u64 {
+    at := ident_at(s, offset);
+    if at == no_index() {
+        return no_index();
+    }
+    if 0 < at {
+        prev := s.tokens[at - 1].kind;
+        if prev == 46 || prev == 260 {
+            return no_index();
+        }
+    }
+    declared := item_with_token(s, at);
+    if declared.kind != 0 {
+        return at;
+    }
+    hit := field_decl_hit(s, at);
+    if hit.record.len() != 0 {
+        return at;
+    }
+    vhit := variant_decl_hit(s, at);
+    if vhit.record.len() != 0 {
+        return at;
+    }
+    binding := resolve_binding(s, at);
+    if binding != no_index() {
+        return binding;
+    }
+    name := s.text[s.tokens[at].start: s.tokens[at].end];
+    for i in s.items.len() {
+        if s.items[i].kind == K_FN {
+            if eq(s.items[i].name, name) {
+                return s.items[i].token;
+            }
+        }
+    }
+    return no_index();
+}
+
+pub const R_LOCAL: u64 = 1;
+pub const R_ITEM: u64 = 2;
+pub const R_FIELD: u64 = 3;
+
+pub struct Span {
+    lo: u64,
+    hi: u64
+}
+pub struct Target {
+    kind: u64,
+    name: u8[],
+    record: u8[],
+    module: u8[],
+    decl: u64,
+    refusal: u8[]
+}
+pub fn no_rename() -> Target {
+    return Target { kind: 0, name: u8[], record: u8[], module: u8[], decl: no_index(), refusal: u8[] };
+}
+fn refused(text: &[u8]) -> Target {
+    mut target = no_rename();
+    target.refusal = copy_bytes(text);
+    return target;
+}
+fn target_item(item: &Item, module: &[u8], decl: u64) -> Target {
+    if item.external {
+        mut note = u8[];
+        put(&mut note, view("`"));
+        put(&mut note, item.name);
+        put(&mut note, view("` is an extern \"C\" declaration: its name is the symbol C calls"));
+        return refused(view(note));
+    }
+    if item.kind == K_METHOD {
+        return refused(view("a method is named at the call sites of every type that implements it"));
+    }
+    return Target {
+        kind: R_ITEM,
+        name: copy_bytes(item.name),
+        record: u8[],
+        module: copy_bytes(module),
+        decl: decl,
+        refusal: u8[]
+    };
+}
+// The spans of a token list, in document order and without repeats: a field's declaration
+// is matched both as its own token and as a label in the record's body.
+fn span_list(s: &Source, ats: (&u64[])) -> Span[] {
+    mut chosen = u64[];
+    for i in ats.len() {
+        at := ats[i];
+        if at != no_index() {
+            mut seen = false;
+            for k in chosen.len() {
+                if chosen[k] == at {
+                    seen = true;
+                }
+            }
+            if !seen {
+                chosen.push(at);
+            }
+        }
+    }
+    // Document order: the same edits, written the way an editor applies them.
+    mut i = 1;
+    while i < chosen.len() {
+        at := chosen[i];
+        mut j = i;
+        while 0 < j {
+            if s.tokens[chosen[j - 1]].start <= s.tokens[at].start {
+                break;
+            }
+            chosen[j] = chosen[j - 1];
+            j -= 1;
+        }
+        chosen[j] = at;
+        i += 1;
+    }
+    mut out = Span[];
+    for i in chosen.len() {
+        at := chosen[i];
+        if at < s.tokens.len() {
+            out.push(Span { lo: s.tokens[at].start, hi: s.tokens[at].end });
+        }
+    }
+    return out;
+}
+// The record name a record literal or pattern at `at` belongs to: the name before the
+// braces that enclose it.
+fn literal_head(s: &Source, at: u64) -> u8[] {
+    mut i = at;
+    mut depth = 0;
+    while 0 < i {
+        i -= 1;
+        k := s.tokens[i].kind;
+        if (k == 125) || (k == 93) || (k == 41) {
+            depth += 1;
+        } else {
+            if (k == 123) || (k == 91) || (k == 40) {
+                if 0 < depth {
+                    depth -= 1;
+                } else {
+                    if k == 123 {
+                        if 0 < i {
+                            if s.tokens[i - 1].kind == 1 {
+                                return render(view(s.text), &s.tokens, i - 1, i);
+                            }
+                        }
+                    }
+                    return u8[];
+                }
+            }
+        }
+    }
+    return u8[];
+}
+fn is_label_position(s: &Source, at: u64) -> bool {
+    if s.tokens.len() <= at + 1 {
+        return false;
+    }
+    if s.tokens[at + 1].kind != 58 {
+        return false;
+    }
+    if 0 < at {
+        k := s.tokens[at - 1].kind;
+        return k == 123 || k == 44;
+    }
+    return false;
+}
+fn is_pun_position(s: &Source, at: u64) -> bool {
+    if s.tokens.len() <= at + 1 {
+        return false;
+    }
+    k := s.tokens[at + 1].kind;
+    return k == 44 || k == 125;
+}
+fn is_item_decl_token(s: &Source, at: u64) -> bool {
+    for i in s.items.len() {
+        if s.items[i].token == at {
+            return true;
+        }
+    }
+    return false;
+}
+fn own_record(s: &Source, name: &[u8]) -> Item {
+    for i in s.items.len() {
+        if s.items[i].kind == K_RECORD {
+            if eq(s.items[i].name, name) {
+                return item_copy(&s.items[i]);
+            }
+        }
+    }
+    return empty_item();
+}
+// The declaration a rename at `offset` would change. kind 0 with an empty refusal means
+// there is nothing here to rename; kind 0 with a refusal means it was refused for a reason
+// the editor should show.
+pub fn rename_target(s: &Source, others: (&Item[]), offset: u64) -> Target {
+    at := ident_at(s, offset);
+    if at == no_index() {
+        return no_rename();
+    }
+    text := view(s.text);
+    tokens := &s.tokens;
+    name := render(text, tokens, at, at + 1);
+    if is_keyword(view(name)) {
+        return refused(view("this name is a keyword"));
+    }
+    mut prev = 0;
+    if 0 < at {
+        prev = s.tokens[at - 1].kind;
+    }
+    // A field of a value: `value.field`.
+    if prev == 46 {
+        dot := at - 1;
+        start := expr_start(s, dot);
+        if start == no_index() {
+            return no_rename();
+        }
+        recv := ty_of(s, others, start, dot, 12);
+        if recv.len() == 0 {
+            return refused(view("the type of this value is not known here"));
+        }
+        rec := find_record(s, others, view(recv), 4);
+        if rec.kind == 0 {
+            return refused(view("this receiver's type is not a record the server can see"));
+        }
+        field := field_of(s, others, view(recv), view(name), 4);
+        if field.name.len() == 0 {
+            return no_rename();
+        }
+        mut decl = no_index();
+        if own_record(s, view(rec.name)).kind != 0 {
+            decl = field.token;
+        }
+        return Target {
+            kind: R_FIELD,
+            name: copy_bytes(field.name),
+            record: copy_bytes(rec.name),
+            module: copy_bytes(rec.module),
+            decl: decl,
+            refusal: u8[]
+        };
+    }
+    // A name written in full: `module::name` or `Type::Variant`.
+    if prev == 260 {
+        if at < 2 {
+            return no_rename();
+        }
+        if s.tokens[at - 2].kind != 1 {
+            return no_rename();
+        }
+        owner := render(text, tokens, at - 2, at - 1);
+        type_item := resolve_item(s, others, view(owner), 1, 4);
+        if type_item.kind == K_ENUM {
+            return refused(view("an enum variant is renamed with its enum, which this server does not do"));
+        }
+        mut full = copy_bytes(view(owner));
+        put(&mut full, view("::"));
+        put(&mut full, name);
+        item := resolve_item(s, others, view(full), 0, 4);
+        if item.kind == 0 {
+            mut note = u8[];
+            put(&mut note, view("no source for module `"));
+            put(&mut note, owner);
+            put(&mut note, view("` is open, so `"));
+            put(&mut note, name);
+            put(&mut note, view("` cannot be renamed soundly"));
+            return refused(view(note));
+        }
+        mut decl = no_index();
+        if eq(view(owner), view(s.module)) {
+            decl = item.token;
+        }
+        return target_item(&item, view(owner), decl);
+    }
+    // A declaration written here.
+    declared := item_with_token(s, at);
+    if declared.kind != 0 {
+        return target_item(&declared, view(s.module), at);
+    }
+    hit := field_decl_hit(s, at);
+    if hit.record.len() != 0 {
+        return Target {
+            kind: R_FIELD,
+            name: hit.field.name,
+            record: hit.record,
+            module: copy_bytes(s.module),
+            decl: at,
+            refusal: u8[]
+        };
+    }
+    vhit := variant_decl_hit(s, at);
+    if vhit.record.len() != 0 {
+        return refused(view("an enum variant is renamed with its enum, which this server does not do"));
+    }
+    // A binding: a local, a parameter, a loop variable.
+    binding := resolve_binding(s, at);
+    if binding != no_index() {
+        if eq(view(name), view("self")) {
+            return refused(view("`self` is part of every method signature"));
+        }
+        return Target {
+            kind: R_LOCAL,
+            name: name,
+            record: u8[],
+            module: copy_bytes(s.module),
+            decl: binding,
+            refusal: u8[]
+        };
+    }
+    // A name this document declares, or one it imports.
+    mine := own_item(s, view(name), 0);
+    if mine.kind != 0 {
+        return target_item(&mine, view(s.module), mine.token);
+    }
+    for i in s.imports.len() {
+        if eq(s.imports[i].name, view(name)) {
+            other := foreign_item(others, view(s.imports[i].module), view(name), 0);
+            if other.kind != 0 {
+                return target_item(&other, view(s.imports[i].module), no_index());
+            }
+        }
+    }
+    return no_rename();
+}
+// The tokens to rewrite when renaming a local or parameter: exactly the uses that resolve
+// to that binding, so a shadowing binding's uses are never touched.
+pub fn local_spans(s: &Source, decl: u64) -> Span[] {
+    mut ats = u64[];
+    mut i = 0;
+    while i < s.tokens.len() {
+        if s.tokens[i].kind == 1 {
+            resolved := resolve_binding(s, i);
+            if resolved == decl {
+                ats.push(i);
+            }
+        }
+        i += 1;
+    }
+    return span_list(s, &ats);
+}
+// The tokens to rewrite when renaming a module-level declaration. In the document that
+// declares it every unshadowed use is a reference; in another open document only a use
+// that names it in full or imports it by name can be one.
+pub fn item_spans(s: &Source, module: &[u8], name: &[u8], decl: u64, defining: bool) -> Span[] {
+    mut ats = u64[];
+    mut imported = false;
+    for i in s.imports.len() {
+        if eq(s.imports[i].name, name) {
+            if eq(s.imports[i].module, module) {
+                imported = true;
+                ats.push(s.imports[i].token);
+            }
+        }
+    }
+    mut i = 0;
+    while i < s.tokens.len() {
+        if s.tokens[i].kind == 1 {
+            token_name := s.text[s.tokens[i].start: s.tokens[i].end];
+            if eq(token_name, name) {
+                mut use_token = true;
+                mut prev = 0;
+                if 0 < i {
+                    prev = s.tokens[i - 1].kind;
+                }
+                if prev == 46 {
+                    use_token = false;
+                }
+                if is_label_position(s, i) {
+                    use_token = false;
+                }
+                if prev == 260 {
+                    // `other::name` belongs to the module written before it.
+                    if 1 < i {
+                        qualifier := i - 2;
+                        if s.tokens[qualifier].kind == 1 {
+                            qualifier_name := s.text[s.tokens[qualifier].start: s.tokens[qualifier].end];
+                            if !eq(qualifier_name, module) {
+                                use_token = false;
+                            }
+                        } else {
+                            use_token = false;
+                        }
+                    } else {
+                        use_token = false;
+                    }
+                } else {
+                    if defining {
+                        // A local of the same name shadows the declaration.
+                        if resolve_binding(s, i) != no_index() {
+                            use_token = false;
+                        }
+                        if is_item_decl_token(s, i) {
+                            if i != decl {
+                                use_token = false;
+                            }
+                        }
+                    } else {
+                        if !imported {
+                            use_token = false;
+                        } else {
+                            if resolve_binding(s, i) != no_index() {
+                                use_token = false;
+                            }
+                        }
+                    }
+                }
+                if use_token {
+                    ats.push(i);
+                }
+            }
+        }
+        i += 1;
+    }
+    return span_list(s, &ats);
+}
+// The tokens to rewrite when renaming a record field: its declaration, every `x.field`
+// whose receiver is that record, and the field's label in a record literal or pattern.
+pub fn field_spans(s: &Source, others: (&Item[]), module: &[u8], record: &[u8], name: &[u8]) -> Span[] {
+    mut ats = u64[];
+    mine := own_record(s, record);
+    if mine.kind != 0 {
+        for f in mine.fields.len() {
+            if eq(mine.fields[f].name, name) {
+                ats.push(mine.fields[f].token);
+            }
+        }
+    }
+    mut i = 0;
+    while i < s.tokens.len() {
+        if s.tokens[i].kind == 1 {
+            token_name := s.text[s.tokens[i].start: s.tokens[i].end];
+            if eq(token_name, name) {
+                mut use_token = false;
+                mut prev = 0;
+                if 0 < i {
+                    prev = s.tokens[i - 1].kind;
+                }
+                if prev == 46 {
+                    dot := i - 1;
+                    start := expr_start(s, dot);
+                    if start != no_index() {
+                        recv := ty_of(s, others, start, dot, 12);
+                        if recv.len() != 0 {
+                            rec := find_record(s, others, view(recv), 4);
+                            if rec.kind != 0 {
+                                if eq(rec.name, record) {
+                                    use_token = true;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    if is_label_position(s, i) || is_pun_position(s, i) {
+                        head := literal_head(s, i);
+                        if 0 < head.len() {
+                            rec := resolve_item(s, others, view(head), 1, 4);
+                            if rec.kind == K_RECORD {
+                                if eq(rec.name, record) {
+                                    use_token = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                if use_token {
+                    ats.push(i);
+                }
+            }
+        }
+        i += 1;
+    }
+    return span_list(s, &ats);
+}
