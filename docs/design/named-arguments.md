@@ -134,6 +134,8 @@ regeneration and nothing else.
   count.
 - A closure or function *value* has no parameter names to name, so a call through a value is
   positional: *named arguments need a declared parameter list*.
-- A variadic `extern "C"` declaration cannot be called with named arguments, and it cannot declare a
-  default: C's ABI is the declaration, and the extra arguments have no parameter to name.
+- A variadic `extern "C"` declaration's *fixed* parameters can be named (their names are recorded for
+  exactly this), but the `...` arguments have no parameter to name: they are positional, and a call
+  that passes them cannot name anything, because a positional argument may not follow a named one.
+  Such a declaration cannot give a parameter a default either - the C signature is the declaration.
 - `self` cannot have a default.

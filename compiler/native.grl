@@ -13399,6 +13399,9 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     mut count = 0;
     mut words = 0;
     mut variadic = 0;
+    // The fixed parameters' names, so a call can name its slots exactly as a Grail declaration's can
+    // (docs/design/named-arguments.md). The `...` has no parameter and so no name.
+    mut pnames = u8[][];
     expect(&mut c, view("("));
     if !eat(&mut c, view(")")) {
         while true {
@@ -13429,6 +13432,7 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             );
             words = words + ffi_words(&mut c, ty);
             c.params.push(ty);
+            pnames.push(p.copy());
             count = count + 1;
             if eat(&mut c, view(")")) {
                 break;
@@ -13493,7 +13497,7 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                 body: u8[],
                 ppreds: Pred[],
                 rpred: no_pred(),
-                pnames: u8[][],
+                pnames: copy_names(&pnames),
                 pdefaults: Pred[],
                 strict: 0,
                 no_alloc: 0,
@@ -21853,6 +21857,21 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
             index := args.len();
             if !(index < signature.len()) {
                 fail(&mut c, view("callable arity mismatch"));
+            }
+            // A named argument needs a declaration to read the names from, and a call through a
+            // function value has none: the signature is a type, whose parameters are unnamed.
+            // Refused here, before `x` would be read as a value and reported as an unknown name.
+            mut named_ahead = 0;
+            if kind_at(&mut c, c.pos) == 1 {
+                if kind_at(&mut c, c.pos + 1) == 58 {
+                    named_ahead = 1;
+                }
+            }
+            if named_ahead != 0 {
+                fail(
+                    &mut c,
+                    view("named arguments need a declared parameter list: this call goes through a function value, whose parameters have no names")
+                );
             }
             astart := c.pos;
             // A reference or view binding passed by name is reborrowed, not moved, exactly as at a
