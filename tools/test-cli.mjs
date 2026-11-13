@@ -1,4 +1,5 @@
 // Formatter and `grail` command-line tool regressions (host + cross-target formatter/builds).
+import * as fs from 'node:fs';
 import { readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync, copyFileSync, existsSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -54,7 +55,7 @@ assert.equal(withoutSites(readFileSync(original, 'utf8')), withoutSites(readFile
 // 3. Project workflow: new / run / test / fmt / add / fetch / build.
 run(['new', 'demo']); const demo = join(work, 'demo');
 assert.equal(run(['run'], demo).stdout.trim(), 'Hello, world!');
-assert.match(run(['test'], demo).stdout, /1 passed, 0 failed/);
+assert.match(run(['test'], demo).stdout, /passed 1 failed 0 skipped 0/);
 writeFileSync(join(demo, 'src/main.grl'), 'use mathlib;\nfn main(){println(mathlib::triple(14));}\n');
 assert.equal(run(['fmt', '--check'], demo, false).status, 1, 'fmt --check must fail on unformatted code');
 run(['fmt'], demo); assert.equal(run(['fmt', '--check'], demo).status, 0);
@@ -72,7 +73,26 @@ assert.equal(run(['run'], demo).stdout.trim(), '42');
 run(['fetch', '--force'], demo);
 assert.equal(run(['run'], demo).stdout.trim(), '42');
 writeFileSync(join(demo, 'tests/bad.grl'), 'fn main() {\n    assert(1 == 2);\n}\n');
-const failing = run(['test'], demo, false); assert.equal(failing.status, 1); assert.match(failing.stdout, /1 passed, 1 failed/);
+const failing = run(['test'], demo, false); assert.equal(failing.status, 1); assert.match(failing.stdout, /passed 1 failed 1 skipped 0/);
+// `grail test` ergonomics: selection is by name/path and by position, `--list` runs nothing, and a
+// failing case is reported with its own path and what it printed. The tests' directory order is the
+// filesystem's, so these assertions are about the report's shape, not about which test comes first.
+writeFileSync(join(demo, 'tests/second.grl'), 'fn main() {\n    println("second");\n}\n');
+const listed = run(['test', '--list'], demo).stdout;
+for (const name of ['tests/smoke.grl', 'tests/bad.grl', 'tests/second.grl']) assert.ok(listed.includes(name), `--list names ${name}: ${listed}`);
+assert.match(listed, /3 tests selected/);
+assert.match(run(['test', '--filter', 'smoke'], demo).stdout, /passed 1 failed 0 skipped 0/);
+assert.match(run(['test', '--shard', '1/2'], demo).stdout, /passed [0-9]+ failed [0-9]+ skipped 0/);
+assert.match(run(['test', '--jobs', '2'], demo, false).stdout, /passed 2 failed 1 skipped 0/);
+// --fail-fast stops the project run at the first failure: the tests after it never start, and they
+// are reported as skipped rather than silently missing.
+const stopped = run(['test', '--fail-fast', '--jobs', '1'], demo, false);
+assert.equal(stopped.status, 1, 'a failing project test exits 1');
+assert.match(stopped.stdout, /FAIL tests\/bad\.grl[\s\S]*assertion failed/, 'the failure block names the case and prints its output');
+const counts = /passed ([0-9]+) failed ([0-9]+) skipped ([0-9]+)/.exec(stopped.stdout);
+assert.ok(counts, `the summary line is stable: ${stopped.stdout}`);
+assert.equal(Number(counts[2]), 1, 'exactly one failure');
+assert.equal(Number(counts[1]) + Number(counts[3]), 2, 'every test after the failure is skipped, not lost');
 writeFileSync(join(work, 'args.grl'), 'fn main(argument: &[u8]) -> u64 {\n    return argument.len();\n}\n');
 assert.equal(run(['run', 'args.grl', '--', 'seven!!'], work, false).status, 7);
 writeFileSync(join(work, 'bad.grl'), 'fn main() {\n    x := 1;\n    x = 2;\n}\n');
@@ -81,6 +101,31 @@ assert.equal(badCheck.status, 1, 'grail check must fail on an error'); assert.ma
 assert.match(run(['check', 'args.grl']).stdout, /^ok/m);
 checks += 10;
 
+// 3b. `grail doc`: the standard library documents itself, the same sources produce byte-identical
+// pages, and a doc body links the declarations it names.
+{
+  const outA = join(work, 'api-a'), outB = join(work, 'api-b');
+  run(['doc', '--out', outA, join(root, 'lib')]);
+  run(['doc', '--out', outB, join(root, 'lib')]);
+  const index = JSON.parse(readFileSync(join(outA, 'index.json'), 'utf8'));
+  assert.equal(index.schema, 1, 'the index carries a schema number');
+  assert.ok(index.modules.length >= 25, `every stdlib module is documented: ${index.modules.length}`);
+  const module = name => index.modules.find(entry => entry.name === name);
+  const item = (name, kind, itemName) => module(name)?.items.find(entry => entry.kind === kind && entry.name === itemName);
+  assert.ok(module('strings')?.doc.includes('Byte-oriented text helpers'), 'a module carries the comment block below `module X;`');
+  assert.ok(item('strings', 'fn', 'find')?.doc.includes('first occurrence'), 'a function carries the block above it');
+  assert.equal(item('strings', 'fn', 'starts_with')?.doc, '', 'the module block is not also the first declaration\'s doc');
+  const fields = item('hashmap', 'struct', 'Map')?.members ?? [];
+  assert.ok(fields.some(field => field.name === 'entries' && field.type === 'Slot<K, V>[]'), `a record lists its fields: ${JSON.stringify(fields)}`);
+  assert.ok((item('io', 'enum', 'Error')?.members ?? []).some(variant => variant.name === 'Other' && variant.type === 'u64'), 'an enum lists its variants and payloads');
+  assert.ok(module('hashmap')?.items.some(entry => entry.kind === 'impl' && entry.name.startsWith('Map')), 'an implementation is listed');
+  assert.ok(fs.readdirSync(outA).filter(name => name.endsWith('.html')).length >= 25, 'one page per module');
+  for (const name of fs.readdirSync(outA)) if (name.endsWith('.html') || name === 'index.json')
+    assert.equal(fs.readFileSync(join(outA, name), 'utf8'), fs.readFileSync(join(outB, name), 'utf8'), `documentation is deterministic: ${name}`);
+  assert.match(fs.readFileSync(join(outA, 'hashmap.html'), 'utf8'), /href="hashmap\.html#struct-Entry"/, 'a doc body links a uniquely named declaration');
+  assert.match(fs.readFileSync(join(outA, 'index.html'), 'utf8'), /data-name="hashmap Map"/, 'the index carries the search data');
+  checks += 7;
+}
 // 4. Cross targets: the grail tool itself (formatter) and programs it builds.
 writeFileSync(join(work, 'hello.grl'), 'fn main() {\n    println(42);\n}\n');
 for (const target of ['x86_64', 'aarch64', 'riscv64']) {
