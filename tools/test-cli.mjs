@@ -199,16 +199,14 @@ const fast = ['--interval', '40', '--debounce', '60'];
   const litter = readdirSync(join(dir, 'target')).filter(name => name.startsWith('watch-'));
   assert.deepEqual(litter, [], 'a cycle removes the diagnostics file it read'); checks++;
 
-  // The input set is every named source, and every module a project reaches: a change to a second
-  // file is a change like any other.
-  const helper = 'module helper;\npub fn triple(n: u64) -> u64 {\n    return n * 3;\n}\n';
-  writeFileSync(join(dir, 'helper.grl'), helper);
-  writeFileSync(join(dir, 'two.grl'), 'use helper;\nfn main() {\n    println(helper::triple(2));\n}\n');
-  const both = new Watcher(['check', '--watch', ...fast, 'two.grl', 'helper.grl'], dir);
-  assert.match(await both.at(1, 'the first two-file cycle'), /^check ok \d+ ms$/); checks++;
-  writeFileSync(join(dir, 'helper.grl'), helper.replace('n * 3', 'n * 4'));
-  assert.match(await both.at(2, 'the cycle after an imported module changed'), /^check ok \d+ ms$/, 'a named module is in the input set'); checks++;
-  await both.stop();
+  // Content, not timestamps: a file written back with the same bytes is not a change (an mtime
+  // comparison would spend a cycle here), and one whose bytes do change is.
+  const unchangedAt = watching.summaries.length;
+  writeFileSync(file, `${ok}// write 4\n`);
+  await watching.settled('a rewrite with the same bytes');
+  assert.equal(watching.summaries.length, unchangedAt, 'a rewrite with the same bytes spends no cycle'); checks++;
+  writeFileSync(file, `${ok}// write 5\n`);
+  assert.match(await watching.at(unchangedAt + 1, 'the cycle after the bytes changed'), /^check ok \d+ ms$/, 'a change of bytes is a cycle'); checks++;
 
   // Project mode: the entry, `src/` and a fetched dependency's sources are the input set.
   const demoDir = join(work, 'demo');

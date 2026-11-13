@@ -3,8 +3,8 @@
 ## Unreleased
 
 - Added: `grail check --watch` and `grail build --watch` - one driver process that re-runs the cycle
-  when an input changes. The input set is the sources named on the command line (or the project's
-  entry, `src/` and every fetched dependency's sources), the standard modules they reach through
+  when an input changes. The input set is the source named on the command line (or the project's
+  entry, `src/` and every fetched dependency's sources), the standard modules it reaches through
   `use`, and every file in an `--interface DIR`, recomputed on every poll so a new file or a new
   `use` is a change like any other. Change detection is a 128-bit content stamp (XXH64 with two
   seeds, `lib/xxhash.grl`), never a timestamp: a file written back unchanged is not a change, and a

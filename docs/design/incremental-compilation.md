@@ -17,9 +17,11 @@ same code path, in the watching process - so watch mode adds no second definitio
 
 The files a cycle reads, in this order:
 
-- the sources named on the command line (`grail check --watch a.grl b.grl` reads both), or, in a
-  project, the entry `grail.pkg` names plus every `.grl` under `src/` and under each fetched
-  dependency's `src/` - the same list the one-shot command builds from;
+- the source named on the command line, or, in a project, the entry `grail.pkg` names plus every
+  `.grl` under `src/` and under each fetched dependency's `src/` - the same list the one-shot
+  command compiles. (A second `FILE` argument is not a module of the first: `grail check a.grl b.grl`
+  compiles `a.grl`, so watch mode watches `a.grl`. Modules of the entry are the project's, or the
+  standard library's through `use`.)
 - the standard modules the sources reach through `use`, found by reading the sources' `use` lines
   (`used_std`), so the set follows the code rather than a hand-maintained list, and a new import
   brings its module into the set on the next poll;
