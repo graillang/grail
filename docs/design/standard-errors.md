@@ -37,9 +37,11 @@ like every other interface in the stdlib: `Error::message(&value)`, or a `T: Err
 - `message` is the root message, owned. `Error::message` on a report answers this, not the whole chain;
   `show()` is the chain.
 - `origin` keeps the stdlib failure a report started from as a *typed* value, so a caller that needs
-  `io::Error::is_not_found` still has it. It is not a generic cause: there is no generic `Result` in the
-  language yet and no `From`, so `errs::from_os(e, what)` - or `errs::of(a_message_record)` - is the
-  conversion, written by the caller.
+  `io::Error::is_not_found` still has it. It is not a generic cause: there is no implicit `From`
+  between error types, so `errs::from_os(e, what)` - or `errs::of(a_message_record)` - is the
+  conversion, written by the caller. (The generic `Result<T, E>` this document says the language
+  lacks has since landed: see [generic results](generic-results.md). `Report` is used as the `E` of
+  a result union, which is unchanged by that.)
 - `frames` are the context strings, owned, oldest first.
 - `stack` is the captured stack text, empty when nothing was captured.
 

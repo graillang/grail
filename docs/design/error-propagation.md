@@ -5,11 +5,14 @@ with its payload. On Err/None, the enclosing function returns its matching failu
 dropping remaining owners by the usual reverse-binding / recursive-field rules. `!` still aborts
 instead. Both operators have higher precedence than arithmetic and may chain.
 
-The enclosing return type must be an Ok/Err or Some/None enum of the same family. It may have a
-different success payload and different declaration order. Error payload types/modes must match;
-there is no implicit From conversion. Captured error origins must satisfy the enclosing written
-lifetime contract. Concrete enum payloads are current functionality; generic Result/Option are not
-yet implemented. This is not a concession to permanent nongeneric APIs.
+The operand is any shape with one success member and one failure member, and the enclosing return
+type must be able to receive its failure: a two-member enum (`Ok`/`Some` by name, otherwise the
+first declared variant is the success), a two-member ordinary union (the first member), or a result
+union `S |? F` (its declared partition). It may have a different success payload. Error payload
+types/modes must match; there is no implicit From conversion. Captured error origins must satisfy
+the enclosing written lifetime contract. Generic `Result<T, E>` and `Option<T>` are standard-library
+types now - `T?` is `result::Option<T>` - and `?` reads them through the same shape rule; see
+[generic results](generic-results.md) for the rule, its refusals and the specialisation keys.
 
 The parser emits existing checked Match/Variant/Return operations directly, not an unlowered
 operator stub or special exception runtime. It allocates the success binding and failure return

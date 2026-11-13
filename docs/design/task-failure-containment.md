@@ -198,11 +198,11 @@ Two consequences are stated rather than hidden:
 - **A sentinel result** (`join` returns `0`/`null` on failure plus a flag somewhere). Rejected: a
   task whose result type has no zero value cannot express it, and the flag is a second channel that
   nothing forces a caller to read.
-- **A generic `Result<R, E>`.** Ideal, unavailable: user generics for enums are not implemented
-  ([error-propagation.md](error-propagation.md)). The structural union `R |? TaskFailure` is the
-  language's result shape today and needs no new type machinery - `make_union` already synthesizes
-  `.result::Result2_1` for `T |? E`, and `.outcome::Outcome2_1` is the same object under another
-  name.
+- **A generic `Result<R, E>`.** Generic enums have since landed
+  ([generic-results.md](generic-results.md)), so `Result<R, TaskFailure>` is expressible; the join
+  keeps the structural union `R |? TaskFailure` because it needs no type argument at the join and
+  composes with member-type matching - `make_union` already synthesizes `.result::Result2_1` for
+  `T |? E`, and `.outcome::Outcome2_1` is the same object under another name.
 - **Reset the stack instead of discarding it** (memset on release). Rejected: it buys nothing (the
   bytes are dead by construction, and the next task writes its own frame) and costs a 1 MiB write
   per contained failure.

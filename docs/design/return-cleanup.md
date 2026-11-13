@@ -37,9 +37,10 @@ the other field. A second program returns a captured span, frees its owned carri
 regains source growth after the span's last use. Primitive C/LLVM paths execute empty/input-hit/
 input-miss cases equally.
 
-This is not a full CFG ownership join solution. Unequal continuing field states, owned assignment,
-`break`/`continue` and generic Result/Option remain to implement. Postfix `?` uses this same return
-cleanup; see [propagation](error-propagation.md). Concrete tagged enum
+This is not a full CFG ownership join solution. Unequal continuing field states, owned assignment
+and `break`/`continue` remain to implement. (Generic Result/Option, listed here at the time, have
+since landed: [generic results](generic-results.md).) Postfix `?` uses this same return cleanup; see
+[propagation](error-propagation.md). Concrete tagged enum
 matching and unwrap are now implemented; see [tagged enums](tagged-enums.md). The synthetic flat
 branch cost harness revealed cumulative-state clone overhead (roughly quadratic). The scalar/type
 ledger issue is now addressed in [checker state](checker-state.md), retaining frozen before/after
