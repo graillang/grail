@@ -348,8 +348,10 @@ is written — which is what lets extraction be a plain "write files here" with 
 (the host interface has no rename) and lets a partially extracted tree be recognised as such
 (a directory without its `done` marker is discarded on the next fetch).
 
-`done` is an empty marker file written last, after the tree's digest is computed and matched
-against the lock. `src/<key>` without `done` is never used.
+`src/<key>.done` is the marker a tree's digest is recorded in, written last, after extraction. It
+sits beside the tree rather than inside it, because the tree must be exactly what was unpacked:
+a file inside would change the very digest it records. `src/<key>` without its marker is never
+used.
 
 ### 5.3 The tree digest
 

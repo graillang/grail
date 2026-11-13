@@ -508,7 +508,11 @@ function lint() {
   check('sampling profiler test exists', existsSync(join(root, 'tools/test-profile.mjs')));
   check('sampling profiler doc exists', existsSync(join(root, 'docs/tooling/profiler.md')));
   check('CI runs the sampling profiler test', readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8').includes('tools/test-profile.mjs'));
-  check('VERSION file matches compiler --version', readFileSync(join(root, 'compiler/cli.grl'), 'utf8').includes(`grail ${version ?? '0.0.0'}`), version ?? '');
+  // The reported version is `pkg::grail_version()` (compiler/pkg.grl); `grail version` prints it as
+  // "grail <that>". Check the function body, not the whole file: an unrelated 0.1.0 must not pass.
+  const pkgSource = readFileSync(join(root, 'compiler/pkg.grl'), 'utf8');
+  const versionBody = /pub fn grail_version\(\)[^{]*\{([\s\S]*?)\n\}/.exec(pkgSource)?.[1] ?? '';
+  check('VERSION file matches compiler --version', versionBody.includes(version ?? '0.0.0'), version ?? '');
 
   // Release pipeline: one tag-triggered workflow that covers every platform,
   // builds from the checked-in seed and publishes checksums plus the generated

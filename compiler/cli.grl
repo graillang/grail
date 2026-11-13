@@ -2,19 +2,13 @@ module cli;
 use host;
 use fmt;
 use explain;
+use pkg;
 
 // The `grail` command-line tool. The same binary is the compiler: subcommands drive it by
 // re-invoking itself (`grail [--target T] OUT.s ENTRY.grl MODULE.grl...`), then assemble and link.
 struct Home {
     runtime: u8[],
     std: u8[]
-}
-struct Project {
-    name: u8[],
-    entry: u8[],
-    deps: u8[][],
-    urls: u8[][],
-    revs: u8[][]
 }
 
 fn eq<a, b>(x: &a [u8], y: &b [u8]) -> bool {
@@ -2528,65 +2522,6 @@ fn cache_split<a, b, d, e, g, k, m>(
     return 0;
 }
 
-fn load_project() -> Project {
-    mut p = Project {
-        name: u8[],
-        entry: copy(view("src/main.grl")),
-        deps: u8[][],
-        urls: u8[][],
-        revs: u8[][],
-    };
-    if host::exists(view("grail.pkg")) == 0 {
-        return p;
-    }
-    text := host::read_file(view("grail.pkg"));
-    rows := lines(view(text));
-    for i in rows.len() {
-        row := item(&rows, i);
-        w := words(view(row));
-        if 1 < w.len() {
-            key := item(&w, 0);
-            value := item(&w, 1);
-            if eq(view(key), view("name")) {
-                p.name = value;
-            } else {
-                if eq(view(key), view("entry")) {
-                    p.entry = value;
-                } else {
-                    if eq(view(key), view("dep")) & (2 < w.len()) {
-                        p.deps.push(value);
-                        p.urls.push(item(&w, 2));
-                        mut rev = u8[];
-                        if 3 < w.len() {
-                            rev = item(&w, 3);
-                        }
-                        p.revs.push(rev);
-                    }
-                }
-            }
-        }
-    }
-    return p;
-}
-// Project modules: every .grl under src/ except the entry, plus every fetched dependency's src/.
-fn project_modules<a>(p: (&a Project), skip_entry: u64) -> u8[][] {
-    mut all = u8[][];
-    collect(view("src"), &mut all);
-    for i in p.deps.len() {
-        name := item(&p.deps, i);
-        d := path_join(view(".grail/deps"), view(name));
-        src := path_join(view(d), view("src"));
-        collect(view(src), &mut all);
-    }
-    mut out = u8[][];
-    for i in all.len() {
-        f := item(&all, i);
-        if !(skip_entry != 0 && eq(view(f), view(p.entry))) {
-            out.push(f);
-        }
-    }
-    return out;
-}
 struct Options {
     file: u8[],
     output: u8[],
@@ -2759,16 +2694,18 @@ fn build<a, b>(args: (&a u8[][]), o: (&b mut Options)) -> u64 {
         mut none = u8[][];
         return compile(&h, view(o.file), &none, view(o.output), view(o.target), flag_bits(&o), view(o.iface), o.verify);
     }
-    p := load_project();
+    // A project build reads grail.lock: the package manager has already resolved, fetched and
+    // verified the graph, and hands back the entry file plus every module file (B1's module list,
+    // unchanged). No resolution and no network happen here.
+    p := pkg::plan(0);
     if p.name.len() == 0 {
-        say(view("grail: no .grl file given and no grail.pkg here (try `grail new NAME`)"));
         return 1;
     }
     if o.output.len() == 0 {
-        o.output = path_join(view("target"), view(p.name));
+        name := copy(view(p.name));
+        o.output = path_join(view("target"), view(name));
     }
-    modules := project_modules(&p, 1);
-    return compile(&h, view(p.entry), &modules, view(o.output), view(o.target), flag_bits(&o), view(o.iface), o.verify);
+    return compile(&h, view(p.entry), &p.modules, view(o.output), view(o.target), flag_bits(&o), view(o.iface), o.verify);
 }
 fn check_command<a>(args: (&a u8[][])) -> u64 {
     o := options(&args);
@@ -2784,14 +2721,13 @@ fn check_command<a>(args: (&a u8[][])) -> u64 {
         mut none = u8[][];
         status = compile_mode(&h, view(o.file), &none, view(out), view(o.target), 1 + flag_bits(&o), view(o.iface), o.verify);
     } else {
-        p := load_project();
+        p := pkg::plan(0);
         if p.name.len() == 0 {
-            say(view("grail: no .grl file given and no grail.pkg here"));
             return 1;
         }
-        out := path_join(view("target"), view(p.name));
-        modules := project_modules(&p, 1);
-        status = compile_mode(&h, view(p.entry), &modules, view(out), view(o.target), 1 + flag_bits(&o), view(o.iface), o.verify);
+        name := copy(view(p.name));
+        out := path_join(view("target"), view(name));
+        status = compile_mode(&h, view(p.entry), &p.modules, view(out), view(o.target), 1 + flag_bits(&o), view(o.iface), o.verify);
     }
     if status == 0 {
         say(view("ok"));
@@ -2841,8 +2777,11 @@ fn test_command<a>(args: (&a u8[][])) -> u64 {
     } else {
         collect(view("tests"), &mut files);
     }
-    p := load_project();
-    modules := project_modules(&p, 1);
+    // `grail test` is the one build that sees the root's dev-dependencies (section 8).
+    p := pkg::plan(1);
+    if p.name.len() == 0 {
+        return 1;
+    }
     host::mkdir(view("target"));
     host::mkdir(view("target/tests"));
     mut failed = 0;
@@ -2853,7 +2792,7 @@ fn test_command<a>(args: (&a u8[][])) -> u64 {
         host::print(view("test "));
         host::print(view(f));
         host::print(view(" ... "));
-        mut status = compile(&h, view(f), &modules, view(out), view(o.target), flag_bits(&o), view(o.iface), o.verify);
+        mut status = compile(&h, view(f), &p.modules, view(out), view(o.target), flag_bits(&o), view(o.iface), o.verify);
         if status == 0 {
             exe := path_join(view("."), view(out));
             status = host::command(u8[][exe]);
@@ -2923,155 +2862,20 @@ fn new_command<a>(args: (&a u8[][])) -> u64 {
     host::mkdir(view(src));
     tests := path_join(view(name), view("tests"));
     host::mkdir(view(tests));
-    mut manifest = copy(view("name "));
-    for i in name.len() {
-        manifest.push(name[i]);
-    }
-    manifest.push(10);
-    pkg := path_join(view(name), view("grail.pkg"));
+    manifest := cat(
+        view("[package]\nname = \""),
+        view(cat(view(copy(view(name))), view("\"\nversion = \"0.1.0\"\n")))
+    );
+    pkg := path_join(view(name), view("grail.toml"));
     host::write_file(view(pkg), view(manifest));
     main := path_join(view(src), view("main.grl"));
     host::write_file(view(main), view("fn main() {\n    println(\"Hello, world!\");\n}\n"));
     test := path_join(view(tests), view("smoke.grl"));
     host::write_file(view(test), view("fn main() {\n    assert(1 + 1 == 2);\n}\n"));
     ignore := path_join(view(name), view(".gitignore"));
-    host::write_file(view(ignore), view("target/\n.grail/\n"));
+    host::write_file(view(ignore), view("target/\n"));
     say2(view("created project "), view(name));
     return 0;
-}
-fn lock_lookup<a, b>(lock: &a [u8], name: &b [u8]) -> u8[] {
-    rows := lines(view(lock));
-    for i in rows.len() {
-        row := item(&rows, i);
-        w := words(view(row));
-        if 1 < w.len() {
-            k := item(&w, 0);
-            if eq(view(k), view(name)) {
-                return item(&w, 1);
-            }
-        }
-    }
-    return u8[];
-}
-fn fetch_command() -> u64 {
-    p := load_project();
-    if p.name.len() == 0 {
-        say(view("grail: no grail.pkg here"));
-        return 1;
-    }
-    mut lock = u8[];
-    if host::exists(view("grail.lock")) != 0 {
-        lock = host::read_file(view("grail.lock"));
-    }
-    host::mkdir(view(".grail"));
-    host::mkdir(view(".grail/deps"));
-    mut newlock = u8[];
-    for i in p.deps.len() {
-        name := item(&p.deps, i);
-        url := item(&p.urls, i);
-        rev := item(&p.revs, i);
-        dir := path_join(view(".grail/deps"), view(name));
-        if host::exists(view(dir)) == 0 {
-            say2(view("fetching "), view(name));
-            if host::command(
-                u8[][copy(view("git")), copy(view("clone")), copy(view("--quiet")), copy(view(url)), copy(view(dir))]
-            )
-                != 0 {
-                say2(view("grail: git clone failed for "), view(url));
-                return 1;
-            }
-            mut pin = lock_lookup(view(lock), view(name));
-            if pin.len() == 0 {
-                pin = copy(view(rev));
-            }
-            if pin.len() != 0 {
-                if host::command(
-                    u8[][
-                        copy(view("git")),
-                        copy(view("-C")),
-                        copy(view(dir)),
-                        copy(view("checkout")),
-                        copy(view("--quiet")),
-                        pin
-                    ]
-                )
-                    != 0 {
-                    say2(view("grail: cannot check out revision for "), view(name));
-                    return 1;
-                }
-            }
-        }
-        record := path_join(view(dir), view(".grail-commit"));
-        mut script = copy(view("git -C '"));
-        for j in dir.len() {
-            script.push(dir[j]);
-        }
-        tail := cat(view("' rev-parse HEAD > '"), view(record));
-        for j in tail.len() {
-            script.push(tail[j]);
-        }
-        script.push(39);
-        if host::command(u8[][copy(view("sh")), copy(view("-c")), script]) != 0 {
-            return 1;
-        }
-        commit := host::read_file(view(record));
-        for j in name.len() {
-            newlock.push(name[j]);
-        }
-        newlock.push(32);
-        for j in commit.len() {
-            if commit[j] != 10 {
-                newlock.push(commit[j]);
-            }
-        }
-        newlock.push(10);
-    }
-    host::write_file(view("grail.lock"), view(newlock));
-    return 0;
-}
-fn add_command<a>(args: (&a u8[][])) -> u64 {
-    if args.len() < 2 {
-        say(view("usage: grail add NAME GIT-URL [REVISION]"));
-        return 1;
-    }
-    if host::exists(view("grail.pkg")) == 0 {
-        say(view("grail: no grail.pkg here"));
-        return 1;
-    }
-    name := item(&args, 0);
-    url := item(&args, 1);
-    p := load_project();
-    for i in p.deps.len() {
-        d := item(&p.deps, i);
-        if eq(view(d), view(name)) {
-            say2(view("grail add: dependency already listed: "), view(name));
-            return fetch_command();
-        }
-    }
-    mut text = host::read_file(view("grail.pkg"));
-    if text.len() != 0 {
-        if text[text.len() - 1] != 10 {
-            text.push(10);
-        }
-    }
-    line := cat(view("dep "), view(name));
-    for i in line.len() {
-        text.push(line[i]);
-    }
-    text.push(32);
-    for i in url.len() {
-        text.push(url[i]);
-    }
-    if 2 < args.len() {
-        rev := item(&args, 2);
-        text.push(32);
-        for i in rev.len() {
-            text.push(rev[i]);
-        }
-    }
-    text.push(10);
-    host::write_file(view("grail.pkg"), view(text));
-    return fetch_command();
 }
 fn debug_command<a>(args: (&a u8[][])) -> u64 {
     if args.len() < 2 {
@@ -3673,9 +3477,15 @@ fn help() {
     say(view("  grail run [FILE.grl] [-- ARGS...]"));
     say(view("  grail test [FILES or DIRS]        compile and run tests/ (exit status 0 = pass)"));
     say(view("  grail fmt [--check] [FILES or DIRS]"));
-    say(view("  grail new NAME                    create a project (grail.pkg, src/, tests/)"));
-    say(view("  grail add NAME GIT-URL [REV]      add a dependency and fetch it"));
-    say(view("  grail fetch                       fetch dependencies pinned in grail.lock"));
+    say(view("  grail new NAME                    create a project (grail.toml, src/, tests/)"));
+    say(view("  grail add NAME[@REQ]              add a registry dependency (resolves and locks it)"));
+    say(view("  grail add --path DIR              add a path dependency"));
+    say(view("  grail add --git URL [--rev R]     add a git dependency (--rev, --tag or --branch)"));
+    say(view("  grail remove NAME                 drop a dependency and re-resolve"));
+    say(view("  grail update [NAME...]            re-resolve, then fetch what the lock names"));
+    say(view("  grail fetch [--force]             make the store hold exactly what grail.lock says"));
+    say(view("  grail tree                        print the resolved dependency graph"));
+    say(view("  (--offline works on add, update and fetch: no git or curl is run)"));
     say(
         view("  grail [--target T] [--overflow=checked|wrap] OUT.s ENTRY.grl MODULE.grl...  (compiler)")
     );
@@ -3689,11 +3499,13 @@ pub fn is_command<a>(name: &a [u8]) -> bool {
         || eq(view(name), view("new"))
         || eq(view(name), view("add"))
         || eq(view(name), view("fetch"))
+        || eq(view(name), view("remove"))
+        || eq(view(name), view("update"))
+        || eq(view(name), view("tree"))
         || eq(view(name), view("debug"))
         || eq(view(name), view("profile"))
         || eq(view(name), view("cache"))
         || eq(view(name), view("explain"))
-        || eq(view(name), view("install"))
         || eq(view(name), view("help"))
         || eq(view(name), view("--help"))
         || eq(view(name), view("version"))
@@ -3726,11 +3538,12 @@ pub fn run() -> u64 {
     if eq(view(name), view("new")) {
         return new_command(&args);
     }
-    if eq(view(name), view("add")) {
-        return add_command(&args);
+    // The package manager owns these five commands (module pkg, docs/design/package-manager.md).
+    if eq(view(name), view("add")) || eq(view(name), view("remove")) {
+        return pkg::command(view(name), &args);
     }
-    if eq(view(name), view("fetch")) || eq(view(name), view("install")) {
-        return fetch_command();
+    if eq(view(name), view("update")) || eq(view(name), view("fetch")) || eq(view(name), view("tree")) {
+        return pkg::command(view(name), &args);
     }
     if eq(view(name), view("debug")) {
         return debug_command(&args);
@@ -3756,7 +3569,8 @@ pub fn run() -> u64 {
         return profile_command(&args);
     }
     if eq(view(name), view("version")) || eq(view(name), view("--version")) {
-        say(view("grail 0.1.0"));
+        out := cat(view("grail "), view(pkg::grail_version()));
+        say(view(out));
         return 0;
     }
     help();

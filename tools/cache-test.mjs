@@ -68,7 +68,7 @@ pub fn main() -> u64 {
 `;
 function write(value = 3) {
   mkdirSync(join(project, 'src'), { recursive: true });
-  writeFileSync(join(project, 'grail.pkg'), 'name cachetest\n');
+  writeFileSync(join(project, 'grail.toml'), '[package]\nname = "cachetest\n"\nversion = "0.1.0"\n');
   writeFileSync(join(project, 'src/main.grl'), mainSource);
   writeFileSync(join(project, 'src/util.grl'), utilSource(value));
   writeFileSync(join(project, 'src/helper.grl'), helperSource);

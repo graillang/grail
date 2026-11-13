@@ -105,7 +105,7 @@ truncated, oversized, mistyped — that terminates the process before `exit`.
 ## Limits, stated plainly
 
 - One file per check, plus the runtime and standard library that `grail check` always
-  includes. Project modules (`grail.pkg` dependencies, sibling modules under `use`) are not
+  includes. Project modules (packages from `grail.toml`, sibling modules under `use`) are not
   part of the compilation, so a program is checked as if its other modules were absent.
 - Diagnostics are push-only, computed synchronously per change (no debounce, no background
   checking, no cancellation), and only the first compiler error is available.
