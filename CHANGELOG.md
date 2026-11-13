@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Fixed: the debug tables named local labels by number alone (`.L<n>`), but a label is minted in
+  its unit's namespace (`.L<unit>_<n>`, the separate-compilation change), so a `--debug` build whose
+  program spans more than one unit asked the assembler to subtract a label no unit had emitted
+  (`symbol '.L5021' can not be undefined in a subtraction expression`). DWARF's compile-unit range
+  and subprogram ranges and CodeView's function ranges and `.cv_linetable` directives now spell the
+  label through the function's own unit; `DebugFunc` records the unit it was emitted in. Found by
+  merging the backtrace tables (`grail_funcs`) with per-module label namespaces; no single branch had
+  it.
 - Fixed: the compiler's "no type" is a real sentinel instead of type id 0, which is u64. A type is an index into the interned type table and id 0 is u64 (1 unit, 2 bytes, 3 string, 4 view), so every "no type" answer used to collide with a real type and needed a second `found`/`any`/`set` flag beside the id; any site that forgot the flag read "no type" as an integer. The no-type answer is now `NO_TYPE` (`compiler/native.grl`), one value above any id a table can hold, so the id itself says whether there is a type: the `found`/`any` pair in `assoc_type`, `impl_params.self_ty`'s "0 means not built yet" and `c.self_type`'s `+1` offset are gone, and `type_args`/`ty_kind`/`ty_arg`/`ty_mode`/`ty_env`/`type_regions`/`ct_seq_elem` refuse a sentinel with a diagnostic instead of indexing the table with it. Two user-visible bugs the collision caused, both fixed: `type Word = u64;` could not be named as `module::Word` (the u64 id read as "unresolved alias", `recursive or unresolved type alias`), and a recursive alias used qualified (`type A = probe::A;`) crashed the compiler with `index 18446744073709551615 out of bounds` instead of naming the alias. Corpus: `sentinel-qualified-u64-alias`, `sentinel-qualified-recursive-alias`, `sentinel-u64-self-impl` (an `impl` for u64, whose `Self` is type id 0) and `sentinel-untyped-closure-reject`.
 - Changed: the refinement prover keeps its facts as the body is compiled instead of re-reading the
   tokens from the body's `{` to each check (`docs/design/refinements.md`). Every fact now belongs to

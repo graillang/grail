@@ -356,7 +356,11 @@ struct DebugFunc {
     start: u64,
     end: u64,
     params: u64,
-    vars: DebugVar[]
+    vars: DebugVar[],
+    // The label namespace this function's start and end labels were minted in (B1 stage 5): every
+    // label is `.L<unit>_<n>`, so a table that names a label by its number alone would name one the
+    // unit never emitted. Captured where the function is recorded, i.e. inside its own unit.
+    unit: u8[]
 }
 // One module of the program, as an interface sees it.
 struct IModule {
@@ -1445,7 +1449,8 @@ fn record_debug_func<a, b, d>(c: (&a mut C), name: &b [u8], module: &d [u8], sit
                 start: site.start,
                 end: site.end,
                 params: site.params,
-                vars: vars
+                vars: vars,
+                unit: copy_bytes(view(c.lpart))
             }
         );
     return ();
@@ -1655,10 +1660,10 @@ fn codeview_symbols<a>(c: &a C, index: (&u64[])) -> u8[] {
         fstart := f.start;
         fend := f.end;
         mut range = u8[];
-        push_bytes(&mut range, view(".long .L"));
-        decimal(&mut range, fend);
-        push_bytes(&mut range, view("-.L"));
-        decimal(&mut range, fstart);
+        push_bytes(&mut range, view(".long "));
+        dlabel(&mut range, view(f.unit), fend);
+        range.push(45); // '-'
+        dlabel(&mut range, view(f.unit), fstart);
         range.push(10);
         cv_record_start(&mut out, i, 0, 4368);
         // parent, end, next: lld-link fills the scope links.
@@ -1666,10 +1671,10 @@ fn codeview_symbols<a>(c: &a C, index: (&u64[])) -> u8[] {
         push_bytes(&mut out, view(range));
         push_bytes(&mut out, view(".long 0\n"));
         push_bytes(&mut out, view(range));
-        push_bytes(&mut out, view(".long 0\n.secrel32 .L"));
-        decimal(&mut out, fstart);
-        push_bytes(&mut out, view("\n.secidx .L"));
-        decimal(&mut out, fstart);
+        push_bytes(&mut out, view(".long 0\n.secrel32 "));
+        dlabel(&mut out, view(f.unit), fstart);
+        push_bytes(&mut out, view("\n.secidx "));
+        dlabel(&mut out, view(f.unit), fstart);
         push_bytes(&mut out, view("\n.byte 0\n.asciz \""));
         if f.module.len() != 0 {
             push_bytes(&mut out, view(f.module));
@@ -1783,19 +1788,23 @@ fn debug_sections<a, b>(c: &a C, entry: &b [u8]) -> u8[] {
     dstring(&mut out, view("."));
     mut first_start = 0;
     mut last_end = 0;
+    mut first_unit = u8[];
+    mut last_unit = u8[];
     if c.debug_funcs.len() != 0 {
         first_start = c.debug_funcs[0].start;
+        first_unit = c.debug_funcs[0].unit.copy();
         last_end = c.debug_funcs[c.debug_funcs.len() - 1].end;
+        last_unit = c.debug_funcs[c.debug_funcs.len() - 1].unit.copy();
     }
     if c.debug_funcs.len() == 0 {
         dput(&mut out, view(".quad 0\n.quad 0\n.long 0\n"));
     } else {
-        dput(&mut out, view(".quad .L"));
-        dnum(&mut out, first_start);
-        dput(&mut out, view("\n.quad .L"));
-        dnum(&mut out, last_end);
-        dput(&mut out, view("-.L"));
-        dnum(&mut out, first_start);
+        dput(&mut out, view(".quad "));
+        dlabel(&mut out, view(first_unit), first_start);
+        dput(&mut out, view("\n.quad "));
+        dlabel(&mut out, view(last_unit), last_end);
+        dput(&mut out, view("-"));
+        dlabel(&mut out, view(first_unit), first_start);
         dput(&mut out, view("\n.long 0\n"));
     }
     // One DIE per entry of c.debug_types, labelled .Ldebug_type_N; DW_AT_type is the CU-relative
@@ -1851,12 +1860,12 @@ fn debug_sections<a, b>(c: &a C, entry: &b [u8]) -> u8[] {
             link.push(f.name[k]);
         }
         dstring(&mut out, view(link));
-        dput(&mut out, view(".quad .L"));
-        dnum(&mut out, f.start);
-        dput(&mut out, view("\n.quad .L"));
-        dnum(&mut out, f.end);
-        dput(&mut out, view("-.L"));
-        dnum(&mut out, f.start);
+        dput(&mut out, view(".quad "));
+        dlabel(&mut out, view(f.unit), f.start);
+        dput(&mut out, view("\n.quad "));
+        dlabel(&mut out, view(f.unit), f.end);
+        dput(&mut out, view("-"));
+        dlabel(&mut out, view(f.unit), f.start);
         dput(&mut out, view("\n.byte "));
         dnum(&mut out, f.file);
         dput(&mut out, view("\n.uleb128 "));
@@ -2036,6 +2045,15 @@ fn site_relative<a, b>(path: &a [u8], cwd: &b [u8]) -> u8[] {
 }
 // Opens a range: the address an entry names, and the floor a frame's return address is looked up
 // against.
+// A label the emitted text minted, spelled the way `lname` spells it: the unit's namespace, then
+// the unit's number. A debug table that spelled `.L<n>` named a label no unit emitted (B1 stage 5).
+fn dlabel<a, b>(out: (&a mut u8[]), unit: &b [u8], n: u64) -> unit {
+    push_bytes(&mut out, view(".L"));
+    push_bytes(&mut out, view(unit));
+    out.push(95);
+    decimal(&mut out, n);
+    return ();
+}
 fn site_label<a>(out: (&a mut u8[]), count: u64) -> unit {
     push_bytes(&mut out, view(".Lgs"));
     decimal(&mut out, count);
@@ -38145,12 +38163,13 @@ pub fn main() -> u64 {
                 for i in c.debug_funcs.len() {
                     push_bytes(&mut image, view(".cv_linetable "));
                     decimal(&mut image, i);
-                    push_bytes(&mut image, view(", .L"));
+                    push_bytes(&mut image, view(", "));
                     fstart := c.debug_funcs[i].start;
                     fend := c.debug_funcs[i].end;
-                    decimal(&mut image, fstart);
-                    push_bytes(&mut image, view(", .L"));
-                    decimal(&mut image, fend);
+                    funit := c.debug_funcs[i].unit.copy();
+                    dlabel(&mut image, view(funit), fstart);
+                    push_bytes(&mut image, view(", "));
+                    dlabel(&mut image, view(funit), fend);
                     image.push(10);
                 }
                 push_bytes(&mut image, view(".cv_filechecksums\n.cv_stringtable\n"));
