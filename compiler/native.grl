@@ -6096,8 +6096,7 @@ fn ref_params<a>(c: (&a mut C)) -> unit {
         ty := local_ty(&mut c, i);
         slots.push(slot);
         tys.push(ty);
-        name := c.cur_name.copy();
-        ref_check(&mut c, Pred { file: pf, lo: plo, hi: phi }, &none, &slots, &tys, name, c.cur_file, c.cur_pos, 0);
+        ref_check(&mut c, Pred { file: pf, lo: plo, hi: phi }, &none, &slots, &tys, c.cur_name.copy(), c.cur_file, c.cur_pos, 0);
         emitted = emitted + 1;
     }
     if emitted != 0 {
@@ -11380,8 +11379,7 @@ fn float_op_call<a>(c: (&a mut C), op: u64, lhs: u64, rhs: u64, single: u64) -> 
     opv := imm(&mut c, op);
     t := invoke(&mut c, view("rt_f64_op"), three(opv, lhs, rhs));
     if (single != 0) & (c.backend != 0) & (c.validating == 0) & (c.facts_fn.len() != 0) {
-        name := copy_bytes(view(c.facts_fn));
-        llvm::fact_op(&mut c.facts, name, c.call_ord, op);
+        llvm::fact_op(&mut c.facts, copy_bytes(view(c.facts_fn)), c.call_ord, op);
     }
     return t;
 }
@@ -19431,8 +19429,7 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
     if method == 3 {
         formal := c.params[template_first];
         lin := c.lazy_input;
-        lty := c.lazy_inty;
-        prepared := method_receiver(&mut c, lin, lty, c.lazy_xty, formal);
+        prepared := method_receiver(&mut c, lin, c.lazy_inty, c.lazy_xty, formal);
         if c.raw == 0 {
             require_type(&mut c, prepared.ty, formal);
         }
@@ -19751,13 +19748,11 @@ fn specialized_function_value<a>(c: (&a mut C), index: u64, map: u64[]) -> Val {
         }
     }
     require_constraints(&mut c, &map, &function_bounds(&c, index));
-    requirements := function_constraints(&c, index);
-    require_interfaces(&mut c, &map, &requirements);
+    require_interfaces(&mut c, &map, &function_constraints(&c, index));
     require_assoc_eqs(&mut c, index, &map);
     mut params = u64[];
     for i in count {
-        formal := c.params[first + i];
-        bound := bind_types(&mut c, formal, &map);
+        bound := bind_types(&mut c, c.params[first + i], &map);
         params.push(bound);
     }
     result := bind_types(&mut c, ret, &map);
@@ -20052,8 +20047,7 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
             if reborrow != 0 {
                 // Only references take this path here: a view argument is already a copy the
                 // closure's parameter type expects.
-                here_tok := c.pos;
-                arg_name := tok_text(&mut c, here_tok);
+                arg_name := tok_text(&mut c, c.pos);
                 l := find_local(&mut c, view(arg_name));
                 lty := local_ty(&mut c, l - 1);
                 if ty_kind(&mut c, lty) != 7 {
@@ -21032,8 +21026,7 @@ fn print_builtin<a>(c: (&a mut C), newline: u64) -> Val {
     }
     // print("x = {}, y = {}", x, y): the literal is split at compile time; {{ and }} are braces.
     if (kind(&mut c) == 3) & (next_kind(&mut c) == 44) {
-        p := c.pos;
-        text := decode_literal(&mut c, p);
+        text := decode_literal(&mut c, c.pos);
         advance(&mut c);
         mut piece = u8[];
         mut i = 0;
@@ -21105,8 +21098,7 @@ fn format_builtin<a>(c: (&a mut C)) -> Val {
         fail(&mut c, view("format needs a string literal"));
     }
     acc := invoke(&mut c, view("rt_new"), u64[]);
-    p := c.pos;
-    text := decode_literal(&mut c, p);
+    text := decode_literal(&mut c, c.pos);
     advance(&mut c);
     mut piece = u8[];
     mut i = 0;
@@ -23773,8 +23765,7 @@ fn adopt_literal<a>(c: (&a mut C), start: u64, end: u64, ty: u64) -> bool {
         return false;
     }
     value := c.lit_value;
-    negative := c.lit_negative;
-    if literal_fits(&mut c, ty, value, negative) == 0 {
+    if literal_fits(&mut c, ty, value, c.lit_negative) == 0 {
         fail(&mut c, view("integer literal out of range for its type"));
     }
     return true;
@@ -23991,8 +23982,7 @@ fn adopt_float<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) ->
         return v;
     }
     ftok := c.flit_tok;
-    fneg := c.flit_neg;
-    slot := float_literal_slot(&mut c, ftok, fneg);
+    slot := float_literal_slot(&mut c, ftok, c.flit_neg);
     return val(slot, expected);
 }
 fn float_literal_slot<a>(c: (&a mut C), tok: u64, negative: u64) -> u64 {
@@ -24233,6 +24223,7 @@ fn capture_aggregate_regions<a, b>(c: (&a mut C), slot: u64, caps: (&b mut u64[]
         holder := c.bonds[i].holder;
         loan := c.bonds[i].loan;
         if (loan_live(&mut c, loan) != 0) && ownership::ancestor(&c.check, place, holder) {
+            // stays: `c.check.loans[loan - 1]` is a borrowed element (see drop_hook_symbol).
             source := c.check.loans[loan - 1].source;
             add_region(&mut caps, region_of(&mut c, source));
         }
@@ -25010,8 +25001,7 @@ fn capture_assignment<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
         if (261 < op) & (op < 268) {
             rstart := c.pos;
             mut rhs = expr(&mut c, 0);
-            rend := c.pos;
-            rhs = adopt_value(&mut c, rhs, rstart, rend, fty);
+            rhs = adopt_value(&mut c, rhs, rstart, c.pos, fty);
             v = compound_value(&mut c, compound_operator(op), read.t, rhs, fty);
         } else {
             fail(&mut c, view("expected = after a captured value"));
@@ -25240,8 +25230,7 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         } else {
             start := c.pos;
             mut v = expr(&mut c, 0);
-            end := c.pos;
-            v = adopt_value(&mut c, v, start, end, ret);
+            v = adopt_value(&mut c, v, start, c.pos, ret);
             require_type(&mut c, v.ty, ret);
             validate_return(&mut c, val(v.t, v.ty));
             move_out(&mut c, val(v.t, v.ty));
@@ -25254,8 +25243,7 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         o(&mut c, view("xorq %rax,%rax\nleave\nret\n.set .F"));
         on(&mut c, frame);
         c.out.push(44);
-        n := c.next;
-        on(&mut c, div(n + 1, 2) * 16);
+        on(&mut c, div(c.next + 1, 2) * 16);
         c.out.push(10);
         exchange(&mut c.closure_env, 0);
         i += 1;
@@ -25674,8 +25662,7 @@ fn pattern_loop<a>(
     exchange(&mut c.loop_end, loopend);
     loopmark := c.resources.len();
     exchange(&mut c.loopmark, loopmark);
-    current := ownership::snapshot(&c.check);
-    oldloop := exchange(&mut c.loopcheck, current);
+    oldloop := exchange(&mut c.loopcheck, ownership::snapshot(&c.check));
     oldbreak := exchange(&mut c.breaks, ownership::new());
     oldhas := c.hasbreak;
     exchange(&mut c.hasbreak, 0);
@@ -25764,8 +25751,7 @@ fn pattern_loop<a>(
         pop_locals(&mut c, patmark);
     }
     if terminated == 0 {
-        loopstate := ownership::snapshot(&c.loopcheck);
-        if !backedge_ok(&mut c, &loopstate) {
+        if !backedge_ok(&mut c, &ownership::snapshot(&c.loopcheck)) {
             fail(&mut c, view("loop backedge consumes entry storage"));
         }
     }
@@ -25778,8 +25764,7 @@ fn pattern_loop<a>(
         ownership::merge(&mut c.check, &entry);
     }
     if c.hasbreak != 0 {
-        broken := ownership::snapshot(&c.breaks);
-        ownership::merge(&mut c.check, &broken);
+        ownership::merge(&mut c.check, &ownership::snapshot(&c.breaks));
     }
     exchange(&mut c.terminated, 0);
     jump(&mut c, view("jmp"), head);
@@ -26287,8 +26272,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         }
         info := &c.funcs[method - 1];
         first := info.first;
-        formal := c.params[first];
-        prepared := method_receiver(&mut c, input, inty, xty, formal);
+        prepared := method_receiver(&mut c, input, inty, xty, c.params[first]);
         rv := prepared.t;
         rty := prepared.ty;
         exchange(&mut c.receiver, rv);
@@ -26321,8 +26305,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         }
         info := &c.funcs[method - 1];
         first := info.first;
-        formal := c.params[first];
-        prepared := method_receiver(&mut c, input, inty, xty, formal);
+        prepared := method_receiver(&mut c, input, inty, xty, c.params[first]);
         rv := prepared.t;
         rty := prepared.ty;
         exchange(&mut c.receiver, rv);
@@ -26364,8 +26347,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             if count == 0 {
                 fail(&mut c, view("associated function called as a method (use Interface::name)"));
             }
-            formal := c.params[first];
-            prepared := method_receiver(&mut c, input, inty, xty, formal);
+            prepared := method_receiver(&mut c, input, inty, xty, c.params[first]);
             rv := prepared.t;
             rty := prepared.ty;
             exchange(&mut c.receiver, rv);
@@ -26403,8 +26385,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             if c.funcs[method - 1].count == 0 {
                 fail(&mut c, view("associated function called as a method (use Interface::name)"));
             }
-            formal := c.params[first];
-            prepared := method_receiver(&mut c, input, inty, concrete, formal);
+            prepared := method_receiver(&mut c, input, inty, concrete, c.params[first]);
             rv := prepared.t;
             rty := prepared.ty;
             exchange(&mut c.receiver, rv);
@@ -27202,8 +27183,7 @@ fn borrow_chain_end<a>(c: (&a mut C)) -> u64 {
     return e;
 }
 fn after_next_kind<a>(c: (&a mut C)) -> u64 {
-    p := c.pos;
-    return kind_at(&mut c, p + 2);
+    return kind_at(&mut c, c.pos + 2);
 }
 fn simple_type_head<a, b>(c: (&a mut C), name: &b [u8]) -> bool {
     n := name.copy();
@@ -27309,8 +27289,7 @@ fn type_literal_ahead<a, b>(c: (&a mut C), name: &b [u8]) -> bool {
 fn finish_type_literal<a>(c: (&a mut C), ty: u64) -> Val {
     mut out = ty;
     while is(&mut c, view("[")) {
-        here := c.pos + 1;
-        if kind_at(&mut c, here) != 93 {
+        if kind_at(&mut c, c.pos + 1) != 93 {
             break;
         }
         advance(&mut c);
@@ -27354,8 +27333,7 @@ fn map_call<a, b>(c: (&a mut C), name: &b [u8], ty: u64, values: Val[]) -> Val {
     mut sources = u64[];
     for i in values.len() {
         v := val(values[i].t, values[i].ty);
-        formal := c.params[first + i];
-        expected := bind_types(&mut c, formal, &types);
+        expected := bind_types(&mut c, c.params[first + i], &types);
         require_type(&mut c, v.ty, expected);
         if ty_kind(&mut c, v.ty) == 7 {
             observe(&mut c, v.t);
@@ -27498,13 +27476,11 @@ fn primary<a>(c: (&a mut C)) -> Val {
     k := kind(&mut c);
     // `@expr`: the next operand, folded at compile time (stage C1: literals, constants, size_of,
     // align_of and target; a call in it is the run tier, C3).
-    embed_at := c.pos + 1;
-    if (k == 64) & is_at(&mut c, embed_at, view("embed")) {
+    if (k == 64) & is_at(&mut c, c.pos + 1, view("embed")) {
         return embed_file(&mut c);
     }
     if (k == 1) & (c.ct_loop_names.len() != 0) & (next_kind(&mut c) == 46) {
-        here_tok := c.pos;
-        loop_name := tok_text(&mut c, here_tok);
+        loop_name := tok_text(&mut c, c.pos);
         b := ct_loop_binding(&mut c, view(loop_name));
         if b != 0 {
             advance(&mut c);
@@ -27543,15 +27519,13 @@ fn primary<a>(c: (&a mut C)) -> Val {
         // A value parameter (`n` in `fn f<@n: u64>`) reads as its constant. Checked before every
         // other name, because the parameter also lives in the type-parameter table, where other
         // paths would take it for a type.
-        here_tok := c.pos;
-        name_text := tok_text(&mut c, here_tok);
+        name_text := tok_text(&mut c, c.pos);
         vp := value_param(&mut c, view(name_text));
         if (vp != 0) & (next_kind(&mut c) != 40) {
             advance(&mut c);
             v := value_param_value(&mut c, vp - 1);
             exchange(&mut c.ct_unbound, 0);
-            vty := c.type_bounds[vp - 1] / 8;
-            return val(imm(&mut c, v.value), vty);
+            return val(imm(&mut c, v.value), c.type_bounds[vp - 1] / 8);
         }
     }
     if (k == 1) & (is(&mut c, view("size_of")) || is(&mut c, view("align_of"))) & (next_kind(&mut c) == 40) {
@@ -27933,8 +27907,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
     // module's type (the head re-read as a type, as for an unqualified `Type[`).
     q2 := c.pos + 2;
     if is(&mut c, view("::")) & (kind_at(&mut c, q2) == 91) {
-        qp := c.pos + 1;
-        qname := tok_text(&mut c, qp);
+        qname := tok_text(&mut c, c.pos + 1);
         if find_decl(&mut c, view(first), view(qname)) != 0 {
             back := c.pos - 1;
             exchange(&mut c.pos, back);
@@ -28826,8 +28799,7 @@ fn proven_index<a>(c: (&a mut C), value: Val) -> bool {
     if !same(view(t), view(ix)) {
         return false;
     }
-    base := c.bce_base.copy();
-    l := find_local(&mut c, view(base));
+    l := find_local(&mut c, view(c.bce_base.copy()));
     if l == 0 {
         return false;
     }
@@ -28991,8 +28963,7 @@ fn vector_slice<a>(c: (&a mut C), x: Val, input: u64, access: u64) -> Val {
     } else {
         bstart := c.pos;
         mut bound = expr(&mut c, 0);
-        bend := c.pos;
-        bound = adopt_value(&mut c, bound, bstart, bend, 0);
+        bound = adopt_value(&mut c, bound, bstart, c.pos, 0);
         require_type(&mut c, bound.ty, 0);
         start = bound.t;
     }
@@ -29003,8 +28974,7 @@ fn vector_slice<a>(c: (&a mut C), x: Val, input: u64, access: u64) -> Val {
     } else {
         bstart := c.pos;
         mut bound = expr(&mut c, 0);
-        bend := c.pos;
-        bound = adopt_value(&mut c, bound, bstart, bend, 0);
+        bound = adopt_value(&mut c, bound, bstart, c.pos, 0);
         require_type(&mut c, bound.ty, 0);
         end = bound.t;
     }
@@ -29152,8 +29122,7 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
         }
         bstart := c.pos;
         mut bound = expr(&mut c, 0);
-        bend := c.pos;
-        bound = adopt_value(&mut c, bound, bstart, bend, 0);
+        bound = adopt_value(&mut c, bound, bstart, c.pos, 0);
         require_type(&mut c, bound.ty, 0);
         expect(&mut c, view("]"));
         elem := int_type(&mut c, 8, 0);
@@ -29874,15 +29843,13 @@ fn strict_bool_fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
             column += 1;
         }
     }
-    here := c.file;
-    path := file_path(&mut c, here);
+    path := file_path(&mut c, c.file);
     println("{}:{}:{}: {}", view(path), line, column, msg);
     return ();
 }
 // ---- statements ----
 fn block<a>(c: (&a mut C)) -> unit {
-    start := c.pos;
-    end := block_end(&mut c, start);
+    end := block_end(&mut c, c.pos);
     oldend := c.scope_end;
     exchange(&mut c.scope_end, end);
     expect(&mut c, view("{"));
@@ -30363,8 +30330,7 @@ fn statement_builtin<a, b>(c: (&a mut C), name: &b [u8]) -> bool {
     if !is(&mut c, &name) {
         return false;
     }
-    here := c.pos;
-    if kind_at(&mut c, here + 1) != 40 {
+    if kind_at(&mut c, c.pos + 1) != 40 {
         return false;
     }
     if find_local(&mut c, &name) != 0 {
@@ -31273,8 +31239,7 @@ fn map_loop<a, b, d>(c: (&a mut C), name: &b [u8], value_name: &d [u8]) -> unit 
     exchange(&mut c.loop_end, loopend);
     loopmark := c.resources.len();
     exchange(&mut c.loopmark, loopmark);
-    current := ownership::snapshot(&c.check);
-    oldloop := exchange(&mut c.loopcheck, current);
+    oldloop := exchange(&mut c.loopcheck, ownership::snapshot(&c.check));
     oldbreak := exchange(&mut c.breaks, ownership::new());
     oldhas := c.hasbreak;
     exchange(&mut c.hasbreak, 0);
@@ -31316,8 +31281,7 @@ fn map_loop<a, b, d>(c: (&a mut C), name: &b [u8], value_name: &d [u8]) -> unit 
         cleanup(&mut c, loopmark);
     }
     if c.terminated == 0 {
-        loopstate := ownership::snapshot(&c.loopcheck);
-        if !backedge_ok(&mut c, &loopstate) {
+        if !backedge_ok(&mut c, &ownership::snapshot(&c.loopcheck)) {
             fail(&mut c, view("loop backedge consumes entry storage"));
         }
     }
@@ -31328,8 +31292,7 @@ fn map_loop<a, b, d>(c: (&a mut C), name: &b [u8], value_name: &d [u8]) -> unit 
         ownership::merge(&mut c.check, &entry);
     }
     if c.hasbreak != 0 {
-        broken := ownership::snapshot(&c.breaks);
-        ownership::merge(&mut c.check, &broken);
+        ownership::merge(&mut c.check, &ownership::snapshot(&c.breaks));
     }
     exchange(&mut c.terminated, 0);
     pop_locals(&mut c, iteration);
@@ -31400,8 +31363,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
     // An `unsafe { ... }` block is the explicit boundary for foreign calls. It is
     // lexical and checked: move/drop/borrow rules still apply inside the body.
     if is(&mut c, view("unsafe")) {
-        after := c.pos + 1;
-        if is_at(&mut c, after, view("{")) {
+        if is_at(&mut c, c.pos + 1, view("{")) {
             advance(&mut c);
             depth := c.unsafe_depth;
             exchange(&mut c.unsafe_depth, depth + 1);
