@@ -30,6 +30,33 @@
 
 ## Unreleased
 
+- Changed: the call-site table helper the compiler emits (`compiler/native.grl` `rt_sites`) and the
+  runtime that calls it (`compiler/runtime.grl`) now carry their length instead of agreeing on fixed
+  offsets. The signature is `words_written = rt_sites(out, capacity_words)`, and the descriptor is
+  append-only - statement table start/end, the caller's frame, then the function table start/end - so
+  the helper writes the longest prefix the capacity admits and returns how many words it wrote. The
+  runtime asks once (`rt_sites_fill`), reads only that many, and **refuses** the descriptor when the
+  count is smaller than a statement entry needs or larger than the capacity it offered, so a caller
+  that reads first and believes afterwards is gone from this contract. A capacity of `0` means "this
+  caller predates the argument" and is answered with the three words every runtime since the
+  statement table existed has room for - the direction that must never break, because a checked-in
+  seed's runtime calls `helper(scratch, 0)` on a 24-byte scratch and a five-word answer there *is*
+  the 16-byte overrun into the following block's allocator header that the task-failure example
+  tripped; an offer below three words writes nothing at all. `rt_backtrace` needs the last two words
+  and answers no text when it was offered three, instead of walking a function table that is not
+  there; `rt_site_here` (the containment path, which may not allocate), `rt_fail_where` and
+  `rt_backtrace` all go through the one fill, so `words read <= words written` is checked in one
+  place rather than assumed in three. The audit of the other `rt_*` handshakes found no second
+  word-list: `host::*` `&[u8]` pairs carry a pointer *and* a length, `host::backtrace` returns an
+  owned text it bounds itself, and everything else that crosses is a single process-state word or a
+  NUL-terminated static the runtime only reads. Corpus: `rth-contained-then-joined` (the book's
+  example with the join's site made observable), `rth-contained-then-joined-thrice` (the repeat run
+  that caught the original overrun), `rth-offer-five-names-the-frame`, `rth-offer-three-still-names-
+  the-statement` and `rth-offer-two-refuses-the-descriptor` - the last two drive the capacity through
+  `GRAIL_RT_SITES_OFFER`, a test-only fault injection read once into process-state word 3408, which
+  is how a buffer smaller than the helper writes is shown to be refused rather than corrupted.
+  docs/design/runtime-api.md, "What the compiler hands the runtime: a handshake that carries its
+  length".
 - Fixed: a contained task failure corrupted the allocator header of the block that followed the
   task record, so the scope exit aborted (`book/examples/task-failure.grl` printed `bad input` and
   exited 134 instead of printing its sibling's `7`). `rt_site_here` handed the compiler's `rt_sites`

@@ -341,6 +341,117 @@ runtime, FFI and tests:
 | `host::exit` | runtime exit | not an OS service; cleanup checks stay in the runtime |
 | `host::target` | compiler target query | not an OS service |
 
+## What the compiler hands the runtime: a handshake that carries its length
+
+Two branches write the same program: `compiler/native.grl` emits the code, `compiler/runtime.grl`
+is the runtime that code calls. They are separate lanes with a shared contract at every point where
+one fills a buffer the other owns, and one of those points had no length in it at all.
+
+The site walk had a **bare pointer and fixed offsets**. The program's entry publishes the address of
+a helper in process-state word 3400; `rt_site_here` and `rt_backtrace` called it as
+`helper(scratch)` and read words 0, 8 and 16 - both statement-table bounds and the caller's frame
+pointer - or 24 and 32 as well. The helper wrote unconditionally. So the contract lived in two
+comments, and the two branches disagreed: this lane sized the caller's scratch by what the walk
+*reads* (three words, 24 bytes) while the compiler's helper wrote five (40 bytes). Sixteen bytes
+landed in the block header after a 240-byte task record and the next allocation was handed out with
+a size word that was really `__stop_grail_funcs`
+([task-failure-containment.md](task-failure-containment.md#the-integration-failure-and-the-word-that-wrote-the-header-fixed-gaps2-tmem)).
+
+The handshake now carries its length. Three shapes were considered:
+
+| | shape | why not |
+| --- | --- | --- |
+| (a) | a descriptor record `{ptr, len, words_written, version}` in a fixed state slot, published by the helper | the length would be published *after* the call that needs it; the caller still has to allocate a buffer before it can learn how big one should be, and a version word is a second thing to keep in step with a layout that has never needed one |
+| (b) | call twice: `need = helper(0)` for the required size, then `helper(buf)` to fill | the size query is a call the *older* helper cannot understand. A seed-built helper writes through whatever pointer it is given, so `helper(0)` is a null store: the one case that must never break is the one this breaks first |
+| (c) | **a capacity argument plus a returned count**, the runtime never reading past its own buffer | chosen |
+
+The contract, in `rt_sites` as emitted by `native.grl site_table` and consumed by `runtime.grl
+rt_sites_fill`:
+
+```
+words_written = rt_sites(out, capacity_words)
+
+0  __start_grail_sites    8  __stop_grail_sites    16 the caller's frame pointer
+24 __start_grail_funcs   32  __stop_grail_funcs
+```
+
+The layout is **append-only**, so a prefix of it is always meaningful and a helper may always write
+fewer words than a runtime would like to read:
+
+| capacity | the helper writes | returns |
+| --- | --- | --- |
+| 0 | the first three words | 3 |
+| 1..2 | nothing | 0 |
+| 3..4 | the first three words | 3 |
+| 5 or more | all five words | 5 |
+
+`0` means "this caller predates the argument", and it is answered with the three words every
+runtime since the statement table existed has room for. That is not a special case invented for
+taste; it is the compatibility direction that decides the design. **A seed build's runtime is older
+than the code it compiles**: the checked-in seed compiles this tree's `runtime.grl`, so the runtime
+that runs is new while the helper it calls was emitted by the seed's `native.grl`, or - in the other
+order - an old runtime calls a helper emitted by new code. The old runtime's call is
+`raw_call2(helper, scratch, 0)` on a **24-byte** scratch, so an argument that arrives as `0` must
+mean "three words", and the five-word answer that caused the overrun must be unreachable there.
+It also means an offer below three words writes *nothing at all* rather than the floor, so an
+explicit capacity is never exceeded.
+
+The other direction - a new runtime calling a helper emitted before the count existed - is answered
+by the returned count: such a helper answers `0` (the `xorq %rax,%rax` it ends with) after writing
+its words, and the runtime reads `0` as "the words an offer of this size implies". Which is safe
+because it pre-zeroes the two function-table words before the call: a helper that writes only the
+first three leaves zeros there instead of the block's previous contents, so "this build has no
+function table" is a fact rather than a guess, and `rt_backtrace` refuses rather than naming frames
+from a table that is not there.
+
+### The runtime is the checking side, not the tolerant one
+
+`rt_sites_fill` returns the number of words the caller may read, and `0` for a refused descriptor:
+
+- no helper in word 3400 (a macOS or `--debug` or LLVM build, a split build, an old seed);
+- a count smaller than the three words a statement entry needs;
+- **a count larger than the capacity it offered** - a helper that ignored the argument. Nothing is
+  read in that case, which is the whole difference from assuming: a runtime that reads first and
+  validates afterwards has already walked a table that may not be there.
+
+`rt_site_here` (the containment path, which may not allocate) and `rt_backtrace` share the fill, and
+`rt_fail_where` uses it too, so there is one place where the descriptor is asked for and one place
+where its length is believed. Each caller asserts `words read <= words written`: the site walk reads
+three of `have >= 3`, the backtrace reads five of `have >= 5`.
+
+The buffer on the containment path is the task record's words 200..240, which is
+`rt_sites_words()` words.
+
+### The audit: every other place generated code and the runtime share a buffer
+
+`rg -n 'fn rt_sites|rt_site_here|rt_fail_where|rt_backtrace|host_fn\(&mut c, view\("'` over
+`compiler/native.grl` and `compiler/runtime.grl` finds one helper: `rt_sites`. `host_fn(...)` names
+the `host::*` entry points the compiler binds by name, and `host::backtrace` is
+`f_host_backtrace -> rt_backtrace`, a call *into* the runtime that returns an owned text, not a
+buffer handed over to be filled. Everything else at the boundary is one of:
+
+| handshake | what crosses | why it cannot overrun |
+| --- | --- | --- |
+| `rt_sites` (both tables, the frame) | five words into the runtime's buffer | capacity argument + returned count, above |
+| `host::backtrace` | an owned text the runtime allocates and returns | `rt_backtrace` bounds every line by `n + 256 < rt_fail_limit()` and its frame walk by depth 64 / 32 lines |
+| `host::*` scalar and `&[u8]` calls | values, and a `view` pair (pointer **and** length) | the length is part of the pair for every one of them |
+| entry state words (`rt_state` 0/8/16, 184, 3216, 3392, 3400) | one word each | a word has no length to lose |
+| `rt_trap` / `rt_fail` / `rt_refine` | the compiler's check kinds and two C strings beside the check | the strings are NUL-terminated statics the runtime only reads |
+| compile-time refusal text (`rt_state` 3232..3384) | the runtime's own message, written and read by the runtime | one owner, one length (79 bytes), no generated code |
+
+So the site descriptor was the only word-list handshake, and it is the one that corrupted a header.
+The report's own text buffers (`rt_fail_limit`) were already bounded by their writer.
+
+### Proving the refusal
+
+`GRAIL_RT_SITES_OFFER` is a **test-only** fault injection, read once into process-state word 3408:
+it replaces the capacity the runtime offers with a smaller number, which is what an older runtime,
+a hypothetical smaller buffer or a mismatched future helper would present as. Three corpus cases
+pin the three outcomes - an offer of 5 (the whole descriptor: site and function table), of 3 (what
+a runtime older than the count receives: the site still names the statement, `host::backtrace`
+answers no text), and of 2 (the helper writes nothing and the runtime refuses the descriptor,
+leaving the message without a location rather than reading a buffer it was told is too small).
+
 ## Prerequisites and non-goals
 
 Prerequisites owned by other lanes: the frozen `extern "C"` contract (declarations, `&[u8]`

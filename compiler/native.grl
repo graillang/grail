@@ -2353,9 +2353,10 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
         site_func_entry(&mut funcs, pending_func, 0);
         pending_func = 0;
     }
-    // rt_sites(out): the table's bounds and the caller's frame pointer, for runtime.grl
-    // rt_fail_where. The body is Grail's pseudo text: it is x86-64 as it stands, and machine::lower
-    // turns it into AArch64 or RISC-V for those targets.
+    // rt_sites(out, capacity): the descriptor the runtime walks frames with - the two tables'
+    // bounds and the caller's frame pointer - and the length of it this call was given room for.
+    // runtime.grl rt_sites_fill is the only caller. The body is Grail's pseudo text: it is x86-64 as
+    // it stands, and machine::lower turns it into AArch64 or RISC-V for those targets.
     pe := (c.target == 3) || (c.target == 4);
     push_bytes(&mut out, view("\n.text\n"));
     if !pe {
@@ -2363,10 +2364,21 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
         // because every object of a separately compiled program carries one and the linker keeps one.
         push_bytes(&mut out, view(".weak __start_grail_sites\n.weak __stop_grail_sites\n.weak __start_grail_funcs\n.weak __stop_grail_funcs\n.weak rt_sites\n"));
     }
-    // The five words are the two tables' bounds and the caller's frame pointer. A runtime that only
-    // reads the first three (a seed-built one) is unaffected; one that reads all five names the
-    // functions a stack walk finds.
-    push_bytes(&mut out, view("rt_sites:\nleaq __start_grail_sites(%rip),%rax\nmovq %rax,(%rdi)\nleaq __stop_grail_sites(%rip),%rax\nmovq %rax,8(%rdi)\nmovq %rbp,16(%rdi)\nleaq __start_grail_funcs(%rip),%rax\nmovq %rax,24(%rdi)\nleaq __stop_grail_funcs(%rip),%rax\nmovq %rax,32(%rdi)\nxorq %rax,%rax\nret\n"));
+    // Word 0 __start_grail_sites, 8 __stop_grail_sites and 16 the caller's rbp are the statement
+    // table and the frame every runtime since the table existed reads; 24 __start_grail_funcs and
+    // 32 __stop_grail_funcs add the function table `host::backtrace` names frames with. The layout
+    // is append-only, and the second argument says how many words the caller's buffer holds:
+    //
+    //   capacity 0        the caller predates the argument: the three words it has room for
+    //   capacity 1..2     less than a descriptor needs: write nothing, so nothing is overrun
+    //   capacity 3..4     the statement table and the frame
+    //   capacity 5 or up  all five
+    //
+    // The count of words written is the return value, so the runtime reads only what was written.
+    // A runtime older than this compiler - a checked-in seed's - calls with 0 and a 24-byte
+    // scratch: answering five words there is the overrun that corrupted an allocator header
+    // (docs/design/task-failure-containment.md), and answering three is what keeps it impossible.
+    push_bytes(&mut out, view("rt_sites:\ncmpq $3,%rsi\njb .Lrt_sites_none\nleaq __start_grail_sites(%rip),%rax\nmovq %rax,(%rdi)\nleaq __stop_grail_sites(%rip),%rax\nmovq %rax,8(%rdi)\nmovq %rbp,16(%rdi)\ncmpq $5,%rsi\njb .Lrt_sites_three\nleaq __start_grail_funcs(%rip),%rax\nmovq %rax,24(%rdi)\nleaq __stop_grail_funcs(%rip),%rax\nmovq %rax,32(%rdi)\nmovq $5,%rax\nret\n.Lrt_sites_three:\nmovq $3,%rax\nret\n.Lrt_sites_none:\nxorq %rax,%rax\nret\n"));
     // Past the end of the text the table says nothing: a frame whose return address is out there (in
     // libc above the image, say) is not one of the program's own.
     site_label(&mut out, count);

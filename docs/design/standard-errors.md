@@ -102,10 +102,17 @@ prologue the statement table cannot name are omitted, exactly as a failed check 
 The tables: `site_table` emits the function table into its own section, `grail_funcs`, bracketed exactly
 as `grail_sites` is - `__start_`/`__stop_` symbols an ELF linker provides, grouped PE sections
 (`grail_funcs$a/$b/$z`) on Windows, and no table at all where the statement table is already off. The
-`rt_sites` helper fills five words (statement table start and end, the caller's frame pointer, then the
-function table's start and end) into a buffer the caller allocates. A helper emitted before this change
-fills three, leaving the function table empty - the same refusal, not a fault, and the reason the change
-is bootstrap-safe: a seed compiler's helper never writes past the buffer a newer runtime allocates.
+`rt_sites` helper fills a five-word descriptor (statement table start and end, the caller's frame
+pointer, then the function table's start and end) into a buffer the caller allocates, and it is called
+with that buffer's size: `written = rt_sites(out, capacity_words)`. It writes the longest prefix the
+capacity admits - five words, the first three, or nothing - and answers how many it wrote, and the
+runtime reads only that many. So a helper emitted before the count existed answers nothing while
+writing the words it always wrote - the runtime reads that as the whole descriptor it offered, and the
+two function-table words it cleared beforehand read as absent, which is the same refusal and not a
+fault - and a helper emitted by newer code than the runtime calling it writes three words for the call
+a seed's runtime makes, which passes no capacity at all. The size is the caller's, not an assumption
+either side makes about the other.
+([runtime-api.md](runtime-api.md#what-the-compiler-hands-the-runtime-a-handshake-that-carries-its-length))
 
 Assumptions, stated because a wrong one would print garbage:
 
