@@ -387,9 +387,13 @@ struct C {
     // 1 with --verify-facts: the lifter checks every word a fact treats as an f32, and every word
     // it treats as a sequence header.
     verify_facts: u64,
-    // 1 with --range-facts: the LLVM lifter derives range facts and removes the bounds check a
-    // fact proves redundant (docs/design/typed-ir.md). Off by default; see that document for why.
+    // 1 with --range-facts: the lifter derives range facts and removes the bounds check a fact
+    // proves redundant (docs/design/typed-ir.md). On by default for the native backend, which reads
+    // the same facts from the source at each access (`pv_in_bounds_at`); off by default for LLVM,
+    // where the pass costs compile time and the flag is opt-in.
     range_facts: u64,
+    // 1 with --no-range-facts: no check is removed by a fact, on either backend.
+    range_off: u64,
     no_sites: u64,
     // --f1-what=N: a test aid that records a deliberately wrong F1 kind for every binding, so the
     // checks --verify-facts emits can be shown to fire (docs/design/typed-ir.md, "Tests that catch
@@ -6292,7 +6296,12 @@ fn copy_atom_value<a>(x: (&a Atom)) -> Atom {
 struct PvFrame {
     mark: u64,
     kind: u64,
-    neg: Atom[]
+    neg: Atom[],
+    // What the block states once it has run: a counted fill loop's `len(v) >= N`. Empty for every
+    // other block, whose facts hold only while it runs.
+    post: Atom[],
+    // Where the block's `{` is, so the statement a clamp-shaped block leaves behind can be read.
+    open: u64
 }
 // The weight of "no path": larger than any bound a fact can state, small enough that two of them
 // added together stay inside i64.
@@ -6930,6 +6939,9 @@ fn pv_kill_spans<a>(c: (&a mut C), facts: (&a mut Atom[]), lo: u64, hi: u64) -> 
 fn pv_scope<a>(c: (&a mut C), start: u64, pos: u64, facts: (&a mut Atom[])) -> unit {
     pv_seed_params(&mut c, &mut facts);
     mut frames = PvFrame[];
+    // The facts a block the walk is about to open will leave behind once it has run (a counted fill
+    // loop), waiting for the `{` that opens it.
+    mut post = Atom[];
     mut i = start;
     // The condition of an `if` whose block is about to open, and what the block it just closed would
     // let an `else` assume.
@@ -6942,7 +6954,8 @@ fn pv_scope<a>(c: (&a mut C), start: u64, pos: u64, facts: (&a mut Atom[])) -> u
         k := kind_at(&mut c, i);
         if k == 123 {
             mark := facts.len();
-            frames.push(PvFrame { mark: mark, kind: pending, neg: pending_neg });
+            frames.push(PvFrame { mark: mark, kind: pending, neg: pending_neg, post: post, open: i });
+            post = Atom[];
             for j in pending_atoms.len() {
                 pv_add(&mut facts, pending_atoms[j].rel, view(pending_atoms[j].a), view(pending_atoms[j].b), pending_atoms[j].k);
             }
@@ -6957,6 +6970,12 @@ fn pv_scope<a>(c: (&a mut C), start: u64, pos: u64, facts: (&a mut Atom[])) -> u
                 fr := frames.pop();
                 while fr.mark < facts.len() {
                     facts.pop();
+                }
+                // What the block leaves behind, for the blocks that state something once they have
+                // run: a counted fill loop pushed each vector once per trip, so its length is at
+                // least the count now.
+                for j in fr.post.len() {
+                    pv_add(&mut facts, fr.post[j].rel, view(fr.post[j].a), view(fr.post[j].b), fr.post[j].k);
                 }
                 closed = 0;
                 closed_neg = Atom[];
@@ -7110,9 +7129,17 @@ fn pv_scope<a>(c: (&a mut C), start: u64, pos: u64, facts: (&a mut Atom[])) -> u
                         }
                     } else {
                         bterm := pv_span_term(&mut c, i + 3, close);
-                        if bterm.len() != 0 {
+                        // `for x in v` walks a sequence: `x` is an element, not an index, and says
+                        // nothing about the length. Only a count (`for i in n`, `for i in v.len()`)
+                        // puts the loop variable below the bound it names.
+                        if (bterm.len() != 0) & !pv_seq_iterable(&mut c, i + 3, view(bterm)) {
                             pv_add(&mut facts, 0, view(loop_name), view(bterm), 0);
                         }
+                    }
+                    // A counted loop whose body pushes each vector once leaves a lower bound on that
+                    // vector's length once it has run: `for i in n { v.push(x) }` gives `len(v) >= n`.
+                    if (dots == close) & (close < pos) & (kind_at(&mut c, close) == 123) {
+                        pv_fill_loop(&mut c, i + 3, close, close, &mut facts, &mut post);
                     }
                     i = close;
                     continue;
@@ -7121,6 +7148,35 @@ fn pv_scope<a>(c: (&a mut C), start: u64, pos: u64, facts: (&a mut Atom[])) -> u
             if (same(view(t), view("mut")) || same(view(t), view("let"))) & (kind_at(&mut c, i + 1) == 1) {
                 nm := tok_text(&mut c, i + 1);
                 pv_kill(&mut facts, view(nm));
+                // `mut NAME = VALUE` and `mut NAME: TY = VALUE` are where an allocation's length
+                // enters the facts; the walk steps past the name, so it is read here.
+                mut eq = i + 2;
+                if kind_at(&mut c, eq) == 58 {
+                    mut d = 0;
+                    while eq < pos {
+                        kk := kind_at(&mut c, eq);
+                        if (kk == 40) || (kk == 91) || (kk == 123) {
+                            d += 1;
+                        }
+                        if ((kk == 41) || (kk == 93) || (kk == 125)) & (0 < d) {
+                            d -= 1;
+                        }
+                        if (d == 0) & ((kk == 61) || (kk == 59) || (kk == 123)) {
+                            break;
+                        }
+                        eq += 1;
+                    }
+                    if (pos <= eq) || (kind_at(&mut c, eq) != 61) {
+                        eq = 0;
+                    }
+                } else {
+                    if pos <= eq {
+                        eq = 0;
+                    }
+                }
+                if eq != 0 {
+                    pv_bind_len(&mut c, &mut facts, view(nm), eq, pos);
+                }
                 // `let Variant(name) = ..` (and `if let`) also binds what the pattern names.
                 if (kind_at(&mut c, i + 2) == 40) & (kind_at(&mut c, i + 4) == 41) {
                     mut j = i + 3;
@@ -7157,12 +7213,18 @@ fn pv_scope<a>(c: (&a mut C), start: u64, pos: u64, facts: (&a mut Atom[])) -> u
                 if term.len() != 0 {
                     pv_add(&mut facts, 2, view(t), view(term), 0);
                 }
+                pv_bind_len(&mut c, &mut facts, view(t), i + 1, pos);
                 i = j + 1;
                 continue;
             }
             // A plain write, and the compound writes, kill what the name's facts said.
             if (kind_at(&mut c, i + 1) == 61) || (kind_at(&mut c, i + 1) == 262) || (kind_at(&mut c, i + 1) == 263) || (kind_at(&mut c, i + 1) == 264) || (kind_at(&mut c, i + 1) == 265) || (kind_at(&mut c, i + 1) == 266) {
                 pv_kill(&mut facts, view(t));
+                // A binding with a fresh value: what an allocation pins, and what a copy of another
+                // sequence must have the length of.
+                if kind_at(&mut c, i + 1) == 61 {
+                    pv_bind_len(&mut c, &mut facts, view(t), i + 1, pos);
+                }
                 i += 2;
                 continue;
             }
@@ -7173,6 +7235,26 @@ fn pv_scope<a>(c: (&a mut C), start: u64, pos: u64, facts: (&a mut Atom[])) -> u
             }
             // A method call may write its receiver (`v.push(x)`): forget what the base's length was.
             if (kind_at(&mut c, i + 1) == 46) & (kind_at(&mut c, i + 2) == 1) & (kind_at(&mut c, i + 3) == 40) {
+                // A call whose argument list holds `pos` has not run where the access is: it changes
+                // nothing there, and the walk is over.
+                mut k0 = i + 4;
+                mut d0 = 0;
+                while k0 < pos {
+                    kk := kind_at(&mut c, k0);
+                    if kk == 40 {
+                        d0 += 1;
+                    }
+                    if kk == 41 {
+                        if d0 == 0 {
+                            break;
+                        }
+                        d0 -= 1;
+                    }
+                    k0 += 1;
+                }
+                if pos <= k0 {
+                    return ();
+                }
                 pv_kill(&mut facts, view(t));
                 mut j = i + 4;
                 mut depth = 0;
@@ -7209,6 +7291,10 @@ fn pv_scope<a>(c: (&a mut C), start: u64, pos: u64, facts: (&a mut Atom[])) -> u
                         depth -= 1;
                     }
                     j += 1;
+                }
+                if pos <= j {
+                    // The access is inside this call's arguments: the call has not run yet.
+                    return ();
                 }
                 pv_kill_spans(&mut c, &mut facts, i + 2, j);
                 i = j + 1;
@@ -7596,6 +7682,636 @@ fn pv_bce<a>(c: (&a mut C)) -> unit {
         }
     }
     return ();
+}
+
+// ---- range facts for the bounds checks the native backend keeps -----------------------------------
+//
+// Every sequence accessor the front end calls - rt_slot, rt_slot4, rt_slotb, rt_at, rt_at4, rt_atb -
+// begins with `if (i < len) == 0 { rt_fail(..) }`, and the front end substitutes the unchecked
+// sibling (rt_slotu, rt_slot4u, rt_atbu) only when it has a proof. Until now that proof was
+// syntactic (len_bound_ahead: `for i in 0..v.len()` whose body names `v` only as `v[x]` or
+// `v.len()`). These read the same question out of the facts the refinement prover collects at a
+// program point (pv_scope), which is the source-level counterpart of the range fact the LLVM lifter
+// derives over the emitted stream (docs/design/typed-ir.md, "the range fact":
+// `does index < base.len() follow?`).
+//
+// A check is removed only when the facts in scope establish the bound, so the proofs are:
+//   - a dominating guard (`while i < n`, `if i < v.len()`, `assert i < v.len()`),
+//   - the loop's own bounds (`for i in 0..v.len()`, `for i in n`),
+//   - a refined parameter at entry (`where i < v.len()`),
+//   - an allocation that pins the length (`v = u8[0; n]`, `v = f64[1.0, 2.0]`, `w = v.copy()`),
+//   - a counted fill loop that leaves a lower bound (`for i in n { v.push(x) }` gives `len(v) >= n`).
+// pv_scope drops a fact on a write, a loan, a method call and a call, so anything that can move a
+// length between the guard and the access takes the proof with it.
+//
+// The question is answered two ways. The difference graph (pv_implies) carries a relation between
+// two names, which covers `i < v.len` exactly. The interval below carries numbers, which covers an
+// index expression over names the facts bound literally - `p[i * 3 + 1]` with `i < 5` and
+// `len(p) == 15`. Neither invents anything: a term with no stated bound has none, an expression
+// shape this reader does not know is not evaluated, and a length with no stated floor is not
+// compared.
+struct PvBound {
+    ok: u64,
+    v: i64,
+    at: u64
+}
+// A decimal the prover reads as a number, as a value.
+fn pv_num<a>(t: &a [u8], out: (&a mut i64)) -> bool {
+    if !pv_digits(view(t)) {
+        return false;
+    }
+    v := pv_number(view(t));
+    exchange(out, v);
+    return true;
+}
+// The largest value (`upper` set) or the smallest value the facts put on one term: an exact literal
+// the facts equate it with, `t <= L + k`, `t < L + k`, or the mirrors `L <= t + k` / `L < t + k` read
+// downwards. False when no fact states a number, which is the answer for a term bounded only against
+// other names - that shape belongs to the graph, not here.
+fn pv_term_bound<a>(facts: (&a Atom[]), t: &a [u8], upper: u64, out: (&a mut i64)) -> bool {
+    if t.len() == 0 {
+        return false;
+    }
+    exact := pv_resolve(&facts, view(t));
+    if !same(view(exact), view(t)) {
+        mut e: i64 = 0;
+        if pv_num(view(exact), &mut e) {
+            exchange(out, e);
+            return true;
+        }
+    }
+    mut best: i64 = 0;
+    mut found = 0;
+    for i in facts.len() {
+        x := &facts[i];
+        if (x.rel == 3) || (x.rel == 4) || (x.rel == 5) {
+            continue;
+        }
+        if (x.a.len() == 0) || (x.b.len() == 0) {
+            continue;
+        }
+        mut g: i64 = 0;
+        if (same(view(x.a), view(t))) & (upper != 0) {
+            // `t REL L + k` bounds the term from above.
+            lit := pv_resolve(&facts, view(x.b));
+            if pv_num(view(lit), &mut g) & !same(view(lit), view(t)) {
+                if x.rel == 2 {
+                    exchange(out, g + x.k);
+                    return true;
+                }
+                mut cand: i64 = g + x.k;
+                if x.rel == 0 {
+                    cand = cand - 1;
+                }
+                if (found == 0) || (cand < best) {
+                    best = cand;
+                    found = 1;
+                }
+            }
+        }
+        if (same(view(x.b), view(t))) & (upper == 0) {
+            // `L REL t + k` read downwards: `t >= L - k`, and `t > L - k` under a strict `<`.
+            lit := pv_resolve(&facts, view(x.a));
+            if pv_num(view(lit), &mut g) & !same(view(lit), view(t)) {
+                if x.rel == 2 {
+                    exchange(out, g - x.k);
+                    return true;
+                }
+                mut cand: i64 = g - x.k;
+                if x.rel == 0 {
+                    cand = cand + 1;
+                }
+                if (found == 0) || (best < cand) {
+                    best = cand;
+                    found = 1;
+                }
+            }
+        }
+    }
+    if found == 0 {
+        return false;
+    }
+    exchange(out, best);
+    return true;
+}
+// One number an index expression's arithmetic stays inside: a value larger than any index a proof
+// would cover is not one this reader carries.
+fn pv_wide() -> i64 {
+    return 4294967296;
+}
+// A literal, a name, `name.len()`, or a parenthesised sum.
+fn pv_bound_factor<a>(c: (&a mut C), facts: (&a Atom[]), s: (&a mut PvBound), hi: u64, upper: u64) -> bool {
+    at := s.at;
+    if at >= hi {
+        s.ok = 0;
+        return false;
+    }
+    if kind_at(&mut c, at) == 40 {
+        s.at = at + 1;
+        if !pv_bound_sum(&mut c, &facts, &mut s, hi, upper) {
+            return false;
+        }
+        ap := s.at;
+        if (ap < hi) & (kind_at(&mut c, ap) == 41) {
+            s.at = ap + 1;
+            return true;
+        }
+        s.ok = 0;
+        return false;
+    }
+    mut used = 0;
+    t := pv_term(&mut c, at, &mut used);
+    if t.len() == 0 {
+        s.ok = 0;
+        return false;
+    }
+    mut v: i64 = 0;
+    if pv_digits(view(t)) & pv_num(view(t), &mut v) {
+        s.at = at + used;
+        s.v = v;
+        return true;
+    }
+    if pv_term_bound(&facts, view(t), upper, &mut v) {
+        s.at = at + used;
+        s.v = v;
+        return true;
+    }
+    s.ok = 0;
+    return false;
+}
+// Factors joined by `*`, and `/` by a literal. A product of two upper bounds is an upper bound of
+// the product and a product of two lower bounds is a lower bound of it, because every value here is
+// non-negative; a quotient is only read when the divisor is a number.
+fn pv_bound_prod<a>(c: (&a mut C), facts: (&a Atom[]), s: (&a mut PvBound), hi: u64, upper: u64) -> bool {
+    if !pv_bound_factor(&mut c, &facts, &mut s, hi, upper) {
+        return false;
+    }
+    while true {
+        at := s.at;
+        if (s.ok == 0) || (hi <= at) {
+            return s.ok != 0;
+        }
+        op := kind_at(&mut c, at);
+        if (op != 42) & (op != 47) {
+            return true;
+        }
+        s.at = at + 1;
+        if op == 47 {
+            mut used = 0;
+            t := pv_term(&mut c, s.at, &mut used);
+            mut d: i64 = 0;
+            if !(pv_digits(view(t)) & pv_num(view(t), &mut d)) || !(0 < d) {
+                s.ok = 0;
+                return false;
+            }
+            s.at = s.at + used;
+            s.v = s.v / d;
+            continue;
+        }
+        mut rhs = PvBound { ok: 1, v: 0, at: s.at };
+        if !pv_bound_factor(&mut c, &facts, &mut rhs, hi, upper) {
+            s.ok = 0;
+            return false;
+        }
+        s.at = rhs.at;
+        if (pv_wide() < s.v) || (pv_wide() < rhs.v) {
+            s.ok = 0;
+            return false;
+        }
+        if (s.v != 0) & (pv_wide() / s.v < rhs.v) {
+            s.ok = 0;
+            return false;
+        }
+        s.v = s.v * rhs.v;
+    }
+    return true;
+}
+// Factors joined by `+`, and `-` by a literal: a difference is exact only when the subtrahend is a
+// number and the result does not go negative, so an index that can underflow proves nothing.
+fn pv_bound_sum<a>(c: (&a mut C), facts: (&a Atom[]), s: (&a mut PvBound), hi: u64, upper: u64) -> bool {
+    if !pv_bound_prod(&mut c, &facts, &mut s, hi, upper) {
+        return false;
+    }
+    while true {
+        at := s.at;
+        if (s.ok == 0) || (hi <= at) {
+            return s.ok != 0;
+        }
+        op := kind_at(&mut c, at);
+        if (op != 43) & (op != 45) {
+            return true;
+        }
+        s.at = at + 1;
+        if op == 45 {
+            mut used = 0;
+            t := pv_term(&mut c, s.at, &mut used);
+            mut d: i64 = 0;
+            if !(pv_digits(view(t)) & pv_num(view(t), &mut d)) {
+                s.ok = 0;
+                return false;
+            }
+            s.at = s.at + used;
+            mut n: i64 = s.v - d;
+            if (n < 0) || (pv_wide() < n) {
+                s.ok = 0;
+                return false;
+            }
+            s.v = n;
+            continue;
+        }
+        mut rhs = PvBound { ok: 1, v: 0, at: s.at };
+        if !pv_bound_prod(&mut c, &facts, &mut rhs, hi, upper) {
+            s.ok = 0;
+            return false;
+        }
+        s.at = rhs.at;
+        mut n: i64 = s.v + rhs.v;
+        if (n < 0) || (pv_wide() < n) {
+            s.ok = 0;
+            return false;
+        }
+        s.v = n;
+    }
+    return true;
+}
+// The largest (`upper` set) or smallest value the expression at `[lo, hi)` is known to have, and
+// whether the whole span was read: an unread shape proves nothing at all.
+fn pv_span_bound<a>(c: (&a mut C), facts: (&a Atom[]), lo: u64, hi: u64, upper: u64, out: (&a mut i64)) -> bool {
+    if lo >= hi {
+        return false;
+    }
+    mut s = PvBound { ok: 1, v: 0, at: lo };
+    if !pv_bound_sum(&mut c, &facts, &mut s, hi, upper) {
+        return false;
+    }
+    if (s.ok == 0) || (s.at != hi) {
+        return false;
+    }
+    exchange(out, s.v);
+    return true;
+}
+// The count a `TY[..]` initialiser allocates: the expression `TY[value; N]` repeats, or the number of
+// items a literal list `TY[a, b, c]` spells.
+struct PvCount {
+    // 0 when the span is not an initialiser this reader knows, 1 for a literal list's item count,
+    // 2 for the count expression at `[lo, hi)`.
+    kind: u64,
+    items: u64,
+    lo: u64,
+    hi: u64
+}
+// `TY[..]` at `[lo, hi)`: what a sequence initialiser allocates. False when the span is not such an
+// initialiser - a call, a name, a slice. The count itself is read where the fact is written, so a
+// count the facts do not bound simply states nothing.
+fn pv_alloc_count<a>(c: (&a mut C), lo: u64, hi: u64, out: (&a mut PvCount)) -> bool {
+    out.kind = 0;
+    if hi < lo + 3 {
+        return false;
+    }
+    if kind_at(&mut c, lo) != 1 {
+        return false;
+    }
+    ty_name := tok_text(&mut c, lo);
+    // A name that is a local is being indexed, not a type being allocated.
+    if find_local(&mut c, view(ty_name)) != 0 {
+        return false;
+    }
+    if (kind_at(&mut c, lo + 1) != 91) || (kind_at(&mut c, hi - 1) != 93) {
+        return false;
+    }
+    inner_lo := lo + 2;
+    inner_hi := hi - 1;
+    if inner_hi <= inner_lo {
+        // `TY[]`: an empty sequence.
+        out.kind = 1;
+        out.items = 0;
+        return true;
+    }
+    mut i = inner_lo;
+    mut depth = 0;
+    mut semi = hi;
+    mut commas = 0;
+    while i < inner_hi {
+        k := kind_at(&mut c, i);
+        if (k == 40) || (k == 91) || (k == 123) {
+            depth += 1;
+        }
+        if ((k == 41) || (k == 93) || (k == 125)) & (0 < depth) {
+            depth -= 1;
+        }
+        if depth == 0 {
+            if k == 59 {
+                semi = i;
+                break;
+            }
+            if k == 44 {
+                commas += 1;
+            }
+        }
+        i += 1;
+    }
+    if semi != hi {
+        // `TY[value; count]`: the count is the length.
+        if semi + 1 >= inner_hi {
+            return false;
+        }
+        out.kind = 2;
+        out.lo = semi + 1;
+        out.hi = inner_hi;
+        return true;
+    }
+    // A literal list: one element per comma-separated item.
+    out.kind = 1;
+    out.items = commas + 1;
+    return true;
+}
+// The length fact an allocation states: `len(base) == count`, either as the literal item count or as
+// the count expression's own term.
+fn pv_len_fact<a>(c: (&a mut C), facts: (&a mut Atom[]), base: &a [u8], cnt: (&a mut PvCount)) -> unit {
+    if cnt.kind == 0 {
+        return ();
+    }
+    mut len_term = copy_bytes(view(base));
+    push_bytes(&mut len_term, view(".len"));
+    if cnt.kind == 1 {
+        mut lit = u8[];
+        decimal(&mut lit, cnt.items);
+        pv_add(&mut facts, 2, view(len_term), view(lit), 0);
+        return ();
+    }
+    mut off: i64 = 0;
+    clo := cnt.lo;
+    chi := cnt.hi;
+    t := pv_index_term(&mut c, clo, chi, &mut off);
+    if t.len() == 0 {
+        return ();
+    }
+    if 0 <= off {
+        // The count is `t + off`, so `len == t + off` is `t == len - off`.
+        pv_add(&mut facts, 2, view(t), view(len_term), 0 - off);
+        return ();
+    }
+    // The count is `t - |off|`, so `len == t - |off|`.
+    pv_add(&mut facts, 2, view(len_term), view(t), off);
+    return ();
+}
+// The length facts a binding `NAME = VALUE` states, `eq` being the `=` token: an allocation pins
+// the length (`v = u8[0; n]`, `v = f64[1.0, 2.0]`, `v = u8[]`), and a copy takes its source's
+// (`w = v.copy()`). Anything else states nothing.
+fn pv_bind_len<a>(c: (&a mut C), facts: (&a mut Atom[]), name: &a [u8], eq: u64, pos: u64) -> unit {
+    if kind_at(&mut c, eq + 1) != 1 {
+        return ();
+    }
+    mut j = eq + 1;
+    mut depth = 0;
+    while j < pos {
+        kk := kind_at(&mut c, j);
+        if (kk == 40) || (kk == 91) || (kk == 123) {
+            depth += 1;
+        }
+        if ((kk == 41) || (kk == 93) || (kk == 125)) & (0 < depth) {
+            depth -= 1;
+        }
+        if (depth == 0) & (kk == 59) {
+            break;
+        }
+        j += 1;
+    }
+    mut cnt = PvCount { kind: 0, items: 0, lo: 0, hi: 0 };
+    if pv_alloc_count(&mut c, eq + 1, j, &mut cnt) {
+        pv_len_fact(&mut c, &mut facts, view(name), &mut cnt);
+        return ();
+    }
+    if (kind_at(&mut c, eq + 2) == 46) & (kind_at(&mut c, eq + 3) == 1) & (kind_at(&mut c, eq + 4) == 40) & (kind_at(&mut c, eq + 5) == 41) {
+        m := tok_text(&mut c, eq + 3);
+        src_name := tok_text(&mut c, eq + 1);
+        if same(view(m), view("copy")) & (find_local(&mut c, view(src_name)) != 0) {
+            mut len_term = copy_bytes(view(name));
+            push_bytes(&mut len_term, view(".len"));
+            mut src_len = copy_bytes(view(src_name));
+            push_bytes(&mut src_len, view(".len"));
+            pv_add(&mut facts, 2, view(len_term), view(src_len), 0);
+        }
+    }
+    return ();
+}
+// Whether the iterable at `[lo, close)` names a sequence, and so binds elements rather than indices.
+fn pv_seq_iterable<a>(c: (&a mut C), lo: u64, bterm: &a [u8]) -> bool {
+    if kind_at(&mut c, lo) == 38 {
+        return true;
+    }
+    if bterm.len() == 0 {
+        return false;
+    }
+    l := find_local(&mut c, view(bterm));
+    if l == 0 {
+        return false;
+    }
+    k := ty_kind(&mut c, local_ty(&mut c, l - 1));
+    return (k == 3) || (k == 4) || (k == 5) || (k == 6) || (k == 7) || (k == 27);
+}
+// A keyword whose body could skip the statement a fill loop is counted by.
+fn pv_control<a>(t: &a [u8]) -> bool {
+    return same(view(t), view("if"))
+        || same(view(t), view("else"))
+        || same(view(t), view("while"))
+        || same(view(t), view("for"))
+        || same(view(t), view("loop"))
+        || same(view(t), view("match"))
+        || same(view(t), view("break"))
+        || same(view(t), view("continue"))
+        || same(view(t), view("return"))
+        || same(view(t), view("assert"));
+}
+// The fact a counted loop leaves behind: `for i in N { .. v.push(x) .. }` runs N times and pushes
+// each named vector once per trip, so `len(v) >= N` holds afterwards. Read only when the body has no
+// control flow (nothing can skip a push), no loan (`&`), and no other mention of the pushed vector
+// (nothing else can move its length). The count is compared as a lower bound, so a count the facts
+// only bound from below still states a floor.
+fn pv_fill_loop<a>(c: (&a mut C), cnt_lo: u64, cnt_hi: u64, open: u64, facts: (&a mut Atom[]), post: (&a mut Atom[])) -> unit {
+    close := block_end(&mut c, open);
+    if close <= open + 1 {
+        return ();
+    }
+    mut bodies = u8[][];
+    mut at = open + 1;
+    while at < close {
+        k := kind_at(&mut c, at);
+        if (k == 124) || (k == 274) || (k == 33) || (k == 38) {
+            return ();
+        }
+        if (k == 1) & (kind_at(&mut c, at + 1) == 46) & (kind_at(&mut c, at + 2) == 1) & (kind_at(&mut c, at + 3) == 40) {
+            nm := tok_text(&mut c, at);
+            m := tok_text(&mut c, at + 2);
+            if pv_control(view(nm)) {
+                return ();
+            }
+            if same(view(m), view("push")) {
+                bodies.push(nm);
+            }
+        }
+        at += 1;
+    }
+    if (bodies.len() == 0) || (4 < bodies.len()) {
+        return ();
+    }
+    // The facts so far, as a snapshot the count reader can look at while `post` is being built.
+    mut snap = Atom[];
+    for q in facts.len() {
+        x := &facts[q];
+        snap.push(copy_atom_value(&x));
+    }
+    mut trips: i64 = 0;
+    if !pv_span_bound(&mut c, &snap, cnt_lo, cnt_hi, 0, &mut trips) {
+        return ();
+    }
+    if trips < 0 {
+        return ();
+    }
+    for b in bodies.len() {
+        nm := bodies[b].copy();
+        mut pushes = 0;
+        for j in bodies.len() {
+            if same(view(bodies[j]), view(nm)) {
+                pushes += 1;
+            }
+        }
+        if pushes != 1 {
+            return ();
+        }
+        mut seen = 0;
+        mut at2 = open + 1;
+        while at2 < close {
+            if kind_at(&mut c, at2) == 1 {
+                if same(view(tok_text(&mut c, at2)), view(nm)) {
+                    seen += 1;
+                }
+            }
+            at2 += 1;
+        }
+        if seen != 1 {
+            return ();
+        }
+        if find_local(&mut c, view(nm)) == 0 {
+            return ();
+        }
+        mut lit = u8[];
+        decimal(&mut lit, u64(trips));
+        mut len_term = copy_bytes(view(nm));
+        push_bytes(&mut len_term, view(".len"));
+        pv_add(&mut post, 1, view(lit), view(len_term), 0);
+    }
+    return ();
+}
+// The bounds check question: whether the facts at `at` prove `base[index]` in range, where the index
+// expression is `[lo, hi)`. `1` proved, `0` not.
+fn pv_in_bounds_at<a>(c: (&a mut C), base: &a [u8], at: u64, lo: u64, hi: u64) -> u64 {
+    if (base.len() == 0) || (c.body_hi == 0) || (c.validating != 0) || (lo >= hi) {
+        return 0;
+    }
+    mut facts = Atom[];
+    body := c.body_lo;
+    pv_scope(&mut c, body, at, &mut facts);
+    mut len_term = copy_bytes(view(base));
+    push_bytes(&mut len_term, view(".len"));
+    // (1) The relation the graph carries: `index` is one term plus a literal, and the term is below
+    // the length. A literal offset moves to the bound's side without wrapping, because the offset is
+    // non-negative there and `len - k` cannot be reached by a path the graph accepts.
+    mut off: i64 = 0;
+    idx := pv_index_term(&mut c, lo, hi, &mut off);
+    if (idx.len() != 0) & (0 <= off) {
+        if pv_holds(&facts, 0, view(idx), view(len_term), 0 - off) {
+            return 1;
+        }
+    }
+    // (2) The numbers the facts state: the largest the index expression can be, against the smallest
+    // the length can be.
+    mut top: i64 = 0;
+    if !pv_span_bound(&mut c, &facts, lo, hi, 1, &mut top) {
+        return 0;
+    }
+    mut floor: i64 = 0;
+    if !pv_term_bound(&facts, view(len_term), 0, &mut floor) {
+        return 0;
+    }
+    if top < floor {
+        return 1;
+    }
+    return 0;
+}
+// The index expression at `[lo, hi)` as one term plus a literal offset: `i` is (i, 0) and `j - 1` is
+// (j, -1). Empty text means the span is not a shape the graph can carry.
+fn pv_index_term<a>(c: (&a mut C), lo: u64, hi: u64, off: (&a mut i64)) -> u8[] {
+    exchange(off, 0);
+    if lo >= hi {
+        return u8[];
+    }
+    mut used = 0;
+    t := pv_term(&mut c, lo, &mut used);
+    if t.len() == 0 {
+        return u8[];
+    }
+    at := lo + used;
+    if at == hi {
+        return t;
+    }
+    sign := kind_at(&mut c, at);
+    if (sign != 43) & (sign != 45) {
+        return u8[];
+    }
+    mut u2 = 0;
+    t2 := pv_term(&mut c, at + 1, &mut u2);
+    mut n: i64 = 0;
+    if !(pv_digits(view(t2)) & pv_num(view(t2), &mut n)) {
+        return u8[];
+    }
+    if at + 1 + u2 != hi {
+        return u8[];
+    }
+    if sign == 45 {
+        n = 0 - n;
+    }
+    exchange(off, n);
+    return t;
+}
+// The name of the sequence `NAME[` indexes at `bracket`, when the token before it is a plain local
+// of a sequence, view or byte type. A field, a call result or a slice names no term the prover
+// knows, so those keep their check.
+fn index_base_name<a>(c: (&a mut C), bracket: u64) -> u8[] {
+    if bracket < 2 {
+        return u8[];
+    }
+    if kind_at(&mut c, bracket - 1) != 1 {
+        return u8[];
+    }
+    pk := kind_at(&mut c, bracket - 2);
+    if (pk == 46) || (pk == 93) || (pk == 41) {
+        return u8[];
+    }
+    name := tok_text(&mut c, bracket - 1);
+    l := find_local(&mut c, view(name));
+    if l == 0 {
+        return u8[];
+    }
+    k := ty_kind(&mut c, local_ty(&mut c, l - 1));
+    // A sequence, a byte sequence, a view, or a shared reference to one: each keeps its length at
+    // +8, and nothing a body does through a shared loan can move it.
+    if (k != 3) & (k != 4) & (k != 5) & (k != 6) & (k != 7) & (k != 27) {
+        return u8[];
+    }
+    return name;
+}
+// Whether the facts prove the `[` at `bracket` indexes its base in range: the question the accessor
+// substitution asks when the syntactic proof (proven_index) said nothing.
+fn index_proved<a>(c: (&a mut C), bracket: u64, lo: u64, hi: u64) -> bool {
+    if (c.range_facts == 0) || (c.verify_facts != 0) || (c.raw != 0) {
+        return false;
+    }
+    base := index_base_name(&mut c, bracket);
+    if base.len() == 0 {
+        return false;
+    }
+    return pv_in_bounds_at(&mut c, view(base), bracket, lo, hi) != 0;
 }
 fn ident<a>(c: (&a mut C)) -> u8[] {
     if kind(&mut c) != 1 {
@@ -29098,7 +29814,11 @@ fn element_index_ahead<a>(c: (&a mut C)) -> bool {
     return false;
 }
 fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
-    unchecked := (c.raw == 0) & proven_index(&mut c, val(value.t, value.ty));
+    // `bracket` is where the `[` is, which is what the range facts need to name the base and read
+    // the index expression. The syntactic proof (len_bound_ahead) and the fact-based one
+    // (pv_in_bounds_at) are the same question asked two ways, and a check goes when either answers.
+    bracket := c.pos;
+    mut unchecked = (c.raw == 0) & proven_index(&mut c, val(value.t, value.ty));
     advance(&mut c);
     input := value.t;
     inty := value.ty;
@@ -29124,6 +29844,9 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
         elem := ty_arg(&mut c, xty);
         if c.raw == 0 {
             require_type(&mut c, bound.ty, 0);
+        }
+        if !unchecked {
+            unchecked = index_proved(&mut c, bracket, bstart, bend);
         }
         if access == 2 {
             if (vk == 27) & (ty_mode(&mut c, xty) == 0) {
@@ -29233,6 +29956,9 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
             require_type(&mut c, bound.ty, 0);
         }
         expect(&mut c, view("]"));
+        if !unchecked {
+            unchecked = index_proved(&mut c, bracket, bstart, bend);
+        }
         mut f = "rt_atb";
         if unchecked {
             f = "rt_atbu";
@@ -31928,6 +32654,17 @@ fn statement<a>(c: (&a mut C)) -> unit {
                     if bytewise != 0 {
                         slotf = "rt_slotb";
                     }
+                    // The iterable is pinned for the whole loop and the head already tested this
+                    // counter against its length (`i < rt_len`), so the element address needs no
+                    // second test: the loop's own bounds are the proof. A byte sequence has no
+                    // unchecked address accessor, so it keeps its check.
+                    if (c.range_facts != 0) & (c.verify_facts == 0) & (bytewise == 0) {
+                        if code != 0 {
+                            slotf = "rt_slot4u";
+                        } else {
+                            slotf = "rt_slotu";
+                        }
+                    }
                     index := apply(&mut c, view(slotf), two(seq, i));
                     if code != 0 || bytewise != 0 {
                         // A tagged reference to 4-byte storage (see ref_load).
@@ -31950,6 +32687,11 @@ fn statement<a>(c: (&a mut C)) -> unit {
                     }
                     if consume != 0 {
                         f = "rt_take";
+                    }
+                    // `for b in buf` reads byte `i` of a pinned sequence, and the head tested that
+                    // counter against the length: only a byte read has an unchecked accessor.
+                    if (c.range_facts != 0) & (c.verify_facts == 0) & (bytewise != 0) & (consume == 0) {
+                        f = "rt_atbu";
                     }
                     element := invoke(&mut c, view(f), two(seq, i));
                     if consume != 0 {
@@ -36944,6 +37686,7 @@ pub fn main() -> u64 {
         f1_ord: 0,
         verify_facts: 0,
         range_facts: 0,
+        range_off: 0,
         no_sites: 0,
         f1_what: 0,
         debug_funcs: DebugFunc[],
@@ -37399,6 +38142,11 @@ pub fn main() -> u64 {
                                         } else {
                                             if same(view(option), view("--range-facts")) {
                                                 exchange(&mut c.range_facts, 1);
+                                                exchange(&mut c.range_off, 0);
+                                                offset += 1;
+                                            } else if same(view(option), view("--no-range-facts")) {
+                                                exchange(&mut c.range_off, 1);
+                                                exchange(&mut c.range_facts, 0);
                                                 offset += 1;
                                             } else if same(view(option), view("--no-error-sites")) {
                                                 // No call-site table: runtime errors print their
@@ -37454,8 +38202,11 @@ pub fn main() -> u64 {
         // them still emits its runtime check, so a wrong proof aborts instead of going unnoticed.
         exchange(&mut c.verify_facts, 2);
     }
-    if (c.range_facts != 0) && (c.backend == 0) {
-        fail_option(&mut c, view("--range-facts derives range facts in the LLVM lifter; add --backend=llvm"));
+    // The native backend reads range facts from the source at each access, so it wants them on by
+    // default: the flag is only an opt-out there (`--no-range-facts`), and `--range-facts` is the
+    // opt-in for the LLVM lifter.
+    if (c.backend == 0) & (c.range_off == 0) {
+        exchange(&mut c.range_facts, 1);
     }
     // Splitting is a build-shape change on the native assembly path; the line tables and the LLVM
     // route inspect the whole stream, and the Mach-O/PE writers rewrite it after selection.
