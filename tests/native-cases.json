@@ -7791,5 +7791,11 @@
       "leaq -4(%rbp)"
     ],
     "note": "a function that builds a `&dyn` pair is optimized: the loop accumulator is promoted into a callee-saved register (`movq %rbx,-.F...` spills it below the frame), and the unaligned-frame-operand request that used to send every pair-building function down the copy-unchanged path is gone"
+  },
+  {
+    "name": "opt2-dyn-pair-dyn-return",
+    "source": "interface Shape {\n    fn area(self: &Self) -> u64;\n}\ninterface Maker {\n    fn make(self: &Self) -> &dyn Shape;\n}\nstruct Sq {\n    side: u64,\n}\nimpl Shape for Sq {\n    fn area(self: &Self) -> u64 {\n        return self.side * self.side;\n    }\n}\nstruct Factory {\n    v: Sq,\n}\nimpl Maker for Factory {\n    fn make(self: &Self) -> &dyn Shape {\n        return &self.v;\n    }\n}\nfn main() -> u64 {\n    f := Factory { v: Sq { side: 6 } };\n    m: &dyn Maker = &f;\n    s: &dyn Shape = m.make();\n    println(\"{}\", s.area());\n    return 0;\n}\n",
+    "stdout": "36\n",
+    "note": "a `&dyn Shape` returned through a dyn-dispatched (indirect) call: the pair comes back in %rax:%rdx and the caller builds it in its own frame, so both words have to be live at the return of a function the optimizer compressed"
   }
 ]
