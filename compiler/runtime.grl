@@ -111,8 +111,7 @@ fn rt_fail(kind: u64, a: u64, b: u64) -> u64 {
     if rt_abort_begin() == 0 {
         rt_abort_park();
     }
-    site := rt_site_here(raw_state() + 3600);
-    return rt_report_die(rt_fail_body_text(kind, a, b), rt_site_text(site));
+    return rt_report_die(rt_fail_body_text(kind, a, b), rt_fail_site_full());
 }
 // An inline check in compiled code failed (the compiler rewrote its `call rt_abort`): for an index
 // check the vector is in `a` and the index in `b`.
@@ -154,6 +153,17 @@ fn rt_site_text(entry: u64) -> u64 {
     if entry != 0 {
         n = rt_fail_line(raw_load(s), 0, entry, " --> ");
     }
+    raw_store(s + 8, n);
+    return s;
+}
+// Every location line the report prints: ` --> ` for the failing statement, then one
+// ` = called from ` line per further frame that lies in a statement. The dying report uses this,
+// because the frames are still there; a value a join carries gets the innermost line only, since
+// the frames it would need are gone by the time a program reads it.
+fn rt_fail_site_full() -> u64 {
+    s := rt_new();
+    rt_reserveb(s, rt_fail_limit() + 196);
+    n := rt_fail_where(raw_load(s), 0);
     raw_store(s + 8, n);
     return s;
 }
@@ -3209,7 +3219,7 @@ fn rt_task_fail(text: u64) -> u64 {
     if rt_abort_begin() == 0 {
         rt_abort_park();
     }
-    return rt_report_die(msg, rt_site_text(rt_site_here(raw_state() + 3600)));
+    return rt_report_die(msg, rt_fail_site_full());
 }
 // A thread-per-task task owns an OS thread: the joiner reaps it once the finished word is set, so
 // the thread has exited before its stack is unmapped and the handle is released. Green tasks have
