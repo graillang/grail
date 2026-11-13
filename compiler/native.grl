@@ -22315,12 +22315,14 @@ fn print_value<a>(c: (&a mut C), input: Val, newline: u64) -> unit {
     }
     return ();
 }
-// `exchange(&mut place, value)` is two-phase like an ordinary call: when the value argument reads
-// the place's root, it is evaluated before the `&mut` is taken, so that read sees the value from
-// before the swap (`exchange(&mut p, p + 1)` stores the old `p` plus one and returns the old `p`).
-// Only a plain `&mut path` is deferred, exactly as for call arguments: the address of anything else
-// was already computed where that reference was made. A value taken from the very place that is
-// written is still refused - `exchange(&mut a, a)` names the same storage twice.
+// `exchange(&mut place, value)` is two-phase like an ordinary call: when the value argument names a
+// place the written one overlaps, it is evaluated before the `&mut` is taken, so that read sees the
+// value from before the swap (`exchange(&mut p, p + 1)` stores the old `p` plus one and returns the
+// old `p`). Only a plain `&mut path` is deferred, exactly as for call arguments: the address of
+// anything else was already computed where that reference was made. A sibling field does not make
+// the value a reader of the place (`exchange(&mut c.f, c.g)` keeps the order it is written in), so
+// every exchange that needs no temporary compiles as it did before. A value taken from the very
+// place that is written is still refused - `exchange(&mut a, a)` names the same storage twice.
 fn exchange_builtin<a>(c: (&a mut C)) -> Val {
     ranges := argument_ranges(&mut c);
     mut defer = false;
