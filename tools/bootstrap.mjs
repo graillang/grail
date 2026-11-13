@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync, renameSync, existsSync } from '
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import {
-  root, compilerSources, targets, hostTarget, targetName, buildCompiler, assemble, command, execute,
+  root, compilerSources, targets, hostTarget, targetName, bootstrapCompiler, assemble, command, execute,
   digest, compressSeed, seedDirectory, seedFile, seedManifest, seedAssemblyPath, readSeedManifest,
   compilerEnvironment,
 } from './native.mjs';
@@ -31,7 +31,7 @@ if (mode === 'update' && selected.length !== targets.length) {
   assert.deepEqual(recorded.sources, sources, 'Compiler source changes require update all to preserve shared provenance');
 }
 const staged = [];
-const compiler = buildCompiler();
+const compiler = bootstrapCompiler();
 for (const target of selected) {
   const work = join(root, '.work/bootstrap', target);
   mkdirSync(work, { recursive: true });
