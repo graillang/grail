@@ -1,4 +1,5 @@
 // Formatter and `grail` command-line tool regressions (host + cross-target formatter/builds).
+import * as fs from 'node:fs';
 import { readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync, copyFileSync, existsSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -97,6 +98,31 @@ assert.equal(badCheck.status, 1, 'grail check must fail on an error'); assert.ma
 assert.match(run(['check', 'args.grl']).stdout, /^ok/m);
 checks += 10;
 
+// 3b. `grail doc`: the standard library documents itself, the same sources produce byte-identical
+// pages, and a doc body links the declarations it names.
+{
+  const outA = join(work, 'api-a'), outB = join(work, 'api-b');
+  run(['doc', '--out', outA, join(root, 'lib')]);
+  run(['doc', '--out', outB, join(root, 'lib')]);
+  const index = JSON.parse(readFileSync(join(outA, 'index.json'), 'utf8'));
+  assert.equal(index.schema, 1, 'the index carries a schema number');
+  assert.ok(index.modules.length >= 25, `every stdlib module is documented: ${index.modules.length}`);
+  const module = name => index.modules.find(entry => entry.name === name);
+  const item = (name, kind, itemName) => module(name)?.items.find(entry => entry.kind === kind && entry.name === itemName);
+  assert.ok(module('strings')?.doc.includes('Byte-oriented text helpers'), 'a module carries the comment block below `module X;`');
+  assert.ok(item('strings', 'fn', 'find')?.doc.includes('first occurrence'), 'a function carries the block above it');
+  assert.equal(item('strings', 'fn', 'starts_with')?.doc, '', 'the module block is not also the first declaration\'s doc');
+  const fields = item('hashmap', 'struct', 'Map')?.members ?? [];
+  assert.ok(fields.some(field => field.name === 'entries' && field.type === 'Slot<K, V>[]'), `a record lists its fields: ${JSON.stringify(fields)}`);
+  assert.ok((item('io', 'enum', 'Error')?.members ?? []).some(variant => variant.name === 'Other' && variant.type === 'u64'), 'an enum lists its variants and payloads');
+  assert.ok(module('hashmap')?.items.some(entry => entry.kind === 'impl' && entry.name.startsWith('Map')), 'an implementation is listed');
+  assert.ok(fs.readdirSync(outA).filter(name => name.endsWith('.html')).length >= 25, 'one page per module');
+  for (const name of fs.readdirSync(outA)) if (name.endsWith('.html') || name === 'index.json')
+    assert.equal(fs.readFileSync(join(outA, name), 'utf8'), fs.readFileSync(join(outB, name), 'utf8'), `documentation is deterministic: ${name}`);
+  assert.match(fs.readFileSync(join(outA, 'hashmap.html'), 'utf8'), /href="hashmap\.html#struct-Entry"/, 'a doc body links a uniquely named declaration');
+  assert.match(fs.readFileSync(join(outA, 'index.html'), 'utf8'), /data-name="hashmap Map"/, 'the index carries the search data');
+  checks += 7;
+}
 // 4. Cross targets: the grail tool itself (formatter) and programs it builds.
 writeFileSync(join(work, 'hello.grl'), 'fn main() {\n    println(42);\n}\n');
 for (const target of ['x86_64', 'aarch64', 'riscv64']) {

@@ -2,6 +2,7 @@ module cli;
 use host;
 use fmt;
 use explain;
+use docgen;
 
 // The `grail` command-line tool. The same binary is the compiler: subcommands drive it by
 // re-invoking itself (`grail [--target T] OUT.s ENTRY.grl MODULE.grl...`), then assemble and link.
@@ -4080,6 +4081,64 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
     return status;
 }
 
+// `grail doc [--out DIR] [FILES or DIRS]`: the reference documentation of a source tree, as one HTML
+// page per module plus a JSON index (compiler/docgen.grl). The default is the standard library into
+// `docs/api`.
+fn doc_usage() -> unit {
+    say(view("usage: grail doc [--out DIR] [FILES or DIRS]   (default: docs/api from lib/)"));
+    say(view("       the documentation of a declaration is the // comment block directly above it"));
+}
+fn put_label<a>(out: (&a mut u8[]), text: &a [u8]) -> unit {
+    for i in text.len() {
+        out.push(text[i]);
+    }
+    return ();
+}
+fn doc_command<a>(args: (&a u8[][])) -> u64 {
+    mut dir = copy(view("docs/api"));
+    mut paths = u8[][];
+    mut i: u64 = 0;
+    while i < args.len() {
+        a := item(&args, i);
+        if (eq(view(a), view("--out"))) & (i + 1 < args.len()) {
+            i += 1;
+            dir = item(&args, i);
+        } else if starts(view(a), view("--out=")) {
+            dir = tail_from(view(a), 6);
+        } else if starts(view(a), view("--")) {
+            doc_usage();
+            return 1;
+        } else {
+            paths.push(a);
+        }
+        i += 1;
+    }
+    if paths.len() == 0 {
+        paths.push(copy(view("lib")));
+    }
+    mut files = u8[][];
+    for i in paths.len() {
+        x := item(&paths, i);
+        if ends(view(x), view(".grl")) {
+            files.push(x);
+        } else {
+            collect(view(x), &mut files);
+        }
+    }
+    if files.len() == 0 {
+        say(view("grail doc: no .grl sources found in the paths given"));
+        return 1;
+    }
+    // The sources the tree documents, named in the index: the paths as given, one line.
+    mut label = u8[];
+    for i in paths.len() {
+        if 0 < i {
+            label.push(32);
+        }
+        put_label(&mut label, view(item(&paths, i)));
+    }
+    return docgen::write(&files, view(dir), view(label));
+}
 fn help() {
     say(view("grail - the Grail compiler and project tool\n"));
     say(view("usage:"));
@@ -4091,6 +4150,7 @@ fn help() {
     say(view("  grail cache prune [--keep N]       drop cache entries no build used in the last N (10)"));
     say(view("  grail cache clear                  empty the build cache"));
     say(view("  grail explain CODE                 what an error code means (error[E0004])"));
+    say(view("  grail doc [--out DIR] [FILES|DIRS] reference documentation: HTML per module + index.json"));
     say(view("  grail profile [--rate N] [--out FILE] -- PROGRAM [ARGS]   sampling profile"));
     say(view("  grail run [FILE.grl] [-- ARGS...]"));
     say(view("  grail test [FILES or DIRS] [--filter TEXT] [--list] [--shard i/n] [--jobs N] [--fail-fast]"));
@@ -4116,6 +4176,7 @@ pub fn is_command<a>(name: &a [u8]) -> bool {
         || eq(view(name), view("profile"))
         || eq(view(name), view("cache"))
         || eq(view(name), view("explain"))
+        || eq(view(name), view("doc"))
         || eq(view(name), view("install"))
         || eq(view(name), view("help"))
         || eq(view(name), view("--help"))
@@ -4174,6 +4235,9 @@ pub fn run() -> u64 {
         }
         host::print(view(text));
         return 0;
+    }
+    if eq(view(name), view("doc")) {
+        return doc_command(&args);
     }
     if eq(view(name), view("profile")) {
         return profile_command(&args);
