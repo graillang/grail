@@ -30,6 +30,40 @@
 
 ## Unreleased
 
+- Fixed: a duplicate declaration no longer compiles. Two `struct`/`enum` declarations under one
+  name in a module, a repeated field in a record, a repeated variant in an enum, a second
+  module-level `const`, and a `type` alias colliding with another alias or with a struct were all
+  accepted, and the second one silently won: a duplicate field was laid out behind the first and
+  could never be read through a `.name`. All of them are refused now, by a diagnostic that names
+  where the first declaration is - `a struct named `P` is already declared at input.grl:1:8: rename
+  one, or remove it` - and, for a repeated member, `` `P` has two fields named `x`: rename or remove
+  the second, it can never be read`` with the caret on the second and a label on the first. `union`
+  members are not declarations in Grail (`A | B` is a type) and were already refused; a `handle` and
+  an `extern "C" record` share the type check. The first declaration's position is carried as
+  `file:line:column` text because it can be in another file of the same module, where a token index
+  means nothing. Pinned by `diagx-dup-struct-field`, `diagx-dup-enum-variant`,
+  `diagx-dup-type-name`, `diagx-dup-type-across-files`, `diagx-dup-const`, `diagx-dup-alias`,
+  `diagx-dup-alias-for-struct`, and `diagx-decl-distinct-members` as the guard that distinct names
+  still compile.
+- Fixed: the lexer no longer aborts on source it cannot scan. Six `assert`s on user input -
+  `'ab'`, a character literal that never closes, an unterminated string, a raw control byte in a
+  string - ended the compiler with `error: assertion failed` and a compiler source line
+  (`compiler/lexer.grl:169`), which is a compiler bug by definition, not a refusal. The scanner now
+  emits a token for what it could not finish (998 an ill-formed character literal, 996 an unclosed
+  string, 995 a string holding a raw control byte) and the front end renders it where every other
+  diagnostic is rendered: ``a character literal holds exactly one character: `'ab'` has more`` with a
+  help line naming `'a'` and `"ab"`, `unclosed character literal: add the closing `'``, `unclosed
+  string literal: add the closing `"``, and `a string literal cannot hold a raw tab: write the escape
+  `\t` instead`. A literal newline inside a string is reported as the unclosed literal it means. The
+  lexer module now has no `assert` at all. Pinned by `diagx-char-literal-too-long`,
+  `diagx-char-literal-unclosed`, `diagx-string-literal-unclosed`,
+  `diagx-string-raw-control-byte`, and `diagx-literal-escapes-ok` (escapes, an escaped backslash and
+  a non-ASCII character still lex).
+- Docs: docs/testing.md records what `--jobs N` changes about a case's working directory - it runs in
+  `.work/native-tests/<target>/stripe-<i>-<n>/<case>`, one level deeper - and therefore why the five
+  `lib-*` corpus cases that pass a relative `../../../../tests/lib/<name>` argument report `cannot
+  read a corpus file` under `--jobs` and pass without it. A full run in jobs mode is green at
+  `failed 5` with exactly those names.
 - Diagnostics: the loop-backedge refusal names the value it refuses. `while i < 2 { consume(s) }`
   with an owned `s` printed `error: loop backedge consumes entry storage` under the closing brace of
   the *enclosing function* and said nothing about what was consumed or what to do. It now reads

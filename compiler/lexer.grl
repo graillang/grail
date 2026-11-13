@@ -104,7 +104,9 @@ fn pair_kind(c: u64, d: u64) -> u64 {
 // backslash protects the following byte, including a quote or backslash.
 // Escape validity and decoded UTF-8 validity belong to the literal parser.
 // Non-ASCII bytes are accepted inside strings/comments, not identifiers.
-// Invalid characters, raw string control bytes and unclosed strings abort.
+// A literal the scanner cannot finish is a token the compiler reports: 998 an ill-formed character
+// literal, 996 an unclosed string, 995 a string holding a raw control byte. Nothing in here aborts
+// on user input - an assert on source text is a compiler bug, not a refusal (docs/diagnostics.md).
 pub fn tokenize<a>(source: &a [u8]) -> Token<a>[] {
     mut tokens = Token<a>[];
     size := source.len();
@@ -139,34 +141,64 @@ pub fn tokenize<a>(source: &a [u8]) -> Token<a>[] {
         if c == 39 {
             kind = 4;
             i = i + 1;
-            assert(i < size);
-            if source[i] == 92 {
-                i = i + 1;
-                assert(i < size);
-                if source[i] == 117 {
-                    while i < size {
-                        if source[i] == 125 {
-                            break;
+            // 0 = nothing to scan, 1 = one character and a closing quote, 2 = more than one
+            // character before the quote. Only 1 is a character literal.
+            mut body = 0;
+            if i < size {
+                body = 1;
+                if source[i] == 92 {
+                    i = i + 1;
+                    if i == size {
+                        body = 0;
+                    } else {
+                        if source[i] == 117 {
+                            while i < size {
+                                if source[i] == 125 {
+                                    break;
+                                }
+                                i = i + 1;
+                            }
                         }
                         i = i + 1;
                     }
-                }
-                i = i + 1;
-            } else {
-                lead := source[i];
-                i = i + 1;
-                if 191 < lead {
-                    while i < size {
-                        if (source[i] & 192) != 128 {
-                            break;
+                } else {
+                    lead := source[i];
+                    i = i + 1;
+                    if 191 < lead {
+                        while i < size {
+                            if (source[i] & 192) != 128 {
+                                break;
+                            }
+                            i = i + 1;
                         }
-                        i = i + 1;
                     }
                 }
             }
-            assert(i < size);
-            assert(source[i] == 39);
-            i = i + 1;
+            mut form = 0;
+            if (body != 0) & (i < size) {
+                if source[i] == 39 {
+                    i = i + 1;
+                    form = 1;
+                } else {
+                    // `'ab'`: stop at the closing quote on this line so the span the compiler quotes
+                    // is the literal, not the rest of the file.
+                    mut stop = i;
+                    while (stop < size) & (source[stop] != 10) {
+                        if source[stop] == 39 {
+                            i = stop + 1;
+                            form = 2;
+                            break;
+                        }
+                        stop = stop + 1;
+                    }
+                }
+            }
+            if form != 1 {
+                kind = 998;
+                if form == 0 {
+                    i = size;
+                }
+            }
         } else {
             if c == 34 {
                 kind = 3;
@@ -179,7 +211,19 @@ pub fn tokenize<a>(source: &a [u8]) -> Token<a>[] {
                         closed = 1;
                         break;
                     }
-                    assert(!(b < 32));
+                    if b < 32 {
+                        // A literal newline is the mistake a string with no closing quote makes,
+                        // so it is reported as unclosed; any other control byte is reported as the
+                        // byte it is. Either way it is a token the compiler reports, not an abort.
+                        if b == 10 {
+                            kind = 996;
+                        } else {
+                            kind = 995;
+                            i = i + 1;
+                        }
+                        closed = 1;
+                        break;
+                    }
                     if b == 92 {
                         i = i + 1;
                         if i == size {
@@ -188,7 +232,10 @@ pub fn tokenize<a>(source: &a [u8]) -> Token<a>[] {
                     }
                     i = i + 1;
                 }
-                assert(closed);
+                if closed == 0 {
+                    kind = 996;
+                    i = size;
+                }
             } else {
                 if letter(c) {
                     kind = 1;

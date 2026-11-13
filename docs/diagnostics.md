@@ -33,6 +33,15 @@ count in the summary is the number of distinct errors, not of replayed bodies. A
 reported an error in is skipped whether it is checked directly or replayed, so the next run moves on
 to the next error instead of spending the 20-error budget on the same one (`diag-dedupe-*`).
 
+## Source the scanner cannot read
+
+A malformed literal is an error like any other, not a crash: `'ab'`, a character literal that never
+closes, an unterminated string, and a raw control byte inside a string are all reported with the
+usual excerpt (`diagx-char-literal-too-long`, `diagx-string-raw-control-byte`). The scanner
+(`compiler/lexer.grl`) has no diagnostic channel, so it hands the front end a token for what it could
+not finish and the front end renders it. Nothing in the scanner asserts on source text: an assert on
+input is a compiler bug, not a refusal, and it prints a compiler source line where a refusal belongs.
+
 ## Error codes
 
 The diagnostics a program most often hits carry a code, and `grail explain CODE` prints what the

@@ -70,6 +70,8 @@ struct Ty {
 struct Decl {
     module: u8[],
     name: u8[],
+    // The declaration's source position, for a duplicate that has to name the first one.
+    declared_at: u8[],
     // 0 when declared without `pub`: private to `module` (separate-compilation.md, "Visibility").
     public: u64,
     is_enum: u64,
@@ -102,6 +104,9 @@ struct Import {
 struct Alias {
     module: u8[],
     name: u8[],
+    // "path.grl:12:5" of the declaration: a duplicate is refused by naming where the first one is,
+    // and a token index from another file is not an index into this one (native.grl, position_text).
+    declared_at: u8[],
     // 0 when declared without `pub`: private to `module` (separate-compilation.md, "Visibility").
     public: u64,
     ty: u64
@@ -247,6 +252,8 @@ struct ImplParams {
 struct Constant {
     module: u8[],
     name: u8[],
+    // The declaration's source position, for a duplicate that has to name the first one.
+    declared_at: u8[],
     // 0 when declared without `pub`: private to `module` (separate-compilation.md, "Visibility").
     public: u64,
     ty: u64,
@@ -5939,6 +5946,96 @@ fn diag_help<a, b>(c: (&a mut C), text: &b [u8]) -> unit {
     c.diag_help.push(text.copy());
     return ();
 }
+// "path.grl:12:5": where a declaration starts, formatted once when it is declared. A duplicate is
+// refused by naming the first declaration, and that one may be in another file - whose token
+// indexes are not indexes into the current file's stream, so the position is kept as text.
+fn position_text<a>(c: (&a mut C), at: u64) -> u8[] {
+    file := c.file;
+    mut out = file_path(&mut c, file);
+    mut tok = at;
+    if c.toks.len() <= tok {
+        tok = 0;
+    }
+    start := c.toks[tok].start;
+    pos := diag_pos(&c.src, start);
+    out.push(58);
+    push_bytes(&mut out, view(decimal_bytes(pos.line)));
+    out.push(58);
+    push_bytes(&mut out, view(decimal_bytes(pos.column)));
+    return out;
+}
+fn find_constant<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> u64 {
+    for i in c.constants.len() {
+        k := &c.constants[i];
+        if same(view(k.module), view(m)) & same(view(k.name), view(n)) {
+            return i + 1;
+        }
+    }
+    return 0;
+}
+// Where `m::name` is already declared as a type, an alias or a constant, or "" when nothing is.
+fn first_declared_at<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> u8[] {
+    d := find_decl(&mut c, view(m), view(n));
+    if d != 0 {
+        return c.decls[d - 1].declared_at.copy();
+    }
+    a := find_alias(&mut c, view(m), view(n));
+    if a != 0 {
+        return c.aliases[a - 1].declared_at.copy();
+    }
+    k := find_constant(&mut c, view(m), view(n));
+    if k != 0 {
+        return c.constants[k - 1].declared_at.copy();
+    }
+    return u8[];
+}
+// "a struct named `P` is already declared at input.grl:1:8: rename one, or remove it". Two
+// declarations under one name in one module used to be accepted, and the second silently won.
+fn duplicate_declared<a, b, d, e>(c: (&a mut C), kind: &b [u8], name: &d [u8], m: &e [u8], at: u64) -> unit {
+    first := first_declared_at(&mut c, m, name);
+    mut msg = copy_bytes(view("a "));
+    push_bytes(&mut msg, view(kind));
+    push_bytes(&mut msg, view(" named `"));
+    push_bytes(&mut msg, view(name));
+    push_bytes(&mut msg, view("` is already declared"));
+    if first.len() != 0 {
+        push_bytes(&mut msg, view(" at "));
+        push_bytes(&mut msg, view(first));
+    }
+    push_bytes(&mut msg, view(": rename one, or remove it"));
+    exchange(&mut c.pos, at);
+    fail(&mut c, view(msg));
+}
+// A second type, handle, alias or constant under a name this module already uses for a type.
+fn refuse_duplicate_type<a, b, d, e>(c: (&a mut C), kind: &b [u8], m: &e [u8], name: &d [u8], at: u64) -> unit {
+    if (find_decl(&mut c, view(m), view(name)) != 0) || (find_alias(&mut c, view(m), view(name)) != 0) {
+        duplicate_declared(&mut c, view(kind), view(name), view(m), at);
+    }
+    return ();
+}
+fn refuse_duplicate_constant<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8], at: u64) -> unit {
+    if find_constant(&mut c, view(m), view(name)) != 0 {
+        duplicate_declared(&mut c, view("constant"), view(name), view(m), at);
+    }
+    return ();
+}
+// Two fields (or, for an enum, two variants) with one name: the second is unreachable through a
+// `.name`, so it is refused rather than laid out behind the first.
+fn duplicate_field_fail<a, b, d>(c: (&a mut C), owner: &b [u8], field: &d [u8], is_enum: u64, at: u64) -> unit {
+    mut msg = copy_bytes(view("`"));
+    push_bytes(&mut msg, view(owner));
+    push_bytes(&mut msg, view("` has two "));
+    if is_enum != 0 {
+        push_bytes(&mut msg, view("variants"));
+    } else {
+        push_bytes(&mut msg, view("fields"));
+    }
+    push_bytes(&mut msg, view(" named `"));
+    push_bytes(&mut msg, view(field));
+    push_bytes(&mut msg, view("`: rename or remove the second, it can never be read"));
+    exchange(&mut c.pos, at);
+    fail(&mut c, view(msg));
+}
 // Line (1-based), column (1-based) and the bounds of the line holding byte `at` of `src`.
 struct DiagPos {
     line: u64,
@@ -8172,6 +8269,55 @@ fn file_path<a>(c: (&a mut C), index: u64) -> u8[] {
     push_bytes(&mut out, view(host::arg(index + c.arg_offset)));
     return out;
 }
+// A literal the lexer could not finish arrives as a token (kind 998 a character literal, 996 an
+// unclosed string, 995 a string holding a raw control byte) because the lexer has no diagnostic
+// channel; this is where those tokens become errors. Before this, the lexer aborted on them and the
+// reader saw "assertion failed" and a compiler source line.
+fn fail_literal<a>(c: (&a mut C), at: u64, kind: u64) -> unit {
+    exchange(&mut c.pos, at);
+    text := tok_text(&mut c, at);
+    if kind == 998 {
+        if 2 <= text.len() {
+            if text[text.len() - 1] == 39 {
+                mut msg = copy_bytes(view("a character literal holds exactly one character: `"));
+                push_bytes(&mut msg, view(text));
+                push_bytes(&mut msg, view("` has more"));
+                diag_help(&mut c, view("write the one character (`'a'`), or a string (`\"ab\"`) when the text is longer"));
+                fail(&mut c, view(msg));
+            }
+        }
+        fail(&mut c, view("unclosed character literal: add the closing `'`"));
+    }
+    if kind == 996 {
+        fail(&mut c, view("unclosed string literal: add the closing `\"`"));
+    }
+    // 995: a raw control byte inside a string literal.
+    mut seen = 0;
+    for i in text.len() {
+        if text[i] < 32 {
+            seen = text[i];
+        }
+    }
+    mut named = copy_bytes(view("a raw control byte"));
+    mut escape = copy_bytes(view("a named escape"));
+    if seen == 10 {
+        named = copy_bytes(view("a raw line break"));
+        escape = copy_bytes(view("`\\n`"));
+    } else if seen == 9 {
+        named = copy_bytes(view("a raw tab"));
+        escape = copy_bytes(view("`\\t`"));
+    } else if seen == 0 {
+        named = copy_bytes(view("a raw NUL byte"));
+        escape = copy_bytes(view("`\\0`"));
+    }
+    mut msg = copy_bytes(view("a string literal cannot hold "));
+    push_bytes(&mut msg, view(named));
+    push_bytes(&mut msg, view(": write the escape "));
+    push_bytes(&mut msg, view(escape));
+    push_bytes(&mut msg, view(" instead"));
+    fail(&mut c, view(msg));
+    return ();
+}
 fn load_file<a>(c: (&a mut C), index: u64) -> unit {
     // A generic body an interface carried is a file like any other from here on: it has its own
     // token stream and its own diagnostics, it just did not come from the command line.
@@ -8203,9 +8349,13 @@ fn load_file<a>(c: (&a mut C), index: u64) -> unit {
     exchange(&mut c.src, src);
     exchange(&mut c.pos, 0);
     for i in c.toks.len() {
-        if c.toks[i].kind == 999 {
+        k := c.toks[i].kind;
+        if (k == 999) || (k == 995) || (k == 996) || (k == 998) {
             exchange(&mut c.pos, i);
             exchange(&mut c.file, index);
+            if k != 999 {
+                fail_literal(&mut c, i, k);
+            }
             if c.src[c.toks[i].start] == 35 {
                 fail(&mut c, view("`#` is not Grail syntax: comments start with //, and compile-time forms with @"));
             }
@@ -9944,7 +10094,7 @@ fn bind_types<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> u64 {
                 left := base_type(&mut c, args[i]);
                 right := base_type(&mut c, args[j]);
                 if same_type(&mut c, left, right) != 0 {
-                    fail(&mut c, view("duplicate union member"));
+                    fail_duplicate_member(&mut c, left);
                 }
             }
         }
@@ -10461,7 +10611,7 @@ fn tuple_decl<a>(c: (&a mut C), count: u64) -> u64 {
             Decl {
                 public: 1,
                 module: copy_bytes(view(".tuple")),
-                name: name,
+                name: name, declared_at: u8[],
                 is_enum: 0,
                 opaque: 0,
                 transfer: 0,
@@ -10759,11 +10909,20 @@ fn append_ordinary<a>(c: (&a mut C), ty: u64, args: (&a mut u64[])) -> unit {
     }
     return ();
 }
+// A union (`A | B`) naming one type twice: no value could be told apart, so one of them has to be
+// wrapped. "duplicate union member" named neither the type nor the way out.
+fn fail_duplicate_member<a>(c: (&a mut C), ty: u64) -> unit {
+    named := source_type_name(&mut c, ty);
+    mut msg = copy_bytes(view("the type `"));
+    push_bytes(&mut msg, view(named));
+    push_bytes(&mut msg, view("` appears twice in this union, so no value could be told apart: wrap one of them in a struct"));
+    fail(&mut c, view(msg));
+}
 fn check_distinct_members<a>(c: (&a mut C), args: (&a u64[]), success: u64) -> unit {
     for i in args.len() {
         for j in i {
             if same_type(&mut c, args[i], args[j]) != 0 {
-                fail(&mut c, view("duplicate union member"));
+                fail_duplicate_member(&mut c, args[i]);
             }
         }
         if (success != 0) & (i < success) {
@@ -10806,7 +10965,7 @@ fn make_union<a>(c: (&a mut C), args: u64[], success: u64, module: u8[], prefix:
                 Decl {
                     public: item_public_1,
                     module: module,
-                    name: name,
+                    name: name, declared_at: u8[],
                     is_enum: 1,
                     opaque: 0,
                     transfer: 0,
@@ -11607,7 +11766,9 @@ fn body_label<a, b, d, e>(c: (&a C), m: &b [u8], n: &d [u8], symbol: &e [u8], ex
 }
 fn alias_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     expect(&mut c, view("type"));
+    mut at_name = c.pos;
     name := ident(&mut c);
+    declared := position_text(&mut c, at_name);
     module := module_copy(&mut c);
     expect(&mut c, view("="));
     if pass == 1 {
@@ -11615,11 +11776,9 @@ fn alias_declaration<a>(c: (&a mut C), pass: u64) -> unit {
             advance(&mut c);
         }
         expect(&mut c, view(";"));
-        if find_alias(&mut c, view(module), view(name)) != 0 {
-            fail(&mut c, view("duplicate type alias"));
-        }
+        refuse_duplicate_type(&mut c, view("type alias"), view(module), view(name), at_name);
         alias_public := c.decl_public;
-        c.aliases.push(Alias { module: module, name: name, public: alias_public, ty: NO_TYPE });
+        c.aliases.push(Alias { module: module, name: name, declared_at: declared,  public: alias_public, ty: NO_TYPE });
         return ();
     }
     if pass == 3 {
@@ -11643,7 +11802,9 @@ fn alias_declaration<a>(c: (&a mut C), pass: u64) -> unit {
 // pass it, but cannot construct, size, inspect or drop one: it is a foreign token.
 fn handle_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     expect(&mut c, view("handle"));
+    mut at_name = c.pos;
     name := ident(&mut c);
+    declared := position_text(&mut c, at_name);
     exchange(&mut c.parsing_input, 0);
     exchange(&mut c.output_region, 0);
     // The audited foreign-resource contract, stated where the handle is declared:
@@ -11683,9 +11844,7 @@ fn handle_declaration<a>(c: (&a mut C), pass: u64) -> unit {
         return ();
     }
     m := module_copy(&mut c);
-    if (find_decl(&mut c, view(m), view(name)) != 0) || (find_alias(&mut c, view(m), view(name)) != 0) {
-        fail(&mut c, view("duplicate type"));
-    }
+    refuse_duplicate_type(&mut c, view("handle"), view(m), view(name), at_name);
     item_public_2 := c.decl_public;
     c
         .decls
@@ -11693,7 +11852,7 @@ fn handle_declaration<a>(c: (&a mut C), pass: u64) -> unit {
             Decl {
                 public: item_public_2,
                 module: m,
-                name: name,
+                name: name, declared_at: declared,
                 is_enum: 0,
                 opaque: 1,
                 transfer: transfer,
@@ -11714,7 +11873,9 @@ fn handle_declaration<a>(c: (&a mut C), pass: u64) -> unit {
 fn decl<a>(c: (&a mut C), pass: u64) -> unit {
     is_enum := u64(is(&mut c, view("enum")));
     advance(&mut c);
+    mut at_name = c.pos;
     name := ident(&mut c);
+    declared := position_text(&mut c, at_name);
     lifetime_parameters(&mut c);
     // `unsafe struct C<T>: transferable, shareable`: an audited capability contract for a record
     // that holds raw pointers or foreign state on purpose. The hook is the `unsafe` keyword, so a
@@ -11762,6 +11923,11 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
     if pass != 2 {
         if pass == 1 {
             m := module_copy(&mut c);
+            mut kind = copy_bytes(view("struct"));
+            if is_enum != 0 {
+                kind = copy_bytes(view("enum"));
+            }
+            refuse_duplicate_type(&mut c, view(kind), view(m), view(name), at_name);
             item_public_3 := c.decl_public;
             c
                 .decls
@@ -11769,7 +11935,7 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
                     Decl {
                         public: item_public_3,
                         module: m,
-                        name: name,
+                        name: name, declared_at: declared,
                         is_enum: is_enum,
                         opaque: 0,
                         transfer: transfer,
@@ -11793,10 +11959,14 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
     m := module_copy(&mut c);
     d := find_decl(&mut c, view(m), view(name));
     mut pending = Field[];
+    // Where each field was declared, so a duplicate can label the first one. Enums share this loop:
+    // their variants are fields, laid out in the same flat array.
+    mut spots = u64[];
     mut count = 0;
     expect(&mut c, view("{"));
     if !eat(&mut c, view("}")) {
         while true {
+            mut at_field = c.pos;
             f := ident(&mut c);
             mut ty = 1;
             mut fp = no_pred();
@@ -11814,6 +11984,17 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
                     fp = pred_scan(&mut c, view(","), view("}"));
                 }
             }
+            mut spot = 0;
+            for i in pending.len() {
+                if same(view(pending[i].name), view(f)) {
+                    spot = i + 1;
+                }
+            }
+            if spot != 0 {
+                diag_label(&mut c, spots[spot - 1], view("the first one is here"));
+                duplicate_field_fail(&mut c, view(name), view(f), is_enum, at_field);
+            }
+            spots.push(at_field);
             pending.push(Field { name: f, ty: ty, pred: fp });
             count = count + 1;
             if eat(&mut c, view("}")) {
@@ -11834,12 +12015,13 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
     while reverse.len() != 0 {
         c.fields.push(reverse.pop());
     }
+    carried := c.decls[d - 1].declared_at.copy();
     exchange(
         &mut c.decls[d - 1],
         Decl {
             public: c.decl_public,
             module: m,
-            name: name,
+            name: name, declared_at: carried,
             is_enum: is_enum,
             opaque: 0,
             transfer: transfer,
@@ -12872,12 +13054,15 @@ fn ffi_field<a>(c: (&a mut C), ty: u64) -> unit {
 }
 fn ffi_record<a>(c: (&a mut C), pass: u64) -> unit {
     expect(&mut c, view("record"));
+    mut at_name = c.pos;
     name := ident(&mut c);
+    declared := position_text(&mut c, at_name);
     exchange(&mut c.parsing_input, 0);
     exchange(&mut c.output_region, 0);
     if pass != 2 {
         if pass == 1 {
             m := module_copy(&mut c);
+            refuse_duplicate_type(&mut c, view("extern record"), view(m), view(name), at_name);
             item_public_5 := c.decl_public;
             c
                 .decls
@@ -12885,7 +13070,7 @@ fn ffi_record<a>(c: (&a mut C), pass: u64) -> unit {
                     Decl {
                         public: item_public_5,
                         module: m,
-                        name: name,
+                        name: name, declared_at: declared,
                         is_enum: 0,
                         opaque: 0,
                         transfer: 0,
@@ -12946,12 +13131,13 @@ fn ffi_record<a>(c: (&a mut C), pass: u64) -> unit {
     while reverse.len() != 0 {
         c.fields.push(reverse.pop());
     }
+    carried := c.decls[d - 1].declared_at.copy();
     exchange(
         &mut c.decls[d - 1],
         Decl {
             public: c.decl_public,
             module: m,
-            name: name,
+            name: name, declared_at: carried,
             is_enum: 0,
             opaque: 0,
             transfer: 0,
@@ -15717,7 +15903,9 @@ fn ct_loop_field_name<a>(c: (&a mut C), b: u64) -> u8[] {
 // `NAME := expr;` at module level: a compile-time constant with its type inferred - u64 for an
 // integer, bool for a bool, string for a text literal. The typed spelling is `const NAME: T = expr;`.
 fn module_binding<a>(c: (&a mut C), pass: u64) -> unit {
+    mut at_name = c.pos;
     name := ident(&mut c);
+    declared := position_text(&mut c, at_name);
     advance(&mut c);
     if pass != 1 {
         while !is(&mut c, view(";")) {
@@ -15727,12 +15915,7 @@ fn module_binding<a>(c: (&a mut C), pass: u64) -> unit {
         return ();
     }
     module := module_copy(&mut c);
-    for i in c.constants.len() {
-        k := &c.constants[i];
-        if same(view(k.module), view(module)) & same(view(k.name), view(name)) {
-            fail(&mut c, view("duplicate constant"));
-        }
-    }
+    refuse_duplicate_constant(&mut c, view(module), view(name), at_name);
     mut ty = 0;
     mut value = 0;
     mut text = u8[];
@@ -15742,7 +15925,7 @@ fn module_binding<a>(c: (&a mut C), pass: u64) -> unit {
         text = ct_take_call_text(&mut c);
         expect(&mut c, view(";"));
         constant_public := c.decl_public;
-        c.constants.push(Constant { module: module, name: name, public: constant_public, ty: CT_PENDING, value: 0, text: text });
+        c.constants.push(Constant { module: module, name: name, declared_at: declared,  public: constant_public, ty: CT_PENDING, value: 0, text: text });
         return ();
     }
     if kind(&mut c) == 3 {
@@ -15764,12 +15947,14 @@ fn module_binding<a>(c: (&a mut C), pass: u64) -> unit {
     }
     expect(&mut c, view(";"));
     constant_public := c.decl_public;
-    c.constants.push(Constant { module: module, name: name, public: constant_public, ty: ty, value: value, text: text });
+    c.constants.push(Constant { module: module, name: name, declared_at: declared,  public: constant_public, ty: ty, value: value, text: text });
     return ();
 }
 fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     expect(&mut c, view("const"));
+    mut at_name = c.pos;
     name := ident(&mut c);
+    declared := position_text(&mut c, at_name);
     expect(&mut c, view(":"));
     // Registered in the first pass, so a module-level `@if` and every later declaration can fold
     // against it.
@@ -15783,12 +15968,7 @@ fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     ty := parse_type(&mut c);
     expect(&mut c, view("="));
     module := module_copy(&mut c);
-    for i in c.constants.len() {
-        k := &c.constants[i];
-        if same(view(k.module), view(module)) & same(view(k.name), view(name)) {
-            fail(&mut c, view("duplicate constant"));
-        }
-    }
+    refuse_duplicate_constant(&mut c, view(module), view(name), at_name);
     negative := u64(eat(&mut c, view("-")));
     here := c.pos;
     k := kind(&mut c);
@@ -15810,7 +15990,7 @@ fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
                 Constant {
                     public: item_public_10,
                     module: module,
-                    name: name,
+                    name: name, declared_at: declared, 
                     ty: ty,
                     value: bits ^ 9223372036854775808,
                     text: text,
@@ -15887,7 +16067,7 @@ fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     }
     expect(&mut c, view(";"));
     constant_public := c.decl_public;
-    c.constants.push(Constant { module: module, name: name, public: constant_public, ty: ty, value: value, text: text });
+    c.constants.push(Constant { module: module, name: name, declared_at: declared,  public: constant_public, ty: ty, value: value, text: text });
     return ();
 }
 fn constant_value<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> Val {
@@ -20656,7 +20836,7 @@ fn fn_value_decl<a>(c: (&a mut C)) -> u64 {
             Decl {
                 public: item_public_11,
                 module: copy_bytes(view(".closure")),
-                name: copy_bytes(view("FnValue")),
+                name: copy_bytes(view("FnValue")), declared_at: u8[],
                 is_enum: 0,
                 opaque: 0,
                 transfer: 0,
@@ -24009,7 +24189,7 @@ fn task_failure_type<a>(c: (&a mut C)) -> u64 {
                 Decl {
                     public: item_public_1,
                     module: copy_bytes(view(".outcome")),
-                    name: copy_bytes(view("Failure")),
+                    name: copy_bytes(view("Failure")), declared_at: u8[],
                     is_enum: 0,
                     opaque: 0,
                     transfer: 0,
@@ -25958,7 +26138,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
             Decl {
                 public: item_public_12,
                 module: copy_bytes(view(".closure")),
-                name: decl_name,
+                name: decl_name, declared_at: u8[],
                 is_enum: 0,
                 opaque: 0,
                 transfer: 0,
@@ -37236,7 +37416,7 @@ fn iface_register<a, b, d>(c: (&a mut C), line: &b [u8], path: &d [u8], n: u64, 
                 Decl {
                     public: item_public_14,
                     module: ip_ref_module(&ref),
-                    name: ip_ref_name(&ref),
+                    name: ip_ref_name(&ref), declared_at: u8[],
                     is_enum: u64(same(view(kind), view("enum"))),
                     opaque: u64(same(view(kind), view("handle"))),
                     transfer: transfer[0],
@@ -37267,7 +37447,7 @@ fn iface_register<a, b, d>(c: (&a mut C), line: &b [u8], path: &d [u8], n: u64, 
                 Decl {
                     public: item_public_15,
                     module: copy_bytes(view(".closure")),
-                    name: name,
+                    name: name, declared_at: u8[],
                     is_enum: 0,
                     opaque: 0,
                     transfer: 0,
@@ -37295,7 +37475,7 @@ fn iface_register<a, b, d>(c: (&a mut C), line: &b [u8], path: &d [u8], n: u64, 
             iface_fail(&p, view("declares a type alias twice"));
         }
         alias_public := c.decl_public;
-        c.aliases.push(Alias { module: m, name: name, public: alias_public, ty: NO_TYPE });
+        c.aliases.push(Alias { module: m, name: name, declared_at: u8[],  public: alias_public, ty: NO_TYPE });
         return ();
     }
     if same(view(word), view("interface")) {
@@ -37492,7 +37672,7 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
                 Constant {
                     public: item_public_16,
                     module: ip_ref_module(&ref),
-                    name: ip_ref_name(&ref),
+                    name: ip_ref_name(&ref), declared_at: u8[], 
                     ty: ty,
                     value: value,
                     text: text,

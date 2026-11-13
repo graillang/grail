@@ -2052,7 +2052,7 @@
     "name": "const-duplicate",
     "source": "const X: u64 = 1;const X: u64 = 2;fn main(){}",
     "reject": true,
-    "diagnostic": "duplicate constant"
+    "diagnostic": "a constant named `X` is already declared at"
   },
   {
     "name": "const-text-type",
@@ -3257,19 +3257,19 @@
     "name": "union-generic-duplicate-conversion",
     "source": "module duplicate_generic;\nfn show<T>(x:T | string) { match x { T(value)=>{println(\"value\");}, string(error)=>{println(error);} } }\nfn main(){show<string>(\"hello\".text());}\n",
     "reject": true,
-    "diagnostic": "duplicate union member"
+    "diagnostic": "appears twice in this union"
   },
   {
     "name": "union-generic-duplicate-signature",
     "source": "module duplicate_signature;\nfn id<T>(x:T | string)->T | string { return x; }\nfn main(){ f := id<string>; drop(f); }\n",
     "reject": true,
-    "diagnostic": "duplicate union member"
+    "diagnostic": "appears twice in this union"
   },
   {
     "name": "union-generic-duplicate-nested",
     "source": "module duplicate_nested;\nfn id<T>(x:T[] | string[]) -> T[] | string[] { return x; }\nfn main(){ f := id<string>; drop(f); }\n",
     "reject": true,
-    "diagnostic": "duplicate union member"
+    "diagnostic": "appears twice in this union"
   },
   {
     "name": "union-indirect-call",
@@ -9041,5 +9041,136 @@
     "source": "fn main() {\n    mut rows = u64[][];\n    rows.push(u64[1, 2]);\n    x := &rows[0][1];\n    println(*x);\n}\n",
     "stdout": "2\n",
     "note": "a reference into a nested vector element"
+  },
+  {
+    "name": "diagx-dup-struct-field",
+    "source": "struct P {\n    x: u64,\n    x: u64\n}\nfn main() { println(1); }\n",
+    "reject": true,
+    "diagnostic": [
+      "`P` has two fields named `x`: rename or remove the second, it can never be read",
+      "the first one is here"
+    ],
+    "note": "a repeated field was laid out behind the first and could never be read; now refused, caret on the second field, label on the first"
+  },
+  {
+    "name": "diagx-dup-enum-variant",
+    "source": "enum E {\n    A,\n    B,\n    A\n}\nfn main() { e := E::B; println(1); }\n",
+    "reject": true,
+    "diagnostic": [
+      "`E` has two variants named `A`",
+      "the first one is here"
+    ],
+    "note": "variants are fields in the same flat list, so one check covers them"
+  },
+  {
+    "name": "diagx-dup-type-name",
+    "source": "struct P { x: u64 }\nstruct P { y: u64 }\nfn main() { println(1); }\n",
+    "reject": true,
+    "diagnostic": [
+      "a struct named `P` is already declared at",
+      ": rename one, or remove it"
+    ],
+    "note": "two structs under one name were accepted and the second silently won"
+  },
+  {
+    "name": "diagx-dup-type-across-files",
+    "source": "use dupmod;\nfn main() {\n    t := dupmod::Thing { x: 1 };\n    println(t.x);\n}\n",
+    "modules": [
+      "compiler/tests/dup_type_a.grl",
+      "compiler/tests/dup_type_b.grl"
+    ],
+    "reject": true,
+    "diagnostic": [
+      "a struct named `Thing` is already declared at",
+      "dup_type_a.grl:"
+    ],
+    "note": "the first declaration is in another file, so its position is carried as text rather than as a token index"
+  },
+  {
+    "name": "diagx-dup-const",
+    "source": "const K: u64 = 1;\nconst K: u64 = 2;\nfn main() { println(K); }\n",
+    "reject": true,
+    "diagnostic": [
+      "a constant named `K` is already declared at",
+      ": rename one, or remove it"
+    ],
+    "note": "names the first constant instead of \"duplicate constant\" with a caret past the value"
+  },
+  {
+    "name": "diagx-dup-alias",
+    "source": "type W = u64;\ntype W = u32;\nfn main() { println(1); }\n",
+    "reject": true,
+    "diagnostic": [
+      "a type alias named `W` is already declared at",
+      ": rename one, or remove it"
+    ],
+    "note": "the caret used to land on whatever followed the alias declaration"
+  },
+  {
+    "name": "diagx-dup-alias-for-struct",
+    "source": "struct W { x: u64 }\ntype W = u32;\nfn main() { println(1); }\n",
+    "reject": true,
+    "diagnostic": [
+      "a type alias named `W` is already declared at"
+    ],
+    "note": "an alias and a struct are one type namespace"
+  },
+  {
+    "name": "diagx-decl-distinct-members",
+    "source": "struct P { x: u64, y: u64 }\nenum E { A, B }\nconst K: u64 = 1;\nconst L: u64 = 2;\ntype W = u64;\ntype V = u32;\nfn main() {\n    p := P { x: 1, y: 2 };\n    e := E::B;\n    println(p.x + p.y + K + L);\n}\n",
+    "stdout": "6\n",
+    "note": "guard on the duplicate checks: distinct names still compile, so the refusal is not a blanket"
+  },
+  {
+    "name": "diagx-char-literal-too-long",
+    "source": "fn main() {\n    c := 'ab';\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "a character literal holds exactly one character: `'ab'` has more",
+      "or a string (`\"ab\"`) when the text is longer"
+    ],
+    "note": "`'ab'` used to abort the compiler on an assert in compiler/lexer.grl:169, printing a compiler source line instead of a refusal"
+  },
+  {
+    "name": "diagx-char-literal-unclosed",
+    "source": "fn main() {\n    c := 'a;\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "unclosed character literal: add the closing `'`"
+    ],
+    "note": "a character literal that runs to the end of the line is refused, not aborted"
+  },
+  {
+    "name": "diagx-string-literal-unclosed",
+    "source": "fn main() {\n    s := \"abc;\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "unclosed string literal: add the closing `\"`"
+    ],
+    "note": "an unclosed string was an assert in the lexer; the newline it runs into is reported as the unclosed literal it means"
+  },
+  {
+    "name": "diagx-string-raw-control-byte",
+    "source": "fn main() {\n    s := \"a\tb\";\n    println(s.len());\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "a string literal cannot hold a raw tab: write the escape `\\t` instead"
+    ],
+    "note": "a raw control byte in a string is named, with the escape that spells it"
+  },
+  {
+    "name": "diagx-literal-escapes-ok",
+    "source": "fn main() {\n    s := \"a\\tb\\n\\\\\";\n    c := '\\n';\n    u := '\u00e9';\n    println(s.len() + u64(c) + u64(u));\n}\n",
+    "stdout": "248\n",
+    "note": "the guard on the literal diagnostics: escapes, an escaped backslash and a non-ASCII character still lex"
+  },
+  {
+    "name": "diagx-dup-union-member",
+    "source": "fn f(x: u64|u64) -> u64 {\n    return 1;\n}\nfn main() { println(f(1)); }\n",
+    "reject": true,
+    "diagnostic": [
+      "the type `u64` appears twice in this union, so no value could be told apart: wrap one of them in a struct"
+    ],
+    "note": "a union is a type in Grail, not a declaration, so `A | A` is the duplicate to refuse; it named no member before"
   }
 ]
