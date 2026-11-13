@@ -132,6 +132,10 @@ regeneration and nothing else.
 
 - Fixed arity: a default is a value for a parameter that exists, never a way to vary the parameter
   count.
+- An argument list that holds a closure literal is read positionally (a closure's own commas are not
+  argument separators, and `|` is also bitwise or), so such a call may not name its arguments - it
+  says so by name rather than reporting the name as an unknown variable. Its trailing defaults are
+  still filled, because a positional list has a length.
 - A closure or function *value* has no parameter names to name, so a call through a value is
   positional: *named arguments need a declared parameter list*.
 - A variadic `extern "C"` declaration's *fixed* parameters can be named (their names are recorded for
