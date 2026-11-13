@@ -239,3 +239,24 @@ because the failing instruction killed the process.
 - A program that never calls `try_join` behaves exactly as before, including the leak counter.
 - Windows and macOS are the same code path (the platform supplies the context switch); only Linux
   x86-64 is verified by the test cases in this change.
+
+## Known integration failure (open, gaps-int3)
+
+On the integration branch that merges this work with the `errs` backtrace work, the book example
+`book/examples/task-failure.grl` prints its failure text and then exits **134 with no message**
+instead of printing the sibling task's value. What is established:
+
+- the containment itself works: `try_join` returns the `TaskFailure`, its message prints, the
+  sibling's value prints (`7`) and the scope's join returns it - with markers added, the program
+  reaches the end of `body` correctly;
+- the abort is at **process exit**, silent, which is either `rt_leak_exit`'s `live != 0 &&
+  contained == 0` branch or a double free in the scope/stack teardown;
+- stderr is empty, so the "note: N allocation(s) still live after M contained task failure(s)"
+  text did not run, i.e. whichever counter the exit path reads saw **zero** containments.
+
+The two branches that touched this path are this one (`rt_fail`/`rt_contain_site`/`rt_leak_exit`,
+the task record, state word 3584) and the errors branch (`rt_backtrace`, the site and function
+tables, `rt_sites`). The next step is to dump `rt_live()` and `rt_contained()` in `rt_leak_exit`
+(an instrumented build is enough - no seed change) and to compare the merged `rt_fail` against both
+parents: `git diff origin/gaps2-taskfail -- compiler/runtime.grl` and the same against
+`origin/gaps2-errs`.
