@@ -25,14 +25,25 @@ slot() { while [ "$(jobs -rp | wc -l)" -ge "${GATE_JOBS:-3}" ]; do wait -n; done
 done_ok() { [ -f "$1" ] && tail -1 "$1" | grep -qx 'exit=0'; }
 leg() { local log=$1; shift; done_ok "$G/$log.log" && return 0; slot; ( "$@" > "$G/$log.log.tmp" 2>&1; echo "exit=$?" >> "$G/$log.log.tmp"; mv "$G/$log.log.tmp" "$G/$log.log" ) & }
 
-if [ $reseed = 1 ] && ! done_ok "$G/reseed.log"; then
-  bun tools/bootstrap.mjs update all > "$G/reseed.log.tmp" 2>&1
-  status=$?
-  if [ $status = 0 ]; then
-    git add compiler/bootstrap && git commit -q -m "Reseed the bootstrap" >> "$G/reseed.log.tmp" 2>&1
+if [ $reseed = 1 ]; then
+  # One resumable step per target (each up to an hour under qemu), then one publish.
+  for t in x86_64 aarch64 riscv64; do
+    if ! done_ok "$G/reseed_$t.log"; then
+      bun tools/bootstrap.mjs stage $t > "$G/reseed_$t.log.tmp" 2>&1
+      echo "exit=$?" >> "$G/reseed_$t.log.tmp"
+      mv "$G/reseed_$t.log.tmp" "$G/reseed_$t.log"
+      done_ok "$G/reseed_$t.log" || { echo "reseed $t failed" > "$G/summary.txt"; touch "$G/DONE"; exit 1; }
+    fi
+  done
+  if ! done_ok "$G/reseed.log"; then
+    bun tools/bootstrap.mjs publish > "$G/reseed.log.tmp" 2>&1
+    status=$?
+    if [ $status = 0 ]; then
+      git add compiler/bootstrap && git commit -q -m "Reseed the bootstrap" >> "$G/reseed.log.tmp" 2>&1
+    fi
+    echo "exit=$status" >> "$G/reseed.log.tmp"
+    mv "$G/reseed.log.tmp" "$G/reseed.log"
   fi
-  echo "exit=$status" >> "$G/reseed.log.tmp"
-  mv "$G/reseed.log.tmp" "$G/reseed.log"
 fi
 bun tools/ci.mjs preflight > "$G/preflight.log" 2>&1
 C=$(bun tools/native.mjs build 2>&1 | tail -1)
