@@ -30849,6 +30849,68 @@ fn if_let<a>(c: (&a mut C)) -> unit {
     return ();
 }
 // match on an integer or bool: `0 => {..}`, `1 | 2 => {..}`, `'a' => {..}`, `_ => {..}`.
+// A keyword that starts a statement, never an expression: an arm body written that way needs the
+// braces of the block form. `true`/`false` are values, so they are not here.
+fn arm_statement_word<a>(c: (&a mut C)) -> bool {
+    if kind(&mut c) != 1 {
+        return false;
+    }
+    return is(&mut c, view("if"))
+        || is(&mut c, view("while"))
+        || is(&mut c, view("for"))
+        || is(&mut c, view("loop"))
+        || is(&mut c, view("match"))
+        || is(&mut c, view("let"))
+        || is(&mut c, view("return"))
+        || is(&mut c, view("break"))
+        || is(&mut c, view("continue"))
+        || is(&mut c, view("mut"))
+        || is(&mut c, view("unsafe"))
+        || is(&mut c, view("drop"))
+        || is(&mut c, view("write"))
+        || is(&mut c, view("assert"));
+}
+// A match arm's body: a block, or one expression (`Pat => f(x),`), which reaches the same code as
+// the block form `Pat => { f(x) }` because the expression's temporaries are released here and the
+// arm's cleanup runs afterwards either way. The ambiguous shapes are refused by name: a statement
+// body needs braces (`=> if ...` was the case that read as an expression and could not be one),
+// and a body that continues as a statement (`=> x = 1;`) is not an expression arm.
+fn arm_body<a>(c: (&a mut C)) -> unit {
+    if is(&mut c, view("{")) {
+        block(&mut c);
+        return ();
+    }
+    if arm_statement_word(&mut c) {
+        fail(
+            &mut c,
+            view("this arm body is a statement, so it needs braces: write `Pat => { if ... }`")
+        );
+    }
+    v := expr(&mut c, 0);
+    if kind(&mut c) == 61 {
+        fail(
+            &mut c,
+            view("an arm body is one expression, not a statement: write `Pat => { x = 1; }`")
+        );
+    }
+    if (261 < kind(&mut c)) & (kind(&mut c) < 267) {
+        fail(
+            &mut c,
+            view("an arm body is one expression, not a statement: write `Pat => { x += 1; }`")
+        );
+    }
+    discard_value(&mut c, v);
+    if kind(&mut c) == 59 {
+        fail(
+            &mut c,
+            view("an expression arm ends at `,` or `}`: for a statement body write `Pat => { stmt; }`")
+        );
+    }
+    if (kind(&mut c) != 44) & (kind(&mut c) != 125) {
+        fail(&mut c, view("expected `,` or `}` after this match arm"));
+    }
+    return ();
+}
 fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
     xt := s.t;
     ty := s.ty;
@@ -31019,7 +31081,7 @@ fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
             before = merged;
         }
         expect(&mut c, view("=>"));
-        block(&mut c);
+        arm_body(&mut c);
         pop_locals(&mut c, mark);
         if c.terminated == 0 {
             edge := ownership::snapshot(&c.check);
@@ -31232,7 +31294,7 @@ fn record_match<a>(c: (&a mut C), sslot: u64, sty: u64, x: Val, byref: u64, refm
     if byref != 0 {
         arm_scrutinee(&mut c, sslot, sty);
     }
-    block(&mut c);
+    arm_body(&mut c);
     cleanup(&mut c, payloads);
     pop_locals(&mut c, mark);
     eaten := eat(&mut c, view(","));
@@ -31258,7 +31320,7 @@ fn record_match<a>(c: (&a mut C), sslot: u64, sty: u64, x: Val, byref: u64, refm
             get(&mut c, xt, view("%rdi"));
             drop_call(&mut c, x.ty);
         }
-        block(&mut c);
+        arm_body(&mut c);
         eat(&mut c, view(","));
         expect(&mut c, view("}"));
         mark(&mut c, end);
@@ -32122,7 +32184,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
                 if byref != 0 || borrowed {
                     arm_scrutinee(&mut c, sslot, sty);
                 }
-                block(&mut c);
+                arm_body(&mut c);
                 cleanup(&mut c, payloads);
                 pop_locals(&mut c, mark);
                 if c.terminated == 0 {
@@ -32240,7 +32302,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
             if byref != 0 || borrowed {
                 arm_scrutinee(&mut c, sslot, sty);
             }
-            block(&mut c);
+            arm_body(&mut c);
             cleanup(&mut c, payloads);
             pop_locals(&mut c, mark);
             if c.terminated == 0 {
@@ -32489,6 +32551,12 @@ fn statement<a>(c: (&a mut C)) -> unit {
     }
     mut v = expr(&mut c, 0);
     expect(&mut c, view(";"));
+    discard_value(&mut c, v);
+    return ();
+}
+// An expression whose value nobody keeps (`expr;`, or a single-expression match arm): release
+// whatever temporary it produced, dropping an owned one it evaluates to.
+fn discard_value<a>(c: (&a mut C), v: Val) -> unit {
     mut r = resource(&mut c, v.t);
     if r != 0 {
         info := &c.resources[r - 1];
