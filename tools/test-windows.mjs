@@ -147,7 +147,10 @@ export async function check(compiler) {
       }
     }
 
-    if (wine) {
+    // A case that pins behaviour the Wine build of Windows cannot deliver still proves its
+    // static half (it links what it names) but is not executed here; it runs on a real Windows
+    // host. The only such case is the fiber stack overflow below.
+    if (wine && !test.noWineRun) {
       const run = runWine(wine, built.executable, test.args ?? [], directory, test.env ?? {});
       assert.equal(run.status, test.status ?? 0, `${test.name}: wine exit ${run.status}: ${run.stderr}`);
       assert.equal(run.stdout.toString(), test.stdout, `${test.name}: wine stdout`);
@@ -165,7 +168,7 @@ export async function check(compiler) {
       executed++;
     }
     passed++;
-    console.log(`windows-x86_64 ${test.name}: COFF object + PE image verified (entry RVA 0x${entry})${wine ? ', executed' : ''}`);
+    console.log(`windows-x86_64 ${test.name}: COFF object + PE image verified (entry RVA 0x${entry})${test.noWineRun ? ', static only' : (wine ? ', executed' : '')}`);
   }
 
   // windows-aarch64: PE/COFF for ARM64. There is no ARM64 Windows runner on this host, so these
