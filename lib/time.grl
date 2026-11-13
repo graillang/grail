@@ -48,3 +48,150 @@ pub fn unix_seconds() -> u64 {
 pub fn sleep_ms(milliseconds: u64) {
     host::sleep_ms(milliseconds);
 }
+
+// ---- wall-clock timestamps ---------------------------------------------------------------------
+// A moment on the wall clock: whole seconds since the Unix epoch plus the nanoseconds within that
+// second. Times before 1970 have a negative second count, and `metadata` reports what the file
+// system recorded, so the negative range is not a corner case.
+
+pub struct Timestamp {
+    seconds: i64,
+    nanos: u64
+}
+
+// The calendar fields of a timestamp in one time zone, as a date and a clock reading.
+pub struct DateTime {
+    year: i64,
+    month: u64,
+    day: u64,
+    hour: u64,
+    minute: u64,
+    second: u64,
+    nanos: u64
+}
+
+pub fn timestamp(seconds: i64, nanos: u64) -> Timestamp {
+    return Timestamp { seconds: seconds, nanos: nanos };
+}
+
+// The wall clock now, to the millisecond the runtime reads.
+pub fn now_timestamp() -> Timestamp {
+    millis := host::wall_ms();
+    return Timestamp { seconds: i64(millis / 1000), nanos: (millis % 1000) * 1000000 };
+}
+
+impl Timestamp {
+    // Whole seconds since the Unix epoch; negative before 1970.
+    pub fn unix_seconds(self: (&Timestamp)) -> i64 {
+        return self.seconds;
+    }
+    // The whole-second count as a word, so a caller comparing against `host::wall_ms()` needs no cast.
+    pub fn seconds(self: (&Timestamp)) -> i64 {
+        return self.seconds;
+    }
+    pub fn nanos(self: (&Timestamp)) -> u64 {
+        return self.nanos;
+    }
+    // Whole milliseconds since the Unix epoch.
+    pub fn unix_millis(self: (&Timestamp)) -> i64 {
+        return self.seconds * 1000 + i64(self.nanos / 1000000);
+    }
+    // This instant plus a signed number of seconds, for a window such as "an hour from now".
+    pub fn plus_seconds(self: (&Timestamp), seconds: i64) -> Timestamp {
+        return Timestamp { seconds: self.seconds + seconds, nanos: self.nanos };
+    }
+    // The calendar reading in UTC. A zoned reading is `tz::TimeZone::to_local`.
+    pub fn to_utc(self: (&Timestamp)) -> DateTime {
+        return date_time_at(self.seconds, self.nanos);
+    }
+    // `1970-01-01T00:00:00Z`, with `.nanos` when they are not zero. `format` renders any value it
+    // is given, so this is one call.
+    pub fn format_utc(self: (&Timestamp)) -> string {
+        d := date_time_at(self.seconds, self.nanos);
+        return d.format();
+    }
+}
+
+impl DateTime {
+    // `1970-01-01T00:00:00Z`; the trailing `Z` says the reading is UTC.
+    pub fn format(self: (&DateTime)) -> string {
+        if self.nanos == 0 {
+            return format("{}-{}-{}T{}:{}:{}Z", self.year, pad2(self.month), pad2(self.day), pad2(self.hour), pad2(self.minute), pad2(self.second));
+        }
+        return format("{}-{}-{}T{}:{}:{}.{}Z", self.year, pad2(self.month), pad2(self.day), pad2(self.hour), pad2(self.minute), pad2(self.second), self.nanos);
+    }
+    // Seconds since the Unix epoch for these calendar fields, reading them as UTC.
+    pub fn unix_seconds(self: (&DateTime)) -> i64 {
+        return days_from_civil(self.year, self.month, self.day) * 86400
+            + i64(self.hour) * 3600 + i64(self.minute) * 60 + i64(self.second);
+    }
+    pub fn to_timestamp(self: (&DateTime)) -> Timestamp {
+        return Timestamp { seconds: self.unix_seconds(), nanos: self.nanos };
+    }
+}
+
+fn pad2(value: u64) -> string {
+    if value < 10 {
+        return format("0{}", value);
+    }
+    return format("{}", value);
+}
+
+// The calendar reading of a second count, in UTC (Howard Hinnant's civil-from-days, which needs no
+// table and no loop).
+pub fn date_time_at(seconds: i64, nanos: u64) -> DateTime {
+    mut days = seconds / 86400;
+    mut rest = seconds % 86400;
+    if rest < 0 {
+        days = days - 1;
+        rest = rest + 86400;
+    }
+    z := days + 719468;
+    mut era = z / 146097;
+    if (z < 0) & (z % 146097 != 0) {
+        era = era - 1;
+    }
+    doe := z - era * 146097;
+    yoe := (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    mut year = yoe + era * 400;
+    doy := doe - (365 * yoe + yoe / 4 - yoe / 100);
+    mp := (5 * doy + 2) / 153;
+    day := doy - (153 * mp + 2) / 5 + 1;
+    mut month = mp + 3;
+    if mp > 9 {
+        month = mp - 9;
+    }
+    if month < 3 {
+        year = year + 1;
+    }
+    return DateTime {
+        year: year,
+        month: u64(month),
+        day: u64(day),
+        hour: u64(rest / 3600),
+        minute: u64((rest % 3600) / 60),
+        second: u64(rest % 60),
+        nanos: nanos
+    };
+}
+
+// The inverse: days since the Unix epoch for a calendar date read as UTC.
+pub fn days_from_civil(year: i64, month: u64, day: u64) -> i64 {
+    mut y = year;
+    m := i64(month);
+    if m < 3 {
+        y = y - 1;
+    }
+    mut era = y / 400;
+    if (y < 0) & (y % 400 != 0) {
+        era = era - 1;
+    }
+    yoe := y - era * 400;
+    mut shifted = m + 9;
+    if m > 2 {
+        shifted = m - 3;
+    }
+    doy := (153 * shifted + 2) / 5 + i64(day) - 1;
+    doe := yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}

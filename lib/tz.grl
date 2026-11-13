@@ -1,0 +1,1138 @@
+module tz;
+use host;
+use core;
+use io;
+use fs;
+use strings;
+use time;
+
+// Time zones from the system's tzdata files (`/usr/share/zoneinfo`, or `$TZDIR`).
+//
+// A zone is the table a TZif file records: the instants its offset changed, one offset per
+// transition, the abbreviations those offsets are named by, and the POSIX TZ rule for times after the
+// last recorded transition. Nothing here reads the machine's own time zone - a `TimeZone` is a value
+// loaded from a named file and the questions asked of it are answered from that file.
+//
+// Leap seconds are ignored on purpose: the records TZif carries for them are read past, because a
+// `time::Timestamp` is the POSIX second count Unix time and the file system use, and a leap-second
+// table would make the two disagree.
+//
+// A local time is not always a unique instant. Around a spring-forward a wall-clock reading is
+// skipped, and around a fall-back it happens twice. `TimeZone::from_local` answers which of those
+// happened as data - `Unique`, `Ambiguous` (both instants) or `Skipped` (the gap) - and never picks
+// one silently.
+
+// ---- errors ------------------------------------------------------------------------------------
+
+// A failure to load or parse a zone: the name it was asked for, and what went wrong.
+pub struct Error {
+    zone: u8[],
+    detail: u8[],
+}
+
+impl Error {
+    pub fn zone<a>(self: (&a Error)) -> (&a [u8]) {
+        return view(self.zone);
+    }
+    pub fn is_missing(self: (&Error)) -> bool {
+        return true;
+    }
+    // `Europe/Berlin: no such zone` or `Europe/Berlin: truncated TZif data`.
+    pub fn show<a>(self: (&a Error)) -> string {
+        return format("{}: {}", strings::to_text_lossy(view(self.zone)), strings::to_text_lossy(view(self.detail)));
+    }
+}
+
+fn malformed<a, b>(zone: &a [u8], detail: &b [u8]) -> Error {
+    return Error { zone: zone.copy(), detail: detail.copy() };
+}
+
+// ---- big-endian fields -------------------------------------------------------------------------
+
+fn be32<a>(data: &a [u8], at: u64) -> u64 {
+    return u64(data[at]) * 16777216 + u64(data[at + 1]) * 65536 + u64(data[at + 2]) * 256 + u64(data[at + 3]);
+}
+
+// A signed 32-bit second count, which may be before 1970.
+fn be32_signed<a>(data: &a [u8], at: u64) -> i64 {
+    value := be32(data, at);
+    if value >= 2147483648 {
+        return core::as_i64(value + 18446744069414584320); // value - 2^32, wrapped
+    }
+    return i64(value);
+}
+
+fn be64<a>(data: &a [u8], at: u64) -> u64 {
+    mut i = 0;
+    mut value = 0;
+    while i < 8 {
+        value = value * 256 + u64(data[at + i]);
+        i = i + 1;
+    }
+    return value;
+}
+
+// ---- the zone's value types --------------------------------------------------------------------
+
+// One clock offset in the zone's table, with the name it is known by and whether it is daylight
+// saving time.
+pub struct ZoneType {
+    offset: i64,
+    is_dst: bool,
+    abbreviation: u8[],
+}
+
+// The offset, daylight flag and abbreviation in effect at one instant: the table's row, or the
+// footer rule's, as a value.
+pub struct ZoneState {
+    offset: i64,
+    is_dst: bool,
+    abbreviation: u8[],
+}
+
+// When a POSIX rule's transition happens, in one of the three forms a TZ string allows: a month, week
+// and weekday (`M3.5.0`), a day of the year counting no leap day (`J60`), or a zero-based day of the
+// year counting one (`59`). Each carries the local time of day, in seconds.
+pub enum RuleDate {
+    WeekDay(MonthWeekDay),
+    NoLeapDay(DayTime),
+    LeapDay(DayTime),
+    Unset
+}
+
+pub struct MonthWeekDay {
+    month: u64,
+    week: u64,
+    weekday: u64,
+    seconds: i64,
+}
+
+pub struct DayTime {
+    day: u64,
+    seconds: i64,
+}
+
+// A POSIX TZ rule, which is what a TZif footer holds: `CET-1CEST,M3.5.0,M10.5.0/3` is standard time
+// one hour east of UTC named CET, daylight time two hours east named CEST, starting the last Sunday
+// of March at 02:00 and ending the last Sunday of October at 03:00, both local.
+pub struct PosixRule {
+    standard_name: string,
+    standard_offset: i64,
+    daylight_name: string,
+    daylight_offset: i64,
+    has_daylight: bool,
+    start_rule: RuleDate,
+    end_rule: RuleDate,
+}
+
+// A loaded zone.
+pub struct TimeZone {
+    name: u8[],
+    transitions: i64[],
+    indices: u64[],
+    types: ZoneType[],
+    footer: PosixRule,
+    has_footer: bool,
+}
+
+impl TimeZone {
+    // The zone's name, as `load` was given it.
+    pub fn name<a>(self: (&a TimeZone)) -> (&a [u8]) {
+        return view(self.name);
+    }
+    // How many transitions the file records.
+    pub fn transition_count(self: (&TimeZone)) -> u64 {
+        return self.transitions.len();
+    }
+    // The offsets the file describes, in type order.
+    pub fn type_count(self: (&TimeZone)) -> u64 {
+        return self.types.len();
+    }
+    // Whether the file carries a POSIX rule for times after its last transition.
+    pub fn has_footer(self: (&TimeZone)) -> bool {
+        return self.has_footer;
+    }
+    // The instant of the `index`-th recorded transition.
+    pub fn transition_at(self: (&TimeZone), index: u64) -> i64 {
+        return self.transitions[index];
+    }
+    // The offset in effect at `instant`, in seconds east of UTC: 3600 for CET in winter.
+    pub fn offset_at(self: (&TimeZone), instant: i64) -> i64 {
+        return self.state_at(instant).offset;
+    }
+    // Whether daylight saving time is in effect at `instant`.
+    pub fn is_dst_at(self: (&TimeZone), instant: i64) -> bool {
+        return self.state_at(instant).is_dst;
+    }
+    // The abbreviation in effect at `instant`: `CET`, `CEST`, `+1030`.
+    pub fn abbreviation_at(self: (&TimeZone), instant: i64) -> u8[] {
+        return self.state_at(instant).abbreviation;
+    }
+    // The wall-clock reading at `instant` in this zone.
+    pub fn to_local(self: (&TimeZone), instant: i64) -> LocalTime {
+        chosen := self.state_at(instant);
+        return LocalTime {
+            seconds: instant + chosen.offset,
+            offset: chosen.offset,
+            abbreviation: chosen.abbreviation,
+            is_dst: chosen.is_dst,
+        };
+    }
+    // The instant a wall-clock reading names, as data about what it can mean.
+    pub fn from_local(self: (&TimeZone), local: (&LocalTime)) -> Resolution {
+        return self.resolve(local.seconds);
+    }
+    // The instant a local reading names when it names exactly one; None when it is ambiguous or does
+    // not exist. A caller that wants the ambiguity as data uses `from_local`.
+    pub fn instant_of(self: (&TimeZone), local: (&LocalTime)) -> i64? {
+        match self.resolve(local.seconds) {
+            Unique(instant) => { return Some(instant); },
+            _ => { return None; }
+        }
+    }
+
+    // The zone's type at an instant: the table inside its recorded range, the footer's rule after it,
+    // and the first standard type before the first transition (which is what localtime(3) does).
+    fn state_at(self: (&TimeZone), instant: i64) -> ZoneState {
+        n := self.transitions.len();
+        if n != 0 {
+            if instant >= self.transitions[n - 1] {
+                if self.has_footer {
+                    return footer_type(self, instant);
+                }
+            }
+            if instant >= self.transitions[0] {
+                mut look = 0;
+                mut i = 0;
+                while i < n {
+                    if self.transitions[i] <= instant {
+                        look = i;
+                    }
+                    i = i + 1;
+                }
+                row := &self.types[self.indices[look]];
+                return ZoneState { offset: row.offset, is_dst: row.is_dst, abbreviation: row.abbreviation.copy() };
+            }
+        }
+        if self.types.len() == 0 {
+            return ZoneState { offset: i64(0), is_dst: false, abbreviation: "UTC".copy() };
+        }
+        mut first = 0;
+        mut i = 0;
+        while i < self.types.len() {
+            if !self.types[i].is_dst {
+                first = i;
+                break;
+            }
+            i = i + 1;
+        }
+        row := &self.types[first];
+        return ZoneState { offset: row.offset, is_dst: row.is_dst, abbreviation: row.abbreviation.copy() };
+    }
+
+    // Every instant a wall-clock second count can name: one, two, or none.
+    fn resolve(self: (&TimeZone), local_seconds: i64) -> Resolution {
+        mut candidates = i64[];
+        mut offsets = i64[];
+        mut i = 0;
+        while i < self.types.len() {
+            offset := self.types[i].offset;
+            mut seen = false;
+            mut k = 0;
+            while k < offsets.len() {
+                if offsets[k] == offset {
+                    seen = true;
+                }
+                k = k + 1;
+            }
+            if !seen {
+                offsets.push(offset);
+                guess := local_seconds - offset;
+                if self.state_at(guess).offset == offset {
+                    push_unique(&mut candidates, guess);
+                }
+            }
+            i = i + 1;
+        }
+        if self.has_footer {
+            standard := local_seconds - self.footer.standard_offset;
+            if self.state_at(standard).offset == self.footer.standard_offset {
+                push_unique(&mut candidates, standard);
+            }
+            if self.footer.has_daylight {
+                daylight := local_seconds - self.footer.daylight_offset;
+                if self.state_at(daylight).offset == self.footer.daylight_offset {
+                    push_unique(&mut candidates, daylight);
+                }
+            }
+        }
+        sort(&mut candidates);
+        if candidates.len() == 1 {
+            return Resolution::Unique(candidates[0]);
+        }
+        if candidates.len() >= 2 {
+            pair := Ambiguity { earlier: candidates[0], later: candidates[candidates.len() - 1] };
+            return Resolution::Ambiguous(pair);
+        }
+        gap := self.gap_of(local_seconds);
+        return Resolution::Skipped(gap);
+    }
+
+    // The transition whose jump forward skips `local_seconds`: the wall clock reads
+    // `instant + before` and then `instant + after`, so the readings between never happen. A gap of
+    // zero seconds is the answer when no transition skips it.
+    fn gap_of(self: (&TimeZone), local_seconds: i64) -> Gap {
+        n := self.transitions.len();
+        mut i = 1;
+        while i < n {
+            instant := self.transitions[i - 1];
+            before := self.types[self.indices[i - 1]].offset;
+            after := self.types[self.indices[i]].offset;
+            if after > before {
+                start := instant + before;
+                stop := instant + after;
+                if local_seconds >= start {
+                    if local_seconds < stop {
+                        return Gap { start: instant, seconds: after - before };
+                    }
+                }
+            }
+            i = i + 1;
+        }
+        return Gap { start: local_seconds, seconds: i64(0) };
+    }
+}
+
+fn push_unique<a>(values: (&mut i64[]), value: i64) {
+    mut i = 0;
+    while i < values.len() {
+        if values[i] == value {
+            return ();
+        }
+        i = i + 1;
+    }
+    values.push(value);
+    return ();
+}
+
+fn sort<a>(values: (&mut i64[])) {
+    n := values.len();
+    mut i = 1;
+    while i < n {
+        mut j = i;
+        while j > 0 {
+            if values[j - 1] <= values[j] {
+                break;
+            }
+            held := values[j - 1];
+            values[j - 1] = values[j];
+            values[j] = held;
+            j = j - 1;
+        }
+        i = i + 1;
+    }
+    return ();
+}
+
+// ---- local readings ----------------------------------------------------------------------------
+
+// A wall-clock reading in a zone: the second count as if it were UTC (so an instant is that count
+// minus the offset), plus the offset and the name in effect.
+pub struct LocalTime {
+    seconds: i64,
+    offset: i64,
+    abbreviation: u8[],
+    is_dst: bool,
+}
+
+impl LocalTime {
+    // A reading from calendar fields, as if they were UTC: `local(zone, 2026, 3, 29, 1, 30, 0)`.
+    // `to_instant` or `from_local` then says what it means in the zone.
+    // The reading as a calendar date and clock time.
+    pub fn to_datetime(self: (&LocalTime)) -> time::DateTime {
+        return time::date_time_at(self.seconds, 0);
+    }
+    pub fn seconds(self: (&LocalTime)) -> i64 {
+        return self.seconds;
+    }
+    pub fn offset(self: (&LocalTime)) -> i64 {
+        return self.offset;
+    }
+    pub fn is_dst(self: (&LocalTime)) -> bool {
+        return self.is_dst;
+    }
+    pub fn abbreviation<a>(self: (&a LocalTime)) -> (&a [u8]) {
+        return view(self.abbreviation);
+    }
+    // The instant this reading names under the offset it was read with.
+    pub fn to_instant(self: (&LocalTime)) -> i64 {
+        return self.seconds - self.offset;
+    }
+    // `2026-03-29T01:30:00Z+01:00`, the reading and the offset it was taken with.
+    pub fn show(self: (&LocalTime)) -> string {
+        return format("{}{}{}", time::date_time_at(self.seconds, 0).format(), sign_of(self.offset), offset_body(self.offset));
+    }
+}
+
+// A reading in a zone, from calendar fields whose meaning `from_local` decides.
+pub fn local(year: i64, month: u64, day: u64, hour: u64, minute: u64, second: u64) -> LocalTime {
+    stamp := time::days_from_civil(year, month, day) * 86400 + i64(hour) * 3600 + i64(minute) * 60 + i64(second);
+    return LocalTime { seconds: stamp, offset: i64(0), abbreviation: u8[], is_dst: false };
+}
+
+// The two instants a fall-back reading names.
+pub struct Ambiguity {
+    earlier: i64,
+    later: i64,
+}
+
+impl Ambiguity {
+    pub fn earlier(self: (&Ambiguity)) -> i64 {
+        return self.earlier;
+    }
+    pub fn later(self: (&Ambiguity)) -> i64 {
+        return self.later;
+    }
+}
+
+// The hole a spring-forward leaves: it starts at `start` (a UTC instant) and is `seconds` long.
+pub struct Gap {
+    start: i64,
+    seconds: i64,
+}
+
+impl Gap {
+    pub fn start(self: (&Gap)) -> i64 {
+        return self.start;
+    }
+    pub fn seconds(self: (&Gap)) -> i64 {
+        return self.seconds;
+    }
+}
+
+// What a wall-clock reading means in a zone.
+pub enum Resolution {
+    // Exactly one instant.
+    Unique(i64),
+    // Two instants, the offsets either side of a fall-back.
+    Ambiguous(Ambiguity),
+    // No instant: the reading falls in a gap (a zero-length gap means the zone has no such hole).
+    Skipped(Gap)
+}
+
+impl Resolution {
+    // The instant for a caller that treats an ambiguous reading as the earlier one, or None when the
+    // reading does not exist at all.
+    pub fn instant(self: (&Resolution)) -> i64? {
+        match self {
+            Unique(instant) => { return Some(instant); },
+            Ambiguous(pair) => { return Some(pair.earlier); },
+            Skipped(gap) => { return None; }
+        }
+    }
+    pub fn is_unique(self: (&Resolution)) -> bool {
+        match self {
+            Unique(instant) => { return true; },
+            _ => { return false; }
+        }
+    }
+    pub fn is_ambiguous(self: (&Resolution)) -> bool {
+        match self {
+            Ambiguous(pair) => { return true; },
+            _ => { return false; }
+        }
+    }
+    pub fn is_skipped(self: (&Resolution)) -> bool {
+        match self {
+            Skipped(gap) => { return true; },
+            _ => { return false; }
+        }
+    }
+    pub fn show(self: (&Resolution)) -> string {
+        match self {
+            Unique(instant) => { return format("{}", instant); },
+            Ambiguous(pair) => { return format("{} or {}", pair.earlier, pair.later); },
+            Skipped(gap) => { return format("does not exist ({} seconds skipped at {})", gap.seconds, gap.start); }
+        }
+    }
+}
+
+// ---- parsing TZif ------------------------------------------------------------------------------
+
+// The six counts a header carries, after its magic, version byte and fifteen reserved bytes.
+struct Counts {
+    isutcnt: u64,
+    isstdcnt: u64,
+    leapcnt: u64,
+    timecnt: u64,
+    typecnt: u64,
+    charcnt: u64,
+}
+
+fn header_counts<a>(data: &a [u8], at: u64) -> Counts {
+    return Counts {
+        isutcnt: be32(data, at + 20),
+        isstdcnt: be32(data, at + 24),
+        leapcnt: be32(data, at + 28),
+        timecnt: be32(data, at + 32),
+        typecnt: be32(data, at + 36),
+        charcnt: be32(data, at + 40),
+    };
+}
+
+fn is_magic<a>(data: &a [u8], at: u64) -> bool {
+    if at + 4 > data.len() {
+        return false;
+    }
+    // "TZif"
+    return (data[at] == 84) & (data[at + 1] == 90) & (data[at + 2] == 105) & (data[at + 3] == 102);
+}
+
+// The bytes one data block takes: transition times, their type indices, the local time types, the
+// abbreviations, the leap-second records and the standard/universal indicators.
+fn block_size(counts: (&Counts), wide: bool) -> u64 {
+    mut time_width = 4;
+    mut leap_width = 8;
+    if wide {
+        time_width = 8;
+        leap_width = 12;
+    }
+    return counts.timecnt * (time_width + 1) + counts.typecnt * 6 + counts.charcnt
+        + counts.leapcnt * leap_width + counts.isstdcnt + counts.isutcnt;
+}
+
+// A zone from TZif bytes. A version 2 or 3 file's second block is the one used, because it carries
+// 64-bit transition times and the footer rule; a version 1 file's only block is used as it is.
+pub fn parse<a>(data: &a [u8]) -> TimeZone | Error {
+    return parse_named(data, view(""));
+}
+
+fn parse_named<a, b>(data: &a [u8], name: &b [u8]) -> TimeZone | Error {
+    if data.len() < 44 {
+        return malformed(name, view("truncated TZif header"));
+    }
+    if !is_magic(data, 0) {
+        return malformed(name, view("not a TZif file"));
+    }
+    version := data[4];
+    if version < 50 {
+        return parse_block(data, 0, name, false);
+    }
+    if (version != 50) & (version != 51) {
+        return malformed(name, view("unsupported TZif version"));
+    }
+    first := block_size(&header_counts(data, 0), false);
+    second := 44 + first;
+    if second + 44 > data.len() {
+        return malformed(name, view("truncated TZif data"));
+    }
+    if !is_magic(data, second) {
+        return malformed(name, view("truncated TZif data"));
+    }
+    return parse_block(data, second, name, true);
+}
+
+fn parse_block<a, b>(data: &a [u8], header: u64, name: &b [u8], wide: bool) -> TimeZone | Error {
+    counts := header_counts(data, header);
+    if counts.typecnt == 0 {
+        return malformed(name, view("a TZif block with no local time types"));
+    }
+    if counts.charcnt == 0 {
+        return malformed(name, view("a TZif block with no abbreviations"));
+    }
+    at := header + 44;
+    if at + block_size(&counts, wide) > data.len() {
+        return malformed(name, view("truncated TZif data"));
+    }
+    mut width = 4;
+    if wide {
+        width = 8;
+    }
+    mut transitions = i64[];
+    mut i = 0;
+    while i < counts.timecnt {
+        offset := at + i * width;
+        if wide {
+            transitions.push(core::as_i64(be64(data, offset)));
+        } else {
+            transitions.push(be32_signed(data, offset));
+        }
+        i = i + 1;
+    }
+    // The binary search below needs strictly increasing times; a file that is not is refused rather
+    // than searched with.
+    i = 1;
+    while i < counts.timecnt {
+        if transitions[i] <= transitions[i - 1] {
+            return malformed(name, view("TZif transition times are not increasing"));
+        }
+        i = i + 1;
+    }
+    index_at := at + counts.timecnt * width;
+    mut indices = u64[];
+    i = 0;
+    while i < counts.timecnt {
+        index := u64(data[index_at + i]);
+        if index >= counts.typecnt {
+            return malformed(name, view("TZif transition names a type that is not there"));
+        }
+        indices.push(index);
+        i = i + 1;
+    }
+    // The leap-second records sit between the abbreviations and the indicators and are read past:
+    // POSIX seconds, as time::Timestamp counts them, have no leap second.
+    types_at := index_at + counts.timecnt;
+    abbreviations_at := types_at + counts.typecnt * 6;
+    mut types = ZoneType[];
+    i = 0;
+    while i < counts.typecnt {
+        row := types_at + i * 6;
+        offset := be32_signed(data, row);
+        designation := u64(data[row + 5]);
+        if designation >= counts.charcnt {
+            return malformed(name, view("TZif abbreviation index is out of range"));
+        }
+        mut end = abbreviations_at + designation;
+        while end < abbreviations_at + counts.charcnt {
+            if data[end] == 0 {
+                break;
+            }
+            end = end + 1;
+        }
+        start := abbreviations_at + designation;
+        text := strings::to_text_lossy(view(data[start:end]));
+        types.push(ZoneType { offset: offset, is_dst: u64(data[row + 4]) != 0, abbreviation: text.copy() });
+        i = i + 1;
+    }
+    mut footer = empty_rule();
+    mut has_footer = false;
+    if wide {
+        after := at + block_size(&counts, wide);
+        if after < data.len() {
+            if data[after] == 10 {
+                mut stop = after + 1;
+                while stop < data.len() {
+                    if data[stop] == 10 {
+                        break;
+                    }
+                    stop = stop + 1;
+                }
+                if (stop < data.len()) & (stop > after + 1) {
+                    mut text = u8[];
+                    for k in (after + 1)..stop {
+                        text.push(data[k]);
+                    }
+                    match parse_posix(view(text)) {
+                        rule: PosixRule => {
+                            footer = rule;
+                            has_footer = true;
+                        },
+                        e: Error => {}
+                    }
+                }
+            }
+        }
+    }
+    mut zone_name = u8[];
+    for b in name {
+        zone_name.push(b);
+    }
+    return TimeZone {
+        name: zone_name,
+        transitions: transitions,
+        indices: indices,
+        types: types,
+        footer: footer,
+        has_footer: has_footer,
+    };
+}
+
+fn empty_rule() -> PosixRule {
+    return PosixRule {
+        standard_name: "UTC".text(),
+        standard_offset: i64(0),
+        daylight_name: "".text(),
+        daylight_offset: i64(0),
+        has_daylight: false,
+        start_rule: RuleDate::Unset,
+        end_rule: RuleDate::Unset,
+    };
+}
+
+// ---- the POSIX TZ footer -----------------------------------------------------------------------
+
+// A cursor over a TZ string; the parser reads forward and answers what it found.
+struct Scanner {
+    text: u8[],
+    at: u64,
+}
+
+impl Scanner {
+    fn more(self: (&Scanner)) -> bool {
+        return self.at < self.text.len();
+    }
+    fn peek(self: (&Scanner)) -> u64 {
+        if self.at < self.text.len() {
+            return u64(self.text[self.at]);
+        }
+        return 0;
+    }
+    fn advance(self: (&mut Scanner)) {
+        self.at = self.at + 1;
+        return ();
+    }
+    // A name: letters, or anything between `<` and `>`.
+    fn name(self: (&mut Scanner)) -> u8[] {
+        mut out = u8[];
+        if self.peek() == 60 {
+            self.advance();
+            while self.more() {
+                if self.peek() == 62 {
+                    self.advance();
+                    break;
+                }
+                out.push(u8(self.peek()));
+                self.advance();
+            }
+            return out;
+        }
+        while self.more() {
+            b := self.peek();
+            mut letter = false;
+            if (b >= 65) & (b <= 90) {
+                letter = true;
+            }
+            if (b >= 97) & (b <= 122) {
+                letter = true;
+            }
+            if !letter {
+                break;
+            }
+            out.push(u8(b));
+            self.advance();
+        }
+        return out;
+    }
+    // `[+|-]hh[:mm[:ss]]` as seconds east of UTC. The text counts west positive, so the sign flips.
+    fn offset(self: (&mut Scanner)) -> i64 {
+        mut negative = false;
+        if self.peek() == 45 {
+            negative = true;
+            self.advance();
+        } else {
+            if self.peek() == 43 {
+                self.advance();
+            }
+        }
+        hours := self.number();
+        mut minutes = 0;
+        mut seconds = 0;
+        if self.peek() == 58 {
+            self.advance();
+            minutes = self.number();
+        }
+        if self.peek() == 58 {
+            self.advance();
+            seconds = self.number();
+        }
+        total := i64(hours) * 3600 + i64(minutes) * 60 + i64(seconds);
+        if negative {
+            return total;
+        }
+        return i64(0) - total;
+    }
+    // `[+|-]hh[:mm[:ss]]` as a time of day: seconds after midnight, negative meaning before it.
+    fn time_of_day(self: (&mut Scanner)) -> i64 {
+        mut negative = false;
+        if self.peek() == 45 {
+            negative = true;
+            self.advance();
+        } else {
+            if self.peek() == 43 {
+                self.advance();
+            }
+        }
+        hours := self.number();
+        mut minutes = 0;
+        mut seconds = 0;
+        if self.peek() == 58 {
+            self.advance();
+            minutes = self.number();
+        }
+        if self.peek() == 58 {
+            self.advance();
+            seconds = self.number();
+        }
+        total := i64(hours) * 3600 + i64(minutes) * 60 + i64(seconds);
+        if negative {
+            return i64(0) - total;
+        }
+        return total;
+    }
+    fn number(self: (&mut Scanner)) -> u64 {
+        mut value = 0;
+        while self.more() {
+            b := self.peek();
+            if (b < 48) | (b > 57) {
+                break;
+            }
+            value = value * 10 + u64(b - 48);
+            self.advance();
+        }
+        return value;
+    }
+    // A rule and, after a `/`, the local time of day it happens at (02:00 by default).
+    fn rule(self: (&mut Scanner)) -> RuleDate {
+        mut kind = 0; // 0: a zero-based day of the year, 1: month.week.weekday, 2: J day
+        if self.peek() == 77 {
+            kind = 1;
+            self.advance();
+        } else {
+            if self.peek() == 74 {
+                kind = 2;
+                self.advance();
+            }
+        }
+        first := self.number();
+        mut week = 0;
+        mut weekday = 0;
+        if kind == 1 {
+            if self.peek() == 46 {
+                self.advance();
+                week = self.number();
+            }
+            if self.peek() == 46 {
+                self.advance();
+                weekday = self.number();
+            }
+        }
+        mut seconds = i64(7200);
+        if self.peek() == 47 {
+            self.advance();
+            seconds = self.time_of_day();
+        }
+        if kind == 1 {
+            return RuleDate::WeekDay(MonthWeekDay { month: first, week: week, weekday: weekday, seconds: seconds });
+        }
+        if kind == 2 {
+            return RuleDate::NoLeapDay(DayTime { day: first, seconds: seconds });
+        }
+        return RuleDate::LeapDay(DayTime { day: first, seconds: seconds });
+    }
+}
+
+// A POSIX TZ string. Only the forms tzdata writes are accepted: a name and an offset, optionally
+// followed by a daylight name, its offset and two rules.
+pub fn parse_posix<a>(text: &a [u8]) -> PosixRule | Error {
+    mut scanner = Scanner { text: text.copy(), at: 0 };
+    standard_name := scanner.name();
+    if standard_name.len() == 0 {
+        return malformed(text, view("a POSIX TZ string without a standard name"));
+    }
+    standard_offset := scanner.offset();
+    if !scanner.more() {
+        return PosixRule {
+            standard_name: standard_name.text(),
+            standard_offset: standard_offset,
+            daylight_name: "".text(),
+            daylight_offset: standard_offset + 3600,
+            has_daylight: false,
+            start_rule: RuleDate::Unset,
+            end_rule: RuleDate::Unset,
+        };
+    }
+    daylight_name := scanner.name();
+    if daylight_name.len() == 0 {
+        return malformed(text, view("a POSIX TZ string with no rule after its standard offset"));
+    }
+    mut daylight_offset = standard_offset + 3600;
+    if scanner.more() {
+        if scanner.peek() != 44 {
+            daylight_offset = scanner.offset();
+        }
+    }
+    if !scanner.more() {
+        return malformed(text, view("a POSIX TZ string with a daylight name but no rules"));
+    }
+    if scanner.peek() != 44 {
+        return malformed(text, view("a POSIX TZ string without a comma before its rules"));
+    }
+    scanner.advance();
+    start_rule := scanner.rule();
+    if !scanner.more() {
+        return malformed(text, view("a POSIX TZ string with one rule"));
+    }
+    if scanner.peek() != 44 {
+        return malformed(text, view("a POSIX TZ string without a comma between its rules"));
+    }
+    scanner.advance();
+    end_rule := scanner.rule();
+    return PosixRule {
+        standard_name: standard_name.text(),
+        standard_offset: standard_offset,
+        daylight_name: daylight_name.text(),
+        daylight_offset: daylight_offset,
+        has_daylight: true,
+        start_rule: start_rule,
+        end_rule: end_rule,
+    };
+}
+
+// ---- the footer rule in use --------------------------------------------------------------------
+
+// The type the footer's rule gives at an instant: what the table would report if the file recorded a
+// transition there.
+fn footer_type(zone: (&TimeZone), instant: i64) -> ZoneState {
+    rule := &zone.footer;
+    standard := ZoneState { offset: rule.standard_offset, is_dst: false, abbreviation: rule.standard_name.copy() };
+    if !rule.has_daylight {
+        return standard;
+    }
+    // The year the rule's dates belong to, read in standard time: a transition is never more than a
+    // day away from the year it starts or ends.
+    year := time::date_time_at(instant + rule.standard_offset, 0).year;
+    start := transition_instant(year, &rule.start_rule, rule.standard_offset);
+    stop := transition_instant(year, &rule.end_rule, rule.daylight_offset);
+    mut dst = false;
+    if start < stop {
+        if instant >= start {
+            if instant < stop {
+                dst = true;
+            }
+        }
+    } else {
+        // Southern hemisphere: daylight saving starts late in the year and ends early in the next.
+        if instant >= start {
+            dst = true;
+        }
+        if instant < stop {
+            dst = true;
+        }
+    }
+    if dst {
+        return ZoneState { offset: rule.daylight_offset, is_dst: true, abbreviation: rule.daylight_name.copy() };
+    }
+    return standard;
+}
+
+fn is_leap(year: i64) -> bool {
+    if year % 4 != 0 {
+        return false;
+    }
+    if year % 100 != 0 {
+        return true;
+    }
+    return year % 400 == 0;
+}
+
+fn days_in_month(year: i64, month: u64) -> u64 {
+    if month == 2 {
+        if is_leap(year) {
+            return 29;
+        }
+        return 28;
+    }
+    if (month == 4) | (month == 6) | (month == 9) | (month == 11) {
+        return 30;
+    }
+    return 31;
+}
+
+// The weekday a date falls on, counting Sunday as 0 (a POSIX M rule counts that way).
+fn weekday(year: i64, month: u64, day: u64) -> u64 {
+    days := time::days_from_civil(year, month, day);
+    mut w = (days + 4) % 7; // 1970-01-01 was a Thursday;
+    if w < 0 {
+        w = w + 7;
+    }
+    return u64(w);
+}
+
+// The UTC instant a rule names in `year`, given the offset in effect before it changes (a rule's time
+// is local, so its instant is that much earlier).
+fn transition_instant(year: i64, rule: (&RuleDate), before: i64) -> i64 {
+    mut day = 0;
+    mut local_time = i64(7200);
+    match rule {
+        WeekDay(month_rule) => {
+            first := weekday(year, month_rule.month, 1);
+            mut date = 1 + ((month_rule.weekday + 7 - first) % 7);
+            if month_rule.week == 5 {
+                while date + 7 <= days_in_month(year, month_rule.month) {
+                    date = date + 7;
+                }
+            } else {
+                mut extra = 1;
+                while extra < month_rule.week {
+                    date = date + 7;
+                    extra = extra + 1;
+                }
+                if date > days_in_month(year, month_rule.month) {
+                    date = date - 7;
+                }
+            }
+            local_time = month_rule.seconds;
+            day = time::days_from_civil(year, month_rule.month, date);
+        },
+        LeapDay(day_rule) => {
+            local_time = day_rule.seconds;
+            day = time::days_from_civil(year, 1, 1) + i64(day_rule.day);
+        },
+        NoLeapDay(day_rule) => {
+            local_time = day_rule.seconds;
+            day = time::days_from_civil(year, 1, 1) + i64(day_rule.day) - 1;
+        },
+        Unset => {
+            return i64(0);
+        }
+    }
+    return i64(day) * 86400 + local_time - before;
+}
+
+// ---- loading -----------------------------------------------------------------------------------
+
+fn is_windows() -> bool {
+    t := host::target();
+    return (t == 3) || (t == 4);
+}
+
+// The directory the zone files live in: `$TZDIR`, or the platform's own.
+pub fn zone_directory() -> string {
+    found := host::env(view("TZDIR"));
+    if found.len() != 0 {
+        return strings::to_text_lossy(view(found));
+    }
+    return "/usr/share/zoneinfo".text();
+}
+
+// Whether `name` may be used as a zone: a relative path of ordinary components, so a name can never
+// name a file outside the zone directory - no leading separator, no `.` or `..` component and no
+// empty one.
+fn valid_name<a>(name: &a [u8]) -> bool {
+    n := name.len();
+    if n == 0 {
+        return false;
+    }
+    if name[0] == 47 {
+        return false;
+    }
+    mut start = 0;
+    mut i = 0;
+    while i <= n {
+        mut boundary = false;
+        if i == n {
+            boundary = true;
+        } else {
+            if name[i] == 47 {
+                boundary = true;
+            }
+        }
+        if boundary {
+            if i == start {
+                return false;
+            }
+            part := view(name[start:i]);
+            if is_component(part, view("..")) {
+                return false;
+            }
+            if is_component(part, view(".")) {
+                return false;
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn is_component<a, b>(part: &a [u8], text: &b [u8]) -> bool {
+    if part.len() != text.len() {
+        return false;
+    }
+    mut i = 0;
+    while i < part.len() {
+        if part[i] != text[i] {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// Loads the zone `name` from the system's zone directory, honouring `$TZDIR`.
+pub fn load<a>(name: &a [u8]) -> TimeZone | Error {
+    if !valid_name(name) {
+        return malformed(name, view("not a zone name"));
+    }
+    mut full = u8[];
+    for b in view(zone_directory()) {
+        full.push(b);
+    }
+    full.push(47);
+    for b in name {
+        full.push(b);
+    }
+    match fs::read(view(full)) {
+        data: u8[] => { return parse_named(view(data), name); },
+        e: fs::Error => {
+            if e.is_not_found() {
+                return malformed(name, view("no such zone"));
+            }
+            return malformed(name, view("cannot be read"));
+        }
+    }
+}
+
+// The zone when the machine has it, or None: for a test that pins facts about /usr/share/zoneinfo
+// only where it exists, and skips cleanly where it does not.
+pub fn available<a>(name: &a [u8]) -> TimeZone? {
+    match load(name) {
+        zone: TimeZone => { return Some(zone); },
+        e: Error => { return None; }
+    }
+}
+
+// ---- rendering ---------------------------------------------------------------------------------
+
+fn sign_of(offset: i64) -> string {
+    if offset < 0 {
+        return "-".text();
+    }
+    return "+".text();
+}
+
+// `+01:00` and `-10:30`: an offset as the "local time with its offset" form spells it.
+pub fn offset_text(offset: i64) -> string {
+    mut value = offset;
+    if value < 0 {
+        value = i64(0) - value;
+    }
+    hours := u64(value / 3600);
+    minutes := u64((value % 3600) / 60);
+    seconds := u64(value % 60);
+    if seconds != 0 {
+        return format("{}{}:{}:{}", sign_of(offset), hours, pad_two(minutes), pad_two(seconds));
+    }
+    return format("{}{}:{}", sign_of(offset), hours, pad_two(minutes));
+}
+
+fn pad_two(value: u64) -> string {
+    if value < 10 {
+        return format("0{}", value);
+    }
+    return format("{}", value);
+}
+
+fn offset_body(offset: i64) -> string {
+    mut value = offset;
+    if value < 0 {
+        value = i64(0) - value;
+    }
+    hours := u64(value / 3600);
+    minutes := u64((value % 3600) / 60);
+    seconds := u64(value % 60);
+    if seconds != 0 {
+        return format("{}:{}:{}", hours, pad_two(minutes), pad_two(seconds));
+    }
+    return format("{}:{}", hours, pad_two(minutes));
+}

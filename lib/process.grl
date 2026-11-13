@@ -1,5 +1,523 @@
 module process;
 use host;
+use core;
+use io;
+use strings;
+
+// Running other programs, and this process's own environment.
+//
+// A child is started from an argument vector, never from a shell: `spawn(["git", "status"])` runs
+// `git` with exactly that argument, and nothing in a string is reinterpreted. The executable is
+// looked up on `PATH` by the parent. `run` additionally connects the child's stdout and stderr to
+// pipes and reads both, so a program can inspect what a child printed without a temporary file.
+//
+// A status is a value, not a number: `Exited(code)` or `Signaled(signal)`. Windows has no signals,
+// so there a status is always an exit code.
+
+// ---- errors ------------------------------------------------------------------------------------
+
+// A failure to start or to reap a child: the program it was about, and the error underneath.
+pub struct Error {
+    program: u8[],
+    kind: io::Error
+}
+
+impl Error {
+    // The program as the caller spelled it (the first entry of the argument vector).
+    pub fn program<a>(self: (&a Error)) -> (&a [u8]) {
+        return view(self.program);
+    }
+    pub fn is_not_found(self: (&Error)) -> bool {
+        return self.kind.is_not_found();
+    }
+    // `program: reason`, with the name rendered as text even when its bytes are not UTF-8.
+    pub fn show<a>(self: (&a Error)) -> string {
+        return format("{}: {}", strings::to_text_lossy(view(self.program)), self.kind.show());
+    }
+}
+
+// ---- status ------------------------------------------------------------------------------------
+
+// How a child ended. `Exited(code)` is a code the program chose; `Signaled(signal)` is the signal
+// that ended it, so `9` for a kill -9 and `11` for a segmentation fault.
+pub enum Status { Exited(u64), Signaled(u64) }
+
+impl Status {
+    // The exit code, or 0 when a signal ended the child (see `signal`).
+    pub fn code(self: (&Status)) -> u64 {
+        match self {
+            Exited(code) => { return code; },
+            Signaled(signal) => { return 0; }
+        }
+    }
+    // The signal number, or 0 when the child exited.
+    pub fn signal(self: (&Status)) -> u64 {
+        match self {
+            Signaled(signal) => { return signal; },
+            Exited(code) => { return 0; }
+        }
+    }
+    // Whether the child exited with code 0. A signalled child is never a success.
+    pub fn is_success(self: (&Status)) -> bool {
+        match self {
+            Exited(code) => { return code == 0; },
+            Signaled(signal) => { return false; }
+        }
+    }
+    // `exited with status 3` / `killed by signal 9 (SIGKILL)`.
+    pub fn show(self: (&Status)) -> string {
+        match self {
+            Exited(code) => { return format("exited with status {}", code); },
+            Signaled(signal) => {
+                name := signal_name(signal);
+                if name.len() == 0 {
+                    return format("killed by signal {}", signal);
+                }
+                return format("killed by signal {} ({})", signal, name);
+            }
+        }
+    }
+}
+
+// The usual name of a signal number, or empty text for one this module does not name.
+pub fn signal_name(number: u64) -> string {
+    if number == 1 { return "SIGHUP".text(); }
+    if number == 2 { return "SIGINT".text(); }
+    if number == 3 { return "SIGQUIT".text(); }
+    if number == 4 { return "SIGILL".text(); }
+    if number == 5 { return "SIGTRAP".text(); }
+    if number == 6 { return "SIGABRT".text(); }
+    if number == 7 { return "SIGBUS".text(); }
+    if number == 8 { return "SIGFPE".text(); }
+    if number == 9 { return "SIGKILL".text(); }
+    if number == 11 { return "SIGSEGV".text(); }
+    if number == 13 { return "SIGPIPE".text(); }
+    if number == 14 { return "SIGALRM".text(); }
+    if number == 15 { return "SIGTERM".text(); }
+    return "".text();
+}
+
+// The status a platform's wait word describes: `code << 8` for an exit, the signal number in the low
+// bits when a signal ended the child.
+fn describe(word: u64) -> Status {
+    signal := word & 127;
+    if signal != 0 {
+        return Status::Signaled(signal);
+    }
+    return Status::Exited((word / 256) & 255);
+}
+
+// ---- environment -------------------------------------------------------------------------------
+
+// A set of `NAME=VALUE` entries. It starts as a copy of what a process inherits and is what a child
+// is handed; changing it changes what this process passes on, never the operating system's own
+// environment of the running image.
+pub struct Environment {
+    entries: u8[][]
+}
+
+// This process's environment as entries, so a caller can add to what it inherits instead of
+// replacing everything.
+pub fn environment() -> Environment {
+    return Environment { entries: host::environment() };
+}
+// An empty set: a child started with it receives no environment at all.
+pub fn empty() -> Environment {
+    return Environment { entries: u8[][] };
+}
+
+// Whether two names are the same variable. Windows compares names without regard to case, as its
+// own environment does; every other platform compares them as bytes.
+fn name_matches<a, b>(x: &a [u8], y: &b [u8]) -> bool {
+    if x.len() != y.len() {
+        return false;
+    }
+    mut i = 0;
+    while i < x.len() {
+        a := x[i];
+        b := y[i];
+        if is_windows() {
+            if (a >= 65) & (a <= 90) {
+                a = a + 32;
+            }
+            if (b >= 65) & (b <= 90) {
+                b = b + 32;
+            }
+        }
+        if a != b {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn is_windows() -> bool {
+    t := host::target();
+    return (t == 3) || (t == 4);
+}
+
+// Whether `entry` is the variable `name` ("NAME=VALUE" with a matching name).
+fn entry_is<a, b>(entry: &a [u8], name: &b [u8]) -> bool {
+    n := name.len();
+    if entry.len() <= n {
+        return false;
+    }
+    if entry[n] != 61 {
+        return false;
+    }
+    return name_matches(entry[0:n], name);
+}
+
+impl Environment {
+    pub fn len(self: (&Environment)) -> u64 {
+        return self.entries.len();
+    }
+    pub fn is_empty(self: (&Environment)) -> bool {
+        return self.entries.len() == 0;
+    }
+    // The `NAME=VALUE` entry at `index`, as a copy.
+    pub fn entry_at(self: (&Environment), index: u64) -> u8[] {
+        return self.entries[index].copy();
+    }
+    // A copy of every entry, in the order they are held.
+    pub fn all(self: (&Environment)) -> u8[][] {
+        mut out = u8[][];
+        mut i = 0;
+        while i < self.entries.len() {
+            out.push(self.entries[i].copy());
+            i = i + 1;
+        }
+        return out;
+    }
+    // The value of `name`, or None when the set does not hold it (an empty value is `Some` and empty).
+    pub fn get<a>(self: (&Environment), name: (&a [u8])) -> u8[]? {
+        mut i = 0;
+        while i < self.entries.len() {
+            entry := &self.entries[i];
+            if entry_is(entry, name) {
+                start := name.len() + 1;
+                mut out = u8[];
+                for k in start..entry.len() {
+                    out.push(entry[k]);
+                }
+                return Some(out);
+            }
+            i = i + 1;
+        }
+        return None;
+    }
+    pub fn has<a>(self: (&Environment), name: (&a [u8])) -> bool {
+        match self.get(name) {
+            Some(value) => { return true; },
+            None => { return false; }
+        }
+    }
+    // Sets `name` to `value`, replacing an entry of the same name.
+    pub fn set<a>(self: (&mut Environment), name: (&a [u8]), value: (&a [u8])) -> unit {
+        mut entry = u8[];
+        for b in name {
+            entry.push(b);
+        }
+        entry.push(61);
+        for b in value {
+            entry.push(b);
+        }
+        mut i = 0;
+        while i < self.entries.len() {
+            if entry_is(&self.entries[i], name) {
+                self.entries[i] = entry;
+                return ();
+            }
+            i = i + 1;
+        }
+        self.entries.push(entry);
+        return ();
+    }
+    // Removes `name`, answering whether it was there.
+    pub fn remove<a>(self: (&mut Environment), name: (&a [u8])) -> bool {
+        mut i = 0;
+        while i < self.entries.len() {
+            if entry_is(&self.entries[i], name) {
+                mut k = i;
+                while k + 1 < self.entries.len() {
+                    self.entries[k] = self.entries[k + 1].copy();
+                    k = k + 1;
+                }
+                self.entries.pop();
+                return true;
+            }
+            i = i + 1;
+        }
+        return false;
+    }
+}
+
+// One variable of this process's own environment, or None when it is unset.
+pub fn var<a>(name: &a [u8]) -> u8[]? {
+    mut entries = host::environment();
+    mut i = 0;
+    while i < entries.len() {
+        entry := &entries[i];
+        if entry_is(entry, name) {
+            start := name.len() + 1;
+            mut out = u8[];
+            for k in start..entry.len() {
+                out.push(entry[k]);
+            }
+            return Some(out);
+        }
+        i = i + 1;
+    }
+    return None;
+}
+
+// Every entry of this process's own environment, as `NAME=VALUE` copies.
+pub fn environment_entries() -> u8[][] {
+    return host::environment();
+}
+
+// ---- children ----------------------------------------------------------------------------------
+
+// A child that has been started and not yet waited for.
+pub struct Child {
+    id: u64,
+    program: u8[]
+}
+
+impl Child {
+    // The child's identifier, for a message or a `host::` call.
+    pub fn id(self: (&Child)) -> u64 {
+        return self.id;
+    }
+    // Waits for the child to end and reaps it, answering how it ended. Each child is waited for
+    // exactly once: the value is consumed, so a second wait is not expressible.
+    pub fn wait(self: Child) -> Status | Error {
+        word := host::wait(self.id);
+        if word > 9223372036854775807 {
+            return Error { program: self.program.copy(), kind: io::from_errno(wrapping_sub(0, word)) };
+        }
+        return describe(word);
+    }
+}
+
+// The argument vectors a child is started from, copied out of a view.
+fn copy_args<a>(argv: &a u8[][]) -> u8[][] {
+    mut args = u8[][];
+    mut i = 0;
+    while i < argv.len() {
+        args.push(argv[i].copy());
+        i = i + 1;
+    }
+    return args;
+}
+fn copy_entries(env: (&Environment)) -> u8[][] {
+    mut entries = u8[][];
+    mut i = 0;
+    while i < env.len() {
+        entries.push(env.entry_at(i));
+        i = i + 1;
+    }
+    return entries;
+}
+
+fn bad_argv<a>(argv: &a u8[][]) -> Error {
+    mut name = u8[];
+    if argv.len() != 0 {
+        name = argv[0].copy();
+    }
+    return Error { program: name, kind: io::Error::Other(22) }; // EINVAL: no program to start
+}
+
+// Starts `argv[0]` with `argv[1..]` as its arguments, inheriting this process's environment and the
+// standard streams, and answers the child. It inherits nothing else: the child shares this process's
+// working directory and file descriptors, as a fork does.
+pub fn spawn<a>(argv: &a u8[][]) -> Child | Error {
+    mut env = environment();
+    return spawn_with(argv, &env);
+}
+
+// The same, with `env` as the child's whole environment.
+pub fn spawn_with<a>(argv: &a u8[][], env: (&Environment)) -> Child | Error {
+    if argv.len() == 0 {
+        return bad_argv(argv);
+    }
+    id := host::spawn(copy_args(argv), copy_entries(env), 1, 2);
+    if id > 9223372036854775807 {
+        return Error { program: argv[0].copy(), kind: io::from_errno(wrapping_sub(0, id)) };
+    }
+    return Child { id: id, program: argv[0].copy() };
+}
+
+// What a captured child produced: how it ended, and what each stream held, up to the limit.
+pub struct Output {
+    status: Status,
+    stdout: u8[],
+    stderr: u8[],
+    truncated: bool
+}
+
+impl Output {
+    // The exit code, or 0 when a signal ended the child.
+    pub fn code(self: (&Output)) -> u64 {
+        match self.status {
+            Status::Exited(code) => { return code; },
+            Status::Signaled(signal) => { return 0; }
+        }
+    }
+    // The signal number, or 0 when the child exited.
+    pub fn signal(self: (&Output)) -> u64 {
+        match self.status {
+            Status::Signaled(signal) => { return signal; },
+            Status::Exited(code) => { return 0; }
+        }
+    }
+    pub fn succeeded(self: (&Output)) -> bool {
+        match self.status {
+            Status::Exited(code) => { return code == 0; },
+            Status::Signaled(signal) => { return false; }
+        }
+    }
+    // How the child ended, as text: `exited with status 3`, `killed by signal 9 (SIGKILL)`.
+    pub fn show_status(self: (&Output)) -> string {
+        match self.status {
+            Status::Exited(code) => { return format("exited with status {}", code); },
+            Status::Signaled(signal) => { return format("killed by signal {} ({})", signal, signal_name(signal)); }
+        }
+    }
+    // The bytes the child wrote to its standard output, without copying them.
+    pub fn out<a>(self: (&a Output)) -> (&a [u8]) {
+        return view(self.stdout);
+    }
+    // The bytes the child wrote to its standard error, without copying them.
+    pub fn err<a>(self: (&a Output)) -> (&a [u8]) {
+        return view(self.stderr);
+    }
+    // Whether a stream reached the limit and was cut off. The child then writes into a pipe with no
+    // reader and sees an error, so a run that hit the limit is not a complete record of the output.
+    pub fn is_truncated(self: (&Output)) -> bool {
+        return self.truncated;
+    }
+    pub fn status(self: (&Output)) -> Status {
+        match self.status {
+            Status::Exited(code) => { return Status::Exited(code); },
+            Status::Signaled(signal) => { return Status::Signaled(signal); }
+        }
+    }
+}
+
+// One step of a capture: 0 when neither end is ready, 1 at end-of-file, 2 when `limit` is reached, 3
+// when the read failed.
+fn step<a>(out: (&mut u8[]), fd: u64, limit: u64) -> u64 {
+    ready := host::ready(fd, 5);
+    if ready > 9223372036854775807 {
+        return 3;
+    }
+    if ready == 0 {
+        return 0;
+    }
+    chunk := host::read_fd(fd, 8192);
+    n := chunk.len();
+    if n == 0 {
+        return 1;
+    }
+    mut i = 0;
+    while i < n {
+        if out.len() >= limit {
+            return 2;
+        }
+        out.push(chunk[i]);
+        i = i + 1;
+    }
+    return 0;
+}
+
+// Starts `argv`, reads both of its output streams until it ends, and reaps it: at most `limit` bytes
+// are kept of each stream. Both pipes are read a step at a time, so a child that fills one while
+// writing nothing to the other still finishes.
+pub fn run_with<a>(argv: &a u8[][], env: (&Environment), limit: u64) -> Output | Error {
+    if argv.len() == 0 {
+        return bad_argv(argv);
+    }
+    out_pair := host::pipe();
+    err_pair := host::pipe();
+    id := host::spawn(copy_args(argv), copy_entries(env), out_pair[1], err_pair[1]);
+    host::close(out_pair[1]);
+    host::close(err_pair[1]);
+    if id > 9223372036854775807 {
+        host::close(out_pair[0]);
+        host::close(err_pair[0]);
+        return Error { program: argv[0].copy(), kind: io::from_errno(wrapping_sub(0, id)) };
+    }
+    mut out = u8[];
+    mut err = u8[];
+    mut read_out = true;
+    mut read_err = true;
+    mut truncated = false;
+    while read_out || read_err {
+        if read_out {
+            code := step(&mut out, out_pair[0], limit);
+            if code == 1 {
+                read_out = false;
+            }
+            if code == 2 {
+                truncated = true;
+                read_out = false;
+            }
+            if code == 3 {
+                read_out = false;
+            }
+        }
+        if read_err {
+            code := step(&mut err, err_pair[0], limit);
+            if code == 1 {
+                read_err = false;
+            }
+            if code == 2 {
+                truncated = true;
+                read_err = false;
+            }
+            if code == 3 {
+                read_err = false;
+            }
+        }
+    }
+    host::close(out_pair[0]);
+    host::close(err_pair[0]);
+    word := host::wait(id);
+    if word > 9223372036854775807 {
+        return Error { program: argv[0].copy(), kind: io::from_errno(wrapping_sub(0, word)) };
+    }
+    return Output { status: describe(word), stdout: out, stderr: err, truncated: truncated };
+}
+
+// `argv` run to completion with both streams captured, keeping up to one mebibyte of each.
+pub fn run<a>(argv: &a u8[][]) -> Output | Error {
+    mut env = environment();
+    return run_with(argv, &env, 1048576);
+}
+
+// The same, into a caller's environment.
+pub fn run_in<a>(argv: &a u8[][], env: (&Environment)) -> Output | Error {
+    return run_with(argv, env, 1048576);
+}
 
 // Ends the process at once with `code` (0-255). Pending cleanup does not run.
-pub fn exit(code:u64){host::exit(code);}
+pub fn exit(code: u64) {
+    host::exit(code);
+}
+
+// The running image's path, as the platform reports it (`/proc/self/exe` on Linux).
+pub fn executable() -> u8[] {
+    return host::exe_path();
+}
+
+// This process's working directory, or `NotFound` when the platform cannot report it (a deleted
+// directory).
+pub fn current_dir() -> u8[] | io::Error {
+    here := host::cwd();
+    if here.len() == 0 {
+        return io::Error::NotFound;
+    }
+    return here;
+}
