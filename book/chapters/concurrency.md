@@ -74,6 +74,26 @@ print see whatever interleaving the host produced. A task's stack is a 1 MiB res
 only the pages it touches, and recursing past the bottom of it is a named runtime error,
 `error: stack overflow`, with exit status 134 rather than a write into the neighbouring mapping.
 
+### A failed task is a value
+
+`join(handle)` is "this task must have succeeded": a task that fails a check - a bounds index, a
+checked overflow, a division by zero, `!` on a failed `Option`/`Result`, `assert` - or that calls
+`task_fail(text)` explicitly reports that failure at the join, and the process ends there as it
+always has. `try_join(handle)` is the containing form: it never aborts, and it returns the
+language's own result shape rather than a special error type.
+
+{{example:task-failure}}
+
+`R |? TaskFailure` is the same structural union as `string |? Error`, so `?` and `match` work on it
+unchanged, and `TaskFailure` carries the check's `kind`, its `message` and the `site` of the
+statement that failed. The failure never unwinds a frame - the task's stack is discarded whole, the
+same rule as an abort, bounded to one task - so what the dead frames owned is not released: that
+leak is the accepted cost, and the exit-time allocation check reports it instead of aborting. Because
+an outcome you never looked at is the failure path no one chose, the compiler refuses to drop one:
+`ignore_failure(try_join(t))` is the explicit opt-out. A failure belongs to the task, not to the
+scope - the siblings keep running and their joins return their values, and cancellation is still
+something a program asks for with `scope.cancel()` rather than a side effect of a failure.
+
 General `async`/`await` syntax is not provided; the scope and task APIs are the current surface.
 
 ## What this month added
@@ -102,9 +122,16 @@ Three things, and one of them removed work rather than adding it.
   cannot ride into a job inside what looks like plain data, and the diagnostic names the capture that
   denied it.
 
-What it still does not do: a job's failure is still a process abort (there is no error value to cross
-a boundary), there are no dependency edges between jobs, and a graph of asset jobs can still starve
-interactive work because the pool has one queue class. `docs/design/parallelism.md` states each of
-those with the reason.
+- **A task's failure became a value.** A green task that fails a check, or calls `task_fail(text)`,
+  is contained at its own top frame: the stack is discarded whole, no frame is unwound, and
+  `try_join` returns `R |? TaskFailure` with the failure's kind, message and site. `join` keeps
+  "must have succeeded", `ignore_failure` is the explicit opt-out from handling, and the compiler
+  refuses to drop an outcome that was never looked at. `docs/design/task-failure-containment.md`,
+  decision B5a.
+
+What it still does not do: a *pool job*'s failure is still a process abort (a job has no scheduler
+frame to return to and no scope to report into), there are no dependency edges between jobs, and a
+graph of asset jobs can still starve interactive work because the pool has one queue class.
+`docs/design/parallelism.md` states each of those with the reason.
 
 **Try it:** remove `shared.total.lock_with(1, add);` and compare the two totals.

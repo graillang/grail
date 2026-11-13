@@ -22,6 +22,7 @@ decision without a stated trigger is what made these items outstanding for so lo
 | B3 | A foreign call **blocks the executing thread**; no green-task scheduling integration is promised for v1. Foreign calls are valid on every runtime thread (per-thread host TLS; runtime threads are glibc threads); callbacks on C-created threads abort by name. | Decided; task semantics now identical on Linux and Windows |
 | B4 | Windows runs **the same green scheduler as Linux** (Win32 fibers on one scheduler thread); thread-per-task is an explicit opt-in (`GRAIL_TASKS=thread`). IOCP stays a named future work item. **Amended by G23:** Windows now runs one worker per core with Win32 fibers, and the reactor *is* an IOCP (see the amendment at the end of B4). | Decided and implemented; amended |
 | B5 | **Abort never unwinds**; nothing may unwind across the C boundary. There is no `defer` and no cleanup runs on an abort path. | Decided |
+| B5a | A runtime failure **inside a task** is contained at that task's join instead of ending the process: the stack is discarded whole (no unwinding), the join returns `R |? TaskFailure`, and the compiler refuses to drop an unhandled outcome. Amends B5: containment is a *task* boundary, not a process one. | Implemented (green scheduler; Linux x86-64 verified) |
 | B6 | Closures capture references and views and cannot outlive the borrow; **`FnMut`/mutable captures are implemented** under the six rules fixed below. | Implemented |
 | B7 | Records passed by value to C: **accepted**, spelling `v: byval R`. | Implemented on every ABI: SysV x86-64, AAPCS64, RV64, Win64 and Windows ARM64 |
 
@@ -392,6 +393,75 @@ before dying.
 `20426-20429`); the absence of CFI/`.eh_frame` in `compiler/native.grl`'s emission; PE `.pdata`
 without handlers; the native abort cases; and the "Abort paths do not unwind" statement in
 [implementation-status.md](implementation-status.md).
+
+## B5a: a task failure is contained at its join
+
+**Decision.** A runtime check failure *inside a task* no longer ends the process. It is contained at
+the task's own top frame and delivered to the join as a value: `try_join(t)` returns
+`R |? TaskFailure` - the language's existing structural result type, with a synthesized
+`.outcome::Failure` record carrying the failure kind, its message text and its call-site text. The
+failing task's stack is **discarded whole**: no frame is unwound, no destructor runs, nothing crosses
+a C frame, exactly as B5 requires of an abort - the difference is that the boundary is one task
+instead of the process. `join` keeps its meaning ("this task must have succeeded") and reports the
+recorded failure at the join site with today's status 134 and today's one-reporter rule, so no
+existing program changes behaviour.
+
+A join that can fail must be handled: the compiler refuses to drop an `.outcome` union value where it
+is still owned (`try_join(t);`, or a binding never consumed), and `ignore_failure(e)` is the explicit
+opt-out that drops the value by the ordinary rules. Design and the full semantics catalogue:
+[task-failure-containment.md](task-failure-containment.md).
+
+**Semantics fixed here.** A failed task produces no placeholder result. Its children are *not*
+cancelled: they belong to the same scope, run to completion and keep their own outcomes, because
+cancellation in v1 is cooperative and explicit and because "the failure cancels its siblings" would
+give the failure path two behaviours. A handle is affine, so a join happens once and the answer about
+a failed task is a property of the value, not a second join. An abandoned handle whose task failed
+re-raises at the scope exit (contained by the enclosing task if there is one, fatal at the top
+level), since `task_scope`'s result type has no failure arm to carry it. `rt_abort` sites - allocator
+invariants, allocation failure, the end-of-main leak check, stack overflow - are **not** contained:
+they are not values.
+
+**Mechanism, as implemented.** `rt_fail` asks whether the current thread is running a green task and,
+if it is, records the check kind, its operands and the failing statement's static site-table entry in
+the task record - **allocating nothing**, so a trap cannot deadlock on the allocator lock - marks the
+task finished and returns to the scheduler's saved context. The scheduler's ordinary completion path
+releases the (recyclable) stack and publishes the task to its joiner. The message and site texts are
+built later, by the joiner that asked for them.
+
+**Accepted cost.** The dead frames' owned heap values leak. The stack mapping is recycled (stack
+bytes are scratch, not ownership), and the end-of-main leak counter cannot subtract the leaked blocks
+exactly (no per-frame slot map exists, and building one is the unwind data B5 refuses to emit), so
+after a containment it reports `note: N allocation(s) still live after a contained task failure` on
+fd 2 and exits normally, while a program that contained nothing still aborts on a leak as before.
+Nothing is silently accepted; the number is printed.
+
+**Alternatives considered.** (a) Unwinding with destructors: rejected for B5's reasons - CFI on ELF,
+`.pdata` handlers on Windows, a defined foreign-exception policy, and a per-task table set; B5 already
+rejected it for the process. (b) A handler installed earlier than the join (`try_task(body, handler)`):
+rejected - it moves recovery away from the value and hides the failure from the place that must decide
+what to do. (c) A sentinel result (`join` yields `0` and a flag elsewhere): rejected - not every result
+type has a zero value, and nothing forces the flag to be read. (d) A generic `Result<R, E>`: ideal but
+generic enums are not implemented, so the structural union the language already has for `T |? E` is
+reused, which is why no new type kind exists for this. (e) Reset the discarded stack: rejected as a
+1 MiB write that buys nothing. (f) Thread-per-task containment: not implemented - a task owns its OS
+thread there, so there is no scheduler frame to return to; that mode keeps the process abort.
+
+**Consequence if wrong.** If the failure record is not enough to diagnose a failure (no usable site,
+no message) programs will re-run traps under a debugger, which is what containment exists to avoid;
+the record is sized and shaped so that adding a backtrace *text* is a runtime-only change. If the
+compiler's forced handling is wrong in either direction the damage is asymmetric: too strict and
+programs are written with `ignore_failure` around real failures (a review smell), too lax and a
+failure disappears - which is why the check is a property of the type and the opt-out is a word in
+the source, not a default. If the leak accounting is relied on after a containment, the note on fd 2
+is the only evidence; nothing subtracts an exact figure.
+
+**Enforced by.** `rt_fail`'s containment branch, `rt_contain_site`/`rt_contain_text`, `rt_site_here`,
+`rt_task_outcome`/`rt_task_message`/`rt_task_site` and the extended (240-byte) task record in
+`compiler/runtime.grl`;
+`rt_scope_end`'s re-raise; the `try_join`, `task_fail` and `ignore_failure` builtins,
+`make_union`'s `.outcome` decl, `.outcome::Failure`, and the drop check in `release`
+(`compiler/native.grl`); the `tfail-` cases in `tests/native-cases.json`; and the unchanged
+`abort-in-green-task-ends-process` and `parallel-map-real-threads-contention` cases.
 
 ## B6: references captured, FnMut implemented
 

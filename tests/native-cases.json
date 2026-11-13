@@ -8380,5 +8380,42 @@
     "diagnostic": [
       "no capability proof for the type parameter"
     ]
+  },
+  {
+    "name": "tfail-explicit-failure-at-join",
+    "note": "A task that fails explicitly (task_fail) is contained: the process survives and the join sees a TaskFailure carrying the failure kind and the message the task gave (docs/design/task-failure-containment.md).",
+    "source": "use host;\nfn work(n: u64, base: u64) -> u64 {\n    if n == 0 {\n        task_fail(view(\"bad input\"));\n    }\n    return n + base;\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    t := spawn(sc, 0, work);\n    match try_join(t) {\n        v: u64 => { println(v); },\n        f: TaskFailure => {\n            println(f.kind);\n            host::print(f.message);\n            host::print(view(\"\\n\"));\n        },\n    }\n    return 0;\n}\nfn main() {\n    host::print(view(\"before\\n\"));\n    task_scope(1, body);\n    host::print(view(\"after\\n\"));\n}\n",
+    "stdout": "before\n13\nbad input\nafter\n"
+  },
+  {
+    "name": "tfail-trap-contained-at-join",
+    "note": "An out-of-bounds index inside a task is contained: no frame is unwound, the stack is discarded and the join reports the check failure with its message and its call site.",
+    "source": "use host;\nfn victim(n: u64, base: u64) -> u64 {\n    v := u64[10, 20, 30];\n    return v[n + 5];\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    t := spawn(sc, 1, victim);\n    match try_join(t) {\n        v: u64 => { println(v); },\n        f: TaskFailure => {\n            host::print(f.message);\n            host::print(view(\"\\n\"));\n            println(f.kind);\n            if f.site == \"\" {\n                host::print(view(\"no site\\n\"));\n            } else {\n                host::print(view(\"site\\n\"));\n            }\n        },\n    }\n    return 0;\n}\nfn main() {\n    host::print(view(\"before\\n\"));\n    task_scope(1, body);\n    host::print(view(\"after\\n\"));\n}\n",
+    "stdout": "before\nindex 6 out of bounds for length 3\n1\nsite\nafter\n"
+  },
+  {
+    "name": "tfail-scope-one-fails-one-succeeds",
+    "note": "A failure is one task's outcome, not the process's: the sibling tasks in the scope finish and are joined, and only the failed one's join reports a failure.",
+    "source": "use host;\nfn good(n: u64, base: u64) -> u64 { return n + base; }\nfn bad(n: u64, base: u64) -> u64 {\n    task_fail(view(\"first\"));\n    return 0;\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    a := spawn(sc, 20, good);\n    b := spawn(sc, 0, bad);\n    c := spawn(sc, 22, good);\n    match try_join(b) {\n        v: u64 => { println(v); },\n        f: TaskFailure => { host::print(f.message); host::print(view(\"\\n\")); },\n    }\n    println(join(a) + join(c));\n    return 0;\n}\nfn main() { task_scope(1, body); }\n",
+    "stdout": "first\n44\n"
+  },
+  {
+    "name": "tfail-child-failure-propagates-to-parent-join",
+    "note": "A task whose own scope contains a failed task it never joined re-raises at that scope exit, which is contained by the parent task and reported by the parent's join.",
+    "source": "use host;\nfn inner<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    task_fail(view(\"child\"));\n    return 0;\n}\nfn parent(n: u64, base: u64) -> u64 {\n    return task_scope(7, inner);\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    t := spawn(sc, 0, parent);\n    match try_join(t) {\n        v: u64 => { println(v); },\n        f: TaskFailure => {\n            host::print(f.message);\n            host::print(view(\"\\n\"));\n        },\n    }\n    return 0;\n}\nfn main() { task_scope(1, body); }\n",
+    "stdout": "child\n"
+  },
+  {
+    "name": "tfail-success-path-unchanged",
+    "note": "A task that succeeds is unchanged: same output as before containment existed, no failure record and no allocation added to the join.",
+    "source": "use host;\nfn work(n: u64, base: u64) -> u64 { return n + base; }\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    a := spawn(sc, 5, work);\n    b := spawn(sc, 6, work);\n    return join(a) + join(b);\n}\nfn main() { println(task_scope(1, body)); }\n",
+    "stdout": "13\n"
+  },
+  {
+    "name": "tfail-reject-discarded-outcome",
+    "note": "A join that can fail must be handled: a try_join whose outcome is dropped is a compile error until the program writes ignore_failure(...).",
+    "reject": true,
+    "diagnostic": "the outcome of a joined task must be handled",
+    "source": "fn work(n: u64, base: u64) -> u64 { return n + base; }\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    t := spawn(sc, 5, work);\n    try_join(t);\n    return 0;\n}\nfn main() { task_scope(1, body); }\n"
   }
 ]

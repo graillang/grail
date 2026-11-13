@@ -91,60 +91,27 @@ fn rt_stack_overflow() -> u64 {
 // frame-pointer chain is walked outwards, and every frame whose return address falls in a statement
 // outside the runtime adds a line. Without a table (debug builds, the LLVM backend, macOS) the
 // message is printed alone.
+// A check failed. Two outcomes, decided before the abort claim is touched:
+//
+//  * inside a green task, the failure is *contained*: it becomes a value at the task's join (see
+//    docs/design/task-failure-containment.md) and the process keeps running. The task's stack is
+//    discarded whole by the scheduler - no frame is unwound and no destructor runs, which is the
+//    B5 rule applied to one task instead of the process. **Nothing is allocated here**: the failure
+//    is recorded as numbers in the task record and left for the join to format, so a trap is safe
+//    even where the allocator lock is held;
+//  * anywhere else (the main thread, an offload thread, a C callback, thread-per-task mode) the
+//    process ends exactly as it always has: one reporter, SIGABRT from the main thread, status 134.
+//    The claim is taken before any text is built, so a second failing thread cannot garble the
+//    report.
 fn rt_fail(kind: u64, a: u64, b: u64) -> u64 {
-    // The report is written once per process: a second failing thread parks before it builds or
-    // prints anything (see rt_abort).
+    t := rt_containable();
+    if t != 0 {
+        return rt_contain_site(t, kind, a, b, rt_site_here(t + 208), 0);
+    }
     if rt_abort_begin() == 0 {
         rt_abort_park();
     }
-    // The message writers stop at the limit; a site line's own tail (`:line:col` and the newline) is
-    // what the reserve past it is for.
-    buf := rt_alloc(rt_fail_limit() + 196);
-    mut n = rt_fail_put(buf, 0, "error: ");
-    if kind == 1 {
-        n = rt_fail_put(buf, n, "index ");
-        n = rt_fail_num(buf, n, a);
-        n = rt_fail_put(buf, n, " out of bounds for length ");
-        n = rt_fail_num(buf, n, b);
-    } else if kind == 2 {
-        n = rt_fail_put(buf, n, "arithmetic overflow");
-    } else if kind == 3 {
-        n = rt_fail_put(buf, n, "negative value converted to an unsigned type");
-    } else if kind == 4 {
-        n = rt_fail_put(buf, n, "value has no matching variant");
-    } else if kind == 5 {
-        n = rt_fail_put(buf, n, "division by zero");
-    } else if kind == 6 {
-        n = rt_fail_put(buf, n, "unwrap of None or Err");
-    } else if kind == 7 {
-        n = rt_fail_put(buf, n, "range ");
-        n = rt_fail_num(buf, n, a);
-        n = rt_fail_put(buf, n, "..");
-        n = rt_fail_num(buf, n, b);
-        n = rt_fail_put(buf, n, " out of bounds");
-    } else if kind == 8 {
-        n = rt_fail_put(buf, n, "pop from an empty vector");
-    } else if kind == 9 {
-        n = rt_fail_put(buf, n, "byte value ");
-        n = rt_fail_num(buf, n, a);
-        n = rt_fail_put(buf, n, " does not fit in u8");
-    } else if kind == 10 {
-        n = rt_fail_put(buf, n, "C array length mismatch: got ");
-        n = rt_fail_num(buf, n, a);
-        n = rt_fail_put(buf, n, " elements for an array of ");
-        n = rt_fail_num(buf, n, b);
-    } else if kind == 11 {
-        n = rt_fail_put(buf, n, "index out of bounds");
-    } else if kind == 12 {
-        n = rt_fail_put(buf, n, "assertion failed");
-    } else {
-        n = rt_fail_put(buf, n, "the program aborted");
-    }
-    raw_putbyte(buf + n, 10);
-    n = n + 1;
-    n = rt_fail_where(buf, n);
-    rt_write_all(2, buf, n);
-    return rt_abort_final();
+    return rt_report_die(rt_fail_body_text(kind, a, b), rt_fail_site_full());
 }
 // An inline check in compiled code failed (the compiler rewrote its `call rt_abort`): for an index
 // check the vector is in `a` and the index in `b`.
@@ -153,6 +120,205 @@ fn rt_trap(a: u64, b: u64, kind: u64) -> u64 {
         return rt_fail(1, b, raw_load(wrapping_add(a, 8)));
     }
     return rt_fail(kind, a, b);
+}
+// The task whose failure this call may contain, or 0. Only the green scheduler has a containment
+// point: a thread-per-task task owns its OS thread, so there is no scheduler frame to return to and
+// that mode keeps the process abort.
+fn rt_containable() -> u64 {
+    t := rt_current();
+    if t == 0 {
+        return 0;
+    }
+    if rt_task_threads() != 0 {
+        return 0;
+    }
+    return t;
+}
+// The message body of a check failure, as an owned text: the same words the report prints, without
+// the `error: ` prefix and without the location lines.
+fn rt_fail_body_text(kind: u64, a: u64, b: u64) -> u64 {
+    s := rt_new();
+    rt_reserveb(s, rt_fail_limit() + 196);
+    buf := raw_load(s);
+    n := rt_fail_body(kind, a, b, buf, 0);
+    raw_store(s + 8, n);
+    return s;
+}
+// The location line ` --> file:line:col` of a captured site entry, as an owned text; empty when the
+// program carries no statement table or the entry names no place.
+fn rt_site_text(entry: u64) -> u64 {
+    s := rt_new();
+    rt_reserveb(s, 400);
+    mut n = 0;
+    if entry != 0 {
+        n = rt_fail_line(raw_load(s), 0, entry, " --> ");
+    }
+    raw_store(s + 8, n);
+    return s;
+}
+// Every location line the report prints: ` --> ` for the failing statement, then one
+// ` = called from ` line per further frame that lies in a statement. The dying report uses this,
+// because the frames are still there; a value a join carries gets the innermost line only, since
+// the frames it would need are gone by the time a program reads it.
+fn rt_fail_site_full() -> u64 {
+    s := rt_new();
+    rt_reserveb(s, rt_fail_limit() + 196);
+    n := rt_fail_where(raw_load(s), 0);
+    raw_store(s + 8, n);
+    return s;
+}
+// The innermost statement entry of the frame that failed, found through the same rbp walk the
+// report uses, and written through `scratch` (24 bytes: table start, table end, caller frame) so the
+// walk allocates nothing. A captured entry is static data: it stays valid long after the task's
+// stack is gone, which is what lets the join format the site later.
+fn rt_site_here(scratch: u64) -> u64 {
+    helper := raw_load(raw_state() + 3400);
+    if helper == 0 {
+        return 0;
+    }
+    raw_call2(helper, scratch, 0);
+    begin := raw_load(scratch);
+    end := raw_load(scratch + 8);
+    if (begin == 0) + (end <= begin) {
+        return 0;
+    }
+    mut frame = raw_load(scratch + 16);
+    mut depth = 0;
+    while (frame != 0) & (depth < 64) {
+        ret := raw_load(frame + 8);
+        mut hit = 0;
+        mut hit_at = 0;
+        mut e = begin;
+        while e < end {
+            a := raw_load(e);
+            mut take = a <= ret;
+            if take && (hit != 0) {
+                take = hit_at < a;
+            }
+            if take {
+                hit = e;
+                hit_at = a;
+            }
+            e = e + 24;
+        }
+        if hit != 0 {
+            name := raw_load(hit + 8);
+            flags := raw_load(hit + 16);
+            // A place is named only when the entry has a file; the runtime's own statements carry a
+            // zero, so the walk always answers with a program location.
+            if (name != 0) & ((flags >> 63) == 0) {
+                return hit;
+            }
+        }
+        frame = raw_load(frame);
+        depth = depth + 1;
+    }
+    return 0;
+}
+// The retained check kinds' text, written at `buf` (+n) without the `error: ` prefix.
+fn rt_fail_body(kind: u64, a: u64, b: u64, buf: u64, n: u64) -> u64 {
+    mut at = n;
+    if kind == 1 {
+        at = rt_fail_put(buf, at, "index ");
+        at = rt_fail_num(buf, at, a);
+        at = rt_fail_put(buf, at, " out of bounds for length ");
+        at = rt_fail_num(buf, at, b);
+    } else if kind == 2 {
+        at = rt_fail_put(buf, at, "arithmetic overflow");
+    } else if kind == 3 {
+        at = rt_fail_put(buf, at, "negative value converted to an unsigned type");
+    } else if kind == 4 {
+        at = rt_fail_put(buf, at, "value has no matching variant");
+    } else if kind == 5 {
+        at = rt_fail_put(buf, at, "division by zero");
+    } else if kind == 6 {
+        at = rt_fail_put(buf, at, "unwrap of None or Err");
+    } else if kind == 7 {
+        at = rt_fail_put(buf, at, "range ");
+        at = rt_fail_num(buf, at, a);
+        at = rt_fail_put(buf, at, "..");
+        at = rt_fail_num(buf, at, b);
+        at = rt_fail_put(buf, at, " out of bounds");
+    } else if kind == 8 {
+        at = rt_fail_put(buf, at, "pop from an empty vector");
+    } else if kind == 9 {
+        at = rt_fail_put(buf, at, "byte value ");
+        at = rt_fail_num(buf, at, a);
+        at = rt_fail_put(buf, at, " does not fit in u8");
+    } else if kind == 10 {
+        at = rt_fail_put(buf, at, "C array length mismatch: got ");
+        at = rt_fail_num(buf, at, a);
+        at = rt_fail_put(buf, at, " elements for an array of ");
+        at = rt_fail_num(buf, at, b);
+    } else if kind == 11 {
+        at = rt_fail_put(buf, at, "index out of bounds");
+    } else if kind == 12 {
+        at = rt_fail_put(buf, at, "assertion failed");
+    } else if kind == 13 {
+        at = rt_fail_put(buf, at, "the task failed");
+    } else {
+        at = rt_fail_put(buf, at, "the program aborted");
+    }
+    return at;
+}
+// The dying report: `error: ` message, a newline, then the location line, and the cleanup-free
+// exit. Reached with the abort claim already taken.
+fn rt_report_die(msg: u64, site: u64) -> u64 {
+    rt_write_text(2, view("error: "));
+    rt_write_text(2, msg);
+    rt_write_text(2, view("\n"));
+    rt_write_text(2, site);
+    return rt_abort_final();
+}
+// Containment: the failure is written into the task record and control returns to the scheduler on
+// the worker's stack. The frames of this stack are dead from here on; the scheduler takes its
+// ordinary "this task is done" path, so the mapping is recycled and the task is published to its
+// joiner. Nothing in between is resumed or cleaned up.
+fn rt_contain_site(t: u64, kind: u64, a: u64, b: u64, site: u64, msg: u64) -> u64 {
+    raw_store(t + 160, kind);
+    raw_store(t + 168, a);
+    raw_store(t + 176, b);
+    raw_store(t + 184, site);
+    raw_store(t + 192, msg);
+    raw_store(t + 200, 0);
+    return rt_contain_tail(t);
+}
+// The same, for a failure that already has its texts (a `join` inside a task re-raising a task's
+// recorded failure): the words are handed over, not rebuilt.
+fn rt_contain_text(t: u64, kind: u64, msg: u64, site: u64) -> u64 {
+    raw_store(t + 160, kind);
+    raw_store(t + 168, 0);
+    raw_store(t + 176, 0);
+    raw_store(t + 184, site);
+    raw_store(t + 192, msg);
+    raw_store(t + 200, 1);
+    return rt_contain_tail(t);
+}
+fn rt_contain_tail(t: u64) -> u64 {
+    rt_contained_note();
+    raw_store(t + 144, 1);
+    rt_os_ctx_leave(t);
+    return 0;
+}
+// One word in process state: how many task failures were contained. The end-of-main leak check
+// reads it (rt_leak_exit), because a discarded stack's owners are exactly the allocations nothing
+// can free and no exact count of them exists.
+fn rt_contained_word() -> u64 {
+    return raw_state() + 3584;
+}
+fn rt_contained_note() -> u64 {
+    raw_store(rt_contained_word(), raw_load(rt_contained_word()) + 1);
+    return 0;
+}
+fn rt_contained() -> u64 {
+    return raw_load(rt_contained_word());
+}
+fn rt_write_text(fd: u64, s: u64) -> u64 {
+    n := raw_load(wrapping_add(s, 8));
+    if n == 0 {
+        return 0;
+    }
+    return rt_write_all(fd, raw_load(s), n);
 }
 // The point every failure-message writer stops at, so the buffer's own length is never a concern.
 fn rt_fail_limit() -> u64 {
@@ -611,6 +777,33 @@ fn rt_live() -> u64 {
     n := raw_load(raw_state() + 24);
     rt_allocator_unlock();
     return n;
+}
+// The end-of-main leak check (`compiler/native.grl`, the epilogue). A balanced program has nothing
+// live and returns; a leak aborts the process with status 134, as it always has. The one exception
+// is a contained task failure: the owners of a discarded stack cannot be counted (there is no
+// per-frame slot map, and building one is the unwind data B5 refuses to emit), so the check reports
+// the number it sees on fd 2 and lets the program exit normally. It never reports nothing: an
+// unexplained balance is either aborted on or printed.
+fn rt_leak_exit() -> u64 {
+    live := rt_live();
+    if live == 0 {
+        return 0;
+    }
+    failures := rt_contained();
+    if failures == 0 {
+        rt_abort();
+    }
+    s := rt_new();
+    rt_reserveb(s, 160);
+    buf := raw_load(s);
+    mut n = rt_fail_put(buf, 0, "note: ");
+    n = rt_fail_num(buf, n, live);
+    n = rt_fail_put(buf, n, " allocation(s) still live after ");
+    n = rt_fail_num(buf, n, failures);
+    n = rt_fail_put(buf, n, " contained task failure(s); the owners of a discarded stack are not released\n");
+    raw_store(s + 8, n);
+    rt_write_text(2, s);
+    return 0;
 }
 fn rt_shutdown() -> u64 {
     rt_prof_dump();
@@ -1880,6 +2073,7 @@ fn rt_thread_join(handle: u64) -> u64 {
 //   3400         call-site table helper       _start; rt_fail_where      runtime-errors
 //   3456         abort report claim           rt_abort                   abort-once
 //   3464..3576   task-stack fault handler     rt_state_stack_guard       stack-guard
+//   3584         contained task failures      rt_contained              task-fail-containment
 //   3840         Windows fiber state          os-windows                 --
 //   3856..       Windows fiber table          os-windows                 --
 //
@@ -3001,9 +3195,15 @@ fn rt_cancel(s: u64) -> u64 {
     }
     return 0;
 }
+// The task record. Words 40-152 are listed at the scope functions below; the containment area is:
+//   160 failure kind (0 = the task did not fail)   168 a   176 b
+//   184 the failing statement's site-table entry (a static address) or, for a re-raised failure,
+//       its site text   192 message text (0 when the message is dictated by the kind)   200 1 when
+//       184/192 are already texts   208..232 scratch for the site walk
+// A failed task has no result: word 80 is never written and its dropper is never called.
 fn rt_task_spawn(s: u64, f: u64, item: u64, arity: u64, dropper: u64) -> u64 {
     // Word 152 holds the task's OS thread handle in thread-per-task mode (0 in green mode).
-    t := rt_alloc(160);
+    t := rt_alloc(240);
     raw_store(t + 40, f);
     raw_store(t + 48, item);
     raw_store(t + 56, raw_load(s + 16));
@@ -3052,6 +3252,9 @@ fn rt_task_wait(t: u64) -> u64 {
     }
     return 0;
 }
+// `join` asserts success: a task that failed reports its recorded failure *here*, at the join, and
+// ends the process by the ordinary rules of rt_fail_text - contained by an enclosing task, fatal
+// at the top level. Nothing of the failed task's stack is involved; the report is its record.
 fn rt_task_join(t: u64) -> u64 {
     if raw_load(t + 104) != 0 {
         rt_abort();
@@ -3059,7 +3262,81 @@ fn rt_task_join(t: u64) -> u64 {
     rt_task_wait(t);
     raw_store(t + 104, 1);
     rt_task_reap(t);
+    kind := raw_load(t + 160);
+    if kind != 0 {
+        msg := rt_task_message(t);
+        site := rt_task_site(t);
+        return rt_fail_text(kind, msg, site);
+    }
     return raw_load(t + 80);
+}
+// Report a failure that already has its texts: contained by an enclosing task if there is one
+// (task-record words 184/192 then carry the two texts), fatal from the top of the program.
+fn rt_fail_text(kind: u64, msg: u64, site: u64) -> u64 {
+    t := rt_containable();
+    if t != 0 {
+        return rt_contain_text(t, kind, msg, site);
+    }
+    if rt_abort_begin() == 0 {
+        rt_abort_park();
+    }
+    return rt_report_die(msg, site);
+}
+// `try_join`: the same join, but the outcome is a value. Result: the task's result word on success,
+// and a two-word union record `{tag, payload}` on both arms - tag 0 carries the result, tag 1 a
+// three-word failure record `{kind, message, site}`. The failure's two texts move into that record;
+// the task record itself is released at scope exit like any other.
+fn rt_task_outcome(t: u64) -> u64 {
+    if raw_load(t + 104) != 0 {
+        rt_abort();
+    }
+    rt_task_wait(t);
+    raw_store(t + 104, 1);
+    rt_task_reap(t);
+    kind := raw_load(t + 160);
+    if kind == 0 {
+        return rt_enum(0, raw_load(t + 80));
+    }
+    msg := rt_task_message(t);
+    site := rt_task_site(t);
+    rec := rt_alloc(24);
+    raw_store(rec, kind);
+    raw_store(rec + 8, msg);
+    raw_store(rec + 16, site);
+    return rt_enum(1, rec);
+}
+// The recorded failure's message as an owned text. A failure that stored its own text (an explicit
+// `task_fail`, or a re-raised failure) hands it over; a check failure is formatted here, once, by
+// the caller that asked for it.
+fn rt_task_message(t: u64) -> u64 {
+    msg := raw_load(t + 192);
+    raw_store(t + 192, 0);
+    if msg != 0 {
+        return msg;
+    }
+    return rt_fail_body_text(raw_load(t + 160), raw_load(t + 168), raw_load(t + 176));
+}
+fn rt_task_site(t: u64) -> u64 {
+    site := raw_load(t + 184);
+    raw_store(t + 184, 0);
+    if raw_load(t + 200) != 0 {
+        // A re-raised failure already carries its site text.
+        return site;
+    }
+    return rt_site_text(site);
+}
+// An explicit task failure (`task_fail(msg)`): the caller's own text, with the location of the call.
+// Contained exactly like a failed check, so it is a value at the join or the end of the process.
+fn rt_task_fail(text: u64) -> u64 {
+    msg := rt_lit(raw_load(text), raw_load(wrapping_add(text, 8)));
+    t := rt_containable();
+    if t != 0 {
+        return rt_contain_site(t, 13, 0, 0, rt_site_here(t + 208), msg);
+    }
+    if rt_abort_begin() == 0 {
+        rt_abort_park();
+    }
+    return rt_report_die(msg, rt_fail_site_full());
 }
 // A thread-per-task task owns an OS thread: the joiner reaps it once the finished word is set, so
 // the thread has exited before its stack is unmapped and the handle is released. Green tasks have
@@ -3116,8 +3393,14 @@ fn rt_scope_end(s: u64) -> u64 {
         if state == 0 {
             rt_abort();
         }
+        kind := raw_load(t + 160);
+        if (state == 2) & (kind != 0) {
+            // An abandoned handle whose task failed: the scope's result type has no arm for it, so
+            // the failure is reported here - contained by the enclosing task, fatal at the top.
+            rt_fail_text(kind, rt_task_message(t), rt_task_site(t));
+        }
         dropper := raw_load(t + 112);
-        if (state == 2) & (dropper != 0) {
+        if (state == 2) & (dropper != 0) & (kind == 0) {
             raw_call2(dropper, raw_load(t + 80), 0);
         }
         rt_task_reap(t);
