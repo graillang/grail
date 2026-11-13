@@ -79,6 +79,26 @@ for (let i = 0; i < cases.length; i++) {
 // A case's `data` files (what an `@embed` reads) are staged under their own names beside its
 // sources, so a path relative to the source resolves as it does in a project.
 for (const test of cases) for (const file of test.data ?? []) writeFileSync(join(snapshot, basename(file)), readFileSync(resolve(root, file)));
+// A stdlib module may import other stdlib modules (`lib/fs.grl` uses `time`), and a case that
+// names only the top-level one would leave `time::Timestamp` unresolved inside it. The staged std
+// snapshot holds every module, so the dependency set is closed over its own `use` lines.
+const stdClosure = (list) => {
+  const out = [...list];
+  const seen = new Set(out.map(p => basename(p)));
+  for (let i = 0; i < out.length; i++) {
+    const p = out[i];
+    if (dirname(p) !== stdSnapshot) continue;
+    for (const line of readFileSync(p, 'utf8').split('\n')) {
+      const m = /^\s*use\s+([A-Za-z_][A-Za-z0-9_]*)\s*;/.exec(line);
+      if (!m) continue;
+      const dep = join(stdSnapshot, `${m[1]}.grl`);
+      if (!existsSync(dep) || seen.has(`${m[1]}.grl`)) continue;
+      seen.add(`${m[1]}.grl`);
+      out.push(dep);
+    }
+  }
+  return out;
+};
 let passed = 0;
 let skipped = 0;
 let filtered = 0;
@@ -99,6 +119,7 @@ for (const [position, test] of cases.entries()) {
   let files;
   if (test.files) files = [...test.files, ...(test.modules ?? [])];
   else { const input = join(directory, 'input.grl'); writeFileSync(input, test.source); files = [input, ...(test.modules ?? [])]; }
+  files = stdClosure(files);
   if (test.reject) {
     const assembly = join(directory, 'prior.s');
     writeFileSync(assembly, 'prior valid artifact');
@@ -137,7 +158,7 @@ const stand = test.interfaceFiles ?? [];
       // The interface files come first: the first source after OUT.s is the entry of the emit run, and
       // a reject case's own entry is the thing the rejection is about - so the interface is emitted
       // from these files, which pull in the modules they use.
-      const emit = execute(compiler, ['--target', target, '--emit-interface', ifaces, join(directory, 'emit.s'), ...(test.interfaceFiles ?? []), ...modules, runtime, osRuntime]);
+      const emit = execute(compiler, ['--target', target, '--emit-interface', ifaces, join(directory, 'emit.s'), ...stdClosure(test.interfaceFiles ?? []), ...stdClosure(modules), runtime, osRuntime]);
       assert.equal(emit.status, 0, `${test.name}: emitting interfaces failed: ${emit.stdout}${emit.stderr}`);
       const separate = stand.length !== 0;
       const mode = separate ? ['--use', ifaces] : ['--interface', ifaces];
