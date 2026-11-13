@@ -43,6 +43,56 @@ Vectors of numbers print directly, like Rust's `{:?}`.
 
 **Try it:** sort `scores` from lowest to highest by flipping the comparison in `less`.
 
+## Ordered maps
+
+`btree::BTreeMap<K, V>` is the map whose order is its keys': a B-tree keyed by the `order::Ord`
+interface, so any key with an implementation (the numbers, `string`, `u8[]`, or a record of yours)
+works, and nothing needs a hash. `btree::new()` makes an empty one.
+
+```grl
+use btree;
+use order;
+
+fn main() {
+    mut pages = btree::new<string, u64>();
+    pages.insert("beta".text(), 2);
+    pages.insert("alpha".text(), 1);
+    pages.insert("gamma".text(), 3);
+    for pair in pages.iter() {          // key order: alpha, beta, gamma
+        println("{} {}", pair.0, pair.1);
+    }
+    lo := "b".text();
+    hi := "g".text();
+    for pair in pages.range(&lo, &hi) {  // b <= key < g
+        println(pair.0);
+    }
+    if let Some(first) = pages.first() {   // the smallest key
+        println(first.0);
+    }
+    if let Some(last) = pages.last() {     // the largest
+        println(last.0);
+    }
+}
+```
+
+`iter()` walks every pair smallest key first, and `range(lo, hi)` walks the pairs with `lo <= key <
+hi`; both hand out `(&K, &V)`, so a pair is read through references (`pair.0`, `pair.1`) exactly as
+a `&map` loop hands them out. A walk borrows the map for as long as it lives, so the body cannot
+insert or remove. `len`, `is_empty`, `contains_key`, `get` and `get_mut` are `[K: V]`'s, and `insert`
+is the upsert: it replaces the value for an equal key and returns the old one, while `get_or_insert`
+places a value only when the key is absent and answers the stored one either way. `remove` answers
+`V?`, `first` and `last` answer `((&K, &V))?`, and `clear` empties the map.
+
+Every operation is O(log n) in node visits (each a binary search over at most seven keys), a walk is
+O(1) a pair, and `range` costs O(log n) to start. Deletion keeps the tree balanced by lending a key
+from a sibling or merging two nodes, and a merged node goes on a free list that the next split reuses,
+so growing and shrinking a map repeatedly does not keep allocating: `nodes_used()` reports the node
+slots the tree holds, and `shrink()` rebuilds it when a burst of removals has left the arena larger
+than the pairs need. Memory is a vector of nodes, `(max 7 keys + 8 children)` each; a lookup allocates
+nothing.
+
+**Try it:** insert the pages in the opposite order and check that the walk prints the same lines.
+
 ## Slices
 
 `v[a: b]` borrows elements `a` up to (not including) `b` of a vector as a slice, `&[T]`; `&mut v[a: b]`
