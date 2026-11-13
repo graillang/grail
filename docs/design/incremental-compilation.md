@@ -103,9 +103,11 @@ flag, so one cycle's file holds every diagnostic the cycle had. The driver trunc
 start of a cycle, reads the records back when the cycle ends, deletes it, and both report forms are
 built from those fields. No part of the driver parses printed text.
 
-The flag is an internal seam of the driver, not a documented command-line option of the compiler;
-`rendered` exists so a driver can show a human what the compiler had to say without a second
-rendering path in the driver.
+The flag belongs to the compiler; the driver forwards it from `grail check --diagnostics-json FILE`
+(and `grail build --diagnostics-json FILE`), which is what an editor calls, and prints nothing of its
+own when it is given - the file is the whole report, and the status is the exit code. `rendered`
+exists so a driver can show a human what the compiler had to say without a second rendering path in
+the driver.
 
 ### Locking
 
