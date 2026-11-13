@@ -9259,5 +9259,341 @@
     "source": "struct Pair {\n    left: u64,\n    right: u64,\n}\nfn main() -> u64 {\n    mut p = Pair { left: 1, right: 2 };\n    old := exchange(&mut p.left, p.right);\n    p.right = old;\n    println(p.left);\n    println(p.right);\n    return 0;\n}\n",
     "stdout": "2\n1\n",
     "note": "a field swap through a record: the second field is read before the first is written, so no temporary is needed"
+  },
+  {
+    "name": "diagx-backedge-names-the-value",
+    "source": "fn take(s: string) -> u64 {\n    return 1;\n}\nfn main() {\n    s := \"abc\";\n    mut i = 0;\n    while i < 2 {\n        take(s);\n        i = i + 1;\n    }\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "`s` is moved out of it, so a second iteration would use a moved value",
+      "help: copy it (`s.copy()`), borrow it (`view(s)`), or move it before the loop"
+    ],
+    "note": "the loop-backedge refusal names the value the second iteration would use, and the three ways out"
+  },
+  {
+    "name": "diagx-backedge-names-the-field",
+    "source": "struct Row { name: string, n: u64 }\nfn take(s: string) -> u64 {\n    return 1;\n}\nfn main() {\n    r := Row { name: \"abc\", n: 1 };\n    mut i = 0;\n    while i < 3 {\n        take(r.name);\n        i = i + 1;\n    }\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "`r` is moved out of it"
+    ],
+    "note": "a field move on the backedge names the binding that owns the storage"
+  },
+  {
+    "name": "diagx-backedge-continue-names-the-value",
+    "source": "fn take(s: string) -> u64 {\n    return 1;\n}\nfn main() {\n    s := \"abc\";\n    mut i = 0;\n    while i < 3 {\n        i = i + 1;\n        if i == 1 {\n            take(s);\n            continue;\n        }\n    }\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "continue consumes loop-entry storage: `s` is moved out of it"
+    ],
+    "note": "the continue edge names the value too"
+  },
+  {
+    "name": "diagx-byte-push-literal-out-of-range",
+    "source": "fn main() {\n    mut b = u8[];\n    b.push(300);\n    println(b[0]);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "integer 300 is out of range for u8 (0..=255)",
+      "explicitly (`u8(x)`)"
+    ],
+    "note": "a u8[] push of a literal that does not fit is refused at compile time, as u8[300] and b[0] = 300 already were; it used to compile and abort at run time with no message"
+  },
+  {
+    "name": "diagx-byte-push-wider-value",
+    "source": "fn main() {\n    n: u64 = 3;\n    mut b = u8[];\n    b.push(n);\n    println(b[0]);\n}\n",
+    "stdout": "3\n",
+    "note": "a wider *value* is still accepted and range-checked at run time, exactly like b[0] = n"
+  },
+  {
+    "name": "diagx-moved-value-names-the-binding",
+    "source": "fn main() {\n    a := u64[1];\n    b := a;\n    println(a.len());\n    println(b.len());\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "`a` was moved, so it cannot be read here",
+      "help: copy it (`a.copy()`)"
+    ],
+    "note": "E0006 names the binding that was moved and the fix"
+  },
+  {
+    "name": "diagx-use-before-assignment-names-the-binding",
+    "source": "fn main() {\n    mut x: u64;\n    println(x);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "`x` is read before it was assigned",
+      "help: assign it first (`x = ...`)"
+    ],
+    "note": "E0006 distinguishes never-assigned from moved"
+  },
+  {
+    "name": "diagx-readonly-borrow-names-the-binding",
+    "source": "fn reset(v: &u64[]) {\n    v.push(0);\n}\nfn main() {\n    mut x = u64[1];\n    reset(&x);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "`v` is a shared borrow, so it cannot be written through",
+      "as `&mut T`, passed as `&mut value`"
+    ],
+    "note": "E0009 names the binding that holds the shared borrow and how to get a writable one"
+  },
+  {
+    "name": "diagx-unknown-function-names-it",
+    "source": "fn main() {\n    println(lenght(\"x\"));\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "unknown function `lenght` in `main`"
+    ],
+    "note": "E0002 names the function, not just the caret"
+  },
+  {
+    "name": "diagx-unknown-type-names-it",
+    "source": "fn main() {\n    x: Widget := 1;\n    println(x);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "unknown type `Widget`"
+    ],
+    "note": "E0003 names the type"
+  },
+  {
+    "name": "diagx-undefined-name-names-it",
+    "source": "fn main() {\n    println(totl);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "undefined name `totl`"
+    ],
+    "note": "E0001 names the name"
+  },
+  {
+    "name": "diagx-duplicate-function-names-it",
+    "source": "fn f() -> u64 {\n    return 1;\n}\nfn f() -> u64 {\n    return 2;\n}\nfn main() {\n    println(f());\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "`f` is declared twice in this module"
+    ],
+    "note": "a duplicate is named, and the message says what to do about it"
+  },
+  {
+    "name": "diagx-unknown-field-names-type-and-field",
+    "source": "struct P { x: u64 }\nfn main() {\n    p := P { x: 1 };\n    println(p.y);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "`P` has no field `y`"
+    ],
+    "note": "an unknown field names both the record and the field"
+  },
+  {
+    "name": "diagx-unknown-method-names-receiver",
+    "source": "fn main() {\n    v := u64[1];\n    println(v.lenght());\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "`u64[]` has no method `lenght`"
+    ],
+    "note": "an unknown method names the receiver type as it was written and the method"
+  },
+  {
+    "name": "diagx-argument-count-names-callee",
+    "source": "fn f(a: u64, b: u64) -> u64 {\n    return a + b;\n}\nfn main() {\n    println(f(1));\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "wrong number of arguments: `f` takes 2, this call passes 1"
+    ],
+    "note": "E0018 names the callee and both counts"
+  },
+  {
+    "name": "diagx-index-of-non-sequence-names-type",
+    "source": "fn main() {\n    n := 1;\n    println(n[0]);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "`u64` cannot be indexed"
+    ],
+    "note": "indexing names the type that cannot be indexed"
+  },
+  {
+    "name": "diagx-expected-token-names-what-it-found",
+    "source": "fn main() {\n    x := 1\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "expected `;`, found `}`"
+    ],
+    "note": "a parse error names the token it wanted and the token it got"
+  },
+  {
+    "name": "diagx-expected-name-names-what-it-found",
+    "source": "fn main() {\n    x: = 1;\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "expected a name here, found `=`"
+    ],
+    "note": "a missing name names the token that took its place"
+  },
+  {
+    "name": "diagx-unclosed-block-points-at-the-brace",
+    "source": "fn main() {\n    println(1);\n",
+    "reject": true,
+    "diagnostic": [
+      "unclosed `{`: the block that starts here runs to the end of the file",
+      "this `{` is never closed"
+    ],
+    "note": "an unclosed block labels the brace that was never closed instead of only the end of the file"
+  },
+  {
+    "name": "diagx-literal-range-names-value-and-type",
+    "source": "fn main() {\n    x := 300u8;\n    println(x);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "integer 300 is out of range for u8 (0..=255)",
+      "(0..=255)"
+    ],
+    "note": "E0015 names the literal, the type and the range it missed"
+  },
+  {
+    "name": "diagx-rebind-reference",
+    "source": "fn main() {\n    mut a = 1;\n    mut b = 2;\n    mut r = &a;\n    println(*r);\n    r = &b;\n    println(*r);\n}\n",
+    "stdout": "1\n2\n",
+    "note": "a reference binding can be rebound to another referent"
+  },
+  {
+    "name": "diagx-f64-of-f32-outside-entry",
+    "source": "use wid;\nfn main() {\n    println(wid::wide(f32(1.5)));\n}\n",
+    "modules": [
+      "compiler/tests/f32_widen_mod.grl"
+    ],
+    "stdout": "1.5\n",
+    "note": "f64(f32) compiles inside a non-entry module"
+  },
+  {
+    "name": "diagx-nested-index-reference",
+    "source": "fn main() {\n    mut rows = u64[][];\n    rows.push(u64[1, 2]);\n    x := &rows[0][1];\n    println(*x);\n}\n",
+    "stdout": "2\n",
+    "note": "a reference into a nested vector element"
+  },
+  {
+    "name": "diagx-dup-struct-field",
+    "source": "struct P {\n    x: u64,\n    x: u64\n}\nfn main() { println(1); }\n",
+    "reject": true,
+    "diagnostic": [
+      "`P` has two fields named `x`: rename or remove the second, it can never be read",
+      "the first one is here"
+    ],
+    "note": "a repeated field was laid out behind the first and could never be read; now refused, caret on the second field, label on the first"
+  },
+  {
+    "name": "diagx-dup-enum-variant",
+    "source": "enum E {\n    A,\n    B,\n    A\n}\nfn main() { e := E::B; println(1); }\n",
+    "reject": true,
+    "diagnostic": [
+      "`E` has two variants named `A`",
+      "the first one is here"
+    ],
+    "note": "variants are fields in the same flat list, so one check covers them"
+  },
+  {
+    "name": "diagx-dup-type-name",
+    "source": "struct P { x: u64 }\nstruct P { y: u64 }\nfn main() { println(1); }\n",
+    "reject": true,
+    "diagnostic": [
+      "a struct named `P` is already declared at",
+      ": rename one, or remove it"
+    ],
+    "note": "two structs under one name were accepted and the second silently won"
+  },
+  {
+    "name": "diagx-dup-type-across-files",
+    "source": "use dupmod;\nfn main() {\n    t := dupmod::Thing { x: 1 };\n    println(t.x);\n}\n",
+    "modules": [
+      "compiler/tests/dup_type_a.grl",
+      "compiler/tests/dup_type_b.grl"
+    ],
+    "reject": true,
+    "diagnostic": [
+      "a struct named `Thing` is already declared at",
+      "dup_type_a.grl:"
+    ],
+    "note": "the first declaration is in another file, so its position is carried as text rather than as a token index"
+  },
+  {
+    "name": "diagx-dup-const",
+    "source": "const K: u64 = 1;\nconst K: u64 = 2;\nfn main() { println(K); }\n",
+    "reject": true,
+    "diagnostic": [
+      "a constant named `K` is already declared at",
+      ": rename one, or remove it"
+    ],
+    "note": "names the first constant instead of \"duplicate constant\" with a caret past the value"
+  },
+  {
+    "name": "diagx-dup-alias",
+    "source": "type W = u64;\ntype W = u32;\nfn main() { println(1); }\n",
+    "reject": true,
+    "diagnostic": [
+      "a type alias named `W` is already declared at",
+      ": rename one, or remove it"
+    ],
+    "note": "the caret used to land on whatever followed the alias declaration"
+  },
+  {
+    "name": "diagx-dup-alias-for-struct",
+    "source": "struct W { x: u64 }\ntype W = u32;\nfn main() { println(1); }\n",
+    "reject": true,
+    "diagnostic": [
+      "a type alias named `W` is already declared at"
+    ],
+    "note": "an alias and a struct are one type namespace"
+  },
+  {
+    "name": "diagx-decl-distinct-members",
+    "source": "struct P { x: u64, y: u64 }\nenum E { A, B }\nconst K: u64 = 1;\nconst L: u64 = 2;\ntype W = u64;\ntype V = u32;\nfn main() {\n    p := P { x: 1, y: 2 };\n    e := E::B;\n    println(p.x + p.y + K + L);\n}\n",
+    "stdout": "6\n",
+    "note": "guard on the duplicate checks: distinct names still compile, so the refusal is not a blanket"
+  },
+  {
+    "name": "diagx-char-literal-too-long",
+    "source": "fn main() {\n    c := 'ab';\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "a character literal holds exactly one character: `'ab'` has more",
+      "or a string (`\"ab\"`) when the text is longer"
+    ],
+    "note": "`'ab'` used to abort the compiler on an assert in compiler/lexer.grl:169, printing a compiler source line instead of a refusal"
+  },
+  {
+    "name": "diagx-char-literal-unclosed",
+    "source": "fn main() {\n    c := 'a;\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "unclosed character literal: add the closing `'`"
+    ],
+    "note": "a character literal that runs to the end of the line is refused, not aborted"
+  },
+  {
+    "name": "diagx-string-literal-unclosed",
+    "source": "fn main() {\n    s := \"abc;\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "unclosed string literal: add the closing `\"`"
+    ],
+    "note": "an unclosed string was an assert in the lexer; the newline it runs into is reported as the unclosed literal it means"
+  },
+  {
+    "name": "diagx-string-raw-control-byte",
+    "source": "fn main() {\n    s := \"a\tb\";\n    println(s.len());\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "a string literal cannot hold a raw tab: write the escape `\\t` instead"
+    ],
+    "note": "a raw control byte in a string is named, with the escape that spells it"
+  },
+  {
+    "name": "diagx-literal-escapes-ok",
+    "source": "fn main() {\n    s := \"a\\tb\\n\\\\\";\n    c := '\\n';\n    u := '\u00e9';\n    println(s.len() + u64(c) + u64(u));\n}\n",
+    "stdout": "248\n",
+    "note": "the guard on the literal diagnostics: escapes, an escaped backslash and a non-ASCII character still lex"
+  },
+  {
+    "name": "diagx-dup-union-member",
+    "source": "fn f(x: u64|u64) -> u64 {\n    return 1;\n}\nfn main() { println(f(1)); }\n",
+    "reject": true,
+    "diagnostic": [
+      "the type `u64` appears twice in this union, so no value could be told apart: wrap one of them in a struct"
+    ],
+    "note": "a union is a type in Grail, not a declaration, so `A | A` is the duplicate to refuse; it named no member before"
   }
 ]

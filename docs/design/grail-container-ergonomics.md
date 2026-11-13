@@ -1,79 +1,73 @@
-# Container ergonomics in Grail: what the Abundance port actually hit
+# Container ergonomics in Grail: what still holds
 
-Status: evidence from the completed port increments on `feature/abundance-cpu`
-(`abundance/src/{math,hash,world_hash,landscape_digest,world_cache,checkpoint,entity_table,job_policy}.grl`).
-Every point below is a rule the compiler enforced, with the shape that satisfied it. This is a
-porting note, not a language proposal; each item says what it cost and what to do next time.
+Status: measured on `gaps3-diagx`, the tree that follows `gaps-int3` (e5b8f6d). The Abundance port
+note that stood here listed nine container shapes that cost iterations. Six of them are fixed; this
+records which still hold and names the case in `tests/native-cases.json` that pins each. Every
+statement below was re-measured on this tree, none is carried over. Evidence, not a proposal.
 
-## 1. Owned aggregates are affine inside loops
+## Still open
 
-A loop that reads an owned aggregate's fields consumes the aggregate at the loop backedge:
-
-```grl
-// rejected: "loop backedge consumes entry storage" at the line after the loop
-fn insert(table: EntityTable, ...) -> ... {
-    for i in table.rows.len() { rebuilt.push(copy_entity(&table.rows[i])); }
-    size := table.size_out + 1;        // table is already consumed here
-}
-```
-
-Loops over a **borrow** are fine; loops over an **owned value** are not. Two patterns survived:
-
-- **copy first, then loop locally** — `rows := copy_page(&table.pages[p]);` and loop over `rows`;
-- **consuming mutators** — `insert(table: &EntityTable, ...) -> UpdateResult { ok, table }`, with the
-  caller doing `table = result.table`. `entity_table.grl` uses this; it reads naturally in a port and
-  keeps row owners unambiguous.
-
-## 2. Nested vectors cannot be indexed by reference
-
-`&table.pages[p]` is rejected ("reference has no access authority near '['"), and
-`out.queued[i].cancelled = 1` is rejected ("expected ; near '='"). Nested `T[][]` therefore supports
-neither element references nor in-place field writes.
-
-Workarounds used: pass `(table, page_index)` and copy the page into a local, and rebuild a vector
-instead of writing through an index:
+### 1. An owned aggregate is consumed at a loop backedge
 
 ```grl
-mut rebuilt = Job[];
-for i in out.queued.len() {
-    mut job = copy_job(&out.queued[i]);
-    if job.id == id { job.cancelled = 1; }
-    rebuilt.push(job);
-}
-out.queued = rebuilt;
+s := "abc";
+mut i = 0;
+while i < 2 { take(s); i = i + 1; }   // refused
 ```
 
-`entity_table.grl` consequently stores parallel scalar arrays (`ids: u64[]`, `types: u64[]`, …,
-`payloads: u8[][]`) instead of `Entity[]`. That is the shape to reach for when a container must be
-mutated in place.
+```text
+error: loop backedge consumes entry storage: `s` is moved out of it, so a second iteration would
+       use a moved value
+ = help: copy it (`s.copy()`), borrow it (`view(s)`), or move it before the loop
+```
 
-## 3. Rebinding a reference consumes it
+The refusal is correct and the message is the finding: it names the binding, the state it is in and
+the three ways out. Rust refuses the same program for the same reason (second iteration: use of
+moved value), so this is not a Grail gap. Pinned by `for-in-move-collection-rejected`,
+`diagx-backedge-names-the-value`, `diagx-backedge-names-the-field`, and
+`diagx-backedge-continue-names-the-value` (the `continue` edge).
 
-For a reference parameter or local, a call that takes it by reference consumes the binding: pass
-`&table` again at each use (`lower_bound(&rows, key)`, `far_limit(&model)`), and declare `mut` on the
-local before mutation. `&mut` parameters need `&mut x` at every call site, including inside the same
-function (`put_u32(&mut target, at, v)` in `cache_test.grl`).
+### 2. `if` is not an expression
 
-## 4. Small syntax facts that cost iterations
+```grl
+n := if c { 1 } else { 2 };   // refused: undefined name `if`
+```
 
-| Shape | Rule |
-| --- | --- |
-| `x := …` then `x = …` | declaration is `:=`; reassignment needs `mut x = …` at the declaration, and `mut` binds with `=`, never `:=` |
-| `if c { a } else { b }` as an expression | not supported; use a mutable local |
-| `f64(x)` where `x: f32` | rejected inside non-entry modules (works in the entry file); `f64_from_bits(bits(x))` is the identity widening. Recorded in `abundance/README.md` |
-| `u8[]` element push | `push` takes a `u64` word, not a `u8` value |
-| empty vector of a qualified type | `module::Type[]` does not parse; take an empty one from a module helper (`empty_checkpoint().sections`) or a `new_*()` constructor |
-| 7+ parameter function | rejected ("exceeds six parameters"), including helpers — pass a struct or a reference |
-| `Type(...)` where the name is also a method | method names that shadow type names (`fn u64`) fail; use `word64`-style names |
-| `1..n` ranges | not used in the port; loops are `for i in n { if i == 0 { continue; } … }` |
+Use a mutable local. Another workstream is fixing this on a separate branch; this note records the
+state of this tree, not that plan.
 
-## 5. What this means for the next container increment
+### 3. `u8[]` push of a word
 
-- A shared `Vec<T>`/arena must be **affine-friendly**: consuming updates returning a result struct, or
-  index-based reads into a local, rather than `&mut` element access.
-- Sparse/dense sets should be **parallel scalar arrays** with a separate free list, not
-  `Row[]` with in-place mutation.
-- Byte-oriented buffers are the comfortable case: everything in the port that only reads and rebuilds
-  (`world_cache`, `checkpoint`, `entity_table`) needed no cleverness once it followed rules 1-3.
-- The remaining friction is concentrated in **in-place mutation of records**, which is exactly what an
-  ECS wants. That is the case to design deliberately rather than port ad hoc.
+`b.push(300)` on a `u8[]` used to compile and then abort at run time with no message at all. A
+literal that does not fit is now refused at compile time, exactly as `u8[300]` and `b[0] = 300`
+already were:
+
+```text
+error[E0015]: integer 300 is out of range for u8 (0..=255)
+ = help: write a value that fits, or convert explicitly (`u8(x)`), which truncates and so says the
+   narrowing is intended
+```
+
+A *value* wider than a byte is still accepted and range-checked at run time, which is what a byte
+store does; only the literal is now a compile error. Pinned by
+`diagx-byte-push-literal-out-of-range` (refused) and `diagx-byte-push-wider-value` (accepted).
+
+## Fixed
+
+Each row was a refusal or a parse failure in the port; each now compiles, and the case named in the
+last column runs it.
+
+| Shape | Now | Pinned by |
+| --- | --- | --- |
+| a function with 7 or more parameters | `fn nine(a, b, c, d, e, f, g, h, i)` and `fn seven<x>(...)` compile and run | `more-than-six-parameters` |
+| `a[i].f = x` on a vector of records or vectors | `v[0][1] = 9`, `w.items[0].x += 1` | `nested-place-assignment` |
+| `&v[i]` into a nested vector | `&rows[0][1]` | `diagx-nested-index-reference` |
+| a mutating call through an index | `v[0].push(4)`, `&mut z.comps[0].data` | `nested-mutating-calls`, `borrow-through-index-and-field` |
+| rebinding a reference | `mut r = &a; r = &b;` | `diagx-rebind-reference` |
+| `module::Type[]` | `mut v = qvec::P[];`, `v: geom::Point[]` | `qualified-vec-literal` |
+| `f64(f32)` outside the entry module | `pub fn wide(x: f32) -> f64 { return f64(x); }` | `diagx-f64-of-f32-outside-entry` |
+| `1..n` ranges | `for i in 2..5`, `for i in n-3..n` | `for-range-loops` |
+
+Two syntax facts from the port that are not container items and did not change: a declaration is
+`:=` while a re-assignment needs `mut x = ...` at the declaration (a bare `x = 2` on a `:=` binding
+is E0005, "assignment requires mut"), and a mutable declaration binds with `=`, never `:=`.

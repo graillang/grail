@@ -168,6 +168,22 @@ checks++;
 // summary; a `--json` cycle is one line, and every line of it is a summary.
 const textSummary = line => /^(check ok|built \S+) \d+ ms$/.test(line) || /^error (\d+ diagnostics? )?\d+ ms$/.test(line);
 const jsonSummary = line => { try { return JSON.parse(line).cycle !== undefined; } catch { return false; } };
+// Every watcher this file starts, so that none can outlive the case that started it. A `grail
+// check --watch` process only ends on a signal, so a suite that threw before reaching its own
+// `stop()` used to leave one watching a tree with nothing left to read it (one ran for 100 minutes,
+// reparented to systemd after the runner exited).
+const watchers = [];
+async function reapWatchers() {
+  const left = [];
+  for (const watcher of watchers) {
+    if (!watcher.live) continue;
+    left.push(`grail ${watcher.args.join(' ')}`);
+    watcher.child.kill('SIGKILL');
+    await watcher.exited;
+  }
+  watchers.length = 0;
+  return left;
+}
 class Watcher {
   constructor(args, cwd, isSummary = textSummary) {
     this.args = args;
@@ -191,6 +207,11 @@ class Watcher {
     });
     this.child.stderr.on('data', chunk => { this.errors += chunk; });
     this.exited = new Promise(resolve => this.child.on('exit', (code, signal) => resolve({ code, signal })));
+    watchers.push(this);
+  }
+  // Still running: no exit and no death signal yet.
+  get live() {
+    return this.child.exitCode === null && this.child.signalCode === null;
   }
   // The n-th cycle's summary line, waiting for the process to print it.
   async at(count, what) {
@@ -210,10 +231,16 @@ class Watcher {
     assert.equal(this.summaries.length, summaries, `${what}: a change produced more than one cycle, or an unchanged tree did: ${JSON.stringify(this.summaries.slice(summaries))}`);
     assert.equal(this.lines.length, lines, `${what}: the process printed between cycles: ${JSON.stringify(this.lines.slice(lines))}`);
   }
-  stop() {
+  // SIGINT first, as the user would. A watcher that does not end within the deadline is killed, and
+  // the ending it reports then fails the SIGINT assertion rather than hanging the suite.
+  async stop() {
     const started = Date.now();
     this.child.kill('SIGINT');
-    return this.exited.then(ending => ({ ...ending, ms: Date.now() - started }));
+    const ended = await Promise.race([this.exited, settle(10_000).then(() => null)]);
+    if (ended !== null) return { ...ended, ms: Date.now() - started };
+    this.child.kill('SIGKILL');
+    const forced = await this.exited;
+    return { ...forced, ms: Date.now() - started };
   }
 }
 const settle = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -224,6 +251,10 @@ const fast = ['--interval', '40', '--debounce', '60'];
   const broken = 'fn main() {\n    x := 1;\n    x = 2;\n}\n';
   const file = join(dir, 'main.grl');
   writeFileSync(file, ok);
+  // Pass or fail, nothing this case started is left running: the `finally` kills what the explicit
+  // `stop()` calls did not reach, and a watcher that was still alive there fails the case.
+  const stragglers = [];
+  try {
   const watching = new Watcher(['check', '--watch', ...fast, 'main.grl'], dir);
   assert.match(await watching.at(1, 'the first cycle'), /^check ok \d+ ms$/, 'the first cycle runs before any change, and is one line'); checks++;
   writeFileSync(file, broken);
@@ -319,5 +350,10 @@ const fast = ['--interval', '40', '--debounce', '60'];
   // `--watch` on a command with no cycle to repeat is refused, not silently ignored.
   const refused = spawnSync(grail, ['run', '--watch', 'main.grl'], { cwd: dir, encoding: 'utf8' });
   assert.equal(refused.status, 1); assert.match(refused.stdout, /watch mode is `grail build --watch`/); checks++;
+  } finally {
+    stragglers.push(...await reapWatchers());
+  }
+  assert.deepEqual(stragglers, [], `a watcher outlived its case (killed it, but the case leaked it): ${stragglers.join(', ')}`);
+  checks++;
 }
 console.log(`cli: ${checks} formatter/tool checks passed`);

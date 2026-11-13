@@ -144,6 +144,90 @@
   is how a buffer smaller than the helper writes is shown to be refused rather than corrupted.
   docs/design/runtime-abi.md, "What the compiler hands the runtime: a handshake that carries its
   length".
+- Fixed: a duplicate declaration no longer compiles. Two `struct`/`enum` declarations under one
+  name in a module, a repeated field in a record, a repeated variant in an enum, a second
+  module-level `const`, and a `type` alias colliding with another alias or with a struct were all
+  accepted, and the second one silently won: a duplicate field was laid out behind the first and
+  could never be read through a `.name`. All of them are refused now, by a diagnostic that names
+  where the first declaration is - `a struct named `P` is already declared at input.grl:1:8: rename
+  one, or remove it` - and, for a repeated member, `` `P` has two fields named `x`: rename or remove
+  the second, it can never be read`` with the caret on the second and a label on the first. `union`
+  members are not declarations in Grail (`A | B` is a type) and were already refused; a `handle` and
+  an `extern "C" record` share the type check. The first declaration's position is carried as
+  `file:line:column` text because it can be in another file of the same module, where a token index
+  means nothing. Pinned by `diagx-dup-struct-field`, `diagx-dup-enum-variant`,
+  `diagx-dup-type-name`, `diagx-dup-type-across-files`, `diagx-dup-const`, `diagx-dup-alias`,
+  `diagx-dup-alias-for-struct`, and `diagx-decl-distinct-members` as the guard that distinct names
+  still compile.
+- Fixed: the lexer no longer aborts on source it cannot scan. Six `assert`s on user input -
+  `'ab'`, a character literal that never closes, an unterminated string, a raw control byte in a
+  string - ended the compiler with `error: assertion failed` and a compiler source line
+  (`compiler/lexer.grl:169`), which is a compiler bug by definition, not a refusal. The scanner now
+  emits a token for what it could not finish (998 an ill-formed character literal, 996 an unclosed
+  string, 995 a string holding a raw control byte) and the front end renders it where every other
+  diagnostic is rendered: ``a character literal holds exactly one character: `'ab'` has more`` with a
+  help line naming `'a'` and `"ab"`, `unclosed character literal: add the closing `'``, `unclosed
+  string literal: add the closing `"``, and `a string literal cannot hold a raw tab: write the escape
+  `\t` instead`. A literal newline inside a string is reported as the unclosed literal it means. The
+  lexer module now has no `assert` at all. Pinned by `diagx-char-literal-too-long`,
+  `diagx-char-literal-unclosed`, `diagx-string-literal-unclosed`,
+  `diagx-string-raw-control-byte`, and `diagx-literal-escapes-ok` (escapes, an escaped backslash and
+  a non-ASCII character still lex).
+- Docs: docs/testing.md records what `--jobs N` changes about a case's working directory - it runs in
+  `.work/native-tests/<target>/stripe-<i>-<n>/<case>`, one level deeper - and therefore why the five
+  `lib-*` corpus cases that pass a relative `../../../../tests/lib/<name>` argument report `cannot
+  read a corpus file` under `--jobs` and pass without it. A full run in jobs mode is green at
+  `failed 5` with exactly those names.
+- Diagnostics: the loop-backedge refusal names the value it refuses. `while i < 2 { consume(s) }`
+  with an owned `s` printed `error: loop backedge consumes entry storage` under the closing brace of
+  the *enclosing function* and said nothing about what was consumed or what to do. It now reads
+  ``loop backedge consumes entry storage: `s` is moved out of it, so a second iteration would use a
+  moved value``, with `` = help: copy it (`s.copy()`), borrow it (`view(s)`), or move it before the
+  loop``, and the caret on the loop's own `}` (`compiler/ownership.grl` gained `consumed_entry` so the
+  check can name the place it refuses). The `continue` edge names the value too. Pinned by
+  `diagx-backedge-names-the-value`, `diagx-backedge-names-the-field`,
+  `diagx-backedge-continue-names-the-value`.
+- Fixed: `b.push(300)` on a `u8[]` was accepted and then aborted at run time with no message at all -
+  the `push` path of a byte buffer was the one place with no literal range check, while `u8[300]` and
+  `b[0] = 300` were already compile errors. A literal that does not fit is now refused, and the
+  refusal names the value, the type, the range and the conversion: `error[E0015]: integer 300 is out
+  of range for u8 (0..=255)` with `` = help: write a value that fits, or convert explicitly
+  (`u8(x)`), which truncates and so says the narrowing is intended``. Silent truncation is the wrong
+  default for a memory-safe language, and an unmessaged abort is not much better. A *value* wider
+  than a byte (`b.push(n)`, `n: u64`) is still accepted and range-checked at run time, exactly as a
+  byte store is, so a conversion is demanded only where the compiler can see the number. Pinned by
+  `diagx-byte-push-literal-out-of-range` (refused) and `diagx-byte-push-wider-value` (accepted).
+- Diagnostics: sixteen messages that named no entity now name one, and each has a reject case so it
+  cannot regress. `integer literal out of range for its type` became E0015 ``integer 300 is out of
+  range for u8 (0..=255)`` with the `u8(x)` fix - it named neither the value nor the type, and the
+  reader had to count bytes. E0006 `use of moved, borrowed or partially initialized value` gained a
+  clause that names the binding and which state it is in (moved, maybe moved, never assigned, not yet
+  written) plus the fix. E0009 `mutation through readonly frame` names the binding that holds the
+  shared borrow and how to ask for a writable one. `unknown function` / `unknown type` /
+  `undefined name` / `duplicate function` name what they are about (`unknown function `lenght` in
+  `main``, `unknown type `Widget``, `undefined name `totl``, ``` `f` is declared twice in this
+  module: rename one, or remove it```), `unknown field or variant` says `` `P` has no field `y` ``
+  (or `no variant`, for an enum), `unknown collection method` says `` `u64[]` has no method `lenght` ``,
+  E0018 says ``wrong number of arguments: `f` takes 2, this call passes 1``, and
+  `index/slice requires byte sequence/view` says `` `u64` cannot be indexed ``. Every parse error now
+  names the token it found as well as the one it wanted (``expected `;`, found `}` ``,
+  ``expected a name here, found `=` ``), and `unclosed {` labels the brace that was never closed
+  instead of only the end of the file. `explain::code_of` learned the new spellings, so the codes
+  (E0002, E0003, E0015, E0018) survive the rewording. Pinned by the `diagx-*` reject cases.
+- docs/design/grail-container-ergonomics.md rewritten to what this tree actually does. The Abundance
+  port note it replaced claimed nine container shapes; re-measured here, six are fixed (a function
+  with seven or more parameters, `a[i].f = x` and `&v[i]` on nested vectors, rebinding a reference,
+  `module::Type[]`, `f64(f32)` outside the entry module, `1..n` ranges) and are recorded with the
+  corpus case that pins each, and three still hold (an owned aggregate consumed at a loop backedge -
+  refused, Rust-compatible, and the message is now the finding; `if` as an expression, being fixed
+  elsewhere; `u8[]` push of a word, refused by this round).
+- Tooling: `tools/test-cli.mjs` stops leaking `grail check --watch` processes. The watch section
+  started four watchers inside a bare block, so an assertion that threw before the section's own
+  `stop()` calls left a watcher running against a tree with nothing left to read it - one ran for 100
+  minutes, reparented to systemd once the runner exited. Every watcher the file starts is now
+  registered, a `finally` kills whatever the case did not, `stop()` escalates to SIGKILL after ten
+  seconds instead of hanging the suite on an ignored SIGINT, and a watcher that was still alive in
+  that `finally` fails the case by name.
 - Fixed: a contained task failure corrupted the allocator header of the block that followed the
   task record, so the scope exit aborted (`book/examples/task-failure.grl` printed `bad input` and
   exited 134 instead of printing its sibling's `7`). `rt_site_here` handed the compiler's `rt_sites`
