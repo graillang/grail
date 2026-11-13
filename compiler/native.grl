@@ -5312,6 +5312,7 @@ fn drop_impl_registered<a>(c: (&a mut C), ty: u64) -> unit {
     if counted != 0 {
         // stays: `exchange` is a builtin, not a call, so its `&mut` is taken before `n + 1` reads
         // the field (a two-phase borrow covers call arguments only).
+        // stays: exchange is a builtin, so its &mut is taken before this read.
         n := c.drop_generic;
         exchange(&mut c.drop_generic, n + 1);
     }
@@ -10366,6 +10367,7 @@ fn find_func<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> u64 {
         }
     }
     if (found != 0) && (c.funcs[found - 1].public == 0) {
+        // stays: a vector element read is a loan, so it conflicts with the call's &mut.
         home := c.funcs[found - 1].home.copy();
         require_visible(&mut c, view(home), view(n));
     }
@@ -10840,8 +10842,7 @@ fn parse_reference<a>(c: (&a mut C)) -> u64 {
 }
 // Whether the type before the parser is `dyn I`: what `&dyn I` in a body borrows.
 fn dyn_type_ahead<a>(c: (&a mut C)) -> bool {
-    p := c.pos;
-    return is(&mut c, view("dyn")) && (kind_at(&mut c, p + 1) == 1);
+    return is(&mut c, view("dyn")) && (kind_at(&mut c, c.pos + 1) == 1);
 }
 // `*T` / `*mut T`: a raw pointer (kind 34, argument T, mode 1 when mutable). It is one word, Copy
 // and has no drop; every operation on it needs an `unsafe` block (docs/design/unsafe.md).
@@ -10866,8 +10867,7 @@ fn parse_type_base<a>(c: (&a mut C)) -> u64 {
         return parse_raw_pointer(&mut c);
     }
     // `dyn I` / `dyn module::I`: a value of any type implementing I, chosen at run time.
-    here_dyn := c.pos;
-    if is(&mut c, view("dyn")) && (kind_at(&mut c, here_dyn + 1) == 1) {
+    if is(&mut c, view("dyn")) && (kind_at(&mut c, c.pos + 1) == 1) {
         advance(&mut c);
         first := ident(&mut c);
         mut m = module_copy(&mut c);
@@ -11557,11 +11557,10 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
     while reverse.len() != 0 {
         c.fields.push(reverse.pop());
     }
-    item_public_4 := c.decl_public;
     exchange(
         &mut c.decls[d - 1],
         Decl {
-            public: item_public_4,
+            public: c.decl_public,
             module: m,
             name: name,
             is_enum: is_enum,
@@ -12673,11 +12672,10 @@ fn ffi_record<a>(c: (&a mut C), pass: u64) -> unit {
     while reverse.len() != 0 {
         c.fields.push(reverse.pop());
     }
-    item_public_6 := c.decl_public;
     exchange(
         &mut c.decls[d - 1],
         Decl {
-            public: item_public_6,
+            public: c.decl_public,
             module: m,
             name: name,
             is_enum: 0,
@@ -13051,6 +13049,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         label = special_name(&mut c, c.current_spec - 1);
     }
     sym_unit := symbol_unit(&mut c, view(m));
+    // stays: exchange is a builtin, so its &mut is taken before this read.
     sym := body_label(&c, view(sym_unit), view(label), view(export_symbol), export);
     exchange(&mut c.facts_fn, sym);
     exchange(&mut c.f64_ops, 0);
@@ -13254,9 +13253,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         if typecount != 0 {
             from := c.toks[position].start;
             skip_braces(&mut c);
-            to := c.toks[c.pos - 1].end;
             // `index` is `c.funcs.len()` after the push, so the record is at `index - 1`.
-            exchange(&mut c.funcs[index - 1].body, (c.src[from: to]).copy());
+            exchange(&mut c.funcs[index - 1].body, (c.src[from: c.toks[c.pos - 1].end]).copy());
         } else {
             skip_braces(&mut c);
         }
@@ -13287,6 +13285,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         // A specialisation is emitted by the module that asked for it, whichever module defines the
         // template, and weak: every object that instantiates the same key emits the same body under
         // the same content-addressed name, and the linker keeps one (B1 stage 4).
+        // stays: a vector element read is a loan, so it conflicts with the call's &mut.
         requester := c.specs[c.current_spec - 1].requester.copy();
         unit = unit_module(&mut c, view(requester));
     }
@@ -13529,6 +13528,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         exchange(&mut c.spec_closures, spec_closure_mark);
         exchange(&mut c.retry, 0);
         exchange(&mut c.tolerant, 0);
+        // stays: exchange is a builtin, so its &mut is taken before this read.
         a := c.attempts + 1;
         exchange(&mut c.attempts, a);
         exchange(&mut c.pos, position);
@@ -13859,6 +13859,7 @@ fn default_methods<a>(c: (&a mut C), pass: u64) -> unit {
             exchange(&mut c.pos, defaults[j] - 1);
             exchange(&mut c.raw, 0);
             exchange(&mut c.module, home.copy());
+            // stays: exchange is a builtin, so its &mut is taken before this read.
             opted := u64(host_opted(&c, view(c.module)));
             exchange(&mut c.host_optin, opted);
             exchange(&mut c.rnames, u8[][]);
@@ -13883,6 +13884,7 @@ fn default_methods<a>(c: (&a mut C), pass: u64) -> unit {
         exchange(&mut c.file, saved_file);
         exchange(&mut c.module, saved_module);
         exchange(&mut c.raw, saved_raw);
+        // stays: exchange is a builtin, so its &mut is taken before this read.
         opted := u64(host_opted(&c, view(c.module)));
         exchange(&mut c.host_optin, opted);
     }
@@ -13961,6 +13963,7 @@ fn prepend_impl_params<a>(c: (&a mut C)) -> unit {
     // The function's own parameters now follow the implementation's.
     shift := tn.len() - own_t.len();
     for k in c.assoc_eqs.len() / 3 {
+        // stays: exchange is a builtin, so its &mut is taken before this read.
         old := c.assoc_eqs[3 * k];
         exchange(&mut c.assoc_eqs[3 * k], old + shift);
     }
@@ -14790,8 +14793,7 @@ fn ct_if<a>(c: (&a mut C), pass: u64, top: u64) -> unit {
         if !eat(&mut c, view("else")) {
             return ();
         }
-        after := c.pos + 1;
-        if (kind(&mut c) == 64) & is_at(&mut c, after, view("if")) {
+        if (kind(&mut c) == 64) & is_at(&mut c, c.pos + 1, view("if")) {
             advance(&mut c);
             advance(&mut c);
             continue;
@@ -15965,8 +15967,7 @@ fn fx_begin<a, b, d>(c: (&a mut C), sym: &b [u8], name: &d [u8], file: u64, pos:
     c.fx_entry_panic[k] = 0;
     trusted := c.raw;
     exchange(&mut c.fx_trusted, trusted);
-    out_len := c.out.len();
-    exchange(&mut c.fx_out_start, out_len);
+    exchange(&mut c.fx_out_start, c.out.len());
     edges := c.fx_edge_from.len();
     exchange(&mut c.fx_edge_mark, edges);
     exchange(&mut c.fx_calls, 0);
@@ -16128,8 +16129,7 @@ fn fx_helper<a, b>(c: (&a mut C), sym: &b [u8]) -> unit {
     c.fx_own_alloc[k] = 0;
     c.fx_own_panic[k] = 0;
     exchange(&mut c.fx_trusted, 1);
-    out_len := c.out.len();
-    exchange(&mut c.fx_out_start, out_len);
+    exchange(&mut c.fx_out_start, c.out.len());
     exchange(&mut c.fx_calls, 0);
     exchange(&mut c.fx_skip_lo, 0);
     exchange(&mut c.fx_skip_hi, 0);
@@ -16281,8 +16281,7 @@ fn fx_solve<a>(c: (&a mut C)) -> unit {
         c.fx_panic[i] = c.fx_own_panic[i];
     }
     for e in c.fx_edge_name.len() {
-        name := c.fx_edge_name[e].copy();
-        k := fx_lookup(&mut c, view(name));
+        k := fx_lookup(&mut c, view(c.fx_edge_name[e].copy()));
         c.fx_edge_to[e] = k;
         if k == 0 {
             mut unknown = 1;
@@ -19016,6 +19015,7 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
                 if local == 0 {
                     fail(&mut c, view("field shorthand needs a variable with the field's name"));
                 }
+                // stays: exchange is a builtin, so its &mut is taken before this read.
                 back := c.pos - 1;
                 exchange(&mut c.pos, back);
                 v = primary(&mut c);
@@ -19328,6 +19328,7 @@ fn replay_function<a>(c: (&a mut C), template: u64) -> unit {
     exchange(&mut c.pos, pos);
     exchange(&mut c.raw, raw);
     exchange(&mut c.module, module);
+    // stays: exchange is a builtin, so its &mut is taken before this read.
     opted := u64(host_opted(&c, view(c.module)));
     exchange(&mut c.host_optin, opted);
     func(&mut c, 4, 0);
@@ -19924,8 +19925,7 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
     }
     if method == 3 {
         formal := c.params[template_first];
-        lin := c.lazy_input;
-        prepared := method_receiver(&mut c, lin, c.lazy_inty, c.lazy_xty, formal);
+        prepared := method_receiver(&mut c, c.lazy_input, c.lazy_inty, c.lazy_xty, formal);
         if c.raw == 0 {
             require_type(&mut c, prepared.ty, formal);
         }
@@ -24425,8 +24425,7 @@ fn adopt_literal<a>(c: (&a mut C), start: u64, end: u64, ty: u64) -> bool {
     if (c.lit_start != start) || (c.lit_end != end) {
         return false;
     }
-    value := c.lit_value;
-    if literal_fits(&mut c, ty, value, c.lit_negative) == 0 {
+    if literal_fits(&mut c, ty, c.lit_value, c.lit_negative) == 0 {
         fail(&mut c, view("integer literal out of range for its type"));
     }
     return true;
@@ -24642,8 +24641,7 @@ fn adopt_float<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) ->
     if is_f32(&mut c, v.ty) {
         return v;
     }
-    ftok := c.flit_tok;
-    slot := float_literal_slot(&mut c, ftok, c.flit_neg);
+    slot := float_literal_slot(&mut c, c.flit_tok, c.flit_neg);
     return val(slot, expected);
 }
 fn float_literal_slot<a>(c: (&a mut C), tok: u64, negative: u64) -> u64 {
@@ -25621,6 +25619,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
         // part of the module that asked for the specialisation.
         spec := c.current_spec - 1;
         symbol = special_name(&mut c, spec);
+        // stays: a vector element read is a loan, so it conflicts with the call's &mut.
         requester := c.specs[spec].requester.copy();
         owner_unit = unit_module(&mut c, view(requester));
         n := c.spec_closures;
@@ -26417,8 +26416,7 @@ fn pattern_loop<a>(
     loopend := block_end(&mut c, open);
     exchange(&mut c.loop_start, loopstart);
     exchange(&mut c.loop_end, loopend);
-    loopmark := c.resources.len();
-    exchange(&mut c.loopmark, loopmark);
+    exchange(&mut c.loopmark, c.resources.len());
     oldloop := exchange(&mut c.loopcheck, ownership::snapshot(&c.check));
     oldbreak := exchange(&mut c.breaks, ownership::new());
     oldhas := c.hasbreak;
@@ -27128,6 +27126,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         mut method = 0;
         mut picked = 0;
         for i in c.implementations.len() {
+            // stays: a vector element read is a loan, so it conflicts with the call's &mut.
             ity := c.implementations[i].ty;
             mut fits = same_type(&mut c, ity, concrete) != 0;
             if !fits {
@@ -28284,8 +28283,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
                 return string_from_bytes(&mut c, &field_name);
             }
             if same(view(what), view("index")) {
-                index := c.ct_loop_index[b - 1];
-                return val(imm(&mut c, index), int_type(&mut c, 64, 0));
+                return val(imm(&mut c, c.ct_loop_index[b - 1]), int_type(&mut c, 64, 0));
             }
             fail(&mut c, view("a field from @for has .name and .index (and x.@f for the value)"));
         }
@@ -28464,8 +28462,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
         bits := float_bits_p(&mut c, view(t), precision);
         if suffixed == 0 {
             exchange(&mut c.flit_start, p);
-            q := c.pos;
-            exchange(&mut c.flit_end, q);
+            exchange(&mut c.flit_end, c.pos);
             exchange(&mut c.flit_tok, p);
             exchange(&mut c.flit_neg, 0);
         }
@@ -28632,13 +28629,13 @@ fn primary<a>(c: (&a mut C)) -> Val {
         return call(&mut c, view("core"), view("some"));
     }
     if same(view(first), view("None")) {
-        p := c.pos - 1;
-        exchange(&mut c.none_start, p);
+        exchange(&mut c.none_start, c.pos - 1);
         exchange(&mut c.none_end, c.pos);
         return val(imm(&mut c, 0), 0);
     }
     // `dyn I[...]`: a sequence literal of interface objects.
     if same(view(first), view("dyn")) && (kind(&mut c) == 1) && (find_local(&mut c, view(first)) == 0) {
+        // stays: exchange is a builtin, so its &mut is taken before this read.
         back := c.pos - 1;
         exchange(&mut c.pos, back);
         ty := parse_type_base(&mut c);
@@ -28654,6 +28651,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
             }
         }
         if generic && (find_local(&mut c, view(first)) == 0) {
+            // stays: exchange is a builtin, so its &mut is taken before this read.
             back := c.pos - 1;
             exchange(&mut c.pos, back);
             ty := parse_type_base(&mut c);
@@ -28662,6 +28660,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
     }
     if type_literal_ahead(&mut c, view(first)) {
         // Rewind and re-read the whole head as a type so `<...>` arguments work.
+        // stays: exchange is a builtin, so its &mut is taken before this read.
         back := c.pos - 1;
         exchange(&mut c.pos, back);
         mut ty = parse_type_base(&mut c);
@@ -28698,10 +28697,10 @@ fn primary<a>(c: (&a mut C)) -> Val {
     }
     // `module::Type[...]` / `module::Type[]`: a type-first collection literal of another
     // module's type (the head re-read as a type, as for an unqualified `Type[`).
-    q2 := c.pos + 2;
-    if is(&mut c, view("::")) & (kind_at(&mut c, q2) == 91) {
+    if is(&mut c, view("::")) & (kind_at(&mut c, c.pos + 2) == 91) {
         qname := tok_text(&mut c, c.pos + 1);
         if find_decl(&mut c, view(first), view(qname)) != 0 {
+            // stays: exchange is a builtin, so its &mut is taken before this read.
             back := c.pos - 1;
             exchange(&mut c.pos, back);
             mut qty = parse_type_base(&mut c);
@@ -30957,6 +30956,7 @@ fn map_index_assignment<a>(c: (&a mut C)) -> unit {
     mut j = temp_end;
     while temps < j {
         j -= 1;
+        // stays: a vector element read is a loan, so it conflicts with the call's &mut.
         slot := c.resources[j].slot;
         if !is_local_slot(&mut c, slot) {
             release(&mut c, j);
@@ -32330,8 +32330,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         if dst == 0 {
             fail(&mut c, view("jump outside loop"));
         }
-        mark := c.loopmark;
-        cleanup(&mut c, mark);
+        cleanup(&mut c, c.loopmark);
         if b {
             edge := ownership::snapshot(&c.check);
             if c.hasbreak != 0 {
@@ -32341,8 +32340,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
                 exchange(&mut c.hasbreak, 1);
             }
         } else {
-            loopstate := ownership::snapshot(&c.loopcheck);
-            if !backedge_ok(&mut c, &loopstate) {
+            if !backedge_ok(&mut c, &ownership::snapshot(&c.loopcheck)) {
                 fail(&mut c, view("continue consumes loop-entry storage"));
             }
         }
@@ -32376,8 +32374,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         cleanup(&mut c, 0);
         restore := c.export_tls;
         if restore != 0 {
-            adopted := c.export_adopt;
-            tls_leave_callback(&mut c, restore, adopted);
+            tls_leave_callback(&mut c, restore, c.export_adopt);
         }
         if borrowed_object(&mut c, v.ty) != 0 {
             // The pair travels by value: data in %rax, vtable in %rdx. The caller stores both in its
@@ -32779,8 +32776,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         exchange(&mut c.loop_end, loopend);
         loopmark := c.resources.len();
         exchange(&mut c.loopmark, loopmark);
-        current := ownership::snapshot(&c.check);
-        oldloop := exchange(&mut c.loopcheck, current);
+        oldloop := exchange(&mut c.loopcheck, ownership::snapshot(&c.check));
         oldbreak := exchange(&mut c.breaks, ownership::new());
         oldhas := c.hasbreak;
         exchange(&mut c.hasbreak, 0);
@@ -32876,8 +32872,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
             }
         }
         if c.terminated == 0 {
-            loopstate := ownership::snapshot(&c.loopcheck);
-            if !backedge_ok(&mut c, &loopstate) {
+            if !backedge_ok(&mut c, &ownership::snapshot(&c.loopcheck)) {
                 fail(&mut c, view("loop backedge consumes entry storage"));
             }
         }
@@ -32890,8 +32885,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
             ownership::merge(&mut c.check, &entry);
         }
         if c.hasbreak != 0 {
-            broken := ownership::snapshot(&c.breaks);
-            ownership::merge(&mut c.check, &broken);
+            ownership::merge(&mut c.check, &ownership::snapshot(&c.breaks));
         }
         exchange(&mut c.terminated, 0);
         pop_locals(&mut c, mark);
@@ -33311,8 +33305,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
                 current := deref_value(&mut c, val(rt, rty));
                 rstart := c.pos;
                 mut rhs = expr(&mut c, 0);
-                rend := c.pos;
-                rhs = adopt_value(&mut c, rhs, rstart, rend, current.ty);
+                rhs = adopt_value(&mut c, rhs, rstart, c.pos, current.ty);
                 v = compound_value(&mut c, compound_operator(op), current.t, rhs, current.ty);
             } else {
                 fail(&mut c, view("expected = after *reference"));
@@ -33354,6 +33347,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         mutable := entry.mutable;
         if mutable == 0 {
             if kind(&mut c) != 46 {
+                // stays: a vector element read is a loan, so it conflicts with the call's &mut.
                 born := c.locals[l - 1].born;
                 at := decl_token(&mut c, born, view(name));
                 mut text = copy_bytes(view("`"));
@@ -33364,6 +33358,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
                 push_bytes(&mut help, view(name));
                 push_bytes(&mut help, view(" = ...`"));
                 diag_help(&mut c, view(help));
+                // stays: exchange is a builtin, so its &mut is taken before this read.
                 here := c.pos;
                 exchange(&mut c.pos, here - 1);
                 fail(&mut c, view("assignment requires mut"));
@@ -33445,8 +33440,7 @@ fn carray_assign<a>(c: (&a mut C), id: u64, ty: u64) -> u64 {
         return 0;
     }
     name_at := c.pos + 1;
-    eq_at := c.pos + 2;
-    if (kind_at(&mut c, name_at) != 1) || (kind_at(&mut c, eq_at) != 61) {
+    if (kind_at(&mut c, name_at) != 1) || (kind_at(&mut c, c.pos + 2) != 61) {
         return 0;
     }
     d := ty_arg(&mut c, rty);
@@ -34330,6 +34324,7 @@ fn s256_block(h: (&mut u64[]), text: &[u8], at: u64, w: (&mut u64[]), k: (&u64[]
         y := w[t - 2];
         s0 := s256_rotr(x, 7) ^ s256_rotr(x, 18) ^ (x >> 3);
         s1 := s256_rotr(y, 17) ^ s256_rotr(y, 19) ^ (y >> 10);
+        // stays: exchange is a builtin, so its &mut is taken before this read.
         packed := w[t - 16] + s0 + w[t - 7] + s1;
         exchange(&mut w[t], packed & S256MASK);
     }
@@ -35451,6 +35446,7 @@ fn ip_done<a>(p: (&a IPos)) -> bool {
 }
 fn ip_take<a>(p: (&a mut IPos)) -> u8[] {
     t := ip_txt(&p);
+    // stays: exchange is a builtin, so its &mut is taken before this read.
     at := p.at + 1;
     exchange(&mut p.at, at);
     return t;
@@ -35481,6 +35477,7 @@ fn ip_quoted<a>(p: (&a mut IPos)) -> u8[] {
         iface_fail(&p, view("expected a quoted value"));
     }
     t := ip_txt(&p);
+    // stays: exchange is a builtin, so its &mut is taken before this read.
     at := p.at + 1;
     exchange(&mut p.at, at);
     mut out = u8[];
@@ -35539,6 +35536,7 @@ fn ip_is<a, b>(p: (&a IPos), word: &b [u8]) -> bool {
 }
 fn ip_eat<a, b>(p: (&a mut IPos), word: &b [u8]) -> bool {
     if ip_is(&p, view(word)) {
+        // stays: exchange is a builtin, so its &mut is taken before this read.
         at := p.at + 1;
         exchange(&mut p.at, at);
         return true;
@@ -36290,9 +36288,7 @@ fn iface_module_text<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std: 
     mut at = 0;
     env_start := out.len();
     while at < c.iface_env.len() {
-        decl := c.iface_env[at];
-        local := c.iface_env_names[at].copy();
-        iface_emit_env(&mut c, &mut out, decl, view(local));
+        iface_emit_env(&mut c, &mut out, c.iface_env[at], view(c.iface_env_names[at].copy()));
         at += 1;
     }
     iface_span(&mut spans, env_start, out.len(), 9, 0, 1, 0);
@@ -36572,6 +36568,7 @@ fn iface_load<a, b>(c: (&a mut C), path: &a [u8], source_path: &b [u8], phase: u
         } else if same(view(key), view("link")) {
             input := ip_quoted(&mut p);
             ffi_link(&mut c, view(input));
+            // stays: exchange is a builtin, so its &mut is taken before this read.
             last := c.lib_owner.len() - 1;
             exchange(&mut c.lib_owner[last], module.copy());
         }
@@ -38439,8 +38436,7 @@ pub fn main() -> u64 {
         iface_check_manifest(&mut c, view(iface_dir));
     }
     if c.iface_use.len() != 0 {
-        used := c.iface_use.copy();
-        iface_load_used(&mut c, view(used));
+        iface_load_used(&mut c, view(c.iface_use.copy()));
     }
     n := argc - offset;
     if !(2 < n) {
@@ -38531,8 +38527,7 @@ pub fn main() -> u64 {
         // when its names were registered.
         if (pass == 0) & (c.iface_verify == 0) {
             for k in c.iface_loaded.len() {
-                file := c.iface_loaded_path[k].copy();
-                iface_load(&mut c, view(file), view(""), 2);
+                iface_load(&mut c, view(c.iface_loaded_path[k].copy()), view(""), 2);
             }
         }
         if pass == 1 {

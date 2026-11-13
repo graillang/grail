@@ -8787,5 +8787,31 @@
     "source": "module derived_self;\ninterface Build { fn rebuild(self: &Self) -> Self; }\nimpl Build for u64 { fn rebuild(self: &u64) -> u64 { return *self + 100; } }\nfn twice<T: Build>(v: T) -> T {\n    return v.rebuild().rebuild();\n}\nfn main() {\n    println(\"{}\", twice(1));\n}\n",
     "stdout": "201\n",
     "note": "an interface method declared `-> Self` keeps the specialisation parameter's identity, so it chains inside a generic function"
+  },
+  {
+    "name": "hoist-inlined-field-read",
+    "source": "struct C {\n    pos: u64,\n    log: u64[],\n}\nfn bump(c: &mut C, by: u64) -> u64 {\n    c.pos = c.pos + by;\n    return c.pos;\n}\nfn main() -> u64 {\n    mut c = C { pos: 3, log: u64[] };\n    println(bump(&mut c, c.pos * 2));\n    println(bump(&mut c, c.pos + 1));\n    c.log.push(c.pos);\n    println(c.log[0]);\n    return 0;\n}\n",
+    "stdout": "9\n19\n19\n",
+    "note": "the read stays in the argument list: bump(&mut c, c.pos * 2) reads the pre-call pos, and the &mut self push reads its argument before the receiver borrow"
+  },
+  {
+    "name": "hoist-inlined-nested-call",
+    "source": "struct C {\n    pos: u64,\n    hits: u64,\n}\nfn count(c: &mut C) -> u64 {\n    c.hits = c.hits + 1;\n    return c.hits;\n}\nfn place(c: &mut C, at: u64) -> u64 {\n    c.pos = at;\n    return c.pos;\n}\nfn main() -> u64 {\n    mut c = C { pos: 0, hits: 0 };\n    println(place(&mut c, count(&mut c)));\n    println(place(&mut c, count(&mut c) * 10));\n    return 0;\n}\n",
+    "stdout": "1\n20\n",
+    "note": "two calls taking &mut c nest as an argument instead of through a temporary"
+  },
+  {
+    "name": "hoist-rejects-simultaneous-mut-alias",
+    "source": "struct C {\n    pos: u64,\n}\nfn pair(a: &mut C, b: &mut C) -> u64 {\n    a.pos = 1;\n    b.pos = 2;\n    return a.pos + b.pos;\n}\nfn main() -> u64 {\n    mut c = C { pos: 0 };\n    println(pair(&mut c, &mut c));\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "borrow conflicts with active access",
+    "note": "two &mut borrows of one place in one argument list are still refused"
+  },
+  {
+    "name": "hoist-rejects-element-borrow",
+    "source": "struct Row {\n    ty: u64,\n}\nstruct Grid {\n    rows: Row[],\n}\nfn add(g: &mut Grid, ty: u64) -> u64 {\n    g.rows.push(Row { ty: ty });\n    return ty;\n}\nfn main() -> u64 {\n    mut g = Grid { rows: Row[] };\n    g.rows.push(Row { ty: 7 });\n    println(add(&mut g, g.rows[0].ty));\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "borrow conflicts with active access",
+    "note": "a non-numeric element stays borrowed, so reading g.rows[0].ty inside the call is a live loan, not a copy: that read keeps its temporary"
   }
 ]

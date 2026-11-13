@@ -225,6 +225,12 @@ Use `mut name = value` for mutable declarations and `name := value` for fixed bi
 `&value` creates a readonly byte view; `&mut value` creates an exclusive writable byte view.
 The latter requires mutable owned storage or an existing writable capability. Prefix borrowing
 binds tighter than binary operators, including bitwise `&`; postfix indexing binds tighter still.
+A call's `&mut place` argument, and a `&mut self` receiver, is borrowed after the other arguments
+are evaluated (Rust's two-phase borrows), so those arguments may still read the place:
+`bump(&mut c, c.pos)`, `ty_kind(&mut c, ty_arg(&mut c, t))` and `c.bump(c.pos)` compile, and the
+read sees the state from before the call. There is no need for a temporary: write the read where
+it is used. Two shapes keep one - `exchange` is a builtin whose `&mut` is taken first, and a read
+through a borrowed vector element (`c.rows[i].field` of a record element) is a loan, not a copy.
 Typed storage references remain `borrow(value)` / `borrow_mut(value)`.
 
 Byte buffers, strings and views support `value[index]` and readonly `value[start:end]` slices.

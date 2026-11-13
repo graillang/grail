@@ -773,6 +773,7 @@ fn parse<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64) {
         }
     }
     if extra != 0 {
+        // stays: exchange is a builtin, so its &mut is taken before this read.
         last := o.op.len() - 1;
         exchange(&mut o.op[last], 0);
     }
@@ -817,6 +818,7 @@ fn parse<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64) {
                 fast = 48;
             }
             if fast != 0 {
+                // stays: exchange is a builtin, so its &mut is taken before this read.
                 last := o.op.len() - 1;
                 exchange(&mut o.op[last], fast);
             }
@@ -1023,15 +1025,13 @@ fn facts_valid<a>(f: (&a F), n: u64) -> bool {
 }
 fn fresh_facts<a>(f: (&a mut F), n: u64) {
     put(&mut f.sep, n, f.epoch);
-    t1 := f.sver[n];
-    put(&mut f.sfv, n, t1);
+    put(&mut f.sfv, n, f.sver[n]);
     put(&mut f.sreg, n, 0);
     put(&mut f.simm, n, 0);
     put(&mut f.scopy, n, 0);
 }
 fn reg_written<a>(f: (&a mut F), r: u64) {
-    t2 := f.rver[r] + 1;
-    put(&mut f.rver, r, t2);
+    put(&mut f.rver, r, f.rver[r] + 1);
     put(&mut f.rimm, r, 0);
     put(&mut f.rslot, r, 0);
     put(&mut f.rcopy, r, 0);
@@ -1147,6 +1147,7 @@ fn forward<a, b, c>(o: (&a mut O), f: (&c mut F), s: &b [u8], first: u64, last: 
             continue;
         }
         if op == 100 || op == 0 {
+            // stays: exchange is a builtin, so its &mut is taken before this read.
             ep := f.epoch + 1;
             exchange(&mut f.epoch, ep);
             if op == 0 {
@@ -1241,15 +1242,13 @@ fn forward<a, b, c>(o: (&a mut O), f: (&c mut F), s: &b [u8], first: u64, last: 
         }
         if slot_written(&o, i) {
             n := o.v1[i] / 8;
-            t3 := f.sver[n] + 1;
-            put(&mut f.sver, n, t3);
+            put(&mut f.sver, n, f.sver[n] + 1);
             if (op2 == 1) & (f.bad[n] == 0) {
                 fresh_facts(&mut f, n);
                 if o.k0[i] == 1 {
                     r := o.v0[i];
                     put(&mut f.sreg, n, r + 1);
-                    t4 := f.rver[r];
-                    put(&mut f.sregv, n, t4);
+                    put(&mut f.sregv, n, f.rver[r]);
                     if src_imm != 0 {
                         put(&mut f.simm, n, src_imm);
                     }
@@ -1257,8 +1256,7 @@ fn forward<a, b, c>(o: (&a mut O), f: (&c mut F), s: &b [u8], first: u64, last: 
                         m := src_slot - 1;
                         if (m != n) & (src_slotv == f.sver[m]) {
                             put(&mut f.scopy, n, m + 1);
-                            t5 := f.sver[m];
-                            put(&mut f.scopyv, n, t5);
+                            put(&mut f.scopyv, n, f.sver[m]);
                         }
                     }
                 }
@@ -1280,38 +1278,36 @@ fn forward<a, b, c>(o: (&a mut O), f: (&c mut F), s: &b [u8], first: u64, last: 
                 r := o.v0[i];
                 if r != q {
                     put(&mut f.rcopy, q, r + 1);
-                    cv := f.rver[r];
-                    put(&mut f.rcopyv, q, cv);
+                    put(&mut f.rcopyv, q, f.rver[r]);
                 }
             }
             if o.k0[i] == 2 {
                 n := o.v0[i] / 8;
                 if f.bad[n] == 0 {
                     put(&mut f.rslot, q, n + 1);
-                    t6 := f.sver[n];
-                    put(&mut f.rslotv, q, t6);
+                    put(&mut f.rslotv, q, f.sver[n]);
                     if !facts_valid(&f, n) {
                         fresh_facts(&mut f, n);
                     }
                     put(&mut f.sreg, n, q + 1);
-                    t7 := f.rver[q];
-                    put(&mut f.sregv, n, t7);
+                    put(&mut f.sregv, n, f.rver[q]);
                 }
             }
             if loaded != 0 {
                 n := loaded - 1;
                 if o.k0[i] != 2 {
                     put(&mut f.rslot, q, n + 1);
-                    t8 := f.sver[n];
-                    put(&mut f.rslotv, q, t8);
+                    put(&mut f.rslotv, q, f.sver[n]);
                 }
             }
         }
         if is_jump(op2) && op2 != 15 {
+            // stays: exchange is a builtin, so its &mut is taken before this read.
             ep := f.epoch + 1;
             exchange(&mut f.epoch, ep);
         }
         if op2 == 29 || op2 == 30 {
+            // stays: exchange is a builtin, so its &mut is taken before this read.
             ep := f.epoch + 1;
             exchange(&mut f.epoch, ep);
         }
@@ -1334,13 +1330,11 @@ fn count_reads<a, c>(o: (&a O), f: (&c mut F), first: u64, last: u64) {
         if o.del[j] == 0 {
             if slot_read(&o, j, 0) {
                 n := o.v0[j] / 8;
-                t9 := f.reads[n] + 1;
-                put(&mut f.reads, n, t9);
+                put(&mut f.reads, n, f.reads[n] + 1);
             }
             if slot_read(&o, j, 1) {
                 n := o.v1[j] / 8;
-                t10 := f.reads[n] + 1;
-                put(&mut f.reads, n, t10);
+                put(&mut f.reads, n, f.reads[n] + 1);
             }
         }
     }
@@ -1911,8 +1905,7 @@ fn emit_line<a, b>(o: (&a mut O), s: &b [u8], i: u64) {
         o.out.push(10);
         return ();
     }
-    code := o.op[i];
-    opname(&mut o, code);
+    opname(&mut o, o.op[i]);
     if o.k0[i] != 0 {
         o.out.push(32);
         emit_operand(&mut o, view(s), i, 0);
@@ -2057,8 +2050,7 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
         }
         for i in last {
             if o.lab[i] != 0 {
-                li := o.lab[i] - 1 - base;
-                put(&mut o.table, li, i + 1);
+                put(&mut o.table, o.lab[i] - 1 - base, i + 1);
             }
         }
         for i in last {
@@ -2075,8 +2067,7 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
                     n := v - 1;
                     if n >= base {
                         if n - base < refs.len() {
-                            x := refs[n - base] + 1;
-                            put(&mut refs, n - base, x);
+                            put(&mut refs, n - base, refs[n - base] + 1);
                         }
                     }
                 }
@@ -2125,10 +2116,8 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
             if is_jump(op) && op != 15 && o.del[i] == 0 {
                 t := jump_target(&o, i);
                 if t < i {
-                    x := opens[t] + 1;
-                    put(&mut opens, t, x);
-                    y := closes[i + 1] + 1;
-                    put(&mut closes, i + 1, y);
+                    put(&mut opens, t, opens[t] + 1);
+                    put(&mut closes, i + 1, closes[i + 1] + 1);
                 }
             }
         }
@@ -2157,8 +2146,7 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
                         n := v / 8;
                         if f.bad[n] == 0 {
                             if promotable_use(&o, i) {
-                                t11 := f.weight[n] + w;
-                                put(&mut f.weight, n, t11);
+                                put(&mut f.weight, n, f.weight[n] + w);
                             } else {
                                 put(&mut f.bad, n, 1);
                             }
@@ -2679,12 +2667,10 @@ fn compact<a, b>(o: (&a mut O), s: &b [u8], prologue: u64, ns: u64) -> u64 {
     for i in last {
         if o.del[i] == 0 {
             if o.k0[i] == 2 {
-                v := map[o.v0[i] / 8] * 8;
-                set_operand(&mut o, i, 0, 2, v);
+                set_operand(&mut o, i, 0, 2, map[o.v0[i] / 8] * 8);
             }
             if o.k1[i] == 2 {
-                v := map[o.v1[i] / 8] * 8;
-                set_operand(&mut o, i, 1, 2, v);
+                set_operand(&mut o, i, 1, 2, map[o.v1[i] / 8] * 8);
             }
         }
     }

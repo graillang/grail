@@ -28,8 +28,13 @@ c.bump(c.pos);
 v.push(v.len());
 ```
 
-The value read is copied before the borrow starts. A borrow that lives through the call is still
-a conflict: `take(&mut c, &c.pos)` is refused.
+The value read is copied before the borrow starts. Any plain path works there, including one that
+computes (`bump(&mut c, c.pos + 1)`) or a call that only reads (`bump(&mut c, peek(&mut c))`). A
+borrow that lives through the call is still a conflict: `take(&mut c, &c.pos)` is refused.
+
+Two shapes are not covered, and there the value must reach the call in a local: the `exchange`
+builtin takes its `&mut` before its other argument, and a read through a borrowed vector element
+(`c.rows[i].field`, where `Row` is a record) is a loan of that element rather than a copy.
 
 ## Borrowing a temporary
 
