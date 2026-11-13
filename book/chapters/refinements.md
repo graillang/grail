@@ -105,3 +105,41 @@ sound.
 entry, so a proof that is wrong aborts instead of passing unnoticed. The corpus runs this way, and no
 check has ever fired: the prover's power is an optimisation, and every step of it is covered by a
 check whose absence is tested.
+
+## Checked effects
+
+A refinement states what is true of a value. An effect attribute states what a function never
+does, and the compiler proves it over everything the function can reach:
+
+```grl
+@no_alloc
+fn sum(v: &u64[]) -> u64 { ... }        // no heap allocation, in it or in anything it calls
+
+@no_panic
+fn get(v: &u64[], i: u64 where i < v.len()) -> u64 {
+    return v[i];                          // no runtime check is left that could fail
+}
+
+fn drain() {
+    @bounded(64)
+    while i < 64 { i += 1; }               // at most 64 iterations, proved from the counter
+}
+```
+
+The proof walks the call graph, the runtime's own included: a function allocates exactly when a
+chain of calls reaches the allocator, and it can fail exactly when a chain reaches a runtime check
+that the prover did not remove. The refusal names that chain:
+
+```
+error: `@no_alloc` function `grow` performs a heap allocation: it calls grow -> rt_push -> rt_grow
+```
+
+A refined parameter's check belongs to the caller. A `@no_panic` function that calls `get` with an
+index it has proved in bounds reaches `get`'s proved entry and passes; one that has not is refused,
+because the call goes through the check. Overflow is a failure too: `@no_panic` arithmetic either
+cannot overflow from the facts the prover has, or is written with the wrapping operations.
+
+A program that claims an effect is compiled whole, because the proof needs every body. Indirect calls
+in user code (a function value, a `dyn` method) are unknown and refused under both attributes; the
+compiler's own dispatch (a vector dropping its elements, a vtable's drop slot) is followed through
+the helpers it can reach, not through the call itself.

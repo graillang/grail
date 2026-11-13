@@ -274,6 +274,46 @@ fn use_names<a>(text: &a [u8]) -> u8[][] {
     }
     return out;
 }
+// Whether a source of the build claims a checked effect (docs/design/effects.md).
+fn effects_claimed<a>(command: (&a u8[][]), at: u64) -> bool {
+    mut k = at;
+    while k < command.len() {
+        file := item(command, k);
+        k += 1;
+        if !ends_with_grl(view(file)) {
+            continue;
+        }
+        text := host::read_file(view(file));
+        if has_text(view(text), view("@no_alloc")) || has_text(view(text), view("@no_panic")) {
+            return true;
+        }
+    }
+    return false;
+}
+fn ends_with_grl<a>(s: &a [u8]) -> bool {
+    n := s.len();
+    if n < 4 {
+        return false;
+    }
+    return (s[n - 4] == 46) && (s[n - 3] == 103) && (s[n - 2] == 114) && (s[n - 1] == 108);
+}
+fn has_text<a, b>(text: &a [u8], needle: &b [u8]) -> bool {
+    if needle.len() > text.len() {
+        return false;
+    }
+    mut i = 0;
+    while i + needle.len() <= text.len() {
+        mut j = 0;
+        while (j < needle.len()) && (text[i + j] == needle[j]) {
+            j += 1;
+        }
+        if j == needle.len() {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
 fn contains_name<a, b>(list: (&a u8[][]), name: &b [u8]) -> bool {
     for i in list.len() {
         if eq(view(list[i]), view(name)) {
@@ -704,6 +744,11 @@ fn compile_mode<a, b, d, e, g>(
         groups = source_groups(&command, at);
         if (cache != 0) || (program_modules(&groups) > 1) {
             per_module = 1;
+        }
+        // `@no_alloc` and `@no_panic` are proved over every body the program can reach, the runtime's
+        // included, so a program that claims them is compiled in one run.
+        if effects_claimed(&command, at) {
+            per_module = 0;
         }
     }
     // B1 stage 4: an unchanged program is not rebuilt at all, and what is rebuilt assembles and links

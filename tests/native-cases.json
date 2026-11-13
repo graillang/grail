@@ -7620,5 +7620,53 @@
     "interfaceFiles": [
       "tests/interfaces/strictgen_idle.grl"
     ]
+  },
+  {
+    "name": "effects-accepted",
+    "source": "@no_alloc\nfn sum(v: &u64[]) -> u64 {\n    mut t = 0;\n    for i in v.len() {\n        t = t + v[i];\n    }\n    return t;\n}\n\n@no_panic\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\n\n@no_panic\nfn largest(v: &u64[]) -> u64 {\n    mut t = 0;\n    for i in v.len() {\n        if v[i] > t {\n            t = v[i];\n        }\n    }\n    return t;\n}\n\nfn count() -> u64 {\n    mut i = 0;\n    @bounded(16)\n    while i < 16 {\n        i += 1;\n    }\n    return i;\n}\n\n@no_panic\nfn pick(v: &u64[]) -> u64 {\n    if v.len() > 2 {\n        return get(v, 2);\n    }\n    return 0;\n}\n\nfn main() -> u64 {\n    v := u64[1, 2, 3];\n    println(\"{}\", pick(&v));\n    println(\"{} {} {} {}\", sum(&v), get(&v, 2), largest(&v), count());\n    return 0;\n}\n",
+    "stdout": "3\n6 3 3 16\n",
+    "note": "@no_alloc over a slice loop, @no_panic with a refined index and with for-len indexing, a @no_panic caller that proves the callee's refinement, @bounded(16) while"
+  },
+  {
+    "name": "effects-no-alloc-push-refused",
+    "source": "@no_alloc\nfn grow(v: &mut u64[]) -> unit {\n    v.push(1);\n}\nfn main() -> u64 { mut v = u64[]; grow(&mut v); return 0; }\n",
+    "reject": true,
+    "diagnostic": "`@no_alloc` function `grow` performs a heap allocation: it calls grow -> rt_push -> rt_grow"
+  },
+  {
+    "name": "effects-no-alloc-chain-refused",
+    "source": "fn helper() -> u64[] {\n    return u64[1, 2];\n}\nfn middle() -> u64 {\n    return helper().len();\n}\n@no_alloc\nfn top() -> u64 {\n    return middle();\n}\nfn main() -> u64 { println(top()); return 0; }\n",
+    "reject": true,
+    "diagnostic": "`@no_alloc` function `top` performs a heap allocation: it calls top -> middle -> helper"
+  },
+  {
+    "name": "effects-no-panic-index-refused",
+    "source": "@no_panic\nfn at(v: &u64[], i: u64) -> u64 {\n    return v[i];\n}\nfn main() -> u64 { v := u64[1]; println(at(&v, 0)); return 0; }\n",
+    "reject": true,
+    "diagnostic": "`@no_panic` function `at` can fail: it calls at -> rt_slot"
+  },
+  {
+    "name": "effects-no-panic-unwrap-refused",
+    "source": "@no_panic\nfn first(x: u64?) -> u64 {\n    return x!;\n}\nfn main() -> u64 { println(first(Some(3))); return 0; }\n",
+    "reject": true,
+    "diagnostic": "`@no_panic` function `first` can fail"
+  },
+  {
+    "name": "effects-no-panic-overflow-refused",
+    "source": "@no_panic\nfn add(a: u64, b: u64) -> u64 {\n    return a + b;\n}\nfn main() -> u64 { println(add(1, 2)); return 0; }\n",
+    "reject": true,
+    "diagnostic": "`@no_panic` function `add` can fail"
+  },
+  {
+    "name": "effects-no-panic-unproved-refinement-refused",
+    "source": "fn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\n@no_panic\nfn careless(v: &u64[], i: u64) -> u64 {\n    return get(v, i);\n}\nfn main() -> u64 { v := u64[1, 2]; println(careless(&v, 1)); return 0; }\n",
+    "reject": true,
+    "diagnostic": "`@no_panic` function `careless` can fail: it calls careless -> get"
+  },
+  {
+    "name": "effects-bounded-unprovable-refused",
+    "source": "fn spin(n: u64) -> u64 {\n    mut i = 0;\n    @bounded(8)\n    while i != n {\n        i += 1;\n    }\n    return i;\n}\nfn main() -> u64 { println(spin(3)); return 0; }\n",
+    "reject": true,
+    "diagnostic": "cannot prove `@bounded(8)`"
   }
 ]
