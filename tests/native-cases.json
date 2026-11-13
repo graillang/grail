@@ -7834,14 +7834,21 @@
     "files": [
       "compiler/tests/dyn_borrowed_alloc.grl"
     ],
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
     "stdout": "7 7 7\n",
     "asm": [
       "leaq .V",
-      "movq %rax,8(%rcx)\nmovq %rcx,%rax"
+      "movq 8(%rax),%rdx\nmovq (%rax),%rax"
     ],
     "asmAbsent": [
       "call f_main_as_shape.pair"
-    ]
+    ],
+    "note": "the vtable is a static symbol and the pair is written straight into the borrowing frame (no helper call, no allocation); a returned pair leaves as the two words %rax:%rdx, which the optimizer keeps live"
   },
   {
     "name": "dyn-borrowed-reject-move",
@@ -8116,5 +8123,36 @@
     "reject": true,
     "diagnostic": "`@no_alloc` function `mine` performs a heap allocation",
     "note": "no claim in the definition module means no `effects` row for it, so an importer cannot trust the callee and its own claim is refused; `fx-effects-interface-proof` is the half where the row is present, and `tools/interface-test.mjs` asserts both the row's presence and that a removed row is refused by the manifest"
+  },
+  {
+    "name": "opt2-dyn-pair-loop",
+    "source": "// A `&dyn` pair built in a loop, copied, passed to a function and returned.\ninterface Shape {\n    fn area(self: &Self) -> u64;\n    fn grow(self: &mut Self, by: u64) -> unit;\n}\nstruct Sq {\n    side: u64,\n}\nstruct Ci {\n    r: u64,\n}\nimpl Shape for Sq {\n    fn area(self: &Self) -> u64 {\n        return self.side * self.side;\n    }\n    fn grow(self: &mut Self, by: u64) -> unit {\n        self.side = self.side + by;\n        return ();\n    }\n}\nimpl Shape for Ci {\n    fn area(self: &Self) -> u64 {\n        return 3 * self.r * self.r;\n    }\n    fn grow(self: &mut Self, by: u64) -> unit {\n        self.r = self.r + by;\n        return ();\n    }\n}\nfn round(s: &dyn Shape) -> u64 {\n    return s.area();\n}\nfn as_shape(v: &Sq) -> &dyn Shape {\n    return v;\n}\nfn main() -> u64 {\n    mut q = Sq { side: 1 };\n    mut c = Ci { r: 2 };\n    mut total = 0;\n    for i in 10 {\n        mut d: &mut dyn Shape = &mut q;\n        d.grow(1);\n        e: &dyn Shape = &q;\n        same := e;\n        total = total + round(same);\n        total = total + round(&c);\n        total = total + as_shape(&q).area();\n    }\n    println(\"{} {}\", total, q.side);\n    return 0;\n}\n",
+    "stdout": "1130 11\n",
+    "note": "ten rounds of building a `&dyn` pair: a `&mut dyn` method call through one, a pair in a local that is copied, a pair passed to a function and a pair returned by one, all in a loop, so the two-word slot is spilled, reloaded and dispatched repeatedly"
+  },
+  {
+    "name": "opt2-dyn-pair-optimized",
+    "source": "interface Shape {\n    fn area(self: &Self) -> u64;\n    fn grow(self: &mut Self, by: u64) -> unit;\n}\nstruct Sq {\n    side: u64,\n}\nimpl Shape for Sq {\n    fn area(self: &Self) -> u64 {\n        return self.side * self.side;\n    }\n    fn grow(self: &mut Self, by: u64) -> unit {\n        self.side = self.side + by;\n        return ();\n    }\n}\nfn main() -> u64 {\n    mut q = Sq { side: 1 };\n    mut total = 0;\n    for i in 5 {\n        mut d: &mut dyn Shape = &mut q;\n        d.grow(1);\n        e: &dyn Shape = &q;\n        total = total + e.area();\n    }\n    println(\"{}\", total);\n    return 0;\n}\n",
+    "stdout": "90\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asm": [
+      "movq %rbx,-.F",
+      "movq $0,%rbx"
+    ],
+    "asmAbsent": [
+      "leaq -4(%rbp)"
+    ],
+    "note": "a function that builds a `&dyn` pair is optimized: the loop accumulator is promoted into a callee-saved register (`movq %rbx,-.F...` spills it below the frame), and the unaligned-frame-operand request that used to send every pair-building function down the copy-unchanged path is gone"
+  },
+  {
+    "name": "opt2-dyn-pair-dyn-return",
+    "source": "interface Shape {\n    fn area(self: &Self) -> u64;\n}\ninterface Maker {\n    fn make(self: &Self) -> &dyn Shape;\n}\nstruct Sq {\n    side: u64,\n}\nimpl Shape for Sq {\n    fn area(self: &Self) -> u64 {\n        return self.side * self.side;\n    }\n}\nstruct Factory {\n    v: Sq,\n}\nimpl Maker for Factory {\n    fn make(self: &Self) -> &dyn Shape {\n        return &self.v;\n    }\n}\nfn main() -> u64 {\n    f := Factory { v: Sq { side: 6 } };\n    m: &dyn Maker = &f;\n    s: &dyn Shape = m.make();\n    println(\"{}\", s.area());\n    return 0;\n}\n",
+    "stdout": "36\n",
+    "note": "a `&dyn Shape` returned through a dyn-dispatched (indirect) call: the pair comes back in %rax:%rdx and the caller builds it in its own frame, so both words have to be live at the return of a function the optimizer compressed"
   }
 ]

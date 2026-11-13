@@ -151,6 +151,10 @@ struct L {
     // 1 when every frame access is a constant negative offset from rbp: each 8-byte slot is then
     // its own alloca, so borrowing one local does not make the whole frame escape.
     split: u64,
+    // Two-word frame values of the function being lowered, as their first word's slot: word 1 is
+    // the slot above it (`8(%base)`), and the two are one `[2 x i64]` alloca (native.grl declares
+    // them with `.gpair`, for a borrowed interface object's {data, vtable} pair).
+    pairs: u64[],
     // Accepted f32 slot facts of the function being lowered: every slot in here is emitted as
     // `alloca float` and read and written with `load float`/`store float` (docs/design/typed-ir.md).
     fslots: u64[],
@@ -751,10 +755,18 @@ fn address<a, b>(l: (&a mut L), op: &b [u8]) -> u8[] {
             // Slot k covers [-8(k+1), -8k) below rbp.
             k := u64(0 - (d + 1)) / 8;
             within := d + i64(8 * (k + 1));
+            // A two-word value is one alloca of two slots: the second word is the first word's
+            // alloca at +8, so the address of either word names one object.
+            mut at = k;
+            mut off = within;
+            if pair_second(&l, k) != 0 {
+                at = u64(pair_base(&l, k)) - 1;
+                off = within + 8;
+            }
             mut slot = copy(view("%s."));
-            num(&mut slot, k);
+            num(&mut slot, at);
             mut wt = u8[];
-            inum(&mut wt, within);
+            inum(&mut wt, off);
             return def(&mut l, view("getelementptr i8, ptr {}, i64 {}"), &u8[][slot, wt]);
         }
         return def(&mut l, view("getelementptr i8, ptr %fbase, i64 {}"), &u8[][dt]);
@@ -2483,6 +2495,11 @@ fn body_lines<a, b>(lines: (&a u8[][]), f: (&b Func)) -> u8[][] {
     mut i = f.first;
     while i < f.end {
         line := view(lines[i]);
+        // A two-word value's declaration is read by function_pairs; no instruction sees it.
+        if starts(line, view(".gpair ")) {
+            i += 1;
+            continue;
+        }
         if starts(line, view(".pushsection")) {
             pool = 1;
         }
@@ -2495,6 +2512,73 @@ fn body_lines<a, b>(lines: (&a u8[][]), f: (&b Func)) -> u8[][] {
         i += 1;
     }
     return out;
+}
+// The slot a `.gpair -N(%rbp)` line declares as the first word of a two-word value, +1 (0 when the
+// line is not one). `-N(%rbp)` is that word's address, so the slot is N/8-1 and the second word is
+// the slot above it, at `-N+8(%rbp)`.
+fn pair_slot(line: &[u8]) -> u64 {
+    if !starts(line, view(".gpair -")) {
+        return 0;
+    }
+    mut n: u64 = 0;
+    mut digits = 0;
+    mut i: u64 = 8;
+    while i < line.len() {
+        ch := line[i];
+        if (ch < 48) || (57 < ch) {
+            break;
+        }
+        n = n * 10 + ch - 48;
+        digits += 1;
+        i += 1;
+    }
+    if (digits == 0) || (n == 0) || (n % 8 != 0) {
+        return 0;
+    }
+    return n / 8;
+}
+fn function_pairs<a, b>(l: (&a mut L), lines: (&a u8[][]), f: (&b Func)) -> unit {
+    exchange(&mut l.pairs, u64[]);
+    mut i = f.first;
+    while i < f.end {
+        line := view(lines[i]);
+        n := pair_slot(line);
+        if n != 0 {
+            l.pairs.push(n - 1);
+        } else {
+            // A declaration this lowering cannot read leaves the function to the assembler,
+            // rather than guessing at half of a two-word value.
+            if starts(line, view(".gpair -")) {
+                bad(&mut l);
+                return ();
+            }
+        }
+        i += 1;
+    }
+    return ();
+}
+// The two-word value slot k belongs to, +1: its first word's slot, or 0 when k is a plain slot.
+// Slot k is the first word when it is the base, and the second word when the base is k+1.
+fn pair_base<a>(l: (&a L), k: u64) -> u64 {
+    for i in l.pairs.len() {
+        b := l.pairs[i];
+        if (b == k) | (b == k + 1) {
+            return b + 1;
+        }
+    }
+    return 0;
+}
+// Whether slot k is the second word of a two-word value (the slot above its base).
+fn pair_second<a>(l: (&a L), k: u64) -> u64 {
+    b := pair_base(&l, k);
+    if b == 0 {
+        return 0;
+    }
+    // `pair_base` counts the base slot from one, so the second word's slot is two below it.
+    if b == k + 2 {
+        return 1;
+    }
+    return 0;
 }
 // Whether every `%rbp` in the instructions is a constant negative offset `-N(%rbp)`; the deepest
 // slot index is written to `deepest`.
@@ -2653,6 +2737,7 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
     }
     mut deepest: u64 = 0;
     l.split = frame_split(&instrs, &mut deepest);
+    function_pairs(&mut l, &lines, &f);
     // The range facts of this function, one verdict per line (see range_proofs). The frame the
     // front end declared does not always cover every slot the body spills to, so the deepest one
     // the stream addresses sets the count.
@@ -2701,8 +2786,30 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
             set_chain(&mut l, reg_index(view("rdi")) + 1, 1, 0, 0);
         }
         for k in count {
+            if pair_second(&l, k) != 0 {
+                // The second word of a two-word value lives in the alloca of the first word.
+                continue;
+            }
+            b := pair_base(&l, k);
             mut sn = copy(view("%s."));
             num(&mut sn, k);
+            if b != 0 {
+                // One object of two slots, so a write to either word is a write to an object whose
+                // address escapes: neither word can be dropped as dead.
+                emit(&mut l, view("{} = alloca [2 x i64], align 8"), &u8[][copy(view(sn))]);
+                if (zero >= 0) && (k >= u64(zero)) && (k < slots) {
+                    emit(&mut l, view("store i64 0, ptr {}"), &u8[][copy(view(sn))]);
+                }
+                if (zero >= 0) && (k >= 1) {
+                    // The second word is only cleared when the first one is (a pair starts above
+                    // the parameters, so both words share the zeroing decision).
+                    if (k - 1 >= u64(zero)) && (k - 1 < slots) {
+                        wt := def(&mut l, view("getelementptr i8, ptr {}, i64 8"), &u8[][copy(view(sn))]);
+                        emit(&mut l, view("store i64 0, ptr {}"), &u8[][wt]);
+                    }
+                }
+                continue;
+            }
             // An f32 slot is a real `float` so the loop-carried value stays a float; a float
             // zero is all-zero bytes, so the frame clear is bit-identical.
             if slot_typed(&l, k) {
@@ -5328,7 +5435,7 @@ fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (
             set_add(&mut weak, view(sub(wl, 6, wl.len())));
         }
     }
-    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, dnames: u8[][], proof: u64[], rline: 0, ranges: ranges };
+    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, dnames: u8[][], proof: u64[], rline: 0, ranges: ranges };
     mut funcs = Func[];
     mut data = u8[][];
     split(&lines, &mut funcs, &mut data);

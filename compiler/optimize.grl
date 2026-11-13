@@ -7,7 +7,17 @@ module optimize;
 // registers (weighted by loop depth), and (4) fuses set/test/branch sequences and turns division
 // by a power-of-two constant into shift/mask. Unrecognized functions are copied unchanged.
 // Kinds: 0 none, 1 register, 2 frame slot -N(%rbp), 3 immediate/other text, 4 other operand,
-// 5 generated text (range in O.gen). Ops: see opcode(); 100 label, 101 directive, 0 unknown.
+// 5 generated text (range in O.gen). Ops: see opcode(); 100 label, 101 directive, 102 two-word
+// slot declaration, 0 unknown.
+//
+// A slot is one word unless a `.gpair -N(%rbp)` line declares it the first word of a two-word
+// value (native.grl emits one where a borrowed interface object's {data, vtable} pair is built), and
+// a result is one word unless `.gpair ret` declares it the two-word %rax:%rdx form.
+// The two words are one value with one identity: allocated together, written directly, addressed
+// from the first word, kept adjacent when the frame is compacted, and never promoted, forwarded or
+// dropped - the second word's only reader is the pair's address, which no pass reasons about. Every
+// pass that looks at a slot obeys `pair[n]`, so width 1 and width 2 are handled uniformly and a
+// pass that cannot reason about the second word is conservative for both.
 struct O {
     ls: u64[],
     le: u64[],
@@ -37,6 +47,9 @@ struct O {
     zline: u64,
     zfrom: u64,
     zto: u64,
+    pairs: u64[],
+    pair: u64[],
+    ret2: u64,
     inl_names: u8[][],
     inl_bodies: u8[][],
     inl_units: u8[][],
@@ -696,6 +709,25 @@ fn parse<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64) {
     }
     o.op.push(op);
     o.lab.push(lab);
+    if op == 101 {
+        // `.gpair -N(%rbp)`: the two-word value whose first word lives at that frame address.
+        if (e - a > 7) & same(view(s), a, a + 7, view(".gpair ")) {
+            last := o.op.len() - 1;
+            if same(view(s), a + 7, e, view("ret")) {
+                exchange(&mut o.op[last], 102);
+                exchange(&mut o.ret2, 1);
+                classify(&mut o, view(s), e, e, 0);
+                classify(&mut o, view(s), e, e, 1);
+                return ();
+            }
+            exchange(&mut o.op[last], 102);
+            classify(&mut o, view(s), a + 7, e, 0);
+            classify(&mut o, view(s), e, e, 1);
+            n := o.v0[o.v0.len() - 1];
+            o.pairs.push(n / 8);
+            return ();
+        }
+    }
     if op == 100 || op == 101 {
         classify(&mut o, view(s), e, e, 0);
         classify(&mut o, view(s), e, e, 1);
@@ -837,7 +869,7 @@ fn reads<a>(o: (&a O), i: u64) -> u64 {
     if op == 15 {
         return arg_regs() | src;
     }
-    if op == 100 || op == 101 || op == 29 || op == 32 || is_jump(op) {
+    if op == 100 || op == 101 || op == 102 || op == 29 || op == 32 || is_jump(op) {
         return 0;
     }
     if movelike(op) {
@@ -860,8 +892,11 @@ fn reads<a>(o: (&a O), i: u64) -> u64 {
     if op == 13 {
         return src | 5;
     }
-    if op == 25 || op == 26 || op == 27 || op == 30 {
+    if op == 25 || op == 26 || op == 27 {
         return 1;
+    }
+    if op == 30 {
+        return result_live(&o);
     }
     if op == 31 {
         return src;
@@ -883,7 +918,7 @@ fn reads<a>(o: (&a O), i: u64) -> u64 {
 }
 fn writes<a>(o: (&a O), i: u64) -> u64 {
     op := o.op[i];
-    if op == 100 || op == 101 || op == 29 || op == 30 || op == 31 || op == 6 || op == 7 {
+    if op == 100 || op == 101 || op == 102 || op == 29 || op == 30 || op == 31 || op == 6 || op == 7 {
         return 0;
     }
     if op == 15 {
@@ -915,6 +950,9 @@ fn writes<a>(o: (&a O), i: u64) -> u64 {
 // Whether operand j of instruction i reads / writes a frame slot.
 fn slot_read<a>(o: (&a O), i: u64, j: u64) -> bool {
     op := o.op[i];
+    if op == 101 || op == 102 {
+        return false;
+    }
     if j == 0 {
         return o.k0[i] == 2;
     }
@@ -1104,7 +1142,7 @@ fn forward<a, b, c>(o: (&a mut O), f: (&c mut F), s: &b [u8], first: u64, last: 
     mut i = first;
     while i < last {
         op := o.op[i];
-        if o.del[i] != 0 || op == 101 || o.tr[i] != 0 {
+        if o.del[i] != 0 || op == 101 || op == 102 || o.tr[i] != 0 {
             i += 1;
             continue;
         }
@@ -1280,6 +1318,13 @@ fn forward<a, b, c>(o: (&a mut O), f: (&c mut F), s: &b [u8], first: u64, last: 
         i += 1;
     }
 }
+// Registers a result is read from: %rax, plus %rdx when the function returns a two-word value.
+fn result_live<a>(o: (&a O)) -> u64 {
+    if o.ret2 != 0 {
+        return 5;
+    }
+    return 1;
+}
 fn count_reads<a, c>(o: (&a O), f: (&c mut F), first: u64, last: u64) {
     for n in f.reads.len() {
         put(&mut f.reads, n, 0);
@@ -1329,7 +1374,7 @@ fn live_pass<a, c>(o: (&a mut O), lin: (&c mut u64[]), remove: u64) -> u64 {
                     changed = 1;
                 }
             } else {
-                if op != 101 {
+                if (op != 101) & (op != 102) {
                     if op == 16 || (16 < op && op < 25) {
                         t := jump_target(&o, i);
                         mut there = all_regs();
@@ -1343,7 +1388,7 @@ fn live_pass<a, c>(o: (&a mut O), lin: (&c mut u64[]), remove: u64) -> u64 {
                         }
                     } else {
                         if op == 29 || op == 30 {
-                            live = 1;
+                            live = result_live(&o);
                         } else {
                             if op == 0 {
                                 live = all_regs();
@@ -1392,7 +1437,7 @@ fn dead_defs<a, b>(o: (&a mut O), s: &b [u8], first: u64, last: u64) {
 fn next_live<a>(o: (&a O), i: u64, last: u64) -> u64 {
     mut j = i + 1;
     while j < last {
-        if (o.del[j] == 0) & (o.op[j] != 101) {
+        if (o.del[j] == 0) & (o.op[j] != 101) & (o.op[j] != 102) {
             return j;
         }
         j += 1;
@@ -1788,6 +1833,9 @@ fn out_number<a>(o: (&a mut O), n: u64) {
 }
 fn emit_line<a, b>(o: (&a mut O), s: &b [u8], i: u64) {
     op := o.op[i];
+    if op == 102 {
+        return ();
+    }
     if op == 40 || op == 41 || op == 44 {
         n := uniq_take(&mut o);
         app(&mut o.out, view("cmpq 8(%rdi),%rsi\njb .L"));
@@ -1893,11 +1941,42 @@ fn emit_frame_slot<a, b>(o: (&a mut O), s: &b [u8], p: u64, k: u64) {
     out_number(&mut o, 8 * (k + 1));
     app(&mut o.out, view("(%rbp)"));
 }
+// Turn the declared pairs into slot widths: 0 scalar, 1 first word, 2 second word. A pair whose
+// second word would not be a frame slot cannot be modelled, so the function is copied unchanged
+// rather than mis-lowered.
+fn build_pairs<a>(o: (&a mut O), ns: u64) {
+    exchange(&mut o.pair, u64[]);
+    if o.pairs.len() == 0 {
+        return ();
+    }
+    for i in ns {
+        o.pair.push(0);
+    }
+    for i in o.pairs.len() {
+        n := o.pairs[i];
+        if (0 < n) & (n < ns) {
+            put(&mut o.pair, n, 1);
+            put(&mut o.pair, n - 1, 2);
+        } else {
+            exchange(&mut o.weird, 1);
+        }
+    }
+}
 fn function<a, b>(o: (&a mut O), s: &b [u8]) {
     first := 0;
     last := o.op.len();
     ns := o.maxslot / 8 + 1;
     mut f = new_facts(ns);
+    // Both words of a two-word value are opaque to the value passes: not promoted (bad), not
+    // forwarded, and their stores are not dead - the handle names them, not the frame.
+    build_pairs(&mut o, ns);
+    if o.pairs.len() != 0 {
+        for n in ns {
+            if o.pair[n] != 0 {
+                put(&mut f.bad, n, 1);
+            }
+        }
+    }
     // Frame shape: escaping slots, prologue position, label table and loop depth.
     mut prologue = 0;
     mut regs_used = 0;
@@ -2206,6 +2285,9 @@ fn name_hash<b>(s: &b [u8], a: u64, e: u64) -> u64 {
 // frameless copy of its body: slots move to free scratch registers, returns jump to the end.
 // Calls to it are replaced by that body after all functions are optimized.
 fn inline_candidate<a, b>(o: (&a mut O), s: &b [u8], prologue: u64) {
+    if o.pairs.len() != 0 {
+        return ();
+    }
     last := o.op.len();
     mut count = 0;
     mut used = 0;
@@ -2540,6 +2622,16 @@ fn compact<a, b>(o: (&a mut O), s: &b [u8], prologue: u64, ns: u64) -> u64 {
             }
         }
     }
+    // A two-word value keeps both slots whether or not each has a direct reader, and slots are
+    // renumbered in ascending order, so its words stay adjacent and in order: word 1 keeps the slot
+    // above word 0, where `8(%handle)` finds it.
+    if o.pair.len() != 0 {
+        for n in ns {
+            if o.pair[n] != 0 {
+                put(&mut map, n, 1);
+            }
+        }
+    }
     mut used = 0;
     for n in ns {
         if n != 0 {
@@ -2617,6 +2709,9 @@ fn reset<a>(o: (&a mut O)) {
     o.e1.clear();
     o.m1.clear();
     exchange(&mut o.gen, u8[]);
+    exchange(&mut o.pairs, u64[]);
+    exchange(&mut o.pair, u64[]);
+    exchange(&mut o.ret2, 0);
     exchange(&mut o.weird, 0);
     exchange(&mut o.zline, 0);
     exchange(&mut o.maxslot, 0);
@@ -2659,6 +2754,9 @@ pub fn optimize_parts<b>(s: &b [u8], split: u64, marks: (&mut u64[]), names: (&m
         zline: 0,
         zfrom: 0,
         zto: 0,
+        pairs: u64[],
+        pair: u64[],
+        ret2: 0,
         inl_names: u8[][],
         inl_bodies: u8[][],
         inl_units: u8[][],
