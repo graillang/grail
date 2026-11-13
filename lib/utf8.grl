@@ -1,0 +1,253 @@
+module utf8;
+use core;
+use io;
+use strings;
+use iter;
+
+// A string whose bytes are valid UTF-8, and nothing else.
+//
+// Grail text is bytes: a `string` is owned UTF-8 that the language validates at its boundaries, but
+// a `&[u8]` view, a file, a socket or a slice of text can hold anything. `Utf8String` is the value
+// that says "these bytes were checked" - it can only be built by a constructor that validates, or
+// by the `unsafe` escape hatch, so a function that takes one never has to validate again. Every
+// operation below preserves the invariant by construction: concatenation of valid text is valid,
+// a slice at character boundaries is valid, and a replacement whose parts are valid text cannot
+// break a sequence (a valid sequence never appears at a non-boundary offset of valid text).
+//
+// Interop is free: `as_bytes` hands out a view of the bytes without copying, and `from_bytes`
+// validates one. The byte-slice string stays: it is what the language, the runtime and every
+// allocation-free interface speak, and a validated value is a promise about it, not a replacement
+// for it.
+
+// Why construction, slicing or a case mapping was refused.
+pub enum Error {
+    // The first ill-formed sequence starts at this byte offset.
+    InvalidUtf8(u64),
+    // The offset is inside a multi-byte sequence, so it is not a character boundary.
+    NotCharBoundary(u64),
+    // Case mapping was asked for text whose case this module does not implement (anything outside
+    // ASCII); the character's code point is the payload.
+    UnmappableCase(u64)
+}
+
+impl Error {
+    // `not valid UTF-8 at byte 3`, `not a character boundary at 4`, `no case mapping for code
+    // point 233 (ASCII only)`.
+    pub fn show(self: (&Error)) -> string {
+        match self {
+            InvalidUtf8(at) => { return format("not valid UTF-8 at byte {}", at); },
+            NotCharBoundary(at) => { return format("not a character boundary at {}", at); },
+            UnmappableCase(c) => { return format("no case mapping for code point {} (ASCII only)", c); }
+        }
+    }
+    pub fn is_invalid(self: (&Error)) -> bool {
+        match self {
+            InvalidUtf8(at) => { return true; },
+            _ => { return false; }
+        }
+    }
+}
+
+// Validated UTF-8 text.
+pub struct Utf8String {
+    bytes: u8[]
+}
+
+// `data` as text, or the offset of the first ill-formed sequence. This is the only checked
+// constructor, and it accepts any byte view: a slice of a file, a socket's bytes, a `&[u8]`.
+pub fn from_bytes<a>(data: &a [u8]) -> Utf8String | Error {
+    match strings::utf8_error(data) {
+        Some(at) => { return Error::InvalidUtf8(at); },
+        None => { return Utf8String { bytes: data.copy() }; }
+    }
+}
+
+// The empty text.
+pub fn empty() -> Utf8String {
+    return Utf8String { bytes: u8[] };
+}
+
+// `text` as a validated value. A `string` is UTF-8 by the language's own rule, so nothing is
+// checked here: the bytes are copied and the invariant is the language's.
+pub fn from_text(text: string) -> Utf8String {
+    return Utf8String { bytes: view(text).copy() };
+}
+
+// Text from bytes that were validated somewhere the compiler cannot see, such as a checked file
+// whose contents a test pins. Getting this wrong makes every later operation's promise false, which
+// is why it is `unsafe` and needs an `unsafe` block at the call site.
+pub unsafe fn from_unchecked<a>(data: &a [u8]) -> Utf8String {
+    return Utf8String { bytes: data.copy() };
+}
+
+impl Utf8String {
+    // The bytes, without copying them: the interop direction that matters for I/O.
+    pub fn as_bytes<a>(self: (&a Utf8String)) -> (&a [u8]) {
+        return view(self.bytes);
+    }
+    // The bytes as owned text, for a call that wants a `string`.
+    pub fn to_text(self: (&Utf8String)) -> string {
+        return self.bytes.text();
+    }
+    // Bytes, not characters: see `char_count` for the other count.
+    pub fn len(self: (&Utf8String)) -> u64 {
+        return self.bytes.len();
+    }
+    pub fn is_empty(self: (&Utf8String)) -> bool {
+        return self.bytes.len() == 0;
+    }
+    pub fn char_count(self: (&Utf8String)) -> u64 {
+        return strings::char_count(view(self.bytes));
+    }
+    // The text itself, so `println` and `format` show it.
+    pub fn show(self: (&Utf8String)) -> string {
+        return self.bytes.text();
+    }
+    // Whether two values hold the same bytes. There is no implicit `==` for this type.
+    pub fn same(self: (&Utf8String), other: (&Utf8String)) -> bool {
+        n := self.len();
+        if n != other.len() {
+            return false;
+        }
+        mut i = 0;
+        while i < n {
+            if self.bytes[i] != other.bytes[i] {
+                return false;
+            }
+            i = i + 1;
+        }
+        return true;
+    }
+    // `self` followed by `other`: a concatenation of valid text is valid.
+    pub fn concat(self: (&Utf8String), other: (&Utf8String)) -> Utf8String {
+        mut out = u8[];
+        mut i = 0;
+        while i < self.len() {
+            out.push(self.bytes[i]);
+            i = i + 1;
+        }
+        i = 0;
+        while i < other.len() {
+            out.push(other.bytes[i]);
+            i = i + 1;
+        }
+        return Utf8String { bytes: out };
+    }
+    // A copy of this value's bytes, as a new value.
+    pub fn copy(self: (&Utf8String)) -> Utf8String {
+        return Utf8String { bytes: self.bytes.copy() };
+    }
+    // The characters at `[lo, hi)`. Both offsets must be character boundaries, and a refusal says
+    // which one was not.
+    pub fn slice_chars(self: (&Utf8String), lo: u64, hi: u64) -> Utf8String | Error {
+        if !strings::is_char_boundary(view(self.bytes), lo) {
+            return Error::NotCharBoundary(lo);
+        }
+        if !strings::is_char_boundary(view(self.bytes), hi) {
+            return Error::NotCharBoundary(hi);
+        }
+        if hi < lo {
+            return Error::NotCharBoundary(hi);
+        }
+        mut out = u8[];
+        for i in lo..hi {
+            out.push(self.bytes[i]);
+        }
+        return Utf8String { bytes: out };
+    }
+    // Every occurrence of `from` replaced by `to`. Both are valid text, so the result is too: a
+    // valid sequence never matches at a non-boundary offset of valid text.
+    pub fn replace(self: (&Utf8String), from: (&Utf8String), to: (&Utf8String)) -> Utf8String {
+        replaced := strings::replace(view(self.bytes), view(from.bytes), view(to.bytes));
+        return Utf8String { bytes: replaced };
+    }
+    // ASCII case mapping, which is total: `to_upper`/`to_lower` are the calls that refuse what this
+    // module does not implement.
+    pub fn to_ascii_upper(self: (&Utf8String)) -> Utf8String {
+        return Utf8String { bytes: strings::to_upper(view(self.bytes)) };
+    }
+    pub fn to_ascii_lower(self: (&Utf8String)) -> Utf8String {
+        return Utf8String { bytes: strings::to_lower(view(self.bytes)) };
+    }
+    // Upper case for text that is ASCII. Text with a code point above U+007F is refused rather than
+    // half-mapped: Unicode case mapping needs tables this module does not carry, and leaving a
+    // character unchanged would make the answer wrong in a way a caller could not see.
+    pub fn to_upper(self: (&Utf8String)) -> Utf8String | Error {
+        match first_non_ascii(view(self.bytes)) {
+            Some(code) => { return Error::UnmappableCase(code); },
+            None => { return Utf8String { bytes: strings::to_upper(view(self.bytes)) }; }
+        }
+    }
+    pub fn to_lower(self: (&Utf8String)) -> Utf8String | Error {
+        match first_non_ascii(view(self.bytes)) {
+            Some(code) => { return Error::UnmappableCase(code); },
+            None => { return Utf8String { bytes: strings::to_lower(view(self.bytes)) }; }
+        }
+    }
+    // Every code point in order. The value is valid UTF-8 by construction, so this never has to
+    // substitute U+FFFD: every sequence decodes.
+    pub fn chars<a>(self: (&a Utf8String)) -> iter::Iter<char> {
+        return strings::chars(view(self.bytes));
+    }
+    pub fn char_indices<a>(self: (&a Utf8String)) -> iter::Iter<(u64, char)> {
+        return strings::char_indices(view(self.bytes));
+    }
+    // Whether the text starts with `prefix` (a byte comparison: both are valid UTF-8).
+    pub fn starts_with(self: (&Utf8String), prefix: (&Utf8String)) -> bool {
+        return strings::starts_with(view(self.bytes), view(prefix.bytes));
+    }
+    pub fn contains(self: (&Utf8String), needle: (&Utf8String)) -> bool {
+        return strings::contains(view(self.bytes), view(needle.bytes));
+    }
+}
+
+// The first code point above U+007F, for the case-mapping refusal.
+fn first_non_ascii<a>(data: &a [u8]) -> u64? {
+    mut at = 0;
+    n := data.len();
+    while at < n {
+        b := data[at];
+        if b >= 128 {
+            // Decode the sequence properly: the payload is the code point, not the lead byte.
+            mut width = 1;
+            if b >= 240 {
+                width = 4;
+            } else {
+                if b >= 224 {
+                    width = 3;
+                } else {
+                    if b >= 192 {
+                        width = 2;
+                    }
+                }
+            }
+            mut value = 0;
+            mut got = 0;
+            while got < width {
+                if at + got < n {
+                    c := data[at + got];
+                    if got == 0 {
+                        mut mask = 127;
+                        if width == 2 {
+                            mask = 31;
+                        }
+                        if width == 3 {
+                            mask = 15;
+                        }
+                        if width == 4 {
+                            mask = 7;
+                        }
+                        value = u64(c & mask);
+                    } else {
+                        value = value * 64 + u64(c & 63);
+                    }
+                }
+                got = got + 1;
+            }
+            return Some(value);
+        }
+        at = at + 1;
+    }
+    return None;
+}
+

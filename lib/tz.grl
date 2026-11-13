@@ -299,6 +299,26 @@ impl TimeZone {
             }
             i = i + 1;
         }
+        // Past the last recorded transition the footer's rule can skip a reading too: its
+        // spring-forward is a transition the file does not list.
+        if self.has_footer {
+            rule := &self.footer;
+            if rule.has_daylight {
+                if rule.daylight_offset > rule.standard_offset {
+                    base := time::date_time_at(local_seconds, 0).year;
+                    mut year = base - 1;
+                    while year <= base + 1 {
+                        start := transition_instant(year, &rule.start_rule, rule.standard_offset);
+                        low := start + rule.standard_offset;
+                        high := start + rule.daylight_offset;
+                        if (local_seconds >= low) & (local_seconds < high) {
+                            return Gap { start: start, seconds: rule.daylight_offset - rule.standard_offset };
+                        }
+                        year = year + 1;
+                    }
+                }
+            }
+        }
         return Gap { start: local_seconds, seconds: i64(0) };
     }
 }
@@ -508,11 +528,14 @@ pub fn parse<a>(data: &a [u8]) -> TimeZone | Error {
 }
 
 fn parse_named<a, b>(data: &a [u8], name: &b [u8]) -> TimeZone | Error {
-    if data.len() < 44 {
+    if data.len() < 4 {
         return malformed(name, view("truncated TZif header"));
     }
     if !is_magic(data, 0) {
         return malformed(name, view("not a TZif file"));
+    }
+    if data.len() < 44 {
+        return malformed(name, view("truncated TZif header"));
     }
     version := data[4];
     if version < 50 {
@@ -1111,9 +1134,9 @@ pub fn offset_text(offset: i64) -> string {
     minutes := u64((value % 3600) / 60);
     seconds := u64(value % 60);
     if seconds != 0 {
-        return format("{}{}:{}:{}", sign_of(offset), hours, pad_two(minutes), pad_two(seconds));
+        return format("{}{}:{}:{}", sign_of(offset), pad_two(hours), pad_two(minutes), pad_two(seconds));
     }
-    return format("{}{}:{}", sign_of(offset), hours, pad_two(minutes));
+    return format("{}{}:{}", sign_of(offset), pad_two(hours), pad_two(minutes));
 }
 
 fn pad_two(value: u64) -> string {
@@ -1132,7 +1155,7 @@ fn offset_body(offset: i64) -> string {
     minutes := u64((value % 3600) / 60);
     seconds := u64(value % 60);
     if seconds != 0 {
-        return format("{}:{}:{}", hours, pad_two(minutes), pad_two(seconds));
+        return format("{}:{}:{}", pad_two(hours), pad_two(minutes), pad_two(seconds));
     }
-    return format("{}:{}", hours, pad_two(minutes));
+    return format("{}:{}", pad_two(hours), pad_two(minutes));
 }

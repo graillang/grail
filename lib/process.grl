@@ -43,6 +43,14 @@ impl Error {
 pub enum Status { Exited(u64), Signaled(u64) }
 
 impl Status {
+    // The same value again, from a shared borrow: an enum with a payload cannot be read out of a
+    // field, so `Output` copies it this way.
+    pub fn make(self: (&Status)) -> Status {
+        match self {
+            Exited(code) => { return Status::Exited(code); },
+            Signaled(signal) => { return Status::Signaled(signal); }
+        }
+    }
     // The exit code, or 0 when a signal ended the child (see `signal`).
     pub fn code(self: (&Status)) -> u64 {
         match self {
@@ -134,8 +142,8 @@ fn name_matches<a, b>(x: &a [u8], y: &b [u8]) -> bool {
     }
     mut i = 0;
     while i < x.len() {
-        a := x[i];
-        b := y[i];
+        mut a = x[i];
+        mut b = y[i];
         if is_windows() {
             if (a >= 65) & (a <= 90) {
                 a = a + 32;
@@ -360,30 +368,18 @@ pub struct Output {
 impl Output {
     // The exit code, or 0 when a signal ended the child.
     pub fn code(self: (&Output)) -> u64 {
-        match self.status {
-            Status::Exited(code) => { return code; },
-            Status::Signaled(signal) => { return 0; }
-        }
+        return self.status.code();
     }
     // The signal number, or 0 when the child exited.
     pub fn signal(self: (&Output)) -> u64 {
-        match self.status {
-            Status::Signaled(signal) => { return signal; },
-            Status::Exited(code) => { return 0; }
-        }
+        return self.status.signal();
     }
     pub fn succeeded(self: (&Output)) -> bool {
-        match self.status {
-            Status::Exited(code) => { return code == 0; },
-            Status::Signaled(signal) => { return false; }
-        }
+        return self.status.is_success();
     }
     // How the child ended, as text: `exited with status 3`, `killed by signal 9 (SIGKILL)`.
     pub fn show_status(self: (&Output)) -> string {
-        match self.status {
-            Status::Exited(code) => { return format("exited with status {}", code); },
-            Status::Signaled(signal) => { return format("killed by signal {} ({})", signal, signal_name(signal)); }
-        }
+        return self.status.show();
     }
     // The bytes the child wrote to its standard output, without copying them.
     pub fn out<a>(self: (&a Output)) -> (&a [u8]) {
@@ -398,11 +394,9 @@ impl Output {
     pub fn is_truncated(self: (&Output)) -> bool {
         return self.truncated;
     }
+    // How the child ended, as the `Status` value a caller can inspect further.
     pub fn status(self: (&Output)) -> Status {
-        match self.status {
-            Status::Exited(code) => { return Status::Exited(code); },
-            Status::Signaled(signal) => { return Status::Signaled(signal); }
-        }
+        return self.status.make();
     }
 }
 
