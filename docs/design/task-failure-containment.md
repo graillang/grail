@@ -242,21 +242,31 @@ because the failing instruction killed the process.
 
 ## Known integration failure (open, gaps-int3)
 
-On the integration branch that merges this work with the `errs` backtrace work, the book example
-`book/examples/task-failure.grl` prints its failure text and then exits **134 with no message**
-instead of printing the sibling task's value. What is established:
+Reproduce with `grail run book/examples/task-failure.grl` (prints `bad input`, then exits 134 with
+no message and without the sibling task's `7`).
 
-- the containment itself works: `try_join` returns the `TaskFailure`, its message prints, the
-  sibling's value prints (`7`) and the scope's join returns it - with markers added, the program
-  reaches the end of `body` correctly;
-- the abort is at **process exit**, silent, which is either `rt_leak_exit`'s `live != 0 &&
-  contained == 0` branch or a double free in the scope/stack teardown;
-- stderr is empty, so the "note: N allocation(s) still live after M contained task failure(s)"
-  text did not run, i.e. whichever counter the exit path reads saw **zero** containments.
+What gdb established on the merged tree (an optimized native build; `--debug` exits normally, and
+`--backend=llvm` fails identically, so this is runtime logic, not the word optimizer or the emitter):
 
-The two branches that touched this path are this one (`rt_fail`/`rt_contain_site`/`rt_leak_exit`,
-the task record, state word 3584) and the errors branch (`rt_backtrace`, the site and function
-tables, `rt_sites`). The next step is to dump `rt_live()` and `rt_contained()` in `rt_leak_exit`
-(an instrumented build is enough - no seed change) and to compare the merged `rt_fail` against both
-parents: `git diff origin/gaps2-taskfail -- compiler/runtime.grl` and the same against
-`origin/gaps2-errs`.
+```
+#0 rt_syscall  #1 rt_abort_final  #2 rt_abort  #3 rt_free_unlocked  #4 rt_free
+#5 rt_scope_end   (the FIRST `rt_free(t)` in the reap loop)  #6 f_main_main  #7 _start
+```
+
+`t` is a real task record (`f=0x2208a8 item=5 arity=2` - the second task), but the 16 bytes before
+it, which hold the allocator's block header, read `size=0x21f8a8 kind=1` where a 240-byte block
+should read `size=0xf0`. `0x21f8a8` is a **text address** (close to the task's own function
+pointer), so a code address was written into the record's block header - or the record's memory was
+clobbered by the discarded stack. `rt_free_unlocked` then treats the block as a >=512 KiB arena,
+does not find it in the arena list, and aborts.
+
+So the open question is narrow: **who writes 16 bytes before the task record** - the containment
+path, the stack discard (`rt_os_ctx_leave` in `rt_contain_tail`), or the allocation of the record
+itself. A breakpoint on `rt_free if $rdi == <record>` shows the first free of the record is
+`rt_scope_end`'s own, so nothing frees it twice; the header is already wrong by then.
+
+Two branches touched this path: this one (`rt_fail`, `rt_contain_site`, `rt_contain_tail`,
+`rt_leak_exit`, the task record, state word 3584) and the errors branch (`rt_backtrace`, the site
+and function tables, `rt_sites`). Compare the merged `rt_fail`/`rt_task_spawn`/`rt_scope_end`
+against both parents (`git diff origin/gaps2-taskfail -- compiler/runtime.grl`,
+`git diff origin/gaps2-errs -- compiler/runtime.grl`).
