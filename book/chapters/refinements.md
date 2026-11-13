@@ -26,16 +26,17 @@ check that stays is exactly the one the compiler could not discharge.
 
 ## What the prover reads
 
-The prover is deliberately small: a fact set per program point, read off the tokens of the function
-being compiled, never inferred from the optimiser. A term is a name, a length (`v.len()`) or a
+The prover is deliberately small: a fact set per program point, kept as the body is compiled and
+attached to the structure the compiler already knows - a block, a binding, a condition, a loop's
+guard, a `match` arm - never inferred from the optimiser. A term is a name, a length (`v.len()`) or a
 literal; a fact is a comparison between two terms (`i < n + 1`, `i <= j`, `x == 16`), a `%`
 divisibility (`align % 16 == 0`) or a float class (`t.is_finite()`).
 
 Facts come from a refined parameter (it holds at entry), the condition of an enclosing `if`/`while`
 (and, in an `else`, the negation of a single comparison), an `assert`, a `for` loop's bounds
-(`for i in v.len()` states `i < v.len()`), and a binding of one term. A fact dies when it could stop
-being true: assigning to a name or binding it again, a method call or a `&mut` on a vector (its
-length), and a call, which may write through any name it is given.
+(`for i in v.len()` states `i < v.len()`), a `match` arm's pattern and guard, and a binding of one
+term. A fact dies when it could stop being true: assigning to a name, a method call or a `&mut` on a
+vector (its length), and a call, which may write through any name it is given.
 
 ```grl
 fn get(v: &u64[], i: u64 where i < v.len()) -> u64 {
@@ -55,6 +56,22 @@ fn total(v: &u64[]) -> u64 {
     return sum;
 }
 ```
+
+Because a fact belongs to the block that stated it, a `match` arm's pattern is where its fact lives
+and nowhere else:
+
+```grl
+fn pick(n: u64) -> u64 {
+    match n {
+        16 => take(n),            // proved: this arm is the one about 16
+        _ => take(n),             // checked: the 16-arm's fact is not this arm's
+    }
+}
+```
+
+A guard counts the same way - `_ if n % 16 == 0 => take(n)` states it in that arm's body - and
+binding a name again hides the facts about the outer value only while the new binding is in scope:
+`{ i := 9; ... }` proves nothing about `i` inside the block and proves `i < v.len()` again after it.
 
 A `%` fact carries through divisibility (`align % 32 == 0` proves `align % 16 == 0`), a float class
 matches exactly (`t.is_finite()` proves `t.is_finite()`), and comparisons go through a small

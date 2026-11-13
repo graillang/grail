@@ -369,6 +369,16 @@ struct IModule {
     // 1 when the module declared `use host;`.
     host: u64
 }
+// Declared before `C` because the typed-IR fact walker (docs/design/refinements.md) keeps a list of
+// them in the per-compile state: a fact is a comparison, a divisibility or a float class over named
+// terms.
+struct Atom {
+    // 0 `<`, 1 `<=`, 2 `==`, 3 `%`, 4 `finite`, 5 `nan`.
+    rel: u64,
+    a: u8[],
+    b: u8[],
+    k: i64
+}
 struct C {
     src: u8[],
     toks: Tok[],
@@ -572,6 +582,18 @@ struct C {
     // start at its `{`. Zero inside a closure, where no enclosing function's facts hold.
     body_lo: u64,
     body_hi: u64,
+    // The typed-IR fact walker (docs/design/refinements.md): `pv_on` says this body is maintaining
+    // facts as it is compiled, `pv_facts` holds
+    // the ones that hold at the current point, `pv_marks` and `pv_trmarks` one entry per open block,
+    // `pv_trail` the atoms a binding's shadowing kill removed (they come back when the block that
+    // made the binding closes), and `pv_pending` what a condition, a guard or an arm's pattern
+    // states for the block about to open.
+    pv_on: u64,
+    pv_facts: Atom[],
+    pv_marks: u64[],
+    pv_trmarks: u64[],
+    pv_trail: Atom[],
+    pv_pending: Atom[],
     // Strict refinements (docs/design/refinements.md): `--strict-refinements` for the whole program,
     // `@strict;` for a module (it stays with the module's name, so a replayed body keeps it), and
     // `@strict` on a declaration for the function that follows.
@@ -6412,23 +6434,8 @@ fn ref_result<a, b>(c: (&a mut C), slot: u64, ty: u64, term: &b [u8], pos: u64) 
 // atom is `a < b + k`, `a <= b + k`, `a == b + k`, `a % k == 0`, `finite(a)` or `nan(a)`. Terms are
 // compared by text: two occurrences of `i` in one function name the same variable unless a binding
 // between them shadowed it, and a binding drops the facts that name it.
-struct Atom {
-    // 0 `<`, 1 `<=`, 2 `==`, 3 `%`, 4 `finite`, 5 `nan`.
-    rel: u64,
-    a: u8[],
-    b: u8[],
-    k: i64
-}
 fn copy_atom_value<a>(x: (&a Atom)) -> Atom {
     return Atom { rel: x.rel, a: x.a.copy(), b: x.b.copy(), k: x.k };
-}
-// One open `{` while the facts at a program point are collected: where its facts begin in the list,
-// whether it is the then-block of an `if` (1) or anything else (0), and what an `else` after it may
-// assume - the negation of the condition, when that negation is itself one comparison.
-struct PvFrame {
-    mark: u64,
-    kind: u64,
-    neg: Atom[]
 }
 // The weight of "no path": larger than any bound a fact can state, small enough that two of them
 // added together stay inside i64.
@@ -7046,313 +7053,312 @@ fn pv_seed_params<a>(c: (&a mut C), facts: (&a mut Atom[])) -> unit {
     }
     return ();
 }
-// Kill the facts about every name a call's arguments mention: the callee may write through them.
-fn pv_kill_spans<a>(c: (&a mut C), facts: (&a mut Atom[]), lo: u64, hi: u64) -> unit {
+// ---- facts over the typed IR (docs/design/refinements.md, "Facts over the typed IR") --------------
+// The front end has no materialised tree to walk: a body is compiled once, statement by statement,
+// and the facts are kept as it goes. Each hook below sits where the parser already knows the
+// structure - a block, a binding, a condition, a loop guard, an arm, a call - so what a fact means is
+// a resolved local and a resolved block, not a re-scan of the tokens from the body's `{` to the
+// obligation. `pv_proved` and `pv_call_proved` read the live list instead of rebuilding it, which is
+// what makes an arm's pattern, a shadowing `let` and a `for` guard exact.
+fn pv_ir_live<a>(c: (&a C)) -> bool {
+    if c.pv_on == 0 {
+        return false;
+    }
+    if c.body_hi == 0 {
+        return false;
+    }
+    return true;
+}
+fn copy_atoms<a>(from: (&a Atom[]), to: (&a mut Atom[])) -> unit {
+    for i in from.len() {
+        x := &from[i];
+        to.push(copy_atom_value(&x));
+    }
+    return ();
+}
+// The facts that hold at the current point of the body being compiled.
+fn pv_ir_read<a>(c: (&a mut C), facts: (&a mut Atom[])) -> unit {
+    copy_atoms(&c.pv_facts, &mut facts);
+    return ();
+}
+fn pv_ir_add_all<a>(c: (&a mut C), atoms: (&a Atom[])) -> unit {
+    if !pv_ir_live(&c) {
+        return ();
+    }
+    for i in atoms.len() {
+        x := &atoms[i];
+        pv_add(&mut c.pv_facts, x.rel, view(x.a), view(x.b), x.k);
+    }
+    return ();
+}
+// Enter a block: the atoms it adds are dropped when it closes, and so is what a binding made inside it
+// did to the facts about the name it shadowed.
+fn pv_ir_open<a>(c: (&a mut C)) -> unit {
+    if !pv_ir_live(&c) {
+        return ();
+    }
+    c.pv_marks.push(c.pv_facts.len());
+    c.pv_trmarks.push(c.pv_trail.len());
+    mut pending = exchange(&mut c.pv_pending, Atom[]);
+    for i in pending.len() {
+        x := &pending[i];
+        pv_add(&mut c.pv_facts, x.rel, view(x.a), view(x.b), x.k);
+    }
+    return ();
+}
+fn pv_ir_close<a>(c: (&a mut C)) -> unit {
+    if !pv_ir_live(&c) {
+        return ();
+    }
+    if c.pv_marks.len() == 0 {
+        return ();
+    }
+    mark := c.pv_marks.pop();
+    trmark := c.pv_trmarks.pop();
+    while mark < c.pv_facts.len() {
+        c.pv_facts.pop();
+    }
+    if trmark < c.pv_trail.len() {
+        mut back = Atom[];
+        mut keep = Atom[];
+        for i in c.pv_trail.len() {
+            x := &c.pv_trail[i];
+            if trmark <= i {
+                back.push(copy_atom_value(&x));
+            } else {
+                keep.push(copy_atom_value(&x));
+            }
+        }
+        exchange(&mut c.pv_trail, keep);
+        for i in back.len() {
+            x := &back[i];
+            pv_add(&mut c.pv_facts, x.rel, view(x.a), view(x.b), x.k);
+        }
+    }
+    return ();
+}
+// What a condition, a loop guard or an arm's pattern states for the block about to open.
+fn pv_ir_pending<a>(c: (&a mut C), atoms: (&a Atom[])) -> unit {
+    if !pv_ir_live(&c) {
+        return ();
+    }
+    mut out = Atom[];
+    copy_atoms(&atoms, &mut out);
+    exchange(&mut c.pv_pending, out);
+    return ();
+}
+// A binding of `name` in the current block: the name means the new value, so what the facts said
+// about the old one is about nothing - until the block closes, where the old one is the name again.
+fn pv_ir_shadow<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
+    if !pv_ir_live(&c) {
+        return ();
+    }
+    mut len_name = copy_bytes(view(name));
+    push_bytes(&mut len_name, view(".len"));
+    mut keep = Atom[];
+    for i in c.pv_facts.len() {
+        x := &c.pv_facts[i];
+        mut hit = same(view(x.a), view(name)) || same(view(x.b), view(name));
+        if !hit {
+            hit = same(view(x.a), view(len_name)) || same(view(x.b), view(len_name));
+        }
+        if hit {
+            c.pv_trail.push(copy_atom_value(&x));
+        } else {
+            keep.push(copy_atom_value(&x));
+        }
+    }
+    exchange(&mut c.pv_facts, keep);
+    return ();
+}
+// A write to `name`: what the facts said is false from here on, and stays false, because the write
+// may have happened before the block that holds it closes.
+fn pv_ir_wrote<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
+    if !pv_ir_live(&c) {
+        return ();
+    }
+    mut facts = exchange(&mut c.pv_facts, Atom[]);
+    pv_kill(&mut facts, view(name));
+    exchange(&mut c.pv_facts, facts);
+    return ();
+}
+// The pure tests a predicate may use: spelled like a method call, but they read their receiver and
+// write nothing, so a span that mentions one has not called anything.
+fn pv_pure_test<a, b>(t: &b [u8]) -> bool {
+    return same(view(t), view("len")) || same(view(t), view("is_finite")) || same(view(t), view("is_nan"));
+}
+// Whether a span mentions a call or a mutable loan: what it names may be written by it.
+fn pv_span_calls<a>(c: (&a mut C), lo: u64, hi: u64) -> bool {
+    mut i = lo;
+    while i < hi {
+        k := kind_at(&mut c, i);
+        if k == 38 {
+            if kind_at(&mut c, i + 1) == 1 {
+                m := tok_text(&mut c, i + 1);
+                if same(view(m), view("mut")) {
+                    return true;
+                }
+            }
+        }
+        if k == 1 {
+            if kind_at(&mut c, i + 1) == 40 {
+                // `x.len()`, `x.is_finite()` and `x.is_nan()` read their receiver and write nothing;
+                // the method's own name is the token the `(` follows.
+                mut pure = 0;
+                if 0 < i {
+                    if kind_at(&mut c, i - 1) == 46 {
+                        n := tok_text(&mut c, i);
+                        if pv_pure_test(view(n)) {
+                            pure = 1;
+                        }
+                    }
+                }
+                if pure == 0 {
+                    return true;
+                }
+            }
+            if (kind_at(&mut c, i + 1) == 46) & (kind_at(&mut c, i + 3) == 40) {
+                m := tok_text(&mut c, i + 2);
+                if !pv_pure_test(view(m)) {
+                    return true;
+                }
+            }
+        }
+        i += 1;
+    }
+    return false;
+}
+// The atoms a source span states, or nothing when it states none the prover reads. A span that calls
+// or takes a mutable loan states nothing here: the call may write what its atoms would name.
+fn pv_ir_atoms<a>(c: (&a mut C), lo: u64, hi: u64) -> Atom[] {
+    mut out = Atom[];
+    if lo >= hi {
+        return out;
+    }
+    if pv_span_calls(&mut c, lo, hi) {
+        return out;
+    }
+    if !pv_atoms(&mut c, lo, hi, &mut out) {
+        out = Atom[];
+    }
+    return out;
+}
+// A statement keyword whose own conditions and statements report what they do as they are compiled.
+fn pv_compound<a, b>(t: &b [u8]) -> bool {
+    return same(view(t), view("if"))
+        || same(view(t), view("match"))
+        || same(view(t), view("while"))
+        || same(view(t), view("loop"))
+        || same(view(t), view("for"))
+        || same(view(t), view("unsafe"));
+}
+// A statement that calls may write through the names it mentions, so what they meant before it is
+// forgotten after it. A compound statement is not scanned here: its condition and its own statements
+// report themselves, which is the precision the token walk could not have.
+fn pv_ir_statement<a>(c: (&a mut C), lo: u64, hi: u64) -> unit {
+    if !pv_ir_live(&c) {
+        return ();
+    }
+    if lo >= hi {
+        return ();
+    }
+    k := kind_at(&mut c, lo);
+    if k == 123 {
+        return ();
+    }
+    if k == 1 {
+        t := tok_text(&mut c, lo);
+        if pv_compound(view(t)) {
+            return ();
+        }
+    }
+    if !pv_span_calls(&mut c, lo, hi) {
+        return ();
+    }
     mut i = lo;
     while i < hi {
         if kind_at(&mut c, i) == 1 {
             n := tok_text(&mut c, i);
-            pv_kill(&mut facts, view(n));
+            pv_ir_wrote(&mut c, view(n));
         }
         i += 1;
     }
     return ();
 }
-// The facts that hold at token `pos` of the function body `[start, pos)`: the assumptions a refined
-// parameter gives at entry, the conditions of the enclosing `if`/`while` (and, in an `else`, the
-// negation of a single comparison), an `assert`, the bounds of a `for` loop, and a binding of a
-// simple value. An assignment kills the facts that name its target, a loan or a method call on a
-// vector kills its length's, and a call kills the facts about the names it is given.
-fn pv_scope<a>(c: (&a mut C), start: u64, pos: u64, facts: (&a mut Atom[])) -> unit {
-    pv_seed_params(&mut c, &mut facts);
-    mut frames = PvFrame[];
-    mut i = start;
-    // The condition of an `if` whose block is about to open, and what the block it just closed would
-    // let an `else` assume.
-    mut pending = 0;
-    mut pending_atoms = Atom[];
-    mut pending_neg = Atom[];
-    mut closed = 0;
-    mut closed_neg = Atom[];
-    while i < pos {
-        k := kind_at(&mut c, i);
-        if k == 123 {
-            mark := facts.len();
-            frames.push(PvFrame { mark: mark, kind: pending, neg: pending_neg });
-            for j in pending_atoms.len() {
-                pv_add(&mut facts, pending_atoms[j].rel, view(pending_atoms[j].a), view(pending_atoms[j].b), pending_atoms[j].k);
-            }
-            pending = 0;
-            pending_atoms = Atom[];
-            pending_neg = Atom[];
-            i += 1;
-            continue;
-        }
-        if k == 125 {
-            if frames.len() != 0 {
-                fr := frames.pop();
-                while fr.mark < facts.len() {
-                    facts.pop();
-                }
-                closed = 0;
-                closed_neg = Atom[];
-                if fr.kind == 1 {
-                    closed = 1;
-                    for j in fr.neg.len() {
-                        closed_neg.push(copy_atom_value(&fr.neg[j]));
-                    }
-                }
-            }
-            i += 1;
-            continue;
-        }
-        t := pv_tok(&mut c, i);
-        if k == 1 {
-            if same(view(t), view("match")) {
-                // An arm binds names the walk cannot follow, and its body runs in that binding, so
-                // what was known before the `match` is not what the arm's names mean. The frames
-                // stay: their marks move to zero, so the `}` that closes any enclosing block still
-                // drops what was added after the `match` instead of letting it outlive its block.
-                exchange(&mut facts, Atom[]);
-                for f in frames.len() {
-                    exchange(&mut frames[f].mark, 0);
-                }
-                i += 1;
-                continue;
-            }
-            if same(view(t), view("else")) {
-                pending = 0;
-                pending_atoms = Atom[];
-                pending_neg = Atom[];
-                if (closed != 0) & (kind_at(&mut c, i + 1) == 123) {
-                    pending = 2;
-                    pending_atoms = closed_neg;
-                    closed = 0;
-                    closed_neg = Atom[];
-                }
-                i += 1;
-                continue;
-            }
-            if same(view(t), view("if")) || same(view(t), view("while")) {
-                mut j = i + 1;
-                mut depth = 0;
-                mut close = pos;
-                while j < pos {
-                    kk := kind_at(&mut c, j);
-                    if (kk == 40) || (kk == 91) {
-                        depth += 1;
-                    }
-                    if ((kk == 41) || (kk == 93)) & (0 < depth) {
-                        depth -= 1;
-                    }
-                    if (depth == 0) & ((kk == 123) || (kk == 59)) {
-                        close = j;
-                        break;
-                    }
-                    j += 1;
-                }
-                mut cond = Atom[];
-                mut ok = pv_atoms(&mut c, i + 1, close, &mut cond);
-                pending = 0;
-                pending_atoms = Atom[];
-                pending_neg = Atom[];
-                if ok & (close < pos) & (kind_at(&mut c, close) == 123) {
-                    pending = 2;
-                    if same(view(t), view("if")) {
-                        pending = 1;
-                        pv_negation(&cond, &mut pending_neg);
-                    }
-                    pending_atoms = cond;
-                }
-                // Leave the cursor on the `{` (or the `;`): the block it opens is what holds the
-                // condition's facts, and its `}` drops them.
-                i = close;
-                continue;
-            }
-            if same(view(t), view("assert")) & (kind_at(&mut c, i + 1) == 40) {
-                mut j = i + 2;
-                mut depth = 0;
-                while j < pos {
-                    kk := kind_at(&mut c, j);
-                    if (kk == 40) || (kk == 91) {
-                        depth += 1;
-                    }
-                    if (kk == 41) || (kk == 93) {
-                        if depth == 0 {
-                            break;
-                        }
-                        depth -= 1;
-                    }
-                    j += 1;
-                }
-                mut cond = Atom[];
-                if pv_atoms(&mut c, i + 2, j, &mut cond) {
-                    for m in cond.len() {
-                        pv_add(&mut facts, cond[m].rel, view(cond[m].a), view(cond[m].b), cond[m].k);
-                    }
-                }
-                i = j + 1;
-                continue;
-            }
-            // `for k, v in &m` names both halves of a pair: both bindings shadow what the names said.
-            if same(view(t), view("for")) & (kind_at(&mut c, i + 1) == 1) & (kind_at(&mut c, i + 2) == 44) & (kind_at(&mut c, i + 3) == 1) {
-                first_name := tok_text(&mut c, i + 1);
-                second_name := tok_text(&mut c, i + 3);
-                pv_kill(&mut facts, view(first_name));
-                pv_kill(&mut facts, view(second_name));
-                i += 4;
-                continue;
-            }
-            if same(view(t), view("for")) & (kind_at(&mut c, i + 1) == 1) & (kind_at(&mut c, i + 2) == 1) {
-                loop_name := tok_text(&mut c, i + 1);
-                in_word := tok_text(&mut c, i + 2);
-                if same(view(in_word), view("in")) {
-                    // The iterable ends at the body's `{`.
-                    mut j = i + 3;
-                    mut depth = 0;
-                    mut close = pos;
-                    while j < pos {
-                        kk := kind_at(&mut c, j);
-                        if (kk == 40) || (kk == 91) {
-                            depth += 1;
-                        }
-                        if ((kk == 41) || (kk == 93)) & (0 < depth) {
-                            depth -= 1;
-                        }
-                        if (depth == 0) & (kk == 123) {
-                            close = j;
-                            break;
-                        }
-                        j += 1;
-                    }
-                    pv_kill(&mut facts, view(loop_name));
-                    // `for i in a..b` counts from a up to (not including) b; `for i in n` and
-                    // `for i in v.len()` count from zero, so the loop variable is below the bound.
-                    mut dots = close;
-                    mut m = i + 3;
-                    while m + 1 < close {
-                        if (kind_at(&mut c, m) == 46) & (kind_at(&mut c, m + 1) == 46) {
-                            dots = m;
-                            break;
-                        }
-                        m += 1;
-                    }
-                    if dots < close {
-                        aterm := pv_span_term(&mut c, i + 3, dots);
-                        bterm := pv_span_term(&mut c, dots + 2, close);
-                        if (aterm.len() != 0) & (bterm.len() != 0) {
-                            pv_add(&mut facts, 1, view(aterm), view(loop_name), 0);
-                            pv_add(&mut facts, 0, view(loop_name), view(bterm), 0);
-                        }
-                    } else {
-                        bterm := pv_span_term(&mut c, i + 3, close);
-                        if bterm.len() != 0 {
-                            pv_add(&mut facts, 0, view(loop_name), view(bterm), 0);
-                        }
-                    }
-                    i = close;
-                    continue;
-                }
-            }
-            if (same(view(t), view("mut")) || same(view(t), view("let"))) & (kind_at(&mut c, i + 1) == 1) {
-                nm := tok_text(&mut c, i + 1);
-                pv_kill(&mut facts, view(nm));
-                // `let Variant(name) = ..` (and `if let`) also binds what the pattern names.
-                if (kind_at(&mut c, i + 2) == 40) & (kind_at(&mut c, i + 4) == 41) {
-                    mut j = i + 3;
-                    while (j < pos) & (kind_at(&mut c, j) != 41) {
-                        if kind_at(&mut c, j) == 1 {
-                            bound := tok_text(&mut c, j);
-                            pv_kill(&mut facts, view(bound));
-                        }
-                        j += 1;
-                    }
-                }
-                i += 2;
-                continue;
-            }
-            // `NAME := VALUE`
-            if kind_at(&mut c, i + 1) == 261 {
-                pv_kill(&mut facts, view(t));
-                mut j = i + 2;
-                mut depth = 0;
-                while j < pos {
-                    kk := kind_at(&mut c, j);
-                    if (kk == 40) || (kk == 91) || (kk == 123) {
-                        depth += 1;
-                    }
-                    if ((kk == 41) || (kk == 93) || (kk == 125)) & (0 < depth) {
-                        depth -= 1;
-                    }
-                    if (depth == 0) & (kk == 59) {
-                        break;
-                    }
-                    j += 1;
-                }
-                term := pv_span_term(&mut c, i + 2, j);
-                if term.len() != 0 {
-                    pv_add(&mut facts, 2, view(t), view(term), 0);
-                }
-                i = j + 1;
-                continue;
-            }
-            // A plain write, and the compound writes, kill what the name's facts said.
-            if (kind_at(&mut c, i + 1) == 61) || (kind_at(&mut c, i + 1) == 262) || (kind_at(&mut c, i + 1) == 263) || (kind_at(&mut c, i + 1) == 264) || (kind_at(&mut c, i + 1) == 265) || (kind_at(&mut c, i + 1) == 266) {
-                pv_kill(&mut facts, view(t));
-                i += 2;
-                continue;
-            }
-            // `NAME.field = VALUE` writes a field, not the name.
-            if (kind_at(&mut c, i + 1) == 46) & (kind_at(&mut c, i + 2) == 1) & (kind_at(&mut c, i + 3) == 61) {
-                i += 4;
-                continue;
-            }
-            // A method call may write its receiver (`v.push(x)`): forget what the base's length was.
-            if (kind_at(&mut c, i + 1) == 46) & (kind_at(&mut c, i + 2) == 1) & (kind_at(&mut c, i + 3) == 40) {
-                pv_kill(&mut facts, view(t));
-                mut j = i + 4;
-                mut depth = 0;
-                while j < pos {
-                    kk := kind_at(&mut c, j);
-                    if (kk == 40) {
-                        depth += 1;
-                    }
-                    if kk == 41 {
-                        if depth == 0 {
-                            break;
-                        }
-                        depth -= 1;
-                    }
-                    j += 1;
-                }
-                pv_kill_spans(&mut c, &mut facts, i + 4, j);
-                i = j + 1;
-                continue;
-            }
-            // A call may write through any name it is given.
-            if kind_at(&mut c, i + 1) == 40 {
-                mut j = i + 2;
-                mut depth = 0;
-                while j < pos {
-                    kk := kind_at(&mut c, j);
-                    if kk == 40 {
-                        depth += 1;
-                    }
-                    if kk == 41 {
-                        if depth == 0 {
-                            break;
-                        }
-                        depth -= 1;
-                    }
-                    j += 1;
-                }
-                pv_kill_spans(&mut c, &mut facts, i + 2, j);
-                i = j + 1;
-                continue;
-            }
-        }
-        i += 1;
+// `name == term` for a binding of a simple value: `n := 32` answers `n % 16 == 0`.
+fn pv_ir_value<a, b>(c: (&a mut C), name: &b [u8], lo: u64, hi: u64) -> unit {
+    if !pv_ir_live(&c) {
+        return ();
     }
+    t := pv_span_term(&mut c, lo, hi);
+    if t.len() == 0 {
+        return ();
+    }
+    pv_add(&mut c.pv_facts, 2, view(name), view(t), 0);
+    return ();
+}
+// `name == value` for an arm whose pattern is a single literal: `match n { 16 => ... }` states
+// `n == 16` in that arm, and the arm's own block is what ends the fact.
+fn pv_ir_literal<a, b>(c: (&a mut C), out: (&a mut Atom[]), name: &b [u8], value: u64) -> unit {
+    if !pv_ir_live(&c) {
+        return ();
+    }
+    if name.len() == 0 {
+        return ();
+    }
+    mut text = u8[];
+    decimal(&mut text, value);
+    pv_add(&mut out, 2, view(name), view(text), 0);
+    return ();
+}
+// `lo <= name < hi` for a range pattern: `match n { 0..16 => ... }` states both bounds in that arm.
+fn pv_ir_range<a, b>(c: (&a mut C), out: (&a mut Atom[]), name: &b [u8], lo: u64, hi: u64) -> unit {
+    if !pv_ir_live(&c) {
+        return ();
+    }
+    if name.len() == 0 {
+        return ();
+    }
+    mut lo_text = u8[];
+    decimal(&mut lo_text, lo);
+    pv_add(&mut out, 1, view(lo_text), view(name), 0);
+    mut hi_text = u8[];
+    decimal(&mut hi_text, hi);
+    pv_add(&mut out, 0, view(name), view(hi_text), 0);
+    return ();
+}
+// Starting and finishing a body: a refined parameter holds at its entry (the entry checked it or the
+// caller proved it, which is the `.proved` convention), and nothing of this body is left behind for
+// the next one the compile emits.
+fn pv_begin<a>(c: (&a mut C)) -> unit {
+    exchange(&mut c.pv_on, 0);
+    exchange(&mut c.pv_facts, Atom[]);
+    exchange(&mut c.pv_marks, u64[]);
+    exchange(&mut c.pv_trmarks, u64[]);
+    exchange(&mut c.pv_trail, Atom[]);
+    exchange(&mut c.pv_pending, Atom[]);
+    if c.body_hi == 0 {
+        return ();
+    }
+    if c.raw != 0 {
+        return ();
+    }
+    if c.validating != 0 {
+        return ();
+    }
+    exchange(&mut c.pv_on, 1);
+    mut facts = Atom[];
+    pv_seed_params(&mut c, &mut facts);
+    exchange(&mut c.pv_facts, facts);
+    return ();
+}
+fn pv_end<a>(c: (&a mut C)) -> unit {
+    exchange(&mut c.pv_on, 0);
+    exchange(&mut c.pv_facts, Atom[]);
+    exchange(&mut c.pv_marks, u64[]);
+    exchange(&mut c.pv_trmarks, u64[]);
+    exchange(&mut c.pv_trail, Atom[]);
+    exchange(&mut c.pv_pending, Atom[]);
     return ();
 }
 // The proof of one obligation: `pred`'s atoms, with `names` renamed to `terms`, all follow from the
@@ -7370,7 +7376,7 @@ fn pv_proved<a, b>(c: (&a mut C), pred: Pred, names: (&a u8[][]), terms: (&a u8[
         return 0;
     }
     mut facts = Atom[];
-    pv_scope(&mut c, c.body_lo, pos, &mut facts);
+    pv_ir_read(&mut c, &mut facts);
     for j in atoms.len() {
         rel := atoms[j].rel;
         x := pv_rename(view(atoms[j].a), &names, &terms);
@@ -7461,7 +7467,7 @@ fn pv_call_proved<a>(c: (&a mut C), f: u64, count: u64, spans: (&a u64[]), at: u
         }
     }
     mut facts = Atom[];
-    pv_scope(&mut c, c.body_lo, at, &mut facts);
+    pv_ir_read(&mut c, &mut facts);
     for i in c.funcs[f - 1].ppreds.len() {
         mut pf = 0;
         mut plo = 0;
@@ -7653,10 +7659,7 @@ fn pv_strict_fail<a, b>(c: (&a mut C), pred: Pred, pos: u64, need: &b [u8]) -> u
 fn pv_strict_fail_why<a, b, d>(c: (&a mut C), pred: Pred, pos: u64, need: &b [u8], why: &d [u8]) -> unit {
     text := pred_text(&mut c, pred);
     mut facts = Atom[];
-    body := c.body_lo;
-    if c.body_hi != 0 {
-        pv_scope(&mut c, body, pos, &mut facts);
-    }
+    pv_ir_read(&mut c, &mut facts);
     mut msg = copy_bytes(view("cannot prove the refinement `"));
     push_bytes(&mut msg, view(text));
     push_bytes(&mut msg, view("`"));
@@ -11385,6 +11388,9 @@ fn is_keyword<a>(name: &a [u8]) -> bool {
     return false;
 }
 fn bind<a>(c: (&a mut C), name: u8[], ty: u64, id: u64, mutable: u64) -> unit {
+    // Every binding goes through here, so this is where the facts about the shadowed name stop being
+    // about anything - and where they come back, when the block that made the binding closes.
+    pv_ir_shadow(&mut c, view(name));
     if is_keyword(view(name)) {
         fail(&mut c, view("a keyword cannot name a binding"));
     }
@@ -13058,7 +13064,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     start := c.pos;
     end := block_end(&mut c, start);
     exchange(&mut c.scope_end, end);
-    // The facts an obligation may read start at this `{` (see pv_scope).
+    // The facts an obligation may read start at this body's entry (pv_begin).
     exchange(&mut c.body_lo, start);
     exchange(&mut c.body_hi, end);
     for i in c.locals.len() {
@@ -13260,7 +13266,11 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     if unsafe_fn != 0 {
         exchange(&mut c.unsafe_depth, depth + 1);
     }
+    // The facts of this body start at its entry, where a refined parameter holds because the entry
+    // checked it or the caller proved it (the `.proved` convention), and they are this body's alone.
+    pv_begin(&mut c);
     block(&mut c);
+    pv_end(&mut c);
     if unsafe_fn != 0 {
         exchange(&mut c.unsafe_depth, depth);
     }
@@ -25919,13 +25929,20 @@ fn pattern_loop<a>(
     }
     if !endless & (pattern == 0) {
         tests := c.resources.len();
+        guard_at := c.pos;
         mut v = expr(&mut c, 0);
+        guard_end := c.pos;
         if c.raw == 0 {
             require_type(&mut c, v.ty, 0);
             strict_condition(&mut c, v.ty);
         }
         cleanup(&mut c, tests);
         expire_locals(&mut c);
+        // The guard holds on the body's paths, and only there: an iteration that exits did not
+        // establish it for what follows the loop.
+        mut guards = pv_ir_atoms(&mut c, guard_at, guard_end);
+        pv_ir_statement(&mut c, guard_at, guard_end);
+        pv_ir_pending(&mut c, &guards);
         get(&mut c, v.t, view("%rax"));
         o(&mut c, view("testq %rax,%rax\n"));
         jump(&mut c, view("jz"), end);
@@ -30045,6 +30062,9 @@ fn block<a>(c: (&a mut C)) -> unit {
     oldend := c.scope_end;
     exchange(&mut c.scope_end, end);
     expect(&mut c, view("{"));
+    // One scope of facts per block: what a condition or an arm's pattern stated for it holds here,
+    // and a binding's shadowing of a name it mentions ends with it (docs/design/refinements.md).
+    pv_ir_open(&mut c);
     mark := c.locals.len();
     mut owners = c.resources.len();
     while !is(&mut c, view("}")) {
@@ -30053,6 +30073,7 @@ fn block<a>(c: (&a mut C)) -> unit {
     advance(&mut c);
     cleanup(&mut c, owners);
     pop_locals(&mut c, mark);
+    pv_ir_close(&mut c);
     exchange(&mut c.scope_end, oldend);
     return ();
 }
@@ -30939,11 +30960,23 @@ fn if_let<a>(c: (&a mut C)) -> unit {
     return ();
 }
 // match on an integer or bool: `0 => {..}`, `1 | 2 => {..}`, `'a' => {..}`, `_ => {..}`.
-fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
+fn scalar_match<a>(c: (&a mut C), s: Val, term: u8[]) -> unit {
     xt := s.t;
     ty := s.ty;
     observe(&mut c, xt);
     boolean := is_bool(&mut c, ty);
+    // A pattern fact is read as an unsigned comparison, so it is only stated for a value that is
+    // one: a signed integer's negative values would make the atom mean the wrong thing. Type id 0 is
+    // `u64`, and only a spelled integer with a signed mode is not unsigned.
+    mut unsigned_scrut = 1;
+    if ty_kind(&mut c, ty) == 18 {
+        if ty_mode(&mut c, ty) != 0 {
+            unsigned_scrut = 0;
+        }
+    }
+    if is_float(&mut c, ty) {
+        unsigned_scrut = 0;
+    }
     mut before = ownership::snapshot(&c.check);
     mut exits = ownership::new();
     mut have = 0;
@@ -30956,6 +30989,12 @@ fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
         exchange(&mut c.terminated, 0);
         next := label(&mut c);
         body := label(&mut c);
+        // What this arm's pattern and guard state, for this arm's block only.
+        mut arm_atoms = Atom[];
+        mut alternatives = 0;
+        mut only_lo = 0;
+        mut only_hi = 0;
+        mut only_ranged = 0;
         mut binding = u8[];
         mut wildcard = 0;
         if eat(&mut c, view("_")) {
@@ -31017,6 +31056,11 @@ fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
                         value = wrapping_sub(0, value);
                     }
                 }
+                if alternatives == 0 {
+                    only_lo = value;
+                    only_hi = value;
+                    only_ranged = 0;
+                }
                 if !boolean & (kind(&mut c) == 46) & (next_kind(&mut c) == 46) {
                     // lo..hi (hi excluded): (x - lo) < (hi - lo) as unsigned words, correct for signed types too.
                     advance(&mut c);
@@ -31042,6 +31086,10 @@ fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
                     }
                     if hneg != 0 {
                         high = wrapping_sub(0, high);
+                    }
+                    if alternatives == 0 {
+                        only_hi = high;
+                        only_ranged = 1;
                     }
                     mut empty = false;
                     if ty_kind(&mut c, ty) == 18 {
@@ -31081,8 +31129,18 @@ fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
                     o(&mut c, view("cmpq %rcx,%rax\n"));
                     jump(&mut c, view("je"), body);
                 }
+                alternatives += 1;
                 if !eat(&mut c, view("|")) {
                     break;
+                }
+            }
+            // One literal states `x == n` in the arm; one range states both of its bounds. An arm
+            // with several alternatives states nothing, since the prover has no disjunction.
+            if (alternatives == 1) & (unsigned_scrut != 0) {
+                if only_ranged != 0 {
+                    pv_ir_range(&mut c, &mut arm_atoms, view(term), only_lo, only_hi);
+                } else {
+                    pv_ir_literal(&mut c, &mut arm_atoms, view(term), only_lo);
                 }
             }
             jump(&mut c, view("jmp"), next);
@@ -31094,7 +31152,9 @@ fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
         }
         if eat(&mut c, view("if")) {
             tests := c.resources.len();
+            guard_at := c.pos;
             g := expr(&mut c, 0);
+            guard_end := c.pos;
             if !(is_bool(&mut c, g.ty) || g.ty == 0) {
                 fail(&mut c, view("match guard must be a bool"));
             }
@@ -31107,8 +31167,16 @@ fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
             mut merged = ownership::snapshot(&before);
             ownership::merge(&mut merged, &after);
             before = merged;
+            // A true guard is what reaching this arm's body means, so it states its facts there.
+            mut guards = pv_ir_atoms(&mut c, guard_at, guard_end);
+            pv_ir_statement(&mut c, guard_at, guard_end);
+            for i in guards.len() {
+                x := &guards[i];
+                pv_add(&mut arm_atoms, x.rel, view(x.a), view(x.b), x.k);
+            }
         }
         expect(&mut c, view("=>"));
+        pv_ir_pending(&mut c, &arm_atoms);
         block(&mut c);
         pop_locals(&mut c, mark);
         if c.terminated == 0 {
@@ -31536,7 +31604,16 @@ fn zero_record_binding<a>(c: (&a mut C), name: u8[], ty: u64, mutable: u64) -> u
     bind(&mut c, name, ty, held.t, mutable);
     return ();
 }
+// One statement of a body, with the facts the typed-IR walker keeps: a statement that calls may write
+// through the names it mentions, so what they meant before it is forgotten after it
+// (docs/design/refinements.md, "Facts over the typed IR").
 fn statement<a>(c: (&a mut C)) -> unit {
+    lo := c.pos;
+    statement_body(&mut c);
+    pv_ir_statement(&mut c, lo, c.pos);
+    return ();
+}
+fn statement_body<a>(c: (&a mut C)) -> unit {
     emit_loc(&mut c);
     after := c.pos + 1;
     if (kind(&mut c) == 64) && is_at(&mut c, after, view("bounded")) {
@@ -31700,6 +31777,12 @@ fn statement<a>(c: (&a mut C)) -> unit {
                 }
                 held := move_value(&mut c, val(v.t, ty));
                 bind(&mut c, name, ty, held.t, mutable);
+                // `x := 16` states `x == 16` for the rest of the block: what a refined parameter of
+                // the call below needs is often exactly the binding it is given.
+                if c.pv_on != 0 {
+                    nm := tok_text(&mut c, name_at);
+                    pv_ir_value(&mut c, view(nm), vstart, vend);
+                }
                 return ();
             }
         }
@@ -31788,6 +31871,10 @@ fn statement<a>(c: (&a mut C)) -> unit {
         }
         mut v = move_value(&mut c, v);
         bind(&mut c, name, v.ty, v.t, mutable);
+        if c.pv_on != 0 {
+            nm := tok_text(&mut c, name_at);
+            pv_ir_value(&mut c, view(nm), vstart, vend);
+        }
         if hint != 0 {
             return ();
         }
@@ -31840,6 +31927,12 @@ fn statement<a>(c: (&a mut C)) -> unit {
     }
     if eat(&mut c, view("for")) {
         name := ident(&mut c);
+        // The loop variable is bound (and so shadowed) below; the guard's facts name it, so keep the
+        // text in a copy of its own.
+        mut loop_name = u8[];
+        if c.pv_on != 0 {
+            loop_name = name.copy();
+        }
         // `for k, v in &m` names both halves of a map pair; `map_loop` lowers that form.
         mut second = u8[];
         if eat(&mut c, view(",")) {
@@ -31854,7 +31947,9 @@ fn statement<a>(c: (&a mut C)) -> unit {
         loopbase := c.resources.len();
         // `for x in &s` / `for x in &mut s` over a slice borrows each element.
         borrowed := is(&mut c, view("&"));
+        iter_at := c.pos;
         mut v = expr(&mut c, 0);
+        iter_end := c.pos;
         if (c.raw == 0) & (v.ty != 0) {
             if iterator_loop(&mut c, name.copy(), v.t, v.ty, loopbase) {
                 return ();
@@ -31950,6 +32045,8 @@ fn statement<a>(c: (&a mut C)) -> unit {
         }
         mut e = 0;
         mut i = 0;
+        mut range_at = 0;
+        mut range_end = 0;
         mut proven = u8[];
         mut proven_base = u8[];
         if range != 0 {
@@ -31965,7 +32062,9 @@ fn statement<a>(c: (&a mut C)) -> unit {
         if range != 0 {
             get(&mut c, v.t, view("%rax"));
             i = save(&mut c);
+            exchange(&mut range_at, c.pos);
             limit := expr(&mut c, 0);
+            exchange(&mut range_end, c.pos);
             if c.raw == 0 {
                 require_type(&mut c, limit.ty, 0);
             }
@@ -32069,6 +32168,25 @@ fn statement<a>(c: (&a mut C)) -> unit {
             entry = ownership::snapshot(&c.check);
         }
         exchange(&mut c.terminated, 0);
+        // `for i in a..b` states `a <= i < b`, and `for i in n` / `for i in v.len()` states
+        // `i < n` / `i < v.len()`: the loop variable counts up to a bound it never reaches. The
+        // body's block owns the fact, and its `}` is what ends it.
+        mut guard = Atom[];
+        if range != 0 {
+            first := pv_span_term(&mut c, iter_at, iter_end);
+            last := pv_span_term(&mut c, range_at, range_end);
+            if (first.len() != 0) & (last.len() != 0) {
+                pv_add(&mut guard, 1, view(first), view(loop_name), 0);
+                pv_add(&mut guard, 0, view(loop_name), view(last), 0);
+            }
+        } else {
+            last := pv_span_term(&mut c, iter_at, iter_end);
+            if last.len() != 0 {
+                pv_add(&mut guard, 0, view(loop_name), view(last), 0);
+            }
+        }
+        pv_ir_statement(&mut c, iter_at, c.pos);
+        pv_ir_pending(&mut c, &guard);
         oldi := exchange(&mut c.bce_index, proven);
         oldb2 := exchange(&mut c.bce_base, proven_base);
         block(&mut c);
@@ -32119,7 +32237,16 @@ fn statement<a>(c: (&a mut C)) -> unit {
     if eat(&mut c, view("match")) {
         // Matching through a reference (`match self`) inspects the value in place: payloads are bound
         // as references of the same mode instead of being moved out.
+        scrut_at := c.pos;
         s := expr(&mut c, 0);
+        scrut_end := c.pos;
+        // The term an arm's pattern is about: the scrutinee's own name or literal, when the source
+        // spells one. The scrutinee may also call, which states nothing for the arms.
+        mut scrut_term = u8[];
+        if c.pv_on != 0 {
+            scrut_term = pv_span_term(&mut c, scrut_at, scrut_end);
+        }
+        pv_ir_statement(&mut c, scrut_at, scrut_end);
         sty := s.ty;
         sslot := s.t;
         mut byref = 0;
@@ -32128,7 +32255,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
             if integer(&mut c, sty)
                 || is_bool(&mut c, sty)
                 || is_char(&mut c, sty) {
-                scalar_match(&mut c, s);
+                scalar_match(&mut c, s, scrut_term);
                 return ();
             }
         }
@@ -32365,19 +32492,28 @@ fn statement<a>(c: (&a mut C)) -> unit {
             return ();
         }
         tests := c.resources.len();
+        cond_at := c.pos;
         mut v = expr(&mut c, 0);
+        cond_end := c.pos;
         if c.raw == 0 {
             require_type(&mut c, v.ty, 0);
             strict_condition(&mut c, v.ty);
         }
         cleanup(&mut c, tests);
         expire_locals(&mut c);
+        // The condition is a fact in the block it guards, and the negation of a single comparison is
+        // one in the `else`. Both blocks own them: the `}` that closes one drops them.
+        mut conds = pv_ir_atoms(&mut c, cond_at, cond_end);
+        mut gains = Atom[];
+        pv_negation(&conds, &mut gains);
+        pv_ir_statement(&mut c, cond_at, cond_end);
         get(&mut c, v.t, view("%rax"));
         no := label(&mut c);
         end := label(&mut c);
         o(&mut c, view("testq %rax,%rax\n"));
         jump(&mut c, view("jz"), no);
         before := ownership::snapshot(&c.check);
+        pv_ir_pending(&mut c, &conds);
         block(&mut c);
         yes := ownership::snapshot(&c.check);
         yt := c.terminated;
@@ -32387,8 +32523,13 @@ fn statement<a>(c: (&a mut C)) -> unit {
         exchange(&mut c.terminated, 0);
         if eat(&mut c, view("else")) {
             if is(&mut c, view("if")) {
+                // `else if`: the failed condition still holds while the next one is tested.
+                pv_ir_open(&mut c);
+                pv_ir_add_all(&mut c, &gains);
                 statement(&mut c);
+                pv_ir_close(&mut c);
             } else {
+                pv_ir_pending(&mut c, &gains);
                 block(&mut c);
             }
         }
@@ -32435,7 +32576,9 @@ fn statement<a>(c: (&a mut C)) -> unit {
     }
     if statement_builtin(&mut c, view("assert")) {
         expect(&mut c, view("("));
+        at_at := c.pos;
         mut v = expr(&mut c, 0);
+        at_end := c.pos;
         if c.raw == 0 {
             require_type(&mut c, v.ty, 0);
         }
@@ -32448,6 +32591,11 @@ fn statement<a>(c: (&a mut C)) -> unit {
         site_kind(&mut c, 12);
         o(&mut c, view("call rt_abort\n"));
         mark(&mut c, ok);
+        // An assertion is a fact for the rest of the block, exactly as an `if` condition is for its
+        // body - and a call inside it states nothing, since it may write what it names.
+        mut claimed = pv_ir_atoms(&mut c, at_at, at_end);
+        pv_ir_statement(&mut c, at_at, at_end);
+        pv_ir_add_all(&mut c, &claimed);
         return ();
     }
     if index_assignment_ahead(&mut c) != 0 {
@@ -32501,6 +32649,10 @@ fn statement<a>(c: (&a mut C)) -> unit {
     }
     if assignment_ahead(&mut c) {
         name := ident(&mut c);
+        mut written = u8[];
+        if c.pv_on != 0 {
+            written = name.copy();
+        }
         mut l = find_local(&mut c, view(name));
         if l == 0 {
             if capture_of(&mut c, view(name)) != 0 {
@@ -32569,6 +32721,11 @@ fn statement<a>(c: (&a mut C)) -> unit {
             record_ty = shape;
         }
         assignment_tail(&mut c, l, id, ty, target, u64[through, fieldty], view(field_name), record_ty);
+        // `x = e` writes the binding; `x.f = e` writes a field of what `x` owns, which is not a fact
+        // about `x`'s own value.
+        if through == 0 {
+            pv_ir_wrote(&mut c, view(written));
+        }
         return ();
     }
     mut v = expr(&mut c, 0);
@@ -37151,6 +37308,12 @@ pub fn main() -> u64 {
         cur_rpred: no_pred(),
         body_lo: 0,
         body_hi: 0,
+        pv_on: 0,
+        pv_facts: Atom[],
+        pv_marks: u64[],
+        pv_trmarks: u64[],
+        pv_trail: Atom[],
+        pv_pending: Atom[],
         strict_refinements: 0,
         strict_modules: u8[][],
         strict_next: 0,
