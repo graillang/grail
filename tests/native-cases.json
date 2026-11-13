@@ -7759,5 +7759,157 @@
     "stdout": "before\n",
     "status": 134,
     "stderr": "error: stack overflow\n"
+  },
+  {
+    "name": "rng-for-range-proves",
+    "source": "fn main() {\n    mut v = u64[];\n    for i in 10 { v.push(u64(i)); }\n    mut s: u64 = 0;\n    for i in 0..v.len() { s += v[i]; }\n    println(s);\n}\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "the loop's own bounds: `for i in 0..v.len()` states `i < v.len` for its body, so the access needs no check.",
+    "stdout": "45\n",
+    "asmAbsent": [
+      "movq $1,%rdx"
+    ]
+  },
+  {
+    "name": "rng-while-guard-proves",
+    "source": "fn main() {\n    mut v = u64[0, 1, 2, 3, 4];\n    mut s: u64 = 0;\n    mut i: u64 = 0;\n    while i < v.len() {\n        s += v[i];\n        i += 1;\n    }\n    println(s);\n}\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a dominating guard: the `while` tests the length on every path into the body, so the read below it is proved.",
+    "stdout": "10\n",
+    "asmAbsent": [
+      "movq $1,%rdx"
+    ]
+  },
+  {
+    "name": "rng-if-guard-proves",
+    "source": "fn main() {\n    mut v = u64[0, 1, 2, 3, 4];\n    println(v[3]);\n    mut i: u64 = 7;\n    if i < v.len() {\n        println(v[i]);\n    } else {\n        println(99);\n    }\n}\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "an `if` guard dominates its then-block, and a literal index is in range of the allocation it indexes.",
+    "stdout": "3\n99\n",
+    "asmAbsent": [
+      "movq $1,%rdx"
+    ]
+  },
+  {
+    "name": "rng-alloc-length-proves",
+    "source": "fn main() {\n    n: u64 := 6;\n    mut v = u8[3; n];\n    mut s: u64 = 0;\n    mut i: u64 = 0;\n    while i < n {\n        s += u64(v[i]);\n        i += 1;\n    }\n    println(s);\n}\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "an allocation pins the length (`u8[3; n]` has n bytes) and the guard bounds the index by the same n.",
+    "stdout": "18\n",
+    "asmAbsent": [
+      "movq $1,%rdx"
+    ]
+  },
+  {
+    "name": "rng-fill-loop-proves",
+    "source": "fn main() {\n    n: u64 := 8;\n    mut v = u64[];\n    mut x: u64 = 1;\n    for i in n {\n        x = x * 3;\n        v.push(x);\n    }\n    mut s: u64 = 0;\n    for i in n { s += v[i]; }\n    println(s);\n}\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a counted fill loop pushes once per trip, so it leaves len(v) >= n, which is what the read loop needs.",
+    "stdout": "9840\n",
+    "asmAbsent": [
+      "movq $1,%rdx"
+    ]
+  },
+  {
+    "name": "rng-index-expression-proves",
+    "source": "fn main() {\n    mut v = u64[10, 11, 12, 13, 14, 15];\n    mut s: u64 = 0;\n    for i in 2 { s += v[i * 3 + 1]; }\n    println(s);\n}\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "an index expression over bounded names: i < 2 gives i * 3 + 1 <= 4, below the six-element allocation.",
+    "stdout": "25\n",
+    "asmAbsent": [
+      "movq $1,%rdx"
+    ]
+  },
+  {
+    "name": "rng-iter-borrow-proves",
+    "source": "fn main() {\n    mut v = u64[1, 2, 3];\n    mut s: u64 = 0;\n    for x in &v { s += *x; }\n    println(s);\n}\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a `for x in &v` loops over a sequence that is pinned for the loop and whose length the head already tested.",
+    "stdout": "6\n",
+    "asmAbsent": [
+      "movq $1,%rdx",
+      "call rt_slot\n"
+    ]
+  },
+  {
+    "name": "rng-kept-when-unproven",
+    "source": "fn main() {\n    mut v = u64[0, 1, 2, 3];\n    mut i: u64 = 9;\n    println(v[i]);\n}\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a fact proves nothing here, so the check stays and the read aborts.",
+    "signal": "SIGABRT",
+    "stderr": "index 9 out of bounds for length 4",
+    "asm": [
+      "movq $1,%rdx"
+    ]
+  },
+  {
+    "name": "rng-crosses-a-shared-call",
+    "source": "fn sum(a: (&u64[])) -> u64 {\n    mut s: u64 = 0;\n    mut i: u64 = 0;\n    while i < a.len() {\n        s += a[i];\n        i += 1;\n    }\n    return s;\n}\n\nfn main() {\n    mut v = u64[1, 2, 3, 4];\n    println(sum(&v));\n    println(v[1]);\n}\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a shared loan `&v` at a call cannot change v, so the allocation's length survives it; inside sum the parameter's own length is what the guard tests.",
+    "stdout": "10\n2\n",
+    "asmAbsent": [
+      "movq $1,%rdx"
+    ]
+  },
+  {
+    "name": "rng-store-keeps-its-check",
+    "source": "fn main() {\n    mut v = u8[0; 4];\n    v[1] = 7;\n    println(u64(v[1]));\n}\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a byte store goes through rt_write, which checks the value as well as the index; the read beside it is proved.",
+    "stdout": "7\n",
+    "asm": [
+      "call rt_write"
+    ]
   }
 ]

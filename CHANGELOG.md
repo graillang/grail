@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Improved: range facts on the native backend. The front end already substituted the unchecked
+  accessors (`rt_slotu`, `rt_slot4u`, `rt_atbu`) for a proving access, but the only proof was
+  syntactic (`for i in 0..v.len()` whose body names `v` nowhere but `v[x]` and `v.len()`). At each
+  access the compiler now asks the refinement prover's facts the same question - does
+  `index < base.len()` follow? - so a dominating guard (`while i < v.len()`, `if i < v.len()`), a
+  loop's own bounds, a refined parameter, an allocation's length (`u8[0; n]`, `f64[1.0, 2.0]`,
+  `w = v.copy()`) and a counted fill loop (`for i in n { v.push(x) }` leaves `len(v) >= n`) all remove
+  the compare-and-trap. The index may be an arithmetic expression over bounded names
+  (`p[i * 3 + 1]`, `a[i * n + k]`). Checks removed on the corpus: fnv 1 -> 0, sieve 2 -> 1,
+  nbody 32 -> 15, matmul 4 -> 1, sort 8 -> 8 (its merge-loop bounds only hold at a join). The pass is
+  on by default for the native backend, `--no-range-facts` turns it off, and `--verify-facts` keeps
+  every check so a verifying build aborts where a proof would be wrong. Docs:
+  `docs/design/native-range-facts.md`; corpus: the ten `rng-` cases.
+- Fixed: what an `else` may assume from a comparison that failed. `!(a < b + k)` was read as
+  `b <= a - k - 1`, one tighter than the truth (`b <= a - k`), so an `else` could discharge a
+  refinement - or, with range facts, a bounds check - that the program does not actually meet.
 - Fixed: `bun tools/bootstrap.mjs stage ARCH` no longer requires the published manifest to describe the current sources. Splitting a reseed into `stage` and `publish` left the old `verify`-only manifest comparison on a bare `else`, so every `stage` run ended in `bootstrap source manifest is stale` - exactly the case a reseed exists for, and `tools/gate.sh --reseed` stopped at its first target after the self-hosting check had already passed. The comparison now runs only for `verify`; `bun tools/ci.mjs lint` pins the guard.
 - Tooling: `bootstrap.mjs stage ARCH` and `bootstrap.mjs publish` split a reseed into one step per target plus a publish that requires every seed to come from the current sources, and `tools/gate.sh --reseed` uses them, so an interrupted gate resumes at the target it stopped on rather than redoing an up-to-90-minute reseed.
 - Added: borrowed interface objects - `&dyn I` and `&mut dyn I` of a value that stays where it is, with no allocation (Rust's `&dyn Trait`). `&x` and `&mut x` become one at a typed binding, an argument and a return when `T` implements `I`, and a reference to an owned `dyn I` converts too. The value is a pair {data, vtable} written into the frame that borrows it, so the object never moves and nothing is allocated; a method call dispatches through that pair exactly as an owned `dyn I` dispatches through its cell, and a `&mut dyn` method mutates the original. The lifetime rules are `&T`'s: the value cannot be moved or dropped while the borrow lives, and a `&dyn` borrowed from a local cannot be returned (`returned borrow escapes its declared input lifetime`) while one borrowed from an input can. Records, vectors of borrowed objects (`(&dyn I)[]`) and generic code hold them; interface files carry the form as `(bobj (dyn ...))`. A function that builds one is left to the assembler as written - the word optimizer models frame slots as scalars, and a pair's second word is only reachable through the pair's address. Book: *Borrowing an object* in *Generics*; corpus: `dyn-borrowed-objects`, `dyn-borrowed-no-alloc` (an `@no_alloc` builder and a static-vtable pin), `dyn-borrowed-interface-form`, and `dyn-borrowed-reject-move`/`-escape`/`-not-implemented`.
