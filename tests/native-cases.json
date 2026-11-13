@@ -7905,5 +7905,83 @@
     "diagnostic": [
       "closure parameter `v` needs a type here (nothing fixes it): write |v: T|"
     ]
+  },
+  {
+    "name": "ergo-rc-dyn-object",
+    "modules": [
+      "lib/rc.grl",
+      "lib/core.grl"
+    ],
+    "source": "use rc;\ninterface Shape {\n    fn area(self: &Self) -> u64;\n}\nstruct Rect {\n    w: u64,\n    h: u64\n}\nimpl Shape for Rect {\n    fn area(self: &Self) -> u64 {\n        return self.w * self.h;\n    }\n}\nimpl Drop for Rect {\n    fn drop(self: &mut Rect) {\n        println(\"drop rect {}\", self.w);\n    }\n}\nfn main() {\n    o: dyn Shape = Rect { w: 3, h: 4 };\n    r: rc::Rc<dyn Shape> = rc::new(o);\n    println(\"area {}\", r.get().area());\n    println(\"strong {}\", r.strong_count());\n}\n",
+    "stdout": "area 12\nstrong 1\ndrop rect 3\n"
+  },
+  {
+    "name": "ergo-rc-dyn-clones-keep-alive",
+    "modules": [
+      "lib/rc.grl",
+      "lib/core.grl"
+    ],
+    "source": "use rc;\ninterface Shape {\n    fn area(self: &Self) -> u64;\n}\nstruct Rect {\n    w: u64,\n    h: u64\n}\nimpl Shape for Rect {\n    fn area(self: &Self) -> u64 {\n        return self.w * self.h;\n    }\n}\nimpl Drop for Rect {\n    fn drop(self: &mut Rect) {\n        println(\"drop rect {}\", self.w);\n    }\n}\nfn main() {\n    o: dyn Shape = Rect { w: 2, h: 5 };\n    r: rc::Rc<dyn Shape> = rc::new(o);\n    b := r.clone();\n    println(\"both {} {}\", r.get().area(), b.get().area());\n    drop(r);\n    println(\"alive after one {} {}\", b.strong_count(), b.get().area());\n    drop(b);\n    println(\"end\");\n}\n",
+    "stdout": "both 10 10\nalive after one 1 10\ndrop rect 2\nend\n"
+  },
+  {
+    "name": "ergo-rc-dyn-explicit-type-argument",
+    "modules": [
+      "lib/rc.grl",
+      "lib/core.grl"
+    ],
+    "source": "use rc;\ninterface Shape {\n    fn area(self: &Self) -> u64;\n}\nstruct Rect {\n    w: u64,\n    h: u64\n}\nimpl Shape for Rect {\n    fn area(self: &Self) -> u64 {\n        return self.w * self.h;\n    }\n}\nfn main() {\n    r := rc::new<dyn Shape>(Rect { w: 6, h: 7 });\n    println(\"area {}\", r.get().area());\n}\n",
+    "stdout": "area 42\n"
+  },
+  {
+    "name": "ergo-rc-dyn-record-field",
+    "modules": [
+      "lib/rc.grl",
+      "lib/core.grl"
+    ],
+    "source": "use rc;\ninterface Shape {\n    fn area(self: &Self) -> u64;\n}\nstruct Rect {\n    w: u64,\n    h: u64\n}\nimpl Shape for Rect {\n    fn area(self: &Self) -> u64 {\n        return self.w * self.h;\n    }\n}\nstruct Drawing {\n    main: rc::Rc<dyn Shape>\n}\nfn describe(d: Drawing) -> u64 {\n    return d.main.get().area();\n}\nfn main() {\n    o: dyn Shape = Rect { w: 4, h: 4 };\n    d := Drawing { main: rc::new(o) };\n    println(\"area {}\", describe(d));\n}\n",
+    "stdout": "area 16\n"
+  },
+  {
+    "name": "ergo-rc-dyn-weak-upgrade",
+    "modules": [
+      "lib/rc.grl",
+      "lib/core.grl"
+    ],
+    "source": "use rc;\ninterface Shape {\n    fn area(self: &Self) -> u64;\n}\nstruct Rect {\n    w: u64,\n    h: u64\n}\nimpl Shape for Rect {\n    fn area(self: &Self) -> u64 {\n        return self.w * self.h;\n    }\n}\nfn main() {\n    o: dyn Shape = Rect { w: 1, h: 9 };\n    r: rc::Rc<dyn Shape> = rc::new(o);\n    w := rc::downgrade(&r);\n    match w.upgrade() {\n        Some(live) => println(\"live {}\", live.get().area()),\n        None => println(\"gone\"),\n    }\n    drop(r);\n    match w.upgrade() {\n        Some(live) => println(\"live {}\", live.get().area()),\n        None => println(\"gone\"),\n    }\n}\n",
+    "stdout": "live 9\ngone\n"
+  },
+  {
+    "name": "ergo-arc-dyn-object",
+    "modules": [
+      "lib/rc.grl",
+      "lib/core.grl"
+    ],
+    "source": "use rc;\ninterface Shape {\n    fn area(self: &Self) -> u64;\n}\nstruct Rect {\n    w: u64,\n    h: u64\n}\nimpl Shape for Rect {\n    fn area(self: &Self) -> u64 {\n        return self.w * self.h;\n    }\n}\nimpl Drop for Rect {\n    fn drop(self: &mut Rect) {\n        println(\"drop rect {}\", self.w);\n    }\n}\nfn main() {\n    o: dyn Shape = Rect { w: 5, h: 5 };\n    a: rc::Arc<dyn Shape> = rc::arc_new(o);\n    b := a.clone();\n    println(\"both {} {}\", a.get().area(), b.get().area());\n    drop(a);\n    println(\"alive {}\", b.strong_count());\n    drop(b);\n    println(\"end\");\n}\n",
+    "stdout": "both 25 25\nalive 1\ndrop rect 5\nend\n"
+  },
+  {
+    "name": "ergo-rc-dyn-reject-cross-thread",
+    "modules": [
+      "lib/rc.grl",
+      "lib/core.grl"
+    ],
+    "reject": true,
+    "source": "use rc;\ninterface Shape {\n    fn area(self: &Self) -> u64;\n}\nstruct Rect {\n    w: u64,\n    h: u64\n}\nimpl Shape for Rect {\n    fn area(self: &Self) -> u64 {\n        return self.w * self.h;\n    }\n}\nfn work(item: u64, shape: &rc::Rc<dyn Shape>) -> u64 {\n    return item + shape.get().area();\n}\nfn main() {\n    o: dyn Shape = Rect { w: 3, h: 3 };\n    r: rc::Rc<dyn Shape> = rc::new(o);\n    results := parallel_map(u64[1, 2], &r, work);\n    println(\"{}\", results[0]);\n}\n",
+    "diagnostic": [
+      "cannot share parallel_map context"
+    ]
+  },
+  {
+    "name": "ergo-arc-dyn-reject-not-shared",
+    "modules": [
+      "lib/rc.grl",
+      "lib/core.grl"
+    ],
+    "reject": true,
+    "source": "use rc;\ninterface Shape {\n    fn area(self: &Self) -> u64;\n}\nstruct Rect {\n    w: u64,\n    h: u64\n}\nimpl Shape for Rect {\n    fn area(self: &Self) -> u64 {\n        return self.w * self.h;\n    }\n}\nfn work(item: u64, shape: &rc::Arc<dyn Shape>) -> u64 {\n    return item + shape.get().area();\n}\nfn main() {\n    o: dyn Shape = Rect { w: 3, h: 3 };\n    a: rc::Arc<dyn Shape> = rc::arc_new(o);\n    results := parallel_map(u64[1, 2], &a, work);\n    println(\"{}\", results[0]);\n}\n",
+    "diagnostic": [
+      "no capability proof for the type parameter"
+    ]
   }
 ]
