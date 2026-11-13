@@ -6,6 +6,234 @@ unsafe module runtime;
 
 // Process state scratch below the allocator's 4 KiB state block: bytes transferred, GetLastError
 // and other small results. Never allocated, so consultations cost no user allocation.
+
+// ---- UTF-8 <-> UTF-16 at one boundary ---------------------------------------------------------
+// The internal convention: every entry point in this module takes a NUL-terminated **UTF-8** path or
+// argument (what the portable runtime's rt_cstr produces) and reports results in UTF-8, and the wide
+// form exists only between a conversion helper and the Win32 call that follows it. No call site
+// converts by hand, so no call site can forget to.
+//
+// The conversion arena is one 128 KiB mapping made at startup: five 16 KiB slots. Slots 0..3 hold
+// UTF-16 (8 KiB units each, so two paths and their arguments fit at once), slot 4 holds the UTF-8 of
+// a wide result. A path longer than 8191 units is refused with ENAMETOOLONG rather than truncated.
+fn rt_win_arena() -> u64 {
+    return raw_load(raw_state() + 3600);
+}
+fn rt_win_wslot(i: u64) -> u64 {
+    return rt_win_arena() + i * 16384;
+}
+fn rt_win_uslot() -> u64 {
+    return rt_win_arena() + 65536;
+}
+// Why a path could not be converted, as the negative errno the portable layers already understand.
+// Invalid UTF-8 is refused (never silently replaced): a program that hands the runtime bytes that
+// are not text gets EINVAL and a message, not a file with a mangled name.
+fn rt_win_not_utf8() -> u64 {
+    return wrapping_sub(0, 22); // EINVAL
+}
+// One code point from the UTF-8 at `at`, packed as (code point << 8) | byte length, or all ones when
+// the bytes there are not UTF-8: overlong, truncated, a bare continuation, a surrogate (which UTF-8
+// may not encode) or a code point above U+10FFFF.
+fn rt_win_cp(src: u64, at: u64) -> u64 {
+    b := raw_byte(src + at);
+    if b < 128 {
+        return b * 256 + 1;
+    }
+    mut size = 0;
+    mut cp = 0;
+    if (194 <= b) & (b < 224) {
+        size = 2;
+        cp = b - 192;
+    }
+    if (224 <= b) & (b < 240) {
+        size = 3;
+        cp = b - 224;
+    }
+    if (240 <= b) & (b < 245) {
+        size = 4;
+        cp = b - 240;
+    }
+    if size == 0 {
+        return 18446744073709551615;
+    }
+    mut k = 1;
+    while k < size {
+        c := raw_byte(src + at + k);
+        if (c & 192) != 128 {
+            return 18446744073709551615;
+        }
+        cp = cp * 64 + (c & 63);
+        k = k + 1;
+    }
+    if (size == 2) & (cp < 128) {
+        return 18446744073709551615; // overlong
+    }
+    if (size == 3) & ((cp < 2048) + ((55296 <= cp) & (cp < 57344))) {
+        return 18446744073709551615; // overlong, or a surrogate
+    }
+    if (size == 4) & ((cp < 65536) + (1114111 < cp)) {
+        return 18446744073709551615; // overlong, or outside Unicode
+    }
+    return cp * 256 + size;
+}
+// The UTF-16 for the NUL-terminated UTF-8 at `src`, NUL-terminated in slot `slot`; the number of
+// units written, or a negative errno. Surrogate pairs come from the four-byte forms, so a name with
+// an emoji or a CJK character reaches CreateFileW as exactly the text the program wrote.
+fn rt_win_wide(slot: u64, src: u64) -> u64 {
+    base := rt_win_arena();
+    if base == 0 {
+        return wrapping_sub(0, 12); // ENOMEM: no arena means no conversion
+    }
+    dst := base + slot * 16384;
+    mut at = 0;
+    mut out = 0;
+    while raw_byte(src + at) != 0 {
+        packed := rt_win_cp(src, at);
+        if packed == 18446744073709551615 {
+            return rt_win_not_utf8();
+        }
+        cp := packed >> 8;
+        size := packed & 255;
+        if 8190 < out {
+            return wrapping_sub(0, 36); // ENAMETOOLONG
+        }
+        if cp < 65536 {
+            raw_putbyte(dst + out * 2, cp & 255);
+            raw_putbyte(dst + out * 2 + 1, (cp >> 8) & 255);
+            out = out + 1;
+        } else {
+            v := cp - 65536;
+            hi := 55296 + (v >> 10);
+            lo := 56320 + (v & 1023);
+            raw_putbyte(dst + out * 2, hi & 255);
+            raw_putbyte(dst + out * 2 + 1, (hi >> 8) & 255);
+            raw_putbyte(dst + out * 2 + 2, lo & 255);
+            raw_putbyte(dst + out * 2 + 3, (lo >> 8) & 255);
+            out = out + 2;
+        }
+        at = at + size;
+    }
+    raw_putbyte(dst + out * 2, 0);
+    raw_putbyte(dst + out * 2 + 1, 0);
+    return out;
+}
+fn rt_win_unit(wide: u64, i: u64) -> u64 {
+    return raw_byte(wide + i * 2) + raw_byte(wide + i * 2 + 1) * 256;
+}
+// The UTF-8 for `units` UTF-16 units, NUL-terminated in `dst` and bounded by `cap` bytes including
+// the terminator. The byte length, or a negative errno when the text does not fit or holds an
+// unpaired surrogate. This is the result direction (a directory entry, the module path, the console
+// code page line): text the OS handed us is refused rather than replaced, so a caller can report
+// which path it could not represent.
+fn rt_win_utf8_of(dst: u64, cap: u64, wide: u64, units: u64) -> u64 {
+    if cap == 0 {
+        return wrapping_sub(0, 34); // ERANGE
+    }
+    mut i = 0;
+    mut o = 0;
+    while i < units {
+        u := rt_win_unit(wide, i);
+        mut cp = u;
+        mut used = 1;
+        if (55296 <= u) & (u < 57344) {
+            if (55296 <= u) & (u < 56320) {
+                if i + 1 < units {
+                    v := rt_win_unit(wide, i + 1);
+                    if (56320 <= v) & (v < 57344) {
+                        cp = 65536 + (u - 55296) * 1024 + (v - 56320);
+                        used = 2;
+                    }
+                }
+            }
+            if used == 1 {
+                return rt_win_not_utf8(); // an unpaired surrogate is not text
+            }
+        }
+        mut n = 1;
+        if 127 < cp {
+            n = 2;
+        }
+        if 2047 < cp {
+            n = 3;
+        }
+        if 65535 < cp {
+            n = 4;
+        }
+        if cap - 1 < o + n {
+            return wrapping_sub(0, 34); // ERANGE
+        }
+        if n == 1 {
+            raw_putbyte(dst + o, cp);
+        }
+        if n == 2 {
+            raw_putbyte(dst + o, 192 + (cp >> 6));
+            raw_putbyte(dst + o + 1, 128 + (cp & 63));
+        }
+        if n == 3 {
+            raw_putbyte(dst + o, 224 + (cp >> 12));
+            raw_putbyte(dst + o + 1, 128 + ((cp >> 6) & 63));
+            raw_putbyte(dst + o + 2, 128 + (cp & 63));
+        }
+        if n == 4 {
+            raw_putbyte(dst + o, 240 + (cp >> 18));
+            raw_putbyte(dst + o + 1, 128 + ((cp >> 12) & 63));
+            raw_putbyte(dst + o + 2, 128 + ((cp >> 6) & 63));
+            raw_putbyte(dst + o + 3, 128 + (cp & 63));
+        }
+        o = o + n;
+        i = i + used;
+    }
+    raw_putbyte(dst + o, 0);
+    return o;
+}
+// Inbound OS text (a command line, an environment block): the code point at unit `i` of `wide`,
+// packed as (code point << 2) | units spanned. An unpaired surrogate becomes U+FFFD here and only
+// here: the runtime was handed that text and must not refuse an argument it was given, while text a
+// program produces is refused above. Both directions are documented in docs/design/windows-backend.md.
+fn rt_win_wide_cp(wide: u64, i: u64) -> u64 {
+    u := rt_win_unit(wide, i);
+    if (55296 <= u) & (u < 56320) {
+        v := rt_win_unit(wide, i + 1);
+        if (56320 <= v) & (v < 57344) {
+            return (65536 + (u - 55296) * 1024 + (v - 56320)) * 4 + 2;
+        }
+        return 65533 * 4 + 1;
+    }
+    if (56320 <= u) & (u < 57344) {
+        return 65533 * 4 + 1;
+    }
+    return u * 4 + 1;
+}
+fn rt_win_put_cp(dst: u64, at: u64, cp: u64) -> u64 {
+    if cp < 128 {
+        raw_putbyte(dst + at, cp);
+        return 1;
+    }
+    if cp < 2048 {
+        raw_putbyte(dst + at, 192 + (cp >> 6));
+        raw_putbyte(dst + at + 1, 128 + (cp & 63));
+        return 2;
+    }
+    if cp < 65536 {
+        raw_putbyte(dst + at, 224 + (cp >> 12));
+        raw_putbyte(dst + at + 1, 128 + ((cp >> 6) & 63));
+        raw_putbyte(dst + at + 2, 128 + (cp & 63));
+        return 3;
+    }
+    raw_putbyte(dst + at, 240 + (cp >> 18));
+    raw_putbyte(dst + at + 1, 128 + ((cp >> 12) & 63));
+    raw_putbyte(dst + at + 2, 128 + ((cp >> 6) & 63));
+    raw_putbyte(dst + at + 3, 128 + (cp & 63));
+    return 4;
+}
+fn rt_win_units(wide: u64) -> u64 {
+    mut n = 0;
+    while rt_win_unit(wide, n) != 0 {
+        n = n + 1;
+    }
+    return n;
+}
+
 fn rt_win_scratch() -> u64 {
     return raw_state() + 3840;
 }
@@ -29,6 +257,15 @@ fn rt_win_read(handle: u64, buf: u64, len: u64) -> u64 {
     if handle == 0 {
         return wrapping_sub(0, 9);
     }
+    // A descriptor that is not a Win32 handle: a socket reads through WSARecv, and a directory
+    // enumeration has no byte stream at all.
+    entry := rt_win_entry(handle);
+    if entry != 0 {
+        if raw_load(entry + 8) == rt_win_kind_socket {
+            return rt_win_sock_recv(entry, buf, len);
+        }
+        return wrapping_sub(0, 9);
+    }
     scratch := rt_win_scratch();
     raw_store(scratch, 0);
     if raw_win32(ReadFile, handle, buf, len, scratch, 0) == 0 {
@@ -40,6 +277,13 @@ fn rt_win_write(handle: u64, buf: u64, len: u64) -> u64 {
     if handle == 0 {
         return wrapping_sub(0, 9);
     }
+    entry := rt_win_entry(handle);
+    if entry != 0 {
+        if raw_load(entry + 8) == rt_win_kind_socket {
+            return rt_win_sock_send(entry, buf, len);
+        }
+        return wrapping_sub(0, 9);
+    }
     scratch := rt_win_scratch();
     raw_store(scratch, 0);
     if raw_win32(WriteFile, handle, buf, len, scratch, 0) == 0 {
@@ -47,12 +291,12 @@ fn rt_win_write(handle: u64, buf: u64, len: u64) -> u64 {
     }
     return raw_load(scratch);
 }
-// Linux open(2) flags map onto CreateFileA access and disposition bits.
+
 // The last Win32 error as the negated Linux errno the portable layers (lib/io.grl) understand.
 // Unmapped codes keep their Win32 value above 0x10000, so io::Error::Other never confuses a
-// Win32 code with an errno.
+// Win32 code with an errno. Socket codes are mapped in the socket section below.
 fn rt_win_errno() -> u64 {
-    code := raw_win32(GetLastError);
+    code := raw_win32(GetLastError) & 4294967295;
     mut errno = 65536 + code;
     if (code == 2) + (code == 3) + (code == 15) + (code == 161) {
         errno = 2; // FILE/PATH_NOT_FOUND, INVALID_DRIVE, BAD_PATHNAME -> ENOENT
@@ -77,7 +321,16 @@ fn rt_win_errno() -> u64 {
     }
     return wrapping_sub(0, errno);
 }
+
+// ---- file system ------------------------------------------------------------------------------
+// Every call below takes a UTF-8 path. The wide form is built in a conversion slot and passed to
+// the -W entry point, so a path outside the system code page is not mangled on the way in.
 fn rt_win_open(path: u64, flags: u64, mode: u64) -> u64 {
+    units := rt_win_wide(0, path);
+    if rt_error(units) {
+        return units;
+    }
+    wide := rt_win_wslot(0);
     mut access = 2147483648; // GENERIC_READ
     if (flags & 3) == 1 {
         access = 1073741824; // GENERIC_WRITE
@@ -89,13 +342,40 @@ fn rt_win_open(path: u64, flags: u64, mode: u64) -> u64 {
     if (flags & 64) + (flags & 512) != 0 {
         disposition = 2; // CREATE_ALWAYS
     }
-    handle := raw_win32(CreateFileA, path, access, 3, 0, disposition, 128, 0);
+    if (access == 2147483648) & (disposition == 3) {
+        // The portable layer opens a directory to read it, and Windows lists one through
+        // FindFirstFileW instead, so an enumeration stands in for the handle. The attribute query
+        // is what decides, not a failed CreateFileW: Wine opens a directory handle where Windows
+        // refuses, and a platform layer that depends on that difference lists nothing under Wine.
+        if (raw_win32(GetFileAttributesW, wide) & 16) != 0 {
+            return rt_win_opendir(wide);
+        }
+    }
+    handle := raw_win32(CreateFileW, wide, access, 3, 0, disposition, 128, 0);
     if handle == wrapping_sub(0, 1) {
         return rt_win_errno();
     }
     return handle;
 }
+// Releasing one of the descriptors that is not a Win32 handle.
+fn rt_win_close_entry(entry: u64) -> u64 {
+    kind := raw_load(entry + 8);
+    handle := raw_load(entry + 16);
+    rt_win_unenrol(entry);
+    if kind == rt_win_kind_dir {
+        if handle != 0 {
+            raw_win32(FindClose, handle);
+        }
+        rt_free(entry);
+        return 0;
+    }
+    return rt_win_sock_close(entry);
+}
 fn rt_win_close(handle: u64) -> u64 {
+    entry := rt_win_entry(handle);
+    if entry != 0 {
+        return rt_win_close_entry(entry);
+    }
     if raw_win32(CloseHandle, handle) == 0 {
         return wrapping_sub(0, 9);
     }
@@ -108,24 +388,755 @@ fn rt_win_unmap(address: u64) -> u64 {
     return 0;
 }
 fn rt_win_mkdir(name: u64, mode: u64) -> u64 {
-    if raw_win32(CreateDirectoryA, name, 0) != 0 {
+    units := rt_win_wide(0, name);
+    if rt_error(units) {
+        return units;
+    }
+    if raw_win32(CreateDirectoryW, rt_win_wslot(0), 0) != 0 {
         return 0;
     }
     return rt_win_errno(); // EEXIST for an existing directory, which the portable caller accepts
 }
 fn rt_win_remove(name: u64, flags: u64) -> u64 {
+    units := rt_win_wide(0, name);
+    if rt_error(units) {
+        return units;
+    }
     if (flags & 512) != 0 {
-        if raw_win32(RemoveDirectoryA, name) != 0 {
+        if raw_win32(RemoveDirectoryW, rt_win_wslot(0)) != 0 {
             return 0;
         }
         return rt_win_errno();
     }
-    if raw_win32(DeleteFileA, name) != 0 {
+    if raw_win32(DeleteFileW, rt_win_wslot(0)) != 0 {
         return 0;
     }
     return rt_win_errno();
 }
-// Sleep takes milliseconds; the portable caller passes a Linux timespec {sec, nsec}.
+// Descriptors that are not Win32 handles: a directory enumeration and, below, a socket. They are
+// looked up by address in one list, so the portable layer keeps passing a single word around and
+// rt_win_close/rt_win_read/rt_syscall stay the only places that need to know the difference.
+// Entry layout: +0 next, +8 kind, +16 handle, +24 flags, +32 WIN32_FIND_DATAW (592 bytes).
+const rt_win_kind_socket: u64 = 1;
+const rt_win_kind_dir: u64 = 2;
+const rt_win_entry_size: u64 = 640;
+const rt_win_find_attributes: u64 = 0;
+const rt_win_find_name: u64 = 44;
+fn rt_win_entry(fd: u64) -> u64 {
+    mut p = raw_load(raw_state() + 3608);
+    while p != 0 {
+        if p == fd {
+            return p;
+        }
+        p = raw_load(p);
+    }
+    return 0;
+}
+// Registers a descriptor in the list and returns it. The allocation happens before the lock is taken
+// because rt_alloc takes it too.
+fn rt_win_enrol(kind: u64, handle: u64) -> u64 {
+    entry := rt_alloc(rt_win_entry_size);
+    mut i = 0;
+    while i < 80 {
+        raw_store(entry + i * 8, 0);
+        i = i + 1;
+    }
+    raw_store(entry + 8, kind);
+    raw_store(entry + 16, handle);
+    rt_allocator_lock();
+    raw_store(entry, raw_load(raw_state() + 3608));
+    raw_store(raw_state() + 3608, entry);
+    rt_allocator_unlock();
+    return entry;
+}
+fn rt_win_unenrol(entry: u64) -> u64 {
+    rt_allocator_lock();
+    mut prev = 0;
+    mut p = raw_load(raw_state() + 3608);
+    while p != 0 {
+        if p == entry {
+            if prev == 0 {
+                raw_store(raw_state() + 3608, raw_load(p));
+            } else {
+                raw_store(prev, raw_load(p));
+            }
+            p = 0;
+        } else {
+            prev = p;
+            p = raw_load(p);
+        }
+    }
+    rt_allocator_unlock();
+    return 0;
+}
+// Opens a directory for reading: `wide` is the directory path (no trailing separator added by the
+// caller), and the pattern is that path followed by "\*", which FindFirstFileW reads as its entries.
+fn rt_win_opendir(wide: u64) -> u64 {
+    mut units = rt_win_units(wide);
+    if 8000 < units {
+        return wrapping_sub(0, 36); // ENAMETOOLONG
+    }
+    pattern := rt_win_wslot(1);
+    mut i = 0;
+    while i < units {
+        raw_store(pattern + i * 2, rt_win_unit(wide, i));
+        i = i + 1;
+    }
+    if units != 0 {
+        last := rt_win_unit(wide, units - 1);
+        if (last == 47) + (last == 92) {
+            units = units - 1;
+        }
+    }
+    raw_store(pattern + units * 2, 92); // '\'
+    raw_store(pattern + units * 2 + 2, 42); // '*'
+    raw_store(pattern + units * 2 + 4, 0);
+    entry := rt_win_enrol(rt_win_kind_dir, 0);
+    found := raw_win32(FindFirstFileW, pattern, entry + 32);
+    if found == wrapping_sub(0, 1) {
+        rt_win_unenrol(entry);
+        rt_free(entry);
+        return rt_win_errno();
+    }
+    raw_store(entry + 16, found);
+    raw_store(entry + 24, 1); // the first entry is already in the find data
+    return entry;
+}
+// One directory read as a Linux dirent64 stream, which is the shape the portable runtime decodes
+// (record length at 16, type at 18, name at 19), exactly as the Darwin module already translates
+// getdirentries64 into it. ".", ".." and empty names are skipped here.
+fn rt_win_getdents(fd: u64, buf: u64, n: u64) -> u64 {
+    entry := rt_win_entry(fd);
+    if (entry == 0) | (raw_load(entry + 8) != rt_win_kind_dir) {
+        return wrapping_sub(0, 9); // EBADF
+    }
+    data := entry + 32;
+    mut at = 0;
+    while true {
+        mut have = raw_load(entry + 24);
+        if have == 0 {
+            if raw_win32(FindNextFileW, raw_load(entry + 16), data) == 0 {
+                return at; // the list ended, or the enumeration failed: either way the caller stops
+            }
+        } else {
+            raw_store(entry + 24, 0);
+        }
+        name := data + rt_win_find_name;
+        units := rt_win_units(name);
+        dot := (rt_win_unit(name, 0) == 46) & ((units == 1) + ((units == 2) & (rt_win_unit(name, 1) == 46)));
+        if (dot == 0) & (units != 0) {
+            bytes := rt_win_utf8_of(rt_win_uslot(), 16384, name, units);
+            if rt_error(bytes) {
+                return bytes;
+            }
+            mut kind = 8; // DT_REG
+            if (raw_load(data + rt_win_find_attributes) & 16) != 0 {
+                kind = 4; // DT_DIR
+            }
+            mut length = 19 + bytes + 1;
+            if (length % 8) != 0 {
+                length = length + (8 - length % 8);
+            }
+            if n < at + length {
+                if at == 0 {
+                    return wrapping_sub(0, 22); // EINVAL: the caller's buffer cannot hold one entry
+                }
+                return at;
+            }
+            raw_store(buf + at, 0);
+            raw_store(buf + at + 8, 0);
+            raw_putbyte(buf + at + 16, length & 255);
+            raw_putbyte(buf + at + 17, (length >> 8) & 255);
+            raw_putbyte(buf + at + 18, kind);
+            mut i = 0;
+            while i < bytes {
+                raw_putbyte(buf + at + 19 + i, raw_byte(rt_win_uslot() + i));
+                i = i + 1;
+            }
+            raw_putbyte(buf + at + 19 + bytes, 0);
+            at = at + length;
+        }
+    }
+    return at;
+}
+// The current directory: GetCurrentDirectoryW writes it in units and the portable buffer is UTF-8.
+fn rt_cwd(buf: u64, size: u64) -> u64 {
+    units := raw_win32(GetCurrentDirectoryW, 8192, rt_win_wslot(2)) & 4294967295;
+    if units == 0 {
+        return rt_win_errno();
+    }
+    return rt_win_utf8_of(buf, size, rt_win_wslot(2), units);
+}
+// The running image: GetModuleFileNameW writes its full path in units; the portable buffer is UTF-8.
+fn rt_exe_path(buf: u64, size: u64) -> u64 {
+    units := raw_win32(GetModuleFileNameW, 0, rt_win_wslot(2), 8191) & 4294967295;
+    if units == 0 {
+        return rt_win_errno();
+    }
+    return rt_win_utf8_of(buf, size, rt_win_wslot(2), units);
+}
+fn rt_readlinkat(path: u64, buf: u64, size: u64) -> u64 {
+    return wrapping_sub(0, 38);
+}
+fn rt_faccessat(path: u64) -> u64 {
+    units := rt_win_wide(0, path);
+    if rt_error(units) {
+        return units;
+    }
+    attributes := raw_win32(GetFileAttributesW, rt_win_wslot(0)) & 4294967295;
+    if attributes == 4294967295 {
+        return rt_win_errno();
+    }
+    return 0;
+}
+
+// ---- sockets on the completion port ----------------------------------------------------------
+// Winsock is started once per process, every socket is created with WSA_FLAG_OVERLAPPED, and every
+// receive, send and connect is an overlapped operation whose completion is taken from the request's
+// own event by the waiter. Nothing blocks a worker in recv: the operation itself is the readiness
+// source, the waiter is an offload thread, and the reactor wakes the task with the offload's
+// completion.
+//
+// A socket descriptor is one entry of the same list the directory enumerations use (kind 1), so the
+// portable layer keeps passing one word around and `rt_win_read`, `rt_win_write`, `rt_win_close` and
+// the operation table are the only places that know a descriptor is not a Win32 handle. The entry
+// holds the socket's only OVERLAPPED at +32, which is what a completion's lpOverlapped maps back
+// through: the reactor subtracts 32 and finds the record.
+//
+// Per-descriptor state, inside the area the directory case uses for its find data:
+//   +32  OVERLAPPED (Internal, InternalHigh, Offset/Pointer, hEvent)     32 bytes
+//   +72  bytes transferred, from the completion
+//   +80  error code, from the completion (0 = success)
+//   +88  operation: 1 receive, 2 send, 3 connect
+//   +96  buffer handed to WSARecv/WSASend
+//   +104 its length
+//   +112 the socket's manual-reset event: how the waiter learns the operation finished
+//   +120 pending flag: one operation at a time per descriptor
+//   +128 WSABUF {len, buf}
+//   +144 the DWORD of flags WSARecv/WSASend take
+//   +152 the DWORD ConnectEx reports through
+//   +160 the sockaddr bind uses, and the address getsockname reports into
+const rt_win_ov: u64 = 32;
+const rt_win_bytes: u64 = 72;
+const rt_win_error: u64 = 80;
+const rt_win_op: u64 = 88;
+const rt_win_buf: u64 = 96;
+const rt_win_len: u64 = 104;
+const rt_win_event: u64 = 112;
+const rt_win_pending: u64 = 120;
+const rt_win_wsabuf: u64 = 128;
+const rt_win_flags: u64 = 144;
+const rt_win_out: u64 = 152;
+const rt_win_addrs: u64 = 160;
+const rt_win_op_recv: u64 = 1;
+const rt_win_op_send: u64 = 2;
+const rt_win_op_connect: u64 = 3;
+// Winsock's own error space, as the negative Linux errno the portable layers report. The three
+// connection-lost codes are handled by the caller (a receive reports 0 bytes instead); everything
+// else is what a program sees from `io::Error`.
+fn rt_win_wsa_errno(code: u64) -> u64 {
+    mut errno = 65536 + code;
+    if code == 10004 {
+        errno = 4; // WSAEINTR -> EINTR
+    }
+    if code == 10013 {
+        errno = 13; // WSAEACCES -> EACCES
+    }
+    if code == 10014 {
+        errno = 14; // WSAEFAULT -> EFAULT
+    }
+    if code == 10022 {
+        errno = 22; // WSAEINVAL -> EINVAL
+    }
+    if code == 10024 {
+        errno = 24; // WSAEMFILE -> EMFILE
+    }
+    if code == 10035 {
+        errno = 11; // WSAEWOULDBLOCK -> EAGAIN
+    }
+    if code == 10036 {
+        errno = 115; // WSAEINPROGRESS -> EINPROGRESS
+    }
+    if code == 10037 {
+        errno = 114; // WSAEALREADY -> EALREADY
+    }
+    if code == 10038 {
+        errno = 9; // WSAENOTSOCK -> EBADF
+    }
+    if code == 10040 {
+        errno = 90; // WSAEMSGSIZE -> EMSGSIZE
+    }
+    if code == 10048 {
+        errno = 98; // WSAEADDRINUSE -> EADDRINUSE
+    }
+    if code == 10049 {
+        errno = 99; // WSAEADDRNOTAVAIL -> EADDRNOTAVAIL
+    }
+    if code == 10050 {
+        errno = 100; // WSAENETDOWN -> ENETDOWN
+    }
+    if code == 10051 {
+        errno = 101; // WSAENETUNREACH -> ENETUNREACH
+    }
+    if code == 10053 {
+        errno = 103; // WSAECONNABORTED -> ECONNABORTED
+    }
+    if code == 10054 {
+        errno = 104; // WSAECONNRESET -> ECONNRESET
+    }
+    if code == 10055 {
+        errno = 105; // WSAENOBUFS -> ENOBUFS
+    }
+    if code == 10056 {
+        errno = 106; // WSAEISCONN -> EISCONN
+    }
+    if code == 10057 {
+        errno = 107; // WSAENOTCONN -> ENOTCONN
+    }
+    if code == 10060 {
+        errno = 110; // WSAETIMEDOUT -> ETIMEDOUT
+    }
+    if code == 10061 {
+        errno = 111; // WSAECONNREFUSED -> ECONNREFUSED
+    }
+    if code == 10064 {
+        errno = 36; // WSAENAMETOOLONG -> ENAMETOOLONG
+    }
+    if code == 10065 {
+        errno = 113; // WSAEHOSTUNREACH -> EHOSTUNREACH
+    }
+    if code == 995 {
+        errno = 125; // ERROR_OPERATION_ABORTED -> ECANCELED
+    }
+    if code == 64 {
+        errno = 104; // ERROR_NETNAME_DELETED: the peer reset the connection
+    }
+    return wrapping_sub(0, errno);
+}
+// WSAStartup once per process, asking for Winsock 2.2. A second call is a no-op, and a failed start
+// is remembered so a program sees one error rather than a startup per socket. State word 3616: 0 not
+// started, 1 starting, 2 ready, 3 failed or cleaned up.
+fn rt_win_wsa() -> u64 {
+    state := raw_state() + 3616;
+    mut v = raw_atomic_load(state);
+    if v == 2 {
+        return 0;
+    }
+    if v == 3 {
+        return wrapping_sub(0, 93); // EPROTONOSUPPORT: the stack never came up
+    }
+    if raw_atomic_cas(state, 0, 1) != 0 {
+        while raw_atomic_load(state) == 1 {
+            rt_syscall(24, 0, 0, 0);
+        }
+        return rt_win_wsa();
+    }
+    // WSADATA is 408 bytes on Win64. It is zeroed rather than read: the version the library
+    // implements is not consulted, because 2.2 is the version every supported Windows has.
+    data := rt_alloc(512);
+    if rt_error(data) {
+        raw_atomic_store_release(state, 3);
+        return wrapping_sub(0, 12);
+    }
+    mut i = 0;
+    while i < 64 {
+        raw_store(data + i * 8, 0);
+        i = i + 1;
+    }
+    code := raw_win32(WSAStartup, 514, data) & 65535; // MAKEWORD(2, 2)
+    rt_free(data);
+    if code != 0 {
+        raw_atomic_store_release(state, 3);
+        return rt_win_wsa_errno(code);
+    }
+    raw_atomic_store_release(state, 2);
+    return 0;
+}
+// Teardown once per process, from the exit paths only: WSACleanup after ExitProcess would never run.
+fn rt_win_wsa_stop() -> u64 {
+    state := raw_state() + 3616;
+    if raw_atomic_load(state) == 2 {
+        raw_atomic_store_release(state, 3);
+        raw_win32(WSACleanup);
+    }
+    return 0;
+}
+// The scheduler's completion port, or 0 when the process has no reactor (a program that never makes
+// a task). The port lives in the scheduler block that rt_os_complete also reads.
+fn rt_win_port() -> u64 {
+    s := raw_load(raw_state() + 72);
+    if s == 0 {
+        return 0;
+    }
+    return raw_load(s + 40);
+}
+// Creates the operation record's event and joins the socket to the completion port. The event is
+// what a thread that is not a task waits on; a task parks on the reactor instead. The association
+// key is unused: a completion is mapped back through its OVERLAPPED, not through the key.
+fn rt_win_sock_setup(entry: u64) -> u64 {
+    event := raw_win32(CreateEventW, 0, 1, 0, 0);
+    if event == 0 {
+        return rt_win_errno();
+    }
+    raw_store(entry + rt_win_event, event);
+    // The OVERLAPPED's hEvent field (+24 of the 32-byte structure), so a wait on this record is a
+    // wait on a signalling the kernel does, whether or not the socket is on a completion port.
+    raw_store(entry + rt_win_ov + 24, event);
+    return 0;
+}
+// Joins the socket to the scheduler's completion port, once. A socket belongs to no port when a
+// program creates it before it makes a task - the reactor does not exist yet - so the association is
+// deferred to the first operation, which is the point where the port is known to exist. Returns 0
+// when the socket is on a port or there is none to join; a socket with no port falls back to its own
+// event, so a program without tasks still works.
+// socket(2): AF_INET only, which is what `lib/net.grl` speaks. `kind` carries the Linux socket type
+// (1 stream, 2 datagram) plus the non-blocking and close-on-exec bits, which Winsock has no use for
+// because every operation here is overlapped.
+fn rt_win_socket(domain: u64, kind: u64, protocol: u64) -> u64 {
+    if raw_target() == 4 {
+        // windows-aarch64: the ARM64 import path passes at most seven register arguments, and
+        // WSAIoctl needs nine, so the socket layer reports itself unimplemented instead of issuing a
+        // call with two arguments missing.
+        return wrapping_sub(0, 38);
+    }
+    if rt_error(rt_win_wsa()) {
+        return rt_win_wsa();
+    }
+    if domain != 2 {
+        return wrapping_sub(0, 97); // EAFNOSUPPORT
+    }
+    ty := kind & 15;
+    mut proto = protocol;
+    if ty == 1 {
+        proto = 6; // IPPROTO_TCP
+    }
+    if ty == 2 {
+        proto = 17; // IPPROTO_UDP
+    }
+    if (ty != 1) & (ty != 2) {
+        return wrapping_sub(0, 94); // ESOCKTNOSUPPORT
+    }
+    handle := raw_win32(WSASocketW, 2, ty, proto, 0, 0, 1); // WSA_FLAG_OVERLAPPED
+    if handle == wrapping_sub(0, 1) {
+        return rt_win_wsa_errno(raw_win32(WSAGetLastError) & 65535);
+    }
+    entry := rt_win_enrol(rt_win_kind_socket, handle);
+    if rt_error(rt_win_sock_setup(entry)) {
+        raw_win32(closesocket, handle);
+        rt_win_unenrol(entry);
+        rt_free(entry);
+        return rt_win_errno();
+    }
+    return entry;
+}
+// Releasing a socket. A pending operation cannot outlive its waiter - the waiter itself reaps it
+// before returning - so the record is free to release here, and a completion that arrives for it
+// afterwards finds a descriptor that is no longer enrolled.
+fn rt_win_sock_close(entry: u64) -> u64 {
+    handle := raw_load(entry + 16);
+    event := raw_load(entry + rt_win_event);
+    raw_atomic_store_release(entry + rt_win_pending, 0);
+    if event != 0 {
+        raw_win32(CloseHandle, event);
+        raw_store(entry + rt_win_event, 0);
+    }
+    if handle != 0 {
+        raw_win32(closesocket, handle);
+        raw_store(entry + 16, 0);
+    }
+    rt_free(entry);
+    return 0;
+}
+// Waits for the operation issued on `entry` and records its result. The waiter is the record's own
+// event: `WSAGetOverlappedResult` with fWait waits on it, which is the one completion mechanism
+// Winsock delivers for every operation and every host. A task must not wait on its own worker, so it
+// hands the wait to an offload thread and parks; the reactor wakes it with the offload completion it
+// already delivers.
+//
+// The scheduler's completion port is deliberately not used here. Sockets can be joined to it with
+// CreateIoCompletionPort and a completion's lpOverlapped maps back to the record (both were
+// implemented and measured), but under Wine - the only host that can run these tests - a socket
+// cooperative accept never posts to the port at all and an AcceptEx does not either, so a port-based
+// waiter would be untestable and wrong on the host the suite runs on. docs/design/windows-backend.md
+// states that as remaining work rather than a claim.
+fn rt_win_sock_wait(entry: u64) -> u64 {
+    if rt_current() != 0 {
+        return rt_blocking_call(rt_win_sock_await, raw_load(entry + 16), entry);
+    }
+    return rt_win_sock_await(raw_load(entry + 16), entry);
+}
+fn rt_win_sock_await(handle: u64, entry: u64) -> u64 {
+    flags := entry + rt_win_flags;
+    raw_store(flags, 0);
+    raw_store(entry + rt_win_out, 0);
+    ok := raw_win32(WSAGetOverlappedResult, handle, entry + rt_win_ov, entry + rt_win_out, 1, flags);
+    raw_store(entry + rt_win_bytes, 0);
+    raw_store(entry + rt_win_error, 0);
+    if ok == 0 {
+        raw_store(entry + rt_win_error, raw_win32(WSAGetLastError) & 65535);
+    } else {
+        raw_store(entry + rt_win_bytes, raw_load(entry + rt_win_out) & 4294967295);
+    }
+    raw_atomic_store_release(entry + rt_win_pending, 0);
+    return 0;
+}
+// The result of a completed operation: bytes transferred, or a negative errno. A receive that ends
+// with the connection gone is 0 bytes (end of stream), not an error - that is what a portable read
+// loop tests for, and mapping it to an error would make an ordinary peer close look like a fault.
+fn rt_win_sock_result(entry: u64) -> u64 {
+    err := raw_load(entry + rt_win_error);
+    if err == 0 {
+        return raw_load(entry + rt_win_bytes);
+    }
+    if (raw_load(entry + rt_win_op) == rt_win_op_recv) & ((err == 10054) + (err == 10053) + (err == 64)) {
+        return 0;
+    }
+    return rt_win_wsa_errno(err);
+}
+// Fills in the record for one operation and arms it. One operation per descriptor at a time: the
+// descriptor holds a single OVERLAPPED, and the portable layer never has two tasks reading the same
+// socket, so a second operation waits for the first rather than corrupting it.
+fn rt_win_sock_issue(entry: u64, op: u64, buf: u64, len: u64) -> u64 {
+    while raw_atomic_load(entry + rt_win_pending) != 0 {
+        rt_syscall(24, 0, 0, 0);
+    }
+    raw_store(entry + rt_win_op, op);
+    raw_store(entry + rt_win_buf, buf);
+    raw_store(entry + rt_win_len, len);
+    raw_store(entry + rt_win_bytes, 0);
+    raw_store(entry + rt_win_error, 0);
+    raw_store(entry + rt_win_flags, 0);
+    raw_atomic_store_release(entry + rt_win_pending, 1);
+    return 0;
+}
+// WSA_IO_PENDING (997) is the ordinary answer for an overlapped call that completes later; any other
+// error means the operation was never issued, so the record is released at once and the errno goes
+// back to the caller.
+fn rt_win_sock_submitted(entry: u64, r: u64) -> u64 {
+    if r == 0 {
+        return 0;
+    }
+    code := raw_win32(WSAGetLastError) & 65535;
+    if code == 997 {
+        return 0;
+    }
+    raw_store(entry + rt_win_error, code);
+    raw_atomic_store_release(entry + rt_win_pending, 0);
+    return rt_win_wsa_errno(code);
+}
+fn rt_win_sock_recv(entry: u64, buf: u64, len: u64) -> u64 {
+    rt_win_sock_issue(entry, rt_win_op_recv, buf, len);
+    raw_store(entry + rt_win_wsabuf, len);
+    raw_store(entry + rt_win_wsabuf + 8, buf);
+    r := raw_win32(WSARecv, raw_load(entry + 16), entry + rt_win_wsabuf, 1, entry + rt_win_bytes,
+        entry + rt_win_flags, entry + rt_win_ov, 0);
+    submitted := rt_win_sock_submitted(entry, r);
+    if rt_error(submitted) {
+        return submitted;
+    }
+    if rt_error(rt_win_sock_wait(entry)) {
+        return wrapping_sub(0, 125);
+    }
+    return rt_win_sock_result(entry);
+}
+fn rt_win_sock_send(entry: u64, buf: u64, len: u64) -> u64 {
+    rt_win_sock_issue(entry, rt_win_op_send, buf, len);
+    raw_store(entry + rt_win_wsabuf, len);
+    raw_store(entry + rt_win_wsabuf + 8, buf);
+    r := raw_win32(WSASend, raw_load(entry + 16), entry + rt_win_wsabuf, 1, entry + rt_win_bytes,
+        0, entry + rt_win_ov, 0);
+    submitted := rt_win_sock_submitted(entry, r);
+    if rt_error(submitted) {
+        return submitted;
+    }
+    if rt_error(rt_win_sock_wait(entry)) {
+        return wrapping_sub(0, 125);
+    }
+    return rt_win_sock_result(entry);
+}
+// A blocking connect on the socket itself, used when Winsock does not offer ConnectEx. It runs on an
+// offload thread, so the task that asked for it still parks instead of holding a worker.
+fn rt_win_sock_connect_blocking(fd: u64, addr: u64) -> u64 {
+    entry := rt_win_entry(fd);
+    if (entry == 0) | (raw_load(entry + 8) != rt_win_kind_socket) {
+        return wrapping_sub(0, 9);
+    }
+    if raw_win32(connect, raw_load(entry + 16), addr, 16) == wrapping_sub(0, 1) {
+        return rt_win_wsa_errno(raw_win32(WSAGetLastError) & 65535);
+    }
+    return 0;
+}
+// ConnectEx, resolved once per process with WSAIoctl(SIO_GET_EXTENSION_FUNCTION_POINTER) and cached
+// in state word 3632 (0 unresolved, 1 absent, otherwise the function pointer). It is not an import
+// because no DLL exports it on every stack this build has to run on: Wine's ws2_32 and mswsock do
+// not export it at all, while Windows' mswsock does, and the extension table is the interface every
+// Winsock 2 provider publishes.
+fn rt_win_connect_ex() -> u64 {
+    slot := raw_state() + 3632;
+    mut p = raw_atomic_load(slot);
+    if p != 0 {
+        return p;
+    }
+    arena := rt_win_arena();
+    if arena == 0 {
+        return 1;
+    }
+    // The GUID and the out-pointer live past the five conversion slots: process-wide state, written
+    // once, never a user allocation.
+    guid := arena + 81920;
+    // WSAID_CONNECTEX {25a207b9-ddf3-4660-8ee9-76e58c74063e}, in the order a GUID has in memory.
+    raw_putbyte(guid, 185);
+    raw_putbyte(guid + 1, 7);
+    raw_putbyte(guid + 2, 162);
+    raw_putbyte(guid + 3, 37);
+    raw_putbyte(guid + 4, 243);
+    raw_putbyte(guid + 5, 221);
+    raw_putbyte(guid + 6, 96);
+    raw_putbyte(guid + 7, 70);
+    raw_putbyte(guid + 8, 142);
+    raw_putbyte(guid + 9, 233);
+    raw_putbyte(guid + 10, 118);
+    raw_putbyte(guid + 11, 229);
+    raw_putbyte(guid + 12, 140);
+    raw_putbyte(guid + 13, 116);
+    raw_putbyte(guid + 14, 6);
+    raw_putbyte(guid + 15, 62);
+    out := arena + 81936;
+    raw_store(out, 0);
+    bytes := arena + 81952;
+    raw_store(bytes, 0);
+    // Any socket of this process can be asked for the extension table, and the list already holds
+    // the caller's: it was enrolled before this call.
+    mut probe = raw_load(raw_state() + 3608);
+    mut socket = 0;
+    while probe != 0 {
+        if raw_load(probe + 8) == rt_win_kind_socket {
+            socket = raw_load(probe + 16);
+            probe = 0;
+        } else {
+            probe = raw_load(probe);
+        }
+    }
+    mut resolved = 1;
+    if socket != 0 {
+        // SIO_GET_EXTENSION_FUNCTION_POINTER = 0xC8000006.
+        if raw_win32(WSAIoctl, socket, 3355443206, guid, 16, out, 8, bytes, 0, 0) == 0 {
+            if raw_load(out) != 0 {
+                resolved = raw_load(out);
+            }
+        }
+    }
+    raw_atomic_store_release(slot, resolved);
+    return resolved;
+}
+// ConnectEx, the only way to make a connect an overlapped operation. It requires the socket to be
+// bound first, so an unbound socket is bound to 0.0.0.0:0 here (a socket the caller bound itself
+// answers WSAEINVAL, which is not an error for this path), and afterwards
+// SO_UPDATE_CONNECT_CONTEXT publishes the connection's properties on the handle.
+fn rt_win_sock_connect(fd: u64, addr: u64, len: u64) -> u64 {
+    entry := rt_win_entry(fd);
+    if (entry == 0) | (raw_load(entry + 8) != rt_win_kind_socket) {
+        return wrapping_sub(0, 9); // EBADF
+    }
+    extension := rt_win_connect_ex();
+    if extension == 1 {
+        return rt_blocking_call(rt_win_sock_connect_blocking, fd, addr);
+    }
+    zero := entry + rt_win_addrs;
+    mut i = 0;
+    while i < 4 {
+        raw_store(zero + i * 8, 0);
+        i = i + 1;
+    }
+    raw_putbyte(zero, 2); // AF_INET, port 0, address 0.0.0.0
+    if raw_win32(bind, raw_load(entry + 16), zero, 16) == wrapping_sub(0, 1) {
+        code := raw_win32(WSAGetLastError) & 65535;
+        if code != 10022 {
+            return rt_win_wsa_errno(code);
+        }
+    }
+    rt_win_sock_issue(entry, rt_win_op_connect, 0, 0);
+    r := raw_win_call(extension, raw_load(entry + 16), addr, len, 0, 0, entry + rt_win_out,
+        entry + rt_win_ov);
+    submitted := rt_win_sock_submitted(entry, r);
+    if rt_error(submitted) {
+        return submitted;
+    }
+    if rt_error(rt_win_sock_wait(entry)) {
+        return wrapping_sub(0, 125);
+    }
+    mut result = rt_win_sock_result(entry);
+    if result == 0 {
+        raw_win32(setsockopt, raw_load(entry + 16), 65535, 28688, 0, 0); // SO_UPDATE_CONNECT_CONTEXT
+    }
+    return result;
+}
+fn rt_win_sock_bind(fd: u64, addr: u64, len: u64) -> u64 {
+    entry := rt_win_entry(fd);
+    if (entry == 0) | (raw_load(entry + 8) != rt_win_kind_socket) {
+        return wrapping_sub(0, 9);
+    }
+    if raw_win32(bind, raw_load(entry + 16), addr, len) == wrapping_sub(0, 1) {
+        return rt_win_wsa_errno(raw_win32(WSAGetLastError) & 65535);
+    }
+    return 0;
+}
+fn rt_win_sock_listen(fd: u64, backlog: u64) -> u64 {
+    entry := rt_win_entry(fd);
+    if (entry == 0) | (raw_load(entry + 8) != rt_win_kind_socket) {
+        return wrapping_sub(0, 9);
+    }
+    if raw_win32(listen, raw_load(entry + 16), backlog) == wrapping_sub(0, 1) {
+        return rt_win_wsa_errno(raw_win32(WSAGetLastError) & 65535);
+    }
+    return 0;
+}
+fn rt_win_sock_name(fd: u64, buf: u64, lenptr: u64) -> u64 {
+    entry := rt_win_entry(fd);
+    if (entry == 0) | (raw_load(entry + 8) != rt_win_kind_socket) {
+        return wrapping_sub(0, 9);
+    }
+    if raw_win32(getsockname, raw_load(entry + 16), buf, lenptr) == wrapping_sub(0, 1) {
+        return rt_win_wsa_errno(raw_win32(WSAGetLastError) & 65535);
+    }
+    return 0;
+}
+// accept: a blocking accept on an offload thread, for the reason the design document states -
+// AcceptEx was implemented first and had to be withdrawn. Under the only host that can run these
+// tests, AcceptEx completes when the connection is already queued (the synchronous "direct result"
+// path) but never when the request has to wait for one, so a server would accept the first client
+// and then hang. A blocking accept on a helper thread is what the rest of this platform layer does
+// with a call that blocks: the task parks, a worker stays free, and the reactor wakes the task with
+// the offload completion.
+fn rt_accept4(fd: u64) -> u64 {
+    entry := rt_win_entry(fd);
+    if (entry == 0) | (raw_load(entry + 8) != rt_win_kind_socket) {
+        return wrapping_sub(0, 9);
+    }
+    if rt_error(rt_win_wsa()) {
+        return rt_win_wsa();
+    }
+    return rt_blocking_call(rt_win_sock_accept_blocking, fd, 0);
+}
+fn rt_win_sock_accept_blocking(fd: u64, unused: u64) -> u64 {
+    listen_entry := rt_win_entry(fd);
+    handle := raw_win32(accept, raw_load(listen_entry + 16), 0, 0);
+    if handle == wrapping_sub(0, 1) {
+        return rt_win_wsa_errno(raw_win32(WSAGetLastError) & 65535);
+    }
+    entry := rt_win_enrol(rt_win_kind_socket, handle);
+    if rt_error(rt_win_sock_setup(entry)) {
+        raw_win32(closesocket, handle);
+        rt_win_unenrol(entry);
+        rt_free(entry);
+        return rt_win_errno();
+    }
+    return entry;
+}
+
+
+
+
 fn rt_win_sleep(spec: u64) -> u64 {
     ms := raw_load(spec) * 1000 + rt_div(raw_load(spec + 8), 1000000);
     raw_win32(Sleep, ms);
@@ -177,9 +1188,11 @@ fn rt_syscall(n: u64, a: u64, b: u64, c: u64) -> u64 {
         return raw_win32(GetCurrentProcessId);
     }
     if n == 60 {
+        rt_win_wsa_stop();
         return raw_win32(ExitProcess, a);
     }
     if n == 231 {
+        rt_win_wsa_stop();
         return raw_win32(ExitProcess, a & 255);
     }
     if n == 62 {
@@ -197,6 +1210,24 @@ fn rt_syscall(n: u64, a: u64, b: u64, c: u64) -> u64 {
     }
     if n == 228 {
         return rt_win_clock(b);
+    }
+    if n == 217 {
+        return rt_win_getdents(a, b, c);
+    }
+    if n == 41 {
+        return rt_win_socket(a, b, c);
+    }
+    if n == 42 {
+        return rt_win_sock_connect(a, b, c);
+    }
+    if n == 49 {
+        return rt_win_sock_bind(a, b, c);
+    }
+    if n == 50 {
+        return rt_win_sock_listen(a, b);
+    }
+    if n == 51 {
+        return rt_win_sock_name(a, b, c);
     }
     if n == 258 {
         return rt_win_mkdir(b, c);
@@ -235,37 +1266,6 @@ fn rt_syscall4(n: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
     }
     return wrapping_sub(0, 38);
 }
-// The current directory: GetCurrentDirectoryA writes it and returns its length in characters.
-fn rt_cwd(buf: u64, size: u64) -> u64 {
-    n := raw_win32(GetCurrentDirectoryA, size - 1, buf);
-    if n == 0 {
-        return wrapping_sub(0, rt_win_errno());
-    }
-    raw_putbyte(buf + n, 0);
-    return n;
-}
-// The running image: GetModuleFileNameA writes its full path, and the return value is its length.
-fn rt_exe_path(buf: u64, size: u64) -> u64 {
-    n := raw_win32(GetModuleFileNameA, 0, buf, size - 1);
-    if n == 0 {
-        return rt_win_errno();
-    }
-    raw_putbyte(buf + n, 0);
-    return n;
-}
-fn rt_readlinkat(path: u64, buf: u64, size: u64) -> u64 {
-    return wrapping_sub(0, 38);
-}
-fn rt_faccessat(path: u64) -> u64 {
-    if raw_win32(GetFileAttributesA, path) == 4294967295 {
-        return wrapping_sub(0, 2);
-    }
-    return 0;
-}
-fn rt_accept4(fd: u64) -> u64 {
-    return wrapping_sub(0, 38);
-}
-
 // ---- file metadata, rename, and a spawn that redirects stdio -----------------------------------
 // The Win32 half of the operations os-linux.grl implements with newfstatat, renameat and a
 // fork/exec with dup3. A descriptor above 2 is already a HANDLE here (rt_win_handle), which is what
@@ -295,13 +1295,17 @@ fn rt_win_kind(attributes: u64) -> u64 {
     }
     return 1;
 }
-// GetFileAttributesExA, whose WIN32_FILE_ATTRIBUTE_DATA is 36 bytes: attributes at 0, last access at
+// GetFileAttributesExW, whose WIN32_FILE_ATTRIBUTE_DATA is 36 bytes: attributes at 0, last access at
 // 12, last write at 20, size high at 28 and size low at 32. Windows has no POSIX permission bits, no
 // owner and no inode, so those fields are 0; both `follow` values report the entry itself, which is
 // what a reparse point's attributes describe.
 fn rt_stat(path: u64, follow: u64, fields: u64) -> u64 {
+    units := rt_win_wide(0, path);
+    if rt_error(units) {
+        return wrapping_sub(0, units);
+    }
     data := rt_alloc(64);
-    if raw_win32(GetFileAttributesExA, path, 0, data) == 0 {
+    if raw_win32(GetFileAttributesExW, rt_win_wslot(0), 0, data) == 0 {
         errno := rt_win_errno();
         rt_free(data);
         return errno;
@@ -324,18 +1328,35 @@ fn rt_stat(path: u64, follow: u64, fields: u64) -> u64 {
     rt_free(data);
     return 0;
 }
-// CreateSymbolicLinkA: a symbolic link to a file (flag 0) - Windows decides junctions for
-// directories itself, so a link to a directory needs the privilege the platform asks for.
+// CreateSymbolicLinkW: a symbolic link to a file (flag 0) - Windows decides junctions for
+// directories itself, so a link to a directory needs the privilege the platform asks for. Both
+// names are UTF-8 here and UTF-16 at the call (slots 0 and 2).
 fn rt_symlink(target: u64, link: u64) -> u64 {
-    if raw_win32(CreateSymbolicLinkA, link, target, 0) == 0 {
+    a := rt_win_wide(0, link);
+    if rt_error(a) {
+        return wrapping_sub(0, a);
+    }
+    b := rt_win_wide(2, target);
+    if rt_error(b) {
+        return wrapping_sub(0, b);
+    }
+    if raw_win32(CreateSymbolicLinkW, rt_win_wslot(0), rt_win_wslot(2), 0) == 0 {
         return rt_win_errno();
     }
     return 0;
 }
-// MoveFileExA with MOVEFILE_REPLACE_EXISTING: the destination file is replaced, a directory is only
+// MoveFileExW with MOVEFILE_REPLACE_EXISTING: the destination file is replaced, a directory is only
 // renamed when it is absent, and 0 or a positive errno comes back.
 fn rt_rename(from: u64, to: u64) -> u64 {
-    if raw_win32(MoveFileExA, from, to, 1) == 0 {
+    a := rt_win_wide(0, from);
+    if rt_error(a) {
+        return wrapping_sub(0, a);
+    }
+    b := rt_win_wide(2, to);
+    if rt_error(b) {
+        return wrapping_sub(0, b);
+    }
+    if raw_win32(MoveFileExW, rt_win_wslot(0), rt_win_wslot(2), 1) == 0 {
         return rt_win_errno();
     }
     return 0;
@@ -360,42 +1381,47 @@ fn rt_wait_pid(pid: u64) -> u64 {
     raw_win32(CloseHandle, pid);
     return code * 256;
 }
-// CreateProcessA with STARTF_USESTDHANDLES: the STARTUPINFOA's hStdInput/hStdOutput/hStdError (at 80,
+// CreateProcessW with STARTF_USESTDHANDLES: the STARTUPINFOW's hStdInput/hStdOutput/hStdError (at 80,
 // 88 and 96) name the child's standard handles and bInheritHandles is set, so a descriptor the caller
-// opened is the child's stdout or stderr. The answer is the process handle, or a wrapped negative
-// errno; rt_wait_pid closes it.
+// opened is the child's stdout or stderr. The command line and the environment block are UTF-16, as
+// rt_spawn_wait builds them. The answer is the process handle, or a wrapped negative errno;
+// rt_wait_pid closes it.
 fn rt_spawn_redirect(paths: u64, argv: u64, envp: u64, out_fd: u64, err_fd: u64) -> u64 {
     if raw_target() == 4 {
         // windows-aarch64: the ARM64 Win32 call path passes seven register arguments and
-        // CreateProcessA needs ten, so it is reported as unimplemented instead of mis-called.
+        // CreateProcessW needs ten, so it is reported as unimplemented instead of mis-called.
         return wrapping_sub(0, 38);
     }
-    mut size = 1;
+    mut units = 1;
     mut count = 0;
     while raw_load(argv + count * 8) != 0 {
-        p := raw_load(argv + count * 8);
-        mut n = 0;
-        while raw_byte(p + n) != 0 {
-            n += 1;
+        w := rt_win_wide(1, raw_load(argv + count * 8));
+        if rt_error(w) {
+            return w;
         }
-        size += n * 2 + 4;
+        units += w * 2 + 4;
         count += 1;
     }
-    line := rt_alloc(size);
+    line := rt_alloc(units * 2);
     mut at = 0;
     mut i = 0;
     while i < count {
         if i != 0 {
-            raw_putbyte(line + at, 32);
+            raw_store(line + at * 2, 32);
             at += 1;
         }
-        at = rt_win_quote(line, at, raw_load(argv + i * 8));
+        rt_win_wide(1, raw_load(argv + i * 8));
+        at = rt_win_quote_w(line, at, rt_win_wslot(1));
         i += 1;
     }
-    raw_putbyte(line + at, 0);
+    raw_store(line + at * 2, 0);
     mut block = 0;
     if envp != 0 {
         block = rt_win_env_block(envp);
+        if block == 18446744073709551615 {
+            rt_free(line);
+            return wrapping_sub(0, 22);
+        }
     }
     startup := rt_alloc(128);
     info := rt_alloc(32);
@@ -414,7 +1440,11 @@ fn rt_spawn_redirect(paths: u64, argv: u64, envp: u64, out_fd: u64, err_fd: u64)
     raw_store(startup + 80, rt_win_handle(0));
     raw_store(startup + 88, rt_win_handle(out_fd));
     raw_store(startup + 96, rt_win_handle(err_fd));
-    started := raw_win32(CreateProcessA, 0, line, 0, 0, 1, 0, block, 0, startup, info);
+    mut flags = 0;
+    if block != 0 {
+        flags = 1024; // CREATE_UNICODE_ENVIRONMENT
+    }
+    started := raw_win32(CreateProcessW, 0, line, 0, 0, 1, flags, block, 0, startup, info);
     mut result = wrapping_sub(0, 22);
     if started == 0 {
         result = wrapping_sub(0, rt_win_errno());
@@ -699,66 +1729,140 @@ fn rt_win_join_wait(addr: u64) -> u64 {
 }
 
 // ---- process creation ------------------------------------------------------------------------
-// CreateProcessA takes one command line, not an argument vector, so every argument is quoted back
-// into a line that rt_win_split (and CommandLineToArgvW) reads as the same vector: a backslash only
-// escapes a quote when it precedes one, and a quote is escaped by doubling the backslashes in front
-// of it.
-fn rt_win_quote(dst: u64, at: u64, src: u64) -> u64 {
-    mut len = 0;
+
+// Splits the wide Win32 command line into NUL-terminated UTF-8 arguments in `out`, recording each
+// one's address in `table`, and returns the count. Backslash and quote handling follows the
+// CommandLineToArgvW rules the C runtime uses, applied to units; every kept unit is re-encoded as
+// UTF-8, so a program sees the same text the console wrote.
+fn rt_win_split_w(line: u64, out: u64, table: u64) -> u64 {
+    mut count = 0;
+    mut i = 0;
+    mut at = 0;
+    while rt_win_unit(line, i) != 0 {
+        while (rt_win_unit(line, i) == 32) + (rt_win_unit(line, i) == 9) {
+            i = i + 1;
+        }
+        if rt_win_unit(line, i) == 0 {
+            break;
+        }
+        raw_store(table + count * 8, out + at);
+        count = count + 1;
+        mut quoted = 0;
+        while 1 {
+            u := rt_win_unit(line, i);
+            if u == 0 {
+                break;
+            }
+            if u == 92 {
+                mut slashes = 0;
+                while rt_win_unit(line, i) == 92 {
+                    slashes = slashes + 1;
+                    i = i + 1;
+                }
+                if rt_win_unit(line, i) == 34 {
+                    mut k = 0;
+                    while k < slashes / 2 {
+                        raw_putbyte(out + at, 92);
+                        at = at + 1;
+                        k = k + 1;
+                    }
+                    if (slashes % 2) == 1 {
+                        raw_putbyte(out + at, 34);
+                        at = at + 1;
+                        i = i + 1;
+                    }
+                } else {
+                    mut k = 0;
+                    while k < slashes {
+                        raw_putbyte(out + at, 92);
+                        at = at + 1;
+                        k = k + 1;
+                    }
+                }
+            } else {
+                if u == 34 {
+                    quoted = 1 - quoted;
+                    i = i + 1;
+                } else {
+                    if ((u == 32) + (u == 9)) & (quoted == 0) {
+                        break;
+                    }
+                    packed := rt_win_wide_cp(line, i);
+                    at = at + rt_win_put_cp(out, at, packed >> 2);
+                    i = i + (packed & 3);
+                }
+            }
+        }
+        // The delimiter is overwritten by the terminator, so read it before writing.
+        delimiter := rt_win_unit(line, i);
+        raw_putbyte(out + at, 0);
+        at = at + 1;
+        if delimiter != 0 {
+            i = i + 1;
+        }
+    }
+    raw_store(table + count * 8, 0);
+    return count;
+}
+// ---- process creation ------------------------------------------------------------------------
+// CreateProcessW takes one command line, not an argument vector, so every argument is quoted back
+// into a line that CommandLineToArgvW reads as the same vector: a backslash only escapes a quote
+// when it precedes one, and a quote is escaped by doubling the backslashes in front of it. The rules
+// are applied to UTF-16 units, so a non-ASCII argument reaches the child as itself.
+fn rt_win_quote_w(dst: u64, at: u64, src: u64) -> u64 {
+    units := rt_win_units(src);
     mut need = 0;
-    while raw_byte(src + len) != 0 {
-        b := raw_byte(src + len);
-        if (b == 32) + (b == 9) + (b == 34) {
+    if units == 0 {
+        need = 1; // an empty argument must still be quoted, or it disappears from the child's vector
+    }
+    mut i = 0;
+    while i < units {
+        u := rt_win_unit(src, i);
+        if (u == 32) + (u == 9) + (u == 34) {
             need = 1;
         }
-        len += 1;
-    }
-    // An empty argument must still be quoted, or it disappears from the child's vector.
-    if len == 0 {
-        need = 1;
+        i = i + 1;
     }
     if need == 0 {
-        mut i = 0;
-        while i < len {
-            raw_putbyte(dst + at + i, raw_byte(src + i));
-            i += 1;
+        i = 0;
+        while i < units {
+            raw_store(dst + (at + i) * 2, rt_win_unit(src, i));
+            i = i + 1;
         }
-        return at + len;
+        return at + units;
     }
     mut out = at;
-    raw_putbyte(dst + out, 34);
-    out += 1;
-    mut i = 0;
-    while i < len {
+    raw_store(dst + out * 2, 34);
+    out = out + 1;
+    i = 0;
+    while i < units {
         mut slashes = 0;
-        while raw_byte(src + i) == 92 {
-            slashes += 1;
-            i += 1;
+        while rt_win_unit(src, i) == 92 {
+            slashes = slashes + 1;
+            i = i + 1;
         }
-        b := raw_byte(src + i);
-        if b == 0 {
-            // Trailing backslashes: doubled, so they cannot escape the closing quote.
-            slashes = slashes * 2;
+        u := rt_win_unit(src, i);
+        if i == units {
+            slashes = slashes * 2; // trailing backslashes, doubled so they cannot escape the quote
         } else {
-            if b == 34 {
-                // A literal quote: 2N+1 backslashes, then the quote.
-                slashes = slashes * 2 + 1;
+            if u == 34 {
+                slashes = slashes * 2 + 1; // a literal quote: 2N+1 backslashes, then the quote
             }
         }
         mut k = 0;
         while k < slashes {
-            raw_putbyte(dst + out, 92);
-            out += 1;
-            k += 1;
+            raw_store(dst + out * 2, 92);
+            out = out + 1;
+            k = k + 1;
         }
-        if b == 0 {
+        if i == units {
             break;
         }
-        raw_putbyte(dst + out, b);
-        out += 1;
-        i += 1;
+        raw_store(dst + out * 2, u);
+        out = out + 1;
+        i = i + 1;
     }
-    raw_putbyte(dst + out, 34);
+    raw_store(dst + out * 2, 34);
     return out + 1;
 }
 fn rt_win_upper(b: u64) -> u64 {
@@ -782,9 +1886,10 @@ fn rt_win_env_less(a: u64, b: u64) -> u64 {
         i += 1;
     }
 }
-// A Win32 environment block: the entries in name order, each NUL-terminated, the list closed by one
-// more NUL. Unlike an inherited environment (CreateProcess with a NULL block), this block is the
-// child's whole environment: nothing is added from this process unless it is in the table.
+// A Win32 environment block in UTF-16: the entries in name order, each NUL-terminated in units, the
+// list closed by one more NUL. Unlike an inherited environment (CreateProcessW with a NULL block),
+// this block is the child's whole environment: nothing is added from this process unless it is in
+// the table. The caller frees the block. All ones when an entry cannot be converted.
 fn rt_win_env_block(envp: u64) -> u64 {
     mut count = 0;
     while raw_load(envp + count * 8) != 0 {
@@ -811,74 +1916,84 @@ fn rt_win_env_block(envp: u64) -> u64 {
         i += 1;
     }
     mut total = 1;
+    mut bad = 0;
     i = 0;
     while i < count {
-        p := raw_load(order + i * 8);
-        mut n = 0;
-        while raw_byte(p + n) != 0 {
-            n += 1;
+        w := rt_win_wide(3, raw_load(order + i * 8));
+        if rt_error(w) {
+            bad = 1;
+            i = count;
+        } else {
+            total += w + 1;
+            i += 1;
         }
-        total += n + 1;
-        i += 1;
     }
-    block := rt_alloc(total);
+    if bad != 0 {
+        rt_free(order);
+        return 18446744073709551615;
+    }
+    block := rt_alloc(total * 2);
     mut at = 0;
     i = 0;
     while i < count {
-        p := raw_load(order + i * 8);
-        mut n = 0;
-        while raw_byte(p + n) != 0 {
-            raw_putbyte(block + at, raw_byte(p + n));
-            at += 1;
-            n += 1;
+        w := rt_win_wide(3, raw_load(order + i * 8));
+        mut k = 0;
+        while k < w {
+            raw_store(block + (at + k) * 2, rt_win_unit(rt_win_wslot(3), k));
+            k += 1;
         }
-        raw_putbyte(block + at, 0);
-        at += 1;
+        raw_store(block + (at + w) * 2, 0);
+        at += w + 1;
         i += 1;
     }
-    raw_putbyte(block + at, 0);
+    raw_store(block + at * 2, 0);
     rt_free(order);
     return block;
 }
 // Runs `argv` and waits for it. `envp` is a NUL-terminated "NAME=VALUE" table that becomes the
-// child's whole environment, or 0 for the inherited one (CreateProcess with a NULL block). The child
-// gets this console's standard handles because dwFlags is 0, and CreateProcess searches PATH itself
+// child's whole environment, or 0 for the inherited one (CreateProcessW with a NULL block). The child
+// gets this console's standard handles because dwFlags is 0, and CreateProcessW searches PATH itself
 // when the first argument has no directory, so `paths` (built for the POSIX exec loop) is unused.
 // Same status convention as os-linux.grl: 0..255 exit code, 256+errno on failure.
 fn rt_spawn_wait(paths: u64, argv: u64, envp: u64) -> u64 {
     if raw_target() == 4 {
         // windows-aarch64: the ARM64 Win32 call path passes seven register arguments and
-        // CreateProcessA needs ten, so it is reported as unimplemented instead of mis-called.
+        // CreateProcessW needs ten, so it is reported as unimplemented instead of mis-called.
         return wrapping_sub(0, 38);
     }
-    mut size = 1;
+    mut units = 1;
     mut count = 0;
     while raw_load(argv + count * 8) != 0 {
-        p := raw_load(argv + count * 8);
-        mut n = 0;
-        while raw_byte(p + n) != 0 {
-            n += 1;
+        w := rt_win_wide(1, raw_load(argv + count * 8));
+        if rt_error(w) {
+            return 256 + wrapping_sub(0, w);
         }
-        size += n * 2 + 4;
+        // Quoting can at most double a unit and adds two quotes and a separating space.
+        units += w * 2 + 4;
         count += 1;
     }
-    line := rt_alloc(size);
+    line := rt_alloc(units * 2);
     mut at = 0;
     mut i = 0;
     while i < count {
         if i != 0 {
-            raw_putbyte(line + at, 32);
+            raw_store(line + at * 2, 32);
             at += 1;
         }
-        at = rt_win_quote(line, at, raw_load(argv + i * 8));
+        rt_win_wide(1, raw_load(argv + i * 8));
+        at = rt_win_quote_w(line, at, rt_win_wslot(1));
         i += 1;
     }
-    raw_putbyte(line + at, 0);
+    raw_store(line + at * 2, 0);
     mut block = 0;
     if envp != 0 {
         block = rt_win_env_block(envp);
+        if block == 18446744073709551615 {
+            rt_free(line);
+            return 256 + 22; // EINVAL: an environment entry is not UTF-8
+        }
     }
-    // STARTUPINFOA is 104 bytes on Win64 and PROCESS_INFORMATION 24; both zeroed, so no standard
+    // STARTUPINFOW is 104 bytes on Win64 and PROCESS_INFORMATION 24; both zeroed, so no standard
     // handle is overridden and no console is forced.
     startup := rt_alloc(128);
     info := rt_alloc(32);
@@ -893,8 +2008,15 @@ fn rt_spawn_wait(paths: u64, argv: u64, envp: u64) -> u64 {
         i += 8;
     }
     raw_store(startup, 104);
+    // CREATE_UNICODE_ENVIRONMENT: without it CreateProcessW reads a non-NULL block as ANSI bytes,
+    // which turns a UTF-16 environment into a one-letter name and an empty list. With a NULL block
+    // (inherit) the flag is ignored, so it is only set for ours.
+    mut flags = 0;
+    if block != 0 {
+        flags = 1024;
+    }
     mut result = 0;
-    started := raw_win32(CreateProcessA, 0, line, 0, 0, 0, 0, block, 0, startup, info);
+    started := raw_win32(CreateProcessW, 0, line, 0, 0, 0, flags, block, 0, startup, info);
     if started == 0 {
         result = 256 + wrapping_sub(0, rt_win_errno());
     } else {
@@ -920,49 +2042,70 @@ fn rt_spawn_wait(paths: u64, argv: u64, envp: u64) -> u64 {
     return result;
 }
 
-// Process setup for the PE entry: argv from GetCommandLineA, envp from GetEnvironmentStringsA.
-// Both live in untracked mappings so they do not count as user allocations at shutdown.
+// Process setup for the PE entry: argv from GetCommandLineW, envp from GetEnvironmentStringsW. Both
+// are UTF-16 at the OS boundary and UTF-8 above it, and both are copied into untracked mappings,
+// because they outlive every user allocation and must not count as one at shutdown.
 fn rt_os_init() -> u64 {
     // Grail strings are UTF-8, so the console is told to read and write UTF-8 rather than the
     // ANSI code page: without this every non-ASCII character printed through WriteFile arrives
     // as mojibake (cp1252 has no mapping for most of it).
     raw_win32(SetConsoleOutputCP, 65001);
     raw_win32(SetConsoleCP, 65001);
-    line := raw_win32(GetCommandLineA);
-    mut length = 0;
-    while raw_byte(line + length) != 0 {
-        length = length + 1;
+    arena := raw_map(131072);
+    if rt_error(arena) {
+        return 1;
     }
-    buf := raw_map(65536);
+    raw_store(raw_state() + 3600, arena);
+    // A Win32 command line is capped at 32767 units; at three bytes per unit the UTF-8 is under
+    // 96 KiB, and the table holds one word per argument.
+    buf := raw_map(131072);
     if rt_error(buf) {
         return 1;
     }
-    mut i = 0;
-    while i < length {
-        raw_putbyte(buf + i, raw_byte(line + i));
-        i = i + 1;
-    }
-    raw_putbyte(buf + length, 0);
     table := raw_map(4096);
     if rt_error(table) {
         return 1;
     }
-    raw_store(raw_state(), rt_win_split(buf, table));
+    line := raw_win32(GetCommandLineW);
+    if line == 0 {
+        return 1;
+    }
+    raw_store(raw_state(), rt_win_split_w(line, buf, table));
     raw_store(raw_state() + 8, table);
-    env := raw_win32(GetEnvironmentStringsA);
+    // The environment block is the OS's own memory and must be released with
+    // FreeEnvironmentStringsW, but envp has to outlive this call, so each entry is copied as UTF-8
+    // into a mapping of ours first. An entry whose text is not convertible is dropped: it can only
+    // be an unpaired surrogate, and a program cannot use such a name anyway.
+    env := raw_win32(GetEnvironmentStringsW);
     envtable := raw_map(8192);
     if rt_error(envtable) {
         return 1;
     }
+    envbuf := raw_map(262144);
+    if rt_error(envbuf) {
+        return 1;
+    }
     mut count = 0;
+    mut at = 0;
     mut p = env;
-    while (p != 0) & (raw_byte(p) != 0) {
-        raw_store(envtable + count * 8, p);
-        count = count + 1;
-        while raw_byte(p) != 0 {
-            p = p + 1;
+    while p != 0 {
+        units := rt_win_units(p);
+        if units == 0 {
+            p = 0;
+        } else {
+            if count < 1023 {
+                bytes := rt_win_utf8_of(envbuf + at, 262144 - at, p, units);
+                if rt_error(bytes) == 0 {
+                    raw_store(envtable + count * 8, envbuf + at);
+                    count = count + 1;
+                    at = at + bytes + 1;
+                }
+            }
+            p = p + (units + 1) * 2;
         }
-        p = p + 1;
+    }
+    if env != 0 {
+        raw_win32(FreeEnvironmentStringsW, env);
     }
     // `host::env("PWD")` is how the compiler reads the working directory - the site table trims
     // source paths with it, so a diagnostic names `compiler/native.grl` rather than an absolute
@@ -1369,3 +2512,4 @@ fn rt_os_complete(task: u64) -> u64 {
     }
     return rt_wake(task);
 }
+
