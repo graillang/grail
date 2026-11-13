@@ -106,7 +106,7 @@ fn rt_stack_overflow() -> u64 {
 fn rt_fail(kind: u64, a: u64, b: u64) -> u64 {
     t := rt_containable();
     if t != 0 {
-        return rt_contain_site(t, kind, a, b, rt_site_here(t + 208), 0);
+        return rt_contain_site(t, kind, a, b, rt_site_here(t + 200), 0);
     }
     if rt_abort_begin() == 0 {
         rt_abort_park();
@@ -168,9 +168,12 @@ fn rt_fail_site_full() -> u64 {
     return s;
 }
 // The innermost statement entry of the frame that failed, found through the same rbp walk the
-// report uses, and written through `scratch` (24 bytes: table start, table end, caller frame) so the
-// walk allocates nothing. A captured entry is static data: it stays valid long after the task's
-// stack is gone, which is what lets the join format the site later.
+// report uses, and written through `scratch` so the walk allocates nothing. `scratch` must be the
+// five words `rt_sites` writes - both tables' bounds and the caller's frame, 40 bytes - even though
+// the walk reads only the first three: the helper is emitted by the compiler, and one built before
+// the function table existed writes fewer, never more, so a caller that sizes its area from what
+// this walk reads is one table away from writing past it. A captured entry is static data: it stays
+// valid long after the task's stack is gone, which is what lets the join format the site later.
 fn rt_site_here(scratch: u64) -> u64 {
     helper := raw_load(raw_state() + 3400);
     if helper == 0 {
@@ -278,9 +281,9 @@ fn rt_contain_site(t: u64, kind: u64, a: u64, b: u64, site: u64, msg: u64) -> u6
     raw_store(t + 160, kind);
     raw_store(t + 168, a);
     raw_store(t + 176, b);
-    raw_store(t + 184, site);
+    // Bit 0 of the site word stays clear: what is stored is a statement-table entry, not a text.
+    raw_store(t + 184, site & 18446744073709551614);
     raw_store(t + 192, msg);
-    raw_store(t + 200, 0);
     return rt_contain_tail(t);
 }
 // The same, for a failure that already has its texts (a `join` inside a task re-raising a task's
@@ -289,9 +292,9 @@ fn rt_contain_text(t: u64, kind: u64, msg: u64, site: u64) -> u64 {
     raw_store(t + 160, kind);
     raw_store(t + 168, 0);
     raw_store(t + 176, 0);
-    raw_store(t + 184, site);
+    // Bit 0 marks the site word as an owned text, which is what the words are in this case.
+    raw_store(t + 184, site | 1);
     raw_store(t + 192, msg);
-    raw_store(t + 200, 1);
     return rt_contain_tail(t);
 }
 fn rt_contain_tail(t: u64) -> u64 {
@@ -3197,9 +3200,15 @@ fn rt_cancel(s: u64) -> u64 {
 }
 // The task record. Words 40-152 are listed at the scope functions below; the containment area is:
 //   160 failure kind (0 = the task did not fail)   168 a   176 b
-//   184 the failing statement's site-table entry (a static address) or, for a re-raised failure,
-//       its site text   192 message text (0 when the message is dictated by the kind)   200 1 when
-//       184/192 are already texts   208..232 scratch for the site walk
+//   184 the failing statement's site-table entry (a static address in 24-byte stride) or, for a
+//       re-raised failure, its owned site text - bit 0 says which, and costs no word, because a
+//       table entry is 8-byte aligned and an allocation is more so
+//   192 message text (0 when the message is dictated by the kind)
+//   200..240 the site walk's scratch: the FIVE words `rt_sites` writes (statement table start and
+//       end, caller frame, function table start and end). The walk reads three, but this area is
+//       sized by what the helper writes, never by what the walk reads: 240 bytes of payload and a
+//       16-byte block header are exactly one 256-byte size class, so a walk area one word short
+//       writes into the block that follows.
 // A failed task has no result: word 80 is never written and its dropper is never called.
 fn rt_task_spawn(s: u64, f: u64, item: u64, arity: u64, dropper: u64) -> u64 {
     // Word 152 holds the task's OS thread handle in thread-per-task mode (0 in green mode).
@@ -3319,9 +3328,9 @@ fn rt_task_message(t: u64) -> u64 {
 fn rt_task_site(t: u64) -> u64 {
     site := raw_load(t + 184);
     raw_store(t + 184, 0);
-    if raw_load(t + 200) != 0 {
-        // A re-raised failure already carries its site text.
-        return site;
+    if (site & 1) == 1 {
+        // A re-raised failure already carries its site text; bit 0 says so.
+        return site & 18446744073709551614;
     }
     return rt_site_text(site);
 }
@@ -3331,7 +3340,7 @@ fn rt_task_fail(text: u64) -> u64 {
     msg := rt_lit(raw_load(text), raw_load(wrapping_add(text, 8)));
     t := rt_containable();
     if t != 0 {
-        return rt_contain_site(t, 13, 0, 0, rt_site_here(t + 208), msg);
+        return rt_contain_site(t, 13, 0, 0, rt_site_here(t + 200), msg);
     }
     if rt_abort_begin() == 0 {
         rt_abort_park();
