@@ -68,7 +68,7 @@ for (const file of readdirSync(join(root, 'lib')).filter(f => f.endsWith('.grl')
   writeFileSync(join(stdSnapshot, file), readFileSync(join(root, 'lib', file)));
 }
 for (let i = 0; i < cases.length; i++) {
-  for (const field of ['files', 'modules', 'interfaceFiles']) if (cases[i][field]) cases[i][field] = cases[i][field].map((file, j) => {
+  for (const field of ['files', 'modules']) if (cases[i][field]) cases[i][field] = cases[i][field].map((file, j) => {
     const source = resolve(root, file);
     if (dirname(source) === join(root, 'lib')) return join(stdSnapshot, basename(source));
     const path = join(snapshot, `${i}-${field}-${j}-${basename(file)}`);
@@ -128,7 +128,11 @@ for (const [position, test] of cases.entries()) {
       // rejection is about.
       const modules = test.modules ?? [];
       assert.ok(modules.length !== 0, `${test.name}: an interface rejection needs module sources`);
-      const emit = execute(compiler, ['--target', target, '--emit-interface', ifaces, join(directory, 'emit.s'), ...modules, ...(test.interfaceFiles ?? []), runtime, osRuntime]);
+      // The interfaces come from the library modules alone: the entry may be the very thing the
+      // rejection is about, so it is not part of the emit set. `--interface` still wants an interface
+      // for the entry module, which is why a reject case's own entry is passed as source below and the
+      // emit set never covers it.
+      const emit = execute(compiler, ['--target', target, '--emit-interface', ifaces, join(directory, 'emit.s'), ...modules, runtime, osRuntime]);
       assert.equal(emit.status, 0, `${test.name}: emitting interfaces failed: ${emit.stdout}${emit.stderr}`);
       const viaInterface = execute(compiler, ['--target', target, '--interface', ifaces, join(directory, 'iface.s'), ...files, runtime, osRuntime]);
       assert.equal(viaInterface.status, 1, `${test.name}: the interface build must refuse it too: ${viaInterface.stdout}${viaInterface.stderr}`);
