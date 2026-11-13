@@ -29191,7 +29191,7 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
         k := ty_kind(&mut c, x.ty);
         if access == 2 {
             if k == 4 {
-                fail(&mut c, view("a string's bytes are immutable"));
+                refuse_string_bytes(&mut c);
             }
             if (k == 5) & (ty_mode(&mut c, x.ty) == 0) {
                 fail(&mut c, view("writing a byte needs a mutable byte view (&mut [u8])"));
@@ -30520,6 +30520,16 @@ fn chained_field_assignment<a>(c: (&a mut C)) -> unit {
     assignment_tail(&mut c, 0, base.t, base.ty, target, u64[1, fieldty], view(fname), record_ty);
     return ();
 }
+// Writing or mutably borrowing a string's bytes. A string literal is a `string` (read-only,
+// UTF-8-validated text), so `mut` on the binding makes the binding reassignable - the handle may
+// name a different string - and never makes the bytes writable. Rust's `let mut s = "x"` is the
+// same rule for `&'static str`. docs/design/string-literals.md records the choice.
+fn refuse_string_bytes<a>(c: (&a mut C)) -> unit {
+    fail(
+        &mut c,
+        view("a string's bytes are immutable: a string literal is read-only text, and `mut` on a binding makes the binding reassignable, not the bytes; copy them into a mutable byte vector to edit (`mut b: u8[] = s.copy()`)")
+    );
+}
 // Legacy vector/byte assignment evaluates RHS before parsing its mutable target.
 fn index_assignment<a>(c: (&a mut C)) -> unit {
     start := c.pos;
@@ -30624,6 +30634,14 @@ fn index_assignment<a>(c: (&a mut C)) -> unit {
         // Bytes: buf[i] = b stores the low byte of a u8/u64 value.
         if c.raw == 0 {
             if (k != 3) && ((k != 5) || (ty_mode(&mut c, x.ty) == 0)) {
+                if k == 4 {
+                    // A `string` is validated, immutable text: `mut` on the binding only makes the
+                    // binding reassignable, exactly as Rust's `let mut s: &'static str` does.
+                    refuse_string_bytes(&mut c);
+                }
+                if k == 5 {
+                    fail(&mut c, view("writing through a readonly view needs an exclusive byte view (&mut [u8])"));
+                }
                 fail(
                     &mut c,
                     view("index assignment needs a vector, bytes or a mutable byte view")
@@ -31572,10 +31590,8 @@ fn statement<a>(c: (&a mut C)) -> unit {
                 advance(&mut c);
                 ty := parse_type(&mut c);
                 // `x: T = v` and `x: T := v` are the same immutable typed binding; the mutable form
-                // is `mut x: T = v`, the same `=`.
-                if mutable != 0 {
-                    expect(&mut c, view("="));
-                } else if is(&mut c, view(":=")) {
+                // is `mut x: T = v`, and `mut x: T := v` is accepted as the same declaration.
+                if is(&mut c, view(":=")) {
                     advance(&mut c);
                 } else {
                     expect(&mut c, view("="));
@@ -31642,7 +31658,11 @@ fn statement<a>(c: (&a mut C)) -> unit {
         }
         name_at := c.pos - 1;
         if mutable != 0 {
-            expect(&mut c, view("="));
+            // `mut s = v` and `mut s := v` both declare a reassignable binding: `mut` says mutable,
+            // and either spelling of the initializer is read the same way.
+            if !eat(&mut c, view(":=")) {
+                expect(&mut c, view("="));
+            }
         } else {
             expect(&mut c, view(":="));
         }
