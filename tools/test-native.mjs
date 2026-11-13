@@ -128,7 +128,10 @@ for (const [position, test] of cases.entries()) {
       // rejection is about.
       const modules = test.modules ?? [];
       assert.ok(modules.length !== 0, `${test.name}: an interface rejection needs module sources`);
-      const emit = execute(compiler, ['--target', target, '--emit-interface', ifaces, join(directory, 'emit.s'), ...modules, ...(test.interfaceFiles ?? []), runtime, osRuntime]);
+      // The interface files come first: the first source after OUT.s is the entry of the emit run, and
+      // a reject case's own entry is the thing the rejection is about - so the interface is emitted
+      // from these files, which pull in the modules they use.
+      const emit = execute(compiler, ['--target', target, '--emit-interface', ifaces, join(directory, 'emit.s'), ...(test.interfaceFiles ?? []), ...modules, runtime, osRuntime]);
       assert.equal(emit.status, 0, `${test.name}: emitting interfaces failed: ${emit.stdout}${emit.stderr}`);
       const viaInterface = execute(compiler, ['--target', target, '--interface', ifaces, join(directory, 'iface.s'), ...files, runtime, osRuntime]);
       assert.equal(viaInterface.status, 1, `${test.name}: the interface build must refuse it too: ${viaInterface.stdout}${viaInterface.stderr}`);

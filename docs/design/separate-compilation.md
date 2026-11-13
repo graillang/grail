@@ -861,6 +861,43 @@ Consequences, stated rather than discovered:
 - the single-file build keeps cross-module inlining only where the optimizer knows no unit
   boundaries; it emits the same markers, so both shapes inline identically.
 
+### The frame constant, which was a latent miscompile
+
+The per-unit change found a real defect that had nothing to do with caching. A function's frame
+constant was `.F<label>`, minted from the same counter, and `.set` defines *one symbol per file*:
+
+```
+subq $.F1,%rsp        # this function's frame
+...
+.set .F1,656          # this function's size
+...
+.set .F1,80           # another function's size, same name
+```
+
+A single-file build whose label counter happened to give two functions the same `.F` name therefore
+had one function's frame size decide another function's displacements — silently, because the
+assembler resolves the symbol and the program merely addresses the wrong part of its frame. It was
+reachable before this stage (any program where two functions were minted the same frame number) and
+`--split` made it worse, because a part's `.set` lines are a subset and the last definition in the
+file can differ between the two shapes. `tools/split-test.mjs` caught it as a `.text` length
+difference between the split and single shapes for a generic-heavy program; the frames are now named
+in the unit's namespace too (`.F<unit>_<n>`), so a frame constant is unique per file in both shapes.
+`tools/cache-test.mjs` and `tools/split-test.mjs` both compare bytes, which is what made it visible.
+
+### Who must have an interface
+
+`--interface DIR` verifies the modules whose surface is on disk: the directory holds
+`<module>.iface`, or `interfaces.manifest` lists it (`iface_check_manifest` already refuses a listed
+file that has gone, so a deleted interface is still caught). A module compiled from its source in
+this build with no interface in the directory — the entry, and any module nothing else in the build
+depends on — is exempt, because nothing reads its surface and requiring one would mean a program
+could not be built against a directory that describes only what it depends on. `grail check
+--interface DIR` is what writes an entry's interface, for when something else will depend on it.
+`tests/native-cases.json` case `sep-entry-needs-no-interface` pins the difference: an entry compiled
+from source against a directory holding only its dependency's interface reaches the refusal the
+dependency's own interface justifies (a refinement the entry cannot prove), where requiring an
+interface for the entry would have refused the build for the wrong reason and before reading anything.
+
 ### What is still coupled, honestly
 
 The whole-program shape emits a generic specialisation into the part of the *module that asked for

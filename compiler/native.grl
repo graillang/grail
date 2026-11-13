@@ -36971,6 +36971,39 @@ fn iface_recorded_digest<a>(text: (&a u8[])) -> u8[] {
     }
     return u8[];
 }
+// Whether a module has to have an interface in `dir`. Two cases, and both are "its surface is on
+// disk": the directory holds `<module>.iface` (this build read it, or a previous one wrote it), or
+// the manifest lists it (`iface_check_manifest` refuses a listed file that is gone, so a deleted
+// interface is still caught). A module compiled from its source in this build with no interface in
+// the directory has no dependants inside the build - the entry is the usual one - and requiring one
+// would mean a program could not be built against a directory that describes only what it depends
+// on. `grail check --interface DIR` is what writes an entry's interface, when something else will
+// depend on it.
+fn iface_required<a, b, d>(c: (&a mut C), m: &b [u8], dir: &d [u8]) -> u64 {
+    file := iface_join(view(dir), view(m), view(".iface"));
+    if host::exists(view(file)) != 0 {
+        return 1;
+    }
+    manifest := iface_join(view(dir), view("interfaces"), view(".manifest"));
+    mut text = u8[]; 
+    if host::exists(view(manifest)) != 0 {
+        text = host::read_file(view(manifest));
+    }
+    lines := iface_lines(&text);
+    for i in lines.len() {
+        line := lines[i].copy();
+        if (line.len() <= m.len()) || (line[0] == 47) {
+            continue;
+        }
+        if line[m.len()] != 32 {
+            continue;
+        }
+        if span_has(view(line), 0, m.len(), view(m)) {
+            return 1;
+        }
+    }
+    return 0;
+}
 fn iface_verify_module<a>(c: (&a mut C), index: u64) -> unit {
     m := c.iface_list[index].module.copy();
     path := c.iface_list[index].path.copy();
@@ -37673,9 +37706,13 @@ pub fn main() -> u64 {
             check_interfaces(&mut c);
             validate_type_constraints(&mut c);
             if c.iface_verify != 0 {
+                dir := c.iface_dir.copy();
                 for j in c.iface_list.len() {
-                    if !same(view(c.iface_list[j].module), view("runtime")) {
-                        iface_verify_module(&mut c, j);
+                    m := c.iface_list[j].module.copy();
+                    if !same(view(m), view("runtime")) {
+                        if iface_required(&mut c, view(m), view(dir)) != 0 {
+                            iface_verify_module(&mut c, j);
+                        }
                     }
                 }
             }
