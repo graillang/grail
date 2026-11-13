@@ -195,6 +195,31 @@
   is how a buffer smaller than the helper writes is shown to be refused rather than corrupted.
   docs/design/runtime-abi.md, "What the compiler hands the runtime: a handshake that carries its
   length".
+- Fixed: a repeated parameter name and a repeated method name are refused. `fn f(a: u64, a: u64)`
+  bound `a` twice, so the first argument could never be read: `` `f` has two parameters named `a`:
+  rename the second, the first can never be read``, caret on the second and a label on the first. A
+  method declared twice on one type was reported as "declared twice in this module" with the caret
+  past the signature; it now says ``this type already has a method named `get`: rename one, or
+  remove it`` with the caret on the method name. One method name on two different types is still
+  fine (`diagx-same-method-two-types`). Pinned by `diagx-dup-parameter`, `diagx-dup-method-on-type`.
+- Fixed: an `extern "C"` callback cannot be generic. A lifetime parameter (`extern "C" fn cb<a>`) and
+  a type parameter (`extern "C" fn cb<T>`) were both accepted and quietly ignored, emitting a
+  function exported under a fixed symbol that C could not call: ``an `extern "C"` callback cannot
+  take a type parameter: `T` has no C representation``, naming the parameter, with a help line
+  offering the two ways out. Pinned by `diagx-extern-callback-type-parameter`,
+  `diagx-extern-callback-lifetime-parameter`, and `diagx-extern-callback-plain-ok` as the guard that
+  a concrete callback still compiles.
+- Fixed: a Rust-style tick before a name is diagnosed instead of being read as a character literal.
+  `extern "C" fn cb<'a>() -> &'a [u8]` used to abort the compiler on an assert; after the asserts
+  were removed it became ``a character literal holds exactly one character: `'a>() -> &'` has more``,
+  which is true of the token stream and useless to the reader. Grail lifetimes take no tick (`<a>`,
+  `&a`), so a quote followed by a name now gets its own token and one message that names it and both
+  readings: `` `'a` is not a character literal, and it does not close as one`` with ``for a character,
+  close it (`'a'`); a lifetime takes no tick in Grail (`<'a>` is `<a>`, `&'a u64` is `&a u64`)``. A
+  character literal that really is unfinished (`'ab'`, or a `'` at the end of the file) keeps its
+  own message.
+  Pinned by `diagx-tick-lifetime`, `diagx-char-literal-unclosed`, and
+  `diagx-lifetime-parameters-ok` as the guard that `<a>` / `&a` still parse.
 - Fixed: a duplicate declaration no longer compiles. Two `struct`/`enum` declarations under one
   name in a module, a repeated field in a record, a repeated variant in an enum, a second
   module-level `const`, and a `type` alias colliding with another alias or with a struct were all
