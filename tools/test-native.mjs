@@ -125,16 +125,22 @@ for (const [position, test] of cases.entries()) {
     if (test.interfaces) {
       const ifaces = join(directory, 'ifaces');
       // The interface comes from the library modules alone: the entry may be the very thing the
-      // rejection is about.
+      // rejection is about, so it cannot be what the emit run compiles. `interfaceFiles` is the
+      // stand-in entry for that run, and it changes the second leg too: a program whose own entry
+      // is refused has no `main.iface` to check it against, so that leg builds with `--use` - the
+      // entry from its source, the modules' declarations and generic bodies from the interfaces.
+      // `--interface DIR` is the verification mode: it compares every module given as source with
+      // its interface, the entry included, which is exactly the file that cannot be emitted here.
       const modules = test.modules ?? [];
       assert.ok(modules.length !== 0, `${test.name}: an interface rejection needs module sources`);
-      // The interface-producing entry comes first: the compiler reads the first source as the entry
-      // module (the one that may omit `module`), and every later file must declare one. A case's
-      // interface file is written as that entry - it exists to pull the modules in and emit their
-      // interfaces without instantiating the deferred template.
-      const emit = execute(compiler, ['--target', target, '--emit-interface', ifaces, join(directory, 'emit.s'), ...(test.interfaceFiles ?? []), ...modules, runtime, osRuntime]);
+      const stand = test.interfaceFiles ?? [];
+      const emit = execute(compiler, ['--target', target, '--emit-interface', ifaces, join(directory, 'emit.s'), ...stand, ...modules, runtime, osRuntime]);
       assert.equal(emit.status, 0, `${test.name}: emitting interfaces failed: ${emit.stdout}${emit.stderr}`);
-      const viaInterface = execute(compiler, ['--target', target, '--interface', ifaces, join(directory, 'iface.s'), ...files, runtime, osRuntime]);
+      const separate = stand.length !== 0;
+      const mode = separate ? ['--use', ifaces] : ['--interface', ifaces];
+      const entry = separate ? (test.files ?? []) : files;
+      assert.ok(entry.length !== 0, `${test.name}: an interface build needs an entry file`);
+      const viaInterface = execute(compiler, ['--target', target, ...mode, join(directory, 'iface.s'), ...entry, runtime, osRuntime]);
       assert.equal(viaInterface.status, 1, `${test.name}: the interface build must refuse it too: ${viaInterface.stdout}${viaInterface.stderr}`);
       for (const fragment of diagnostics) {
         assert.ok(`${viaInterface.stdout}${viaInterface.stderr}`.includes(fragment), `${test.name}: expected diagnostic ${fragment} from the interface build: ${viaInterface.stdout}${viaInterface.stderr}`);
