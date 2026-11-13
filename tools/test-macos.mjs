@@ -36,7 +36,23 @@ const libSystem = new Set([
   '_NSGetExecutablePath',
   '_access', '_clock_gettime', '_close', '___error', '_execve', '_exit', '_fork', '_getdirentries64',
   '_getpid', '_kill', '_mkdir', '_mmap', '_mprotect', '_munmap', '_nanosleep', '_open', '_pipe',
+  // The portable scheduler parks a worker on this thread's address with libsystem_pthread's
+  // private ulock entry points; they are real libSystem exports, so an object that calls them is
+  // not importing something the link cannot resolve.
+  '___ulock_wait', '___ulock_wake',
   '_poll', '_read', '_readlink', '_rmdir', '_sched_yield', '_sysconf', '_unlink', '_wait4', '_write',
+  // Called by the runtime now that files, processes and the reactor exist (stdutil, reactor).
+  '_dup2',
+  '_getcwd',
+  '_kevent',
+  '_kqueue',
+  '_lstat',
+  '_rename',
+  '_sigaction',
+  '_sigaltstack',
+  '_signal',
+  '_stat',
+  '_symlink',
 ]);
 const programs = [
   { name: 'hello', source: 'fn main() {\n    println("Hello, macOS!");\n}\n', literal: true },
