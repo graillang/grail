@@ -271,21 +271,29 @@ and function tables, `rt_sites`). Compare the merged `rt_fail`/`rt_task_spawn`/`
 against both parents (`git diff origin/gaps2-taskfail -- compiler/runtime.grl`,
 `git diff origin/gaps2-errs -- compiler/runtime.grl`).
 
-### Where the corruption comes from (narrowed)
+### What the corruption is (measured, not inferred)
 
-A hardware watchpoint on the block header 16 bytes before the first task record fires **at the entry
-of the second `rt_task_spawn` of the same scope**, with `%rdi` = the scope and `%rsi` = the task
-function - i.e. it is the *prologue of an ordinary call* spilling registers, not a stray
-`raw_store`. The records sit in a heap arena (`0x7ffff7df7020`, `0x7ffff7df7120`); the scope record
-is a megabyte away (`0x7ffff7ef7020`).
+A hardware watchpoint on the block header 16 bytes before the first record never fires: that record's
+header is fine (`size=0x100`, `kind=1` for a 240-byte request rounded to 256). The **second** record
+of the same scope is the bad one, and its header is already wrong the moment `rt_task_spawn`
+returns: `size=0x21f8a8`, `kind=1`. Nothing writes that header afterwards (a watchpoint on it stays
+silent through the crash).
 
-The reading that fits every observation: after the contained failure, the context that carries on
-executing has its stack pointer **inside that arena** - a recycled/discarded task stack - so the
-next call's register spills land on heap metadata. That explains all of it at once: the header
-becomes a text address (a saved return address), `--debug` survives (different frame layout and
-allocation order), the LLVM backend fails the same way (same runtime logic), and the abort appears
-only at `rt_scope_end`, where the corrupted size is finally read.
+`rt_alloc_unlocked` writes `block+0 = size` only on the **bump** path; a block taken from the
+per-size free list keeps whatever size word it had. `block+8` is written to 1 on both paths, so
+`kind` looks right even for a reused block. Therefore the bad `size` was written into that block
+**while it was free** - a use-after-free write into a freed block's header, 16 bytes before its old
+payload - and the next `rt_alloc(240)` handed it out with the stale word, which `rt_free_unlocked`
+then read: as `>= 512 KiB` it is treated as its own arena, the arena list does not contain it, and
+`rt_abort` fires.
 
-The place to look is therefore the resume path in `rt_contain_tail` / the scheduler: which context
-the joining thread continues on once `rt_os_ctx_leave(t)` has discarded the failing task's stack,
-and whether the joiner's saved context is restored before that mapping is recycled.
+Beware two hypotheses that the measurements rule out: the running stack is **not** inside the heap
+(`%rsp` is `0x7fffffffc940` at both spawns), and the word optimizer is not implicated (the LLVM
+backend fails identically, `--debug` does not).
+
+So the open question is precise: **who frees a block and then writes 16 bytes before the payload it
+used to point at**. The two branches that touched memory near there are this one (the containment
+record and its `t + 160..208` writes, `rt_contain_tail`, `rt_leak_exit`) and the errors branch
+(`rt_backtrace`'s capture and the site/function tables). Compare them with
+`git diff origin/gaps2-taskfail -- compiler/runtime.grl` and the same against `origin/gaps2-errs`,
+and check every `raw_store(x - 16, ...)`.
