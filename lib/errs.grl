@@ -1,0 +1,171 @@
+module errs;
+use io;
+use host;
+
+// ---- the standard error interface ---------------------------------------------------------------
+//
+// One method, because a message is what every error shape can answer on its own: a record holding
+// text, this module's chain, and the stdlib's own io::Error all implement it. Everything else about
+// an error - its typed origin, its context frames, its captured stack - is only known by the type
+// that carries it, so it is asked for on that type, not through the interface.
+pub interface Error {
+    // The error's own message, owned so an implementor that formats it can answer at all.
+    fn message(self: &Self) -> u8[];
+}
+
+// A message-carrying record: the shape a program's own error type takes when a message is all it
+// has to say. `Report::of` turns one into a chain.
+pub struct Message {
+    text: string
+}
+
+impl Message {
+    pub fn new<a>(text: &a [u8]) -> Message {
+        return Message { text: text.text() };
+    }
+    pub fn show(self: &Message) -> u8[] {
+        return self.text.copy();
+    }
+}
+
+impl Error for Message {
+    fn message(self: &Self) -> u8[] {
+        return self.text.copy();
+    }
+}
+
+// The stdlib's operating-system errors answer with the text `show` prints, so a caller that reports a
+// failure generically does not need to know which stdlib module produced it.
+impl Error for io::Error {
+    fn message(self: &Self) -> u8[] {
+        return self.show().copy();
+    }
+}
+
+// ---- the owned chain ----------------------------------------------------------------------------
+
+// What a report started from, when the layer that made it knew a stdlib failure. It is a typed
+// origin, not a generic cause: a caller that needs io::Error::is_not_found again still has it.
+pub enum Origin {
+    None,
+    Os(io::Error)
+}
+
+// A failure with its context chain and, when it was captured, the stack where it was created.
+// Everything it holds is owned: the root message, the context frames, the typed origin and the stack
+// text, so the chain can be returned up through any number of layers and is released with the value.
+pub struct Report {
+    message: string,
+    origin: Origin,
+    frames: u8[][],
+    stack: u8[]
+}
+
+impl Error for Report {
+    fn message(self: &Self) -> u8[] {
+        return self.message.copy();
+    }
+}
+
+// The message and nothing else: no context, no origin, no stack. This is the error path that
+// allocates one value, and it is the one to use where a failure is expected and cheap.
+pub fn report<a>(text: &a [u8]) -> Report {
+    return Report {
+        message: text.text(),
+        origin: Origin::None,
+        frames: u8[][],
+        stack: u8[]
+    };
+}
+// The same, capturing the stack where the error is created (host::backtrace). The capture costs one
+// formatted buffer and its own walk, so it is a call-site choice: nothing is captured unless the
+// caller asks, and a build that carries no tables captures no text at all.
+pub fn traced<a>(text: &a [u8]) -> Report {
+    return Report {
+        message: text.text(),
+        origin: Origin::None,
+        frames: u8[][],
+        stack: host::backtrace()
+    };
+}
+// An io::Error about `what` ("while opening /x"): the operation becomes the first context frame and
+// the error itself stays reachable through origin(). There is no implicit From, so this call is where
+// a layer chooses to convert.
+pub fn from_os<a>(e: io::Error, what: &a [u8]) -> Report {
+    mut frames = u8[][];
+    frames.push(what.copy());
+    return Report { message: e.show(), origin: Origin::Os(e), frames: frames, stack: u8[] };
+}
+// A message record becomes a chain with that message as its cause.
+pub fn of(msg: Message) -> Report {
+    return Report { message: msg.text, origin: Origin::None, frames: u8[][], stack: u8[] };
+}
+
+impl Report {
+    // One more context frame: the report is consumed and returned, so a chain is built by
+    // reassignment (`r = r.context(view("while parsing config"))`) and every frame it holds is owned.
+    pub fn context<a>(self: Report, text: &a [u8]) -> Report {
+        mut frames = self.frames;
+        frames.push(text.copy());
+        return Report {
+            message: self.message,
+            origin: self.origin,
+            frames: frames,
+            stack: self.stack
+        };
+    }
+    // How many context frames the report carries, not counting the cause.
+    pub fn depth(self: &Report) -> u64 {
+        return self.frames.len();
+    }
+    // The `index`th context frame, oldest first: frame(depth() - 1) is the outermost one. A frame is
+    // returned as a borrow of the owned text it is, not as a byte view: the checker does not let a
+    // view of a record's owned text outlive the borrow of the record it came from.
+    pub fn frame<a>(self: &a Report, index: u64) -> &a u8[] {
+        return &self.frames[index];
+    }
+    // The innermost cause: the message the chain ends at. It is a copy, because a view of owned text
+    // that lives in a record cannot be handed out with the record's own lifetime.
+    pub fn cause(self: &Report) -> u8[] {
+        return self.message.copy();
+    }
+    pub fn origin<a>(self: &a Report) -> &a Origin {
+        return &self.origin;
+    }
+    // The captured stack, empty when nothing was captured.
+    pub fn trace(self: &Report) -> u8[] {
+        return self.stack.copy();
+    }
+    // The whole chain on one line, outermost context first and the cause last, joined with ": ":
+    //   while loading app: while parsing config: while opening /x: not found
+    // The order is the nesting order, so reading left to right goes from the caller's framing to the
+    // failure itself, and the same report always prints the same text.
+    pub fn show(self: &Report) -> u8[] {
+        mut out = u8[];
+        mut i = self.frames.len();
+        while i > 0 {
+            i = i - 1;
+            part := &self.frames[i];
+            for b in part {
+                out.push(b);
+            }
+            out.push(58);
+            out.push(32);
+        }
+        for b in view(self.message) {
+            out.push(b);
+        }
+        return out;
+    }
+    // Write the chain to stderr, then the captured stack, one frame per line. A report built with
+    // `new` has no stack, so it prints its message alone rather than a heading for nothing.
+    pub fn to_stderr(self: &Report) {
+        mut line = self.show();
+        line.push(10);
+        host::write_fd(2, view(line));
+        if self.stack.len() != 0 {
+            host::write_fd(2, view(self.stack));
+        }
+        return ();
+    }
+}
