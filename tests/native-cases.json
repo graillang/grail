@@ -7759,5 +7759,74 @@
     "stdout": "before\n",
     "status": 134,
     "stderr": "error: stack overflow\n"
+  },
+  {
+    "name": "fx-effects-specialization-per-instance",
+    "source": "interface Store {\n    fn put(self: &Self, v: u64) -> u64;\n}\nstruct Quiet { n: u64 }\nstruct Loud { n: u64 }\nimpl Store for Quiet {\n    fn put(self: &Quiet, v: u64) -> u64 {\n        return self.n + v;\n    }\n}\nimpl Store for Loud {\n    fn put(self: &Loud, v: u64) -> u64 {\n        mut b = u64[];\n        b.push(v);\n        return b.len();\n    }\n}\nfn store_one<S: Store>(s: &S, v: u64) -> u64 {\n    return s.put(v);\n}\n@no_alloc\nfn quiet_path(q: &Quiet, v: u64) -> u64 {\n    return store_one<Quiet>(q, v);\n}\nfn main() -> u64 {\n    q := Quiet { n: 1 };\n    l := Loud { n: 3 };\n    println(\"{} {}\", quiet_path(&q, 2), store_one<Loud>(&l, 4));\n    return 0;\n}\n",
+    "stdout": "3 1\n",
+    "note": "one effect record per emitted body: `store_one<main::Loud>` allocates and `store_one<main::Quiet>` does not, and the `@no_alloc` caller of the quiet instance is accepted although both instances are in the program"
+  },
+  {
+    "name": "fx-effects-generic-claim-refused",
+    "source": "interface Store {\n    fn put(self: &Self, v: u64) -> u64;\n}\nstruct Loud { n: u64 }\nimpl Store for Loud {\n    fn put(self: &Loud, v: u64) -> u64 {\n        mut b = u64[];\n        b.push(v);\n        return b.len();\n    }\n}\n@no_alloc\nfn store_one<S: Store>(s: &S, v: u64) -> u64 {\n    return s.put(v);\n}\nfn main() -> u64 {\n    l := Loud { n: 3 };\n    println(\"{}\", store_one<Loud>(&l, 4));\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "`@no_alloc` function `store_one<main::Loud>` performs a heap allocation",
+      "it calls store_one<main::Loud> -> put -> rt_new -> rt_alloc"
+    ],
+    "note": "the claim on a generic is the obligation and each emitted instance has to prove it: before per-instance records this allocating instantiation was accepted, because the claim sat on the template's symbol and the template has no body. The refusal names the instance"
+  },
+  {
+    "name": "fx-effects-drop-glue-dyn-refused",
+    "source": "interface Speak {\n    fn speak(self: &Self) -> u64;\n}\nstruct Talker { fd: u64 }\nimpl Speak for Talker {\n    fn speak(self: &Talker) -> u64 {\n        return self.fd;\n    }\n}\nimpl Drop for Talker {\n    fn drop(self: &mut Talker) {\n        mut b = u64[];\n        b.push(self.fd);\n        println(\"dropped {}\", b.len());\n    }\n}\n@no_alloc\nfn sink(s: dyn Speak) -> u64 {\n    return 0;\n}\nfn main() -> u64 {\n    s: dyn Speak = Talker { fd: 7 };\n    println(\"{}\", sink(s));\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "`@no_alloc` function `sink` performs a heap allocation",
+      " -> drop -> rt_new -> rt_alloc"
+    ],
+    "note": "dropping a `dyn` value runs the vtable's drop slot; the compiler built that vtable from recorded entries, so the slot is resolved to the concrete drop helper and the user `Drop` that allocates is found - the old text scan stopped at `call *%rax`"
+  },
+  {
+    "name": "fx-effects-drop-glue-accepted",
+    "source": "interface Speak {\n    fn speak(self: &Self) -> u64;\n}\nstruct Marker { tag: u64 }\nstruct Star { tag: u64 }\nimpl Speak for Marker {\n    fn speak(self: &Marker) -> u64 {\n        return self.tag;\n    }\n}\nimpl Speak for Star {\n    fn speak(self: &Star) -> u64 {\n        return self.tag;\n    }\n}\nimpl Drop for Marker {\n    fn drop(self: &mut Marker) {\n        self.tag = 7;\n    }\n}\nimpl Drop for Star {\n    fn drop(self: &mut Star) {\n        self.tag = 8;\n    }\n}\n@no_alloc\nfn sink(s: dyn Speak) -> u64 {\n    return 0;\n}\n@no_alloc\nfn sink_all(v: (dyn Speak)[]) -> u64 {\n    return 0;\n}\nfn main() -> u64 {\n    s: dyn Speak = Marker { tag: 2 };\n    println(\"{}\", sink(s));\n    mut all = (dyn Speak)[];\n    all.push(Marker { tag: 3 });\n    all.push(Star { tag: 4 });\n    println(\"{}\", sink_all(all));\n    return 0;\n}\n",
+    "stdout": "0\n0\n",
+    "note": "the same dispatch is a real edge, not a blanket unknown: two concrete types with a `Drop` that neither allocates nor fails are accepted both through a vector's element glue and through the vtable's drop slot (two helpers behind one `call *%rax`)"
+  },
+  {
+    "name": "fx-effects-indirect-call-refused",
+    "source": "@no_alloc\nfn apply_step(f: Fn(u64) -> u64, x: u64) -> u64 {\n    return f(x);\n}\nfn main() -> u64 {\n    println(\"{}\", apply_step(|x: u64| -> u64 x + 1, 4));\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "`@no_alloc` function `apply_step` performs a heap allocation: it makes an indirect call the compiler cannot follow",
+    "note": "an indirect call in user code names nothing, so it counts as both allocating and failing; the refusal points at the call and says why"
+  },
+  {
+    "name": "fx-effects-prover-removed-check",
+    "source": "@no_panic\nfn pick(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn main() -> u64 {\n    v := u64[1, 2, 3];\n    println(\"{}\", pick(&v, 1));\n    return 0;\n}\n",
+    "stdout": "2\n",
+    "note": "the prover removes the bounds check the refinement implies, so the body emits no call at all and `@no_panic` is proved; the same access without the refinement is `effects-no-panic-index-refused`, which is the half of the pair that fails"
+  },
+  {
+    "name": "fx-effects-interface-proof",
+    "files": [
+      "tests/interfaces/fx_eff_lib_user.grl"
+    ],
+    "modules": [
+      "tests/interfaces/fx_eff_lib.grl"
+    ],
+    "interfaces": true,
+    "stdout": "6\n",
+    "note": "the definition module's `effects 1 0 0` row is what an importing module trusts: the caller's claim is accepted from the interface alone, and the interface build runs the same program"
+  },
+  {
+    "name": "fx-effects-interface-absent-row-refused",
+    "files": [
+      "tests/interfaces/fx_eff_plain_user.grl"
+    ],
+    "modules": [
+      "tests/interfaces/fx_eff_plain.grl"
+    ],
+    "reject": true,
+    "diagnostic": "`@no_alloc` function `mine` performs a heap allocation",
+    "note": "no claim in the definition module means no `effects` row for it, so an importer cannot trust the callee and its own claim is refused; `fx-effects-interface-proof` is the half where the row is present, and `tools/interface-test.mjs` asserts both the row's presence and that a removed row is refused by the manifest"
   }
 ]

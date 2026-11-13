@@ -887,6 +887,46 @@ report(
   `${naming.symbols} content-addressed symbols, identical across runs`,
 );
 
+// ---- (h) checked effects travel, and only when they were claimed -----------------
+// An `effects` row is the definition module's own proof of an `@no_alloc`/`@no_panic` claim: an
+// importer trusts it instead of re-deriving it. Three claims, on real compiles:
+//   1. a claimed function publishes `effects 1 0 0`, and building the importer against the
+//      interface accepts the claim;
+//   2. a function that claims nothing publishes no row, so no importer can trust it;
+//   3. a row edited out is refused by the manifest rather than silently honoured as "proved".
+function proveEffectsTravel() {
+  const directory = join(work, 'effects');
+  mkdirSync(directory, { recursive: true });
+  const entry = join(root, 'tests/interfaces/fx_eff_lib_user.grl');
+  const lib = join(root, 'tests/interfaces/fx_eff_lib.grl');
+  const plain = join(root, 'tests/interfaces/fx_eff_plain.grl');
+  const ifaces = join(directory, 'ifaces');
+  mkdirSync(ifaces, { recursive: true });
+  const files = [entry, lib, runtime, platform];
+  const emit = compile(files, join(directory, 'emit'), ['--emit-interface', ifaces]);
+  assert.equal(emit.status, 0, `effects: the claimed program does not compile\n${emit.output}`);
+  const claimed = readFileSync(join(ifaces, 'fx_eff_lib.iface'), 'utf8');
+  assert.match(claimed, /^effects 1 0 0$/m, 'effects: the claim did not travel in the interface');
+  const viaInterface = compile(files, join(directory, 'via'), ['--interface', ifaces]);
+  assert.equal(viaInterface.status, 0, `effects: an interface build refused the claim its own interface records\n${viaInterface.output}`);
+  const plainIfaces = join(directory, 'plain');
+  mkdirSync(plainIfaces, { recursive: true });
+  const plainEmit = compile([plain, runtime, platform], join(directory, 'plain_emit'), ['--emit-interface', plainIfaces]);
+  assert.equal(plainEmit.status, 0, `effects: the unclaimed module does not compile\n${plainEmit.output}`);
+  assert.ok(
+    !/^effects /m.test(readFileSync(join(plainIfaces, 'fx_eff_plain.iface'), 'utf8')),
+    'effects: an unclaimed function published an `effects` row',
+  );
+  writeFileSync(join(ifaces, 'fx_eff_lib.iface'), claimed.replace(/^effects 1 0 0\n/m, ''));
+  const tampered = compile(files, join(directory, 'tampered'), ['--interface', ifaces]);
+  assert.equal(tampered.status, 1, 'effects: an interface whose `effects` row was removed was accepted');
+  assert.match(tampered.output, /does not match the manifest/, `effects: the refusal does not name the manifest\n${tampered.output}`);
+  return 'recorded when claimed, absent when not, refused once edited';
+}
+
+const effects = proveEffectsTravel();
+report('checked effects travel in an interface, and only when claimed', effects);
+
 const corpus = proveCorpus();
 report('corpus agrees with source builds', `${corpus} programs (interface build, verify build and source build agree)` + (full ? ' - full corpus' : ''));
 

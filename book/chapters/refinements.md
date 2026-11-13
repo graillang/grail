@@ -139,7 +139,21 @@ index it has proved in bounds reaches `get`'s proved entry and passes; one that 
 because the call goes through the check. Overflow is a failure too: `@no_panic` arithmetic either
 cannot overflow from the facts the prover has, or is written with the wrapping operations.
 
-A program that claims an effect is compiled whole, because the proof needs every body. Indirect calls
-in user code (a function value, a `dyn` method) are unknown and refused under both attributes; the
-compiler's own dispatch (a vector dropping its elements, a vtable's drop slot) is followed through
-the helpers it can reach, not through the call itself.
+A program that claims an effect is compiled whole, because the proof needs every body. The facts are
+recorded as each statement is emitted, not read back out of the assembly, so a check the prover
+removed is not in the graph at all - that is what makes `@no_panic` exactly as strong as the prover.
+
+Indirect calls in user code (a function value, a `dyn` method) are unknown and refused under both
+attributes. The compiler's own dispatch is followed instead: a record's or a vector's drop helper
+calls the field's or the element's helper directly, and a `dyn` value's drop is resolved through the
+vtable to the drop helper of every concrete type that vtable can hold, because the compiler built
+that vtable itself.
+
+One record per emitted body means a generic is judged per instantiation. A `@no_alloc` function that
+only reaches a quiet instance of a generic is accepted even when another instance of the same generic
+allocates, and a claim on the generic itself is checked for every instance that is emitted - the
+refusal names it:
+
+```
+error: `@no_alloc` function `fill<main::File>` performs a heap allocation: it calls fill<main::File> -> rt_push -> rt_grow
+```
