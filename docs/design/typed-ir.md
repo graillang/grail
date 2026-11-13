@@ -631,6 +631,11 @@ vector-fact-on-a-descriptor abort rather than corrupt a length, exercised by
 
 ### Implemented: the range fact (F3)
 
+The native backend reads the same question from the source instead of the stream - the facts the
+refinement prover already collects at each access - in [native-range-facts.md](native-range-facts.md),
+which also records what that leaves behind (a join from a clamped bound, a length floor a push
+does not drop, unchecked byte stores).
+
 The lever is in `compiler/llvm.grl` and it is the lifter's own: the front end's stream is unchanged,
 `optimize.grl` and `machine.grl` are untouched, the word stream of all five benchmarks is
 byte-identical to the F1 branch's, and the native backend emits exactly what it emitted before. What

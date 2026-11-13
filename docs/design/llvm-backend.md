@@ -452,3 +452,6 @@ front-end job, for the same reason as F1.
 
 LLVM does not change Grail's semantics: overflow and bounds checks, ownership checks and the
 deterministic float rules all stay.
+
+*Stage 3 on the native backend*: the same facts, read from the source at each access rather than
+from the word stream, are in [native-range-facts.md](native-range-facts.md).
