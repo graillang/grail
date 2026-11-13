@@ -22,6 +22,11 @@ fn digit(c: u64) -> bool {
 fn whitespace(c: u64) -> bool {
     return (c == 32) || (c == 9) || (c == 10) || (c == 12) || (c == 13);
 }
+// What may follow a tick-prefixed name and still make it a lifetime rather than a character literal
+// that never closed: `>` `,` `)` ` ` `&` `[` `|` `;` and a line break.
+fn lifetime_stop(c: u64) -> bool {
+    return (c == 62) || (c == 44) || (c == 41) || (c == 32) || (c == 38) || (c == 91) || (c == 124) || (c == 59) || (c == 10);
+}
 fn punctuation(c: u64) -> bool {
     return (c == 40)
         || (c == 41)
@@ -180,20 +185,51 @@ pub fn tokenize<a>(source: &a [u8]) -> Token<a>[] {
                     i = i + 1;
                     form = 1;
                 } else {
-                    // `'ab'`: stop at the closing quote on this line so the span the compiler quotes
-                    // is the literal, not the rest of the file.
+                    // `<'a>` / `&'a u64`: one quote and then a name, with no quote closing it.
+                    // Grail's lifetimes take no tick (`<a>`, `&a`), so this is a mistake of its own,
+                    // not a character literal, and it gets a token of its own (997) when a delimiter
+                    // follows the name.
                     mut stop = i;
-                    while (stop < size) & (source[stop] != 10) {
-                        if source[stop] == 39 {
-                            i = stop + 1;
-                            form = 2;
-                            break;
+                    mut name_end = 0;
+                    body_ch := source[start + 1];
+                    if letter(body_ch) || (body_ch == 95) {
+                        if stop < size {
+                            if !lifetime_stop(source[stop]) {
+                                while stop < size {
+                                    if !letter(source[stop]) && !digit(source[stop]) {
+                                        break;
+                                    }
+                                    stop = stop + 1;
+                                }
+                            }
+                            if stop < size {
+                                if lifetime_stop(source[stop]) {
+                                    name_end = stop;
+                                }
+                            }
                         }
-                        stop = stop + 1;
+                    }
+                    if name_end != 0 {
+                        kind = 997;
+                        i = name_end;
+                    } else {
+                        // `'ab'`: stop at the closing quote on this line so the span the compiler
+                        // quotes is the literal, not the rest of the file.
+                        mut q = i;
+                        while (q < size) & (source[q] != 10) {
+                            if source[q] == 39 {
+                                i = q + 1;
+                                form = 2;
+                                break;
+                            }
+                            q = q + 1;
+                        }
                     }
                 }
             }
-            if form != 1 {
+            // 997 already answered this quote (a tick-prefixed name); only a quote that really is
+            // an unfinished character literal becomes 998, and only then does it swallow the run.
+            if (form != 1) & (kind != 997) {
                 kind = 998;
                 if form == 0 {
                     i = size;

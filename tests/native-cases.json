@@ -9136,9 +9136,10 @@
     "source": "fn main() {\n    c := 'a;\n}\n",
     "reject": true,
     "diagnostic": [
-      "unclosed character literal: add the closing `'`"
+      "`'a` is not a character literal, and it does not close as one",
+      "for a character, close it (`'a'`)"
     ],
-    "note": "a character literal that runs to the end of the line is refused, not aborted"
+    "note": "a `'` followed by a name is reported once, naming the quote and both readings: a character missing its closing quote, or a Rust-style lifetime"
   },
   {
     "name": "diagx-string-literal-unclosed",
@@ -9172,5 +9173,66 @@
       "the type `u64` appears twice in this union, so no value could be told apart: wrap one of them in a struct"
     ],
     "note": "a union is a type in Grail, not a declaration, so `A | A` is the duplicate to refuse; it named no member before"
+  },
+  {
+    "name": "diagx-dup-parameter",
+    "source": "fn f(a: u64, a: u64) -> u64 {\n    return a;\n}\nfn main() { println(f(1, 2)); }\n",
+    "reject": true,
+    "diagnostic": [
+      "`f` has two parameters named `a`: rename the second, the first can never be read",
+      "the first one is here"
+    ],
+    "note": "a repeated parameter name silently shadowed the first argument for the whole body; caret on the second, label on the first"
+  },
+  {
+    "name": "diagx-dup-method-on-type",
+    "source": "struct P { x: u64 }\nimpl P {\n    fn get(self: P) -> u64 { return self.x; }\n    fn get(self: P) -> u64 { return 2; }\n}\nfn main() { p := P { x: 1 }; println(p.get()); }\n",
+    "reject": true,
+    "diagnostic": [
+      "this type already has a method named `get`: rename one, or remove it"
+    ],
+    "note": "a repeated method was reported as \"declared twice in this module\" with the caret past the signature"
+  },
+  {
+    "name": "diagx-same-method-two-types",
+    "source": "struct A { x: u64 }\nstruct B { y: u64 }\nimpl A { fn get(self: A) -> u64 { return self.x; } }\nimpl B { fn get(self: B) -> u64 { return self.y; } }\nfn main() { a := A { x: 1 }; b := B { y: 2 }; println(a.get() + b.get()); }\n",
+    "stdout": "3\n",
+    "note": "guard: one method name on two types is not a duplicate"
+  },
+  {
+    "name": "diagx-extern-callback-type-parameter",
+    "source": "extern \"C\" fn cb<T>(x: u64) -> u64 {\n    return x;\n}\nfn main() { println(1); }\n",
+    "reject": true,
+    "diagnostic": "an `extern \"C\"` callback cannot take a type parameter: `T` has no C representation",
+    "note": "a generic parameter on a C callback was accepted and silently ignored, emitting a function C could not call"
+  },
+  {
+    "name": "diagx-extern-callback-lifetime-parameter",
+    "source": "extern \"C\" fn cb<a>(x: u64) -> u64 {\n    return x;\n}\nfn main() { println(1); }\n",
+    "reject": true,
+    "diagnostic": "an `extern \"C\"` callback cannot take a lifetime parameter: `a` has no C representation",
+    "note": "the Grail-spelled lifetime parameter is refused too, naming it"
+  },
+  {
+    "name": "diagx-tick-lifetime",
+    "source": "extern \"C\" fn cb<'a>() -> &'a [u8] {\n    return \"x\";\n}\nfn main() { println(1); }\n",
+    "reject": true,
+    "diagnostic": [
+      "`'a` is not a character literal, and it does not close as one",
+      "a lifetime takes no tick in Grail"
+    ],
+    "note": "Rust-style `<'a>` used to abort the compiler on an assert; it is now named, with the Grail spelling in the help"
+  },
+  {
+    "name": "diagx-extern-callback-plain-ok",
+    "source": "extern \"C\" fn cb(x: u64) -> u64 {\n    return x + 1;\n}\nfn main() { println(1); }\n",
+    "stdout": "1\n",
+    "note": "guard: a concrete C callback still compiles"
+  },
+  {
+    "name": "diagx-lifetime-parameters-ok",
+    "source": "fn first<a>(v: &a u64[]) -> &a u64 {\n    return &v[0];\n}\nfn main() { x := u64[1]; println(*first(&x)); }\n",
+    "stdout": "1\n",
+    "note": "guard: Grail lifetimes take no tick, and `<a>` / `&a` still parse after the tick token was added"
   }
 ]

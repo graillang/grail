@@ -6019,6 +6019,39 @@ fn refuse_duplicate_constant<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8], 
     }
     return ();
 }
+// A parameter list naming one binding twice: the second shadows the first for the whole body, so the
+// first argument can never be read.
+fn duplicate_param_fail<a, b, d>(c: (&a mut C), function: &b [u8], param: &d [u8], at: u64) -> unit {
+    mut msg = copy_bytes(view("`"));
+    push_bytes(&mut msg, view(function));
+    push_bytes(&mut msg, view("` has two parameters named `"));
+    push_bytes(&mut msg, view(param));
+    push_bytes(&mut msg, view("`: rename the second, the first can never be read"));
+    exchange(&mut c.pos, at);
+    fail(&mut c, view(msg));
+}
+// Two methods with one name on one type: the second is not reachable through `receiver.name`, and
+// "declared twice in this module" is the wrong sentence for something that is not in the module.
+fn duplicate_method_fail<a, b>(c: (&a mut C), name: &b [u8], at: u64) -> unit {
+    mut msg = copy_bytes(view("this type already has a method named `"));
+    push_bytes(&mut msg, view(name));
+    push_bytes(&mut msg, view("`: rename one, or remove it"));
+    exchange(&mut c.pos, at);
+    fail(&mut c, view(msg));
+}
+// A C callback is exported under a fixed symbol with the C ABI: a generic parameter has no
+// representation there. A lifetime (`a`) and a type parameter (`T`) used to be accepted and quietly
+// ignored, which emitted a function C could not call.
+fn ffi_callback_concrete<a, b, d>(c: (&a mut C), kind: &b [u8], name: &d [u8], at: u64) -> unit {
+    mut msg = copy_bytes(view("an `extern \"C\"` callback cannot take a "));
+    push_bytes(&mut msg, view(kind));
+    push_bytes(&mut msg, view(": `"));
+    push_bytes(&mut msg, view(name));
+    push_bytes(&mut msg, view("` has no C representation"));
+    diag_help(&mut c, view("give the exported function a concrete signature C can call, or keep the generic a normal `fn` and call it from the callback"));
+    exchange(&mut c.pos, at);
+    fail(&mut c, view(msg));
+}
 // Two fields (or, for an enum, two variants) with one name: the second is unreachable through a
 // `.name`, so it is refused rather than laid out behind the first.
 fn duplicate_field_fail<a, b, d>(c: (&a mut C), owner: &b [u8], field: &d [u8], is_enum: u64, at: u64) -> unit {
@@ -8276,6 +8309,14 @@ fn file_path<a>(c: (&a mut C), index: u64) -> u8[] {
 fn fail_literal<a>(c: (&a mut C), at: u64, kind: u64) -> unit {
     exchange(&mut c.pos, at);
     text := tok_text(&mut c, at);
+    if kind == 997 {
+        // `<'a>`, `&'a`: a tick-prefixed name where Grail writes the name alone.
+        mut msg = copy_bytes(view("`"));
+        push_bytes(&mut msg, view(text));
+        push_bytes(&mut msg, view("` is not a character literal, and it does not close as one"));
+        diag_help(&mut c, view("for a character, close it (`'a'`); a lifetime takes no tick in Grail (`<'a>` is `<a>`, `&'a u64` is `&a u64`)"));
+        fail(&mut c, view(msg));
+    }
     if kind == 998 {
         if 2 <= text.len() {
             if text[text.len() - 1] == 39 {
@@ -8350,7 +8391,7 @@ fn load_file<a>(c: (&a mut C), index: u64) -> unit {
     exchange(&mut c.pos, 0);
     for i in c.toks.len() {
         k := c.toks[i].kind;
-        if (k == 999) || (k == 995) || (k == 996) || (k == 998) {
+        if (k == 999) || (k == 995) || (k == 996) || (k == 997) || (k == 998) {
             exchange(&mut c.pos, i);
             exchange(&mut c.file, index);
             if k != 999 {
@@ -13428,6 +13469,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     c.cur_name = name.copy();
     c.cur_file = c.file;
     c.cur_pos = position;
+    mut at_generics = c.pos;
     lifetime_parameters(&mut c);
     exchange(&mut c.input_regions, u64[]);
     exchange(&mut c.receiver_region, 0);
@@ -13441,6 +13483,22 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     }
     typecount := c.tnames.len();
     regioncount := c.rnames.len();
+    if c.pending_ext == 2 {
+        mut at_generic = at_generics;
+        if 0 < at_generic {
+            if kind_at(&mut c, at_generic) == 60 {
+                at_generic = at_generic + 1;
+            }
+        }
+        if regioncount != 0 {
+            first := c.rnames[0].copy();
+            ffi_callback_concrete(&mut c, view("lifetime parameter"), view(first), at_generic);
+        }
+        if typecount != 0 {
+            first := c.tnames[0].copy();
+            ffi_callback_concrete(&mut c, view("type parameter"), view(first), at_generic);
+        }
+    }
     if (pass == 3) & (typecount != 0) {
         while kind(&mut c) != 123 {
             advance(&mut c);
@@ -13530,10 +13588,25 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     mut count = 0;
     mut ppreds = Pred[];
     mut pnames = u8[][];
+    // Where each parameter was declared, so a repeated name can label the first one.
+    mut pspots = u64[];
     expect(&mut c, view("("));
     if !eat(&mut c, view(")")) {
         while true {
+            mut at_param = c.pos;
             p := ident(&mut c);
+            mut dup_at = 0;
+            for i in pnames.len() {
+                if same(view(pnames[i]), view(p)) {
+                    dup_at = pspots[i];
+                }
+            }
+            if dup_at != 0 {
+                diag_label(&mut c, dup_at, view("the first one is here"));
+                mut fname = c.cur_name.copy();
+                duplicate_param_fail(&mut c, view(fname), view(p), at_param);
+            }
+            pspots.push(at_param);
             expect(&mut c, view(":"));
             if ffi_byval_ahead(&mut c) {
                 fail(
@@ -13597,6 +13670,13 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     exchange(&mut c.result, ret);
     if pass == 2 {
         if find_func(&mut c, view(m), view(name)) != 0 {
+            // The name token sits right after `fn`, so the caret lands on the declaration itself
+            // rather than on whatever the signature ended with.
+            mut at_fn = position + 1;
+            if (c.current_impl != 0) || (c.inherent != 0) {
+                duplicate_method_fail(&mut c, view(name), at_fn);
+            }
+            exchange(&mut c.pos, at_fn);
             fail(&mut c, view(duplicate_msg(&mut c, view(name))));
         }
         if export != 0 {
