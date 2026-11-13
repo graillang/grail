@@ -344,6 +344,7 @@ enum Toml {
 }
 struct TomlEntry {
     key: u8[],
+    line: u64,
     value: Toml
 }
 struct TomlTable {
@@ -382,8 +383,8 @@ fn toml_has<a, b>(doc: (&a TomlDoc), ti: u64, key: &b [u8]) -> bool {
     }
     return false;
 }
-fn toml_put(doc: (&a mut TomlDoc), ti: u64, key: u8[], value: Toml) {
-    entry := TomlEntry { key: key, value: value };
+fn toml_put(doc: (&a mut TomlDoc), ti: u64, key: u8[], line: u64, value: Toml) {
+    entry := TomlEntry { key: key, line: line, value: value };
     slot := &mut doc.tables[ti];
     slot.entries.push(entry);
 }
@@ -715,7 +716,7 @@ fn toml_inline<a, b>(text: &a [u8], cur: (&b mut Cur)) -> TomlEntry[] |? Err {
                 return err(cur.line, copyb(view("duplicate key in an inline table")));
             }
         }
-        entry := TomlEntry { key: key, value: value };
+        entry := TomlEntry { key: key, line: cur.line, value: value };
         out.push(entry);
         toml_skip(text, &mut cur);
         if cur.pos >= text.len() {
@@ -790,7 +791,7 @@ pub fn toml_parse<a>(text: &a [u8]) -> TomlDoc |? Err {
                 head := catb(view("duplicate key "), view(key));
                 return err(ln, head);
             }
-            toml_put(&mut doc, current, key, value);
+            toml_put(&mut doc, current, key, ln, value);
         }
     }
     return doc;
@@ -1298,4 +1299,1622 @@ pub fn semver_match<a, b>(version: &a [u8], requirement: &b [u8]) -> u8[] {
             return catb(view("error: "), view(err_text(&e)));
         }
     }
+}
+
+// ---- JSON (sections 4 and 6.2) ----
+// The lockfile and every index line are JSON. One reader and one writer, both strict: an index
+// line with a field this does not understand is ignored, but malformed JSON, a duplicate key or a
+// number that is not an integer is refused with the byte offset.
+enum Json {
+    JNull,
+    JBool(bool),
+    JInt(i64),
+    JStr(u8[]),
+    JArr(Json[]),
+    JObj(JsonMember[])
+}
+struct JsonMember {
+    key: u8[],
+    value: Json
+}
+struct JsonErr {
+    offset: u64,
+    message: u8[]
+}
+struct JCursor {
+    text_at: u64,
+    size: u64
+}
+fn jerr(offset: u64, message: u8[]) -> JsonErr {
+    return JsonErr { offset: offset, message: message };
+}
+fn json_err_text(e: (&a JsonErr)) -> u8[] {
+    n := dec(e.offset);
+    head := catb(view("byte "), view(n));
+    return catb(view(catb(view(head), view(": "))), view(e.message));
+}
+fn json_skip<a, b>(text: &a [u8], cur: (&b mut JCursor)) {
+    while cur.text_at < cur.size {
+        c := text[cur.text_at];
+        if (c == ' ') || (c == '\t') || (c == '\n') || (c == '\r') {
+            cur.text_at += 1;
+        } else {
+            break;
+        }
+    }
+}
+fn json_literal<a, b>(text: &a [u8], cur: (&b mut JCursor), word: &d [u8]) -> unit |? JsonErr {
+    if cur.size < cur.text_at + word.len() {
+        return jerr(cur.text_at, copyb(view("unexpected end of input")));
+    }
+    for i in word.len() {
+        if text[cur.text_at + i] != word[i] {
+            return jerr(cur.text_at, catb(view("expected <"), view(catb(view(word), view(">")))));
+        }
+    }
+    cur.text_at += word.len();
+    return ();
+}
+fn json_hex4<a>(text: &a [u8], at: u64) -> u64 {
+    mut code: u64 = 0;
+    for i in 4 {
+        c := text[at + i];
+        d := hex_value(c);
+        if d == NO_INDEX {
+            return NO_INDEX;
+        }
+        code = code * 16 + d;
+    }
+    return code;
+}
+fn json_string<a, b>(text: &a [u8], cur: (&b mut JCursor)) -> u8[] |? JsonErr {
+    cur.text_at += 1;
+    mut out = u8[];
+    while true {
+        if cur.size <= cur.text_at {
+            return jerr(cur.text_at, copyb(view("unterminated string")));
+        }
+        c := text[cur.text_at];
+        if c == '"' {
+            cur.text_at += 1;
+            return out;
+        }
+        if c < 32 {
+            return jerr(cur.text_at, copyb(view("raw control character in a string")));
+        }
+        if c == '\\' {
+            cur.text_at += 1;
+            if cur.size <= cur.text_at {
+                return jerr(cur.text_at, copyb(view("unterminated escape")));
+            }
+            e := text[cur.text_at];
+            cur.text_at += 1;
+            if e == 'n' {
+                out.push(u8(10));
+            } else {
+                if e == 't' {
+                    out.push(u8(9));
+                } else {
+                    if e == 'r' {
+                        out.push(u8(13));
+                    } else {
+                        if e == 'b' {
+                            out.push(u8(8));
+                        } else {
+                            if e == 'f' {
+                                out.push(u8(12));
+                            } else {
+                                if (e == '"') || (e == '\\') || (e == '/') {
+                                    out.push(u8(e));
+                                } else {
+                                    if e == 'u' {
+                                        if cur.size < cur.text_at + 4 {
+                                            return jerr(cur.text_at, copyb(view("truncated \\u escape")));
+                                        }
+                                        code := json_hex4(text, cur.text_at);
+                                        if code == NO_INDEX {
+                                            return jerr(cur.text_at, copyb(view("\\u escape needs four hex digits")));
+                                        }
+                                        cur.text_at += 4;
+                                        if (code >= 55296) & (code <= 57343) {
+                                            return jerr(cur.text_at, copyb(view("surrogate escapes are not supported")));
+                                        }
+                                        piece := utf8_of(code);
+                                        pushb(&mut out, view(piece));
+                                    } else {
+                                        return jerr(cur.text_at, copyb(view("unsupported escape sequence")));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            out.push(u8(c));
+            cur.text_at += 1;
+        }
+    }
+    return out;
+}
+fn json_number<a, b>(text: &a [u8], cur: (&b mut JCursor)) -> i64 |? JsonErr {
+    start := cur.text_at;
+    mut negative = false;
+    if text[cur.text_at] == '-' {
+        negative = true;
+        cur.text_at += 1;
+    }
+    while cur.text_at < cur.size {
+        if is_digit(text[cur.text_at]) {
+            cur.text_at += 1;
+        } else {
+            break;
+        }
+    }
+    if cur.text_at == start + u64(negative) {
+        return jerr(start, copyb(view("expected a number")));
+    }
+    if cur.text_at < cur.size {
+        c := text[cur.text_at];
+        if (c == '.') || (c == 'e') || (c == 'E') {
+            return jerr(cur.text_at, copyb(view("only integer numbers are accepted here (no fraction or exponent)")));
+        }
+    }
+    mut v: u64 = 0;
+    mut i = start + u64(negative);
+    while i < cur.text_at {
+        v = v * 10 + u64(text[i] - '0');
+        i += 1;
+    }
+    if negative {
+        return 0i64 - i64(v);
+    }
+    return i64(v);
+}
+fn json_value<a, b>(text: &a [u8], cur: (&b mut JCursor)) -> Json |? JsonErr {
+    json_skip(text, &mut cur);
+    if cur.size <= cur.text_at {
+        return jerr(cur.text_at, copyb(view("unexpected end of input")));
+    }
+    c := text[cur.text_at];
+    if c == '{' {
+        cur.text_at += 1;
+        mut members = JsonMember[];
+        json_skip(text, &mut cur);
+        if (cur.text_at < cur.size) && (text[cur.text_at] == '}') {
+            cur.text_at += 1;
+            return Json::JObj(members);
+        }
+        while true {
+            json_skip(text, &mut cur);
+            if (cur.text_at >= cur.size) || (text[cur.text_at] != '"') {
+                return jerr(cur.text_at, copyb(view("expected a quoted key")));
+            }
+            key := json_string(text, &mut cur)?;
+            json_skip(text, &mut cur);
+            if (cur.text_at >= cur.size) || (text[cur.text_at] != ':') {
+                return jerr(cur.text_at, copyb(view("expected ':' after a key")));
+            }
+            cur.text_at += 1;
+            value := json_value(text, &mut cur)?;
+            for i in members.len() {
+                m := &members[i];
+                if eqb(view(m.key), view(key)) {
+                    return jerr(cur.text_at, catb(view("duplicate key <"), view(catb(view(key), view(">")))));
+                }
+            }
+            members.push(JsonMember { key: key, value: value });
+            json_skip(text, &mut cur);
+            if cur.text_at >= cur.size {
+                return jerr(cur.text_at, copyb(view("unterminated object")));
+            }
+            if text[cur.text_at] == ',' {
+                cur.text_at += 1;
+            } else {
+                if text[cur.text_at] == '}' {
+                    cur.text_at += 1;
+                    return Json::JObj(members);
+                }
+                return jerr(cur.text_at, copyb(view("expected ',' or '}' in an object")));
+            }
+        }
+    }
+    if c == '[' {
+        cur.text_at += 1;
+        mut items = Json[];
+        json_skip(text, &mut cur);
+        if (cur.text_at < cur.size) && (text[cur.text_at] == ']') {
+            cur.text_at += 1;
+            return Json::JArr(items);
+        }
+        while true {
+            value := json_value(text, &mut cur)?;
+            items.push(value);
+            json_skip(text, &mut cur);
+            if cur.text_at >= cur.size {
+                return jerr(cur.text_at, copyb(view("unterminated array")));
+            }
+            if text[cur.text_at] == ',' {
+                cur.text_at += 1;
+            } else {
+                if text[cur.text_at] == ']' {
+                    cur.text_at += 1;
+                    return Json::JArr(items);
+                }
+                return jerr(cur.text_at, copyb(view("expected ',' or ']' in an array")));
+            }
+        }
+    }
+    if c == '"' {
+        s := json_string(text, &mut cur)?;
+        return Json::JStr(s);
+    }
+    if c == 't' {
+        json_literal(text, &mut cur, view("true"))?;
+        return Json::JBool(true);
+    }
+    if c == 'f' {
+        json_literal(text, &mut cur, view("false"))?;
+        return Json::JBool(false);
+    }
+    if c == 'n' {
+        json_literal(text, &mut cur, view("null"))?;
+        return Json::JNull;
+    }
+    if (c == '-') || is_digit(c) {
+        n := json_number(text, &mut cur)?;
+        return Json::JInt(n);
+    }
+    return jerr(cur.text_at, copyb(view("unexpected byte")));
+}
+pub fn json_parse<a>(text: &a [u8]) -> Json |? JsonErr {
+    mut cur = JCursor { text_at: 0, size: text.len() };
+    value := json_value(text, &mut cur)?;
+    json_skip(text, &mut cur);
+    if cur.text_at < cur.size {
+        return jerr(cur.text_at, copyb(view("trailing bytes after the value")));
+    }
+    return value;
+}
+fn json_quote<a, b>(out: (&a mut u8[]), s: &b [u8]) {
+    out.push('"');
+    for i in s.len() {
+        c := s[i];
+        if c == '"' {
+            out.push('\\');
+            out.push('"');
+        } else {
+            if c == '\\' {
+                out.push('\\');
+                out.push('\\');
+            } else {
+                if c == 10 {
+                    out.push('\\');
+                    out.push('n');
+                } else {
+                    if c == 9 {
+                        out.push('\\');
+                        out.push('t');
+                    } else {
+                        if c == 13 {
+                            out.push('\\');
+                            out.push('r');
+                        } else {
+                            if c < 32 {
+                                out.push('\\');
+                                out.push('u');
+                                out.push('0');
+                                out.push('0');
+                                hi := (u64(c) >> 4) & 15;
+                                lo := u64(c) & 15;
+                                out.push(hex_digit(hi));
+                                out.push(hex_digit(lo));
+                            } else {
+                                out.push(c);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out.push('"');
+}
+fn hex_digit(v: u64) -> u64 {
+    if v < 10 {
+        return 48 + v;
+    }
+    return 97 + v - 10;
+}
+fn json_indent<a>(out: (&a mut u8[]), depth: u64) {
+    for i in depth {
+        out.push(' ');
+        out.push(' ');
+    }
+}
+// The writer, in the one shape the lockfile has: two-space indentation, one member or element per
+// line, `[]`/`{}` for empty, LF line endings. Determinism is the caller's ordering plus this.
+pub fn json_text(v: (&a Json)) -> u8[] {
+    mut out = u8[];
+    json_write(&mut out, v, 0);
+    out.push('\n');
+    return out;
+}
+fn json_write<a>(out: (&a mut u8[]), v: (&b Json), depth: u64) {
+    match v {
+        JNull => {
+            pushb(out, view("null"));
+        },
+        JBool(b) => {
+            if b {
+                pushb(out, view("true"));
+            } else {
+                pushb(out, view("false"));
+            }
+        },
+        JInt(n) => {
+            pushb(out, view(dec_signed(n)));
+        },
+        JStr(s) => {
+            json_quote(out, s);
+        },
+        JArr(items) => {
+            if items.len() == 0 {
+                pushb(out, view("[]"));
+                return ();
+            }
+            out.push('[');
+            out.push('\n');
+            for i in items.len() {
+                json_indent(out, depth + 1);
+                json_write(out, &items[i], depth + 1);
+                if i + 1 < items.len() {
+                    out.push(',');
+                }
+                out.push('\n');
+            }
+            json_indent(out, depth);
+            out.push(']');
+        },
+        JObj(members) => {
+            if members.len() == 0 {
+                pushb(out, view("{}"));
+                return ();
+            }
+            out.push('{');
+            out.push('\n');
+            for i in members.len() {
+                json_indent(out, depth + 1);
+                json_quote(out, members[i].key);
+                out.push(':');
+                out.push(' ');
+                json_write(out, &members[i].value, depth + 1);
+                if i + 1 < members.len() {
+                    out.push(',');
+                }
+                out.push('\n');
+            }
+            json_indent(out, depth);
+            out.push('}');
+        }
+    }
+}
+// Lookup helpers. There is no Option in the compiler's module set (its `?` sugar belongs to the
+// standard library), so absence is reported two ways: `jhas` answers yes/no, and `jfield` answers
+// the receiver itself when the key is absent — a value no caller asked for, which fails every
+// kind test and so is caught by the same check as a wrong kind.
+fn jhas<a, b>(v: (&a Json), key: &b [u8]) -> bool {
+    match v {
+        JObj(members) => {
+            for i in members.len() {
+                m := &members[i];
+                if eqb(view(m.key), view(key)) {
+                    return true;
+                }
+            }
+            return false;
+        },
+        _ => {
+            return false;
+        }
+    }
+}
+fn jfield<a, b>(v: (&a Json), key: &b [u8]) -> (&a Json) {
+    match v {
+        JObj(members) => {
+            for i in members.len() {
+                m := &members[i];
+                if eqb(view(m.key), view(key)) {
+                    return &m.value;
+                }
+            }
+            return v;
+        },
+        _ => {
+            return v;
+        }
+    }
+}
+// The string a value holds, or "" for any other kind.
+fn jstr_of<a>(v: (&a Json)) -> u8[] {
+    match v {
+        JStr(s) => {
+            return copyb(view(s));
+        },
+        _ => {
+            return u8[];
+        }
+    }
+}
+fn jis_str<a>(v: (&a Json)) -> bool {
+    match v {
+        JStr(s) => {
+            return true;
+        },
+        _ => {
+            return false;
+        }
+    }
+}
+fn jbool_of<a>(v: (&a Json)) -> bool {
+    match v {
+        JBool(b) => {
+            return b;
+        },
+        _ => {
+            return false;
+        }
+    }
+}
+fn jint_of<a>(v: (&a Json)) -> i64 {
+    match v {
+        JInt(n) => {
+            return n;
+        },
+        _ => {
+            return 0i64;
+        }
+    }
+}
+// Number of elements; 0 for any other kind (including the `jfield` fallback).
+fn jlen<a>(v: (&a Json)) -> u64 {
+    match v {
+        JArr(items) => {
+            return items.len();
+        },
+        JObj(members) => {
+            return members.len();
+        },
+        _ => {
+            return 0;
+        }
+    }
+}
+// Element `i` of an array; the receiver itself when out of range or not an array, which callers
+// avoid by iterating `jlen` first.
+fn jat<a>(v: (&a Json), i: u64) -> (&a Json) {
+    match v {
+        JArr(items) => {
+            if i < items.len() {
+                return &items[i];
+            }
+            return v;
+        },
+        _ => {
+            return v;
+        }
+    }
+}
+
+// `pkg-json-*` regression cases: parse and re-emit, or the refusal.
+pub fn json_roundtrip<a>(text: &a [u8]) -> u8[] {
+    match json_parse(view(text)) {
+        v: Json => {
+            return json_text(&v);
+        },
+        e: JsonErr => {
+            return catb(view("error: "), view(json_err_text(&e)));
+        }
+    }
+}
+
+// ---- the manifest (section 2) ----
+const KIND_REGISTRY: u64 = 0;
+const KIND_PATH: u64 = 1;
+const KIND_GIT: u64 = 2;
+const PIN_NONE: u64 = 0;
+const PIN_REV: u64 = 1;
+const PIN_TAG: u64 = 2;
+const PIN_BRANCH: u64 = 3;
+struct Dep {
+    name: u8[],
+    kind: u64,
+    req: u8[],
+    path: u8[],
+    url: u8[],
+    pin_kind: u64,
+    pin: u8[],
+    dev: u64,
+    line: u64
+}
+struct Manifest {
+    name: u8[],
+    version: u8[],
+    grl_version: u8[],
+    entry: u8[],
+    registry: u8[],
+    deps: Dep[],
+    text: u8[]
+}
+fn dep_new(name: u8[], kind: u64, req: u8[], path: u8[], url: u8[], pin_kind: u64, pin: u8[], dev: u64, line: u64) -> Dep {
+    return Dep {
+        name: name,
+        kind: kind,
+        req: req,
+        path: path,
+        url: url,
+        pin_kind: pin_kind,
+        pin: pin,
+        dev: dev,
+        line: line,
+    };
+}
+// Names are the key dependencies use and the file name in the index: one spelling, always.
+fn name_ok<a>(name: &a [u8]) -> bool {
+    if name.len() == 0 {
+        return false;
+    }
+    if name.len() > 64 {
+        return false;
+    }
+    c := name[0];
+    if (c < 'a') || (c > 'z') {
+        return false;
+    }
+    for i in name.len() {
+        ch := name[i];
+        if !is_digit(ch) && (ch != '_') && (ch != '-') && !((ch >= 'a') & (ch <= 'z')) {
+            return false;
+        }
+    }
+    return true;
+}
+fn is_table<a>(v: (&a Toml)) -> bool {
+    match v {
+        TTab(entries) => {
+            return true;
+        },
+        _ => {
+            return false;
+        }
+    }
+}
+fn find_entry<a, b>(entries: (&a TomlEntry[]), key: &b [u8]) -> u64 {
+    for i in entries.len() {
+        e := &entries[i];
+        if eqb(view(e.key), view(key)) {
+            return i;
+        }
+    }
+    return NO_INDEX;
+}
+// The [package] keys this understands; anything else is an error rather than a silent no-op.
+fn package_key_ok<a>(key: &a [u8]) -> bool {
+    if eqb(view(key), view("name")) {
+        return true;
+    }
+    if eqb(view(key), view("version")) {
+        return true;
+    }
+    if eqb(view(key), view("grl-version")) {
+        return true;
+    }
+    if eqb(view(key), view("entry")) {
+        return true;
+    }
+    if eqb(view(key), view("description")) {
+        return true;
+    }
+    if eqb(view(key), view("license")) {
+        return true;
+    }
+    if eqb(view(key), view("repository")) {
+        return true;
+    }
+    return false;
+}
+// A dependency written as an inline table: exactly one source, at most one pin (section 2.1).
+fn dep_from_inline<a>(name: &a [u8], entries: (&b TomlEntry[]), line: u64, dev: u64) -> Dep |? Err {
+    mut kind: u64 = 99;
+    mut req = u8[];
+    mut path = u8[];
+    mut url = u8[];
+    mut pin_kind: u64 = PIN_NONE;
+    mut pin = u8[];
+    for i in entries.len() {
+        e := &entries[i];
+        if eqb(view(e.key), view("path")) {
+            if kind != 99 {
+                return err(e.line, copyb(view("a dependency has exactly one source (path, git or version)")));
+            }
+            ev := &e.value;
+            match ev {
+                TStr(s) => {
+                    kind = KIND_PATH;
+                    path = copyb(view(s));
+                },
+                _ => {
+                    return err(e.line, copyb(view("path must be a string")));
+                }
+            }
+        } else {
+            if eqb(view(e.key), view("git")) {
+                if kind != 99 {
+                    return err(e.line, copyb(view("a dependency has exactly one source (path, git or version)")));
+                }
+                ev := &e.value;
+            match ev {
+                    TStr(s) => {
+                        kind = KIND_GIT;
+                        url = copyb(view(s));
+                    },
+                    _ => {
+                        return err(e.line, copyb(view("git must be a string")));
+                    }
+                }
+            } else {
+                if eqb(view(e.key), view("version")) {
+                    ev := &e.value;
+            match ev {
+                        TStr(s) => {
+                            req = copyb(view(s));
+                        },
+                        _ => {
+                            return err(e.line, copyb(view("version must be a string")));
+                        }
+                    }
+                } else {
+                    if eqb(view(e.key), view("rev")) || eqb(view(e.key), view("tag")) || eqb(view(e.key), view("branch")) {
+                        if pin_kind != PIN_NONE {
+                            return err(e.line, copyb(view("a git dependency pins at most one of rev, tag and branch")));
+                        }
+                        if eqb(view(e.key), view("rev")) {
+                            pin_kind = PIN_REV;
+                        } else {
+                            if eqb(view(e.key), view("tag")) {
+                                pin_kind = PIN_TAG;
+                            } else {
+                                pin_kind = PIN_BRANCH;
+                            }
+                        }
+                        ev := &e.value;
+            match ev {
+                            TStr(s) => {
+                                pin = copyb(view(s));
+                            },
+                            _ => {
+                                return err(e.line, copyb(view("rev, tag and branch must be strings")));
+                            }
+                        }
+                    } else {
+                        return err(
+                            e.line,
+                            catb(view("unknown dependency key <"), view(catb(view(e.key), view("> (path, git, version, rev, tag, branch)"))))
+                        );
+                    }
+                }
+            }
+        }
+    }
+    if kind == 99 {
+        if req.len() != 0 {
+            kind = KIND_REGISTRY;
+        } else {
+            return err(line, catb(view("dependency <"), view(catb(view(name), view("> names no source")))));
+        }
+    }
+    if (kind != KIND_GIT) & (pin_kind != PIN_NONE) {
+        return err(line, copyb(view("rev, tag and branch only apply to a git dependency")));
+    }
+    if (kind == KIND_REGISTRY) & (req.len() == 0) {
+        return err(line, copyb(view("a registry dependency needs a version requirement")));
+    }
+    if (kind == KIND_PATH) & (path.len() == 0) {
+        return err(line, copyb(view("a path dependency needs a directory")));
+    }
+    if (kind == KIND_GIT) & (url.len() == 0) {
+        return err(line, copyb(view("a git dependency needs a URL")));
+    }
+    return dep_new(copyb(view(name)), kind, req, path, url, pin_kind, pin, dev, line);
+}
+fn dep_from_entry<a>(e: (&a TomlEntry), dev: u64) -> Dep |? Err {
+    name := copyb(view(e.key));
+    v := &e.value;
+    match v {
+        TStr(s) => {
+            if !name_ok(view(name)) {
+                return err(e.line, catb(view("invalid package name <"), view(catb(view(name), view(">")))));
+            }
+            return dep_new(name, KIND_REGISTRY, copyb(view(s)), u8[], u8[], PIN_NONE, u8[], dev, e.line);
+        },
+        TTab(entries) => {
+            if !name_ok(view(name)) {
+                return err(e.line, catb(view("invalid package name <"), view(catb(view(name), view(">")))));
+            }
+            return dep_from_inline(&name, &entries, e.line, dev)?;
+        },
+        _ => {
+            return err(e.line, catb(view("dependency <"), view(catb(view(name), view("> must be a version string or an inline table")))));
+        }
+    }
+}
+fn dependency_table<a>(doc: (&a TomlDoc), path: &b [u8], dev: u64, out: (&c mut Dep[])) -> unit |? Err {
+    ti := toml_table_index(doc, view(path));
+    if ti == NO_INDEX {
+        return ();
+    }
+    t := &doc.tables[ti];
+    for i in t.entries.len() {
+        d := dep_from_entry(&t.entries[i], dev)?;
+        out.push(d);
+    }
+    return ();
+}
+pub fn manifest_parse<a>(text: &a [u8]) -> Manifest |? Err {
+    doc := toml_parse(view(text))?;
+    // The root table holds no keys: a manifest is tables only.
+    root := &doc.tables[0];
+    if root.entries.len() != 0 {
+        e := &root.entries[0];
+        return err(e.line, catb(view("top-level key <"), view(catb(view(e.key), view("> is not part of a manifest (did you mean [package]?)")))));
+    }
+    // Exactly the tables this understands, each at most once (toml_parse already refuses a repeat).
+    for i in doc.tables.len() {
+        t := &doc.tables[i];
+        if t.path.len() == 0 {
+            continue;
+        }
+        if eqb(view(t.path), view("package")) || eqb(view(t.path), view("dependencies")) || eqb(view(t.path), view("dev-dependencies")) || eqb(view(t.path), view("registry")) {
+            continue;
+        }
+        if eqb(view(t.path), view("workspace")) {
+            return err(t.line, copyb(view("workspaces are not implemented (docs/design/package-manager.md section 2.6)")));
+        }
+        return err(t.line, catb(view("unknown table ["), view(catb(view(t.path), view("]")))));
+    }
+    pi := toml_table_index(&doc, view("package"));
+    if pi == NO_INDEX {
+        return err(0, copyb(view("a manifest needs a [package] table")));
+    }
+    pkg := &doc.tables[pi];
+    mut name = u8[];
+    mut version = u8[];
+    mut grl_version = u8[];
+    mut entry = u8[];
+    for i in pkg.entries.len() {
+        e := &pkg.entries[i];
+        if !package_key_ok(view(e.key)) {
+            return err(e.line, catb(view("unknown [package] key <"), view(catb(view(e.key), view(">")))));
+        }
+        if eqb(view(e.key), view("name")) || eqb(view(e.key), view("version")) || eqb(view(e.key), view("grl-version")) || eqb(view(e.key), view("entry")) {
+            ev := &e.value;
+            match ev {
+                TStr(s) => {
+                    if eqb(view(e.key), view("name")) {
+                        name = copyb(view(s));
+                    } else {
+                        if eqb(view(e.key), view("version")) {
+                            version = copyb(view(s));
+                        } else {
+                            if eqb(view(e.key), view("grl-version")) {
+                                grl_version = copyb(view(s));
+                            } else {
+                                entry = copyb(view(s));
+                            }
+                        }
+                    }
+                },
+                _ => {
+                    return err(e.line, catb(view("[package] "), view(catb(view(e.key), view(" must be a string")))));
+                }
+            }
+        }
+    }
+    if name.len() == 0 {
+        return err(pkg.line, copyb(view("[package] needs a name")));
+    }
+    if !name_ok(view(name)) {
+        return err(pkg.line, catb(view("invalid package name <"), view(catb(view(name), view("> (lowercase letters, digits, '_' and '-', starting with a letter)")))));
+    }
+    if version.len() == 0 {
+        return err(pkg.line, catb(view("[package] "), view(catb(view(name), view(" needs a version")))));
+    }
+    match version_parse(view(version)) {
+        v: Ver => {
+            // The parsed form is what the resolver compares; nothing more to check here.
+        },
+        e: Err => {
+            return err(pkg.line, catb(view("[package] version: "), view(e.message)));
+        }
+    }
+    if grl_version.len() != 0 {
+        match requirement_parse(view(grl_version)) {
+            r: Req => {
+            },
+            e: Err => {
+                return err(pkg.line, catb(view("[package] grl-version: "), view(e.message)));
+            }
+        }
+    }
+    if entry.len() == 0 {
+        entry = copyb(view("src/main.grl"));
+    }
+    mut registry = u8[];
+    ri := toml_table_index(&doc, view("registry"));
+    if ri != NO_INDEX {
+        t := &doc.tables[ri];
+        for i in t.entries.len() {
+            e := &t.entries[i];
+            if !eqb(view(e.key), view("index")) {
+                return err(e.line, catb(view("unknown [registry] key <"), view(catb(view(e.key), view("> (index)")))));
+            }
+            ev := &e.value;
+            match ev {
+                TStr(s) => {
+                    registry = copyb(view(s));
+                },
+                _ => {
+                    return err(e.line, copyb(view("[registry] index must be a string")));
+                }
+            }
+        }
+    }
+    mut deps = Dep[];
+    dependency_table(&doc, view("dependencies"), 0, &mut deps)?;
+    dependency_table(&doc, view("dev-dependencies"), 1, &mut deps)?;
+    // A name may not be required twice, not even once normally and once for tests: the resolver
+    // has one version per name, so two entries could never disagree.
+    for i in deps.len() {
+        for j in deps.len() {
+            if i < j {
+                a := &deps[i];
+                b := &deps[j];
+                if eqb(view(a.name), view(b.name)) {
+                    return err(b.line, catb(view("dependency <"), view(catb(view(b.name), view("> is listed twice")))));
+                }
+            }
+        }
+    }
+    return Manifest {
+        name: name,
+        version: version,
+        grl_version: grl_version,
+        entry: entry,
+        registry: registry,
+        deps: deps,
+        text: copyb(view(text)),
+    };
+}
+// `pkg-manifest-*` regression cases: the parsed manifest as one line per fact, or the refusal.
+pub fn manifest_report<a>(text: &a [u8]) -> u8[] {
+    match manifest_parse(view(text)) {
+        m: Manifest => {
+            mut out = u8[];
+            pushb(&mut out, view("name "));
+            pushb(&mut out, view(m.name));
+            out.push('\n');
+            pushb(&mut out, view("version "));
+            pushb(&mut out, view(m.version));
+            out.push('\n');
+            pushb(&mut out, view("entry "));
+            pushb(&mut out, view(m.entry));
+            out.push('\n');
+            if m.grl_version.len() != 0 {
+                pushb(&mut out, view("grl-version "));
+                pushb(&mut out, view(m.grl_version));
+                out.push('\n');
+            }
+            if m.registry.len() != 0 {
+                pushb(&mut out, view("registry "));
+                pushb(&mut out, view(m.registry));
+                out.push('\n');
+            }
+            for i in m.deps.len() {
+                d := &m.deps[i];
+                pushb(&mut out, view("dep "));
+                pushb(&mut out, view(d.name));
+                if d.dev != 0 {
+                    pushb(&mut out, view(" dev"));
+                }
+                if d.kind == KIND_PATH {
+                    pushb(&mut out, view(" path "));
+                    pushb(&mut out, view(d.path));
+                } else {
+                    if d.kind == KIND_GIT {
+                        pushb(&mut out, view(" git "));
+                        pushb(&mut out, view(d.url));
+                        if d.pin_kind == PIN_REV {
+                            pushb(&mut out, view(" rev "));
+                            pushb(&mut out, view(d.pin));
+                        } else {
+                            if d.pin_kind == PIN_TAG {
+                                pushb(&mut out, view(" tag "));
+                                pushb(&mut out, view(d.pin));
+                            } else {
+                                if d.pin_kind == PIN_BRANCH {
+                                    pushb(&mut out, view(" branch "));
+                                    pushb(&mut out, view(d.pin));
+                                }
+                            }
+                        }
+                    } else {
+                        pushb(&mut out, view(" req "));
+                        pushb(&mut out, view(d.req));
+                    }
+                }
+                out.push('\n');
+            }
+            return out;
+        },
+        e: Err => {
+            return catb(view("error: "), view(err_text(&e)));
+        }
+    }
+}
+
+// ---- the resolver (section 3) ----
+// Unification: one version per name, every requirement on that name satisfied by it. The engine
+// here is pure — it never reads a file — and reports what it needs through `wants` (see
+// `engine_advance`), so the same code resolves a real project and a text-specified test graph.
+const NEED_NONE: u64 = 0;
+const NEED_CANDIDATES: u64 = 1;
+const NEED_ERROR: u64 = 2;
+struct Edge {
+    name: u8[],
+    req: u8[],
+    from: u8[],
+    kind: u64,
+    text: u8[],
+    pin_kind: u64,
+    pin: u8[],
+    dev: u64
+}
+struct Cand {
+    name: u8[],
+    version: u8[],
+    kind: u64,
+    text: u8[],
+    rev: u8[],
+    tarball: u8[],
+    deps: Edge[],
+    yanked: u64
+}
+struct Pick {
+    name: u8[],
+    cand: u64,
+    preferred: u8[],
+    loaded: u64,
+    from: u8[]
+}
+struct Want {
+    name: u8[],
+    kind: u64,
+    text: u8[],
+    pin_kind: u64,
+    pin: u8[]
+}
+struct Engine {
+    roots: Edge[],
+    locked: u8[][],
+    locked_versions: u8[][],
+    cands: Cand[],
+    edges: Edge[],
+    picks: Pick[],
+    wants: Want[],
+    error: u8[]
+}
+fn edge_new(name: u8[], req: u8[], from: u8[], kind: u64, text: u8[], pin_kind: u64, pin: u8[], dev: u64) -> Edge {
+    return Edge { name: name, req: req, from: from, kind: kind, text: text, pin_kind: pin_kind, pin: pin, dev: dev };
+}
+fn edge_copy(e: (&a Edge)) -> Edge {
+    return edge_new(
+        copyb(view(e.name)),
+        copyb(view(e.req)),
+        copyb(view(e.from)),
+        e.kind,
+        copyb(view(e.text)),
+        e.pin_kind,
+        copyb(view(e.pin)),
+        e.dev
+    );
+}
+fn cand_new(name: u8[], version: u8[], kind: u64, text: u8[]) -> Cand {
+    return Cand {
+        name: name,
+        version: version,
+        kind: kind,
+        text: text,
+        rev: u8[],
+        tarball: u8[],
+        deps: Edge[],
+        yanked: 0,
+    };
+}
+fn engine_new(roots: Edge[]) -> Engine {
+    return Engine {
+        roots: roots,
+        locked: u8[][],
+        locked_versions: u8[][],
+        cands: Cand[],
+        edges: Edge[],
+        picks: Pick[],
+        wants: Want[],
+        error: u8[],
+    };
+}
+// The lock's choices, so a new dependency does not silently upgrade a working tree.
+fn engine_lock(e: (&a mut Engine), name: u8[], version: u8[]) {
+    e.locked.push(name);
+    e.locked_versions.push(version);
+}
+fn engine_locked_version<a, b>(e: (&a Engine), name: &b [u8]) -> u8[] {
+    for i in e.locked.len() {
+        if eqb(view(e.locked[i]), view(name)) {
+            return copyb(view(e.locked_versions[i]));
+        }
+    }
+    return u8[];
+}
+fn engine_pick_index<a, b>(e: (&a Engine), name: &b [u8]) -> u64 {
+    for i in e.picks.len() {
+        p := &e.picks[i];
+        if eqb(view(p.name), view(name)) {
+            return i;
+        }
+    }
+    return NO_INDEX;
+}
+fn engine_cand_index<a, b, c, d>(e: (&a Engine), name: &b [u8], kind: u64, text: &c [u8], version: &d [u8]) -> u64 {
+    for i in e.cands.len() {
+        c := &e.cands[i];
+        if (c.kind == kind) && eqb(view(c.name), view(name)) {
+            if eqb(view(c.text), view(text)) && eqb(view(c.version), view(version)) {
+                return i;
+            }
+        }
+    }
+    return NO_INDEX;
+}
+fn engine_add_cand(e: (&a mut Engine), c: Cand) -> u64 {
+    // A candidate with an unparseable requirement is a publisher bug; refuse it here so the
+    // selection below never has to guess.
+    for i in c.deps.len() {
+        d := &c.deps[i];
+        match requirement_parse(view(d.req)) {
+            r: Req => {
+            },
+            e2: Err => {
+                e.error = catb(view("bad requirement from "), view(catb(view(c.name), view(": "))));
+                e.error = catb(view(e.error), view(e2.message));
+                return 1;
+            }
+        }
+    }
+    e.cands.push(c);
+    return 0;
+}
+fn engine_has_cands<a, b, c>(e: (&a Engine), name: &b [u8], kind: u64, text: &c [u8]) -> bool {
+    for i in e.cands.len() {
+        c := &e.cands[i];
+        if (c.kind == kind) && eqb(view(c.name), view(name)) && eqb(view(c.text), view(text)) {
+            return true;
+        }
+    }
+    return false;
+}
+// Every live edge that names `name`, in discovery order.
+fn engine_edge_count<a, b>(e: (&a Engine), name: &b [u8]) -> u64 {
+    mut n: u64 = 0;
+    for i in e.edges.len() {
+        d := &e.edges[i];
+        if eqb(view(d.name), view(name)) {
+            n += 1;
+        }
+    }
+    return n;
+}
+fn engine_match_edges<a, b, c>(e: (&a Engine), name: &b [u8], version: &c [u8]) -> bool {
+    match version_parse(view(version)) {
+        v: Ver => {
+            for i in e.edges.len() {
+                d := &e.edges[i];
+                if !eqb(view(d.name), view(name)) {
+                    continue;
+                }
+                match requirement_parse(view(d.req)) {
+                    r: Req => {
+                        if !requirement_match(&r, &v) {
+                            return false;
+                        }
+                    },
+                    bad: Err => {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        },
+        bad: Err => {
+            return false;
+        }
+    }
+}
+fn engine_cand_ok_for<a, b>(e: (&a Engine), name: &b [u8], ci: u64) -> bool {
+    c := &e.cands[ci];
+    return engine_match_edges(e, name, view(c.version));
+}
+fn version_gt<a, b>(left: &a [u8], right: &b [u8]) -> bool {
+    match version_parse(view(left)) {
+        l: Ver => {
+            match version_parse(view(right)) {
+                r: Ver => {
+                    return version_cmp(&l, &r) == 1;
+                },
+                bad: Err => {
+                    return false;
+                }
+            }
+        },
+        bad: Err => {
+            return false;
+        }
+    }
+}
+// Highest satisfying version, or the lock's choice when it still satisfies (section 3.3):
+// stability first, then preference, then "highest wins".
+fn engine_select<a, d>(e: (&a Engine), pi: u64, kind: u64, text: &d [u8]) -> u64 {
+    p := &e.picks[pi];
+    name := copyb(view(p.name));
+    if p.cand != NO_INDEX {
+        if engine_cand_ok_for(e, &name, p.cand) {
+            return p.cand;
+        }
+    }
+    pref := copyb(view(p.preferred));
+    if pref.len() != 0 {
+        for i in e.cands.len() {
+            c := &e.cands[i];
+            if (c.kind != kind) || (c.yanked != 0) {
+                continue;
+            }
+            if !eqb(view(c.name), view(name)) || !eqb(view(c.text), view(text)) {
+                continue;
+            }
+            if eqb(view(c.version), view(pref)) {
+                if engine_cand_ok_for(e, &name, i) {
+                    return i;
+                }
+            }
+        }
+    }
+    mut best: u64 = NO_INDEX;
+    for i in e.cands.len() {
+        c := &e.cands[i];
+        if (c.kind != kind) || (c.yanked != 0) {
+            continue;
+        }
+        if !eqb(view(c.name), view(name)) || !eqb(view(c.text), view(text)) {
+            continue;
+        }
+        if !engine_cand_ok_for(e, &name, i) {
+            continue;
+        }
+        if best == NO_INDEX {
+            best = i;
+        } else {
+            b := &e.cands[best];
+            if version_gt(view(c.version), view(b.version)) {
+                best = i;
+            }
+        }
+    }
+    return best;
+}
+fn engine_conflict<a, b, d>(e: (&a Engine), name: &b [u8], kind: u64, text: &d [u8]) -> u8[] {
+    mut out = catb(view("no version of "), view(name));
+    pushb(&mut out, view(" satisfies all requirements:"));
+    for i in e.edges.len() {
+        d := &e.edges[i];
+        if !eqb(view(d.name), view(name)) {
+            continue;
+        }
+        pushb(&mut out, view("\n  "));
+        pushb(&mut out, view(d.req));
+        pushb(&mut out, view(" (from "));
+        pushb(&mut out, view(d.from));
+        out.push(')');
+    }
+    mut seen = u8[][];
+    for i in e.cands.len() {
+        c := &e.cands[i];
+        if (c.kind != kind) || !eqb(view(c.name), view(name)) || !eqb(view(c.text), view(text)) {
+            continue;
+        }
+        mut dup = false;
+        for j in seen.len() {
+            if eqb(view(seen[j]), view(c.version)) {
+                dup = true;
+            }
+        }
+        if dup {
+            continue;
+        }
+        seen.push(copyb(view(c.version)));
+    }
+    if seen.len() == 0 {
+        pushb(&mut out, view("\nno versions are available for this source"));
+        return out;
+    }
+    pushb(&mut out, view("\navailable:"));
+    for i in seen.len() {
+        if i != 0 {
+            out.push(',');
+        }
+        out.push(' ');
+        pushb(&mut out, view(seen[i]));
+    }
+    return out;
+}
+fn engine_source_conflict<a, b>(e: (&a Engine), name: &b [u8]) -> u8[] {
+    mut out = catb(view("package "), view(name));
+    pushb(&mut out, view(" is required from two different sources:"));
+    mut kind: u64 = 99;
+    mut text = u8[];
+    for i in e.edges.len() {
+        d := &e.edges[i];
+        if !eqb(view(d.name), view(name)) {
+            continue;
+        }
+        mut same = false;
+        if kind == 99 {
+            same = true;
+        } else {
+            if (kind == d.kind) && eqb(view(text), view(d.text)) {
+                same = true;
+            }
+        }
+        if !same {
+            pushb(&mut out, view("\n  "));
+            pushb(&mut out, view(source_text(d.kind, view(d.text))));
+            pushb(&mut out, view(" (from "));
+            pushb(&mut out, view(d.from));
+            out.push(')');
+        }
+        if kind == 99 {
+            kind = d.kind;
+            text = copyb(view(d.text));
+        }
+    }
+    return out;
+}
+fn source_text<a>(kind: u64, text: &a [u8]) -> u8[] {
+    if kind == KIND_PATH {
+        return catb(view("path "), view(text));
+    }
+    if kind == KIND_GIT {
+        return catb(view("git "), view(text));
+    }
+    return catb(view("registry "), view(text));
+}
+// Recompute the live edge set: the roots, plus the dependencies of every chosen candidate. Starting
+// from scratch each round is what makes a re-choice drop the requirements the old choice brought.
+// "<name> <version>": how a requirement's source is named in a diagnostic.
+fn cand_label<a>(e: (&a Engine), ci: u64) -> u8[] {
+    c := &e.cands[ci];
+    return cat3(view(c.name), view(" "), view(c.version));
+}
+fn engine_edge_name<a>(e: (&a Engine), i: u64) -> u8[] {
+    d := &e.edges[i];
+    return copyb(view(d.name));
+}
+fn engine_edge_from<a>(e: (&a Engine), i: u64) -> u8[] {
+    d := &e.edges[i];
+    return copyb(view(d.from));
+}
+fn engine_rebuild(e: (&a mut Engine)) {
+    mut edges = Edge[];
+    for i in e.roots.len() {
+        edges.push(edge_copy(&e.roots[i]));
+    }
+    for i in e.picks.len() {
+        ci := e.picks[i].cand;
+        if ci == NO_INDEX {
+            continue;
+        }
+        // A candidate's own requirements are attributed to it, which is what makes a conflict
+        // message name the two packages that disagree rather than "root".
+        label := cand_label(&e, ci);
+        c := &e.cands[ci];
+        for j in c.deps.len() {
+            mut edge = edge_copy(&c.deps[j]);
+            edge.from = copyb(view(label));
+            edges.push(edge);
+        }
+    }
+    e.edges = edges;
+    // A pick for every name the live edges mention, in the order the edges first mention it.
+    for i in e.edges.len() {
+        name := engine_edge_name(&e, i);
+        if engine_pick_index(&e, &name) != NO_INDEX {
+            continue;
+        }
+        pref := engine_locked_version(&e, &name);
+        from := engine_edge_from(&e, i);
+        e.picks.push(Pick { name: name, cand: NO_INDEX, preferred: pref, loaded: 0, from: from });
+    }
+}
+// Resolve one name against the current edges. Returns NEED_NONE, NEED_CANDIDATES or NEED_ERROR.
+fn engine_step(e: (&a mut Engine), pi: u64) -> u64 {
+    name := copyb(view(e.picks[pi].name));
+    if engine_edge_count(&e, &name) == 0 {
+        return NEED_NONE;
+    }
+    mut kind: u64 = 99;
+    mut text = u8[];
+    for i in e.edges.len() {
+        d := &e.edges[i];
+        if !eqb(view(d.name), view(name)) {
+            continue;
+        }
+        if kind == 99 {
+            kind = d.kind;
+            text = copyb(view(d.text));
+        } else {
+            if (kind != d.kind) || !eqb(view(text), view(d.text)) {
+                msg := engine_source_conflict(&e, &name);
+                e.error = msg;
+                return NEED_ERROR;
+            }
+        }
+    }
+    mut want_pin_kind: u64 = PIN_NONE;
+    mut want_pin = u8[];
+    for i in e.edges.len() {
+        d := &e.edges[i];
+        if eqb(view(d.name), view(name)) && (d.pin_kind != PIN_NONE) {
+            want_pin_kind = d.pin_kind;
+            want_pin = copyb(view(d.pin));
+        }
+    }
+    best := engine_select(&e, pi, kind, &text);
+    if best == NO_INDEX {
+        if engine_has_cands(&e, &name, kind, &text) {
+            msg := engine_conflict(&e, &name, kind, &text);
+            e.error = msg;
+            return NEED_ERROR;
+        }
+        if e.picks[pi].loaded != 0 {
+            msg := engine_conflict(&e, &name, kind, &text);
+            e.error = msg;
+            return NEED_ERROR;
+        }
+        e.wants.push(Want { name: name, kind: kind, text: text, pin_kind: want_pin_kind, pin: want_pin });
+        e.picks[pi].loaded = 1;
+        return NEED_CANDIDATES;
+    }
+    if e.picks[pi].cand != best {
+        e.picks[pi].cand = best;
+        return NEED_CANDIDATES;
+    }
+    return NEED_NONE;
+}
+// One resolution round set at a time. The driver answers `wants` (by loading candidates) and calls
+// this again; a full resolution is the loop in `resolve_project` and in `resolve_report`.
+fn engine_advance(e: (&a mut Engine)) -> u64 {
+    e.wants = Want[];
+    mut round: u64 = 0;
+    while true {
+        round += 1;
+        if 64 < round {
+            e.error = copyb(view("dependency resolution did not converge after 64 rounds"));
+            return NEED_ERROR;
+        }
+        engine_rebuild(e);
+        mut changed = false;
+        mut i: u64 = 0;
+        while i < e.picks.len() {
+            status := engine_step(e, i);
+            if status == NEED_ERROR {
+                return NEED_ERROR;
+            }
+            if status == NEED_CANDIDATES {
+                if e.wants.len() != 0 {
+                    return NEED_CANDIDATES;
+                }
+                changed = true;
+            }
+            i += 1;
+        }
+        if !changed {
+            return NEED_NONE;
+        }
+    }
+    return NEED_NONE;
+}
+// The chosen graph, as (name, cand) pairs in pick order, for the lock and for `grail tree`.
+fn engine_chosen<a>(e: (&a Engine)) -> u8[][] {
+    mut out = u8[][];
+    for i in e.picks.len() {
+        p := &e.picks[i];
+        if p.cand == NO_INDEX {
+            continue;
+        }
+        c := &e.cands[p.cand];
+        out.push(copyb(view(c.name)));
+        out.push(copyb(view(c.version)));
+    }
+    return out;
+}
+// `pkg-resolve-*` regression cases: a graph written as text, resolved.
+//
+//   avail NAME VERSION [VERSION...]          versions that exist (registry source "index")
+//   dep NAME VERSION DEPNAME REQ            a version's own dependency
+//   need NAME REQ                            a root requirement
+//   lock NAME VERSION                        a version the lock already holds
+//   out                                      print the resolution
+//
+// Every line is one fact; the first failure is printed and stops the run. This is the unit-test
+// surface for section 3: the engine itself, with a text catalog instead of a store.
+fn spec_engine_roots(lines: (&a u8[][]), e: (&b mut Engine)) -> unit |? Err {
+    return ();
+}
+pub fn resolve_report<a>(spec: &a [u8]) -> u8[] {
+    rows := split_lines(view(spec));
+    mut roots = Edge[];
+    mut cands = Cand[];
+    mut locked_names = u8[][];
+    mut locked_versions = u8[][];
+    mut ln: u64 = 0;
+    for r in rows.len() {
+        ln += 1;
+        raw := item(&rows, r);
+        line := trim(&raw);
+        if line.len() == 0 {
+            continue;
+        }
+        w := split_char(view(line), ' ');
+        mut words = u8[][];
+        for i in w.len() {
+            piece := trim(&item(&w, i));
+            if piece.len() != 0 {
+                words.push(piece);
+            }
+        }
+        if words.len() == 0 {
+            continue;
+        }
+        head := item(&words, 0);
+        if eqb(view(head), view("avail")) {
+            if words.len() < 3 {
+                return copyb(view("error: avail needs NAME VERSION..."));
+            }
+            name := item(&words, 1);
+            for i in words.len() {
+                if 1 < i {
+                    v := item(&words, i);
+                    c := cand_new(copyb(view(name)), v, KIND_REGISTRY, copyb(view("index")));
+                    cands.push(c);
+                }
+            }
+        } else {
+            if eqb(view(head), view("dep")) {
+                if words.len() < 5 {
+                    return copyb(view("error: dep needs NAME VERSION DEPNAME REQ"));
+                }
+                dep_name := item(&words, 3);
+                dep_req := item(&words, 4);
+                // A "dep NAME VERSION DEP REQ" line names the dep as the 4th word; the request
+                // form is the rest joined, so `>=1.0, <1.4` survives the space split.
+                mut req_text = dep_req;
+                mut k: u64 = 5;
+                while k < words.len() {
+                    req_text = catb(view(req_text), view(" "));
+                    req_text = catb(view(req_text), view(item(&words, k)));
+                    k += 1;
+                }
+                target_name := item(&words, 1);
+                target_version := item(&words, 2);
+                mut found = false;
+                for i in cands.len() {
+                    if eqb(view(cands[i].name), view(target_name)) && eqb(view(cands[i].version), view(target_version)) {
+                        cands[i].deps.push(
+                            edge_new(
+                                copyb(view(dep_name)),
+                                copyb(view(req_text)),
+                                copyb(view("")),
+                                KIND_REGISTRY,
+                                copyb(view("index")),
+                                PIN_NONE,
+                                u8[],
+                                0
+                            )
+                        );
+                        found = true;
+                    }
+                }
+                if !found {
+                    mut n = copyb(view("error: dep names an unknown version: "));
+                    n = catb(view(n), view(target_name));
+                    n = catb(view(n), view(" "));
+                    return catb(view(n), view(target_version));
+                }
+            } else {
+                if eqb(view(head), view("need")) {
+                    if words.len() < 3 {
+                        return copyb(view("error: need needs NAME REQ"));
+                    }
+                    name := item(&words, 1);
+                    n := item(&words, 2);
+                    roots.push(edge_new(copyb(view(name)), n, copyb(view("root")), KIND_REGISTRY, copyb(view("index")), PIN_NONE, u8[], 0));
+                } else {
+                    if eqb(view(head), view("lock")) {
+                        if words.len() < 3 {
+                            return copyb(view("error: lock needs NAME VERSION"));
+                        }
+                        locked_names.push(item(&words, 1));
+                        locked_versions.push(item(&words, 2));
+                    } else {
+                        mut msg = copyb(view("error: unknown spec line at line "));
+                        msg = catb(view(msg), view(dec(ln)));
+                        msg = catb(view(msg), view(": "));
+                        return catb(view(msg), view(head));
+                    }
+                }
+            }
+        }
+    }
+    mut e = engine_new(roots);
+    for i in locked_names.len() {
+        engine_lock(&mut e, item(&locked_names, i), item(&locked_versions, i));
+    }
+    for i in cands.len() {
+        mut c = cand_new(copyb(view(cands[i].name)), copyb(view(cands[i].version)), cands[i].kind, copyb(view(cands[i].text)));
+        for j in cands[i].deps.len() {
+            c.deps.push(edge_copy(&cands[i].deps[j]));
+        }
+        e.cands.push(c);
+    }
+    mut rounds: u64 = 0;
+    while true {
+        rounds += 1;
+        if 8 < rounds {
+            return copyb(view("error: resolution did not settle"));
+        }
+        status := engine_advance(&mut e);
+        if status == NEED_CANDIDATES {
+            if e.wants.len() != 0 {
+                mut msg = copyb(view("error: no versions are available for "));
+                msg = catb(view(msg), view(e.wants[0].name));
+                return msg;
+            }
+            continue;
+        }
+        if status == NEED_ERROR {
+            return catb(view("error: "), view(e.error));
+        }
+        break;
+    }
+    mut out = u8[];
+    for i in e.picks.len() {
+        p := &e.picks[i];
+        if p.cand == NO_INDEX {
+            continue;
+        }
+        c := &e.cands[p.cand];
+        pushb(&mut out, view(c.name));
+        out.push(' ');
+        pushb(&mut out, view(c.version));
+        out.push('\n');
+    }
+    return out;
 }
