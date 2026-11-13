@@ -1,0 +1,21 @@
+module errs_chain;
+use errs;
+
+// A message error and a three-frame chain, printed: the whole of what an error reports is its text,
+// so the message alone is one line and the chain is one line with the cause last.
+fn main() {
+    message := errs::report(view("cannot open /etc/app.conf"));
+    assert(message.show() == view("cannot open /etc/app.conf"));
+    message.to_stderr();
+    mut chain = errs::report(view("not found"));
+    chain = chain.context(view("while opening /x"));
+    chain = chain.context(view("while parsing config"));
+    chain = chain.context(view("while loading app"));
+    assert(chain.depth() == 3);
+    assert(chain.cause() == view("not found"));
+    assert(chain.frame(0) == view("while opening /x"));
+    assert(chain.frame(2) == view("while loading app"));
+    assert(chain.show() == view("while loading app: while parsing config: while opening /x: not found"));
+    chain.to_stderr();
+    println("ok");
+}

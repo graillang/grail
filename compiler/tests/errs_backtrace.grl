@@ -1,0 +1,32 @@
+module errs_backtrace;
+use errs;
+
+// A captured stack names the function that created the error and the frames it came through, one
+// line per frame, innermost first. The capture is a call-site choice: `report` holds no stack.
+fn create(flag: bool) -> u64 |? errs::Report {
+    if flag {
+        return errs::traced(view("missing"));
+    }
+    return 1;
+}
+fn middle(flag: bool) -> u64 |? errs::Report {
+    value := create(flag)?;
+    return value;
+}
+fn main() {
+    mut r = errs::traced(view("bad config"));
+    assert(r.trace().len() != 0);
+    r = r.context(view("while loading app"));
+    r.to_stderr();
+    plain := errs::report(view("no stack here"));
+    assert(plain.trace().len() == 0);
+    plain.to_stderr();
+    match middle(true) {
+        u64(n) => { assert(false); },
+        errs::Report(e) => {
+            assert(e.trace().len() != 0);
+            e.to_stderr();
+        }
+    }
+    println("ok");
+}
