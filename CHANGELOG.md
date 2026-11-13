@@ -1,5 +1,11 @@
 ## Unreleased
 
+- Fixed: a `byval` record whose last eightbyte is narrower than eight bytes — a 12-byte record, or
+  a three-float aggregate — loaded that eightbyte with `movl ...,%rax`, which is not an instruction,
+  so the generated assembly did not assemble. The load now matches the width. `tests/ffi/byval_records.grl`
+  covers 12- and 40-byte records, a record returned by value while another arrives by value, and a
+  callee that writes its own copy, on x86-64, AArch64, RISC-V 64 and (through `tests/windows-cases.json`)
+  Windows x86-64 under Wine.
 - Added: `grail bindgen HEADER.h -o OUT.grl`, a C header importer. It is a compiler module
   (`compiler/bindgen.grl`) with its own preprocessor - `#include` resolution through `-I`/`-isystem`,
   object-like and function-like macros with `##` pasting, `#if`/`#ifdef`/`#elif` with a C constant

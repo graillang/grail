@@ -364,14 +364,32 @@ length := unsafe { c_length(vec) };
   never passes a struct in `xmm` - and any other size by reference to a 16-byte-aligned copy the
   caller makes. Windows ARM64 follows AAPCS64 for fixed parameters (homogeneous float aggregates in
   `v` registers, up to 16 bytes in `x` registers, larger by reference), which is the lowering it uses.
-  The Win64 shapes execute under Wine (`ffi-byval-records` in `tests/windows-cases.json`).
+  The Win64 shapes execute under Wine (`ffi-byval-records` in `tests/windows-cases.json`): every
+  record size from 4 to 40 bytes, both directions and the callee-writes-its-copy case, with the
+  same 25 checksum values the ELF targets print. Windows ARM64 is built as a COFF-ARM64 image and
+  its AAPCS64 lowering is the one Linux AArch64 executes, but it is not run (no ARM64 Windows
+  runner here).
 - Refused with a diagnostic rather than approximated: anything that is not an `extern "C"` record
   (`byval must name an extern "C" record type; a bare record parameter is a pointer`), and an
   `extern "C" fn` definition, because a C callback cannot take a record by value yet.
-- `tests/ffi/byval_records.grl` executes 4-, 8-, 16- and 24-byte records, mixed int/float fields, an
-  ImVec2-shaped float pair, an embedded array, a `byval` parameter after six integer arguments and a
-  record sharing the stack area with a following scalar, with `tests/ffi/byval_shim.c` returning a
-  checksum over every field each twin received, on x86-64, AArch64 and RISC-V 64.
+- `tests/ffi/byval_records.grl` executes 4-, 8-, 12-, 16-, 24- and 40-byte records, mixed int/float
+  fields, an ImVec2-shaped float pair, a three-float aggregate, an embedded array, a `byval`
+  parameter after six integer arguments and a record sharing the stack area with a following scalar,
+  with `tests/ffi/byval_shim.c` returning a checksum over every field each twin received, on x86-64,
+  AArch64 and RISC-V 64.
+  The 12-byte shape is the interesting one: it is neither a power of two nor a whole number of
+  eightbyte words, so SysV spends two INTEGER eightbytes (the second 4 bytes wide), AAPCS64 two `x`
+  registers, and Win64 and RV64 pass it by reference. The 40-byte shape exhausts both integer
+  register files before the callee sees it, so SysV uses MEMORY and AAPCS64, RV64 and Win64 pass a
+  pointer to a caller copy.
+- The same fixture covers the other direction and the copy semantics: records of 4, 12, 16, 24 and
+  40 bytes **returned by value** (Win64 returns only a 1/2/4/8-byte record in `rax` and any other
+  size through a hidden result pointer in `rcx`; SysV uses `rax:rdx` up to 16 bytes and MEMORY above
+  it), a callee that writes its own copy (the caller's fields must not change), and one call that
+  takes a record by value and returns a record by value, so the argument copy's address and the
+  hidden result pointer are live at the same time. That last shape is the one a Win32 API such as
+  `MulDiv`-style record-returning calls need, and it is where an off-by-one in the argument counter
+  would put the result pointer in a register the callee already used.
 
 ### Opaque handles
 
