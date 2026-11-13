@@ -37652,7 +37652,8 @@ fn iface_keep<a>(items: (&a IItem[])) -> u64[] {
                     if keep[k] == 0 {
                         kt := &items[k];
                         if marker == 1 {
-                            if (kt.tag == IFACE_TAG_TYPE) & (kt.index == at) & (kt.parent == 0) {
+                            if ((kt.tag == IFACE_TAG_TYPE) || (kt.tag == IFACE_TAG_ENV)) & (kt.index == at)
+                                & (kt.parent == 0) {
                                 exchange(&mut keep[k], 1);
                                 changed = true;
                             }
@@ -37728,7 +37729,34 @@ fn iface_is_section(tag: u64) -> bool {
 fn iface_module_bytes<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std: u64, unsafe_flag: u64, host_opt: u64, digest: &a [u8]) -> u8[] {
     exchange(&mut c.iface_env, u64[]);
     exchange(&mut c.iface_env_names, u8[][]);
-    items := iface_items(&mut c, view(m));
+    mut items = iface_items(&mut c, view(m));
+    // Environment records a closure type in this surface captures. Encoding one can reach another,
+    // so this runs to a fixpoint - before the surface is computed, because a capture's type cites
+    // declarations exactly as a field does.
+    mut at = 0;
+    while at < c.iface_env.len() {
+        decl := c.iface_env[at];
+        local := c.iface_env_names[at].copy();
+        mut deps = u64[];
+        payload := iface_enc_env(&mut c, decl, &mut deps);
+        mut body = u8[];
+        iface_ws(&mut body, view(local));
+        push_bytes(&mut body, view(payload));
+        items.push(
+            IItem {
+                tag: IFACE_TAG_ENV,
+                index: decl,
+                name: local,
+                public: 1,
+                owner: 0,
+                parent: 0,
+                payload: body,
+                deps: deps,
+                text: u8[]
+            }
+        );
+        at += 1;
+    }
     keep := iface_keep(&items);
     mut out = u8[];
     // The magic and the version: the first thing the reader checks and the first thing a diagnostic
@@ -37781,20 +37809,6 @@ fn iface_module_bytes<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std:
         } else {
             iface_wrec(&mut out, tag, view(items[i].payload));
         }
-    }
-    // Environment records a closure type in this surface carries. Writing one can reach another, so
-    // this runs to a fixpoint; they come last because nothing else has to refer to them by position.
-    mut at = 0;
-    while at < c.iface_env.len() {
-        decl := c.iface_env[at];
-        local := c.iface_env_names[at].copy();
-        mut deps = u64[];
-        payload := iface_enc_env(&mut c, decl, &mut deps);
-        mut body = u8[];
-        iface_ws(&mut body, view(local));
-        push_bytes(&mut body, view(payload));
-        iface_wrec(&mut out, IFACE_TAG_ENV, view(body));
-        at += 1;
     }
     mut source_digest = digest.copy();
     if source_digest.len() == 0 {
