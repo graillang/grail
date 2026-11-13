@@ -22,6 +22,36 @@ other position writes `&` explicitly.
 
 **Try it:** slice `[0:3]` instead, then return the first byte. Do not read index 3 from that view.
 
+## Ranges that carry their slice
+
+`..` is the half-open range spelling in a loop header, and brackets accept it exactly where the colon
+is: `s[a..e]`, `s[a..]`, `s[..e]` and `s[..]` are the same slice as `s[a: e]`, `s[a: ]`, `s[: e]` and
+`s[:]`, on vectors, views and strings. One spelling for one idea, and no extra cost: both forms
+compile to the same slice.
+
+A range that travels - to a helper, into a comparison, across a boundary - is a `span`:
+
+```grl
+use span;
+fn opens_with<b, c>(r: span::Span<c>, w: &b [u8]) -> bool { return r.same_as(w); }
+fn main() {
+    stored := u8[1, 2, 3, 4];
+    name := u8[2, 3];
+    r := span::span_of(&stored, 1, 3);   // the range, and the slice it was made from
+    assert(r.len() == 2);
+    assert(r.same_as(&name));
+    assert(opens_with(&r, &name));
+    over := span::span_of(&stored, 2, 9);   // refused here: `stored` has no index 9
+    assert(over.len() == 0);
+}
+```
+
+The span holds the view it was made from, so its bytes come out of that view and nowhere else: a
+range its slice does not have is refused where the span is written (`1..0`, which names no bytes and
+slices nothing), and a range from another sequence cannot index this one - `s[r]` is a compile error,
+because the span already knows its slice. That is the difference from a bare pair of indices: a pair
+can be assembled from two different slices, and a span cannot.
+
 ## Slices of any vector
 
 `v[a: b]` works on every vector, not just bytes. A function that takes `&[f32]` reads part of a vector

@@ -1,0 +1,43 @@
+module span;
+
+// A half-open range `start..end` over a byte sequence, carrying the sequence it was made from
+// (docs/design/range-values.md). Because the span holds the view, the only bytes it can ever name
+// are its own slice's: a range taken from another sequence cannot reach this one, and a range its
+// slice does not have is refused where it is made, not where it is used.
+pub struct Span<a> {
+    base: &a [u8],
+    start: u64,
+    end: u64
+}
+// The only way to make a span. A range the slice does not have yields `1..0` - the refusal, which
+// names no bytes: a comparison through it is unequal and slicing through it stops the program.
+pub fn span_of<a>(s: &a [u8], start: u64, end: u64) -> Span<a> {
+    if (end < start) || (s.len() < end) {
+        return Span { base: s, start: 1, end: 0 };
+    }
+    return Span { base: s, start: start, end: end };
+}
+impl<a> Span<a> {
+    pub fn len(self: &a Span<a>) -> u64 {
+        if self.end < self.start {
+            return 0;
+        }
+        return self.end - self.start;
+    }
+    // The bytes the range names, borrowed from the span's own slice; the language checks the slice
+    // bounds, so a refused span stops the program here instead of reading its neighbour's memory.
+    pub fn bytes(self: &a Span<a>) -> &a [u8] {
+        return self.base[self.start: self.end];
+    }
+    pub fn same_as<b>(self: &a Span<a>, w: &b [u8]) -> bool {
+        if (self.end < self.start) || (self.end - self.start != w.len()) {
+            return false;
+        }
+        for i in w.len() {
+            if self.base[self.start + i] != w[i] {
+                return false;
+            }
+        }
+        return true;
+    }
+}

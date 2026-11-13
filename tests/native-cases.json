@@ -8838,5 +8838,84 @@
     "reject": true,
     "diagnostic": "borrow conflicts with active access",
     "note": "a non-numeric element stays borrowed, so reading g.rows[0].ty inside the call is a live loan, not a copy: that read keeps its temporary"
+  },
+  {
+    "name": "rng2-span-within-slice",
+    "note": "a range made from its own slice: length, comparison and bytes all come from that slice (docs/design/range-values.md)",
+    "source": "use span;\nfn main(){ stored := u8[1,2,3,4]; name := u8[2,3]; r := span::span_of(&stored, 1, 3); println(r.len()); println(r.same_as(&name)); println(r.bytes().len()); println(r.bytes() == &stored[1: 3]); }\n",
+    "stdout": "2\ntrue\n2\ntrue\n",
+    "modules": [
+      "lib/span.grl"
+    ]
+  },
+  {
+    "name": "rng2-span-other-slice-refused",
+    "note": "a range carries the slice it was made from, so indexing another sequence with it is a compile error naming both spellings that mean something",
+    "source": "use span;\nfn main(){ b := u64[1,2,3]; a := u8[9,9]; r := span::span_of(&a, 0, 2); println(b[r]); }\n",
+    "reject": true,
+    "diagnostic": "cannot index another sequence",
+    "modules": [
+      "lib/span.grl"
+    ]
+  },
+  {
+    "name": "rng2-span-longer-than-slice",
+    "note": "the range the compiler used to abort on: 0..name.len() over a shorter stored slice is refused where the span is made, so it compares unequal and names no bytes",
+    "source": "use span;\nfn main(){ stored := u8[7,8]; name := u8[7,8,9]; r := span::span_of(&stored, 0, name.len()); println(r.same_as(&name)); println(r.len()); }\n",
+    "stdout": "false\n0\n",
+    "modules": [
+      "lib/span.grl"
+    ]
+  },
+  {
+    "name": "rng2-span-bytes-refused-stops",
+    "note": "slicing a refused span stops the program on the language's own bounds check instead of reading a neighbour",
+    "source": "use span;\nfn main(){ b := u8[1,2,3]; r := span::span_of(&b, 1, 9); println(r.bytes().len()); }\n",
+    "signal": "SIGABRT",
+    "modules": [
+      "lib/span.grl"
+    ]
+  },
+  {
+    "name": "rng2-dotdot-slices",
+    "note": "`..` inside brackets is the half-open range a `for` header spells: both bounds, one bound, and neither, on a sequence, a byte view and a string",
+    "source": "fn main(){ v := u64[10,20,30,40,50]; println(v[1..3]); b := u8[1,2,3,4]; println(b[..2].len()); println(b[2..].len()); println(b[..].len()); println(\"hello\"[1..3].len()); println(v[1: 3]); }\n",
+    "stdout": "[20, 30]\n2\n2\n4\n2\n[20, 30]\n"
+  },
+  {
+    "name": "rng2-dotdot-count-loops",
+    "note": "a count-only range in a loop header is unchanged: no slice, no span, and the bounds-check elimination of `for i in 0..v.len()` still applies",
+    "source": "fn main(){ n := 4; mut s = 0; for i in 0..n { s += i; } println(s); v := u64[1,2,3]; mut t = 0; for i in 0..v.len() { t += v[i]; } println(t); println(v[1..2]); }\n",
+    "stdout": "6\n6\n[2]\n"
+  },
+  {
+    "name": "rng2-span-helper-window",
+    "note": "the `same` shape: a helper takes the range as a value and the extent of a window comes from the needle, so a window past the end matches nothing",
+    "source": "use span;\nfn same<b, c>(r: span::Span<c>, w: &b [u8]) -> bool { return r.same_as(w); }\nfn at<b, c>(s: &b [u8], a: u64, w: &c [u8]) -> bool { return same(span::span_of(s, a, a + w.len()), w); }\nfn main(){ stored := u8[1,2,3,4]; println(at(&stored, 1, &u8[2,3])); println(at(&stored, 1, &u8[2,4])); println(at(&stored, 3, &u8[4,5])); }\n",
+    "stdout": "true\nfalse\nfalse\n",
+    "modules": [
+      "lib/span.grl"
+    ]
+  },
+  {
+    "name": "rng2-span-grow-refused",
+    "note": "a span holds the slice it was made from, so growing that slice while the span is live is refused, naming both",
+    "source": "use span;\nfn main(){ mut v = u8[1,2,3]; r := span::span_of(&v, 0, 2); v.push(4); println(r.len()); }\n",
+    "reject": true,
+    "diagnostic": "mutation conflicts with live borrow",
+    "modules": [
+      "lib/span.grl"
+    ]
+  },
+  {
+    "name": "lib-span",
+    "note": "the span library: a range carries its slice, a refused range names no bytes, and a helper receives the range as one value",
+    "files": [
+      "tests/lib/span.grl"
+    ],
+    "modules": [
+      "lib/span.grl"
+    ],
+    "stdout": "span ok: 19 checks\n"
   }
 ]
