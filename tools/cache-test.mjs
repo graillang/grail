@@ -467,6 +467,87 @@ function proveModules() {
   return { cold, warm, body, surface, rebuilt };
 }
 
+// ---- (h) edit cost, measured ------------------------------------------------------------------
+// Four edits, each printing the build's wall clock and exactly which module runs it redid, and each
+// ending with the image byte-compared against the same build made without the cache.
+//
+// The fourth edit is a one-function edit in a large module. The large module here is generated: 400
+// functions in one module, the same shape as the compiler's own `native` (2,600 functions, 38k
+// lines) at a size the harness can run in seconds rather than minutes. `bun tools/cache-test.mjs
+// --big` swaps in a 2000-function module for a number closer to the compiler's.
+const bigFunctions = count => {
+  const lines = ['module big;', ''];
+  for (let i = 0; i < count; i += 1) {
+    lines.push(`pub fn f${i}(x: u64) -> u64 {\n    mut y = x + ${i};\n    if (y % 2) == 0 {\n        y = y * 3;\n    }\n    return y + ${i};\n}\n`);
+  }
+  return lines.join('\n');
+};
+function costProject(count) {
+  write(3);
+  writeFileSync(join(project, 'src/big.grl'), bigFunctions(count));
+  writeFileSync(
+    join(project, 'src/main.grl'),
+    `${mainSource}`.replace('use helper;', 'use helper;\nuse big;').replace('util::twice(a) + helper::bump(a)', 'util::twice(a) + helper::bump(a) + big::f7(1)'),
+  );
+}
+function proveEditCost(count) {
+  const output = join(project, 'target/cost');
+  rmSync(store, { recursive: true, force: true });
+  costProject(count);
+  const cold = build(['--cache', '-o', output], { measure: true });
+  assert.equal(cold.status, 0, `the cold build failed\n${cold.output}`);
+  assert.equal(run(output), '47', 'the cold build prints the wrong answer');
+  const cases = [];
+  // Nothing changed.
+  const warm = build(['--cache', '-o', output], { measure: true });
+  assert.equal(warm.line.misses, 0, `an unchanged tree must be a full hit\n${warm.output}`);
+  cases.push({ name: 'nothing changed', line: warm.line, ms: warm.ms });
+  // (i) a leaf module's body: `helper` imports nothing, so nothing reads its interface.
+  writeFileSync(join(project, 'src/helper.grl'), helperSource.replace('x + 7', 'x + 8'));
+  const leaf = build(['--cache', '-o', output], { measure: true });
+  assert.deepEqual(leaf.line.names, ['helper'], `a leaf module's body edit must rerun it alone: ${leaf.output}`);
+  cases.push({ name: "a leaf module's body", line: leaf.line, ms: leaf.ms });
+  // (ii) a body-only edit in a module importers read: `util` gains a private helper and then has its
+  // body changed, so the interface's bytes do not move and no importer has a reason to rerun.
+  const iface = join(project, 'target/cost.modules/interfaces/util.iface');
+  // The *surface* of an interface: what an importer reads. The `source`/`sha256` lines record the
+  // module's own source (they change with any edit) and `digest` closes the file, so they are the
+  // three lines the cache key leaves out and this comparison leaves out with them.
+  const surfaceOf = path => digest(readFileSync(path, 'utf8').split('\n').filter(line => !/^(source|sha256|digest) /.test(line)).join('\n'));
+  const privateHelper = `\nfn private_pad(x: u64) -> u64 {\n    return x + 1;\n}\n`;
+  writeFileSync(join(project, 'src/util.grl'), `${utilSource(3)}${privateHelper}`);
+  const added = build(['--cache', '-o', output], { measure: true });
+  assert.equal(added.status, 0, `adding a private helper failed\n${added.output}`);
+  const before = surfaceOf(iface);
+  writeFileSync(join(project, 'src/util.grl'), `${utilSource(3)}${privateHelper.replace('x + 1', 'x + 2')}`);
+  const bodyOnly = build(['--cache', '-o', output], { measure: true });
+  assert.equal(bodyOnly.status, 0, `the body-only edit failed\n${bodyOnly.output}`);
+  assert.deepEqual(bodyOnly.line.names, ['util'], `a body-only edit must not rerun an importer: ${bodyOnly.output}`);
+  assert.equal(surfaceOf(iface), before, 'a body-only edit must leave the interface surface unchanged');
+  cases.push({ name: 'a body-only edit', line: bodyOnly.line, ms: bodyOnly.ms });
+  // (iii) an interface edit: a new `pub` function. The module and every run after it are redone.
+  writeFileSync(join(project, 'src/util.grl'), `${utilSource(3)}${privateHelper.replace('x + 1', 'x + 2')}\npub fn extra() -> u64 {\n    return 1;\n}\n`);
+  const surface = build(['--cache', '-o', output], { measure: true });
+  assert.ok(surface.line.names.includes('util'), `the edited module must miss: ${surface.output}`);
+  assert.ok(surface.line.names.length > 1, `an interface edit must rerun the runs after it: ${surface.output}`);
+  assert.notEqual(surfaceOf(iface), before, 'an interface edit must change the interface surface');
+  cases.push({ name: 'an interface edit', line: surface.line, ms: surface.ms });
+  // (iv) one function of a large module: `big` is one module, so its run is redone - and nothing else.
+  const bigPath = join(project, 'src/big.grl');
+  writeFileSync(bigPath, readFileSync(bigPath, 'utf8').replace('pub fn f7(x: u64) -> u64 {\n    mut y = x + 7;', 'pub fn f7(x: u64) -> u64 {\n    mut y = x + 70;'));
+  const oneFunction = build(['--cache', '-o', output], { measure: true });
+  assert.equal(oneFunction.status, 0, `the one-function edit failed\n${oneFunction.output}`);
+  assert.deepEqual(oneFunction.line.names, ['big'], `a one-function edit in one module must stay in that module: ${oneFunction.output}`);
+  const bigAssembly = readFileSync(join(project, 'target/cost.modules/big.s'));
+  cases.push({ name: `one function of a ${count}-function module`, line: oneFunction.line, ms: oneFunction.ms, bytes: bigAssembly.length });
+  // Every case above is the clean build's bytes: the same output name, built again with no cache.
+  // (The name has to be the same - each object's symbol table names the assembly file it came from.)
+  const cached = bytes(output);
+  assert.equal(build(['-o', output]).status, 0, 'the uncached build failed');
+  assert.deepEqual(bytes(output), cached, 'the edited build is not the uncached build');
+  return { cold, cases };
+}
+
 // ---- run --------------------------------------------------------------------------------------
 // The timings come first, from an empty store, so "cold" means cold.
 const reuse = proveReuse();
@@ -478,6 +559,7 @@ const interfaceProof = proveInterfaces();
 const corruption = proveCorruption();
 const pruning = provePruning();
 const modules = proveModules();
+const editCost = proveEditCost(flags.includes('--big') ? 2000 : 400);
 const finalStore = proveStore();
 
 const ms = value => `${value.toFixed(1)}ms`;
@@ -492,6 +574,12 @@ console.log(`               ${precision.shifted.hits} hit, ${precision.shifted.m
 console.log(`(c) flags      --overflow=wrap: ${flagProof.wrapped.hits} hit, ${flagProof.wrapped.misses} miss; back: ${flagProof.back.misses} miss`);
 console.log(`(d) interface  warm ${interfaceProof.warm.hits} hit; a tampered interface is refused; restored: ${interfaceProof.after.hits} hit, ${interfaceProof.after.misses} miss`);
 console.log(`(e) corruption helper entry: ${corruption.rebuilt.hits} hit, ${corruption.rebuilt.misses} miss (${corruption.rebuilt.names.join(', ')}); healed: ${corruption.healed.misses} miss; image: ${corruption.afterImage.what}`);
+console.log(`(h) edit cost  the edits and what each one redid, each one the clean build's bytes:`);
+for (const item of editCost.cases) {
+  const redone = item.line.misses === 0 ? 'nothing' : `${item.line.misses} of ${item.line.hits + item.line.misses} runs: ${item.line.names.join(', ')}`;
+  console.log(`               ${ms(item.ms).padStart(10)}  ${item.name.padEnd(30)} redid ${redone}`);
+}
+console.log(`               ${ms(editCost.cold.ms).padStart(10)}  cold build of the same tree`);
 console.log(`(f) pruning    --keep 0 after an edit dropped ${pruning.pruned.records} records and ${pruning.pruned.blobs} blobs; next build ${pruning.again.hits} hit, ${pruning.again.misses} miss`);
 console.log('');
 console.log('build cache verified');

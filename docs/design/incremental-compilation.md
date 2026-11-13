@@ -159,6 +159,35 @@ object per cycle (`{"ok":bool,"diagnostics":[…]}`), which the LSP can read fro
 already reads `grail check`'s stderr from; that is recorded here as the next step, not claimed as
 done.
 
+## Measured: what a per-function unit could skip, and what it cannot
+
+Recorded before the unit was built, because it decided the shape. The predicate for "a function whose
+emission needs nothing from the rest of the run" is: it requests no specialisation, creates no
+closure, asks for no drop helper, synthesises no declaration or implementation, and records no effect
+fact. Counted over the compiler's own sources (`compiler/*.grl`, 1,867 function bodies, 85 MB of
+emitted text, on this host at this load):
+
+| | functions | emitted bytes |
+| --- | --- | --- |
+| self-contained by that predicate | 743 (40 %) | 2.5 MB (2.9 %) |
+| not | 1,124 (60 %) | 82.5 MB (97.1 %) |
+
+So a per-function unit that replays a body's emitted text — and its helpers — but skips the front end
+would skip 40 % of the *functions* and 3 % of the *work*. The reason is structural: in this compiler
+almost every non-trivial body instantiates a generic (`view`, `push`, the iterator adapters), which
+registers a specialisation whose own body has to be emitted into the same object, and nearly every
+body that owns memory asks for a drop helper for a type interned during its own emission.
+
+Two consequences, and they are why the function-level unit is *designed but not claimed*:
+
+1. a body's emitted text is not a sufficient artifact: the run also needs the specialisations,
+   closures and helpers the body *requested*, which is exactly the typed-IR and state serialization
+   the typed-IR stage owns. Until that exists, the honest unit is the module run, and its cost is
+   what the table below measures;
+2. the number to watch is 2.9 %, not 40 %. Anyone revisiting this should re-run the count after the
+   typed-IR change, because a body carrying its own specialisations no longer needs them from the
+   run — that is the change that moves it.
+
 ## Measurements (printed by `tools/cache-test.mjs`)
 
 The proof prints, for each case, the number of module runs reused, how long the build took, and
@@ -172,7 +201,24 @@ whether the image is byte-identical to a clean build of the same tree:
    harness can do it in reasonable time, otherwise a scaled-down module of the same shape, and the
    note says which.
 
-Every case ends with a byte comparison against a clean, uncached build of the same tree.
+Every case ends with a byte comparison against a clean, uncached build of the same tree, and the tool
+prints the wall clock of each build and the miss list for each case. Measured on this host (six
+module runs; a generated module of 400 functions stands in for the compiler's own `native`; the
+absolute times move with the machine's load, the miss lists do not):
+
+| edit | wall clock | runs redone |
+| --- | --- | --- |
+| nothing changed | 79 ms | none - `program up to date` |
+| a leaf module's body | 221 ms | 1 of 6: `helper` |
+| a body-only edit (interface surface unchanged) | 215 ms | 1 of 6: `util` |
+| an interface edit (`pub` function added) | 4.8 s | 5 of 6: `util` and every run after it |
+| one function of a 400-function module | 4.7 s | 1 of 6: `big` |
+| (cold build of the same tree, for scale) | 5.8 s | 6 of 6 |
+
+The last row is the honest limit of module-level incrementality: a one-function edit re-runs that
+module, because a module is one compiler invocation. Everything else in the module's dependency
+graph is reused, which is where the 5.8 s → 4.7 s comes from; the remainder is that module's own
+parse, typecheck, codegen and assembly.
 
 ## What this does not claim
 

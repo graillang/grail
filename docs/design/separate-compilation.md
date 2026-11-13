@@ -861,6 +861,56 @@ Consequences, stated rather than discovered:
 - the single-file build keeps cross-module inlining only where the optimizer knows no unit
   boundaries; it emits the same markers, so both shapes inline identically.
 
+### The frame constant, which was a latent miscompile
+
+The per-unit change found a real defect that had nothing to do with caching. A function's frame
+constant was `.F<label>`, minted from the same counter, and `.set` defines *one symbol per file*:
+
+```
+subq $.F1,%rsp        # this function's frame
+...
+.set .F1,656          # this function's size
+...
+.set .F1,80           # another function's size, same name
+```
+
+A single-file build whose label counter happened to give two functions the same `.F` name therefore
+had one function's frame size decide another function's displacements — silently, because the
+assembler resolves the symbol and the program merely addresses the wrong part of its frame. It was
+reachable before this stage (any program where two functions were minted the same frame number) and
+`--split` made it worse, because a part's `.set` lines are a subset and the last definition in the
+file can differ between the two shapes. `tools/split-test.mjs` caught it as a `.text` length
+difference between the split and single shapes for a generic-heavy program; the frames are now named
+in the unit's namespace too (`.F<unit>_<n>`), so a frame constant is unique per file in both shapes.
+`tools/cache-test.mjs` and `tools/split-test.mjs` both compare bytes, which is what made it visible.
+
+### The two interface modes, and who must have an interface
+
+There are two ways a build meets an interface, and they ask different things:
+
+- **`--interface DIR` is verification mode.** Every module given as *source* is compared with
+  `DIR/<module>.iface`: the interface must be present, must record that module's source digest, and
+  must say line for line what the sources say, or the build refuses by name. Nothing comes *from*
+  the directory - the build has the sources. This is the mode that catches a stale or edited
+  interface, and it is the mode every source module of the program is checked in.
+- **`--use DIR` is substitution mode.** A module not given as source on the command line has its
+  declarations and its generic bodies taken from `DIR/<module>.iface`; the module named as the
+  entry is compiled from its source. This is the build shape `grail build` uses per module: the
+  modules built before it were compiled from source into interfaces, and this run reads those.
+
+So *every module whose surface is read by something else must have an interface* - that is what the
+per-module build writes as it goes - and a module that is given as source in verification mode must
+match the interface it has. A reject case that means "the entry from its source, the library from
+its interface" is a `--use` case, not an `--interface` one; using the verification mode there asks
+the entry to match an interface nothing wrote, which is a different question and not the one the
+case is about.
+
+One strength limit belongs here, next to the effect-fact transport. In a `--use` build a refined
+parameter's predicate text is in the interface, but the *file* it was written in is not, so an
+obligation in a separately compiled caller cannot be located in that file and keeps its runtime
+check: sound, and weaker than the same call compiled from source. Refinements therefore survive
+separate compilation as contracts, not (yet) as proofs across it.
+
 ### What is still coupled, honestly
 
 The whole-program shape emits a generic specialisation into the part of the *module that asked for
