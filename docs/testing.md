@@ -157,6 +157,27 @@ is resolved when that program is compiled by a compiler that has the new table, 
 ever asked to compile the compiler's own sources. If the compiler's own sources must call the
 builtin, a reseed on the same branch is part of the change, not a follow-up.
 
+**A source change the seed cannot read needs the same two steps, with no new builtin.** The seed
+also carries the rules it was built with, so a `compiler/*.grl` written in a rule a later compiler
+added is rejected although every name resolves. Two-phase `exchange` arguments are the case that
+has now needed this twice in one round: `exchange(&mut c.pos, c.pos + 1)` is accepted by a compiler
+with the two-phase builtin and refused by a seed recorded before it, as an ordinary borrow error
+rather than an unknown name:
+
+```text
+error: reference access conflicts with active borrow
+    --> compiler/native.grl:5727:32
+     |
+5727 |     exchange(&mut c.pos, c.pos + 1);
+     |                                ^
+```
+
+The steps do not change - a `GRAIL_COMPILER` built from these sources with a seed it can still
+read, `bootstrap.mjs stage <target>` (or `update all`) with that variable set, `verify`, and the
+reseed committed on the same branch - and neither does the reason: the checked-in seed is the
+compiler as it was, so a branch first written in a newer rule can only reseed itself through a
+compiler that reads it.
+
 The fresh-clone step is the one to run before pushing such a change. `GRAIL_COMPILER` makes every
 suite pass while the published seed still cannot build the compiler, so a branch can be green locally
 and still fail CI's clean-clone preflight; `ci.mjs` already refuses a stale seed, it just never ran
