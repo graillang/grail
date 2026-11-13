@@ -288,18 +288,6 @@ for (const test of cases) {
   assert.deepEqual(moduleRuns(project, 'target/alias'), built, 'per-module: --per-module and the default differ');
   console.log(`split: driver: grail build (${built.length} compiler runs: ${built.join(', ')}) agrees with --whole-program`);
 
-  // A generic interface implementation read back from an interface file (`impl<T> Iterator for
-  // Iter<T>` in iter) and closures emitted inside specialisations: the per-module build has to
-  // rebuild the implementation's parameters from the file, and give those closures one binding.
-  copyFileSync(join(root, 'book/examples/iterator-adapters.grl'), join(project, 'src/main.grl'));
-  rmSync(join(project, 'src/pair.grl'), { force: true });
-  rmSync(join(project, 'src/util.grl'), { force: true });
-  build(['--whole-program', '-o', 'target/iter-whole']);
-  const iterBuild = build(['-o', 'target/iter-modules']);
-  assert.ok(!/changed binding/.test(iterBuild ?? ''), 'per-module: a symbol changed binding');
-  assert.equal(run(join(project, 'target/iter-modules')).stdout, run(join(project, 'target/iter-whole')).stdout, 'per-module: iter adapters print differently');
-  console.log('split: driver: a generic interface implementation from an interface file builds per module');
-
   // The same holds on the cross targets: the default is one run per module there too, and the
   // program it links makes the same answer as the whole-program build.
   for (const cross of ['aarch64', 'riscv64']) {
@@ -322,6 +310,18 @@ for (const test of cases) {
     assert.ok(ran.length > 1, `${cross}: the default build must run the compiler per module (${ran.join(', ')})`);
     console.log(`split: driver: ${cross}: grail build (${ran.length} compiler runs: ${ran.join(', ')}) agrees with --whole-program`);
   }
+
+  // A generic interface implementation read back from an interface file (`impl<T> Iterator for
+  // Iter<T>` in iter) and closures emitted inside specialisations: the per-module build has to
+  // rebuild the implementation's parameters from the file, and give those closures one binding.
+  copyFileSync(join(root, 'book/examples/iterator-adapters.grl'), join(project, 'src/main.grl'));
+  rmSync(join(project, 'src/pair.grl'), { force: true });
+  rmSync(join(project, 'src/util.grl'), { force: true });
+  build(['--whole-program', '-o', 'target/iter-whole']);
+  const iterBuild = build(['-o', 'target/iter-modules']);
+  assert.ok(!/changed binding/.test(iterBuild ?? ''), 'per-module: a symbol changed binding');
+  assert.equal(run(join(project, 'target/iter-modules')).stdout, run(join(project, 'target/iter-whole')).stdout, 'per-module: iter adapters print differently');
+  console.log('split: driver: a generic interface implementation from an interface file builds per module');
 }
 
 if (timing) {

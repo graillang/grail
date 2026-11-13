@@ -381,6 +381,17 @@ struct C {
     separate: u64,
     // The module of the run being emitted, so a marker opens a run only when the module changes.
     part: u8[],
+    // The label namespace of that unit: every label it mints is `.L<lpart>_<n>`, from a counter that
+    // starts at 1 for each unit, so a unit's emitted text never depends on what was emitted before
+    // it. The counters live per unit (`lunits`, `lnext`, `rnext`) rather than in one field, because
+    // emission can leave a unit and come back - a specialisation requested mid-body is emitted after
+    // the requesting function - and a reset on the way back would mint the same numbers twice.
+    lpart: u8[],
+    // 1-based index into `lunits` of the unit being emitted, or 0 before the first one.
+    lunit: u64,
+    lunits: u8[][],
+    lnext: u64[],
+    rnext: u64[],
     // Where the markers ended up in the optimized stream, and the module each names.
     marks: u64[],
     part_names: u8[][],
@@ -794,16 +805,83 @@ fn emit_path<a, b>(c: (&a mut C), path: &b [u8]) -> unit {
 // file. Markers are top-level lines, so optimize copies them through untouched and reports where
 // they landed; the parts minus those markers are the single-file stream, which is what
 // tools/split-test.mjs checks.
+// The label namespace of an emission unit: its own name with anything that is not an identifier
+// character replaced by '_', then eight hex digits of a hash of the name. Labels are file-local, so
+// one file holding several units needs the prefix to keep them apart - and a unit's text must not
+// depend on the units before it, which is what the per-unit counter (reset in `part`) gives.
+fn unit_prefix<a>(name: &a [u8]) -> u8[] {
+    mut out = u8[];
+    for i in name.len() {
+        b := name[i];
+        if ((97 <= b) & (b <= 122)) || ((65 <= b) & (b <= 90)) || ((48 <= b) & (b <= 57)) || (b == 95) {
+            out.push(b);
+        } else {
+            out.push(95);
+        }
+    }
+    out.push(95);
+    // A 32-bit hash kept below 2^32 so the multiply cannot overflow a checked build.
+    mut h: u64 = 2166136261;
+    for i in name.len() {
+        h = (h * 131 + u64(name[i])) % 4294967291;
+    }
+    mut at: u64 = 28;
+    loop {
+        d := (h >> at) & 15;
+        if d < 10 {
+            out.push(48 + d);
+        } else {
+            out.push(87 + d);
+        }
+        if at == 0 {
+            break;
+        }
+        at -= 4;
+    }
+    return out;
+}
+// 1 when the optimizer runs, so emission units are named in the stream it reads. `--debug` and the
+// other backends read the stream untouched, so they get no marker and no label namespace.
+fn unit_markers<a>(c: (&a C)) -> u64 {
+    if (c.debug != 0) | (c.backend != 0) {
+        return 0;
+    }
+    return 1;
+}
 fn part<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
     if same(view(c.part), view(name)) {
         // Still the same module: the run continues, and its file already has its `.text`.
         return ();
     }
     c.part = name.copy();
-    if c.split != 0 {
+    c.lpart = unit_prefix(view(name));
+    mut k = 0;
+    while k < c.lunits.len() {
+        if same(view(c.lunits[k]), view(name)) {
+            break;
+        }
+        k += 1;
+    }
+    if k == c.lunits.len() {
+        c.lunits.push(name.copy());
+        c.lnext.push(1);
+        c.rnext.push(0);
+    }
+    c.lunit = k + 1;
+    c.label = c.lnext[k];
+    c.ref_next = c.rnext[k];
+    if unit_markers(&c) != 0 {
+        // The marker states the unit's name (what `--split` names a file after) and the label
+        // prefix its code mints (what the optimizer has to recognise as this unit's labels).
+        prefix := c.lpart.copy();
         o(&mut c, view(".grail_part "));
         o(&mut c, name);
-        o(&mut c, view("\n.text\n"));
+        c.out.push(32);
+        o(&mut c, view(prefix));
+        c.out.push(10);
+        if c.split != 0 {
+            o(&mut c, view(".text\n"));
+        }
     }
     // Each module's literals start eight-aligned, in one file as in parts: a part object's section
     // is aligned on its own, so the single build pads where the split link will. Only an ELF build
@@ -898,8 +976,13 @@ fn write_parts<a, b, d>(c: (&a mut C), path: &b [u8], text: &d [u8]) -> u64 {
     mut files = u8[][];
     mut status: u64 = 0;
     for k in c.marks.len() {
-        // Past the `.grail_part NAME` line: the run begins at the `.text` directive under it.
-        start := c.marks[k] + 12 + c.part_names[k].len() + 1;
+        // Past the `.grail_part` line: the run begins at the `.text` directive under it. The offset
+        // is found rather than computed, so the marker line may carry more than the module name.
+        mut start = c.marks[k];
+        while (start < text.len()) & (text[start] != 10) {
+            start += 1;
+        }
+        start += 1;
         mut end = text.len();
         if k + 1 < c.marks.len() {
             end = c.marks[k + 1];
@@ -2548,10 +2631,31 @@ fn get<a, b>(c: (&a mut C), id: u64, reg: &b [u8]) -> unit {
 fn label<a>(c: (&a mut C)) -> u64 {
     n := c.label;
     exchange(&mut c.label, n + 1);
+    k := c.lunit;
+    if (k != 0) & (k <= c.lnext.len()) {
+        c.lnext[k - 1] = n + 1;
+    }
     return n;
 }
 fn lname<a>(c: (&a mut C), n: u64) -> unit {
+    // A label is `.L<unit>_<n>`: the unit's namespace, then the unit's own counter. Copies, because
+    // `o` borrows `c` mutably and the prefix is a field of it.
+    prefix := c.lpart.copy();
     o(&mut c, view(".L"));
+    o(&mut c, view(prefix));
+    c.out.push(95);
+    on(&mut c, n);
+    return ();
+}
+// The frame constant of a function: `.F<unit prefix>_<n>`, `.set` at its end. It is named in the
+// unit's namespace like every other label because two units' counters can both reach `n` - and a
+// shared `.F` name would let one function's frame size decide another function's displacements,
+// since `.set` is one symbol per file (B1 stage 5).
+fn fname<a>(c: (&a mut C), n: u64) -> unit {
+    prefix := c.lpart.copy();
+    o(&mut c, view(".F"));
+    o(&mut c, view(prefix));
+    c.out.push(95);
     on(&mut c, n);
     return ();
 }
@@ -6072,7 +6176,11 @@ fn ref_check<a, b, d, e>(c: (&a mut C), pred: Pred, names: (&b u8[][]), slots: (
         return ();
     }
     n := c.ref_next;
-    c.ref_next = n + 1;
+    exchange(&mut c.ref_next, n + 1);
+    k := c.lunit;
+    if (k != 0) & (k <= c.rnext.len()) {
+        c.rnext[k - 1] = n + 1;
+    }
     v := pred_value(&mut c, Pred { file: pred.file, lo: pred.lo, hi: pred.hi }, &names, &slots, &tys);
     if c.raw == 0 {
         require_type(&mut c, v.ty, 0);
@@ -6085,8 +6193,12 @@ fn ref_check<a, b, d, e>(c: (&a mut C), pred: Pred, names: (&b u8[][]), slots: (
     at := src_where(&mut c, at_file, at_pos);
     req := ref_requirement(&mut c, view(fn_name), view(at));
     mut pred_label = copy_bytes(view(".Lrfp"));
+    push_bytes(&mut pred_label, view(c.lpart));
+    pred_label.push(95);
     decimal(&mut pred_label, n);
     mut req_label = copy_bytes(view(".Lrfr"));
+    push_bytes(&mut req_label, view(c.lpart));
+    req_label.push(95);
     decimal(&mut req_label, n);
     ref_data(&mut c, view(pred_label), view(text));
     ref_data(&mut c, view(req_label), view(req));
@@ -12650,6 +12762,10 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     out_mark := c.out.len();
     fact_mark := llvm::facts_len(&c.facts);
     part_mark := c.part.copy();
+    part_lpart := c.lpart.copy();
+    part_lunit := c.lunit;
+    part_label := c.label;
+    part_ref := c.ref_next;
     closure_mark := c.closures.len();
     spec_closure_mark := c.spec_closures;
     mut dstart = 0;
@@ -13052,12 +13168,12 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     o(&mut c, view("pushq %rbp\nmovq %rsp,%rbp\n"));
     frame := label(&mut c);
     if c.target == 4 {
-        o(&mut c, view("framesub .F"));
-        on(&mut c, frame);
+        o(&mut c, view("framesub "));
+        fname(&mut c, frame);
         c.out.push(10);
     } else {
-        o(&mut c, view("subq $.F"));
-        on(&mut c, frame);
+        o(&mut c, view("subq $"));
+        fname(&mut c, frame);
         o(&mut c, view(",%rsp\n"));
     }
     if export == 2 {
@@ -13079,10 +13195,10 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // The parameter refinements hold here, where the parameters are the arguments they were given.
     // Before the frame zeroing on purpose: the check's own return address must stay inside the
     // prologue's no-position range, so a failure reports the call site rather than this statement.
-    o(&mut c, view("leaq -.F"));
-    on(&mut c, frame);
-    o(&mut c, view("(%rbp),%rdi\nmovq $.F"));
-    on(&mut c, frame);
+    o(&mut c, view("leaq -"));
+    fname(&mut c, frame);
+    o(&mut c, view("(%rbp),%rdi\nmovq $"));
+    fname(&mut c, frame);
     o(&mut c, view("/8-"));
     on(&mut c, count);
     o(&mut c, view(",%rcx\nxorl %eax,%eax\nrep stosq\n"));
@@ -13188,8 +13304,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     if tls_slot != 0 {
         tls_leave_callback(&mut c, tls_slot, adopt_slot);
     }
-    o(&mut c, view("xorq %rax,%rax\nleave\nret\n.set .F"));
-    on(&mut c, frame);
+    o(&mut c, view("xorq %rax,%rax\nleave\nret\n.set "));
+    fname(&mut c, frame);
     c.out.push(44);
     n := c.next;
     on(&mut c, div(n + 1, 2) * 16);
@@ -13202,6 +13318,15 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     if c.retry != 0 {
 
         exchange(&mut c.part, part_mark);
+        exchange(&mut c.lpart, part_lpart);
+        exchange(&mut c.label, part_label);
+        exchange(&mut c.ref_next, part_ref);
+        // The unit's own counters go back with it: a discarded attempt must not spend its numbers.
+        c.lunit = part_lunit;
+        if (part_lunit != 0) & (part_lunit <= c.lnext.len()) {
+            c.lnext[part_lunit - 1] = part_label;
+            c.rnext[part_lunit - 1] = part_ref;
+        }
         while out_mark < c.out.len() {
             c.out.pop();
         }
@@ -18970,11 +19095,23 @@ fn emit_specializations<a>(c: (&a mut C)) -> unit {
         if (types != 0) & (contract == 0) & check {
             saved := c.out.len();
             part_mark := c.part.copy();
+            part_lpart := c.lpart.copy();
+            part_lunit := c.lunit;
+            part_label := c.label;
+            part_ref := c.ref_next;
             replay_function(&mut c, i);
             while saved < c.out.len() {
                 c.out.pop();
             }
             exchange(&mut c.part, part_mark);
+            exchange(&mut c.lpart, part_lpart);
+            exchange(&mut c.label, part_label);
+            exchange(&mut c.ref_next, part_ref);
+            c.lunit = part_lunit;
+            if (part_lunit != 0) & (part_lunit <= c.lnext.len()) {
+                c.lnext[part_lunit - 1] = part_label;
+                c.rnext[part_lunit - 1] = part_ref;
+            }
         }
     }
     exchange(&mut c.validating, 0);
@@ -25312,19 +25449,19 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\n"));
         frame := label(&mut c);
         if c.target == 4 {
-            o(&mut c, view("framesub .F"));
-            on(&mut c, frame);
+            o(&mut c, view("framesub "));
+            fname(&mut c, frame);
             c.out.push(10);
         } else {
-            o(&mut c, view("subq $.F"));
-            on(&mut c, frame);
+            o(&mut c, view("subq $"));
+            fname(&mut c, frame);
             o(&mut c, view(",%rsp\n"));
         }
         store_params(&mut c, count);
-        o(&mut c, view("leaq -.F"));
-        on(&mut c, frame);
-        o(&mut c, view("(%rbp),%rdi\nmovq $.F"));
-        on(&mut c, frame);
+        o(&mut c, view("leaq -"));
+        fname(&mut c, frame);
+        o(&mut c, view("(%rbp),%rdi\nmovq $"));
+        fname(&mut c, frame);
         o(&mut c, view("/8-"));
         on(&mut c, count);
         o(&mut c, view(",%rcx\nxorl %eax,%eax\nrep stosq\n"));
@@ -25356,8 +25493,8 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
             exchange(&mut c.terminated, 1);
         }
         cleanup(&mut c, 0);
-        o(&mut c, view("xorq %rax,%rax\nleave\nret\n.set .F"));
-        on(&mut c, frame);
+        o(&mut c, view("xorq %rax,%rax\nleave\nret\n.set "));
+        fname(&mut c, frame);
         c.out.push(44);
         n := c.next;
         on(&mut c, div(n + 1, 2) * 16);
@@ -36983,6 +37120,11 @@ pub fn main() -> u64 {
         split: 0,
         separate: 0,
         part: u8[],
+        lpart: u8[],
+        lunit: 0,
+        lunits: u8[][],
+        lnext: u64[],
+        rnext: u64[],
         marks: u64[],
         part_names: u8[][],
         module: u8[],

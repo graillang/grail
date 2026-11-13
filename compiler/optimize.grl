@@ -39,8 +39,20 @@ struct O {
     zto: u64,
     inl_names: u8[][],
     inl_bodies: u8[][],
+    inl_units: u8[][],
     inl_head: u64[],
-    inl_next: u64[]
+    inl_next: u64[],
+    // The emission unit the stream is inside: its name and its label prefix, both from the
+    // `.grail_part` marker `native.grl` writes. A label is numbered only when it is this unit's.
+    unit: u8[],
+    uprefix: u8[],
+    // 1 when the stream carried any marker, so a single-file build knows to strip them.
+    marked: u64,
+    // The expansion-label counter of each unit (1-based index into `uniq_units` of the one being
+    // emitted, 0 before the first). Per unit and kept across a re-entry, like the emitter's own.
+    uniq_index: u64,
+    uniq_units: u8[][],
+    uniq_next: u64[]
 }
 fn put<a>(v: (&a mut u64[]), i: u64, x: u64) {
     exchange(&mut v[i], x);
@@ -531,6 +543,105 @@ fn classify<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64, second: u64) {
         o.m0.push(m);
     }
 }
+// The counter a label carries: `.L<unit prefix>_<n>` is numbered, everything else is opaque text
+// (`.Lopt` expansions, refinement strings, `.Lret` in an inlined body). A stream with no marker -
+// a caller that hands the optimizer text it produced itself - keeps the old `.L<n>` numbering.
+fn label_number<a, b, d>(s: &a [u8], a: u64, e: u64, uprefix: &d [u8]) -> u64 {
+    if (e <= a + 2) || !same(view(s), a, a + 2, view(".L")) {
+        return 0;
+    }
+    mut at = a + 2;
+    if uprefix.len() == 0 {
+        mut n = 0;
+        mut ok = 1;
+        while at < e {
+            d := s[at];
+            if (d < 48) || (57 < d) {
+                ok = 0;
+                break;
+            }
+            n = n * 10 + (d - 48);
+            at += 1;
+        }
+        if (ok == 0) || (at == a + 2) {
+            return 0;
+        }
+        return n + 1;
+    }
+    if !same(view(s), at, e, view(uprefix)) | (e <= at + uprefix.len() + 1) {
+        return 0;
+    }
+    mut i = 0;
+    while i < uprefix.len() {
+        if s[at + i] != uprefix[i] {
+            return 0;
+        }
+        i += 1;
+    }
+    at += uprefix.len();
+    if s[at] != 95 {
+        return 0;
+    }
+    at += 1;
+    mut n = 0;
+    while at < e {
+        d := s[at];
+        if (d < 48) || (57 < d) {
+            return 0;
+        }
+        n = n * 10 + (d - 48);
+        at += 1;
+    }
+    return n + 1;
+}
+// The marker line: `.grail_part <unit> <label prefix>`, and the unit fields it sets. 1 when the
+// line was one.
+fn marker<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64) -> u64 {
+    if (e - a < 14) || (s[a] != 46) || !same(view(s), a, a + 12, view(".grail_part ")) {
+        return 0;
+    }
+    mut unit = u8[];
+    mut at = a + 12;
+    while (at < e) & (s[at] != 32) {
+        unit.push(s[at]);
+        at += 1;
+    }
+    mut prefix = u8[];
+    at += 1;
+    while at < e {
+        prefix.push(s[at]);
+        at += 1;
+    }
+    // Labels and the optimizer's own expansion labels are per unit: this unit's counters resume
+    // where it left them, or start at zero the first time.
+    mut k = 0;
+    while k < o.uniq_units.len() {
+        if same(view(o.uniq_units[k]), 0, unit.len(), view(unit)) {
+            break;
+        }
+        k += 1;
+    }
+    if k == o.uniq_units.len() {
+        o.uniq_units.push(unit.copy());
+        o.uniq_next.push(0);
+    }
+    o.uniq_index = k + 1;
+    exchange(&mut o.uniq, o.uniq_next[k]);
+    exchange(&mut o.unit, unit);
+    exchange(&mut o.uprefix, prefix);
+    exchange(&mut o.marked, 1);
+    return 1;
+}
+// The next expansion label number of the unit being emitted, kept with that unit.
+fn uniq_take<a>(o: (&a mut O)) -> u64 {
+    n := o.uniq + 1;
+    exchange(&mut o.uniq, n);
+    k := o.uniq_index;
+    if (k != 0) & (k <= o.uniq_next.len()) {
+        o.uniq_next[k - 1] = n;
+    }
+    return n;
+}
 fn parse<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64) {
     o.ls.push(a);
     o.le.push(e);
@@ -559,21 +670,7 @@ fn parse<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64) {
         if a < e {
             if s[e - 1] == 58 {
                 op = 100;
-                if same(view(s), a, a + 2, view(".L")) & (e - a > 3) {
-                    mut n = 0;
-                    mut ok = 1;
-                    for i in e - a - 3 {
-                        d := s[a + 2 + i];
-                        if d < 48 || 57 < d {
-                            ok = 0;
-                        } else {
-                            n = n * 10 + d - 48;
-                        }
-                    }
-                    if ok != 0 {
-                        lab = n + 1;
-                    }
-                }
+                lab = label_number(view(s), a, e - 1, view(o.uprefix));
             } else {
                 if s[a] == 46 {
                     op = 101;
@@ -1692,11 +1789,12 @@ fn out_number<a>(o: (&a mut O), n: u64) {
 fn emit_line<a, b>(o: (&a mut O), s: &b [u8], i: u64) {
     op := o.op[i];
     if op == 40 || op == 41 || op == 44 {
-        n := o.uniq + 1;
-        exchange(&mut o.uniq, n);
-        app(&mut o.out, view("cmpq 8(%rdi),%rsi\njb .Lopt"));
+        n := uniq_take(&mut o);
+        app(&mut o.out, view("cmpq 8(%rdi),%rsi\njb .L"));
+        opt_label(&mut o);
         out_number(&mut o, n);
-        app(&mut o.out, view("\ncall rt_abort\n.Lopt"));
+        app(&mut o.out, view("\ncall rt_abort\n.L"));
+        opt_label(&mut o);
         out_number(&mut o, n);
         if op == 40 {
             app(&mut o.out, view(":\nmovq (%rdi),%rax\nleaq (%rax,%rsi,8),%rax\n"));
@@ -1722,18 +1820,20 @@ fn emit_line<a, b>(o: (&a mut O), s: &b [u8], i: u64) {
         return ();
     }
     if op == 45 || op == 46 {
-        fast := o.uniq + 1;
-        done := o.uniq + 2;
-        exchange(&mut o.uniq, done);
-        app(&mut o.out, view("movq 8(%rdi),%rcx\ncmpq 16(%rdi),%rcx\njb .Lopt"));
+        fast := uniq_take(&mut o);
+        done := uniq_take(&mut o);
+        app(&mut o.out, view("movq 8(%rdi),%rcx\ncmpq 16(%rdi),%rcx\njb .L"));
+        opt_label(&mut o);
         out_number(&mut o, fast);
         if op == 45 {
-            app(&mut o.out, view("\ncall rt_push\njmp .Lopt"));
+            app(&mut o.out, view("\ncall rt_push\njmp .L"));
         } else {
-            app(&mut o.out, view("\ncall rt_pushb\njmp .Lopt"));
+            app(&mut o.out, view("\ncall rt_pushb\njmp .L"));
         }
+        opt_label(&mut o);
         out_number(&mut o, done);
-        app(&mut o.out, view("\n.Lopt"));
+        app(&mut o.out, view("\n.L"));
+        opt_label(&mut o);
         out_number(&mut o, fast);
         if op == 45 {
             app(
@@ -1746,7 +1846,8 @@ fn emit_line<a, b>(o: (&a mut O), s: &b [u8], i: u64) {
                 view(":\nleaq 1(%rcx),%rdx\nmovq %rdx,8(%rdi)\naddq (%rdi),%rcx\nmovq %rsi,%rax\nmovb %al,(%rcx)\n")
             );
         }
-        app(&mut o.out, view("movq $0,%rax\n.Lopt"));
+        app(&mut o.out, view("movq $0,%rax\n.L"));
+        opt_label(&mut o);
         out_number(&mut o, done);
         app(&mut o.out, view(":\n"));
         return ();
@@ -1773,6 +1874,14 @@ fn emit_line<a, b>(o: (&a mut O), s: &b [u8], i: u64) {
         }
     }
     o.out.push(10);
+}
+// `opt<unit prefix>_`: the namespace of the optimizer's own expansion labels, so a unit's `.Lopt`
+// numbers do not depend on the expansions the units before it emitted.
+fn opt_label<a>(o: (&a mut O)) {
+    app(&mut o.out, view("opt"));
+    prefix := o.uprefix.copy();
+    app(&mut o.out, view(prefix));
+    o.out.push(95);
 }
 fn emit_frame_slot<a, b>(o: (&a mut O), s: &b [u8], p: u64, k: u64) {
     // -.FN-8(k+1)(%rbp), where .FN is the frame constant named by the prologue subq.
@@ -1906,7 +2015,8 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
                 if j < last {
                     if (o.op[j] == 15) & (o.k0[j] == 4) {
                         if same(view(s), o.s0[j], o.e0[j], view("rt_abort")) {
-                            if (next_live(&o, j, last) == t)
+                            if (o.lab[t] != 0)
+                                & (next_live(&o, j, last) == t)
                                 & (refs[o.lab[t] - 1 - base] == 1) {
                                 put(&mut o.tr, i, 1);
                                 put(&mut o.tr, j, 1);
@@ -2238,6 +2348,7 @@ fn inline_candidate<a, b>(o: (&a mut O), s: &b [u8], prologue: u64) {
     index := o.inl_names.len();
     o.inl_names.push(name);
     o.inl_bodies.push(body);
+    o.inl_units.push(o.unit.copy());
     old := o.inl_head[h];
     o.inl_next.push(old);
     put(&mut o.inl_head, h, index + 1);
@@ -2250,6 +2361,8 @@ fn inline_calls<a>(o: (&a mut O), split: u64, marks: (&a mut u64[])) {
     mut start = 0;
     mut site = 0;
     mut next = 0;
+    mut unit = u8[];
+    mut uprefix = u8[];
     for i in text.len() {
         if text[i] == 10 {
             a := start;
@@ -2262,9 +2375,21 @@ fn inline_calls<a>(o: (&a mut O), split: u64, marks: (&a mut u64[])) {
                     mut k = o.inl_head[h];
                     while k != 0 {
                         n := &o.inl_names[k - 1];
-                        if same(view(text), a + 5, e, view(n)) {
+                        // Only a body this unit emits: inlining across a module boundary would make
+                        // the caller's text a function of a body its own module never declares, and
+                        // a module compiled alone has no other module's bodies anyway.
+                        mut here = 1;
+                        u := &unit;
+                        ul := u.len();
+                        if ul != 0 {
+                            // `same` is this module's slice-vs-token comparison: whole, so 0..len.
+                            if !same(view(o.inl_units[k - 1]), 0, ul, view(u)) {
+                                here = 0;
+                            }
+                        }
+                        if (here != 0) & same(view(text), a + 5, e, view(n)) {
                             site += 1;
-                            emit_body(&mut o, k - 1, site);
+                            emit_body(&mut o, k - 1, site, view(uprefix));
                             done = 1;
                             break;
                         }
@@ -2273,16 +2398,41 @@ fn inline_calls<a>(o: (&a mut O), split: u64, marks: (&a mut u64[])) {
                 }
             }
             if done == 0 {
-                if (split != 0) & (next < marks.len()) {
-                    if (e - a > 12) & (text[a] == 46) & same(view(text), a, a + 12, view(".grail_part ")) {
-                        exchange(&mut marks[next], o.out.len());
-                        next += 1;
+                if (e - a > 12) & (text[a] == 46) & same(view(text), a, a + 12, view(".grail_part ")) {
+                    mut fresh = u8[];
+                    mut at = a + 12;
+                    while (at < e) & (text[at] != 32) {
+                        fresh.push(text[at]);
+                        at += 1;
+                    }
+                    exchange(&mut unit, fresh);
+                    mut fresh_prefix = u8[];
+                    at += 1;
+                    while at < e {
+                        fresh_prefix.push(text[at]);
+                        at += 1;
+                    }
+                    exchange(&mut uprefix, fresh_prefix);
+                    // A unit starts its own inline-site numbers, so one unit's text does not depend
+                    // on how many sites the units before it expanded.
+                    site = 0;
+                    if split != 0 {
+                        if next < marks.len() {
+                            exchange(&mut marks[next], o.out.len());
+                            next += 1;
+                        }
+                    } else {
+                        // A single-file build keeps no markers: they are the splitter's, and the
+                        // units they name exist only for the optimizer's own decisions.
+                        done = 1;
                     }
                 }
-                for x in e - a {
-                    o.out.push(text[a + x]);
+                if done == 0 {
+                    for x in e - a {
+                        o.out.push(text[a + x]);
+                    }
+                    o.out.push(10);
                 }
-                o.out.push(10);
             }
         }
     }
@@ -2290,7 +2440,10 @@ fn inline_calls<a>(o: (&a mut O), split: u64, marks: (&a mut u64[])) {
         o.out.push(text[start + x]);
     }
 }
-fn emit_body<a>(o: (&a mut O), k: u64, site: u64) {
+// `_i<unit prefix>_<site>` on every `.L` in the body: the site number disambiguates two copies of
+// one body, and the unit prefix keeps a body label without a prefix of its own (`.Lret`) apart from
+// the same label minted by another unit of the same file.
+fn emit_body<a, b>(o: (&a mut O), k: u64, site: u64, prefix: &b [u8]) {
     body := o.inl_bodies[k].copy();
     mut i = 0;
     n := body.len();
@@ -2319,6 +2472,8 @@ fn emit_body<a>(o: (&a mut O), k: u64, site: u64) {
                 i += 1;
             }
             app(&mut o.out, view("_i"));
+            app(&mut o.out, view(prefix));
+            o.out.push(95);
             out_number(&mut o, site);
         } else {
             o.out.push(c);
@@ -2506,8 +2661,15 @@ pub fn optimize_parts<b>(s: &b [u8], split: u64, marks: (&mut u64[]), names: (&m
         zto: 0,
         inl_names: u8[][],
         inl_bodies: u8[][],
+        inl_units: u8[][],
         inl_head: u64[],
         inl_next: u64[],
+        unit: u8[],
+        uprefix: u8[],
+        marked: 0,
+        uniq_index: 0,
+        uniq_units: u8[][],
+        uniq_next: u64[],
     };
     for i in 4096 {
         o.inl_head.push(0);
@@ -2528,14 +2690,10 @@ pub fn optimize_parts<b>(s: &b [u8], split: u64, marks: (&mut u64[]), names: (&m
                     }
                 }
                 if inside == 0 {
-                    if split != 0 {
-                        if (e - a > 12) & (s[a] == 46) & same(view(s), a, a + 12, view(".grail_part ")) {
+                    if marker(&mut o, view(s), a, e) != 0 {
+                        if split != 0 {
                             marks.push(o.out.len());
-                            mut name = u8[];
-                            for k in e - a - 12 {
-                                name.push(s[a + 12 + k]);
-                            }
-                            names.push(name);
+                            names.push(o.unit.copy());
                         }
                     }
                     for x in e - a {
@@ -2561,7 +2719,8 @@ pub fn optimize_parts<b>(s: &b [u8], split: u64, marks: (&mut u64[]), names: (&m
     for x in s.len() - start {
         o.out.push(s[start + x]);
     }
-    if o.inl_names.len() != 0 {
+    // Either something inlines, or the markers have to be taken out of a single-file build.
+    if (o.inl_names.len() != 0) || (o.marked != 0) {
         inline_calls(&mut o, split, marks);
     }
     return exchange(&mut o.out, u8[]);

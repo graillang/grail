@@ -15,10 +15,13 @@
 //  (f) corruption  - a corrupted store entry is a miss and a rebuild, never a wrong binary, and the
 //                    entry is repaired instead of missing forever.
 //
-// What the module level cannot do yet is also pinned here: the emitter numbers its local labels over
-// one stream, so a change in one module re-spells the text of every module emitted after it. Those
-// modules miss by the emitted-text guard, not by their own keys - which is why a stale object is
-// impossible, and why an edit in a big program still reassembles the modules after it.
+// (c) is also where the *independence* of a module's emitted text is pinned, by measurement rather
+// than by argument: every label is minted in its module's own namespace from a counter that restarts
+// with that module (`.L<module>_<hash>_<n>`, `docs/design/separate-compilation.md` stage 5), and the
+// optimizer inlines only within one module, so an edit in one module leaves every other part's
+// assembly byte-identical. Before that change the emitter numbered its local labels over one stream
+// and the test measured 0 hit / 6 miss for an edit in the entry module; it now requires 5 hit / 1
+// miss and compares the untouched parts' bytes.
 //
 // Usage: bun tools/cache-test.mjs [--target T]
 
@@ -181,6 +184,19 @@ function proveReuse() {
 }
 
 // ---- (c) one module's source ------------------------------------------------------------------
+// The parts of the last split build, as `module -> digest of its assembly`, so "an edit did not
+// re-spell the modules after it" can be a comparison of bytes.
+function partDigests() {
+  const parts = emissionOrder();
+  const out = new Map();
+  const manifest = readFileSync(`${program}.parts`, 'utf8').split('\n').filter(row => row.startsWith(project));
+  for (const row of manifest) {
+    const module = row.slice(row.lastIndexOf('/') + 1).replace(/^[^.]*\./, '').replace(/\.s$/, '');
+    out.set(module, digest(readFileSync(row)));
+  }
+  assert.equal(out.size, parts.length, 'every part must be named by the manifest');
+  return out;
+}
 function provePrecision() {
   const before = emissionOrder();
   setScale(4);
@@ -191,16 +207,23 @@ function provePrecision() {
   assert.ok(!result.line.names.includes('helper'), `a module that does not read it must hit: ${result.output}`);
   assert.equal(run(program), '19', 'the rebuilt program must use the new constant');
 
-  // And the thing the module key cannot see: the emitted text of every later module is re-spelled,
-  // so those modules miss through the emitted-text guard even though nothing they declare changed.
+  // And the property this stage exists for: a module added in the entry does not re-spell any other
+  // module's text. The modules after it hit, and the bytes of their parts are the bytes they had.
+  const was = partDigests();
   setMainUnused();
   const shifted = build(['--whole-program', '--cache', '-o', program]);
   assert.equal(shifted.status, 0, `the second edit failed to build\n${shifted.output}`);
-  assert.ok(shifted.line.names.includes('main'), `the edited module must miss: ${shifted.output}`);
+  assert.deepEqual(shifted.line.names, ['main'], `only the edited module may miss: ${shifted.output}`);
+  assert.equal(shifted.line.hits, before.length - 1, `every other module must hit: ${shifted.output}`);
   const order = emissionOrder();
   assert.deepEqual(order, before, 'the emission order must not change');
+  const now = partDigests();
+  const changed = [...now.keys()].filter(module => was.get(module) !== now.get(module));
+  // `before` names parts as `NNN.module`; the edited module's part is the one that may change.
+  const edited = before.filter(name => name.replace(/^\d+\./, '') === 'main');
+  assert.deepEqual(changed, edited, `only the edited module's assembly may change, got ${changed.join(', ')}`);
   const reference = assertUncachedBuild('shifted');
-  return { line: result.line, shifted: shifted.line, order, reference };
+  return { line: result.line, shifted: shifted.line, order, reference, changed };
 }
 
 // ---- (d) a code-generation flag ---------------------------------------------------------------
@@ -465,7 +488,7 @@ console.log(`(a) reuse      cold ${ms(reuse.cold.ms)} -> warm ${ms(reuse.warm.ms
 console.log(`(b) precision  ${precision.line.hits} hit, ${precision.line.misses} miss (${precision.line.names.join(', ')}) for an edit in util, order ${precision.order.join(' ')}`);
 console.log(`(g) modules    cold ${ms(modules.cold.ms)} -> warm ${ms(modules.warm.ms)} (${(modules.cold.ms / modules.warm.ms).toFixed(1)}x): ${modules.warm.line.hits} hit, ${modules.warm.line.misses} miss; ${modules.warm.line.what}`);
 console.log(`(g) modules    a body edit reruns ${modules.body.line.names.join(', ')}; a surface edit reruns ${modules.surface.line.hits + modules.surface.line.misses - modules.surface.line.hits} of ${modules.surface.line.hits + modules.surface.line.misses} runs`);
-console.log(`               ${precision.shifted.hits} hit, ${precision.shifted.misses} miss (${precision.shifted.names.join(', ')}) for an edit in main: the modules after it are re-spelled`);
+console.log(`               ${precision.shifted.hits} hit, ${precision.shifted.misses} miss (${precision.shifted.names.join(', ')}) for an edit in main: only its own part's assembly changed (${precision.changed.join(', ')})`);
 console.log(`(c) flags      --overflow=wrap: ${flagProof.wrapped.hits} hit, ${flagProof.wrapped.misses} miss; back: ${flagProof.back.misses} miss`);
 console.log(`(d) interface  warm ${interfaceProof.warm.hits} hit; a tampered interface is refused; restored: ${interfaceProof.after.hits} hit, ${interfaceProof.after.misses} miss`);
 console.log(`(e) corruption helper entry: ${corruption.rebuilt.hits} hit, ${corruption.rebuilt.misses} miss (${corruption.rebuilt.names.join(', ')}); healed: ${corruption.healed.misses} miss; image: ${corruption.afterImage.what}`);
