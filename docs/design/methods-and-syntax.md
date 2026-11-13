@@ -106,10 +106,15 @@ element. Sorted-vector sets: `vecs::insert_sorted(&mut v, x)` (keeps order, reje
 
 `strings::starts_with`, `ends_with`, `find` (→ `num?`), `contains`, `split` (on a byte),
 `trim`, `join_with`, ASCII `to_upper`/`to_lower`, and `parse_num` (→ `num?`, `None` for
-non-digits or overflow), `replace` and `repeat`. Unicode: `chars` decodes UTF-8 into code points
-(`u32[]`, invalid bytes become U+FFFD), `char_count` counts them and `push_char` appends a code
-point's UTF-8 encoding. `strings::to_upper/to_lower` are ASCII-only; the built-in methods also map
-Latin, Greek and Cyrillic letters.
+non-digits or overflow), `replace` and `repeat`. UTF-8 (Rust's `str` API): `is_utf8` and
+`utf8_error` (→ `u64?`, the offset of the first ill-formed sequence, strict validation),
+`chars`/`char_indices` (lazy `iter::Iter<char>` and `iter::Iter<(u64, char)>`; invalid input
+decodes to one U+FFFD per maximal subpart), `char_count`, `is_char_boundary`,
+`slice_chars(text, lo, hi)` (a view; both offsets must be char boundaries), and
+`encode_utf8`/`push_char` (a `char`'s encoding, 1 to 4 bytes). The iterators own a copy of the
+bytes: an `iter::Iter<T>` carries no lifetime, so a borrow of the argument cannot live inside it.
+`strings::to_upper/to_lower` are ASCII-only; the built-in methods also map Latin, Greek and
+Cyrillic letters.
 
 ## Constants
 

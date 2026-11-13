@@ -1,0 +1,137 @@
+use strings;
+
+// The code points of a byte sequence as words, with invalid input replaced by U+FFFD.
+fn lossy(bytes: u8[]) -> u64[] {
+    mut out = u64[];
+    it := strings::chars(view(bytes));
+    for c in it {
+        out.push(u64(c));
+    }
+    return out;
+}
+fn one(bytes: u8[]) -> u64 {
+    v := lossy(bytes);
+    assert(v.len() == 1);
+    return v[0];
+}
+fn main() {
+    // ASCII.
+    ascii := "abc".text();
+    assert(strings::is_utf8(view(ascii)));
+    assert(strings::char_count(view(ascii)) == 3);
+    a := strings::chars(view(ascii)).collect();
+    assert(a.len() == 3);
+    assert(a[0] == 'a');
+    assert(a[2] == 'c');
+    if let Some(i) = strings::utf8_error(view(ascii)) {
+        assert(false);
+    }
+    // 2-byte, 3-byte and 4-byte sequences, including both ends of each range.
+    assert(one(u8[0xC2, 0x80]) == 128);         // U+0080, the first 2-byte scalar
+    assert(one(u8[0xC3, 0xA9]) == 233);         // é
+    assert(one(u8[0xDF, 0xBF]) == 2047);        // U+07FF, the last 2-byte scalar
+    assert(one(u8[0xE0, 0xA0, 0x80]) == 2048);  // U+0800, the first 3-byte scalar
+    assert(one(u8[0xE2, 0x82, 0xAC]) == 8364);  // €
+    assert(one(u8[0xED, 0x9F, 0xBF]) == 55295); // U+D7FF, the last scalar below the surrogates
+    assert(one(u8[0xEE, 0x80, 0x80]) == 57344); // U+E000, the first scalar above them
+    assert(one(u8[0xEF, 0xBF, 0xBF]) == 65535); // U+FFFF, the last 3-byte scalar
+    assert(one(u8[0xF0, 0x90, 0x80, 0x80]) == 65536); // U+10000, the first 4-byte scalar
+    assert(one(u8[0xF0, 0x9F, 0x91, 0x8B]) == 128075); // 👋
+    assert(one(u8[0xF4, 0x8F, 0xBF, 0xBF]) == 1114111); // U+10FFFF, the last scalar
+    // Every class of invalid sequence.
+    assert(one(u8[0x80]) == 65533);             // a bare continuation byte
+    assert(one(u8[0xBF]) == 65533);
+    assert(one(u8[0xFF]) == 65533);             // a byte no sequence can start with
+    assert(one(u8[0xFE]) == 65533);
+    assert(lossy(u8[0xC0, 0xAF]).len() == 2);   // overlong 2-byte: two maximal subparts
+    assert(lossy(u8[0xC1, 0xBF]).len() == 2);
+    assert(lossy(u8[0xE0, 0x80, 0x80]).len() == 3); // overlong 3-byte
+    assert(lossy(u8[0xE0, 0x9F, 0xBF]).len() == 3);
+    assert(lossy(u8[0xED, 0xA0, 0x80]).len() == 3); // surrogate D800
+    assert(lossy(u8[0xED, 0xBF, 0xBF]).len() == 3); // surrogate DFFF
+    assert(lossy(u8[0xF4, 0x90, 0x80, 0x80]).len() == 4); // above U+10FFFF
+    assert(lossy(u8[0xF5, 0x80, 0x80, 0x80]).len() == 4); // lead above F4
+    assert(lossy(u8[0xF8, 0x88, 0x80, 0x80, 0x80]).len() == 5); // a 5-byte sequence
+    // A bad continuation byte ends the maximal subpart: E2 82 is a valid prefix, then 'A'.
+    split := lossy(u8[0xE2, 0x82, 0x41]);
+    assert(split.len() == 2);
+    assert(split[0] == 65533);
+    assert(split[1] == 65);
+    // Truncated sequences at the end consume the bytes that are there.
+    assert(lossy(u8[0xE2, 0x82]).len() == 1);
+    assert(lossy(u8[0xF0, 0x9F, 0x91]).len() == 1);
+    assert(lossy(u8[0xE2]).len() == 1);
+    // Validation and the offset of the first bad sequence.
+    assert(strings::is_utf8(view(u8[0x68, 0xC3, 0xA9])));
+    assert(strings::is_utf8(view(u8[0x68, 0xC3, 0x28])) == false);
+    bad := u8[104, 226, 130, 65, 105];
+    assert(!strings::is_utf8(view(bad)));
+    match strings::utf8_error(view(bad)) {
+        Some(i) => {
+            assert(i == 1);
+        },
+        None => {
+            assert(false);
+        }
+    }
+    valid := u8[97, 195, 169];
+    if let Some(i) = strings::utf8_error(view(valid)) {
+        assert(false);
+    }
+    // Offsets: 'a' 0, é 1, € 3, 👋 6, end 10.
+    t := "aé€👋".text();
+    assert(t.len() == 10);
+    assert(strings::char_count(view(t)) == 4);
+    pair := strings::char_indices(view(t)).collect();
+    assert(pair.len() == 4);
+    assert(pair[0].0 == 0);
+    assert(pair[0].1 == 'a');
+    assert(pair[1].0 == 1);
+    assert(pair[1].1 == 'é');
+    assert(pair[2].0 == 3);
+    assert(pair[2].1 == '€');
+    assert(pair[3].0 == 6);
+    assert(pair[3].1 == '👋');
+    assert(strings::is_char_boundary(view(t), 0));
+    assert(strings::is_char_boundary(view(t), 1));
+    assert(!strings::is_char_boundary(view(t), 2));
+    assert(strings::is_char_boundary(view(t), 3));
+    assert(!strings::is_char_boundary(view(t), 4));
+    assert(!strings::is_char_boundary(view(t), 5));
+    assert(strings::is_char_boundary(view(t), 6));
+    assert(!strings::is_char_boundary(view(t), 7));
+    assert(strings::is_char_boundary(view(t), 10));
+    assert(!strings::is_char_boundary(view(t), 11));
+    assert(strings::slice_chars(view(t), 3, 6).len() == 3);
+    assert(strings::slice_chars(view(t), 0, 1).len() == 1);
+    assert(strings::slice_chars(view(t), 10, 10).len() == 0);
+    print(strings::slice_chars(view(t), 1, 3));
+    print(strings::slice_chars(view(t), 6, 10));
+    println("");
+    // Encoding round-trips every sequence, and the iterator chains with the adapters.
+    mut back = u8[];
+    it := strings::chars(view(t));
+    for c in it {
+        strings::push_char(&mut back, c);
+    }
+    assert(back.len() == 10);
+    for i in 10 {
+        assert(back[i] == t[i]);
+    }
+    mut encoded = u8[];
+    strings::encode_utf8('€', &mut encoded);
+    assert(encoded.len() == 3);
+    assert(encoded[0] == 226);
+    strings::encode_utf8('a', &mut encoded);
+    assert(encoded.len() == 4);
+    assert(encoded[3] == 97);
+    // map/filter/collect over the iterator.
+    upper_offsets := strings::char_indices(view(t)).filter(|p: &(u64, char)| -> bool p.0 > 0).map(|p: (u64, char)| -> u64 p.0).collect();
+    assert(upper_offsets.len() == 3);
+    assert(upper_offsets[0] == 1);
+    assert(upper_offsets[2] == 6);
+    late := strings::chars(view(t)).map(|c: char| -> u64 u64(c)).filter(|v: &u64| -> bool *v > 300).collect();
+    assert(late.len() == 2);
+    assert(late[0] == 8364);
+    println("{}-{}", strings::char_count(view(t)), late.len());
+}

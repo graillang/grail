@@ -52,3 +52,37 @@ A loop over views borrows them: bind the result first (`parts := name.split(' ')
 **Try it:** print `clean.len()` and `line.len()` to see what `trim` removed.
 
 Also try a non-ASCII greeting and compare its byte length with the number of visible letters.
+
+## UTF-8
+
+Text is bytes, so "one character" and "one byte" are different questions. The `strings` module
+answers them with Rust's `str` API: `strings::is_utf8(bytes)` validates strictly (an overlong form, a
+surrogate, a value above U+10FFFF and a truncated sequence are all rejected), `strings::utf8_error(bytes)`
+returns the offset of the first ill-formed sequence (`u64?`), and `strings::char_count(bytes)` counts
+characters rather than bytes.
+
+`strings::chars(bytes)` is a lazy iterator of `char` values and `strings::char_indices(bytes)` of
+`(u64, char)` pairs, the number being the byte offset each character starts at. Both are
+`iter::Iter` values, so they chain with `map`, `filter` and `collect` like any other iterator; the
+built-in `.chars()` method decodes eagerly into a `char[]` when a vector is more convenient.
+`strings::is_char_boundary(bytes, i)` answers whether an offset starts a character, and
+`strings::slice_chars(bytes, lo, hi)` cuts at two of them: an offset that is not a boundary stops the
+program with a runtime error naming the call site, rather than handing back half a character.
+`strings::encode_utf8(c, &mut out)` and `strings::push_char(&mut out, c)` go the other way, appending
+a `char`'s one to four bytes.
+
+Invalid input never stops a decode: it yields one U+FFFD for each **maximal subpart**, the longest
+prefix of a well-formed sequence plus the byte that broke it, which is Unicode's recommended
+practice and exactly what Rust's `from_utf8_lossy` produces. `E2 82 41` is therefore one replacement
+character for `E2 82` followed by `A`, not three.
+
+{{example:utf8}}
+
+The Grail and Rust versions answer the same questions with the same numbers; two differences are
+Grail's. `strings::chars` copies the bytes it walks, because an `iter::Iter<T>` carries no lifetime
+and so cannot hold a borrow of the argument - Rust's `chars()` borrows the `str` and allocates
+nothing. And a decoded code point is a `char` all the way through, where Rust casts to `u32` to print
+it.
+
+**Try it:** add a five-byte sequence such as `F8 88 80 80 80` to `bad` and watch the replacement
+count grow by one per byte, then feed the result of `push_char` back into `is_utf8`.

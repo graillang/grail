@@ -1,5 +1,6 @@
 module strings;
 use core;
+use iter;
 
 // Byte-oriented text helpers. Inputs are read-only views (`&text`); results are new values.
 pub fn starts_with<a,b>(text:&a [u8],prefix:&b [u8])->bool{
@@ -83,28 +84,167 @@ pub fn from_i64(value:i64)->string{
     return out.text();
 }
 
-// Unicode code points of UTF-8 text (`string` values are always valid UTF-8; for raw bytes, invalid
-// sequences decode to U+FFFD per byte).
-pub fn chars<a>(text:&a [u8])->u32[]{
-    mut out=u32[];mut i=0;n:=text.len();
-    while i<n{
-        b:=text[i];mut cp=65533u32;mut width=1;
-        if b<128{cp=u32(b);}
-        else{if (b>=194)&(b<=223)&(i+1<n){c1:=text[i+1];if (c1&192)==128{cp=u32((b&31)*64+(c1&63));width=2;}}
-        else{if (b>=224)&(b<=239)&(i+2<n){c1:=text[i+1];c2:=text[i+2];if ((c1&192)==128)&((c2&192)==128){v:=(b&15)*4096+(c1&63)*64+(c2&63);if (v>=2048)&&((v<55296)||(v>57343)){cp=u32(v);width=3;}}}
-        else{if (b>=240)&(b<=244)&(i+3<n){c1:=text[i+1];c2:=text[i+2];c3:=text[i+3];if ((c1&192)==128)&((c2&192)==128)&((c3&192)==128){v:=(b&7)*262144+(c1&63)*4096+(c2&63)*64+(c3&63);if (v>=65536)&(v<=1114111){cp=u32(v);width=4;}}}}}}
-        out.push(cp);i+=width;
-    }
-    return out;
+// ---- UTF-8 -------------------------------------------------------------------------------------
+// Grail text is bytes; these helpers read them as UTF-8 and follow Rust's `str` API: the same strict
+// validation (overlong forms, surrogates, scalars above U+10FFFF and truncated sequences are
+// rejected) and the same replacement policy for invalid input - one U+FFFD for each *maximal
+// subpart*, the longest prefix of a well-formed sequence plus the byte that broke it (Unicode's
+// recommended practice, what Rust's `from_utf8_lossy` does).
+
+// The sequence length a leading byte starts, or 0 when no sequence can start with it.
+pub fn utf8_width(lead: u8) -> u64 {
+    if lead < 128 { return 1; }
+    if (lead >= 194) && (lead <= 223) { return 2; }
+    if (lead >= 224) && (lead <= 239) { return 3; }
+    if (lead >= 240) && (lead <= 244) { return 4; }
+    return 0;
 }
-pub fn char_count<a>(text:&a [u8])->u64{v:=chars(text);return v.len();}
-// Appends the UTF-8 encoding of a code point (invalid code points become U+FFFD).
-pub fn push_char<a>(out:(&a mut u8[]),code:u32){
-    mut v=u64(code);if (v>1114111)||((v>=55296)&&(v<=57343)){v=65533;}
-    if v<128{out.push(v);return ();}
-    if v<2048{out.push(192+v/64);out.push(128+v%64);return ();}
-    if v<65536{out.push(224+v/4096);out.push(128+(v/64)%64);out.push(128+v%64);return ();}
-    out.push(240+v/262144);out.push(128+(v/4096)%64);out.push(128+(v/64)%64);out.push(128+v%64);
+// Whether `byte` is a UTF-8 continuation byte (10xxxxxx).
+fn continuation(byte: u8) -> bool {
+    return (byte & 192) == 128;
+}
+// One decoding step from the bytes at hand: (value, bytes consumed, 1 when they were a valid
+// sequence). Invalid input consumes its maximal subpart: 1 byte for a bad lead or a bad first
+// continuation byte, 2 for a bad third byte, 3 for a bad fourth, and the bytes that are there when
+// the input ends early.
+fn step_at(lead: u8, b1: u8, b2: u8, b3: u8, left: u64) -> (char, u64, u64) {
+    w := utf8_width(lead);
+    if w == 1 { return (char(u64(lead)), 1, 1); }
+    if w == 0 { return (char(65533), 1, 0); }
+    if left < 2 { return (char(65533), 1, 0); }
+    mut low = 128;
+    mut high = 191;
+    if lead == 224 { low = 160; }  // E0 80..9F would be overlong
+    if lead == 237 { high = 159; } // ED A0..BF would be a surrogate
+    if lead == 240 { low = 144; }  // F0 80..8F would be overlong
+    if lead == 244 { high = 143; } // F4 90..BF would be above U+10FFFF
+    if (b1 < low) || (b1 > high) { return (char(65533), 1, 0); }
+    if w == 2 { return (char(u64(lead & 31) * 64 + u64(b1 & 63)), 2, 1); }
+    if left < 3 { return (char(65533), 2, 0); }
+    if !continuation(b2) { return (char(65533), 2, 0); }
+    if w == 3 { return (char(u64(lead & 15) * 4096 + u64(b1 & 63) * 64 + u64(b2 & 63)), 3, 1); }
+    if left < 4 { return (char(65533), 3, 0); }
+    if !continuation(b3) { return (char(65533), 3, 0); }
+    v := u64(lead & 7) * 262144 + u64(b1 & 63) * 4096 + u64(b2 & 63) * 64 + u64(b3 & 63);
+    return (char(v), 4, 1);
+}
+fn decode_at<a>(text: &a [u8], at: u64) -> (char, u64, u64) {
+    left := text.len() - at;
+    mut b1 = u8(0);
+    mut b2 = u8(0);
+    mut b3 = u8(0);
+    if left > 1 { b1 = u8(text[at + 1]); }
+    if left > 2 { b2 = u8(text[at + 2]); }
+    if left > 3 { b3 = u8(text[at + 3]); }
+    return step_at(u8(text[at]), b1, b2, b3, left);
+}
+// The same step over bytes an iterator owns (a `&u8[]`); kept apart from `decode_at` so neither
+// path allocates a view per character.
+fn decode_owned<a>(bytes: &a u8[], at: u64) -> (char, u64, u64) {
+    left := bytes.len() - at;
+    mut b1 = u8(0);
+    mut b2 = u8(0);
+    mut b3 = u8(0);
+    if left > 1 { b1 = u8(bytes[at + 1]); }
+    if left > 2 { b2 = u8(bytes[at + 2]); }
+    if left > 3 { b3 = u8(bytes[at + 3]); }
+    return step_at(u8(bytes[at]), b1, b2, b3, left);
+}
+// Whether every byte is part of a well-formed UTF-8 sequence.
+pub fn is_utf8<a>(text: &a [u8]) -> bool {
+    mut at = 0;
+    len := text.len();
+    while at < len {
+        step := decode_at(text, at);
+        if step.2 == 0 { return false; }
+        at = at + step.1;
+    }
+    return true;
+}
+// The byte offset where the first ill-formed sequence starts, or None for valid UTF-8.
+pub fn utf8_error<a>(text: &a [u8]) -> u64? {
+    mut at = 0;
+    len := text.len();
+    while at < len {
+        step := decode_at(text, at);
+        if step.2 == 0 { return Some(at); }
+        at = at + step.1;
+    }
+    return None;
+}
+// Every code point in order, lazily; invalid sequences decode to U+FFFD by maximal subpart.
+// The iterator owns a copy of the bytes: an `iter::Iter<T>` carries no lifetime, so Grail cannot
+// keep a borrow of the argument alive inside it (Rust's `str::chars` borrows instead).
+pub fn chars<a>(text: &a [u8]) -> iter::Iter<char> {
+    mut bytes = text.copy();
+    mut at = 0;
+    return iter::from_fn(|| -> char? {
+        if at >= bytes.len() { return None; }
+        step := decode_owned(&bytes, at);
+        at = at + step.1;
+        return Some(step.0);
+    });
+}
+// Every code point with the byte offset it starts at, lazily (byte offsets into `text`).
+pub fn char_indices<a>(text: &a [u8]) -> iter::Iter<(u64, char)> {
+    mut bytes = text.copy();
+    mut at = 0;
+    return iter::from_fn(|| -> (u64, char)? {
+        if at >= bytes.len() { return None; }
+        start := at;
+        step := decode_owned(&bytes, at);
+        at = at + step.1;
+        return Some((start, step.0));
+    });
+}
+pub fn char_count<a>(text: &a [u8]) -> u64 {
+    mut at = 0;
+    len := text.len();
+    mut n = 0;
+    while at < len {
+        step := decode_at(text, at);
+        at = at + step.1;
+        n = n + 1;
+    }
+    return n;
+}
+// Whether offset `i` starts a character: 0, the end, or a byte that is not a continuation byte. A
+// byte offset inside a multi-byte sequence is not a boundary, whatever the bytes say about validity.
+pub fn is_char_boundary<a>(text: &a [u8], i: u64) -> bool {
+    if i == 0 { return true; }
+    if i >= text.len() { return i == text.len(); }
+    return !continuation(text[i]);
+}
+// The bytes of the characters at [lo, hi): both offsets must be character boundaries, else the
+// program stops with a runtime error naming the call site.
+pub fn slice_chars<a>(text: &a [u8], lo: u64, hi: u64) -> &a [u8] {
+    assert(is_char_boundary(text, lo) && is_char_boundary(text, hi) && (lo <= hi));
+    return text[lo:hi];
+}
+// Appends the UTF-8 encoding of `c` to `out` (1 to 4 bytes).
+pub fn encode_utf8<a>(c: char, out: (&a mut u8[])) {
+    v := u64(c);
+    if v < 128 { out.push(u8(v)); return (); }
+    if v < 2048 {
+        out.push(u8(192 + v / 64));
+        out.push(u8(128 + v % 64));
+        return ();
+    }
+    if v < 65536 {
+        out.push(u8(224 + v / 4096));
+        out.push(u8(128 + (v / 64) % 64));
+        out.push(u8(128 + v % 64));
+        return ();
+    }
+    out.push(u8(240 + v / 262144));
+    out.push(u8(128 + (v / 4096) % 64));
+    out.push(u8(128 + (v / 64) % 64));
+    out.push(u8(128 + v % 64));
+}
+// `encode_utf8` with the buffer first, matching `out.push(...)`.
+pub fn push_char<a>(out: (&a mut u8[]), c: char) {
+    encode_utf8(c, out);
+    return ();
 }
 pub fn replace<a,b,d>(text:&a [u8],from:&b [u8],to:&d [u8])->u8[]{
     mut out=u8[];if from.len()==0{for b in text{out.push(b);}return out;}mut i=0;
