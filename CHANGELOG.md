@@ -1,5 +1,11 @@
 ## Unreleased
 
+- Fixed: the tree did not compile. Two merge sites arrived half-applied on `gaps-int5`:
+  `none_tag` lost its closing brace, so `compiler/native.grl` reported "unclosed {" at end of file,
+  and the field-shorthand path of a record literal still called `primary(&mut c)` after `primary`
+  gained its `expected` type, so a typechecked build reported "function argument count". Both are
+  one-line repairs (`primary(&mut c, field)`, which is the type the shorthand's field has); the
+  emitted assembly is unchanged.
 - Ranges: a range value is now a `Span` (`lib/span.grl`) that carries the slice it was made from - a
   byte view plus its two ends - so a range its slice does not have is refused where the span is made
   (`span_of` yields `1..0`, which names no bytes) and a range taken from one sequence cannot reach
