@@ -38,8 +38,12 @@ version, flags)`.
 
 ### Interface contents
 
-Text, line-oriented, versioned with a header. Deliberately boring: it is read far more often than
-written, and a hand-readable file makes interface diffs reviewable.
+A versioned, length-counted record stream with one writer and one reader (format 4, built; see
+"Format 4 as built" below). This section described a line-oriented text format when it was written;
+that shape was replaced because its reader was a hand-written parser of a file the compiler had just
+written - two implementations of one format, which is exactly what the record stream removes. The
+format is not readable with `cat`; `grail iface dump` renders the record tree the reader read, which
+is what makes an interface reviewable without a second parser.
 
 - header: format version, module name, compiler version, the source hash it was built from;
 - imports: the interfaces this module read, with their hashes (this is what makes rebuilds sound);
@@ -453,6 +457,185 @@ per importing module.
   state, but two runs still both emit the runtime module, so a full per-module link needs the
   helpers weak (done) and the runtime split out (stage 4). `tools/interface-test.mjs` links each
   module's part from one run and merges the helper parts.
+
+## Format 4 as built: typed interfaces, one writer and one reader
+
+Implemented on `gaps4-iface`; `tools/interface-test.mjs` is the proof and this section is the record.
+The format replaced the line-oriented text of stages 2 and 3 with a versioned, length-counted record
+stream. Everything the text format carried is still carried; what changed is that the file is no
+longer a *spelling* of the declarations that a hand-written parser reads back, but the declarations
+themselves, written once and read once.
+
+### Why the text format had to go
+
+The text format had two halves that could disagree, and one of them was hand-written:
+
+- `iface_module_text` built the file from the declaration store, one line per declaration;
+- `iface_load` re-read it by splitting lines, lexing each one with the compiler's own lexer, and
+  dispatching on its first keyword - about a thousand lines of parsing for a shape one compiler
+  version earlier was writing itself.
+
+Anything the writer spelled ambiguously, or the reader did not expect, was a silent reinterpretation
+or a diagnostic with a line number and no context. The format had already been bitten twice: a
+signature naming a qualified enum from another module (`&a tls::Error`) did not round-trip, and the
+effects row and entry arguments had to be threaded carefully through a version bump. Every new
+declaration kind meant a new spelling, a new parse rule and a new way to lose a field.
+
+### The bytes
+
+```
+file   := "GRIF" VERSION:u8 record* trailer
+record := tag:u8 len:VAR payload[len]
+trailer   tag 2: source digest, then 32 raw bytes of SHA-256 over every byte before them
+```
+
+`VAR` is LEB128, so a small count costs one byte. One tag per declaration kind:
+
+| tag | record | carries |
+| --- | --- | --- |
+| 1 | `module` | module, source path, `std`/`unsafe`/`host`, overflow mode, target |
+| 2 | `trailer` | the source's SHA-256, then the file's own digest |
+| 3 | `link` | one `extern "C" lib` input |
+| 10 | `type` | kind (struct/record/enum/handle), parameter and lifetime counts, `transfer`/`share`, bounds, requirements, fields with their names, types and refinements |
+| 11 | `alias` | name and the type it denotes |
+| 12 | `const` | type, kind (int/text/table), value and raw bytes |
+| 13 | `fn` | signature, generics and their bounds, interface requirements, `where` rows with parameter names, `ensures`, the effects row, `@strict`, the extern symbol, and a template's own body |
+| 14 | `inherent` | a type's methods and the block's own parameters |
+| 15 | `interface` | supers, associated types and the interface's methods |
+| 16 | `impl` | the contract, the type, the implementation's parameters, associated types and methods |
+| 17 | `env` | a closure environment's captured fields |
+
+Every type is a record of its own: `tag, len, mode, regions, payload`. The writer writes mode and the
+lifetime slots for *every* kind, not only "where they are legal" - that rule is what let the text
+format lose a mode on a kind it did not expect to carry one - and the reader reads them for every
+kind, then switches on the tag for the payload. Named types travel as `module::name`, never as a
+table index; a union travels as its members and the reader rebuilds the synthesised declaration; an
+interface travels by name; a closure type carries its environment record as a nested `env` record
+under a name local to the file (`.closure`/`envN`).
+
+### One writer, one reader, and why they cannot disagree
+
+- **One encoder.** `iface_module_bytes` is the only function that produces a file, and it is a
+  function of the declaration store. There is no second string builder: the diagnostic spelling of a
+  type (`type_name`, `iface_type_raw`) still exists for error messages and is *never parsed back*.
+- **One decoder.** `iface_decode` is the only function that consumes one. It runs in one of three
+  phases over the same walk: register names (1), install definitions (2), or describe (0). The
+  describe phase is `grail iface dump`, and because it is the reader itself, a dump is what the
+  compiler would install - not a third spelling that could drift.
+- **Lengths everywhere.** A record states its own length, a string states its own length, and every
+  nested value is a record. The decoder checks that it consumed *exactly* the payload it was given:
+  a record one field longer than this compiler reads is refused with the number of unread bytes,
+  never skipped. That is the property that makes the format evolvable at all: adding a field is a
+  version bump, and an old reader refuses the file instead of misreading it.
+- **The reader is checked against the writer.** `--verify-interface` re-decodes every type it writes
+  and refuses one that does not come back as the same interned type.
+- **The whole file is checked against itself.** `grail iface roundtrip FILE` reads a file, encodes the
+  model it built, and requires the bytes to be identical - "write, read, write again" as one command.
+  `tools/interface-test.mjs` runs it over every interface the corpus emits.
+
+### Inspectability without a second parser
+
+The format is not human-readable, so the tool that makes it reviewable is a *renderer of the record
+tree* rather than a parser of it:
+
+```
+$ grail iface dump DIR/util.iface
+grail-interface 4
+module util
+source "src/util.grl"
+mode overflow=checked target=x86_64
+std 0
+unsafe 0
+host 0
+type util::Stream handle params=0 lifetimes=0 transfer=1 share=0 public=1
+type util::Point struct params=0 lifetimes=0 public=1
+  field x u64
+  field y u64
+fn util::twice (u64) -> u64 public=1 lifetimes=0
+fn util::keep <1> ((tparam 0 0 [])) -> (tparam 0 0 []) public=1 lifetimes=0
+  body
+  |pub fn keep<T>(value: T) -> T {
+  |    return value;
+  |}
+sha256 "…"
+digest "…"
+```
+
+`grail iface roundtrip FILE` is the second half of the same idea: it prints `identical N bytes`, or
+refuses with the first byte offset at which reading and writing disagree. A review that wants to see
+what changed therefore runs one command against the two files; a review that wants a line diff checks
+out the branch and dumps both sides.
+
+### The surface, computed structurally
+
+An interface still carries the public surface only: every `pub` item, every implementation, every
+closure environment, and, to a fixpoint, each private item a carried one names - the helper a public
+template's body calls, the type a public signature names. The fixpoint used to scan the *text* of each
+emitted span for the names of the items it had not kept yet. It is now computed while encoding: the
+type writer records the declarations and interfaces each type names (`deps`), the record writers
+append the predicate and body text they write, and `iface_keep` closes the set over those. The
+citations are therefore produced by the same function that produces the bytes, so they cannot
+describe a different file. A kept private item carries `public=0`, and there is no trailing `private`
+list any more: the bit is on the record.
+
+### Refusals
+
+Each names the file, and, where there is one, the record and the byte offset. Nothing is ever
+half-installed: the prologue, the framing of every record, the trailer's digest and
+`interfaces.manifest` are all verified before the first declaration is read.
+
+1. **not an interface** - no `GRIF` header;
+2. **old text format** - a file that begins `// grail-interface`: `was written in the old text
+   interface format; this compiler reads interface format 4. Re-emit it with \`grail check --interface DIR\``;
+3. **wrong version** - `was written in interface format 3; this compiler reads format 4` (and, for a
+   newer file, `by a newer compiler`);
+4. **truncated** - `is truncated: <record> needs N more bytes and the file ends there`, or `a record
+   says it is longer than the rest of the file`;
+5. **unknown record** - `carries an unknown record (tag 99) … it was written by a newer compiler`;
+6. **unread field** - `carries N bytes this compiler does not read: the record declares X and this
+   compiler reads Y`;
+7. **edited** - `changed after it was written: the digest in its trailer does not match the file`;
+8. **not in the manifest / stale / disagreeing** - the stage-2 refusals, unchanged: the manifest
+   pins the bytes that were written, the source digest catches a changed source, and `--verify`
+   compares the two record trees line by line and names the declaration that differs.
+
+### The cache key
+
+`grail build --cache` keys each module's run on the *surface* of every interface it can read: the
+bytes before the trailer, which is every declaration and nothing that a body edit changes. The source
+digest and the file's own digest live in the trailer, so an edit that changes no declaration leaves
+every downstream key alone - the property the text format got from skipping two line kinds, now a
+byte range (`native::iface_surface`).
+
+### What changed in behaviour, and what got smaller
+
+- **Generic implementations now carry their parameters.** `impl<T> Show for Pair<T>` wrote
+  `params=0` in the text format, because the writer looked the parameter record up under the type's
+  declaration while the reader filed it under the implementation. The record now states the key it is
+  filed under (`iface_enc_impl_params`), so the two agree by construction and the parameters travel.
+- **Bodies stopped being escaped.** A template body is one length-counted byte string, not one quoted
+  row per source line: no escape rule, no row count to disagree with, and a changed statement is still
+  one changed line in a `dump` diff.
+- **Interfaces are smaller.** The compiler's own nine surfaces went from 14,312 bytes of text to
+  9,209 in the record stream (36% smaller), mostly from digests (64 hex characters become 32 bytes),
+  type references that no longer spell `(named module::name mode regions)` and constants that carry
+  raw bytes instead of hex.
+- **Emission is faster.** The compiler's own emit went from 4m12s to 2m14s on this host, because the
+  surface no longer re-scans emitted text for every unkept name in a fixpoint over strings.
+
+### What it does not do
+
+- **The body is not typed IR.** A template's body is still the checked source text the declaration
+  pass captured, replayed at the instantiating caller. Replacing it with a typed body is the stage-3
+  remainder, and it is one length-counted field: a `body` record with a kind byte, so the text and a
+  future typed form can coexist behind one version bump. That is the one thing this format will want
+  from the typed IR workstream, and the field is designed for it rather than for a second format.
+- **Parameter names and defaults.** The `fn` record carries the parameters' *refinement* names
+  (`where`/`pname` rows) because a proof needs them. A general parameter-name list and default
+  arguments are one additive field in the same record - print-time names for a caller that omits an
+  argument - and land with the named-arguments work, not before it.
+- **No signing.** The trailer digest and the manifest are an integrity check against a stale or
+  edited file, not authenticity: whoever can rewrite `DIR` can rewrite both.
 
 ## Stages
 

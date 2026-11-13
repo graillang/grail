@@ -1435,19 +1435,11 @@ fn unit_key<a, b, d, e, g, k>(
     }
     for i in names.len() {
         n := item(&names, i);
-        // An interface's surface, without the lines that change with its module's body alone: the
-        // source file's sha256 and the whole-file digest. An edit that keeps the surface keeps
-        // every other module's key.
+        // An interface's surface: every byte before the trailer, which carries only the source
+        // digest and the file's own digest. An edit that keeps the surface keeps every other
+        // module's key.
         text := host::read_file(view(path_join(view(ifaces), view(n))));
-        rows := lines(view(text));
-        mut surface = u8[];
-        for r in rows.len() {
-            row := item(&rows, r);
-            if !starts(view(row), view("sha256 ")) & !starts(view(row), view("digest ")) {
-                push_bytes(&mut surface, view(row));
-                surface.push(10);
-            }
-        }
+        surface := native::iface_surface(view(text));
         push_bytes(&mut buf, view("interface "));
         push_bytes(&mut buf, view(native::iface_digest(&surface)));
         buf.push(32);
@@ -4766,14 +4758,39 @@ fn help() {
     );
     say(view("  grail tree                        print the resolved dependency graph"));
     say(view("  (--offline works on add, update and fetch: no git or curl is run)"));
+    say(view("  grail iface dump FILE        render the typed records one interface carries"));
+    say(view("  grail iface roundtrip FILE   read it back, write it again, compare byte for byte"));
     say(
         view(
             "  grail [--target T] [--overflow=checked|wrap] OUT.s ENTRY.grl MODULE.grl...  (compiler)"
         )
     );
 }
+// `grail iface dump FILE` and `grail iface roundtrip FILE`: the typed record tree an interface
+// carries, rendered field by field, and the proof that reading it back and writing it again
+// reproduces the file byte for byte. Both run the compiler itself, because the dump *is* the
+// reader's own view of the file - there is no second parser, and so no third spelling to drift.
+fn iface_command<a>(args: (&a u8[][])) -> u64 {
+    if args.len() < 2 {
+        say(view("usage: grail iface dump FILE | grail iface roundtrip FILE"));
+        return 1;
+    }
+    what := item(&args, 0);
+    mut flag = copy(view("--iface-dump"));
+    if eq(view(what), view("roundtrip")) {
+        flag = copy(view("--iface-roundtrip"));
+    } else {
+        if !eq(view(what), view("dump")) {
+            say(view("grail: iface takes `dump` or `roundtrip`"));
+            return 1;
+        }
+    }
+    mut argv = u8[][host::exe_path(), flag, item(&args, 1)];
+    return host::command(argv);
+}
 pub fn is_command<a>(name: &a [u8]) -> bool {
     return eq(view(name), view("build"))
+        || eq(view(name), view("iface"))
         || eq(view(name), view("check"))
         || eq(view(name), view("run"))
         || eq(view(name), view("test"))
@@ -4807,6 +4824,9 @@ pub fn run() -> u64 {
     if eq(view(name), view("build")) {
         mut o = options(&args);
         return build(&args, &mut o);
+    }
+    if eq(view(name), view("iface")) {
+        return iface_command(&args);
     }
     if eq(view(name), view("check")) {
         return check_command(&args);

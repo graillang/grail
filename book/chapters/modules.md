@@ -100,20 +100,27 @@ What this tree does:
   `--whole-program` on every Linux target.
 
 Checked module interfaces (`docs/design/separate-compilation.md` has the built shape):
-`grail check --interface DIR` writes one text file per module plus a manifest, `grail build
+`grail check --interface DIR` writes one file per module plus a manifest, `grail build
 --interface DIR` compiles against those files instead of the imported modules' sources, and
-`--verify` re-reads the sources and refuses the first line that disagrees. A file is refused by name
-when it is missing, stale (the recorded source digest no longer matches) or disagreeing with the
-sources, and its format version, module, compiler modes and own digest are checked before one
+`--verify` re-reads the sources and refuses the first declaration that disagrees. A file is a
+versioned, length-counted record stream - one writer, one reader, no text in between - and
+`grail iface dump FILE` renders the record tree the reader read, so an interface is reviewable
+without a second parser; `grail iface roundtrip FILE` reads it back, writes it again and requires
+the bytes to be identical. A file is refused by name
+when it is missing, stale (the recorded source digest no longer matches), disagreeing with the
+sources, written in another format version, truncated, carrying a record this compiler does not know,
+or edited (its trailer's digest covers every byte before it); all of that is checked before one
 declaration is installed. It carries the handle audits (`transfer=N share=N`) and a closure's
 environment record, which is what stops a module that imports a handle from re-deriving the safe
-answer for the wrong reason. It does not carry bodies: generics still record a source dependency, and
-the module's code is still parsed and emitted in the same run - so the checked surface is real and
-the rebuild saving is not yet.
+answer for the wrong reason. A generic template's body does travel, so an
+importer instantiates a foreign generic without its source; a module's own code is still parsed and
+emitted in the run that names it, so the checked surface is real and the rebuild saving is the
+cache's.
 
 The build cache (`grail build --cache`). In a per-module build it keeps each module's compiler run:
 its key is over the module's own source digests, the surface of every interface it can read (each
-interface without the digest lines that change with a body), the compiler's and the assembler's
+interface's bytes before its trailer, so an edit that changes no declaration leaves it alone), the
+compiler's and the assembler's
 identity, the target and the flag vector. The flag list is not maintained by hand - the key hashes
 the invocation vector, so a flag added to the driver is in the key by construction. Entries live under
 `.work/cache/<target>/` with the digest in the path and every write staged and renamed, and a blob is

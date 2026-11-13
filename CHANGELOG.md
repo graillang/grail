@@ -1,5 +1,26 @@
-## Unreleased
-
+- Changed: module interface files are a **typed record stream, format 4**, not line-oriented
+  text. The compiler wrote the text and then re-read it with a hand-written line lexer and parser -
+  two implementations of one format, and one of them three hundred lines of spelling rules that had
+  already lost a qualified enum in a signature (`&a tls::Error`) and needed a version bump to thread
+  the effects row. Now one writer encodes the declarations and one reader consumes them:
+  `GRIF`, a version byte, then `tag, length, payload` records (module, type, alias, const, fn,
+  inherent, interface, impl, env, link) whose types are records too, then a trailer carrying the
+  source digest and the SHA-256 of every byte before it. Every record and every string is
+  length-counted, and the reader refuses a record with bytes left over rather than skipping them, so
+  a field this compiler does not know is a refusal by name and never a misread. Refusals name the
+  file, the record and the byte: not an interface, the old text format, another version, truncated,
+  unknown record, unread field, edited (trailer digest), not in the manifest, stale, disagreeing.
+  `grail iface dump FILE` renders the typed record tree the reader read - the inspector, with no
+  second parser behind it - and `grail iface roundtrip FILE` reads a file, writes it again and
+  requires byte identity. The surface (which private items travel because a public item names them)
+  is computed from the types and text the writer itself produces, not by scanning emitted lines. A
+  build cache keys on the interface's *surface* bytes (everything before the trailer), so an edit
+  that changes no declaration still leaves downstream keys alone. Two behaviour changes: a generic
+  interface implementation (`impl<T> Show for Pair<T>`) now carries its parameters - the text format
+  wrote `params=0` because writer and reader looked the record up under different keys - and the
+  compiler's own nine interfaces drop from 14,427 to 8,482 bytes, with emission from 4m12s to 2m14s.
+  docs/design/separate-compilation.md, "Format 4 as built"; cases `ifc-*`, and
+  `tools/interface-test.mjs` proves round-trip equality and every refusal.
 - Ranges: a range value is now a `Span` (`lib/span.grl`) that carries the slice it was made from - a
   byte view plus its two ends - so a range its slice does not have is refused where the span is made
   (`span_of` yields `1..0`, which names no bytes) and a range taken from one sequence cannot reach
