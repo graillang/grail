@@ -128,7 +128,11 @@ for (const [position, test] of cases.entries()) {
       // rejection is about.
       const modules = test.modules ?? [];
       assert.ok(modules.length !== 0, `${test.name}: an interface rejection needs module sources`);
-      const emit = execute(compiler, ['--target', target, '--emit-interface', ifaces, join(directory, 'emit.s'), ...modules, ...(test.interfaceFiles ?? []), runtime, osRuntime]);
+      // The interface-producing entry comes first: the compiler reads the first source as the entry
+      // module (the one that may omit `module`), and every later file must declare one. A case's
+      // interface file is written as that entry - it exists to pull the modules in and emit their
+      // interfaces without instantiating the deferred template.
+      const emit = execute(compiler, ['--target', target, '--emit-interface', ifaces, join(directory, 'emit.s'), ...(test.interfaceFiles ?? []), ...modules, runtime, osRuntime]);
       assert.equal(emit.status, 0, `${test.name}: emitting interfaces failed: ${emit.stdout}${emit.stderr}`);
       const viaInterface = execute(compiler, ['--target', target, '--interface', ifaces, join(directory, 'iface.s'), ...files, runtime, osRuntime]);
       assert.equal(viaInterface.status, 1, `${test.name}: the interface build must refuse it too: ${viaInterface.stdout}${viaInterface.stderr}`);
