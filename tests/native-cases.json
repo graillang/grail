@@ -8937,5 +8937,72 @@
     "diagnostic": [
       "`for` is a statement, not an expression: it has no value"
     ]
+  },
+  {
+    "name": "exprif-match-scalar",
+    "source": "fn pick(n: u64) -> u64 {\n    return match n { 0 => 100, 1 => 200, _ => 300 };\n}\nfn main() {\n    for n in 3 {\n        x := match n { 0 => 1, _ => 2 };\n        println(\"{}\", x);\n    }\n    println(\"{}\", pick(1));\n}\n",
+    "stdout": "1\n2\n2\n200\n"
+  },
+  {
+    "name": "exprif-match-enum-optional",
+    "source": "use core;\nenum E { A(u64), B }\nfn main() {\n    e := E::A(5);\n    a := match e { A(v) => v + 1, B => 0 };\n    println(\"{}\", a);\n    o: u64? := Some(7);\n    b := match o { Some(v) => v, None => 0 };\n    println(\"{}\", b);\n}\n",
+    "modules": [
+      "lib/core.grl"
+    ],
+    "stdout": "6\n7\n"
+  },
+  {
+    "name": "exprif-match-record",
+    "source": "struct P { x: u64, y: u64 }\nfn main() {\n    p := P { x: 4, y: 9 };\n    q := match p { P { x: v, y: w } => v * 2 + w };\n    println(\"{}\", q);\n}\n",
+    "stdout": "17\n"
+  },
+  {
+    "name": "exprif-match-nested-if",
+    "source": "fn main() {\n    c := 1 == 1;\n    d := match 2 { 0 => if c { 1 } else { 2 }, _ => 3 };\n    println(\"{}\", d);\n    e := match 0 { 0 => if c { 1 } else { 2 }, _ => 3 };\n    println(\"{}\", e);\n}\n",
+    "stdout": "3\n1\n"
+  },
+  {
+    "name": "exprif-match-diverging-arm",
+    "source": "fn need(c: bool, n: u64) -> u64 {\n    v := match n { 0 => if c { 1 } else { 2 }, _ => { return 9; } };\n    return v;\n}\nfn main() {\n    println(\"{} {}\", need(1 == 1, 0), need(1 == 1, 5));\n}\n",
+    "stdout": "1 9\n"
+  },
+  {
+    "name": "exprif-match-drops-value",
+    "source": "struct P { n: u64 }\nimpl Drop for P {\n    fn drop(self: &mut P) {\n        println(\"drop {}\", self.n);\n    }\n}\nfn make(n: u64) -> P {\n    return P { n: n };\n}\nfn main() {\n    p := match 0 { 0 => make(1), _ => make(2) };\n    println(\"took {}\", p.n);\n}\n",
+    "stdout": "took 1\ndrop 1\n"
+  },
+  {
+    "name": "exprif-match-type-mismatch",
+    "source": "fn main() {\n    c := 1 == 1;\n    x := match 1 { 0 => 1, _ => c };\n    println(\"{}\", x);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "every arm of an expression `match` must have the same type",
+      "the other arm is `u64`, this one is `bool`"
+    ]
+  },
+  {
+    "name": "exprif-match-statement-arm",
+    "source": "fn main() {\n    mut y = 0;\n    x := match 1 { 0 => { y = 5; }, _ => 2 };\n    println(\"{} {}\", x, y);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "this arm of an expression `match` is a block of statements, so it has no value",
+      "write one expression for the arm's value, or make the arm diverge with `return` or `break`"
+    ]
+  },
+  {
+    "name": "exprif-match-borrows",
+    "source": "fn main() {\n    a := 1;\n    b := 2;\n    r := match 1 { 0 => &a, _ => &b };\n    println(\"{}\", *r);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "an expression `match` cannot produce a value that borrows"
+    ]
+  },
+  {
+    "name": "exprif-match-no-value",
+    "source": "fn skip(c: bool) {\n    x := match 1 { 0 => { return (); }, _ => { return (); } };\n    println(\"{}\", x);\n}\nfn main() {\n    skip(1 == 1);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "no arm of this `match` produces a value, so it is not an expression"
+    ]
   }
 ]

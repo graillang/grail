@@ -56,8 +56,9 @@ where no block can start (a block starts with `{`, and a path followed by `{` is
 in expression position, as in a binding initializer). Requiring parentheses would add a rule that
 never disambiguates anything, so Grail does not.
 
-A `{` immediately after `=>` is still a block: `_ => { P { x: 1, y: 2 } }` evaluates the literal
-and drops it, and `_ => P { x: 1, y: 2 }` is the compact form of the same arm.
+A `{` immediately after `=>` is still a block, and a block is a statement list: `_ => { P { x: 1,
+y: 2 } }` needs the semicolon its expression statement requires (`{ P { x: 1, y: 2 }; }`), while
+`_ => P { x: 1, y: 2 }` is the compact form of the same arm.
 
 ## Formatter
 
@@ -68,3 +69,41 @@ round-trips (`tests/fmt/messy.grl` already contained a one-expression arm). Veri
 Corpus: `ergo-match-expr-arm-scalar`, `-last-comma-omitted`, `-enum-payload`, `-nested`,
 `-struct-literal`, `-drops-value`, and the rejections `-reject-keyword`, `-reject-semicolon`,
 `-reject-missing-comma`.
+
+## `match` in expression position
+
+The same increment's other half: `match` also produces a value where one is required.
+
+```grl
+n := match flag { 0 => 1, 1 => 2, _ => 3 };
+label := match e { A(v) => v + 1, B => 0 };
+```
+
+It is the statement `match`, unchanged - the scrutinee, the patterns, the per-arm ownership
+snapshots, the failed-match `rt_abort` and the exhausted-match check are all the same code
+(`match_statement`) - with one flag set (`c.arm_value`): an arm body writes its value into one frame
+word instead of discarding it. That word is owned once, after the arms join (`own` in
+`match_value`), so exactly one value exists however many arms wrote it, and each arm's cleanup runs
+on a temporary that was moved out. `if` in expression position is lowered the same way
+(`docs/design/if-expression.md`), and an `if` expression is an ordinary arm body: `0 => if c { 1 }
+else { 2 },`.
+
+Rules, refused by name:
+
+- Every arm that reaches the join produces a value. A block arm has none, so it is refused at the
+  arm (`this arm of an expression `match` is a block of statements, so it has no value`, with the
+  help to write one expression or diverge) - unless it diverges, which needs no value: `_ => {
+  return 9; }` is a fine arm and the other arms decide the type.
+- The arms agree in type; the first arm that produces a value fixes it, and a later arm's mismatch
+  is reported at that arm with the primary line naming both (`the other arm is `u64`, this one is
+  `bool``) and a label at the arm that fixed it.
+- A value that borrows is refused, for the same reason `if` refuses one: the result is one word and
+  a place has one loan, so `r := match n { 0 => &a, _ => &b }` cannot be represented. The refusal
+  says to use the reference inside each arm.
+- No arm producing a value is not an expression: `x := match n { 0 => { return (); }, _ => { return
+  (); } };` is refused by name.
+
+`x := match ...` takes the type the binding declares, and a literal or `None` arm adopts it
+(`o: u64? := match n { 0 => Some(1), _ => None };`), exactly as the `if` form does. Corpus:
+`exprif-match-scalar`, `-enum-optional`, `-record`, `-nested-if`, `-diverging-arm`, `-drops-value`,
+and the rejections `-type-mismatch`, `-statement-arm`, `-borrows`, `-no-value`.

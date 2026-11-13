@@ -87,10 +87,27 @@ match n {
 
 The expression form releases its temporaries at the end of the arm, exactly as the same expression
 with a semicolon inside the block form does, and the last arm before `}` may omit its comma. A body
-that is a statement (`if`, `while`, `for`, `loop`, `match`, `let`, `return`, `break`, `continue`,
-`drop`, `write`, `assert`, or an assignment) needs the braces: `_ => if c { ... }` is refused with
-that reason. A record literal needs no parentheses in an arm: `_ => Point { x: 1, y: 2 }` is the
-literal, and `_ => { Point { x: 1, y: 2 } }` is the block that builds and drops it.
+that is a statement (`while`, `for`, `loop`, `let`, `return`, `break`, `continue`, `drop`, `write`,
+`assert`, or an assignment) needs the braces: `_ => while c { ... }` is refused with that reason. A
+record literal needs no parentheses in an arm: `_ => Point { x: 1, y: 2 }` is the literal, and
+`_ => { Point { x: 1, y: 2 }; }` is the block that builds and drops it.
+
+## `match` as a value
+
+`match` is also an expression, so it can be bound, returned or passed as an argument:
+
+```grl
+n := match flag { 0 => 1, 1 => 2, _ => 3 };
+```
+
+Every arm that reaches the end then produces a value, the arms agree in type, and the diagnostic
+names both when they do not. An arm may still be a block, as long as that block always leaves the
+branch (`return`, `break`): it needs no value, so the other arms decide the type. The shapes that
+cannot be one value are refused by name - a block arm that falls through, and an arm whose value
+borrows (`match n { 0 => &a, _ => &b }`), since one result word cannot name both loans. An `if` with
+an `else` is a fine arm body here: `0 => if c { 1 } else { 2 },`.
+
+{{example:match-values}}
 
 ## Matching through a borrow
 

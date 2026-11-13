@@ -662,6 +662,16 @@ struct C {
     scope_end: u64,
     loop_start: u64,
     loop_end: u64,
+    // An expression `match` (`x := match n { 0 => 1, _ => 2 }`): 1 while its arms are compiled (a
+    // slot number can be 0, so the slot alone cannot say), the frame word every arm stores its
+    // value into, the type the arms agreed on (NO_TYPE until one produces a value), the type the
+    // surrounding place expects, and the token of the arm that fixed the type - what a later arm's
+    // mismatch is reported against.
+    arm_value: u64,
+    arm_slot: u64,
+    arm_ty: u64,
+    arm_hint: u64,
+    arm_at: u64,
     no_union: u64,
     // Set while the operand of `ignore_failure(...)` is evaluated: a join outcome may be dropped
     // there and nowhere else (docs/design/task-failure-containment.md).
@@ -28418,7 +28428,11 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
     // and it sees an `if` that begins a statement first, so this one path covers an initializer, an
     // argument, a `return`, a record field and a match arm.
     if (k == 1) & is(&mut c, view("if")) {
-        return if_value(&mut c, expected, 0, 0);
+        return if_value(&mut c, expected, 0, NO_TYPE);
+    }
+    // The same for `match`: `x := match n { 0 => 1, _ => 2 };`.
+    if (k == 1) & is(&mut c, view("match")) {
+        return match_value(&mut c, expected);
     }
     // `@expr`: the next operand, folded at compile time (stage C1: literals, constants, size_of,
     // align_of and target; a call in it is the run tier, C3).
@@ -31742,6 +31756,13 @@ fn arm_statement_word<a>(c: (&a mut C)) -> bool {
     if kind(&mut c) != 1 {
         return false;
     }
+    // An expression `match` takes a value from each arm, and `if`/`match` are expressions: their own
+    // forms refuse the statement shapes (an `if` without `else`, an arm with no value).
+    if c.arm_value != 0 {
+        if is(&mut c, view("if")) || is(&mut c, view("match")) {
+            return false;
+        }
+    }
     return is(&mut c, view("if"))
         || is(&mut c, view("while"))
         || is(&mut c, view("for"))
@@ -31763,8 +31784,24 @@ fn arm_statement_word<a>(c: (&a mut C)) -> bool {
 // body needs braces (`=> if ...` was the case that read as an expression and could not be one),
 // and a body that continues as a statement (`=> x = 1;`) is not an expression arm.
 fn arm_body<a>(c: (&a mut C)) -> unit {
+    at := c.pos;
     if is(&mut c, view("{")) {
         block(&mut c);
+        // An expression `match` needs a value from every arm that reaches the join. A block that
+        // always leaves the arm (`return`, `break`) produces none and needs none.
+        if c.arm_value != 0 {
+            if c.terminated == 0 {
+                diag_help(
+                    &mut c,
+                    view("write one expression for the arm's value, or make the arm diverge with `return` or `break`")
+                );
+                fail_at(
+                    &mut c,
+                    at,
+                    view("this arm of an expression `match` is a block of statements, so it has no value")
+                );
+            }
+        }
         return ();
     }
     if arm_statement_word(&mut c) {
@@ -31773,7 +31810,12 @@ fn arm_body<a>(c: (&a mut C)) -> unit {
             view("this arm body is a statement, so it needs braces: write `Pat => { if ... }`")
         );
     }
-    v := expr(&mut c, 0);
+    mut hint = c.arm_hint;
+    if c.arm_ty != NO_TYPE {
+        hint = c.arm_ty;
+    }
+    value_at := c.pos;
+    mut v = expr_expected(&mut c, 0, hint);
     if kind(&mut c) == 61 {
         fail(
             &mut c,
@@ -31786,7 +31828,14 @@ fn arm_body<a>(c: (&a mut C)) -> unit {
             view("an arm body is one expression, not a statement: write `Pat => { x += 1; }`")
         );
     }
-    discard_value(&mut c, v);
+    if (c.arm_value != 0) & (hint != NO_TYPE) {
+        v = adopt_value(&mut c, v, value_at, c.pos, hint);
+    }
+    if c.arm_value != 0 {
+        match_arm_value(&mut c, v, value_at);
+    } else {
+        discard_value(&mut c, v);
+    }
     if kind(&mut c) == 59 {
         fail(
             &mut c,
@@ -31797,6 +31846,90 @@ fn arm_body<a>(c: (&a mut C)) -> unit {
         fail(&mut c, view("expected `,` or `}` after this match arm"));
     }
     return ();
+}
+// An arm's value in an expression `match`. The first arm that produces one fixes the type; every
+// later one is checked against it here, at the arm's own value, naming the arm that fixed it. The
+// value goes into the match's frame word and its temporary is moved out, so the arm's own cleanup
+// does not drop what the join now owns (`own` in match_value, after every arm has run).
+fn match_arm_value<a>(c: (&a mut C), v: Val, at: u64) -> unit {
+    if contains_borrow(&mut c, v.ty, 0) {
+        diag_help(
+            &mut c,
+            view("the result is one word, so it cannot name the arms' different loans: use the reference inside each arm")
+        );
+        fail_at(&mut c, at, view("an expression `match` cannot produce a value that borrows"));
+    }
+    if c.arm_ty == NO_TYPE {
+        exchange(&mut c.arm_ty, v.ty);
+        exchange(&mut c.arm_at, at);
+    } else {
+        if (c.tolerant == 0) & (same_type(&mut c, v.ty, c.arm_ty) == 0) {
+            first := source_type_name(&mut c, c.arm_ty);
+            this := source_type_name(&mut c, v.ty);
+            mut said = copy_bytes(view("the other arm is `"));
+            push_bytes(&mut said, view(first));
+            push_bytes(&mut said, view("`, this one is `"));
+            push_bytes(&mut said, view(this));
+            push_bytes(&mut said, view("`"));
+            exchange(&mut c.diag_primary, said);
+            if c.arm_at != 0 {
+                diag_label(&mut c, c.arm_at, view("the other arm's type"));
+            }
+            fail_at(
+                &mut c,
+                at,
+                view("every arm of an expression `match` must have the same type")
+            );
+        }
+    }
+    store_arm_word(&mut c, v, c.arm_slot);
+    return ();
+}
+// An arm's value goes into the frame word the arms share. Ownership is established once, after the
+// arms join (`own` in if_value/match_value), so this is the word move plus ending the arm's own
+// ownership record - the arm's cleanup must not drop what the join owns.
+fn store_arm_word<a>(c: (&a mut C), v: Val, slot: u64) -> unit {
+    get(&mut c, v.t, view("%rax"));
+    o(&mut c, view("movq %rax,"));
+    stack_slot(&mut c, slot);
+    c.out.push(10);
+    move_out(&mut c, v);
+    return ();
+}
+// `match n { 0 => 1, _ => 2 }` where a value is required. The match itself is the statement form's
+// code (`match_statement`): the arms, their patterns, the ownership snapshots and the exhausted-match
+// arm are unchanged, and an arm body writes its value into the word this allocates. That word is
+// owned once, here, after the arms have joined.
+fn match_value<a>(c: (&a mut C), expected: u64) -> Val {
+    at := c.pos;
+    advance(&mut c);
+    slot := fresh(&mut c);
+    old_value := c.arm_value;
+    old_slot := c.arm_slot;
+    old_ty := c.arm_ty;
+    old_hint := c.arm_hint;
+    old_at := c.arm_at;
+    exchange(&mut c.arm_value, 1);
+    exchange(&mut c.arm_slot, slot);
+    exchange(&mut c.arm_ty, NO_TYPE);
+    exchange(&mut c.arm_hint, expected);
+    exchange(&mut c.arm_at, 0);
+    match_statement(&mut c);
+    ty := c.arm_ty;
+    exchange(&mut c.arm_value, old_value);
+    exchange(&mut c.arm_slot, old_slot);
+    exchange(&mut c.arm_ty, old_ty);
+    exchange(&mut c.arm_hint, old_hint);
+    exchange(&mut c.arm_at, old_at);
+    if ty == NO_TYPE {
+        diag_help(&mut c, view("write it as a statement, with each arm's statements ending in `;`"));
+        fail_at(
+            &mut c,
+            at,
+            view("no arm of this `match` produces a value, so it is not an expression")
+        );
+    }
+    return own(&mut c, slot, ty);
 }
 // ---- `if` in expression position ----------------------------------------------------------------
 // `x := if c { 1 } else { 2 };`, `f(if c { a } else { b })`, `return if c { a } else { b };`.
@@ -31967,17 +32100,14 @@ fn if_arm_store<a>(c: (&a mut C), v: Val, at: u64, hint: u64, hint_at: u64, slot
             );
         }
     }
-    get(&mut c, v.t, view("%rax"));
-    o(&mut c, view("movq %rax,"));
-    stack_slot(&mut c, slot);
-    c.out.push(10);
-    move_out(&mut c, v);
+    store_arm_word(&mut c, v, slot);
     return ();
 }
 // `if c { value } else { value }` where a value is required. `hint` is the type the place this value
 // goes into has; `hint_at` the token of the arm that fixed it, or 0 when the type came from the
 // context (which the enclosing check reports against by itself). `into` is the frame word an `else
-// if` chain writes into - the outer `if`'s - or 0 for one this call allocates and owns.
+// if` chain writes into - the outer `if`'s - or NO_TYPE for one this call allocates and owns (a slot
+// number can be 0, so 0 cannot be that answer).
 fn if_value<a>(c: (&a mut C), hint: u64, hint_at: u64, into: u64) -> Val {
     at := c.pos;
     advance(&mut c);
@@ -32022,7 +32152,7 @@ fn if_value<a>(c: (&a mut C), hint: u64, hint_at: u64, into: u64) -> Val {
     // The word every arm writes into. It has no type of its own: the value is owned once, after the
     // merge, at the type the arms agreed on.
     mut slot = fresh(&mut c);
-    if into != 0 {
+    if into != NO_TYPE {
         exchange(&mut slot, into);
     }
     get(&mut c, v.t, view("%rax"));
@@ -32082,7 +32212,7 @@ fn if_value<a>(c: (&a mut C), hint: u64, hint_at: u64, into: u64) -> Val {
     if out_ty == NO_TYPE {
         exchange(&mut out_ty, et);
     }
-    if into != 0 {
+    if into != NO_TYPE {
         return val(slot, out_ty);
     }
     return own(&mut c, slot, out_ty);
@@ -33358,255 +33488,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         return ();
     }
     if eat(&mut c, view("match")) {
-        // Matching through a reference (`match self`) inspects the value in place: payloads are bound
-        // as references of the same mode instead of being moved out.
-        scrut_at := c.pos;
-        s := expr(&mut c, 0);
-        scrut_end := c.pos;
-        // The term an arm's pattern is about: the scrutinee's own name or literal, when the source
-        // spells one. The scrutinee may also call, which states nothing for the arms.
-        mut scrut_term = u8[];
-        if c.pv_on != 0 {
-            scrut_term = pv_span_term(&mut c, scrut_at, scrut_end);
-        }
-        pv_ir_statement(&mut c, scrut_at, scrut_end);
-        sty := s.ty;
-        sslot := s.t;
-        mut byref = 0;
-        mut refmode = 0;
-        if c.raw == 0 {
-            if integer(&mut c, sty)
-                || is_bool(&mut c, sty)
-                || is_char(&mut c, sty) {
-                scalar_match(&mut c, s, scrut_term);
-                return ();
-            }
-        }
-        if c.raw == 0 {
-            if ty_kind(&mut c, sty) == 7 {
-                byref = 1;
-                refmode = ty_mode(&mut c, sty);
-            }
-        }
-        x := deref(&mut c, s);
-        xt := x.t;
-        if ty_kind(&mut c, x.ty) != 8 {
-            fail(&mut c, view("match requires an enum, integer or bool"));
-        }
-        d := ty_arg(&mut c, x.ty);
-        count := c.decls[d].count;
-        if c.decls[d].is_enum == 0 {
-            record_match(&mut c, sslot, sty, x, byref, refmode);
-            return ();
-        }
-        tag := rec_load(&mut c, xt, 0, 0);
-        if byref == 0 {
-            move_out(&mut c, val(xt, x.ty));
-        }
-        // A by-value scrutinee that holds a loan, such as the optional reference of `match m.get(&k)`, ends
-        // its loan in each arm once no payload reference is live, like a `match &s` scrutinee: the
-        // `None` arm may then modify `m`.
-        borrowed := byref == 0 && c.raw == 0 && contains_borrow(&mut c, x.ty, 0);
-        before := ownership::snapshot(&c.check);
-        mut exits = ownership::new();
-        mut have = 0;
-        mut seen = u64[];
-        mut default = 0;
-        end := label(&mut c);
-        expect(&mut c, view("{"));
-        while !eat(&mut c, view("}")) {
-            ownership::restore(&mut c.check, &before);
-            exchange(&mut c.terminated, 0);
-            mut name = u8[];
-            mut binder = u8[];
-            mut pattern = 0;
-            mut union_arm = 0;
-            if is(&mut c, view("_")) {
-                advance(&mut c);
-                name = copy_bytes(view("_"));
-            } else {
-                if is_union(&mut c, x.ty) {
-                    union_arm = 1;
-                    p := c.pos;
-                    if (kind_at(&mut c, p) == 1) & is_at(&mut c, p + 1, view(":")) {
-                        binder = ident(&mut c);
-                        expect(&mut c, view(":"));
-                    }
-                    pattern = parse_type(&mut c);
-                } else {
-                    name = ident(&mut c);
-                    if is(&mut c, view("{")) {
-                        fail(&mut c, view("a record pattern needs a record value"));
-                    }
-                }
-            }
-            // `_ =>` covers the remaining variants; an owned value is dropped there.
-            if same(view(name), view("_")) {
-                if default != 0 {
-                    fail(&mut c, view("duplicate _ arm"));
-                }
-                default = 1;
-                mark := c.locals.len();
-                payloads := c.resources.len();
-                if byref == 0 {
-                    get(&mut c, xt, view("%rdi"));
-                    drop_call(&mut c, x.ty);
-                }
-                expect(&mut c, view("=>"));
-                if byref != 0 || borrowed {
-                    arm_scrutinee(&mut c, sslot, sty);
-                }
-                arm_body(&mut c);
-                cleanup(&mut c, payloads);
-                pop_locals(&mut c, mark);
-                if c.terminated == 0 {
-                    edge := ownership::snapshot(&c.check);
-                    if have != 0 {
-                        ownership::merge(&mut exits, &edge);
-                    } else {
-                        exits = edge;
-                        have = 1;
-                    }
-                }
-                jump(&mut c, view("jmp"), end);
-                if !eat(&mut c, view(",")) {
-                    expect(&mut c, view("}"));
-                    break;
-                }
-                continue;
-            }
-            if default != 0 {
-                fail(&mut c, view("_ arm must be last"));
-            }
-            mut k = 0;
-            if union_arm != 0 {
-                args := type_args(&mut c, x.ty);
-                mut found = 0;
-                for i in args.len() {
-                    if same_type(&mut c, pattern, args[i]) != 0 {
-                        found += 1;
-                        k = i;
-                    }
-                }
-                if found == 0 {
-                    fail(&mut c, view("type is not a union member"));
-                }
-                if found > 1 {
-                    fail(&mut c, view("ambiguous union match"));
-                }
-            } else {
-                k = find_field(&mut c, d, view(name));
-            }
-            for i in seen.len() {
-                if seen[i] == k {
-                    fail(&mut c, view("duplicate match arm"));
-                }
-            }
-            seen.push(k);
-            pty := field_type(&mut c, x.ty, k);
-            mut next = label(&mut c);
-            get(&mut c, tag, view("%rax"));
-            o(&mut c, view("cmpq $"));
-            on(&mut c, k);
-            o(&mut c, view(",%rax\n"));
-            jump(&mut c, view("jne"), next);
-            mark := c.locals.len();
-            payloads := c.resources.len();
-            if byref != 0 {
-                mut b = binder;
-                if eat(&mut c, view("(")) {
-                    if !eat(&mut c, view("_")) {
-                        b = ident(&mut c);
-                    }
-                    expect(&mut c, view(")"));
-                }
-                if b.len() != 0 {
-                    if scalar(&mut c, pty) {
-                        value := rec_load(&mut c, xt, 1, 0);
-                        bind(&mut c, b, pty, value, 0);
-                    } else {
-                        n := rec_load(&mut c, xt, 1, 1);
-                        refty := reference_type(&mut c, pty, refmode);
-                        root := place_of(&mut c, xt);
-                        target := member_place(&mut c, root, 1, pty);
-                        authority := authority_of(&mut c, xt);
-                        c
-                            .resources
-                            .push(
-                                Resource {
-                                    slot: n,
-                                    ty: refty,
-                                    flag: 0,
-                                    base: xt + 1,
-                                    field: 1,
-                                    via: 1,
-                                    place: 0,
-                                    target: target,
-                                    authority: authority,
-                                }
-                            );
-                        r := borrow_reference(&mut c, n, refty, xt, target, refmode);
-                        bind(&mut c, b, r.ty, r.t, 0);
-                    }
-                }
-            } else {
-                payload := rec_load(&mut c, xt, 1, 0);
-                own(&mut c, payload, pty);
-                source := place_of(&mut c, xt);
-                dest := place_of(&mut c, payload);
-                if contains_borrow(&mut c, pty, 0) {
-                    transfer_bonds(&mut c, source, dest);
-                }
-                stored_source(&mut c, payload, pty);
-                invoke(&mut c, view("rt_free"), one(xt));
-                mut b = binder;
-                if eat(&mut c, view("(")) {
-                    if !eat(&mut c, view("_")) {
-                        b = ident(&mut c);
-                    }
-                    expect(&mut c, view(")"));
-                }
-                if b.len() != 0 {
-                    bind(&mut c, b, pty, payload, 0);
-                }
-            }
-            expect(&mut c, view("=>"));
-            if byref != 0 || borrowed {
-                arm_scrutinee(&mut c, sslot, sty);
-            }
-            arm_body(&mut c);
-            cleanup(&mut c, payloads);
-            pop_locals(&mut c, mark);
-            if c.terminated == 0 {
-                edge := ownership::snapshot(&c.check);
-                if have != 0 {
-                    ownership::merge(&mut exits, &edge);
-                } else {
-                    exits = edge;
-                    have = 1;
-                }
-            }
-            jump(&mut c, view("jmp"), end);
-            mark(&mut c, next);
-            if !eat(&mut c, view(",")) {
-                expect(&mut c, view("}"));
-                break;
-            }
-        }
-        if (seen.len() != count) & (default == 0) {
-            fail(&mut c, view("non-exhaustive match"));
-        }
-        if default != 0 && seen.len() == count {
-            fail(&mut c, view("unreachable _ arm (all variants are covered)"));
-        }
-        call_out(&mut c, view("rt_abort"));
-        mark(&mut c, end);
-        if have != 0 {
-            ownership::restore(&mut c.check, &exits);
-            exchange(&mut c.terminated, 0);
-        } else {
-            exchange(&mut c.terminated, 1);
-        }
+        match_statement(&mut c);
         return ();
     }
     if eat(&mut c, view("if")) {
@@ -34305,6 +34187,262 @@ fn hint_use<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) -> Va
         exchange(&mut c.tolerant, 1);
     }
     return val(v.t, expected);
+}
+// `match` on a scrutinee: integer/bool, enum/optional/union, or a record. The arm list, the
+// per-arm ownership snapshots and the join are the same whichever kind of value is matched;
+// an expression `match` (docs/design/match-expression-arms.md) only changes what an arm body
+// does with its value (c.arm_slot).
+fn match_statement<a>(c: (&a mut C)) -> unit {
+    // Matching through a reference (`match self`) inspects the value in place: payloads are bound
+    // as references of the same mode instead of being moved out.
+    scrut_at := c.pos;
+    s := expr(&mut c, 0);
+    scrut_end := c.pos;
+    // The term an arm's pattern is about: the scrutinee's own name or literal, when the source
+    // spells one. The scrutinee may also call, which states nothing for the arms.
+    mut scrut_term = u8[];
+    if c.pv_on != 0 {
+        scrut_term = pv_span_term(&mut c, scrut_at, scrut_end);
+    }
+    pv_ir_statement(&mut c, scrut_at, scrut_end);
+    sty := s.ty;
+    sslot := s.t;
+    mut byref = 0;
+    mut refmode = 0;
+    if c.raw == 0 {
+        if integer(&mut c, sty)
+            || is_bool(&mut c, sty)
+            || is_char(&mut c, sty) {
+            scalar_match(&mut c, s, scrut_term);
+            return ();
+        }
+    }
+    if c.raw == 0 {
+        if ty_kind(&mut c, sty) == 7 {
+            byref = 1;
+            refmode = ty_mode(&mut c, sty);
+        }
+    }
+    x := deref(&mut c, s);
+    xt := x.t;
+    if ty_kind(&mut c, x.ty) != 8 {
+        fail(&mut c, view("match requires an enum, integer or bool"));
+    }
+    d := ty_arg(&mut c, x.ty);
+    count := c.decls[d].count;
+    if c.decls[d].is_enum == 0 {
+        record_match(&mut c, sslot, sty, x, byref, refmode);
+        return ();
+    }
+    tag := rec_load(&mut c, xt, 0, 0);
+    if byref == 0 {
+        move_out(&mut c, val(xt, x.ty));
+    }
+    // A by-value scrutinee that holds a loan, such as the optional reference of `match m.get(&k)`, ends
+    // its loan in each arm once no payload reference is live, like a `match &s` scrutinee: the
+    // `None` arm may then modify `m`.
+    borrowed := byref == 0 && c.raw == 0 && contains_borrow(&mut c, x.ty, 0);
+    before := ownership::snapshot(&c.check);
+    mut exits = ownership::new();
+    mut have = 0;
+    mut seen = u64[];
+    mut default = 0;
+    end := label(&mut c);
+    expect(&mut c, view("{"));
+    while !eat(&mut c, view("}")) {
+        ownership::restore(&mut c.check, &before);
+        exchange(&mut c.terminated, 0);
+        mut name = u8[];
+        mut binder = u8[];
+        mut pattern = 0;
+        mut union_arm = 0;
+        if is(&mut c, view("_")) {
+            advance(&mut c);
+            name = copy_bytes(view("_"));
+        } else {
+            if is_union(&mut c, x.ty) {
+                union_arm = 1;
+                p := c.pos;
+                if (kind_at(&mut c, p) == 1) & is_at(&mut c, p + 1, view(":")) {
+                    binder = ident(&mut c);
+                    expect(&mut c, view(":"));
+                }
+                pattern = parse_type(&mut c);
+            } else {
+                name = ident(&mut c);
+                if is(&mut c, view("{")) {
+                    fail(&mut c, view("a record pattern needs a record value"));
+                }
+            }
+        }
+        // `_ =>` covers the remaining variants; an owned value is dropped there.
+        if same(view(name), view("_")) {
+            if default != 0 {
+                fail(&mut c, view("duplicate _ arm"));
+            }
+            default = 1;
+            mark := c.locals.len();
+            payloads := c.resources.len();
+            if byref == 0 {
+                get(&mut c, xt, view("%rdi"));
+                drop_call(&mut c, x.ty);
+            }
+            expect(&mut c, view("=>"));
+            if byref != 0 || borrowed {
+                arm_scrutinee(&mut c, sslot, sty);
+            }
+            arm_body(&mut c);
+            cleanup(&mut c, payloads);
+            pop_locals(&mut c, mark);
+            if c.terminated == 0 {
+                edge := ownership::snapshot(&c.check);
+                if have != 0 {
+                    ownership::merge(&mut exits, &edge);
+                } else {
+                    exits = edge;
+                    have = 1;
+                }
+            }
+            jump(&mut c, view("jmp"), end);
+            if !eat(&mut c, view(",")) {
+                expect(&mut c, view("}"));
+                break;
+            }
+            continue;
+        }
+        if default != 0 {
+            fail(&mut c, view("_ arm must be last"));
+        }
+        mut k = 0;
+        if union_arm != 0 {
+            args := type_args(&mut c, x.ty);
+            mut found = 0;
+            for i in args.len() {
+                if same_type(&mut c, pattern, args[i]) != 0 {
+                    found += 1;
+                    k = i;
+                }
+            }
+            if found == 0 {
+                fail(&mut c, view("type is not a union member"));
+            }
+            if found > 1 {
+                fail(&mut c, view("ambiguous union match"));
+            }
+        } else {
+            k = find_field(&mut c, d, view(name));
+        }
+        for i in seen.len() {
+            if seen[i] == k {
+                fail(&mut c, view("duplicate match arm"));
+            }
+        }
+        seen.push(k);
+        pty := field_type(&mut c, x.ty, k);
+        mut next = label(&mut c);
+        get(&mut c, tag, view("%rax"));
+        o(&mut c, view("cmpq $"));
+        on(&mut c, k);
+        o(&mut c, view(",%rax\n"));
+        jump(&mut c, view("jne"), next);
+        mark := c.locals.len();
+        payloads := c.resources.len();
+        if byref != 0 {
+            mut b = binder;
+            if eat(&mut c, view("(")) {
+                if !eat(&mut c, view("_")) {
+                    b = ident(&mut c);
+                }
+                expect(&mut c, view(")"));
+            }
+            if b.len() != 0 {
+                if scalar(&mut c, pty) {
+                    value := rec_load(&mut c, xt, 1, 0);
+                    bind(&mut c, b, pty, value, 0);
+                } else {
+                    n := rec_load(&mut c, xt, 1, 1);
+                    refty := reference_type(&mut c, pty, refmode);
+                    root := place_of(&mut c, xt);
+                    target := member_place(&mut c, root, 1, pty);
+                    authority := authority_of(&mut c, xt);
+                    c
+                        .resources
+                        .push(
+                            Resource {
+                                slot: n,
+                                ty: refty,
+                                flag: 0,
+                                base: xt + 1,
+                                field: 1,
+                                via: 1,
+                                place: 0,
+                                target: target,
+                                authority: authority,
+                            }
+                        );
+                    r := borrow_reference(&mut c, n, refty, xt, target, refmode);
+                    bind(&mut c, b, r.ty, r.t, 0);
+                }
+            }
+        } else {
+            payload := rec_load(&mut c, xt, 1, 0);
+            own(&mut c, payload, pty);
+            source := place_of(&mut c, xt);
+            dest := place_of(&mut c, payload);
+            if contains_borrow(&mut c, pty, 0) {
+                transfer_bonds(&mut c, source, dest);
+            }
+            stored_source(&mut c, payload, pty);
+            invoke(&mut c, view("rt_free"), one(xt));
+            mut b = binder;
+            if eat(&mut c, view("(")) {
+                if !eat(&mut c, view("_")) {
+                    b = ident(&mut c);
+                }
+                expect(&mut c, view(")"));
+            }
+            if b.len() != 0 {
+                bind(&mut c, b, pty, payload, 0);
+            }
+        }
+        expect(&mut c, view("=>"));
+        if byref != 0 || borrowed {
+            arm_scrutinee(&mut c, sslot, sty);
+        }
+        arm_body(&mut c);
+        cleanup(&mut c, payloads);
+        pop_locals(&mut c, mark);
+        if c.terminated == 0 {
+            edge := ownership::snapshot(&c.check);
+            if have != 0 {
+                ownership::merge(&mut exits, &edge);
+            } else {
+                exits = edge;
+                have = 1;
+            }
+        }
+        jump(&mut c, view("jmp"), end);
+        mark(&mut c, next);
+        if !eat(&mut c, view(",")) {
+            expect(&mut c, view("}"));
+            break;
+        }
+    }
+    if (seen.len() != count) & (default == 0) {
+        fail(&mut c, view("non-exhaustive match"));
+    }
+    if default != 0 && seen.len() == count {
+        fail(&mut c, view("unreachable _ arm (all variants are covered)"));
+    }
+    call_out(&mut c, view("rt_abort"));
+    mark(&mut c, end);
+    if have != 0 {
+        ownership::restore(&mut c.check, &exits);
+        exchange(&mut c.terminated, 0);
+    } else {
+        exchange(&mut c.terminated, 1);
+    }
+    return ();
 }
 fn stmt<a>(c: (&a mut C)) -> unit {
     if c.raw == 0 {
@@ -38535,6 +38673,11 @@ pub fn main() -> u64 {
         scope_end: 0,
         loop_start: 0,
         loop_end: 0,
+        arm_value: 0,
+        arm_slot: 0,
+        arm_ty: NO_TYPE,
+        arm_hint: NO_TYPE,
+        arm_at: 0,
         no_union: 0,
         ignored_failure: 0,
         parsing_input: 0,
