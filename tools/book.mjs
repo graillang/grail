@@ -1,5 +1,5 @@
 import { buildCompiler, assemble, execute, hostTarget, targetName, triples } from './native.mjs';
-import { readFileSync, mkdirSync, writeFileSync, copyFileSync, rmSync, existsSync } from 'node:fs';
+import { readFileSync, mkdirSync, writeFileSync, copyFileSync, rmSync } from 'node:fs';
 import { resolve, dirname, relative, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -101,27 +101,10 @@ export function verifyExample(example, compiler, suppliedArgs, target = hostTarg
   const asm = join(directory, 'program.s');
   const prior = 'prior valid artifact\n';
   writeFileSync(asm, prior);
-  // `std` lists standard-library modules (lib/NAME.grl) linked like `grail build` does.\n  // A stdlib module may import others (`fs` uses `time`): close the named set over lib/*.grl's own
-  // `use` lines so `mod::Type` inside a named module resolves.
-  const stdNames = (names) => {
-    const out = [];
-    const seen = new Set();
-    const visit = (n) => {
-      if (seen.has(n)) return;
-      seen.add(n);
-      out.push(n);
-      const p = join(root, 'lib', `${n}.grl`);
-      if (!existsSync(p)) return;
-      for (const line of readFileSync(p, 'utf8').split('\n')) {
-        const m = /^\s*use\s+([A-Za-z_][A-Za-z0-9_]*)\s*;/.exec(line);
-        if (m && existsSync(join(root, 'lib', `${m[1]}.grl`))) visit(m[1]);
-      }
-    };
-    for (const n of names) visit(n);
-    return out;
-  };
-
-  const args = [compiler, '--target', target, asm, sourcePath(example.entry), ...(example.modules ?? []).map(sourcePath), ...stdNames(example.std ?? []).map(name => join(root, 'lib', `${name}.grl`)), join(root, 'compiler/runtime.grl'), join(root, 'compiler/os-linux.grl')];
+  // The compiler resolves `use NAME;` through its module roots and the standard library is one, so an
+  // example reaches a std module with its `use` line alone (docs/design/module-resolution.md);
+  // `modules` names a source that is not reachable by name, like this chapter's sibling file.
+  const args = [compiler, '--module-root', join(root, 'lib'), '--target', target, asm, sourcePath(example.entry), ...(example.modules ?? []).map(sourcePath), join(root, 'compiler/runtime.grl'), join(root, 'compiler/os-linux.grl')];
   const result = Bun.spawnSync(args, { cwd: root, stdout: 'pipe', stderr: 'pipe' });
   if (example.diagnostic !== undefined) {
     const diagnostic = result.stdout.toString() + result.stderr.toString();

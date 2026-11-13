@@ -248,7 +248,9 @@ function proveSelfHosting() {
   const asmA = join(directory, 'sample-a.s');
   const asmB = join(directory, 'sample-b.s');
   for (const [compilerPath, asm] of [[a, asmA], [b, asmB]]) {
-    const result = spawnSync(compilerPath, ['--target', target, asm, ...sampleFiles], { encoding: 'utf8', maxBuffer: 512 * 1024 * 1024 });
+    // The corpus case names no std file: `use vecs;` is resolved through the stdlib module root, the
+    // same one `grail build` passes (docs/design/module-resolution.md).
+    const result = spawnSync(compilerPath, ['--module-root', join(root, 'lib'), '--target', target, asm, ...sampleFiles], { encoding: 'utf8', maxBuffer: 512 * 1024 * 1024 });
     assert.equal(result.status, 0, `compiler: a program failed to compile\n${result.stdout ?? ''}${result.stderr ?? ''}`);
   }
   assert.equal(readFileSync(asmB, 'utf8'), readFileSync(asmA, 'utf8'), 'compiler: the two compilers compile a program differently');

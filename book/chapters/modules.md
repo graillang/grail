@@ -8,9 +8,21 @@ This example calls a public function in another file.
 
 The supporting Grail and Rust files are included in the comparison above.
 
-Unlike an implicit package loader, today's native compiler needs every source file explicitly.
-The example manifest lists its helper, and `just book-run modules` supplies both files plus the
-Grail runtime. The entry file comes first. `use arithmetic` by itself does not search the disk.
+`use arithmetic;` is enough: the compiler resolves a module it was not handed by looking for
+`arithmetic.grl` in each module root it was given, transitively, so a program says what it uses and
+not which files implement it. The roots are the `--module-root DIR` options (repeatable, tried in
+order), the standard-library directory of any input file that sits beside `core.grl`, and a project's
+`src/` when the working directory holds a `grail.toml` - which is why `use fs;` is enough in a project
+and why the standard library needs no listing anywhere. A module the command line names explicitly
+still wins over a root, so naming a file is never wrong, only unnecessary. A `use` no root answers for
+is an error that names the module, the file that asked and every root searched.
+
+This example's helper is named on the command line anyway, because the chapter shows it: it lives
+beside the example rather than in a module root, so naming it is how the book's own run finds it.
+
+`docs/design/module-resolution.md` states the rule, the order the roots are tried in and the two
+exceptions (`core`, which `Some` and `None` lower to, and `use host;`, which is the ambient interface
+rather than a file).
 
 A `use` declaration can name a module or import one member:
 
@@ -123,7 +135,8 @@ entry whose bytes match its name.
 Watching instead of rebuilding by hand (`grail check --watch`, `grail build --watch`). One process
 stays alive and re-runs the cycle when an input changes: the source named on the command line, or,
 in a project, the plan the manifest and the lock resolve (the entry plus every module the lock
-names), the standard modules it reaches through `use`, and every file in an `--interface DIR`. Change detection is a content hash of
+names), every standard module (the watcher does not copy the resolver's answer - it watches the
+stdlib directory), and every file in an `--interface DIR`. Change detection is a content hash of
 each input, not a timestamp, so an editor that writes a file back unchanged spends no cycle and a
 file restored with an old timestamp still does. A burst of writes is one cycle: the loop waits for
 the files to go quiet (120 ms, `--debounce MS`) before it runs, and it polls every 100 ms

@@ -32,7 +32,9 @@ const prologue = '.text\n';
 // One assembly stream for the whole program, or one file per module plus OUT.parts.
 function compile(name, inputs, split) {
   const asm = join(work, `${name}${split ? '.split' : '.single'}.s`);
-  const args = [compiler, '--target', target];
+  // The standard library is a module root, exactly as `grail build` passes it: a program says `use
+  // vecs;` and the compiler finds `lib/vecs.grl` (docs/design/module-resolution.md).
+  const args = [compiler, '--module-root', join(root, 'lib'), '--target', target];
   // A split build carries no runtime-error call-site table, so the single reference is built without
   // one too: the proof is that splitting changes nothing else.
   if (split) args.push('--split'); else args.push('--no-error-sites');
@@ -205,7 +207,7 @@ const cases = [];
   writeFileSync(entry, test.source);
   cases.push({
     name: 'native-generics',
-    inputs: [entry, ...test.modules.map(m => join(root, m)), ...(test.std ?? []).map(s => join(root, 'lib', `${s}.grl`))],
+    inputs: [entry, ...(test.modules ?? []).map(m => join(root, m))],
     expect: test.stdout,
   });
 }

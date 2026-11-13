@@ -276,49 +276,6 @@ fn collect<a, b>(dir: &a [u8], out: (&b mut u8[][])) {
         }
     }
 }
-// The names in `use NAME;` / `use NAME::...;` lines of a source file.
-fn use_names<a>(text: &a [u8]) -> u8[][] {
-    mut out = u8[][];
-    mut start: u64 = 0;
-    mut i: u64 = 0;
-    while i <= text.len() {
-        if (i == text.len()) || (text[i] == 10) {
-            mut a = start;
-            while (a < i) && ((text[a] == 32) || (text[a] == 9)) {
-                a += 1;
-            }
-            if (i - a > 4)
-                && (text[a] == 117)
-                && (text[a + 1] == 115)
-                && (text[a + 2] == 101)
-                && (text[a + 3] == 32) {
-                mut b = a + 4;
-                while (b < i) && (text[b] == 32) {
-                    b += 1;
-                }
-                mut name = u8[];
-                while b < i {
-                    ch := text[b];
-                    ok := ((ch >= 97) && (ch <= 122))
-                        || ((ch >= 65) && (ch <= 90))
-                        || ((ch >= 48) && (ch <= 57))
-                        || (ch == 95);
-                    if ok == false {
-                        break;
-                    }
-                    name.push(ch);
-                    b += 1;
-                }
-                if name.len() > 0 {
-                    out.push(name);
-                }
-            }
-            start = i + 1;
-        }
-        i += 1;
-    }
-    return out;
-}
 // Whether a source of the build claims a checked effect (docs/design/effects.md).
 fn effects_claimed<a>(command: (&a u8[][]), at: u64) -> bool {
     mut k = at;
@@ -358,48 +315,6 @@ fn has_text<a, b>(text: &a [u8], needle: &b [u8]) -> bool {
         i += 1;
     }
     return false;
-}
-fn contains_name<a, b>(list: (&a u8[][]), name: &b [u8]) -> bool {
-    for i in list.len() {
-        if eq(view(list[i]), view(name)) {
-            return true;
-        }
-    }
-    return false;
-}
-// Standard-library files reachable from `sources` through `use`, in discovery order.
-fn used_std<a, b>(std: &a [u8], sources: (&b u8[][])) -> u8[][] {
-    mut queue = u8[][];
-    for i in sources.len() {
-        queue.push(item(&sources, i));
-    }
-    mut seen = u8[][];
-    mut out = u8[][];
-    // core is always compiled: `Some(x)` and `None` lower to its constructors.
-    prelude := path_join(view(std), view("core.grl"));
-    if host::exists(view(prelude)) != 0 {
-        seen.push(copy(view("core")));
-        out.push(copy(view(prelude)));
-    }
-    mut k: u64 = 0;
-    while k < queue.len() {
-        file := item(&queue, k);
-        k += 1;
-        text := host::read_file(view(file));
-        names := use_names(view(text));
-        for n in names.len() {
-            name := item(&names, n);
-            if !contains_name(&seen, view(name)) {
-                seen.push(copy(view(name)));
-                candidate := path_join(view(std), view(cat(view(name), view(".grl"))));
-                if host::exists(view(candidate)) != 0 {
-                    out.push(copy(view(candidate)));
-                    queue.push(candidate);
-                }
-            }
-        }
-    }
-    return out;
 }
 // The compiler's link requests: each `// grail-link: INPUT` line of the assembly. Absolute paths
 // and flags pass through, relative object/archive/shared inputs resolve against `base` (the entry
@@ -940,21 +855,18 @@ fn build_argv<a, b, d, e, g, k>(
         command.push(copy(view("--diagnostics-json")));
         command.push(copy(view(diag)));
     }
+    // The modules the program reaches through `use` are the compiler's to resolve: a module root is
+    // the directory it looks for `ROOT/NAME.grl` in (docs/design/module-resolution.md). The stdlib is
+    // a root here, so `use fs;` is enough to build against it; a project's own `src/` is a root the
+    // compiler takes from the grail.toml it finds in the working directory.
+    if h.std.len() != 0 {
+        command.push(copy(view("--module-root")));
+        command.push(copy(view(h.std)));
+    }
     command.push(copy(view(asm)));
     command.push(copy(view(entry)));
     for i in modules.len() {
         command.push(item(&modules, i));
-    }
-    // Only the standard-library modules the program reaches through `use` (transitively) are
-    // compiled; lib/NAME.grl is module NAME.
-    mut sources = u8[][];
-    sources.push(copy(view(entry)));
-    for i in modules.len() {
-        sources.push(item(&modules, i));
-    }
-    used := used_std(view(h.std), &sources);
-    for i in used.len() {
-        command.push(item(&used, i));
     }
     command.push(copy(view(h.runtime)));
     // One platform module per target, and the target decides which: darwin.grl owns the libSystem
@@ -1085,6 +997,19 @@ fn compile_mode<a, b, d, e, g, k>(
         // included, so a program that claims them is compiled in one run.
         if effects_claimed(&command, at) {
             per_module = 0;
+        }
+        if per_module != 0 {
+            // One run per module, so every module the program has needs a group, and the module set is
+            // the compiler's: it resolves `use` through the roots and names what it will compile.
+            groups = resolved_groups(&command, at, view(cat(view(asm), view(".inputs"))));
+            if groups.len() == 0 {
+                return 1;
+            }
+            if (cache == 0) & (program_modules(&groups) < 2) {
+                // Resolution settled a program of one module (a lone entry that uses std modules):
+                // that is one compiler run, not a per-module build, so nothing is split into parts.
+                per_module = 0;
+            }
         }
     }
     // B1 stage 4: an unchanged program is not rebuilt at all, and what is rebuilt assembles and links
@@ -1378,6 +1303,65 @@ fn source_groups<a>(command: (&a u8[][]), at: u64) -> ModuleGroup[] {
     }
     return groups;
 }
+// The modules the build will really compile, as the compiler settles them: the entry, the modules named
+// on the command line, the runtime and platform files, and everything the `use` lines reached through a
+// module root (docs/design/module-resolution.md). The driver asks (`--print-inputs FILE`) rather than
+// scanning for a module set of its own, so a per-module build has a group for every module the program
+// has - including the standard ones - and no unit is compiled twice.
+fn resolved_groups<a>(command: (&a u8[][]), at: u64, list: &a [u8]) -> ModuleGroup[] {
+    mut probe = u8[][];
+    for i in at {
+        probe.push(item(&command, i));
+    }
+    probe.push(copy(view("--print-inputs")));
+    probe.push(copy(view(list)));
+    for i in command.len() - at {
+        probe.push(item(&command, at + i));
+    }
+    mut groups = ModuleGroup[];
+    if host::command(probe) != 0 {
+        // The compiler printed why (an unresolvable `use` names the module and the roots it searched).
+        return groups;
+    }
+    text := host::read_file(view(list));
+    host::remove(view(list), 0);
+    mut start = 0;
+    mut i = 0;
+    while i <= text.len() {
+        if (i == text.len()) || (text[i] == 10) {
+            mut cut = start;
+            while cut < i {
+                if text[cut] == 9 {
+                    break;
+                }
+                cut += 1;
+            }
+            if (cut < i) & (cut > start) {
+                mut name = u8[];
+                for j in start..cut {
+                    name.push(text[j]);
+                }
+                mut path = u8[];
+                for j in cut + 1..i {
+                    path.push(text[j]);
+                }
+                uses := scan_words(view(path), view("use"));
+                g := group_of(&groups, view(name));
+                if g == 0 {
+                    groups.push(ModuleGroup { name: name, files: u8[][path], uses: uses, done: 0 });
+                } else {
+                    groups[g - 1].files.push(path);
+                    for u in uses.len() {
+                        groups[g - 1].uses.push(item(&uses, u));
+                    }
+                }
+            }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    return groups;
+}
 // The program's own modules. The runtime and platform files are the base group every program has,
 // and the standard library's core prelude is compiled whether a module names it or not, so neither
 // makes a program multi-module: what is left is what the program is made of.
@@ -1606,6 +1590,12 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
     while i < at {
         a := item(&command, i);
         if eq(view(a), view("--interface")) {
+            i += 2;
+            continue;
+        }
+        // A unit is one module of a settled set: every module the program has is a group, so the unit
+        // does not resolve `use` through the roots again - that is what would compile a module twice.
+        if eq(view(a), view("--module-root")) {
             i += 2;
             continue;
         }
@@ -3162,19 +3152,17 @@ fn watch_settled<a, b>(before: (&a u64[][]), after: (&b u64[][])) -> bool {
     }
     return true;
 }
-// The files the next cycle reads, in the order it reads them. `used_std` reads every file it is
-// given, so only sources go there: the manifest, the lock and the interface directory are watched
-// for changes but not scanned for `use` lines - and a project that has no lock yet has no lock to
-// read.
+// The files the next cycle reads, in the order it reads them. The compiler owns which modules a
+// program has (docs/design/module-resolution.md), so the watcher does not read `use` lines itself:
+// it watches every standard module, which is a superset of the ones any one program reaches, and a
+// change to any of them re-runs the cycle.
 fn watch_inputs<a, b, c>(h: (&a Home), o: (&b Options), project: (&c u8[][])) -> u8[][] {
     mut files = u8[][];
-    mut sources = u8[][];
     if o.file.len() != 0 {
         // The source a one-shot `grail check FILE` / `grail build FILE` compiles: the file named on
         // the command line, and no other (a second FILE argument is not a module of the first - the
         // driver compiles only the named entry, and watch mode watches what the cycle reads).
         files.push(copy(view(o.file)));
-        sources.push(copy(view(o.file)));
     } else {
         // The plan is the set. The manifest, the lock and a listing of `src/` are only how a change
         // to the plan itself - a new dependency, a new module - is noticed: the next cycle re-plans.
@@ -3184,19 +3172,20 @@ fn watch_inputs<a, b, c>(h: (&a Home), o: (&b Options), project: (&c u8[][])) ->
         collect(view("src"), &mut listed);
         for i in listed.len() {
             files.push(item(&listed, i));
-            sources.push(item(&listed, i));
         }
         for i in project.len() {
             found := item(project, i);
             files.push(copy(view(found)));
-            sources.push(found);
         }
     }
-    // The standard modules the sources reach: `used_std` reads their `use` lines, so the set follows
-    // the sources rather than a list of guesses.
-    reached := used_std(view(h.std), &sources);
-    for i in reached.len() {
-        files.push(item(&reached, i));
+    // Every standard module, and the project's own modules from the plan: a file the roots resolve is
+    // under one of them, so a change to it is a change to an input.
+    if h.std.len() != 0 {
+        mut reached = u8[][];
+        collect(view(h.std), &mut reached);
+        for i in reached.len() {
+            files.push(item(&reached, i));
+        }
     }
     if o.iface.len() != 0 {
         mut interfaces = u8[][];
