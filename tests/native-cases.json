@@ -7800,5 +7800,57 @@
     "stdout": "before\n",
     "status": 134,
     "stderr": "error: stack overflow\n"
+  },
+  {
+    "name": "fsx-tree-lifecycle",
+    "source": "use fs;\nuse core;\nuse strings;\n\n// A real tree in the case's own scratch directory: create, write, read, stat, walk, list, rename,\n// copy and remove, with every step observed.\nfn main(){\n    match fs::remove_dir_all(view(\"tree\")) {\n        e: fs::Error => {},\n        _ => {}\n    }\n    fs::create_dir_all(view(\"tree/a/b\"))!;\n    fs::create_dir_all(view(\"tree/c\"))!;\n    fs::write(view(\"tree/a/b/one.txt\"), view(\"hello\"))!;\n    fs::write(view(\"tree/a/two.txt\"), view(\"second\"))!;\n    fs::write_atomic(view(\"tree/c/atomic.txt\"), view(\"all at once\"))!;\n    println(fs::read_text(view(\"tree/c/atomic.txt\"))!);\n    md := fs::metadata(view(\"tree/a/b/one.txt\"))!;\n    println(md.size());\n    println(md.is_file());\n    println(md.is_dir());\n    println(md.permissions() != 0);\n    println(md.modified.unix_seconds() > 1600000000);\n    entries := fs::walk(view(\"tree\"), fs::walk_options())!;\n    mut i = 0;\n    while i < entries.len() {\n        println(entries[i].path());\n        i = i + 1;\n    }\n    names := fs::list_dir(view(\"tree/a\"))!;\n    println(names.len());\n    println(names[0].text());\n    fs::rename(view(\"tree/a/two.txt\"), view(\"tree/a/renamed.txt\"))!;\n    println(fs::exists(view(\"tree/a/renamed.txt\")));\n    println(fs::exists(view(\"tree/a/two.txt\")));\n    fs::copy(view(\"tree/a/b/one.txt\"), view(\"tree/c/copy.txt\"))!;\n    println(fs::read_text(view(\"tree/c/copy.txt\"))!);\n    fs::remove_dir_all(view(\"tree\"))!;\n    println(fs::exists(view(\"tree\")));\n    match fs::read_text(view(\"tree/one.txt\")) {\n        e: fs::Error => { println(e.show()); },\n        t: string => { println(t); }\n    }\n    println(\"done\");\n}\n",
+    "modules": [
+      "lib/fs.grl",
+      "lib/io.grl",
+      "lib/core.grl",
+      "lib/strings.grl",
+      "lib/time.grl",
+      "lib/iter.grl"
+    ],
+    "stdout": "all at once\n5\ntrue\nfalse\ntrue\ntrue\ntree/a\ntree/a/b\ntree/a/b/one.txt\ntree/a/two.txt\ntree/c\ntree/c/atomic.txt\n2\nb\ntrue\nfalse\nhello\nfalse\ntree/one.txt: not found\ndone\n"
+  },
+  {
+    "name": "fsx-paths-lexical",
+    "source": "use fs;\nuse core;\n\n// Every path operation is lexical: these answers need no file to exist.\nfn main(){\n    p := fs::path(view(\"a/./b/../c//d/\"));\n    println(p.show());\n    println(p.is_absolute());\n    println(p.parent()!.show());\n    println(p.file_name()!.text());\n    println(p.file_stem()!.text());\n    q := fs::path(view(\"archive.tar.gz\"));\n    println(q.extension()!.text());\n    r := fs::path(view(\".bashrc\"));\n    println(r.extension() == None);\n    root := fs::path(view(\"/usr//local/../share/./zoneinfo/\"));\n    println(root.normalize().show());\n    println(root.normalize().parent()!.show());\n    joined := fs::path(view(\"/tmp\")).join(view(\"x/y.txt\"));\n    println(joined.show());\n    println(fs::path(view(\"/tmp\")).join(view(\"/etc/hosts\")).show());\n    here := fs::path(view(\".\")).canonicalize()!;\n    println(here.is_absolute());\n    println(here.file_name() != None);\n    println(fs::path(view(\"\")).is_absolute());\n    println(fs::path(view(\"..\")).normalize().show());\n    println(\"done\");\n}\n",
+    "modules": [
+      "lib/fs.grl",
+      "lib/io.grl",
+      "lib/core.grl",
+      "lib/strings.grl",
+      "lib/time.grl",
+      "lib/iter.grl"
+    ],
+    "stdout": "a/./b/../c//d/\nfalse\na/c\nd\nd\ngz\ntrue\n/usr/share/zoneinfo\n/usr/share\n/tmp/x/y.txt\n/etc/hosts\ntrue\ntrue\nfalse\n..\ndone\n"
+  },
+  {
+    "name": "fsx-text-handles-and-errors",
+    "source": "use fs;\nuse core;\nuse io;\nuse strings;\n\n// Text that is not UTF-8 is refused with the offset of the first ill-formed byte, a file handle is\n// closed exactly once, and a name that is not ASCII is a name like any other.\nfn main(){\n    raw := u8[111, 107, 255, 254]; // \"ok\" then two bytes that are not UTF-8\n    fs::write(view(\"bad.txt\"), view(raw))!;\n    match fs::read_text(view(\"bad.txt\")) {\n        e: fs::Error => { println(e.show()); },\n        t: string => { println(t); }\n    }\n    match fs::metadata(view(\"missing.txt\")) {\n        e: fs::Error => { println(e.is_not_found()); },\n        m: fs::Metadata => { println(false); }\n    }\n    match fs::list_dir(view(\"missing\")) {\n        e: fs::Error => { println(e.is_not_found()); },\n        names: u8[][] => { println(false); }\n    }\n    match fs::read_text(view(\"missing.txt\")) {\n        e: fs::Error => { println(e.show()); },\n        t: string => { println(t); }\n    }\n    mut writer = fs::create(view(\"handles.txt\"))!;\n    writer.write(view(\"first line\"))!;\n    writer.close()!;\n    println(writer.is_open());\n    match writer.close() {\n        e: fs::Error => { println(e.show()); },\n        _ => { println(\"closed twice\"); }\n    }\n    mut reader = fs::open(view(\"handles.txt\"))!;\n    data := reader.read_all()!;\n    println(data.len());\n    reader.close()!;\n    name := \"a file with spaces \\u{e9}\\u{4e16}.txt\";\n    fs::write(view(name), view(\"payload\"))!;\n    println(fs::read_text(view(name))!);\n    println(fs::path_of(name).file_name()!.len() > 20);\n    println(\"done\");\n}\n",
+    "modules": [
+      "lib/fs.grl",
+      "lib/io.grl",
+      "lib/core.grl",
+      "lib/strings.grl",
+      "lib/time.grl",
+      "lib/iter.grl"
+    ],
+    "stdout": "bad.txt: text is not valid UTF-8 (ill-formed at byte 2)\ntrue\ntrue\nmissing.txt: not found\nfalse\nhandles.txt: os error 9\n10\npayload\ntrue\ndone\n"
+  },
+  {
+    "name": "fsx-walk-symlink-policy",
+    "source": "use fs;\nuse core;\n\n// The walker's symbolic-link policy: a link is an entry of its own; following enters the target,\n// and a link back to an ancestor is not entered again - so the walk always ends.\nfn main(){\n    fs::create_dir_all(view(\"real/inner\"))!;\n    fs::write(view(\"real/inner/file.txt\"), view(\"x\"))!;\n    fs::symlink(view(\"real\"), view(\"alias\"))!;\n    fs::symlink(view(\"..\"), view(\"real/inner/up\"))!;\n    plain := fs::walk(view(\"real\"), fs::walk_options())!;\n    println(plain.len());\n    mut links = 0;\n    mut i = 0;\n    while i < plain.len() {\n        if plain[i].is_symlink() {\n            links = links + 1;\n        }\n        i = i + 1;\n    }\n    println(links);\n    following := fs::follow_links(fs::walk_options(), true);\n    followed := fs::walk(view(\"real\"), following)!;\n    println(followed.len());\n    mut files = 0;\n    i = 0;\n    while i < followed.len() {\n        if followed[i].is_file() {\n            files = files + 1;\n        }\n        i = i + 1;\n    }\n    println(files);\n    target := fs::metadata(view(\"alias/inner/file.txt\"))!;\n    println(target.is_file());\n    link_md := fs::symlink_metadata(view(\"alias\"))!;\n    println(link_md.is_symlink());\n    fs::remove_dir_all(view(\"real\"))!;\n    fs::remove_file(view(\"alias\"))!;\n    println(fs::exists(view(\"real\")));\n    println(\"done\");\n}\n",
+    "modules": [
+      "lib/fs.grl",
+      "lib/io.grl",
+      "lib/core.grl",
+      "lib/strings.grl",
+      "lib/time.grl",
+      "lib/iter.grl"
+    ],
+    "stdout": "3\n1\n3\n1\ntrue\ntrue\nfalse\ndone\n"
   }
 ]

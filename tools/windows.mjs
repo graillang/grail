@@ -39,6 +39,7 @@ export const imports = {
     'GetFileAttributesExA',
     'MoveFileExA',
     'CreatePipe',
+    'CreateSymbolicLinkA',
     'GetLastError',
     'GetStdHandle',
     'GetSystemTimeAsFileTime',
