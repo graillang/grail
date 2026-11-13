@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Changed: the refinement prover keeps its facts as the body is compiled instead of re-reading the
+  tokens from the body's `{` to each check (`docs/design/refinements.md`). Every fact now belongs to
+  the structure that stated it, which is what makes a `match` arm's pattern (`16 =>` states
+  `n == 16`, `0..16` states both bounds), a `match` guard, a shadowing binding and a `for` guard
+  exact: an arm's facts reach that arm's body and no sibling arm or code after the match, a
+  shadowing binding kills the facts about the name it shadows for its own block and the outer ones
+  come back when it closes, and `for i in a..b` / `for i in v.len()` state their bound inside the
+  body and stop at its `}`. Writes are never restored (a path may have taken them), bindings are
+  (the outer value was never written), and a statement that calls forgets the names it mentions. The
+  old token walk is removed; the switch was measured on the corpus first - 41 check sites with it,
+  41 with the walk over the IR, and seven new `pv-` cases prove calls the token walk could not.
 - Fixed: `bun tools/bootstrap.mjs stage ARCH` no longer requires the published manifest to describe the current sources. Splitting a reseed into `stage` and `publish` left the old `verify`-only manifest comparison on a bare `else`, so every `stage` run ended in `bootstrap source manifest is stale` - exactly the case a reseed exists for, and `tools/gate.sh --reseed` stopped at its first target after the self-hosting check had already passed. The comparison now runs only for `verify`; `bun tools/ci.mjs lint` pins the guard.
 - Tooling: `bootstrap.mjs stage ARCH` and `bootstrap.mjs publish` split a reseed into one step per target plus a publish that requires every seed to come from the current sources, and `tools/gate.sh --reseed` uses them, so an interrupted gate resumes at the target it stopped on rather than redoing an up-to-90-minute reseed.
 - Added: borrowed interface objects - `&dyn I` and `&mut dyn I` of a value that stays where it is, with no allocation (Rust's `&dyn Trait`). `&x` and `&mut x` become one at a typed binding, an argument and a return when `T` implements `I`, and a reference to an owned `dyn I` converts too. The value is a pair {data, vtable} written into the frame that borrows it, so the object never moves and nothing is allocated; a method call dispatches through that pair exactly as an owned `dyn I` dispatches through its cell, and a `&mut dyn` method mutates the original. The lifetime rules are `&T`'s: the value cannot be moved or dropped while the borrow lives, and a `&dyn` borrowed from a local cannot be returned (`returned borrow escapes its declared input lifetime`) while one borrowed from an input can. Records, vectors of borrowed objects (`(&dyn I)[]`) and generic code hold them; interface files carry the form as `(bobj (dyn ...))`. A function that builds one is left to the assembler as written - the word optimizer models frame slots as scalars, and a pair's second word is only reachable through the pair's address. Book: *Borrowing an object* in *Generics*; corpus: `dyn-borrowed-objects`, `dyn-borrowed-no-alloc` (an `@no_alloc` builder and a static-vtable pin), `dyn-borrowed-interface-form`, and `dyn-borrowed-reject-move`/`-escape`/`-not-implemented`.
