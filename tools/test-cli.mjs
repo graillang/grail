@@ -59,6 +59,7 @@ writeFileSync(join(demo, 'src/main.grl'), 'use mathlib;\nfn main(){println(mathl
 assert.equal(run(['fmt', '--check'], demo, false).status, 1, 'fmt --check must fail on unformatted code');
 run(['fmt'], demo); assert.equal(run(['fmt', '--check'], demo).status, 0);
 const lib = join(work, 'mathlib'); mkdirSync(join(lib, 'src'), { recursive: true });
+writeFileSync(join(lib, 'grail.toml'), '[package]\nname = "mathlib"\nversion = "0.1.0"\n');
 writeFileSync(join(lib, 'src/mathlib.grl'), 'module mathlib;\npub fn triple(n: u64) -> u64 {\n    return n * 3;\n}\n');
 const git = args => assert.equal(spawnSync('git', args, { cwd: lib }).status, 0, `git ${args.join(' ')}`);
 git(['init', '-q']); git(['add', '.']); git(['commit', '-qm', 'init']);
