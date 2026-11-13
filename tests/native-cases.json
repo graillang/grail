@@ -7759,5 +7759,86 @@
     "stdout": "before\n",
     "status": 134,
     "stderr": "error: stack overflow\n"
+  },
+  {
+    "name": "pkg-sha256",
+    "source": "use pkg;\nfn main() {\n\n    println(pkg::sha_hex(view(\"\")));\n    println(pkg::sha_hex(view(\"abc\")));\n    println(pkg::sha_hex(view(\"The quick brown fox jumps over the lazy dog\")));\n}\n",
+    "modules": [
+      "compiler/pkg.grl"
+    ],
+    "stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\nba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\nd7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592\n",
+    "status": 0
+  },
+  {
+    "name": "pkg-toml-document",
+    "source": "use pkg;\nfn main() {\n\n    text := \"[package]\\nname = \\\"demo\\\"\\nversion = '0.1.0'\\ncount = 42\\nneg = -7\\nflag = true\\n[dependencies]\\ncolors = { path = \\\"../colors\\\" }\\ntags = [\\\"a\\\", \\\"b\\\",]\\n\\\"quoted key\\\" = 1\\n\";\n    println(pkg::toml_dump(view(text)));\n}\n",
+    "modules": [
+      "compiler/pkg.grl"
+    ],
+    "stdout": "[package]\nname \"demo\"\nversion \"0.1.0\"\ncount 42\nneg -7\nflag true\n[dependencies]\ncolors {path=\"../colors\"}\ntags [\"a\",\"b\"]\nquoted key 1\n\n",
+    "status": 0
+  },
+  {
+    "name": "pkg-toml-refuse",
+    "source": "use pkg;\nfn main() {\n\n    println(pkg::toml_dump(view(\"[[bin]]\\nname = \\\"x\\\"\\n\")));\n    println(pkg::toml_dump(view(\"f = 1.5\\n\")));\n    println(pkg::toml_dump(view(\"s = \\\"\\\"\\\"x\\\"\\\"\\\"\\n\")));\n    println(pkg::toml_dump(view(\"d = 1979-05-27\\n\")));\n    println(pkg::toml_dump(view(\"k = 1\\nk = 2\\n\")));\n    println(pkg::toml_dump(view(\"t = { a = 1, }\\n\")));\n    println(pkg::toml_dump(view(\"[a]\\n[b]\\n[a]\\n\")));\n}\n",
+    "modules": [
+      "compiler/pkg.grl"
+    ],
+    "stdout": "error: line 1: arrays of tables ([[name]]) are not supported\nerror: line 1: floats are not supported (integers only)\nerror: line 1: multi-line strings are not supported\nerror: line 1: dates and times are not supported\nerror: line 2: duplicate key k\nerror: line 1: an inline table may not end with a comma\nerror: line 3: table [a] is defined twice\n",
+    "status": 0
+  },
+  {
+    "name": "pkg-semver-order",
+    "source": "use pkg;\nfn main() {\n\n    println(pkg::semver_order(\"1.2.3\", \"1.2.10\"));\n    println(pkg::semver_order(\"1.2.3\", \"1.2.3\"));\n    println(pkg::semver_order(\"1.3.0-alpha.1\", \"1.3.0\"));\n    println(pkg::semver_order(\"1.3.0-alpha\", \"1.3.0-alpha.1\"));\n    println(pkg::semver_order(\"1.3.0-beta\", \"1.3.0-alpha.9\"));\n    println(pkg::semver_order(\"01.2.3\", \"1.2.3\"));\n    println(pkg::semver_order(\"1.2\", \"1.2.0\"));\n}\n",
+    "modules": [
+      "compiler/pkg.grl"
+    ],
+    "stdout": "less\nequal\nless\nless\ngreater\nerror: line 0: version part has a leading zero: <01>\nerror: line 0: a version needs exactly MAJOR.MINOR.PATCH, got <1.2>\n",
+    "status": 0
+  },
+  {
+    "name": "pkg-requirement",
+    "source": "use pkg;\nfn main() {\n\n    println(pkg::semver_match(\"1.3.0\", \"1.2\"));\n    println(pkg::semver_match(\"2.0.0\", \"1.2\"));\n    println(pkg::semver_match(\"1.3.0-alpha.1\", \"1.2\"));\n    println(pkg::semver_match(\"1.3.0-alpha.1\", \"=1.3.0-alpha.1\"));\n    println(pkg::semver_match(\"1.3.0\", \">=1.0, <1.4\"));\n    println(pkg::semver_match(\"0.3.1\", \"^0.2.3\"));\n    println(pkg::semver_match(\"0.0.3\", \"^0.0.3\"));\n    println(pkg::semver_match(\"0.9.0\", \"~1\"));\n    println(pkg::semver_match(\"1.2.9\", \"~1.2\"));\n    println(pkg::semver_match(\"1.0.0\", \"*\"));\n    println(pkg::semver_match(\"1.0.0\", \"1.2,\"));\n}\n",
+    "modules": [
+      "compiler/pkg.grl"
+    ],
+    "stdout": "match\nno match\nno match\nmatch\nmatch\nno match\nmatch\nno match\nmatch\nmatch\nerror: line 0: empty comparator in requirement <1.2,>\n",
+    "status": 0
+  },
+  {
+    "name": "pkg-manifest",
+    "source": "use pkg;\nfn main() {\n\n    good := \"[package]\\nname = \\\"demo\\\"\\nversion = \\\"0.1.0\\\"\\ngrl-version = \\\"0.1\\\"\\n[dependencies]\\nlogging = \\\"1.2\\\"\\ncolors = { path = \\\"../colors\\\" }\\nmarks = { git = \\\"https://example/marks.git\\\", tag = \\\"v2.0.0\\\" }\\n[dev-dependencies]\\ntestkit = \\\"0.4\\\"\\n\";\n    print(pkg::manifest_report(view(good)));\n    println(pkg::manifest_report(view(\"[package]\\nname = \\\"demo\\\"\\n\")));\n    println(pkg::manifest_report(view(\"[workspace]\\nmembers = [\\\"a\\\"]\\n\")));\n    println(pkg::manifest_report(view(\"[package]\\nname = \\\"Demo\\\"\\nversion = \\\"1.0.0\\\"\\n\")));\n    println(pkg::manifest_report(view(\"[package]\\nname = \\\"demo\\\"\\nversion = \\\"1.0.0\\\"\\nextra = \\\"x\\\"\\n\")));\n    println(pkg::manifest_report(view(\"[package]\\nname = \\\"demo\\\"\\nversion = \\\"1.0.0\\\"\\n[dependencies]\\na = { git = \\\"u\\\", rev = \\\"r\\\", tag = \\\"t\\\" }\\n\")));\n}\n",
+    "modules": [
+      "compiler/pkg.grl"
+    ],
+    "stdout": "name demo\nversion 0.1.0\nentry src/main.grl\ngrl-version 0.1\ndep logging req 1.2\ndep colors path ../colors\ndep marks git https://example/marks.git tag v2.0.0\ndep testkit dev req 0.4\nerror: line 1: [package] demo needs a version\nerror: line 1: workspaces are not implemented (docs/design/package-manager.md section 2.6)\nerror: line 1: invalid package name <Demo> (lowercase letters, digits, '_' and '-', starting with a letter)\nerror: line 4: unknown [package] key <extra>\nerror: line 5: a git dependency pins at most one of rev, tag and branch\n",
+    "status": 0
+  },
+  {
+    "name": "pkg-resolve",
+    "source": "use pkg;\nfn main() {\n\n    print(pkg::resolve_report(\"avail log 1.0.0 1.5.0 2.0.0\\navail core 1.0.0 1.3.0 1.5.0\\nneed log ^1.0\\nneed core ^1.0\\n\"));\n    print(pkg::resolve_report(\"avail a 1.0.0\\navail b 1.0.0\\navail log 1.0.0 1.2.0\\nneed a ^1.0\\ndep a 1.0.0 log ^1.0\\n\"));\n    print(pkg::resolve_report(\"avail log 1.0.0 1.2.0 1.9.0\\nneed log ^1.0\\nlock log 1.2.0\\n\"));\n}\n",
+    "modules": [
+      "compiler/pkg.grl"
+    ],
+    "stdout": "log 1.5.0\ncore 1.5.0\na 1.0.0\nlog 1.2.0\nlog 1.2.0\n",
+    "status": 0
+  },
+  {
+    "name": "pkg-resolve-conflict",
+    "source": "use pkg;\nfn main() {\n\n    print(pkg::resolve_report(\"avail aaa 1.0.0\\navail bbb 1.0.0\\navail log 1.0.0 2.0.0\\nneed aaa ^1.0\\nneed bbb ^1.0\\ndep aaa 1.0.0 log ^1.0\\ndep bbb 1.0.0 log ^2.0\\n\"));\n    print(pkg::resolve_report(\"need log ^1.0\\n\"));\n    print(pkg::resolve_report(\"avail log 1.0.0\\nneed log ^2.0\\n\"));\n}\n",
+    "modules": [
+      "compiler/pkg.grl"
+    ],
+    "stdout": "error: no version of log satisfies all requirements:\n  ^1.0 (from aaa 1.0.0)\n  ^2.0 (from bbb 1.0.0)\navailable: 1.0.0, 2.0.0\nerror: no versions are available for log\nerror: no version of log satisfies all requirements:\n  ^2.0 (from root)\navailable: 1.0.0\n",
+    "status": 0
+  },
+  {
+    "name": "pkg-json",
+    "source": "use pkg;\nfn main() {\n    print(pkg::json_roundtrip(\"{\\\"name\\\":\\\"demo\\\",\\\"n\\\":42,\\\"ok\\\":true,\\\"deps\\\":[{\\\"n\\\":\\\"a\\\"}]}\"));\n    print(pkg::json_roundtrip(\"[1,]\"));\n    print(pkg::json_roundtrip(\"{\\\"a\\\":1.5}\"));\n    print(pkg::json_roundtrip(\"{\\\"a\\\":1,\\\"a\\\":2}\"));\n    print(pkg::json_roundtrip(\"[]\"));\n    print(pkg::json_roundtrip(\"\\\"tab\\\\there\\\"\"));\n}\n",
+    "modules": [
+      "compiler/pkg.grl"
+    ],
+    "stdout": "{\n  \"name\": \"demo\",\n  \"n\": 42,\n  \"ok\": true,\n  \"deps\": [\n    {\n      \"n\": \"a\"\n    }\n  ]\n}\nerror: byte 3: unexpected byte\nerror: byte 6: only integer numbers are accepted here (no fraction or exponent)\nerror: byte 12: duplicate key <a>\n[]\n\"tab\\there\"\n",
+    "status": 0
   }
 ]
