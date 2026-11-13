@@ -788,11 +788,21 @@ fn compile<a, b, d, e, g, k>(
     output: &e [u8],
     target: &g [u8],
     flags: u64,
-    iface: &d [u8],
-    verify: u64,
-    diag: &k [u8]
+    iface: &d [u8] = view(""),
+    verify: u64 = 0,
+    diag: &k [u8] = view("")
 ) -> u64 {
-    return compile_mode(h, entry, modules, output, target, flags, iface, verify, diag);
+    return compile_mode(
+        h: h,
+        entry: entry,
+        modules: modules,
+        output: output,
+        target: target,
+        flags: flags,
+        iface: iface,
+        verify: verify,
+        diag: diag
+    );
 }
 // The compiler invocation, spelled out in one place: the build cache keys on this vector, so a flag
 // or an input that the driver passes is in the key by construction and cannot be forgotten there.
@@ -805,9 +815,9 @@ fn build_argv<a, b, d, e, g, k>(
     asm: &e [u8],
     target: &g [u8],
     flags: u64,
-    iface: &d [u8],
-    verify: u64,
-    diag: &k [u8]
+    iface: &d [u8] = view(""),
+    verify: u64 = 0,
+    diag: &k [u8] = view("")
 ) -> u8[][] {
     check_only := flags % 2;
     debug := (flags / 2) % 2;
@@ -914,9 +924,9 @@ fn compile_mode<a, b, d, e, g, k>(
     output: &e [u8],
     target: &g [u8],
     flags: u64,
-    iface: &d [u8],
-    verify: u64,
-    diag: &k [u8]
+    iface: &d [u8] = view(""),
+    verify: u64 = 0,
+    diag: &k [u8] = view("")
 ) -> u64 {
     check_only := flags % 2;
     debug := (flags / 2) % 2;
@@ -973,7 +983,17 @@ fn compile_mode<a, b, d, e, g, k>(
     }
     assemble.push(triple);
     assemble.push(copy(view("-c")));
-    command := build_argv(&h, view(entry), &modules, view(asm), view(target), flags, iface, verify, diag);
+    command := build_argv(
+        h: &h,
+        entry: view(entry),
+        modules: &modules,
+        asm: view(asm),
+        target: view(target),
+        flags: flags,
+        iface: iface,
+        verify: verify,
+        diag: diag
+    );
     // The shape of the build. A program of more than one module of its own is built one compiler run
     // per module, each reading the interfaces the runs before it wrote (B1 stage 4). `--whole-program`
     // and `--split` ask for the one-run shapes, an `--interface` build checks every module against its
@@ -2752,8 +2772,10 @@ struct Options {
 // The code-generation flag vector, in one place: it is what the compiler is told, and what the build
 // cache keys on. Bit 0 check only, 1 debug, 2 deny ambient host, 3 split, 4/5 overflow, 6 cache,
 // 7 whole program, 8 no runtime-error location table.
-fn flag_bits<a>(o: (&a Options)) -> u64 {
-    return o.debug
+// The compiler's flag word. `check_only` is the `--check` bit, which is about the caller rather than
+// the options, so it is an argument instead of an option field.
+fn flag_bits<a>(o: (&a Options), check_only: bool = false) -> u64 {
+    return u64(check_only) + o.debug
         * 2
         + o.deny
         * 4
@@ -2977,15 +2999,15 @@ fn build_pass<a, b, c>(h: (&a Home), o: (&b mut Options), diag: &c [u8]) -> u64 
         }
         mut none = u8[][];
         return compile(
-            &h,
-            view(o.file),
-            &none,
-            view(o.output),
-            view(o.target),
-            flag_bits(&o),
-            view(o.iface),
-            o.verify,
-            diag
+            h: &h,
+            entry: view(o.file),
+            modules: &none,
+            output: view(o.output),
+            target: view(o.target),
+            flags: flag_bits(&o),
+            iface: view(o.iface),
+            verify: o.verify,
+            diag: diag
         );
     }
     // A project build reads grail.lock: the package manager has already resolved, fetched and
@@ -3000,15 +3022,15 @@ fn build_pass<a, b, c>(h: (&a Home), o: (&b mut Options), diag: &c [u8]) -> u64 
         o.output = path_join(view("target"), view(name));
     }
     return compile(
-        &h,
-        view(p.entry),
-        &p.modules,
-        view(o.output),
-        view(o.target),
-        flag_bits(&o),
-        view(o.iface),
-        o.verify,
-        diag
+        h: &h,
+        entry: view(p.entry),
+        modules: &p.modules,
+        output: view(o.output),
+        target: view(o.target),
+        flags: flag_bits(&o),
+        iface: view(o.iface),
+        verify: o.verify,
+        diag: diag
     );
 }
 fn check_command<a>(args: (&a u8[][])) -> u64 {
@@ -3042,15 +3064,15 @@ fn check_pass<a, b, c>(h: (&a Home), o: (&b Options), diag: &c [u8]) -> u64 {
         out := path_join(view("target"), view(stem));
         mut none = u8[][];
         return compile_mode(
-            &h,
-            view(o.file),
-            &none,
-            view(out),
-            view(o.target),
-            1 + flag_bits(&o),
-            view(o.iface),
-            o.verify,
-            diag
+            h: &h,
+            entry: view(o.file),
+            modules: &none,
+            output: view(out),
+            target: view(o.target),
+            flags: flag_bits(&o, check_only: true),
+            iface: view(o.iface),
+            verify: o.verify,
+            diag: diag
         );
     }
     p := pkg::plan(0);
@@ -3060,15 +3082,15 @@ fn check_pass<a, b, c>(h: (&a Home), o: (&b Options), diag: &c [u8]) -> u64 {
     name := copy(view(p.name));
     out := path_join(view("target"), view(name));
     return compile_mode(
-        &h,
-        view(p.entry),
-        &p.modules,
-        view(out),
-        view(o.target),
-        1 + flag_bits(&o),
-        view(o.iface),
-        o.verify,
-        diag
+        h: &h,
+        entry: view(p.entry),
+        modules: &p.modules,
+        output: view(out),
+        target: view(o.target),
+        flags: flag_bits(&o, check_only: true),
+        iface: view(o.iface),
+        verify: o.verify,
+        diag: diag
     );
 }
 
@@ -3785,7 +3807,7 @@ fn test_failure<a, b>(file: &a [u8], status: u64, log_path: &b [u8], note: &b [u
 fn test_run_here<a, b, d>(h: (&a Home), o: (&a TestOptions), file: &a [u8], log: &b [u8]) -> u64 {
     modules := u8[][];
     out := test_binary(view(file));
-    status := compile(h, view(file), &modules, view(out), view(o.target), test_bits(&o), view(""), 0, view(""));
+    status := compile(h: h, entry: view(file), modules: &modules, output: view(out), target: view(o.target), flags: test_bits(&o));
     if status != 0 {
         return status;
     }

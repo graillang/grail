@@ -20478,13 +20478,12 @@ fn receiver_read_by_args<a>(c: (&a mut C), dot: u64) -> bool {
     return false;
 }
 // The token range [start, end) of each argument of the call whose `(` was just read, then the
-// position of its `)`, flattened: start0, end0, start1, end1, ..., close. `closures` 0 declines a
-// list that holds a closure at all (a `|a, b|` has commas of its own) and 1 counts the bars, so a
-// comma between them is not a separator. Empty when the list cannot be scanned simply.
-fn argument_slots<a>(c: (&a mut C), closures: u64) -> u64[] {
+// position of its `)`, flattened: start0, end0, start1, end1, ..., close. Empty when the list
+// cannot be scanned simply: a closure holds commas of its own (`|a, b|`), and `|` is also the
+// bitwise-or operator, so a list holding one is not split here - `call` then reads it positionally.
+fn argument_ranges<a>(c: (&a mut C)) -> u64[] {
     mut out = u64[];
     mut depth = 0;
-    mut bars = 0;
     mut at = c.pos;
     mut begin = at;
     while true {
@@ -20492,7 +20491,7 @@ fn argument_slots<a>(c: (&a mut C), closures: u64) -> u64[] {
         if k == 0 {
             return u64[];
         }
-        if (closures == 0) & ((k == 124) || (k == 274)) {
+        if (k == 124) || (k == 274) {
             return u64[];
         }
         if (k == 40) || (k == 91) || (k == 123) {
@@ -20505,9 +20504,7 @@ fn argument_slots<a>(c: (&a mut C), closures: u64) -> u64[] {
                 return out;
             }
             depth -= 1;
-        } else if k == 124 {
-            bars += 1;
-        } else if (k == 44) && (depth == 0) && (bars % 2 == 0) {
+        } else if (k == 44) && (depth == 0) {
             out.push(begin);
             out.push(at);
             begin = at + 1;
@@ -20515,11 +20512,6 @@ fn argument_slots<a>(c: (&a mut C), closures: u64) -> u64[] {
         at += 1;
     }
     return out;
-}
-// The same list for the loan ordering two-phase borrows need, which declines a list holding a
-// closure rather than guess which of its commas separate arguments.
-fn argument_ranges<a>(c: (&a mut C)) -> u64[] {
-    return argument_slots(&mut c, 0);
 }
 // The parameter of function `f` named `name`, 1-based, or 0 when the declaration has none.
 fn param_slot<a, b>(c: (&a C), f: u64, name: &b [u8]) -> u64 {
@@ -20905,9 +20897,14 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
     mut order = u64[];
     mut slots = u64[];
     if more != 0 {
-        ranges = argument_slots(&mut c, 1);
+        ranges = argument_ranges(&mut c);
         order = two_phase_order(&mut c, &ranges);
-        slots = call_slots(&mut c, f, &ranges, base, view(name));
+        // A list holding a closure is not split (`argument_ranges`), so such a call is read
+        // positionally: parameter `base + i` for the i-th argument written, and the defaults for
+        // whatever the list leaves over.
+        if ranges.len() != 0 {
+            slots = call_slots(&mut c, f, &ranges, base, view(name));
+        }
     }
     mut slot_k = 0;
     if more != 0 {
@@ -20919,10 +20916,13 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                 written = order[slot_k];
                 exchange(&mut c.pos, ranges[2 * written]);
             }
-            argi := slots[2 * written];
-            // A named argument's value starts after its `name:`.
-            if slots[2 * written + 1] != 0 {
-                exchange(&mut c.pos, c.pos + 2);
+            mut argi = base + written;
+            if slots.len() != 0 {
+                argi = slots[2 * written];
+                // A named argument's value starts after its `name:`.
+                if slots[2 * written + 1] != 0 {
+                    exchange(&mut c.pos, c.pos + 2);
+                }
             }
             astart := c.pos;
             mut context = NO_TYPE;
@@ -21150,9 +21150,19 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
     for i in base {
         exchange(&mut given[i], 1);
     }
-    for i in slots.len() / 2 {
-        if slots[2 * i] < count {
-            exchange(&mut given[slots[2 * i]], 1);
+    if slots.len() != 0 {
+        for i in slots.len() / 2 {
+            if slots[2 * i] < count {
+                exchange(&mut given[slots[2 * i]], 1);
+            }
+        }
+    } else {
+        // A list that could not be split filled the parameters in written order (`slot_k` counts
+        // them, in both the plain and the two-phase reading).
+        for i in slot_k {
+            if base + i < count {
+                exchange(&mut given[base + i], 1);
+            }
         }
     }
     for p in count {
