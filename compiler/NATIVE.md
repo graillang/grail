@@ -164,19 +164,27 @@ lowers it, so all three targets share it. It is not a general optimizing middle 
   instructions): their slots move to free scratch registers and each call site gets a copy with
   its own labels. The function itself is still emitted for indirect calls.
 
-A slot is one word unless the emitter declares it the first word of a **two-word value** with a
-`.gpair -N(%rbp)` line, which is how a borrowed interface object's `{data, vtable}` pair is written
-into the frame. The line is consumed (no other part of the toolchain sees it) and the two slots
-become one value with one identity: both words are opaque to the value passes (never promoted, never
+A slot is one word unless the front end records it as the first word of a **`DynPair`**, the
+16-byte `{data, vtable}` value a borrowed interface object is (`docs/design/fat-dyn.md`). That is a
+typed-IR fact about the function's body (`llvm::fact_dyn_pair`, keyed by the body symbol), not a
+directive in the stream: the stream carries instructions only. The pass turns the fact into one
+value with one identity - both words are opaque to the value passes (never promoted, never
 forwarded, their stores never dead), the frame compaction reserves both and keeps them adjacent and
-in order, so the handle `-N(%rbp)` still names word 0 with word 1 eight bytes above it. `.gpair ret`
+in order, so the handle still names word 0 with word 1 eight bytes above it. `llvm::fact_dyn_result`
 declares the other place a two-word value lives - the result registers - and keeps `%rdx` live at a
 `ret` that a one-word result would leave dead. A pass that cannot reason about the second word is
-conservative for both words, and a function that declares a pair is not inlined (its slots would
-move to registers) or sent down the copy-unchanged path.
+conservative for both words, and a function that builds a pair is not inlined (its slots would move
+to registers).
 
-Since the average function declares no pair, the model costs nothing there: with no declaration the
-pass reads none of the pair state and the emitted code of a pair-free function is byte-identical.
+Two slot conventions meet at that fact and they differ by one: the front end indexes slots by the
+number `fresh` hands out (slot `k` lives at `-8(k+1)(%rbp)`), while this pass indexes them by
+address (`k+1`, from a `-N(%rbp)` operand as `N/8`). `llvm.grl` uses the front end's numbering and
+`optimize.grl` converts; the fact itself carries the front end's.
+
+Since the average function builds no pair, the model costs nothing there: with no fact the pass
+reads none of the pair state and the emitted code of a pair-free function is byte-identical, and a
+pair-building function compiles to the same instructions it did when the pair was declared with a
+directive (the assembly of `opt2-dyn-pair-loop` is byte-identical).
 
 The compiler also emits sized-integer comparisons, `& | ^`, checked `+ - *` (8–32 bit, and `+ -` on
 `i64`) and division/remainder inline instead of calling `rt_int`, and drops the bounds check of

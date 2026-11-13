@@ -8414,6 +8414,73 @@
     ]
   },
   {
+    "name": "dynf-pair-layout",
+    "files": [
+      "compiler/tests/dyn_fat_layout.grl"
+    ],
+    "stdout": "7 49 49\n",
+    "targets": [
+      "x86_64"
+    ],
+    "asm": [
+      "movq 8(%rdi),%rax",
+      "movq (%rdi),%rdi",
+      "movq 16(%rax),%rax"
+    ],
+    "note": "the ABI of docs/design/fat-dyn.md, pinned: a `&dyn Shape` is one word, the address of a 16-byte pair whose word 0 is the data pointer and whose word 1 is the vtable, and dispatch reads `8(handle)` for the vtable and `16(vtable)` for the interface's second method (word 0 of the vtable is the drop slot, word 1 is method 0). The program pins what word 0 reaches: a `&mut dyn` method writes through it, so the object the borrowing frame passed is what holds the mutation afterwards"
+  },
+  {
+    "name": "dynf-borrowed-mut-method",
+    "files": [
+      "compiler/tests/dyn_fat_mut.grl"
+    ],
+    "stdout": "5 5\n5 501\n15 2\n",
+    "note": "a `&mut dyn Counter` dispatched twice through one pair, a second `&mut dyn` beside it, and a pair held in a scope of its own: the methods write through word 0 of their pair, so the objects hold the mutations once the borrows end (the trait is implemented by two different concrete types, so the dispatch is real)"
+  },
+  {
+    "name": "dynf-owned-dyn-field",
+    "files": [
+      "compiler/tests/dyn_fat_owned.grl"
+    ],
+    "stdout": "drop sq 4\n17\n2 25 sq\n36\ndrop sq 6\ndrop sq 5\n",
+    "note": "an owned `dyn Shape` in a record field: built by a call that returns one, passed by value into a function that drops it, returned again through a call that keeps it, and dropped with the record - each object's destructor runs exactly once, through word 0 of its vtable, and a default method (`name`) dispatches through the same table"
+  },
+  {
+    "name": "dynf-pair-fields-and-vectors",
+    "files": [
+      "compiler/tests/dyn_fat_fields.grl"
+    ],
+    "stdout": "112\n2 21\n12 12\n",
+    "note": "a `&dyn Shape` stored in a record field, in a vector, passed as an argument and returned from a function: one word each, so a field, an element and a result hold the handle while the pair stays in the frame that built it; the returned one is rebuilt in the caller's frame from the two words the callee hands back"
+  },
+  {
+    "name": "dynf-pair-optimized",
+    "source": "interface Shape {\n    fn area(self: &Self) -> u64;\n    fn grow(self: &mut Self, by: u64) -> unit;\n}\nstruct Sq {\n    side: u64,\n}\nimpl Shape for Sq {\n    fn area(self: &Self) -> u64 {\n        return self.side * self.side;\n    }\n    fn grow(self: &mut Self, by: u64) -> unit {\n        self.side = self.side + by;\n        return ();\n    }\n}\nfn main() -> u64 {\n    mut q = Sq { side: 1 };\n    mut total = 0;\n    for i in 5 {\n        mut d: &mut dyn Shape = &mut q;\n        d.grow(1);\n        e: &dyn Shape = &q;\n        total = total + e.area();\n    }\n    println(\"{}\", total);\n    return 0;\n}\n",
+    "stdout": "90\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asm": [
+      "movq %rbx,-.F"
+    ],
+    "asmAbsent": [
+      "leaq -4(%rbp)"
+    ],
+    "note": "a function that builds `&dyn` pairs is optimized like any other: the loop accumulator is promoted into a callee-saved register (`movq %rbx,-.F` spills it below the frame) and the frame is compacted, so building a pair does not send a function down the copy-unchanged path; the two-word pair is a typed-IR fact, not a directive the optimizer has to be taught to parse"
+  },
+  {
+    "name": "dynf-reject-c-boundary",
+    "source": "interface Shape {\n    fn area(self: &Self) -> u64;\n}\nstruct Sq {\n    side: u64,\n}\nimpl Shape for Sq {\n    fn area(self: &Self) -> u64 {\n        return self.side * self.side;\n    }\n}\nextern \"C\" fn c_area(p: &dyn Shape) -> u64 {\n    return p.area();\n}\nfn main() {\n    q := Sq { side: 2 };\n    println(\"{}\", unsafe { c_area(&q) });\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "an extern C out-parameter must be &mut a handle, CPtr, CMutPtr or extern \"C\" record"
+    ],
+    "note": "the ABI says a `&dyn I` is one pointer, but a reference parameter of an `extern \"C\"` function is an out-parameter (C writes through it) and a `&dyn` is not one of the shapes that admits, so a borrowed trait object cannot cross a C boundary yet. Pinned here so that admitting it is a decision with a test to update, not a silent change; docs/design/fat-dyn.md records the gap"
+  },
+  {
     "name": "tfail-explicit-failure-at-join",
     "note": "A task that fails explicitly (task_fail) is contained: the process survives and the join sees a TaskFailure carrying the failure kind and the message the task gave (docs/design/task-failure-containment.md).",
     "source": "use host;\nfn work(n: u64, base: u64) -> u64 {\n    if n == 0 {\n        task_fail(view(\"bad input\"));\n    }\n    return n + base;\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    t := spawn(sc, 0, work);\n    match try_join(t) {\n        v: u64 => { println(v); },\n        f: TaskFailure => {\n            println(f.kind);\n            host::print(f.message);\n            host::print(view(\"\\n\"));\n        },\n    }\n    return 0;\n}\nfn main() {\n    host::print(view(\"before\\n\"));\n    task_scope(1, body);\n    host::print(view(\"after\\n\"));\n}\n",

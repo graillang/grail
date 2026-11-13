@@ -1,5 +1,31 @@
 ## Unreleased
 
+- Changed: a borrowed interface object's shape is now stated by the language instead of declared by
+  the emitter. A `&dyn I` is one 8-byte pointer to a 16-byte, 8-byte-aligned `{data@0, vtable@8}`
+  pair, whose vtable is `{drop, method0, method1, ...}` with the destructor's slot first
+  (`docs/design/fat-dyn.md`). One word is what keeps a borrow a borrow: the handle is the same size,
+  alignment, copy and drop as any `&T`, so it sits in a record field, a vector element, a generic
+  argument or a result unchanged - a two-register fat pointer would double each of those and put
+  Win64's 16-byte-aggregate-by-reference rule, and 32-bit targets' hidden `sret` pointer, on every
+  signature that mentions one. A returned `&dyn I` still travels as the pair's two words
+  (`%rax:%rdx`, `x0:x1`, `a0:a1`), which is those platforms' own rule for a 16-byte `{ptr, ptr}`
+  aggregate, and the caller stores both into its own frame. The `.gpair` directive is gone from the
+  emitted stream and `pair_new` with it: the front end records the pair as a typed-IR fact about the
+  body that builds one (`llvm::fact_dyn_pair`, and `llvm::fact_dyn_result` for a body that returns
+  one, beside the instruction stream and keyed by body symbol), and `optimize.grl` and `llvm.grl`
+  read it there, so the optimizer's two-word frame value is a fact about a language type rather than
+  a marker it parses out of assembly text. A pair-building function compiles to exactly the
+  instructions it did (the assembly of `opt2-dyn-pair-loop` is byte-identical), building one still
+  allocates nothing, and it is still optimized rather than copied unchanged. The interface format
+  goes to `// grail-interface 4` with one header line - `abi dyn pair size = 16 align = 8 word0 =
+  data word1 = vtable drop = 0` - which the reader compares with its own ABI and refuses when it
+  differs, so separately compiled modules cannot be built for different `dyn` layouts; a v3 file
+  meeting this compiler is refused with the version it was written in. Cases: `dynf-pair-layout`
+  (the offsets, by assembly), `dynf-borrowed-mut-method`, `dynf-owned-dyn-field`,
+  `dynf-pair-fields-and-vectors`, `dynf-pair-optimized`, and `dynf-reject-c-boundary`, which pins the
+  gap that a `&dyn` cannot yet be an `extern "C"` parameter (a reference parameter there is an
+  out-parameter and a `&dyn` is not one of the shapes it admits).
+
 - Ranges: a range value is now a `Span` (`lib/span.grl`) that carries the slice it was made from - a
   byte view plus its two ends - so a range its slice does not have is refused where the span is made
   (`span_of` yields `1..0`, which names no bytes) and a range taken from one sequence cannot reach

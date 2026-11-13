@@ -1,0 +1,52 @@
+// A `&mut dyn` method mutates the object the pair's word 0 points at, and the mutation is what a
+// later read of the object sees: the pair is written into the borrowing frame and the method it
+// dispatches to (word 1 of the vtable + 8) writes through word 0 of the pair.
+interface Counter {
+    fn bump(self: &mut Self, by: u64) -> unit;
+    fn total(self: &Self) -> u64;
+}
+struct Acc {
+    n: u64,
+}
+impl Counter for Acc {
+    fn bump(self: &mut Self, by: u64) -> unit {
+        self.n = self.n + by;
+        return ();
+    }
+    fn total(self: &Self) -> u64 {
+        return self.n;
+    }
+}
+struct Tally {
+    sum: u64,
+    hits: u64,
+}
+impl Counter for Tally {
+    fn bump(self: &mut Self, by: u64) -> unit {
+        self.sum = self.sum + by;
+        self.hits = self.hits + 1;
+        return ();
+    }
+    fn total(self: &Self) -> u64 {
+        return self.sum * 100 + self.hits;
+    }
+}
+fn bump_all(a: &mut dyn Counter, b: &mut dyn Counter) {
+    a.bump(2);
+    b.bump(5);
+    a.bump(3);
+    return ();
+}
+fn main() {
+    mut one = Acc { n: 0 };
+    mut two = Tally { sum: 0, hits: 0 };
+    bump_all(&mut one, &mut two);
+    // The borrows ended: what the objects hold now is what the methods wrote through the pairs.
+    println("{} {}", one.n, two.sum);
+    println("{} {}", one.total(), two.total());
+    {
+        mut c: &mut dyn Counter = &mut two;
+        c.bump(10);
+    }
+    println("{} {}", two.sum, two.hits);
+}

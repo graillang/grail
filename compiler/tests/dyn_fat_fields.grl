@@ -1,0 +1,53 @@
+// A `&dyn Shape` is one word wherever a value goes: a record field, a vector element, a return and
+// an argument. Each of those holds the *handle*, the address of the pair the borrowing frame wrote,
+// so passing one on copies one word while the pair stays where it was built.
+interface Shape {
+    fn area(self: &Self) -> u64;
+}
+struct Sq {
+    side: u64,
+}
+struct Ci {
+    r: u64,
+}
+impl Shape for Sq {
+    fn area(self: &Self) -> u64 {
+        return self.side * self.side;
+    }
+}
+impl Shape for Ci {
+    fn area(self: &Self) -> u64 {
+        return 3 * self.r * self.r;
+    }
+}
+struct Row<a> {
+    shape: &a dyn Shape,
+    tag: u64,
+}
+fn area_row<a>(r: &Row<a>) -> u64 {
+    return r.shape.area() + r.tag;
+}
+// The pair is built in this frame and comes back as its two words; the caller stores them in its
+// own, so the handle it holds never points into this call's frame.
+fn as_shape(c: &Ci) -> &dyn Shape {
+    return c;
+}
+fn area_of(s: &dyn Shape) -> u64 {
+    return s.area();
+}
+fn main() {
+    c := Ci { r: 2 };
+    mut q = Sq { side: 3 };
+    row := Row { shape: &c, tag: 100 };
+    println("{}", area_row(&row));
+    mut v = (&dyn Shape)[];
+    v.push(&c);
+    v.push(&q);
+    mut total = 0;
+    for i in v.len() {
+        total = total + v[i].area();
+    }
+    println("{} {}", v.len(), total);
+    f := as_shape(&c);
+    println("{} {}", area_of(f), row.shape.area());
+}
