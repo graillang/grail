@@ -567,6 +567,16 @@ refuses with the first byte offset at which reading and writing disagree. A revi
 what changed therefore runs one command against the two files; a review that wants a line diff checks
 out the branch and dumps both sides.
 
+**`grail iface dump` is the supported way to read an interface.** It renders everything the file
+carries - the header, every record with its fields, bounds (`bound=I:BITS`), interface requirements,
+refinements with their parameter names, the effects row, a template's body rows and the trailer's
+two digests - because it is the reader walking the file, not a description of what a file is supposed
+to look like. Nothing else should parse the bytes: a tool that needs to know what an interface says
+runs the dump, and a test that needs to *corrupt* one changes a byte it located through the record
+framing (`tools/interface-test.mjs` does exactly that). The dump's shape is as stable as the format
+version: a field added to a record appears on the line of the record it belongs to, and a script that
+reads the dump sees the same grammar across format 4 files.
+
 ### The surface, computed structurally
 
 An interface still carries the public surface only: every `pub` item, every implementation, every
@@ -600,6 +610,14 @@ half-installed: the prologue, the framing of every record, the trailer's digest 
    pins the bytes that were written, the source digest catches a changed source, and `--verify`
    compares the two record trees line by line and names the declaration that differs.
 
+`--verify` checks the trailer's two digests **separately, and refuses them with different messages**,
+because they are different bugs: a file that does not match its own trailer digest is *tampered with*
+(`changed after it was written: the digest in its trailer does not match the file`), and a file whose
+recorded source digest does not match the source on the command line is *stale*
+(`module \`util\` changed since this interface was written: the interface records source-sha256 …,
+but src/util.grl is …`). The trailer's framing is checked before either: a file cut short is reported
+as truncation, not as a digest mismatch.
+
 ### The cache key
 
 `grail build --cache` keys each module's run on the *surface* of every interface it can read: the
@@ -617,10 +635,12 @@ byte range (`native::iface_surface`).
 - **Bodies stopped being escaped.** A template body is one length-counted byte string, not one quoted
   row per source line: no escape rule, no row count to disagree with, and a changed statement is still
   one changed line in a `dump` diff.
-- **Interfaces are smaller.** The compiler's own nine surfaces went from 14,312 bytes of text to
-  9,209 in the record stream (36% smaller), mostly from digests (64 hex characters become 32 bytes),
-  type references that no longer spell `(named module::name mode regions)` and constants that carry
-  raw bytes instead of hex.
+- **Interfaces are smaller.** Over the fourteen modules both runs emit, the compiler's own surfaces
+  went from 14,427 bytes of text to 8,733 in the record stream (39% smaller): a digest is 32 bytes
+  instead of 64 hex characters, a type reference is a length-counted name instead of
+  `(named module::name mode regions)`, a constant carries raw bytes instead of hex, and a generic
+  body is one string instead of one escaped row per line. (The run also emits `core` and `result`
+  now, 4,350 bytes more, because they are modules of the program.)
 - **Emission is faster.** The compiler's own emit went from 4m12s to 2m14s on this host, because the
   surface no longer re-scans emitted text for every unkept name in a fixpoint over strings.
 

@@ -18,7 +18,7 @@
   that changes no declaration still leaves downstream keys alone. Two behaviour changes: a generic
   interface implementation (`impl<T> Show for Pair<T>`) now carries its parameters - the text format
   wrote `params=0` because writer and reader looked the record up under different keys - and the
-  compiler's own nine interfaces drop from 14,427 to 8,482 bytes, with emission from 4m12s to 2m14s.
+  compiler's own interfaces drop from 14,427 to 8,733 bytes, with emission from 4m12s to 2m14s.
   docs/design/separate-compilation.md, "Format 4 as built"; cases `ifc-*`, and
   `tools/interface-test.mjs` proves round-trip equality and every refusal.
 - Ranges: a range value is now a `Span` (`lib/span.grl`) that carries the slice it was made from - a

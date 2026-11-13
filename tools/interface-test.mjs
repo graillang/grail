@@ -171,6 +171,81 @@ function typeRecord(bytes, module, name) {
   assert.fail(`${module}::${name}: no type record`);
 }
 
+// A cursor that skips the length-counted fields the record stream is made of, so a test can reach
+// one field (the effects row) and change it. This is the same framing `frame` reads, nothing more.
+function skipVar(bytes, at) {
+  for (;;) {
+    const b = bytes[at];
+    at += 1;
+    if (!(b & 128)) return at;
+  }
+}
+function readVar(bytes, at) {
+  let n = 0;
+  let scale = 1;
+  for (;;) {
+    const b = bytes[at];
+    at += 1;
+    n += (b & 127) * scale;
+    if (!(b & 128)) return [n, at];
+    scale *= 128;
+  }
+}
+function skipStr(bytes, at) {
+  const [n, next] = readVar(bytes, at);
+  return next + n;
+}
+function skipType(bytes, at) {
+  const [n, next] = readVar(bytes, at + 1);
+  return next + n;
+}
+// Where the `no_alloc` and `no_panic` bytes of one function's record are.
+function fnEffects(bytes, name) {
+  for (const record of frame(bytes)) {
+    if (record.tag !== 13) continue;
+    const p = payload(bytes, record);
+    if (p.str().toString() !== name) continue;
+    let at = p.at;
+    at += 1;
+    at = skipVar(bytes, at);
+    at = skipVar(bytes, at);
+    at = skipVar(bytes, at);
+    at = skipStr(bytes, at);
+    at += 1;
+    const [np, afterParams] = readVar(bytes, at);
+    at = afterParams;
+    for (let i = 0; i < np; i += 1) at = skipType(bytes, at);
+    at = skipType(bytes, at);
+    const [nb, afterBounds] = readVar(bytes, at);
+    at = afterBounds;
+    for (let i = 0; i < nb; i += 1) {
+      at = skipVar(bytes, at);
+      at = skipVar(bytes, at);
+    }
+    const [nr, afterReqs] = readVar(bytes, at);
+    at = afterReqs;
+    for (let i = 0; i < nr; i += 1) {
+      at = skipVar(bytes, at);
+      const [refs, afterRefs] = readVar(bytes, at);
+      at = afterRefs;
+      for (let j = 0; j < refs; j += 1) {
+        at = skipStr(bytes, at);
+        at = skipStr(bytes, at);
+      }
+    }
+    const [nw, afterWhere] = readVar(bytes, at);
+    at = afterWhere;
+    for (let i = 0; i < nw; i += 1) {
+      at = skipVar(bytes, at);
+      at = skipStr(bytes, at);
+      at = skipStr(bytes, at);
+    }
+    at = skipStr(bytes, at);
+    return { noAlloc: at, noPanic: at + 1 };
+  }
+  assert.fail(`no function record named ${name}`);
+}
+
 // (0) Every digest an interface records is the real SHA-256 of what it covers, checked with the
 // host's own implementation rather than the compiler's: the source the header names, the trailer's
 // digest over every byte before it, and - through the compiler's own reader - byte-identical
@@ -444,7 +519,6 @@ pub fn twice(x: u64) -> u64 {
   // the manifest was pinned to the edited bytes so the manifest check cannot be what catches it.
   const edited = Buffer.from(original);
   const transfer = typeRecord(edited, 'util', 'Stream');
-  transfer.var();
   assert.equal(edited[transfer.at], 1, 'the transfer byte must be where the format says it is');
   edited[transfer.at] = 0;
   repin(edited);
@@ -479,6 +553,16 @@ pub fn twice(x: u64) -> u64 {
   assert.equal(version.status, 1, 'an interface written by another compiler must be refused');
   assert.match(version.output, /was written in interface format 3/, `the version refusal must name the version it found: ${version.output}`);
   assert.match(version.output, /this compiler reads format 4/, 'the version refusal must name the version this compiler reads');
+
+  // ... and a file from a *newer* compiler is refused by name as well: a version this compiler
+  // does not know is never half-read.
+  const future = Buffer.from(original);
+  future[4] = 5;
+  repin(future);
+  const ahead = compile(files, join(directory, 'future'), ['--interface', ifaces]);
+  assert.equal(ahead.status, 1, 'an interface written by a newer compiler must be refused');
+  assert.match(ahead.output, /was written in interface format 5 by a newer compiler/, `the future-version refusal must name the version it found: ${ahead.output}`);
+  assert.match(ahead.output, /this one reads format 4/, 'the future-version refusal must name the version this compiler reads');
 
   // ... a truncated file is refused as truncated.
   repin(Buffer.from(original.subarray(0, Math.floor(original.length * 0.6))));
@@ -530,6 +614,7 @@ pub fn twice(x: u64) -> u64 {
   const restored = compile(files, join(directory, 'restored'), ['--interface', ifaces]);
   assert.equal(restored.status, 0, `an untouched interface must still build\n${restored.output}`);
   return {
+    future: ahead.output.trim().split('\n')[0],
     edited: unsealed.output.trim().split('\n')[0],
     manifest: laundered.output.trim().split('\n')[0],
     verify: verified.output.trim().split('\n')[0],
@@ -672,7 +757,8 @@ const tamper = proveTampering();
 report('edited transfer refused (seal)', tamper.edited);
 report('re-digested transfer refused (manifest)', tamper.manifest);
 report('edited transfer refused (--verify)', tamper.verify);
-report('version refused', tamper.version);
+report('old version refused', tamper.version);
+report('future version refused', tamper.future);
 report('truncation refused', tamper.truncated);
 report('unknown record refused', tamper.unknown);
 report('a record one field longer refused', tamper.longer);
@@ -746,13 +832,14 @@ function proveGenericBodies() {
   // (e1) Emit the interfaces, then never mention the modules' sources again.
   const ifaces = emit(all, directory);
   const generic = join(ifaces, 'generic.iface');
-  const text = readFileSync(generic, 'utf8');
-  assert.ok(text.startsWith('// grail-interface 3\n'), 'generics: the interface does not carry the current format version');
+  const text = dump(generic);
+  assert.match(text, /^grail-interface 4$/m, 'generics: the interface does not carry the current format version');
   assert.match(text, /^fn generic::twice <1> /m, 'generics: generic.iface does not declare the template');
-  assert.doesNotMatch(text, /\bpos \d+$/, 'generics: a body is still a source position, not carried text');
-  assert.match(text, /^body \d+$/m, 'generics: generic.iface carries no body section');
-  // A body row is the template's own source line, readable in a diff.
-  assert.ok(text.includes('line "    return value;"'), 'generics: the body section does not carry the template text');
+  assert.match(text, /^\s*body$/m, 'generics: generic.iface carries no body section');
+  // The body is the template's own source text, one `|` row per line, readable in a diff.
+  assert.ok(text.includes('|    return value;'), 'generics: the body section does not carry the template text');
+  // Nothing carries a source position: a body is text, not a pointer into a file.
+  assert.doesNotMatch(text, /\bpos /, 'generics: a body is still a source position, not carried text');
 
   // Three separate compiles, each with only the interface directory: the entry module, the two
   // importers, and the module that defines the template. `generic.grl` is on none of them.
@@ -833,8 +920,8 @@ function proveCapabilityAcrossInstantiation() {
   // From interfaces only: `handles.grl` is on neither command line, so the bound and both
   // classifications can only have come from `handles.iface`.
   const ifaces = emit(ok, directory);
-  const handleIface = readFileSync(join(ifaces, 'handles.iface'), 'utf8');
-  assert.match(handleIface, /^bound 0 2$/m, 'capability: the template lost its `Share` bound in the interface');
+  const handleIface = dump(join(ifaces, 'handles.iface'));
+  assert.match(handleIface, / bound=0:2( |$)/m, 'capability: the template lost its `Share` bound in the interface');
   assert.match(handleIface, /type handles::File handle params=0 lifetimes=0 transfer=1 share=1/, 'capability: the shareable handle lost its audit');
   assert.match(handleIface, /type handles::Lock handle params=0 lifetimes=0 transfer=1 share=0/, 'capability: the unshareable handle lost its audit');
 
@@ -1064,8 +1151,8 @@ function proveEffectsTravel() {
   const files = [entry, lib, runtime, platform];
   const emit = compile(files, join(directory, 'emit'), ['--emit-interface', ifaces]);
   assert.equal(emit.status, 0, `effects: the claimed program does not compile\n${emit.output}`);
-  const claimed = readFileSync(join(ifaces, 'fx_eff_lib.iface'), 'utf8');
-  assert.match(claimed, /^effects 1 0 0$/m, 'effects: the claim did not travel in the interface');
+  const claimedPath = join(ifaces, 'fx_eff_lib.iface');
+  assert.match(dump(claimedPath), /^\s*effects 1 0 0$/m, 'effects: the claim did not travel in the interface');
   const viaInterface = compile(files, join(directory, 'via'), ['--interface', ifaces]);
   assert.equal(viaInterface.status, 0, `effects: an interface build refused the claim its own interface records\n${viaInterface.output}`);
   const plainIfaces = join(directory, 'plain');
@@ -1073,13 +1160,26 @@ function proveEffectsTravel() {
   const plainEmit = compile([plain, runtime, platform], join(directory, 'plain_emit'), ['--emit-interface', plainIfaces]);
   assert.equal(plainEmit.status, 0, `effects: the unclaimed module does not compile\n${plainEmit.output}`);
   assert.ok(
-    !/^effects /m.test(readFileSync(join(plainIfaces, 'fx_eff_plain.iface'), 'utf8')),
+    !/^\s*effects /m.test(dump(join(plainIfaces, 'fx_eff_plain.iface'))),
     'effects: an unclaimed function published an `effects` row',
   );
-  writeFileSync(join(ifaces, 'fx_eff_lib.iface'), claimed.replace(/^effects 1 0 0\n/m, ''));
-  const tampered = compile(files, join(directory, 'tampered'), ['--interface', ifaces]);
+  // (c) A claimed effect is a byte in the record stream, so a false claim is one changed byte -
+  // re-sealed and re-pinned, `--verify` is what has to refuse it, and it names the declaration.
+  const original = readFileSync(claimedPath);
+  const edited = Buffer.from(original);
+  const effects = fnEffects(edited, 'total');
+  assert.equal(edited[effects.noAlloc], 1, 'effects: the claim is not where the format says it is');
+  edited[effects.noAlloc] = 0;
+  writeFileSync(claimedPath, seal(edited));
+  const manifest = join(ifaces, 'interfaces.manifest');
+  const pinned = readFileSync(manifest, 'utf8');
+  writeFileSync(manifest, pinned.replace(/^fx_eff_lib \S+/m, `fx_eff_lib ${sha256(seal(Buffer.from(edited)))}`));
+  const tampered = compile(files, join(directory, 'tampered'), ['--interface', ifaces, '--verify-interface']);
   assert.equal(tampered.status, 1, 'effects: an interface whose `effects` row was removed was accepted');
-  assert.match(tampered.output, /does not match the manifest/, `effects: the refusal does not name the manifest\n${tampered.output}`);
+  assert.match(tampered.output, /does not match this interface/, `effects: the refusal must name the interface\n${tampered.output}`);
+  assert.match(tampered.output, /effects 0 0/, 'effects: the refusal must show the row that differs');
+  writeFileSync(claimedPath, original);
+  writeFileSync(manifest, pinned);
   return 'recorded when claimed, absent when not, refused once edited';
 }
 
