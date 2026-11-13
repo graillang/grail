@@ -71,26 +71,73 @@ column below was measured.
 
 ## Measured
 
-`bench/` on Linux x86-64, native backend, one compiler built from this branch; "before" is the same
-compiler built with `--no-range-facts`, so the two sides differ only in the checks. Checks are
-counted in the program's own functions: a call to a checking accessor (`rt_slot`, `rt_slot4`,
-`rt_slotb`, `rt_at`, `rt_at4`, `rt_atb`, `rt_write`) or the arm the optimizer inlined out of one.
+### Checks removed (load-independent)
 
-| benchmark | checks before | checks after | time before | time after | ratio before | ratio after |
-| --- | --- | --- | --- | --- | --- | --- |
-| fnv     | 1 | 0 | TIMING | TIMING | RATIO | RATIO |
-| sieve   | 2 | 1 | TIMING | TIMING | RATIO | RATIO |
-| sort    | 8 | 8 | TIMING | TIMING | RATIO | RATIO |
-| nbody   | 32 | 15 | TIMING | TIMING | RATIO | RATIO |
-| matmul  | 4 | 1 | TIMING | TIMING | RATIO | RATIO |
+`bench/` compiled with one compiler built from this branch; "before" is the same compiler built with
+`--no-range-facts`, so the two sides differ only in the checks. A check is counted in the program's
+own functions (`f_main*`): a call to a checking accessor (`rt_slot`, `rt_slot4`, `rt_slotb`, `rt_at`,
+`rt_at4`, `rt_atb`, `rt_write`) or the arm the optimizer inlined out of one
+(`movq $1,%rdx; call rt_trap`).
 
-`nbody` keeps 15 checks inside `energy`, whose three parameters are shared views: their lengths are
-not known there, which is the fact that function does not have. `sort` keeps all 8: its merge loop
-bounds `i` by `mid` and `j` by `hi`, and both are clamped into `[0, n]` by `if mid > n { mid = n; }`,
-a fact that only holds at the *join* of the two paths. The prover reads a block's own edge facts, not
-a join, so the clamp states nothing and the checks stay (the access is still correct - it is just
-checked). `sieve` keeps one byte store: `rt_write` checks the value as well as the index, and there is
-no unchecked byte-store accessor.
+| benchmark | checks before | checks after |
+| --- | --- | --- |
+| fnv     | 1 | 0 |
+| sieve   | 2 | 1 |
+| sort    | 8 | 8 |
+| nbody   | 32 | 15 |
+| matmul  | 4 | 1 |
+
+`nbody` keeps 15 checks inside `energy`, whose three parameters are shared views: their lengths are not
+known there, which is the fact that function does not have. `sort` keeps all 8: its merge loop bounds
+`i` by `mid` and `j` by `hi`, and both are clamped into `[0, n]` by `if mid > n { mid = n; }`, a fact
+that only holds at the *join* of the two paths; the prover reads a block's own edge facts, not a join,
+so the clamp states nothing and the checks stay. `sieve` keeps one byte store: `rt_write` checks the
+value as well as the index, and there is no unchecked byte-store accessor.
+
+### Instructions executed
+
+Wall clock on a shared host (this measurement was taken at load average 24 from unrelated work) has a
+spread larger than the change, so the honest measurement is the instruction count. `bench/bounds.grl`
+- one load per iteration, the loop counter as the index, the guard naming the length, so one check per
+iteration - compiled at `n = 4 MiB` (three read rounds, 12,582,912 accesses) and run under
+`valgrind --tool=callgrind`:
+
+| build | instructions executed | |
+| --- | --- | --- |
+| `--no-range-facts` | 1,649,305,466 | |
+| default | 1,624,139,642 | **-25,165,824 (-1.5%)** |
+
+25,165,824 / 12,582,912 = **exactly 2 instructions per access**, which is the check itself: the fast
+path loses `cmpq 8(%rdi),%rsi` / `jb`. What that is worth in time depends on the loop body, and on the
+byte-sum loop it is 1.5% because two heavier things dominate it (see *The next lever*): the `u64(x)`
+widening from a byte is emitted as `call rt_int_cast`, and the accumulation is a checked add.
+
+Both builds print the same number. `bench/bounds.grl` and `bench/bounds.c` are in the tree so the
+measurement is reproducible: `bun tools/bench.mjs bounds` with and without `--no-range-facts`
+(`GRAIL_COMPILER` selects a built compiler).
+
+## The next lever
+
+The callgrind run of `bench/bounds` says where this loop's time actually is, and it is not the check:
+after the change the emitted read loop is
+
+    movq %r12,%rdi          ; the sequence header
+    movq %rbx,%rsi          ; the index
+    movq (%rdi),%rax        ; load the data pointer
+    movzbq (%rax,%rsi,1),%rax
+    movq %rax,%rdi          ; u64(byte) -> a call
+    movabsq $64,%rsi
+    movabsq $64,%rdx
+    call rt_int_cast
+    movq %rax,%r15
+    movq %r13,%rax
+    addq %r15,%rax
+    jnc .L15                ; checked add
+    ...
+
+A widening conversion from a narrow integer needs no runtime call, and a `u64 += u8` in a loop is
+where a bounds check would otherwise be blamed. That is a separate change (a front-end cast rule, not
+a fact), and it is worth more than this whole pass on this loop.
 
 ## What is missing
 
