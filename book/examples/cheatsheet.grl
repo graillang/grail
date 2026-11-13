@@ -1,0 +1,97 @@
+use core;
+use iter;
+use rc;
+
+interface Shape {
+    fn area(self: &Self) -> u64;
+}
+
+struct Rect {
+    w: u64,
+    h: u64,
+}
+
+impl Shape for Rect {
+    fn area(self: &Rect) -> u64 {
+        return self.w * self.h;
+    }
+}
+
+enum Token {
+    Num(u64),
+    Plus
+}
+
+struct Guard {
+    name: string,
+}
+
+impl Drop for Guard {
+    fn drop(self: &mut Guard) {
+        println("drop {}", self.name);
+    }
+}
+
+fn largest<T: Shape>(items: &T[]) -> u64 {
+    mut best = 0;
+    for i in items.len() {
+        a := items[i].area();
+        if a > best {
+            best = a;
+        }
+    }
+    return best;
+}
+
+fn divmod(a: u64, b: u64 where b != 0) -> (u64, u64) {
+    return (a / b, a % b);
+}
+
+fn first_even(v: &u64[]) -> u64? {
+    for i in v.len() {
+        if v[i] % 2 == 0 {
+            return Some(v[i]);
+        }
+    }
+    return None;
+}
+
+fn main() {
+    // Bindings: immutable by default, `mut` to reassign.
+    x := 5;
+    mut total = 0;
+    total += x;
+    // Records, methods through an interface, generics with a bound.
+    rects := Rect[Rect { w: 2, h: 3 }, Rect { w: 4, h: 1 }];
+    println("largest {}", largest(&rects));
+    // Enums and match.
+    t := Token::Num(7);
+    match t {
+        Num(n) => {
+            println("num {}", n);
+        },
+        Plus => {
+            println("plus");
+        }
+    }
+    // Tuples and destructuring.
+    (q, r) := divmod(17, 5);
+    println("{} {}", q, r);
+    // Options: `match`, or `!` to insist.
+    v := u64[3, 5, 8, 9];
+    match first_even(&v) {
+        Some(e) => {
+            println("even {}", e);
+        },
+        None => {
+            println("none");
+        }
+    }
+    // Closures and lazy iterator adapters.
+    big := iter::collect(iter::filter(iter::of(v), |n: &u64| -> bool *n > 4));
+    println("{} big, total {}", big.len(), total);
+    // Shared ownership and destructors.
+    shared := rc::new(Guard { name: "g" });
+    other := shared.clone();
+    println("count {}", other.strong_count());
+}
