@@ -190,7 +190,24 @@ inputs, and one borrowed from a local is refused (`fn made() -> &dyn Shape { c :
 return &c; }` does not compile). A record or a vector may hold one, and a struct that stores one
 names the lifetime: `struct Wrapper<a> { shape: &a dyn Shape }`.
 
+That pair has a fixed shape, and it is the language's, not the compiler's: a `&dyn Shape` is **one
+word**, the address of a 16-byte, 8-byte-aligned pair whose first word is the data pointer and whose
+second word is the method table (`docs/design/fat-dyn.md`). The table's first word is the
+destructor's slot and its later words are the interface's methods in declaration order. Being one
+word is why a `&dyn Shape` sits in a record field, a vector element or a function result exactly
+where a `&Square` would, and why it copies like one; the value it points at is the single word
+`&q`, so a method dispatched through it writes through that word and the mutation lands in `q`.
+`dyn Shape` on its own is one word too - a pointer to a heap cell holding the value and its table -
+and dropping it runs the concrete type's destructor through the table's first slot.
+
 Interface files carry the form, so a separately compiled module can take a `&dyn Shape` as
-naturally as it takes a `&u64`.
+naturally as it takes a `&u64` - and they state the pair's layout, so two modules built for
+different layouts are refused rather than linked together.
+
+A borrowed object can cross into C: a shared `&dyn Shape` parameter of an `extern "C"` function is a
+`const DynPair *`, one pointer to the two words, so C reads the object at `p->data` and its table at
+`p->vtable`. `&mut dyn Shape` is not admitted there - a reference parameter of an `extern "C"`
+function otherwise means "C writes through this", and a C callee rewriting a pair is not part of the
+ABI.
 
 **Try it:** instantiate identity with a string, then consume the returned string exactly once.

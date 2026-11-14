@@ -21,7 +21,7 @@ pub struct Lowered {
 // slot) and 7 (a call); F1 is `what` 2/3/4 (a vector header of element width 8/4/1) and 5 (a
 // descriptor `{data, len}`, whose `+16` is uninitialised and whose `cap` must never be read).
 pub struct Fact {
-    // 0 frame slot, 1 call argument.
+    // 0 frame slot, 1 call argument, 3 `DynPair` slot, 4 two-word dyn result.
     kind: u64,
     // Body symbol of the function the fact is about, as emitted in the stream.
     fn: u8[],
@@ -46,6 +46,40 @@ pub struct Facts {
 }
 pub fn facts_new() -> Facts {
     return Facts { items: Fact[] };
+}
+// `slot` is the first word of a `DynPair` in `name`: 16 bytes, 8-aligned, word 0 the data pointer
+// of a borrowed interface object and word 1 its vtable (docs/design/fat-dyn.md). The front end
+// produces one where a `&dyn I` is built, and both backends read it here: a two-word frame value is
+// a fact about a declared type, not a directive in the instruction stream.
+pub fn fact_dyn_pair<a>(facts: (&a mut Facts), name: u8[], slot: u64) -> unit {
+    facts.items.push(Fact { kind: 3, fn: name, a: slot, b: 0, callee: u8[], what: 0, width: 0 });
+    return ();
+}
+// `name` returns a borrowed interface object: the pair travels back as the two words of a 16-byte
+// {ptr, ptr} aggregate, so the second result word is live at the `ret`.
+pub fn fact_dyn_result<a>(facts: (&a mut Facts), name: u8[]) -> unit {
+    facts.items.push(Fact { kind: 4, fn: name, a: 0, b: 0, callee: u8[], what: 0, width: 0 });
+    return ();
+}
+// The `DynPair` slots of `name` (each the first word's slot), appended to `out`.
+pub fn facts_dyn_pairs<a, b, d>(facts: (&a Facts), name: &b [u8], out: (&d mut u64[])) -> unit {
+    for i in facts.items.len() {
+        f := &facts.items[i];
+        if (f.kind == 3) & eq(view(f.fn), name) {
+            out.push(f.a);
+        }
+    }
+    return ();
+}
+// 1 when `name` returns a borrowed interface object.
+pub fn facts_dyn_result<a, b>(facts: (&a Facts), name: &b [u8]) -> u64 {
+    for i in facts.items.len() {
+        f := &facts.items[i];
+        if (f.kind == 4) & eq(view(f.fn), name) {
+            return 1;
+        }
+    }
+    return 0;
 }
 // `slot` holds an f32 when `f32` is 1, and an untyped word otherwise.
 pub fn fact_slot<a>(facts: (&a mut Facts), name: u8[], slot: u64, f32: u64) -> unit {
@@ -127,6 +161,16 @@ fn dump_facts<a>(out: (&a mut u8[]), facts: (&a Facts)) -> unit {
             put(&mut out, view(" shared\n"));
             continue;
         }
+        if f.kind == 3 {
+            put(&mut out, view(" dyn_pair "));
+            num(&mut out, f.a);
+            out.push(10);
+            continue;
+        }
+        if f.kind == 4 {
+            put(&mut out, view(" dyn_result\n"));
+            continue;
+        }
         if f.kind == 0 {
             put(&mut out, view(" slot "));
         } else {
@@ -181,9 +225,10 @@ struct L {
     // 1 when every frame access is a constant negative offset from rbp: each 8-byte slot is then
     // its own alloca, so borrowing one local does not make the whole frame escape.
     split: u64,
-    // Two-word frame values of the function being lowered, as their first word's slot: word 1 is
-    // the slot above it (`8(%base)`), and the two are one `[2 x i64]` alloca (native.grl declares
-    // them with `.gpair`, for a borrowed interface object's {data, vtable} pair).
+    // The `DynPair`s of the function being lowered, as their first word's slot: word 1 is the slot
+    // above it (`8(%base)`), and the two are one `[2 x i64]` alloca. They come from the typed-IR
+    // facts (docs/design/fat-dyn.md), so what the front end built a pair for is not re-derived from
+    // the shape of the stream.
     pairs: u64[],
     // Accepted f32 slot facts of the function being lowered: every slot in here is emitted as
     // `alloca float` and read and written with `load float`/`store float` (docs/design/typed-ir.md).
@@ -2521,11 +2566,6 @@ fn body_lines<a, b>(lines: (&a u8[][]), f: (&b Func)) -> u8[][] {
     mut i = f.first;
     while i < f.end {
         line := view(lines[i]);
-        // A two-word value's declaration is read by function_pairs; no instruction sees it.
-        if starts(line, view(".gpair ")) {
-            i += 1;
-            continue;
-        }
         if starts(line, view(".pushsection")) {
             pool = 1;
         }
@@ -2539,48 +2579,12 @@ fn body_lines<a, b>(lines: (&a u8[][]), f: (&b Func)) -> u8[][] {
     }
     return out;
 }
-// The slot a `.gpair -N(%rbp)` line declares as the first word of a two-word value, +1 (0 when the
-// line is not one). `-N(%rbp)` is that word's address, so the slot is N/8-1 and the second word is
-// the slot above it, at `-N+8(%rbp)`.
-fn pair_slot(line: &[u8]) -> u64 {
-    if !starts(line, view(".gpair -")) {
-        return 0;
-    }
-    mut n: u64 = 0;
-    mut digits = 0;
-    mut i: u64 = 8;
-    while i < line.len() {
-        ch := line[i];
-        if (ch < 48) || (57 < ch) {
-            break;
-        }
-        n = n * 10 + ch - 48;
-        digits += 1;
-        i += 1;
-    }
-    if (digits == 0) || (n == 0) || (n % 8 != 0) {
-        return 0;
-    }
-    return n / 8;
-}
-fn function_pairs<a, b>(l: (&a mut L), lines: (&a u8[][]), f: (&b Func)) -> unit {
+// The `DynPair` slots of the function being lowered, from the typed-IR facts (docs/design/fat-dyn.md):
+// each is the first word of a 16-byte, 8-aligned `{data, vtable}` value whose second word is the slot
+// above it, lowered as one `[2 x i64]` alloca so the two words stay one addressable value.
+fn function_pairs<a, b, d>(l: (&a mut L), facts: (&b Facts), name: &d [u8]) -> unit {
     exchange(&mut l.pairs, u64[]);
-    mut i = f.first;
-    while i < f.end {
-        line := view(lines[i]);
-        n := pair_slot(line);
-        if n != 0 {
-            l.pairs.push(n - 1);
-        } else {
-            // A declaration this lowering cannot read leaves the function to the assembler,
-            // rather than guessing at half of a two-word value.
-            if starts(line, view(".gpair -")) {
-                bad(&mut l);
-                return ();
-            }
-        }
-        i += 1;
-    }
+    facts_dyn_pairs(facts, name, &mut l.pairs);
     return ();
 }
 // The two-word value slot k belongs to, +1: its first word's slot, or 0 when k is a plain slot.
@@ -2763,7 +2767,7 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
     }
     mut deepest: u64 = 0;
     l.split = frame_split(&instrs, &mut deepest);
-    function_pairs(&mut l, &lines, &f);
+    function_pairs(&mut l, facts, view(f.name));
     // The range facts of this function, one verdict per line (see range_proofs). The frame the
     // front end declared does not always cover every slot the body spills to, so the deepest one
     // the stream addresses sets the count.

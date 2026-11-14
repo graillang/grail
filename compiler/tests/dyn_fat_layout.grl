@@ -1,0 +1,42 @@
+// Where the two words are (docs/design/fat-dyn.md): a `&dyn Shape` is one word, the address of a
+// 16-byte pair whose word 0 is the data pointer and whose word 1 is the vtable, whose own word 0 is
+// the drop slot and word 1 is method 0. The program pins what the pair reaches (word 0 is the
+// object, so a `&mut dyn` method mutates it and a second conversion sees the same object); `asm`
+// pins the offsets, because dispatch reads word 1 at `8(handle)` for the vtable and then word 1 of
+// the vtable at `8(vtable)` for method 0.
+interface Shape {
+    fn area(self: &Self) -> u64;
+    fn grow(self: &mut Self, by: u64) -> unit;
+}
+struct Sq {
+    side: u64,
+}
+impl Shape for Sq {
+    fn area(self: &Self) -> u64 {
+        return self.side * self.side;
+    }
+    fn grow(self: &mut Self, by: u64) -> unit {
+        self.side = self.side + by;
+        return ();
+    }
+}
+fn grow_twice(s: &mut dyn Shape) {
+    s.grow(1);
+    s.grow(1);
+    return ();
+}
+fn area_of(s: &dyn Shape) -> u64 {
+    return s.area();
+}
+fn main() {
+    mut q = Sq { side: 3 };
+    {
+        // The pair a `&mut dyn` holds points at `q`: the method it dispatches to writes through it.
+        mut d: &mut dyn Shape = &mut q;
+        d.grow(2);
+    }
+    grow_twice(&mut q);
+    plain: &dyn Shape = &q;
+    other: &dyn Shape = &q;
+    println("{} {} {}", q.side, area_of(plain), other.area());
+}

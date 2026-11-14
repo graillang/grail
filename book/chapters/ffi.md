@@ -49,6 +49,11 @@ record Grail owns is passed as the *address of its own fields*, which is exactly
   call (or an assignment) gives it one, so reading a field before that is refused with
   `use of moved, borrowed or partially initialized value`. Zeroed bytes are not an initialised
   handle.
+- `p: &dyn I` in a declaration is the C `const DynPair *`: one pointer to the 16-byte
+  `{data, vtable}` pair a borrowed interface object is (`generics`, *Borrowing an object*), which the
+  callee reads but cannot rewrite. It is the one reference parameter that is a reader rather than an
+  out-parameter, which is why it is declared `&` and not `&mut` — `&mut dyn I` is refused, because C
+  writing a pair is not part of that ABI.
 
 `cptr` is `unsafe` for the same reason as `cptr` of a byte sequence: the pointer carries no length,
 and C must not keep it or free it once the call returns. On the Grail side it is a borrow like any

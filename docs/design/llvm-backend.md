@@ -40,10 +40,11 @@ Stage 1 lowers the stream as it is:
 
 - each Grail function becomes an LLVM function; machine registers and the frame become allocas
   that `mem2reg`/SROA promote, so LLVM's register allocator, inliner, GVN and loop passes apply;
-  a frame whose accesses are all constant slots gets one alloca per slot, except a **two-word
-  value** (a borrowed interface object's `{data, vtable}`, declared by the emitter with `.gpair`),
-  which is one `[2 x i64]` alloca: its address is taken as an integer and both words must be one
-  object, or the second word's store would have no reader in the IR and would be dropped as dead;
+  a frame whose accesses are all constant slots gets one alloca per slot, except a **`DynPair`**
+  (a borrowed interface object's 16-byte `{data, vtable}`, recorded as a typed-IR fact for the body
+  that builds one - `docs/design/fat-dyn.md`), which is one `[2 x i64]` alloca: its address is
+  taken as an integer and both words must be one object, or the second word's store would have no
+  reader in the IR and would be dropped as dead;
 - flags are modelled explicitly: a compare records its operands and the following `jcc`/`setcc`
   becomes an `icmp`; checked `+ - *` sequences become `llvm.*.with.overflow` plus a branch to the
   abort path, so the checks stay but become cheap and hoistable;

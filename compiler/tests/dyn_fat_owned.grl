@@ -1,0 +1,47 @@
+// An owned `dyn I` in a record field, passed by value, returned from a call and dropped with the
+// record: one word, a pointer to a heap cell `{value, vtable}` whose word 1 is the vtable, so the
+// drop slot (word 0 of the vtable) runs the concrete type's destructor exactly once per object.
+interface Shape {
+    fn area(self: &Self) -> u64;
+    fn name(self: &Self) -> string {
+        return "shape";
+    }
+}
+struct Sq {
+    side: u64,
+}
+impl Drop for Sq {
+    fn drop(self: &mut Sq) {
+        println("drop sq {}", self.side);
+    }
+}
+impl Shape for Sq {
+    fn area(self: &Self) -> u64 {
+        return self.side * self.side;
+    }
+    fn name(self: &Self) -> string {
+        return "sq";
+    }
+}
+struct Holder {
+    shape: dyn Shape,
+    label: u64,
+}
+fn make(side: u64) -> dyn Shape {
+    return Sq { side: side };
+}
+fn take(h: Holder) -> u64 {
+    // `h` is owned here and dropped at the end of this call: the dyn field's drop glue runs.
+    return h.shape.area() + h.label;
+}
+fn keep(h: Holder) -> Holder {
+    return h;
+}
+fn main() {
+    println("{}", take(Holder { shape: make(4), label: 1 }));
+    a := Holder { shape: make(5), label: 2 };
+    b := keep(a);
+    println("{} {} {}", b.label, b.shape.area(), b.shape.name());
+    c := Holder { shape: Sq { side: 6 }, label: 3 };
+    println("{}", c.shape.area());
+}

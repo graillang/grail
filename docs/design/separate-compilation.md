@@ -100,11 +100,12 @@ from. The format version is the first line, so a file written by another compile
 than misread.
 
 ```
- // grail-interface 3
+ // grail-interface 4
  module pair
  source "tests/interfaces/pair.grl"
  sha256 "ad1f2b3cf421decab61ea22f7dfc572fec79a74a3078b3ef330f4e49a94db2d0"
  mode typed_refs=1 default_u64=1 overflow=checked target=x86_64
+ abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0
  unsafe 0
  std 0
  host 0
@@ -281,7 +282,12 @@ interface that is missing, stale or different from its module stops the build by
 
 Implemented on `b1-generics`; `tools/interface-test.mjs` section (e) is the proof and this section is
 the record. The interface format went to `// grail-interface 2` for this, and to 3 when pool job
-handles (`Job<T>`, spelled `(job T)`) became expressible, which emptied the not-expressible list.
+handles (`Job<T>`, spelled `(job T)`) became expressible, which emptied the not-expressible list. It
+went to 4 when the `abi` line joined the header: a `&dyn I` is an 8-byte pointer to a 16-byte
+`{data@0, vtable@8}` pair (`docs/design/fat-dyn.md`), and two modules that build one for different
+layouts cannot be linked together, so the file states the ABI it was compiled against and the reader
+refuses a line that differs. A v3 file meeting this compiler fails with the version it was written
+in rather than being read as if the line were optional.
 
 ### The representation
 
