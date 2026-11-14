@@ -77,6 +77,23 @@
   gained its `expected` type, so a typechecked build reported "function argument count". Both are
   one-line repairs (`primary(&mut c, field)`, which is the type the shorthand's field has); the
   emitted assembly is unchanged.
+- Named and default arguments. A call may name the parameter each argument fills - `f(x: 1, y: 2)`,
+  positional arguments first, and every argument after the first named one named too - and a
+  parameter may carry a default (`fn f(x: u64, y: u64 = 0)`) that a call leaving it out gets. A
+  default is a value the declaration supplies, compiled where the call is written: it adopts the
+  parameter's type, is owned and borrowed exactly as an argument is, and can build an owned value in
+  the caller's frame. The argument list is resolved into one slot per parameter before any argument
+  compiles, so the refusals are all at the argument: a name the declaration does not have (naming
+  its parameters), a parameter given twice, a positional argument after a named one, a parameter
+  left without an argument and without a default, and a default on a parameter followed by one
+  without. A short call's diagnostic now names the parameter it leaves empty, not only the count.
+  Parameter names and each default's *text* travel in interface files (`param`, `default`), so an
+  importing module still names its slots and still compiles what the declaration wrote;
+  `--verify-interface` agrees. The compiler's own `compile`, `compile_mode` and `build_argv` - nine
+  positional arguments each, three of them empty at most call sites - now name their arguments and
+  let `iface`/`verify`/`diag` default, and `flag_bits` takes the check-only bit as a named argument
+  instead of every caller adding `1`. docs/design/named-arguments.md; cases `nargs-*`; the book's
+  "Functions and recursion" gains the section and its example.
 - Ranges: a range value is now a `Span` (`lib/span.grl`) that carries the slice it was made from - a
   byte view plus its two ends - so a range its slice does not have is refused where the span is made
   (`span_of` yields `1..0`, which names no bytes) and a range taken from one sequence cannot reach

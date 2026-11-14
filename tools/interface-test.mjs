@@ -549,10 +549,12 @@ function proveCallerRejected() {
   assert.ok(existsSync(join(ifaces, 'interfaces.manifest')), 'the emitting run wrote no interfaces');
   const rejected = compile(files, join(directory, 'build'), ['--interface', ifaces]);
   assert.equal(rejected.status, 1, 'a caller that disagrees with the interface must be rejected');
-  // The arity message carries the callee's detail before the arrow ('wrong number of arguments:
-  // `make` takes 2, this call passes 1'), the wording `gaps5-dnsfix` (1f72e70) settles; int5's copy of
-  // this line predates it, so this file keeps the wider form.
-  assert.match(rejected.output, /error(\[E\d+\])?: wrong number of arguments[^\n]*\n\s*--> \S*reject_user\.grl:\d+:\d+/, `the rejection must be in the caller's file: ${rejected.output}`);
+  // The message names the callee and the parameter it leaves empty (the argument list is resolved
+  // per parameter), and the caret line is the caller's file, not the defining module's.
+  const rows = rejected.output.split('\n');
+  const at = rows.findIndex(row => row.includes('call to `make` leaves `right` without an argument'));
+  assert.ok(at >= 0, `the rejection must name the parameter it leaves empty: ${rejected.output}`);
+  assert.match(rows[at + 1] ?? '', /--> .*reject_user\.grl:\d+:\d+/, `the rejection must be in the caller's file: ${rejected.output}`);
   return rejected.output.trim().split('\n')[0];
 }
 

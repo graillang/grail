@@ -9812,5 +9812,107 @@
     "flags": [
       "--emit-ir"
     ]
+  },
+  {
+    "name": "nargs-basic",
+    "source": "fn diff(a:u64,b:u64)->u64{if a<b{return b-a;}return a-b;}fn main(){println(diff(a:10,b:3));}",
+    "stdout": "7\n",
+    "note": "a named argument fills the parameter its name reads, not the position it is written in: `diff(a:10,b:3)` and `diff(10,3)` call the same function the same way"
+  },
+  {
+    "name": "nargs-mixed",
+    "source": "fn diff(a:u64,b:u64)->u64{if a<b{return b-a;}return a-b;}fn main(){println(diff(10,b:3));}",
+    "stdout": "7\n",
+    "note": "positional first, then named; a positional argument after a named one is refused (nargs-reject-positional-after-named)"
+  },
+  {
+    "name": "nargs-defaults",
+    "source": "fn scale(x:u64,by:u64=2,plus:u64=0)->u64{return x*by+plus;}fn main(){println(scale(5));println(scale(5,plus:7));println(scale(x:5,by:3));}",
+    "stdout": "10\n17\n15\n",
+    "note": "a parameter nobody supplies takes the default the declaration gives it; the default is compiled at the call site, so it is a value, not a macro"
+  },
+  {
+    "name": "nargs-default-owned",
+    "source": "struct Buf{data:u64[],tag:u64}fn make_buf(tag:u64)->Buf{mut d=u64[];d.push(tag);return Buf{data:d,tag:tag};}fn describe(b:Buf,prefix:u64=1)->u64{return b.data[0]+b.tag+prefix;}fn main(){println(describe(make_buf(4)));println(describe(b:make_buf(4),prefix:10));}",
+    "stdout": "9\n18\n",
+    "note": "a default is owned exactly as an argument is: the owned record argument is moved in, and dropping it is the callee's cleanup"
+  },
+  {
+    "name": "nargs-generic",
+    "source": "fn pick<T>(a:T,b:T,which:u64=0)->T{if which==0{return a;}return b;}fn main(){println(pick<u64>(a:7,b:9));println(pick(7,b:9,which:1));}",
+    "stdout": "7\n9\n",
+    "note": "a generic call's names belong to the template, so they resolve once and each instantiation checks its slots as `T`; the default is compiled per instantiation"
+  },
+  {
+    "name": "nargs-method",
+    "source": "struct Counter{n:u64}impl Counter{fn add(self:&mut Counter,by:u64=1,times:u64=1)->u64{mut i=0;while i<times{self.n=self.n+by;i+=1;}return self.n;}}fn main(){mut c=Counter{n:0};println(c.add());println(c.add(times:3));println(c.add(by:5,times:2));}",
+    "stdout": "1\n4\n14\n",
+    "note": "a method call names its parameters too, starting after the receiver the call already supplies"
+  },
+  {
+    "name": "nargs-interface-defaults",
+    "files": [
+      "tests/nargs/default_user.grl"
+    ],
+    "modules": [
+      "tests/nargs/default_lib.grl"
+    ],
+    "interfaces": true,
+    "stdout": "10\n17\n15\n",
+    "note": "the interface carries the parameter names (`param`) and each default's text (`default`), so a module that imports the declaration names its slots and compiles the value the declaration wrote - `--verify-interface` agrees"
+  },
+  {
+    "name": "nargs-reject-unknown-name",
+    "source": "fn diff(a:u64,b:u64)->u64{if a<b{return b-a;}return a-b;}fn main(){println(diff(a:10,c:3));}",
+    "reject": true,
+    "diagnostic": "no parameter named `c` in `diff`"
+  },
+  {
+    "name": "nargs-reject-duplicate",
+    "source": "fn diff(a:u64,b:u64)->u64{if a<b{return b-a;}return a-b;}fn main(){println(diff(10,a:3));}",
+    "reject": true,
+    "diagnostic": "parameter `a` of `diff` is given twice"
+  },
+  {
+    "name": "nargs-reject-positional-after-named",
+    "source": "fn diff(a:u64,b:u64)->u64{if a<b{return b-a;}return a-b;}fn main(){println(diff(a:10,3));}",
+    "reject": true,
+    "diagnostic": "a positional argument cannot follow a named one"
+  },
+  {
+    "name": "nargs-reject-missing",
+    "source": "fn three(a:u64,b:u64,c:u64)->u64{return a+b+c;}fn main(){println(three(1,c:2));}",
+    "reject": true,
+    "diagnostic": "leaves `b` without an argument, and it has no default"
+  },
+  {
+    "name": "nargs-reject-default-gap",
+    "source": "fn f(a:u64=1,b:u64)->u64{return a+b;}fn main(){println(f(1,2));}",
+    "reject": true,
+    "diagnostic": "parameter `b` has no default while `a` before it does"
+  },
+  {
+    "name": "nargs-reject-receiver-named",
+    "source": "struct C{n:u64}impl C{fn add(self:&mut C,by:u64)->u64{self.n=self.n+by;return self.n;}}fn main(){mut c=C{n:0};println(c.add(self:1,by:2));}",
+    "reject": true,
+    "diagnostic": "is the receiver, which the call already supplies"
+  },
+  {
+    "name": "nargs-reject-value-call",
+    "source": "fn foo(x:u64)->u64{return x;}fn main(){f:=foo;println(f(x:1));}",
+    "reject": true,
+    "diagnostic": "named arguments need a declared parameter list"
+  },
+  {
+    "name": "nargs-closure-argument-default",
+    "source": "fn apply(f:Fn(u64)->u64,base:u64=10)->u64{return f(base);}fn main(){println(apply(|x:u64|->u64 x+1));println(apply(|x:u64|->u64 x+1,20));}",
+    "stdout": "11\n21\n",
+    "note": "an argument list holding a closure is read positionally - its commas are its own - so such a call names none of its arguments, and a name is refused by name; the parameters the list leaves over still take their defaults"
+  },
+  {
+    "name": "nargs-reject-named-with-closure",
+    "source": "fn apply(f:Fn(u64)->u64,base:u64=10)->u64{return f(base);}fn main(){println(apply(|x:u64|->u64 x+1,base:5));}",
+    "reject": true,
+    "diagnostic": "this argument list holds a closure, so its arguments are read positionally"
   }
 ]

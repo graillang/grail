@@ -19,4 +19,28 @@ written `()` as a value; a function with no result annotation returns unit. Its 
 return. There are no tail-expression returns: a function that produces a value uses `return`, and
 `return ();` is still available for an explicit early exit.
 
-**Try it:** replace the recursive implementation with a loop using two numeric `mut` bindings.
+## Naming arguments, and letting the declaration fill them in
+
+A call may name the parameter each argument fills. Positional arguments come first; after the first
+named one every argument is named, so the argument list reads as a set of slots rather than a
+sequence a reader has to count:
+
+```grail
+println(rect(1, height: 2, width: 5));   // 1 is `area`; the other two say which they are
+```
+
+A parameter may also carry a default - `fn scaled(value: u64, by: u64 = 2, plus: u64 = 0)` - and a
+call that leaves it out gets it. The default is a value the *declaration* supplies, compiled where
+the call is written and owned exactly as an argument is, so it can build an owned value in the
+caller's frame. A parameter with a default may not be followed by one without, so dropping arguments
+always drops a suffix.
+
+{{example:named-arguments}}
+
+Every parameter must be supplied exactly once. A name the declaration does not have, a parameter
+named twice, a positional argument after a named one, and a parameter left without an argument and
+without a default are each refused at the call, naming the parameter and the callee. The Rust example
+has neither feature, so it writes the parameters in declaration order and turns the optional ones
+into a struct of options with a `Default` impl.
+
+**Try it:** give `rect` a default for `height` of `1` and call it as `rect(width: 3, area: 0)`.
