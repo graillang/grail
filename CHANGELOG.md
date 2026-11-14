@@ -1,5 +1,31 @@
 ## Unreleased
 
+- Changed: module interface files are a **typed record stream, format 4**, not line-oriented
+  text. The compiler wrote the text and then re-read it with a hand-written line lexer and parser -
+  two implementations of one format, and one of them three hundred lines of spelling rules that had
+  already lost a qualified enum in a signature (`&a tls::Error`) and needed a version bump to thread
+  the effects row. Now one writer encodes the declarations and one reader consumes them:
+  `GRIF`, a version byte, then `tag, length, payload` records (module, type, alias, const, fn,
+  inherent, interface, impl, env, link) whose types are records too, then a trailer carrying the
+  source digest and the SHA-256 of every byte before it. Every record and every string is
+  length-counted, and the reader refuses a record with bytes left over rather than skipping them, so
+  a field this compiler does not know is a refusal by name and never a misread. Refusals name the
+  file, the record and the byte: not an interface, the old text format, another version, truncated,
+  unknown record, unread field, edited (trailer digest), not in the manifest, stale, disagreeing.
+  `grail iface dump FILE` renders the typed record tree the reader read - the inspector, with no
+  second parser behind it - and `grail iface roundtrip FILE` reads a file, writes it again and
+  requires byte identity. The surface (which private items travel because a public item names them)
+  is computed from the types and text the writer itself produces, not by scanning emitted lines. A
+  build cache keys on the interface's *surface* bytes (everything before the trailer), so an edit
+  that changes no declaration still leaves downstream keys alone. Two behaviour changes: a generic
+  interface implementation (`impl<T> Show for Pair<T>`) now carries its parameters - the text format
+  wrote `params=0` because writer and reader looked the record up under different keys - and the
+  compiler's own interfaces drop from 14,427 to 8,733 bytes, with emission from 4m12s to 2m14s.
+  The header record also carries the borrowed-`dyn` ABI (`abi dyn pair size = 16 align = 8 word0 =
+  data word1 = vtable drop = 0`, one string, `iface_dyn_abi()` its only spelling), so two modules
+  built for different pair layouts refuse to link rather than dereferencing each other's pairs
+  wrongly. docs/design/separate-compilation.md, "Format 4 as built"; cases `ifc-*`, and
+  `tools/interface-test.mjs` proves round-trip equality and every refusal.
 - Fixed: `tools/interface-test.mjs` wiped `.work/interface-test/<target>` at the start of every run,
   so two runs in one checkout deleted each other's interfaces mid-run and the survivor failed with
   `has no interface for module X (expected this file)` - a directory collision, not a compiler bug.

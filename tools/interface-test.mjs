@@ -34,11 +34,7 @@ const flags = process.argv.slice(2);
 const target = targetName(flags.includes('--target') ? flags[flags.indexOf('--target') + 1] : hostTarget);
 const full = flags.includes('--full');
 const compiler = buildCompiler();
-// One run's work directory, and only that run's: the tool wipes it at the start and the compiler's
-// outputs are large, so two runs in the same checkout used to delete each other's interfaces
-// mid-run - which reads as `has no interface for module X (expected this file)` and is not a
-// compiler failure. `tools/cache-test.mjs` and the gate legs can run beside it.
-const work = join(root, '.work/interface-test', `${target}-${process.pid}`);
+const work = join(root, '.work/interface-test', target);
 rmSync(work, { recursive: true, force: true });
 mkdirSync(work, { recursive: true });
 const runtime = join(root, 'compiler/runtime.grl');
@@ -64,9 +60,12 @@ function link(files, directory, name = 'program') {
   return assemble(asm, join(directory, name), target, linkArgs);
 }
 
+const clip = (text, limit = 400) => (typeof text === 'string' && text.length > limit ? `${text.slice(0, limit)}...` : text);
 function run(executable, args = [], options = {}) {
-  const result = spawnSync(executable, args, { encoding: 'utf8', timeout: 900_000, ...options });
-  return { status: result.status, signal: result.signal, stdout: result.stdout ?? '' };
+  // A generous output buffer: a program that prints more than node's 1 MB default is killed by the
+  // spawn, which looks like a null status and a signal rather than like the program's own answer.
+  const result = spawnSync(executable, args, { encoding: 'utf8', timeout: 900_000, maxBuffer: 64 * 1024 * 1024, ...options });
+  return { status: result.status, signal: result.signal, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
 }
 
 // Describing a module is not making a program: `--no-entry` lets a run emit the interfaces of the
@@ -81,56 +80,301 @@ function interfaceFiles(directory) {
   return readdirSync(directory).filter(name => name.endsWith('.iface')).sort().map(name => join(directory, name));
 }
 
-// The module a file describes, from its own header line.
+// The typed record tree, as `grail iface dump` renders it: what the reader read, field by field.
+// The dump is the inspector - there is no second parser behind it, so what this test asserts about a
+// declaration is exactly what the compiler installed from that declaration.
+function dump(path) {
+  const result = spawnSync(compiler, [...numeric, '--iface-dump', path], { encoding: 'utf8', timeout: 900_000 });
+  assert.equal(result.status, 0, `${path}: dump failed\n${result.stdout ?? ''}${result.stderr ?? ''}`);
+  return `${result.stdout ?? ''}${result.stderr ?? ''}`;
+}
+
+// The module a file describes, from its own header record.
 function moduleOf(path) {
-  const line = readFileSync(path, 'utf8').split('\n').find(row => row.startsWith('module '));
-  assert.ok(line, `${path}: no module line`);
+  const line = dump(path).split('\n').find(row => row.startsWith('module '));
+  assert.ok(line, `${path}: no module record`);
   return line.slice('module '.length).trim();
 }
 
-// (0) Every digest an interface records is the real SHA-256 of the file it describes, checked with
-// the host's own implementation rather than the compiler's.
+// The format, as docs/design/separate-compilation.md states it: `GRIF`, one version byte, then
+// `tag, length, payload` records, then a trailer whose last 32 bytes are the SHA-256 of everything
+// before them. This reads that framing - nothing else - so a test can tamper with one field on
+// purpose and prove the compiler refuses the file rather than honouring or misreading it.
+function frame(bytes) {
+  const records = [];
+  let at = 5;
+  while (at < bytes.length) {
+    const tagAt = at;
+    const tag = bytes[at];
+    at += 1;
+    const lenAt = at;
+    let len = 0;
+    let scale = 1;
+    for (;;) {
+      const b = bytes[at];
+      at += 1;
+      len += (b & 127) * scale;
+      if (!(b & 128)) break;
+      scale *= 128;
+    }
+    records.push({ tag, tagAt, lenAt, at, len, end: at + len });
+    at += len;
+    if (tag === 2) break;
+  }
+  return records;
+}
+
+// A cursor over one record payload: a length-prefixed string, one byte, and LEB128.
+function payload(bytes, record) {
+  let at = record.at;
+  const varint = () => {
+    let n = 0;
+    let scale = 1;
+    for (;;) {
+      const b = bytes[at];
+      at += 1;
+      n += (b & 127) * scale;
+      if (!(b & 128)) return n;
+      scale *= 128;
+    }
+  };
+  return {
+    var: varint,
+    byte: () => bytes[at++],
+    str: () => {
+      const n = varint();
+      const out = bytes.subarray(at, at + n);
+      at += n;
+      return out;
+    },
+    get at() { return at; },
+  };
+}
+
+// Recompute the trailer's digest, so an edit reaches the reader instead of stopping at the seal.
+function seal(bytes) {
+  const body = Buffer.from(bytes.subarray(0, bytes.length - 32));
+  createHash('sha256').update(body).digest().copy(bytes, bytes.length - 32);
+  return bytes;
+}
+
+// A cursor just past the identity of the `type` record that declares `module::name`.
+function typeRecord(bytes, module, name) {
+  for (const record of frame(bytes)) {
+    if (record.tag !== 10) continue;
+    const r = payload(bytes, record);
+    if (r.str().toString() !== module) continue;
+    if (r.str().toString() !== name) continue;
+    r.byte();
+    r.byte();
+    r.var();
+    r.var();
+    return r;
+  }
+  assert.fail(`${module}::${name}: no type record`);
+}
+
+// A cursor that skips the length-counted fields the record stream is made of, so a test can reach
+// one field (the effects row) and change it. This is the same framing `frame` reads, nothing more.
+function skipVar(bytes, at) {
+  for (;;) {
+    const b = bytes[at];
+    at += 1;
+    if (!(b & 128)) return at;
+  }
+}
+function readVar(bytes, at) {
+  let n = 0;
+  let scale = 1;
+  for (;;) {
+    const b = bytes[at];
+    at += 1;
+    n += (b & 127) * scale;
+    if (!(b & 128)) return [n, at];
+    scale *= 128;
+  }
+}
+function skipStr(bytes, at) {
+  const [n, next] = readVar(bytes, at);
+  return next + n;
+}
+function skipType(bytes, at) {
+  const [n, next] = readVar(bytes, at + 1);
+  return next + n;
+}
+function writeVar(n) {
+  const out = [];
+  let v = n;
+  while (v > 127) {
+    out.push((v & 127) | 128);
+    v >>>= 7;
+  }
+  out.push(v);
+  return Buffer.from(out);
+}
+// Replace one record's payload with `body`, re-encoding the tag and the length around it: how a test
+// builds the file a slightly different writer would have produced.
+function replacePayload(bytes, record, body) {
+  return Buffer.concat([
+    bytes.subarray(0, record.tagAt),
+    Buffer.from([record.tag]),
+    writeVar(body.length),
+    body,
+    bytes.subarray(record.end),
+  ]);
+}
+// The payload offsets of one function record: its effects bytes and the start of its body field.
+function fnLayout(bytes, name) {
+  for (const record of frame(bytes)) {
+    if (record.tag !== 13) continue;
+    const p = payload(bytes, record);
+    if (p.str().toString() !== name) continue;
+    const at = effectsAt(bytes, p.at);
+    return { record, noAlloc: at.noAlloc, noPanic: at.noPanic, body: at.noPanic + 1 };
+  }
+  assert.fail(`no function record named ${name}`);
+}
+// Where the `no_alloc` and `no_panic` bytes of one function's record are.
+function effectsAt(bytes, from) {
+  let at = from;
+  at += 1; // public
+  at = skipVar(bytes, at); // generic parameters
+  at = skipVar(bytes, at); // lifetimes
+  at = skipVar(bytes, at); // extern kind
+  at = skipStr(bytes, at); // extern symbol
+  at += 1; // @strict
+  const [params, afterParams] = readVar(bytes, at);
+  at = afterParams;
+  for (let i = 0; i < params; i += 1) at = skipType(bytes, at);
+  at = skipType(bytes, at); // result
+  const [bounds, afterBounds] = readVar(bytes, at);
+  at = afterBounds;
+  for (let i = 0; i < bounds; i += 1) {
+    at = skipVar(bytes, at);
+    at = skipVar(bytes, at);
+  }
+  const [required, afterReqs] = readVar(bytes, at);
+  at = afterReqs;
+  for (let i = 0; i < required; i += 1) {
+    at = skipVar(bytes, at);
+    const [refs, afterRefs] = readVar(bytes, at);
+    at = afterRefs;
+    for (let j = 0; j < refs; j += 1) {
+      at = skipStr(bytes, at);
+      at = skipStr(bytes, at);
+    }
+  }
+  const [wheres, afterWhere] = readVar(bytes, at);
+  at = afterWhere;
+  for (let i = 0; i < wheres; i += 1) {
+    at = skipVar(bytes, at);
+    at = skipStr(bytes, at);
+    at = skipStr(bytes, at);
+  }
+  at = skipStr(bytes, at); // ensures
+  return { noAlloc: at, noPanic: at + 1 };
+}
+
+// (0) Every digest an interface records is the real SHA-256 of what it covers, checked with the
+// host's own implementation rather than the compiler's: the source the header names, the trailer's
+// digest over every byte before it, and - through the compiler's own reader - byte-identical
+// round-trip equality.
 function proveDigests(directory) {
   let checked = 0;
   for (const path of interfaceFiles(directory)) {
-    const text = readFileSync(path, 'utf8');
+    const text = dump(path);
     const source = /^source "(.*)"$/m.exec(text);
     const digest = /^sha256 "(.*)"$/m.exec(text);
-    assert.ok(source && digest, `${path}: missing source or sha256 line`);
+    assert.ok(source && digest, `${path}: missing source or sha256 record`);
     const file = resolve(dirname(dirname(path)), source[1]);
     assert.ok(existsSync(file), `${path}: names a source that does not exist: ${source[1]}`);
-    assert.equal(digest[1], sha256(readFileSync(file)), `${path}: sha256 line is not the SHA-256 of ${source[1]}`);
-    // The file's own digest covers every byte above it.
-    const at = text.indexOf('\ndigest "');
-    assert.ok(at > 0, `${path}: no digest line`);
-    assert.equal(/^digest "(.*)"$/m.exec(text)[1], sha256(text.slice(0, at + 1)), `${path}: digest line does not cover the file`);
+    assert.equal(digest[1], sha256(readFileSync(file)), `${path}: sha256 record is not the SHA-256 of ${source[1]}`);
+    // The trailer's digest covers every byte before it.
+    const bytes = readFileSync(path);
+    assert.ok(bytes.length > 32, `${path}: too short to carry a trailer`);
+    const body = Buffer.from(bytes.subarray(0, bytes.length - 32));
+    assert.equal(bytes.subarray(bytes.length - 32).toString('hex'), sha256(body), `${path}: the trailer's digest does not cover the file`);
+    // Every interface states the ABI a `&dyn I` is built for, in dynfat's spelling, so a module
+    // built against another layout cannot link: the pair one writes would be the pair the other
+    // dereferences wrongly.
+    assert.match(
+      text,
+      /^abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0$/m,
+      `${path}: the header does not state the \`dyn\` ABI`,
+    );
+    // Write, read, write again: the reader rebuilds the model the writer started from.
+    const round = spawnSync(compiler, [...numeric, '--iface-roundtrip', path], { encoding: 'utf8', timeout: 900_000 });
+    assert.equal(round.status, 0, `${path}: does not round-trip\n${round.stdout ?? ''}${round.stderr ?? ''}`);
+    assert.match(round.stdout ?? '', /^identical \d+ bytes$/m, `${path}: round-trip did not report equality`);
     checked += 1;
   }
   return checked;
 }
 
-// (d) No leakage, and the one thing stage 3 does add: a generic template's own body, as one quoted
-// `line` row per source line, so a changed statement is a changed line in a review diff. The claim
-// stage 2 made about bodies narrows rather than disappears: a *declaration* line still carries no
-// body, no local name and no other module's declaration, and a body section still only appears under
-// a template that declares type parameters. The fixture names its locals and its helper with
-// distinctive identifiers, so "the interface does not carry a body" is checked by looking for them
-// rather than by scanning for any short word.
+// (d0) the manifest is the set, not only a checksum list: a source module the manifest does not
+// describe is refused by name. This is the guard against the class of bug where an emitting run's
+// source list and the set it wrote disagreed - the module then had no interface file at all, and the
+// disagreement only surfaced one module later as an unknown name in somebody else's module (the
+// compiler built against its own modules, `lexer.iface` missing).
+function proveManifestCoverage() {
+  const directory = join(work, 'coverage');
+  const project = join(directory, 'project');
+  mkdirSync(join(project, 'src'), { recursive: true });
+  writeFileSync(join(project, 'src/util.grl'), 'module util;\n\npub fn twice(x: u64) -> u64 {\n    return x * 2;\n}\n');
+  writeFileSync(join(project, 'src/helper.grl'), 'module helper;\n\npub fn bump(x: u64) -> u64 {\n    return x + 7;\n}\n');
+  writeFileSync(join(project, 'src/main.grl'), 'use util;\nuse helper;\n\npub fn main() -> u64 {\n    println(util::twice(helper::bump(3)));\n    return 0;\n}\n');
+  const files = [join(project, 'src/main.grl'), join(project, 'src/util.grl'), join(project, 'src/helper.grl'), runtime, platform];
+  const ifaces = emit(files, directory);
+  const manifestPath = join(ifaces, 'interfaces.manifest');
+  const original = readFileSync(manifestPath, 'utf8');
+  const rows = original.split('\n').filter(row => row.length !== 0 && !row.startsWith('//'));
+  assert.equal(rows.length, 3, `the emitting run must list every source module of the program: ${original}`);
+  // Delete one module's row - the interface file stays, so only the manifest can catch it - and the
+  // consuming run must name the module it can no longer account for.
+  const dropped = rows.find(row => row.startsWith('util '));
+  assert.ok(dropped, `no util row in the manifest: ${original}`);
+  writeFileSync(manifestPath, `// grail-interfaces 1\n${rows.filter(row => row !== dropped).join('\n')}\n`);
+  const refused = compile(files, join(directory, 'build'), ['--interface', ifaces, '--verify-interface']);
+  assert.equal(refused.status, 1, `a manifest missing a source module must be refused\n${refused.output}`);
+  assert.match(refused.output, /has no interface for module `util`/, `the refusal must name the missing module: ${refused.output}`);
+  assert.match(refused.output, /util\.iface/, 'the refusal must name the file it expected');
+  // `--interface DIR` is a verification build (`--verify-interface` only says so explicitly), so the
+  // reading is the same for the directory's last row: a manifest that does not describe a source
+  // module of the run is refused by name, never silently filled in from the module's source.
+  const entryRow = rows.find(row => row.startsWith('main '));
+  assert.ok(entryRow, `no main row in the manifest: ${original}`);
+  writeFileSync(manifestPath, `// grail-interfaces 1\n${rows.filter(row => row !== entryRow).join('\n')}\n`);
+  const entryRefused = compile(files, join(directory, 'entry'), ['--interface', ifaces]);
+  assert.equal(entryRefused.status, 1, `a manifest without the entry module is refused too\n${entryRefused.output}`);
+  assert.match(entryRefused.output, /has no interface for module `main`/, `the refusal must name the entry: ${entryRefused.output}`);
+  // Restored, the same sources build: the refusals above are about the missing rows.
+  writeFileSync(manifestPath, original);
+  const restored = compile(files, join(directory, 'restored'), ['--interface', ifaces]);
+  assert.equal(restored.status, 0, `an untouched manifest must build\n${restored.output}`);
+  return refused.output.trim().split('\n')[0];
+}
+
+// (d) No leakage, and the one thing stage 3 does add: a generic template's own body, as `|` rows
+// under the `fn` record that carries its signature. The claim is asserted on the dump - the record
+// tree as the reader read it - so it is the engine's view of the file that is checked: a
+// *declaration* line carries no body, no local name and no other module's declaration, and a body
+// appears only under a template that declares type parameters. The fixture names its locals and its
+// helper with distinctive identifiers, so "the interface does not carry a body" is checked by looking
+// for them rather than by scanning for any short word.
 function proveNoLeakage(directory, module) {
-  const synthetic = ['.impl_', '.inherent_', '.interface_', '.union', '.result', '.closure', '__start'];
+  const synthetic = ['.impl_', '.inherent_', '.interface_', '.union', '.result', '__start'];
   for (const path of interfaceFiles(directory)) {
     const owner = moduleOf(path);
-    const text = readFileSync(path, 'utf8');
+    const text = dump(path);
     const rows = text.split('\n');
-    const declaration = rows.filter(row => !row.startsWith('line ')).join('\n');
+    const declaration = rows.filter(row => !row.trimStart().startsWith('|')).join('\n');
     for (const line of rows) {
-      if (line.length === 0 || line.startsWith('//')) continue;
-      if (line.startsWith('line ')) {
-        // A body row: quoted, one row per source line, and nothing else on it.
-        assert.match(line, /^line "(?:[^"\\]|\\.)*"$/, `${path}: a body row is not one quoted line: ${line}`);
-        continue;
-      }
-      // A declaration line never carries a statement or a block.
+      if (line.length === 0) continue;
+      if (/^(grail-interface|module|source|mode|sha256|digest) /.test(line)) continue;
+      if (/^(std|unsafe|host) \d+$/.test(line)) continue;
+      // A body row: the template's own text, one `|` row per source line and nothing else.
+      if (line.trimStart().startsWith('|')) continue;
+      // A declaration or field line never carries a statement or a block.
       assert.doesNotMatch(line, /[{};]/, `${path}: a declaration line carries a statement: ${line}`);
       for (const marker of synthetic) {
         assert.ok(!line.includes(marker), `${path}: leaks the synthetic module ${marker}: ${line}`);
@@ -140,31 +384,28 @@ function proveNoLeakage(directory, module) {
         assert.ok(referenced === owner || referenced === '.closure', `${path}: names ${referenced}::, another module's declaration: ${line}`);
       }
     }
-    // No binding, no local and no function body crosses: only declarations do. Grail has no
-    // cross-module visibility rule yet (`pub` marks the entry candidate and `--export`), so a
-    // non-pub *declaration* does appear - its signature is what an importer can call anyway. What
-    // this pins is the rule that holds today: a declaration line, and nothing from inside it.
+    // No binding, no local and no function body crosses. Grail has no cross-module visibility rule
+    // yet (`pub` marks the entry candidate and `--export`), so a non-pub *declaration* does appear -
+    // its signature is what an importer can call anyway. What this pins is the rule that holds
+    // today: a declaration, and nothing from inside it.
+    const bytes = readFileSync(path);
     for (const secret of ['zzprivatemessage', 'zzprivatecounter', 'zzprivatevalue']) {
       assert.ok(!text.includes(secret), `${path}: leaks the local binding ${secret}`);
+      assert.ok(!bytes.includes(secret), `${path}: the file carries the local binding ${secret}`);
     }
     assert.ok(!/zzprivatehelper\(.*\)[^{]*\{/.test(declaration), `${path}: leaks a function body`);
     assert.ok(!/\breturn\b/.test(declaration), `${path}: an interface carries a return statement on a declaration line`);
-    assert.ok(!text.includes('\n\n'), `${path}: unexpected blank line`);
-    // Bodies belong to templates, have the stated number of rows, and are the only place a `{` may
-    // appear.
+    // Bodies belong to templates and are the only place a `{` may appear.
     for (let i = 0; i < rows.length; i += 1) {
-      const marker = /^body (\d+)$/.exec(rows[i]);
-      if (!marker) continue;
+      if (rows[i].trim() !== 'body') continue;
       let at = i - 1;
-      while (at >= 0 && !rows[at].startsWith('fn ')) at -= 1;
+      while (at >= 0 && !/^\s*fn /.test(rows[at])) at -= 1;
       assert.ok(at >= 0, `${path}: a body section that follows no function`);
-      assert.match(rows[at], /^fn \S+ <\d+>/, `${path}: a body section on a declaration that is not a template: ${rows[at]}`);
-      const count = Number(marker[1]);
-      assert.ok(count > 0, `${path}: a template with an empty body section`);
-      for (let k = 0; k < count; k += 1) {
-        assert.match(rows[i + 1 + k], /^line "/, `${path}: a body section with fewer rows than it declares`);
-      }
-      i += count;
+      assert.match(rows[at], /^\s*fn \S+ <\d+>/, `${path}: a body section on a declaration that is not a template: ${rows[at]}`);
+      let rows2 = 0;
+      while (i + 1 + rows2 < rows.length && rows[i + 1 + rows2].trimStart().startsWith('|')) rows2 += 1;
+      assert.ok(rows2 > 0, `${path}: a template with an empty body section`);
+      i += rows2;
     }
   }
   return module;
@@ -184,8 +425,20 @@ function proveEquivalent(name, files, directory, { stdout: expected, args = [], 
   assert.equal(viaInterface.status, 0, `${name}: interface build failed\n${viaInterface.output}`);
   const interfaceExe = link(files, join(directory, 'interface'));
 
+  // The interface build generates the same program: code, data and symbol order, byte for byte. An
+  // interface stands in for a module's declarations, and nothing else about the run changes.
+  assert.equal(
+    readFileSync(join(directory, 'interface', 'out.s'), 'utf8'),
+    readFileSync(join(directory, 'source', 'out.s'), 'utf8'),
+    `${name}: the interface build emits different assembly from the source build`,
+  );
   const verified = compile(files, join(directory, 'verify'), ['--interface', ifaces, '--verify-interface']);
   assert.equal(verified.status, 0, `${name}: interfaces disagree with their sources\n${verified.output}`);
+  assert.equal(
+    readFileSync(join(directory, 'verify', 'out.s'), 'utf8'),
+    readFileSync(join(directory, 'source', 'out.s'), 'utf8'),
+    `${name}: the --verify build emits different assembly from the source build`,
+  );
   const verifyExe = link(files, join(directory, 'verify'));
 
   // A case's arguments and its working directory are part of what it tests (a fixture path, for
@@ -194,9 +447,9 @@ function proveEquivalent(name, files, directory, { stdout: expected, args = [], 
   const a = run(sourceExe, args, runOptions);
   const b = run(interfaceExe, args, runOptions);
   const c = run(verifyExe, args, runOptions);
-  assert.equal(b.status, a.status, `${name}: exit status ${b.status} != ${a.status}`);
+  assert.equal(b.status, a.status, `${name}: exit status ${b.status} != ${a.status} (signal ${b.signal})`);
   assert.equal(b.stdout, a.stdout, `${name}: interface build prints something else`);
-  assert.equal(c.status, a.status, `${name}: verify build exit status`);
+  assert.equal(c.status, a.status, `${name}: verify build exit status (signal ${c.signal}, stderr ${JSON.stringify(clip(c.stderr))})`);
   assert.equal(c.stdout, a.stdout, `${name}: verify build prints something else`);
   if (expected !== undefined) assert.equal(a.stdout, expected, `${name}: source build output`);
   return ifaces;
@@ -278,7 +531,7 @@ function proveStale() {
   const directory = join(work, 'stale');
   const project = join(directory, 'project');
   mkdirSync(join(project, 'src'), { recursive: true });
-  writeFileSync(join(project, 'grail.toml'), '[package]\nname = "stale\n"\nversion = "0.1.0"\n');
+  writeFileSync(join(project, 'grail.toml'), '[package]\nname = "stale"\nversion = "0.1.0"\n');
   writeFileSync(join(project, 'src/util.grl'), 'module util;\n\npub fn twice(x: u64) -> u64 {\n    return x * 2;\n}\n');
   writeFileSync(join(project, 'src/main.grl'), 'use util;\n\npub fn main() -> u64 {\n    println(util::twice(21));\n    return 0;\n}\n');
   const files = [join(project, 'src/main.grl'), join(project, 'src/util.grl'), runtime, platform];
@@ -294,17 +547,21 @@ function proveStale() {
 }
 
 // ---- (c) tampering with the audit metadata ---------------------------------
-// Three layers, three refusals, and one limit stated rather than hidden:
-//   (c1) an edited entry is refused by the manifest, which pins the bytes that were written;
-//   (c2) re-digesting the file does not launder it - the manifest still pins the old bytes;
-//   (c3) re-digesting the file *and* rewriting the manifest is accepted, because the manifest is an
-//        integrity check and not a signature: whoever can rewrite the directory can rewrite both;
-//   (c4) `--verify` is the check against the sources, and it refuses that edit by name.
+// The interface is a typed record stream, so a tamper is a changed byte and the refusal is what the
+// *reader* makes of it. Six layers, one limit stated rather than hidden:
+//   (c0) the manifest is consulted at all;
+//   (c1) an edit that was not re-sealed is refused by the file's own digest in the trailer;
+//   (c2) re-sealing it does not launder it - the manifest pins the bytes that were written;
+//   (c3) re-sealing *and* re-pinning the manifest gets past both, and `--verify` then refuses that
+//        edit by declaration: an audit result is never silently honoured while the sources exist;
+//   (c4) an old version, a truncated file and an unknown record are each refused by name;
+//   (c5) a record one field longer - what a newer writer emitting a new field would produce - is
+//        refused by length rather than misread, which is what the format needs to evolve at all.
 function proveTampering() {
   const directory = join(work, 'tamper');
   const project = join(directory, 'project');
   mkdirSync(join(project, 'src'), { recursive: true });
-  writeFileSync(join(project, 'grail.toml'), '[package]\nname = "tamper\n"\nversion = "0.1.0"\n');
+  writeFileSync(join(project, 'grail.toml'), '[package]\nname = "tamper"\nversion = "0.1.0"\n');
   writeFileSync(join(project, 'src/util.grl'), `module util;
 
 pub handle Stream: transferable;
@@ -324,115 +581,164 @@ pub fn twice(x: u64) -> u64 {
   const files = [join(project, 'src/main.grl'), join(project, 'src/util.grl'), runtime, platform];
   const ifaces = emit(files, directory);
   const util = join(ifaces, 'util.iface');
-  const original = readFileSync(util, 'utf8');
-  assert.match(original, /type util::Stream handle params=0 lifetimes=0 transfer=1 share=0/, 'the audited handle contract must travel');
+  const original = readFileSync(util);
+  // The audited handle contract travels, and the dump is where a reviewer reads it.
+  assert.match(dump(util), /type util::Stream handle params=0 lifetimes=0 transfer=1 share=0/, 'the audited handle contract must travel');
   const manifestPath = join(ifaces, 'interfaces.manifest');
   const originalManifest = readFileSync(manifestPath, 'utf8');
-  const digestOf = text => sha256(text.slice(0, text.indexOf('\ndigest "') + 1));
-  const withDigest = text => `${text.slice(0, text.indexOf('\ndigest "') + 1)}digest "${digestOf(text)}"\n`;
   const pin = (text, digest) => text.replace(/^util \S+/m, `util ${digest}`);
+  const repin = bytes => {
+    writeFileSync(util, bytes);
+    writeFileSync(manifestPath, pin(originalManifest, sha256(bytes)));
+  };
+  const restore = () => {
+    writeFileSync(util, original);
+    writeFileSync(manifestPath, originalManifest);
+  };
 
   // (c0) the manifest is consulted at all: corrupt only its recorded digest, leave the interface
   // untouched, and the build must refuse. Without this, a tamper test can pass for the wrong reason
-  // (e.g. the interface's own digest catching an edit before the manifest is ever read), and a
-  // manifest check that silently compares nothing would look green.
-  const hostDigest = readFileSync(manifestPath, 'utf8').replace(/^util \S+/m, `util ${'0'.repeat(64)}`);
-  writeFileSync(manifestPath, hostDigest);
+  // (the file's own digest catching an edit before the manifest is ever read).
+  writeFileSync(manifestPath, pin(originalManifest, '0'.repeat(64)));
   const uncatalogued = compile(files, join(directory, 'uncatalogued'), ['--interface', ifaces]);
   assert.equal(uncatalogued.status, 1, 'the manifest must be consulted, not decorative');
   assert.match(uncatalogued.output, /module `util`: the interface file does not match the manifest/, `the manifest refusal must name the module: ${uncatalogued.output}`);
-  writeFileSync(manifestPath, readFileSync(manifestPath, 'utf8').replace(/^util \S+/m, `util ${sha256(original)}`));
+  writeFileSync(manifestPath, originalManifest);
   const recatalogued = compile(files, join(directory, 'recatalogued'), ['--interface', ifaces]);
   assert.equal(recatalogued.status, 0, `an interface matching its manifest must build\n${recatalogued.output}`);
 
-  // (c1) a changed `transfer` is refused: the manifest pins the bytes the emitting run wrote, so an
-  // edit to an audit result never reaches the checker.
-  writeFileSync(util, original.replace('transfer=1 share=0', 'transfer=0 share=0'));
-  const edited = compile(files, join(directory, 'edited'), ['--interface', ifaces]);
-  assert.equal(edited.status, 1, 'a tampered transfer must be refused');
-  assert.match(edited.output, /module `util`: the interface file does not match the manifest/, `the refusal must name the module and the manifest: ${edited.output}`);
-  assert.match(edited.output, /manifest says \S+, the file is \S+/, 'the refusal must show both digests');
+  // (c1) a changed `transfer`, and nothing else: the file's own trailer digest refuses it, because
+  // the manifest was pinned to the edited bytes so the manifest check cannot be what catches it.
+  const edited = Buffer.from(original);
+  const transfer = typeRecord(edited, 'util', 'Stream');
+  assert.equal(edited[transfer.at], 1, 'the transfer byte must be where the format says it is');
+  edited[transfer.at] = 0;
+  repin(edited);
+  const unsealed = compile(files, join(directory, 'unsealed'), ['--interface', ifaces]);
+  assert.equal(unsealed.status, 1, 'an edited interface must be refused by its own digest');
+  assert.match(unsealed.output, /changed after it was written/, `the seal refusal must say the file changed: ${unsealed.output}`);
 
-  // (c2) re-digesting the edit does not launder it: the manifest still pins the original bytes.
-  const tampered = original.replace('transfer=1 share=0', 'transfer=0 share=0');
-  const reDigested = withDigest(tampered);
-  writeFileSync(util, reDigested);
+  // (c2) re-sealing the edit does not launder it: the manifest still pins the written bytes.
+  writeFileSync(util, seal(Buffer.from(edited)));
+  writeFileSync(manifestPath, originalManifest);
   const laundered = compile(files, join(directory, 'laundered'), ['--interface', ifaces]);
   assert.equal(laundered.status, 1, 'a re-digested tamper must still be refused');
-  assert.match(laundered.output, /module `util`: the interface file does not match the manifest/, `the refusal must name the manifest: ${laundered.output}`);
+  assert.match(laundered.output, /module `util`: the interface file does not match the manifest/, `the manifest refusal must name the module: ${laundered.output}`);
+  assert.match(laundered.output, /manifest says \S+, the file is \S+/, 'the refusal must show both digests');
 
-  // (c3) with the manifest rewritten too, `--verify` still refuses and names the declaration: the
-  // entry is never silently honoured while the sources are available.
-  writeFileSync(manifestPath, readFileSync(manifestPath, 'utf8').replace(/^util \S+/m, `util ${sha256(reDigested)}`));
+  // (c3) with the manifest re-pinned too, `--verify` still refuses and names the declaration.
+  const sealedEdit = seal(Buffer.from(edited));
+  repin(sealedEdit);
   const verified = compile(files, join(directory, 'verify'), ['--interface', ifaces, '--verify-interface']);
   assert.equal(verified.status, 1, '`--verify` must refuse a tampered transfer');
   assert.match(verified.output, /module `util` does not match this interface/, `the refusal must name the module: ${verified.output}`);
   assert.match(verified.output, /transfer=0/, 'the refusal must show the interface line that differs');
   assert.match(verified.output, /transfer=1/, 'the refusal must show what the sources give');
+  // ... and the dump shows the tampered declaration, so the reader really did install it.
+  assert.match(dump(util), /type util::Stream handle params=0 lifetimes=0 transfer=0 share=0/, 'the dump must show what the reader read');
 
-  // (c5) the same for a closure type's environment record. A generic body can now produce a closure
-  // type, but no *signature* in the corpus can name one, so the entry is injected in the format's
-  // own spelling - and it must be refused rather than honoured.
-  writeFileSync(util, original);
-  writeFileSync(manifestPath, originalManifest);
-  const withEnv = original.replace('field x u64', 'field x u64\nfield callback (closure 0 [] (u64) u64 (named .closure::env1))').replace(/\ndigest ".*"\n$/, '\n');
-  const injected = `${withEnv}env env1\nfield captured u64\ndigest "${sha256(withEnv)}"\n`;
-  writeFileSync(util, injected);
-  writeFileSync(manifestPath, pin(originalManifest, sha256(injected)));
-  const envRefused = compile(files, join(directory, 'env'), ['--interface', ifaces, '--verify-interface']);
-  assert.equal(envRefused.status, 1, 'a tampered env entry must be refused');
-  assert.match(envRefused.output, /module `util` does not match this interface/, `the env refusal must name the module: ${envRefused.output}`);
-  assert.match(envRefused.output, /env|closure|field/, 'the env refusal must show the injected entry');
+  // (c4) an old version is refused by number, before anything else is read.
+  const old = Buffer.from(original);
+  old[4] = 3;
+  repin(old);
+  const version = compile(files, join(directory, 'version'), ['--interface', ifaces]);
+  assert.equal(version.status, 1, 'an interface written by another compiler must be refused');
+  assert.match(version.output, /was written in interface format 3/, `the version refusal must name the version it found: ${version.output}`);
+  assert.match(version.output, /this compiler reads format 4/, 'the version refusal must name the version this compiler reads');
+
+  // ... and a file from a *newer* compiler is refused by name as well: a version this compiler
+  // does not know is never half-read.
+  const future = Buffer.from(original);
+  future[4] = 5;
+  repin(future);
+  const ahead = compile(files, join(directory, 'future'), ['--interface', ifaces]);
+  assert.equal(ahead.status, 1, 'an interface written by a newer compiler must be refused');
+  assert.match(ahead.output, /was written in interface format 5 by a newer compiler/, `the future-version refusal must name the version it found: ${ahead.output}`);
+  assert.match(ahead.output, /this one reads format 4/, 'the future-version refusal must name the version this compiler reads');
+
+  // ... a truncated file is refused as truncated.
+  repin(Buffer.from(original.subarray(0, Math.floor(original.length * 0.6))));
+  const cut = compile(files, join(directory, 'truncated'), ['--interface', ifaces]);
+  assert.equal(cut.status, 1, 'a truncated interface must be refused');
+  assert.match(cut.output, /truncated|no trailer/, `the truncation refusal must say what is missing: ${cut.output}`);
+
+  // ... and an unknown record is refused by tag, not skipped.
+  const unknown = Buffer.from(original);
+  const firstType = frame(unknown).find(record => record.tag === 10);
+  unknown[firstType.tagAt] = 99;
+  repin(seal(unknown));
+  const alien = compile(files, join(directory, 'unknown'), ['--interface', ifaces]);
+  assert.equal(alien.status, 1, 'an unknown record must be refused');
+  assert.match(alien.output, /unknown record \(tag 99\)/, `the unknown-record refusal must name the tag: ${alien.output}`);
+
+  // (c4d) another `dyn` ABI: one digit of the header's ABI string, re-sealed and re-pinned, so the
+  // refusal is the ABI comparison and not the digest.
+  const abi = Buffer.from(original);
+  const abiAt = abi.indexOf('abi dyn pair size = 16');
+  assert.ok(abiAt > 0, 'the header must state the `dyn` ABI');
+  abi[abiAt + 'abi dyn pair size = 1'.length] = '5'.charCodeAt(0);
+  repin(seal(abi));
+  const layout = compile(files, join(directory, 'abi'), ['--interface', ifaces]);
+  assert.equal(layout.status, 1, 'an interface written for another `dyn` ABI must be refused');
+  assert.match(layout.output, /does not match this interface/, `the ABI refusal must name the module: ${layout.output}`);
+  assert.match(layout.output, /abi dyn pair size = 15/, 'the ABI refusal must show the ABI the file states');
+  // ... and the loader refuses it by itself, without the sources to compare against: `--use` reads a
+  // module whose source this build does not have, so the header's ABI is all there is to check.
+  const loaded = compile(
+    [join(project, 'src/main.grl'), runtime, platform],
+    join(directory, 'abi-use'),
+    ['--use', ifaces],
+  );
+  assert.equal(loaded.status, 1, 'loading an interface written for another `dyn` ABI must be refused');
+  assert.match(loaded.output, /was written for another `dyn` ABI/, `the ABI refusal must name the ABI: ${loaded.output}`);
+  assert.match(loaded.output, /this compiler builds/, 'the ABI refusal must show the ABI this compiler builds');
+
+  // (c5) a record one field longer than this compiler reads: refused by length, never skipped.
+  const grown = Buffer.from(original);
+  const target = frame(grown).find(record => record.tag === 10);
+  assert.ok(grown[target.lenAt] < 128, 'the test needs a one-byte length to extend in place');
+  grown[target.lenAt] += 1;
+  const spliced = Buffer.concat([grown.subarray(0, target.end), Buffer.from([0]), grown.subarray(target.end)]);
+  repin(seal(spliced));
+  const longer = compile(files, join(directory, 'longer'), ['--interface', ifaces]);
+  assert.equal(longer.status, 1, 'a record with an unread field must be refused');
+  assert.match(longer.output, /bytes? this compiler does not read/, `the length refusal must say so: ${longer.output}`);
+
+  // (c6) a renamed field: manifest and seal are both re-pinned, so `--verify` is what catches it,
+  // and it names the declaration that differs.
+  const renamed = Buffer.from(original);
+  const point = typeRecord(renamed, 'util', 'Point');
+  point.var();
+  point.var();
+  point.var();
+  point.var();
+  const fields = point.var();
+  assert.equal(fields, 2, 'Point has two fields');
+  const nameStart = point.at + 1;
+  assert.equal(String.fromCharCode(renamed[nameStart]), 'x', 'the first field of Point is x');
+  renamed[nameStart] = 'y'.charCodeAt(0);
+  repin(seal(renamed));
+  const field = compile(files, join(directory, 'field'), ['--interface', ifaces, '--verify-interface']);
+  assert.equal(field.status, 1, 'a renamed field must be refused by --verify');
+  assert.match(field.output, /module `util` does not match this interface/, `the field refusal must name the module: ${field.output}`);
+  assert.match(field.output, /field y/, 'the field refusal must show the renamed field');
 
   // Restore and prove the interface still builds, so the refusals above are about the edit.
-  writeFileSync(util, original);
-  writeFileSync(manifestPath, originalManifest);
+  restore();
   const restored = compile(files, join(directory, 'restored'), ['--interface', ifaces]);
   assert.equal(restored.status, 0, `an untouched interface must still build\n${restored.output}`);
-  return { edited: edited.output.trim().split('\n')[0], manifest: laundered.output.trim().split('\n')[0], verify: verified.output.trim().split('\n')[0], env: envRefused.output.trim().split('\n')[0] };
-}
-
-// (d0) the manifest is the set, not only a checksum list: a source module the manifest does not
-// describe is refused by name. This is the guard against the class of bug where an emitting run's
-// source list and the set it wrote disagreed - the module then had no interface file at all, and the
-// disagreement only surfaced one module later as an unknown name in somebody else's module (the
-// compiler built against its own modules, `lexer.iface` missing).
-function proveManifestCoverage() {
-  const directory = join(work, 'coverage');
-  const project = join(directory, 'project');
-  mkdirSync(join(project, 'src'), { recursive: true });
-  writeFileSync(join(project, 'src/util.grl'), 'module util;\n\npub fn twice(x: u64) -> u64 {\n    return x * 2;\n}\n');
-  writeFileSync(join(project, 'src/helper.grl'), 'module helper;\n\npub fn bump(x: u64) -> u64 {\n    return x + 7;\n}\n');
-  writeFileSync(join(project, 'src/main.grl'), 'use util;\nuse helper;\n\npub fn main() -> u64 {\n    println(util::twice(helper::bump(3)));\n    return 0;\n}\n');
-  const files = [join(project, 'src/main.grl'), join(project, 'src/util.grl'), join(project, 'src/helper.grl'), runtime, platform];
-  const ifaces = emit(files, directory);
-  const manifestPath = join(ifaces, 'interfaces.manifest');
-  const original = readFileSync(manifestPath, 'utf8');
-  const rows = original.split('\n').filter(row => row.length !== 0 && !row.startsWith('//'));
-  assert.equal(rows.length, 3, `the emitting run must list every source module of the program: ${original}`);
-  // Delete one module's row - the interface file stays, so only the manifest can catch it - and the
-  // consuming run must name the module it can no longer account for.
-  const dropped = rows.find(row => row.startsWith('util '));
-  assert.ok(dropped, `no util row in the manifest: ${original}`);
-  writeFileSync(manifestPath, `// grail-interfaces 1\n${rows.filter(row => row !== dropped).join('\n')}\n`);
-  const refused = compile(files, join(directory, 'build'), ['--interface', ifaces, '--verify-interface']);
-  assert.equal(refused.status, 1, `a manifest missing a source module must be refused\n${refused.output}`);
-  assert.match(refused.output, /has no interface for module `util`/, `the refusal must name the missing module: ${refused.output}`);
-  assert.match(refused.output, /util\.iface/, 'the refusal must name the file it expected');
-  // `--interface DIR` is a verification build (`--verify-interface` only says so explicitly), so the
-  // reading is the same for the directory's last row: a manifest that does not describe a source
-  // module of the run is refused by name, never silently filled in from the module's source.
-  const entryRow = rows.find(row => row.startsWith('main '));
-  assert.ok(entryRow, `no main row in the manifest: ${original}`);
-  writeFileSync(manifestPath, `// grail-interfaces 1\n${rows.filter(row => row !== entryRow).join('\n')}\n`);
-  const entryRefused = compile(files, join(directory, 'entry'), ['--interface', ifaces]);
-  assert.equal(entryRefused.status, 1, `a manifest without the entry module is refused too\n${entryRefused.output}`);
-  assert.match(entryRefused.output, /has no interface for module `main`/, `the refusal must name the entry: ${entryRefused.output}`);
-  // Restored, the same sources build: the refusals above are about the missing rows.
-  writeFileSync(manifestPath, original);
-  const restored = compile(files, join(directory, 'restored'), ['--interface', ifaces]);
-  assert.equal(restored.status, 0, `an untouched manifest must build\n${restored.output}`);
-  return refused.output.trim().split('\n')[0];
+  return {
+    future: ahead.output.trim().split('\n')[0],
+    abi: layout.output.trim().split('\n')[0],
+    edited: unsealed.output.trim().split('\n')[0],
+    manifest: laundered.output.trim().split('\n')[0],
+    verify: verified.output.trim().split('\n')[0],
+    version: version.output.trim().split('\n')[0],
+    truncated: cut.output.trim().split('\n')[0],
+    unknown: alien.output.trim().split('\n')[0],
+    longer: longer.output.trim().split('\n')[0],
+    field: field.output.trim().split('\n')[0],
+  };
 }
 
 // (d) no leakage, on a module whose source has a distinctive helper and distinctive locals.
@@ -440,7 +746,7 @@ function proveLeakage() {
   const directory = join(work, 'leak');
   const project = join(directory, 'project');
   mkdirSync(join(project, 'src'), { recursive: true });
-  writeFileSync(join(project, 'grail.toml'), '[package]\nname = "leak\n"\nversion = "0.1.0"\n');
+  writeFileSync(join(project, 'grail.toml'), '[package]\nname = "leak"\nversion = "0.1.0"\n');
   writeFileSync(join(project, 'src/util.grl'), `module util;
 
 fn zzprivatehelper(value: u64) -> u64 {
@@ -571,10 +877,16 @@ const coverage = proveManifestCoverage();
 report('a source module missing from the manifest refused', coverage);
 
 const tamper = proveTampering();
-report('edited transfer refused (manifest)', tamper.edited);
+report('edited transfer refused (seal)', tamper.edited);
 report('re-digested transfer refused (manifest)', tamper.manifest);
 report('edited transfer refused (--verify)', tamper.verify);
-report('edited env refused (--verify)', tamper.env);
+report('old version refused', tamper.version);
+report('future version refused', tamper.future);
+report('truncation refused', tamper.truncated);
+report('unknown record refused', tamper.unknown);
+report('another `dyn` ABI refused', tamper.abi);
+report('a record one field longer refused', tamper.longer);
+report('renamed field refused (--verify)', tamper.field);
 
 
 // ---- (e) generic bodies across a module boundary (stage 3) -------------------
@@ -644,13 +956,14 @@ function proveGenericBodies() {
   // (e1) Emit the interfaces, then never mention the modules' sources again.
   const ifaces = emit(all, directory);
   const generic = join(ifaces, 'generic.iface');
-  const text = readFileSync(generic, 'utf8');
-  assert.ok(text.startsWith('// grail-interface 3\n'), 'generics: the interface does not carry the current format version');
+  const text = dump(generic);
+  assert.match(text, /^grail-interface 4$/m, 'generics: the interface does not carry the current format version');
   assert.match(text, /^fn generic::twice <1> /m, 'generics: generic.iface does not declare the template');
-  assert.doesNotMatch(text, /\bpos \d+$/, 'generics: a body is still a source position, not carried text');
-  assert.match(text, /^body \d+$/m, 'generics: generic.iface carries no body section');
-  // A body row is the template's own source line, readable in a diff.
-  assert.ok(text.includes('line "    return value;"'), 'generics: the body section does not carry the template text');
+  assert.match(text, /^\s*body$/m, 'generics: generic.iface carries no body section');
+  // The body is the template's own source text, one `|` row per line, readable in a diff.
+  assert.ok(text.includes('|    return value;'), 'generics: the body section does not carry the template text');
+  // Nothing carries a source position: a body is text, not a pointer into a file.
+  assert.doesNotMatch(text, /\bpos /, 'generics: a body is still a source position, not carried text');
 
   // Three separate compiles, each with only the interface directory: the entry module, the two
   // importers, and the module that defines the template. `generic.grl` is on none of them.
@@ -697,13 +1010,16 @@ function proveGenericBodies() {
   assert.equal(ran.status, expected.status, `generics: the separately compiled program exits ${ran.status}, the source build ${expected.status}`);
   assert.equal(ran.stdout, expected.stdout, 'generics: the separately compiled program prints something else');
 
-  // (e4) The interface is checked, not trusted: a template without its body is refused by name.
+  // (e4) The interface is checked, not trusted: a template without its body is refused by name. The
+  // body is the last field of the template's record, so emptying it is one byte: the record is
+  // rebuilt with its payload cut at the body, the length re-encoded, the file re-sealed.
   const edited = join(work, 'generics-nobody');
   mkdirSync(edited, { recursive: true });
   for (const file of interfaceFiles(ifaces)) writeFileSync(join(edited, file.split('/').pop()), readFileSync(file));
-  const stripped = readFileSync(generic, 'utf8').replace(/^body \d+\n(?:line .*\n)+/gm, '');
-  const at = stripped.indexOf('\ndigest "');
-  writeFileSync(join(edited, 'generic.iface'), `${stripped.slice(0, at + 1)}digest "${sha256(stripped.slice(0, at + 1))}"\n`);
+  const whole = readFileSync(generic);
+  const layout = fnLayout(whole, 'twice');
+  const cut = Buffer.concat([whole.subarray(layout.record.at, layout.body), Buffer.from([0])]);
+  writeFileSync(join(edited, 'generic.iface'), seal(replacePayload(whole, layout.record, cut)));
   const refused = compile([fixtures('generic_a.grl'), runtime, platform], join(directory, 'nobody'), ['--use', edited]);
   assert.equal(refused.status, 1, 'generics: a template without a body must be refused');
   assert.match(refused.output, /carries no body for the generic template `twice`/, `generics: the refusal must name the template: ${refused.output}`);
@@ -731,8 +1047,8 @@ function proveCapabilityAcrossInstantiation() {
   // From interfaces only: `handles.grl` is on neither command line, so the bound and both
   // classifications can only have come from `handles.iface`.
   const ifaces = emit(ok, directory);
-  const handleIface = readFileSync(join(ifaces, 'handles.iface'), 'utf8');
-  assert.match(handleIface, /^bound 0 2$/m, 'capability: the template lost its `Share` bound in the interface');
+  const handleIface = dump(join(ifaces, 'handles.iface'));
+  assert.match(handleIface, / bound=0:2( |$)/m, 'capability: the template lost its `Share` bound in the interface');
   assert.match(handleIface, /type handles::File handle params=0 lifetimes=0 transfer=1 share=1/, 'capability: the shareable handle lost its audit');
   assert.match(handleIface, /type handles::Lock handle params=0 lifetimes=0 transfer=1 share=0/, 'capability: the unshareable handle lost its audit');
 
@@ -962,8 +1278,8 @@ function proveEffectsTravel() {
   const files = [entry, lib, runtime, platform];
   const emit = compile(files, join(directory, 'emit'), ['--emit-interface', ifaces]);
   assert.equal(emit.status, 0, `effects: the claimed program does not compile\n${emit.output}`);
-  const claimed = readFileSync(join(ifaces, 'fx_eff_lib.iface'), 'utf8');
-  assert.match(claimed, /^effects 1 0 0$/m, 'effects: the claim did not travel in the interface');
+  const claimedPath = join(ifaces, 'fx_eff_lib.iface');
+  assert.match(dump(claimedPath), /^\s*effects 1 0 0$/m, 'effects: the claim did not travel in the interface');
   const viaInterface = compile(files, join(directory, 'via'), ['--interface', ifaces]);
   assert.equal(viaInterface.status, 0, `effects: an interface build refused the claim its own interface records\n${viaInterface.output}`);
   const plainIfaces = join(directory, 'plain');
@@ -971,13 +1287,27 @@ function proveEffectsTravel() {
   const plainEmit = compile([plain, runtime, platform], join(directory, 'plain_emit'), ['--emit-interface', plainIfaces]);
   assert.equal(plainEmit.status, 0, `effects: the unclaimed module does not compile\n${plainEmit.output}`);
   assert.ok(
-    !/^effects /m.test(readFileSync(join(plainIfaces, 'fx_eff_plain.iface'), 'utf8')),
+    !/^\s*effects [^0]|^\s*effects 0 [^0]/m.test(dump(join(plainIfaces, 'fx_eff_plain.iface'))),
     'effects: an unclaimed function published an `effects` row',
   );
-  writeFileSync(join(ifaces, 'fx_eff_lib.iface'), claimed.replace(/^effects 1 0 0\n/m, ''));
-  const tampered = compile(files, join(directory, 'tampered'), ['--interface', ifaces]);
+  // (c) A claimed effect is a byte in the record stream, so a false claim is one changed byte -
+  // re-sealed and re-pinned, `--verify` is what has to refuse it, and it names the declaration.
+  const original = readFileSync(claimedPath);
+  const edited = Buffer.from(original);
+  const effects = fnLayout(edited, 'total');
+  assert.equal(edited[effects.noAlloc], 1, 'effects: the claim is not where the format says it is');
+  edited[effects.noAlloc] = 0;
+  writeFileSync(claimedPath, seal(edited));
+  const manifest = join(ifaces, 'interfaces.manifest');
+  const pinned = readFileSync(manifest, 'utf8');
+  writeFileSync(manifest, pinned.replace(/^fx_eff_lib \S+/m, `fx_eff_lib ${sha256(seal(Buffer.from(edited)))}`));
+  const tampered = compile(files, join(directory, 'tampered'), ['--interface', ifaces, '--verify-interface']);
   assert.equal(tampered.status, 1, 'effects: an interface whose `effects` row was removed was accepted');
-  assert.match(tampered.output, /does not match the manifest/, `effects: the refusal does not name the manifest\n${tampered.output}`);
+  assert.match(tampered.output, /does not match this interface/, `effects: the refusal must name the interface\n${tampered.output}`);
+  assert.match(tampered.output, /effects 0 0 0/, 'effects: the refusal must show the row it read');
+  assert.match(tampered.output, /effects 1 0 0/, 'effects: the refusal must show what the sources give');
+  writeFileSync(claimedPath, original);
+  writeFileSync(manifest, pinned);
   return 'recorded when claimed, absent when not, refused once edited';
 }
 
