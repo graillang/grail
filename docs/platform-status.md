@@ -240,10 +240,11 @@ just abundance-test             # Abundance bit-exact parity (313 values, 9 prog
 just borg-test                  # Borg reference-line parity (1014 lines, 12 suites)
 ```
 
-## Known gap: PE unwind data on Windows ARM64
+## Windows ARM64: unwind records yes, frame-constant table no
 
-`win_unwind` (the pass that turns a function's `.seh_*` prologue into a PE `.pdata`/`.xdata` pair)
-runs for windows-x86_64 only, so a Windows ARM64 object carries no unwind records at all. The
-windows suite therefore proves the frame-size contract on x86-64 and records, per ARM64 case, that
-no unwind data is present. Consequences: an ARM64 Windows image cannot be unwound for exception
-handling or debugging. Emitting ARM64 `.pdata`/`.xdata` is the first item of the next round.
+An ARM64 PE object does carry one `.xdata` unwind record per function, and the windows suite
+checks them (length positive and 4-aligned, frame-pointer pair saved, `mov fp, sp` present).
+What it has no equivalent of is the `.set .F<n>,<size>` frame-constant table: an x86-64 prologue
+sizes its frame from that table, while an ARM64 prologue uses `sub sp, #n` directly. The suite
+therefore enforces the one-to-one frame-table contract where the table exists, and checks each
+record's own `FunctionLength` and prologue everywhere.
