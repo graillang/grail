@@ -1,5 +1,17 @@
 ## Unreleased
 
+- Changed: the interface set is one rule, stated once and checked at the boundary. An emitting run
+  writes one interface per source module of the program except the runtime and the platform modules -
+  `core` included when `use` resolution makes it a source module, since the prelude is not exempt as a
+  category - and `interfaces.manifest` is that set, not just a list of checksums: `--interface DIR` (a
+  verification build, which `--verify-interface` names explicitly) now refuses a source module the
+  manifest does not describe, naming the module and the file it should be in, where before only a
+  module whose file the manifest listed could be caught. The synthetic units `.impl_N`, `.inherent_N`,
+  `.interface_N`, `.union`, `.result`, `.closure`, `__start` and the entry's process furniture are
+  excluded by name in docs/design/separate-compilation.md ("What an interface deliberately does not
+  contain"), "What a run compiles, and what it writes" states the set for both shapes (a
+  `use`-resolved program and an explicit source list), and `tools/interface-test.mjs` pins the
+  manifest check by deleting one row and requiring a refusal that names the missing module.
 - Corpus: the cases that assert a failure's location are scoped to the backend that emits the
   tables. A contained failure's `site`, and `host::backtrace()`, are read from the statement and
   function tables and the `rt_sites` helper the entry publishes, and `native.grl site_table_on`

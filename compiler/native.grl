@@ -38133,6 +38133,7 @@ fn iface_check_manifest<a, b>(c: (&a mut C), dir: &b [u8]) -> unit {
         );
     }
     lines := iface_lines(&text);
+    mut listed = u8[][];
     for i in lines.len() {
         line := lines[i].copy();
         if line.len() == 0 {
@@ -38169,6 +38170,7 @@ fn iface_check_manifest<a, b>(c: (&a mut C), dir: &b [u8]) -> unit {
         if bytes.len() == 0 {
             iface_refuse(view(file), view("is missing but the manifest lists it"));
         }
+        listed.push(module.copy());
         got := iface_digest(&bytes);
         if !same(view(got), view(want)) {
             mut msg = u8[];
@@ -38179,6 +38181,32 @@ fn iface_check_manifest<a, b>(c: (&a mut C), dir: &b [u8]) -> unit {
             push_bytes(&mut msg, view(", the file is "));
             push_bytes(&mut msg, view(got));
             push_bytes(&mut msg, view("); it was edited or replaced after it was written"));
+            iface_refuse(view(file), view(msg));
+        }
+    }
+    // The manifest is the set, not only a list of checksums: `--interface DIR` is a verification
+    // build (it checks every module given as source against `DIR/<module>.iface`), so a source
+    // module the manifest does not describe is refused here, naming the module and the file it
+    // should be in - the same diagnostic a missing file earns, raised at the boundary instead of one
+    // module later. An emitting run whose source list and its set disagreed is exactly how a module
+    // ended up with no interface file at all. `runtime` is the trusted base and has none.
+    for i in c.mod_names.len() {
+        m := c.mod_names[i].copy();
+        if same(view(m), view("runtime")) {
+            continue;
+        }
+        mut listed_module = 0;
+        for k in listed.len() {
+            if same(view(listed[k]), view(m)) {
+                listed_module = 1;
+            }
+        }
+        if listed_module == 0 {
+            file := iface_join(view(dir), view(m), view(".iface"));
+            mut msg = u8[];
+            push_bytes(&mut msg, view("has no interface for module `"));
+            push_bytes(&mut msg, view(m));
+            push_bytes(&mut msg, view("` (expected this file); run `grail check --interface DIR` to write it"));
             iface_refuse(view(file), view(msg));
         }
     }
