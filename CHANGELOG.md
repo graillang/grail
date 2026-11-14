@@ -1,5 +1,20 @@
 ## Unreleased
 
+- Corpus: the cases that assert a failure's location are scoped to the backend that emits the
+  tables. A contained failure's `site`, and `host::backtrace()`, are read from the statement and
+  function tables and the `rt_sites` helper the entry publishes, and `native.grl site_table_on`
+  emits them only without `--backend=llvm` (as it already did without `--debug`, with `--split`,
+  with `--no-error-sites`, and on macOS), so `GRAIL_BACKEND=llvm bun tools/test-native.mjs x86_64`
+  reported `no site` for the four `rth-` cases that expect `site`
+  (`rth-contained-then-joined`, `-thrice`, `rth-offer-five-names-the-frame`,
+  `rth-offer-three-still-names-the-statement`). Those four now carry `"backends": ["native"]` and a
+  `note` naming the mechanism, joining `tfail-trap-contained-at-join`, which already documented the
+  same limit; the containment, the message and the kind stay asserted on both backends, and
+  `rth-offer-two-refuses-the-descriptor` stays unscoped because its expected answer is the refusal
+  that loses the location on purpose. docs/testing.md also records that `--backend=llvm` is a
+  compiler flag with no `grail build` path - the driver assembles and links `OUT.s` only, never the
+  `OUT.s.ll`, so `grail build x.grl --backend=llvm` silently builds the native one - and
+  docs/design/task-failure-containment.md lists which builds carry a site table.
 - Fixed: `grail build` of a multi-module project failed with an unknown-function diagnostic for
   `some` in `core` and left no `core.iface` behind whenever the program's standard closure reached
   `core` and `result` (reproduced without `--cache`). The per-module driver ordered its runs by the
