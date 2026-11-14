@@ -493,7 +493,7 @@ trailer   tag 2: source digest, then 32 raw bytes of SHA-256 over every byte bef
 
 | tag | record | carries |
 | --- | --- | --- |
-| 1 | `module` | module, source path, `std`/`unsafe`/`host`, overflow mode, target |
+| 1 | `module` | module, source path, `std`/`unsafe`/`host`, overflow mode, target, and the `dyn` ABI |
 | 2 | `trailer` | the source's SHA-256, then the file's own digest |
 | 3 | `link` | one `extern "C" lib` input |
 | 10 | `type` | kind (struct/record/enum/handle), parameter and lifetime counts, `transfer`/`share`, bounds, requirements, fields with their names, types and refinements |
@@ -504,6 +504,14 @@ trailer   tag 2: source digest, then 32 raw bytes of SHA-256 over every byte bef
 | 15 | `interface` | supers, associated types and the interface's methods |
 | 16 | `impl` | the contract, the type, the implementation's parameters, associated types and methods |
 | 17 | `env` | a closure environment's captured fields |
+
+The module record also carries the **`dyn` ABI** - `abi dyn pair size = 16 align = 8 word0 = data
+word1 = vtable drop = 0`, one length-counted string holding exactly what `iface_dyn_abi()` returns.
+A `&dyn I` in a signature or a field crosses a module boundary as a pair, so two modules built for
+different layouts must not link: the reader compares the field with `iface_dyn_abi()` and refuses a
+file that states another one (`was written for another \`dyn\` ABI (...); this compiler builds
+(...)`), and one that states none. `iface_dyn_abi()` stays the single spelling - the encoder writes
+what it returns, the reader compares against it, and the dump renders it as that line.
 
 Every type is a record of its own: `tag, len, mode, regions, payload`. The writer writes mode and the
 lifetime slots for *every* kind, not only "where they are legal" - that rule is what let the text
@@ -605,6 +613,8 @@ half-installed: the prologue, the framing of every record, the trailer's digest 
 5. **unknown record** - `carries an unknown record (tag 99) … it was written by a newer compiler`;
 6. **unread field** - `carries N bytes this compiler does not read: the record declares X and this
    compiler reads Y`;
+6b. **another `dyn` ABI** - the header's ABI string differs from `iface_dyn_abi()` (or the header
+   carries none): a `&dyn` value would not mean the same thing across the two compilers;
 7. **edited** - `changed after it was written: the digest in its trailer does not match the file`;
 8. **not in the manifest / stale / disagreeing** - the stage-2 refusals, unchanged: the manifest
    pins the bytes that were written, the source digest catches a changed source, and `--verify`

@@ -291,6 +291,14 @@ function proveDigests(directory) {
     assert.ok(bytes.length > 32, `${path}: too short to carry a trailer`);
     const body = Buffer.from(bytes.subarray(0, bytes.length - 32));
     assert.equal(bytes.subarray(bytes.length - 32).toString('hex'), sha256(body), `${path}: the trailer's digest does not cover the file`);
+    // Every interface states the ABI a `&dyn I` is built for, in dynfat's spelling, so a module
+    // built against another layout cannot link: the pair one writes would be the pair the other
+    // dereferences wrongly.
+    assert.match(
+      text,
+      /^abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0$/m,
+      `${path}: the header does not state the \`dyn\` ABI`,
+    );
     // Write, read, write again: the reader rebuilds the model the writer started from.
     const round = spawnSync(compiler, [...numeric, '--iface-roundtrip', path], { encoding: 'utf8', timeout: 900_000 });
     assert.equal(round.status, 0, `${path}: does not round-trip\n${round.stdout ?? ''}${round.stderr ?? ''}`);
@@ -617,6 +625,18 @@ pub fn twice(x: u64) -> u64 {
   assert.equal(alien.status, 1, 'an unknown record must be refused');
   assert.match(alien.output, /unknown record \(tag 99\)/, `the unknown-record refusal must name the tag: ${alien.output}`);
 
+  // (c4d) another `dyn` ABI: one digit of the header's ABI string, re-sealed and re-pinned, so the
+  // refusal is the ABI comparison and not the digest.
+  const abi = Buffer.from(original);
+  const abiAt = abi.indexOf('abi dyn pair size = 16');
+  assert.ok(abiAt > 0, 'the header must state the `dyn` ABI');
+  abi[abiAt + 'abi dyn pair size = 1'.length] = '5'.charCodeAt(0);
+  repin(seal(abi));
+  const layout = compile(files, join(directory, 'abi'), ['--interface', ifaces]);
+  assert.equal(layout.status, 1, 'an interface written for another `dyn` ABI must be refused');
+  assert.match(layout.output, /was written for another `dyn` ABI/, `the ABI refusal must name the ABI: ${layout.output}`);
+  assert.match(layout.output, /this compiler builds/, 'the ABI refusal must show the ABI this compiler builds');
+
   // (c5) a record one field longer than this compiler reads: refused by length, never skipped.
   const grown = Buffer.from(original);
   const target = frame(grown).find(record => record.tag === 10);
@@ -653,6 +673,7 @@ pub fn twice(x: u64) -> u64 {
   assert.equal(restored.status, 0, `an untouched interface must still build\n${restored.output}`);
   return {
     future: ahead.output.trim().split('\n')[0],
+    abi: layout.output.trim().split('\n')[0],
     edited: unsealed.output.trim().split('\n')[0],
     manifest: laundered.output.trim().split('\n')[0],
     verify: verified.output.trim().split('\n')[0],
@@ -799,6 +820,7 @@ report('old version refused', tamper.version);
 report('future version refused', tamper.future);
 report('truncation refused', tamper.truncated);
 report('unknown record refused', tamper.unknown);
+report('another `dyn` ABI refused', tamper.abi);
 report('a record one field longer refused', tamper.longer);
 report('renamed field refused (--verify)', tamper.field);
 

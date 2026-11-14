@@ -36167,6 +36167,15 @@ const IFACE_TAG_IFACE: u64 = 15;
 const IFACE_TAG_IMPL: u64 = 16;
 const IFACE_TAG_ENV: u64 = 17;
 
+// The ABI a borrowed trait object (`&dyn I`) is built for. A `&dyn I` in a signature or a record
+// field crosses a module boundary, so two modules built for different pair layouts must not link;
+// every interface states this string in its header record and the reader compares it with the one
+// this compiler builds. It is dynfat's own spelling, verbatim, and this function is the only place
+// it is written - the encoder writes what it returns and the reader compares against it.
+fn iface_dyn_abi() -> string {
+    return "abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0";
+}
+
 // ---- writing ----
 fn iface_w1<a>(out: (&a mut u8[]), b: u64) -> unit {
     out.push(b & 255);
@@ -37784,6 +37793,9 @@ fn iface_module_bytes<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std:
     iface_w1(&mut head, c.overflow);
     iface_w1(&mut head, c.target);
     iface_w1(&mut head, c.plat);
+    // Last, so a compiler that predates the field reads its absence as a truncated record rather
+    // than misreading the bytes that follow.
+    iface_ws(&mut head, view(iface_dyn_abi()));
     iface_wrec(&mut out, IFACE_TAG_MODULE, view(head));
     for i in c.libs.len() {
         if same(view(c.lib_owner[i]), view(m)) {
@@ -37961,6 +37973,7 @@ struct IHead {
     overflow: u64,
     target: u64,
     plat: u64,
+    dyn_abi: u8[],
     digest: u8[],
     next: u64
 }
@@ -37985,6 +37998,7 @@ fn iface_r_head<a>(path: &a [u8], data: &a [u8]) -> IHead {
     overflow := iface_r1(&mut p);
     target := iface_r1(&mut p);
     plat := iface_r1(&mut p);
+    dyn_abi := iface_rs(&mut p);
     iface_rend(&mut p, start);
     p.stop = saved;
     return IHead {
@@ -37996,6 +38010,7 @@ fn iface_r_head<a>(path: &a [u8], data: &a [u8]) -> IHead {
         overflow: overflow,
         target: target,
         plat: plat,
+        dyn_abi: dyn_abi,
         digest: digest,
         next: p.at
     };
@@ -38897,6 +38912,8 @@ fn iface_decode<a, b>(c: (&a mut C), path: &a [u8], bytes: &a [u8], source_path:
         push_bytes(&mut p.rtext, view(" target="));
         push_bytes(&mut p.rtext, view(iface_target_word(head.target, head.plat)));
         p.rtext.push(10);
+        push_bytes(&mut p.rtext, view(head.dyn_abi));
+        p.rtext.push(10);
         push_bytes(&mut p.rtext, view("std "));
         decimal(&mut p.rtext, head.std);
         p.rtext.push(10);
@@ -38924,6 +38941,24 @@ fn iface_decode<a, b>(c: (&a mut C), path: &a [u8], bytes: &a [u8], source_path:
             if known == 0 {
                 c.host_modules.push(module.copy());
             }
+        }
+        // The `dyn` ABI: two modules must build a `&dyn I` the same way, or the pair one writes is
+        // the pair the other dereferences wrongly. The field is compared as written; this compiler
+        // builds one ABI, and a file that does not say so is refused before a declaration is read.
+        if head.dyn_abi.len() == 0 {
+            iface_refuse(
+                view(path),
+                view("carries no `abi dyn` field: it does not say what a borrowed `dyn` value is")
+            );
+        }
+        if !same(view(head.dyn_abi), view(iface_dyn_abi())) {
+            mut msg = u8[];
+            push_bytes(&mut msg, view("was written for another `dyn` ABI (`"));
+            push_bytes(&mut msg, view(head.dyn_abi));
+            push_bytes(&mut msg, view("`); this compiler builds `"));
+            push_bytes(&mut msg, view(iface_dyn_abi()));
+            push_bytes(&mut msg, view("`, so a `&dyn` value would not mean the same thing"));
+            iface_refuse(view(path), view(msg));
         }
         // Modes: an interface is only meaningful for the checker that would have produced it.
         if iface_target_word(c.target, c.plat) != iface_target_word(head.target, head.plat) {
