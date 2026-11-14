@@ -1,5 +1,6 @@
 ## Unreleased
 
+- Known gap: Windows ARM64 objects carry no PE unwind data (`win_unwind` runs for windows-x86_64 only), so an ARM64 Windows image cannot be unwound. The windows suite proves the frame-size contract on x86-64 and states the gap per ARM64 case instead of failing on it; see docs/platform-status.md.
 - Fixed: `tools/interface-test.mjs` wiped `.work/interface-test/<target>` at the start of every run,
   so two runs in one checkout deleted each other's interfaces mid-run and the survivor failed with
   `has no interface for module X (expected this file)` - a directory collision, not a compiler bug.

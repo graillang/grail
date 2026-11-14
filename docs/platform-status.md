@@ -239,3 +239,11 @@ make -C graphics perm-test      # shader permutations
 just abundance-test             # Abundance bit-exact parity (313 values, 9 programs)
 just borg-test                  # Borg reference-line parity (1014 lines, 12 suites)
 ```
+
+## Known gap: PE unwind data on Windows ARM64
+
+`win_unwind` (the pass that turns a function's `.seh_*` prologue into a PE `.pdata`/`.xdata` pair)
+runs for windows-x86_64 only, so a Windows ARM64 object carries no unwind records at all. The
+windows suite therefore proves the frame-size contract on x86-64 and records, per ARM64 case, that
+no unwind data is present. Consequences: an ARM64 Windows image cannot be unwound for exception
+handling or debugging. Emitting ARM64 `.pdata`/`.xdata` is the first item of the next round.
