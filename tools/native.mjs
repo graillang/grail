@@ -166,7 +166,9 @@ export function dynamicLinkFlags(target, linkArgs) {
 }
 export function assemble(source, executable, target = hostTarget, linkArgs = [], { frameworkArgs = [], sign = false, sdk = undefined } = {}) {
   targetName(target);
-  const object = `${executable}.o`;
+  // Unique per process: two concurrent builds of the same target otherwise truncate each
+  // other's object file mid-assembly, which clang reports as SIGBUS.
+  const object = `${executable}.${process.pid}.o`;
   const flags = target === 'riscv64' ? ['-march=rv64imafd', '-mabi=lp64d'] : [];
   command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[target]}`, ...flags, '-c', source, '-o', object]);
   if (machoTargets.includes(target)) {
@@ -378,7 +380,7 @@ export function buildCompiler() {
   // switches to read today's sources; a newer bootstrap accepts them too, so they are passed
   // unconditionally until the reseed drops them.
   command([base, '--default-u64', '--typed-refs', output, ...compilerSources], { env: compilerEnvironment() });
-  const pending = assemble(output, join(directory, 'grail.pending'));
+  const pending = assemble(output, join(directory, `grail.pending.${process.pid}`));
   renameSync(pending, executable);
   return executable;
 }
