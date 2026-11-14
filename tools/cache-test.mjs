@@ -585,10 +585,15 @@ function proveEditCost(count) {
   // (ii) a body-only edit in a module importers read: `util` gains a private helper and then has its
   // body changed, so the interface's bytes do not move and no importer has a reason to rerun.
   const iface = join(project, 'target/cost.modules/interfaces/util.iface');
-  // The *surface* of an interface: what an importer reads. The `source`/`sha256` lines record the
-  // module's own source (they change with any edit) and `digest` closes the file, so they are the
-  // three lines the cache key leaves out and this comparison leaves out with them.
-  const surfaceOf = path => digest(readFileSync(path, 'utf8').split('\n').filter(line => !/^(source|sha256|digest) /.test(line)).join('\n'));
+  // The *surface* of an interface: every byte before the trailer record, which is what
+  // `native::iface_surface` hands the cache key. The trailer carries the source digest and the
+  // file's own digest, so they are outside it by construction.
+  const surfaceOf = path => {
+    const bytes = readFileSync(path);
+    const trailer = recordsOf(bytes).find(record => record.tag === 2);
+    assert.ok(trailer, `${path}: no trailer record`);
+    return digest(bytes.subarray(0, trailer.tagAt));
+  };
   const privateHelper = `\nfn private_pad(x: u64) -> u64 {\n    return x + 1;\n}\n`;
   writeFileSync(join(project, 'src/util.grl'), `${utilSource(3)}${privateHelper}`);
   const added = build(['--cache', '-o', output], { measure: true });
