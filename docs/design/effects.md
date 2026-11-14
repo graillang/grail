@@ -17,7 +17,12 @@ statement is emitted**, not by reading the assembly back:
   or a drop helper the compiler itself named.
 - `call_slot_out` emits `call *%rax` / an import thunk in **user code**: a closure call, a function
   value, a `dyn` method slot. Nothing names what it reaches, so it is an **unknown** edge, and an
-  unknown call both allocates and may fail.
+  unknown call both allocates and may fail. It also records **why** the target has no symbol
+  (`fx_why`), because the site is the only place that knows: a `dyn` receiver's site passes
+  `iface_reason(contract)`, so the edge carries "interface `Shape` of module `m`", and the other
+  sites say "a closure call", "a function value", "an imported function" or "a call through a value
+  the compiler did not name". A refusal therefore reads "it makes an indirect call the compiler
+  cannot follow (the target is interface `Shape` of module `m`)".
 - `call_dispatch_out` emits the compiler's own dispatch inside trusted code (a closure's drop through
   the slot its body installed). Every body it can reach is a body of this build already, so it is not
   an unknown.
@@ -29,6 +34,24 @@ statement is emitted**, not by reading the assembly back:
 These six functions are the only places a `call` line is written. `fx_end` counts the `call` lines in
 the bytes each body emitted and refuses a body whose count disagrees with the calls it recorded, so a
 new call site that bypasses them is a compiler error rather than a silently weaker proof.
+
+**That count is no longer a text scan.** The typed IR (`compiler/ir.grl`) parses every body into
+instructions and records its calls, so the check is made against the parse instead of the bytes:
+`fx_end` records what each claiming body emitted (with the range of a replayed `.proved` prologue),
+`optimize::body` hands back `Body.calls`' count per body through `ir::count_calls`, and
+`fx_check_calls` holds the two together once the optimizer has walked the whole program. A call site
+that bypassed the recording helpers still leaves the IR with a call the recorder never saw, so the
+proof is exactly as loud as before, and nothing reads emitted bytes to decide a fact.
+
+Two details the move had to get right, both of which produced a false refusal before they did:
+
+- the `.proved` entry replays a byte copy of the checked entry's prologue, so the parse holds those
+  `call` instructions twice while the recorder counted them once. The front end records the replay
+  range per body (`fx_body_lo`/`fx_body_hi`, which used to be `fx_skip_lo`/`fx_skip_hi` for the scan)
+  and `ir::count_calls` counts only calls outside it;
+- `parse` re-tags nine runtime accessors (`call rt_slot`, `call rt_at`, ...) into pseudo-instructions
+  40..48, which `emit_line` may inline. They are still calls the front end wrote with `call_out`, so
+  the count includes those opcodes; counting only opcode 15 refused `effects-accepted` by three calls.
 
 The roots are the runtime's allocator (`rt_alloc`, `rt_alloc_unlocked`, `rt_grow`) and its failure
 entries (`rt_abort`, `rt_fail`, `rt_trap`, `rt_refine`, `rt_error`). A fixpoint marks every body that
