@@ -808,6 +808,37 @@ it. The key names every interface present, not just the ones a module reads, so 
 reruns some modules that do not import it - conservative, never stale.
 
 
+### What a run compiles, and what it writes
+
+A run compiles the files it is given and writes one interface per module it compiled from source: a
+module a run compiles from source appears in the interface set of that run exactly once, whether the
+command line named it or `use` resolution added it. A module a run read from an interface (`--use`) is
+not re-read from source in that run: it is described by the interface it came from, and the run that
+compiled it from source is the one that writes that interface. A per-module build therefore writes
+each interface once per build, and the interfaces a build leaves behind are its modules' objects
+minus `runtime`, which is the trusted base and has none. (`tools/cache-test.mjs` (g) counts the runs;
+the corpus case `drv-per-module-three-modules` counts the interfaces against the objects.)
+
+The driver builds in the order of the `use` graph plus one edge no source writes: `core`. `Some(value)`
+and `None` lower to `core`'s constructors, so a module may need `core` without naming it, and `core` is
+resolved into every program with a stdlib root. A unit built before `core` looks `some` up in a module
+nothing has declared yet, and the build dies with ``unknown function `some` in `core` `` in whichever
+module first writes one - with no `core.iface` left behind, because `core`'s own run never happened.
+
+`core` is not a leaf, so the modules it needs cannot all be built after it: `core` `use`s `result`,
+whose `Option` is the type `T?` names, and `result` is a group of its own. Those modules are the
+prelude: built before `core`, and the only ones that do not get the implicit dependency on it
+(`runtime` is the base every run has). The prelude is the one part of the order the `use` lines do not
+already describe.
+
+That order is acyclic only because `result` builds its option values through the variant -
+`Option::Some(v)`, not `Some(v)` - inside `lib/result.grl`. The shorthand lowers to `core::some`, so
+writing it there would put `result` in `core`'s dependency set and make the prelude circular: `core`
+would need `result`'s `Option` for its own signature and `result` would need `core`'s `some` for its
+bodies, and one compiler run per module can order neither before the other. Nothing else about the
+language changes: `Some(v)` outside `result` still lowers to `core::some`, and a unit that writes one
+reads the declaration from `core`'s interface and emits the specialisation weakly in its own object.
+
 ## Stage 5 as built: a per-module label namespace and module-local inlining
 
 Implemented on `gaps2-sepcomp`, and the two things this section exists for are the two things that

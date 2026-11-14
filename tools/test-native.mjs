@@ -10,7 +10,7 @@
 // status and signal, the failed assertion), then a stable summary line
 // `passed X failed Y skipped Z`. `--update` rewrites the expectations of the selected cases that
 // differ, and only when it is asked for.
-import { readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync, existsSync, copyFileSync } from 'node:fs';
 import { join, basename, resolve, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
@@ -139,6 +139,7 @@ function expectations(test) {
     return diagnostics.length ? diagnostics.map(fragment => `diagnostic contains ${JSON.stringify(fragment)}`).join(', ') : 'the compiler exits 1';
   }
   const parts = [];
+  if (test.driver) parts.push('grail build: one run and one interface per module');
   parts.push(`status ${test.signal ? `(no status; signal ${test.signal})` : (test.status ?? 0)}`);
   if (test.stdout !== undefined) parts.push(`stdout ${JSON.stringify(test.stdout)}`);
   for (const pin of [test.stderr ?? []].flat().filter(Boolean)) {
@@ -193,6 +194,38 @@ function runCase(test, position, context) {
     const directory = join(work, test.name);
     rmSync(directory, { recursive: true, force: true });
     mkdirSync(directory, { recursive: true });
+    // A `driver` case is a project, not one compiler invocation: `grail build` compiles one module
+    // per run and writes one interface per module, so what it pins is the set of interfaces against
+    // the set of modules the build compiled (docs/design/separate-compilation.md, "What a run
+    // compiles"). The entry is the case's `source`; `project` fixtures keep their own names,
+    // because the driver resolves `use pair;` to `src/pair.grl`.
+    if (test.driver) {
+      const project = join(directory, 'project');
+      mkdirSync(join(project, 'src'), { recursive: true });
+      writeFileSync(join(project, 'grail.toml'), '[package]\nname = "drivercase"\nversion = "0.1.0"\n');
+      writeFileSync(join(project, 'src/main.grl'), test.source);
+      for (const name of readdirSync(test.projectDir)) copyFileSync(join(test.projectDir, name), join(project, 'src', name));
+      const output = join(project, 'target/prog');
+      const built = execute(compiler, ['build', '--target', target, ...(test.flags ?? []), '-o', output], target, { cwd: project, env: { ...process.env, GRAIL_HOME: root } });
+      assert.equal(built.status, 0, `${test.name}: grail build failed\n${built.stdout}${built.stderr}`);
+      assert.equal(built.signal, null, `${test.name}: grail build crashed (${built.signal})`);
+      // One run per module, one interface per module: runtime is the trusted base and has none.
+      const modules = join(`${output}.modules`);
+      const ran = readdirSync(modules).filter(name => name.endsWith('.s')).map(name => name.slice(0, -2)).sort();
+      const written = readdirSync(join(modules, 'interfaces')).filter(name => name.endsWith('.iface')).map(name => name.slice(0, -6)).sort();
+      assert.ok(ran.length > 1, `${test.name}: the default build must compile one module per run (${ran.join(', ')})`);
+      assert.deepEqual(written, ran.filter(name => name !== 'runtime'), `${test.name}: every module a run compiles from source must get its interface written`);
+      for (const module of test.driverModules ?? []) assert.ok(ran.includes(module), `${test.name}: no compiler run for module ${module} (${ran.join(', ')})`);
+      const image = execute(output, test.args ?? [], target, { cwd: project, env: { ...process.env, ...(test.env ?? {}) } });
+      observed.stdout = image.stdout.toString();
+      observed.stderr = image.stderr.toString();
+      observed.status = image.status;
+      observed.signal = image.signal;
+      assert.equal(image.signal, null, `${test.name}: the program crashed (${image.signal})`);
+      if (test.stdout !== undefined) assert.equal(observed.stdout, test.stdout, `${test.name}: unexpected output`);
+      result.outcome = 'pass';
+      return result;
+    }
     // A case's own files (or its inline source) come first, then the modules it lists.
     let files;
     if (test.files) files = [...test.files, ...(test.modules ?? [])];
@@ -400,6 +433,15 @@ function stage(context) {
     mkdirSync(byName, { recursive: true });
     for (const file of test.roots) writeFileSync(join(byName, basename(file)), readFileSync(resolve(root, file)));
     test.moduleRoots = ['--module-root', byName];
+  }
+  // A `driver` case's project fixtures are staged under their own names, for the same reason `roots`
+  // are: the driver resolves `use util;` to the file `src/util.grl`, so the name is the interface.
+  for (const [i, test] of context.cases.entries()) {
+    if (!test.driver) continue;
+    const byName = join(snapshot, `${i}-project`);
+    mkdirSync(byName, { recursive: true });
+    for (const file of test.project ?? []) writeFileSync(join(byName, basename(file)), readFileSync(resolve(root, file)));
+    test.projectDir = byName;
   }
   // A case's `data` files (what an `@embed` reads) are staged under their own names beside its
   // sources, so a path relative to the source resolves as it does in a project.

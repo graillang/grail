@@ -15,6 +15,29 @@
   compiler flag with no `grail build` path - the driver assembles and links `OUT.s` only, never the
   `OUT.s.ll`, so `grail build x.grl --backend=llvm` silently builds the native one - and
   docs/design/task-failure-containment.md lists which builds carry a site table.
+- Fixed: `grail build` of a multi-module project failed with an unknown-function diagnostic for
+  `some` in `core` and left no `core.iface` behind whenever the program's standard closure reached
+  `core` and `result` (reproduced without `--cache`). The per-module driver ordered its runs by the
+  `use` graph alone, but `Some(value)` and `None` lower to `core`'s constructors, so a module may need
+  `core` with no `use` line to say so - and the modules that write one ran before `core` did, so the
+  failing unit read a `core` nothing had declared and `core`'s own run never happened. `core` is now
+  an implicit dependency of every module outside the prelude, and the prelude - `core` plus the
+  modules `core` itself `use`s, which is `result` - is built before it; `lib/result.grl` constructs
+  its option values as `Option::Some(v)` instead of through the `Some(v)` shorthand, because the
+  shorthand lowers to `core::some` and put `core` and `result` in a dependency cycle one compiler run
+  per module cannot order (it needs `core` for its bodies and `core` needs its `Option` for `T?`).
+  `tools/cache-test.mjs` (g) and `tools/split-test.mjs` build such a project per module again, and the
+  corpus case `drv-per-module-three-modules` pins that every module a run compiles from source has its
+  interface written (docs/design/separate-compilation.md, "What a run compiles, and what it writes").
+- Fixed: `tools/split-test.mjs` wrote a project `grail.toml` whose package name spanned two lines
+  (the fixture put a `\n` inside the quoted string), so every driver build in that tool stopped at the
+  manifest with `grail.toml: line 2: unterminated string` before testing anything - the per-module
+  section never reached the build it exists to compare.
+- Fixed: a cached build passed the `--module-root` directory to `sha256sum` (one `Is a directory`
+  line per build) and keyed the program on it, and the image shortcut did not see an edit to a module
+  `use` resolution had added, so `grail build --cache` could hand back a stale image for a project
+  whose standard closure changed. A module root is now an option with a value rather than an input,
+  and the program record lists and re-checks the digest of every module source the build compiles.
 - Ranges: a range value is now a `Span` (`lib/span.grl`) that carries the slice it was made from - a
   byte view plus its two ends - so a range its slice does not have is refused where the span is made
   (`span_of` yields `1..0`, which names no bytes) and a range taken from one sequence cannot reach
