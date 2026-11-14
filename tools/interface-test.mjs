@@ -465,7 +465,7 @@ function proveStale() {
   const directory = join(work, 'stale');
   const project = join(directory, 'project');
   mkdirSync(join(project, 'src'), { recursive: true });
-  writeFileSync(join(project, 'grail.toml'), '[package]\nname = "stale\n"\nversion = "0.1.0"\n');
+  writeFileSync(join(project, 'grail.toml'), '[package]\nname = "stale"\nversion = "0.1.0"\n');
   writeFileSync(join(project, 'src/util.grl'), 'module util;\n\npub fn twice(x: u64) -> u64 {\n    return x * 2;\n}\n');
   writeFileSync(join(project, 'src/main.grl'), 'use util;\n\npub fn main() -> u64 {\n    println(util::twice(21));\n    return 0;\n}\n');
   const files = [join(project, 'src/main.grl'), join(project, 'src/util.grl'), runtime, platform];
@@ -495,7 +495,7 @@ function proveTampering() {
   const directory = join(work, 'tamper');
   const project = join(directory, 'project');
   mkdirSync(join(project, 'src'), { recursive: true });
-  writeFileSync(join(project, 'grail.toml'), '[package]\nname = "tamper\\n"\nversion = "0.1.0"\n');
+  writeFileSync(join(project, 'grail.toml'), '[package]\nname = "tamper"\nversion = "0.1.0"\n');
   writeFileSync(join(project, 'src/util.grl'), `module util;
 
 pub handle Stream: transferable;
@@ -657,7 +657,7 @@ function proveLeakage() {
   const directory = join(work, 'leak');
   const project = join(directory, 'project');
   mkdirSync(join(project, 'src'), { recursive: true });
-  writeFileSync(join(project, 'grail.toml'), '[package]\nname = "leak\n"\nversion = "0.1.0"\n');
+  writeFileSync(join(project, 'grail.toml'), '[package]\nname = "leak"\nversion = "0.1.0"\n');
   writeFileSync(join(project, 'src/util.grl'), `module util;
 
 fn zzprivatehelper(value: u64) -> u64 {
