@@ -1,5 +1,10 @@
 ## Unreleased
 
+- Fixed: `tools/interface-test.mjs` wiped `.work/interface-test/<target>` at the start of every run,
+  so two runs in one checkout deleted each other's interfaces mid-run and the survivor failed with
+  `has no interface for module X (expected this file)` - a directory collision, not a compiler bug.
+  Each run now works in `<target>-<pid>`, which is what made this look like a module-set bug in the
+  interface emitter.
 - Changed: the interface set is one rule, stated once and checked at the boundary. An emitting run
   writes one interface per source module of the program except the runtime and the platform modules -
   `core` included when `use` resolution makes it a source module, since the prelude is not exempt as a
