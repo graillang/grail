@@ -34,7 +34,11 @@ const flags = process.argv.slice(2);
 const target = targetName(flags.includes('--target') ? flags[flags.indexOf('--target') + 1] : hostTarget);
 const full = flags.includes('--full');
 const compiler = buildCompiler();
-const work = join(root, '.work/interface-test', target);
+// One run's work directory, and only that run's: the tool wipes it at the start and the compiler's
+// outputs are large, so two runs in the same checkout used to delete each other's interfaces
+// mid-run - which reads as `has no interface for module X (expected this file)` and is not a
+// compiler failure. `tools/cache-test.mjs` and the gate legs can run beside it.
+const work = join(root, '.work/interface-test', `${target}-${process.pid}`);
 rmSync(work, { recursive: true, force: true });
 mkdirSync(work, { recursive: true });
 const runtime = join(root, 'compiler/runtime.grl');
