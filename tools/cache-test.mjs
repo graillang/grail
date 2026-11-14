@@ -97,6 +97,79 @@ function run(binary) {
 }
 const bytes = path => readFileSync(path);
 const digest = data => createHash('sha256').update(data).digest('hex');
+// Interfaces are the typed record stream docs/design/separate-compilation.md describes: `GRIF`, a
+// version byte, then `tag, len, payload` records, then a trailer whose last 32 bytes are the digest
+// of everything before them. These read that framing only, so this test can change one byte of one
+// declaration on purpose - and `grail iface dump` shows what a file says.
+function recordsOf(bytes) {
+  const out = [];
+  let at = 5;
+  while (at < bytes.length) {
+    const tagAt = at;
+    const tag = bytes[at];
+    at += 1;
+    const lenAt = at;
+    let len = 0;
+    let scale = 1;
+    for (;;) {
+      const b = bytes[at];
+      at += 1;
+      len += (b & 127) * scale;
+      if (!(b & 128)) break;
+      scale *= 128;
+    }
+    out.push({ tag, tagAt, lenAt, at, len, end: at + len });
+    at += len;
+    if (tag === 2) break;
+  }
+  return out;
+}
+function readVarAt(bytes, at) {
+  let n = 0;
+  let scale = 1;
+  for (;;) {
+    const b = bytes[at];
+    at += 1;
+    n += (b & 127) * scale;
+    if (!(b & 128)) return [n, at];
+    scale *= 128;
+  }
+}
+function skipStrAt(bytes, at) {
+  const [n, next] = readVarAt(bytes, at);
+  return next + n;
+}
+function skipTypeAt(bytes, at) {
+  const [n, next] = readVarAt(bytes, at + 1);
+  return next + n;
+}
+// The offset of one constant record's value, through the framing: module, name, public, type, kind.
+function constValueAt(bytes, name) {
+  for (const record of recordsOf(bytes)) {
+    if (record.tag !== 12) continue;
+    let at = record.at;
+    const [moduleLen, afterModule] = readVarAt(bytes, at);
+    at = afterModule + moduleLen;
+    const [nameLen, afterName] = readVarAt(bytes, at);
+    if (bytes.subarray(afterName, afterName + nameLen).toString() !== name) continue;
+    at = afterName + nameLen;
+    at += 1; // public
+    at = skipTypeAt(bytes, at);
+    at += 1; // constant kind
+    return at;
+  }
+  assert.fail(`no constant record named ${name}`);
+}
+function sealFile(bytes) {
+  const body = Buffer.from(bytes.subarray(0, bytes.length - 32));
+  createHash('sha256').update(body).digest().copy(bytes, bytes.length - 32);
+  return bytes;
+}
+function dump(path) {
+  const result = spawnSync(compiler, ['--target', target, '--iface-dump', path], { encoding: 'utf8', timeout: 900_000 });
+  assert.equal(result.status, 0, `${path}: dump failed\n${result.stdout ?? ''}${result.stderr ?? ''}`);
+  return `${result.stdout ?? ''}${result.stderr ?? ''}`;
+}
 
 // The parts a build produced, in link order, as `NNN.module` -> module.
 function emissionOrder() {
@@ -251,14 +324,16 @@ function proveInterfaces() {
   assert.equal(run(program), '16', 'the interface build must print the source build\'s answer');
 
   const path = join(ifaces, 'util.iface');
-  const original = readFileSync(path, 'utf8');
-  assert.match(original, /const util::SCALE u64 int 3/, 'the constant must be in the interface');
-  const edited = original.replace('const util::SCALE u64 int 3', 'const util::SCALE u64 int 4');
-  const body = edited.slice(0, edited.indexOf('\ndigest "') + 1);
-  const tampered = `${body}digest "${digest(body)}"\n`;
-  writeFileSync(path, tampered);
+  const original = readFileSync(path);
+  assert.match(dump(path), /const util::SCALE .* u64 int 3/, 'the constant must be in the interface');
+  // One byte: the constant's value goes from 3 to 4, the trailer is re-sealed and the manifest
+  // re-pinned, so what stops the build is the interface disagreeing with its source.
+  const edited = Buffer.from(original);
+  edited[constValueAt(edited, 'SCALE')] = 4;
+  sealFile(edited);
+  writeFileSync(path, edited);
   const manifestPath = join(ifaces, 'interfaces.manifest');
-  writeFileSync(manifestPath, readFileSync(manifestPath, 'utf8').replace(/^util \S+/m, `util ${digest(tampered)}`));
+  writeFileSync(manifestPath, readFileSync(manifestPath, 'utf8').replace(/^util \S+/m, `util ${digest(edited)}`));
 
   // A whole-program build compiles every module from its source and requires each interface to say
   // what the source says, so an interface that was edited (and re-digested) is refused - before the
@@ -510,10 +585,15 @@ function proveEditCost(count) {
   // (ii) a body-only edit in a module importers read: `util` gains a private helper and then has its
   // body changed, so the interface's bytes do not move and no importer has a reason to rerun.
   const iface = join(project, 'target/cost.modules/interfaces/util.iface');
-  // The *surface* of an interface: what an importer reads. The `source`/`sha256` lines record the
-  // module's own source (they change with any edit) and `digest` closes the file, so they are the
-  // three lines the cache key leaves out and this comparison leaves out with them.
-  const surfaceOf = path => digest(readFileSync(path, 'utf8').split('\n').filter(line => !/^(source|sha256|digest) /.test(line)).join('\n'));
+  // The *surface* of an interface: every byte before the trailer record, which is what
+  // `native::iface_surface` hands the cache key. The trailer carries the source digest and the
+  // file's own digest, so they are outside it by construction.
+  const surfaceOf = path => {
+    const bytes = readFileSync(path);
+    const trailer = recordsOf(bytes).find(record => record.tag === 2);
+    assert.ok(trailer, `${path}: no trailer record`);
+    return digest(bytes.subarray(0, trailer.tagAt));
+  };
   const privateHelper = `\nfn private_pad(x: u64) -> u64 {\n    return x + 1;\n}\n`;
   writeFileSync(join(project, 'src/util.grl'), `${utilSource(3)}${privateHelper}`);
   const added = build(['--cache', '-o', output], { measure: true });
