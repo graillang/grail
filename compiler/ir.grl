@@ -23,12 +23,13 @@ use llvm;
 // the passes keep, the frame shape, the label table and the unit the body belongs to.
 //
 // Kinds: 0 none, 1 register, 2 frame slot -N(%rbp), 3 immediate/other text, 4 other operand,
-// 5 generated text (range in `gen`). Ops: see opcode_key(); 100 label, 101 directive, 102 two-word
-// slot declaration, 0 unknown.
+// 5 generated text (range in `gen`). Ops: see opcode_key(); 100 label, 101 directive, 0 unknown.
 //
-// A slot is one word unless a `.gpair -N(%rbp)` line declares it the first word of a two-word
-// value (native.grl emits one where a borrowed interface object's {data, vtable} pair is built), and
-// a result is one word unless `.gpair ret` declares it the two-word %rax:%rdx form.
+// A slot is one word unless the body's typed-IR facts name it the first word of a `DynPair` - the
+// 16-byte `{data, vtable}` value a borrowed interface object is (docs/design/fat-dyn.md) - and the
+// two-word result of a body that returns one is a fact too (`facts_dyn_result`). Both are read from
+// `llvm::facts_dyn_pairs`/`facts_dyn_result` in `build`, keyed by the body symbol; nothing is
+// declared in the instruction stream.
 // The two words are one value with one identity: allocated together, written directly, addressed
 // from the first word, kept adjacent when the frame is compacted, and never promoted, forwarded or
 // dropped - the second word's only reader is the pair's address, which no pass reasons about. Every
@@ -63,7 +64,9 @@ pub struct Body {
     zline: u64,
     zfrom: u64,
     zto: u64,
-    pairs: u64[],
+    // The `DynPair`s this body builds, as the address-indexed slots the passes use, read from
+    // `llvm::facts_dyn_pairs` in `build` (docs/design/fat-dyn.md).
+    dyn_pairs: u64[],
     pair: u64[],
     ret2: u64,
     inl_names: u8[][],
@@ -666,25 +669,6 @@ pub fn parse<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) {
     // label or a directive has no mnemonic and carries its whole line instead.
     o.ms.push(a);
     o.me.push(space);
-    if op == 101 {
-        // `.gpair -N(%rbp)`: the two-word value whose first word lives at that frame address.
-        if (e - a > 7) & at(view(s), a, view(".gpair ")) {
-            last := o.op.len() - 1;
-            if same(span_of(view(s), a + 7, e), view("ret")) {
-                exchange(&mut o.op[last], 102);
-                exchange(&mut o.ret2, 1);
-                classify(&mut o, view(s), e, e, 0);
-                classify(&mut o, view(s), e, e, 1);
-                return ();
-            }
-            exchange(&mut o.op[last], 102);
-            classify(&mut o, view(s), a + 7, e, 0);
-            classify(&mut o, view(s), e, e, 1);
-            n := o.v0[o.v0.len() - 1];
-            o.pairs.push(n / 8);
-            return ();
-        }
-    }
     if op == 100 || op == 101 {
         classify(&mut o, view(s), e, e, 0);
         classify(&mut o, view(s), e, e, 1);
@@ -837,7 +821,7 @@ pub fn reads<a>(o: (&a Body), i: u64) -> u64 {
     if op == 15 {
         return arg_regs() | src;
     }
-    if op == 100 || op == 101 || op == 102 || op == 29 || op == 32 || is_jump(op) {
+    if op == 100 || op == 101 || op == 29 || op == 32 || is_jump(op) {
         return 0;
     }
     if movelike(op) {
@@ -887,7 +871,7 @@ pub fn reads<a>(o: (&a Body), i: u64) -> u64 {
 
 pub fn writes<a>(o: (&a Body), i: u64) -> u64 {
     op := o.op[i];
-    if op == 100 || op == 101 || op == 102 || op == 29 || op == 30 || op == 31 || op == 6 || op == 7 {
+    if op == 100 || op == 101 || op == 29 || op == 30 || op == 31 || op == 6 || op == 7 {
         return 0;
     }
     if op == 15 {
@@ -920,7 +904,7 @@ pub fn writes<a>(o: (&a Body), i: u64) -> u64 {
 // Whether operand j of instruction i reads / writes a frame slot.
 pub fn slot_read<a>(o: (&a Body), i: u64, j: u64) -> bool {
     op := o.op[i];
-    if op == 101 || op == 102 {
+    if op == 101 {
         return false;
     }
     if j == 0 {
@@ -970,7 +954,7 @@ pub fn reset<a>(o: (&a mut Body)) {
     o.e1.clear();
     o.m1.clear();
     exchange(&mut o.gen, u8[]);
-    exchange(&mut o.pairs, u64[]);
+    exchange(&mut o.dyn_pairs, u64[]);
     exchange(&mut o.pair, u64[]);
     exchange(&mut o.ret2, 0);
     exchange(&mut o.weird, 0);
@@ -1027,7 +1011,7 @@ pub fn new_body() -> Body {
         zline: 0,
         zfrom: 0,
         zto: 0,
-        pairs: u64[],
+        dyn_pairs: u64[],
         pair: u64[],
         ret2: 0,
         inl_names: u8[][],
@@ -1230,6 +1214,20 @@ pub fn type_symbol<a>(s: &a [u8], a: u64, e: u64) -> u8[] {
 // a label starts a block, so a read across it keeps its slot (value 0) rather than claiming one
 // definition where a slot may hold several.
 pub fn build<a, b, c, d>(o: (&a mut Body), s: &b [u8], facts: (&c llvm::Facts), ix: (&d FactIndex)) {
+    // The `DynPair`s this body builds, and whether it returns one, are typed-IR facts keyed by the
+    // body symbol (docs/design/fat-dyn.md): one read, here, so every consumer of the width sees the
+    // same list. The fact names word 0 by the front end's slot index (slot k at `-8(k+1)`); this
+    // pass indexes slots by address (`N/8` from a `-N(%rbp)` operand), so the index shifts by one.
+    exchange(&mut o.dyn_pairs, u64[]);
+    exchange(&mut o.ret2, 0);
+    if o.name.len() != 0 {
+        llvm::facts_dyn_pairs(facts, view(o.name), &mut o.dyn_pairs);
+        for q in o.dyn_pairs.len() {
+            first := o.dyn_pairs[q] + 1;
+            exchange(&mut o.dyn_pairs[q], first);
+        }
+        exchange(&mut o.ret2, llvm::facts_dyn_result(facts, view(o.name)));
+    }
     o.dval.clear();
     o.use0.clear();
     o.use1.clear();
@@ -1339,7 +1337,7 @@ pub fn build<a, b, c, d>(o: (&a mut Body), s: &b [u8], facts: (&c llvm::Facts), 
     }
 }
 
-// A slot's type from the front end's fact table, and its width in words (a `.gpair` first word is
+// A slot's type from the front end's fact table, and its width in words (a `DynPair` first word is
 // two words). The table keys a slot as `k` with the address `-8(k+1)`, while the stream spells the
 // same slot as `-N(%rbp)`; `N / 8 - 1` is the table's index for it.
 fn slot_ty<a, b, c, d>(o: (&a Body), facts: (&b llvm::Facts), ix: (&d FactIndex), slot: u64) -> Ty {
@@ -1355,8 +1353,8 @@ fn slot_ty<a, b, c, d>(o: (&a Body), facts: (&b llvm::Facts), ix: (&d FactIndex)
         }
     }
     mut pair = 0;
-    for p in o.pairs.len() {
-        if o.pairs[p] == slot {
+    for p in o.dyn_pairs.len() {
+        if o.dyn_pairs[p] == slot {
             pair = 1;
         }
     }
@@ -1513,8 +1511,6 @@ pub fn write_body<a, b>(o: (&a Body), s: &b [u8], out: (&mut u8[])) {
             }
         } else if o.op[i] == 100 {
             append(&mut out, view("label"));
-        } else if o.op[i] == 102 {
-            append(&mut out, view("pair"));
         } else {
             append(&mut out, view("directive"));
         }

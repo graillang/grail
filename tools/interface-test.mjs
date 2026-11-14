@@ -643,7 +643,21 @@ function proveGenericBodies() {
   const ifaces = emit(all, directory);
   const generic = join(ifaces, 'generic.iface');
   const text = readFileSync(generic, 'utf8');
-  assert.ok(text.startsWith('// grail-interface 3\n'), 'generics: the interface does not carry the current format version');
+  assert.ok(text.startsWith('// grail-interface 4\n'), 'generics: the interface does not carry the current format version');
+  // The `dyn` ABI the file was compiled against (docs/design/fat-dyn.md): a `&dyn I` is an 8-byte
+  // pointer to a 16-byte {data@0, vtable@8} pair, so two modules must agree on the layout.
+  assert.match(text, /^abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0$/m, 'generics: the interface does not state the dyn ABI');
+  // A file whose `dyn` ABI line differs is not read as if the line were optional. The digest in the
+  // manifest refuses an *edited* file first (which is what this leg proves: an interface is not a
+  // file a build can be talked into reading), and the `abi` line is the guard for a file this
+  // compiler wrote itself with another layout - the writer and the reader share `iface_dyn_abi`.
+  const tampered = text.replace(/^abi dyn .*$/m, 'abi dyn pair size = 8 align = 8 word0 = data word1 = vtable drop = 0');
+  assert.notEqual(tampered, text, 'generics: generic.iface has no abi line to disagree with');
+  writeFileSync(generic, tampered);
+  const abiRefused = compile(all, join(directory, 'tampered'), ['--interface', ifaces]);
+  assert.notEqual(abiRefused.status, 0, 'generics: an interface whose dyn ABI line was changed was accepted');
+  assert.match(abiRefused.output, /generic\.iface/, `generics: the refusal does not name the file\n${abiRefused.output}`);
+  writeFileSync(generic, text);
   assert.match(text, /^fn generic::twice <1> /m, 'generics: generic.iface does not declare the template');
   assert.doesNotMatch(text, /\bpos \d+$/, 'generics: a body is still a source position, not carried text');
   assert.match(text, /^body \d+$/m, 'generics: generic.iface carries no body section');

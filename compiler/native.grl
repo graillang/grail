@@ -2873,10 +2873,8 @@ fn save_result<a>(c: (&a mut C), ret: u64) -> u64 {
         return save(&mut c);
     }
     // %rax is the data and %rdx the vtable of the returned pair.
-    pair := pair_new(&mut c);
-    pair_store(&mut c, pair, 0, view("%rax"));
-    pair_store(&mut c, pair, 1, view("%rdx"));
-    pair_handle(&mut c, pair);
+    pair := dyn_pair_of_words(&mut c, view("%rax"), view("%rdx"));
+    dyn_pair_handle(&mut c, pair);
     return save(&mut c);
 }
 fn get<a, b>(c: (&a mut C), id: u64, reg: &b [u8]) -> unit {
@@ -9728,9 +9726,9 @@ fn borrowed_object<a>(c: (&a mut C), ty: u64) -> u64 {
     inner := ty_arg(&mut c, ty);
     return u64(ty_kind(&mut c, inner) == 35);
 }
-// `&T`, `&mut T` or a reference to an owned `dyn I` where a `&dyn I` is expected: write the pair
-// {data, vtable} into two words of the current frame and hand back the handle to it. Nothing here
-// allocates, and the object itself never moves or copies - mutation through a `&mut dyn` reaches it.
+// `&T`, `&mut T` or a reference to an owned `dyn I` where a `&dyn I` is expected: build a `DynPair`
+// in two words of the current frame and hand back the handle to it. Nothing here allocates, and the
+// object itself never moves or copies - mutation through a `&mut dyn` reaches it.
 // The handle borrows what the reference borrowed (bind_loan reborrows it), so the referent cannot
 // move or be dropped while the `&dyn` lives.
 fn borrow_dyn<a>(c: (&a mut C), v: Val, expected: u64) -> Val {
@@ -9765,59 +9763,57 @@ fn borrow_dyn<a>(c: (&a mut C), v: Val, expected: u64) -> Val {
         }
     }
     register_vtable(&mut c, id, referent);
-    pair := pair_new(&mut c);
+    // Word 0 is the reference's own word - the address the concrete value lives at - stored before
+    // anything else is computed, so the value the caller just produced is not reloaded; word 1 is
+    // the vtable of the (interface, concrete) pair, a static symbol.
+    pair := dyn_pair_slots(&mut c);
     get(&mut c, v.t, view("%rax"));
-    pair_store(&mut c, pair, 0, view("%rax"));
+    dyn_pair_word(&mut c, pair, 0, view("%rax"));
     vt := vtable_symbol(&mut c, id, referent);
     o(&mut c, view("leaq "));
     push_bytes(&mut c.out, view(vt));
     o(&mut c, view("(%rip),%rax\n"));
-    pair_store(&mut c, pair, 1, view("%rax"));
-    pair_handle(&mut c, pair);
+    dyn_pair_word(&mut c, pair, 1, view("%rax"));
+    dyn_pair_handle(&mut c, pair);
     handle := borrow_dyn_handle(&mut c, v, expected);
     return val(handle, expected);
 }
-// `&d`: an owned object's cell is the value (word 0) and word 1 is its vtable, so the pair is made
-// from those two words rather than from a new concrete type.
+// `&d`: an owned object's cell is the data word itself and word 1 is its vtable, so the pair is made
+// from the object's own two words rather than from a new concrete type.
 fn borrow_owned_dyn<a>(c: (&a mut C), v: Val, expected: u64) -> Val {
     want := ty_mode(&mut c, expected);
     have := ty_mode(&mut c, v.ty);
     if (want != 0) & (have == 0) {
         fail(&mut c, view("a shared reference cannot become a `&mut dyn`"));
     }
-    pair := pair_new(&mut c);
+    // The reference points at the owned object's word, which is its cell: that cell is word 0 of the
+    // pair (an `&T`-shaped data pointer - the cell's address is the address of cell[0], the value)
+    // and its vtable is cell[1], at `+8`.
     get(&mut c, v.t, view("%rax"));
-    o(&mut c, view("movq (%rax),%r10\n"));
-    pair_store(&mut c, pair, 0, view("%r10"));
-    o(&mut c, view("movq 8(%r10),%r10\n"));
-    pair_store(&mut c, pair, 1, view("%r10"));
-    pair_handle(&mut c, pair);
+    o(&mut c, view("movq (%rax),%r10\nmovq 8(%r10),%rax\n"));
+    pair := dyn_pair_of_words(&mut c, view("%r10"), view("%rax"));
+    dyn_pair_handle(&mut c, pair);
     handle := borrow_dyn_handle(&mut c, v, expected);
     return val(handle, expected);
 }
-// A borrowed interface object is a two-word frame value: word 0 (the data pointer) in slot `first`
-// and word 1 (its vtable) in slot `first - 1`, the next word up, so the handle - the address a
-// `&dyn I` value holds - names both. The pair is declared to the word optimizer, whose slot model
-// then carries a two-word value: both words are allocated here, both are stored directly, and
-// `pair_handle` takes the address of word 0.
-fn pair_new<a>(c: (&a mut C)) -> u64 {
-    // Two consecutive slots: the second word is allocated first so the first word takes the next
-    // number. Slot n is `-8(n+1)(%rbp)`, so the first word's slot is the lower address and the
-    // second word is the slot above it, at `+8`.
+// A borrowed interface object is a `DynPair` (docs/design/fat-dyn.md): 16 bytes, 8-aligned, word 0 the
+// data pointer (an `&T`-shaped word: the address the concrete value lives at) and word 1 its vtable.
+// One is built in the borrowing frame and recorded for this function as a typed-IR fact, which is how
+// both backends know the two words are one value. Nothing here allocates.
+//
+// Two adjacent slots, word 0 at the lower address so the handle is word 0's address and word 1 is at
+// `+8`. Slot n is `-8(n+1)(%rbp)`, so the second word is allocated first and the first word takes the
+// next number.
+fn dyn_pair_slots<a>(c: (&a mut C)) -> u64 {
     second := fresh(&mut c);
     first := fresh(&mut c);
-    // A `--debug` build copies the stream to the assembler, so only a build with a consumer for the
-    // declaration gets it: optimize.grl on the native path (a two-word slot) and llvm.grl on the
-    // LLVM path (one alloca of two slots). Neither ever emits the line.
-    if c.debug == 0 {
-        o(&mut c, view(".gpair -"));
-        on(&mut c, (first + 1) * 8);
-        o(&mut c, view("(%rbp)\n"));
+    if c.facts_fn.len() != 0 {
+        llvm::fact_dyn_pair(&mut c.facts, copy_bytes(view(c.facts_fn)), first);
     }
     return first;
 }
-// Word `word` (0 data, 1 vtable) of the pair whose first word is slot `first`, from register `reg`.
-fn pair_store<a, b>(c: (&a mut C), first: u64, word: u64, reg: &b [u8]) -> unit {
+// `word` 0 (data) or 1 (the vtable, the slot above word 0) of the pair whose first word is `first`.
+fn dyn_pair_word<a, b>(c: (&a mut C), first: u64, word: u64, reg: &b [u8]) -> unit {
     mut slot = first;
     if word != 0 {
         slot = first - 1;
@@ -9829,16 +9825,26 @@ fn pair_store<a, b>(c: (&a mut C), first: u64, word: u64, reg: &b [u8]) -> unit 
     c.out.push(10);
     return ();
 }
-// A two-word result comes back in %rax:%rdx. The declaration says so, which is what keeps the
-// second word live across the return (a one-word result live-range ends at %rax).
-fn pair_return<a>(c: (&a mut C)) -> unit {
-    if c.debug == 0 {
-        o(&mut c, view(".gpair ret\n"));
+// Both words already in registers: a returned pair (`%rax`/`%rdx`) or a borrowed owned object
+// (`%r10` and its vtable at `8(%r10)`).
+fn dyn_pair_of_words<a, b, d>(c: (&a mut C), data: &b [u8], table: &d [u8]) -> u64 {
+    first := dyn_pair_slots(&mut c);
+    dyn_pair_word(&mut c, first, 0, data);
+    dyn_pair_word(&mut c, first, 1, table);
+    return first;
+}
+// A returned `&dyn I` travels as the pair's two words - a 16-byte {ptr, ptr} aggregate in the two
+// result registers, which is SysV's, AAPCS64's and RV64's own rule for one - because the pair lives
+// in the returning frame. The fact keeps the second word live at the `ret`; the caller rebuilds the
+// pair in its own frame (save_result).
+fn dyn_result<a>(c: (&a mut C)) -> unit {
+    if c.facts_fn.len() != 0 {
+        llvm::fact_dyn_result(&mut c.facts, copy_bytes(view(c.facts_fn)));
     }
     return ();
 }
 // %rax := the pair's address, which is the `&dyn I` handle: word 0 at `(%rax)`, word 1 at `8(%rax)`.
-fn pair_handle<a>(c: (&a mut C), first: u64) -> unit {
+fn dyn_pair_handle<a>(c: (&a mut C), first: u64) -> unit {
     o(&mut c, view("leaq -"));
     on(&mut c, (first + 1) * 8);
     o(&mut c, view("(%rbp),%rax\n"));
@@ -12953,6 +12959,13 @@ fn ffi_param<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
         }
     }
     if k == 7 {
+        // A shared `&dyn I` is the C `const DynPair *`: one pointer to the 16-byte
+        // `{data@0, vtable@8}` pair the handle already is (docs/design/fat-dyn.md), so it is the one
+        // reference parameter that is a *reader* rather than an out-parameter. `&mut dyn I` is not
+        // admitted: C writing a 16-byte pair is not part of the ABI.
+        if (ty_mode(&mut c, ty) == 0) & (borrowed_object(&mut c, ty) != 0) {
+            return ();
+        }
         inner := ty_arg(&mut c, ty);
         if ffi_out_slot_type(&mut c, inner) {
             if ty_mode(&mut c, ty) != 0 {
@@ -34089,8 +34102,8 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         if borrowed_object(&mut c, v.ty) != 0 {
             // The pair travels by value: data in %rax, vtable in %rdx. The caller stores both in its
             // own frame, so no handle into this frame escapes it. Both words are live at the return,
-            // so the value is declared a two-word one; a one-word result keeps %rax alone.
-            pair_return(&mut c);
+            // which is a typed-IR fact about this function; a one-word result keeps %rax alone.
+            dyn_result(&mut c);
             get(&mut c, v.t, view("%rax"));
             o(&mut c, view("movq 8(%rax),%rdx\nmovq (%rax),%rax\n"));
         } else {
@@ -36147,7 +36160,9 @@ pub fn iface_digest<a>(data: &a [u8]) -> u8[] {
 //
 // Grammar (docs/design/separate-compilation.md has the full description and a worked example):
 //
-//   file      := "// grail-interface 3" NL header+ declaration* "digest " HEX NL
+//   file      := "// grail-interface 4" NL header+ declaration* "digest " HEX NL
+//   header    := "module" ... | "source" ... | "sha256" ... | "mode" ... | iface_dyn_abi()
+//                | "unsafe"/"std"/"host"/"templates" N | "link" QUOTED
 //   type      := WORD [" " MODE] [" " "[" REGIONS "]"] PAYLOAD
 //
 // One word per store kind; MODE and REGIONS are written only when they are not 0 and empty, and the
@@ -36606,6 +36621,13 @@ fn iface_line<a, b>(out: (&a mut u8[]), key: &a [u8], value: &b [u8]) -> unit {
     push_bytes(&mut out, view(value));
     out.push(10);
     return ();
+}
+// The `dyn` ABI this compiler builds objects for (docs/design/fat-dyn.md), as the one line every
+// interface carries. A `&dyn I` is an 8-byte pointer to a 16-byte, 8-aligned `{data, vtable}` pair,
+// so a module that was compiled for another layout cannot be linked into the same program by
+// accident: the writer writes this line and the reader refuses a file whose line differs.
+fn iface_dyn_abi() -> string {
+    return "abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0";
 }
 fn iface_key<a, b>(out: (&a mut u8[]), key: &a [u8], n: u64) -> unit {
     push_bytes(&mut out, view(key));
@@ -37793,7 +37815,7 @@ fn iface_module_text<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std: 
     exchange(&mut c.iface_env, u64[]);
     exchange(&mut c.iface_env_names, u8[][]);
     mut out = u8[];
-    push_bytes(&mut out, view("// grail-interface 3\n"));
+    push_bytes(&mut out, view("// grail-interface 4\n"));
     iface_line(&mut out, view("module"), view(m));
     push_bytes(&mut out, view("source "));
     iface_quoted(&mut out, view(path));
@@ -37818,6 +37840,9 @@ fn iface_module_text<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std: 
     }
     push_bytes(&mut out, view(" target="));
     push_bytes(&mut out, view(iface_target_word(c.target, c.plat)));
+    out.push(10);
+    // The ABI a `&dyn I` is built for, so an importer that builds one for another layout is refused.
+    push_bytes(&mut out, view(iface_dyn_abi()));
     out.push(10);
     iface_key(&mut out, view("unsafe"), unsafe_flag);
     iface_key(&mut out, view("std"), in_std);
@@ -38234,7 +38259,7 @@ fn iface_load<a, b>(c: (&a mut C), path: &a [u8], source_path: &b [u8], phase: u
     if text.len() == 0 {
         iface_refuse(view(path), view("cannot read interface file"));
     }
-    if !iface_starts(view(text), view("// grail-interface 3\n")) {
+    if !iface_starts(view(text), view("// grail-interface 4\n")) {
         if iface_starts(view(text), view("// grail-interface ")) {
             mut version = u8[];
             mut i = 19;
@@ -38245,7 +38270,7 @@ fn iface_load<a, b>(c: (&a mut C), path: &a [u8], source_path: &b [u8], phase: u
             mut msg = u8[];
             push_bytes(&mut msg, view("was written in interface format "));
             push_bytes(&mut msg, view(version));
-            push_bytes(&mut msg, view(", this compiler reads format 3"));
+            push_bytes(&mut msg, view(", this compiler reads format 4"));
             iface_refuse(view(path), view(msg));
         }
         iface_refuse(view(path), view("is not an interface file (no `// grail-interface` header)"));
@@ -38262,6 +38287,7 @@ fn iface_load<a, b>(c: (&a mut C), path: &a [u8], source_path: &b [u8], phase: u
     mut mode_default = 0;
     mut mode_overflow = u8[];
     mut mode_target = u8[];
+    mut dyn_abi = u8[];
     for i in lines.len() {
         line := lines[i].copy();
         if line.len() == 0 {
@@ -38298,6 +38324,13 @@ fn iface_load<a, b>(c: (&a mut C), path: &a [u8], source_path: &b [u8], phase: u
                     ip_number(&mut p);
                 }
             }
+        } else if same(view(key), view("abi")) {
+            mut got = copy_bytes(view("abi"));
+            while !ip_done(&p) {
+                got.push(32);
+                push_bytes(&mut got, view(ip_take(&mut p)));
+            }
+            dyn_abi = got;
         } else if same(view(key), view("unsafe")) {
             unsafe_flag = ip_number(&mut p);
         } else if same(view(key), view("std")) {
@@ -38312,6 +38345,20 @@ fn iface_load<a, b>(c: (&a mut C), path: &a [u8], source_path: &b [u8], phase: u
             last := c.lib_owner.len() - 1;
             exchange(&mut c.lib_owner[last], module.copy());
         }
+    }
+    // Both sides must build a `&dyn I` the same way, or the pair one module writes is the pair the
+    // other dereferences wrongly. The line is compared as written: this compiler has one ABI.
+    if dyn_abi.len() == 0 {
+        iface_refuse(view(path), view("has no `abi` line: it does not say what a borrowed `dyn` value is"));
+    }
+    if !same(view(dyn_abi), view(iface_dyn_abi())) {
+        mut msg = u8[];
+        push_bytes(&mut msg, view("was written for another `dyn` ABI (`"));
+        push_bytes(&mut msg, view(dyn_abi));
+        push_bytes(&mut msg, view("`); this compiler builds `"));
+        push_bytes(&mut msg, view(iface_dyn_abi()));
+        push_bytes(&mut msg, view("`, so a `&dyn` value would not mean the same thing"));
+        iface_refuse(view(path), view(msg));
     }
     // The module must be the one this file of the program declares.
     if module.len() == 0 {
