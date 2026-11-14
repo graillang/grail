@@ -235,19 +235,14 @@ export async function check(compiler) {
       assert.ok(linked.includes(symbol.replace('__imp_', '')), `${name}/${windowsAarch64}: no short import for ${symbol}`);
     }
     // Unwind evidence: one .xdata record per function, with the frame size the compiler set.
-    // NOT available on ARM64 yet: the PE unwind emitter (`win_unwind`) runs only for
-    // windows-x86_64, so an ARM64 object carries no .pdata and this contract cannot hold.
-    // Recorded in docs/platform-status.md as a known gap; every other ARM64 check still
-    // runs, and the frame-size contract is still proved on windows-x86_64.
-    if (inspectUnwind(built.object).includes('RuntimeFunction {')) {
     const defs = (assembly.match(/^\.def /gm) ?? []).length;
     const frames = [...assembly.matchAll(/^\.set \.F\d+,(\d+)$/gm)].map(m => Number(m[1]));
     const records = inspectUnwind(built.object).split('RuntimeFunction {').slice(1);
     assert.equal(records.length, defs, `${name}/${windowsAarch64}: ${records.length} records for ${defs} functions`);
-    // The `.set .F<n>,<size>` frame-constant table is emitted for windows-x86_64; ARM64 prologues
-    // size their frame with `sub sp, #n` directly, so there is no table to compare against. Where
-    // it exists it must line up one-to-one; where it does not, each record's own FunctionLength
-    // and prologue are still checked below.
+    // The `.set .F<n>,<size>` frame-constant table is emitted for windows-x86_64, whose prologue
+    // sizes its frame from it; an ARM64 prologue uses `sub sp, #n` directly and has no such table.
+    // Where the table exists it must be one-to-one with the functions; where it does not, each
+    // record's own FunctionLength and prologue are still checked below.
     const haveFrameTable = frames.length === defs;
     assert.ok(frames.length === 0 || haveFrameTable, `${name}/${windowsAarch64}: frame table has ${frames.length} entries for ${defs} functions`);
     for (let i = 0; i < records.length; i++) {
@@ -265,10 +260,6 @@ export async function check(compiler) {
     assert.equal(pdataWords.length, defs, `${name}/${windowsAarch64}: .pdata size`);
     for (const [, , unwind] of pdataWords) {
       assert.equal(Number.parseInt(unwind, 16) & 3, 0, `${name}/${windowsAarch64}: packed flag set with an .xdata pointer`);
-    }
-    }
-    else {
-      console.log(`${name}/${windowsAarch64}: no PE unwind data (ARM64 emission is a known gap)`);
     }
 
     const relocations = inspectRelocations(built.object);
