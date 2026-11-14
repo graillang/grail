@@ -79,3 +79,26 @@ Each of these is a real improvement that did not fit, and each is recorded with 
   register allocator, and the cheap alternative is a pointer API that is not really SIMD.
 - Windows: SChannel TLS and sockets on the IOCP reactor are refused, not half-done, with the reason
   written in the notes.
+
+## Found during the endgame, for the next round's list
+
+Three things that only appeared once the gate was run to the end, all worth naming because each is a
+class rather than an incident:
+
+- **A tool that writes a fixed temporary path under `.work` breaks when legs run in parallel.**
+  `buildCompiler` named its intermediates after the hash of its inputs, so two tool legs that built
+  the compiler in one worktree wrote the same `compiler.s` and `grail.pending.o`; interface-test died
+  in clang with "no preprocessable inputs" and windows in ld with "cannot open ...grail.pending.o",
+  both inside `command()` where they look like a broken build rather than a collision. Fixed by
+  naming the intermediates after the process and claiming the final name with an atomic rename, which
+  is also what makes `GATE_JOBS > 1` safe. The rule generalises: any path under `.work` that is not
+  unique per process is a race waiting for a parallel gate.
+- **Windows ARM64 has unwind records but no `.set .F<n>` frame-constant table.** Checks that assume
+  the x86-64 frame-constant table must be scoped to x86-64; the first two attempts got that wrong in
+  both directions (assuming the table everywhere, then dropping the check entirely). The honest form
+  tolerates its absence on ARM64 and keeps every other check.
+- **A suite that stops at its first failure hides the rest of its bugs.** The windows suite had never
+  run past its first red in this round, so three separate case bugs — `io::Error` where the stdlib
+  now answers `fs::Error`, a named module missing its `entry`, and the frame-table assumption — all
+  surfaced at once in the endgame. Running the whole suite early, even with known reds, is cheaper
+  than finding them one gate at a time.
