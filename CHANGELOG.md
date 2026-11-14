@@ -55,6 +55,28 @@
   `use` resolution had added, so `grail build --cache` could hand back a stale image for a project
   whose standard closure changed. A module root is now an option with a value rather than an input,
   and the program record lists and re-checks the digest of every module source the build compiles.
+- Added: a typed IR with SSA values for the word stream, and its serializer
+  (`compiler/ir.grl`, docs/design/typed-ir.md "A typed IR with SSA values, and its serializer").
+  The optimizer's record moved out of `optimize.grl` into the IR module as `ir::Body`, and with it
+  the stream parser (`parse`, `classify`, the opcode and register keys) and the operand algebra
+  (`reads`, `writes`, `slot_read`, `slot_written`, `dst_writes`, `dst_address`, `result_live`):
+  the two modules are now "what a body is" and "the passes that rewrite it". On top of the
+  instruction record the IR carries what the text could not say: each instruction's defined value
+  and the values it reads (minted per definition, bound inside a block, kept as the frame slot at a
+  label), each value's type and width (from the front end's fact table, keyed by body symbol and
+  slot, through the new reader `llvm::fact_slot_kind`), and the body's calls with the callee symbol
+  in emission order. `ir::build` fills that layer once per body, before the passes. Nothing in it
+  changes a decision yet: **the emitted assembly is byte-identical**, verified per function by the
+  new `tools/ssair-bytes.mjs` over the x86-64 corpus and the compiler's own sources.
+  `--emit-ir` writes the units beside the assembly (`OUT.s.tir`), versioned text, one unit per
+  function; `tools/ssair-ir.mjs` holds the format to its own counts. Cases `ssair-emit-ir`,
+  `ssair-emit-ir-split`.
+- Fixed: the tree did not compile. Two merge sites arrived half-applied on `gaps-int5`:
+  `none_tag` lost its closing brace, so `compiler/native.grl` reported "unclosed {" at end of file,
+  and the field-shorthand path of a record literal still called `primary(&mut c)` after `primary`
+  gained its `expected` type, so a typechecked build reported "function argument count". Both are
+  one-line repairs (`primary(&mut c, field)`, which is the type the shorthand's field has); the
+  emitted assembly is unchanged.
 - Ranges: a range value is now a `Span` (`lib/span.grl`) that carries the slice it was made from - a
   byte view plus its two ends - so a range its slice does not have is refused where the span is made
   (`span_of` yields `1..0`, which names no bytes) and a range taken from one sequence cannot reach

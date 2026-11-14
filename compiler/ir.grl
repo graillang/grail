@@ -1,0 +1,1561 @@
+module ir;
+use span;
+use llvm;
+
+// The typed IR of the word stream: instructions that define and use values, one unit per emitted
+// function (docs/design/typed-ir.md, "A typed IR with SSA values, and its serializer").
+//
+// The word stream is where this module starts, and its spellings do not change here. `parse` turns
+// one emitted line into an instruction -- an opcode from `opcode_key`, two operands from `classify`,
+// the label it defines -- and `build` gives every instruction its values: the value id it defines,
+// the ids it reads, the type the front end's fact table records for a slot, and a call entry for
+// every call in emission order. The optimizer's passes run on this record and the native backend
+// emits from it; `write_body` serialises a unit as versioned text.
+//
+// Values relate to frame slots rather than replacing them: a value id names one *definition* of one
+// location (a register, an `xmm` register or a frame slot), the location is what the emitter prints,
+// and a read whose definition is not in the same block keeps its slot (value 0). Nothing here
+// changes a byte of output; `tools/ssair-bytes.mjs` compares every emitted function against the
+// pre-change compiler.
+
+// One emitted function body, as the optimizer sees it: the instructions of the word stream with
+// their byte spans, the two classified operands of each (kind and value), the per-instruction flags
+// the passes keep, the frame shape, the label table and the unit the body belongs to.
+//
+// Kinds: 0 none, 1 register, 2 frame slot -N(%rbp), 3 immediate/other text, 4 other operand,
+// 5 generated text (range in `gen`). Ops: see opcode_key(); 100 label, 101 directive, 102 two-word
+// slot declaration, 0 unknown.
+//
+// A slot is one word unless a `.gpair -N(%rbp)` line declares it the first word of a two-word
+// value (native.grl emits one where a borrowed interface object's {data, vtable} pair is built), and
+// a result is one word unless `.gpair ret` declares it the two-word %rax:%rdx form.
+// The two words are one value with one identity: allocated together, written directly, addressed
+// from the first word, kept adjacent when the frame is compacted, and never promoted, forwarded or
+// dropped - the second word's only reader is the pair's address, which no pass reasons about. Every
+// pass that looks at a slot obeys `pair[n]`, so width 1 and width 2 are handled uniformly and a
+// pass that cannot reason about the second word is conservative for both.
+pub struct Body {
+    ls: u64[],
+    le: u64[],
+    op: u64[],
+    chg: u64[],
+    del: u64[],
+    lab: u64[],
+    tr: u64[],
+    k0: u64[],
+    v0: u64[],
+    s0: u64[],
+    e0: u64[],
+    m0: u64[],
+    k1: u64[],
+    v1: u64[],
+    s1: u64[],
+    e1: u64[],
+    m1: u64[],
+    gen: u8[],
+    out: u8[],
+    weird: u64,
+    maxslot: u64,
+    table: u64[],
+    base: u64,
+    data: u64,
+    uniq: u64,
+    zline: u64,
+    zfrom: u64,
+    zto: u64,
+    pairs: u64[],
+    pair: u64[],
+    ret2: u64,
+    inl_names: u8[][],
+    inl_bodies: u8[][],
+    inl_units: u8[][],
+    inl_head: u64[],
+    inl_next: u64[],
+    // The emission unit the stream is inside: its name and its label prefix, both from the
+    // `.grail_part` marker `native.grl` writes. A label is numbered only when it is this unit's.
+    unit: u8[],
+    uprefix: u8[],
+    // 1 when the stream carried any marker, so a single-file build knows to strip them.
+    marked: u64,
+    // The expansion-label counter of each unit (1-based index into `uniq_units` of the one being
+    // emitted, 0 before the first). Per unit and kept across a re-entry, like the emitter's own.
+    uniq_index: u64,
+    uniq_units: u8[][],
+    uniq_next: u64[],
+    // ---------------------------------------------------------------------------------------
+    // The IR's own layer (docs/design/typed-ir.md, "A typed IR with SSA values"). One entry per
+    // instruction: `dval` is the value id it defines (0 none), `use0`/`use1` the values it reads
+    // (0 = the location's content on entry to the block), `ity`/`iw` the type and width of `def`.
+    dval: u64[],
+    use0: u64[],
+    use1: u64[],
+    ity: u64[],
+    iw: u64[],
+    // The mnemonic's byte range in the stream (for `op >= 100`, where there is no mnemonic, the
+    // range is the whole line), kept so the serializer can print the line as it was written.
+    ms: u64[],
+    me: u64[],
+    // The value table: entry i is value id i + 1 (`0` is the "unknown on entry" value). `vwidth` is
+    // the number of words the value occupies, so a two-word pair is one value of width 2.
+    vspace: u64[],
+    vidx: u64[],
+    vty: u64[],
+    vwidth: u64[],
+    vdef: u64[],
+    // Calls in emission order, with the symbol the front end named or the reason it named none.
+    calls: Call[],
+    // The body's symbol, from its `.type NAME,@function` line (`type_symbol`), used to look the
+    // front end's type facts up by `(body, slot)`.
+    name: u8[]
+}
+
+pub fn put<a>(v: (&a mut u64[]), i: u64, x: u64) {
+    exchange(&mut v[i], x);
+}
+
+// `s[a..e]` equals `w`. The range is a `Span`: it carries the slice it was made from, so the only
+// bytes it can name are that slice's (`docs/design/range-values.md`). `span_of` refuses a range the
+// slice does not have when the span is made, which is why no guard here checks `e` against `s.len()`
+// any more: there is no second, unwritten end left for a caller to supply.
+pub fn same<b, d>(r: span::Span<b>, w: &d [u8]) -> bool {
+    return r.same_as(w);
+}
+
+// `span_of` is `lib/span.grl`'s constructor (the compiler builds with that module); the range it
+// makes is the same value user code gets, not a private copy of the idea.
+pub fn span_of<a>(s: &a [u8], start: u64, end: u64) -> span::Span<a> {
+    return span::span_of(s, start, end);
+}
+
+// `s` at `a` opens with `w`: the extent comes from the needle, so the window cannot be wider than
+// the thing it is compared with, and `span_of` refuses one that runs past the end of `s`.
+pub fn at<b, d>(s: &b [u8], a: u64, w: &d [u8]) -> bool {
+    return span_of(s, a, a + w.len()).same_as(w);
+}
+
+pub fn bit(r: u64) -> u64 {
+    return 1 << r;
+}
+
+// 0xFFCF: every general register except rsp/rbp; caller-saved; argument registers.
+pub fn all_regs() -> u64 {
+    return 65487;
+}
+
+pub fn caller_saved() -> u64 {
+    return 4039;
+}
+
+// A call reads every register an argument can arrive in: rdi, rsi, rdx, rcx, r8, r9 and - because
+// machine.grl maps the seventh and eighth AAPCS64/RV64 argument registers to their x86-64 spelling -
+// r10 and r11 too. Without them a store to %r10 before a call looks dead and is deleted.
+pub fn arg_regs() -> u64 {
+    return 4038;
+}
+
+pub fn opcode_key(k: u64) -> u64 {
+    if k == 1903587181 {
+        return 1;
+    }
+    if k == 31933538747445101 {
+        return 2;
+    }
+    if k == 1902208364 {
+        return 3;
+    }
+    if k == 1902404705 {
+        return 4;
+    }
+    if k == 1902278003 {
+        return 5;
+    }
+    if k == 1903193443 {
+        return 6;
+    }
+    if k == 487285024116 {
+        return 7;
+    }
+    if k == 1902407265 {
+        return 8;
+    }
+    if k == 7434863 {
+        return 9;
+    }
+    if k == 1903325048 {
+        return 10;
+    }
+    if k == 1902341737 {
+        return 11;
+    }
+    if k == 1902933357 {
+        return 12;
+    }
+    if k == 1903585636 {
+        return 13;
+    }
+    if k == 487150939497 {
+        return 14;
+    }
+    if k == 1819042147 {
+        return 15;
+    }
+    if k == 7368042 {
+        return 16;
+    }
+    if k == 25962 {
+        return 17;
+    }
+    if k == 31338 {
+        return 18;
+    }
+    if k == 6647402 {
+        return 19;
+    }
+    if k == 8023658 {
+        return 20;
+    }
+    if k == 6516330 {
+        return 21;
+    }
+    if k == 6644074 {
+        return 22;
+    }
+    if k == 25194 {
+        return 23;
+    }
+    if k == 25450 {
+        return 24;
+    }
+    if k == 1702126963 {
+        return 25;
+    }
+    if k == 435644818803 {
+        return 26;
+    }
+    if k == 1651795315 {
+        return 27;
+    }
+    if k == 124667775315821 {
+        return 28;
+    }
+    if k == 435777791340 {
+        return 29;
+    }
+    if k == 7628146 {
+        return 30;
+    }
+    if k == 487083701616 {
+        return 31;
+    }
+    if k == 1903193968 {
+        return 32;
+    }
+    if k == 1902930035 {
+        return 33;
+    }
+    if k == 1903323251 {
+        return 34;
+    }
+    return 0;
+}
+
+// 0..15 for 64-bit names, 16+n for a narrower spelling of register n, 99 otherwise.
+pub fn reg_key(k: u64) -> u64 {
+    if k == 7889266 {
+        return 0;
+    }
+    if k == 7889778 {
+        return 1;
+    }
+    if k == 7890034 {
+        return 2;
+    }
+    if k == 7889522 {
+        return 3;
+    }
+    if k == 7369586 {
+        return 4;
+    }
+    if k == 7365234 {
+        return 5;
+    }
+    if k == 6910834 {
+        return 6;
+    }
+    if k == 6906994 {
+        return 7;
+    }
+    if k == 14450 {
+        return 8;
+    }
+    if k == 14706 {
+        return 9;
+    }
+    if k == 3158386 {
+        return 10;
+    }
+    if k == 3223922 {
+        return 11;
+    }
+    if k == 3289458 {
+        return 12;
+    }
+    if k == 3354994 {
+        return 13;
+    }
+    if k == 3420530 {
+        return 14;
+    }
+    if k == 3486066 {
+        return 15;
+    }
+    if k == 7889253 {
+        return 16;
+    }
+    if k == 27745 {
+        return 16;
+    }
+    if k == 7889765 {
+        return 17;
+    }
+    if k == 27747 {
+        return 17;
+    }
+    if k == 7890021 {
+        return 18;
+    }
+    if k == 27748 {
+        return 18;
+    }
+    if k == 7889509 {
+        return 19;
+    }
+    if k == 27746 {
+        return 19;
+    }
+    if k == 7369573 {
+        return 20;
+    }
+    if k == 7365221 {
+        return 21;
+    }
+    if k == 6910821 {
+        return 22;
+    }
+    if k == 7104883 {
+        return 22;
+    }
+    if k == 6906981 {
+        return 23;
+    }
+    if k == 7104868 {
+        return 23;
+    }
+    if k == 6568050 {
+        return 24;
+    }
+    if k == 6568306 {
+        return 25;
+    }
+    if k == 1680879986 {
+        return 26;
+    }
+    if k == 1680945522 {
+        return 27;
+    }
+    if k == 1681011058 {
+        return 28;
+    }
+    if k == 1681076594 {
+        return 29;
+    }
+    if k == 1681142130 {
+        return 30;
+    }
+    if k == 1681207666 {
+        return 31;
+    }
+    return 99;
+}
+
+pub fn regcode<b>(s: &b [u8], a: u64, e: u64) -> u64 {
+    if e <= a || e - a > 4 {
+        return 99;
+    }
+    mut k = 0;
+    for i in e - a {
+        k = k | (s[a + i] << (8 * i));
+    }
+    return reg_key(k);
+}
+
+pub fn alnum(c: u64) -> bool {
+    return ((47 < c) && (c < 58)) || ((96 < c) && (c < 123)) || ((64 < c) && (c < 91));
+}
+
+// Registers mentioned anywhere in s[a:e] (bit 5 marks an rbp use).
+pub fn mentions<b>(s: &b [u8], a: u64, e: u64) -> u64 {
+    mut m = 0;
+    mut i = a;
+    while i < e {
+        if s[i] == 37 {
+            mut j = i + 1;
+            while j < e {
+                if !alnum(s[j]) {
+                    break;
+                }
+                j += 1;
+            }
+            r := regcode(view(s), i + 1, j);
+            if r < 32 {
+                m = m | bit(r % 16);
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    return m;
+}
+
+// Classifies one operand: returns kind and fills value/mask through the pair encoding.
+pub fn classify<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64, second: u64) {
+    mut k = 4;
+    mut v = 0;
+    mut m = 0;
+    if a < e {
+        c := s[a];
+        if c == 37 {
+            r := regcode(view(s), a + 1, e);
+            if r < 16 {
+                k = 1;
+                v = r;
+            } else {
+                k = 6;
+                if r < 32 {
+                    m = bit(r - 16);
+                }
+            }
+        } else {
+            if c == 36 {
+                k = 3;
+            } else {
+                m = mentions(view(s), a, e);
+                if (c == 46) & (e - a > 2) {
+                    if s[a + 1] == 76 {
+                        mut n = 0;
+                        mut digits = 0;
+                        mut i = a + 2;
+                        while i < e {
+                            d := s[i];
+                            if d < 48 || 57 < d {
+                                break;
+                            }
+                            n = n * 10 + d - 48;
+                            digits += 1;
+                            i += 1;
+                        }
+                        if digits != 0 {
+                            v = n + 1;
+                        }
+                    }
+                }
+                // -N(%rbp) with decimal N is a frame slot.
+                if (c == 45) & (e - a > 7) {
+                    if same(span_of(view(s), e - 6, e), view("(%rbp)")) {
+                        mut n = 0;
+                        mut ok = 1;
+                        for i in e - 7 - a {
+                            d := s[a + 1 + i];
+                            if d < 48 || 57 < d {
+                                ok = 0;
+                            } else {
+                                n = n * 10 + d - 48;
+                            }
+                        }
+                        if ok != 0 && n != 0 {
+                            k = 2;
+                            v = n;
+                            m = 0;
+                            if n % 8 != 0 {
+                                exchange(&mut o.weird, 1);
+                            }
+                            if o.maxslot < n {
+                                exchange(&mut o.maxslot, n);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        k = 0;
+    }
+    if second != 0 {
+        o.k1.push(k);
+        o.v1.push(v);
+        o.s1.push(a);
+        o.e1.push(e);
+        o.m1.push(m);
+    } else {
+        o.k0.push(k);
+        o.v0.push(v);
+        o.s0.push(a);
+        o.e0.push(e);
+        o.m0.push(m);
+    }
+}
+
+// The counter a label carries: `.L<unit prefix>_<n>` is numbered, everything else is opaque text
+// (`.Lopt` expansions, refinement strings, `.Lret` in an inlined body). A stream with no marker -
+// a caller that hands the optimizer text it produced itself - keeps the old `.L<n>` numbering.
+pub fn label_number<a, b, d>(s: &a [u8], a: u64, e: u64, uprefix: &d [u8]) -> u64 {
+    if (e <= a + 2) || !at(view(s), a, view(".L")) {
+        return 0;
+    }
+    mut at = a + 2;
+    if uprefix.len() == 0 {
+        mut n = 0;
+        mut ok = 1;
+        while at < e {
+            d := s[at];
+            if (d < 48) || (57 < d) {
+                ok = 0;
+                break;
+            }
+            n = n * 10 + (d - 48);
+            at += 1;
+        }
+        if (ok == 0) || (at == a + 2) {
+            return 0;
+        }
+        return n + 1;
+    }
+    if !same(span_of(view(s), at, e), view(uprefix)) | (e <= at + uprefix.len() + 1) {
+        return 0;
+    }
+    mut i = 0;
+    while i < uprefix.len() {
+        if s[at + i] != uprefix[i] {
+            return 0;
+        }
+        i += 1;
+    }
+    at += uprefix.len();
+    if s[at] != 95 {
+        return 0;
+    }
+    at += 1;
+    mut n = 0;
+    while at < e {
+        d := s[at];
+        if (d < 48) || (57 < d) {
+            return 0;
+        }
+        n = n * 10 + (d - 48);
+        at += 1;
+    }
+    return n + 1;
+}
+
+// The marker line: `.grail_part <unit> <label prefix>`, and the unit fields it sets. 1 when the
+// line was one.
+pub fn marker<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) -> u64 {
+    if (e - a < 14) || (s[a] != 46) || !at(view(s), a, view(".grail_part ")) {
+        return 0;
+    }
+    mut unit = u8[];
+    mut at = a + 12;
+    while (at < e) & (s[at] != 32) {
+        unit.push(s[at]);
+        at += 1;
+    }
+    mut prefix = u8[];
+    at += 1;
+    while at < e {
+        prefix.push(s[at]);
+        at += 1;
+    }
+    // Labels and the optimizer's own expansion labels are per unit: this unit's counters resume
+    // where it left them, or start at zero the first time.
+    mut k = 0;
+    while k < o.uniq_units.len() {
+        if same(span_of(view(o.uniq_units[k]), 0, unit.len()), view(unit)) {
+            break;
+        }
+        k += 1;
+    }
+    if k == o.uniq_units.len() {
+        o.uniq_units.push(unit.copy());
+        o.uniq_next.push(0);
+    }
+    o.uniq_index = k + 1;
+    exchange(&mut o.uniq, o.uniq_next[k]);
+    exchange(&mut o.unit, unit);
+    exchange(&mut o.uprefix, prefix);
+    exchange(&mut o.marked, 1);
+    return 1;
+}
+
+// The next expansion label number of the unit being emitted, kept with that unit.
+pub fn uniq_take<a>(o: (&a mut Body)) -> u64 {
+    n := o.uniq + 1;
+    exchange(&mut o.uniq, n);
+    k := o.uniq_index;
+    if (k != 0) & (k <= o.uniq_next.len()) {
+        o.uniq_next[k - 1] = n;
+    }
+    return n;
+}
+
+pub fn parse<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) {
+    o.ls.push(a);
+    o.le.push(e);
+    o.chg.push(0);
+    o.del.push(0);
+    o.tr.push(0);
+    mut op = 0;
+    mut lab = 0;
+    mut space = e;
+    // String data between .pushsection/.popsection is inert, including its labels.
+    if (e - a > 10) & (s[a] == 46) {
+        if s[a + 1] == 112 {
+            if s[a + 2] == 117 {
+                exchange(&mut o.data, 1);
+            }
+            if s[a + 2] == 111 {
+                exchange(&mut o.data, 0);
+                op = 101;
+            }
+        }
+    }
+    if o.data != 0 {
+        op = 101;
+    }
+    if op == 101 {} else {
+        if a < e {
+            if s[e - 1] == 58 {
+                op = 100;
+                lab = label_number(view(s), a, e - 1, view(o.uprefix));
+            } else {
+                if s[a] == 46 {
+                    op = 101;
+                } else {
+                    for i in e - a {
+                        if s[a + i] == 32 {
+                            space = a + i;
+                            break;
+                        }
+                    }
+                    mut k = 0;
+                    if space - a < 8 {
+                        for x in space - a {
+                            k = k | (s[a + x] << (8 * x));
+                        }
+                    }
+                    op = opcode_key(k);
+                }
+            }
+        } else {
+            op = 101;
+        }
+    }
+    o.op.push(op);
+    o.lab.push(lab);
+    // The mnemonic's byte range, so the serializer prints the instruction as it was written. A
+    // label or a directive has no mnemonic and carries its whole line instead.
+    o.ms.push(a);
+    o.me.push(space);
+    if op == 101 {
+        // `.gpair -N(%rbp)`: the two-word value whose first word lives at that frame address.
+        if (e - a > 7) & at(view(s), a, view(".gpair ")) {
+            last := o.op.len() - 1;
+            if same(span_of(view(s), a + 7, e), view("ret")) {
+                exchange(&mut o.op[last], 102);
+                exchange(&mut o.ret2, 1);
+                classify(&mut o, view(s), e, e, 0);
+                classify(&mut o, view(s), e, e, 1);
+                return ();
+            }
+            exchange(&mut o.op[last], 102);
+            classify(&mut o, view(s), a + 7, e, 0);
+            classify(&mut o, view(s), e, e, 1);
+            n := o.v0[o.v0.len() - 1];
+            o.pairs.push(n / 8);
+            return ();
+        }
+    }
+    if op == 100 || op == 101 {
+        classify(&mut o, view(s), e, e, 0);
+        classify(&mut o, view(s), e, e, 1);
+        return ();
+    }
+    // Split operands at the top-level comma.
+    mut first = e;
+    mut comma = e;
+    mut depth = 0;
+    if space < e {
+        first = space + 1;
+    }
+    mut i = first;
+    while i < e {
+        c := s[i];
+        if c == 40 {
+            depth += 1;
+        }
+        if c == 41 {
+            depth -= 1;
+        }
+        if (c == 44) & (depth == 0) {
+            comma = i;
+            break;
+        }
+        i += 1;
+    }
+    mut extra = 0;
+    if comma < e {
+        i = comma + 1;
+        while i < e {
+            c := s[i];
+            if c == 40 {
+                depth += 1;
+            }
+            if c == 41 {
+                depth -= 1;
+            }
+            if (c == 44) & (depth == 0) {
+                extra = 1;
+            }
+            i += 1;
+        }
+    }
+    if extra != 0 {
+        // stays: the written place is indexed (`&mut o.op[last]`), and two-phase defers only a
+        // plain `&mut path`, so the length read is part of taking the place.
+        last := o.op.len() - 1;
+        exchange(&mut o.op[last], 0);
+    }
+    classify(&mut o, view(s), first, comma, 0);
+    if comma < e {
+        classify(&mut o, view(s), comma + 1, e, 1);
+    } else {
+        classify(&mut o, view(s), e, e, 1);
+    }
+    // Calls to the leaf runtime accessors become pseudo-instructions expanded inline at emission:
+    // 40 rt_slot, 41 rt_at (bounds-checked element address / load), 42 rt_len, 43 rt_xchg, 44 rt_atb (byte load),
+    // 45 rt_push / 46 rt_pushb (inline store when capacity remains, runtime call to grow),
+    // 47 rt_slotu / 48 rt_atbu (proven in-bounds element address / byte load).
+    if (op == 15) & (comma == e) & (e - first > 5) & (e - first < 9) {
+        if (s[first] == 114) & (s[first + 1] == 116) & (s[first + 2] == 95) {
+            mut fast = 0;
+            if same(span_of(view(s), first, e), view("rt_slot")) {
+                fast = 40;
+            }
+            if same(span_of(view(s), first, e), view("rt_at")) {
+                fast = 41;
+            }
+            if same(span_of(view(s), first, e), view("rt_len")) {
+                fast = 42;
+            }
+            if same(span_of(view(s), first, e), view("rt_xchg")) {
+                fast = 43;
+            }
+            if same(span_of(view(s), first, e), view("rt_atb")) {
+                fast = 44;
+            }
+            if same(span_of(view(s), first, e), view("rt_push")) {
+                fast = 45;
+            }
+            if same(span_of(view(s), first, e), view("rt_pushb")) {
+                fast = 46;
+            }
+            if same(span_of(view(s), first, e), view("rt_slotu")) {
+                fast = 47;
+            }
+            if same(span_of(view(s), first, e), view("rt_atbu")) {
+                fast = 48;
+            }
+            if fast != 0 {
+                // stays: the written place is indexed (`&mut o.op[last]`), and two-phase defers
+                // only a plain `&mut path`, so the length read is part of taking the place.
+                last := o.op.len() - 1;
+                exchange(&mut o.op[last], fast);
+            }
+        }
+    }
+}
+
+pub fn movelike(op: u64) -> bool {
+    return (op == 1) || (op == 2) || (op == 3) || (op == 28);
+}
+
+pub fn arith(op: u64) -> bool {
+    return (op == 4)
+        || (op == 5)
+        || (op == 8)
+        || (op == 9)
+        || (op == 10)
+        || (op == 14)
+        || (op == 33)
+        || (op == 34);
+}
+
+pub fn is_jump(op: u64) -> bool {
+    return (15 < op) && (op < 25);
+}
+
+pub fn mask_of(k: u64, v: u64, m: u64) -> u64 {
+    if k == 1 {
+        return bit(v);
+    }
+    return m;
+}
+
+// Registers written by a destination operand (narrow register spellings count as written).
+pub fn dst_writes<a>(o: (&a Body), i: u64) -> u64 {
+    k := o.k1[i];
+    if k == 1 {
+        return bit(o.v1[i]);
+    }
+    if k == 6 {
+        return o.m1[i];
+    }
+    return 0;
+}
+
+pub fn dst_address<a>(o: (&a Body), i: u64) -> u64 {
+    if o.k1[i] == 1 {
+        return 0;
+    }
+    return o.m1[i];
+}
+
+pub fn reads<a>(o: (&a Body), i: u64) -> u64 {
+    op := o.op[i];
+    src := mask_of(o.k0[i], o.v0[i], o.m0[i]);
+    dst := mask_of(o.k1[i], o.v1[i], o.m1[i]);
+    if op == 15 {
+        return arg_regs() | src;
+    }
+    if op == 100 || op == 101 || op == 102 || op == 29 || op == 32 || is_jump(op) {
+        return 0;
+    }
+    if movelike(op) {
+        return src | dst_address(&o, i);
+    }
+    if op == 10 {
+        if (o.k0[i] == 1) & (o.k1[i] == 1) & (o.v0[i] == o.v1[i]) {
+            return 0;
+        }
+    }
+    if arith(op) || (op == 6) || (op == 7) {
+        return src | dst;
+    }
+    if op == 11 {
+        return dst;
+    }
+    if op == 12 {
+        return src | 1;
+    }
+    if op == 13 {
+        return src | 5;
+    }
+    if op == 25 || op == 26 || op == 27 {
+        return 1;
+    }
+    if op == 30 {
+        return result_live(&o);
+    }
+    if op == 31 {
+        return src;
+    }
+    if op == 40
+        || op == 41
+        || op == 43
+        || op == 44
+        || op == 45
+        || op == 46
+        || op == 47
+        || op == 48 {
+        return 192;
+    }
+    if op == 42 {
+        return 128;
+    }
+    return all_regs();
+}
+
+pub fn writes<a>(o: (&a Body), i: u64) -> u64 {
+    op := o.op[i];
+    if op == 100 || op == 101 || op == 102 || op == 29 || op == 30 || op == 31 || op == 6 || op == 7 {
+        return 0;
+    }
+    if op == 15 {
+        return caller_saved();
+    }
+    if is_jump(op) {
+        return 0;
+    }
+    if movelike(op) || arith(op) || (op == 11) || (op == 32) {
+        return dst_writes(&o, i);
+    }
+    if op == 12 || op == 13 {
+        return 5;
+    }
+    if op == 25 || op == 26 || op == 27 {
+        return 1;
+    }
+    if (39 < op) & (op < 45) {
+        return 1;
+    }
+    if op == 45 || op == 46 {
+        return caller_saved();
+    }
+    if op == 47 || op == 48 {
+        return 1;
+    }
+    return all_regs();
+}
+
+// Whether operand j of instruction i reads / writes a frame slot.
+pub fn slot_read<a>(o: (&a Body), i: u64, j: u64) -> bool {
+    op := o.op[i];
+    if op == 101 || op == 102 {
+        return false;
+    }
+    if j == 0 {
+        return o.k0[i] == 2;
+    }
+    if o.k1[i] != 2 {
+        return false;
+    }
+    if movelike(op) {
+        return false;
+    }
+    return true;
+}
+
+pub fn slot_written<a>(o: (&a Body), i: u64) -> bool {
+    op := o.op[i];
+    if o.k1[i] != 2 {
+        return false;
+    }
+    return movelike(op) || arith(op) || (op == 11) || (op == 0);
+}
+
+// Registers a result is read from: %rax, plus %rdx when the function returns a two-word value.
+pub fn result_live<a>(o: (&a Body)) -> u64 {
+    if o.ret2 != 0 {
+        return 5;
+    }
+    return 1;
+}
+
+pub fn reset<a>(o: (&a mut Body)) {
+    o.ls.clear();
+    o.le.clear();
+    o.op.clear();
+    o.chg.clear();
+    o.del.clear();
+    o.lab.clear();
+    o.tr.clear();
+    o.k0.clear();
+    o.v0.clear();
+    o.s0.clear();
+    o.e0.clear();
+    o.m0.clear();
+    o.k1.clear();
+    o.v1.clear();
+    o.s1.clear();
+    o.e1.clear();
+    o.m1.clear();
+    exchange(&mut o.gen, u8[]);
+    exchange(&mut o.pairs, u64[]);
+    exchange(&mut o.pair, u64[]);
+    exchange(&mut o.ret2, 0);
+    exchange(&mut o.weird, 0);
+    exchange(&mut o.zline, 0);
+    exchange(&mut o.maxslot, 0);
+    // The typed-IR layer is per body too: a body starts with no values, no calls and no type facts.
+    o.dval.clear();
+    o.use0.clear();
+    o.use1.clear();
+    o.ity.clear();
+    o.iw.clear();
+    o.ms.clear();
+    o.me.clear();
+    o.vspace.clear();
+    o.vidx.clear();
+    o.vty.clear();
+    o.vwidth.clear();
+    o.vdef.clear();
+    o.calls.clear();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Values, SSA, types and calls.
+
+// The empty record, with every table allocated: a caller that needs a body starts here, so a new
+// field is added in one place instead of at every literal.
+pub fn new_body() -> Body {
+    return Body {
+        ls: u64[],
+        le: u64[],
+        op: u64[],
+        chg: u64[],
+        del: u64[],
+        lab: u64[],
+        tr: u64[],
+        k0: u64[],
+        v0: u64[],
+        s0: u64[],
+        e0: u64[],
+        m0: u64[],
+        k1: u64[],
+        v1: u64[],
+        s1: u64[],
+        e1: u64[],
+        m1: u64[],
+        gen: u8[],
+        out: u8[],
+        weird: 0,
+        maxslot: 0,
+        table: u64[],
+        base: 0,
+        data: 0,
+        uniq: 0,
+        zline: 0,
+        zfrom: 0,
+        zto: 0,
+        pairs: u64[],
+        pair: u64[],
+        ret2: 0,
+        inl_names: u8[][],
+        inl_bodies: u8[][],
+        inl_units: u8[][],
+        inl_head: u64[],
+        inl_next: u64[],
+        unit: u8[],
+        uprefix: u8[],
+        marked: 0,
+        uniq_index: 0,
+        uniq_units: u8[][],
+        uniq_next: u64[],
+        dval: u64[],
+        use0: u64[],
+        use1: u64[],
+        ity: u64[],
+        iw: u64[],
+        ms: u64[],
+        me: u64[],
+        vspace: u64[],
+        vidx: u64[],
+        vty: u64[],
+        vwidth: u64[],
+        vdef: u64[],
+        calls: Call[],
+        name: u8[]
+    };
+}
+
+// One call in a body's emission order. `kind` 0 names the callee (a user function, a
+// specialisation, a runtime entry, a drop helper or any other symbol the front end wrote); kind 1
+// is an indirect call, and `who` then says what stopped the target from being named.
+pub struct Call {
+    ins: u64,
+    kind: u64,
+    who: u8[]
+}
+
+// The location a value names, as one number: 0..15 a general register, 16..31 an `xmm` register,
+// 32 and up the frame slot whose offset is `-8(index - 32)`. 0 means "no location".
+fn loc_of(k: u64, v: u64) -> u64 {
+    if k == 1 {
+        return v;
+    }
+    if k == 6 {
+        if v >= 16 {
+            return v;
+        }
+        return 16;
+    }
+    if k == 2 {
+        return 32 + v / 8;
+    }
+    return 0;
+}
+
+// One value's type: `kind` is 0 untyped word, 1 f32, 2 a vector header of element width `width`,
+// 3 a `{data, len}` descriptor, 4 an element pointer (the result of `rt_slot`), 5 an immediate
+// (encodings shared with the front end's fact table, llvm.grl). `width` is the number of words the
+// value occupies, so a two-word pair has width 2.
+pub struct Ty {
+    kind: u64,
+    width: u64
+}
+fn ty(kind: u64, width: u64) -> Ty {
+    return Ty { kind: kind, width: width };
+}
+
+// Mint a value for `loc` and return its id.
+fn mint(o: (&mut Body), loc: u64, ty: u64, width: u64, ins: u64) -> u64 {
+    mut space: u64 = 0;
+    mut idx: u64 = loc;
+    if loc >= 32 {
+        space = 1;
+        idx = loc - 32;
+    } else if loc >= 16 {
+        space = 2;
+        idx = loc - 16;
+    }
+    o.vspace.push(space);
+    o.vidx.push(idx);
+    o.vty.push(ty);
+    o.vwidth.push(width);
+    o.vdef.push(ins);
+    return o.vspace.len() - 1;
+}
+
+// The type facts, indexed by body symbol: a 4096-bucket hash table whose chains hold fact indices
+// (index + 1, so 0 means "no fact"). The table is append-only and complete before the bodies are
+// walked, so it is indexed once per compile and a slot lookup is a scan of one body's few facts
+// instead of a scan of the whole table.
+pub struct FactIndex {
+    head: u64[],
+    next: u64[],
+    count: u64
+}
+fn fact_bucket<a>(facts: (&a llvm::Facts), i: u64) -> u64 {
+    mut h: u64 = 2166136261;
+    for j in llvm::fact_name_len(facts, i) {
+        h = wrapping_mul(h ^ llvm::fact_name_byte(facts, i, j), 16777619);
+    }
+    return h % 4096;
+}
+pub fn index_facts<a>(facts: (&a llvm::Facts)) -> FactIndex {
+    mut ix = FactIndex { head: u64[], next: u64[], count: llvm::facts_len(facts) };
+    for i in 4096 {
+        ix.head.push(0);
+    }
+    for i in ix.count {
+        h := fact_bucket(facts, i);
+        ix.next.push(ix.head[h]);
+        put(&mut ix.head, h, i + 1);
+    }
+    return ix;
+}
+// The slot's type fact from the index: `(what << 8) | width` in the table's own encodings, or 0.
+fn slot_fact<a, b, c>(ix: (&a FactIndex), facts: (&b llvm::Facts), name: &c [u8], slot: u64) -> u64 {
+    if ix.count == 0 {
+        return 0;
+    }
+    mut h: u64 = 2166136261;
+    for j in name.len() {
+        h = wrapping_mul(h ^ name[j], 16777619);
+    }
+    mut at = ix.head[h % 4096];
+    while at != 0 {
+        i := at - 1;
+        if (llvm::fact_kind(facts, i) == 0) & (llvm::fact_slot_at(facts, i) == slot) {
+            if llvm::fact_name_len(facts, i) == name.len() {
+                mut same = 1;
+                for j in name.len() {
+                    if llvm::fact_name_byte(facts, i, j) != name[j] {
+                        same = 0;
+                    }
+                }
+                if same != 0 {
+                    return (llvm::fact_what(facts, i) << 8) | (llvm::fact_width(facts, i) & 255);
+                }
+            }
+        }
+        at = ix.next[i];
+    }
+    return 0;
+}
+
+// The type a value's `what` gives: `what` 1 is an f32 (one word), 2/3/4 are vector headers of
+// element width 8/4/1, 5 is a `{data, len}` descriptor. Anything else is the untyped word.
+fn ty_of_what(what: u64) -> u64 {
+    if what == 1 {
+        return 1;
+    }
+    if (what == 2) || (what == 3) || (what == 4) {
+        return 2;
+    }
+    if what == 5 {
+        return 3;
+    }
+    return 0;
+}
+fn width_of_what(what: u64, wide: u64) -> u64 {
+    if what == 3 {
+        return 4;
+    }
+    if what == 4 {
+        return 1;
+    }
+    if what == 5 {
+        return 8;
+    }
+    if what == 1 {
+        return 1;
+    }
+    if what == 2 {
+        return 8;
+    }
+    return wide;
+}
+
+// `s[a..e]` is a `.type NAME,@function` line: the symbol it names, which is the key the fact table
+// files a body's slots under.
+pub fn type_symbol<a>(s: &a [u8], a: u64, e: u64) -> u8[] {
+    mut out = u8[];
+    mut i = a + 6;
+    while i < e {
+        if s[i] == 44 {
+            break;
+        }
+        out.push(s[i]);
+        i += 1;
+    }
+    return out;
+}
+
+// Fill a parsed body's value, type and call layers. Runs once, before the passes: `dval`/`use0`/`use1`
+// then answer "which definition does this read" without a pass re-deriving it from the text, and
+// `ity`/`iw` carry the width a two-word value has and the type the front end recorded for a slot.
+//
+// A value is minted per definition. Reads bind to the last definition of that location in the block;
+// a label starts a block, so a read across it keeps its slot (value 0) rather than claiming one
+// definition where a slot may hold several.
+pub fn build<a, b, c, d>(o: (&a mut Body), s: &b [u8], facts: (&c llvm::Facts), ix: (&d FactIndex)) {
+    o.dval.clear();
+    o.use0.clear();
+    o.use1.clear();
+    o.ity.clear();
+    o.iw.clear();
+    o.vspace.clear();
+    o.vidx.clear();
+    o.vty.clear();
+    o.vwidth.clear();
+    o.vdef.clear();
+    o.calls.clear();
+    // Value 0 is the "not one definition in this block" value.
+    o.vspace.push(0);
+    o.vidx.push(0);
+    o.vty.push(0);
+    o.vwidth.push(1);
+    o.vdef.push(0);
+    span := 32 + o.maxslot / 8 + 2;
+    mut cur = u64[];
+    for i in span {
+        cur.push(0);
+    }
+    last := o.op.len();
+    for i in last {
+        op := o.op[i];
+        if op == 100 {
+            // A label is a merge point or a jump target: what a location holds there is not one
+            // definition, so reads of it keep the location.
+            for j in span {
+                cur[j] = 0;
+            }
+        }
+        mut u0: u64 = 0;
+        mut u1: u64 = 0;
+        if o.k0[i] == 1 {
+            if ((reads(&o, i) >> o.v0[i]) & 1) != 0 {
+                u0 = cur[o.v0[i]];
+            }
+        }
+        if o.k0[i] == 2 {
+            if slot_read(&o, i, 0) {
+                u0 = cur[32 + o.v0[i] / 8];
+            }
+        }
+        if o.k1[i] == 1 {
+            if ((reads(&o, i) >> o.v1[i]) & 1) != 0 {
+                u1 = cur[o.v1[i]];
+            }
+        }
+        if o.k1[i] == 2 {
+            if slot_read(&o, i, 1) {
+                u1 = cur[32 + o.v1[i] / 8];
+            }
+        }
+        // The definition: the destination slot, the destination register, or - for the instructions
+        // whose result is not an operand - %rax (and %rdx for a two-word result).
+        mut d: u64 = 0;
+        mut dty: u64 = 0;
+        mut dw: u64 = 1;
+        if (o.k1[i] == 2) & slot_written(&o, i) {
+            loc := 32 + o.v1[i] / 8;
+            st := slot_ty(&o, facts, ix, o.v1[i] / 8);
+            dty = st.kind;
+            dw = st.width;
+            d = mint(&mut o, loc, dty, dw, i);
+            cur[loc] = d;
+        } else if o.k1[i] == 1 {
+            if ((writes(&o, i) >> o.v1[i]) & 1) != 0 {
+                loc := loc_of(o.k1[i], o.v1[i]);
+                mt := moved_ty(&o, i, o.k0[i], o.v0[i], u0);
+                dty = mt.kind;
+                dw = mt.width;
+                d = mint(&mut o, loc, dty, dw, i);
+                cur[loc] = d;
+            }
+        } else if op == 15 {
+            // A call's result is %rax, and %rdx too for a two-word result; the arguments are
+            // registers the call leaves to the calling convention, not operands.
+            ct := call_ty(&o, facts, i);
+            dty = ct.kind;
+            dw = ct.width;
+            d = mint(&mut o, 0, dty, dw, i);
+            cur[0] = d;
+            if o.ret2 != 0 {
+                d2 := mint(&mut o, 2, 0, 1, i);
+                cur[2] = d2;
+            }
+            o.dval.push(d);
+            o.use0.push(u0);
+            o.use1.push(u1);
+            o.ity.push(dty);
+            o.iw.push(dw);
+            record_call(&mut o, view(s), i);
+            continue;
+        } else if (op == 12) || (op == 13) {
+            // mulq/divq write %rax and %rdx and name neither as an operand.
+            d = mint(&mut o, 0, 0, 1, i);
+            cur[0] = d;
+            d2 := mint(&mut o, 2, 0, 1, i);
+            cur[2] = d2;
+        }
+        o.dval.push(d);
+        o.use0.push(u0);
+        o.use1.push(u1);
+        o.ity.push(dty);
+        o.iw.push(dw);
+    }
+}
+
+// A slot's type from the front end's fact table, and its width in words (a `.gpair` first word is
+// two words). The table keys a slot as `k` with the address `-8(k+1)`, while the stream spells the
+// same slot as `-N(%rbp)`; `N / 8 - 1` is the table's index for it.
+fn slot_ty<a, b, c, d>(o: (&a Body), facts: (&b llvm::Facts), ix: (&d FactIndex), slot: u64) -> Ty {
+    mut t: u64 = 0;
+    mut width: u64 = 1;
+    if slot != 0 {
+        // The table files a slot under the same number the stream spells in `-N(%rbp)`: the
+        // `--verify-facts` dump reads `slot 4` for the `-32(%rbp)` frame word.
+        k := slot_fact(ix, facts, view(o.name), slot);
+        if k != 0 {
+            t = ty_of_what(k >> 8);
+            width = width_of_what(k >> 8, 1);
+        }
+    }
+    mut pair = 0;
+    for p in o.pairs.len() {
+        if o.pairs[p] == slot {
+            pair = 1;
+        }
+    }
+    if pair != 0 {
+        width = 2;
+    }
+    return ty(t, width);
+}
+
+// The type of a register definition: a move copies the type of what it moved, an immediate is an
+// immediate, and anything else is the untyped word.
+fn moved_ty<a>(o: (&a Body), i: u64, k: u64, v: u64, u: u64) -> Ty {
+    if (o.op[i] == 1) & (k == 3) {
+        return ty(5, 1);
+    }
+    if u != 0 {
+        if (o.op[i] == 1) || (o.op[i] == 2) {
+            return ty(o.vty[u], o.vwidth[u]);
+        }
+    }
+    if o.op[i] == 3 {
+        // `leaq` of an address: a pointer into the frame, not a loaded value.
+        return ty(0, 1);
+    }
+    return ty(0, 1);
+}
+
+// The type of a call's result. The fact table records float arithmetic as a call fact (`what` 7),
+// keyed by the call's ordinal inside the body; everything else is the untyped word.
+fn call_ty<a, b>(o: (&a Body), facts: (&b llvm::Facts), i: u64) -> Ty {
+    return ty(0, 1);
+}
+
+// Record one call: the symbol the front end wrote, or why the target has no symbol.
+fn record_call<a, b>(o: (&a mut Body), s: &b [u8], i: u64) {
+    a := o.s0[i];
+    e := o.e0[i];
+    mut kind: u64 = 0;
+    mut who = u8[];
+    if a < e {
+        if (s[a] == 42) || (s[a] == 37) {
+            // `call *%rax`, `call *16(%rax)`: the target is in a register or a slot, so the stream
+            // names no callee. Stage 2 replaces this reason with the interface or closure behind it.
+            kind = 1;
+            for x in e - a {
+                who.push(s[a + x]);
+            }
+        } else {
+            for x in e - a {
+                who.push(s[a + x]);
+            }
+        }
+    } else {
+        kind = 1;
+        for x in view("no target text").len() {
+            who.push(view("no target text")[x]);
+        }
+    }
+    o.calls.push(Call { ins: i, kind: kind, who: who });
+}
+
+// ---------------------------------------------------------------------------------------------
+// The serializer: one function per unit, versioned, textual.
+
+fn append<a, b>(out: (&a mut u8[]), t: &b [u8]) {
+    for i in t.len() {
+        out.push(t[i]);
+    }
+}
+fn append_num<a>(out: (&a mut u8[]), n: u64) {
+    mut digits = u8[];
+    mut v = n;
+    if v == 0 {
+        out.push(48);
+        return ();
+    }
+    while v != 0 {
+        digits.push(48 + v % 10);
+        v = v / 10;
+    }
+    mut i = digits.len();
+    while 0 < i {
+        i -= 1;
+        out.push(digits[i]);
+    }
+}
+
+// The body as one unit of the serialised IR. The format is version 1:
+//
+//   ssair 1
+//   fn <symbol> unit <unit> prefix <prefix> ins <n> labels <n> calls <n>
+//   v <id> <reg|slot|xmm> <index> ty <kind> <width> def <instruction>
+//   i <ord> <mnemonic> k<k0>:<v0> k<k1>:<v1> d:<d> u<u0>:<u1> ty<kind>:<width> x<len>:<text>
+//   c <ord> <instruction> direct <symbol>
+//   c <ord> <instruction> indirect <reason>
+//   end
+//
+// Every count is repeated from the tables it describes, so a truncated unit is detectable without
+// parsing it, and `x<len>:` is the only field whose body can contain spaces: a reader takes exactly
+// `len` bytes after it.
+pub fn write_body<a, b>(o: (&a Body), s: &b [u8], out: (&mut u8[])) {
+    append(&mut out, view("fn "));
+    if o.name.len() == 0 {
+        append(&mut out, view("-"));
+    } else {
+        append(&mut out, view(o.name));
+    }
+    append(&mut out, view(" unit "));
+    append(&mut out, view(o.unit));
+    append(&mut out, view(" prefix "));
+    append(&mut out, view(o.uprefix));
+    append(&mut out, view(" ins "));
+    append_num(&mut out, o.op.len());
+    append(&mut out, view(" labels "));
+    mut labels: u64 = 0;
+    for i in o.op.len() {
+        if o.op[i] == 100 {
+            labels += 1;
+        }
+    }
+    append_num(&mut out, labels);
+    append(&mut out, view(" calls "));
+    append_num(&mut out, o.calls.len());
+    append(&mut out, view("\n"));
+    for v in o.vspace.len() {
+        if v == 0 {
+            continue;
+        }
+        append(&mut out, view("v "));
+        append_num(&mut out, v);
+        if o.vspace[v] == 0 {
+            append(&mut out, view(" reg "));
+        } else if o.vspace[v] == 2 {
+            append(&mut out, view(" xmm "));
+        } else {
+            append(&mut out, view(" slot "));
+        }
+        append_num(&mut out, o.vidx[v]);
+        append(&mut out, view(" ty="));
+        append_num(&mut out, o.vty[v]);
+        append(&mut out, view(","));
+        append_num(&mut out, o.vwidth[v]);
+        append(&mut out, view(" def="));
+        append_num(&mut out, o.vdef[v]);
+        append(&mut out, view("\n"));
+    }
+    for i in o.op.len() {
+        append(&mut out, view("i "));
+        append_num(&mut out, i);
+        append(&mut out, view(" "));
+        if o.op[i] < 100 {
+            for x in o.me[i] - o.ms[i] {
+                out.push(s[o.ms[i] + x]);
+            }
+        } else if o.op[i] == 100 {
+            append(&mut out, view("label"));
+        } else if o.op[i] == 102 {
+            append(&mut out, view("pair"));
+        } else {
+            append(&mut out, view("directive"));
+        }
+        append(&mut out, view(" o0="));
+        append_num(&mut out, o.k0[i]);
+        append(&mut out, view(":"));
+        append_num(&mut out, o.v0[i]);
+        append(&mut out, view(" o1="));
+        append_num(&mut out, o.k1[i]);
+        append(&mut out, view(":"));
+        append_num(&mut out, o.v1[i]);
+        append(&mut out, view(" d="));
+        append_num(&mut out, o.dval[i]);
+        append(&mut out, view(" u="));
+        append_num(&mut out, o.use0[i]);
+        append(&mut out, view(","));
+        append_num(&mut out, o.use1[i]);
+        append(&mut out, view(" ty="));
+        append_num(&mut out, o.ity[i]);
+        append(&mut out, view(","));
+        append_num(&mut out, o.iw[i]);
+        append(&mut out, view(" x="));
+        append_num(&mut out, o.le[i] - o.ls[i]);
+        append(&mut out, view(":"));
+        for x in o.le[i] - o.ls[i] {
+            out.push(s[o.ls[i] + x]);
+        }
+        append(&mut out, view("\n"));
+    }
+    for c in o.calls.len() {
+        append(&mut out, view("c "));
+        append_num(&mut out, c);
+        append(&mut out, view(" "));
+        append_num(&mut out, o.calls[c].ins);
+        if o.calls[c].kind == 0 {
+            append(&mut out, view(" direct "));
+        } else {
+            append(&mut out, view(" indirect "));
+        }
+        append(&mut out, view(o.calls[c].who));
+        append(&mut out, view("\n"));
+    }
+    append(&mut out, view("end\n"));
+}

@@ -1233,3 +1233,203 @@ touched the front end, the runtime and all three lowerings; option 3 touches the
 - `GRAIL_BACKEND=llvm bun tools/test-native.mjs x86_64` (exact `stdout` on both
   backends), `GRAIL_BACKEND=llvm bun tools/bench.mjs --rounds 9`, and the same for `aarch64`/`riscv64`
   under qemu, since the facts are target-independent and the lowering is shared.
+
+# A typed IR with SSA values, and its serializer
+
+Status: design, 2026-11-13 (gaps round, the `ssair` workstream). This section is the *second* half of
+this note: the fact table above carries two types from the front end into the LLVM lifter as a side
+table, and leaves the word stream, `optimize.grl` and `machine.grl` untouched. The IR below is the
+structural change that makes the stream a *program* -- values with types, instructions that define
+and use them, function bodies as units -- so the optimizer's passes can stop rediscovering value
+identity from text, the effects prover can walk calls instead of counting `call` lines, and a
+function body can be serialised and cached. It is staged so that stage 1 emits byte-identical
+assembly; the fact table stays the mechanism the LLVM backend reads, because it costs nothing on the
+native path and is consumed per value.
+
+## What exists today
+
+`compiler/native.grl` emits the program as *text*: `o(&mut c, view("movq %rax,%rcx\n"))` at several
+thousand sites, appended to one buffer. There is no instruction object anywhere in the front end. The
+first thing that looks at structure is `optimize.grl`, which scans that buffer line by line, splits a
+line into a mnemonic key (`opcode_key`, 34 codes) and two operands (`classify`: register, frame slot
+`-N(%rbp)`, immediate, label, or opaque text), and runs four passes over the parallel arrays it filled
+-- constant folding and slot forwarding, dead stores, dead definitions, and frame compaction with
+register promotion -- then prints each surviving line back, either from its original byte span or
+from the rewrite a pass recorded. `machine.grl` then lowers the x86-64 spelling to another target, and
+`llvm.grl` lifts the same spelling to LLVM IR.
+
+So the streams' *operands* are classified, but there are no values: two instructions that both say
+`-24(%rbp)` are related only by the passes re-deriving "did this slot change" from the text, and a
+value's type is known only where a `.gpair` marker or an `f32` fact happens to say so. Three
+consequences this section exists to remove:
+
+- `live_pass`, `count_reads` and `dead_stores` each walk the instruction array again to answer "how
+  many reads does this slot have from here", because nothing records a definition or a use;
+- the effects prover cannot see a call in the IR, so `fx_end` counts the `call` lines a body emitted
+  to check that no call site bypassed `call_out` -- a text scan that exists only because there is no
+  call list;
+- nothing in the tree can name a function body as a thing, so nothing can hash one, serialise one, or
+  reuse one (`docs/design/incremental-compilation.md`, *Below the module*).
+
+## What a value is
+
+A **value** is one machine word that an instruction wrote and a later instruction may read. It is
+identified by a number `v<i>`, and it names a location, not a register name: the location is the
+*space* and *index*
+
+- space 0, index `r` -- the 64-bit register `r` (the `reg_key` numbering: 0 rax, 1 rcx, ..., 13 r15),
+- space 1, index `k` -- the frame slot `-8k(%rbp)`,
+- space 2, index `r` -- the `xmm` register `r` (a float or a two-word move's second half).
+
+A value id is minted when an instruction *defines* a location, and it is what a read of that location
+resolves to. A two-word pair (`docs/design/typed-ir.md`'s `.gpair`, and the frame-slot pair the
+borrowed-object ABI builds) is **one** value occupying two slots: the pair's identity is its first
+word, and the second word is reachable only through the pair's address, exactly as `optimize.grl`'s
+`pair[]` already encodes.
+
+A value also carries a **type**, `Ty { kind, width }`, where kind is one of
+
+| kind | meaning | where the front end knows it |
+| --- | --- | --- |
+| 0 | an untyped word | everywhere else |
+| 1 | an `f32` (the low half of the word) | `Local.ty` is `f32`, `bind()` |
+| 2 | a vector header pointer, `width` = element width | `Local.ty` is `T[]`, `bind()`; `rt_new` results |
+| 3 | a view/slice descriptor `{data, len}`, `width` = element width | `&[T]` parameters and `rt_slice`/`rt_view` results |
+| 4 | an element pointer (the result of `rt_slot`) | `index_view` |
+| 5 | an immediate | `classify` already knows this |
+
+The type of a *slot* comes from the front end's `Fact` table (the section above), keyed by `(fn,
+slot)`. The type of a *register* is propagated from the instruction that wrote it: a `movq` copies its
+source's type, `leaq -N(%rbp)` types the destination as a slot pointer, an `f32` arithmetic call
+types its result, and anything the IR cannot type is kind 0. The propagation mirrors the one the
+lifter's F2 work already needed (`valtype`/`set_valtype` in `llvm.grl`), with the difference that here
+it happens once, in the emitter's own IR, instead of per backend.
+
+## What an instruction is
+
+An instruction is one line of the stream that has a mnemonic: an opcode (the 34 existing codes, plus
+100 label, 101 directive, 102 two-word declaration), two operands `(kind, value, span, mask)`, the
+`del`/`chg`/`tr`/`lab` flags the passes already keep, its byte span in the emitted text, and the SSA
+annotations:
+
+- `d` -- the value id it defines, or 0;
+- `u0`, `u1` -- the value ids it reads, or 0 for "the location's content on entry to the block";
+- `ty`, `w` -- the type and width of `d`.
+
+**SSA, and how it relates to the frame slots.** Ids are assigned per basic block, where a block starts
+at a label that something jumps to (or at the first instruction) and ends at a jump or at a label with
+an incoming edge. Inside a block, each definition is a new id and each read binds to the last
+definition of that location in the block. At a block entry nothing is known, so a read of a slot gets
+id 0 and stays a *slot read*; a read of a caller-saved register at a block entry is likewise 0. There
+are no phi nodes and none are needed: the pass that wants union-at-merge (frame compaction's
+per-slot read counts, forwarding) treats id 0 as "the slot", which is exactly the answer the current
+text-based passes compute, and the emitter needs the location either way.
+
+Two gaps are deliberate and named rather than hidden: an `xmm` register operand is not numbered
+(`classify` gives it kind 6, and an `xmm` value keeps its register, because no pass reasons about it
+yet), and a call's argument registers are not uses of the call instruction -- they are the calling
+convention's, so `u0`/`u1` are 0 for a call and its operands are the symbol it names.
+
+This is the sense in which SSA values relate to frame slots rather than replace them: a value id is
+*the name of one definition of one location*, the location is what the emitter prints, and the maps
+`value -> (space, index)` and `(space, index) -> current value` are both in the IR. The native
+backend emits from instructions whose operands are still locations, which is why this landing cannot
+change a byte; the SSA ids are what the passes, the prover and the cache read.
+
+## How ownership and drop information travels
+
+The front end already computes ownership: `own`, `move_out`, `release_temporaries`, `drop_call_out`
+and the drop-helper set decide, per expression, what is copied, moved and dropped, and the effects
+prover follows those drops through the call graph. In the IR that information appears in the two forms
+the native backend actually uses, and the IR does not invent a third:
+
+- **an edge.** Dropping a value emits a call to the drop helper (or to `rt_drop_seq`, `rt_free`,
+  `rt_release`), so the IR's call list carries the callee symbol and the instruction that made it.
+  Ownership *transfer* is therefore a call fact plus the values that flow into it, which is what
+  `docs/design/effects.md`'s fixpoint consumes and what stage 2 walks instead of counting text;
+- **a type.** The type a value carries (kind 2/3/4 above) is what decides whether a drop is one
+  release or element-by-element, so the drop information that the prover and the cache key need is the
+  pair (callee symbol, receiver type).
+
+What the IR deliberately does **not** carry is a borrow/loan encoding: loans are a front-end,
+source-level discipline, resolved before the word stream exists, and re-deriving them from
+instructions would be a second, weaker checker. A stage that needs it (an ownership-aware optimizer
+pass) has to have the front end record it, which is the same lesson the fact table taught.
+
+## What the optimizer's facts become
+
+The passes keep their algorithms, and their *inputs* become first class instead of re-derived:
+
+| today | in the IR |
+| --- | --- |
+| `reads`/`writes`/`slot_read`/`slot_written` scan an instruction twice per operand | `u0`/`u1`/`d` on the instruction, filled once by the SSA pass |
+| `live_pass` counts reads of a slot from a point by walking forward | the same walk, over value ids, so a redefinition of the slot ends the search without comparing spans |
+| `pair[]` (a slot array the two-word passes consult) | the pair is one value; `w` says two words |
+| `f32`/header handled by special cases in the lifter only | `ty` on the value, for every consumer |
+| the effects prover counting `call` lines in emitted bytes | `calls[]`, with the callee symbol and directness |
+
+Nothing in the table changes a decision in stage 1: the values are computed and carried, the passes
+read them where that reproduces today's answer, and `tools/ssair-bytes.mjs` compares every emitted
+function against the pre-change compiler to prove it.
+
+## The serializer
+
+The IR serialises as **one function per unit**, versioned, textual, because the two things it is for
+-- reviewing a body and keying a cache -- both want a diffable file, and because a body is what
+`docs/design/incremental-compilation.md` caches. Version 1:
+
+```
+ssair 1
+fn f_t_main unit t prefix t_11a4bd8d ins 12 labels 2 calls 1
+v 3 reg 0 ty=0,1 def=4
+v 4 slot 3 ty=1,1 def=7
+i 0 movq o0=1:0 o1=3:0 d=0 u=0,0 ty=0,1 x=12:movq %rax,%rcx
+i 1 leaq o0=2:24 o1=1:3 d=3 u=0,0 ty=0,1 x=18:leaq -24(%rbp),%rax
+c 0 ins 9 direct rt_abort
+end
+```
+
+- line 1 is the magic and the version; a reader refuses any version it does not implement and a unit
+  whose byte count disagrees with its declared `ins`, which is the same "a damaged entry is a miss"
+  rule the artifact store already uses;
+- `fn` names the symbol, the emission unit and its label prefix (both from `.grail_part`), and counts
+  the rest, so a truncated unit is detectable without parsing it;
+- `v` lines are the value table: id, space (`reg`/`xmm`/`slot`), index, `ty=<kind>,<width>` and
+  `def=<instruction>`;
+- `i` lines are the instructions in emission order: the ordinal, the mnemonic, each operand as
+  `=<kind>:<value>` (the kinds `classify` already assigns: 1 register, 2 frame slot, 3 immediate,
+  4 text/label, 6 `xmm`), the defined value, the two used values, the type and width of the defined
+  value, and the emitted line itself, length-prefixed as `x=<len>:<bytes>`; because `len` is stated,
+  the only field whose body can contain spaces is the last one, so a unit round-trips exactly;
+- `c` lines are the calls: ordinal, instruction, and either the callee symbol or, for an indirect
+  call, the reason it cannot be named (stage 2's refinement makes that reason specific: the interface,
+  the closure, the vtable slot's interface).
+
+`optimize.grl` does not read the format in stage 1 -- it is written and compared, so the format is
+fixed by something real before a cache depends on it. Stage 3 reads it, keys a unit by the hash of its
+own text plus the interface surfaces it names, and replays the emitted bytes of a unit that matches.
+
+Two properties of the writing are worth stating because they decide where the text comes from.
+
+**The unit is the body as the optimizer parsed it, before the passes.** `optimize.grl` calls
+`ir::build` and then `ir::write_body` at the same point, and only then runs the passes that delete
+instructions, rewrite spans and compact the frame. Writing the body *after* a pass would describe a
+stream whose `-N(%rbp)` numbering had already moved, and the frame slots are exactly what the type
+facts are keyed by (`docs/design/incremental-compilation.md` keys a unit by its body, not by its
+rewrite, so this is also the body a cache wants).
+
+**The facts are recorded for the IR only when it is asked for.** Every producer of a type fact in
+`native.grl` (`emit_slot_fact`, `fact_seq_arg`, `float_op_call`) tests one predicate, `wants_facts`:
+the LLVM lifter always wants the table, the typed IR wants it under `--emit-ir`, and a plain native
+build records nothing and pays nothing. When the table is wanted the optimizer indexes it once per
+compile (`ir::index_facts`, a 4096-bucket table by body symbol) so a slot lookup is a scan of one
+body's few facts rather than a scan of the whole table per slot the program writes.
+
+## What this does not do
+
+- It does not remove the front end's text emission. That is the *next* structural step (a builder API
+  in `native.grl`), and it is not needed for any of the three stages here: the IR starts where the
+  stream does.
+- It does not type every value: a value whose type the front end did not record is kind 0, and the
+  passes must treat that as "word", which is what they do today.
+- It does not add a phi node, a rewriter, or a second optimizer. The four passes stay the passes.
