@@ -613,10 +613,11 @@ half-installed: the prologue, the framing of every record, the trailer's digest 
 5. **unknown record** - `carries an unknown record (tag 99) … it was written by a newer compiler`;
 6. **unread field** - `carries N bytes this compiler does not read: the record declares X and this
    compiler reads Y`;
-6b. **another `dyn` ABI** - the header's ABI string differs from `iface_dyn_abi()` (or the header
-   carries none): a `&dyn` value would not mean the same thing across the two compilers;
-7. **edited** - `changed after it was written: the digest in its trailer does not match the file`;
-8. **not in the manifest / stale / disagreeing** - the stage-2 refusals, unchanged: the manifest
+7. **another `dyn` ABI** - the header's ABI string differs from `iface_dyn_abi()` (or the header
+   carries none): `was written for another \`dyn\` ABI (...) this compiler builds (...), so a
+   \`&dyn\` value would not mean the same thing`;
+8. **edited** - `changed after it was written: the digest in its trailer does not match the file`;
+9. **not in the manifest / stale / disagreeing** - the stage-2 refusals, unchanged: the manifest
    pins the bytes that were written, the source digest catches a changed source, and `--verify`
    compares the two record trees line by line and names the declaration that differs.
 

@@ -634,8 +634,18 @@ pub fn twice(x: u64) -> u64 {
   repin(seal(abi));
   const layout = compile(files, join(directory, 'abi'), ['--interface', ifaces]);
   assert.equal(layout.status, 1, 'an interface written for another `dyn` ABI must be refused');
-  assert.match(layout.output, /was written for another `dyn` ABI/, `the ABI refusal must name the ABI: ${layout.output}`);
-  assert.match(layout.output, /this compiler builds/, 'the ABI refusal must show the ABI this compiler builds');
+  assert.match(layout.output, /does not match this interface/, `the ABI refusal must name the module: ${layout.output}`);
+  assert.match(layout.output, /abi dyn pair size = 15/, 'the ABI refusal must show the ABI the file states');
+  // ... and the loader refuses it by itself, without the sources to compare against: `--use` reads a
+  // module whose source this build does not have, so the header's ABI is all there is to check.
+  const loaded = compile(
+    [join(project, 'src/main.grl'), runtime, platform],
+    join(directory, 'abi-use'),
+    ['--use', ifaces],
+  );
+  assert.equal(loaded.status, 1, 'loading an interface written for another `dyn` ABI must be refused');
+  assert.match(loaded.output, /was written for another `dyn` ABI/, `the ABI refusal must name the ABI: ${loaded.output}`);
+  assert.match(loaded.output, /this compiler builds/, 'the ABI refusal must show the ABI this compiler builds');
 
   // (c5) a record one field longer than this compiler reads: refused by length, never skipped.
   const grown = Buffer.from(original);

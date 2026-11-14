@@ -19,7 +19,10 @@
   interface implementation (`impl<T> Show for Pair<T>`) now carries its parameters - the text format
   wrote `params=0` because writer and reader looked the record up under different keys - and the
   compiler's own interfaces drop from 14,427 to 8,733 bytes, with emission from 4m12s to 2m14s.
-  docs/design/separate-compilation.md, "Format 4 as built"; cases `ifc-*`, and
+  The header record also carries the borrowed-`dyn` ABI (`abi dyn pair size = 16 align = 8 word0 =
+  data word1 = vtable drop = 0`, one string, `iface_dyn_abi()` its only spelling), so two modules
+  built for different pair layouts refuse to link rather than dereferencing each other's pairs
+  wrongly. docs/design/separate-compilation.md, "Format 4 as built"; cases `ifc-*`, and
   `tools/interface-test.mjs` proves round-trip equality and every refusal.
 - Ranges: a range value is now a `Span` (`lib/span.grl`) that carries the slice it was made from - a
   byte view plus its two ends - so a range its slice does not have is refused where the span is made
