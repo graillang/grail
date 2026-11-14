@@ -275,17 +275,12 @@ update all` already proves self-hosting and assembly identity on every target, s
 independent legs overlap within that cap. Each leg logs to `LOGDIR/<leg>.log` ending in `exit=N`;
 `LOGDIR/summary.txt` lists failures first, and `LOGDIR/DONE` is written last.
 
-### A build artifact a step depends on is an input
+### Two builds of the same compiler must not share a path
 
-A reseed whose stage 0 must be a particular compiler is only a recipe if that compiler exists.
-Keep such binaries **outside** every worktree (this repository uses `~/grail-bases/`), because
-`.work/native` is deleted on every host reset, and name the path in the design note that needs it.
-Two binaries are preserved there today:
-
-| artifact | why it is an input |
-| --- | --- |
-| `~/grail-bases/nargs-fixpoint` | named/default arguments are a syntax change: the seed cannot read the sources that implement them |
-| `~/grail-bases/int6-batch-base` | the batch base itself (int5 + drv + ssair + nargs), usable as stage 0 |
-
-If one is lost, the recovery is to rebuild a fixpoint from the branch that introduced the syntax
-change (parser first, then call sites) before any reseed can run.
+`buildCompiler` names its intermediates after the hash of its inputs, not after the process, so two
+tools that build the compiler at once in one worktree used to write the same `compiler.s` and
+`grail.pending.o` and destroy each other: the symptoms were clang's "no preprocessable inputs" and
+ld's "cannot open ...grail.pending.o" inside `command()`, which read like a broken build rather than
+a collision. The intermediates now carry the process id and the final name is claimed by `rename`,
+which is atomic, so a second caller either finds the finished binary or builds its own copy and
+loses the race harmlessly. That is what makes `GATE_JOBS > 1` safe for the tool legs.
