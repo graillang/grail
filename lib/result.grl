@@ -30,17 +30,23 @@ impl<T, E> Result<T, E> {
         }
     }
     // The success payload as an optional value; the failure is dropped.
+    //
+    // The variant is named (`Option::Some`, not the `Some(v)` shorthand) because the shorthand
+    // lowers to `core::some`, and `core` is written in terms of this module's `Option`. Naming it
+    // here would make `result` depend on `core` and `core` depend on `result`, which one compiler
+    // run per module cannot order (docs/design/separate-compilation.md, "What a run compiles, and
+    // what it writes").
     pub fn ok(self: Result<T, E>) -> T? {
         match self {
-            Ok(v) => { return Some(v); },
-            Err(e) => { return None; }
+            Ok(v) => { return Option::Some(v); },
+            Err(e) => { return Option::None; }
         }
     }
     // The failure payload as an optional value; the success is dropped.
     pub fn err(self: Result<T, E>) -> E? {
         match self {
-            Ok(v) => { return None; },
-            Err(e) => { return Some(e); }
+            Ok(v) => { return Option::None; },
+            Err(e) => { return Option::Some(e); }
         }
     }
     pub fn unwrap_or(self: Result<T, E>, fallback: T) -> T {
@@ -98,8 +104,8 @@ impl<T> Option<T> {
     pub fn map<U>(self: T?, f: FnMut(T) -> U) -> U? {
         mut call = f;
         match self {
-            Some(v) => { return Some(call(v)); },
-            None => { return None; }
+            Some(v) => { return Option::Some(call(v)); },
+            None => { return Option::None; }
         }
     }
     // `None` becomes the failure the caller writes, as a *union*: `T | E` is the shape that needs no

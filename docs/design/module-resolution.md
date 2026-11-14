@@ -47,7 +47,10 @@ The compiler closes the module set itself.
 - **`core` is implicit.** `Some(x)` and `None` lower to `core::some` and `core::none`, so core is
   compiled whenever a root holds `core.grl`, without a `use core;` line. It is the one name resolution
   looks for unasked, and it is not an error when no root has it (a compiler invocation with no roots
-  has no stdlib).
+  has no stdlib). Because no module names it, the per-module driver adds the edge resolution implies:
+  every module that is not part of the prelude is built after `core` (and the prelude - `core` and
+  what `core` itself `use`s - is built before it). docs/design/separate-compilation.md, "What a run
+  compiles, and what it writes".
 - **`use host;` is not a file.** It is a module's opt-in to the ambient `host::` interface, and
   resolution skips it.
 - **Unresolvable is a hard error**, naming the module, the file that asked, and every root searched:

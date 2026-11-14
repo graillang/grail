@@ -1360,6 +1360,48 @@ fn resolved_groups<a>(command: (&a u8[][]), at: u64, list: &a [u8]) -> ModuleGro
         }
         i += 1;
     }
+    // `core` is a dependency of every module, with no `use` line to say so: `Some(value)` and `None`
+    // lower to its constructors, so a unit compiled before it looks up `some` in a module nothing
+    // has declared yet ("unknown function `some` in `core`", in whichever module first writes one).
+    // `core` has dependencies of its own - it `use`s `result`, whose `Option` is the type `T?` names
+    // - and those are the bottom of the order rather than a cycle, so they are the prelude: built
+    // before `core`, and the only modules that do not get the implicit dependency.
+    if group_of(&groups, view("core")) != 0 {
+        mut prelude = u8[][copy(view("core"))];
+        mut k = 0;
+        while k < prelude.len() {
+            here := prelude[k].copy();
+            k += 1;
+            at := group_of(&groups, view(here));
+            if at == 0 {
+                continue;
+            }
+            for u in groups[at - 1].uses.len() {
+                used := groups[at - 1].uses[u].copy();
+                mut have = 0;
+                for i in prelude.len() {
+                    if eq(view(prelude[i]), view(used)) {
+                        have = 1;
+                    }
+                }
+                if have == 0 {
+                    prelude.push(used);
+                }
+            }
+        }
+        for g in groups.len() {
+            name := groups[g].name.copy();
+            mut in_prelude = 0;
+            for i in prelude.len() {
+                if eq(view(prelude[i]), view(name)) {
+                    in_prelude = 1;
+                }
+            }
+            if (in_prelude == 0) & !eq(view(name), view("runtime")) {
+                groups[g].uses.push(copy(view("core")));
+            }
+        }
+    }
     return groups;
 }
 // The program's own modules. The runtime and platform files are the base group every program has,
@@ -1761,6 +1803,21 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
                     record.push(32);
                     push_bytes(&mut record, view(input));
                     record.push(10);
+                }
+            }
+            // Every module source this build compiles, not only the ones the command line named: `use`
+            // resolution adds the standard closure, and the image shortcut has to see an edit there
+            // (docs/design/separate-compilation.md, "What a run compiles, and what it writes").
+            for g in groups.len() {
+                for f in groups[g].files.len() {
+                    source := groups[g].files[f].copy();
+                    if host::exists(view(source)) != 0 {
+                        push_bytes(&mut record, view("source "));
+                        push_bytes(&mut record, view(cache_digest_file(&mut store, view(source))));
+                        record.push(32);
+                        push_bytes(&mut record, view(source));
+                        record.push(10);
+                    }
                 }
             }
             cache_record_put(&mut store, view("prog"), view(program), view(record));
@@ -2368,17 +2425,23 @@ fn cache_build_id<a, b, d, e, g>(
                 id.ifaces = cache_digest_file(&mut c, view(manifest));
                 i += 2;
             } else {
-                if (a.len() != 0) & (a[0] == 45) {
-                    push_bytes(&mut flagbuf, view(a));
-                    flagbuf.push(10);
-                    i += 1;
+                if eq(view(a), view("--module-root")) & (i + 1 < argv.len()) {
+                    // A module root is a directory, not an input: the modules it resolves are modules
+                    // of the program, and the record written here lists each one's source.
+                    i += 2;
                 } else {
-                    if !eq(view(a), view(asm)) {
-                        digest := cache_digest_file(&mut c, view(a));
-                        id.sources.push(copy(view(a)));
-                        id.digests.push(digest);
+                    if (a.len() != 0) & (a[0] == 45) {
+                        push_bytes(&mut flagbuf, view(a));
+                        flagbuf.push(10);
+                        i += 1;
+                    } else {
+                        if !eq(view(a), view(asm)) {
+                            digest := cache_digest_file(&mut c, view(a));
+                            id.sources.push(copy(view(a)));
+                            id.digests.push(digest);
+                        }
+                        i += 1;
                     }
-                    i += 1;
                 }
             }
         }
@@ -2525,12 +2588,22 @@ fn cache_up_to_date<a, b, d>(c: (&a mut Cache), key: &b [u8], output: &d [u8]) -
     rows := lines(view(body));
     for i in rows.len() {
         row := item(&rows, i);
-        if starts(view(row), view("link ")) & (69 <= row.len()) {
+        // `link <digest> <path>` and `source <digest> <path>`: the digest is 64 hex, so the path
+        // starts 65 bytes after the field name.
+        mut skip = 0;
+        if starts(view(row), view("link ")) {
+            skip = 5;
+        } else {
+            if starts(view(row), view("source ")) {
+                skip = 7;
+            }
+        }
+        if (skip != 0) & (skip + 65 <= row.len()) {
             mut wanted = u8[];
             for k in 64 {
-                wanted.push(row[5 + k]);
+                wanted.push(row[skip + k]);
             }
-            path := cache_rest(view(row), 69);
+            path := cache_rest(view(row), skip + 65);
             actual := cache_digest_file(&mut c, view(path));
             if !eq(view(actual), view(wanted)) {
                 return 0;
