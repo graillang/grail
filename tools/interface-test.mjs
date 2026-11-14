@@ -371,8 +371,20 @@ function proveEquivalent(name, files, directory, { stdout: expected, args = [], 
   assert.equal(viaInterface.status, 0, `${name}: interface build failed\n${viaInterface.output}`);
   const interfaceExe = link(files, join(directory, 'interface'));
 
+  // The interface build generates the same program: code, data and symbol order, byte for byte. An
+  // interface stands in for a module's declarations, and nothing else about the run changes.
+  assert.equal(
+    readFileSync(join(directory, 'interface', 'out.s'), 'utf8'),
+    readFileSync(join(directory, 'source', 'out.s'), 'utf8'),
+    `${name}: the interface build emits different assembly from the source build`,
+  );
   const verified = compile(files, join(directory, 'verify'), ['--interface', ifaces, '--verify-interface']);
   assert.equal(verified.status, 0, `${name}: interfaces disagree with their sources\n${verified.output}`);
+  assert.equal(
+    readFileSync(join(directory, 'verify', 'out.s'), 'utf8'),
+    readFileSync(join(directory, 'source', 'out.s'), 'utf8'),
+    `${name}: the --verify build emits different assembly from the source build`,
+  );
   const verifyExe = link(files, join(directory, 'verify'));
 
   // A case's arguments and its working directory are part of what it tests (a fixture path, for
