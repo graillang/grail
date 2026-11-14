@@ -1,7 +1,7 @@
 // Build/test orchestration only. Language checking and instruction selection live in Grail.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, statSync, accessSync, constants as fsConstants } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, statSync, accessSync, constants as fsConstants } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { constants as zlibConstants, zstdCompressSync, zstdDecompressSync } from 'node:zlib';
@@ -373,13 +373,22 @@ export function buildCompiler() {
   const executable = join(directory, 'grail');
   if (existsSync(executable)) return executable;
   mkdirSync(directory, { recursive: true });
-  const output = join(directory, 'compiler.s');
+  // Every intermediate carries this process's id: two tools that build the compiler at the same
+  // time in one worktree compute the same hash and therefore the same directory, and with shared
+  // names one run's `compiler.s` or `grail.pending.o` disappears under the other. The symptom is a
+  // clang "no preprocessable inputs" or an ld "cannot open ...grail.pending.o", which reads like a
+  // broken build rather than two builds colliding. The final name is still claimed by rename,
+  // which is atomic, so the loser of the race simply finds the executable already there.
+  const output = join(directory, `compiler.${process.pid}.s`);
   // A seed from before typed references and the u64 default became the only modes still needs the
   // switches to read today's sources; a newer bootstrap accepts them too, so they are passed
   // unconditionally until the reseed drops them.
   command([base, '--default-u64', '--typed-refs', output, ...compilerSources], { env: compilerEnvironment() });
-  const pending = assemble(output, join(directory, 'grail.pending'));
+  const pending = assemble(output, join(directory, `grail.pending.${process.pid}`));
   renameSync(pending, executable);
+  for (const leftover of [output, pending, `${pending}.o`, `${pending}.s`]) {
+    if (existsSync(leftover)) rmSync(leftover);
+  }
   return executable;
 }
 // The compiler's own sources without the portable runtime and the host's platform module:

@@ -274,3 +274,13 @@ update all` already proves self-hosting and assembly identity on every target, s
 `verify` follows. At most three legs run at once - this machine has crashed under more - and
 independent legs overlap within that cap. Each leg logs to `LOGDIR/<leg>.log` ending in `exit=N`;
 `LOGDIR/summary.txt` lists failures first, and `LOGDIR/DONE` is written last.
+
+### Two builds of the same compiler must not share a path
+
+`buildCompiler` names its intermediates after the hash of its inputs, not after the process, so two
+tools that build the compiler at once in one worktree used to write the same `compiler.s` and
+`grail.pending.o` and destroy each other: the symptoms were clang's "no preprocessable inputs" and
+ld's "cannot open ...grail.pending.o" inside `command()`, which read like a broken build rather than
+a collision. The intermediates now carry the process id and the final name is claimed by `rename`,
+which is atomic, so a second caller either finds the finished binary or builds its own copy and
+loses the race harmlessly. That is what makes `GATE_JOBS > 1` safe for the tool legs.
