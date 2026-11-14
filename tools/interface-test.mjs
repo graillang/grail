@@ -60,9 +60,12 @@ function link(files, directory, name = 'program') {
   return assemble(asm, join(directory, name), target, linkArgs);
 }
 
+const clip = (text, limit = 400) => (typeof text === 'string' && text.length > limit ? `${text.slice(0, limit)}...` : text);
 function run(executable, args = [], options = {}) {
-  const result = spawnSync(executable, args, { encoding: 'utf8', timeout: 900_000, ...options });
-  return { status: result.status, signal: result.signal, stdout: result.stdout ?? '' };
+  // A generous output buffer: a program that prints more than node's 1 MB default is killed by the
+  // spawn, which looks like a null status and a signal rather than like the program's own answer.
+  const result = spawnSync(executable, args, { encoding: 'utf8', timeout: 900_000, maxBuffer: 64 * 1024 * 1024, ...options });
+  return { status: result.status, signal: result.signal, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
 }
 
 // Describing a module is not making a program: `--no-entry` lets a run emit the interfaces of the
@@ -401,9 +404,9 @@ function proveEquivalent(name, files, directory, { stdout: expected, args = [], 
   const a = run(sourceExe, args, runOptions);
   const b = run(interfaceExe, args, runOptions);
   const c = run(verifyExe, args, runOptions);
-  assert.equal(b.status, a.status, `${name}: exit status ${b.status} != ${a.status}`);
+  assert.equal(b.status, a.status, `${name}: exit status ${b.status} != ${a.status} (signal ${b.signal})`);
   assert.equal(b.stdout, a.stdout, `${name}: interface build prints something else`);
-  assert.equal(c.status, a.status, `${name}: verify build exit status`);
+  assert.equal(c.status, a.status, `${name}: verify build exit status (signal ${c.signal}, stderr ${JSON.stringify(clip(c.stderr))})`);
   assert.equal(c.stdout, a.stdout, `${name}: verify build prints something else`);
   if (expected !== undefined) assert.equal(a.stdout, expected, `${name}: source build output`);
   return ifaces;
