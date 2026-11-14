@@ -392,6 +392,49 @@ pub fn twice(x: u64) -> u64 {
   return { edited: edited.output.trim().split('\n')[0], manifest: laundered.output.trim().split('\n')[0], verify: verified.output.trim().split('\n')[0], env: envRefused.output.trim().split('\n')[0] };
 }
 
+// (d0) the manifest is the set, not only a checksum list: a source module the manifest does not
+// describe is refused by name. This is the guard against the class of bug where an emitting run's
+// source list and the set it wrote disagreed - the module then had no interface file at all, and the
+// disagreement only surfaced one module later as an unknown name in somebody else's module (the
+// compiler built against its own modules, `lexer.iface` missing).
+function proveManifestCoverage() {
+  const directory = join(work, 'coverage');
+  const project = join(directory, 'project');
+  mkdirSync(join(project, 'src'), { recursive: true });
+  writeFileSync(join(project, 'src/util.grl'), 'module util;\n\npub fn twice(x: u64) -> u64 {\n    return x * 2;\n}\n');
+  writeFileSync(join(project, 'src/helper.grl'), 'module helper;\n\npub fn bump(x: u64) -> u64 {\n    return x + 7;\n}\n');
+  writeFileSync(join(project, 'src/main.grl'), 'use util;\nuse helper;\n\npub fn main() -> u64 {\n    println(util::twice(helper::bump(3)));\n    return 0;\n}\n');
+  const files = [join(project, 'src/main.grl'), join(project, 'src/util.grl'), join(project, 'src/helper.grl'), runtime, platform];
+  const ifaces = emit(files, directory);
+  const manifestPath = join(ifaces, 'interfaces.manifest');
+  const original = readFileSync(manifestPath, 'utf8');
+  const rows = original.split('\n').filter(row => row.length !== 0 && !row.startsWith('//'));
+  assert.equal(rows.length, 3, `the emitting run must list every source module of the program: ${original}`);
+  // Delete one module's row - the interface file stays, so only the manifest can catch it - and the
+  // consuming run must name the module it can no longer account for.
+  const dropped = rows.find(row => row.startsWith('util '));
+  assert.ok(dropped, `no util row in the manifest: ${original}`);
+  writeFileSync(manifestPath, `// grail-interfaces 1\n${rows.filter(row => row !== dropped).join('\n')}\n`);
+  const refused = compile(files, join(directory, 'build'), ['--interface', ifaces, '--verify-interface']);
+  assert.equal(refused.status, 1, `a manifest missing a source module must be refused\n${refused.output}`);
+  assert.match(refused.output, /has no interface for module `util`/, `the refusal must name the missing module: ${refused.output}`);
+  assert.match(refused.output, /util\.iface/, 'the refusal must name the file it expected');
+  // `--interface DIR` is a verification build (`--verify-interface` only says so explicitly), so the
+  // reading is the same for the directory's last row: a manifest that does not describe a source
+  // module of the run is refused by name, never silently filled in from the module's source.
+  const entryRow = rows.find(row => row.startsWith('main '));
+  assert.ok(entryRow, `no main row in the manifest: ${original}`);
+  writeFileSync(manifestPath, `// grail-interfaces 1\n${rows.filter(row => row !== entryRow).join('\n')}\n`);
+  const entryRefused = compile(files, join(directory, 'entry'), ['--interface', ifaces]);
+  assert.equal(entryRefused.status, 1, `a manifest without the entry module is refused too\n${entryRefused.output}`);
+  assert.match(entryRefused.output, /has no interface for module `main`/, `the refusal must name the entry: ${entryRefused.output}`);
+  // Restored, the same sources build: the refusals above are about the missing rows.
+  writeFileSync(manifestPath, original);
+  const restored = compile(files, join(directory, 'restored'), ['--interface', ifaces]);
+  assert.equal(restored.status, 0, `an untouched manifest must build\n${restored.output}`);
+  return refused.output.trim().split('\n')[0];
+}
+
 // (d) no leakage, on a module whose source has a distinctive helper and distinctive locals.
 function proveLeakage() {
   const directory = join(work, 'leak');
@@ -506,7 +549,10 @@ function proveCallerRejected() {
   assert.ok(existsSync(join(ifaces, 'interfaces.manifest')), 'the emitting run wrote no interfaces');
   const rejected = compile(files, join(directory, 'build'), ['--interface', ifaces]);
   assert.equal(rejected.status, 1, 'a caller that disagrees with the interface must be rejected');
-  assert.match(rejected.output, /error(\[E\d+\])?: wrong number of arguments\n\s*--> \S*reject_user\.grl:\d+:\d+/, `the rejection must be in the caller's file: ${rejected.output}`);
+  // The arity message carries the callee's detail before the arrow ('wrong number of arguments:
+  // `make` takes 2, this call passes 1'), the wording `gaps5-dnsfix` (1f72e70) settles; int5's copy of
+  // this line predates it, so this file keeps the wider form.
+  assert.match(rejected.output, /error(\[E\d+\])?: wrong number of arguments[^\n]*\n\s*--> \S*reject_user\.grl:\d+:\d+/, `the rejection must be in the caller's file: ${rejected.output}`);
   return rejected.output.trim().split('\n')[0];
 }
 
@@ -518,6 +564,9 @@ report('compiler compiled against its own interfaces', `${self.modules} interfac
 
 const stale = proveStale();
 report('stale interface refused', stale);
+
+const coverage = proveManifestCoverage();
+report('a source module missing from the manifest refused', coverage);
 
 const tamper = proveTampering();
 report('edited transfer refused (manifest)', tamper.edited);

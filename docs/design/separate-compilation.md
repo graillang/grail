@@ -156,12 +156,16 @@ The audit metadata the parallelism design asks for travels with it:
   needs, because one object for the whole program cannot leave a module out (see "still missing").
 - **Local names, statements, comments.** The writer never emits token text: only declarations, types
   and flags.
-- **Synthetic compiler modules.** `.impl_N`, `.inherent_N`, `.interface_N`, `.union`, `.result`,
-  `.closure` and `__start` never appear as modules: an implementation's methods travel under the
-  declaration they belong to (`inherent`/`impl` sections), a union travels as its members, an
-  environment record travels as the closure type's environment, and the process entry belongs to no
-  module at all.
-- **The runtime.** `module runtime` (the portable runtime and the platform module) is the trusted
+- **Nothing, if it is a source module.** Every source module of the program gets an interface,
+  except the runtime and the platform modules: `core` gets one like any other module when it is a
+  source module of the build (which `use` resolution makes it), and the prelude is not exempt as a
+  category. What gets none is not a source module: the synthetic units `.impl_N`, `.inherent_N`,
+  `.interface_N`, `.union`, `.result`, `.closure` and `__start`, and the entry's process furniture.
+  An implementation's methods travel under the declaration they belong to (`inherent`/`impl`
+  sections), a union travels as its members, an environment record travels as the closure type's
+  environment, and the process entry belongs to no module at all.
+- **The runtime and the platform modules.** `module runtime` - the portable runtime and the platform
+  module (`os-linux.grl`, `os-windows.grl`, `darwin.grl`), which all declare it - is the trusted
   base: it is compiled from source in every build and has no interface.
 - **Anything the module keeps private** (see Visibility below), except what a public template's body
   needs. `tools/interface-test.mjs` also pins that no body, no local name, no synthetic module and no
@@ -812,12 +816,26 @@ reruns some modules that do not import it - conservative, never stale.
 
 A run compiles the files it is given and writes one interface per module it compiled from source: a
 module a run compiles from source appears in the interface set of that run exactly once, whether the
-command line named it or `use` resolution added it. A module a run read from an interface (`--use`) is
-not re-read from source in that run: it is described by the interface it came from, and the run that
-compiled it from source is the one that writes that interface. A per-module build therefore writes
-each interface once per build, and the interfaces a build leaves behind are its modules' objects
-minus `runtime`, which is the trusted base and has none. (`tools/cache-test.mjs` (g) counts the runs;
-the corpus case `drv-per-module-three-modules` counts the interfaces against the objects.)
+command line named it, `use` resolution added it, or - for a program that is a list of sources, like
+the compiler built against its own modules - it was simply one of the files. The set is every source
+module except the runtime and the platform modules (the rule above, stated once, for both shapes). A
+module a run read from an interface (`--use`) is not re-read from source in that run: it is
+described by the interface it came from, and the run that compiled it from source is the one that
+writes that interface. A per-module build therefore writes each interface once per build, and the
+interfaces a build leaves behind are its modules' objects minus the runtime, which is the trusted
+base and has none. (`tools/cache-test.mjs` (g) counts the runs; the corpus case
+`drv-per-module-three-modules` counts the interfaces against the objects.)
+
+The manifest is where that set is visible: an emitting run writes `interfaces.manifest` with one
+`MODULE <digest-of-its-interface> <digest-of-its-source>` row per module it wrote. `--interface DIR`
+is a verification build - every module given as source is compiled and checked against
+`DIR/<module>.iface`, which is what `--verify-interface` says explicitly - so the manifest is also
+the set that build checks: a source module the manifest does not describe is refused by name, with
+the same diagnostic a missing file earns (it names the module and the file it should be in), and the
+refusal comes from the manifest, so an emitting run whose source list and its set disagreed surfaces
+at the boundary instead of one module later as an unknown name inside somebody else's module.
+Interfaces standing in for source a build does not have is `--use`, which reads the files it is
+given and has no manifest to check.
 
 The driver builds in the order of the `use` graph plus one edge no source writes: `core`. `Some(value)`
 and `None` lower to `core`'s constructors, so a module may need `core` without naming it, and `core` is
