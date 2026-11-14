@@ -143,3 +143,24 @@ regeneration and nothing else.
   that passes them cannot name anything, because a positional argument may not follow a named one.
   Such a declaration cannot give a parameter a default either - the C signature is the declaration.
 - `self` cannot have a default.
+
+## Reseeding a tree that contains this change
+
+Named and default arguments are a **syntax** change, so the checked-in seed cannot read the sources
+that implement them: `compiler/cli.grl` calls `compile(..., iface: view(""))`, and a pre-change
+compiler answers `expected ',', found '='`. A batch that contains this work therefore needs a
+fixpoint compiler as its stage 0, and that compiler is part of the batch's inputs.
+
+The stage-0 binary is preserved outside every worktree, because `.work/native` is deleted on
+every host reset:
+
+    GRAIL_COMPILER=~/grail-bases/nargs-fixpoint bun tools/bootstrap.mjs update all
+
+`~/grail-bases/int6-batch-base` is the compiler built from the batch base itself (int5 + drv +
+ssair + nargs); either works as stage 0 for a tree that contains this change, and the first is the
+older, more conservative choice.
+
+If both binaries are lost, the recovery is a two-step from this branch: check out the pre-syntax
+commit (the parser change alone, before any call site used it), build a compiler from it, use it as
+`GRAIL_COMPILER` to build the current sources, and only then reseed. That is a half hour of
+archaeology, which is why the binaries live outside `.work`.
