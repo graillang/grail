@@ -1,5 +1,11 @@
 ## Unreleased
 
+- Changed: an `@no_alloc`/`@no_panic` refusal for an indirect call now names what the call is. The
+  effects record keeps the reason the target has no symbol (`fx_edge_why`, filled by
+  `call_slot_out`), and a `dyn` receiver's site fills it from the interface the vtable belongs to, so
+  the diagnostic reads "it makes an indirect call the compiler cannot follow (the target is interface
+  `Shape` of module `m`)" instead of a blanket "an indirect call". A closure call, a function value
+  and an imported function say which they are. Case `ssair-fx-indirect-names-interface`.
 - Added: a typed IR with SSA values for the word stream, and its serializer
   (`compiler/ir.grl`, docs/design/typed-ir.md "A typed IR with SSA values, and its serializer").
   The optimizer's record moved out of `optimize.grl` into the IR module as `ir::Body`, and with it

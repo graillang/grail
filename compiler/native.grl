@@ -773,6 +773,10 @@ struct C {
     fx_edge_kind: u64[],
     fx_edge_file: u64[],
     fx_edge_pos: u64[],
+    // Why an edge names no callee - `interface `Shape``, `a closure`, `a function value`. Empty for
+    // an edge that names its callee; an unknown edge's reason is what the refusal prints, so a
+    // `@no_alloc` function that reaches one is told which one (docs/design/effects.md).
+    fx_edge_why: u8[][],
     fx_pending_alloc: u64,
     fx_pending_panic: u64,
     fx_bounded: u64,
@@ -12767,7 +12771,7 @@ fn ffi_emit_call<a, b, d, e, f>(
     }
     if symbol.len() == 0 {
         get(&mut c, target, view("%rax"));
-        call_slot_out(&mut c, view("call *%rax\n"));
+        call_slot_out(&mut c, view("call *%rax\n"), view("a closure call"));
     } else {
         call_out(&mut c, view(symbol));
     }
@@ -16508,6 +16512,17 @@ fn fx_edge<a, b>(c: (&a mut C), name: &b [u8], proved: u64) -> unit {
     p := c.pos;
     c.fx_edge_file.push(f);
     c.fx_edge_pos.push(p);
+    c.fx_edge_why.push(u8[]);
+    return ();
+}
+// Say why the edge just recorded names no callee. Called by the indirect call sites, which are the
+// ones that know what the target is; the solver turns it into the refusal's reason.
+fn fx_why<a, b>(c: (&a mut C), why: &b [u8]) -> unit {
+    last := c.fx_edge_why.len();
+    if last == 0 {
+        return ();
+    }
+    c.fx_edge_why[last - 1] = copy_bytes(view(why));
     return ();
 }
 // The edge list back to where a body started: an attempt whose bytes were discarded does not get to
@@ -16520,6 +16535,7 @@ fn fx_edges_truncate<a>(c: (&a mut C), mark: u64) -> unit {
         c.fx_edge_kind.pop();
         c.fx_edge_file.pop();
         c.fx_edge_pos.pop();
+        c.fx_edge_why.pop();
     }
     return ();
 }
@@ -16552,8 +16568,25 @@ fn call_proved_out<a, b>(c: (&a mut C), callee: &b [u8]) -> unit {
 }
 // An indirect call in user code: `text` is the instruction (`call *%rax`, an import thunk). Nothing
 // names what it reaches, so it is an unknown edge.
-fn call_slot_out<a, b>(c: (&a mut C), text: &b [u8]) -> unit {
+// "interface `Shape`" for a call through a `dyn` receiver: the interface the vtable belongs to, so a
+// refusal names the contract instead of saying that something unknown was called.
+fn iface_reason<a>(c: (&a mut C), iface: u64) -> u8[] {
+    mut out = copy_bytes(view("interface `"));
+    if (0 < iface) & (iface <= c.interfaces.len()) {
+        push_bytes(&mut out, view(c.interfaces[iface - 1].name));
+        if c.interfaces[iface - 1].module.len() != 0 {
+            push_bytes(&mut out, view("` of module `"));
+            push_bytes(&mut out, view(c.interfaces[iface - 1].module));
+        }
+    } else {
+        push_bytes(&mut out, view("?"));
+    }
+    push_bytes(&mut out, view("`"));
+    return out;
+}
+fn call_slot_out<a, b, d>(c: (&a mut C), text: &b [u8], why: &d [u8]) -> unit {
     fx_edge(&mut c, view(""), 0);
+    fx_why(&mut c, view(why));
     fx_called(&mut c);
     o(&mut c, text);
     return ();
@@ -16921,6 +16954,16 @@ fn fx_unknown_pos_of<a>(c: (&a mut C), from: u64) -> u64 {
 // Every claim is checked here, after the whole program - the drop helpers, the vtables' drop slots and
 // the specialisations - has been emitted and settled. A claim on a generic is checked per emitted
 // instance, so the refusal names the instance whose body reaches the root.
+// Why the body reaches a call nothing names: the reason recorded where the call was emitted
+// (`iface_reason` for a `dyn` receiver), or nothing when the edge predates the reason.
+fn fx_unknown_why<a>(c: (&a mut C), k: u64) -> u8[] {
+    for e in c.fx_edge_from.len() {
+        if (c.fx_edge_from[e] == k) & (c.fx_edge_name[e].len() == 0) & (c.fx_edge_why[e].len() != 0) {
+            return c.fx_edge_why[e].copy();
+        }
+    }
+    return u8[];
+}
 fn fx_report<a>(c: (&a mut C)) -> unit {
     if c.fx_any == 0 {
         return ();
@@ -16954,6 +16997,12 @@ fn fx_report<a>(c: (&a mut C)) -> unit {
                 push_bytes(&mut msg, view("\n = move the allocation out of the function, or keep the attribute off it"));
             } else {
                 push_bytes(&mut msg, view("` performs a heap allocation: it makes an indirect call the compiler cannot follow"));
+                why := fx_unknown_why(&mut c, k);
+                if why.len() != 0 {
+                    push_bytes(&mut msg, view(" (the target is "));
+                    push_bytes(&mut msg, view(why));
+                    push_bytes(&mut msg, view(")"));
+                }
                 push_bytes(&mut msg, view("\n = a call through a function value or a vtable may allocate; name the callee, or keep the attribute off"));
                 at_file = fx_unknown_file_of(&mut c, k);
                 at_pos = fx_unknown_pos_of(&mut c, k);
@@ -16990,6 +17039,12 @@ fn fx_report<a>(c: (&a mut C)) -> unit {
                 push_bytes(&mut msg, view("\n = prove the check away, or keep the attribute off the function"));
             } else {
                 push_bytes(&mut msg, view("` can fail: it makes an indirect call the compiler cannot follow"));
+                why := fx_unknown_why(&mut c, k);
+                if why.len() != 0 {
+                    push_bytes(&mut msg, view(" (the target is "));
+                    push_bytes(&mut msg, view(why));
+                    push_bytes(&mut msg, view(")"));
+                }
                 push_bytes(&mut msg, view("\n = a call through a function value or a vtable may fail; name the callee, or keep the attribute off"));
                 at_file = fx_unknown_file_of(&mut c, k);
                 at_pos = fx_unknown_pos_of(&mut c, k);
@@ -20705,14 +20760,14 @@ fn emit_resolved_call<a>(
             o(&mut c, view("movq 8(%rdi),%rax\nmovq "));
             on(&mut c, (dyn_entry - 1) * 8);
             o(&mut c, view("(%rax),%rax\nmovq (%rdi),%rdi\n"));
-            call_slot_out(&mut c, view("call *%rax\n"));
+            call_slot_out(&mut c, view("call *%rax\n"), view(iface_reason(&mut c, contract)));
         } else {
             // The receiver is a reference to the object's slot: the cell it holds starts with the
             // value, so the cell is the `&Self` the implementation expects; word 1 is the vtable.
             o(&mut c, view("movq (%rdi),%rdi\nmovq 8(%rdi),%rax\nmovq "));
             on(&mut c, (dyn_entry - 1) * 8);
             o(&mut c, view("(%rax),%rax\n"));
-            call_slot_out(&mut c, view("call *%rax\n"));
+            call_slot_out(&mut c, view("call *%rax\n"), view(iface_reason(&mut c, contract)));
         }
     } else {
         callee := mangle_name(&mut c, view(destination), view(symbol));
@@ -21208,7 +21263,7 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
         get(&mut c, envp, view("%rdi"));
     }
     get(&mut c, target, view("%rax"));
-    call_slot_out(&mut c, view("call *%rax\n"));
+    call_slot_out(&mut c, view("call *%rax\n"), view("a function value"));
     slot := save_result(&mut c, resulttype);
     own(&mut c, slot, resulttype);
     shape_pair_result(&mut c, slot, resulttype);
@@ -21645,7 +21700,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
                 get(&mut c, args[4], view("%r9"));
             }
             get(&mut c, args[0], view("%r11"));
-            call_slot_out(&mut c, view("call *%r11\n"));
+            call_slot_out(&mut c, view("call *%r11\n"), view("an imported function"));
         } else {
             if 0 < count {
                 get(&mut c, args[1], view("%rdi"));
@@ -21728,7 +21783,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
             get(&mut c, args[3], view("%r9"));
         }
         win32_link(&mut c, view(api));
-        call_slot_out(&mut c, view("call *__imp_"));
+        call_slot_out(&mut c, view("call *__imp_"), view("an imported function"));
         o(&mut c, view(api));
         o(&mut c, view("(%rip)\n"));
         o(&mut c, view("addq $"));
@@ -21805,7 +21860,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
                 &mut c,
                 view("subq $48,%rsp\nxorl %ecx,%ecx\nmovl $12288,%r8d\nmovl $4,%r9d\n")
             );
-            call_slot_out(&mut c, view("call *__imp_VirtualAlloc(%rip)\n"));
+            call_slot_out(&mut c, view("call *__imp_VirtualAlloc(%rip)\n"), view("an imported function"));
             o(
                 &mut c,
                 view("addq $48,%rsp\n")
@@ -21909,7 +21964,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
                     &mut c,
                     view("xorl %ebp,%ebp\npopq %rax\npopq %rdi\n")
                 );
-                call_slot_out(&mut c, view("call *%rax\n"));
+                call_slot_out(&mut c, view("call *%rax\n"), view("a call through a value the compiler did not name"));
                 o(
                     &mut c,
                     view("movl $60,%eax\nxorl %edi,%edi\nsyscall\nud2\n")
@@ -22071,13 +22126,13 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         get(&mut c, args[2], view("%rsi"));
         get(&mut c, args[3], view("%rdx"));
         get(&mut c, args[0], view("%rax"));
-        call_slot_out(&mut c, view("call *%rax\n"));
+        call_slot_out(&mut c, view("call *%rax\n"), view("a call through a value the compiler did not name"));
     }
     if id == 118 {
         get(&mut c, args[1], view("%rdi"));
         get(&mut c, args[2], view("%rsi"));
         get(&mut c, args[0], view("%rax"));
-        call_slot_out(&mut c, view("call *%rax\n"));
+        call_slot_out(&mut c, view("call *%rax\n"), view("a call through a value the compiler did not name"));
     }
     if id == 112 {
         get(&mut c, args[0], view("%rdi"));
@@ -24160,7 +24215,7 @@ fn task_scope_builtin<a>(c: (&a mut C), context: Val) -> Val {
     get(&mut c, handle, view("%rdi"));
     get(&mut c, context.t, view("%rsi"));
     get(&mut c, body.t, view("%rax"));
-    call_slot_out(&mut c, view("call *%rax\n"));
+    call_slot_out(&mut c, view("call *%rax\n"), view("a call through a value the compiler did not name"));
     slot := save(&mut c);
     invoke(&mut c, view("rt_scope_end"), one(handle));
     observe(&mut c, context.t);
@@ -26811,7 +26866,7 @@ fn mutex_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
     get(&mut c, pointer, view("%rdi"));
     get(&mut c, heldslot, view("%rsi"));
     get(&mut c, target, view("%rax"));
-    call_slot_out(&mut c, view("call *%rax\n"));
+    call_slot_out(&mut c, view("call *%rax\n"), view("a call through a value the compiler did not name"));
     slot := save(&mut c);
     invoke(&mut c, view("rt_mutex_unlock"), one(cell));
     own(&mut c, slot, result);
@@ -39421,6 +39476,7 @@ pub fn main() -> u64 {
         fx_edge_kind: u64[],
         fx_edge_file: u64[],
         fx_edge_pos: u64[],
+        fx_edge_why: u8[][],
         fx_pending_alloc: 0,
         fx_pending_panic: 0,
         fx_bounded: 0,
