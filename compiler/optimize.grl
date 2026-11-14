@@ -1098,11 +1098,16 @@ fn build_pairs<a>(o: (&a mut ir::Body), ns: u64) {
 // then the passes. The layer is built before the passes because the front end's type facts are
 // keyed by the frame slot numbers the passes go on to compact
 // (docs/design/typed-ir.md, "The serializer").
-fn body<a, b, c, d>(o: (&a mut ir::Body), s: &b [u8], facts: (&c llvm::Facts), ix: (&d ir::FactIndex), want_ir: u64, ir_text: (&mut u8[])) {
+fn body<a, b, c, d, e>(o: (&a mut ir::Body), s: &b [u8], facts: (&c llvm::Facts), ix: (&d ir::FactIndex), want_ir: u64, ir_text: (&mut u8[]), replay: (&e ir::Replay), call_syms: (&mut u8[][]), call_counts: (&mut u64[])) {
     ir::build(&mut o, view(s), facts, ix);
     if want_ir != 0 {
         ir::write_body(&o, view(s), &mut ir_text);
     }
+    // What the effect recorder's count is held against: the calls this body parses to, minus the
+    // ones in a replayed `.proved` prologue, which the recorder counted where they were emitted.
+    range := ir::replay_of(replay, view(o.name));
+    call_syms.push(o.name.copy());
+    call_counts.push(ir::count_calls(&o, range[0], range[1]));
     function(&mut o, view(s));
 }
 fn function<a, b>(o: (&a mut ir::Body), s: &b [u8]) {
@@ -1826,15 +1831,15 @@ fn compact<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64, ns: u64) -> u6
     }
     return (used * 8 + 15) / 16 * 16;
 }
-pub fn optimize<b, c>(s: &b [u8], facts: (&c llvm::Facts), want_ir: u64, ir_text: (&mut u8[])) -> u8[] {
+pub fn optimize<b, c, d>(s: &b [u8], facts: (&c llvm::Facts), want_ir: u64, ir_text: (&mut u8[]), replay: (&d ir::Replay), call_syms: (&mut u8[][]), call_counts: (&mut u64[])) -> u8[] {
     mut marks = u64[];
     mut names = u8[][];
-    return optimize_parts(view(s), 0, &mut marks, &mut names, facts, want_ir, ir_text);
+    return optimize_parts(view(s), 0, &mut marks, &mut names, facts, want_ir, ir_text, replay, call_syms, call_counts);
 }
 // `optimize` plus the positions of the `--split` module markers it kept: for each marker line, the
 // output offset of the line and the module name it carries. A single-file build passes `split` 0 and
 // pays nothing. `native.grl` splits at these offsets, so the stream never has to be scanned again.
-pub fn optimize_parts<b, c>(s: &b [u8], split: u64, marks: (&mut u64[]), names: (&mut u8[][]), facts: (&c llvm::Facts), want_ir: u64, ir_text: (&mut u8[])) -> u8[] {
+pub fn optimize_parts<b, c, d, e>(s: &b [u8], split: u64, marks: (&mut u64[]), names: (&mut u8[][]), facts: (&c llvm::Facts), want_ir: u64, ir_text: (&mut u8[]), replay: (&e ir::Replay), call_syms: (&mut u8[][]), call_counts: (&mut u64[])) -> u8[] {
     mut o = ir::new_body();
     for i in 4096 {
         o.inl_head.push(0);
@@ -1875,7 +1880,7 @@ pub fn optimize_parts<b, c>(s: &b [u8], split: u64, marks: (&mut u64[]), names: 
             ir::parse(&mut o, view(s), a, e);
             if (e - a > 6) & (inside != 0) {
                 if (s[a] == 46) & (s[a + 1] == 115) & (s[a + 5] == 46) {
-                    body(&mut o, view(s), facts, &ix, want_ir, ir_text);
+                    body(&mut o, view(s), facts, &ix, want_ir, ir_text, replay, call_syms, call_counts);
                     ir::reset(&mut o);
                     inside = 0;
                 }
@@ -1883,7 +1888,7 @@ pub fn optimize_parts<b, c>(s: &b [u8], split: u64, marks: (&mut u64[]), names: 
         }
     }
     if inside != 0 {
-        body(&mut o, view(s), facts, &ix, want_ir, ir_text);
+        body(&mut o, view(s), facts, &ix, want_ir, ir_text, replay, call_syms, call_counts);
     }
     for x in s.len() - start {
         o.out.push(s[start + x]);

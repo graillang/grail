@@ -792,7 +792,14 @@ struct C {
     // A refined parameter's check in the checked entry: the caller's obligation, not a body edge.
     fx_entry_panic: u64[],
     // Where the body's edge list started, so a retried body's discarded edges go with its bytes.
-    fx_edge_mark: u64
+    fx_edge_mark: u64,
+    // Per body that claimed an effect, in emission order: its symbol, the `call` instructions it
+    // emitted, and the byte range of a replayed `.proved` prologue (0, 0 when it has none).
+    // `compile_end` holds the count against the calls the typed IR parses out of the same body.
+    fx_body_sym: u8[][],
+    fx_body_calls: u64[],
+    fx_body_lo: u64[],
+    fx_body_hi: u64[]
 }
 
 fn same<a, b>(x: &a [u8], y: &b [u8]) -> bool {
@@ -16671,58 +16678,48 @@ fn fx_end<a>(c: (&a mut C)) -> unit {
     }
     exchange(&mut c.fx_cur, 0);
     from := cur - 1;
-    lo := c.fx_skip_lo;
-    hi := c.fx_skip_hi;
-    mut seen = 0;
-    mut i = c.fx_out_start;
-    while i < c.out.len() {
-        if (lo != 0) && (i >= lo) && (i < hi) {
-            i = hi;
+    // The calls this body emitted, with the range of a replayed `.proved` prologue: the comparison
+    // that used to scan these bytes for `call` lines happens once, against the typed IR's call list
+    // (`fx_check_calls`, called where the optimizer has parsed every body).
+    c.fx_body_sym.push(c.fx_syms[from].copy());
+    c.fx_body_calls.push(c.fx_calls);
+    c.fx_body_lo.push(c.fx_skip_lo);
+    c.fx_body_hi.push(c.fx_skip_hi);
+    exchange(&mut c.fx_calls, 0);
+    return ();
+}
+// The check the byte scan used to make: every body that claimed an effect recorded exactly as many
+// calls as the typed IR parsed out of its bytes (outside any replayed prologue). A call site that
+// bypasses `call_out`, `call_slot_out`, `call_dispatch_out` or `call_entry_out` would leave the IR
+// with a call the recorder never saw - a silently weaker proof - so it is refused here.
+fn fx_check_calls<a, b, d>(c: (&a mut C), syms: (&b u8[][]), counts: (&d u64[])) {
+    for b in c.fx_body_sym.len() {
+        mut found = 0;
+        mut got: u64 = 0;
+        for i in syms.len() {
+            if same(view(syms[i]), view(c.fx_body_sym[b])) {
+                found = 1;
+                got = counts[i];
+            }
+        }
+        if found == 0 {
             continue;
         }
-        if i < c.out.len() {
-            mut line_start = i == 0;
-            if i != 0 {
-                line_start = c.out[i - 1] == 10;
-            }
-            if line_start && (c.out[i] == 99) {
-                mut ok = i + 4 < c.out.len();
-                if ok {
-                    if (c.out[i + 1] != 97) || (c.out[i + 2] != 108) || (c.out[i + 3] != 108) || (c.out[i + 4] != 32) {
-                        ok = false;
-                    }
-                }
-                if ok {
-                    seen = seen + 1;
-                    while (i < c.out.len()) && (c.out[i] != 10) {
-                        i = i + 1;
-                    }
-                }
-            }
+        if got != c.fx_body_calls[b] {
+            mut msg = copy_bytes(view("internal: the body of `"));
+            push_bytes(&mut msg, view(c.fx_body_sym[b]));
+            push_bytes(&mut msg, view("` emits "));
+            decimal(&mut msg, got);
+            push_bytes(&mut msg, view(" call instructions but the effect checker recorded "));
+            decimal(&mut msg, c.fx_body_calls[b]);
+            push_bytes(&mut msg, view(": a call site is not going through call_out, call_slot_out, call_dispatch_out or call_entry_out"));
+            fail(&mut c, view(msg));
         }
-        i = i + 1;
-    }
-    if seen != c.fx_calls {
-        mut msg = copy_bytes(view("internal: the body of `"));
-        if c.fx_fn_name[from].len() != 0 {
-            push_bytes(&mut msg, view(c.fx_fn_name[from]));
-        } else {
-            push_bytes(&mut msg, view(c.fx_syms[from]));
-        }
-        push_bytes(&mut msg, view("` emitted "));
-        decimal(&mut msg, seen);
-        push_bytes(&mut msg, view(" call instructions but the effect checker recorded "));
-        decimal(&mut msg, c.fx_calls);
-        push_bytes(&mut msg, view(": a call site is not going through call_out, call_slot_out, call_dispatch_out or call_entry_out"));
-        fail(&mut c, view(msg));
     }
     return ();
 }
 // The record a callee symbol names: a body emitted for it, or a declaration read for it.
 fn fx_lookup<a, b>(c: (&a mut C), name: &b [u8]) -> u64 {
-    if name.len() == 0 {
-        return 0;
-    }
     for i in c.fx_syms.len() {
         if same(view(c.fx_syms[i]), view(name)) {
             return i + 1;
@@ -39487,6 +39484,10 @@ pub fn main() -> u64 {
         fx_skip_hi: 0,
         fx_entry_panic: u64[],
         fx_edge_mark: 0,
+        fx_body_sym: u8[][],
+        fx_body_calls: u64[],
+        fx_body_lo: u64[],
+        fx_body_hi: u64[],
     };
     exchange(&mut c.target, host::target());
     for k in 5 {
@@ -40095,14 +40096,26 @@ pub fn main() -> u64 {
     mut out = u8[];
     // The typed IR of each body, as the optimizer parsed it, when --emit-ir asked for it.
     mut ir_text = u8[];
+    // Where each body's replayed `.proved` prologue sits, so the optimizer can count the calls the
+    // body really emits and this end can hold that count against what the effect checker recorded.
+    mut rsym = u8[][];
+    for i in c.fx_body_sym.len() {
+        rsym.push(c.fx_body_sym[i].copy());
+    }
+    replay := ir::Replay { sym: rsym, lo: c.fx_body_lo.copy(), hi: c.fx_body_hi.copy() };
+    mut call_syms = u8[][];
+    mut call_counts = u64[];
     if (c.debug != 0) || (c.backend != 0) {
         out = copy_bytes(view(c.out));
     } else {
         if c.split != 0 {
-            out = optimize::optimize_parts(view(c.out), 1, &mut c.marks, &mut c.part_names, &c.facts, c.emit_ir, &mut ir_text);
+            out = optimize::optimize_parts(view(c.out), 1, &mut c.marks, &mut c.part_names, &c.facts, c.emit_ir, &mut ir_text, &replay, &mut call_syms, &mut call_counts);
         } else {
-            out = optimize::optimize(view(c.out), &c.facts, c.emit_ir, &mut ir_text);
+            out = optimize::optimize(view(c.out), &c.facts, c.emit_ir, &mut ir_text, &replay, &mut call_syms, &mut call_counts);
         }
+        // The check the byte scan used to make, now from the IR: a call site that bypasses the
+        // recording helpers is a compiler bug, and a bug here is a silently weaker proof.
+        fx_check_calls(&mut c, &call_syms, &call_counts);
     }
     if c.emit_ir != 0 {
         mut ir_path = copy_bytes(view(host::arg(1 + offset)));

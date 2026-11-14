@@ -1,5 +1,13 @@
 ## Unreleased
 
+- Changed: the effects prover no longer reads the emitted bytes for a fact. `fx_end` used to count the
+  `call` lines in each body's text and refuse a body whose count disagreed with the calls it recorded;
+  it now records what the body emitted and lets the typed IR answer, once, after the whole program is
+  parsed (`ir::count_calls` + `fx_check_calls`). The check is unchanged in strength - a call site that
+  bypasses `call_out`/`call_slot_out`/`call_dispatch_out`/`call_entry_out` still refuses the build -
+  and it is the last text scan in the prover. Two things it had to respect: a `.proved` entry replays
+  a copy of the checked entry's prologue (the recorded range is excluded), and the nine leaf accessors
+  `parse` re-tags into pseudo-instructions 40..48 are calls too.
 - Changed: an `@no_alloc`/`@no_panic` refusal for an indirect call now names what the call is. The
   effects record keeps the reason the target has no symbol (`fx_edge_why`, filled by
   `call_slot_out`), and a `dyn` receiver's site fills it from the interface the vtable belongs to, so

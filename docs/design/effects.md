@@ -35,14 +35,23 @@ These six functions are the only places a `call` line is written. `fx_end` count
 the bytes each body emitted and refuses a body whose count disagrees with the calls it recorded, so a
 new call site that bypasses them is a compiler error rather than a silently weaker proof.
 
-**That count is the last text scan in the prover, and it is being replaced by the IR.** The typed IR
-(`compiler/ir.grl`) already parses every body into instructions and records its calls, so the same
-comparison can be made against `Body.calls` instead of a byte scan. One obstacle decides how: a
-`.proved` entry replays a byte copy of the checked entry's prologue (`fx_skip_lo`/`fx_skip_hi` is the
-range `fx_end` steps over), so the parsed stream holds those `call` instructions twice while the
-recorder counted them once. The replacement therefore has to carry the replay range into the IR -- or
-count the copy where it is made -- and land as its own change: a count comparison that ignored it
-would refuse every refined function in the tree.
+**That count is no longer a text scan.** The typed IR (`compiler/ir.grl`) parses every body into
+instructions and records its calls, so the check is made against the parse instead of the bytes:
+`fx_end` records what each claiming body emitted (with the range of a replayed `.proved` prologue),
+`optimize::body` hands back `Body.calls`' count per body through `ir::count_calls`, and
+`fx_check_calls` holds the two together once the optimizer has walked the whole program. A call site
+that bypassed the recording helpers still leaves the IR with a call the recorder never saw, so the
+proof is exactly as loud as before, and nothing reads emitted bytes to decide a fact.
+
+Two details the move had to get right, both of which produced a false refusal before they did:
+
+- the `.proved` entry replays a byte copy of the checked entry's prologue, so the parse holds those
+  `call` instructions twice while the recorder counted them once. The front end records the replay
+  range per body (`fx_body_lo`/`fx_body_hi`, which used to be `fx_skip_lo`/`fx_skip_hi` for the scan)
+  and `ir::count_calls` counts only calls outside it;
+- `parse` re-tags nine runtime accessors (`call rt_slot`, `call rt_at`, ...) into pseudo-instructions
+  40..48, which `emit_line` may inline. They are still calls the front end wrote with `call_out`, so
+  the count includes those opcodes; counting only opcode 15 refused `effects-accepted` by three calls.
 
 The roots are the runtime's allocator (`rt_alloc`, `rt_alloc_unlocked`, `rt_grow`) and its failure
 entries (`rt_abort`, `rt_fail`, `rt_trap`, `rt_refine`, `rt_error`). A fixpoint marks every body that
