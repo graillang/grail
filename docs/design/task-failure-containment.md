@@ -89,7 +89,7 @@ match try_join(t) {           // or inspect both arms
 | --- | --- | --- |
 | `kind` | `u64` | which failure: 1 index, 2 arithmetic overflow, 3 negative-to-unsigned, 4 no matching variant, 5 division by zero, 6 unwrap of None/Err, 7 range, 8 pop from empty, 9 byte range, 10 C array length, 11 index, 12 assertion, 13 explicit `task_fail` - the numbers `rt_fail` already uses |
 | `message` | `string` | the human text without its `error: ` prefix and without the location, e.g. `index 7 out of bounds for length 3`, or the text an explicit `task_fail` gave |
-| `site` | `string` | ` --> file:line:col` of the statement that failed, the line the report would print first; empty when the program carries no site table |
+| `site` | `string` | ` --> file:line:col` of the statement that failed, the line the report would print first; empty when the program carries no site table, which is every build but the native one (`native.grl site_table_on`: no table with `--debug`, `--split`, `--no-error-sites`, `--backend=llvm`, or on macOS) |
 
 The site is the innermost program location only, not the whole ` = called from` chain: walking the
 chain needs the failing frames, and by the time a program looks at the value those frames are gone.
@@ -239,6 +239,14 @@ because the failing instruction killed the process.
 - A program that never calls `try_join` behaves exactly as before, including the leak counter.
 - Windows and macOS are the same code path (the platform supplies the context switch); only Linux
   x86-64 is verified by the test cases in this change.
+- The site text needs the tables, and only the native backend emits them (Linux, and Windows through
+  its grouped PE sections; macOS, `--debug`, `--split` and `--backend=llvm` emit none), so `site` and
+  `host::backtrace` are empty on the LLVM backend: the cases that assert a non-empty site
+  (`tfail-trap-contained-at-join`, `rth-contained-then-joined`, `rth-contained-then-joined-thrice`,
+  `rth-offer-five-names-the-frame`, `rth-offer-three-still-names-the-statement`) carry
+  `"backends": ["native"]`. The containment, the message and the kind are asserted on both backends;
+  `rth-offer-two-refuses-the-descriptor` stays unscoped because it pins the refusal, which loses the
+  location on purpose.
 
 ## The integration failure, and the word that wrote the header (fixed, gaps2-tmem)
 

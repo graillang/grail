@@ -234,7 +234,13 @@ gate is 2–3 hours; run it in a watched job that logs to a file rather than hol
 
 - `test-native.mjs <target>` — compile, run and compare `tests/native-cases.json` (execution,
   diagnostics and intentional rejections). `GRAIL_BACKEND=llvm` runs the same corpus through the
-  LLVM backend.
+  LLVM backend. `--backend=llvm` is a flag of the compiler, not of `grail build`: the driver has no
+  LLVM path (it assembles and links only `OUT.s`, never the `OUT.s.ll` the backend writes beside it),
+  so an LLVM build is `compileProgram` in `tools/native.mjs` — what this corpus does — or the
+  compiler plus `clang -O2 -c OUT.s.ll`. A case that asserts something the LLVM backend does not
+  emit is scoped instead of guessed at: the statement table is native only
+  (`docs/design/task-failure-containment.md`, Limits), so the cases that read a failure's `site`
+  name `"backends": ["native"]`.
 - `test-selfhost.mjs` — the compiler compiles itself twice and the two outputs must be identical.
 - `split-test.mjs` — per-module emission: the parts must concatenate to the single assembly file, the
   objects must match it outside relocations, and the linked programs must behave identically. It also

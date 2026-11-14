@@ -8468,30 +8468,42 @@
   },
   {
     "name": "rth-contained-then-joined",
-    "note": "The book's task-failure example, with the join's site text made observable: one contained failure, then a sibling spawned after that join and joined. The join's site walk asks the compiler's rt_sites helper for its descriptor and is given a capacity, so the helper writes three or five words by what it was offered and the walk reads three of what it answered - never a fixed offset past the record's last word.",
+    "note": "The book's task-failure example, with the join's site text made observable: one contained failure, then a sibling spawned after that join and joined. The join's site walk asks the compiler's rt_sites helper for its descriptor and is given a capacity, so the helper writes three or five words by what it was offered and the walk reads three of what it answered - never a fixed offset past the record's last word. Native only, as tfail-trap-contained-at-join: the statement and function tables (`grail_sites`, `grail_funcs`) and the `rt_sites` helper the entry publishes are emitted by `native.grl site_table`, and `site_table_on` excludes `--backend=llvm`, so an LLVM build has no table for the walk to read and the join's `site` is empty; the containment itself works on both backends.",
     "source": "use host;\nfn work(n: u64, base: u64) -> u64 {\n    return n + base;\n}\nfn failing(n: u64, base: u64) -> u64 {\n    task_fail(view(\"bad input\"));\n    return 0;\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    t := spawn(sc, 0, failing);\n    match try_join(t) {\n        v: u64 => { println(v); },\n        f: TaskFailure => {\n            host::print(f.message);\n            host::print(view(\"\\n\"));\n            if f.site == \"\" {\n                host::print(view(\"no site\\n\"));\n            } else {\n                host::print(view(\"site\\n\"));\n            }\n        },\n    }\n    u := spawn(sc, 5, work);\n    return join(u);\n}\nfn main() {\n    println(task_scope(2, body));\n}\n",
-    "stdout": "bad input\nsite\n7\n"
+    "stdout": "bad input\nsite\n7\n",
+    "backends": [
+      "native"
+    ]
   },
   {
     "name": "rth-contained-then-joined-thrice",
-    "note": "The same scope three times, so the task record the site walk fills comes back from the allocator's free list. This is the repeat run that caught the original 16-byte overrun: with a fixed-offset descriptor the fifth word landed on the following block's header, and only a reused block is handed out with a size word the free path then reads.",
+    "note": "The same scope three times, so the task record the site walk fills comes back from the allocator's free list. This is the repeat run that caught the original 16-byte overrun: with a fixed-offset descriptor the fifth word landed on the following block's header, and only a reused block is handed out with a size word the free path then reads. Native only, as tfail-trap-contained-at-join: the statement and function tables (`grail_sites`, `grail_funcs`) and the `rt_sites` helper the entry publishes are emitted by `native.grl site_table`, and `site_table_on` excludes `--backend=llvm`, so an LLVM build has no table for the walk to read and every join in the repeat run is empty; the containment and the allocator reuse it exercises work on both backends.",
     "source": "use host;\nfn work(n: u64, base: u64) -> u64 {\n    return n + base;\n}\nfn failing(n: u64, base: u64) -> u64 {\n    task_fail(view(\"bad input\"));\n    return 0;\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    t := spawn(sc, 0, failing);\n    match try_join(t) {\n        v: u64 => { println(v); },\n        f: TaskFailure => {\n            host::print(f.message);\n            host::print(view(\"\\n\"));\n            if f.site == \"\" {\n                host::print(view(\"no site\\n\"));\n            } else {\n                host::print(view(\"site\\n\"));\n            }\n        },\n    }\n    u := spawn(sc, 5, work);\n    return join(u);\n}\nfn main() {\n    mut i = 0;\n    while i < 3 {\n        println(task_scope(2, body));\n        i = i + 1;\n    }\n}\n",
-    "stdout": "bad input\nsite\n7\nbad input\nsite\n7\nbad input\nsite\n7\n"
+    "stdout": "bad input\nsite\n7\nbad input\nsite\n7\nbad input\nsite\n7\n",
+    "backends": [
+      "native"
+    ]
   },
   {
     "name": "rth-offer-five-names-the-frame",
-    "note": "The descriptor asked for in full (the runtime offers five words): the failing statement is named and host::backtrace still names frames from the function table, which is the last two words of the descriptor.",
+    "note": "The descriptor asked for in full (the runtime offers five words): the failing statement is named and host::backtrace still names frames from the function table, which is the last two words of the descriptor. Native only, as tfail-trap-contained-at-join: the statement and function tables (`grail_sites`, `grail_funcs`) and the `rt_sites` helper the entry publishes are emitted by `native.grl site_table`, and `site_table_on` excludes `--backend=llvm`, so an LLVM build has no table for the walk to read, which is what `site` and `host::backtrace` name frames with.",
     "source": "use host;\nfn failing(n: u64, base: u64) -> u64 {\n    task_fail(view(\"bad input\"));\n    return 0;\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    t := spawn(sc, 0, failing);\n    match try_join(t) {\n        v: u64 => { println(v); },\n        f: TaskFailure => {\n            host::print(f.message);\n            host::print(view(\"\\n\"));\n            if f.site == \"\" {\n                host::print(view(\"no site\\n\"));\n            } else {\n                host::print(view(\"site\\n\"));\n            }\n        },\n    }\n    return 0;\n}\nfn main() {\n    task_scope(1, body);\n    s := host::backtrace();\n    if s == \"\" {\n        host::print(view(\"no backtrace\\n\"));\n    } else {\n        host::print(view(\"backtrace\\n\"));\n    }\n}\n",
-    "stdout": "bad input\nsite\nbacktrace\n"
+    "stdout": "bad input\nsite\nbacktrace\n",
+    "backends": [
+      "native"
+    ]
   },
   {
     "name": "rth-offer-three-still-names-the-statement",
-    "note": "The offer an older runtime makes (three words, what a caller that predates the capacity argument is given): the statement table and the frame are there, so the failure still names its statement, while the two function-table words are absent and host::backtrace answers no text instead of walking a table that is not there.",
+    "note": "The offer an older runtime makes (three words, what a caller that predates the capacity argument is given): the statement table and the frame are there, so the failure still names its statement, while the two function-table words are absent and host::backtrace answers no text instead of walking a table that is not there. Native only, as tfail-trap-contained-at-join: the statement and function tables (`grail_sites`, `grail_funcs`) and the `rt_sites` helper the entry publishes are emitted by `native.grl site_table`, and `site_table_on` excludes `--backend=llvm`, so an LLVM build has no table for the walk to read, which is what `site` names the statement with.",
     "env": {
       "GRAIL_RT_SITES_OFFER": "3"
     },
     "source": "use host;\nfn failing(n: u64, base: u64) -> u64 {\n    task_fail(view(\"bad input\"));\n    return 0;\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    t := spawn(sc, 0, failing);\n    match try_join(t) {\n        v: u64 => { println(v); },\n        f: TaskFailure => {\n            host::print(f.message);\n            host::print(view(\"\\n\"));\n            if f.site == \"\" {\n                host::print(view(\"no site\\n\"));\n            } else {\n                host::print(view(\"site\\n\"));\n            }\n        },\n    }\n    return 0;\n}\nfn main() {\n    task_scope(1, body);\n    s := host::backtrace();\n    if s == \"\" {\n        host::print(view(\"no backtrace\\n\"));\n    } else {\n        host::print(view(\"backtrace\\n\"));\n    }\n}\n",
-    "stdout": "bad input\nsite\nno backtrace\n"
+    "stdout": "bad input\nsite\nno backtrace\n",
+    "backends": [
+      "native"
+    ]
   },
   {
     "name": "rth-offer-two-refuses-the-descriptor",
