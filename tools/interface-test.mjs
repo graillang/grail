@@ -271,6 +271,14 @@ function effectsAt(bytes, from) {
     at = skipStr(bytes, at);
     at = skipStr(bytes, at);
   }
+  // The sparse parameter rows: index, name, default text.
+  const [args, afterArgs] = readVar(bytes, at);
+  at = afterArgs;
+  for (let i = 0; i < args; i += 1) {
+    at = skipVar(bytes, at);
+    at = skipStr(bytes, at);
+    at = skipStr(bytes, at);
+  }
   at = skipStr(bytes, at); // ensures
   return { noAlloc: at, noPanic: at + 1 };
 }
