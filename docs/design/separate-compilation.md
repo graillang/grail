@@ -503,11 +503,21 @@ trailer   tag 2: source digest, then 32 raw bytes of SHA-256 over every byte bef
 | 10 | `type` | kind (struct/record/enum/handle), parameter and lifetime counts, `transfer`/`share`, bounds, requirements, fields with their names, types and refinements |
 | 11 | `alias` | name and the type it denotes |
 | 12 | `const` | type, kind (int/text/table), value and raw bytes |
-| 13 | `fn` | signature, generics and their bounds, interface requirements, `where` rows with parameter names, `ensures`, the effects row, `@strict`, the extern symbol, and a template's own body |
+| 13 | `fn` | signature, generics and their bounds, interface requirements, `where` rows, parameter names and defaults, `ensures`, the effects row, `@strict`, the extern symbol, and a template's own body |
 | 14 | `inherent` | a type's methods and the block's own parameters |
 | 15 | `interface` | supers, associated types and the interface's methods |
 | 16 | `impl` | the contract, the type, the implementation's parameters, associated types and methods |
 | 17 | `env` | a closure environment's captured fields |
+
+A function's **parameter names and defaults** are one sparse field after its `where` rows:
+`count, { index, name, default }*`, one row per parameter that has either, so a parameter list with
+neither costs one byte. A name is what a named argument at a call site fills in, and what a proof
+substitutes the arguments for. A default is the declaration's own expression carried as **text** and
+rebuilt as a virtual source of its own (`<path>:<module>::<fn>#defaultN`), because it is compiled
+where the call is written, in the caller's context - a value frozen into the interface would be
+evaluated once, in the defining module's context, and would mean something else at the call. The rows
+are keyed by index rather than written in order, so they cannot desynchronise from the parameter list,
+and a parameter that gains a default does not change any other parameter's record.
 
 The module record also carries the **`dyn` ABI** - `abi dyn pair size = 16 align = 8 word0 = data
 word1 = vtable drop = 0`, one length-counted string holding exactly what `iface_dyn_abi()` returns.
