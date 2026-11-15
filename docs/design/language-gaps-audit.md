@@ -97,7 +97,10 @@ returned and read as `t.0`/`t.1`, and `vecs::sort(&mut v)` with `use vecs;`.
 
 Two gaps the pass found, neither in Tier 1 and both worth having:
 
-**A. A struct cannot be destructured in a binding.** It works in a pattern, not in `:=`:
+**A. A struct cannot be destructured in a binding.** **Done** (`56179cf`, gated): `{ x, y } := p` is a
+lookahead plus one lowering, with partial bindings allowed, an unknown field refused by name, the
+same field twice refused, non-records and `Drop` types refused, and an owned `u8[]` field moving out
+(`destr-record-*` cases). The original finding, kept because it explains the shape:
 ```grl
 P { x, y } := p;      // error[E0001]: undefined name `x`
 { x, y } := p;        // same
@@ -117,7 +120,10 @@ from a compile error:
   since "partial bindings are allowed and the rest are dropped" and "partial bindings are refused"
   are both defensible and only one of them can be true.
 
-**B. A map has no iteration surface.** `hashmap` exposes `get`, `get_mut`, `insert`, `remove`,
+**B. A map has no iteration surface.** **Done** (`8d0ac36`, on `main`): `keys()`, `values()` and
+`iter()`, yielding references in storage order and borrowing the map like `iter::refs(&v)` borrows a
+vector, plus `iter::from_step` as the seam for building an iterator outside `iter`. The original
+finding: `hashmap` exposes `get`, `get_mut`, `insert`, `remove`,
 `contains`, `entry`, `len`, `key_at`, `value_at`, `value_at_mut`, `entry_at` - and nothing else.
 There is no `keys()`, no `values()`, no `iter()`, and `for k, v in &m` does not exist. Iterating a
 map today is:
@@ -174,9 +180,11 @@ lesson is not "be careful", it is "change the shape first":
    contract, not as a user surface. `--` as a terminator and a `.grl` path are unaffected.
 3. **Then `--emit-ir FILE`** as an `Options` field forwarded through `Home`, with a case asserting the
    file exists *and* is non-empty — an empty `.tir` would satisfy a naive existence check.
-4. **Then `driverNoModules`** in `tools/test-native.mjs`, so a bare file plus `--module-root` is
-   expressible and `gaps6-modroot`'s case can be made red on the pre-fix binary. `projectExtra` and
-   `printInputs` are used by that case or deleted with it.
+4. **Then `driverNoModules`** in `tools/test-native.mjs`. **Done** (`bef132e`, on `main`):
+   `drv-module-root-bare-file` builds one file plus `--module-root` with the module outside `src/`,
+   which is the shape that actually failed. Checked load-bearing by hand: the same project without
+   the flag reports `cannot resolve module arithmetic ... no module root holds arithmetic.grl`, with
+   it prints 42. `projectExtra` is used by that case; `printInputs` is used by the existing one.
 
 ## 5. Long-standing, known, and deliberately not "quick"
 
