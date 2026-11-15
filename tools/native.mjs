@@ -167,8 +167,11 @@ export function dynamicLinkFlags(target, linkArgs) {
 export function assemble(source, executable, target = hostTarget, linkArgs = [], { frameworkArgs = [], sign = false, sdk = undefined } = {}) {
   targetName(target);
   // Unique per process: two concurrent builds of the same target otherwise truncate each
-  // other's object file mid-assembly, which clang reports as SIGBUS.
+  // other's object file mid-assembly, which clang reports as SIGBUS. `object` is this process's
+  // scratch copy; `stable` is the name callers read (`tools/test-ffi.mjs` opens `<exe>.o`), so the
+  // scratch copy is renamed into place once assembly succeeds.
   const object = `${executable}.${process.pid}.o`;
+  const stable = `${executable}.o`;
   const flags = target === 'riscv64' ? ['-march=rv64imafd', '-mabi=lp64d'] : [];
   command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[target]}`, ...flags, '-c', source, '-o', object]);
   if (machoTargets.includes(target)) {
@@ -191,12 +194,14 @@ export function assemble(source, executable, target = hostTarget, linkArgs = [],
     command(link);
     // On macOS the platform tool owns ad-hoc signing; elsewhere lld already wrote the signature.
     if (sign) signAdhoc(executable);
+    renameSync(object, stable);
     return executable;
   }
   command([
     process.env.GRAIL_LINKER ?? 'ld.lld', '-m', emulations[target], object,
     ...linkArgs, ...dynamicLinkFlags(target, linkArgs), '-o', executable,
   ]);
+  renameSync(object, stable);
   return executable;
 }
 // Shared Mach-O libraries. A Grail program still needs an entry function, so the image keeps its

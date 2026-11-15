@@ -22,10 +22,27 @@ logs=${2:-$dir/.work/gate}
 
 cd "$dir" || exit 1
 
-running=$(pgrep -c -f 'bash tools/gate.sh' 2>/dev/null)
+# Identifying a running gate by substring is not safe: a monitor loop or a `bash -c` one-liner that
+# merely *mentions* tools/gate.sh (for example `for i in ...; do if [ -f .work/gate/summary.txt ]`)
+# matches `pgrep -f 'bash tools/gate.sh'` and this script then refuses to start a gate that is not
+# running. Ask each process's argv instead: a real gate has an argument that *is* tools/gate.sh, not
+# an argument that contains the words.
+gate_pids() {
+    for proc in /proc/[0-9]*; do
+        [ -r "$proc/cmdline" ] || continue
+        pid=${proc#/proc/}
+        [ "$pid" = "$$" ] && continue
+        while IFS= read -r -d '' arg; do
+            case "$arg" in
+                tools/gate.sh|*/tools/gate.sh) echo "$pid"; break ;;
+            esac
+        done < "$proc/cmdline" 2>/dev/null
+    done
+}
+running=$(gate_pids | wc -l)
 if [ "${running:-0}" -ge 1 ]; then
     echo "a gate is already running on this host (${running} process); not starting another"
-    echo "it is in: $(pgrep -a -f 'bash tools/gate.sh' | head -1)"
+    for pid in $(gate_pids | head -3); do echo "  pid $pid: $(tr '\0' ' ' < /proc/$pid/cmdline)"; done
     exit 0
 fi
 
