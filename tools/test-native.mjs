@@ -205,10 +205,29 @@ function runCase(test, position, context) {
       writeFileSync(join(project, 'grail.toml'), '[package]\nname = "drivercase"\nversion = "0.1.0"\n');
       writeFileSync(join(project, 'src/main.grl'), test.source);
       for (const name of readdirSync(test.projectDir)) copyFileSync(join(test.projectDir, name), join(project, 'src', name));
+      // A file the case places somewhere other than `src/`: a module root that is not the project's
+      // own source directory is exactly what `--module-root` is for, and a fixture that can only
+      // live in `src/` cannot test it.
+      for (const [at, text] of Object.entries(test.projectExtra ?? {})) {
+        const target = join(project, at);
+        mkdirSync(dirname(target), { recursive: true });
+        writeFileSync(target, text);
+      }
       const output = join(project, 'target/prog');
-      const built = execute(compiler, ['build', '--target', target, ...(test.flags ?? []), '-o', output], target, { cwd: project, env: { ...process.env, GRAIL_HOME: root } });
+      // `--print-inputs FILE` is the oracle for what the build resolved: the same root list must
+      // reach the resolution probe and the compile, so the file names every module it compiled.
+      const inputs = join(directory, 'inputs.txt');
+      const buildFlags = [...(test.flags ?? [])];
+      if (test.printInputs) buildFlags.push('--print-inputs', inputs);
+      // `driverFile` names the entry explicitly, which is the shape that resolves `use` through the
+      // module roots the command line gives (`--module-root DIR`), rather than through `src/`.
+      const entryArgs = test.driverFile ? [test.driverFile] : [];
+      const built = execute(compiler, ['build', '--target', target, ...buildFlags, ...entryArgs, '-o', output], target, { cwd: project, env: { ...process.env, GRAIL_HOME: root } });
       assert.equal(built.status, 0, `${test.name}: grail build failed\n${built.stdout}${built.stderr}`);
       assert.equal(built.signal, null, `${test.name}: grail build crashed (${built.signal})`);
+      // One run per module, one interface per module: runtime is the trusted base and has none. A
+      // case that builds a single module (`driverNoModules`) has no split to inspect: it pins that
+      // the build resolved and ran, which is what `--module-root` was failing to do.
       // One run per module, one interface per module: runtime is the trusted base and has none.
       const modules = join(`${output}.modules`);
       const ran = readdirSync(modules).filter(name => name.endsWith('.s')).map(name => name.slice(0, -2)).sort();
@@ -216,6 +235,10 @@ function runCase(test, position, context) {
       assert.ok(ran.length > 1, `${test.name}: the default build must compile one module per run (${ran.join(', ')})`);
       assert.deepEqual(written, ran.filter(name => name !== 'runtime'), `${test.name}: every module a run compiles from source must get its interface written`);
       for (const module of test.driverModules ?? []) assert.ok(ran.includes(module), `${test.name}: no compiler run for module ${module} (${ran.join(', ')})`);
+      if (test.printInputs) {
+        const listed = readFileSync(inputs, 'utf8').split('\n').filter(Boolean).map(row => row.split('\t')[0]);
+        for (const module of test.driverModules ?? []) assert.ok(listed.includes(module), `${test.name}: --print-inputs does not name ${module} (${listed.join(', ')})`);
+      }
       const image = execute(output, test.args ?? [], target, { cwd: project, env: { ...process.env, ...(test.env ?? {}) } });
       observed.stdout = image.stdout.toString();
       observed.stderr = image.stderr.toString();

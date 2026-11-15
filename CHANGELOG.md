@@ -56,6 +56,15 @@
   `ci.mjs lint` runs 200 mutations from seed 1, so the class cannot come back unnoticed.
   docs/design/frontend-robustness.md has the mutation set, the classification, and the bug list with
   repros: 0 bugs and 0 hangs on the 200-case seed, from 2 bugs before the fixes above.
+- `grail build --module-root DIR` now reaches the compiler. The flag was taken for a path by the
+  option parser, so the resolution run never saw it and the build refused the module with a message
+  telling the caller to pass the very flag it had passed. A command-line root comes before the
+  stdlib's, so a project can shadow a std module by name.
+- `grail build --emit-interface DIR`, `grail build --no-entry` and `grail build --print-inputs FILE`
+  work on the driver, as they already did on the compiler. `--print-inputs` writes the module set the
+  build resolved and still builds.
+- A call that passes too many arguments has a case pinning its message; it had none.
+
 
 - Changed: module interface files are a **typed record stream, format 4**, not line-oriented
   text. The compiler wrote the text and then re-read it with a hand-written line lexer and parser -

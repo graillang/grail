@@ -11,7 +11,12 @@ use xxhash;
 // re-invoking itself (`grail [--target T] OUT.s ENTRY.grl MODULE.grl...`), then assemble and link.
 struct Home {
     runtime: u8[],
-    std: u8[]
+    std: u8[],
+    // The directories `--module-root DIR` named, in the order given: a root is where `use` looks for
+    // `NAME.grl`, and the first root that holds a module wins. They travel in `Home` so that the
+    // resolution probe and the compile are built from one command and cannot disagree about the
+    // list - that disagreement is what made the flag look ignored.
+    roots: u8[][]
 }
 
 fn eq<a, b>(x: &a [u8], y: &b [u8]) -> bool {
@@ -236,11 +241,11 @@ fn home() -> Home {
     if env.len() != 0 {
         installed := path_join(view(env), view("runtime.grl"));
         if host::exists(view(installed)) != 0 {
-            return Home { runtime: installed, std: path_join(view(env), view("std")) };
+            return Home { runtime: installed, std: path_join(view(env), view("std")) , roots: u8[][] };
         }
         repo := path_join(view(env), view("compiler/runtime.grl"));
         if host::exists(view(repo)) != 0 {
-            return Home { runtime: repo, std: path_join(view(env), view("lib")) };
+            return Home { runtime: repo, std: path_join(view(env), view("lib")) , roots: u8[][] };
         }
     }
     exe := host::exe_path();
@@ -249,16 +254,16 @@ fn home() -> Home {
         installed := path_join(view(dir), view("lib/grail/runtime.grl"));
         if host::exists(view(installed)) != 0 {
             prefix := path_join(view(dir), view("lib/grail"));
-            return Home { runtime: installed, std: path_join(view(prefix), view("std")) };
+            return Home { runtime: installed, std: path_join(view(prefix), view("std")) , roots: u8[][] };
         }
         repo := path_join(view(dir), view("compiler/runtime.grl"));
         if host::exists(view(repo)) != 0 {
-            return Home { runtime: repo, std: path_join(view(dir), view("lib")) };
+            return Home { runtime: repo, std: path_join(view(dir), view("lib")) , roots: u8[][] };
         }
         dir = path_join(view(dir), view(".."));
     }
     say(view("grail: cannot find the Grail runtime; set GRAIL_HOME"));
-    return Home { runtime: u8[], std: u8[] };
+    return Home { runtime: u8[], std: u8[] , roots: u8[][] };
 }
 fn collect<a, b>(dir: &a [u8], out: (&b mut u8[][])) {
     entries := host::list_dir(view(dir));
@@ -790,7 +795,10 @@ fn compile<a, b, d, e, g, k>(
     flags: u64,
     iface: &d [u8] = view(""),
     verify: u64 = 0,
-    diag: &k [u8] = view("")
+    diag: &k [u8] = view(""),
+    force_emit: bool = false,
+    no_entry: bool = false,
+    inputs: &e [u8] = view("")
 ) -> u64 {
     return compile_mode(
         h: h,
@@ -801,7 +809,10 @@ fn compile<a, b, d, e, g, k>(
         flags: flags,
         iface: iface,
         verify: verify,
-        diag: diag
+        diag: diag,
+        force_emit: force_emit,
+        no_entry: no_entry,
+        inputs: inputs
     );
 }
 // The compiler invocation, spelled out in one place: the build cache keys on this vector, so a flag
@@ -817,7 +828,10 @@ fn build_argv<a, b, d, e, g, k>(
     flags: u64,
     iface: &d [u8] = view(""),
     verify: u64 = 0,
-    diag: &k [u8] = view("")
+    diag: &k [u8] = view(""),
+    force_emit: bool = false,
+    no_entry: bool = false,
+    inputs: &d [u8] = view("")
 ) -> u8[][] {
     check_only := flags % 2;
     debug := (flags / 2) % 2;
@@ -847,8 +861,15 @@ fn build_argv<a, b, d, e, g, k>(
     }
     // B1 stage 2: `grail check --interface DIR` writes the interfaces, `grail build --interface DIR`
     // reads them instead of the modules' sources, and `--verify` compares the two.
+    if no_entry {
+        command.push(copy(view("--no-entry")));
+    }
+
     if iface.len() != 0 {
-        emit := u64(check_only != 0) * u64(verify == 0);
+        mut emit = u64(check_only != 0) * u64(verify == 0);
+        if force_emit {
+            emit = 1;
+        }
         if emit != 0 {
             command.push(copy(view("--emit-interface")));
         } else {
@@ -869,6 +890,13 @@ fn build_argv<a, b, d, e, g, k>(
     // the directory it looks for `ROOT/NAME.grl` in (docs/design/module-resolution.md). The stdlib is
     // a root here, so `use fs;` is enough to build against it; a project's own `src/` is a root the
     // compiler takes from the grail.toml it finds in the working directory.
+    // A root named on the command line comes before the stdlib's, so a project can shadow a std
+    // module by name; among themselves they keep the order given and the first root that holds a
+    // module wins. The probe and the compile are both built here, so they cannot disagree.
+    for i in h.roots.len() {
+        command.push(copy(view("--module-root")));
+        command.push(item(&h.roots, i));
+    }
     if h.std.len() != 0 {
         command.push(copy(view("--module-root")));
         command.push(copy(view(h.std)));
@@ -926,7 +954,10 @@ fn compile_mode<a, b, d, e, g, k>(
     flags: u64,
     iface: &d [u8] = view(""),
     verify: u64 = 0,
-    diag: &k [u8] = view("")
+    diag: &k [u8] = view(""),
+    force_emit: bool = false,
+    no_entry: bool = false,
+    inputs: &e [u8] = view("")
 ) -> u64 {
     check_only := flags % 2;
     debug := (flags / 2) % 2;
@@ -992,8 +1023,31 @@ fn compile_mode<a, b, d, e, g, k>(
         flags: flags,
         iface: iface,
         verify: verify,
-        diag: diag
+        diag: diag,
+        force_emit: force_emit,
+        no_entry: no_entry,
+        inputs: inputs
     );
+    if inputs.len() != 0 {
+        // `--print-inputs FILE` is the resolution oracle: the same command runs once more with the
+        // flag, writes the module set it settled, and stops before assembling. The build below is
+        // the ordinary command, so a caller can ask what a build resolved and still get the build.
+        probe := build_argv(
+            h: &h,
+            entry: view(entry),
+            modules: &modules,
+            asm: view(asm),
+            target: view(target),
+            flags: flags,
+            iface: iface,
+            verify: verify,
+            diag: diag,
+            force_emit: force_emit,
+            no_entry: no_entry,
+            inputs: inputs
+        );
+        host::command(probe);
+    }
     // The shape of the build. A program of more than one module of its own is built one compiler run
     // per module, each reading the interfaces the runs before it wrote (B1 stage 4). `--whole-program`
     // and `--split` ask for the one-run shapes, an `--interface` build checks every module against its
@@ -2843,7 +2897,16 @@ struct Options {
     // prints nothing, and the driver prints no summary, so a driver (an editor, the language
     // server) reads fields instead of text. Watch mode settles on its own file when this is empty.
     diag: u8[],
-    paths: u8[][]
+    paths: u8[][],
+    // `--module-root DIR` (repeatable), and the two switches that were reachable only in the raw
+    // compiler form: `grail build --emit-interface DIR` writes interfaces, and `grail build
+    // --no-entry` suppresses entry selection for a library module.
+    roots: u8[][],
+    iface_emit: u64,
+    no_entry: u64,
+    // `--print-inputs FILE`: the compiler writes the module set it settled (`NAME<TAB>PATH`), which
+    // is what a driver or a test uses as the oracle for "the roots the compile actually saw".
+    inputs: u8[]
 }
 // The code-generation flag vector, in one place: it is what the compiler is told, and what the build
 // cache keys on. Bit 0 check only, 1 debug, 2 deny ambient host, 3 split, 4/5 overflow, 6 cache,
@@ -2916,6 +2979,10 @@ fn options<a>(args: (&a u8[][])) -> Options {
         json: 0,
         diag: u8[],
         paths: u8[][],
+        roots: u8[][],
+        iface_emit: 0,
+        no_entry: 0,
+        inputs: u8[],
     };
     mut i = 0;
     mut passthrough = 0;
@@ -2939,7 +3006,22 @@ fn options<a>(args: (&a u8[][])) -> Options {
                         i += 1;
                         o.target = item(&args, i);
                     } else {
-                        if eq(view(a), view("--check")) {
+                        if eq(view(a), view("--module-root")) & (i + 1 < args.len()) {
+                            // A module root is a directory, not an input. Taken for a path (what the
+                            // fall-through did), it became a source, so the resolution run - the one
+                            // that actually resolves `use` - never saw the flag.
+                            i += 1;
+                            o.roots.push(item(&args, i));
+                        } else if eq(view(a), view("--emit-interface")) & (i + 1 < args.len()) {
+                            i += 1;
+                            o.iface = item(&args, i);
+                            o.iface_emit = 1;
+                        } else if eq(view(a), view("--no-entry")) {
+                            o.no_entry = 1;
+                        } else if eq(view(a), view("--print-inputs")) & (i + 1 < args.len()) {
+                            i += 1;
+                            o.inputs = item(&args, i);
+                        } else if eq(view(a), view("--check")) {
                             o.check = 1;
                         } else {
                             if eq(view(a), view("--debug")) {
@@ -3027,7 +3109,10 @@ fn options<a>(args: (&a u8[][])) -> Options {
     return o;
 }
 fn build<a, b>(args: (&a u8[][]), o: (&b mut Options)) -> u64 {
-    h := home();
+    mut h = home();
+    for i in o.roots.len() {
+        h.roots.push(item(&o.roots, i).copy());
+    }
     if h.runtime.len() == 0 {
         return 1;
     }
@@ -3083,7 +3168,10 @@ fn build_pass<a, b, c>(h: (&a Home), o: (&b mut Options), diag: &c [u8]) -> u64 
             flags: flag_bits(&o),
             iface: view(o.iface),
             verify: o.verify,
-            diag: diag
+            diag: diag,
+            force_emit: o.iface_emit != 0,
+            no_entry: o.no_entry != 0,
+            inputs: view(o.inputs)
         );
     }
     // A project build reads grail.lock: the package manager has already resolved, fetched and
@@ -3106,7 +3194,10 @@ fn build_pass<a, b, c>(h: (&a Home), o: (&b mut Options), diag: &c [u8]) -> u64 
         flags: flag_bits(&o),
         iface: view(o.iface),
         verify: o.verify,
-        diag: diag
+        diag: diag,
+        force_emit: o.iface_emit != 0,
+        no_entry: o.no_entry != 0,
+        inputs: view(o.inputs)
     );
 }
 fn check_command<a>(args: (&a u8[][])) -> u64 {
@@ -3148,7 +3239,10 @@ fn check_pass<a, b, c>(h: (&a Home), o: (&b Options), diag: &c [u8]) -> u64 {
             flags: flag_bits(&o, check_only: true),
             iface: view(o.iface),
             verify: o.verify,
-            diag: diag
+            diag: diag,
+            force_emit: o.iface_emit != 0,
+            no_entry: o.no_entry != 0,
+            inputs: view(o.inputs)
         );
     }
     p := pkg::plan(0);
@@ -3166,7 +3260,10 @@ fn check_pass<a, b, c>(h: (&a Home), o: (&b Options), diag: &c [u8]) -> u64 {
         flags: flag_bits(&o, check_only: true),
         iface: view(o.iface),
         verify: o.verify,
-        diag: diag
+        diag: diag,
+        force_emit: o.iface_emit != 0,
+        no_entry: o.no_entry != 0,
+        inputs: view(o.inputs)
     );
 }
 
