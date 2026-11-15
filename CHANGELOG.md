@@ -1,5 +1,34 @@
 ## Unreleased
 
+- Changed: an `impl` may name a type no module declares - `impl u8[] { ... }`, `impl [u64] { ... }`,
+  `impl<T> T[] { ... }`, `impl string { ... }` - and its methods are that type's own, so a method can
+  exist on a slice or on text at all. `impl [T]` accepts the bare slice spelling and serves a `&[T]`
+  and a `&mut [T]` receiver alike: the mode belongs to the value, so the method's own `self` type
+  decides, and a `&mut self` method is refused on a shared slice (and a `&self` method on a
+  `&mut [T]`). Method lookup is inherent first, then interface implementations, then the builtin
+  collection methods - Rust's order. The collection protocol names (`len`, `push`, `pop`, `insert`,
+  `remove`, `swap`, `contains`, `reverse`, `append`, `truncate`, `clear`) are refused where an impl
+  declares them: `for i in v.len()` and every bounds check depend on what `len` means.
+- Changed: `&self`, `&mut self` and `self` are the method receiver shorthand -
+  `self: (&__self Self)`, `(&mut __self Self)` and `Self`, with a fresh region per method - and
+  `&Self`/`&mut Self` spell the same reference in a signature, so `fn same(&self, other: &Self) -> bool`
+  reads the way it does in Rust. Interfaces and implementations match whichever spelling each side
+  used, and the written `fn f<a>(x: (&a Self))` still means exactly what it did. `&self` outside a
+  method now says a receiver belongs to a method instead of `expected a name here`.
+- Changed: the vector and text libraries are postfix. `lib/vecs.grl`'s operations are methods on
+  `T[]` (`v.map(f)`, `v.filter(p)`, `v.fold(a, f)`, `v.reduce(f)`, `v.sort()`, `v.sort_by_key(k)`,
+  `v.min()`, `v.max()`, `v.get(i)`, `v.first()`, `v.last()`, `v.any(p)`, `v.all(p)`, `v.count(p)`,
+  `v.find(p)`, `v.position(p)`, `v.dedup()`, `v.iter()`, `v.into_iter()`, `v.binary_search(x)`,
+  `v.insert_sorted(x)`, `v.sum()`), and `lib/strings.grl`'s are methods on `[u8]` (`text.find(n)`,
+  `text.parse_u64()`, `text.parse_i64()`, `text.is_utf8()`, `text.utf8_error()`, `text.char_count()`,
+  `text.is_char_boundary(i)`, `text.slice_chars(lo, hi)`, `text.char_indices()`, `text.lines()`,
+  `text.split_whitespace()`, `text.to_text_lossy()`) with `chunks`/`windows` on `u8[]` and
+  `join_with` on `u8[][]`. A byte vector or a string is viewed for a `[u8]` receiver, so
+  `bytes.trim()` and `view(bytes).trim()` are both the old `strings::trim(view(bytes))`, and a view
+  receiver is reborrowed so one binding serves several calls. Every old free name still works
+  (they are one-line forwarders), except `vecs::any_num`, `all_num`, `count_num`, `position_num` and
+  `max_num`, which are gone: the generic `any`/`all`/`count`/`position`/`max` methods replace them.
+
 - Fixed: the windows suite no longer requires the `.set .F<n>` frame-constant table on Windows ARM64, where prologues size their frame with `sub sp, #n` instead. ARM64 unwind records are still checked one per function, with length, frame-pointer pair and `mov fp, sp`.
 - Fixed: `tools/interface-test.mjs` wiped `.work/interface-test/<target>` at the start of every run,
   so two runs in one checkout deleted each other's interfaces mid-run and the survivor failed with

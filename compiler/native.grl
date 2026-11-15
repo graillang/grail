@@ -13529,9 +13529,15 @@ fn receiver_shorthand<a>(c: (&a mut C)) -> (u64, u64) {
             )
         );
     }
+    // The impl's type with this instantiation's arguments, exactly as the `Self` in a written
+    // receiver is resolved: a replayed method of `impl<T> T[]` must see `T` bound, not the template.
+    mut st = c.self_type;
+    if c.bindings.len() != 0 {
+        st = bind_types(&mut c, st, &copy_numbers(&c.bindings));
+    }
     if receiver == 2 {
         advance(&mut c);
-        return (1, c.self_type);
+        return (1, st);
     }
     advance(&mut c);
     mut mode = 0;
@@ -13544,7 +13550,7 @@ fn receiver_shorthand<a>(c: (&a mut C)) -> (u64, u64) {
     }
     r := fresh_lifetime(&mut c);
     note_input_region(&mut c, r);
-    return (1, receiver_reference(&mut c, c.self_type, mode, r));
+    return (1, receiver_reference(&mut c, st, mode, r));
 }
 fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // A body's synthesised declarations (closure environments) are not the function's to hide.
@@ -14594,6 +14600,49 @@ fn default_copy<a>(c: (&a C), index: u64) -> bool {
 fn inherent_type_base() -> u64 {
     return 500000000;
 }
+// Whether the written-type impl at `key` has the header the parser just read: the same owner type
+// and the same parameters (names, bounds and required interfaces).
+fn inherent_same_header<a>(c: (&a mut C), key: u64, ty: u64) -> bool {
+    i := key - inherent_type_base();
+    if (i == 0) || (c.inherent_types.len() < i) {
+        return false;
+    }
+    if same_type(&mut c, c.inherent_types[i - 1], ty) == 0 {
+        return false;
+    }
+    record := impl_record(&mut c, key);
+    if record == 0 {
+        return c.tnames.len() == 0;
+    }
+    p := &c.impl_params[record - 1];
+    if (p.rnames.len() != c.rnames.len()) || (p.tnames.len() != c.tnames.len()) {
+        return false;
+    }
+    if p.bounds.len() != c.type_bounds.len() {
+        return false;
+    }
+    for j in p.bounds.len() {
+        if p.bounds[j] != c.type_bounds[j] {
+            return false;
+        }
+    }
+    if p.interfaces.len() != c.type_interfaces.len() {
+        return false;
+    }
+    for j in p.interfaces.len() {
+        want := copy_numbers(&c.type_interfaces[j]);
+        have := copy_numbers(&p.interfaces[j]);
+        if want.len() != have.len() {
+            return false;
+        }
+        for k in want.len() {
+            if want[k] != have[k] {
+                return false;
+            }
+        }
+    }
+    return true;
+}
 fn inherent_is_type_key(owner: u64) -> bool {
     // Below the generic-implementation namespace: a written-type impl's owner is a key of its own,
     // not a position in `c.decls` (that is `owner - 1 < decls.len()`) and not a generic impl.
@@ -14684,9 +14733,61 @@ fn inherent_pattern_fits<a, b>(c: (&a mut C), pattern: u64, actual: u64, map: (&
     pk := ty_kind(&mut c, pattern);
     ak := ty_kind(&mut c, actual);
     if (pk == ak) & ((pk == 27) || (pk == 5)) {
-        return type_matches(&mut c, ty_arg(&mut c, pattern), ty_arg(&mut c, actual), &mut map);
+        return inherent_match(&mut c, ty_arg(&mut c, pattern), ty_arg(&mut c, actual), &mut map);
     }
-    return type_matches(&mut c, pattern, actual, &mut map);
+    return inherent_match(&mut c, pattern, actual, &mut map);
+}
+// `type_matches` that binds every parameter the pattern names, even where the two types are already
+// equal: a generic function forwarding to `impl<T> T[]`'s method has the *same* parameter on both
+// sides, which `same_type` answers without binding anything - and the caller still has to know that
+// the implementation is `T[]`'s.
+fn inherent_match<a, b>(c: (&a mut C), pattern: u64, actual: u64, map: (&b mut u64[])) -> bool {
+    pk := ty_kind(&mut c, pattern);
+    if pk == 9 {
+        i := ty_arg(&mut c, pattern);
+        if map.len() <= i {
+            return false;
+        }
+        if map[i] == NO_TYPE {
+            exchange(&mut map[i], actual);
+        }
+        return true;
+    }
+    mut a = actual;
+    if pk != ty_kind(&mut c, a) {
+        // A specialisation binds a parameter to the concrete type it stands for.
+        candidate := base_type(&mut c, a);
+        if ty_kind(&mut c, candidate) == ty_kind(&mut c, a) {
+            return false;
+        }
+        a = candidate;
+        if pk != ty_kind(&mut c, a) {
+            return false;
+        }
+    }
+    if (pk == 5) || (pk == 6) || (pk == 7) || (pk == 27) {
+        if ty_mode(&mut c, pattern) != ty_mode(&mut c, a) {
+            return false;
+        }
+        return inherent_match(&mut c, ty_arg(&mut c, pattern), ty_arg(&mut c, a), &mut map);
+    }
+    if pk == 8 {
+        if ty_arg(&mut c, pattern) != ty_arg(&mut c, a) {
+            return false;
+        }
+        pargs := type_args(&mut c, pattern);
+        aargs := type_args(&mut c, a);
+        if pargs.len() != aargs.len() {
+            return false;
+        }
+        for k in pargs.len() {
+            if !inherent_match(&mut c, pargs[k], aargs[k], &mut map) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return same_type(&mut c, pattern, a) != 0;
 }
 // The type arguments a written-type impl binds for a receiver of type `actual`: (found, map).
 fn inherent_bindings<a>(c: (&a mut C), key: u64, actual: u64) -> (u64, u64[]) {
@@ -14797,11 +14898,14 @@ fn inherent_type_key<a>(c: (&a mut C), ty: u64, pass: u64) -> u64 {
             )
         );
     }
-    // One key per owner type: two `impl u8[] { ... }` blocks in one program are one impl (Rust
-    // merges them), so their methods share a module and a duplicate name is the existing conflict.
+    // One key per impl header: two blocks that spell the same owner type and the same parameters
+    // are one impl (Rust merges them), so their methods share a module and a duplicate name is the
+    // existing conflict. `impl<T> T[]` and `impl<T: Ord> T[]` are two headers - the second only
+    // serves receivers whose element satisfies the bound - so they keep two keys.
     for i in c.inherent_types.len() {
-        if same_type(&mut c, c.inherent_types[i], ty) != 0 {
-            return inherent_type_base() + i + 1;
+        key := inherent_type_base() + i + 1;
+        if inherent_same_header(&mut c, key, ty) {
+            return key;
         }
     }
     if pass == 2 {
@@ -20199,6 +20303,35 @@ fn coerce_view<a>(c: (&a mut C), v: Val, formal: u64) -> Val {
         }
     }
     return v;
+}
+// Whether a value is byte text: a byte vector, a string, a borrowed byte sequence or a view. These
+// are the receivers an `impl [u8]` serves, since a view of them is what such a method reads.
+fn byte_sequence_value<a>(c: (&a mut C), ty: u64) -> bool {
+    mut k = ty_kind(&mut c, ty);
+    if k == 7 {
+        k = ty_kind(&mut c, ty_arg(&mut c, ty));
+    }
+    return (k == 2) || (k == 3) || (k == 4);
+}
+fn view_type_of<a>(c: (&a mut C)) -> u64 {
+    return intern_full(&mut c, 5, 0, 0, u64[]);
+}
+// A byte view handed to a `&[u8]` method receiver is reborrowed for the call: the same storage and
+// length as a fresh value whose loan is the one the receiver already holds, so the binding is still
+// usable afterwards. `rt_vslice` over the whole view is that reborrow.
+fn reborrow_view<a>(c: (&a mut C), v: Val, formal: u64) -> Val {
+    mode := ty_mode(&mut c, formal);
+    length := apply(&mut c, view("rt_len"), one(v.t));
+    mut args = u64[];
+    args.push(v.t);
+    args.push(imm(&mut c, 0));
+    args.push(length);
+    args.push(imm(&mut c, 1));
+    slot := invoke(&mut c, view("rt_vslice"), args);
+    vty := intern_full(&mut c, 5, 0, mode, u64[]);
+    own(&mut c, slot, vty);
+    view_bonds(&mut c, slot, v.t, mode, false);
+    return val(slot, vty);
 }
 // A field's type as Grail code sees it: an inline C array `[T; N]` is the vector `T[]` it is copied
 // to and from.
@@ -28638,7 +28771,12 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     // order), and before the builtin collection methods below - which an impl may not redefine at
     // all (protocol_method_name). A declared type's own methods were looked up above (k == 8).
     if k != 8 {
-        method := inherent_method_for(&mut c, xty, view(name));
+        mut method = inherent_method_for(&mut c, xty, view(name));
+        // A byte vector or a string is byte text: when no impl names it as it stands, the impls of
+        // `[u8]` are the ones it is asking for, and the receiver is viewed for the call below.
+        if (method == 0) & byte_sequence_value(&mut c, inty) {
+            method = inherent_method_for(&mut c, view_type_of(&mut c), view(name));
+        }
         if method != 0 {
             owner := c.funcs[method - 1].module.copy();
             first := c.funcs[method - 1].first;
@@ -28658,7 +28796,28 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
                 exchange(&mut c.has_receiver, 3);
                 return call(&mut c, view(owner), view(name));
             }
-            prepared := method_receiver(&mut c, input, inty, xty, formal);
+            // A byte vector or a string handed to a `&[u8]` receiver is viewed for the call,
+            // exactly as an argument of that type is (coerce_view): `bytes.trim()` is
+            // `trim(view(bytes))`, and `&bytes.trim()` already is a view.
+            mut rinput = input;
+            mut rinty = inty;
+            mut rxty = xty;
+            if ty_kind(&mut c, formal) == 5 {
+                mut viewed = val(input, inty);
+                if ty_kind(&mut c, inty) == 5 {
+                    // The receiver is itself a view: reborrow the loan for the call, so one binding
+                    // stays usable across calls (`text.is_utf8()` then `text.find(...)`).
+                    viewed = reborrow_view(&mut c, viewed, formal);
+                } else {
+                    viewed = coerce_view(&mut c, viewed, formal);
+                }
+                if ty_kind(&mut c, viewed.ty) == 5 {
+                    rinput = viewed.t;
+                    rinty = viewed.ty;
+                    rxty = viewed.ty;
+                }
+            }
+            prepared := method_receiver(&mut c, rinput, rinty, rxty, formal);
             rv := prepared.t;
             rty := prepared.ty;
             exchange(&mut c.receiver, rv);
