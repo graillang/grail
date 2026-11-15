@@ -13,7 +13,10 @@ struct Ray {
 
 impl Ray {
     fn new(t_max: f32) -> Ray {
-        assert!(t_max.is_finite() && t_max > 0.0, "t_max is finite and positive");
+        assert!(
+            t_max.is_finite() && t_max > 0.0,
+            "t_max is finite and positive"
+        );
         Ray { t_max }
     }
 }

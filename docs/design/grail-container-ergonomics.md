@@ -27,14 +27,36 @@ moved value), so this is not a Grail gap. Pinned by `for-in-move-collection-reje
 `diagx-backedge-names-the-value`, `diagx-backedge-names-the-field`, and
 `diagx-backedge-continue-names-the-value` (the `continue` edge).
 
-### 2. `if` is not an expression
+The refusal is about **moving** the value, not about touching it. Reading an owned aggregate's
+fields inside a loop does not consume it, so this compiles even though the aggregate is owned:
 
 ```grl
-n := if c { 1 } else { 2 };   // refused: undefined name `if`
+fn total(table: T) -> u64 {
+    mut n = 0;
+    for i in table.rows.len() { n = n + table.rows[i]; }
+    return n + table.size_out;          // fine: `table` was never moved
+}
 ```
 
-Use a mutable local. Another workstream is fixing this on a separate branch; this note records the
-state of this tree, not that plan.
+It is passing the value itself to a call inside the loop body that refuses; borrow it (`view(t)`)
+or copy it (`t.copy()`) and the same loop compiles.
+
+### 2. `if` and `match` in expression position (fixed since this note was written)
+
+When the port ran, `n := if c { 1 } else { 2 };` was refused as `undefined name 'if'`, and the advice
+was a mutable local. That workaround is no longer needed: `if` and `match` are both expressions.
+
+```grl
+n := if c { 1 } else { 2 };
+x := match e { Good(v) => v, Bad(_) => 0 };
+```
+
+Two rules still shape a port. An `if` used as a value needs an `else`, because an `if` with no
+`else` has no value - the refusal says to add one. And an arm whose value *borrows* is refused
+(`match n { 0 => &a, _ => &b }`): one result word cannot name both arms' loans, so use the
+reference inside each arm. A diverging arm (`return`, `break`) needs no value. Reasoning in
+`docs/design/if-expression.md` and `docs/design/match-expression-arms.md`; corpus: the sixteen
+`exprif-` cases and the ten `exprif-match-` cases.
 
 ### 3. `u8[]` push of a word
 

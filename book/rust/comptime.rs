@@ -12,7 +12,10 @@ struct Header {
     pad: u8,
     size: u64,
 }
-const _: () = assert!(size_of::<Header>() == 16, "Header is read from disk as 16 bytes");
+const _: () = assert!(
+    size_of::<Header>() == 16,
+    "Header is read from disk as 16 bytes"
+);
 
 #[cfg(target_os = "windows")]
 fn separator() -> &'static str {

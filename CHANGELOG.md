@@ -26,6 +26,7 @@
   built for different pair layouts refuse to link rather than dereferencing each other's pairs
   wrongly. docs/design/separate-compilation.md, "Format 4 as built"; cases `ifc-*`, and
   `tools/interface-test.mjs` proves round-trip equality and every refusal.
+- Fixed: the windows suite no longer requires the `.set .F<n>` frame-constant table on Windows ARM64, where prologues size their frame with `sub sp, #n` instead. ARM64 unwind records are still checked one per function, with length, frame-pointer pair and `mov fp, sp`.
 - Fixed: `tools/interface-test.mjs` wiped `.work/interface-test/<target>` at the start of every run,
   so two runs in one checkout deleted each other's interfaces mid-run and the survivor failed with
   `has no interface for module X (expected this file)` - a directory collision, not a compiler bug.

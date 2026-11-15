@@ -239,3 +239,12 @@ make -C graphics perm-test      # shader permutations
 just abundance-test             # Abundance bit-exact parity (313 values, 9 programs)
 just borg-test                  # Borg reference-line parity (1014 lines, 12 suites)
 ```
+
+## Windows ARM64: unwind records yes, frame-constant table no
+
+An ARM64 PE object does carry one `.xdata` unwind record per function, and the windows suite
+checks them (length positive and 4-aligned, frame-pointer pair saved, `mov fp, sp` present).
+What it has no equivalent of is the `.set .F<n>,<size>` frame-constant table: an x86-64 prologue
+sizes its frame from that table, while an ARM64 prologue uses `sub sp, #n` directly. The suite
+therefore enforces the one-to-one frame-table contract where the table exists, and checks each
+record's own `FunctionLength` and prologue everywhere.

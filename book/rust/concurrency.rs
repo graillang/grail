@@ -1,6 +1,9 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-struct Shared { counter: AtomicU64, total: Mutex<u64> }
+struct Shared {
+    counter: AtomicU64,
+    total: Mutex<u64>,
+}
 fn work(id: u64, shared: &Shared) -> u64 {
     for _ in 0..1000 {
         shared.counter.fetch_add(1, Ordering::SeqCst);
@@ -9,7 +12,10 @@ fn work(id: u64, shared: &Shared) -> u64 {
     id * id
 }
 fn main() {
-    let shared = Shared { counter: AtomicU64::new(0), total: Mutex::new(0) };
+    let shared = Shared {
+        counter: AtomicU64::new(0),
+        total: Mutex::new(0),
+    };
     let squares: Vec<u64> = std::thread::scope(|s| {
         let handles: Vec<_> = [1, 2, 3, 4]
             .into_iter()

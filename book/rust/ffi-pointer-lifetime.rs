@@ -14,8 +14,22 @@ struct CreateInfo<'a> {
 }
 
 fn main() {
-    let mut app = AppInfo { api_version: 1, flags: 0 };
-    let info = CreateInfo { s_type: 0, pad: 0, p_app: &app, count: 7 };
-    app = AppInfo { api_version: 2, flags: 0 }; // info still points at the old app below.
-    println!("{}", info.p_app.api_version + info.count + info.s_type + info.pad + app.flags);
+    let mut app = AppInfo {
+        api_version: 1,
+        flags: 0,
+    };
+    let info = CreateInfo {
+        s_type: 0,
+        pad: 0,
+        p_app: &app,
+        count: 7,
+    };
+    app = AppInfo {
+        api_version: 2,
+        flags: 0,
+    }; // info still points at the old app below.
+    println!(
+        "{}",
+        info.p_app.api_version + info.count + info.s_type + info.pad + app.flags
+    );
 }

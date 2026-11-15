@@ -39,7 +39,10 @@ fn main() {
     }
     let prices = vec![120u64, 80, 45];
     let mut total = 0;
-    for p in (Items { items: &prices, pos: 0 }) {
+    for p in (Items {
+        items: &prices,
+        pos: 0,
+    }) {
         total += *p;
     }
     println!("total {}", total);

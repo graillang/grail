@@ -1,6 +1,7 @@
 import { buildCompiler, assemble, execute, hostTarget, targetName, triples } from './native.mjs';
 import { readFileSync, mkdirSync, writeFileSync, copyFileSync, rmSync } from 'node:fs';
 import { resolve, dirname, relative, join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
 export const root = resolve(import.meta.dir, '..');
@@ -45,7 +46,12 @@ export function expand(text, book, used = new Set()) {
     if (!example) throw new Error(`Unknown example: ${id}`);
     used.add(id);
     const code = readFileSync(sourcePath(example.entry), 'utf8');
-    const codeBlock = (code, language, cls = '') => `<pre class="${cls}"><code class="language-${language}">${escape(code)}</code></pre>`;
+    // A raw HTML block ends at the first blank line in CommonMark, and the rest of the block is then
+    // re-read as markdown: leading indentation is collapsed and a stray `<p>` is opened inside the
+    // `<pre>`. That is why code kept its indents up to a blank line and lost them after it. Emitting
+    // the newlines as `&#10;` leaves the block one unbroken line of HTML; the browser decodes them
+    // back to real newlines in the rendered text (and in `textContent`, so Copy still copies code).
+    const codeBlock = (code, language, cls = '') => `<pre class="${cls}"><code class="language-${language}">${escape(code).replace(/\n/g, '&#10;')}</code></pre>`;
     const outcome = (label, text, rejected) => `<div class="example-result${rejected ? ' rejection' : ''}"><div class="result-label">${label}</div>${codeBlock(text, 'text')}</div>`;
     const grailResult = example.diagnostic ? outcome('Expected compiler rejection', `Diagnostic contains: ${example.diagnostic}\n`, true) : outcome('Output', example.output, false);
     const command = codeBlock(`$ just book-run ${id}\n`, 'sh', 'run-command');
@@ -73,11 +79,24 @@ function page(book, chapter, index, html) {
 export function buildBook(destination = output) {
   if (!Bun.markdown?.html) throw new Error('Book rendering requires Bun 1.4 or newer.');
   const book = loadBook();
+  // `theme.css`, `book.js` and `search.js` keep their names, so a browser that has already loaded
+  // the book serves its cached copy after a rebuild - which looks exactly like the fix not having
+  // been made. Stamping the content hash into the URL makes a rebuilt page fetch the new asset and
+  // makes an unchanged one still cache.
+  const assetVersion = createHash('sha256')
+    .update(readFileSync(join(source, 'theme.css')))
+    .update(readFileSync(join(source, 'book.js')))
+    .digest('hex')
+    .slice(0, 10);
+  const stamp = (html) => html
+    .replace('href="theme.css"', `href="theme.css?v=${assetVersion}"`)
+    .replace('src="book.js"', `src="book.js?v=${assetVersion}"`)
+    .replace('src="search.js"', `src="search.js?v=${assetVersion}"`);
   mkdirSync(destination, { recursive: true });
   const search = [], used = new Set();
   book.chapters.forEach((chapter, index) => {
     const expanded = expand(readFileSync(sourcePath(chapter.source), 'utf8'), book, used);
-    const html = page(book, chapter, index, Bun.markdown.html(expanded));
+    const html = stamp(page(book, chapter, index, Bun.markdown.html(expanded)));
     writeFileSync(join(destination, `${chapter.slug}.html`), html);
     if (!index) writeFileSync(join(destination, 'index.html'), html);
     search.push({ title: chapter.title, url: `${chapter.slug}.html`, text: expanded.replace(/<[^>]*>/g, ' ').replace(/&(?:amp|lt|gt|quot|#39);/g, e => ({'&amp;':'&','&lt;':'<','&gt;':'>','&quot;':'"','&#39;':"'"}[e])).replace(/[`#]/g, '') });

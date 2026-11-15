@@ -9,7 +9,13 @@ fn main() {
     // Containment by canonicalised components, not by a string prefix.
     let escape = root.join("../outside.txt");
     let denied = match escape.canonicalize() {
-        Ok(path) => if path.starts_with(&root) { 0 } else { 1 },
+        Ok(path) => {
+            if path.starts_with(&root) {
+                0
+            } else {
+                1
+            }
+        }
         Err(_) => 1,
     };
     println!("{}", denied);

@@ -1,4 +1,7 @@
-struct Message { body: Vec<u8>, label: String }
+struct Message {
+    body: Vec<u8>,
+    label: String,
+}
 fn main() {
     let body = Vec::new();
     let label = String::from("note");

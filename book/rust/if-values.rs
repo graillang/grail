@@ -1,5 +1,11 @@
 fn word(n: u64) -> &'static str {
-    if n == 0 { "zero" } else if n == 1 { "one" } else { "many" }
+    if n == 0 {
+        "zero"
+    } else if n == 1 {
+        "one"
+    } else {
+        "many"
+    }
 }
 fn show(n: u64) {
     println!("{}", n);

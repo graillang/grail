@@ -26,8 +26,20 @@ fn main() {
     println!("{}", counts.len());
     let empty: HashMap<String, u64> = HashMap::new();
     println!("{}", empty.len());
-    let mut scores = vec![Score { name: "ada".into(), points: 7 }, Score { name: "bo".into(), points: 12 }];
-    scores.push(Score { name: "cy".into(), points: 9 });
+    let mut scores = vec![
+        Score {
+            name: "ada".into(),
+            points: 7,
+        },
+        Score {
+            name: "bo".into(),
+            points: 12,
+        },
+    ];
+    scores.push(Score {
+        name: "cy".into(),
+        points: 9,
+    });
     scores.sort_by(|a, b| b.points.cmp(&a.points));
     for s in &scores {
         println!("{} {}", s.name, s.points);
