@@ -1649,8 +1649,9 @@
   },
   {
     "name": "narrowing-cast-traps",
-    "source": "fn main(){a:=u8(256);}",
-    "signal": "SIGABRT"
+    "source": "fn main(){n: u64 = 256; a:=u8(n);}",
+    "signal": "SIGABRT",
+    "note": "A narrowing conversion of a value the target cannot hold traps; the value is a binding, not a literal, so the check is the run time one (a literal is refused when it is compiled)."
   },
   {
     "name": "negative-to-u64-traps",
@@ -10016,5 +10017,128 @@
     "interfaces": true,
     "stdout": "4\n0\n41\n6\n",
     "note": "iface: a signature that names a qualified enum from another module - a borrowed parameter, a record field, a return type and a generic instantiation - is written to the interface record stream and read back for the second build, which prints what the source build prints. An earlier text format lost exactly this signature"
+  },
+  {
+    "name": "frontend-fn-without-body",
+    "source": "fn f(a: u64",
+    "reject": true,
+    "diagnostic": [
+      "expected `{`, found the end of the file",
+      "this `fn` has no body"
+    ],
+    "note": "A signature the file ends in has no body. The scan for the body's `{` used to step over the end of the file and index past the token stream: the compiler aborted with \"index N out of bounds\" (docs/design/frontend-robustness.md)."
+  },
+  {
+    "name": "frontend-fn-without-body-generic",
+    "source": "fn main() -> u64 { return 0; } fn f<T>(x: T) -> T",
+    "reject": true,
+    "diagnostic": [
+      "expected `{`, found the end of the file",
+      "this `fn` has no body"
+    ],
+    "note": "The same refusal through the generic-template pass, where the label sits on a token that is not the first of the file."
+  },
+  {
+    "name": "early-return-unit-function",
+    "source": "fn emit(n: u64) { if n != 0 { return; } println(\"zero\"); } fn main() -> u64 { emit(1); emit(0); return 0; }",
+    "stdout": "zero\n",
+    "note": "`return;` is an early exit from a function whose result is unit, and it has to run: emit(1) returns before the println (docs/design/frontend-robustness.md)."
+  },
+  {
+    "name": "early-return-needs-value",
+    "source": "fn g() -> u64 { return; } fn main() -> u64 { return 0; }",
+    "reject": true,
+    "diagnostic": "`return` needs a value: this function returns `u64`",
+    "note": "A function with a result still has to name one, and the refusal names the type instead of \"expected a name here, found `;`\"."
+  },
+  {
+    "name": "record-contains-itself",
+    "source": "struct N{v:u64,next:N} fn main()->u64{return 0;}",
+    "reject": true,
+    "diagnostic": [
+      "contains itself by value",
+      "the field `next` carries the record itself"
+    ],
+    "note": "The type is uninhabited: every value needs a value of itself first. Accepted in silence before (docs/design/frontend-robustness.md)."
+  },
+  {
+    "name": "record-contains-itself-indirectly",
+    "source": "struct A{b:B} struct B{a:A} fn main()->u64{return 0;}",
+    "reject": true,
+    "diagnostic": "contains itself by value",
+    "note": "The same refusal through a second record: the cycle closes in `B`, which is refused and names its field."
+  },
+  {
+    "name": "recursive-record-through-optional",
+    "source": "struct N { v: u64, next: N? } fn head(n: N?) -> u64 { return match n { Some(x) => x.v, None => 0 }; } fn main() -> u64 { leaf := N { v: 7, next: None }; println(head(Some(leaf))); return 0; }",
+    "stdout": "7\n",
+    "note": "`N?` is how a recursive record is spelled here: the Option is an enum whose `None` is a value, so it breaks the cycle and must stay accepted."
+  },
+  {
+    "name": "entry-picked-function-named",
+    "source": "pub fn helper() -> u8[] { return u8[]; }",
+    "reject": true,
+    "diagnostic": [
+      "the entry `main::helper` was picked because this module has no `main`",
+      "it returns `u8[]`"
+    ],
+    "note": "A module with no `main` makes its first public function the entry. The refusal names that function and where it is, instead of pointing into lib/result.grl."
+  },
+  {
+    "name": "entry-missing-names-the-file",
+    "source": "fn hidden() { }",
+    "reject": true,
+    "diagnostic": "no `main` and no public function with at most one parameter",
+    "note": "The refusal points at the file the caller named; it used to point at the standard module the last pass had read."
+  },
+  {
+    "name": "main-result-type-named",
+    "source": "fn main() -> u8[] { return u8[]; }",
+    "reject": true,
+    "diagnostic": "`main` must return unit or u64; this one returns `u8[]`",
+    "note": "The refusal names `main` and its result, with the caret on the declaration."
+  },
+  {
+    "name": "runtime-narrowing-conversion-report",
+    "source": "fn main() -> u64 { x: u64 = 300; y := u8(x); println(y); return 0; }",
+    "signal": "SIGABRT",
+    "stderr": "value 300 does not fit in u8",
+    "note": "A conversion the target cannot hold died with an empty stderr and a bare abort; it now reports the value, the type and the line, like every other failed check (docs/design/frontend-robustness.md)."
+  },
+  {
+    "name": "runtime-narrowing-conversion-u16",
+    "source": "fn main() -> u64 { x: u64 = 70000; y := u16(x); println(y); return 0; }",
+    "signal": "SIGABRT",
+    "stderr": "value 70000 does not fit in u16",
+    "note": "Wider targets name themselves: the type comes from the conversion's own code, so the report says `u16` and not the compiler's spelling."
+  },
+  {
+    "name": "runtime-narrowing-negative-to-unsigned",
+    "source": "fn main() -> u64 { x: i64 = -1; y := u8(x); println(y); return 0; }",
+    "signal": "SIGABRT",
+    "stderr": "negative value converted to an unsigned type",
+    "note": "A negative value into an unsigned target keeps its own message: a magnitude would read as a positive number that never existed."
+  },
+  {
+    "name": "runtime-narrowing-negative-to-signed",
+    "source": "fn main() -> u64 { x: i64 = -300; y := i8(x); println(y); return 0; }",
+    "signal": "SIGABRT",
+    "stderr": "value -300 does not fit in i8",
+    "note": "The register holds the two's complement, so the report prints the magnitude with the sign the program wrote."
+  },
+  {
+    "name": "narrowing-conversion-of-a-constant",
+    "source": "fn main() -> u64 { y := u8(300); println(y); return 0; }",
+    "reject": true,
+    "diagnostic": [
+      "integer 300 is out of range for u8 (0..=255)"
+    ],
+    "note": "A constant the target cannot hold never needed a run-time check: the conversion is refused when it is compiled, with the range."
+  },
+  {
+    "name": "narrowing-conversion-wrapping-is-a-choice",
+    "source": "fn main() -> u64 { x: u64 = 300; y := wrapping_u8(x); println(y); return 0; }",
+    "stdout": "44\n",
+    "note": "`wrapping_u8` is the spelling that says the truncation is intended; it must stay accepted and silent."
   }
 ]

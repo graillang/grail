@@ -66,8 +66,8 @@ already were:
 
 ```text
 error[E0015]: integer 300 is out of range for u8 (0..=255)
- = help: write a value that fits, or convert explicitly (`u8(x)`), which truncates and so says the
-   narrowing is intended
+ = help: write a value that fits, or truncate on purpose: `wrapping_u8(x)` says the narrowing is
+   intended, where `u8(x)` checks the value at run time
 ```
 
 A *value* wider than a byte is still accepted and range-checked at run time, which is what a byte

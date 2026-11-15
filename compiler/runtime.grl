@@ -381,10 +381,35 @@ fn rt_fail_body(kind: u64, a: u64, b: u64, buf: u64, n: u64) -> u64 {
         at = rt_fail_put(buf, at, "assertion failed");
     } else if kind == 13 {
         at = rt_fail_put(buf, at, "the task failed");
+    } else if kind == 14 {
+        // A conversion whose value the target type cannot hold: `u8(300)`. The type is the code
+        // `rt_int_cast` was given, so the report names it the way the source did.
+        at = rt_fail_put(buf, at, "value ");
+        at = rt_fail_num(buf, at, a);
+        at = rt_fail_put(buf, at, " does not fit in ");
+        at = rt_fail_type(buf, at, b);
+    } else if kind == 15 {
+        // The same, for a negative value and a signed target, where the word in the register is the
+        // two's-complement of the number the program wrote.
+        at = rt_fail_put(buf, at, "value -");
+        at = rt_fail_num(buf, at, a);
+        at = rt_fail_put(buf, at, " does not fit in ");
+        at = rt_fail_type(buf, at, b);
     } else {
         at = rt_fail_put(buf, at, "the program aborted");
     }
     return at;
+}
+// An integer type's source name from its runtime code: the size is the low byte, the signedness is
+// bit 8 (`rt_int_cast`), so 8 is `u8` and 264 is `i8`.
+fn rt_fail_type(buf: u64, at: u64, code: u64) -> u64 {
+    mut out = at;
+    if ((code / 256) & 1) != 0 {
+        out = rt_fail_put(buf, out, view("i"));
+    } else {
+        out = rt_fail_put(buf, out, view("u"));
+    }
+    return rt_fail_num(buf, out, code & 255);
 }
 // The dying report: `error: ` message, a newline, then the location line, and the cleanup-free
 // exit. Reached with the abort claim already taken.
@@ -4183,7 +4208,16 @@ fn rt_int_cast(v: u64, from: u64, to: u64) -> u64 {
         if (to / 512) & 1 {
             return rt_int_truncate(v, tb, ts);
         }
-        rt_abort();
+        // A conversion the target cannot hold is a failed check like any other: it reports what
+        // failed and where. It used to call rt_abort, so `u8(300)` died with an empty stderr and a
+        // status of 134 - the one runtime check with nothing to say (docs/diagnostics.md).
+        if (ts == 0) & (negative != 0) {
+            return rt_fail(3, 0, 0);
+        }
+        if negative != 0 {
+            return rt_fail(15, wrapping_sub(0, v), to);
+        }
+        return rt_fail(14, v, to);
     }
     return v;
 }

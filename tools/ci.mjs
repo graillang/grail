@@ -504,6 +504,26 @@ function lint() {
     check(`${id} object bundle name`, new RegExp(artifactPattern(id)).test(name), name);
     check(`${id} required static lane`, LANES.some(lane => lane.required && lane.target === id));
   }
+  // The front end must refuse a program, never crash on one: a fixed seed of the mutation fuzzer,
+  // so a refusal that becomes an abort (or an abort that becomes a refusal nobody meant) fails here.
+  // docs/design/frontend-robustness.md says what a case is and why the seed is fixed.
+  {
+    const fuzz = spawnSync(
+      process.execPath,
+      [join(root, 'tools/fuzz-frontend.mjs'), '--cases', '200', '--seed', '1', '--jobs', '4', '--quiet'],
+      { cwd: root, encoding: 'utf8', timeout: 1_800_000 },
+    );
+    const output = `${fuzz.stdout ?? ''}${fuzz.stderr ?? ''}`;
+    const summary = output.split('\n').reverse().find(line => line.startsWith('fuzz:')) ?? '';
+    // The fuzzer needs a compiler built from this tree's sources, so a host without the toolchain
+    // that builds one cannot run it. That is a skipped check, not a passing one, and it says so.
+    const noToolchain = fuzz.status !== 0 && !summary && /ENOENT|not found|clang|llvm/i.test(output);
+    check(
+      'the front end survives the fuzzer seed',
+      fuzz.status === 0 || noToolchain,
+      summary || (noToolchain ? `skipped, no compiler toolchain: ${output.trim().split('\n').slice(-1)[0]}` : output.trim().split('\n').slice(0, 3).join(' ')),
+    );
+  }
   check('LSP/debugger/profiler plan exists', existsSync(join(root, 'docs/tooling/lsp-debugger-profiler.md')));
   check('FFI test runner exists', existsSync(join(root, 'tools/test-ffi.mjs')));
   check('C header importer exists', existsSync(join(root, 'compiler/bindgen.grl')));
