@@ -1,6 +1,7 @@
 import { buildCompiler, assemble, execute, hostTarget, targetName, triples } from './native.mjs';
 import { readFileSync, mkdirSync, writeFileSync, copyFileSync, rmSync } from 'node:fs';
 import { resolve, dirname, relative, join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
 export const root = resolve(import.meta.dir, '..');
@@ -73,11 +74,24 @@ function page(book, chapter, index, html) {
 export function buildBook(destination = output) {
   if (!Bun.markdown?.html) throw new Error('Book rendering requires Bun 1.4 or newer.');
   const book = loadBook();
+  // `theme.css`, `book.js` and `search.js` keep their names, so a browser that has already loaded
+  // the book serves its cached copy after a rebuild - which looks exactly like the fix not having
+  // been made. Stamping the content hash into the URL makes a rebuilt page fetch the new asset and
+  // makes an unchanged one still cache.
+  const assetVersion = createHash('sha256')
+    .update(readFileSync(join(source, 'theme.css')))
+    .update(readFileSync(join(source, 'book.js')))
+    .digest('hex')
+    .slice(0, 10);
+  const stamp = (html) => html
+    .replace('href="theme.css"', `href="theme.css?v=${assetVersion}"`)
+    .replace('src="book.js"', `src="book.js?v=${assetVersion}"`)
+    .replace('src="search.js"', `src="search.js?v=${assetVersion}"`);
   mkdirSync(destination, { recursive: true });
   const search = [], used = new Set();
   book.chapters.forEach((chapter, index) => {
     const expanded = expand(readFileSync(sourcePath(chapter.source), 'utf8'), book, used);
-    const html = page(book, chapter, index, Bun.markdown.html(expanded));
+    const html = stamp(page(book, chapter, index, Bun.markdown.html(expanded)));
     writeFileSync(join(destination, `${chapter.slug}.html`), html);
     if (!index) writeFileSync(join(destination, 'index.html'), html);
     search.push({ title: chapter.title, url: `${chapter.slug}.html`, text: expanded.replace(/<[^>]*>/g, ' ').replace(/&(?:amp|lt|gt|quot|#39);/g, e => ({'&amp;':'&','&lt;':'<','&gt;':'>','&quot;':'"','&#39;':"'"}[e])).replace(/[`#]/g, '') });
