@@ -114,6 +114,27 @@ value was accepted with no diagnostic.
 - The too-many-arguments message (`f takes 2, this call passes 1`) has no case pinning it, so it can
   regress silently.
 
+### 4.1 The flag work, in the order it has to be done
+
+An attempt at the unknown-flag refusal on 2026-11-15 was abandoned rather than shipped: inserting a
+branch into `options()` means editing a deeply nested `else { if .. } else { .. }` chain, and a
+half-applied edit left the compiler unable to parse its own source (`expected 'fn', found 'if'`). The
+lesson is not "be careful", it is "change the shape first":
+
+1. **Flatten `options()` into a table** (word -> kind -> field), as its own commit with no behaviour
+   change, gated by "every existing flag still parses". This is the step that removes the brace
+   hazard for every later flag.
+2. **Then the refusal.** An unknown `--word` sets `bad` and the build reports
+   ``grail: unknown option `--x`; `grail build --help` lists the options this command takes``. The
+   pass-through allowlist (`--separate`, `--print-inputs`, `--skip-body`, `--reported`, `--interface`,
+   `--verify-interface`, the analysis switches) lives in one place labelled as the driver-to-compiler
+   contract, not as a user surface. `--` as a terminator and a `.grl` path are unaffected.
+3. **Then `--emit-ir FILE`** as an `Options` field forwarded through `Home`, with a case asserting the
+   file exists *and* is non-empty — an empty `.tir` would satisfy a naive existence check.
+4. **Then `driverNoModules`** in `tools/test-native.mjs`, so a bare file plus `--module-root` is
+   expressible and `gaps6-modroot`'s case can be made red on the pre-fix binary. `projectExtra` and
+   `printInputs` are used by that case or deleted with it.
+
 ## 5. Long-standing, known, and deliberately not "quick"
 
 - The word optimizer still runs over spliced text in the per-function cache, so a cache hit saves the
