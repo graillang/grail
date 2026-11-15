@@ -229,6 +229,11 @@ function runCase(test, position, context) {
       // case that builds a single module (`driverNoModules`) has no split to inspect: it pins that
       // the build resolved and ran, which is what `--module-root` was failing to do.
       // One run per module, one interface per module: runtime is the trusted base and has none.
+      // A case with `driverNoModules` builds a single module, so there is no `.modules` split to
+      // inspect: what it pins is that the build resolved `use` through the module roots the command
+      // line gives and produced a program that runs. That is the shape `--module-root` was failing
+      // to serve, and the reason this mode exists at all.
+      if (!test.driverNoModules) {
       const modules = join(`${output}.modules`);
       const ran = readdirSync(modules).filter(name => name.endsWith('.s')).map(name => name.slice(0, -2)).sort();
       const written = readdirSync(join(modules, 'interfaces')).filter(name => name.endsWith('.iface')).map(name => name.slice(0, -6)).sort();
@@ -238,6 +243,7 @@ function runCase(test, position, context) {
       if (test.printInputs) {
         const listed = readFileSync(inputs, 'utf8').split('\n').filter(Boolean).map(row => row.split('\t')[0]);
         for (const module of test.driverModules ?? []) assert.ok(listed.includes(module), `${test.name}: --print-inputs does not name ${module} (${listed.join(', ')})`);
+      }
       }
       const image = execute(output, test.args ?? [], target, { cwd: project, env: { ...process.env, ...(test.env ?? {}) } });
       observed.stdout = image.stdout.toString();
