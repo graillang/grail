@@ -1,0 +1,106 @@
+// Inherent impls on a *written* type, and the receiver shorthand.
+//
+// `impl u8[] { ... }`, `impl [u64] { ... }` and `impl<T> T[] { ... }` are inherent impls like
+// `impl Stack { ... }` is, but their owner is a type no module declares. `&self`, `&mut self` and
+// `self` are sugar for the written receiver (`self: (&__self Self)`), and `&Self` is the same
+// reference with a fresh region, so a signature reads the way Rust's does.
+use order;
+
+// ---- a written type: the byte vector -------------------------------------------------------
+impl u8[] {
+    fn first_byte(&self) -> u64 {
+        if self.len() == 0 { return 0; }
+        return u64(self[0]);
+    }
+    fn byte_count(&self) -> u64 { return self.len(); }
+}
+
+// ---- a slice: `[u64]` covers `&[u64]` and `&mut [u64]` receivers; the `self` type decides ----
+impl [u64] {
+    fn slice_sum(&self) -> u64 {
+        mut total = 0;
+        for i in self.len() { total = total + self[i]; }
+        return total;
+    }
+    fn slice_bump(&mut self) {
+        for i in self.len() { self[i] = self[i] + 1; }
+    }
+}
+
+// ---- a generic impl on the vector type: the element type comes from the receiver -------------
+impl<T> T[] {
+    fn longer_than<U>(&self, other: U[]) -> bool {
+        return self.len() > other.len();
+    }
+}
+
+// ---- a record: the shorthand, `&Self`, `-> Self`, and a second type parameter ---------------
+struct Point { x: u64, y: u64 }
+impl Point {
+    fn area(&self) -> u64 { return self.x * self.y; }
+    fn bump(&mut self) { self.x = self.x + 1; }
+    fn same(&self, other: &Self) -> bool {
+        if self.x != other.x { return false; }
+        return self.y == other.y;
+    }
+    fn twin(&self) -> Self { return Self { x: self.x, y: self.y }; }
+    fn with<U>(&self, other: U[]) -> u64 { return self.area() + other.len(); }
+    // The written form still means exactly what it did.
+    fn written<a>(self: (&a Self)) -> u64 { return self.x; }
+}
+
+// ---- an interface with the shorthand, and a method own by both ------------------------------
+interface Area { fn area(&self) -> u64; }
+impl Area for Point { fn area(&self) -> u64 { return 99; } }
+fn by_area<A: Area>(a: &A) -> u64 { return a.area(); }
+
+// `Probe::first_byte` and the inherent `u8[]::first_byte` both fit a byte vector: the inherent one
+// wins at a call site, and the interface one is still what a bound reaches.
+interface Probe { fn first_byte(&self) -> u64; }
+impl Probe for u8[] { fn first_byte(&self) -> u64 { return 99; } }
+fn by_bound<P: Probe>(p: &P) -> u64 { return p.first_byte(); }
+
+fn main() {
+    bytes := u8[65, 66, 67];
+    assert(bytes.first_byte() == 65);
+    assert(bytes.byte_count() == 3);
+    empty := u8[];
+    assert(empty.first_byte() == 0);
+
+    mut values = u64[1, 2, 3];
+    shared := view(values);
+    assert(shared.slice_sum() == 6);
+    mut head = &mut values[0: 2];
+    head.slice_bump();
+    assert(values[0] == 2);
+    assert(values[2] == 3);
+    assert(shared.slice_sum() == 7);
+
+    words := u64[1, 2, 3];
+    assert(words.longer_than(u64[1, 2]));
+    assert(!words.longer_than(u64[1, 2, 3]));
+    assert(words.longer_than(u8[7]));
+
+    mut p = Point { x: 3, y: 4 };
+    assert(p.area() == 12);
+    p.bump();
+    assert(p.area() == 16);
+    q := Point { x: 4, y: 4 };
+    assert(p.same(&q));
+    assert(!q.same(&p));
+    copy := q.twin();
+    assert(copy.area() == 16);
+    assert(p.with(u64[1, 2]) == 18);
+    assert(p.written() == 4);
+
+    // The inherent method wins on the value; the interface method is what a bound calls.
+    probe := u8[7];
+    assert(probe.first_byte() == 7);
+    assert(by_bound(&probe) == 99);
+    assert(p.area() == 16);
+    assert(by_area(&p) == 99);
+    // An interface method still resolves on a written-type receiver (order::Ord's `less`).
+    assert(!probe.less(&probe));
+    assert(probe.less(&u8[9]));
+    println(42);
+}
