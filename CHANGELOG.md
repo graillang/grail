@@ -1,5 +1,16 @@
 ## Unreleased
 
+- `grail build --module-root DIR` now reaches the compiler. The flag was taken for a path by the
+  option parser, so the resolution run never saw it and the build refused the module with a message
+  telling the caller to pass the very flag it had passed. A command-line root comes before the
+  stdlib's, so a project can shadow a std module by name.
+- `grail build --emit-interface DIR`, `grail build --no-entry` and `grail build --print-inputs FILE`
+  work on the driver, as they already did on the compiler. `--print-inputs` writes the module set the
+  build resolved and still builds.
+- A call that passes too many arguments has a case pinning its message; it had none.
+
+## Unreleased
+
 - Changed: module interface files are a **typed record stream, format 4**, not line-oriented
   text. The compiler wrote the text and then re-read it with a hand-written line lexer and parser -
   two implementations of one format, and one of them three hundred lines of spelling rules that had
