@@ -5869,8 +5869,15 @@ fn move_value<a>(c: (&a mut C), v: Val) -> Val {
     return val(slot, v.ty);
 }
 // ---- tokens ----
+// The kind at the cursor. Past the last token is the end of the file: the stream ends with one (kind
+// 0), and a parser that has stepped over it - a search for a `{` that never arrives - has to see
+// EOF, not fault. An unchecked index here was a compiler abort on a half-typed declaration
+// (docs/design/frontend-robustness.md).
 fn kind<a>(c: (&a mut C)) -> u64 {
     p := c.pos;
+    if c.toks.len() <= p {
+        return 0;
+    }
     t := &c.toks[p];
     return t.kind;
 }
@@ -5888,7 +5895,11 @@ fn advance<a>(c: (&a mut C)) -> unit {
     exchange(&mut c.pos, c.pos + 1);
     return ();
 }
+// The cursor's token text. Past the last token is the end of the file, which has no text.
 fn tok_text<a>(c: (&a mut C), i: u64) -> u8[] {
+    if c.toks.len() <= i {
+        return u8[];
+    }
     t := &c.toks[i];
     st := t.start;
     en := t.end;
@@ -6213,7 +6224,12 @@ fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
     if 60 < span {
         span = 60;
     }
-    st := c.toks[p].start;
+    // A refusal raised past the last token ("expected `{`, found the end of the file") points at
+    // the end of the source, where the missing token belongs.
+    mut st = c.src.len();
+    if p < c.toks.len() {
+        st = c.toks[p].start;
+    }
     exchange(&mut c.out, u8[]);
     here := diag_pos(&c.src, st);
     file := c.file;
@@ -6249,6 +6265,11 @@ fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
     primary := exchange(&mut c.diag_primary, u8[]);
     mut width = diag_digits(here.line);
     mut shown = DiagLabel[];
+    // Which labels have been drawn. This used to be `pos = 0` on the label just rendered, and a real
+    // label on a file's *first* token was then read as "already drawn": the loop asked for the label
+    // after the last one and indexed past it, so a refusal that labels token 0 - "this `fn` has no
+    // body" at the top of a file - was a compiler abort (docs/design/frontend-robustness.md).
+    mut rendered = u64[];
     for i in labels.len() {
         l := &labels[i];
         if (l.file == file) & (l.pos < c.toks.len()) & (l.pos != p) {
@@ -6257,6 +6278,7 @@ fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
                 width = diag_digits(lp.line);
             }
             shown.push(DiagLabel { pos: l.pos, file: l.file, text: l.text.copy() });
+            rendered.push(0);
         }
     }
     code := explain::code_of(msg);
@@ -6290,7 +6312,7 @@ fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
         mut best = 0;
         for j in shown.len() {
             lj := c.toks[shown[j].pos].start;
-            if (shown[j].pos != 0) & ((next_label == shown.len()) || (lj < best)) {
+            if (rendered[j] == 0) & ((next_label == shown.len()) || (lj < best)) {
                 next_label = j;
                 best = lj;
             }
@@ -6301,6 +6323,11 @@ fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
             }
             diag_excerpt(&mut c, width, &here, span, 94, view(primary));
             last_line = here.line;
+            done = true;
+            continue;
+        }
+        if next_label == shown.len() {
+            // Nothing left to draw: every label is rendered and the primary line is out.
             done = true;
             continue;
         }
@@ -6319,7 +6346,7 @@ fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
         text := shown[next_label].text.copy();
         diag_excerpt(&mut c, width, &lp, lspan, 45, view(text));
         last_line = lp.line;
-        shown[next_label].pos = 0;
+        rendered[next_label] = 1;
         k += 1;
     }
     for i in helps.len() {
@@ -6340,6 +6367,18 @@ fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
     next_error(&mut c, view(key));
     // A rejected program is an ordinary failure (status 1), not a crash of the compiler.
     host::exit(1);
+    return ();
+}
+// Refuse at a position in a file that may not be the one being read: the token stream an excerpt
+// and a caret are drawn from is the loaded file's, so load it first. A refusal about a declaration
+// has to point at that declaration, not at whatever file the last pass happened to read.
+fn fail_in_file<a, b>(c: (&a mut C), file: u64, pos: u64, msg: &b [u8]) -> unit {
+    if c.file != file {
+        load_file(&mut c, file);
+        exchange(&mut c.file, file);
+    }
+    exchange(&mut c.pos, pos);
+    fail(&mut c, view(msg));
     return ();
 }
 // One diagnostic as a JSON object on its own line, appended to the listener's file
@@ -8354,6 +8393,20 @@ fn ident<a>(c: (&a mut C)) -> u8[] {
     return t;
 }
 // Skips a balanced {...} group starting at the current '{'.
+// The `{` that opens a function body. A pass that is not checking this body still has to find where
+// it ends, so it scans forward for the brace; a signature the file ends in has none, and the scan
+// used to step over the end-of-file token and index past the token stream. It stops there now and
+// the refusal names the `fn` (docs/design/frontend-robustness.md).
+fn body_brace<a>(c: (&a mut C), position: u64) -> unit {
+    while (kind(&mut c) != 123) & (kind(&mut c) != 0) {
+        advance(&mut c);
+    }
+    if kind(&mut c) != 123 {
+        diag_label(&mut c, position, view("this `fn` has no body"));
+        expect(&mut c, view("{"));
+    }
+    return ();
+}
 fn skip_braces<a>(c: (&a mut C)) -> unit {
     mut depth = 0;
     opened := c.pos;
@@ -12003,6 +12056,59 @@ fn handle_declaration<a>(c: (&a mut C), pass: u64) -> unit {
         );
     return ();
 }
+// Does a value of `decl` need a value of `target` before it can exist? Only the edges a value
+// cannot avoid are followed: a struct's value needs every field, so any field that needs `target`
+// makes it impossible, while an enum's value needs one variant, so every variant has to need it.
+// Everything else ends the walk, because it is a value on its own: a number, a view, a vector, a
+// reference (it points at a record, it does not hold one), and `T?` - Option is an enum whose `None`
+// is a value, so `next: T?` is how a recursive record is spelled here.
+// `decl` refuses a record that contains itself by value (docs/design/frontend-robustness.md).
+fn needs_record<a, b>(c: (&a mut C), target: u64, decl: u64, seen: (&b u64[]), depth: u64) -> bool {
+    // A record graph deeper than this is not a person's program, and the walk is only a diagnostic.
+    if 64 <= depth {
+        return false;
+    }
+    for i in seen.len() {
+        if seen[i] == decl {
+            return false;
+        }
+    }
+    count := c.decls[decl].count;
+    if count == 0 {
+        // A record this pass has not read yet: nothing is known about what it holds.
+        return false;
+    }
+    first := c.decls[decl].first;
+    is_enum := c.decls[decl].is_enum;
+    mut path = u64[];
+    for i in seen.len() {
+        path.push(seen[i]);
+    }
+    path.push(decl);
+    mut any = false;
+    mut all = true;
+    for i in count {
+        fty := c.fields[first + i].ty;
+        mut hit = false;
+        if ty_kind(&mut c, fty) == 8 {
+            inner := ty_arg(&mut c, fty);
+            if inner == target {
+                hit = true;
+            } else {
+                hit = needs_record(&mut c, target, inner, &path, depth + 1);
+            }
+        }
+        if hit {
+            any = true;
+        } else {
+            all = false;
+        }
+    }
+    if is_enum != 0 {
+        return all;
+    }
+    return any;
+}
 fn decl<a>(c: (&a mut C), pass: u64) -> unit {
     is_enum := u64(is(&mut c, view("enum")));
     advance(&mut c);
@@ -12140,6 +12246,57 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
         }
     }
     eat(&mut c, view(";"));
+    // A record that needs itself before it can exist has no value anyone can write: the field that
+    // names it would need one first, so the type is uninhabited and the user is holding something
+    // they can never build. This was accepted in silence (docs/design/frontend-robustness.md).
+    mut closes = 0;
+    mut field_name = u8[];
+    mut any_needs = false;
+    mut all_need = true;
+    for i in pending.len() {
+        mut hit = false;
+        fty := pending[i].ty;
+        if ty_kind(&mut c, fty) == 8 {
+            inner := ty_arg(&mut c, fty);
+            if inner == d - 1 {
+                hit = true;
+            } else {
+                mut none = u64[];
+                hit = needs_record(&mut c, d - 1, inner, &none, 1);
+            }
+        }
+        if hit {
+            any_needs = true;
+            if closes == 0 {
+                closes = spots[i];
+                field_name = pending[i].name.copy();
+            }
+        } else {
+            all_need = false;
+        }
+    }
+    mut impossible = any_needs;
+    if is_enum != 0 {
+        impossible = all_need;
+    }
+    if impossible {
+        if closes != 0 {
+            exchange(&mut c.pos, closes);
+        }
+        mut said = copy_bytes(view("`"));
+        push_bytes(&mut said, view(name));
+        push_bytes(&mut said, view("` contains itself by value: "));
+        if is_enum != 0 {
+            push_bytes(&mut said, view("every variant carries the record itself, so no value of it can be built. Give it a variant with no payload, or hold the record behind a reference"));
+        } else {
+            push_bytes(&mut said, view("the field `"));
+            push_bytes(&mut said, view(field_name));
+            push_bytes(&mut said, view("` carries the record itself, so no value of it can be built. Break the cycle with an optional field (`"));
+            push_bytes(&mut said, view(name));
+            push_bytes(&mut said, view("?`, whose value can be `None`), a reference, or a vector"));
+        }
+        fail(&mut c, view(said));
+    }
     mut reverse = Field[];
     while pending.len() != 0 {
         reverse.push(pending.pop());
@@ -13614,16 +13771,12 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         }
     }
     if (pass == 3) & (typecount != 0) {
-        while kind(&mut c) != 123 {
-            advance(&mut c);
-        }
+        body_brace(&mut c, position);
         skip_braces(&mut c);
         return ();
     }
     if pass == 1 {
-        while kind(&mut c) != 123 {
-            advance(&mut c);
-        }
+        body_brace(&mut c, position);
         skip_braces(&mut c);
         return ();
     }
@@ -13635,9 +13788,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         here_file := c.file;
         for i in c.skip_bodies.len() / 2 {
             if (c.skip_bodies[2 * i] == here_file) & (c.skip_bodies[2 * i + 1] == position + 1) {
-                while kind(&mut c) != 123 {
-                    advance(&mut c);
-                }
+                body_brace(&mut c, position);
                 skip_braces(&mut c);
                 return ();
             }
@@ -34500,7 +34651,21 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         rstart := c.pos;
         expected_result := c.result;
         exchange(&mut c.in_return, 1);
-        mut v = expr_expected(&mut c, 0, expected_result);
+        // `return;` is an early exit from a function whose result is unit: the source names no value
+        // and unit needs none. A function with a result still has to name one, so the refusal says
+        // which result it owes instead of "expected a name here, found `;`" - an early exit was
+        // simply not spellable before this (docs/design/frontend-robustness.md).
+        mut v = val(0, 1);
+        if is(&mut c, view(";")) {
+            if expected_result != 1 {
+                mut said = copy_bytes(view("`return` needs a value here: this function's result is `"));
+                push_bytes(&mut said, view(source_type_name(&mut c, expected_result)));
+                push_bytes(&mut said, view("`, so the `return` has to produce one"));
+                fail(&mut c, view(said));
+            }
+        } else {
+            v = expr_expected(&mut c, 0, expected_result);
+        }
         exchange(&mut c.in_return, 0);
         rend := c.pos;
         expect(&mut c, view(";"));
@@ -41590,7 +41755,16 @@ pub fn main() -> u64 {
     } else {
     e := c.entry;
     if e == 0 {
-        fail(&mut c, view("no public entry function with at most one parameter"));
+        // No function in the entry file can be the program's entry. Say that at the file the caller
+        // named: the last pass to run read a standard module, and this refusal used to point into
+        // lib/result.grl - a location in a file the user never mentioned.
+        at := 2 + c.probe_mode;
+        if c.file != at {
+            load_file(&mut c, at);
+            exchange(&mut c.file, at);
+            exchange(&mut c.pos, 0);
+        }
+        fail(&mut c, view("no `main` and no public function with at most one parameter to use as the entry: add `pub fn main()`"));
     }
     f := &c.funcs[e - 1];
     m := f.module.copy();
@@ -41598,14 +41772,29 @@ pub fn main() -> u64 {
     count := f.count;
     result := f.ret;
     first := f.first;
+    entry_file := f.file;
+    entry_pos := f.pos;
     named_main := same(view(name), view("main"));
     if named_main {
         if (result != 0) & (result != 1) {
-            fail(&mut c, view("main must return unit or u64"));
+            mut said = copy_bytes(view("`main` must return unit or u64; this one returns `"));
+            push_bytes(&mut said, view(source_type_name(&mut c, result)));
+            push_bytes(&mut said, view("`"));
+            fail_in_file(&mut c, entry_file, entry_pos, view(said));
         }
     } else {
         if result != 0 {
-            fail(&mut c, view("executable entry must return u64"));
+            // The entry was picked, not written: a module with no `main` makes its first public
+            // function with at most one parameter the entry. Name it, so the user is not told about
+            // a rule they never invoked.
+            mut said = copy_bytes(view("the entry `"));
+            push_bytes(&mut said, view(m));
+            push_bytes(&mut said, view("::"));
+            push_bytes(&mut said, view(name));
+            push_bytes(&mut said, view("` was picked because this module has no `main`, and an entry must return `u64`; it returns `"));
+            push_bytes(&mut said, view(source_type_name(&mut c, result)));
+            push_bytes(&mut said, view("`. Give the program a `pub fn main()`"));
+            fail_in_file(&mut c, entry_file, entry_pos, view(said));
         }
     }
     if count == 1 {

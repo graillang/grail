@@ -1,5 +1,45 @@
 ## Unreleased
 
+- Fixed: a declaration the file ends in (`fn f(a: u64`, nothing after it) **aborted the compiler**
+  with `error: index 24 out of bounds for length 24 --> compiler/native.grl:5874:5` and a backtrace.
+  Three passes scan forward to a body's `{`; the stream ends with an end-of-file token, the scan
+  stepped over it, and `kind()` indexed the token vector unchecked. `kind`, `tok_text` and `fail`
+  now answer "end of file" past the last token, and the scan stops there and refuses as any missing
+  token is (`expected `{`, found the end of the file`, with `this `fn` has no body` on the `fn`).
+  The same fix closed a second crash one layer under it: `fail` marked the secondary labels it had
+  drawn by setting their token index to 0, and 0 is a real token - the first `fn` of a file - so the
+  renderer asked for the label after the last one and indexed past it (`index 1 out of bounds for
+  length 1`). Labels carry their own drawn flag now. Cases `frontend-fn-without-body`,
+  `frontend-fn-without-body-generic`; docs/design/frontend-robustness.md.
+- Fixed: `return;` in a function whose result is unit was refused with "expected a name here, found
+  `;`", and there was no spelling for an early return from a unit function at all (`return ();` and
+  `return unit;` failed differently). `return` followed by `;` is a return from a unit function now;
+  a function with a result still has to name one, and the refusal says so: "`return` needs a value
+  here: this function's result is `u64`, so the `return` has to produce one". Cases
+  `early-return-unit-function` (which runs), `early-return-needs-value`.
+- Fixed: `struct N { v: u64, next: N }` was accepted in silence, and no value of the type can ever
+  be built - the field that names the record needs a value of the record first. A record that
+  contains itself by value is refused, with the caret on the field that closes the cycle, and the
+  fix named: an optional field (`N?`, whose value can be `None`), a reference, or a vector. Only the
+  edges a value cannot avoid are followed, so `next: N?`, reference fields and vector fields stay
+  accepted, and a mutual cycle is refused at the record that is completed second. Cases
+  `record-contains-itself`, `record-contains-itself-indirectly`, `recursive-record-through-optional`.
+- Changed: a refusal about the program's entry names the entry and the file instead of pointing into
+  the standard library. `grail check` of a module with no `main` used to say `error: executable entry
+  must return u64 --> lib/result.grl:128:1`: the diagnosis was about a function borrowed from
+  entry selection, at a line in a file the user never wrote. The refusal now names it - "the entry
+  `main::helper` was picked because this module has no `main`, and an entry must return `u64`; it
+  returns `u8[]`. Give the program a `pub fn main()`" - or says there is none, at the file the
+  caller named. Entry *selection* is unchanged. Cases `entry-picked-function-named`,
+  `entry-missing-names-the-file`, `main-result-type-named`.
+- Added: `tools/fuzz-frontend.mjs`, a front-end fuzzer that mutates real sources (the test corpus,
+  the book's examples and the compiler's own modules) and runs one compiler per case, and classifies
+  each outcome - `fine` (a diagnostic), `bug` (a signal, a runtime check inside the compiler, a hang),
+  or `other` with the reason. Deterministic from a seed, one case per crash site, with a shrinker.
+  `ci.mjs lint` runs 200 mutations from seed 1, so the class cannot come back unnoticed.
+  docs/design/frontend-robustness.md has the mutation set, the classification, and the bug list with
+  repros: 0 bugs and 0 hangs on the 200-case seed, from 2 bugs before the fixes above.
+
 - Changed: module interface files are a **typed record stream, format 4**, not line-oriented
   text. The compiler wrote the text and then re-read it with a hand-written line lexer and parser -
   two implementations of one format, and one of them three hundred lines of spelling rules that had

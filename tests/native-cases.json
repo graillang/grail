@@ -10016,5 +10016,85 @@
     "interfaces": true,
     "stdout": "4\n0\n41\n6\n",
     "note": "iface: a signature that names a qualified enum from another module - a borrowed parameter, a record field, a return type and a generic instantiation - is written to the interface record stream and read back for the second build, which prints what the source build prints. An earlier text format lost exactly this signature"
+  },
+  {
+    "name": "frontend-fn-without-body",
+    "source": "fn f(a: u64",
+    "reject": true,
+    "diagnostic": [
+      "expected `{`, found the end of the file",
+      "this `fn` has no body"
+    ],
+    "note": "A signature the file ends in has no body. The scan for the body's `{` used to step over the end of the file and index past the token stream: the compiler aborted with \"index N out of bounds\" (docs/design/frontend-robustness.md)."
+  },
+  {
+    "name": "frontend-fn-without-body-generic",
+    "source": "fn main() -> u64 { return 0; } fn f<T>(x: T) -> T",
+    "reject": true,
+    "diagnostic": [
+      "expected `{`, found the end of the file",
+      "this `fn` has no body"
+    ],
+    "note": "The same refusal through the generic-template pass, where the label sits on a token that is not the first of the file."
+  },
+  {
+    "name": "early-return-unit-function",
+    "source": "fn emit(n: u64) { if n != 0 { return; } println(\"zero\"); } fn main() -> u64 { emit(1); emit(0); return 0; }",
+    "stdout": "zero\n",
+    "note": "`return;` is an early exit from a function whose result is unit, and it has to run: emit(1) returns before the println (docs/design/frontend-robustness.md)."
+  },
+  {
+    "name": "early-return-needs-value",
+    "source": "fn g() -> u64 { return; } fn main() -> u64 { return 0; }",
+    "reject": true,
+    "diagnostic": "`return` needs a value here",
+    "note": "A function with a result still has to name one; the refusal names the result instead of \"expected a name here, found `;`\"."
+  },
+  {
+    "name": "record-contains-itself",
+    "source": "struct N{v:u64,next:N} fn main()->u64{return 0;}",
+    "reject": true,
+    "diagnostic": [
+      "contains itself by value",
+      "the field `next` carries the record itself"
+    ],
+    "note": "The type is uninhabited: every value needs a value of itself first. Accepted in silence before (docs/design/frontend-robustness.md)."
+  },
+  {
+    "name": "record-contains-itself-indirectly",
+    "source": "struct A{b:B} struct B{a:A} fn main()->u64{return 0;}",
+    "reject": true,
+    "diagnostic": "contains itself by value",
+    "note": "The same refusal through a second record: the cycle closes in `B`, which is refused and names its field."
+  },
+  {
+    "name": "recursive-record-through-optional",
+    "source": "struct N { v: u64, next: N? } fn head(n: N?) -> u64 { return match n { Some(x) => x.v, None => 0 }; } fn main() -> u64 { leaf := N { v: 7, next: None }; println(head(Some(leaf))); return 0; }",
+    "stdout": "7\n",
+    "note": "`N?` is how a recursive record is spelled here: the Option is an enum whose `None` is a value, so it breaks the cycle and must stay accepted."
+  },
+  {
+    "name": "entry-picked-function-named",
+    "source": "pub fn helper() -> u8[] { return u8[]; }",
+    "reject": true,
+    "diagnostic": [
+      "the entry `main::helper` was picked because this module has no `main`",
+      "it returns `u8[]`"
+    ],
+    "note": "A module with no `main` makes its first public function the entry. The refusal names that function and where it is, instead of pointing into lib/result.grl."
+  },
+  {
+    "name": "entry-missing-names-the-file",
+    "source": "fn hidden() { }",
+    "reject": true,
+    "diagnostic": "no `main` and no public function with at most one parameter",
+    "note": "The refusal points at the file the caller named; it used to point at the standard module the last pass had read."
+  },
+  {
+    "name": "main-result-type-named",
+    "source": "fn main() -> u8[] { return u8[]; }",
+    "reject": true,
+    "diagnostic": "`main` must return unit or u64; this one returns `u8[]`",
+    "note": "The refusal names `main` and its result, with the caret on the declaration."
   }
 ]
