@@ -115,6 +115,7 @@ them at its last.
 | the part and its label prefix | labels are `.L<prefix>_<n>`; the prefix is the module's |
 | the symbol the label spells | a renamed or re-signatured function is a different unit |
 | the option vector (every argument except the output path and `--fn-cache`) | a flag that changes code generation changes every body; hashing the words means a flag added later is in the key by construction |
+| the **compiler's own identity** | a unit is code *this* compiler emitted. The driver passes the digest of the binary it runs (`--fn-cache-id`, from `cache_build_id`); a hand-run compiler, which has no digest to pass, is identified by its executable's path, size and modification time instead. Without this a rebuilt compiler would replay its predecessor's bytes, which is the worst stale splice the layer could make |
 | the **declaration surface** of the run | a field offset, a drop bit, a symbol spelling and a constant's value all reach the emitted text as numbers. The surface is every declaration, alias, function *signature*, constant, import, interface and implementation - and every interface the run read, as its surface (the bytes before the trailer). No body is in it. |
 | the declaration's own source text | the obvious input, and the only one an ordinary edit moves |
 | the function's typed signature, spelled by `iface_w_type` | the types after substitution, structurally - not the run's interned ids |
@@ -164,26 +165,41 @@ specialisation class is excluded rather than half-handled.
 
 ## Measured: the function-level cache on the compiler's own sources
 
-The compiler is the natural subject: `compiler/*.grl` is 2,569 emitted bodies and 105 MB of
-assembly. Compiled as one `--separate` run (all of its modules in one stream, the shape
-`bun tools/native.mjs build` uses), with the unit store under `.work/`:
+The compiler is the natural subject: `compiler/*.grl` is 2,569 emitted bodies and 105,315,043 bytes
+of assembly. Compiled as one `--separate` run (all of its modules in one stream, the shape
+`bun tools/native.mjs build` uses), with the unit store under `.work/` and this host's load moving
+the clock by a few percent in either direction:
 
-| | bodies | wall clock |
-| --- | --- | --- |
-| cold unit store: 879 filed, 1,690 not units | 2,569 | 72.7 s |
-| the same tree again, every unit replayed (879 hit, 0 filed, 1,690 not units) | 2,569 | 69.7 s |
-| one function's body reverted (878 hit, 1 filed, 1,690 not units) | 2,569 | 72.1 s |
-| a clean build of the same tree, empty store | 2,569 | 75.7 s |
+| | bodies | units | wall clock |
+| --- | --- | --- | --- |
+| cold unit store | 2,569 | 879 filed, 1,690 not units | 82.2 s |
+| the same tree again | 2,569 | 879 replayed, 0 filed, 1,690 not units | 80.0 s |
+| one function's body reverted | 2,569 | 878 replayed, 1 filed, 1,690 not units | 72.1 s (another run, less loaded) |
+| a clean build of the same tree, empty store | 2,569 | - | 75.7 s (the same other run) |
 
-and the assembly of the replayed runs is **byte-identical** to the clean build's - the one-function
-case differs from the other variant in that function's own bytes, as it must.
+**34 % of the bodies are units, and a run that replays all of them is 3-5 % faster.** The assembly
+of the replayed run is byte-identical to the clean build's (105,315,043 bytes, `cmp`), and the
+one-function case differs from the other variant in that function's own bytes and nowhere else. The
+counts are exact; the clock moves with the machine.
 
-So 34 % of the bodies are units, and a run that replays all of them is about 5 % faster: the
-bodies a body-only key can describe are the small ones. That is the same ceiling the earlier
-measurement predicted (40 % of bodies, 2.9 % of bytes), and it is the honest number: the front end
-of the 1,690 bodies that request a specialisation, a closure or a drop helper is what a module run
-is mostly made of. Widening the layer means making a specialisation request replayable, not making
-this key cleverer.
+That is the ceiling the earlier measurement predicted (40 % of bodies, 2.9 % of bytes), and it is
+worth stating plainly rather than dressing up: the front end of the 1,690 bodies that request a
+specialisation, a closure or a drop helper is what a module run is mostly made of, and no key can
+describe those today. Widening the layer means making a specialisation *request* replayable, not
+making the key cleverer.
+
+Two costs, also stated plainly:
+
+- **Filing is not free.** A cold build writes one store entry per unit: on the six-module project
+  `tools/cache-test.mjs` builds, 837 entries cost roughly half a second, which is why the cold
+  column above is not faster than a clean build. It is paid once per unit and only by a run that
+  missed.
+- **The word optimizer still runs.** The unit covers the front end and the emitter, not
+  `optimize.grl`: that pass walks the whole stream (and `inline_calls` rewrites callers from
+  callees), so a per-function replay of its *output* would need the inliner's verdict for every
+  call in the key - which the earlier plan called out as `inlined: <callee>@<n>` and which this
+  stage does not record. What a unit skips is the expensive, per-body part: parsing the body again,
+  checking it, lowering it and emitting it.
 
 ## What a module run can now skip, per edit (the numbers `tools/cache-test.mjs` prints)
 

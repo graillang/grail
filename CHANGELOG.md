@@ -3,8 +3,8 @@
 - Added: **the per-function codegen cache** (`compiler/fncache.grl`, `--fn-cache DIR`). A module run
   that misses can now replay the functions whose inputs did not move: a function's whole emitted
   region, the label numbers it mints and its typed-IR facts are filed under a key naming its source
-  text, its structurally spelled signature, the run's declaration surface, the option vector and its
-  starting label numbers. `grail build --cache` passes the store, so the two caches compose - a
+  text, its structurally spelled signature, the run's declaration surface, the option vector, the
+  compiler's own digest and its starting label numbers. `grail build --cache` passes the store, so the two caches compose - a
   module-level hit runs nothing, a module-level miss replays every body it can. A body is a unit only
   when its emission added nothing outside its own bytes (no specialisation, closure, drop helper,
   vtable, link input, constant, debug record or effect record), and everything else is emitted as
