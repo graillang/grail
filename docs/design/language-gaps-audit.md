@@ -57,6 +57,34 @@ shape people reach for), `filter_map`, `any`, `all`, `find`, `position`, `take_w
 `reduce` must return `T?` with `None` on empty; a zero default silently changes the meaning of the
 program, and a panic is not a language feature.
 
+### 2.1 What we are doing, and what we are deliberately not
+
+The goal is not to reimplement Rust's iterator surface. It is to close the gap where a competent
+Rust programmer's hand goes without thinking. The split:
+
+**Tier 1 - do now, because they appear in ordinary code constantly**
+`iter` / `iter_mut` / `into_iter`; `chars` / `bytes` / `lines` / `split` / `split_whitespace` / `trim`
+on text; `map` / `filter` / `filter_map` / `fold` / `reduce` / `collect` / `count` / `sum` / `any` /
+`all` / `find` / `position` / `take` / `skip` / `chain` / `rev` / `zip` / `enumerate` / `flat_map` /
+`for_each`; `get` / `first` / `last` / `clone` / `join` / `contains` / `push` / `pop` / `sort` /
+`sort_by_key` / `dedup` / `windows` / `chunks` / `min` / `max` / `min_by_key` / `max_by_key`.
+
+**Tier 2 - cheap, so take it if it falls out of the same code**
+`take_while`, `skip_while`, `step_by`, `nth`, `partition`, `flatten`, `sort_by`.
+
+**Not doing. This is a decision, not an oversight.**
+`peekable`, `cycle`, `inspect`, `scan`, `unzip`, `try_fold`, `fold_while`, `rposition`, `chunks_exact`,
+`windows_exact`, `array_chunks`, `split_at`, `split_at_mut`, `binary_search_by_*` beyond what exists,
+`drain`, `splice`, `retain`, `dedup_by`, `sort_unstable*` as separate names, and the whole
+itertools-style layer (`combinations`, `permutations`, `group_by`, `tuple_windows`, `cartesian_product`,
+`batching`, `tee`). Each of these is real, and none of them is worth the surface area: a caller who
+needs one can write six lines, and every method we add is one we test, document, keep working across
+three targets, and teach in the book.
+
+The test for moving something from "not doing" to "doing" is evidence, not argument: three or more
+places in the compiler, the standard library or a ported application that want it badly enough to have
+worked around it.
+
 ## 3. Crashes and silent failures (a compiler must never)
 
 ### 3.1 Main-thread stack exhaustion is a bare SIGSEGV
