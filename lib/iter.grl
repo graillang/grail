@@ -66,7 +66,180 @@ impl<T> Iter<T> {
         }
         return acc;
     }
+    // The one value `f` combines every item into, or None when there are none.
+    pub fn reduce(self: Self, f: FnMut(T, T) -> T) -> T? {
+        mut src = self;
+        mut g = f;
+        if let Some(seed) = src.next() {
+            mut value = seed;
+            while let Some(x) = src.next() {
+                value = g(value, x);
+            }
+            return Some(value);
+        }
+        return None;
+    }
+    // At most the first `n` items are dropped.
+    pub fn skip(self: Self, n: u64) -> Iter<T> {
+        mut src = self;
+        mut left = n;
+        mut skipped = false;
+        return Iter { step: || -> T? {
+            if !skipped {
+                while left > 0 {
+                    if src.next().is_none() {
+                        left = 0;
+                    } else {
+                        left = left - 1;
+                    }
+                }
+                skipped = true;
+            }
+            return src.next();
+        } };
+    }
+    // Every item of this iterator, then every item of `other`.
+    pub fn chain(self: Self, other: Iter<T>) -> Iter<T> {
+        mut first = self;
+        mut second = other;
+        mut on_second = false;
+        return Iter { step: || -> T? {
+            if !on_second {
+                if let Some(x) = first.next() {
+                    return Some(x);
+                }
+                on_second = true;
+            }
+            return second.next();
+        } };
+    }
+    // Every item in reverse order (the whole iterator is pulled through first).
+    pub fn rev(self: Self) -> Iter<T> {
+        mut src = self;
+        mut items = T[];
+        while let Some(x) = src.next() {
+            items.push(x);
+        }
+        return Iter { step: || -> T? {
+            if items.len() == 0 {
+                return None;
+            }
+            return Some(items.pop());
+        } };
+    }
+    // One iterator per item, concatenated, in order.
+    pub fn flat_map<U>(self: Self, f: FnMut(T) -> Iter<U>) -> Iter<U> {
+        mut src = self;
+        mut g = f;
+        mut current = from_fn(|| -> U? {
+            return None;
+        });
+        mut have = false;
+        return Iter { step: || -> U? {
+            while true {
+                if have {
+                    if let Some(x) = current.next() {
+                        return Some(x);
+                    }
+                    have = false;
+                }
+                match src.next() {
+                    Some(v) => {
+                        current = g(v);
+                        have = true;
+                    },
+                    None => {
+                        return None;
+                    }
+                }
+            }
+            return None;
+        } };
+    }
+    // The mapped value of every item that has one.
+    pub fn filter_map<U>(self: Self, f: FnMut(T) -> U?) -> Iter<U> {
+        mut src = self;
+        mut g = f;
+        return Iter { step: || -> U? {
+            while let Some(x) = src.next() {
+                if let Some(v) = g(x) {
+                    return Some(v);
+                }
+            }
+            return None;
+        } };
+    }
+    // Calls `f` on every item, in order; the iterator is consumed.
+    pub fn for_each(self: Self, f: FnMut(T) -> unit) {
+        mut src = self;
+        mut g = f;
+        while let Some(x) = src.next() {
+            g(x);
+        }
+        return ();
+    }
+    // `sum` and `min`/`max` are not here. `sum` needs `T` to be a number, and an impl of a declared
+    // type must name that type's own parameters (`impl Iter<u64> { ... }` is not a header this
+    // compiler accepts). `min`/`max` need `T: order::Ord`, and a bound stated on the impl header is
+    // not carried by the type argument a method's receiver hands back, so `order::less` inside such
+    // a body is refused. Both are one call away: `it.collect().sum()`, `it.collect().min()`.
+    // Whether any item passes `test` (stops at the first that does).
+    pub fn any(self: Self, test: FnMut(T) -> bool) -> bool {
+        mut src = self;
+        mut t = test;
+        while let Some(x) = src.next() {
+            if t(x) {
+                return true;
+            }
+        }
+        return false;
+    }
+    // Whether every item passes `test` (stops at the first that does not).
+    pub fn all(self: Self, test: FnMut(T) -> bool) -> bool {
+        mut src = self;
+        mut t = test;
+        while let Some(x) = src.next() {
+            if !t(x) {
+                return false;
+            }
+        }
+        return true;
+    }
+    // The first item passing `test`, or None.
+    pub fn find(self: Self, test: FnMut((&T)) -> bool) -> T? {
+        mut src = self;
+        mut t = test;
+        while let Some(x) = src.next() {
+            if t(&x) {
+                return Some(x);
+            }
+        }
+        return None;
+    }
+    // The index of the first item passing `test`, or None.
+    pub fn position(self: Self, test: FnMut((&T)) -> bool) -> u64? {
+        mut src = self;
+        mut t = test;
+        mut i = 0;
+        while let Some(x) = src.next() {
+            if t(&x) {
+                return Some(i);
+            }
+            i = i + 1;
+        }
+        return None;
+    }
+    // The last item, or None.
+    pub fn last(self: Self) -> T? {
+        mut items = self.collect();
+        if items.len() == 0 {
+            return None;
+        }
+        return Some(items.remove(items.len() - 1));
+    }
 }
+
+
 
 // An iterator from any closure that yields the next item.
 pub fn from_fn<T>(step: FnMut() -> T?) -> Iter<T> {
