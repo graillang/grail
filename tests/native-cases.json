@@ -10047,8 +10047,8 @@
     "name": "early-return-needs-value",
     "source": "fn g() -> u64 { return; } fn main() -> u64 { return 0; }",
     "reject": true,
-    "diagnostic": "`return` needs a value here",
-    "note": "A function with a result still has to name one; the refusal names the result instead of \"expected a name here, found `;`\"."
+    "diagnostic": "`return` needs a value: this function returns `u64`",
+    "note": "A function with a result still has to name one, and the refusal names the type instead of \"expected a name here, found `;`\"."
   },
   {
     "name": "record-contains-itself",
@@ -10096,5 +10096,48 @@
     "reject": true,
     "diagnostic": "`main` must return unit or u64; this one returns `u8[]`",
     "note": "The refusal names `main` and its result, with the caret on the declaration."
+  },
+  {
+    "name": "runtime-narrowing-conversion-report",
+    "source": "fn main() -> u64 { x: u64 = 300; y := u8(x); println(y); return 0; }",
+    "signal": "SIGABRT",
+    "stderr": "value 300 does not fit in u8",
+    "note": "A conversion the target cannot hold died with an empty stderr and a bare abort; it now reports the value, the type and the line, like every other failed check (docs/design/frontend-robustness.md)."
+  },
+  {
+    "name": "runtime-narrowing-conversion-u16",
+    "source": "fn main() -> u64 { x: u64 = 70000; y := u16(x); println(y); return 0; }",
+    "signal": "SIGABRT",
+    "stderr": "value 70000 does not fit in u16",
+    "note": "Wider targets name themselves: the type comes from the conversion's own code, so the report says `u16` and not the compiler's spelling."
+  },
+  {
+    "name": "runtime-narrowing-negative-to-unsigned",
+    "source": "fn main() -> u64 { x: i64 = -1; y := u8(x); println(y); return 0; }",
+    "signal": "SIGABRT",
+    "stderr": "negative value converted to an unsigned type",
+    "note": "A negative value into an unsigned target keeps its own message: a magnitude would read as a positive number that never existed."
+  },
+  {
+    "name": "runtime-narrowing-negative-to-signed",
+    "source": "fn main() -> u64 { x: i64 = -300; y := i8(x); println(y); return 0; }",
+    "signal": "SIGABRT",
+    "stderr": "value -300 does not fit in i8",
+    "note": "The register holds the two's complement, so the report prints the magnitude with the sign the program wrote."
+  },
+  {
+    "name": "narrowing-conversion-of-a-constant",
+    "source": "fn main() -> u64 { y := u8(300); println(y); return 0; }",
+    "reject": true,
+    "diagnostic": [
+      "integer 300 is out of range for u8 (0..=255)"
+    ],
+    "note": "A constant the target cannot hold never needed a run-time check: the conversion is refused when it is compiled, with the range."
+  },
+  {
+    "name": "narrowing-conversion-wrapping-is-a-choice",
+    "source": "fn main() -> u64 { x: u64 = 300; y := wrapping_u8(x); println(y); return 0; }",
+    "stdout": "44\n",
+    "note": "`wrapping_u8` is the spelling that says the truncation is intended; it must stay accepted and silent."
   }
 ]

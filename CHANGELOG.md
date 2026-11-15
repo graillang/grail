@@ -1,5 +1,18 @@
 ## Unreleased
 
+- Fixed: a narrowing integer conversion that does not fit **aborted the program with an empty
+  stderr**. `x: u64 = 300; y := u8(x);` exited 134 with nothing said, while every other failed
+  runtime check reports its message and line. `rt_int_cast` called `rt_abort()` directly; it now goes
+  through the reporting path with two new kinds, so `u8(x)` says `error: value 300 does not fit in
+  u8` with the caret on the conversion, `u16(x)`/`i32(x)` name their own target, a negative value
+  into an unsigned target keeps `negative value converted to an unsigned type`, and a negative value
+  into a smaller signed target prints the sign the program wrote (`value -300 does not fit in i8`).
+  A constant the target cannot hold is refused at compile time instead - `error[E0015]: integer 300
+  is out of range for u8 (0..=255)` - and `wrapping_u8` stays the silent, intended-truncation
+  spelling. Cases `runtime-narrowing-conversion-report`, `runtime-narrowing-conversion-u16`,
+  `runtime-narrowing-negative-to-unsigned`, `runtime-narrowing-negative-to-signed`,
+  `narrowing-conversion-of-a-constant`, `narrowing-conversion-wrapping-is-a-choice`.
+  docs/design/frontend-robustness.md, class 2.
 - Fixed: a declaration the file ends in (`fn f(a: u64`, nothing after it) **aborted the compiler**
   with `error: index 24 out of bounds for length 24 --> compiler/native.grl:5874:5` and a backtrace.
   Three passes scan forward to a body's `{`; the stream ends with an end-of-file token, the scan
@@ -14,8 +27,8 @@
 - Fixed: `return;` in a function whose result is unit was refused with "expected a name here, found
   `;`", and there was no spelling for an early return from a unit function at all (`return ();` and
   `return unit;` failed differently). `return` followed by `;` is a return from a unit function now;
-  a function with a result still has to name one, and the refusal says so: "`return` needs a value
-  here: this function's result is `u64`, so the `return` has to produce one". Cases
+  a function with a result still has to name one, and the refusal says so: "`return` needs a value:
+  this function returns `u64`". Cases
   `early-return-unit-function` (which runs), `early-return-needs-value`.
 - Fixed: `struct N { v: u64, next: N }` was accepted in silence, and no value of the type can ever
   be built - the field that names the record needs a value of the record first. A record that

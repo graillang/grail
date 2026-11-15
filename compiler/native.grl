@@ -30679,7 +30679,9 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
             if (find_local(&mut c, view(first)) == 0)
                 & (find_func(&mut c, view(m), view(first)) == 0) {
                 advance(&mut c);
+                arg_start := c.pos;
                 value := expr(&mut c, 0);
+                arg_end := c.pos;
                 expect(&mut c, view(")"));
                 mut source = value.ty;
                 if !(integer(&mut c, source)
@@ -30694,6 +30696,15 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
                 ty := int_type_named(&mut c, named);
                 if raw_bits != 0 {
                     return val(value.t, 0);
+                }
+                // A constant the target cannot hold is refused here rather than at run time: the
+                // check would fire every time, and this message has the value, the type and its
+                // range (`u8(300)` reads "integer 300 is out of range for u8 (0..=255)"). The
+                // conversion of a *value* is checked at run time, where rt_int_cast reports it.
+                if (wrapping == 0) & (kind_at(&mut c, arg_start) == 2) & (c.lit_start == arg_start) & (c.lit_end == arg_end) {
+                    if literal_fits(&mut c, ty, c.lit_value, c.lit_negative) == 0 {
+                        fail(&mut c, view(literal_range_msg_v(&mut c, ty, c.lit_value, c.lit_negative)));
+                    }
                 }
                 if is_float(&mut c, source) {
                     if wrapping != 0 {
@@ -34651,16 +34662,18 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         rstart := c.pos;
         expected_result := c.result;
         exchange(&mut c.in_return, 1);
-        // `return;` is an early exit from a function whose result is unit: the source names no value
-        // and unit needs none. A function with a result still has to name one, so the refusal says
-        // which result it owes instead of "expected a name here, found `;`" - an early exit was
-        // simply not spellable before this (docs/design/frontend-robustness.md).
+        // A bare `return;` is legal exactly when the enclosing function's result is unit: unit is the
+        // absent-value type, so `return ()` would name a value the function does not have, falling
+        // off the end of a unit function is already allowed, and `return;` is that same exit made
+        // explicit. A function with a result still has to name one, and the refusal names the type
+        // it owes instead of "expected a name here, found `;`"
+        // (docs/design/frontend-robustness.md).
         mut v = val(0, 1);
         if is(&mut c, view(";")) {
             if expected_result != 1 {
-                mut said = copy_bytes(view("`return` needs a value here: this function's result is `"));
+                mut said = copy_bytes(view("`return` needs a value: this function returns `"));
                 push_bytes(&mut said, view(source_type_name(&mut c, expected_result)));
-                push_bytes(&mut said, view("`, so the `return` has to produce one"));
+                push_bytes(&mut said, view("`"));
                 fail(&mut c, view(said));
             }
         } else {

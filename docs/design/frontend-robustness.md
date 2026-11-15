@@ -5,8 +5,8 @@ sees `assertion failed` and a compiler source line where a diagnostic belongs. T
 that kind were fixed by hand (a character literal with two characters in it asserted inside the
 lexer, and `same()` read past a shorter slice and aborted the compiler with `index 4 out of
 bounds`), and nothing in the corpus would have told us if a third had arrived. This is the standing
-answer: a fuzzer over real sources, a classification rather than a count, the list of what it found,
-and a fixed seed of it in `ci.mjs lint`.
+answer: a fuzzer over real sources, a classification rather than a count, and the list of what it
+found, grouped by what went wrong for the user.
 
 ## The fuzzer
 
@@ -70,14 +70,20 @@ fuzz: 200 cases, 186 fine, 0 bugs, 0 hangs, 14 other (seed 1, 218 sources, 6 job
 refused by the driver before the front end runs, so it is neither a diagnostic nor a crash. The full
 classification is in `.work/fuzz/report.json`; exit status is 1 when any case was a `bug` or a hang.
 
-## What it found, and what each one says now
+Before the fixes below: `fuzz: 200 cases, 184 fine, 2 bugs, 0 hangs, 14 other (seed 1, 218 sources,
+6 jobs, 25.6s)`. After: `fuzz: 200 cases, 186 fine, 0 bugs, 0 hangs, 14 other (seed 1, 218 sources,
+6 jobs, 25.2s)`.
 
-Before: `fuzz: 200 cases, 184 fine, 2 bugs, 0 hangs, 14 other (seed 1, 218 sources, 6 jobs, 25.6s)`
-After: `fuzz: 200 cases, 186 fine, 0 bugs, 0 hangs, 14 other (seed 1, 218 sources, 6 jobs, 25.2s)`
+## Five ways the front end could fail a user
 
-### 1. A function whose body never arrives
+The fuzzer finds crashes; the same reading of "the user is told nothing, or told the wrong thing"
+finds the rest. Each class below is a way for a tool to fail a person who typed something
+reasonable, and each has the repro, the message before and after, and the case that keeps it.
 
-A declaration the file ends in - `fn f(a: u64` with nothing after it - aborted the compiler:
+### 1. The compiler dies where a diagnostic was possible
+
+**1a. A function whose body never arrives.** `fn f(a: u64`, with nothing after it, aborted the
+compiler:
 
 ```
 error: index 24 out of bounds for length 24
@@ -85,43 +91,29 @@ error: index 24 out of bounds for length 24
  = called from compiler/native.grl:13624:9
 ```
 
-Three passes (`func`'s pass 1, pass 3 with type parameters, and the skip-a-reported-body replay) scan
-forward to the body's `{`. The token stream ends with an end-of-file token, the scan stepped over it,
-and `kind()` indexed `c.toks[pos]` unchecked. It now stops at the end of the file and refuses the way
-any missing token is refused:
+Three passes (`func`'s pass 1, pass 3 with type parameters, and the replay that skips a body an
+earlier run already reported) scan forward to the body's `{`. The token stream ends with an
+end-of-file token, the scan stepped over it, and `kind()` indexed `c.toks[pos]` unchecked. It now
+stops at the end of the file and refuses the way any missing token is refused - `expected `{`, found
+the end of the file`, with `this `fn` has no body` on the `fn`.
 
-```
-error: expected `{`, found the end of the file
- --> t.grl:1:12
-  |
-1 | fn f(a: u64
-  |            ^
-  |
-1 | fn f(a: u64
-  | -- this `fn` has no body
-```
-
-The fix has two halves, and both are needed: `kind`, `tok_text` and `fail` answer "end of file" past
-the last token instead of faulting (`kind_at` already did), and `body_brace` stops the scan at EOF
-and reports. An EOF-safe `kind` alone would turn the abort into a hang, which is why the scan stop is
-not optional.
+The fix has two halves and both are needed: `kind`, `tok_text` and `fail` answer "end of file" past
+the last token (`kind_at` already did), and `body_brace` stops the scan at EOF and reports. An
+EOF-safe `kind` alone would turn the abort into a hang, so the scan stop is not optional.
 
 The other accessors that read `c.toks[c.pos]` already guard: `source_line`, `site_pos`, `emit_loc`
-and `position_text` all test `c.toks.len() <= p` first. `decode_literal` and `token_line` take an
-index the caller already holds from the stream (a literal token, a recorded declaration), so they
-cannot be reached past the end and are unchanged. `fail` was the last unchecked one, and it is
-reached by every refusal, so its guard matters more than the others: a refusal at the end of a file
-(`struct S` with no body, for one) now draws its caret at the end of the source instead of
-faulting.
+and `position_text` test `c.toks.len() <= p` first. `decode_literal` and `token_line` take an index
+the caller already holds from the stream (a literal token, a recorded declaration), so they cannot be
+reached past the end and are unchanged. `fail` was the last unchecked one, and every refusal goes
+through it.
 
-Doors checked, all of them already refusals: truncated `struct`/`enum` (`unclosed `{``), `match`
-(`unclosed `{``), `impl` (`unclosed implementation`), `interface` (`expected interface body`),
-`extern C fn` (`extern requires a quoted ABI name`), `use` (module resolution). Regression cases:
-`frontend-fn-without-body`, `frontend-fn-without-body-generic`.
+Doors checked, all already refusals: truncated `struct`/`enum` (`unclosed `{``), `match` (same),
+`impl` (`unclosed implementation`), `interface` (`expected interface body`), `extern C fn` (`extern
+requires a quoted ABI name`), `use` (module resolution). Cases `frontend-fn-without-body`,
+`frontend-fn-without-body-generic`.
 
-### 2. A label on a file's first token
-
-The same input, after the fix above, died one layer deeper:
+**1b. A label on a file's first token.** The same input, once 1a reported instead of faulting, died
+one layer down:
 
 ```
 error: index 1 out of bounds for length 1
@@ -131,16 +123,52 @@ error: index 1 out of bounds for length 1
 ```
 
 `fail` tracked which secondary labels it had drawn by setting the label's token index to 0, and 0 is
-also a real token index: the `fn` of the first declaration in a file. The renderer then looked for
-the label after the last one and indexed past its list. The marker is now a flag array, plus a guard
-when nothing is left to draw. Any refusal that labels the first token of a file went through this,
-not just the new one. Regression case: `frontend-fn-without-body` (the label is on token 0 and the
-caret is at the end of the file, which is the worst case for that loop).
+a real token index - the `fn` of the first declaration in a file. The renderer then asked for the
+label after the last one and indexed past its list. Labels carry a drawn flag now, with a guard for
+"nothing left to draw". Any refusal that labels the first token of a file went through this, not just
+the new one. Case `frontend-fn-without-body` (its label is on token 0 and its caret is at the end of
+the file, the worst case for that loop).
 
-### 3. The entry refusal pointed into the standard library
+### 2. The program dies and nothing says why
 
-Checking a module that has no `main` used to report an error in `lib/result.grl`, at a line the user
-never wrote:
+`u8(x)` where `x` does not fit aborted the *program* with an empty stderr and status 134:
+
+```
+$ grail build narrow.grl && ./narrow     # x: u64 = 300; y := u8(x);
+Aborted (core dumped)                    # stderr: nothing at all
+```
+
+Every other runtime check reports (`error: arithmetic overflow` with the line); this one called
+`rt_abort()` directly. `rt_int_cast` now goes through `rt_fail` with two new kinds, so the report
+names the value and the type, and the frame walk puts the caret on the conversion:
+
+```
+error: value 300 does not fit in u8
+ --> narrow.grl:3:33
+```
+
+- Negative into an unsigned target keeps its own message (`negative value converted to an unsigned
+  type`): a magnitude would read as a positive number the program never had.
+- Negative into a smaller signed target prints the sign the program wrote (`value -300 does not fit
+  in i8`); the register holds the two's complement, so the runtime formats the magnitude.
+- `wrapping_u8` is unchanged and silent: it is the spelling that says the truncation is intended.
+- A constant the target cannot hold never needed a run-time check, so it is now refused when it is
+  compiled: `error[E0015]: integer 300 is out of range for u8 (0..=255)`, from the same range
+  machinery that types a literal.
+
+Cases `runtime-narrowing-conversion-report`, `runtime-narrowing-conversion-u16`,
+`runtime-narrowing-negative-to-unsigned`, `runtime-narrowing-negative-to-signed`,
+`narrowing-conversion-of-a-constant`, `narrowing-conversion-wrapping-is-a-choice`.
+
+This is *not* the trap behind a deep recursion aborting with an empty stderr: that one is genuine
+stack exhaustion (SIGSEGV, status 139) on the main thread's stack, which has no guard page and no
+fault handler - task stacks have both (`rt_os_stack_guard_install`). One fix does not cover the
+other, and the stack case is listed as open below.
+
+### 3. The refusal names the wrong thing
+
+Checking a module that has no `main` reported an error in `lib/result.grl`, at a line the user never
+wrote:
 
 ```
 $ grail check lex.grl          # a module with pub fns and no main
@@ -151,7 +179,7 @@ error: executable entry must return u64
 `fail` reports at the cursor, and by the time the entry is checked the cursor is in whatever file the
 last pass read. Entry *selection* is unchanged (a module with no `main` still makes its first public
 function with at most one parameter the entry); the refusal now says which function that was and
-where it is, or that there is none, in the file the caller named:
+where it is, or that there is none, at the file the caller named:
 
 ```
 error: the entry `main::helper` was picked because this module has no `main`, and an entry must
@@ -166,39 +194,39 @@ error: `main` must return unit or u64; this one returns `u8[]`
  --> input.grl:1:1
 ```
 
-Regression cases: `entry-picked-function-named`, `entry-missing-names-the-file`,
-`main-result-type-named`.
+Cases `entry-picked-function-named`, `entry-missing-names-the-file`, `main-result-type-named`.
 
-### 4. `return;` in a unit function could not be written
+### 4. The language has no spelling for a legal program
 
 ```
 $ grail check x.grl            # fn main() { return; }
 error: expected a name here, found `;`
 ```
 
-There was no spelling at all for an early return from a unit function: `return;`, `return ();` and
-`return unit;` were each refused with a message about the wrong thing. `return` now reads the `;` as
-"no value" when the enclosing function's result is unit, and keeps the ordinary expression form
-otherwise. A function with a result still has to produce one, and says so:
+A unit function had no early exit at all: `return;` was refused by the expression parser, `return ();`
+failed later, and `return unit;` said `undefined name `unit``. The policy is that a bare `return;` is
+legal exactly when the enclosing function's result is unit - unit is the absent-value type, so
+`return ()` would name a value the function does not have, and falling off the end of a unit function
+is already allowed, so `return;` is that same exit made explicit. `()` does not become a general
+expression. A function with a result still has to name one, and the refusal names the type:
 
 ```
-error: `return` needs a value here: this function's result is `u64`, so the `return` has
-to produce one
+error: `return` needs a value: this function returns `u64`
  --> t.grl:1:23
 ```
 
-Regression cases: `early-return-unit-function` (which also runs: the early return skips the
-`println`), `early-return-needs-value`.
+Cases `early-return-unit-function` (which also runs: the early return skips the `println`) and
+`early-return-needs-value`.
 
-### 5. A record that contains itself by value was accepted in silence
+### 5. The type has no value and nothing is said
 
 ```
 $ grail check x.grl            # struct N{v:u64,next:N} ... : exit 0
 ```
 
-No value of that type can ever be built - the field that names the record needs a value of the
-record first - so the user had written a type they could never use and the compiler said nothing. It
-is refused now, with the caret on the field that closes the cycle:
+No value of that type can ever be built - the field that names the record needs a value of the record
+first - so the user had written a type they could never use and the compiler said nothing. It is
+refused now, with the caret on the field that closes the cycle:
 
 ```
 error: `N` contains itself by value: the field `next` carries the record itself, so no value of
@@ -212,16 +240,19 @@ reference, or a vector
 
 The walk (`needs_record`) follows only the edges a value cannot avoid: a struct needs every field, so
 one field that needs the record makes it impossible; an enum needs one variant, so every variant has
-to need it (an enum with no payload-free variant is refused the same way). A number, a view, a
-vector, a reference and `T?` all end the walk, because each is a value on its own. That is what keeps
-the accepted shapes accepted: `next: N?` compiles and runs (`recursive-record-through-optional`),
-as do reference fields (`struct N<a> { v: u64, next: &a N<a> }`) and vector fields
-(`next: N[]`) - there is no `Rc` in this standard library, and a reference needs a lifetime
-parameter, so `N?` is the ordinary spelling; a mutual cycle is refused at whichever record is
-completed second (`record-contains-itself-indirectly`).
+to need it. A number, a view, a vector, a reference and `T?` all end the walk, because each is a value
+on its own. That is what keeps the accepted shapes accepted: `next: N?` compiles and runs
+(`recursive-record-through-optional`), as do reference fields (`struct N<a> { v: u64, next: &a N<a>
+}`) and vector fields (`next: N[]`) - there is no `Rc` in this standard library and a reference needs
+a lifetime parameter, so `N?` is the ordinary spelling. A mutual cycle is refused at whichever record
+is completed second (`record-contains-itself-indirectly`).
 
 ## Open, and deliberately not bugs
 
+- **Stack exhaustion on the main thread.** `down(100000000)` in a recursive function exits 139
+  (SIGSEGV) with an empty stderr. The guard page and `rt_stack_overflow` report belong to task
+  stacks; the main thread's stack is the OS default and has neither. A report there needs the
+  handler installed for the main thread, which is the guard-page work already tracked elsewhere.
 - **`grail check` of one module that the program only reaches through the command line.** Checking
   `compiler/cli.grl` alone reports `unknown function `iface_digest` in `native`` - seven times -
   because `cli.grl` calls `native::...` without a `use native;` and the real build passes every
@@ -230,10 +261,6 @@ completed second (`record-contains-itself-indirectly`).
 - **A mutated `use`.** `grail: cannot resolve module `sys_grail` ...` exits 1 with no `error:` line.
   It is the driver refusing before the front end runs, which is why the fuzzer counts it as `other`
   and names it in the report. A driver refusal in diagnostic form is a separate change.
-- **Silent runtime traps** are the same class one layer down: a *program* that dies with an empty
-  stderr. The narrowing conversion `u8(300)` was one; it is fixed in `compiler/native.grl` (the
-  conversion calls the runtime's reporting path with `value N does not fit in u8`) and covered by
-  `runtime-narrowing-conversion-report`.
 
 ## The lint seed
 
