@@ -1,4 +1,5 @@
 module native;
+use fncache;
 use lexer;
 use host;
 use explain;
@@ -820,7 +821,26 @@ struct C {
     fx_body_sym: u8[][],
     fx_body_calls: u64[],
     fx_body_lo: u64[],
-    fx_body_hi: u64[]
+    fx_body_hi: u64[],
+    // ---- the per-function codegen cache (`--fn-cache DIR`) ----------------------------------
+    // The directory units are filed in, the two hashes every unit's key is built from (the option
+    // vector and the declaration surface), where the cursor for a declaration's line has got to,
+    // and what this run did with the store. All of it is inert when `fn_dir` is empty, which is
+    // every run that did not ask for the cache.
+    fn_dir: u8[],
+    // The compiler's own identity, as the driver computed it (the digest of the binary it runs).
+    // Empty for a hand-run compiler; the option vector then carries the executable's own path, size
+    // and modification time instead.
+    fn_id: u8[],
+    fn_flags: u8[],
+    fn_surface: u8[],
+    fn_at_file: u64,
+    fn_at_off: u64,
+    fn_at_line: u64,
+    fn_at_col: u64,
+    fn_hits: u64,
+    fn_filed: u64,
+    fn_kept: u64
 }
 
 fn same<a, b>(x: &a [u8], y: &b [u8]) -> bool {
@@ -13705,6 +13725,430 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         );
     return ();
 }
+// ---- the per-function codegen cache (docs/design/incremental-compilation.md) ---------------------
+//
+// A *unit* is one emitted function: the bytes `func` writes for it, the label numbers those bytes
+// name, and the typed-IR facts its emission recorded. It is filed under a key that names every
+// input those bytes are a function of, and replayed by copying them back when the key is found
+// again - for that body the front end, the lowering and the emission are all skipped. The rule for
+// which bodies are units, and why the rest are not, is written down in
+// docs/design/incremental-compilation.md ("Per-function units"); `tools/cache-test.mjs` measures
+// what it buys and compares every rebuilt image with a clean build's.
+struct FnPlace {
+    line: u64,
+    col: u64
+}
+
+// Whether this run can file units at all: the directory the driver named, and a run-level shape
+// this layer can describe. Every other condition is a property of the whole run, not of a body.
+fn fn_on<a>(c: (&a C)) -> bool {
+    if c.fn_dir.len() == 0 {
+        return false;
+    }
+    // No surface, no units: it is empty when a declaration had no interface spelling, and a key
+    // that cannot say what the module declares is a key that would reuse a body on a guess.
+    if c.fn_surface.len() == 0 {
+        return false;
+    }
+    // The Linux x86-64 word stream is the shape this layer re-emits. A debug build inspects the
+    // whole stream for line tables, the LLVM backend lifts it, and the PE/Mach-O writers rewrite it
+    // after selection; the ARM and RISC-V selection is not what this cache was measured on.
+    if (c.plat != 0) | (c.target != 0) | (c.debug != 0) | (c.backend != 0) | (c.emit_ir != 0) {
+        return false;
+    }
+    // Effect edges are per-body records in a table this layer does not carry, so a run that records
+    // any does not file units (docs/design/effects.md).
+    if c.fx_any != 0 {
+        return false;
+    }
+    // `--export` counts the definitions that matched it, and a replayed body is one it never sees.
+    if c.exports.len() != 0 {
+        return false;
+    }
+    // A validating run throws its code away.
+    if c.validating != 0 {
+        return false;
+    }
+    return true;
+}
+
+// Whether this body is a unit at its entry: the run can file units, this is not a specialisation
+// replay (a later stage keys those by their own identity), and the part marker is already open -
+// the first body of a part writes `.grail_part` and `.text` inside its own bytes.
+fn fn_open<a, b>(c: (&a mut C), unit: &b [u8]) -> bool {
+    if !fn_on(&c) {
+        return false;
+    }
+    if c.current_spec != 0 {
+        return false;
+    }
+    if !same(view(c.part), view(unit)) {
+        return false;
+    }
+    return true;
+}
+
+// Where a declaration starts, as `.gpos` will print it: its line and column in its file. Bodies are
+// walked in source order, so the cursor moves forward; a position before it (a replay) restarts.
+// The line and column are what makes a body edit inside one function leave every *later* function's
+// key alone: byte offsets would shift with it, positions do not.
+fn fn_place<a>(c: (&a mut C), pos: u64) -> FnPlace {
+    mut st: u64 = 0;
+    if c.toks.len() <= pos {
+        return FnPlace { line: 0, col: 0 };
+    }
+    st = c.toks[pos].start;
+    if (c.fn_at_file != c.file) | (st < c.fn_at_off) {
+        exchange(&mut c.fn_at_file, c.file);
+        exchange(&mut c.fn_at_off, 0);
+        exchange(&mut c.fn_at_line, 1);
+        exchange(&mut c.fn_at_col, 1);
+    }
+    mut line = c.fn_at_line;
+    mut col = c.fn_at_col;
+    mut i = c.fn_at_off;
+    while (i < st) & (i < c.src.len()) {
+        if c.src[i] == 10 {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+        i += 1;
+    }
+    exchange(&mut c.fn_at_off, st);
+    exchange(&mut c.fn_at_line, line);
+    exchange(&mut c.fn_at_col, col);
+    return FnPlace { line: line, col: col };
+}
+
+// The counters whose movement means a body reached outside its own bytes: a closure body, a
+// specialisation, a drop helper, a vtable, a link input, a compile-time constant, a debug record,
+// the fn thunk, an effect record. Each of those is emitted by a later step, so a replay that
+// skipped the registration would hand the link an object missing a symbol.
+fn fn_marks<a>(c: (&a C)) -> u64[] {
+    mut m = u64[];
+    m.push(c.closures.len());
+    m.push(c.specs.len());
+    m.push(c.drop_refs.len());
+    m.push(c.drop_names.len());
+    m.push(c.vtables.len());
+    m.push(c.libs.len());
+    m.push(c.constants.len());
+    m.push(c.debug_funcs.len());
+    m.push(c.fn_thunk_used);
+    m.push(c.fx_syms.len());
+    m.push(c.fx_body_sym.len());
+    return m;
+}
+
+fn fn_marks_same<a, b>(a: (&a u64[]), b: (&b u64[])) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The key of one unit: a text record naming every input its bytes are a function of.
+//
+//   the unit (part) it is emitted into and the label prefix that part mints labels in;
+//   the symbol the label spells;
+//   the option vector (`--fn-cache` and the output path left out: nothing in the text is theirs);
+//   the run's declaration surface (fn_surface_now: every name, type, layout and signature, no body);
+//   the declaration's own source text, from `fn` to the closing brace;
+//   its typed signature, spelled structurally (`iface_w_type`) after substitution;
+//   the line and column it starts at, which `.gpos` bakes into the body;
+//   the label and `.Lrfp` numbers it starts at, and the declaration count it starts with (a body
+//   that synthesised a declaration before this one changes what this one can see).
+//
+// An empty key means "not a unit": a type with no interface spelling cannot be named, and a unit
+// keyed by a partial signature would be reused on a guess.
+fn fn_key<a, b, d>(c: (&a mut C), unit: &b [u8], symbol: &d [u8], from: u64, to: u64, at: u64, count: u64, ret: u64) -> u8[] {
+    mut sig = u8[];
+    mut deps = u64[];
+    old_lenient := exchange(&mut c.spell_lenient, 1);
+    old_failed := exchange(&mut c.spell_failed, 0);
+    for i in count {
+        ty := c.locals[i].ty;
+        iface_w_type(&mut c, &mut sig, &mut deps, ty);
+    }
+    iface_w_type(&mut c, &mut sig, &mut deps, ret);
+    mut failed = c.spell_failed;
+    exchange(&mut c.spell_lenient, old_lenient);
+    exchange(&mut c.spell_failed, old_failed);
+    if failed != 0 {
+        return u8[];
+    }
+    place := fn_place(&mut c, at);
+    mut key = u8[];
+    push_bytes(&mut key, view("grail-fnkey 1\nunit "));
+    push_bytes(&mut key, view(unit));
+    push_bytes(&mut key, view("\nprefix "));
+    push_bytes(&mut key, view(c.lpart));
+    push_bytes(&mut key, view("\nsymbol "));
+    push_bytes(&mut key, view(symbol));
+    push_bytes(&mut key, view("\nflags "));
+    push_bytes(&mut key, view(c.fn_flags));
+    push_bytes(&mut key, view("\ncompiler "));
+    push_bytes(&mut key, view(c.fn_id));
+    push_bytes(&mut key, view("\nsurface "));
+    push_bytes(&mut key, view(c.fn_surface));
+    push_bytes(&mut key, view("\ndecl "));
+    push_bytes(&mut key, view(fncache::hash(c.src[from: to])));
+    push_bytes(&mut key, view("\nsig "));
+    push_bytes(&mut key, view(fncache::hash(view(sig))));
+    push_bytes(&mut key, view("\nat "));
+    push_bytes(&mut key, view(decimal_bytes(place.line)));
+    key.push(32);
+    push_bytes(&mut key, view(decimal_bytes(place.col)));
+    push_bytes(&mut key, view("\nlabel "));
+    push_bytes(&mut key, view(decimal_bytes(c.label)));
+    push_bytes(&mut key, view("\nrefs "));
+    push_bytes(&mut key, view(decimal_bytes(c.ref_next)));
+    push_bytes(&mut key, view("\ndecls "));
+    push_bytes(&mut key, view(decimal_bytes(c.decls.len())));
+    push_bytes(&mut key, view("\nraw "));
+    push_bytes(&mut key, view(decimal_bytes(c.raw)));
+    key.push(10);
+    return key;
+}
+
+// The declaration surface of this run: every declaration, alias, function signature, constant,
+// import, interface and implementation, with no body among them. A body's emitted bytes are a
+// function of this - a field offset, a drop bit, a symbol spelling and a constant's value all reach
+// the text as numbers - so a change here invalidates every unit of the module, while an edit inside
+// one body does not. The interfaces this run read contribute their surface (every byte before the
+// trailer, which carries only source digests), exactly as the module key's own rule does.
+fn fn_surface_now<a>(c: (&a mut C)) -> u8[] {
+    mut out = u8[];
+    old_lenient := exchange(&mut c.spell_lenient, 1);
+    old_failed := exchange(&mut c.spell_failed, 0);
+    mut deps = u64[];
+    for i in c.decls.len() {
+        m := c.decls[i].module.copy();
+        n := c.decls[i].name.copy();
+        iface_ws(&mut out, view(m));
+        iface_ws(&mut out, view(n));
+        iface_wv(&mut out, c.decls[i].is_enum);
+        iface_wv(&mut out, c.decls[i].opaque);
+        iface_wv(&mut out, c.decls[i].transfer);
+        iface_wv(&mut out, c.decls[i].share);
+        iface_wv(&mut out, c.decls[i].c_layout);
+        iface_wv(&mut out, c.decls[i].drop);
+        nf := c.decls[i].count;
+        first := c.decls[i].first;
+        iface_wv(&mut out, nf);
+        for j in nf {
+            fname := c.fields[first + j].name.copy();
+            fty := c.fields[first + j].ty;
+            iface_ws(&mut out, view(fname));
+            iface_w_type(&mut c, &mut out, &mut deps, fty);
+        }
+    }
+    for i in c.aliases.len() {
+        m := c.aliases[i].module.copy();
+        n := c.aliases[i].name.copy();
+        pub := c.aliases[i].public;
+        ty := c.aliases[i].ty;
+        iface_ws(&mut out, view(m));
+        iface_ws(&mut out, view(n));
+        iface_wv(&mut out, pub);
+        iface_w_type(&mut c, &mut out, &mut deps, ty);
+    }
+    for i in c.funcs.len() {
+        m := c.funcs[i].module.copy();
+        n := c.funcs[i].name.copy();
+        home := c.funcs[i].home.copy();
+        sym := c.funcs[i].symbol.copy();
+        pub := c.funcs[i].public;
+        npar := c.funcs[i].count;
+        first := c.funcs[i].first;
+        ret := c.funcs[i].ret;
+        ext := c.funcs[i].ext;
+        strict := c.funcs[i].strict;
+        no_alloc := c.funcs[i].no_alloc;
+        no_panic := c.funcs[i].no_panic;
+        owner := c.funcs[i].owner;
+        arity := c.funcs[i].types;
+        iface_ws(&mut out, view(m));
+        iface_ws(&mut out, view(n));
+        iface_ws(&mut out, view(home));
+        iface_ws(&mut out, view(sym));
+        iface_wv(&mut out, pub);
+        iface_wv(&mut out, ext);
+        iface_wv(&mut out, strict);
+        iface_wv(&mut out, no_alloc);
+        iface_wv(&mut out, no_panic);
+        iface_wv(&mut out, owner);
+        iface_wv(&mut out, arity);
+        iface_wv(&mut out, npar);
+        for j in npar {
+            pty := c.params[first + j];
+            iface_w_type(&mut c, &mut out, &mut deps, pty);
+        }
+        iface_w_type(&mut c, &mut out, &mut deps, ret);
+    }
+    for i in c.constants.len() {
+        m := c.constants[i].module.copy();
+        n := c.constants[i].name.copy();
+        text := c.constants[i].text.copy();
+        pub := c.constants[i].public;
+        ty := c.constants[i].ty;
+        val := c.constants[i].value;
+        iface_ws(&mut out, view(m));
+        iface_ws(&mut out, view(n));
+        iface_ws(&mut out, view(text));
+        iface_wv(&mut out, pub);
+        iface_wv(&mut out, val);
+        iface_w_type(&mut c, &mut out, &mut deps, ty);
+    }
+    for i in c.imports.len() {
+        m := c.imports[i].module.copy();
+        n := c.imports[i].name.copy();
+        iface_ws(&mut out, view(m));
+        iface_ws(&mut out, view(n));
+    }
+    for i in c.interfaces.len() {
+        m := c.interfaces[i].module.copy();
+        n := c.interfaces[i].name.copy();
+        pub := c.interfaces[i].public;
+        methods := c.interfaces[i].methods.len();
+        iface_ws(&mut out, view(m));
+        iface_ws(&mut out, view(n));
+        iface_wv(&mut out, pub);
+        iface_wv(&mut out, methods);
+    }
+    for i in c.implementations.len() {
+        m := c.implementations[i].module.copy();
+        contract := c.implementations[i].contract;
+        ty := c.implementations[i].ty;
+        methods := c.implementations[i].methods.len();
+        iface_ws(&mut out, view(m));
+        iface_wv(&mut out, contract);
+        iface_wv(&mut out, methods);
+        iface_w_type(&mut c, &mut out, &mut deps, ty);
+    }
+    for i in c.iface_loaded_path.len() {
+        p := c.iface_loaded_path[i].copy();
+        text := host::read_file(view(p));
+        iface_ws(&mut out, view(p));
+        iface_ws(&mut out, view(iface_digest(view(iface_surface(view(text))))));
+    }
+    mut failed = c.spell_failed;
+    exchange(&mut c.spell_lenient, old_lenient);
+    exchange(&mut c.spell_failed, old_failed);
+    if failed != 0 {
+        // A declaration this compiler cannot spell: nothing in the run is keyed by the surface, so
+        // nothing in it is a unit.
+        return u8[];
+    }
+    return fncache::hash(view(out));
+}
+
+// The option vector as the driver spelled it: every argument except the output path (which reaches
+// no emitted byte) and this layer's own directory. Hashing the words means a flag added later is in
+// every unit's key by construction - the same argument `build_argv` rests on at the module level.
+fn fn_flags_now<a>(c: (&a mut C)) -> u8[] {
+    mut out = u8[];
+    argc := host::argc();
+    mut i = 0;
+    while i < argc {
+        w := host::arg(i);
+        mut skip = 0;
+        if i == 1 + c.arg_offset {
+            skip = 1;
+        }
+        if same(view(w), view("--fn-cache")) || same(view(w), view("--fn-cache-id")) {
+            skip = 1;
+        }
+        if 0 < i {
+            // `&` does not short-circuit, so the guard is its own branch: `i - 1` at 0 would wrap.
+            prev := host::arg(i - 1);
+            if same(view(prev), view("--fn-cache")) || same(view(prev), view("--fn-cache-id")) {
+                skip = 1;
+            }
+        }
+        if skip == 0 {
+            iface_ws(&mut out, view(w));
+        }
+        i += 1;
+    }
+    // A hand-run compiler has no `--fn-cache-id`, so its executable stands in for one: the path it
+    // is being run from, its size and its modification time. A unit is code *this* compiler emitted,
+    // and replaying a previous compiler's would be exactly the stale splice this cache must not do.
+    exe := host::exe_path();
+    push_bytes(&mut out, view("exe "));
+    push_bytes(&mut out, view(exe));
+    parts := host::stat(view(exe), 1);
+    if 2 < parts.len() {
+        push_bytes(&mut out, view(" size "));
+        push_bytes(&mut out, view(decimal_bytes(parts[2])));
+    }
+    if 5 < parts.len() {
+        push_bytes(&mut out, view(" mtime "));
+        push_bytes(&mut out, view(decimal_bytes(parts[4])));
+        out.push(46);
+        push_bytes(&mut out, view(decimal_bytes(parts[5])));
+    }
+    return fncache::hash(view(out));
+}
+
+// The typed-IR facts one body's emission recorded, framed for replay: kind, a, b, what, width, the
+// body symbol and the callee, per fact. They are replayed, not recomputed: the fact table is what
+// the optimizer's pair rules and the LLVM lifter read, so a body spliced without them would be
+// optimised as if it had none.
+fn fn_facts_encode<a>(c: (&a C), from: u64) -> u8[] {
+    mut out = u8[];
+    n := llvm::facts_len(&c.facts);
+    mut count: u64 = 0;
+    if from < n {
+        count = n - from;
+    }
+    iface_wv(&mut out, count);
+    for i in count {
+        k := from + i;
+        iface_wv(&mut out, llvm::fact_kind(&c.facts, k));
+        iface_wv(&mut out, llvm::fact_slot_at(&c.facts, k));
+        iface_wv(&mut out, llvm::fact_arg_b(&c.facts, k));
+        iface_wv(&mut out, llvm::fact_what(&c.facts, k));
+        iface_wv(&mut out, llvm::fact_width(&c.facts, k));
+        nl := llvm::fact_name_len(&c.facts, k);
+        iface_wv(&mut out, nl);
+        for j in nl {
+            out.push(llvm::fact_name_byte(&c.facts, k, j));
+        }
+        cl := llvm::fact_callee_len(&c.facts, k);
+        iface_wv(&mut out, cl);
+        for j in cl {
+            out.push(llvm::fact_callee_byte(&c.facts, k, j));
+        }
+    }
+    return out;
+}
+
+fn fn_facts_restore<a>(c: (&a mut C), data: &a [u8]) -> unit {
+    mut r = fncache::Read { data: data.copy(), at: 0, ok: 1 };
+    n := fncache::rv(&mut r);
+    for i in n {
+        k := fncache::rv(&mut r);
+        a := fncache::rv(&mut r);
+        b := fncache::rv(&mut r);
+        what := fncache::rv(&mut r);
+        width := fncache::rv(&mut r);
+        name := fncache::rs(&mut r);
+        callee := fncache::rs(&mut r);
+        if r.ok != 0 {
+            llvm::fact_restore(&mut c.facts, k, name, a, b, callee, what, width);
+        }
+    }
+    return ();
+}
+
 fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // A body's synthesised declarations (closure environments) are not the function's to hide.
     exchange(&mut c.decl_public, 1);
@@ -14149,6 +14593,51 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         requester := c.specs[c.current_spec - 1].requester.copy();
         unit = unit_module(&mut c, view(requester));
     }
+    // ---- the per-function codegen cache: replay this body if the store has it ----------------
+    //
+    // The key names the declaration's own source text and its typed signature, so nothing here has
+    // parsed the body: a hit skips the body's tokens, its checking, its lowering and its emission,
+    // and puts back the label numbers the replayed bytes spell. A body is filed (below, at the end
+    // of this function) only when its emission added nothing outside its own bytes.
+    mut fn_key_text = u8[];
+    mut fn_marks_at = u64[];
+    mut fn_label_at = c.label;
+    mut fn_refs_at = c.ref_next;
+    mut fn_candidate = 0;
+    if fn_open(&mut c, view(unit)) {
+        // The symbol the label will spell: `body_label` is the one spelling both `func_directive`
+        // and the label use, so a unit's key names exactly the symbol its bytes define.
+        fn_symbol := body_label(&c, view(m), view(name), view(export_symbol), export);
+        // Hoisted: `fn_key` borrows `c` mutably, so no argument may read it.
+        decl_from := c.toks[position].start;
+        decl_to := c.toks[end].end;
+        key := fn_key(&mut c, view(unit), view(fn_symbol), decl_from, decl_to, position, count, ret);
+        if key.len() != 0 {
+            hit := fncache::load(view(c.fn_dir), view(fncache::hash(view(key))));
+            if hit.key.len() != 0 {
+                if same(view(hit.key), view(key)) {
+                    for i in hit.text.len() {
+                        c.out.push(hit.text[i]);
+                    }
+                    c.label = c.label + hit.labels;
+                    c.ref_next = c.ref_next + hit.refs;
+                    k := c.lunit;
+                    if (k != 0) & (k <= c.lnext.len()) {
+                        c.lnext[k - 1] = c.label;
+                        c.rnext[k - 1] = c.ref_next;
+                    }
+                    fn_facts_restore(&mut c, view(hit.facts));
+                    exchange(&mut c.hints, u64[]);
+                    c.fn_hits = c.fn_hits + 1;
+                    skip_braces(&mut c);
+                    return ();
+                }
+            }
+            fn_key_text = key;
+            fn_marks_at = fn_marks(&c);
+            fn_candidate = 1;
+        }
+    }
     part(&mut c, view(unit));
     mut body_symbol = u8[];
     push_bytes(&mut body_symbol, view(export_symbol));
@@ -14409,6 +14898,35 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     ref_entry(&mut c, view(m), view(name), view(body_symbol), export, body_lbl, view(prologue));
     fx_end(&mut c);
     exchange(&mut c.hints, u64[]);
+    // ---- file this body as a unit, if its emission stayed inside its own bytes ----------------
+    //
+    // The marks say what the body added to the *run*: a closure body, a specialisation, a drop
+    // helper, a vtable, a link input, a compile-time constant, a debug record or an effect record
+    // is emitted by a later step, so a replay that skipped the registration would hand the link an
+    // object missing a symbol. Such a body is emitted exactly as before and is never filed.
+    if fn_candidate != 0 {
+        now := fn_marks(&c);
+        if fn_marks_same(&fn_marks_at, &now) {
+            mut text = u8[];
+            for i in out_mark .. c.out.len() {
+                text.push(c.out[i]);
+            }
+            // The file's name is the key's hash; the key record itself travels inside the entry,
+            // so two keys that collide make a miss and never a wrong hit.
+            filed := fncache::hash(view(fn_key_text));
+            rec := fncache::Unit {
+                key: fn_key_text,
+                text: text,
+                labels: c.label - fn_label_at,
+                refs: c.ref_next - fn_refs_at,
+                facts: fn_facts_encode(&c, fact_mark)
+            };
+            fncache::save(view(c.fn_dir), view(filed), &rec);
+            c.fn_filed = c.fn_filed + 1;
+        } else {
+            c.fn_kept = c.fn_kept + 1;
+        }
+    }
     return ();
 }
 fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
@@ -41259,6 +41777,17 @@ pub fn main() -> u64 {
         fx_body_calls: u64[],
         fx_body_lo: u64[],
         fx_body_hi: u64[],
+        fn_dir: u8[],
+        fn_id: u8[],
+        fn_flags: u8[],
+        fn_surface: u8[],
+        fn_at_file: 0,
+        fn_at_off: 0,
+        fn_at_line: 1,
+        fn_at_col: 1,
+        fn_hits: 0,
+        fn_filed: 0,
+        fn_kept: 0
     };
     exchange(&mut c.target, host::target());
     for k in 5 {
@@ -41418,6 +41947,23 @@ pub fn main() -> u64 {
             }
             exchange(&mut c.mod_list, 1);
             exchange(&mut c.mod_list_file, host::arg(offset + 2));
+            offset += 2;
+        } else if same(view(option), view("--fn-cache")) {
+            // The per-function codegen cache: DIR holds one file per emitted function, keyed by
+            // everything its bytes are a function of (docs/design/incremental-compilation.md).
+            // The driver passes it when `--cache` is asked for; nothing else does.
+            if argc < offset + 3 {
+                fail_option(&mut c, view("--fn-cache needs a directory"));
+            }
+            exchange(&mut c.fn_dir, host::arg(offset + 2));
+            offset += 2;
+        } else if same(view(option), view("--fn-cache-id")) {
+            // The compiler's own digest, as the driver computed it (`cache_build_id`). A unit is
+            // code this compiler emitted, so a new compiler is a new key for every function.
+            if argc < offset + 3 {
+                fail_option(&mut c, view("--fn-cache-id needs a digest"));
+            }
+            exchange(&mut c.fn_id, host::arg(offset + 2));
             offset += 2;
         } else if same(view(option), view("--no-entry")) {
             // A run that emits one module's code for a link, not a program: no entry stub, so the
@@ -41711,6 +42257,14 @@ pub fn main() -> u64 {
             }
             iface_emit_all(&mut c);
         }
+        if (pass == 1) & (c.fn_dir.len() != 0) {
+            // The declaration surface is final once every declaration is known. Both hashes are
+            // computed once, here, before the first body is emitted: a declaration synthesised
+            // while a body is emitted must not move the surface under the bodies that follow it.
+            exchange(&mut c.fn_flags, fn_flags_now(&mut c));
+            exchange(&mut c.fn_surface, fn_surface_now(&mut c));
+            fncache::ensure(view(c.fn_dir));
+        }
     }
     // Every definition has been emitted by now, so an --export name that never matched is a typo.
     for i in c.exports.len() {
@@ -41936,6 +42490,29 @@ pub fn main() -> u64 {
     }
     }
     }
+    }
+    if c.fn_dir.len() != 0 {
+        // What this run did with the store, one line per module run: bodies replayed from cache,
+        // bodies filed as units, and bodies emitted that are not units (they reached outside their
+        // own bytes, or a part was opened or a key could not be spelled).
+        mut line = u8[];
+        push_bytes(&mut line, view("grail: fn-cache: "));
+        // The module this run compiled: the first part it opened, which a driver run (one module per
+        // compiler invocation) opens for that module's first body. Not `c.part`, which by the end
+        // names a synthetic part - `.helpers` for the drop helpers, `__start` for the entry stub.
+        if c.lunits.len() != 0 {
+            push_bytes(&mut line, view(c.lunits[0]));
+        } else {
+            push_bytes(&mut line, view("(none)"));
+        }
+        push_bytes(&mut line, view(": "));
+        push_bytes(&mut line, view(decimal_bytes(c.fn_hits)));
+        push_bytes(&mut line, view(" hit, "));
+        push_bytes(&mut line, view(decimal_bytes(c.fn_filed)));
+        push_bytes(&mut line, view(" filed, "));
+        push_bytes(&mut line, view(decimal_bytes(c.fn_kept)));
+        push_bytes(&mut line, view(" not units\n"));
+        host::print(view(line));
     }
     mut out = u8[];
     // The typed IR of each body, as the optimizer parsed it, when --emit-ir asked for it.

@@ -90,6 +90,26 @@ function cacheLine(output) {
   const match = output.match(/grail: cache: (\d+) hit, (\d+) miss(?: \(([^)]*)\))?; (.+)\n/);
   return match ? { hits: Number(match[1]), misses: Number(match[2]), names: match[3] ? match[3].split(', ') : [], what: match[4] } : null;
 }
+// The *surface* of an interface: every byte before the trailer record, which is what
+// `native::iface_surface` hands the cache key. The trailer carries the source digest and the file's
+// own digest, so they are outside it by construction.
+function surfaceOf(path) {
+  const bytes = readFileSync(path);
+  const trailer = recordsOf(bytes).find(record => record.tag === 2);
+  assert.ok(trailer, `${path}: no trailer record`);
+  return digest(bytes.subarray(0, trailer.tagAt));
+}
+// The per-function layer's report, one line per module run: the part the run ended in, bodies
+// replayed from the unit store, bodies filed as units, and bodies emitted that are not units.
+function unitLines(output) {
+  const out = [];
+  for (const m of output.matchAll(/grail: fn-cache: (\S+): (\d+) hit, (\d+) filed, (\d+) not units/g)) {
+    out.push({ module: m[1], hits: Number(m[2]), filed: Number(m[3]), kept: Number(m[4]) });
+  }
+  return out;
+}
+const sum = lines => lines.reduce((a, l) => ({ hits: a.hits + l.hits, filed: a.filed + l.filed, kept: a.kept + l.kept }), { hits: 0, filed: 0, kept: 0 });
+const forModule = (lines, name) => lines.filter(l => l.module === name).reduce((a, l) => ({ hits: a.hits + l.hits, filed: a.filed + l.filed, kept: a.kept + l.kept }), { hits: 0, filed: 0, kept: 0 });
 function run(binary) {
   const result = spawnSync(binary, [], { encoding: 'utf8', timeout: 60_000 });
   assert.equal(result.status, 0, `${binary}: exited ${result.status}\n${result.stderr ?? ''}`);
@@ -585,15 +605,6 @@ function proveEditCost(count) {
   // (ii) a body-only edit in a module importers read: `util` gains a private helper and then has its
   // body changed, so the interface's bytes do not move and no importer has a reason to rerun.
   const iface = join(project, 'target/cost.modules/interfaces/util.iface');
-  // The *surface* of an interface: every byte before the trailer record, which is what
-  // `native::iface_surface` hands the cache key. The trailer carries the source digest and the
-  // file's own digest, so they are outside it by construction.
-  const surfaceOf = path => {
-    const bytes = readFileSync(path);
-    const trailer = recordsOf(bytes).find(record => record.tag === 2);
-    assert.ok(trailer, `${path}: no trailer record`);
-    return digest(bytes.subarray(0, trailer.tagAt));
-  };
   const privateHelper = `\nfn private_pad(x: u64) -> u64 {\n    return x + 1;\n}\n`;
   writeFileSync(join(project, 'src/util.grl'), `${utilSource(3)}${privateHelper}`);
   const added = build(['--cache', '-o', output], { measure: true });
@@ -628,6 +639,122 @@ function proveEditCost(count) {
   return { cold, cases };
 }
 
+// ---- (i) the per-function cache: units inside a module run ------------------------------------
+// `grail build --cache` runs the compiler once per module, and a module run that misses can still
+// replay the functions whose inputs did not move: each `grail: fn-cache:` line above is one run's
+// account of that. Every case here ends with the module assembly compared byte for byte against the
+// same build made from an empty unit store, and with the image compared against a build with no
+// cache at all: a replayed body that is not the body a fresh emission writes is a silent
+// miscompile, so it has to be caught as bytes.
+function moduleAssembly(output) {
+  const directory = `${output}.modules`;
+  const out = new Map();
+  for (const name of readdirSync(directory)) {
+    if (name.endsWith('.s')) out.set(name, bytes(join(directory, name)));
+  }
+  assert.ok(out.size > 0, `no module assembly under ${directory}`);
+  return out;
+}
+function sameAssembly(before, after, what) {
+  assert.deepEqual([...after.keys()], [...before.keys()], `${what}: the module set changed`);
+  for (const [name, text] of before) {
+    assert.deepEqual(after.get(name), text, `${what}: ${name}.s is not the assembly a clean emission writes`);
+  }
+}
+// The unit store is emptied, the module store is not: the next build replays nothing at the module
+// level and hits the unit store on every function it filed.
+function clearUnitStore() {
+  rmSync(join(store, 'fn'), { recursive: true, force: true });
+}
+function clearModuleStore() {
+  rmSync(join(store, 'map'), { recursive: true, force: true });
+  rmSync(join(store, 'blob'), { recursive: true, force: true });
+}
+function proveUnits(count) {
+  const output = join(project, 'target/units');
+  rmSync(store, { recursive: true, force: true });
+  costProject(count);
+  // The cold build files the units. Its image is the reference every case below is compared with,
+  // and its module assembly is the text a replay has to reproduce byte for byte.
+  const cold = build(['--cache', '-o', output], { measure: true });
+  assert.equal(cold.status, 0, `the cold unit build failed\n${cold.output}`);
+  const coldLines = unitLines(cold.output);
+  assert.equal(coldLines.length, cold.line.hits + cold.line.misses, `one fn-cache line per module run:\n${cold.output}`);
+  const filed = sum(coldLines);
+  assert.equal(filed.hits, 0, `a cold unit store cannot replay a body:\n${cold.output}`);
+  assert.ok(filed.filed > 0, `a cold build must file units:\n${cold.output}`);
+  const bigFiled = forModule(coldLines, 'big').filed;
+  assert.ok(bigFiled > 1, `the big module must file its bodies:\n${cold.output}`);
+  const coldImage = bytes(output);
+  // The same build with no cache at all, to the same output name: this is the image, and (after it
+  // has overwritten the cached build's assembly) the module text, that a replay must be.
+  const clean = build(['-o', output], { measure: true });
+  assert.equal(clean.status, 0, `the uncached build failed\n${clean.output}`);
+  assert.deepEqual(bytes(output), coldImage, 'the cached build is not the uncached build');
+  const assembly = moduleAssembly(output);
+
+  // (1) every module run forced to miss while the unit store stays warm: the module's assembly has to
+  // come back byte for byte. This is the property the layer rests on - label numbers, `.gpos`
+  // positions, the fact table and the label counters all have to line up with a fresh emission.
+  clearModuleStore();
+  const replay = build(['--cache', '-o', output], { measure: true });
+  assert.equal(replay.status, 0, `the replay build failed\n${replay.output}`);
+  const replayed = sum(unitLines(replay.output));
+  assert.equal(replayed.hits, filed.filed, `every filed unit must replay:\n${replay.output}`);
+  assert.equal(replayed.filed, 0, `nothing is filed when everything replays:\n${replay.output}`);
+  sameAssembly(assembly, moduleAssembly(output), 'a replayed module');
+  assert.deepEqual(bytes(output), coldImage, 'a replayed image is not the clean image');
+
+  // (2) one function of the big module: that body is emitted and filed again, and every other body
+  // of the module replays - the label numbers of the bodies after it did not move, which is what
+  // `at <line>` in the key buys over a byte offset.
+  const bigPath = join(project, 'src/big.grl');
+  writeFileSync(bigPath, readFileSync(bigPath, 'utf8').replace('pub fn f7(x: u64) -> u64 {\n    mut y = x + 7;', 'pub fn f7(x: u64) -> u64 {\n    mut y = x + 70;'));
+  const one = build(['--cache', '-o', output], { measure: true });
+  assert.equal(one.status, 0, `the one-function edit failed\n${one.output}`);
+  const big = forModule(unitLines(one.output), 'big');
+  assert.equal(big.filed, 1, `one edited body is emitted and filed:\n${one.output}`);
+  assert.equal(big.hits, bigFiled - 1, `every other body of big must replay:\n${one.output}`);
+  const oneImage = bytes(output);
+  assert.equal(build(['-o', output]).status, 0, 'the uncached one-function build failed');
+  assert.deepEqual(bytes(output), oneImage, 'the one-function edit is not the uncached build');
+
+  // (3) a body-only edit of another inner function: the module-level cache reruns that module and
+  // nothing else (its interface surface does not move), and inside the run one body is emitted.
+  const bigIfaces = join(project, 'target/units.modules/interfaces/big.iface');
+  const bigSurface = surfaceOf(bigIfaces);
+  writeFileSync(bigPath, readFileSync(bigPath, 'utf8').replace('pub fn f3(x: u64) -> u64 {\n    mut y = x + 3;', 'pub fn f3(x: u64) -> u64 {\n    mut y = x + 30;'));
+  const bodyOnly = build(['--cache', '-o', output], { measure: true });
+  assert.equal(bodyOnly.status, 0, `the body-only edit failed\n${bodyOnly.output}`);
+  assert.deepEqual(bodyOnly.line.names, ['big'], `a body-only edit must rerun one module:\n${bodyOnly.output}`);
+  assert.equal(surfaceOf(bigIfaces), bigSurface, 'a body edit must leave the interface surface alone');
+  const onlyBig = forModule(unitLines(bodyOnly.output), 'big');
+  assert.equal(onlyBig.filed, 1, `the edited body is the one body emitted again:\n${bodyOnly.output}`);
+  assert.equal(onlyBig.hits, bigFiled - 1, `every other body of big must replay:\n${bodyOnly.output}`);
+  const bodyImage = bytes(output);
+  assert.equal(build(['-o', output]).status, 0, 'the uncached body-only build failed');
+  assert.deepEqual(bytes(output), bodyImage, 'the body-only edit is not the uncached build');
+
+  // (4) an interface change: a new `pub` function moves the big module's declaration surface, and
+  // the surface is in every key of that module, so every one of its units is a miss - not one
+  // replayed body. The modules nobody touched are still module-level hits, so one edit does not
+  // throw the store away.
+  writeFileSync(bigPath, `${readFileSync(bigPath, 'utf8')}\npub fn extra(x: u64) -> u64 {\n    return x + 1;\n}\n`);
+  const surface = build(['--cache', '-o', output], { measure: true });
+  assert.equal(surface.status, 0, `the interface edit failed\n${surface.output}`);
+  assert.equal(surface.line.names[0], 'big', `the edited module must rerun first:\n${surface.output}`);
+  const bigAfter = forModule(unitLines(surface.output), 'big');
+  assert.equal(bigAfter.hits, 0, `a surface change must invalidate every unit of the module:\n${surface.output}`);
+  assert.ok(bigAfter.filed >= bigFiled, `every body of the module is emitted and filed again:\n${surface.output}`);
+  assert.ok(surface.line.hits >= 3, `a surface change must not throw away the modules before it:\n${surface.output}`);
+  const surfaceImage = bytes(output);
+  assert.equal(build(['-o', output]).status, 0, 'the uncached surface build failed');
+  assert.deepEqual(bytes(output), surfaceImage, 'the surface edit is not the uncached build');
+
+  write(3);
+  return { cold, clean, replay, one, bodyOnly, surface, filed, replayed, big, onlyBig, assembly: assembly.size };
+}
+
 // ---- run --------------------------------------------------------------------------------------
 // The timings come first, from an empty store, so "cold" means cold.
 const reuse = proveReuse();
@@ -640,6 +767,7 @@ const corruption = proveCorruption();
 const pruning = provePruning();
 const modules = proveModules();
 const editCost = proveEditCost(flags.includes('--big') ? 2000 : 400);
+const units = proveUnits(flags.includes('--big') ? 2000 : 400);
 const finalStore = proveStore();
 
 const ms = value => `${value.toFixed(1)}ms`;
@@ -660,6 +788,17 @@ for (const item of editCost.cases) {
   console.log(`               ${ms(item.ms).padStart(10)}  ${item.name.padEnd(30)} redid ${redone}`);
 }
 console.log(`               ${ms(editCost.cold.ms).padStart(10)}  cold build of the same tree`);
+console.log(`(i) units      ${units.assembly} module assembly files, ${units.filed.filed} bodies filed by a cold build (${units.filed.kept} bodies are not units), every replay byte-identical`);
+console.log(`               ${ms(units.cold.ms).padStart(10)}  cold: nothing to replay, everything filed`);
+for (const item of [
+  { name: 'every module run forced to miss', built: units.replay, line: units.replayed },
+  { name: 'one function of the big module', built: units.one, line: units.big },
+  { name: 'a body-only edit of an inner function', built: units.bodyOnly, line: units.onlyBig },
+  { name: 'an interface change in the big module', built: units.surface, line: sum(unitLines(units.surface.output)) },
+]) {
+  console.log(`               ${ms(item.built.ms).padStart(10)}  ${item.name.padEnd(34)} ${item.line.hits} replayed, ${item.line.filed} re-emitted, ${item.line.kept} not units`);
+}
+console.log(`               ${ms(units.clean.ms).padStart(10)}  a clean build of the same tree (no cache at all)`);
 console.log(`(f) pruning    --keep 0 after an edit dropped ${pruning.pruned.records} records and ${pruning.pruned.blobs} blobs; next build ${pruning.again.hits} hit, ${pruning.again.misses} miss`);
 console.log('');
 console.log('build cache verified');

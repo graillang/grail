@@ -1,0 +1,226 @@
+module fncache;
+use host;
+
+// The per-function codegen cache: one file per emitted function, under the build cache's `fn/`
+// directory (docs/design/incremental-compilation.md, "Per-function units").
+//
+// A *unit* is one function's emitted assembly and the state a replay has to put back: the label
+// numbers its text mints (a label is `.L<unit prefix>_<n>`, so the text names the numbers it was
+// written with), the `.Lrfp`/`.Lrfr` numbers its checks mint, and the typed-IR facts its emission
+// recorded. Everything about *which* functions are units, and what a unit's key names, lives in
+// `compiler/native.grl` where the emitter is; this module is only the store and its framing.
+//
+// The store is a directory of files whose names are content hashes. A file is
+//
+//     "GFN1" key:VAR text:VAR labels:VAR refs:VAR facts:VAR
+//
+// where `S:VAR` is a LEB128 length followed by that many bytes, and `facts` is opaque here (the
+// emitter writes one framed record per fact). The *key record itself* is inside the file: a reader
+// compares it with the key it computed, so two keys that hash to the same file name make a miss and
+// never a wrong hit. A truncated or unreadable file decodes to no unit at all, which is a miss.
+//
+// Writes go to `stage/` and are renamed into place, so a reader never sees half an entry; and a
+// reader that finds one anyway rejects it rather than handing the emitter a partial body, because a
+// wrong splice is a silent miscompile.
+
+// One cached unit. `key` is empty when there is no unit (a miss, or an entry that did not decode).
+pub struct Unit {
+    key: u8[],
+    text: u8[],
+    labels: u64,
+    refs: u64,
+    facts: u8[]
+}
+
+pub fn none() -> Unit {
+    return Unit { key: u8[], text: u8[], labels: 0, refs: 0, facts: u8[] };
+}
+
+fn wv<a>(out: (&a mut u8[]), n: u64) -> unit {
+    mut v = n;
+    while 127 < v {
+        out.push((v & 127) | 128);
+        v = v >> 7;
+    }
+    out.push(v);
+    return ();
+}
+
+fn ws<a, b>(out: (&a mut u8[]), s: &b [u8]) -> unit {
+    wv(&mut out, s.len());
+    for i in s.len() {
+        out.push(s[i]);
+    }
+    return ();
+}
+
+// A decoder over the bytes of one entry: `at` moves forward and `ok` goes to 0 the first time a
+// field would read past the end, so a truncated file is a miss rather than a read past the end.
+pub struct Read {
+    data: u8[],
+    at: u64,
+    ok: u64
+}
+
+pub fn rv<a>(r: (&a mut Read)) -> u64 {
+    mut n = 0;
+    mut scale = 1;
+    mut done = 0;
+    while done == 0 {
+        if (r.ok == 0) | (r.data.len() <= r.at) {
+            exchange(&mut r.ok, 0);
+            return 0;
+        }
+        b := r.data[r.at];
+        r.at = r.at + 1;
+        n = n + (b & 127) * scale;
+        if (b & 128) == 0 {
+            done = 1;
+        } else {
+            scale = scale * 128;
+            // A number wider than 64 bits cannot have been written by us.
+            if 72057594037927936 < scale {
+                exchange(&mut r.ok, 0);
+                return 0;
+            }
+        }
+    }
+    return n;
+}
+
+pub fn rs<a>(r: (&a mut Read)) -> u8[] {
+    n := rv(&mut r);
+    if (r.ok == 0) | (r.data.len() < r.at) | ((r.data.len() - r.at) < n) {
+        exchange(&mut r.ok, 0);
+        return u8[];
+    }
+    mut out = u8[];
+    for i in n {
+        out.push(r.data[r.at + i]);
+    }
+    r.at = r.at + n;
+    return out;
+}
+
+// Four 32-bit FNV-1a lanes with different primes and offset bases, printed as 32 hex characters.
+// Each lane keeps its product below 2^56 so a checked build never overflows: the compiler is built
+// with overflow checking on, and a wrapping multiply would abort. The value only ever names a file:
+// the key record inside the file is what decides a hit, so a collision costs a cache entry, never
+// correctness.
+pub fn hash<a>(data: &a [u8]) -> u8[] {
+    mut p = 2166136261;
+    mut q = 4018111043;
+    mut r = 1267837801;
+    mut s = 2793279851;
+    for i in data.len() {
+        x := u64(data[i]);
+        p = ((p ^ x) * 16777619) & 4294967295;
+        q = ((q ^ (x + 337)) * 16777639) & 4294967295;
+        r = ((r ^ (x + 663)) * 16777667) & 4294967295;
+        s = ((s ^ (x + 991)) * 16777699) & 4294967295;
+    }
+    mut out = u8[];
+    hex32(&mut out, p);
+    hex32(&mut out, q);
+    hex32(&mut out, r);
+    hex32(&mut out, s);
+    return out;
+}
+
+fn hex32<a>(out: (&a mut u8[]), n: u64) -> unit {
+    mut at: u64 = 28;
+    loop {
+        d := (n >> at) & 15;
+        if d < 10 {
+            out.push(48 + d);
+        } else {
+            out.push(87 + d);
+        }
+        if at == 0 {
+            break;
+        }
+        at -= 4;
+    }
+    return ();
+}
+
+pub fn encode<a>(u: (&a Unit)) -> u8[] {
+    mut out = u8[];
+    out.push(71);
+    out.push(70);
+    out.push(78);
+    out.push(49);
+    ws(&mut out, view(u.key));
+    ws(&mut out, view(u.text));
+    wv(&mut out, u.labels);
+    wv(&mut out, u.refs);
+    ws(&mut out, view(u.facts));
+    return out;
+}
+
+pub fn decode<a>(bytes: (&a u8[])) -> Unit {
+    if bytes.len() < 5 {
+        return none();
+    }
+    if (bytes[0] != 71) || (bytes[1] != 70) || (bytes[2] != 78) || (bytes[3] != 49) {
+        return none();
+    }
+    mut r = Read { data: bytes.copy(), at: 4, ok: 1 };
+    key := rs(&mut r);
+    text := rs(&mut r);
+    labels := rv(&mut r);
+    refs := rv(&mut r);
+    facts := rs(&mut r);
+    // The bytes after the last field would be a record this compiler did not write.
+    if (r.ok == 0) | (r.at != r.data.len()) | (key.len() == 0) | (text.len() == 0) {
+        return none();
+    }
+    return Unit { key: key, text: text, labels: labels, refs: refs, facts: facts };
+}
+
+fn path<a, b>(dir: &a [u8], name: &b [u8]) -> u8[] {
+    mut out = dir.copy();
+    out.push(47);
+    for i in name.len() {
+        out.push(name[i]);
+    }
+    return out;
+}
+
+pub fn ensure<a>(dir: &a [u8]) -> unit {
+    if host::exists(view(dir)) == 0 {
+        host::mkdir(view(dir));
+    }
+    stage := path(view(dir), view("stage"));
+    if host::exists(view(stage)) == 0 {
+        host::mkdir(view(stage));
+    }
+    return ();
+}
+
+// The entry filed under `name`, or no unit when there is none, when it does not decode, or when it
+// was filed under a different key record.
+pub fn load<a, b>(dir: &a [u8], name: &b [u8]) -> Unit {
+    file := path(view(dir), view(name));
+    if host::exists(view(file)) == 0 {
+        return none();
+    }
+    text := host::read_file(view(file));
+    return decode(&text);
+}
+
+// File a unit under `name`: written into `stage/`, then renamed into place, so no reader can see a
+// half entry.
+pub fn save<a, b, d>(dir: &a [u8], name: &b [u8], u: (&d Unit)) -> unit {
+    ensure(view(dir));
+    bytes := encode(u);
+    stage := path(path(view(dir), view("stage")), view(name));
+    if host::write_file(view(stage), view(bytes)) != 0 {
+        host::remove(view(stage), 0);
+        return ();
+    }
+    if host::rename(view(stage), view(path(view(dir), view(name)))) != 0 {
+        host::remove(view(stage), 0);
+    }
+    return ();
+}

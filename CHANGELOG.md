@@ -66,6 +66,19 @@
 - A call that passes too many arguments has a case pinning its message; it had none.
 
 
+- Added: **the per-function codegen cache** (`compiler/fncache.grl`, `--fn-cache DIR`). A module run
+  that misses can now replay the functions whose inputs did not move: a function's whole emitted
+  region, the label numbers it mints and its typed-IR facts are filed under a key naming its source
+  text, its structurally spelled signature, the run's declaration surface, the option vector, the
+  compiler's own digest and its starting label numbers. `grail build --cache` passes the store, so the two caches compose - a
+  module-level hit runs nothing, a module-level miss replays every body it can. A body is a unit only
+  when its emission added nothing outside its own bytes (no specialisation, closure, drop helper,
+  vtable, link input, constant, debug record or effect record), and everything else is emitted as
+  before: `docs/design/incremental-compilation.md` writes the rule down, including the excluded
+  classes and why. On the compiler's own 2,569 bodies, 879 are units and a full replay is byte
+  identical to a clean build; `tools/cache-test.mjs` section (i) measures it.
+- Changed: `grail build --cache` prints one `grail: fn-cache: MODULE: N hit, M filed, K not units`
+  line per per-module run, the layer's own account of what a run replayed and what it re-emitted.
 - Changed: module interface files are a **typed record stream, format 4**, not line-oriented
   text. The compiler wrote the text and then re-read it with a hand-written line lexer and parser -
   two implementations of one format, and one of them three hundred lines of spelling rules that had

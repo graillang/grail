@@ -55,7 +55,7 @@ blob/<sha256>      artifact bytes; the file name is the digest of the bytes insi
 map/prog/<key>     the linked image, plus the output path and the link inputs
 map/lnk/<key>      the linked image
 map/mod/<key>      one module run: its object, its interface, its link inputs
-map/unit/<key>     one function-level unit (below)
+fn/<key>           one function-level unit (below): its bytes, its key record, its label counts
 ```
 
 A *key* is the digest of a text record that names every input the artifact is a function of:
@@ -75,66 +75,149 @@ the damaged entry instead of leaving it to miss forever (`tools/cache-test.mjs`,
 
 ## Below the module: the function-level cache
 
-A module's run is not one artifact but many: a big module has hundreds of functions, and an edit
-touches one of them. The plan is to cache **per function**, so a one-function edit in
-`compiler/native.grl` (38k lines, ~2,600 functions) re-emits that function instead of the module.
+**Implemented** (2026-11-15). A module's run is not one artifact but many: a big module has
+hundreds of functions, and an edit touches one of them. The per-function cache makes **one emitted
+function** the unit of reuse inside a module run that has to be redone:
 
-The unit is *one emitted function body plus the data it needs*, keyed by:
+- `compiler/fncache.grl` is the store: one file per unit under `<store>/fn/`, written through
+  `stage/` and renamed into place, with the key record carried *inside* the file and compared on
+  the way out (two keys that hash to the same name are a miss, never a wrong hit).
+- `compiler/native.grl` owns what a unit *is* and what its key names (`fn_key`, `fn_surface_now`,
+  `fn_flags_now`, `fn_open`, `fn_marks`), and `compiler/cli.grl` passes `--fn-cache DIR` to every
+  per-module run when `--cache` is asked for. It is `store/fn/`, so `grail cache clear` and
+  `grail cache prune` take it with everything else.
+- `tools/cache-test.mjs` section (i) is the proof, and prints the numbers.
 
-    key = H(function body text, the module's surface snapshot, the interfaces the body reads,
-            the layout/global inputs listed below, the compiler and target and flags)
+A run that is a full module-level hit never reaches this layer: the compiler does not run at all.
+A run that misses replays the unchanged functions' bytes into its own stream at the position the
+function occupies and re-emits the rest through the front end and the emitter as it does today.
 
-and what it buys is the expensive part of the pipeline for that function: re-use of the *typed*
-result and of the emitted body, so the front end does not re-typecheck it and the emitter does not
-walk it again.
+### The rule: which functions are units, and why the rest are not
 
-### What is in the key, and precisely what invalidates a function unit
+A *unit* is one function's **whole emitted region** - from the point `func` starts writing for it
+(the `.globl`, the `.type`, the label, the prologue, the body, the epilogue, the `.set` of the frame
+constant and the `.proved` second entry) to the point it stops. Two things have to hold.
 
-This is the part that has to be conservative, because a code generator is full of shared state. The
-key names, deliberately:
+**1. The emission must stay inside those bytes.** The front end registers work for later steps as it
+goes, and a replay that skipped the registration would hand the link an object missing a symbol.
+So a body is a unit only when, across its own emission, none of these moved: the closure list, the
+specialisation list, the drop-helper references or names, the vtable list, a module's link inputs,
+the compile-time constant table, the debug records, the fn thunk and the effect records. (The typed
+IR fact table *is* allowed to move: its entries for the body are stored in the unit and appended
+again on replay, because the optimizer's `DynPair` rules and the LLVM lifter read it.)
+This is measured, not assumed: `fn_marks` takes the counters at the unit's first byte and compares
+them at its last.
 
-| input | invalidates | why it cannot be left out |
+**2. The key must name every input the bytes are a function of.** The key is a text record holding
+
+| field | why it is there |
+| --- | --- |
+| the part and its label prefix | labels are `.L<prefix>_<n>`; the prefix is the module's |
+| the symbol the label spells | a renamed or re-signatured function is a different unit |
+| the option vector (every argument except the output path and `--fn-cache`) | a flag that changes code generation changes every body; hashing the words means a flag added later is in the key by construction |
+| the **compiler's own identity** | a unit is code *this* compiler emitted. The driver passes the digest of the binary it runs (`--fn-cache-id`, from `cache_build_id`); a hand-run compiler, which has no digest to pass, is identified by its executable's path, size and modification time instead. Without this a rebuilt compiler would replay its predecessor's bytes, which is the worst stale splice the layer could make |
+| the **declaration surface** of the run | a field offset, a drop bit, a symbol spelling and a constant's value all reach the emitted text as numbers. The surface is every declaration, alias, function *signature*, constant, import, interface and implementation - and every interface the run read, as its surface (the bytes before the trailer). No body is in it. |
+| the declaration's own source text | the obvious input, and the only one an ordinary edit moves |
+| the function's typed signature, spelled by `iface_w_type` | the types after substitution, structurally - not the run's interned ids |
+| the line and column the declaration starts at | `.gpos` bakes a statement's absolute line into the body, so an edit that adds a line above a function must invalidate it |
+| the label number, the `.Lrfp` number and the declaration count it starts at | a body's text names the numbers it was written with, and a declaration synthesised by an earlier body changes what a later one can see |
+
+Not in the key, and why that is safe: other functions' *bodies* (a body reaches another only through
+its signature, which is in the surface; there is no per-function inlining at this stage), the whole
+module's text (that is the problem units exist to remove), and the run's interned type ids (they
+never reach the text).
+
+**What replay restores**: the bytes, the label and `.Lrfp` counters the text consumes (so the next
+function mints the numbers it would have minted), and the body's fact records. Everything else the
+run's bookkeeping holds is untouched, because the body added nothing to it.
+
+### What is deliberately not cached, with the reason
+
+| class | why | cost |
 | --- | --- | --- |
-| the function's own token span (body text hash) | that function | the obvious one |
-| the emitted symbol and signature spelling | that function | a renamed or re-signatured function is a different unit |
-| the module's interface surface hash | every function of the module | a `pub` change can change visibility, drop helpers and call conventions for the whole module |
-| the surface of every interface the body reads | functions that call across the boundary | a callee's signature, bounds, `effects` and layout reach the emitted body |
-| **layout inputs**: the record/enum/union declarations and their field widths the body mentions, and the C-layout flag | functions that mention them | field offsets are baked into the emitted text as immediates |
-| **global/static data inputs**: every module-level `const`, static, string literal pool entry and vtable the body references | functions that reference them | a data symbol's identity and initialiser reach the body |
-| **the module's label namespace and per-body label count** | functions whose emitted label text would collide | labels are minted per module and per body, so a body's labels depend only on its own minting order — but the *number* a body starts at is part of its text |
-| the module's drop-helper set for the types it mentions | functions mentioning those types | helper names are content-addressed from the type, and a new helper changes nothing else — but a *removed* one changes a call |
-| compiler digest, target, flag vector, assembler identity | everything | a new compiler or target is a different code generator |
+| a body that requests a **specialisation** | the request is a record in `c.specs` that `drain_specs` emits later, from the template's body and type arguments - neither of which a unit carries | 60 % of the compiler's own bodies; this is the 97 %-of-bytes class the earlier measurement found, and it is still the ceiling |
+| a body that creates a **closure**, a **drop helper** or a **vtable** | same: emitted by a later step, registered here | included in the above |
+| a **generic template** of this module | pass 3 skips its body; pass 4 replays it per specialisation, which is that specialisation's unit, not this declaration's | every `impl` method of `Option`/`Result`, all of `core` and `result` |
+| a **specialisation replay** (`-- fn` pass 4) | its identity is the template plus its type arguments, and the replay path shares the request dedupe list; keying it is a later stage, and a guess here is a wrong splice | all specialised code |
+| a run with **effect records** (`@no_alloc`/`@no_panic` anywhere) | a body's call edges are per-body records in the effect table; the layer does not carry them | nothing in this tree claims effects |
+| the **first body of a part** | `part()` writes the `.grail_part`/`.text` marker inside that body's own bytes and resets the part's counters; it is one miss per part per run | one body per module run |
+| a body whose **signature cannot be spelled** (`iface_w_type` has no spelling for a kind) | a key that cannot name the signature would reuse a body on a guess | none in this tree |
+| `--debug`, `--backend=llvm`, `--emit-ir`, `--export`, PE/Mach-O, ARM/RISC-V | the shape is not the one this layer re-emits: line tables and the lifter inspect the whole stream, the other writers rewrite it after selection, and `--export` counts definitions a replay never reaches | all of those shapes (the module cache covers them) |
 
-Explicitly **not** in the key, and why that is safe:
-
-- **Other functions' bodies in the same module.** A body reaches another body only through the
-  interface-visible signature plus the emitter's cross-references; same-module inlining happens
-  during the module's emission from *text* the optimizer has already seen, so the inliner's decision
-  is part of the module's run, not of a function unit. Until the inliner is per-function (a later
-  stage), a module that inlines re-emits the *caller* when it changes: the unit key includes the
-  inliner's verdict for the calls the body makes (`inlined: <callee>@<n>`), so this is recorded
-  rather than assumed.
-- **The whole module's text.** If a function unit were keyed by the module's emitted text, an edit
-  anywhere would miss every unit, which is the problem function units exist to remove.
-
-A unit that cannot be given a complete key (anything the emitter does that the key does not name) is
-**not cached**: it is emitted as today. The conservative direction is lexical — a body the key
-cannot describe is a body that is always re-emitted, never a body that is reused on a guess.
+The direction is lexical throughout: **a body the key cannot describe is a body that is re-emitted,
+never one that is reused on a guess.** A wrong splice is a silent miscompile, and a missed hit costs
+what the build cost before this layer existed.
 
 ### Where it plugs in
 
-Per-module runs already produce one assembly file per module: the function-level cache sits inside a
-run, between *deciding a module must be compiled* and *emitting its text*. A run that is a full
-module-level hit never reaches it. A run that misses replays the unchanged functions' emitted bodies
-into its own `.text` under the same symbols; changed functions go through the front end and the
-emitter as they do today. Because the emitted text of an unchanged function is *replayed*, not
-recomputed, the module's object stays byte-identical to the clean build — which is the property
-`tools/cache-test.mjs` compares in every case.
+Inside `func`, after the signature is parsed and the body's brace range is known (`start`/`end`) but
+before `part()` writes anything: `fn_open` decides whether this body can be a unit, `fn_key` builds
+the key, and a hit appends the stored bytes and returns - the body's tokens are skipped with
+`skip_braces`, so its checking, lowering and emission never happen. On a miss the body is emitted
+exactly as before, and at the end of `func` `fn_marks` decides whether the bytes just written are a
+unit; if they are, they are filed under the key with their label counts and facts.
 
-Generics: a specialisation is keyed the same way — the template's body hash, the structural key of
-its type arguments (`type_key`, which is already content-addressed and index-free), and the
-interfaces it reads — so a specialisation is a unit like any other, and two modules that instantiate
-the same key reach the same unit.
+Generics: **not yet** a unit of this layer. A specialisation is keyed by the template's body hash and
+the structural key of its type arguments (`type_key`, already content-addressed and index-free) and
+by the interfaces it reads, so the design above carries over unchanged; what is missing is the
+replay path's own bookkeeping (the request dedupe list and `spec_closures`), which is why the whole
+specialisation class is excluded rather than half-handled.
+
+## Measured: the function-level cache on the compiler's own sources
+
+The compiler is the natural subject: `compiler/*.grl` is 2,569 emitted bodies and 105,315,043 bytes
+of assembly. Compiled as one `--separate` run (all of its modules in one stream, the shape
+`bun tools/native.mjs build` uses), with the unit store under `.work/` and this host's load moving
+the clock by a few percent in either direction:
+
+| | bodies | units | wall clock |
+| --- | --- | --- | --- |
+| cold unit store | 2,569 | 879 filed, 1,690 not units | 82.2 s |
+| the same tree again | 2,569 | 879 replayed, 0 filed, 1,690 not units | 80.0 s |
+| one function's body reverted | 2,569 | 878 replayed, 1 filed, 1,690 not units | 72.1 s (another run, less loaded) |
+| a clean build of the same tree, empty store | 2,569 | - | 75.7 s (the same other run) |
+
+**34 % of the bodies are units, and a run that replays all of them is 3-5 % faster.** The assembly
+of the replayed run is byte-identical to the clean build's (105,315,043 bytes, `cmp`), and the
+one-function case differs from the other variant in that function's own bytes and nowhere else. The
+counts are exact; the clock moves with the machine.
+
+That is the ceiling the earlier measurement predicted (40 % of bodies, 2.9 % of bytes), and it is
+worth stating plainly rather than dressing up: the front end of the 1,690 bodies that request a
+specialisation, a closure or a drop helper is what a module run is mostly made of, and no key can
+describe those today. Widening the layer means making a specialisation *request* replayable, not
+making the key cleverer.
+
+Two costs, also stated plainly:
+
+- **Filing is not free.** A cold build writes one store entry per unit: on the six-module project
+  `tools/cache-test.mjs` builds, 837 entries cost roughly half a second, which is why the cold
+  column above is not faster than a clean build. It is paid once per unit and only by a run that
+  missed.
+- **The word optimizer still runs.** The unit covers the front end and the emitter, not
+  `optimize.grl`: that pass walks the whole stream (and `inline_calls` rewrites callers from
+  callees), so a per-function replay of its *output* would need the inliner's verdict for every
+  call in the key - which the earlier plan called out as `inlined: <callee>@<n>` and which this
+  stage does not record. What a unit skips is the expensive, per-body part: parsing the body again,
+  checking it, lowering it and emitting it.
+
+## What a module run can now skip, per edit (the numbers `tools/cache-test.mjs` prints)
+
+The proof builds a six-module project whose `big` module is generated with 400 functions (2,000 with
+`--big`), and prints, for every case, how many bodies were replayed and how many re-emitted:
+
+1. every module run forced to miss with the unit store warm - every filed body replays, the module
+   assembly is byte-identical to a clean build's, and the image is byte-identical;
+2. one function of the big module edited - one body is re-emitted and every other body of that
+   module replays;
+3. a body-only edit of another inner function - the module reruns (the module cache's rule) and one
+   body inside it is re-emitted;
+4. an interface edit - every unit of the runs that read that interface misses, and the units of a
+   run that read no such interface still replay.
+
+Every case ends with the image compared against a build with no cache at all, and (1) additionally
+compares the module assembly against an empty-store build's, because a replayed body that is not the
+body a fresh emission writes is a silent miscompile and has to be caught as bytes.
 
 ## Watch mode
 
@@ -296,34 +379,25 @@ watching is that every change is checked.
   decide.
 - `--watch` is on `build` and `check` only.
 
-## Measured: what a per-function unit could skip, and what it cannot
+## Measured before it was built: what a per-function unit could skip
 
-Recorded before the unit was built, because it decided the shape. The predicate for "a function whose
-emission needs nothing from the rest of the run" is: it requests no specialisation, creates no
-closure, asks for no drop helper, synthesises no declaration or implementation, and records no effect
-fact. Counted over the compiler's own sources (`compiler/*.grl`, 1,867 function bodies, 85 MB of
-emitted text, on this host at this load):
+Recorded before the unit existed, because it decided the shape, and kept because it predicted the
+result. The predicate for "a function whose emission needs nothing from the rest of the run" was: it
+requests no specialisation, creates no closure, asks for no drop helper, synthesises no declaration
+and records no effect fact. Counted over the compiler's own sources at the time (1,867 bodies, 85 MB
+emitted):
 
 | | functions | emitted bytes |
 | --- | --- | --- |
 | self-contained by that predicate | 743 (40 %) | 2.5 MB (2.9 %) |
 | not | 1,124 (60 %) | 82.5 MB (97.1 %) |
 
-So a per-function unit that replays a body's emitted text — and its helpers — but skips the front end
-would skip 40 % of the *functions* and 3 % of the *work*. The reason is structural: in this compiler
-almost every non-trivial body instantiates a generic (`view`, `push`, the iterator adapters), which
-registers a specialisation whose own body has to be emitted into the same object, and nearly every
-body that owns memory asks for a drop helper for a type interned during its own emission.
-
-Two consequences, and they are why the function-level unit is *designed but not claimed*:
-
-1. a body's emitted text is not a sufficient artifact: the run also needs the specialisations,
-   closures and helpers the body *requested*, which is exactly the typed-IR and state serialization
-   the typed-IR stage owns. Until that exists, the honest unit is the module run, and its cost is
-   what the table below measures;
-2. the number to watch is 2.9 %, not 40 %. Anyone revisiting this should re-run the count after the
-   typed-IR change, because a body carrying its own specialisations no longer needs them from the
-   run — that is the change that moves it.
+The reason is structural: in this compiler almost every non-trivial body instantiates a generic
+(`view`, `push`, the iterator adapters), which registers a specialisation whose own body has to be
+emitted into the same object, and nearly every body that owns memory asks for a drop helper. The
+number to watch was 2.9 %, not 40 %, and the implementation now measures 34 % of bodies and about
+5 % of a run's wall clock - the same shape, slightly different counts because the shipped predicate
+admits typed-IR facts and also drops the first body of every part.
 
 ## Measurements (printed by `tools/cache-test.mjs`)
 
