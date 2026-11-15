@@ -85,6 +85,39 @@ The test for moving something from "not doing" to "doing" is evidence, not argum
 places in the compiler, the standard library or a ported application that want it badly enough to have
 worked around it.
 
+## 2.2 Second pass: what already works, and the two gaps it found
+
+Probed the same way, because a list of gaps that omits what works reads as if the language were
+worse than it is. **Verified working** (do not "fix" these): or-patterns (`1 | 2 => ...`), struct
+destructuring in a `match` arm (`P { x, y } => ...`), slice and string ranges (`v[1..3]`,
+`s[1..3]`), `format` with width and alignment (`"{:>6}|{:<4}|{:^5}"`), a hashmap literal indexed
+directly (`m["b"] = 2`, with `use hashmap;`), `Option` combinators (`is_some`, `unwrap_or`),
+closures capturing their environment, range patterns (`0..5 => ...`), `if let Some(v) = x`, tuples
+returned and read as `t.0`/`t.1`, and `vecs::sort(&mut v)` with `use vecs;`.
+
+Two gaps the pass found, neither in Tier 1 and both worth having:
+
+**A. A struct cannot be destructured in a binding.** It works in a pattern, not in `:=`:
+```grl
+P { x, y } := p;      // error[E0001]: undefined name `x`
+{ x, y } := p;        // same
+match p { P { x, y } => ... }   // fine
+```
+Rust writes `let P { x, y } = p;` and reaches for it constantly when a function returns a small
+record. This is the same family as the missing tuple destructuring in a `for` header (1.2): the
+*pattern* machinery exists, it is the binding and loop forms that do not accept it.
+
+**B. A map has no iteration surface.** `hashmap` exposes `get`, `get_mut`, `insert`, `remove`,
+`contains`, `entry`, `len`, `key_at`, `value_at`, `value_at_mut`, `entry_at` - and nothing else.
+There is no `keys()`, no `values()`, no `iter()`, and `for k, v in &m` does not exist. Iterating a
+map today is:
+```grl
+for i in m.len() { t += *m.value_at(i); }     // note the deref: value_at returns &V
+```
+Iterating a map is one of the most common things anyone does with one. A `keys()`/`values()`/`iter()`
+trio (or a single `entries()` yielding a pair) belongs in Tier 1 alongside the other collection
+methods, and it is cheap because the storage already has `key_at`/`value_at` to build on.
+
 ## 3. Crashes and silent failures (a compiler must never)
 
 ### 3.1 Main-thread stack exhaustion is a bare SIGSEGV
