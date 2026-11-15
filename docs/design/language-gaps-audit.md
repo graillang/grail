@@ -107,6 +107,16 @@ Rust writes `let P { x, y } = p;` and reaches for it constantly when a function 
 record. This is the same family as the missing tuple destructuring in a `for` header (1.2): the
 *pattern* machinery exists, it is the binding and loop forms that do not accept it.
 
+Because it changes what `:=` means for a type with named fields, the case that proves it must prove
+the **refusals** too, or it is a feature without a boundary and the next reader cannot tell a typo
+from a compile error:
+
+- a binding that names a field the type does not have (`P { x, zed } := p`);
+- a binding that names the same field twice (`P { x, x } := p`);
+- a binding that omits a field, if the rule is to require all of them - state which rule and pin it,
+  since "partial bindings are allowed and the rest are dropped" and "partial bindings are refused"
+  are both defensible and only one of them can be true.
+
 **B. A map has no iteration surface.** `hashmap` exposes `get`, `get_mut`, `insert`, `remove`,
 `contains`, `entry`, `len`, `key_at`, `value_at`, `value_at_mut`, `entry_at` - and nothing else.
 There is no `keys()`, no `values()`, no `iter()`, and `for k, v in &m` does not exist. Iterating a
