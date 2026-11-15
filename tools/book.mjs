@@ -46,7 +46,12 @@ export function expand(text, book, used = new Set()) {
     if (!example) throw new Error(`Unknown example: ${id}`);
     used.add(id);
     const code = readFileSync(sourcePath(example.entry), 'utf8');
-    const codeBlock = (code, language, cls = '') => `<pre class="${cls}"><code class="language-${language}">${escape(code)}</code></pre>`;
+    // A raw HTML block ends at the first blank line in CommonMark, and the rest of the block is then
+    // re-read as markdown: leading indentation is collapsed and a stray `<p>` is opened inside the
+    // `<pre>`. That is why code kept its indents up to a blank line and lost them after it. Emitting
+    // the newlines as `&#10;` leaves the block one unbroken line of HTML; the browser decodes them
+    // back to real newlines in the rendered text (and in `textContent`, so Copy still copies code).
+    const codeBlock = (code, language, cls = '') => `<pre class="${cls}"><code class="language-${language}">${escape(code).replace(/\n/g, '&#10;')}</code></pre>`;
     const outcome = (label, text, rejected) => `<div class="example-result${rejected ? ' rejection' : ''}"><div class="result-label">${label}</div>${codeBlock(text, 'text')}</div>`;
     const grailResult = example.diagnostic ? outcome('Expected compiler rejection', `Diagnostic contains: ${example.diagnostic}\n`, true) : outcome('Output', example.output, false);
     const command = codeBlock(`$ just book-run ${id}\n`, 'sh', 'run-command');
