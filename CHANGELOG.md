@@ -11,7 +11,11 @@
   is out of range for u8 (0..=255)` - and `wrapping_u8` stays the silent, intended-truncation
   spelling. Cases `runtime-narrowing-conversion-report`, `runtime-narrowing-conversion-u16`,
   `runtime-narrowing-negative-to-unsigned`, `runtime-narrowing-negative-to-signed`,
-  `narrowing-conversion-of-a-constant`, `narrowing-conversion-wrapping-is-a-choice`.
+  `narrowing-conversion-of-a-constant`, `narrowing-conversion-wrapping-is-a-choice`. The help line
+  that accompanied an out-of-range literal named the wrong conversion - "convert explicitly
+  (`u8(x)`), which truncates" - while `u8(x)` checks the value at run time and `wrapping_u8(x)` is
+  the truncating spelling; it reads "write a value that fits, or truncate on purpose:
+  `wrapping_u8(x)` says the narrowing is intended, where `u8(x)` checks the value at run time".
   docs/design/frontend-robustness.md, class 2.
 - Fixed: a declaration the file ends in (`fn f(a: u64`, nothing after it) **aborted the compiler**
   with `error: index 24 out of bounds for length 24 --> compiler/native.grl:5874:5` and a backtrace.
