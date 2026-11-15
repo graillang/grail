@@ -10948,6 +10948,82 @@ fn tuple_destructure<a>(c: (&a mut C)) -> unit {
     return ();
 }
 
+// `{ x, y } := p;` - a record's named fields bound to new names. Only the named fields are bound
+// and the rest are dropped with the record, which is stated in the book and pinned by a case.
+fn record_pattern_ahead<a>(c: (&a mut C)) -> bool {
+    mut q = c.pos + 1;
+    while true {
+        if kind_at(&mut c, q) != 1 {
+            return false;
+        }
+        q += 1;
+        if kind_at(&mut c, q) == 125 {
+            return kind_at(&mut c, q + 1) == 261;
+        }
+        if kind_at(&mut c, q) != 44 {
+            return false;
+        }
+        q += 1;
+    }
+    return false;
+}
+fn record_destructure<a>(c: (&a mut C)) -> unit {
+    expect(&mut c, view("{"));
+    mut names = u8[][];
+    while true {
+        names.push(ident(&mut c));
+        if eat(&mut c, view("}")) {
+            break;
+        }
+        expect(&mut c, view(","));
+    }
+    expect(&mut c, view(":="));
+    v := expr(&mut c, 0);
+    expect(&mut c, view(";"));
+    held := move_value(&mut c, v);
+    ty := base_type(&mut c, held.ty);
+    if ty_kind(&mut c, ty) != 8 {
+        fail(&mut c, view("this pattern binds a record's fields, and the value is not a record"));
+    }
+    d := ty_arg(&mut c, ty);
+    // Refusals before any binding is made: a name the type does not have, and the same name twice.
+    // Without the second, one binding silently shadows the other and the reader cannot tell which.
+    mut slots = u64[];
+    for i in names.len() {
+        idx := field_index(&mut c, d, view(names[i]));
+        if idx == 0 {
+            fail_unknown_field(&mut c, view(names[i]));
+        }
+        for j in i {
+            if same(view(names[j]), view(names[i])) {
+                mut msg = u8[];
+                push_bytes(&mut msg, view("this field is bound twice in one pattern: "));
+                push_bytes(&mut msg, view(names[i]));
+                fail(&mut c, view(msg));
+            }
+        }
+        slots.push(idx - 1);
+    }
+    if drop_type(&mut c, ty) != 0 {
+        fail(&mut c, view("a value that implements Drop cannot be destructured"));
+    }
+    source := place_of(&mut c, held.t);
+    for i in names.len() {
+        fty := field_type(&mut c, ty, slots[i]);
+        part := rec_load(&mut c, held.t, slots[i], 0);
+        own(&mut c, part, fty);
+        dest := place_of(&mut c, part);
+        if contains_borrow(&mut c, fty, 0) {
+            transfer_bonds(&mut c, source, dest);
+        }
+        stored_source(&mut c, part, fty);
+        bind(&mut c, names[i].copy(), fty, part, 0);
+    }
+    move_out(&mut c, val(held.t, held.ty));
+    invoke(&mut c, view("rt_free"), one(held.t));
+    return ();
+}
+
 // These declarations back concise syntax and are not public nominal types.
 fn find_decl<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> u64 {
     here := module_copy(&mut c);
@@ -35253,6 +35329,9 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         o(&mut c, view("leave\nret\n"));
         exchange(&mut c.terminated, 1);
         return ();
+    }
+    if is(&mut c, view("{")) && record_pattern_ahead(&mut c) {
+        return record_destructure(&mut c);
     }
     if is(&mut c, view("{")) {
         block(&mut c);
