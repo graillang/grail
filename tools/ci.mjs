@@ -542,6 +542,17 @@ function lint() {
   check('build cache test exists', existsSync(join(root, 'tools/cache-test.mjs')));
   check('CI runs the build cache test', readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8').includes('tools/cache-test.mjs'));
   check('native cases cover an interface-first build', readFileSync(join(root, 'tests/native-cases.json'), 'utf8').includes('"interfaces": true'));
+  // A driver case runs the host compiler binary as a subprocess, so it can only mean something on a
+  // shard whose target is the host's. Without the declaration it lands on an emulated shard and the
+  // runner tries to execute an x86-64 ELF under qemu ("Invalid ELF image for this architecture"),
+  // which reads like a compiler fault and is not one.
+  const driverCases = JSON.parse(readFileSync(join(root, 'tests/native-cases.json'), 'utf8')).filter(c => c.driver);
+  const unscoped = driverCases.filter(c => !Array.isArray(c.targets) || c.targets.length === 0);
+  check(
+    'every driver case declares the targets it can run on',
+    unscoped.length === 0,
+    unscoped.map(c => c.name).join(', ')
+  );
   const bootstrapTool = readFileSync(join(root, 'tools/bootstrap.mjs'), 'utf8');
   check('bootstrap stage parks a seed without the published manifest being current', /if \(mode === 'update'\)[\s\S]*?else if \(mode === 'verify'\)/.test(bootstrapTool));
   check('LSP server exists', existsSync(join(root, 'tools/lsp/main.grl')));
