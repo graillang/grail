@@ -57,19 +57,7 @@
   rustToggle.hidden = comparisons.length === 0;
   const updateRustToggle = () => { rustToggle.textContent = comparisons.every(panel => panel.open) ? 'Hide Rust' : 'Show Rust'; };
   rustToggle.addEventListener('click', () => { const open = !comparisons.every(panel => panel.open); comparisons.forEach(panel => { panel.open = open; }); try {localStorage.setItem('grail-book-rust',open?'shown':'hidden');} catch {} updateRustToggle(); });
-  const alignComparisons = () => {
-    for (const panel of comparisons) {
-      const workspace = panel.closest('.example-workspace');
-      workspace.style.removeProperty('--comparison-code-height');
-      if (panel.open && matchMedia('(min-width: 1100px)').matches) {
-        const blocks = [...workspace.querySelectorAll('.source-code')];
-        workspace.style.setProperty('--comparison-code-height', `${Math.max(...blocks.map(block => block.getBoundingClientRect().height))}px`);
-      }
-    }
-  };
-  comparisons.forEach(panel => panel.addEventListener('toggle', () => {updateRustToggle();alignComparisons();}));
-  window.addEventListener('resize', alignComparisons);
-  updateRustToggle();alignComparisons();
+  updateRustToggle();
 
   const search = $('#search'), results = $('#search-results'), status = $('#search-status');
   search.addEventListener('input', () => {

@@ -71,10 +71,13 @@ fn best(a: u64, b: u64) -> u64 {
 fn main() {
     n := 3000000;
     vitals := cores();
-    mut owned_one = 0;
-    mut owned_eight = 0;
-    mut mut_one = 0;
-    mut mut_eight = 0;
+    // One best round per claim. The two claims compare different pairs from the same round, and on a
+    // loaded machine they peak in different rounds: keeping a single round and asserting both claims
+    // on it is what made this case flake at 1.26x against its own 1.33x floor.
+    mut copy_owned = 0;
+    mut copy_mut = 0;
+    mut par_one = 0;
+    mut par_eight = 0;
     for round in 5 {
         // Every vector is built before its window: this measures the work, not the setup.
         serial := big(n);
@@ -111,43 +114,52 @@ fn main() {
         for part in eight { owned_eight_answer = owned_eight_answer ^ part; }
         assert(owned_single == expect_once);
         assert(owned_eight_answer == expect_once);
-        // Keep the whole round whose in-place split showed the best speedup, rather than the fastest
-        // sample of each shape: the samples are taken under whatever load the machine is under, so a
-        // quick single chunk from a quiet moment compared against an eight-chunk run from a busy one
-        // measures the load rather than the split.
+        // Each claim keeps its own best round, and every comparison stays inside one round: a single
+        // chunk timed in a quiet moment against an eight-chunk run timed in a busy one would measure
+        // the load rather than the split. A round whose in-place window timed as zero is skipped,
+        // since a ratio against it says nothing.
         r_one := t4 - t3;
         r_eight := t5 - t4;
-        if (mut_eight == 0) || (r_one * mut_eight > mut_one * r_eight) {
-            owned_one = t1 - t0;
-            owned_eight = t2 - t1;
-            mut_one = r_one;
-            mut_eight = r_eight;
+        o_one := t1 - t0;
+        if r_one != 0 {
+            if (copy_mut == 0) || (o_one * copy_mut > copy_owned * r_one) {
+                copy_owned = o_one;
+                copy_mut = r_one;
+            }
+        }
+        if r_eight != 0 {
+            if (par_eight == 0) || (r_one * par_eight > par_one * r_eight) {
+                par_one = r_one;
+                par_eight = r_eight;
+            }
         }
     }
-    if owned_one == 0 { owned_one = 1; }
-    if owned_eight == 0 { owned_eight = 1; }
-    if mut_one == 0 { mut_one = 1; }
-    if mut_eight == 0 { mut_eight = 1; }
+    if copy_owned == 0 { copy_owned = 1; }
+    if copy_mut == 0 { copy_mut = 1; }
+    if par_one == 0 { par_one = 1; }
+    if par_eight == 0 { par_eight = 1; }
     host::write_fd(
         2,
         format(
-            "pool chunks: {} cores, owned 1 chunk {} ms, owned 8 {} ms, in place 1 chunk {} ms, in place 8 {} ms\n",
+            "pool chunks: {} cores, copy round: owned 1 chunk {} ms, in place 1 chunk {} ms; parallelism round: in place 1 chunk {} ms, in place 8 {} ms\n",
             vitals,
-            owned_one,
-            owned_eight,
-            mut_one,
-            mut_eight
+            copy_owned,
+            copy_mut,
+            par_one,
+            par_eight
         ).text()
     );
     println("ok");
-    // The copy: one job either way, so this compares the split and nothing else. Measured ~2.3x.
-    assert(owned_one * 3 >= mut_one * 4);
+    // The copy: one job either way, so this compares the split and nothing else. Measured ~2.3x on a
+    // quiet machine; 1.33x is the floor, and it is taken from the round that showed the copy best.
+    assert(copy_owned * 3 >= copy_mut * 4);
     if vitals < 4 {
         host::write_fd(2, format("pool chunks: speedup assertion skipped, {} cores reported\n", vitals).text());
         return ();
     }
     // Parallelism still pays: the 4-worker row claims 3.0x, so 1.5x leaves room for a loaded machine.
-    // The ratio is taken from one round, and there are five rounds to find one the machine lets
-    // through; a host whose every round is slower than 1.5x is reporting no parallelism at all.
-    assert(mut_eight * 3 <= mut_one * 2);
+    // Five rounds are run so a loaded one has a chance to be superseded; a host whose every round is
+    // slower than 1.5x is reporting no parallelism at all, which is what this must catch.
+    // 8 chunks must beat 1, so par_one (one chunk) is the larger number: 1.5x is the floor.
+    assert(par_eight * 3 <= par_one * 2);
 }
