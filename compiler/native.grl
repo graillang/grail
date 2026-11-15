@@ -30625,6 +30625,19 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
     if (k == 1) & is(&mut c, view("match")) {
         return match_value(&mut c, expected);
     }
+    // And for `unsafe`: `count := unsafe { c_alloc_buffers(&mut buffers) };`. The statement form is a
+    // block; this is the value form, and it takes the same lexical boundary - the depth is raised for
+    // the expression and restored after it, so move, drop and borrow rules still apply inside.
+    if (k == 1) & is(&mut c, view("unsafe")) & is_at(&mut c, c.pos + 1, view("{")) {
+        advance(&mut c);
+        expect(&mut c, view("{"));
+        depth := c.unsafe_depth;
+        exchange(&mut c.unsafe_depth, depth + 1);
+        v := expr(&mut c, 0);
+        expect(&mut c, view("}"));
+        exchange(&mut c.unsafe_depth, depth);
+        return v;
+    }
     // `@expr`: the next operand, folded at compile time (stage C1: literals, constants, size_of,
     // align_of and target; a call in it is the run tier, C3).
     if (k == 64) & is_at(&mut c, c.pos + 1, view("embed")) {
