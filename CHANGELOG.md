@@ -1,5 +1,13 @@
 ## Unreleased
 
+- **A map can be iterated.** `Map::keys()`, `values()` and `iter()` (both at once) yield references
+  into the map, in its storage order, borrowing it the way `iter::refs(&v)` borrows a vector - so
+  `for k in m.keys() { m.insert(..) }` is refused as a borrow conflict rather than corrupting the
+  walk. `iter::from_step(closure)` is now the public seam a module outside `iter` uses to build its
+  own iterable, so every iterator in the language is still one record with a `next`. Before this,
+  iterating a map meant `for i in m.len() { *m.value_at(i) }`, which is the shape people coming from
+  Rust reach for once and then work around.
+
 - Fixed: a narrowing integer conversion that does not fit **aborted the program with an empty
   stderr**. `x: u64 = 300; y := u8(x);` exited 134 with nothing said, while every other failed
   runtime check reports its message and line. `rt_int_cast` called `rt_abort()` directly; it now goes
