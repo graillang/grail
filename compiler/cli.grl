@@ -1754,6 +1754,13 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
             run.push(copy(view("--emit-interface")));
             run.push(ifaces.copy());
             run.push(copy(view("--separate")));
+            if cache != 0 {
+                // The per-function codegen cache: a module run that misses can still replay the
+                // functions whose inputs did not move (docs/design/incremental-compilation.md).
+                // It is one directory inside this build's store, so a prune drops it with the rest.
+                run.push(copy(view("--fn-cache")));
+                run.push(fn_store(view(store.root)));
+            }
             if !eq(view(name), view(entry_name)) {
                 run.push(copy(view("--no-entry")));
             }
@@ -1942,6 +1949,11 @@ struct BuildId {
     iface_dir: u8[],
     sources: u8[][],
     digests: u8[][]
+}
+// Where one target's per-function units live: a directory of the build store, so `cache clear`
+// takes it with everything else.
+fn fn_store<a>(root: &a [u8]) -> u8[] {
+    return path_join(view(root), view("fn"));
 }
 fn cache_root<a>(target: &a [u8]) -> u8[] {
     return cat(view(".work/cache/"), view(target));
@@ -2198,6 +2210,16 @@ fn cache_command<a>(args: (&a u8[][])) -> u64 {
             leftovers := host::list_dir(view(stage));
             for l in leftovers.len() {
                 host::remove(view(path_join(view(stage), view(item(&leftovers, l)))), 0);
+            }
+        }
+        // The per-function store is dropped whole: its entries carry no generation stamp, and one
+        // is only reached by a module run that already missed, so dropping it costs the first such
+        // run a re-emission and never a rebuild of anything the module cache holds.
+        fn_dir := fn_store(view(root));
+        if host::exists(view(fn_dir)) != 0 {
+            units := host::list_dir(view(fn_dir));
+            for u in units.len() {
+                host::remove(view(path_join(view(fn_dir), view(item(&units, u)))), 0);
             }
         }
     }
