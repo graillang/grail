@@ -1,4 +1,7 @@
-use std::{fs, io::{self, Write}};
+use std::{
+    fs,
+    io::{self, Write},
+};
 
 fn main() {
     let contents = fs::read("note.txt").expect("read note.txt");

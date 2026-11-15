@@ -21,7 +21,11 @@ impl Point {
     }
 }
 fn main() {
-    let points = vec![Point { x: 0, y: 0 }, Point { x: 3, y: -4 }, Point { x: 20, y: 1 }];
+    let points = vec![
+        Point { x: 0, y: 0 },
+        Point { x: 3, y: -4 },
+        Point { x: 20, y: 1 },
+    ];
     for point in &points {
         println!("{} inside: {}", point, point.inside());
     }

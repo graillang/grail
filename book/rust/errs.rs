@@ -13,7 +13,11 @@ struct Report {
 
 impl Report {
     fn new(message: &str) -> Report {
-        Report { message: message.to_string(), frames: Vec::new(), origin: None }
+        Report {
+            message: message.to_string(),
+            frames: Vec::new(),
+            origin: None,
+        }
     }
     fn context(mut self, text: &str) -> Report {
         self.frames.push(text.to_string());

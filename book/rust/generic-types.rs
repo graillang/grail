@@ -1,6 +1,12 @@
-struct Pair<T, U> { first: T, second: U }
+struct Pair<T, U> {
+    first: T,
+    second: U,
+}
 fn main() {
-    let pair = Pair { first: 42_u64, second: Vec::<u8>::new() };
+    let pair = Pair {
+        first: 42_u64,
+        second: Vec::<u8>::new(),
+    };
     let some = Some(pair.second);
     match some {
         Some(value) => assert_eq!(value.len(), 0),

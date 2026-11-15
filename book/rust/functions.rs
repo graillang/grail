@@ -1,6 +1,13 @@
 fn fib(n: u64) -> u64 {
-    if n < 2 { return n; }
+    if n < 2 {
+        return n;
+    }
     fib(n - 1) + fib(n - 2)
 }
-fn apply(function: fn(u64) -> u64, value: u64) -> u64 { function(value) }
-fn main() { let function = fib; println!("{}", apply(function, 10)); }
+fn apply(function: fn(u64) -> u64, value: u64) -> u64 {
+    function(value)
+}
+fn main() {
+    let function = fib;
+    println!("{}", apply(function, 10));
+}

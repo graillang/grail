@@ -14,7 +14,11 @@ fn restock(order: &mut Order, count: u64) {
     }
 }
 fn main() {
-    let mut order = Order { id: 7, items: vec![2, 3, 5], note: String::from("rush") };
+    let mut order = Order {
+        id: 7,
+        items: vec![2, 3, 5],
+        note: String::from("rush"),
+    };
     println!("{} items", items_of(&order));
     restock(&mut order, 7);
     match order {

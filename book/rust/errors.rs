@@ -1,5 +1,9 @@
 fn make(flag: bool) -> Result<Vec<u8>, String> {
-    if flag { Err(String::from("missing")) } else { Ok(Vec::new()) }
+    if flag {
+        Err(String::from("missing"))
+    } else {
+        Ok(Vec::new())
+    }
 }
 fn forward(flag: bool) -> Result<Vec<u8>, String> {
     let value = make(flag)?;

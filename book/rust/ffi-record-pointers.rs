@@ -21,12 +21,23 @@ unsafe extern "C" {
 }
 
 fn main() {
-    let app = AppInfo { api_version: 1, flags: 0 };
-    let info = CreateInfo { s_type: 0, pad: 0, p_app: &app, count: 7 };
+    let app = AppInfo {
+        api_version: 1,
+        flags: 0,
+    };
+    let info = CreateInfo {
+        s_type: 0,
+        pad: 0,
+        p_app: &app,
+        count: 7,
+    };
     let created = unsafe { book_create(&info) };
     println!("{created}");
 
-    let mut filled = AppInfo { api_version: 0, flags: 0 };
+    let mut filled = AppInfo {
+        api_version: 0,
+        flags: 0,
+    };
     let seen = unsafe { book_fill(&mut filled) };
     println!("{seen}");
     println!("{}", filled.api_version);

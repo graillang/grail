@@ -72,7 +72,9 @@ fn main() {
     }
     let big: Vec<u64> = v.into_iter().filter(|n| *n > 4).collect();
     println!("{} big, total {}", big.len(), total);
-    let shared = Rc::new(Guard { name: "g".to_string() });
+    let shared = Rc::new(Guard {
+        name: "g".to_string(),
+    });
     let other = Rc::clone(&shared);
     println!("count {}", Rc::strong_count(&other));
 }
