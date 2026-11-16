@@ -375,7 +375,7 @@ struct DebugFunc {
     params: u64,
     vars: DebugVar[],
     // The label namespace this function's start and end labels were minted in (B1 stage 5): every
-    // label is `.L<unit>_<n>`, so a table that names a label by its number alone would name one the
+    // label is `.L<unit>_<n>`, where <unit> is `<unit prefix>_<function ordinal>`, so a table that names a label by its number alone would name one the
     // unit never emitted. Captured where the function is recorded, i.e. inside its own unit.
     unit: u8[]
 }
@@ -1735,11 +1735,11 @@ fn record_debug_func<a, b, d>(c: (&a mut C), name: &b [u8], module: &d [u8], sit
             }
         );
     }
-    // The namespace the function's `start` and `end` labels are in, as `scoped_number` spells it.
-    mut label_space = copy_bytes(view(c.lpart));
+    // The function's labels are in its own numbering (scoped_number), and this runs inside it.
+    mut unit = copy_bytes(view(c.lpart));
     if c.fscope != 0 {
-        label_space.push(95);
-        decimal(&mut label_space, c.fscope);
+        unit.push(95);
+        decimal(&mut unit, c.fscope);
     }
     c
         .debug_funcs
@@ -1753,7 +1753,7 @@ fn record_debug_func<a, b, d>(c: (&a mut C), name: &b [u8], module: &d [u8], sit
                 end: site.end,
                 params: site.params,
                 vars: vars,
-                unit: label_space
+                unit: unit
             }
         );
     return ();
@@ -15235,6 +15235,14 @@ fn fn_surface_now<a>(c: (&a mut C)) -> u8[] {
         pub := c.constants[i].public;
         ty := c.constants[i].ty;
         val := c.constants[i].value;
+        if CT_PENDING <= ty {
+            // A constant a compile-time call has yet to give: its value will reach the bodies that
+            // name it, and nothing here can say what it will be - the function that computes it is
+            // a body, and bodies are not part of the surface. No surface, no units.
+            exchange(&mut c.spell_lenient, old_lenient);
+            exchange(&mut c.spell_failed, old_failed);
+            return u8[];
+        }
         iface_ws(&mut out, view(m));
         iface_ws(&mut out, view(n));
         iface_ws(&mut out, view(text));

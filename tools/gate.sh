@@ -60,6 +60,9 @@ for i in 1 2 3; do leg x86_64_$i env GRAIL_TEST_SHARD=$i/3 bun tools/test-native
 for arch in aarch64 riscv64; do
   for i in 1 2 3; do leg ${arch}_$i env GRAIL_TEST_SHARD=$i/3 bun tools/test-native.mjs $arch; done
 done
+# The per-function unit store against the whole corpus: no store, an empty one, a warm one - and
+# the same with --debug - must write the same assembly (docs/design/incremental-compilation.md).
+leg unit-identity bun tools/test-native.mjs x86_64 --unit-identity --jobs 4
 for i in 1 2 3; do leg llvm_$i env GRAIL_BACKEND=llvm GRAIL_TEST_SHARD=$i/3 bun tools/test-native.mjs x86_64; done
 for i in 1 2 3; do
   leg vf_$i env GRAIL_BACKEND=llvm GRAIL_RANGE_FACTS=1 GRAIL_VERIFY_FACTS=1 GRAIL_TEST_SHARD=$i/3 bun tools/test-native.mjs x86_64
