@@ -11217,5 +11217,348 @@
     "targets": [
       "x86_64"
     ]
+  },
+  {
+    "name": "job-handle-holds-closure-loan-generic",
+    "note": "Q3 of docs/design/closure-bounds.md: a `Job<u64>` owns the closure it runs, so the loan a wrapper's closure argument handed to it stays with the handle; the borrowed vector cannot be moved while the job may read it (was accepted: use after free)",
+    "source": "use pool;\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    view := &data;\n    j := pool::spawn(|| -> u64 view[0]);\n    println(eat(data));\n    println(pool::wait(j));\n}\n",
+    "reject": true,
+    "diagnostic": "this closure captures a borrow, and an `Owned` closure is required here",
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "job-handle-holds-closure-loan-wrapper",
+    "note": "the same through a non-generic wrapper: the loss was in the handle's type, not in the generic call",
+    "source": "fn sp(f: Fn<Send>()->u64) -> Job<u64> { return parallel_spawn(f); }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    view := &data;\n    j := sp(|| -> u64 view[0]);\n    println(eat(data));\n    println(parallel_join(j));\n}\n",
+    "reject": true,
+    "diagnostic": "move of unavailable or borrowed value"
+  },
+  {
+    "name": "job-handle-in-record-holds-closure-loan",
+    "note": "a record holding the handle holds the loan too",
+    "source": "struct Keep { j: Job<u64>, n: u64 }\nfn sp(f: Fn<Send>()->u64) -> Job<u64> { return parallel_spawn(f); }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    view := &data;\n    k := Keep { j: sp(|| -> u64 view[0]), n: 1 };\n    println(eat(data));\n    println(parallel_join(k.j));\n}\n",
+    "reject": true,
+    "diagnostic": "move of unavailable or borrowed value"
+  },
+  {
+    "name": "job-handle-loan-ends-at-wait",
+    "note": "once the job is waited on its handle is gone and the loan with it: the vector may move again",
+    "source": "fn sp(f: Fn<Send>()->u64) -> Job<u64> { return parallel_spawn(f); }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    mut got = 0;\n    {\n        view := &data;\n        j := sp(|| -> u64 view[0]);\n        got = parallel_join(j);\n    }\n    println(got + eat(data));\n}\n",
+    "stdout": "5\n"
+  },
+  {
+    "name": "closure-bounds-p01-wrapper-needs-send",
+    "note": "P01: a wrapper whose parameter is a bare `Fn` cannot hand it to parallel_spawn - the capture the builtin would have refused is no longer visible, so the type must have stated `Send` (was accepted: a thread-affine handle reached a worker)",
+    "source": "// A library wrapper over parallel_spawn: the closure captures a thread-affine handle.\n// Direct `parallel_spawn(|| ...)` refuses this capture; through the wrapper?\nhandle H;\nfn keep(h: (&H), x: u64) -> u64 { return x; }\nfn my_spawn<R:Send>(f: Fn()->R) -> Job<R> { return parallel_spawn(f); }\nfn main() {\n    mut h: H;\n    j := my_spawn(|| -> u64 keep(&h, 1));\n    println(parallel_join(j));\n}\n",
+    "reject": true,
+    "diagnostic": "does not say what it captured"
+  },
+  {
+    "name": "closure-bounds-p02-direct-handle-capture",
+    "note": "P02: the builtin, called directly, sees the capture",
+    "source": "handle H;\nfn keep(h: (&H), x: u64) -> u64 { return x; }\nfn main() {\n    mut h: H;\n    j := parallel_spawn(|| -> u64 keep(&h, 1));\n    println(parallel_join(j));\n}\n",
+    "reject": true,
+    "diagnostic": "cannot transfer job capture `h`: h is thread-affine"
+  },
+  {
+    "name": "closure-bounds-p03-spawn-owned",
+    "note": "P03: pool::spawn takes `FnMut<Send, Owned>`: the borrow is refused where the closure is written",
+    "source": "// pool::spawn's promise: \"a callback that captured a borrow is refused\". Through the wrapper the\n// closure's regions are erased at the `Fn()->R` parameter, so the job can outlive the frame.\nuse pool;\nfn make() -> Job<u64> {\n    mut data = u64[1, 2, 3, 4];\n    view := &data;\n    return pool::spawn(|| -> u64 { mut t = 0; for i in 2000000 { t = t + view[i % 4]; } return t; });\n}\nfn main() {\n    j := make();\n    mut junk = u64[];\n    for i in 100000 { junk.push(i); }\n    println(pool::wait(j));\n}\n",
+    "reject": true,
+    "diagnostic": "this closure captures a borrow, and an `Owned` closure is required here",
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "closure-bounds-p04-direct-borrow-capture",
+    "note": "P04",
+    "source": "fn make() -> Job<u64> {\n    mut data = u64[1, 2, 3, 4];\n    view := &data;\n    return parallel_spawn(|| -> u64 view[0]);\n}\nfn main() { println(parallel_join(make())); }\n",
+    "reject": true,
+    "diagnostic": "a job handle may outlive this statement"
+  },
+  {
+    "name": "closure-bounds-p05-join-first-is-fn",
+    "note": "P05: pool::join's worker branch is still `Fn<Send>`; stage 4 of the note makes it `FnMut<Send>` and this case an accepting one",
+    "source": "// What the SIMD/layout note asks for: one branch of a join writes through an exclusive borrow.\nuse pool;\nfn main() {\n    mut a = u64[1, 2, 3];\n    mut b = u64[4, 5, 6];\n    ra := &mut a;\n    rb := &mut b;\n    p := pool::join(|| -> u64 { ra[0] = 10; return 1; }, || -> u64 { rb[0] = 20; return 2; });\n    println(a[0] + b[0] + p.first + p.second);\n}\n",
+    "reject": true,
+    "diagnostic": "FnMut, not Fn",
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "closure-bounds-p06-generic-send-sees-capture",
+    "note": "P06: a closure through a generic parameter keeps its environment",
+    "source": "// A closure through a generic parameter F with an ordinary bound.\nhandle H;\nfn keep(h: (&H), x: u64) -> u64 { return x; }\nfn needs_send<F:Send>(f: F) -> u64 { return 7; }\nfn main() {\n    mut h: H;\n    println(needs_send(|| -> u64 5));\n    println(needs_send(|| -> u64 keep(&h, 1)));\n}\n",
+    "reject": true,
+    "diagnostic": "type does not satisfy Send"
+  },
+  {
+    "name": "closure-bounds-p07-generic-not-callable",
+    "note": "P07: a generic `F` has no call",
+    "source": "fn apply<F>(f: F) -> u64 { return f(); }\nfn main() { n := 3; println(apply(|| -> u64 n + 1)); }\n",
+    "reject": true,
+    "diagnostic": "unknown function `f`"
+  },
+  {
+    "name": "closure-bounds-p08-join-second-writes",
+    "note": "P08",
+    "source": "use pool;\nfn main() {\n    mut a = u64[1, 2, 3];\n    mut b = u64[4, 5, 6];\n    ra := &a;\n    rb := &mut b;\n    p := pool::join(|| -> u64 ra[0] + ra[1], || -> u64 { rb[0] = 20; return 2; });\n    println(a[0] + b[0] + p.first + p.second);\n}\n",
+    "stdout": "26\n",
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "closure-bounds-p09-join-branches-share-owner",
+    "note": "P09: two branches cannot both take the vector",
+    "source": "// Both branches reach `a`: one reads on a worker while the other writes on the caller. Must refuse.\nuse pool;\nfn main() {\n    mut a = u64[1, 2, 3];\n    p := pool::join(|| -> u64 a[0] + a[1], || -> u64 { a[0] = 20; return 2; });\n    println(p.first + p.second);\n}\n",
+    "reject": true,
+    "diagnostic": "`a` was moved",
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "closure-bounds-p10-join-branches-alias",
+    "note": "P10",
+    "source": "use pool;\nfn main() {\n    mut a = u64[1, 2, 3];\n    ra := &a;\n    rb := &mut a;\n    p := pool::join(|| -> u64 ra[0] + ra[1], || -> u64 { rb[0] = 20; return 2; });\n    println(p.first + p.second);\n}\n",
+    "reject": true,
+    "diagnostic": "borrow conflicts with active access",
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "closure-bounds-p11-fn-field-not-send",
+    "note": "P11: a record with a bare `Fn` field is not Send (was accepted: the field laundered a handle capture into parallel_map)",
+    "source": "// A record with a field typed `Fn()->u64` is \"Send\": the field's type has no environment.\nhandle H;\nfn keep(h: (&H), x: u64) -> u64 { return x; }\nstruct Work { run: Fn()->u64 }\nfn go(w: Work, unused: u64) -> u64 { f := &w.run; return f(); }\nfn main() {\n    mut h: H;\n    mut items = Work[];\n    items.push(Work { run: || -> u64 keep(&h, 1) });\n    out := parallel_map(items, 0, go);\n    println(out[0]);\n}\n",
+    "reject": true,
+    "diagnostic": "run is a closure whose type does not say what it captured"
+  },
+  {
+    "name": "closure-bounds-p12-erased-fn-not-send",
+    "note": "P12: a bare `Fn` parameter forwarded to `F: Send` (was accepted)",
+    "source": "// The erased `Fn()->u64` parameter forwarded to a `F: Send` generic: nothing left to check.\nhandle H;\nfn keep(h: (&H), x: u64) -> u64 { return x; }\nfn needs_send<F:Send>(f: F) -> u64 { return 7; }\nfn wrapper(f: Fn()->u64) -> u64 { return needs_send(f); }\nfn main() {\n    mut h: H;\n    println(wrapper(|| -> u64 keep(&h, 1)));\n}\n",
+    "reject": true,
+    "diagnostic": "type does not satisfy Send: Fn() -> u64 is a closure whose type does not say what it captured"
+  },
+  {
+    "name": "closure-bounds-p15-direct-shared-exclusive",
+    "note": "P15",
+    "source": "fn main() {\n    mut a = u64[1, 2, 3];\n    ra := &mut a;\n    out := parallel_map(u64[1], 0, |x: u64, u: u64| -> u64 ra[0] + x);\n    println(out[0]);\n}\n",
+    "reject": true,
+    "diagnostic": "cannot share closure capture `ra`: an exclusive borrow cannot be shared"
+  },
+  {
+    "name": "closure-bounds-p16-map-shared-exclusive",
+    "note": "P16: the same refusal through pool::map, whose callback is `Fn<Share>` (was accepted)",
+    "source": "// The same closure through pool::map: an `Fn` holding `&mut` shared by every worker.\nuse pool;\nfn main() {\n    mut a = u64[1, 2, 3];\n    ra := &mut a;\n    out := pool::map(u64[1, 2], |x: u64| -> u64 ra[0] + x);\n    println(out[0]);\n}\n",
+    "reject": true,
+    "diagnostic": "cannot share closure capture `ra`: an exclusive borrow cannot be shared",
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "closure-bounds-p17-no-callable-bound",
+    "note": "P17: callable bounds on a type parameter are deferred (Q5)",
+    "source": "fn apply<R, F: Fn()->R>(f: F) -> R { return f(); }\nfn main() { n := 3; println(apply(|| -> u64 n + 1)); }\n",
+    "reject": true,
+    "diagnostic": "expected `,`, found `(`"
+  },
+  {
+    "name": "closure-bounds-p18-generic-record-send",
+    "note": "P18",
+    "source": "// A closure kept un-erased in a generic record: the record's Send bound sees the capture.\nhandle H;\nfn keep(h: (&H), x: u64) -> u64 { return x; }\nstruct Boxed<F> { f: F }\nfn needs_send<T:Send>(t: T) -> u64 { return 7; }\nfn main() {\n    mut h: H;\n    println(needs_send(Boxed { f: || -> u64 5 }));\n    println(needs_send(Boxed { f: || -> u64 keep(&h, 1) }));\n}\n",
+    "reject": true,
+    "diagnostic": "type does not satisfy Send: Boxed<"
+  },
+  {
+    "name": "closure-bounds-p19-returned-closure-keeps-loan",
+    "note": "P19",
+    "source": "// call_bonds hands a borrowing closure argument's loan to the call's result. Does that hold the\n// borrowed data in place?\nfn id(f: Fn()->u64) -> Fn()->u64 { return f; }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    view := &data;\n    g := id(|| -> u64 view[0]);\n    println(eat(data));\n    println(g());\n}\n",
+    "reject": true,
+    "diagnostic": "move of unavailable or borrowed value"
+  },
+  {
+    "name": "closure-bounds-p20-local-closure-keeps-loan",
+    "note": "P20",
+    "source": "fn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    view := &data;\n    g := || -> u64 view[0];\n    println(eat(data));\n    println(g());\n}\n",
+    "reject": true,
+    "diagnostic": "move of unavailable or borrowed value"
+  },
+  {
+    "name": "closure-bounds-p21-share-of-exclusive-capture",
+    "note": "P21",
+    "source": "// What `F: Send` / `F: Share` say about a closure holding an exclusive borrow today.\nfn needs_send<F:Send>(f: F) -> u64 { return 1; }\nfn needs_share<F:Share>(f: F) -> u64 { return 2; }\nfn main() {\n    mut a = u64[1, 2, 3];\n    ra := &mut a;\n    println(needs_send(|| -> u64 { ra[0] = 5; return 1; }));\n    mut b = u64[1, 2, 3];\n    rb := &mut b;\n    println(needs_share(|| -> u64 rb[0]));\n}\n",
+    "reject": true,
+    "diagnostic": "type does not satisfy Share"
+  },
+  {
+    "name": "closure-bounds-p23-stored-borrow-keeps-loan",
+    "note": "P23: the mechanism a scope will use, shown for a reference",
+    "source": "// The pattern a scoped spawn reduces to: a borrow stored, through a reference parameter, into\n// storage whose type names the borrow's lifetime. The loan must stay live while the holder is.\nstruct Holder<d> { r: (&d u64[]) }\nfn put<a, d>(h: (&a mut Holder<d>), r: (&d u64[])) -> unit { h.r = r; }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    mut other = u64[9];\n    mut h = Holder { r: &other };\n    put(&mut h, &data);\n    println(eat(data));\n    println(h.r.len());\n}\n",
+    "reject": true,
+    "diagnostic": "move of unavailable or borrowed value"
+  },
+  {
+    "name": "closure-bounds-p24-stored-local-borrow",
+    "note": "P24",
+    "source": "// The refusing half: a callee stores a borrow of its OWN local into the caller's holder.\nstruct Holder<d> { r: (&d u64[]) }\nfn put<a, d>(h: (&a mut Holder<d>), r: (&d u64[])) -> unit { h.r = r; }\nfn fill<a, d>(h: (&a mut Holder<d>)) -> unit {\n    mut local = u64[1, 2, 3];\n    put(&mut h, &local);\n}\nfn main() {\n    mut other = u64[9];\n    mut h = Holder { r: &other };\n    fill(&mut h);\n    println(h.r.len());\n}\n",
+    "reject": true,
+    "diagnostic": "captured writeback violates invariant lifetime"
+  },
+  {
+    "name": "closure-bounds-p25-fnmut-by-value",
+    "note": "P25",
+    "source": "fn once(f: FnMut()->u64) -> u64 { mut g = f; return g(); }\nfn main() {\n    mut a = u64[1, 2, 3];\n    ra := &mut a;\n    println(once(|| -> u64 { ra[0] = 7; return ra[0]; }));\n    println(a[0]);\n}\n",
+    "stdout": "7\n7\n"
+  },
+  {
+    "name": "closure-bounds-p26-dyn-holds-no-borrow",
+    "note": "P26",
+    "source": "// A `dyn I` is refused borrowed data where it is built, so the object itself cannot carry a\n// borrow out of a frame (and it is neither Send nor Share: n:9329-9332).\ninterface Peek { fn peek(self: &Self) -> u64; }\nstruct View<d> { r: (&d u64[]) }\nimpl<d> Peek for View<d> { fn peek(self: &Self) -> u64 { return self.r[0]; } }\nstruct Q { items: (dyn Peek)[] }\nfn stash<a>(q: (&a mut Q), p: dyn Peek) -> unit { q.items.push(p); }\nfn fill<a>(q: (&a mut Q)) -> unit {\n    mut data = u64[41, 2, 3, 4];\n    stash(&mut q, View { r: &data });\n}\nfn main() {\n    mut q = Q { items: (dyn Peek)[] };\n    fill(&mut q);\n    mut junk = u64[9, 9, 9, 9, 9, 9];\n    p := q.items.pop()!;\n    println(p.peek());\n}\n",
+    "reject": true,
+    "diagnostic": "a dyn value cannot hold borrowed data"
+  },
+  {
+    "name": "closure-bounds-send-field",
+    "note": "a field typed `Fn<Send>` makes the record Send; the capture was checked at the field initialiser",
+    "source": "struct Work { run: Fn<Send>() -> u64 }\nfn go(w: Work, unused: u64) -> u64 { f := &w.run; return f(); }\nfn main() {\n    n := 41;\n    mut items = Work[];\n    items.push(Work { run: || -> u64 n + 1 });\n    out := parallel_map(items, 0, go);\n    println(out[0]);\n}\n",
+    "stdout": "42\n"
+  },
+  {
+    "name": "closure-bounds-send-field-handle",
+    "note": "...and a handle capture is refused there, by name",
+    "source": "handle H;\nfn keep(h: (&H), x: u64) -> u64 { return x; }\nstruct Work { run: Fn<Send>() -> u64 }\nfn main() {\n    mut h: H;\n    w := Work { run: || -> u64 keep(&h, 1) };\n    println(1);\n}\n",
+    "reject": true,
+    "diagnostic": "cannot transfer closure capture `h`: h is thread-affine"
+  },
+  {
+    "name": "closure-bounds-fn-value-has-every-bound",
+    "note": "a named function captures nothing, so it meets every bound",
+    "source": "fn twice(x: u64) -> u64 { return x * 2; }\nfn apply(f: Fn<Send, Share, Owned>(u64) -> u64, x: u64) -> u64 { return f(x); }\nfn main() { println(apply(twice, 21)); }\n",
+    "stdout": "42\n"
+  },
+  {
+    "name": "closure-bounds-drop-a-bound",
+    "note": "a closure type that says more is accepted where less is asked",
+    "source": "fn plain(f: Fn() -> u64) -> u64 { return f(); }\nfn strict(f: Fn<Send, Owned>() -> u64) -> u64 { return plain(f); }\nfn main() { n := 6; println(strict(|| -> u64 n * 7)); }\n",
+    "stdout": "42\n"
+  },
+  {
+    "name": "closure-bounds-add-a-bound",
+    "note": "a bound cannot be added to a value whose type no longer shows its captures",
+    "source": "fn strict(f: Fn<Send>() -> u64) -> u64 { return f(); }\nfn plain(f: Fn() -> u64) -> u64 { return strict(f); }\nfn main() { println(plain(|| -> u64 1)); }\n",
+    "reject": true,
+    "diagnostic": "`Fn() -> u64` does not say what it captured, so it cannot be used as `Fn<Send>(..)`"
+  },
+  {
+    "name": "closure-bounds-fnmut-share-is-not-a-type",
+    "note": "a closure that writes its captures cannot be shared",
+    "source": "fn each(f: FnMut<Share>(u64) -> unit) -> unit { }\nfn main() { }\n",
+    "reject": true,
+    "diagnostic": "`FnMut<Share>` is not a type"
+  },
+  {
+    "name": "closure-bounds-lifetime-bound-not-yet",
+    "note": "stage 3 of the note",
+    "source": "fn each<s>(f: Fn<s>(u64) -> unit) -> unit { }\nfn main() { }\n",
+    "reject": true,
+    "diagnostic": "a lifetime bound on a closure type (`Fn<s>(..)`) is not implemented yet"
+  },
+  {
+    "name": "closure-bounds-unknown-bound",
+    "note": "the list reads three names",
+    "source": "fn each(f: Fn<Sync>(u64) -> unit) -> unit { }\nfn main() { }\n",
+    "reject": true,
+    "diagnostic": "a closure type's bounds are `Send`, `Share` and `Owned`"
+  },
+  {
+    "name": "closure-bounds-container-is-exact",
+    "note": "a vector of `Fn<Send>` is not a vector of `Fn`: through `&mut` a closure that is not Send could be pushed into it",
+    "source": "fn add(v: (&mut (Fn() -> u64)[]), f: Fn() -> u64) -> unit { v.push(f); }\nfn main() {\n    mut v = (Fn<Send>() -> u64)[];\n    add(&mut v, || -> u64 1);\n    println(v.len());\n}\n",
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "closure-bounds-owned-type-parameter",
+    "note": "`Owned` on a type parameter: the type holds no borrow; a parameter that proves it may be forwarded",
+    "source": "fn keep<T: Owned>(t: T) -> T { return t; }\nfn fwd<T: Send + Owned>(t: T) -> T { return keep(t); }\nfn main() { v := fwd(u64[1, 2, 3]); println(keep(v.len())); }\n",
+    "stdout": "3\n"
+  },
+  {
+    "name": "closure-bounds-owned-refuses-reference",
+    "note": "a reference is not Owned",
+    "source": "fn keep<T: Owned>(t: T) -> u64 { return 1; }\nfn main() { v := u64[1, 2, 3]; println(keep(&v)); }\n",
+    "reject": true,
+    "diagnostic": "type does not satisfy Owned: &u64[] holds a borrow"
+  },
+  {
+    "name": "closure-bounds-owned-needs-proof",
+    "note": "a type parameter without the bound may be instantiated with a reference",
+    "source": "fn keep<T: Owned>(t: T) -> u64 { return 1; }\nfn fwd<T>(t: T) -> u64 { return keep(t); }\nfn main() { println(fwd(1)); }\n",
+    "reject": true,
+    "diagnostic": "has a type parameter that is not known to be `Owned`"
+  },
+  {
+    "name": "closure-bounds-share-refuses-fnmut-callback",
+    "note": "`Fn<Share>` asked of a closure that writes a capture",
+    "source": "use pool;\nfn main() {\n    mut count = 0;\n    out := pool::map(u64[1, 2, 3], |x: u64| -> u64 { count += 1; return x; });\n    println(out.len());\n}\n",
+    "reject": true,
+    "diagnostic": "a closure that mutates a captured value is FnMut, not Fn",
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "closure-bounds-fnmut-send-owned-inferred-result",
+    "note": "the bounds of a parameter are checked while its result type is still being inferred, and a job may write the captures it owns",
+    "source": "fn start<R: Send + Owned>(f: FnMut<Send, Owned>() -> R) -> Job<R> { return parallel_spawn(f); }\nfn main() {\n    mut n = 41;\n    j := start(|| -> u64 { n += 1; return n; });\n    println(parallel_join(j));\n}\n",
+    "stdout": "42\n"
+  },
+  {
+    "name": "closure-bounds-generic-share-refuses-fnmut",
+    "note": "a closure that writes its captures is not Share through a generic parameter either",
+    "source": "fn needs<F: Share>(f: F) -> u64 { return 1; }\nfn main() { mut n = 0; println(needs(|| -> u64 { n += 1; return n; })); }\n",
+    "reject": true,
+    "diagnostic": "an FnMut closure, which cannot be shared"
+  },
+  {
+    "name": "closure-bounds-closure-in-generic-function",
+    "note": "a closure written in a generic function is checked when the function is specialised, not while its template is validated",
+    "source": "fn run(f: Fn<Send, Owned>() -> u64) -> u64 { return f(); }\nfn through<T: Send + Owned>(t: T, n: u64) -> u64 { return run(|| -> u64 n + 1); }\nfn main() { println(through(u64[1], 41)); }\n",
+    "stdout": "42\n"
+  },
+  {
+    "name": "closure-bounds-closure-in-generic-function-handle",
+    "note": "...and the specialisation on a handle is refused",
+    "source": "handle H;\nfn keep(h: (&H), x: u64) -> u64 { return x; }\nfn run(f: Fn<Send>() -> u64) -> u64 { return f(); }\nfn through<a, T>(t: (&a T)) -> u64 { return run(|| -> u64 { r := t; return 1; }); }\nfn main() { mut h: H; println(through(&h)); }\n",
+    "reject": true,
+    "diagnostic": "thread-affine"
+  },
+  {
+    "name": "closure-bounds-interface-two-modules",
+    "files": [
+      "tests/closures/bounds_user.grl"
+    ],
+    "modules": [
+      "tests/closures/bounds_lib.grl"
+    ],
+    "interfaces": true,
+    "stdout": "43\n7\n",
+    "note": "the bounds of a closure type and `Owned` on a type parameter travel in the interface row: the importer's calls are checked against `bounds_lib.iface` alone"
   }
 ]

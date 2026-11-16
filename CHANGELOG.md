@@ -61,6 +61,31 @@
   and theirs: `--use-named`, `--use-module NAME`) and the run reads those, in that order, and
   nothing else; without the flags a directory is read in name order.
 
+- **Closure types state what the closure may capture: `Fn<Send>`, `Fn<Share>`, `Fn<Owned>`.**
+  A closure parameter, field or element can now say its captures may move to another thread
+  (`Send`), be used from several at once (`Share`, `Fn` only), or hold no borrow (`Owned`), and
+  `Owned` is a new bound on type parameters (`R: Send + Owned`). `lib/pool.grl` states them:
+  `pool::map`/`run`/`for_chunks`/`chunks_mut` take `Fn<Share>(..)`, `pool::spawn` takes
+  `FnMut<Send, Owned>() -> R`, `pool::join`'s first branch is `Fn<Send>() -> A`. This closes three
+  soundness holes in safe code: a wrapper over the parallel builtins let a thread-affine handle, or a
+  shared `&mut`, reach a worker, and a record with an `Fn` field carried a handle capture into
+  `parallel_map`. (`docs/design/closure-bounds.md`; interface format 6.)
+  **What stops compiling, and the fix:**
+  - A bare `Fn(..)` is no longer `Send` or `Share`. A record with an `Fn(..)` field sent to a worker,
+    a `Fn(..)` passed to a `T: Send` generic, or a `Fn(..)` parameter forwarded to `parallel_spawn`,
+    `parallel_map` or a `pool` function is refused with "does not say what it captured". Write the
+    bound where the type is written: `Fn<Send>(..)` (one worker) or `Fn<Share>(..)` (several).
+  - `pool::spawn` refuses a closure that captured a borrow where the closure is written, and every
+    `pool` callback refuses an `FnMut` one: move the value in, or return an owned result.
+  - Interfaces written by an older compiler are refused: re-emit them with
+    `grail check --interface DIR`.
+- **Soundness: a job handle keeps what its closure borrowed.** A closure that borrowed a value,
+  passed through a wrapper such as `pool::spawn`, left a `Job<R>` that the checker believed held
+  no borrow, so the borrowed value could be moved or dropped while the job was still reading it
+  (a use after free in safe code). The handle now holds the loan until it is waited on or dropped.
+  A program that moved the borrowed value while the job was live is refused with
+  `move of unavailable or borrowed value`: wait on the job first, or move the value into the
+  closure instead of borrowing it. (`docs/design/closure-bounds.md`, Q3.)
 - **Builds are 25x to 180x faster than they were a day ago.** With the release compiler: the
   compiler compiles itself in 2.9 s (was 73.8 s), a 104k-line program checks in 0.9 s (was 166 s),
   hello world checks in 0.04 s (was 1.1 s), and 90k lines in 24 modules build cold in 1.4 s.
