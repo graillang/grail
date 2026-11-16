@@ -78,12 +78,16 @@ against Grail's own past numbers. The bars:
 - **Release build (LLVM backend)**: parity with `clang -O2` on every benchmark, within noise.
 - **Development build (native backend)**: faster than Zig Debug, Rust's dev profile and Go.
 
-`bun tools/bench-rivals.mjs [--runs N] [NAME...]` builds every program in `bench/` that has a C
+`bun tools/bench-rivals.mjs [--runs N] [--compiler PATH | --branch REF] [NAME...]` builds every program in `bench/` that has a C
 twin, plus its Rust, Go and Zig twins in `bench/rivals/` (the same algorithm and the same output,
 idiomatic, not hand-vectorised), each the way its users build it, checks that every output agrees
 with C's, and prints three tables: CPU time, the same programs built for the host CPU, and
 user-space instructions. With `GRAIL_SCHED_TREE` naming a checkout of `gaps12-sched` (and
-`GRAIL_SCHED_COMPILER` its compiler) it adds `ffi_call`, which is only on that branch.
+`GRAIL_SCHED_COMPILER` its compiler) it adds `ffi_call`, which is only on that branch. `--compiler`
+measures a given compiler; `--branch REF` builds REF's compiler from a read-only `git archive` copy
+and takes REF's runtime and libraries with this tree's programs, so any branch is measured against
+the same twins. Every table names the commit it measured. A rival whose toolchain is absent is left
+out with a note.
 
 | column | command |
 | --- | --- |

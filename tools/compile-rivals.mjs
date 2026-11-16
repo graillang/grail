@@ -17,17 +17,18 @@
 // cold build left: cargo's incremental state, Grail's store, Go's and Zig's caches.
 // The figure is CPU seconds (user + sys of the tool and every process it waited for), best of N;
 // wall seconds are in the JSON (.work/compile-rivals.json). Ratios are Grail over the fastest rival.
-//   bun tools/compile-rivals.mjs [--runs N] [--sizes 1000,4000]
-//   GRAIL_COMPILER selects the compiler; default is the release compiler (`bun tools/native.mjs
-//   release`), the one a user runs, as `compile-bench --release` measures.
+//   bun tools/compile-rivals.mjs [--runs N] [--sizes 1000,4000] [--compiler PATH | --branch REF]
+//   --compiler names the Grail compiler, --branch REF builds REF's release compiler
+//   (tools/rivals/common.mjs); default GRAIL_COMPILER, else this tree's release compiler (`bun
+//   tools/native.mjs release`), the one a user runs, as `compile-bench --release` measures.
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { root } from './platforms.mjs';
-import { buildReleaseCompiler } from './native.mjs';
 import { scalingProgram } from './compile-bench.mjs';
-import { loadavg, measurer, ratio, run, versions } from './rivals/common.mjs';
+import { compilerOptions, grailCompiler, loadavg, measurer, ratio, run, toolchains, versions } from './rivals/common.mjs';
 
 const argv = process.argv.slice(2);
+const chosen = compilerOptions(argv);
 const option = (name, fallback) => { const at = argv.indexOf(name); return at < 0 ? fallback : argv[at + 1]; };
 const runs = Number(option('--runs', 3));
 const sizes = option('--sizes', '1000,4000').split(',').map(Number);
@@ -35,8 +36,10 @@ const work = join(root, '.work/compile-rivals');
 rmSync(work, { recursive: true, force: true });
 mkdirSync(work, { recursive: true });
 const measure = measurer(root, work);
-const grail = process.env.GRAIL_COMPILER && existsSync(process.env.GRAIL_COMPILER) ? resolve(process.env.GRAIL_COMPILER)
-  : buildReleaseCompiler({ log: line => console.error(line) });
+const measuredGrail = !chosen.compiler && !chosen.branch && process.env.GRAIL_COMPILER && existsSync(process.env.GRAIL_COMPILER)
+  ? grailCompiler(root, { compiler: process.env.GRAIL_COMPILER })
+  : grailCompiler(root, { ...chosen, release: true });
+const grail = measuredGrail.compiler;
 
 // ---- the programs. Each takes a seed (main's starting total) so every cold run is new text.
 const grailProgram = (n, seed) => scalingProgram(n).replace('    mut t = 0;\n', `    mut t = ${seed};\n`);
@@ -190,7 +193,15 @@ const languages = {
     check: ['cargo', 'check', '--offline', '-q'], build: ['cargo', 'build', '--offline', '-q'],
   },
 };
+// The built program, run after each build: every language must print the same number, and a build
+// whose program prints something else fails the tool (the one way it fails; ratios never do).
+languages.grail.exe = 'target/main'; languages.go.exe = 'syn'; languages.zig.exe = 'main'; languages.rust.exe = 'target/debug/syn';
+// A language whose toolchain is absent is left out, and toolchains() says so.
+const have = toolchains();
+for (const lang of ['go', 'zig', 'rust']) if (!have[lang]) delete languages[lang];
 const names = Object.keys(languages);
+const headOf = { grail: 'Grail', go: 'Go', zig: 'Zig', rust: 'Rust' };
+let failed = 0;
 
 let serial = 0;
 function project(lang, text) {
@@ -227,18 +238,30 @@ for (const n of [0, ...sizes]) {
       cold[lang] = { cpu: Infinity, wall: Infinity }; edited[lang] = { cpu: Infinity, wall: Infinity };
     }
     for (let r = 0; r < runs; r++) {
+      // One seed per round, the same in every language (so every program prints the same number),
+      // new in every round (so every cold run is new text).
+      const seed = 1000 + serial;
+      const printed = {};
       for (const lang of names) {
         const l = languages[lang];
-        const text = n ? l.program(n, 1000 + serial) : l.hello(serial);
+        const text = n ? l.program(n, seed) : l.hello(seed);
         const dir = project(lang, text);
         const a = timed(lang, which, dir);
+        const output = () => which === 'build' ? run([join(dir, l.exe)], { cwd: dir }).stdout.trim() : null;
+        const coldOut = output();
         writeFileSync(join(dir, l.file), edit(text, n));
         const b = timed(lang, which, dir);
+        if (which === 'build') printed[lang] = [coldOut, output()];
         for (const [slot, m] of [[cold, a], [edited, b]]) {
           slot[lang].cpu = Math.min(slot[lang].cpu, m.cpu);
           slot[lang].wall = Math.min(slot[lang].wall, m.wall);
         }
         rmSync(dir, { recursive: true, force: true });
+      }
+      const differ = names.filter(x => JSON.stringify(printed[x]) !== JSON.stringify(printed.grail));
+      if (which === 'build' && differ.length) {
+        failed++;
+        console.log(`OUTPUT DIFFERS (${label}, round ${r}): ${names.map(x => `${x} ${JSON.stringify(printed[x])}`).join('; ')}`);
       }
     }
     rows.push([`${label} ${which}, cold`, cold], [`${label} ${which}, edited`, edited]);
@@ -248,11 +271,15 @@ for (const n of [0, ...sizes]) {
       const rivals = Math.min(...names.filter(x => x !== 'grail').map(x => figures[x].cpu));
       console.log(`${name.padEnd(24)} ${names.map(x => `${figures[x].cpu.toFixed(3)} (${figures[x].wall.toFixed(2)})`.padStart(16)).join(' ')}   ${ratio(figures.grail.cpu, rivals).padStart(8)}`);
     };
-    if (rows.length === 2) console.log(`compile-rivals: CPU s (wall s), best of ${runs}; ratio = Grail CPU / fastest rival's CPU\n${'program, step'.padEnd(24)} ${['Grail', 'Go', 'Zig', 'Rust'].map(h => h.padStart(16)).join(' ')}   Grail/best`);
+    if (rows.length === 2) console.log(`compile-rivals: CPU s (wall s), best of ${runs}; ratio = Grail CPU / fastest rival's CPU\n${'program, step'.padEnd(24)} ${names.map(x => headOf[x].padStart(16)).join(' ')}   Grail/best`);
     show(rows[rows.length - 2]); show(rows[rows.length - 1]);
   }
 }
 load.push(loadavg());
 const v = versions();
-console.log(`grail: ${grail}\nload average ${load[0]} at start, ${load[1]} at end; ${Object.values(v).join('; ')}`);
-writeFileSync(join(root, '.work/compile-rivals.json'), JSON.stringify({ runs, sizes, load, versions: v, grail, results, at: new Date().toISOString() }, null, 2) + '\n');
+console.log(`grail: ${grail}, commit ${measuredGrail.commit}\nload average ${load[0]} at start, ${load[1]} at end; ${Object.values(v).join('; ')}`);
+writeFileSync(join(root, '.work/compile-rivals.json'), JSON.stringify({ runs, sizes, load, versions: v, grail, commit: measuredGrail.commit, results, at: new Date().toISOString() }, null, 2) + '\n');
+// One line the gate's summary picks up: Grail over the fastest rival, the large program's four steps.
+const big = `syn${sizes[sizes.length - 1]}`;
+console.log(`compile-rivals (${measuredGrail.commit}): Grail/fastest ${['check cold', 'check edited', 'build cold', 'build edited'].map(step => { const f = results[`${big} ${step}`]; return `${big} ${step} ${ratio(f.grail.cpu, Math.min(...names.filter(x => x !== 'grail').map(x => f[x].cpu)))}`; }).join(', ')}`);
+if (failed) process.exit(1);

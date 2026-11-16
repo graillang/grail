@@ -2,7 +2,7 @@
 // load average and the toolchain versions. docs/design/runtime-parity.md, "Against other languages".
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 export function run(argv, options = {}) {
   const result = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, ...options });
@@ -44,3 +44,70 @@ export function versions() {
 
 // Ratio of a Grail figure to the best competitor's, as printed in every rivals table.
 export const ratio = (mine, theirs) => (mine === undefined || theirs === undefined || !isFinite(theirs)) ? '-' : `${(mine / theirs).toFixed(2)}x`;
+
+// The Grail compiler a rivals tool measures, and the tree its runtime and libraries come from:
+//   --compiler PATH   that compiler, with this tree's runtime and libraries
+//   --branch REF      REF's compiler: REF (a branch, tag or commit; origin/REF is tried too) is
+//                     extracted with `git archive` into .work/branches/<commit>, read-only, and its
+//                     compiler built there - from its own seed, else bootstrapped by this tree's
+//                     compiler (a branch's checked-in seed may be older than its sources)
+//   neither           this tree's compiler (GRAIL_COMPILER when set)
+// `release` asks for the release compiler (`native.mjs release`). Returns { compiler, tree, commit }
+// so every table can say which Grail it measured.
+export function grailCompiler(root, { compiler, branch, release = false, log = line => console.error(line) } = {}) {
+  const git = args => run(['git', '-C', root, ...args]).stdout.trim();
+  if (compiler) return { compiler: resolveFile(compiler), tree: root, commit: `${git(['rev-parse', '--short=12', 'HEAD'])}${dirty(git)} (--compiler ${compiler})` };
+  let tree = root, commit = `${git(['rev-parse', '--short=12', 'HEAD'])}${dirty(git)}`;
+  if (branch) {
+    let sha;
+    for (const ref of [branch, `origin/${branch}`]) {
+      try { sha = git(['rev-parse', '--short=12', `${ref}^{commit}`]); break; } catch {}
+    }
+    if (!sha) throw new Error(`--branch ${branch}: no such ref (fetch it first)`);
+    tree = join(root, '.work/branches', sha);
+    if (!existsSync(join(tree, 'tools/native.mjs'))) {
+      mkdirSync(tree, { recursive: true });
+      const archive = spawnSync('git', ['-C', root, 'archive', sha], { maxBuffer: 1 << 30 });
+      if (archive.status !== 0) throw new Error(`git archive ${sha} failed`);
+      run(['tar', '-x', '-C', tree], { input: archive.stdout });
+    }
+    commit = `${sha} (${branch})`;
+  }
+  const mode = release ? 'release' : 'build';
+  if (!branch && !release && process.env.GRAIL_COMPILER && existsSync(process.env.GRAIL_COMPILER)) return { compiler: resolveFile(process.env.GRAIL_COMPILER), tree, commit };
+  const attempt = env => spawnSync('bun', [join(tree, 'tools/native.mjs'), mode], { cwd: tree, encoding: 'utf8', maxBuffer: 1 << 26, env: { ...process.env, ...env } });
+  const clean = { ...process.env };
+  delete clean.GRAIL_COMPILER;
+  log(`building the ${mode === 'release' ? 'release ' : ''}compiler of ${commit}`);
+  let result = spawnSync('bun', [join(tree, 'tools/native.mjs'), mode], { cwd: tree, encoding: 'utf8', maxBuffer: 1 << 26, env: clean });
+  if (result.status !== 0 && tree !== root) {
+    const base = grailCompiler(root, { log }).compiler;
+    log(`  its seed cannot build it; bootstrapping with ${base}`);
+    result = attempt({ GRAIL_COMPILER: base });
+  }
+  if (result.status !== 0) throw new Error(`building the compiler of ${commit} failed\n${(result.stderr ?? '').slice(-2000)}`);
+  return { compiler: result.stdout.trim().split('\n').pop(), tree, commit };
+}
+const dirty = git => git(['status', '--porcelain', '--untracked-files=no']) ? '+changes' : '';
+const resolveFile = path => { if (!existsSync(path)) throw new Error(`--compiler ${path} does not exist`); return resolve(path); };
+// `--compiler PATH` and `--branch REF` from an argument vector (removed from it).
+export function compilerOptions(argv) {
+  const take = name => { const at = argv.indexOf(name); if (at < 0) return undefined; const v = argv[at + 1]; argv.splice(at, 2); return v; };
+  return { compiler: take('--compiler'), branch: take('--branch') };
+}
+
+// Which rival toolchains this machine has. A tool drops the columns of one that is absent and says
+// so, so the gate still runs on a machine without, say, Zig.
+export function toolchains() {
+  const ok = argv => { try { return spawnSync(argv[0], argv.slice(1), { encoding: 'utf8' }).status === 0; } catch { return false; } };
+  const have = {
+    c: ok(['clang', '--version']),
+    rust: ok(['rustc', '--version']) && ok(['cargo', '--version']),
+    go: ok(['go', 'version']),
+    zig: ok(['zig', 'version']),
+    tbb: ok(['g++', '--version']) && ['/usr/include/oneapi/tbb.h', '/usr/local/include/oneapi/tbb.h'].some(existsSync),
+  };
+  const missing = Object.entries(have).filter(([, v]) => !v).map(([k]) => k);
+  if (missing.length) console.log(`note: not installed here, so not measured: ${missing.map(k => ({ c: 'clang', rust: 'rustc/cargo', go: 'go', zig: 'zig', tbb: 'g++ with oneTBB' })[k]).join(', ')}`);
+  return have;
+}

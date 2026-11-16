@@ -1,5 +1,10 @@
 ## Unreleased
 
+- The rivals tools (`bench-rivals`, `sched-rivals`, `compile-rivals`) take `--compiler PATH` or
+  `--branch REF` (REF's compiler built from a read-only `git archive` copy) and name the Grail commit
+  they measured in every table. A toolchain that is not installed is skipped with a note. Each fails
+  only when a program's output differs: compile-rivals now runs what it built and compares.
+
 - `bun tools/compile-rivals.mjs`: compile speed against Go, Zig and rustc on the same programs
   (hello world and the scaling trio at N = 1000 and 4000): check and build, cold and after a
   one-function edit, CPU seconds by `getrusage`. The table and the reason for every miss are in
