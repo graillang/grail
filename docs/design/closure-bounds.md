@@ -588,7 +588,14 @@ refuses `iter::map` itself: its step closure captures the source `Iter<(&a T)>` 
 result keeps its arguments' loans, `may_hide_borrow`), not by the type. So the non-parameter default
 `Owned` cannot be enforced on fields as stated: either such a field names the region
 (`Iter<a, T>`), or the rule counts a capture whose type is an aggregate holding the loan as
-flow-tracked. Open question Q8; the field stays a bare `FnMut` until it is decided.
+flow-tracked. **Decided (director, 2026-11-16):** neither `Iter<a, T>` nor a weaker `Owned`. The rule:
+**a value's hidden borrows are carried by loan flow and by its type not being `Owned`; `Owned` is
+the only way to cross a lifetime boundary.** `Iter<T>`'s field stays a bare `FnMut`. Its soundness
+rests on (a) loan flow - `iter::map(src, f)`'s result is bonded to `src`'s loans by `call_bonds`,
+because `src` is a non-closure argument - and (b) a record with a non-`Owned` closure field is
+itself not `Owned` (`owned_walk`) and not `Send`/`Share` (denial code 12). Pinned by the cases
+`iter-hidden-borrow-*`: such an Iter cannot ride into a job or a task, be returned past the vector,
+be kept across a push, or satisfy `T: Owned` / `T: Send`; consumed locally it is fine.
 
 ### 6.2 Stage 3 (call-scoped closure parameters) - built
 
@@ -603,3 +610,13 @@ flow-tracked. Open question Q8; the field stays a bare `FnMut` until it is decid
 - `parallel_spawn` makes the job take over the loans of the closure it runs (the builtin face of
   2.10), so a wrapper over it either waits before returning or takes `Fn<Owned>`.
 - Cases `closure-call-scoped-*` (P14, P27 and the shapes of the count). `Fn<s>` is next.
+
+### 6.3 `Fn<s>` - built
+
+`Fn<s>(..)` / `FnMut<Send, s>(..)`: the lifetime is stored in the closure type's `regions`, so the
+type carries `s` like a reference does. No new conversion check is needed: `call_bonds` hands a
+closure argument's loans to whatever the signature labels `s` (the `type_caps` intersection it
+already does for every argument), and the return and writeback checks follow those loans. A
+parameter typed `Fn<s>` is not call-scoped (it may be kept where `s` is named). At most one
+lifetime; `Owned` with a lifetime is refused. Cases `closure-region-*`. This is the piece stage 5's
+scopes build on; R-env and the scope types are planned in section 7 and not built.

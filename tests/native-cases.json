@@ -11227,18 +11227,18 @@
     "diagnostic": "`FnMut<Share>` is not a type"
   },
   {
-    "name": "closure-bounds-lifetime-bound-not-yet",
-    "note": "stage 3 of the note",
-    "source": "fn each<s>(f: Fn<s>(u64) -> unit) -> unit { }\nfn main() { }\n",
+    "name": "closure-bounds-lifetime-undeclared",
+    "note": "a closure lifetime must be declared like any other",
+    "source": "fn each(f: Fn<s>(u64) -> unit) -> unit { }\nfn main() { }\n",
     "reject": true,
-    "diagnostic": "a lifetime bound on a closure type (`Fn<s>(..)`) is not implemented yet"
+    "diagnostic": "undeclared lifetime"
   },
   {
     "name": "closure-bounds-unknown-bound",
     "note": "the list reads three names",
     "source": "fn each(f: Fn<Sync>(u64) -> unit) -> unit { }\nfn main() { }\n",
     "reject": true,
-    "diagnostic": "a closure type's bounds are `Send`, `Share` and `Owned`"
+    "diagnostic": "a closure type's bounds are `Send`, `Share`, `Owned` and one lifetime"
   },
   {
     "name": "closure-bounds-container-is-exact",
@@ -11420,5 +11420,90 @@
     "source": "fn sp(f: Fn<Send>() -> u64) -> Job<u64> { return parallel_spawn(f); }\nfn main() { println(parallel_join(sp(|| -> u64 1))); }\n",
     "reject": true,
     "diagnostic": "returned borrow escapes its declared input lifetime"
+  },
+  {
+    "name": "iter-hidden-borrow-not-sent-to-job",
+    "note": "Q8 (a)/(b): an Iter mapped over `iter::refs(&v)` holds v's loan by flow and its `step` field is a bare `FnMut`, so it is not Send and cannot ride into a job (stands in for `thread::spawn`, which takes the same `FnMut<Send, Owned>`)",
+    "source": "use pool;\nuse iter;\nfn main() {\n    v := u64[1, 2, 3];\n    it := iter::map(iter::refs(&v), |x: &u64| -> u64 *x * 2);\n    j := pool::spawn(|| -> u64 { mut s = 0; for x in it { s += x; } return s; });\n    println(pool::wait(j));\n}\n",
+    "reject": true,
+    "diagnostic": "cannot transfer closure capture `it`",
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "iter-hidden-borrow-not-a-task-item",
+    "note": "...nor be handed to a task",
+    "source": "use iter;\nfn total(it: iter::Iter<u64>, unused: u64) -> u64 { mut s = 0; for x in it { s += x; } return s; }\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    v := u64[1, 2, 3];\n    it := iter::map(iter::refs(&v), |x: &u64| -> u64 *x + base);\n    t := spawn(sc, it, total);\n    return join(t);\n}\nfn main() { println(task_scope(10, body)); }\n",
+    "reject": true,
+    "diagnostic": "cannot transfer spawned item: step is a closure whose type does not say what it captured"
+  },
+  {
+    "name": "iter-hidden-borrow-not-returned",
+    "note": "...nor be returned past the vector it borrows: call_bonds bonded the mapped Iter to `refs(&v)`'s loans",
+    "source": "use iter;\nfn doubled() -> iter::Iter<u64> {\n    v := u64[1, 2, 3];\n    return iter::map(iter::refs(&v), |x: &u64| -> u64 *x * 2);\n}\nfn main() { for x in doubled() { println(x); } }\n",
+    "reject": true,
+    "diagnostic": "returned borrow escapes its declared input lifetime"
+  },
+  {
+    "name": "iter-hidden-borrow-blocks-push",
+    "note": "...nor be kept across a mutation of the vector",
+    "source": "use iter;\nfn main() {\n    mut v = u64[1, 2, 3];\n    it := iter::map(iter::refs(&v), |x: &u64| -> u64 *x * 2);\n    v.push(4);\n    for x in it { println(x); }\n}\n",
+    "reject": true,
+    "diagnostic": "mutation conflicts with live borrow"
+  },
+  {
+    "name": "iter-hidden-borrow-local-use",
+    "note": "...and consumed locally it is fine, and the vector is free again afterwards",
+    "source": "use iter;\nfn main() {\n    mut v = u64[1, 2, 3];\n    {\n        it := iter::map(iter::refs(&v), |x: &u64| -> u64 *x * 2);\n        mut s = 0;\n        for x in it { s += x; }\n        println(s);\n    }\n    v.push(4);\n    println(v.len());\n}\n",
+    "stdout": "12\n4\n"
+  },
+  {
+    "name": "iter-hidden-borrow-not-owned",
+    "note": "a record with a bare closure field is not `Owned`: `Owned` is the only way across a lifetime boundary",
+    "source": "use iter;\nfn keep<T: Owned>(t: T) -> u64 { return 1; }\nfn main() { v := u64[1, 2]; it := iter::map(iter::refs(&v), |x: &u64| -> u64 *x); println(keep(it)); }\n",
+    "reject": true,
+    "diagnostic": "type does not satisfy Owned: iter::Iter<u64> holds a closure whose type does not say it is `Owned`"
+  },
+  {
+    "name": "iter-hidden-borrow-not-send",
+    "note": "...nor Send",
+    "source": "use iter;\nfn keep<T: Send>(t: T) -> u64 { return 1; }\nfn main() { v := u64[1, 2]; it := iter::map(iter::refs(&v), |x: &u64| -> u64 *x); println(keep(it)); }\n",
+    "reject": true,
+    "diagnostic": "type does not satisfy Send: iter::Iter<u64>"
+  },
+  {
+    "name": "closure-region-stored-in-holder",
+    "note": "`Fn<s>(..)`: a closure whose borrows come from `s`; a holder labelled `s` may keep it, and calls through it work",
+    "source": "struct Holder<s> { items: (Fn<s>() -> u64)[] }\nfn holder<s>(f: Fn<s>() -> u64) -> Holder<s> { mut v = (Fn<s>() -> u64)[]; v.push(f); return Holder { items: v }; }\nfn add<a, s>(h: (&a mut Holder<s>), f: Fn<s>() -> u64) -> unit { h.items.push(f); }\nfn total<a, s>(h: (&a Holder<s>)) -> u64 { mut t = 0; for i in h.items.len() { f := &h.items[i]; t += f(); } return t; }\nfn main() {\n    data := u64[1, 2, 3];\n    r := &data;\n    mut h = holder(|| -> u64 r[0]);\n    r2 := &data;\n    add(&mut h, || -> u64 r2[2]);\n    println(total(&h));\n}\n",
+    "stdout": "4\n"
+  },
+  {
+    "name": "closure-region-holder-keeps-loan",
+    "note": "...the holder keeps the closure's loans: the borrowed vector cannot move while it lives",
+    "source": "struct Holder<s> { items: (Fn<s>() -> u64)[] }\nfn holder<s>(f: Fn<s>() -> u64) -> Holder<s> { mut v = (Fn<s>() -> u64)[]; v.push(f); return Holder { items: v }; }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    data := u64[1, 2, 3];\n    r := &data;\n    h := holder(|| -> u64 r[0]);\n    println(eat(data));\n    println(h.items.len());\n}\n",
+    "reject": true,
+    "diagnostic": "move of unavailable or borrowed value"
+  },
+  {
+    "name": "closure-region-local-escapes",
+    "note": "...a closure borrowing a local cannot leave in a `Holder<s>` returned past that local",
+    "source": "struct Holder<s> { items: (Fn<s>() -> u64)[] }\nfn holder<s>(f: Fn<s>() -> u64) -> Holder<s> { mut v = (Fn<s>() -> u64)[]; v.push(f); return Holder { items: v }; }\nfn mk<s>(x: (&s u64[])) -> Holder<s> {\n    local := u64[7];\n    lr := &local;\n    return holder(|| -> u64 lr[0]);\n}\nfn main() { d := u64[1]; h := mk(&d); println(h.items.len()); }\n",
+    "reject": true,
+    "diagnostic": "returned borrow escapes its declared input lifetime"
+  },
+  {
+    "name": "closure-region-from-input",
+    "note": "...one borrowing the input labelled `s` can",
+    "source": "struct Holder<s> { items: (Fn<s>() -> u64)[] }\nfn holder<s>(f: Fn<s>() -> u64) -> Holder<s> { mut v = (Fn<s>() -> u64)[]; v.push(f); return Holder { items: v }; }\nfn mk<s>(x: (&s u64[])) -> Holder<s> { return holder(|| -> u64 x[0] + 1); }\nfn main() { d := u64[41]; h := mk(&d); f := &h.items[0]; println(f()); }\n",
+    "stdout": "42\n"
+  },
+  {
+    "name": "closure-region-call-scoped-not-stored",
+    "note": "a call-scoped `Fn(..)` parameter cannot be stored where an `Fn<s>` is kept",
+    "source": "fn put<a, s>(v: (&a mut (Fn<s>() -> u64)[]), f: Fn() -> u64) -> unit { v.push(f); }\nfn main() { }\n",
+    "reject": true,
+    "diagnostic": "captured writeback violates invariant lifetime"
   }
 ]

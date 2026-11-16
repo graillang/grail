@@ -113,6 +113,11 @@ of its own type - its parameters or its result. A closure that captures `&a Map`
 lives (this is how `map.keys()` works); one that also captured `&b Other`, or any borrow of a local,
 is not. A closure that captures no borrow at all is always `Owned`.
 
+A lifetime may stand in the list too: `Fn<s>() -> u64` borrows only from `s`, and a record labelled
+`s` (`struct Holder<s> { items: (Fn<s>() -> u64)[] }`) may keep it - the record then keeps the
+closure's borrows alive for as long as it lives. A closure parameter without `Owned` or a lifetime
+borrows for the call: the callee may call it and pass it on, but not return or store it.
+
 They combine (`FnMut<Send, Owned>() -> R` is what `pool::spawn` takes). They are checked where a
 closure expression meets the type - the captures are known there - and carried by the type from
 then on. A bare `Fn(..)` states none of them: it is not `Send` or `Share`, so a record with a

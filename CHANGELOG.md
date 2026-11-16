@@ -1,5 +1,9 @@
 ## Unreleased
 
+- **`Fn<s>(..)`: a closure type may name the lifetime its borrows come from**, so a record labelled
+  `s` can keep closures that borrow (`struct Holder<s> { items: (Fn<s>() -> u64)[] }`) and keeps
+  their loans alive while it lives. A record whose closure field states no bound (`iter::Iter<T>`)
+  is no longer accepted for `T: Owned`; its hidden borrows stay local.
 - **Soundness: a closure parameter borrows for the call.** A parameter typed `Fn(..)`/`FnMut(..)`
   (without `Owned`) may be called and passed on during the call, and nothing more: returning it,
   storing it (a push through `&mut`, a field), or capturing it in a closure that is returned is
