@@ -649,6 +649,10 @@ struct C {
     // The names a closure literal created in this body writes: a call in this body may write through
     // one of them, so no fact about them outlives a call (docs/design/refinements.md).
     pv_caps: u8[][],
+    // 1 while a declaration's predicate is being read (see pv_read_pred).
+    pv_pred_mode: u64,
+    // 1 for the next subtraction `binary` emits: the facts show it cannot underflow.
+    pv_sub_ok: u64,
     // Strict refinements (docs/design/refinements.md): `--strict-refinements` for the whole program,
     // `@strict;` for a module (it stays with the module's name, so a replayed body keeps it), and
     // `@strict` on a declaration for the function that follows.
@@ -7434,7 +7438,64 @@ fn pv_term<a>(c: (&a mut C), at: u64, used: (&a mut u64)) -> u8[] {
             return out;
         }
     }
+    // `ROOT.FIELD` and `ROOT.FIELD.len()`, when nothing in this body can write the field: the term
+    // is the path, and it means one value for as long as the binding lives (pv_field_stable).
+    if (c.pv_pred_mode == 0) & (kind_at(&mut c, at + 1) == 46) & (kind_at(&mut c, at + 2) == 1) & (kind_at(&mut c, at + 3) != 40) {
+        f := tok_text(&mut c, at + 2);
+        if pv_field_stable(&mut c, view(t), view(f)) {
+            mut out = t.copy();
+            out.push(46);
+            push_bytes(&mut out, view(f));
+            exchange(used, 3);
+            if (kind_at(&mut c, at + 3) == 46) & (kind_at(&mut c, at + 4) == 1) & (kind_at(&mut c, at + 5) == 40) & (kind_at(&mut c, at + 6) == 41) {
+                m := tok_text(&mut c, at + 4);
+                if same(view(m), view("len")) {
+                    push_bytes(&mut out, view(".len"));
+                    exchange(used, 7);
+                }
+            }
+            return out;
+        }
+    }
     return t;
+}
+// Whether `root.field` names one value for the whole life of the binding `root`: the binding is not
+// `mut`, it is a record or a shared reference to one (a `&mut` could be written through), and the
+// field is itself a plain value or an owned vector - not a reference, through which someone else's
+// write could arrive. A path that passes this needs no kill rule: nothing in the body can change it,
+// and binding the root's name again hides it like any other fact about that name.
+fn pv_field_stable<a, b, d>(c: (&a mut C), root: &b [u8], field: &d [u8]) -> bool {
+    l := find_local(&mut c, root);
+    if l == 0 {
+        return false;
+    }
+    if c.locals[l - 1].mutable != 0 {
+        return false;
+    }
+    lty := local_ty(&mut c, l - 1);
+    if (ty_kind(&mut c, lty) == 7) && (ty_mode(&mut c, lty) != 0) {
+        return false;
+    }
+    mut rty = lty;
+    if ty_kind(&mut c, rty) == 7 {
+        rty = ty_arg(&mut c, rty);
+    }
+    rty = base_type(&mut c, rty);
+    if ty_kind(&mut c, rty) != 8 {
+        return false;
+    }
+    d := ty_arg(&mut c, rty);
+    if c.decls[d].is_enum != 0 {
+        return false;
+    }
+    idx := field_index(&mut c, d, field);
+    if idx == 0 {
+        return false;
+    }
+    fty := field_type(&mut c, rty, idx - 1);
+    fk := ty_kind(&mut c, fty);
+    // An integer of any width, or an owned vector (whose length is the term).
+    return (fty == 0) || (fk == 18) || (fty == 2) || (fk == 6);
 }
 // The atom at `at`, or false when the tokens there are not one this prover models. `>` is turned into
 // its `<` form with the operands swapped, so one shape covers every comparison.
@@ -7480,6 +7541,21 @@ fn pv_atom<a>(c: (&a mut C), at: u64, atom: (&a mut Atom), used: (&a mut u64)) -
         exchange(used, (j + 1 + u3) - at);
         return true;
     }
+    // `x + 1 < y` is `x < y - 1`: an offset on the left moves to the right with its sign turned.
+    mut left_k: i64 = 0;
+    if (kind_at(&mut c, i) == 43) || (kind_at(&mut c, i) == 45) {
+        lsign := kind_at(&mut c, i);
+        mut ul = 0;
+        tl := pv_term(&mut c, i + 1, &mut ul);
+        if !pv_digits(view(tl)) {
+            return false;
+        }
+        left_k = pv_number(view(tl));
+        if lsign == 45 {
+            left_k = 0 - left_k;
+        }
+        i = i + 1 + ul;
+    }
     // A comparison. `>` swaps its operands, so `<`, `<=`, `==` and their mirrors share one shape.
     op := kind_at(&mut c, i);
     mut rel = 99;
@@ -7523,6 +7599,13 @@ fn pv_atom<a>(c: (&a mut C), at: u64, atom: (&a mut Atom), used: (&a mut u64)) -
             kk = 0 - kk;
         }
         j = j + 1 + u3;
+    }
+    kk = kk - left_k;
+    // An offset is arithmetic the program does, and in a wrap build it can wrap: `i < n - 1` with
+    // `n == 0` is true of the wrapped value and false of the integers the facts reason about. A
+    // checked build stops at the wrap instead, so only there does the atom mean what it says.
+    if (kk != 0) & (c.overflow == 0) {
+        return false;
     }
     if flip != 0 {
         // `x > y + k` is `y < x - k`.
@@ -7583,7 +7666,11 @@ fn pv_read_pred<a>(c: (&a mut C), pred: Pred, out: (&a mut Atom[])) -> bool {
         load_file(&mut c, pf);
         exchange(&mut c.file, pf);
     }
+    // A predicate is written over its own function's names, not this body's: a field path in it
+    // would be looked up among the wrong locals, so none is read while it is.
+    exchange(&mut c.pv_pred_mode, 1);
     ok := pv_atoms(&mut c, plo, phi, &mut out);
+    exchange(&mut c.pv_pred_mode, 0);
     if saved_file != pf {
         load_file(&mut c, saved_file);
         exchange(&mut c.file, saved_file);
@@ -7598,18 +7685,26 @@ fn pv_add<a>(facts: (&a mut Atom[]), rel: u64, a: &a [u8], b: &a [u8], k: i64) -
     facts.push(Atom { rel: rel, a: copy_bytes(view(a)), b: copy_bytes(view(b)), k: k });
     return ();
 }
-// Drop every fact that mentions a name or its length: a binding of the name shadows what the facts
-// said, and a write through it makes them false.
+// Whether a term is `name` or something reached through it: `name.len`, `name.field`,
+// `name.field.len`.
+fn pv_mentions<a, b>(term: &a [u8], name: &b [u8]) -> bool {
+    if term.len() < name.len() {
+        return false;
+    }
+    for i in name.len() {
+        if term[i] != name[i] {
+            return false;
+        }
+    }
+    return (term.len() == name.len()) || (term[name.len()] == 46);
+}
+// Drop every fact that mentions a name, its length or a field of it: a binding of the name shadows
+// what the facts said, and a write through it makes them false.
 fn pv_kill<a>(facts: (&a mut Atom[]), name: &a [u8]) -> unit {
-    mut len_name = copy_bytes(view(name));
-    push_bytes(&mut len_name, view(".len"));
     mut keep = Atom[];
     for i in facts.len() {
         x := &facts[i];
-        mut hit = same(view(x.a), view(name)) || same(view(x.b), view(name));
-        if !hit {
-            hit = same(view(x.a), view(len_name)) || same(view(x.b), view(len_name));
-        }
+        hit := pv_mentions(view(x.a), view(name)) || pv_mentions(view(x.b), view(name));
         if !hit {
             keep.push(Atom { rel: x.rel, a: x.a.copy(), b: x.b.copy(), k: x.k });
         }
@@ -7840,6 +7935,16 @@ fn pv_holds<a>(facts: (&a Atom[]), rel: u64, a: &a [u8], b: &a [u8], k: i64) -> 
     }
     return pv_implies(&facts, rel, view(a), view(b), k);
 }
+// The offset the argument bound to parameter `t` carries; a `t.len` or a name that is no parameter
+// carries none.
+fn pv_rename_off<a, b>(t: &a [u8], from: (&b u8[][]), offs: (&b i64[])) -> i64 {
+    for i in from.len() {
+        if same(view(from[i]), view(t)) {
+            return offs[i];
+        }
+    }
+    return 0;
+}
 // `name` (or `name.len`) with the callee's parameters renamed to the caller's terms. A length of a
 // literal cannot be renamed, and says so with empty text.
 fn pv_rename<a, b>(t: &a [u8], from: (&b u8[][]), to: (&b u8[][])) -> u8[] {
@@ -7890,6 +7995,42 @@ fn pv_span_term<a>(c: (&a mut C), lo: u64, hi: u64) -> u8[] {
     }
     return t;
 }
+// An argument's term and the constant added to it: `i`, `i + 1`, `v.len() - 1`. The offset is
+// arithmetic the caller does before the call, so it is read only in a checked build, where a wrap
+// stops the program before the callee is entered (see pv_atom). Empty text when the span is anything
+// else.
+fn pv_span_term_off<a, b>(c: (&a mut C), lo: u64, hi: u64, off: (&b mut i64)) -> u8[] {
+    exchange(off, 0);
+    whole := pv_span_term(&mut c, lo, hi);
+    if whole.len() != 0 {
+        return whole;
+    }
+    if (c.overflow == 0) || (hi < lo + 3) {
+        return u8[];
+    }
+    sign := kind_at(&mut c, hi - 2);
+    if (sign != 43) & (sign != 45) {
+        return u8[];
+    }
+    kd := kind_at(&mut c, hi - 1);
+    if (kd != 2) & (kd != 5) {
+        return u8[];
+    }
+    digits := tok_text(&mut c, hi - 1);
+    if !pv_digits(view(digits)) {
+        return u8[];
+    }
+    base := pv_span_term(&mut c, lo, hi - 2);
+    if (base.len() == 0) || pv_literal(view(base)) {
+        return u8[];
+    }
+    mut k = pv_number(view(digits));
+    if sign == 45 {
+        k = 0 - k;
+    }
+    exchange(off, k);
+    return base;
+}
 // Whether a span could write through a name it mentions: `&mut` takes an exclusive loan, and a call
 // may write what it is given. A call site with such an argument proves nothing, since another
 // argument's evaluation could change what the proof read.
@@ -7907,10 +8048,18 @@ fn pv_span_mutates<a>(c: (&a mut C), lo: u64, hi: u64) -> bool {
         }
         if k == 1 {
             if kind_at(&mut c, i + 1) == 40 {
-                return true;
+                // `.len()` and the other pure tests are spelled as calls and call nothing.
+                called := tok_text(&mut c, i);
+                if !((i > lo) && (kind_at(&mut c, i - 1) == 46) && pv_pure_test(view(called))) {
+                    return true;
+                }
             }
             if (kind_at(&mut c, i + 1) == 46) & (kind_at(&mut c, i + 3) == 40) {
-                return true;
+                // A pure test reads its receiver: `v.len()` in an argument writes nothing.
+                m := tok_text(&mut c, i + 2);
+                if !pv_pure_test(view(m)) {
+                    return true;
+                }
             }
         }
         i += 1;
@@ -8058,8 +8207,6 @@ fn pv_ir_shadow<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
     if !pv_ir_live(&c) {
         return ();
     }
-    mut len_name = copy_bytes(view(name));
-    push_bytes(&mut len_name, view(".len"));
     // The block this binding is made in: its close is the one that may bring the facts back.
     mut owner = 0;
     if c.pv_trmarks.len() != 0 {
@@ -8068,10 +8215,7 @@ fn pv_ir_shadow<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
     mut keep = Atom[];
     for i in c.pv_facts.len() {
         x := &c.pv_facts[i];
-        mut hit = same(view(x.a), view(name)) || same(view(x.b), view(name));
-        if !hit {
-            hit = same(view(x.a), view(len_name)) || same(view(x.b), view(len_name));
-        }
+        hit := pv_mentions(view(x.a), view(name)) || pv_mentions(view(x.b), view(name));
         if hit {
             c.pv_trail.push(copy_atom_value(&x));
             c.pv_trown.push(owner);
@@ -8417,6 +8561,26 @@ fn pv_call_give_up<a, b, d>(c: (&a mut C), report: u64, pred: Pred, at: u64, nee
     }
     return 0;
 }
+// `hi - lo` with `lo <= hi` among the facts cannot underflow, so its check is not emitted. Both
+// operands must be single terms - the whole left side of this `-` and the whole right side - so a
+// chain (`a - b - c`) or a product proves nothing here. `--verify-facts` keeps the check.
+fn pv_sub_proof<a>(c: (&a mut C), lstart: u64, rstart: u64, rend: u64) -> unit {
+    exchange(&mut c.pv_sub_ok, 0);
+    if !pv_ir_live(&c) || (c.verify_facts != 0) || (rstart == 0) || (rstart <= lstart) {
+        return ();
+    }
+    left := pv_span_term(&mut c, lstart, rstart - 1);
+    right := pv_span_term(&mut c, rstart, rend);
+    if (left.len() == 0) || (right.len() == 0) {
+        return ();
+    }
+    mut facts = Atom[];
+    pv_ir_read(&mut c, &mut facts);
+    if pv_holds(&facts, 1, view(right), view(left), 0) {
+        exchange(&mut c.pv_sub_ok, 1);
+    }
+    return ();
+}
 // The proof of a call: every refined parameter's predicate, with its names replaced by the
 // arguments' own terms, follows from the facts at the call. A function with no refined parameter
 // needs no proof and is never routed to the second entry.
@@ -8453,6 +8617,7 @@ fn pv_call_proved<a>(c: (&a mut C), f: u64, count: u64, spans: (&a u64[]), at: u
     mut need = pv_need(&mut c, view(cname), cfile, cpos);
     mut names = u8[][];
     mut terms = u8[][];
+    mut offs = i64[];
     for i in count {
         if i >= c.funcs[f - 1].pnames.len() {
             return pv_call_give_up(&mut c, report, first, at, view(need), view("the parameter has no name to substitute"));
@@ -8464,12 +8629,14 @@ fn pv_call_proved<a>(c: (&a mut C), f: u64, count: u64, spans: (&a u64[]), at: u
         if nm.len() == 0 {
             return pv_call_give_up(&mut c, report, first, at, view(need), view("the parameter has no name to substitute"));
         }
-        tm := pv_span_term(&mut c, spans[2 * i], spans[2 * i + 1]);
+        mut off: i64 = 0;
+        tm := pv_span_term_off(&mut c, spans[2 * i], spans[2 * i + 1], &mut off);
         if tm.len() == 0 {
-            return pv_call_give_up(&mut c, report, first, at, view(need), view("an argument is not a name or a constant"));
+            return pv_call_give_up(&mut c, report, first, at, view(need), view("an argument is not a name, a constant or one of those plus a constant"));
         }
         names.push(nm);
         terms.push(tm);
+        offs.push(off);
     }
     for i in count {
         if pv_span_mutates(&mut c, spans[2 * i], spans[2 * i + 1]) {
@@ -8504,8 +8671,31 @@ fn pv_call_proved<a>(c: (&a mut C), f: u64, count: u64, spans: (&a u64[]), at: u
                 y = pv_rename(view(atoms[j].b), &names, &terms);
                 ok = y.len() != 0;
             }
+            // The arguments' own offsets: the parameter `a` stands for `x + oa`, so `a REL b + k`
+            // is `x REL y + (k + ob - oa)`.
+            oa := pv_rename_off(view(atoms[j].a), &names, &offs);
+            ob := pv_rename_off(view(atoms[j].b), &names, &offs);
+            mut k = atoms[j].k;
+            if (oa != 0) || (ob != 0) {
+                // Only a comparison carries an offset; divisibility and a float class do not.
+                if rel > 2 {
+                    ok = false;
+                }
+                k = k + ob - oa;
+            }
             if ok {
-                ok = pv_holds(&facts, rel, view(x), view(y), atoms[j].k);
+                if (rel <= 2) & (y.len() != 0) & same(view(x), view(y)) {
+                    // One term on both sides: `t < t + k` is a statement about `k` alone.
+                    ok = ((rel == 0) & (k >= 1)) || ((rel == 1) & (k >= 0)) || ((rel == 2) & (k == 0));
+                } else {
+                    // An offset the arguments brought makes the bound looser than the facts need to
+                    // show: `x < y + 1` follows from `x < y`. The graph reads only non-positive
+                    // offsets (pv_implies), so the looser bound is proved through the tighter one.
+                    if ((oa != 0) || (ob != 0)) & (k > 0) & (rel <= 1) {
+                        k = 0;
+                    }
+                    ok = pv_holds(&facts, rel, view(x), view(y), k);
+                }
             }
             if !ok {
                 return pv_call_give_up(&mut c, report, Pred { file: pf, lo: plo, hi: phi }, at, view(need), view("the facts at the call do not settle it"));
@@ -32485,7 +32675,9 @@ fn binary<a>(c: (&a mut C), k: u64, left: u64, right: u64) -> u64 {
     if k == 42 {
         o(&mut c, view("mulq %rcx\n"));
     }
-    if ((k == 43) || (k == 45) || (k == 42)) && (((c.overflow != 0) || (c.raw != 0))) {
+    sub_proved := (k == 45) && (c.pv_sub_ok != 0);
+    exchange(&mut c.pv_sub_ok, 0);
+    if ((k == 43) || (k == 45) || (k == 42)) && (((c.overflow != 0) || (c.raw != 0))) && !sub_proved {
         ok := label(&mut c);
         jump(&mut c, view("jnc"), ok);
         site_kind(&mut c, 2);
@@ -33671,6 +33863,9 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
                                                 }
                                                 both := is_bool(&mut c, ty)
                                                     && is_bool(&mut c, rty);
+                                                if (k == 45) & (c.raw == 0) {
+                                                    pv_sub_proof(&mut c, lstart, rstart, rend);
+                                                }
                                                 t = binary(&mut c, k, snap, right.t);
                                                 ty = 0;
                                                 if is_comparison(k)
@@ -42386,6 +42581,8 @@ pub fn main() -> u64 {
         pv_trown: u64[],
         pv_pending: Atom[],
         pv_caps: u8[][],
+        pv_pred_mode: 0,
+        pv_sub_ok: 0,
         strict_refinements: 0,
         strict_modules: u8[][],
         strict_next: 0,

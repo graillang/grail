@@ -43,6 +43,17 @@ body assigns, lends out with `&mut` or calls a method on loses its facts *before
 guard `i < 3` is the only fact about `i` in the body - while a name the body never writes keeps
 what was known about it.
 
+A term is a name, a length (`v.len()`), a literal, or a field reached through a binding nothing can
+write - `c.at` and `c.items.len()` where `c` is a record that is not `mut` or a shared reference to
+one. A field behind `&mut` or a `mut` binding is not a term: something between the test and the
+call could write it. A comparison may carry a constant on either side (`i + 1 < v.len()`), and so
+may an argument: `get(&v, i + 1)`, `get(&v, i - 1)` and `get(&v, v.len() - 1)` are proved from the
+facts about `i` and `v.len()`. That arithmetic is the program's own, so it is read only in a checked
+build, where a wrap stops the program before the callee is entered; under `--overflow=wrap` an
+offset states nothing. A subtraction whose operands the facts order (`hi - lo` with `lo <= hi`,
+`v.len() - 1` with `v.len() > 0`) keeps no underflow check, which is what lets a function that
+computes a width be `@no_panic`.
+
 ```grl
 fn get(v: &u64[], i: u64 where i < v.len()) -> u64 {
     return v[i];                      // no bounds check: the entry said i < v.len()

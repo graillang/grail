@@ -8204,15 +8204,15 @@
     "name": "fx-effects-specialization-per-instance",
     "source": "interface Store {\n    fn put(self: &Self, v: u64) -> u64;\n}\nstruct Quiet { n: u64 }\nstruct Loud { n: u64 }\nimpl Store for Quiet {\n    fn put(self: &Quiet, v: u64) -> u64 {\n        return self.n + v;\n    }\n}\nimpl Store for Loud {\n    fn put(self: &Loud, v: u64) -> u64 {\n        mut b = u64[];\n        b.push(v);\n        return b.len();\n    }\n}\nfn store_one<S: Store>(s: &S, v: u64) -> u64 {\n    return s.put(v);\n}\n@no_alloc\nfn quiet_path(q: &Quiet, v: u64) -> u64 {\n    return store_one<Quiet>(q, v);\n}\nfn main() -> u64 {\n    q := Quiet { n: 1 };\n    l := Loud { n: 3 };\n    println(\"{} {}\", quiet_path(&q, 2), store_one<Loud>(&l, 4));\n    return 0;\n}\n",
     "stdout": "3 1\n",
-    "note": "one effect record per emitted body: `store_one<main::Loud>` allocates and `store_one<main::Quiet>` does not, and the `@no_alloc` caller of the quiet instance is accepted although both instances are in the program"
+    "note": "one effect record per emitted body: `store_one<Loud>` allocates and `store_one<main::Quiet>` does not, and the `@no_alloc` caller of the quiet instance is accepted although both instances are in the program"
   },
   {
     "name": "fx-effects-generic-claim-refused",
     "source": "interface Store {\n    fn put(self: &Self, v: u64) -> u64;\n}\nstruct Loud { n: u64 }\nimpl Store for Loud {\n    fn put(self: &Loud, v: u64) -> u64 {\n        mut b = u64[];\n        b.push(v);\n        return b.len();\n    }\n}\n@no_alloc\nfn store_one<S: Store>(s: &S, v: u64) -> u64 {\n    return s.put(v);\n}\nfn main() -> u64 {\n    l := Loud { n: 3 };\n    println(\"{}\", store_one<Loud>(&l, 4));\n    return 0;\n}\n",
     "reject": true,
     "diagnostic": [
-      "`@no_alloc` function `store_one<main::Loud>` performs a heap allocation",
-      "it calls store_one<main::Loud> -> put -> rt_new -> rt_alloc"
+      "`@no_alloc` function `store_one<Loud>` performs a heap allocation",
+      "it calls store_one<Loud> -> put -> rt_new -> rt_alloc"
     ],
     "note": "the claim on a generic is the obligation and each emitted instance has to prove it: before per-instance records this allocating instantiation was accepted, because the claim sat on the template's symbol and the template has no body. The refusal names the instance"
   },
@@ -10633,5 +10633,144 @@
       "riscv64"
     ],
     "note": "with an expected vector type each element is checked against its element type"
+  },
+  {
+    "name": "refinement-argument-plus-constant",
+    "source": "@strict;\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn main() {\n    v := u64[1, 2, 3];\n    mut i = 0;\n    mut t = 0;\n    while i + 1 < v.len() {\n        t += get(&v, i + 1);\n        i += 1;\n    }\n    println(t);\n}\n",
+    "stdout": "5\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`get(&v, i + 1)` under `while i + 1 < v.len()`: an offset on the left of a condition and on an argument both move to the bound"
+  },
+  {
+    "name": "refinement-argument-minus-constant",
+    "source": "@strict;\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn main() {\n    v := u64[1, 2, 3];\n    for i in v.len() {\n        if i > 0 {\n            println(get(&v, i - 1));\n        }\n    }\n    n := v.len();\n    mut k = 0;\n    while k < n {\n        println(get(&v, k));\n        k += 1;\n    }\n}\n",
+    "stdout": "1\n2\n1\n2\n3\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`get(&v, i - 1)` from `i < v.len()`: the argument's offset loosens the bound, and a checked build has already stopped a wrap"
+  },
+  {
+    "name": "refinement-argument-length-minus-constant",
+    "source": "@strict;\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn main() {\n    v := u64[1, 2, 3];\n    if v.len() > 0 {\n        println(get(&v, v.len() - 1));\n    }\n    if 0 < v.len() {\n        println(get(&v, 0));\n    }\n}\n",
+    "stdout": "3\n1\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`get(&v, v.len() - 1)`: one term on both sides is a statement about the constant alone, and `.len()` in an argument calls nothing"
+  },
+  {
+    "name": "refinement-argument-offset-wrap-build-unproved",
+    "source": "@strict;\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn main() {\n    v := u64[1, 2, 3];\n    mut i = 0;\n    mut t = 0;\n    while i + 1 < v.len() {\n        t += get(&v, i + 1);\n        i += 1;\n    }\n    println(t);\n}\n",
+    "reject": true,
+    "flags": [
+      "--overflow=wrap"
+    ],
+    "diagnostic": [
+      "cannot prove the refinement `i < v.len()`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "in a wrap build `i + 1` can wrap, so an offset is not read there: the same program is refused under @strict"
+  },
+  {
+    "name": "refinement-field-path-proved",
+    "source": "@strict;\nstruct Cur { items: u64[], at: u64 }\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn peek(c: &Cur) -> u64 {\n    if c.at < c.items.len() {\n        return get(&c.items, c.at);\n    }\n    return 0;\n}\nfn main() {\n    c := Cur { items: u64[4, 5], at: 1 };\n    println(peek(&c));\n}\n",
+    "stdout": "5\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`c.at < c.items.len()` through a shared reference is a fact about the paths, and `get(&c.items, c.at)` is proved from it"
+  },
+  {
+    "name": "refinement-field-path-local-record",
+    "source": "@strict;\nstruct Cur { items: u64[], at: u64 }\nfn lt(i: u64, n: u64 where i < n) -> u64 {\n    return i;\n}\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn main() {\n    c := Cur { items: u64[4, 5], at: 1 };\n    n := 9;\n    if c.at < n {\n        println(lt(c.at, n));\n    }\n    if c.at < c.items.len() {\n        println(get(&c.items, c.at));\n    }\n}\n",
+    "stdout": "1\n5\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "the same through an immutable local record, with a field path as a plain integer argument"
+  },
+  {
+    "name": "refinement-field-path-mutable-root-unproved",
+    "source": "@strict;\nstruct Cur { items: u64[], at: u64 }\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn bump(c: &mut Cur) -> u64 {\n    if c.at < c.items.len() {\n        c.at += 5;\n        return get(&c.items, c.at);\n    }\n    return 0;\n}\nfn main() {\n    mut c = Cur { items: u64[4, 5], at: 1 };\n    println(bump(&mut c));\n    if c.at < c.items.len() {\n        c.at = 9;\n        println(get(&c.items, c.at));\n    }\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot prove the refinement `i < v.len()`",
+      "the facts in scope were:\n   (none)"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a field reached through `&mut` (or a `mut` binding) can be written, so it is not a term and states no fact: `c.at += 5` between the test and the call would have made the proof wrong"
+  },
+  {
+    "name": "refinement-subtraction-cannot-underflow",
+    "source": "@no_panic\nfn span(lo: u64, hi: u64 where lo <= hi) -> u64 {\n    return hi - lo;\n}\n@no_panic\nfn last(v: &u64[]) -> u64 {\n    if v.len() > 0 {\n        n := v.len() - 1;\n        return n;\n    }\n    return 0;\n}\nfn main() {\n    println(span(2, 9));\n    println(last(&u64[1, 2, 3]));\n}\n",
+    "stdout": "7\n2\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`hi - lo` with `lo <= hi` and `v.len() - 1` with `v.len() > 0` leave no check: both functions are @no_panic"
+  },
+  {
+    "name": "refinement-subtraction-unproved-keeps-check",
+    "source": "@no_panic\nfn span(lo: u64, hi: u64) -> u64 {\n    return hi - lo;\n}\nfn main() {\n    println(span(2, 9));\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "`@no_panic` function `span` can fail"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "without the fact the subtraction keeps its check and @no_panic refuses the function"
   }
 ]
