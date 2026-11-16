@@ -868,6 +868,8 @@ struct C {
     // Empty for a hand-run compiler; the option vector then carries the executable's own path, size
     // and modification time instead.
     fn_id: u8[],
+    // `--fn-cache-quiet`: use the store, print no report line.
+    fn_quiet: u64,
     fn_flags: u8[],
     fn_surface: u8[],
     fn_at_file: u64,
@@ -14938,7 +14940,7 @@ fn fn_flags_now<a>(c: (&a mut C)) -> u8[] {
         if i == 1 + c.arg_offset {
             skip = 1;
         }
-        if same(view(w), view("--fn-cache")) || same(view(w), view("--fn-cache-id")) {
+        if same(view(w), view("--fn-cache")) || same(view(w), view("--fn-cache-id")) || same(view(w), view("--fn-cache-quiet")) {
             skip = 1;
         }
         if 0 < i {
@@ -41650,7 +41652,7 @@ fn iface_rec_inherent<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], source_in
 fn iface_rec_inherent_type<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], source_index: u64, raw_flag: u64) -> unit {
     if p.phase == 0 {
         iface_rt_indent(&mut p, view(""));
-        push_bytes(&mut p.rtext, view("inherent_type"));
+        push_bytes(&mut p.rtext, view("inherent_type "));
     }
     owner_ty := iface_r_type(&mut p, &mut c);
     mut key = 0;
@@ -43669,6 +43671,7 @@ pub fn main() -> u64 {
         fx_body_hi: u64[],
         fn_dir: u8[],
         fn_id: u8[],
+        fn_quiet: 0,
         fn_flags: u8[],
         fn_surface: u8[],
         fn_at_file: 0,
@@ -43847,6 +43850,11 @@ pub fn main() -> u64 {
             }
             exchange(&mut c.fn_dir, host::arg(offset + 2));
             offset += 2;
+        } else if same(view(option), view("--fn-cache-quiet")) {
+            // The driver's default build uses the store without being asked to by name, and then
+            // says nothing about it: no per-module report line.
+            exchange(&mut c.fn_quiet, 1);
+            offset += 1;
         } else if same(view(option), view("--fn-cache-id")) {
             // The compiler's own digest, as the driver computed it (`cache_build_id`). A unit is
             // code this compiler emitted, so a new compiler is a new key for every function.
@@ -44381,7 +44389,7 @@ pub fn main() -> u64 {
     }
     }
     }
-    if c.fn_dir.len() != 0 {
+    if (c.fn_dir.len() != 0) & (c.fn_quiet == 0) {
         // What this run did with the store, one line per module run: bodies replayed from cache,
         // bodies filed as units, and bodies emitted that are not units (they reached outside their
         // own bytes, or a part was opened or a key could not be spelled).

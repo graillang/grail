@@ -42,6 +42,9 @@ rmSync(work, { recursive: true, force: true });
 mkdirSync(work, { recursive: true });
 const project = join(work, 'project');
 const store = join(project, '.work/cache', target);
+// The store this test inspects is the project's own directory, named explicitly: the default is a
+// per-user store, which a test must not read or fill.
+process.env.GRAIL_CACHE_DIR = join(project, '.work/cache');
 const program = join(project, 'target/prog');
 
 // A three-module project: the entry reads both modules, so there is one importer and one module that

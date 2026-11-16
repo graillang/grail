@@ -18,6 +18,10 @@ export const hostTarget = ({ x64: 'x86_64', arm64: 'aarch64', riscv64: 'riscv64'
 export const compilerSources = ['native', 'lexer', 'ownership', 'machine', 'optimize', 'llvm', 'ir', 'fncache', 'fmt', 'explain', 'bindgen', 'pkg', 'docgen', 'cli', 'runtime', 'os-linux'].map(n => join(root, 'compiler', `${n}.grl`));
 // A standard module the compiler itself uses: `grail build --watch` hashes its inputs with XXH64
 // (lib/xxhash.grl), so the compiler is built with that module in its source list.
+// Every tool builds through one store inside this worktree, not the user's: a test run must neither
+// depend on what an earlier build of some other tree left behind nor leave anything in a home
+// directory. A tool that inspects the store sets its own (tools/cache-test.mjs).
+process.env.GRAIL_CACHE_DIR ??= join(root, '.work/build-cache');
 const compilerStdSources = ['xxhash'].map(n => join(root, 'lib', `${n}.grl`));
 compilerSources.push(...compilerStdSources);
 export const triples = { x86_64: 'x86_64-linux-gnu', aarch64: 'aarch64-linux-gnu', riscv64: 'riscv64-linux-gnu', 'macos-x86_64': 'x86_64-apple-macos11', 'macos-aarch64': 'arm64-apple-macos11' };

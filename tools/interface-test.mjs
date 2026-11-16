@@ -1334,11 +1334,12 @@ function proveWrittenInherent() {
   // The emitting run has no entry: a library module has no `main`.
   const emitRun = compile(libFiles, join(directory, 'emit'), ['--emit-interface', ifaces, '--no-entry']);
   assert.equal(emitRun.status, 0, `written inherent: emitting the library interface failed\n${emitRun.output}`);
-  const text = readFileSync(join(ifaces, 'arithmetic.iface'), 'utf8');
-  for (const line of ['inherent_type bytes\n', 'inherent_type (slice u64)\n', 'inherent_type (vec (tparam 0 0 [])) params=1 lifetimes=0\n']) {
+  // The file is a record stream; the dump is its text form, written by the same reader a build uses.
+  const text = dump(join(ifaces, 'arithmetic.iface'));
+  for (const line of ['inherent_type bytes params=0 lifetimes=0\n', 'inherent_type (slice u64) params=0 lifetimes=0\n', 'inherent_type (vec (tparam 0 0 [])) params=1 lifetimes=0\n']) {
     assert.ok(text.includes(line), `written inherent: the interface has no \`${line.trim()}\` section\n${text}`);
   }
-  assert.match(text, /^fn first_byte \(\(ref \[1\] bytes\)\) -> \(int 8u\)$/m, 'written inherent: the method signature is not in the interface');
+  assert.match(text, /^  fn first_byte \(\(ref \[1\] bytes\)\) -> \(int 8u\) /m, 'written inherent: the method signature is not in the interface');
   // The importer is compiled against the interface with the library's source absent.
   const viaInterface = compile([user, runtime, platform], join(directory, 'via'), ['--use', ifaces]);
   assert.equal(
@@ -1359,7 +1360,7 @@ function proveWrittenInherent() {
   const emitWithout = compile([withoutLib, runtime, platform], join(without, 'emit'), ['--emit-interface', withoutIfaces, '--no-entry']);
   assert.equal(emitWithout.status, 0, `written inherent: emitting the reduced library failed\n${emitWithout.output}`);
   assert.ok(
-    !readFileSync(join(withoutIfaces, 'arithmetic.iface'), 'utf8').includes('inherent_type bytes\n'),
+    !dump(join(withoutIfaces, 'arithmetic.iface')).includes('inherent_type bytes '),
     'written inherent: the reduced library still published an `inherent_type bytes` section',
   );
   const stripped = compile([user, runtime, platform], join(without, 'build'), ['--use', withoutIfaces]);
