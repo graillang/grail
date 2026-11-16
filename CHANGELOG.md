@@ -1,5 +1,9 @@
 ## Unreleased
 
+- Fixed: a module binding whose compile-time call was refused (`LOCK := make();` returning a
+  `Mutex`) was reported at the end of whichever file the compiler had parsed last - often
+  `lib/result.grl:129` - when nothing read it. The diagnostic now points at the binding.
+
 - Fixed: an effect attribute's name anywhere in a source file - a comment, a string - made the build
   one compiler run over the whole program, because the driver searched the bytes. It now looks for
   the attribute itself (`@no_alloc`, `@no_panic` outside comments and strings).

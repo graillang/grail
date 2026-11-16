@@ -264,6 +264,10 @@ struct Constant {
     name: u8[],
     // The declaration's source position, for a duplicate that has to name the first one.
     declared_at: u8[],
+    // The file and token of the name, for a diagnostic about the declaration raised after the parse
+    // has moved on (a compile-time call resolved at the end of the compile); 0 for an interface's.
+    file: u64,
+    at: u64,
     // 0 when declared without `pub`: private to `module` (separate-compilation.md, "Visibility").
     public: u64,
     ty: u64,
@@ -17722,7 +17726,24 @@ fn resolve_all_pending<a>(c: (&a mut C)) -> unit {
     }
     for i in c.constants.len() {
         if c.constants[i].ty == CT_PENDING {
+            // Nothing reads this constant, so the parse has moved on to whichever file came last; a
+            // refusal of its call belongs at the binding, not there.
+            file := c.constants[i].file;
+            saved_file := c.file;
+            saved_pos := c.pos;
+            if (file != 0) & (file != saved_file) {
+                load_file(&mut c, file);
+                exchange(&mut c.file, file);
+            }
+            if file != 0 {
+                exchange(&mut c.pos, c.constants[i].at);
+            }
             resolve_pending(&mut c, i);
+            if (file != 0) & (file != saved_file) {
+                load_file(&mut c, saved_file);
+                exchange(&mut c.file, saved_file);
+            }
+            exchange(&mut c.pos, saved_pos);
         }
     }
     return ();
@@ -18205,7 +18226,7 @@ fn module_binding<a>(c: (&a mut C), pass: u64) -> unit {
         text = ct_take_call_text(&mut c);
         expect(&mut c, view(";"));
         constant_public := c.decl_public;
-        c.constants.push(Constant { module: module, name: name, declared_at: declared,  public: constant_public, ty: CT_PENDING, value: 0, text: text });
+        c.constants.push(Constant { module: module, name: name, declared_at: declared, file: c.file, at: at_name,  public: constant_public, ty: CT_PENDING, value: 0, text: text });
         return ();
     }
     if kind(&mut c) == 3 {
@@ -18227,7 +18248,7 @@ fn module_binding<a>(c: (&a mut C), pass: u64) -> unit {
     }
     expect(&mut c, view(";"));
     constant_public := c.decl_public;
-    c.constants.push(Constant { module: module, name: name, declared_at: declared,  public: constant_public, ty: ty, value: value, text: text });
+    c.constants.push(Constant { module: module, name: name, declared_at: declared, file: c.file, at: at_name,  public: constant_public, ty: ty, value: value, text: text });
     return ();
 }
 fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
@@ -18270,7 +18291,7 @@ fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
                 Constant {
                     public: item_public_10,
                     module: module,
-                    name: name, declared_at: declared, 
+                    name: name, declared_at: declared, file: c.file, at: at_name, 
                     ty: ty,
                     value: bits ^ 9223372036854775808,
                     text: text,
@@ -18347,7 +18368,7 @@ fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     }
     expect(&mut c, view(";"));
     constant_public := c.decl_public;
-    c.constants.push(Constant { module: module, name: name, declared_at: declared,  public: constant_public, ty: ty, value: value, text: text });
+    c.constants.push(Constant { module: module, name: name, declared_at: declared, file: c.file, at: at_name,  public: constant_public, ty: ty, value: value, text: text });
     return ();
 }
 fn constant_value<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> Val {
@@ -41407,6 +41428,8 @@ fn iface_rec_const<a>(c: (&a mut C), p: (&a mut IR)) -> unit {
                 module: copy_bytes(view(module)),
                 name: copy_bytes(view(name)),
                 declared_at: u8[],
+                file: 0,
+                at: 0,
                 ty: ty,
                 value: value,
                 text: text
