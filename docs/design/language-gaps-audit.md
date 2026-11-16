@@ -35,7 +35,9 @@ element's record is freed - so `for (at, c) in s.char_indices()` and
 `for (i, x) in iter::enumerate(it)` name their halves, and the iterator protocol carries the pattern
 through `Some(tuple)` as well. `_` skips a position (what it held is dropped with the iteration), an
 owned field such as a `u8[]` moves out, the arity is checked by name (`the element is a 3-tuple and
-the pattern names 2`), and a non-tuple element is refused naming its type. The comma form
+the pattern names 2`), a non-tuple element is refused naming its type, and a borrowed element
+(`for (a, b) in &pairs`, which cannot take fields out of a reference) is refused with the way out.
+The comma form
 `for k, v in &m` and the counted forms are unchanged (`for-tuple-*` cases).
 
 ### 1.3 Missing collection methods (measured, all on `u64[]`)
