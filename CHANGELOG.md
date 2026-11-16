@@ -1,5 +1,10 @@
 ## Unreleased
 
+- `bun tools/bench-rivals.mjs`: every `bench/` program against its C, Rust, Go and Zig twins
+  (`bench/rivals/`), release and debug builds of each, CPU time from `getrusage`, one table with
+  Grail's two builds as ratios to the best competitor of their bar. The numbers and the named
+  reason for every miss are in `docs/design/runtime-parity.md`, "Against other languages".
+
 - A method of a generic written-type impl whose bound the receiver does not meet says so: `v.sort()`
   on a `Point[]` is "`sort` needs `T: order::Ord`, and `Point` does not implement it", with a help
   line naming the impl (`impl<T: order::Ord> T[]`, module `vecs`), where it was "`Point[]` has no
