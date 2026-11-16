@@ -15,7 +15,13 @@ pub struct Place {
     parent: u64,
     status: u64,
     copy: u64,
-    filled: u64
+    filled: u64,
+    // The storage tree downward: the first field made of this place and the next field of its
+    // parent (both one-based, zero for none). A question about "this place and everything inside
+    // it" walks these instead of testing every place the function has made, which made each read
+    // cost the length of the function so far.
+    child: u64,
+    next: u64
 }
 pub struct Loan {
     source: u64,
@@ -32,14 +38,14 @@ pub fn new() -> State {
     return State { places: Place[], loans: Loan[] };
 }
 pub fn root<a>(s: (&a mut State), copy: u64, initialized: u64) -> u64 {
-    s.places.push(Place { parent: 0, status: initialized, copy: copy, filled: initialized });
+    s.places.push(Place { parent: 0, status: initialized, copy: copy, filled: initialized, child: 0, next: 0 });
     return s.places.len();
 }
 // Storage that exists and may be borrowed but holds no value yet: the place a foreign
 // out-parameter is handed, and what `mut r: R;` gives an extern record. `read`/`take` refuse it
 // until `filled` says a write happened.
 pub fn unfilled_slot<a>(s: (&a mut State), copy: u64) -> u64 {
-    s.places.push(Place { parent: 0, status: 1, copy: copy, filled: 0 });
+    s.places.push(Place { parent: 0, status: 1, copy: copy, filled: 0, child: 0, next: 0 });
     return s.places.len();
 }
 pub fn field<a>(s: (&a mut State), parent: u64, copy: u64) -> u64 {
@@ -49,8 +55,11 @@ pub fn field<a>(s: (&a mut State), parent: u64, copy: u64) -> u64 {
     mut p = &s.places[parent - 1];
     status := p.status;
     filled := p.filled;
-    s.places.push(Place { parent: parent, status: status, copy: copy, filled: filled });
-    return s.places.len();
+    sibling := p.child;
+    s.places.push(Place { parent: parent, status: status, copy: copy, filled: filled, child: 0, next: sibling });
+    made := s.places.len();
+    exchange(&mut s.places[parent - 1].child, made);
+    return made;
 }
 fn parent_of<a>(s: (&a State), id: u64) -> u64 {
     mut p = &s.places[id - 1];
@@ -97,25 +106,55 @@ fn complete<a>(s: (&a State), id: u64) -> u64 {
     if e != 0 {
         return e;
     }
-    for i in s.places.len() {
-        if ancestor(&s, id, i + 1) {
-            if status(&s, i + 1) != 1 {
-                return 5;
-            }
-        }
+    if !tree_live(&s, id) {
+        return 5;
     }
     return 0;
+}
+// Whether `id` and every place inside it is definitely live.
+fn tree_live<a>(s: (&a State), id: u64) -> bool {
+    if s.places[id - 1].status != 1 {
+        return false;
+    }
+    mut k = s.places[id - 1].child;
+    while k != 0 {
+        if !tree_live(&s, k) {
+            return false;
+        }
+        k = s.places[k - 1].next;
+    }
+    return true;
+}
+// Whether `id` and every place inside it holds a value.
+fn tree_filled<a>(s: (&a State), id: u64) -> bool {
+    if s.places[id - 1].filled == 0 {
+        return false;
+    }
+    mut k = s.places[id - 1].child;
+    while k != 0 {
+        if !tree_filled(&s, k) {
+            return false;
+        }
+        k = s.places[k - 1].next;
+    }
+    return true;
 }
 // 8 when the storage reachable from `id` still holds no value: a record declared without an
 // initializer has zeroed bytes C may fill, but Grail may not read them until it did.
 fn unfilled<a>(s: (&a State), id: u64) -> u64 {
-    for i in s.places.len() {
-        if overlaps(&s, id, i + 1) {
-            mut p = &s.places[i];
-            if p.filled == 0 {
-                return 8;
-            }
+    if id == 0 || s.places.len() < id {
+        return 0;
+    }
+    // What overlaps `id` is what it is inside and what is inside it.
+    mut up = parent_of(&s, id);
+    while up != 0 {
+        if s.places[up - 1].filled == 0 {
+            return 8;
         }
+        up = parent_of(&s, up);
+    }
+    if !tree_filled(&s, id) {
+        return 8;
     }
     return 0;
 }
@@ -147,20 +186,26 @@ pub fn read(s: (&a State), id: u64) -> u64 {
     return conflict(&s, id, 0);
 }
 fn fill_tree<a>(s: (&a mut State), id: u64) -> unit {
-    for i in s.places.len() {
-        if ancestor(&s, id, i + 1) {
-            mut p = &mut s.places[i];
-            exchange(&mut p.filled, 1);
-        }
+    if id == 0 || s.places.len() < id {
+        return ();
+    }
+    exchange(&mut s.places[id - 1].filled, 1);
+    mut k = s.places[id - 1].child;
+    while k != 0 {
+        fill_tree(&mut s, k);
+        k = s.places[k - 1].next;
     }
     return ();
 }
 fn set_tree<a>(s: (&a mut State), id: u64, status: u64) -> unit {
-    for i in s.places.len() {
-        if ancestor(&s, id, i + 1) {
-            mut p = &mut s.places[i];
-            exchange(&mut p.status, status);
-        }
+    if id == 0 || s.places.len() < id {
+        return ();
+    }
+    exchange(&mut s.places[id - 1].status, status);
+    mut k = s.places[id - 1].child;
+    while k != 0 {
+        set_tree(&mut s, k, status);
+        k = s.places[k - 1].next;
     }
     return ();
 }
@@ -370,7 +415,7 @@ pub fn snapshot<a>(s: (&a State)) -> State {
     mut loans = Loan[];
     for i in s.places.len() {
         mut p = &s.places[i];
-        places.push(Place { parent: p.parent, status: p.status, copy: p.copy, filled: p.filled });
+        places.push(Place { parent: p.parent, status: p.status, copy: p.copy, filled: p.filled, child: p.child, next: p.next });
     }
     for i in s.loans.len() {
         mut l = &s.loans[i];
@@ -471,7 +516,17 @@ pub fn merge<a, b>(s: (&a mut State), saved: (&b State)) -> unit {
             state = status(&s, parent);
         }
         filled := p.filled;
-        s.places.push(Place { parent: parent, status: state, copy: copy, filled: filled });
+        // Linked into this state's own tree, as `field` links one (the saved state's links are
+        // its own).
+        mut sibling = 0;
+        if parent != 0 {
+            sibling = s.places[parent - 1].child;
+        }
+        s.places.push(Place { parent: parent, status: state, copy: copy, filled: filled, child: 0, next: sibling });
+        if parent != 0 {
+            made := s.places.len();
+            exchange(&mut s.places[parent - 1].child, made);
+        }
         i = i + 1;
     }
     for i in s.places.len() {

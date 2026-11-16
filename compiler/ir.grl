@@ -79,11 +79,13 @@ pub struct Body {
     uprefix: u8[],
     // 1 when the stream carried any marker, so a single-file build knows to strip them.
     marked: u64,
-    // The expansion-label counter of each unit (1-based index into `uniq_units` of the one being
-    // emitted, 0 before the first). Per unit and kept across a re-entry, like the emitter's own.
+    // How many functions each unit has had so far (`uniq_index` is the 1-based index into
+    // `uniq_units` of the unit being emitted, 0 before the first; `uniq_plain` counts for a stream
+    // without units). Kept across a re-entry of the unit. See function_begin.
     uniq_index: u64,
     uniq_units: u8[][],
     uniq_next: u64[],
+    uniq_plain: u64,
     // ---------------------------------------------------------------------------------------
     // The IR's own layer (docs/design/typed-ir.md, "A typed IR with SSA values"). One entry per
     // instruction: `dval` is the value id it defines (0 none), `use0`/`use1` the values it reads
@@ -594,21 +596,35 @@ pub fn marker<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) -> u64 {
         o.uniq_next.push(0);
     }
     o.uniq_index = k + 1;
-    exchange(&mut o.uniq, o.uniq_next[k]);
     exchange(&mut o.unit, unit);
     exchange(&mut o.uprefix, prefix);
     exchange(&mut o.marked, 1);
     return 1;
 }
 
-// The next expansion label number of the unit being emitted, kept with that unit.
+// A body begins: it is the next function of its unit, and its expansion labels are numbered from
+// that. The number of a label is (the function's ordinal in its unit) * 2^20 + (the label's ordinal
+// in the function), so it depends on nothing but where the function stands in its unit - not on
+// how many labels the functions before it happened to take. That is what lets the bodies of one
+// stream be optimised in separate processes and still come out as the same text
+// (optimize::optimize_parts).
+pub fn function_begin<a>(o: (&a mut Body)) {
+    k := o.uniq_index;
+    mut ordinal = 0;
+    if (k != 0) & (k <= o.uniq_next.len()) {
+        ordinal = o.uniq_next[k - 1] + 1;
+        o.uniq_next[k - 1] = ordinal;
+    } else {
+        // A stream with no unit markers is one unit.
+        ordinal = o.uniq_plain + 1;
+        exchange(&mut o.uniq_plain, ordinal);
+    }
+    exchange(&mut o.uniq, ordinal * 1048576);
+}
+// The next expansion label number of the function being emitted.
 pub fn uniq_take<a>(o: (&a mut Body)) -> u64 {
     n := o.uniq + 1;
     exchange(&mut o.uniq, n);
-    k := o.uniq_index;
-    if (k != 0) & (k <= o.uniq_next.len()) {
-        o.uniq_next[k - 1] = n;
-    }
     return n;
 }
 
@@ -1026,6 +1042,7 @@ pub fn new_body() -> Body {
         uniq_index: 0,
         uniq_units: u8[][],
         uniq_next: u64[],
+        uniq_plain: 0,
         dval: u64[],
         use0: u64[],
         use1: u64[],
