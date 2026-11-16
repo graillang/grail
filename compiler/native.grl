@@ -930,6 +930,8 @@ struct C {
     par_hits: u64,
     // Where the lines the optimiser's cut planning reads were written (optimize::plan_from).
     plan_at: u64[],
+    // The bodies applied from units, for the optimiser (ir::Known).
+    known: ir::Known,
     // Armed (par_start) but not forked yet: the walk forks when it has compiled `par_threshold`
     // bodies the store did not have (par_fork), over the source still ahead of it.
     par_armed: u64,
@@ -15249,9 +15251,13 @@ fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), l
     // The body's opening line, for the cut planning (optimize::plan_from): within its first lines.
     mut k = 0;
     mut seen = 0;
+    mut open = 0;
+    mut found = 0;
     while (k + 6 < u.text.len()) & (seen < 4) {
         if (u.text[k] == 46) & (u.text[k + 1] == 116) & (u.text[k + 2] == 121) & (u.text[k + 3] == 112) & (u.text[k + 4] == 101) & (u.text[k + 5] == 32) {
-            c.plan_at.push(c.out.len() + k);
+            open = c.out.len() + k;
+            found = 1;
+            c.plan_at.push(open);
             break;
         }
         while (k < u.text.len()) & (u.text[k] != 10) {
@@ -15259,6 +15265,30 @@ fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), l
         }
         k += 1;
         seen += 1;
+    }
+    // And its closing line, the frame constant's `.set`, near the end: the optimiser takes the body
+    // from these two lines and keys its memo by the unit (ir::Known); it checks both.
+    if found != 0 {
+        mut q = u.text.len();
+        mut lines = 0;
+        while (6 < q) & (lines < 64) {
+            // `q` is the end of a line; its start is after the newline before it.
+            mut p = q - 1;
+            while (0 < p) && (u.text[p - 1] != 10) {
+                p -= 1;
+            }
+            if (q - p > 6) & (u.text[p] == 46) & (u.text[p + 1] == 115) & (u.text[p + 2] == 101) & (u.text[p + 3] == 116) & (u.text[p + 4] == 32) & (u.text[p + 5] == 46) {
+                c.known.open.push(open);
+                c.known.end.push(c.out.len() + q);
+                c.known.key.push(fncache::hash(view(u.key)));
+                break;
+            }
+            if p == 0 {
+                break;
+            }
+            q = p;
+            lines += 1;
+        }
     }
     c.out.append(view(u.text));
     fn_facts_restore(&mut c, view(u.facts));
@@ -15775,6 +15805,9 @@ fn par_collect<a>(c: (&a mut C), k: u64) -> unit {
     }
     host::close(fd);
     status := host::wait(c.par_pids[k - 1]);
+    mut what = copy_bytes(view("collected-"));
+    decimal(&mut what, k);
+    jobs::phase(view(what));
     jobs::give(&mut c.par_jobs);
     mut whole = (status == 0) & (8 <= data.len());
     if whole {
@@ -15861,6 +15894,11 @@ fn par_record<a, b>(c: (&a mut C), at_off: u64, kind: u64, u: (&b fncache::Unit)
 }
 // A worker has walked past its slice: what it made goes to its parent, and it stops.
 fn par_worker_finish<a>(c: (&a mut C)) -> unit {
+    mut what = copy_bytes(view("worker-"));
+    decimal(&mut what, c.par_me);
+    push_bytes(&mut what, view("-done-sending-bytes-"));
+    decimal(&mut what, c.par_buf.len());
+    jobs::phase(view(what));
     mut end = 4702111234474983745;
     mut tail = u8[];
     for b in 8 {
@@ -44799,6 +44837,7 @@ pub fn main() -> u64 {
         par_jobs: jobs::none(),
         par_hits: 0,
         plan_at: u64[],
+        known: ir::no_known(),
         par_armed: 0,
         par_misses: 0,
         par_threshold: 0,
@@ -45384,6 +45423,7 @@ pub fn main() -> u64 {
     jobs::phase(view("closures"));
     emit_fn_thunk(&mut c);
     emit_drops(&mut c);
+    jobs::phase(view("drop-helpers"));
     // A drop helper can be the first thing to ask for a generic `Drop` implementation's
     // specialisation, so anything it requested is emitted before the helpers are written out.
     helpers_specs := c.specs.len();
@@ -45395,7 +45435,9 @@ pub fn main() -> u64 {
         // Those bodies can name more helpers, and a named helper with no body is an undefined symbol.
         emit_drops(&mut c);
     }
+    jobs::phase(view("helper-specialisations"));
     emit_vtables(&mut c);
+    jobs::phase(view("vtables"));
     // A vtable's drop slot is a helper too, and the bodies emitted above were the first to name
     // some types: one more sweep emits what they named and leaves no symbol undefined.
     emit_drops(&mut c);
@@ -45646,9 +45688,9 @@ pub fn main() -> u64 {
         out = copy_bytes(view(c.out));
     } else {
         if c.split != 0 {
-            out = optimize::optimize_parts(view(c.out), 1, &mut c.marks, &mut c.part_names, &c.facts, c.emit_ir, &mut ir_text, &replay, &mut call_syms, &mut call_counts, view(c.fn_dir), view(c.fn_id), &c.plan_at);
+            out = optimize::optimize_parts(view(c.out), 1, &mut c.marks, &mut c.part_names, &c.facts, c.emit_ir, &mut ir_text, &replay, &mut call_syms, &mut call_counts, view(c.fn_dir), view(c.fn_id), &c.plan_at, &c.known);
         } else {
-            out = optimize::optimize(view(c.out), &c.facts, c.emit_ir, &mut ir_text, &replay, &mut call_syms, &mut call_counts, view(c.fn_dir), view(c.fn_id), &c.plan_at);
+            out = optimize::optimize(view(c.out), &c.facts, c.emit_ir, &mut ir_text, &replay, &mut call_syms, &mut call_counts, view(c.fn_dir), view(c.fn_id), &c.plan_at, &c.known);
         }
         // The check the byte scan used to make, now from the IR: a call site that bypasses the
         // recording helpers is a compiler bug, and a bug here is a silently weaker proof.

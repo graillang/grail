@@ -365,6 +365,19 @@ processes and applied by one.
   s against 15.8-19.1 s, load average near 38), and the variant runs one process more, so the
   parent keeps its slice.
 
+### The optimiser's memo under a unit's key
+
+A body the front end applied from a unit is noted where its opening and closing lines are written
+(`ir::Known`, filled by `fn_apply`). The optimiser takes those bodies from the notes - `run_range`
+scans line by line only the text between them - and keys their memo entries by the unit's key
+(plus the meta it always had: the compiler, the unit, the ordinal, the facts digest, the replay
+range) instead of an xxhash of the body's text. Sound because a unit's text is a function of its
+key, which the identity leg shows; `GRAIL_MEMO_VERIFY=1` optimises every such body again and fails
+on any difference, and `tools/cache-test.mjs` (l) runs it on a warm rebuild of the compiler. Every
+note is checked to be a whole body before it is used. On the compiler's sources a rebuild after a
+one-body edit went from 10.2 to 6.1 CPU seconds in one process, and from 7.8-8.5 to 4.9-5.4 s
+at the default job count (self-built compilers, load average 25-28).
+
 ### The jobserver
 
 `grail build` runs one compiler process per module, each forks optimiser workers, and each now
