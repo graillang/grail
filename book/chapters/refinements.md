@@ -163,6 +163,16 @@ and was removed. Restoring the saving without that copy is planned.
 Predicates travel in interface files, along with the parameters' names, so a caller in another module
 owes - and may prove - exactly what a caller in the same module does.
 
+## A call that can only fail
+
+When the arguments are constants - or names the facts equate with constants (`g := 0`) - that
+break the predicate, the call is not unproved but disproved, and that is a compile error in every
+mode, strict or not:
+
+```
+error: the refinement `grain > 0` is false at this call: the arguments are constants that break it
+```
+
 ## Strict mode
 
 `--strict-refinements`, `@strict;` at the top of a module, or `@strict` before a declaration turn

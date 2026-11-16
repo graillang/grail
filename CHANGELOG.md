@@ -1,5 +1,9 @@
 ## Unreleased
 
+- A call whose constant arguments break the callee's predicate (`split(v, 0, f)` with
+  `grain: u64 where grain > 0`) is a compile error in every mode; it used to compile and fail at
+  run time. Only constants, and names the facts equate with one, are judged false.
+
 - **Fixed: memory corruption after a proved call to a refined function.** The `.proved` entry
   that let a proved call skip the parameter checks was a byte copy of the prologue taken before the
   optimiser rewrote it: it did not save the callee-saved registers the epilogue restores, so the

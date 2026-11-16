@@ -7215,7 +7215,7 @@
   },
   {
     "name": "refinement-param-violated",
-    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\nfn main() -> u64 {\n    println(take(16));\n    println(take(17));\n    return 0;\n}\n",
+    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\nfn main() -> u64 {\n    println(take(16));\n    println(take(seventeen()));\n    return 0;\n}\nfn seventeen() -> u64 {\n    return 17;\n}\n",
     "signal": "SIGABRT",
     "stderr": [
       "error: refinement violated: align % 16 == 0\n --> ",
@@ -7598,7 +7598,7 @@
   },
   {
     "name": "refinement-strict-unproved",
-    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\nfn main() -> u64 {\n    println(take(17));\n    return 0;\n}\n",
+    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\nfn main() -> u64 {\n    n := seventeen();\n    println(take(n));\n    return 0;\n}\nfn seventeen() -> u64 {\n    return 17;\n}\n",
     "reject": true,
     "flags": [
       "--strict-refinements"
@@ -7607,7 +7607,7 @@
       "cannot prove the refinement `align % 16 == 0`",
       "= the facts at the call do not settle it",
       "= the facts in scope were:",
-      "input.grl:6:"
+      "input.grl:7:"
     ],
     "targets": [
       "x86_64",
@@ -7621,7 +7621,7 @@
   },
   {
     "name": "refinement-strict-attribute-fn",
-    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\n@strict\nfn caller() -> u64 {\n    return take(17);\n}\n\nfn main() -> u64 {\n    println(caller());\n    return 0;\n}\n",
+    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\n@strict\nfn caller() -> u64 {\n    return take(seventeen());\n}\n\nfn main() -> u64 {\n    println(caller());\n    return 0;\n}\nfn seventeen() -> u64 {\n    return 17;\n}\n",
     "reject": true,
     "diagnostic": [
       "cannot prove the refinement `align % 16 == 0`",
@@ -7771,7 +7771,7 @@
   },
   {
     "name": "refinement-strict-generic-unproved",
-    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\n@strict\nfn pick<T>(x: T) -> u64 {\n    return take(17);\n}\n\nfn main() -> u64 {\n    println(pick<u64>(3));\n    return 0;\n}\n",
+    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\n@strict\nfn pick<T>(x: T) -> u64 {\n    return take(seventeen());\n}\n\nfn main() -> u64 {\n    println(pick<u64>(3));\n    return 0;\n}\nfn seventeen() -> u64 {\n    return 17;\n}\n",
     "reject": true,
     "diagnostic": [
       "cannot prove the refinement `align % 16 == 0`",
@@ -10623,8 +10623,7 @@
       "--strict-refinements"
     ],
     "diagnostic": [
-      "cannot prove the refinement `i == 0`",
-      "input.grl:11:"
+      "the refinement `i == 0` is false at this call"
     ],
     "targets": [
       "x86_64",
@@ -10634,7 +10633,7 @@
     "backends": [
       "native"
     ],
-    "note": "a fact about an inner binding ends with its block: the outer name is a different value"
+    "note": "a fact about an inner binding ends with its block: the outer name is a different value - after the block `i` is the outer 4 again, so the call is not only unproved but false, a compile error in every mode"
   },
   {
     "name": "refinement-loop-invariant-name-still-proved",
@@ -13531,5 +13530,50 @@
       "riscv64"
     ],
     "note": "an owned parameter beside a refined one, called with a proved argument, then the heap is used again and the end-of-main allocator balance check runs: the old second entry restored callee-saved registers it never saved and corrupted the caller"
+  },
+  {
+    "name": "refinement-proved-false-constant",
+    "source": "fn split(v: &u64[], grain: u64 where grain > 0) -> u64 {\n    return v.len() / grain;\n}\nfn main() {\n    v := u64[1, 2, 3, 4];\n    println(split(&v, 2));\n    println(split(&v, 0));\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "the refinement `grain > 0` is false at this call: the arguments are constants that break it"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a constant argument that breaks the predicate is a compile error without @strict: the call could only fail"
+  },
+  {
+    "name": "refinement-proved-false-constant-wrap",
+    "source": "fn split(v: &u64[], grain: u64 where grain > 0) -> u64 {\n    return v.len() / grain;\n}\nfn main() {\n    v := u64[1, 2, 3, 4];\n    println(split(&v, 2));\n    println(split(&v, 0));\n}\n",
+    "reject": true,
+    "flags": [
+      "--overflow=wrap"
+    ],
+    "diagnostic": [
+      "the refinement `grain > 0` is false at this call: the arguments are constants that break it"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a constant argument that breaks the predicate is a compile error without @strict: the call could only fail"
+  },
+  {
+    "name": "refinement-proved-false-bound-constant",
+    "source": "fn split(v: &u64[], grain: u64 where grain > 0) -> u64 {\n    return v.len() / grain;\n}\nfn main() {\n    v := u64[1, 2, 3, 4];\n    g := 0;\n    println(split(&v, g));\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "the refinement `grain > 0` is false at this call"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a name the facts equate with a constant (`g := 0`) is read as that constant"
   }
 ]

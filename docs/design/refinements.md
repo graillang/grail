@@ -311,6 +311,13 @@ record - the same renaming a call's arguments get. The no-`&mut` rule extends to
 predicate mentions; a trusted root's reader fact becomes `r.lo <= r.hi`; the interface carries the
 text and the field list.
 
+## A disproved obligation (2026-11-16)
+
+At a call, an obligation whose sides are integer literals, or names the facts equate with one, and
+which does not hold of them is a compile error in every mode (`pv_false_literal`, `pv_false_fail`):
+the call can only fail. Nothing but constants is judged false, so an obligation that is merely
+unproved keeps its check.
+
 ## Verification
 
 A `--use DIR` build is the one place a proof is not available: the interface carries the predicate's

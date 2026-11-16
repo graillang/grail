@@ -9036,6 +9036,55 @@ fn pv_proved<a, b>(c: (&a mut C), pred: Pred, names: (&a u8[][]), terms: (&a u8[
     }
     return 1;
 }
+// Whether an obligation is false outright: its sides are integer literals, or names the facts equate
+// with one (`n := 0`), and the comparison or the divisibility does not hold of them. Nothing else is
+// judged false - an unproved obligation stays a check.
+fn pv_false_literal<a, b>(facts: (&a Atom[]), rel: u64, x: &b [u8], y: &b [u8], k: i64) -> bool {
+    a := pv_resolve(&facts, view(x));
+    if !pv_digits(view(a)) {
+        return false;
+    }
+    av := pv_number(view(a));
+    if rel == 3 {
+        return (0 < k) & (av % k != 0);
+    }
+    if rel > 2 {
+        return false;
+    }
+    mut bv: i64 = 0;
+    if y.len() != 0 {
+        b := pv_resolve(&facts, view(y));
+        if !pv_digits(view(b)) {
+            return false;
+        }
+        bv = pv_number(view(b));
+    }
+    mut bad = 0;
+    rhs := pv_k_sum(bv, k, &mut bad);
+    if bad != 0 {
+        return false;
+    }
+    if rel == 0 {
+        return !(av < rhs);
+    }
+    if rel == 1 {
+        return !(av <= rhs);
+    }
+    return av != rhs;
+}
+fn pv_false_fail<a, b>(c: (&a mut C), pred: Pred, pos: u64, need: &b [u8]) -> unit {
+    text := pred_text(&mut c, pred);
+    mut msg = copy_bytes(view("the refinement `"));
+    push_bytes(&mut msg, view(text));
+    push_bytes(&mut msg, view("` is false at this call: the arguments are constants that break it"));
+    if need.len() != 0 {
+        push_bytes(&mut msg, view("\n = "));
+        push_bytes(&mut msg, view(need));
+    }
+    exchange(&mut c.pos, pos);
+    fail(&mut c, view(msg));
+    return ();
+}
 // A call the prover cannot discharge. Strict mode reports it here, at the call, with the predicate
 // and the reason; otherwise the check stays and the call keeps the checked entry.
 fn pv_call_give_up<a, b, d>(c: (&a mut C), report: u64, pred: Pred, at: u64, need: &b [u8], why: &d [u8]) -> u64 {
@@ -9210,6 +9259,11 @@ fn pv_call_proved<a>(c: (&a mut C), f: u64, count: u64, spans: (&a u64[]), at: u
                 } else {
                     ok = pv_holds(&facts, rel, view(x), view(y), k);
                 }
+            }
+            if !ok & (x.len() != 0) & pv_false_literal(&facts, rel, view(x), view(y), k) {
+                // Not unproved but disproved: the arguments are constants that break the predicate,
+                // so the call can only fail. That is a wrong program in every mode.
+                pv_false_fail(&mut c, Pred { file: pf, lo: plo, hi: phi }, at, view(need));
             }
             if !ok {
                 return pv_call_give_up(&mut c, report, Pred { file: pf, lo: plo, hi: phi }, at, view(need), view("the facts at the call do not settle it"));
