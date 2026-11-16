@@ -86,12 +86,14 @@ only by its forker, after it has seen the job done.
 descends into the lower half, joining on the way back; the leaf boundaries are a function of the
 element count and the requested chunks, never of who ran what.
 
-**Joining.** A forker that reaches its join pops its own job deque (the fork is there unless it was
-stolen), else claims by pointer, else the job is running elsewhere: on a worker it *helps* - runs an
-injected job or one stolen from another worker - and when there is nothing to help with it parks
-(a task parks as a task; a plain thread sleeps on the record's state word). Help nests on the
-waiter's stack; each worker records the deepest nesting it saw, and `GRAIL_SCHED_STATS=1` prints
-the maximum at exit.
+**Joining.** A forker that reaches its join claims its job by pointer if it is still pending and
+runs it. If somebody else has it, a waiter on a worker *leapfrogs*: it takes only work forked by
+that job or its descendants (each record names its parent; the claim word names the worker whose
+deque holds the job's forks), so nothing is stacked on it that a sequential run would not have
+stacked there. `rt_job_may_help` is the one place that decides whether to help at all: not off a
+worker, not with less than an eighth of the stack left. With nothing to take, it parks (a task
+parks as a task; a plain thread sleeps on the record's state word). Each worker records the deepest
+help nesting it saw, and `GRAIL_SCHED_STATS=1` prints the maximum at exit.
 
 **Runners.** A worker does not run a job on its scheduler stack. It enters its *runner*, a green
 task whose body claims the handed job, drains the worker's job deque and goes idle. Inside a job
@@ -107,9 +109,9 @@ outstanding - ends the process (status 134, one report), as a pool job's failure
 Containing it needs the failing stack kept alive until every stolen child that borrows its frames
 has finished; that is follow-up F1 in `concurrency-model.md`.
 
-**A hazard that comes with helping.** A stack that holds a `Mutex` across a join may, while
-waiting, pick up a job that wants the same mutex; that job then waits for a lock its own stack
-holds. Do not fork while holding a lock.
+**Locks.** Because help is limited to the waiter's own job's descendants, a join while holding a
+`Mutex` can deadlock only where the sequential program would. When locks are tracked per record a
+waiter that holds one will not help at all.
 
 ## Stacks
 

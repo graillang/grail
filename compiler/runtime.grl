@@ -3060,7 +3060,7 @@ fn rt_parallel_for_chunks(s: u64, chunks: u64, f: u64, env: u64, width: u64) -> 
 // result.
 fn rt_parallel_spawn(f: u64, box: u64) -> u64 {
     rt_jobs_sched();
-    return rt_job_fork(rt_job_boxed, box, f, 0);
+    return rt_job_make(rt_job_boxed, box, f, 0, 0);
 }
 // The one-word heap slot the closure ABI reads: rt_job_boxed passes its address as the callee's
 // first argument, and the callee loads the object from it. Made and freed here, so the box belongs
@@ -3083,8 +3083,10 @@ fn rt_job_boxed(box: u64, f: u64, unused: u64) -> u64 {
 // `parallel_join(handle)` and a handle's drop: the result word, and the record goes back.
 fn rt_job_wait(j: u64) -> u64 {
     rt_region_enter();
-    r := rt_job_join(j);
+    rt_job_await(j);
     rt_region_leave();
+    r := raw_load(j + 40);
+    rt_job_release(j);
     return r;
 }
 // `parallel_with(first, second)`, which is pool::join: `first` is forked as a job and `second` runs
@@ -3639,10 +3641,21 @@ fn rt_worker_run(s: u64, w: u64, t: u64) -> u64 {
 }
 
 // ---- jobs on the scheduler ------------------------------------------------------------------
-// Job record, 64 bytes: 0 function, 8/16/24 its three arguments, 32 state, 40 result,
-// 48 free-list link, 56 acknowledgement of a task waiter's wake.
-// State: 0 free, 1 pending, 2 claimed (running), 3 done, 4 claimed with an OS thread asleep on this
-// word, any larger value claimed with that task waiting.
+// Job record, 128 bytes: 0 function, 8/16/24 its three arguments, 32 state, 40 result,
+// 48 free-list link, 56 acknowledgement of a task waiter's wake, 64 link in its forker's stack list,
+// 72 link in its runner's stack list, 120 parent (the job that was running when this one was
+// forked, 0 at a root).
+// State: 0 free, 1 pending, 3 done, 4 claimed with an OS thread asleep on this word, 2 claimed by a
+// thread that is not a worker, 8 * (i + 1) claimed by worker i (so a waiter knows whose deque the
+// job's own forks land on), any value from 4096 up claimed with that task waiting.
+//
+// THE STACK LIST. Every green task (a runner is one) keeps in word 152 the head of a list of what
+// its stack is in the middle of, newest first: the jobs it forked and has not joined (linked
+// through record word 64) and the jobs it is running (linked through word 72, the head pointer
+// tagged with bit 0). Forks and joins nest, so it is a stack. It gives a fork its parent in one
+// load - the job at the head, or the parent of the fork at the head - and it is non-empty exactly
+// while the stack is inside a parallel region. The top 16 bits of the word count nested helps.
+// A thread that is not a green task keeps no list; its forks are roots.
 //
 // WHERE A RECORD LIVES. Records are carved from mapped pages that are never unmapped and are
 // recycled through free lists, so a record's address always holds *a* job record. That is what
@@ -3736,7 +3749,7 @@ fn rt_job_new() -> u64 {
     if r == 0 {
         j := raw_load(rt_state_jobs());
         rt_spin_lock(j + 24);
-        r = rt_job_carve(j, 32, 64);
+        r = rt_job_carve(j, 32, 128);
         rt_spin_unlock(j + 24);
     }
     raw_store(r + 56, 0);
@@ -3762,15 +3775,62 @@ fn rt_job_release(r: u64) -> u64 {
     rt_spin_unlock(j + 24);
     return 0;
 }
+// The task whose stack list this code is on, or 0: a green task or a runner. A thread-per-task
+// task keeps its thread handle in word 152 and is not containable anyway.
+fn rt_job_stack() -> u64 {
+    t := rt_current();
+    if t == 0 {
+        return 0;
+    }
+    if rt_task_threads() && (raw_load(t + 104) != 3) {
+        return 0;
+    }
+    return t;
+}
+fn rt_list_head(t: u64) -> u64 {
+    return raw_load(t + 152) & 281474976710655;
+}
+fn rt_list_set(t: u64, head: u64) -> u64 {
+    raw_store(t + 152, (raw_load(t + 152) & 18446462598732840960) | head);
+    return 0;
+}
+// The claim word a caller writes: which worker's deque the job's own forks will land on.
+fn rt_job_claim_word() -> u64 {
+    w := rt_worker_self();
+    if w == 0 {
+        return 2;
+    }
+    return (raw_load(w + 40) + 1) * 8;
+}
 // A new pending job fn(a, b, c), queued where a worker can find it: on this worker's job deque, or
 // in the injection ring from any other thread. When neither has room the job is simply not queued;
-// it stays pending and its forker runs it at the join.
+// it stays pending and its forker runs it at the join. `listed` forks are the structured ones - the
+// forker joins them before its frame returns - and go on the forker's stack list; a job handle is
+// not listed, because it owns its captures and may be joined by anyone.
 fn rt_job_fork(f: u64, a: u64, b: u64, c: u64) -> u64 {
+    return rt_job_make(f, a, b, c, 1);
+}
+fn rt_job_make(f: u64, a: u64, b: u64, c: u64, listed: u64) -> u64 {
     r := rt_job_new();
     raw_store(r, f);
     raw_store(r + 8, a);
     raw_store(r + 16, b);
     raw_store(r + 24, c);
+    mut parent = 0;
+    t := rt_job_stack();
+    if t != 0 {
+        head := rt_list_head(t);
+        if (head & 1) != 0 {
+            parent = head - 1;
+        } else if head != 0 {
+            parent = raw_load(head + 120);
+        }
+        if listed != 0 {
+            raw_store(r + 64, head);
+            rt_list_set(t, r);
+        }
+    }
+    raw_store(r + 120, parent);
     raw_atomic_store(r + 32, 1);
     w := rt_worker_self();
     mut placed = 0;
@@ -3821,12 +3881,21 @@ fn rt_job_steal(s: u64, w: u64) -> u64 {
     }
     return 0;
 }
-// Run a job this caller has claimed, and publish it. The swap is the last touch of the record
-// unless a task had registered as the waiter: that task is woken and then told so, because it must
-// not carry a wake that arrives after it has moved on.
+// Run a job this caller has claimed, and publish it. While it runs it is at the head of this
+// stack's list, so its forks know their parent. The swap is the last touch of the record unless a
+// task had registered as the waiter: that task is woken and then told so, because it must not carry
+// a wake that arrives after it has moved on.
 fn rt_job_exec(r: u64) -> u64 {
+    t := rt_job_stack();
+    if t != 0 {
+        raw_store(r + 72, rt_list_head(t));
+        rt_list_set(t, r + 1);
+    }
     res := raw_call3(raw_load(r), raw_load(r + 8), raw_load(r + 16), raw_load(r + 24));
     raw_store(r + 40, res);
+    if t != 0 {
+        rt_list_set(t, raw_load(r + 72));
+    }
     old := rt_atomic_swap(r + 32, 3);
     if old == 4 {
         rt_syscall(202, r + 32, 129, 2147483647);
@@ -3836,29 +3905,105 @@ fn rt_job_exec(r: u64) -> u64 {
     }
     return 0;
 }
-// A job found while waiting for another one, run on top of the waiter's frames. The depth of that
-// nesting is counted in the high half of the running task's word 152 and its high-water mark kept
-// per worker (word 264): a helped job that waits parks every join beneath it on this stack, and
-// the mark is how that risk is measured (GRAIL_SCHED_STATS=1 prints it at exit).
+// A job run on top of a waiter's frames. The depth of that nesting is counted in the top 16 bits
+// of the running task's word 152 and its high-water mark kept per worker (word 264);
+// GRAIL_SCHED_STATS=1 prints it at exit.
 fn rt_job_help(w: u64, r: u64) -> u64 {
     t := rt_current();
-    raw_store(t + 152, raw_load(t + 152) + 4294967296);
-    depth := raw_load(t + 152) / 4294967296;
+    raw_store(t + 152, raw_load(t + 152) + 281474976710656);
+    depth := raw_load(t + 152) / 281474976710656;
     if raw_load(w + 264) < depth {
         raw_store(w + 264, depth);
     }
     rt_job_exec(r);
-    raw_store(t + 152, raw_load(t + 152) - 4294967296);
+    raw_store(t + 152, raw_load(t + 152) - 281474976710656);
     return 0;
+}
+// An address inside the calling frame, which is where the stack is now.
+fn rt_frame() -> u64 {
+    mut here = 0;
+    p := &mut here;
+    return p;
+}
+// May this waiter run another job on top of its own frames? This is the one place that decides.
+//   - Only on a worker: a thread that is not one takes back its own forks and nothing else.
+//   - Only with room: at least an eighth of the stack left above the guard page. The job that would
+//     be run is one this stack would have run anyway (rt_job_leap), so the room is a safety net
+//     for the runtime's own frames, not the bound. Where the stack's bounds are not known (a
+//     Windows fiber) the bound below is all there is.
+//   - (When locks are tracked per record: not while this stack holds one. docs/design/
+//     concurrency-model.md, 2.1.)
+fn rt_job_may_help(w: u64) -> u64 {
+    if w == 0 {
+        return 0;
+    }
+    t := rt_current();
+    if t == 0 {
+        return 0;
+    }
+    base := raw_load(t + 8);
+    if base != 0 {
+        if rt_frame() < base + 4096 + raw_load(t + 16) / 8 {
+            return 0;
+        }
+    }
+    return 1;
+}
+// Is job `k` a descendant of job `r`? Parents are followed a bounded number of steps; the walk
+// reads records that may be recycled under it, which is safe (records are never unmapped) and is
+// checked again after the claim, when `k`'s ancestors can no longer change: each of them is inside
+// a join waiting for the next.
+fn rt_job_descends(k: u64, r: u64) -> u64 {
+    mut at = k;
+    mut steps = 0;
+    while (at != 0) & (steps < 64) {
+        if at == r {
+            return 1;
+        }
+        at = raw_load(at + 120);
+        steps += 1;
+    }
+    return 0;
+}
+// Leapfrogging: the only work a waiter takes while its job `r` runs elsewhere is a job forked by
+// `r` or by one of `r`'s descendants - work this stack would have run inside `r` had `r` not been
+// stolen. So nothing is ever stacked on a waiter that a sequential run would not have stacked
+// there: a program whose joins fit its stack one after another fits it in parallel, however many
+// workers steal. (Taking any job - the first version - let unrelated work pile up on one stack: a
+// help depth of 29 on a recursion 21 deep, and no bound but the guard page.)
+// `claimed` is the state word seen: it names the worker that took `r`, whose deque is where
+// `r`'s forks are. Only the oldest entry there is looked at; anything else is left for its owner.
+fn rt_job_leap(s: u64, r: u64, claimed: u64) -> u64 {
+    if (claimed < 8) | (4095 < claimed) {
+        return 0;
+    }
+    index := claimed / 8 - 1;
+    if raw_load(s + 32) <= index {
+        return 0;
+    }
+    v := raw_load(raw_load(s + 72) + index * 8) + 128;
+    head := raw_atomic_load(v + 8);
+    tail := raw_atomic_load(v + 16);
+    if tail <= head {
+        return 0;
+    }
+    k := raw_load(raw_load(v) + (head & raw_load(v + 24)) * 8);
+    if (k == 0) | (k == r) {
+        return 0;
+    }
+    if rt_job_descends(k, r) == 0 {
+        return 0;
+    }
+    if raw_atomic_cas(v + 8, head, head + 1) != head {
+        return 0;
+    }
+    return k;
 }
 // Return when job `r`, forked by the caller, is done.
 //
-// On a worker: take this worker's own job entries first, newest first. The entry for `r` is among
-// them unless a thief has it or the caller's task migrated; anything above it is either stale or
-// work this stack forked later, and running it is progress. With the deque empty, claim `r` by
-// pointer if it is still pending. Otherwise somebody else is running it: help - an injected job or
-// one stolen from another worker - and when there is nothing to help with, wait.
-// Off a worker: claim `r` by pointer or sleep. Nothing else is taken.
+// Still pending: claim it by pointer and run it here; its queue entry, usually the newest in this
+// worker's deque, is taken out (an entry that is not it goes back). Claimed by someone else: on a
+// worker with room, leapfrog; otherwise, and when there is nothing to leapfrog, wait.
 fn rt_job_await(r: u64) -> u64 {
     s := raw_atomic_load(raw_state() + 72);
     mut idle = 0;
@@ -3868,35 +4013,45 @@ fn rt_job_await(r: u64) -> u64 {
             return 0;
         }
         w := rt_worker_self();
-        mut k = 0;
-        if w != 0 {
-            k = rt_deque_pop(w + 128);
-        }
-        if (k == 0) & (st == 1) {
-            k = r;
-        }
-        if (k == 0) & (w != 0) {
-            k = rt_job_inject_pop();
-            if k == 0 {
-                k = rt_job_steal(s, w);
-            }
-        }
-        if k != 0 {
-            idle = 0;
-            if raw_atomic_cas(k + 32, 1, 2) == 1 {
-                if k == r {
-                    rt_job_exec(r);
-                    return 0;
+        if st == 1 {
+            if raw_atomic_cas(r + 32, 1, rt_job_claim_word()) == 1 {
+                if w != 0 {
+                    k := rt_deque_pop(w + 128);
+                    if (k != 0) & (k != r) {
+                        rt_deque_push(w + 128, k);
+                    }
                 }
-                rt_job_help(w, k);
+                rt_job_exec(r);
+                return 0;
             }
         } else {
-            // A stolen join usually finishes within microseconds: look a few more times before
-            // paying for a park and a wake.
-            idle += 1;
-            if 64 < idle {
-                rt_job_park(r);
+            mut k = 0;
+            if rt_job_may_help(w) != 0 {
+                k = rt_job_leap(s, r, st);
+            }
+            if k != 0 {
                 idle = 0;
+                if raw_atomic_cas(k + 32, 1, rt_job_claim_word()) == 1 {
+                    if rt_job_descends(k, r) != 0 {
+                        rt_job_help(w, k);
+                    } else {
+                        // The record was recycled between the look and the claim: this is some
+                        // other job. Give it back, where a worker will find it.
+                        raw_atomic_store(k + 32, 1);
+                        if rt_deque_push(w + 128, k) == 0 {
+                            rt_job_inject_push(k);
+                        }
+                        rt_notify(s);
+                    }
+                }
+            } else {
+                // A stolen join usually finishes within microseconds: look a few more times before
+                // paying for a park and a wake.
+                idle += 1;
+                if 64 < idle {
+                    rt_job_park(r);
+                    idle = 0;
+                }
             }
         }
     }
@@ -3906,9 +4061,16 @@ fn rt_job_await(r: u64) -> u64 {
 // the finisher wakes it and acknowledges, and the task leaves only after the acknowledgement, with
 // no wake left pending. A plain OS thread sleeps on the state word itself.
 fn rt_job_park(r: u64) -> u64 {
+    st := raw_atomic_load(r + 32);
+    if (st == 1) | (st == 3) {
+        return 0;
+    }
     me := rt_current();
     if me != 0 {
-        if raw_atomic_cas(r + 32, 2, me) == 2 {
+        if 4095 < st {
+            return 0;
+        }
+        if raw_atomic_cas(r + 32, st, me) == st {
             while raw_atomic_load(r + 32) != 3 {
                 rt_suspend(me);
             }
@@ -3919,42 +4081,43 @@ fn rt_job_park(r: u64) -> u64 {
         }
         return 0;
     }
-    st := raw_atomic_cas(r + 32, 2, 4);
-    if (st == 2) | (st == 4) {
-        rt_syscall(202, r + 32, 128, 4);
+    if st != 4 {
+        if raw_atomic_cas(r + 32, st, 4) != st {
+            return 0;
+        }
     }
+    rt_syscall(202, r + 32, 128, 4);
     return 0;
 }
+// Join a listed fork: it is the newest entry of this stack's list, and leaves it here.
 fn rt_job_join(r: u64) -> u64 {
     rt_job_await(r);
+    t := rt_job_stack();
+    if t != 0 {
+        rt_list_set(t, raw_load(r + 64));
+    }
     res := raw_load(r + 40);
     rt_job_release(r);
     return res;
 }
-// A parallel region: from the first fork to the last join. The low half of task word 152 counts
-// them (rt_containable reads it). Thread-per-task tasks keep their thread handle in that word and
-// are not containable anyway.
+// A thread that is not running a task counts its parallel regions in thread-record word 24, in
+// steps of 16 so the word never reads as a worker marker: inside a region it may fail at the same
+// moment as a worker running a sibling leaf, so it reports as a runtime thread does
+// (rt_abort_signals) - status 134, not a signal that can race the exit. A task needs no count: its
+// stack list is non-empty exactly while it is inside one.
 fn rt_region_enter() -> u64 {
-    return rt_region_step(1, 16);
+    return rt_region_step(16);
 }
 fn rt_region_leave() -> u64 {
-    return rt_region_step(wrapping_sub(0, 1), wrapping_sub(0, 16));
+    return rt_region_step(wrapping_sub(0, 16));
 }
-// A thread that is not running a task counts its regions in thread-record word 24, in steps of 16
-// so the word never reads as a worker marker: inside a region it may fail at the same moment as a
-// worker running a sibling leaf, so it reports as a runtime thread does (rt_abort_signals) - status
-// 134, not a signal that can race the exit.
-fn rt_region_step(task: u64, thread: u64) -> u64 {
-    t := rt_current();
-    if t != 0 {
-        if rt_task_threads() == 0 {
-            raw_store(t + 152, wrapping_add(raw_load(t + 152), task));
-        }
+fn rt_region_step(by: u64) -> u64 {
+    if rt_current() != 0 {
         return 0;
     }
     tp := raw_tp_get();
     if tp != 0 {
-        raw_store(tp + 24, wrapping_add(raw_load(tp + 24), thread));
+        raw_store(tp + 24, wrapping_add(raw_load(tp + 24), by));
     }
     return 0;
 }
@@ -3971,7 +4134,7 @@ fn rt_region_step(task: u64, thread: u64) -> u64 {
 //
 // A runner is a task record (256 bytes from the jobs block, not the allocator: it is
 // infrastructure and must not count as a live allocation at exit): callback rt_runner_main, handle
-// word 104 = 3 marks it, word 152 starts at 1 so a failure inside a job is never contained, and its
+// word 104 = 3 marks it, word 152 is its stack list like any task's, and its
 // cancel token is a word that stays zero.
 fn rt_runner_new() -> u64 {
     j := raw_load(rt_state_jobs());
@@ -3988,7 +4151,6 @@ fn rt_runner_new() -> u64 {
     raw_store(t + 64, 2);
     raw_store(t + 72, j + 64);
     raw_store(t + 104, 3);
-    raw_store(t + 152, 1);
     return t;
 }
 fn rt_runner_free(t: u64) -> u64 {
@@ -4018,7 +4180,7 @@ fn rt_runner_main(t: u64, unused: u64) -> u64 {
             rt_os_ctx_leave(t);
             raw_atomic_store(t + 24, 0);
         } else {
-            if raw_atomic_cas(j + 32, 1, 2) == 1 {
+            if raw_atomic_cas(j + 32, 1, rt_job_claim_word()) == 1 {
                 rt_job_exec(j);
             }
         }

@@ -132,8 +132,8 @@ Three things, and one of them removed work rather than adding it.
   decision B5a.
 
 A job that waits - sleeps, reads a descriptor, joins a task - does not hold a worker: it parks the
-way a task does and another worker's job runs meanwhile. Do not fork while holding a `Mutex`: a
-thread waiting in a join helps with other jobs, and one of them may want that lock.
+way a task does and another worker's job runs meanwhile. A thread waiting in a join helps only with work its own
+forked job created, so joining while holding a `Mutex` is safe unless that work takes the same lock.
 
 What it still does not do: a failure inside a parallel call is still a process abort (a stolen
 branch may be borrowing the failing stack's frames, so that stack cannot simply be discarded),

@@ -21,8 +21,9 @@
   - `pool::wait(pool::spawn(f))` from a thread that waits at once may now run `f` on that thread.
   - `GRAIL_SCHED_STATS=1` prints the worker count and the deepest nesting of helped jobs at exit.
   - Still a process abort: a failed check inside a parallel call (follow-up F1 in
-    `docs/design/concurrency-model.md`). New: do not fork while holding a `Mutex` - a thread waiting
-    in a join helps with other jobs, and one of them may want that lock.
+    `docs/design/concurrency-model.md`). A thread waiting in a join helps only with work forked by the job
+    it waits for, and not at all with less than an eighth of its stack left, so helping never
+    stacks more on a stack than the sequential program would.
   `docs/design/scheduler.md` ("Jobs") is the mechanism; `lib/pool.grl`'s signatures are unchanged.
 - `host::now_us()`: the monotonic clock in microseconds, beside `host::now_ms()`. A frame time or
   the cost of a join is not measurable in whole milliseconds; `bench/frame.grl` and

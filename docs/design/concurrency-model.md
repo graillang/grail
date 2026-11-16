@@ -239,19 +239,21 @@ Mechanics (replaces `rt_pool_*`):
   forgets it and makes a fresh one, and the parked runner is resumed by any worker, finishes its
   job and ends. The non-waiting path pays nothing for this. It also gives every job the overflow
   report tasks have (before: SIGSEGV [P6]).
-- While a stolen job is outstanding, a waiting worker takes from its own job deque first and
-  steals only jobs of the same or a higher class than the one it waits for (one class until
-  stage 5). Help nests on the waiter's stack; each worker keeps the high-water mark of that
-  nesting and `GRAIL_SCHED_STATS=1` prints it.
-- A stack that holds a `Mutex` across a join can pick up, while helping, a job that wants the same
-  mutex. Do not fork while holding a lock; the callback-scoped guard makes the offending shape
-  visible (a parallel call inside `lock_with`).
-- A thread that is not a worker (main, render) may fork jobs. It pushes to the injection queue of
-  the scope's class and **helps with jobs of its own scope only** - never an unrelated job, the
-  reason the pool gives for not helping at all [V runtime.grl:2840-2844].
-- A parallel loop is recursive halving down to a grain: `log2(n/grain)` steal-able records, no
-  job array, no descriptor allocation. The grain and the split are functions of `n` and `grain`
-  only, never of the worker count (2.9).
+- **Help is bounded (stage 1, second step).** While its job runs elsewhere, a waiter takes only
+  work forked by that job or its descendants - *leapfrogging*: each record names its parent, and a
+  job's claim word names the worker that took it, whose deque is where its forks are. So nothing is
+  stacked on a waiter that a sequential run would not have stacked there, and a program whose joins
+  fit its stack one after another fits it in parallel. On top of that, one function
+  (`rt_job_may_help`) refuses any help when less than an eighth of the stack is left, and that is
+  where the held-lock test goes when locks are tracked per record. The first version took *any*
+  job (help depth 17-29 on `fib(32)`, bounded only by the guard page). Measured against it, on a
+  loaded machine: `fib(32)` by join 9.4 -> 8.8 ms, frame p99 11.9 -> 8.2 ms, join 2.7 -> 3.3 us
+  (within its range): no cost found. Each worker keeps the high-water mark of help nesting and
+  `GRAIL_SCHED_STATS=1` prints it.
+- A stack that holds a `Mutex` across a join helps only with its own job's descendants, so it can
+  deadlock only where the sequential program would (a descendant taking the same lock). When the
+  sync work tracks held locks per record, a waiter that holds any lock will not help at all
+  (`sched-join-while-holding-mutex-does-not-deadlock`).
 
 The known cost of helping: a helper that picks up a job which then *waits* parks the joins beneath
 it on the same stack. That is why waiting in a job is legal but discouraged, and why the proof
