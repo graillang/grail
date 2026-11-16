@@ -12,24 +12,25 @@ three modules below are the ones a first program usually reaches for.
 
 ## Strings
 
-`strings` works on byte text: its functions take readonly `&[u8]` views, so a `string` is passed as
-`view(text)`, and the ones that build text return an owned `u8[]` that `.text()` turns back into a
-`string`. Searching answers with an index or with `None`, and parsing answers with `Some(value)` or
-`None` rather than stopping the program.
+`strings` works on byte text, and its operations are methods on the text itself: a `string`, a
+`u8[]` and a `&[u8]` view are all byte text, so `text.find(...)` reads the same whichever of them
+`text` is (a value receiver is viewed for the call, so nothing is copied). The ones that build text
+return an owned `u8[]` that `.text()` turns back into a `string`. Searching answers with an index or
+with `None`, and parsing answers with `Some(value)` or `None` rather than stopping the program.
 
 ```grl
 use strings;
 
 fn main() {
     text := "Grail by example".text();
-    assert(strings::starts_with(view(text), view("Grail")));
-    assert(strings::ends_with(view(text), view("example")));
-    start := strings::find(view(text), view(" by "))!;    // Some(index); ! aborts on None
-    replaced := strings::replace(view(text), view("example"), view("code"));
+    assert(text.starts_with(view("Grail")));
+    assert(text.ends_with(view("example")));
+    start := text.find(view(" by "))!;                    // Some(index); ! aborts on None
+    replaced := text.replace(view("example"), view("code"));
     println(replaced);
-    println(strings::from_u64(start));
+    println(strings::from_u64(start));                    // a constructor, so a free function
     println(strings::from_i64(-42));
-    match strings::parse_u64(view("18446744073709551615")) {
+    match view("18446744073709551615").parse_u64() {
         Some(value) => { println(value); },
         None => { println("not a number"); }
     }
@@ -37,11 +38,15 @@ fn main() {
 ```
 
 `find` returns the byte index of the first occurrence, `contains` is its boolean form, and
-`replace`, `split`, `trim`, `join_with`, `to_upper`, `to_lower`, `repeat` and `chars` cover the
-everyday cases. `parse_u64` accepts decimal digits only and rejects empty input, a stray character
-and overflow; `parse_i64` also accepts a leading `-` and checks the signed range. `from_u64` and
-`from_i64` are their inverse. Building a line from parts needs no library call: `format("{} of {}",
-done, total)` is a builtin and returns a `string`, which is what `println` uses.
+`starts_with`, `ends_with`, `replace`, `split`, `trim`, `join_with`, `to_upper`, `to_lower`, `repeat`
+and `chars` cover the everyday cases - `chars`, `split`, `trim`, `replace`, `repeat`, `starts_with`,
+`ends_with` and `to_upper`/`to_lower` are the compiler's own methods on text, the rest are `strings`.
+`lines` and `split_whitespace` split text into its lines and its words. `parse_u64` accepts decimal
+digits only and rejects empty input, a stray character and overflow; `parse_i64` also accepts a
+leading `-` and checks the signed range. `from_u64` and `from_i64` are their inverse, and they are
+free functions because the receiver would be the number, not the text - `value.text()` is the
+builtin that turns a number into a `string`. Building a line from parts needs no library call:
+`format("{} of {}", done, total)` is a builtin and returns a `string`, which is what `println` uses.
 
 ## Errors
 

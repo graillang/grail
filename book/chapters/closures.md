@@ -55,7 +55,7 @@ reach, is rejected.
 
 ```grl
 groups := &b.groups;
-vecs::sort_by(&mut order, |x: &u64, y: &u64| -> bool {
+order.sort_by(|x: &u64, y: &u64| -> bool {
     gx := &groups[*x];
     gy := &groups[*y];
     return gx.depth > gy.depth;
@@ -68,24 +68,25 @@ bind the reference itself, or reach the value through one.
 ## Sorting with a closure
 
 A closure's parameters may be references, borrowed afresh on each call, so a closure works as a
-comparator. `vecs::sort_by` sorts stably: elements that compare equal keep their order.
+comparator. `v.sort_by(...)` sorts stably: elements that compare equal keep their order.
 
 {{example:sorting}}
 
 Any function with a matching signature can be passed where a callback is expected, so
-`vecs::sort_by(&mut tasks, by_priority)` works too. `vecs::sort_by_key` sorts by a computed `u64`
-key, and `vecs::insert_sorted` / `vecs::binary_search` keep a vector as a sorted set.
+`tasks.sort_by(by_priority)` works too. `v.sort_by_key(k)` sorts by a computed `u64` key, and
+`v.insert_sorted(x)` / `v.binary_search(&x)` keep a vector as a sorted set.
 
-The stdlib callbacks that run on your thread, one call at a time — `vecs::map`, `fold`,
-`filter_nums`, `any_num`/`all_num`/`count_num`/`position_num`, `sort_by`, `sort_by_key`, an
-option's `map` and the second callback of `pool::join` — take `FnMut`, so a comparator or predicate
-may write what it captured. To see the result in the caller, capture a `&mut` and write through it;
-a captured number is the closure's own copy:
+The stdlib callbacks that run on your thread, one call at a time — the vector methods `map`,
+`filter`, `filter_map`, `flat_map`, `fold`, `reduce`, `any`, `all`, `count`, `find`, `position`,
+`for_each`, `sort_by` and `sort_by_key`, the iterator adapters on `iter::Iter`, an option's `map`
+and the second callback of `pool::join` — take `FnMut`, so a comparator or predicate may write what
+it captured. To see the result in the caller, capture a `&mut` and write through it; a captured
+number is the closure's own copy:
 
 ```grl
 mut compares = 0;
 counter := &mut compares;
-vecs::sort_by(&mut items, |a: &u64, b: &u64| -> bool { *counter += 1; return *a < *b; });
+items.sort_by(|a: &u64, b: &u64| -> bool { *counter += 1; return *a < *b; });
 println(compares);
 ```
 

@@ -38,9 +38,11 @@ A function that changes bytes takes `&mut [u8]`, and its caller writes `&mut dat
 
 Text values (`string`, `u8[]` and string literals) compare by content with `==` and `<`, join with
 `+`, and answer methods for everyday work: `trim`, `split`, `contains`, `starts_with`, `ends_with`,
-`replace`, `to_upper`, `to_lower`, `is_empty` and `chars`. Prefer the methods; the `strings` module
-keeps only the helpers that are not methods, such as `find`, `parse_num`, `join_with`,
-`char_count` and `push_char`.
+`replace`, `to_upper`, `to_lower`, `is_empty` and `chars`. The rest are `strings` methods on the same
+text: `find`, `parse_u64`, `parse_i64`, `is_utf8`, `utf8_error`, `char_count`, `is_char_boundary`,
+`slice_chars`, `char_indices`, `lines`, `split_whitespace`, `to_text_lossy`, with `chunks`, `windows`
+and `push_char` on a byte vector and `join_with` on a vector of parts. A byte vector, a `string` and a
+view are all byte text, so `bytes.find(x)`, `text.find(x)` and `view(bytes).find(x)` are one method.
 
 {{example:text-methods}}
 
@@ -57,21 +59,22 @@ Also try a non-ASCII greeting and compare its byte length with the number of vis
 
 ## UTF-8
 
-Text is bytes, so "one character" and "one byte" are different questions. The `strings` module
-answers them with Rust's `str` API: `strings::is_utf8(bytes)` validates strictly (an overlong form, a
-surrogate, a value above U+10FFFF and a truncated sequence are all rejected), `strings::utf8_error(bytes)`
-returns the offset of the first ill-formed sequence (`u64?`), and `strings::char_count(bytes)` counts
+Text is bytes, so "one character" and "one byte" are different questions. The `strings` methods
+answer them with Rust's `str` API: `text.is_utf8()` validates strictly (an overlong form, a
+surrogate, a value above U+10FFFF and a truncated sequence are all rejected), `text.utf8_error()`
+returns the offset of the first ill-formed sequence (`u64?`), and `text.char_count()` counts
 characters rather than bytes.
 
-`strings::chars(bytes)` is a lazy iterator of `char` values and `strings::char_indices(bytes)` of
+`strings::chars(text)` is a lazy iterator of `char` values and `text.char_indices()` of
 `(u64, char)` pairs, the number being the byte offset each character starts at. Both are
 `iter::Iter` values, so they chain with `map`, `filter` and `collect` like any other iterator; the
 built-in `.chars()` method decodes eagerly into a `char[]` when a vector is more convenient.
-`strings::is_char_boundary(bytes, i)` answers whether an offset starts a character, and
-`strings::slice_chars(bytes, lo, hi)` cuts at two of them: an offset that is not a boundary stops the
+`text.is_char_boundary(i)` answers whether an offset starts a character, and
+`text.slice_chars(lo, hi)` cuts at two of them: an offset that is not a boundary stops the
 program with a runtime error naming the call site, rather than handing back half a character.
-`strings::encode_utf8(c, &mut out)` and `strings::push_char(&mut out, c)` go the other way, appending
-a `char`'s one to four bytes.
+`strings::encode_utf8(c, &mut out)` and `out.push_char(c)` go the other way, appending a `char`'s one
+to four bytes; `bytes.chunks(n)` and `bytes.windows(n)` are the runs and the sliding windows of a byte
+vector.
 
 Invalid input never stops a decode: it yields one U+FFFD for each **maximal subpart**, the longest
 prefix of a well-formed sequence plus the byte that broke it, which is Unicode's recommended
