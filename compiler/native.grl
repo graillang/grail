@@ -375,7 +375,7 @@ struct DebugFunc {
     params: u64,
     vars: DebugVar[],
     // The label namespace this function's start and end labels were minted in (B1 stage 5): every
-    // label is `.L<unit>_<n>`, so a table that names a label by its number alone would name one the
+    // label is `.L<unit>_<n>`, where <unit> is `<unit prefix>_<function ordinal>`, so a table that names a label by its number alone would name one the
     // unit never emitted. Captured where the function is recorded, i.e. inside its own unit.
     unit: u8[]
 }
@@ -1722,6 +1722,12 @@ fn record_debug_func<a, b, d>(c: (&a mut C), name: &b [u8], module: &d [u8], sit
             }
         );
     }
+    // The function's labels are in its own numbering (scoped_number), and this runs inside it.
+    mut unit = copy_bytes(view(c.lpart));
+    if c.fscope != 0 {
+        unit.push(95);
+        decimal(&mut unit, c.fscope);
+    }
     c
         .debug_funcs
         .push(
@@ -1734,7 +1740,7 @@ fn record_debug_func<a, b, d>(c: (&a mut C), name: &b [u8], module: &d [u8], sit
                 end: site.end,
                 params: site.params,
                 vars: vars,
-                unit: copy_bytes(view(c.lpart))
+                unit: unit
             }
         );
     return ();
