@@ -36,7 +36,12 @@ Facts come from a refined parameter (it holds at entry), the condition of an enc
 (and, in an `else`, the negation of a single comparison), an `assert`, a `for` loop's bounds
 (`for i in v.len()` states `i < v.len()`), a `match` arm's pattern and guard, and a binding of one
 term. A fact dies when it could stop being true: assigning to a name, a method call or a `&mut` on a
-vector (its length), and a call, which may write through any name it is given.
+vector (its length), and a call, which may write through any name it is given. A loop is where that
+rule has to look ahead: the body's first statement runs again after its last one, so every name the
+body assigns, lends out with `&mut` or calls a method on loses its facts *before* the body starts.
+`mut i = 0; while i < 3 { take0(i); i += 1; }` does not prove `i == 0` at the call - the loop's own
+guard `i < 3` is the only fact about `i` in the body - while a name the body never writes keeps
+what was known about it.
 
 ```grl
 fn get(v: &u64[], i: u64 where i < v.len()) -> u64 {
@@ -119,9 +124,13 @@ sound.
 ## Checking the prover itself
 
 `--verify-facts` re-emits the check of every obligation the prover discharged and calls the checked
-entry, so a proof that is wrong aborts instead of passing unnoticed. The corpus runs this way, and no
-check has ever fired: the prover's power is an optimisation, and every step of it is covered by a
-check whose absence is tested.
+entry, so a proof that is wrong aborts instead of passing unnoticed. The corpus runs this way. The
+prover has been wrong once: a fact stated before a loop was still believed inside it after the body
+had written the name, and that was found by review rather than by this flag, because no case then
+wrote a refined name in a loop and the driver did not pass the flag on to the compiler. Both are
+fixed and pinned (`refinement-loop-write-*`), which is the honest form of the claim: the prover's
+power is an optimisation, and each rule that removes a check has a case in which the check must
+still fire.
 
 ## Checked effects
 
@@ -156,7 +165,8 @@ index it has proved in bounds reaches `get`'s proved entry and passes; one that 
 because the call goes through the check. Overflow is a failure too: `@no_panic` arithmetic either
 cannot overflow from the facts the prover has, or is written with the wrapping operations.
 
-A program that claims an effect is compiled whole, because the proof needs every body. The facts are
+An effect claim crosses a module boundary through the interface file: each claimed function has an
+`effects` row, so a caller is checked against the row and not against the body. The facts are
 recorded as each statement is emitted, not read back out of the assembly, so a check the prover
 removed is not in the graph at all - that is what makes `@no_panic` exactly as strong as the prover.
 

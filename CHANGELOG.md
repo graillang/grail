@@ -1,5 +1,27 @@
 ## Unreleased
 
+- Fixed, **soundness**: **a refinement fact survived a write in a loop.** `mut i = 0; while i < 3 {
+  take0(i); i += 1; }` with `take0(i: u64 where i == 0)` compiled under `@strict` and printed
+  `0 1 2`: the fact `i == 0` from before the loop was still believed at the body's first statement
+  on the second iteration, so the check was removed. Every name a loop body assigns, lends out with
+  `&mut` or calls a non-pure method on now loses its facts before the body is compiled (`while`,
+  `loop`, counted and pattern `for`, map loops, nested loops), a loop owns a fact scope of its own
+  so a shadowed fact comes back when the loop ends and not at an unrelated block's close, and a
+  call of a closure forgets the names that closure writes. Strict mode refuses the program, plain
+  code keeps the check and aborts on the second iteration. `grail build --verify-facts` now reaches
+  the compiler (the driver accepted the word and dropped it). Cases `refinement-loop-write-*`,
+  `refinement-assignment-kills-fact`, `refinement-loop-mut-borrow-kills-fact`,
+  `refinement-loop-field-write-kills-fact`, `refinement-nested-loop-outer-write-kills-fact`,
+  `refinement-loop-branch-write-kills-fact`, `refinement-shadow-fact-ends-with-scope`,
+  `refinement-loop-invariant-name-still-proved`; the book's refinements chapter states the loop
+  rule and no longer says no check has ever fired.
+
+- Fixed: **a runtime error could name the statement after the one that failed.** The location walk
+  took the statement whose label is not past the return address, and a return address is the byte
+  *after* the call: when the failing call was its statement's last instruction (`take0(i);` as a
+  statement), the report and the backtrace named the next line. The walk now compares strictly, and
+  the backtrace looks up `return address - 1`.
+
 - Fixed: **a refusal could name the wrong type.** `type_name` - the speller about half the
   diagnostics used - answers in the interface format for anything it does not name itself, so an
   element or argument of type `u8` read back as `(int 8u)` and an `f32` as `f64` (f32 and f64 are one

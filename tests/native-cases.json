@@ -10366,5 +10366,202 @@
     "name": "unsafe-expr-outside-refused",
     "source": "fn main() -> u64 {\n  mut x: u64 = 41;\n  p := unsafe { ptr_of(&mut x) };\n  v := p.read();\n  println(v);\n  return 0;\n}",
     "reject": true
+  },
+  {
+    "name": "refinement-loop-write-kills-fact-strict",
+    "source": "fn take0(i: u64 where i == 0) {\n    println(i);\n}\n\nfn main() -> u64 {\n    mut i = 0;\n    while i < 3 {\n        take0(i);\n        i += 1;\n    }\n    return 0;\n}\n",
+    "reject": true,
+    "flags": [
+      "--strict-refinements"
+    ],
+    "diagnostic": [
+      "cannot prove the refinement `i == 0`",
+      "= the facts in scope were:",
+      "i < 3",
+      "input.grl:8:"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a fact about a name the loop body assigns does not hold at the body's first statement on the second iteration: strict mode refuses the call (was accepted, printing 0 1 2)"
+  },
+  {
+    "name": "refinement-loop-write-kills-fact-runtime",
+    "source": "fn take0(i: u64 where i == 0) {\n    println(i);\n}\n\nfn main() -> u64 {\n    mut i = 0;\n    while i < 3 {\n        take0(i);\n        i += 1;\n    }\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "0\n",
+    "stderr": [
+      "error: refinement violated: i == 0\n --> ",
+      "input.grl:8:"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "the same loop in plain code keeps its runtime check and aborts on the second iteration"
+  },
+  {
+    "name": "refinement-loop-write-verify-facts",
+    "source": "fn take0(i: u64 where i == 0) {\n    println(i);\n}\n\nfn main() -> u64 {\n    mut i = 0;\n    while i < 3 {\n        take0(i);\n        i += 1;\n    }\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "0\n",
+    "stderr": [
+      "error: refinement violated: i == 0\n --> ",
+      "input.grl:8:"
+    ],
+    "flags": [
+      "--verify-facts"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "--verify-facts sees the same abort: no proof is leaned on for a name the loop writes"
+  },
+  {
+    "name": "refinement-assignment-kills-fact",
+    "source": "fn take0(i: u64 where i == 0) {\n    println(i);\n}\n\nfn main() -> u64 {\n    mut i = 0;\n    take0(i);\n    i = 5;\n    take0(i);\n    return 0;\n}\n",
+    "reject": true,
+    "flags": [
+      "--strict-refinements"
+    ],
+    "diagnostic": [
+      "cannot prove the refinement `i == 0`",
+      "input.grl:9:"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "an assignment ends every fact about the name it writes; the first call is proved, the second is not"
+  },
+  {
+    "name": "refinement-loop-mut-borrow-kills-fact",
+    "source": "fn take0(i: u64 where i == 0) {\n    println(i);\n}\n\nfn inc(p: &mut u64) {\n    *p = *p + 1;\n}\n\nfn main() -> u64 {\n    mut i = 0;\n    for k in 3 {\n        take0(i);\n        inc(&mut i);\n    }\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "0\n",
+    "stderr": [
+      "error: refinement violated: i == 0\n --> ",
+      "input.grl:12:"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a `&mut` loan in a loop body is a write: the fact from before the loop is gone at the body's first statement"
+  },
+  {
+    "name": "refinement-loop-field-write-kills-fact",
+    "source": "struct P {\n    x: u64\n}\n\nfn take0(i: u64 where i == 0) {\n    println(i);\n}\n\nfn main() -> u64 {\n    mut p = P { x: 0 };\n    mut n = 0;\n    while n < 3 {\n        take0(p.x);\n        p.x += 1;\n        n += 1;\n    }\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "0\n",
+    "stderr": [
+      "error: refinement violated: i == 0\n --> ",
+      "input.grl:13:"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a field written in a loop body: no fact about the record survives into the body"
+  },
+  {
+    "name": "refinement-nested-loop-outer-write-kills-fact",
+    "source": "fn take0(i: u64 where i == 0) {\n    println(i);\n}\n\nfn main() -> u64 {\n    mut i = 0;\n    mut n = 0;\n    while n < 2 {\n        mut m = 0;\n        while m < 2 {\n            take0(i);\n            m += 1;\n        }\n        i += 1;\n        n += 1;\n    }\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "0\n0\n",
+    "stderr": [
+      "error: refinement violated: i == 0\n --> ",
+      "input.grl:11:"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "the write is in the outer loop, the use in the inner one: the outer loop's kill covers the whole body"
+  },
+  {
+    "name": "refinement-loop-branch-write-kills-fact",
+    "source": "fn take0(i: u64 where i == 0) {\n    println(i);\n}\n\nfn main() -> u64 {\n    mut i = 0;\n    mut n = 0;\n    while n < 2 {\n        take0(i);\n        match n {\n            0 => {\n                i = 9;\n            },\n            _ => {},\n        }\n        n += 1;\n    }\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "0\n",
+    "stderr": [
+      "error: refinement violated: i == 0\n --> ",
+      "input.grl:9:"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a write inside one match arm of the loop body is still a write of the loop body"
+  },
+  {
+    "name": "refinement-shadow-fact-ends-with-scope",
+    "source": "fn take0(i: u64 where i == 0) {\n    println(i);\n}\n\nfn main() -> u64 {\n    mut i = 4;\n    {\n        i := 0;\n        take0(i);\n    }\n    take0(i);\n    return 0;\n}\n",
+    "reject": true,
+    "flags": [
+      "--strict-refinements"
+    ],
+    "diagnostic": [
+      "cannot prove the refinement `i == 0`",
+      "input.grl:11:"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a fact about an inner binding ends with its block: the outer name is a different value"
+  },
+  {
+    "name": "refinement-loop-invariant-name-still-proved",
+    "source": "fn take0(i: u64 where i == 0) {\n    println(i);\n}\n\nfn main() -> u64 {\n    z := 0;\n    mut n = 0;\n    while n < 3 {\n        take0(z);\n        n += 1;\n    }\n    return 0;\n}\n",
+    "stdout": "0\n0\n0\n",
+    "flags": [
+      "--strict-refinements"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "the kill is per name: a name the loop body never writes keeps its fact and the call is still proved"
   }
 ]

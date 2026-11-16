@@ -336,7 +336,9 @@ fn rt_site_here(scratch: u64) -> u64 {
         mut e = begin;
         while e < end {
             a := raw_load(e);
-            mut take = a <= ret;
+            // Strictly before: a return address is the instruction *after* the call, so when the
+            // call is its statement's last instruction that address is the next statement's label.
+            mut take = a < ret;
             if take && (hit != 0) {
                 take = hit_at < a;
             }
@@ -587,7 +589,9 @@ fn rt_fail_where(buf: u64, n: u64) -> u64 {
         mut e = begin;
         while e < end {
             a := raw_load(e);
-            mut take = a <= ret;
+            // Strictly before: a return address is the instruction *after* the call, so when the
+            // call is its statement's last instruction that address is the next statement's label.
+            mut take = a < ret;
             if take && (hit != 0) {
                 take = hit_at < a;
             }
@@ -886,11 +890,13 @@ fn rt_backtrace() -> u64 {
     mut lines = 0;
     while (frame != 0) & (depth < 64) & (lines < 32) & (n + 256 < rt_fail_limit()) {
         ret := raw_load(frame + 8);
-        f := rt_site_find(fbegin, fend, ret, 16);
+        // `ret - 1` is inside the call instruction: the return address itself can be the next
+        // statement's (or, after a call that never returns, the next function's) first byte.
+        f := rt_site_find(fbegin, fend, ret - 1, 16);
         if f != 0 {
             name := raw_load(f + 8);
             if name != 0 {
-                n = rt_bt_line(buf, n, name, rt_site_find(begin, end, ret, 24));
+                n = rt_bt_line(buf, n, name, rt_site_find(begin, end, ret - 1, 24));
                 lines = lines + 1;
             }
         }
