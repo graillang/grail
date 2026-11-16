@@ -1,0 +1,235 @@
+{
+ "schema": 1,
+ "tool": "sched-rivals",
+ "title": "The scheduler against rayon and oneTBB",
+ "commit": "/home/shulgin/grail-w-rivals/.work/sched-src (GRAIL_SCHED_TREE)",
+ "date": "2026-11-16T23:17:57.320Z",
+ "machine": {
+  "cpu": "AMD Ryzen 9 7900X 12-Core Processor",
+  "cpus": 24,
+  "kernel": "Linux 7.2.14-arch1-1"
+ },
+ "load": [
+  "38.64 33.62 28.97",
+  "37.29 37.43 31.58"
+ ],
+ "versions": {
+  "clang": "clang version 23.1.4",
+  "g++": "g++ (GCC) 16.2.1 20260810",
+  "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+  "cargo": "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+  "go": "go version go1.27.3-X:nodwarf5 linux/amd64",
+  "zig": "zig 0.14.1"
+ },
+ "commands": [
+  "bun tools/sched-rivals.mjs --rounds 9",
+  "Grail-native: grail build --no-cache",
+  "Grail-LLVM: --backend=llvm --overflow=wrap, clang -O2",
+  "LLVM w=24: the same with GRAIL_WORKERS=24",
+  "rayon: cargo build --release (bench/rivals/sched-rayon)",
+  "oneTBB: g++ -O2 -std=c++20 sched_tbb.cpp -ltbb"
+ ],
+ "tables": [
+  {
+   "id": "scheduler",
+   "title": "The scheduler: join, spawn, nested join and a frame loop",
+   "chart": true,
+   "threshold": 1,
+   "primary": "grail-llvm",
+   "direction": "lower",
+   "note": "Wall time measured inside each program, median of 9 rounds. The bar: match or beat rayon and oneTBB.",
+   "columns": [
+    {
+     "key": "grail-native",
+     "label": "Grail-native",
+     "grail": true
+    },
+    {
+     "key": "grail-llvm",
+     "label": "Grail-LLVM",
+     "grail": true
+    },
+    {
+     "key": "grail-llvm-w24",
+     "label": "LLVM w=24",
+     "grail": true
+    },
+    {
+     "key": "rayon",
+     "label": "rayon",
+     "grail": false
+    },
+    {
+     "key": "onetbb",
+     "label": "oneTBB",
+     "grail": false
+    }
+   ],
+   "rows": [
+    {
+     "name": "join, from the main thread",
+     "unit": "ns",
+     "direction": "lower",
+     "values": {
+      "grail-native": 6613,
+      "grail-llvm": 8184,
+      "grail-llvm-w24": 7807,
+      "rayon": 6981,
+      "onetbb": 114
+     }
+    },
+    {
+     "name": "join, on a worker",
+     "unit": "ns",
+     "direction": "lower",
+     "values": {
+      "rayon": 14,
+      "onetbb": 117
+     }
+    },
+    {
+     "name": "spawn a job and wait",
+     "unit": "ns",
+     "direction": "lower",
+     "values": {
+      "grail-native": 8596,
+      "grail-llvm": 7793,
+      "grail-llvm-w24": 7651,
+      "rayon": 9322,
+      "onetbb": 153
+     }
+    },
+    {
+     "name": "task spawn+join, one at a time",
+     "unit": "ns",
+     "direction": "lower",
+     "values": {
+      "grail-native": 19899,
+      "grail-llvm": 13350,
+      "grail-llvm-w24": 13083
+     }
+    },
+    {
+     "name": "burst of 100k spawns, per spawn",
+     "unit": "ns",
+     "direction": "lower",
+     "values": {
+      "grail-native": 2956,
+      "grail-llvm": 4680,
+      "grail-llvm-w24": 2712,
+      "rayon": 558,
+      "onetbb": 168
+     }
+    },
+    {
+     "name": "fib(32) serial",
+     "unit": "us",
+     "direction": "lower",
+     "values": {
+      "grail-native": 19174,
+      "grail-llvm": 10628,
+      "grail-llvm-w24": 9858,
+      "rayon": 6085,
+      "onetbb": 3544
+     }
+    },
+    {
+     "name": "fib(32) nested join, from main",
+     "unit": "us",
+     "direction": "lower",
+     "values": {
+      "grail-native": 15627,
+      "grail-llvm": 26516,
+      "grail-llvm-w24": 20424,
+      "rayon": 5531,
+      "onetbb": 1670
+     }
+    },
+    {
+     "name": "fib(32) nested join, in a task",
+     "unit": "us",
+     "direction": "lower",
+     "values": {
+      "grail-native": 19087,
+      "grail-llvm": 21860,
+      "grail-llvm-w24": 21444,
+      "rayon": 3208,
+      "onetbb": 1424
+     }
+    },
+    {
+     "name": "frame median",
+     "unit": "us",
+     "direction": "lower",
+     "values": {
+      "grail-native": 6315,
+      "grail-llvm": 2796,
+      "grail-llvm-w24": 2299,
+      "rayon": 929,
+      "onetbb": 616
+     }
+    },
+    {
+     "name": "frame p99",
+     "unit": "us",
+     "direction": "lower",
+     "values": {
+      "grail-native": 16156,
+      "grail-llvm": 13731,
+      "grail-llvm-w24": 9578,
+      "rayon": 19415,
+      "onetbb": 4064
+     }
+    },
+    {
+     "name": "frame max",
+     "unit": "us",
+     "direction": "lower",
+     "values": {
+      "grail-native": 20821,
+      "grail-llvm": 17845,
+      "grail-llvm-w24": 12538,
+      "rayon": 23389,
+      "onetbb": 8101
+     }
+    },
+    {
+     "name": "600 frames",
+     "unit": "ms",
+     "direction": "lower",
+     "values": {
+      "grail-native": 4387,
+      "grail-llvm": 2338,
+      "grail-llvm-w24": 1627,
+      "rayon": 1187,
+      "onetbb": 506
+     }
+    },
+    {
+     "name": "I/O task worst lateness",
+     "unit": "us",
+     "direction": "lower",
+     "values": {
+      "grail-native": 12608,
+      "grail-llvm": 10247,
+      "grail-llvm-w24": 7030,
+      "rayon": 2840,
+      "onetbb": 2782
+     }
+    },
+    {
+     "name": "importer rounds",
+     "unit": "rounds",
+     "direction": "higher",
+     "values": {
+      "grail-native": 2291,
+      "grail-llvm": 1502,
+      "grail-llvm-w24": 1553,
+      "rayon": 5377,
+      "onetbb": 8746
+     }
+    }
+   ]
+  }
+ ]
+}
