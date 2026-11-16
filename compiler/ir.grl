@@ -110,7 +110,11 @@ pub struct Body {
     calls: Call[],
     // The body's symbol, from its `.type NAME,@function` line (`type_symbol`), used to look the
     // front end's type facts up by `(body, slot)`.
-    name: u8[]
+    name: u8[],
+    // Where optimised bodies are remembered between builds, and the compiler they were made by
+    // (optimize.grl, the body memo). Empty: nothing is remembered.
+    memo_dir: u8[],
+    memo_id: u8[]
 }
 
 pub fn put<a>(v: (&a mut u64[]), i: u64, x: u64) {
@@ -1056,7 +1060,9 @@ pub fn new_body() -> Body {
         vwidth: u64[],
         vdef: u64[],
         calls: Call[],
-        name: u8[]
+        name: u8[],
+        memo_dir: u8[],
+        memo_id: u8[]
     };
 }
 
@@ -1145,6 +1151,34 @@ pub fn index_facts<a>(facts: (&a llvm::Facts)) -> FactIndex {
         put(&mut ix.head, h, i + 1);
     }
     return ix;
+}
+// One number for every fact about the body `name`, in the table's order.
+pub fn facts_digest<a, b, c>(ix: (&a FactIndex), facts: (&b llvm::Facts), name: &c [u8]) -> u64 {
+    mut total: u64 = 1469598103934665603;
+    if ix.count == 0 {
+        return total;
+    }
+    mut h: u64 = 2166136261;
+    for j in name.len() {
+        h = wrapping_mul(h ^ name[j], 16777619);
+    }
+    mut at = ix.head[h % 4096];
+    while at != 0 {
+        i := at - 1;
+        if llvm::fact_name_len(facts, i) == name.len() {
+            mut same = 1;
+            for j in name.len() {
+                if llvm::fact_name_byte(facts, i, j) != name[j] {
+                    same = 0;
+                }
+            }
+            if same != 0 {
+                total = wrapping_mul(total ^ llvm::fact_digest(facts, i), 1099511628211);
+            }
+        }
+        at = ix.next[at - 1];
+    }
+    return total;
 }
 // The slot's type fact from the index: `(what << 8) | width` in the table's own encodings, or 0.
 fn slot_fact<a, b, c>(ix: (&a FactIndex), facts: (&b llvm::Facts), name: &c [u8], slot: u64) -> u64 {

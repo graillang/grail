@@ -31,11 +31,18 @@ pub struct Loan {
 }
 pub struct State {
     places: Place[],
-    loans: Loan[]
+    loans: Loan[],
+    // The loans that are live, by id, in the order they were made - when `live_ok` says the list is
+    // current. A function makes a loan for nearly every statement and almost all of them are over
+    // within it, so the questions asked of "every live loan" walk this and not the whole history.
+    // A join or a restore rewrites the flags wholesale and clears `live_ok`; the list is rebuilt
+    // the next time it is asked for (live_ids).
+    live_list: u64[],
+    live_ok: u64
 }
 
 pub fn new() -> State {
-    return State { places: Place[], loans: Loan[] };
+    return State { places: Place[], loans: Loan[], live_list: u64[], live_ok: 1 };
 }
 pub fn root<a>(s: (&a mut State), copy: u64, initialized: u64) -> u64 {
     s.places.push(Place { parent: 0, status: initialized, copy: copy, filled: initialized, child: 0, next: 0 });
@@ -158,7 +165,40 @@ fn unfilled<a>(s: (&a State), id: u64) -> u64 {
     }
     return 0;
 }
+// A loan was just made live: it joins the list, if the list is current.
+fn live_made<a>(s: (&a mut State)) -> unit {
+    if s.live_ok != 0 {
+        s.live_list.push(s.loans.len());
+    }
+    return ();
+}
+// The ids of the live loans, oldest first. Brings the list up to date if a join or a restore left
+// it behind.
+pub fn live_ids<a>(s: (&a mut State)) -> u64[] {
+    if s.live_ok == 0 {
+        mut fresh = u64[];
+        for i in s.loans.len() {
+            if s.loans[i].live != 0 {
+                fresh.push(i + 1);
+            }
+        }
+        exchange(&mut s.live_list, fresh);
+        exchange(&mut s.live_ok, 1);
+    }
+    return s.live_list.copy();
+}
 fn conflict<a>(s: (&a State), id: u64, exclusive: u64) -> u64 {
+    if s.live_ok != 0 {
+        for k in s.live_list.len() {
+            l := &s.loans[s.live_list[k] - 1];
+            if (exclusive + l.mode) != 0 {
+                if overlaps(&s, id, l.source) {
+                    return 3;
+                }
+            }
+        }
+        return 0;
+    }
     for i in s.loans.len() {
         mut l = &s.loans[i];
         source := l.source;
@@ -295,6 +335,7 @@ pub fn borrow_place<a>(s: (&a mut State), id: u64, mode: u64) -> u64 {
         return 0;
     }
     s.loans.push(Loan { source: id, parent: 0, mode: mode, live: 1 });
+    live_made(&mut s);
     return s.loans.len();
 }
 fn loan_parent<a>(s: (&a State), id: u64) -> u64 {
@@ -368,6 +409,7 @@ pub fn reborrow<a>(s: (&a mut State), parent: u64, mode: u64) -> u64 {
         }
     }
     s.loans.push(Loan { source: source, parent: authority, mode: mode, live: 1 });
+    live_made(&mut s);
     return s.loans.len();
 }
 pub fn end_loan<a>(s: (&a mut State), id: u64) -> u64 {
@@ -378,17 +420,39 @@ pub fn end_loan<a>(s: (&a mut State), id: u64) -> u64 {
     if l.live == 0 {
         return 2;
     }
-    for i in s.loans.len() {
-        child := &s.loans[i];
-        active := child.live;
-        if active != 0 && i + 1 != id {
-            if loan_ancestor(&s, id, i + 1) {
-                return 6;
+    if s.live_ok != 0 {
+        for k in s.live_list.len() {
+            other := s.live_list[k];
+            if other != id {
+                if loan_ancestor(&s, id, other) {
+                    return 6;
+                }
+            }
+        }
+    } else {
+        for i in s.loans.len() {
+            child := &s.loans[i];
+            active := child.live;
+            if active != 0 && i + 1 != id {
+                if loan_ancestor(&s, id, i + 1) {
+                    return 6;
+                }
             }
         }
     }
     mut p = &mut s.loans[id - 1];
     exchange(&mut p.live, 0);
+    if s.live_ok != 0 {
+        mut at = s.live_list.len();
+        for i in s.live_list.len() {
+            if s.live_list[i] == id {
+                at = i;
+            }
+        }
+        if at < s.live_list.len() {
+            s.live_list.remove(at);
+        }
+    }
     return 0;
 }
 // An exclusive loan with no live reborrows becomes a shared one: what it still permits is a subset
@@ -421,7 +485,7 @@ pub fn snapshot<a>(s: (&a State)) -> State {
         mut l = &s.loans[i];
         loans.push(Loan { source: l.source, parent: l.parent, mode: l.mode, live: l.live });
     }
-    return State { places: places, loans: loans };
+    return State { places: places, loans: loans, live_list: u64[], live_ok: 0 };
 }
 // Conservative join: definitely initialized places intersect, possible live loans union.
 // Different storage/authority shapes are rejected instead of pretending they are interchangeable.
@@ -463,6 +527,7 @@ pub fn join<a, b>(s: (&a mut State), other: (&b State)) -> u64 {
             exchange(&mut a.live, 1);
         }
     }
+    exchange(&mut s.live_ok, 0);
     return 0;
 }
 // Restore an earlier control-flow point without reusing place IDs allocated in another arm.
@@ -492,6 +557,7 @@ pub fn restore<a, b>(s: (&a mut State), saved: (&b State)) -> unit {
         mut l = &mut s.loans[i];
         exchange(&mut l.live, live);
     }
+    exchange(&mut s.live_ok, 0);
     return ();
 }
 fn inherited_status<a, b>(s: (&a State), saved: (&b State), id: u64) -> u64 {
@@ -553,6 +619,7 @@ pub fn merge<a, b>(s: (&a mut State), saved: (&b State)) -> unit {
             }
         }
     }
+    exchange(&mut s.live_ok, 0);
     return ();
 }
 // The entry place a repeating backedge consumed: the first one `backedge` refuses for, or 0. It is
@@ -667,6 +734,7 @@ pub fn reborrow_place<a>(s: (&a mut State), parent: u64, target: u64, mode: u64)
         authority = gp;
     }
     s.loans.push(Loan { source: target, parent: authority, mode: mode, live: 1 });
+    live_made(&mut s);
     return s.loans.len();
 }
 pub fn can_cleanup<a>(s: (&a State), id: u64) -> bool {

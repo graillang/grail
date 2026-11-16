@@ -1525,15 +1525,17 @@ fn bytes_less<a, b>(x: &a [u8], y: &b [u8]) -> bool {
 }
 // The cache key of one module's compiler run (B1 stage 4): the build's flags, compiler and assembler,
 // the target, the module's name and its own source files, and every interface the run can read - the
-// ones written by the runs before it, by name and content. An edit that leaves a module's interface
-// unchanged therefore reruns that module alone; one that changes it reruns the modules after it.
-fn unit_key<a, b, d, e, g, k>(
+// modules it uses and the ones those use, by name and content. An edit that leaves a module's
+// interface unchanged therefore reruns that module alone; one that changes it reruns the modules
+// that read it.
+fn unit_key<a, b, d, e, g, k, r>(
     store: (&a mut Cache),
     id: (&b BuildId),
     target: &d [u8],
     name: &e [u8],
     files: (&g u8[][]),
-    ifaces: &k [u8]
+    ifaces: &k [u8],
+    reads: (&r u8[][])
 ) -> u8[] {
     mut buf = u8[];
     push_bytes(&mut buf, view("grail-cache-unit 1\ntarget "));
@@ -1555,16 +1557,16 @@ fn unit_key<a, b, d, e, g, k>(
         push_bytes(&mut buf, view(f));
         buf.push(10);
     }
+    // The interfaces this run can read: the modules it uses and theirs, not whatever else happens
+    // to have been built already - modules are built several at a time, and a key that named its
+    // neighbours would be a different key from one build to the next.
     mut names = u8[][];
-    listed := host::list_dir(view(ifaces));
-    for i in listed.len() {
-        n := item(&listed, i);
-        if ends(view(n), view(".iface")) {
-            mut at = names.len();
-            while (0 < at) && bytes_less(view(n), view(names[at - 1])) {
-                at -= 1;
-            }
-            names.insert(at, n);
+    for i in reads.len() {
+        // A module with no interface file has no surface to read (the runtime's is the compiler's
+        // own knowledge of it, which the compiler digest above already names).
+        file := cat(view(reads[i]), view(".iface"));
+        if host::exists(view(path_join(view(ifaces), view(file)))) != 0 {
+            names.push(file);
         }
     }
     for i in names.len() {
@@ -1697,6 +1699,97 @@ fn unit_file<a, b, d, e, g>(
     cache_record_put(&mut store, view("unit"), view(key), view(record));
     return ();
 }
+// Whether every module `g` reads is finished: the base (the runtime) for all of them, then the
+// modules it uses.
+fn unit_ready<a, b>(groups: (&a ModuleGroup[]), base: (&b u8[][]), g: u64) -> bool {
+    for b in base.len() {
+        if eq(view(base[b]), view(groups[g].name)) {
+            return true;
+        }
+    }
+    for b in base.len() {
+        bg := group_of(groups, view(base[b]));
+        if (bg != 0) && (groups[bg - 1].done == 0) {
+            return false;
+        }
+    }
+    for u in groups[g].uses.len() {
+        ug := group_of(groups, view(groups[g].uses[u]));
+        if (ug != 0) && (ug - 1 != g) && (groups[ug - 1].done == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+// The modules whose interfaces a run of `g` can read: the base, what it uses, and what those use.
+// Sorted, so the list is a function of the program and not of the order modules finished in.
+fn unit_reads<a, b>(groups: (&a ModuleGroup[]), base: (&b u8[][]), g: u64) -> u8[][] {
+    mut seen = u64[];
+    for i in groups.len() {
+        seen.push(0);
+    }
+    mut work = u64[g];
+    seen[g] = 1;
+    mut names = u8[][];
+    for b in base.len() {
+        bg := group_of(groups, view(base[b]));
+        if (bg != 0) && (seen[bg - 1] == 0) {
+            seen[bg - 1] = 1;
+            work.push(bg - 1);
+        }
+    }
+    mut at = 0;
+    while at < work.len() {
+        here := work[at];
+        at += 1;
+        if here != g {
+            n := groups[here].name.copy();
+            mut slot = names.len();
+            while (0 < slot) && bytes_less(view(n), view(names[slot - 1])) {
+                slot -= 1;
+            }
+            names.insert(slot, n);
+        }
+        for u in groups[here].uses.len() {
+            ug := group_of(groups, view(groups[here].uses[u]));
+            if (ug != 0) && (seen[ug - 1] == 0) {
+                seen[ug - 1] = 1;
+                work.push(ug - 1);
+            }
+        }
+    }
+    return names;
+}
+// `grail unit-build N <N compiler words> <assembler words>`: one module's compiler run and then its
+// assembly, as one process, so a build can start several modules at once and wait for each as a
+// whole. Not a command a person runs.
+fn unit_build_command<a>(args: (&a u8[][])) -> u64 {
+    if args.len() == 0 {
+        return 1;
+    }
+    count := number_of(view(item(&args, 0)));
+    if args.len() < 1 + count {
+        return 1;
+    }
+    mut compile = u8[][];
+    for i in count {
+        compile.push(item(&args, 1 + i));
+    }
+    if host::command(compile) != 0 {
+        return 1;
+    }
+    mut assemble = u8[][];
+    mut i = 1 + count;
+    while i < args.len() {
+        assemble.push(item(&args, i));
+        i += 1;
+    }
+    if host::command(assemble) != 0 {
+        say(view("grail: assembling failed (needs clang)"));
+        return 1;
+    }
+    return 0;
+}
 fn per_module_build<a, d, e, g, k, m, n, x, y>(
     command: (&a u8[][]),
     at: u64,
@@ -1747,38 +1840,111 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
     mut objects = u8[][];
     mut link = u8[][];
     mut built = 0;
+    // What each module's run is doing. A module is started as soon as the modules it reads are
+    // finished, so independent modules compile at the same time, one process each; what the build
+    // *records* - objects, link inputs, the cache's report - is still taken in the order a build of
+    // one module at a time takes it, so the image and the report do not depend on the scheduling.
+    //   0 not started, 1 running (pid, the pipe its output arrives on), 2 restored from the store,
+    //   3 ended (its output and status kept until its turn).
+    mut state = u64[];
+    mut pids = u64[];
+    mut pipes = u64[];
+    mut keys = u8[][];
+    mut outputs = u8[][];
+    mut statuses = u64[];
+    for g in groups.len() {
+        state.push(0);
+        pids.push(0);
+        pipes.push(0);
+        keys.push(u8[]);
+        outputs.push(u8[]);
+        statuses.push(0);
+    }
+    mut running = 0;
+    limit := host::cpus();
     while built < groups.len() {
-        // The next group: a base group first, then any group whose program-local uses are built.
+        // Start every module whose dependencies are finished.
+        for g in groups.len() {
+            if (groups[g].done != 0) || (state[g] != 0) || (limit <= running) {
+                continue;
+            }
+            if !unit_ready(&groups, &base, g) {
+                continue;
+            }
+            name := groups[g].name.copy();
+            stem := path_join(view(dir), view(name));
+            if cache != 0 {
+                reads := unit_reads(&groups, &base, g);
+                keys[g] = unit_key(&mut store, id, view(target), view(name), &groups[g].files, view(ifaces), &reads);
+                if unit_restore(&mut store, view(keys[g]), view(stem), view(ifaces), view(name)) {
+                    state[g] = 2;
+                    continue;
+                }
+            }
+            // One process, two steps: this module's code alone, global so the link can bind it,
+            // read against the interfaces of the modules it uses; then the assembler.
+            mut run = u8[][compiler.copy(), copy(view("unit-build"))];
+            mut compile = u8[][compiler.copy()];
+            for f in flags.len() {
+                compile.push(item(&flags, f));
+            }
+            if !eq(view(name), view(base[0])) {
+                compile.push(copy(view("--use")));
+                compile.push(ifaces.copy());
+            }
+            compile.push(copy(view("--emit-interface")));
+            compile.push(ifaces.copy());
+            compile.push(copy(view("--separate")));
+            if cache != 0 {
+                // The per-function codegen cache: a module run that misses can still replay the
+                // functions whose inputs did not move (docs/design/incremental-compilation.md).
+                // It is one directory inside this build's store, so a prune drops it with the rest.
+                compile.push(copy(view("--fn-cache")));
+                compile.push(fn_store(view(store.root)));
+                // The compiler's own digest: a unit is code this binary emitted, so a rebuilt
+                // compiler must not replay the previous one's.
+                compile.push(copy(view("--fn-cache-id")));
+                compile.push(id.compiler.copy());
+                if store.quiet != 0 {
+                    compile.push(copy(view("--fn-cache-quiet")));
+                }
+            }
+            if !eq(view(name), view(entry_name)) {
+                compile.push(copy(view("--no-entry")));
+            }
+            compile.push(cat(view(stem), view(".s")));
+            for f in groups[g].files.len() {
+                compile.push(groups[g].files[f].copy());
+            }
+            run.push(decimal(compile.len()));
+            for k in compile.len() {
+                run.push(compile[k].copy());
+            }
+            for k in prefix.len() {
+                run.push(item(&prefix, k));
+            }
+            run.push(cat(view(stem), view(".s")));
+            run.push(copy(view("-o")));
+            run.push(cat(view(stem), view(".o")));
+            pair := host::pipe();
+            pid := host::spawn(run, host::environment(), pair[1], pair[1]);
+            host::close(pair[1]);
+            if 9223372036854775807 < pid {
+                host::close(pair[0]);
+                say(view("grail: could not start a compiler run for a module"));
+                return 1;
+            }
+            state[g] = 1;
+            pids[g] = pid;
+            pipes[g] = pair[0];
+            running += 1;
+        }
+        // The next module to record: the first unfinished one whose dependencies are finished,
+        // which is the one a build of one module at a time would be on.
         mut pick = groups.len();
         for g in groups.len() {
-            if (pick == groups.len()) && (groups[g].done == 0) {
-                mut ready = true;
-                mut is_base = false;
-                for b in base.len() {
-                    if eq(view(base[b]), view(groups[g].name)) {
-                        is_base = true;
-                    }
-                }
-                if !is_base {
-                    for b in base.len() {
-                        base_name := base[b].copy();
-                        bg := group_of(&groups, view(base_name));
-                        if (bg != 0) && (groups[bg - 1].done == 0) {
-                            ready = false;
-                        }
-                    }
-                    for u in groups[g].uses.len() {
-                        // Hoisted: reading the group while `group_of` borrows the list is refused.
-                        used := groups[g].uses[u].copy();
-                        ug := group_of(&groups, view(used));
-                        if (ug != 0) && (ug - 1 != g) && (groups[ug - 1].done == 0) {
-                            ready = false;
-                        }
-                    }
-                }
-                if ready {
-                    pick = g;
-                }
+            if (pick == groups.len()) && (groups[g].done == 0) && unit_ready(&groups, &base, g) {
+                pick = g;
             }
         }
         if pick == groups.len() {
@@ -1789,84 +1955,84 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
             );
             return 1;
         }
+        if state[pick] == 0 {
+            // Ready, and not started only because every processor is busy. One running module is
+            // waited for - its output and status kept for its own turn - and the loop starts this
+            // one in the place that frees.
+            mut oldest = groups.len();
+            for g in groups.len() {
+                if (oldest == groups.len()) && (state[g] == 1) {
+                    oldest = g;
+                }
+            }
+            if oldest == groups.len() {
+                say(view("grail: a module is ready and nothing is running to wait for"));
+                return 1;
+            }
+            mut early = u8[];
+            while true {
+                chunk := host::read_fd(pipes[oldest], 65536);
+                if chunk.len() == 0 {
+                    break;
+                }
+                push_bytes(&mut early, view(chunk));
+            }
+            host::close(pipes[oldest]);
+            statuses[oldest] = host::wait(pids[oldest]);
+            exchange(&mut outputs[oldest], early);
+            state[oldest] = 3;
+            running -= 1;
+            continue;
+        }
         name := groups[pick].name.copy();
         stem := path_join(view(dir), view(name));
         unit_asm := cat(view(stem), view(".s"));
         unit_obj := cat(view(stem), view(".o"));
-        mut key = u8[];
-        mut reused = false;
-        if cache != 0 {
-            key = unit_key(
-                &mut store,
-                id,
-                view(target),
-                view(name),
-                &groups[pick].files,
-                view(ifaces)
-            );
-            reused = unit_restore(&mut store, view(key), view(stem), view(ifaces), view(name));
-            if reused {
-                store.hits += 1;
+        if state[pick] == 2 {
+            store.hits += 1;
+        } else {
+            // Whatever the run printed, then how it ended.
+            mut said = u8[];
+            mut status = 0;
+            if state[pick] == 3 {
+                said = exchange(&mut outputs[pick], u8[]);
+                status = statuses[pick];
             } else {
+                while true {
+                    chunk := host::read_fd(pipes[pick], 65536);
+                    if chunk.len() == 0 {
+                        break;
+                    }
+                    push_bytes(&mut said, view(chunk));
+                }
+                host::close(pipes[pick]);
+                status = host::wait(pids[pick]);
+                running -= 1;
+                state[pick] = 3;
+            }
+            if said.len() != 0 {
+                host::print(view(said));
+            }
+            if status != 0 {
+                // The modules still running are left to finish; nothing of theirs is recorded.
+                for g in groups.len() {
+                    if state[g] == 1 {
+                        host::close(pipes[g]);
+                        host::wait(pids[g]);
+                    }
+                }
+                return 1;
+            }
+            if cache != 0 {
                 store.misses += 1;
                 store.names.push(name.copy());
-            }
-        }
-        if !reused {
-            // One compiler run, one file: this module's code alone, global so the link can bind it,
-            // with the interfaces of the modules built before it as its view of them.
-            mut run = u8[][compiler.copy()];
-            for f in flags.len() {
-                run.push(item(&flags, f));
-            }
-            if built != 0 {
-                run.push(copy(view("--use")));
-                run.push(ifaces.copy());
-            }
-            run.push(copy(view("--emit-interface")));
-            run.push(ifaces.copy());
-            run.push(copy(view("--separate")));
-            if cache != 0 {
-                // The per-function codegen cache: a module run that misses can still replay the
-                // functions whose inputs did not move (docs/design/incremental-compilation.md).
-                // It is one directory inside this build's store, so a prune drops it with the rest.
-                run.push(copy(view("--fn-cache")));
-                run.push(fn_store(view(store.root)));
-                // The compiler's own digest: a unit is code this binary emitted, so a rebuilt
-                // compiler must not replay the previous one's.
-                run.push(copy(view("--fn-cache-id")));
-                run.push(id.compiler.copy());
-                if store.quiet != 0 {
-                    run.push(copy(view("--fn-cache-quiet")));
-                }
-            }
-            if !eq(view(name), view(entry_name)) {
-                run.push(copy(view("--no-entry")));
-            }
-            run.push(unit_asm.copy());
-            for f in groups[pick].files.len() {
-                run.push(groups[pick].files[f].copy());
-            }
-            if host::command(run) != 0 {
-                return 1;
-            }
-            mut assemble = u8[][];
-            for i in prefix.len() {
-                assemble.push(item(&prefix, i));
-            }
-            assemble.push(unit_asm.copy());
-            assemble.push(copy(view("-o")));
-            assemble.push(unit_obj.copy());
-            if host::command(assemble) != 0 {
-                say(view("grail: assembling failed (needs clang)"));
-                return 1;
             }
             if write_unit_links(view(stem), view(unit_asm), &groups[pick].files) != 0 {
                 say(view("grail: could not write a module's link inputs"));
                 return 1;
             }
             if cache != 0 {
-                unit_file(&mut store, view(key), view(stem), view(ifaces), view(name));
+                unit_file(&mut store, view(keys[pick]), view(stem), view(ifaces), view(name));
             }
         }
         objects.push(unit_obj);
@@ -5275,6 +5441,7 @@ pub fn is_command<a>(name: &a [u8]) -> bool {
         || eq(view(name), view("debug"))
         || eq(view(name), view("profile"))
         || eq(view(name), view("cache"))
+        || eq(view(name), view("unit-build"))
         || eq(view(name), view("explain"))
         || eq(view(name), view("doc"))
         || eq(view(name), view("bindgen"))
@@ -5328,6 +5495,9 @@ pub fn run() -> u64 {
     }
     if eq(view(name), view("cache")) {
         return cache_command(&args);
+    }
+    if eq(view(name), view("unit-build")) {
+        return unit_build_command(&args);
     }
     if eq(view(name), view("explain")) {
         // `grail explain E0004`: what an error code means and how it is usually fixed.
