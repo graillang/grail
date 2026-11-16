@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **LLVM backend: a failed check no longer costs the loop it guards.** `rt_fail` and `rt_trap` never
+  return, and the lifter now says so (`unreachable` after the call), as it already did for
+  `rt_abort`. A checked access to an 8-byte element (`f64[]`, `u64[]`) used to leave a returning call
+  in the loop body, which clobbered every register the loop held. A one-million-element `x[i] =
+  x[i] * a + y[i]` pass over `f64[]` goes from about 1.3 ms to 0.64 ms, and the `f64` dot product
+  from 2.0 ms to 0.62 ms (scalar C: 0.65 ms).
+
 - **`f32` arithmetic on the native backend rounds in hardware.** Every `f32` result used to be
   rounded by a runtime routine written with integer shifts and a division; it is now one narrowing
   and one widening conversion on x86-64, aarch64 and riscv64. A one-million-element `x[i] = x[i] * a

@@ -2040,6 +2040,15 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
     put(&mut c, target);
     put(&mut c, view("\"({})"));
     pair := def(&mut l, view(c), &u8[][args]);
+    if eq(target, view("rt_fail")) || eq(target, view("rt_trap")) {
+        // A failed check reports and never comes back: it ends the process, or abandons this
+        // stack for the scheduler's (rt_contain_tail). Saying so keeps the failure arm out of the
+        // loop it guards - a returning call there clobbers every register the loop holds, which
+        // is what kept spills and a merge in the body of every checked 8-byte element access.
+        emit(&mut l, view("unreachable"), &u8[][]);
+        ends_terminator(&mut l);
+        return ();
+    }
     r0 := def(&mut l, view("extractvalue {i64, i64} {}, 0"), &u8[][copy(view(pair))]);
     r1 := def(&mut l, view("extractvalue {i64, i64} {}, 1"), &u8[][pair]);
     set_reg(&mut l, view("rax"), view(r0));
