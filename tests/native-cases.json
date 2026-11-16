@@ -10649,6 +10649,24 @@
     ]
   },
   {
+    "name": "drv-release-check-messages",
+    "driver": true,
+    "flags": [
+      "--release",
+      "--overflow=checked"
+    ],
+    "source": "use host;\n// Every inline check kind, failing inside a task so the failure is contained and its message can\n// be printed: built with --release (the LLVM backend), whose stream has no site table.\nfn overflow(n: u64, base: u64) -> u64 { a: u64 := 18446744073709551615 - base; return a + n; }\nfn negative(n: u64, base: u64) -> u64 { x: i64 := 0 - i64(n); return u64(x); }\nfn divide(n: u64, base: u64) -> u64 { return base / (n - 1); }\nfn unwrap(n: u64, base: u64) -> u64 { mut v = u64[]; if n == 2 { v.push(1); } return v.pop()!; }\nfn index8(n: u64, base: u64) -> u64 { v := u64[10, 20, 30]; return v[n + 5]; }\nfn index4(n: u64, base: u64) -> u64 { v := f32[1.0, 2.0]; s := &v[0: 2]; return u64(s[n + 3]); }\nfn asserted(n: u64, base: u64) -> u64 { assert(n == 2); return 0; }\nfn report<s>(sc: (&s Scope<u64>), f: fn(u64, u64) -> u64) -> unit {\n    t := spawn(sc, 1, f);\n    match try_join(t) {\n        v: u64 => { println(v); },\n        e: TaskFailure => { host::print(e.message); host::print(view(\"\\n\")); },\n    }\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    report(sc, overflow);\n    report(sc, negative);\n    report(sc, divide);\n    report(sc, unwrap);\n    report(sc, index8);\n    report(sc, index4);\n    report(sc, asserted);\n    return 0;\n}\nfn main() { task_scope(0, body); }\n",
+    "stdout": "arithmetic overflow\nnegative value converted to an unsigned type\ndivision by zero\npop from an empty vector\nindex 6 out of bounds for length 3\nindex 4 out of bounds for length 2\nassertion failed\n",
+    "driverModules": [
+      "main",
+      "core"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "note": "A release build (the LLVM backend) has no site table to turn an inline `call rt_abort` into a reported failure, so the front end writes `rt_trap` with the check's kind itself, and the 4-byte accessor reports through rt_fail like the 8-byte one: every check kind fails with the message a development build prints (contained in a task, so the message can be pinned)."
+  },
+  {
     "name": "diagx-argument-count-too-many",
     "reject": true,
     "source": "fn f(a: u64, b: u64) -> u64 {\n    return a + b;\n}\n\nfn main() -> u64 {\n    println(f(1, 2, 3));\n    return 0;\n}\n",

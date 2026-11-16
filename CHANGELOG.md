@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **A release build says what failed.** On the LLVM backend an inline check (overflow, a negative
+  value to an unsigned type, division by zero, an unwrap, an assertion) used to end the program
+  with status 134 and no message, because only the native backend's site table turned its `call
+  rt_abort` into a report. The front end now writes `rt_trap` with the check's kind itself when
+  there is no site table, and a failed index into a 4-byte vector reports its index and length
+  like an 8-byte one. Locations (`--> file:line`) are still native-only.
+
 - **One integer-overflow mode per build, decided by the root.** `--overflow=checked|wrap` on the
   command line wins; otherwise the root package's new `[package] overflow = "checked" | "wrap"`
   key; otherwise the build mode's default - checked, or wrap for `--release`. A dependency's own

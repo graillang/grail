@@ -483,6 +483,10 @@ struct C {
     f1_names: u8[][],
     f1_counts: u64[],
     f1_ord: u64,
+    // Set by `site_kind` on a stream without a site table that the LLVM lifter reads: the check's
+    // kind is already in %rdx, and the `call rt_abort` that follows is written as `call rt_trap`, so
+    // the failure reports what failed instead of aborting silently.
+    trap_next: u64,
     // 1 with --verify-facts: the lifter checks every word a fact treats as an f32, and every word
     // it treats as a sequence header.
     verify_facts: u64,
@@ -2361,6 +2365,14 @@ fn site_kind<a>(c: (&a mut C), kind: u64) -> unit {
         o(&mut c, view(".gkind "));
         on(&mut c, kind);
         c.out.push(10);
+    } else if (c.backend != 0) && (c.raw == 0) && (kind != 1) && (kind != 7) && (kind != 9) && (kind != 10) {
+        // No site table will rewrite the abort (the LLVM backend): the kind goes to `rt_trap` here.
+        // Only the kinds whose message needs no operands; an index or range check names its
+        // operands, which only the site table's pattern finds.
+        o(&mut c, view("movq $"));
+        on(&mut c, kind);
+        o(&mut c, view(",%rdx\n"));
+        exchange(&mut c.trap_next, 1);
     }
     return ();
 }
@@ -21269,7 +21281,12 @@ fn call_out<a, b>(c: (&a mut C), callee: &b [u8]) -> unit {
     fx_edge(&mut c, view(callee), 0);
     fx_called(&mut c);
     o(&mut c, view("call "));
-    o(&mut c, callee);
+    if (c.trap_next != 0) && same(view(callee), view("rt_abort")) {
+        exchange(&mut c.trap_next, 0);
+        o(&mut c, view("rt_trap"));
+    } else {
+        o(&mut c, callee);
+    }
     c.out.push(10);
     return ();
 }
@@ -46676,6 +46693,7 @@ pub fn main() -> u64 {
         f1_names: u8[][],
         f1_counts: u64[],
         f1_ord: 0,
+        trap_next: 0,
         verify_facts: 0,
         emit_ir: 0,
         range_facts: 0,
