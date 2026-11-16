@@ -620,7 +620,13 @@ struct C {
     pv_marks: u64[],
     pv_trmarks: u64[],
     pv_trail: Atom[],
+    // The block each `pv_trail` atom came back into: a fact a binding shadowed belongs to the block
+    // that binding was made in, so only that block's close may restore it.
+    pv_trown: u64[],
     pv_pending: Atom[],
+    // The names a closure literal created in this body writes: a call in this body may write through
+    // one of them, so no fact about them outlives a call (docs/design/refinements.md).
+    pv_caps: u8[][],
     // Strict refinements (docs/design/refinements.md): `--strict-refinements` for the whole program,
     // `@strict;` for a module (it stays with the module's name, so a replayed body keeps it), and
     // `@strict` on a declaration for the function that follows.
@@ -7783,17 +7789,33 @@ fn pv_ir_close<a>(c: (&a mut C)) -> unit {
         c.pv_facts.pop();
     }
     if trmark < c.pv_trail.len() {
+        // Only the atoms a binding made *in this block* shadowed come back here. A binding made
+        // between this block's open and its own binding's scope (a loop variable, whose `bind` runs
+        // before the body's block opens) is owned by the block that holds the loop, so its facts are
+        // not restored by an unrelated block's close: that resurrected a fact about a name whose
+        // binding had already ended.
         mut back = Atom[];
         mut keep = Atom[];
+        mut owners = u64[];
         for i in c.pv_trail.len() {
             x := &c.pv_trail[i];
+            mut own = 0;
+            if i < c.pv_trown.len() {
+                own = c.pv_trown[i];
+            }
             if trmark <= i {
-                back.push(copy_atom_value(&x));
+                if own == trmark {
+                    back.push(copy_atom_value(&x));
+                }
             } else {
                 keep.push(copy_atom_value(&x));
+                owners.push(own);
             }
         }
-        exchange(&mut c.pv_trail, keep);
+        if back.len() != 0 || keep.len() != c.pv_trail.len() {
+            exchange(&mut c.pv_trail, keep);
+            exchange(&mut c.pv_trown, owners);
+        }
         for i in back.len() {
             x := &back[i];
             pv_add(&mut c.pv_facts, x.rel, view(x.a), view(x.b), x.k);
@@ -7819,6 +7841,11 @@ fn pv_ir_shadow<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
     }
     mut len_name = copy_bytes(view(name));
     push_bytes(&mut len_name, view(".len"));
+    // The block this binding is made in: its close is the one that may bring the facts back.
+    mut owner = 0;
+    if c.pv_trmarks.len() != 0 {
+        owner = c.pv_trmarks[c.pv_trmarks.len() - 1];
+    }
     mut keep = Atom[];
     for i in c.pv_facts.len() {
         x := &c.pv_facts[i];
@@ -7828,6 +7855,7 @@ fn pv_ir_shadow<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
         }
         if hit {
             c.pv_trail.push(copy_atom_value(&x));
+            c.pv_trown.push(owner);
         } else {
             keep.push(copy_atom_value(&x));
         }
@@ -7892,6 +7920,96 @@ fn pv_span_calls<a>(c: (&a mut C), lo: u64, hi: u64) -> bool {
     }
     return false;
 }
+// Whether a span calls a closure: a name that resolves to a local of closure type, followed by `(`.
+// A closure can only write a binding of this body if it captured it here, which is what `pv_caps`
+// records, so this is the call whose writes that set answers for.
+fn pv_span_calls_closure<a>(c: (&a mut C), lo: u64, hi: u64) -> bool {
+    mut i = lo;
+    while i < hi {
+        if kind_at(&mut c, i) == 1 {
+            if kind_at(&mut c, i + 1) == 40 {
+                n := tok_text(&mut c, i);
+                l := find_local(&mut c, view(n));
+                if l != 0 {
+                    if ty_kind(&mut c, local_ty(&mut c, l - 1)) == 20 {
+                        return true;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    return false;
+}
+// Record that a closure created in this body writes `name`: a call in this body may write through it.
+fn pv_caps_add<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
+    for i in c.pv_caps.len() {
+        if same(view(c.pv_caps[i]), view(name)) {
+            return ();
+        }
+    }
+    c.pv_caps.push(copy_bytes(view(name)));
+    return ();
+}
+// Kill the facts about every name a closure of this body writes: after a call that may reach one,
+// what those names meant before it is not what they mean now.
+fn pv_caps_kill<a>(c: (&a mut C)) -> unit {
+    if !pv_ir_live(&c) {
+        return ();
+    }
+    mut i = 0;
+    while i < c.pv_caps.len() {
+        n := c.pv_caps[i].copy();
+        pv_ir_wrote(&mut c, view(n));
+        i += 1;
+    }
+    return ();
+}
+// What a loop body's writes make false before the body is compiled. The body's own statements kill
+// facts as they are compiled, but the first check site in the body runs before any of them, and on
+// the second iteration a fact that held at the loop's entry no longer holds there. So every name the
+// body assigns, mutably borrows or method-calls is killed here, before the body's block opens; the
+// guard's own facts are added by the block that follows, and are true at every iteration.
+fn pv_loop_kill<a>(c: (&a mut C), open: u64, end: u64) -> unit {
+    if !pv_ir_live(&c) {
+        return ();
+    }
+    mut i = open + 1;
+    while i < end {
+        if kind_at(&mut c, i) == 1 {
+            n := tok_text(&mut c, i);
+            nk := kind_at(&mut c, i + 1);
+            // `x = ...` and `x += ...` change what the name means from here on.
+            mut hit = u64((nk == 61) || ((261 < nk) & (nk < 269)));
+            if hit == 0 {
+                // `x.m()` may write x; the pure tests read their receiver and write nothing.
+                if (nk == 46) & (kind_at(&mut c, i + 3) == 40) {
+                    m := tok_text(&mut c, i + 2);
+                    if !pv_pure_test(view(m)) {
+                        hit = 1;
+                    }
+                }
+            }
+            if (hit == 0) & (2 <= i) {
+                // `&mut x` lends x out exclusively, so a call in the body may write it.
+                if (kind_at(&mut c, i - 1) == 1) & (kind_at(&mut c, i - 2) == 38) {
+                    w := tok_text(&mut c, i - 1);
+                    if same(view(w), view("mut")) {
+                        hit = 1;
+                    }
+                }
+            }
+            if hit != 0 {
+                pv_ir_wrote(&mut c, view(n));
+            }
+        }
+        i += 1;
+    }
+    if pv_span_calls_closure(&mut c, open, end) {
+        pv_caps_kill(&mut c);
+    }
+    return ();
+}
 // The atoms a source span states, or nothing when it states none the prover reads. A span that calls
 // or takes a mutable loan states nothing here: the call may write what its atoms would name.
 fn pv_ir_atoms<a>(c: (&a mut C), lo: u64, hi: u64) -> Atom[] {
@@ -7947,6 +8065,11 @@ fn pv_ir_statement<a>(c: (&a mut C), lo: u64, hi: u64) -> unit {
         }
         i += 1;
     }
+    // A closure of this body writes its captures, not the argument it is given: the names in the
+    // span do not cover those, so they are killed here (see `pv_caps`).
+    if pv_span_calls_closure(&mut c, lo, hi) {
+        pv_caps_kill(&mut c);
+    }
     return ();
 }
 // `name == term` for a binding of a simple value: `n := 32` answers `n % 16 == 0`.
@@ -8001,6 +8124,8 @@ fn pv_begin<a>(c: (&a mut C)) -> unit {
     exchange(&mut c.pv_trmarks, u64[]);
     exchange(&mut c.pv_trail, Atom[]);
     exchange(&mut c.pv_pending, Atom[]);
+    exchange(&mut c.pv_trown, u64[]);
+    exchange(&mut c.pv_caps, u8[][]);
     if c.body_hi == 0 {
         return ();
     }
@@ -8023,6 +8148,8 @@ fn pv_end<a>(c: (&a mut C)) -> unit {
     exchange(&mut c.pv_trmarks, u64[]);
     exchange(&mut c.pv_trail, Atom[]);
     exchange(&mut c.pv_pending, Atom[]);
+    exchange(&mut c.pv_trown, u64[]);
+    exchange(&mut c.pv_caps, u8[][]);
     return ();
 }
 // The proof of one obligation: `pred`'s atoms, with `names` renamed to `terms`, all follow from the
@@ -27776,6 +27903,16 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
             mode = 1;
         }
     }
+    // The names this closure writes are the body's to forget after a call: the call names the
+    // closure, not what it captured, so the set is kept per body (docs/design/refinements.md).
+    if pv_ir_live(&c) {
+        for j in captures.len() {
+            if written[j] != 0 {
+                name := &captures[j];
+                pv_caps_add(&mut c, view(name));
+            }
+        }
+    }
     // Template validation checks captures and moves only; specializations build the real object.
     if c.validating != 0 {
         mut caps = u64[];
@@ -28662,6 +28799,10 @@ fn pattern_loop<a>(
     iter_xty: u64,
     iter_formal: u64
 ) -> unit {
+    // A fact scope of its own for the loop: the loop variable's binding is made before the body's
+    // block opens, so the facts it shadows come back when the loop ends rather than at the close of
+    // an unrelated later block (docs/design/refinements.md, "Facts over the typed IR").
+    pv_ir_open(&mut c);
     head := label(&mut c);
     end := label(&mut c);
     oldb := c.brk;
@@ -28763,6 +28904,7 @@ fn pattern_loop<a>(
     }
     entry := ownership::snapshot(&c.check);
     exchange(&mut c.terminated, 0);
+    pv_loop_kill(&mut c, open, loopend);
     block(&mut c);
     // The pattern's binding ends with each iteration, before the jump back: release it first, so
     // neither the backedge check nor the state the loop exits with still holds this iteration's
@@ -28809,6 +28951,7 @@ fn pattern_loop<a>(
     if endless & (broke == 0) {
         exchange(&mut c.terminated, 1);
     }
+    pv_ir_close(&mut c);
     return ();
 }
 // Built-in methods on string / bytes / views. Results are new values; `string` input gives `string`.
@@ -34977,6 +35120,8 @@ fn map_loop<a, b, d>(c: (&a mut C), name: &b [u8], value_name: &d [u8]) -> unit 
         );
         return ();
     }
+    // A fact scope of its own, as the other loops have: the pair bindings end with the loop.
+    pv_ir_open(&mut c);
     mode := ty_mode(&mut c, map.ty);
     refty := map.ty;
     refslot := map.t;
@@ -35044,6 +35189,7 @@ fn map_loop<a, b, d>(c: (&a mut C), name: &b [u8], value_name: &d [u8]) -> unit 
         bind(&mut c, value_name.copy(), value.ty, value.t, 0);
     }
     exchange(&mut c.terminated, 0);
+    pv_loop_kill(&mut c, open, loopend);
     block(&mut c);
     if c.terminated == 0 {
         cleanup(&mut c, loopmark);
@@ -35080,6 +35226,7 @@ fn map_loop<a, b, d>(c: (&a mut C), name: &b [u8], value_name: &d [u8]) -> unit 
     exchange(&mut c.hasbreak, oldhas);
     exchange(&mut c.loop_start, oldstart);
     exchange(&mut c.loop_end, oldend);
+    pv_ir_close(&mut c);
     return ();
 }
 // `mut r: R;` for an extern "C" record allocates `sizeof(struct)` zeroed bytes, because C's
@@ -35478,6 +35625,9 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
                 return ();
             }
         }
+        // The loop owns a fact scope of its own: its variable's binding (and its guard) end with the
+        // loop, not with the block that holds it.
+        pv_ir_open(&mut c);
         // `for x in v` moves owned elements; `for x in &v` borrows them. Scalar elements are
         // copied out one at a time. The iterable itself is pinned for the duration of the loop, so
         // its storage cannot move or grow in the body.
@@ -35708,6 +35858,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
             }
         }
         pv_ir_statement(&mut c, iter_at, c.pos);
+        pv_loop_kill(&mut c, open, loopend);
         pv_ir_pending(&mut c, &guard);
         oldi := exchange(&mut c.bce_index, proven);
         oldb2 := exchange(&mut c.bce_base, proven_base);
@@ -35752,6 +35903,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         exchange(&mut c.hasbreak, oldhas);
         exchange(&mut c.loop_start, oldstart);
         exchange(&mut c.loop_end, oldend);
+        pv_ir_close(&mut c);
         return ();
     }
     if eat(&mut c, view("match")) {
@@ -41646,7 +41798,9 @@ pub fn main() -> u64 {
         pv_marks: u64[],
         pv_trmarks: u64[],
         pv_trail: Atom[],
+        pv_trown: u64[],
         pv_pending: Atom[],
+        pv_caps: u8[][],
         strict_refinements: 0,
         strict_modules: u8[][],
         strict_next: 0,

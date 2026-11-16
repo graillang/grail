@@ -840,9 +840,13 @@ fn build_argv<a, b, d, e, g, k>(
     wrap := (flags / 16) % 2;
     checked := (flags / 32) % 2;
     no_sites := (flags / 256) % 2;
+    verify_facts := (flags / 512) % 2;
     mut command = u8[][host::exe_path(), copy(view("--target")), copy(view(target))];
     if no_sites != 0 {
         command.push(copy(view("--no-error-sites")));
+    }
+    if verify_facts != 0 {
+        command.push(copy(view("--verify-facts")));
     }
     if debug != 0 {
         command.push(copy(view("--debug")));
@@ -2907,6 +2911,10 @@ struct Options {
     whole: u64,
     // `--no-error-sites`: no runtime-error location table (byte-for-byte comparisons with --split).
     no_sites: u64,
+    // `--verify-facts`: every refinement the prover discharged still emits its runtime check, so a
+    // proof that is wrong aborts at the call instead of passing unnoticed. Without it the flag
+    // never reached the compiler, and the check it exists to keep was the check nobody saw.
+    verify_facts: u64,
     // Module interfaces (B1 stage 2): `--interface DIR` reads them, `grail check` writes them, and
     // `--verify` compares the two instead of trusting either.
     iface: u8[],
@@ -2935,7 +2943,7 @@ struct Options {
 }
 // The code-generation flag vector, in one place: it is what the compiler is told, and what the build
 // cache keys on. Bit 0 check only, 1 debug, 2 deny ambient host, 3 split, 4/5 overflow, 6 cache,
-// 7 whole program, 8 no runtime-error location table.
+// 7 whole program, 8 no runtime-error location table, 9 verify the facts a proof leaned on.
 // The compiler's flag word. `check_only` is the `--check` bit, which is about the caller rather than
 // the options, so it is an argument instead of an option field.
 fn flag_bits<a>(o: (&a Options), check_only: bool = false) -> u64 {
@@ -2952,7 +2960,9 @@ fn flag_bits<a>(o: (&a Options), check_only: bool = false) -> u64 {
         + o.whole
         * 128
         + o.no_sites
-        * 256;
+        * 256
+        + o.verify_facts
+        * 512;
 }
 // The watch flags: `--watch`, `--json`, `--interval MS`, `--debounce MS` and
 // `--diagnostics-json FILE`. Returns 0 for a word that is not one of them, otherwise 1 plus the
@@ -2998,6 +3008,7 @@ fn options<a>(args: (&a u8[][])) -> Options {
         no_sites: 0,
         iface: u8[],
         verify: 0,
+        verify_facts: 0,
         watch: 0,
         interval: 0,
         debounce: 0,
@@ -3075,6 +3086,9 @@ fn options<a>(args: (&a u8[][])) -> Options {
                                                     if eq(view(a), view("--overflow=wrap")) {
                                                         o.overflow = 1;
                                                     } else {
+                                                        if eq(view(a), view("--verify-facts")) {
+                                                            o.verify_facts = 1;
+                                                        } else {
                                                         if eq(view(a), view("--no-error-sites")) {
                                                             o.no_sites = 1;
                                                         } else {
@@ -3122,6 +3136,7 @@ fn options<a>(args: (&a u8[][])) -> Options {
                 }
             }
         }
+            }
             }
         i += 1;
     }
