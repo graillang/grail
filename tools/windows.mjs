@@ -80,8 +80,12 @@ export const runtimeImports = {
     'CreateIoCompletionPort',
     'DeleteFiber',
     'GetActiveProcessorCount',
+    'GetCurrentThread',
     'GetQueuedCompletionStatus',
     'PostQueuedCompletionStatus',
+    'SetThreadAffinityMask',
+    'SetThreadDescription',
+    'SetThreadPriority',
     'SwitchToFiber',
   ],
 };
