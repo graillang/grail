@@ -10,6 +10,8 @@
   `# grail-jumps <known> <unknown>` before each optimised body, and
   `tools/test-optimiser-jumps.mjs` holds the compiler's own sources to 99% known (674285 of
   674319 today; the rest are a hand-written body the optimiser leaves alone and two indirect jumps).
+  The compiler's self-compile assembly is 0.5% smaller (111.9 MB from 112.5 MB) and the compiler
+  compiles itself 2% faster (16.5 s from 16.9 s); `bench/` programs use 9-14% less CPU time.
 
 - A build emits a drop helper for each type whose helper something names, in the order they are
   first named, instead of one for every type the compiler interned: the helpers nothing called are
