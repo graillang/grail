@@ -11,12 +11,14 @@ borrows. The library's opt-in generic bounds are still spelled `Send`/`Share`.
 
 {{example:concurrency}}
 
-Behind `parallel_map` sits one process-wide pool of worker threads that steal work from each
-other, so a second call pays no thread-creation cost and a nested call reuses the same pool. For
+Behind `parallel_map` are the scheduler's worker threads, one per CPU - the same ones that run
+tasks - stealing work from each other, so a call pays no thread-creation cost, a nested call uses
+the same workers, and the calling thread runs leaves itself instead of sleeping. For
 `T[]`-shaped work, `lib/pool.grl` wraps it: `pool::map(items, f)` is the per-element form,
 `pool::run(count, f)` gives job `i` to `f(i)`, `pool::for_chunks(data, chunks, f)` consumes a vector
-and hands each job one contiguous owned chunk, and `pool::join(a, b)` runs two branches and returns
-both owned results. All of them state the same rule: everything a job's closure touches it owns, and
+and hands each job one contiguous owned chunk, and `pool::join(a, b)` forks `a` for any worker to take, runs `b` on the calling thread, and returns
+both owned results - if no worker took `a`, the caller runs it too, so a join costs little when
+there is nobody free to help. All of them state the same rule: everything a job's closure touches it owns, and
 results come back in input order whatever order the jobs finish in. See
 `docs/design/parallelism.md`.
 
@@ -129,9 +131,14 @@ Three things, and one of them removed work rather than adding it.
   refuses to drop an outcome that was never looked at. `docs/design/task-failure-containment.md`,
   decision B5a.
 
-What it still does not do: a *pool job*'s failure is still a process abort (a job has no scheduler
-frame to return to and no scope to report into), there are no dependency edges between jobs, and a
-graph of asset jobs can still starve interactive work because the pool has one queue class.
+A job that waits - sleeps, reads a descriptor, joins a task - does not hold a worker: it parks the
+way a task does and another worker's job runs meanwhile. Do not fork while holding a `Mutex`: a
+thread waiting in a join helps with other jobs, and one of them may want that lock.
+
+What it still does not do: a failure inside a parallel call is still a process abort (a stolen
+branch may be borrowing the failing stack's frames, so that stack cannot simply be discarded),
+there are no dependency edges between jobs, and a graph of asset jobs can still starve interactive
+work because there is one queue class.
 `docs/design/parallelism.md` states each of those with the reason.
 
 **Try it:** remove `shared.total.lock_with(1, add);` and compare the two totals.

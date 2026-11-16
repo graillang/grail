@@ -207,10 +207,24 @@ a task or a thread.
 ### 2.1 Jobs
 
 A job is a run-to-completion closure created by a structured call. Its record
-`{fn, env, state, link}` lives **in the forking frame** (`join`, loops) or in the scope's bump
-block (`scope.spawn`), so spawning allocates nothing. The forker cannot return before the job is
-done, which is what makes a frame-held record and borrowed captures sound - the same argument
+`{fn, three arguments, state, result}` is 64 bytes from a **type-stable pool**: pages that are
+never unmapped, recycled through one free list per worker (touched only by the thread running on
+that worker) and a locked list for other threads, so forking calls no allocator. The forker cannot
+return before the job is done, which is what makes borrowed captures sound - the same argument
 `chunks_mut` already relies on [V lib/pool.grl:92-107].
+
+*As built (stage 1), and why it is not the forking frame as first written here.* A record in the
+frame makes every queue entry a pointer into a stack, so an entry that outlives its job dangles:
+a forker could not take back a job it had injected (a non-worker thread would have to sleep, not
+help), and a forker whose task migrated mid-join would have to hunt its entry down in another
+worker's deque. With type-stable records **a queue entry is only a hint and the claim is a CAS on
+the record's state word** (`pending -> claimed`): whoever wins runs the job, exactly once. A stale
+entry names a record that is free, running, done, or pending again as a later job, and claiming
+that later job is harmless - it is run once, by someone, which is all its forker needs. The forker
+claims its own job by pointer, which is also the whole of "helps with its own scope only". The
+runtime dialect cannot take a frame address either, so frame records would have needed a new
+intrinsic on every back end. A free-list pop costs what a frame slot costs. The argument is written
+next to the CAS in `compiler/runtime.grl` ("jobs on the scheduler").
 
 Mechanics (replaces `rt_pool_*`):
 
@@ -218,11 +232,20 @@ Mechanics (replaces `rt_pool_*`):
   is still there (the common case) run it inline: cost is a push, a pop and two calls, no atomics
   beyond the deque's. If it was stolen, **help**: run other jobs until `b`'s state word flips,
   then park.
-- A stolen job runs on the thief's *current stack*. Every worker's idle loop runs on a recycled
-  task-sized stack with a guard page (the existing free list), not on the bare thread stack, so
-  **a job that waits is promoted, not forbidden**: the park switches away from that stack exactly
-  as for a task, and the worker takes a fresh one. The non-waiting path pays nothing for this.
-  It also gives every job the overflow report tasks have (today: SIGSEGV [P6]).
+- A stolen job runs on the thief's *runner*: each worker keeps one cached green task whose body is
+  "claim the handed job, drain my job deque, go idle". Inside a job there is therefore always a
+  current task, so **a job that waits is promoted, not forbidden**, and by no code of its own: the
+  wait parks the runner as any task parks, the worker sees its runner leave without being idle,
+  forgets it and makes a fresh one, and the parked runner is resumed by any worker, finishes its
+  job and ends. The non-waiting path pays nothing for this. It also gives every job the overflow
+  report tasks have (before: SIGSEGV [P6]).
+- While a stolen job is outstanding, a waiting worker takes from its own job deque first and
+  steals only jobs of the same or a higher class than the one it waits for (one class until
+  stage 5). Help nests on the waiter's stack; each worker keeps the high-water mark of that
+  nesting and `GRAIL_SCHED_STATS=1` prints it.
+- A stack that holds a `Mutex` across a join can pick up, while helping, a job that wants the same
+  mutex. Do not fork while holding a lock; the callback-scoped guard makes the offending shape
+  visible (a parallel call inside `lock_with`).
 - A thread that is not a worker (main, render) may fork jobs. It pushes to the injection queue of
   the scope's class and **helps with jobs of its own scope only** - never an unrelated job, the
   reason the pool gives for not helping at all [V runtime.grl:2840-2844].
@@ -268,6 +291,26 @@ the compiler) belongs to the SIMD/layout note; it should lower to `chunks_mut`/`
 needs nothing else from this design. **Depends on:** unboxed records (a `&mut [Body]` chunk is only
 cache-efficient if `Body` is stored inline) and the allocator work (`map`'s result vector and any
 allocation inside a leaf).
+
+### Follow-up F1: contain a failure inside a parallel region (before stage 2)
+
+Stage 1 keeps the old pool's rule: a failed check in a job, or in a task that still has forks
+outstanding, ends the process (status 134, one report). That must not become permanent - a task
+contains its failures today and jobs on the same scheduler should too.
+
+- **What is missing.** Containment discards the failing stack. A stolen child may be borrowing that
+  stack's frames (its closure environment, the slice it writes), so the stack has to stay alive
+  until every record it forked is done. The failing stack must therefore finish its joins without
+  running any more user code - wait, do not help, do not claim - and only then be discarded; a
+  failure in a stolen or helped job is recorded in its record and re-raised by the forker at its
+  join (first failure wins, siblings finish: Q1).
+- **Acceptance test** `sched-job-failure-is-contained`: a task forks eight chunks over its own
+  vector, one chunk fails an index check while the others are still writing; `try_join` on the
+  task returns the `TaskFailure` with the chunk's message and site, the process keeps running, a
+  sibling task's result is intact, and every other chunk's writes are in the vector (they finished
+  before the stack was discarded). The same from the main thread still ends the process.
+- `pool-abort-eight-chunks-reports-once` and `pool-chunk-write-outside-aborts` keep their meaning
+  for the main-thread case.
 
 ### 2.2 Tasks
 
@@ -553,7 +596,7 @@ stalls and the assertion fails) and `tests/sched/job_overflow.grl` (today: SIGSE
 | 2. Threads | `lib/thread.grl`: spawn/join/try_join/scope/detach, `Config`, `Ctx`, `with_current`, `sleep_until`; `sched::start`; `thread::Local`; `GRAIL_TASKS=thread` removed (D10) | `runtime.grl` (public surface over `rt_thread_start`, stack size, name, affinity, priority), the three OS modules, `native.grl` (`Thread<R>` kind and its `Send`/`Share` rows, `Ctx` not transferable), `lib/thread.grl`, book chapter | priority and affinity need privileges or differ per OS (macOS has QoS, no hard affinity): each setter returns a result, never aborts; libc-loaded processes must create through the glibc bridge with attributes | `thread-join-result`, `thread-drop-joins`, `thread-scope-borrows`, `thread-ctx-not-sendable` (compile error), `thread-local-per-thread`, `thread-failure-is-value`, `thread-stack-size-honoured`, `sched-start-twice-is-error` | render moves to a pinned thread; frame max improves or holds |
 | 3. Parking and `sync` | Wait nodes; `Mutex` parks; `Condition`, `Latch`, `Barrier`, `Semaphore`, `Once`, `RwLock`; cancellable, deadline-able waits | `runtime.grl` (park/unpark, mutex), `native.grl` (builtin kinds or plain library types - Q4), `lib/sync.grl`, `lib/concurrent_map.grl` (may move to `RwLock`) | lost-wakeup and ABA bugs in the wait list; mutex handoff fairness against throughput (allow barging after a short spin) | `mutex-waiters-park` (P3 as a test: user CPU under 2x wall), `condition-ping-pong`, `rwlock-readers-overlap`, `once-runs-once-under-race`, `latch-many-waiters`, `wait-cancelled-by-scope`, `wait-deadline` | mutex handoff under 1 us uncontended-to-contended; CPU seconds drop |
 | 4. Channels and executor | `chan::bounded`, `chan::spsc`, `thread::Executor` | `lib/chan.grl`, `lib/thread.grl`, small runtime help for the SPSC cache-line layout | SPSC needs inline atomics and padding to be wait-free in practice - **depends on unboxed records / layout**; until then it works through heap words and is slower | `chan-bounded-backpressure`, `chan-close-on-last-sender`, `chan-mpmc-checksum`, `spsc-order-and-count`, `executor-call-from-task`, `chan-send-non-send-refused` (compile error) | render command stream on SPSC; zero allocations per frame on that path |
-| 5. Classes and latency | `Frame`/`Normal`/`Background` deques, `background_cap`, `idle_spin_us`, `pin_workers`, `warm_stacks`, `seed`, 61-tick fairness, `(n, grain)` splits, `reduce` | `runtime.grl`, `lib/pool.grl`, `lib/sched.grl` | three deques per worker triples steal scans; starvation of `Background` must be bounded (age promotion or guaranteed share - Q3) | `frame-not-starved-by-background`, `reduce-bit-identical-across-worker-counts`, `seeded-run-reproduces`, `injected-work-not-starved` | frame p99 with the background importer within 10% of without |
+| 5. Classes and latency | `Frame`/`Normal`/`Background` deques, `background_cap`, `idle_spin_us`, `pin_workers`, `warm_stacks`, `seed`, 61-tick fairness, `(n, grain)` splits, `reduce` | `runtime.grl`, `lib/pool.grl`, `lib/sched.grl` | three deques per worker triples steal scans; a stale entry in one class's deque can name a later job of another class (entries are hints, the claim is on the record - correct, but it runs that job at the wrong priority, so the record needs its class checked at the claim or entries must not outlive their job); `Background` starvation is made visible by a counter, not bounded, in the first version (D8) | `frame-not-starved-by-background`, `reduce-bit-identical-across-worker-counts`, `seeded-run-reproduces`, `injected-work-not-starved` | frame p99 with the background importer within 10% of without |
 | 6. Blocking and foreign | `extern "C" blocking`, worker handoff with cached spares, spares replace thread-per-offload, cached adopted records for C threads, timer wheel, `@no_wait` | `native.grl` (extern attribute, effect), `runtime.grl`, OS modules, `docs/ffi.md`, `decisions-b2-b6.md` (B3 amended) | handoff races (a returning thread and its replacement both own the slot); spare-thread cap behaviour under a storm; `@no_wait` precision through closures | `blocking-ffi-does-not-stall-tasks` (the existing `tests/concurrency/blocking_call.grl` inverted), `offload-reuses-threads`, `c-thread-callback-no-mmap`, `no-wait-refuses-lock`, `audio-callback-spsc` | I/O task latency flat while 24 tasks sit in `blocking` calls; P5 ratio near 1 |
 | 7. Atomics | The `Atomic<T>` family, the ordering suffixes on every target, native `xadd`/`xchg` | `native.grl`, back ends, `runtime.grl` | **blocked on unboxed records** for inline atomics; weak orderings need per-target lowering and a litmus test each | `atomic-family-widths`, `atomic-wrap-is-modular`, `atomic-orderings-litmus` (store buffering, message passing), `atomic-inline-field-size` | fetch_add throughput; no frame gate |
 

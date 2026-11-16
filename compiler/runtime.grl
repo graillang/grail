@@ -3114,6 +3114,11 @@ fn rt_inject_push(s: u64, t: u64) -> u64 {
     return 0;
 }
 fn rt_inject_pop(s: u64) -> u64 {
+    // An unlocked look first: idle and helping workers ask often and the ring is usually empty. A
+    // push that this look misses bumps the park sequence afterwards, so no worker sleeps on it.
+    if raw_atomic_load(s + 8) == raw_atomic_load(s + 16) {
+        return 0;
+    }
     rt_spin_lock(s);
     head := raw_load(s + 8);
     tail := raw_load(s + 16);
@@ -3189,7 +3194,8 @@ fn rt_worker_loop(worker: u64) -> u64 {
     rt_os_sched_prepare();
     while true {
         // The sequence is read before the look for work: a push after this read changes the word
-        // the wait compares, so the wait returns at once and no wakeup is lost.
+        // the wait compares, so the wait returns at once and no wakeup is lost. (Looking a few
+        // more times before sleeping was measured and did not pay: bench/sched.grl got slower.)
         seq := raw_atomic_load(s + 24);
         if rt_worker_step(s, worker) == 0 {
             rt_atomic_fetch_add(s + 96, 1);
@@ -3449,12 +3455,7 @@ fn rt_job_inject_push(r: u64) -> u64 {
     return 1;
 }
 fn rt_job_inject_pop() -> u64 {
-    j := raw_load(rt_state_jobs());
-    // An unlocked look first: an idle or helping worker asks often and the ring is usually empty.
-    if raw_atomic_load(j + 8) == raw_atomic_load(j + 16) {
-        return 0;
-    }
-    return rt_inject_pop(j);
+    return rt_inject_pop(raw_load(rt_state_jobs()));
 }
 fn rt_job_steal(s: u64, w: u64) -> u64 {
     workers := raw_load(s + 32);

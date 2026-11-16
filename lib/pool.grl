@@ -1,6 +1,7 @@
 module pool;
 
-// Data-parallel jobs over the process-wide pool (docs/design/parallelism.md, stages 1 and 2).
+// Data-parallel jobs on the scheduler's workers (docs/design/scheduler.md, "Jobs";
+// docs/design/parallelism.md for the ownership rules).
 //
 // THE OWNERSHIP RULE, in one line: everything a job's closure touches it owns or borrows
 // exclusively. A job takes its inputs by value, builds an owned result, and the only shared memory
@@ -106,8 +107,9 @@ pub fn chunks_mut<T:Send>(data: (&mut [T]), chunks: u64, f: Fn((&mut [T]))->unit
     parallel_for_chunks(data, chunks, f);
 }
 
-// Two branches of a job graph, both owned: `first` runs on a worker while `second` runs on the
-// calling thread, so both make progress and the results come back owned, in the order given.
+// Two branches of a job graph, both owned: `first` is forked for any worker to take while `second`
+// runs on the calling thread, and if nobody took `first` the caller runs it afterwards, so a join
+// with no free worker costs about two calls. The results come back owned, in the order given.
 // This is what "spawn two jobs, then join" means without a handle that could outlive the call.
 // `first` crosses to a worker, so it is an `Fn` with classified captures like every callback in
 // this module; `second` never leaves the calling thread and is called once, so it is an `FnMut`

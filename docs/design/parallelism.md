@@ -236,6 +236,11 @@ room for that even if priorities are not implemented yet.
 
 ### The runtime: one bounded work-stealing pool
 
+> **Superseded.** The pool described in this subsection no longer exists: jobs run on the
+> scheduler's own workers (`docs/design/scheduler.md`, "Jobs"; `docs/design/concurrency-model.md`,
+> stage 1). `GRAIL_POOL_WORKERS` became `GRAIL_WORKERS`, a waiting thread now runs its own forks,
+> and `rt_pool_*` is gone. What follows is the record of what was built first and why.
+
 `compiler/runtime.grl` owns one process-wide pool, created by the first parallel call and never
 destroyed. Reused rather than reinvented:
 
@@ -357,8 +362,9 @@ What this does **not** buy, and must not be read as buying:
 
 Tested by native cases (`tests/native-cases.json`, fixtures in `tests/pool/`):
 
-- nested parallel work completes on a **one-worker** pool (`pool-nested-one-worker`,
-  `GRAIL_POOL_WORKERS=1`) - the helping scheduler is the only thing that makes that non-deadlocking;
+- nested parallel work completes with **one worker** (`pool-nested-one-worker`,
+  `GRAIL_WORKERS=1`) - a waiter that runs its own forks is the only thing that makes that
+  non-deadlocking;
 - one long job among trivial ones does not deadlock and its result lands in its own slot
   (`pool-uneven-work-no-deadlock`);
 - results are independent of completion order (`pool-map-input-order`: job 0 sleeps longest);
