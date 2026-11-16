@@ -12296,6 +12296,21 @@ fn callable_contract<a, b>(
     for i in ax.len() {
         left := ax[i];
         right := ex[i];
+        // A closure's reference parameter is a fresh input lifetime on every call, so an expected
+        // parameter that names no lifetime - a type argument bound to a reference (`C` of
+        // `Fn((&T), C)` given `&a K`), whose lifetime the binding does not carry - accepts any: only
+        // the referent and the mode must match. Result positions are not relaxed.
+        if (ak == 20) || (ak == 12) {
+            lk := ty_kind(&mut c, left);
+            if ((lk == 5) || (lk == 7) || (lk == 27)) && (ty_kind(&mut c, right) == lk)
+                && (type_regions(&mut c, right).len() == 0) && (type_regions(&mut c, left).len() == 1)
+                && (ty_mode(&mut c, left) == ty_mode(&mut c, right)) {
+                if (lk == 5) || callable_contract(&mut c, ty_arg(&mut c, left), ty_arg(&mut c, right), &mut map, depth + 1) {
+                    continue;
+                }
+                return false;
+            }
+        }
         if !callable_contract(&mut c, left, right, &mut map, depth + 1) {
             return false;
         }
@@ -31725,7 +31740,15 @@ fn bound_or_unknown<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> u64 {
     if mentions_unbound(&mut c, ty, &map) {
         return NO_TYPE;
     }
-    return bind_types(&mut c, ty, &map);
+    bound := bind_types(&mut c, ty, &map);
+    // A type argument bound to a reference carries no lifetime, and a closure's reference
+    // parameter needs one of its own: leave it to the closure to write (`|k: (&a K)|`), so the
+    // message is the one that asks for the annotation.
+    bk := ty_kind(&mut c, bound);
+    if ((bk == 5) || (bk == 7) || (bk == 27)) && (type_regions(&mut c, bound).len() == 0) {
+        return NO_TYPE;
+    }
+    return bound;
 }
 fn mentions_unbound<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> bool {
     k := ty_kind(&mut c, ty);
@@ -36248,6 +36271,17 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
     }
     captured := capture_field(&mut c, view(first), 0, 0);
     if captured.ty != NO_TYPE {
+        // A captured shared reference, view or slice read as a value is re-borrowed - `load(&name)`,
+        // which keeps the loan it came from - so it can be passed on, bound or returned without
+        // moving the environment's own field (which the closure cannot give up).
+        ck := ty_kind(&mut c, captured.ty);
+        if ((ck == 5) || (ck == 7) || (ck == 27)) && (ty_mode(&mut c, captured.ty) == 0) && (c.validating == 0) {
+            nk := kind(&mut c);
+            if (nk != 91) && (nk != 46) {
+                field := capture_field(&mut c, view(first), 1, 0);
+                return deref_value(&mut c, field);
+            }
+        }
         return captured;
     }
     constant := constant_value(&mut c, view(m), view(first));

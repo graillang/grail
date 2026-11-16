@@ -1,6 +1,13 @@
-# Changelog
-
 ## Unreleased
+
+- **A closure may take a reference where a type argument stands for one, and pass a captured
+  reference on.** `lock.read_with(key, |v: (&u64[]), k: (&a u64)| -> bool ..)` was a type mismatch
+  when the context parameter `C` was bound to a reference (a type argument carries no lifetime; a
+  closure parameter has a fresh one); it is accepted, and a parameter type left to inference there
+  asks for the annotation. A captured shared reference read as a value (`find(v, key)` inside a
+  closure) is re-borrowed instead of moved out of the closure, which was "move of unavailable or
+  borrowed value"; the borrow is kept as before.
+ Unreleased
 
 - **A closure inside a closure may capture what the outer one captured.** A captured shared
   reference is re-borrowed, and a captured `&mut` vector or slice is re-borrowed as an exclusive
