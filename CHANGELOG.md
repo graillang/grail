@@ -1027,6 +1027,7 @@
 # Changelog
 
 ## Unreleased
+- `grail fmt` no longer reads `i < (n >> 1)` as a generic argument list (it wrote `i<(n> > 1)`, which does not parse): a `>` met inside an open parenthesis or bracket closes no type arguments.
 
 - Fixed: **a program that ran the main thread's stack out died with an empty stderr**. `f(100000000)`
   in a recursive function exited 139 (SIGSEGV) with nothing said, because the guard page and the
