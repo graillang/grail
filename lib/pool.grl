@@ -115,9 +115,10 @@ pub fn chunks_mut<T:Send>(data: (&mut [T]), chunks: u64, f: Fn((&mut [T]))->unit
 pub struct Pair<A,B>{first:A,second:B}
 pub fn join<A:Send,B:Send>(first:Fn()->A,second:FnMut()->B)->Pair<A,B>{
     mut here=second;
-    mut one=u64[0];
-    mut done=parallel_map(one,0,|i: u64, unused: u64| -> A first());
-    return Pair{first:done.pop()!,second:here()};
+    mut slot: B? = None;
+    out := &mut slot;
+    a := parallel_with(first, || -> unit { *out = Some(here()); });
+    return Pair{first:a,second:slot!};
 }
 
 // A job handle: `spawn` starts a job and returns it, `wait` takes its result. This is spawn-then-wait

@@ -1414,6 +1414,7 @@
   },
   {
     "name": "parallel-map-real-threads-contention",
+    "note": "The four-way barrier needs four threads running leaves at once - the caller and three workers - so the case asks for four workers itself instead of relying on the host's CPU count.",
     "files": [
       "compiler/tests/parallel.grl",
       "lib/concurrent_map.grl",
@@ -1421,6 +1422,9 @@
       "lib/hash.grl",
       "lib/core.grl"
     ],
+    "env": {
+      "GRAIL_WORKERS": "4"
+    },
     "stdout": "42\n"
   },
   {
@@ -5402,7 +5406,7 @@
   },
   {
     "name": "pool-nested-one-worker",
-    "note": "Nested parallelism on a one-worker pool (GRAIL_POOL_WORKERS=1): a job waits on the jobs it queued, so only the helping scheduler can complete this without deadlock.",
+    "note": "Nested parallelism with one worker (GRAIL_WORKERS=1): a job waits on the jobs it forked, so only a waiter that runs its own forks and helps can complete this without deadlock.",
     "files": [
       "tests/pool/nested.grl"
     ],
@@ -5411,7 +5415,7 @@
       "lib/core.grl"
     ],
     "env": {
-      "GRAIL_POOL_WORKERS": "1"
+      "GRAIL_WORKERS": "1"
     },
     "stdout": "[19900, 219900, 419900, 619900, 819900, 1019900]\n[19900, 20100, 20300, 20500]\n"
   },
@@ -11001,6 +11005,38 @@
       "lib/core.grl"
     ],
     "stdout": "1\n",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "sched-job-wait-does-not-hold-a-worker",
+    "note": "Every worker's task forks one job that sleeps 300 ms while a ticker task sleeps 10 ms at a time: the sleeping job parks its runner and the waiting task parks too, so the ticker keeps ticking. With jobs on a pool of their own each waiting task put a scheduler thread to sleep and the ticker stalled for the whole 300 ms.",
+    "files": [
+      "tests/sched/job_wait_in_task.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "1\n",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "sched-job-stack-overflow-reports-and-exits-134",
+    "note": "Deep recursion inside a job hits the guard page of the stack it runs on and is reported like a task's overflow; on a pool thread it was an unexplained SIGSEGV.",
+    "files": [
+      "tests/sched/job_overflow.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "before\n",
+    "status": 134,
+    "stderr": "error: stack overflow\n",
     "targets": [
       "x86_64"
     ]
