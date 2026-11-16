@@ -13511,7 +13511,10 @@ fn float_text<a>(c: (&a mut C), id: u64) -> unit {
     if id == 131 {
         name = "toi";
     }
-    if (c.target == 0) || (c.target == 3) {
+    // The arithmetic and sqrt are SSE text on every target - machine.grl translates it for AArch64
+    // and RISC-V like any other instruction - so the optimiser keeps their values in registers
+    // everywhere. Compares and integer conversions produce integers and stay `fop` off x86.
+    if (id < 127) || (id == 129) || (c.target == 0) || (c.target == 3) {
         if id < 127 {
             mut instr = "addsd";
             if id == 124 {
@@ -13645,24 +13648,19 @@ fn float_arith<a>(c: (&a mut C), op: u64, lhs: u64, rhs: u64, single: u64) -> u6
     }
     get(&mut c, lhs, view("%rax"));
     get(&mut c, rhs, view("%rcx"));
-    if (c.target == 0) || (c.target == 3) {
-        mut instr = "addsd";
-        if id == 124 {
-            instr = "subsd";
-        }
-        if id == 125 {
-            instr = "mulsd";
-        }
-        if id == 126 {
-            instr = "divsd";
-        }
-        o(&mut c, view("movq %rax,%xmm0\nmovq %rcx,%xmm1\n"));
-        o(&mut c, view(instr));
-        o(&mut c, view(" %xmm1,%xmm0\ncvtsd2ss %xmm0,%xmm0\ncvtss2sd %xmm0,%xmm0\nmovq %xmm0,%rax\n"));
-    } else {
-        float_text(&mut c, id);
-        o(&mut c, view("cf32bits\ncf32widen\n"));
+    mut instr = "addsd";
+    if id == 124 {
+        instr = "subsd";
     }
+    if id == 125 {
+        instr = "mulsd";
+    }
+    if id == 126 {
+        instr = "divsd";
+    }
+    o(&mut c, view("movq %rax,%xmm0\nmovq %rcx,%xmm1\n"));
+    o(&mut c, view(instr));
+    o(&mut c, view(" %xmm1,%xmm0\ncvtsd2ss %xmm0,%xmm0\ncvtss2sd %xmm0,%xmm0\nmovq %xmm0,%rax\n"));
     return save(&mut c);
 }
 // A binary64 word rounded to the nearest f32 (ties to even) and widened again: the value every f32
@@ -13675,11 +13673,7 @@ fn f32_round<a>(c: (&a mut C), value: u64) -> u64 {
         return invoke(&mut c, view("rt_f32_round"), one(value));
     }
     get(&mut c, value, view("%rax"));
-    if (c.target == 0) || (c.target == 3) {
-        o(&mut c, view("movq %rax,%xmm0\ncvtsd2ss %xmm0,%xmm0\ncvtss2sd %xmm0,%xmm0\nmovq %xmm0,%rax\n"));
-    } else {
-        o(&mut c, view("cf32bits\ncf32widen\n"));
-    }
+    o(&mut c, view("movq %rax,%xmm0\ncvtsd2ss %xmm0,%xmm0\ncvtss2sd %xmm0,%xmm0\nmovq %xmm0,%rax\n"));
     return save(&mut c);
 }
 // `op(lhs, rhs)` on floats. With `single` (both operands' static type is f32) the call carries the

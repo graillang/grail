@@ -170,6 +170,53 @@ pub fn arg_regs() -> u64 {
 // general register except the ones named (the integer side of `movd`, `cvttsd2si`, `cvtsi2sdq`)
 // and no memory. Before they had numbers they were unknown instructions, after which every
 // register was live and nothing could be removed across them.
+// The argument registers a call reads, when the callee is one whose arguments are known: the runtime
+// exits (llvm.grl `never_returns`, and `rt_abort`; rdi, rsi, rdx by arity, runtime.grl and
+// os-linux.grl) and the compiler's drop helpers (`.D` and 16 hex digits, native.grl `drop_symbol`),
+// which take the value in rdi alone. A register mask with bit 63 set; 0 for any other call, which
+// reads every argument register.
+pub fn call_args<b>(s: &b [u8], a: u64, e: u64) -> u64 {
+    if (e - a == 18) && at(view(s), a, view(".D")) {
+        return 9223372036854775808 + 128;
+    }
+    if same_range(view(s), a, e, view("rt_abort")) {
+        return 9223372036854775808 + 0;
+    }
+    if same_range(view(s), a, e, view("rt_fail")) {
+        return 9223372036854775808 + 196;
+    }
+    if same_range(view(s), a, e, view("rt_trap")) {
+        return 9223372036854775808 + 196;
+    }
+    if same_range(view(s), a, e, view("rt_refine")) {
+        return 9223372036854775808 + 192;
+    }
+    if same_range(view(s), a, e, view("rt_task_fail")) {
+        return 9223372036854775808 + 128;
+    }
+    if same_range(view(s), a, e, view("rt_fail_text")) {
+        return 9223372036854775808 + 196;
+    }
+    if same_range(view(s), a, e, view("rt_report_die")) {
+        return 9223372036854775808 + 192;
+    }
+    if same_range(view(s), a, e, view("rt_abort_final")) {
+        return 9223372036854775808 + 0;
+    }
+    if same_range(view(s), a, e, view("rt_abort_park")) {
+        return 9223372036854775808 + 0;
+    }
+    if same_range(view(s), a, e, view("rt_hard_exit")) {
+        return 9223372036854775808 + 128;
+    }
+    if same_range(view(s), a, e, view("rt_stack_overflow")) {
+        return 9223372036854775808 + 0;
+    }
+    if same_range(view(s), a, e, view("rt_stack_overflow_at")) {
+        return 9223372036854775808 + 128;
+    }
+    return 0;
+}
 pub fn float_opcode<b>(s: &b [u8], a: u64, space: u64) -> u64 {
     if same_range(view(s), a, space, view("addsd")) {
         return 60;
@@ -828,6 +875,17 @@ pub fn parse<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) {
             exchange(&mut o.op[last], 0);
         }
     }
+    // A call whose callee's arguments are known says which registers it reads (call_args): a drop
+    // helper reads rdi, not the six registers a call is otherwise assumed to, so what the caller left
+    // in %rcx is not kept alive for it. The mask rides in the call operand's register mask with bit
+    // 63 set (`reads`).
+    if (op == 15) & (comma == e) & (o.k0[o.k0.len() - 1] == 4) {
+        known := call_args(view(s), first, e);
+        if known != 0 {
+            n := o.m0.len() - 1;
+            exchange(&mut o.m0[n], known);
+        }
+    }
     // Calls to the leaf runtime accessors become pseudo-instructions expanded inline at emission:
     // 40 rt_slot, 41 rt_at (bounds-checked element address / load), 42 rt_len, 43 rt_xchg, 44 rt_atb (byte load),
     // 45 rt_push / 46 rt_pushb (inline store when capacity remains, runtime call to grow),
@@ -933,6 +991,9 @@ pub fn reads<a>(o: (&a Body), i: u64) -> u64 {
     src := mask_of(o.k0[i], o.v0[i], o.m0[i]);
     dst := mask_of(o.k1[i], o.v1[i], o.m1[i]);
     if op == 15 {
+        if (o.m0[i] >> 63) != 0 {
+            return o.m0[i] & all_regs();
+        }
         return arg_regs() | src;
     }
     if op == 100 || op == 101 || op == 29 || op == 32 || is_jump(op) {

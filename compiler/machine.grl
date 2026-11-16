@@ -1028,6 +1028,189 @@ fn c_abi<a, b, c>(o: (&a mut Out), op: &b [u8], rest: &c [u8]) -> bool {
     }
     return false;
 }
+// An SSE register of the x86 text in this target's floating-point file: the scratch pair xmm0/xmm1
+// is d0/d1 (ft0/ft1), and the registers the optimiser keeps floats in, xmm8..xmm14, are v17..v23
+// (ft2..ft8) - caller-saved in AAPCS64 and the RISC-V psABI, as every SSE register is in SysV, and
+// clear of d16/ft0, the scratch of the f32 conversions above. `single` names the 32-bit view. ""
+// when `s` is not one of them.
+fn freg<a>(target: u64, s: &a [u8], single: bool) -> u8[] {
+    mut n = 99;
+    if eq(view(s), view("%xmm0")) {
+        n = 0;
+    }
+    if eq(view(s), view("%xmm1")) {
+        n = 1;
+    }
+    if (s.len() == 5) && starts(view(s), view("%xmm")) && (s[4] > 55) && (s[4] < 58) {
+        n = s[4] - 48;
+    }
+    if (s.len() == 6) && starts(view(s), view("%xmm1")) && (s[5] > 47) && (s[5] < 53) {
+        n = 10 + s[5] - 48;
+    }
+    mut out = u8[];
+    if n == 99 {
+        return out;
+    }
+    mut k = n;
+    if target == 1 {
+        if n > 7 {
+            k = n + 9;
+        }
+        if single {
+            out.push(115);
+        } else {
+            out.push(100);
+        }
+    } else {
+        if n > 7 {
+            k = n - 6;
+        }
+        out.push(102);
+        out.push(116);
+    }
+    if k > 9 {
+        out.push(48 + k / 10);
+    }
+    out.push(48 + k % 10);
+    return out;
+}
+// The SSE forms the native front end and the optimiser write for float arithmetic, on AArch64 and
+// RISC-V: moves between SSE and general registers, register copies, clearing, the four operations
+// and sqrt in both precisions, and the two conversions. Compares and integer conversions arrive as
+// `fop` lines instead.
+fn float_sse<a, b, c, d>(o: (&a mut Out), op: &b [u8], src: &c [u8], dst: &d [u8]) -> bool {
+    target := o.target;
+    arm := target == 1;
+    if eq(view(op), view("movq")) {
+        fs := freg(target, view(src), false);
+        fd := freg(target, view(dst), false);
+        if (fs.len() != 0) && (fd.len() == 0) {
+            r := reg(target, view(dst));
+            if arm {
+                put(&mut o, view("fmov "));
+                put(&mut o, view(r));
+                put(&mut o, view(","));
+            } else {
+                put(&mut o, view("fmv.x.d "));
+                put(&mut o, view(r));
+                put(&mut o, view(","));
+            }
+            put(&mut o, view(fs));
+            put(&mut o, view("\n"));
+            return true;
+        }
+        if (fd.len() != 0) && (fs.len() == 0) {
+            r := reg(target, view(src));
+            if arm {
+                put(&mut o, view("fmov "));
+            } else {
+                put(&mut o, view("fmv.d.x "));
+            }
+            put(&mut o, view(fd));
+            put(&mut o, view(","));
+            put(&mut o, view(r));
+            put(&mut o, view("\n"));
+            return true;
+        }
+        return false;
+    }
+    single := eq(view(op), view("addss")) || eq(view(op), view("subss")) || eq(view(op), view("mulss"))
+        || eq(view(op), view("divss")) || eq(view(op), view("sqrtss")) || eq(view(op), view("cvtsd2ss"));
+    fs := freg(target, view(src), single && !eq(view(op), view("cvtsd2ss")));
+    fd := freg(target, view(dst), single);
+    if (fs.len() == 0) || (fd.len() == 0) {
+        return false;
+    }
+    if eq(view(op), view("movaps")) {
+        if arm {
+            put(&mut o, view("fmov "));
+        } else {
+            put(&mut o, view("fmv.d "));
+        }
+        put(&mut o, view(fd));
+        put(&mut o, view(","));
+        put(&mut o, view(fs));
+        put(&mut o, view("\n"));
+        return true;
+    }
+    if eq(view(op), view("xorps")) {
+        if arm {
+            put(&mut o, view("movi "));
+            put(&mut o, view(fd));
+            put(&mut o, view(",#0\n"));
+        } else {
+            put(&mut o, view("fmv.d.x "));
+            put(&mut o, view(fd));
+            put(&mut o, view(",zero\n"));
+        }
+        return true;
+    }
+    if eq(view(op), view("cvtss2sd")) || eq(view(op), view("cvtsd2ss")) {
+        mut from = freg(target, view(src), eq(view(op), view("cvtss2sd")));
+        if arm {
+            put(&mut o, view("fcvt "));
+        } else {
+            if eq(view(op), view("cvtss2sd")) {
+                put(&mut o, view("fcvt.d.s "));
+            } else {
+                put(&mut o, view("fcvt.s.d "));
+            }
+        }
+        put(&mut o, view(fd));
+        put(&mut o, view(","));
+        put(&mut o, view(from));
+        put(&mut o, view("\n"));
+        return true;
+    }
+    mut name = u8[];
+    if starts(view(op), view("add")) {
+        name = copy_text(view("fadd"));
+    }
+    if starts(view(op), view("sub")) {
+        name = copy_text(view("fsub"));
+    }
+    if starts(view(op), view("mul")) {
+        name = copy_text(view("fmul"));
+    }
+    if starts(view(op), view("div")) {
+        name = copy_text(view("fdiv"));
+    }
+    if starts(view(op), view("sqrt")) {
+        name = copy_text(view("fsqrt"));
+    }
+    if (name.len() == 0) || !(ends_sd_ss(view(op))) {
+        return false;
+    }
+    put(&mut o, view(name));
+    if !arm {
+        if single {
+            put(&mut o, view(".s"));
+        } else {
+            put(&mut o, view(".d"));
+        }
+    }
+    put(&mut o, view(" "));
+    put(&mut o, view(fd));
+    put(&mut o, view(","));
+    if !eq(view(name), view("fsqrt")) {
+        put(&mut o, view(fd));
+        put(&mut o, view(","));
+    }
+    put(&mut o, view(fs));
+    put(&mut o, view("\n"));
+    return true;
+}
+fn ends_sd_ss<a>(op: &a [u8]) -> bool {
+    n := op.len();
+    return (n > 2) && (op[n - 2] == 115) && ((op[n - 1] == 100) || (op[n - 1] == 115));
+}
+fn copy_text<a>(s: &a [u8]) -> u8[] {
+    mut out = u8[];
+    for i in s.len() {
+        out.push(s[i]);
+    }
+    return out;
+}
 fn instruction<a, b>(o: (&a mut Out), line: &b [u8]) -> unit {
     target := o.target;
     mut space = line.len();
@@ -1416,6 +1599,9 @@ fn instruction<a, b>(o: (&a mut Out), line: &b [u8]) -> unit {
     }
     src := args[0].copy();
     dst := args[1].copy();
+    if float_sse(&mut o, view(op), view(src), view(dst)) {
+        return ();
+    }
     if eq(view((op)), view("movq"))
         || eq(view((op)), view("movl"))
         || eq(view((op)), view("movabsq"))

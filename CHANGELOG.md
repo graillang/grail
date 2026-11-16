@@ -14,6 +14,11 @@
   that is rounded to `f32` at once (`addsd; cvtsd2ss; cvtss2sd`) is the single-precision one
   (`addss`): exact for + - * / and sqrt, since 53 >= 2*24 + 2. Loads that feed anything else are
   widened in place of the copy. `f32-held-as-binary32-in-registers` pins the results.
+- The float arithmetic is SSE text on AArch64 and RISC-V too, translated by machine.grl (xmm0/1 to
+  d0/d1 and ft0/ft1, xmm8..xmm14 to v17..v23 and ft2..ft8, all caller-saved), so floats are kept in
+  registers there as on x86-64; compares and integer conversions stay `fop`. And a call to a
+  runtime exit or a drop helper reads only the argument registers it takes, so a value left in
+  %rcx before one is no longer kept alive for it.
 
 - **Native backend: float operations are not calls.** `+ - * /`, comparisons, negation, `abs`,
   `sqrt` and conversions from integers of up to 32 bits (and signed 64-bit to `f64`) are emitted in
