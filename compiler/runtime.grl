@@ -1681,6 +1681,12 @@ fn rt_xchg(p: u64, v: u64) -> u64 {
 }
 fn rt_drop_seq(s: u64) -> u64 {
     if s != 0 {
+        // A literal's static object (block state 2) owns nothing and is never freed. Most of what
+        // is dropped is one of those - every `view("text")` has one - so it is settled here and
+        // not by two calls of rt_free that each find the same thing out.
+        if raw_load(s - 8) == 2 {
+            return 0;
+        }
         rt_free(raw_load(s));
         rt_free(s);
     }
@@ -6676,6 +6682,20 @@ fn rt_vec_reverse(s: u64) -> u64 {
     return 0;
 }
 fn rt_vec_truncate(s: u64, keep: u64, dropper: u64) -> u64 {
+    if dropper == 0 {
+        // Plain words: clear the tail and set the length, instead of a pop per element.
+        n := raw_load(s + 8);
+        if keep < n {
+            base := raw_load(s);
+            mut i = keep;
+            while i < n {
+                raw_store(base + i * 8, 0);
+                i += 1;
+            }
+            raw_store(s + 8, keep);
+        }
+        return 0;
+    }
     while keep < rt_len(s) {
         v := rt_pop(s);
         if dropper != 0 {
