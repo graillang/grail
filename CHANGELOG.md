@@ -1,5 +1,11 @@
 ## Unreleased
 
+- `grail profile --callers` samples each tick's return addresses too (the runtime walks the frame
+  pointers) and adds two views to the report: inclusive samples per function, and for the ten
+  hottest functions who called them and the first caller outside the runtime - so a profile topped
+  by `rt_alloc_unlocked` says which code allocates. Without the flag nothing changes: the request,
+  the sample format and the signal handler's path are the ones before.
+
 - A function taking an `extern "C"` record `byval` no longer breaks an interface or the build store:
   the interface writer took the record's type for its declaration (an index out of bounds while
   spelling it), and the reader rebuilt the marker over a declaration where the parser puts the

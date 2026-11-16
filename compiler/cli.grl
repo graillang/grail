@@ -5107,6 +5107,10 @@ fn profile_scratch() -> u8[] {
 }
 fn profile_command<a>(args: (&a u8[][])) -> u64 {
     mut rate: u64 = 200;
+    // `--callers`: each sample also carries up to seven return addresses (the runtime walks the frame
+    // pointers), and the report adds inclusive time and who calls the hottest functions. Without it
+    // the request, the samples and the runtime's handler are exactly what they were.
+    mut callers = false;
     mut out_path = u8[];
     mut i: u64 = 0;
     while i < args.len() {
@@ -5121,6 +5125,8 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
         } else if eq(view(a), view("--out")) && (i + 1 < args.len()) {
             i += 1;
             out_path = item(&args, i);
+        } else if eq(view(a), view("--callers")) {
+            callers = true;
         } else {
             break;
         }
@@ -5132,7 +5138,7 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
         i += 1;
     }
     if rest.len() == 0 {
-        say(view("usage: grail profile [--rate N] [--out FILE] -- PROGRAM [ARGS]"));
+        say(view("usage: grail profile [--rate N] [--callers] [--out FILE] -- PROGRAM [ARGS]"));
         return 2;
     }
     if (rate == 0) || (1000000 < rate) {
@@ -5159,6 +5165,9 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
     }
     samples := path_join(view(dir), view("samples"));
     mut text = decimal(1);
+    if callers {
+        text = decimal(2);
+    }
     text.push(32);
     text = cat(view(text), view(decimal(rate)));
     text.push(32);
@@ -5197,7 +5206,7 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
         say(view("grail profile: truncated sample file"));
         return 1;
     }
-    if (data[0] != 71) || (data[6] != 50) {
+    if (data[0] != 71) || ((data[6] != 50) && (data[6] != 51)) {
         say(
             view("grail profile: unsupported sample format; rebuild the program with this compiler")
         );
@@ -5208,7 +5217,11 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
     count := le64(view(data), 24);
     dropped := le64(view(data), 32);
     cpu_ns := le64(view(data), 40);
-    if data.len() < 48 + count * 8 {
+    mut each: u64 = 1;
+    if data[6] == 51 {
+        each = 8;
+    }
+    if data.len() < 48 + count * 8 * each {
         say(view("grail profile: truncated sample file"));
         return 1;
     }
@@ -5280,7 +5293,7 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
     if elf && (kind != 3) {
         mut k: u64 = 0;
         while k < count {
-            slot := symbol_at(&symbols, &order, le64(view(data), 48 + k * 8));
+            slot := symbol_at(&symbols, &order, le64(view(data), 48 + k * 8 * each));
             counts[slot] = counts[slot] + 1;
             k += 1;
         }
@@ -5328,6 +5341,9 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
     total = cat(view(total), view(pad_left(view(share_text(count, count)), 6)));
     total = cat(view(total), view("  total"));
     push_line(&mut out, view(total));
+    if (each != 1) && elf && (kind != 3) {
+        profile_callers(&mut out, view(data), count, each, &symbols, &order, &counts, &rows, width);
+    }
     host::print(view(out));
     if out_path.len() != 0 {
         if host::write_file(view(out_path), out) != 0 {
@@ -5337,6 +5353,137 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
         }
     }
     return status;
+}
+
+// The caller view of a `--callers` profile: for every function, the samples in which it is anywhere
+// on the stack (inclusive, each sample counted once per function); then, for the ten hottest leaf
+// functions, which function called them and which was the first caller outside the runtime - the
+// view that says *which* code allocates when `rt_alloc_unlocked` tops the table. A return address
+// is attributed to the function containing the call (the address before it). A leaf caught before
+// its frame is set up reports its caller's caller as its caller.
+fn profile_callers<a, b, d, e, g>(out: (&a mut u8[]), data: &b [u8], count: u64, each: u64, symbols: (&d Symbol[]), order: (&e u64[]), leaf: (&g u64[]), rows: (&g u64[]), width: u64) -> unit {
+    unknown := symbols.len();
+    mut inclusive = u64[];
+    for n in symbols.len() + 1 {
+        inclusive.push(0);
+    }
+    mut seen = u64[];
+    for n in symbols.len() + 1 {
+        seen.push(0);
+    }
+    // frame(k, j): the function of the j-th address of sample k.
+    for k in count {
+        for j in each {
+            pc := le64(view(data), 48 + (k * each + j) * 8);
+            if (j != 0) && (pc == 0) {
+                break;
+            }
+            mut at = pc;
+            if (j != 0) && (0 < at) {
+                at -= 1;
+            }
+            f := symbol_at(symbols, order, at);
+            if seen[f] != k + 1 {
+                seen[f] = k + 1;
+                inclusive[f] = inclusive[f] + 1;
+            }
+        }
+    }
+    push_line(&mut out, view(""));
+    push_line(&mut out, view("  inclusive: samples with the function anywhere on the stack"));
+    by := by_count(&inclusive, order);
+    mut shown = 0;
+    for n in by.len() {
+        if (25 <= shown) || (inclusive[by[n]] == 0) {
+            break;
+        }
+        line := profile_row(inclusive[by[n]], count, view(symbols[by[n]].function), view(symbols[by[n]].module), width);
+        push_line(&mut out, view(line));
+        shown += 1;
+    }
+    push_line(&mut out, view(""));
+    push_line(&mut out, view("  callers of the hottest functions: the caller, and the first caller outside the runtime"));
+    mut top = 0;
+    for r in rows.len() {
+        hot := rows[r];
+        if (10 <= top) || (leaf[hot] == 0) {
+            break;
+        }
+        top += 1;
+        mut direct = u64[];
+        mut outside = u64[];
+        for n in symbols.len() + 1 {
+            direct.push(0);
+            outside.push(0);
+        }
+        for k in count {
+            pc := le64(view(data), 48 + k * each * 8);
+            if symbol_at(symbols, order, pc) != hot {
+                continue;
+            }
+            mut first = unknown;
+            mut away = unknown;
+            for j in each {
+                if j == 0 {
+                    continue;
+                }
+                ret := le64(view(data), 48 + (k * each + j) * 8);
+                if ret == 0 {
+                    break;
+                }
+                f := symbol_at(symbols, order, ret - 1);
+                if first == unknown {
+                    first = f;
+                }
+                if (away == unknown) && (f != unknown) && !eq(view(symbols[f].module), view("runtime")) {
+                    away = f;
+                    break;
+                }
+            }
+            direct[first] = direct[first] + 1;
+            outside[away] = outside[away] + 1;
+        }
+        mut head = copy(view("    "));
+        head = cat(view(head), view(symbols[hot].function));
+        head = cat(view(head), view(" ("));
+        head = cat(view(head), view(decimal(leaf[hot])));
+        head = cat(view(head), view(" samples)"));
+        push_line(&mut out, view(head));
+        for pass in 2 {
+            mut list = direct.copy();
+            mut label = copy(view("      called by"));
+            if pass == 1 {
+                list = outside.copy();
+                label = copy(view("      from"));
+            }
+            push_line(&mut out, view(label));
+            order_by := by_count(&list, order);
+            mut listed = 0;
+            for n in order_by.len() {
+                if (6 <= listed) || (list[order_by[n]] == 0) {
+                    break;
+                }
+                line := profile_row(list[order_by[n]], leaf[hot], view(symbols[order_by[n]].function), view(symbols[order_by[n]].module), width);
+                push_line(&mut out, view(cat(view("    "), view(line))));
+                listed += 1;
+            }
+            if list[unknown] != 0 {
+                line := profile_row(list[unknown], leaf[hot], view("[unknown]"), view("-"), width);
+                push_line(&mut out, view(cat(view("    "), view(line))));
+            }
+        }
+    }
+    return ();
+}
+fn profile_row<a, b>(n: u64, total: u64, function: &a [u8], module: &b [u8], width: u64) -> u8[] {
+    mut line = copy(view("  "));
+    line = cat(view(line), view(pad_left(view(decimal(n)), 7)));
+    line = cat(view(line), view(" "));
+    line = cat(view(line), view(pad_left(view(share_text(n, total)), 6)));
+    line = cat(view(line), view("  "));
+    line = cat(view(line), view(padded(function, width + 2)));
+    line = cat(view(line), module);
+    return line;
 }
 
 // `grail doc [--out DIR] [FILES or DIRS]`: the reference documentation of a source tree, as one HTML
