@@ -441,8 +441,8 @@ fn main() {
 }
 ```
 
-Without `where k > 0` it prints 14 and 3. Until it is fixed, `pool::split` checks its grain with an
-`assert` instead of the refinement its siblings carry.
+Without `where k > 0` it prints 14 and 3. Fixed by 117bdf9 (a proved call's second entry copied
+registers it should not have); `pool::split` carries `where grain > 0` again.
 
 ## Follow-up (recorded, not scheduled): a vDSO clock
 
