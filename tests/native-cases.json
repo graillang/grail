@@ -13010,5 +13010,428 @@
       "native"
     ],
     "note": "second iteration, `i == 100`: the kept check fires"
+  },
+  {
+    "name": "refinement-field-loan-explicit",
+    "source": "struct R { n: u64 where n > 5, items: u64[] where items.len() < 10 }\nfn zap(x: &mut u64) {\n    *x = 0;\n}\nfn main() {\n    mut r = R { n: 9, items: u64[] };\n    zap(&mut r.n);\n    println(r.n);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot borrow the refined field `R.n` mutably"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`&mut r.n` would let `zap` write the field with nothing to check it"
+  },
+  {
+    "name": "refinement-field-loan-binding",
+    "source": "struct R { n: u64 where n > 5, items: u64[] where items.len() < 10 }\nfn main() {\n    mut r = R { n: 9, items: u64[] };\n    p := &mut r.n;\n    *p = 2;\n    println(r.n);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot borrow the refined field `R.n` mutably"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a `&mut` of a refined field held in a binding is the same loan"
+  },
+  {
+    "name": "refinement-field-loan-exchange",
+    "source": "struct R { n: u64 where n > 5, items: u64[] where items.len() < 10 }\nfn main() {\n    mut r = R { n: 9, items: u64[] };\n    old := exchange(&mut r.n, 1);\n    println(old);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot borrow the refined field `R.n` mutably"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`exchange` takes the field by `&mut`"
+  },
+  {
+    "name": "refinement-field-loan-method-autoref",
+    "source": "struct R { n: u64 where n > 5, items: u64[] where items.len() < 10 }\nfn main() {\n    mut r = R { n: 9, items: u64[] };\n    r.items.push(1);\n    println(r.items.len());\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot borrow the refined field `R.items` mutably"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a mutating method on the field borrows it mutably: `push` could pass the length bound"
+  },
+  {
+    "name": "refinement-field-loan-vector-swap",
+    "source": "struct R { n: u64 where n > 5, items: u64[] where items.len() < 10 }\nfn main() {\n    mut r = R { n: 9, items: u64[1, 2] };\n    r.items.swap(0, 1);\n    println(r.items[0]);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot borrow the refined field `R.items` mutably"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "every mutating vector method on a refined field is refused, not only the ones that change its length"
+  },
+  {
+    "name": "refinement-field-loan-through-reference",
+    "source": "struct R { n: u64 where n > 5, items: u64[] where items.len() < 10 }\nfn grow(r: &mut R) {\n    r.items.push(1);\n}\nfn main() {\n    mut r = R { n: 9, items: u64[] };\n    grow(&mut r);\n    println(r.n);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot borrow the refined field `R.items` mutably"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`&mut r` is allowed, and a mutating method on its refined field is refused inside the callee"
+  },
+  {
+    "name": "refinement-field-loan-vector-element",
+    "source": "struct R { n: u64 where n > 5, items: u64[] where items.len() < 10 }\nfn main() {\n    mut v = R[];\n    v.push(R { n: 9, items: u64[] });\n    v[0].items.push(1);\n    println(v[0].n);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot borrow the refined field `R.items` mutably"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a record reached through a vector element is the same record"
+  },
+  {
+    "name": "refinement-field-loan-match-pattern",
+    "source": "struct R { n: u64 where n > 5, items: u64[] where items.len() < 10 }\nfn main() {\n    mut r = R { n: 9, items: u64[] };\n    match &mut r {\n        R { n, items } => {\n            items.push(3);\n            println(n);\n        }\n    }\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot borrow the refined field `R.items` mutably"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a record pattern through a `&mut` scrutinee binds a non-copy field by `&mut`"
+  },
+  {
+    "name": "refinement-field-loan-match-rest",
+    "source": "struct R { n: u64 where n > 5, items: u64[] where items.len() < 10 }\nfn main() {\n    mut r = R { n: 9, items: u64[] };\n    match &mut r {\n        R { items, .. } => {\n            println(items.len());\n        }\n    }\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot borrow the refined field `R.items` mutably"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "the binding is refused even when the arm only reads it: the loan is what the rule is about"
+  },
+  {
+    "name": "refinement-field-loan-for",
+    "source": "struct R { n: u64 where n > 5, items: u64[] where items.len() < 10 }\nfn main() {\n    mut r = R { n: 9, items: u64[1] };\n    for x in &mut r.items {\n        *x = 2;\n    }\n    println(r.n);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot borrow the refined field `R.items` mutably"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a `for` over `&mut r.items` is a `&mut` of the field"
+  },
+  {
+    "name": "refinement-field-compound-assignment",
+    "source": "struct R { n: u64 where n > 5, items: u64[] where items.len() < 10 }\nfn main() {\n    mut r = R { n: 9, items: u64[] };\n    r.n += 1;\n    println(r.n);\n    r.n -= 8;\n    println(r.n);\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "10\n",
+    "stderr": [
+      "error: refinement violated: n > 5\n --> ",
+      "input.grl:6:",
+      "required by R.n"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`r.n op= v` owes the field's predicate as `r.n = v` does"
+  },
+  {
+    "name": "refinement-field-compound-mul",
+    "source": "struct R { n: u64 where n > 5, items: u64[] where items.len() < 10 }\nfn main() {\n    mut r = R { n: 9, items: u64[] };\n    r.n *= 0;\n    println(r.n);\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "",
+    "stderr": [
+      "error: refinement violated: n > 5\n --> ",
+      "input.grl:4:",
+      "required by R.n"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "every compound operator Grail has stores into the field and owes its predicate"
+  },
+  {
+    "name": "refinement-field-compound-div",
+    "source": "struct R { n: u64 where n > 5, items: u64[] where items.len() < 10 }\nfn main() {\n    mut r = R { n: 9, items: u64[] };\n    r.n /= 9;\n    println(r.n);\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "",
+    "stderr": [
+      "error: refinement violated: n > 5\n --> ",
+      "input.grl:4:",
+      "required by R.n"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "every compound operator Grail has stores into the field and owes its predicate"
+  },
+  {
+    "name": "refinement-field-compound-rem",
+    "source": "struct R { n: u64 where n > 5, items: u64[] where items.len() < 10 }\nfn main() {\n    mut r = R { n: 9, items: u64[] };\n    r.n %= 3;\n    println(r.n);\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "",
+    "stderr": [
+      "error: refinement violated: n > 5\n --> ",
+      "input.grl:4:",
+      "required by R.n"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "every compound operator Grail has stores into the field and owes its predicate"
+  },
+  {
+    "name": "refinement-field-compound-pow",
+    "source": "struct R { n: u64 where n > 5, items: u64[] where items.len() < 10 }\nfn main() {\n    mut r = R { n: 9, items: u64[] };\n    r.n **= 0;\n    println(r.n);\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "",
+    "stderr": [
+      "error: refinement violated: n > 5\n --> ",
+      "input.grl:4:",
+      "required by R.n"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "every compound operator Grail has stores into the field and owes its predicate"
+  },
+  {
+    "name": "refinement-field-nested-assignment",
+    "source": "struct In {\n    n: u64 where n > 5\n}\nstruct Out {\n    inner: In\n}\nfn main() {\n    mut o = Out { inner: In { n: 9 } };\n    o.inner.n = 1;\n    println(o.inner.n);\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "",
+    "stderr": [
+      "error: refinement violated: n > 5\n --> ",
+      "input.grl:9:",
+      "required by In.n"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`o.inner.n = v` owes `In.n`'s predicate: the last field of the path is the one written (it used to be looked up in the head's type and missed)"
+  },
+  {
+    "name": "refinement-field-closure-write",
+    "source": "struct R { n: u64 where n > 5, items: u64[] where items.len() < 10 }\nfn main() {\n    mut r = R { n: 9, items: u64[] };\n    mut f = || {\n        r.n = 1;\n        println(r.n);\n    };\n    f();\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "",
+    "stderr": [
+      "error: refinement violated: n > 5\n --> ",
+      "input.grl:5:",
+      "required by R.n"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a closure's write of a captured record's field is checked like any field write"
+  },
+  {
+    "name": "refinement-field-cross-field-refused",
+    "source": "struct P {\n    lo: u64,\n    hi: u64 where lo <= hi\n}\nfn main() {\n    p := P { lo: 1, hi: 3 };\n    println(p.hi);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "a field predicate may name only its own field: `lo` is not `hi`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a predicate naming another field was read in the constructor's scope; it is refused until cross-field predicates are designed"
+  },
+  {
+    "name": "refinement-field-outer-name-refused",
+    "source": "fn main() {\n    println(1);\n}\nstruct P {\n    n: u64 where n < LIMIT\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "a field predicate may name only its own field: `LIMIT` is not `n`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "any other name in a field predicate would be read wherever the record is built"
+  },
+  {
+    "name": "refinement-field-type-refused",
+    "source": "struct Q {\n    n: u64\n}\nstruct P {\n    q: Q where q > 0\n}\nfn main() {\n    println(1);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "a field predicate applies to an integer, a float or an owned vector (through `len()`)"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a field predicate applies to an integer, a float or an owned vector"
+  },
+  {
+    "name": "refinement-field-types-accepted",
+    "source": "struct P {\n    n: u64 where n % 16 == 0 && n > 0,\n    t: f32 where t.is_finite(),\n    v: u64[] where v.len() < 4,\n    s: i32 where s < 3\n}\nfn main() {\n    p := P { n: 16, t: 1.0, v: u64[1], s: 1 };\n    println(p.n);\n    println(p.v.len());\n}\n",
+    "stdout": "16\n1\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a predicate on an integer of any width, a float and a vector's length"
+  },
+  {
+    "name": "refinement-field-reader-fact",
+    "source": "@strict;\nstruct R {\n    n: u64 where n > 5\n}\nfn need(k: u64 where k > 5) -> u64 {\n    return k;\n}\nfn get(r: &R) -> u64 {\n    return need(r.n);\n}\nfn main() {\n    r := R { n: 9 };\n    println(get(&r));\n    println(need(r.n));\n}\n",
+    "stdout": "9\n9\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a record read through a shared reference or a binding that is not `mut` satisfies its field predicates: `r.n > 5` proves the call"
+  },
+  {
+    "name": "refinement-field-reader-mut-root",
+    "source": "@strict;\nstruct R {\n    n: u64 where n > 5\n}\nfn need(k: u64 where k > 5) -> u64 {\n    return k;\n}\nfn main() {\n    mut r = R { n: 9 };\n    println(need(r.n));\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot prove the refinement `k > 5`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a `mut` root gives no fact: the path is not one value for the binding's life"
+  },
+  {
+    "name": "refinement-field-reader-mut-reference",
+    "source": "@strict;\nstruct R {\n    n: u64 where n > 5\n}\nfn need(k: u64 where k > 5) -> u64 {\n    return k;\n}\nfn get(r: &mut R) -> u64 {\n    return need(r.n);\n}\nfn main() {\n    mut r = R { n: 9 };\n    println(get(&mut r));\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot prove the refinement `k > 5`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a `&mut` root gives no fact"
   }
 ]

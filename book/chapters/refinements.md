@@ -93,6 +93,25 @@ A `%` fact carries through divisibility (`align % 32 == 0` proves `align % 16 ==
 matches exactly (`t.is_finite()` proves `t.is_finite()`), and comparisons go through a small
 difference graph, so transitivity works: `i <= j` and `j < v.len()` prove `i < v.len()`.
 
+### A field's predicate
+
+A field predicate names its own field and nothing else, on an integer, a float or a vector's
+length. It is owed at every store into the field - the literal, `r.n = v`, `r.n += v` - and a
+mutable borrow of a refined field is refused, because a write through it would skip the check:
+
+```grl
+struct Batch { size: u64 where size > 0, items: u64[] where items.len() <= 64 }
+
+fn grow(b: &mut Batch) {
+    b.size += 1;          // checked: size > 0
+    b.items.push(7);      // error: cannot borrow the refined field `Batch.items` mutably
+}
+```
+
+In return, a record read through a shared reference or a binding that is not `mut` satisfies its
+field predicates: `fn half(b: &Batch)` may pass `b.size` where `size > 0` is required, proved.
+A predicate relating two fields (`hi: u64 where lo <= hi`) is not supported yet and is refused.
+
 ### Arithmetic in a condition
 
 Integer arithmetic traps on overflow in a development build and wraps in a release build, and a

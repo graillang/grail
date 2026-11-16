@@ -256,6 +256,61 @@ Sized and signed integers keep whatever the prover does for them today (the cond
 stated for `u64` terms; another width gets them only where the same argument is made for its range).
 The `--verify-facts` mode keeps every check and must still find no fired proof.
 
+## Field predicates (2026-11-16)
+
+A field predicate (`n: u64 where n > 5`) is a property of every record of its type, for as long as
+the record exists. Before this section it was compiled in the scope of whoever built or wrote the
+record: a predicate naming another field was an undefined name, or - when a local had that name -
+a proof about the wrong value; and three writes skipped it (`&mut r.n` handed to a writer,
+`r.n -= 8`, a closure's or a nested path's write). `--strict-refinements` accepted records that
+violated their own predicates.
+
+**What a field predicate may say.** Its own field, literals, `len()` and the pure tests, and
+nothing else; the field is an integer of any width, a float, or an owned vector (through `len()`).
+Anything else is refused at the struct (`ref_field_pred_rules`). Another field, a parameter or a
+global would be read wherever the record is built, which is the bug.
+
+**Where it is owed.** At every store into the field, with the stored value as the field's name:
+the record literal, `r.f = v`, and `r.f op= v` for every compound operator Grail has (`+=`, `-=`,
+`*=`, `/=`, `%=`, `**=`; it has no bitwise or shift compounds and no `++`). An assignment's path is
+read by `assign_field_path`, so the predicate owed is the one of the field the path ends at, in the
+record that declares it (`o.inner.n = v` owes `In.n`'s; it used to be looked up in the head's type
+and found nothing). A closure's write of a captured record's field goes through the same path.
+Strict mode refuses an unproved one; plain code checks it at run time.
+
+**No `&mut` to a refined field exists.** Through one, a write would reach the field with nothing to
+check it, and a loan can outlive any point where a check could run. Every way to get one is refused
+(`ref_field_loan_fail`), each with a case (`refinement-field-loan-*`):
+
+| route | where it is refused |
+| --- | --- |
+| `&mut r.f`, also as an argument, held in a binding, given to `exchange` | `field_path`, the last segment of a `&mut` path |
+| a mutating method on the field (`r.items.push(x)`, `swap`, `pop`, ...) | `ref_refuse_field_receiver` in the vector methods, and the receiver autoref of a `&mut self` method |
+| a record pattern through a `&mut` scrutinee binding a non-copy field | the record pattern (a copy field is bound by value) |
+| `for x in &mut r.items` | the `&mut r.items` it is written with |
+| a closure | closures capture by move; a write in the body is a field write and is checked |
+
+`swap` as a free function does not exist in Grail. A user `&mut self` method on a refined field
+cannot exist either: the field types that may carry a predicate have no user methods. `&mut r` of
+the whole record stays allowed: every write through it is a field write (checked), a `&mut` of a
+refined field (refused), or a store of a whole `R`, which satisfies the predicates by induction.
+
+**What a reader may assume.** For a path the field-path rule already trusts (`pv_field_stable`: a
+binding that is not `mut`, of a record or a shared reference to one, and an integer or vector
+field), an obligation naming `r.f` or `r.f.len` gets the field's predicate with the field renamed
+to the path (`pv_field_facts`). A `mut` or `&mut` root gets nothing.
+
+**Cost.** Nothing when no field is refined: every hook stops at `pred.hi == 0`.
+
+### Follow-up: predicates across fields (not built, refused until then)
+
+`struct P { lo: u64, hi: u64 where lo <= hi }`. Sketch: every field name in the predicate is renamed
+to the record's field values - at a literal all of them, after every field is stored; at a direct
+write of any field the predicate mentions, the new value and the other fields read from the
+record - the same renaming a call's arguments get. The no-`&mut` rule extends to every field a
+predicate mentions; a trusted root's reader fact becomes `r.lo <= r.hi`; the interface carries the
+text and the field list.
+
 ## Verification
 
 A `--use DIR` build is the one place a proof is not available: the interface carries the predicate's

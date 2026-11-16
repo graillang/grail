@@ -1,5 +1,18 @@
 ## Unreleased
 
+- **Field predicates are sound.** A field predicate may name only its own field, on an integer,
+  a float or an owned vector's `len()`; anything else is refused at the struct. It used to be read
+  in the scope of whoever built the record, so a predicate naming another field was an undefined
+  name or - with a local of that name - a proof about the wrong value, and `@strict` accepted
+  records that broke their own predicates. Every store into a refined field now owes the
+  predicate: `r.f op= v` (it skipped the check), a nested path `o.inner.n = v` (it looked in the
+  wrong record) and a closure's write. A mutable borrow of a refined field is refused - `&mut r.f`,
+  `exchange(&mut r.f, ..)`, `r.items.push(..)` and the other mutating methods, a `for` over
+  `&mut r.items`, a record pattern through `&mut` - because a write through it would skip the
+  check. In return a record read through a shared reference or a non-`mut` binding gives its field
+  predicates as facts: `need(r.n)` is proved from `n: u64 where n > 5`. No existing code in the
+  repository uses a cross-field predicate; the book's `Ray` example is unchanged.
+
 - **A refinement proof no longer depends on the overflow mode.** `--overflow=checked` and
   `--overflow=wrap` now accept exactly the same programs under `@strict` and under `@no_panic`
   (`bun tools/overflow-parity-test.mjs` checks it over the corpus, in the gate). A constant in a
