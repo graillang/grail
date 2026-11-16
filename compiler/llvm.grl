@@ -324,6 +324,10 @@ struct L {
     // slice descriptor (`what` 5) written exactly once and never addressed, so the fields read where
     // that one write happens in the first block are current everywhere after it.
     hstable: u64[],
+    // The accepted header slots (parallel to hslots) whose address the body takes (`leaq` of the
+    // slot: `&v`, `&mut v`). Any call may then reach the header through that address, so every
+    // call that is not known to leave headers alone makes their fields stale.
+    hesc: u64[],
     // Sibling mode: 0 normally, else the element width of the typed header parameter this body is
     // being re-emitted with, the `what` of that fact, and the two incoming words for the header
     // fields at `+0` and `+8` in place of the loads.
@@ -1603,6 +1607,7 @@ fn accept_headers(l: (&mut L), instrs: (&u8[][]), facts: (&Facts), fname: (&[u8]
     exchange(&mut l.hwhat, u64[]);
     exchange(&mut l.hwidth, u64[]);
     exchange(&mut l.hstable, u64[]);
+    exchange(&mut l.hesc, u64[]);
     mut cand = u64[];
     mut cwhat = u64[];
     mut cwidth = u64[];
@@ -1648,6 +1653,7 @@ fn accept_headers(l: (&mut L), instrs: (&u8[][]), facts: (&Facts), fname: (&[u8]
             l.hwhat.push(cwhat[i]);
             l.hwidth.push(cwidth[i]);
             l.hstable.push(u64((cwhat[i] == 5) && written_once(&instrs, k)));
+            l.hesc.push(u64(slot_addressed(&l, &instrs, k)));
         }
     }
     return ();
@@ -1791,6 +1797,9 @@ fn establish(l: (&mut L), k: u64, w: (&[u8])) -> unit {
         l.edata.push(u8[]);
         l.elen.push(u8[]);
         l.edptr.push(u8[]);
+    }
+    // `stale` and `unestablish` grow the other arrays without this one.
+    while l.eblk.len() <= k {
         l.eblk.push(0);
     }
     what := header_slot_kind(&l, k);
@@ -1820,8 +1829,9 @@ fn stale(l: (&mut L), k: u64) -> unit {
         l.edptr.push(u8[]);
     }
     // A slice's descriptor (`what` 5) is never written while the slice lives (SEQ-STABLE): no call
-    // can grow, move or truncate what it describes, so its fields stay current.
-    if header_slot_kind(&l, k) == 5 {
+    // can grow, move or truncate what it describes, so its fields stay current - unless the slot's
+    // address was taken, through which a call could bind the slot to another slice.
+    if (header_slot_kind(&l, k) == 5) && header_stable(&l, k) {
         return ();
     }
     if l.eon[k] == 1 {
@@ -1938,9 +1948,49 @@ fn header_readonly(name: (&[u8])) -> bool {
 // The header slots a call reaches through its argument words. A call that is not one of the
 // read-only accessors may grow, fill, truncate, pop, insert or clear the sequence it is given, so
 // the fields hoisted for that slot are stale from here; they are re-read once the call returns.
+// The runtime calls that cannot change any vector header: the read-only accessors, the float and
+// integer helpers (pure functions of their words), and the failures that never return.
+fn header_neutral(name: (&[u8])) -> bool {
+    if never_returns(name) || eq(name, view("rt_abort")) {
+        return true;
+    }
+    return starts(name, view("rt_f64_")) || starts(name, view("rt_f32_")) || eq(name, view("rt_int_from_f64"))
+        || eq(name, view("rt_div")) || eq(name, view("rt_int_cast"));
+}
+// Whether the body takes the address of slot k: a `leaq` whose source is the slot.
+fn slot_addressed(l: (&L), instrs: (&u8[][]), k: u64) -> bool {
+    needle := slot_needle(k);
+    if k + 1 >= l.sl_start.len() {
+        return false;
+    }
+    for q in l.sl_start[k + 1] - l.sl_start[k] {
+        line := view(instrs[l.sl_lines[l.sl_start[k] + q]]);
+        if !starts(line, view("leaq ")) {
+            continue;
+        }
+        mut comma = line.len();
+        for j in line.len() {
+            if line[j] == 44 {
+                comma = j;
+            }
+        }
+        if (comma < line.len()) && eq(view(trim(view(sub(line, 5, comma)))), view(needle)) {
+            return true;
+        }
+    }
+    return false;
+}
 fn invalidate_args(l: (&mut L), target: (&[u8])) -> unit {
-    if header_readonly(target) {
+    if header_readonly(target) || header_neutral(target) {
         return ();
+    }
+    // A header whose slot's address was taken can be reached by this call whatever it was handed:
+    // `pad(&mut out)` passes the slot's address, not the header word, and a callee that pushes
+    // through it moves `len` and `data` (the stale-length miscompile).
+    for i in l.hslots.len() {
+        if (i < l.hesc.len()) && (l.hesc[i] != 0) {
+            stale(&mut l, l.hslots[i]);
+        }
     }
     for i in 6 {
         id := reg_index(view(arg_reg(i))) + 1;
@@ -5919,7 +5969,7 @@ fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (
             set_add(&mut weak, view(sub(wl, 6, wl.len())));
         }
     }
-    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges };
+    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges };
     mut funcs = Func[];
     mut data = u8[][];
     split(&lines, &mut funcs, &mut data);
