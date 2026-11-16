@@ -188,7 +188,7 @@ Here the allocator and view runtime are **20 %** of instructions, not 40 %: the 
 IR are 51 % (`optimize::*` 24 %, `ir::*` 27 %), the front end 14.5 %. So "40 % is allocation" holds
 for a check and not for a full build, and unboxing can remove at most a fifth of a self-compile.
 
-**Data-oriented micro-benchmark** (sources in section 5; 1M records, built by `push`, 20 passes of
+**Data-oriented micro-benchmark** (sources in `bench/unboxed/`; 1M records, built by `push`, 20 passes of
 transform-in-place then sum; `--overflow=wrap`) **[V]**
 
 | program | native backend | LLVM backend | C `-O2` | peak RSS |
