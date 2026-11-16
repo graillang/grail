@@ -10951,7 +10951,7 @@ fn tuple_element_bind<a, b>(c: (&a mut C), names: (&b u8[][]), ty: u64, slot: u6
             fail(&mut c, view(msg));
             return ();
         }
-        tname := type_name(&mut c, ty);
+        tname := source_type_name(&mut c, ty);
         mut msg = copy_bytes(view("for "));
         push_bytes(&mut msg, view(pattern));
         push_bytes(&mut msg, view(" needs tuple elements: the element type is `"));
@@ -35785,7 +35785,15 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         if names.len() != 0 {
             last := c.locals.len() - 1;
             slot := c.locals[last].id;
-            ety := c.locals[last].ty;
+            mut ety = c.locals[last].ty;
+            if (bytewise != 0) & (byref == 0) {
+                // A bytewise loop binds each element as the default word - the load is `rt_atb`,
+                // and the body has always worked on that word - so the local's type is not the
+                // sequence's: a `u8[]` or a `string` element is a byte. Naming the word in a
+                // refusal would name a type the sequence never held. A byte is never a tuple, so
+                // nothing is lowered with this type: the check below refuses first.
+                ety = int_type(&mut c, 8, 0);
+            }
             tuple_element_bind(&mut c, &names, ety, slot);
         }
         if (byref == 0) & (consume == 0) {
