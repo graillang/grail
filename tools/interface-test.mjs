@@ -652,17 +652,17 @@ pub fn twice(x: u64) -> u64 {
   const version = compile(files, join(directory, 'version'), ['--interface', ifaces]);
   assert.equal(version.status, 1, 'an interface written by another compiler must be refused');
   assert.match(version.output, /was written in interface format 3/, `the version refusal must name the version it found: ${version.output}`);
-  assert.match(version.output, /this compiler reads format 4/, 'the version refusal must name the version this compiler reads');
+  assert.match(version.output, /this compiler reads format 5/, 'the version refusal must name the version this compiler reads');
 
   // ... and a file from a *newer* compiler is refused by name as well: a version this compiler
   // does not know is never half-read.
   const future = Buffer.from(original);
-  future[4] = 5;
+  future[4] = 6;
   repin(future);
   const ahead = compile(files, join(directory, 'future'), ['--interface', ifaces]);
   assert.equal(ahead.status, 1, 'an interface written by a newer compiler must be refused');
-  assert.match(ahead.output, /was written in interface format 5 by a newer compiler/, `the future-version refusal must name the version it found: ${ahead.output}`);
-  assert.match(ahead.output, /this one reads format 4/, 'the future-version refusal must name the version this compiler reads');
+  assert.match(ahead.output, /was written in interface format 6 by a newer compiler/, `the future-version refusal must name the version it found: ${ahead.output}`);
+  assert.match(ahead.output, /this one reads format 5/, 'the future-version refusal must name the version this compiler reads');
 
   // ... a truncated file is refused as truncated.
   repin(Buffer.from(original.subarray(0, Math.floor(original.length * 0.6))));
@@ -965,7 +965,7 @@ function proveGenericBodies() {
   const ifaces = emit(all, directory);
   const generic = join(ifaces, 'generic.iface');
   const text = dump(generic);
-  assert.match(text, /^grail-interface 4$/m, 'generics: the interface does not carry the current format version');
+  assert.match(text, /^grail-interface 5$/m, 'generics: the interface does not carry the current format version');
   assert.match(text, /^fn generic::twice <1> /m, 'generics: generic.iface does not declare the template');
   assert.match(text, /^\s*body$/m, 'generics: generic.iface carries no body section');
   // The body is the template's own source text, one `|` row per line, readable in a diff.
@@ -1318,6 +1318,65 @@ function proveEffectsTravel() {
   writeFileSync(manifest, pinned);
   return 'recorded when claimed, absent when not, refused once edited';
 }
+
+// Inherent methods on a type no module declares (`impl u8[] { ... }`, `impl [u64] { ... }`,
+// `impl<T> T[] { ... }`) are part of a module's public surface, so its interface must carry them or
+// an importer compiled against the interface cannot call a method the module publishes - a `pub`
+// method silently lost to separate compilation, which reads as the importer's own mistake.
+function proveWrittenInherent() {
+  const directory = join(work, 'written_inherent');
+  mkdirSync(directory, { recursive: true });
+  const ifaces = join(directory, 'ifaces');
+  mkdirSync(ifaces, { recursive: true });
+  const lib = join(root, 'tests/interfaces/arithmetic.grl');
+  const user = join(root, 'tests/interfaces/written_inherent_user.grl');
+  const libFiles = [lib, runtime, platform];
+  // The emitting run has no entry: a library module has no `main`.
+  const emitRun = compile(libFiles, join(directory, 'emit'), ['--emit-interface', ifaces, '--no-entry']);
+  assert.equal(emitRun.status, 0, `written inherent: emitting the library interface failed\n${emitRun.output}`);
+  const text = readFileSync(join(ifaces, 'arithmetic.iface'), 'utf8');
+  for (const line of ['inherent_type bytes\n', 'inherent_type (slice u64)\n', 'inherent_type (vec (tparam 0 0 [])) params=1 lifetimes=0\n']) {
+    assert.ok(text.includes(line), `written inherent: the interface has no \`${line.trim()}\` section\n${text}`);
+  }
+  assert.match(text, /^fn first_byte \(\(ref \[1\] bytes\)\) -> \(int 8u\)$/m, 'written inherent: the method signature is not in the interface');
+  // The importer is compiled against the interface with the library's source absent.
+  const viaInterface = compile([user, runtime, platform], join(directory, 'via'), ['--use', ifaces]);
+  assert.equal(
+    viaInterface.status,
+    0,
+    `written inherent: a consumer compiled against the interface cannot call the method\n${viaInterface.output}`,
+  );
+  // ... and it is the section that carries it: the same module with the `impl u8[]` block removed
+  // emits an interface the consumer cannot call that method through. (Editing the section out of
+  // the file by hand is refused earlier, by its digest - which is the right answer, so this asks the
+  // question with a legitimately emitted interface instead.)
+  const without = join(directory, 'without');
+  mkdirSync(without, { recursive: true });
+  const withoutLib = join(without, 'arithmetic.grl');
+  writeFileSync(withoutLib, readFileSync(lib, 'utf8').replace(/impl u8\[\] \{[\s\S]*?\n\}\n/, ''));
+  const withoutIfaces = join(without, 'ifaces');
+  mkdirSync(withoutIfaces, { recursive: true });
+  const emitWithout = compile([withoutLib, runtime, platform], join(without, 'emit'), ['--emit-interface', withoutIfaces, '--no-entry']);
+  assert.equal(emitWithout.status, 0, `written inherent: emitting the reduced library failed\n${emitWithout.output}`);
+  assert.ok(
+    !readFileSync(join(withoutIfaces, 'arithmetic.iface'), 'utf8').includes('inherent_type bytes\n'),
+    'written inherent: the reduced library still published an `inherent_type bytes` section',
+  );
+  const stripped = compile([user, runtime, platform], join(without, 'build'), ['--use', withoutIfaces]);
+  assert.equal(stripped.status, 1, 'written inherent: the consumer built against an interface with no such section');
+  assert.match(
+    stripped.output,
+    /has no method `first_byte`/,
+    `written inherent: the refusal does not name the missing method\n${stripped.output}`,
+  );
+  // The same importer, from source, still builds: this is about the interface, not the method.
+  const fromSource = compile([user, lib, runtime, platform], join(directory, 'source'));
+  assert.equal(fromSource.status, 0, `written inherent: the source build failed\n${fromSource.output}`);
+  return 'pub methods on written types travel, and the section is what carries them';
+}
+
+const writtenInherent = proveWrittenInherent();
+report('inherent methods on a written type travel in an interface', writtenInherent);
 
 const effects = proveEffectsTravel();
 report('checked effects travel in an interface, and only when claimed', effects);

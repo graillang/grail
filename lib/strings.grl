@@ -2,101 +2,317 @@ module strings;
 use core;
 use iter;
 
-// Byte-oriented text helpers. Inputs are read-only views (`&text`); results are new values.
-pub fn starts_with<a,b>(text:&a [u8],prefix:&b [u8])->bool{
-    if text.len()<prefix.len(){return false;}for i in prefix.len(){if text[i]!=prefix[i]{return false;}}return true;
-}
-pub fn ends_with<a,b>(text:&a [u8],suffix:&b [u8])->bool{
-    if text.len()<suffix.len(){return false;}d:=text.len()-suffix.len();for i in suffix.len(){if text[d+i]!=suffix[i]{return false;}}return true;
-}
-// Index of the first occurrence of needle, or None.
-pub fn find<a,b>(text:&a [u8],needle:&b [u8])->u64?{
-    if needle.len()==0{return Some(0);}if text.len()<needle.len(){return None;}
-    for i in text.len()-needle.len()+1{mut same=true;for j in needle.len(){if text[i+j]!=needle[j]{same=false;break;}}if same{return Some(i);}}
-    return None;
-}
-pub fn contains<a,b>(text:&a [u8],needle:&b [u8])->bool{if let Some(i) = find(text,needle) {return true;}return false;}
-pub fn split<a>(text:&a [u8],separator:u64)->u8[][]{
-    mut parts=u8[][];mut current=u8[];
-    for b in text{if b==separator{parts.push(current);current=u8[];}else{current.push(b);}}
-    parts.push(current);return parts;
-}
-pub fn trim<a>(text:&a [u8])->u8[]{
-    mut start=0;mut end=text.len();
-    while start<end{b:=text[start];if (b!=32)&(b!=9)&(b!=10)&(b!=13){break;}start+=1;}
-    while start<end{b:=text[end-1];if (b!=32)&(b!=9)&(b!=10)&(b!=13){break;}end-=1;}
-    mut out=u8[];for i in start..end{out.push(text[i]);}return out;
-}
-pub fn join_with<a,b>(parts:(&a u8[][]),separator:&b [u8])->u8[]{
-    mut out=u8[];for i in parts.len(){if i>0{for b in separator{out.push(b);}}part:=&parts[i];for b in part{out.push(b);}}return out;
-}
-pub fn to_upper<a>(text:&a [u8])->u8[]{mut out=u8[];for b in text{if (b>=97)&(b<=122){out.push(b-32);}else{out.push(b);}}return out;}
-pub fn to_lower<a>(text:&a [u8])->u8[]{mut out=u8[];for b in text{if (b>=65)&(b<=90){out.push(b+32);}else{out.push(b);}}return out;}
-// Decimal digits only; None for empty input, other characters or overflow.
-pub fn parse_u64<a>(text:&a [u8])->u64?{
-    if text.len()==0{return None;}mut value=0;
-    for b in text{if (b<48)||(b>57){return None;}if value>1844674407370955161{return None;}
-        next:=value*10;if next>18446744073709551615-(b-48){return None;}value=next+(b-48);}
-    return Some(value);
-}
-// The same parser under its historical name, used by existing callers.
-pub fn parse_num<a>(text:&a [u8])->u64?{return parse_u64(text);}
-// An optional '-' or '+', then decimal digits; None for bad input or a value outside i64.
-pub fn parse_i64<a>(text:&a [u8])->i64?{
-    if text.len()==0{return None;}
-    mut start=0;mut negative=false;
-    if text[0]==45{negative=true;start=1;}else{if text[0]==43{start=1;}}
-    if start==text.len(){return None;}
-    mut magnitude=0;
-    for i in start..text.len(){
-        b:=text[i];if (b<48)||(b>57){return None;}
-        if magnitude>922337203685477580{return None;}
-        next:=magnitude*10;if next>18446744073709551615-(b-48){return None;}
-        magnitude=next+(b-48);
+// Byte-oriented text helpers, as methods on `[u8]` (any byte text: a byte vector, a string, a view
+// or a slice reads the same way). A value receiver is viewed for the call, so `bytes.trim()` and
+// `view(bytes).trim()` are both the written `strings::trim(view(bytes))`.
+//
+// `starts_with`, `ends_with`, `trim`, `split`, `replace`, `repeat`, `chars`, `to_upper`, `to_lower`
+// and `contains` are the compiler's own methods on byte text; the rest live here.
+
+impl [u8] {
+    // Index of the first occurrence of `needle`, or None.
+    pub fn find(&self, needle: (&[u8])) -> u64? {
+        if needle.len() == 0 {
+            return Some(0);
+        }
+        if self.len() < needle.len() {
+            return None;
+        }
+        for i in self.len() - needle.len() + 1 {
+            mut same = true;
+            for j in needle.len() {
+                if self[i + j] != needle[j] {
+                    same = false;
+                    break;
+                }
+            }
+            if same {
+                return Some(i);
+            }
+        }
+        return None;
     }
-    if negative{
-        if magnitude>9223372036854775808{return None;}
-        if magnitude==9223372036854775808{return Some(i64(0)-i64(9223372036854775807)-i64(1));}
-        return Some(i64(0)-i64(magnitude));
+    // Decimal digits only; None for empty input, other characters or overflow.
+    pub fn parse_u64(&self) -> u64? {
+        if self.len() == 0 {
+            return None;
+        }
+        mut value = 0;
+        for b in self {
+            if (b < 48) || (b > 57) {
+                return None;
+            }
+            if value > 1844674407370955161 {
+                return None;
+            }
+            next := value * 10;
+            if next > 18446744073709551615 - (b - 48) {
+                return None;
+            }
+            value = next + (b - 48);
+        }
+        return Some(value);
     }
-    if magnitude>9223372036854775807{return None;}
-    return Some(i64(magnitude));
-}
-// Decimal text of an unsigned value.
-pub fn from_u64(value:u64)->string{
-    if value==0{return "0".text();}
-    mut digits=u8[];mut rest=value;
-    while rest>0{digits.push(u8(rest%10)+48);rest=rest/10;}
-    mut out=u8[];mut i=digits.len();
-    while i>0{i-=1;out.push(digits[i]);}
-    return out.text();
-}
-// Decimal text of a signed value, with a minus sign when negative.
-pub fn from_i64(value:i64)->string{
-    if value>=0{return from_u64(u64(value));}
-    mut digits=u8[];mut rest=value;
-    while rest<0{
-        digit:=0-(rest%10);digits.push(u8(digit)+48);rest=rest/10;
+    // An optional '-' or '+', then decimal digits; None for bad input or a value outside i64.
+    pub fn parse_i64(&self) -> i64? {
+        if self.len() == 0 {
+            return None;
+        }
+        mut start = 0;
+        mut negative = false;
+        if self[0] == 45 {
+            negative = true;
+            start = 1;
+        } else {
+            if self[0] == 43 {
+                start = 1;
+            }
+        }
+        if start == self.len() {
+            return None;
+        }
+        mut magnitude = 0;
+        for i in start..self.len() {
+            b := self[i];
+            if (b < 48) || (b > 57) {
+                return None;
+            }
+            if magnitude > 922337203685477580 {
+                return None;
+            }
+            next := magnitude * 10;
+            if next > 18446744073709551615 - (b - 48) {
+                return None;
+            }
+            magnitude = next + (b - 48);
+        }
+        if negative {
+            if magnitude > 9223372036854775808 {
+                return None;
+            }
+            if magnitude == 9223372036854775808 {
+                return Some(i64(0) - i64(9223372036854775807) - i64(1));
+            }
+            return Some(i64(0) - i64(magnitude));
+        }
+        if magnitude > 9223372036854775807 {
+            return None;
+        }
+        return Some(i64(magnitude));
     }
-    digits.push(45);
-    mut out=u8[];mut i=digits.len();
-    while i>0{i-=1;out.push(digits[i]);}
-    return out.text();
+    // ---- UTF-8 ---------------------------------------------------------------------------------
+    // Grail text is bytes; these read them as UTF-8 and follow Rust's `str` API: the same strict
+    // validation (overlong forms, surrogates, scalars above U+10FFFF and truncated sequences are
+    // rejected) and the same replacement policy for invalid input - one U+FFFD for each *maximal
+    // subpart*, the longest prefix of a well-formed sequence plus the byte that broke it (Unicode's
+    // recommended practice, what Rust's `from_utf8_lossy` does).
+
+    // Whether every byte is part of a well-formed UTF-8 sequence.
+    pub fn is_utf8(&self) -> bool {
+        mut at = 0;
+        len := self.len();
+        while at < len {
+            step := decode_at(self, at);
+            if step.2 == 0 {
+                return false;
+            }
+            at = at + step.1;
+        }
+        return true;
+    }
+    // The byte offset where the first ill-formed sequence starts, or None for valid UTF-8.
+    pub fn utf8_error(&self) -> u64? {
+        mut at = 0;
+        len := self.len();
+        while at < len {
+            step := decode_at(self, at);
+            if step.2 == 0 {
+                return Some(at);
+            }
+            at = at + step.1;
+        }
+        return None;
+    }
+    pub fn char_count(&self) -> u64 {
+        mut at = 0;
+        len := self.len();
+        mut n = 0;
+        while at < len {
+            step := decode_at(self, at);
+            at = at + step.1;
+            n = n + 1;
+        }
+        return n;
+    }
+    // Whether offset `i` starts a character: 0, the end, or a byte that is not a continuation byte.
+    // A byte offset inside a multi-byte sequence is not a boundary, whatever the bytes say about
+    // validity.
+    pub fn is_char_boundary(&self, i: u64) -> bool {
+        if i == 0 {
+            return true;
+        }
+        if i >= self.len() {
+            return i == self.len();
+        }
+        return !continuation(self[i]);
+    }
+    // The bytes of the characters at [lo, hi): both offsets must be character boundaries, else the
+    // program stops with a runtime error naming the call site.
+    pub fn slice_chars(&self, lo: u64, hi: u64) -> (&[u8]) {
+        assert(self.is_char_boundary(lo) && self.is_char_boundary(hi) && (lo <= hi));
+        return self[lo:hi];
+    }
+    // Every code point with the byte offset it starts at, lazily.
+    pub fn char_indices(&self) -> iter::Iter<(u64, char)> {
+        mut bytes = self.copy();
+        mut at = 0;
+        return iter::from_fn(|| -> (u64, char)? {
+            if at >= bytes.len() {
+                return None;
+            }
+            start := at;
+            step := decode_owned(&bytes, at);
+            at = at + step.1;
+            return Some((start, step.0));
+        });
+    }
+    // `self` as owned string text, with one U+FFFD for each maximal ill-formed subpart. This is the
+    // display form of bytes that may not be UTF-8 at all, such as a path or a line from a file:
+    // nothing aborts, and nothing is silently dropped.
+    pub fn to_text_lossy(&self) -> string {
+        mut out = u8[];
+        mut at = 0;
+        len := self.len();
+        while at < len {
+            step := decode_at(self, at);
+            encode_utf8(step.0, &mut out);
+            at = at + step.1;
+        }
+        return out.text();
+    }
+    // The lines of the text, split at '\n' with a carriage return of a CRLF pair dropped. The last
+    // line has no trailing newline; text that ends in a newline does not produce a final empty line.
+    pub fn lines(&self) -> u8[][] {
+        mut parts = u8[][];
+        mut current = u8[];
+        mut saw = false;
+        for b in self {
+            if b == 10 {
+                mut line = current;
+                if (line.len() != 0) && (line[line.len() - 1] == 13) {
+                    line.truncate(line.len() - 1);
+                }
+                parts.push(line);
+                current = u8[];
+                saw = true;
+            } else {
+                current.push(b);
+                saw = false;
+            }
+        }
+        if current.len() != 0 {
+            parts.push(current);
+        }
+        return parts;
+    }
+    // The words of the text, split at runs of spaces, tabs, newlines and carriage returns.
+    pub fn split_whitespace(&self) -> u8[][] {
+        mut parts = u8[][];
+        mut current = u8[];
+        for b in self {
+            skip := (b == 32) || (b == 9) || (b == 10) || (b == 13);
+            if skip {
+                if current.len() != 0 {
+                    parts.push(current);
+                    current = u8[];
+                }
+            } else {
+                current.push(b);
+            }
+        }
+        if current.len() != 0 {
+            parts.push(current);
+        }
+        return parts;
+    }
 }
 
-// ---- UTF-8 -------------------------------------------------------------------------------------
-// Grail text is bytes; these helpers read them as UTF-8 and follow Rust's `str` API: the same strict
-// validation (overlong forms, surrogates, scalars above U+10FFFF and truncated sequences are
-// rejected) and the same replacement policy for invalid input - one U+FFFD for each *maximal
-// subpart*, the longest prefix of a well-formed sequence plus the byte that broke it (Unicode's
-// recommended practice, what Rust's `from_utf8_lossy` does).
+// The runs of a byte vector.
+impl u8[] {
+    // `up_to`-sized runs of the bytes, in order; the last one may be shorter. No empty run is
+    // produced, and `n == 0` gives an empty vector.
+    pub fn chunks(&self, n: u64) -> u8[][] {
+        mut out = u8[][];
+        if n == 0 {
+            return out;
+        }
+        mut at = 0;
+        while at < self.len() {
+            mut end = at + n;
+            if end > self.len() {
+                end = self.len();
+            }
+            mut part = u8[];
+            for i in at..end {
+                part.push(self[i]);
+            }
+            out.push(part);
+            at = end;
+        }
+        return out;
+    }
+    // Every `n`-byte window of the bytes, in order: `len - n + 1` of them, or none when the vector
+    // is shorter than the window.
+    pub fn windows(&self, n: u64) -> u8[][] {
+        mut out = u8[][];
+        if (n == 0) || (self.len() < n) {
+            return out;
+        }
+        for at in self.len() - n + 1 {
+            mut part = u8[];
+            for i in at..at + n {
+                part.push(self[i]);
+            }
+            out.push(part);
+        }
+        return out;
+    }
+}
 
+// Joining a vector of byte parts, with a separator between them.
+impl u8[][] {
+    pub fn join_with(&self, separator: (&[u8])) -> u8[] {
+        mut out = u8[];
+        for i in self.len() {
+            if i > 0 {
+                for b in separator {
+                    out.push(b);
+                }
+            }
+            part := &self[i];
+            for b in part {
+                out.push(b);
+            }
+        }
+        return out;
+    }
+}
+
+// ---- UTF-8 steps ------------------------------------------------------------------------------
 // The sequence length a leading byte starts, or 0 when no sequence can start with it.
 pub fn utf8_width(lead: u8) -> u64 {
-    if lead < 128 { return 1; }
-    if (lead >= 194) && (lead <= 223) { return 2; }
-    if (lead >= 224) && (lead <= 239) { return 3; }
-    if (lead >= 240) && (lead <= 244) { return 4; }
+    if lead < 128 {
+        return 1;
+    }
+    if (lead >= 194) && (lead <= 223) {
+        return 2;
+    }
+    if (lead >= 224) && (lead <= 239) {
+        return 3;
+    }
+    if (lead >= 240) && (lead <= 244) {
+        return 4;
+    }
     return 0;
 }
 // Whether `byte` is a UTF-8 continuation byte (10xxxxxx).
@@ -109,122 +325,98 @@ fn continuation(byte: u8) -> bool {
 // the input ends early.
 fn step_at(lead: u8, b1: u8, b2: u8, b3: u8, left: u64) -> (char, u64, u64) {
     w := utf8_width(lead);
-    if w == 1 { return (char(u64(lead)), 1, 1); }
-    if w == 0 { return (char(65533), 1, 0); }
-    if left < 2 { return (char(65533), 1, 0); }
+    if w == 1 {
+        return (char(u64(lead)), 1, 1);
+    }
+    if w == 0 {
+        return (char(65533), 1, 0);
+    }
+    if left < 2 {
+        return (char(65533), 1, 0);
+    }
     mut low = 128;
     mut high = 191;
-    if lead == 224 { low = 160; }  // E0 80..9F would be overlong
-    if lead == 237 { high = 159; } // ED A0..BF would be a surrogate
-    if lead == 240 { low = 144; }  // F0 80..8F would be overlong
-    if lead == 244 { high = 143; } // F4 90..BF would be above U+10FFFF
-    if (b1 < low) || (b1 > high) { return (char(65533), 1, 0); }
-    if w == 2 { return (char(u64(lead & 31) * 64 + u64(b1 & 63)), 2, 1); }
-    if left < 3 { return (char(65533), 2, 0); }
-    if !continuation(b2) { return (char(65533), 2, 0); }
-    if w == 3 { return (char(u64(lead & 15) * 4096 + u64(b1 & 63) * 64 + u64(b2 & 63)), 3, 1); }
-    if left < 4 { return (char(65533), 3, 0); }
-    if !continuation(b3) { return (char(65533), 3, 0); }
+    if lead == 224 {
+        low = 160;
+    }
+    // E0 80..9F would be overlong
+    if lead == 237 {
+        high = 159;
+    }
+    // ED A0..BF would be a surrogate
+    if lead == 240 {
+        low = 144;
+    }
+    // F0 80..8F would be overlong
+    if lead == 244 {
+        high = 143;
+    }
+    // F4 90..BF would be above U+10FFFF
+    if (b1 < low) || (b1 > high) {
+        return (char(65533), 1, 0);
+    }
+    if w == 2 {
+        return (char(u64(lead & 31) * 64 + u64(b1 & 63)), 2, 1);
+    }
+    if left < 3 {
+        return (char(65533), 2, 0);
+    }
+    if !continuation(b2) {
+        return (char(65533), 2, 0);
+    }
+    if w == 3 {
+        return (char(u64(lead & 15) * 4096 + u64(b1 & 63) * 64 + u64(b2 & 63)), 3, 1);
+    }
+    if left < 4 {
+        return (char(65533), 3, 0);
+    }
+    if !continuation(b3) {
+        return (char(65533), 3, 0);
+    }
     v := u64(lead & 7) * 262144 + u64(b1 & 63) * 4096 + u64(b2 & 63) * 64 + u64(b3 & 63);
     return (char(v), 4, 1);
 }
-fn decode_at<a>(text: &a [u8], at: u64) -> (char, u64, u64) {
+fn decode_at<a>(text: (&a [u8]), at: u64) -> (char, u64, u64) {
     left := text.len() - at;
     mut b1 = u8(0);
     mut b2 = u8(0);
     mut b3 = u8(0);
-    if left > 1 { b1 = u8(text[at + 1]); }
-    if left > 2 { b2 = u8(text[at + 2]); }
-    if left > 3 { b3 = u8(text[at + 3]); }
+    if left > 1 {
+        b1 = u8(text[at + 1]);
+    }
+    if left > 2 {
+        b2 = u8(text[at + 2]);
+    }
+    if left > 3 {
+        b3 = u8(text[at + 3]);
+    }
     return step_at(u8(text[at]), b1, b2, b3, left);
 }
 // The same step over bytes an iterator owns (a `&u8[]`); kept apart from `decode_at` so neither
 // path allocates a view per character.
-fn decode_owned<a>(bytes: &a u8[], at: u64) -> (char, u64, u64) {
+fn decode_owned<a>(bytes: (&a u8[]), at: u64) -> (char, u64, u64) {
     left := bytes.len() - at;
     mut b1 = u8(0);
     mut b2 = u8(0);
     mut b3 = u8(0);
-    if left > 1 { b1 = u8(bytes[at + 1]); }
-    if left > 2 { b2 = u8(bytes[at + 2]); }
-    if left > 3 { b3 = u8(bytes[at + 3]); }
+    if left > 1 {
+        b1 = u8(bytes[at + 1]);
+    }
+    if left > 2 {
+        b2 = u8(bytes[at + 2]);
+    }
+    if left > 3 {
+        b3 = u8(bytes[at + 3]);
+    }
     return step_at(u8(bytes[at]), b1, b2, b3, left);
-}
-// Whether every byte is part of a well-formed UTF-8 sequence.
-pub fn is_utf8<a>(text: &a [u8]) -> bool {
-    mut at = 0;
-    len := text.len();
-    while at < len {
-        step := decode_at(text, at);
-        if step.2 == 0 { return false; }
-        at = at + step.1;
-    }
-    return true;
-}
-// The byte offset where the first ill-formed sequence starts, or None for valid UTF-8.
-pub fn utf8_error<a>(text: &a [u8]) -> u64? {
-    mut at = 0;
-    len := text.len();
-    while at < len {
-        step := decode_at(text, at);
-        if step.2 == 0 { return Some(at); }
-        at = at + step.1;
-    }
-    return None;
-}
-// Every code point in order, lazily; invalid sequences decode to U+FFFD by maximal subpart.
-// The iterator owns a copy of the bytes: an `iter::Iter<T>` carries no lifetime, so Grail cannot
-// keep a borrow of the argument alive inside it (Rust's `str::chars` borrows instead).
-pub fn chars<a>(text: &a [u8]) -> iter::Iter<char> {
-    mut bytes = text.copy();
-    mut at = 0;
-    return iter::from_fn(|| -> char? {
-        if at >= bytes.len() { return None; }
-        step := decode_owned(&bytes, at);
-        at = at + step.1;
-        return Some(step.0);
-    });
-}
-// Every code point with the byte offset it starts at, lazily (byte offsets into `text`).
-pub fn char_indices<a>(text: &a [u8]) -> iter::Iter<(u64, char)> {
-    mut bytes = text.copy();
-    mut at = 0;
-    return iter::from_fn(|| -> (u64, char)? {
-        if at >= bytes.len() { return None; }
-        start := at;
-        step := decode_owned(&bytes, at);
-        at = at + step.1;
-        return Some((start, step.0));
-    });
-}
-pub fn char_count<a>(text: &a [u8]) -> u64 {
-    mut at = 0;
-    len := text.len();
-    mut n = 0;
-    while at < len {
-        step := decode_at(text, at);
-        at = at + step.1;
-        n = n + 1;
-    }
-    return n;
-}
-// Whether offset `i` starts a character: 0, the end, or a byte that is not a continuation byte. A
-// byte offset inside a multi-byte sequence is not a boundary, whatever the bytes say about validity.
-pub fn is_char_boundary<a>(text: &a [u8], i: u64) -> bool {
-    if i == 0 { return true; }
-    if i >= text.len() { return i == text.len(); }
-    return !continuation(text[i]);
-}
-// The bytes of the characters at [lo, hi): both offsets must be character boundaries, else the
-// program stops with a runtime error naming the call site.
-pub fn slice_chars<a>(text: &a [u8], lo: u64, hi: u64) -> &a [u8] {
-    assert(is_char_boundary(text, lo) && is_char_boundary(text, hi) && (lo <= hi));
-    return text[lo:hi];
 }
 // Appends the UTF-8 encoding of `c` to `out` (1 to 4 bytes).
 pub fn encode_utf8<a>(c: char, out: (&a mut u8[])) {
     v := u64(c);
-    if v < 128 { out.push(u8(v)); return (); }
+    if v < 128 {
+        out.push(u8(v));
+        return ();
+    }
     if v < 2048 {
         out.push(u8(192 + v / 64));
         out.push(u8(128 + v % 64));
@@ -240,32 +432,134 @@ pub fn encode_utf8<a>(c: char, out: (&a mut u8[])) {
     out.push(u8(128 + (v / 4096) % 64));
     out.push(u8(128 + (v / 64) % 64));
     out.push(u8(128 + v % 64));
-}
-// `encode_utf8` with the buffer first, matching `out.push(...)`.
-pub fn push_char<a>(out: (&a mut u8[]), c: char) {
-    encode_utf8(c, out);
     return ();
 }
-pub fn replace<a,b,d>(text:&a [u8],from:&b [u8],to:&d [u8])->u8[]{
-    mut out=u8[];if from.len()==0{for b in text{out.push(b);}return out;}mut i=0;
-    while i<text.len(){
-        mut hit=i+from.len()<=text.len();if hit{for j in from.len(){if text[i+j]!=from[j]{hit=false;break;}}}
-        if hit{for b in to{out.push(b);}i+=from.len();}else{out.push(text[i]);i+=1;}
+// Decimal text of an unsigned value.
+pub fn from_u64(value: u64) -> string {
+    if value == 0 {
+        return "0".text();
     }
-    return out;
-}
-pub fn repeat<a>(text:&a [u8],count:u64)->u8[]{mut out=u8[];for i in count{for b in text{out.push(b);}}return out;}
-// `text` as owned string text, with one U+FFFD for each maximal ill-formed subpart (the policy
-// `chars` uses). This is the display form of bytes that may not be UTF-8 at all, such as a path or a
-// line from a file: nothing aborts, and nothing is silently dropped.
-pub fn to_text_lossy<a>(text: &a [u8]) -> string {
+    mut digits = u8[];
+    mut rest = value;
+    while rest > 0 {
+        digits.push(u8(rest % 10) + 48);
+        rest = rest / 10;
+    }
     mut out = u8[];
-    mut at = 0;
-    len := text.len();
-    while at < len {
-        step := decode_at(text, at);
-        encode_utf8(step.0, &mut out);
-        at = at + step.1;
+    mut i = digits.len();
+    while i > 0 {
+        i -= 1;
+        out.push(digits[i]);
     }
     return out.text();
+}
+// Decimal text of a signed value, with a minus sign when negative.
+pub fn from_i64(value: i64) -> string {
+    if value >= 0 {
+        return from_u64(u64(value));
+    }
+    mut digits = u8[];
+    mut rest = value;
+    while rest < 0 {
+        digit := 0 - (rest % 10);
+        digits.push(u8(digit) + 48);
+        rest = rest / 10;
+    }
+    digits.push(45);
+    mut out = u8[];
+    mut i = digits.len();
+    while i > 0 {
+        i -= 1;
+        out.push(digits[i]);
+    }
+    return out.text();
+}
+
+// ---- the free names, kept for the callers that have not moved to the postfix form -------------
+// The builtin text methods, under the names this module published first. Each is the method call.
+pub fn starts_with<a, b>(text: (&a [u8]), prefix: (&b [u8])) -> bool {
+    return text.starts_with(prefix);
+}
+pub fn ends_with<a, b>(text: (&a [u8]), suffix: (&b [u8])) -> bool {
+    return text.ends_with(suffix);
+}
+pub fn split<a>(text: (&a [u8]), separator: u64) -> u8[][] {
+    return text.split(separator);
+}
+pub fn trim<a>(text: (&a [u8])) -> u8[] {
+    return text.trim();
+}
+pub fn to_upper<a>(text: (&a [u8])) -> u8[] {
+    return text.to_upper();
+}
+pub fn to_lower<a>(text: (&a [u8])) -> u8[] {
+    return text.to_lower();
+}
+pub fn replace<a, b, d>(text: (&a [u8]), from: (&b [u8]), to: (&d [u8])) -> u8[] {
+    return text.replace(from, to);
+}
+pub fn repeat<a>(text: (&a [u8]), count: u64) -> u8[] {
+    return text.repeat(count);
+}
+pub fn find<a, b>(text: (&a [u8]), needle: (&b [u8])) -> u64? {
+    return text.find(needle);
+}
+// The same parser under its historical name, used by existing callers.
+pub fn parse_num<a>(text: (&a [u8])) -> u64? {
+    return text.parse_u64();
+}
+pub fn parse_u64<a>(text: (&a [u8])) -> u64? {
+    return text.parse_u64();
+}
+pub fn parse_i64<a>(text: (&a [u8])) -> i64? {
+    return text.parse_i64();
+}
+pub fn join_with<a, b>(parts: (&a u8[][]), separator: (&b [u8])) -> u8[] {
+    return parts.join_with(separator);
+}
+pub fn is_utf8<a>(text: (&a [u8])) -> bool {
+    return text.is_utf8();
+}
+pub fn utf8_error<a>(text: (&a [u8])) -> u64? {
+    return text.utf8_error();
+}
+pub fn char_count<a>(text: (&a [u8])) -> u64 {
+    return text.char_count();
+}
+pub fn is_char_boundary<a>(text: (&a [u8]), i: u64) -> bool {
+    return text.is_char_boundary(i);
+}
+pub fn slice_chars<a>(text: (&a [u8]), lo: u64, hi: u64) -> (&a [u8]) {
+    return text.slice_chars(lo, hi);
+}
+    // Every code point in order, lazily; invalid sequences decode to U+FFFD by maximal subpart. The
+    // iterator owns a copy of the bytes: an `iter::Iter<T>` carries no lifetime, so Grail cannot
+    // keep a borrow of the receiver alive inside it (Rust's `str::chars` borrows instead).
+pub fn chars<a>(text: (&a [u8])) -> iter::Iter<char> {
+        mut bytes = text.copy();
+        mut at = 0;
+        return iter::from_fn(|| -> char? {
+            if at >= bytes.len() {
+                return None;
+            }
+            step := decode_owned(&bytes, at);
+            at = at + step.1;
+            return Some(step.0);
+        });
+    }
+pub fn char_indices<a>(text: (&a [u8])) -> iter::Iter<(u64, char)> {
+    return text.char_indices();
+}
+pub fn to_text_lossy<a>(text: (&a [u8])) -> string {
+    return text.to_text_lossy();
+}
+pub fn contains<a, b>(text: (&a [u8]), needle: (&b [u8])) -> bool {
+    if let Some(i) = text.find(needle) {
+        return true;
+    }
+    return false;
+}
+pub fn push_char<a>(out: (&a mut u8[]), c: char) {
+    out.push_char(c);
+    return ();
 }

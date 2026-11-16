@@ -35,10 +35,29 @@ out.
 
 {{example:map-iteration}}
 
-`vecs::sort` sorts any vector whose element type implements the `Ord` interface, imported here with
+`v.sort()` sorts any vector whose element type implements the `Ord` interface, imported here with
 `use order::Ord;`; numbers and text already do, and here `Score` sorts by points, highest first.
-Vectors keep their built-in methods (`push`, `pop`, `len`, `insert`, `remove`, `swap`, `reverse`,
-`truncate`, `clear`, `contains`), so `vecs` adds only the generic helpers that cannot be methods.
+
+A vector's operations are its own methods, and `vecs` is where the generic ones live: `map`,
+`filter`, `filter_map`, `flat_map`, `fold`, `reduce`, `for_each`, `any`, `all`, `count`, `find`,
+`position`, `get`, `first`, `last`, `iter`, `into_iter`, `sort`, `sort_by`, `sort_by_key`,
+`is_sorted`, `min`, `max`, `min_by_key`, `max_by_key`, `binary_search`, `insert_sorted`, `dedup`
+and, on a `u64[]`, `sum` - plus the built-in `push`, `pop`, `len`, `insert`, `remove`, `swap`,
+`reverse`, `truncate`, `clear`, `contains` and `is_empty`. Nothing aborts where `None` can answer:
+`get`, `first`, `last`, `min`, `max`, `min_by_key`, `max_by_key`, `find`, `position`, `reduce` and
+`binary_search` all answer `None` on an empty vector or a miss.
+
+Three asymmetries are deliberate rather than gaps, because the language's element rules are what
+they are:
+
+- `u8[]` is byte text, a type of its own, and *not* a `T[]`: `words.map(...)` works on a vector of
+  numbers or records, `bytes.map(...)` is not a method at all. `bytes` has the byte operations
+  instead (`push_char`, `chunks`, `windows`, the text methods, `copy`).
+- `windows` and `chunks` are therefore byte-vector methods; a vector of records cannot hand out
+  borrowed runs, because a `&[T]` of them would be a second borrow of the vector per window.
+- there is no generic `clone`: duplicating a vector needs a way to duplicate an element, and this
+  language has no `Copy`/`Clone` bound to ask for. Copy the elements yourself into a new vector.
+
 Vectors of numbers print directly, like Rust's `{:?}`.
 
 **Try it:** sort `scores` from lowest to highest by flipping the comparison in `less`.

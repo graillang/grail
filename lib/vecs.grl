@@ -1,173 +1,612 @@
 module vecs;
+use core;
 use hash;
+use iter;
 use order;
 
-// Everyday vector operations. Closures passed here own their captures (see closures.md).
-// Every callback here is called on the caller's thread, one call at a time and in element order,
+// Everyday vector operations, as methods on `T[]`.
+//
+// A closure passed here is called on the caller's thread, one call at a time and in element order,
 // so it is an `FnMut`: a closure that writes its captures (a counter, a `&mut` total) is accepted,
 // and an `Fn` closure or a named `fn` widens to it. A by-value `FnMut` parameter is not mutable
 // storage, so each body first moves it into a `mut` binding and calls that.
-pub fn map<T,U>(items:T[],f:FnMut(T)->U)->U[]{
-    mut call=f;
-    mut source=items;mut reversed=T[];while let Some(popped) = source.pop() { reversed.push(popped); }
-    mut out=U[];while let Some(popped) = reversed.pop() { out.push(call(popped)); }return out;
+//
+// `map`, `filter`, `fold`, `reduce`, `for_each` and `flat_map` consume the vector: each element is
+// moved into the closure, so they work for any element type. The reading adapters (`any`, `all`,
+// `count`, `find`, `position`, `get`, `first`, `last`) borrow it and hand the element out by
+// reference. Nothing here aborts: an empty vector gives `None` to `reduce`/`min`/`max`/`get`, and
+// `Some(len)`/`None` to `position`/`find`.
+
+impl<T> T[] {
+    pub fn map<U>(self, f: FnMut(T) -> U) -> U[] {
+        mut call = f;
+        mut source = self;
+        mut reversed = T[];
+        while let Some(popped) = source.pop() {
+            reversed.push(popped);
+        }
+        mut out = U[];
+        while let Some(popped) = reversed.pop() {
+            out.push(call(popped));
+        }
+        return out;
+    }
+    // fold consumes the vector and moves each element into `step` in order.
+    pub fn fold<A>(self, initial: A, step: FnMut(A, T) -> A) -> A {
+        mut call = step;
+        mut source = self;
+        mut reversed = T[];
+        while let Some(popped) = source.pop() {
+            reversed.push(popped);
+        }
+        mut acc = initial;
+        while let Some(popped) = reversed.pop() {
+            acc = call(acc, popped);
+        }
+        return acc;
+    }
+    pub fn filter(self, keep: FnMut(&T) -> bool) -> T[] {
+        mut call = keep;
+        mut source = self;
+        mut reversed = T[];
+        while let Some(popped) = source.pop() {
+            reversed.push(popped);
+        }
+        mut out = T[];
+        while reversed.len() != 0 {
+            value := reversed.pop()!;
+            if call(&value) {
+                out.push(value);
+            }
+        }
+        return out;
+    }
+    pub fn filter_map<U>(self, f: FnMut(&T) -> U?) -> U[] {
+        mut call = f;
+        mut source = self;
+        mut reversed = T[];
+        while let Some(popped) = source.pop() {
+            reversed.push(popped);
+        }
+        mut out = U[];
+        while reversed.len() != 0 {
+            value := reversed.pop()!;
+            if let Some(mapped) = call(&value) {
+                out.push(mapped);
+            }
+        }
+        return out;
+    }
+    pub fn flat_map<U>(self, f: FnMut(T) -> U[]) -> U[] {
+        mut call = f;
+        mut source = self;
+        mut reversed = T[];
+        while let Some(popped) = source.pop() {
+            reversed.push(popped);
+        }
+        mut out = U[];
+        while reversed.len() != 0 {
+            part := call(reversed.pop()!);
+            mut rest = part;
+            mut back = U[];
+            while let Some(popped) = rest.pop() {
+                back.push(popped);
+            }
+            while let Some(popped) = back.pop() {
+                out.push(popped);
+            }
+        }
+        return out;
+    }
+    pub fn for_each(self, f: FnMut(T) -> unit) {
+        mut call = f;
+        mut source = self;
+        mut reversed = T[];
+        while let Some(popped) = source.pop() {
+            reversed.push(popped);
+        }
+        while let Some(popped) = reversed.pop() {
+            call(popped);
+        }
+        return ();
+    }
+    // The one value `step` combines every element into, or None for an empty vector.
+    pub fn reduce(self, step: FnMut(T, T) -> T) -> T? {
+        mut call = step;
+        mut source = self;
+        mut reversed = T[];
+        while let Some(popped) = source.pop() {
+            reversed.push(popped);
+        }
+        if reversed.len() == 0 {
+            return None;
+        }
+        mut acc = reversed.pop()!;
+        while let Some(popped) = reversed.pop() {
+            acc = call(acc, popped);
+        }
+        return Some(acc);
+    }
+    // Every element in order, moved out one at a time (`for x in v.into_iter()`).
+    pub fn into_iter(self) -> iter::Iter<T> {
+        return iter::of(self);
+    }
+    // Every element in order, by reference: the vector stays borrowed meanwhile.
+    pub fn iter(&self) -> iter::Iter<(&T)> {
+        return iter::refs(self);
+    }
+    pub fn any(&self, test: FnMut(&T) -> bool) -> bool {
+        mut call = test;
+        for x in self {
+            if call(x) {
+                return true;
+            }
+        }
+        return false;
+    }
+    pub fn all(&self, test: FnMut(&T) -> bool) -> bool {
+        mut call = test;
+        for x in self {
+            if !call(x) {
+                return false;
+            }
+        }
+        return true;
+    }
+    // How many elements pass `test`.
+    pub fn count(&self, test: FnMut(&T) -> bool) -> u64 {
+        mut call = test;
+        mut n = 0;
+        for x in self {
+            if call(x) {
+                n += 1;
+            }
+        }
+        return n;
+    }
+    // The first element passing `test`, or None.
+    pub fn find(&self, test: FnMut(&T) -> bool) -> (&T)? {
+        mut call = test;
+        for i in self.len() {
+            if call(&self[i]) {
+                return Some(&self[i]);
+            }
+        }
+        return None;
+    }
+    // The index of the first element passing `test`, or None.
+    pub fn position(&self, test: FnMut(&T) -> bool) -> u64? {
+        mut call = test;
+        for i in self.len() {
+            if call(&self[i]) {
+                return Some(i);
+            }
+        }
+        return None;
+    }
+    // The element at `i`, or None: an index past the end is not an error here.
+    pub fn get(&self, i: u64) -> (&T)? {
+        if i >= self.len() {
+            return None;
+        }
+        return Some(&self[i]);
+    }
+    pub fn first(&self) -> (&T)? {
+        if self.len() == 0 {
+            return None;
+        }
+        return Some(&self[0]);
+    }
+    pub fn last(&self) -> (&T)? {
+        if self.len() == 0 {
+            return None;
+        }
+        return Some(&self[self.len() - 1]);
+    }
 }
-// fold consumes the vector and moves each element into `step` in order, so it works for any
-// element type. The predicate helpers below take u64 elements by value and filter_nums consumes
-// the vector; a predicate over a borrowed element is written with a reference parameter
-// (`FnMut(&T)`), as sort_by's comparator is. any/all/position stop at the first decisive element,
-// so a mutating predicate sees exactly the elements up to and including that one.
-pub fn fold<T,A>(items:T[],initial:A,step:FnMut(A,T)->A)->A{
-    mut call=step;
-    mut source=items;mut reversed=T[];while let Some(popped) = source.pop() { reversed.push(popped); }
-    mut acc=initial;while let Some(popped) = reversed.pop() { acc = call(acc, popped); }return acc;
+
+// Drops later elements that equal an earlier one, keeping first occurrences in order.
+impl<T: hash::Equal> T[] {
+    pub fn dedup(self) -> T[] {
+        mut source = self;
+        mut reversed = T[];
+        while let Some(popped) = source.pop() {
+            reversed.push(popped);
+        }
+        mut out = T[];
+        while reversed.len() != 0 {
+            value := reversed.pop()!;
+            mut fresh = true;
+            for i in out.len() {
+                if hash::Equal::equal(&out[i], &value) {
+                    fresh = false;
+                }
+            }
+            if fresh {
+                out.push(value);
+            }
+        }
+        return out;
+    }
 }
-pub fn any_num<a>(items:(&a u64[]),test:FnMut(u64)->bool)->bool{mut call=test;for x in items{if call(*x){return true;}}return false;}
-pub fn all_num<a>(items:(&a u64[]),test:FnMut(u64)->bool)->bool{mut call=test;for x in items{if !call(*x){return false;}}return true;}
-pub fn count_num<a>(items:(&a u64[]),test:FnMut(u64)->bool)->u64{mut call=test;mut n=0;for x in items{if call(*x){n+=1;}}return n;}
-// The index of the first element passing `test`, or items.len() when none does.
-pub fn position_num<a>(items:(&a u64[]),test:FnMut(u64)->bool)->u64{mut call=test;for i in items.len(){if call(items[i]){return i;}}return items.len();}
-pub fn filter_nums(items:u64[],keep:FnMut(u64)->bool)->u64[]{
-    mut call=keep;mut out=u64[];for x in items{if call(x){out.push(x);}}return out;
-}
-pub fn sum(items:u64[])->u64{mut total=0;for x in items{total+=x;}return total;}
-pub fn max_num(items:u64[])->u64{assert(items.len()!=0);mut best=items[0];for x in items{if x>best{best=x;}}return best;}
-pub fn reverse<a,T>(items:(&a mut T[])){
-    mut taken=T[];while let Some(popped) = items.pop() { taken.push(popped); }
-    mut back=T[];while let Some(popped) = taken.pop() { back.push(popped); }
-    while let Some(popped) = back.pop() { items.push(popped); }
-}
-// In-place merge-free insertion sort for numbers (stable, O(n^2); fine for small vectors).
-pub fn sort_nums<a>(items:(&a mut u64[])){
-    n:=items.len();for i in 1..n{mut j=i;while j>0{left:=items[j-1];right:=items[j];if left<=right{break;}
-        exchange(&mut items[j-1],right);exchange(&mut items[j],left);j-=1;}}
-}
-pub fn contains<a,b,T:hash::Equal>(items:(&a T[]),wanted:(&b T))->bool{
-    for i in items.len(){item:=&items[i];if hash::Equal::equal(item,&wanted){return true;}}return false;
+
+// The one number every element adds up to.
+impl u64[] {
+    pub fn sum(&self) -> u64 {
+        mut total = 0;
+        for x in self {
+            total += *x;
+        }
+        return total;
+    }
 }
 
 // Stable merge sort for any element type with an order::Ord implementation; elements are moved,
 // never copied. O(n log n).
-fn reversed<T>(items:T[])->T[]{mut source=items;mut out=T[];while let Some(popped) = source.pop() { out.push(popped); }return out;}
-fn merge_sorted<T:order::Ord>(items:T[])->T[]{
-    if items.len()<2{return items;}
-    mut left=items;half:=left.len()/2;mut right_rev=T[];
-    while left.len()>half{right_rev.push(left.pop()!);}
-    mut a=merge_sorted(left);mut b=merge_sorted(reversed(right_rev));
-    // Take the larger tail element each time (ties prefer the right half) to build a reversed
-    // result, then reverse it; this keeps equal elements in their original order.
-    mut out_rev=T[];
-    while (a.len()!=0)&&(b.len()!=0){
-        take_left:=order::less(&b[b.len()-1],&a[a.len()-1]);
-        if take_left{out_rev.push(a.pop()!);}else{out_rev.push(b.pop()!);}
+impl<T: order::Ord> T[] {
+    pub fn sort(&mut self) {
+        taken := exchange(self, T[]);
+        sorted := merge_sorted(taken);
+        exchange(self, sorted);
+        return ();
     }
-    while let Some(popped) = a.pop() { out_rev.push(popped); }while let Some(popped) = b.pop() { out_rev.push(popped); }
-    return reversed(out_rev);
+    pub fn is_sorted(&self) -> bool {
+        for i in 1..self.len() {
+            if order::less(&self[i], &self[i - 1]) {
+                return false;
+            }
+        }
+        return true;
+    }
+    // The smallest/largest element, or None for an empty vector (first one on ties).
+    pub fn min(&self) -> (&T)? {
+        if self.len() == 0 {
+            return None;
+        }
+        mut best = 0;
+        for i in 1..self.len() {
+            if order::less(&self[i], &self[best]) {
+                best = i;
+            }
+        }
+        return Some(&self[best]);
+    }
+    pub fn max(&self) -> (&T)? {
+        if self.len() == 0 {
+            return None;
+        }
+        mut best = 0;
+        for i in 1..self.len() {
+            if order::less(&self[best], &self[i]) {
+                best = i;
+            }
+        }
+        return Some(&self[best]);
+    }
+    // The index of the smallest/largest element (first one on ties), or None when empty.
+    pub fn min_index(&self) -> u64? {
+        if self.len() == 0 {
+            return None;
+        }
+        mut best = 0;
+        for i in 1..self.len() {
+            if order::less(&self[i], &self[best]) {
+                best = i;
+            }
+        }
+        return Some(best);
+    }
+    pub fn max_index(&self) -> u64? {
+        if self.len() == 0 {
+            return None;
+        }
+        mut best = 0;
+        for i in 1..self.len() {
+            if order::less(&self[best], &self[i]) {
+                best = i;
+            }
+        }
+        return Some(best);
+    }
+    // The index of `value` if present, else None; O(log n). `self` must be sorted.
+    pub fn binary_search(&self, value: &T) -> u64? {
+        mut lo = 0;
+        mut hi = self.len();
+        while lo < hi {
+            mid := lo + (hi - lo) / 2;
+            if order::less(&self[mid], value) {
+                lo = mid + 1;
+            } else {
+                if order::less(value, &self[mid]) {
+                    hi = mid;
+                } else {
+                    return Some(mid);
+                }
+            }
+        }
+        return None;
+    }
+    // Inserts `value` in order unless it is present; true if inserted. `self` stays sorted.
+    pub fn insert_sorted(&mut self, value: T) -> bool {
+        mut lo = 0;
+        mut hi = self.len();
+        while lo < hi {
+            mid := lo + (hi - lo) / 2;
+            if order::less(&self[mid], &value) {
+                lo = mid + 1;
+            } else {
+                if order::less(&value, &self[mid]) {
+                    hi = mid;
+                } else {
+                    return false;
+                }
+            }
+        }
+        self.insert(lo, value);
+        return true;
+    }
+    // The smallest/largest element by a u64 key computed once per element, or None when empty.
+    pub fn min_by_key(&self, key_of: FnMut(&T) -> u64) -> (&T)? {
+        mut key = key_of;
+        if self.len() == 0 {
+            return None;
+        }
+        mut best = 0;
+        mut best_key = key(&self[0]);
+        for i in 1..self.len() {
+            k := key(&self[i]);
+            if k < best_key {
+                best = i;
+                best_key = k;
+            }
+        }
+        return Some(&self[best]);
+    }
+    pub fn max_by_key(&self, key_of: FnMut(&T) -> u64) -> (&T)? {
+        mut key = key_of;
+        if self.len() == 0 {
+            return None;
+        }
+        mut best = 0;
+        mut best_key = key(&self[0]);
+        for i in 1..self.len() {
+            k := key(&self[i]);
+            if k > best_key {
+                best = i;
+                best_key = k;
+            }
+        }
+        return Some(&self[best]);
+    }
 }
-pub fn sort<a,T:order::Ord>(items:(&a mut T[])){taken:=exchange(items,T[]);sorted:=merge_sorted(taken);exchange(items,sorted);}
-pub fn is_sorted<a,T:order::Ord>(items:(&a T[]))->bool{for i in 1..items.len(){if order::less(&items[i],&items[i-1]){return false;}}return true;}
-// Index of the smallest/largest element (first one on ties); the vector must not be empty.
-pub fn min_index<a,T:order::Ord>(items:(&a T[]))->u64{assert(items.len()!=0);mut best=0;for i in 1..items.len(){if order::less(&items[i],&items[best]){best=i;}}return best;}
-pub fn max_index<a,T:order::Ord>(items:(&a T[]))->u64{assert(items.len()!=0);mut best=0;for i in 1..items.len(){if order::less(&items[best],&items[i]){best=i;}}return best;}
 
 // Stable sort by a comparator: `less(a, b)` is true when `a` must come before `b`; equal elements
 // keep their order. A bottom-up merge over an index permutation, then applied with swaps: elements
 // are moved, never copied, and the comparator is called from one place. O(n log n). The comparator
 // is an FnMut (it may count its calls); the order of the calls is the merge's, not specified.
-pub fn sort_by<a,T>(items:(&a mut T[]),order_by:FnMut(&T,&T)->bool){
-    mut less=order_by;
-    n:=items.len();
-    mut idx=u64[0;n];
-    for i in n{idx[i]=i;}
-    mut tmp=u64[0;n];
-    mut width=1;
-    while width<n{
-        mut lo=0;
-        while lo<n{
-            mut mid=lo+width;if mid>n{mid=n;}
-            mut hi=lo+2*width;if hi>n{hi=n;}
-            mut i=lo;mut j=mid;mut k=lo;
-            while k<hi{
-                // Take from the right only when it must come strictly first (stability).
-                if (i<mid)&&((j>=hi)||!less(&items[idx[j]],&items[idx[i]])){tmp[k]=idx[i];i+=1;}
-                else{tmp[k]=idx[j];j+=1;}
-                k+=1;
-            }
-            lo=hi;
+impl<T> T[] {
+    pub fn sort_by(&mut self, order_by: FnMut(&T, &T) -> bool) {
+        mut less = order_by;
+        n := self.len();
+        mut idx = u64[0; n];
+        for i in n {
+            idx[i] = i;
         }
-        swapped:=exchange(&mut idx,tmp);
-        tmp=swapped;
-        width=width*2;
-    }
-    permute(items,&idx);
-}
-// Stable sort by a u64 key computed once per element.
-// The key is called once per element, in element order.
-pub fn sort_by_key<a,T>(items:(&a mut T[]),key_of:FnMut(&T)->u64){
-    mut key=key_of;
-    n:=items.len();
-    mut keys=u64[0;n];
-    for i in n{keys[i]=key(&items[i]);}
-    mut idx=u64[0;n];
-    for i in n{idx[i]=i;}
-    mut tmp=u64[0;n];
-    mut width=1;
-    while width<n{
-        mut lo=0;
-        while lo<n{
-            mut mid=lo+width;if mid>n{mid=n;}
-            mut hi=lo+2*width;if hi>n{hi=n;}
-            mut i=lo;mut j=mid;mut k=lo;
-            while k<hi{
-                if (i<mid)&&((j>=hi)||(keys[idx[j]]>=keys[idx[i]])){tmp[k]=idx[i];i+=1;}
-                else{tmp[k]=idx[j];j+=1;}
-                k+=1;
+        mut tmp = u64[0; n];
+        mut width = 1;
+        while width < n {
+            mut lo = 0;
+            while lo < n {
+                mut mid = lo + width;
+                if mid > n {
+                    mid = n;
+                }
+                mut hi = lo + 2 * width;
+                if hi > n {
+                    hi = n;
+                }
+                mut i = lo;
+                mut j = mid;
+                mut k = lo;
+                while k < hi {
+                    // Take from the right only when it must come strictly first (stability).
+                    if (i < mid) && ((j >= hi) || !less(&self[idx[j]], &self[idx[i]])) {
+                        tmp[k] = idx[i];
+                        i += 1;
+                    } else {
+                        tmp[k] = idx[j];
+                        j += 1;
+                    }
+                    k += 1;
+                }
+                lo = hi;
             }
-            lo=hi;
+            swapped := exchange(&mut idx, tmp);
+            tmp = swapped;
+            width = width * 2;
         }
-        swapped:=exchange(&mut idx,tmp);
-        tmp=swapped;
-        width=width*2;
+        permute(self, &idx);
+        return ();
     }
-    permute(items,&idx);
+    // Stable sort by a u64 key computed once per element, in element order.
+    pub fn sort_by_key(&mut self, key_of: FnMut(&T) -> u64) {
+        mut key = key_of;
+        n := self.len();
+        mut keys = u64[0; n];
+        for i in n {
+            keys[i] = key(&self[i]);
+        }
+        mut idx = u64[0; n];
+        for i in n {
+            idx[i] = i;
+        }
+        mut tmp = u64[0; n];
+        mut width = 1;
+        while width < n {
+            mut lo = 0;
+            while lo < n {
+                mut mid = lo + width;
+                if mid > n {
+                    mid = n;
+                }
+                mut hi = lo + 2 * width;
+                if hi > n {
+                    hi = n;
+                }
+                mut i = lo;
+                mut j = mid;
+                mut k = lo;
+                while k < hi {
+                    if (i < mid) && ((j >= hi) || (keys[idx[j]] >= keys[idx[i]])) {
+                        tmp[k] = idx[i];
+                        i += 1;
+                    } else {
+                        tmp[k] = idx[j];
+                        j += 1;
+                    }
+                    k += 1;
+                }
+                lo = hi;
+            }
+            swapped := exchange(&mut idx, tmp);
+            tmp = swapped;
+            width = width * 2;
+        }
+        permute(self, &idx);
+        return ();
+    }
 }
+
+fn merge_sorted<T: order::Ord>(items: T[]) -> T[] {
+    if items.len() < 2 {
+        return items;
+    }
+    mut left = items;
+    half := left.len() / 2;
+    mut right_rev = T[];
+    while left.len() > half {
+        right_rev.push(left.pop()!);
+    }
+    mut a = merge_sorted(left);
+    mut b = merge_sorted(reversed(right_rev));
+    // Take the larger tail element each time (ties prefer the right half) to build a reversed
+    // result, then reverse it; this keeps equal elements in their original order.
+    mut out_rev = T[];
+    while (a.len() != 0) && (b.len() != 0) {
+        take_left := order::less(&b[b.len() - 1], &a[a.len() - 1]);
+        if take_left {
+            out_rev.push(a.pop()!);
+        } else {
+            out_rev.push(b.pop()!);
+        }
+    }
+    while let Some(popped) = a.pop() {
+        out_rev.push(popped);
+    }
+    while let Some(popped) = b.pop() {
+        out_rev.push(popped);
+    }
+    return reversed(out_rev);
+}
+
+fn reversed<T>(items: T[]) -> T[] {
+    mut source = items;
+    mut out = T[];
+    while let Some(popped) = source.pop() {
+        out.push(popped);
+    }
+    return out;
+}
+
 // Rearranges `items` so position k holds the element that was at order[k] (a permutation).
-fn permute<a,b,T>(items:(&a mut T[]),order:(&b u64[])){
-    n:=items.len();
+fn permute<a, T>(items: (&a mut T[]), order: (&a u64[])) {
+    n := items.len();
     // pos[o]: where original element o sits now; at[p]: which original element sits at p.
-    mut pos=u64[0;n];mut at=u64[0;n];
-    for i in n{pos[i]=i;at[i]=i;}
-    for k in n{
-        o:=order[k];p:=pos[o];
-        if p!=k{
-            items.swap(k,p);
-            moved:=at[k];
-            at[p]=moved;pos[moved]=p;
-            at[k]=o;pos[o]=k;
+    mut pos = u64[0; n];
+    mut at = u64[0; n];
+    for i in n {
+        pos[i] = i;
+        at[i] = i;
+    }
+    for k in n {
+        o := order[k];
+        p := pos[o];
+        if p != k {
+            items.swap(k, p);
+            moved := at[k];
+            at[p] = moved;
+            pos[moved] = p;
+            at[k] = o;
+            pos[o] = k;
         }
     }
+    return ();
 }
 
-// Sorted-vector sets (Go/Zig style): `items` ascending and duplicate-free.
-// The index of `value` if present, else None; O(log n).
-pub fn binary_search<a,b,T:order::Ord>(items:(&a T[]),value:(&b T))->u64?{
-    mut lo=0;mut hi=items.len();
-    while lo<hi{
-        mid:=lo+(hi-lo)/2;
-        if order::less(&items[mid],value){lo=mid+1;}
-        else{if order::less(value,&items[mid]){hi=mid;}else{return Some(mid);}}
-    }
-    return None;
+// ---- the free names, kept for the callers that have not moved to the postfix form -------------
+// Each is the method call it stands for; a call site that reads better as a method should use one.
+pub fn map<T, U>(items: T[], f: FnMut(T) -> U) -> U[] {
+    return items.map(f);
 }
-// Inserts `value` in order unless it is present; true if inserted.
-pub fn insert_sorted<a,T:order::Ord>(items:(&a mut T[]),value:T)->bool{
-    mut lo=0;mut hi=items.len();
-    while lo<hi{
-        mid:=lo+(hi-lo)/2;
-        if order::less(&items[mid],&value){lo=mid+1;}
-        else{if order::less(&value,&items[mid]){hi=mid;}else{return false;}}
-    }
-    items.insert(lo,value);
-    return true;
+pub fn fold<T, A>(items: T[], initial: A, step: FnMut(A, T) -> A) -> A {
+    return items.fold(initial, step);
 }
-
+pub fn filter_nums(items: u64[], keep: FnMut(&u64) -> bool) -> u64[] {
+    return items.filter(keep);
+}
+pub fn sum(items: u64[]) -> u64 {
+    return items.sum();
+}
+pub fn reverse<a, T>(items: (&a mut T[])) {
+    items.reverse();
+    return ();
+}
+// In-place merge-free insertion sort for numbers (stable, O(n^2); fine for small vectors).
+pub fn sort_nums<a>(items: (&a mut u64[])) {
+    items.sort();
+    return ();
+}
+pub fn contains<a, b, T: hash::Equal>(items: (&a T[]), wanted: (&b T)) -> bool {
+    for i in items.len() {
+        item := &items[i];
+        if hash::Equal::equal(item, wanted) {
+            return true;
+        }
+    }
+    return false;
+}
+pub fn sort<a, T: order::Ord>(items: (&a mut T[])) {
+    items.sort();
+    return ();
+}
+pub fn is_sorted<a, T: order::Ord>(items: (&a T[])) -> bool {
+    return items.is_sorted();
+}
+pub fn min_index<a, T: order::Ord>(items: (&a T[])) -> u64 {
+    assert(items.len() != 0);
+    if let Some(i) = items.min_index() {
+        return i;
+    }
+    return 0;
+}
+pub fn max_index<a, T: order::Ord>(items: (&a T[])) -> u64 {
+    assert(items.len() != 0);
+    if let Some(i) = items.max_index() {
+        return i;
+    }
+    return 0;
+}
+pub fn sort_by<a, T>(items: (&a mut T[]), order_by: FnMut(&T, &T) -> bool) {
+    items.sort_by(order_by);
+    return ();
+}
+pub fn sort_by_key<a, T>(items: (&a mut T[]), key_of: FnMut(&T) -> u64) {
+    items.sort_by_key(key_of);
+    return ();
+}
+pub fn binary_search<a, b, T: order::Ord>(items: (&a T[]), value: (&b T)) -> u64? {
+    return items.binary_search(value);
+}
+pub fn insert_sorted<a, T: order::Ord>(items: (&a mut T[]), value: T) -> bool {
+    return items.insert_sorted(value);
+}

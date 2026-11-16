@@ -596,6 +596,10 @@ struct C {
     // does not tell apart from no hint.
     hint_set: u64,
     inherent: u64,
+    // Inherent impls whose owner is a written type rather than a declaration of the module
+    // (`impl u8[] { ... }`, `impl<T> T[] { ... }`): the owner type of each, in source order. The key
+    // of one is `inherent_type_base()` plus its 1-based position here (inherent_type_base).
+    inherent_types: u64[],
     constants: Constant[],
     impl_params: ImplParams[],
     receiver: u64,
@@ -12243,6 +12247,14 @@ fn parse_reference<a>(c: (&a mut C)) -> u64 {
     old := exchange(&mut c.no_union, 1);
     mut e = parse_type(&mut c);
     exchange(&mut c.no_union, old);
+    // `&Self` in an impl whose owner is a slice is the slice reference itself, exactly as `&self`
+    // is (receiver_reference): `Self` there names `&[T]`, which is already a reference.
+    k := ty_kind(&mut c, e);
+    if (e == c.self_type) & ((k == 27) || (k == 5)) {
+        mut srs = u64[];
+        srs.push(r);
+        return intern_full(&mut c, k, ty_arg(&mut c, e), mode, srs);
+    }
     if ty_kind(&mut c, e) == 33 {
         // `&dyn I` / `&mut dyn I`: a borrowed interface object, not a reference to an owned one. Its
         // referent is the borrowed-object marker (35), which is what the type system prints as `dyn
@@ -12677,9 +12689,26 @@ fn mangle_into<a, b, d>(out: (&a mut u8[]), plat: u64, m: &b [u8], n: &d [u8]) -
 // object never defines. The symbol spells the declaration instead: the type's module and name, the
 // interface's module and name, and for an implementation also a digest of the implementing type
 // (B1 stage 4).
+// The unit a written-type inherent impl's methods are emitted under: a digest of the owner type as
+// written (`.inherent_<key>` is a position in this run's tables, and cannot be a symbol).
+fn inherent_type_unit<a>(c: (&a mut C), owner: u64) -> u8[] {
+    mut out = copy_bytes(view(".inherent_type$"));
+    ty := inherent_owner_type(&mut c, owner);
+    mut key = u8[];
+    type_key(&mut c, &mut key, ty, 0);
+    digest := iface_digest(&key);
+    for i in 16 {
+        out.push(digest[i]);
+    }
+    return out;
+}
 fn symbol_unit<a, b>(c: (&a mut C), m: &b [u8]) -> u8[] {
     if starts_with(view(m), view(".inherent_")) {
         n := module_index(view(m), 10);
+        // A written-type inherent impl has no declaration to spell, so it spells its owner type.
+        if (n != 0) & inherent_is_type_key(n) {
+            return inherent_type_unit(&mut c, n);
+        }
         if (n != 0) & (n <= c.decls.len()) {
             mut out = copy_bytes(view(".inherent$"));
             push_bytes(&mut out, view(c.decls[n - 1].module));
@@ -14323,6 +14352,71 @@ fn ffi_link<a, b>(c: (&a mut C), input: &b [u8]) -> unit {
     c.libs.push(input.copy());
     return ();
 }
+// `&self`, `&mut self` and `self` at the start of a signature's parameter list: the receiver
+// shorthand, desugared to `self: (&__self Self)`, `self: (&mut __self Self)` and `self: Self`.
+// Consumes the tokens and returns (1, ty), or (0, 0) when an ordinary `name: type` follows. The
+// region is fresh per method - the weakest relation that typechecks - and `Self` is the impl's type
+// or the interface's own parameter, exactly what the written-out form spells.
+// The reference type a `&self` / `&mut self` receiver has, for an impl whose owner is `owner`: the
+// written `(&__self Self)`. A slice owner *is* a reference already (`&[T]` is kind 27, `&[u8]` kind
+// 5), so `&self` on it is that slice reference with the method's fresh region - not a reference to a
+// slice reference, which no value has.
+fn receiver_reference<a>(c: (&a mut C), owner: u64, mode: u64, r: u64) -> u64 {
+    mut rs = u64[];
+    rs.push(r);
+    k := ty_kind(&mut c, owner);
+    if (k == 27) || (k == 5) {
+        return intern_full(&mut c, k, ty_arg(&mut c, owner), mode, rs);
+    }
+    return intern_full(&mut c, 7, owner, mode, rs);
+}
+fn receiver_shorthand<a>(c: (&a mut C)) -> (u64, u64) {
+    mut receiver = 0;
+    if is(&mut c, view("&")) {
+        receiver = 1;
+    } else {
+        if (kind(&mut c) == 1) & same(view(tok_text(&mut c, c.pos)), view("self")) {
+            next := kind_at(&mut c, c.pos + 1);
+            if (next == 41) || (next == 44) || (next == 59) {
+                receiver = 2;
+            }
+        }
+    }
+    if receiver == 0 {
+        return (0, 0);
+    }
+    if c.self_type == NO_TYPE {
+        // Not `expected a name here`: the form is spelled right and is in the wrong place.
+        fail(
+            &mut c,
+            view(
+                "a receiver belongs to a method: `&self`, `&mut self` and `self` are written only in an `impl` block or an interface method, and a free function takes ordinary `name: type` parameters"
+            )
+        );
+    }
+    // The impl's type with this instantiation's arguments, exactly as the `Self` in a written
+    // receiver is resolved: a replayed method of `impl<T> T[]` must see `T` bound, not the template.
+    mut st = c.self_type;
+    if c.bindings.len() != 0 {
+        st = bind_types(&mut c, st, &copy_numbers(&c.bindings));
+    }
+    if receiver == 2 {
+        advance(&mut c);
+        return (1, st);
+    }
+    advance(&mut c);
+    mut mode = 0;
+    if eat(&mut c, view("mut")) {
+        mode = 1;
+    }
+    word := ident(&mut c);
+    if !same(view(word), view("self")) {
+        fail(&mut c, view("`&` at the start of a parameter list is a receiver: write `&self` or `&mut self`"));
+    }
+    r := fresh_lifetime(&mut c);
+    note_input_region(&mut c, r);
+    return (1, receiver_reference(&mut c, st, mode, r));
+}
 fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     position := c.pos;
     expect(&mut c, view("extern"));
@@ -14965,6 +15059,11 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     c.cur_name = name.copy();
     c.cur_file = c.file;
     c.cur_pos = position;
+    // An impl for a written type may not take over a name the compiler already resolves on that
+    // type: `v.len()` is how `for i in v.len()` is written, so its meaning is not an impl's to set.
+    if (pass == 2) & inherent_is_type_key(c.inherent) {
+        inherent_protocol_refused(&mut c, c.inherent, view(name), position + 1);
+    }
     mut at_generics = c.pos;
     lifetime_parameters(&mut c);
     exchange(&mut c.input_regions, u64[]);
@@ -15087,7 +15186,18 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     if !eat(&mut c, view(")")) {
         while true {
             mut at_param = c.pos;
-            p := ident(&mut c);
+            // `&self`, `&mut self` and `self` are the receiver shorthand; anything else is a
+            // written `name: type` parameter (receiver_shorthand).
+            recv := receiver_shorthand(&mut c);
+            mut shorthand = recv.0;
+            mut p = u8[];
+            mut ty = recv.1;
+            if shorthand != 0 {
+                p = copy_bytes(view("self"));
+            } else {
+                p = ident(&mut c);
+                ty = NO_TYPE;
+            }
             mut dup_at = 0;
             for i in pnames.len() {
                 if same(view(pnames[i]), view(p)) {
@@ -15100,17 +15210,19 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                 duplicate_param_fail(&mut c, view(fname), view(p), at_param);
             }
             pspots.push(at_param);
-            expect(&mut c, view(":"));
-            if ffi_byval_ahead(&mut c) {
-                fail(
-                    &mut c,
-                    view("byval is only for an extern \"C\" declaration parameter; a C callback cannot take a record by value yet")
-                );
+            if shorthand == 0 {
+                expect(&mut c, view(":"));
+                if ffi_byval_ahead(&mut c) {
+                    fail(
+                        &mut c,
+                        view("byval is only for an extern \"C\" declaration parameter; a C callback cannot take a record by value yet")
+                    );
+                }
+                ty = parse_type(&mut c);
             }
-            ty := parse_type(&mut c);
             // `p: T where P`: the parameter's refinement (docs/design/refinements.md).
             mut pp = no_pred();
-            if is(&mut c, view("where")) {
+            if (shorthand == 0) & is(&mut c, view("where")) {
                 advance(&mut c);
                 pp = pred_scan(&mut c, view(","), view(")"));
             }
@@ -15878,9 +15990,18 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
         mut count = 0;
         if !eat(&mut c, view(")")) {
             while true {
-                p := ident(&mut c);
-                expect(&mut c, view(":"));
-                ty := parse_type(&mut c);
+                // The receiver shorthand is collected by receiver_shorthand, the same code the
+                // implementation's methods use, so both spellings mean one signature.
+                recv := receiver_shorthand(&mut c);
+                mut p = u8[];
+                mut ty = recv.1;
+                if recv.0 != 0 {
+                    p = copy_bytes(view("self"));
+                } else {
+                    p = ident(&mut c);
+                    expect(&mut c, view(":"));
+                    ty = parse_type(&mut c);
+                }
                 if same(view(p), view("self")) & (ty_kind(&mut c, ty) == 7) {
                     rr := outer_region(&mut c, ty);
                     exchange(&mut c.receiver_region, rr);
@@ -16053,6 +16174,359 @@ fn default_copy<a>(c: (&a C), index: u64) -> bool {
     }
     return false;
 }
+// ---- inherent impls on a written type -------------------------------------------------------------
+// `impl<T> T[] { ... }` and `impl [u8] { ... }` give methods to a type no module declares. The owner
+// is the type as written, and the impl is keyed by that type: its key is `inherent_type_base` plus
+// its 1-based position in `c.inherent_types`, so its methods live in the private module
+// `.inherent_<key-1>` exactly as a declared type's do. A declared type keeps using its declaration
+// index as the key, so `impl_self` and `prepend_impl_params` need no branch for this: every
+// written-type impl registers an ImplParams record under its key, which is where `impl_self` looks.
+fn inherent_type_base() -> u64 {
+    return 500000000;
+}
+// Whether the written-type impl at `key` has the header the parser just read: the same owner type
+// and the same parameters (names, bounds and required interfaces).
+fn inherent_same_header<a>(c: (&a mut C), key: u64, ty: u64) -> bool {
+    i := key - inherent_type_base();
+    if (i == 0) || (c.inherent_types.len() < i) {
+        return false;
+    }
+    if same_type(&mut c, c.inherent_types[i - 1], ty) == 0 {
+        return false;
+    }
+    record := impl_record(&mut c, key);
+    if record == 0 {
+        return c.tnames.len() == 0;
+    }
+    p := &c.impl_params[record - 1];
+    if (p.rnames.len() != c.rnames.len()) || (p.tnames.len() != c.tnames.len()) {
+        return false;
+    }
+    if p.bounds.len() != c.type_bounds.len() {
+        return false;
+    }
+    for j in p.bounds.len() {
+        if p.bounds[j] != c.type_bounds[j] {
+            return false;
+        }
+    }
+    if p.interfaces.len() != c.type_interfaces.len() {
+        return false;
+    }
+    for j in p.interfaces.len() {
+        want := copy_numbers(&c.type_interfaces[j]);
+        have := copy_numbers(&p.interfaces[j]);
+        if want.len() != have.len() {
+            return false;
+        }
+        for k in want.len() {
+            if want[k] != have[k] {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+fn inherent_is_type_key(owner: u64) -> bool {
+    // Below the generic-implementation namespace: a written-type impl's owner is a key of its own,
+    // not a position in `c.decls` (that is `owner - 1 < decls.len()`) and not a generic impl.
+    return (inherent_type_base() <= owner) & (owner < generic_impl_key(0));
+}
+// The private module a written-type impl's methods are in.
+fn inherent_type_module(key: u64) -> u8[] {
+    return private_module(view(".inherent_"), key - 1);
+}
+// The owner type a written-type impl is for, or NO_TYPE.
+fn inherent_owner_type<a>(c: (&a mut C), owner: u64) -> u64 {
+    if !inherent_is_type_key(owner) {
+        return NO_TYPE;
+    }
+    i := owner - inherent_type_base();
+    if (i == 0) || (c.inherent_types.len() < i) {
+        return NO_TYPE;
+    }
+    return c.inherent_types[i - 1];
+}
+// Whether `name` is part of a collection's protocol: the methods the compiler itself resolves on a
+// vector, a byte sequence, a string, a view or a slice. They are the language's own operations, not
+// library surface - `for i in v.len()`, `v[i]`, `v.push(x)`, `v.clear()` are what the bounds checks
+// and the vector growth protocol are built on - so an impl may not take one over.
+fn protocol_method_name<a, b>(c: (&a mut C), k: u64, name: &b [u8]) -> bool {
+    // A vector, a slice, a byte sequence, a string and a view: the kinds that carry the collection
+    // protocol (`len`, indexed access, growth).
+    if (k == 3) || (k == 4) || (k == 5) || (k == 6) || (k == 27) {
+        if same(view(name), view("len"))
+            || same(view(name), view("push"))
+            || same(view(name), view("pop"))
+            || same(view(name), view("insert"))
+            || same(view(name), view("remove"))
+            || same(view(name), view("swap"))
+            || same(view(name), view("contains"))
+            || same(view(name), view("reverse"))
+            || same(view(name), view("append"))
+            || same(view(name), view("truncate"))
+            || same(view(name), view("clear")) {
+            return true;
+        }
+    }
+    return false;
+}
+// A method that would set what a protocol name means is refused where it is defined, so no call site
+// silently changes meaning: the message says what the name is and asks for another one.
+fn inherent_protocol_refused<a, b>(c: (&a mut C), owner: u64, name: &b [u8], at: u64) -> unit {
+    ty := inherent_owner_type(&mut c, owner);
+    if ty == NO_TYPE {
+        return ();
+    }
+    if !protocol_method_name(&mut c, ty_kind(&mut c, ty), name) {
+        return ();
+    }
+    mut msg = copy_bytes(view("`"));
+    push_bytes(&mut msg, view(name));
+    push_bytes(&mut msg, view("` is part of the collection protocol of `"));
+    push_bytes(&mut msg, view(source_type_name(&mut c, ty)));
+    push_bytes(
+        &mut msg,
+        view(
+            "`, so an inherent impl cannot set it: the compiler resolves that name itself, and `for i in v.len()` and every bounds check depend on what it means. Give this method another name."
+        )
+    );
+    exchange(&mut c.pos, at);
+    fail(&mut c, view(msg));
+    return ();
+}
+// The owner type of an inherent impl header: a type as written, or `[T]`, the slice spelling the
+// type grammar has no other place for (`&[T]` is the reference to it, `T[]` the vector).
+fn parse_inherent_owner<a>(c: (&a mut C)) -> u64 {
+    if is(&mut c, view("[")) & slice_ahead(&mut c, c.pos) {
+        advance(&mut c);
+        elem := parse_type(&mut c);
+        expect(&mut c, view("]"));
+        if elem == int_type(&mut c, 8, 0) {
+            return intern_full(&mut c, 5, 0, 0, u64[]);
+        }
+        return intern_full(&mut c, 27, elem, 0, u64[]);
+    }
+    return parse_type(&mut c);
+}
+// `type_matches` with the one relaxation an impl's written owner needs: `impl [T]` names the slice
+// of T, and the mode of a slice is a property of the value, not of the impl - the method's own
+// `self` type says whether it reads or writes - so the owner matches a slice receiver of either
+// mode. Mutability is still checked at the call, against that `self` type.
+fn inherent_pattern_fits<a, b>(c: (&a mut C), pattern: u64, actual: u64, map: (&b mut u64[])) -> bool {
+    pk := ty_kind(&mut c, pattern);
+    ak := ty_kind(&mut c, actual);
+    if (pk == ak) & ((pk == 27) || (pk == 5)) {
+        return inherent_match(&mut c, ty_arg(&mut c, pattern), ty_arg(&mut c, actual), &mut map);
+    }
+    return inherent_match(&mut c, pattern, actual, &mut map);
+}
+// `type_matches` that binds every parameter the pattern names, even where the two types are already
+// equal: a generic function forwarding to `impl<T> T[]`'s method has the *same* parameter on both
+// sides, which `same_type` answers without binding anything - and the caller still has to know that
+// the implementation is `T[]`'s.
+fn inherent_match<a, b>(c: (&a mut C), pattern: u64, actual: u64, map: (&b mut u64[])) -> bool {
+    pk := ty_kind(&mut c, pattern);
+    if pk == 9 {
+        i := ty_arg(&mut c, pattern);
+        if map.len() <= i {
+            return false;
+        }
+        if map[i] == NO_TYPE {
+            exchange(&mut map[i], actual);
+        }
+        return true;
+    }
+    mut a = actual;
+    mut unwrapped = 0;
+    if pk != ty_kind(&mut c, a) {
+        // A specialisation binds a parameter to the concrete type it stands for.
+        candidate := base_type(&mut c, a);
+        if ty_kind(&mut c, candidate) == ty_kind(&mut c, a) {
+            return false;
+        }
+        a = candidate;
+        unwrapped = 1;
+        if pk != ty_kind(&mut c, a) {
+            return false;
+        }
+    }
+    if (pk == 5) || (pk == 6) || (pk == 7) || (pk == 27) {
+        if ty_mode(&mut c, pattern) != ty_mode(&mut c, a) {
+            return false;
+        }
+        return inherent_match(&mut c, ty_arg(&mut c, pattern), ty_arg(&mut c, a), &mut map);
+    }
+    if pk == 8 {
+        if ty_arg(&mut c, pattern) != ty_arg(&mut c, a) {
+            return false;
+        }
+        pargs := type_args(&mut c, pattern);
+        aargs := type_args(&mut c, a);
+        if pargs.len() != aargs.len() {
+            return false;
+        }
+        for k in pargs.len() {
+            if !inherent_match(&mut c, pargs[k], aargs[k], &mut map) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if unwrapped != 0 {
+        // A replayed generic body's receiver is a specialisation alias. The alias does name a
+        // concrete type, but a method call on it is the method its *bound* declares (`P: Probe` ->
+        // `Probe::first_byte`), not an inherent method of the type it stands for - which is also what
+        // the value's type can carry: the receiver is `&(the alias)`, and only the interface
+        // signature is written in those terms.
+        return false;
+    }
+    return same_type(&mut c, pattern, a) != 0;
+}
+// The type arguments a written-type impl binds for a receiver of type `actual`: (found, map).
+fn inherent_bindings<a>(c: (&a mut C), key: u64, actual: u64) -> (u64, u64[]) {
+    i := key - inherent_type_base();
+    if (i == 0) || (c.inherent_types.len() < i) {
+        return (0, u64[]);
+    }
+    // A key with no parameters need carry no record: the owner pattern then names no parameter, and
+    // there is no bound to satisfy. (The interface reader registers a record only for a generic impl.)
+    record := impl_record(&mut c, key);
+    mut count = 0;
+    if record != 0 {
+        count = c.impl_params[record - 1].tnames.len();
+    }
+    pattern := c.inherent_types[i - 1];
+    mut map = u64[];
+    for k in count {
+        map.push(NO_TYPE);
+    }
+    if !inherent_pattern_fits(&mut c, pattern, actual, &mut map) {
+        return (0, u64[]);
+    }
+    mut sets = u64[][];
+    if record != 0 {
+        sets = copy_constraints(&c.impl_params[record - 1].interfaces);
+    }
+    for k in count {
+        mut bound = map[k];
+        if bound == NO_TYPE {
+            return (0, u64[]);
+        }
+        if k < sets.len() {
+            for j in sets[k].len() {
+                if !satisfies_interface(&mut c, bound, sets[k][j]) {
+                    return (0, u64[]);
+                }
+            }
+        }
+    }
+    return (1, map);
+}
+// The inherent method `name` that a written-type impl gives a receiver of type `ty`, or 0. An impl
+// whose owner is written concretely (`impl u64[]`) wins over a generic one (`impl<T> T[]`); two
+// impls that both define the name for the receiver are ambiguous, as two interfaces would be.
+fn inherent_method_for<a, b>(c: (&a mut C), ty: u64, name: &b [u8]) -> u64 {
+    mut exact = 0;
+    mut generic = 0;
+    for i in c.inherent_types.len() {
+        key := inherent_type_base() + i + 1;
+        found := inherent_bindings(&mut c, key, ty);
+        if found.0 == 0 {
+            continue;
+        }
+        owner := inherent_type_module(key);
+        m := find_func(&mut c, view(owner), view(name));
+        if m == 0 {
+            continue;
+        }
+        record := impl_record(&mut c, key);
+        mut params = 0;
+        if record != 0 {
+            params = c.impl_params[record - 1].tnames.len();
+        }
+        if params == 0 {
+            if exact != 0 {
+                ambiguous_inherent_fail(&mut c, ty, view(name));
+            }
+            exact = m;
+        } else {
+            if generic != 0 {
+                ambiguous_inherent_fail(&mut c, ty, view(name));
+            }
+            generic = m;
+        }
+    }
+    if exact != 0 {
+        return exact;
+    }
+    return generic;
+}
+fn ambiguous_inherent_fail<a, b>(c: (&a mut C), ty: u64, name: &b [u8]) -> unit {
+    mut msg = copy_bytes(view("ambiguous method: two inherent impls define `"));
+    push_bytes(&mut msg, view(name));
+    push_bytes(&mut msg, view("` for `"));
+    push_bytes(&mut msg, view(source_type_name(&mut c, ty)));
+    push_bytes(&mut msg, view("`; keep one, or rename one of them"));
+    fail(&mut c, view(msg));
+    return ();
+}
+// Register (signature pass) or find (later passes) a written-type impl's record. The later passes
+// re-parse the same header, so the key is looked up by the type: every pass must name the same
+// module `.inherent_<key-1>`, and pick the same type arguments when a method is called.
+fn inherent_type_key<a>(c: (&a mut C), ty: u64, pass: u64) -> u64 {
+    k := ty_kind(&mut c, ty);
+    // A scalar (`u64`, `u32`, `bool`, `char`, `f64`), a string, a byte vector, a vector of any
+    // element, the byte view `[u8]`, and the slice `[T]`.
+    if !(
+        (k == 0)
+            || (k == 3)
+            || (k == 4)
+            || (k == 5)
+            || (k == 6)
+            || (k == 18)
+            || (k == 19)
+            || (k == 21)
+            || (k == 22)
+            || (k == 27)
+    ) {
+        fail(
+            &mut c,
+            view(
+                "an inherent impl's type must be a scalar, a string, a vector, a slice or a type this module declares; a reference, a `dyn` interface and a bare type parameter have no inherent methods"
+            )
+        );
+    }
+    // One key per impl header: two blocks that spell the same owner type and the same parameters
+    // are one impl (Rust merges them), so their methods share a module and a duplicate name is the
+    // existing conflict. `impl<T> T[]` and `impl<T: Ord> T[]` are two headers - the second only
+    // serves receivers whose element satisfies the bound - so they keep two keys.
+    for i in c.inherent_types.len() {
+        key := inherent_type_base() + i + 1;
+        if inherent_same_header(&mut c, key, ty) {
+            return key;
+        }
+    }
+    if pass == 2 {
+        key := inherent_type_base() + c.inherent_types.len() + 1;
+        c.inherent_types.push(ty);
+        c
+            .impl_params
+            .push(
+                ImplParams {
+                    decl: key,
+                    rnames: copy_names(&c.rnames),
+                    tnames: copy_names(&c.tnames),
+                    bounds: copy_numbers(&c.type_bounds),
+                    interfaces: copy_constraints(&c.type_interfaces),
+                    self_ty: ty,
+                }
+            );
+        return key;
+    }
+    fail(&mut c, view("an inherent impl for this type was not registered"));
+    return 0;
+}
 fn impl_has_for<a>(c: (&a mut C)) -> bool {
     mut i = c.pos;
     while (kind_at(&mut c, i) != 123) & (kind_at(&mut c, i) != 0) {
@@ -16143,14 +16617,12 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
     impl_file := c.file;
     impl_pos := c.pos;
     expect(&mut c, view("impl"));
-    // `impl Type { fn ... }`: methods and associated functions of a nominal type in this module.
-    if ((kind(&mut c) == 1) & (next_kind(&mut c) == 123))
-        || (is(&mut c, view("<")) & !impl_has_for(&mut c))
-        || (
-            (kind(&mut c) == 1)
-                & (next_kind(&mut c) == 60)
-                & !impl_has_for(&mut c)
-        ) {
+    // `impl Type { fn ... }`: an inherent impl, whose methods and associated functions are the
+    // type's own. `impl Type { ... }` has no `for`, and that is the whole difference from the
+    // interface implementation below (impl_has_for). The owner is either a type this module
+    // declares - `impl<T> Stack<T>` - or a written type no module declares, `impl<T> T[]` and
+    // `impl [u8]`, which is what inherent_type_key records.
+    if !impl_has_for(&mut c) {
         if pass == 1 {
             while !is(&mut c, view("{")) {
                 advance(&mut c);
@@ -16167,40 +16639,44 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
             lifetime_parameters(&mut c);
         }
         module := module_copy(&mut c);
-        name := tok_text(&mut c, c.pos);
-        d := find_decl(&mut c, view(module), view(name));
-        if d == 0 {
-            fail(&mut c, view("impl needs a struct or enum declared in this module"));
-        }
-        ty := parse_type(&mut c);
-        if (ty_kind(&mut c, ty) != 8) || (ty_arg(&mut c, ty) != d - 1) {
-            fail(&mut c, view("impl needs a struct or enum declared in this module"));
-        }
-        args := type_args(&mut c, ty);
-        if args.len() != c.tnames.len() {
-            fail(&mut c, view("impl type arguments must be its own parameters, in order"));
-        }
-        for i in args.len() {
-            a := args[i];
-            if (ty_kind(&mut c, a) != 9) || (ty_arg(&mut c, a) != i) {
+        ty := parse_inherent_owner(&mut c);
+        mut owner = 0;
+        if ty_kind(&mut c, ty) == 8 {
+            // A declared type: the owner is the declaration, and its arguments must be this impl's
+            // own parameters, in order.
+            owner = ty_arg(&mut c, ty) + 1;
+            home := c.decls[owner - 1].module.copy();
+            if !same(view(home), view(module)) {
+                fail(&mut c, view("inherent impl needs a type of the same module"));
+            }
+            args := type_args(&mut c, ty);
+            if args.len() != c.tnames.len() {
                 fail(&mut c, view("impl type arguments must be its own parameters, in order"));
             }
+            for i in args.len() {
+                a := args[i];
+                if (ty_kind(&mut c, a) != 9) || (ty_arg(&mut c, a) != i) {
+                    fail(&mut c, view("impl type arguments must be its own parameters, in order"));
+                }
+            }
+            if pass == 2 {
+                c
+                    .impl_params
+                    .push(
+                        ImplParams {
+                            decl: owner,
+                            rnames: copy_names(&c.rnames),
+                            tnames: copy_names(&c.tnames),
+                            bounds: copy_numbers(&c.type_bounds),
+                            interfaces: copy_constraints(&c.type_interfaces),
+                            self_ty: ty,
+                        }
+                    );
+            }
+        } else {
+            owner = inherent_type_key(&mut c, ty, pass);
         }
-        if pass == 2 {
-            c
-                .impl_params
-                .push(
-                    ImplParams {
-                        decl: d,
-                        rnames: copy_names(&c.rnames),
-                        tnames: copy_names(&c.tnames),
-                        bounds: copy_numbers(&c.type_bounds),
-                        interfaces: copy_constraints(&c.type_interfaces),
-                        self_ty: ty,
-                    }
-                );
-        }
-        exchange(&mut c.inherent, d);
+        exchange(&mut c.inherent, owner);
         exchange(&mut c.self_type, ty);
         expect(&mut c, view("{"));
         while !eat(&mut c, view("}")) {
@@ -21468,6 +21944,35 @@ fn coerce_view<a>(c: (&a mut C), v: Val, formal: u64) -> Val {
     }
     return v;
 }
+// Whether a value is byte text: a byte vector, a string, a borrowed byte sequence or a view. These
+// are the receivers an `impl [u8]` serves, since a view of them is what such a method reads.
+fn byte_sequence_value<a>(c: (&a mut C), ty: u64) -> bool {
+    mut k = ty_kind(&mut c, ty);
+    if k == 7 {
+        k = ty_kind(&mut c, ty_arg(&mut c, ty));
+    }
+    return (k == 2) || (k == 3) || (k == 4);
+}
+fn view_type_of<a>(c: (&a mut C)) -> u64 {
+    return intern_full(&mut c, 5, 0, 0, u64[]);
+}
+// A byte view handed to a `&[u8]` method receiver is reborrowed for the call: the same storage and
+// length as a fresh value whose loan is the one the receiver already holds, so the binding is still
+// usable afterwards. `rt_vslice` over the whole view is that reborrow.
+fn reborrow_view<a>(c: (&a mut C), v: Val, formal: u64) -> Val {
+    mode := ty_mode(&mut c, formal);
+    length := apply(&mut c, view("rt_len"), one(v.t));
+    mut args = u64[];
+    args.push(v.t);
+    args.push(imm(&mut c, 0));
+    args.push(length);
+    args.push(imm(&mut c, 1));
+    slot := invoke(&mut c, view("rt_vslice"), args);
+    vty := intern_full(&mut c, 5, 0, mode, u64[]);
+    own(&mut c, slot, vty);
+    view_bonds(&mut c, slot, v.t, mode, false);
+    return val(slot, vty);
+}
 // A field's type as Grail code sees it: an inline C array `[T; N]` is the vector `T[]` it is copied
 // to and from.
 fn surface_field_ty<a>(c: (&a mut C), d: u64, k: u64) -> u64 {
@@ -21864,7 +22369,14 @@ fn replay_function<a>(c: (&a mut C), template: u64) -> unit {
     home := f.home.copy();
     owner := f.owner;
     mut generic_impl = 0;
-    if owner >= generic_impl_key(0) {
+    if inherent_is_type_key(owner) {
+        // A method of a written-type inherent impl (`impl<T> T[]`): its body is written in the
+        // impl's own module, and its `Self` is the impl's type with this instantiation's arguments.
+        module = home;
+        exchange(&mut c.inherent, owner);
+        st := impl_self(&mut c, owner);
+        exchange(&mut c.self_type, st);
+    } else if owner >= generic_impl_key(0) {
         // A method of a generic interface implementation: its home module, and the implementation
         // it belongs to (so its own parameters are prepended again).
         generic_impl = owner - generic_impl_key(0);
@@ -29561,6 +30073,20 @@ fn method_receiver<a>(c: (&a mut C), input: u64, inty: u64, xty: u64, formal: u6
         if ty_kind(&mut c, inty) == 7 {
             fail(&mut c, view("method takes self by value but the receiver is a reference"));
         }
+        // A slice receiver carries its writability in its type: a `&mut [T]` self cannot be
+        // satisfied by a readable slice of the same elements, and a `&[T]` self is not something a
+        // `&mut [T]` passes as - the two differ in mode and nothing here converts one to the other.
+        fk := ty_kind(&mut c, formal);
+        if ((fk == 27) || (fk == 5)) & (fk == ty_kind(&mut c, inty)) {
+            fm := ty_mode(&mut c, formal);
+            im := ty_mode(&mut c, inty);
+            if (fm != 0) & (im == 0) {
+                fail(&mut c, view("method needs a mutable receiver but got a shared reference"));
+            }
+            if (fm == 0) & (im != 0) {
+                fail(&mut c, view("method takes a shared receiver but got a mutable reference"));
+            }
+        }
     }
     return val(rv, rty);
 }
@@ -30382,6 +30908,66 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
                 fail(&mut c, view("associated function called as a method (use Interface::name)"));
             }
             prepared := method_receiver(&mut c, input, inty, xty, c.params[first]);
+            rv := prepared.t;
+            rty := prepared.ty;
+            exchange(&mut c.receiver, rv);
+            exchange(&mut c.receiver_ty, rty);
+            exchange(&mut c.has_receiver, 1);
+            return call(&mut c, view(owner), view(name));
+        }
+    }
+    // A method an inherent impl gives a *written* type: `impl<T> T[] { ... }`, `impl [u8] { ... }`,
+    // `impl string { ... }`. It resolves before any interface method of the same name (Rust's
+    // order), and before the builtin collection methods below - which an impl may not redefine at
+    // all (protocol_method_name). A declared type's own methods were looked up above (k == 8).
+    if k != 8 {
+        mut method = inherent_method_for(&mut c, xty, view(name));
+        // A byte vector or a string is byte text: when no impl names it as it stands, the impls of
+        // `[u8]` are the ones it is asking for, and the receiver is viewed for the call below.
+        if (method == 0) & byte_sequence_value(&mut c, inty) {
+            method = inherent_method_for(&mut c, view_type_of(&mut c), view(name));
+        }
+        if method != 0 {
+            owner := c.funcs[method - 1].module.copy();
+            first := c.funcs[method - 1].first;
+            count := c.funcs[method - 1].count;
+            types := c.funcs[method - 1].types;
+            if count == 0 {
+                fail(
+                    &mut c,
+                    view("associated function called as a method (an inherent associated function is called on a value)")
+                );
+            }
+            formal := c.params[first];
+            if (types == 0) && (ty_kind(&mut c, formal) == 7) && (ty_mode(&mut c, formal) == 1) && receiver_read_by_args(&mut c, dot_at) {
+                exchange(&mut c.lazy_input, input);
+                exchange(&mut c.lazy_inty, inty);
+                exchange(&mut c.lazy_xty, xty);
+                exchange(&mut c.has_receiver, 3);
+                return call(&mut c, view(owner), view(name));
+            }
+            // A byte vector or a string handed to a `&[u8]` receiver is viewed for the call,
+            // exactly as an argument of that type is (coerce_view): `bytes.trim()` is
+            // `trim(view(bytes))`, and `&bytes.trim()` already is a view.
+            mut rinput = input;
+            mut rinty = inty;
+            mut rxty = xty;
+            if ty_kind(&mut c, formal) == 5 {
+                mut viewed = val(input, inty);
+                if ty_kind(&mut c, inty) == 5 {
+                    // The receiver is itself a view: reborrow the loan for the call, so one binding
+                    // stays usable across calls (`text.is_utf8()` then `text.find(...)`).
+                    viewed = reborrow_view(&mut c, viewed, formal);
+                } else {
+                    viewed = coerce_view(&mut c, viewed, formal);
+                }
+                if ty_kind(&mut c, viewed.ty) == 5 {
+                    rinput = viewed.t;
+                    rinty = viewed.ty;
+                    rxty = viewed.ty;
+                }
+            }
+            prepared := method_receiver(&mut c, rinput, rinty, rxty, formal);
             rv := prepared.t;
             rty := prepared.ty;
             exchange(&mut c.receiver, rv);
@@ -34566,7 +35152,7 @@ fn mutating_method_name<a>(c: (&a mut C), name: &a [u8], elem: u64) -> u64 {
     // A user method of the element's own type whose receiver is `self: &mut ...`.
     for i in c.funcs.len() {
         f := &c.funcs[i];
-        if (f.owner != 0) & (f.count != 0) & same(view(f.name), view(name)) {
+        if (f.owner != 0) & !inherent_is_type_key(f.owner) & (f.owner < generic_impl_key(0)) & (f.count != 0) & same(view(f.name), view(name)) {
             first := f.first;
             owner := f.owner;
             pty := c.params[first];
@@ -38458,7 +39044,7 @@ pub fn iface_digest<a>(data: &a [u8]) -> u8[] {
 // compiler reads is refused by length. Neither can be misread as something else, which is what makes
 // adding a field a version bump and not a silent reinterpretation. `grail iface dump` renders the
 // tree the reader read, so the format stays inspectable without a second parser.
-const IFACE_VERSION: u64 = 4;
+const IFACE_VERSION: u64 = 5;
 const IFACE_TAG_MODULE: u64 = 1;
 const IFACE_TAG_TRAILER: u64 = 2;
 const IFACE_TAG_LINK: u64 = 3;
@@ -38470,6 +39056,8 @@ const IFACE_TAG_INHERENT: u64 = 14;
 const IFACE_TAG_IFACE: u64 = 15;
 const IFACE_TAG_IMPL: u64 = 16;
 const IFACE_TAG_ENV: u64 = 17;
+// A written type's inherent methods (`impl<T> T[] { .. }`): the owner is a type, not a declaration.
+const IFACE_TAG_INHERENT_TYPE: u64 = 18;
 
 // The `dyn` ABI this compiler builds objects for (docs/design/fat-dyn.md), as the one line every
 // interface carries. A `&dyn I` is an 8-byte pointer to a 16-byte, 8-aligned `{data, vtable}` pair,
@@ -38627,6 +39215,9 @@ fn iface_tag_name(tag: u64) -> string {
     if tag == IFACE_TAG_INHERENT {
         return "inherent";
     }
+    if tag == IFACE_TAG_INHERENT_TYPE {
+        return "inherent_type";
+    }
     if tag == IFACE_TAG_IFACE {
         return "interface";
     }
@@ -38642,7 +39233,7 @@ fn iface_known_tag(tag: u64) -> bool {
     return (tag == IFACE_TAG_MODULE) || (tag == IFACE_TAG_TRAILER) || (tag == IFACE_TAG_LINK)
         || (tag == IFACE_TAG_TYPE) || (tag == IFACE_TAG_ALIAS) || (tag == IFACE_TAG_CONST)
         || (tag == IFACE_TAG_FN) || (tag == IFACE_TAG_INHERENT) || (tag == IFACE_TAG_IFACE)
-        || (tag == IFACE_TAG_IMPL) || (tag == IFACE_TAG_ENV);
+        || (tag == IFACE_TAG_IMPL) || (tag == IFACE_TAG_ENV) || (tag == IFACE_TAG_INHERENT_TYPE);
 }
 // Where a refusal happened, so no diagnostic says only "malformed".
 fn iface_where<a>(p: (&a IR)) -> u8[] {
@@ -39856,6 +40447,72 @@ fn iface_items<a>(c: (&a mut C), m: &a [u8]) -> IItem[] {
             );
         }
     }
+    // Inherent methods on a *written* type (`impl u8[] { ... }`, `impl<T> T[] { ... }`): the owner
+    // has no declaration to name, so the section spells the type structurally and the reader
+    // registers it under the type it spells. The module that wrote the impl is the one whose
+    // interface carries it.
+    mut written = u64[];
+    mut spelled = u8[][];
+    for i in c.inherent_types.len() {
+        key := inherent_type_base() + i + 1;
+        methods := iface_func_ids(&mut c, view(inherent_type_module(key)));
+        if methods.len() == 0 {
+            continue;
+        }
+        if !same(view(c.funcs[methods[0]].home), view(m)) {
+            continue;
+        }
+        mut spell_deps = u64[];
+        mut owner_bytes = u8[];
+        iface_w_type(&mut c, &mut owner_bytes, &mut spell_deps, c.inherent_types[i]);
+        written.push(key);
+        spelled.push(owner_bytes);
+    }
+    worder := iface_sorted(&spelled);
+    for i in worder.len() {
+        key := written[worder[i]];
+        owner_module := inherent_type_module(key);
+        methods := iface_func_ids(&mut c, view(owner_module));
+        mut deps = u64[];
+        mut body = u8[];
+        iface_w_type(&mut c, &mut body, &mut deps, c.inherent_types[key - inherent_type_base() - 1]);
+        iface_enc_impl_params(&mut c, &mut body, &mut deps, key);
+        n := items.len();
+        items.push(
+            IItem {
+                tag: IFACE_TAG_INHERENT_TYPE,
+                index: key,
+                name: spelled[worder[i]].copy(),
+                public: 0,
+                owner: key,
+                parent: 0,
+                payload: body,
+                deps: deps,
+                text: u8[]
+            }
+        );
+        mnames := iface_names_of_funcs(&mut c, &methods);
+        morder := iface_sorted(&mnames);
+        for j in morder.len() {
+            method := methods[morder[j]];
+            mut mdeps = u64[];
+            mut mtext = u8[];
+            payload := iface_enc_fn(&mut c, method, &mut mdeps, &mut mtext);
+            items.push(
+                IItem {
+                    tag: IFACE_TAG_FN,
+                    index: method,
+                    name: mnames[morder[j]].copy(),
+                    public: c.funcs[method].public,
+                    owner: key,
+                    parent: n + 1,
+                    payload: payload,
+                    deps: mdeps,
+                    text: mtext
+                }
+            );
+        }
+    }
     // Interface declarations and their methods.
     mut ifaces = u64[];
     mut iface_names = u8[][];
@@ -40072,7 +40729,7 @@ fn iface_keep<a>(items: (&a IItem[])) -> u64[] {
         }
     }
     for k in n {
-        if (items[k].parent == 0) & (items[k].tag == IFACE_TAG_INHERENT) {
+        if (items[k].parent == 0) & ((items[k].tag == IFACE_TAG_INHERENT) || (items[k].tag == IFACE_TAG_INHERENT_TYPE)) {
             mut any = 0;
             for j in n {
                 if (items[j].parent == k + 1) & (keep[j] != 0) {
@@ -40096,7 +40753,7 @@ fn iface_vlen(n: u64) -> u64 {
     return bytes;
 }
 fn iface_is_section(tag: u64) -> bool {
-    return (tag == IFACE_TAG_INHERENT) || (tag == IFACE_TAG_IFACE) || (tag == IFACE_TAG_IMPL);
+    return (tag == IFACE_TAG_INHERENT) || (tag == IFACE_TAG_IFACE) || (tag == IFACE_TAG_IMPL) || (tag == IFACE_TAG_INHERENT_TYPE);
 }
 // The bytes of one module's interface. One writer, driven by the declaration store: the header, then
 // one length-counted record per declaration of the public surface, then the trailer that carries the
@@ -40985,6 +41642,51 @@ fn iface_rec_inherent<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], source_in
     }
     return ();
 }
+// A written type's inherent section: the owner type, the impl's own parameters, then its methods.
+// The owner is registered under the type the section spells (`iface_written_owner`), which is the
+// key the source parse gives the same header, so a method read from here and one compiled from the
+// source are found by one lookup. A written section always has an impl record, whatever its
+// parameter count: the record is where `impl_self` finds the owner type.
+fn iface_rec_inherent_type<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], source_index: u64, raw_flag: u64) -> unit {
+    if p.phase == 0 {
+        iface_rt_indent(&mut p, view(""));
+        push_bytes(&mut p.rtext, view("inherent_type"));
+    }
+    owner_ty := iface_r_type(&mut p, &mut c);
+    mut key = 0;
+    mut filed = u8[];
+    if p.phase == 2 {
+        key = iface_written_owner(&mut c, owner_ty);
+        filed = inherent_type_module(key);
+    }
+    record := iface_r_impl_params(&mut c, &mut p, key, key);
+    if p.phase == 2 {
+        if record != 0 {
+            exchange(&mut c.impl_params[record - 1].self_ty, owner_ty);
+        } else {
+            c
+                .impl_params
+                .push(
+                    ImplParams {
+                        decl: key,
+                        rnames: u8[][],
+                        tnames: u8[][],
+                        bounds: u64[],
+                        interfaces: u64[][],
+                        self_ty: owner_ty
+                    }
+                );
+        }
+    }
+    n := iface_rv(&mut p);
+    for i in n {
+        saved := p.stop;
+        iface_rec(&mut p, IFACE_TAG_FN);
+        iface_rec_fn(&mut c, &mut p, view(home), view(filed), view("  "), source_index, raw_flag, 1, 0, key, 0);
+        p.stop = saved;
+    }
+    return ();
+}
 fn iface_rec_iface<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], source_index: u64, raw_flag: u64) -> unit {
     module := iface_rs(&mut p);
     name := iface_rs(&mut p);
@@ -41148,6 +41850,18 @@ fn iface_rec_impl<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], source_index:
     }
     return ();
 }
+// Register the owner type an `inherent (vec ...)` section names. One key per owner type, the same
+// keying the source parse uses, so the methods land in the private module whose digest-named symbol
+// the emitting object defines.
+fn iface_written_owner<a>(c: (&a mut C), ty: u64) -> u64 {
+    for i in c.inherent_types.len() {
+        if same_type(&mut c, c.inherent_types[i], ty) != 0 {
+            return inherent_type_base() + i + 1;
+        }
+    }
+    c.inherent_types.push(ty);
+    return inherent_type_base() + c.inherent_types.len();
+}
 fn iface_rec_env<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8]) -> unit {
     local := iface_rs(&mut p);
     if p.phase == 0 {
@@ -41271,6 +41985,8 @@ fn iface_walk<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], source_index: u64
             iface_rec_fn(&mut c, &mut p, view(home), view(home), view(""), source_index, raw_flag, 0, 0, 0, 0);
         } else if tag == IFACE_TAG_INHERENT {
             iface_rec_inherent(&mut c, &mut p, view(home), source_index, raw_flag);
+        } else if tag == IFACE_TAG_INHERENT_TYPE {
+            iface_rec_inherent_type(&mut c, &mut p, view(home), source_index, raw_flag);
         } else if tag == IFACE_TAG_IFACE {
             iface_rec_iface(&mut c, &mut p, view(home), source_index, raw_flag);
         } else if tag == IFACE_TAG_IMPL {
@@ -42189,14 +42905,6 @@ fn iface_func_ids<a, b>(c: (&a mut C), m: &b [u8]) -> u64[] {
     return ids;
 }
 
-fn iface_sort_ids<a, b>(names: (&a u8[][]), ids: (&b u64[])) -> u64[] {
-    order := iface_sorted(&names);
-    mut out = u64[];
-    for i in order.len() {
-        out.push(ids[order[i]]);
-    }
-    return out;
-}
 
 fn iface_names_of_decls<a, b>(c: (&a mut C), ids: (&b u64[])) -> u8[][] {
     mut names = u8[][];
@@ -42793,6 +43501,7 @@ pub fn main() -> u64 {
         hint_ret: NO_TYPE,
         hint_set: 0,
         inherent: 0,
+        inherent_types: u64[],
         constants: Constant[],
         impl_params: ImplParams[],
         receiver: 0,
