@@ -488,6 +488,12 @@ struct C {
     aliases: Alias[],
     imports: Import[],
     fields: Field[],
+    // The file whose tokens and text are in `toks`/`src` (index + 1; 0 for none), and the files
+    // loaded before it (see load_file).
+    file_loaded: u64,
+    file_cache_index: u64[],
+    file_cache_src: u8[][],
+    file_cache_toks: Tok[][],
     funcs: Func[],
     // The (module, name) index of `funcs` and of `decls` (see name_key).
     func_slots: u64[],
@@ -8829,6 +8835,46 @@ fn fail_literal<a>(c: (&a mut C), at: u64, kind: u64) -> unit {
 fn load_file<a>(c: (&a mut C), index: u64) -> unit {
     // A generic body an interface carried is a file like any other from here on: it has its own
     // token stream and its own diagnostics, it just did not come from the command line.
+    // The file that is loaded stays loaded, and a file that was loaded before comes back from the
+    // cache: a specialisation is replayed in its template's file, and reading and tokenising that
+    // file again for every one of them was most of a generic-heavy build
+    // (docs/design/compile-speed.md).
+    if c.file_loaded == index + 1 {
+        load_file_reset(&mut c);
+        return ();
+    }
+    if c.file_loaded != 0 {
+        parked := c.file_loaded - 1;
+        mut slot = c.file_cache_index.len();
+        for i in c.file_cache_index.len() {
+            if c.file_cache_index[i] == parked {
+                slot = i;
+                break;
+            }
+        }
+        if slot == c.file_cache_index.len() {
+            c.file_cache_index.push(parked);
+            c.file_cache_src.push(u8[]);
+            c.file_cache_toks.push(Tok[]);
+        }
+        old_toks := exchange(&mut c.toks, Tok[]);
+        old_src := exchange(&mut c.src, u8[]);
+        exchange(&mut c.file_cache_toks[slot], old_toks);
+        exchange(&mut c.file_cache_src[slot], old_src);
+        exchange(&mut c.file_loaded, 0);
+    }
+    for i in c.file_cache_index.len() {
+        if c.file_cache_index[i] == index {
+            // The entry stays in the list, empty, until this file is parked again.
+            back_toks := exchange(&mut c.file_cache_toks[i], Tok[]);
+            back_src := exchange(&mut c.file_cache_src[i], u8[]);
+            exchange(&mut c.toks, back_toks);
+            exchange(&mut c.src, back_src);
+            exchange(&mut c.file_loaded, index + 1);
+            load_file_reset(&mut c);
+            return ();
+        }
+    }
     mut path = u8[];
     mut src = u8[];
     if 1000000 <= index {
@@ -8869,8 +8915,14 @@ fn load_file<a>(c: (&a mut C), index: u64) -> unit {
             fail(&mut c, view("unexpected character"));
         }
     }
-    // Token positions are indices into this file: a call-flex hint record or a `None` span from
-    // another file is stale.
+    exchange(&mut c.file_loaded, index + 1);
+    load_file_reset(&mut c);
+    return ();
+}
+// What every load resets, fresh or from the cache. Token positions are indices into this file: a
+// call-flex hint record or a `None` span from another file is stale.
+fn load_file_reset<a>(c: (&a mut C)) -> unit {
+    exchange(&mut c.pos, 0);
     exchange(&mut c.cf_start, 0);
     exchange(&mut c.cf_end, 0);
     exchange(&mut c.cf_local, 0);
@@ -42148,6 +42200,10 @@ pub fn main() -> u64 {
         aliases: Alias[],
         imports: Import[],
         fields: Field[],
+        file_loaded: 0,
+        file_cache_index: u64[],
+        file_cache_src: u8[][],
+        file_cache_toks: Tok[][],
         funcs: Func[],
         func_slots: u64[],
         func_keys: u64[],
