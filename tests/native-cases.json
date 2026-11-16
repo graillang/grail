@@ -2457,6 +2457,33 @@
     "stdout": "1 3 3 5 7 9 \napple fig pear äpfel \nBob:25 Di:25 Ann:40 Cy:40 \n-1 0.5 2.5 NaN \n5\nsorted\n"
   },
   {
+    "name": "inherent-mut-method-on-indexed-field",
+    "note": "A `&mut self` method of a written-type impl (`impl<T: order::Ord> T[]`), called on a field of a vector element reached through a `&mut` parameter, borrows the element mutably: the receiver's type is followed along the field path. It was refused as a write through a shared borrow.",
+    "source": "use vecs;\nstruct G { depth: u64, deps: u64[] }\nstruct B { groups: G[] }\nfn f<a>(b: (&a mut B), i: u64) -> u64 {\n    g := &b.groups[i];\n    d := g.depth;\n    b.groups[i].deps.insert_sorted(3);\n    b.groups[i].deps.insert_sorted(1);\n    b.groups[i].deps.insert_sorted(3);\n    return d;\n}\nfn main() {\n    mut b = B { groups: G[G { depth: 7, deps: u64[] }] };\n    println(f(&mut b, 0));\n    println(\"{}\", b.groups[0].deps);\n}\n",
+    "modules": [
+      "lib/vecs.grl",
+      "lib/order.grl",
+      "lib/hash.grl",
+      "lib/iter.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "7\n[1, 3]\n"
+  },
+  {
+    "name": "inherent-mut-method-on-indexed-field-reborrowed-in-argument",
+    "note": "The element stays exclusively borrowed while the arguments are evaluated: reading the same receiver inside them is refused.",
+    "source": "use vecs;\nstruct G { deps: u64[] }\nstruct B { groups: G[] }\nfn f<a>(b: (&a mut B), i: u64) {\n    b.groups[i].deps.insert_sorted(b.groups[i].deps.len());\n}\nfn main() {\n    mut b = B { groups: G[G { deps: u64[] }] };\n    f(&mut b, 0);\n}\n",
+    "modules": [
+      "lib/vecs.grl",
+      "lib/order.grl",
+      "lib/hash.grl",
+      "lib/iter.grl",
+      "lib/core.grl"
+    ],
+    "reject": true,
+    "diagnostic": "conflicts with active borrow"
+  },
+  {
     "name": "sort-needs-ord",
     "source": "use vecs;struct P{x:u64}fn main(){mut v=P[P{x:1}];v.sort();}",
     "modules": [

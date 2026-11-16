@@ -1,5 +1,10 @@
 ## Unreleased
 
+- Fixed: a `&mut self` method of a written-type impl (`v[i].deps.insert_sorted(x)`, from
+  `impl<T: order::Ord> T[]`) called on a field of a vector element was refused as "mutation through
+  readonly frame": the check that borrows an indexed element mutably looked only at methods of the
+  element's own struct, never at the type the field path reaches or at written-type impls.
+
 - Removed: `iter::from_step`, an exact copy of `iter::from_fn`. Write `iter::from_fn(step)`.
 
 - Removed: **the free-function forms of the `strings`, `vecs` and `iter` methods.** Each was one line
