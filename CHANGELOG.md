@@ -8,7 +8,8 @@
   `--debug` or `--split`, rather than quietly built native. Runtime failures print their message
   without the `--> file:line` location in a release build (the location table is a native-backend
   artefact for now). The LLVM backend's `memcpy`/`memset`/`memmove` are weak, so several modules can
-  each carry them.
+  each carry them, and so are the lifted bodies of `.weak` functions (generic specialisations,
+  drop helpers), which every module that instantiates them defines.
 
 - **LLVM backend: loops over slices vectorise.** A slice's descriptor (`&[T]`, `&mut [T]`) cannot
   change while the slice lives, so the front end says so (F1 kind 5) and the lifter reads its

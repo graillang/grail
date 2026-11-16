@@ -5895,6 +5895,25 @@ fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (
             fname := sub(line, 20, e - 3);
             thunk_into_ir(&mut thunks, view(fname), target, set_has(&weak, view(fname)));
         }
+        if starts(line, view("define {i64, i64} @\"")) {
+            // A body the stream declared `.weak` (a generic specialisation, a content-addressed
+            // drop helper) may be defined by every module that instantiates it, so its lifted body
+            // is weak too, or a release build of two such modules fails to link.
+            mut e = 20;
+            while (e < line.len()) && (line[e] != 34) {
+                e += 1;
+            }
+            mut base = sub(line, 20, e);
+            if ends(view(base), view(".ll")) {
+                base = sub(view(base), 0, base.len() - 3);
+            }
+            if set_has(&weak, view(base)) {
+                put(&mut ir, view("define weak "));
+                put(&mut ir, view(rename_line(view(sub(line, 7, line.len())), &exported)));
+                ir.push(10);
+                continue;
+            }
+        }
         put(&mut ir, view(rename_line(line, &exported)));
         ir.push(10);
     }
