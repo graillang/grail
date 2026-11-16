@@ -85,6 +85,20 @@ The test for moving something from "not doing" to "doing" is evidence, not argum
 places in the compiler, the standard library or a ported application that want it badly enough to have
 worked around it.
 
+## 2.1a A method cannot be added to one instantiation
+
+`impl Iter<u64> { .. }` — adding a method to a *concrete instantiation* of a declared generic type — is
+refused by the impl grammar, which accepts a declaration (`impl Map<K, V>`) or a written builtin type
+(`impl u8[]`, `impl<T> T[]`) but not a partially-applied one. The practical cost is small and specific:
+`sum`/`min`/`max` over an `Iter<u64>` cannot be added as methods, so the call is
+`.collect().sum()`. The workaround is honest and the reason is written where it is needed
+(`lib/iter.grl`).
+
+Recorded rather than fixed because the fix is a general one - allow `impl` on any type spelling the
+type system can intern - and that is a design decision with its own round, not a side effect of adding
+adapters. Moving it to "doing" needs evidence like everything else: three or more places that wanted a
+method on one instantiation badly enough to have worked around it.
+
 ## 2.2 Second pass: what already works, and the two gaps it found
 
 Probed the same way, because a list of gaps that omits what works reads as if the language were
