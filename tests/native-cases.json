@@ -11874,5 +11874,19 @@
     "interfaces": true,
     "stdout": "43\n7\n",
     "note": "the bounds of a closure type and `Owned` on a type parameter travel in the interface row: the importer's calls are checked against `bounds_lib.iface` alone"
+  },
+  {
+    "name": "pool-join-first-captures-ref-to-non-share-refused",
+    "source": "use pool;\nhandle H: transferable;\nstruct Holder { h: H, n: u64 }\nfn main() {\n    mut raw: H;\n    holder := Holder { h: raw, n: 4 };\n    r := &holder;\n    pair := pool::join<u64, u64>(|| -> u64 r.n, || -> u64 r.n + 1);\n    println(pair.first + pair.second);\n}\n",
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "reject": true,
+    "diagnostic": "cannot transfer closure capture `r`: r.h is thread-affine (declared transferable, not shareable)",
+    "targets": [
+      "x86_64"
+    ],
+    "note": "pool::join's first branch is Fn<Send> and parallel_with asks Send of it: a `&T` capture still requires T to be Share, which is what makes the concurrent second branch reading the same T sound"
   }
 ]

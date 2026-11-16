@@ -2854,7 +2854,9 @@ fn tls_bss<a>(c: (&a mut C)) -> unit {
     if tls_bridge(&mut c) {
         tls_thread_stubs(&mut c);
     }
-    o(&mut c, view(".bss\n.p2align 3\nrt_state: .zero 4096\n"));
+    // 16-aligned: runtime code keeps 16-byte-aligned blocks in process state (a waiter block's address
+    // shares its queue word with four flag bits, rt_main_waiter), and 8 left that a trap.
+    o(&mut c, view(".bss\n.p2align 4\nrt_state: .zero 4096\n"));
     if tls_bridge(&mut c) {
         o(&mut c, view(".section .tbss,\"awT\",@nobits\n.p2align 3\nrt_tls_record: .zero 8\n"));
     }
@@ -45134,7 +45136,7 @@ pub fn main() -> u64 {
         o(
             &mut c,
             view(
-                "ud2\nrt_win_thread_start:\nsubq $56,%rsp\nmovq %rdi,32(%rsp)\nmovq %rsi,40(%rsp)\nmovq %rcx,%rdi\ncall rt_win_thread_main\nmovq 32(%rsp),%rdi\nmovq 40(%rsp),%rsi\naddq $56,%rsp\nret\n.bss\n.p2align 3\nrt_state: .zero 4096\n"
+                "ud2\nrt_win_thread_start:\nsubq $56,%rsp\nmovq %rdi,32(%rsp)\nmovq %rsi,40(%rsp)\nmovq %rcx,%rdi\ncall rt_win_thread_main\nmovq 32(%rsp),%rdi\nmovq 40(%rsp),%rsi\naddq $56,%rsp\nret\n.bss\n.p2align 4\nrt_state: .zero 4096\n"
             )
         );
     } else {
@@ -45145,17 +45147,17 @@ pub fn main() -> u64 {
         o(
             &mut c,
             view(
-                "ud2\nrt_win_thread_start:\npushq %rbp\nmovq %rsp,%rbp\ncall rt_win_thread_main\npopq %rbp\nret\n.bss\n.p2align 3\nrt_state: .zero 4096\n"
+                "ud2\nrt_win_thread_start:\npushq %rbp\nmovq %rsp,%rbp\ncall rt_win_thread_main\npopq %rbp\nret\n.bss\n.p2align 4\nrt_state: .zero 4096\n"
             )
         );
     } else {
     if (c.target == 3) || (c.target == 4) {
-        o(&mut c, view("ud2\n.bss\n.p2align 3\nrt_state: .zero 4096\n"));
+        o(&mut c, view("ud2\n.bss\n.p2align 4\nrt_state: .zero 4096\n"));
     } else {
         if c.plat == 1 {
             o(
                 &mut c,
-                view("ud2\n.section __DATA,__bss\n.p2align 3\n_rt_state:\n.space 4096\n")
+                view("ud2\n.section __DATA,__bss\n.p2align 4\n_rt_state:\n.space 4096\n")
             );
         } else {
             tls_bss(&mut c);
