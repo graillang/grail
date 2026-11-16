@@ -1,7 +1,10 @@
 # Printing your own types
 
-Give a struct or enum a `show` method that returns a `string`, and `println`, `print` and
-`format` use it wherever the value appears.
+A record prints without any help: `println(p)` writes its name and fields in declaration order,
+`Point { x: 3, name: "a" }`, with text in quotes and nested records and vectors inside; a tuple
+prints as `(3, "a")`. That form is for looking at a value. To choose the text - or to print an enum,
+which has no default form - give the type a `show` method that returns a `string`, and `println`,
+`print` and `format` use it wherever the value appears.
 
 {{example:showing}}
 

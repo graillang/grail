@@ -1916,9 +1916,9 @@
   },
   {
     "name": "format-unprintable-value",
-    "source": "struct P{x:u64}fn main(){p:=P{x:1};println(\"{}\", p);}",
+    "source": "enum E{A,B(u64)}fn main(){e:=E::B(1);println(\"{}\", e);}",
     "reject": true,
-    "diagnostic": "print requires"
+    "diagnostic": ["`E` has no text form", "give the type a `show` method"]
   },
   {
     "name": "method-calls-on-fields",
@@ -10772,5 +10772,82 @@
       "native"
     ],
     "note": "without the fact the subtraction keeps its check and @no_panic refuses the function"
+  },
+  {
+    "name": "record-default-text",
+    "source": "struct P { x: u64, name: string }\nstruct Line { from: P, to: P, tags: string[], w: f64, ok: bool }\nstruct Unit {}\nenum E { A, B(u64) }\nfn main() {\n    p := P { x: 1, name: \"a\".text() };\n    println(\"{}\", p);\n    println(p);\n    t := (1, \"x\".text());\n    println(t);\n    l := Line { from: P { x: 0, name: \"o\".text() }, to: p, tags: [\"k\".text()], w: 1.5, ok: true };\n    println(l);\n    s := format(\"<{}>\", l.from);\n    println(s);\n    println(Unit {});\n    println([P { x: 7, name: \"v\".text() }].len());\n}\n",
+    "stdout": "P { x: 1, name: \"a\" }\nP { x: 1, name: \"a\" }\n(1, \"x\")\nLine { from: P { x: 0, name: \"o\" }, to: P { x: 1, name: \"a\" }, tags: [\"k\"], w: 1.5, ok: true }\n<P { x: 0, name: \"o\" }>\nUnit\n1\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a record with no `show` prints its name and fields in declaration order, a tuple prints as it is written, nested records and vectors inside; `format` takes the same form"
+  },
+  {
+    "name": "format-name-in-braces-refused",
+    "source": "fn main() {\n    n := 5;\n    println(\"n is {n} and {}\", n);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "`{n}` is not a placeholder: write `{}` and pass `n` as an argument",
+      "write `{{` and `}}`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "`{n}` in a format string is the Rust habit: the refusal names the placeholder Grail has"
+  },
+  {
+    "name": "print-lone-literal-name-in-braces-refused",
+    "source": "fn main() {\n    n := 5;\n    println(\"{n}\");\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "`{n}` is not a placeholder: write `{}` and pass `n` as an argument"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a lone literal is printed as written, so `println(\"{n}\")` with `n` in scope would print the braces: refused"
+  },
+  {
+    "name": "print-lone-literal-braces-are-text",
+    "source": "fn main() {\n    println(\"{braces} are text here\");\n    s := format(\"{}{{x}}\", 1);\n    println(s);\n}\n",
+    "stdout": "{braces} are text here\n1{x}\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "braces around a word that is no binding in scope are text in a lone literal, and `{{x}}` is `{x}` in a format string"
+  },
+  {
+    "name": "closure-result-inferred-from-expression",
+    "source": "fn main() {\n    g := |x: u64| x * 2;\n    println(g(4) + 1);\n    s := |a: u64| \"v\".text();\n    println(s(1));\n    f := |a: f64| a * 2.0;\n    println(f(1.5));\n    v := u64[1, 2, 3];\n    k := |i: u64| v[i];\n    println(k(1));\n    say := |x: u64| println(x);\n    say(9);\n    b := |x: u64| x > 2;\n    println(b(3));\n    h := |a: u64, b: u64| -> u64 { return a + b; };\n    println(h(1, 2));\n    mut n = 0;\n    mut bump = || { n += 1; };\n    bump();\n}\n",
+    "stdout": "9\nv\n3\n2\n9\ntrue\n3\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "`g := |x: u64| x * 2` has the type of its body as its result (it was `unit`, and the value was dropped); a statement-like body is still `unit`"
+  },
+  {
+    "name": "closure-block-returning-value-needs-type",
+    "source": "fn main() {\n    h := |a: u64, b: u64| { return a + b; };\n    println(h(1, 2));\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "this closure's block returns a value, and nothing says what type its result is",
+      "write the result type before the block"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a block body that returns a value with no `->` and no expected type is refused instead of dropping the value"
   }
 ]

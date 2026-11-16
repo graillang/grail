@@ -1,5 +1,22 @@
 ## Unreleased
 
+- **A record prints.** `println(p)` and `format("{}", p)` on a record with no `show` method write its
+  name and fields in declaration order - `Point { x: 1, name: "a" }` - a tuple prints as it is
+  written (`(1, "x")`), and nested records and vectors print inside. A type with no form (an enum
+  without `show`, an extern record) is refused by name (`` `E` has no text form ``) instead of with
+  a list of the types that do print.
+
+- **`{n}` in a format string is refused by name.** Grail's placeholder is `{}`; `println("n is
+  {n}", n)` used to say "unmatched brace" and `println("{n}")` printed the braces. Both now say
+  `` `{n}` is not a placeholder: write `{}` and pass `n` as an argument ``. Braces around a word that
+  is no binding in scope are still text in a lone literal.
+
+- **A closure's result is its body's type.** `g := |x: u64| x * 2` returned `unit` and dropped the
+  product unless a `->` or an expected type said otherwise; an expression body now gives the
+  closure its result type everywhere. A block body that returns a value with nothing to fix the
+  type (`|a: u64| { return a + 1; }`) is refused with the spelling that works, instead of dropping
+  the value.
+
 - **The prover reads five more everyday shapes.** An argument may be a term plus or minus a
   constant (`get(&v, i + 1)`, `get(&v, i - 1)`, `get(&v, v.len() - 1)`); a comparison may carry its
   constant on the left (`while i + 1 < v.len()`); a field reached through a binding nothing can

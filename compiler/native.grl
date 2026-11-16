@@ -24476,7 +24476,7 @@ fn print_builtin<a>(c: (&a mut C), newline: u64) -> Val {
                 continue;
             }
             if (b == 123) || (b == 125) {
-                fail(&mut c, view("unmatched brace in format string (use {{ or }})"));
+                format_brace_refuse(&mut c, view(text), i);
             }
             piece.push(b);
             i += 1;
@@ -24491,10 +24491,65 @@ fn print_builtin<a>(c: (&a mut C), newline: u64) -> Val {
         }
         return val(imm(&mut c, 0), 1);
     }
+    // `println("{n}")`: a lone literal is printed as it is written, so a name in braces prints the
+    // braces - which is never what was meant when that name is a binding in scope.
+    if (kind(&mut c) == 3) & (next_kind(&mut c) == 41) {
+        lone := decode_literal(&mut c, c.pos);
+        for i in lone.len() {
+            if lone[i] == 123 {
+                inside := brace_name(view(lone), i);
+                if (inside.len() != 0) && (find_local(&mut c, view(inside)) != 0) {
+                    format_name_refuse(&mut c, view(inside));
+                }
+            }
+        }
+    }
     input := expr(&mut c, 0);
     expect(&mut c, view(")"));
     print_value(&mut c, input, newline);
     return val(imm(&mut c, 0), 1);
+}
+// The name inside `{name}` at `at`, or empty when the braces there do not hold exactly a name.
+fn brace_name<a>(text: &a [u8], at: u64) -> u8[] {
+    mut out = u8[];
+    mut i = at + 1;
+    while i < text.len() {
+        b := text[i];
+        if b == 125 {
+            return out;
+        }
+        letter := ((64 < b) && (b < 91)) || ((96 < b) && (b < 123)) || (b == 95);
+        digit := (47 < b) && (b < 58);
+        if !(letter || (digit && (out.len() != 0))) {
+            return u8[];
+        }
+        out.push(b);
+        i += 1;
+    }
+    return u8[];
+}
+// `{n}` where a placeholder was meant: Grail's placeholder is `{}` and takes its value from the
+// argument list.
+fn format_name_refuse<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
+    mut msg = copy_bytes(view("`{"));
+    push_bytes(&mut msg, name);
+    push_bytes(&mut msg, view("}` is not a placeholder: write `{}` and pass `"));
+    push_bytes(&mut msg, name);
+    push_bytes(&mut msg, view("` as an argument"));
+    diag_help(&mut c, view("to print the braces themselves, write `{{` and `}}` in a string that has arguments, or pass the text as one (`println(\"{}\", \"{n}\")`)"));
+    fail(&mut c, view(msg));
+    return ();
+}
+// A brace in a format string that opens no placeholder.
+fn format_brace_refuse<a, b>(c: (&a mut C), text: &b [u8], at: u64) -> unit {
+    if text[at] == 123 {
+        inside := brace_name(text, at);
+        if inside.len() != 0 {
+            format_name_refuse(&mut c, view(inside));
+        }
+    }
+    fail(&mut c, view("unmatched brace in format string (use {{ or }})"));
+    return ();
 }
 // format("x = {}", x) -> string, with the same compile-time placeholder checks as print.
 fn format_builtin<a>(c: (&a mut C)) -> Val {
@@ -24544,7 +24599,7 @@ fn format_builtin<a>(c: (&a mut C)) -> Val {
             continue;
         }
         if (b == 123) || (b == 125) {
-            fail(&mut c, view("unmatched brace in format string (use {{ or }})"));
+            format_brace_refuse(&mut c, view(text), i);
         }
         piece.push(b);
         i += 1;
@@ -24576,6 +24631,98 @@ fn format_raw<a, b>(c: (&a mut C), acc: u64, piece: &b [u8]) -> unit {
     n := imm(&mut c, piece.len());
     invoke(&mut c, view("rt_fmt_raw"), three(acc, ptr, n));
     return ();
+}
+// A value with no text form, named: the refusal used to list the types that print and leave the
+// reader to work out which one this was not.
+fn print_refuse<a>(c: (&a mut C), ty: u64) -> unit {
+    mut msg = copy_bytes(view("`"));
+    push_bytes(&mut msg, view(source_type_name(&mut c, ty)));
+    push_bytes(&mut msg, view("` has no text form"));
+    if ty_kind(&mut c, ty) == 8 {
+        diag_help(&mut c, view("give the type a `show` method (`fn show(self: &T) -> string`); a record whose fields all print gets one by default"));
+    } else {
+        diag_help(&mut c, view("numbers, bool, char, text, byte views, vectors of those and records of those print as they are"));
+    }
+    fail(&mut c, view(msg));
+    return ();
+}
+// The default text of a record that has no `show`: its name and its fields in declaration order,
+// `Point { x: 1, y: 2 }`, and `(1, "a")` for a tuple. Each field is written the way a vector
+// element is (text in quotes, nested vectors and records inside), or through its own `show`. False
+// when the type has no such form - an enum, an extern record, or a field of a type with none - and
+// then the caller's own refusal stands.
+fn record_text<a>(c: (&a mut C), acc: u64, value: u64, ty: u64, depth: u64) -> bool {
+    if (ty_kind(&mut c, ty) != 8) || (depth > 8) {
+        return false;
+    }
+    d := ty_arg(&mut c, ty);
+    if (c.decls[d].is_enum != 0) || (c.decls[d].opaque != 0) || (c.decls[d].c_layout != 0) {
+        return false;
+    }
+    count := c.decls[d].count;
+    first := c.decls[d].first;
+    tuple := same(view(c.decls[d].module), view(".tuple"));
+    // Every field is checked before anything is emitted, so a refusal leaves no half-built text.
+    for i in count {
+        fty := field_type(&mut c, ty, i);
+        if (element_code(&mut c, fty) == 0) && !record_text_ok(&mut c, fty, depth + 1) {
+            return false;
+        }
+    }
+    if tuple {
+        format_raw(&mut c, acc, view("("));
+    } else {
+        mut head = c.decls[d].name.copy();
+        if count == 0 {
+            format_raw(&mut c, acc, view(head));
+            return true;
+        }
+        push_bytes(&mut head, view(" { "));
+        format_raw(&mut c, acc, view(head));
+    }
+    for i in count {
+        if i != 0 {
+            format_raw(&mut c, acc, view(", "));
+        }
+        if !tuple {
+            mut label_text = c.fields[first + i].name.copy();
+            push_bytes(&mut label_text, view(": "));
+            format_raw(&mut c, acc, view(label_text));
+        }
+        fty := field_type(&mut c, ty, i);
+        part := rec_load(&mut c, value, i, 0);
+        code := element_code(&mut c, fty);
+        if code != 0 {
+            cv := imm(&mut c, code);
+            invoke(&mut c, view("rt_fmt_value"), three(acc, part, cv));
+        } else {
+            record_text(&mut c, acc, part, fty, depth + 1);
+        }
+    }
+    if tuple {
+        format_raw(&mut c, acc, view(")"));
+    } else {
+        format_raw(&mut c, acc, view(" }"));
+    }
+    return true;
+}
+// Whether `record_text` has a form for `ty` (the same walk, emitting nothing).
+fn record_text_ok<a>(c: (&a mut C), ty: u64, depth: u64) -> bool {
+    if (ty_kind(&mut c, ty) != 8) || (depth > 8) {
+        return false;
+    }
+    d := ty_arg(&mut c, ty);
+    if (c.decls[d].is_enum != 0) || (c.decls[d].opaque != 0) || (c.decls[d].c_layout != 0) {
+        return false;
+    }
+    count := c.decls[d].count;
+    for i in count {
+        fty := field_type(&mut c, ty, i);
+        if (element_code(&mut c, fty) == 0) && !record_text_ok(&mut c, fty, depth + 1) {
+            return false;
+        }
+    }
+    return true;
 }
 // Element format codes for printing vectors: 1 u64, 2 bool, 3 f64, 4 text/bytes, 5 nested vector,
 // 256+ sized integer (int_code); 0 means not printable.
@@ -24668,10 +24815,9 @@ fn format_arg<a>(c: (&a mut C), acc: u64, input: Val) -> bool {
                     invoke(&mut c, view("rt_fmt_seq"), two(acc, value.t));
                 } else {
                     if k != 0 {
-                        fail(
-                            &mut c,
-                            view("format arguments must be u64, sized integers, bool, text, byte views or have show()")
-                        );
+                        if !record_text(&mut c, acc, value.t, value.ty, 0) {
+                            print_refuse(&mut c, value.ty);
+                        }
                     }
                 }
             }
@@ -24999,7 +25145,15 @@ fn print_value<a>(c: (&a mut C), input: Val, newline: u64) -> unit {
                 invoke(&mut c, view("rt_print_int"), three(value.t, line, cv));
             } else {
                 if (k != 3) & (k != 4) & (k != 5) {
-                    fail(&mut c, view("print requires u64, string, bytes or a byte view"));
+                    if record_text_ok(&mut c, value.ty, 0) {
+                        acc := invoke(&mut c, view("rt_new"), u64[]);
+                        record_text(&mut c, acc, value.t, value.ty, 0);
+                        line := imm(&mut c, newline);
+                        invoke(&mut c, view("rt_print_acc"), two(acc, line));
+                        release_temporary(&mut c, original);
+                        return ();
+                    }
+                    print_refuse(&mut c, value.ty);
                 }
                 ty := intern_full(&mut c, 5, 0, 0, u64[]);
                 slot := apply(&mut c, view("rt_view"), one(value.t));
@@ -28386,6 +28540,13 @@ fn matching_paren<a>(c: (&a mut C), open: u64) -> u64 {
     }
     return 0;
 }
+fn tok_is_return<a>(c: (&a mut C), i: u64) -> bool {
+    st := c.toks[i].start;
+    if c.toks[i].end - st != 6 {
+        return false;
+    }
+    return (c.src[st] == 114) && (c.src[st + 1] == 101) && (c.src[st + 2] == 116) && (c.src[st + 3] == 117) && (c.src[st + 4] == 114) && (c.src[st + 5] == 110);
+}
 fn closure_literal<a>(c: (&a mut C)) -> Val {
     // Inside a generic function the closure is compiled once per specialization, with its bindings.
     if (c.tnames.len() != 0) & (c.bindings.len() == 0) & (c.validating == 0) {
@@ -28449,9 +28610,45 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
         ret = parse_type(&mut c);
     } else if hinted && (hint_ret != NO_TYPE) {
         ret = hint_ret;
-    } else if hinted && !is(&mut c, view("{")) {
-        // An expression body whose type nothing fixes yet (`map`'s U): its type is the result.
+    } else if !is(&mut c, view("{")) {
+        // An expression body whose type nothing fixes - `map`'s U, or a closure bound to a name
+        // with no expected type (`g := |x: u64| x * 2`): its type is the result. Without this the
+        // result was `unit` and the body's value was computed and dropped.
         ret = closure_body_type(&mut c, &names, &params);
+    } else {
+        // A block body with nothing to fix its result is `unit`, and then a `return` that carries a
+        // value has nowhere to put it: the value used to be dropped in silence. Ask for the type.
+        // A block that holds another closure is left alone - that `return` may be the inner one's.
+        mut depth = 0;
+        mut q = c.pos;
+        mut nested = false;
+        mut valued = 0;
+        while q < c.toks.len() {
+            k := kind_at(&mut c, q);
+            if k == 123 {
+                depth += 1;
+            }
+            if k == 125 {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            if (k == 124) || (k == 274) {
+                nested = true;
+            }
+            if (k == 1) & (valued == 0) {
+                if tok_is_return(&mut c, q) && (kind_at(&mut c, q + 1) != 59) {
+                    valued = q;
+                }
+            }
+            q += 1;
+        }
+        if (valued != 0) && !nested {
+            exchange(&mut c.pos, valued);
+            diag_help(&mut c, view("write the result type before the block: `|a: u64| -> u64 { return a + 1; }`"));
+            fail(&mut c, view("this closure's block returns a value, and nothing says what type its result is"));
+        }
     }
     start := c.pos;
     if is(&mut c, view("{")) {
