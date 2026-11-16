@@ -101,11 +101,12 @@ wait
 # time against C, Rust, Go and Zig twins, the scheduler against rayon and oneTBB, compile speed
 # against Go, Zig and cargo. One at a time, after everything else, alone. Reports: each fails only
 # when a program's output differs, never on a ratio, and skips a toolchain that is not installed.
-leg bench-rivals bun tools/bench-rivals.mjs
+# They refresh bench/results/, which the book's Performance chapter renders (`just bench-results`).
+leg bench-rivals bun tools/bench-rivals.mjs --json bench/results/bench-rivals.json
 wait
-leg sched-rivals bun tools/sched-rivals.mjs
+leg sched-rivals bun tools/sched-rivals.mjs --json bench/results/sched-rivals.json
 wait
-leg compile-rivals bun tools/compile-rivals.mjs
+leg compile-rivals bun tools/compile-rivals.mjs --json bench/results/compile-rivals.json
 wait
 
 # One line per leg, failures first.

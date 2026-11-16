@@ -27,7 +27,9 @@ pairs the runs on a busy machine. See the header of `tools/bench.mjs`.
 `gaps12-sched`), plus the scheduler twins (`sched-rayon/`, `sched_tbb.cpp`).
 `bun tools/bench-rivals.mjs` times all of them against Grail's two builds, and
 `bun tools/sched-rivals.mjs` the scheduler against rayon and oneTBB; the tables are in
-`docs/design/runtime-parity.md`, "Against other languages".
+`docs/design/runtime-parity.md`, "Against other languages". `bench/results/` holds their latest
+results as JSON (`--json`), which the book's Performance chapter draws; `just bench-results`
+refreshes them.
 
 `xform` and `dot` are the loops of `docs/design/simd-layout-parallel-loops.md` (section 1.3), which
 records what stands between each backend and C on them.

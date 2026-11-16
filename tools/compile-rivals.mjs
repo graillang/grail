@@ -25,10 +25,11 @@ import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } fr
 import { join, resolve } from 'node:path';
 import { root } from './platforms.mjs';
 import { scalingProgram } from './compile-bench.mjs';
-import { compilerOptions, grailCompiler, loadavg, measurer, ratio, run, toolchains, versions } from './rivals/common.mjs';
+import { compilerOptions, grailCompiler, jsonOption, loadavg, measurer, ratio, run, toolchains, versions, writeResults } from './rivals/common.mjs';
 
 const argv = process.argv.slice(2);
 const chosen = compilerOptions(argv);
+const jsonPath = jsonOption(argv);
 const option = (name, fallback) => { const at = argv.indexOf(name); return at < 0 ? fallback : argv[at + 1]; };
 const runs = Number(option('--runs', 3));
 const sizes = option('--sizes', '1000,4000').split(',').map(Number);
@@ -279,6 +280,21 @@ load.push(loadavg());
 const v = versions();
 console.log(`grail: ${grail}, commit ${measuredGrail.commit}\nload average ${load[0]} at start, ${load[1]} at end; ${Object.values(v).join('; ')}`);
 writeFileSync(join(root, '.work/compile-rivals.json'), JSON.stringify({ runs, sizes, load, versions: v, grail, commit: measuredGrail.commit, results, at: new Date().toISOString() }, null, 2) + '\n');
+if (jsonPath) {
+  const table = (id, title, field, chart, note) => ({
+    id, title, chart, note, threshold: 1, primary: 'grail', direction: 'lower',
+    columns: names.map(key => ({ key, label: headOf[key], grail: key === 'grail' })),
+    rows: rows.map(([name, figures]) => ({ name, unit: field === 'cpu' ? 's CPU' : 's wall', values: Object.fromEntries(names.map(k => [k, figures[k][field]])) })),
+  });
+  writeResults(jsonPath, {
+    tool: 'compile-rivals', title: 'Compile speed against Go, Zig and rustc', commit: measuredGrail.commit, versions: v, load,
+    commands: [`bun tools/compile-rivals.mjs --runs ${runs} --sizes ${sizes.join(',')}`, ...names.map(n => `${headOf[n]}: check \`${languages[n].check.join(' ').replace('__grail', 'grail')}\`, build \`${languages[n].build.join(' ').replace('__grail', 'grail')}\``)],
+    tables: [
+      table('compile', 'Compile speed: check and build, cold and after a one-function edit', 'cpu', true, `CPU time of the tool and every process it waited for, best of ${runs}. The bar: the fastest of Go, Zig and rustc.`),
+      table('compile-wall', 'The same, wall time', 'wall', false, 'Wall time: Go spreads a package over every core.'),
+    ],
+  });
+}
 // One line the gate's summary picks up: Grail over the fastest rival, the large program's four steps.
 const big = `syn${sizes[sizes.length - 1]}`;
 console.log(`compile-rivals (${measuredGrail.commit}): Grail/fastest ${['check cold', 'check edited', 'build cold', 'build edited'].map(step => { const f = results[`${big} ${step}`]; return `${big} ${step} ${ratio(f.grail.cpu, Math.min(...names.filter(x => x !== 'grail').map(x => f[x].cpu)))}`; }).join(', ')}`);

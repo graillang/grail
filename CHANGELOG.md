@@ -1,5 +1,12 @@
 ## Unreleased
 
+- The book has a chapter, "Performance against other languages": charts of run time (release and
+  development builds), compile speed and the scheduler against C, Rust, Go, Zig, rayon and oneTBB,
+  with the numbers, the machine, the load, the commit and the commands under each, and the named
+  reason wherever Grail is behind. It renders `bench/results/*.json` (inline SVG, offline; no
+  benchmark runs when the book is built); the rivals tools write those files with `--json`, and
+  `just bench-results` refreshes them, as the gate's last legs do.
+
 - The rivals tools (`bench-rivals`, `sched-rivals`, `compile-rivals`) take `--compiler PATH` or
   `--branch REF` (REF's compiler built from a read-only `git archive` copy) and name the Grail commit
   they measured in every table. A toolchain that is not installed is skipped with a note. Each fails

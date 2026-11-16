@@ -33,12 +33,13 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import { join, resolve } from 'node:path';
 import { root } from './platforms.mjs';
 import { compileProgram } from './native.mjs';
-import { compilerOptions, grailCompiler, loadavg, measurer, ratio, run, toolchains, versions } from './rivals/common.mjs';
+import { compilerOptions, grailCompiler, jsonOption, loadavg, measurer, ratio, run, toolchains, versions, writeResults } from './rivals/common.mjs';
 
 const argv = process.argv.slice(2);
 const option = (name, fallback) => { const at = argv.indexOf(name); if (at < 0) return fallback; const v = argv[at + 1]; argv.splice(at, 2); return v; };
 const runs = Number(option('--runs', 3));
 const chosen = compilerOptions(argv);
+const jsonPath = jsonOption(argv);
 const metric = option('--metric', 'cpu');
 const work = join(root, '.work/bench-rivals');
 rmSync(work, { recursive: true, force: true });
@@ -192,6 +193,24 @@ load.push(loadavg());
 const v = versions();
 console.log(`load average ${load[0]} at start, ${load[1]} at end; ${Object.values(v).join('; ')}`);
 writeFileSync(join(root, '.work/bench-rivals.json'), JSON.stringify({ grail: measuredGrail.commit, metric, runs, load, versions: v, results, at: new Date().toISOString() }, null, 2) + '\n');
+if (jsonPath) {
+  const unitOf = (name, kind) => name === 'ffi_call' ? (kind === 'instructions' ? 'G instructions (whole program)' : 'ns per call') : kind === 'instructions' ? 'G instructions' : 's CPU';
+  const table = (id, title, keys, primary, threshold, chart, kind = 'time', note = undefined) => ({
+    id, title, chart, threshold, primary, note, direction: 'lower',
+    columns: keys.map(key => ({ key, label: headOf[key], grail: key.startsWith('grail') })),
+    rows: names.map(name => ({ name, unit: unitOf(name, kind), values: Object.fromEntries(keys.map(k => [k, kind === 'instructions' ? results[name].instructions[k] / 1e9 : results[name].best[k]])) })),
+  });
+  writeResults(jsonPath, {
+    tool: 'bench-rivals', title: 'Run time against C, Rust, Go and Zig', commit: measuredGrail.commit, versions: v, load,
+    commands: [`bun tools/bench-rivals.mjs --runs ${runs}${chosen.branch ? ` --branch ${chosen.branch}` : ''}`, ...Object.entries({ 'Grail-native': 'native backend, --overflow=checked', 'Grail-LLVM': '--backend=llvm --overflow=wrap, clang -O2', 'C -O2': 'clang -O2 -ffp-contract=off', 'Rust rel': 'rustc --edition 2021 -C opt-level=3', Go: 'go build (GOAMD64=v1)', 'Zig RF': 'zig build-exe -O ReleaseFast -mcpu=baseline', 'Rust dev': 'rustc --edition 2021 -C opt-level=0 -g', 'Zig Debug': 'zig build-exe -O Debug -mcpu=baseline' }).map(([k, c]) => `${k}: ${c}`)],
+    tables: [
+      table('release', 'Release builds: run time', ['grail-llvm', ...releaseRivals], 'grail-llvm', 1.05, true, 'time', `CPU time (user + sys), best of ${runs}. The bar: parity with clang -O2, within noise (5 %).`),
+      table('dev', 'Development builds: run time', ['grail-native', ...devRivals], 'grail-native', 1, true, 'time', `CPU time (user + sys), best of ${runs}. The bar: faster than Zig Debug, Rust's dev profile and Go.`),
+      table('instructions', 'User-space instructions', columns, 'grail-llvm', 1.05, false, 'instructions', 'perf_event_open, every thread; not moved by load.'),
+      ...(nativeColumns.length ? [table('native-cpu', 'Rivals built for this CPU (Grail still baseline x86-64)', ['grail-llvm', ...nativeColumns], 'grail-llvm', 1.05, false)] : []),
+    ],
+  });
+}
 // One line the gate's summary picks up: Grail-LLVM over the best release rival, per program.
 console.log(`bench-rivals (${measuredGrail.commit}): LLVM/release-best ${names.map(n => `${n} ${ratio(results[n].best['grail-llvm'], Math.min(...releaseRivals.map(c => results[n].best[c])))}`).join(', ')}`);
 if (failed) process.exit(1);

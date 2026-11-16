@@ -1,8 +1,8 @@
 // Shared by the rivals tools (bench-rivals, compile-rivals, sched-rivals): the measuring helper, the
 // load average and the toolchain versions. docs/design/runtime-parity.md, "Against other languages".
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, mkdirSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 
 export function run(argv, options = {}) {
   const result = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, ...options });
@@ -50,7 +50,8 @@ export const ratio = (mine, theirs) => (mine === undefined || theirs === undefin
 //   --branch REF      REF's compiler: REF (a branch, tag or commit; origin/REF is tried too) is
 //                     extracted with `git archive` into .work/branches/<commit>, read-only, and its
 //                     compiler built there - from its own seed, else bootstrapped by this tree's
-//                     compiler (a branch's checked-in seed may be older than its sources)
+//                     compiler or GRAIL_BRANCH_BOOTSTRAP (a branch's checked-in seed may be older
+//                     than its sources)
 //   neither           this tree's compiler (GRAIL_COMPILER when set)
 // `release` asks for the release compiler (`native.mjs release`). Returns { compiler, tree, commit }
 // so every table can say which Grail it measured.
@@ -81,7 +82,9 @@ export function grailCompiler(root, { compiler, branch, release = false, log = l
   log(`building the ${mode === 'release' ? 'release ' : ''}compiler of ${commit}`);
   let result = spawnSync('bun', [join(tree, 'tools/native.mjs'), mode], { cwd: tree, encoding: 'utf8', maxBuffer: 1 << 26, env: clean });
   if (result.status !== 0 && tree !== root) {
-    const base = grailCompiler(root, { log }).compiler;
+    // GRAIL_BRANCH_BOOTSTRAP names a compiler new enough to build REF when neither REF's seed nor
+    // this tree's compiler is (a branch that changed the runtime's entry points).
+    const base = process.env.GRAIL_BRANCH_BOOTSTRAP ? resolveFile(process.env.GRAIL_BRANCH_BOOTSTRAP) : grailCompiler(root, { log }).compiler;
     log(`  its seed cannot build it; bootstrapping with ${base}`);
     result = attempt({ GRAIL_COMPILER: base });
   }
@@ -111,3 +114,23 @@ export function toolchains() {
   if (missing.length) console.log(`note: not installed here, so not measured: ${missing.map(k => ({ c: 'clang', rust: 'rustc/cargo', go: 'go', zig: 'zig', tbb: 'g++ with oneTBB' })[k]).join(', ')}`);
   return have;
 }
+
+// `--json PATH`: the results as one file the book renders (tools/perf-charts.mjs) without running
+// anything. Each table: columns (one per language and build, Grail's flagged, `primary` the one its
+// ratio is read from), rows (a program or measure, its unit, its direction - lower or higher is
+// better - and each column's value), and `threshold`, the ratio to the fastest rival at or under
+// which the bar counts as met. The machine, load, versions, commit and commands come with it so a
+// chart can be reproduced.
+export function writeResults(path, { tool, title, commit, versions, load, commands, tables }) {
+  const cpuinfo = existsSync('/proc/cpuinfo') ? readFileSync('/proc/cpuinfo', 'utf8') : '';
+  const machine = {
+    cpu: (cpuinfo.match(/^model name\s*:\s*(.*)$/m) ?? [])[1] ?? 'unknown',
+    cpus: (cpuinfo.match(/^processor\s*:/gm) ?? []).length,
+    kernel: (() => { try { return run(['uname', '-sr']).stdout.trim(); } catch { return 'unknown'; } })(),
+  };
+  const data = { schema: 1, tool, title, commit, date: new Date().toISOString(), machine, load, versions, commands, tables };
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(data, null, 1) + '\n');
+  return data;
+}
+export const jsonOption = argv => { const at = argv.indexOf('--json'); if (at < 0) return undefined; const v = argv[at + 1]; argv.splice(at, 2); return resolve(v); };

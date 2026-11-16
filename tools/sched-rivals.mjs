@@ -16,13 +16,14 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { cpus } from 'node:os';
 import { join, resolve } from 'node:path';
 import { root } from './platforms.mjs';
-import { compilerOptions, grailCompiler, loadavg, measurer, ratio, run, toolchains, versions } from './rivals/common.mjs';
+import { compilerOptions, grailCompiler, jsonOption, loadavg, measurer, ratio, run, toolchains, versions, writeResults } from './rivals/common.mjs';
 
 const at = process.argv.indexOf('--rounds');
 const rounds = at > 0 ? Number(process.argv[at + 1]) : 9;
 // --compiler PATH / --branch REF as in the other rivals tools; otherwise GRAIL_SCHED_TREE and
 // GRAIL_SCHED_COMPILER below (a branch whose seed and this tree's compiler both fail to build it).
 const chosen = compilerOptions(process.argv);
+const jsonPath = jsonOption(process.argv);
 const picked = chosen.compiler || chosen.branch ? grailCompiler(root, chosen) : null;
 const tree = picked ? picked.tree : resolve(process.env.GRAIL_SCHED_TREE ?? root);
 // A tree without the scheduler benchmarks (the scheduler branch not merged yet) has nothing to
@@ -140,5 +141,19 @@ if (seenChecksums.size !== 1) {
   console.log(`OUTPUT DIFFERS: frame checksums ${JSON.stringify(Object.fromEntries(Object.entries(checksums).map(([k, v]) => [k, [...v]])))}`);
   process.exit(1);
 }
+if (jsonPath) writeResults(jsonPath, {
+  tool: 'sched-rivals', title: 'The scheduler against rayon and oneTBB', commit, versions: v, load,
+  commands: [`bun tools/sched-rivals.mjs --rounds ${rounds}`, 'Grail-native: grail build --no-cache', 'Grail-LLVM: --backend=llvm --overflow=wrap, clang -O2', `LLVM w=${threads}: the same with GRAIL_WORKERS=${threads}`, 'rayon: cargo build --release (bench/rivals/sched-rayon)', 'oneTBB: g++ -O2 -std=c++20 sched_tbb.cpp -ltbb'],
+  tables: [{
+    id: 'scheduler', title: 'The scheduler: join, spawn, nested join and a frame loop', chart: true, threshold: 1, primary: 'grail-llvm', direction: 'lower',
+    note: `Wall time measured inside each program, median of ${rounds} rounds. The bar: match or beat rayon and oneTBB.`,
+    columns: columns.map(key => ({ key, label: headOf[key], grail: key.startsWith('grail') })),
+    rows: rows.map(([label]) => {
+      const m = label.match(/^(.*?) \((.*)\)$/);
+      const more = label.includes('more is better');
+      return { name: more ? label.replace(' (more is better)', '') : m ? m[1] : label, unit: more ? 'rounds' : m ? m[2] : '', direction: more ? 'higher' : 'lower', values: table[label] };
+    }),
+  }],
+});
 // One line the gate's summary picks up.
 console.log(`sched-rivals (${commit}): LLVM/best ${['join, from the main thread (ns)', 'fib(32) nested join, in a task (us)', 'frame p99 (us)'].map(label => { const v = table[label]; const best = Math.min(...rivalsHere.map(c => v[c]).filter(x => x !== undefined)); return `${label.replace(/ \(.*\)$/, '')} ${ratio(v['grail-llvm'], best)}`; }).join(', ')}`);
