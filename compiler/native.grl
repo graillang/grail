@@ -16130,11 +16130,6 @@ fn fn_on<a>(c: (&a C)) -> bool {
     if (c.plat != 0) | (c.target != 0) | (c.debug != 0) | (c.backend != 0) | (c.emit_ir != 0) {
         return false;
     }
-    // Effect edges are per-body records in a table this layer does not carry, so a run that records
-    // any does not file units (docs/design/effects.md).
-    if c.fx_any != 0 {
-        return false;
-    }
     // `--export` counts the definitions that matched it, and a replayed body is one it never sees.
     if c.exports.len() != 0 {
         return false;
@@ -16255,7 +16250,8 @@ fn fn_marks<a>(c: (&a C)) -> u64[] {
     m[FN_CLOSURE] = c.closures.len();
     m[FN_CONSTANT] = c.constants.len();
     m[FN_DECLARATION] = c.decls.len();
-    m[FN_EFFECT] = c.fx_syms.len() + c.fx_body_sym.len();
+    // An effect record is not here any more: a unit carries its body's (fx_unit_record).
+    m[FN_EFFECT] = 0;
     return m;
 }
 // A type as a registration spells it: structurally, the way an interface does. False when the type
@@ -16312,7 +16308,9 @@ fn fn_reg_spec<a, b>(c: (&a mut C), template: u64, map: (&b u64[])) -> unit {
 struct FnReg {
     kind: u64,
     template: u64,
-    types: u64[]
+    types: u64[],
+    // Kind 3: the body's effect record (fx_unit_record), replayed by fx_unit_replay.
+    data: u8[]
 }
 // The registrations of a unit, with every type interned in this run. `ok` goes to 0 when a record is
 // not one this compiler writes, and then nothing of the unit may be applied.
@@ -16323,7 +16321,7 @@ fn fn_regs_read<a, b, d>(c: (&a mut C), data: &b [u8], ok: (&d mut u64)) -> FnRe
         kind := iface_r1(&mut p);
         if kind == 1 {
             ty := iface_r_type(&mut p, &mut c);
-            out.push(FnReg { kind: 1, template: 0, types: u64[ty] });
+            out.push(FnReg { kind: 1, template: 0, types: u64[ty], data: u8[] });
         } else if kind == 2 {
             template := iface_rv(&mut p);
             n := iface_rv(&mut p);
@@ -16335,7 +16333,10 @@ fn fn_regs_read<a, b, d>(c: (&a mut C), data: &b [u8], ok: (&d mut u64)) -> FnRe
             for i in n {
                 types.push(iface_r_type(&mut p, &mut c));
             }
-            out.push(FnReg { kind: 2, template: template, types: types });
+            out.push(FnReg { kind: 2, template: template, types: types, data: u8[] });
+        } else if kind == 3 {
+            data := iface_rs(&mut p);
+            out.push(FnReg { kind: 3, template: 0, types: u64[], data: data });
         } else {
             exchange(ok, 0);
             return out;
@@ -16356,7 +16357,7 @@ fn fn_unit_of<a>(c: (&a mut C), key: u8[], text_mark: u64, fact_mark: u64) -> fn
 // text, its facts, and its registrations made again through the calls a fresh emission makes
 // (drop_ref_name, specialize) - so the drop walk and the specialisation queue see the same requests
 // in the same order whether the body was compiled in this run or in an earlier one.
-fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), line: u64) -> unit {
+fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), line: u64, at: u64, claim_alloc: u64, claim_panic: u64) -> unit {
     k := c.lunit;
     if (k != 0) & (k <= c.fnext.len()) {
         c.fnext[k - 1] = c.fnext[k - 1] + 1;
@@ -16364,6 +16365,7 @@ fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), l
     if site_table_on(&c) {
         site_base(&mut c, line);
     }
+    text_at := c.out.len();
     c.out.append(view(u.text));
     fn_facts_restore(&mut c, view(u.facts));
     for i in regs.len() {
@@ -16372,6 +16374,8 @@ fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), l
         types := regs[i].types.copy();
         if kind == 1 {
             drop_ref_name(&mut c, types[0]);
+        } else if kind == 3 {
+            fx_unit_replay(&mut c, view(regs[i].data), text_at, at, claim_alloc, claim_panic);
         } else {
             specialize(&mut c, template, &types);
         }
@@ -16380,6 +16384,110 @@ fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), l
     return ();
 }
 
+// A unit's effect record: what the body's emission recorded (its own facts, its entry checks, its
+// call edges and the count the IR check holds them to), so a replay hands the solver exactly what
+// compiling the body would. Positions are kept relative - an edge's token to the `fn` token, the
+// replayed prologue to the unit's text - because the unit is reused where lines above it moved. The
+// claim is not kept: it is an attribute outside the unit's key text, so a replay takes it from the
+// declaration as this run parsed it.
+fn fx_unit_record<a, b>(c: (&a mut C), sym: &b [u8], text_mark: u64, at: u64, edge_at: u64) -> u8[] {
+    k := fx_find(&mut c, view(sym));
+    if (k == 0) || (c.fx_body_sym.len() == 0) {
+        return u8[];
+    }
+    kk := k - 1;
+    last := c.fx_body_sym.len() - 1;
+    if !same(view(c.fx_body_sym[last]), view(sym)) {
+        return u8[];
+    }
+    mut out = u8[];
+    iface_ws(&mut out, view(sym));
+    iface_ws(&mut out, view(c.fx_fn_name[kk]));
+    iface_w1(&mut out, c.fx_own_alloc[kk]);
+    iface_w1(&mut out, c.fx_own_panic[kk]);
+    iface_w1(&mut out, c.fx_entry_panic[kk]);
+    iface_wv(&mut out, c.fx_body_calls[last]);
+    mut lo = 0;
+    mut hi = 0;
+    if (c.fx_body_hi[last] != 0) && (text_mark <= c.fx_body_lo[last]) {
+        lo = c.fx_body_lo[last] - text_mark + 1;
+        hi = c.fx_body_hi[last] - text_mark;
+    }
+    iface_wv(&mut out, lo);
+    iface_wv(&mut out, hi);
+    mut n = 0;
+    mut edges = u8[];
+    for e in edge_at..c.fx_edge_from.len() {
+        if c.fx_edge_from[e] != kk {
+            continue;
+        }
+        iface_ws(&mut edges, view(c.fx_edge_name[e]));
+        iface_wv(&mut edges, c.fx_edge_kind[e]);
+        iface_ws(&mut edges, view(c.fx_edge_why[e]));
+        mut delta = 0;
+        if at <= c.fx_edge_pos[e] {
+            delta = c.fx_edge_pos[e] - at;
+        }
+        iface_wv(&mut edges, delta);
+        n += 1;
+    }
+    iface_wv(&mut out, n);
+    push_bytes(&mut out, view(edges));
+    return out;
+}
+// The record of a replayed body, put back as `fx_begin`, `fx_edge` and `fx_end` would have left it.
+fn fx_unit_replay<a, b>(c: (&a mut C), data: &b [u8], text_at: u64, at: u64, claim_alloc: u64, claim_panic: u64) -> unit {
+    mut p = IR { data: copy_bytes(view(data)), at: 0, stop: data.len(), path: copy_bytes(view("the unit store")), phase: 2, rtext: u8[], what: u8[] };
+    sym := iface_rs(&mut p);
+    shown := iface_rs(&mut p);
+    own_a := iface_r1(&mut p);
+    own_p := iface_r1(&mut p);
+    entry := iface_r1(&mut p);
+    calls := iface_rv(&mut p);
+    lo := iface_rv(&mut p);
+    hi := iface_rv(&mut p);
+    k := fx_sym(&mut c, view(sym)) - 1;
+    c.fx_body[k] = 1;
+    c.fx_row[k] = 0;
+    c.fx_alloc_thru[k] = 0;
+    c.fx_panic_thru[k] = 0;
+    c.fx_own_alloc[k] = own_a;
+    c.fx_own_panic[k] = own_p;
+    c.fx_entry_panic[k] = entry;
+    if claim_alloc != 0 {
+        c.fx_attr_alloc[k] = 1;
+    }
+    if claim_panic != 0 {
+        c.fx_attr_panic[k] = 1;
+    }
+    c.fx_fn_name[k] = shown.copy();
+    c.fx_fn_file[k] = c.file;
+    c.fx_fn_pos[k] = at;
+    n := iface_rv(&mut p);
+    for i in n {
+        name := iface_rs(&mut p);
+        kind := iface_rv(&mut p);
+        why := iface_rs(&mut p);
+        delta := iface_rv(&mut p);
+        c.fx_edge_from.push(k);
+        c.fx_edge_name.push(name);
+        c.fx_edge_to.push(0);
+        c.fx_edge_kind.push(kind);
+        c.fx_edge_file.push(c.file);
+        c.fx_edge_pos.push(at + delta);
+        c.fx_edge_why.push(why);
+    }
+    c.fx_body_sym.push(sym.copy());
+    c.fx_body_calls.push(calls);
+    if lo != 0 {
+        c.fx_body_lo.push(text_at + lo - 1);
+        c.fx_body_hi.push(text_at + hi);
+    } else {
+        c.fx_body_lo.push(0);
+        c.fx_body_hi.push(0);
+    }
+    return ();
+}
 // The key of one unit: a text record naming every input its bytes are a function of.
 //
 //   the unit (part) it is emitted into and the label prefix that part mints labels in;
@@ -17193,7 +17301,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                     mut readable = 1;
                     regs := fn_regs_read(&mut c, view(hit.regs), &mut readable);
                     if readable != 0 {
-                        fn_apply(&mut c, &hit, &regs, fn_line);
+                        fn_apply(&mut c, &hit, &regs, fn_line, position, claimed_alloc, claimed_panic);
                         c.fn_hits = c.fn_hits + 1;
                         skip_braces(&mut c);
                         return ();
@@ -17278,6 +17386,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         fx_label.push(c.out[label_at + i]);
     }
     o(&mut c, view(":\n"));
+    fx_edge_at := c.fx_edge_from.len();
     fx_begin(&mut c, view(fx_label), view(name), c.file, position, claimed_alloc, claimed_panic);
     // Where the prologue's own bytes begin: the second entry replays them, then jumps to the body.
     pro_start := c.out.len();
@@ -17520,7 +17629,14 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             }
         }
         if unit_ok != 0 {
-            produced := fn_unit_of(&mut c, fn_key_text, text_mark, fact_mark);
+            mut produced = fn_unit_of(&mut c, fn_key_text, text_mark, fact_mark);
+            // The body's effect record travels in the unit; this run already has it, so the apply
+            // below is given the registrations without it.
+            effect := fx_unit_record(&mut c, view(fx_label), text_mark, position, fx_edge_at);
+            if effect.len() != 0 {
+                produced.regs.push(3);
+                iface_ws(&mut produced.regs, view(effect));
+            }
             // The file's name is the key's hash; the key record itself travels inside the entry,
             // so two keys that collide make a miss and never a wrong hit.
             fncache::save(view(c.fn_dir), view(fncache::hash(view(produced.key))), &produced);
@@ -17536,7 +17652,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             if (k != 0) & (k <= c.fnext.len()) {
                 c.fnext[k - 1] = c.fnext[k - 1] - 1;
             }
-            fn_apply(&mut c, &produced, &regs, fn_line);
+            fn_apply(&mut c, &produced, &regs, fn_line, position, claimed_alloc, claimed_panic);
         } else {
             c.fn_kept = c.fn_kept + 1;
         }
