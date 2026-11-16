@@ -395,7 +395,7 @@ Designed but not observable in safe code yet:
 
 ### Measured (24 reported cores, 3M CPU-bound u64 elements, 1 job vs 4 jobs, best of two rounds)
 
-| `GRAIL_POOL_WORKERS` | one job | four jobs | speedup |
+| workers | one job | four jobs | speedup |
 |---:|---:|---:|---:|
 | 1 | 27 ms | 28 ms | 0.96x (assertion fails, as it must) |
 | 2 | 28 ms | 15 ms | 1.9x |
@@ -502,7 +502,7 @@ both of which are structured.
 
 `pool::for_chunks` (owned) against `parallel_for_chunks` (in place), milliseconds:
 
-| `GRAIL_POOL_WORKERS` | owned 1 chunk | owned 8 | in place 1 chunk | in place 8 | in-place speedup |
+| workers | owned 1 chunk | owned 8 | in place 1 chunk | in place 8 | in-place speedup |
 |---:|---:|---:|---:|---:|---:|
 | 1 | 104 | 107 | 45 | 48 | 0.94x |
 | 2 | 99 | 80 | 44 | 31 | 1.4x |
@@ -520,7 +520,7 @@ single-job gap (at least 1.33x) and the parallel one (eight in-place chunks at l
 than one, above four cores), and prints all four times to stderr.
 
 `parallel_map` is untouched: the existing `pool-speedup-four-workers` case measures 33 ms (one job)
-and 11 ms (four jobs) at `GRAIL_POOL_WORKERS=4`, against 33 ms and 12 ms before this change.
+and 11 ms (four jobs) with four workers, against 33 ms and 12 ms before this change.
 
 ### What stage 4 still needs
 
