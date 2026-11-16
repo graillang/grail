@@ -182,6 +182,14 @@ export function dynamicLinkFlags(target, linkArgs) {
   // libc always: the runtime creates its threads through a weak pthread_create (docs/ffi.md).
   return [...(loader ? ['--dynamic-linker', loader] : []), '-L/usr/lib', '-L/usr/lib64', '-lc'];
 }
+// What clang needs to compile an LLVM module for a target, besides the triple. RISC-V: the ISA and
+// ABI the assembly is written for. AArch64: atomics inline - clang's default for Linux calls
+// `__aarch64_cas8_acq_rel` and friends in libgcc, and a Grail program links no libgcc.
+export function moduleFlags(target) {
+  if (target === 'riscv64') return ['-march=rv64imafd', '-mabi=lp64d'];
+  if (target === 'aarch64') return ['-mno-outline-atomics'];
+  return [];
+}
 export function assemble(source, executable, target = hostTarget, linkArgs = [], { frameworkArgs = [], sign = false, sdk = undefined } = {}) {
   targetName(target);
   // Unique per process: two concurrent builds of the same target otherwise truncate each
@@ -447,7 +455,7 @@ export function buildReleaseCompiler({ log = () => {} } = {}) {
   }
   if (!lowered) throw new Error('no compiler could lower the compiler through the LLVM backend');
   log('clang -O2');
-  command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[hostTarget]}`, '-O2', '-c', `${stem}.s.ll`, '-o', `${stem}.ll.o`]);
+  command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[hostTarget]}`, ...moduleFlags(hostTarget), '-O2', '-c', `${stem}.s.ll`, '-o', `${stem}.ll.o`]);
   command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[hostTarget]}`, '-c', `${stem}.s`, '-o', `${stem}.o`]);
   const pending = `${stem}.pending`;
   command([process.env.GRAIL_LINKER ?? 'ld.lld', '-m', emulations[hostTarget], `${stem}.o`, `${stem}.ll.o`, '-o', pending]);
@@ -514,7 +522,7 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
   const linkArgs = linkInputs(readFileSync(assembly, 'utf8'), dirname(resolve(root, inputs[0])));
   if (llvm) {
     const object = join(directory, `${name}.ll.o`);
-    command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[target]}`, '-O2', '-c', `${assembly}.ll`, '-o', object]);
+    command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[target]}`, ...moduleFlags(target), '-O2', '-c', `${assembly}.ll`, '-o', object]);
     linkArgs.unshift(object);
   }
   const framework = machoTargets.includes(target) ? frameworkArguments(frameworks, { directory, sdk }) : { args: [] };

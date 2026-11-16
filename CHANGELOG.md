@@ -3,6 +3,49 @@
 - Fixed: an effect attribute's name anywhere in a source file - a comment, a string - made the build
   one compiler run over the whole program, because the driver searched the bytes. It now looks for
   the attribute itself (`@no_alloc`, `@no_panic` outside comments and strings).
+- **Native backend: float temporaries live in SSE registers.** The optimiser keeps a frame slot
+  that only ever holds a float in one of xmm8..xmm14, slots whose lives do not overlap sharing a
+  register, as long as the slot is not live across a call that returns (every SSE register is
+  caller-saved). It also knows the SSE instructions the front end writes (`addsd`, `cvtss2sd`,
+  `ucomisd`, ...) touch no general register; before, each was an unknown instruction across which
+  nothing could be removed. And a compare-and-branch now fuses even when the loop's exit runs
+  through several drop-flag tests. On x86-64, CPU time: nbody 1.42 s -> 1.16 s, xform_f32 1.08 ->
+  0.80, dot_f64 0.72 -> 0.62. A loop's slots now outweigh straight-line ones 16 to 1 (was 4), so a
+  loop bound gets a register before a drop flag does.
+- **Native backend: `f32` arithmetic in single precision.** A promoted `f32` local whose every
+  value comes from a widening (or is zero) is held as binary32, and an operation on two such values
+  that is rounded to `f32` at once (`addsd; cvtsd2ss; cvtss2sd`) is the single-precision one
+  (`addss`): exact for + - * / and sqrt, since 53 >= 2*24 + 2. Loads that feed anything else are
+  widened in place of the copy. `f32-held-as-binary32-in-registers` pins the results.
+
+- **Native backend: float operations are not calls.** `+ - * /`, comparisons, negation, `abs`,
+  `sqrt` and conversions from integers of up to 32 bits (and signed 64-bit to `f64`) are emitted in
+  line, and so is access to `f32[]`/`u32[]`/`i32[]` elements and to narrow fields of `extern "C"`
+  records (one emitter, `sized_load`/`sized_store`). The LLVM backend keeps the called forms its
+  lifter rewrites. One million `x[i] = x[i] * a + y[i]` over `f32[]` goes from 7.6 ms to about 4 ms
+  a pass. `float-operations-agree-across-backends` pins every operation over edge values. The LLVM
+  lifter also treats `rt_refine`, `rt_task_fail` and the other runtime exits as non-returning.
+- `bench/` has `xform_f32`, `xform_f64`, `dot_f32` and `dot_f64`, with a README.
+
+- **LLVM backend: a failed check no longer costs the loop it guards.** `rt_fail` and `rt_trap` never
+  return, and the lifter now says so (`unreachable` after the call), as it already did for
+  `rt_abort`. A checked access to an 8-byte element (`f64[]`, `u64[]`) used to leave a returning call
+  in the loop body, which clobbered every register the loop held. A one-million-element `x[i] =
+  x[i] * a + y[i]` pass over `f64[]` goes from about 1.3 ms to 0.64 ms, and the `f64` dot product
+  from 2.0 ms to 0.62 ms (scalar C: 0.65 ms).
+
+- **`f32` arithmetic on the native backend rounds in hardware.** Every `f32` result used to be
+  rounded by a runtime routine written with integer shifts and a division; it is now one narrowing
+  and one widening conversion on x86-64, aarch64 and riscv64. A one-million-element `x[i] = x[i] * a
+  + y[i]` pass over `f32[]` goes from 259 ms to 7.6 ms. Non-NaN results are bit-identical to before
+  (`f32-round-hardware-matches-reference` checks four million words on every target); a result that
+  is a NaN is a quiet NaN and its payload bits are not promised.
+
+- The LLVM backend builds programs for AArch64 and RISC-V again. A lifted function the stream
+  declares `.weak` (a generic instance, a drop helper) got a `.globl` entry thunk, which the
+  assembler rejects (`changed binding to STB_GLOBAL`); the thunk now keeps the weak binding. And
+  an AArch64 module is compiled with atomics inline (`-mno-outline-atomics`): clang's default
+  calls `__aarch64_cas8_acq_rel` in libgcc, which a Grail program does not link.
 
 - Fixed: an `extern "C"` call with no arguments that was the first thing in its function left the
   thread pointer on libc's side in a libc-linked program, so later runtime calls on that thread
@@ -53,6 +96,7 @@
     statement (11.3 s to 2.2 s on 26k lines).
   New in the language and library on the way: `u8[].append(bytes)`; `host::fork()` and
   `host::cpus()` (Linux). `docs/design/compile-speed.md` has every measurement.
+
 - **The native backend's optimiser follows jumps again.** Since 2026-11-13 it read no label a real
   build mints: `label_number` compared the whole label with the unit prefix instead of its opening,
   so every `.L<prefix>_<n>` was unnumbered, and a jump's operand was still read in the old
