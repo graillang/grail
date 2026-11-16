@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **Native backend: float operations are not calls.** `+ - * /`, comparisons, negation, `abs`,
+  `sqrt` and conversions from integers of up to 32 bits (and signed 64-bit to `f64`) are emitted in
+  line, and so is access to `f32[]`/`u32[]`/`i32[]` elements and to narrow fields of `extern "C"`
+  records (one emitter, `sized_load`/`sized_store`). The LLVM backend keeps the called forms its
+  lifter rewrites. One million `x[i] = x[i] * a + y[i]` over `f32[]` goes from 7.6 ms to about 4 ms
+  a pass. `float-operations-agree-across-backends` pins every operation over edge values. The LLVM
+  lifter also treats `rt_refine`, `rt_task_fail` and the other runtime exits as non-returning.
+- `bench/` has `xform_f32`, `xform_f64`, `dot_f32` and `dot_f64`, with a README.
+
 - **LLVM backend: a failed check no longer costs the loop it guards.** `rt_fail` and `rt_trap` never
   return, and the lifter now says so (`unreachable` after the call), as it already did for
   `rt_abort`. A checked access to an 8-byte element (`f64[]`, `u64[]`) used to leave a returning call

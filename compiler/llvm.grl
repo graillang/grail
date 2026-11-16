@@ -1914,6 +1914,16 @@ fn call_args<a>(l: (&a mut L)) -> u8[] {
     }
     return out;
 }
+// The runtime entries that end the process or abandon the calling stack, so nothing after a call to
+// one is reached: the check failures compiled code calls (`rt_fail`, `rt_trap`, `rt_refine`,
+// `rt_task_fail`), the reporters behind them, and the exits those end in. `rt_abort` is the same
+// kind and has its own cold stub in `lower_call`.
+fn never_returns<a>(target: &a [u8]) -> bool {
+    return eq(target, view("rt_fail")) || eq(target, view("rt_trap")) || eq(target, view("rt_refine"))
+        || eq(target, view("rt_task_fail")) || eq(target, view("rt_fail_text")) || eq(target, view("rt_report_die"))
+        || eq(target, view("rt_abort_final")) || eq(target, view("rt_abort_park")) || eq(target, view("rt_hard_exit"))
+        || eq(target, view("rt_stack_overflow")) || eq(target, view("rt_stack_overflow_at"));
+}
 fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> unit {
     if (target.len() == 0) || (target[0] == 42) {
         bad(&mut l);
@@ -2040,7 +2050,7 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
     put(&mut c, target);
     put(&mut c, view("\"({})"));
     pair := def(&mut l, view(c), &u8[][args]);
-    if eq(target, view("rt_fail")) || eq(target, view("rt_trap")) {
+    if never_returns(target) {
         // A failed check reports and never comes back: it ends the process, or abandons this
         // stack for the scheduler's (rt_contain_tail). Saying so keeps the failure arm out of the
         // loop it guards - a returning call there clobbers every register the loop holds, which
