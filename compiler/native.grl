@@ -11664,7 +11664,7 @@ fn tuple_element_bind<a, b>(c: (&a mut C), names: (&b u8[][]), ty: u64, slot: u6
     source := place_of(&mut c, slot);
     for i in names.len() {
         fty := field_type(&mut c, base, i);
-        part := rec_load(&mut c, slot, i, 0);
+        part := field_load(&mut c, slot, base, i, 0);
         own(&mut c, part, fty);
         dest := place_of(&mut c, part);
         if contains_borrow(&mut c, fty, 0) {
@@ -11699,7 +11699,7 @@ fn tuple_destructure<a>(c: (&a mut C)) -> unit {
     source := place_of(&mut c, held.t);
     for i in names.len() {
         fty := field_type(&mut c, ty, i);
-        part := rec_load(&mut c, held.t, i, 0);
+        part := field_load(&mut c, held.t, ty, i, 0);
         own(&mut c, part, fty);
         dest := place_of(&mut c, part);
         if contains_borrow(&mut c, fty, 0) {
@@ -11775,7 +11775,7 @@ fn record_destructure<a>(c: (&a mut C)) -> unit {
     source := place_of(&mut c, held.t);
     for i in names.len() {
         fty := field_type(&mut c, ty, slots[i]);
-        part := rec_load(&mut c, held.t, slots[i], 0);
+        part := field_load(&mut c, held.t, ty, slots[i], 0);
         own(&mut c, part, fty);
         dest := place_of(&mut c, part);
         if contains_borrow(&mut c, fty, 0) {
@@ -20240,6 +20240,18 @@ fn rec_store<a>(c: (&a mut C), base: u64, k: u64, value: u64) -> unit {
     o(&mut c, view("(%rcx)\n"));
     return ();
 }
+// The word of a record a field starts at. Every field is one word today, so it is the field's
+// index; it is asked here, by type, so that a record whose fields are not all one word
+// (docs/design/unboxed-values.md, stage 1b) changes this answer and not the sites that read, bind,
+// compare, print or drop a field. Enum tags and payloads, closure objects and `dyn` cells are words
+// by position and keep calling rec_load/rec_store directly.
+fn field_word<a>(c: (&a mut C), ty: u64, k: u64) -> u64 {
+    return k;
+}
+fn field_load<a>(c: (&a mut C), base: u64, ty: u64, k: u64, address: u64) -> u64 {
+    word := field_word(&mut c, ty, k);
+    return rec_load(&mut c, base, word, address);
+}
 // C-layout field access: exact byte offset, exact field width. Fields narrower than
 // eight bytes use portable byte-wise helpers so every target stays correct without
 // new instruction selection.
@@ -21287,7 +21299,7 @@ fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
             exchange(&mut c.cfield_more, more);
             n = cfield_load(&mut c, b, d, k, last);
         } else {
-            n = rec_load(&mut c, b, k, last);
+            n = field_load(&mut c, b, base.ty, k, last);
         }
         if last {
             ty := reference_type(&mut c, fty, address == 2);
@@ -21918,10 +21930,10 @@ fn structural_eq<a>(c: (&a mut C), x: u64, y: u64, ty: u64, depth: u64) -> u64 {
                     observe(&mut c, a);
                     b = cfield_load(&mut c, y, d, i, 0);
                 } else {
-                    a = rec_load(&mut c, x, i, 0);
+                    a = field_load(&mut c, x, ty, i, 0);
                     alias_field(&mut c, a, fty, x, i, 1);
                     observe(&mut c, a);
-                    b = rec_load(&mut c, y, i, 0);
+                    b = field_load(&mut c, y, ty, i, 0);
                 }
                 alias_field(&mut c, b, fty, y, i, 1);
                 observe(&mut c, b);
@@ -25289,7 +25301,7 @@ fn record_text<a>(c: (&a mut C), acc: u64, value: u64, ty: u64, depth: u64) -> b
             format_raw(&mut c, acc, view(label_text));
         }
         fty := field_type(&mut c, ty, i);
-        part := rec_load(&mut c, value, i, 0);
+        part := field_load(&mut c, value, ty, i, 0);
         code := element_code(&mut c, fty);
         if code != 0 {
             cv := imm(&mut c, code);
@@ -30887,7 +30899,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         if ty_kind(&mut c, ft) != 12 {
             fail(&mut c, view("record field is not callable"));
         }
-        slot := rec_load(&mut c, xt, field, 0);
+        slot := field_load(&mut c, xt, xty, field, 0);
         projected := alias_field(&mut c, slot, ft, xt, field, 0);
         return indirect_call(&mut c, projected, 1);
     }
@@ -36607,10 +36619,10 @@ fn record_match<a>(c: (&a mut C), sslot: u64, sty: u64, x: Val, byref: u64, refm
         fty := field_type(&mut c, xty, k);
         if byref != 0 {
             if scalar(&mut c, fty) {
-                value := rec_load(&mut c, xt, k, 0);
+                value := field_load(&mut c, xt, xty, k, 0);
                 bind(&mut c, binder, fty, value, 0);
             } else {
-                n := rec_load(&mut c, xt, k, 1);
+                n := field_load(&mut c, xt, xty, k, 1);
                 refty := reference_type(&mut c, fty, refmode);
                 target := member_place(&mut c, root, k, fty);
                 authority := authority_of(&mut c, xt);
@@ -36633,7 +36645,7 @@ fn record_match<a>(c: (&a mut C), sslot: u64, sty: u64, x: Val, byref: u64, refm
                 bind(&mut c, binder, r.ty, r.t, 0);
             }
         } else {
-            payload := rec_load(&mut c, xt, k, 0);
+            payload := field_load(&mut c, xt, xty, k, 0);
             if scalar(&mut c, fty) {
                 bind(&mut c, binder, fty, payload, 0);
             } else {
@@ -36678,7 +36690,7 @@ fn record_match<a>(c: (&a mut C), sslot: u64, sty: u64, x: Val, byref: u64, refm
             if used == 0 {
                 fty := field_type(&mut c, xty, k);
                 if needs_drop(&mut c, fty) {
-                    value := rec_load(&mut c, xt, k, 0);
+                    value := field_load(&mut c, xt, xty, k, 0);
                     get(&mut c, value, view("%rdi"));
                     drop_call(&mut c, fty);
                 }
@@ -36739,7 +36751,7 @@ fn record_member<a, b>(c: (&a mut C), base: Val, name: &b [u8]) -> Val {
     d := ty_arg(&mut c, base.ty);
     k := find_field(&mut c, d, view(name));
     fty := field_type(&mut c, base.ty, k);
-    n := rec_load(&mut c, base.t, k, 0);
+    n := field_load(&mut c, base.t, base.ty, k, 0);
     alias_field(&mut c, n, fty, base.t, k, 0);
     observe(&mut c, n);
     return val(n, fty);
@@ -38864,7 +38876,7 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                                 mark(&mut c, skip);
                             } else {
                                 o(&mut c, view("movq "));
-                                on(&mut c, i * 8);
+                                on(&mut c, field_word(&mut c, ty, i) * 8);
                                 o(&mut c, view("(%r12),%rdi\n"));
                                 drop_call(&mut c, t);
                             }
