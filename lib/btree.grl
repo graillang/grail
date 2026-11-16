@@ -46,19 +46,17 @@ pub struct BTreeMap<K: order::Ord, V> {
 fn take_tail<a, T>(items: (&a mut T[]), keep: u64) -> T[] {
     mut back = T[];
     while items.len() > keep {
-        back.push(items.pop());
+        back.push(items.pop()!);
     }
     mut out = T[];
-    while back.len() > 0 {
-        out.push(back.pop());
-    }
+    while let Some(popped) = back.pop() { out.push(popped); }
     return out;
 }
 
 // Moves the element at `index` out, shifting the elements after it down: O(node size).
 fn take_at<a, T>(items: (&a mut T[]), index: u64) -> T {
     rest := take_tail(items, index + 1);
-    taken := items.pop();
+    taken := items.pop()!;
     append(items, rest);
     return taken;
 }
@@ -67,12 +65,8 @@ fn take_at<a, T>(items: (&a mut T[]), index: u64) -> T {
 fn append<T>(items: (&mut T[]), source: T[]) {
     mut src = source;
     mut back = T[];
-    while src.len() > 0 {
-        back.push(src.pop());
-    }
-    while back.len() > 0 {
-        items.push(back.pop());
-    }
+    while let Some(popped) = src.pop() { back.push(popped); }
+    while let Some(popped) = back.pop() { items.push(popped); }
 }
 
 // Inserts `value` before the first element: O(node size).
@@ -136,8 +130,7 @@ fn locate<K: order::Ord, V>(node: (&Node<K, V>), key: (&K)) -> (u64, u64, u64, u
 
 // A fresh node, reusing a released one when there is one. `leaf` is 1 or 0.
 fn alloc_node<K: order::Ord, V>(map: (&mut BTreeMap<K, V>), leaf: u64) -> u64 {
-    if map.free.len() > 0 {
-        index := map.free.pop();
+    if let Some(index) = map.free.pop() {
         node := &mut map.nodes[index];
         node.leaf = leaf;
         node.keys.clear();
@@ -175,9 +168,9 @@ fn split_child<K: order::Ord, V>(map: (&mut BTreeMap<K, V>), parent: u64, at: u6
     mut tail_children = u64[];
     node := &mut map.nodes[child];
     tail_keys = take_tail(&mut node.keys, SPLIT_AT + 1);
-    middle_key = Some(node.keys.pop());
+    middle_key = Some(node.keys.pop()!);
     tail_values = take_tail(&mut node.values, SPLIT_AT + 1);
-    middle_value = Some(node.values.pop());
+    middle_value = Some(node.values.pop()!);
     if leaf == 0 {
         tail_children = take_tail(&mut node.children, SPLIT_AT + 1);
     }
@@ -400,11 +393,11 @@ fn borrow_left<K: order::Ord, V>(map: (&mut BTreeMap<K, V>), parent: u64, at: u6
     down_key := take_at(&mut pnode.keys, at - 1);
     down_value := take_at(&mut pnode.values, at - 1);
     lnode := &mut map.nodes[sibling];
-    up_key := lnode.keys.pop();
-    up_value := lnode.values.pop();
+    up_key := lnode.keys.pop()!;
+    up_value := lnode.values.pop()!;
     mut moved_child = 0;
     if inner == 0 {
-        moved_child = lnode.children.pop();
+        moved_child = lnode.children.pop()!;
     }
     cnode := &mut map.nodes[child];
     push_front(&mut cnode.keys, down_key);
@@ -671,8 +664,8 @@ impl<K: order::Ord, V> BTreeMap<K, V> {
         for i in held {
             node := &mut self.nodes[i];
             while node.keys.len() > 0 {
-                values.push(node.values.pop());
-                keys.push(node.keys.pop());
+                values.push(node.values.pop()!);
+                keys.push(node.keys.pop()!);
             }
             node.children.clear();
             node.leaf = 1;
@@ -682,8 +675,8 @@ impl<K: order::Ord, V> BTreeMap<K, V> {
         self.root = 0;
         self.count = 0;
         while keys.len() > 0 {
-            key := keys.pop();
-            value := values.pop();
+            key := keys.pop()!;
+            value := values.pop()!;
             self.insert(key, value);
         }
         return ();
@@ -734,8 +727,8 @@ fn step_cursor<a, K: order::Ord, V>(walk: (&mut Cursor<a, K, V>)) -> ((&a K), (&
             }
             return Some((&node.keys[pos], &node.values[pos]));
         }
-        walk.path.pop();
-        walk.slots.pop();
+        walk.path.pop()!;
+        walk.slots.pop()!;
     }
     return None;
 }

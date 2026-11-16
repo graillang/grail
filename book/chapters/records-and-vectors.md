@@ -16,7 +16,10 @@ also lead the literal: `T[]` creates an empty vector, `u64[10, 20, 30]` initiali
 no element, so it is accepted only where a vector type is expected. A `[` that follows an expression
 is still indexing: `v[0]`, `f()[0]`. Owned elements (strings, vectors, records
 that own data) cannot be repeated, since each copy would share one owner; build those with `push`.
-`values.push(value)` consumes an element, and `values.pop()` removes and returns the last element.
+`values.push(value)` consumes an element, and `values.pop()` takes the last one off as an option:
+`Some(element)`, or `None` when the vector is empty, so `while let Some(x) = values.pop() { ... }`
+empties it and `if let Some(x) = values.pop()` handles both cases. `values.pop()!` insists there
+is one, and stops the program with `pop from an empty vector` when there is not.
 
 {{example:vectors}}
 

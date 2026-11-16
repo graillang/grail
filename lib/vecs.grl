@@ -9,8 +9,8 @@ use order;
 // storage, so each body first moves it into a `mut` binding and calls that.
 pub fn map<T,U>(items:T[],f:FnMut(T)->U)->U[]{
     mut call=f;
-    mut source=items;mut reversed=T[];while source.len()!=0{reversed.push(source.pop());}
-    mut out=U[];while reversed.len()!=0{out.push(call(reversed.pop()));}return out;
+    mut source=items;mut reversed=T[];while let Some(popped) = source.pop() { reversed.push(popped); }
+    mut out=U[];while let Some(popped) = reversed.pop() { out.push(call(popped)); }return out;
 }
 // fold consumes the vector and moves each element into `step` in order, so it works for any
 // element type. The predicate helpers below take u64 elements by value and filter_nums consumes
@@ -19,8 +19,8 @@ pub fn map<T,U>(items:T[],f:FnMut(T)->U)->U[]{
 // so a mutating predicate sees exactly the elements up to and including that one.
 pub fn fold<T,A>(items:T[],initial:A,step:FnMut(A,T)->A)->A{
     mut call=step;
-    mut source=items;mut reversed=T[];while source.len()!=0{reversed.push(source.pop());}
-    mut acc=initial;while reversed.len()!=0{acc=call(acc,reversed.pop());}return acc;
+    mut source=items;mut reversed=T[];while let Some(popped) = source.pop() { reversed.push(popped); }
+    mut acc=initial;while let Some(popped) = reversed.pop() { acc = call(acc, popped); }return acc;
 }
 pub fn any_num<a>(items:(&a u64[]),test:FnMut(u64)->bool)->bool{mut call=test;for x in items{if call(*x){return true;}}return false;}
 pub fn all_num<a>(items:(&a u64[]),test:FnMut(u64)->bool)->bool{mut call=test;for x in items{if !call(*x){return false;}}return true;}
@@ -33,9 +33,9 @@ pub fn filter_nums(items:u64[],keep:FnMut(u64)->bool)->u64[]{
 pub fn sum(items:u64[])->u64{mut total=0;for x in items{total+=x;}return total;}
 pub fn max_num(items:u64[])->u64{assert(items.len()!=0);mut best=items[0];for x in items{if x>best{best=x;}}return best;}
 pub fn reverse<a,T>(items:(&a mut T[])){
-    mut taken=T[];while items.len()!=0{taken.push(items.pop());}
-    mut back=T[];while taken.len()!=0{back.push(taken.pop());}
-    while back.len()!=0{items.push(back.pop());}
+    mut taken=T[];while let Some(popped) = items.pop() { taken.push(popped); }
+    mut back=T[];while let Some(popped) = taken.pop() { back.push(popped); }
+    while let Some(popped) = back.pop() { items.push(popped); }
 }
 // In-place merge-free insertion sort for numbers (stable, O(n^2); fine for small vectors).
 pub fn sort_nums<a>(items:(&a mut u64[])){
@@ -48,20 +48,20 @@ pub fn contains<a,b,T:hash::Equal>(items:(&a T[]),wanted:(&b T))->bool{
 
 // Stable merge sort for any element type with an order::Ord implementation; elements are moved,
 // never copied. O(n log n).
-fn reversed<T>(items:T[])->T[]{mut source=items;mut out=T[];while source.len()!=0{out.push(source.pop());}return out;}
+fn reversed<T>(items:T[])->T[]{mut source=items;mut out=T[];while let Some(popped) = source.pop() { out.push(popped); }return out;}
 fn merge_sorted<T:order::Ord>(items:T[])->T[]{
     if items.len()<2{return items;}
     mut left=items;half:=left.len()/2;mut right_rev=T[];
-    while left.len()>half{right_rev.push(left.pop());}
+    while left.len()>half{right_rev.push(left.pop()!);}
     mut a=merge_sorted(left);mut b=merge_sorted(reversed(right_rev));
     // Take the larger tail element each time (ties prefer the right half) to build a reversed
     // result, then reverse it; this keeps equal elements in their original order.
     mut out_rev=T[];
     while (a.len()!=0)&&(b.len()!=0){
         take_left:=order::less(&b[b.len()-1],&a[a.len()-1]);
-        if take_left{out_rev.push(a.pop());}else{out_rev.push(b.pop());}
+        if take_left{out_rev.push(a.pop()!);}else{out_rev.push(b.pop()!);}
     }
-    while a.len()!=0{out_rev.push(a.pop());}while b.len()!=0{out_rev.push(b.pop());}
+    while let Some(popped) = a.pop() { out_rev.push(popped); }while let Some(popped) = b.pop() { out_rev.push(popped); }
     return reversed(out_rev);
 }
 pub fn sort<a,T:order::Ord>(items:(&a mut T[])){taken:=exchange(items,T[]);sorted:=merge_sorted(taken);exchange(items,sorted);}

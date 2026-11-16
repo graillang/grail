@@ -9,7 +9,7 @@ fn main() {
     mut data = u8[10, 20, 30];
     data.push(40);
     println(data[1]);
-    println(data.pop());
+    println(data.pop()!);
 }
 ```
 

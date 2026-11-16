@@ -2,7 +2,7 @@
 
 `u8[]` creates an empty owned growable byte sequence; `u8[10, 20, 30]` initializes one directly,
 and `u8[0; n]` makes `n` copies of one byte (a value above 255 stops the program).
-`data.push(byte)` appends a byte, `data.pop()` removes the last byte, and `data.len()` reports its
+`data.push(byte)` appends a byte, `data.pop()` takes the last byte off as an option (`data.pop()!` when there must be one), and `data.len()` reports its
 length. Read an individual byte with `data[index]`.
 
 {{example:bytes}}

@@ -1,5 +1,18 @@
 ## Unreleased
 
+- **`pop()` returns an option.** `v.pop()` on a vector or a byte vector is `T?`: `Some(element)`, or
+  `None` when there is nothing to take, so `while let Some(x) = v.pop() { .. }` and `if let Some(x)
+  = v.pop()` replace a length test followed by a pop. `v.pop()!` is the old behaviour - the element,
+  or the program stops with `pop from an empty vector` - and compiles to exactly the code it always
+  did (no option is built). A discarded `v.pop();` on an empty vector now does nothing instead of
+  aborting. **This changes existing code:** a `pop()` whose result is used as the element needs a
+  `!` or a pattern. In this repository 125 sites were read: 17 became a pattern (`while let` over
+  the stdlib's move loops in `vecs`, `btree`, `pool`, `iter`; `collections::pop` is now the builtin
+  itself), and the rest take `!` because the surrounding code had already established the
+  collection is not empty. A type mismatch against an option now spells it `u64?` rather than
+  `result::Option<u64>`. Cases `pop-returns-option`, `pop-insisting-on-empty-aborts`,
+  `pop-option-is-not-the-element`.
+
 - **A record prints.** `println(p)` and `format("{}", p)` on a record with no `show` method write its
   name and fields in declaration order - `Point { x: 1, name: "a" }` - a tuple prints as it is
   written (`(1, "x")`), and nested records and vectors print inside. A type with no form (an enum

@@ -265,7 +265,8 @@ vector type the context expects), `T[...]` with the element type leading, `[v; n
 and `["key": value]` for a map - the colon is what makes it a map. The empty forms `[]` and `[:]`
 name no element and need an expected type; `T[]` and `[K: V]()` say it themselves. A `[` after an
 expression is indexing. Use postfix `.push(value)`, `.pop()`, `.len()`, `.copy()` and `.text()`;
-strings append with `.append(source)`. Generic user functions and types are checked and specialized
+strings append with `.append(source)`. `.pop()` answers `T?` - `None` from an empty collection -
+and `.pop()!` insists. Generic user functions and types are checked and specialized
 by the Grail-written compiler.
 
 `true` and `false` are reserved numeric truth literals (one and zero). Generic type parameters
