@@ -7745,8 +7745,9 @@ fn pv_u64_term<a, b>(c: (&a mut C), t: &b [u8]) -> bool {
     return field_type(&mut c, ty, idx - 1) == 0;
 }
 // The no-wrap condition of `t + o`, from the facts. For `o > 0` it is `NW+`: some `u64` term `y` in
-// the facts has `t <= y - o`, and every `u64` is at most `2^64 - 1`, so `t + o` is too. For `o < 0`
-// it is `NW-`: the facts give the literal bound `-o <= t`.
+// the facts has `t <= y - o`, and every `u64` is at most `2^64 - 1`, so `t + o` is too; or `t` is at
+// most a literal the facts name. For `o < 0` it is `NW-`: the facts give the literal bound
+// `-o <= t`.
 fn pv_nw<a, b>(c: (&a mut C), facts: (&a Atom[]), t: &b [u8], o: i64) -> bool {
     if o == 0 {
         return true;
@@ -7774,7 +7775,13 @@ fn pv_nw<a, b>(c: (&a mut C), facts: (&a Atom[]), t: &b [u8], o: i64) -> bool {
             if !pv_u64_term(&mut c, view(y)) {
                 continue;
             }
-            if pv_implies(&facts, 1, view(t), view(y), 0 - o) {
+            // A literal bound needs no room below it: the prover's literals and constants have at
+            // most fifteen digits (pv_digits), so `t <= L` already puts `t + o` far below `2^64`.
+            mut room = 0 - o;
+            if pv_digits(view(y)) {
+                room = 0;
+            }
+            if pv_implies(&facts, 1, view(t), view(y), room) {
                 return true;
             }
         }
@@ -28899,6 +28906,13 @@ fn int_binary<a>(c: (&a mut C), k: u64, left: u64, right: u64, ty: u64) -> Val {
             }
         }
         return val(save(&mut c), ty);
+    }
+    // What a trapping build checks inline above is a failure in this build too, recorded the same
+    // way so both report it alike (fx_would_trap).
+    if !checked {
+        if ((k == 43 || k == 45 || k == 42) && bits < 64) || ((k == 43 || k == 45) && bits == 64 && signed != 0) || (k == 47 || k == 37) {
+            fx_would_trap(&mut c, view("rt_abort"));
+        }
     }
     code := int_code(&mut c, ty);
     op := imm(&mut c, k);

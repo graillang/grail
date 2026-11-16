@@ -10756,15 +10756,10 @@
     "note": "`get(&v, v.len() - 1)`: one term on both sides is a statement about the constant alone, and `.len()` in an argument calls nothing"
   },
   {
-    "name": "refinement-argument-offset-wrap-build-unproved",
+    "name": "refinement-argument-offset-wrap-build-proved",
     "source": "@strict;\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn main() {\n    v := u64[1, 2, 3];\n    mut i = 0;\n    mut t = 0;\n    while i + 1 < v.len() {\n        t += get(&v, i + 1);\n        i += 1;\n    }\n    println(t);\n}\n",
-    "reject": true,
-    "flags": [
-      "--overflow=wrap"
-    ],
-    "diagnostic": [
-      "cannot prove the refinement `i < v.len()`"
-    ],
+    "stdout": "5\n",
+    "overflow": "wrap",
     "targets": [
       "x86_64",
       "aarch64",
@@ -10773,7 +10768,7 @@
     "backends": [
       "native"
     ],
-    "note": "in a wrap build `i + 1` can wrap, so an offset is not read there: the same program is refused under @strict"
+    "note": "a wrap build proves what a checked build proves: `i + 1` is one opaque term in the guard and in the argument, so @strict accepts the program in both"
   },
   {
     "name": "refinement-field-path-proved",
@@ -10972,5 +10967,1232 @@
       "riscv64"
     ],
     "note": "the result of `pop()` is an option, spelled the way it is written"
+  },
+  {
+    "name": "refinement-wrap-opaque-term-matches",
+    "source": "@strict;\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn main() {\n    v := u64[1, 2, 3];\n    mut i = 0;\n    mut t = 0;\n    while i + 1 < v.len() {\n        t += get(&v, i + 1);\n        i += 1;\n    }\n    println(t);\n}\n",
+    "stdout": "5\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`i + 1` may wrap, so it is the opaque term `i+1`: the guard's fact and the argument name the same value, and that is the whole proof in either overflow mode"
+  },
+  {
+    "name": "refinement-wrap-opaque-term-matches-wrap",
+    "source": "@strict;\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn main() {\n    v := u64[1, 2, 3];\n    mut i = 0;\n    mut t = 0;\n    while i + 1 < v.len() {\n        t += get(&v, i + 1);\n        i += 1;\n    }\n    println(t);\n}\n",
+    "stdout": "5\n",
+    "overflow": "wrap",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`i + 1` may wrap, so it is the opaque term `i+1`: the guard's fact and the argument name the same value, and that is the whole proof in either overflow mode"
+  },
+  {
+    "name": "refinement-wrap-opaque-term-matches-verify-facts",
+    "source": "@strict;\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn main() {\n    v := u64[1, 2, 3];\n    mut i = 0;\n    mut t = 0;\n    while i + 1 < v.len() {\n        t += get(&v, i + 1);\n        i += 1;\n    }\n    println(t);\n}\n",
+    "stdout": "5\n",
+    "flags": [
+      "--verify-facts"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`i + 1` may wrap, so it is the opaque term `i+1`: the guard's fact and the argument name the same value, and that is the whole proof in either overflow mode"
+  },
+  {
+    "name": "refinement-wrap-opaque-term-matches-verify-facts-wrap",
+    "source": "@strict;\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn main() {\n    v := u64[1, 2, 3];\n    mut i = 0;\n    mut t = 0;\n    while i + 1 < v.len() {\n        t += get(&v, i + 1);\n        i += 1;\n    }\n    println(t);\n}\n",
+    "stdout": "5\n",
+    "flags": [
+      "--verify-facts"
+    ],
+    "overflow": "wrap",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`i + 1` may wrap, so it is the opaque term `i+1`: the guard's fact and the argument name the same value, and that is the whole proof in either overflow mode"
+  },
+  {
+    "name": "refinement-wrap-subtraction-normalised",
+    "source": "@strict;\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn main() {\n    v := u64[1, 2, 3];\n    mut t = 0;\n    for i in v.len() {\n        if i > 0 {\n            t += get(&v, i - 1);\n        }\n    }\n    println(t);\n}\n",
+    "stdout": "3\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`0 < i` shows `i - 1` cannot wrap (NW-), so it is `i` with offset -1 and `i - 1 < v.len()` follows from `i < v.len()`"
+  },
+  {
+    "name": "refinement-wrap-subtraction-normalised-wrap",
+    "source": "@strict;\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn main() {\n    v := u64[1, 2, 3];\n    mut t = 0;\n    for i in v.len() {\n        if i > 0 {\n            t += get(&v, i - 1);\n        }\n    }\n    println(t);\n}\n",
+    "stdout": "3\n",
+    "overflow": "wrap",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`0 < i` shows `i - 1` cannot wrap (NW-), so it is `i` with offset -1 and `i - 1 < v.len()` follows from `i < v.len()`"
+  },
+  {
+    "name": "refinement-wrap-subtraction-normalised-verify-facts",
+    "source": "@strict;\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn main() {\n    v := u64[1, 2, 3];\n    mut t = 0;\n    for i in v.len() {\n        if i > 0 {\n            t += get(&v, i - 1);\n        }\n    }\n    println(t);\n}\n",
+    "stdout": "3\n",
+    "flags": [
+      "--verify-facts"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`0 < i` shows `i - 1` cannot wrap (NW-), so it is `i` with offset -1 and `i - 1 < v.len()` follows from `i < v.len()`"
+  },
+  {
+    "name": "refinement-wrap-subtraction-normalised-verify-facts-wrap",
+    "source": "@strict;\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn main() {\n    v := u64[1, 2, 3];\n    mut t = 0;\n    for i in v.len() {\n        if i > 0 {\n            t += get(&v, i - 1);\n        }\n    }\n    println(t);\n}\n",
+    "stdout": "3\n",
+    "flags": [
+      "--verify-facts"
+    ],
+    "overflow": "wrap",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`0 < i` shows `i - 1` cannot wrap (NW-), so it is `i` with offset -1 and `i - 1 < v.len()` follows from `i < v.len()`"
+  },
+  {
+    "name": "refinement-wrap-length-minus-one",
+    "source": "@strict;\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn main() {\n    v := u64[1, 2, 3];\n    if v.len() > 0 {\n        println(get(&v, v.len() - 1));\n    }\n}\n",
+    "stdout": "3\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`v.len() > 0` shows `v.len() - 1` cannot wrap, and `v.len - 1 < v.len` is a statement about the constant alone"
+  },
+  {
+    "name": "refinement-wrap-length-minus-one-wrap",
+    "source": "@strict;\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn main() {\n    v := u64[1, 2, 3];\n    if v.len() > 0 {\n        println(get(&v, v.len() - 1));\n    }\n}\n",
+    "stdout": "3\n",
+    "overflow": "wrap",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`v.len() > 0` shows `v.len() - 1` cannot wrap, and `v.len - 1 < v.len` is a statement about the constant alone"
+  },
+  {
+    "name": "refinement-wrap-length-minus-one-verify-facts",
+    "source": "@strict;\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn main() {\n    v := u64[1, 2, 3];\n    if v.len() > 0 {\n        println(get(&v, v.len() - 1));\n    }\n}\n",
+    "stdout": "3\n",
+    "flags": [
+      "--verify-facts"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`v.len() > 0` shows `v.len() - 1` cannot wrap, and `v.len - 1 < v.len` is a statement about the constant alone"
+  },
+  {
+    "name": "refinement-wrap-length-minus-one-verify-facts-wrap",
+    "source": "@strict;\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn main() {\n    v := u64[1, 2, 3];\n    if v.len() > 0 {\n        println(get(&v, v.len() - 1));\n    }\n}\n",
+    "stdout": "3\n",
+    "flags": [
+      "--verify-facts"
+    ],
+    "overflow": "wrap",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`v.len() > 0` shows `v.len() - 1` cannot wrap, and `v.len - 1 < v.len` is a statement about the constant alone"
+  },
+  {
+    "name": "refinement-wrap-addition-normalised",
+    "source": "@strict;\nfn take_le(a: u64, n: u64 where a <= n) -> u64 {\n    return n - a;\n}\nfn pick(v: &u64[], i: u64) -> u64 {\n    if i < v.len() {\n        return take_le(i + 1, v.len());\n    }\n    return 99;\n}\nfn main() {\n    v := u64[1, 2, 3];\n    println(pick(&v, 0));\n    println(pick(&v, 18446744073709551615));\n}\n",
+    "stdout": "2\n99\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`i < v.len()` shows `i + 1` cannot wrap (NW+: a larger u64 exists), so `i + 1 <= v.len()` is read over the integers"
+  },
+  {
+    "name": "refinement-wrap-addition-normalised-wrap",
+    "source": "@strict;\nfn take_le(a: u64, n: u64 where a <= n) -> u64 {\n    return n - a;\n}\nfn pick(v: &u64[], i: u64) -> u64 {\n    if i < v.len() {\n        return take_le(i + 1, v.len());\n    }\n    return 99;\n}\nfn main() {\n    v := u64[1, 2, 3];\n    println(pick(&v, 0));\n    println(pick(&v, 18446744073709551615));\n}\n",
+    "stdout": "2\n99\n",
+    "overflow": "wrap",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`i < v.len()` shows `i + 1` cannot wrap (NW+: a larger u64 exists), so `i + 1 <= v.len()` is read over the integers"
+  },
+  {
+    "name": "refinement-wrap-addition-normalised-verify-facts",
+    "source": "@strict;\nfn take_le(a: u64, n: u64 where a <= n) -> u64 {\n    return n - a;\n}\nfn pick(v: &u64[], i: u64) -> u64 {\n    if i < v.len() {\n        return take_le(i + 1, v.len());\n    }\n    return 99;\n}\nfn main() {\n    v := u64[1, 2, 3];\n    println(pick(&v, 0));\n    println(pick(&v, 18446744073709551615));\n}\n",
+    "stdout": "2\n99\n",
+    "flags": [
+      "--verify-facts"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`i < v.len()` shows `i + 1` cannot wrap (NW+: a larger u64 exists), so `i + 1 <= v.len()` is read over the integers"
+  },
+  {
+    "name": "refinement-wrap-addition-normalised-verify-facts-wrap",
+    "source": "@strict;\nfn take_le(a: u64, n: u64 where a <= n) -> u64 {\n    return n - a;\n}\nfn pick(v: &u64[], i: u64) -> u64 {\n    if i < v.len() {\n        return take_le(i + 1, v.len());\n    }\n    return 99;\n}\nfn main() {\n    v := u64[1, 2, 3];\n    println(pick(&v, 0));\n    println(pick(&v, 18446744073709551615));\n}\n",
+    "stdout": "2\n99\n",
+    "flags": [
+      "--verify-facts"
+    ],
+    "overflow": "wrap",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`i < v.len()` shows `i + 1` cannot wrap (NW+: a larger u64 exists), so `i + 1 <= v.len()` is read over the integers"
+  },
+  {
+    "name": "refinement-wrap-predicate-offset",
+    "source": "@strict;\nfn before(p: u64, n: u64 where p + 1 < n) -> u64 {\n    return n - p;\n}\nfn main() {\n    n := 10;\n    mut i = 0;\n    mut t = 0;\n    while i + 1 < n {\n        t += before(i, n);\n        i += 1;\n    }\n    for j in n {\n        if j > 0 {\n            if j < n {\n                t += before(j - 1, n);\n            }\n        }\n    }\n    println(t);\n}\n",
+    "stdout": "108\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a predicate with its own offset: called with a plain name it is the opaque `i+1` the guard stated; called with `j - 1` under `j > 0` the offsets cancel and `j < n` is what is owed"
+  },
+  {
+    "name": "refinement-wrap-predicate-offset-wrap",
+    "source": "@strict;\nfn before(p: u64, n: u64 where p + 1 < n) -> u64 {\n    return n - p;\n}\nfn main() {\n    n := 10;\n    mut i = 0;\n    mut t = 0;\n    while i + 1 < n {\n        t += before(i, n);\n        i += 1;\n    }\n    for j in n {\n        if j > 0 {\n            if j < n {\n                t += before(j - 1, n);\n            }\n        }\n    }\n    println(t);\n}\n",
+    "stdout": "108\n",
+    "overflow": "wrap",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a predicate with its own offset: called with a plain name it is the opaque `i+1` the guard stated; called with `j - 1` under `j > 0` the offsets cancel and `j < n` is what is owed"
+  },
+  {
+    "name": "refinement-wrap-predicate-offset-verify-facts",
+    "source": "@strict;\nfn before(p: u64, n: u64 where p + 1 < n) -> u64 {\n    return n - p;\n}\nfn main() {\n    n := 10;\n    mut i = 0;\n    mut t = 0;\n    while i + 1 < n {\n        t += before(i, n);\n        i += 1;\n    }\n    for j in n {\n        if j > 0 {\n            if j < n {\n                t += before(j - 1, n);\n            }\n        }\n    }\n    println(t);\n}\n",
+    "stdout": "108\n",
+    "flags": [
+      "--verify-facts"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a predicate with its own offset: called with a plain name it is the opaque `i+1` the guard stated; called with `j - 1` under `j > 0` the offsets cancel and `j < n` is what is owed"
+  },
+  {
+    "name": "refinement-wrap-predicate-offset-verify-facts-wrap",
+    "source": "@strict;\nfn before(p: u64, n: u64 where p + 1 < n) -> u64 {\n    return n - p;\n}\nfn main() {\n    n := 10;\n    mut i = 0;\n    mut t = 0;\n    while i + 1 < n {\n        t += before(i, n);\n        i += 1;\n    }\n    for j in n {\n        if j > 0 {\n            if j < n {\n                t += before(j - 1, n);\n            }\n        }\n    }\n    println(t);\n}\n",
+    "stdout": "108\n",
+    "flags": [
+      "--verify-facts"
+    ],
+    "overflow": "wrap",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a predicate with its own offset: called with a plain name it is the opaque `i+1` the guard stated; called with `j - 1` under `j > 0` the offsets cancel and `j < n` is what is owed"
+  },
+  {
+    "name": "refinement-wrap-literal-bound",
+    "source": "@strict;\nfn take_lt(i: u64, n: u64 where i < n) -> u64 {\n    return n - i;\n}\nfn f(i: u64) -> u64 {\n    if i < 10 {\n        return take_lt(i + 5, 20);\n    }\n    return 0;\n}\nfn main() {\n    println(f(3));\n}\n",
+    "stdout": "12\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a literal upper bound shows the addition cannot wrap: `i < 10` makes `i + 5` the integer it looks like"
+  },
+  {
+    "name": "refinement-wrap-literal-bound-wrap",
+    "source": "@strict;\nfn take_lt(i: u64, n: u64 where i < n) -> u64 {\n    return n - i;\n}\nfn f(i: u64) -> u64 {\n    if i < 10 {\n        return take_lt(i + 5, 20);\n    }\n    return 0;\n}\nfn main() {\n    println(f(3));\n}\n",
+    "stdout": "12\n",
+    "overflow": "wrap",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a literal upper bound shows the addition cannot wrap: `i < 10` makes `i + 5` the integer it looks like"
+  },
+  {
+    "name": "refinement-wrap-literal-bound-verify-facts",
+    "source": "@strict;\nfn take_lt(i: u64, n: u64 where i < n) -> u64 {\n    return n - i;\n}\nfn f(i: u64) -> u64 {\n    if i < 10 {\n        return take_lt(i + 5, 20);\n    }\n    return 0;\n}\nfn main() {\n    println(f(3));\n}\n",
+    "stdout": "12\n",
+    "flags": [
+      "--verify-facts"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a literal upper bound shows the addition cannot wrap: `i < 10` makes `i + 5` the integer it looks like"
+  },
+  {
+    "name": "refinement-wrap-literal-bound-verify-facts-wrap",
+    "source": "@strict;\nfn take_lt(i: u64, n: u64 where i < n) -> u64 {\n    return n - i;\n}\nfn f(i: u64) -> u64 {\n    if i < 10 {\n        return take_lt(i + 5, 20);\n    }\n    return 0;\n}\nfn main() {\n    println(f(3));\n}\n",
+    "stdout": "12\n",
+    "flags": [
+      "--verify-facts"
+    ],
+    "overflow": "wrap",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a literal upper bound shows the addition cannot wrap: `i < 10` makes `i + 5` the integer it looks like"
+  },
+  {
+    "name": "refinement-wrap-subtraction-unbounded-strict",
+    "source": "@strict;\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn at(v: &u64[], i: u64) -> u64 {\n    if i < v.len() {\n        return get(&v, i - 1);\n    }\n    return 0;\n}\nfn main() {\n    v := u64[1, 2, 3];\n    println(at(&v, 2));\n    println(at(&v, 0));\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot prove the refinement `i < v.len()`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`i < v.len()` alone does not bound `i - 1`: with `i == 0` the argument is 2^64-1"
+  },
+  {
+    "name": "refinement-wrap-subtraction-unbounded-strict-wrap",
+    "source": "@strict;\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn at(v: &u64[], i: u64) -> u64 {\n    if i < v.len() {\n        return get(&v, i - 1);\n    }\n    return 0;\n}\nfn main() {\n    v := u64[1, 2, 3];\n    println(at(&v, 2));\n    println(at(&v, 0));\n}\n",
+    "reject": true,
+    "flags": [
+      "--overflow=wrap"
+    ],
+    "diagnostic": [
+      "cannot prove the refinement `i < v.len()`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`i < v.len()` alone does not bound `i - 1`: with `i == 0` the argument is 2^64-1"
+  },
+  {
+    "name": "refinement-wrap-subtraction-unbounded-runtime-wrap",
+    "source": "fn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn at(v: &u64[], i: u64) -> u64 {\n    if i < v.len() {\n        return get(&v, i - 1);\n    }\n    return 0;\n}\nfn main() {\n    v := u64[1, 2, 3];\n    println(at(&v, 2));\n    println(at(&v, 0));\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "2\n",
+    "stderr": [
+      "error: refinement violated: i < v.len()\n --> ",
+      "input.grl:6:"
+    ],
+    "overflow": "wrap",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "with `i == 0` the argument wraps to 2^64-1 in a wrap build, and the check that was kept is what stops it"
+  },
+  {
+    "name": "refinement-wrap-both-sides-offset-strict",
+    "source": "@strict;\nfn take_lt(i: u64, n: u64 where i < n) -> u64 {\n    return n - i;\n}\nfn f(i: u64, n: u64) -> u64 {\n    if i + 1 < n + 1 {\n        return take_lt(i, n);\n    }\n    return 0;\n}\nfn main() {\n    println(f(1, 5));\n    println(f(18446744073709551615, 5));\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot prove the refinement `i < n`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`i + 1 < n + 1` is not `i < n` when nothing bounds either side: both sums are opaque terms"
+  },
+  {
+    "name": "refinement-wrap-both-sides-offset-strict-wrap",
+    "source": "@strict;\nfn take_lt(i: u64, n: u64 where i < n) -> u64 {\n    return n - i;\n}\nfn f(i: u64, n: u64) -> u64 {\n    if i + 1 < n + 1 {\n        return take_lt(i, n);\n    }\n    return 0;\n}\nfn main() {\n    println(f(1, 5));\n    println(f(18446744073709551615, 5));\n}\n",
+    "reject": true,
+    "flags": [
+      "--overflow=wrap"
+    ],
+    "diagnostic": [
+      "cannot prove the refinement `i < n`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`i + 1 < n + 1` is not `i < n` when nothing bounds either side: both sums are opaque terms"
+  },
+  {
+    "name": "refinement-wrap-both-sides-offset-runtime-wrap",
+    "source": "fn take_lt(i: u64, n: u64 where i < n) -> u64 {\n    return n - i;\n}\nfn f(i: u64, n: u64) -> u64 {\n    if i + 1 < n + 1 {\n        return take_lt(i, n);\n    }\n    return 0;\n}\nfn main() {\n    println(f(1, 5));\n    println(f(18446744073709551615, 5));\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "4\n",
+    "stderr": [
+      "error: refinement violated: i < n\n --> ",
+      "input.grl:6:"
+    ],
+    "overflow": "wrap",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`i == 2^64-1` makes `i + 1` wrap to 0, the condition is true and `i < n` is false: the kept check fires"
+  },
+  {
+    "name": "refinement-wrap-fact-after-assignment-strict",
+    "source": "@strict;\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn f(v: &u64[], start: u64, jump: u64) -> u64 {\n    mut i = start;\n    if i + 1 < v.len() {\n        i = jump;\n        return get(&v, i + 1);\n    }\n    return 0;\n}\nfn main() {\n    v := u64[1, 2, 3];\n    println(f(&v, 0, 0));\n    println(f(&v, 0, 7));\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot prove the refinement `i < v.len()`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "an opaque term mentions its base: assigning `i` ends the fact about `i+1`"
+  },
+  {
+    "name": "refinement-wrap-fact-after-assignment-strict-wrap",
+    "source": "@strict;\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn f(v: &u64[], start: u64, jump: u64) -> u64 {\n    mut i = start;\n    if i + 1 < v.len() {\n        i = jump;\n        return get(&v, i + 1);\n    }\n    return 0;\n}\nfn main() {\n    v := u64[1, 2, 3];\n    println(f(&v, 0, 0));\n    println(f(&v, 0, 7));\n}\n",
+    "reject": true,
+    "flags": [
+      "--overflow=wrap"
+    ],
+    "diagnostic": [
+      "cannot prove the refinement `i < v.len()`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "an opaque term mentions its base: assigning `i` ends the fact about `i+1`"
+  },
+  {
+    "name": "refinement-wrap-fact-after-assignment-runtime",
+    "source": "fn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn f(v: &u64[], start: u64, jump: u64) -> u64 {\n    mut i = start;\n    if i + 1 < v.len() {\n        i = jump;\n        return get(&v, i + 1);\n    }\n    return 0;\n}\nfn main() {\n    v := u64[1, 2, 3];\n    println(f(&v, 0, 0));\n    println(f(&v, 0, 7));\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "2\n",
+    "stderr": [
+      "error: refinement violated: i < v.len()\n --> ",
+      "input.grl:8:"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "the fact about `i+1` did not survive the assignment to `i`, so the check is still there for the second call"
+  },
+  {
+    "name": "refinement-wrap-fact-after-assignment-runtime-wrap",
+    "source": "fn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn f(v: &u64[], start: u64, jump: u64) -> u64 {\n    mut i = start;\n    if i + 1 < v.len() {\n        i = jump;\n        return get(&v, i + 1);\n    }\n    return 0;\n}\nfn main() {\n    v := u64[1, 2, 3];\n    println(f(&v, 0, 0));\n    println(f(&v, 0, 7));\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "2\n",
+    "stderr": [
+      "error: refinement violated: i < v.len()\n --> ",
+      "input.grl:8:"
+    ],
+    "overflow": "wrap",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "the fact about `i+1` did not survive the assignment to `i`, so the check is still there for the second call"
+  },
+  {
+    "name": "refinement-wrap-loop-write-kills-opaque-strict",
+    "source": "@strict;\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn f(v: &u64[], start: u64) -> u64 {\n    mut i = start;\n    mut t = 0;\n    if i + 1 < v.len() {\n        mut n = 0;\n        while n < 2 {\n            t += get(&v, i + 1);\n            i += 5;\n            n += 1;\n        }\n    }\n    return t;\n}\nfn main() {\n    v := u64[1, 2, 3];\n    println(f(&v, 0));\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot prove the refinement `i < v.len()`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a loop body that writes `i` kills the fact about the opaque `i+1` before the body is compiled"
+  },
+  {
+    "name": "refinement-wrap-loop-write-kills-opaque-strict-wrap",
+    "source": "@strict;\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn f(v: &u64[], start: u64) -> u64 {\n    mut i = start;\n    mut t = 0;\n    if i + 1 < v.len() {\n        mut n = 0;\n        while n < 2 {\n            t += get(&v, i + 1);\n            i += 5;\n            n += 1;\n        }\n    }\n    return t;\n}\nfn main() {\n    v := u64[1, 2, 3];\n    println(f(&v, 0));\n}\n",
+    "reject": true,
+    "flags": [
+      "--overflow=wrap"
+    ],
+    "diagnostic": [
+      "cannot prove the refinement `i < v.len()`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a loop body that writes `i` kills the fact about the opaque `i+1` before the body is compiled"
+  },
+  {
+    "name": "refinement-wrap-loop-write-kills-opaque-runtime",
+    "source": "fn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn f(v: &u64[], start: u64) -> u64 {\n    mut i = start;\n    mut t = 0;\n    if i + 1 < v.len() {\n        mut n = 0;\n        while n < 2 {\n            t += get(&v, i + 1);\n            i += 5;\n            n += 1;\n        }\n    }\n    return t;\n}\nfn main() {\n    v := u64[1, 2, 3];\n    println(f(&v, 0));\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "",
+    "stderr": [
+      "error: refinement violated: i < v.len()\n --> ",
+      "input.grl:10:"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "the second iteration reads `i + 1 == 6`: the loop rule dropped the fact, so the check is there to fire"
+  },
+  {
+    "name": "refinement-wrap-loop-write-kills-opaque-runtime-wrap",
+    "source": "fn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn f(v: &u64[], start: u64) -> u64 {\n    mut i = start;\n    mut t = 0;\n    if i + 1 < v.len() {\n        mut n = 0;\n        while n < 2 {\n            t += get(&v, i + 1);\n            i += 5;\n            n += 1;\n        }\n    }\n    return t;\n}\nfn main() {\n    v := u64[1, 2, 3];\n    println(f(&v, 0));\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "",
+    "stderr": [
+      "error: refinement violated: i < v.len()\n --> ",
+      "input.grl:10:"
+    ],
+    "overflow": "wrap",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "the second iteration reads `i + 1 == 6`: the loop rule dropped the fact, so the check is there to fire"
+  },
+  {
+    "name": "refinement-wrap-guard-settled-after-loop-kill-strict",
+    "source": "@strict;\nfn take_lt(i: u64, n: u64 where i < n) -> u64 {\n    return n - i;\n}\nfn f(start: u64, m: u64, n: u64) -> u64 {\n    mut j = start;\n    mut t = 0;\n    if j < m {\n        while j + 1 < n {\n            t += take_lt(j, n);\n            j = 18446744073709551615;\n        }\n    }\n    return t;\n}\nfn main() {\n    println(f(0, 9, 5));\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot prove the refinement `i < n`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`j < m` holds at the loop's entry only: the body writes `j`, so the guard's `j + 1` is not shown to stay unwrapped and is an opaque term"
+  },
+  {
+    "name": "refinement-wrap-guard-settled-after-loop-kill-strict-wrap",
+    "source": "@strict;\nfn take_lt(i: u64, n: u64 where i < n) -> u64 {\n    return n - i;\n}\nfn f(start: u64, m: u64, n: u64) -> u64 {\n    mut j = start;\n    mut t = 0;\n    if j < m {\n        while j + 1 < n {\n            t += take_lt(j, n);\n            j = 18446744073709551615;\n        }\n    }\n    return t;\n}\nfn main() {\n    println(f(0, 9, 5));\n}\n",
+    "reject": true,
+    "flags": [
+      "--overflow=wrap"
+    ],
+    "diagnostic": [
+      "cannot prove the refinement `i < n`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`j < m` holds at the loop's entry only: the body writes `j`, so the guard's `j + 1` is not shown to stay unwrapped and is an opaque term"
+  },
+  {
+    "name": "refinement-wrap-guard-settled-after-loop-kill-runtime-wrap",
+    "source": "fn take_lt(i: u64, n: u64 where i < n) -> u64 {\n    return n - i;\n}\nfn f(start: u64, m: u64, n: u64) -> u64 {\n    mut j = start;\n    mut t = 0;\n    if j < m {\n        while j + 1 < n {\n            t += take_lt(j, n);\n            j = 18446744073709551615;\n        }\n    }\n    return t;\n}\nfn main() {\n    println(f(0, 9, 5));\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "",
+    "stderr": [
+      "error: refinement violated: i < n\n --> ",
+      "input.grl:9:"
+    ],
+    "overflow": "wrap",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "on the second evaluation `j + 1` wraps to 0 and the guard is true with `j == 2^64-1`: the kept check fires"
+  },
+  {
+    "name": "refinement-wrap-predicate-offset-in-body-strict",
+    "source": "@strict;\nfn take_lt(i: u64, n: u64 where i < n) -> u64 {\n    return n - i;\n}\nfn before(p: u64, n: u64 where p + 1 < n) -> u64 {\n    return take_lt(p, n);\n}\nfn main() {\n    println(before(1, 5));\n    println(before(18446744073709551615, 5));\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot prove the refinement `i < n`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "inside the callee `p + 1 < n` is a fact about the wrapped sum, not about `p`"
+  },
+  {
+    "name": "refinement-wrap-predicate-offset-in-body-strict-wrap",
+    "source": "@strict;\nfn take_lt(i: u64, n: u64 where i < n) -> u64 {\n    return n - i;\n}\nfn before(p: u64, n: u64 where p + 1 < n) -> u64 {\n    return take_lt(p, n);\n}\nfn main() {\n    println(before(1, 5));\n    println(before(18446744073709551615, 5));\n}\n",
+    "reject": true,
+    "flags": [
+      "--overflow=wrap"
+    ],
+    "diagnostic": [
+      "cannot prove the refinement `i < n`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "inside the callee `p + 1 < n` is a fact about the wrapped sum, not about `p`"
+  },
+  {
+    "name": "refinement-wrap-predicate-offset-in-body-runtime-wrap",
+    "source": "fn take_lt(i: u64, n: u64 where i < n) -> u64 {\n    return n - i;\n}\nfn before(p: u64, n: u64 where p + 1 < n) -> u64 {\n    return take_lt(p, n);\n}\nfn main() {\n    println(before(1, 5));\n    println(before(18446744073709551615, 5));\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "4\n",
+    "stderr": [
+      "error: refinement violated: i < n\n --> ",
+      "input.grl:5:"
+    ],
+    "overflow": "wrap",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`before(2^64-1, 5)` passes its own check (`0 < 5`) in a wrap build, and the inner check is what catches it"
+  },
+  {
+    "name": "refinement-wrap-length-minus-one-empty-strict",
+    "source": "@strict;\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn last(v: &u64[]) -> u64 {\n    return get(&v, v.len() - 1);\n}\nfn main() {\n    println(last(&u64[1, 2, 3]));\n    e := u64[];\n    println(last(&e));\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot prove the refinement `i < v.len()`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`v.len() - 1` with nothing saying the vector is not empty is an opaque term"
+  },
+  {
+    "name": "refinement-wrap-length-minus-one-empty-strict-wrap",
+    "source": "@strict;\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn last(v: &u64[]) -> u64 {\n    return get(&v, v.len() - 1);\n}\nfn main() {\n    println(last(&u64[1, 2, 3]));\n    e := u64[];\n    println(last(&e));\n}\n",
+    "reject": true,
+    "flags": [
+      "--overflow=wrap"
+    ],
+    "diagnostic": [
+      "cannot prove the refinement `i < v.len()`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`v.len() - 1` with nothing saying the vector is not empty is an opaque term"
+  },
+  {
+    "name": "refinement-wrap-length-minus-one-empty-runtime-wrap",
+    "source": "fn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn last(v: &u64[]) -> u64 {\n    return get(&v, v.len() - 1);\n}\nfn main() {\n    println(last(&u64[1, 2, 3]));\n    e := u64[];\n    println(last(&e));\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "3\n",
+    "stderr": [
+      "error: refinement violated: i < v.len()\n --> ",
+      "input.grl:5:"
+    ],
+    "overflow": "wrap",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "an empty vector makes the index 2^64-1 in a wrap build: the kept check fires"
+  },
+  {
+    "name": "refinement-wrap-argument-and-predicate-offset-strict",
+    "source": "@strict;\nfn before(p: u64, n: u64 where p + 1 < n) -> u64 {\n    return n - p;\n}\nfn f(i: u64, n: u64) -> u64 {\n    if i < n {\n        return before(i - 1, n);\n    }\n    return 0;\n}\nfn main() {\n    println(f(3, 9));\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot prove the refinement `p + 1 < n`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`i - 1` is not shown to stay above zero, so the predicate's `+ 1` has no integer to cancel against"
+  },
+  {
+    "name": "refinement-wrap-argument-and-predicate-offset-strict-wrap",
+    "source": "@strict;\nfn before(p: u64, n: u64 where p + 1 < n) -> u64 {\n    return n - p;\n}\nfn f(i: u64, n: u64) -> u64 {\n    if i < n {\n        return before(i - 1, n);\n    }\n    return 0;\n}\nfn main() {\n    println(f(3, 9));\n}\n",
+    "reject": true,
+    "flags": [
+      "--overflow=wrap"
+    ],
+    "diagnostic": [
+      "cannot prove the refinement `p + 1 < n`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`i - 1` is not shown to stay above zero, so the predicate's `+ 1` has no integer to cancel against"
+  },
+  {
+    "name": "refinement-wrap-sized-offset-strict",
+    "source": "@strict;\nfn lt(a: u32, b: u32 where a < b) -> u32 {\n    return b - a;\n}\nfn f(a: u32, b: u32) -> u32 {\n    if a < 100 {\n        if a + 1 < b {\n            return lt(a, b);\n        }\n    }\n    return 0;\n}\nfn main() {\n    println(f(3, 9));\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot prove the refinement `a < b`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "the no-wrap conditions are stated for u64: a sized integer's sum is an opaque term in both modes"
+  },
+  {
+    "name": "refinement-wrap-sized-offset-strict-wrap",
+    "source": "@strict;\nfn lt(a: u32, b: u32 where a < b) -> u32 {\n    return b - a;\n}\nfn f(a: u32, b: u32) -> u32 {\n    if a < 100 {\n        if a + 1 < b {\n            return lt(a, b);\n        }\n    }\n    return 0;\n}\nfn main() {\n    println(f(3, 9));\n}\n",
+    "reject": true,
+    "flags": [
+      "--overflow=wrap"
+    ],
+    "diagnostic": [
+      "cannot prove the refinement `a < b`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "the no-wrap conditions are stated for u64: a sized integer's sum is an opaque term in both modes"
+  },
+  {
+    "name": "refinement-wrap-loop-guard-call-strict",
+    "source": "@strict;\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn main() {\n    v := u64[1, 2, 3];\n    mut i = 0;\n    if i < v.len() {\n        while get(&v, i) != 9 {\n            i += 100;\n        }\n    }\n    println(i);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot prove the refinement `i < v.len()`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a call in a loop guard runs again after every iteration, so it is proved only from facts the body does not end"
+  },
+  {
+    "name": "refinement-wrap-loop-guard-call-strict-wrap",
+    "source": "@strict;\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn main() {\n    v := u64[1, 2, 3];\n    mut i = 0;\n    if i < v.len() {\n        while get(&v, i) != 9 {\n            i += 100;\n        }\n    }\n    println(i);\n}\n",
+    "reject": true,
+    "flags": [
+      "--overflow=wrap"
+    ],
+    "diagnostic": [
+      "cannot prove the refinement `i < v.len()`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a call in a loop guard runs again after every iteration, so it is proved only from facts the body does not end"
+  },
+  {
+    "name": "refinement-wrap-loop-guard-call-runtime",
+    "source": "fn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn main() {\n    v := u64[1, 2, 3];\n    mut i = 0;\n    if i < v.len() {\n        while get(&v, i) != 9 {\n            i += 100;\n        }\n    }\n    println(i);\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "",
+    "stderr": [
+      "error: refinement violated: i < v.len()\n --> ",
+      "input.grl:8:"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "the second evaluation of the guard has `i == 100`: the check that is now kept stops it"
+  },
+  {
+    "name": "refinement-wrap-loop-guard-call-runtime-wrap",
+    "source": "fn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn main() {\n    v := u64[1, 2, 3];\n    mut i = 0;\n    if i < v.len() {\n        while get(&v, i) != 9 {\n            i += 100;\n        }\n    }\n    println(i);\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "",
+    "stderr": [
+      "error: refinement violated: i < v.len()\n --> ",
+      "input.grl:8:"
+    ],
+    "overflow": "wrap",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "the second evaluation of the guard has `i == 100`: the check that is now kept stops it"
+  },
+  {
+    "name": "effects-overflow-proved-absent",
+    "source": "@no_panic\nfn span(lo: u64, hi: u64 where lo <= hi) -> u64 {\n    return hi - lo;\n}\n@no_panic\nfn next(i: u64, n: u64 where i < n) -> u64 {\n    return i + 1;\n}\nfn main() {\n    println(span(2, 5));\n    println(next(2, 5));\n}\n",
+    "stdout": "3\n3\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`hi - lo` with `lo <= hi` and `i + 1` with `i < n` cannot overflow: no failure in either mode"
+  },
+  {
+    "name": "effects-overflow-proved-absent-wrap",
+    "source": "@no_panic\nfn span(lo: u64, hi: u64 where lo <= hi) -> u64 {\n    return hi - lo;\n}\n@no_panic\nfn next(i: u64, n: u64 where i < n) -> u64 {\n    return i + 1;\n}\nfn main() {\n    println(span(2, 5));\n    println(next(2, 5));\n}\n",
+    "stdout": "3\n3\n",
+    "overflow": "wrap",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`hi - lo` with `lo <= hi` and `i + 1` with `i < n` cannot overflow: no failure in either mode"
+  },
+  {
+    "name": "effects-overflow-addition-can-fail",
+    "source": "@no_panic\nfn sum(a: u64, b: u64) -> u64 {\n    return a + b;\n}\nfn main() {\n    println(sum(2, 5));\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "`@no_panic` function `sum` can fail: it calls sum -> rt_abort"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "an addition that could overflow is a failure of the function whether or not the build traps on it: the same refusal in both modes"
+  },
+  {
+    "name": "effects-overflow-addition-can-fail-wrap",
+    "source": "@no_panic\nfn sum(a: u64, b: u64) -> u64 {\n    return a + b;\n}\nfn main() {\n    println(sum(2, 5));\n}\n",
+    "reject": true,
+    "flags": [
+      "--overflow=wrap"
+    ],
+    "diagnostic": [
+      "`@no_panic` function `sum` can fail: it calls sum -> rt_abort"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "an addition that could overflow is a failure of the function whether or not the build traps on it: the same refusal in both modes"
+  },
+  {
+    "name": "effects-overflow-addition-weak-bound",
+    "source": "@no_panic\nfn next(i: u64, n: u64 where i <= n) -> u64 {\n    return i + 1;\n}\nfn main() {\n    println(next(2, 5));\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "`@no_panic` function `next` can fail: it calls next -> rt_abort"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`i <= n` leaves `i == 2^64-1` possible, so `i + 1` can overflow"
+  },
+  {
+    "name": "effects-overflow-addition-weak-bound-wrap",
+    "source": "@no_panic\nfn next(i: u64, n: u64 where i <= n) -> u64 {\n    return i + 1;\n}\nfn main() {\n    println(next(2, 5));\n}\n",
+    "reject": true,
+    "flags": [
+      "--overflow=wrap"
+    ],
+    "diagnostic": [
+      "`@no_panic` function `next` can fail: it calls next -> rt_abort"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`i <= n` leaves `i == 2^64-1` possible, so `i + 1` can overflow"
+  },
+  {
+    "name": "effects-overflow-other-operators",
+    "source": "@no_panic\nfn f(a: u64, b: u64) -> u64 {\n    return a * b;\n}\nfn main() {\n    println(f(2, 5));\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "`@no_panic` function `f` can fail: it calls f -> rt_abort"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a product is never proved: refused in both modes"
+  },
+  {
+    "name": "effects-overflow-other-operators-wrap",
+    "source": "@no_panic\nfn f(a: u64, b: u64) -> u64 {\n    return a * b;\n}\nfn main() {\n    println(f(2, 5));\n}\n",
+    "reject": true,
+    "flags": [
+      "--overflow=wrap"
+    ],
+    "diagnostic": [
+      "`@no_panic` function `f` can fail: it calls f -> rt_abort"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a product is never proved: refused in both modes"
+  },
+  {
+    "name": "effects-overflow-power",
+    "source": "@no_panic\nfn f(a: u64, b: u64) -> u64 {\n    return a ** b;\n}\nfn main() {\n    println(f(2, 5));\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "`@no_panic` function `f` can fail: it calls f -> rt_pow -> rt_abort"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`**` can overflow: the wrap build calls the wrapping helper and is still refused, with the trapping build's chain"
+  },
+  {
+    "name": "effects-overflow-power-wrap",
+    "source": "@no_panic\nfn f(a: u64, b: u64) -> u64 {\n    return a ** b;\n}\nfn main() {\n    println(f(2, 5));\n}\n",
+    "reject": true,
+    "flags": [
+      "--overflow=wrap"
+    ],
+    "diagnostic": [
+      "`@no_panic` function `f` can fail: it calls f -> rt_pow -> rt_abort"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`**` can overflow: the wrap build calls the wrapping helper and is still refused, with the trapping build's chain"
+  },
+  {
+    "name": "effects-overflow-sized",
+    "source": "@no_panic\nfn f(a: i32, b: i32) -> i32 {\n    return a + b;\n}\nfn main() {\n    println(f(2, 5));\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "`@no_panic` function `f` can fail: it calls f -> rt_abort"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "sized arithmetic: the same refusal in both modes"
+  },
+  {
+    "name": "effects-overflow-sized-wrap",
+    "source": "@no_panic\nfn f(a: i32, b: i32) -> i32 {\n    return a + b;\n}\nfn main() {\n    println(f(2, 5));\n}\n",
+    "reject": true,
+    "flags": [
+      "--overflow=wrap"
+    ],
+    "diagnostic": [
+      "`@no_panic` function `f` can fail: it calls f -> rt_abort"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "sized arithmetic: the same refusal in both modes"
+  },
+  {
+    "name": "effects-wrapping-helpers-never-fail",
+    "source": "@no_panic\nfn g(a: u64, b: u64) -> u64 {\n    return wrapping_add(a, b) ^ wrapping_mul(a, b) ^ wrapping_sub(a, b);\n}\nfn main() {\n    println(g(1, 2));\n}\n",
+    "stdout": "18446744073709551614\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`wrapping_add`, `wrapping_sub` and `wrapping_mul` never trap, in either mode"
+  },
+  {
+    "name": "effects-wrapping-helpers-never-fail-wrap",
+    "source": "@no_panic\nfn g(a: u64, b: u64) -> u64 {\n    return wrapping_add(a, b) ^ wrapping_mul(a, b) ^ wrapping_sub(a, b);\n}\nfn main() {\n    println(g(1, 2));\n}\n",
+    "stdout": "18446744073709551614\n",
+    "overflow": "wrap",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`wrapping_add`, `wrapping_sub` and `wrapping_mul` never trap, in either mode"
+  },
+  {
+    "name": "refinement-wrap-wrapping-call-opaque-strict",
+    "source": "@strict;\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn main() {\n    v := u64[1, 2, 3];\n    i := 0;\n    if wrapping_add(i, 1) < v.len() {\n        println(get(&v, wrapping_add(i, 1)));\n    }\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot prove the refinement `i < v.len()`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`wrapping_add` is a call: a condition that calls states nothing and an argument that calls is not a term"
+  },
+  {
+    "name": "refinement-wrap-wrapping-call-opaque-strict-wrap",
+    "source": "@strict;\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn main() {\n    v := u64[1, 2, 3];\n    i := 0;\n    if wrapping_add(i, 1) < v.len() {\n        println(get(&v, wrapping_add(i, 1)));\n    }\n}\n",
+    "reject": true,
+    "flags": [
+      "--overflow=wrap"
+    ],
+    "diagnostic": [
+      "cannot prove the refinement `i < v.len()`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`wrapping_add` is a call: a condition that calls states nothing and an argument that calls is not a term"
   }
 ]
