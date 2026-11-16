@@ -239,19 +239,21 @@ Mechanics (replaces `rt_pool_*`):
   forgets it and makes a fresh one, and the parked runner is resumed by any worker, finishes its
   job and ends. The non-waiting path pays nothing for this. It also gives every job the overflow
   report tasks have (before: SIGSEGV [P6]).
-- While a stolen job is outstanding, a waiting worker takes from its own job deque first and
-  steals only jobs of the same or a higher class than the one it waits for (one class until
-  stage 5). Help nests on the waiter's stack; each worker keeps the high-water mark of that
-  nesting and `GRAIL_SCHED_STATS=1` prints it.
-- A stack that holds a `Mutex` across a join can pick up, while helping, a job that wants the same
-  mutex. Do not fork while holding a lock; the callback-scoped guard makes the offending shape
-  visible (a parallel call inside `lock_with`).
-- A thread that is not a worker (main, render) may fork jobs. It pushes to the injection queue of
-  the scope's class and **helps with jobs of its own scope only** - never an unrelated job, the
-  reason the pool gives for not helping at all [V runtime.grl:2840-2844].
-- A parallel loop is recursive halving down to a grain: `log2(n/grain)` steal-able records, no
-  job array, no descriptor allocation. The grain and the split are functions of `n` and `grain`
-  only, never of the worker count (2.9).
+- **Help is bounded (stage 1, second step).** While its job runs elsewhere, a waiter takes only
+  work forked by that job or its descendants - *leapfrogging*: each record names its parent, and a
+  job's claim word names the worker that took it, whose deque is where its forks are. So nothing is
+  stacked on a waiter that a sequential run would not have stacked there, and a program whose joins
+  fit its stack one after another fits it in parallel. On top of that, one function
+  (`rt_job_may_help`) refuses any help when less than an eighth of the stack is left, and that is
+  where the held-lock test goes when locks are tracked per record. The first version took *any*
+  job (help depth 17-29 on `fib(32)`, bounded only by the guard page). Measured against it, on a
+  loaded machine: `fib(32)` by join 9.4 -> 8.8 ms, frame p99 11.9 -> 8.2 ms, join 2.7 -> 3.3 us
+  (within its range): no cost found. Each worker keeps the high-water mark of help nesting and
+  `GRAIL_SCHED_STATS=1` prints it.
+- A stack that holds a `Mutex` across a join helps only with its own job's descendants, so it can
+  deadlock only where the sequential program would (a descendant taking the same lock). When the
+  sync work tracks held locks per record, a waiter that holds any lock will not help at all
+  (`sched-join-while-holding-mutex-does-not-deadlock`).
 
 The known cost of helping: a helper that picks up a job which then *waits* parks the joins beneath
 it on the same stack. That is why waiting in a job is legal but discouraged, and why the proof
@@ -292,25 +294,57 @@ needs nothing else from this design. **Depends on:** unboxed records (a `&mut [B
 cache-efficient if `Body` is stored inline) and the allocator work (`map`'s result vector and any
 allocation inside a leaf).
 
-### Follow-up F1: contain a failure inside a parallel region (before stage 2)
+### F1: a failure inside a parallel region is contained (built)
 
-Stage 1 keeps the old pool's rule: a failed check in a job, or in a task that still has forks
-outstanding, ends the process (status 134, one report). That must not become permanent - a task
-contains its failures today and jobs on the same scheduler should too.
+A failed check in a job, or in a task with forks outstanding, no longer ends the process. Every
+green stack keeps a list of what it is in the middle of (the forks it has not joined and the jobs
+it is running, task word 152), and a failure on a stack with a non-empty list runs on that same
+stack, with no unwinding (`rt_job_fail` in `compiler/runtime.grl`):
 
-- **What is missing.** Containment discards the failing stack. A stolen child may be borrowing that
-  stack's frames (its closure environment, the slice it writes), so the stack has to stay alive
-  until every record it forked is done. The failing stack must therefore finish its joins without
-  running any more user code - wait, do not help, do not claim - and only then be discarded; a
-  failure in a stolen or helped job is recorded in its record and re-raised by the forker at its
-  join (first failure wins, siblings finish: Q1).
-- **Acceptance test** `sched-job-failure-is-contained`: a task forks eight chunks over its own
-  vector, one chunk fails an index check while the others are still writing; `try_join` on the
-  task returns the `TaskFailure` with the chunk's message and site, the process keeps running, a
-  sibling task's result is intact, and every other chunk's writes are in the vector (they finished
-  before the stack was discarded). The same from the main thread still ends the process.
-- `pool-abort-eight-chunks-reports-once` and `pool-chunk-write-outside-aborts` keep their meaning
-  for the main-thread case.
+0. **Locks first.** Held locks are released and poisoned before anything waits, so a stolen child
+   waiting for one cannot deadlock the drain. That is `rt_held_settle` on gaps12-sync; the call
+   site is in place as a comment. **Until that merge, a job that fails inside `lock_with` while a
+   sibling waits for the same lock hangs** (before F1 it ended the process). The case for it,
+   `tests/sched/fail_holding_mutex.grl` (`sched-job-fails-holding-mutex-while-sibling-waits`), is
+   written and registered by that merge.
+1. **Drain.** Every fork not yet joined is taken back unrun if it is still pending, or waited for
+   if it is running elsewhere: it may be borrowing these frames, so the stack is not discarded
+   until it is done. Nothing else runs - no help, no claims - and the wait is not cancellable: it
+   never sets the cancellable-wait word and re-tests after any wake.
+2. **Publish.** Every job this stack was running gets the failure (a five-word record: kind, two
+   operands, the statement-table entry, an optional text) and is published as done.
+3. **Discard.** A runner ends; a task is contained as any failed task is.
+
+A join on a failed job re-raises it in the forker, whose stack does the same: siblings finish
+first, and the first failure to reach a join wins (Q1). Where the failure leaves the parallel
+region - contained by a task, or ending the process from main or another plain thread - the report
+names the original statement and kind, plus one line: ` = in a job joined at FILE:LINE:COL`, the
+statement of the forker that joined it. `try_join` returns that same message and site.
+
+- **Stack overflow stays fatal** inside a parallel region: the drain needs stack, and there is none
+  at the guard page. `sched-job-stack-overflow-reports-and-exits-134` is unchanged.
+- **Cost:** none on the success path beyond one load at each join. A failure leaks what the
+  discarded frames owned, as task containment already does; the exit note counts each discarded
+  stack as one contained failure, so one failure that crossed two joins is reported as three.
+- Cases: `sched-job-failure-is-contained` (the acceptance test above),
+  `sched-job-failure-drain-is-not-cancellable`; `pool-abort-eight-chunks-reports-once` and
+  `pool-chunk-write-outside-aborts` still pass for main.
+
+### What frame-held closure environments would take (no code)
+
+Each `join`, `run` and `map` callback still allocates its closure environment, because a closure
+value is a heap object the caller owns and drops. These closures never escape: the call that
+receives them returns only after every use. Keeping the environment in the caller's frame needs
+three things:
+- **A non-escaping parameter mode** in the type of the callee (`f: Fn() -> A` that cannot be
+  stored, returned or moved into a heap object), checked at the callee. That is the closure-bounds
+  work on gaps12-closures.
+- **A lowering that builds the environment in a frame slot** at the call site when the parameter
+  is non-escaping, and passes its address. The closure ABI already passes "the address of a word
+  holding the object", so the callee does not change; only who allocates and who drops does (the
+  frame, with no drop call when the captures are plain data).
+- **For job handles (`Job<R>`), nothing:** a handle may outlive the frame, so its environment
+  stays on the heap. Only the structured forms qualify, which is exactly the frame-loop path.
 
 ### 2.2 Tasks
 

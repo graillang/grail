@@ -11449,12 +11449,87 @@
   },
   {
     "name": "mutex-job-fails-holding-lock-poisons",
-    "pending": "F1 on gaps12-sched (a failed job is contained): its drain path calls rt_held_settle; today a job's failure is fatal",
+    "pending": "gaps12-sched ee64b29: a job that fails inside parallel_map called from a task leaves that task parked for ever (reproduced on origin/gaps12-sched alone, no lock involved); rt_held_settle is wired into rt_job_fail",
     "source": "use sync;\nstruct Shared { m: Mutex<u64> }\nfn bad<a>(v: (&a mut u64), n: u64) -> u64 {\n    w := u64[1];\n    return w[n];\n}\nfn job(i: u64, s: (&Shared)) -> u64 {\n    if i == 3 {\n        return s.m.lock_with(9, bad);\n    }\n    return i;\n}\nfn run(n: u64, s: (&Shared)) -> u64 {\n    out := parallel_map(u64[0, 1, 2, 3], s, job);\n    return out.len();\n}\nfn body<sc>(scope: (&sc Scope<(&Shared)>), s: (&Shared)) -> u64 {\n    t := spawn(scope, 0, run);\n    match try_join(t) {\n        TaskFailure(e) => { println(\"failed\"); },\n        u64(v) => { println(v); }\n    }\n    return 0;\n}\nfn main() {\n    s := Shared { m: Mutex::new(0) };\n    task_scope(&s, body);\n    println(sync::is_poisoned(&s.m));\n}\n",
     "modules": [
       "lib/sync.grl"
     ],
     "stdout": "failed\ntrue\n",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "sched-help-stops-when-the-stack-is-low",
+    "note": "A task recurses through about 90% of its stack and joins there while a thief runs its forked branch, which forks eight children of about 290 KiB each. They are its own job's work, so leapfrogging may take them, but there is no room for one: the room check makes the waiter park instead of running one into the guard page.",
+    "files": [
+      "tests/sched/help_depth.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "env": {
+      "GRAIL_WORKERS": "2"
+    },
+    "stdout": "28\n",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "sched-join-while-holding-mutex-does-not-deadlock",
+    "note": "A task holds a mutex across parallel passes whose leaves never touch it, while other tasks fork jobs that take the same mutex. A waiter only takes work forked by the job it waits for, so the holder never runs a lock-taking job on its own frames; when locks are tracked per record (gaps12-sync) a waiter that holds one will not help at all.",
+    "files": [
+      "tests/sched/join_holding_mutex.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "1\n",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "ffi-first-slot-call-restores-thread-pointer",
+    "source": "extern \"C\" lib \"c\" fn getpid() -> i32;\nfn work(n: u64, unused: u64) -> u64 {\n    return n + 1;\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    t := spawn(sc, 41, work);\n    return join(t);\n}\nfn main() {\n    unsafe { println(getpid() != 0); }\n    println(task_scope(0, body));\n}\n",
+    "stdout": "true\n42\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "the foreign call takes main's first stack slot; the thread pointer must be the Grail record again afterwards, or starting the scheduler's threads runs pthread_create on a zero thread pointer"
+  },
+  {
+    "name": "sched-job-failure-is-contained",
+    "note": "A task forks eight chunks over its own vector and one fails an index check while the others are still writing. The failing stack waits for its outstanding forks, then the failure is re-raised at the join and the task is contained: try_join returns the check's message with the original statement and the line naming the join, a sibling task's result is intact, and the process keeps running.",
+    "files": [
+      "tests/sched/job_failure.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "index 100 out of bounds for length 1\n --> job_failure.grl:12:9\n = in a job joined at pool.grl:107:5\n56\nstill running\n",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "sched-job-failure-drain-is-not-cancellable",
+    "note": "A failing job's stack waits for its sibling (asleep 200 ms) before it is discarded; the scope is cancelled meanwhile. The cancel does not cut the drain short: the failure arrives as itself, after the sibling finished.",
+    "files": [
+      "tests/sched/job_failure_cancel.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "index 5 out of bounds for length 1\n1\n",
     "targets": [
       "x86_64"
     ]
