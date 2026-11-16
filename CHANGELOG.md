@@ -61,6 +61,23 @@
   New in the language and library on the way: `u8[].append(bytes)`; `host::fork()` and
   `host::cpus()` (Linux). `docs/design/compile-speed.md` has every measurement.
 
+- **The native backend's optimiser follows jumps again.** Since 2026-11-13 it read no label a real
+  build mints: `label_number` compared the whole label with the unit prefix instead of its opening,
+  so every `.L<prefix>_<n>` was unnumbered, and a jump's operand was still read in the old
+  `.L<digits>` spelling. Nothing failed - every pass that follows a jump (liveness across a branch,
+  dead code after a jump, the peephole, register promotion's loop weights) took its most
+  conservative answer. Labels and jump operands now go through one reader (`ir::numbered`), which
+  reads `.L<prefix>_<n>` and the per-function `.L<prefix>_<f>_<n>`. `GRAIL_OPT_STATS=1` writes
+  `# grail-jumps <known> <unknown>` before each optimised body, and
+  `tools/test-optimiser-jumps.mjs` holds the compiler's own sources to 99% known (674285 of
+  674319 today; the rest are a hand-written body the optimiser leaves alone and two indirect jumps).
+  The compiler's self-compile assembly is 0.5% smaller (111.9 MB from 112.5 MB) and the compiler
+  compiles itself 2% faster (16.5 s from 16.9 s); `bench/` programs use 9-14% less CPU time.
+
+- A build emits a drop helper for each type whose helper something names, in the order they are
+  first named, instead of one for every type the compiler interned: the helpers nothing called are
+  gone from the assembly, and the set no longer depends on which bodies the compiler had to check.
+
 - `hash::write_byte` states its precondition in its signature (`value: u64 where value < 256`)
   instead of asserting it in its body: a caller that can show the value is a byte pays no check,
   and one that cannot gets the check at its own call, named. It was the standard library's only

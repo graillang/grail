@@ -55,6 +55,8 @@ pub struct Body {
     gen: u8[],
     out: u8[],
     weird: u64,
+    // The numbering this body's labels are in (label_number), 0 before its first numbered label.
+    lscope: u64,
     maxslot: u64,
     table: u64[],
     base: u64,
@@ -451,24 +453,15 @@ pub fn classify<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64, second: u64)
                 k = 3;
             } else {
                 m = mentions(view(s), a, e);
-                if (c == 46) & (e - a > 2) {
-                    if s[a + 1] == 76 {
-                        mut n = 0;
-                        mut digits = 0;
-                        mut i = a + 2;
-                        while i < e {
-                            d := s[i];
-                            if d < 48 || 57 < d {
-                                break;
-                            }
-                            n = n * 10 + d - 48;
-                            digits += 1;
-                            i += 1;
-                        }
-                        if digits != 0 {
-                            v = n + 1;
-                        }
+                if c == 46 {
+                    // A label, alone (a jump's operand) or with an addressing suffix
+                    // (`.L..(%rip)`): the reading the label's own line gets, so a reference is
+                    // counted against the label whichever way it is made.
+                    mut j = a + 1;
+                    while (j < e) && (alnum(s[j]) || (s[j] == 95)) {
+                        j += 1;
                     }
+                    v = numbered(&mut o, view(s), a, j);
                 }
                 // -N(%rbp) with decimal N is a frame slot.
                 if (c == 45) & (e - a > 7) {
@@ -516,56 +509,69 @@ pub fn classify<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64, second: u64)
     }
 }
 
-// The counter a label carries: `.L<unit prefix>_<n>` is numbered, everything else is opaque text
-// (`.Lopt` expansions, refinement strings, `.Lret` in an inlined body). A stream with no marker -
-// a caller that hands the optimizer text it produced itself - keeps the old `.L<n>` numbering.
+// The counter a label carries: `.L<unit prefix>_<n>` (minted outside any function) and
+// `.L<unit prefix>_<f>_<n>` (minted by the unit's function number `f`) are numbered `n`, everything
+// else is opaque text (`.Lopt` expansions, refinement strings, `.Lret` in an inlined body). A stream
+// with no marker - a caller that hands the optimizer text it produced itself - keeps the old `.L<n>`
+// numbering.
+//
+// Returns 0 for a label that is not numbered, else `scope * 2^32 + n + 1`, where the scope says
+// which numbering the label is in: 1 for the unit's own, `f + 1` for function `f`'s. One body's
+// labels are all in one - the numbers are only unique within it - so a body that mixes two is left
+// as it was written (parse).
 pub fn label_number<a, b, d>(s: &a [u8], a: u64, e: u64, uprefix: &d [u8]) -> u64 {
     if (e <= a + 2) || !at(view(s), a, view(".L")) {
         return 0;
     }
     mut at = a + 2;
-    if uprefix.len() == 0 {
-        mut n = 0;
-        mut ok = 1;
-        while at < e {
-            d := s[at];
-            if (d < 48) || (57 < d) {
-                ok = 0;
-                break;
-            }
-            n = n * 10 + (d - 48);
-            at += 1;
-        }
-        if (ok == 0) || (at == a + 2) {
+    if uprefix.len() != 0 {
+        // Opens with `<prefix>_` and has something after it.
+        if !at(view(s), at, view(uprefix)) || (e <= at + uprefix.len() + 1) || (s[at + uprefix.len()] != 95) {
             return 0;
         }
-        return n + 1;
+        at += uprefix.len() + 1;
     }
-    if !same_range(view(s), at, e, view(uprefix)) | (e <= at + uprefix.len() + 1) {
-        return 0;
-    }
-    mut i = 0;
-    while i < uprefix.len() {
-        if s[at + i] != uprefix[i] {
-            return 0;
-        }
-        i += 1;
-    }
-    at += uprefix.len();
-    if s[at] != 95 {
-        return 0;
-    }
-    at += 1;
+    // One run of digits, or two with `_` between them.
+    mut scope = 1;
     mut n = 0;
+    mut digits = 0;
     while at < e {
         d := s[at];
-        if (d < 48) || (57 < d) {
-            return 0;
+        if (d == 95) & (digits != 0) & (scope == 1) & (uprefix.len() != 0) {
+            scope = n + 1;
+            n = 0;
+            digits = 0;
+        } else {
+            if (d < 48) || (57 < d) {
+                return 0;
+            }
+            n = n * 10 + (d - 48);
+            digits += 1;
         }
-        n = n * 10 + (d - 48);
         at += 1;
     }
-    return n + 1;
+    if digits == 0 {
+        return 0;
+    }
+    return scope * 4294967296 + n + 1;
+}
+
+// A label's number plus one as this body reads it, 0 for a label that is not numbered - for the
+// label's own line and for a jump's operand alike, so the two cannot disagree about a spelling. A
+// second numbering in one body marks the body weird.
+pub fn numbered<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) -> u64 {
+    packed := label_number(view(s), a, e, view(o.uprefix));
+    if packed == 0 {
+        return 0;
+    }
+    scope := packed >> 32;
+    if o.lscope == 0 {
+        exchange(&mut o.lscope, scope);
+    } else if o.lscope != scope {
+        // Two numberings in one body: the numbers are not this body's alone.
+        exchange(&mut o.weird, 1);
+    }
+    return packed & 4294967295;
 }
 
 // The marker line: `.grail_part <unit> <label prefix>`, and the unit fields it sets. 1 when the
@@ -660,7 +666,7 @@ pub fn parse<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) {
         if a < e {
             if s[e - 1] == 58 {
                 op = 100;
-                lab = label_number(view(s), a, e - 1, view(o.uprefix));
+                lab = numbered(&mut o, view(s), a, e - 1);
             } else {
                 if s[a] == 46 {
                     op = 101;
@@ -993,6 +999,7 @@ pub fn reset<a>(o: (&a mut Body)) {
     exchange(&mut o.pair, u64[]);
     exchange(&mut o.ret2, 0);
     exchange(&mut o.weird, 0);
+    exchange(&mut o.lscope, 0);
     exchange(&mut o.zline, 0);
     exchange(&mut o.maxslot, 0);
     // The typed-IR layer is per body too: a body starts with no values, no calls and no type facts.
@@ -1038,6 +1045,7 @@ pub fn new_body() -> Body {
         gen: u8[],
         out: u8[],
         weird: 0,
+        lscope: 0,
         maxslot: 0,
         table: u64[],
         base: 0,
@@ -1542,7 +1550,7 @@ fn append<a, b>(out: (&a mut u8[]), t: &b [u8]) {
         out.push(t[i]);
     }
 }
-fn append_num<a>(out: (&a mut u8[]), n: u64) {
+pub fn append_num<a>(out: (&a mut u8[]), n: u64) {
     mut digits = u8[];
     mut v = n;
     if v == 0 {
