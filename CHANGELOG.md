@@ -1,5 +1,16 @@
 ## Unreleased
 
+- **A `for` header destructures a tuple element.** `for (at, c) in pairs { .. }` binds each field of
+  the element to its own name, the way `(at, c) := pairs[0]` already did, so `char_indices`,
+  `iter::zip` and `iter::enumerate` chains no longer end in `pair.0` / `pair.1`. The pattern must
+  name exactly as many fields as the element has (`the element is a 3-tuple and the pattern names
+  2`), `_` skips a position and drops what it held, an owned field such as a `u8[]` moves out of the
+  element (the element's own record is freed and nothing else is), and a non-tuple element is
+  refused naming the element type. The comma form `for k, v in &m` and the counted forms are
+  unchanged. Cases `for-tuple-pattern-halves`, `for-tuple-skip-position`,
+  `for-tuple-moves-owned-element`, `for-tuple-iterator-chain`, `for-tuple-arity-mismatch`,
+  `for-tuple-non-tuple-element`.
+
 - **A map can be iterated.** `Map::keys()`, `values()` and `iter()` (both at once) yield references
   into the map, in its storage order, borrowing it the way `iter::refs(&v)` borrows a vector - so
   `for k in m.keys() { m.insert(..) }` is refused as a borrow conflict rather than corrupting the

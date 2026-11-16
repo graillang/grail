@@ -6802,6 +6802,43 @@
     "note": "tuple types and values, returns, (q, r) := destructuring, .0/.1 (also t.0.1), a vector of tuples"
   },
   {
+    "name": "for-tuple-pattern-halves",
+    "source": "fn main() {\n    mut total = 0;\n    for (a, b) in (u64, u64)[(1, 2), (3, 4)] {\n        total += a * b;\n    }\n    println(total);\n    pairs := (u64, u64)[(5, 6)];\n    mut one = 0;\n    for (left, right) in pairs {\n        one += left + right;\n    }\n    println(one);\n}\n",
+    "stdout": "14\n11\n",
+    "note": "for (a, b) in xs binds the parts of each tuple element, over a literal and over a named vector"
+  },
+  {
+    "name": "for-tuple-skip-position",
+    "source": "fn main() {\n    mut later = 0;\n    for (_, b) in (u64, u64)[(1, 10), (2, 20)] {\n        later += b;\n    }\n    println(later);\n    mut earlier = 0;\n    for (a, _) in (u64, u64)[(3, 100)] {\n        earlier += a;\n    }\n    println(earlier);\n}\n",
+    "stdout": "30\n3\n",
+    "note": "`_` in a for pattern skips a position and drops what it held, as it does in (a, b) := t"
+  },
+  {
+    "name": "for-tuple-moves-owned-element",
+    "source": "fn main() {\n    pairs := (u8[], u64)[(u8[1, 2, 3], 7), (u8[9], 8)];\n    mut total = 0;\n    for (bytes, n) in pairs {\n        total += n + bytes.len();\n    }\n    println(total);\n    held := (u8[], u8[])[(u8[1, 2], u8[3, 4, 5])];\n    for (keep, _) in held {\n        println(keep.len());\n    }\n}\n",
+    "stdout": "19\n2\n",
+    "note": "an owned u8[] element moves out of the tuple, the tuple's record is freed, and a skipped u8[] is dropped: the end-of-main leak check proves neither leaks nor is freed twice"
+  },
+  {
+    "name": "for-tuple-iterator-chain",
+    "modules": ["lib/core.grl", "lib/iter.grl"],
+    "source": "use core;\nuse iter;\nfn main() {\n    mut weighted = 0;\n    for (i, v) in iter::enumerate(iter::upto(5, 8)) {\n        weighted += i * v;\n    }\n    println(weighted);\n    mut products = 0;\n    for (a, b) in iter::zip(iter::upto(1, 4), iter::upto(10, 13)) {\n        products += a * b;\n    }\n    println(products);\n}\n",
+    "stdout": "20\n68\n",
+    "note": "a for pattern over an iterator (the Some(x) protocol): zip and enumerate chains name their halves instead of .0/.1"
+  },
+  {
+    "name": "for-tuple-arity-mismatch",
+    "source": "fn main() {\n    for (a, b) in (u64, u64, u64)[(1, 2, 3)] {\n        println(a + b);\n    }\n}\n",
+    "reject": true,
+    "diagnostic": "the element is a 3-tuple and the pattern names 2"
+  },
+  {
+    "name": "for-tuple-non-tuple-element",
+    "source": "fn main() {\n    for (a, b) in u64[1, 2] {\n        println(a + b);\n    }\n}\n",
+    "reject": true,
+    "diagnostic": "needs tuple elements: the element type is `u64`"
+  },
+  {
     "name": "tuple-destructure-rejects-arity",
     "source": "fn main() -> u64 {\n    (a, b) := (1, 2, 3);\n    return 0;\n}\n",
     "reject": true,
