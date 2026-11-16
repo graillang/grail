@@ -40,6 +40,38 @@
   assembled seed is now kept under its digest and the key names the bootstrap's content; a second
   build with nothing changed takes milliseconds (`tools/test-cli.mjs` checks it).
 
+- **A release build says what failed.** On the LLVM backend an inline check (overflow, a negative
+  value to an unsigned type, division by zero, an unwrap, an assertion) used to end the program
+  with status 134 and no message, because only the native backend's site table turned its `call
+  rt_abort` into a report. The front end now writes `rt_trap` with the check's kind itself when
+  there is no site table, and a failed index into a 4-byte vector reports its index and length
+  like an 8-byte one. Locations (`--> file:line`) are still native-only.
+
+- **One integer-overflow mode per build, decided by the root.** `--overflow=checked|wrap` on the
+  command line wins; otherwise the root package's new `[package] overflow = "checked" | "wrap"`
+  key; otherwise the build mode's default - checked, or wrap for `--release`. A dependency's own
+  `overflow` key is not used, and the build prints one note naming it (Cargo's model for profiles):
+  a library that needs modular arithmetic says so with `wrapping_add` and friends. An interface file
+  still records the mode it was written under, but a build of the other mode no longer refuses it:
+  the prover and the effect analysis do not depend on the mode, so the mode only chooses the code.
+
+- **`grail build --release`** (and `grail run --release`, a project's `grail test --release`):
+  every module is compiled by the LLVM backend and its LLVM module optimised by `clang -O2`, per
+  module through the build store as before, and integer overflow wraps unless `--overflow=` says
+  otherwise. A release unit is still one object: the assembled stream and the optimised module are
+  folded together with `ld.lld -r`. Release builds are refused on macOS and Windows and with
+  `--debug` or `--split`, rather than quietly built native. Runtime failures print their message
+  without the `--> file:line` location in a release build (the location table is a native-backend
+  artefact for now). The LLVM backend's `memcpy`/`memset`/`memmove` are weak, so several modules can
+  each carry them, and so are the lifted bodies of `.weak` functions (generic specialisations,
+  drop helpers), which every module that instantiates them defines.
+
+- **LLVM backend: loops over slices vectorise.** A slice's descriptor (`&[T]`, `&mut [T]`) cannot
+  change while the slice lives, so the front end says so (F1 kind 5) and the lifter reads its
+  `data` (as a pointer) and `len` once per function; element addresses are `getelementptr`s on that
+  pointer, which keeps their provenance. `x[i] = x[i] * a + y[i]` over one million elements goes
+  from 7x to 1.2x (`f32`) and from 4x to 1.1x (`f64`) of vectorised `clang -O2`. Under
+  `--verify-facts` every such access re-reads the header and aborts if it moved.
 - `bun tools/bench-rivals.mjs`: every `bench/` program against its C, Rust, Go and Zig twins
   (`bench/rivals/`), release and debug builds of each, CPU time from `getrusage`, one table with
   Grail's two builds as ratios to the best competitor of their bar. The numbers and the named

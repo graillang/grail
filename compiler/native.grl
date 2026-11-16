@@ -484,6 +484,10 @@ struct C {
     f1_names: u8[][],
     f1_counts: u64[],
     f1_ord: u64,
+    // Set by `site_kind` on a stream without a site table that the LLVM lifter reads: the check's
+    // kind is already in %rdx, and the `call rt_abort` that follows is written as `call rt_trap`, so
+    // the failure reports what failed instead of aborting silently.
+    trap_next: u64,
     // 1 with --verify-facts: the lifter checks every word a fact treats as an f32, and every word
     // it treats as a sequence header.
     verify_facts: u64,
@@ -2399,6 +2403,14 @@ fn site_kind<a>(c: (&a mut C), kind: u64) -> unit {
         o(&mut c, view(".gkind "));
         on(&mut c, kind);
         c.out.push(10);
+    } else if (c.backend != 0) && (c.raw == 0) && (kind != 1) && (kind != 7) && (kind != 9) && (kind != 10) {
+        // No site table will rewrite the abort (the LLVM backend): the kind goes to `rt_trap` here.
+        // Only the kinds whose message needs no operands; an index or range check names its
+        // operands, which only the site table's pattern finds.
+        o(&mut c, view("movq $"));
+        on(&mut c, kind);
+        o(&mut c, view(",%rdx\n"));
+        exchange(&mut c.trap_next, 1);
     }
     return ();
 }
@@ -14681,6 +14693,12 @@ fn header_what<a>(c: (&a mut C), ty: u64) -> u64 {
     if (k == 3) || (k == 4) {
         return 4;
     }
+    // A typed slice (`&[T]`, `&mut [T]`) is a descriptor `{data, len}` that never changes while the
+    // slice lives: element writes are all a `&mut [T]` permits, and the borrow checker refuses
+    // whatever would move the vector under it (SEQ-STABLE, docs/design/release-builds-and-parity.md).
+    if k == 27 {
+        return 5;
+    }
     if k != 6 {
         return 0;
     }
@@ -21842,7 +21860,12 @@ fn call_out<a, b>(c: (&a mut C), callee: &b [u8]) -> unit {
     fx_edge(&mut c, view(callee), 0);
     fx_called(&mut c);
     o(&mut c, view("call "));
-    o(&mut c, callee);
+    if (c.trap_next != 0) && same(view(callee), view("rt_abort")) {
+        exchange(&mut c.trap_next, 0);
+        o(&mut c, view("rt_trap"));
+    } else {
+        o(&mut c, callee);
+    }
     c.out.push(10);
     return ();
 }
@@ -46024,23 +46047,10 @@ fn iface_decode<a, b>(c: (&a mut C), path: &a [u8], bytes: &a [u8], source_path:
             push_bytes(&mut msg, view("; re-emit it with `grail check --interface DIR`"));
             iface_refuse(view(path), view(msg));
         }
-        if head.overflow != c.overflow {
-            mut msg = u8[];
-            push_bytes(&mut msg, view("was written under overflow="));
-            if head.overflow == 0 {
-                push_bytes(&mut msg, view("wrap"));
-            } else {
-                push_bytes(&mut msg, view("checked"));
-            }
-            push_bytes(&mut msg, view(", this build uses overflow="));
-            if c.overflow == 0 {
-                push_bytes(&mut msg, view("wrap"));
-            } else {
-                push_bytes(&mut msg, view("checked"));
-            }
-            push_bytes(&mut msg, view("; re-emit it with `grail check --interface DIR`"));
-            iface_refuse(view(path), view(msg));
-        }
+        // The header still records the overflow mode it was written under (it is input to a unit's
+        // key), but a reader built under the other mode is not refused: the prover and the effect
+        // analysis no longer depend on the mode, so an interface describes the same surface in both
+        // and the mode only chooses the code a body is emitted with.
         // The sources this interface was built from must be the ones on this command line - when
         // there are any. `--use` reads an interface for a module whose source this build does not
         // have, which is the whole point of stage 3; the file's own digest is what remains. Phase 2
@@ -47369,6 +47379,7 @@ pub fn main() -> u64 {
         f1_names: u8[][],
         f1_counts: u64[],
         f1_ord: 0,
+        trap_next: 0,
         verify_facts: 0,
         emit_ir: 0,
         range_facts: 0,
