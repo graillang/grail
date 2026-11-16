@@ -16,11 +16,58 @@
   pointer, which keeps their provenance. `x[i] = x[i] * a + y[i]` over one million elements goes
   from 7x to 1.2x (`f32`) and from 4x to 1.1x (`f64`) of vectorised `clang -O2`. Under
   `--verify-facts` every such access re-reads the header and aborts if it moved.
+
+- **A failure allocates nothing, on every route.** A failed check inside a parallel job used to build
+  its failure record and texts on the heap where it failed, so every `@no_alloc` function that
+  could index, cast or unwrap was refused once the job-failure path existed. The failing stack now
+  writes numbers only (kind, operands, the statement's site) into a record that is not heap
+  memory. The joiner builds the message and the site text, on a healthy stack. A wake on that path
+  no longer reaches scheduler creation.
+- Fixed: `bun tools/native.mjs build` rebuilt the compiler on every call. It assembled the bootstrap
+  seed each time and keyed the compiler by the bootstrap's mtime, so the key never matched. The
+  assembled seed is now kept under its digest and the key names the bootstrap's content; a second
+  build with nothing changed takes milliseconds (`tools/test-cli.mjs` checks it).
+
 - `bun tools/bench-rivals.mjs`: every `bench/` program against its C, Rust, Go and Zig twins
   (`bench/rivals/`), release and debug builds of each, CPU time from `getrusage`, one table with
   Grail's two builds as ratios to the best competitor of their bar. The numbers and the named
   reason for every miss are in `docs/design/runtime-parity.md`, "Against other languages".
 
+
+
+- **A foreign call costs what it costs in C (x86-64).** In a program that loaded libc, every
+  `extern "C"` call switched the thread pointer to libc's TCB and back, and on x86-64 a write to the
+  FS base is a system call (`arch_prctl`): two per call, about 660 ns for a call to `labs`. The
+  thread pointer now stays libc's TCB for the life of the thread, and the runtime finds its own
+  thread record through an initial-exec TLS word (`rt_tls_record`) - one fs-relative load, as
+  before. Measured on 10M `labs` calls, best of five: about 3 ns a call against C's 2-3 ns
+  (`bench/ffi_call.grl` and its C twin). AArch64 and RISC-V, whose thread-pointer write is a
+  register move, and programs that never load libc keep the record as the thread pointer.
+
+- **`sched::start(config)`** (`lib/sched.grl`) sets the scheduler up before anything starts it:
+  `workers`, `background_cap`, `idle_spin_us`, `pin_workers` (Linux), `warm_stacks` (task stacks
+  mapped up front, so a frame never maps one) and `seed` (a reproducible steal order). It returns
+  false - it never aborts - when the scheduler already started or settings were already applied.
+  `GRAIL_WORKERS` still wins over `workers`.
+
+- **Priority classes for parallel work.** `pool::with_class(pool::Class::Frame | Normal | Background,
+  f)` runs `f` with every job it forks - and every job those fork - in that class. Workers take
+  Frame work before Normal work, Normal before tasks, and tasks before Background work. At most a
+  quarter of the workers (at least one) take Background jobs at once, so an asset import cannot
+  occupy the machine when a frame's jobs arrive. Nothing is preempted. `host::background_wait_us()`
+  (and the `GRAIL_SCHED_STATS=1` line) reports how long the oldest queued Background job has
+  waited, so starvation is visible. Every 61st scheduling step looks at the injected tasks first.
+
+- **Parallel splits are by grain, and never depend on the machine.** `pool::split_mut(data, grain, f)`
+  replaces `pool::chunks_mut(data, count, f)`, and `pool::split(data, grain, f)` replaces
+  `pool::for_chunks(data, count, f)`: each job gets a piece of at most `grain` elements. The builtin
+  is `parallel_split(data, grain, f)` (it was `parallel_for_chunks` with a count). The old names are
+  gone, with no alias; every caller in the repository moved. `grain` is `u64 where grain > 0`.
+  `parallel_map` (and so `pool::map` and `pool::run`) splits into at most 256 leaves fixed by the
+  length, where it used to make four per worker. New: `pool::range(n, grain, f)` calls `f(lo, hi)`
+  per piece of `0..n`, and `pool::reduce(n, grain, zero, leaf, merge)` folds the pieces' results
+  in index order. A floating-point reduction therefore prints the same bits with 1, 4 or 24
+  workers (`pool-reduce-bit-identical-workers-*`).
 - A method of a generic written-type impl whose bound the receiver does not meet says so: `v.sort()`
   on a `Point[]` is "`sort` needs `T: order::Ord`, and `Point` does not implement it", with a help
   line naming the impl (`impl<T: order::Ord> T[]`, module `vecs`), where it was "`Point[]` has no
@@ -296,6 +343,15 @@
   A program that moved the borrowed value while the job was live is refused with
   `move of unavailable or borrowed value`: wait on the job first, or move the value into the
   closure instead of borrowing it. (`docs/design/closure-bounds.md`, Q3.)
+- **Fixed: memory corruption after a proved call to a refined function.** The `.proved` entry
+  that let a proved call skip the parameter checks was a byte copy of the prologue taken before the
+  optimiser rewrote it: it did not save the callee-saved registers the epilogue restores, so the
+  caller's registers came back as garbage (seen as a double free of a vector the caller had moved
+  into the call, exit 134 at the next allocation). The entry is gone: a proved call is a plain call
+  and the entry checks run, true by the proof; `@no_panic` still counts it as unable to fail. Every
+  refined function whose body used a callee-saved register was exposed, since the second entry was
+  introduced.
+
 - **Field predicates are sound.** A field predicate may name only its own field, on an integer,
   a float or an owned vector's `len()`; anything else is refused at the struct. It used to be read
   in the scope of whoever built the record, so a predicate naming another field was an undefined

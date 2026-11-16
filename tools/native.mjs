@@ -2,7 +2,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, renameSync, rmSync, statSync, accessSync, linkSync, constants as fsConstants } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { constants as zlibConstants, zstdCompressSync, zstdDecompressSync } from 'node:zlib';
 export const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -388,7 +388,15 @@ export function bootstrapCompiler() {
   const assembly = seedAssemblyPath(hostTarget);
   const directory = join(root, '.work/native', 'seed');
   mkdirSync(directory, { recursive: true });
-  return assemble(assembly, join(directory, 'bootstrap'));
+  // Named by the seed's digest (the cached assembly is `<digest>.s`) and assembled once: assembling
+  // it on every call gave the bootstrap a new mtime each time, and buildCompiler's key - which named
+  // that mtime - then rebuilt the whole compiler on every `build`.
+  const executable = join(directory, `bootstrap-${basename(assembly, '.s')}`);
+  if (existsSync(executable)) return executable;
+  const pending = assemble(assembly, join(directory, `bootstrap.pending.${process.pid}`));
+  claimExecutable(pending, executable);
+  for (const leftover of [pending, `${pending}.o`]) if (existsSync(leftover)) rmSync(leftover);
+  return executable;
 }
 // The tree's compiler: ALWAYS built from compilerSources by the bootstrap, cached by a hash of
 // what went into it. It never hands back the bootstrap itself - a `build` that printed a supplied
@@ -410,10 +418,11 @@ function claimExecutable(pending, executable) {
 }
 export function buildCompiler() {
   const base = bootstrapCompiler();
-  const baseStat = statSync(base);
   const hash = createHash('sha256');
   hash.update(readFileSync(fileURLToPath(import.meta.url)));
-  hash.update(`${base}\u0000${baseStat.size}\u0000${baseStat.mtimeMs}\u0000`);
+  // The base by content, never by path or mtime: the same bootstrap rebuilt or copied elsewhere is
+  // the same compiler, and a different one at the same path is not.
+  hash.update(`${digest(readFileSync(base))}\u0000`);
   for (const file of compilerSources) hash.update(readFileSync(file));
   const directory = join(root, '.work/native', hash.digest('hex').slice(0, 24));
   const executable = join(directory, 'grail');
