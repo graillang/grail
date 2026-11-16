@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **Soundness: a job handle keeps what its closure borrowed.** A closure that borrowed a value,
+  passed through a wrapper such as `pool::spawn`, left a `Job<R>` that the checker believed held
+  no borrow, so the borrowed value could be moved or dropped while the job was still reading it
+  (a use after free in safe code). The handle now holds the loan until it is waited on or dropped.
+  A program that moved the borrowed value while the job was live is refused with
+  `move of unavailable or borrowed value`: wait on the job first, or move the value into the
+  closure instead of borrowing it. (`docs/design/closure-bounds.md`, Q3.)
 - **Builds are 25x to 180x faster than they were a day ago.** With the release compiler: the
   compiler compiles itself in 2.9 s (was 73.8 s), a 104k-line program checks in 0.9 s (was 166 s),
   hello world checks in 0.04 s (was 1.1 s), and 90k lines in 24 modules build cold in 1.4 s.
