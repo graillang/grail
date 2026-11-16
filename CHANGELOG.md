@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **One jobserver per build.** `grail build` runs at most `GRAIL_JOBS` (default: the processor count)
+  compiler processes at once across everything it starts - module runs and their optimiser workers
+  share one GNU-make-style token fifo - where each module run used to fork up to the processor count
+  on its own. Under `make -j`, a build takes its tokens from make's jobserver
+  (`MAKEFLAGS=--jobserver-auth=fifo:PATH`). On the 24-module benchmark with `GRAIL_JOBS=4` the build
+  peaks at 9 processes instead of 49.
+
 - Integer conversions (`u8(x)`, `i32(y)`, `wrapping_u16(z)`, ...) are emitted in line by the native
   backend: a widening costs nothing, a wrapping conversion is a shift pair, and a checked narrowing
   is a compare and a branch that calls the runtime only to report a value that does not fit (the

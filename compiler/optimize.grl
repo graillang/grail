@@ -1,5 +1,6 @@
 module optimize;
 use ir;
+use jobs;
 use xxhash;
 use llvm;
 use llvm;
@@ -1930,12 +1931,16 @@ pub fn optimize_parts<b, c, d, e, m>(s: &b [u8], split: u64, marks: (&mut u64[])
     // and on where it stands in its unit (ir::function_begin), so the pieces put back in order are
     // the text one process would have written. The copies share this process's memory until they
     // write, so nothing is passed to them; what they made comes back through a pipe each.
-    cuts := plan(view(s), jobs_for(s.len()));
+    // Inside a build's jobserver (compiler/jobs.grl) the pieces are as many as there are tokens
+    // free now, plus this process's own; the text is the same whatever the count.
+    mut js = jobs::open();
+    cuts := plan(view(s), jobs::workers(&mut js, jobs_for(s.len())));
     mut rest = 0;
     mut parallel = false;
     if cuts.len() > 2 {
-        parallel = run_forked(&mut o, view(s), &cuts, split, marks, names, facts, &ix, want_ir, ir_text, replay, call_syms, call_counts);
+        parallel = run_forked(&mut o, view(s), &cuts, split, marks, names, facts, &ix, want_ir, ir_text, replay, call_syms, call_counts, &mut js);
     }
+    jobs::give_all(&mut js);
     // The lines the inlining pass will read. The workers noted theirs as they went; a single
     // process notes them here.
     mut lines = u64[];
@@ -2258,7 +2263,7 @@ fn inl_file<a>(o: (&a mut ir::Body), name: u8[], body: u8[], unit: u8[]) {
 // text, the unit markers it kept, the inlinable bodies it found, the typed IR and the call counts.
 // This process reads the pipes in order, which is the order one process would have produced.
 // False when the platform cannot fork: the caller then does the work itself.
-fn run_forked<a, b, c, e, x, g>(o: (&a mut ir::Body), s: &b [u8], cuts: (&g Cut[]), split: u64, marks: (&mut u64[]), names: (&mut u8[][]), facts: (&c llvm::Facts), ix: (&x ir::FactIndex), want_ir: u64, ir_text: (&mut u8[]), replay: (&e ir::Replay), call_syms: (&mut u8[][]), call_counts: (&mut u64[])) -> bool {
+fn run_forked<a, b, c, e, x, g, h>(o: (&a mut ir::Body), s: &b [u8], cuts: (&g Cut[]), split: u64, marks: (&mut u64[]), names: (&mut u8[][]), facts: (&c llvm::Facts), ix: (&x ir::FactIndex), want_ir: u64, ir_text: (&mut u8[]), replay: (&e ir::Replay), call_syms: (&mut u8[][]), call_counts: (&mut u64[]), js: (&h mut jobs::Jobs)) -> bool {
     pieces := cuts.len() - 1;
     mut readers = u64[];
     mut children = u64[];
@@ -2354,6 +2359,8 @@ fn run_forked<a, b, c, e, x, g>(o: (&a mut ir::Body), s: &b [u8], cuts: (&g Cut[
             whole = take_word(view(packed), &mut tail) == 6072411188134084935;
         }
         if !whole {
+            // The tokens this process took for its workers go back before it stops.
+            jobs::give_all(&mut js);
             host::print(view("grail: an optimiser worker did not finish (GRAIL_JOBS=1 runs the optimiser in one process)\n"));
             host::exit(1);
         }

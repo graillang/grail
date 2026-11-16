@@ -5,6 +5,7 @@ use fmt;
 use explain;
 use bindgen;
 use pkg;
+use jobs;
 use xxhash;
 
 // The `grail` command-line tool. The same binary is the compiler: subcommands drive it by
@@ -1142,7 +1143,22 @@ fn compile_mode<a, b, d, e, g, k>(
         }
     }
     if per_module != 0 {
-        return per_module_build(
+        // One jobserver for every process of this build (compiler/jobs.grl): the module runs, their
+        // optimiser workers and their body workers all take their tokens from it. A build started
+        // inside one (`make -j`, or another `grail`) uses that one; otherwise this process makes
+        // it, beside the output, and the processes it starts find it in their environment.
+        mut js = jobs::open();
+        mut env = host::environment();
+        mut made = u8[];
+        if js.rfd == 0 {
+            path := cat(view(output), view(".jobs"));
+            js = jobs::create(view(path), jobs::count());
+            if js.rfd != 0 {
+                env.push(cat(view("GRAIL_JOBSERVER="), view(path)));
+                made = path;
+            }
+        }
+        built := per_module_build(
             &command,
             at,
             &mut groups,
@@ -1153,8 +1169,16 @@ fn compile_mode<a, b, d, e, g, k>(
             &mut store,
             &id,
             view(program),
-            cache
+            cache,
+            &mut js,
+            &env
         );
+        jobs::give_all(&mut js);
+        if made.len() != 0 {
+            host::close(js.rfd);
+            host::remove(view(made), 0);
+        }
+        return built;
     }
     if host::command(command) != 0 {
         return 1;
@@ -1790,7 +1814,7 @@ fn unit_build_command<a>(args: (&a u8[][])) -> u64 {
     }
     return 0;
 }
-fn per_module_build<a, d, e, g, k, m, n, x, y>(
+fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
     command: (&a u8[][]),
     at: u64,
     groups: (&x mut ModuleGroup[]),
@@ -1801,7 +1825,9 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
     store: (&m mut Cache),
     id: (&n BuildId),
     program: &y [u8],
-    cache: u64
+    cache: u64,
+    js: (&jb mut jobs::Jobs),
+    env: (&ev u8[][])
 ) -> u64 {
     compiler := item(&command, 0);
     mut flags = u8[][];
@@ -1861,11 +1887,13 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
         statuses.push(0);
     }
     mut running = 0;
-    limit := host::cpus();
+    // A module run is started on this process's own token when nothing is running, and on a token
+    // from the jobserver otherwise; each is given back when a run is waited for (`running -= 1`
+    // below gives one back whenever this process holds one).
     while built < groups.len() {
         // Start every module whose dependencies are finished.
         for g in groups.len() {
-            if (groups[g].done != 0) || (state[g] != 0) || (limit <= running) {
+            if (groups[g].done != 0) || (state[g] != 0) {
                 continue;
             }
             if !unit_ready(&groups, &base, g) {
@@ -1883,6 +1911,9 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
                     state[g] = 2;
                     continue;
                 }
+            }
+            if (running != 0) && !jobs::take(&mut js) {
+                continue;
             }
             // One process, two steps: this module's code alone, global so the link can bind it,
             // read against the interfaces of the modules it uses; then the assembler.
@@ -1942,7 +1973,11 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
             run.push(copy(view("-o")));
             run.push(cat(view(stem), view(".o")));
             pair := host::pipe();
-            pid := host::spawn(run, host::environment(), pair[1], pair[1]);
+            mut child_env = u8[][];
+            for k in env.len() {
+                child_env.push(item(&env, k));
+            }
+            pid := host::spawn(run, child_env, pair[1], pair[1]);
             host::close(pair[1]);
             if 9223372036854775807 < pid {
                 host::close(pair[0]);
@@ -1997,6 +2032,7 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
             exchange(&mut outputs[oldest], early);
             state[oldest] = 3;
             running -= 1;
+            jobs::give(&mut js);
             continue;
         }
         name := groups[pick].name.copy();
@@ -2023,6 +2059,7 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
                 host::close(pipes[pick]);
                 status = host::wait(pids[pick]);
                 running -= 1;
+                jobs::give(&mut js);
                 state[pick] = 3;
             }
             if said.len() != 0 {

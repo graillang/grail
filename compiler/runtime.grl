@@ -3992,8 +3992,12 @@ fn f_host_pipe() -> u64 {
     return out;
 }
 // Reads up to max bytes; suspends (green) while no data is available. Empty on end/cancel.
-fn f_host_read_fd(fd: u64, max: u64) -> u64 {
+// `max` with bit 62 set (2^62 + n) reads at most n bytes and does not wait: nothing to read yet is an
+// empty vector (the jobserver's token take, compiler/jobs.grl).
+fn f_host_read_fd(fd: u64, asked: u64) -> u64 {
     out := rt_new();
+    now_only := (asked / 4611686018427387904) & 1;
+    max := asked % 4611686018427387904;
     if max == 0 {
         return out;
     }
@@ -4001,6 +4005,9 @@ fn f_host_read_fd(fd: u64, max: u64) -> u64 {
     while true {
         n := rt_io(rt_read_now, fd, buf, max);
         if n == wrapping_sub(0, 11) {
+            if now_only {
+                break;
+            }
             if rt_wait_fd(fd, 1) != 0 {
                 break;
             }
@@ -4657,7 +4664,9 @@ fn f_host_tcp_connect(host: u64, port: u64) -> u64 {
 }
 
 // Opens a file for reading (write==0) or writing (create/truncate). Returns the descriptor or a
-// negative errno (as a wrapped word) instead of aborting.
+// negative errno (as a wrapped word) instead of aborting. `write == 2` is the jobserver's fifo
+// (compiler/jobs.grl): made first if the path does not exist, then opened for reading and writing
+// and non-blocking, so a process that holds it open never sees its end.
 fn f_host_open(path: u64, write: u64) -> u64 {
     name := rt_cstr(path);
     rt_view_free(path);
@@ -4665,7 +4674,11 @@ fn f_host_open(path: u64, write: u64) -> u64 {
         return wrapping_sub(0, 22);
     }
     mut flags = 524288;
-    if write {
+    if write == 2 {
+        // mknodat(AT_FDCWD, name, S_IFIFO | 0600, 0); an existing one is the one to open.
+        rt_syscall(259, wrapping_sub(0, 100), name, 4480);
+        flags = 526338;
+    } else if write {
         flags = 524865;
     }
     fd := rt_syscall(2, name, flags, 438);

@@ -1,0 +1,153 @@
+module jobs;
+use host;
+
+// The jobserver: how many compiler processes run at once, across every process of one build.
+//
+// `grail build` compiles modules in processes of their own, each of those forks optimiser workers,
+// and a module run forks body workers too. Bounded by the CPU count each, that multiplies. One
+// counter for the whole build is what GNU make uses, and this is its protocol, so a `grail` run
+// under `make -j` shares make's: a fifo holding one byte per token, named by
+// `MAKEFLAGS=... --jobserver-auth=fifo:PATH` (or `GRAIL_JOBSERVER=PATH`, which the outermost `grail`
+// sets for the processes it starts). Every process owns one implicit token of its own, which is
+// why a fifo for N jobs holds N - 1.
+//
+// A token is taken by the process that starts the work and given back by that same process when
+// it has waited for it, never by the work itself: a worker that dies cannot lose one. A take never
+// waits: a process that cannot get a token does the work itself or runs fewer workers, so no set
+// of processes can each hold tokens while waiting for another's.
+//
+// With no jobserver in the environment, `fd` is 0 and nothing here does anything: a process
+// behaves as it did, bounded by its own count.
+pub struct Jobs {
+    rfd: u64,
+    wfd: u64,
+    held: u64
+}
+
+pub fn none() -> Jobs {
+    return Jobs { rfd: 0, wfd: 0, held: 0 };
+}
+
+// The path a `--jobserver-auth=fifo:PATH` word of MAKEFLAGS names, or nothing.
+fn make_fifo<a>(flags: &a [u8]) -> u8[] {
+    word := view("--jobserver-auth=fifo:");
+    mut i = 0;
+    while i + word.len() <= flags.len() {
+        mut hit = true;
+        for j in word.len() {
+            if flags[i + j] != word[j] {
+                hit = false;
+                break;
+            }
+        }
+        if hit {
+            mut out = u8[];
+            mut k = i + word.len();
+            while (k < flags.len()) && (flags[k] != 32) {
+                out.push(flags[k]);
+                k += 1;
+            }
+            return out;
+        }
+        i += 1;
+    }
+    return u8[];
+}
+
+// The build's jobserver, if this process was started inside one.
+pub fn open() -> Jobs {
+    mut path = host::env(view("GRAIL_JOBSERVER"));
+    if path.len() == 0 {
+        path = make_fifo(view(host::env(view("MAKEFLAGS"))));
+    }
+    if path.len() == 0 {
+        return none();
+    }
+    fd := host::open(view(path), 2);
+    if 9223372036854775807 < fd {
+        return none();
+    }
+    return Jobs { rfd: fd, wfd: fd, held: 0 };
+}
+
+// How many jobs a build runs at once when it makes its own jobserver: `GRAIL_JOBS`, else the number
+// of processors.
+pub fn count() -> u64 {
+    asked := host::env(view("GRAIL_JOBS"));
+    mut n = 0;
+    for i in asked.len() {
+        if (47 < asked[i]) && (asked[i] < 58) {
+            n = n * 10 + u64(asked[i] - 48);
+        }
+    }
+    if asked.len() == 0 {
+        n = host::cpus();
+    }
+    if n == 0 {
+        n = 1;
+    }
+    return n;
+}
+
+// The outermost process makes one for `n` jobs at `path`: n - 1 tokens, its own being the n-th.
+pub fn create<a>(path: &a [u8], n: u64) -> Jobs {
+    host::remove(view(path), 0);
+    fd := host::open(view(path), 2);
+    if 9223372036854775807 < fd {
+        return none();
+    }
+    if 1 < n {
+        mut tokens = u8[];
+        for i in n - 1 {
+            tokens.push(43);
+        }
+        host::write_fd(fd, view(tokens));
+    }
+    return Jobs { rfd: fd, wfd: fd, held: 0 };
+}
+
+// One more token, if one is free now. Never waits.
+pub fn take<a>(j: (&a mut Jobs)) -> bool {
+    if j.rfd == 0 {
+        return false;
+    }
+    got := host::read_fd(j.rfd, 4611686018427387905);
+    if got.len() == 1 {
+        j.held = j.held + 1;
+        return true;
+    }
+    return false;
+}
+
+// Gives one token back.
+pub fn give<a>(j: (&a mut Jobs)) -> unit {
+    if (j.wfd == 0) || (j.held == 0) {
+        return ();
+    }
+    mut token = u8[];
+    token.push(43);
+    host::write_fd(j.wfd, view(token));
+    j.held = j.held - 1;
+    return ();
+}
+
+// Gives back every token this process holds: before it exits on any path.
+pub fn give_all<a>(j: (&a mut Jobs)) -> unit {
+    while j.held != 0 {
+        give(&mut j);
+    }
+    return ();
+}
+
+// How many workers to run for work that could use `wanted`: the implicit token's one, plus every
+// token free now, up to `wanted`. With no jobserver, `wanted` itself.
+pub fn workers<a>(j: (&a mut Jobs), wanted: u64) -> u64 {
+    if j.rfd == 0 {
+        return wanted;
+    }
+    mut n = 1;
+    while (n < wanted) && take(&mut j) {
+        n += 1;
+    }
+    return n;
+}
