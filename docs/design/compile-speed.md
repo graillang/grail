@@ -137,6 +137,68 @@ accessors are emitted inline by the front end, not by the cross-module inliner).
 Not done here: `grail check` still checks the runtime, the platform module and `core` from source
 every time (0.59 s for hello world). It can read their interfaces from the same store instead.
 
+## Stage 3 began with a measurement: what the instructions are spent on
+
+Counted with callgrind, the compiler executed about 1.9 million machine instructions per source
+line on the scaling benchmark and 3.1 million per line on its own sources. A fast compiler spends
+thousands. So the next changes were chosen by multiplier, largest first, and each is recorded with
+what it bought.
+
+### The compiler that is shipped is built by the optimising backend (3.4x to 6.9x)
+
+The compiler was built by its own native backend, which writes naive code quickly: every value in a
+stack slot. The allocator's fast path was 326 instructions. `bun tools/native.mjs release` builds
+the same sources through `--backend=llvm` and `clang -O2`, and accepts the result only if it emits,
+for the compiler's own sources, byte for byte what the natively built compiler emits. Nothing in
+the source changed. The tests keep running the natively built compiler - it is the product of the
+backend they exist to test - and `compile-bench --release` measures the one a user runs.
+
+### `grail check` stops when the last diagnostic can have been given (about 2x on a check)
+
+A check ran the whole compiler and threw the assembly away. Every diagnostic is given by the passes
+over the source (the effect report included), so `--check` returns after them: no optimiser, no
+location table, nothing written.
+
+### A view of a whole vector is the vector's header (7 in 10 allocations gone)
+
+`view(x)` allocated a two-word record holding what the vector's header already starts with, and
+6.8 million of the benchmark's 10.1 million allocations were that. A view of a whole vector is now
+the header itself. A view of part of one still has a record, and the two are told apart when a view
+is dropped by the address alone: a record is the second word onward of a 32-byte block, so it sits
+8 past a multiple of 16, where no block and no static object starts (`rt_view_record`,
+`rt_view_free`). Nothing is read to decide, so a view may be dropped after the vector it came from.
+
+### Positions are looked up, not counted (a `--debug` compile: 11.3 s to 2.2 s on 26k lines)
+
+Tokens carry their line and column from the moment the file is read. A debug row, a runtime-error
+site and a diagnostic each rescanned the source from the top.
+
+### The borrow checker's questions cost what they ask about (self-check 18.5 s to 7.1 s)
+
+- "This place and everything inside it" walked every place the function had made; places now link
+  to their fields, and the walk is the subtree.
+- The record of a value was found by scanning the function's records backwards; the latest record
+  of each slot is remembered.
+- A type was interned by comparing it with every type in the program; the table is hashed.
+- The lifetimes a type can carry and whether it holds a borrow were recomputed at every call by
+  walking the type's fields, recursively - for the compiler's own 450-field context, at every call
+  that passes it. Both are remembered per type until a declaration is added.
+
+A function of 4,000 statements is linear again: the 104k-line benchmark is 4.2x the 26k-line one.
+
+### The optimiser runs in forked workers
+
+The optimiser is a pass over assembly text, one function at a time. The stream is cut between
+functions into one piece per processor, each piece is optimised by a forked copy of the compiler
+(`host::fork`, Linux), and the pieces come back through pipes in order. The copies share the
+parent's memory until they write, so nothing is passed to them. The output is the same text
+whatever the number of workers, because the one thing that depended on the functions before -
+the numbering of the optimiser's own labels - now depends only on where a function stands in its
+unit (`ir::function_begin`). `GRAIL_JOBS=1` keeps it in one process.
+
+What is still one process after it: the front end, the inlining pass, the location table and the
+merge. Those are what a build costs now.
+
 ## The order of the remaining work
 
 2. *(done: see above.)* What is left of it is `grail check` reading interfaces from the store.
