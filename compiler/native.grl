@@ -517,6 +517,8 @@ struct C {
     // What `resource` remembers: the latest record of each slot, and how much of the list it read.
     res_last: u64[],
     res_synced: u64,
+    bond_head: u64[],
+    bond_next: u64[],
     spec_em_slots: u64[],
     spec_em_keys: u64[],
     drop_em_slots: u64[],
@@ -3881,9 +3883,7 @@ fn needs_drop<a>(c: (&a mut C), ty: u64) -> bool {
 }
 // The record of the value in `slot`: the latest one made for it. `res_last[slot]` remembers that
 // record (index + 1) and is brought up to date here, so the dozen places that push a record did not
-// change; the three that swap the whole list say so (resources_swapped). A remembered entry is used
-// only if the record there still is that slot's - a record popped since leaves a stale entry, and
-// then the list is scanned as it always was.
+// change; the three that swap the whole list say so (resources_swapped).
 fn resource<a>(c: (&a mut C), slot: u64) -> u64 {
     if c.resources.len() < c.res_synced {
         resources_swapped(&mut c);
@@ -3896,13 +3896,19 @@ fn resource<a>(c: (&a mut C), slot: u64) -> u64 {
         exchange(&mut c.res_synced, c.res_synced + 1);
         c.res_last[at] = c.res_synced;
     }
-    if slot < c.res_last.len() {
-        known := c.res_last[slot];
-        if known != 0 {
-            if c.resources[known - 1].slot == slot {
-                return known;
-            }
-        }
+    // The list only grows between two swaps, so what is remembered is the whole truth: a slot with
+    // no entry has no record, and that is the common answer (a plain value has none). The scan
+    // below is reached only if an entry does not match, which would mean a record was replaced in
+    // place.
+    if c.res_last.len() <= slot {
+        return 0;
+    }
+    known := c.res_last[slot];
+    if known == 0 {
+        return 0;
+    }
+    if c.resources[known - 1].slot == slot {
+        return known;
     }
     mut i = c.resources.len();
     while i != 0 {
@@ -4037,6 +4043,29 @@ fn return_bonds<a>(c: (&a mut C), src: u64, dst: u64, aggregate: u64) -> unit {
     }
     return ();
 }
+// The bonds of each loan, as a chain: `bond_head[loan]` is the latest bond made on it (index + 1)
+// and `bond_next[bond]` the one before. Brought up to date here, like `resource`'s table; the bond
+// list only grows between the swaps that reset this (bonds_swapped).
+fn bonds_sync<a>(c: (&a mut C)) -> unit {
+    if c.bonds.len() < c.bond_next.len() {
+        bonds_swapped(&mut c);
+    }
+    while c.bond_next.len() < c.bonds.len() {
+        at := c.bond_next.len();
+        loan := c.bonds[at].loan;
+        while c.bond_head.len() <= loan {
+            c.bond_head.push(0);
+        }
+        c.bond_next.push(c.bond_head[loan]);
+        c.bond_head[loan] = at + 1;
+    }
+    return ();
+}
+fn bonds_swapped<a>(c: (&a mut C)) -> unit {
+    exchange(&mut c.bond_head, u64[]);
+    exchange(&mut c.bond_next, u64[]);
+    return ();
+}
 // The record list was replaced by another one: what `resource` remembers is about the old list.
 fn resources_swapped<a>(c: (&a mut C)) -> unit {
     exchange(&mut c.res_last, u64[]);
@@ -4047,29 +4076,32 @@ fn close_loans<a>(c: (&a mut C)) -> unit {
     mut changed = 1;
     while changed != 0 {
         changed = 0;
-        mut i = c.check.loans.len();
-        while i != 0 {
-            i = i - 1;
-            mut l = &c.check.loans[i];
-            live := l.live;
-            if live != 0 {
-                mut held = 0;
-                for j in c.bonds.len() {
-                    mut b = &c.bonds[j];
-                    loan := b.loan;
-                    holder := b.holder;
-                    if loan == i + 1 {
-                        state := ownership::status(&c.check, holder);
-                        if (state == 1) || (state == 3) {
-                            held = 1;
-                            break;
-                        }
-                    }
+        // Only the live loans, newest first, and for each only the bonds made on it (bonds_sync):
+        // a function has made thousands of loans and bonds by its last statement and nearly all of
+        // them are over.
+        bonds_sync(&mut c);
+        ids := ownership::live_ids(&mut c.check);
+        mut n = ids.len();
+        while n != 0 {
+            n = n - 1;
+            id := ids[n];
+            mut held = 0;
+            mut j = 0;
+            if id < c.bond_head.len() {
+                j = c.bond_head[id];
+            }
+            while j != 0 {
+                holder := c.bonds[j - 1].holder;
+                state := ownership::status(&c.check, holder);
+                if (state == 1) || (state == 3) {
+                    held = 1;
+                    break;
                 }
-                if held == 0 {
-                    if ownership::end_loan(&mut c.check, i + 1) == 0 {
-                        changed = 1;
-                    }
+                j = c.bond_next[j - 1];
+            }
+            if held == 0 {
+                if ownership::end_loan(&mut c.check, id) == 0 {
+                    changed = 1;
                 }
             }
         }
@@ -4084,15 +4116,12 @@ fn close_loans<a>(c: (&a mut C)) -> unit {
                 ostate := ownership::status(&c.check, root);
                 if (ostate == 1) || (ostate == 3) {
                     mut reached = 0;
-                    for k in c.check.loans.len() {
-                        mut l = &c.check.loans[k];
-                        live := l.live;
-                        source := l.source;
-                        if live != 0 {
-                            if ownership::ancestor(&c.check, root, source) {
-                                reached = 1;
-                                break;
-                            }
+                    alive := ownership::live_ids(&mut c.check);
+                    for k in alive.len() {
+                        source := c.check.loans[alive[k] - 1].source;
+                        if ownership::ancestor(&c.check, root, source) {
+                            reached = 1;
+                            break;
                         }
                     }
                     if reached == 0 {
@@ -5566,19 +5595,26 @@ fn capture_authority<a>(c: (&a mut C), place: u64) -> unit {
     if place == 0 {
         return ();
     }
-    for i in c.bonds.len() {
-        mut b = &c.bonds[i];
-        holder := b.holder;
-        loan := b.loan;
-        guard := b.guard;
-        if guard == 0 {
-            if loan_live(&mut c, loan) != 0 {
+    // The bonds of the live loans (bonds_sync): the rest cannot matter.
+    bonds_sync(&mut c);
+    ids := ownership::live_ids(&mut c.check);
+    for n in ids.len() {
+        loan := ids[n];
+        mut j = 0;
+        if loan < c.bond_head.len() {
+            j = c.bond_head[loan];
+        }
+        while j != 0 {
+            holder := c.bonds[j - 1].holder;
+            guard := c.bonds[j - 1].guard;
+            if guard == 0 {
                 if ownership::ancestor(&c.check, place, holder) {
                     if ownership::use_loan(&c.check, loan, 0) != 0 {
                         fail(&mut c, view("captured authority is suspended"));
                     }
                 }
             }
+            j = c.bond_next[j - 1];
         }
     }
     return ();
@@ -15208,6 +15244,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     exchange(&mut c.members, Member[]);
     exchange(&mut c.terminated, 0);
     exchange(&mut c.bonds, Bond[]);
+    bonds_swapped(&mut c);
     exchange(&mut c.pointers, Pointer[]);
     exchange(&mut c.origins, Origin[]);
     first := c.params.len();
@@ -28968,6 +29005,7 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
     saved_check := exchange(&mut c.check, ownership::new());
     saved_members := exchange(&mut c.members, Member[]);
     saved_bonds := exchange(&mut c.bonds, Bond[]);
+    bonds_swapped(&mut c);
     saved_pointers := exchange(&mut c.pointers, Pointer[]);
     saved_origins := exchange(&mut c.origins, Origin[]);
     saved_next := exchange(&mut c.next, 0);
@@ -29015,6 +29053,7 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
     exchange(&mut c.check, saved_check);
     exchange(&mut c.members, saved_members);
     exchange(&mut c.bonds, saved_bonds);
+    bonds_swapped(&mut c);
     exchange(&mut c.pointers, saved_pointers);
     exchange(&mut c.origins, saved_origins);
     exchange(&mut c.next, saved_next);
@@ -29713,6 +29752,7 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         exchange(&mut c.members, Member[]);
         exchange(&mut c.terminated, 0);
         exchange(&mut c.bonds, Bond[]);
+    bonds_swapped(&mut c);
         exchange(&mut c.pointers, Pointer[]);
         exchange(&mut c.origins, Origin[]);
         mut regions = u8[][];
@@ -43501,6 +43541,8 @@ pub fn main() -> u64 {
         borrow_stamp: u64[],
         res_last: u64[],
         res_synced: 0,
+        bond_head: u64[],
+        bond_next: u64[],
         spec_em_slots: u64[],
         spec_em_keys: u64[],
         drop_em_slots: u64[],
