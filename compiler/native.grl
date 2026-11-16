@@ -41645,27 +41645,28 @@ fn iface_rec_inherent<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], source_in
     return ();
 }
 // A written type's inherent section: the owner type, the impl's own parameters, then its methods.
-// The owner is registered under the type the section spells (`iface_written_owner`), which is the
-// key the source parse gives the same header, so a method read from here and one compiled from the
-// source are found by one lookup. A written section always has an impl record, whatever its
-// parameter count: the record is where `impl_self` finds the owner type.
+// The owner is registered under the header the section spells - its type and its parameters
+// (iface_same_header) - which is how the source parse keys the same block, so a method read from
+// here and one compiled from the source are found by one lookup.
 fn iface_rec_inherent_type<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], source_index: u64, raw_flag: u64) -> unit {
     if p.phase == 0 {
         iface_rt_indent(&mut p, view(""));
         push_bytes(&mut p.rtext, view("inherent_type "));
     }
     owner_ty := iface_r_type(&mut p, &mut c);
+    // The section's parameters are read under a key no impl has yet; whether that key is kept is
+    // decided once they are known, because the header is the owner type *and* its parameters:
+    // `impl<T> T[]` and `impl<T: Ord> T[]` spell one owner type and are two impls.
     mut key = 0;
+    if p.phase == 2 {
+        key = inherent_type_base() + c.inherent_types.len() + 1;
+    }
+    mut record = iface_r_impl_params(&mut c, &mut p, key, key);
     mut filed = u8[];
     if p.phase == 2 {
-        key = iface_written_owner(&mut c, owner_ty);
-        filed = inherent_type_module(key);
-    }
-    record := iface_r_impl_params(&mut c, &mut p, key, key);
-    if p.phase == 2 {
-        if record != 0 {
-            exchange(&mut c.impl_params[record - 1].self_ty, owner_ty);
-        } else {
+        if record == 0 {
+            // A written section always has a record, whatever its parameter count: it is where
+            // `impl_self` finds the owner type.
             c
                 .impl_params
                 .push(
@@ -41678,7 +41679,25 @@ fn iface_rec_inherent_type<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], sour
                         self_ty: owner_ty
                     }
                 );
+            record = c.impl_params.len();
+        } else {
+            exchange(&mut c.impl_params[record - 1].self_ty, owner_ty);
         }
+        // The same header read before (another module's interface, or the source itself) is the
+        // same impl: its key stands and the record just read is dropped.
+        mut known = 0;
+        for i in c.inherent_types.len() {
+            if (known == 0) && iface_same_header(&mut c, inherent_type_base() + i + 1, owner_ty, record) {
+                known = inherent_type_base() + i + 1;
+            }
+        }
+        if known != 0 {
+            c.impl_params.pop()!;
+            key = known;
+        } else {
+            c.inherent_types.push(owner_ty);
+        }
+        filed = inherent_type_module(key);
     }
     n := iface_rv(&mut p);
     for i in n {
@@ -41852,17 +41871,32 @@ fn iface_rec_impl<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], source_index:
     }
     return ();
 }
-// Register the owner type an `inherent (vec ...)` section names. One key per owner type, the same
-// keying the source parse uses, so the methods land in the private module whose digest-named symbol
-// the emitting object defines.
-fn iface_written_owner<a>(c: (&a mut C), ty: u64) -> u64 {
-    for i in c.inherent_types.len() {
-        if same_type(&mut c, c.inherent_types[i], ty) != 0 {
-            return inherent_type_base() + i + 1;
+// Whether the written-type impl at `key` has the header a section just gave: the same owner type and
+// the same parameters. `record` is the section's own ImplParams record, the last one pushed. The
+// source parse asks the same question of its own header (inherent_same_header).
+fn iface_same_header<a>(c: (&a mut C), key: u64, ty: u64, record: u64) -> bool {
+    i := key - inherent_type_base();
+    if same_type(&mut c, c.inherent_types[i - 1], ty) == 0 {
+        return false;
+    }
+    old := impl_record(&mut c, key);
+    if (old == 0) || (old == record) {
+        return false;
+    }
+    a := &c.impl_params[old - 1];
+    b := &c.impl_params[record - 1];
+    if (a.rnames.len() != b.rnames.len()) || (a.tnames.len() != b.tnames.len()) {
+        return false;
+    }
+    if !numbers_equal(&a.bounds, &b.bounds) || (a.interfaces.len() != b.interfaces.len()) {
+        return false;
+    }
+    for j in a.interfaces.len() {
+        if !numbers_equal(&a.interfaces[j], &b.interfaces[j]) {
+            return false;
         }
     }
-    c.inherent_types.push(ty);
-    return inherent_type_base() + c.inherent_types.len();
+    return true;
 }
 fn iface_rec_env<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8]) -> unit {
     local := iface_rs(&mut p);

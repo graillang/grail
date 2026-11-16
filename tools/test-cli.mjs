@@ -117,8 +117,11 @@ checks += 10;
   const module = name => index.modules.find(entry => entry.name === name);
   const item = (name, kind, itemName) => module(name)?.items.find(entry => entry.kind === kind && entry.name === itemName);
   assert.ok(module('strings')?.doc.includes('Byte-oriented text helpers'), 'a module carries the comment block below `module X;`');
-  assert.ok(item('strings', 'fn', 'find')?.doc.includes('first occurrence'), 'a function carries the block above it');
-  assert.equal(item('strings', 'fn', 'starts_with')?.doc, '', 'the module block is not also the first declaration\'s doc');
+  // The standard library is written as methods, so a module's functions are an impl block's members.
+  const bytes = item('strings', 'impl', '[u8]');
+  assert.ok(bytes?.members.find(member => member.name === 'find')?.doc.includes('first occurrence'), 'a method carries the block above it');
+  assert.match(bytes?.members.find(member => member.name === 'find')?.type ?? '', /^pub fn find\(&self, needle: \(&\[u8\]\)\) -> u64\?$/, 'a method\'s signature is the text up to its body');
+  assert.equal(bytes?.doc, '', 'the module block is not also the first declaration\'s doc');
   const fields = item('hashmap', 'struct', 'Map')?.members ?? [];
   assert.ok(fields.some(field => field.name === 'entries' && field.type === 'Slot<K, V>[]'), `a record lists its fields: ${JSON.stringify(fields)}`);
   assert.ok((item('io', 'enum', 'Error')?.members ?? []).some(variant => variant.name === 'Other' && variant.type === 'u64'), 'an enum lists its variants and payloads');

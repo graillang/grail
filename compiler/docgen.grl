@@ -564,6 +564,93 @@ fn sanitized<a>(text: &a [u8]) -> u8[] {
     }
     return out;
 }
+// The methods of an impl block, one member each: the name, the signature as written (up to the body)
+// and the comment block above it. An inherent impl lists its `pub` methods - the rest are the
+// module's own business - and an `impl I for T` lists every method, since the interface makes them
+// all callable.
+fn impl_methods<a, b>(text: &a [u8], from: u64, to: u64, head: &b [u8], starts: (&a u64[]), rows: (&a u8[][])) -> Field[] {
+    mut every = false;
+    mut h: u64 = 0;
+    while h + 5 <= head.len() {
+        if begins(view(head), h, view(" for ")) {
+            every = true;
+        }
+        h += 1;
+    }
+    mut out = Field[];
+    mut i = from;
+    mut depth: u64 = 0;
+    mut line_start = true;
+    while i < to {
+        ch := text[i];
+        if ch == 34 {
+            i += 1;
+            while (i < to) && (text[i] != 34) {
+                if text[i] == 92 {
+                    i += 1;
+                }
+                i += 1;
+            }
+        } else if (ch == 47) && (i + 1 < to) && (text[i + 1] == 47) {
+            while (i < to) && (text[i] != 10) {
+                i += 1;
+            }
+            continue;
+        } else if ch == 123 {
+            depth += 1;
+        } else if ch == 125 {
+            if 0 < depth {
+                depth -= 1;
+            }
+        } else if ch == 10 {
+            line_start = true;
+            i += 1;
+            continue;
+        } else if (depth == 0) && line_start && !blank(ch) {
+            // A declaration at the block's own level: `pub fn name`, `fn name`, or an attribute line.
+            mut at = i;
+            mut public = false;
+            if begins(view(text), at, view("pub ")) {
+                public = true;
+                at += 4;
+            }
+            if begins(view(text), at, view("fn ")) && (public || every) {
+                // The signature runs to the `{` that opens the body.
+                mut end = at;
+                mut nest: u64 = 0;
+                while end < to {
+                    e := text[end];
+                    if (e == 40) || (e == 91) {
+                        nest += 1;
+                    } else if (e == 41) || (e == 93) {
+                        if 0 < nest {
+                            nest -= 1;
+                        }
+                    } else if (e == 123) && (nest == 0) {
+                        break;
+                    }
+                    end += 1;
+                }
+                member_line := line_of(&starts, i) + 1;
+                out.push(
+                    Field {
+                        name: ident_at(view(text), at + 3),
+                        ty: collapsed(view(text), i, end),
+                        doc: doc_above(&rows, member_line - 1)
+                    }
+                );
+                i = end;
+                line_start = false;
+                continue;
+            }
+        }
+        if !blank(ch) {
+            line_start = false;
+        }
+        i += 1;
+    }
+    return out;
+}
 // The members of a struct, enum or interface block: one entry per top-level `,` (records and enums)
 // or `;` (interface methods).
 fn member_fields<a>(text: &a [u8], from: u64, to: u64, kind: u64, decl_line: u64, starts: (&a u64[]), rows: (&a u8[][])) -> Field[] {
@@ -747,6 +834,11 @@ fn scan_module<a>(path: &a [u8], text: &a [u8]) -> Module {
         mut members = Field[];
         if (scan.block_start != 0) && ((kind == 1) || (kind == 2) || (kind == 3)) {
             members = member_fields(view(text), scan.block_start, scan.block_end, kind, first + 1, &starts, &rows);
+        }
+        if (scan.block_start != 0) && (kind == 4) {
+            // An impl block's methods are its members: with the standard library written as methods
+            // (`impl [u8] { pub fn find(..) }`) they are most of what a module offers.
+            members = impl_methods(view(text), scan.block_start, scan.block_end, view(signature), &starts, &rows);
         }
         items.push(
             Item {
