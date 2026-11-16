@@ -11135,5 +11135,74 @@
       }
     ],
     "note": "the stage 1a representation, pinned: a field read through `&P` is one load from the reference (it was a load of the record's address and then the field), and passing `&p` of a local record passes the local's word, so the local no longer has its address taken"
+  },
+  {
+    "name": "unboxed-plain-stays-affine-moved-binding",
+    "source": "struct P { x: u64, y: u64 }\nstruct R { f: P, g: P }\nfn take(p: P) -> u64 { return p.x; }\nfn main() { a := P { x: 1, y: 2 }; b := a; println(a.x + b.y); }\n",
+    "reject": true,
+    "diagnostic": [
+      "use of moved, borrowed or partially initialized value"
+    ],
+    "note": "stage 1b stores plain records inline and must not change what the checker accepts: `b := a` moves a plain record (docs/design/unboxed-values.md, section 4)"
+  },
+  {
+    "name": "unboxed-plain-stays-affine-moved-argument",
+    "source": "struct P { x: u64, y: u64 }\nstruct R { f: P, g: P }\nfn take(p: P) -> u64 { return p.x; }\nfn main() { a := P { x: 1, y: 2 }; take(a); println(a.x); }\n",
+    "reject": true,
+    "diagnostic": [
+      "use of moved, borrowed or partially initialized value"
+    ],
+    "note": "stage 1b stores plain records inline and must not change what the checker accepts: passing a plain record by value moves it (docs/design/unboxed-values.md, section 4)"
+  },
+  {
+    "name": "unboxed-plain-stays-affine-element-read-borrows-push",
+    "source": "struct P { x: u64, y: u64 }\nstruct R { f: P, g: P }\nfn take(p: P) -> u64 { return p.x; }\nfn main() { mut v = P[P { x: 1, y: 2 }]; q := v[0]; v.push(P { x: 3, y: 4 }); println(q.x); }\n",
+    "reject": true,
+    "diagnostic": [
+      "mutation conflicts with live borrow"
+    ],
+    "note": "stage 1b stores plain records inline and must not change what the checker accepts: `q := v[i]` borrows the vector, so it cannot grow under `q` (docs/design/unboxed-values.md, section 4)"
+  },
+  {
+    "name": "unboxed-plain-stays-affine-element-read-borrows-store",
+    "source": "struct P { x: u64, y: u64 }\nstruct R { f: P, g: P }\nfn take(p: P) -> u64 { return p.x; }\nfn main() { mut v = P[P { x: 1, y: 2 }]; q := v[0]; v[0] = P { x: 3, y: 4 }; println(q.x); }\n",
+    "reject": true,
+    "diagnostic": [
+      "borrow conflicts with active access"
+    ],
+    "note": "stage 1b stores plain records inline and must not change what the checker accepts: `q := v[i]` borrows the vector, so the element cannot be replaced under `q` (docs/design/unboxed-values.md, section 4)"
+  },
+  {
+    "name": "unboxed-flat-vec-ops",
+    "files": [
+      "compiler/tests/unboxed_flat_vec_ops.grl"
+    ],
+    "stdout": "20 0 361\n19 361 200 7 26\n5:26 1:1 2:4 100:200 7:16 50:51 \n50:51 7:16 100:200 2:4 1:1 5:26 \n0 0\n6 true\n3 7 4\n8 2 50\n169\n846\n3689 70 2000 5 77\n6 50\n0\n",
+    "note": "every vector operation the language has for records - push, index, element and field writes, &mut v[i], pop, truncate, insert, remove, swap, reverse, slices, by-reference and consuming loops - over a 2-word record and a 5-word record nesting two others"
+  },
+  {
+    "name": "unboxed-flat-mixed",
+    "files": [
+      "compiler/tests/unboxed_flat_mixed.grl"
+    ],
+    "stdout": "5 6 one! 3 9\n513\nn0 41 renamed 9 3\n8 text left 9 3\ndrop tag 1\n8 3\ndrop tag 2\ntruncated\n5 4 2\n3 1\n1 3 4 9\nend\ndrop tag 0\ndrop tag 10\n",
+    "note": "plain records beside owned data: fields of a record with a string, vectors of such records, a generic pair built with and without written type arguments, a record with a Drop field, map values and a sorted vector; every owned value dropped once"
+  },
+  {
+    "name": "unboxed-flat-c-records",
+    "files": [
+      "compiler/tests/unboxed_flat_c_records.grl"
+    ],
+    "stdout": "21950\n100.5 9 3 40 -1000 65535\n9 -49 1 0.25 48\n85601.5\n",
+    "note": "a vector of extern \"C\" records with f32, u8, u16 and i32 fields and an embedded record: element and field reads and writes, &mut, remove, pop, swap"
+  },
+  {
+    "name": "unboxed-plain-stays-affine-field-move",
+    "source": "struct P { x: u64, y: u64 }\nstruct R { f: P, g: P }\nfn take(p: P) -> u64 { return p.x; }\nfn main() { r := R { f: P { x: 1, y: 2 }, g: P { x: 3, y: 4 } }; a := r.f; println(a.x + r.f.y); }\n",
+    "reject": true,
+    "diagnostic": [
+      "use of moved, borrowed or partially initialized value"
+    ],
+    "note": "stage 1b stores plain records inline and must not change what the checker accepts: `a := r.f` moves the field out of the record, it does not copy it (docs/design/unboxed-values.md, section 4)"
   }
 ]

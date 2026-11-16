@@ -265,11 +265,12 @@ record because the box must be freed (N:3873), and that one fact is what makes r
   that would change meaning if stage 1b instead taught `needs_drop` that a plain record "owns
   nothing" (tempting, since a flat element has nothing to free) are exactly these, for a plain `P`:
   `b := a; use(a)` (E0006 today, would compile); `q := v[i]; v.push(..)` and `q := v[i]; v[i] = ..`
-  (E0008 today: `q` borrows `v`; would compile, with `q` a dangling interior address); `a := r.f;
-  r.f = ..` for a plain field (E0008 today); `take(a); use(a)` (E0006 today); and a plain element
-  or field moved out of its container without leaving a hole. Stage 1b therefore adds `plain(ty)`
-  as a *layout* predicate only, never consulted by `member_place`, `own`, `move_out` or the alias
-  paths, and its corpus keeps one refusing case for each line above.
+  (E0008 today: `q` is a `&P` borrowing `v`; would compile, with `q` a dangling interior address);
+  `take(a); use(a)` (E0006 today); and `a := r.f; use(r.f)`, where `a := r.f` is a *move* of the
+  field today (the field is then a hole that `r.f = ..` may refill, which is accepted and stays
+  accepted) and would become a silent copy. Stage 1b therefore adds `plain(ty)` as a *layout*
+  predicate only, never consulted by `member_place`, `own`, `move_out` or the alias paths, and its
+  corpus keeps a refusing case for each (`unboxed-plain-stays-affine-*`).
 - *Stage 3:* a plain record in a frame owns nothing. If `needs_drop` simply became false for it,
   *every* plain record would silently become `copy`, whatever its size. So stage 3 splits the
   question in two: `needs_drop(ty)` (is there anything to free: false for a plain record in a
