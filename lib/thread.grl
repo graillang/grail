@@ -44,7 +44,7 @@ pub struct Ctx {
 pub struct CpuSet {
     bits: u64[]
 }
-pub fn cpus<a>(list: (&a [u64])) -> CpuSet {
+pub fn cpus(list: u64[]) -> CpuSet {
     mut bits = u64[];
     for i in list.len() {
         n := list[i];
@@ -272,11 +272,17 @@ pub fn sleep_until(deadline: time::Instant) -> unit {
 // the first time and dropped when the thread ends (the main thread's at the end of `main`). Reading
 // takes a `Ctx`, which only a thread has and which cannot leave it, so no task - which may resume
 // on another worker - can read one.
+//
+// A `Local` is a key and the function that makes a thread's first value - plain data, so a copy of
+// it (`same()`) may be moved into each thread's closure, and every copy names the same local.
+// `make` is a function value, not a closure: it runs on whichever thread reads first, and must
+// carry nothing with it. Grail has no module-level value to declare one in yet (see
+// docs/design/threads.md), so the handle is passed, or captured by copy.
 pub struct Local<T> {
     key: u64,
-    make: Fn() -> T
+    make: fn() -> T
 }
-pub fn local<T>(make: Fn() -> T) -> Local<T> {
+pub fn local<T>(make: fn() -> T) -> Local<T> {
     return Local { key: host::thread_local_key(), make: make };
 }
 fn drop_local<T>(cell: u64, unused: u64) -> u64 {
@@ -289,6 +295,10 @@ fn drop_local<T>(cell: u64, unused: u64) -> u64 {
     return 0;
 }
 impl<T> Local<T> {
+    // Another handle on the same local, for another thread's closure to own.
+    pub fn same(self: (&Local<T>)) -> Local<T> {
+        return Local { key: self.key, make: self.make };
+    }
     pub fn with<a, R>(self: (&Local<T>), ctx: (&a Ctx), f: FnMut((&mut T)) -> R) -> R {
         mut call = f;
         unsafe {
