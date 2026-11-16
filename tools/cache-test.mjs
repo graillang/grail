@@ -821,11 +821,11 @@ function proveIndependentUnits(count) {
   richProject(count);
   const cold = build(['--cache', '-o', output], { measure: true });
   assert.equal(cold.status, 0, `the cold build of the rich module failed\n${cold.output}`);
-  // Every body but the first of the part, which writes the part's marker inside its own bytes and
-  // is not a unit in this pass.
-  const bodies = 2 * count - 1;
+  // Every body is a unit, the first of the part included: its unit's text starts after the part's
+  // marker, which the run writes before applying it.
+  const bodies = 2 * count;
   const coldRich = forModule(unitLines(cold.output), 'rich');
-  assert.deepEqual(coldRich, { hits: 0, filed: bodies, kept: 0 }, `every body of the rich module after its first is a unit - drop helpers and specialisations are replayable registrations:\n${cold.output}`);
+  assert.deepEqual(coldRich, { hits: 0, filed: bodies, kept: 0 }, `every body of the rich module is a unit - drop helpers and specialisations are replayable registrations:\n${cold.output}`);
   // One edit, then: the cached build's account, its assembly and image, and the same tree built
   // with no cache to the same output name.
   const edited = (what, from, to) => {

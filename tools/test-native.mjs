@@ -33,7 +33,8 @@ GRAIL_TEST_RESUME=1, GRAIL_TEST_JOBS, GRAIL_BACKEND, GRAIL_VERIFY_FACTS.
 --unit-identity (x86_64, native backend) does not run the programs: it compiles every case that
 compiles three times - with no unit store, with an empty one, with the one the second compile
 filled - and requires the three assemblies to be byte-identical and every filed unit to replay; and
-once more with --shift-declarations 3, which must not change the assembly either
+once more with --shift-declarations 3, and with the bodies compiled by two processes cut two ways
+(GRAIL_BODY_SLICE) and with a worker that dies, none of which may change the assembly either
 (docs/design/incremental-compilation.md, "Per-function units").`;
 
 function parseArguments(argv) {
@@ -370,6 +371,27 @@ function runCase(test, position, context) {
       compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', runtime, osRuntime, extra: [...caseRoots, ...(test.flags ?? []), '--shift-declarations', '3'] });
       const shifted = readFileSync(assembly);
       assert.ok(plain.equals(shifted), `${test.name}: with the declaration indices shifted the assembly changed (${describeDifference(plain, shifted)})`);
+      // Parallel bodies: two processes with the bodies cut in two, then two processes dealing the
+      // bodies out in turn - no process compiles two bodies in a row - and a worker that dies at
+      // once, whose bodies the parent compiles itself. Each must write the bytes one process writes.
+      const withEnv = (vars, extra = []) => {
+        const saved = {};
+        for (const [k, v] of Object.entries(vars)) { saved[k] = process.env[k]; process.env[k] = v; }
+        try {
+          compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', runtime, osRuntime, extra: [...caseRoots, ...(test.flags ?? []), ...extra] });
+        } finally {
+          for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+        }
+        return readFileSync(assembly);
+      };
+      for (const [what, vars] of [
+        ['two body workers, the bodies cut in two', { GRAIL_JOBS: '2', GRAIL_BODY_SLICE: '2' }],
+        ['two body workers, the bodies dealt out in turn', { GRAIL_JOBS: '2', GRAIL_BODY_SLICE: '1' }],
+        ['a body worker that dies', { GRAIL_JOBS: '3', GRAIL_BODY_SLICE: '1', GRAIL_TEST_BODY_WORKER_DIE: '1' }],
+      ]) {
+        const got = withEnv(vars);
+        assert.ok(plain.equals(got), `${test.name}: ${what}: the assembly is not the one-process assembly (${describeDifference(plain, got)})`);
+      }
       const empty = withStore();
       const warm = withStore();
       assert.ok(plain.equals(empty.bytes), `${test.name}: with an empty unit store the assembly is not the assembly a compile with no store writes (${describeDifference(plain, empty.bytes)})`);
@@ -650,6 +672,8 @@ if (options.unitIdentity && (options.target !== 'x86_64' || (process.env.GRAIL_B
   console.error('test-native: --unit-identity is the per-function unit store, which is the Linux x86_64 native backend');
   process.exit(2);
 }
+// The reference of the identity mode is one process; the parallel variants set their own count.
+if (options.unitIdentity) process.env.GRAIL_JOBS = '1';
 // A work directory and pass markers of its own for each kind of run: two can be in flight at once.
 const backend = `${process.env.GRAIL_BACKEND ?? 'native'}${process.env.GRAIL_VERIFY_FACTS === '1' ? '+facts' : ''}${options.unitIdentity ? '+units' : ''}`;
 const backendLabel = backend === 'native' ? options.target : `${options.target}-${backend}`;

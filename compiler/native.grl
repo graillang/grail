@@ -1,5 +1,6 @@
 module native;
 use fncache;
+use jobs;
 use lexer;
 use host;
 use explain;
@@ -903,6 +904,30 @@ struct C {
     fn_at_col: u64,
     // `--shift-declarations N`: tuple declarations synthesised before the first body (a test switch).
     shift_decls: u64,
+    // Parallel bodies (par_start): 1 while forked workers compile bodies into units; this process's
+    // part in it (0 the parent, k the k-th worker); how many processes; where each one's slice
+    // starts (file and byte, one pair per process); 1 when bodies are dealt out in turn instead
+    // (`GRAIL_BODY_SLICE=1`); the count of bodies walked so far. The parent keeps one pipe and one
+    // child per worker, what each sent, how far it has read it, and whether it has (0 not yet, 1
+    // whole, 2 not whole); a worker keeps what it will send. `par_fail` sends the rest of the walk
+    // to this process.
+    par_on: u64,
+    par_me: u64,
+    par_j: u64,
+    par_cut_file: u64[],
+    par_cut_off: u64[],
+    par_rr: u64,
+    par_n: u64,
+    par_fds: u64[],
+    par_pids: u64[],
+    par_data: u8[][],
+    par_at: u64[],
+    par_read: u64[],
+    par_buf: u8[],
+    par_wfd: u64,
+    par_fail: u64,
+    par_jobs: jobs::Jobs,
+    par_hits: u64,
     fn_hits: u64,
     fn_filed: u64,
     fn_kept: u64,
@@ -6684,6 +6709,11 @@ fn diag_excerpt<a, b, d>(c: (&a mut C), width: u64, at: &d DiagPos, span: u64, m
 // with the offending token underlined, any secondary labels (other lines that explain it, in source
 // order), and `help:` / `note:` lines. A rejected program exits with status 1.
 fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
+    // A body worker reports nothing: its parent sees the short stream and compiles the module
+    // itself, which reports the error exactly as a compile in one process does.
+    if c.par_me != 0 {
+        host::exit(3);
+    }
     p := c.pos;
     m := tok_text(&mut c, p);
     // The offending token's width: the caret run under the primary line, and the width a driver
@@ -14910,7 +14940,8 @@ struct FnPlace {
 // Whether this run can file units at all: the directory the driver named, and a run-level shape
 // this layer can describe. Every other condition is a property of the whole run, not of a body.
 fn fn_on<a>(c: (&a C)) -> bool {
-    if c.fn_dir.len() == 0 {
+    // Units are made for the store, or to come back from a body worker (par_start).
+    if (c.fn_dir.len() == 0) & (c.par_on == 0) {
         return false;
     }
     // No surface, no units: it is empty when a declaration had no interface spelling, and a key
@@ -14948,9 +14979,6 @@ fn fn_open<a, b>(c: (&a mut C), unit: &b [u8]) -> bool {
         return false;
     }
     if c.current_spec != 0 {
-        return false;
-    }
-    if !same(view(c.part), view(unit)) {
         return false;
     }
     return true;
@@ -15480,6 +15508,258 @@ fn fn_facts_restore<a>(c: (&a mut C), data: &a [u8]) -> unit {
     return ();
 }
 
+// ---- parallel function bodies (docs/design/incremental-compilation.md, "Parallel bodies") -----
+//
+// After the declarations, a module's bodies are cut into slices and forked copies of this process
+// compile the slices after the first into units, which come back through a pipe each; this process
+// compiles the first slice itself and, as its walk reaches each later body, applies the unit a
+// worker made for it - the route a cache hit takes - or compiles the body itself when there is
+// none. The walk, its counters and its registrations are the ones one process has, and a unit's
+// text depends only on its key, so the output is the same at any number of workers and any cut.
+// Anything a worker does not finish - an error in a body, a crash - sends the rest of the walk to
+// this process, which then reports what one process reports.
+//
+// The least source, in bytes, worth a worker of its own: below it a fork and a pipe cost more than
+// the bodies do.
+const PAR_MIN: u64 = 131072;
+fn par_debug<a>(msg: &a [u8]) -> unit {
+    if host::env(view("GRAIL_DEBUG")).len() != 0 {
+        host::print(view(msg));
+    }
+    return ();
+}
+// Which process compiles body `n`, which starts at byte `off` of file `file`.
+fn par_owner<a>(c: (&a C), file: u64, off: u64, n: u64) -> u64 {
+    if c.par_rr != 0 {
+        return n % c.par_j;
+    }
+    mut k = c.par_j - 1;
+    while 0 < k {
+        cf := c.par_cut_file[k];
+        if (cf < file) || ((cf == file) && (c.par_cut_off[k] <= off)) {
+            return k;
+        }
+        k -= 1;
+    }
+    return 0;
+}
+fn par_start<a>(c: (&a mut C), files: u64) -> unit {
+    if (c.plat != 0) | (c.target != 0) | (c.debug != 0) | (c.backend != 0) | (c.emit_ir != 0) {
+        return ();
+    }
+    if (c.fx_any != 0) | (c.exports.len() != 0) | (c.validating != 0) | (c.skip_bodies.len() != 0) | (c.check_only != 0) {
+        return ();
+    }
+    slice := host::env(view("GRAIL_BODY_SLICE"));
+    forced := slice.len() != 0;
+    mut sizes = u64[];
+    mut total = 0;
+    mut i = 2;
+    while i < files {
+        load_file(&mut c, i);
+        sizes.push(c.src.len());
+        total += c.src.len();
+        i += 1;
+    }
+    mut wanted = jobs::count();
+    if !forced {
+        while (1 < wanted) && (total / wanted < PAR_MIN) {
+            wanted -= 1;
+        }
+    }
+    if wanted < 2 {
+        return ();
+    }
+    if c.fn_surface.len() == 0 {
+        exchange(&mut c.fn_flags, fn_flags_now(&mut c));
+        exchange(&mut c.fn_surface, fn_surface_now(&mut c));
+    }
+    if c.fn_surface.len() == 0 {
+        return ();
+    }
+    mut js = jobs::open();
+    j := jobs::workers(&mut js, wanted);
+    if j < 2 {
+        jobs::give_all(&mut js);
+        return ();
+    }
+    exchange(&mut c.par_j, j);
+    exchange(&mut c.par_rr, u64(same(view(slice), view("1"))));
+    // Slice k starts at the k-th j-th of the source, counted over the files in order.
+    for k in j {
+        want := total / j * k;
+        mut at = 0;
+        mut f = 0;
+        while (f + 1 < sizes.len()) && (at + sizes[f] <= want) {
+            at += sizes[f];
+            f += 1;
+        }
+        c.par_cut_file.push(f + 2);
+        c.par_cut_off.push(want - at);
+    }
+    exchange(&mut c.par_on, 1);
+    exchange(&mut c.par_n, 0);
+    die := host::env(view("GRAIL_TEST_BODY_WORKER_DIE")).len() != 0;
+    for k in j - 1 {
+        pair := host::pipe();
+        child := host::fork();
+        if child == 0 {
+            host::close(pair[0]);
+            for r in c.par_fds.len() {
+                host::close(c.par_fds[r]);
+            }
+            if die & (k == 0) {
+                // The test of a worker that dies holding a token (tools/test-native.mjs).
+                host::exit(9);
+            }
+            exchange(&mut c.par_me, k + 1);
+            exchange(&mut c.par_wfd, pair[1]);
+            exchange(&mut c.par_fds, u64[]);
+            exchange(&mut c.par_pids, u64[]);
+            exchange(&mut c.par_jobs, jobs::none());
+            return ();
+        }
+        host::close(pair[1]);
+        if 9223372036854775807 < child {
+            // No fork: whatever was started is still read and waited for, and this process does the
+            // rest; the bodies after the last worker's slice are its own.
+            host::close(pair[0]);
+            exchange(&mut c.par_fail, 1);
+            break;
+        }
+        c.par_fds.push(pair[0]);
+        c.par_pids.push(child);
+        c.par_data.push(u8[]);
+        c.par_at.push(0);
+        c.par_read.push(0);
+    }
+    exchange(&mut c.par_jobs, js);
+    if c.par_fail != 0 {
+        par_fall_back(&mut c, view("a body worker could not be started"));
+    }
+    return ();
+}
+// What worker `k` sent, read and waited for once; its token goes back when it has been waited for.
+fn par_collect<a>(c: (&a mut C), k: u64) -> unit {
+    if c.par_read[k - 1] != 0 {
+        return ();
+    }
+    fd := c.par_fds[k - 1];
+    mut data = u8[];
+    while true {
+        chunk := host::read_fd(fd, 1048576);
+        if chunk.len() == 0 {
+            break;
+        }
+        data.append(view(chunk));
+    }
+    host::close(fd);
+    status := host::wait(c.par_pids[k - 1]);
+    jobs::give(&mut c.par_jobs);
+    mut whole = (status == 0) & (8 <= data.len());
+    if whole {
+        mut end = 0;
+        for b in 8 {
+            end = end * 256 + u64(data[data.len() - 8 + b]);
+        }
+        whole = end == 4702111234474983745;
+    }
+    if whole {
+        c.par_read[k - 1] = 1;
+        exchange(&mut c.par_data[k - 1], data);
+    } else {
+        c.par_read[k - 1] = 2;
+    }
+    return ();
+}
+// Every worker read and waited for, and the rest of the walk this process's.
+fn par_fall_back<a, b>(c: (&a mut C), why: &b [u8]) -> unit {
+    exchange(&mut c.par_fail, 1);
+    for k in c.par_fds.len() {
+        par_collect(&mut c, k + 1);
+    }
+    mut line = copy_bytes(view("grail: "));
+    push_bytes(&mut line, why);
+    push_bytes(&mut line, view("; the rest of this module is compiled in one process\n"));
+    par_debug(view(line));
+    return ();
+}
+fn par_unexpected<a, b>(c: (&a mut C), why: &b [u8]) -> unit {
+    if c.par_me == 0 {
+        par_fall_back(&mut c, why);
+    }
+    return ();
+}
+// The next thing worker `owner` sent, which has to be for the body at `file`/`off`: its unit, with
+// `outcome` 1 (made) or 2 (from the store); no unit when it is not one, or the worker did not finish.
+fn par_take<a, b>(c: (&a mut C), owner: u64, file: u64, off: u64, outcome: (&b mut u64)) -> fncache::Unit {
+    if c.par_fds.len() < owner {
+        return fncache::none();
+    }
+    par_collect(&mut c, owner);
+    if c.par_read[owner - 1] != 1 {
+        par_fall_back(&mut c, view("a body worker did not finish"));
+        return fncache::none();
+    }
+    mut r = fncache::Read { data: exchange(&mut c.par_data[owner - 1], u8[]), at: c.par_at[owner - 1], ok: 1 };
+    got_file := fncache::rv(&mut r);
+    got_off := fncache::rv(&mut r);
+    kind := fncache::rv(&mut r);
+    bytes := fncache::rs(&mut r);
+    c.par_at[owner - 1] = r.at;
+    exchange(&mut c.par_data[owner - 1], r.data);
+    if (r.ok == 0) | (got_file != file) | (got_off != off) {
+        par_fall_back(&mut c, view("a body worker sent the bodies out of order"));
+        return fncache::none();
+    }
+    if kind == 0 {
+        return fncache::none();
+    }
+    exchange(outcome, kind);
+    u := fncache::decode(bytes);
+    if u.key.len() == 0 {
+        par_fall_back(&mut c, view("a body worker sent a unit that does not decode"));
+    }
+    return u;
+}
+// A worker's account of one of its bodies: 0 not a unit, 1 a unit it made, 2 one from the store.
+fn par_record<a, b>(c: (&a mut C), at_off: u64, kind: u64, u: (&b fncache::Unit)) -> unit {
+    iface_wv(&mut c.par_buf, c.file);
+    iface_wv(&mut c.par_buf, at_off);
+    iface_wv(&mut c.par_buf, kind);
+    if kind == 0 {
+        iface_wv(&mut c.par_buf, 0);
+    } else {
+        iface_ws(&mut c.par_buf, view(fncache::encode(u)));
+    }
+    return ();
+}
+// A worker has walked past its slice: what it made goes to its parent, and it stops.
+fn par_worker_finish<a>(c: (&a mut C)) -> unit {
+    mut end = 4702111234474983745;
+    mut tail = u8[];
+    for b in 8 {
+        tail.push(end / 72057594037927936);
+        end = (end % 72057594037927936) * 256;
+    }
+    c.par_buf.append(view(tail));
+    host::write_fd(c.par_wfd, view(c.par_buf));
+    host::close(c.par_wfd);
+    host::exit(0);
+    return ();
+}
+// The walk is over: every worker read and waited for, every token back.
+fn par_end<a>(c: (&a mut C)) -> unit {
+    if c.par_on == 0 {
+        return ();
+    }
+    for k in c.par_fds.len() {
+        par_collect(&mut c, k + 1);
+    }
+    jobs::give_all(&mut c.par_jobs);
+    exchange(&mut c.par_on, 0);
+    return ();
+}
 fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // A body's synthesised declarations (closure environments) are not the function's to hide.
     exchange(&mut c.decl_public, 1);
@@ -15958,8 +16238,37 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         fn_line = c.toks[position].line;
     }
     fn_drop_mark := c.drop_refs.len();
-    if fn_on(&c) & (c.current_spec == 0) & !same(view(c.part), view(unit)) {
-        c.fn_why[FN_FIRST] = c.fn_why[FN_FIRST] + 1;
+    // Parallel bodies: which process this body is for. A worker skips the bodies that are not its
+    // own - spending the function's ordinal as the process that compiles it does - and the parent
+    // takes the unit a worker made for it (par_take), applied below like a hit.
+    mut par_mine = 0;
+    mut par_unit = fncache::none();
+    mut par_outcome = 0;
+    mut at_off = 0;
+    if position < c.toks.len() {
+        at_off = c.toks[position].start;
+    }
+    if (c.par_on != 0) & (pass == 3) & (c.current_spec == 0) & (c.validating == 0) {
+        n := c.par_n;
+        c.par_n = n + 1;
+        owner := par_owner(&c, c.file, at_off, n);
+        if c.par_me != 0 {
+            if owner != c.par_me {
+                if (c.par_rr == 0) & (c.par_me < owner) {
+                    par_worker_finish(&mut c);
+                }
+                part(&mut c, view(unit));
+                k := c.lunit;
+                if (k != 0) & (k <= c.fnext.len()) {
+                    c.fnext[k - 1] = c.fnext[k - 1] + 1;
+                }
+                skip_braces(&mut c);
+                return ();
+            }
+            par_mine = 1;
+        } else if (owner != 0) & (c.par_fail == 0) {
+            par_unit = par_take(&mut c, owner, c.file, at_off, &mut par_outcome);
+        }
     }
     if fn_open(&mut c, view(unit)) {
         // The symbol the label will spell: `body_label` is the one spelling both `func_directive`
@@ -15970,19 +16279,39 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         decl_to := c.toks[end].end;
         key := fn_key(&mut c, view(unit), view(fn_symbol), decl_from, decl_to, position, count, ret);
         if key.len() != 0 {
-            hit := fncache::load(view(c.fn_dir), view(fncache::hash(view(key))));
+            from_worker := par_unit.key.len() != 0;
+            mut hit = par_unit;
+            if (hit.key.len() == 0) & (c.fn_dir.len() != 0) {
+                hit = fncache::load(view(c.fn_dir), view(fncache::hash(view(key))));
+                par_outcome = 2;
+            }
             if hit.key.len() != 0 {
                 if same(view(hit.key), view(key)) {
                     // All of its registrations, or none of the unit.
                     mut readable = 1;
                     regs := fn_regs_read(&mut c, view(hit.regs), &mut readable);
                     if readable != 0 {
+                        if par_mine != 0 {
+                            par_record(&mut c, at_off, 2, &hit);
+                        }
+                        // The first body of a part opens it; the unit's text starts after that.
+                        part(&mut c, view(unit));
                         fn_apply(&mut c, &hit, &regs, fn_line);
-                        c.fn_hits = c.fn_hits + 1;
+                        if par_outcome == 1 {
+                            c.fn_filed = c.fn_filed + 1;
+                        } else {
+                            c.fn_hits = c.fn_hits + 1;
+                        }
+                        if from_worker {
+                            c.par_hits = c.par_hits + 1;
+                        }
                         skip_braces(&mut c);
                         return ();
                     }
                 }
+            }
+            if from_worker {
+                par_unexpected(&mut c, view("a worker's unit is not the unit of this body"));
             }
             fn_key_text = key;
             fn_marks_at = fn_marks(&c);
@@ -15997,6 +16326,9 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     }
     part(&mut c, view(unit));
     scope_begin(&mut c);
+    // What a unit is taken back to: after the part's marker (the first body of a part writes it),
+    // before the line that says where the function is.
+    apply_mark := c.out.len();
     if site_table_on(&c) && (c.validating == 0) && (position < c.toks.len()) {
         site_base(&mut c, fn_line);
     }
@@ -16305,9 +16637,15 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             produced := fn_unit_of(&mut c, fn_key_text, text_mark, fact_mark);
             // The file's name is the key's hash; the key record itself travels inside the entry,
             // so two keys that collide make a miss and never a wrong hit.
-            fncache::save(view(c.fn_dir), view(fncache::hash(view(produced.key))), &produced);
-            c.fn_filed = c.fn_filed + 1;
-            while out_mark < c.out.len() {
+            if c.fn_dir.len() != 0 {
+                fncache::save(view(c.fn_dir), view(fncache::hash(view(produced.key))), &produced);
+                c.fn_filed = c.fn_filed + 1;
+            }
+            if par_mine != 0 {
+                par_record(&mut c, at_off, 1, &produced);
+                par_mine = 0;
+            }
+            while apply_mark < c.out.len() {
                 c.out.pop()!;
             }
             llvm::facts_truncate(&mut c.facts, fact_mark);
@@ -16322,6 +16660,11 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         } else {
             c.fn_kept = c.fn_kept + 1;
         }
+    }
+    if par_mine != 0 {
+        // Not a unit: the parent compiles this body itself.
+        none := fncache::none();
+        par_record(&mut c, at_off, 0, &none);
     }
     return ();
 }
@@ -44271,6 +44614,23 @@ pub fn main() -> u64 {
         fn_at_line: 1,
         fn_at_col: 1,
         shift_decls: 0,
+        par_on: 0,
+        par_me: 0,
+        par_j: 0,
+        par_cut_file: u64[],
+        par_cut_off: u64[],
+        par_rr: 0,
+        par_n: 0,
+        par_fds: u64[],
+        par_pids: u64[],
+        par_data: u8[][],
+        par_at: u64[],
+        par_read: u64[],
+        par_buf: u8[],
+        par_wfd: 0,
+        par_fail: 0,
+        par_jobs: jobs::none(),
+        par_hits: 0,
         fn_hits: 0,
         fn_filed: 0,
         fn_kept: 0,
@@ -44747,6 +45107,9 @@ pub fn main() -> u64 {
                 o(&mut c, view(".text\n"));
             }
         }
+        if pass == 2 {
+            par_start(&mut c, n);
+        }
         mut i = 2;
         while i < n {
             path := input_path(&c, i);
@@ -44770,6 +45133,10 @@ pub fn main() -> u64 {
         }
         if pass == 2 {
             default_methods(&mut c, 3);
+            if c.par_me != 0 {
+                par_worker_finish(&mut c);
+            }
+            par_end(&mut c);
         }
         // The definition sweep for the interfaces read above, once every module's names exist.
         // `--interface` and `--use` both land here; the path each interface came from was recorded

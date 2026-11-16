@@ -1,5 +1,13 @@
 ## Unreleased
 
+- **A module's function bodies are compiled in parallel.** After the declarations, forked copies of
+  the compiler compile slices of the bodies into units and the compile applies them in source
+  order, so the output is byte-identical at any worker count (`GRAIL_JOBS=1` keeps one process). The
+  compiler compiling itself goes from 38.7 s in one process to 18.3 s; a 1000-function program from
+  4.2 s to 2.1 s. A body with an error is reported exactly as before: any worker that does not
+  finish sends the module back to one process. The first body of each module is now a cache unit
+  too.
+
 - **One jobserver per build.** `grail build` runs at most `GRAIL_JOBS` (default: the processor count)
   compiler processes at once across everything it starts - module runs and their optimiser workers
   share one GNU-make-style token fifo - where each module run used to fork up to the processor count
