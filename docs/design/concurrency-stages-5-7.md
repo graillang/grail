@@ -396,6 +396,16 @@ call, or a call after anything started it, returns an error value; it does not a
 4. The class lives on the forking stack (`with_class`) rather than being an argument of every
    call. **Recommend**; `pool::scope(class, ...)` from the model note becomes unnecessary.
 
+## Follow-up (recorded, not scheduled): a vDSO clock
+
+`host::now_us`, `host::now_ms` and every runtime time read are `clock_gettime` system calls
+(syscall 228), not the vDSO, which costs too much for frame timing at hundreds of reads per
+frame. Reading the vDSO from a libc-free runtime is its own small piece of work: find
+`AT_SYSINFO_EHDR` in the auxiliary vector at startup, walk the ELF dynamic symbols for
+`__vdso_clock_gettime` (`__kernel_clock_gettime` on AArch64 and RV64), and call it with the
+syscall as the fallback. Windows and macOS have their own fast paths (`QueryPerformanceCounter`,
+`mach_absolute_time`).
+
 ## Order
 
 Stage 5, then 6, then 7: classes and the deterministic split are what the frame loop needs first.
