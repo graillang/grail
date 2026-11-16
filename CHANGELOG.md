@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **LLVM backend: loops over slices vectorise.** A slice's descriptor (`&[T]`, `&mut [T]`) cannot
+  change while the slice lives, so the front end says so (F1 kind 5) and the lifter reads its
+  `data` (as a pointer) and `len` once per function; element addresses are `getelementptr`s on that
+  pointer, which keeps their provenance. `x[i] = x[i] * a + y[i]` over one million elements goes
+  from 7x to 1.2x (`f32`) and from 4x to 1.1x (`f64`) of vectorised `clang -O2`. Under
+  `--verify-facts` every such access re-reads the header and aborts if it moved.
+
 - **`--debug` builds write vector element access in line.** The leaf accessors (`rt_slot`, `rt_at`,
   `rt_slot4`, `rt_at4`, `rt_len`, `rt_push`, ...) were expanded only by the optimiser, so a debug
   build called them for every element; the expansion is lowering and now runs without the
