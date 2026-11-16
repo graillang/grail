@@ -376,6 +376,35 @@ Files: native.grl. Acceptance: self-compile byte-identical (`tools/test-selfhost
   an earlier compiler is refused. Build-store entries and per-function units are keyed by the
   compiler's own digest (cli.grl:2779, 1546) and need no bump.
 
+**Stage 1b as built** (2026-11-16).
+- *Plain.* A struct or tuple with no `Drop` whose fields are all scalars, references, function or C
+  pointers, or plain records (`layout_bits`, memoised per type). A layout fact only: `needs_drop`,
+  `member_place`, `own` and `move_out` never ask it, and six cases pin that the checker accepts
+  exactly what it did (`unboxed-plain-stays-affine-*`).
+- *Inline fields.* A plain record held by a Grail struct or tuple is its words at an offset
+  (`field_layout`, a per-type table). Reading one gives its interior address; anything that would
+  own or move that value first copies it to a box of its own (`materialise`, called from `own`,
+  `move_value` and `move_out`). Assigning one copies the new words in through the embedded-place path
+  C records already used. A record's construction now allocates after its fields are evaluated.
+- *Flat vectors.* `T[]` of a plain record or of an `extern "C"` record holds the elements' bytes
+  (8 per word, or the C size; so `Vertex[]` is a C array). The runtime family takes a width:
+  `rt_pushw`, `rt_popw`, `rt_vec_insertw/removew/swapw/reversew`, `rt_slotw`, `rt_flat_box`. A
+  checked `&v[i]` is optimiser pseudo-op 52 next to `rt_slot4`'s 49-51, expanded to the same bounds
+  check and `imulq`/`addq`; a proven index skips the check, as for words. C arrays of extern records
+  copy to and from flat vectors.
+- *Padding.* `==` on `extern "C"` records was and is field by field (`structural_eq` reads each field
+  with `cfield_load`), so padding is never read; vectors of records have no `==`, `contains` or hash.
+- *Narrow fields.* Through the merged `gaps12-float` emitter (`sized_load`/`sized_store`), which
+  already serves `cfield_*`/`caddr_*`; an element of a flat C-record vector reaches it through the
+  same functions, so no second emitter exists.
+- *Transitional cost (stage 3 removes it).* A record still starts in a box, so `push` of a fresh
+  record allocates, copies and frees, and taking one out (pop, remove, a consuming loop, an owned
+  field read) allocates a copy. Measured below.
+- *Bug found on the way.* Layout first depended on `c.raw`; drop helpers are emitted after the last,
+  raw, module, so a whole-program build walked a flat vector as pointers at exit. Layout is now a
+  property of the type alone.
+- *Interface line:* `record plain = inline`.
+
 **Stage 1 - flat vectors of plain records** (engine first; removes the 8 % token allocations).
 - 1a: `&T` to a record becomes the address of its words (all records, still boxed);
   assignment and `exchange` through such a reference copy words. Measurable alone: one load fewer
