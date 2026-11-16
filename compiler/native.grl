@@ -510,6 +510,10 @@ struct C {
     spec_keys: u64[],
     ty_slots: u64[],
     ty_keys: u64[],
+    // What type_caps and contains_borrow remember, per type id (see type_walk_stamp).
+    caps_stamp: u64[],
+    caps_memo: u64[][],
+    borrow_stamp: u64[],
     // What `resource` remembers: the latest record of each slot, and how much of the list it read.
     res_last: u64[],
     res_synced: u64,
@@ -4174,8 +4178,34 @@ fn add_region<a>(rs: (&a mut u64[]), r: u64) -> unit {
 // Recursive nominal types (enum Tree { Node(Branch) }, struct Branch { left: Tree }) are walked once:
 // a type already on the path adds nothing beyond its own region arguments.
 fn type_caps<a>(c: (&a mut C), ty: u64, depth: u64) -> u64[] {
+    // The answer is a function of the type and of the declarations it is made of, and it is asked
+    // at every call the checker binds - for a record with hundreds of fields that was a walk of all
+    // of them, every time. It is remembered per type and forgotten when a declaration or a field
+    // is added (docs/design/compile-speed.md).
+    stamp := type_walk_stamp(&c);
+    if is_type_id(ty) {
+        if ty < c.caps_stamp.len() {
+            if c.caps_stamp[ty] == stamp {
+                return copy_numbers(&c.caps_memo[ty]);
+            }
+        }
+    }
     mut trail = u64[];
-    return caps_walk(&mut c, ty, &mut trail);
+    found := caps_walk(&mut c, ty, &mut trail);
+    if is_type_id(ty) {
+        while c.caps_stamp.len() <= ty {
+            c.caps_stamp.push(0);
+            c.caps_memo.push(u64[]);
+        }
+        c.caps_stamp[ty] = stamp;
+        exchange(&mut c.caps_memo[ty], copy_numbers(&found));
+    }
+    return found;
+}
+// What a remembered walk of a type's structure is valid for: the declarations and fields there are.
+// Never 0, which is "nothing remembered".
+fn type_walk_stamp<a>(c: (&a C)) -> u64 {
+    return c.fields.len() * 16777216 + c.decls.len() * 4 + 2;
 }
 fn caps_walk<a, b>(c: (&a mut C), ty: u64, trail: (&b mut u64[])) -> u64[] {
     mut rs = type_regions(&mut c, ty);
@@ -11093,8 +11123,24 @@ fn same_type<a>(c: (&a mut C), x: u64, y: u64) -> u64 {
     return 1;
 }
 fn contains_borrow<a>(c: (&a mut C), ty: u64, depth: u64) -> bool {
+    // Remembered per type, as type_caps is: the stamp's low bit carries the answer.
+    stamp := type_walk_stamp(&c);
+    if is_type_id(ty) {
+        if ty < c.borrow_stamp.len() {
+            if (c.borrow_stamp[ty] | 1) == (stamp | 1) {
+                return (c.borrow_stamp[ty] & 1) != 0;
+            }
+        }
+    }
     mut trail = u64[];
-    return borrow_walk(&mut c, ty, &mut trail);
+    found := borrow_walk(&mut c, ty, &mut trail);
+    if is_type_id(ty) {
+        while c.borrow_stamp.len() <= ty {
+            c.borrow_stamp.push(0);
+        }
+        c.borrow_stamp[ty] = stamp + u64(found);
+    }
+    return found;
 }
 fn borrow_walk<a, b>(c: (&a mut C), ty: u64, trail: (&b mut u64[])) -> bool {
     k := ty_kind(&mut c, ty);
@@ -43450,6 +43496,9 @@ pub fn main() -> u64 {
         spec_keys: u64[],
         ty_slots: u64[],
         ty_keys: u64[],
+        caps_stamp: u64[],
+        caps_memo: u64[][],
+        borrow_stamp: u64[],
         res_last: u64[],
         res_synced: 0,
         spec_em_slots: u64[],
