@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # The full multi-platform gate, in its fastest safe shape. Usage:
 #   tools/gate.sh [--reseed] [LOGDIR]
+# GATE_RESEED_COMPILER names the compiler the reseed starts from when the checked-in seed cannot
+# read the tree (a two-step bootstrap: docs/testing.md). It is used for the reseed only; every leg
+# after it builds from the seed that was just published, which is what proves the seed.
 # --reseed first republishes the bootstrap (`bootstrap.mjs update all`, which already proves
 # self-hosting and assembly identity on every target, so no separate `verify` follows) and commits
 # it. Logs go to LOGDIR (default .work/gate), one per leg; LOGDIR/DONE is written last. Run it again
@@ -29,14 +32,14 @@ if [ $reseed = 1 ]; then
   # One resumable step per target (each up to an hour under qemu), then one publish.
   for t in x86_64 aarch64 riscv64; do
     if ! done_ok "$G/reseed_$t.log"; then
-      bun tools/bootstrap.mjs stage $t > "$G/reseed_$t.log.tmp" 2>&1
+      GRAIL_COMPILER=${GATE_RESEED_COMPILER:-${GRAIL_COMPILER:-}} bun tools/bootstrap.mjs stage $t > "$G/reseed_$t.log.tmp" 2>&1
       echo "exit=$?" >> "$G/reseed_$t.log.tmp"
       mv "$G/reseed_$t.log.tmp" "$G/reseed_$t.log"
       done_ok "$G/reseed_$t.log" || { echo "reseed $t failed" > "$G/summary.txt"; touch "$G/DONE"; exit 1; }
     fi
   done
   if ! done_ok "$G/reseed.log"; then
-    bun tools/bootstrap.mjs publish > "$G/reseed.log.tmp" 2>&1
+    GRAIL_COMPILER=${GATE_RESEED_COMPILER:-${GRAIL_COMPILER:-}} bun tools/bootstrap.mjs publish > "$G/reseed.log.tmp" 2>&1
     status=$?
     if [ $status = 0 ]; then
       git add compiler/bootstrap && git commit -q -m "Reseed the bootstrap" >> "$G/reseed.log.tmp" 2>&1
