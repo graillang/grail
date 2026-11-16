@@ -236,22 +236,24 @@ export async function check(compiler) {
     }
     // Unwind evidence: one .xdata record per function, with the frame size the compiler set.
     const defs = (assembly.match(/^\.def /gm) ?? []).length;
-    const frames = [...assembly.matchAll(/^\.set \.F\d+,(\d+)$/gm)].map(m => Number(m[1]));
+    // The frame-constant table: one `.set .F<unit>_<n>,<size>` per function, in emission order. The
+    // unit prefix keeps two units' frame constants apart (separate compilation), so a frame
+    // constant is not a bare `.F<n>` and a pattern that assumes one matches nothing at all.
+    const frames = [...assembly.matchAll(/^\.set \.F\w+,(\d+)$/gm)].map(m => Number(m[1]));
     const records = inspectUnwind(built.object).split('RuntimeFunction {').slice(1);
     assert.equal(records.length, defs, `${name}/${windowsAarch64}: ${records.length} records for ${defs} functions`);
-    // The `.set .F<n>,<size>` frame-constant table is emitted for windows-x86_64, whose prologue
-    // sizes its frame from it; an ARM64 prologue uses `sub sp, #n` directly and has no such table.
-    // Where the table exists it must be one-to-one with the functions; where it does not, each
-    // record's own FunctionLength and prologue are still checked below.
-    const haveFrameTable = frames.length === defs;
-    assert.ok(frames.length === 0 || haveFrameTable, `${name}/${windowsAarch64}: frame table has ${frames.length} entries for ${defs} functions`);
+    // Every function's record states the frame its own constant holds: the ARM64 prologue allocates
+    // `movz/movk x10,#.F<n>` then `sub sp,sp,x10`, and the unwind pass writes that same number as
+    // `.seh_stackalloc`, so record i and table entry i must agree one-to-one. A missing table would
+    // silently drop the comparison, so its absence is a failure, not a reprieve.
+    assert.equal(frames.length, defs, `${name}/${windowsAarch64}: frame table has ${frames.length} entries for ${defs} functions`);
     for (let i = 0; i < records.length; i++) {
       const record = records[i];
       assert.match(record, /ExceptionRecord: \.xdata/, `${name}/${windowsAarch64}: record ${i} is not an .xdata record`);
       const length = Number(record.match(/FunctionLength: (\d+)/)[1]);
       assert.ok(length > 0 && length % 4 === 0, `${name}/${windowsAarch64}: record ${i} has length ${length}`);
       const frame = Number(record.match(/sub sp, #(\d+)/)[1]);
-      if (haveFrameTable) assert.equal(frame, frames[i], `${name}/${windowsAarch64}: record ${i} frame ${frame} != .set frame ${frames[i]}`);
+      assert.equal(frame, frames[i], `${name}/${windowsAarch64}: record ${i} frame ${frame} != .set frame ${frames[i]}`);
       assert.match(record, /stp x29, x30/, `${name}/${windowsAarch64}: record ${i} misses the frame-pointer pair`);
       assert.match(record, /mov fp, sp/, `${name}/${windowsAarch64}: record ${i} misses the frame-pointer setup`);
     }

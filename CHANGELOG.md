@@ -113,7 +113,15 @@
   built for different pair layouts refuse to link rather than dereferencing each other's pairs
   wrongly. docs/design/separate-compilation.md, "Format 4 as built"; cases `ifc-*`, and
   `tools/interface-test.mjs` proves round-trip equality and every refusal.
-- Fixed: the windows suite no longer requires the `.set .F<n>` frame-constant table on Windows ARM64, where prologues size their frame with `sub sp, #n` instead. ARM64 unwind records are still checked one per function, with length, frame-pointer pair and `mov fp, sp`.
+- Fixed: the windows suite's Windows ARM64 frame-size check never ran. It matched `.set .F<n>,<size>`,
+  but a frame constant is named in its unit's namespace (`.set .F<unit>_<n>,<size>`), so the pattern
+  matched nothing and a tolerance added for the apparent absence (`672e1da`) turned the comparison
+  into `if (haveFrameTable)`. That is the one check guarding against a wrong frame size in an unwind
+  record, which corrupts stack walks on real hardware. The table was there all along: every ARM64
+  function emits its constant, its prologue subtracts that constant (`movz/movk x10,#.F<n>; sub
+  sp,sp,x10`) and the unwind pass writes it as `.seh_stackalloc`. The suite now requires one table
+  entry per function and compares each record's `sub sp, #n` against it, so a table that disappears
+  or goes stale fails instead of skipping.
 - Fixed: `tools/interface-test.mjs` wiped `.work/interface-test/<target>` at the start of every run,
   so two runs in one checkout deleted each other's interfaces mid-run and the survivor failed with
   `has no interface for module X (expected this file)` - a directory collision, not a compiler bug.

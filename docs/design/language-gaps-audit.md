@@ -193,8 +193,11 @@ lesson is not "be careful", it is "change the shape first":
   what would have to enter the key for that to change.
 - `pool-chunks-mut-timing` measures in-place mutation at ~2x owned; the old 1.33x assertion was
   failing on loaded hosts because one round served both claims. Fixed this round.
-- Windows ARM64 PE unwind records exist but carry no frame-constant table, so `sub sp, #n` is not
-  verifiable against one. Documented, not fixed.
+- Windows ARM64 PE unwind records: **done**. They always did carry a frame-constant table - one
+  `.set .F<unit>_<n>,<size>` per function - but the suite's pattern expected a bare `.F<n>`, so the
+  comparison matched nothing and the absence looked like a property of the target (`672e1da`). The
+  suite now matches the real spelling and requires one entry per function, equal to the record's
+  `sub sp, #n`.
 
 ## How to re-run this audit
 
