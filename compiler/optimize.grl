@@ -1131,6 +1131,22 @@ fn out_number<a>(o: (&a mut ir::Body), n: u64) {
 // labels; a bounds check that fails calls `rt_abort`, as the accessor would have.
 // This is lowering, not optimisation: `lower_leaf_calls` runs it on a build the optimiser skips.
 pub fn leaf_expansion<a, b>(out: (&a mut u8[]), op: u64, label: &b [u8], n: u64, more: u64, trap: u64) {
+    if op == 54 {
+        out.append(view("movq %rsi,%rax\nimulq %rdx,%rax\naddq %rdi,%rax\n"));
+        return ();
+    }
+    if op == 53 {
+        // A fixed-size array's element: the length is the constant in %rdx, so the check reads no
+        // memory. A failure reports `rt_fail(1, index, length)` from this frame, as rt_aslot would.
+        out.append(view("cmpq %rdx,%rsi\njb .L"));
+        out.append(label);
+        put_num(&mut out, n);
+        out.append(view("\nmovq $1,%rdi\ncall rt_fail\n.L"));
+        out.append(label);
+        put_num(&mut out, n);
+        out.append(view(":\nmovq %rsi,%rax\nimulq %rcx,%rax\naddq %rdi,%rax\n"));
+        return ();
+    }
     if op == 40 || op == 41 || op == 44 || op == 49 || op == 51 || op == 52 {
         out.append(view("cmpq 8(%rdi),%rsi\njb .L"));
         out.append(label);
@@ -1222,6 +1238,111 @@ fn put_num<a>(out: (&a mut u8[]), n: u64) {
 }
 // A build the optimiser does not run on (`--debug`) still gets the leaf accessors in line: every
 // line that is exactly `call NAME` for one of them becomes its expansion, with labels of its own.
+// Stack probes (docs/design/fixed-arrays.md): before a frame larger than a page is allocated, the
+// stack pointer walks down to it one page at a time and touches each page, so the first page past
+// the stack's end that is touched is its guard page, within a page of the stack pointer - where the
+// overflow handler reports `stack overflow` - and never a mapping beyond it. The frame sizes are the
+// final ones, the `.set .F<n>,SIZE` lines; the probe goes before the `subq $.F<n>,%rsp` that uses one.
+// Windows (`after` = 1) describes its prologue to the unwinder as exactly `pushq %rbp`, `movq
+// %rsp,%rbp` and the frame line, so there the probe follows the frame line: the frame is already
+// allocated and its pages are touched from the top down, which is what Windows' guard-page growth
+// needs (it is `__chkstk`'s job), with only %rax, %r10 and %r11, which carry no argument.
+pub fn probe_frames<a>(s: &a [u8], after: u64) -> u8[] {
+    mut names = u8[][];
+    mut sizes = u64[];
+    mut a = 0;
+    while a < s.len() {
+        mut e = a;
+        while (e < s.len()) && (s[e] != 10) {
+            e += 1;
+        }
+        if (e - a > 8) && ir::at(view(s), a, view(".set .F")) {
+            mut comma = a;
+            while (comma < e) && (s[comma] != 44) {
+                comma += 1;
+            }
+            mut n: u64 = 0;
+            for x in comma + 1..e {
+                if (48 <= s[x]) & (s[x] <= 57) {
+                    n = n * 10 + u64(s[x] - 48);
+                }
+            }
+            if 4096 < n {
+                names.push(s[a + 5: comma].copy());
+                sizes.push(n);
+            }
+        }
+        a = e + 1;
+    }
+    if names.len() == 0 {
+        return s.copy();
+    }
+    mut out = u8[];
+    mut k: u64 = 0;
+    a = 0;
+    while a < s.len() {
+        mut e = a;
+        while (e < s.len()) && (s[e] != 10) {
+            e += 1;
+        }
+        mut name = u8[];
+        if (e - a > 12) && ir::at(view(s), a, view("subq $.F")) && ir::at(view(s), e - 5, view(",%rsp")) {
+            name = s[a + 6: e - 5].copy();
+        }
+        if (after != 0) && (e - a > 11) && ir::at(view(s), a, view("framesub .F")) {
+            name = s[a + 9: e].copy();
+        }
+        if after != 0 {
+            for x in e - a {
+                out.push(s[a + x]);
+            }
+            out.push(10);
+        }
+        if name.len() != 0 {
+            for i in names.len() {
+                if names[i].len() == name.len() {
+                    mut same = true;
+                    for j in name.len() {
+                        if names[i][j] != name[j] {
+                            same = false;
+                        }
+                    }
+                    if same {
+                        k += 1;
+                        pages := (sizes[i] + 4095) / 4096;
+                        if after != 0 {
+                            out.append(view("movq %rbp,%rax\nmovq $"));
+                            put_num(&mut out, pages);
+                            out.append(view(",%r11\n.Lgrail_probe_"));
+                            put_num(&mut out, k);
+                            out.append(view(":\nsubq $4096,%rax\nmovq (%rax),%r10\nsubq $1,%r11\njnz .Lgrail_probe_"));
+                            put_num(&mut out, k);
+                            out.append(view("\n"));
+                        } else {
+                            out.append(view("movq $"));
+                            put_num(&mut out, pages);
+                            out.append(view(",%rax\n.Lgrail_probe_"));
+                            put_num(&mut out, k);
+                            out.append(view(":\nsubq $4096,%rsp\nmovq $0,(%rsp)\nsubq $1,%rax\njnz .Lgrail_probe_"));
+                            put_num(&mut out, k);
+                            out.append(view("\nmovq %rbp,%rsp\n"));
+                        }
+                    }
+                }
+            }
+        }
+        if after == 0 {
+            for x in e - a {
+                out.push(s[a + x]);
+            }
+            if e < s.len() {
+                out.push(10);
+            }
+        }
+        a = e + 1;
+    }
+    return out;
+}
 pub fn lower_leaf_calls<a>(s: &a [u8]) -> u8[] {
     mut out = u8[];
     mut n: u64 = 0;
@@ -1261,7 +1382,7 @@ fn leaf_op<a>(name: &a [u8]) -> u64 {
     names := u8[][copy_text(view("rt_slot")), copy_text(view("rt_at")), copy_text(view("rt_len")), copy_text(view("rt_xchg")),
         copy_text(view("rt_atb")), copy_text(view("rt_push")), copy_text(view("rt_pushb")), copy_text(view("rt_slotu")),
         copy_text(view("rt_atbu")), copy_text(view("rt_slot4")), copy_text(view("rt_slot4u")), copy_text(view("rt_at4")),
-        copy_text(view("rt_slotw"))];
+        copy_text(view("rt_slotw")), copy_text(view("rt_aslot")), copy_text(view("rt_aslotu"))];
     for i in names.len() {
         if names[i].len() == name.len() {
             mut same = true;
@@ -1279,7 +1400,7 @@ fn leaf_op<a>(name: &a [u8]) -> u64 {
 }
 fn emit_line<a, b>(o: (&a mut ir::Body), s: &b [u8], i: u64) {
     op := o.op[i];
-    if (39 < op) & (op < 53) {
+    if (39 < op) & (op < 55) {
         mut label = u8[];
         label.append(view("opt"));
         prefix := o.uprefix.copy();
@@ -1288,7 +1409,7 @@ fn emit_line<a, b>(o: (&a mut ir::Body), s: &b [u8], i: u64) {
         // Only the forms with labels number them, as they always have.
         mut n = 0;
         mut more = 0;
-        if op == 40 || op == 41 || op == 44 || op == 49 || op == 51 || op == 52 || op == 45 || op == 46 {
+        if op == 40 || op == 41 || op == 44 || op == 49 || op == 51 || op == 52 || op == 53 || op == 45 || op == 46 {
             n = ir::uniq_take(&mut o);
         }
         if op == 45 || op == 46 {

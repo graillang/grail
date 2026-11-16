@@ -6140,7 +6140,238 @@
     "name": "c-array-length-positive",
     "source": "extern \"C\" record Z { a: [u8; 0] }\nfn main() -> u64 {\n    return 0;\n}\n",
     "reject": true,
-    "diagnostic": "a C array length is a positive integer constant"
+    "diagnostic": "an array length is a positive integer constant"
+  },
+  {
+    "name": "array-literals-index-len",
+    "note": "fixed-size arrays in locals (docs/design/fixed-arrays.md): sized elements in C layout, nested arrays, an `&mut` parameter, compound assignment, a constant len()",
+    "source": "fn sum(a: &[f64; 3]) -> f64 {\n    return a[0] + a[1] + a[2];\n}\nfn scale(a: &mut [f64; 3], k: f64) {\n    for i in 3 {\n        a[i] = a[i] * k;\n    }\n}\nfn main() {\n    a: [f32; 4] = [1.0, 2.0, 3.5, 4.0];\n    println(a[2]);\n    println(a.len());\n    mut b: [f64; 3] = [1.0, 2.0, 3.0];\n    scale(&mut b, 2.0);\n    println(sum(&b));\n    mut z: [u8; 5] = [7; 5];\n    z[1] = 9;\n    z[2] += 1;\n    println(\"{} {} {}\", z[0], z[1], z[2]);\n    m: [[i32; 2]; 3] = [[1, -2], [3, 4], [5, 6]];\n    println(m[0][1] + m[2][0]);\n    mut t = 0.0;\n    for x in &b {\n        t = t + *x;\n    }\n    println(t);\n    k: u64 = 2;\n    println(a[k]);\n    c := a;\n    println(c[0] + a[3]);\n    w: [i16; 3] = [-300, 0, 300];\n    println(w);\n}\n",
+    "stdout": "3.5\n4\n12\n7 9 8\n3\n12\n3.5\n5\n[-300, 0, 300]\n"
+  },
+  {
+    "name": "array-equality-and-text",
+    "note": "`==` compares element by element (floats as IEEE, so -0.0 == 0.0), and an array prints as a vector does, nested and inside a format string",
+    "source": "fn main() {\n    a: [f32; 3] = [1.5, -0.0, 3.0];\n    b: [f32; 3] = [1.5, 0.0, 3.0];\n    c: [f32; 3] = [1.5, 0.0, 4.0];\n    println(a == b);\n    println(a == c);\n    println(a != c);\n    println(a);\n    m: [[u8; 2]; 2] = [[1, 2], [3, 4]];\n    println(m);\n    println(\"m = {}\", m);\n    big: [u64; 40] = [7; 40];\n    println(big[39] + big.len());\n}\n",
+    "stdout": "true\nfalse\ntrue\n[1.5, -0.0, 3.0]\n[[1, 2], [3, 4]]\nm = [[1, 2], [3, 4]]\n47\n"
+  },
+  {
+    "name": "array-small-copies",
+    "note": "the owner's copy rule: an array of plain data of at most four words copies on binding, and both names stay usable",
+    "source": "fn main() {\n    a: [f64; 4] = [1.0; 4];\n    mut b = a;\n    b[0] = 5.0;\n    println(\"{} {}\", a[0], b[0]);\n}\n",
+    "stdout": "1 5\n"
+  },
+  {
+    "name": "reject-array-large-moves",
+    "reject": true,
+    "note": "an array larger than four words moves; reading the moved-from name is refused and the help names .copy()",
+    "source": "fn main() {\n    a: [f64; 5] = [0.0; 5];\n    b := a;\n    println(a[0] + b[0]);\n}\n",
+    "diagnostic": "`a` was moved"
+  },
+  {
+    "name": "array-copy-method",
+    "note": "`.copy()` copies a large array; the copy is independent",
+    "source": "fn main() {\n    a: [u64; 6] = [3; 6];\n    mut b = a.copy();\n    b[5] = 4;\n    println(\"{} {}\", a, b);\n}\n",
+    "stdout": "[3, 3, 3, 3, 3, 3] [3, 3, 3, 3, 3, 4]\n"
+  },
+  {
+    "name": "array-assignment-never-aliases",
+    "note": "assignment copies into the variable's own storage: the literal on the right is re-evaluated each iteration while it reads the variable, and nothing shares storage",
+    "source": "fn main() {\n    mut keep: [u64; 2] = [1, 2];\n    for i in 3 {\n        keep = [keep[1], keep[0] + i];\n        b: [u64; 2] = [i, i];\n        t: [u64; 2] = b;\n        keep[0] = keep[0] + t[1];\n    }\n    println(keep);\n}\n",
+    "stdout": "[5, 4]\n"
+  },
+  {
+    "name": "array-through-reference",
+    "note": "`*r = v` and `exchange` on an array reference replace its bytes",
+    "source": "fn reset(a: &mut [f64; 3]) {\n    *a = [9.0, 8.0, 7.0];\n}\nfn main() {\n    mut a: [f64; 3] = [1.0, 2.0, 3.0];\n    reset(&mut a);\n    println(a);\n    old := exchange(&mut a, [4.0, 5.0, 6.0]);\n    println(\"{} {}\", old, a);\n    mut big: [u64; 6] = [1; 6];\n    prev := exchange(&mut big, [2; 6]);\n    println(\"{} {}\", prev, big);\n}\n",
+    "stdout": "[9.0, 8.0, 7.0]\n[9.0, 8.0, 7.0] [4.0, 5.0, 6.0]\n[1, 1, 1, 1, 1, 1] [2, 2, 2, 2, 2, 2]\n"
+  },
+  {
+    "name": "array-index-out-of-bounds-aborts",
+    "note": "an index the compiler cannot prove is checked against the constant length, and a failure reports both and where (the location comes from the site table, which only the native backend emits)",
+    "source": "fn main() {\n    a: [u64; 3] = [1, 2, 3];\n    k: u64 = 3;\n    println(a[k]);\n}\n",
+    "stderr": "error: index 3 out of bounds for length 3\n --> ",
+    "signal": "SIGABRT",
+    "backends": [
+      "native"
+    ]
+  },
+  {
+    "name": "reject-array-constant-index",
+    "reject": true,
+    "note": "a literal index is checked against N while compiling",
+    "source": "fn main() {\n    a: [u64; 3] = [1, 2, 3];\n    println(a[3]);\n}\n",
+    "diagnostic": "index 3 is out of bounds for `[u64; 3]`"
+  },
+  {
+    "name": "reject-array-literal-count",
+    "reject": true,
+    "note": "an array starts full: a literal must give exactly N elements",
+    "source": "fn main() {\n    a: [u64; 3] = [1, 2];\n}\n",
+    "diagnostic": "this literal has 2 elements, and `[u64; 3]` holds 3"
+  },
+  {
+    "name": "reject-array-repeat-count",
+    "reject": true,
+    "source": "fn main() {\n    a: [f32; 4] = [0.0; 3];\n}\n",
+    "diagnostic": "this repeat makes 3 elements, and `[f32; 4]` holds 4"
+  },
+  {
+    "name": "reject-array-uninitialised",
+    "reject": true,
+    "note": "no partially initialised arrays: a declaration without a value is refused",
+    "source": "fn main() {\n    mut a: [f32; 4];\n}\n",
+    "diagnostic": "an array starts full, so it is declared with a value"
+  },
+  {
+    "name": "reject-array-zero-length",
+    "reject": true,
+    "note": "[T; 0] is refused in v1",
+    "source": "fn main() {\n    a: [f32; 0] = [0.0; 0];\n}\n",
+    "diagnostic": "an array length is a positive integer constant"
+  },
+  {
+    "name": "reject-array-by-value-parameter",
+    "reject": true,
+    "source": "fn f(a: [f32; 4]) -> f32 {\n    return a[0];\n}\nfn main() {\n}\n",
+    "diagnostic": "an array as a parameter taken by value is not supported yet"
+  },
+  {
+    "name": "reject-array-result",
+    "reject": true,
+    "source": "fn f() -> [f32; 4] {\n    return [0.0; 4];\n}\nfn main() {\n}\n",
+    "diagnostic": "an array as a function result is not supported yet"
+  },
+  {
+    "name": "reject-array-struct-field",
+    "reject": true,
+    "source": "struct S {\n    a: [f32; 4]\n}\nfn main() {\n}\n",
+    "diagnostic": "an array as a field of a struct or a variant's payload is not supported yet"
+  },
+  {
+    "name": "reject-array-capture",
+    "reject": true,
+    "source": "fn main() {\n    a: [f32; 4] = [0.0; 4];\n    g := || a[0];\n}\n",
+    "diagnostic": "an array as a closure's capture is not supported yet"
+  },
+  {
+    "name": "reject-array-type-argument",
+    "reject": true,
+    "source": "fn main() {\n    t: ([u8; 2], u64) = ([1, 2], 3);\n}\n",
+    "diagnostic": "an array as a type argument"
+  },
+  {
+    "name": "reject-array-owned-element",
+    "reject": true,
+    "source": "fn main() {\n    a: [string; 2] = [\"a\".text(), \"b\".text()];\n}\n",
+    "diagnostic": "an array element is a number or another array in this version"
+  },
+  {
+    "name": "reject-array-write-through-shared",
+    "reject": true,
+    "source": "fn f(a: &[f32; 4]) {\n    a[0] = 1.0;\n}\nfn main() {\n}\n",
+    "diagnostic": "mutation through readonly reference"
+  },
+  {
+    "name": "reject-array-element-borrow-conflict",
+    "reject": true,
+    "note": "element places are one child of the array, as for a vector: a write to one element while another is borrowed is refused",
+    "source": "fn main() {\n    mut a: [u64; 4] = [0; 4];\n    r := &a[1];\n    a[0] = 5;\n    println(*r);\n}\n",
+    "diagnostic": ""
+  },
+  {
+    "name": "array-checks-proved-or-constant",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a loop to N, `for x in a` and a refined index have no element check; an unknown index is one compare against the constant N - no length is loaded - and a loop over an array calls nothing",
+    "source": "fn total(a: &[u64; 8]) -> u64 {\n    mut t = 0;\n    for i in 8 {\n        t += a[i];\n    }\n    return t;\n}\nfn total_each(a: &[f64; 8]) -> f64 {\n    mut t = 0.0;\n    for x in a {\n        t = t + *x;\n    }\n    return t;\n}\nfn get(a: &[u64; 8], k: u64) -> u64 {\n    return a[k];\n}\nfn at(a: &[u64; 8], i: u64 where i < 8) -> u64 {\n    return a[i];\n}\nfn main() {\n    a: [u64; 8] = [1, 2, 3, 4, 5, 6, 7, 8];\n    f: [f64; 8] = [0.5; 8];\n    println(\"{} {} {} {}\", total(&a), total_each(&f), get(&a, 7), at(&a, 2));\n}\n",
+    "stdout": "36 4 8 3\n",
+    "asm": [
+      {
+        "in": "f_main_get",
+        "text": "movabsq $8,%rdx"
+      },
+      {
+        "in": "f_main_get",
+        "text": "call rt_fail"
+      }
+    ],
+    "asmAbsent": [
+      {
+        "in": "f_main_total",
+        "text": "rt_fail"
+      },
+      {
+        "in": "f_main_total_each",
+        "text": "call"
+      },
+      {
+        "in": "f_main_at",
+        "text": "rt_fail"
+      },
+      {
+        "in": "f_main_get",
+        "text": "8(%rdi)"
+      }
+    ]
+  },
+  {
+    "name": "array-frame-over-a-page-is-probed",
+    "note": "a frame larger than a page is touched a page at a time from the top before it is allocated (on LLVM, `probe-stack`), and a deep recursion through such frames reports a stack overflow instead of stepping over the guard",
+    "source": "fn fill(depth: u64) -> u64 {\n    mut buf: [u64; 8192] = [0; 8192];\n    buf[depth % 8192] = depth;\n    if depth == 0 {\n        return buf[0];\n    }\n    return fill(depth - 1) + buf[depth % 8192];\n}\nfn main() {\n    println(fill(10));\n}\n",
+    "stdout": "55\n"
+  },
+  {
+    "name": "array-frame-probe-pinned",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "source": "fn fill(depth: u64) -> u64 {\n    mut buf: [u64; 8192] = [0; 8192];\n    buf[depth % 8192] = depth;\n    return buf[depth % 8192];\n}\nfn small(x: u64) -> u64 {\n    a: [u64; 4] = [x; 4];\n    return a[3];\n}\nfn main() {\n    println(fill(10) + small(1));\n}\n",
+    "stdout": "11\n",
+    "asm": [
+      {
+        "in": "f_main_fill",
+        "text": "movq $0,(%rsp)"
+      }
+    ],
+    "asmAbsent": [
+      {
+        "in": "f_main_small",
+        "text": ".Lgrail_probe_"
+      }
+    ]
+  },
+  {
+    "name": "array-large-frames-overflow-reports",
+    "backends": [
+      "native"
+    ],
+    "note": "recursion through 64 KiB frames runs into the stack's end page by page and is reported as an overflow, at the frame's statement",
+    "source": "fn fill(depth: u64) -> u64 {\n    mut buf: [u64; 8192] = [0; 8192];\n    buf[depth % 8192] = depth;\n    if depth == 0 {\n        return buf[0];\n    }\n    return fill(depth - 1) + buf[depth % 8192];\n}\nfn main() {\n    println(\"before\");\n    println(fill(100000));\n}\n",
+    "stdout": "before\n",
+    "status": 134,
+    "stderr": [
+      "error: stack overflow\n"
+    ]
+  },
+  {
+    "name": "reject-array-frame-over-task-stack",
+    "reject": true,
+    "note": "a frame larger than the 1 MiB stack a task runs on is refused at the largest array in it",
+    "source": "fn main() {\n    big: [u64; 200000] = [0; 200000];\n    println(big[1]);\n}\n",
+    "diagnostic": "more than the 1 MiB stack a task runs on"
+  },
+  {
+    "name": "array-in-task-frame-runs",
+    "note": "a task (1 MiB stack) with a 64 KiB array in its frame runs: the probe walks its stack from the top",
+    "source": "fn work(seed: u64, unused: u64) -> u64 {\n    mut buf: [u64; 8192] = [seed; 8192];\n    for i in 8192 {\n        buf[i] = buf[i] + i;\n    }\n    return buf[8191] + buf[0];\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    t := spawn(sc, 5, work);\n    return join(t);\n}\nfn main() {\n    println(task_scope(0, body));\n}\n",
+    "stdout": "8201\n"
   },
   {
     "name": "extern-lib-link-only",
