@@ -398,7 +398,12 @@ struct Atom {
     rel: u64,
     a: u8[],
     b: u8[],
-    k: i64
+    k: i64,
+    // The constant each side adds in the source, while the atom is still as it was read (pv_atom):
+    // `i + 1 < n` is `a: i, ao: 1`. A fact has neither - pv_settle moved each one into `k` where the
+    // addition cannot wrap, or into the term's own spelling where it might.
+    ao: i64,
+    bo: i64
 }
 struct C {
     src: u8[],
@@ -664,7 +669,7 @@ struct C {
     // 1 while a declaration's predicate is being read (see pv_read_pred).
     pv_pred_mode: u64,
     // 1 for the next subtraction `binary` emits: the facts show it cannot underflow.
-    pv_sub_ok: u64,
+    pv_arith_ok: u64,
     // Strict refinements (docs/design/refinements.md): `--strict-refinements` for the whole program,
     // `@strict;` for a module (it stays with the module's name, so a replayed body keeps it), and
     // `@strict` on a declaration for the function that follows.
@@ -7349,7 +7354,7 @@ fn ref_result<a, b>(c: (&a mut C), slot: u64, ty: u64, term: &b [u8], pos: u64) 
 // compared by text: two occurrences of `i` in one function name the same variable unless a binding
 // between them shadowed it, and a binding drops the facts that name it.
 fn copy_atom_value<a>(x: (&a Atom)) -> Atom {
-    return Atom { rel: x.rel, a: x.a.copy(), b: x.b.copy(), k: x.k };
+    return Atom { rel: x.rel, a: x.a.copy(), b: x.b.copy(), k: x.k, ao: x.ao, bo: x.bo };
 }
 // The weight of "no path": larger than any bound a fact can state, small enough that two of them
 // added together stay inside i64.
@@ -7536,7 +7541,7 @@ fn pv_atom<a>(c: (&a mut C), at: u64, atom: (&a mut Atom), used: (&a mut u64)) -
             rel = 5;
         }
         if same(view(m), view("is_finite")) || same(view(m), view("is_nan")) {
-            exchange(atom, Atom { rel: rel, a: t1, b: u8[], k: 0 });
+            exchange(atom, Atom { rel: rel, a: t1, b: u8[], k: 0, ao: 0, bo: 0 });
             exchange(used, (i + 4) - at);
             return true;
         }
@@ -7558,11 +7563,13 @@ fn pv_atom<a>(c: (&a mut C), at: u64, atom: (&a mut Atom), used: (&a mut u64)) -
         if !same(view(t3), view("0")) {
             return false;
         }
-        exchange(atom, Atom { rel: 3, a: t1, b: u8[], k: pv_number(view(t2)) });
+        exchange(atom, Atom { rel: 3, a: t1, b: u8[], k: pv_number(view(t2)), ao: 0, bo: 0 });
         exchange(used, (j + 1 + u3) - at);
         return true;
     }
-    // `x + 1 < y` is `x < y - 1`: an offset on the left moves to the right with its sign turned.
+    // A constant added to the left side. It stays beside its term: whether `x + 1 < y` may be read as
+    // `x < y - 1` depends on whether `x + 1` can wrap, and that is settled where the facts are
+    // (pv_settle), not here.
     mut left_k: i64 = 0;
     if (kind_at(&mut c, i) == 43) || (kind_at(&mut c, i) == 45) {
         lsign := kind_at(&mut c, i);
@@ -7621,21 +7628,238 @@ fn pv_atom<a>(c: (&a mut C), at: u64, atom: (&a mut Atom), used: (&a mut u64)) -
         }
         j = j + 1 + u3;
     }
-    kk = kk - left_k;
-    // An offset is arithmetic the program does, and in a wrap build it can wrap: `i < n - 1` with
-    // `n == 0` is true of the wrapped value and false of the integers the facts reason about. A
-    // checked build stops at the wrap instead, so only there does the atom mean what it says.
-    if (kk != 0) & (c.overflow == 0) {
+    // Two literals are folded here, where no fact is needed: `16 - 1` is `15`. A difference below
+    // zero is a wrapped value this prover does not spell, so the atom is not read.
+    if (left_k != 0) & pv_literal(view(t1)) {
+        t1 = pv_fold(view(t1), left_k);
+        left_k = 0;
+    }
+    if (kk != 0) & pv_literal(view(t2)) {
+        t2 = pv_fold(view(t2), kk);
+        kk = 0;
+    }
+    if (t1.len() == 0) || (t2.len() == 0) {
         return false;
     }
     if flip != 0 {
-        // `x > y + k` is `y < x - k`.
-        exchange(atom, Atom { rel: rel, a: t2, b: t1, k: 0 - kk });
+        // `x > y` is `y < x`, each side keeping its own constant.
+        exchange(atom, Atom { rel: rel, a: t2, b: t1, k: 0, ao: kk, bo: left_k });
     } else {
-        exchange(atom, Atom { rel: rel, a: t1, b: t2, k: kk });
+        exchange(atom, Atom { rel: rel, a: t1, b: t2, k: 0, ao: left_k, bo: kk });
     }
     exchange(used, j - at);
     return true;
+}
+// ---- arithmetic that may wrap (docs/design/refinements.md, "Arithmetic in a predicate") -----------
+// An atom is a statement over the integers about the values of its terms. A source side `t + c`
+// denotes the wrapped value `(t + c) mod 2^64`, which is the integer `t + c` only when the addition
+// cannot wrap. So a side with a constant is read in one of two ways, and the build's overflow mode
+// is no part of the choice: where the facts prove the no-wrap condition the constant moves into the
+// atom's `k`; where they do not, the whole expression is one opaque term (`i+1`, `v.len-1`) whose
+// value is whatever the expression evaluates to, wrapped or not.
+//
+// A literal with a constant folded in: the digits of the sum, or empty when the literal is not an
+// integer or the result is below zero.
+fn pv_fold<a>(t: &a [u8], o: i64) -> u8[] {
+    if !pv_digits(view(t)) {
+        return u8[];
+    }
+    v := pv_number(view(t)) + o;
+    if v < 0 {
+        return u8[];
+    }
+    mut out = u8[];
+    decimal(&mut out, u64(v));
+    return out;
+}
+// Where an opaque term's constant starts: the index of its `+` or `-`, or 0 when the term has none.
+// A name, a path and a literal contain neither sign.
+fn pv_opaque_at<a>(t: &a [u8]) -> u64 {
+    for i in t.len() {
+        if (t[i] == 43) || (t[i] == 45) {
+            return i;
+        }
+    }
+    return 0;
+}
+// The canonical spelling of `t + o`: the base term, the sign, the digits, no spaces.
+fn pv_opaque<a>(t: &a [u8], o: i64) -> u8[] {
+    mut out = copy_bytes(view(t));
+    if o < 0 {
+        out.push(45);
+        decimal(&mut out, u64(0 - o));
+    } else {
+        out.push(43);
+        decimal(&mut out, u64(o));
+    }
+    return out;
+}
+// Whether a term is a `u64` in this body: an integer literal, a length, a `u64` local or parameter,
+// a `u64` field of a record local, or an opaque term over one of those. The no-wrap conditions are
+// stated for `u64`; a sized or signed term wraps at another boundary and is never normalised.
+fn pv_u64_term<a, b>(c: (&a mut C), t: &b [u8]) -> bool {
+    if pv_digits(view(t)) {
+        return true;
+    }
+    mut n = pv_opaque_at(view(t));
+    if n == 0 {
+        n = t.len();
+    }
+    if (4 < n) && (t[n - 4] == 46) && (t[n - 3] == 108) && (t[n - 2] == 101) && (t[n - 1] == 110) {
+        return true;
+    }
+    mut root = u8[];
+    mut field = u8[];
+    mut dotted = 0;
+    for i in n {
+        if (t[i] == 46) & (dotted == 0) {
+            dotted = 1;
+        } else {
+            if dotted == 0 {
+                root.push(t[i]);
+            } else {
+                field.push(t[i]);
+            }
+        }
+    }
+    l := find_local(&mut c, view(root));
+    if l == 0 {
+        return false;
+    }
+    mut ty = local_ty(&mut c, l - 1);
+    if dotted == 0 {
+        return ty == 0;
+    }
+    if ty_kind(&mut c, ty) == 7 {
+        ty = ty_arg(&mut c, ty);
+    }
+    ty = base_type(&mut c, ty);
+    if ty_kind(&mut c, ty) != 8 {
+        return false;
+    }
+    d := ty_arg(&mut c, ty);
+    idx := field_index(&mut c, d, view(field));
+    if idx == 0 {
+        return false;
+    }
+    return field_type(&mut c, ty, idx - 1) == 0;
+}
+// The no-wrap condition of `t + o`, from the facts. For `o > 0` it is `NW+`: some `u64` term `y` in
+// the facts has `t <= y - o`, and every `u64` is at most `2^64 - 1`, so `t + o` is too. For `o < 0`
+// it is `NW-`: the facts give the literal bound `-o <= t`.
+fn pv_nw<a, b>(c: (&a mut C), facts: (&a Atom[]), t: &b [u8], o: i64) -> bool {
+    if o == 0 {
+        return true;
+    }
+    if !pv_u64_term(&mut c, view(t)) {
+        return false;
+    }
+    if o < 0 {
+        mut low = u8[];
+        decimal(&mut low, u64(0 - o));
+        return pv_implies(&facts, 1, view(low), view(t), 0);
+    }
+    for i in facts.len() {
+        if 2 < facts[i].rel {
+            continue;
+        }
+        for side in 2 {
+            mut y = facts[i].a.copy();
+            if side == 1 {
+                y = facts[i].b.copy();
+            }
+            if (y.len() == 0) || same(view(y), view(t)) {
+                continue;
+            }
+            if !pv_u64_term(&mut c, view(y)) {
+                continue;
+            }
+            if pv_implies(&facts, 1, view(t), view(y), 0 - o) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+// One side `t + o` as a term and an integer offset (`k`): the term with its constant where the
+// no-wrap condition follows from the facts, the opaque term with none where it does not. Empty when
+// the side cannot be spelled: a constant on a term that is already opaque, or on a float literal.
+fn pv_side<a, b, d>(c: (&a mut C), facts: (&a Atom[]), t: &b [u8], o: i64, k: (&d mut i64)) -> u8[] {
+    exchange(k, 0);
+    if o == 0 {
+        return copy_bytes(view(t));
+    }
+    if pv_literal(view(t)) {
+        return pv_fold(view(t), o);
+    }
+    if pv_nw(&mut c, &facts, view(t), o) {
+        exchange(k, o);
+        return copy_bytes(view(t));
+    }
+    if pv_opaque_at(view(t)) != 0 {
+        return u8[];
+    }
+    return pv_opaque(view(t), o);
+}
+// An atom as it was read, turned into a fact with the facts in scope: each side through pv_side.
+fn pv_settle<a, b>(c: (&a mut C), facts: (&a Atom[]), raw: (&b Atom), out: (&a mut Atom[])) -> bool {
+    if (2 < raw.rel) || ((raw.ao == 0) & (raw.bo == 0)) {
+        out.push(Atom { rel: raw.rel, a: raw.a.copy(), b: raw.b.copy(), k: raw.k, ao: 0, bo: 0 });
+        return true;
+    }
+    mut ka: i64 = 0;
+    mut kb: i64 = 0;
+    x := pv_side(&mut c, &facts, view(raw.a), raw.ao, &mut ka);
+    y := pv_side(&mut c, &facts, view(raw.b), raw.bo, &mut kb);
+    if (x.len() == 0) || (y.len() == 0) {
+        return false;
+    }
+    // `x + ka REL y + kb` is `x REL y + (kb - ka)`.
+    out.push(Atom { rel: raw.rel, a: x, b: y, k: raw.k + kb - ka, ao: 0, bo: 0 });
+    return true;
+}
+// A conjunction settled left to right into `facts`: every atom of it holds where it is stated, so an
+// earlier one (`0 < i`) may be what shows a later one's subtraction cannot wrap (`i - 1 < n`). False
+// when a side cannot be spelled, and then nothing was added.
+fn pv_settle_all<a>(c: (&a mut C), raws: (&a Atom[]), facts: (&a mut Atom[]), out: (&a mut Atom[])) -> bool {
+    mut work = Atom[];
+    copy_atoms(&facts, &mut work);
+    mut got = Atom[];
+    for i in raws.len() {
+        mut one = Atom[];
+        if !pv_settle(&mut c, &work, &raws[i], &mut one) {
+            return false;
+        }
+        for j in one.len() {
+            got.push(copy_atom_value(&one[j]));
+            if work.len() < 64 {
+                work.push(copy_atom_value(&one[j]));
+            }
+        }
+    }
+    for i in got.len() {
+        out.push(copy_atom_value(&got[i]));
+    }
+    return true;
+}
+// One side of an obligation, on the caller's terms. The parameter stands for the argument `x + o`
+// (`o` is not zero only where the argument's own no-wrap condition was proved - pv_side did that),
+// and the predicate adds `pa` to it. The sum is the integer `x + o + pa` when each step is known not
+// to wrap: the argument's, and then the combined constant's (nothing to show when it is zero).
+fn pv_oblige_side<a, b, d>(c: (&a mut C), facts: (&a Atom[]), x: &b [u8], o: i64, pa: i64, k: (&d mut i64)) -> u8[] {
+    exchange(k, 0);
+    total := o + pa;
+    if total == 0 {
+        return copy_bytes(view(x));
+    }
+    if o == 0 {
+        return pv_side(&mut c, &facts, view(x), pa, &mut k);
+    }
+    if pv_nw(&mut c, &facts, view(x), total) {
+        exchange(k, total);
+        return copy_bytes(view(x));
+    }
+    return u8[];
 }
 // The atoms a predicate or a condition states, a conjunction only: a `||`, a `!` or an atom the
 // prover cannot read means "nothing proved", which is the safe answer.
@@ -7655,7 +7879,7 @@ fn pv_atoms<a>(c: (&a mut C), lo: u64, hi: u64, out: (&a mut Atom[])) -> bool {
             i += 1;
             continue;
         }
-        mut atom = Atom { rel: 0, a: u8[], b: u8[], k: 0 };
+        mut atom = Atom { rel: 0, a: u8[], b: u8[], k: 0, ao: 0, bo: 0 };
         mut used = 0;
         if !pv_atom(&mut c, i, &mut atom, &mut used) {
             return false;
@@ -7703,11 +7927,12 @@ fn pv_add<a>(facts: (&a mut Atom[]), rel: u64, a: &a [u8], b: &a [u8], k: i64) -
     if 64 <= facts.len() {
         return ();
     }
-    facts.push(Atom { rel: rel, a: copy_bytes(view(a)), b: copy_bytes(view(b)), k: k });
+    facts.push(Atom { rel: rel, a: copy_bytes(view(a)), b: copy_bytes(view(b)), k: k, ao: 0, bo: 0 });
     return ();
 }
 // Whether a term is `name` or something reached through it: `name.len`, `name.field`,
-// `name.field.len`.
+// `name.field.len`, and an opaque term over any of those (`name+1`, `name.len-1`), whose value
+// changes when its base does.
 fn pv_mentions<a, b>(term: &a [u8], name: &b [u8]) -> bool {
     if term.len() < name.len() {
         return false;
@@ -7717,7 +7942,11 @@ fn pv_mentions<a, b>(term: &a [u8], name: &b [u8]) -> bool {
             return false;
         }
     }
-    return (term.len() == name.len()) || (term[name.len()] == 46);
+    if term.len() == name.len() {
+        return true;
+    }
+    next := term[name.len()];
+    return (next == 46) || (next == 43) || (next == 45);
 }
 // Drop every fact that mentions a name, its length or a field of it: a binding of the name shadows
 // what the facts said, and a write through it makes them false.
@@ -7727,7 +7956,7 @@ fn pv_kill<a>(facts: (&a mut Atom[]), name: &a [u8]) -> unit {
         x := &facts[i];
         hit := pv_mentions(view(x.a), view(name)) || pv_mentions(view(x.b), view(name));
         if !hit {
-            keep.push(Atom { rel: x.rel, a: x.a.copy(), b: x.b.copy(), k: x.k });
+            keep.push(copy_atom_value(&x));
         }
     }
     exchange(facts, keep);
@@ -7795,9 +8024,8 @@ fn pv_resolve<a>(facts: (&a Atom[]), t: &a [u8]) -> u8[] {
     return cur;
 }
 // Whether `a REL b + k` follows from the facts: `%` divisibility, a float class, or the difference
-// graph closed over the comparisons. Only facts and obligations whose `k` is zero or negative take
-// part in the graph: `b + k` with `k` positive can wrap at run time in a wrap build, and then the
-// integer reading of the fact would be the wrong one.
+// graph closed over the comparisons. Atoms are statements over the integers, with any `k`: a
+// constant reached `k` only where its addition was shown not to wrap (pv_settle, pv_oblige_side).
 fn pv_implies<a>(facts: (&a Atom[]), rel: u64, a: &a [u8], b: &a [u8], k: i64) -> bool {
     if rel == 4 {
         for i in facts.len() {
@@ -7830,12 +8058,6 @@ fn pv_implies<a>(facts: (&a Atom[]), rel: u64, a: &a [u8], b: &a [u8], k: i64) -
         }
         return false;
     }
-    // A comparison at run time is exact only where its own arithmetic cannot wrap: two literals are
-    // exact whatever `k` is, and `k <= 0` needs `b >= -k`, or the checked build would have stopped
-    // before the comparison.
-    if !((k <= 0) || (pv_digits(view(a)) & pv_digits(view(b)))) {
-        return false;
-    }
     // The difference graph: `d[j * n + i]` is the smallest `i - j` the facts allow, closed by
     // Floyd-Warshall over the terms the facts and the obligation mention. A literal is an exact
     // vertex, so `16` and `20` order each other.
@@ -7853,7 +8075,7 @@ fn pv_implies<a>(facts: (&a Atom[]), rel: u64, a: &a [u8], b: &a [u8], k: i64) -
     }
     for i in facts.len() {
         r := facts[i].rel;
-        if (r == 4) || (r == 5) || (r == 3) || (0 < facts[i].k) {
+        if (r == 4) || (r == 5) || (r == 3) {
             continue;
         }
         if (facts[i].a.len() == 0) || (facts[i].b.len() == 0) {
@@ -7886,7 +8108,7 @@ fn pv_implies<a>(facts: (&a Atom[]), rel: u64, a: &a [u8], b: &a [u8], k: i64) -
     }
     for i in facts.len() {
         r := facts[i].rel;
-        if (r == 4) || (r == 5) || (r == 3) || (0 < facts[i].k) {
+        if (r == 4) || (r == 5) || (r == 3) {
             continue;
         }
         if (facts[i].a.len() == 0) || (facts[i].b.len() == 0) {
@@ -7979,7 +8201,7 @@ fn pv_rename<a, b>(t: &a [u8], from: (&b u8[][]), to: (&b u8[][])) -> u8[] {
         mut len_form = from[i].copy();
         push_bytes(&mut len_form, view(".len"));
         if same(view(len_form), view(t)) {
-            if pv_literal(view(to[i])) {
+            if pv_literal(view(to[i])) || (pv_opaque_at(view(to[i])) != 0) {
                 return u8[];
             }
             mut out = to[i].copy();
@@ -8016,17 +8238,16 @@ fn pv_span_term<a>(c: (&a mut C), lo: u64, hi: u64) -> u8[] {
     }
     return t;
 }
-// An argument's term and the constant added to it: `i`, `i + 1`, `v.len() - 1`. The offset is
-// arithmetic the caller does before the call, so it is read only in a checked build, where a wrap
-// stops the program before the callee is entered (see pv_atom). Empty text when the span is anything
-// else.
+// An argument's term and the constant added to it: `i`, `i + 1`, `v.len() - 1`. The constant is
+// arithmetic the caller does before the call and it may wrap, so the caller of this settles it with
+// the facts at the call (pv_side). Empty text when the span is anything else.
 fn pv_span_term_off<a, b>(c: (&a mut C), lo: u64, hi: u64, off: (&b mut i64)) -> u8[] {
     exchange(off, 0);
     whole := pv_span_term(&mut c, lo, hi);
     if whole.len() != 0 {
         return whole;
     }
-    if (c.overflow == 0) || (hi < lo + 3) {
+    if hi < lo + 3 {
         return u8[];
     }
     sign := kind_at(&mut c, hi - 2);
@@ -8042,7 +8263,7 @@ fn pv_span_term_off<a, b>(c: (&a mut C), lo: u64, hi: u64, off: (&b mut i64)) ->
         return u8[];
     }
     base := pv_span_term(&mut c, lo, hi - 2);
-    if (base.len() == 0) || pv_literal(view(base)) {
+    if base.len() == 0 {
         return u8[];
     }
     mut k = pv_number(view(digits));
@@ -8105,8 +8326,13 @@ fn pv_seed_params<a>(c: (&a mut C), facts: (&a mut Atom[])) -> unit {
         }
         mut atoms = Atom[];
         if pv_read_pred(&mut c, Pred { file: pf, lo: plo, hi: phi }, &mut atoms) {
-            for j in atoms.len() {
-                pv_add(&mut facts, atoms[j].rel, view(atoms[j].a), view(atoms[j].b), atoms[j].k);
+            // What the entry checked is the wrapped value of each side, so a constant in the
+            // predicate is settled like any other: with the predicates before it as the facts.
+            mut settled = Atom[];
+            if pv_settle_all(&mut c, &atoms, &mut facts, &mut settled) {
+                for j in settled.len() {
+                    pv_add(&mut facts, settled[j].rel, view(settled[j].a), view(settled[j].b), settled[j].k);
+                }
             }
         }
     }
@@ -8404,7 +8630,13 @@ fn pv_ir_atoms<a>(c: (&a mut C), lo: u64, hi: u64) -> Atom[] {
     if pv_span_calls(&mut c, lo, hi) {
         return out;
     }
-    if !pv_atoms(&mut c, lo, hi, &mut out) {
+    mut raws = Atom[];
+    if !pv_atoms(&mut c, lo, hi, &mut raws) {
+        return out;
+    }
+    mut facts = Atom[];
+    pv_ir_read(&mut c, &mut facts);
+    if !pv_settle_all(&mut c, &raws, &mut facts, &mut out) {
         out = Atom[];
     }
     return out;
@@ -8554,15 +8786,25 @@ fn pv_proved<a, b>(c: (&a mut C), pred: Pred, names: (&a u8[][]), terms: (&a u8[
     pv_ir_read(&mut c, &mut facts);
     for j in atoms.len() {
         rel := atoms[j].rel;
-        x := pv_rename(view(atoms[j].a), &names, &terms);
+        mut x = pv_rename(view(atoms[j].a), &names, &terms);
         mut ok = x.len() != 0;
         mut y = u8[];
         if ok & (atoms[j].b.len() != 0) {
             y = pv_rename(view(atoms[j].b), &names, &terms);
             ok = y.len() != 0;
         }
+        // A constant in the predicate is arithmetic on the value: settled with the facts here.
+        mut k = atoms[j].k;
+        if ok & (rel <= 2) {
+            mut ka: i64 = 0;
+            mut kb: i64 = 0;
+            x = pv_oblige_side(&mut c, &facts, view(x), 0, atoms[j].ao, &mut ka);
+            y = pv_oblige_side(&mut c, &facts, view(y), 0, atoms[j].bo, &mut kb);
+            ok = (x.len() != 0) & (y.len() != 0);
+            k = k + kb - ka;
+        }
         if ok {
-            ok = pv_holds(&facts, rel, view(x), view(y), atoms[j].k);
+            ok = pv_holds(&facts, rel, view(x), view(y), k);
         }
         if !ok {
             if report != 0 {
@@ -8582,12 +8824,14 @@ fn pv_call_give_up<a, b, d>(c: (&a mut C), report: u64, pred: Pred, at: u64, nee
     }
     return 0;
 }
-// `hi - lo` with `lo <= hi` among the facts cannot underflow, so its check is not emitted. Both
-// operands must be single terms - the whole left side of this `-` and the whole right side - so a
-// chain (`a - b - c`) or a product proves nothing here. `--verify-facts` keeps the check.
-fn pv_sub_proof<a>(c: (&a mut C), lstart: u64, rstart: u64, rend: u64) -> unit {
-    exchange(&mut c.pv_sub_ok, 0);
-    if !pv_ir_live(&c) || (c.verify_facts != 0) || (rstart == 0) || (rstart <= lstart) {
+// An addition or a subtraction the facts show cannot overflow: `hi - lo` with `lo <= hi` (which is
+// also `i - 1` with `1 <= i`), and `t + c` with a literal `c` under `NW+` (pv_nw). Both operands must
+// be single terms - the whole left side of the operator and the whole right side - so a chain
+// (`a - b - c`) or a product proves nothing here. A proved operation has no overflow check in any
+// build and is no failure of its function; `--verify-facts` emits the check anyway (`binary`).
+fn pv_arith_proof<a>(c: (&a mut C), k: u64, lstart: u64, rstart: u64, rend: u64) -> unit {
+    exchange(&mut c.pv_arith_ok, 0);
+    if !pv_ir_live(&c) || (rstart == 0) || (rstart <= lstart) {
         return ();
     }
     left := pv_span_term(&mut c, lstart, rstart - 1);
@@ -8595,10 +8839,24 @@ fn pv_sub_proof<a>(c: (&a mut C), lstart: u64, rstart: u64, rend: u64) -> unit {
     if (left.len() == 0) || (right.len() == 0) {
         return ();
     }
+    if !pv_u64_term(&mut c, view(left)) || !pv_u64_term(&mut c, view(right)) {
+        return ();
+    }
     mut facts = Atom[];
     pv_ir_read(&mut c, &mut facts);
-    if pv_holds(&facts, 1, view(right), view(left), 0) {
-        exchange(&mut c.pv_sub_ok, 1);
+    mut ok = false;
+    if k == 45 {
+        ok = pv_holds(&facts, 1, view(right), view(left), 0);
+    } else {
+        if pv_digits(view(right)) & !pv_digits(view(left)) {
+            ok = pv_nw(&mut c, &facts, view(left), pv_number(view(right)));
+        }
+        if pv_digits(view(left)) & !pv_digits(view(right)) {
+            ok = pv_nw(&mut c, &facts, view(right), pv_number(view(left)));
+        }
+    }
+    if ok {
+        exchange(&mut c.pv_arith_ok, 1);
     }
     return ();
 }
@@ -8639,6 +8897,8 @@ fn pv_call_proved<a>(c: (&a mut C), f: u64, count: u64, spans: (&a u64[]), at: u
     mut names = u8[][];
     mut terms = u8[][];
     mut offs = i64[];
+    mut facts = Atom[];
+    pv_ir_read(&mut c, &mut facts);
     for i in count {
         if i >= c.funcs[f - 1].pnames.len() {
             return pv_call_give_up(&mut c, report, first, at, view(need), view("the parameter has no name to substitute"));
@@ -8651,21 +8911,26 @@ fn pv_call_proved<a>(c: (&a mut C), f: u64, count: u64, spans: (&a u64[]), at: u
             return pv_call_give_up(&mut c, report, first, at, view(need), view("the parameter has no name to substitute"));
         }
         mut off: i64 = 0;
-        tm := pv_span_term_off(&mut c, spans[2 * i], spans[2 * i + 1], &mut off);
+        base := pv_span_term_off(&mut c, spans[2 * i], spans[2 * i + 1], &mut off);
+        if base.len() == 0 {
+            return pv_call_give_up(&mut c, report, first, at, view(need), view("an argument is not a name, a constant or one of those plus a constant"));
+        }
+        // The parameter stands for the wrapped value of the argument: the term with an integer
+        // offset where the argument's addition cannot wrap, the opaque term where it might.
+        mut settled: i64 = 0;
+        tm := pv_side(&mut c, &facts, view(base), off, &mut settled);
         if tm.len() == 0 {
             return pv_call_give_up(&mut c, report, first, at, view(need), view("an argument is not a name, a constant or one of those plus a constant"));
         }
         names.push(nm);
         terms.push(tm);
-        offs.push(off);
+        offs.push(settled);
     }
     for i in count {
         if pv_span_mutates(&mut c, spans[2 * i], spans[2 * i + 1]) {
             return pv_call_give_up(&mut c, report, first, at, view(need), view("an argument is borrowed or calls something"));
         }
     }
-    mut facts = Atom[];
-    pv_ir_read(&mut c, &mut facts);
     for i in c.funcs[f - 1].ppreds.len() {
         mut pf = 0;
         mut plo = 0;
@@ -8685,36 +8950,40 @@ fn pv_call_proved<a>(c: (&a mut C), f: u64, count: u64, spans: (&a u64[]), at: u
         }
         for j in atoms.len() {
             rel := atoms[j].rel;
-            x := pv_rename(view(atoms[j].a), &names, &terms);
+            mut x = pv_rename(view(atoms[j].a), &names, &terms);
             mut ok = x.len() != 0;
             mut y = u8[];
             if ok & (atoms[j].b.len() != 0) {
                 y = pv_rename(view(atoms[j].b), &names, &terms);
                 ok = y.len() != 0;
             }
-            // The arguments' own offsets: the parameter `a` stands for `x + oa`, so `a REL b + k`
-            // is `x REL y + (k + ob - oa)`.
+            // The arguments' own offsets, and the predicate's on top: the parameter `a` stands for
+            // `x + oa`, the predicate reads `a + ao`, and each sum is an integer only where it is
+            // shown not to wrap (pv_oblige_side). Then `x + ka REL y + kb + k` is
+            // `x REL y + (k + kb - ka)`.
             oa := pv_rename_off(view(atoms[j].a), &names, &offs);
             ob := pv_rename_off(view(atoms[j].b), &names, &offs);
             mut k = atoms[j].k;
-            if (oa != 0) || (ob != 0) {
+            if rel > 2 {
                 // Only a comparison carries an offset; divisibility and a float class do not.
-                if rel > 2 {
+                if (oa != 0) || (ob != 0) {
                     ok = false;
                 }
-                k = k + ob - oa;
+            } else {
+                if ok {
+                    mut ka: i64 = 0;
+                    mut kb: i64 = 0;
+                    x = pv_oblige_side(&mut c, &facts, view(x), oa, atoms[j].ao, &mut ka);
+                    y = pv_oblige_side(&mut c, &facts, view(y), ob, atoms[j].bo, &mut kb);
+                    ok = (x.len() != 0) & (y.len() != 0);
+                    k = k + kb - ka;
+                }
             }
             if ok {
                 if (rel <= 2) & (y.len() != 0) & same(view(x), view(y)) {
                     // One term on both sides: `t < t + k` is a statement about `k` alone.
                     ok = ((rel == 0) & (k >= 1)) || ((rel == 1) & (k >= 0)) || ((rel == 2) & (k == 0));
                 } else {
-                    // An offset the arguments brought makes the bound looser than the facts need to
-                    // show: `x < y + 1` follows from `x < y`. The graph reads only non-positive
-                    // offsets (pv_implies), so the looser bound is proved through the tighter one.
-                    if ((oa != 0) || (ob != 0)) & (k > 0) & (rel <= 1) {
-                        k = 0;
-                    }
                     ok = pv_holds(&facts, rel, view(x), view(y), k);
                 }
             }
@@ -8925,9 +9194,9 @@ fn pv_bce<a>(c: (&a mut C)) -> unit {
             continue;
         }
         for j in atoms.len() {
-            // Only `i < v.len()` bounds an index. `i <= v.len() - 1` arrives in that shape too, and
-            // any other comparison says nothing about an access.
-            if (atoms[j].rel != 0) || (atoms[j].k != 0) {
+            // Only `i < v.len()` bounds an index: a side with a constant is arithmetic that may
+            // wrap, and any other comparison says nothing about an access.
+            if (atoms[j].rel != 0) || (atoms[j].ao != 0) || (atoms[j].bo != 0) {
                 continue;
             }
             index_name := atoms[j].a.copy();
@@ -19115,6 +19384,14 @@ fn call_out<a, b>(c: (&a mut C), callee: &b [u8]) -> unit {
     c.out.push(10);
     return ();
 }
+// A check this build does not emit and a trapping build does (integer overflow under
+// `--overflow=wrap`): the edge is recorded without a `call` line, so `@no_panic` is judged as if
+// the operation could trap and both builds accept the same functions (docs/design/refinements.md,
+// "`@no_panic` and the other effects").
+fn fx_would_trap<a, b>(c: (&a mut C), callee: &b [u8]) -> unit {
+    fx_edge(&mut c, view(callee), 0);
+    return ();
+}
 // A direct call whose arguments proved every refinement of the callee's parameters: it enters at the
 // callee's `.proved` entry, so the callee's entry checks are not this body's to answer for.
 fn call_proved_out<a, b>(c: (&a mut C), callee: &b [u8]) -> unit {
@@ -19980,18 +20257,11 @@ fn fx_bound_value<a, b>(c: (&a mut C), bound: &b [u8], rel: u64) -> u64 {
         if ok {
             for a in atoms.len() {
                 item := &atoms[a];
-                if same(view(item.a), view(bound)) {
+                // The bound itself against a literal: `n + 1 < 100` bounds the wrapped sum, not `n`.
+                if same(view(item.a), view(bound)) & (item.ao == 0) & (item.bo == 0) {
                     if (item.rel == 0) || (item.rel == 1) {
                         if pv_digits(view(item.b)) {
                             mut k = literal_value(&mut c, view(item.b));
-                            if item.k <= 0 {
-                                sub := u64(0 - item.k);
-                                if sub < k {
-                                    k = k - sub;
-                                } else {
-                                    k = 0;
-                                }
-                            }
                             if item.rel == 1 {
                                 k = k + 1;
                             }
@@ -30300,6 +30570,10 @@ fn pattern_loop<a, b>(
     exchange(&mut c.hasbreak, 0);
     exchange(&mut c.brk, end);
     exchange(&mut c.cont, head);
+    // The guard is evaluated again after every iteration, so what the body writes is forgotten
+    // before the guard is compiled: a call in it is proved, and a constant in it is settled, only
+    // from facts that hold at every evaluation.
+    pv_loop_kill(&mut c, open, loopend);
     mark(&mut c, head);
     mut nomatch = 0;
     mut scrutinee = 0;
@@ -30382,7 +30656,6 @@ fn pattern_loop<a, b>(
     }
     entry := ownership::snapshot(&c.check);
     exchange(&mut c.terminated, 0);
-    pv_loop_kill(&mut c, open, loopend);
     block(&mut c);
     // The pattern's binding ends with each iteration, before the jump back: release it first, so
     // neither the backedge check nor the state the loop exits with still holds this iteration's
@@ -33578,6 +33851,7 @@ fn binary<a>(c: (&a mut C), k: u64, left: u64, right: u64) -> u64 {
         mut f = "rt_pow";
         if (c.overflow == 0) & (c.raw == 0) {
             f = "rt_wrapping_pow";
+            fx_would_trap(&mut c, view("rt_pow"));
         }
         return invoke(&mut c, view(f), two(left, right));
     }
@@ -33596,14 +33870,33 @@ fn binary<a>(c: (&a mut C), k: u64, left: u64, right: u64) -> u64 {
     if k == 42 {
         o(&mut c, view("mulq %rcx\n"));
     }
-    sub_proved := (k == 45) && (c.pv_sub_ok != 0);
-    exchange(&mut c.pv_sub_ok, 0);
-    if ((k == 43) || (k == 45) || (k == 42)) && (((c.overflow != 0) || (c.raw != 0))) && !sub_proved {
-        ok := label(&mut c);
-        jump(&mut c, view("jnc"), ok);
-        site_kind(&mut c, 2);
-        call_out(&mut c, view("rt_abort"));
-        mark(&mut c, ok);
+    // An overflow is a failure of the function in every build: the check is emitted only where the
+    // build traps, and the effect is recorded either way, unless the facts proved that this
+    // operation cannot overflow (pv_arith_proof). `--verify-facts` checks that proof at run time,
+    // in either mode, without making it a failure the function answers for.
+    proved := ((k == 43) || (k == 45)) && (c.pv_arith_ok != 0);
+    exchange(&mut c.pv_arith_ok, 0);
+    if (k == 43) || (k == 45) || (k == 42) {
+        if proved {
+            if c.verify_facts != 0 {
+                ok := label(&mut c);
+                jump(&mut c, view("jnc"), ok);
+                site_kind(&mut c, 2);
+                fx_called(&mut c);
+                o(&mut c, view("call rt_abort\n"));
+                mark(&mut c, ok);
+            }
+        } else {
+            if (c.overflow != 0) || (c.raw != 0) {
+                ok := label(&mut c);
+                jump(&mut c, view("jnc"), ok);
+                site_kind(&mut c, 2);
+                call_out(&mut c, view("rt_abort"));
+                mark(&mut c, ok);
+            } else {
+                fx_would_trap(&mut c, view("rt_abort"));
+            }
+        }
     }
     if k == 38 {
         o(&mut c, view("andq %rcx,%rax\n"));
@@ -33624,6 +33917,8 @@ fn binary<a>(c: (&a mut C), k: u64, left: u64, right: u64) -> u64 {
             mark(&mut c, ok);
             get(&mut c, right, view("%rcx"));
             get(&mut c, left, view("%rax"));
+        } else {
+            fx_would_trap(&mut c, view("rt_abort"));
         }
         mut op = "shlq";
         if k == 272 {
@@ -34784,8 +35079,8 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
                                                 }
                                                 both := is_bool(&mut c, ty)
                                                     && is_bool(&mut c, rty);
-                                                if (k == 45) & (c.raw == 0) {
-                                                    pv_sub_proof(&mut c, lstart, rstart, rend);
+                                                if ((k == 45) || (k == 43)) & (c.raw == 0) {
+                                                    pv_arith_proof(&mut c, k, lstart, rstart, rend);
                                                 }
                                                 t = binary(&mut c, k, snap, right.t);
                                                 ty = 0;
@@ -43664,7 +43959,7 @@ pub fn main() -> u64 {
         pv_pending: Atom[],
         pv_caps: u8[][],
         pv_pred_mode: 0,
-        pv_sub_ok: 0,
+        pv_arith_ok: 0,
         strict_refinements: 0,
         strict_modules: u8[][],
         strict_next: 0,
