@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **Native backend: float temporaries live in SSE registers.** The optimiser keeps a frame slot
+  that only ever holds a float in one of xmm8..xmm14, slots whose lives do not overlap sharing a
+  register, as long as the slot is not live across a call that returns (every SSE register is
+  caller-saved). It also knows the SSE instructions the front end writes (`addsd`, `cvtss2sd`,
+  `ucomisd`, ...) touch no general register; before, each was an unknown instruction across which
+  nothing could be removed. And a compare-and-branch now fuses even when the loop's exit runs
+  through several drop-flag tests. On x86-64, CPU time: nbody 1.42 s -> 1.16 s, xform_f32 1.08 ->
+  0.80, dot_f64 0.72 -> 0.62. The compiler compiles itself about 3.6% slower.
+
 - **Native backend: float operations are not calls.** `+ - * /`, comparisons, negation, `abs`,
   `sqrt` and conversions from integers of up to 32 bits (and signed 64-bit to `f64`) are emitted in
   line, and so is access to `f32[]`/`u32[]`/`i32[]` elements and to narrow fields of `extern "C"`

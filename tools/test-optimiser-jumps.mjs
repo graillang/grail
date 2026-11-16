@@ -4,6 +4,7 @@
 // the parser stopped reading went unnoticed for three days. Two checks, so that it cannot again:
 //  - a function with a loop and a branch comes out with its loop state in registers and its
 //    comparisons fused with their branches, which needs liveness across the back edge;
+//  - an `f64` loop keeps its float temporaries in SSE registers (xmm8..xmm14), not frame slots;
 //  - GRAIL_OPT_STATS=1 makes the optimiser write `# grail-jumps <known> <unknown>` before each
 //    body, and over the compiler's own sources nearly every direct jump has a known target.
 //   bun tools/test-optimiser-jumps.mjs
@@ -68,6 +69,47 @@ ok('nothing is stored to the frame inside the loop', loop.length !== 0 && !loop.
 ok('nothing is loaded from the frame inside the loop', !loop.some(line => /-\d+\(%rbp\),/.test(line)), shown);
 ok('the loop test is one compare of two registers and a conditional jump', loop.some((line, i) => /^cmpq %r\w+,%r\w+$/.test(line) && /^jae \.L/.test(loop[i + 1] ?? '')), shown);
 ok('no comparison is materialised as a byte and tested again', !loop.some(line => /^(set[a-z]+|movzbq) /.test(line)), shown);
+
+// Float temporaries live in SSE registers (optimize.grl `xmm_choose`): an `f64` scale-and-add loop
+// keeps every float in xmm8..xmm14 and touches the frame for none of them.
+const floatSource = join(work, 'xform.grl');
+writeFileSync(floatSource, `fn scale_add(x: (&mut [f64]), y: (&[f64]), a: f64) -> unit {
+    n := x.len();
+    mut i = 0;
+    while i < n {
+        x[i] = x[i] * a + y[i];
+        i += 1;
+    }
+}
+fn main() {
+    mut x = f64[];
+    mut y = f64[];
+    for i in 1000 {
+        x.push(f64(i));
+        y.push(0.5);
+    }
+    for pass in 3 {
+        scale_add(&mut x[0: 1000], &y[0: 1000], 0.5);
+    }
+    mut sum: f64 = 0.0;
+    for i in 1000 {
+        sum = sum + x[i];
+    }
+    println(sum);
+}
+`);
+const floatExe = compileProgram(compiler, [floatSource], work, { target: 'x86_64', name: 'xform' });
+const floatRun = spawnSync(floatExe, [], { encoding: 'utf8' });
+// x_k = x_0 / 8 + 0.5 * (1/4 + 1/2 + 1) per element: sum(i) / 8 + 1000 * 0.875.
+ok('the float loop prints its sum', floatRun.status === 0 && floatRun.stdout.trim() === String(499500 / 8 + 875), `${floatRun.status} ${floatRun.stdout}${floatRun.stderr}`);
+const floatLines = readFileSync(join(work, 'xform.s'), 'utf8').split('\n');
+const ffrom = floatLines.indexOf('f_main_scale_add:');
+const fbody = floatLines.slice(ffrom, floatLines.findIndex((line, i) => i > ffrom && line.startsWith('.set ')));
+const fback = fbody.findLastIndex((line, i) => line.startsWith('jmp .L') && fbody.indexOf(`${line.slice(4)}:`) !== -1 && fbody.indexOf(`${line.slice(4)}:`) < i);
+const floop = fback === -1 ? [] : fbody.slice(fbody.indexOf(`${fbody[fback].slice(4)}:`), fback + 1);
+const fshown = `\n${floop.join('\n')}`;
+ok('the float loop holds its floats in xmm8..xmm14', floop.some(line => /%xmm(8|9|1[0-4])\b/.test(line)), fshown);
+ok('no float goes through the frame inside the float loop', floop.length !== 0 && !floop.some(line => /\(%rbp\)/.test(line) && !/^movq -\d+\(%rbp\),%r(cx|ax)$/.test(line)), fshown);
 
 // The compiler's own sources: what the optimiser could follow.
 const self = join(work, 'self.s');
