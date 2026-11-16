@@ -1622,10 +1622,32 @@ fn inline_candidate<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64) {
     unit := o.unit.copy();
     inl_file(&mut o, name, body, unit);
 }
+// Where the lines the inlining pass reads start, in `text[from..]`: a `call` and a unit marker.
+// Offsets are from the start of `text`.
+fn lines_of_interest<a, b>(text: &a [u8], from: u64, out: (&b mut u64[])) {
+    mut start = from;
+    mut i = from;
+    n := text.len();
+    while i < n {
+        if text[i] == 10 {
+            a := start;
+            start = i + 1;
+            if i - a > 5 {
+                first := text[a];
+                if (first == 99) && ir::at(view(text), a, view("call ")) {
+                    out.push(a);
+                } else if (first == 46) && (i - a > 12) && ir::at(view(text), a, view(".grail_part ")) {
+                    out.push(a);
+                }
+            }
+        }
+        i += 1;
+    }
+}
 // Replaces `call NAME` lines for inlinable functions by their bodies with per-site labels.
 // Inlining rewrites the output, so the `--split` marker offsets recorded on the way through are
 // rewritten with it: markers are copied in stream order, and each one takes its new offset here.
-fn inline_calls<a>(o: (&a mut ir::Body), split: u64, marks: (&a mut u64[])) {
+fn inline_calls<a, b>(o: (&a mut ir::Body), split: u64, marks: (&a mut u64[]), lines: (&b u64[])) {
     text := exchange(&mut o.out, u8[]);
     mut start = 0;
     // Text is copied in runs: `pend` is where the lines not yet written begin, and they are written
@@ -1636,11 +1658,16 @@ fn inline_calls<a>(o: (&a mut ir::Body), split: u64, marks: (&a mut u64[])) {
     mut next = 0;
     mut unit = u8[];
     mut uprefix = u8[];
-    for i in text.len() {
-        if text[i] == 10 {
-            a := start;
-            e := i;
-            start = i + 1;
+    // Only the lines that can matter are visited: the calls and the unit markers, whose offsets
+    // were noted when the text was made (lines_of_interest). Everything between is copied.
+    for at in lines.len() {
+        {
+            a := lines[at];
+            mut e = a;
+            while (e < text.len()) && (text[e] != 10) {
+                e += 1;
+            }
+            start = e + 1;
             mut done = 0;
             if (e - a > 5) & (text[a] == 99) {
                 if ir::at(view(text), a, view("call ")) {
@@ -1902,15 +1929,22 @@ pub fn optimize_parts<b, c, d, e>(s: &b [u8], split: u64, marks: (&mut u64[]), n
     if cuts.len() > 2 {
         parallel = run_forked(&mut o, view(s), &cuts, split, marks, names, facts, &ix, want_ir, ir_text, replay, call_syms, call_counts);
     }
+    // The lines the inlining pass will read. The workers noted theirs as they went; a single
+    // process notes them here.
+    mut lines = u64[];
     if parallel {
         rest = cuts[cuts.len() - 1].at;
+        lines = exchange(&mut o.table, u64[]);
     } else {
         rest = run_range(&mut o, view(s), 0, s.len(), split, marks, names, facts, &ix, want_ir, ir_text, replay, call_syms, call_counts);
+        lines_of_interest(view(o.out), 0, &mut lines);
     }
+    tail := o.out.len();
     o.out.append(s[rest..s.len()]);
+    lines_of_interest(view(o.out), tail, &mut lines);
     // Either something inlines, or the markers have to be taken out of a single-file build.
     if (o.inl_names.len() != 0) || (o.marked != 0) {
-        inline_calls(&mut o, split, marks);
+        inline_calls(&mut o, split, marks, &lines);
     }
     return exchange(&mut o.out, u8[]);
 }
@@ -2140,8 +2174,14 @@ fn run_forked<a, b, c, e, x, g>(o: (&a mut ir::Body), s: &b [u8], cuts: (&g Cut[
             mut wcounts = u64[];
             run_range(&mut w, view(s), cut.at, cuts[k + 1].at, split, &mut wmarks, &mut wnames, facts, ix, want_ir, &mut wir, replay, &mut wsyms, &mut wcounts);
             mut packed = u8[];
+            mut wlines = u64[];
+            lines_of_interest(view(w.out), 0, &mut wlines);
             put_word(&mut packed, w.marked);
             put_text(&mut packed, view(w.out));
+            put_word(&mut packed, wlines.len());
+            for i in wlines.len() {
+                put_word(&mut packed, wlines[i]);
+            }
             put_word(&mut packed, wmarks.len());
             for i in wmarks.len() {
                 put_word(&mut packed, wmarks[i]);
@@ -2176,6 +2216,7 @@ fn run_forked<a, b, c, e, x, g>(o: (&a mut ir::Body), s: &b [u8], cuts: (&g Cut[
         readers.push(pair[0]);
         children.push(child);
     }
+    mut all_lines = u64[];
     for k in pieces {
         mut packed = u8[];
         while true {
@@ -2204,6 +2245,10 @@ fn run_forked<a, b, c, e, x, g>(o: (&a mut ir::Body), s: &b [u8], cuts: (&g Cut[
         n := take_word(view(packed), &mut at);
         o.out.append(packed[at..at + n]);
         at += n;
+        noted := take_word(view(packed), &mut at);
+        for i in noted {
+            all_lines.push(base + take_word(view(packed), &mut at));
+        }
         kept := take_word(view(packed), &mut at);
         for i in kept {
             mark := take_word(view(packed), &mut at);
@@ -2228,5 +2273,7 @@ fn run_forked<a, b, c, e, x, g>(o: (&a mut ir::Body), s: &b [u8], cuts: (&g Cut[
             call_counts.push(take_word(view(packed), &mut at));
         }
     }
+    // Handed back in the body's label table, which nothing uses between bodies.
+    exchange(&mut o.table, all_lines);
     return true;
 }
