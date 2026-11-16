@@ -1,5 +1,9 @@
 ## Unreleased
 
+- Fixed: an effect attribute's name anywhere in a source file - a comment, a string - made the build
+  one compiler run over the whole program, because the driver searched the bytes. It now looks for
+  the attribute itself (`@no_alloc`, `@no_panic` outside comments and strings).
+
 - Fixed: an `extern "C"` call with no arguments that was the first thing in its function left the
   thread pointer on libc's side in a libc-linked program, so later runtime calls on that thread
   (starting a thread, for one) read the wrong record.
