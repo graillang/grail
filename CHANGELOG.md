@@ -1,5 +1,9 @@
 ## Unreleased
 
+- `host::now_us()`: the monotonic clock in microseconds, beside `host::now_ms()`. A frame time or
+  the cost of a join is not measurable in whole milliseconds; `bench/frame.grl` and
+  `bench/sched.grl` (run by `bun tools/bench-sched.mjs`) are the scheduler benchmarks that use it.
+
 - `hash::write_byte` states its precondition in its signature (`value: u64 where value < 256`)
   instead of asserting it in its body: a caller that can show the value is a byte pays no check,
   and one that cannot gets the check at its own call, named. It was the standard library's only

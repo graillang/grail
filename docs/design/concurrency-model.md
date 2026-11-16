@@ -515,6 +515,38 @@ count; CPU seconds. Until a stage provides a piece, the benchmark uses what exis
 render, `pool::run` for systems) so the trend is one series. Micro-benchmarks: `fib(32)` by nested
 join (today 271 ms against 9 ms serial [P2]), spawn+join, mutex handoff, channel throughput.
 
+### Baseline (before stage 1)
+
+`bun tools/bench-sched.mjs --rounds 7` on the runtime of 78c8c6e plus `host::now_us` (added for
+this: `host::now_ms` cannot time a frame). Median of 7 rounds, range in brackets; Linux x86-64,
+24 logical CPUs, a shared machine. `bench/frame.grl` is the frame loop described above with what
+exists today: the main thread renders, the I/O task reports through an atomic, there are no
+classes and no channel. `bench/sched.grl` holds the micro-benchmarks; `ticker_stall` is probe P4.
+
+```
+frame.frame_median            1690 us  [1634 .. 1720]
+frame.frame_p99               4631 us  [4256 .. 5234]
+frame.frame_max               5852 us  [4690 .. 10392]
+frame.frames_total            1134 ms  [1103 .. 1207]
+frame.io_rounds                210 n   [207 .. 220]
+frame.io_worst_late           4155 us  [3114 .. 7911]
+frame.bg_rounds              25640 n   [25247 .. 28215]
+frame.threads                   50 n   [50 .. 50]
+sched.job_spawn_wait          9693 ns  [9243 .. 10098]
+sched.join                   11412 ns  [10754 .. 11828]
+sched.task_spawn_join         8435 ns  [6673 .. 9061]
+sched.task_burst              2016 ns  [1594 .. 2063]
+sched.fib32_serial            9117 us  [9039 .. 9293]
+sched.fib32_join_main       288329 us  [281664 .. 290607]
+sched.fib32_join_task       288561 us  [277075 .. 309069]
+sched.ticker_stall          300086 us  [300056 .. 300117]
+```
+
+Stress cases added with the baseline and passing on it: `sched-nested-join-under-steal`,
+`sched-task-forks-jobs-while-timers-tick`. Written now and registered by the step that makes them
+pass, because they state the new behaviour: `tests/sched/job_wait_in_task.grl` (today: the ticker
+stalls and the assertion fails) and `tests/sched/job_overflow.grl` (today: SIGSEGV).
+
 | Stage | Ships | Files | Risks | Corpus cases | Gate on the benchmark |
 |---|---|---|---|---|---|
 | 1. One scheduler | Jobs on scheduler workers, frame-held records, help-on-wait, promotion on park, non-worker helping; `rt_pool_*` threads deleted; overflow report for jobs | `compiler/runtime.grl`, `os-linux.grl`, `os-windows.grl`, `darwin.grl`, `native.grl` (lowering of `parallel_map`/`parallel_for_chunks`/`parallel_spawn`), `lib/pool.grl`, `docs/design/scheduler.md`, `parallelism.md` | Windows fibers: a worker's idle loop must itself be a fiber; record lifetime when a forker fails mid-join (must still wait for stolen children before its stack is discarded); `GRAIL_POOL_WORKERS` tests | `job-in-task-does-not-block-worker` (P4 as a test: tick gap under 50 ms), `job-wait-promotes`, `job-stack-overflow-reports-134`, `join-nested-fib`, `threads-equal-cpus-plus-reactor`, existing `tests/pool/*` unchanged | threads = CPUs + 2; `fib(32)` join under 3x serial on one worker; frame p99 no worse |
