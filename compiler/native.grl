@@ -21172,7 +21172,11 @@ fn fx_begin<a, b, d>(c: (&a mut C), sym: &b [u8], name: &d [u8], file: u64, pos:
     }
     k := fx_sym(&mut c, view(sym)) - 1;
     c.fx_body[k] = 1;
-    // A retried body starts over: facts from the discarded attempt are not this body's.
+    // A retried body starts over: facts from the discarded attempt are not this body's. A row read
+    // for the same symbol is replaced by the body: what this run proves is what it answers with.
+    c.fx_row[k] = 0;
+    c.fx_alloc_thru[k] = 0;
+    c.fx_panic_thru[k] = 0;
     c.fx_own_alloc[k] = 0;
     c.fx_own_panic[k] = 0;
     mut display = copy_bytes(view(name));
@@ -21408,6 +21412,9 @@ fn fx_helper<a, b>(c: (&a mut C), sym: &b [u8]) -> unit {
     }
     k := fx_sym(&mut c, view(sym)) - 1;
     c.fx_body[k] = 1;
+    c.fx_row[k] = 0;
+    c.fx_alloc_thru[k] = 0;
+    c.fx_panic_thru[k] = 0;
     c.fx_own_alloc[k] = 0;
     c.fx_own_panic[k] = 0;
     exchange(&mut c.fx_trusted, 1);
@@ -46996,9 +47003,71 @@ fn iface_file_index<a, b>(c: (&a mut C), path: &b [u8]) -> u64 {
     return 0;
 }
 
+// The runtime has no interface: every run knows its declarations already, and it is compiled in a run
+// of its own. Its summary is what the other runs still need - whether `rt_push` allocates, whether
+// `rt_abort` fails - so the run that emitted its bodies writes `runtime.facts` beside the interfaces:
+// the header, one summary record and the seal, read by every run that reads interfaces there.
+fn fx_write_runtime_facts<a>(c: (&a mut C)) -> unit {
+    if c.iface_emit.len() == 0 {
+        return ();
+    }
+    mut listed = u64[];
+    for i in c.funcs.len() {
+        if same(view(c.funcs[i].module), view("runtime")) {
+            listed.push(i);
+        }
+    }
+    facts := iface_facts_bytes(&mut c, view("runtime"), &listed);
+    if facts.len() == 0 {
+        return ();
+    }
+    mut out = u8[];
+    out.push(71);
+    out.push(82);
+    out.push(73);
+    out.push(70);
+    out.push(IFACE_VERSION);
+    iface_wrec(&mut out, IFACE_TAG_FACTS, view(facts));
+    iface_seal_out(&mut out, view(""));
+    host::mkdir(view(c.iface_emit));
+    file := iface_join(view(c.iface_emit), view("runtime"), view(".facts"));
+    if host::write_file(view(file), view(out)) != 0 {
+        iface_refuse(view(file), view("cannot write the runtime's effect summary"));
+    }
+    return ();
+}
+// The runtime's summary, read before any body: its rows answer for the runtime's functions in a run
+// that does not emit them. A run that does emit them replaces each row with its own body's facts. A
+// file of another format is not half-read: it is ignored, and the runtime's functions stay unknown.
+fn fx_read_runtime_facts<a>(c: (&a mut C)) -> unit {
+    mut dir = c.iface_use.copy();
+    if dir.len() == 0 {
+        dir = c.iface_dir.copy();
+    }
+    if dir.len() == 0 {
+        return ();
+    }
+    file := iface_join(view(dir), view("runtime"), view(".facts"));
+    if host::exists(view(file)) == 0 {
+        return ();
+    }
+    data := host::read_file(view(file));
+    if (data.len() < 6) || (data[0] != 71) || (data[1] != 82) || (data[2] != 73) || (data[3] != 70) || (data[4] != IFACE_VERSION) {
+        return ();
+    }
+    if data[5] != IFACE_TAG_FACTS {
+        return ();
+    }
+    mut p = IR { data: data.copy(), at: 6, stop: data.len(), path: file.copy(), phase: 2, rtext: u8[], what: u8[] };
+    len := iface_rv(&mut p);
+    p.stop = p.at + len;
+    iface_rec_facts(&mut c, &mut p);
+    return ();
+}
 // The interfaces this run wrote, again, now with the summaries its solved bodies give them, and the
 // manifest over the new bytes. A run that emitted no body (a check) leaves them as they were.
 fn iface_emit_facts<a>(c: (&a mut C)) -> unit {
+    fx_write_runtime_facts(&mut c);
     if c.iface_out_file.len() == 0 {
         return ();
     }
@@ -47947,6 +48016,7 @@ pub fn main() -> u64 {
             for k in c.iface_loaded.len() {
                 iface_load(&mut c, view(c.iface_loaded_path[k].copy()), view(""), 2);
             }
+            fx_read_runtime_facts(&mut c);
         }
         if pass == 1 {
             default_methods(&mut c, 2);
