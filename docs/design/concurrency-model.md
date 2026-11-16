@@ -1,7 +1,7 @@
 # Concurrency model: jobs, tasks and threads on one scheduler
 
-Status: design proposal (gaps12). Nothing here is implemented; the compiler and runtime are
-unchanged by this note. Claims are tagged **[V file:line]** (read in the code at 78c8c6e),
+Status: design (gaps12), approved as the direction; **stage 1 is implemented** (section 5, "Stage 1
+as built") and section 1 describes the runtime before it. Claims are tagged **[V file:line]** (read in the code at 78c8c6e),
 **[P n]** (probe n in `docs/design/concurrency-probes/`, output quoted in section 1.9) or
 **[A]** (assumed, not verified). Probes ran on Linux x86-64, 24 logical CPUs, static (no libc) builds.
 
@@ -590,9 +590,60 @@ Stress cases added with the baseline and passing on it: `sched-nested-join-under
 pass, because they state the new behaviour: `tests/sched/job_wait_in_task.grl` (today: the ticker
 stalls and the assertion fails) and `tests/sched/job_overflow.grl` (today: SIGSEGV).
 
+### Stage 1 as built: results
+
+Stage 1 is on `gaps12-sched` with the allocator's per-thread caches (`gaps12-alloc`) merged in.
+Before and after were run interleaved, 7 rounds each, median with the range in brackets; the
+machine was heavily loaded by other work during this run (the serial `fib(32)` took 18 ms instead
+of its usual 9), so read the columns against each other, not against the quieter baseline above.
+"Before" is the baseline runtime: the separate pool and the global allocator lock.
+
+```
+frame.frame_median            4638 [3252..5201]  ->       4371 [3063..5125]
+frame.frame_p99              11689 [8219..18751]  ->       7875 [4746..10715]
+frame.frame_max              19949 [13620..43391]  ->      11086 [6388..18428]
+frame.frames_total            3032 [2185..3465]  ->       2671 [1892..3180]
+frame.io_rounds                489 [353..554]  ->        447 [326..507]
+frame.io_worst_late          16242 [9968..35521]  ->       7660 [3964..14573]
+frame.bg_rounds              57590 [42167..67068]  ->      68613 [49893..80781]
+frame.threads                   50 [50..50]  ->         26 [26..26]
+sched.job_spawn_wait          7436 [6521..8375]  ->       3998 [2103..9991]
+sched.join                    9396 [8187..13209]  ->       2948 [1485..4701]
+sched.task_spawn_join        16779 [11224..28881]  ->      10352 [6737..15192]
+sched.task_burst              2738 [1281..3441]  ->       1427 [1336..4768]
+sched.fib32_serial           18282 [10135..23690]  ->      19253 [11623..20711]
+sched.fib32_join_main       369859 [161154..418276]  ->       9832 [8523..10511]
+sched.fib32_join_task       362637 [183188..417185]  ->      13656 [11897..21958]
+sched.ticker_stall          300431 [294236..310126]  ->      11530 [10060..12359]
+```
+
+- **Threads:** 50 -> 26 (24 workers, the reactor, main).
+- **`fib(32)` by nested join:** 370 ms -> 9.8 ms from the main thread, 13.7 ms from inside a task,
+  where the serial form took 18-19 ms in the same run. With `GRAIL_WORKERS` at 1, 2, 4, 8:
+  38.6, 21.6, 12.0, 8.2 ms. The stage's gate was "under 3x serial on one worker": 38.6 ms against
+  18-19 is about 2x. Before the allocator merge the same recursion still took 260-320 ms on 24
+  workers with 94% of samples in `rt_allocator_lock` (`grail profile`): the scheduler was not the
+  limit, the closure environments' allocations were.
+- **Join / job handle / task spawn+join:** 9.4 -> 2.9 us, 7.4 -> 4.0 us, 16.8 -> 10.4 us. A join
+  from the main thread still pays a locked injection-ring push and usually a futex wake of a
+  parked worker; from a worker it is a deque push and pop.
+- **Ticker stall (P4):** 300 ms -> 11.5 ms, which is the 10 ms tick.
+- **Frame loop:** median 4.6 -> 4.4 ms, p99 11.7 -> 7.9 ms, max 19.9 -> 11.1 ms; the I/O task's
+  worst lateness 16.2 -> 7.7 ms; the background task got 19% more rounds done.
+- **Help-depth high-water mark** (`GRAIL_SCHED_STATS=1`): 9-10 in the frame loop, 17-21 in
+  `fib(32)` by join (its recursion is 21 joins deep, so a waiter can nest that many helped jobs).
+- **Tried and dropped:** letting a worker look for work about 200 more times before it parks. It
+  made `bench/sched.grl` slower (join 2.1 -> 3.8 us, job handle 2.1 -> 4.6 us) and did nothing for
+  the frame loop on this loaded machine. Stage 5's `idle_spin_us` should be measured on a quiet one.
+
+What stage 1 did not do: contain a failure inside a parallel region (F1 above); the
+`(n, grain)` split and the `chunks_mut` rename (stage 5, Q5); priority classes. `chunks_mut` still
+allocates one 24-byte slice descriptor per leaf, because a slice parameter is owned by the callee.
+A failed claim of a stale queue entry is not counted anywhere yet.
+
 | Stage | Ships | Files | Risks | Corpus cases | Gate on the benchmark |
 |---|---|---|---|---|---|
-| 1. One scheduler | Jobs on scheduler workers, frame-held records, help-on-wait, promotion on park, non-worker helping; `rt_pool_*` threads deleted; overflow report for jobs | `compiler/runtime.grl`, `os-linux.grl`, `os-windows.grl`, `darwin.grl`, `native.grl` (lowering of `parallel_map`/`parallel_for_chunks`/`parallel_spawn`), `lib/pool.grl`, `docs/design/scheduler.md`, `parallelism.md` | Windows fibers: a worker's idle loop must itself be a fiber; record lifetime when a forker fails mid-join (must still wait for stolen children before its stack is discarded); `GRAIL_POOL_WORKERS` tests | `job-in-task-does-not-block-worker` (P4 as a test: tick gap under 50 ms), `job-wait-promotes`, `job-stack-overflow-reports-134`, `join-nested-fib`, `threads-equal-cpus-plus-reactor`, existing `tests/pool/*` unchanged | threads = CPUs + 2; `fib(32)` join under 3x serial on one worker; frame p99 no worse |
+| 1. One scheduler (**done**, see above) | Jobs on scheduler workers, type-stable pooled records claimed by CAS, help-on-wait, promotion on park through a runner task, non-worker threads running their own forks; `rt_pool_*` threads deleted; overflow report for jobs | `compiler/runtime.grl`, `os-linux.grl`, `os-windows.grl`, `darwin.grl`, `native.grl` (lowering of `parallel_map`/`parallel_for_chunks`/`parallel_spawn`), `lib/pool.grl`, `docs/design/scheduler.md`, `parallelism.md` | Windows fibers: a worker's idle loop must itself be a fiber; record lifetime when a forker fails mid-join (must still wait for stolen children before its stack is discarded); `GRAIL_POOL_WORKERS` tests | `job-in-task-does-not-block-worker` (P4 as a test: tick gap under 50 ms), `job-wait-promotes`, `job-stack-overflow-reports-134`, `join-nested-fib`, `threads-equal-cpus-plus-reactor`, existing `tests/pool/*` unchanged | threads = CPUs + 2; `fib(32)` join under 3x serial on one worker; frame p99 no worse |
 | 2. Threads | `lib/thread.grl`: spawn/join/try_join/scope/detach, `Config`, `Ctx`, `with_current`, `sleep_until`; `sched::start`; `thread::Local`; `GRAIL_TASKS=thread` removed (D10) | `runtime.grl` (public surface over `rt_thread_start`, stack size, name, affinity, priority), the three OS modules, `native.grl` (`Thread<R>` kind and its `Send`/`Share` rows, `Ctx` not transferable), `lib/thread.grl`, book chapter | priority and affinity need privileges or differ per OS (macOS has QoS, no hard affinity): each setter returns a result, never aborts; libc-loaded processes must create through the glibc bridge with attributes | `thread-join-result`, `thread-drop-joins`, `thread-scope-borrows`, `thread-ctx-not-sendable` (compile error), `thread-local-per-thread`, `thread-failure-is-value`, `thread-stack-size-honoured`, `sched-start-twice-is-error` | render moves to a pinned thread; frame max improves or holds |
 | 3. Parking and `sync` | Wait nodes; `Mutex` parks; `Condition`, `Latch`, `Barrier`, `Semaphore`, `Once`, `RwLock`; cancellable, deadline-able waits | `runtime.grl` (park/unpark, mutex), `native.grl` (builtin kinds or plain library types - Q4), `lib/sync.grl`, `lib/concurrent_map.grl` (may move to `RwLock`) | lost-wakeup and ABA bugs in the wait list; mutex handoff fairness against throughput (allow barging after a short spin) | `mutex-waiters-park` (P3 as a test: user CPU under 2x wall), `condition-ping-pong`, `rwlock-readers-overlap`, `once-runs-once-under-race`, `latch-many-waiters`, `wait-cancelled-by-scope`, `wait-deadline` | mutex handoff under 1 us uncontended-to-contended; CPU seconds drop |
 | 4. Channels and executor | `chan::bounded`, `chan::spsc`, `thread::Executor` | `lib/chan.grl`, `lib/thread.grl`, small runtime help for the SPSC cache-line layout | SPSC needs inline atomics and padding to be wait-free in practice - **depends on unboxed records / layout**; until then it works through heap words and is slower | `chan-bounded-backpressure`, `chan-close-on-last-sender`, `chan-mpmc-checksum`, `spsc-order-and-count`, `executor-call-from-task`, `chan-send-non-send-refused` (compile error) | render command stream on SPSC; zero allocations per frame on that path |

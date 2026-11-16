@@ -1,5 +1,29 @@
 ## Unreleased
 
+- **One set of worker threads: jobs run on the scheduler.** `parallel_map`,
+  `parallel_for_chunks`, `pool::join` and job handles used to run on a pool of threads separate
+  from the scheduler that runs tasks, so a program that used both had two threads per CPU (50 on a
+  24-CPU machine, now 26), and a task that waited for a job put its scheduler thread to sleep: with
+  every worker's task waiting on a 300 ms job, a 10 ms timer task stalled for 300 ms (now 11 ms).
+  Jobs are now records the scheduler's own workers claim; a waiting thread runs its own forks and
+  helps with others; a job that sleeps or reads parks like a task instead of holding a thread; and
+  a job that overflows its stack reports `error: stack overflow` and exits 134 instead of dying by
+  SIGSEGV.
+  - **`pool::join` was not parallel.** It ran `first` through a blocking one-element
+    `parallel_map` and only then called `second`, paying several allocations each time, so a
+    recursive join was a slow sequential program: `fib(32)` by nested joins took 288 ms against
+    9 ms serial. It now forks `first`, runs `second`, and takes `first` back if no worker did: in
+    one loaded run on 24 CPUs the same recursion took 9.8 ms where the serial form took 18 ms and
+    the old join 370 ms. One join costs about 3 us instead of 9-11.
+  - `GRAIL_WORKERS=n` (1 to 64) sets the worker count. `GRAIL_POOL_WORKERS` is gone with the pool
+    it sized, and there is no floor of four any more: the default is one worker per CPU with the
+    scheduler's floor of two.
+  - `pool::wait(pool::spawn(f))` from a thread that waits at once may now run `f` on that thread.
+  - `GRAIL_SCHED_STATS=1` prints the worker count and the deepest nesting of helped jobs at exit.
+  - Still a process abort: a failed check inside a parallel call (follow-up F1 in
+    `docs/design/concurrency-model.md`). New: do not fork while holding a `Mutex` - a thread waiting
+    in a join helps with other jobs, and one of them may want that lock.
+  `docs/design/scheduler.md` ("Jobs") is the mechanism; `lib/pool.grl`'s signatures are unchanged.
 - `host::now_us()`: the monotonic clock in microseconds, beside `host::now_ms()`. A frame time or
   the cost of a join is not measurable in whole milliseconds; `bench/frame.grl` and
   `bench/sched.grl` (run by `bun tools/bench-sched.mjs`) are the scheduler benchmarks that use it.
