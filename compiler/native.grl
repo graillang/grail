@@ -888,6 +888,17 @@ struct C {
     fx_any: u64,
     fx_cur: u64,
     fx_syms: u8[][],
+    // An open-addressed index over `fx_syms` (`index_add`), so a symbol's record is found in constant
+    // time: every run records every body, and a linear scan per edge was quadratic in the program.
+    fx_sym_slots: u64[],
+    fx_sym_keys: u64[],
+    // 1 when a symbol's facts came from an interface's summary: a callee whose body is in another
+    // run, answered with what that run proved. Its own facts and witnesses are the row's.
+    fx_row: u64[],
+    // The interfaces this run wrote, kept so the summary can be added once the bodies are solved.
+    iface_out_file: u8[][],
+    iface_out_text: u8[][],
+    iface_out_module: u8[][],
     fx_body: u64[],
     fx_attr_alloc: u64[],
     fx_attr_panic: u64[],
@@ -16368,11 +16379,6 @@ fn fn_on<a>(c: (&a C)) -> bool {
     if (c.plat != 0) | (c.target != 0) | (c.debug != 0) | (c.backend != 0) | (c.emit_ir != 0) {
         return false;
     }
-    // Effect edges are per-body records in a table this layer does not carry, so a run that records
-    // any does not file units (docs/design/effects.md).
-    if c.fx_any != 0 {
-        return false;
-    }
     // `--export` counts the definitions that matched it, and a replayed body is one it never sees.
     if c.exports.len() != 0 {
         return false;
@@ -16490,7 +16496,8 @@ fn fn_marks<a>(c: (&a C)) -> u64[] {
     m[FN_CLOSURE] = c.closures.len();
     m[FN_CONSTANT] = c.constants.len();
     m[FN_DECLARATION] = c.decls.len();
-    m[FN_EFFECT] = c.fx_syms.len() + c.fx_body_sym.len();
+    // An effect record is not here any more: a unit carries its body's (fx_unit_record).
+    m[FN_EFFECT] = 0;
     return m;
 }
 // A type as a registration spells it: structurally, the way an interface does. False when the type
@@ -16547,7 +16554,9 @@ fn fn_reg_spec<a, b>(c: (&a mut C), template: u64, map: (&b u64[])) -> unit {
 struct FnReg {
     kind: u64,
     template: u64,
-    types: u64[]
+    types: u64[],
+    // Kind 3: the body's effect record (fx_unit_record), replayed by fx_unit_replay.
+    data: u8[]
 }
 // The registrations of a unit, with every type interned in this run. `ok` goes to 0 when a record is
 // not one this compiler writes, and then nothing of the unit may be applied.
@@ -16558,7 +16567,7 @@ fn fn_regs_read<a, b, d>(c: (&a mut C), data: &b [u8], ok: (&d mut u64)) -> FnRe
         kind := iface_r1(&mut p);
         if kind == 1 {
             ty := iface_r_type(&mut p, &mut c);
-            out.push(FnReg { kind: 1, template: 0, types: u64[ty] });
+            out.push(FnReg { kind: 1, template: 0, types: u64[ty], data: u8[] });
         } else if kind == 2 {
             template := iface_rv(&mut p);
             n := iface_rv(&mut p);
@@ -16570,7 +16579,10 @@ fn fn_regs_read<a, b, d>(c: (&a mut C), data: &b [u8], ok: (&d mut u64)) -> FnRe
             for i in n {
                 types.push(iface_r_type(&mut p, &mut c));
             }
-            out.push(FnReg { kind: 2, template: template, types: types });
+            out.push(FnReg { kind: 2, template: template, types: types, data: u8[] });
+        } else if kind == 3 {
+            data := iface_rs(&mut p);
+            out.push(FnReg { kind: 3, template: 0, types: u64[], data: data });
         } else {
             exchange(ok, 0);
             return out;
@@ -16591,7 +16603,7 @@ fn fn_unit_of<a>(c: (&a mut C), key: u8[], text_mark: u64, fact_mark: u64) -> fn
 // text, its facts, and its registrations made again through the calls a fresh emission makes
 // (drop_ref_name, specialize) - so the drop walk and the specialisation queue see the same requests
 // in the same order whether the body was compiled in this run or in an earlier one.
-fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), line: u64) -> unit {
+fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), line: u64, at: u64, claim_alloc: u64, claim_panic: u64) -> unit {
     k := c.lunit;
     if (k != 0) & (k <= c.fnext.len()) {
         c.fnext[k - 1] = c.fnext[k - 1] + 1;
@@ -16600,6 +16612,7 @@ fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), l
         c.plan_at.push(c.out.len());
         site_base(&mut c, line);
     }
+    text_at := c.out.len();
     // The body's opening line, for the cut planning (optimize::plan_from): within its first lines.
     mut k = 0;
     mut seen = 0;
@@ -16650,6 +16663,8 @@ fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), l
         types := regs[i].types.copy();
         if kind == 1 {
             drop_ref_name(&mut c, types[0]);
+        } else if kind == 3 {
+            fx_unit_replay(&mut c, view(regs[i].data), text_at, at, claim_alloc, claim_panic);
         } else {
             specialize(&mut c, template, &types);
         }
@@ -16658,6 +16673,110 @@ fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), l
     return ();
 }
 
+// A unit's effect record: what the body's emission recorded (its own facts, its entry checks, its
+// call edges and the count the IR check holds them to), so a replay hands the solver exactly what
+// compiling the body would. Positions are kept relative - an edge's token to the `fn` token, the
+// replayed prologue to the unit's text - because the unit is reused where lines above it moved. The
+// claim is not kept: it is an attribute outside the unit's key text, so a replay takes it from the
+// declaration as this run parsed it.
+fn fx_unit_record<a, b>(c: (&a mut C), sym: &b [u8], text_mark: u64, at: u64, edge_at: u64) -> u8[] {
+    k := fx_find(&mut c, view(sym));
+    if (k == 0) || (c.fx_body_sym.len() == 0) {
+        return u8[];
+    }
+    kk := k - 1;
+    last := c.fx_body_sym.len() - 1;
+    if !same(view(c.fx_body_sym[last]), view(sym)) {
+        return u8[];
+    }
+    mut out = u8[];
+    iface_ws(&mut out, view(sym));
+    iface_ws(&mut out, view(c.fx_fn_name[kk]));
+    iface_w1(&mut out, c.fx_own_alloc[kk]);
+    iface_w1(&mut out, c.fx_own_panic[kk]);
+    iface_w1(&mut out, c.fx_entry_panic[kk]);
+    iface_wv(&mut out, c.fx_body_calls[last]);
+    mut lo = 0;
+    mut hi = 0;
+    if (c.fx_body_hi[last] != 0) && (text_mark <= c.fx_body_lo[last]) {
+        lo = c.fx_body_lo[last] - text_mark + 1;
+        hi = c.fx_body_hi[last] - text_mark;
+    }
+    iface_wv(&mut out, lo);
+    iface_wv(&mut out, hi);
+    mut n = 0;
+    mut edges = u8[];
+    for e in edge_at..c.fx_edge_from.len() {
+        if c.fx_edge_from[e] != kk {
+            continue;
+        }
+        iface_ws(&mut edges, view(c.fx_edge_name[e]));
+        iface_wv(&mut edges, c.fx_edge_kind[e]);
+        iface_ws(&mut edges, view(c.fx_edge_why[e]));
+        mut delta = 0;
+        if at <= c.fx_edge_pos[e] {
+            delta = c.fx_edge_pos[e] - at;
+        }
+        iface_wv(&mut edges, delta);
+        n += 1;
+    }
+    iface_wv(&mut out, n);
+    push_bytes(&mut out, view(edges));
+    return out;
+}
+// The record of a replayed body, put back as `fx_begin`, `fx_edge` and `fx_end` would have left it.
+fn fx_unit_replay<a, b>(c: (&a mut C), data: &b [u8], text_at: u64, at: u64, claim_alloc: u64, claim_panic: u64) -> unit {
+    mut p = IR { data: copy_bytes(view(data)), at: 0, stop: data.len(), path: copy_bytes(view("the unit store")), phase: 2, rtext: u8[], what: u8[] };
+    sym := iface_rs(&mut p);
+    shown := iface_rs(&mut p);
+    own_a := iface_r1(&mut p);
+    own_p := iface_r1(&mut p);
+    entry := iface_r1(&mut p);
+    calls := iface_rv(&mut p);
+    lo := iface_rv(&mut p);
+    hi := iface_rv(&mut p);
+    k := fx_sym(&mut c, view(sym)) - 1;
+    c.fx_body[k] = 1;
+    c.fx_row[k] = 0;
+    c.fx_alloc_thru[k] = 0;
+    c.fx_panic_thru[k] = 0;
+    c.fx_own_alloc[k] = own_a;
+    c.fx_own_panic[k] = own_p;
+    c.fx_entry_panic[k] = entry;
+    if claim_alloc != 0 {
+        c.fx_attr_alloc[k] = 1;
+    }
+    if claim_panic != 0 {
+        c.fx_attr_panic[k] = 1;
+    }
+    c.fx_fn_name[k] = shown.copy();
+    c.fx_fn_file[k] = c.file;
+    c.fx_fn_pos[k] = at;
+    n := iface_rv(&mut p);
+    for i in n {
+        name := iface_rs(&mut p);
+        kind := iface_rv(&mut p);
+        why := iface_rs(&mut p);
+        delta := iface_rv(&mut p);
+        c.fx_edge_from.push(k);
+        c.fx_edge_name.push(name);
+        c.fx_edge_to.push(0);
+        c.fx_edge_kind.push(kind);
+        c.fx_edge_file.push(c.file);
+        c.fx_edge_pos.push(at + delta);
+        c.fx_edge_why.push(why);
+    }
+    c.fx_body_sym.push(sym.copy());
+    c.fx_body_calls.push(calls);
+    if lo != 0 {
+        c.fx_body_lo.push(text_at + lo - 1);
+        c.fx_body_hi.push(text_at + hi);
+    } else {
+        c.fx_body_lo.push(0);
+        c.fx_body_hi.push(0);
+    }
+    return ();
+}
 // The key of one unit: a text record naming every input its bytes are a function of.
 //
 //   the unit (part) it is emitted into and the label prefix that part mints labels in;
@@ -17825,7 +17944,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                         }
                         // The first body of a part opens it; the unit's text starts after that.
                         part(&mut c, view(unit));
-                        fn_apply(&mut c, &hit, &regs, fn_line);
+                        fn_apply(&mut c, &hit, &regs, fn_line, position, claimed_alloc, claimed_panic);
                         if par_outcome == 1 {
                             c.fn_filed = c.fn_filed + 1;
                         } else {
@@ -17941,6 +18060,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         fx_label.push(c.out[label_at + i]);
     }
     o(&mut c, view(":\n"));
+    fx_edge_at := c.fx_edge_from.len();
     fx_begin(&mut c, view(fx_label), view(name), c.file, position, claimed_alloc, claimed_panic);
     o(&mut c, view("pushq %rbp\nmovq %rsp,%rbp\n"));
     frame := label(&mut c);
@@ -18169,7 +18289,14 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             }
         }
         if unit_ok != 0 {
-            produced := fn_unit_of(&mut c, fn_key_text, text_mark, fact_mark);
+            mut produced = fn_unit_of(&mut c, fn_key_text, text_mark, fact_mark);
+            // The body's effect record travels in the unit; this run already has it, so the apply
+            // below is given the registrations without it.
+            effect := fx_unit_record(&mut c, view(fx_label), text_mark, position, fx_edge_at);
+            if effect.len() != 0 {
+                produced.regs.push(3);
+                iface_ws(&mut produced.regs, view(effect));
+            }
             // The file's name is the key's hash; the key record itself travels inside the entry,
             // so two keys that collide make a miss and never a wrong hit.
             if c.fn_dir.len() != 0 {
@@ -18191,7 +18318,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             if (k != 0) & (k <= c.fnext.len()) {
                 c.fnext[k - 1] = c.fnext[k - 1] - 1;
             }
-            fn_apply(&mut c, &produced, &regs, fn_line);
+            fn_apply(&mut c, &produced, &regs, fn_line, position, claimed_alloc, claimed_panic);
         } else {
             c.fn_kept = c.fn_kept + 1;
         }
@@ -21761,14 +21888,33 @@ fn fx_attr_form<a>(c: (&a mut C)) -> u64 {
     return 0;
 }
 // The record of one function symbol: index + 1, appending a fresh one when this is its first mention.
-fn fx_sym<a, b>(c: (&a mut C), sym: &b [u8]) -> u64 {
-    for i in c.fx_syms.len() {
-        if same(view(c.fx_syms[i]), view(sym)) {
+// The record of a symbol already mentioned: index + 1, or 0.
+fn fx_find<a, b>(c: (&a mut C), sym: &b [u8]) -> u64 {
+    if c.fx_sym_slots.len() == 0 {
+        return 0;
+    }
+    key := name_key(view(""), view(sym));
+    mask := c.fx_sym_slots.len() - 1;
+    mut h = key & mask;
+    while c.fx_sym_slots[h] != 0 {
+        i := c.fx_sym_slots[h] - 1;
+        if (c.fx_sym_keys[i] == key) && same(view(c.fx_syms[i]), view(sym)) {
             return i + 1;
         }
+        h = (h + 1) & mask;
     }
+    return 0;
+}
+fn fx_sym<a, b>(c: (&a mut C), sym: &b [u8]) -> u64 {
+    found := fx_find(&mut c, view(sym));
+    if found != 0 {
+        return found;
+    }
+    key := name_key(view(""), view(sym));
+    index_add(&mut c.fx_sym_slots, &mut c.fx_sym_keys, key);
     c.fx_syms.push(copy_bytes(view(sym)));
     c.fx_body.push(0);
+    c.fx_row.push(0);
     c.fx_attr_alloc.push(0);
     c.fx_attr_panic.push(0);
     c.fx_own_alloc.push(0);
@@ -21803,7 +21949,9 @@ fn fx_instance_name<a, b>(c: (&a mut C), name: &b [u8], spec: u64) -> u8[] {
 // apart. A specialisation inherits the template's claim - that is the obligation - and its own body
 // is what proves or refuses it.
 fn fx_begin<a, b, d>(c: (&a mut C), sym: &b [u8], name: &d [u8], file: u64, pos: u64, no_alloc: u64, no_panic: u64) -> unit {
-    if c.fx_any == 0 {
+    // Every run that emits code records every body: its facts are the summary its interface carries.
+    // A check-only run carries none, so it records only when it has a claim to check.
+    if (c.check_only != 0) && (c.fx_any == 0) {
         return ();
     }
     if c.validating != 0 {
@@ -21811,7 +21959,11 @@ fn fx_begin<a, b, d>(c: (&a mut C), sym: &b [u8], name: &d [u8], file: u64, pos:
     }
     k := fx_sym(&mut c, view(sym)) - 1;
     c.fx_body[k] = 1;
-    // A retried body starts over: facts from the discarded attempt are not this body's.
+    // A retried body starts over: facts from the discarded attempt are not this body's. A row read
+    // for the same symbol is replaced by the body: what this run proves is what it answers with.
+    c.fx_row[k] = 0;
+    c.fx_alloc_thru[k] = 0;
+    c.fx_panic_thru[k] = 0;
     c.fx_own_alloc[k] = 0;
     c.fx_own_panic[k] = 0;
     mut display = copy_bytes(view(name));
@@ -22049,11 +22201,14 @@ fn fx_vtable_drop<a>(c: (&a mut C), iface: u64) -> unit {
 // A drop helper's body starts: trusted code, recorded like a function so a caller's claim is followed
 // through it to the user `Drop` it calls.
 fn fx_helper<a, b>(c: (&a mut C), sym: &b [u8]) -> unit {
-    if c.fx_any == 0 {
+    if (c.check_only != 0) && (c.fx_any == 0) {
         return ();
     }
     k := fx_sym(&mut c, view(sym)) - 1;
     c.fx_body[k] = 1;
+    c.fx_row[k] = 0;
+    c.fx_alloc_thru[k] = 0;
+    c.fx_panic_thru[k] = 0;
     c.fx_own_alloc[k] = 0;
     c.fx_own_panic[k] = 0;
     exchange(&mut c.fx_trusted, 1);
@@ -22091,13 +22246,26 @@ fn fx_end<a>(c: (&a mut C)) -> unit {
 // bypasses `call_out`, `call_slot_out`, `call_dispatch_out` or `call_entry_out` would leave the IR
 // with a call the recorder never saw - a silently weaker proof - so it is refused here.
 fn fx_check_calls<a, b, d>(c: (&a mut C), syms: (&b u8[][]), counts: (&d u64[])) {
+    // The parsed bodies by name (the last one parsed under a name wins, as the scan did).
+    mut slots = u64[];
+    mut keys = u64[];
+    for i in syms.len() {
+        index_add(&mut slots, &mut keys, name_key(view(""), view(syms[i])));
+    }
     for b in c.fx_body_sym.len() {
         mut found = 0;
         mut got: u64 = 0;
-        for i in syms.len() {
-            if same(view(syms[i]), view(c.fx_body_sym[b])) {
-                found = 1;
-                got = counts[i];
+        if slots.len() != 0 {
+            key := name_key(view(""), view(c.fx_body_sym[b]));
+            mask := slots.len() - 1;
+            mut h = key & mask;
+            while slots[h] != 0 {
+                i := slots[h] - 1;
+                if (keys[i] == key) && same(view(syms[i]), view(c.fx_body_sym[b])) && ((found == 0) || (i > found - 1)) {
+                    found = i + 1;
+                    got = counts[i];
+                }
+                h = (h + 1) & mask;
             }
         }
         if found == 0 {
@@ -22118,19 +22286,14 @@ fn fx_check_calls<a, b, d>(c: (&a mut C), syms: (&b u8[][]), counts: (&d u64[]))
 }
 // The record a callee symbol names: a body emitted for it, or a declaration read for it.
 fn fx_lookup<a, b>(c: (&a mut C), name: &b [u8]) -> u64 {
-    for i in c.fx_syms.len() {
-        if same(view(c.fx_syms[i]), view(name)) {
-            return i + 1;
-        }
-    }
-    return 0;
+    return fx_find(&mut c, view(name));
 }
 // The fact of a callee: proved by its own body in this build, or claimed by an attribute that its own
 // module verified. Anything else is unknown, and unknown means it has to be assumed to allocate and to
 // fail.
 fn fx_callee_alloc<a>(c: (&a C), k: u64) -> u64 {
     kk := k - 1;
-    if c.fx_body[kk] != 0 {
+    if (c.fx_body[kk] != 0) || (c.fx_row[kk] != 0) {
         return c.fx_alloc[kk];
     }
     if c.fx_attr_alloc[kk] != 0 {
@@ -22140,7 +22303,7 @@ fn fx_callee_alloc<a>(c: (&a C), k: u64) -> u64 {
 }
 fn fx_callee_panic<a>(c: (&a C), k: u64) -> u64 {
     kk := k - 1;
-    if c.fx_body[kk] != 0 {
+    if (c.fx_body[kk] != 0) || (c.fx_row[kk] != 0) {
         return c.fx_panic[kk];
     }
     if c.fx_attr_panic[kk] != 0 {
@@ -22173,9 +22336,6 @@ fn fx_func_symbol<a>(c: (&a mut C), i: u64) -> u8[] {
 // of it. A symbol nothing defines or emits is unknown - an extern, a stub - unless the body that calls
 // it is trusted code, whose unresolved names are the assembly stubs of the system-call gate.
 fn fx_solve<a>(c: (&a mut C)) -> unit {
-    if c.fx_any == 0 {
-        return ();
-    }
     for i in c.funcs.len() {
         na := c.funcs[i].no_alloc;
         np := c.funcs[i].no_panic;
@@ -22216,39 +22376,136 @@ fn fx_solve<a>(c: (&a mut C)) -> unit {
             }
         }
     }
-    mut changed = 1;
-    mut rounds = 0;
-    while (changed != 0) && (rounds <= c.fx_syms.len() + 1) {
-        changed = 0;
-        rounds = rounds + 1;
-        for e in c.fx_edge_from.len() {
-            from := c.fx_edge_from[e];
-            to := c.fx_edge_to[e];
-            kind := c.fx_edge_kind[e];
-            mut a = 0;
-            mut p = 0;
-            if to != 0 {
+    // A worklist over the reverse edges: every fact is set once, and setting it visits the callers
+    // of that body once, so the solve is linear in the edges. First the facts no solved callee
+    // decides - an unknown call, a callee known only by its declaration, a callee's entry checks -
+    // then each body that has a fact passes it to its callers.
+    n := c.fx_syms.len();
+    // How far each fact is from where it starts: 0 for a body's own, 1 for one an edge gives without a
+    // solved callee, one more than the callee's for one passed on. The witness is chosen from it below.
+    mut da = u64[0; n];
+    mut dp = u64[0; n];
+    mut work = u64[];
+    for k in n {
+        if (c.fx_alloc[k] != 0) || (c.fx_panic[k] != 0) {
+            work.push(k);
+        }
+    }
+    mut callers = u64[0; n + 1];
+    for e in c.fx_edge_from.len() {
+        from := c.fx_edge_from[e];
+        to := c.fx_edge_to[e];
+        kind := c.fx_edge_kind[e];
+        mut a = 0;
+        mut p = 0;
+        if to != 0 {
+            if c.fx_body[to - 1] == 0 {
                 a = fx_callee_alloc(&c, to);
                 p = fx_callee_panic(&c, to);
-                if (c.fx_entry_panic[to - 1] != 0) && ((kind & 8) == 0) {
-                    p = 1;
-                }
             } else {
-                if (kind & 1) != 0 {
+                callers[to] = callers[to] + 1;
+            }
+            if (c.fx_entry_panic[to - 1] != 0) && ((kind & 8) == 0) {
+                p = 1;
+            }
+        } else {
+            if (kind & 1) != 0 {
+                a = 1;
+                p = 1;
+            }
+        }
+        mut set = 0;
+        if (a != 0) && (c.fx_alloc[from] == 0) {
+            c.fx_alloc[from] = 1;
+            da[from] = 1;
+            set = 1;
+        }
+        if (p != 0) && (c.fx_panic[from] == 0) {
+            c.fx_panic[from] = 1;
+            dp[from] = 1;
+            set = 1;
+        }
+        if set != 0 {
+            work.push(from);
+        }
+    }
+    // callers[k + 1] .. callers[k + 2]: the edges into body k, in edge order.
+    mut start = u64[0; n + 2];
+    for k in n {
+        start[k + 1] = start[k] + callers[k + 1];
+    }
+    start[n + 1] = start[n];
+    mut fill = u64[0; n + 1];
+    mut into = u64[0; start[n] + 1];
+    for e in c.fx_edge_from.len() {
+        to := c.fx_edge_to[e];
+        if (to != 0) && (c.fx_body[to - 1] != 0) {
+            into[start[to - 1] + fill[to - 1]] = e;
+            fill[to - 1] = fill[to - 1] + 1;
+        }
+    }
+    mut at = 0;
+    while at < work.len() {
+        k := work[at];
+        at += 1;
+        for j in start[k]..start[k + 1] {
+            e := into[j];
+            from := c.fx_edge_from[e];
+            mut set = 0;
+            if (c.fx_alloc[k] != 0) && (c.fx_alloc[from] == 0) {
+                c.fx_alloc[from] = 1;
+                da[from] = da[k] + 1;
+                set = 1;
+            }
+            if (c.fx_panic[k] != 0) && (c.fx_panic[from] == 0) {
+                c.fx_panic[from] = 1;
+                dp[from] = dp[k] + 1;
+                set = 1;
+            }
+            if set != 0 {
+                work.push(from);
+            }
+        }
+    }
+    // The witness of each fact: the first edge, in the order the body made its calls, that gives the
+    // fact from closer to where it starts - so a chain never loops, and it follows the earliest call
+    // that explains the fact, as the diagnostic reads.
+    mut have_a = u64[0; n];
+    mut have_p = u64[0; n];
+    for e in c.fx_edge_from.len() {
+        from := c.fx_edge_from[e];
+        to := c.fx_edge_to[e];
+        kind := c.fx_edge_kind[e];
+        mut a = 0;
+        mut p = 0;
+        if to != 0 {
+            if c.fx_body[to - 1] == 0 {
+                a = fx_callee_alloc(&c, to);
+                p = fx_callee_panic(&c, to);
+            } else {
+                if (c.fx_alloc[to - 1] != 0) && (da[to - 1] < da[from]) {
                     a = 1;
+                }
+                if (c.fx_panic[to - 1] != 0) && (dp[to - 1] < dp[from]) {
                     p = 1;
                 }
             }
-            if (a != 0) && (c.fx_alloc[from] == 0) {
-                c.fx_alloc[from] = 1;
-                c.fx_alloc_thru[from] = to;
-                changed = 1;
+            if (c.fx_entry_panic[to - 1] != 0) && ((kind & 8) == 0) {
+                p = 1;
             }
-            if (p != 0) && (c.fx_panic[from] == 0) {
-                c.fx_panic[from] = 1;
-                c.fx_panic_thru[from] = to;
-                changed = 1;
+        } else {
+            if (kind & 1) != 0 {
+                a = 1;
+                p = 1;
             }
+        }
+        if (a != 0) && (c.fx_alloc[from] != 0) && (da[from] != 0) && (have_a[from] == 0) {
+            c.fx_alloc_thru[from] = to;
+            have_a[from] = 1;
+        }
+        if (p != 0) && (c.fx_panic[from] != 0) && (dp[from] != 0) && (have_p[from] == 0) {
+            c.fx_panic_thru[from] = to;
+            have_p[from] = 1;
         }
     }
     return ();
@@ -43059,7 +43316,7 @@ pub fn iface_digest<a>(data: &a [u8]) -> u8[] {
 // compiler reads is refused by length. Neither can be misread as something else, which is what makes
 // adding a field a version bump and not a silent reinterpretation. `grail iface dump` renders the
 // tree the reader read, so the format stays inspectable without a second parser.
-const IFACE_VERSION: u64 = 6;
+const IFACE_VERSION: u64 = 7;
 const IFACE_TAG_MODULE: u64 = 1;
 const IFACE_TAG_TRAILER: u64 = 2;
 const IFACE_TAG_LINK: u64 = 3;
@@ -43076,6 +43333,9 @@ const IFACE_TAG_INHERENT_TYPE: u64 = 18;
 // A module static (docs/design/module-values.md): name, visibility, type and tier; the storage is in
 // the declaring module's object, so no value travels.
 const IFACE_TAG_STATIC: u64 = 19;
+// The effect summary of every function the module emitted (docs/design/effects.md, "Summaries"):
+// computed facts, not claims, so a run that calls one without its body knows what it does.
+const IFACE_TAG_FACTS: u64 = 20;
 
 // The ABI this compiler builds objects for, as the one line every interface carries: the `dyn`
 // layout (docs/design/fat-dyn.md) - a `&dyn I` is an 8-byte pointer to a 16-byte, 8-aligned
@@ -43261,6 +43521,9 @@ fn iface_tag_name(tag: u64) -> string {
     if tag == IFACE_TAG_ENV {
         return "env";
     }
+    if tag == IFACE_TAG_FACTS {
+        return "facts";
+    }
     return "unknown";
 }
 fn iface_known_tag(tag: u64) -> bool {
@@ -43268,7 +43531,7 @@ fn iface_known_tag(tag: u64) -> bool {
         || (tag == IFACE_TAG_TYPE) || (tag == IFACE_TAG_ALIAS) || (tag == IFACE_TAG_CONST)
         || (tag == IFACE_TAG_FN) || (tag == IFACE_TAG_INHERENT) || (tag == IFACE_TAG_IFACE)
         || (tag == IFACE_TAG_IMPL) || (tag == IFACE_TAG_ENV) || (tag == IFACE_TAG_INHERENT_TYPE)
-        || (tag == IFACE_TAG_STATIC);
+        || (tag == IFACE_TAG_STATIC) || (tag == IFACE_TAG_FACTS);
 }
 // Where a refusal happened, so no diagnostic says only "malformed".
 fn iface_where<a>(p: (&a IR)) -> u8[] {
@@ -44937,6 +45200,11 @@ fn iface_module_bytes<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std:
             iface_wrec(&mut out, tag, view(items[i].payload));
         }
     }
+    listed := iface_listed_fns(&items, &keep);
+    facts := iface_facts_bytes(&mut c, view(m), &listed);
+    if facts.len() != 0 {
+        iface_wrec(&mut out, IFACE_TAG_FACTS, view(facts));
+    }
     mut source_digest = digest.copy();
     if source_digest.len() == 0 {
         source := host::read_file(view(path));
@@ -44948,6 +45216,11 @@ fn iface_module_bytes<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std:
     // The trailer: the source digest, then the digest of every byte above it. The cache keys on the
     // bytes before the trailer (the surface), so a module edit that changes no declaration leaves
     // every other module's key alone.
+    iface_seal_out(&mut out, view(source_digest));
+    return out;
+}
+// The trailer: the source digest, then the digest of every byte above it.
+fn iface_seal_out<a, b>(out: (&a mut u8[]), source_digest: &b [u8]) -> unit {
     out.push(IFACE_TAG_TRAILER);
     iface_wv(&mut out, iface_vlen(source_digest.len()) + source_digest.len() + 32);
     iface_ws(&mut out, view(source_digest));
@@ -44955,6 +45228,198 @@ fn iface_module_bytes<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std:
     for i in d.len() {
         out.push(d[i]);
     }
+    return ();
+}
+// The summary record of module `m`: one entry per function of the module whose facts this run knows -
+// a body it emitted and solved, or a row it read (what makes a read file write back identically).
+// Empty when it knows none, which is what an interface written before any body was emitted carries:
+// a reader then knows nothing about those functions, and nothing is the conservative answer.
+// The functions an interface lists: the summary covers exactly these, the symbols another run can
+// name, so a file read back has a declaration for every entry.
+fn iface_listed_fns<a, b>(items: (&a IItem[]), keep: (&b u64[])) -> u64[] {
+    mut out = u64[];
+    for i in items.len() {
+        if (keep[i] != 0) && (items[i].tag == IFACE_TAG_FN) {
+            out.push(items[i].index);
+        }
+    }
+    return out;
+}
+fn iface_facts_bytes<a, b, d>(c: (&a mut C), m: &b [u8], listed: (&d u64[])) -> u8[] {
+    // One entry per symbol, in symbol order: the order a read file's declarations come back in is
+    // not the order the source declared them, and the bytes must not depend on either.
+    mut parts = u8[][];
+    mut n = 0;
+    mut seen = u8[][];
+    for li in listed.len() {
+        i := listed[li];
+        if i >= c.funcs.len() {
+            continue;
+        }
+        sym := fx_func_symbol(&mut c, i);
+        k := fx_find(&mut c, view(sym));
+        if k == 0 {
+            continue;
+        }
+        kk := k - 1;
+        mut a = 0;
+        mut p = 0;
+        if c.fx_body[kk] != 0 {
+            a = c.fx_alloc[kk];
+            p = c.fx_panic[kk];
+        } else {
+            if c.fx_row[kk] == 0 {
+                continue;
+            }
+            a = c.fx_own_alloc[kk];
+            p = c.fx_own_panic[kk];
+        }
+        mut dup = 0;
+        for j in seen.len() {
+            if same(view(seen[j]), view(sym)) {
+                dup = 1;
+            }
+        }
+        if dup != 0 {
+            continue;
+        }
+        seen.push(sym.copy());
+        mut entries = u8[];
+        mut shown = c.fx_fn_name[kk].copy();
+        if shown.len() == 0 {
+            shown = sym.copy();
+        }
+        iface_ws(&mut entries, view(sym));
+        iface_ws(&mut entries, view(shown));
+        iface_w1(&mut entries, a);
+        iface_w1(&mut entries, p);
+        iface_w1(&mut entries, c.fx_entry_panic[kk]);
+        mut at = u8[];
+        if (a != 0) && (c.fx_alloc_thru[kk] != 0) {
+            at = c.fx_syms[c.fx_alloc_thru[kk] - 1].copy();
+        }
+        mut pt = u8[];
+        if (p != 0) && (c.fx_panic_thru[kk] != 0) {
+            pt = c.fx_syms[c.fx_panic_thru[kk] - 1].copy();
+        }
+        iface_ws(&mut entries, view(at));
+        iface_ws(&mut entries, view(pt));
+        // Insertion by symbol: `seen` and `parts` stay in step.
+        mut j = parts.len();
+        parts.push(entries);
+        while (j > 0) && bytes_less(view(seen[seen.len() - 1]), view(fx_sym_of_part(&parts[j - 1]))) {
+            parts.swap(j, j - 1);
+            j -= 1;
+        }
+        n += 1;
+    }
+    if n == 0 {
+        return u8[];
+    }
+    mut body = u8[];
+    iface_wv(&mut body, n);
+    for i in parts.len() {
+        push_bytes(&mut body, view(parts[i]));
+    }
+    return body;
+}
+// The symbol an encoded summary entry starts with.
+fn fx_sym_of_part<a>(part: (&a u8[])) -> u8[] {
+    mut at = 0;
+    mut len = 0;
+    mut scale = 1;
+    mut more = 1;
+    while (more != 0) & (at < part.len()) {
+        b := part[at];
+        at += 1;
+        len = len + (b & 127) * scale;
+        if (b & 128) == 0 {
+            more = 0;
+        } else {
+            scale = scale * 128;
+        }
+    }
+    mut out = u8[];
+    for i in len {
+        out.push(part[at + i]);
+    }
+    return out;
+}
+// Byte-wise order: `a` before `b`.
+fn bytes_less<a, b>(x: &a [u8], y: &b [u8]) -> bool {
+    mut i = 0;
+    while (i < x.len()) && (i < y.len()) {
+        if x[i] != y[i] {
+            return x[i] < y[i];
+        }
+        i += 1;
+    }
+    return x.len() < y.len();
+}
+// The interface without its summary record, sealed again: the declarations alone.
+fn iface_without_facts<a>(bytes: &a [u8]) -> u8[] {
+    mut out = u8[];
+    if bytes.len() < 5 {
+        return copy_bytes(view(bytes));
+    }
+    for i in 5 {
+        out.push(bytes[i]);
+    }
+    mut at = 5;
+    mut found = 0;
+    while at < bytes.len() {
+        tag_at := at;
+        tag := bytes[at];
+        at += 1;
+        mut len = 0;
+        mut scale = 1;
+        mut more = 1;
+        while (more != 0) & (at < bytes.len()) {
+            b := bytes[at];
+            at += 1;
+            len = len + (b & 127) * scale;
+            if (b & 128) == 0 {
+                more = 0;
+            } else {
+                scale = scale * 128;
+            }
+        }
+        if tag == IFACE_TAG_TRAILER {
+            break;
+        }
+        if tag == IFACE_TAG_FACTS {
+            found = 1;
+        } else {
+            for i in tag_at..at + len {
+                out.push(bytes[i]);
+            }
+        }
+        at = at + len;
+    }
+    if found == 0 {
+        return copy_bytes(view(bytes));
+    }
+    head := iface_r_head(view(""), view(bytes));
+    iface_seal_out(&mut out, view(head.digest));
+    return out;
+}
+// `text` (an interface this run wrote before its bodies were emitted) with the summary of module `m`
+// added in front of the trailer, and sealed again: the bytes are exactly what `iface_module_bytes`
+// writes for the same module once its facts are known, so a re-read file round-trips.
+fn iface_with_facts<a, b>(c: (&a mut C), text: &a [u8], m: &b [u8]) -> u8[] {
+    exchange(&mut c.iface_env, u64[]);
+    exchange(&mut c.iface_env_names, u8[][]);
+    items := iface_items(&mut c, view(m));
+    keep := iface_keep(&items);
+    listed := iface_listed_fns(&items, &keep);
+    facts := iface_facts_bytes(&mut c, view(m), &listed);
+    if facts.len() == 0 {
+        return copy_bytes(view(text));
+    }
+    mut out = iface_surface(view(text));
+    iface_wrec(&mut out, IFACE_TAG_FACTS, view(facts));
+    head := iface_r_head(view(""), view(text));
+    iface_seal_out(&mut out, view(head.digest));
     return out;
 }
 // The trailer's offset, validated: the magic, the version, every record's framing and the file's own
@@ -46160,9 +46625,66 @@ fn iface_walk<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], source_index: u64
             iface_rec_impl(&mut c, &mut p, view(home), source_index, raw_flag);
         } else if tag == IFACE_TAG_ENV {
             iface_rec_env(&mut c, &mut p, view(home));
+        } else if tag == IFACE_TAG_FACTS {
+            iface_rec_facts(&mut c, &mut p);
         }
         iface_rend(&mut p, start);
         p.stop = saved;
+    }
+    return ();
+}
+
+// The summary record: rendered in phase 0, installed in phase 2 as the facts of callees whose
+// bodies are not in this run. A body this run emits wins over a row for the same symbol.
+fn iface_rec_facts<a>(c: (&a mut C), p: (&a mut IR)) -> unit {
+    n := iface_rv(&mut p);
+    for i in n {
+        sym := iface_rs(&mut p);
+        shown := iface_rs(&mut p);
+        a := iface_r1(&mut p);
+        pf := iface_r1(&mut p);
+        e := iface_r1(&mut p);
+        at := iface_rs(&mut p);
+        pt := iface_rs(&mut p);
+        if p.phase == 0 {
+            iface_rt_indent(&mut p, view(""));
+            push_bytes(&mut p.rtext, view("facts "));
+            push_bytes(&mut p.rtext, view(shown));
+            p.rtext.push(32);
+            decimal(&mut p.rtext, a);
+            p.rtext.push(32);
+            decimal(&mut p.rtext, pf);
+            p.rtext.push(32);
+            decimal(&mut p.rtext, e);
+            if at.len() != 0 {
+                push_bytes(&mut p.rtext, view(" alloc-via "));
+                push_bytes(&mut p.rtext, view(at));
+            }
+            if pt.len() != 0 {
+                push_bytes(&mut p.rtext, view(" fail-via "));
+                push_bytes(&mut p.rtext, view(pt));
+            }
+        }
+        if p.phase == 2 {
+            k := fx_sym(&mut c, view(sym)) - 1;
+            if c.fx_body[k] == 0 {
+                c.fx_row[k] = 1;
+                c.fx_own_alloc[k] = a;
+                c.fx_own_panic[k] = pf;
+                c.fx_entry_panic[k] = e;
+                c.fx_fn_name[k] = shown.copy();
+                mut ta = 0;
+                if at.len() != 0 {
+                    ta = fx_sym(&mut c, view(at));
+                }
+                mut tp = 0;
+                if pt.len() != 0 {
+                    tp = fx_sym(&mut c, view(pt));
+                }
+                c.fx_alloc_thru[k] = ta;
+                c.fx_panic_thru[k] = tp;
+            }
+        }
     }
     return ();
 }
@@ -46556,6 +47078,9 @@ fn iface_verify_module<a>(c: (&a mut C), index: u64) -> unit {
         iface_refuse(view(file), view(msg));
     }
     got := iface_module_bytes(&mut c, view(m), view(path), in_std, unsafe_flag, optin, view(""));
+    // The summary is what the module's bodies proved, and this check compares declarations before
+    // any body is emitted: it is left out of the comparison. The source digest pins it.
+    want = iface_without_facts(view(want));
     if same(view(want), view(got)) {
         return ();
     }
@@ -47503,6 +48028,118 @@ fn iface_file_index<a, b>(c: (&a mut C), path: &b [u8]) -> u64 {
     return 0;
 }
 
+// The runtime has no interface: every run knows its declarations already, and it is compiled in a run
+// of its own. Its summary is what the other runs still need - whether `rt_push` allocates, whether
+// `rt_abort` fails - so the run that emitted its bodies writes `runtime.facts` beside the interfaces:
+// the header, one summary record and the seal, read by every run that reads interfaces there.
+fn fx_write_runtime_facts<a>(c: (&a mut C)) -> unit {
+    if c.iface_emit.len() == 0 {
+        return ();
+    }
+    // Only the run that emitted the runtime's bodies writes it: every other run knows the runtime's
+    // declarations and has its rows, and modules compile at the same time.
+    mut listed = u64[];
+    mut emitted = 0;
+    for i in c.funcs.len() {
+        if same(view(c.funcs[i].module), view("runtime")) {
+            listed.push(i);
+            k := fx_find(&mut c, view(fx_func_symbol(&mut c, i)));
+            if (k != 0) && (c.fx_body[k - 1] != 0) {
+                emitted = 1;
+            }
+        }
+    }
+    if emitted == 0 {
+        return ();
+    }
+    facts := iface_facts_bytes(&mut c, view("runtime"), &listed);
+    if facts.len() == 0 {
+        return ();
+    }
+    mut out = u8[];
+    out.push(71);
+    out.push(82);
+    out.push(73);
+    out.push(70);
+    out.push(IFACE_VERSION);
+    iface_wrec(&mut out, IFACE_TAG_FACTS, view(facts));
+    iface_seal_out(&mut out, view(""));
+    host::mkdir(view(c.iface_emit));
+    file := iface_join(view(c.iface_emit), view("runtime"), view(".facts"));
+    if host::write_file(view(file), view(out)) != 0 {
+        iface_refuse(view(file), view("cannot write the runtime's effect summary"));
+    }
+    return ();
+}
+// The runtime's summary, read before any body: its rows answer for the runtime's functions in a run
+// that does not emit them. A run that does emit them replaces each row with its own body's facts. A
+// file of another format is not half-read: it is ignored, and the runtime's functions stay unknown.
+fn fx_read_runtime_facts<a>(c: (&a mut C)) -> unit {
+    mut dir = c.iface_use.copy();
+    if dir.len() == 0 {
+        dir = c.iface_dir.copy();
+    }
+    if dir.len() == 0 {
+        return ();
+    }
+    file := iface_join(view(dir), view("runtime"), view(".facts"));
+    if host::exists(view(file)) == 0 {
+        return ();
+    }
+    data := host::read_file(view(file));
+    if (data.len() < 6) || (data[0] != 71) || (data[1] != 82) || (data[2] != 73) || (data[3] != 70) || (data[4] != IFACE_VERSION) {
+        return ();
+    }
+    if data[5] != IFACE_TAG_FACTS {
+        return ();
+    }
+    mut p = IR { data: data.copy(), at: 6, stop: data.len(), path: file.copy(), phase: 2, rtext: u8[], what: u8[] };
+    len := iface_rv(&mut p);
+    p.stop = p.at + len;
+    iface_rec_facts(&mut c, &mut p);
+    return ();
+}
+// The interfaces this run wrote, again, now with the summaries its solved bodies give them, and the
+// manifest over the new bytes. A run that emitted no body (a check) leaves them as they were.
+fn iface_emit_facts<a>(c: (&a mut C)) -> unit {
+    fx_write_runtime_facts(&mut c);
+    if c.iface_out_file.len() == 0 {
+        return ();
+    }
+    mut manifest = u8[];
+    push_bytes(&mut manifest, view("// grail-interfaces 1\n"));
+    for i in c.iface_out_file.len() {
+        file := c.iface_out_file[i].copy();
+        m := c.iface_out_module[i].copy();
+        old := c.iface_out_text[i].copy();
+        text := iface_with_facts(&mut c, view(old), view(m));
+        if !same(view(text), view(old)) {
+            written := host::write_file(view(file), view(text));
+            if written != 0 {
+                iface_refuse(view(file), view("cannot write an interface file"));
+            }
+        }
+        mut row = u8[];
+        push_bytes(&mut row, view(m));
+        out_push(&mut row, 32);
+        push_bytes(&mut row, view(iface_digest(&text)));
+        out_push(&mut row, 32);
+        push_bytes(&mut row, view(iface_manifest_source_digest(&mut c, view(m))));
+        out_push(&mut row, 10);
+        push_bytes(&mut manifest, view(row));
+    }
+    host::write_file(view(iface_join(view(c.iface_emit), view("interfaces"), view(".manifest"))), view(manifest));
+    return ();
+}
+// The source digest the manifest records for module `m`: the digest of the file it was read from.
+fn iface_manifest_source_digest<a, b>(c: (&a mut C), m: &b [u8]) -> u8[] {
+    for i in c.iface_list.len() {
+        if same(view(c.iface_list[i].module), view(m)) {
+            return iface_digest(&host::read_file(view(c.iface_list[i].path)));
+        }
+    }
+    return u8[];
+}
 // Writes one interface per module of the program, plus the manifest that pins their bytes.
 fn iface_emit_all<a>(c: (&a mut C)) -> unit {
     dir := c.iface_emit.copy();
@@ -47548,6 +48185,9 @@ fn iface_emit_all<a>(c: (&a mut C)) -> unit {
         if written != 0 {
             iface_refuse(view(file), view("cannot write an interface file"));
         }
+        c.iface_out_file.push(file.copy());
+        c.iface_out_text.push(text.copy());
+        c.iface_out_module.push(m.copy());
         mut row = u8[];
         push_bytes(&mut row, view(m));
         out_push(&mut row, 32);
@@ -47833,6 +48473,12 @@ pub fn main() -> u64 {
         fx_any: 0,
         fx_cur: 0,
         fx_syms: u8[][],
+        fx_sym_slots: u64[],
+        fx_sym_keys: u64[],
+        fx_row: u64[],
+        iface_out_file: u8[][],
+        iface_out_text: u8[][],
+        iface_out_module: u8[][],
         fx_body: u64[],
         fx_attr_alloc: u64[],
         fx_attr_panic: u64[],
@@ -48464,6 +49110,7 @@ pub fn main() -> u64 {
             for k in c.iface_loaded.len() {
                 iface_load(&mut c, view(c.iface_loaded_path[k].copy()), view(""), 2);
             }
+            fx_read_runtime_facts(&mut c);
         }
         if pass == 1 {
             default_methods(&mut c, 2);
@@ -48547,6 +49194,7 @@ pub fn main() -> u64 {
     jobs::phase(view("drops-vtables"));
     fx_solve(&mut c);
     fx_report(&mut c);
+    iface_emit_facts(&mut c);
     if c.skip_bodies.len() != 0 {
         // Every error this compile has is reported; the program is still rejected, and nothing it
         // would have written is.
@@ -48778,11 +49426,19 @@ pub fn main() -> u64 {
     mut ir_text = u8[];
     // Where each body's replayed `.proved` prologue sits, so the optimizer can count the calls the
     // body really emits and this end can hold that count against what the effect checker recorded.
+    // Only bodies with such a prologue are listed: the rest have no range, and the optimizer looks
+    // every body up here.
     mut rsym = u8[][];
+    mut rlo = u64[];
+    mut rhi = u64[];
     for i in c.fx_body_sym.len() {
-        rsym.push(c.fx_body_sym[i].copy());
+        if c.fx_body_hi[i] != 0 {
+            rsym.push(c.fx_body_sym[i].copy());
+            rlo.push(c.fx_body_lo[i]);
+            rhi.push(c.fx_body_hi[i]);
+        }
     }
-    replay := ir::Replay { sym: rsym, lo: c.fx_body_lo.copy(), hi: c.fx_body_hi.copy() };
+    replay := ir::Replay { sym: rsym, lo: rlo, hi: rhi };
     mut call_syms = u8[][];
     mut call_counts = u64[];
     if (c.debug != 0) || (c.backend != 0) {
