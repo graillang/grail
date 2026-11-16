@@ -566,3 +566,124 @@ still calling the builtins.
 - `fmt` keeps `Fn<Send, Owned>` and any generic argument list on one line (it split them at the
   comma). `docgen` needed no change: it prints signatures from source text.
 - **Not built yet:** `Fn<s>` (stage 3, refused with "not implemented yet"), P14/H5, P27.
+
+### 6.1 The `Owned` rule, refined (director, 2026-11-16)
+
+`Owned` (and the non-parameter default) means: **every region of every borrow in the closure's
+environment appears among the regions of the closure's own type (its parameters or its result). A
+borrow the type does not name makes it not `Owned`.** Whatever stores the closure then carries the
+region in its own type (`Iter<(&a K)>`) and the existing region checks follow it. This is what
+`borrow_walk` already said of a closure type from a signature (kind 20: a result naming a lifetime
+no parameter supplies is a borrow the value holds); `closure_hidden_regions` is now the one rule for
+closure expressions too. A borrow of a local (region 0) can never be named.
+
+The stage 3 count with this reading: 0 refusals in the corpus, Abundance and Borg. The 8 lazy
+adapters of `lib/iter.grl` (`map`, `filter`, `flat_map`, `filter_map` as methods, `from_fn`,
+`from_step`, `map`, `filter`) take `FnMut<Owned>(..)`; hashmap `keys`/`values`/`iter` compile as
+before. Cases `closure-owned-*`.
+
+**Limit found while enforcing it on a field.** Typing `Iter<T>`'s own field `step: FnMut<Owned>`
+refuses `iter::map` itself: its step closure captures the source `Iter<(&a T)>` and yields `U`, so
+`a` is in no part of the closure's type. That borrow is kept today by loan flow (a generic call's
+result keeps its arguments' loans, `may_hide_borrow`), not by the type. So the non-parameter default
+`Owned` cannot be enforced on fields as stated: either such a field names the region
+(`Iter<a, T>`), or the rule counts a capture whose type is an aggregate holding the loan as
+flow-tracked. **Decided (director, 2026-11-16):** neither `Iter<a, T>` nor a weaker `Owned`. The rule:
+**a value's hidden borrows are carried by loan flow and by its type not being `Owned`; `Owned` is
+the only way to cross a lifetime boundary.** `Iter<T>`'s field stays a bare `FnMut`. Its soundness
+rests on (a) loan flow - `iter::map(src, f)`'s result is bonded to `src`'s loans by `call_bonds`,
+because `src` is a non-closure argument - and (b) a record with a non-`Owned` closure field is
+itself not `Owned` (`owned_walk`) and not `Send`/`Share` (denial code 12). Pinned by the cases
+`iter-hidden-borrow-*`: such an Iter cannot ride into a job or a task, be returned past the vector,
+be kept across a push, or satisfy `T: Owned` / `T: Send`; consumed locally it is fine.
+
+### 6.2 Stage 3 (call-scoped closure parameters) - built
+
+- `init_parameter`: a closure parameter whose type is not `Owned` holds a loan of a place no type
+  can name (region 0, like a local's). Returning it is the ordinary escape error; storing it through
+  `&mut` is refused by `check_writeback`, which now also checks a stored value whose type cannot show
+  a borrow (`may_hide_borrow` and a live loan) with its own diagnostic; capturing it carries the loan
+  into the closure (`capture_hides_loan` in `closure_literal`, both paths, and the environment
+  field takes its bonds). `dyn_box` refuses a value that holds a loan its type cannot show (P27).
+- `call_bonds` hands a closure argument's loans to the call's result only when the formal is
+  `Owned`: a call-scoped formal cannot keep the closure, so its result holds nothing of it.
+- `parallel_spawn` makes the job take over the loans of the closure it runs (the builtin face of
+  2.10), so a wrapper over it either waits before returning or takes `Fn<Owned>`.
+- Cases `closure-call-scoped-*` (P14, P27 and the shapes of the count). `Fn<s>` is next.
+
+### 6.3 `Fn<s>` - built
+
+`Fn<s>(..)` / `FnMut<Send, s>(..)`: the lifetime is stored in the closure type's `regions`, so the
+type carries `s` like a reference does. No new conversion check is needed: `call_bonds` hands a
+closure argument's loans to whatever the signature labels `s` (the `type_caps` intersection it
+already does for every argument), and the return and writeback checks follow those loans. A
+parameter typed `Fn<s>` is not call-scoped (it may be kept where `s` is named). At most one
+lifetime; `Owned` with a lifetime is refused. Cases `closure-region-*`. This is the piece stage 5's
+scopes build on; R-env and the scope types are planned in section 7 and not built.
+
+## 7. Stage 5 plan: R-env and the scope types (for the director, not built)
+
+What exists after 6.3: `Fn<s>` carries `s`; a holder labelled `s` keeps a closure's loans; call-scoped
+parameters cannot escape. What a scope still needs is the *inner* closure: in
+`thread::scope(|t| { t.spawn(|| use(&x)); })` the spawned closure re-borrows `x` from the body's
+environment, whose fields are declared in the body's own region 1 (`capture_field_type`
+[V n:capture_field_type]), so its loans come from region 1, not from `s`, and storing it into
+`Threads<s>` is refused today. Steps, each with its cases:
+
+1. **Hint regions.** When a closure literal is checked against an expected `FnMut<s>((&Threads<s>)) -> R`,
+   the expected type's regions are the *callee's* numbers. Map each to a fresh region of the body
+   (as a generic call maps a callee's lifetimes) before `closure_hint` hands the parameter types over,
+   so the body's `&Threads<s>` and its environment share one id. Case: a body that only calls
+   `t.spawn(|| 1)` (no captures) compiles; today's hint path is checked for collisions first.
+2. **R-env.** If the expected type names a region `s'`, the environment record's field types and the
+   body's hidden environment parameter use `s'` instead of region 1 (`capture_field_type`,
+   `emit_closures`). Then a capture re-borrowed in the body has region `s'`, and an inner closure built
+   from it may be stored in `Threads<s'>`. Cases: accepted - two spawned closures reading `&x`; one
+   writing `&mut x` while another reads `&mut y`. Refused - two capturing `&mut x` (second loan
+   conflicts); a body-local captured by a spawned closure (region 0, `captured writeback violates
+   invariant lifetime`); `x` used in the body after a spawned closure borrowed it mutably; a
+   `ScopedThread<s, T>` returned from the body (`R: Owned`).
+3. **Prototype the receiver assumption first** (2.4): bonding through `self: (&Self)` into a holder
+   labelled `s`, shown with references (P23 through `&Self`). If shared-receiver bonding does not
+   hold, `spawn` takes `(&mut Self)`.
+4. **Scope types in lib, over raw entries owned by the other branches.**
+   `pub unsafe struct Threads<s> { raw: .. }`, neither `Send` nor `Share` by declaration;
+   `pub fn scope<s, R: Owned>(body: FnMut<s>((&Threads<s>)) -> R) -> R`;
+   `impl Threads<s> { pub fn spawn<T: Send + Owned>(self: (&Self), f: FnMut<Send, s>() -> T) -> ScopedThread<s, T>; }`;
+   the same shape for `pool::scope` (`Jobs<s>`) and `task::scope` (`Tasks<s>`, `Task<s, T>`). The raw
+   start/join entries come from gaps12-threads and gaps12-sched; I would write the checker parts and
+   the cases against a minimal `unsafe module` scope that runs spawns inline, and they wire it to
+   the runtime.
+5. **Deletions, in the change that moves the last user:** `task_scope_builtin`, `spawn_builtin`,
+   kind 14 (`Scope<C>`), `require_sendable_owned`; `contains_task` with D8's condition (handles are
+   move-only library records; a case shows a second `join` is a move error).
+
+Risks: step 1 touches every closure passed to a generic function with lifetimes in its signature;
+run the corpus with step 1 alone before step 2. R-env must only apply when the expected type names a
+region, so closures that never asked keep region 1 and today's behaviour.
+
+### 7.1 Stage 5, checker side - built
+
+Found while building: steps 1-2 of the plan (hint-region mapping, R-env) are **not needed**. What was
+missing was more basic - a closure inside a closure body could not capture the enclosing closure's
+captures at all (`undefined name`), and an expression-bodied closure could not capture a local
+borrow (the result-type probe refused it). With both fixed, a nested capture is a *re-borrow that
+keeps the original loan*: a shared reference as `load(&name)`, an exclusive slice or `&mut T[]` as
+an exclusive whole slice (`&mut name[:]`, a child loan). The spawned closure therefore holds the
+caller's own region, and `Fn<s>` plus the existing writeback and loan checks give every scope rule:
+
+| Program (`scope(|t| ..)` over the inline mock) | Outcome |
+|---|---|
+| two spawns sharing `&x` | accepted |
+| spawns on disjoint `&mut x`, `&mut y`; both writes land | accepted |
+| two spawns on one `&mut x` | refused: `reference is suspended or expired` |
+| a spawn capturing a borrow of a body local | refused: `captured writeback violates invariant lifetime` |
+| the body touching what a spawn borrowed | refused: `borrow conflicts with active access` |
+| a `ScopedThread<s>` returned from the body | refused: `returned borrow escapes` |
+
+Step 3: a shared `(&Self)` receiver cannot hold the borrows at all in safe code (a `Mutex` payload
+may not contain borrows), so `spawn` takes `(&mut Self)` and the body gets `(&mut Threads<s>)`, as
+the director allowed. A nested exclusive capture of a general `&mut T` (not a vector or slice) has
+no re-borrow form and stays unsupported. Cases `closure-nested-capture-*`, `scope-*`,
+`closure-expression-body-captures-local-borrow`. Step 4 (wiring to the runtime) and step 5 (deleting
+the builtins) are with the threads and scheduler branches.
