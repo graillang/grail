@@ -61,6 +61,28 @@ pub fn fact_dyn_result<a>(facts: (&a mut Facts), name: u8[]) -> unit {
     facts.items.push(Fact { kind: 4, fn: name, a: 0, b: 0, callee: u8[], what: 0, width: 0 });
     return ();
 }
+// `slot` is word 0 of an aggregate of `words` words in `name`: a plain record kept in the frame
+// (docs/design/unboxed-values.md, stage 3a). Word i is slot `slot - i`, at `8*i` above word 0, the
+// same shape as a `DynPair`, which is the two-word case; both are one object to every pass.
+pub fn fact_aggregate<a>(facts: (&a mut Facts), name: u8[], slot: u64, words: u64) -> unit {
+    facts.items.push(Fact { kind: 3, fn: name, a: slot, b: 0, callee: u8[], what: 0, width: words });
+    return ();
+}
+// The words of each multi-word frame value of `name`, in the order facts_dyn_pairs gives their slots:
+// 2 for a `DynPair` (its fact leaves the width 0), the declared count for an aggregate.
+pub fn facts_pair_widths<a, b, d>(facts: (&a Facts), name: &b [u8], out: (&d mut u64[])) -> unit {
+    for i in facts.items.len() {
+        f := &facts.items[i];
+        if (f.kind == 3) & eq(view(f.fn), name) {
+            if f.width == 0 {
+                out.push(2);
+            } else {
+                out.push(f.width);
+            }
+        }
+    }
+    return ();
+}
 // The `DynPair` slots of `name` (each the first word's slot), appended to `out`.
 pub fn facts_dyn_pairs<a, b, d>(facts: (&a Facts), name: &b [u8], out: (&d mut u64[])) -> unit {
     for i in facts.items.len() {
@@ -265,6 +287,8 @@ struct L {
     // facts (docs/design/fat-dyn.md), so what the front end built a pair for is not re-derived from
     // the shape of the stream.
     pairs: u64[],
+    // The word count of each entry of `pairs`.
+    pair_widths: u64[],
     // Accepted f32 slot facts of the function being lowered: every slot in here is emitted as
     // `alloca float` and read and written with `load float`/`store float` (docs/design/typed-ir.md).
     fslots: u64[],
@@ -871,7 +895,7 @@ fn address<a, b>(l: (&a mut L), op: &b [u8]) -> u8[] {
             mut off = within;
             if pair_second(&l, k) != 0 {
                 at = u64(pair_base(&l, k)) - 1;
-                off = within + 8;
+                off = within + i64(8 * (at - k));
             }
             mut slot = copy(view("%s."));
             num(&mut slot, at);
@@ -2638,7 +2662,9 @@ fn body_lines<a, b>(lines: (&a u8[][]), f: (&b Func)) -> u8[][] {
 // above it, lowered as one `[2 x i64]` alloca so the two words stay one addressable value.
 fn function_pairs<a, b, d>(l: (&a mut L), facts: (&b Facts), name: &d [u8]) -> unit {
     exchange(&mut l.pairs, u64[]);
+    exchange(&mut l.pair_widths, u64[]);
     facts_dyn_pairs(facts, name, &mut l.pairs);
+    facts_pair_widths(facts, name, &mut l.pair_widths);
     return ();
 }
 // The two-word value slot k belongs to, +1: its first word's slot, or 0 when k is a plain slot.
@@ -2646,11 +2672,20 @@ fn function_pairs<a, b, d>(l: (&a mut L), facts: (&b Facts), name: &d [u8]) -> u
 fn pair_base<a>(l: (&a L), k: u64) -> u64 {
     for i in l.pairs.len() {
         b := l.pairs[i];
-        if (b == k) | (b == k + 1) {
+        if (k <= b) & (b < k + l.pair_widths[i]) {
             return b + 1;
         }
     }
     return 0;
+}
+// The word count of the multi-word value whose base (counted from one) is `base`.
+fn pair_words<a>(l: (&a L), base: u64) -> u64 {
+    for i in l.pairs.len() {
+        if l.pairs[i] + 1 == base {
+            return l.pair_widths[i];
+        }
+    }
+    return 1;
 }
 // Whether slot k is the second word of a two-word value (the slot above its base).
 fn pair_second<a>(l: (&a L), k: u64) -> u64 {
@@ -2658,8 +2693,8 @@ fn pair_second<a>(l: (&a L), k: u64) -> u64 {
     if b == 0 {
         return 0;
     }
-    // `pair_base` counts the base slot from one, so the second word's slot is two below it.
-    if b == k + 2 {
+    // `pair_base` counts the base slot from one: any word below the base is a later word.
+    if b != k + 1 {
         return 1;
     }
     return 0;
@@ -2880,16 +2915,23 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
             if b != 0 {
                 // One object of two slots, so a write to either word is a write to an object whose
                 // address escapes: neither word can be dropped as dead.
-                emit(&mut l, view("{} = alloca [2 x i64], align 8"), &u8[][copy(view(sn))]);
+                words := pair_words(&l, b);
+                mut count_text = u8[];
+                num(&mut count_text, words);
+                emit(&mut l, view("{} = alloca [{} x i64], align 8"), &u8[][copy(view(sn)), count_text]);
                 if (zero >= 0) && (k >= u64(zero)) && (k < slots) {
                     emit(&mut l, view("store i64 0, ptr {}"), &u8[][copy(view(sn))]);
                 }
-                if (zero >= 0) && (k >= 1) {
-                    // The second word is only cleared when the first one is (a pair starts above
-                    // the parameters, so both words share the zeroing decision).
-                    if (k - 1 >= u64(zero)) && (k - 1 < slots) {
-                        wt := def(&mut l, view("getelementptr i8, ptr {}, i64 8"), &u8[][copy(view(sn))]);
-                        emit(&mut l, view("store i64 0, ptr {}"), &u8[][wt]);
+                // A later word is cleared when its own slot is in the cleared range (a value starts
+                // above the parameters, so all its words share the zeroing decision).
+                for j in 1..words {
+                    if (zero >= 0) && (k >= j) {
+                        if (k - j >= u64(zero)) && (k - j < slots) {
+                            mut at = u8[];
+                            num(&mut at, 8 * j);
+                            wt := def(&mut l, view("getelementptr i8, ptr {}, i64 {}"), &u8[][copy(view(sn)), at]);
+                            emit(&mut l, view("store i64 0, ptr {}"), &u8[][wt]);
+                        }
                     }
                 }
                 continue;
@@ -5514,7 +5556,7 @@ fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (
             set_add(&mut weak, view(sub(wl, 6, wl.len())));
         }
     }
-    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, dnames: u8[][], proof: u64[], rline: 0, ranges: ranges };
+    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, dnames: u8[][], proof: u64[], rline: 0, ranges: ranges };
     mut funcs = Func[];
     mut data = u8[][];
     split(&lines, &mut funcs, &mut data);
