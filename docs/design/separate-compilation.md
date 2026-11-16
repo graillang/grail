@@ -70,7 +70,7 @@ Typed specialisation means the *body* must be available at every instantiation s
    separate compilation, and it needs exactly the typed IR that LLVM stage 3 wants — so it should be
    built once, not twice.
 3. **Monomorphic-only.** Instantiate generics inside their defining module and cross the boundary
-   with monomorphic symbols. Efficient, but it forbids `vecs::sort_by(&mut v, f)` from another
+   with monomorphic symbols. Efficient, but it forbids `v.sort_by(f)` (from `lib/vecs.grl`) in another
    module, which the ports already use.
 
 **Staged answer:** v1 ships option 1 — interfaces give checked surfaces, correct incrementality and
@@ -1038,7 +1038,7 @@ object path here, so they build the whole program, and an `--interface` build ch
 against its interface in one run.
 
 `tools/split-test.mjs` builds a project with a generic from another module and the standard library's
-`vecs::sort` both ways and requires the same output from eight separate runs, on x86-64, AArch64 and
+`v.sort()` (from `lib/vecs.grl`) both ways and requires the same output from eight separate runs, on x86-64, AArch64 and
 RISC-V (the cross targets are run under qemu).
 
 With `--cache`, each module's run is keyed by its inputs alone: the build's flags, compiler and

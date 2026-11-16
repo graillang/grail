@@ -22,7 +22,6 @@ impl<T> Iterator for Iter<T> {
     }
 }
 
-
 impl<T> Iter<T> {
     pub fn next(self: &mut Self) -> T? {
         return (self.step)();
@@ -30,22 +29,89 @@ impl<T> Iter<T> {
     // The adapters as methods, so a chain reads left to right:
     // `iter::refs(&v).filter(|x: &&u64| -> bool **x > 1).map(|x: &u64| -> u64 *x * 2).collect()`.
     pub fn map<U>(self: Self, f: FnMut(T) -> U) -> Iter<U> {
-        return map(self, f);
+        mut src = self;
+        mut g = f;
+        return Iter { step: || -> U? {
+            match src.next() {
+                Some(x) => {
+                    return Some(g(x));
+                },
+                None => {
+                    return None;
+                }
+            }
+        } };
     }
     pub fn filter<a>(self: Self, keep: FnMut((&a T)) -> bool) -> Iter<T> {
-        return filter(self, keep);
+        mut src = self;
+        mut k = keep;
+        return Iter { step: || -> T? {
+            while let Some(x) = src.next() {
+                if k(&x) {
+                    return Some(x);
+                }
+            }
+            return None;
+        } };
     }
+    // At most the first n items.
     pub fn take(self: Self, n: u64) -> Iter<T> {
-        return take(self, n);
+        mut src = self;
+        mut left = n;
+        return Iter { step: || -> T? {
+            if left == 0 {
+                return None;
+            }
+            left = left - 1;
+            return src.next();
+        } };
     }
     pub fn enumerate(self: Self) -> Iter<(u64, T)> {
-        return enumerate(self);
+        mut src = self;
+        mut n = 0;
+        return Iter { step: || -> (u64, T)? {
+            match src.next() {
+                Some(x) => {
+                    i := n;
+                    n = n + 1;
+                    return Some((i, x));
+                },
+                None => {
+                    return None;
+                }
+            }
+        } };
     }
+    // Pairs items from both until either runs out.
     pub fn zip<B>(self: Self, other: Iter<B>) -> Iter<(T, B)> {
-        return zip(self, other);
+        mut l = self;
+        mut r = other;
+        return Iter { step: || -> (T, B)? {
+            match l.next() {
+                Some(a) => {
+                    match r.next() {
+                        Some(b) => {
+                            return Some((a, b));
+                        },
+                        None => {
+                            return None;
+                        }
+                    }
+                },
+                None => {
+                    return None;
+                }
+            }
+        } };
     }
+    // Every remaining item, in order, in a new vector.
     pub fn collect(self: Self) -> T[] {
-        return collect(self);
+        mut src = self;
+        mut out = T[];
+        while let Some(x) = src.next() {
+            out.push(x);
+        }
+        return out;
     }
     // How many items remain (consuming them).
     pub fn count(self: Self) -> u64 {
@@ -239,9 +305,9 @@ impl<T> Iter<T> {
     }
 }
 
-
-
-// An iterator from any closure that yields the next item.
+// An iterator from any closure that yields the next item. This is the seam a module outside `iter`
+// uses to make its own iterable (a map's keys, a file's lines): `Iter`'s field is private so that
+// every iterator in the language is built one way and behaves the same in a `for` header.
 pub fn from_fn<T>(step: FnMut() -> T?) -> Iter<T> {
     return Iter { step: step };
 }
@@ -257,13 +323,6 @@ pub fn upto(lo: u64, hi: u64) -> Iter<u64> {
         }
         return None;
     } };
-}
-
-// Build an iterator from a step closure. This is the seam a module outside `iter` uses to make its
-// own iterable (a map's keys, a file's lines): `Iter`'s field is private so that every iterator in
-// the language is built one way and behaves the same in a `for` header.
-pub fn from_step<T>(step: FnMut() -> T?) -> Iter<T> {
-    return Iter { step: step };
 }
 
 // Every element of a vector you keep, in order, as references into it: the vector stays borrowed
@@ -289,95 +348,4 @@ pub fn of<T>(v: T[]) -> Iter<T> {
     return Iter { step: || -> T? {
         return rev.pop();
     } };
-}
-
-pub fn map<T, U>(it: Iter<T>, f: FnMut(T) -> U) -> Iter<U> {
-    mut src = it;
-    mut g = f;
-    return Iter { step: || -> U? {
-        match src.next() {
-            Some(x) => {
-                return Some(g(x));
-            },
-            None => {
-                return None;
-            }
-        }
-    } };
-}
-
-pub fn filter<a, T>(it: Iter<T>, keep: FnMut((&a T)) -> bool) -> Iter<T> {
-    mut src = it;
-    mut k = keep;
-    return Iter { step: || -> T? {
-        while let Some(x) = src.next() {
-            if k(&x) {
-                return Some(x);
-            }
-        }
-        return None;
-    } };
-}
-
-// At most the first n items.
-pub fn take<T>(it: Iter<T>, n: u64) -> Iter<T> {
-    mut src = it;
-    mut left = n;
-    return Iter { step: || -> T? {
-        if left == 0 {
-            return None;
-        }
-        left = left - 1;
-        return src.next();
-    } };
-}
-
-pub fn enumerate<T>(it: Iter<T>) -> Iter<(u64, T)> {
-    mut src = it;
-    mut n = 0;
-    return Iter { step: || -> (u64, T)? {
-        match src.next() {
-            Some(x) => {
-                i := n;
-                n = n + 1;
-                return Some((i, x));
-            },
-            None => {
-                return None;
-            }
-        }
-    } };
-}
-
-// Pairs items from both until either runs out.
-pub fn zip<A, B>(left: Iter<A>, right: Iter<B>) -> Iter<(A, B)> {
-    mut l = left;
-    mut r = right;
-    return Iter { step: || -> (A, B)? {
-        match l.next() {
-            Some(a) => {
-                match r.next() {
-                    Some(b) => {
-                        return Some((a, b));
-                    },
-                    None => {
-                        return None;
-                    }
-                }
-            },
-            None => {
-                return None;
-            }
-        }
-    } };
-}
-
-// Every remaining item, in order, in a new vector.
-pub fn collect<T>(it: Iter<T>) -> T[] {
-    mut src = it;
-    mut out = T[];
-    while let Some(x) = src.next() {
-        out.push(x);
-    }
-    return out;
 }

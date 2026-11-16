@@ -79,7 +79,7 @@ for i in 1 2 3; do
 done
 
 # Tool suites: independent of each other (each has its own .work directory).
-for t in test-selfhost test-ffi test-cli interface-test cache-test split-test test-facts test-optimiser-jumps test-debug-lines abundance-test borg-test grammar-test; do
+for t in test-selfhost test-ffi test-cli interface-test cache-test split-test test-facts test-optimiser-jumps test-debug-lines abundance-test borg-test grammar-test lsp-test; do
   leg $t bun tools/$t.mjs
 done
 leg windows bun tools/windows.mjs check

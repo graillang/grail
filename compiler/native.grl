@@ -17099,6 +17099,113 @@ fn inherent_method_for<a, b>(c: (&a mut C), ty: u64, name: &b [u8]) -> u64 {
     }
     return generic;
 }
+// Why a written-type impl that defines `name` does not apply to a receiver of type `ty`: the first
+// bound its parameters state that the receiver's type does not meet, as (message, help); both empty
+// when no impl defines the name for that shape of type. `v.sort()` on a `P[]` is "`sort` needs
+// `T: order::Ord`, and `P` does not implement it", not "`P[]` has no method `sort`".
+fn inherent_unmet_bound<a, b>(c: (&a mut C), ty: u64, name: &b [u8]) -> (u8[], u8[]) {
+    for i in c.inherent_types.len() {
+        key := inherent_type_base() + i + 1;
+        record := impl_record(&mut c, key);
+        if record == 0 {
+            continue;
+        }
+        count := c.impl_params[record - 1].tnames.len();
+        mut map = u64[];
+        for k in count {
+            map.push(NO_TYPE);
+        }
+        pattern := c.inherent_types[i];
+        if !inherent_pattern_fits(&mut c, pattern, ty, &mut map) {
+            continue;
+        }
+        owner := inherent_type_module(key);
+        m := find_func(&mut c, view(owner), view(name));
+        if m == 0 {
+            continue;
+        }
+        sets := copy_constraints(&c.impl_params[record - 1].interfaces);
+        for k in count {
+            bound := map[k];
+            if (bound == NO_TYPE) || (k >= sets.len()) {
+                continue;
+            }
+            for j in sets[k].len() {
+                iface := sets[k][j];
+                if satisfies_interface(&mut c, bound, iface) {
+                    continue;
+                }
+                tname := c.impl_params[record - 1].tnames[k].copy();
+                mut iname = c.interfaces[iface - 1].module.copy();
+                push_bytes(&mut iname, view("::"));
+                push_bytes(&mut iname, view(c.interfaces[iface - 1].name));
+                shown := source_type_name(&mut c, bound);
+                mut msg = copy_bytes(view("`"));
+                push_bytes(&mut msg, view(name));
+                push_bytes(&mut msg, view("` needs `"));
+                push_bytes(&mut msg, view(tname));
+                push_bytes(&mut msg, view(": "));
+                push_bytes(&mut msg, view(iname));
+                push_bytes(&mut msg, view("`, and `"));
+                push_bytes(&mut msg, view(shown));
+                push_bytes(&mut msg, view("` does not implement it"));
+                home := c.funcs[m - 1].home.copy();
+                mut help = copy_bytes(view("`"));
+                push_bytes(&mut help, view(name));
+                push_bytes(&mut help, view("` is defined in `impl<"));
+                for q in count {
+                    if q != 0 {
+                        push_bytes(&mut help, view(", "));
+                    }
+                    push_bytes(&mut help, view(c.impl_params[record - 1].tnames[q]));
+                    if q < sets.len() {
+                        for r in sets[q].len() {
+                            if r == 0 {
+                                push_bytes(&mut help, view(": "));
+                            } else {
+                                push_bytes(&mut help, view(" + "));
+                            }
+                            push_bytes(&mut help, view(c.interfaces[sets[q][r] - 1].module));
+                            push_bytes(&mut help, view("::"));
+                            push_bytes(&mut help, view(c.interfaces[sets[q][r] - 1].name));
+                        }
+                    }
+                }
+                push_bytes(&mut help, view("> "));
+                tnames := copy_names(&c.impl_params[record - 1].tnames);
+                push_bytes(&mut help, view(impl_pattern_name(&mut c, pattern, &tnames)));
+                push_bytes(&mut help, view("` (module `"));
+                push_bytes(&mut help, view(home));
+                push_bytes(&mut help, view("`); implement `"));
+                push_bytes(&mut help, view(iname));
+                push_bytes(&mut help, view("` for `"));
+                push_bytes(&mut help, view(shown));
+                push_bytes(&mut help, view("` to call it"));
+                return (msg, help);
+            }
+        }
+    }
+    return (u8[], u8[]);
+}
+// A written-type impl's owner as written: its parameters by name (`T[]`, `[T]`).
+fn impl_pattern_name<a, b>(c: (&a mut C), ty: u64, tnames: (&b u8[][])) -> u8[] {
+    k := ty_kind(&mut c, ty);
+    if (k == 9) && (ty_arg(&mut c, ty) < tnames.len()) {
+        return tnames[ty_arg(&mut c, ty)].copy();
+    }
+    if k == 6 {
+        mut out = impl_pattern_name(&mut c, ty_arg(&mut c, ty), &tnames);
+        push_bytes(&mut out, view("[]"));
+        return out;
+    }
+    if k == 27 {
+        mut out = copy_bytes(view("["));
+        push_bytes(&mut out, view(impl_pattern_name(&mut c, ty_arg(&mut c, ty), &tnames)));
+        out.push(93);
+        return out;
+    }
+    return source_type_name(&mut c, ty);
+}
 fn ambiguous_inherent_fail<a, b>(c: (&a mut C), ty: u64, name: &b [u8]) -> unit {
     mut msg = copy_bytes(view("ambiguous method: two inherent impls define `"));
     push_bytes(&mut msg, view(name));
@@ -28683,7 +28790,7 @@ fn fn_as_fnmut<a>(c: (&a mut C), ty: u64, expected: u64) -> u64 {
     return 1;
 }
 // A `Fn` closure passed for a generic `FnMut(..)` parameter whose type variables are not all known
-// yet (`vecs::map(v, |x: u64| -> u64 x * 2)` learns `U` from the closure itself): `adopt_value`
+// yet (`v.map(|x: u64| -> u64 x * 2)` learns `U` from the closure itself): `adopt_value`
 // cannot widen against a formal it cannot bind, so the closure's own signature is widened to
 // `FnMut` first and inference then reads the same parameter and result types from it.
 fn widen_to_fnmut_formal<a>(c: (&a mut C), v: Val, formal: u64) -> Val {
@@ -31959,6 +32066,11 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         || same(view(name), view("push_char"))
         || same(view(name), view("append"));
     if !known {
+        unmet := inherent_unmet_bound(&mut c, xty, view(name));
+        if unmet.0.len() != 0 {
+            diag_help(&mut c, view(unmet.1));
+            fail(&mut c, view(unmet.0));
+        }
         recv := source_type_name(&mut c, xty);
         mut msg = copy_bytes(view("`"));
         push_bytes(&mut msg, view(recv));
@@ -35840,25 +35952,60 @@ fn index_assignment_operator<a>(c: (&a mut C)) -> u64 {
     return 0;
 }
 
-fn mutating_method_name<a>(c: (&a mut C), name: &a [u8], elem: u64) -> u64 {
+// Whether `recv.name(...)` mutates its receiver: a builtin that does, a struct method whose receiver
+// is `self: &mut ...`, or an inherent method of a written type (`impl<T: order::Ord> T[]`) whose
+// receiver is `&mut self`. `recv` is the receiver's type, or 0 when it is not known.
+fn mutating_method_name<a>(c: (&a mut C), name: &a [u8], recv: u64) -> u64 {
     builtin := u8[][copy_bytes(view("push")), copy_bytes(view("pop")), copy_bytes(view("insert")), copy_bytes(view("remove")), copy_bytes(view("clear")), copy_bytes(view("truncate")), copy_bytes(view("append")), copy_bytes(view("sort")), copy_bytes(view("reverse")), copy_bytes(view("swap")), copy_bytes(view("extend")), copy_bytes(view("get_mut")), copy_bytes(view("entry")), copy_bytes(view("retain"))];
     for i in builtin.len() {
         if same(view(builtin[i]), view(name)) {
             return 1;
         }
     }
-    // A user method of the element's own type whose receiver is `self: &mut ...`.
+    if recv == 0 {
+        return 0;
+    }
+    // A user method of the receiver's own type whose receiver is `self: &mut ...`.
     for i in c.funcs.len() {
         f := &c.funcs[i];
         if (f.owner != 0) & !inherent_is_type_key(f.owner) & (f.owner < generic_impl_key(0)) & (f.count != 0) & same(view(f.name), view(name)) {
             first := f.first;
             owner := f.owner;
             pty := c.params[first];
-            if (ty_kind(&mut c, pty) == 7) & (ty_mode(&mut c, pty) != 0) & (elem != 0) {
-                if (ty_kind(&mut c, elem) == 8) & (ty_arg(&mut c, elem) == owner - 1) {
+            if (ty_kind(&mut c, pty) == 7) & (ty_mode(&mut c, pty) != 0) {
+                if (ty_kind(&mut c, recv) == 8) & (ty_arg(&mut c, recv) == owner - 1) {
                     return 1;
                 }
             }
+        }
+    }
+    // A method of a written-type impl (`impl u64[]`, `impl<T> T[]`) whose receiver is `&mut self`.
+    m := inherent_method_for(&mut c, recv, view(name));
+    if m != 0 {
+        f := &c.funcs[m - 1];
+        if f.count != 0 {
+            pty := c.params[f.first];
+            if (ty_kind(&mut c, pty) == 7) & (ty_mode(&mut c, pty) != 0) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+// The type of field `name` of a value of type `ty`, or 0 when `ty` is not a struct with that field.
+fn field_type_named<a, b>(c: (&a mut C), ty: u64, name: &b [u8]) -> u64 {
+    if (ty == 0) || (ty_kind(&mut c, ty) != 8) {
+        return 0;
+    }
+    decl := ty_arg(&mut c, ty);
+    if (decl >= c.decls.len()) || (c.decls[decl].is_enum != 0) {
+        return 0;
+    }
+    first := c.decls[decl].first;
+    count := c.decls[decl].count;
+    for i in count {
+        if same(view(c.fields[first + i].name), view(name)) {
+            return field_type(&mut c, ty, i);
         }
     }
     return 0;
@@ -35884,11 +36031,15 @@ fn mutating_call_after_index<a>(c: (&a mut C), elem: u64) -> u64 {
         q = q + 1;
     }
     q = q + 1;
+    // The receiver's type follows the field path: `v[i].deps.insert_sorted(x)` calls a method of
+    // the type of `deps`, not of the element.
+    mut recv = elem;
     while (kind_at(&mut c, q) == 46) & (kind_at(&mut c, q + 1) == 1) {
+        name := tok_text(&mut c, q + 1);
         if kind_at(&mut c, q + 2) == 40 {
-            name := tok_text(&mut c, q + 1);
-            return mutating_method_name(&mut c, view(name), elem);
+            return mutating_method_name(&mut c, view(name), recv);
         }
+        recv = field_type_named(&mut c, recv, view(name));
         q = q + 2;
     }
     return 0;
