@@ -1022,6 +1022,10 @@ extern "C" lib "kernel32" fn GetQueuedCompletionStatus(port: u64, bytes: u64, ke
 extern "C" lib "kernel32" fn PostQueuedCompletionStatus(port: u64, bytes: u64, key: u64, overlapped: u64) -> u64;
 extern "C" lib "kernel32" fn AddVectoredExceptionHandler(first: u64, handler: cfn(u64) -> u64) -> u64;
 extern "C" lib "kernel32" fn GetActiveProcessorCount(group: u64) -> u64;
+extern "C" lib "kernel32" fn GetCurrentThread() -> u64;
+extern "C" lib "kernel32" fn SetThreadAffinityMask(thread: u64, mask: u64) -> u64;
+extern "C" lib "kernel32" fn SetThreadPriority(thread: u64, priority: u64) -> u64;
+extern "C" lib "kernel32" fn SetThreadDescription(thread: u64, name: u64) -> u64;
 
 fn rt_os_reactor() -> u64 {
     return 1;
@@ -1095,6 +1099,116 @@ fn rt_os_ctx_leave(t: u64) -> u64 {
 // running and its stack can be released.
 fn rt_os_ctx_release(t: u64) -> u64 {
     DeleteFiber(raw_load(t));
+    return 0;
+}
+// ---- dedicated threads (runtime.grl rt_uthread_main) -------------------------------------------
+fn rt_os_threads() -> u64 {
+    return 1;
+}
+// The closure's stack is a fiber of `size` reserved bytes; the thread becomes a fiber itself so it
+// can be switched back to. The vectored handler that reports a stack overflow is installed by
+// whichever thread needs it first.
+fn rt_os_body_new(rec: u64, size: u64) -> u64 {
+    words := rt_state_stack_guard();
+    if raw_atomic_cas(words + 8, 0, 2) == 0 {
+        AddVectoredExceptionHandler(1, rt_win_vectored);
+    }
+    w := raw_tp_get();
+    if raw_load(w + 8) == 0 {
+        own := ConvertThreadToFiber(0);
+        if own == 0 {
+            return 1;
+        }
+        raw_store(w + 8, own);
+    }
+    mut commit = 65536;
+    if size < commit {
+        commit = size;
+    }
+    fiber := CreateFiberEx(commit, size, 0, rt_win_body_start, rec);
+    if fiber == 0 {
+        return 1;
+    }
+    raw_store(rec, fiber);
+    raw_store(rec + 8, 0);
+    raw_store(rec + 16, size);
+    return 0;
+}
+fn rt_os_body_free(rec: u64) -> u64 {
+    DeleteFiber(raw_load(rec));
+    return 0;
+}
+extern "C" fn rt_win_body_start(rec: u64) -> u64 {
+    rt_uthread_run(rec);
+    while true {
+        rt_os_ctx_leave(rec);
+    }
+    return 0;
+}
+// The overflow report needs no alternate stack here: the vectored handler runs on the faulting
+// fiber's last committed pages.
+fn rt_os_thread_guard() -> u64 {
+    return 0;
+}
+fn rt_os_thread_unguard(base: u64) -> u64 {
+    return 0;
+}
+// The name is a label (SetThreadDescription, each byte widened: a name outside ASCII shows as its
+// bytes). Affinity is the first 64 processors of the thread's group; a set that names only others,
+// or that the system refuses, is a refusal, as is a priority it will not grant. Background is
+// THREAD_PRIORITY_IDLE, high THREAD_PRIORITY_HIGHEST, realtime THREAD_PRIORITY_TIME_CRITICAL.
+fn rt_os_thread_attr(rec: u64) -> u64 {
+    me := GetCurrentThread();
+    if raw_byte(rec + 384) != 0 {
+        wide := rt_alloc(34);
+        mut i = 0;
+        while raw_byte(rec + 384 + i) != 0 {
+            raw_putbyte(wide + i * 2, raw_byte(rec + 384 + i));
+            i = i + 1;
+        }
+        SetThreadDescription(me, wide);
+        rt_free(wide);
+    }
+    if raw_load(rec + 128) != 0 {
+        mask := raw_load(rec + 256);
+        if mask == 0 {
+            return 2 * 65536 + 22;
+        }
+        if SetThreadAffinityMask(me, mask) == 0 {
+            return 2 * 65536 + 22;
+        }
+    }
+    priority := raw_load(rec + 152);
+    if priority != 0 {
+        mut level = 15;
+        if priority == 1 {
+            level = 4294967281; // -15 as the int the call takes
+        }
+        if priority == 2 {
+            level = 2;
+        }
+        if (SetThreadPriority(me, level) & 4294967295) == 0 {
+            return 3 * 65536 + 1;
+        }
+    }
+    return 0;
+}
+// WaitOnAddress with a timeout, the expected value kept in this thread's record as rt_win_wait does.
+fn rt_os_wait_ms(addr: u64, expected: u64, ms: u64) -> u64 {
+    if ms == 0 {
+        return 0;
+    }
+    mine := raw_tp_get() + 48;
+    raw_store(mine, expected);
+    raw_win32(WaitOnAddress, addr, mine, 8, ms);
+    return 0;
+}
+// No absolute sleep here: the remaining time, asked of Sleep.
+fn rt_os_sleep_until(deadline_ms: u64) -> u64 {
+    now := f_host_now_ms();
+    if now < deadline_ms {
+        f_host_sleep_ms(deadline_ms - now);
+    }
     return 0;
 }
 // Fiber entry: the task body, then back to the scheduler. A fiber that returns exits its thread, so

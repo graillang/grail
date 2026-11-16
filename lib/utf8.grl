@@ -56,7 +56,7 @@ pub struct Utf8String {
 // `data` as text, or the offset of the first ill-formed sequence. This is the only checked
 // constructor, and it accepts any byte view: a slice of a file, a socket's bytes, a `&[u8]`.
 pub fn from_bytes<a>(data: &a [u8]) -> Utf8String | Error {
-    match strings::utf8_error(data) {
+    match data.utf8_error() {
         Some(at) => { return Error::InvalidUtf8(at); },
         None => { return Utf8String { bytes: data.copy() }; }
     }
@@ -97,7 +97,7 @@ impl Utf8String {
         return self.bytes.len() == 0;
     }
     pub fn char_count(self: (&Utf8String)) -> u64 {
-        return strings::char_count(view(self.bytes));
+        return view(self.bytes).char_count();
     }
     // The text itself, so `println` and `format` show it.
     pub fn show(self: (&Utf8String)) -> string {
@@ -140,10 +140,10 @@ impl Utf8String {
     // The characters at `[lo, hi)`. Both offsets must be character boundaries, and a refusal says
     // which one was not.
     pub fn slice_chars(self: (&Utf8String), lo: u64, hi: u64) -> Utf8String | Error {
-        if !strings::is_char_boundary(view(self.bytes), lo) {
+        if !view(self.bytes).is_char_boundary(lo) {
             return Error::NotCharBoundary(lo);
         }
-        if !strings::is_char_boundary(view(self.bytes), hi) {
+        if !view(self.bytes).is_char_boundary(hi) {
             return Error::NotCharBoundary(hi);
         }
         if hi < lo {
@@ -158,16 +158,16 @@ impl Utf8String {
     // Every occurrence of `from` replaced by `to`. Both are valid text, so the result is too: a
     // valid sequence never matches at a non-boundary offset of valid text.
     pub fn replace(self: (&Utf8String), from: (&Utf8String), to: (&Utf8String)) -> Utf8String {
-        replaced := strings::replace(view(self.bytes), view(from.bytes), view(to.bytes));
+        replaced := view(self.bytes).replace(view(from.bytes), view(to.bytes));
         return Utf8String { bytes: replaced };
     }
     // ASCII case mapping, which is total: `to_upper`/`to_lower` are the calls that refuse what this
     // module does not implement.
     pub fn to_ascii_upper(self: (&Utf8String)) -> Utf8String {
-        return Utf8String { bytes: strings::to_upper(view(self.bytes)) };
+        return Utf8String { bytes: view(self.bytes).to_upper() };
     }
     pub fn to_ascii_lower(self: (&Utf8String)) -> Utf8String {
-        return Utf8String { bytes: strings::to_lower(view(self.bytes)) };
+        return Utf8String { bytes: view(self.bytes).to_lower() };
     }
     // Upper case for text that is ASCII. Text with a code point above U+007F is refused rather than
     // half-mapped: Unicode case mapping needs tables this module does not carry, and leaving a
@@ -175,13 +175,13 @@ impl Utf8String {
     pub fn to_upper(self: (&Utf8String)) -> Utf8String | Error {
         match first_non_ascii(view(self.bytes)) {
             Some(code) => { return Error::UnmappableCase(code); },
-            None => { return Utf8String { bytes: strings::to_upper(view(self.bytes)) }; }
+            None => { return Utf8String { bytes: view(self.bytes).to_upper() }; }
         }
     }
     pub fn to_lower(self: (&Utf8String)) -> Utf8String | Error {
         match first_non_ascii(view(self.bytes)) {
             Some(code) => { return Error::UnmappableCase(code); },
-            None => { return Utf8String { bytes: strings::to_lower(view(self.bytes)) }; }
+            None => { return Utf8String { bytes: view(self.bytes).to_lower() }; }
         }
     }
     // Every code point in order. The value is valid UTF-8 by construction, so this never has to
@@ -190,14 +190,14 @@ impl Utf8String {
         return strings::chars(view(self.bytes));
     }
     pub fn char_indices<a>(self: (&a Utf8String)) -> iter::Iter<(u64, char)> {
-        return strings::char_indices(view(self.bytes));
+        return view(self.bytes).char_indices();
     }
     // Whether the text starts with `prefix` (a byte comparison: both are valid UTF-8).
     pub fn starts_with(self: (&Utf8String), prefix: (&Utf8String)) -> bool {
-        return strings::starts_with(view(self.bytes), view(prefix.bytes));
+        return view(self.bytes).starts_with(view(prefix.bytes));
     }
     pub fn contains(self: (&Utf8String), needle: (&Utf8String)) -> bool {
-        return strings::contains(view(self.bytes), view(needle.bytes));
+        return view(self.bytes).contains(view(needle.bytes));
     }
 }
 

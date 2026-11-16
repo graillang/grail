@@ -11,3 +11,26 @@
   acquire loads (`atomics all`); `atomics OP:N` runs one op N times, for callgrind at two N. The
   numbers before and after the inline `atom.*` ops are in `docs/design/concurrency-stages-5-7.md`,
   "Stage 7: as built".
+# Benchmarks
+
+Each `NAME.grl` has a C twin `NAME.c` that prints the same numbers. `bun tools/bench.mjs [NAME...]`
+builds both (C with `clang -O2 -ffp-contract=off`), checks the outputs agree and prints the times
+and the ratio; `GRAIL_BACKEND=llvm` builds the Grail side through the LLVM backend, and `--rounds N`
+pairs the runs on a busy machine. See the header of `tools/bench.mjs`.
+
+| program | what it measures |
+|---|---|
+| `fnv` | a serial integer hash chain over bytes |
+| `sieve` | strided byte stores |
+| `sort` | element moves in a `u64[]` |
+| `nbody` | `f64` arithmetic with eight element accesses per inner iteration |
+| `matmul` | an `f32` inner product with a loop-carried sum |
+| `xform_f32`, `xform_f64` | `x[i] = x[i] * a + y[i]` over one million elements: the simple loop C vectorises, so the ratio is the distance to vectorised C |
+| `dot_f32`, `dot_f64` | a strict-IEEE dot product over one million elements: a serial sum C does not vectorise, so the ratio is the distance to scalar C |
+
+`xform` and `dot` are the loops of `docs/design/simd-layout-parallel-loops.md` (section 1.3), which
+records what stands between each backend and C on them.
+- `mutex.grl`: one `Mutex` taken 20000 times per contender with a short hold, at 1, 2, 8 and 24
+  contenders; wall and CPU ms. Build and run it directly; numbers in `docs/design/parking.md`.
+- `shard_read.grl`: a read-mostly map behind one `Mutex` and behind one `sync::RwLock`, 24 tasks;
+  the measurement behind `concurrent_map`'s shard lock (`docs/design/parking.md`).

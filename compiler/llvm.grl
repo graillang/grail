@@ -1915,6 +1915,16 @@ fn call_args<a>(l: (&a mut L)) -> u8[] {
     }
     return out;
 }
+// The runtime entries that end the process or abandon the calling stack, so nothing after a call to
+// one is reached: the check failures compiled code calls (`rt_fail`, `rt_trap`, `rt_refine`,
+// `rt_task_fail`), the reporters behind them, and the exits those end in. `rt_abort` is the same
+// kind and has its own cold stub in `lower_call`.
+fn never_returns<a>(target: &a [u8]) -> bool {
+    return eq(target, view("rt_fail")) || eq(target, view("rt_trap")) || eq(target, view("rt_refine"))
+        || eq(target, view("rt_task_fail")) || eq(target, view("rt_fail_text")) || eq(target, view("rt_report_die"))
+        || eq(target, view("rt_abort_final")) || eq(target, view("rt_abort_park")) || eq(target, view("rt_hard_exit"))
+        || eq(target, view("rt_stack_overflow")) || eq(target, view("rt_stack_overflow_at"));
+}
 fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> unit {
     if (target.len() == 0) || (target[0] == 42) {
         bad(&mut l);
@@ -2041,6 +2051,15 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
     put(&mut c, target);
     put(&mut c, view("\"({})"));
     pair := def(&mut l, view(c), &u8[][args]);
+    if never_returns(target) {
+        // A failed check reports and never comes back: it ends the process, or abandons this
+        // stack for the scheduler's (rt_contain_tail). Saying so keeps the failure arm out of the
+        // loop it guards - a returning call there clobbers every register the loop holds, which
+        // is what kept spills and a merge in the body of every checked 8-byte element access.
+        emit(&mut l, view("unreachable"), &u8[][]);
+        ends_terminator(&mut l);
+        return ();
+    }
     r0 := def(&mut l, view("extractvalue {i64, i64} {}, 0"), &u8[][copy(view(pair))]);
     r1 := def(&mut l, view("extractvalue {i64, i64} {}, 1"), &u8[][pair]);
     set_reg(&mut l, view("rax"), view(r0));
@@ -5555,8 +5574,14 @@ fn target_triple(target: u64) -> u8[] {
 // convention returns in x0:x1 (a0:a1); arguments already agree (x0..x5 / a0..a5). IR functions
 // are therefore defined as NAME.ll, native code reaches them through a thunk named NAME, and IR
 // reaches native functions through NAME.c.
-fn thunk_into_ir<a>(out: (&a mut u8[]), name: &a [u8], target: u64) -> unit {
-    put(&mut out, view(".text\n.globl "));
+fn thunk_into_ir<a>(out: (&a mut u8[]), name: &a [u8], target: u64, weak: bool) -> unit {
+    // A name the stream declared `.weak` keeps that binding: a second `.globl` is an assembler
+    // error (`changed binding to STB_GLOBAL`).
+    if weak {
+        put(&mut out, view(".text\n.weak "));
+    } else {
+        put(&mut out, view(".text\n.globl "));
+    }
     put(&mut out, name);
     put(&mut out, view("\n.hidden "));
     put(&mut out, name);
@@ -5904,7 +5929,7 @@ fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (
                 e += 1;
             }
             fname := sub(line, 20, e - 3);
-            thunk_into_ir(&mut thunks, view(fname), target);
+            thunk_into_ir(&mut thunks, view(fname), target, set_has(&weak, view(fname)));
         }
         put(&mut ir, view(rename_line(line, &exported)));
         ir.push(10);

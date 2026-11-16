@@ -70,7 +70,7 @@ Typed specialisation means the *body* must be available at every instantiation s
    separate compilation, and it needs exactly the typed IR that LLVM stage 3 wants — so it should be
    built once, not twice.
 3. **Monomorphic-only.** Instantiate generics inside their defining module and cross the boundary
-   with monomorphic symbols. Efficient, but it forbids `vecs::sort_by(&mut v, f)` from another
+   with monomorphic symbols. Efficient, but it forbids `v.sort_by(f)` (from `lib/vecs.grl`) in another
    module, which the ports already use.
 
 **Staged answer:** v1 ships option 1 — interfaces give checked surfaces, correct incrementality and
@@ -109,7 +109,7 @@ than misread.
  source "tests/interfaces/pair.grl"
  sha256 "ad1f2b3cf421decab61ea22f7dfc572fec79a74a3078b3ef330f4e49a94db2d0"
  mode typed_refs=1 default_u64=1 overflow=checked target=x86_64
- abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0
+ abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline
  unsafe 0
  std 0
  host 0
@@ -536,8 +536,10 @@ evaluated once, in the defining module's context, and would mean something else 
 are keyed by index rather than written in order, so they cannot desynchronise from the parameter list,
 and a parameter that gains a default does not change any other parameter's record.
 
-The module record also carries the **`dyn` ABI** - `abi dyn pair size = 16 align = 8 word0 = data
-word1 = vtable drop = 0`, one length-counted string holding exactly what `iface_dyn_abi()` returns.
+The module record also carries the **ABI line** - `abi dyn pair size = 16 align = 8 word0 = data
+word1 = vtable drop = 0 ref record = address record plain = inline`, one length-counted string holding exactly what
+`iface_dyn_abi()` returns. Its last clause says what a reference to a record is (the record's own
+address, docs/design/unboxed-values.md); a stage that changes a layout changes this line.
 A `&dyn I` in a signature or a field crosses a module boundary as a pair, so two modules built for
 different layouts must not link: the reader compares the field with `iface_dyn_abi()` and refuses a
 file that states another one (`was written for another \`dyn\` ABI (...); this compiler builds
@@ -1038,7 +1040,7 @@ object path here, so they build the whole program, and an `--interface` build ch
 against its interface in one run.
 
 `tools/split-test.mjs` builds a project with a generic from another module and the standard library's
-`vecs::sort` both ways and requires the same output from eight separate runs, on x86-64, AArch64 and
+`v.sort()` (from `lib/vecs.grl`) both ways and requires the same output from eight separate runs, on x86-64, AArch64 and
 RISC-V (the cross targets are run under qemu).
 
 With `--cache`, each module's run is keyed by its inputs alone: the build's flags, compiler and

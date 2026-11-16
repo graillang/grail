@@ -1,0 +1,91 @@
+use hashmap;
+use hash;
+use vecs;
+use order::Ord;
+// Plain records beside owned data: as fields of a record that has a string, as vector elements of
+// such records, as map values, arena slots and sorted keys - and every owned thing dropped once.
+struct P {
+    x: u64,
+    y: u64
+}
+struct Named {
+    at: P,
+    name: string,
+    size: P
+}
+struct Pair<A, B> {
+    first: A,
+    second: B
+}
+struct Tag {
+    n: u64
+}
+impl Drop for Tag {
+    fn drop(self: &mut Tag) {
+        println("drop tag {}", self.n);
+    }
+}
+struct Marked {
+    pos: P,
+    tag: Tag
+}
+impl Ord for P {
+    fn less(left: &Self, right: &Self) -> bool {
+        return left.x + left.y < right.x + right.y;
+    }
+}
+fn p(x: u64, y: u64) -> P {
+    return P { x: x, y: y };
+}
+fn take(q: P) -> u64 {
+    return q.x * 100 + q.y;
+}
+fn part(n: Named) -> u64 {
+    moved := n.at;
+    return take(moved) + n.size.x + n.name.len();
+}
+fn main() -> u64 {
+    mut n = Named { at: p(1, 2), name: "one", size: p(3, 4) };
+    n.at = p(5, 6);
+    n.size.y = 9;
+    n.name.append("!");
+    println("{} {} {} {} {}", n.at.x, n.at.y, n.name, n.size.x, n.size.y);
+    println(part(n));
+
+    mut names = Named[];
+    for i in 4 {
+        names.push(Named { at: p(i, i), name: format("n{}", i), size: p(i * 2, i * 3) });
+    }
+    names[1].at = p(40, 41);
+    names[2].name = "renamed";
+    out := names.remove(0);
+    println("{} {} {} {} {}", out.name, names[0].at.y, names[1].name, names[2].size.y, names.len());
+
+    a := Pair { first: p(7, 8), second: "text" };
+    b := Pair<string, P> { first: "left", second: p(9, 10) };
+    c := Pair { first: p(1, 1), second: p(2, 2) };
+    println("{} {} {} {} {}", a.first.y, a.second, b.first, b.second.x, c.first.x + c.second.y);
+
+    mut marks = Marked[];
+    for i in 3 {
+        marks.push(Marked { pos: p(i, i + 1), tag: Tag { n: i } });
+    }
+    marks[1] = Marked { pos: p(8, 8), tag: Tag { n: 10 } };
+    println("{} {}", marks[1].pos.x, marks[2].pos.y);
+    marks.truncate(2);
+    println("truncated");
+
+    mut m: [string: P] = [:];
+    m["a"] = p(1, 2);
+    m["b"] = p(3, 4);
+    m["a"] = p(5, 6);
+    println("{} {} {}", m["a"].x, m["b"].y, m.len());
+    gone := m.remove(&"b")!;
+    println("{} {}", gone.x, m.len());
+
+    mut sorted = P[p(9, 9), p(1, 0), p(4, 4), p(0, 3)];
+    sorted.sort();
+    println("{} {} {} {}", sorted[0].x, sorted[1].y, sorted[2].x, sorted[3].y);
+    println("end");
+    return 0;
+}

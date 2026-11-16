@@ -307,7 +307,7 @@ function proveDigests(directory) {
     // dereferences wrongly.
     assert.match(
       text,
-      /^abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0$/m,
+      /^abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline$/m,
       `${path}: the header does not state the \`dyn\` ABI`,
     );
     // Write, read, write again: the reader rebuilds the model the writer started from.
@@ -799,6 +799,8 @@ function corpusCases() {
     const test = cases[i];
     if (test.targets && !test.targets.includes(target)) continue;
     if (test.removedSyntax) continue;
+    // A pending case states behaviour another piece of work must produce (tools/test-native.mjs).
+    if (test.pending) continue;
     const modules = (test.modules ?? []).map(file => resolve(root, file));
     // A case with no second module has nothing to read from an interface; its own interface is
     // still emitted and checked when `--full` asks for every case.
