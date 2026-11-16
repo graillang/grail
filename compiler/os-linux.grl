@@ -166,6 +166,9 @@ fn rt_syscall4(n: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
     if n == 230 {
         return raw_syscall4(115, a, b, c, d); // clock_nanosleep
     }
+    if n == 202 {
+        return raw_syscall4(98, a, b, c, d); // futex with a timeout
+    }
     return wrapping_sub(0, 38);
 }
 // Abort's last step. Operation 231 is exit_group on every Linux target: it runs no atexit handlers,
@@ -881,6 +884,19 @@ fn rt_os_thread_attr(rec: u64) -> u64 {
             return 3 * 65536 + wrapping_sub(0, r);
         }
     }
+    return 0;
+}
+// Wait on `addr` while it holds `expected`, for at most `ms` milliseconds (a futex wait with a
+// relative timeout). A wake, a timeout and an interruption all just return: the caller looks again.
+fn rt_os_wait_ms(addr: u64, expected: u64, ms: u64) -> u64 {
+    if ms == 0 {
+        return 0;
+    }
+    spec := rt_alloc(16);
+    raw_store(spec, rt_div(ms, 1000));
+    raw_store(spec + 8, (ms % 1000) * 1000000);
+    rt_syscall4(202, addr, 128, expected, spec);
+    rt_free(spec);
     return 0;
 }
 // clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME): an interrupted sleep is simply asked again,

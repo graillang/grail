@@ -1,5 +1,6 @@
 module sync;
 use host;
+use time;
 
 // ---- waiting, and the Mutex operations beside `lock_with` ----------------------------------------
 //
@@ -19,14 +20,26 @@ use host;
 // the first failure happened. `recover_with` is how a program that can put the payload right says
 // so: it is given the payload whatever its state and the mutex is clean again when `f` returns.
 //
-// The callbacks are function values taking `(&mut payload, context)`, as `lock_with`'s is. The
-// payload reference cannot outlive the call: a callback that returns it or stores it in the context
-// does not type-check against these signatures.
+// The callbacks take `(&mut payload, context)`, as `lock_with`'s does, and borrow for the call
+// only (a plain `Fn` parameter); the result is `Owned`, so the payload reference cannot leave the
+// callback by its result, and a callback that stores it in the context does not type-check.
 
+// The address a block pointer holds.
+fn address(p: *mut u64) -> u64 {
+    unsafe {
+        return p.addr();
+    }
+}
 // The mutex block behind a `&Mutex<T>`: the reference is the address of the word that holds it.
 fn block<a, T>(m: (&a Mutex<T>)) -> u64 {
     unsafe {
         return ptr_of(m).cast(u64).read();
+    }
+}
+// The payload read-only, for a Condition's predicate (the lock is held).
+fn payload_ref<a, T>(m: (&a Mutex<T>), at: u64) -> (&a T) {
+    unsafe {
+        return ptr_from_addr(T, at + 8).as_ref();
     }
 }
 // The payload, borrowed for as long as the mutex reference; every caller holds the lock.
@@ -36,26 +49,28 @@ fn payload<a, T>(m: (&a Mutex<T>), at: u64) -> (&a mut T) {
     }
 }
 
-pub fn try_lock_with<a, T, C, R>(m: (&a Mutex<T>), ctx: C, f: fn((&mut T), C) -> R) -> R? {
+pub fn try_lock_with<a, T, C, R: Owned>(m: (&a Mutex<T>), ctx: C, f: FnMut((&mut T), C) -> R) -> R? {
+    mut call = f;
     at := block<T>(m);
     unsafe {
         if host::mutex_try_lock(at) == 0 {
             return None;
         }
     }
-    r := f(payload<T>(m, at), ctx);
+    r := call(payload<T>(m, at), ctx);
     unsafe {
         host::mutex_unlock(at);
     }
     return Some(r);
 }
 
-pub fn recover_with<a, T, C, R>(m: (&a Mutex<T>), ctx: C, f: fn((&mut T), C) -> R) -> R {
+pub fn recover_with<a, T, C, R: Owned>(m: (&a Mutex<T>), ctx: C, f: FnMut((&mut T), C) -> R) -> R {
+    mut call = f;
     at := block<T>(m);
     unsafe {
         host::mutex_lock_recover(at);
     }
-    r := f(payload<T>(m, at), ctx);
+    r := call(payload<T>(m, at), ctx);
     unsafe {
         host::mutex_unlock_recover(at);
     }
@@ -66,5 +81,484 @@ pub fn is_poisoned<a, T>(m: (&a Mutex<T>)) -> bool {
     at := block<T>(m);
     unsafe {
         return host::mutex_poisoned(at) != 0;
+    }
+}
+
+// ---- the waits with a deadline -------------------------------------------------------------------
+//
+// Every wait has a form that ends at a deadline on the monotonic clock (`time::now().after_ms(n)`)
+// or when the waiting task's scope is cancelled, and answers `R |? time::WaitError` instead. A
+// plain LONG wait (Condition, Latch, Barrier, Semaphore, Once) that is cancelled ends its task with
+// a failure of kind Cancelled - try_join reports it, and a scope that was itself cancelled does not
+// re-raise it. A plain LOCK wait (lock_with, read_with, write_with) is not cancellable: it is
+// bounded by its holder's progress, and cancelling a task that holds lock A while it waits for B
+// would leave A poisoned; `lock_until` / `read_until` / `write_until` are the cancellable forms.
+
+// A plain wait: cancellable, and a cancellation fails the task (flags 1 | 2).
+fn plain() -> u64 {
+    return 3;
+}
+
+pub fn lock_until<a, T, C, R: Owned>(m: (&a Mutex<T>), deadline: time::Instant, ctx: C, f: FnMut((&mut T), C) -> R) -> R |? time::WaitError {
+    mut call = f;
+    at := block<T>(m);
+    mut code = 0;
+    unsafe {
+        code = host::mutex_lock_until(at, deadline.millis());
+    }
+    if code == 3 {
+        return time::WaitError::TimedOut;
+    }
+    if code == 4 {
+        return time::WaitError::Cancelled;
+    }
+    r := call(payload<T>(m, at), ctx);
+    unsafe {
+        host::mutex_unlock(at);
+    }
+    return r;
+}
+
+// ---- RwLock<T> ------------------------------------------------------------------------------------
+// Many readers or one writer, writer-preferring: a reader that arrives while a writer waits queues
+// behind it, so a frame's writer is not starved by a stream of readers. A writer that fails while
+// holding it poisons it, as a Mutex's holder does; a reader that fails only gives its share back -
+// it had `&T` and cannot have left the payload half-written. Shareable when T is: readers on
+// several threads share `&T` (the audited classification requires each type argument to classify).
+pub unsafe struct RwLock<T>: transferable, shareable {
+    cell: *mut u64
+}
+impl<T> Drop for RwLock<T> {
+    fn drop(self: &mut RwLock<T>) {
+        unsafe {
+            v := ptr_from_addr(T, address(self.cell) + 32).read();
+            drop(v);
+            free(self.cell);
+        }
+    }
+}
+pub fn rwlock<T>(value: T) -> RwLock<T> {
+    unsafe {
+        cell := alloc(u64, 5);
+        ptr_from_addr(T, cell.addr() + 32).write(value);
+        return RwLock { cell: cell };
+    }
+}
+impl<T> RwLock<T> {
+    fn shared<a>(self: (&a RwLock<T>)) -> (&a T) {
+        unsafe {
+            return ptr_from_addr(T, address(self.cell) + 32).as_ref();
+        }
+    }
+    fn exclusive<a>(self: (&a RwLock<T>)) -> (&a mut T) {
+        unsafe {
+            return ptr_from_addr(T, address(self.cell) + 32).as_mut();
+        }
+    }
+    pub fn read_with<C, R: Owned>(self: (&RwLock<T>), ctx: C, f: Fn((&T), C) -> R) -> R {
+        at := address(self.cell);
+        unsafe {
+            host::rw_lock(at, 1, 0, 0);
+        }
+        r := f(self.shared(), ctx);
+        unsafe {
+            host::rw_unlock(at, 1);
+        }
+        return r;
+    }
+    pub fn write_with<C, R: Owned>(self: (&RwLock<T>), ctx: C, f: FnMut((&mut T), C) -> R) -> R {
+        mut call = f;
+        at := address(self.cell);
+        unsafe {
+            host::rw_lock(at, 2, 0, 0);
+        }
+        r := call(self.exclusive(), ctx);
+        unsafe {
+            host::rw_unlock(at, 2);
+        }
+        return r;
+    }
+    pub fn try_read_with<C, R: Owned>(self: (&RwLock<T>), ctx: C, f: Fn((&T), C) -> R) -> R? {
+        at := address(self.cell);
+        unsafe {
+            if host::rw_try(at, 1) == 0 {
+                return None;
+            }
+        }
+        r := f(self.shared(), ctx);
+        unsafe {
+            host::rw_unlock(at, 1);
+        }
+        return Some(r);
+    }
+    pub fn try_write_with<C, R: Owned>(self: (&RwLock<T>), ctx: C, f: FnMut((&mut T), C) -> R) -> R? {
+        mut call = f;
+        at := address(self.cell);
+        unsafe {
+            if host::rw_try(at, 2) == 0 {
+                return None;
+            }
+        }
+        r := call(self.exclusive(), ctx);
+        unsafe {
+            host::rw_unlock(at, 2);
+        }
+        return Some(r);
+    }
+    pub fn read_until<C, R: Owned>(self: (&RwLock<T>), deadline: time::Instant, ctx: C, f: Fn((&T), C) -> R) -> R |? time::WaitError {
+        at := address(self.cell);
+        mut code = 0;
+        unsafe {
+            code = host::rw_lock(at, 1, deadline.millis(), 1);
+        }
+        if code == 3 {
+            return time::WaitError::TimedOut;
+        }
+        if code == 4 {
+            return time::WaitError::Cancelled;
+        }
+        r := f(self.shared(), ctx);
+        unsafe {
+            host::rw_unlock(at, 1);
+        }
+        return r;
+    }
+    pub fn write_until<C, R: Owned>(self: (&RwLock<T>), deadline: time::Instant, ctx: C, f: FnMut((&mut T), C) -> R) -> R |? time::WaitError {
+        mut call = f;
+        at := address(self.cell);
+        mut code = 0;
+        unsafe {
+            code = host::rw_lock(at, 2, deadline.millis(), 1);
+        }
+        if code == 3 {
+            return time::WaitError::TimedOut;
+        }
+        if code == 4 {
+            return time::WaitError::Cancelled;
+        }
+        r := call(self.exclusive(), ctx);
+        unsafe {
+            host::rw_unlock(at, 2);
+        }
+        return r;
+    }
+    // Write access whether or not a failed writer poisoned it; clean again when `f` returns.
+    pub fn recover_with<C, R: Owned>(self: (&RwLock<T>), ctx: C, f: FnMut((&mut T), C) -> R) -> R {
+        mut call = f;
+        at := address(self.cell);
+        unsafe {
+            host::rw_lock(at, 2, 0, 4);
+        }
+        r := call(self.exclusive(), ctx);
+        unsafe {
+            host::rw_unlock(at, 3);
+        }
+        return r;
+    }
+    pub fn is_poisoned(self: (&RwLock<T>)) -> bool {
+        unsafe {
+            return host::rw_poisoned(address(self.cell)) != 0;
+        }
+    }
+}
+
+// ---- Condition ------------------------------------------------------------------------------------
+// Waits for a predicate over a Mutex's payload. `wait_with(&m, ctx, ready, then)` takes the lock,
+// and while `ready` is false parks with the lock released; when it is true it runs `then` with the
+// lock held and returns its result - the predicate is always re-tested, so a wake that is not for
+// this waiter costs a look, never a wrong answer. Notify after changing the payload under the lock.
+pub unsafe struct Condition: transferable, shareable {
+    queue: *mut u64
+}
+impl Drop for Condition {
+    fn drop(self: &mut Condition) {
+        unsafe {
+            free(self.queue);
+        }
+    }
+}
+pub fn condition() -> Condition {
+    unsafe {
+        return Condition { queue: alloc(u64, 1) };
+    }
+}
+impl Condition {
+    pub fn wait_with<a, T, C, R: Owned>(self: (&Condition), m: (&a Mutex<T>), ctx: C, ready: Fn((&T), (&C)) -> bool, then: FnMut((&mut T), C) -> R) -> R {
+        mut call = then;
+        at := block<T>(m);
+        unsafe {
+            host::mutex_lock_recover(at);
+            if host::mutex_poisoned(at) != 0 {
+                host::mutex_unlock(at);
+                // The ordinary lock reports the poison the ordinary way.
+                host::mutex_lock_until(at, 0);
+            }
+        }
+        while !ready(payload_ref<T>(m, at), &ctx) {
+            unsafe {
+                host::cond_wait(address(self.queue), at, 0, plain());
+            }
+        }
+        r := call(payload<T>(m, at), ctx);
+        unsafe {
+            host::mutex_unlock(at);
+        }
+        return r;
+    }
+    pub fn wait_until<a, T, C, R: Owned>(self: (&Condition), m: (&a Mutex<T>), deadline: time::Instant, ctx: C, ready: Fn((&T), (&C)) -> bool, then: FnMut((&mut T), C) -> R) -> R |? time::WaitError {
+        mut call = then;
+        at := block<T>(m);
+        unsafe {
+            code := host::mutex_lock_until(at, deadline.millis());
+            if code == 3 {
+                return time::WaitError::TimedOut;
+            }
+            if code == 4 {
+                return time::WaitError::Cancelled;
+            }
+        }
+        while !ready(payload_ref<T>(m, at), &ctx) {
+            mut code = 0;
+            unsafe {
+                code = host::cond_wait(address(self.queue), at, deadline.millis(), 1);
+            }
+            if code != 0 {
+                unsafe {
+                    host::mutex_unlock(at);
+                }
+                if code == 3 {
+                    return time::WaitError::TimedOut;
+                }
+                return time::WaitError::Cancelled;
+            }
+        }
+        r := call(payload<T>(m, at), ctx);
+        unsafe {
+            host::mutex_unlock(at);
+        }
+        return r;
+    }
+    pub fn notify_one(self: (&Condition)) -> unit {
+        unsafe {
+            host::cond_notify(address(self.queue), 0);
+        }
+    }
+    pub fn notify_all(self: (&Condition)) -> unit {
+        unsafe {
+            host::cond_notify(address(self.queue), 1);
+        }
+    }
+}
+
+// ---- Latch, Barrier -------------------------------------------------------------------------------
+pub unsafe struct Latch: transferable, shareable {
+    cell: *mut u64
+}
+impl Drop for Latch {
+    fn drop(self: &mut Latch) {
+        unsafe {
+            free(self.cell);
+        }
+    }
+}
+// A latch that opens after `count` count_downs and stays open.
+pub fn latch(count: u64) -> Latch {
+    unsafe {
+        cell := alloc(u64, 2);
+        cell.add(1).write(count);
+        return Latch { cell: cell };
+    }
+}
+impl Latch {
+    pub fn count_down(self: (&Latch)) -> unit {
+        unsafe {
+            host::latch_down(address(self.cell));
+        }
+    }
+    pub fn wait(self: (&Latch)) -> unit {
+        unsafe {
+            host::latch_wait(address(self.cell), 0, plain());
+        }
+    }
+    pub fn wait_until(self: (&Latch), deadline: time::Instant) -> unit |? time::WaitError {
+        mut code = 0;
+        unsafe {
+            code = host::latch_wait(address(self.cell), deadline.millis(), 1);
+        }
+        return time::wait_answer(code);
+    }
+}
+pub unsafe struct Barrier: transferable, shareable {
+    cell: *mut u64
+}
+impl Drop for Barrier {
+    fn drop(self: &mut Barrier) {
+        unsafe {
+            free(self.cell);
+        }
+    }
+}
+// A barrier for `parties` arrivals per round, reusable round after round.
+pub fn barrier(parties: u64) -> Barrier {
+    unsafe {
+        cell := alloc(u64, 4);
+        cell.add(1).write(parties);
+        cell.add(2).write(parties);
+        return Barrier { cell: cell };
+    }
+}
+impl Barrier {
+    // True for exactly one arrival per round: the one that completed it.
+    pub fn wait(self: (&Barrier)) -> bool {
+        unsafe {
+            return host::barrier_wait(address(self.cell), 0, plain()) == 1;
+        }
+    }
+    pub fn wait_until(self: (&Barrier), deadline: time::Instant) -> bool |? time::WaitError {
+        mut code = 0;
+        unsafe {
+            code = host::barrier_wait(address(self.cell), deadline.millis(), 1);
+        }
+        if code == 1 {
+            return true;
+        }
+        time::wait_answer(code)?;
+        return false;
+    }
+}
+
+// ---- Semaphore, Permit ----------------------------------------------------------------------------
+// FIFO: a request that would fit still queues behind earlier ones, so a large request is not
+// starved. Permits are returned when their holder fails (they guard no data, so nothing is
+// poisoned).
+pub unsafe struct Semaphore: transferable, shareable {
+    cell: *mut u64
+}
+impl Drop for Semaphore {
+    fn drop(self: &mut Semaphore) {
+        unsafe {
+            free(self.cell);
+        }
+    }
+}
+pub fn semaphore(permits: u64) -> Semaphore {
+    unsafe {
+        cell := alloc(u64, 2);
+        cell.add(1).write(permits);
+        return Semaphore { cell: cell };
+    }
+}
+// Permits held until this value is dropped. It holds an unclassified handle, so it is neither
+// transferable nor shareable: the permits stay with the task or thread that took them, whose
+// failure gives them back.
+handle PermitToken;
+pub struct Permit {
+    token: PermitToken,
+    node: u64
+}
+impl Drop for Permit {
+    fn drop(self: &mut Permit) {
+        unsafe {
+            host::sem_give(self.node);
+        }
+    }
+}
+impl Semaphore {
+    pub fn acquire_with<C, R: Owned>(self: (&Semaphore), permits: u64, ctx: C, f: FnMut(C) -> R) -> R {
+        mut call = f;
+        at := address(self.cell);
+        mut node = 0;
+        unsafe {
+            host::sem_acquire(at, permits, 0, plain());
+            node = host::sem_node(at);
+        }
+        r := call(ctx);
+        unsafe {
+            host::sem_give(node);
+        }
+        return r;
+    }
+    pub fn acquire_until<C, R: Owned>(self: (&Semaphore), permits: u64, deadline: time::Instant, ctx: C, f: FnMut(C) -> R) -> R |? time::WaitError {
+        mut call = f;
+        at := address(self.cell);
+        mut node = 0;
+        unsafe {
+            code := host::sem_acquire(at, permits, deadline.millis(), 1);
+            if code == 3 {
+                return time::WaitError::TimedOut;
+            }
+            if code == 4 {
+                return time::WaitError::Cancelled;
+            }
+            node = host::sem_node(at);
+        }
+        r := call(ctx);
+        unsafe {
+            host::sem_give(node);
+        }
+        return r;
+    }
+    pub fn try_acquire(self: (&Semaphore), permits: u64) -> Permit? {
+        mut node = 0;
+        unsafe {
+            node = host::sem_try(address(self.cell), permits);
+        }
+        if node == 0 {
+            return None;
+        }
+        mut token: PermitToken;
+        return Some(Permit { token: token, node: node });
+    }
+}
+
+// ---- Once<T> --------------------------------------------------------------------------------------
+// A value made once, by the first caller, while the others wait for it. If that initialiser fails,
+// the Once is empty again and the next waiter runs its own: nothing was published, so nothing is
+// poisoned.
+pub unsafe struct Once<T>: transferable, shareable {
+    cell: *mut u64
+}
+impl<T> Drop for Once<T> {
+    fn drop(self: &mut Once<T>) {
+        unsafe {
+            if self.cell.add(1).read() == 2 {
+                v := ptr_from_addr(T, address(self.cell) + 16).read();
+                drop(v);
+            }
+            free(self.cell);
+        }
+    }
+}
+pub fn once<T>() -> Once<T> {
+    unsafe {
+        return Once { cell: alloc(u64, 3) };
+    }
+}
+impl<T> Once<T> {
+    pub fn get_or_init<a>(self: (&a Once<T>), make: Fn() -> T) -> (&a T) {
+        at := address(self.cell);
+        unsafe {
+            if host::once_begin(at) == 1 {
+                v := make();
+                ptr_from_addr(T, at + 16).write(v);
+                host::once_done(at);
+            }
+        }
+        return self.value();
+    }
+    pub fn get<a>(self: (&a Once<T>)) -> (&a T)? {
+        mut done = 0;
+        unsafe {
+            done = self.cell.add(1).read();
+        }
+        if done == 2 {
+            return Some(self.value());
+        }
+        return None;
+    }
+    fn value<a>(self: (&a Once<T>)) -> (&a T) {
+        unsafe {
+            return ptr_from_addr(T, address(self.cell) + 16).as_ref();
+        }
     }
 }

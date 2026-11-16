@@ -2850,16 +2850,86 @@ fn rt_q_remove(q: u64, b: u64) -> u64 {
     }
     return 0;
 }
-// Sleep until a waker sets this block's state; the answer is that state. The block was linked, with
-// state 0, under the queue lock.
+// Sleep until a waker sets this block's state; the answer is that state (1 woken, 2 granted), or
+// 3 when the deadline passed and 4 when the task's scope was cancelled - in those two cases the
+// block has been taken off the queue again, under the queue lock, so no waker can still grant it;
+// a waker that got there first wins and its answer stands. The block was linked, with state 0,
+// under the queue lock.
+//   until  the monotonic clock (host::now_ms) at which to give up; 0 waits for good
+//   flags  1: a task's wait ends when its scope is cancelled (lock waits do not ask for this - a
+//          lock wait is bounded by its holder's progress, and cancelling a task that holds lock A
+//          while it waits for B would poison A; lock_until is the cancellable form)
+// A task's deadline is the scheduler's own timer (the one host::sleep_ms parks on); a thread's is
+// the kernel wait's timeout. Where no timer can be armed (Windows) a task with a deadline yields
+// and looks at the clock instead of sleeping.
 fn rt_park(b: u64, q: u64) -> u64 {
+    return rt_park_until(b, q, 0, 0);
+}
+fn rt_park_until(b: u64, q: u64, until: u64, flags: u64) -> u64 {
     owner := raw_load(b + 40);
-    while raw_atomic_load(b + 8) == 0 {
-        if owner != 0 {
-            rt_suspend(owner);
-        } else {
-            rt_syscall(202, b + 8, 128, 0);
+    cancellable := ((flags & 1) != 0) & (owner != 0);
+    mut token = 0;
+    if cancellable {
+        token = raw_load(owner + 72);
+        // Set before the token is read: rt_cancel stores the token first and then wakes every task
+        // that has this word set, so one of the two sees the other.
+        raw_atomic_store(owner + 128, 1);
+    }
+    mut timer = 0;
+    mut poll = 0;
+    if (until != 0) & (owner != 0) & (rt_task_threads() == 0) {
+        now := f_host_now_ms();
+        if now < until {
+            if (rt_os_reactor() != 0) & (rt_os_timer(rt_sched(), owner, until - now) == 0) {
+                timer = 1;
+            } else {
+                poll = 1;
+            }
         }
+    }
+    mut code = 0;
+    while raw_atomic_load(b + 8) == 0 {
+        mut give_up = 0;
+        if cancellable {
+            if raw_atomic_load(token) != 0 {
+                give_up = 4;
+            }
+        }
+        if (give_up == 0) & (until != 0) {
+            if until <= f_host_now_ms() {
+                give_up = 3;
+            }
+        }
+        if give_up != 0 {
+            rt_q_lock(q);
+            if rt_q_remove(q, b) {
+                rt_q_unlock(q);
+                code = give_up;
+                break;
+            }
+            // Already granted: the waker is setting the state now.
+            rt_q_unlock(q);
+            continue;
+        }
+        if owner != 0 {
+            if poll {
+                rt_yield();
+            } else {
+                rt_suspend(owner);
+            }
+        } else {
+            if until != 0 {
+                rt_os_wait_ms(b + 8, 0, until - f_host_now_ms());
+            } else {
+                rt_syscall(202, b + 8, 128, 0);
+            }
+        }
+    }
+    if cancellable {
+        raw_atomic_store(owner + 128, 0);
+    }
+    if timer {
+        rt_os_timer_done(rt_sched(), owner);
     }
     // The waker finished under this lock: nothing of this wait is in flight after it.
     rt_q_lock(q);
@@ -2867,7 +2937,27 @@ fn rt_park(b: u64, q: u64) -> u64 {
     if owner != 0 {
         raw_atomic_cas(owner + 24, 3, 0);
     }
+    if code != 0 {
+        return code;
+    }
     return raw_load(b + 8);
+}
+// A plain wait that was cancelled ends its task: a failure of kind 16, contained like any other,
+// which try_join reports as a TaskFailure and join re-raises (docs/design/parking.md).
+fn rt_wait_cancelled() -> u64 {
+    return rt_fail_message(16, rt_lit_text("the wait was cancelled"));
+}
+fn rt_lit_text(text: string) -> u64 {
+    v := view(text);
+    s := rt_new();
+    rt_reserveb(s, v.len());
+    mut i = 0;
+    while i < v.len() {
+        raw_putbyte(raw_load(s) + i, u64(v[i]));
+        i = i + 1;
+    }
+    raw_store(s + 8, v.len());
+    return s;
 }
 // Wake an unlinked waiter with `state` (1 woken, 2 granted). Queue lock held, and held until this
 // returns: see rt_park.
@@ -2884,7 +2974,8 @@ fn rt_unpark(b: u64, state: u64) -> u64 {
 // ---- Mutex<T> ------------------------------------------------------------------------------------
 // Block: 0 the word (bit 0 locked, bit 1 queue lock, bit 2 poisoned, bit 3 a waiter is owed the
 // lock, the rest the queue), 8 the payload, 16 the next lock its holder holds (held list), 24 the
-// statement that failed while holding it (a site-table entry; 0 when not poisoned or not known).
+// statement that failed while holding it (a site-table entry; 0 when not poisoned or not known),
+// 32 the held-list kind (1).
 //
 // An uncontended lock or unlock is one compare-and-swap. A lock that is held is tried a few dozen
 // times more - most holds are shorter than a sleep - and then the caller parks: no yield loop, so
@@ -2896,8 +2987,9 @@ fn rt_unpark(b: u64, state: u64) -> u64 {
 // is woken and loses asks for the lock by name (bit 3, and it queues at the front): the next unlock
 // passes ownership to it directly and new arrivals queue behind. So a waiter loses at most once.
 fn rt_mutex_new(value: u64) -> u64 {
-    p := rt_alloc(32);
+    p := rt_alloc(48);
     raw_store(p + 8, value);
+    raw_store(p + 32, 1); // a held-list entry of kind 1 (rt_held_settle)
     return p;
 }
 fn rt_mutex_try(p: u64) -> u64 {
@@ -2908,6 +3000,10 @@ fn rt_mutex_try(p: u64) -> u64 {
     return raw_atomic_cas(p, s, s | 1) == s;
 }
 fn rt_mutex_acquire(p: u64) -> u64 {
+    return rt_mutex_acquire_until(p, 0, 0);
+}
+// 0 with the lock held, or rt_park_until's 3 (deadline) or 4 (cancelled).
+fn rt_mutex_acquire_until(p: u64, until: u64, flags: u64) -> u64 {
     if rt_mutex_try(p) {
         return 0;
     }
@@ -2946,8 +3042,12 @@ fn rt_mutex_acquire(p: u64) -> u64 {
             rt_q_push(p, b);
         }
         rt_q_unlock(p);
-        if rt_park(b, p) == 2 {
+        r := rt_park_until(b, p, until, flags);
+        if r == 2 {
             return 0;
+        }
+        if 2 < r {
+            return r;
         }
         if rt_mutex_try(p) {
             return 0;
@@ -2993,26 +3093,54 @@ fn rt_mutex_release(p: u64) -> u64 {
 // (rt_mutex_lock); sync::recover_with gives access anyway and clears the poison. The walk is a
 // function of its own so that a failure contained somewhere else (a job's, when that is contained)
 // can call it.
+// Held-list entries are linked through word 16 and say what they are in word 32: a mutex block is
+// its own entry (kind 1); everything else is a 48-byte node {0 the object, 8 a count, 16 next,
+// 32 kind}: 2 semaphore permits, 3 a read lock, 4 a write lock, 5 a Once being initialised.
 fn rt_held_push(p: u64) -> u64 {
     b := rt_waiter();
     raw_store(p + 16, raw_load(b + 32));
     raw_store(b + 32, p);
     return 0;
 }
-fn rt_held_pop(p: u64) -> u64 {
+fn rt_held_node(object: u64, count: u64, kind: u64) -> u64 {
+    n := rt_alloc(48);
+    raw_store(n, object);
+    raw_store(n + 8, count);
+    raw_store(n + 32, kind);
+    rt_held_push(n);
+    return n;
+}
+// Take entry `e` off the current execution's list.
+fn rt_held_pop(e: u64) -> u64 {
     b := rt_waiter_peek();
     if b == 0 {
         rt_abort();
     }
-    if raw_load(b + 32) == p {
-        raw_store(b + 32, raw_load(p + 16));
+    if raw_load(b + 32) == e {
+        raw_store(b + 32, raw_load(e + 16));
         return 0;
     }
     mut at = raw_load(b + 32);
     while at != 0 {
-        if raw_load(at + 16) == p {
-            raw_store(at + 16, raw_load(p + 16));
+        if raw_load(at + 16) == e {
+            raw_store(at + 16, raw_load(e + 16));
             return 0;
+        }
+        at = raw_load(at + 16);
+    }
+    rt_abort();
+    return 0;
+}
+// The newest node of `kind` on `object`, taken off the list and freed; its count is the answer.
+fn rt_held_drop(object: u64, kind: u64) -> u64 {
+    b := rt_waiter_peek();
+    mut at = raw_load(b + 32);
+    while at != 0 {
+        if (raw_load(at + 32) == kind) & (raw_load(at) == object) {
+            n := raw_load(at + 8);
+            rt_held_pop(at);
+            rt_free(at);
+            return n;
         }
         at = raw_load(at + 16);
     }
@@ -3029,16 +3157,39 @@ fn rt_holds_any() -> u64 {
     }
     return raw_load(b + 32) != 0;
 }
-// `site` is the failing statement's site-table entry, or 0.
+// `site` is the failing statement's site-table entry, or 0. It never allocates and never parks; it
+// frees the nodes it settles, and each release takes a queue lock (a bounded spin) and wakes.
 fn rt_held_settle(b: u64, site: u64) -> u64 {
     while raw_load(b + 32) != 0 {
-        p := raw_load(b + 32);
-        raw_store(b + 32, raw_load(p + 16));
-        if (raw_atomic_load(p) & 4) == 0 {
-            raw_store(p + 24, site);
+        e := raw_load(b + 32);
+        raw_store(b + 32, raw_load(e + 16));
+        kind := raw_load(e + 32);
+        if kind == 1 {
+            if (raw_atomic_load(e) & 4) == 0 {
+                raw_store(e + 24, site);
+            }
+            rt_q_flags(e, 0, 4);
+            rt_mutex_release(e);
+        } else {
+            object := raw_load(e);
+            if kind == 2 {
+                rt_sem_release(object, raw_load(e + 8));
+            }
+            if kind == 3 {
+                rt_rw_unlock_read(object);
+            }
+            if kind == 4 {
+                if (raw_atomic_load(object) & 4) == 0 {
+                    raw_store(object + 24, site);
+                }
+                rt_q_flags(object, 0, 4);
+                rt_rw_unlock_write(object);
+            }
+            if kind == 5 {
+                rt_once_reset(object);
+            }
+            rt_free(e);
         }
-        rt_q_flags(p, 0, 4);
-        rt_mutex_release(p);
     }
     return 0;
 }
@@ -3110,6 +3261,455 @@ fn f_host_mutex_unlock_recover(p: u64) -> u64 {
 }
 fn f_host_mutex_poisoned(p: u64) -> u64 {
     return (raw_atomic_load(p) & 4) != 0;
+}
+
+// sync::lock_until: 0 with the lock held, 3 when the deadline passed, 4 when cancelled.
+fn f_host_mutex_lock_until(p: u64, until: u64) -> u64 {
+    r := rt_mutex_acquire_until(p, until, 1);
+    if r != 0 {
+        return r;
+    }
+    if (raw_atomic_load(p) & 4) != 0 {
+        rt_mutex_release(p);
+        return rt_mutex_poisoned(p);
+    }
+    rt_held_push(p);
+    return 0;
+}
+// The answer of a wait that has a deadline or a cancellable form: 0 done, 3 timed out, 4 cancelled.
+// `plain` (flags bit 2) turns a cancellation into the task's failure instead.
+fn rt_wait_answer(r: u64, flags: u64) -> u64 {
+    if (r == 4) & ((flags & 2) != 0) {
+        return rt_wait_cancelled();
+    }
+    if 2 < r {
+        return r;
+    }
+    return 0;
+}
+
+// ---- RwLock<T> (lib/sync.grl) -----------------------------------------------------------------
+// Block: 0 queue word (bit 2 poisoned, bit 3 a writer holds it), 8 readers holding it, 16 writers
+// waiting, 24 the poisoning statement, 32 the payload. Writer-preferring: a reader that arrives
+// while a writer waits queues behind it, so a frame's writer is not starved by a stream of
+// readers. A queued block's request word is 1 for a reader, 2 for a writer.
+fn rt_rw_dispatch(l: u64) -> u64 {
+    if (raw_atomic_load(l) & 8) != 0 {
+        return 0;
+    }
+    while true {
+        h := rt_q_head(l);
+        if h == 0 {
+            return 0;
+        }
+        if raw_load(h + 16) == 2 {
+            if raw_load(l + 8) != 0 {
+                return 0;
+            }
+            rt_q_pop(l);
+            rt_q_flags(l, 0, 8);
+            raw_store(l + 16, raw_load(l + 16) - 1);
+            rt_unpark(h, 2);
+            return 0;
+        }
+        rt_q_pop(l);
+        raw_store(l + 8, raw_load(l + 8) + 1);
+        rt_unpark(h, 2);
+    }
+    return 0;
+}
+fn rt_rw_poisoned(l: u64) -> u64 {
+    s := rt_new();
+    rt_reserveb(s, 600);
+    buf := raw_load(s);
+    mut n = rt_fail_put(buf, 0, "rwlock poisoned: a writer failed");
+    site := raw_load(l + 24);
+    if site != 0 {
+        n = rt_fail_line(buf, n, site, " at ");
+        if (n != 0) & (raw_byte(buf + n - 1) == 10) {
+            n = n - 1;
+        }
+    }
+    raw_store(s + 8, n);
+    return rt_fail_message(17, s);
+}
+// mode 1 read, 2 write; flags as rt_park_until's, plus 4: ignore poison (recover_write).
+fn f_host_rw_lock(l: u64, mode: u64, until: u64, flags: u64) -> u64 {
+    rt_q_lock(l);
+    w := raw_atomic_load(l);
+    mut free = 0;
+    if mode == 1 {
+        free = ((w & 8) == 0) & (raw_load(l + 16) == 0);
+        if free {
+            raw_store(l + 8, raw_load(l + 8) + 1);
+        }
+    } else {
+        free = ((w & 8) == 0) & (raw_load(l + 8) == 0);
+        if free {
+            rt_q_flags(l, 0, 8);
+        }
+    }
+    if free == 0 {
+        b := rt_waiter();
+        raw_atomic_store(b + 8, 0);
+        raw_store(b + 16, mode);
+        if mode == 2 {
+            raw_store(l + 16, raw_load(l + 16) + 1);
+        }
+        rt_q_push(l, b);
+        rt_q_unlock(l);
+        r := rt_park_until(b, l, until, flags & 1);
+        if r != 2 {
+            if mode == 2 {
+                rt_q_lock(l);
+                raw_store(l + 16, raw_load(l + 16) - 1);
+                // Readers queued behind this writer may go now.
+                rt_rw_dispatch(l);
+                rt_q_unlock(l);
+            }
+            return rt_wait_answer(r, flags);
+        }
+    } else {
+        rt_q_unlock(l);
+    }
+    if ((raw_atomic_load(l) & 4) != 0) & ((flags & 4) == 0) & (mode == 2) {
+        rt_rw_unlock_write(l);
+        return rt_rw_poisoned(l);
+    }
+    if ((raw_atomic_load(l) & 4) != 0) & (mode == 1) {
+        rt_rw_unlock_read(l);
+        return rt_rw_poisoned(l);
+    }
+    rt_held_node(l, 1, mode + 2);
+    return 0;
+}
+fn f_host_rw_try(l: u64, mode: u64) -> u64 {
+    rt_q_lock(l);
+    w := raw_atomic_load(l);
+    mut free = 0;
+    if mode == 1 {
+        free = ((w & 8) == 0) & (raw_load(l + 16) == 0);
+        if free {
+            raw_store(l + 8, raw_load(l + 8) + 1);
+        }
+    } else {
+        free = ((w & 8) == 0) & (raw_load(l + 8) == 0);
+        if free {
+            rt_q_flags(l, 0, 8);
+        }
+    }
+    rt_q_unlock(l);
+    if free == 0 {
+        return 0;
+    }
+    if (raw_atomic_load(l) & 4) != 0 {
+        if mode == 1 {
+            rt_rw_unlock_read(l);
+        } else {
+            rt_rw_unlock_write(l);
+        }
+        return rt_rw_poisoned(l);
+    }
+    rt_held_node(l, 1, mode + 2);
+    return 1;
+}
+fn rt_rw_unlock_read(l: u64) -> u64 {
+    rt_q_lock(l);
+    raw_store(l + 8, raw_load(l + 8) - 1);
+    rt_rw_dispatch(l);
+    rt_q_unlock(l);
+    return 0;
+}
+fn rt_rw_unlock_write(l: u64) -> u64 {
+    rt_q_lock(l);
+    rt_q_flags(l, 8, 0);
+    rt_rw_dispatch(l);
+    rt_q_unlock(l);
+    return 0;
+}
+// mode 1 read, 2 write, 3 write that recovers (clears the poison).
+fn f_host_rw_unlock(l: u64, mode: u64) -> u64 {
+    if mode == 1 {
+        rt_held_drop(l, 3);
+        return rt_rw_unlock_read(l);
+    }
+    rt_held_drop(l, 4);
+    if mode == 3 {
+        rt_q_flags(l, 4, 0);
+        raw_store(l + 24, 0);
+    }
+    return rt_rw_unlock_write(l);
+}
+fn f_host_rw_poisoned(l: u64) -> u64 {
+    return (raw_atomic_load(l) & 4) != 0;
+}
+
+// ---- Semaphore (lib/sync.grl) -------------------------------------------------------------------
+// Block: 0 queue word, 8 permits available. FIFO: a request that fits is still refused while
+// others queue, so a large request is not starved. Permits are returned when their holder fails.
+fn rt_sem_release(m: u64, n: u64) -> u64 {
+    rt_q_lock(m);
+    raw_store(m + 8, raw_load(m + 8) + n);
+    while true {
+        h := rt_q_head(m);
+        if h == 0 {
+            break;
+        }
+        want := raw_load(h + 16);
+        if raw_load(m + 8) < want {
+            break;
+        }
+        rt_q_pop(m);
+        raw_store(m + 8, raw_load(m + 8) - want);
+        rt_unpark(h, 2);
+    }
+    rt_q_unlock(m);
+    return 0;
+}
+// 0 with `n` permits held (the answer's node is on the held list: rt_sem_node), 3, 4.
+fn f_host_sem_acquire(m: u64, n: u64, until: u64, flags: u64) -> u64 {
+    rt_q_lock(m);
+    if (rt_q_head(m) == 0) & ((raw_load(m + 8) < n) == 0) {
+        raw_store(m + 8, raw_load(m + 8) - n);
+        rt_q_unlock(m);
+    } else {
+        b := rt_waiter();
+        raw_atomic_store(b + 8, 0);
+        raw_store(b + 16, n);
+        rt_q_push(m, b);
+        rt_q_unlock(m);
+        r := rt_park_until(b, m, until, flags & 1);
+        if r != 2 {
+            // A withdrawn head may have been what held the others back.
+            rt_sem_release(m, 0);
+            return rt_wait_answer(r, flags);
+        }
+    }
+    rt_held_node(m, n, 2);
+    return 0;
+}
+// The node of the permits the last acquire on this execution took (a Permit keeps it).
+fn f_host_sem_node(m: u64) -> u64 {
+    b := rt_waiter_peek();
+    mut at = raw_load(b + 32);
+    while at != 0 {
+        if (raw_load(at + 32) == 2) & (raw_load(at) == m) {
+            return at;
+        }
+        at = raw_load(at + 16);
+    }
+    return 0;
+}
+fn f_host_sem_try(m: u64, n: u64) -> u64 {
+    rt_q_lock(m);
+    if (rt_q_head(m) == 0) & ((raw_load(m + 8) < n) == 0) {
+        raw_store(m + 8, raw_load(m + 8) - n);
+        rt_q_unlock(m);
+        return rt_held_node(m, n, 2);
+    }
+    rt_q_unlock(m);
+    return 0;
+}
+// Give back the permits of node `e` (a Permit's drop, or the end of acquire_with).
+fn f_host_sem_give(e: u64) -> u64 {
+    m := raw_load(e);
+    n := raw_load(e + 8);
+    rt_held_pop(e);
+    rt_free(e);
+    return rt_sem_release(m, n);
+}
+
+// ---- Condition, Latch, Barrier (lib/sync.grl) ----------------------------------------------------
+// Each is a queue word and counters. A Condition wait links its block before it releases the
+// mutex, and a notify takes the same queue lock, so a notify made under the mutex after the
+// predicate changed always finds the waiter.
+fn f_host_cond_wait(c: u64, p: u64, until: u64, flags: u64) -> u64 {
+    b := rt_waiter();
+    rt_q_lock(c);
+    raw_atomic_store(b + 8, 0);
+    rt_q_push(c, b);
+    rt_q_unlock(c);
+    rt_mutex_unlock(p);
+    r := rt_park_until(b, c, until, flags & 1);
+    // The mutex comes back whatever happened, so the caller's unlock is always right.
+    rt_mutex_lock(p);
+    return rt_wait_answer(r, flags);
+}
+fn f_host_cond_notify(c: u64, all: u64) -> u64 {
+    rt_q_lock(c);
+    while true {
+        h := rt_q_pop(c);
+        if h == 0 {
+            break;
+        }
+        rt_unpark(h, 1);
+        if all == 0 {
+            break;
+        }
+    }
+    rt_q_unlock(c);
+    return 0;
+}
+// Latch block: 0 queue word, 8 count.
+fn f_host_latch_down(l: u64) -> u64 {
+    rt_q_lock(l);
+    n := raw_load(l + 8);
+    if n != 0 {
+        raw_store(l + 8, n - 1);
+        if n == 1 {
+            while true {
+                h := rt_q_pop(l);
+                if h == 0 {
+                    break;
+                }
+                rt_unpark(h, 1);
+            }
+        }
+    }
+    rt_q_unlock(l);
+    return 0;
+}
+fn f_host_latch_wait(l: u64, until: u64, flags: u64) -> u64 {
+    rt_q_lock(l);
+    if raw_load(l + 8) == 0 {
+        rt_q_unlock(l);
+        return 0;
+    }
+    b := rt_waiter();
+    raw_atomic_store(b + 8, 0);
+    rt_q_push(l, b);
+    rt_q_unlock(l);
+    return rt_wait_answer(rt_park_until(b, l, until, flags & 1), flags);
+}
+// Barrier block: 0 queue word, 8 still to arrive in this round, 16 parties, 24 round.
+// The answer is 1 for the one arrival that completes a round (the leader), 0 for the others.
+fn f_host_barrier_wait(br: u64, until: u64, flags: u64) -> u64 {
+    rt_q_lock(br);
+    left := raw_load(br + 8) - 1;
+    if left == 0 {
+        raw_store(br + 8, raw_load(br + 16));
+        raw_store(br + 24, raw_load(br + 24) + 1);
+        while true {
+            h := rt_q_pop(br);
+            if h == 0 {
+                break;
+            }
+            rt_unpark(h, 1);
+        }
+        rt_q_unlock(br);
+        return 1;
+    }
+    raw_store(br + 8, left);
+    round := raw_load(br + 24);
+    b := rt_waiter();
+    raw_atomic_store(b + 8, 0);
+    rt_q_push(br, b);
+    rt_q_unlock(br);
+    r := rt_park_until(b, br, until, flags & 1);
+    if 2 < r {
+        // Withdrawn before the round completed: this arrival does not count.
+        rt_q_lock(br);
+        if raw_load(br + 24) == round {
+            raw_store(br + 8, raw_load(br + 8) + 1);
+        }
+        rt_q_unlock(br);
+    }
+    return rt_wait_answer(r, flags);
+}
+
+// ---- Once<T> (lib/sync.grl) ---------------------------------------------------------------------
+// Block: 0 queue word, 8 state (0 empty, 1 being initialised, 2 done), 16 the value. The caller that
+// finds it empty initialises it and holds it (held-list kind 5) while it does: if it fails, the Once
+// goes back to empty and the callers waiting for it are woken - the next of them runs its own
+// initialiser. A Once has no half-built state to protect, so it is not poisoned.
+// The answer: 1 run your initialiser, 2 the value is there.
+fn f_host_once_begin(o: u64) -> u64 {
+    while true {
+        rt_q_lock(o);
+        st := raw_load(o + 8);
+        if st == 2 {
+            rt_q_unlock(o);
+            return 2;
+        }
+        if st == 0 {
+            raw_store(o + 8, 1);
+            rt_q_unlock(o);
+            rt_held_node(o, 0, 5);
+            return 1;
+        }
+        b := rt_waiter();
+        raw_atomic_store(b + 8, 0);
+        rt_q_push(o, b);
+        rt_q_unlock(o);
+        r := rt_park_until(b, o, 0, 1);
+        if r == 4 {
+            return rt_wait_cancelled();
+        }
+    }
+    return 0;
+}
+fn rt_once_finish(o: u64, state: u64) -> u64 {
+    rt_q_lock(o);
+    raw_store(o + 8, state);
+    while true {
+        h := rt_q_pop(o);
+        if h == 0 {
+            break;
+        }
+        rt_unpark(h, 1);
+    }
+    rt_q_unlock(o);
+    return 0;
+}
+fn rt_once_reset(o: u64) -> u64 {
+    return rt_once_finish(o, 0);
+}
+fn f_host_once_done(o: u64) -> u64 {
+    rt_held_drop(o, 5);
+    return rt_once_finish(o, 2);
+}
+
+// ---- cancellable sleep ---------------------------------------------------------------------------
+// time::sleep_ms in a task whose scope is cancelled while it sleeps fails the task with Cancelled;
+// time::try_sleep_ms answers 4 instead. A thread is not cancellable and simply sleeps.
+fn f_host_try_sleep_ms(ms: u64) -> u64 {
+    return rt_sleep_for(ms, 1);
+}
+fn rt_sleep_for(ms: u64, flags: u64) -> u64 {
+    t := rt_current();
+    if (t == 0) | rt_task_threads() | (rt_os_reactor() == 0) {
+        rt_sleep_plain(ms);
+        return 0;
+    }
+    token := raw_load(t + 72);
+    raw_atomic_store(t + 128, 1);
+    if raw_atomic_load(token) != 0 {
+        raw_atomic_store(t + 128, 0);
+        return rt_wait_answer(4, flags);
+    }
+    s := rt_sched();
+    if rt_os_timer(s, t, ms) != 0 {
+        raw_atomic_store(t + 128, 0);
+        rt_sleep_plain(ms);
+        return 0;
+    }
+    until := f_host_now_ms() + ms;
+    while true {
+        rt_suspend(t);
+        if raw_atomic_load(token) != 0 {
+            break;
+        }
+        if (f_host_now_ms() < until) == 0 {
+            break;
+        }
+    }
+    raw_atomic_store(t + 128, 0);
+    rt_os_timer_done(s, t);
+    raw_atomic_cas(t + 24, 3, 0);
+    if raw_atomic_load(token) != 0 {
+        return rt_wait_answer(4, flags);
+    }
+    return 0;
 }
 
 // ---- worker threads (structured fork-join only; see docs/design/structured-parallelism.md) ----
@@ -5520,7 +6120,12 @@ fn rt_scope_end(s: u64) -> u64 {
             rt_abort();
         }
         kind := raw_load(t + 160);
-        if (state == 2) & (kind != 0) {
+        if (state == 2) & (kind == 16) & (raw_atomic_load(s + 8) != 0) {
+            // A child that ended Cancelled because this scope was cancelled did what was asked:
+            // not re-raised. Its texts go with it.
+            rt_drop_seq(rt_task_message(t));
+            rt_drop_seq(rt_task_site(t));
+        } else if (state == 2) & (kind != 0) {
             // An abandoned handle whose task failed: the scope's result type has no arm for it, so
             // the failure is reported here - contained by the enclosing task, fatal at the top.
             rt_fail_text(kind, rt_task_message(t), rt_task_site(t));
@@ -5594,27 +6199,18 @@ fn rt_sleep_now(spec: u64, unused: u64) -> u64 {
     return rt_syscall(35, spec, 0, 0);
 }
 fn f_host_sleep_ms(ms: u64) -> u64 {
+    return rt_sleep_for(ms, 3);
+}
+// The sleep with no task to park: this thread sleeps, or a helper does while the task parks.
+fn rt_sleep_plain(ms: u64) -> u64 {
     spec := rt_alloc(32);
     raw_store(spec + 16, rt_div(ms, 1000));
     raw_store(spec + 24, (ms % 1000) * 1000000);
     if (rt_current() == 0) | rt_task_threads() {
-        // A plain OS thread, or a task that owns its thread: sleeping this thread sleeps nobody
-        // else.
         rt_syscall(35, spec + 16, 0, 0);
-        rt_free(spec);
-        return 0;
-    }
-    t := rt_current();
-    s := rt_sched();
-    if (rt_os_reactor() == 0) | (rt_os_timer(s, t, ms) != 0) {
-        // Green task, no timer to park on: the sleep runs on a helper thread and the task parks,
-        // exactly as host::read_file hands off a blocking call. Other tasks keep running.
+    } else {
         rt_blocking_call(rt_sleep_now, spec + 16, 0);
-        rt_free(spec);
-        return 0;
     }
-    rt_suspend(t);
-    rt_os_timer_done(s, t);
     rt_free(spec);
     return 0;
 }
