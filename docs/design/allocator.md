@@ -9,7 +9,7 @@ program on free - a freed block's state word is its list link, which is how a do
 A reused block is cleared; a block from a fresh arena is already zero.
 
 Until this note, all of that sat behind one spin lock once the process had a second thread, so a
-threaded program serialised every allocation and every free. `bench/alloc_threads.grl` (pool workers
+threaded program serialised every allocation and every free. `bench/alloc_threads.grl` (jobs
 that each build and drop small vectors and records, sharing nothing) went *down* with workers.
 
 ## What changed
@@ -50,7 +50,7 @@ operation. The lock is taken only to move a batch of blocks between a cache and 
   request - `rt_push`, `rt_reserveb`, `rt_grow` - never the class). A block from a reserved run is
   untouched memory and is not cleared again.
 - **Thread exit.** `rt_thread_main` retires the cache after the thread's entry returns, which every
-  thread the runtime starts passes through on Linux and Windows (scheduler workers, pool workers,
+  thread the runtime starts passes through on Linux and Windows (scheduler workers,
   plain threads, blocking-call helpers); an adopted record of a C-created thread does it in
   `rt_release_record`. Retiring gives every bin away as a chain, turns the unused rest of each run
   into free blocks, adds the thread's live count to the process's and unmaps the page.

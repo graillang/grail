@@ -137,6 +137,9 @@ function selected(test, position, options) {
   return true;
 }
 function hostOnly(test, target) {
+  // `pending` names the work a case waits for: it states the behaviour that work must produce,
+  // fails until then, and is skipped rather than weakened. Removing the field is how it is armed.
+  if (test.pending) return true;
   if (test.targets && !test.targets.includes(target)) return true;
   if (test.backends && !test.backends.includes(process.env.GRAIL_BACKEND ?? 'native')) return true;
   return false;
@@ -415,8 +418,8 @@ function runCase(test, position, context) {
     // The interface build is a second program from the same sources; it has to behave the same.
     const interfaceExecutable = viaInterface ? compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', runtime, osRuntime, name: 'program-interface', interfaces: viaInterface.ifaces, extra: caseRoots }) : null;
     if (test.compileOnly) { result.outcome = 'pass'; return result; }
-    // A case may pin the environment it needs (`"env": {"GRAIL_POOL_WORKERS": "1"}`), which is how a
-    // test proves a pool size the host would not otherwise choose. Everything else is inherited.
+    // A case may pin the environment it needs (`"env": {"GRAIL_WORKERS": "1"}`), which is how a
+    // test proves a worker count the host would not otherwise choose. Everything else is inherited.
     const options = test.env ? { cwd: directory, env: { ...process.env, ...test.env } } : { cwd: directory };
     const ran = execute(executable, caseArgs(test), target, options);
     if (ran.error) throw ran.error;

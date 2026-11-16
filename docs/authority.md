@@ -124,10 +124,12 @@ default when the switch is absent, so existing programs are unaffected.
   reading and writing the descriptor still uses `host::read_fd`/`host::write_fd`, so a program
   under `--deny-ambient-host` that needs socket I/O still opts in with `use host;`.
 - **Remaining ambient paths**: `host::env`, `host::environment`, `host::command`,
-  `host::command_with`, `host::arg`, `host::exe_path`, `host::now_ms`, `host::wall_ms`, `host::sleep_ms`,
+  `host::command_with`, `host::arg`, `host::exe_path`, `host::now_ms`, `host::now_us`, `host::wall_ms`, `host::sleep_ms`,
   `host::exit`, `host::remove`, `host::mkdir`, `host::list_dir`, `host::open`, `host::read_fd`,
   `host::write_fd`, `host::tcp_accept`, and the `fs`, `env`, `process` modules built on them are
   still reachable with `use host;` (or through `fs::`, which opts in itself).
+  The `host::thread_*` functions and `host::sleep_until_ms` are the plumbing of `lib/thread.grl`:
+  those that take a thread record's address are `unsafe` functions, and programs use `thread::`.
   The model does not remove ambient authority; it gives a checked route and a switch that makes
   the ambient one visible.
 - **No runtime enforcement.** An `Authority` is a checked convention for code that goes through

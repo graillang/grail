@@ -63,6 +63,88 @@
   `Mutex`) was reported at the end of whichever file the compiler had parsed last - often
   `lib/result.grl:129` - when nothing read it. The diagnostic now points at the binding.
 
+- **`lib/sync.grl`: `RwLock`, `Condition`, `Once`, `Latch`, `Barrier`, `Semaphore`.** All park
+  instead of spinning, and every wait has an `_until(deadline)` form answering
+  `time::WaitError::{Cancelled, TimedOut}`. A task waiting in a long wait - a condition, a latch, a
+  barrier, a semaphore, another caller's `Once` initialiser, `time::sleep_ms` - now wakes when its
+  scope is cancelled and ends as a `Cancelled` failure (`try_join` reports kind 16; `join`
+  re-raises; the cancelled scope itself does not); `time::try_sleep_ms` answers instead. Lock
+  waits are not cancellable; `sync::lock_until`, `read_until` and `write_until` are. A writer that
+  fails poisons an `RwLock`, permits come back from a failed holder, and a failed `Once`
+  initialiser lets the next caller try. `docs/design/parking.md`.
+- `thread::spawn` states what it needs: `f: FnMut<Send, Owned>((&Ctx)) -> R` with `R: Send + Owned`,
+  so a closure that captures a borrow or a thread-affine value is refused at the call.
+
+- **A `Mutex` wait costs nothing, and a failed holder poisons it instead of hanging everyone.**
+  A task or thread waiting for a lock now parks - eight tasks waiting through a 300 ms hold used a
+  processor each, and now use under 100 ms of CPU together. When a task or a spawned thread fails
+  inside `lock_with`, the lock is released and the mutex is poisoned: the next `lock_with` fails with
+  `mutex poisoned: its holder failed at FILE:LINE:COL` (the next locker used to wait for ever).
+  `sync::recover_with(&m, ctx, f)` gets in anyway and clears the poison; `sync::try_lock_with` and
+  `sync::is_poisoned` are new. `thread::join` from a task parks instead of starting a helper thread.
+  `docs/design/parking.md`, `bench/mutex.grl`.
+
+- **One set of worker threads: jobs run on the scheduler.** `parallel_map`,
+  `parallel_for_chunks`, `pool::join` and job handles used to run on a pool of threads separate
+  from the scheduler that runs tasks, so a program that used both had two threads per CPU (50 on a
+  24-CPU machine, now 26), and a task that waited for a job put its scheduler thread to sleep: with
+  every worker's task waiting on a 300 ms job, a 10 ms timer task stalled for 300 ms (now 11 ms).
+  Jobs are now records the scheduler's own workers claim; a waiting thread runs its own forks and
+  helps with others; a job that sleeps or reads parks like a task instead of holding a thread; and
+  a job that overflows its stack reports `error: stack overflow` and exits 134 instead of dying by
+  SIGSEGV.
+  - **`pool::join` was not parallel.** It ran `first` through a blocking one-element
+    `parallel_map` and only then called `second`, paying several allocations each time, so a
+    recursive join was a slow sequential program: `fib(32)` by nested joins took 288 ms against
+    9 ms serial. It now forks `first`, runs `second`, and takes `first` back if no worker did: in
+    one loaded run on 24 CPUs the same recursion took 9.8 ms where the serial form took 18 ms and
+    the old join 370 ms. One join costs about 3 us instead of 9-11.
+  - `GRAIL_WORKERS=n` (1 to 64) sets the worker count. `GRAIL_POOL_WORKERS` is gone with the pool
+    it sized, and there is no floor of four any more: the default is one worker per CPU with the
+    scheduler's floor of two.
+  - `pool::wait(pool::spawn(f))` from a thread that waits at once may now run `f` on that thread.
+  - `GRAIL_SCHED_STATS=1` prints the worker count and the deepest nesting of helped jobs at exit.
+  - **A failure inside a parallel call is contained.** A failed check in a job no longer ends the
+    process: the jobs it forked finish, the failure is raised again at the join, and a task that
+    made the call fails as tasks already do - `try_join` returns the check's message, the
+    statement that failed and a line naming the join. From `main` the program ends as before, now
+    with that same report. A stack overflow is still fatal. Until locks are tracked per task, a
+    job that fails inside `lock_with` while a sibling waits for that lock waits forever. A thread waiting in a join helps only with work forked by the job
+    it waits for, and not at all with less than an eighth of its stack left, so helping never
+    stacks more on a stack than the sequential program would.
+  `docs/design/scheduler.md` ("Jobs") is the mechanism; `lib/pool.grl`'s signatures are unchanged.
+- `host::now_us()`: the monotonic clock in microseconds, beside `host::now_ms()`. A frame time or
+  the cost of a join is not measurable in whole milliseconds; `bench/frame.grl` and
+  `bench/sched.grl` (run by `bun tools/bench-sched.mjs`) are the scheduler benchmarks that use it.
+- **Threads of your own: `thread::spawn`.** `lib/thread.grl` starts an OS thread that runs one
+  closure: `spawn(config, f)`, `join`, `try_join`, `detach`, `with_current`, `sleep_until`, and
+  `thread::Local<T>` read through a `thread::Ctx` that cannot leave its thread. A handle that is
+  dropped joins. `Config` asks for a name, a stack size, a processor set and a priority; a refusal
+  by the OS is an error value from `spawn` and the closure does not run. A failed check on a
+  spawned thread is contained like a task's - a `TaskFailure` at `try_join`, re-raised by `join` -
+  and running off its stack is the named `stack overflow`. **What a thread is not:** it is not a
+  scheduler worker; nothing is stolen onto it; a wait blocks it in the kernel. Linux and Windows;
+  on macOS `spawn` returns `Unsupported`. Not checked yet: a `spawn` closure that captures a borrow
+  or a thread-affine value is accepted until bounds on closure types land.
+  `docs/design/threads.md`, the book's concurrency chapter.
+- Fixed: an `extern "C"` call with no arguments that was the first thing in its function left the
+  thread pointer on libc's side in a libc-linked program, so later runtime calls on that thread
+  (starting a thread, for one) read the wrong record.
+
+- **A buffer of 512 bytes or more starts on a 64-byte boundary.** Every allocation of that size -
+  a vector's storage, a byte buffer, a record that large - is cache-line aligned, on every path and
+  every thread; smaller ones stay 16-byte aligned. It costs 32 bytes per megabyte arena and nothing
+  per allocation, and it is a promise from now on (`docs/design/allocator.md`).
+
+- **Threads no longer queue for the allocator.** Once a program has a second thread, every OS
+  thread allocates from and frees into a cache of its own for blocks up to 256 KiB, with no lock
+  and no atomic operation; the lock is taken only to move a batch of blocks between a cache and
+  the shared lists. Pool workers that allocate and free small vectors and records went from 10.5
+  million pairs a second with one worker and 0.5 with 24 (slower with every worker added) to 12.7
+  and 126 on a 12-core machine. A block may be freed on any thread, a thread that ends gives its
+  cache back, and the end-of-main leak check still counts exactly. A one-thread program runs the
+  code it always ran. macOS, which has no threads in this runtime, is unchanged.
+  `docs/design/allocator.md`; `bench/alloc_threads.grl`, `bench/alloc_handoff.grl`.
 - Fixed: an effect attribute's name anywhere in a source file - a comment, a string - made the build
   one compiler run over the whole program, because the driver searched the bytes. It now looks for
   the attribute itself (`@no_alloc`, `@no_panic` outside comments and strings).
