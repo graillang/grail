@@ -1,5 +1,10 @@
 ## Unreleased
 
+- Fixed: a small leaf that takes the address of its own local (runtime.grl's `rt_frame`) was
+  inlined with that local turned into a scratch register, so split and cached builds of programs
+  that reach it emitted `leaq %r8,%rax` and did not assemble. Such a leaf is no longer an inline
+  candidate.
+
 - **A failure allocates nothing, on every route.** A failed check inside a parallel job used to build
   its failure record and texts on the heap where it failed, so every `@no_alloc` function that
   could index, cast or unwrap was refused once the job-failure path existed. The failing stack now
