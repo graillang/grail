@@ -7231,50 +7231,6 @@ fn ref_pred_count<a>(c: (&a mut C)) -> u64 {
     }
     return n;
 }
-// The second entry of a function with refined parameters (docs/design/refinements.md): the frame
-// and the parameter stores, then a jump straight to the body, past the checks. It is out of line
-// because a `call` to an entry inside the function would skip the prologue the body needs, and it is
-// a copy of the prologue's own bytes because that prologue is the same code either way - the checked
-// entry runs it and then the checks, this one runs it and then the body.
-//
-// Only a call site that proved every parameter predicate reaches it. An indirect call - a function
-// value, a vtable entry, a foreign call - has proved nothing, and uses the checked entry.
-fn ref_entry<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &d [u8], export: u64, body: u64, prologue: (&a [u8])) -> unit {
-    // The LLVM backend lifts this assembly into IR, and the prologue it copies here is written in
-    // frame-symbol arithmetic (`subq $.F7,%rsp`) the lifter does not model. So that build keeps the
-    // checked entry, which is what `--verify-facts` does too: every obligation is still checked, the
-    // proof only saves the check.
-    if (c.backend != 0) || (ref_pred_count(&mut c) == 0) || (export == 2) || (prologue.len() == 0) {
-        return ();
-    }
-    // The binding is stated here, as it is for the checked entry: a specialisation is emitted by
-    // every object that instantiates it and stays weak, and a split build's objects have to see
-    // each other's symbols.
-    if c.plat != 1 {
-        if c.current_spec != 0 {
-            o(&mut c, view(".weak "));
-            export_name(&mut c, view(m), view(name), view(body_symbol), export);
-            o(&mut c, view(".proved\n"));
-        } else {
-            if c.split != 0 {
-                o(&mut c, view(".globl "));
-                export_name(&mut c, view(m), view(name), view(body_symbol), export);
-                o(&mut c, view(".proved\n"));
-            }
-        }
-    }
-    export_name(&mut c, view(m), view(name), view(body_symbol), export);
-    o(&mut c, view(".proved:\n"));
-    // The prologue's calls were recorded - and counted - when the checked entry emitted them; this is
-    // a copy of those bytes, so the consistency check in `fx_end` steps over them.
-    lo := c.out.len();
-    push_bytes(&mut c.out, view(prologue));
-    hi := c.out.len();
-    exchange(&mut c.fx_skip_lo, lo);
-    exchange(&mut c.fx_skip_hi, hi);
-    jump(&mut c, view("jmp"), body);
-    return ();
-}
 // Whether field `k` of record `d` carries a predicate. Such a field is written only where the
 // predicate is owed - a literal, `r.f = v` and `r.f op= v` - so no `&mut` to it may exist: through
 // one, a write would reach the field with nothing to check it (docs/design/refinements.md, "Field
@@ -8991,7 +8947,7 @@ fn pv_ir_range<a, b>(c: (&a mut C), out: (&a mut Atom[]), name: &b [u8], lo: u64
     return ();
 }
 // Starting and finishing a body: a refined parameter holds at its entry (the entry checked it or the
-// caller proved it, which is the `.proved` convention), and nothing of this body is left behind for
+// caller proved it, which is what a proved call means), and nothing of this body is left behind for
 // the next one the compile emits.
 fn pv_begin<a>(c: (&a mut C)) -> unit {
     exchange(&mut c.pv_on, 0);
@@ -16206,8 +16162,6 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     }
     o(&mut c, view(":\n"));
     fx_begin(&mut c, view(fx_label), view(name), c.file, position, claimed_alloc, claimed_panic);
-    // Where the prologue's own bytes begin: the second entry replays them, then jumps to the body.
-    pro_start := c.out.len();
     o(&mut c, view("pushq %rbp\nmovq %rsp,%rbp\n"));
     frame := label(&mut c);
     if c.target == 4 {
@@ -16294,16 +16248,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // The parameter refinements hold here: the parameters are the arguments they were given and
     // their bookkeeping is done (a view's target is tracked), and the first statement has not been
     // reached, so a failure inside the check reports the call site rather than a line of this body.
-    // The prologue's bytes, for the second entry (ref_entry): everything from the frame setup to
-    // here is what a proved call has to run, and the checks are what it may skip.
-    mut prologue = u8[];
-    for i in pro_start .. c.out.len() {
-        prologue.push(c.out[i]);
-    }
     ref_params(&mut c);
-    // The body begins after the checks: the second entry jumps here.
-    body_lbl := label(&mut c);
-    mark(&mut c, body_lbl);
     // A refined parameter can state what the body's bounds checks need (pv_bce), for this body only.
     old_bce_index := exchange(&mut c.bce_index, u8[]);
     old_bce_base := exchange(&mut c.bce_base, u8[]);
@@ -16324,7 +16269,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         exchange(&mut c.unsafe_depth, depth + 1);
     }
     // The facts of this body start at its entry, where a refined parameter holds because the entry
-    // checked it or the caller proved it (the `.proved` convention), and they are this body's alone.
+    // checked it or the caller proved it (what a proved call means), and they are this body's alone.
     pv_begin(&mut c);
     block(&mut c);
     pv_end(&mut c);
@@ -16400,9 +16345,6 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         };
         record_debug_func(&mut c, view(name), view(m), &site);
     }
-    // The second entry, out of line: reached only by a call site that proved every predicate. It
-    // sits after the function's own range, so a debug line table never attributes it to the body.
-    ref_entry(&mut c, view(m), view(name), view(body_symbol), export, body_lbl, view(prologue));
     fx_end(&mut c);
     exchange(&mut c.hints, u64[]);
     // ---- file this body as a unit, if its emission stayed inside its own bytes ----------------
@@ -19436,7 +19378,7 @@ fn ref_strict_form<a>(c: (&a mut C)) -> u64 {
 // - the compiler's own dispatch inside trusted code (a closure's drop through the slot its body
 //   installed) records nothing: every body it can reach is a body of this build already;
 // - a refined parameter's check in the checked entry records an entry fact, not a body edge, because
-//   it is the caller's obligation (a caller that proved the predicate enters at `.proved`).
+//   it is the caller's obligation (a caller that proved the predicate answers for it with the proof).
 //
 // What this buys over reading the emitted text back:
 //
@@ -19661,14 +19603,16 @@ fn fx_would_trap<a, b>(c: (&a mut C), callee: &b [u8]) -> unit {
     fx_edge(&mut c, view(callee), 0);
     return ();
 }
-// A direct call whose arguments proved every refinement of the callee's parameters: it enters at the
-// callee's `.proved` entry, so the callee's entry checks are not this body's to answer for.
+// A direct call whose arguments proved every refinement of the callee's parameters. It enters the
+// callee at its one entry, whose checks then hold by the proof: they are not this body's to answer
+// for (edge kind 8). A second entry past the checks was a byte copy of the prologue taken before the
+// optimiser rewrote it, and restored callee-saved registers it had never saved.
 fn call_proved_out<a, b>(c: (&a mut C), callee: &b [u8]) -> unit {
     fx_edge(&mut c, view(callee), 8);
     fx_called(&mut c);
     o(&mut c, view("call "));
     o(&mut c, callee);
-    o(&mut c, view(".proved\n"));
+    c.out.push(10);
     return ();
 }
 // An indirect call in user code: `text` is the instruction (`call *%rax`, an import thunk). Nothing

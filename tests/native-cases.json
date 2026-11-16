@@ -7315,14 +7315,13 @@
       "native"
     ],
     "asm": [
-      "f_main_take.proved:",
-      "call f_main_take.proved"
-    ],
-    "asmAbsent": [
-      "f_main_untaken.proved",
+      "f_main_take:",
       "call f_main_take\n"
     ],
-    "note": "a function whose parameters are refined carries a second entry; the prover routes the constant call to it, a function with no predicate carries none, and an unproved call keeps the checked entry"
+    "asmAbsent": [
+      ".proved"
+    ],
+    "note": "a proved call is a plain call to the one entry, whose checks hold by the proof; a function with no predicate is unchanged"
   },
   {
     "name": "refinement-param-proved-binding",
@@ -7335,9 +7334,12 @@
       "native"
     ],
     "asm": [
-      "call f_main_take.proved"
+      "call f_main_take\n"
     ],
-    "note": "a binding of a constant settles `align % 16 == 0` by divisibility, so the call enters past the check"
+    "note": "a binding of a constant settles `align % 16 == 0` by divisibility, so the call enters past the check",
+    "asmAbsent": [
+      ".proved"
+    ]
   },
   {
     "name": "refinement-param-checked-after-write",
@@ -7353,7 +7355,7 @@
       "call f_main_take\n"
     ],
     "asmAbsent": [
-      "call f_main_take.proved"
+      ".proved"
     ],
     "note": "a write kills the facts that name the target: the check stays, and passes because 48 is a multiple of 16"
   },
@@ -7470,9 +7472,10 @@
       "native"
     ],
     "asmAbsent": [
-      "call f_main_take.proved"
+      ".proved"
     ],
-    "note": "an indirect call proved nothing: a function value always takes the checked entry"
+    "note": "an indirect call proved nothing: a function value always takes the checked entry",
+    "asm": []
   },
   {
     "name": "refinement-loop-fact-proves-call",
@@ -7519,9 +7522,12 @@
       "native"
     ],
     "asm": [
-      "call f_refined_take.proved"
+      "call f_refined_take\n"
     ],
-    "note": "a refinement carried by an interface is owed by a caller in another module, and its constant argument proves it there too"
+    "note": "a refinement carried by an interface is owed by a caller in another module, and its constant argument proves it there too",
+    "asmAbsent": [
+      ".proved"
+    ]
   },
   {
     "name": "refinement-bce-from-param",
@@ -7815,10 +7821,10 @@
       "native"
     ],
     "asm": [
-      "call f_main_take.proved"
+      "call f_main_take\n"
     ],
     "asmAbsent": [
-      "call f_main_take\n"
+      ".proved"
     ],
     "note": "an arm whose pattern is one literal states `n == 16` in that arm: the call's `align % 16 == 0` is settled there and enters the proved entry"
   },
@@ -7852,10 +7858,10 @@
       "native"
     ],
     "asm": [
-      "call f_main_take.proved"
+      "call f_main_take\n"
     ],
     "asmAbsent": [
-      "call f_main_take\n"
+      ".proved"
     ],
     "note": "a guard is what reaching the arm's body means: `_ if n % 16 == 0` states it there, and the call enters the proved entry"
   },
@@ -7870,10 +7876,10 @@
       "native"
     ],
     "asm": [
-      "call f_main_get.proved"
+      "call f_main_get\n"
     ],
     "asmAbsent": [
-      "call f_main_get\n"
+      ".proved"
     ],
     "note": "a shadowing binding kills the facts about the name it shadows for its own block only: after the block the refined parameter's `i < v.len()` is back, and the call needs no check"
   },
@@ -7907,10 +7913,10 @@
       "native"
     ],
     "asm": [
-      "call f_main_at.proved"
+      "call f_main_at\n"
     ],
     "asmAbsent": [
-      "call f_main_at\n"
+      ".proved"
     ],
     "note": "`for k in 0..n` states `0 <= k < n` inside the body, which is exactly at's `k < n`: the call enters the proved entry"
   },
@@ -7944,10 +7950,10 @@
       "native"
     ],
     "asm": [
-      "call f_main_take_second.proved"
+      "call f_main_take_second\n"
     ],
     "asmAbsent": [
-      "call f_main_take_second\n"
+      ".proved"
     ],
     "note": "an arm binds `x`, not `i` or `v`: the facts that held before the match are still about the names the arm uses, so the call enters the proved entry (the token walk dropped every fact at a `match`)"
   },
@@ -7958,6 +7964,10 @@
     "note": "@no_alloc over a slice loop, @no_panic with a refined index and with for-len indexing, a @no_panic caller that proves the callee's refinement, @bounded(16) while Native only: the case is accepted because the refinement prover's `<sym>.proved` entry discharges the refined callee inside an `@no_panic` function, and that entry is native-only (its prologue is frame-symbol arithmetic the LLVM lifter does not model), so an LLVM build refuses the effect by name instead of discharging it and then leaving the check in.",
     "backends": [
       "native"
+    ],
+    "asm": [],
+    "asmAbsent": [
+      ".proved"
     ]
   },
   {
@@ -13433,5 +13443,93 @@
       "native"
     ],
     "note": "a `&mut` root gives no fact"
+  },
+  {
+    "name": "refinement-owned-param-vector-before",
+    "source": "fn f(data: u64[], k: u64 where k > 0) -> u64 {\n    mut s = u64[1, 2, 3, 4, 5];\n    mut n = 0;\n    while s.len() > 0 {\n        n += s.pop()!;\n    }\n    mut s = data;\n    mut n = 0;\n    while s.len() > 0 {\n        s.pop()!;\n        n += 1;\n    }\n    return n + k + n;\n}\nfn main() {\n    keep := u64[7, 8, 9];\n    a0 := u64[1, 2, 3, 4, 5, 6, 7, 8, 9, 10];\n    println(f(a0, 4));\n    m := 5;\n    a0 := u64[1, 2, 3, 4, 5, 6, 7, 8, 9, 10];\n    println(f(a0, m));\n    println(keep.len() + keep[2]);\n    mut w = u64[];\n    for i in 200 {\n        w.push(i);\n    }\n    mut s = \"\";\n    for i in 50 {\n        s = s + \"ab\";\n    }\n    println(w.len() + s.len());\n}\n",
+    "stdout": "24\n25\n12\n300\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "an owned parameter beside a refined one, called with a proved argument, then the heap is used again and the end-of-main allocator balance check runs: the old second entry restored callee-saved registers it never saved and corrupted the caller"
+  },
+  {
+    "name": "refinement-owned-param-vector-after",
+    "source": "fn f(k: u64 where k > 0, data: u64[]) -> u64 {\n    mut s = u64[1, 2, 3, 4, 5];\n    mut n = 0;\n    while s.len() > 0 {\n        n += s.pop()!;\n    }\n    return data.len() + k + n;\n}\nfn main() {\n    keep := u64[7, 8, 9];\n    a0 := u64[1, 2, 3, 4, 5, 6, 7, 8, 9, 10];\n    println(f(4, a0));\n    println(keep.len() + keep[2]);\n    mut w = u64[];\n    for i in 200 {\n        w.push(i);\n    }\n    mut s = \"\";\n    for i in 50 {\n        s = s + \"ab\";\n    }\n    println(w.len() + s.len());\n}\n",
+    "stdout": "29\n12\n300\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "an owned parameter beside a refined one, called with a proved argument, then the heap is used again and the end-of-main allocator balance check runs: the old second entry restored callee-saved registers it never saved and corrupted the caller"
+  },
+  {
+    "name": "refinement-owned-param-string-before",
+    "source": "fn f(text: string, k: u64 where k > 0) -> u64 {\n    mut s = u64[1, 2, 3, 4, 5];\n    mut n = 0;\n    while s.len() > 0 {\n        n += s.pop()!;\n    }\n    t := text + \"!\";\n    return t.len() + k + n;\n}\nfn main() {\n    keep := u64[7, 8, 9];\n    a0 := \"hello\";\n    println(f(a0, 4));\n    println(keep.len() + keep[2]);\n    mut w = u64[];\n    for i in 200 {\n        w.push(i);\n    }\n    mut s = \"\";\n    for i in 50 {\n        s = s + \"ab\";\n    }\n    println(w.len() + s.len());\n}\n",
+    "stdout": "25\n12\n300\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "an owned parameter beside a refined one, called with a proved argument, then the heap is used again and the end-of-main allocator balance check runs: the old second entry restored callee-saved registers it never saved and corrupted the caller"
+  },
+  {
+    "name": "refinement-owned-param-string-after",
+    "source": "fn f(k: u64 where k > 0, text: string) -> u64 {\n    mut s = u64[1, 2, 3, 4, 5];\n    mut n = 0;\n    while s.len() > 0 {\n        n += s.pop()!;\n    }\n    return text.len() + k + n;\n}\nfn main() {\n    keep := u64[7, 8, 9];\n    a0 := \"hello\";\n    println(f(4, a0));\n    println(keep.len() + keep[2]);\n    mut w = u64[];\n    for i in 200 {\n        w.push(i);\n    }\n    mut s = \"\";\n    for i in 50 {\n        s = s + \"ab\";\n    }\n    println(w.len() + s.len());\n}\n",
+    "stdout": "24\n12\n300\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "an owned parameter beside a refined one, called with a proved argument, then the heap is used again and the end-of-main allocator balance check runs: the old second entry restored callee-saved registers it never saved and corrupted the caller"
+  },
+  {
+    "name": "refinement-owned-param-record-before",
+    "source": "struct Bag {\n    items: u64[],\n    name: string\n}\nfn f(b: Bag, k: u64 where k > 0) -> u64 {\n    mut s = u64[1, 2, 3, 4, 5];\n    mut n = 0;\n    while s.len() > 0 {\n        n += s.pop()!;\n    }\n    return b.items.len() + b.name.len() + k + n;\n}\nfn main() {\n    keep := u64[7, 8, 9];\n    a0 := Bag { items: u64[1, 2, 3, 4, 5, 6, 7, 8, 9, 10], name: \"bag\" };\n    println(f(a0, 4));\n    println(keep.len() + keep[2]);\n    mut w = u64[];\n    for i in 200 {\n        w.push(i);\n    }\n    mut s = \"\";\n    for i in 50 {\n        s = s + \"ab\";\n    }\n    println(w.len() + s.len());\n}\n",
+    "stdout": "32\n12\n300\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "an owned parameter beside a refined one, called with a proved argument, then the heap is used again and the end-of-main allocator balance check runs: the old second entry restored callee-saved registers it never saved and corrupted the caller"
+  },
+  {
+    "name": "refinement-owned-param-record-after",
+    "source": "struct Bag {\n    items: u64[],\n    name: string\n}\nfn f(k: u64 where k > 0, b: Bag) -> u64 {\n    mut s = u64[1, 2, 3, 4, 5];\n    mut n = 0;\n    while s.len() > 0 {\n        n += s.pop()!;\n    }\n    return b.items.len() + b.name.len() + k + n;\n}\nfn main() {\n    keep := u64[7, 8, 9];\n    a0 := Bag { items: u64[1, 2, 3, 4, 5, 6, 7, 8, 9, 10], name: \"bag\" };\n    println(f(4, a0));\n    println(keep.len() + keep[2]);\n    mut w = u64[];\n    for i in 200 {\n        w.push(i);\n    }\n    mut s = \"\";\n    for i in 50 {\n        s = s + \"ab\";\n    }\n    println(w.len() + s.len());\n}\n",
+    "stdout": "32\n12\n300\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "an owned parameter beside a refined one, called with a proved argument, then the heap is used again and the end-of-main allocator balance check runs: the old second entry restored callee-saved registers it never saved and corrupted the caller"
+  },
+  {
+    "name": "refinement-owned-param-between-owned",
+    "source": "fn f(a: u64[], k: u64 where k > 0, b: string) -> u64 {\n    mut s = u64[1, 2, 3, 4, 5];\n    mut n = 0;\n    while s.len() > 0 {\n        n += s.pop()!;\n    }\n    return a.len() + b.len() + k + n;\n}\nfn main() {\n    keep := u64[7, 8, 9];\n    a0 := u64[1, 2, 3, 4, 5, 6, 7, 8, 9, 10];\n    a1 := \"xyz\";\n    println(f(a0, 4, a1));\n    println(keep.len() + keep[2]);\n    mut w = u64[];\n    for i in 200 {\n        w.push(i);\n    }\n    mut s = \"\";\n    for i in 50 {\n        s = s + \"ab\";\n    }\n    println(w.len() + s.len());\n}\n",
+    "stdout": "32\n12\n300\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "an owned parameter beside a refined one, called with a proved argument, then the heap is used again and the end-of-main allocator balance check runs: the old second entry restored callee-saved registers it never saved and corrupted the caller"
+  },
+  {
+    "name": "refinement-owned-param-method-self",
+    "source": "struct Bag {\n    items: u64[]\n}\nimpl Bag {\n    fn take(self: Self, k: u64 where k > 0) -> u64 {\n        mut s = u64[1, 2, 3, 4, 5];\n        mut n = 0;\n        while s.len() > 0 {\n            n += s.pop()!;\n        }\n        return self.items.len() + k + n;\n    }\n}\nfn main() {\n    keep := u64[7, 8, 9];\n    b := Bag { items: u64[1, 2, 3, 4, 5, 6, 7, 8, 9, 10] };\n    println(b.take(4));\n    println(keep.len() + keep[2]);\n    mut w = u64[];\n    for i in 200 {\n        w.push(i);\n    }\n    mut s = \"\";\n    for i in 50 {\n        s = s + \"ab\";\n    }\n    println(w.len() + s.len());\n}\n",
+    "stdout": "29\n12\n300\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "an owned parameter beside a refined one, called with a proved argument, then the heap is used again and the end-of-main allocator balance check runs: the old second entry restored callee-saved registers it never saved and corrupted the caller"
   }
 ]

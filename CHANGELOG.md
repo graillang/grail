@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **Fixed: memory corruption after a proved call to a refined function.** The `.proved` entry
+  that let a proved call skip the parameter checks was a byte copy of the prologue taken before the
+  optimiser rewrote it: it did not save the callee-saved registers the epilogue restores, so the
+  caller's registers came back as garbage (seen as a double free of a vector the caller had moved
+  into the call, exit 134 at the next allocation). The entry is gone: a proved call is a plain call
+  and the entry checks run, true by the proof; `@no_panic` still counts it as unable to fail. Every
+  refined function whose body used a callee-saved register was exposed, since the second entry was
+  introduced.
+
 - **Field predicates are sound.** A field predicate may name only its own field, on an integer,
   a float or an owned vector's `len()`; anything else is refused at the struct. It used to be read
   in the scope of whoever built the record, so a predicate naming another field was an undefined
