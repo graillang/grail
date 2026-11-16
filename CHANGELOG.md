@@ -1,7 +1,12 @@
 ## Unreleased
 
+- **A buffer of 512 bytes or more starts on a 64-byte boundary.** Every allocation of that size -
+  a vector's storage, a byte buffer, a record that large - is cache-line aligned, on every path and
+  every thread; smaller ones stay 16-byte aligned. It costs 32 bytes per megabyte arena and nothing
+  per allocation, and it is a promise from now on (`docs/design/allocator.md`).
+
 - **Threads no longer queue for the allocator.** Once a program has a second thread, every OS
-  thread allocates from and frees into a cache of its own for blocks up to 64 KiB, with no lock
+  thread allocates from and frees into a cache of its own for blocks up to 256 KiB, with no lock
   and no atomic operation; the lock is taken only to move a batch of blocks between a cache and
   the shared lists. Pool workers that allocate and free small vectors and records went from 10.5
   million pairs a second with one worker and 0.5 with 24 (slower with every worker added) to 12.7
