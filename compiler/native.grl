@@ -47011,11 +47011,21 @@ fn fx_write_runtime_facts<a>(c: (&a mut C)) -> unit {
     if c.iface_emit.len() == 0 {
         return ();
     }
+    // Only the run that emitted the runtime's bodies writes it: every other run knows the runtime's
+    // declarations and has its rows, and modules compile at the same time.
     mut listed = u64[];
+    mut emitted = 0;
     for i in c.funcs.len() {
         if same(view(c.funcs[i].module), view("runtime")) {
             listed.push(i);
+            k := fx_find(&mut c, view(fx_func_symbol(&mut c, i)));
+            if (k != 0) && (c.fx_body[k - 1] != 0) {
+                emitted = 1;
+            }
         }
+    }
+    if emitted == 0 {
+        return ();
     }
     facts := iface_facts_bytes(&mut c, view("runtime"), &listed);
     if facts.len() == 0 {

@@ -281,68 +281,6 @@ fn collect<a, b>(dir: &a [u8], out: (&b mut u8[][])) {
         }
     }
 }
-// Whether a source of the build claims a checked effect (docs/design/effects.md).
-fn effects_claimed<a>(command: (&a u8[][]), at: u64) -> bool {
-    mut k = at;
-    while k < command.len() {
-        file := item(command, k);
-        k += 1;
-        if !ends_with_grl(view(file)) {
-            continue;
-        }
-        text := host::read_file(view(file));
-        if claims_effect(view(text)) {
-            return true;
-        }
-    }
-    return false;
-}
-// Whether a source text carries `@no_alloc` or `@no_panic` as an attribute: outside a comment and
-// outside a string, and not as the start of a longer word. Searching the bytes found the attribute's
-// name in a comment of the runtime, and since the runtime is a source of every build, every build
-// silently became a whole-program one.
-fn claims_effect<a>(text: &a [u8]) -> bool {
-    n := text.len();
-    mut i = 0;
-    while i < n {
-        ch := text[i];
-        if (ch == 47) && (i + 1 < n) && (text[i + 1] == 47) {
-            while (i < n) && (text[i] != 10) {
-                i += 1;
-            }
-            continue;
-        }
-        if ch == 34 {
-            i += 1;
-            while (i < n) && (text[i] != 34) {
-                if text[i] == 92 {
-                    i += 1;
-                }
-                i += 1;
-            }
-            i += 1;
-            continue;
-        }
-        if ch == 39 {
-            // A character literal: `'"'` must not open a string.
-            if (i + 2 < n) && (text[i + 1] == 92) {
-                i += 4;
-                continue;
-            }
-            if (i + 2 < n) && (text[i + 2] == 39) {
-                i += 3;
-                continue;
-            }
-        }
-        if ch == 64 {
-            if effect_word(text, i + 1, view("no_alloc")) || effect_word(text, i + 1, view("no_panic")) {
-                return true;
-            }
-        }
-        i += 1;
-    }
-    return false;
-}
 fn effect_word<a, b>(text: &a [u8], at: u64, word: &b [u8]) -> bool {
     if text.len() < at + word.len() {
         return false;
@@ -1130,11 +1068,6 @@ fn compile_mode<a, b, d, e, g, k>(
         if (cache != 0) || (program_modules(&groups) > 1) {
             per_module = 1;
         }
-        // `@no_alloc` and `@no_panic` are proved over every body the program can reach, the runtime's
-        // included, so a program that claims them is compiled in one run.
-        if effects_claimed(&command, at) {
-            per_module = 0;
-        }
         if per_module != 0 {
             // One run per module, so every module the program has needs a group, and the module set is
             // the compiler's: it resolves `use` through the roots and names what it will compile.
@@ -1615,6 +1548,19 @@ fn unit_key<a, b, d, e, g, k, r>(
             names.push(file);
         }
     }
+    // The effect summary of a module with no interface (the runtime's `runtime.facts`): what this
+    // run's own summaries are computed from, so a change in it is a change in this run's input.
+    for i in reads.len() {
+        facts := cat(view(reads[i]), view(".facts"));
+        fpath := path_join(view(ifaces), view(facts));
+        if host::exists(view(fpath)) != 0 {
+            push_bytes(&mut buf, view("facts "));
+            push_bytes(&mut buf, view(cache_digest_file(&mut store, view(fpath))));
+            buf.push(32);
+            push_bytes(&mut buf, view(facts));
+            buf.push(10);
+        }
+    }
     for i in names.len() {
         n := item(&names, i);
         // An interface's surface: every byte before the trailer, which carries only the source
@@ -1650,6 +1596,7 @@ fn unit_restore<a, b, d, e, g>(
     mut links_blob = u8[];
     mut obj_blob = u8[];
     mut iface_blob = u8[];
+    mut facts_blob = u8[];
     for i in rows.len() {
         w := words(view(item(&rows, i)));
         if (2 <= w.len()) & eq(view(item(&w, 0)), view("links")) {
@@ -1661,6 +1608,9 @@ fn unit_restore<a, b, d, e, g>(
         if (2 <= w.len()) & eq(view(item(&w, 0)), view("iface")) {
             iface_blob = item(&w, 1);
         }
+        if (2 <= w.len()) & eq(view(item(&w, 0)), view("facts")) {
+            facts_blob = item(&w, 1);
+        }
     }
     if (links_blob.len() == 0) || (obj_blob.len() == 0) {
         return false;
@@ -1669,6 +1619,9 @@ fn unit_restore<a, b, d, e, g>(
         return false;
     }
     if (iface_blob.len() != 0) && !cache_blob_ok(&mut store, view(iface_blob)) {
+        return false;
+    }
+    if (facts_blob.len() != 0) && !cache_blob_ok(&mut store, view(facts_blob)) {
         return false;
     }
     if cache_blob_restore(&mut store, view(links_blob), view(unit_links_path(view(stem))), 0) != 0 {
@@ -1680,6 +1633,12 @@ fn unit_restore<a, b, d, e, g>(
     if iface_blob.len() != 0 {
         dest := path_join(view(ifaces), view(cat(view(name), view(".iface"))));
         if cache_blob_restore(&mut store, view(iface_blob), view(dest), 0) != 0 {
+            return false;
+        }
+    }
+    if facts_blob.len() != 0 {
+        dest := path_join(view(ifaces), view(cat(view(name), view(".facts"))));
+        if cache_blob_restore(&mut store, view(facts_blob), view(dest), 0) != 0 {
             return false;
         }
     }
@@ -1739,6 +1698,18 @@ fn unit_file<a, b, d, e, g>(
             return ();
         }
         push_bytes(&mut record, view("iface "));
+        push_bytes(&mut record, view(b));
+        record.push(10);
+    }
+    // The runtime's effect summary: the one output a run writes beside the interfaces that is not an
+    // interface (docs/design/effects.md).
+    facts := path_join(view(ifaces), view(cat(view(name), view(".facts"))));
+    if host::exists(view(facts)) != 0 {
+        b := cache_blob_put(&mut store, view(facts));
+        if b.len() != 64 {
+            return ();
+        }
+        push_bytes(&mut record, view("facts "));
         push_bytes(&mut record, view(b));
         record.push(10);
     }
