@@ -20545,18 +20545,14 @@ fn field_word<a>(c: (&a mut C), ty: u64, k: u64) -> u64 {
 // unit, a reference, a function or C pointer, or a plain record. It owns nothing, so it can be
 // stored inline in the record or the vector that holds it. This is a layout fact only: the checker
 // never asks it, and a plain record moves exactly as every record does (unboxed-values.md, 4).
+// Layout is a property of the type alone, never of the module being compiled: the drop helpers are
+// emitted after the last (raw) module, and they must lay a vector out as everyone else does.
 fn plain<a>(c: (&a mut C), alias: u64) -> bool {
-    if c.raw != 0 {
-        return false;
-    }
     return (layout_bits(&mut c, alias) & 1) != 0;
 }
 // The bytes a vector element of type `elem` takes when the vector stores its elements inline - a
 // plain record's words, or an `extern "C"` record's C size - and 0 for a vector of words.
 fn flat_bytes<a>(c: (&a mut C), elem: u64) -> u64 {
-    if c.raw != 0 {
-        return 0;
-    }
     ty := base_type(&mut c, elem);
     if plain(&mut c, ty) {
         return record_words(&mut c, ty) * 8;
@@ -20607,9 +20603,6 @@ fn container_record<a>(c: (&a mut C), ty: u64) -> bool {
     return !same(view(d.module), view(".closure"));
 }
 fn layout_bits<a>(c: (&a mut C), alias: u64) -> u64 {
-    if c.raw != 0 {
-        return 0;
-    }
     ty := base_type(&mut c, alias);
     while c.layout_memo.len() <= ty {
         c.layout_memo.push(0);
