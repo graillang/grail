@@ -20551,6 +20551,35 @@ fn plain<a>(c: (&a mut C), alias: u64) -> bool {
     }
     return (layout_bits(&mut c, alias) & 1) != 0;
 }
+// The bytes a vector element of type `elem` takes when the vector stores its elements inline - a
+// plain record's words, or an `extern "C"` record's C size - and 0 for a vector of words.
+fn flat_bytes<a>(c: (&a mut C), elem: u64) -> u64 {
+    if c.raw != 0 {
+        return 0;
+    }
+    ty := base_type(&mut c, elem);
+    if plain(&mut c, ty) {
+        return record_words(&mut c, ty) * 8;
+    }
+    if is_c_record(&mut c, ty) != 0 {
+        return ffi_record_size(&mut c, ty_arg(&mut c, ty));
+    }
+    return 0;
+}
+// The address of element `index` of a vector whose elements are `width` bytes inline. Checked
+// against the length unless the index is proven in bounds; the address is computed in line.
+fn flat_element<a>(c: (&a mut C), seq: u64, index: u64, width: u64, unchecked: bool) -> u64 {
+    if !unchecked {
+        return invoke(&mut c, view("rt_slotw"), three(seq, index, imm(&mut c, width)));
+    }
+    get(&mut c, index, view("%rcx"));
+    o(&mut c, view("imulq $"));
+    on(&mut c, width);
+    o(&mut c, view(",%rcx\n"));
+    get(&mut c, seq, view("%rax"));
+    o(&mut c, view("movq (%rax),%rax\naddq %rcx,%rax\n"));
+    return save(&mut c);
+}
 // Whether field `k` of the record `ty` is a plain record stored inline: only Grail structs and
 // tuples hold them so (an enum's payload, a closure's captures and a C record keep their words).
 fn inline_field<a>(c: (&a mut C), ty: u64, k: u64) -> bool {
@@ -20643,15 +20672,13 @@ fn materialise<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
     if found == c.interior.len() {
         return ();
     }
-    if !plain(&mut c, ty) {
+    size := flat_bytes(&mut c, ty);
+    if size == 0 {
         return ();
     }
     c.interior[found] = 18446744073709551615;
-    words := record_words(&mut c, base_type(&mut c, ty));
-    n := imm(&mut c, words);
-    box := invoke(&mut c, view("rt_rec"), one(n));
-    bytes := imm(&mut c, words * 8);
-    invoke(&mut c, view("rt_copy_bytes"), three(box, slot, bytes));
+    bytes := imm(&mut c, size);
+    box := invoke(&mut c, view("rt_flat_box"), two(slot, bytes));
     get(&mut c, box, view("%rax"));
     o(&mut c, view("movq %rax,"));
     stack_slot(&mut c, slot);
@@ -31939,6 +31966,23 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             element := narrow_decode(&mut c, code, unit);
             return pop_option(&mut c, had, element, ty);
         }
+        width := flat_bytes(&mut c, ty);
+        if (insist) & (width != 0) {
+            slot := apply(&mut c, view("rt_popw"), two(xt, imm(&mut c, width)));
+            own(&mut c, slot, ty);
+            result := place_of(&mut c, slot);
+            return_bonds(&mut c, root, result, 1);
+            stored_source(&mut c, slot, ty);
+            return val(slot, ty);
+        }
+        if width != 0 {
+            had := apply(&mut c, view("rt_len"), one(xt));
+            word := apply(&mut c, view("rt_popw_quiet"), two(xt, imm(&mut c, width)));
+            out := pop_option(&mut c, had, word, ty);
+            result := place_of(&mut c, out.t);
+            return_bonds(&mut c, root, result, 1);
+            return out;
+        }
         if insist {
             slot := apply(&mut c, view("rt_pop"), one(xt));
             own(&mut c, slot, ty);
@@ -31979,9 +32023,14 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         ) {
         elem := ty_arg(&mut c, xty);
         code := narrow_code(&mut c, elem);
+        width := flat_bytes(&mut c, elem);
         if same(view(name), view("reverse")) {
             expect(&mut c, view(")"));
             require_write(&mut c, xt);
+            if width != 0 {
+                invoke(&mut c, view("rt_vec_reversew"), two(xt, imm(&mut c, width)));
+                return val(imm(&mut c, 0), 1);
+            }
             mut f = "rt_vec_reverse";
             if code != 0 {
                 f = "rt_vec_reverse4";
@@ -31997,6 +32046,12 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             require_type(&mut c, j.ty, 0);
             expect(&mut c, view(")"));
             require_write(&mut c, xt);
+            if width != 0 {
+                mut args = three(xt, i.t, j.t);
+                args.push(imm(&mut c, width));
+                invoke(&mut c, view("rt_vec_swapw"), args);
+                return val(imm(&mut c, 0), 1);
+            }
             mut f = "rt_vec_swap";
             if code != 0 {
                 f = "rt_vec_swap4";
@@ -32022,7 +32077,8 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
                 dropper = save(&mut c);
             }
             require_write(&mut c, xt);
-            if code != 0 {
+            if (code != 0) || (width != 0) {
+                // 4-byte and inline elements own nothing: shortening is setting the length.
                 invoke(&mut c, view("rt_vec_truncate4"), two(xt, keep));
                 return val(imm(&mut c, 0), 1);
             }
@@ -32043,7 +32099,12 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
                 own(&mut c, element, elem);
                 return val(element, elem);
             }
-            slot := apply(&mut c, view("rt_vec_remove"), two(xt, i.t));
+            mut slot = 0;
+            if width != 0 {
+                slot = apply(&mut c, view("rt_vec_removew"), three(xt, i.t, imm(&mut c, width)));
+            } else {
+                slot = apply(&mut c, view("rt_vec_remove"), two(xt, i.t));
+            }
             own(&mut c, slot, elem);
             result := place_of(&mut c, slot);
             return_bonds(&mut c, root, result, 1);
@@ -32071,7 +32132,13 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             invoke(&mut c, view("rt_vec_insert4"), three(xt, i.t, unit));
             return val(imm(&mut c, 0), 1);
         }
-        invoke(&mut c, view("rt_vec_insert"), three(xt, i.t, bt));
+        if width != 0 {
+            mut args = three(xt, i.t, bt);
+            args.push(imm(&mut c, width));
+            invoke(&mut c, view("rt_vec_insertw"), args);
+        } else {
+            invoke(&mut c, view("rt_vec_insert"), three(xt, i.t, bt));
+        }
         transfer_bonds(&mut c, source, target);
         return val(imm(&mut c, 0), 1);
     }
@@ -32159,8 +32226,13 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     }
     source := place_of(&mut c, bt);
     move_out(&mut c, val(bt, b.ty));
-    unit := narrow_encode(&mut c, code, bt);
-    invoke(&mut c, view(f), two(xt, unit));
+    width := flat_bytes(&mut c, ty_arg(&mut c, base_type(&mut c, xty)));
+    if (k == 6) & (width != 0) {
+        invoke(&mut c, view("rt_pushw"), three(xt, bt, imm(&mut c, width)));
+    } else {
+        unit := narrow_encode(&mut c, code, bt);
+        invoke(&mut c, view(f), two(xt, unit));
+    }
     root := place_of(&mut c, xt);
     transfer_bonds(&mut c, source, root);
     return val(imm(&mut c, 0), 1);
@@ -32262,8 +32334,16 @@ fn collection_body<a>(
             if code != 0 {
                 f = "rt_push4";
             }
-            unit := narrow_encode(&mut c, code, value);
-            invoke(&mut c, view(f), two(slot, unit));
+            mut width = 0;
+            if bytes == 0 {
+                width = flat_bytes(&mut c, ty_arg(&mut c, base_type(&mut c, ty)));
+            }
+            if width != 0 {
+                invoke(&mut c, view("rt_pushw"), three(slot, value, imm(&mut c, width)));
+            } else {
+                unit := narrow_encode(&mut c, code, value);
+                invoke(&mut c, view(f), two(slot, unit));
+            }
             target := place_of(&mut c, slot);
             transfer_bonds(&mut c, source, target);
             first = 0;
@@ -34601,6 +34681,9 @@ fn vector_slice<a>(c: (&a mut C), x: Val, input: u64, access: u64) -> Val {
     if narrow_code(&mut c, elem) != 0 {
         width = 4;
     }
+    if flat_bytes(&mut c, elem) != 0 {
+        width = flat_bytes(&mut c, elem);
+    }
     mut args = two(xt, start);
     args.push(end);
     args.push(imm(&mut c, width));
@@ -34718,9 +34801,16 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
             return val(element, elem);
         }
         ty := reference_type(&mut c, elem, access == 2);
-        at := apply(&mut c, view(f), two(xt, index));
-        fact_seq_arg(&mut c, view(f), xt, xty);
-        slot := word_reference(&mut c, at, elem);
+        width := flat_bytes(&mut c, elem);
+        mut slot = 0;
+        if width != 0 {
+            // An inline element: the reference is the element's own address.
+            slot = flat_element(&mut c, xt, index, width, unchecked);
+        } else {
+            at := apply(&mut c, view(f), two(xt, index));
+            fact_seq_arg(&mut c, view(f), xt, xty);
+            slot = word_reference(&mut c, at, elem);
+        }
         if code != 0 {
             // The element's address is 4-byte storage: reads and writes through it are sized, and
             // borrowing it yields a tagged reference (tag_narrow_borrow).
@@ -38095,7 +38185,13 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
                     if bytewise != 0 {
                         slotf = "rt_slotb";
                     }
-                    index := apply(&mut c, view(slotf), two(seq, i));
+                    width := flat_bytes(&mut c, elemty);
+                    mut index = 0;
+                    if width != 0 {
+                        index = flat_element(&mut c, seq, i, width, false);
+                    } else {
+                        index = apply(&mut c, view(slotf), two(seq, i));
+                    }
                     if code != 0 || bytewise != 0 {
                         // A tagged reference to 4-byte storage (see ref_load).
                         get(&mut c, index, view("%rax"));
@@ -38106,7 +38202,10 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
                     rty := reference_type(&mut c, elemty, refmode);
                     root := place_of(&mut c, seq);
                     target := member_place(&mut c, root, 0, elemty);
-                    item := word_reference(&mut c, index, elemty);
+                    mut item = index;
+                    if width == 0 {
+                        item = word_reference(&mut c, index, elemty);
+                    }
                     own(&mut c, item, rty);
                     bind_loan(&mut c, item, seq, root, refmode);
                     set_target(&mut c, item, target, item + 1);
@@ -38119,7 +38218,15 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
                     if consume != 0 {
                         f = "rt_take";
                     }
-                    element := invoke(&mut c, view(f), two(seq, i));
+                    width := flat_bytes(&mut c, elemty);
+                    mut element = 0;
+                    if (width != 0) & (bytewise == 0) {
+                        // The element's words, read in place; owning them copies them to a box.
+                        element = flat_element(&mut c, seq, i, width, false);
+                        c.interior.push(element);
+                    } else {
+                        element = invoke(&mut c, view(f), two(seq, i));
+                    }
                     if consume != 0 {
                         own(&mut c, element, elemty);
                     }
@@ -39455,7 +39562,8 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                     call_out(&mut c, view("rt_free"));
                 }
                 if kind == 6 {
-                    if needs_drop(&mut c, arg) {
+                    // Inline elements (plain or C records) own nothing: only the buffer is freed.
+                    if needs_drop(&mut c, arg) & (flat_bytes(&mut c, arg) == 0) {
                         head := label(&mut c);
                         end := label(&mut c);
                         o(&mut c, view("xorq %r13,%r13\n"));

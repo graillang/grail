@@ -1475,9 +1475,8 @@ fn rt_carray_load(src: u64, n: u64, size: u64, signed: u64, kind: u64, words: u6
         } else if kind == 3 {
             rt_pushb(out, raw_byte(a));
         } else if kind == 2 {
-            r := rt_rec(words);
-            rt_copy_bytes(r, a, size);
-            rt_push(out, r);
+            // A vector of extern records stores them inline, as the C array does.
+            rt_pushw(out, rt_flat_box(a, size), size);
         } else {
             if kind == 1 {
                 rt_push(out, rt_f32_from_bits(rt_load_sized(a, 4, 0)));
@@ -1510,17 +1509,18 @@ fn rt_carray_store(dst: u64, v: u64, n: u64, size: u64, kind: u64) -> u64 {
             i = i + 1;
             continue;
         }
-        x := rt_at(v, i);
         if kind == 2 {
-            rt_copy_bytes(a, x, size);
+            rt_copy_bytes(a, rt_slotw(v, i, size), size);
+            i = i + 1;
+            continue;
+        }
+        x := rt_at(v, i);
+        if kind == 1 {
+            rt_store_sized(a, rt_f32_bits(x), 4);
+        } else if size == 8 {
+            raw_store(a, x);
         } else {
-            if kind == 1 {
-                rt_store_sized(a, rt_f32_bits(x), 4);
-            } else if size == 8 {
-                raw_store(a, x);
-            } else {
-                rt_store_sized(a, x, size);
-            }
+            rt_store_sized(a, x, size);
         }
         i = i + 1;
     }
@@ -6574,6 +6574,101 @@ fn rt_vec_reverse4(s: u64) -> u64 {
     mut i = 0;
     while i < rt_div(n, 2) {
         rt_vec_swap4(s, i, n - 1 - i);
+        i += 1;
+    }
+    return 0;
+}
+// ---- flat vectors: elements of `w` bytes stored inline (docs/design/unboxed-values.md, 1b) ----
+// A vector of plain records or `extern "C"` records holds the elements' bytes, `w` each, after one
+// another; the header is the same {pointer, length, capacity}, counted in elements. A value taken out
+// of one is a box of its own (rt_flat_box); a value put in is copied from its box, which is freed.
+fn rt_flat_box(src: u64, w: u64) -> u64 {
+    box := rt_alloc(wrapping_mul(rt_div(w + 7, 8), 8));
+    rt_copy_bytes(box, src, w);
+    return box;
+}
+fn rt_slotw(s: u64, i: u64, w: u64) -> u64 {
+    if (i < raw_load(wrapping_add(s, 8))) == 0 {
+        rt_fail(1, i, raw_load(wrapping_add(s, 8)));
+    }
+    return wrapping_add(raw_load(s), wrapping_mul(i, w));
+}
+fn rt_pushw(s: u64, src: u64, w: u64) -> u64 {
+    n := raw_load(wrapping_add(s, 8));
+    cap := raw_load(wrapping_add(s, 16));
+    if n == cap {
+        mut capacity = cap * 2;
+        if capacity == 0 {
+            capacity = 8;
+        }
+        if rt_div(18446744073709551615, w) < capacity {
+            rt_abort();
+        }
+        ptr := rt_grow(raw_load(s), wrapping_mul(n, w), wrapping_mul(capacity, w));
+        raw_store(s, ptr);
+        raw_store(wrapping_add(s, 16), capacity);
+    }
+    rt_copy_bytes(wrapping_add(raw_load(s), wrapping_mul(n, w)), src, w);
+    raw_store(wrapping_add(s, 8), n + 1);
+    rt_free(src);
+    return 0;
+}
+fn rt_popw(s: u64, w: u64) -> u64 {
+    n := raw_load(wrapping_add(s, 8));
+    if n == 0 {
+        rt_fail(8, 0, 0);
+    }
+    raw_store(wrapping_add(s, 8), n - 1);
+    return rt_flat_box(wrapping_add(raw_load(s), wrapping_mul(n - 1, w)), w);
+}
+fn rt_popw_quiet(s: u64, w: u64) -> u64 {
+    if raw_load(wrapping_add(s, 8)) == 0 {
+        return 0;
+    }
+    return rt_popw(s, w);
+}
+fn rt_vec_insertw(s: u64, index: u64, src: u64, w: u64) -> u64 {
+    n := rt_len(s);
+    if n < index {
+        rt_abort();
+    }
+    rt_pushw(s, rt_flat_box(src, w), w);
+    mut i = n;
+    while index < i {
+        rt_copy_bytes(rt_slotw(s, i, w), rt_slotw(s, i - 1, w), w);
+        i -= 1;
+    }
+    rt_copy_bytes(rt_slotw(s, index, w), src, w);
+    rt_free(src);
+    return 0;
+}
+fn rt_vec_removew(s: u64, index: u64, w: u64) -> u64 {
+    n := rt_len(s);
+    if (index < n) == 0 {
+        rt_abort();
+    }
+    v := rt_flat_box(rt_slotw(s, index, w), w);
+    mut i = index;
+    while i + 1 < n {
+        rt_copy_bytes(rt_slotw(s, i, w), rt_slotw(s, i + 1, w), w);
+        i += 1;
+    }
+    raw_store(wrapping_add(s, 8), n - 1);
+    return v;
+}
+fn rt_vec_swapw(s: u64, i: u64, j: u64, w: u64) -> u64 {
+    a := rt_slotw(s, i, w);
+    b := rt_slotw(s, j, w);
+    if i != j {
+        rt_swap(a, b, w);
+    }
+    return 0;
+}
+fn rt_vec_reversew(s: u64, w: u64) -> u64 {
+    n := rt_len(s);
+    mut i = 0;
+    while i < rt_div(n, 2) {
+        rt_vec_swapw(s, i, n - 1 - i, w);
         i += 1;
     }
     return 0;
