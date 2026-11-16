@@ -23,6 +23,44 @@
   (`f32-round-hardware-matches-reference` checks four million words on every target); a result that
   is a NaN is a quiet NaN and its payload bits are not promised.
 
+- The LLVM backend builds programs for AArch64 and RISC-V again. A lifted function the stream
+  declares `.weak` (a generic instance, a drop helper) got a `.globl` entry thunk, which the
+  assembler rejects (`changed binding to STB_GLOBAL`); the thunk now keeps the weak binding. And
+  an AArch64 module is compiled with atomics inline (`-mno-outline-atomics`): clang's default
+  calls `__aarch64_cas8_acq_rel` in libgcc, which a Grail program does not link.
+
+- Fixed: an `extern "C"` call with no arguments that was the first thing in its function left the
+  thread pointer on libc's side in a libc-linked program, so later runtime calls on that thread
+  (starting a thread, for one) read the wrong record.
+
+- Fixed: **a module's compiler run read every interface that happened to be in the build
+  directory.** With modules compiling at the same time that was a race - a run could list and open
+  an interface another run was still writing - and it made what a run read depend on timing and on
+  the file system's listing order. The build now names the modules a run reads (the ones it uses,
+  and theirs: `--use-named`, `--use-module NAME`) and the run reads those, in that order, and
+  nothing else; without the flags a directory is read in name order.
+
+- **Builds are 25x to 180x faster than they were a day ago.** With the release compiler: the
+  compiler compiles itself in 2.9 s (was 73.8 s), a 104k-line program checks in 0.9 s (was 166 s),
+  hello world checks in 0.04 s (was 1.1 s), and 90k lines in 24 modules build cold in 1.4 s.
+  Time is linear in program size. What changed:
+  - `bun tools/native.mjs release` builds the compiler through the LLVM backend (`clang -O2`) and
+    accepts it only if it emits, for the compiler's own sources, exactly what the natively built
+    compiler emits. `compile-bench --release` measures it.
+  - `grail check` stops when its last diagnostic can have been given: no optimiser, nothing written.
+  - A view of a whole vector is the vector's header, not a record (7 in 10 allocations).
+  - The borrow checker walks storage trees, live loans and a loan's bonds instead of every place,
+    loan and bond the function has made; types are interned by hash; the lifetimes a type carries
+    are remembered per type.
+  - The optimiser runs in forked workers, one piece of the stream per processor, with output that
+    does not depend on the number of workers (`GRAIL_JOBS=1` for one process).
+  - Modules compile at the same time, each started when the modules it reads are finished.
+  - With a build store, an optimised function body is remembered and not optimised again.
+  - Tokens carry their line and column: a `--debug` build no longer rescans the source per
+    statement (11.3 s to 2.2 s on 26k lines).
+  New in the language and library on the way: `u8[].append(bytes)`; `host::fork()` and
+  `host::cpus()` (Linux). `docs/design/compile-speed.md` has every measurement.
+
 - `hash::write_byte` states its precondition in its signature (`value: u64 where value < 256`)
   instead of asserting it in its body: a caller that can show the value is a byte pays no check,
   and one that cannot gets the check at its own call, named. It was the standard library's only

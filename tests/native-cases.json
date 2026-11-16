@@ -3102,6 +3102,7 @@
   },
   {
     "name": "raw-module-sized-integer-arithmetic",
+    "targets": ["x86_64"],
     "source": "// A sized integer keeps its stated signedness inside an `unsafe module`, whose other values are\n// untyped words: 0 - 1 is -1, the comparison against 0 is signed, i8 120 + 7 stops at 127.\n// The `extern \"C\"` declaration carries a `cfn` parameter, the shape the report named.\nunsafe module runtime;\nextern \"C\" lib \"c\" fn qsort(base: u64, n: u64, size: u64, cmp: cfn(u64, u64) -> i32) -> unit;\nfn main() {\n    mut x: i32 = 0;\n    x = x - 1;\n    println(x);\n    println(x < 0);\n    mut small: i8 = 120;\n    small = small + 7;\n    println(small);\n    mut wide: i64 = 0;\n    wide = wide - 1;\n    println(wide < 0);\n}\n",
     "stdout": "-1\ntrue\n127\ntrue\n",
     "note": "an unsafe module's untyped words must not swallow a stated i32/i8/i64 signedness"
@@ -10983,5 +10984,17 @@
       "riscv64"
     ],
     "note": "the result of `pop()` is an option, spelled the way it is written"
+  },
+  {
+    "name": "ffi-first-slot-call-restores-thread-pointer",
+    "source": "extern \"C\" lib \"c\" fn getpid() -> i32;\nfn work(n: u64, unused: u64) -> u64 {\n    return n + 1;\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    t := spawn(sc, 41, work);\n    return join(t);\n}\nfn main() {\n    unsafe { println(getpid() != 0); }\n    println(task_scope(0, body));\n}\n",
+    "stdout": "true\n42\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "the foreign call takes main's first stack slot; the thread pointer must be the Grail record again afterwards, or starting the scheduler's threads runs pthread_create on a zero thread pointer"
   }
 ]

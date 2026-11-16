@@ -60,6 +60,16 @@ for i in 1 2 3; do leg x86_64_$i env GRAIL_TEST_SHARD=$i/3 bun tools/test-native
 for arch in aarch64 riscv64; do
   for i in 1 2 3; do leg ${arch}_$i env GRAIL_TEST_SHARD=$i/3 bun tools/test-native.mjs $arch; done
 done
+# The LLVM backend on the emulated targets: the `vec` cases every gate (a minute each; generics,
+# hashmaps and threads go through the weak-symbol and atomics paths that broke there before), and one
+# third of the corpus. The third is derived from the tree being gated, not the date, so the same tree
+# always runs the same cases; the leg's name carries it, so a failure reproduces with
+# `GRAIL_BACKEND=llvm GRAIL_TEST_SHARD=<i>/3 bun tools/test-native.mjs <arch>`.
+xshard=$(( 16#$(git rev-parse 'HEAD^{tree}' | cut -c1) % 3 + 1 ))
+for arch in aarch64 riscv64; do
+  leg llvm_${arch}_vec env GRAIL_BACKEND=llvm bun tools/test-native.mjs $arch --filter vec
+  leg llvm_${arch}_shard${xshard}of3 env GRAIL_BACKEND=llvm GRAIL_TEST_SHARD=$xshard/3 bun tools/test-native.mjs $arch
+done
 for i in 1 2 3; do leg llvm_$i env GRAIL_BACKEND=llvm GRAIL_TEST_SHARD=$i/3 bun tools/test-native.mjs x86_64; done
 for i in 1 2 3; do
   leg vf_$i env GRAIL_BACKEND=llvm GRAIL_RANGE_FACTS=1 GRAIL_VERIFY_FACTS=1 GRAIL_TEST_SHARD=$i/3 bun tools/test-native.mjs x86_64
@@ -77,12 +87,19 @@ wait
 # of the numbers in docs/design/compile-speed.md, which fails only when a compile itself does.
 leg compile-bench bun tools/compile-bench.mjs
 wait
+# Run time against C, one backend at a time on a quiet machine: the numbers the runtime-parity pillar
+# is judged by (docs/design/runtime-parity.md). They fail only when a program's output differs from
+# the C program's.
+leg runtime-bench-native bun tools/bench.mjs --rounds 3
+wait
+GRAIL_BACKEND=llvm leg runtime-bench-llvm bun tools/bench.mjs --rounds 3
+wait
 
 # One line per leg, failures first.
 for f in "$G"/*.log; do
   if rg -q 'exit=[1-9]' "$f"; then echo "FAIL $(basename "$f" .log): $(rg 'AssertionError|error' "$f" | head -1 | cut -c1-120)"; fi
 done > "$G/summary.txt"
 for f in "$G"/*.log; do
-  if rg -q 'exit=0' "$f"; then echo "ok   $(basename "$f" .log): $(rg 'passed|identical|verified|agree|checks|ffi:|facts:|program|compile-bench:' "$f" | tail -1 | cut -c1-100)"; fi
+  if rg -q 'exit=0' "$f"; then echo "ok   $(basename "$f" .log): $(rg 'passed|identical|verified|agree|checks|ffi:|facts:|program|compile-bench:|runtime-bench' "$f" | tail -1 | cut -c1-100)"; fi
 done >> "$G/summary.txt"
 echo done > "$G/DONE"
