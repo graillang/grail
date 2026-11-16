@@ -11045,5 +11045,17 @@
       "riscv64"
     ],
     "note": "the allocator's promise: a payload of 512 bytes or more starts on a 64-byte boundary and every payload on a 16-byte one - before the process has threads, on four threads at once, after blocks were freed on other threads, and for a block with its own mapping as it grows"
+  },
+  {
+    "name": "ffi-first-slot-call-restores-thread-pointer",
+    "source": "extern \"C\" lib \"c\" fn getpid() -> i32;\nfn work(n: u64, unused: u64) -> u64 {\n    return n + 1;\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    t := spawn(sc, 41, work);\n    return join(t);\n}\nfn main() {\n    unsafe { println(getpid() != 0); }\n    println(task_scope(0, body));\n}\n",
+    "stdout": "true\n42\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "the foreign call takes main's first stack slot; the thread pointer must be the Grail record again afterwards, or starting the scheduler's threads runs pthread_create on a zero thread pointer"
   }
 ]

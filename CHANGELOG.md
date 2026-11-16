@@ -1,5 +1,9 @@
 ## Unreleased
 
+- Fixed: an `extern "C"` call with no arguments that was the first thing in its function left the
+  thread pointer on libc's side in a libc-linked program, so later runtime calls on that thread
+  (starting a thread, for one) read the wrong record.
+
 - **A buffer of 512 bytes or more starts on a 64-byte boundary.** Every allocation of that size -
   a vector's storage, a byte buffer, a record that large - is cache-line aligned, on every path and
   every thread; smaller ones stay 16-byte aligned. It costs 32 bytes per megabyte arena and nothing
