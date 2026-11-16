@@ -492,6 +492,32 @@ its value is the address of slot 0. Non-plain records stay boxed; enums until st
 - *3e, the loop.* Compare `aosu` with clang -O2 on the LLVM backend, read the optimised IR of the hot
   loop, fix what is ours; if what remains is the descriptor hoist shared with gaps12-float P2/P3,
   report it with the IR (condition 3).
+*Where 3a stands (handover, 2026-11-16).* Steps 1-2 are built (72f29d3): the kind-3 fact carries
+a word count (`llvm::fact_aggregate`, `facts_pair_widths`), the optimiser keeps every word of such a
+value adjacent and unpromoted, and the lifter makes one `[N x i64]` alloca. Nothing emits the fact
+yet, so output is byte-identical. Steps 3-6 follow the director's switch plan (`--frame-records`, off
+by default until step 6). What designing step 4 showed, for whoever takes it:
+- Word order follows `dyn_pair_slots`: allocate N slots with `fresh`; word 0 is the last one
+  allocated (lowest address), word j is `word0 - j`; the value is `leaq` of word 0; emit
+  `fact_aggregate(facts_fn, word0, N)`. `field_store`/`field_load` then work unchanged.
+- **The drop rule changes with the representation, not later.** Once one plain record can be a frame
+  address, *no* plain record may be freed by its drop helper, because a callee cannot tell a frame
+  record from a box (`fn id(p: P) -> P` returns whatever it was given). So under the switch a plain
+  record's drop helper does nothing, and every box that still holds a plain record must be freed by
+  its holder, not by `drop_call(P)`: the closure environment's field walk, the Mutex cell, the task
+  result and the dyn cell each free the box they made at "box on store". Same for `materialise`'s
+  remaining boxes (C records in the four holders).
+- **Returns cannot wait for 3c.** A frame record returned from a function is a dangling address.
+  Under the switch, a plain result is boxed at `return` (the caller frees it after copying into its
+  own frame) until 3c replaces the box by registers or a destination pointer. Without that, step 4
+  is unsound.
+- The checker needs no change in 3a: a frame record still moves (`needs_drop` stays true for the
+  checker's purposes - split it from the emitter's "is there a box to free" question, which is the
+  `affine`/`needs_drop` split 3d needs anyway; do that split first, inert, as its own commit).
+- Cases to write with the switch on: a record built and read in one function; passed to a callee
+  that reads it; passed to a callee that pushes it; returned (boxed) and pushed; each of the four
+  holders with the source frame gone before the holder is read; the allocator-balance check on all.
+
 Verification per sub-step (the director's load rule): `bun tools/test-selfhost.mjs`, a filtered
 corpus (`unboxed-|record|struct|tuple|closure|mutex|task|dyn|ffi|c-array`, counts reported), test-ffi
 for 3b/3c, interface-test for 3c; callgrind counts after 3a and 3d. Each sub-step is one commit
