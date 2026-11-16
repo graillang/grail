@@ -100,7 +100,7 @@ from. The format version is the first line, so a file written by another compile
 than misread.
 
 ```
- // grail-interface 3
+ // grail-interface 4
  module pair
  source "tests/interfaces/pair.grl"
  sha256 "ad1f2b3cf421decab61ea22f7dfc572fec79a74a3078b3ef330f4e49a94db2d0"
@@ -122,8 +122,17 @@ than misread.
  inherent pair::Pair
  fn sum ((ref [1] (named pair::Pair))) -> u64
  lifetimes 1
+ inherent_type (slice u64)
+ fn total ((slice [1] u64)) -> u64
+ lifetimes 1
  digest "90e9eed4bebaf86f0d546893afa2f78c1b32991c77912ef551fc2b8adde33892"
 ```
+
+`inherent module::Type` describes the methods of a type the module declares; `inherent_type <type>`
+describes the methods of a type no module declares (`impl u8[] { ... }`, `impl<T> T[] { ... }`,
+`impl [u64] { ... }`), so the owner is the type in the same structural spelling as every other type.
+A program that reads either section registers the methods under the same header the source parse
+would, which is what makes the digest-named symbol in the emitting object the one an importer calls.
 
 Types are written in one canonical prefix spelling (`(ref [1] (named pair::Pair))`: kind word, mode
 when it is not 0, regions when there are any, then the payload). A declaration's identity is
@@ -278,6 +287,7 @@ interface that is missing, stale or different from its module stops the build by
 Implemented on `b1-generics`; `tools/interface-test.mjs` section (e) is the proof and this section is
 the record. The interface format went to `// grail-interface 2` for this, and to 3 when pool job
 handles (`Job<T>`, spelled `(job T)`) became expressible, which emptied the not-expressible list.
+It went to 4 when inherent methods on a written type (`inherent_type <type>`) joined the surface.
 
 ### The representation
 

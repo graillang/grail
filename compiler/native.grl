@@ -14791,16 +14791,18 @@ fn inherent_match<a, b>(c: (&a mut C), pattern: u64, actual: u64, map: (&b mut u
 }
 // The type arguments a written-type impl binds for a receiver of type `actual`: (found, map).
 fn inherent_bindings<a>(c: (&a mut C), key: u64, actual: u64) -> (u64, u64[]) {
-    record := impl_record(&mut c, key);
-    if record == 0 {
-        return (0, u64[]);
-    }
     i := key - inherent_type_base();
     if (i == 0) || (c.inherent_types.len() < i) {
         return (0, u64[]);
     }
+    // A key with no parameters need carry no record: the owner pattern then names no parameter, and
+    // there is no bound to satisfy. (The interface reader registers a record only for a generic impl.)
+    record := impl_record(&mut c, key);
+    mut count = 0;
+    if record != 0 {
+        count = c.impl_params[record - 1].tnames.len();
+    }
     pattern := c.inherent_types[i - 1];
-    count := c.impl_params[record - 1].tnames.len();
     mut map = u64[];
     for k in count {
         map.push(NO_TYPE);
@@ -14808,7 +14810,10 @@ fn inherent_bindings<a>(c: (&a mut C), key: u64, actual: u64) -> (u64, u64[]) {
     if !inherent_pattern_fits(&mut c, pattern, actual, &mut map) {
         return (0, u64[]);
     }
-    sets := copy_constraints(&c.impl_params[record - 1].interfaces);
+    mut sets = u64[][];
+    if record != 0 {
+        sets = copy_constraints(&c.impl_params[record - 1].interfaces);
+    }
     for k in count {
         mut bound = map[k];
         if bound == NO_TYPE {
@@ -36705,7 +36710,7 @@ pub fn iface_digest<a>(data: &a [u8]) -> u8[] {
 //
 // Grammar (docs/design/separate-compilation.md has the full description and a worked example):
 //
-//   file      := "// grail-interface 3" NL header+ declaration* "digest " HEX NL
+//   file      := "// grail-interface 4" NL header+ declaration* "digest " HEX NL
 //   type      := WORD [" " MODE] [" " "[" REGIONS "]"] PAYLOAD
 //
 // One word per store kind; MODE and REGIONS are written only when they are not 0 and empty, and the
@@ -38335,8 +38340,15 @@ fn iface_select<a, b, d>(c: (&a mut C), out: (&b u8[]), header_end: u64, spans: 
             if kind == 6 {
                 push_bytes(&mut text, view("method "));
                 owner := spans[k * 6 + 5];
-                push_bytes(&mut text, view(c.decls[owner].name));
-                text.push(32);
+                if inherent_is_type_key(owner) {
+                    // A written-type method a template body mentions: there is no declaration to
+                    // name, so the owner is the type, spelled structurally.
+                    iface_type(&mut text, &mut c, inherent_owner_type(&mut c, owner));
+                    text.push(32);
+                } else {
+                    push_bytes(&mut text, view(c.decls[owner].name));
+                    text.push(32);
+                }
             }
             if kind == 7 {
                 push_bytes(&mut text, view("interface "));
@@ -38351,7 +38363,7 @@ fn iface_module_text<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std: 
     exchange(&mut c.iface_env, u64[]);
     exchange(&mut c.iface_env_names, u8[][]);
     mut out = u8[];
-    push_bytes(&mut out, view("// grail-interface 3\n"));
+    push_bytes(&mut out, view("// grail-interface 4\n"));
     iface_line(&mut out, view("module"), view(m));
     push_bytes(&mut out, view("source "));
     iface_quoted(&mut out, view(path));
@@ -38464,6 +38476,47 @@ fn iface_module_text<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std: 
             iface_emit_func(&mut c, &mut out, method, view(owner), 0);
             visible := c.funcs[method].public;
             iface_span(&mut spans, start, out.len(), 6, method, visible, index);
+        }
+    }
+    // Inherent methods on a *written* type (`impl u8[] { ... }`, `impl<T> T[] { ... }`): the owner
+    // has no declaration to name, so the section spells the type structurally and the reader
+    // registers it under the header it spells. The module that wrote the impl is the one whose
+    // interface carries it.
+    mut written = u64[];
+    mut spelled = u8[][];
+    for i in c.inherent_types.len() {
+        key := inherent_type_base() + i + 1;
+        methods := iface_func_ids(&mut c, view(inherent_type_module(key)));
+        if methods.len() == 0 {
+            continue;
+        }
+        if !same(view(c.funcs[methods[0]].home), view(m)) {
+            continue;
+        }
+        mut owner_text = u8[];
+        iface_type(&mut owner_text, &mut c, c.inherent_types[i]);
+        written.push(key);
+        spelled.push(owner_text);
+    }
+    for i in iface_sort_ids(&spelled, &written).len() {
+        key := iface_sort_ids(&spelled, &written)[i];
+        owner := inherent_type_module(key);
+        methods := iface_func_ids(&mut c, view(owner));
+        head := out.len();
+        // `inherent module::Type` names a declaration; `inherent_type <type>` spells a type no
+        // module declares, in the same structural spelling every other type in the file uses.
+        push_bytes(&mut out, view("inherent_type "));
+        iface_type(&mut out, &mut c, c.inherent_types[key - inherent_type_base() - 1]);
+        iface_emit_impl_params(&mut c, &mut out, key);
+        out.push(10);
+        iface_span(&mut spans, head, out.len(), 5, 0, 0, key);
+        mnames := iface_names_of_funcs(&mut c, &methods);
+        for j in iface_sort_ids(&mnames, &methods).len() {
+            method := iface_sort_ids(&mnames, &methods)[j];
+            start := out.len();
+            iface_emit_func(&mut c, &mut out, method, view(owner), 0);
+            visible := c.funcs[method].public;
+            iface_span(&mut spans, start, out.len(), 6, method, visible, key);
         }
     }
     // Interface declarations and their methods.
@@ -38764,7 +38817,7 @@ fn iface_load<a, b>(c: (&a mut C), path: &a [u8], source_path: &b [u8], phase: u
     if text.len() == 0 {
         iface_refuse(view(path), view("cannot read interface file"));
     }
-    if !iface_starts(view(text), view("// grail-interface 3\n")) {
+    if !iface_starts(view(text), view("// grail-interface 4\n")) {
         if iface_starts(view(text), view("// grail-interface ")) {
             mut version = u8[];
             mut i = 19;
@@ -39378,11 +39431,20 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
             );
         return ();
     }
-    if same(view(word), view("inherent")) {
-        ref := ip_ref(&mut p);
-        found := find_decl_internal(&mut c, view(ip_ref_module(&ref)), view(ip_ref_name(&ref)));
-        if found == 0 {
-            iface_fail(&p, view("inherent methods need a type of the same module"));
+    if same(view(word), view("inherent")) || same(view(word), view("inherent_type")) {
+        // `inherent module::Type` is a declared type's section; `inherent_type <type>` is a written
+        // type's, and the owner is the type the section spells.
+        written := same(view(word), view("inherent_type"));
+        mut found = 0;
+        mut owner_ty = NO_TYPE;
+        if written {
+            owner_ty = iface_parse_type(&mut c, &mut p);
+        } else {
+            ref := ip_ref(&mut p);
+            found = find_decl_internal(&mut c, view(ip_ref_module(&ref)), view(ip_ref_name(&ref)));
+            if found == 0 {
+                iface_fail(&p, view("inherent methods need a type of the same module"));
+            }
         }
         mut params = u64[0];
         mut lifetimes = u64[0];
@@ -39390,12 +39452,43 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
         mut share = u64[0];
         iface_flags(&mut p, &mut params, &mut lifetimes, &mut transfer, &mut share);
         exchange(&mut st.section, 1);
-        exchange(&mut st.owner, found - 1);
+        if written {
+            // The owner type is the section's own: one key per header, as the source parse keys it.
+            key := iface_written_owner(&mut c, owner_ty);
+            exchange(&mut st.owner, key - 1);
+        } else {
+            exchange(&mut st.owner, found - 1);
+        }
         exchange(&mut st.last_func, 0);
         // A section header starts a new declaration: `require`/`bound` lines under it belong to the
         // implementation's own parameters, not to the type declared above it.
         exchange(&mut st.last_decl, 0);
-        iface_impl_record(&mut c, &mut st, found, params[0], lifetimes[0]);
+        if written {
+            // A written section always carries a record, whatever its parameter count: the record is
+            // where `impl_self` finds the owner type and where `bound`/`require` lines land.
+            key := st.owner + 1;
+            exchange(&mut st.impl_first, c.impl_params.len());
+            mut bounds = u64[];
+            mut requirements = u64[][];
+            for i in params[0] {
+                bounds.push(0);
+                requirements.push(u64[]);
+            }
+            c
+                .impl_params
+                .push(
+                    ImplParams {
+                        decl: key,
+                        rnames: u8[][],
+                        tnames: u8[][],
+                        bounds: bounds,
+                        interfaces: requirements,
+                        self_ty: owner_ty,
+                    }
+                );
+        } else {
+            iface_impl_record(&mut c, &mut st, found, params[0], lifetimes[0]);
+        }
         return ();
     }
     if same(view(word), view("interface")) {
@@ -39820,6 +39913,18 @@ fn iface_impl_self<a>(c: (&a mut C), record: u64) -> unit {
     mut item = &mut c.impl_params[record];
     exchange(&mut item.self_ty, self);
     return ();
+}
+// Register the owner type an `inherent (vec ...)` section names. One key per owner type, the same
+// keying the source parse uses, so the methods land in the private module whose digest-named symbol
+// the emitting object defines.
+fn iface_written_owner<a>(c: (&a mut C), ty: u64) -> u64 {
+    for i in c.inherent_types.len() {
+        if same_type(&mut c, c.inherent_types[i], ty) != 0 {
+            return inherent_type_base() + i + 1;
+        }
+    }
+    c.inherent_types.push(ty);
+    return inherent_type_base() + c.inherent_types.len();
 }
 fn iface_impl_record<a>(c: (&a mut C), st: (&a mut IState), owner: u64, params: u64, lifetimes: u64) -> unit {
     exchange(&mut st.impl_first, c.impl_params.len());
