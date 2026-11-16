@@ -1,5 +1,16 @@
 ## Unreleased
 
+- **The native backend's optimiser follows jumps again.** Since 2026-11-13 it read no label a real
+  build mints: `label_number` compared the whole label with the unit prefix instead of its opening,
+  so every `.L<prefix>_<n>` was unnumbered, and a jump's operand was still read in the old
+  `.L<digits>` spelling. Nothing failed - every pass that follows a jump (liveness across a branch,
+  dead code after a jump, the peephole, register promotion's loop weights) took its most
+  conservative answer. Labels and jump operands now go through one reader (`ir::numbered`), which
+  reads `.L<prefix>_<n>` and the per-function `.L<prefix>_<f>_<n>`. `GRAIL_OPT_STATS=1` writes
+  `# grail-jumps <known> <unknown>` before each optimised body, and
+  `tools/test-optimiser-jumps.mjs` holds the compiler's own sources to 99% known (674285 of
+  674319 today; the rest are a hand-written body the optimiser leaves alone and two indirect jumps).
+
 - A build emits a drop helper for each type whose helper something names, in the order they are
   first named, instead of one for every type the compiler interned: the helpers nothing called are
   gone from the assembly, and the set no longer depends on which bodies the compiler had to check.

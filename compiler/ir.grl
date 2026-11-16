@@ -453,24 +453,15 @@ pub fn classify<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64, second: u64)
                 k = 3;
             } else {
                 m = mentions(view(s), a, e);
-                if (c == 46) & (e - a > 2) {
-                    if s[a + 1] == 76 {
-                        mut n = 0;
-                        mut digits = 0;
-                        mut i = a + 2;
-                        while i < e {
-                            d := s[i];
-                            if d < 48 || 57 < d {
-                                break;
-                            }
-                            n = n * 10 + d - 48;
-                            digits += 1;
-                            i += 1;
-                        }
-                        if digits != 0 {
-                            v = n + 1;
-                        }
+                if c == 46 {
+                    // A label, alone (a jump's operand) or with an addressing suffix
+                    // (`.L..(%rip)`): the reading the label's own line gets, so a reference is
+                    // counted against the label whichever way it is made.
+                    mut j = a + 1;
+                    while (j < e) && (alnum(s[j]) || (s[j] == 95)) {
+                        j += 1;
                     }
+                    v = numbered(&mut o, view(s), a, j);
                 }
                 // -N(%rbp) with decimal N is a frame slot.
                 if (c == 45) & (e - a > 7) {
@@ -534,21 +525,11 @@ pub fn label_number<a, b, d>(s: &a [u8], a: u64, e: u64, uprefix: &d [u8]) -> u6
     }
     mut at = a + 2;
     if uprefix.len() != 0 {
-        if !same_range(view(s), at, e, view(uprefix)) | (e <= at + uprefix.len() + 1) {
+        // Opens with `<prefix>_` and has something after it.
+        if !at(view(s), at, view(uprefix)) || (e <= at + uprefix.len() + 1) || (s[at + uprefix.len()] != 95) {
             return 0;
         }
-        mut i = 0;
-        while i < uprefix.len() {
-            if s[at + i] != uprefix[i] {
-                return 0;
-            }
-            i += 1;
-        }
-        at += uprefix.len();
-        if s[at] != 95 {
-            return 0;
-        }
-        at += 1;
+        at += uprefix.len() + 1;
     }
     // One run of digits, or two with `_` between them.
     mut scope = 1;
@@ -573,6 +554,24 @@ pub fn label_number<a, b, d>(s: &a [u8], a: u64, e: u64, uprefix: &d [u8]) -> u6
         return 0;
     }
     return scope * 4294967296 + n + 1;
+}
+
+// A label's number plus one as this body reads it, 0 for a label that is not numbered - for the
+// label's own line and for a jump's operand alike, so the two cannot disagree about a spelling. A
+// second numbering in one body marks the body weird.
+pub fn numbered<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) -> u64 {
+    packed := label_number(view(s), a, e, view(o.uprefix));
+    if packed == 0 {
+        return 0;
+    }
+    scope := packed >> 32;
+    if o.lscope == 0 {
+        exchange(&mut o.lscope, scope);
+    } else if o.lscope != scope {
+        // Two numberings in one body: the numbers are not this body's alone.
+        exchange(&mut o.weird, 1);
+    }
+    return packed & 4294967295;
 }
 
 // The marker line: `.grail_part <unit> <label prefix>`, and the unit fields it sets. 1 when the
@@ -667,17 +666,7 @@ pub fn parse<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) {
         if a < e {
             if s[e - 1] == 58 {
                 op = 100;
-                packed := label_number(view(s), a, e - 1, view(o.uprefix));
-                if packed != 0 {
-                    lab = packed & 4294967295;
-                    scope := packed >> 32;
-                    if o.lscope == 0 {
-                        exchange(&mut o.lscope, scope);
-                    } else if o.lscope != scope {
-                        // Two numberings in one body: the numbers are not this body's alone.
-                        exchange(&mut o.weird, 1);
-                    }
-                }
+                lab = numbered(&mut o, view(s), a, e - 1);
             } else {
                 if s[a] == 46 {
                     op = 101;
@@ -1547,7 +1536,7 @@ fn append<a, b>(out: (&a mut u8[]), t: &b [u8]) {
         out.push(t[i]);
     }
 }
-fn append_num<a>(out: (&a mut u8[]), n: u64) {
+pub fn append_num<a>(out: (&a mut u8[]), n: u64) {
     mut digits = u8[];
     mut v = n;
     if v == 0 {

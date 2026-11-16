@@ -694,6 +694,33 @@ fn jump_target<a>(o: (&a ir::Body), j: u64) -> u64 {
     }
     return t - 1;
 }
+// The self-check behind GRAIL_OPT_STATS=1: one comment line per body, `# grail-jumps <known>
+// <unknown>`, counting the direct jumps the passes will see a target line for and the ones they
+// will not (a label this body does not define, a spelling label_number does not read, or every jump
+// of a body left as written). The passes fall back silently on an unknown target, so a parser that
+// stops recognising the labels the backend mints costs speed and nothing fails; a test sums these
+// over the compiler's own sources (tools/test-optimiser-jumps.mjs).
+fn jump_stats<a>(o: (&a mut ir::Body), last: u64) {
+    if host::env(view("GRAIL_OPT_STATS")).len() == 0 {
+        return ();
+    }
+    mut known = 0;
+    mut unknown = 0;
+    for i in last {
+        if (15 < o.op[i]) & (o.op[i] < 25) & (o.k0[i] == 4) {
+            if (o.weird == 0) && (jump_target(&o, i) < last) {
+                known += 1;
+            } else {
+                unknown += 1;
+            }
+        }
+    }
+    app(&mut o.out, view("# grail-jumps "));
+    ir::append_num(&mut o.out, known);
+    app(&mut o.out, view(" "));
+    ir::append_num(&mut o.out, unknown);
+    app(&mut o.out, view("\n"));
+}
 fn gen_number<a>(o: (&a mut ir::Body), n: u64) -> u64 {
     start := o.gen.len();
     if 9 < n {
@@ -1237,6 +1264,7 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8]) {
         }
     }
     if o.weird != 0 {
+        jump_stats(&mut o, last);
         for i in last {
             emit_line(&mut o, view(s), i);
         }
@@ -1280,6 +1308,7 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8]) {
             }
         }
     }
+    jump_stats(&mut o, last);
     // `jcc L; call rt_abort; L:` is transparent: rt_abort never returns, so L is reached only
     // by the jump with the state that preceded it.
     for i in last {
