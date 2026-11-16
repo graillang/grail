@@ -304,8 +304,13 @@ the first body is a unit like any other.
 body and applied to the run by `fn_apply`, so the bodies of one module can be produced by several
 processes and applied by one.
 
-- **The shape.** After the declaration passes (`par_start`, called before pass 3 walks the files),
-  the module's source is cut into slices of about equal size, counted in bytes over the files in
+- **When the fork happens.** `par_start` only arms the walk. The parent walks the bodies itself,
+  applying hits from the store, and forks when it has compiled `par_threshold` bodies the store did
+  not have (`par_fork`: 1 with no store, 16 with one), cutting only the source still ahead of it.
+  A rebuild after an edit therefore never forks: forking it anyway made workers load and pipe back
+  2,700 hits the parent can load itself, and the compiler's one-body-edit rebuild went from about
+  7 s to 13-14 s; with the lazy fork it is 8-11 s on the same loaded host.
+- **The shape.** At the fork the source still ahead is cut into slices of about equal size, counted in bytes over the files in
   order. The process forks one worker per slice after the first; the copies share its memory until
   they write, so they start with every declaration, signature, interface and the declaration
   surface. Each worker walks pass 3 like the parent, compiles the bodies of its slice into units -

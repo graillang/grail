@@ -1934,7 +1934,9 @@ pub fn optimize_parts<b, c, d, e, m>(s: &b [u8], split: u64, marks: (&mut u64[])
     // Inside a build's jobserver (compiler/jobs.grl) the pieces are as many as there are tokens
     // free now, plus this process's own; the text is the same whatever the count.
     mut js = jobs::open();
+    jobs::phase(view("optimiser-start"));
     cuts := plan(view(s), jobs::workers(&mut js, jobs_for(s.len())));
+    jobs::phase(view("optimiser-plan"));
     mut rest = 0;
     mut parallel = false;
     if cuts.len() > 2 {
@@ -1955,9 +1957,11 @@ pub fn optimize_parts<b, c, d, e, m>(s: &b [u8], split: u64, marks: (&mut u64[])
     o.out.append(s[rest..s.len()]);
     lines_of_interest(view(o.out), tail, &mut lines);
     // Either something inlines, or the markers have to be taken out of a single-file build.
+    jobs::phase(view("optimiser-workers"));
     if (o.inl_names.len() != 0) || (o.marked != 0) {
         inline_calls(&mut o, split, marks, &lines);
     }
+    jobs::phase(view("optimiser-inline"));
     return exchange(&mut o.out, u8[]);
 }
 // Where a piece of the stream starts, and what the optimiser knows on arriving there: the unit it is

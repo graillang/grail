@@ -928,6 +928,12 @@ struct C {
     par_fail: u64,
     par_jobs: jobs::Jobs,
     par_hits: u64,
+    // Armed (par_start) but not forked yet: the walk forks when it has compiled `par_threshold`
+    // bodies the store did not have (par_fork), over the source still ahead of it.
+    par_armed: u64,
+    par_misses: u64,
+    par_threshold: u64,
+    par_sizes: u64[],
     fn_hits: u64,
     fn_filed: u64,
     fn_kept: u64,
@@ -15547,6 +15553,10 @@ fn par_owner<a>(c: (&a C), file: u64, off: u64, n: u64) -> u64 {
     }
     return 0;
 }
+// Before the bodies: whether this run may compile them in parallel, and the source sizes the cuts are
+// made over. Nothing is forked yet: with a store, most bodies of a rebuild are hits, which this
+// process applies itself faster than a worker could send them, so the walk forks only when it has
+// compiled some bodies the store did not have (par_fork) - at once when there is no store.
 fn par_start<a>(c: (&a mut C), files: u64) -> unit {
     if (c.plat != 0) | (c.target != 0) | (c.debug != 0) | (c.backend != 0) | (c.emit_ir != 0) {
         return ();
@@ -15554,25 +15564,15 @@ fn par_start<a>(c: (&a mut C), files: u64) -> unit {
     if (c.fx_any != 0) | (c.exports.len() != 0) | (c.validating != 0) | (c.skip_bodies.len() != 0) {
         return ();
     }
-    slice := host::env(view("GRAIL_BODY_SLICE"));
-    forced := slice.len() != 0;
+    if (jobs::count() < 2) & (host::env(view("GRAIL_BODY_SLICE")).len() == 0) {
+        return ();
+    }
     mut sizes = u64[];
-    mut total = 0;
     mut i = 2;
     while i < files {
         load_file(&mut c, i);
         sizes.push(c.src.len());
-        total += c.src.len();
         i += 1;
-    }
-    mut wanted = jobs::count();
-    if !forced {
-        while (1 < wanted) && (total / wanted < PAR_MIN) {
-            wanted -= 1;
-        }
-    }
-    if wanted < 2 {
-        return ();
     }
     if c.fn_surface.len() == 0 {
         exchange(&mut c.fn_flags, fn_flags_now(&mut c));
@@ -15581,25 +15581,74 @@ fn par_start<a>(c: (&a mut C), files: u64) -> unit {
     if c.fn_surface.len() == 0 {
         return ();
     }
+    exchange(&mut c.par_sizes, sizes);
+    exchange(&mut c.par_armed, 1);
+    exchange(&mut c.par_misses, 0);
+    // With no store every body is compiled, so the first one is reason enough; with one, a rebuild
+    // after an edit compiles a handful and should not pay for workers.
+    mut threshold = 1;
+    if c.fn_dir.len() != 0 {
+        threshold = 16;
+    }
+    if host::env(view("GRAIL_BODY_SLICE")).len() != 0 {
+        threshold = 1;
+    }
+    exchange(&mut c.par_threshold, threshold);
+    return ();
+}
+// The walk is at the body at byte `off` of file `file` and has compiled enough misses: fork workers
+// for the source from here on. 1 in a worker (which skips this body: it is the parent's), 0 here.
+fn par_fork<a>(c: (&a mut C), file: u64, off: u64) -> u64 {
+    exchange(&mut c.par_armed, 0);
+    slice := host::env(view("GRAIL_BODY_SLICE"));
+    forced := slice.len() != 0;
+    // The bytes still ahead, over the files from this one on.
+    mut ahead = u64[];
+    mut total = 0;
+    for k in c.par_sizes.len() {
+        mut n = 0;
+        if file < k + 2 {
+            n = c.par_sizes[k];
+        } else if file == k + 2 {
+            if off < c.par_sizes[k] {
+                n = c.par_sizes[k] - off;
+            }
+        }
+        ahead.push(n);
+        total += n;
+    }
+    mut wanted = jobs::count();
+    if !forced {
+        while (1 < wanted) && (total / wanted < PAR_MIN) {
+            wanted -= 1;
+        }
+    }
+    if wanted < 2 {
+        return 0;
+    }
     mut js = jobs::open();
     j := jobs::workers(&mut js, wanted);
     if j < 2 {
         jobs::give_all(&mut js);
-        return ();
+        return 0;
     }
     exchange(&mut c.par_j, j);
     exchange(&mut c.par_rr, u64(same(view(slice), view("1"))));
-    // Slice k starts at the k-th j-th of the source, counted over the files in order.
+    // Slice k starts at the k-th j-th of what is ahead; slice 0 is this process's, from here.
     for k in j {
         want := total / j * k;
         mut at = 0;
         mut f = 0;
-        while (f + 1 < sizes.len()) && (at + sizes[f] <= want) {
-            at += sizes[f];
+        while (f + 1 < ahead.len()) && (at + ahead[f] <= want) {
+            at += ahead[f];
             f += 1;
         }
+        mut base = 0;
+        if f + 2 == file {
+            base = off;
+        }
         c.par_cut_file.push(f + 2);
-        c.par_cut_off.push(want - at);
+        c.par_cut_off.push(base + want - at);
     }
     exchange(&mut c.par_on, 1);
     exchange(&mut c.par_n, 0);
@@ -15613,7 +15662,7 @@ fn par_start<a>(c: (&a mut C), files: u64) -> unit {
                 host::close(c.par_fds[r]);
             }
             if die & (k == 0) {
-                // The test of a worker that dies holding a token (tools/test-native.mjs).
+                // The test of a worker that dies holding a token (tools/jobs-test.mjs).
                 host::exit(9);
             }
             exchange(&mut c.par_me, k + 1);
@@ -15621,7 +15670,7 @@ fn par_start<a>(c: (&a mut C), files: u64) -> unit {
             exchange(&mut c.par_fds, u64[]);
             exchange(&mut c.par_pids, u64[]);
             exchange(&mut c.par_jobs, jobs::none());
-            return ();
+            return 1;
         }
         host::close(pair[1]);
         if 9223372036854775807 < child {
@@ -15641,7 +15690,7 @@ fn par_start<a>(c: (&a mut C), files: u64) -> unit {
     if c.par_fail != 0 {
         par_fall_back(&mut c, view("a body worker could not be started"));
     }
-    return ();
+    return 0;
 }
 // What worker `k` sent, read and waited for once; its token goes back when it has been waited for.
 fn par_collect<a>(c: (&a mut C), k: u64) -> unit {
@@ -15759,6 +15808,7 @@ fn par_worker_finish<a>(c: (&a mut C)) -> unit {
 }
 // The walk is over: every worker read and waited for, every token back.
 fn par_end<a>(c: (&a mut C)) -> unit {
+    exchange(&mut c.par_armed, 0);
     if c.par_on == 0 {
         return ();
     }
@@ -16331,6 +16381,23 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         } else {
             c.fn_why[FN_UNSPELLED] = c.fn_why[FN_UNSPELLED] + 1;
             c.fn_kept = c.fn_kept + 1;
+        }
+    }
+    // This body was not a hit: when the walk has compiled enough of those, the rest goes to workers.
+    if (c.par_armed != 0) & (pass == 3) & (c.current_spec == 0) & (c.validating == 0) {
+        c.par_misses = c.par_misses + 1;
+        if c.par_threshold <= c.par_misses {
+            if par_fork(&mut c, c.file, at_off) != 0 {
+                // A worker: this body is the parent's.
+                exchange(&mut c.fn_rec, 0);
+                part(&mut c, view(unit));
+                k := c.lunit;
+                if (k != 0) & (k <= c.fnext.len()) {
+                    c.fnext[k - 1] = c.fnext[k - 1] + 1;
+                }
+                skip_braces(&mut c);
+                return ();
+            }
         }
     }
     part(&mut c, view(unit));
@@ -44662,6 +44729,10 @@ pub fn main() -> u64 {
         par_fail: 0,
         par_jobs: jobs::none(),
         par_hits: 0,
+        par_armed: 0,
+        par_misses: 0,
+        par_threshold: 0,
+        par_sizes: u64[],
         fn_hits: 0,
         fn_filed: 0,
         fn_kept: 0,
@@ -45111,6 +45182,7 @@ pub fn main() -> u64 {
             view("--split is implemented for the Linux x86_64 assembler path, without --debug")
         );
     }
+    jobs::phase(view("start"));
     for pass in 3 {
         if pass == 1 {
             if c.plat == 1 {
@@ -45138,7 +45210,11 @@ pub fn main() -> u64 {
                 o(&mut c, view(".text\n"));
             }
         }
+        if pass == 1 {
+            jobs::phase(view("names"));
+        }
         if pass == 2 {
+            jobs::phase(view("declarations"));
             par_start(&mut c, n);
         }
         mut i = 2;
@@ -45167,7 +45243,9 @@ pub fn main() -> u64 {
             if c.par_me != 0 {
                 par_worker_finish(&mut c);
             }
+            jobs::phase(view("bodies"));
             par_end(&mut c);
+            jobs::phase(view("bodies-workers-collected"));
         }
         // The definition sweep for the interfaces read above, once every module's names exist.
         // `--interface` and `--use` both land here; the path each interface came from was recorded
@@ -45223,6 +45301,7 @@ pub fn main() -> u64 {
     // Constants a compile-time call gives that nothing used are evaluated now (C3).
     resolve_all_pending(&mut c);
     emit_specializations(&mut c);
+    jobs::phase(view("specialisations"));
     // A closure body can instantiate a generic (`Some(x)` inside `|| ...`) and a specialisation can
     // create a closure, so the two are emitted to a fixpoint; request files are written once both
     // lists are complete.
@@ -45232,6 +45311,7 @@ pub fn main() -> u64 {
         specs_done = drain_specs(&mut c, specs_done);
         closures_done = emit_closures(&mut c, closures_done);
     }
+    jobs::phase(view("closures"));
     emit_fn_thunk(&mut c);
     emit_drops(&mut c);
     // A drop helper can be the first thing to ask for a generic `Drop` implementation's
@@ -45251,6 +45331,7 @@ pub fn main() -> u64 {
     emit_drops(&mut c);
     fx_end(&mut c);
     // Every body is emitted: the effect claims are settled over the whole call graph.
+    jobs::phase(view("drops-vtables"));
     fx_solve(&mut c);
     fx_report(&mut c);
     if c.skip_bodies.len() != 0 {
@@ -45475,6 +45556,7 @@ pub fn main() -> u64 {
         line.push(10);
         host::print(view(line));
     }
+    jobs::phase(view("front-end-done"));
     if c.check_only != 0 {
         return 0;
     }
@@ -45513,7 +45595,9 @@ pub fn main() -> u64 {
         }
     }
     if site_table_on(&c) {
+        jobs::phase(view("optimised"));
         tabled := site_table(&mut c, view(out));
+        jobs::phase(view("location-table"));
         out = tabled;
     }
     if c.plat == 1 {
