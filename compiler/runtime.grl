@@ -431,6 +431,10 @@ fn rt_fail_body(kind: u64, a: u64, b: u64, buf: u64, n: u64) -> u64 {
         at = rt_fail_num(buf, at, a);
         at = rt_fail_put(buf, at, " does not fit in ");
         at = rt_fail_type(buf, at, b);
+    } else if kind == 16 {
+        at = rt_fail_put(buf, at, "the wait was cancelled");
+    } else if kind == 17 {
+        at = rt_fail_put(buf, at, "mutex poisoned: its holder failed");
     } else {
         at = rt_fail_put(buf, at, "the program aborted");
     }
@@ -483,6 +487,15 @@ fn rt_contain_text(t: u64, kind: u64, msg: u64, site: u64) -> u64 {
 fn rt_contain_tail(t: u64) -> u64 {
     rt_contained_note();
     raw_store(t + 144, 1);
+    // What this stack held is released now, poisoned: no frame of it will run again (rt_held_settle).
+    held := rt_waiter_peek();
+    if held != 0 {
+        mut site = raw_load(t + 184);
+        if (site & 1) == 1 {
+            site = 0; // a re-raised failure carries a text, not a statement
+        }
+        rt_held_settle(held, site);
+    }
     rt_os_ctx_leave(t);
     return 0;
 }
@@ -2648,20 +2661,451 @@ fn rt_atomic_swap(p: u64, value: u64) -> u64 {
     return 0;
 }
 
-// Mutex word: 0 unlocked, 1 locked, 2 locked with possible waiters (Drepper's futex mutex).
-// Waiting sleeps in the kernel; no busy spinning. Payload word follows at offset 8.
+// ---- parking: one way to wait (docs/design/parking.md) ------------------------------------------
+// Everything that waits - a task, a job in its runner task, a thread - waits the same way: its
+// WAITER BLOCK is linked on the queue of the thing it waits for, and it sleeps until a waker sets the
+// block's state. One execution waits for one thing at a time, so the block is part of the waiter's
+// own record and nothing is allocated to wait: a task's is the tail of its record (rt_task_record_
+// size), a thread's hangs off thread-record word 96 (the main thread's is in process state, rt_main_waiter).
+//
+// Waiter block, 7 words:
+//   0 next in the queue   8 state (0 waiting, 1 woken, 2 granted what it waited for)
+//   16 what it asked for (a primitive's own use)   24 the queue's last block (kept in the head)
+//   32 HELD LIST: the locks this execution holds, newest first (rt_held_settle)
+//   40 the task record this block belongs to, 0 for a thread   48 unused
+//
+// A queue is one word in the primitive: the low four bits are the primitive's flags - bit 1 is the
+// queue's own lock - and the rest is the first waiter block (blocks are 16-byte aligned).
+//
+// The protocol, and why each step is there:
+//   wait:  take the queue lock; LOOK AGAIN at the condition (the release may have happened while
+//          this execution was deciding to wait); link the block; drop the lock; sleep until the
+//          state is not 0. A task sleeps in rt_suspend, which does not lose a wake that came first;
+//          a thread sleeps on the state word with the kernel checking that it is still 0.
+//   wake:  under the queue lock: unlink the block, set its state, wake its owner (rt_wake for a
+//          task, a futex wake for a thread).
+//   after: the waiter takes and drops the queue lock once more before it returns. The waker did
+//          its wake under that lock, so from here on no waker can still be touching this block or
+//          this task's record - a task that returned could finish and be freed, and an idle runner
+//          must never be woken. Then the waiter clears a wake that is still pending on its task,
+//          so its next sleep does not return early.
+// A task that waits may resume on another worker: the block names the task record, never a thread.
+// The main thread's waiter block. Process state is only 8-byte aligned and a queue word keeps
+// flags in the low four bits of a block's address, so the block is rounded up to 16 inside the
+// words reserved for it (1920..1984).
+fn rt_main_waiter() -> u64 {
+    return (raw_state() + 1935) & 18446744073709551600;
+}
+fn rt_task_record_size() -> u64 {
+    // 240 bytes of task record and the waiter block, a multiple of 16.
+    return 304;
+}
+// The current execution's waiter block, or 0 for a thread that has none yet. Never allocates.
+fn rt_waiter_peek() -> u64 {
+    t := rt_current();
+    if t != 0 {
+        return t + 240;
+    }
+    tp := raw_tp_get();
+    if tp == 0 {
+        return rt_main_waiter();
+    }
+    return raw_load(tp + 96);
+}
+fn rt_waiter() -> u64 {
+    t := rt_current();
+    if t != 0 {
+        raw_store(t + 280, t);
+        return t + 240;
+    }
+    tp := raw_tp_get();
+    if tp == 0 {
+        return rt_main_waiter();
+    }
+    mut b = raw_load(tp + 96);
+    if b == 0 {
+        if tp == raw_state() + 128 {
+            b = rt_main_waiter();
+        } else {
+            b = rt_alloc(56);
+        }
+        raw_store(tp + 96, b);
+    }
+    return b;
+}
+// A thread that ends gives its block back (rt_thread_main); the main thread's is static.
+fn rt_waiter_free(record: u64) -> u64 {
+    b := raw_load(record + 96);
+    if (b != 0) & (b != rt_main_waiter()) {
+        raw_store(record + 96, 0);
+        rt_free(b);
+    }
+    return 0;
+}
+// The queue lock is a spin lock, and the thread that holds it can be preempted by the OS: nobody
+// may spin on it without bound. A short spin, then the OS thread is yielded each time round.
+fn rt_q_lock(q: u64) -> u64 {
+    mut spins = 0;
+    while true {
+        s := raw_atomic_load(q);
+        if (s & 2) == 0 {
+            if raw_atomic_cas(q, s, s | 2) == s {
+                return 0;
+            }
+        }
+        spins = spins + 1;
+        if 64 < spins {
+            rt_syscall(24, 0, 0, 0);
+        }
+    }
+    return 0;
+}
+// Change the flag bits of a queue word: clear `off`, then set `on`. The flags move under compare-
+// and-swap because a primitive's fast path changes its own bits without the queue lock.
+fn rt_q_flags(q: u64, off: u64, on: u64) -> u64 {
+    while true {
+        s := raw_atomic_load(q);
+        if raw_atomic_cas(q, s, (s & (18446744073709551615 - off)) | on) == s {
+            return s;
+        }
+    }
+    return 0;
+}
+fn rt_q_unlock(q: u64) -> u64 {
+    return rt_q_flags(q, 2, 0);
+}
+fn rt_q_head(q: u64) -> u64 {
+    return raw_atomic_load(q) & 18446744073709551600;
+}
+fn rt_q_set_head(q: u64, b: u64) -> u64 {
+    while true {
+        s := raw_atomic_load(q);
+        if raw_atomic_cas(q, s, (s & 15) | b) == s {
+            return 0;
+        }
+    }
+    return 0;
+}
+// Queue lock held for the four below.
+fn rt_q_push(q: u64, b: u64) -> u64 {
+    raw_store(b, 0);
+    h := rt_q_head(q);
+    if h == 0 {
+        raw_store(b + 24, b);
+        return rt_q_set_head(q, b);
+    }
+    raw_store(raw_load(h + 24), b);
+    raw_store(h + 24, b);
+    return 0;
+}
+fn rt_q_push_front(q: u64, b: u64) -> u64 {
+    h := rt_q_head(q);
+    raw_store(b, h);
+    if h == 0 {
+        raw_store(b + 24, b);
+    } else {
+        raw_store(b + 24, raw_load(h + 24));
+    }
+    return rt_q_set_head(q, b);
+}
+fn rt_q_pop(q: u64) -> u64 {
+    h := rt_q_head(q);
+    if h == 0 {
+        return 0;
+    }
+    next := raw_load(h);
+    if next != 0 {
+        raw_store(next + 24, raw_load(h + 24));
+    }
+    rt_q_set_head(q, next);
+    return h;
+}
+// Take `b` out of the queue wherever it is; 1 when it was there. A waiter that gives up (a
+// deadline, a cancellation) withdraws itself with this - and if a waker got to it first, it is not
+// there and the wake stands.
+fn rt_q_remove(q: u64, b: u64) -> u64 {
+    h := rt_q_head(q);
+    if h == 0 {
+        return 0;
+    }
+    if h == b {
+        rt_q_pop(q);
+        return 1;
+    }
+    mut prev = h;
+    while raw_load(prev) != 0 {
+        at := raw_load(prev);
+        if at == b {
+            raw_store(prev, raw_load(b));
+            if raw_load(h + 24) == b {
+                raw_store(h + 24, prev);
+            }
+            return 1;
+        }
+        prev = at;
+    }
+    return 0;
+}
+// Sleep until a waker sets this block's state; the answer is that state. The block was linked, with
+// state 0, under the queue lock.
+fn rt_park(b: u64, q: u64) -> u64 {
+    owner := raw_load(b + 40);
+    while raw_atomic_load(b + 8) == 0 {
+        if owner != 0 {
+            rt_suspend(owner);
+        } else {
+            rt_syscall(202, b + 8, 128, 0);
+        }
+    }
+    // The waker finished under this lock: nothing of this wait is in flight after it.
+    rt_q_lock(q);
+    rt_q_unlock(q);
+    if owner != 0 {
+        raw_atomic_cas(owner + 24, 3, 0);
+    }
+    return raw_load(b + 8);
+}
+// Wake an unlinked waiter with `state` (1 woken, 2 granted). Queue lock held, and held until this
+// returns: see rt_park.
+fn rt_unpark(b: u64, state: u64) -> u64 {
+    owner := raw_load(b + 40);
+    raw_atomic_store(b + 8, state);
+    if owner != 0 {
+        return rt_wake(owner);
+    }
+    rt_syscall(202, b + 8, 129, 1);
+    return 0;
+}
+
+// ---- Mutex<T> ------------------------------------------------------------------------------------
+// Block: 0 the word (bit 0 locked, bit 1 queue lock, bit 2 poisoned, bit 3 a waiter is owed the
+// lock, the rest the queue), 8 the payload, 16 the next lock its holder holds (held list), 24 the
+// statement that failed while holding it (a site-table entry; 0 when not poisoned or not known).
+//
+// An uncontended lock or unlock is one compare-and-swap. A lock that is held is tried a few dozen
+// times more - most holds are shorter than a sleep - and then the caller parks: no yield loop, so
+// waiters cost nothing while they wait.
+//
+// Unlock is BARGING WITH A BOUND. It clears the lock and wakes the first waiter, which then
+// competes with whoever arrives; handing the lock straight to the waiter would leave it idle from
+// the unlock until that waiter is actually running, on every contended acquisition. A waiter that
+// is woken and loses asks for the lock by name (bit 3, and it queues at the front): the next unlock
+// passes ownership to it directly and new arrivals queue behind. So a waiter loses at most once.
 fn rt_mutex_new(value: u64) -> u64 {
-    p := rt_alloc(16);
-    raw_atomic_store(p, 0);
+    p := rt_alloc(32);
     raw_store(p + 8, value);
     return p;
 }
-fn rt_mutex_unlock(p: u64) -> u64 {
-    if rt_atomic_fetch_sub(p, 1) != 1 {
-        raw_atomic_store(p, 0);
-        rt_syscall(202, p, 129, 1);
+fn rt_mutex_try(p: u64) -> u64 {
+    s := raw_atomic_load(p);
+    if (s & 9) != 0 {
+        return 0;
+    }
+    return raw_atomic_cas(p, s, s | 1) == s;
+}
+fn rt_mutex_acquire(p: u64) -> u64 {
+    if rt_mutex_try(p) {
+        return 0;
+    }
+    mut i = 0;
+    while i < 40 {
+        if rt_mutex_try(p) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    b := rt_waiter();
+    mut lost = 0;
+    while true {
+        rt_q_lock(p);
+        // Look again, under the queue lock: an unlock that found no waiter has already gone.
+        mut got = 0;
+        while true {
+            s := raw_atomic_load(p);
+            if (s & 9) != 0 {
+                break;
+            }
+            if raw_atomic_cas(p, s, s | 1) == s {
+                got = 1;
+                break;
+            }
+        }
+        if got {
+            rt_q_unlock(p);
+            return 0;
+        }
+        raw_atomic_store(b + 8, 0);
+        if lost {
+            rt_q_flags(p, 0, 8);
+            rt_q_push_front(p, b);
+        } else {
+            rt_q_push(p, b);
+        }
+        rt_q_unlock(p);
+        if rt_park(b, p) == 2 {
+            return 0;
+        }
+        if rt_mutex_try(p) {
+            return 0;
+        }
+        lost = 1;
     }
     return 0;
+}
+fn rt_mutex_release(p: u64) -> u64 {
+    while true {
+        s := raw_atomic_load(p);
+        if (s & 18446744073709551610) != 0 {
+            break;
+        }
+        // No waiter, no queue lock held, nobody owed the lock.
+        if raw_atomic_cas(p, s, s & 4) == s {
+            return 0;
+        }
+    }
+    rt_q_lock(p);
+    b := rt_q_pop(p);
+    if b == 0 {
+        rt_q_flags(p, 9, 0);
+    } else {
+        if (raw_atomic_load(p) & 8) != 0 {
+            // Owed: the lock stays locked and changes hands.
+            rt_q_flags(p, 8, 0);
+            rt_unpark(b, 2);
+        } else {
+            rt_q_flags(p, 1, 0);
+            rt_unpark(b, 1);
+        }
+    }
+    rt_q_unlock(p);
+    return 0;
+}
+// ---- what an execution holds, and what happens to it when the execution fails ------------------
+// A failed check discards its stack whole: no frame runs its unlock. So every execution keeps a
+// list of the locks it holds (waiter block word 32; a mutex's link is word 16 of its own block,
+// since it has one holder), and the one place a failing stack is left - rt_contain_tail - settles
+// the list before it switches away: each mutex is POISONED with the failing statement's site and
+// released. A later lock_with fails its caller with a message that names that statement
+// (rt_mutex_lock); sync::recover_with gives access anyway and clears the poison. The walk is a
+// function of its own so that a failure contained somewhere else (a job's, when that is contained)
+// can call it.
+fn rt_held_push(p: u64) -> u64 {
+    b := rt_waiter();
+    raw_store(p + 16, raw_load(b + 32));
+    raw_store(b + 32, p);
+    return 0;
+}
+fn rt_held_pop(p: u64) -> u64 {
+    b := rt_waiter_peek();
+    if b == 0 {
+        rt_abort();
+    }
+    if raw_load(b + 32) == p {
+        raw_store(b + 32, raw_load(p + 16));
+        return 0;
+    }
+    mut at = raw_load(b + 32);
+    while at != 0 {
+        if raw_load(at + 16) == p {
+            raw_store(at + 16, raw_load(p + 16));
+            return 0;
+        }
+        at = raw_load(at + 16);
+    }
+    rt_abort();
+    return 0;
+}
+// Whether the current execution holds any lock. The scheduler asks before it lets a waiting
+// execution help with other jobs: one that holds a lock parks instead, because a job it helped
+// with might want that lock. Never allocates.
+fn rt_holds_any() -> u64 {
+    b := rt_waiter_peek();
+    if b == 0 {
+        return 0;
+    }
+    return raw_load(b + 32) != 0;
+}
+// `site` is the failing statement's site-table entry, or 0.
+fn rt_held_settle(b: u64, site: u64) -> u64 {
+    while raw_load(b + 32) != 0 {
+        p := raw_load(b + 32);
+        raw_store(b + 32, raw_load(p + 16));
+        if (raw_atomic_load(p) & 4) == 0 {
+            raw_store(p + 24, site);
+        }
+        rt_q_flags(p, 0, 4);
+        rt_mutex_release(p);
+    }
+    return 0;
+}
+// A failure with a message the runtime wrote: contained by a task or a dedicated thread, fatal
+// anywhere else - the rules of rt_task_fail, which is this with the program's own text.
+fn rt_fail_message(kind: u64, msg: u64) -> u64 {
+    t := rt_containable();
+    if t != 0 {
+        return rt_contain_site(t, kind, 0, 0, rt_site_here(t + 200), msg);
+    }
+    if rt_abort_begin() == 0 {
+        rt_abort_park();
+    }
+    return rt_report_die(msg, rt_fail_site_full());
+}
+fn rt_mutex_poisoned(p: u64) -> u64 {
+    s := rt_new();
+    rt_reserveb(s, 600);
+    buf := raw_load(s);
+    mut n = rt_fail_put(buf, 0, "mutex poisoned: its holder failed");
+    site := raw_load(p + 24);
+    if site != 0 {
+        n = rt_fail_line(buf, n, site, " at ");
+        // The location line ends in a newline; the message is one line.
+        if (n != 0) & (raw_byte(buf + n - 1) == 10) {
+            n = n - 1;
+        }
+    }
+    raw_store(s + 8, n);
+    return rt_fail_message(17, s);
+}
+fn rt_mutex_lock(p: u64) -> u64 {
+    rt_mutex_acquire(p);
+    if (raw_atomic_load(p) & 4) != 0 {
+        rt_mutex_release(p);
+        return rt_mutex_poisoned(p);
+    }
+    return rt_held_push(p);
+}
+fn rt_mutex_unlock(p: u64) -> u64 {
+    rt_held_pop(p);
+    return rt_mutex_release(p);
+}
+// sync::try_lock_with: 1 with the lock held, 0 when it is held by someone else. A poisoned mutex
+// fails the caller here too - "not available" would hide it.
+fn f_host_mutex_try_lock(p: u64) -> u64 {
+    if rt_mutex_try(p) == 0 {
+        return 0;
+    }
+    if (raw_atomic_load(p) & 4) != 0 {
+        rt_mutex_release(p);
+        return rt_mutex_poisoned(p);
+    }
+    rt_held_push(p);
+    return 1;
+}
+fn f_host_mutex_unlock(p: u64) -> u64 {
+    return rt_mutex_unlock(p);
+}
+// sync::recover_with: the lock, poisoned or not; its unlock clears the poison.
+fn f_host_mutex_lock_recover(p: u64) -> u64 {
+    rt_mutex_acquire(p);
+    return rt_held_push(p);
+}
+fn f_host_mutex_unlock_recover(p: u64) -> u64 {
+    rt_q_flags(p, 4, 0);
+    raw_store(p + 24, 0);
+    return rt_mutex_unlock(p);
+}
+fn f_host_mutex_poisoned(p: u64) -> u64 {
+    return (raw_atomic_load(p) & 4) != 0;
 }
 
 // ---- worker threads (structured fork-join only; see docs/design/structured-parallelism.md) ----
@@ -2703,7 +3147,8 @@ fn rt_thread_spawn_detached(entry: u64, arg: u64) -> u64 {
 // 32 arg, 40 TID word of a persistent thread, 48 Windows wait value, 56 host TLS base, 64 the
 // thread's allocator cache (rt_cache_make; 0 until it allocates), 72 frees made with no cache
 // (rt_cache_for_free), 80 the record of the dedicated thread whose closure this thread is running
-// (rt_uthread_main; 0 on every other thread), 88 the thread's locals (rt_locals), 96..120 unused}. Word 24 is
+// (rt_uthread_main; 0 on every other thread), 88 the thread's locals (rt_locals), 96 the thread's
+// waiter block (rt_waiter; 0 until it waits or holds a lock), 104..120 unused}. Word 24 is
 // the entry only until rt_thread_main has read it; a scheduler worker then stores a non-zero
 // marker there so rt_abort_signals can tell a runtime worker from any other thread. Word 56 is this thread's libc TCB,
 // which every foreign call made on the thread switches to (0: there is none, the call runs on the
@@ -2796,6 +3241,7 @@ fn rt_thread_main(record: u64) -> u64 {
     raw_store(record, record);
     raw_tp_set(record);
     raw_call2(raw_load(record + 24), raw_load(record + 32), 0);
+    rt_waiter_free(record);
     rt_cache_retire(record);
     return 0;
 }
@@ -2818,7 +3264,7 @@ fn rt_thread_main(record: u64) -> u64 {
 //   96 finished (futex word)
 //   104 ownership: 0 running and joinable, 1 detached, 2 finished, 3 result kept for a joiner
 //   112 start latch (futex word: 0 starting, 1 running, 2 refused)   120 why it was refused
-//   128 affinity words in use (0: unpinned)   144 completed   152 priority (0 normal, 1 background,
+//   128 affinity words in use (0: unpinned)   136 the joiners' queue (rt_q_*)   144 completed   152 priority (0 normal, 1 background,
 //   2 high, 3 + p realtime p)   160..192 failure   200..239 site scratch
 //   256..383 affinity mask, 16 words   384..399 name, NUL-terminated (15 bytes shown by Linux)
 // A refusal is attribute * 65536 + errno: attribute 1 stack, 2 affinity, 3 priority, 4 no threads
@@ -2917,8 +3363,18 @@ fn rt_uthread_main(rec: u64) -> u64 {
         rt_atomic_fetch_sub(rt_detached_word(), 1);
         return 0;
     }
+    // Finished is published under the joiners' queue lock, and each joiner is woken under it: a
+    // joiner frees this record only after its own pass through that lock (rt_park).
+    rt_q_lock(rec + 136);
     raw_atomic_store(rec + 96, 1);
-    rt_syscall(202, rec + 96, 129, 2147483647);
+    while true {
+        joiner := rt_q_pop(rec + 136);
+        if joiner == 0 {
+            break;
+        }
+        rt_unpark(joiner, 1);
+    }
+    rt_q_unlock(rec + 136);
     return 0;
 }
 // The closure, on the thread's mapped stack. The library's wrapper stores the result itself
@@ -2973,22 +3429,21 @@ fn f_host_thread_detach(rec: u64) -> u64 {
 fn rt_detached_word() -> u64 {
     return raw_state() + 56;
 }
-fn rt_uthread_wait_now(rec: u64, unused: u64) -> u64 {
-    while raw_atomic_load(rec + 96) == 0 {
-        rt_syscall(202, rec + 96, 128, 0);
-    }
-    return 0;
-}
-// Wait for the thread's closure to end; the answer is the failure kind, 0 when it returned. A green
-// task hands the wait to a helper thread and parks (rt_blocking_call), so its worker keeps running
-// other tasks; any other caller blocks in the kernel.
+// Wait for the thread's closure to end; the answer is the failure kind, 0 when it returned. The
+// caller parks on the thread record's queue (word 136): a task's worker keeps running other tasks,
+// a thread sleeps in the kernel, and no helper thread is involved.
 fn f_host_thread_wait(rec: u64) -> u64 {
-    if raw_atomic_load(rec + 96) == 0 {
-        if rt_task_threads() {
-            rt_uthread_wait_now(rec, 0);
-        } else {
-            rt_blocking_call(rt_uthread_wait_now, rec, 0);
+    b := rt_waiter();
+    while raw_atomic_load(rec + 96) == 0 {
+        rt_q_lock(rec + 136);
+        if raw_atomic_load(rec + 96) != 0 {
+            rt_q_unlock(rec + 136);
+            break;
         }
+        raw_atomic_store(b + 8, 0);
+        rt_q_push(rec + 136, b);
+        rt_q_unlock(rec + 136);
+        rt_park(b, rec + 136);
     }
     return raw_load(rec + 160);
 }
@@ -3145,6 +3600,7 @@ fn rt_thread_join(handle: u64) -> u64 {
 //   768..832     allocator bin bump           rt_grow                    --
 //   1280..1344   allocator bin remaining      rt_grow                    --
 //   1792..1896   thread-cache chains, per bin rt_chain_give              thread-alloc
+//   1920..1984   main thread's waiter block   rt_main_waiter             parking
 //   2048..2672   sampling profiler block      rt_prof_words              --
 //   3200         jobs block (ring, records)   rt_state_jobs              one-scheduler
 //   3216         glibc thread bridge          rt_state_host_thread       ffi-threads
@@ -4298,10 +4754,10 @@ fn rt_region_step(task: u64, thread: u64) -> u64 {
 fn rt_runner_new() -> u64 {
     j := raw_load(rt_state_jobs());
     rt_spin_lock(j + 24);
-    t := rt_job_carve(j, 56, 256);
+    t := rt_job_carve(j, 56, rt_task_record_size());
     rt_spin_unlock(j + 24);
     mut i = 0;
-    while i < 256 {
+    while i < rt_task_record_size() {
         raw_store(t + i, 0);
         i += 8;
     }
@@ -4474,29 +4930,6 @@ fn rt_yield() -> u64 {
     rt_os_ctx_leave(t);
     return 0;
 }
-// Mutex acquisition from a green task yields instead of blocking its worker, so a holder that
-// suspended (for I/O) can always resume on some worker.
-fn rt_mutex_lock(p: u64) -> u64 {
-    if (rt_current() != 0) & (rt_task_threads() == 0) {
-        while raw_atomic_cas(p, 0, 1) != 0 {
-            rt_yield();
-        }
-        return 0;
-    }
-    mut state = raw_atomic_cas(p, 0, 1);
-    if state == 0 {
-        return 0;
-    }
-    if state != 2 {
-        state = rt_atomic_swap(p, 2);
-    }
-    while state != 0 {
-        rt_syscall(202, p, 128, 2);
-        state = rt_atomic_swap(p, 2);
-    }
-    return 0;
-}
-
 // ---- structured task scopes ----
 // Scope words: 0 self (a scope reference points here), 8 cancel flag, 16 context, 24 tasks.
 fn rt_scope_begin(context: u64) -> u64 {
@@ -4541,7 +4974,7 @@ fn rt_cancel(s: u64) -> u64 {
 // A failed task has no result: word 80 is never written and its dropper is never called.
 fn rt_task_spawn(s: u64, f: u64, item: u64, arity: u64, dropper: u64) -> u64 {
     // Word 152 holds the task's OS thread handle in thread-per-task mode (0 in green mode).
-    t := rt_alloc(240);
+    t := rt_alloc(rt_task_record_size());
     raw_store(t + 40, f);
     raw_store(t + 48, item);
     raw_store(t + 56, raw_load(s + 16));

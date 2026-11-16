@@ -1,0 +1,70 @@
+module sync;
+use host;
+
+// ---- waiting, and the Mutex operations beside `lock_with` ----------------------------------------
+//
+// Everything in the runtime that waits - for a lock, for a thread to end - parks: a task gives its
+// worker to other tasks, a thread sleeps in the kernel, and neither burns a processor while it
+// waits (docs/design/parking.md). `Mutex<T>` is the builtin it always was, and `m.lock_with(ctx, f)`
+// is unchanged in shape. This module adds the forms a builtin method would otherwise have to be:
+//
+//     sync::try_lock_with(&m, ctx, f)   run `f` if the lock is free right now; `None` if it is held
+//     sync::recover_with(&m, ctx, f)    run `f` on a POISONED mutex too, and clear the poison
+//     sync::is_poisoned(&m)
+//
+// POISON. A check that fails inside `lock_with` on a task or a spawned thread discards that stack
+// whole - the unlock in it never runs. The runtime knows what the failed execution held: it
+// releases the mutex and marks it poisoned, because the payload may be half-written. The next
+// `lock_with` (or `try_lock_with`) fails ITS caller, with a message that names the statement where
+// the first failure happened. `recover_with` is how a program that can put the payload right says
+// so: it is given the payload whatever its state and the mutex is clean again when `f` returns.
+//
+// The callbacks are function values taking `(&mut payload, context)`, as `lock_with`'s is. The
+// payload reference cannot outlive the call: a callback that returns it or stores it in the context
+// does not type-check against these signatures.
+
+// The mutex block behind a `&Mutex<T>`: the reference is the address of the word that holds it.
+fn block<a, T>(m: (&a Mutex<T>)) -> u64 {
+    unsafe {
+        return ptr_of(m).cast(u64).read();
+    }
+}
+// The payload, borrowed for as long as the mutex reference; every caller holds the lock.
+fn payload<a, T>(m: (&a Mutex<T>), at: u64) -> (&a mut T) {
+    unsafe {
+        return ptr_from_addr(T, at + 8).as_mut();
+    }
+}
+
+pub fn try_lock_with<a, T, C, R>(m: (&a Mutex<T>), ctx: C, f: fn((&mut T), C) -> R) -> R? {
+    at := block<T>(m);
+    unsafe {
+        if host::mutex_try_lock(at) == 0 {
+            return None;
+        }
+    }
+    r := f(payload<T>(m, at), ctx);
+    unsafe {
+        host::mutex_unlock(at);
+    }
+    return Some(r);
+}
+
+pub fn recover_with<a, T, C, R>(m: (&a Mutex<T>), ctx: C, f: fn((&mut T), C) -> R) -> R {
+    at := block<T>(m);
+    unsafe {
+        host::mutex_lock_recover(at);
+    }
+    r := f(payload<T>(m, at), ctx);
+    unsafe {
+        host::mutex_unlock_recover(at);
+    }
+    return r;
+}
+
+pub fn is_poisoned<a, T>(m: (&a Mutex<T>)) -> bool {
+    at := block<T>(m);
+    unsafe {
+        return host::mutex_poisoned(at) != 0;
+    }
+}
