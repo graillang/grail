@@ -110,6 +110,9 @@ What the waiter sees:
   poisoned. `sync::lock_until`, `read_until`, `write_until` are the cancellable forms.
 - `join` (of a task or a thread) is not cancellable: it is how a scope winds down.
 - A thread has no scope and is never cancelled; it has deadlines.
+- A job (any wait inside a parallel region) does not wake for its scope's cancellation: a job runs
+  inline on its forker's stack or stolen on a runner, and both must behave alike; it asks
+  (`pool::cancelled()`), and a failing stack's drain is never cut short.
 
 ## The `sync` types
 

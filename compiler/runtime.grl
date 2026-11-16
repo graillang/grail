@@ -2867,7 +2867,14 @@ fn rt_park(b: u64, q: u64) -> u64 {
 }
 fn rt_park_until(b: u64, q: u64, until: u64, flags: u64) -> u64 {
     owner := raw_load(b + 40);
-    cancellable := ((flags & 1) != 0) & (owner != 0);
+    // Inside a parallel region (task word 152) a wait is a job's, and a job does not observe its
+    // scope's cancellation by waking: it asks (pool::cancelled). A job runs inline on its forker's
+    // stack or stolen on a runner whose token never fires, and the two must behave alike; and a
+    // failing stack's drain must not be cut short.
+    mut cancellable = 0;
+    if ((flags & 1) != 0) & (owner != 0) {
+        cancellable = raw_load(owner + 152) == 0;
+    }
     mut token = 0;
     if cancellable {
         token = raw_load(owner + 72);
@@ -3196,6 +3203,10 @@ fn rt_held_settle(b: u64, site: u64) -> u64 {
 // A failure with a message the runtime wrote: contained by a task or a dedicated thread, fatal
 // anywhere else - the rules of rt_task_fail, which is this with the program's own text.
 fn rt_fail_message(kind: u64, msg: u64) -> u64 {
+    j := rt_job_failing();
+    if j != 0 {
+        return rt_job_fail(j, kind, 0, 0, rt_site_here(j + 200) & 18446744073709551614, msg, 0);
+    }
     t := rt_containable();
     if t != 0 {
         return rt_contain_site(t, kind, 0, 0, rt_site_here(t + 200), msg);
@@ -3680,6 +3691,10 @@ fn rt_sleep_for(ms: u64, flags: u64) -> u64 {
     if (t == 0) | rt_task_threads() | (rt_os_reactor() == 0) {
         rt_sleep_plain(ms);
         return 0;
+    }
+    if raw_load(t + 152) != 0 {
+        // A job's sleep: not cancellable (rt_park_until), but still parked on the timer.
+        return rt_sleep_job(t, ms);
     }
     token := raw_load(t + 72);
     raw_atomic_store(t + 128, 1);
@@ -6200,6 +6215,20 @@ fn rt_sleep_now(spec: u64, unused: u64) -> u64 {
 }
 fn f_host_sleep_ms(ms: u64) -> u64 {
     return rt_sleep_for(ms, 3);
+}
+fn rt_sleep_job(t: u64, ms: u64) -> u64 {
+    s := rt_sched();
+    if rt_os_timer(s, t, ms) != 0 {
+        rt_sleep_plain(ms);
+        return 0;
+    }
+    until := f_host_now_ms() + ms;
+    while f_host_now_ms() < until {
+        rt_suspend(t);
+    }
+    rt_os_timer_done(s, t);
+    raw_atomic_cas(t + 24, 3, 0);
+    return 0;
 }
 // The sleep with no task to park: this thread sleeps, or a helper does while the task parks.
 fn rt_sleep_plain(ms: u64) -> u64 {
