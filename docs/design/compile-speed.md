@@ -196,8 +196,55 @@ whatever the number of workers, because the one thing that depended on the funct
 the numbering of the optimiser's own labels - now depends only on where a function stands in its
 unit (`ir::function_begin`). `GRAIL_JOBS=1` keeps it in one process.
 
-What is still one process after it: the front end, the inlining pass, the location table and the
-merge. Those are what a build costs now.
+What is still one process after it: the front end, the location table and the merge. The inlining
+pass no longer scans the stream: the workers note where the call lines of their pieces are, and the
+pass visits those.
+
+### Modules compile at the same time
+
+`grail build` runs one compiler process per module and starts each as soon as the modules it reads
+are finished; what the build records - objects, link inputs, the cache report - is still taken in
+the order a build of one module at a time takes it, so the image does not depend on the scheduling.
+A module's cache key names only the interfaces it can read (its dependencies and theirs), which is
+also what makes the key the same from one build to the next. 90k lines in 24 modules: 16.9 s one at
+a time, 4.0 s together, on the natively built compiler.
+
+### An optimised body is remembered
+
+What the optimiser makes of a body is a function of the body's lines, its facts and its place in
+its unit. With a build store the result is filed under a hash of those, so a body that has not
+changed since some earlier build is not optimised again. It removes CPU time, not much wall time,
+now that the optimiser is spread over every core: what an edit costs is the front end.
+
+### Where that leaves the numbers
+
+Release compiler, best of three, one 24-core host; "baseline" is the tree before any of this.
+
+| | baseline | now |
+| --- | --- | --- |
+| check hello | 1.12 s | 0.037 s |
+| check, N = 1000 (26k lines) | 16.7 s | 0.22 s |
+| check, N = 4000 (104k lines) | 165.9 s | 0.91 s |
+| `t4000 / t1000` | about 10 | 4.16 |
+| check generic (2,000 specialisations) | refused | 0.26 s |
+| self-compile (80k lines) | 73.8 s | 2.86 s |
+| build, 90k lines in 24 modules, cold | - | 1.36 s |
+| build hello after an edit | 1.25 s | 0.14 s |
+
+The natively built compiler, which the tests run, self-compiles in 12.6 s and checks itself in 7.0 s.
+
+### What a build still costs, and what is being done about it
+
+- **An edit recompiles its module's front end.** The per-function cache exists and reuses almost
+  nothing: a body is not filed when it registers a drop helper or a specialisation, and its key
+  names the line and the label numbers it starts at, so an edit above it is a miss. Making units
+  position-independent and their registrations replayable is the next piece of work.
+- **The front end is one process.** Bodies are independent once signatures are known; the plan is
+  the same as the optimiser's - forked workers over pieces of the declaration list - and it needs
+  the same thing first: labels that do not depend on the bodies before.
+- **Allocation is still about a third of the front end**: accessors that copy a type's argument
+  list, a heap record per value. That is the unboxed-values work (docs/design/unboxed-values.md).
+- **The assembler and the linker** are most of a small edit's 0.14 s.
 
 ## The order of the remaining work
 

@@ -114,6 +114,81 @@ the pattern `[i]` on a shared reference needs, and the body is scanned for anyth
 the bound stale before it is used. Folding that into the fact set is the next step, and the fact
 walker already refuses to reuse a shadowed name.
 
+## Arithmetic in a predicate: sound under wrapping, in every build (design, 2026-11-16)
+
+Decided: integer arithmetic is checked in development builds and wraps in release builds
+(`docs/design/runtime-parity.md`). A proof must therefore not depend on which it is. Before this
+design the prover read a constant offset (`i + 1 < n`) only in a checked build, where an overflow
+has already stopped the program, and read nothing with an offset in a wrap build; so a `@strict`
+program could compile in one mode and be refused in the other. **The rule now: what is accepted is
+decided as if arithmetic could wrap (so a proof needs evidence that it does not) and as if it could
+trap (so `@no_panic` needs evidence that it does not). Both builds accept exactly the same
+programs; the trap is only an extra check in a development build.**
+
+### What an atom means
+
+An atom `a REL b + k` is a statement over the integers about the *values* of the terms `a` and `b`
+(each in `[0, 2^64)`), with `k` an integer. That is unchanged. What changes is when a source
+expression with an offset may be turned into one.
+
+A source side `t + c` or `t - c` (`t` a term, `c` a literal) denotes, at run time, the wrapped value
+`(t +- c) mod 2^64`. It equals the integer `t +- c` exactly when:
+
+- `NW+(t, c)`: `t + c <= 2^64 - 1`. Established from the facts when some term `y` has
+  `t <= y - c` (every term is at most `2^64 - 1`), in particular `t < y` for `c = 1`; or when `t` is
+  itself a literal and the sum fits.
+- `NW-(t, c)`: `t >= c`. Established when the facts give `c <= t` (a literal lower bound: `0 < t`,
+  `t >= 3`, `t != 0` where that is a fact the graph has).
+
+### Reading a comparison (a fact from a condition, or a callee's predicate)
+
+For each side that carries an offset:
+
+1. If the no-wrap condition for it follows from the facts in scope, the side is normalised: the
+   term is `t` and the offset moves into `k`, as it does today.
+2. Otherwise the side is an **opaque term**: the whole expression, spelled canonically (`i+1`,
+   `v.len-1`), is the term, with offset 0. A fact about it is a fact about the value that expression
+   has, wrapped or not, so it is always sound; it proves an obligation that names the same
+   expression, and nothing else.
+
+An opaque term mentions its base: a write to `i` kills every fact naming `i+1` (`pv_mentions`).
+
+So `while i + 1 < v.len() { get(&v, i + 1); }` is proved in both builds without knowing that
+`i + 1` does not wrap: fact and obligation name the same value. And
+`for i in v.len() { if i > 0 { get(&v, i - 1); } }` is proved by normalising: `0 < i` gives
+`NW-(i, 1)`, and `i - 1 < v.len()` follows from `i < v.len()`.
+
+### An argument with an offset
+
+The parameter stands for the wrapped value of the argument. If the argument's no-wrap condition
+holds, it is the term with an integer offset (today's mechanism); otherwise it is the opaque term.
+A predicate offset applied on top (`where p + 1 < n` called with `i - 1`) is the integer
+`i - 1 + 1` only if each step is known not to wrap: the argument's own condition, then the
+condition for the combined offset (`NW+` if the total is positive, `NW-` if negative, nothing if
+zero).
+
+### What a development build adds
+
+Nothing to the prover. A development build traps on overflow, which only makes more executions
+stop; it never makes an accepted program wrong. The one place the mode used to help - "the
+arithmetic would have trapped, so the offset is exact" - is gone, and with it the difference
+between the builds.
+
+### `@no_panic` and the other effects
+
+An arithmetic operation that could overflow is a possible failure of the function in *both* builds:
+the claim is about the program, not about a build of it. So where a development build would emit an
+overflow check, the effect analysis records "may fail" unless the facts prove the operation cannot
+overflow (`hi - lo` with `lo <= hi`; an addition bounded by `NW+`), whether or not the check is
+emitted. A release build emits no check and accepts no more `@no_panic` functions than a
+development build does.
+
+### What does not change
+
+Sized and signed integers keep whatever the prover does for them today (the conditions above are
+stated for `u64` terms; another width gets them only where the same argument is made for its range).
+The `--verify-facts` mode keeps every check and must still find no fired proof.
+
 ## Verification
 
 A `--use DIR` build is the one place a proof is not available: the interface carries the predicate's

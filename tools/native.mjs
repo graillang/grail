@@ -1,7 +1,7 @@
 // Build/test orchestration only. Language checking and instruction selection live in Grail.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, statSync, accessSync, constants as fsConstants } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, renameSync, rmSync, statSync, accessSync, constants as fsConstants } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { constants as zlibConstants, zstdCompressSync, zstdDecompressSync } from 'node:zlib';
@@ -18,10 +18,24 @@ export const hostTarget = ({ x64: 'x86_64', arm64: 'aarch64', riscv64: 'riscv64'
 export const compilerSources = ['native', 'lexer', 'ownership', 'machine', 'optimize', 'llvm', 'ir', 'fncache', 'fmt', 'explain', 'bindgen', 'pkg', 'docgen', 'cli', 'runtime', 'os-linux'].map(n => join(root, 'compiler', `${n}.grl`));
 // A standard module the compiler itself uses: `grail build --watch` hashes its inputs with XXH64
 // (lib/xxhash.grl), so the compiler is built with that module in its source list.
-// Every tool builds through one store inside this worktree, not the user's: a test run must neither
-// depend on what an earlier build of some other tree left behind nor leave anything in a home
-// directory. A tool that inspects the store sets its own (tools/cache-test.mjs).
-process.env.GRAIL_CACHE_DIR ??= join(root, '.work/build-cache');
+// Every tool builds through a store of its own run, inside this worktree: a test run must neither
+// depend on what an earlier run left behind (a second run with the same compiler would restore
+// every module, and a case that counts compiler runs would find none) nor leave anything in a home
+// directory. Tools started by this one inherit the same store, so one run compiles the runtime
+// once. A tool that inspects the store sets its own (tools/cache-test.mjs).
+if (!process.env.GRAIL_CACHE_DIR) {
+  const stores = join(root, '.work/build-cache');
+  const store = join(stores, `run-${process.pid}`);
+  // Stores of runs that were killed before they could remove theirs.
+  if (existsSync(stores)) {
+    for (const name of readdirSync(stores)) {
+      const pid = /^run-(\d+)$/.exec(name)?.[1];
+      if (!pid || !existsSync(`/proc/${pid}`)) rmSync(join(stores, name), { recursive: true, force: true });
+    }
+  }
+  process.env.GRAIL_CACHE_DIR = store;
+  process.on('exit', () => rmSync(store, { recursive: true, force: true }));
+}
 const compilerStdSources = ['xxhash'].map(n => join(root, 'lib', `${n}.grl`));
 compilerSources.push(...compilerStdSources);
 export const triples = { x86_64: 'x86_64-linux-gnu', aarch64: 'aarch64-linux-gnu', riscv64: 'riscv64-linux-gnu', 'macos-x86_64': 'x86_64-apple-macos11', 'macos-aarch64': 'arm64-apple-macos11' };
@@ -167,6 +181,14 @@ export function dynamicLinkFlags(target, linkArgs) {
   const loader = (dynamicLoaders[target] ?? []).find(candidate => existsSync(candidate));
   // libc always: the runtime creates its threads through a weak pthread_create (docs/ffi.md).
   return [...(loader ? ['--dynamic-linker', loader] : []), '-L/usr/lib', '-L/usr/lib64', '-lc'];
+}
+// What clang needs to compile an LLVM module for a target, besides the triple. RISC-V: the ISA and
+// ABI the assembly is written for. AArch64: atomics inline - clang's default for Linux calls
+// `__aarch64_cas8_acq_rel` and friends in libgcc, and a Grail program links no libgcc.
+export function moduleFlags(target) {
+  if (target === 'riscv64') return ['-march=rv64imafd', '-mabi=lp64d'];
+  if (target === 'aarch64') return ['-mno-outline-atomics'];
+  return [];
 }
 export function assemble(source, executable, target = hostTarget, linkArgs = [], { frameworkArgs = [], sign = false, sdk = undefined } = {}) {
   targetName(target);
@@ -433,7 +455,7 @@ export function buildReleaseCompiler({ log = () => {} } = {}) {
   }
   if (!lowered) throw new Error('no compiler could lower the compiler through the LLVM backend');
   log('clang -O2');
-  command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[hostTarget]}`, '-O2', '-c', `${stem}.s.ll`, '-o', `${stem}.ll.o`]);
+  command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[hostTarget]}`, ...moduleFlags(hostTarget), '-O2', '-c', `${stem}.s.ll`, '-o', `${stem}.ll.o`]);
   command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[hostTarget]}`, '-c', `${stem}.s`, '-o', `${stem}.o`]);
   const pending = `${stem}.pending`;
   command([process.env.GRAIL_LINKER ?? 'ld.lld', '-m', emulations[hostTarget], `${stem}.o`, `${stem}.ll.o`, '-o', pending]);
@@ -498,7 +520,7 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
   const linkArgs = linkInputs(readFileSync(assembly, 'utf8'), dirname(resolve(root, inputs[0])));
   if (llvm) {
     const object = join(directory, `${name}.ll.o`);
-    command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[target]}`, '-O2', '-c', `${assembly}.ll`, '-o', object]);
+    command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[target]}`, ...moduleFlags(target), '-O2', '-c', `${assembly}.ll`, '-o', object]);
     linkArgs.unshift(object);
   }
   const framework = machoTargets.includes(target) ? frameworkArguments(frameworks, { directory, sdk }) : { args: [] };

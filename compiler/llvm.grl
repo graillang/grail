@@ -5409,8 +5409,14 @@ fn target_triple(target: u64) -> u8[] {
 // convention returns in x0:x1 (a0:a1); arguments already agree (x0..x5 / a0..a5). IR functions
 // are therefore defined as NAME.ll, native code reaches them through a thunk named NAME, and IR
 // reaches native functions through NAME.c.
-fn thunk_into_ir<a>(out: (&a mut u8[]), name: &a [u8], target: u64) -> unit {
-    put(&mut out, view(".text\n.globl "));
+fn thunk_into_ir<a>(out: (&a mut u8[]), name: &a [u8], target: u64, weak: bool) -> unit {
+    // A name the stream declared `.weak` keeps that binding: a second `.globl` is an assembler
+    // error (`changed binding to STB_GLOBAL`).
+    if weak {
+        put(&mut out, view(".text\n.weak "));
+    } else {
+        put(&mut out, view(".text\n.globl "));
+    }
     put(&mut out, name);
     put(&mut out, view("\n.hidden "));
     put(&mut out, name);
@@ -5754,7 +5760,7 @@ fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (
                 e += 1;
             }
             fname := sub(line, 20, e - 3);
-            thunk_into_ir(&mut thunks, view(fname), target);
+            thunk_into_ir(&mut thunks, view(fname), target, set_has(&weak, view(fname)));
         }
         put(&mut ir, view(rename_line(line, &exported)));
         ir.push(10);

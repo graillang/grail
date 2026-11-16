@@ -64,6 +64,7 @@ const names = rest.length ? rest
   : readdirSync(join(root, 'bench')).filter(f => f.endsWith('.grl')).map(f => f.slice(0, -4)).sort();
 const work = mkdtempSync(join(tmpdir(), 'grail-bench-'));
 let failed = 0;
+const ratios = [];
 try {
   console.log(rounds
     ? `benchmark      C -O2      Grail (${process.env.GRAIL_BACKEND ?? 'native'})      ratio   (median of ${rounds} paired, spread C/G)`
@@ -87,9 +88,12 @@ try {
     }
     const same = JSON.stringify(numbers(g.out)) === JSON.stringify(numbers(c.out));
     if (!same) failed++;
+    ratios.push(`${name} ${(g.time / c.time).toFixed(1)}x`);
     console.log(`${name.padEnd(12)} ${c.time.toFixed(3).padStart(7)} s ${g.time.toFixed(3).padStart(8)} s ${(g.time / c.time).toFixed(1).padStart(8)}x${same ? '' : '   OUTPUT DIFFERS: ' + JSON.stringify([g.out, c.out])}${spread}`);
   }
 } finally {
   rmSync(work, { recursive: true, force: true });
 }
+// One line the gate's summary picks up: Grail's time over C's, per program.
+console.log(`runtime-bench (${process.env.GRAIL_BACKEND ?? 'native'}): ${ratios.join(', ')}`);
 if (failed) process.exit(1);
