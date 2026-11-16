@@ -1,5 +1,10 @@
 ## Unreleased
 
+- `bun tools/compile-rivals.mjs`: compile speed against Go, Zig and rustc on the same programs
+  (hello world and the scaling trio at N = 1000 and 4000): check and build, cold and after a
+  one-function edit, CPU seconds by `getrusage`. The table and the reason for every miss are in
+  `docs/design/compile-speed.md`, "Against Go, Zig and rustc".
+
 - `bun tools/sched-rivals.mjs`: the scheduler (`bench/sched.grl`, `bench/frame.grl` from a
   scheduler tree) against Rust's rayon and C++'s oneTBB twins (`bench/rivals/sched-rayon`,
   `sched_tbb.cpp`): join, spawn, a burst of spawns, fib(32) by nested join and the frame loop's
