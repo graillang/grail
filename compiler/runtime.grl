@@ -1444,8 +1444,16 @@ fn rt_vslice(s: u64, a: u64, b: u64, width: u64) -> u64 {
     raw_store(v + 8, b - a);
     return v;
 }
+// A view of everything `s` holds. A vector's header already starts {pointer, length}, so the view of
+// a whole vector is the header itself: nothing is allocated and dropping it frees nothing
+// (rt_view_free). This was seven in ten of every allocation the compiler made
+// (docs/design/compile-speed.md). A view of a view record is a record of its own, as before: the
+// two are dropped separately.
 fn rt_view(s: u64) -> u64 {
-    return rt_slice(s, 0, raw_load(wrapping_add(s, 8)));
+    if (s & 8) != 0 {
+        return rt_slice(s, 0, raw_load(wrapping_add(s, 8)));
+    }
+    return s;
 }
 // Checked, zero-copy C string view: the sequence must be NUL-terminated. No
 // allocation and no copy, so the bytes stay owned by the caller. (rt_cstr copies
