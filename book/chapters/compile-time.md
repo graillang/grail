@@ -17,6 +17,8 @@ is `@`.
   branch is skipped without being type-checked, so it may name functions that exist only on another
   platform. At module level it chooses declarations; inside a function, statements.
 - `@expr` folds one operand: `@(PAGE * 2)`.
+- `static TABLE: u64[] = @build();` runs `build` while compiling and keeps its result as one
+  read-only object the program borrows (see *Module values* in the modules chapter).
 
 Constant expressions use literals, other constants, `size_of`, `align_of`, `target.os`,
 `target.arch` and `target.pointer_bits`, with the usual operators; arithmetic is checked, so an

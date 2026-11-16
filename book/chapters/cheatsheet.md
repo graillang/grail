@@ -23,6 +23,7 @@ is checked to agree.
 | `data.par_chunks_mut(n).for_each(f)` (rayon) | `pool::split_mut(&mut data[0: len], n, f)` | Pieces of at most `n` elements; the split never depends on the number of cores. `pool::split`, `range` and `reduce` are the owned, index and folding forms. |
 | `rayon::join(a, b)` | `pool::join(a, b)` | `a` may run on another worker; `b` runs here. |
 | `iter().filter(..).collect()` | `iter::collect(iter::filter(iter::of(v), ..))` | Adapters are lazy in both, and also chain as methods. |
+| `iter().filter(..).collect()` | `iter::of(v).filter(..).collect()` | Adapters are lazy in both. |
 | `Rc::new(v)`, `Rc::clone(&r)` | `rc::new(v)`, `r.clone()` | `Arc` is the same shape. |
 | `impl Drop for Guard` | `impl Drop for Guard` | |
 | `assert!(b != 0)` at run time | `b: u64 where b != 0` | Proved at the call when it can be, checked otherwise. |

@@ -107,6 +107,47 @@ something a program asks for with `scope.cancel()` rather than a side effect of 
 
 General `async`/`await` syntax is not provided; the scope and task APIs are the current surface.
 
+### Threads of your own
+
+A task runs on whichever scheduler worker picks it up. Some work must not: the thread that owns a
+window or a GL context, an audio callback's thread, a frame loop that has to wake on time. For that
+there is `thread::spawn(config, closure)`, an OS thread that runs one closure and is nothing else.
+
+{{example:threads}}
+
+A thread is **not a worker**. Nothing is stolen onto it, `host::worker_id()` is 0 on it, and a wait -
+a lock, a sleep, a read - blocks it in the kernel instead of parking a task. That is the point: its
+latency is the operating system's and yours, not the scheduler's. It reaches the scheduler the way
+`main` does, by opening a `task_scope` or calling into `pool`.
+
+- **Joined by default.** `Thread<R>` is move-only and its drop joins, as a `pool::Job<R>`'s drop
+  waits. `thread::join(t)` takes the owned result; `thread::detach(t)` is the one way to let a
+  thread outlive its handle, and a detached thread still running when `main` returns does not keep
+  the process alive (the exit-time allocation check is not made in that case - the thread's
+  allocations are still its own).
+- **A failure is contained**, exactly like a task's: the thread's stack is discarded whole, the
+  thread ends, `try_join` returns the `TaskFailure` and `join` re-raises it. What the dead frames
+  held stays held - a `Mutex` locked inside `lock_with` on that stack is never unlocked, for a
+  thread as for a task - so contain failures you expect, do not rely on them. On the main thread a
+  failure still ends the process.
+- **`Config`** asks the OS for a stack size, a set of processors and a priority, and those are
+  contracts: when the OS refuses one, `spawn` returns a `thread::Error` saying which and why, and
+  the closure does not run. The name is a label: the OS shows what it can (15 bytes on Linux) and
+  the rest is cut. The closure always runs on a guard-paged stack of the size asked for (1 MiB by
+  default), and running off its end is the same named `stack overflow` a task reports.
+- **`thread::Ctx`** is lent to the thread's closure, and `thread::with_current` lends the calling
+  thread's (the main thread has one; a task or a pool job gets `None`). It can be neither sent nor
+  shared, so no code that might run on another thread can hold one - which is what makes
+  `thread::Local<T>` safe: `local.with(ctx, |value| ...)` reads this thread's own value, made the
+  first time and dropped when the thread ends.
+- **`thread::sleep_until(instant)`** sleeps to a point on the monotonic clock rather than for a
+  duration, so a loop that sleeps to the next frame does not drift by the time the frame took.
+
+Not here yet: threads that borrow from the caller's frame (`thread::scope`), and the compiler does
+not yet refuse a `spawn` closure that captures a borrow or a thread-affine value - both wait for
+bounds on closure types. On macOS `spawn` returns `Unsupported`: this runtime cannot start threads
+there.
+
 ## What this month added
 
 Three things, and one of them removed work rather than adding it.

@@ -128,6 +128,8 @@ default when the switch is absent, so existing programs are unaffected.
   `host::exit`, `host::remove`, `host::mkdir`, `host::list_dir`, `host::open`, `host::read_fd`,
   `host::write_fd`, `host::tcp_accept`, and the `fs`, `env`, `process` modules built on them are
   still reachable with `use host;` (or through `fs::`, which opts in itself).
+  The `host::thread_*` functions and `host::sleep_until_ms` are the plumbing of `lib/thread.grl`:
+  those that take a thread record's address are `unsafe` functions, and programs use `thread::`.
   The model does not remove ambient authority; it gives a checked route and a switch that makes
   the ambient one visible.
 - **No runtime enforcement.** An `Authority` is a checked convention for code that goes through

@@ -105,7 +105,13 @@ or `FnMut`:
 |---|---|
 | `Fn<Send>(T) -> R` | every capture may move to another thread |
 | `Fn<Share>(T) -> R` | every capture may be used from several threads at once (`Fn` only) |
-| `Fn<Owned>(T) -> R` | no capture is a borrow, so the closure may outlive the caller's frame |
+| `Fn<Owned>(T) -> R` | every borrow it captured is named in its own type, so whatever keeps it carries the borrow |
+
+`Owned` precisely: every lifetime of every borrow the closure captured appears among the lifetimes
+of its own type - its parameters or its result. A closure that captures `&a Map` and returns
+`(&a K)?` is `Owned`, and an `Iter<(&a K)>` built from it keeps the map borrowed for as long as it
+lives (this is how `map.keys()` works); one that also captured `&b Other`, or any borrow of a local,
+is not. A closure that captures no borrow at all is always `Owned`.
 
 They combine (`FnMut<Send, Owned>() -> R` is what `pool::spawn` takes). They are checked where a
 closure expression meets the type - the captures are known there - and carried by the type from

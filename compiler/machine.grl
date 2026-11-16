@@ -102,7 +102,7 @@ fn split<a>(s: &a [u8], delimiter: u64) -> u8[][] {
     return out;
 }
 fn reg<a>(target: u64, s: &a [u8]) -> string {
-    if eq(view((s)), view("%rax")) || eq(view((s)), view("%eax")) || eq(view((s)), view("%al")) {
+    if eq(view((s)), view("%rax")) || eq(view((s)), view("%eax")) || eq(view((s)), view("%ax")) || eq(view((s)), view("%al")) {
         if target == 1 {
             return "x9";
         }
@@ -414,8 +414,31 @@ fn read_operand<a, b, c>(o: (&a mut Out), operand: &b [u8], dst: &c [u8], byte: 
         }
         return ();
     }
-    // `byte` is the access width: 0 a word, 1 a byte, 2 a zero-extended 32-bit word (movl).
+    // `byte` is the access width: 0 a word, 1 a byte, 2 a zero-extended 32-bit word (movl), 3 a
+    // zero-extended and 4 a sign-extended 16-bit halfword.
     address(&mut o, view((operand)));
+    if byte > 2 {
+        if target == 1 {
+            if byte == 3 {
+                put(&mut o, view("ldrh "));
+                w := armword(view((dst)));
+                put(&mut o, view(w));
+            } else {
+                put(&mut o, view("ldrsh "));
+                put(&mut o, view((dst)));
+            }
+            put(&mut o, view(",[x13]\n"));
+        } else {
+            if byte == 3 {
+                put(&mut o, view("lhu "));
+            } else {
+                put(&mut o, view("lh "));
+            }
+            put(&mut o, view((dst)));
+            put(&mut o, view(",0(t3)\n"));
+        }
+        return ();
+    }
     if target == 1 {
         if byte == 1 {
             put(&mut o, view("ldrb "));
@@ -485,6 +508,14 @@ fn store<a, b>(o: (&a mut Out), operand: &b [u8], byte: u64) -> unit {
         return ();
     }
     address(&mut o, view((operand)));
+    if byte == 3 {
+        if target == 1 {
+            put(&mut o, view("strh w10,[x13]\n"));
+        } else {
+            put(&mut o, view("sh t1,0(t3)\n"));
+        }
+        return ();
+    }
     if target == 1 {
         if byte == 1 {
             put(&mut o, view("strb w10,[x13]\n"));
@@ -1420,11 +1451,24 @@ fn instruction<a, b>(o: (&a mut Out), line: &b [u8]) -> unit {
         || eq(view((op)), view("movl"))
         || eq(view((op)), view("movabsq"))
         || eq(view((op)), view("movb"))
-        || eq(view((op)), view("movzbq")) {
+        || eq(view((op)), view("movzbq"))
+        || eq(view((op)), view("movzwq"))
+        || eq(view((op)), view("movswq"))
+        || eq(view((op)), view("movw")) {
         mut rw = 0;
         mut sw = 0;
         if eq(view(op), view("movzbq")) {
             rw = 1;
+        }
+        // 16-bit: a zero- or sign-extending halfword load, a halfword store (sized_load/sized_store).
+        if eq(view(op), view("movzwq")) {
+            rw = 3;
+        }
+        if eq(view(op), view("movswq")) {
+            rw = 4;
+        }
+        if eq(view(op), view("movw")) {
+            sw = 3;
         }
         if eq(view(op), view("movb")) {
             sw = 1;
