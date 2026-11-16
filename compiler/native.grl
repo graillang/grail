@@ -14754,6 +14754,7 @@ fn inherent_match<a, b>(c: (&a mut C), pattern: u64, actual: u64, map: (&b mut u
         return true;
     }
     mut a = actual;
+    mut unwrapped = 0;
     if pk != ty_kind(&mut c, a) {
         // A specialisation binds a parameter to the concrete type it stands for.
         candidate := base_type(&mut c, a);
@@ -14761,6 +14762,7 @@ fn inherent_match<a, b>(c: (&a mut C), pattern: u64, actual: u64, map: (&b mut u
             return false;
         }
         a = candidate;
+        unwrapped = 1;
         if pk != ty_kind(&mut c, a) {
             return false;
         }
@@ -14786,6 +14788,14 @@ fn inherent_match<a, b>(c: (&a mut C), pattern: u64, actual: u64, map: (&b mut u
             }
         }
         return true;
+    }
+    if unwrapped != 0 {
+        // A replayed generic body's receiver is a specialisation alias. The alias does name a
+        // concrete type, but a method call on it is the method its *bound* declares (`P: Probe` ->
+        // `Probe::first_byte`), not an inherent method of the type it stands for - which is also what
+        // the value's type can carry: the receiver is `&(the alias)`, and only the interface
+        // signature is written in those terms.
+        return false;
     }
     return same_type(&mut c, pattern, a) != 0;
 }
