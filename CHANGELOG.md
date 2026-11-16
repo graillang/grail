@@ -1,5 +1,26 @@
 ## Unreleased
 
+- **A refinement proof no longer depends on the overflow mode.** `--overflow=checked` and
+  `--overflow=wrap` now accept exactly the same programs under `@strict` and under `@no_panic`
+  (`bun tools/overflow-parity-test.mjs` checks it over the corpus, in the gate). A constant in a
+  condition, a predicate or an argument (`i + 1`, `v.len() - 1`) is integer arithmetic where the
+  facts show it cannot wrap - `i - 1` under `i > 0`, `i + 1` under `i < n` - and otherwise one
+  opaque value that proves an obligation naming the same expression and nothing else. What changes
+  for existing code:
+  - a wrap build now proves what a checked build did where the proof never needed the trap
+    (`while i + 1 < v.len() { get(&v, i + 1); }`);
+  - a checked build no longer proves from "the overflow would have trapped": `get(&v, i - 1)` under
+    `i < v.len()` alone, `i < n` from `i + 1 < n + 1`, and any offset on a sized integer keep their
+    checks (and are refused under `@strict`) in both modes;
+  - `@no_panic` treats `+`, `-`, `*`, `**`, a shift and sized arithmetic as possible failures in a
+    wrap build too, unless the facts prove the operation cannot overflow; `i + 1` with `i < n` is
+    now such a proof, beside `hi - lo` with `lo <= hi`, and a proved addition has no overflow
+    check in a checked build;
+  - `@bounded` no longer reads a bound from a predicate whose bounded side has a constant
+    (`where n + 1 < 100`): that bounds the wrapped sum, not `n`.
+  Fixed on the way: a call in a `while` guard was proved from facts that the loop's body ends, so
+  `@strict` accepted a guard that indexed out of bounds on its second evaluation.
+
 - **Builds are 25x to 180x faster than they were a day ago.** With the release compiler: the
   compiler compiles itself in 2.9 s (was 73.8 s), a 104k-line program checks in 0.9 s (was 166 s),
   hello world checks in 0.04 s (was 1.1 s), and 90k lines in 24 modules build cold in 1.4 s.

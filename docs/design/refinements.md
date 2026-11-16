@@ -1,6 +1,7 @@
 # Refinement types: checked invariants on values
 
-Status: implemented (gaps round, G24): the syntax (`a483462`), the runtime checks that keep the
+Status: implemented (gaps round, G24; arithmetic sound under wrapping in both overflow modes,
+2026-11-16): the syntax (`a483462`), the runtime checks that keep the
 feature sound (`031fd33`), the prover with its second entry point (`a6fe6b0`, `3fee023`),
 bounds-check elimination from a refined parameter (`a0d2dda`), strict mode (`5001170`), the
 `--verify-facts` cross-check on the native backend (`4ef15d8`) and the fact walker over the typed IR
@@ -59,7 +60,7 @@ is a place where a scope, a binding or a guard is opened or closed:
 | `block` | one scope per `{}`: what a condition, a guard or an arm's pattern stated for it holds inside it, and the atoms a binding's shadowing removed come back when it closes |
 | `bind` | every binding: the name stops meaning what the old one meant, for this block only |
 | `if` / `else` | the condition states its atoms in the then-block; the negation of a single comparison states one in the `else`, and an `else if` carries it while the next condition is tested |
-| `while` / `loop` | the guard states its atoms in the body, and only there |
+| `while` / `loop` | what the body writes is forgotten before the guard is compiled (the guard runs again after every iteration); the guard then states its atoms in the body, and only there |
 | `for` | `for i in a..b` states `a <= i < b`, `for i in n` and `for i in v.len()` state `i < n` / `i < v.len()`, in the body, and the body's `}` ends them |
 | `match` | an arm's pattern (`16` states `n == 16`, `0..16` states both bounds) and its `if` guard state atoms for that arm's body; a guarded arm's facts never reach a sibling arm or the code after the match |
 | `assert` | what it tested holds for the rest of the block |
@@ -69,7 +70,8 @@ is a place where a scope, a binding or a guard is opened or closed:
 | call site | the callee's parameter predicates are discharged with the facts at the call, and the argument names are forgotten after it (a method call also forgets its receiver) |
 | body | a refined parameter holds at the body's entry - the entry checked it or the caller proved it, which is what the `.proved` entry means - and nothing is carried into the next body the compile emits (a closure body starts empty) |
 
-A term is a parameter's or local's name, a length spelled `v.len` (for `v.len()`), or a literal; an
+A term is a parameter's or local's name, a length spelled `v.len` (for `v.len()`), a literal, or an
+opaque term (`i+1`, `v.len-1`: an expression whose arithmetic may wrap, see below); an
 atom is `a < b + k`, `a <= b + k`, `a == b + k`, `a % k == 0`, `finite(a)` or `nan(a)`. Terms are
 compared by text, which is why the *scope* of a name is the whole question: two `i`s in one function
 are the same variable unless a binding between them shadowed it, and that is what the trail in
@@ -105,9 +107,8 @@ section, and the walk and its flag were removed once the facts over the IR were 
 An obligation is proved when it follows from the facts by transitivity of `<`/`<=` over a small
 difference graph (Floyd-Warshall over at most twenty terms, literals as exact vertices), by `%` facts
 with a divisor that divides, or by a matching float-class fact. Comparisons go through the graph with
-literals as exact vertices; only facts and obligations whose offset is zero or negative take part,
-since `b + k` with a positive `k` can wrap in a `--overflow=wrap` build and then the integer reading
-would be the wrong one.
+literals as exact vertices and any offset: an offset reaches an atom only where its arithmetic was
+shown not to wrap (the next section), so every atom is a statement over the integers.
 
 The bounds-check elimination is still its own pass (`pv_bce`): a refined parameter `i < v.len()` is
 the pattern `[i]` on a shared reference needs, and the body is scanned for anything that could make
@@ -182,6 +183,43 @@ overflow check, the effect analysis records "may fail" unless the facts prove th
 overflow (`hi - lo` with `lo <= hi`; an addition bounded by `NW+`), whether or not the check is
 emitted. A release build emits no check and accepts no more `@no_panic` functions than a
 development build does.
+
+### As implemented (2026-11-16)
+
+- `pv_atom` reads a comparison with each side's constant beside its term (`Atom.ao`, `Atom.bo`) and
+  decides nothing. `pv_settle` turns that into a fact with the facts in scope (`pv_side` per side:
+  `pv_nw` is `NW+`/`NW-`), left to right through a conjunction so `i > 0 && i - 1 < n` normalises.
+  The function's own parameter predicates are settled the same way at the body's entry, with the
+  predicates before them as the facts: `where p + 1 < n` is a fact about the opaque `p+1` inside
+  the callee.
+- A callee's predicate is read once, in its own names, constants still beside their terms. At the
+  call each argument is settled first (`pv_side`), then each side of each atom adds the
+  predicate's constant on top (`pv_oblige_side`): zero in total needs nothing more, an argument
+  without an offset is settled like any side (so `where p + 1 < n` called with `i` is the opaque
+  `i+1`), and an argument with a proved offset needs the no-wrap condition of the total.
+- `NW+` also accepts a literal upper bound (`t <= L` for a literal `L` the facts name): the
+  prover's literals and constants have at most fifteen digits, so the sum is far below `2^64`.
+- Only `u64` terms are normalised (`pv_u64_term`: a literal, a length, a `u64` local, parameter or
+  field). A sized or signed term with a constant is always opaque, in both modes - before this a
+  checked build read its offset too.
+- `pv_mentions` treats `i+1` and `v.len-1` as mentioning `i` and `v`, so every kill and shadow rule
+  covers opaque terms with no rule of their own.
+- A `while` guard is compiled after the loop's kill (`pv_loop_kill` moved above the guard). It has
+  to be: the guard's constants are settled with facts that must hold at every evaluation. The move
+  also closed a hole that predates this design - a refined call in a guard was proved from facts
+  the body ends.
+- Effects: `binary` and `int_binary` record a failure edge where a trapping build emits an overflow
+  check and this build does not (`fx_would_trap`), so the graph is the same in both modes.
+  `pv_arith_proof` proves `hi - lo` (`lo <= hi`) and `t + c` (`NW+`); a proved operation has no
+  check and no edge in either mode, and `--verify-facts` emits its check in both.
+- `@bounded` (`fx_bound_value`) and the bounds-check elimination (`pv_bce`) read a parameter
+  predicate only when neither side has a constant.
+- `tools/overflow-parity-test.mjs` (in the gate and in CI) checks every corpus case that states a
+  refinement or an effect under both modes and requires the same outcome and the same diagnostics.
+
+One observation not used: `(x + a) + b` wraps to the same value as `x + (a + b)` whatever the
+intermediate does, so the argument's own no-wrap condition is not needed when the total is what
+is settled. The rule above is the stricter one this design states.
 
 ### What does not change
 

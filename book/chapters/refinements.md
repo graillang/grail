@@ -93,6 +93,37 @@ A `%` fact carries through divisibility (`align % 32 == 0` proves `align % 16 ==
 matches exactly (`t.is_finite()` proves `t.is_finite()`), and comparisons go through a small
 difference graph, so transitivity works: `i <= j` and `j < v.len()` prove `i < v.len()`.
 
+### Arithmetic in a condition
+
+Integer arithmetic traps on overflow in a development build and wraps in a release build, and a
+proof must not depend on which. So a constant added to a name is read in one of two ways, and the
+same way in both builds:
+
+```grl
+fn walk(v: &u64[]) -> u64 {
+    mut sum = 0;
+    for i in v.len() {
+        if i > 0 {
+            sum += get(v, i - 1);     // 0 < i: `i - 1` cannot wrap, and i - 1 < v.len() follows
+        }
+    }
+    mut j = 0;
+    while j + 1 < v.len() {
+        sum += get(v, j + 1);         // the guard and the argument name the same value, `j + 1`
+        j += 1;
+    }
+    return sum;
+}
+```
+
+Where the facts show the arithmetic cannot wrap, the constant is ordinary integer arithmetic:
+`i - 1` needs a lower bound (`i > 0`, `i >= 3`), and `i + 1` needs something above `i` (`i < n`,
+or a literal bound such as `i < 10`). Where they do not, the whole expression is one opaque value:
+a fact about `j + 1` proves an obligation about `j + 1` and nothing about `j`, and it ends when `j`
+is written. That is why `get(v, i - 1)` under `i < v.len()` alone is not proved - `i` may be `0`,
+and in a release build the argument would be 2^64-1 - and why `i + 1 < n + 1` does not prove
+`i < n`. The rule covers `u64`; a sized integer's sum is always the opaque kind.
+
 Anything else - a `||`, arithmetic the prover does not model, an argument that is not a name or a
 constant, a function called through a value - is simply not proved, and its check stays. That is the
 whole safety argument: the prover can only remove a check it has a proof for.
@@ -139,7 +170,9 @@ entry, so a proof that is wrong aborts instead of passing unnoticed. The corpus 
 prover has been wrong once: a fact stated before a loop was still believed inside it after the body
 had written the name, and that was found by review rather than by this flag, because no case then
 wrote a refined name in a loop and the driver did not pass the flag on to the compiler. Both are
-fixed and pinned (`refinement-loop-write-*`), which is the honest form of the claim: the prover's
+fixed and pinned (`refinement-loop-write-*`). A second one of the same family was found the same
+way: a call in a `while` guard was proved from facts the loop's body ends, although the guard runs
+again after every iteration (`refinement-wrap-loop-guard-call-*`). That is the honest form of the claim: the prover's
 power is an optimisation, and each rule that removes a check has a case in which the check must
 still fire.
 
@@ -173,8 +206,12 @@ error: `@no_alloc` function `grow` performs a heap allocation: it calls grow -> 
 
 A refined parameter's check belongs to the caller. A `@no_panic` function that calls `get` with an
 index it has proved in bounds reaches `get`'s proved entry and passes; one that has not is refused,
-because the call goes through the check. Overflow is a failure too: `@no_panic` arithmetic either
-cannot overflow from the facts the prover has, or is written with the wrapping operations.
+because the call goes through the check. Overflow is a failure too, and in every build: a release
+build wraps where a development build traps, but the claim is about the program, so `@no_panic` is
+judged as if the arithmetic could trap and both builds accept exactly the same functions.
+`@no_panic` arithmetic either cannot overflow from the facts the prover has - `hi - lo` with
+`lo <= hi`, `i + 1` with `i < n` - or is written with the wrapping operations (`wrapping_add`,
+`wrapping_sub`, `wrapping_mul`), which never fail.
 
 An effect claim crosses a module boundary through the interface file: each claimed function has an
 `effects` row, so a caller is checked against the row and not against the body. The facts are
