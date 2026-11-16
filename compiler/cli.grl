@@ -3801,6 +3801,7 @@ fn build_pass<a, b, c>(h: (&a Home), o: (&b mut Options), diag: &c [u8]) -> u64 
         name := copy(view(p.name));
         o.output = path_join(view("target"), view(name));
     }
+    project_overflow(&mut o, &p);
     return compile(
         h: &h,
         entry: view(p.entry),
@@ -3815,6 +3816,30 @@ fn build_pass<a, b, c>(h: (&a Home), o: (&b mut Options), diag: &c [u8]) -> u64 
         no_entry: o.no_entry != 0,
         inputs: view(o.inputs)
     );
+}
+// One overflow mode per build, decided by the root (docs/design/release-builds-and-parity.md):
+// `--overflow=` on the command line, else the root package's `overflow` key, else the build mode's
+// default (checked, or wrap for `--release`). A dependency's own key is not used, and the build says
+// so once, naming it.
+fn project_overflow<a, b>(o: (&a mut Options), p: (&b pkg::Plan)) -> unit {
+    if (o.overflow == 0) && eq(view(p.overflow), view("wrap")) {
+        o.overflow = 1;
+    }
+    if (o.overflow == 0) && eq(view(p.overflow), view("checked")) {
+        o.overflow = 2;
+    }
+    if p.ignored_overflow.len() != 0 {
+        mut note = copy(view("grail: note: the `overflow` key of "));
+        for i in p.ignored_overflow.len() {
+            if i != 0 {
+                push_bytes(&mut note, view(", "));
+            }
+            push_bytes(&mut note, view(item(&p.ignored_overflow, i)));
+        }
+        push_bytes(&mut note, view(" is not used: a build has one overflow mode, the root package's"));
+        say(view(note));
+    }
+    return ();
 }
 fn check_command<a>(args: (&a u8[][])) -> u64 {
     mut o = options(&args);

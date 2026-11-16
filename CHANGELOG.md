@@ -1,5 +1,13 @@
 ## Unreleased
 
+- **One integer-overflow mode per build, decided by the root.** `--overflow=checked|wrap` on the
+  command line wins; otherwise the root package's new `[package] overflow = "checked" | "wrap"`
+  key; otherwise the build mode's default - checked, or wrap for `--release`. A dependency's own
+  `overflow` key is not used, and the build prints one note naming it (Cargo's model for profiles):
+  a library that needs modular arithmetic says so with `wrapping_add` and friends. An interface file
+  still records the mode it was written under, but a build of the other mode no longer refuses it:
+  the prover and the effect analysis do not depend on the mode, so the mode only chooses the code.
+
 - **`grail build --release`** (and `grail run --release`, a project's `grail test --release`):
   every module is compiled by the LLVM backend and its LLVM module optimised by `clang -O2`, per
   module through the build store as before, and integer overflow wraps unless `--overflow=` says
