@@ -1,5 +1,6 @@
 module fncache;
 use host;
+use xxhash;
 
 // The per-function codegen cache: one file per emitted function, under the build cache's `fn/`
 // directory (docs/design/incremental-compilation.md, "Per-function units").
@@ -44,12 +45,8 @@ pub fn none() -> Unit {
 // The hash of what the emitter's decoders will read.
 fn sum<a>(u: (&a Unit)) -> u8[] {
     mut all = u.key.copy();
-    for i in u.facts.len() {
-        all.push(u.facts[i]);
-    }
-    for i in u.regs.len() {
-        all.push(u.regs[i]);
-    }
+    all.append(view(u.facts));
+    all.append(view(u.regs));
     return hash(view(all));
 }
 
@@ -65,9 +62,7 @@ fn wv<a>(out: (&a mut u8[]), n: u64) -> unit {
 
 fn ws<a, b>(out: (&a mut u8[]), s: &b [u8]) -> unit {
     wv(&mut out, s.len());
-    for i in s.len() {
-        out.push(s[i]);
-    }
+    out.append(s);
     return ();
 }
 
@@ -112,40 +107,23 @@ pub fn rs<a>(r: (&a mut Read)) -> u8[] {
         return u8[];
     }
     mut out = u8[];
-    for i in n {
-        out.push(r.data[r.at + i]);
-    }
+    out.append(r.data[r.at..r.at + n]);
     r.at = r.at + n;
     return out;
 }
 
-// Four 32-bit FNV-1a lanes with different primes and offset bases, printed as 32 hex characters.
-// Each lane keeps its product below 2^56 so a checked build never overflows: the compiler is built
-// with overflow checking on, and a wrapping multiply would abort. The value only ever names a file:
-// the key record inside the file is what decides a hit, so a collision costs a cache entry, never
-// correctness.
+// Two XXH64 digests of the bytes under different seeds, printed as 32 hex characters. The value
+// only ever names a file or stands for a text inside a key: the key record inside the file is what
+// decides a hit, so a collision of file names costs a cache entry, never correctness.
 pub fn hash<a>(data: &a [u8]) -> u8[] {
-    mut p = 2166136261;
-    mut q = 4018111043;
-    mut r = 1267837801;
-    mut s = 2793279851;
-    for i in data.len() {
-        x := u64(data[i]);
-        p = ((p ^ x) * 16777619) & 4294967295;
-        q = ((q ^ (x + 337)) * 16777639) & 4294967295;
-        r = ((r ^ (x + 663)) * 16777667) & 4294967295;
-        s = ((s ^ (x + 991)) * 16777699) & 4294967295;
-    }
     mut out = u8[];
-    hex32(&mut out, p);
-    hex32(&mut out, q);
-    hex32(&mut out, r);
-    hex32(&mut out, s);
+    hex64(&mut out, xxhash::hash64(view(data), 1));
+    hex64(&mut out, xxhash::hash64(view(data), 2));
     return out;
 }
 
-fn hex32<a>(out: (&a mut u8[]), n: u64) -> unit {
-    mut at: u64 = 28;
+fn hex64<a>(out: (&a mut u8[]), n: u64) -> unit {
+    mut at: u64 = 60;
     loop {
         d := (n >> at) & 15;
         if d < 10 {
@@ -175,14 +153,14 @@ pub fn encode<a>(u: (&a Unit)) -> u8[] {
     return out;
 }
 
-pub fn decode<a>(bytes: (&a u8[])) -> Unit {
+pub fn decode(bytes: u8[]) -> Unit {
     if bytes.len() < 5 {
         return none();
     }
     if (bytes[0] != 71) || (bytes[1] != 70) || (bytes[2] != 78) || (bytes[3] != 50) {
         return none();
     }
-    mut r = Read { data: bytes.copy(), at: 4, ok: 1 };
+    mut r = Read { data: bytes, at: 4, ok: 1 };
     key := rs(&mut r);
     text := rs(&mut r);
     facts := rs(&mut r);
@@ -233,7 +211,7 @@ pub fn load<a, b>(dir: &a [u8], name: &b [u8]) -> Unit {
         return none();
     }
     text := host::read_file(view(file));
-    return decode(&text);
+    return decode(text);
 }
 
 // File a unit under `name`: written into `stage/`, then renamed into place, so no reader can see a
