@@ -620,3 +620,44 @@ already does for every argument), and the return and writeback checks follow tho
 parameter typed `Fn<s>` is not call-scoped (it may be kept where `s` is named). At most one
 lifetime; `Owned` with a lifetime is refused. Cases `closure-region-*`. This is the piece stage 5's
 scopes build on; R-env and the scope types are planned in section 7 and not built.
+
+## 7. Stage 5 plan: R-env and the scope types (for the director, not built)
+
+What exists after 6.3: `Fn<s>` carries `s`; a holder labelled `s` keeps a closure's loans; call-scoped
+parameters cannot escape. What a scope still needs is the *inner* closure: in
+`thread::scope(|t| { t.spawn(|| use(&x)); })` the spawned closure re-borrows `x` from the body's
+environment, whose fields are declared in the body's own region 1 (`capture_field_type`
+[V n:capture_field_type]), so its loans come from region 1, not from `s`, and storing it into
+`Threads<s>` is refused today. Steps, each with its cases:
+
+1. **Hint regions.** When a closure literal is checked against an expected `FnMut<s>((&Threads<s>)) -> R`,
+   the expected type's regions are the *callee's* numbers. Map each to a fresh region of the body
+   (as a generic call maps a callee's lifetimes) before `closure_hint` hands the parameter types over,
+   so the body's `&Threads<s>` and its environment share one id. Case: a body that only calls
+   `t.spawn(|| 1)` (no captures) compiles; today's hint path is checked for collisions first.
+2. **R-env.** If the expected type names a region `s'`, the environment record's field types and the
+   body's hidden environment parameter use `s'` instead of region 1 (`capture_field_type`,
+   `emit_closures`). Then a capture re-borrowed in the body has region `s'`, and an inner closure built
+   from it may be stored in `Threads<s'>`. Cases: accepted - two spawned closures reading `&x`; one
+   writing `&mut x` while another reads `&mut y`. Refused - two capturing `&mut x` (second loan
+   conflicts); a body-local captured by a spawned closure (region 0, `captured writeback violates
+   invariant lifetime`); `x` used in the body after a spawned closure borrowed it mutably; a
+   `ScopedThread<s, T>` returned from the body (`R: Owned`).
+3. **Prototype the receiver assumption first** (2.4): bonding through `self: (&Self)` into a holder
+   labelled `s`, shown with references (P23 through `&Self`). If shared-receiver bonding does not
+   hold, `spawn` takes `(&mut Self)`.
+4. **Scope types in lib, over raw entries owned by the other branches.**
+   `pub unsafe struct Threads<s> { raw: .. }`, neither `Send` nor `Share` by declaration;
+   `pub fn scope<s, R: Owned>(body: FnMut<s>((&Threads<s>)) -> R) -> R`;
+   `impl Threads<s> { pub fn spawn<T: Send + Owned>(self: (&Self), f: FnMut<Send, s>() -> T) -> ScopedThread<s, T>; }`;
+   the same shape for `pool::scope` (`Jobs<s>`) and `task::scope` (`Tasks<s>`, `Task<s, T>`). The raw
+   start/join entries come from gaps12-threads and gaps12-sched; I would write the checker parts and
+   the cases against a minimal `unsafe module` scope that runs spawns inline, and they wire it to
+   the runtime.
+5. **Deletions, in the change that moves the last user:** `task_scope_builtin`, `spawn_builtin`,
+   kind 14 (`Scope<C>`), `require_sendable_owned`; `contains_task` with D8's condition (handles are
+   move-only library records; a case shows a second `join` is a move error).
+
+Risks: step 1 touches every closure passed to a generic function with lifetimes in its signature;
+run the corpus with step 1 alone before step 2. R-env must only apply when the expected type names a
+region, so closures that never asked keep region 1 and today's behaviour.
