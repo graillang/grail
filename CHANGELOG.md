@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **Baked statics hold records** (module-values stage 4): `static FLAGS: Flag[] = @flags();` and
+  `static BOX: Box = @make_box();` for plain records whose fields are integers, bools, strings,
+  vectors or such records again, at any depth. The run tier prints the value field by field and
+  the compiler lays it out as read-only objects (one word per field), so a read borrows it. A record
+  holding a thread-affine handle is refused as not shareable; a `NAME := f();` binding that computes
+  a record says to make it a static; enums and generic records are refused as not built yet.
+
 - Fixed (test harness): **`test-native --jobs N` made every stripe build a second compiler** - the
   parent passed its compiler as `GRAIL_COMPILER`, which `buildCompiler()` reads as the base to build
   from - all into one directory at once, and each finished build was renamed over the binary the

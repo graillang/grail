@@ -17406,7 +17406,7 @@ fn ct_primary<a>(c: (&a mut C)) -> CVal {
             text := ct_take_call_text(&mut c);
             here_module := module_copy(&mut c);
             r := run_tier(&mut c, view(here_module), view(text), view(""));
-            if (r.ty == 3) || ((r.ty != 0) && (ct_seq_elem(&mut c, r.ty) != NO_TYPE)) {
+            if (r.ty == 3) || ((r.ty != 0) && (ct_seq_elem(&mut c, r.ty) != NO_TYPE)) || static_structured(&mut c, r.ty) {
                 fail(&mut c, view("a compile-time call in an expression must give an integer or a bool; bind a string or a table with NAME := f();"));
             }
             return ct_val(r.value, r.ty);
@@ -17761,6 +17761,16 @@ fn resolve_pending<a>(c: (&a mut C), i: u64) -> unit {
         fail(&mut c, view(msg));
     }
     r := run_tier(&mut c, view(m), view(text), view(key));
+    if static_structured(&mut c, r.ty) {
+        mut msg = copy_bytes(view("`"));
+        push_bytes(&mut msg, view(n));
+        push_bytes(&mut msg, view("` would be a record or a table of them, which a constant cannot hold: a constant is pasted into every use, a static is one object - write `static "));
+        push_bytes(&mut msg, view(n));
+        push_bytes(&mut msg, view(": T = @"));
+        push_bytes(&mut msg, view(text));
+        push_bytes(&mut msg, view(";`"));
+        fail(&mut c, view(msg));
+    }
     exchange(&mut c.constants[i].ty, r.ty);
     exchange(&mut c.constants[i].value, r.value);
     exchange(&mut c.constants[i].text, r.text);
@@ -17914,8 +17924,11 @@ fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [
     } else if ct_seq_elem(&mut c, ret) != NO_TYPE {
         // A vector of integers, or bytes: a table, which is what running code early is for.
         rty = ret;
+    } else if static_structured(&mut c, ret) {
+        // A record, or a vector of records or strings: printed field by field (static_dump_src).
+        rty = ret;
     } else if !integer(&mut c, ret) {
-        fail(&mut c, view("a compile-time call must give an integer, a bool, a string, bytes or a vector of integers (a value the program can hold as data)"));
+        fail(&mut c, view("a compile-time call must give an integer, a bool, a string, bytes, a vector or a plain record of those (a value the program can hold as data)"));
     } else {
         // The integer's own type, so a signed result keeps its sign and width (it was read back as
         // a u64, and a negative one did not parse).
@@ -17958,6 +17971,10 @@ fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [
     push_bytes(&mut probe, view(qualified));
     if rty == 3 {
         push_bytes(&mut probe, view(";\n    print(v);\n    return 0;\n}\n"));
+    } else if static_structured(&mut c, rty) {
+        push_bytes(&mut probe, view(";\n"));
+        static_dump_src(&mut c, rty, view("v"), 0, &mut probe);
+        push_bytes(&mut probe, view("    return 0;\n}\n"));
     } else if elem_signed {
         // One element per line, as a signed word.
         push_bytes(&mut probe, view(";\n    for i in v.len() {\n        println(i64(v[i]));\n    }\n    return 0;\n}\n"));
@@ -18107,8 +18124,8 @@ fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [
         host::command(tidy);
     }
     printed := host::read_file(view(out_path));
-    if rty == 3 {
-        return CTRes { ty: 3, value: 0, text: printed };
+    if (rty == 3) || static_structured(&mut c, rty) {
+        return CTRes { ty: rty, value: 0, text: printed };
     }
     if (rty != 0) && (ct_seq_elem(&mut c, rty) != NO_TYPE) {
         // The elements, laid out at the element's C width (little-endian), for read-only data.
@@ -18606,11 +18623,263 @@ fn static_value<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> Val {
 // The baked tier's types: integers, bool, string, and vectors of integers or bytes - exactly the
 // values the run tier can bring back as data.
 fn static_baked_type<a>(c: (&a mut C), ty: u64) -> bool {
-    if integer(&mut c, ty) || is_bool(&mut c, ty) || (ty == 3) {
+    return static_baked_type_at(&mut c, ty, 0);
+}
+// ---- baked records and tables of them (module-values stage 4) --------------------------------------
+//
+// A baked type is an integer, a bool, a string, bytes, a vector of baked types, or a plain record
+// (not C-laid-out, not an enum, not opaque, not generic) whose fields are baked types. The run tier
+// hands a structured value back as a flat stream the probe prints (static_dump_src) and the
+// compiler reads in the same order (static_bake): a number per line (integers signed or unsigned
+// as their type is, a bool as 0/1), a string as its length then its bytes, a vector as its length
+// then its elements, a record as its fields in declaration order.
+fn static_baked_type_at<a>(c: (&a mut C), ty: u64, depth: u64) -> bool {
+    if (16 < depth) || !is_type_id(ty) {
+        return false;
+    }
+    if is_float(&mut c, ty) {
+        return false;
+    }
+    if integer(&mut c, ty) || is_bool(&mut c, ty) || (ty == 3) || (ty == 2) {
         return true;
     }
-    return ct_seq_elem(&mut c, ty) != NO_TYPE;
+    k := ty_kind(&mut c, ty);
+    if k == 6 {
+        return static_baked_type_at(&mut c, ty_arg(&mut c, ty), depth + 1);
+    }
+    if k == 8 {
+        d := ty_arg(&mut c, ty);
+        if (c.decls[d].is_enum != 0) || (c.decls[d].c_layout != 0) || (c.decls[d].opaque != 0) || (c.decls[d].types != 0) {
+            return false;
+        }
+        first := c.decls[d].first;
+        for j in c.decls[d].count {
+            fty := c.fields[first + j].ty;
+            if !static_baked_type_at(&mut c, fty, depth + 1) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return false;
 }
+// A baked type the run tier's flat number and text forms do not cover: a record, or a vector whose
+// elements are not integers.
+fn static_structured<a>(c: (&a mut C), ty: u64) -> bool {
+    if !is_type_id(ty) || integer(&mut c, ty) || is_bool(&mut c, ty) || (ty == 3) || (ct_seq_elem(&mut c, ty) != NO_TYPE) {
+        return false;
+    }
+    return static_baked_type_at(&mut c, ty, 0);
+}
+// Probe source that prints the value of `expr` (of type `ty`) in the flat form static_bake reads.
+fn static_dump_src<a, b>(c: (&a mut C), ty: u64, expr: &b [u8], depth: u64, out: (&a mut u8[])) -> unit {
+    if is_bool(&mut c, ty) {
+        push_bytes(&mut out, view("    if "));
+        push_bytes(&mut out, expr);
+        push_bytes(&mut out, view(" {\n        println(1);\n    } else {\n        println(0);\n    }\n"));
+        return ();
+    }
+    if integer(&mut c, ty) {
+        if (ty != 0) && (ty_mode(&mut c, ty) != 0) {
+            push_bytes(&mut out, view("    println(i64("));
+        } else {
+            push_bytes(&mut out, view("    println(u64("));
+        }
+        push_bytes(&mut out, expr);
+        push_bytes(&mut out, view("));\n"));
+        return ();
+    }
+    if ty == 3 {
+        push_bytes(&mut out, view("    println("));
+        push_bytes(&mut out, expr);
+        push_bytes(&mut out, view(".len());\n    println(\"{}\", "));
+        push_bytes(&mut out, expr);
+        push_bytes(&mut out, view(");\n"));
+        return ();
+    }
+    mut loopvar = copy_bytes(view("grail_probe_i"));
+    decimal(&mut loopvar, depth);
+    if (ty == 2) || (ty_kind(&mut c, ty) == 6) {
+        mut elem = int_type(&mut c, 8, 0);
+        if ty != 2 {
+            elem = ty_arg(&mut c, ty);
+        }
+        push_bytes(&mut out, view("    println("));
+        push_bytes(&mut out, expr);
+        push_bytes(&mut out, view(".len());\n    for "));
+        push_bytes(&mut out, view(loopvar));
+        push_bytes(&mut out, view(" in "));
+        push_bytes(&mut out, expr);
+        push_bytes(&mut out, view(".len() {\n"));
+        mut item = copy_bytes(expr);
+        item.push(91);
+        push_bytes(&mut item, view(loopvar));
+        item.push(93);
+        static_dump_src(&mut c, elem, view(item), depth + 1, &mut out);
+        push_bytes(&mut out, view("    }\n"));
+        return ();
+    }
+    d := ty_arg(&mut c, ty);
+    first := c.decls[d].first;
+    for j in c.decls[d].count {
+        mut field = copy_bytes(expr);
+        field.push(46);
+        push_bytes(&mut field, view(c.fields[first + j].name));
+        fty := c.fields[first + j].ty;
+        static_dump_src(&mut c, fty, view(field), depth, &mut out);
+    }
+    return ();
+}
+// One number of the flat form, signed or not, and the newline after it.
+fn static_read_num<a>(text: &a [u8], at: (&a mut u64)) -> u64 {
+    mut v = 0;
+    mut minus = false;
+    if (*at < text.len()) && (text[*at] == 45) {
+        minus = true;
+        exchange(at, *at + 1);
+    }
+    while (*at < text.len()) && (48 <= text[*at]) && (text[*at] <= 57) {
+        v = wrapping_add(wrapping_mul(v, 10), u64(text[*at] - 48));
+        exchange(at, *at + 1);
+    }
+    if *at < text.len() {
+        exchange(at, *at + 1);
+    }
+    if minus {
+        return wrapping_sub(0, v);
+    }
+    return v;
+}
+fn static_quad_label<a>(c: (&a mut C), word: u64, is_label: u64) -> unit {
+    o(&mut c, view(".quad "));
+    if is_label != 0 {
+        lname(&mut c, word);
+    } else {
+        static_quad(&mut c, word);
+    }
+    c.out.push(10);
+    return ();
+}
+// The data block and the {data, len, cap} object of a vector or a string whose bytes are `bytes`
+// and whose length is `n`, behind static block headers; answers the object's label.
+fn static_seq_object<a>(c: (&a mut C), bytes: (&a u8[]), n: u64) -> u64 {
+    data := label(&mut c);
+    obj := label(&mut c);
+    o(&mut c, view(".p2align 4\n.quad 0\n.quad 2\n"));
+    mark(&mut c, data);
+    for j in bytes.len() {
+        o(&mut c, view(".byte "));
+        on(&mut c, bytes[j]);
+        c.out.push(10);
+    }
+    o(&mut c, view(".byte 0\n.p2align 4\n.quad 0\n.quad 2\n"));
+    mark(&mut c, obj);
+    o(&mut c, view(".quad "));
+    lname(&mut c, data);
+    o(&mut c, view("\n.quad "));
+    on(&mut c, n);
+    o(&mut c, view("\n.quad "));
+    on(&mut c, n);
+    c.out.push(10);
+    return obj;
+}
+// Emit one baked value of type `ty` read from the flat form at `at`, nested objects first. Answers
+// the word the parent stores: the value itself, or (with `is_label` set) the label of its object.
+fn static_bake<a>(c: (&a mut C), ty: u64, text: &a [u8], at: (&a mut u64), is_label: (&a mut u64)) -> u64 {
+    if integer(&mut c, ty) || is_bool(&mut c, ty) {
+        exchange(is_label, 0);
+        return static_read_num(text, &mut at);
+    }
+    exchange(is_label, 1);
+    if ty == 3 {
+        n := static_read_num(text, &mut at);
+        mut bytes = u8[];
+        for j in n {
+            if *at + j < text.len() {
+                bytes.push(text[*at + j]);
+            }
+        }
+        exchange(at, *at + n + 1);
+        return static_seq_object(&mut c, &bytes, n);
+    }
+    if (ty == 2) || (ty_kind(&mut c, ty) == 6) {
+        mut elem = int_type(&mut c, 8, 0);
+        if ty != 2 {
+            elem = ty_arg(&mut c, ty);
+        }
+        n := static_read_num(text, &mut at);
+        mut bytes = u8[];
+        if integer(&mut c, elem) || is_bool(&mut c, elem) {
+            mut width = 8;
+            if integer(&mut c, elem) && !is_bool(&mut c, elem) {
+                e := carray_elem_of(&mut c, elem);
+                if e[2] == 3 {
+                    width = 1;
+                }
+                if e[2] == 4 {
+                    width = 4;
+                }
+            }
+            for j in n {
+                w := static_read_num(text, &mut at);
+                for b in width {
+                    bytes.push((w >> (8 * b)) & 255);
+                }
+            }
+            return static_seq_object(&mut c, &bytes, n);
+        }
+        // Elements that are objects themselves: each is emitted first, then the word table.
+        mut words = u64[];
+        mut kinds = u64[];
+        for j in n {
+            mut flag = 0;
+            w := static_bake(&mut c, elem, text, &mut at, &mut flag);
+            words.push(w);
+            kinds.push(flag);
+        }
+        data := label(&mut c);
+        obj := label(&mut c);
+        o(&mut c, view(".p2align 4\n.quad 0\n.quad 2\n"));
+        mark(&mut c, data);
+        for j in n {
+            static_quad_label(&mut c, words[j], kinds[j]);
+        }
+        o(&mut c, view(".quad 0\n.p2align 4\n.quad 0\n.quad 2\n"));
+        mark(&mut c, obj);
+        o(&mut c, view(".quad "));
+        lname(&mut c, data);
+        o(&mut c, view("\n.quad "));
+        on(&mut c, n);
+        o(&mut c, view("\n.quad "));
+        on(&mut c, n);
+        c.out.push(10);
+        return obj;
+    }
+    // A record: one word per field, as rt_rec lays it out.
+    d := ty_arg(&mut c, ty);
+    first := c.decls[d].first;
+    count := c.decls[d].count;
+    mut words = u64[];
+    mut kinds = u64[];
+    for j in count {
+        mut flag = 0;
+        fty := c.fields[first + j].ty;
+        w := static_bake(&mut c, fty, text, &mut at, &mut flag);
+        words.push(w);
+        kinds.push(flag);
+    }
+    rec := label(&mut c);
+    o(&mut c, view(".p2align 4\n.quad 0\n.quad 2\n"));
+    mark(&mut c, rec);
+    for j in count {
+        static_quad_label(&mut c, words[j], kinds[j]);
+    }
+    if count == 0 {
+        o(&mut c, view(".quad 0\n"));
+    }
+    return rec;
+}
+
 fn static_refuse<a, b>(c: (&a mut C), at: u64, msg: &b [u8]) -> unit {
     exchange(&mut c.pos, at);
     fail(&mut c, msg);
@@ -18638,10 +18907,19 @@ fn static_type_rules<a>(c: (&a mut C), ty: u64, at: u64) -> unit {
     if is_float(&mut c, ty) {
         static_refuse(&mut c, at, view("a float static is not built yet; use `const NAME: f64 = ...;`"));
     }
+    if (ty_kind(&mut c, ty) == 8) && !static_baked_type(&mut c, ty) {
+        d := ty_arg(&mut c, ty);
+        if (c.decls[d].is_enum != 0) || (c.decls[d].types != 0) {
+            mut msg = copy_bytes(view("a static of type `"));
+            push_bytes(&mut msg, view(shown));
+            push_bytes(&mut msg, view("` is not built yet: the baked tier holds integers, bools, strings, and vectors and plain (non-generic) records of those; an enum or a generic record is not one of them yet"));
+            static_refuse(&mut c, at, view(msg));
+        }
+    }
     if !static_baked_type(&mut c, ty) {
         mut msg = copy_bytes(view("a static of type `"));
         push_bytes(&mut msg, view(shown));
-        push_bytes(&mut msg, view("` needs code run while the program runs (the lazy tier), which is not built yet: a static is an integer, a bool, a string or a vector of integers, computed while compiling"));
+        push_bytes(&mut msg, view("` needs code run while the program runs (the lazy tier), which is not built yet: a static is an integer, a bool, a string, or a vector or plain record of those, computed while compiling"));
         static_refuse(&mut c, at, view(msg));
     }
     return ();
@@ -18677,6 +18955,23 @@ fn static_emit<a, b>(c: (&a mut C), i: u64, ready: u64, value: u64, text: &b [u8
         o(&mut c, view(":\n.quad "));
         static_quad(&mut c, value * ready);
         o(&mut c, view("\n.popsection\n"));
+        return ();
+    }
+    if static_structured(&mut c, ty) {
+        // A record or a table of objects: every nested object first, then the static's word.
+        mut word = 0;
+        mut flag = 0;
+        if ready != 0 {
+            mut at = 0;
+            word = static_bake(&mut c, ty, text, &mut at, &mut flag);
+        }
+        o(&mut c, view(".p2align 3\n.globl "));
+        o(&mut c, view(sym));
+        o(&mut c, view("\n"));
+        o(&mut c, view(sym));
+        o(&mut c, view(":\n"));
+        static_quad_label(&mut c, word, flag);
+        o(&mut c, view(".popsection\n"));
         return ();
     }
     // The object's bytes as the runtime lays a vector out: one byte per u8, four per 32-bit

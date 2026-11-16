@@ -94,6 +94,9 @@ borrows that one.
   and passing it where an owned `u64[]` is expected is a type error (`found &u64[]`).
 - Its type must be shareable, because every thread can read it, and must not hold a borrow. A
   thread-affine handle or a reference is refused at the declaration.
+- A static may be a plain record, or a table of them, as long as every field is something a
+  static can hold: `static FLAGS: Flag[] = @flags();` builds the table while compiling and the
+  program reads `FLAGS[i].name` without building anything.
 - `pub static` exports it like a function. Another module reads `table::SQUARES`; its interface
   file carries the static's name and type, and the object code lives only in the module that
   declares it.
