@@ -13542,6 +13542,49 @@ fn float_sign<a>(c: (&a mut C), value: u64, negate: u64) -> u64 {
     }
     return save(&mut c);
 }
+// `lhs op rhs` as the type computes it: the binary64 operation, and for f32 (`single`) its result
+// rounded to f32. In line the two are one sequence, with no slot between the operation and its
+// rounding.
+fn float_arith<a>(c: (&a mut C), op: u64, lhs: u64, rhs: u64, single: u64) -> u64 {
+    if (single == 0) || !float_inline(&c) {
+        t := float_op_call(&mut c, op, lhs, rhs, single);
+        if single != 0 {
+            return f32_round(&mut c, t);
+        }
+        return t;
+    }
+    mut id = 123;
+    if op == 45 {
+        id = 124;
+    }
+    if op == 42 {
+        id = 125;
+    }
+    if op == 47 {
+        id = 126;
+    }
+    get(&mut c, lhs, view("%rax"));
+    get(&mut c, rhs, view("%rcx"));
+    if (c.target == 0) || (c.target == 3) {
+        mut instr = "addsd";
+        if id == 124 {
+            instr = "subsd";
+        }
+        if id == 125 {
+            instr = "mulsd";
+        }
+        if id == 126 {
+            instr = "divsd";
+        }
+        o(&mut c, view("movq %rax,%xmm0\nmovq %rcx,%xmm1\n"));
+        o(&mut c, view(instr));
+        o(&mut c, view(" %xmm1,%xmm0\ncvtsd2ss %xmm0,%xmm0\ncvtss2sd %xmm0,%xmm0\nmovq %xmm0,%rax\n"));
+    } else {
+        float_text(&mut c, id);
+        o(&mut c, view("cf32bits\ncf32widen\n"));
+    }
+    return save(&mut c);
+}
 // A binary64 word rounded to the nearest f32 (ties to even) and widened again: the value every f32
 // result is. The native backend rounds in hardware - one narrowing and one widening conversion, which
 // is IEEE's rounding and so agrees with `rt_f32_round` on every non-NaN word; a NaN comes out a quiet
@@ -20515,16 +20558,108 @@ fn cfield_load<a>(c: (&a mut C), base: u64, d: u64, k: u64, address: u64) -> u64
     if ty_kind(&mut c, ty) == 18 {
         signed = ty_mode(&mut c, ty);
     }
-    w := imm(&mut c, size);
-    sign := imm(&mut c, signed);
-    loaded := invoke(&mut c, view("rt_load_sized"), three(addr, w, sign));
     if is_f32(&mut c, ty) {
         // binary32 bits in memory; Grail holds f32 values as binary64 words.
-        get(&mut c, loaded, view("%rax"));
-        ffi_f32_widen(&mut c);
-        return save(&mut c);
+        return sized_load(&mut c, addr, size, 0, 1);
     }
-    return loaded;
+    return sized_load(&mut c, addr, size, signed, 0);
+}
+// ---- sized memory access ------------------------------------------------------------------------
+// The one emitter for a value narrower than a word behind an address: a field of a C-layout record,
+// an element of a narrow vector, and whatever else stores its values at their own width.
+// `width` is 1, 2, 4 or 8 bytes; `signed` asks for sign extension to the word; `float` (width 4) says
+// the bytes are a binary32, which Grail holds as the binary64 word of the same value. Any bounds
+// check is the caller's and comes first: these take an address that is already known to be valid.
+//
+// The native backend emits the access in line. The LLVM path and the unsafe runtime keep the calls
+// (`rt_load_sized`, `rt_store_sized`), and so does a 2-byte access off x86, which machine.grl has
+// no load or store for.
+fn sized_inline<a>(c: (&a C), width: u64) -> bool {
+    if !float_inline(&c) {
+        return false;
+    }
+    if width == 2 {
+        return (c.target == 0) || (c.target == 3);
+    }
+    return (width == 1) || (width == 4) || (width == 8);
+}
+fn sized_load<a>(c: (&a mut C), addr: u64, width: u64, signed: u64, float: u64) -> u64 {
+    if !sized_inline(&c, width) {
+        w := imm(&mut c, width);
+        sign := imm(&mut c, signed);
+        loaded := invoke(&mut c, view("rt_load_sized"), three(addr, w, sign));
+        if float != 0 {
+            get(&mut c, loaded, view("%rax"));
+            ffi_f32_widen(&mut c);
+            return save(&mut c);
+        }
+        return loaded;
+    }
+    get(&mut c, addr, view("%rax"));
+    if width == 8 {
+        o(&mut c, view("movq (%rax),%rax\n"));
+    }
+    if width == 4 {
+        o(&mut c, view("movl (%rax),%eax\n"));
+        if float != 0 {
+            ffi_f32_widen(&mut c);
+        } else if signed != 0 {
+            o(&mut c, view("shlq $32,%rax\nsarq $32,%rax\n"));
+        }
+    }
+    if width == 2 {
+        if signed != 0 {
+            o(&mut c, view("movswq (%rax),%rax\n"));
+        } else {
+            o(&mut c, view("movzwq (%rax),%rax\n"));
+        }
+    }
+    if width == 1 {
+        o(&mut c, view("movzbq (%rax),%rax\n"));
+        if signed != 0 {
+            o(&mut c, view("shlq $56,%rax\nsarq $56,%rax\n"));
+        }
+    }
+    return save(&mut c);
+}
+// The store: `value` is the word Grail holds, of which the low `width` bytes are written - after
+// narrowing to binary32 when `float` says the destination is one.
+fn sized_store<a>(c: (&a mut C), addr: u64, value: u64, width: u64, float: u64) -> unit {
+    mut stored = value;
+    if float != 0 {
+        get(&mut c, value, view("%rax"));
+        if (c.target == 0) || (c.target == 3) {
+            o(&mut c, view("movq %rax,%xmm0\ncvtsd2ss %xmm0,%xmm0\nmovd %xmm0,%eax\n"));
+        } else {
+            o(&mut c, view("cf32bits\n"));
+        }
+        if sized_inline(&c, width) {
+            get(&mut c, addr, view("%rcx"));
+            o(&mut c, view("movl %eax,(%rcx)\n"));
+            return ();
+        }
+        stored = save(&mut c);
+    }
+    if !sized_inline(&c, width) {
+        w := imm(&mut c, width);
+        invoke(&mut c, view("rt_store_sized"), three(addr, stored, w));
+        return ();
+    }
+    get(&mut c, stored, view("%rax"));
+    get(&mut c, addr, view("%rcx"));
+    if width == 8 {
+        o(&mut c, view("movq %rax,(%rcx)\n"));
+    }
+    if width == 4 {
+        o(&mut c, view("movl %eax,(%rcx)\n"));
+    }
+    if width == 2 {
+        o(&mut c, view("movw %ax,(%rcx)\n"));
+    }
+    if width == 1 {
+        o(&mut c, view("movb %al,(%rcx)\n"));
+    }
+    return ();
 }
 fn ffi_f32_widen<a>(c: (&a mut C)) -> unit {
     if (c.target == 0) || (c.target == 3) {
@@ -20573,6 +20708,15 @@ fn cfield_store<a>(c: (&a mut C), base: u64, d: u64, k: u64, value: u64) -> unit
         o(&mut c, view("movq %rax,"));
         on(&mut c, off);
         o(&mut c, view("(%rcx)\n"));
+        return ();
+    }
+    if sized_inline(&c, size) {
+        get(&mut c, base, view("%rax"));
+        o(&mut c, view("addq $"));
+        on(&mut c, off);
+        o(&mut c, view(",%rax\n"));
+        at := save(&mut c);
+        sized_store(&mut c, at, value, size, u64(is_f32(&mut c, ty)));
         return ();
     }
     mut stored = value;
@@ -20637,15 +20781,7 @@ fn caddr_load<a>(c: (&a mut C), slot: u64, ty: u64) -> u64 {
         signed = ty_mode(&mut c, ty);
     }
     size := ffi_field_size(&mut c, ty);
-    w := imm(&mut c, size);
-    sign := imm(&mut c, signed);
-    loaded := invoke(&mut c, view("rt_load_sized"), three(slot, w, sign));
-    if is_f32(&mut c, ty) {
-        get(&mut c, loaded, view("%rax"));
-        ffi_f32_widen(&mut c);
-        return save(&mut c);
-    }
-    return loaded;
+    return sized_load(&mut c, slot, size, signed, u64(is_f32(&mut c, ty)));
 }
 // Stores a Grail word into a narrow C field through its address slot.
 fn caddr_store<a>(c: (&a mut C), slot: u64, ty: u64, value: u64) -> unit {
@@ -20658,19 +20794,8 @@ fn caddr_store<a>(c: (&a mut C), slot: u64, ty: u64, value: u64) -> unit {
         invoke(&mut c, view("rt_free"), one(value));
         return ();
     }
-    mut stored = value;
-    if is_f32(&mut c, ty) {
-        get(&mut c, value, view("%rax"));
-        if (c.target == 0) || (c.target == 3) {
-            o(&mut c, view("movq %rax,%xmm0\ncvtsd2ss %xmm0,%xmm0\nmovd %xmm0,%eax\n"));
-        } else {
-            o(&mut c, view("cf32bits\n"));
-        }
-        stored = save(&mut c);
-    }
     size := ffi_field_size(&mut c, ty);
-    w := imm(&mut c, size);
-    invoke(&mut c, view("rt_store_sized"), three(slot, stored, w));
+    sized_store(&mut c, slot, value, size, u64(is_f32(&mut c, ty)));
     return ();
 }
 // Narrow vectors (`f32[]`, `u32[]`, `i32[]`) store 4-byte elements: 1 for f32, 2 for u32, 3 for
@@ -21381,8 +21506,7 @@ fn ffi_float_result<a>(c: (&a mut C), slot: u64, d: u64, plan: u64) -> unit {
             on(&mut c, leaves[i].off);
             o(&mut c, view(",%rax\n"));
             addr := save(&mut c);
-            w := imm(&mut c, leaves[i].size);
-            invoke(&mut c, view("rt_store_sized"), three(addr, held, w));
+            sized_store(&mut c, addr, held, leaves[i].size, 0);
         }
     }
     return ();
@@ -34825,10 +34949,7 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
                                         op := imm(&mut c, k);
                                         if (k == 43) || (k == 45) || (k == 42) || (k == 47) {
                                             single := u64(is_f32(&mut c, ty));
-                                            t = float_op_call(&mut c, k, snap, right.t, single);
-                                            if single != 0 {
-                                                t = f32_round(&mut c, t);
-                                            }
+                                            t = float_arith(&mut c, k, snap, right.t, single);
                                         } else {
                                             if is_comparison(k) {
                                                 t = float_cmp_call(&mut c, k, op, snap, right.t);
@@ -35183,10 +35304,7 @@ fn compound_value<a>(c: (&a mut C), op: u64, old: u64, v: Val, ty: u64) -> Val {
             fail(&mut c, view("operator not defined for floats"));
         }
         single := u64(is_f32(&mut c, ty));
-        mut value = float_op_call(&mut c, op, old, v.t, single);
-        if single != 0 {
-            value = f32_round(&mut c, value);
-        }
+        mut value = float_arith(&mut c, op, old, v.t, single);
         return val(value, ty);
     }
     if ty_kind(&mut c, ty) == 18 {
@@ -38107,10 +38225,7 @@ fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, t
                 fail(&mut c, view("operator not defined for floats"));
             }
             single := u64(is_f32(&mut c, expected));
-            mut value = float_op_call(&mut c, op, oldvalue, v.t, single);
-            if single != 0 {
-                value = f32_round(&mut c, value);
-            }
+            mut value = float_arith(&mut c, op, oldvalue, v.t, single);
             v = val(value, expected);
         } else {
             if ty_kind(&mut c, expected) == 18 {
