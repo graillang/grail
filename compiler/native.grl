@@ -928,6 +928,8 @@ struct C {
     par_fail: u64,
     par_jobs: jobs::Jobs,
     par_hits: u64,
+    // Where the lines the optimiser's cut planning reads were written (optimize::plan_from).
+    plan_at: u64[],
     // Armed (par_start) but not forked yet: the walk forks when it has compiled `par_threshold`
     // bodies the store did not have (par_fork), over the source still ahead of it.
     par_armed: u64,
@@ -1209,6 +1211,7 @@ fn part<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
         // The marker states the unit's name (what `--split` names a file after) and the label
         // prefix its code mints (what the optimizer has to recognise as this unit's labels).
         prefix := c.lpart.copy();
+        c.plan_at.push(c.out.len());
         o(&mut c, view(".grail_part "));
         o(&mut c, name);
         c.out.push(32);
@@ -3933,6 +3936,7 @@ fn func_directive<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], symbol: &d 
         o(&mut c, view("\n.scl 2\n.type 32\n.endef\n"));
         return ();
     }
+    c.plan_at.push(c.out.len());
     o(&mut c, view(".type "));
     export_name(&mut c, view(m), view(name), view(symbol), export);
     o(&mut c, view(",@function\n"));
@@ -15239,7 +15243,22 @@ fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), l
         c.fnext[k - 1] = c.fnext[k - 1] + 1;
     }
     if site_table_on(&c) {
+        c.plan_at.push(c.out.len());
         site_base(&mut c, line);
+    }
+    // The body's opening line, for the cut planning (optimize::plan_from): within its first lines.
+    mut k = 0;
+    mut seen = 0;
+    while (k + 6 < u.text.len()) & (seen < 4) {
+        if (u.text[k] == 46) & (u.text[k + 1] == 116) & (u.text[k + 2] == 121) & (u.text[k + 3] == 112) & (u.text[k + 4] == 101) & (u.text[k + 5] == 32) {
+            c.plan_at.push(c.out.len() + k);
+            break;
+        }
+        while (k < u.text.len()) & (u.text[k] != 10) {
+            k += 1;
+        }
+        k += 1;
+        seen += 1;
     }
     c.out.append(view(u.text));
     fn_facts_restore(&mut c, view(u.facts));
@@ -16451,6 +16470,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // before the line that says where the function is.
     apply_mark := c.out.len();
     if site_table_on(&c) && (c.validating == 0) && (position < c.toks.len()) {
+        c.plan_at.push(c.out.len());
         site_base(&mut c, fn_line);
     }
     // A unit's text starts here, after the line that says where the function is.
@@ -30709,6 +30729,7 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         scope_begin(&mut c);
         if site_table_on(&c) && (start < c.toks.len()) {
             base_line := c.toks[start].line;
+            c.plan_at.push(c.out.len());
             site_base(&mut c, base_line);
         }
         // A closure of a specialisation is weak like the specialisation: func_directive states the
@@ -44774,6 +44795,7 @@ pub fn main() -> u64 {
         par_fail: 0,
         par_jobs: jobs::none(),
         par_hits: 0,
+        plan_at: u64[],
         par_armed: 0,
         par_misses: 0,
         par_threshold: 0,
@@ -45621,9 +45643,9 @@ pub fn main() -> u64 {
         out = copy_bytes(view(c.out));
     } else {
         if c.split != 0 {
-            out = optimize::optimize_parts(view(c.out), 1, &mut c.marks, &mut c.part_names, &c.facts, c.emit_ir, &mut ir_text, &replay, &mut call_syms, &mut call_counts, view(c.fn_dir), view(c.fn_id));
+            out = optimize::optimize_parts(view(c.out), 1, &mut c.marks, &mut c.part_names, &c.facts, c.emit_ir, &mut ir_text, &replay, &mut call_syms, &mut call_counts, view(c.fn_dir), view(c.fn_id), &c.plan_at);
         } else {
-            out = optimize::optimize(view(c.out), &c.facts, c.emit_ir, &mut ir_text, &replay, &mut call_syms, &mut call_counts, view(c.fn_dir), view(c.fn_id));
+            out = optimize::optimize(view(c.out), &c.facts, c.emit_ir, &mut ir_text, &replay, &mut call_syms, &mut call_counts, view(c.fn_dir), view(c.fn_id), &c.plan_at);
         }
         // The check the byte scan used to make, now from the IR: a call site that bypasses the
         // recording helpers is a compiler bug, and a bug here is a silently weaker proof.

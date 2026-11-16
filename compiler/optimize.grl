@@ -1909,15 +1909,18 @@ fn compact<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64, ns: u64) -> u6
     }
     return (used * 8 + 15) / 16 * 16;
 }
-pub fn optimize<b, c, d, m>(s: &b [u8], facts: (&c llvm::Facts), want_ir: u64, ir_text: (&mut u8[]), replay: (&d ir::Replay), call_syms: (&mut u8[][]), call_counts: (&mut u64[]), memo_dir: &m [u8], memo_id: &m [u8]) -> u8[] {
+pub fn optimize<b, c, d, m, q>(s: &b [u8], facts: (&c llvm::Facts), want_ir: u64, ir_text: (&mut u8[]), replay: (&d ir::Replay), call_syms: (&mut u8[][]), call_counts: (&mut u64[]), memo_dir: &m [u8], memo_id: &m [u8], starts: (&q u64[])) -> u8[] {
     mut marks = u64[];
     mut names = u8[][];
-    return optimize_parts(view(s), 0, &mut marks, &mut names, facts, want_ir, ir_text, replay, call_syms, call_counts, memo_dir, memo_id);
+    return optimize_parts(view(s), 0, &mut marks, &mut names, facts, want_ir, ir_text, replay, call_syms, call_counts, memo_dir, memo_id, starts);
 }
 // `optimize` plus the positions of the `--split` module markers it kept: for each marker line, the
 // output offset of the line and the module name it carries. A single-file build passes `split` 0 and
 // pays nothing. `native.grl` splits at these offsets, so the stream never has to be scanned again.
-pub fn optimize_parts<b, c, d, e, m>(s: &b [u8], split: u64, marks: (&mut u64[]), names: (&mut u8[][]), facts: (&c llvm::Facts), want_ir: u64, ir_text: (&mut u8[]), replay: (&e ir::Replay), call_syms: (&mut u8[][]), call_counts: (&mut u64[]), memo_dir: &m [u8], memo_id: &m [u8]) -> u8[] {
+// `starts`: where the emitter wrote the lines the cut planning reads (plan_from) - a body's `.type`
+// line, a part's marker, a function's `.gbase` - so it does not scan the stream for them. Possibly
+// stale (the emitter takes text back on a retry) and in no particular order; empty means scan.
+pub fn optimize_parts<b, c, d, e, m, q>(s: &b [u8], split: u64, marks: (&mut u64[]), names: (&mut u8[][]), facts: (&c llvm::Facts), want_ir: u64, ir_text: (&mut u8[]), replay: (&e ir::Replay), call_syms: (&mut u8[][]), call_counts: (&mut u64[]), memo_dir: &m [u8], memo_id: &m [u8], starts: (&q u64[])) -> u8[] {
     // The type facts, indexed by body symbol once: the table is complete before any body is walked.
     ix := ir::index_facts(facts);
     mut o = ir::new_body();
@@ -1935,7 +1938,13 @@ pub fn optimize_parts<b, c, d, e, m>(s: &b [u8], split: u64, marks: (&mut u64[])
     // free now, plus this process's own; the text is the same whatever the count.
     mut js = jobs::open();
     jobs::phase(view("optimiser-start"));
-    cuts := plan(view(s), jobs::workers(&mut js, jobs_for(s.len())));
+    pieces := jobs::workers(&mut js, jobs_for(s.len()));
+    mut cuts = Cut[];
+    if starts.len() != 0 {
+        cuts = plan_from(view(s), starts, pieces);
+    } else {
+        cuts = plan(view(s), pieces);
+    }
     jobs::phase(view("optimiser-plan"));
     mut rest = 0;
     mut parallel = false;
@@ -2070,6 +2079,71 @@ fn plan<b>(s: &b [u8], jobs: u64) -> Cut[] {
         }
     }
     cuts.push(cut_here(&p, start));
+    return cuts;
+}
+// The cuts `plan` makes, from the offsets the emitter noted instead of a scan of the stream: the
+// lines that change what a cut carries are a body's opening line (its function ordinal), a part's
+// marker and a function's `.gbase`, and every one of them was noted where it was written. Each noted
+// offset is checked to be the start of such a line now - a retry takes text back and writes again,
+// so a note can be stale or repeated - and they are read in stream order. Cuts are made only at a
+// body's opening line, which is outside every body; the output does not depend on where the cuts
+// fall (ir::function_begin), only on the state they carry.
+fn plan_from<b, q>(s: &b [u8], starts: (&q u64[]), jobs: u64) -> Cut[] {
+    mut p = ir::new_body();
+    mut cuts = Cut[];
+    cuts.push(cut_here(&p, 0));
+    if jobs < 2 {
+        return cuts;
+    }
+    // In order, once each: the notes are written in order except where text was taken back.
+    mut at = starts.copy();
+    mut i = 1;
+    while i < at.len() {
+        v := at[i];
+        mut j = i;
+        while (0 < j) && (v < at[j - 1]) {
+            at[j] = at[j - 1];
+            j -= 1;
+        }
+        at[j] = v;
+        i += 1;
+    }
+    n := s.len();
+    share := n / jobs;
+    mut want = share;
+    mut last = n + 1;
+    for k in at.len() {
+        a := at[k];
+        if (a == last) || (n <= a) {
+            continue;
+        }
+        last = a;
+        if (a != 0) && (s[a - 1] != 10) {
+            continue;
+        }
+        mut e = a;
+        while (e < n) && (s[e] != 10) {
+            e += 1;
+        }
+        if e == n {
+            continue;
+        }
+        if opens_body(view(s), a, e) {
+            if (want <= a) && (cuts.len() < jobs) {
+                cuts.push(cut_here(&p, a));
+                want = a + share;
+            }
+            ir::function_begin(&mut p);
+        } else if ir::marker(&mut p, view(s), a, e) == 0 {
+            ir::gbase_line(&mut p, view(s), a, e);
+        }
+    }
+    // The end of the last whole line.
+    mut end = n;
+    while (0 < end) && (s[end - 1] != 10) {
+        end -= 1;
+    }
+    cuts.push(cut_here(&p, end));
     return cuts;
 }
 // Optimise the whole lines of `s[lo..hi]` into `o.out`. Returns where the last whole line ended.
