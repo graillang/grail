@@ -546,6 +546,7 @@ function lint() {
   }
   check('LSP/debugger/profiler plan exists', existsSync(join(root, 'docs/tooling/lsp-debugger-profiler.md')));
   check('FFI test runner exists', existsSync(join(root, 'tools/test-ffi.mjs')));
+  check('the gate runs the jobserver test', readFileSync(join(root, 'tools/gate.sh'), 'utf8').includes('jobs-test') && existsSync(join(root, 'tools/jobs-test.mjs')));
   check('the gate compiles the corpus with no unit store, an empty one and a warm one', readFileSync(join(root, 'tools/gate.sh'), 'utf8').includes('tools/test-native.mjs x86_64 --unit-identity') && readFileSync(join(root, 'tools/test-native.mjs'), 'utf8').includes('--unit-identity'));
   check('the compile-speed benchmark exists and the gate runs it', existsSync(join(root, 'tools/compile-bench.mjs')) && readFileSync(join(root, 'tools/gate.sh'), 'utf8').includes('tools/compile-bench.mjs'));
   check('the gate runs the benchmarks against other languages, one at a time after the rest', (text => ['bench-rivals', 'sched-rivals', 'compile-rivals'].every(tool => new RegExp(`leg ${tool} bun tools/${tool}\\.mjs[^\\n]*\\nwait\\n`).test(text) && existsSync(join(root, `tools/${tool}.mjs`))) && text.indexOf('leg bench-rivals') > text.indexOf('leg runtime-bench-llvm'))(readFileSync(join(root, 'tools/gate.sh'), 'utf8')));

@@ -6801,8 +6801,12 @@ fn f_host_pipe() -> u64 {
     return out;
 }
 // Reads up to max bytes; suspends (green) while no data is available. Empty on end/cancel.
-fn f_host_read_fd(fd: u64, max: u64) -> u64 {
+// `max` with bit 62 set (2^62 + n) reads at most n bytes and does not wait: nothing to read yet is an
+// empty vector (the jobserver's token take, compiler/jobs.grl).
+fn f_host_read_fd(fd: u64, asked: u64) -> u64 {
     out := rt_new();
+    now_only := (asked / 4611686018427387904) & 1;
+    max := asked % 4611686018427387904;
     if max == 0 {
         return out;
     }
@@ -6810,6 +6814,9 @@ fn f_host_read_fd(fd: u64, max: u64) -> u64 {
     while true {
         n := rt_io(rt_read_now, fd, buf, max);
         if n == wrapping_sub(0, 11) {
+            if now_only {
+                break;
+            }
             if rt_wait_fd(fd, 1) != 0 {
                 break;
             }
@@ -7466,7 +7473,9 @@ fn f_host_tcp_connect(host: u64, port: u64) -> u64 {
 }
 
 // Opens a file for reading (write==0) or writing (create/truncate). Returns the descriptor or a
-// negative errno (as a wrapped word) instead of aborting.
+// negative errno (as a wrapped word) instead of aborting. `write == 2` is the jobserver's fifo
+// (compiler/jobs.grl): made first if the path does not exist, then opened for reading and writing
+// and non-blocking, so a process that holds it open never sees its end.
 fn f_host_open(path: u64, write: u64) -> u64 {
     name := rt_cstr(path);
     rt_view_free(path);
@@ -7474,7 +7483,11 @@ fn f_host_open(path: u64, write: u64) -> u64 {
         return wrapping_sub(0, 22);
     }
     mut flags = 524288;
-    if write {
+    if write == 2 {
+        // mknodat(AT_FDCWD, name, S_IFIFO | 0600, 0); an existing one is the one to open.
+        rt_syscall(259, wrapping_sub(0, 100), name, 4480);
+        flags = 526338;
+    } else if write {
         flags = 524865;
     }
     fd := rt_syscall(2, name, flags, 438);
@@ -9657,6 +9670,9 @@ fn rt_vec_contains(s: u64, v: u64) -> u64 {
 //
 // The control page is the first 4096 bytes of the sample mapping:
 //   0 magic  8 sample base  16 capacity  24 claimed  32 dropped  40 rate  48 cpu start (ns)
+//   56 words per sample: 1, or 8 for a request of version 2 (`grail profile --callers`), whose
+//      samples are the instruction pointer and then up to seven return addresses, read up the
+//      frame-pointer chain and ended by a zero. A version-1 request takes exactly the old path.
 fn rt_prof_words() -> u64 {
     return raw_state() + 2048;
 }
@@ -9673,7 +9689,36 @@ fn rt_prof_handler(sig: u64, info: u64, ctx: u64) -> u64 {
     if i < raw_load(page + 16) {
         // The kernel's rt_sigframe keeps the ucontext at a fixed offset from the third handler
         // argument; RIP is gregs[16] inside its sigcontext, 40 + 16 * 8.
-        raw_store(raw_load(page + 8) + i * 8, raw_load(ctx + 168));
+        depth := raw_load(page + 56);
+        if depth < 2 {
+            raw_store(raw_load(page + 8) + i * 8, raw_load(ctx + 168));
+        } else {
+            // The callers: every Grail frame keeps rbp, so the chain gives the return addresses.
+            // A frame pointer is followed only while it lies above the interrupted stack pointer,
+            // within 64 MiB of it, aligned and climbing - a leaf caught in its prologue or a frame
+            // without one ends the chain rather than sending the handler to read anywhere.
+            slot := raw_load(page + 8) + i * depth * 8;
+            raw_store(slot, raw_load(ctx + 168));
+            sp := raw_load(ctx + 160);
+            mut bp = raw_load(ctx + 120);
+            mut j = 1;
+            while j < depth {
+                if (bp < sp) | (sp + 67108864 < bp) | ((bp & 7) != 0) {
+                    break;
+                }
+                raw_store(slot + j * 8, raw_load(bp + 8));
+                next := raw_load(bp);
+                j += 1;
+                if next <= bp {
+                    break;
+                }
+                bp = next;
+            }
+            while j < depth {
+                raw_store(slot + j * 8, 0);
+                j += 1;
+            }
+        }
     } else {
         rt_atomic_fetch_add(page + 32, 1);
     }
@@ -9773,8 +9818,13 @@ fn rt_prof_start() -> u64 {
     // "1 RATE CAPACITY PATH": the format version, the sampling rate in Hz, the sample capacity and
     // the file the raw addresses go to. The CLI writes it; a hand-written file is accepted too.
     v := rt_prof_token(text, n, 0);
-    if rt_prof_num(text, n, v) != 1 {
+    version := rt_prof_num(text, n, v);
+    if (version != 1) & (version != 2) {
         return 0;
+    }
+    mut depth = 1;
+    if version == 2 {
+        depth = 8;
     }
     mut r = rt_prof_end(text, n, v);
     mut rate = rt_prof_num(text, n, rt_prof_token(text, n, r));
@@ -9804,7 +9854,7 @@ fn rt_prof_start() -> u64 {
         used = used + 1;
     }
     raw_putbyte(words + 128 + used, 0);
-    page := raw_map(4096 + cap * 8);
+    page := raw_map(4096 + cap * 8 * depth);
     if rt_error(page) {
         return 0;
     }
@@ -9843,6 +9893,7 @@ fn rt_prof_start() -> u64 {
     raw_store(page + 24, 0);
     raw_store(page + 32, 0);
     raw_store(page + 40, rate);
+    raw_store(page + 56, depth);
     ts := words + 608;
     if rt_error(rt_syscall(228, 2, ts, 0)) {
         raw_store(page + 48, 0);
@@ -9892,8 +9943,14 @@ fn rt_prof_dump() -> u64 {
     // "GRPROF2\n" then rate, capacity, count, dropped and the CPU nanoseconds the samples cover:
     // the rate a caller asks for is capped by the kernel's timer granularity, so the report derives
     // the effective rate from this measurement instead of assuming the request was honoured.
+    // "GRPROF3\n" for samples with their callers, `page + 56` words each.
     h := words + 352;
-    raw_store(h, 734726995712168519);
+    depth := raw_load(page + 56);
+    if depth < 2 {
+        raw_store(h, 734726995712168519);
+    } else {
+        raw_store(h, 735008470688879175);
+    }
     raw_store(h + 8, raw_load(page + 40));
     raw_store(h + 16, cap);
     raw_store(h + 24, count);
@@ -9905,7 +9962,11 @@ fn rt_prof_dump() -> u64 {
     }
     raw_store(h + 40, cpu);
     if rt_write_all(fd, h, 48) == 0 {
-        rt_write_all(fd, raw_load(page + 8), count * 8);
+        mut words_each = depth;
+        if words_each < 2 {
+            words_each = 1;
+        }
+        rt_write_all(fd, raw_load(page + 8), count * 8 * words_each);
     }
     rt_syscall(3, fd, 0, 0);
     return 0;

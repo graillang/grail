@@ -1,5 +1,6 @@
 module native;
 use fncache;
+use jobs;
 use lexer;
 use host;
 use explain;
@@ -946,6 +947,42 @@ struct C {
     fn_at_off: u64,
     fn_at_line: u64,
     fn_at_col: u64,
+    // `--shift-declarations N`: tuple declarations synthesised before the first body (a test switch).
+    shift_decls: u64,
+    // Parallel bodies (par_start): 1 while forked workers compile bodies into units; this process's
+    // part in it (0 the parent, k the k-th worker); how many processes; where each one's slice
+    // starts (file and byte, one pair per process); 1 when bodies are dealt out in turn instead
+    // (`GRAIL_BODY_SLICE=1`); the count of bodies walked so far. The parent keeps one pipe and one
+    // child per worker, what each sent, how far it has read it, and whether it has (0 not yet, 1
+    // whole, 2 not whole); a worker keeps what it will send. `par_fail` sends the rest of the walk
+    // to this process.
+    par_on: u64,
+    par_me: u64,
+    par_j: u64,
+    par_cut_file: u64[],
+    par_cut_off: u64[],
+    par_rr: u64,
+    par_n: u64,
+    par_fds: u64[],
+    par_pids: u64[],
+    par_data: u8[][],
+    par_at: u64[],
+    par_read: u64[],
+    par_buf: u8[],
+    par_wfd: u64,
+    par_fail: u64,
+    par_jobs: jobs::Jobs,
+    par_hits: u64,
+    // Where the lines the optimiser's cut planning reads were written (optimize::plan_from).
+    plan_at: u64[],
+    // The bodies applied from units, for the optimiser (ir::Known).
+    known: ir::Known,
+    // Armed (par_start) but not forked yet: the walk forks when it has compiled `par_threshold`
+    // bodies the store did not have (par_fork), over the source still ahead of it.
+    par_armed: u64,
+    par_misses: u64,
+    par_threshold: u64,
+    par_sizes: u64[],
     fn_hits: u64,
     fn_filed: u64,
     fn_kept: u64,
@@ -1221,6 +1258,7 @@ fn part<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
         // The marker states the unit's name (what `--split` names a file after) and the label
         // prefix its code mints (what the optimizer has to recognise as this unit's labels).
         prefix := c.lpart.copy();
+        c.plan_at.push(c.out.len());
         o(&mut c, view(".grail_part "));
         o(&mut c, name);
         c.out.push(32);
@@ -2499,6 +2537,28 @@ fn site_func_entry<a>(entries: (&a mut u8[]), count: u64, name: u64) -> unit {
 // above). The runtime's own statements are entered as ranges with no file - a failure report never
 // names the runtime - and so is a function's prologue, which has no statement yet. An inline
 // `call rt_abort` becomes `call rt_trap` with its kind.
+// Whether text[a..e] starts with `prefix` / contains `part` (site_table reads lines in place).
+fn site_at<a, b>(text: &a [u8], a: u64, e: u64, prefix: &b [u8]) -> bool {
+    if e - a < prefix.len() {
+        return false;
+    }
+    for i in prefix.len() {
+        if text[a + i] != prefix[i] {
+            return false;
+        }
+    }
+    return true;
+}
+fn site_in<a, b>(text: &a [u8], a: u64, e: u64, part: &b [u8]) -> bool {
+    mut i = a;
+    while i + part.len() <= e {
+        if site_at(text, i, e, part) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
 fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
     mut out = u8[];
     mut entries = u8[];
@@ -2514,11 +2574,13 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
     mut own_internal = true;
     mut seen_own = false;
     mut pending = 0;
-    mut prev1 = u8[];
-    mut prev2 = u8[];
+    // The two code lines before this one, as ranges of `text`.
+    mut p1a = 0;
+    mut p1e = 0;
+    mut p2a = 0;
+    mut p2e = 0;
     mut pending_site = false;
     mut count = 0;
-    mut line = u8[];
     // The function table (grail_funcs): one (start, name) entry per function, name 0 for the
     // runtime's own. A frame's return address names the function it lies in, so a backtrace of a
     // returned error can say which function created it.
@@ -2528,86 +2590,107 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
     mut func_count = 0;
     mut pending_func = 0;
     mut pending_name = u8[];
-    for i in text.len() {
-        b := text[i];
-        if b != 10 {
-            line.push(b);
-            continue;
+    // Lines are read in place, and what passes through unchanged is copied in runs: `pend` is the
+    // first byte not yet copied to `out`. A line that is dropped or replaced, or that gets a label in
+    // front of it, flushes the run before it.
+    mut pend = 0;
+    mut a = 0;
+    n := text.len();
+    while a < n {
+        mut e = a;
+        while (e < n) && (text[e] != 10) {
+            e += 1;
         }
-        if site_starts(view(line), view(".gbase ")) {
-            w := site_words(view(line));
-            if w.len() == 1 {
-                base_line = w[0];
+        if e == n {
+            // A last line with no newline is copied as it is.
+            break;
+        }
+        next := e + 1;
+        if (e - a > 6) && (text[a] == 46) && (text[a + 1] == 103) {
+            if site_at(text, a, e, view(".gbase ")) {
+                w := site_words(text[a..e]);
+                if w.len() == 1 {
+                    base_line = w[0];
+                }
+                out.append(text[pend..a]);
+                pend = next;
+                a = next;
+                continue;
             }
-            line = u8[];
-            continue;
-        }
-        absolute := site_starts(view(line), view(".gposa "));
-        if absolute || site_starts(view(line), view(".gpos ")) {
-            w := site_words(view(line));
-            if w.len() == 4 {
-                internal := w[3] != 0;
-                if !seen_own {
-                    seen_own = true;
-                    own_internal = internal;
-                }
-                // An inlined runtime body keeps its function's own position.
-                if !internal || own_internal {
-                    cur_file = w[0];
-                    cur_line = w[1];
-                    if !absolute {
-                        cur_line = base_line + w[1];
+            absolute := site_at(text, a, e, view(".gposa "));
+            if absolute || site_at(text, a, e, view(".gpos ")) {
+                w := site_words(text[a..e]);
+                if w.len() == 4 {
+                    internal := w[3] != 0;
+                    if !seen_own {
+                        seen_own = true;
+                        own_internal = internal;
                     }
-                    cur_col = w[2];
-                    cur_internal = internal;
-                }
-                // The pending function's first statement names its table entry: the runtime's own
-                // functions have none, so a backtrace never prints `rt_` frames.
-                if pending_func != 0 {
-                    mut func_name = 0;
-                    if !internal {
-                        name_count += 1;
-                        func_name = name_count;
-                        push_bytes(&mut names, view(".Lgh"));
-                        decimal(&mut names, name_count);
-                        push_bytes(&mut names, view(":\n.asciz \""));
-                        for k in pending_name.len() {
-                            ch := pending_name[k];
-                            if (ch == 34) || (ch == 92) {
-                                names.push(92);
-                            }
-                            names.push(ch);
+                    // An inlined runtime body keeps its function's own position.
+                    if !internal || own_internal {
+                        cur_file = w[0];
+                        cur_line = w[1];
+                        if !absolute {
+                            cur_line = base_line + w[1];
                         }
-                        push_bytes(&mut names, view("\"\n"));
+                        cur_col = w[2];
+                        cur_internal = internal;
                     }
-                    site_func_entry(&mut funcs, pending_func, func_name);
-                    pending_func = 0;
+                    // The pending function's first statement names its table entry: the runtime's own
+                    // functions have none, so a backtrace never prints `rt_` frames.
+                    if pending_func != 0 {
+                        mut func_name = 0;
+                        if !internal {
+                            name_count += 1;
+                            func_name = name_count;
+                            push_bytes(&mut names, view(".Lgh"));
+                            decimal(&mut names, name_count);
+                            push_bytes(&mut names, view(":\n.asciz \""));
+                            for k in pending_name.len() {
+                                ch := pending_name[k];
+                                if (ch == 34) || (ch == 92) {
+                                    names.push(92);
+                                }
+                                names.push(ch);
+                            }
+                            push_bytes(&mut names, view("\"\n"));
+                        }
+                        site_func_entry(&mut funcs, pending_func, func_name);
+                        pending_func = 0;
+                    }
+                    // Held until the statement's first instruction: two statements with no code
+                    // between them would otherwise open the same address, and the later one owns it.
+                    pending_site = true;
                 }
-                // Held until the statement's first instruction: two statements with no code between
-                // them would otherwise open the same address, and the later one owns it.
-                pending_site = true;
+                out.append(text[pend..a]);
+                pend = next;
+                a = next;
+                continue;
             }
-            line = u8[];
-            continue;
-        }
-        if site_starts(view(line), view(".gkind ")) {
-            w := site_words(view(line));
-            if w.len() == 1 {
-                pending = w[0];
+            if site_at(text, a, e, view(".gkind ")) {
+                w := site_words(text[a..e]);
+                if w.len() == 1 {
+                    pending = w[0];
+                }
+                out.append(text[pend..a]);
+                pend = next;
+                a = next;
+                continue;
             }
-            line = u8[];
-            continue;
         }
+        directive := (a < e) && (text[a] == 46);
         // A function starts: positions are its own again, and the code up to its first statement -
         // its prologue - names no place.
-        if (line.len() > 1) && (line[line.len() - 1] == 58) && !site_starts(view(line), view(".")) {
+        if (e - a > 1) && (text[e - 1] == 58) && !directive {
             seen_own = false;
             own_internal = true;
             cur_file = 0;
             pending_site = false;
             // Not the data labels, whose range would swallow code, and not the PE entry, which is
             // emitted as `.globl grail_entry` then `grail_entry:` and would get the label between.
-            if !site_starts(view(line), view("rt_state:")) && !site_starts(view(line), view("rt_tls_record:")) && !site_starts(view(line), view("grail_entry:")) {
+            if !site_at(text, a, e, view("rt_state:")) && !site_at(text, a, e, view("rt_tls_record:")) && !site_at(text, a, e, view("grail_entry:")) {
+                out.append(text[pend..a]);
+                pend = a;
                 site_label(&mut out, count);
                 site_entry(&mut entries, count, 0, 0);
                 count += 1;
@@ -2620,11 +2703,13 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
                 func_count += 1;
                 site_func_label(&mut out, func_count);
                 pending_func = func_count;
-                pending_name = span_copy(view(line), 0, line.len() - 1);
+                pending_name = span_copy(text[a..e], 0, e - a - 1);
             }
         }
-        if pending_site && !site_starts(view(line), view(".")) {
+        if pending_site && !directive {
             pending_site = false;
+            out.append(text[pend..a]);
+            pend = a;
             site_label(&mut out, count);
             if (cur_file != 0) && !cur_internal {
                 mut known = false;
@@ -2650,29 +2735,27 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
         }
         // Only a check in program code is rewritten: the runtime's own aborts (rt_fail ends in one)
         // stay plain, or a failing check would report itself forever.
-        mut is_abort = site_starts(view(line), view("call rt_abort")) && (line.len() == 13) && seen_own && !own_internal;
-        if is_abort {
+        if (e - a == 13) && seen_own && !own_internal && site_at(text, a, e, view("call rt_abort")) {
             mut kind = pending;
-            if (kind == 0) && site_starts(view(prev1), view("jb ")) && site_contains(view(prev2), view("cmpq 8(%rdi),%rsi")) {
+            if (kind == 0) && site_at(text, p1a, p1e, view("jb ")) && site_in(text, p2a, p2e, view("cmpq 8(%rdi),%rsi")) {
                 kind = 1;
             }
+            out.append(text[pend..a]);
+            pend = next;
             push_bytes(&mut out, view("movq $"));
             decimal(&mut out, kind);
             push_bytes(&mut out, view(",%rdx\ncall rt_trap\n"));
             pending = 0;
-        } else {
-            push_bytes(&mut out, view(line));
-            out.push(10);
         }
-        if (line.len() != 0) && !site_starts(view(line), view(".")) {
-            prev2 = prev1;
-            prev1 = line;
+        if (a < e) && !directive {
+            p2a = p1a;
+            p2e = p1e;
+            p1a = a;
+            p1e = e;
         }
-        line = u8[];
+        a = next;
     }
-    if line.len() != 0 {
-        push_bytes(&mut out, view(line));
-    }
+    out.append(text[pend..n]);
     // A last function whose body holds no statement (the entry shim, a body of only calls emitted
     // without positions) keeps its range and no name.
     if pending_func != 0 {
@@ -3927,6 +4010,7 @@ fn func_directive<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], symbol: &d 
         o(&mut c, view("\n.scl 2\n.type 32\n.endef\n"));
         return ();
     }
+    c.plan_at.push(c.out.len());
     o(&mut c, view(".type "));
     export_name(&mut c, view(m), view(name), view(symbol), export);
     o(&mut c, view(",@function\n"));
@@ -4012,6 +4096,90 @@ fn store_params<a>(c: (&a mut C), count: u64) -> unit {
     call_out(&mut c, view("rt_free"));
     }
     return ();
+}
+// An integer conversion of the value in slot `v`, from the type `from` codes to the type `to`
+// codes (int_code: bits, 256 signed, 512 wrapping). The native backend emits it in line: nothing at
+// all when every value of the source fits the target, a truncation when the conversion wraps, and
+// otherwise a range test whose failing side calls `rt_int_cast` - which finds the value out of range
+// and reports it exactly as it always did. Only the unsafe runtime, which defines it, keeps the call.
+fn int_cast<a>(c: (&a mut C), v: u64, from: u64, to: u64) -> u64 {
+    fb := from & 255;
+    fs := (from / 256) & 1;
+    tb := to & 255;
+    ts := (to / 256) & 1;
+    wrap := (to / 512) & 1;
+    // Every source value fits: unsigned into a wider-or-equal unsigned or a strictly wider signed,
+    // signed into a wider-or-equal signed. A value is held in 64 bits, zero- or sign-extended, so
+    // the bits do not change.
+    mut covered = false;
+    if ts == 0 {
+        covered = (fs == 0) && (fb <= tb);
+    } else {
+        covered = ((fs == 0) && (fb < tb)) || ((fs == 1) && (fb <= tb));
+    }
+    // A widening is no code on every target and backend: the word already holds the value, zero- or
+    // sign-extended, which is what every later use of it reads.
+    if covered || ((tb == 64) && (fb == 64) && (wrap != 0)) {
+        return v;
+    }
+    // The rest is in line on every target and backend - the word stream's compare and branch is what
+    // the other targets' selection and the LLVM lifter turn into theirs - and only the unsafe runtime,
+    // which defines `rt_int_cast`, keeps the call.
+    if c.raw != 0 {
+        fv := imm(&mut c, from);
+        tv := imm(&mut c, to);
+        return invoke(&mut c, view("rt_int_cast"), three(v, fv, tv));
+    }
+    get(&mut c, v, view("%rax"));
+    if wrap != 0 {
+        // rt_int_truncate: the low bits, zero- or sign-extended.
+        if tb < 64 {
+            k := 64 - tb;
+            o(&mut c, view("shlq $"));
+            on(&mut c, k);
+            if ts == 0 {
+                o(&mut c, view(",%rax\nshrq $"));
+            } else {
+                o(&mut c, view(",%rax\nsarq $"));
+            }
+            on(&mut c, k);
+            o(&mut c, view(",%rax\n"));
+        }
+        return save(&mut c);
+    }
+    ok := label(&mut c);
+    if (fs == 1) && (ts == 1) {
+        // Signed into narrower signed: the value fits when its low bits, sign-extended, are it.
+        k := 64 - tb;
+        o(&mut c, view("movq %rax,%rcx\nshlq $"));
+        on(&mut c, k);
+        o(&mut c, view(",%rcx\nsarq $"));
+        on(&mut c, k);
+        o(&mut c, view(",%rcx\ncmpq %rax,%rcx\n"));
+        jump(&mut c, view("je"), ok);
+    } else {
+        // Otherwise an unsigned comparison with the target's largest value plus one: a negative
+        // signed source is a huge unsigned number, so it fails it too.
+        // (An unsigned 64-bit target reaches here only from a signed source.)
+        mut limit = 9223372036854775808;
+        if (ts == 0) && (tb < 64) {
+            limit = 1 << tb;
+        } else if ts == 1 {
+            limit = 1 << (tb - 1);
+        }
+        o(&mut c, view("movabsq $"));
+        on(&mut c, limit);
+        o(&mut c, view(",%rcx\ncmpq %rcx,%rax\n"));
+        jump(&mut c, view("jb"), ok);
+    }
+    o(&mut c, view("movq %rax,%rdi\nmovq $"));
+    on(&mut c, from);
+    o(&mut c, view(",%rsi\nmovq $"));
+    on(&mut c, to);
+    o(&mut c, view(",%rdx\n"));
+    call_out(&mut c, view("rt_int_cast"));
+    mark(&mut c, ok);
+    return save(&mut c);
 }
 fn invoke<a, b>(c: (&a mut C), name: &b [u8], args: u64[]) -> u64 {
     if 6 < args.len() {
@@ -6707,6 +6875,11 @@ fn diag_excerpt<a, b, d>(c: (&a mut C), width: u64, at: &d DiagPos, span: u64, m
 // with the offending token underlined, any secondary labels (other lines that explain it, in source
 // order), and `help:` / `note:` lines. A rejected program exits with status 1.
 fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
+    // A body worker reports nothing: its parent sees the short stream and compiles the module
+    // itself, which reports the error exactly as a compile in one process does.
+    if c.par_me != 0 {
+        host::exit(3);
+    }
     p := c.pos;
     m := tok_text(&mut c, p);
     // The offending token's width: the caret run under the primary line, and the width a driver
@@ -16088,7 +16261,8 @@ struct FnPlace {
 // Whether this run can file units at all: the directory the driver named, and a run-level shape
 // this layer can describe. Every other condition is a property of the whole run, not of a body.
 fn fn_on<a>(c: (&a C)) -> bool {
-    if c.fn_dir.len() == 0 {
+    // Units are made for the store, or to come back from a body worker (par_start).
+    if (c.fn_dir.len() == 0) & (c.par_on == 0) {
         return false;
     }
     // No surface, no units: it is empty when a declaration had no interface spelling, and a key
@@ -16126,9 +16300,6 @@ fn fn_open<a, b>(c: (&a mut C), unit: &b [u8]) -> bool {
         return false;
     }
     if c.current_spec != 0 {
-        return false;
-    }
-    if !same(view(c.part), view(unit)) {
         return false;
     }
     return true;
@@ -16334,7 +16505,50 @@ fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), l
         c.fnext[k - 1] = c.fnext[k - 1] + 1;
     }
     if site_table_on(&c) {
+        c.plan_at.push(c.out.len());
         site_base(&mut c, line);
+    }
+    // The body's opening line, for the cut planning (optimize::plan_from): within its first lines.
+    mut k = 0;
+    mut seen = 0;
+    mut open = 0;
+    mut found = 0;
+    while (k + 6 < u.text.len()) & (seen < 4) {
+        if (u.text[k] == 46) & (u.text[k + 1] == 116) & (u.text[k + 2] == 121) & (u.text[k + 3] == 112) & (u.text[k + 4] == 101) & (u.text[k + 5] == 32) {
+            open = c.out.len() + k;
+            found = 1;
+            c.plan_at.push(open);
+            break;
+        }
+        while (k < u.text.len()) & (u.text[k] != 10) {
+            k += 1;
+        }
+        k += 1;
+        seen += 1;
+    }
+    // And its closing line, the frame constant's `.set`, near the end: the optimiser takes the body
+    // from these two lines and keys its memo by the unit (ir::Known); it checks both.
+    if found != 0 {
+        mut q = u.text.len();
+        mut lines = 0;
+        while (6 < q) & (lines < 64) {
+            // `q` is the end of a line; its start is after the newline before it.
+            mut p = q - 1;
+            while (0 < p) && (u.text[p - 1] != 10) {
+                p -= 1;
+            }
+            if (q - p > 6) & (u.text[p] == 46) & (u.text[p + 1] == 115) & (u.text[p + 2] == 101) & (u.text[p + 3] == 116) & (u.text[p + 4] == 32) & (u.text[p + 5] == 46) {
+                c.known.open.push(open);
+                c.known.end.push(c.out.len() + q);
+                c.known.key.push(fncache::hash(view(u.key)));
+                break;
+            }
+            if p == 0 {
+                break;
+            }
+            q = p;
+            lines += 1;
+        }
     }
     c.out.append(view(u.text));
     fn_facts_restore(&mut c, view(u.facts));
@@ -16362,9 +16576,9 @@ fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), l
 //   its typed signature, spelled structurally (`iface_w_type`) after substitution;
 //   the file's index and the column it starts at, which `.gpos` prints (the line is not here: a
 //   body counts its positions from its own first line, which `.gbase` states outside its text);
-//   its ordinal among the functions of its unit, which its labels spell;
-//   the declaration count it starts with (a body that synthesised a declaration before this one
-//   changes what this one can see).
+//   its ordinal among the functions of its unit, which its labels spell.
+// Not the number of declarations it starts with: no body's text depends on it, which
+// `--shift-declarations` checks over the whole corpus (`tools/test-native.mjs --unit-identity`).
 //
 // An empty key means "not a unit": a type with no interface spelling cannot be named, and a unit
 // keyed by a partial signature would be reused on a guess.
@@ -16386,7 +16600,7 @@ fn fn_key<a, b, d>(c: (&a mut C), unit: &b [u8], symbol: &d [u8], from: u64, to:
     }
     place := fn_place(&mut c, at);
     mut key = u8[];
-    push_bytes(&mut key, view("grail-fnkey 2\nunit "));
+    push_bytes(&mut key, view("grail-fnkey 3\nunit "));
     push_bytes(&mut key, view(unit));
     push_bytes(&mut key, view("\nprefix "));
     push_bytes(&mut key, view(c.lpart));
@@ -16408,8 +16622,6 @@ fn fn_key<a, b, d>(c: (&a mut C), unit: &b [u8], symbol: &d [u8], from: u64, to:
     push_bytes(&mut key, view(decimal_bytes(place.col)));
     push_bytes(&mut key, view("\nordinal "));
     push_bytes(&mut key, view(decimal_bytes(scope_next(&c))));
-    push_bytes(&mut key, view("\ndecls "));
-    push_bytes(&mut key, view(decimal_bytes(c.decls.len())));
     push_bytes(&mut key, view("\nraw "));
     push_bytes(&mut key, view(decimal_bytes(c.raw)));
     key.push(10);
@@ -16579,7 +16791,10 @@ fn fn_flags_now<a>(c: (&a mut C)) -> u8[] {
     while i < argc {
         w := host::arg(i);
         mut skip = 0;
-        if i == 1 + c.arg_offset {
+        // The output path, and the path the compiler was started by: which compiler it is is the
+        // `compiler` field of the key, not the spelling of its path (an absolute and a relative one
+        // are one compiler).
+        if (i == 1 + c.arg_offset) || (i == 0) {
             skip = 1;
         }
         if same(view(w), view("--fn-cache")) || same(view(w), view("--fn-cache-id")) || same(view(w), view("--fn-cache-quiet")) {
@@ -16600,6 +16815,11 @@ fn fn_flags_now<a>(c: (&a mut C)) -> u8[] {
     // A hand-run compiler has no `--fn-cache-id`, so its executable stands in for one: the path it
     // is being run from, its size and its modification time. A unit is code *this* compiler emitted,
     // and replaying a previous compiler's would be exactly the stale splice this cache must not do.
+    // With `--fn-cache-id` the driver has named the compiler by its content, and a binary renamed
+    // into place again (same bytes, new time) is the same compiler.
+    if c.fn_id.len() != 0 {
+        return fncache::hash(view(out));
+    }
     exe := host::exe_path();
     push_bytes(&mut out, view("exe "));
     push_bytes(&mut out, view(exe));
@@ -16668,6 +16888,315 @@ fn fn_facts_restore<a>(c: (&a mut C), data: &a [u8]) -> unit {
     return ();
 }
 
+// ---- parallel function bodies (docs/design/incremental-compilation.md, "Parallel bodies") -----
+//
+// After the declarations, a module's bodies are cut into slices and forked copies of this process
+// compile the slices after the first into units, which come back through a pipe each; this process
+// compiles the first slice itself and, as its walk reaches each later body, applies the unit a
+// worker made for it - the route a cache hit takes - or compiles the body itself when there is
+// none. The walk, its counters and its registrations are the ones one process has, and a unit's
+// text depends only on its key, so the output is the same at any number of workers and any cut.
+// Anything a worker does not finish - an error in a body, a crash - sends the rest of the walk to
+// this process, which then reports what one process reports.
+//
+// The least source, in bytes, worth a worker of its own: below it a fork and a pipe cost more than
+// the bodies do.
+const PAR_MIN: u64 = 131072;
+fn par_debug<a>(msg: &a [u8]) -> unit {
+    if host::env(view("GRAIL_DEBUG")).len() != 0 {
+        host::print(view(msg));
+    }
+    return ();
+}
+// Which process compiles body `n`, which starts at byte `off` of file `file`.
+fn par_owner<a>(c: (&a C), file: u64, off: u64, n: u64) -> u64 {
+    if c.par_rr != 0 {
+        return n % c.par_j;
+    }
+    mut k = c.par_j - 1;
+    while 0 < k {
+        cf := c.par_cut_file[k];
+        if (cf < file) || ((cf == file) && (c.par_cut_off[k] <= off)) {
+            return k;
+        }
+        k -= 1;
+    }
+    return 0;
+}
+// Before the bodies: whether this run may compile them in parallel, and the source sizes the cuts are
+// made over. Nothing is forked yet: with a store, most bodies of a rebuild are hits, which this
+// process applies itself faster than a worker could send them, so the walk forks only when it has
+// compiled some bodies the store did not have (par_fork) - at once when there is no store.
+fn par_start<a>(c: (&a mut C), files: u64) -> unit {
+    if (c.plat != 0) | (c.target != 0) | (c.debug != 0) | (c.backend != 0) | (c.emit_ir != 0) {
+        return ();
+    }
+    if (c.fx_any != 0) | (c.exports.len() != 0) | (c.validating != 0) | (c.skip_bodies.len() != 0) {
+        return ();
+    }
+    if (jobs::count() < 2) & (host::env(view("GRAIL_BODY_SLICE")).len() == 0) {
+        return ();
+    }
+    mut sizes = u64[];
+    mut i = 2;
+    while i < files {
+        load_file(&mut c, i);
+        sizes.push(c.src.len());
+        i += 1;
+    }
+    if c.fn_surface.len() == 0 {
+        exchange(&mut c.fn_flags, fn_flags_now(&mut c));
+        exchange(&mut c.fn_surface, fn_surface_now(&mut c));
+    }
+    if c.fn_surface.len() == 0 {
+        return ();
+    }
+    exchange(&mut c.par_sizes, sizes);
+    exchange(&mut c.par_armed, 1);
+    exchange(&mut c.par_misses, 0);
+    // With no store every body is compiled, so the first one is reason enough; with one, a rebuild
+    // after an edit compiles a handful and should not pay for workers.
+    mut threshold = 1;
+    if c.fn_dir.len() != 0 {
+        threshold = 16;
+    }
+    if host::env(view("GRAIL_BODY_SLICE")).len() != 0 {
+        threshold = 1;
+    }
+    exchange(&mut c.par_threshold, threshold);
+    return ();
+}
+// The walk is at the body at byte `off` of file `file` and has compiled enough misses: fork workers
+// for the source from here on. 1 in a worker (which skips this body: it is the parent's), 0 here.
+fn par_fork<a>(c: (&a mut C), file: u64, off: u64) -> u64 {
+    exchange(&mut c.par_armed, 0);
+    slice := host::env(view("GRAIL_BODY_SLICE"));
+    forced := slice.len() != 0;
+    // The bytes still ahead, over the files from this one on.
+    mut ahead = u64[];
+    mut total = 0;
+    for k in c.par_sizes.len() {
+        mut n = 0;
+        if file < k + 2 {
+            n = c.par_sizes[k];
+        } else if file == k + 2 {
+            if off < c.par_sizes[k] {
+                n = c.par_sizes[k] - off;
+            }
+        }
+        ahead.push(n);
+        total += n;
+    }
+    mut wanted = jobs::count();
+    if !forced {
+        while (1 < wanted) && (total / wanted < PAR_MIN) {
+            wanted -= 1;
+        }
+    }
+    if wanted < 2 {
+        return 0;
+    }
+    mut js = jobs::open();
+    j := jobs::workers(&mut js, wanted);
+    if j < 2 {
+        jobs::give_all(&mut js);
+        return 0;
+    }
+    exchange(&mut c.par_j, j);
+    exchange(&mut c.par_rr, u64(same(view(slice), view("1"))));
+    // Slice k starts at the k-th j-th of what is ahead; slice 0 is this process's, from here.
+    for k in j {
+        want := total / j * k;
+        mut at = 0;
+        mut f = 0;
+        while (f + 1 < ahead.len()) && (at + ahead[f] <= want) {
+            at += ahead[f];
+            f += 1;
+        }
+        mut base = 0;
+        if f + 2 == file {
+            base = off;
+        }
+        c.par_cut_file.push(f + 2);
+        c.par_cut_off.push(base + want - at);
+    }
+    exchange(&mut c.par_on, 1);
+    exchange(&mut c.par_n, 0);
+    die := host::env(view("GRAIL_TEST_BODY_WORKER_DIE")).len() != 0;
+    for k in j - 1 {
+        pair := host::pipe();
+        child := host::fork();
+        if child == 0 {
+            host::close(pair[0]);
+            for r in c.par_fds.len() {
+                host::close(c.par_fds[r]);
+            }
+            if die & (k == 0) {
+                // The test of a worker that dies holding a token (tools/jobs-test.mjs).
+                host::exit(9);
+            }
+            exchange(&mut c.par_me, k + 1);
+            exchange(&mut c.par_wfd, pair[1]);
+            exchange(&mut c.par_fds, u64[]);
+            exchange(&mut c.par_pids, u64[]);
+            exchange(&mut c.par_jobs, jobs::none());
+            return 1;
+        }
+        host::close(pair[1]);
+        if 9223372036854775807 < child {
+            // No fork: whatever was started is still read and waited for, and this process does the
+            // rest; the bodies after the last worker's slice are its own.
+            host::close(pair[0]);
+            exchange(&mut c.par_fail, 1);
+            break;
+        }
+        c.par_fds.push(pair[0]);
+        c.par_pids.push(child);
+        c.par_data.push(u8[]);
+        c.par_at.push(0);
+        c.par_read.push(0);
+    }
+    exchange(&mut c.par_jobs, js);
+    if c.par_fail != 0 {
+        par_fall_back(&mut c, view("a body worker could not be started"));
+    }
+    return 0;
+}
+// What worker `k` sent, read and waited for once; its token goes back when it has been waited for.
+fn par_collect<a>(c: (&a mut C), k: u64) -> unit {
+    if c.par_read[k - 1] != 0 {
+        return ();
+    }
+    fd := c.par_fds[k - 1];
+    mut data = u8[];
+    while true {
+        chunk := host::read_fd(fd, 1048576);
+        if chunk.len() == 0 {
+            break;
+        }
+        data.append(view(chunk));
+    }
+    host::close(fd);
+    status := host::wait(c.par_pids[k - 1]);
+    mut what = copy_bytes(view("collected-"));
+    decimal(&mut what, k);
+    jobs::phase(view(what));
+    jobs::give(&mut c.par_jobs);
+    mut whole = (status == 0) & (8 <= data.len());
+    if whole {
+        mut end = 0;
+        for b in 8 {
+            end = end * 256 + u64(data[data.len() - 8 + b]);
+        }
+        whole = end == 4702111234474983745;
+    }
+    if whole {
+        c.par_read[k - 1] = 1;
+        exchange(&mut c.par_data[k - 1], data);
+    } else {
+        c.par_read[k - 1] = 2;
+    }
+    return ();
+}
+// Every worker read and waited for, and the rest of the walk this process's.
+fn par_fall_back<a, b>(c: (&a mut C), why: &b [u8]) -> unit {
+    exchange(&mut c.par_fail, 1);
+    for k in c.par_fds.len() {
+        par_collect(&mut c, k + 1);
+    }
+    mut line = copy_bytes(view("grail: "));
+    push_bytes(&mut line, why);
+    push_bytes(&mut line, view("; the rest of this module is compiled in one process\n"));
+    par_debug(view(line));
+    return ();
+}
+fn par_unexpected<a, b>(c: (&a mut C), why: &b [u8]) -> unit {
+    if c.par_me == 0 {
+        par_fall_back(&mut c, why);
+    }
+    return ();
+}
+// The next thing worker `owner` sent, which has to be for the body at `file`/`off`: its unit, with
+// `outcome` 1 (made) or 2 (from the store); no unit when it is not one, or the worker did not finish.
+fn par_take<a, b>(c: (&a mut C), owner: u64, file: u64, off: u64, outcome: (&b mut u64)) -> fncache::Unit {
+    if c.par_fds.len() < owner {
+        return fncache::none();
+    }
+    par_collect(&mut c, owner);
+    if c.par_read[owner - 1] != 1 {
+        par_fall_back(&mut c, view("a body worker did not finish"));
+        return fncache::none();
+    }
+    mut r = fncache::Read { data: exchange(&mut c.par_data[owner - 1], u8[]), at: c.par_at[owner - 1], ok: 1 };
+    got_file := fncache::rv(&mut r);
+    got_off := fncache::rv(&mut r);
+    kind := fncache::rv(&mut r);
+    bytes := fncache::rs(&mut r);
+    c.par_at[owner - 1] = r.at;
+    exchange(&mut c.par_data[owner - 1], r.data);
+    if (r.ok == 0) | (got_file != file) | (got_off != off) {
+        par_fall_back(&mut c, view("a body worker sent the bodies out of order"));
+        return fncache::none();
+    }
+    if kind == 0 {
+        return fncache::none();
+    }
+    exchange(outcome, kind);
+    u := fncache::decode_piped(bytes);
+    if u.key.len() == 0 {
+        par_fall_back(&mut c, view("a body worker sent a unit that does not decode"));
+    }
+    return u;
+}
+// A worker's account of one of its bodies: 0 not a unit, 1 a unit it made, 2 one from the store.
+fn par_record<a, b>(c: (&a mut C), at_off: u64, kind: u64, u: (&b fncache::Unit)) -> unit {
+    iface_wv(&mut c.par_buf, c.file);
+    iface_wv(&mut c.par_buf, at_off);
+    iface_wv(&mut c.par_buf, kind);
+    if kind == 0 {
+        iface_wv(&mut c.par_buf, 0);
+    } else if c.check_only != 0 {
+        // A check run writes no assembly and runs no optimiser: what the parent needs of a checked
+        // body is that it checked, and what it asks of the run - its registrations.
+        checked := fncache::Unit { key: u.key.copy(), text: u8[], facts: u8[], regs: u.regs.copy() };
+        iface_ws(&mut c.par_buf, view(fncache::encode(&checked)));
+    } else {
+        iface_ws(&mut c.par_buf, view(fncache::encode(u)));
+    }
+    return ();
+}
+// A worker has walked past its slice: what it made goes to its parent, and it stops.
+fn par_worker_finish<a>(c: (&a mut C)) -> unit {
+    mut what = copy_bytes(view("worker-"));
+    decimal(&mut what, c.par_me);
+    push_bytes(&mut what, view("-done-sending-bytes-"));
+    decimal(&mut what, c.par_buf.len());
+    jobs::phase(view(what));
+    mut end = 4702111234474983745;
+    mut tail = u8[];
+    for b in 8 {
+        tail.push(end / 72057594037927936);
+        end = (end % 72057594037927936) * 256;
+    }
+    c.par_buf.append(view(tail));
+    host::write_fd(c.par_wfd, view(c.par_buf));
+    host::close(c.par_wfd);
+    host::exit(0);
+    return ();
+}
+// The walk is over: every worker read and waited for, every token back.
+fn par_end<a>(c: (&a mut C)) -> unit {
+    exchange(&mut c.par_armed, 0);
+    if c.par_on == 0 {
+        return ();
+    }
+    for k in c.par_fds.len() {
+        par_collect(&mut c, k + 1);
+    }
+    jobs::give_all(&mut c.par_jobs);
+    exchange(&mut c.par_on, 0);
+    return ();
+}
 fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // A body's synthesised declarations (closure environments) are not the function's to hide.
     exchange(&mut c.decl_public, 1);
@@ -17146,8 +17675,37 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         fn_line = c.toks[position].line;
     }
     fn_drop_mark := c.drop_refs.len();
-    if fn_on(&c) & (c.current_spec == 0) & !same(view(c.part), view(unit)) {
-        c.fn_why[FN_FIRST] = c.fn_why[FN_FIRST] + 1;
+    // Parallel bodies: which process this body is for. A worker skips the bodies that are not its
+    // own - spending the function's ordinal as the process that compiles it does - and the parent
+    // takes the unit a worker made for it (par_take), applied below like a hit.
+    mut par_mine = 0;
+    mut par_unit = fncache::none();
+    mut par_outcome = 0;
+    mut at_off = 0;
+    if position < c.toks.len() {
+        at_off = c.toks[position].start;
+    }
+    if (c.par_on != 0) & (pass == 3) & (c.current_spec == 0) & (c.validating == 0) {
+        n := c.par_n;
+        c.par_n = n + 1;
+        owner := par_owner(&c, c.file, at_off, n);
+        if c.par_me != 0 {
+            if owner != c.par_me {
+                if (c.par_rr == 0) & (c.par_me < owner) {
+                    par_worker_finish(&mut c);
+                }
+                part(&mut c, view(unit));
+                k := c.lunit;
+                if (k != 0) & (k <= c.fnext.len()) {
+                    c.fnext[k - 1] = c.fnext[k - 1] + 1;
+                }
+                skip_braces(&mut c);
+                return ();
+            }
+            par_mine = 1;
+        } else if (owner != 0) & (c.par_fail == 0) {
+            par_unit = par_take(&mut c, owner, c.file, at_off, &mut par_outcome);
+        }
     }
     if fn_open(&mut c, view(unit)) {
         // The symbol the label will spell: `body_label` is the one spelling both `func_directive`
@@ -17158,19 +17716,39 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         decl_to := c.toks[end].end;
         key := fn_key(&mut c, view(unit), view(fn_symbol), decl_from, decl_to, position, count, ret);
         if key.len() != 0 {
-            hit := fncache::load(view(c.fn_dir), view(fncache::hash(view(key))));
+            from_worker := par_unit.key.len() != 0;
+            mut hit = par_unit;
+            if (hit.key.len() == 0) & (c.fn_dir.len() != 0) {
+                hit = fncache::load(view(c.fn_dir), view(fncache::hash(view(key))));
+                par_outcome = 2;
+            }
             if hit.key.len() != 0 {
                 if same(view(hit.key), view(key)) {
                     // All of its registrations, or none of the unit.
                     mut readable = 1;
                     regs := fn_regs_read(&mut c, view(hit.regs), &mut readable);
                     if readable != 0 {
+                        if par_mine != 0 {
+                            par_record(&mut c, at_off, 2, &hit);
+                        }
+                        // The first body of a part opens it; the unit's text starts after that.
+                        part(&mut c, view(unit));
                         fn_apply(&mut c, &hit, &regs, fn_line);
-                        c.fn_hits = c.fn_hits + 1;
+                        if par_outcome == 1 {
+                            c.fn_filed = c.fn_filed + 1;
+                        } else {
+                            c.fn_hits = c.fn_hits + 1;
+                        }
+                        if from_worker {
+                            c.par_hits = c.par_hits + 1;
+                        }
                         skip_braces(&mut c);
                         return ();
                     }
                 }
+            }
+            if from_worker {
+                par_unexpected(&mut c, view("a worker's unit is not the unit of this body"));
             }
             fn_key_text = key;
             fn_marks_at = fn_marks(&c);
@@ -17183,9 +17761,30 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             c.fn_kept = c.fn_kept + 1;
         }
     }
+    // This body was not a hit: when the walk has compiled enough of those, the rest goes to workers.
+    if (c.par_armed != 0) & (pass == 3) & (c.current_spec == 0) & (c.validating == 0) {
+        c.par_misses = c.par_misses + 1;
+        if c.par_threshold <= c.par_misses {
+            if par_fork(&mut c, c.file, at_off) != 0 {
+                // A worker: this body is the parent's.
+                exchange(&mut c.fn_rec, 0);
+                part(&mut c, view(unit));
+                k := c.lunit;
+                if (k != 0) & (k <= c.fnext.len()) {
+                    c.fnext[k - 1] = c.fnext[k - 1] + 1;
+                }
+                skip_braces(&mut c);
+                return ();
+            }
+        }
+    }
     part(&mut c, view(unit));
     scope_begin(&mut c);
+    // What a unit is taken back to: after the part's marker (the first body of a part writes it),
+    // before the line that says where the function is.
+    apply_mark := c.out.len();
     if site_table_on(&c) && (c.validating == 0) && (position < c.toks.len()) {
+        c.plan_at.push(c.out.len());
         site_base(&mut c, fn_line);
     }
     // A unit's text starts here, after the line that says where the function is.
@@ -17481,9 +18080,15 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             produced := fn_unit_of(&mut c, fn_key_text, text_mark, fact_mark);
             // The file's name is the key's hash; the key record itself travels inside the entry,
             // so two keys that collide make a miss and never a wrong hit.
-            fncache::save(view(c.fn_dir), view(fncache::hash(view(produced.key))), &produced);
-            c.fn_filed = c.fn_filed + 1;
-            while out_mark < c.out.len() {
+            if c.fn_dir.len() != 0 {
+                fncache::save(view(c.fn_dir), view(fncache::hash(view(produced.key))), &produced);
+                c.fn_filed = c.fn_filed + 1;
+            }
+            if par_mine != 0 {
+                par_record(&mut c, at_off, 1, &produced);
+                par_mine = 0;
+            }
+            while apply_mark < c.out.len() {
                 c.out.pop()!;
             }
             llvm::facts_truncate(&mut c.facts, fact_mark);
@@ -17498,6 +18103,11 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         } else {
             c.fn_kept = c.fn_kept + 1;
         }
+    }
+    if par_mine != 0 {
+        // Not a unit: the parent compiles this body itself.
+        none := fncache::none();
+        par_record(&mut c, at_off, 0, &none);
     }
     return ();
 }
@@ -32501,6 +33111,7 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         scope_begin(&mut c);
         if site_table_on(&c) && (start < c.toks.len()) {
             base_line := c.toks[start].line;
+            c.plan_at.push(c.out.len());
             site_base(&mut c, base_line);
         }
         // A closure of a specialisation is weak like the specialisation: func_directive states the
@@ -35831,9 +36442,7 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
                     code := int_code(&mut c, value.ty);
                     u := int_type(&mut c, 64, 0);
                     to := int_code(&mut c, u);
-                    fv := imm(&mut c, code);
-                    tv := imm(&mut c, to);
-                    widened := invoke(&mut c, view("rt_int_cast"), three(value.t, fv, tv));
+                    widened := int_cast(&mut c, value.t, code, to);
                     slot := invoke(&mut c, view("rt_char_from"), one(widened));
                     return val(slot, ty);
                 }
@@ -35932,9 +36541,7 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
                 if wrapping != 0 {
                     to = (to % 512) + 512;
                 }
-                fv := imm(&mut c, from);
-                tv := imm(&mut c, to);
-                slot := invoke(&mut c, view("rt_int_cast"), three(value.t, fv, tv));
+                slot := int_cast(&mut c, value.t, from, to);
                 return val(slot, ty);
             }
         }
@@ -42347,6 +42954,16 @@ fn iface_w_ref<a>(c: (&a mut C), out: (&a mut u8[]), decl: u64) -> unit {
     return ();
 }
 fn iface_w_iface_ref<a>(c: (&a mut C), out: (&a mut u8[]), id: u64) -> unit {
+    // A type whose interface slot does not name an interface of this run (an `extern` record's proof
+    // can carry one) has no spelling: a key or surface that asks gets "not spellable", which makes
+    // the run file no units, rather than an index out of bounds.
+    if (id == 0) || (c.interfaces.len() < id) {
+        if c.spell_lenient != 0 {
+            exchange(&mut c.spell_failed, 1);
+            return ();
+        }
+        iface_refuse(view("<interface>"), view("a type names an interface this run does not have"));
+    }
     item := &c.interfaces[id - 1];
     iface_ws(&mut out, view(item.module));
     iface_ws(&mut out, view(item.name));
@@ -42649,9 +43266,15 @@ fn iface_w_type<a>(c: (&a mut C), out: (&a mut u8[]), deps: (&a mut u64[]), ty: 
         deps.push(1);
         deps.push(arg);
     } else if (k == 23) || (k == 28) {
-        iface_w_ref(&mut c, &mut body, arg);
+        // A handle's argument is its declaration; a `byval R`'s is the record's type
+        // (ffi_byval_parameter), whose declaration is what the record names.
+        mut decl = arg;
+        if k == 28 {
+            decl = ty_arg(&mut c, arg);
+        }
+        iface_w_ref(&mut c, &mut body, decl);
         deps.push(1);
-        deps.push(arg);
+        deps.push(decl);
     } else if k == 9 {
         // An opaque type parameter: its bound bits are its mode and its interface proofs its slots,
         // so both travel; the argument is its index.
@@ -43006,7 +43629,13 @@ fn iface_r_type<a>(p: (&a mut IR), c: (&a mut C)) -> u64 {
             p.rtext.push(41);
         } else if p.phase == 2 {
             decl := iface_find_decl(&mut c, &mut p, view(module), view(name));
-            id = iface_intern_args(&mut p, &mut c, tag, decl, mode, rs, u64[]);
+            if tag == 28 {
+                // As the parser builds it: the marker over the record's own type.
+                record := iface_intern_args(&mut p, &mut c, 8, decl, 0, u64[], u64[]);
+                id = iface_intern_args(&mut p, &mut c, tag, record, mode, rs, u64[]);
+            } else {
+                id = iface_intern_args(&mut p, &mut c, tag, decl, mode, rs, u64[]);
+            }
         }
     } else if tag == 9 {
         index := iface_rv(&mut p);
@@ -47022,6 +47651,30 @@ pub fn main() -> u64 {
         fn_at_off: 0,
         fn_at_line: 1,
         fn_at_col: 1,
+        shift_decls: 0,
+        par_on: 0,
+        par_me: 0,
+        par_j: 0,
+        par_cut_file: u64[],
+        par_cut_off: u64[],
+        par_rr: 0,
+        par_n: 0,
+        par_fds: u64[],
+        par_pids: u64[],
+        par_data: u8[][],
+        par_at: u64[],
+        par_read: u64[],
+        par_buf: u8[],
+        par_wfd: 0,
+        par_fail: 0,
+        par_jobs: jobs::none(),
+        par_hits: 0,
+        plan_at: u64[],
+        known: ir::no_known(),
+        par_armed: 0,
+        par_misses: 0,
+        par_threshold: 0,
+        par_sizes: u64[],
         fn_hits: 0,
         fn_filed: 0,
         fn_kept: 0,
@@ -47227,6 +47880,22 @@ pub fn main() -> u64 {
             }
             c.iface_only.push(host::arg(offset + 2));
             exchange(&mut c.iface_only_on, 1);
+            offset += 2;
+        } else if same(view(option), view("--shift-declarations")) {
+            // A test switch (`tools/test-native.mjs --unit-identity`): synthesise this many tuple
+            // declarations before the first body, so every declaration a body synthesises gets a
+            // different index than it would. The assembly must not change: a body's text may not
+            // depend on how many declarations exist, which is what lets a unit be compiled apart from
+            // the bodies before it (docs/design/incremental-compilation.md).
+            if argc < offset + 3 {
+                fail_option(&mut c, view("--shift-declarations needs a count"));
+            }
+            words := host::arg(offset + 2);
+            mut n = 0;
+            for i in words.len() {
+                n = n * 10 + u64(words[i] - 48);
+            }
+            exchange(&mut c.shift_decls, n);
             offset += 2;
         } else if same(view(option), view("--use-named")) {
             // Only the modules `--use-module` names are read, even when it names none.
@@ -47497,6 +48166,7 @@ pub fn main() -> u64 {
             view("--split is implemented for the Linux x86_64 assembler path, without --debug")
         );
     }
+    jobs::phase(view("start"));
     for pass in 3 {
         if pass == 1 {
             if c.plat == 1 {
@@ -47524,6 +48194,13 @@ pub fn main() -> u64 {
                 o(&mut c, view(".text\n"));
             }
         }
+        if pass == 1 {
+            jobs::phase(view("names"));
+        }
+        if pass == 2 {
+            jobs::phase(view("declarations"));
+            par_start(&mut c, n);
+        }
         mut i = 2;
         while i < n {
             path := input_path(&c, i);
@@ -47547,6 +48224,12 @@ pub fn main() -> u64 {
         }
         if pass == 2 {
             default_methods(&mut c, 3);
+            if c.par_me != 0 {
+                par_worker_finish(&mut c);
+            }
+            jobs::phase(view("bodies"));
+            par_end(&mut c);
+            jobs::phase(view("bodies-workers-collected"));
         }
         // The definition sweep for the interfaces read above, once every module's names exist.
         // `--interface` and `--use` both land here; the path each interface came from was recorded
@@ -47569,6 +48252,14 @@ pub fn main() -> u64 {
                 }
             }
             iface_emit_all(&mut c);
+        }
+        if (pass == 1) & (c.shift_decls != 0) {
+            // Largest first, so each is a new declaration.
+            for i in c.shift_decls {
+                if i < 11 {
+                    tuple_decl(&mut c, 12 - i);
+                }
+            }
         }
         if (pass == 1) & (c.fn_dir.len() != 0) {
             // The declaration surface is final once every declaration is known. Both hashes are
@@ -47594,6 +48285,7 @@ pub fn main() -> u64 {
     // Constants a compile-time call gives that nothing used are evaluated now (C3).
     resolve_all_pending(&mut c);
     emit_specializations(&mut c);
+    jobs::phase(view("specialisations"));
     // A closure body can instantiate a generic (`Some(x)` inside `|| ...`) and a specialisation can
     // create a closure, so the two are emitted to a fixpoint; request files are written once both
     // lists are complete.
@@ -47603,8 +48295,10 @@ pub fn main() -> u64 {
         specs_done = drain_specs(&mut c, specs_done);
         closures_done = emit_closures(&mut c, closures_done);
     }
+    jobs::phase(view("closures"));
     emit_fn_thunk(&mut c);
     emit_drops(&mut c);
+    jobs::phase(view("drop-helpers"));
     // A drop helper can be the first thing to ask for a generic `Drop` implementation's
     // specialisation, so anything it requested is emitted before the helpers are written out.
     helpers_specs := c.specs.len();
@@ -47616,12 +48310,15 @@ pub fn main() -> u64 {
         // Those bodies can name more helpers, and a named helper with no body is an undefined symbol.
         emit_drops(&mut c);
     }
+    jobs::phase(view("helper-specialisations"));
     emit_vtables(&mut c);
+    jobs::phase(view("vtables"));
     // A vtable's drop slot is a helper too, and the bodies emitted above were the first to name
     // some types: one more sweep emits what they named and leaves no symbol undefined.
     emit_drops(&mut c);
     fx_end(&mut c);
     // Every body is emitted: the effect claims are settled over the whole call graph.
+    jobs::phase(view("drops-vtables"));
     fx_solve(&mut c);
     fx_report(&mut c);
     if c.skip_bodies.len() != 0 {
@@ -47846,6 +48543,7 @@ pub fn main() -> u64 {
         line.push(10);
         host::print(view(line));
     }
+    jobs::phase(view("front-end-done"));
     if c.check_only != 0 {
         return 0;
     }
@@ -47871,9 +48569,9 @@ pub fn main() -> u64 {
         }
     } else {
         if c.split != 0 {
-            out = optimize::optimize_parts(view(c.out), 1, &mut c.marks, &mut c.part_names, &c.facts, c.emit_ir, &mut ir_text, &replay, &mut call_syms, &mut call_counts, view(c.fn_dir), view(c.fn_id));
+            out = optimize::optimize_parts(view(c.out), 1, &mut c.marks, &mut c.part_names, &c.facts, c.emit_ir, &mut ir_text, &replay, &mut call_syms, &mut call_counts, view(c.fn_dir), view(c.fn_id), &c.plan_at, &c.known);
         } else {
-            out = optimize::optimize(view(c.out), &c.facts, c.emit_ir, &mut ir_text, &replay, &mut call_syms, &mut call_counts, view(c.fn_dir), view(c.fn_id));
+            out = optimize::optimize(view(c.out), &c.facts, c.emit_ir, &mut ir_text, &replay, &mut call_syms, &mut call_counts, view(c.fn_dir), view(c.fn_id), &c.plan_at, &c.known);
         }
         // The check the byte scan used to make, now from the IR: a call site that bypasses the
         // recording helpers is a compiler bug, and a bug here is a silently weaker proof.
@@ -47890,7 +48588,9 @@ pub fn main() -> u64 {
         }
     }
     if site_table_on(&c) {
+        jobs::phase(view("optimised"));
         tabled := site_table(&mut c, view(out));
+        jobs::phase(view("location-table"));
         out = tabled;
     }
     if c.plat == 1 {

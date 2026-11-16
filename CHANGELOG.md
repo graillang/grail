@@ -298,6 +298,36 @@
   assembler rejects (`changed binding to STB_GLOBAL`); the thunk now keeps the weak binding. And
   an AArch64 module is compiled with atomics inline (`-mno-outline-atomics`): clang's default
   calls `__aarch64_cas8_acq_rel` in libgcc, which a Grail program does not link.
+- `grail profile --callers` samples each tick's return addresses too (the runtime walks the frame
+  pointers) and adds two views to the report: inclusive samples per function, and for the ten
+  hottest functions who called them and the first caller outside the runtime - so a profile topped
+  by `rt_alloc_unlocked` says which code allocates. Without the flag nothing changes: the request,
+  the sample format and the signal handler's path are the ones before.
+
+- A function taking an `extern "C"` record `byval` no longer breaks an interface or the build store:
+  the interface writer took the record's type for its declaration (an index out of bounds while
+  spelling it), and the reader rebuilt the marker over a declaration where the parser puts the
+  record's type.
+
+- **A module's function bodies are compiled in parallel.** After the declarations, forked copies of
+  the compiler compile slices of the bodies into units and the compile applies them in source
+  order, so the output is byte-identical at any worker count (`GRAIL_JOBS=1` keeps one process). The
+  compiler compiling itself goes from 38.7 s in one process to 18.3 s; a 1000-function program from
+  4.2 s to 2.1 s. A body with an error is reported exactly as before: any worker that does not
+  finish sends the module back to one process. The first body of each module is now a cache unit
+  too. `grail check` is parallel the same way (the compiler's own sources: 13.6 s to 6.0 s).
+
+- **One jobserver per build.** `grail build` runs at most `GRAIL_JOBS` (default: the processor count)
+  compiler processes at once across everything it starts - module runs and their optimiser workers
+  share one GNU-make-style token fifo - where each module run used to fork up to the processor count
+  on its own. Under `make -j`, a build takes its tokens from make's jobserver
+  (`MAKEFLAGS=--jobserver-auth=fifo:PATH`). On the 24-module benchmark with `GRAIL_JOBS=4` the build
+  peaks at 9 processes instead of 49.
+
+- Integer conversions (`u8(x)`, `i32(y)`, `wrapping_u16(z)`, ...) are emitted in line by the native
+  backend: a widening costs nothing, a wrapping conversion is a shift pair, and a checked narrowing
+  is a compare and a branch that calls the runtime only to report a value that does not fit (the
+  report is unchanged). They were a runtime call each, 8 % of the compiler's own run time.
 
 - **An edit to one function recompiles that function.** The per-function layer of the build store
   now replays every other body of the module: a body's assembly no longer depends on the bodies
