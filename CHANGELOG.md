@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **A failure allocates nothing, on every route.** A failed check inside a parallel job used to build
+  its failure record and texts on the heap where it failed, so every `@no_alloc` function that
+  could index, cast or unwrap was refused once the job-failure path existed. The failing stack now
+  writes numbers only (kind, operands, the statement's site) into a record that is not heap
+  memory. The joiner builds the message and the site text, on a healthy stack. A wake on that path
+  no longer reaches scheduler creation.
+
 - **A foreign call costs what it costs in C (x86-64).** In a program that loaded libc, every
   `extern "C"` call switched the thread pointer to libc's TCB and back, and on x86-64 a write to the
   FS base is a system call (`arch_prctl`): two per call, about 660 ns for a call to `labs`. The
