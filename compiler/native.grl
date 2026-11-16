@@ -29574,7 +29574,17 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
         slot := l.id;
         ty := l.ty;
         own(&mut c, slot, ty);
-        init_parameter(&mut c, slot, ty);
+        // A local borrow - `rx := &x` - names no region: it is a value of the enclosing body, not an
+        // input with a declared lifetime, and this probe only wants the expression's type.
+        lk := ty_kind(&mut c, ty);
+        if ((lk == 5) || (lk == 7) || (lk == 27)) && (type_regions(&mut c, ty).len() == 0) {
+            source := add_external_capture(&mut c, place_of(&mut c, slot), 0, ty_mode(&mut c, ty));
+            if lk == 7 {
+                set_target(&mut c, slot, source, slot + 1);
+            }
+        } else {
+            init_parameter(&mut c, slot, ty);
+        }
     }
     exchange(&mut c.pos, start);
     v := expr(&mut c, 0);
@@ -29822,6 +29832,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
     }
     end := c.pos;
     // Captures: enclosing locals named in the body (not parameters, fields, paths or inner bindings).
+    mut nested_mark = 18446744073709551615;
     mut captures = u8[][];
     mut inner = u8[][];
     mut i = start;
@@ -29865,6 +29876,34 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                     & closure_free_name(&mut c, view(name), &inner)
                     & closure_free_name(&mut c, view(name), &captures) {
                     if find_local(&mut c, view(name)) != 0 {
+                        captures.push(name);
+                    } else if nested_shared_capture(&mut c, view(name)) {
+                        // A closure inside a closure body naming a capture of the enclosing one: the
+                        // captured shared reference is re-borrowed into a local of the same name -
+                        // `name := load(&name)`, which keeps the loan it came from - and that local is
+                        // what this closure captures. The local is unbound again once the closure is
+                        // built, so the enclosing body's later uses read its own capture as before.
+                        if nested_mark == 18446744073709551615 {
+                            nested_mark = c.locals.len();
+                        }
+                        mut copied = val(0, NO_TYPE);
+                        if nested_exclusive_capture(&mut c, view(name)) {
+                            // An exclusive slice (or `&mut T[]`) is re-borrowed whole, as `&mut x[:]`
+                            // would be: the nested closure holds an exclusive slice whose loan is a
+                            // child of the enclosing capture's, so the body cannot touch it meanwhile.
+                            field := capture_field(&mut c, view(name), 0, 0);
+                            fk := ty_kind(&mut c, field.ty);
+                            mut base = field;
+                            if fk == 7 {
+                                base = deref(&mut c, base);
+                            }
+                            copied = whole_slice(&mut c, base, true);
+                        } else {
+                            field := capture_field(&mut c, view(name), 1, 0);
+                            copied = deref_value(&mut c, field);
+                        }
+                        copied = move_value(&mut c, copied);
+                        bind(&mut c, name.copy(), copied.ty, copied.t, 0);
                         captures.push(name);
                     }
                 }
@@ -29935,6 +29974,9 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
         }
         vfn := intern_args(&mut c, 20, ret, mode + CLOSURE_UNBUILT, caps, copy_numbers(&params));
         placeholder := imm(&mut c, 0);
+        if nested_mark != 18446744073709551615 {
+            pop_locals(&mut c, nested_mark);
+        }
         return own(&mut c, placeholder, vfn);
     }
     // Environment record type: {__code, __drop, captures...}.
@@ -30110,7 +30152,70 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                 }
             );
     }
+    if nested_mark != 18446744073709551615 {
+        pop_locals(&mut c, nested_mark);
+    }
     return val(obj, fnty);
+}
+// Whether `name` is a capture of the closure whose body is being compiled, holding a shared
+// reference, view or slice that a nested closure may re-borrow.
+fn nested_shared_capture<a, b>(c: (&a mut C), name: &b [u8]) -> bool {
+    current := c.closure_env;
+    if current == 0 {
+        return false;
+    }
+    mut found = false;
+    cl := &c.closures[current - 1];
+    for j in cl.captures.len() {
+        x := &cl.captures[j];
+        if same(view(x), view(name)) {
+            found = true;
+        }
+    }
+    if !found {
+        return false;
+    }
+    probe := capture_field(&mut c, view(name), 0, 0);
+    k := ty_kind(&mut c, probe.ty);
+    if ((k == 5) || (k == 7) || (k == 27)) && (ty_mode(&mut c, probe.ty) == 0) {
+        return true;
+    }
+    return nested_exclusive_capture(&mut c, view(name));
+}
+// A writable capture of an exclusive slice, or of `&mut T[]`, which a nested closure re-borrows as
+// an exclusive slice over the whole of it. Any other exclusive reference has no re-borrow form.
+fn nested_exclusive_capture<a, b>(c: (&a mut C), name: &b [u8]) -> bool {
+    if capture_writable(&mut c, view(name)) == 0 {
+        return false;
+    }
+    probe := capture_field(&mut c, view(name), 0, 0);
+    k := ty_kind(&mut c, probe.ty);
+    if ty_mode(&mut c, probe.ty) == 0 {
+        return false;
+    }
+    if k == 27 {
+        return true;
+    }
+    return (k == 7) && (ty_kind(&mut c, ty_arg(&mut c, probe.ty)) == 6);
+}
+// `&mut x[:]` / `&x[:]` without tokens: a typed slice over the whole vector or slice `x`.
+fn whole_slice<a>(c: (&a mut C), x: Val, write: bool) -> Val {
+    xt := x.t;
+    elem := ty_arg(&mut c, x.ty);
+    start := imm(&mut c, 0);
+    end := apply(&mut c, view("rt_len"), one(xt));
+    mut width = 8;
+    if narrow_code(&mut c, elem) != 0 {
+        width = 4;
+    }
+    mut args = two(xt, start);
+    args.push(end);
+    args.push(imm(&mut c, width));
+    result := apply(&mut c, view("rt_vslice"), args);
+    sty := intern_full(&mut c, 27, elem, u64(write), u64[]);
+    own(&mut c, result, sty);
+    view_bonds(&mut c, result, xt, write, false);
+    return val(result, sty);
 }
 fn copy_bytes<a>(x: &a [u8]) -> u8[] {
     mut o = u8[];

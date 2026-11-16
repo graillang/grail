@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **A closure inside a closure may capture what the outer one captured.** A captured shared
+  reference is re-borrowed, and a captured `&mut` vector or slice is re-borrowed as an exclusive
+  slice, keeping the original borrow - the shape every scoped spawn has
+  (`scope(|t| t.spawn(|| use(rx)))`). It was an `undefined name` error. An expression-bodied closure
+  without a result type may now capture a local borrow (it was "parameter requires a declared
+  lifetime").
 - **`Fn<s>(..)`: a closure type may name the lifetime its borrows come from**, so a record labelled
   `s` can keep closures that borrow (`struct Holder<s> { items: (Fn<s>() -> u64)[] }`) and keeps
   their loans alive while it lives. A record whose closure field states no bound (`iter::Iter<T>`)

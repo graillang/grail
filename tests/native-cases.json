@@ -11505,5 +11505,77 @@
     "source": "fn put<a, s>(v: (&a mut (Fn<s>() -> u64)[]), f: Fn() -> u64) -> unit { v.push(f); }\nfn main() { }\n",
     "reject": true,
     "diagnostic": "captured writeback violates invariant lifetime"
+  },
+  {
+    "name": "closure-nested-capture-shared",
+    "note": "a closure inside a closure body may capture the enclosing closure's captured shared reference: it is re-borrowed (`load(&rx)`) and the original loan kept",
+    "source": "fn main(){ x := u64[5]; rx := &x; f := || -> u64 { g := || -> u64 rx[0]; return g(); }; println(f()); }\n",
+    "stdout": "5\n"
+  },
+  {
+    "name": "closure-nested-capture-twice",
+    "note": "...twice, and the body still reads its own capture afterwards",
+    "source": "fn main(){ x := u64[5,6,7]; rx := &x; f := || -> u64 { g := || -> u64 rx[0]; h := || -> u64 rx[2]; return g() + h() + rx[1]; }; println(f()); }\n",
+    "stdout": "18\n"
+  },
+  {
+    "name": "closure-nested-capture-keeps-loan",
+    "note": "...and the nested closure keeps the borrow: the vector cannot move while it lives",
+    "source": "fn eat(v: u64[]) -> u64 { return v.len(); }\nfn main(){ x := u64[5,6,7]; rx := &x; f := || -> Fn() -> u64 { return || -> u64 rx[0]; }; g := f(); println(eat(x)); println(g()); }\n",
+    "reject": true,
+    "diagnostic": "move of unavailable or borrowed value"
+  },
+  {
+    "name": "closure-expression-body-captures-local-borrow",
+    "note": "an expression-bodied closure without a result type capturing a local borrow (the result-type probe refused it: `parameter requires a declared lifetime`)",
+    "source": "fn main(){ x := u64[4]; rx := &x; f := || rx[0] + 1; println(f()); }\n",
+    "stdout": "5\n"
+  },
+  {
+    "name": "scope-spawn-shared-borrows",
+    "note": "the minimal inline-running scope of docs/design/closure-bounds.md section 7: two spawned closures share `&x`",
+    "source": "struct Threads<s> { done: (FnMut<s>() -> u64)[] }\nfn scope<s, R>(body: FnMut<s>((&mut Threads<s>)) -> R) -> R {\n    mut t = Threads { done: (FnMut<s>() -> u64)[] };\n    mut b = body;\n    r := b(&mut t);\n    while let Some(f) = t.done.pop() { mut g = f; g(); }\n    return r;\n}\nfn spawn<a, s>(t: (&a mut Threads<s>), f: FnMut<s>() -> u64) -> unit { t.done.push(f); }\nfn main() {\n    x := u64[1, 2];\n    rx := &x;\n    n := scope(|t| -> u64 { spawn(&mut t, || -> u64 rx[0]); spawn(&mut t, || -> u64 rx[1]); return 7; });\n    println(n);\n}\n",
+    "stdout": "7\n"
+  },
+  {
+    "name": "scope-spawn-disjoint-exclusive",
+    "note": "the minimal inline-running scope of docs/design/closure-bounds.md section 7: disjoint `&mut x` and `&mut y` in two spawns; both writes land",
+    "source": "struct Threads<s> { done: (FnMut<s>() -> u64)[] }\nfn scope<s, R>(body: FnMut<s>((&mut Threads<s>)) -> R) -> R {\n    mut t = Threads { done: (FnMut<s>() -> u64)[] };\n    mut b = body;\n    r := b(&mut t);\n    while let Some(f) = t.done.pop() { mut g = f; g(); }\n    return r;\n}\nfn spawn<a, s>(t: (&a mut Threads<s>), f: FnMut<s>() -> u64) -> unit { t.done.push(f); }\nfn main() {\n    mut x = u64[1, 2];\n    mut y = u64[3];\n    mx := &mut x;\n    my := &mut y;\n    n := scope(|t| -> u64 { spawn(&mut t, || -> u64 { mx[0] = 5; return 1; }); spawn(&mut t, || -> u64 { my[0] = 6; return 2; }); return 3; });\n    println(n);\n    println(x[0] + y[0]);\n}\n",
+    "stdout": "3\n11\n"
+  },
+  {
+    "name": "scope-spawn-same-exclusive-refused",
+    "note": "the minimal inline-running scope of docs/design/closure-bounds.md section 7: two spawns cannot both hold `&mut x`",
+    "source": "struct Threads<s> { done: (FnMut<s>() -> u64)[] }\nfn scope<s, R>(body: FnMut<s>((&mut Threads<s>)) -> R) -> R {\n    mut t = Threads { done: (FnMut<s>() -> u64)[] };\n    mut b = body;\n    r := b(&mut t);\n    while let Some(f) = t.done.pop() { mut g = f; g(); }\n    return r;\n}\nfn spawn<a, s>(t: (&a mut Threads<s>), f: FnMut<s>() -> u64) -> unit { t.done.push(f); }\nfn main() {\n    mut x = u64[1, 2];\n    {\n        mx := &mut x;\n        n := scope(|t| -> u64 { spawn(&mut t, || -> u64 { mx[0] = 5; return 1; }); spawn(&mut t, || -> u64 { mx[1] = 6; return 2; }); return 3; });\n        println(n);\n    }\n}\n",
+    "reject": true,
+    "diagnostic": "reference is suspended or expired"
+  },
+  {
+    "name": "scope-spawn-body-local-refused",
+    "note": "the minimal inline-running scope of docs/design/closure-bounds.md section 7: a spawn cannot capture a borrow of the body's own local: the scope outlives it",
+    "source": "struct Threads<s> { done: (FnMut<s>() -> u64)[] }\nfn scope<s, R>(body: FnMut<s>((&mut Threads<s>)) -> R) -> R {\n    mut t = Threads { done: (FnMut<s>() -> u64)[] };\n    mut b = body;\n    r := b(&mut t);\n    while let Some(f) = t.done.pop() { mut g = f; g(); }\n    return r;\n}\nfn spawn<a, s>(t: (&a mut Threads<s>), f: FnMut<s>() -> u64) -> unit { t.done.push(f); }\nfn main() {\n    n := scope(|t| -> u64 { y := u64[1]; ry := &y; spawn(&mut t, || -> u64 ry[0]); return 1; });\n    println(n);\n}\n",
+    "reject": true,
+    "diagnostic": "captured writeback violates invariant lifetime"
+  },
+  {
+    "name": "scope-body-uses-after-spawn-refused",
+    "note": "the minimal inline-running scope of docs/design/closure-bounds.md section 7: the body cannot touch data a spawn borrowed mutably until the scope joins",
+    "source": "struct Threads<s> { done: (FnMut<s>() -> u64)[] }\nfn scope<s, R>(body: FnMut<s>((&mut Threads<s>)) -> R) -> R {\n    mut t = Threads { done: (FnMut<s>() -> u64)[] };\n    mut b = body;\n    r := b(&mut t);\n    while let Some(f) = t.done.pop() { mut g = f; g(); }\n    return r;\n}\nfn spawn<a, s>(t: (&a mut Threads<s>), f: FnMut<s>() -> u64) -> unit { t.done.push(f); }\nfn main() {\n    mut x = u64[1, 2];\n    {\n        mx := &mut x;\n        n := scope(|t| -> u64 { spawn(&mut t, || -> u64 { mx[0] = 5; return 1; }); mx[1] = 9; return 3; });\n        println(n);\n    }\n}\n",
+    "reject": true,
+    "diagnostic": "borrow conflicts with active access"
+  },
+  {
+    "name": "scope-body-writes-shared-spawn-refused",
+    "note": "the minimal inline-running scope of docs/design/closure-bounds.md section 7: ...nor write what a spawn reads",
+    "source": "struct Threads<s> { done: (Fn<s>() -> u64)[] }\nfn scope<s, R>(body: FnMut<s>((&mut Threads<s>)) -> R) -> R {\n    mut t = Threads { done: (Fn<s>() -> u64)[] };\n    mut b = body;\n    r := b(&mut t);\n    mut i = 0;\n    while i < t.done.len() { f := &t.done[i]; f(); i += 1; }\n    return r;\n}\nfn spawn<a, s>(t: (&a mut Threads<s>), f: Fn<s>() -> u64) -> unit { t.done.push(f); }\nfn main() {\n    mut x = u64[1, 2];\n    mx := &mut x;\n    n := scope(|t| -> u64 { spawn(&mut t, || -> u64 mx[0]); mx[0] = 9; return 1; });\n    println(n);\n}\n",
+    "reject": true,
+    "diagnostic": "borrow conflicts with active access"
+  },
+  {
+    "name": "scope-handle-cannot-leave-body",
+    "note": "the minimal inline-running scope of docs/design/closure-bounds.md section 7: a scoped handle carries the scope's lifetime and cannot be the scope's result",
+    "source": "struct ScopedThread<s> { id: u64 }\nstruct Threads<s> { done: (FnMut<s>() -> u64)[] }\nfn scope<s, R: Owned>(body: FnMut<s>((&mut Threads<s>)) -> R) -> R {\n    mut t = Threads { done: (FnMut<s>() -> u64)[] };\n    mut b = body;\n    r := b(&mut t);\n    while let Some(f) = t.done.pop() { mut g = f; g(); }\n    return r;\n}\nfn spawn<a, s>(t: (&a mut Threads<s>), f: FnMut<s>() -> u64) -> ScopedThread<s> { t.done.push(f); return ScopedThread { id: 1 }; }\nfn main() {\n    x := u64[1];\n    rx := &x;\n    h := scope(|t| spawn(&mut t, || -> u64 rx[0]));\n    println(h.id);\n}\n",
+    "reject": true,
+    "diagnostic": "returned borrow escapes its declared input lifetime"
   }
 ]

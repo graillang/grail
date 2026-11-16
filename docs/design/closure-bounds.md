@@ -661,3 +661,29 @@ environment, whose fields are declared in the body's own region 1 (`capture_fiel
 Risks: step 1 touches every closure passed to a generic function with lifetimes in its signature;
 run the corpus with step 1 alone before step 2. R-env must only apply when the expected type names a
 region, so closures that never asked keep region 1 and today's behaviour.
+
+### 7.1 Stage 5, checker side - built
+
+Found while building: steps 1-2 of the plan (hint-region mapping, R-env) are **not needed**. What was
+missing was more basic - a closure inside a closure body could not capture the enclosing closure's
+captures at all (`undefined name`), and an expression-bodied closure could not capture a local
+borrow (the result-type probe refused it). With both fixed, a nested capture is a *re-borrow that
+keeps the original loan*: a shared reference as `load(&name)`, an exclusive slice or `&mut T[]` as
+an exclusive whole slice (`&mut name[:]`, a child loan). The spawned closure therefore holds the
+caller's own region, and `Fn<s>` plus the existing writeback and loan checks give every scope rule:
+
+| Program (`scope(|t| ..)` over the inline mock) | Outcome |
+|---|---|
+| two spawns sharing `&x` | accepted |
+| spawns on disjoint `&mut x`, `&mut y`; both writes land | accepted |
+| two spawns on one `&mut x` | refused: `reference is suspended or expired` |
+| a spawn capturing a borrow of a body local | refused: `captured writeback violates invariant lifetime` |
+| the body touching what a spawn borrowed | refused: `borrow conflicts with active access` |
+| a `ScopedThread<s>` returned from the body | refused: `returned borrow escapes` |
+
+Step 3: a shared `(&Self)` receiver cannot hold the borrows at all in safe code (a `Mutex` payload
+may not contain borrows), so `spawn` takes `(&mut Self)` and the body gets `(&mut Threads<s>)`, as
+the director allowed. A nested exclusive capture of a general `&mut T` (not a vector or slice) has
+no re-borrow form and stays unsupported. Cases `closure-nested-capture-*`, `scope-*`,
+`closure-expression-body-captures-local-borrow`. Step 4 (wiring to the runtime) and step 5 (deleting
+the builtins) are with the threads and scheduler branches.
