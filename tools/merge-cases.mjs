@@ -10,8 +10,8 @@
 // form (two-space indent, non-ASCII as \u escapes). The tool this replaces let the incoming branch's
 // entry win whenever the two differed, which reverted edits the incoming branch had never made.
 //
-// Prose (*.md) keeps both sides of each conflict, ours first. A source conflict is refused: it
-// needs a decision.
+// Prose (*.md) keeps both sides of each conflict, ours first, and a paragraph both sides already
+// carry once. A source conflict is refused: it needs a decision.
 import { execSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 
@@ -81,7 +81,14 @@ function mergeCases(file) {
 
 function mergeProse(file) {
   const before = readFileSync(file, 'utf8');
-  const after = before.replace(/<<<<<<< [^\n]*\n([^]*?)(?:\|\|\|\|\|\|\| [^\n]*\n[^]*?)?=======\n([^]*?)>>>>>>> [^\n]*\n/g, '$1$2');
+  const hunk = /<<<<<<< [^\n]*\n([^]*?)(?:\|\|\|\|\|\|\| [^\n]*\n[^]*?)?=======\n([^]*?)>>>>>>> [^\n]*\n/g;
+  // A paragraph both sides carry (an entry that reached each side through an earlier merge) is kept
+  // once: theirs' paragraphs already present anywhere on our side of the file are dropped.
+  const oursText = before.replace(hunk, '$1');
+  const after = before.replace(hunk, (_, ours, theirs) => {
+    const kept = theirs.split(/\n(?=\n)/).filter(p => p.trim() === '' || !oursText.includes(p.replace(/^\n/, '')));
+    return ours + kept.join('\n');
+  });
   if (/^(<<<<<<<|>>>>>>>) /m.test(after)) { console.log(`${file}: conflict markers left`); return false; }
   writeFileSync(file, after);
   console.log(`${file}: both sides kept`);
