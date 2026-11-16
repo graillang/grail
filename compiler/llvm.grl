@@ -304,6 +304,13 @@ struct L {
     dmap: Map,
     // The F1 call facts of the function being lowered, by `callee#ordinal`: the fact index plus one.
     hmap: Map,
+    // cnames by name (callee_ordinal).
+    cmap: Map,
+    // The lines of the function being lowered that name each frame slot `-N(%rbp)`: those of slot k
+    // are `sl_lines[sl_start[k] .. sl_start[k + 1]]`, in order, each line once. The per-slot
+    // questions read these instead of searching every line for every slot.
+    sl_start: u64[],
+    sl_lines: u64[],
     // Per storage location (0-13 a register, 14+k frame slot k): `vk` is 0 for an untracked word,
     // 1 for the header pointer of slot `vo` at byte offset `vo2`, 2 for the constant `vo`.
     vk: u64[],
@@ -1128,13 +1135,94 @@ fn slot_operand<a, b>(l: (&a L), op: &b [u8]) -> u64 {
 // `movq` read, write or compare, with an immediate write only of zero (a float zero is all-zero
 // bytes). Anything else -- an address taken, a four-byte alias, an integer operation -- makes the
 // slot stay an untyped word, which is always correct.
-fn slot_body_ok<a, b>(instrs: (&a u8[][]), k: u64) -> bool {
-    needle := slot_needle(k);
+// Builds l.sl_start/l.sl_lines for `instrs` and `slots` frame slots. A line names slot k when it
+// contains `-8(k+1)(%rbp)` with the `-` right before the digits, which is exactly when the
+// `has(line, slot_needle(k))` test the per-slot checks used to make is true.
+fn index_slot_lines(l: (&mut L), instrs: (&u8[][]), slots: u64) -> unit {
+    mut count = u64[];
+    for k in slots + 1 {
+        count.push(0);
+    }
+    mut pk = u64[];
+    mut pm = u64[];
     for m in instrs.len() {
         line := view(instrs[m]);
-        if !has(line, view(needle)) {
+        mut last = slots;
+        mut i = 0;
+        while i + 1 < line.len() {
+            if (line[i] == 45) && (line[i + 1] >= 48) && (line[i + 1] <= 57) {
+                mut j = i + 1;
+                mut n: u64 = 0;
+                while (j < line.len()) && (line[j] >= 48) && (line[j] <= 57) && (n < 1099511627776) {
+                    n = n * 10 + u64(line[j] - 48);
+                    j += 1;
+                }
+                if occurs_at_safe(line, j, view("(%rbp)")) && (n >= 8) && (n % 8 == 0) {
+                    k := n / 8 - 1;
+                    if (k < slots) && (k != last) {
+                        pk.push(k);
+                        pm.push(m);
+                        count[k] = count[k] + 1;
+                        last = k;
+                    }
+                }
+                i = j;
+                continue;
+            }
+            i += 1;
+        }
+    }
+    mut start = u64[];
+    mut at: u64 = 0;
+    for k in slots + 1 {
+        start.push(at);
+        at += count[k];
+    }
+    mut fill = start.copy();
+    mut lines = u64[];
+    for q in at {
+        lines.push(0);
+    }
+    // A line naming one slot twice must count once: pairs are in line order, so a repeat of the
+    // same (k, m) is adjacent only within one line's scan, which `last` covers for consecutive
+    // occurrences; an interleaved repeat (k, other, k) is caught here.
+    for q in pk.len() {
+        k := pk[q];
+        if (fill[k] > start[k]) && (lines[fill[k] - 1] == pm[q]) {
             continue;
         }
+        lines[fill[k]] = pm[q];
+        fill[k] = fill[k] + 1;
+    }
+    // Close the gaps the skipped repeats left: each slot's range ends where its fill stopped.
+    mut packed = u64[];
+    mut pstart = u64[];
+    for k in slots {
+        pstart.push(packed.len());
+        mut q = start[k];
+        while q < fill[k] {
+            packed.push(lines[q]);
+            q += 1;
+        }
+    }
+    pstart.push(packed.len());
+    exchange(&mut l.sl_start, pstart);
+    exchange(&mut l.sl_lines, packed);
+    return ();
+}
+fn occurs_at_safe<a, b>(a: &a [u8], at: u64, b: &b [u8]) -> bool {
+    if at + b.len() > a.len() {
+        return false;
+    }
+    return occurs_at(a, at, b);
+}
+fn slot_body_ok<a, b>(l: (&a L), instrs: (&b u8[][]), k: u64) -> bool {
+    needle := slot_needle(k);
+    if k + 1 >= l.sl_start.len() {
+        return true;
+    }
+    for q in l.sl_start[k + 1] - l.sl_start[k] {
+        line := view(instrs[l.sl_lines[l.sl_start[k] + q]]);
         if !starts(line, view("movq ")) && !starts(line, view("cmpq ")) {
             return false;
         }
@@ -1181,7 +1269,7 @@ fn accept_slots<a, b, c, d>(l: (&a mut L), instrs: (&b u8[][]), facts: (&c Facts
                 rejected = 1;
             }
         }
-        if (rejected == 0) & (k < slots) & slot_body_ok(&instrs, k) {
+        if (rejected == 0) & (k < slots) & slot_body_ok(&l, &instrs, k) {
             l.fslots.push(k);
         }
     }
@@ -1491,13 +1579,12 @@ fn header_operand(l: (&L), op: &[u8]) -> u64 {
 // read or write, a `cmpq`, or a `leaq` of the slot (`&v`, a borrow). A constant written into the
 // slot, a four-byte alias or any integer operation makes the slot stay an untyped word, which is
 // always correct.
-fn header_body_ok(instrs: (&u8[][]), k: u64) -> bool {
-    needle := slot_needle(k);
-    for m in instrs.len() {
-        line := view(instrs[m]);
-        if !has(line, view(needle)) {
-            continue;
-        }
+fn header_body_ok(l: (&L), instrs: (&u8[][]), k: u64) -> bool {
+    if k + 1 >= l.sl_start.len() {
+        return true;
+    }
+    for q in l.sl_start[k + 1] - l.sl_start[k] {
+        line := view(instrs[l.sl_lines[l.sl_start[k] + q]]);
         if starts(line, view("leaq ")) || starts(line, view("cmpq ")) {
             continue;
         }
@@ -1556,7 +1643,7 @@ fn accept_headers(l: (&mut L), instrs: (&u8[][]), facts: (&Facts), fname: (&[u8]
                 rejected = 1;
             }
         }
-        if (rejected == 0) & (k < slots) & (cwhat[i] >= 2) & (cwhat[i] <= 5) & header_body_ok(&instrs, k) {
+        if (rejected == 0) & (k < slots) & (cwhat[i] >= 2) & (cwhat[i] <= 5) & header_body_ok(&l, &instrs, k) {
             l.hslots.push(k);
             l.hwhat.push(cwhat[i]);
             l.hwidth.push(cwidth[i]);
@@ -1605,15 +1692,24 @@ fn call_header_at(l: (&L), facts: (&Facts), callee: (&[u8]), ordinal: u64) -> HF
 // The `ordinal`-th call to `callee` in the function being lowered, counting the calls this lifter
 // has already seen in emission order (the key an F1 call fact carries).
 fn callee_ordinal(l: (&mut L), callee: (&[u8])) -> u64 {
-    for i in l.cnames.len() {
-        if eq(view(l.cnames[i]), callee) {
-            n := l.ccount[i];
-            l.ccount[i] = n + 1;
-            return n;
-        }
+    hit := map_get(&l.cmap, callee);
+    if hit != 0 {
+        n := l.ccount[hit - 1];
+        l.ccount[hit - 1] = n + 1;
+        return n;
     }
     l.cnames.push(copy(callee));
     l.ccount.push(1);
+    id := l.cnames.len() - 1;
+    if (id + 1) * 2 >= l.cmap.used.len() {
+        mut bigger = map_new(l.cmap.used.len());
+        for i in l.cnames.len() {
+            map_put(&mut bigger, view(l.cnames[i]), i);
+        }
+        exchange(&mut l.cmap, bigger);
+    } else {
+        map_put(&mut l.cmap, callee, id);
+    }
     return 0;
 }
 // Absolute, machine-aligned loads of the two header fields a fact makes readable this way: `+0` is
@@ -3030,6 +3126,7 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
     exchange(&mut l.vo2, i64[]);
     exchange(&mut l.cnames, u8[][]);
     exchange(&mut l.ccount, u64[]);
+    exchange(&mut l.cmap, map_new(16));
     exchange(&mut l.proof, u64[]);
     l.rline = 0;
     for i in facts.items.len() {
@@ -3160,6 +3257,7 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
     if l.split != 0 {
         // One alloca per slot; the prologue's zeroing covers the slots below the parameters.
         slots := size / 8;
+        index_slot_lines(&mut l, &instrs, slots);
         accept_slots(&mut l, &instrs, &facts, view(f.name), slots);
         accept_headers(&mut l, &instrs, &facts, view(f.name), slots);
         mut count = slots;
@@ -5821,7 +5919,7 @@ fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (
             set_add(&mut weak, view(sub(wl, 6, wl.len())));
         }
     }
-    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, dnames: u8[][], dmap: map_new(16), hmap: map_new(16), proof: u64[], rline: 0, ranges: ranges };
+    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges };
     mut funcs = Func[];
     mut data = u8[][];
     split(&lines, &mut funcs, &mut data);
