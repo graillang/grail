@@ -33,6 +33,9 @@ pub struct A {
     // The text, and which bytes may be part of a name.
     src: u8[],
     nc: u8[],
+    nh: u64,
+    nh_a: u64,
+    nh_e: u64,
     // Mnemonics, directives and registers: FNV hash of the name to an id.
     nt_hash: u64[],
     nt_id: u64[],
@@ -113,6 +116,20 @@ pub struct A {
     im_neg: u64,
     im_div: u64,
     im_add: u64,
+    // Lines seen before, with the bytes they encoded to: a line that names no symbol encodes the
+    // same wherever it stands, and the compiler writes the same few tens of thousands of such lines
+    // over and over. Open addressing on the line's hash; `lc_out` is where its bytes are in
+    // `lc_pool`.
+    lc_hash: u64[],
+    lc_hash2: u64[],
+    lc_len: u64[],
+    lc_out: u64[],
+    lc_olen: u64[],
+    lc_code: u64[],
+    lc_count: u64,
+    lc_pool: u8[],
+    // Whether the line just read may be remembered: an instruction or numeric data, no label.
+    cacheable: u64,
     err: u8[]
 }
 
@@ -263,6 +280,9 @@ pub fn new() -> A {
     mut o = A {
         src: u8[],
         nc: nc,
+        nh: 0,
+        nh_a: 1,
+        nh_e: 0,
         nt_hash: nh,
         nt_id: ni,
         sym_name: u8[][],
@@ -334,8 +354,25 @@ pub fn new() -> A {
         im_neg: 0,
         im_div: 1,
         im_add: 0,
+        lc_hash: u64[],
+        lc_hash2: u64[],
+        lc_len: u64[],
+        lc_out: u64[],
+        lc_olen: u64[],
+        lc_code: u64[],
+        lc_count: 0,
+        lc_pool: u8[],
+        cacheable: 0,
         err: u8[]
     };
+    for i in 65536 {
+        o.lc_hash.push(0);
+        o.lc_hash2.push(0);
+        o.lc_len.push(0);
+        o.lc_out.push(0);
+        o.lc_olen.push(0);
+        o.lc_code.push(0);
+    }
     directives(&mut o);
     mnemonics(&mut o);
     regs(&mut o);
@@ -404,7 +441,10 @@ fn symbol<a>(o: (&a mut A), a0: u64, e: u64) -> u64 {
     if (o.sym_name.len() + 1) * 2 > o.st_id.len() {
         rehash(&mut o);
     }
-    h := fnv_src(&o, a0, e);
+    mut h = o.nh;
+    if (o.nh_a != a0) || (o.nh_e != e) {
+        h = fnv_src(&o, a0, e);
+    }
     mask := o.st_id.len() - 1;
     mut i = h & mask;
     loop {
@@ -536,13 +576,34 @@ fn at_word<b, c>(s: &b [u8], a0: u64, e: u64, w: &c [u8]) -> bool {
 // ---- reading ----------------------------------------------------------------------------------
 
 fn skip<a>(o: (&a mut A)) {
-    while (o.at < o.le) && ((o.src[o.at] == ' ') || (o.src[o.at] == 9)) {
-        o.at += 1;
+    mut i = o.at;
+    e := o.le;
+    while i < e {
+        c := o.src[i];
+        if (c != ' ') && (c != 9) {
+            break;
+        }
+        i += 1;
     }
+    o.at = i;
 }
 
-fn nchar<a>(o: (&a A), c: u64) -> bool {
-    return o.nc[c] != 0;
+// The byte at the cursor, or 256 at the line's end. (An index that is itself a field read makes
+// the compiler build a view of the vector; a local index does not.)
+fn peek<a>(o: (&a A)) -> u64 {
+    i := o.at;
+    if i < o.le {
+        return o.src[i];
+    }
+    return 256;
+}
+
+fn peek1<a>(o: (&a A)) -> u64 {
+    i := o.at + 1;
+    if i < o.le {
+        return o.src[i];
+    }
+    return 256;
 }
 
 fn name_char(c: u64) -> bool {
@@ -550,17 +611,29 @@ fn name_char(c: u64) -> bool {
 }
 
 // A name at the cursor: its end.
-fn name_end<a>(o: (&a A)) -> u64 {
+// The end of the name at the cursor. Its hash is left in `nh` (for the range `nh_a..nh_e`), so a
+// symbol lookup right after does not read the name again.
+fn name_end<a>(o: (&a mut A)) -> u64 {
     mut i = o.at;
-    while (i < o.le) && nchar(&o, o.src[i]) {
+    e := o.le;
+    mut h: u64 = 0xcbf29ce484222325;
+    while i < e {
+        c := o.src[i];
+        if o.nc[c] == 0 {
+            break;
+        }
+        h = wrapping_mul(h ^ c, 0x100000001b3);
         i += 1;
     }
+    o.nh = h;
+    o.nh_a = o.at;
+    o.nh_e = i;
     return i;
 }
 
 fn expect<a>(o: (&a mut A), c: u64) {
     skip(&mut o);
-    if (o.at < o.le) && (o.src[o.at] == c) {
+    if (peek(&o) == c) {
         o.at += 1;
         return ();
     }
@@ -571,16 +644,16 @@ fn expect<a>(o: (&a mut A), c: u64) {
 fn number<a>(o: (&a mut A)) -> u64 {
     skip(&mut o);
     mut neg = false;
-    if (o.at < o.le) && (o.src[o.at] == '-') {
+    if (peek(&o) == '-') {
         neg = true;
         o.at += 1;
     }
     mut v: u64 = 0;
     start := o.at;
-    if (o.at + 1 < o.le) && (o.src[o.at] == '0') && ((o.src[o.at + 1] == 'x') || (o.src[o.at + 1] == 'X')) {
+    if (peek(&o) == '0') && ((peek1(&o) == 'x') || (peek1(&o) == 'X')) {
         o.at += 2;
         while o.at < o.le {
-            c := o.src[o.at];
+            c := peek(&o);
             if (c >= '0') && (c <= '9') {
                 v = wrapping_add(wrapping_mul(v, 16), c - '0');
             } else if (c >= 'a') && (c <= 'f') {
@@ -593,10 +666,17 @@ fn number<a>(o: (&a mut A)) -> u64 {
             o.at += 1;
         }
     } else {
-        while (o.at < o.le) && (o.src[o.at] >= '0') && (o.src[o.at] <= '9') {
-            v = wrapping_add(wrapping_mul(v, 10), o.src[o.at] - '0');
-            o.at += 1;
+        mut i = o.at;
+        e := o.le;
+        while i < e {
+            c := o.src[i];
+            if (c < '0') || (c > '9') {
+                break;
+            }
+            v = wrapping_add(wrapping_mul(v, 10), c - '0');
+            i += 1;
         }
+        o.at = i;
     }
     if o.at == start {
         fail(&mut o, view("expected a number"));
@@ -622,7 +702,7 @@ fn expr<a>(o: (&a mut A)) {
     mut neg = false;
     loop {
         skip(&mut o);
-        while (o.at < o.le) && (o.src[o.at] == '-') {
+        while (peek(&o) == '-') {
             neg = !neg;
             o.at += 1;
             skip(&mut o);
@@ -631,9 +711,9 @@ fn expr<a>(o: (&a mut A)) {
             fail(&mut o, view("expression ends early"));
             return ();
         }
-        if is_digit(o.src[o.at]) {
+        if is_digit(peek(&o)) {
             mut v = number(&mut o);
-            if (o.at < o.le) && (o.src[o.at] == '/') {
+            if (peek(&o) == '/') {
                 o.at += 1;
                 d := number(&mut o);
                 v = v / d;
@@ -644,7 +724,7 @@ fn expr<a>(o: (&a mut A)) {
                 o.ex_add = wrapping_add(o.ex_add, v);
             }
         } else {
-            e := name_end(&o);
+            e := name_end(&mut o);
             if (e == o.at) || (o.ex_sym != 0) {
                 fail(&mut o, view("unsupported expression"));
                 return ();
@@ -654,13 +734,13 @@ fn expr<a>(o: (&a mut A)) {
                 o.ex_neg = 1;
             }
             o.at = e;
-            if (o.at < o.le) && (o.src[o.at] == '/') {
+            if (peek(&o) == '/') {
                 o.at += 1;
                 o.ex_div = number(&mut o);
             }
-            if (o.at < o.le) && (o.src[o.at] == '@') {
+            if (peek(&o) == '@') {
                 o.at += 1;
-                me := name_end(&o);
+                me := name_end(&mut o);
                 if at_src(&o, o.at, me, view("tpoff")) {
                     o.ex_mod = 1;
                 } else {
@@ -670,10 +750,10 @@ fn expr<a>(o: (&a mut A)) {
             }
         }
         skip(&mut o);
-        if (o.at < o.le) && (o.src[o.at] == '+') {
+        if (peek(&o) == '+') {
             neg = false;
             o.at += 1;
-        } else if (o.at < o.le) && (o.src[o.at] == '-') {
+        } else if (peek(&o) == '-') {
             neg = true;
             o.at += 1;
         } else {
@@ -757,7 +837,7 @@ fn data<a>(o: (&a mut A), width: u64) {
             emit_le(&mut o, o.ex_add, width);
         }
         skip(&mut o);
-        if (o.at < o.le) && (o.src[o.at] == ',') {
+        if (peek(&o) == ',') {
             o.at += 1;
         } else {
             return ();
@@ -767,11 +847,11 @@ fn data<a>(o: (&a mut A), width: u64) {
 
 fn string<a>(o: (&a mut A), zero: bool) {
     expect(&mut o, '"');
-    while (o.at < o.le) && (o.src[o.at] != '"') {
-        mut c = o.src[o.at];
+    while (o.at < o.le) && (peek(&o) != '"') {
+        mut c = peek(&o);
         o.at += 1;
         if (c == 92) && (o.at < o.le) {
-            c = o.src[o.at];
+            c = peek(&o);
             o.at += 1;
             if c == 'n' {
                 c = 10;
@@ -786,8 +866,8 @@ fn string<a>(o: (&a mut A), zero: bool) {
             } else if (c >= '0') && (c <= '7') {
                 mut v = c - '0';
                 mut n = 1;
-                while (n < 3) && (o.at < o.le) && (o.src[o.at] >= '0') && (o.src[o.at] <= '7') {
-                    v = v * 8 + o.src[o.at] - '0';
+                while (n < 3) && (peek(&o) >= '0') && (peek(&o) <= '7') {
+                    v = v * 8 + peek(&o) - '0';
                     o.at += 1;
                     n += 1;
                 }
@@ -795,7 +875,7 @@ fn string<a>(o: (&a mut A), zero: bool) {
             } else if c == 'x' {
                 mut v = 0;
                 while o.at < o.le {
-                    d := o.src[o.at];
+                    d := peek(&o);
                     if (d >= '0') && (d <= '9') {
                         v = v * 16 + d - '0';
                     } else if (d >= 'a') && (d <= 'f') {
@@ -848,7 +928,7 @@ fn section_line<a>(o: (&a mut A)) {
     }
     o.at = e;
     skip(&mut o);
-    if (o.at >= o.le) || (o.src[o.at] != ',') {
+    if (peek(&o) != ',') {
         nm := o.src[a0: e].copy();
         named_section(&mut o, view(nm), 0, nm.len());
         return ();
@@ -856,8 +936,8 @@ fn section_line<a>(o: (&a mut A)) {
     o.at += 1;
     expect(&mut o, '"');
     mut flags = 0;
-    while (o.at < o.le) && (o.src[o.at] != '"') {
-        c := o.src[o.at];
+    while (o.at < o.le) && (peek(&o) != '"') {
+        c := peek(&o);
         if c == 'a' {
             flags = flags | 2;
         } else if c == 'w' {
@@ -874,10 +954,10 @@ fn section_line<a>(o: (&a mut A)) {
     expect(&mut o, '"');
     mut ty = 1;
     skip(&mut o);
-    if (o.at < o.le) && (o.src[o.at] == ',') {
+    if (peek(&o) == ',') {
         o.at += 1;
         expect(&mut o, '@');
-        te := name_end(&o);
+        te := name_end(&mut o);
         if at_src(&o, o.at, te, view("nobits")) {
             ty = 8;
         } else if !at_src(&o, o.at, te, view("progbits")) {
@@ -891,7 +971,7 @@ fn section_line<a>(o: (&a mut A)) {
 
 fn sym_operand<a>(o: (&a mut A)) -> u64 {
     skip(&mut o);
-    e := name_end(&o);
+    e := name_end(&mut o);
     if e == o.at {
         fail(&mut o, view("expected a symbol"));
         return 0;
@@ -910,7 +990,7 @@ fn directive<a>(o: (&a mut A), id: u64) {
         sym := sym_operand(&mut o);
         expect(&mut o, ',');
         expect(&mut o, '@');
-        te := name_end(&o);
+        te := name_end(&mut o);
         if at_src(&o, o.at, te, view("function")) {
             o.sym_type[sym] = 2;
         } else if at_src(&o, o.at, te, view("object")) {
@@ -1003,15 +1083,20 @@ fn read_line<a>(o: (&a mut A)) {
     if o.at >= o.le {
         return ();
     }
-    if (o.src[o.at] == '/') || (o.src[o.at] == '#') {
+    if (peek(&o) == '/') || (peek(&o) == '#') {
         return ();
     }
     // A label: a name followed directly by `:`.
     mut i = o.at;
-    while (i < o.le) && nchar(&o, o.src[i]) {
+    while i < o.le {
+        c := o.src[i];
+        if o.nc[c] == 0 {
+            break;
+        }
         i += 1;
     }
     if (i < o.le) && (o.src[i] == ':') && (i > o.at) {
+        o.cacheable = 0;
         label(&mut o, o.at, i);
         o.at = i + 1;
         skip(&mut o);
@@ -1019,17 +1104,24 @@ fn read_line<a>(o: (&a mut A)) {
             return ();
         }
         i = o.at;
-        while (i < o.le) && nchar(&o, o.src[i]) {
+        while i < o.le {
+            c := o.src[i];
+            if o.nc[c] == 0 {
+                break;
+            }
             i += 1;
         }
     }
     id := lookup(&o, o.at, i);
-    if o.src[o.at] == '.' {
+    if peek(&o) == '.' {
         if (id == 0) || (id > 40) {
             fail(&mut o, view("unsupported directive"));
             return ();
         }
         o.at = i;
+        if (id != 1) && (id != 2) && (id != 17) && (id != 18) && (id != 19) {
+            o.cacheable = 0;
+        }
         directive(&mut o, id);
     } else {
         if (id < 100) || (id >= 1000) {
@@ -1193,19 +1285,68 @@ fn sym_final<a, b>(o: (&a A), pre: (&b u64[]), sym: u64) -> u64 {
     return o.sym_pos[sym];
 }
 
-pub fn assemble<b>(s: &b [u8]) -> Result {
+pub fn assemble(text: u8[]) -> Result {
     mut o = new();
-    o.src = s.copy();
+    o.src = text;
+    n := o.src.len();
     mut a0 = 0;
-    while (a0 < s.len()) && (o.err.len() == 0) {
+    while (a0 < n) && (o.err.len() == 0) {
+        // The line's end and two independent 64-bit hashes of it, in one pass: a remembered line is
+        // taken when its length and both hashes agree, without reading it again.
+        mut h: u64 = 0xcbf29ce484222325;
+        mut h2: u64 = 0;
         mut e = a0;
-        while (e < s.len()) && (s[e] != 10) {
+        while e < n {
+            c := o.src[e];
+            if c == 10 {
+                break;
+            }
+            h = wrapping_mul(h ^ c, 0x100000001b3);
+            h2 = wrapping_add(wrapping_mul(h2, 0x9e3779b97f4a7c15), c + 1);
             e += 1;
         }
         o.line += 1;
+        if h == 0 {
+            h = 1;
+        }
+        mask := o.lc_hash.len() - 1;
+        mut slot = h & mask;
+        mut hit = false;
+        while o.lc_hash[slot] != 0 {
+            if (o.lc_hash[slot] == h) && (o.lc_hash2[slot] == h2) && (o.lc_len[slot] == e - a0) && (o.nobits == 0) && ((o.lc_code[slot] == 0) || (o.cur == 0)) {
+                hit = true;
+                break;
+            }
+            slot = (slot + 1) & mask;
+        }
+        if hit {
+            from := o.lc_out[slot];
+            o.buf.append(o.lc_pool[from: from + o.lc_olen[slot]]);
+            a0 = e + 1;
+            continue;
+        }
+        nfx := o.fx_sec.len();
+        npt := o.pt_sec.len();
+        nit := o.it_pos.len();
+        nsym := o.sym_name.len();
+        sec := o.cur;
+        start := o.buf.len();
+        o.cacheable = 1;
         o.at = a0;
         o.le = e;
         read_line(&mut o);
+        if (o.cacheable != 0) && (o.err.len() == 0) && (o.cur == sec) && (o.nobits == 0) && (o.fx_sec.len() == nfx) && (o.pt_sec.len() == npt) && (o.it_pos.len() == nit) && (o.sym_name.len() == nsym) && (o.buf.len() > start) && (o.lc_count * 2 < o.lc_hash.len()) {
+            o.lc_hash[slot] = h;
+            o.lc_hash2[slot] = h2;
+            o.lc_len[slot] = e - a0;
+            o.lc_out[slot] = o.lc_pool.len();
+            o.lc_olen[slot] = o.buf.len() - start;
+            if sec == 0 {
+                o.lc_code[slot] = 1;
+            }
+            o.lc_pool.append(o.buf[start: o.buf.len()]);
+            o.lc_count += 1;
+        }
         a0 = e + 1;
     }
     // Every section's bytes back in its slot.
@@ -1476,12 +1617,16 @@ fn mnemonics<a>(o: (&a mut A)) {
 }
 
 fn reg_at<a>(o: (&a mut A)) -> u64 {
-    if (o.at >= o.le) || (o.src[o.at] != '%') {
+    if (peek(&o) != '%') {
         fail(&mut o, view("expected a register"));
         return 1000;
     }
     mut e = o.at + 1;
-    while (e < o.le) && nchar(&o, o.src[e]) {
+    while e < o.le {
+        c := o.src[e];
+        if o.nc[c] == 0 {
+            break;
+        }
         e += 1;
     }
     id := lookup(&o, o.at + 1, e);
@@ -1500,7 +1645,7 @@ fn operand<a>(o: (&a mut A), n: u64) {
         fail(&mut o, view("missing operand"));
         return ();
     }
-    c := o.src[o.at];
+    c := peek(&o);
     if c == '$' {
         o.at += 1;
         expr(&mut o);
@@ -1524,7 +1669,7 @@ fn operand<a>(o: (&a mut A), n: u64) {
     if c == '%' {
         save := o.at;
         id := reg_at(&mut o);
-        if (id == 1998) && (o.at < o.le) && (o.src[o.at] == ':') {
+        if (id == 1998) && (peek(&o) == ':') {
             o.m_seg = 0x64;
             o.at += 1;
         } else {
@@ -1548,7 +1693,7 @@ fn operand<a>(o: (&a mut A), n: u64) {
     o.d_div = 1;
     o.d_add = 0;
     o.d_mod = 0;
-    if (o.at < o.le) && (o.src[o.at] != '(') {
+    if (peek(&o) != '(') {
         expr(&mut o);
         o.d_has = 1;
         o.d_sym = o.ex_sym;
@@ -1557,10 +1702,10 @@ fn operand<a>(o: (&a mut A), n: u64) {
         o.d_add = o.ex_add;
         o.d_mod = o.ex_mod;
     }
-    if (o.at < o.le) && (o.src[o.at] == '(') {
+    if (peek(&o) == '(') {
         o.at += 1;
         skip(&mut o);
-        if (o.at < o.le) && (o.src[o.at] == '%') {
+        if (peek(&o) == '%') {
             id := reg_at(&mut o);
             if id == 1999 {
                 o.m_rip = 1;
@@ -1569,13 +1714,13 @@ fn operand<a>(o: (&a mut A), n: u64) {
             }
         }
         skip(&mut o);
-        if (o.at < o.le) && (o.src[o.at] == ',') {
+        if (peek(&o) == ',') {
             o.at += 1;
             skip(&mut o);
             id := reg_at(&mut o);
             o.m_index = (id - 1000) & 31;
             skip(&mut o);
-            if (o.at < o.le) && (o.src[o.at] == ',') {
+            if (peek(&o) == ',') {
                 o.at += 1;
                 sc := number(&mut o);
                 if sc == 2 {
@@ -1900,7 +2045,7 @@ fn instruction<a>(o: (&a mut A), first: u64) {
             o.buf.push(0xf3);
         }
         skip(&mut o);
-        e := name_end(&o);
+        e := name_end(&mut o);
         id = lookup(&o, o.at, e);
         o.at = e;
         if (id < 100) || (id >= 1000) {
@@ -1922,7 +2067,7 @@ fn instruction<a>(o: (&a mut A), first: u64) {
         operand(&mut o, o.nops);
         o.nops += 1;
         skip(&mut o);
-        if (o.at < o.le) && (o.src[o.at] == ',') {
+        if (peek(&o) == ',') {
             o.at += 1;
         } else {
             break;
