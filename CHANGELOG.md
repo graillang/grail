@@ -1,5 +1,19 @@
 ## Unreleased
 
+- **An edit to one function recompiles that function.** The per-function layer of the build store
+  now replays every other body of the module: a body's assembly no longer depends on the bodies
+  before it (labels are numbered per function, `.L<unit>_<function>_<n>`, and its positions count
+  from its own first line), and a stored body records the drop helpers it names and the
+  specialisations it asks for, so a replayed body asks the build for them again. Before, a body
+  that named a drop helper or instantiated a generic was never stored, and one that used a
+  specialisation an earlier body had asked for could be replayed into a build that no longer
+  emitted it (an undefined symbol at link time). On a 1000-record module an edit to one function
+  replays the other 1999 bodies where it replayed none. Bodies that create a closure, use a vtable
+  or the fn thunk, add a link input or a constant, synthesise a declaration (the first tuple of a
+  size, the first result union) or spell a source position as text are compiled every time, as is
+  the first body of each module; the build's `fn-cache:` line says how many bodies each rule kept
+  out. `GRAIL_FN_CACHE=0` turns the layer off.
+
 - A build emits a drop helper for each type whose helper something names, in the order they are
   first named, instead of one for every type the compiler interned: the helpers nothing called are
   gone from the assembly, and the set no longer depends on which bodies the compiler had to check.

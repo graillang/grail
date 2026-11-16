@@ -82,9 +82,9 @@ function write(value = 3) {
 write();
 
 // One build. `extra` are the flags under test; everything else is what `grail build` does.
-function build(args, { measure = false } = {}) {
+function build(args, { measure = false, env = process.env } = {}) {
   const started = process.hrtime.bigint();
-  const result = spawnSync(compiler, ['build', '--target', target, ...args], { cwd: project, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 900_000 });
+  const result = spawnSync(compiler, ['build', '--target', target, ...args], { cwd: project, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 900_000, env });
   const ms = Number(process.hrtime.bigint() - started) / 1e6;
   const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
   return { status: result.status, output, ms, line: cacheLine(output) };
@@ -588,6 +588,15 @@ function costProject(count) {
     `${mainSource}`.replace('use helper;', 'use helper;\nuse big;').replace('util::twice(a) + helper::bump(a)', 'util::twice(a) + helper::bump(a) + big::f7(1)'),
   );
 }
+// The reference for the per-function layer: the same tree built to the same output name from an
+// empty store with the unit layer off, so every module is compiled and every body is emitted the
+// way a compiler with no unit store emits it. (A plain `grail build` goes through the build store
+// too, and would hand back the objects the build under test just filed.)
+const referenceStore = join(work, 'reference-store');
+function referenceBuild(output) {
+  rmSync(referenceStore, { recursive: true, force: true });
+  return build(['-o', output], { measure: true, env: { ...process.env, GRAIL_CACHE_DIR: referenceStore, GRAIL_FN_CACHE: '0' } });
+}
 function proveEditCost(count) {
   const output = join(project, 'target/cost');
   rmSync(store, { recursive: true, force: true });
@@ -637,7 +646,7 @@ function proveEditCost(count) {
   // Every case above is the clean build's bytes: the same output name, built again with no cache.
   // (The name has to be the same - each object's symbol table names the assembly file it came from.)
   const cached = bytes(output);
-  assert.equal(build(['-o', output]).status, 0, 'the uncached build failed');
+  assert.equal(referenceBuild(output).status, 0, 'the uncached build failed');
   assert.deepEqual(bytes(output), cached, 'the edited build is not the uncached build');
   return { cold, cases };
 }
@@ -691,7 +700,7 @@ function proveUnits(count) {
   const coldImage = bytes(output);
   // The same build with no cache at all, to the same output name: this is the image, and (after it
   // has overwritten the cached build's assembly) the module text, that a replay must be.
-  const clean = build(['-o', output], { measure: true });
+  const clean = referenceBuild(output);
   assert.equal(clean.status, 0, `the uncached build failed\n${clean.output}`);
   assert.deepEqual(bytes(output), coldImage, 'the cached build is not the uncached build');
   const assembly = moduleAssembly(output);
@@ -719,7 +728,7 @@ function proveUnits(count) {
   assert.equal(big.filed, 1, `one edited body is emitted and filed:\n${one.output}`);
   assert.equal(big.hits, bigFiled - 1, `every other body of big must replay:\n${one.output}`);
   const oneImage = bytes(output);
-  assert.equal(build(['-o', output]).status, 0, 'the uncached one-function build failed');
+  assert.equal(referenceBuild(output).status, 0, 'the uncached one-function build failed');
   assert.deepEqual(bytes(output), oneImage, 'the one-function edit is not the uncached build');
 
   // (3) a body-only edit of another inner function: the module-level cache reruns that module and
@@ -735,7 +744,7 @@ function proveUnits(count) {
   assert.equal(onlyBig.filed, 1, `the edited body is the one body emitted again:\n${bodyOnly.output}`);
   assert.equal(onlyBig.hits, bigFiled - 1, `every other body of big must replay:\n${bodyOnly.output}`);
   const bodyImage = bytes(output);
-  assert.equal(build(['-o', output]).status, 0, 'the uncached body-only build failed');
+  assert.equal(referenceBuild(output).status, 0, 'the uncached body-only build failed');
   assert.deepEqual(bytes(output), bodyImage, 'the body-only edit is not the uncached build');
 
   // (4) an interface change: a new `pub` function moves the big module's declaration surface, and
@@ -751,7 +760,7 @@ function proveUnits(count) {
   assert.ok(bigAfter.filed >= bigFiled, `every body of the module is emitted and filed again:\n${surface.output}`);
   assert.ok(surface.line.hits >= 3, `a surface change must not throw away the modules before it:\n${surface.output}`);
   const surfaceImage = bytes(output);
-  assert.equal(build(['-o', output]).status, 0, 'the uncached surface build failed');
+  assert.equal(referenceBuild(output).status, 0, 'the uncached surface build failed');
   assert.deepEqual(bytes(output), surfaceImage, 'the surface edit is not the uncached build');
 
   write(3);
@@ -805,6 +814,17 @@ function richProject(count) {
     `use rich;\n\npub fn main() -> u64 {\n    v := u64[1, 2, 3, 4];\n    println(rich::work5(&v, 5) + rich::work9(&v, 9) + rich::work${count - 1}(&v, 3));\n    return 0;\n}\n`,
   );
 }
+// A module run reads the interfaces its build directory holds when it starts, and the unit key names
+// what the run read - so the units a cold build files (every module running at once, the other
+// modules' interfaces not yet written) are not the units a later run of that module alone looks
+// for. One run of the module alone - after a comment is appended to it, which moves no declaration
+// - files them under the key every later single-module run computes.
+// (docs/design/incremental-compilation.md, "What a run reads")
+function settleUnits(output, path) {
+  writeFileSync(path, `${readFileSync(path, 'utf8')}// settled\n`);
+  const settled = build(['--cache', '-o', output]);
+  assert.equal(settled.status, 0, `the settling build failed\n${settled.output}`);
+}
 function proveIndependentUnits(count) {
   const output = join(project, 'target/rich');
   const richPath = join(project, 'src/rich.grl');
@@ -812,9 +832,12 @@ function proveIndependentUnits(count) {
   richProject(count);
   const cold = build(['--cache', '-o', output], { measure: true });
   assert.equal(cold.status, 0, `the cold build of the rich module failed\n${cold.output}`);
-  const bodies = 2 * count;
+  // Every body but the first of the part, which writes the part's marker inside its own bytes and
+  // is not a unit in this pass.
+  const bodies = 2 * count - 1;
   const coldRich = forModule(unitLines(cold.output), 'rich');
-  assert.deepEqual(coldRich, { hits: 0, filed: bodies, kept: 0 }, `every body of the rich module is a unit - drop helpers and specialisations are replayable registrations:\n${cold.output}`);
+  assert.deepEqual(coldRich, { hits: 0, filed: bodies, kept: 0 }, `every body of the rich module after its first is a unit - drop helpers and specialisations are replayable registrations:\n${cold.output}`);
+  settleUnits(output, richPath);
   // One edit, then: the cached build's account, its assembly and image, and the same tree built
   // with no cache to the same output name.
   const edited = (what, from, to) => {
@@ -828,8 +851,9 @@ function proveIndependentUnits(count) {
     const answer = run(output);
     const image = bytes(output);
     const assembly = moduleAssembly(output);
-    const clean = build(['-o', output], { measure: true });
+    const clean = referenceBuild(output);
     assert.equal(clean.status, 0, `${what}: the uncached build failed\n${clean.output}`);
+    assert.equal(unitLines(clean.output).length, 0, `${what}: the reference build must not use the unit store\n${clean.output}`);
     sameAssembly(moduleAssembly(output), assembly, what);
     assert.deepEqual(bytes(output), image, `${what}: the cached image is not the uncached image`);
     assert.equal(run(output), answer, `${what}: the answers differ`);
@@ -851,7 +875,7 @@ function proveIndependentUnits(count) {
 // asked for it, so a body that is replayed has to ask again: when `first` stops asking, `second`
 // - unchanged, replayed - is the only body that names the symbol. A unit that recorded only the
 // registrations it was the first to make hands the linker an undefined symbol here.
-const sharedSource = first => `module shared;
+const sharedSource = (first, tail = '') => `module shared;
 
 fn same<T>(x: T, n: u64) -> T {
     return x;
@@ -865,7 +889,7 @@ pub fn first(x: u64) -> u64 {
 pub fn second(x: u64) -> u64 {
     return same(x, 2);
 }
-`;
+${tail}`;
 function proveRegistrations() {
   const output = join(project, 'target/shared');
   rmSync(store, { recursive: true, force: true });
@@ -875,8 +899,9 @@ function proveRegistrations() {
   const cold = build(['--cache', '-o', output]);
   assert.equal(cold.status, 0, `the cold build failed\n${cold.output}`);
   assert.equal(run(output), '7', 'the cold build prints the wrong answer');
+  settleUnits(output, join(project, 'src/shared.grl'));
   // `first` no longer names the specialisation; `second` still does.
-  writeFileSync(join(project, 'src/shared.grl'), sharedSource('x | 8'));
+  writeFileSync(join(project, 'src/shared.grl'), sharedSource('x | 8', '// settled\n'));
   const after = build(['--cache', '-o', output]);
   assert.equal(after.status, 0, `a replayed body must register what it names - the build after the first user of a specialisation stopped using it failed:\n${after.output}`);
   const shared = forModule(unitLines(after.output), 'shared');
@@ -884,7 +909,7 @@ function proveRegistrations() {
   assert.equal(run(output), '15', 'the build after the edit prints the wrong answer');
   const image = bytes(output);
   const assembly = moduleAssembly(output);
-  assert.equal(build(['-o', output]).status, 0, 'the uncached build failed');
+  assert.equal(referenceBuild(output).status, 0, 'the uncached build failed');
   sameAssembly(moduleAssembly(output), assembly, 'a replayed registration');
   assert.deepEqual(bytes(output), image, 'the build after the edit is not the uncached build');
   write(3);
