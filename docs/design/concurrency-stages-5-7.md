@@ -459,3 +459,118 @@ syscall as the fallback. Windows and macOS have their own fast paths (`QueryPerf
 Stage 5, then 6, then 7: classes and the deterministic split are what the frame loop needs first.
 Stage 6 removes the last way a correct program can stall the scheduler. Stage 7 is mostly
 independent and can go in parallel with either (another agent could take it).
+
+## Join against rayon and oneTBB: diagnosis and proposal
+
+The rivals' table (`docs/design/runtime-parity.md` on gaps12-rivals) has Grail's join at 2-4 us
+where rayon on a worker is 19 ns and oneTBB 99-125 ns, `fib(32)` by join scaling 1.1x over serial on
+24 workers where rayon reaches 4.8x and TBB 4.6x, and task spawns at 1.2-4 us against TBB's
+119-191 ns. Measured here on c076e98 (load average 20-26, 24 CPUs; `taskset -c 0-23`; the new
+`join_on_worker` row in `bench/sched.grl`): join from main about 2.0 us, **join on a worker about
+2.1 us** - the same - and job spawn+wait 1.8-2.4 us.
+
+### Where a join's time goes (callgrind, one worker, `pfib(27)`: 2583 joins)
+
+Instructions per join besides the work itself, native build:
+
+| | instr/join | where |
+|---|---:|---|
+| 6 heap allocations and their frees | ~2,550 | `rt_alloc_shared` 1,194, `rt_free_shared` 954, `rt_alloc`/`rt_free`/`rt_rec`/`rt_enum` ~450 |
+| fork, claim, run, publish, release | ~640 | `rt_job_make_class` 194, `rt_job_exec` 121, `rt_job_await` 120, `rt_job_release` 113, deque push/pop 170 |
+| thread-pointer and mode lookups | ~550 | `rt_worker_self` 146, `rt_task_mode` 118, `rt_current` 95, `rt_job_stack` 86, `rt_list_set` 106 |
+
+That is about 3,700 instructions where rayon's join is a few dozen. But instruction counts do not
+explain 2 us. Callgrind runs threads one at a time, so it cannot show the dominant cost, which the
+code shows:
+
+**Every fork wakes a sleeping worker.** `rt_job_make_class` (runtime.grl:5374) ends in `rt_notify`
+(runtime.grl:4881), which does a `fetch_add` on the scheduler's one sequence word and, whenever *any*
+worker is parked, a `futex` wake system call. In a join the forker almost always takes its own fork
+back, so the woken worker finds nothing and parks again: two system calls and a context switch per
+join, plus a cache line that every forking worker writes. That is the 2 us, and it is why nesting
+does not scale: 24 workers forking means 24 cores writing one line and making a system call each
+time. Rayon wakes a sleeping thread only when no thread is already looking for work, and TBB only
+when the arena has no active thief.
+
+### Allocations and atomic operations per join today, and what replaces each
+
+| # | today | file:line | replaced by | owner |
+|---|---|---|---|---|
+| 1, 2 | the two closure literals' environments (`rt_rec`) | the call site | `{code, env}` with frame environments | call_abi S6 |
+| 3 | the inner `\|\| { *out = Some(here()); }` (`rt_rec`) | lib/pool.grl:146 | gone: `parallel_with`'s second branch returns its word | **this proposal** |
+| 4 | `mut slot: B? = None` (`rt_enum`) | lib/pool.grl:144 | gone: no option | **this proposal** |
+| 5 | `Some(here())` (`rt_enum`) | lib/pool.grl:146 | gone | **this proposal** |
+| 6 | the `Pair` result (`rt_rec`) | lib/pool.grl:147 | returned in rax:rdx | unboxed 3c |
+| - | the job record | runtime.grl `rt_job_new` | stays (per-worker free list, no heap, no atomic) | - |
+| RMW | `fetch_add` on the global sequence, plus a futex wake whenever a worker is parked | runtime.grl:4881 | **a wake only when no worker is searching** (below) | this proposal |
+| RMW | claim CAS on the record | runtime.grl:5678 | stays: a queue entry is a hint, so the claim must be a CAS; uncontended it is about 20 cycles | - |
+| RMW | publish `swap` | runtime.grl:5564 | a release store when the forker ran its own job (nobody can be waiting); the swap only after a steal | this proposal |
+
+After this proposal plus S6 and 3c, a join allocates nothing, makes one uncontended CAS and no
+system call, and does no write to a shared line unless something was stolen.
+
+### The proposal, item by item, with targets
+
+1. **Zero-allocation join on our side.** `parallel_with(first, second)` returns both words:
+   `rt_parallel_with` returns `first`'s result in rax and `second`'s in rdx (second's callback
+   returns its value; no capture is written). `pool::join` becomes
+   `return Pair{first: ..., second: ...}` straight from those two words: no option, no inner
+   closure. Removes allocations 3-5 now; 1, 2 and 6 go when S6 and 3c land, with no further change
+   here.
+   **What call_abi and unboxed need to provide:**
+   - (a) "a closure literal passed to a parameter that does not escape has its environment in the
+     caller's frame": `parallel_with` (builtin 58) and `pool::join`'s parameters are such
+     parameters;
+   - (b) a two-word struct result in rax:rdx, which `Pair` is.
+2. **Wake only when nobody is searching** (the fib scaling). Count *searching* workers (awake and
+   looking for work) beside *parked* ones. A fork wakes one parked worker only when there are
+   parked workers and no searching ones; a woken worker counts as searching until it finds work or
+   parks; finding work while others are parked wakes one more (the chain that spreads a burst, as
+   now). The no-lost-wakeup argument stays Dekker-style: a worker increments `parked` before its
+   last look at the queues, and a forker reads `parked` after its push, both with a full fence.
+   - Target: a join on a worker makes **no system call** when the forker takes its fork back.
+   - Target: `fib(32)` by join at **4.5x or more over serial on 24 workers**.
+   Per-worker counters (forks, steals, failed steals, parks, wakes) go into `GRAIL_SCHED_STATS` so
+   the claim is measured, not inferred.
+3. **Publish without a swap when the forker ran its own job**, and inline the per-call lookups
+   (`rt_worker_self`, `rt_current`, `rt_task_mode` become one or two loads at the call).
+   - Target: **join on a worker at or below rayon's 19 ns** once item 1's allocations are gone
+     (which waits for S6/3c); **below 100 ns** with only our side done.
+4. **Main joins as a worker** (TBB's arena slot). The scheduler gets one extra worker block for
+   external threads. A thread that is not a worker takes it with a CAS on entering a parallel
+   region (`rt_region_step`, runtime.grl:6040) and gives it back on leaving. While it holds the
+   block, its forks go on its own deque instead of the locked injection ring, other workers steal
+   from it, and it leapfrogs and spins briefly before parking like a worker. A second external
+   thread that finds the slot taken behaves as today. More slots can come with `thread::spawn`
+   users.
+   - Target: **join from main at or below oneTBB's 99-125 ns**.
+5. **Spawn and burst.**
+   - Job spawn+wait (`pool::spawn`/`wait`) allocates an 8-byte box and the closure environment, and
+     wakes through `rt_notify`. The box goes: the job record's own word becomes the slot the closure
+     ABI reads. The wake follows item 2, and the wait follows item 4.
+     Target: **at or below TBB's 119 ns** after S6 removes the environment.
+   - A task spawn heap-allocates its record (`rt_task_spawn`, runtime.grl:6427), wakes through
+     `rt_notify`, and its first run takes a stack from the free list or maps one. Records come from
+     a per-worker free list like jobs' (no allocator), and the wake follows item 2.
+     Target: **burst at or below 2x TBB's 191 ns**. A Grail task has a stack and a TBB task does
+     not, so "beat" is not promised there; it is for jobs.
+6. **LLVM is 2x slower than native** on join and fib-join. Callgrind of the same program built
+   both ways: 34.8M instructions against 27.3M. `rt_alloc_shared` is 3,812 instructions per join
+   against 1,194, `rt_worker_self` 390 against 146, `rt_current` 275 against 95, and
+   `rt_region_step` 222 against 35. Two causes are visible in the code:
+   - every runtime atomic, even a relaxed or acquire load, reaches LLVM as a `fence seq_cst`
+     (llvm.grl:2359, stage 7's finding) - an `mfence` on x86 that callgrind counts as one
+     instruction and that costs about 30 cycles;
+   - the runtime's thread-pointer reads lower differently there.
+   Stage 7's ordered atomic ops fix the first. For the second: emit raw_tp_get as an LLVM
+   `load from addrspace(257)` instead of a lifted sequence, and check that `rt_alloc_shared`'s
+   cache path is not losing inlining under LLVM. Target: LLVM within 10% of native on every row,
+   then ahead.
+7. **Frame p99 and max**, which already beat both rivals, are re-measured after each item and must
+   not regress. The I/O task's worst lateness (1.9x the best rival) and the frame median (2.8x)
+   are expected to follow from items 2 and 4: today every fork's futex wake competes with the
+   reactor's wake of the I/O task.
+
+**Order:** 2 (the wake rule; largest, and independent of everyone), 1, 3, 4, 5, then 6 with stage 7.
+Each step is re-measured with `bench/sched.grl`, `bench/frame.grl` and the rivals' tool, and
+reported per row against rayon and TBB.
