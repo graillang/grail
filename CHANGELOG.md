@@ -1,5 +1,12 @@
 ## Unreleased
 
+- Fixed (test harness): **`test-native --jobs N` made every stripe build a second compiler** - the
+  parent passed its compiler as `GRAIL_COMPILER`, which `buildCompiler()` reads as the base to build
+  from - all into one directory at once, and each finished build was renamed over the binary the
+  other stripes were running, so a compile-time probe found its compiler "(deleted)". Stripes now run
+  the parent's compiler (`GRAIL_TEST_COMPILER`), and a finished build is put in place by a hard link
+  that never replaces an existing one.
+
 - Fixed: **a compile-time call with a signed result came back wrong.** A vector of signed integers
   with a negative element stopped the probe (it printed each element through a checked `u64(..)`),
   a negative scalar was read back as digits only, and every integer result was typed `u64`. Signed

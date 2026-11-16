@@ -542,7 +542,13 @@ function spawnStripe(options, argv, stripe, compiler) {
     const resultFile = join(root, `.work/native-tests/stripe-${stripe}-${process.pid}.json`);
     const env = {
       ...process.env,
+      // The stripe runs exactly this compiler. It used to receive it only as GRAIL_COMPILER, which
+      // buildCompiler() reads as the *base* to build with, so every stripe built a second compiler
+      // from it into one shared directory at once, and each finished build replaced the file the
+      // other stripes were already running - their /proc/self/exe went "(deleted)" and a
+      // compile-time probe, which re-runs the compiler by that path, failed.
       GRAIL_COMPILER: compiler,
+      GRAIL_TEST_COMPILER: compiler,
       GRAIL_TEST_JOBS: '1',
       GRAIL_TEST_STRIPE: `${stripe}/${options.jobs}`,
       GRAIL_TEST_RESULT_FILE: resultFile,
@@ -634,7 +640,7 @@ if (!isChild && options.jobs > 1) {
   process.exit(crashed || (options.update ? unresolved : merged.failed) ? 1 : 0);
 }
 
-const compiler = buildCompiler();
+const compiler = process.env.GRAIL_TEST_COMPILER ?? buildCompiler();
 // Key by the compiler's content-addressed directory, not its file name: every build is named
 // `grail`. The markers are shared by every stripe: a pass is a property of the compiler, not of the
 // process that observed it.
