@@ -144,6 +144,15 @@ fn main() -> u64 { println(f(100000000)); return 0; }
 Status 139, no message. Task stacks have a guard page and `rt_stack_overflow`; the main thread has
 neither. A recursion bug in a user program should say `error: stack overflow`, as it does on a task.
 
+*Fixed on `gaps7-stackovf`* - `docs/design/main-stack-overflow.md`, "Implemented". The main thread
+now installs the same `SIGSEGV` handler on an alternate stack at startup, and a fault address within
+64 KiB below (or one page above) the interrupted stack pointer is reported as `error: stack
+overflow` with the statement the frame was entering and status 134; anything else keeps the default
+action, so a wild pointer still dies by `SIGSEGV`. Cases
+`main-stack-overflow-reports-and-exits-134` (x86-64, aarch64, riscv64),
+`wild-pointer-dies-by-sigsegv-without-an-overflow-report` (x86-64) and
+`deep-recursion-that-ends-is-unaffected` (all three).
+
 *Fixed this round, recorded so the audit is complete:* a truncated file (`fn f(a: u64` and nothing
 else) aborted the compiler with `index 24 out of bounds`; a narrowing conversion that does not fit
 aborted with empty stderr; `return;` in a unit function was refused with `expected a name`, and no

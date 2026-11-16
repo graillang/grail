@@ -249,10 +249,12 @@ is completed second (`record-contains-itself-indirectly`).
 
 ## Open, and deliberately not bugs
 
-- **Stack exhaustion on the main thread.** `down(100000000)` in a recursive function exits 139
-  (SIGSEGV) with an empty stderr. The guard page and `rt_stack_overflow` report belong to task
-  stacks; the main thread's stack is the OS default and has neither. A report there needs the
-  handler installed for the main thread, which is the guard-page work already tracked elsewhere.
+- **Stack exhaustion on the main thread** - *fixed*, see `docs/design/main-stack-overflow.md`.
+  `down(100000000)` in a recursive function used to exit 139 with an empty stderr, because the guard
+  page and the `rt_stack_overflow` report belong to task stacks and the main thread's stack is the
+  kernel's. The main thread now installs the same handler on an alternate stack, reports
+  `error: stack overflow` with the statement the overflowing frame was entering, and exits 134; a
+  fault that is not within a window of the interrupted stack pointer keeps the default action.
 - **`grail check` of one module that the program only reaches through the command line.** Checking
   `compiler/cli.grl` alone reports `unknown function `iface_digest` in `native`` - seven times -
   because `cli.grl` calls `native::...` without a `use native;` and the real build passes every
