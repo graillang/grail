@@ -92,7 +92,7 @@ items.sort_by(|a: &u64, b: &u64| -> bool { *counter += 1; return *a < *b; });
 println(compares);
 ```
 
-The `pool` callbacks that run on workers (`pool::map`, `run`, `for_chunks`, `chunks_mut`) stay `Fn`:
+The `pool` callbacks that run on workers (`pool::map`, `run`, `split`, `split_mut`, `range`, `reduce`) stay `Fn`:
 every worker shares one closure, so a closure that writes its captures is refused there with the
 `FnMut, not Fn` message.
 

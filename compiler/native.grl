@@ -2513,6 +2513,7 @@ fn site_func_entry<a>(entries: (&a mut u8[]), count: u64, name: u64) -> unit {
 fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
     mut out = u8[];
     mut entries = u8[];
+    mut files_std = u64[];
     mut files = u64[];
     mut cur_file = 0;
     mut cur_line = 0;
@@ -2638,15 +2639,21 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
             site_label(&mut out, count);
             if (cur_file != 0) && !cur_internal {
                 mut known = false;
+                mut std = 0;
                 for f in files.len() {
                     if files[f] == cur_file {
                         known = true;
+                        std = files_std[f];
                     }
                 }
                 if !known {
                     files.push(cur_file);
+                    // Bit 62 marks a standard-library statement: a report that wants the program's
+                    // own place (where a job was joined) looks past those frames.
+                    std = in_std_dir(view(site_path(&c, cur_file)));
+                    files_std.push(std);
                 }
-                site_entry(&mut entries, count, cur_file, cur_line | (cur_col << 32));
+                site_entry(&mut entries, count, cur_file, cur_line | (cur_col << 32) | (std << 62));
             } else {
                 site_entry(&mut entries, count, 0, 0);
             }
@@ -2991,24 +2998,32 @@ fn tls_thread_stubs<a>(c: (&a mut C)) -> unit {
     o(&mut c, view(".weak pthread_create\n.weak pthread_detach\n"));
     o(&mut c, view(".globl rt_host_thread\nrt_host_thread:\npushq %rbp\nmovq %rsp,%rbp\nsubq $48,%rsp\n"));
     o(&mut c, view("movq %rdi,-8(%rbp)\nmovq %rsi,-16(%rbp)\nmovq %rsi,-8(%rdi)\nmovl $1,%eax\nmovq %rax,(%rsi)\n"));
-    tp_read(&mut c);
-    o(&mut c, view("movq %rax,-24(%rbp)\nmovq 56(%rax),%rsi\n"));
-    tp_write(&mut c);
+    // AArch64 and RV64 run Grail on the record and switch to the TCB around pthread_create; x86-64
+    // already runs on the TCB (raw_tp_get), so it switches nothing.
+    if c.target != 0 {
+        tp_read(&mut c);
+        o(&mut c, view("movq %rax,-24(%rbp)\nmovq 56(%rax),%rsi\n"));
+        tp_write(&mut c);
+    }
     o(&mut c, view("leaq -32(%rbp),%rdi\nxorl %esi,%esi\nleaq rt_host_thread_start(%rip),%rdx\nmovq -8(%rbp),%rcx\ncall pthread_create\nmovq %rax,-40(%rbp)\ntestq %rax,%rax\n"));
     failed := label(&mut c);
     jump(&mut c, view("jne"), failed);
     o(&mut c, view("movq -32(%rbp),%rdi\ncall pthread_detach\n"));
     mark(&mut c, failed);
-    o(&mut c, view("movq -24(%rbp),%rsi\n"));
-    tp_write(&mut c);
+    if c.target != 0 {
+        o(&mut c, view("movq -24(%rbp),%rsi\n"));
+        tp_write(&mut c);
+    }
     o(&mut c, view("movq -40(%rbp),%rcx\nxorl %eax,%eax\nsubq %rcx,%rax\nleave\nret\n"));
     o(&mut c, view("rt_host_thread_start:\npushq %rbp\nmovq %rsp,%rbp\nsubq $16,%rsp\nmovq %rdi,-8(%rbp)\n"));
     tp_read(&mut c);
     o(&mut c, view("movq -8(%rbp),%rcx\nmovq 8(%rcx),%rcx\nmovq %rax,56(%rcx)\n"));
     tls_record_address(&mut c);
     o(&mut c, view("movq -8(%rbp),%rcx\nmovq 8(%rcx),%rcx\nmovq %rcx,(%rax)\nmovq %rcx,%rdi\ncall rt_thread_main\n"));
-    o(&mut c, view("movq -8(%rbp),%rcx\nmovq 8(%rcx),%rcx\nmovq 56(%rcx),%rsi\n"));
-    tp_write(&mut c);
+    if c.target != 0 {
+        o(&mut c, view("movq -8(%rbp),%rcx\nmovq 8(%rcx),%rcx\nmovq 56(%rcx),%rsi\n"));
+        tp_write(&mut c);
+    }
     // Load the TID word's address before releasing it: once it reads 0 the joiner may unmap the
     // block and the record.
     o(&mut c, view("movq -8(%rbp),%rcx\nmovq -8(%rcx),%rdi\nmovq %rdi,-16(%rbp)\nxorl %eax,%eax\nsfence\nmovq %rax,(%rdi)\n"));
@@ -3042,6 +3057,11 @@ fn tls_capture<a>(c: (&a mut C)) -> unit {
 // Foreign call entry: when this thread has a libc TCB, `slot` keeps the record and the thread
 // pointer becomes the TCB; otherwise `slot` is 0 and nothing changes.
 fn tls_enter_foreign<a>(c: (&a mut C), slot: u64) -> unit {
+    if c.target == 0 {
+        // x86-64: the thread pointer already is libc's TCB when there is one (raw_tp_get), so a
+        // foreign call switches nothing and costs nothing beyond the call.
+        return ();
+    }
     o(&mut c, view("xorl %eax,%eax\nmovq %rax,"));
     stack_slot(&mut c, slot);
     c.out.push(10);
@@ -3085,11 +3105,15 @@ fn tls_enter_callback<a>(c: (&a mut C), slot: u64, adopt: u64) -> unit {
     stack_slot(&mut c, adopt);
     o(&mut c, view(",%rsi\nmovq %rsi,(%rax)\n"));
     mark(&mut c, have);
-    tp_read(&mut c);
-    o(&mut c, view("movq %rax,"));
-    stack_slot(&mut c, slot);
-    c.out.push(10);
-    tp_write(&mut c);
+    if c.target != 0 {
+        // x86-64 keeps libc's TCB as the thread pointer; the record is reached through
+        // `rt_tls_record`, which the lines above made sure names one.
+        tp_read(&mut c);
+        o(&mut c, view("movq %rax,"));
+        stack_slot(&mut c, slot);
+        c.out.push(10);
+        tp_write(&mut c);
+    }
     mark(&mut c, done);
     return ();
 }
@@ -3126,6 +3150,9 @@ fn callback_copy_back<a>(c: (&a mut C)) -> unit {
 }
 // Undo either entry: restore the thread pointer `slot` saved, if it saved one.
 fn tls_leave<a>(c: (&a mut C), slot: u64) -> unit {
+    if c.target == 0 {
+        return (); // x86-64 never switched (tls_enter_foreign, tls_enter_callback)
+    }
     o(&mut c, view("movq "));
     stack_slot(&mut c, slot);
     o(&mut c, view(",%rsi\ntestq %rsi,%rsi\n"));
@@ -7444,50 +7471,6 @@ fn ref_pred_count<a>(c: (&a mut C)) -> u64 {
     }
     return n;
 }
-// The second entry of a function with refined parameters (docs/design/refinements.md): the frame
-// and the parameter stores, then a jump straight to the body, past the checks. It is out of line
-// because a `call` to an entry inside the function would skip the prologue the body needs, and it is
-// a copy of the prologue's own bytes because that prologue is the same code either way - the checked
-// entry runs it and then the checks, this one runs it and then the body.
-//
-// Only a call site that proved every parameter predicate reaches it. An indirect call - a function
-// value, a vtable entry, a foreign call - has proved nothing, and uses the checked entry.
-fn ref_entry<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &d [u8], export: u64, body: u64, prologue: (&a [u8])) -> unit {
-    // The LLVM backend lifts this assembly into IR, and the prologue it copies here is written in
-    // frame-symbol arithmetic (`subq $.F7,%rsp`) the lifter does not model. So that build keeps the
-    // checked entry, which is what `--verify-facts` does too: every obligation is still checked, the
-    // proof only saves the check.
-    if (c.backend != 0) || (ref_pred_count(&mut c) == 0) || (export == 2) || (prologue.len() == 0) {
-        return ();
-    }
-    // The binding is stated here, as it is for the checked entry: a specialisation is emitted by
-    // every object that instantiates it and stays weak, and a split build's objects have to see
-    // each other's symbols.
-    if c.plat != 1 {
-        if c.current_spec != 0 {
-            o(&mut c, view(".weak "));
-            export_name(&mut c, view(m), view(name), view(body_symbol), export);
-            o(&mut c, view(".proved\n"));
-        } else {
-            if c.split != 0 {
-                o(&mut c, view(".globl "));
-                export_name(&mut c, view(m), view(name), view(body_symbol), export);
-                o(&mut c, view(".proved\n"));
-            }
-        }
-    }
-    export_name(&mut c, view(m), view(name), view(body_symbol), export);
-    o(&mut c, view(".proved:\n"));
-    // The prologue's calls were recorded - and counted - when the checked entry emitted them; this is
-    // a copy of those bytes, so the consistency check in `fx_end` steps over them.
-    lo := c.out.len();
-    push_bytes(&mut c.out, view(prologue));
-    hi := c.out.len();
-    exchange(&mut c.fx_skip_lo, lo);
-    exchange(&mut c.fx_skip_hi, hi);
-    jump(&mut c, view("jmp"), body);
-    return ();
-}
 // Whether field `k` of record `d` carries a predicate. Such a field is written only where the
 // predicate is owed - a literal, `r.f = v` and `r.f op= v` - so no `&mut` to it may exist: through
 // one, a write would reach the field with nothing to check it (docs/design/refinements.md, "Field
@@ -9204,7 +9187,7 @@ fn pv_ir_range<a, b>(c: (&a mut C), out: (&a mut Atom[]), name: &b [u8], lo: u64
     return ();
 }
 // Starting and finishing a body: a refined parameter holds at its entry (the entry checked it or the
-// caller proved it, which is the `.proved` convention), and nothing of this body is left behind for
+// caller proved it, which is what a proved call means), and nothing of this body is left behind for
 // the next one the compile emits.
 fn pv_begin<a>(c: (&a mut C)) -> unit {
     exchange(&mut c.pv_on, 0);
@@ -17388,8 +17371,6 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     o(&mut c, view(":\n"));
     fx_edge_at := c.fx_edge_from.len();
     fx_begin(&mut c, view(fx_label), view(name), c.file, position, claimed_alloc, claimed_panic);
-    // Where the prologue's own bytes begin: the second entry replays them, then jumps to the body.
-    pro_start := c.out.len();
     o(&mut c, view("pushq %rbp\nmovq %rsp,%rbp\n"));
     frame := label(&mut c);
     if c.target == 4 {
@@ -17477,16 +17458,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // The parameter refinements hold here: the parameters are the arguments they were given and
     // their bookkeeping is done (a view's target is tracked), and the first statement has not been
     // reached, so a failure inside the check reports the call site rather than a line of this body.
-    // The prologue's bytes, for the second entry (ref_entry): everything from the frame setup to
-    // here is what a proved call has to run, and the checks are what it may skip.
-    mut prologue = u8[];
-    for i in pro_start .. c.out.len() {
-        prologue.push(c.out[i]);
-    }
     ref_params(&mut c);
-    // The body begins after the checks: the second entry jumps here.
-    body_lbl := label(&mut c);
-    mark(&mut c, body_lbl);
     // A refined parameter can state what the body's bounds checks need (pv_bce), for this body only.
     old_bce_index := exchange(&mut c.bce_index, u8[]);
     old_bce_base := exchange(&mut c.bce_base, u8[]);
@@ -17507,7 +17479,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         exchange(&mut c.unsafe_depth, depth + 1);
     }
     // The facts of this body start at its entry, where a refined parameter holds because the entry
-    // checked it or the caller proved it (the `.proved` convention), and they are this body's alone.
+    // checked it or the caller proved it (what a proved call means), and they are this body's alone.
     pv_begin(&mut c);
     block(&mut c);
     pv_end(&mut c);
@@ -17584,9 +17556,6 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         };
         record_debug_func(&mut c, view(name), view(m), &site);
     }
-    // The second entry, out of line: reached only by a call site that proved every predicate. It
-    // sits after the function's own range, so a debug line table never attributes it to the body.
-    ref_entry(&mut c, view(m), view(name), view(body_symbol), export, body_lbl, view(prologue));
     fx_end(&mut c);
     exchange(&mut c.hints, u64[]);
     scope_end(&mut c);
@@ -21177,7 +21146,7 @@ fn ref_strict_form<a>(c: (&a mut C)) -> u64 {
 // - the compiler's own dispatch inside trusted code (a closure's drop through the slot its body
 //   installed) records nothing: every body it can reach is a body of this build already;
 // - a refined parameter's check in the checked entry records an entry fact, not a body edge, because
-//   it is the caller's obligation (a caller that proved the predicate enters at `.proved`).
+//   it is the caller's obligation (a caller that proved the predicate answers for it with the proof).
 //
 // What this buys over reading the emitted text back:
 //
@@ -21427,14 +21396,16 @@ fn fx_would_trap<a, b>(c: (&a mut C), callee: &b [u8]) -> unit {
     fx_edge(&mut c, view(callee), 0);
     return ();
 }
-// A direct call whose arguments proved every refinement of the callee's parameters: it enters at the
-// callee's `.proved` entry, so the callee's entry checks are not this body's to answer for.
+// A direct call whose arguments proved every refinement of the callee's parameters. It enters the
+// callee at its one entry, whose checks then hold by the proof: they are not this body's to answer
+// for (edge kind 8). A second entry past the checks was a byte copy of the prologue taken before the
+// optimiser rewrote it, and restored callee-saved registers it had never saved.
 fn call_proved_out<a, b>(c: (&a mut C), callee: &b [u8]) -> unit {
     fx_edge(&mut c, view(callee), 8);
     fx_called(&mut c);
     o(&mut c, view("call "));
     o(&mut c, callee);
-    o(&mut c, view(".proved\n"));
+    c.out.push(10);
     return ();
 }
 // An indirect call in user code: `text` is the instruction (`call *%rax`, an import thunk). Nothing
@@ -26959,7 +26930,7 @@ fn builtin_id<a>(n: &a [u8]) -> u64 {
     if same(view(n), view("parallel_map")) {
         return 32;
     }
-    if same(view(n), view("parallel_for_chunks")) {
+    if same(view(n), view("parallel_split")) {
         return 43;
     }
     if same(view(n), view("parallel_spawn")) {
@@ -26973,6 +26944,9 @@ fn builtin_id<a>(n: &a [u8]) -> u64 {
     }
     if same(view(n), view("thread_spawn_raw")) {
         return 59;
+    }
+    if same(view(n), view("parallel_class")) {
+        return 60;
     }
     if same(view(n), view("task_scope")) {
         return 33;
@@ -27649,7 +27623,19 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
                 o(&mut c, view("xorq %rax,%rax\n"));
             } else {
                 if c.target == 0 {
+                    // x86-64 Linux: in a process that loaded libc the thread pointer is libc's TCB for
+                    // good (a write to FS is a system call, which made every foreign call cost two),
+                    // and the record is this thread's `rt_tls_record` word; otherwise the thread
+                    // pointer is the record. One fs-relative load either way.
+                    other := label(&mut c);
+                    done := label(&mut c);
+                    o(&mut c, view("cmpq $0,rt_state+184(%rip)\n"));
+                    jump(&mut c, view("je"), other);
+                    o(&mut c, view("movq %fs:rt_tls_record@tpoff,%rax\n"));
+                    jump(&mut c, view("jmp"), done);
+                    mark(&mut c, other);
                     o(&mut c, view("movq %fs:0,%rax\n"));
+                    mark(&mut c, done);
                 } else {
                     o(&mut c, view("tpget\n"));
                 }
@@ -27671,8 +27657,17 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
                 o(&mut c, view("xorq %rax,%rax\n"));
             } else {
             if c.target == 0 {
+                // With libc loaded the record is published, not installed (see raw_tp_get).
                 get(&mut c, args[0], view("%rsi"));
+                other := label(&mut c);
+                done := label(&mut c);
+                o(&mut c, view("cmpq $0,rt_state+184(%rip)\n"));
+                jump(&mut c, view("je"), other);
+                o(&mut c, view("movq %rsi,%fs:rt_tls_record@tpoff\nxorl %eax,%eax\n"));
+                jump(&mut c, view("jmp"), done);
+                mark(&mut c, other);
                 o(&mut c, view("movl $4098,%edi\nmovl $158,%eax\nsyscall\n"));
+                mark(&mut c, done);
             } else {
                 get(&mut c, args[0], view("%rdi"));
                 o(&mut c, view("tpset\n"));
@@ -29386,7 +29381,7 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
         return parallel_map_builtin(&mut c, a);
     }
     if id == 43 {
-        return parallel_for_chunks_builtin(&mut c, a);
+        return parallel_split_builtin(&mut c, a);
     }
     if id == 44 {
         return parallel_spawn_builtin(&mut c, a);
@@ -29399,6 +29394,9 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
     }
     if id == 59 {
         return thread_spawn_raw_builtin(&mut c, a);
+    }
+    if id == 60 {
+        return parallel_class_builtin(&mut c, a);
     }
     if id == 33 {
         return task_scope_builtin(&mut c, a);
@@ -29717,7 +29715,7 @@ fn parallel_map_builtin<a>(c: (&a mut C), items: Val) -> Val {
     close_loans(&mut c);
     return own(&mut c, slot, ty);
 }
-// parallel_for_chunks(&mut [T], chunks, f): the exclusive-slice shape of the pool, and the one
+// parallel_split(&mut [T], chunks, f): the exclusive-slice shape of the pool, and the one
 // Abundance's geometry work wants. The caller's slice is split by the runtime into `chunks`
 // contiguous, disjoint regions and each job receives `&mut [T]` over its own; the descriptors address
 // the caller's elements, so no element is copied. Distinct from the owned-chunk split in lib/pool.grl,
@@ -29733,7 +29731,7 @@ fn parallel_map_builtin<a>(c: (&a mut C), items: Val) -> Val {
 // read methods callable through it, so the element must be a type that may be used, and destroyed,
 // on another thread. Default-deny means a `handle` element is refused by name, exactly as `&[File]`
 // is refused as a shared parallel_map item.
-fn parallel_for_chunks_builtin<a>(c: (&a mut C), data: Val) -> Val {
+fn parallel_split_builtin<a>(c: (&a mut C), data: Val) -> Val {
     expect(&mut c, view(","));
     chunks := expr(&mut c, 0);
     expect(&mut c, view(","));
@@ -29744,21 +29742,21 @@ fn parallel_for_chunks_builtin<a>(c: (&a mut C), data: Val) -> Val {
     k := ty_kind(&mut c, slice);
     if c.raw == 0 {
         if (k != 27) & (k != 5) {
-            fail(&mut c, view("parallel_for_chunks requires an exclusive slice: write &mut data[a: b]"));
+            fail(&mut c, view("parallel_split requires an exclusive slice: write &mut data[a: b]"));
         }
         if ty_mode(&mut c, slice) == 0 {
             fail(
                 &mut c,
-                view("parallel_for_chunks writes through its chunks, so the slice must be exclusive (&mut [T]); a shared &[T] cannot be handed out as &mut [T]")
+                view("parallel_split writes through its chunks, so the slice must be exclusive (&mut [T]); a shared &[T] cannot be handed out as &mut [T]")
             );
         }
     }
     mut width = imm(&mut c, 8);
     if k == 27 {
         elem := ty_arg(&mut c, slice);
-        require_capability_named(&mut c, elem, 0, view("parallel_for_chunks element"));
+        require_capability_named(&mut c, elem, 0, view("parallel_split element"));
         if contains_task(&mut c, elem, 0) {
-            fail(&mut c, view("parallel_for_chunks cannot hand Task or job handles to workers"));
+            fail(&mut c, view("parallel_split cannot hand Task or job handles to workers"));
         }
         if narrow_code(&mut c, elem) != 0 {
             width = imm(&mut c, 4);
@@ -29772,16 +29770,16 @@ fn parallel_for_chunks_builtin<a>(c: (&a mut C), data: Val) -> Val {
     fty := function.ty;
     closure := ty_kind(&mut c, fty) == 20;
     if (ty_kind(&mut c, fty) != 12) & !closure {
-        fail(&mut c, view("parallel_for_chunks requires a callable"));
+        fail(&mut c, view("parallel_split requires a callable"));
     }
     signature := type_args(&mut c, fty);
     if signature.len() != 1 {
-        fail(&mut c, view("parallel_for_chunks callback takes (&mut [T])"));
+        fail(&mut c, view("parallel_split callback takes (&mut [T])"));
     }
     require_type(&mut c, slice, signature[0]);
     result := ty_arg(&mut c, fty);
     if ty_kind(&mut c, result) != 2 {
-        fail(&mut c, view("parallel_for_chunks callback returns unit: write the elements"));
+        fail(&mut c, view("parallel_split callback returns unit: write the elements"));
     }
     // Every worker calls the same closure object, so its captures are shared, not moved.
     require_parallel_closure(&mut c, fty, 1, view("closure capture"));
@@ -29804,7 +29802,7 @@ fn parallel_for_chunks_builtin<a>(c: (&a mut C), data: Val) -> Val {
     mut pargs = three(data.t, chunks.t, target);
     pargs.push(env);
     pargs.push(width);
-    slot := invoke(&mut c, view("rt_parallel_for_chunks"), pargs);
+    slot := invoke(&mut c, view("rt_parallel_split"), pargs);
     release_temporary(&mut c, data.t);
     release_temporary(&mut c, input);
     close_loans(&mut c);
@@ -29899,6 +29897,60 @@ fn parallel_with_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     slot := invoke(&mut c, view("rt_parallel_with"), pargs);
     release_temporary(&mut c, input);
     release_temporary(&mut c, input2);
+    close_loans(&mut c);
+    return own(&mut c, slot, result);
+}
+// parallel_class(class, f) -> A: run `f` with every job it forks in priority class `class` (0 Frame,
+// 1 Normal, 2 Background), and return its result. It is pool::with_class. `f` may run as a job of
+// that class - on another worker if one takes it first - and is joined before the call returns, so
+// it is checked as parallel_with's first branch is: an `Fn` whose captures are transferable, with an
+// owned, transferable result.
+fn parallel_class_builtin<a>(c: (&a mut C), klass: Val) -> Val {
+    expect(&mut c, view(","));
+    callee := expr(&mut c, 0);
+    expect(&mut c, view(")"));
+    require_type(&mut c, klass.ty, 0);
+    input := callee.t;
+    inty := callee.ty;
+    function := deref(&mut c, callee);
+    fty := function.ty;
+    closure := ty_kind(&mut c, fty) == 20;
+    if (ty_kind(&mut c, fty) != 12) & !closure {
+        fail(&mut c, view("parallel_class requires a callable"));
+    }
+    if type_args(&mut c, fty).len() != 0 {
+        fail(&mut c, view("a parallel_class callback takes no arguments: what it needs it captures"));
+    }
+    result := ty_arg(&mut c, fty);
+    require_parallel_closure(&mut c, fty, 0, view("closure capture"));
+    require_capability_named(&mut c, result, 0, view("parallel_map result"));
+    if contains_borrow(&mut c, result, 0) {
+        fail(&mut c, view("parallel_map result cannot contain borrows"));
+    }
+    if contains_task(&mut c, result, 0) {
+        fail(&mut c, view("parallel_map cannot move Task or job handles between threads"));
+    }
+    observe(&mut c, klass.t);
+    observe(&mut c, function.t);
+    mut env = imm(&mut c, 0);
+    if closure {
+        if ty_kind(&mut c, inty) == 7 {
+            get(&mut c, input, view("%rax"));
+        } else {
+            o(&mut c, view("leaq "));
+            stack_slot(&mut c, function.t);
+            o(&mut c, view(",%rax\n"));
+        }
+        env = save(&mut c);
+    }
+    get(&mut c, function.t, view("%rax"));
+    if closure {
+        o(&mut c, view("movq (%rax),%rax\n"));
+    }
+    target := save(&mut c);
+    pargs := three(klass.t, target, env);
+    slot := invoke(&mut c, view("rt_parallel_class"), pargs);
+    release_temporary(&mut c, input);
     close_loans(&mut c);
     return own(&mut c, slot, result);
 }
@@ -41916,6 +41968,11 @@ fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
     if same(view(name), view("wait")) {
         c.params.push(0);
     }
+    if same(view(name), view("sched_start")) {
+        for i in 6 {
+            c.params.push(0);
+        }
+    }
     if same(view(name), view("ready")) {
         c.params.push(0);
         c.params.push(0);
@@ -47639,6 +47696,8 @@ pub fn main() -> u64 {
     host_fn(&mut c, view("sleep_ms"), 1);
     host_fn(&mut c, view("now_ms"), 0);
     host_fn(&mut c, view("now_us"), 0);
+    host_fn(&mut c, view("background_wait_us"), 0);
+    host_fn(&mut c, view("sched_start"), 0);
     host_fn(&mut c, view("wall_ms"), 0);
     host_fn(&mut c, view("worker_id"), 0);
     host_fn(&mut c, view("workers"), 0);

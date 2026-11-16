@@ -4,9 +4,21 @@ import { readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync, copyFileSy
 import { join, basename } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
-import { root, compilerSources, hostTarget, buildCompiler, assemble, command, execute } from './native.mjs';
+import { root, compilerSources, hostTarget, buildCompiler, bootstrapCompiler, assemble, command, execute } from './native.mjs';
 
 const grail = buildCompiler();
+// 0. A second build with nothing changed does no work: the same compiler, not rebuilt, from a
+// bootstrap that is not assembled again. Its key once named the bootstrap's mtime, and the bootstrap
+// was re-assembled on every call, so every `build` rebuilt the compiler.
+{
+  const base = bootstrapCompiler();
+  const before = [fs.statSync(grail).mtimeMs, fs.statSync(base).mtimeMs];
+  const started = Date.now();
+  assert.equal(buildCompiler(), grail, 'a second build with nothing changed names another compiler');
+  assert.equal(bootstrapCompiler(), base);
+  assert.deepEqual([fs.statSync(grail).mtimeMs, fs.statSync(base).mtimeMs], before, 'a second build rewrote the compiler or its bootstrap');
+  assert.ok(Date.now() - started < 5000, `a second build with nothing changed took ${Date.now() - started} ms`);
+}
 const work = join(root, '.work/cli-tests');
 rmSync(work, { recursive: true, force: true }); mkdirSync(work, { recursive: true });
 const run = (args, cwd = work, ok = true) => {
