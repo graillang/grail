@@ -4183,19 +4183,14 @@ fn rt_job_fail(t: u64, kind: u64, a: u64, b: u64, site: u64, msg: u64, joined: u
     raw_store(f + 16, b);
     raw_store(f + 24, site);
     raw_store(f + 32, msg);
-    // 1. Drain the forks (untagged entries), all of them, before any job is published.
+    // 1 and 2 in one walk of the stack list, newest entry first. A fork is settled before any job
+    // older than it is published: the forks a job made (newer than it) may be borrowing that job's
+    // frames and, through its captures, its forker's - which publishing lets the forker free. A
+    // fork older than a job is settled after that job is published, because it may be waiting for
+    // it: a job this stack helped with is a descendant of the fork it was waiting for. A fork this
+    // stack took back and ran itself is published as the job (its newer, tagged entry) before its
+    // fork entry is reached.
     mut e = rt_list_head(t);
-    while e != 0 {
-        if (e & 1) != 0 {
-            e = raw_load(e - 1 + 72);
-        } else {
-            rt_job_settle(e);
-            e = raw_load(e + 64);
-        }
-    }
-    // 2. Publish the jobs being run here (tagged entries), innermost first. A job this stack forked
-    //    and ran itself appears as a fork too; it is released below, after it is published.
-    e = rt_list_head(t);
     while e != 0 {
         if (e & 1) != 0 {
             r := e - 1;
@@ -4203,16 +4198,14 @@ fn rt_job_fail(t: u64, kind: u64, a: u64, b: u64, site: u64, msg: u64, joined: u
             raw_store(r + 80, f);
             rt_job_publish(r);
         } else {
-            e = raw_load(e + 64);
-        }
-    }
-    e = rt_list_head(t);
-    while e != 0 {
-        if (e & 1) != 0 {
-            e = raw_load(e - 1 + 72);
-        } else {
             r := e;
             e = raw_load(r + 64);
+            // A published job's record is its forker's from then on, so links are read before.
+            // A fork this stack took back and ran is already published (its job entry is newer), so
+            // this finds it done and does not wait for itself.
+            rt_job_settle(r);
+            // This stack forked it, so this stack releases it - unless it ran it itself, in which
+            // case the record carries the failure and stays (a leak, like the stack's own frames).
             if raw_load(r + 80) != f {
                 rt_job_release(r);
             }
