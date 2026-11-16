@@ -18,6 +18,28 @@ verified). Probes ran on Linux x86-64 with the compiler built from this worktree
 | D7 | How a scope lifetime is made | **An ordinary region parameter that is both the body's capture bound and the scope type's region argument** (`scope<s,R>(body: FnMut<s>((&Threads<s>)) -> R)`), plus one rule (R-env, 2.4). No higher-ranked lifetimes, no outlives solver. |
 | D8 | `contains_task` ("no `Task`/`Job` handle in a result or item") | **Drop it when the handles become library types** - open question Q1; it is the one builtin check this design does not re-express. |
 
+### Decided by the director, 2026-11-16
+
+The design is approved and is P0: it is a soundness fix (H3, H5) before it is a feature.
+
+- **D1:** A. B stays as it is; C is what produced the holes.
+- **D2:** as recommended; the non-parameter default is `Owned`, not an error (settles Q2).
+- **D3:** `Fn<Send>(..)`, `Fn<Share>(..)`, `Fn<Owned>(..)`, `Fn<s>(..)` in the angle list. The owner
+  may still ask for another spelling before stage 1 merges, so the spelling lives in one place in
+  the parser and one in the formatter.
+- **D4:** add `Owned`. **D5:** no stopgap; the fix is the design. **D6:** no new borrow rule for
+  `join`.
+- **D7:** accepted as the direction; the stage 5 plan (R-env and the scope types) goes to the
+  director before it is built.
+- **D8 / Q1:** `contains_task` stays while `Task`/`Job` are builtin kinds and goes when a handle is
+  a move-only library record whose `wait`/`join` consumes it - in the same change, with a case
+  showing a second wait is a move error.
+- **Q3:** found and fixed first, as its own commit (section 5).
+- **Q5:** deferred; what it would take is written down in 2.6.
+- **Q6:** a named follow-up with a probe (section 5).
+- **Order:** Q3; stages 0 and 1 together with `lib/pool.grl` re-typed; stage 3 after a count of
+  what it would refuse; then stages 2 and 4 with the threads and scheduler branches.
+
 ## 1. What exists
 
 ### 1.1 A closure's type
@@ -166,6 +188,8 @@ p22 non-generic wrapper of p13   ok                                   (accepted)
 p23 store &d into Holder<d>      error[E0007]: move of unavailable or borrowed value   (the loan outlives the call: correct)
 p24 store &local into Holder<d>  error: captured writeback violates invariant lifetime (correct)
 p25 by-value FnMut, writes &mut  7 / 7                                (accepted, correct)
+p26 dyn over a borrowing record  error: a dyn value cannot hold borrowed data: its lifetime would be lost   (correct)
+p27 dyn over an `Fn` field       exit 134                             (accepted; called after the frame is gone)
 ```
 
 ## 2. The design
@@ -304,8 +328,29 @@ Nothing new is needed for `join`; the pieces exist and only the signature is wro
   structurally [P 06, 18]. A callable bound (`F: Fn() -> R`) is not proposed: it buys a
   monomorphised call and costs a specialisation per closure, and nothing in the concurrency model
   needs it. It can be added later without touching this design.
-- **`dyn I`.** Has the same erasure and is denied both capabilities today [V n:9329-9332]. The same
-  spelling (`dyn<Send> I`) would fix it; out of scope here. Closures are not interface objects [A].
+
+  *What it would take (Q5, deferred).* Every `map`/`for_chunks`/`sort_by` callback is an indirect
+  call through the closure's code word [V n:23974-23990], which the optimiser cannot inline, and
+  run-time parity with C and Rust is a pillar (`docs/design/runtime-parity.md`). The pieces:
+  (1) a bound `F: Fn(T) -> U` / `F: FnMut<Send>(T) -> U` in the generic list - the parser reads a
+  closure type after `:` where it reads an interface name today [P 17; V n:10225-10260] - recorded
+  per parameter beside the interface constraints; (2) in the generic body, a value of type `F` is
+  callable with that signature and mode [P 07], and the bound's `Send`/`Share`/region are what the
+  body may assume of it; (3) at instantiation the bound is checked by rule 2.3 against the closure
+  type `F` is bound to, which still has its environment [P 06]; (4) a closure expression passed for
+  `F` takes its parameter types from the bound, as `closure_hint` does from an `Fn` parameter
+  [V n:28894-28911]; (5) the specialisation's call `f(x)` is emitted as a direct call to that
+  closure's body symbol, which is known because `env` names the closure - this is the whole gain,
+  and it is where inlining becomes possible. The cost is one copy of the library function per
+  closure expression and a named-function argument needing its own zero-capture closure type.
+  Nothing in 2.1-2.4 changes: the bound reuses the closure-type grammar and rule 2.3 verbatim, so
+  `pool::map<T, U, F: Fn<Share>(T) -> U>(items: T[], f: F)` can replace the erased signature
+  later, function by function, where a benchmark says the indirect call matters.
+- **`dyn I`.** Erased the same way, but default-deny already: it is neither `Send` nor `Share`
+  [V n:9329-9332] and is refused borrowed data where it is built [P 26]. So the object has no hole
+  of its own; what it lacks is a way to say more (`dyn<Send> I`, `dyn<s> I`) - follow-up F1 in
+  section 5. A borrow does get behind a `dyn` today through a record with an erased `Fn` field
+  [P 27], which D2 closes.
 - **Records, vectors, channels.** The field or element type carries the bounds, so
   `chan::bounded<FnMut<Send>((&Ctx)) -> unit>` is a `Send` channel of closures and the executor
   mailbox is a library type. The default outside a parameter is `Owned`, so a stored closure that
@@ -458,18 +503,31 @@ still calling the builtins.
   still needed when `Thread<R>`/`Job<R>` are move-only library records with an ordinary drop? If
   yes it needs its own answer (a non-`Send` handle is the obvious one, but `Task` is `Send` today
   [V n:9404-9411]).
-- **Q2. Spelling** (D3), and whether the non-parameter default should be `Owned` (proposed, Rust's
-  `Box<dyn Fn>` rule) or an error asking the author to choose.
-- **Q3. Why P13/P22 accept.** `call_bonds` bonds the closure's loans to the `Job<R>` result, yet
-  moving the borrowed vector is allowed while P19 (closure result) refuses it. Stage 2 makes the
-  program a type error before that matters, but the cause should be found: the same loss may affect
-  other results whose type holds no borrow.
+- **Q2. Spelling and the non-parameter default** - decided (D2, D3).
+- **Q3. Why P13/P22 accepted - answered and fixed.** `call_bonds` did bond the closure's loans to
+  the `Job<R>` temporary. They were lost one step later, when that temporary moved into its
+  binding: `move_value` carries bonds to the new place only if the type shows a borrow, is not
+  concrete, or `may_hide_borrow` [V n:6098]; and `hide_walk` treated `Job<R>` as only as
+  borrow-capable as `R`, so `Job<u64>` could hide nothing. A job handle owns the closure it runs
+  whatever `R` is. Fixed in `hide_walk` (kind 29 answers true); P13 and P22 are now
+  `error[E0007]: move of unavailable or borrowed value`. It does not generalise to other results:
+  a value can only carry a closure it does not show through a closure-typed field, a `dyn`, a
+  generic parameter (all already "may hide") or a builtin handle, and `Job` was the one builtin
+  handle that owns a closure (`Task` is spawned from a capture-free `fn` with an owned item
+  [V n:27186-27205]). Results of *other* types that a callee fills from a stashed closure are H5,
+  which is stage 3. Cases: `job-handle-holds-closure-loan-generic`, `-wrapper`,
+  `job-handle-in-record-holds-closure-loan`, `job-handle-loan-ends-at-wait`.
 - **Q4. A closure that borrows and is `Send` crossing a *task* boundary inside a scope**: tasks
   migrate between workers, so `Tasks<s>.spawn` needs `Send` of everything held across a suspension,
   which this design states only for captures. Locals held across a wait are the task design's
   question, not this note's.
 - **Q5. Callable bounds on `F`** (B's other half) - deferred; say if a zero-indirection `join` is
   wanted for the frame loop, where the closure call is the only indirect call left.
-- **Q6. `dyn<Send> I`** - same disease, same cure, separate note.
+- **F1 (was Q6). Bounds on `dyn`.** `dyn I` is erased like `Fn(..)` but is already default-deny:
+  never `Send`/`Share`, never holding a borrow [P 26]. The follow-up is the same angle list -
+  `dyn<Send> I`, `dyn<Share> I`, `dyn<s> I` - checked where a concrete value is boxed, so an
+  interface object can cross a thread or hold a borrow honestly. Until D2 lands a borrow reaches
+  behind a `dyn` through an erased `Fn` field [P 27]; `closure-bounds-probes/p27` must be a
+  refusing corpus case when stage 0 lands.
 - **Q7. How much existing code returns or stores a closure parameter** (stage 3 migration) - needs
   one corpus run, which this note was told not to make.
