@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **The refinement prover knows statics and constants** (module-values stage 5): an integer static
+  or constant is its value (`small(LIMIT)` with `x < 10` and `LIMIT = 8` calls the proved entry),
+  and a baked string's or table's `.len()` is its length (`get(SQ, 3)` on an 8-element static is
+  proved), at the caller and at the callee's renamed obligation alike. A local that shadows the
+  name hides it; a value that breaks the bound proves nothing and the check stays.
+
 - **Baked statics hold records** (module-values stage 4): `static FLAGS: Flag[] = @flags();` and
   `static BOX: Box = @make_box();` for plain records whose fields are integers, bools, strings,
   vectors or such records again, at any depth. The run tier prints the value field by field and

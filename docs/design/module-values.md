@@ -508,3 +508,22 @@ closure.
 What it does not need: a run-time representation (a `&static` is the same pointer word), or any
 change to statics themselves - their reads would be typed `&static T` instead of carrying an
 anonymous external origin.
+
+## Stage 5 as built: statics in the prover
+
+- **Terms.** A static's name was already a term (`pv_term` returns any identifier), and sound as one:
+  a static never changes, and a local that shadows it is found first.
+- **Known values.** `pv_known_literal`: in `pv_term`, a name that is an integer static or an integer
+  constant of this module with a value the prover's integer reading holds (not negative, below
+  2^62) reads as that literal; `NAME.len()` on a string or vector static reads as its length. A
+  callee's obligation renamed to the caller's terms (`v.len` with `v := SQ`) goes through the same
+  mapping (`pv_rename_known`), so both sides meet on the literal.
+- **Evaluated when asked.** `static_resolve` evaluates a static's initialiser once, at its own
+  position, whoever asks first - the prover in a body, the interface writer, the function cache's
+  surface, or the declaration in the third pass - and keeps the value on the entry (`static_fact`).
+- **Interfaces and the cache.** The static record carries the fact (`fact_kind` 1 value, 2 length)
+  and the function-cache surface includes it, because a reader's emitted call (`.proved` or not) now
+  depends on it.
+- **Not covered.** A qualified name (`table::LIMIT`) is not read as its value - the prover takes only
+  this module's names - and a direct `SQ[i]` in `for i in SQ.len()` keeps its bounds check: the
+  bounds-check pass (`pv_bce`) still serves refined parameters only.
