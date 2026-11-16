@@ -6736,6 +6736,12 @@ fn diag_record<a, b, d, e>(c: (&a mut C), path: &b [u8], here: DiagPos, span: u6
 // outside any body - a declaration, a signature - ends the compile, since what follows it would
 // mostly be consequences of it.
 fn next_error<a, b>(c: (&a mut C), key: &b [u8]) -> unit {
+    // A compile-time probe reports its first error and stops: the outer compile says which call did
+    // not compile. Re-running a probe to find its next error re-ran every probe beneath it, so a
+    // failure deep in a chain multiplied through every level (docs/design/comptime-speed.md).
+    if c.probe_mode != 0 {
+        return ();
+    }
     // The cap is on runs, not on printed diagnostics: a chain that makes no progress still ends.
     attempts := c.skip_bodies.len() / 2 + 1;
     if (c.body_pos == 0) || (20 <= attempts) {

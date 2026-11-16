@@ -1,5 +1,11 @@
 ## Unreleased
 
+- Fixed: **a chain of more than eight compile-time values hung the build.** The compile that hit
+  the nesting limit re-ran itself to report its next error, up to 20 times, and inside a probe each
+  re-run repeated every probe beneath it, so the failure multiplied through the chain (12 values
+  had not finished after four minutes). A probe now stops at its first error; the same program
+  fails in half a second.
+
 - **The refinement prover knows statics and constants** (module-values stage 5): an integer static
   or constant is its value (`small(LIMIT)` with `x < 10` and `LIMIT = 8` calls the proved entry),
   and a baked string's or table's `.len()` is its length (`get(SQ, 3)` on an 8-element static is
