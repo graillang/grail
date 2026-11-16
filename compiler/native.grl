@@ -423,6 +423,14 @@ struct C {
     lunits: u8[][],
     lnext: u64[],
     rnext: u64[],
+    // A function's labels are its own: `.L<lpart>_<f>_<n>`, where `f` is the function's ordinal in
+    // its unit (`fnext` counts them per unit) and `n` restarts at 1 with each function - so the text
+    // of a body does not depend on how many labels the bodies before it minted, and an edit to one
+    // body leaves every other body's text alone (docs/design/incremental-compilation.md). `fscope` is
+    // the ordinal of the function being emitted, or 0 outside any: there the unit's own counters
+    // above mint `.L<lpart>_<n>`, as for the helpers and tables a unit emits around its bodies.
+    fscope: u64,
+    fnext: u64[],
     // Where the markers ended up in the optimized stream, and the module each names.
     marks: u64[],
     part_names: u8[][],
@@ -1139,6 +1147,7 @@ fn part<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
         c.lunits.push(name.copy());
         c.lnext.push(1);
         c.rnext.push(0);
+        c.fnext.push(0);
     }
     c.lunit = k + 1;
     c.label = c.lnext[k];
@@ -3059,19 +3068,79 @@ fn label<a>(c: (&a mut C)) -> u64 {
     n := c.label;
     exchange(&mut c.label, n + 1);
     k := c.lunit;
-    if (k != 0) & (k <= c.lnext.len()) {
+    // Inside a function the numbers are the function's; the unit's counter does not move.
+    if (c.fscope == 0) & (k != 0) & (k <= c.lnext.len()) {
         c.lnext[k - 1] = n + 1;
     }
     return n;
 }
-fn lname<a>(c: (&a mut C), n: u64) -> unit {
-    // A label is `.L<unit>_<n>`: the unit's namespace, then the unit's own counter. Copies, because
-    // `o` borrows `c` mutably and the prefix is a field of it.
+// The next `.Lrfp`/`.Lrfr` number: the function's inside one, the unit's outside.
+fn ref_number<a>(c: (&a mut C)) -> u64 {
+    n := c.ref_next;
+    exchange(&mut c.ref_next, n + 1);
+    k := c.lunit;
+    if (c.fscope == 0) & (k != 0) & (k <= c.rnext.len()) {
+        c.rnext[k - 1] = n + 1;
+    }
+    return n;
+}
+// The ordinal the next function of the current unit takes.
+fn scope_next<a>(c: (&a C)) -> u64 {
+    k := c.lunit;
+    if (k != 0) & (k <= c.fnext.len()) {
+        return c.fnext[k - 1] + 1;
+    }
+    return 1;
+}
+// A function begins in the current unit: it takes the unit's next ordinal and numbers its labels
+// and refinement strings from the start. A validating replay writes text that is thrown away, so it
+// borrows the ordinal without spending it.
+fn scope_begin<a>(c: (&a mut C)) -> unit {
+    f := scope_next(&c);
+    k := c.lunit;
+    if (c.validating == 0) & (k != 0) & (k <= c.fnext.len()) {
+        c.fnext[k - 1] = f;
+    }
+    exchange(&mut c.fscope, f);
+    exchange(&mut c.label, 1);
+    exchange(&mut c.ref_next, 0);
+    return ();
+}
+// The function ends: the unit's own counters are current again.
+fn scope_end<a>(c: (&a mut C)) -> unit {
+    exchange(&mut c.fscope, 0);
+    k := c.lunit;
+    if (k != 0) & (k <= c.lnext.len()) {
+        exchange(&mut c.label, c.lnext[k - 1]);
+        exchange(&mut c.ref_next, c.rnext[k - 1]);
+    }
+    return ();
+}
+// A discarded attempt gives its ordinal back, so the retry takes the same one.
+fn scope_undo<a>(c: (&a mut C)) -> unit {
+    k := c.lunit;
+    if (c.fscope != 0) & (c.validating == 0) & (k != 0) & (k <= c.fnext.len()) {
+        c.fnext[k - 1] = c.fnext[k - 1] - 1;
+    }
+    scope_end(&mut c);
+    return ();
+}
+// `<unit prefix>_<n>` outside a function, `<unit prefix>_<f>_<n>` inside one: what follows `.L`,
+// `.F`, `.Lrfp` and `.Lrfr`. Copies, because `o` borrows `c` mutably and the prefix is a field of it.
+fn scoped_number<a>(c: (&a mut C), n: u64) -> unit {
     prefix := c.lpart.copy();
-    o(&mut c, view(".L"));
     o(&mut c, view(prefix));
     c.out.push(95);
+    if c.fscope != 0 {
+        on(&mut c, c.fscope);
+        c.out.push(95);
+    }
     on(&mut c, n);
+    return ();
+}
+fn lname<a>(c: (&a mut C), n: u64) -> unit {
+    o(&mut c, view(".L"));
+    scoped_number(&mut c, n);
     return ();
 }
 // The frame constant of a function: `.F<unit prefix>_<n>`, `.set` at its end. It is named in the
@@ -3079,11 +3148,8 @@ fn lname<a>(c: (&a mut C), n: u64) -> unit {
 // shared `.F` name would let one function's frame size decide another function's displacements,
 // since `.set` is one symbol per file (B1 stage 5).
 fn fname<a>(c: (&a mut C), n: u64) -> unit {
-    prefix := c.lpart.copy();
     o(&mut c, view(".F"));
-    o(&mut c, view(prefix));
-    c.out.push(95);
-    on(&mut c, n);
+    scoped_number(&mut c, n);
     return ();
 }
 fn mark<a>(c: (&a mut C), n: u64) -> unit {
@@ -7091,12 +7157,7 @@ fn ref_check<a, b, d, e>(c: (&a mut C), pred: Pred, names: (&b u8[][]), slots: (
     if (proved != 0) & (c.verify_facts == 0) {
         return ();
     }
-    n := c.ref_next;
-    exchange(&mut c.ref_next, n + 1);
-    k := c.lunit;
-    if (k != 0) & (k <= c.rnext.len()) {
-        c.rnext[k - 1] = n + 1;
-    }
+    n := ref_number(&mut c);
     v := pred_value(&mut c, Pred { file: pred.file, lo: pred.lo, hi: pred.hi }, &names, &slots, &tys);
     if c.raw == 0 {
         require_type(&mut c, v.ty, 0);
@@ -7111,10 +7172,16 @@ fn ref_check<a, b, d, e>(c: (&a mut C), pred: Pred, names: (&b u8[][]), slots: (
     mut pred_label = copy_bytes(view(".Lrfp"));
     push_bytes(&mut pred_label, view(c.lpart));
     pred_label.push(95);
-    decimal(&mut pred_label, n);
     mut req_label = copy_bytes(view(".Lrfr"));
     push_bytes(&mut req_label, view(c.lpart));
     req_label.push(95);
+    if c.fscope != 0 {
+        decimal(&mut pred_label, c.fscope);
+        pred_label.push(95);
+        decimal(&mut req_label, c.fscope);
+        req_label.push(95);
+    }
+    decimal(&mut pred_label, n);
     decimal(&mut req_label, n);
     ref_data(&mut c, view(pred_label), view(text));
     ref_data(&mut c, view(req_label), view(req));
@@ -14855,10 +14922,8 @@ fn fn_key<a, b, d>(c: (&a mut C), unit: &b [u8], symbol: &d [u8], from: u64, to:
     push_bytes(&mut key, view(decimal_bytes(place.line)));
     key.push(32);
     push_bytes(&mut key, view(decimal_bytes(place.col)));
-    push_bytes(&mut key, view("\nlabel "));
-    push_bytes(&mut key, view(decimal_bytes(c.label)));
-    push_bytes(&mut key, view("\nrefs "));
-    push_bytes(&mut key, view(decimal_bytes(c.ref_next)));
+    push_bytes(&mut key, view("\nordinal "));
+    push_bytes(&mut key, view(decimal_bytes(scope_next(&c))));
     push_bytes(&mut key, view("\ndecls "));
     push_bytes(&mut key, view(decimal_bytes(c.decls.len())));
     push_bytes(&mut key, view("\nraw "));
@@ -15570,8 +15635,6 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // of this function) only when its emission added nothing outside its own bytes.
     mut fn_key_text = u8[];
     mut fn_marks_at = u64[];
-    mut fn_label_at = c.label;
-    mut fn_refs_at = c.ref_next;
     mut fn_candidate = 0;
     if fn_open(&mut c, view(unit)) {
         // The symbol the label will spell: `body_label` is the one spelling both `func_directive`
@@ -15588,12 +15651,10 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                     for i in hit.text.len() {
                         c.out.push(hit.text[i]);
                     }
-                    c.label = c.label + hit.labels;
-                    c.ref_next = c.ref_next + hit.refs;
+                    // The replayed text spells the ordinal the key named: it is spent.
                     k := c.lunit;
-                    if (k != 0) & (k <= c.lnext.len()) {
-                        c.lnext[k - 1] = c.label;
-                        c.rnext[k - 1] = c.ref_next;
+                    if (k != 0) & (k <= c.fnext.len()) {
+                        c.fnext[k - 1] = c.fnext[k - 1] + 1;
                     }
                     fn_facts_restore(&mut c, view(hit.facts));
                     exchange(&mut c.hints, u64[]);
@@ -15608,6 +15669,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         }
     }
     part(&mut c, view(unit));
+    scope_begin(&mut c);
     mut body_symbol = u8[];
     push_bytes(&mut body_symbol, view(export_symbol));
     if (c.target == 3) & (export == 2) {
@@ -15821,7 +15883,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     }
     // A literal binding learned its type from a later use: discard this attempt and recompile.
     if c.retry != 0 {
-
+        scope_undo(&mut c);
         exchange(&mut c.part, part_mark);
         exchange(&mut c.lpart, part_lpart);
         exchange(&mut c.label, part_label);
@@ -15867,6 +15929,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     ref_entry(&mut c, view(m), view(name), view(body_symbol), export, body_lbl, view(prologue));
     fx_end(&mut c);
     exchange(&mut c.hints, u64[]);
+    scope_end(&mut c);
     // ---- file this body as a unit, if its emission stayed inside its own bytes ----------------
     //
     // The marks say what the body added to the *run*: a closure body, a specialisation, a drop
@@ -15886,8 +15949,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             rec := fncache::Unit {
                 key: fn_key_text,
                 text: text,
-                labels: c.label - fn_label_at,
-                refs: c.ref_next - fn_refs_at,
+                labels: 0,
+                refs: 0,
                 facts: fn_facts_encode(&c, fact_mark)
             };
             fncache::save(view(c.fn_dir), view(filed), &rec);
@@ -29798,6 +29861,7 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         unit := c.closures[i].unit.copy();
         weak := c.closures[i].weak;
         part(&mut c, view(unit));
+        scope_begin(&mut c);
         // A closure of a specialisation is weak like the specialisation: func_directive states the
         // binding once, so a per-module object never sees `.globl` turn `.weak`.
         mut mark = 0;
@@ -29859,6 +29923,7 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         c.out.push(44);
         on(&mut c, (c.next + 1) / 2 * 16);
         c.out.push(10);
+        scope_end(&mut c);
         exchange(&mut c.closure_env, 0);
         i += 1;
     }
@@ -43504,6 +43569,8 @@ pub fn main() -> u64 {
         lunits: u8[][],
         lnext: u64[],
         rnext: u64[],
+        fscope: 0,
+        fnext: u64[],
         marks: u64[],
         part_names: u8[][],
         module: u8[],
