@@ -29,6 +29,15 @@ for (at, c) in pairs { ... }        // error: expected a name here, found `(`
 So `char_indices()` and every `zip`/`enumerate` chain ends in `pair.0` / `pair.1`, which is exactly
 the noise the adapters exist to remove.
 
+**Done** (`0922ecd`): the header reads `( ident, .. )` in front of `in`, and the loop variable is
+opened the way `(at, c) := t` opens a tuple - `field_type`, `rec_load`, `own`, `bind`, then the
+element's record is freed - so `for (at, c) in s.char_indices()` and
+`for (i, x) in iter::enumerate(it)` name their halves, and the iterator protocol carries the pattern
+through `Some(tuple)` as well. `_` skips a position (what it held is dropped with the iteration), an
+owned field such as a `u8[]` moves out, the arity is checked by name (`the element is a 3-tuple and
+the pattern names 2`), and a non-tuple element is refused naming its type. The comma form
+`for k, v in &m` and the counted forms are unchanged (`for-tuple-*` cases).
+
 ### 1.3 Missing collection methods (measured, all on `u64[]`)
 ```
 u64[] has no method `iter`        v.iter()      <- blocks every adapter chain
