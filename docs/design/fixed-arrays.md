@@ -256,8 +256,10 @@ frame-limit and 64 KiB-task cases; every case on three targets and LLVM.
 - *Stack.* `frame_limit` sets `probes` for a frame over a page and refuses one over 1 MiB;
   `optimize::probe_frames` writes the page walk before the frame's `subq` from the final `.set`
   sizes, on the optimised, debug and LLVM-remainder outputs; lifted functions carry
-  `"probe-stack"="inline-asm"`. Windows (targets 3, 4) is not probed yet: its prologue is parsed
-  for unwind data, so the probe must go after the frame line there.
+  `"probe-stack"="inline-asm"`. Windows (targets 3, 4) describes its prologue to the unwinder,
+  so there the probe follows the frame line and touches the pages from the top down with `%rax`,
+  `%r10`, `%r11` (Windows grows a stack only through its guard page - `__chkstk`'s job); the windows
+  leg runs a 64 KiB frame on the main thread and in a task (fiber) under wine.
 - *Refused in A1* (A2/A3): by-value parameters and results, struct fields, vector elements, type
   arguments, closure captures, non-numeric elements. No slice conversion yet, so no view record is
   allocated anywhere by arrays.

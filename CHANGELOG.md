@@ -13,7 +13,8 @@
 - **Stack probes.** A function whose frame is larger than a page touches it a page at a time from
   the top before allocating it (x86-64, AArch64 and RISC-V; `probe-stack` on LLVM), so a large frame
   can no longer step over a stack's guard page: running out of stack is reported. A frame larger
-  than the 1 MiB task stack is a compile error. Windows is not probed yet.
+  than the 1 MiB task stack is a compile error. On Windows the probe follows the frame line the
+  unwinder describes and touches the frame from the top down, as `__chkstk` does.
 
 - **A failure allocates nothing, on every route.** A failed check inside a parallel job used to build
   its failure record and texts on the heap where it failed, so every `@no_alloc` function that

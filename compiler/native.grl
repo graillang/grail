@@ -48570,10 +48570,10 @@ pub fn main() -> u64 {
     path := host::arg(1 + offset);
     target := c.target;
     // Stack probes for frames over a page. The LLVM backend probes the functions it lifts itself
-    // (`probe-stack`); the native remainder it hands back is probed below. Windows lays out its
-    // prologue for the unwinder and is not probed yet.
-    if (c.probes != 0) & (c.backend == 0) & (target != 3) & (target != 4) {
-        out = optimize::probe_frames(view(out));
+    // (`probe-stack`); the native remainder it hands back is probed below. Windows probes after the
+    // frame line, which its unwind description ends with.
+    if (c.probes != 0) & (c.backend == 0) {
+        out = optimize::probe_frames(view(out), u64((target == 3) || (target == 4)));
     }
     if (target == 0) || (target == 3) {
         if target == 3 {
@@ -48624,7 +48624,7 @@ pub fn main() -> u64 {
             }
             mut native = lowered.native;
             if c.probes != 0 {
-                native = optimize::probe_frames(view(native));
+                native = optimize::probe_frames(view(native), 0);
             }
             return write_image(&mut c, view(path), view(native));
         }
@@ -48646,8 +48646,8 @@ pub fn main() -> u64 {
             return written;
         }
         mut rest = lowered.native;
-        if (c.probes != 0) & (target != 4) {
-            rest = optimize::probe_frames(view(rest));
+        if c.probes != 0 {
+            rest = optimize::probe_frames(view(rest), u64(target == 4));
         }
         mut image = machine::lower(view(rest), target, c.plat);
         push_bytes(&mut image, view(lowered.thunks));
