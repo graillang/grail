@@ -1,5 +1,10 @@
 ## Unreleased
 
+- A function taking an `extern "C"` record `byval` no longer breaks an interface or the build store:
+  the interface writer took the record's type for its declaration (an index out of bounds while
+  spelling it), and the reader rebuilt the marker over a declaration where the parser puts the
+  record's type.
+
 - **A module's function bodies are compiled in parallel.** After the declarations, forked copies of
   the compiler compile slices of the bodies into units and the compile applies them in source
   order, so the output is byte-identical at any worker count (`GRAIL_JOBS=1` keeps one process). The

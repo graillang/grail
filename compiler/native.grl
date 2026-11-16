@@ -40041,6 +40041,16 @@ fn iface_w_ref<a>(c: (&a mut C), out: (&a mut u8[]), decl: u64) -> unit {
     return ();
 }
 fn iface_w_iface_ref<a>(c: (&a mut C), out: (&a mut u8[]), id: u64) -> unit {
+    // A type whose interface slot does not name an interface of this run (an `extern` record's proof
+    // can carry one) has no spelling: a key or surface that asks gets "not spellable", which makes
+    // the run file no units, rather than an index out of bounds.
+    if (id == 0) || (c.interfaces.len() < id) {
+        if c.spell_lenient != 0 {
+            exchange(&mut c.spell_failed, 1);
+            return ();
+        }
+        iface_refuse(view("<interface>"), view("a type names an interface this run does not have"));
+    }
     item := &c.interfaces[id - 1];
     iface_ws(&mut out, view(item.module));
     iface_ws(&mut out, view(item.name));
@@ -40339,9 +40349,15 @@ fn iface_w_type<a>(c: (&a mut C), out: (&a mut u8[]), deps: (&a mut u64[]), ty: 
         deps.push(1);
         deps.push(arg);
     } else if (k == 23) || (k == 28) {
-        iface_w_ref(&mut c, &mut body, arg);
+        // A handle's argument is its declaration; a `byval R`'s is the record's type
+        // (ffi_byval_parameter), whose declaration is what the record names.
+        mut decl = arg;
+        if k == 28 {
+            decl = ty_arg(&mut c, arg);
+        }
+        iface_w_ref(&mut c, &mut body, decl);
         deps.push(1);
-        deps.push(arg);
+        deps.push(decl);
     } else if k == 9 {
         // An opaque type parameter: its bound bits are its mode and its interface proofs its slots,
         // so both travel; the argument is its index.
@@ -40696,7 +40712,13 @@ fn iface_r_type<a>(p: (&a mut IR), c: (&a mut C)) -> u64 {
             p.rtext.push(41);
         } else if p.phase == 2 {
             decl := iface_find_decl(&mut c, &mut p, view(module), view(name));
-            id = iface_intern_args(&mut p, &mut c, tag, decl, mode, rs, u64[]);
+            if tag == 28 {
+                // As the parser builds it: the marker over the record's own type.
+                record := iface_intern_args(&mut p, &mut c, 8, decl, 0, u64[], u64[]);
+                id = iface_intern_args(&mut p, &mut c, tag, record, mode, rs, u64[]);
+            } else {
+                id = iface_intern_args(&mut p, &mut c, tag, decl, mode, rs, u64[]);
+            }
         }
     } else if tag == 9 {
         index := iface_rv(&mut p);
