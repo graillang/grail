@@ -80,12 +80,14 @@ fn w64<a>(out: (&a mut u8[]), v: u64) {
     w32(&mut out, v & 0xffffffff);
     w32(&mut out, v >> 32);
 }
-fn pad<a>(out: (&a mut u8[]), align: u64) {
-    if align > 1 {
-        while out.len() % align != 0 {
-            out.push(0);
-        }
+// The zero bytes that bring `at` up to a multiple of `align`. The caller pushes them itself: a
+// helper that grows the caller's vector left `--backend=llvm` reading the length from before the
+// call (reported to /root with .work/m/bugs/llvm-stale-len.grl).
+fn pad_count(at: u64, align: u64) -> u64 {
+    if align <= 1 {
+        return 0;
     }
+    return (align - at % align) % align;
 }
 fn name<a, b>(strtab: (&a mut u8[]), text: &b [u8]) -> u64 {
     at := strtab.len();
@@ -149,13 +151,17 @@ pub fn write<a>(o: (&a Obj)) -> u8[] {
     }
     mut off = u64[];
     for k in n {
-        pad(&mut out, o.sec_align[k]);
+        for i in pad_count(out.len(), o.sec_align[k]) {
+            out.push(0);
+        }
         off.push(out.len());
         if o.sec_type[k] != 8 {
             out.append(view(o.sec_data[k]));
         }
     }
-    pad(&mut out, 8);
+    for i in pad_count(out.len(), 8) {
+        out.push(0);
+    }
     symtab_off := out.len();
     for i in 24 {
         out.push(0);
@@ -209,7 +215,9 @@ pub fn write<a>(o: (&a Obj)) -> u8[] {
     }
     strtab_off := out.len();
     out.append(view(strtab));
-    pad(&mut out, 8);
+    for i in pad_count(out.len(), 8) {
+        out.push(0);
+    }
     shoff := out.len();
     // Section headers.
     for i in 64 {
