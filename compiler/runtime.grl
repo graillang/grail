@@ -428,6 +428,8 @@ fn rt_fail_body(kind: u64, a: u64, b: u64, buf: u64, n: u64) -> u64 {
         at = rt_fail_num(buf, at, a);
         at = rt_fail_put(buf, at, " does not fit in ");
         at = rt_fail_type(buf, at, b);
+    } else if kind == 16 {
+        at = rt_fail_put(buf, at, "a parallel split needs a grain of at least one element");
     } else {
         at = rt_fail_put(buf, at, "the program aborted");
     }
@@ -2826,7 +2828,7 @@ fn rt_thread_join(handle: u64) -> u64 {
 }
 // ---- jobs: run-to-completion work on the scheduler's own workers -----------------------------
 // There is one set of worker threads (rt_sched). A job is a record, not a thread and not a stack:
-// `parallel_map`, `parallel_for_chunks`, `parallel_with` (pool::join) and a `Job<R>` handle all
+// `parallel_map`, `parallel_split`, `parallel_with` (pool::join) and a `Job<R>` handle all
 // fork records that any worker may run, and the code is with the scheduler below ("jobs on the
 // scheduler"). docs/design/concurrency-model.md, stage 1.
 //
@@ -2982,9 +2984,10 @@ fn rt_parallel_map(items: u64, context: u64, f: u64, env: u64) -> u64 {
         rt_drop_seq(items);
         return out;
     }
-    // A few leaves per worker keeps every worker busy and lets stealing even out uneven items.
-    sched := rt_jobs_sched();
-    mut leaves = raw_load(sched + 32) * 4;
+    // At most 256 leaves, a function of n alone: the same items land in the same leaves on any
+    // machine, so a reduction over the results is the same on 4 cores and on 64.
+    rt_jobs_sched();
+    mut leaves = 256;
     if n < leaves {
         leaves = n;
     }
@@ -3046,21 +3049,22 @@ fn rt_job_chunk_leaf(d: u64, k: u64) -> u64 {
     }
     return stop - start;
 }
-// Split an exclusive slice into `chunks` disjoint exclusive slices and run one job per chunk. The
-// split is constructed, never checked: chunk k is a function of n alone, so the regions cannot
-// overlap and their lengths sum to n - the invariant rt_parallel_map asserts, asserted here too.
+// Split an exclusive slice into pieces of `grain` elements (the last may be shorter) and run one leaf
+// per piece. The split is constructed, never checked: piece k is [k*grain, min(n, (k+1)*grain)), a
+// function of n and grain alone - never of how many workers there are - so the regions cannot overlap
+// and their lengths sum to n, the invariant asserted below. A zero grain is a caller's error (the
+// library states `grain > 0`; the builtin checks it).
 // The caller holds the loan on the data until this returns, so no job can outlive the slice and no
 // other code in the frame can address it while the jobs run.
-fn rt_parallel_for_chunks(s: u64, chunks: u64, f: u64, env: u64, width: u64) -> u64 {
+fn rt_parallel_split(s: u64, grain: u64, f: u64, env: u64, width: u64) -> u64 {
     n := rt_len(s);
     if n == 0 {
         return 0;
     }
-    mut count = chunks;
-    if count == 0 {
-        count = 1;
+    if grain == 0 {
+        rt_fail(16, 0, 0);
     }
-    size := (n + count - 1) / count;
+    size := grain;
     leaves := (n + size - 1) / size;
     rt_jobs_sched();
     d := rt_job_new();

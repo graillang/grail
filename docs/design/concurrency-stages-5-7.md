@@ -396,6 +396,32 @@ call, or a call after anything started it, returns an error value; it does not a
 4. The class lives on the forking stack (`with_class`) rather than being an argument of every
    call. **Recommend**; `pool::scope(class, ...)` from the model note becomes unnecessary.
 
+## Compiler bug found while building stage 5
+
+A function with an owned vector parameter and a refined parameter corrupts something on return:
+the next allocation aborts with status 134 and no message. It is independent of parallelism and of
+generics, and it reproduces with the compiler of c0ae8ba (before stage 5):
+
+```grail
+fn take(data: u64[], k: u64 where k > 0) -> u64 {
+    mut source = data;
+    mut n = 0;
+    while let Some(x) = source.pop() { n += 1; }
+    return n + k;
+}
+fn main() {
+    mut v = u64[];
+    for i in 10 { v.push(i); }
+    println(take(v, 4));     // prints 14
+    mut w = u64[];
+    for i in 3 { w.push(i); }
+    println(w.len());        // never printed: exit 134
+}
+```
+
+Without `where k > 0` it prints 14 and 3. Until it is fixed, `pool::split` checks its grain with an
+`assert` instead of the refinement its siblings carry.
+
 ## Follow-up (recorded, not scheduled): a vDSO clock
 
 `host::now_us`, `host::now_ms` and every runtime time read are `clock_gettime` system calls

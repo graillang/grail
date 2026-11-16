@@ -83,8 +83,9 @@ only by its forker, after it has seen the job done.
   which is what its forker is waiting for.
 
 **Loops split by halving.** A parallel call forks the upper half of its leaves as one job and
-descends into the lower half, joining on the way back; the leaf boundaries are a function of the
-element count and the requested chunks, never of who ran what.
+descends into the lower half, joining on the way back. The leaves are a function of the element
+count and the grain (`parallel_split`), or of the count alone (`parallel_map`: at most 256), never
+of the worker count or of who ran what.
 
 **Joining.** A forker that reaches its join claims its job by pointer if it is still pending and
 runs it. If somebody else has it, a waiter on a worker *leapfrogs*: it takes only work forked by

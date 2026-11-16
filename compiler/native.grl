@@ -24570,7 +24570,7 @@ fn builtin_id<a>(n: &a [u8]) -> u64 {
     if same(view(n), view("parallel_map")) {
         return 32;
     }
-    if same(view(n), view("parallel_for_chunks")) {
+    if same(view(n), view("parallel_split")) {
         return 43;
     }
     if same(view(n), view("parallel_spawn")) {
@@ -27040,7 +27040,7 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
         return parallel_map_builtin(&mut c, a);
     }
     if id == 43 {
-        return parallel_for_chunks_builtin(&mut c, a);
+        return parallel_split_builtin(&mut c, a);
     }
     if id == 44 {
         return parallel_spawn_builtin(&mut c, a);
@@ -27368,7 +27368,7 @@ fn parallel_map_builtin<a>(c: (&a mut C), items: Val) -> Val {
     close_loans(&mut c);
     return own(&mut c, slot, ty);
 }
-// parallel_for_chunks(&mut [T], chunks, f): the exclusive-slice shape of the pool, and the one
+// parallel_split(&mut [T], chunks, f): the exclusive-slice shape of the pool, and the one
 // Abundance's geometry work wants. The caller's slice is split by the runtime into `chunks`
 // contiguous, disjoint regions and each job receives `&mut [T]` over its own; the descriptors address
 // the caller's elements, so no element is copied. Distinct from the owned-chunk split in lib/pool.grl,
@@ -27384,7 +27384,7 @@ fn parallel_map_builtin<a>(c: (&a mut C), items: Val) -> Val {
 // read methods callable through it, so the element must be a type that may be used, and destroyed,
 // on another thread. Default-deny means a `handle` element is refused by name, exactly as `&[File]`
 // is refused as a shared parallel_map item.
-fn parallel_for_chunks_builtin<a>(c: (&a mut C), data: Val) -> Val {
+fn parallel_split_builtin<a>(c: (&a mut C), data: Val) -> Val {
     expect(&mut c, view(","));
     chunks := expr(&mut c, 0);
     expect(&mut c, view(","));
@@ -27395,21 +27395,21 @@ fn parallel_for_chunks_builtin<a>(c: (&a mut C), data: Val) -> Val {
     k := ty_kind(&mut c, slice);
     if c.raw == 0 {
         if (k != 27) & (k != 5) {
-            fail(&mut c, view("parallel_for_chunks requires an exclusive slice: write &mut data[a: b]"));
+            fail(&mut c, view("parallel_split requires an exclusive slice: write &mut data[a: b]"));
         }
         if ty_mode(&mut c, slice) == 0 {
             fail(
                 &mut c,
-                view("parallel_for_chunks writes through its chunks, so the slice must be exclusive (&mut [T]); a shared &[T] cannot be handed out as &mut [T]")
+                view("parallel_split writes through its chunks, so the slice must be exclusive (&mut [T]); a shared &[T] cannot be handed out as &mut [T]")
             );
         }
     }
     mut width = imm(&mut c, 8);
     if k == 27 {
         elem := ty_arg(&mut c, slice);
-        require_capability_named(&mut c, elem, 0, view("parallel_for_chunks element"));
+        require_capability_named(&mut c, elem, 0, view("parallel_split element"));
         if contains_task(&mut c, elem, 0) {
-            fail(&mut c, view("parallel_for_chunks cannot hand Task or job handles to workers"));
+            fail(&mut c, view("parallel_split cannot hand Task or job handles to workers"));
         }
         if narrow_code(&mut c, elem) != 0 {
             width = imm(&mut c, 4);
@@ -27423,16 +27423,16 @@ fn parallel_for_chunks_builtin<a>(c: (&a mut C), data: Val) -> Val {
     fty := function.ty;
     closure := ty_kind(&mut c, fty) == 20;
     if (ty_kind(&mut c, fty) != 12) & !closure {
-        fail(&mut c, view("parallel_for_chunks requires a callable"));
+        fail(&mut c, view("parallel_split requires a callable"));
     }
     signature := type_args(&mut c, fty);
     if signature.len() != 1 {
-        fail(&mut c, view("parallel_for_chunks callback takes (&mut [T])"));
+        fail(&mut c, view("parallel_split callback takes (&mut [T])"));
     }
     require_type(&mut c, slice, signature[0]);
     result := ty_arg(&mut c, fty);
     if ty_kind(&mut c, result) != 2 {
-        fail(&mut c, view("parallel_for_chunks callback returns unit: write the elements"));
+        fail(&mut c, view("parallel_split callback returns unit: write the elements"));
     }
     // Every worker calls the same closure object, so its captures are shared, not moved.
     require_parallel_closure(&mut c, fty, 1, view("closure capture"));
@@ -27455,7 +27455,7 @@ fn parallel_for_chunks_builtin<a>(c: (&a mut C), data: Val) -> Val {
     mut pargs = three(data.t, chunks.t, target);
     pargs.push(env);
     pargs.push(width);
-    slot := invoke(&mut c, view("rt_parallel_for_chunks"), pargs);
+    slot := invoke(&mut c, view("rt_parallel_split"), pargs);
     release_temporary(&mut c, data.t);
     release_temporary(&mut c, input);
     close_loans(&mut c);

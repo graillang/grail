@@ -5373,7 +5373,7 @@
   },
   {
     "name": "pool-chunks-owned",
-    "note": "A CPU-bound job set: 400k elements summed in 8 owned chunks through pool::for_chunks, asserted equal to the sequential answer. The chunk split is one owned vector per job, so no reference crosses a job boundary.",
+    "note": "A CPU-bound job set: 400k elements summed in 8 owned chunks through pool::split, asserted equal to the sequential answer. The chunk split is one owned vector per job, so no reference crosses a job boundary.",
     "files": [
       "tests/pool/chunks.grl"
     ],
@@ -5749,10 +5749,10 @@
     "note": "C would write the array into storage dropped at the end of the statement"
   },
   {
-    "name": "pool-chunks-mut-split",
-    "note": "In-place chunking over an exclusive slice (parallel_for_chunks / pool::chunks_mut): uneven chunks (10 elements in 3 chunks is 4,4,2), one chunk, zero chunks, more chunks than elements, more chunks than workers (1000 in 64), a sub-range that leaves its neighbours alone, an empty slice that runs no job, nested chunking inside a chunk callback, narrow (f32/u32) elements at their 4-byte stride, a byte buffer through a &mut [u8] view, and the library wrapper. Every check compares CONTENT: a chunk that ran twice doubles its elements, one that never ran leaves them, and one that wrote outside its region would fault or fail the borrow checker.",
+    "name": "pool-split-mut",
+    "note": "In-place splitting of an exclusive slice by grain (parallel_split / pool::split_mut): uneven pieces (10 elements in pieces of 4 is 4,4,2), one piece, a grain larger than the slice, a grain of one, more pieces than workers (1000 in pieces of 16), a sub-range that leaves its neighbours alone, an empty slice that runs no job, nested chunking inside a chunk callback, narrow (f32/u32) elements at their 4-byte stride, a byte buffer through a &mut [u8] view, and the library wrapper. Every check compares CONTENT: a chunk that ran twice doubles its elements, one that never ran leaves them, and one that wrote outside its region would fault or fail the borrow checker.",
     "files": [
-      "tests/pool/chunks_mut.grl"
+      "tests/pool/split_mut.grl"
     ],
     "modules": [
       "lib/pool.grl",
@@ -5761,10 +5761,10 @@
     "stdout": "ok\n"
   },
   {
-    "name": "pool-chunks-mut-timing",
+    "name": "pool-split-mut-timing",
     "note": "The measured case for stage 2: the same 3M-u64 CPU-bound workload through the owned chunk split and through the in-place split, best of three. Asserts the copy is gone (one owned chunk at least 1.33x slower than one in-place chunk, both single-job, so no core count can explain it) and that parallelism still pays (eight in-place chunks at least 1.5x faster than one, asserted only above four cores). stderr carries the times; stdout is a fixed token.",
     "files": [
-      "tests/pool/chunks_mut_timing.grl"
+      "tests/pool/split_mut_timing.grl"
     ],
     "modules": [
       "lib/pool.grl",
@@ -5790,49 +5790,49 @@
   {
     "name": "pool-reject-chunk-alias-vector",
     "note": "The aliasing case the in-place surface must refuse: a chunk callback that reaches the same vector the call already holds exclusively. The argument is an exclusive loan of the whole vector, so the capture cannot be formed - the refusal happens at the call site, before any job exists.",
-    "source": "fn main() {\n    mut v = u64[1, 2, 3, 4];\n    parallel_for_chunks(&mut v[0: 4], 2, |s: &mut [u64]| -> unit {\n        for i in s.len() { s[i] = v[i]; }\n    });\n}\n",
+    "source": "fn main() {\n    mut v = u64[1, 2, 3, 4];\n    parallel_split(&mut v[0: 4], 2, |s: &mut [u64]| -> unit {\n        for i in s.len() { s[i] = v[i]; }\n    });\n}\n",
     "reject": true,
     "diagnostic": "use of moved, borrowed or partially initialized value"
   },
   {
     "name": "pool-reject-chunk-mutable-capture",
     "note": "A chunk callback may not hold an exclusive slice at all: every worker calls the same closure, so a captured &mut [T] would be written by every worker at once. Refused by name, which is the closest a chunk callback gets to writing outside its own region.",
-    "source": "fn main() {\n    mut other = u64[9, 9, 9];\n    w := &mut other[0: 3];\n    mut v = u64[1, 2, 3, 4];\n    parallel_for_chunks(&mut v[0: 4], 2, |s: &mut [u64]| -> unit {\n        for i in s.len() { s[i] = w[0]; }\n    });\n}\n",
+    "source": "fn main() {\n    mut other = u64[9, 9, 9];\n    w := &mut other[0: 3];\n    mut v = u64[1, 2, 3, 4];\n    parallel_split(&mut v[0: 4], 2, |s: &mut [u64]| -> unit {\n        for i in s.len() { s[i] = w[0]; }\n    });\n}\n",
     "reject": true,
     "diagnostic": "cannot share closure capture `w`: a mutable slice or view cannot be shared"
   },
   {
     "name": "pool-reject-chunk-shared-slice",
     "note": "The in-place surface needs exclusive access, so a shared &[T] is refused rather than handed out as &mut [T].",
-    "source": "fn main() {\n    v := u64[1, 2];\n    parallel_for_chunks(&v[0: 2], 1, |s: &mut [u64]| -> unit { });\n}\n",
+    "source": "fn main() {\n    v := u64[1, 2];\n    parallel_split(&v[0: 2], 1, |s: &mut [u64]| -> unit { });\n}\n",
     "reject": true,
-    "diagnostic": "parallel_for_chunks writes through its chunks, so the slice must be exclusive"
+    "diagnostic": "parallel_split writes through its chunks, so the slice must be exclusive"
   },
   {
     "name": "pool-reject-chunk-handle-element",
     "note": "The element type goes through the same structural walk as a parallel_map item, so a slice of unaudited handles is refused by name before any job exists - exactly as &[File] is refused as a shared item.",
-    "source": "handle H;\nfn main() {\n    mut f: H;\n    mut hs = H[f];\n    parallel_for_chunks(&mut hs[0: 1], 1, |s: &mut [H]| -> unit { });\n}\n",
+    "source": "handle H;\nfn main() {\n    mut f: H;\n    mut hs = H[f];\n    parallel_split(&mut hs[0: 1], 1, |s: &mut [H]| -> unit { });\n}\n",
     "reject": true,
-    "diagnostic": "cannot transfer parallel_for_chunks element: thread-affine (a foreign handle with no audited classification)"
+    "diagnostic": "cannot transfer parallel_split element: thread-affine (a foreign handle with no audited classification)"
   },
   {
     "name": "pool-reject-chunk-handle-capture",
     "note": "The closure environment is classified for chunks exactly as for parallel_map: a handle captured by the callback reaches a thread-affine resource from every worker.",
-    "source": "handle H;\nfn main() {\n    mut f: H;\n    mut v = u64[1, 2];\n    parallel_for_chunks(&mut v[0: 2], 1, |s: &mut [u64]| -> unit { s[0] = 1; println(f == f); });\n}\n",
+    "source": "handle H;\nfn main() {\n    mut f: H;\n    mut v = u64[1, 2];\n    parallel_split(&mut v[0: 2], 1, |s: &mut [u64]| -> unit { s[0] = 1; println(f == f); });\n}\n",
     "reject": true,
     "diagnostic": "cannot share closure capture `f`: f is thread-affine (a foreign handle with no audited classification)"
   },
   {
     "name": "pool-reject-chunk-fnmut-capture",
     "note": "An FnMut closure shared by every worker would race on its own environment, the same refusal parallel_map gives.",
-    "source": "fn main() {\n    mut n = 0;\n    mut v = u64[1, 2];\n    parallel_for_chunks(&mut v[0: 2], 1, |s: &mut [u64]| -> unit { n += 1; });\n}\n",
+    "source": "fn main() {\n    mut n = 0;\n    mut v = u64[1, 2];\n    parallel_split(&mut v[0: 2], 1, |s: &mut [u64]| -> unit { n += 1; });\n}\n",
     "reject": true,
     "diagnostic": "a callback shared by concurrent workers must not write a captured value"
   },
   {
     "name": "pool-chunk-write-outside-aborts",
     "note": "The runtime half of 'a chunk cannot write outside itself': the slice a callback holds has its own length, so an index at or past that length is a bounds abort rather than a write into a sibling chunk. Nothing after the abort runs.",
-    "source": "fn main() {\n    mut v = u64[1, 2, 3, 4];\n    println(\"before\");\n    parallel_for_chunks(&mut v[0: 4], 2, |s: &mut [u64]| -> unit { s[s.len()] = 9; });\n    println(v);\n}\n",
+    "source": "fn main() {\n    mut v = u64[1, 2, 3, 4];\n    println(\"before\");\n    parallel_split(&mut v[0: 4], 2, |s: &mut [u64]| -> unit { s[s.len()] = 9; });\n    println(v);\n}\n",
     "status": 134,
     "stdout": "before\n",
     "targets": [
@@ -8100,7 +8100,7 @@
   {
     "name": "pool-abort-eight-chunks-reports-once",
     "note": "Eight parallel chunks write one past their own slice at once. The abort is reported exactly once and the process exits 134 instead of dying by SIGABRT from a second reporter.",
-    "source": "fn main() {\n    mut v = u64[1, 2, 3, 4, 5, 6, 7, 8];\n    println(\"before\");\n    parallel_for_chunks(&mut v[0: 8], 8, |s: &mut [u64]| -> unit { s[s.len()] = 9; });\n    println(v);\n}\n",
+    "source": "fn main() {\n    mut v = u64[1, 2, 3, 4, 5, 6, 7, 8];\n    println(\"before\");\n    parallel_split(&mut v[0: 8], 1, |s: &mut [u64]| -> unit { s[s.len()] = 9; });\n    println(v);\n}\n",
     "stdout": "before\n",
     "status": 134,
     "stderr": "error: "
@@ -11563,7 +11563,7 @@
   },
   {
     "name": "sched-job-failure-forms-from-a-task",
-    "note": "A failure in parallel_map, pool::for_chunks, pool::join and a three-deep nested join, each called from a task, is contained at try_join and the task finishes. Two drain bugs are pinned: the failing stack waited for a fork it had taken back and was running itself, and it waited for its own forks before publishing a job it had helped with, which a fork of its own was waiting for.",
+    "note": "A failure in parallel_map, pool::split, pool::join and a three-deep nested join, each called from a task, is contained at try_join and the task finishes. Two drain bugs are pinned: the failing stack waited for a fork it had taken back and was running itself, and it waited for its own forks before publishing a job it had helped with, which a fork of its own was waiting for.",
     "files": [
       "tests/sched/job_failure_forms.grl"
     ],
@@ -11571,11 +11571,93 @@
       "lib/pool.grl",
       "lib/core.grl"
     ],
-    "stdout": "parallel_map: contained\nfor_chunks: contained\njoin: contained\nnested join: contained\nparallel_map: contained\nfor_chunks: contained\njoin: contained\nnested join: contained\nparallel_map: contained\nfor_chunks: contained\njoin: contained\nnested join: contained\nparallel_map: contained\nfor_chunks: contained\njoin: contained\nnested join: contained\nparallel_map: contained\nfor_chunks: contained\njoin: contained\nnested join: contained\ndone\n",
+    "stdout": "parallel_map: contained\nsplit: contained\njoin: contained\nnested join: contained\nparallel_map: contained\nsplit: contained\njoin: contained\nnested join: contained\nparallel_map: contained\nsplit: contained\njoin: contained\nnested join: contained\nparallel_map: contained\nsplit: contained\njoin: contained\nnested join: contained\nparallel_map: contained\nsplit: contained\njoin: contained\nnested join: contained\ndone\n",
     "targets": [
       "x86_64",
       "aarch64",
       "riscv64"
+    ]
+  },
+  {
+    "name": "pool-reduce-bit-identical-workers-1",
+    "note": "A float reduction over 1M terms through pool::reduce, and an ordered fold of pool::map results, print the same bits at GRAIL_WORKERS 1, 4 and 24 (three cases, one expected line): the pieces depend on the length and the grain only.",
+    "files": [
+      "tests/pool/reduce_bits.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "env": {
+      "GRAIL_WORKERS": "1"
+    },
+    "stdout": "102032.95195766681 101931.45245580416\n",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "pool-reduce-bit-identical-workers-4",
+    "note": "A float reduction over 1M terms through pool::reduce, and an ordered fold of pool::map results, print the same bits at GRAIL_WORKERS 1, 4 and 24 (three cases, one expected line): the pieces depend on the length and the grain only.",
+    "files": [
+      "tests/pool/reduce_bits.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "env": {
+      "GRAIL_WORKERS": "4"
+    },
+    "stdout": "102032.95195766681 101931.45245580416\n",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "pool-reduce-bit-identical-workers-24",
+    "note": "A float reduction over 1M terms through pool::reduce, and an ordered fold of pool::map results, print the same bits at GRAIL_WORKERS 1, 4 and 24 (three cases, one expected line): the pieces depend on the length and the grain only.",
+    "files": [
+      "tests/pool/reduce_bits.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "env": {
+      "GRAIL_WORKERS": "24"
+    },
+    "stdout": "102032.95195766681 101931.45245580416\n",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "pool-chunks-mut-is-gone",
+    "note": "chunks_mut (a chunk count) was removed when the split became a grain: no alias is left, so a call to it is an unknown function.",
+    "source": "use pool;\nfn main() {\n    mut v = u64[1, 2];\n    pool::chunks_mut(&mut v[0: 2], 1, |s: &mut [u64]| -> unit { });\n}\n",
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "reject": true,
+    "diagnostic": "chunks_mut",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "pool-split-mut-zero-grain-refused",
+    "note": "The grain of pool::split_mut is a `u64 where grain > 0`. A zero written at the call is checked where it is passed (a literal is not refused at compile time today), so the failure names the caller's line and the refinement, before any job runs.",
+    "source": "use pool;\nfn main() {\n    mut v = u64[1, 2];\n    pool::split_mut<u64>(&mut v[0: 2], 0, |s: &mut [u64]| -> unit { });\n}\n",
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "signal": "SIGABRT",
+    "stderr": "refinement violated: grain > 0",
+    "targets": [
+      "x86_64"
     ]
   }
 ]

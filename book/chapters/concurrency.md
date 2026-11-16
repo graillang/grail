@@ -19,23 +19,28 @@ Behind `parallel_map` are the scheduler's worker threads, one per CPU - the same
 tasks - stealing work from each other, so a call pays no thread-creation cost, a nested call uses
 the same workers, and the calling thread runs leaves itself instead of sleeping. For
 `T[]`-shaped work, `lib/pool.grl` wraps it: `pool::map(items, f)` is the per-element form,
-`pool::run(count, f)` gives job `i` to `f(i)`, `pool::for_chunks(data, chunks, f)` consumes a vector
-and hands each job one contiguous owned chunk, and `pool::join(a, b)` forks `a` for any worker to take, runs `b` on the calling thread, and returns
+`pool::run(count, f)` gives job `i` to `f(i)`, `pool::split(data, grain, f)` consumes a vector
+and hands each job one contiguous owned piece of at most `grain` elements, `pool::range(n, grain, f)`
+calls `f(lo, hi)` per piece of `0..n`, `pool::reduce(n, grain, zero, leaf, merge)` folds the pieces'
+results in index order, and `pool::join(a, b)` forks `a` for any worker to take, runs `b` on the calling thread, and returns
 both owned results - if no worker took `a`, the caller runs it too, so a join costs little when
 there is nobody free to help. All of them state the same rule: everything a job's closure touches it owns, and
-results come back in input order whatever order the jobs finish in. See
+results come back in input order whatever order the jobs finish in. And the pieces depend on the
+length and the grain only, never on the number of cores, so a floating-point `reduce` prints the
+same bits on a laptop and on a 64-core server. See
 `docs/design/parallelism.md`.
 
-`parallel_for_chunks(&mut data[a: b], chunks, f)` is the in-place form of the chunked one: the
-compiler splits an exclusive slice into disjoint exclusive chunks and hands each job `&mut [T]` over
-its own elements, so nothing is moved or copied - the same 3M-element pass that costs ~100 ms
-through `for_chunks` costs ~44 ms here, as one job. The split is `size = ceil(n/chunks)`, chunk `k`
-being `[k*size, min(n, k*size+size))`, so disjointness and coverage are arithmetic rather than a
-checked property. The `&mut` slice is the whole vector's loan, so no capture in the callback can
+`parallel_split(&mut data[a: b], grain, f)` is the in-place form of the owned one: the compiler
+splits an exclusive slice into disjoint exclusive pieces of at most `grain` elements and hands each
+job `&mut [T]` over its own elements, so nothing is moved or copied - the same 3M-element pass that
+costs ~100 ms through `pool::split` costs ~44 ms here, as one job. Piece `k` is
+`[k*grain, min(n, (k+1)*grain))`, so disjointness and coverage are arithmetic rather than a checked
+property. The `&mut` slice is the whole vector's loan, so no capture in the callback can
 reach that data, and the slice a callback holds has its own length, so an index past the chunk is a
-bounds check rather than a write into a neighbour. `pool::chunks_mut(data, chunks, f)` wraps it.
+bounds check rather than a write into a neighbour. `pool::split_mut(data, grain, f)` wraps it;
+`grain` is a `u64 where grain > 0`, so a zero grain is refused where it is written.
 
-{{example:pool-chunks-mut}}
+{{example:pool-split-mut}}
 
 `parallel_spawn(f)` returns a `Job<R>` you can wait on later with `parallel_join(job)`, or
 `pool::spawn`/`pool::wait`. A handle may outlive the statement that made it, and even the frame: its
@@ -106,10 +111,10 @@ General `async`/`await` syntax is not provided; the scope and task APIs are the 
 
 Three things, and one of them removed work rather than adding it.
 
-- **In-place chunks.** `parallel_for_chunks(&mut [T], chunks, f)` splits the caller's own slice and
+- **In-place chunks.** `parallel_split(&mut [T], grain, f)` (then a chunk count, now a grain) splits the caller's own slice and
   gives each job an exclusive `&mut [T]` over its own elements, so the job that used to move every
   element into a chunk now writes the elements where they are. Measured on 3M `u64` with one job:
-  about 100 ms through `pool::for_chunks`, about 44 ms in place; with eight chunks on eight workers,
+  about 100 ms through the owned split (`pool::split`), about 44 ms in place; with eight chunks on eight workers,
   about 67 ms against 11 ms. The pass has no copy to pay for, which is where the difference comes
   from - it is not a scheduling improvement.
 - **A job handle.** `parallel_spawn(f) -> Job<R>` and `parallel_join(h) -> R` are spawn-then-wait as

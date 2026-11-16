@@ -1,5 +1,16 @@
 ## Unreleased
 
+- **Parallel splits are by grain, and never depend on the machine.** `pool::split_mut(data, grain, f)`
+  replaces `pool::chunks_mut(data, count, f)`, and `pool::split(data, grain, f)` replaces
+  `pool::for_chunks(data, count, f)`: each job gets a piece of at most `grain` elements. The builtin
+  is `parallel_split(data, grain, f)` (it was `parallel_for_chunks` with a count). The old names are
+  gone, with no alias; every caller in the repository moved. `grain` is `u64 where grain > 0`.
+  `parallel_map` (and so `pool::map` and `pool::run`) splits into at most 256 leaves fixed by the
+  length, where it used to make four per worker. New: `pool::range(n, grain, f)` calls `f(lo, hi)`
+  per piece of `0..n`, and `pool::reduce(n, grain, zero, leaf, merge)` folds the pieces' results
+  in index order. A floating-point reduction therefore prints the same bits with 1, 4 or 24
+  workers (`pool-reduce-bit-identical-workers-*`).
+
 - **One set of worker threads: jobs run on the scheduler.** `parallel_map`,
   `parallel_for_chunks`, `pool::join` and job handles used to run on a pool of threads separate
   from the scheduler that runs tasks, so a program that used both had two threads per CPU (50 on a
