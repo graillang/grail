@@ -758,8 +758,158 @@ function proveUnits(count) {
   return { cold, clean, replay, one, bodyOnly, surface, filed, replayed, big, onlyBig, assembly: assembly.size };
 }
 
+// ---- (j) units that do not depend on the bodies before them -----------------------------------
+// The module here is the shape real code has and `big` does not: records with a string field (so
+// every body names a drop helper), a generic every body instantiates (once at a type they all
+// share, once at a type of its own), loops and branches (labels), and string literals. An edit to
+// one body must cost that body and nothing else, whether it keeps the line count (and changes how
+// many labels the body mints) or adds lines (and moves every later statement's position) - and the
+// assembly must be the text a build with no cache writes.
+const richFunctions = count => {
+  const lines = ['module rich;', '', 'fn same<T>(x: T, n: u64) -> T {\n    return x;\n}\n'];
+  for (let i = 0; i < count; i += 1) {
+    lines.push(`struct Rec${i} {
+    a: u64,
+    b: u64,
+    name: string
+}
+fn mk${i}(a: u64, b: u64) -> Rec${i} {
+    return Rec${i} { a: a, b: b, name: "r${i}" };
+}
+pub fn work${i}(v: &u64[], k: u64) -> u64 {
+    mut total = 0;
+    for i in v.len() {
+        x := v[i];
+        if x % 2 == 0 {
+            total = wrapping_add(total, x * k % 1000);
+        } else {
+            total = wrapping_add(total, x % 7);
+        }
+    }
+    r := same(mk${i}(same(total, 1), k), 2);
+    mut out = r.a % 100000;
+    while out > 1000 {
+        out = out / 3;
+    }
+    return out + r.b + r.name.len();
+}
+`);
+  }
+  return lines.join('\n');
+};
+function richProject(count) {
+  write(3);
+  writeFileSync(join(project, 'src/rich.grl'), richFunctions(count));
+  writeFileSync(
+    join(project, 'src/main.grl'),
+    `use rich;\n\npub fn main() -> u64 {\n    v := u64[1, 2, 3, 4];\n    println(rich::work5(&v, 5) + rich::work9(&v, 9) + rich::work${count - 1}(&v, 3));\n    return 0;\n}\n`,
+  );
+}
+function proveIndependentUnits(count) {
+  const output = join(project, 'target/rich');
+  const richPath = join(project, 'src/rich.grl');
+  rmSync(store, { recursive: true, force: true });
+  richProject(count);
+  const cold = build(['--cache', '-o', output], { measure: true });
+  assert.equal(cold.status, 0, `the cold build of the rich module failed\n${cold.output}`);
+  const bodies = 2 * count;
+  const coldRich = forModule(unitLines(cold.output), 'rich');
+  assert.deepEqual(coldRich, { hits: 0, filed: bodies, kept: 0 }, `every body of the rich module is a unit - drop helpers and specialisations are replayable registrations:\n${cold.output}`);
+  // One edit, then: the cached build's account, its assembly and image, and the same tree built
+  // with no cache to the same output name.
+  const edited = (what, from, to) => {
+    const source = readFileSync(richPath, 'utf8');
+    assert.ok(source.includes(from), `${what}: the text to edit is not in the module`);
+    writeFileSync(richPath, source.replace(from, to));
+    const cached = build(['--cache', '-o', output], { measure: true });
+    assert.equal(cached.status, 0, `${what}: the cached build failed\n${cached.output}`);
+    const rich = forModule(unitLines(cached.output), 'rich');
+    assert.deepEqual(rich, { hits: bodies - 1, filed: 1, kept: 0 }, `${what}: the edited body is emitted and every other body replays:\n${cached.output}`);
+    const answer = run(output);
+    const image = bytes(output);
+    const assembly = moduleAssembly(output);
+    const clean = build(['-o', output], { measure: true });
+    assert.equal(clean.status, 0, `${what}: the uncached build failed\n${clean.output}`);
+    sameAssembly(moduleAssembly(output), assembly, what);
+    assert.deepEqual(bytes(output), image, `${what}: the cached image is not the uncached image`);
+    assert.equal(run(output), answer, `${what}: the answers differ`);
+    return { what, cached, clean, rich };
+  };
+  const cases = [];
+  // The line count stays, the label count does not: one more branch in an early body.
+  cases.push(edited('an edit that keeps the line count', 'pub fn work5(v: &u64[], k: u64) -> u64 {\n    mut total = 0;', 'pub fn work5(v: &u64[], k: u64) -> u64 {\n    mut total = 0; if k > 100 { total = 1; }'));
+  // Three more lines and a loop: every later body starts three lines further down.
+  cases.push(edited('an edit that adds lines', 'pub fn work9(v: &u64[], k: u64) -> u64 {\n    mut total = 0;', 'pub fn work9(v: &u64[], k: u64) -> u64 {\n    mut total = 0;\n    mut extra = k;\n    while extra > 10 {\n        extra = extra / 2;\n    }\n    total = wrapping_add(total, extra);'));
+  // And the lines go away again: the bodies after it move back up.
+  cases.push(edited('an edit that removes lines', '    mut extra = k;\n    while extra > 10 {\n        extra = extra / 2;\n    }\n    total = wrapping_add(total, extra);', '    total = wrapping_add(total, k);'));
+  write(3);
+  return { cold, cases, bodies };
+}
+
+// ---- (k) a replayed body's registrations ------------------------------------------------------
+// `first` and `second` both instantiate `same<u64>`. The specialisation is emitted because a body
+// asked for it, so a body that is replayed has to ask again: when `first` stops asking, `second`
+// - unchanged, replayed - is the only body that names the symbol. A unit that recorded only the
+// registrations it was the first to make hands the linker an undefined symbol here.
+const sharedSource = first => `module shared;
+
+fn same<T>(x: T, n: u64) -> T {
+    return x;
+}
+pub fn zero() -> u64 {
+    return 0;
+}
+pub fn first(x: u64) -> u64 {
+    return ${first};
+}
+pub fn second(x: u64) -> u64 {
+    return same(x, 2);
+}
+`;
+function proveRegistrations() {
+  const output = join(project, 'target/shared');
+  rmSync(store, { recursive: true, force: true });
+  write(3);
+  writeFileSync(join(project, 'src/shared.grl'), sharedSource('same(x, 1)'));
+  writeFileSync(join(project, 'src/main.grl'), 'use shared;\n\npub fn main() -> u64 {\n    println(shared::first(3) + shared::second(4));\n    return 0;\n}\n');
+  const cold = build(['--cache', '-o', output]);
+  assert.equal(cold.status, 0, `the cold build failed\n${cold.output}`);
+  assert.equal(run(output), '7', 'the cold build prints the wrong answer');
+  // `first` no longer names the specialisation; `second` still does.
+  writeFileSync(join(project, 'src/shared.grl'), sharedSource('x | 8'));
+  const after = build(['--cache', '-o', output]);
+  assert.equal(after.status, 0, `a replayed body must register what it names - the build after the first user of a specialisation stopped using it failed:\n${after.output}`);
+  const shared = forModule(unitLines(after.output), 'shared');
+  assert.ok(shared.hits >= 1, `the unchanged bodies must replay:\n${after.output}`);
+  assert.equal(run(output), '15', 'the build after the edit prints the wrong answer');
+  const image = bytes(output);
+  const assembly = moduleAssembly(output);
+  assert.equal(build(['-o', output]).status, 0, 'the uncached build failed');
+  sameAssembly(moduleAssembly(output), assembly, 'a replayed registration');
+  assert.deepEqual(bytes(output), image, 'the build after the edit is not the uncached build');
+  write(3);
+  return { shared };
+}
+
+function reportIndependent(independent, registrations) {
+  const t = value => `${value.toFixed(1)}ms`;
+  console.log(`(j) one body   ${independent.bodies} bodies with drop helpers and specialisations, all units; after each edit one is emitted and the rest replay, byte-identical`);
+  for (const item of independent.cases) {
+    console.log(`               ${t(item.cached.ms).padStart(10)}  ${item.what.padEnd(34)} ${item.rich.hits} replayed, ${item.rich.filed} re-emitted (uncached ${t(item.clean.ms)})`);
+  }
+  console.log(`(k) registered a replayed body asks again for what it names: ${registrations.shared.hits} replayed after the first user stopped`);
+}
+
 // ---- run --------------------------------------------------------------------------------------
 // The timings come first, from an empty store, so "cold" means cold.
+// `--units` runs only the per-function sections (j) and (k), for work on that layer.
+if (flags.includes('--units')) {
+  const registrations = proveRegistrations();
+  const independent = proveIndependentUnits(flags.includes('--big') ? 1000 : 150);
+  reportIndependent(independent, registrations);
+  console.log('per-function units verified');
+  process.exit(0);
+}
 const reuse = proveReuse();
 recordBuild('identity');
 proveStore();
@@ -771,6 +921,8 @@ const pruning = provePruning();
 const modules = proveModules();
 const editCost = proveEditCost(flags.includes('--big') ? 2000 : 400);
 const units = proveUnits(flags.includes('--big') ? 2000 : 400);
+const registrations = proveRegistrations();
+const independent = proveIndependentUnits(flags.includes('--big') ? 1000 : 150);
 const finalStore = proveStore();
 
 const ms = value => `${value.toFixed(1)}ms`;
@@ -802,6 +954,7 @@ for (const item of [
   console.log(`               ${ms(item.built.ms).padStart(10)}  ${item.name.padEnd(34)} ${item.line.hits} replayed, ${item.line.filed} re-emitted, ${item.line.kept} not units`);
 }
 console.log(`               ${ms(units.clean.ms).padStart(10)}  a clean build of the same tree (no cache at all)`);
+reportIndependent(independent, registrations);
 console.log(`(f) pruning    --keep 0 after an edit dropped ${pruning.pruned.records} records and ${pruning.pruned.blobs} blobs; next build ${pruning.again.hits} hit, ${pruning.again.misses} miss`);
 console.log('');
 console.log('build cache verified');

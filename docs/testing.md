@@ -250,6 +250,10 @@ gate is 2–3 hours; run it in a watched job that logs to a file rather than hol
   equivalent Rust program.
 - `abundance-test.mjs`, `borg-test.mjs` — the ports, compared bit-for-bit against their C++ and
   reference outputs.
+- `test-optimiser-jumps.mjs` — the text optimiser follows its jumps: a loop with a branch keeps its
+  state in registers across the back edge, and over the compiler's own sources (`GRAIL_OPT_STATS=1`
+  writes `# grail-jumps <known> <unknown>` before each body) at least 99% of the direct jumps have a
+  target the passes know.
 - `test-facts.mjs` — both typed-IR facts (docs/design/typed-ir.md): F2's `f32` fixtures' exact values
   with and without `--verify-facts` and the round-trip check in the module, F1's header facts on a
   vector read through its own header (the fact table in the module, the slots and call arguments
