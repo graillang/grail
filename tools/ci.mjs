@@ -563,6 +563,9 @@ function lint() {
   check('CI runs the FFI shim test', readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8').includes('tools/test-ffi.mjs'));
   check('module interface test exists', existsSync(join(root, 'tools/interface-test.mjs')));
   check('CI runs the module interface test', readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8').includes('tools/interface-test.mjs'));
+  check('overflow parity test exists', existsSync(join(root, 'tools/overflow-parity-test.mjs')));
+  check('CI runs the overflow parity test', readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8').includes('tools/overflow-parity-test.mjs'));
+  check('the gate runs the overflow parity test', readFileSync(join(root, 'tools/gate.sh'), 'utf8').includes('overflow-parity-test'));
   check('build cache test exists', existsSync(join(root, 'tools/cache-test.mjs')));
   check('CI runs the build cache test', readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8').includes('tools/cache-test.mjs'));
   check('native cases cover an interface-first build', readFileSync(join(root, 'tests/native-cases.json'), 'utf8').includes('"interfaces": true'));
