@@ -1,6 +1,7 @@
 # Module values: `static`
 
-Status: **design, not built.** Branch `gaps12-statics` (from `gaps10-view`). Nothing in the compiler
+Status: **stage 1 (the baked tier) built** on `gaps12-statics-impl` - see "Stage 1 as built" at the
+end; the lazy tier waits for `sync::Once` (`gaps12-sync`). Branch `gaps12-statics` (from `gaps10-view`). Nothing in the compiler
 changes until the decisions below are taken. Line numbers are for this branch's
 `compiler/native.grl` (N), `compiler/runtime.grl` (R) and the probe files in
 `.work/statics-probes/` (not committed; their text is quoted where it matters).
@@ -395,3 +396,47 @@ Run with this branch's compiler (`grail run FILE --no-cache`):
 | 7 | `SEED := clock();` | refused: compile-time code cannot read the clock |
 | 8 | `const NAME: string` read in `@no_alloc` | refused: `rt_string_lit -> rt_lit -> rt_new -> rt_alloc` |
 | 9 | `const N: u64` read in `@no_alloc` | accepted, `8192` |
+
+## Stage 1 as built (2026-11-16)
+
+- **Parse.** `declaration_item` sends `static IDENT` to `static_declaration` (compiler/native.grl).
+  Pass 1 registers `module::NAME` in `c.statics` (`Static`: module, name, declared position, public,
+  type, imported) and refuses `static mut`, a generic list, a missing type and a name a constant or
+  another static already has. Pass 2 parses the declared type, so a read in any module's body (pass
+  3) knows it. Pass 3 checks the type rules (no borrow; shareable through `transfer_capability`;
+  a baked type: integer, `bool`, `string`, vector of integers or bytes), computes the value - the
+  constant tier (`ct_expr`, with a negative literal for a signed type) or `@f(...)` through
+  `run_tier` - and emits it. A plain call is refused as the lazy tier; a float static is refused
+  (use `const`).
+- **Storage.** In the declaring module's part (`part(unit_module(module))`), in `.rodata`
+  (`__DATA,__const` on Mach-O): a scalar is the word at global symbol `s_<module>_<name>`; a string
+  or vector is an object `{data, len, cap}` and its data, each behind a 16-byte block header in state
+  2 (never freed), and the symbol's word points at the object. A table from the run tier arrives in C
+  layout and is re-laid as the runtime lays vectors out (a byte per `u8`, four bytes per 32-bit
+  element, a word otherwise, sign-extended).
+- **Reads.** `static_value`: `leaq SYM(%rip)`; a scalar is then loaded; anything else is a value of
+  type `&T` whose target is an external place (`add_external_capture`, the same model as a borrowed
+  parameter's referent). So `r := X` binds a borrow (not a refusal, as §2 first proposed), `X.push`
+  is "mutation through readonly frame", an owned parameter is a type mismatch (`found &u64[]`), and
+  `X = v` says a static is immutable.
+- **Interfaces.** Tag `IFACE_TAG_STATIC` (19): module, name, public, type, tier (1 = baked; a reader
+  refuses another). No value travels. `grail iface dump` prints `static m::n public=P <type> tier 1`.
+- **Cache.** `fn_surface_now` adds each static's module, name, public bit and type; not its value or
+  initialiser.
+- **Probes.** In a compile-time probe computing static `X`, `X`'s storage is a placeholder and a read
+  of it calls `rt_comptime_cycle`, so `static T: u64 = @f();` with `f` reading `T` is refused as a
+  cycle, the way a module constant's is.
+
+Found while building, not changed here:
+
+- **`@no_alloc` refuses every bounds-checked index** - `fn f(v: &u64[]) -> u64 { return v[3]; }` is
+  refused with `rt_slot -> rt_fail -> rt_site_here -> rt_sites_fill` - because the failure report's
+  site lookup is counted as an allocation. So `@no_alloc` code reads a static table's `len()` but not
+  `TABLE[i]`; that is the effect analysis, not statics.
+- **The run tier cannot bring back a signed vector with a negative element**: the probe prints
+  `u64(v[i])`, which stops on a negative value. Constants share it.
+- **No `'static`.** A function cannot return a borrow of a static (`fn t() -> &u64[]` has no input
+  lifetime to name). A function that wants one takes it as a parameter, or the caller reads the static.
+- **`--jobs` and probes.** A corpus run with `--jobs 8` saw a probe's compiler path go "(deleted)" mid-
+  run; the same cases pass serially. A harness race, not a compiler fault.
+- Not done in stage 1: the prover term for a static (stage 5); records in the baked tier (stage 4).

@@ -1,5 +1,15 @@
 ## Unreleased
 
+- **Module statics, baked tier** (docs/design/module-values.md, stage 1): `static NAME: T = init;`
+  where `init` is a constant expression or `@f(...)` computed while compiling. A static is one
+  read-only object in the declaring module's object: a number or `bool` read is a load, any other
+  read is a borrow (`TABLE[i]`, `TABLE.len()`, a `&u64[]` argument) that never copies or allocates,
+  so `@no_alloc` code may read it - unlike a `const` table or string, which is rebuilt at every read.
+  Types: integers, `bool`, `string`, vectors of integers and bytes. Refused with a reason: `static
+  mut`, a missing type, assignment or mutation, a borrow or a non-shareable type, a generic or
+  function-local static, a plain call (the lazy tier, not built yet), and an `@` initialiser that
+  cannot run at compile time. `pub static` crosses modules through the interface file.
+
 - Fixed: a module binding whose compile-time call was refused (`LOCK := make();` returning a
   `Mutex`) was reported at the end of whichever file the compiler had parsed last - often
   `lib/result.grl:129` - when nothing read it. The diagnostic now points at the binding.
