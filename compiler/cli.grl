@@ -1873,8 +1873,11 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
             }
             name := groups[g].name.copy();
             stem := path_join(view(dir), view(name));
+            // The modules this run reads: what it uses, and theirs. They are finished (that is what
+            // made this one ready), so their interfaces are whole; the run is told to read those
+            // and no others, whatever else is in the directory by now.
+            reads := unit_reads(&groups, &base, g);
             if cache != 0 {
-                reads := unit_reads(&groups, &base, g);
                 keys[g] = unit_key(&mut store, id, view(target), view(name), &groups[g].files, view(ifaces), &reads);
                 if unit_restore(&mut store, view(keys[g]), view(stem), view(ifaces), view(name)) {
                     state[g] = 2;
@@ -1891,6 +1894,15 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
             if !eq(view(name), view(base[0])) {
                 compile.push(copy(view("--use")));
                 compile.push(ifaces.copy());
+                // A module with no interface file has no surface to read (the runtime's is the
+                // compiler's own knowledge of it).
+                compile.push(copy(view("--use-named")));
+                for r in reads.len() {
+                    if host::exists(view(path_join(view(ifaces), view(cat(view(reads[r]), view(".iface")))))) != 0 {
+                        compile.push(copy(view("--use-module")));
+                        compile.push(reads[r].copy());
+                    }
+                }
             }
             compile.push(copy(view("--emit-interface")));
             compile.push(ifaces.copy());

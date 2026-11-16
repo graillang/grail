@@ -1,7 +1,7 @@
 // Build/test orchestration only. Language checking and instruction selection live in Grail.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, statSync, accessSync, constants as fsConstants } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, renameSync, rmSync, statSync, accessSync, constants as fsConstants } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { constants as zlibConstants, zstdCompressSync, zstdDecompressSync } from 'node:zlib';
@@ -18,10 +18,24 @@ export const hostTarget = ({ x64: 'x86_64', arm64: 'aarch64', riscv64: 'riscv64'
 export const compilerSources = ['native', 'lexer', 'ownership', 'machine', 'optimize', 'llvm', 'ir', 'fncache', 'fmt', 'explain', 'bindgen', 'pkg', 'docgen', 'cli', 'runtime', 'os-linux'].map(n => join(root, 'compiler', `${n}.grl`));
 // A standard module the compiler itself uses: `grail build --watch` hashes its inputs with XXH64
 // (lib/xxhash.grl), so the compiler is built with that module in its source list.
-// Every tool builds through one store inside this worktree, not the user's: a test run must neither
-// depend on what an earlier build of some other tree left behind nor leave anything in a home
-// directory. A tool that inspects the store sets its own (tools/cache-test.mjs).
-process.env.GRAIL_CACHE_DIR ??= join(root, '.work/build-cache');
+// Every tool builds through a store of its own run, inside this worktree: a test run must neither
+// depend on what an earlier run left behind (a second run with the same compiler would restore
+// every module, and a case that counts compiler runs would find none) nor leave anything in a home
+// directory. Tools started by this one inherit the same store, so one run compiles the runtime
+// once. A tool that inspects the store sets its own (tools/cache-test.mjs).
+if (!process.env.GRAIL_CACHE_DIR) {
+  const stores = join(root, '.work/build-cache');
+  const store = join(stores, `run-${process.pid}`);
+  // Stores of runs that were killed before they could remove theirs.
+  if (existsSync(stores)) {
+    for (const name of readdirSync(stores)) {
+      const pid = /^run-(\d+)$/.exec(name)?.[1];
+      if (!pid || !existsSync(`/proc/${pid}`)) rmSync(join(stores, name), { recursive: true, force: true });
+    }
+  }
+  process.env.GRAIL_CACHE_DIR = store;
+  process.on('exit', () => rmSync(store, { recursive: true, force: true }));
+}
 const compilerStdSources = ['xxhash'].map(n => join(root, 'lib', `${n}.grl`));
 compilerSources.push(...compilerStdSources);
 export const triples = { x86_64: 'x86_64-linux-gnu', aarch64: 'aarch64-linux-gnu', riscv64: 'riscv64-linux-gnu', 'macos-x86_64': 'x86_64-apple-macos11', 'macos-aarch64': 'arm64-apple-macos11' };

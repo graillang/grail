@@ -548,6 +548,7 @@ function lint() {
   check('FFI test runner exists', existsSync(join(root, 'tools/test-ffi.mjs')));
   check('the gate compiles the corpus with no unit store, an empty one and a warm one', readFileSync(join(root, 'tools/gate.sh'), 'utf8').includes('tools/test-native.mjs x86_64 --unit-identity') && readFileSync(join(root, 'tools/test-native.mjs'), 'utf8').includes('--unit-identity'));
   check('the compile-speed benchmark exists and the gate runs it', existsSync(join(root, 'tools/compile-bench.mjs')) && readFileSync(join(root, 'tools/gate.sh'), 'utf8').includes('tools/compile-bench.mjs'));
+  check('the runtime benchmark against C runs in the gate on both backends', (text => text.includes('runtime-bench-native') && text.includes('runtime-bench-llvm'))(readFileSync(join(root, 'tools/gate.sh'), 'utf8')));
   check('C header importer exists', existsSync(join(root, 'compiler/bindgen.grl')));
   check('C header importer is in the compiler source list',
     readFileSync(join(root, 'tools/native.mjs'), 'utf8').includes("'bindgen'"));

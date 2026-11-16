@@ -80,12 +80,19 @@ wait
 # of the numbers in docs/design/compile-speed.md, which fails only when a compile itself does.
 leg compile-bench bun tools/compile-bench.mjs
 wait
+# Run time against C, one backend at a time on a quiet machine: the numbers the runtime-parity pillar
+# is judged by (docs/design/runtime-parity.md). They fail only when a program's output differs from
+# the C program's.
+leg runtime-bench-native bun tools/bench.mjs --rounds 3
+wait
+GRAIL_BACKEND=llvm leg runtime-bench-llvm bun tools/bench.mjs --rounds 3
+wait
 
 # One line per leg, failures first.
 for f in "$G"/*.log; do
   if rg -q 'exit=[1-9]' "$f"; then echo "FAIL $(basename "$f" .log): $(rg 'AssertionError|error' "$f" | head -1 | cut -c1-120)"; fi
 done > "$G/summary.txt"
 for f in "$G"/*.log; do
-  if rg -q 'exit=0' "$f"; then echo "ok   $(basename "$f" .log): $(rg 'passed|identical|verified|agree|checks|ffi:|facts:|program|compile-bench:' "$f" | tail -1 | cut -c1-100)"; fi
+  if rg -q 'exit=0' "$f"; then echo "ok   $(basename "$f" .log): $(rg 'passed|identical|verified|agree|checks|ffi:|facts:|program|compile-bench:|runtime-bench' "$f" | tail -1 | cut -c1-100)"; fi
 done >> "$G/summary.txt"
 echo done > "$G/DONE"
