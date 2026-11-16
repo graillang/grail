@@ -275,3 +275,129 @@ declared. `blocking` then means "hand off at once, do not wait 10 ms". The exist
    migration hole). **Recommend yes.**
 4. Sysmon on the reactor's timer, 50 us for declared calls and 10 ms for undeclared ones.
    **Recommend yes**; the numbers are a starting point to measure.
+
+## Stage 5: priority classes, splits by grain, and the `chunks_mut` rename
+
+Stage 5 comes after the closure-bounds work re-typed `lib/pool.grl` (merged: `map`, `run`,
+`for_chunks` and `chunks_mut` take `Fn<Share>`, `join` takes `Fn<Send>`, `spawn` takes
+`FnMut<Send, Owned>` [V lib/pool.grl:54-139]), so the pool's signatures change once here.
+
+### What exists
+
+- One class: one job deque per worker and one job injection ring (stage 1).
+- **Splits depend on the machine.** `parallel_map` makes `workers * 4` leaves
+  [V runtime.grl:2987], so a float reduction over its results can differ between a 4-core and a
+  64-core run. `parallel_for_chunks(data, chunks, f)` and `pool::chunks_mut` take a chunk *count*
+  [V runtime.grl:3054, lib/pool.grl:106]. Halving is already deterministic in the leaf count
+  (`rt_job_split`).
+- Callers of the count form: `lib/pool.grl`; `tests/pool/chunks_mut.grl`, `chunks_mut_timing.grl`,
+  `job_handle.grl`; `tests/sched/job_failure.grl`; `book/examples/pool-chunks-mut.grl` and its
+  Rust twin; 13 corpus cases; the book chapters `concurrency` and `closures`; and the design notes
+  (`parallelism`, `scheduler`, `closure-bounds`, `concurrency-model`). `abundance/` has none
+  [V rg].
+- The clock: `host::now_us` and every runtime time read are `clock_gettime` *syscalls* (228), not
+  the vDSO [V runtime.grl `f_host_now_us`]. A per-job timestamp would cost a syscall per fork,
+  which matters for the starvation counter below.
+
+### Proposal
+
+**The grain form and its name.** `pool::split_mut(data: &mut [T], grain: u64, f: Fn<Share>(&mut [T]))`.
+`f` receives disjoint slices of at most `grain` elements; the leaves are `[k*grain, min(n,
+(k+1)*grain))`, a function of `n` and `grain` alone. The name reads beside `join`, `map`, `range`
+and `reduce` as what it does to the data. `chunks_mut` is removed in the same change, every caller
+above is migrated, and there is no alias. The builtin becomes `parallel_split(data, grain, f)`;
+`parallel_for_chunks` is removed with its count meaning. `grain == 0` is refused at run time with
+a named failure rather than treated as 1 [A: or a refinement `grain: u64 where grain > 0`, which
+the language has; recommended].
+
+`pool::for_chunks` (owned chunks of a moved vector) takes the same treatment: it becomes
+`pool::split(data: T[], grain, f)` and returns the per-piece results in order. `map` and `run`
+keep their shapes but stop depending on the worker count: they split into pieces of
+`max(1, n / 256)` elements, at most 256 leaves, whatever the machine. New:
+- `pool::range(n, grain, ctx, f: Fn<Share>(u64, u64, &C))` for `[lo, hi)` index ranges;
+- `pool::reduce(n, grain, ctx, zero, leaf, merge)`, which merges in index order: the tree is
+  fixed by `(n, grain)`, so a float reduction is bit-identical on any number of workers.
+
+**Classes.** `pool::Class { Frame, Normal, Background }`.
+- A class is a property of the *stack* doing the forking, not of each call. `pool::with_class(class,
+  f)` sets it for the duration of `f` on the current task or runner (a word in the record; the
+  task record's existing words are untouched - it goes into the jobs' own record, word 112, and a
+  task word reserved with the gaps12-sync author). Forks inherit their forker's class, and a runner
+  takes the class of the job it runs, so a whole fork tree has one class without any signature
+  changing. `task_scope` tasks are `Normal` until stage 2's `TaskConfig.class`.
+- Each worker gets three job deques and there are three job injection rings. A worker takes its
+  own `Frame` jobs, then injected `Frame`, then steals `Frame`, then the same for `Normal`, then for
+  `Background` - strict between classes (D8). Tasks stay in their single deque between `Normal`
+  and `Background` jobs [A: the order of tasks against classes is decision 3].
+- `background_cap` (default `max(1, workers / 4)`): a worker does not *start* a `Background` job
+  while that many workers are running one (an atomic count). No preemption: a running
+  `Background` job finishes.
+- **Starvation is visible, not bounded** (D8): `sched::stats()` returns, among others, the age of
+  the oldest queued `Background` job. A job is stamped not with the clock but with a scheduler
+  *epoch* that the reactor advances every millisecond while any `Background` work is queued, so
+  forking costs one load. The age is `(epoch now - epoch stamped)` ms, maximised over queued
+  `Background` entries. The `GRAIL_SCHED_STATS` line prints it.
+- **Stale entries across classes.** A queue entry is a hint and the claim is the CAS on the record
+  (stage 1). With classes, a stale entry in one class's deque can name a later job of another
+  class. The record stores its class (word 112), and a worker that takes an entry from class `X`'s
+  deque **skips it, without claiming, when the record's class is not `X`**. The job's own entry is
+  in its own class's deque, or its forker takes it back by pointer, so skipping loses nothing, and
+  the claim never runs a job at the wrong priority. A stale entry in the *same* class claiming a
+  later job is harmless (stage 1's argument).
+- **Helping with classes.** Leapfrogging already restricts a waiter to its own job's descendants,
+  which inherit its class, so "steal only the same or a higher class" holds without a new test.
+  It is stated as an assertion in `rt_job_may_help` [A: debug only].
+
+**`sched::start(Config)`.** `lib/sched.grl` with `Config { workers, background_cap, idle_spin_us,
+pin_workers, warm_stacks, seed }`, applied by `sched::start` before the scheduler exists. A second
+call, or a call after anything started it, returns an error value; it does not abort.
+`GRAIL_WORKERS` still overrides `workers` (tests rely on it).
+- `pin_workers`: `sched_setaffinity` worker i to CPU i (Linux); `SetThreadAffinityMask` on
+  Windows; a no-op on macOS, reported in the result.
+- `warm_stacks`: n stacks pre-mapped per worker, so a frame never `mmap`s.
+- `seed`: the steal victims' xorshift seed (reproducible interleavings with `workers: 1`).
+- `idle_spin_us`: re-measure on a quiet machine before choosing the default. Stage 1 measured
+  spinning as a loss on a loaded one.
+- The 61-tick fairness check (injected work every 61st take) goes in with the classes.
+
+### Files, tests, benchmark
+
+- Files: `compiler/runtime.grl` (three deques and rings per worker, class word, skip rule, cap,
+  epoch, stats, splits by grain, `sched::start`), `compiler/native.grl` (`parallel_split` replaces
+  `parallel_for_chunks`), `lib/pool.grl` (`split_mut`, `split`, `range`, `reduce`, `with_class`,
+  `Class`), new `lib/sched.grl`, the callers listed above, the book chapter and example (and the
+  Rust twin, renamed), `CHANGELOG.md`.
+- Corpus cases:
+  - `pool-split-mut-is-by-grain`: leaves are `ceil(n/grain)`, independent of `GRAIL_WORKERS` (run
+    at 1 and 24).
+  - `pool-reduce-bit-identical-across-workers`: a float sum with `GRAIL_WORKERS` 1, 3 and 24 prints
+    the same bits.
+  - `pool-chunks-mut-is-gone`: refused, naming `split_mut`.
+  - `sched-frame-not-starved-by-background`: 4x workers `Background` jobs of 50 ms each; a `Frame`
+    pass of 64 leaves each frame finishes within 5 ms of its solo time.
+  - `sched-background-cap-holds`: no more than `cap` `Background` jobs run at once (an atomic
+    high-water).
+  - `sched-stale-entry-wrong-class-skipped`: a stress test of records recycled across classes
+    (checksum).
+  - `sched-oldest-background-wait-reported`: `sched::stats()` grows while `Frame` work saturates
+    the machine.
+  - `sched-start-twice-is-error`, `sched-seeded-run-reproduces` (`workers: 1`, same output order).
+- Benchmark: `bench/frame.grl` with the importer as a `Background` fork tree. Gate: frame p99
+  within 10% of the run without the importer, and the oldest-`Background` wait reported.
+
+### Decisions for stage 5
+
+1. Names: `split_mut` / `split` (for today's `chunks_mut` / `for_chunks`), plus `range` and `reduce`.
+   **Recommend.**
+2. `grain` as `u64 where grain > 0` (a refinement the caller must show) rather than a run-time
+   failure. **Recommend.**
+3. Where tasks sit against job classes: between `Normal` and `Background` jobs until stage 2 gives
+   tasks a class. **Recommend.**
+4. The class lives on the forking stack (`with_class`) rather than being an argument of every
+   call. **Recommend**; `pool::scope(class, ...)` from the model note becomes unnecessary.
+
+## Order
+
+Stage 5, then 6, then 7: classes and the deterministic split are what the frame loop needs first.
+Stage 6 removes the last way a correct program can stall the scheduler. Stage 7 is mostly
+independent and can go in parallel with either (another agent could take it).
