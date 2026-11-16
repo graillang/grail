@@ -841,7 +841,15 @@ fn build_argv<a, b, d, e, g, k>(
     checked := (flags / 32) % 2;
     no_sites := (flags / 256) % 2;
     verify_facts := (flags / 512) % 2;
+    strict := (flags / 1024) % 2;
+    emit_ir := (flags / 2048) % 2;
     mut command = u8[][host::exe_path(), copy(view("--target")), copy(view(target))];
+    if strict != 0 {
+        command.push(copy(view("--strict-refinements")));
+    }
+    if emit_ir != 0 {
+        command.push(copy(view("--emit-ir")));
+    }
     if no_sites != 0 {
         command.push(copy(view("--no-error-sites")));
     }
@@ -2915,6 +2923,10 @@ struct Options {
     // proof that is wrong aborts at the call instead of passing unnoticed. Without it the flag
     // never reached the compiler, and the check it exists to keep was the check nobody saw.
     verify_facts: u64,
+    // `--strict-refinements`: an obligation the prover cannot settle is refused, program-wide.
+    strict: u64,
+    // `--emit-ir`: the compiler writes the typed IR of the optimized stream beside the assembly.
+    emit_ir: u64,
     // Module interfaces (B1 stage 2): `--interface DIR` reads them, `grail check` writes them, and
     // `--verify` compares the two instead of trusting either.
     iface: u8[],
@@ -2943,7 +2955,8 @@ struct Options {
 }
 // The code-generation flag vector, in one place: it is what the compiler is told, and what the build
 // cache keys on. Bit 0 check only, 1 debug, 2 deny ambient host, 3 split, 4/5 overflow, 6 cache,
-// 7 whole program, 8 no runtime-error location table, 9 verify the facts a proof leaned on.
+// 7 whole program, 8 no runtime-error location table, 9 verify the facts a proof leaned on,
+// 10 strict refinements, 11 write the typed IR beside the assembly.
 // The compiler's flag word. `check_only` is the `--check` bit, which is about the caller rather than
 // the options, so it is an argument instead of an option field.
 fn flag_bits<a>(o: (&a Options), check_only: bool = false) -> u64 {
@@ -2962,7 +2975,11 @@ fn flag_bits<a>(o: (&a Options), check_only: bool = false) -> u64 {
         + o.no_sites
         * 256
         + o.verify_facts
-        * 512;
+        * 512
+        + o.strict
+        * 1024
+        + o.emit_ir
+        * 2048;
 }
 // ---- The driver's own flags, as a table ----------------------------------------------------------
 // One row per word the driver reads: `word` is what the command line says, `kind` says what follows
@@ -3001,6 +3018,8 @@ const F_WATCH: u64 = 11;
 const F_JSON: u64 = 12;
 const F_NO_ENTRY: u64 = 13;
 const F_VERIFY_FACTS: u64 = 14;
+const F_STRICT: u64 = 15;
+const F_EMIT_IR: u64 = 16;
 const F_OUTPUT: u64 = 20;
 const F_TARGET: u64 = 21;
 const F_IFACE: u64 = 22;
@@ -3035,6 +3054,8 @@ fn flag_table() -> Flag[] {
         },
         Flag { word: copy(view("--no-error-sites")), kind: FLAG_SWITCH, field: F_NO_SITES },
         Flag { word: copy(view("--verify-facts")), kind: FLAG_SWITCH, field: F_VERIFY_FACTS },
+        Flag { word: copy(view("--strict-refinements")), kind: FLAG_SWITCH, field: F_STRICT },
+        Flag { word: copy(view("--emit-ir")), kind: FLAG_SWITCH, field: F_EMIT_IR },
         Flag { word: copy(view("--interface")), kind: FLAG_TEXT, field: F_IFACE },
         Flag { word: copy(view("--verify")), kind: FLAG_SWITCH, field: F_VERIFY },
         Flag { word: copy(view("--watch")), kind: FLAG_SWITCH, field: F_WATCH },
@@ -3053,6 +3074,56 @@ fn flag_index<a, b>(table: (&a Flag[]), word: &b [u8]) -> u64 {
         }
     }
     return table.len();
+}
+// Refuse a `--word` no row has, and end the run: the word nearest to it in the table is offered when
+// one is close, and a word that is a flag of the compiler proper but not of the driver says so. An
+// argument for the program a `run` starts goes after `--`, which is never read here.
+fn unknown_flag<a, b>(table: (&a Flag[]), word: &b [u8]) {
+    mut text = copy(view("grail: unknown option `"));
+    push_bytes(&mut text, word);
+    push_bytes(&mut text, view("`"));
+    say(view(text));
+    if eq(word, view("--backend=llvm")) || eq(word, view("--range-facts")) || eq(word, view("--export")) || eq(word, view("--typed-refs")) {
+        say(view("  it is an option of the compiler proper (`grail [options] OUT.s ENTRY.grl ...`): the driver assembles and links the native stream only"));
+    } else {
+        mut best = table.len();
+        mut best_cost = 4;
+        for i in table.len() {
+            cost := flag_distance(view(table[i].word), word);
+            if cost < best_cost {
+                best_cost = cost;
+                best = i;
+            }
+        }
+        if best != table.len() {
+            mut help = copy(view("  did you mean `"));
+            push_bytes(&mut help, view(table[best].word));
+            push_bytes(&mut help, view("`?"));
+            say(view(help));
+        }
+    }
+    say(view("  arguments for the program itself go after `--`"));
+    host::exit(1);
+}
+// How far apart two words are, as the count of positions that differ plus the difference in length:
+// enough to catch a dropped, doubled or swapped letter without an edit-distance table.
+fn flag_distance<a, b>(x: &a [u8], y: &b [u8]) -> u64 {
+    mut short = x.len();
+    mut long = y.len();
+    if long < short {
+        short = y.len();
+        long = x.len();
+    }
+    // A dropped letter shifts everything after it, so compare from both ends and keep the better.
+    mut front = 0;
+    while (front < short) && (x[front] == y[front]) {
+        front += 1;
+    }
+    mut back = 0;
+    while (back < short - front) && (x[x.len() - 1 - back] == y[y.len() - 1 - back]) {
+        back += 1;
+    }
+    return long - front - back;
 }
 // Whether a row takes the word after it.
 fn flag_takes_value(kind: u64) -> bool {
@@ -3083,6 +3154,10 @@ fn switch_on<a>(o: (&a mut Options), field: u64) {
         o.no_sites = 1;
     } else if field == F_VERIFY_FACTS {
         o.verify_facts = 1;
+    } else if field == F_STRICT {
+        o.strict = 1;
+    } else if field == F_EMIT_IR {
+        o.emit_ir = 1;
     } else if field == F_VERIFY {
         o.verify = 1;
     } else if field == F_WATCH {
@@ -3150,6 +3225,8 @@ fn options<a>(args: (&a u8[][])) -> Options {
         iface: u8[],
         verify: 0,
         verify_facts: 0,
+        strict: 0,
+        emit_ir: 0,
         watch: 0,
         interval: 0,
         debounce: 0,
@@ -3173,6 +3250,11 @@ fn options<a>(args: (&a u8[][])) -> Options {
         } else if eq(view(a), view("--")) {
             // The terminator is neither an input nor a flag: it is what switches the branch above on.
             passthrough = 1;
+        } else if (at == table.len()) & starts(view(a), view("--")) {
+            // A word that looks like a flag and is none of the driver's. It used to fall into the
+            // input list, where a build ignored it: `grail build --strict-refinments main.grl`
+            // compiled without the flag and said nothing.
+            unknown_flag(&table, view(a));
         } else if at == table.len() {
             // Not a driver word: an input. The first `.grl` file is the entry, and the paths keep the
             // order they were given in.

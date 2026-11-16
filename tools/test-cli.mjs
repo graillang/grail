@@ -364,4 +364,33 @@ const fast = ['--interval', '40', '--debounce', '60'];
   assert.deepEqual(stragglers, [], `a watcher outlived its case (killed it, but the case leaked it): ${stragglers.join(', ')}`);
   checks++;
 }
+// A `--word` the driver does not have is refused, by name, before anything is built: it used to fall
+// into the input list, where `grail build` ignored it, so a misspelt flag compiled without the flag.
+{
+  const dir = join(work, 'flags'); mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'main.grl'), 'fn take(n: u64 where n % 2 == 0) -> u64 {\n    return n;\n}\nfn main() {\n    println(take(host::argc()));\n}\n');
+  const typo = run(['build', 'main.grl', '--strict-refinments'], dir, false);
+  assert.equal(typo.status, 1, 'a misspelt flag is refused');
+  assert.match(typo.stdout + typo.stderr, /unknown option `--strict-refinments`\n\s+did you mean `--strict-refinements`\?/); checks++;
+  assert.ok(!existsSync(join(dir, 'target/main')), 'nothing is built when a flag is refused'); checks++;
+  const bogus = run(['check', '--bogus', 'main.grl'], dir, false);
+  assert.equal(bogus.status, 1); assert.match(bogus.stdout + bogus.stderr, /unknown option `--bogus`/);
+  assert.doesNotMatch(bogus.stdout + bogus.stderr, /did you mean/, 'no suggestion when nothing is close'); checks++;
+  const llvm = run(['build', 'main.grl', '--backend=llvm'], dir, false);
+  assert.equal(llvm.status, 1); assert.match(llvm.stdout + llvm.stderr, /option of the compiler proper/); checks++;
+  // The flag itself reaches the compiler: the obligation `n % 2 == 0` has no proof, so the strict
+  // build is refused and the plain one is not.
+  assert.equal(run(['build', 'main.grl'], dir).status, 0); checks++;
+  const strict = run(['build', 'main.grl', '--strict-refinements'], dir, false);
+  assert.equal(strict.status, 1); assert.match(strict.stdout + strict.stderr, /cannot prove the refinement `n % 2 == 0`/); checks++;
+  // `--emit-ir` writes the typed IR beside the assembly, and the file holds units.
+  rmSync(join(dir, 'target'), { recursive: true, force: true });
+  assert.equal(run(['build', 'main.grl', '--emit-ir'], dir).status, 0);
+  const ir = readFileSync(join(dir, 'target/main.s.tir'), 'utf8');
+  assert.ok(ir.startsWith('ssair 1\n') && ir.length > 1000, `--emit-ir wrote ${ir.length} bytes of IR`); checks++;
+  // After `--` every word is the program's, a `--word` included.
+  writeFileSync(join(dir, 'args.grl'), 'fn main() {\n    println(host::argc());\n}\n');
+  const passed = run(['run', 'args.grl', '--', '--bogus', 'x'], dir);
+  assert.equal(passed.stdout.trim().split('\n').pop(), '3', 'the program sees its own name and both words'); checks++;
+}
 console.log(`cli: ${checks} formatter/tool checks passed`);

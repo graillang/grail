@@ -1,5 +1,15 @@
 ## Unreleased
 
+- **`grail build`, `check`, `run` and `fmt` refuse a flag they do not have.** A `--word` that is
+  none of the driver's used to fall into the input list, where a build ignored it: `grail build
+  --strict-refinments main.grl` compiled without the flag and said nothing. It is now refused by
+  name before anything is built, with the nearest real flag when one is close (`did you mean
+  `--strict-refinements`?`), and a flag of the compiler proper (`--backend=llvm`, `--range-facts`,
+  `--export`, `--typed-refs`) says that is what it is. Words for the program a `run` starts go
+  after `--` and are never read. The driver gains two flags it forwards: `--strict-refinements` and
+  `--emit-ir` (the typed IR, written to `target/NAME.s.tir`). The driver's flags are one table
+  (`flag_table` in `compiler/cli.grl`), so a new flag is a row.
+
 - **`[1, 2, 3]` is a vector literal.** The element type is the first element's, and each later
   element is checked against it; where the context names a vector type (a typed binding, a
   parameter, a field, a return type, an assignment, an enclosing literal's element type) the literal
