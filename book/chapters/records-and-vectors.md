@@ -7,8 +7,14 @@ are still released when the record ends.
 
 {{example:records}}
 
-`T[]` creates an empty vector; `u64[10, 20, 30]` initializes one directly, and `f32[0.0; n]`
-makes `n` copies of a plain value in one allocation. Owned elements (strings, vectors, records
+`[10, 20, 30]` is a vector: the first element fixes the element type, and every other element is
+checked against it. Where the context already names a vector type - a typed binding, a parameter, a
+field, a return type, an enclosing literal - the literal takes that type instead, so
+`b: u8[] = [104, 105]` is bytes and `rows: u64[][] = [[1], []]` needs no type inside. The type can
+also lead the literal: `T[]` creates an empty vector, `u64[10, 20, 30]` initializes one, and
+`f32[0.0; n]` (or `[0.0; n]`) makes `n` copies of a plain value in one allocation. A bare `[]` names
+no element, so it is accepted only where a vector type is expected. A `[` that follows an expression
+is still indexing: `v[0]`, `f()[0]`. Owned elements (strings, vectors, records
 that own data) cannot be repeated, since each copy would share one owner; build those with `push`.
 `values.push(value)` consumes an element, and `values.pop()` removes and returns the last element.
 

@@ -30545,14 +30545,42 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
 }
 fn collection_literal<a>(c: (&a mut C), ty: u64, bytes: u64) -> Val {
     expect(&mut c, view("["));
+    return collection_body(&mut c, ty, bytes, false, val(0, 0), 0, 0);
+}
+// The elements of a collection literal, after its `[`. `have` says the first element was already
+// read (`given`, spanning tokens `gstart..gend`): an untyped literal `[1, 2, 3]` reads its first
+// element to learn the element type, and the rest of the literal is this same loop.
+fn collection_body<a>(
+    c: (&a mut C),
+    ty: u64,
+    bytes: u64,
+    have: bool,
+    given: Val,
+    gstart: u64,
+    gend: u64
+) -> Val {
     slot := apply(&mut c, view("rt_new"), u64[]);
     own(&mut c, slot, ty);
-    if !eat(&mut c, view("]")) {
+    if have || !eat(&mut c, view("]")) {
         mut first = 1;
+        mut pending = have;
         while true {
-            estart := c.pos;
-            mut v = expr(&mut c, 0);
-            eend := c.pos;
+            mut estart = c.pos;
+            mut v = val(given.t, given.ty);
+            mut eend = gend;
+            if pending {
+                estart = gstart;
+                pending = false;
+            } else {
+                if (c.raw == 0) & (bytes == 0) & is(&mut c, view("[")) {
+                    // A nested untyped literal reads its type from this one's element type, so
+                    // `rows: u64[][] = [[1], []]` needs no type on the inner literals.
+                    v = expr_expected(&mut c, 0, ty_arg(&mut c, ty));
+                } else {
+                    v = expr(&mut c, 0);
+                }
+                eend = c.pos;
+            }
             if c.raw == 0 {
                 mut expected = 0;
                 if bytes == 0 {
@@ -30981,6 +31009,13 @@ fn finish_type_literal<a>(c: (&a mut C), ty: u64) -> Val {
     own(&mut c, slot, out);
     return val(slot, out);
 }
+// `T[]` for some `T` (and `u8[]`, which is type 2).
+fn is_vector_type<a>(c: (&a mut C), ty: u64) -> bool {
+    if ty == NO_TYPE {
+        return false;
+    }
+    return (ty == 2) || (ty_kind(&mut c, ty) == 6);
+}
 // Maps remain ordinary nominal library values; only their concise surface is compiler-owned.
 fn is_map_type<a>(c: (&a mut C), ty: u64) -> bool {
     if ty == NO_TYPE {
@@ -31103,6 +31138,12 @@ fn map_expression<a>(c: (&a mut C), expected: u64) -> Val {
         expect(&mut c, view(")"));
         return map_new(&mut c, ty);
     }
+    // An untyped literal: the colon decides. `[1, 2, 3]` is a vector, `["a": 1]` a map, and the two
+    // empty forms `[]` and `[:]` name no element, so they need the type the context expects. A type
+    // the context fixes is honoured first: a vector type reads the literal as `T[...]` would.
+    if is_vector_type(&mut c, expected) {
+        return collection_literal(&mut c, expected, u64(expected == 2));
+    }
     expect(&mut c, view("["));
     mut ty = expected;
     mut keyty = NO_TYPE;
@@ -31111,10 +31152,6 @@ fn map_expression<a>(c: (&a mut C), expected: u64) -> Val {
         types := type_args(&mut c, ty);
         keyty = types[0];
         valuety = types[1];
-    } else {
-        if expected != NO_TYPE {
-            fail(&mut c, view("map literal needs a map expected type"));
-        }
     }
     if eat(&mut c, view(":")) {
         expect(&mut c, view("]"));
@@ -31123,7 +31160,18 @@ fn map_expression<a>(c: (&a mut C), expected: u64) -> Val {
         }
         return map_new(&mut c, ty);
     }
+    if is(&mut c, view("]")) {
+        diag_help(&mut c, view("name the element type (`u64[]`) or give the binding a type (`v: u64[] = []`)"));
+        fail(&mut c, view("empty `[]` needs a vector expected type"));
+    }
+    kstart := c.pos;
     key := context_value(&mut c, keyty);
+    kend := c.pos;
+    if (keyty == NO_TYPE) && !is(&mut c, view(":")) {
+        // No colon after the first element: a vector of that element's type.
+        vty := vec_of(&mut c, key.ty);
+        return collection_body(&mut c, vty, u64(vty == 2), true, key, kstart, kend);
+    }
     expect(&mut c, view(":"));
     value := context_value(&mut c, valuety);
     if keyty == NO_TYPE {

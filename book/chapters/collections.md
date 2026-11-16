@@ -4,7 +4,7 @@
 context already fixes the key and value types. `[string: u64]()` creates a randomly seeded map, and
 `[string: u64]::with_seed(seed0, seed1)` fixes its seeds. The map keeps the order keys were first
 inserted, and its operations are methods: `len`, `contains`, `get`, `get_mut`, `insert`, `remove`
-and `entry`.
+and `entry`. The colon is what makes it a map: `["a": 1]` is a map and `[1, 2]` is a vector.
 
 {{example:collections}}
 

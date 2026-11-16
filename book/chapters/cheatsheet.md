@@ -14,7 +14,7 @@ is checked to agree.
 | `trait Shape { fn area(&self) -> u64; }` | `interface Shape { fn area(self: &Self) -> u64; }` | The receiver is an ordinary typed parameter. |
 | `impl Shape for Rect` | `impl Shape for Rect` | |
 | `fn largest<T: Shape>(items: &[T])` | `fn largest<T: Shape>(items: &T[])` | `T[]` is a vector, `&T[]` its view. |
-| `vec![a, b]` | `Rect[a, b]` | The element type leads the literal. |
+| `vec![a, b]` | `[a, b]` or `Rect[a, b]` | The element type may lead the literal; `[]` alone needs an expected type. |
 | `Option<u64>`, `Some(x)`, `None` | `u64?`, `Some(x)`, `None` | `x!` insists, `?` propagates. |
 | `match t { Token::Num(n) => ..., }` | `match t { Num(n) => ..., }` | An arm body is an expression or a block. |
 | `(a, b)`, `let (q, r) = ...;` | `(a, b)`, `(q, r) := ...;` | |

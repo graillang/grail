@@ -1,5 +1,16 @@
 ## Unreleased
 
+- **`[1, 2, 3]` is a vector literal.** The element type is the first element's, and each later
+  element is checked against it; where the context names a vector type (a typed binding, a
+  parameter, a field, a return type, an assignment, an enclosing literal's element type) the literal
+  takes that type, so `b: u8[] = [104, 105]`, `rows: u64[][] = [[1], []]` and `return [];` need no
+  type written twice. `[v; n]` repeats. The colon decides between the two bracket literals -
+  `["a": 1]` is a map, `[:]` the empty map - and the two empty forms need an expected type (`[]`
+  alone is refused naming both spellings that work). `u64[1, 2, 3]` stays as the explicit form,
+  braces are unchanged, and a `[` after an expression is still indexing. Cases
+  `literal-untyped-vector`, `literal-untyped-vector-expected`, `literal-untyped-empty-needs-type`,
+  `literal-untyped-mixed-elements`, `literal-untyped-element-against-expected`.
+
 - **The compiler is 2x to 9x faster, and its time is linear in program size.** Checking a
   104k-line program of 4,000 small declarations took 166 s and takes 18 s; the compiler compiles
   itself in 42 s instead of 74 s; hello world checks in 0.59 s instead of 1.19 s. Nothing it emits

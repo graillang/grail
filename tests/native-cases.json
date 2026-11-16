@@ -10563,5 +10563,75 @@
       "native"
     ],
     "note": "the kill is per name: a name the loop body never writes keeps its fact and the call is still proved"
+  },
+  {
+    "name": "literal-untyped-vector",
+    "source": "use hashmap;\nstruct P { x: u64 }\nfn sum(v: &u64[]) -> u64 {\n    mut t = 0;\n    for i in v.len() { t += v[i]; }\n    return t;\n}\nfn total(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    v := [1, 2, 3];\n    println(v);\n    println(sum(&v));\n    println(v[0] + [10, 20][1]);\n    f := [1.5, 2.5];\n    println(f);\n    s := [\"a\".text(), \"b\".text()];\n    println(s.len());\n    b: u8[] = [104, 105];\n    println(b.text());\n    i: i32[] = [-1, 2];\n    println(i);\n    e: u64[] = [];\n    println(e.len());\n    println(total([4, 5, 6, 7]));\n    z := [0; 4];\n    println(z);\n    n := [[1, 2], [3]];\n    println(n);\n    ps := [P { x: 1 }, P { x: 2 }];\n    println(ps[1].x);\n    for x in [7, 8] { print(x); }\n    println();\n    m := [\"a\": 1, \"b\": 2];\n    println(m.len());\n    t := [true, false,];\n    println(t);\n    mut w = [1, 2, 3];\n    w[1] = 9;\n    w.push(4);\n    println(w);\n}\n",
+    "modules": [
+      "lib/hashmap.grl"
+    ],
+    "stdout": "[1, 2, 3]\n6\n21\n[1.5, 2.5]\n2\nhi\n[-1, 2]\n0\n4\n[0, 0, 0, 0]\n[[1, 2], [3]]\n2\n78\n2\n[true, false]\n[1, 9, 3, 4]\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "`[1, 2, 3]` is a vector whose element type is the first element's; an expected vector type is honoured (`b: u8[] = [104, 105]`); `[v; n]` repeats; `[\"a\": 1]` is still a map and `v[0]` / `[10, 20][1]` still index"
+  },
+  {
+    "name": "literal-untyped-vector-expected",
+    "source": "struct Bag { xs: u64[], names: string[] }\nfn none() -> u64[] {\n    return [];\n}\nfn some() -> f64[] {\n    return [1.0, 2.0];\n}\nfn count(v: u64[]) -> u64 {\n    return v.len();\n}\nfn first(v: &u64[]) -> u64 {\n    return v[0];\n}\nfn main() {\n    rows: u64[][] = [[1], [], [2, 3]];\n    println(rows);\n    b := Bag { xs: [], names: [\"x\".text()] };\n    println(b.xs.len() + b.names.len());\n    println(none().len());\n    println(some());\n    println(count([]));\n    println(first(&[5, 6]));\n    mut v: u64[] = [];\n    v = [9];\n    println(v);\n    o: u64[]? = Some([1]);\n    println(o!.len());\n    q := if rows.len() > 2 { [1, 2] } else { [3] };\n    println(q);\n}\n",
+    "stdout": "[[1], [], [2, 3]]\n1\n0\n[1.0, 2.0]\n0\n5\n[9]\n1\n[1, 2]\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "`[]` takes its type from a binding, a field, a parameter, a return type, an assignment and an enclosing literal's element type"
+  },
+  {
+    "name": "literal-untyped-empty-needs-type",
+    "source": "fn main() {\n    v := [];\n    println(v.len());\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "empty `[]` needs a vector expected type",
+      "name the element type (`u64[]`) or give the binding a type"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "`[]` names no element, so with nothing expected it is refused with both spellings that work"
+  },
+  {
+    "name": "literal-untyped-mixed-elements",
+    "source": "fn main() {\n    v := [1, \"a\"];\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "type mismatch",
+      "expected `u64`, found `string`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "the first element fixes the element type; a later element of another type is a mismatch at that element"
+  },
+  {
+    "name": "literal-untyped-element-against-expected",
+    "source": "fn main() {\n    v: u64[] = [1, 2.5];\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "type mismatch",
+      "expected `u64`, found `f64`"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "with an expected vector type each element is checked against its element type"
   }
 ]
