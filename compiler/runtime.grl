@@ -6583,7 +6583,8 @@ fn rt_vec_reverse4(s: u64) -> u64 {
 // another; the header is the same {pointer, length, capacity}, counted in elements. A value taken out
 // of one is a box of its own (rt_flat_box); a value put in is copied from its box, which is freed.
 fn rt_flat_box(src: u64, w: u64) -> u64 {
-    box := rt_alloc(wrapping_mul(rt_div(w + 7, 8), 8));
+    // Rounded up to whole words; rt_div is a software division and this runs per element.
+    box := rt_alloc((w + 7) & 18446744073709551608);
     rt_copy_bytes(box, src, w);
     return box;
 }
@@ -6601,7 +6602,8 @@ fn rt_pushw(s: u64, src: u64, w: u64) -> u64 {
         if capacity == 0 {
             capacity = 8;
         }
-        if rt_div(18446744073709551615, w) < capacity {
+        // No product here can overflow: 2^40 elements of at most 2^20 bytes.
+        if (1099511627776 < capacity) + (1048576 < w) {
             rt_abort();
         }
         ptr := rt_grow(raw_load(s), wrapping_mul(n, w), wrapping_mul(capacity, w));
@@ -6667,7 +6669,7 @@ fn rt_vec_swapw(s: u64, i: u64, j: u64, w: u64) -> u64 {
 fn rt_vec_reversew(s: u64, w: u64) -> u64 {
     n := rt_len(s);
     mut i = 0;
-    while i < rt_div(n, 2) {
+    while i < (n >> 1) {
         rt_vec_swapw(s, i, n - 1 - i, w);
         i += 1;
     }
