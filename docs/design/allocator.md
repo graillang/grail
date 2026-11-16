@@ -15,7 +15,7 @@ that each build and drop small vectors and records, sharing nothing) went *down*
 ## What changed
 
 Once the process has started a second thread, **every OS thread has a cache of free blocks of its
-own** for the classes up to 64 KiB, and `rt_alloc` / `rt_free` work on it with no lock and no atomic
+own** for the classes up to 256 KiB, and `rt_alloc` / `rt_free` work on it with no lock and no atomic
 operation. The lock is taken only to move a batch of blocks between a cache and the shared state.
 
 - **Where it lives.** One page from `raw_map` per thread, made by the thread's first allocation.
@@ -34,7 +34,8 @@ operation. The lock is taken only to move a batch of blocks between a cache and 
   owner word and no per-block atomic: blocks flow from the threads that free to the threads that
   allocate through the shared state, a batch at a time.
 - **Bounds.** A bin holds at most 256 blocks and at most 128 KiB (256 blocks up to the 512-byte
-  class, 2 at 64 KiB). One block over, the newer half leaves as a *chain*: a list whose first block
+  class, 2 at 64 KiB, and one block each for the 128 KiB and 256 KiB classes, which the byte bound
+  alone would exclude). One block over, the newer half leaves as a *chain*: a list whose first block
   carries the next chain and the length in its two payload words, pushed on a per-class chain list
   (process-state words 1792..) under the lock in a few stores. An empty bin takes a whole chain the
   same way; failing that it takes blocks from the old shared free list, and failing that it reserves
@@ -60,12 +61,30 @@ operation. The lock is taken only to move a batch of blocks between a cache and 
   approximate while they are allocating.
 - **What did not change.** A process with one thread takes the path it always took: one load, one
   branch, the shared lists, no lock, no cache. `host::fork` is refused once a second thread started,
-  and no cache exists before that, so a forked copy never inherits one. Classes of 128 KiB and more
-  still go through the lock. The double-free abort, static blocks and view records
+  and no cache exists before that, so a forked copy never inherits one. Classes of 512 KiB and more
+  - a mapping each, made and returned on every use - still go through the lock. The double-free abort, static blocks and view records
   (`rt_view_record`, a block's address plus 8) behave as before.
 - **macOS keeps the locked path.** A Mach-O build has no thread pointer of its own in this runtime
   (`raw_tp_get` is 0) and cannot start threads (`rt_thread` in `darwin.grl` reports ENOSYS), so
   there is no record to hang a cache on and nothing to contend with.
+
+## Alignment: a promise
+
+**A payload of 512 bytes or more starts on a 64-byte boundary; every payload starts on a 16-byte
+one.** Programs may rely on it (a vector's buffer is a payload), and the corpus case
+`alloc-align-64-from-512-bytes-on-every-path-and-thread` pins it.
+
+The padding is in the arena, once, not in the block. An arena is a page-aligned mapping whose first
+16 bytes are its own two words; the blocks of a class follow at multiples of the class size, and a
+payload is 16 bytes into its block. For a class of 1024 bytes or more - where a request of 512 or
+more lands, the header being part of the class - the first block starts at 48 instead of 16, so
+every payload is `arena + 64 + i * size`. That costs 32 bytes per arena and nothing per block: no
+class holds fewer blocks per arena than before, and smaller classes are untouched. Because the
+alignment is fixed by the arena and no path computes a block address (a free list, a reserved run
+and a chain only link or step over existing blocks), nothing can break it. One function knows the
+offset (`rt_arena_first`); `rt_own_arena` finds the mapping of a block that has one to itself, and
+`mremap` keeps such a block aligned when it grows. The 16-byte guarantee is what lets `rt_free`
+read an address that is 8 past a multiple of 16 as a view record.
 
 ## What was not done, and why
 

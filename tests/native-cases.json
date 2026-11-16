@@ -11032,5 +11032,18 @@
     "source": "use host;\nfn read(n: u64, unused: u64) -> u64 {\n    text := host::read_file(\"/proc/self/stat\");\n    mut kept = u64[];\n    for i in n % 9 + 1 {\n        kept.push(text.len() + i);\n    }\n    return kept.len() / kept.len();\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    mut many = Task<u64>[];\n    for i in 64 {\n        many.push(spawn(sc, i, read));\n    }\n    mut total = 0;\n    while many.len() != 0 {\n        total += join(many.pop()!);\n    }\n    return total;\n}\nfn main() {\n    println(task_scope(0, body));\n}\n",
     "stdout": "64\n",
     "note": "64 tasks each hand a blocking read to a helper thread that allocates the result and ends; the task frees it on whichever worker resumes it"
+  },
+  {
+    "name": "alloc-align-64-from-512-bytes-on-every-path-and-thread",
+    "files": [
+      "compiler/tests/alloc_align.grl"
+    ],
+    "stdout": "0\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "the allocator's promise: a payload of 512 bytes or more starts on a 64-byte boundary and every payload on a 16-byte one - before the process has threads, on four threads at once, after blocks were freed on other threads, and for a block with its own mapping as it grows"
   }
 ]

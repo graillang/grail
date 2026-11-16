@@ -1,0 +1,99 @@
+unsafe module runtime;
+// The alignment promise (docs/design/allocator.md): a payload is always a multiple of 16, and one
+// of 512 bytes or more starts on a 64-byte boundary - from the one-thread path, a thread's cache, a
+// reserved run, a chain another thread gave up and a block with a mapping of its own.
+fn aa_one(n: u64) -> u64 {
+    p := rt_alloc(n);
+    assert((p & 15) == 0);
+    if (n < 512) == 0 {
+        assert((p & 63) == 0);
+    }
+    raw_store(p, n);
+    return p;
+}
+// Requests around every class boundary from 16 bytes to 2 MiB, three of each: table[0] counts them.
+fn aa_fill(table: u64) -> u64 {
+    mut at = 0;
+    mut round = 0;
+    while round < 3 {
+        mut n = 16;
+        while n < 2097153 {
+            raw_store(table + 8 + at * 8, aa_one(n - 16));
+            raw_store(table + 16 + at * 8, aa_one(n - 15));
+            raw_store(table + 24 + at * 8, aa_one(n));
+            at = at + 3;
+            n = n * 2;
+        }
+        round = round + 1;
+    }
+    raw_store(table, at);
+    return 0;
+}
+fn aa_drain(table: u64) -> u64 {
+    n := raw_load(table);
+    mut i = 0;
+    while i < n {
+        rt_free(raw_load(table + 8 + i * 8));
+        i = i + 1;
+    }
+    return 0;
+}
+pub fn audit() -> u64 {
+    before := rt_live();
+    tables := rt_alloc(4 * 8);
+    threads := rt_alloc(4 * 8);
+    mut i = 0;
+    while i < 4 {
+        raw_store(tables + i * 8, rt_alloc(8 + 200 * 8));
+        i = i + 1;
+    }
+    // Before the process has a second thread.
+    aa_fill(raw_load(tables));
+    aa_drain(raw_load(tables));
+    aa_fill(raw_load(tables));
+    aa_drain(raw_load(tables));
+    mut pass = 0;
+    while pass < 4 {
+        // Four threads fill at once and end with what they did not use still in their caches.
+        i = 0;
+        while i < 4 {
+            raw_store(threads + i * 8, rt_thread_spawn(aa_fill, raw_load(tables + i * 8)));
+            i = i + 1;
+        }
+        i = 0;
+        while i < 4 {
+            rt_thread_join(raw_load(threads + i * 8));
+            i = i + 1;
+        }
+        // Freed here and on two other threads: the next pass allocates what these gave up.
+        aa_drain(raw_load(tables));
+        aa_drain(raw_load(tables + 8));
+        raw_store(threads, rt_thread_spawn(aa_drain, raw_load(tables + 16)));
+        raw_store(threads + 8, rt_thread_spawn(aa_drain, raw_load(tables + 24)));
+        rt_thread_join(raw_load(threads));
+        rt_thread_join(raw_load(threads + 8));
+        aa_fill(raw_load(tables));
+        aa_drain(raw_load(tables));
+        pass = pass + 1;
+    }
+    // A block with its own mapping keeps its alignment when it grows in place or is moved.
+    big := aa_one(600000);
+    grown := rt_grow(big, 600000, 3000000);
+    assert((grown & 63) == 0);
+    assert(raw_load(grown) == 600000);
+    again := rt_grow(grown, 3000000, 9000000);
+    assert((again & 63) == 0);
+    rt_free(again);
+    // A view record is still the one address that is 8 past a multiple of 16.
+    v := rt_view_record();
+    assert((v & 15) == 8);
+    rt_view_free(v);
+    i = 0;
+    while i < 4 {
+        rt_free(raw_load(tables + i * 8));
+        i = i + 1;
+    }
+    rt_free(tables);
+    rt_free(threads);
+    return rt_live() - before;
+}
