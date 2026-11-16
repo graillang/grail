@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **`f32` arithmetic on the native backend rounds in hardware.** Every `f32` result used to be
+  rounded by a runtime routine written with integer shifts and a division; it is now one narrowing
+  and one widening conversion on x86-64, aarch64 and riscv64. A one-million-element `x[i] = x[i] * a
+  + y[i]` pass over `f32[]` goes from 259 ms to 7.6 ms. Non-NaN results are bit-identical to before
+  (`f32-round-hardware-matches-reference` checks four million words on every target); a result that
+  is a NaN is a quiet NaN and its payload bits are not promised.
+
 - `hash::write_byte` states its precondition in its signature (`value: u64 where value < 256`)
   instead of asserting it in its body: a caller that can show the value is a byte pays no check,
   and one that cannot gets the check at its own call, named. It was the standard library's only

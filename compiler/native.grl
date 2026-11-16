@@ -13402,6 +13402,23 @@ fn emit_slot_fact<a>(c: (&a mut C), ty: u64, slot: u64) -> unit {
     llvm::fact_slot(&mut c.facts, name, slot, f32);
     return ();
 }
+// A binary64 word rounded to the nearest f32 (ties to even) and widened again: the value every f32
+// result is. The native backend rounds in hardware - one narrowing and one widening conversion, which
+// is IEEE's rounding and so agrees with `rt_f32_round` on every non-NaN word; a NaN comes out a quiet
+// NaN and its payload bits are not promised. The LLVM lifter keys on the call (it becomes
+// `fptrunc` + `fpext`, llvm.grl), so that backend keeps it.
+fn f32_round<a>(c: (&a mut C), value: u64) -> u64 {
+    if (c.backend != 0) || (c.emit_ir != 0) {
+        return invoke(&mut c, view("rt_f32_round"), one(value));
+    }
+    get(&mut c, value, view("%rax"));
+    if (c.target == 0) || (c.target == 3) {
+        o(&mut c, view("movq %rax,%xmm0\ncvtsd2ss %xmm0,%xmm0\ncvtss2sd %xmm0,%xmm0\nmovq %xmm0,%rax\n"));
+    } else {
+        o(&mut c, view("cf32bits\ncf32widen\n"));
+    }
+    return save(&mut c);
+}
 // `op(lhs, rhs)` on floats. With `single` (both operands' static type is f32) the call carries the
 // fact the LLVM lifter rewrites into real `f* float` arithmetic; an f64 call gets none and keeps
 // the word lowering. `invoke` has just recorded which call this is, and the opcode travels with
@@ -31206,7 +31223,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             return val(slot, bt);
         }
         if single && same(view(name), view("sqrt")) {
-            slot = invoke(&mut c, view("rt_f32_round"), one(slot));
+            slot = f32_round(&mut c, slot);
         }
         return val(slot, xty);
     }
@@ -32891,7 +32908,7 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
                     return val(value.t, ty);
                 }
                 if is_float(&mut c, source) {
-                    slot := invoke(&mut c, view("rt_f32_round"), one(value.t));
+                    slot := f32_round(&mut c, value.t);
                     return val(slot, ty);
                 }
                 if !integer(&mut c, source) {
@@ -34700,7 +34717,7 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
                                             single := u64(is_f32(&mut c, ty));
                                             t = float_op_call(&mut c, k, snap, right.t, single);
                                             if single != 0 {
-                                                t = invoke(&mut c, view("rt_f32_round"), one(t));
+                                                t = f32_round(&mut c, t);
                                             }
                                         } else {
                                             if is_comparison(k) {
@@ -35062,7 +35079,7 @@ fn compound_value<a>(c: (&a mut C), op: u64, old: u64, v: Val, ty: u64) -> Val {
         single := u64(is_f32(&mut c, ty));
         mut value = float_op_call(&mut c, op, old, v.t, single);
         if single != 0 {
-            value = invoke(&mut c, view("rt_f32_round"), one(value));
+            value = f32_round(&mut c, value);
         }
         return val(value, ty);
     }
@@ -37986,7 +38003,7 @@ fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, t
             single := u64(is_f32(&mut c, expected));
             mut value = float_op_call(&mut c, op, oldvalue, v.t, single);
             if single != 0 {
-                value = invoke(&mut c, view("rt_f32_round"), one(value));
+                value = f32_round(&mut c, value);
             }
             v = val(value, expected);
         } else {
