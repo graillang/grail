@@ -14774,5 +14774,245 @@
       "x86_64"
     ],
     "note": "a Cancelled task is a TaskFailure of kind 16 at try_join; join re-raises it; the scope that was cancelled does not re-raise an abandoned Cancelled child"
+  },
+  {
+    "name": "unboxed-ref-exchange",
+    "files": [
+      "compiler/tests/unboxed_ref_exchange.grl"
+    ],
+    "stdout": "local 1 / new 2\nnew! 106\nright 4 / left! 103 / new 5\none 7 / zero! 106 / new 11\nvalue! 109\nend\ndrop value! 109\ndrop one 7\ndrop zero! 106\ndrop new 8\ndrop right 4\ndrop left! 103\ndrop new 5\ndrop local 1\ndrop new! 102\n",
+    "note": "a `&mut` to a record reaches it in a local, a field, a vector element and a map value; `exchange` returns the old value whole and every owned field is dropped once (unboxed-values.md, stage 1a)"
+  },
+  {
+    "name": "unboxed-ref-generic",
+    "files": [
+      "compiler/tests/unboxed_ref_generic.grl"
+    ],
+    "stdout": "3\n3 three 4 four\n5 0\n60\n2b 3c 1a\n0 9 7\n11 locked 12 swapped\n",
+    "note": "one generic body over `&mut T` at a number, a record and an enum, and a record exchanged under a Mutex"
+  },
+  {
+    "name": "unboxed-ref-dyn",
+    "files": [
+      "compiler/tests/unboxed_ref_dyn.grl"
+    ],
+    "stdout": "8 16\n24\n41\n69\n14 73\n17 51\n11\n20\n",
+    "note": "a record as an interface object: owned, borrowed from the owned object, borrowed from a `&T`, and written through `&mut dyn`; a number beside it, since a dispatch site cannot know which it has"
+  },
+  {
+    "name": "unboxed-ref-routes",
+    "files": [
+      "compiler/tests/unboxed_ref_routes.grl"
+    ],
+    "stdout": "12\n72\n12 bb\n206\n104\n13\n42 rc\n",
+    "note": "references to records made by a by-reference pattern, a loop over `&v`, a closure capture, a receiver on a nested field, an `Rc` and a stored reference"
+  },
+  {
+    "name": "unboxed-ref-other-kinds",
+    "files": [
+      "compiler/tests/unboxed_ref_other_kinds.grl"
+    ],
+    "stdout": "3 0\n3 9 1\nrenamed again\n100 5\n9 3 renamed 50\n0 1 again 5\n4 0 6\n",
+    "note": "stage 1a changes references to records only: assigning and exchanging through a reference to an enum, a vector, a string and a number, as a local, a field and an element, behaves as before"
+  },
+  {
+    "name": "unboxed-ref-assign",
+    "files": [
+      "compiler/tests/unboxed_ref_assign.grl"
+    ],
+    "stdout": "drop small 1 s\ns 2\ndrop small 4 s\nb 3 5\ndrop small 6 s\nv 8 7\ndrop wide 14 w\nw 30 31 32 33 34 / 20 24\no 7 7 7 / 10 11 12\nend\ndrop wide 24 w\ndrop wide 34 w\ndrop small 8 s\ndrop small 7 s\ndrop small 3 s\ndrop small 5 s\ndrop small 2 s\n",
+    "note": "`*r = value` and `exchange` through a reference to a record of 2 words (moved in line), of 6 words (the runtime loop) and to an extern \"C\" record of 12 bytes (swapped by byte size); the old value is dropped once, where it is replaced"
+  },
+  {
+    "name": "unboxed-ref-reject-uninit-mut",
+    "source": "struct P { x: u64, s: string }\nstruct Q { a: P, b: P }\nfn fill<a>(p: (&a mut P)) { p.x = 5; }\nfn peek<a>(p: (&a P)) -> u64 { return p.x; }\nfn eat(p: P) -> u64 { return p.x; }\nfn main() { mut p: P; fill(&mut p); println(p.x); }\n",
+    "reject": true,
+    "diagnostic": [
+      "borrow conflicts with active access"
+    ],
+    "note": "a reference to a record is the record's address, so there must be a record: an exclusive borrow of a local that was never assigned is refused (ownership.grl, borrow_place needs a complete place)"
+  },
+  {
+    "name": "unboxed-ref-reject-uninit-shared",
+    "source": "struct P { x: u64, s: string }\nstruct Q { a: P, b: P }\nfn fill<a>(p: (&a mut P)) { p.x = 5; }\nfn peek<a>(p: (&a P)) -> u64 { return p.x; }\nfn eat(p: P) -> u64 { return p.x; }\nfn main() { mut p: P; println(peek(&p)); }\n",
+    "reject": true,
+    "diagnostic": [
+      "borrow conflicts with active access"
+    ],
+    "note": "a reference to a record is the record's address, so there must be a record: a shared borrow of a local that was never assigned is refused (ownership.grl, borrow_place needs a complete place)"
+  },
+  {
+    "name": "unboxed-ref-reject-moved-mut",
+    "source": "struct P { x: u64, s: string }\nstruct Q { a: P, b: P }\nfn fill<a>(p: (&a mut P)) { p.x = 5; }\nfn peek<a>(p: (&a P)) -> u64 { return p.x; }\nfn eat(p: P) -> u64 { return p.x; }\nfn main() { mut p = P { x: 1, s: \"a\" }; eat(p); fill(&mut p); }\n",
+    "reject": true,
+    "diagnostic": [
+      "borrow conflicts with active access"
+    ],
+    "note": "a reference to a record is the record's address, so there must be a record: an exclusive borrow of a moved local is refused (ownership.grl, borrow_place needs a complete place)"
+  },
+  {
+    "name": "unboxed-ref-reject-moved-shared",
+    "source": "struct P { x: u64, s: string }\nstruct Q { a: P, b: P }\nfn fill<a>(p: (&a mut P)) { p.x = 5; }\nfn peek<a>(p: (&a P)) -> u64 { return p.x; }\nfn eat(p: P) -> u64 { return p.x; }\nfn main() { p := P { x: 1, s: \"a\" }; eat(p); println(peek(&p)); }\n",
+    "reject": true,
+    "diagnostic": [
+      "borrow conflicts with active access"
+    ],
+    "note": "a reference to a record is the record's address, so there must be a record: a shared borrow of a moved local is refused (ownership.grl, borrow_place needs a complete place)"
+  },
+  {
+    "name": "unboxed-ref-reject-hole-mut",
+    "source": "struct P { x: u64, s: string }\nstruct Q { a: P, b: P }\nfn fill<a>(p: (&a mut P)) { p.x = 5; }\nfn peek<a>(p: (&a P)) -> u64 { return p.x; }\nfn eat(p: P) -> u64 { return p.x; }\nfn main() { mut q = Q { a: P { x: 1, s: \"a\" }, b: P { x: 2, s: \"b\" } }; eat(q.a); fill(&mut q.a); }\n",
+    "reject": true,
+    "diagnostic": [
+      "borrow conflicts with active access"
+    ],
+    "note": "a reference to a record is the record's address, so there must be a record: an exclusive borrow of a field that was moved out is refused (ownership.grl, borrow_place needs a complete place)"
+  },
+  {
+    "name": "unboxed-ref-reject-hole-shared",
+    "source": "struct P { x: u64, s: string }\nstruct Q { a: P, b: P }\nfn fill<a>(p: (&a mut P)) { p.x = 5; }\nfn peek<a>(p: (&a P)) -> u64 { return p.x; }\nfn eat(p: P) -> u64 { return p.x; }\nfn main() { q := Q { a: P { x: 1, s: \"a\" }, b: P { x: 2, s: \"b\" } }; eat(q.a); println(peek(&q.a)); }\n",
+    "reject": true,
+    "diagnostic": [
+      "borrow conflicts with active access"
+    ],
+    "note": "a reference to a record is the record's address, so there must be a record: a shared borrow of a field that was moved out is refused (ownership.grl, borrow_place needs a complete place)"
+  },
+  {
+    "name": "unboxed-ref-reject-hole-whole",
+    "source": "struct P { x: u64, s: string }\nstruct Q { a: P, b: P }\nfn fill<a>(p: (&a mut P)) { p.x = 5; }\nfn peek<a>(p: (&a P)) -> u64 { return p.x; }\nfn eat(p: P) -> u64 { return p.x; }\nfn pq<a>(q: (&a Q)) -> u64 { return q.b.x; }\nfn main() { q := Q { a: P { x: 1, s: \"a\" }, b: P { x: 2, s: \"b\" } }; eat(q.a); println(pq(&q)); }\n",
+    "reject": true,
+    "diagnostic": [
+      "borrow conflicts with active access"
+    ],
+    "note": "a reference to a record is the record's address, so there must be a record: a borrow of a record one of whose fields was moved out is refused (ownership.grl, borrow_place needs a complete place)"
+  },
+  {
+    "name": "unboxed-ref-reject-maybe-moved",
+    "source": "struct P { x: u64, s: string }\nstruct Q { a: P, b: P }\nfn fill<a>(p: (&a mut P)) { p.x = 5; }\nfn peek<a>(p: (&a P)) -> u64 { return p.x; }\nfn eat(p: P) -> u64 { return p.x; }\nfn main() { mut p = P { x: 1, s: \"a\" }; if p.x == 1 { eat(p); } fill(&mut p); }\n",
+    "reject": true,
+    "diagnostic": [
+      "borrow conflicts with active access"
+    ],
+    "note": "a reference to a record is the record's address, so there must be a record: a borrow of a local that is moved on one path is refused (ownership.grl, borrow_place needs a complete place)"
+  },
+  {
+    "name": "unboxed-ref-reject-exchange-moved",
+    "source": "struct P { x: u64, s: string }\nstruct Q { a: P, b: P }\nfn fill<a>(p: (&a mut P)) { p.x = 5; }\nfn peek<a>(p: (&a P)) -> u64 { return p.x; }\nfn eat(p: P) -> u64 { return p.x; }\nfn main() { mut p = P { x: 1, s: \"a\" }; eat(p); old := exchange(&mut p, P { x: 2, s: \"b\" }); println(old.x); }\n",
+    "reject": true,
+    "diagnostic": [
+      "borrow conflicts with active access"
+    ],
+    "note": "a reference to a record is the record's address, so there must be a record: `exchange` into a moved local is refused (ownership.grl, borrow_place needs a complete place)"
+  },
+  {
+    "name": "unboxed-ref-refilled-places",
+    "source": "struct P { x: u64, s: string }\nstruct Q { a: P, b: P }\nfn fill<a>(p: (&a mut P)) { p.x = 5; }\nfn peek<a>(p: (&a P)) -> u64 { return p.x; }\nfn eat(p: P) -> u64 { return p.x; }\nfn main() -> u64 {\n    mut p: P;\n    p = P { x: 1, s: \"a\" };\n    fill(&mut p);\n    println(p.x);\n    mut q = Q { a: P { x: 1, s: \"a\" }, b: P { x: 2, s: \"b\" } };\n    eat(q.a);\n    q.a = P { x: 9, s: \"z\" };\n    fill(&mut q.a);\n    println(q.a.x + q.b.x);\n    mut r = P { x: 1, s: \"a\" };\n    eat(r);\n    r = P { x: 2, s: \"b\" };\n    fill(&mut r);\n    println(r.x);\n    return 0;\n}\n",
+    "stdout": "5\n7\n5\n",
+    "note": "a place that held nothing - a local declared without a value, a field that was moved out, a moved local - is assigned by storing the new record's word, and can then be borrowed: assignment writes the place, it does not write through the old record"
+  },
+  {
+    "name": "unboxed-ref-record-is-its-address",
+    "source": "struct P { x: u64, y: u64 }\nfn second<a>(p: (&a P)) -> u64 {\n    return p.y;\n}\nfn bump<a>(p: (&a mut P)) {\n    p.y = p.y + 1;\n}\nfn main() -> u64 {\n    mut p = P { x: 1, y: 2 };\n    bump(&mut p);\n    println(second(&p));\n    return 0;\n}\n",
+    "stdout": "3\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asm": [
+      {
+        "in": "f_main_second",
+        "text": "movq -8(%rbp),%rax\nmovq 8(%rax),%rax"
+      }
+    ],
+    "asmAbsent": [
+      {
+        "in": "f_main_second",
+        "text": "movq (%rax),%rax"
+      },
+      {
+        "in": "f_main_main",
+        "text": "leaq -8(%rbp),%rax"
+      }
+    ],
+    "note": "the stage 1a representation, pinned: a field read through `&P` is one load from the reference (it was a load of the record's address and then the field), and passing `&p` of a local record passes the local's word, so the local no longer has its address taken"
+  },
+  {
+    "name": "unboxed-plain-stays-affine-moved-binding",
+    "source": "struct P { x: u64, y: u64 }\nstruct R { f: P, g: P }\nfn take(p: P) -> u64 { return p.x; }\nfn main() { a := P { x: 1, y: 2 }; b := a; println(a.x + b.y); }\n",
+    "reject": true,
+    "diagnostic": [
+      "use of moved, borrowed or partially initialized value"
+    ],
+    "note": "stage 1b stores plain records inline and must not change what the checker accepts: `b := a` moves a plain record (docs/design/unboxed-values.md, section 4)"
+  },
+  {
+    "name": "unboxed-plain-stays-affine-moved-argument",
+    "source": "struct P { x: u64, y: u64 }\nstruct R { f: P, g: P }\nfn take(p: P) -> u64 { return p.x; }\nfn main() { a := P { x: 1, y: 2 }; take(a); println(a.x); }\n",
+    "reject": true,
+    "diagnostic": [
+      "use of moved, borrowed or partially initialized value"
+    ],
+    "note": "stage 1b stores plain records inline and must not change what the checker accepts: passing a plain record by value moves it (docs/design/unboxed-values.md, section 4)"
+  },
+  {
+    "name": "unboxed-plain-stays-affine-element-read-borrows-push",
+    "source": "struct P { x: u64, y: u64 }\nstruct R { f: P, g: P }\nfn take(p: P) -> u64 { return p.x; }\nfn main() { mut v = P[P { x: 1, y: 2 }]; q := v[0]; v.push(P { x: 3, y: 4 }); println(q.x); }\n",
+    "reject": true,
+    "diagnostic": [
+      "mutation conflicts with live borrow"
+    ],
+    "note": "stage 1b stores plain records inline and must not change what the checker accepts: `q := v[i]` borrows the vector, so it cannot grow under `q` (docs/design/unboxed-values.md, section 4)"
+  },
+  {
+    "name": "unboxed-plain-stays-affine-element-read-borrows-store",
+    "source": "struct P { x: u64, y: u64 }\nstruct R { f: P, g: P }\nfn take(p: P) -> u64 { return p.x; }\nfn main() { mut v = P[P { x: 1, y: 2 }]; q := v[0]; v[0] = P { x: 3, y: 4 }; println(q.x); }\n",
+    "reject": true,
+    "diagnostic": [
+      "borrow conflicts with active access"
+    ],
+    "note": "stage 1b stores plain records inline and must not change what the checker accepts: `q := v[i]` borrows the vector, so the element cannot be replaced under `q` (docs/design/unboxed-values.md, section 4)"
+  },
+  {
+    "name": "unboxed-flat-vec-ops",
+    "files": [
+      "compiler/tests/unboxed_flat_vec_ops.grl"
+    ],
+    "stdout": "20 0 361\n19 361 200 7 26\n5:26 1:1 2:4 100:200 7:16 50:51 \n50:51 7:16 100:200 2:4 1:1 5:26 \n0 0\n6 true\n3 7 4\n8 2 50\n169\n846\n3689 70 2000 5 77\n6 50\n0\n",
+    "note": "every vector operation the language has for records - push, index, element and field writes, &mut v[i], pop, truncate, insert, remove, swap, reverse, slices, by-reference and consuming loops - over a 2-word record and a 5-word record nesting two others"
+  },
+  {
+    "name": "unboxed-flat-mixed",
+    "files": [
+      "compiler/tests/unboxed_flat_mixed.grl"
+    ],
+    "stdout": "5 6 one! 3 9\n513\nn0 41 renamed 9 3\n8 text left 9 3\ndrop tag 1\n8 3\ndrop tag 2\ntruncated\n5 4 2\n3 1\n1 3 4 9\nend\ndrop tag 0\ndrop tag 10\n",
+    "note": "plain records beside owned data: fields of a record with a string, vectors of such records, a generic pair built with and without written type arguments, a record with a Drop field, map values and a sorted vector; every owned value dropped once"
+  },
+  {
+    "name": "unboxed-flat-c-records",
+    "files": [
+      "compiler/tests/unboxed_flat_c_records.grl"
+    ],
+    "stdout": "21950\n100.5 9 3 40 -1000 65535\n9 -49 1 0.25 48\n85601.5\n",
+    "note": "a vector of extern \"C\" records with f32, u8, u16 and i32 fields and an embedded record: element and field reads and writes, &mut, remove, pop, swap"
+  },
+  {
+    "name": "unboxed-plain-stays-affine-field-move",
+    "source": "struct P { x: u64, y: u64 }\nstruct R { f: P, g: P }\nfn take(p: P) -> u64 { return p.x; }\nfn main() { r := R { f: P { x: 1, y: 2 }, g: P { x: 3, y: 4 } }; a := r.f; println(a.x + r.f.y); }\n",
+    "reject": true,
+    "diagnostic": [
+      "use of moved, borrowed or partially initialized value"
+    ],
+    "note": "stage 1b stores plain records inline and must not change what the checker accepts: `a := r.f` moves the field out of the record, it does not copy it (docs/design/unboxed-values.md, section 4)"
+  },
+  {
+    "name": "unboxed-inline-fields",
+    "files": [
+      "compiler/tests/unboxed_inline_fields.grl"
+    ],
+    "stdout": "1 2 3 4 9\n6040 true\n70 7 8\n26\n100008\n1002 box 5 3\n1002 box\n",
+    "note": "plain records stored inline in plain records and in a record with a string: field-of-field reads and writes, whole-field replacement, &mut to an inline field, exchange through it, a move out and a refill, structural ==, and moving the containing value"
   }
 ]

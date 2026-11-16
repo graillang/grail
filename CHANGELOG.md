@@ -163,6 +163,23 @@
   (`addss`): exact for + - * / and sqrt, since 53 >= 2*24 + 2. Loads that feed anything else are
   widened in place of the copy. `f32-held-as-binary32-in-registers` pins the results.
 
+- **Records of plain data are stored inline.** A struct or tuple with no `Drop` whose fields are
+  numbers, bools, chars, references or other such records is now stored in place where it is a
+  field of another record or an element of a vector, and so is every `extern "C"` record in a
+  vector: `Vertex[]` is one buffer of vertices, laid out as a C array, not a vector of pointers.
+  One million three-word records take 24 MB instead of 69 MB, and iterating them in a shuffled
+  order costs what iterating them in order does. What a program may write and what it means do not
+  change - a plain record still moves, and `q := v[i]` still borrows. Interface files say
+  `record plain = inline`. Second stage of docs/design/unboxed-values.md.
+
+- **A reference to a record is the record's address.** `&T` and `&mut T` for a struct, a tuple or
+  an `extern "C"` record used to be the address of a word holding the record's address; a field
+  read through a reference now costs one load, not two, and a local record whose reference is
+  passed no longer has to live in memory. Nothing a safe program can observe changes: assignment
+  and `exchange` through such a reference replace the record's contents, and a reference to an
+  enum, a vector, a string or a number is what it was. Interface files state it (`ref record =
+  address` on the `abi` line), so an object built by an earlier compiler is refused instead of
+  linked. First stage of docs/design/unboxed-values.md.
 - **Native backend: float operations are not calls.** `+ - * /`, comparisons, negation, `abs`,
   `sqrt` and conversions from integers of up to 32 bits (and signed 64-bit to `f64`) are emitted in
   line, and so is access to `f32[]`/`u32[]`/`i32[]` elements and to narrow fields of `extern "C"`
