@@ -1,5 +1,20 @@
 ## Unreleased
 
+- **Threads of your own: `thread::spawn`.** `lib/thread.grl` starts an OS thread that runs one
+  closure: `spawn(config, f)`, `join`, `try_join`, `detach`, `with_current`, `sleep_until`, and
+  `thread::Local<T>` read through a `thread::Ctx` that cannot leave its thread. A handle that is
+  dropped joins. `Config` asks for a name, a stack size, a processor set and a priority; a refusal
+  by the OS is an error value from `spawn` and the closure does not run. A failed check on a
+  spawned thread is contained like a task's - a `TaskFailure` at `try_join`, re-raised by `join` -
+  and running off its stack is the named `stack overflow`. **What a thread is not:** it is not a
+  scheduler worker; nothing is stolen onto it; a wait blocks it in the kernel. Linux and Windows;
+  on macOS `spawn` returns `Unsupported`. Not checked yet: a `spawn` closure that captures a borrow
+  or a thread-affine value is accepted until bounds on closure types land.
+  `docs/design/threads.md`, the book's concurrency chapter.
+- Fixed: an `extern "C"` call with no arguments that was the first thing in its function left the
+  thread pointer on libc's side in a libc-linked program, so later runtime calls on that thread
+  (starting a thread, for one) read the wrong record.
+
 - **A buffer of 512 bytes or more starts on a 64-byte boundary.** Every allocation of that size -
   a vector's storage, a byte buffer, a record that large - is cache-line aligned, on every path and
   every thread; smaller ones stay 16-byte aligned. It costs 32 bytes per megabyte arena and nothing
