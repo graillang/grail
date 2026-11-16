@@ -2877,7 +2877,7 @@ fn tls_bss<a>(c: (&a mut C)) -> unit {
     if tls_bridge(&mut c) {
         tls_thread_stubs(&mut c);
     }
-    o(&mut c, view(".bss\n.p2align 3\nrt_state: .zero 4096\n"));
+    o(&mut c, view(".bss\n.p2align 3\nrt_state: .zero 8192\n"));
     if tls_bridge(&mut c) {
         o(&mut c, view(".section .tbss,\"awT\",@nobits\n.p2align 3\nrt_tls_record: .zero 8\n"));
     }
@@ -19596,6 +19596,15 @@ fn call_slot_out<a, b, d>(c: (&a mut C), text: &b [u8], why: &d [u8]) -> unit {
     o(&mut c, text);
     return ();
 }
+// Whether the body being emitted is the runtime's rt_sites_fill, whose one raw call reaches the
+// compiler-emitted rt_sites helper.
+fn raw_call_is_sites_helper<a>(c: (&a mut C)) -> bool {
+    if (c.raw == 0) || (c.fx_cur == 0) || (c.fx_cur > c.fx_syms.len()) {
+        return false;
+    }
+    sym := c.fx_syms[c.fx_cur - 1].copy();
+    return same(view(sym), view("rt_sites_fill")) || same(view(sym), view("_rt_sites_fill"));
+}
 // The compiler's own dispatch inside trusted code (a closure's drop through the slot its own body
 // installed): every body it can reach is recorded itself, so it is not an unknown.
 fn call_dispatch_out<a, b>(c: (&a mut C), text: &b [u8]) -> unit {
@@ -25459,7 +25468,18 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         get(&mut c, args[1], view("%rdi"));
         get(&mut c, args[2], view("%rsi"));
         get(&mut c, args[0], view("%rax"));
-        call_slot_out(&mut c, view("call *%rax\n"), view("a call through a value the compiler did not name"));
+        if raw_call_is_sites_helper(&mut c) {
+            // The runtime's call to the site-table helper: the target is the address the entry stub
+            // published in state word 3400, and only the entry stub writes that word, always with
+            // `rt_sites` - a leaf this compiler emits beside the tables (site_table). So the call is
+            // named, not unknown. The runtime cannot spell it as a direct call: it is compiled by the
+            // bootstrap seed too, which knows no such form.
+            fx_edge(&mut c, view("rt_sites"), 0);
+            fx_called(&mut c);
+            o(&mut c, view("call *%rax\n"));
+        } else {
+            call_slot_out(&mut c, view("call *%rax\n"), view("a call through a value the compiler did not name"));
+        }
     }
     if id == 112 {
         get(&mut c, args[0], view("%rdi"));
@@ -45100,7 +45120,7 @@ pub fn main() -> u64 {
         o(
             &mut c,
             view(
-                "ud2\nrt_win_thread_start:\nsubq $56,%rsp\nmovq %rdi,32(%rsp)\nmovq %rsi,40(%rsp)\nmovq %rcx,%rdi\ncall rt_win_thread_main\nmovq 32(%rsp),%rdi\nmovq 40(%rsp),%rsi\naddq $56,%rsp\nret\n.bss\n.p2align 3\nrt_state: .zero 4096\n"
+                "ud2\nrt_win_thread_start:\nsubq $56,%rsp\nmovq %rdi,32(%rsp)\nmovq %rsi,40(%rsp)\nmovq %rcx,%rdi\ncall rt_win_thread_main\nmovq 32(%rsp),%rdi\nmovq 40(%rsp),%rsi\naddq $56,%rsp\nret\n.bss\n.p2align 3\nrt_state: .zero 8192\n"
             )
         );
     } else {
@@ -45111,12 +45131,12 @@ pub fn main() -> u64 {
         o(
             &mut c,
             view(
-                "ud2\nrt_win_thread_start:\npushq %rbp\nmovq %rsp,%rbp\ncall rt_win_thread_main\npopq %rbp\nret\n.bss\n.p2align 3\nrt_state: .zero 4096\n"
+                "ud2\nrt_win_thread_start:\npushq %rbp\nmovq %rsp,%rbp\ncall rt_win_thread_main\npopq %rbp\nret\n.bss\n.p2align 3\nrt_state: .zero 8192\n"
             )
         );
     } else {
     if (c.target == 3) || (c.target == 4) {
-        o(&mut c, view("ud2\n.bss\n.p2align 3\nrt_state: .zero 4096\n"));
+        o(&mut c, view("ud2\n.bss\n.p2align 3\nrt_state: .zero 8192\n"));
     } else {
         if c.plat == 1 {
             o(

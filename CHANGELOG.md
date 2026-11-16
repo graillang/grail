@@ -1,5 +1,13 @@
 ## Unreleased
 
+- Fixed: **`@no_alloc` refused every function with a check that can fail** - an index, an overflow,
+  a division, a narrowing, an unwrap, a refined parameter - because the failure report allocated:
+  its texts were heap strings (`rt_new`, `rt_reserveb`, `rt_alloc`, and the runtime's literals are
+  heap values), and it reached the compiler's site-table helper through an unnamed indirect call.
+  The dying report is now written in a process-state report block (`rt_state` grows to 8192 bytes),
+  its literals are static views, and the helper call is a named edge. The checks still fail, so
+  `@no_panic` still refuses them.
+
 - **Module statics, baked tier** (docs/design/module-values.md, stage 1): `static NAME: T = init;`
   where `init` is a constant expression or `@f(...)` computed while compiling. A static is one
   read-only object in the declaring module's object: a number or `bool` read is a load, any other
