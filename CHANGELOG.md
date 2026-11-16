@@ -1,5 +1,10 @@
 ## Unreleased
 
+- Integer conversions (`u8(x)`, `i32(y)`, `wrapping_u16(z)`, ...) are emitted in line by the native
+  backend: a widening costs nothing, a wrapping conversion is a shift pair, and a checked narrowing
+  is a compare and a branch that calls the runtime only to report a value that does not fit (the
+  report is unchanged). They were a runtime call each, 8 % of the compiler's own run time.
+
 - **An edit to one function recompiles that function.** The per-function layer of the build store
   now replays every other body of the module: a body's assembly no longer depends on the bodies
   before it (labels are numbered per function, `.L<unit>_<function>_<n>`, and its positions count

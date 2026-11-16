@@ -3943,6 +3943,86 @@ fn store_params<a>(c: (&a mut C), count: u64) -> unit {
     }
     return ();
 }
+// An integer conversion of the value in slot `v`, from the type `from` codes to the type `to`
+// codes (int_code: bits, 256 signed, 512 wrapping). The native backend emits it in line: nothing at
+// all when every value of the source fits the target, a truncation when the conversion wraps, and
+// otherwise a range test whose failing side calls `rt_int_cast` - which finds the value out of range
+// and reports it exactly as it always did. The LLVM lifter and `--emit-ir` keep the call, and so does
+// the unsafe runtime, which defines it.
+fn int_cast<a>(c: (&a mut C), v: u64, from: u64, to: u64) -> u64 {
+    if (c.backend != 0) || (c.emit_ir != 0) || (c.raw != 0) {
+        fv := imm(&mut c, from);
+        tv := imm(&mut c, to);
+        return invoke(&mut c, view("rt_int_cast"), three(v, fv, tv));
+    }
+    fb := from & 255;
+    fs := (from / 256) & 1;
+    tb := to & 255;
+    ts := (to / 256) & 1;
+    wrap := (to / 512) & 1;
+    // Every source value fits: unsigned into a wider-or-equal unsigned or a strictly wider signed,
+    // signed into a wider-or-equal signed. A value is held in 64 bits, zero- or sign-extended, so
+    // the bits do not change.
+    mut covered = false;
+    if ts == 0 {
+        covered = (fs == 0) && (fb <= tb);
+    } else {
+        covered = ((fs == 0) && (fb < tb)) || ((fs == 1) && (fb <= tb));
+    }
+    if covered || ((tb == 64) && (fb == 64) && (wrap != 0)) {
+        return v;
+    }
+    get(&mut c, v, view("%rax"));
+    if wrap != 0 {
+        // rt_int_truncate: the low bits, zero- or sign-extended.
+        if tb < 64 {
+            k := 64 - tb;
+            o(&mut c, view("shlq $"));
+            on(&mut c, k);
+            if ts == 0 {
+                o(&mut c, view(",%rax\nshrq $"));
+            } else {
+                o(&mut c, view(",%rax\nsarq $"));
+            }
+            on(&mut c, k);
+            o(&mut c, view(",%rax\n"));
+        }
+        return save(&mut c);
+    }
+    ok := label(&mut c);
+    if (fs == 1) && (ts == 1) {
+        // Signed into narrower signed: the value fits when its low bits, sign-extended, are it.
+        k := 64 - tb;
+        o(&mut c, view("movq %rax,%rcx\nshlq $"));
+        on(&mut c, k);
+        o(&mut c, view(",%rcx\nsarq $"));
+        on(&mut c, k);
+        o(&mut c, view(",%rcx\ncmpq %rax,%rcx\n"));
+        jump(&mut c, view("je"), ok);
+    } else {
+        // Otherwise an unsigned comparison with the target's largest value plus one: a negative
+        // signed source is a huge unsigned number, so it fails it too.
+        // (An unsigned 64-bit target reaches here only from a signed source.)
+        mut limit = 9223372036854775808;
+        if (ts == 0) && (tb < 64) {
+            limit = 1 << tb;
+        } else if ts == 1 {
+            limit = 1 << (tb - 1);
+        }
+        o(&mut c, view("movabsq $"));
+        on(&mut c, limit);
+        o(&mut c, view(",%rcx\ncmpq %rcx,%rax\n"));
+        jump(&mut c, view("jb"), ok);
+    }
+    o(&mut c, view("movq %rax,%rdi\nmovq $"));
+    on(&mut c, from);
+    o(&mut c, view(",%rsi\nmovq $"));
+    on(&mut c, to);
+    o(&mut c, view(",%rdx\n"));
+    call_out(&mut c, view("rt_int_cast"));
+    mark(&mut c, ok);
+    return save(&mut c);
+}
 fn invoke<a, b>(c: (&a mut C), name: &b [u8], args: u64[]) -> u64 {
     if 6 < args.len() {
         // Runtime helpers take at most six words; more would need the spill record.
@@ -33298,9 +33378,7 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
                     code := int_code(&mut c, value.ty);
                     u := int_type(&mut c, 64, 0);
                     to := int_code(&mut c, u);
-                    fv := imm(&mut c, code);
-                    tv := imm(&mut c, to);
-                    widened := invoke(&mut c, view("rt_int_cast"), three(value.t, fv, tv));
+                    widened := int_cast(&mut c, value.t, code, to);
                     slot := invoke(&mut c, view("rt_char_from"), one(widened));
                     return val(slot, ty);
                 }
@@ -33399,9 +33477,7 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
                 if wrapping != 0 {
                     to = (to % 512) + 512;
                 }
-                fv := imm(&mut c, from);
-                tv := imm(&mut c, to);
-                slot := invoke(&mut c, view("rt_int_cast"), three(value.t, fv, tv));
+                slot := int_cast(&mut c, value.t, from, to);
                 return val(slot, ty);
             }
         }
