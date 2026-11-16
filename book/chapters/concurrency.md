@@ -7,7 +7,11 @@ the item, the result, the context *and* the closure's captured environment each 
 transferable (may move to another thread) and, where several workers share them, shareable. A
 foreign handle is neither until its declaration says so, so a handle captured by a closure is
 refused by name, with the capture and the path that reached it in the message. Results must hold no
-borrows. The library's opt-in generic bounds are still spelled `Send`/`Share`.
+borrows. The library's generic bounds are spelled `Send`, `Share` and `Owned`, and a closure
+parameter states the same bounds on its type: `pool::map` takes `f: Fn<Share>(T) -> U`,
+`pool::spawn` takes `f: FnMut<Send, Owned>() -> R` (see "Saying what a closure may capture" in the
+closures chapter). A wrapper that takes a bare `Fn(..)` cannot pass it on to a worker: its type no
+longer shows the captures the worker would reach.
 
 {{example:concurrency}}
 

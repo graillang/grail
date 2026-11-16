@@ -1,0 +1,19 @@
+// The one way a borrow gets behind a `dyn`: a record whose field is an erased `Fn()->u64`. The
+// record "holds no borrow", so it may be boxed, kept, and called after the frame is gone.
+interface Peek { fn peek(self: &Self) -> u64; }
+struct Lazy { f: Fn()->u64 }
+impl Peek for Lazy { fn peek(self: &Self) -> u64 { g := &self.f; return g(); } }
+struct Q { items: (dyn Peek)[] }
+fn stash<a>(q: (&a mut Q), p: dyn Peek) -> unit { q.items.push(p); }
+fn fill<a>(q: (&a mut Q)) -> unit {
+    mut data = u64[41, 2, 3, 4];
+    view := &data;
+    stash(&mut q, Lazy { f: || -> u64 view[0] + 1 });
+}
+fn main() {
+    mut q = Q { items: (dyn Peek)[] };
+    fill(&mut q);
+    mut junk = u64[9, 9, 9, 9, 9, 9];
+    p := q.items.pop()!;
+    println(p.peek());
+}

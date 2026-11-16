@@ -1,0 +1,18 @@
+// A `dyn I` is refused borrowed data where it is built, so the object itself cannot carry a
+// borrow out of a frame (and it is neither Send nor Share: n:9329-9332).
+interface Peek { fn peek(self: &Self) -> u64; }
+struct View<d> { r: (&d u64[]) }
+impl<d> Peek for View<d> { fn peek(self: &Self) -> u64 { return self.r[0]; } }
+struct Q { items: (dyn Peek)[] }
+fn stash<a>(q: (&a mut Q), p: dyn Peek) -> unit { q.items.push(p); }
+fn fill<a>(q: (&a mut Q)) -> unit {
+    mut data = u64[41, 2, 3, 4];
+    stash(&mut q, View { r: &data });
+}
+fn main() {
+    mut q = Q { items: (dyn Peek)[] };
+    fill(&mut q);
+    mut junk = u64[9, 9, 9, 9, 9, 9];
+    p := q.items.pop()!;
+    println(p.peek());
+}

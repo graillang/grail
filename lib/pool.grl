@@ -50,13 +50,13 @@ module pool;
 
 // One job per input element, results in input order. The closure captures are read-only on every
 // worker, so they must be plain data (see above).
-pub fn map<T:Send,U:Send>(items:T[],f:Fn(T)->U)->U[]{
+pub fn map<T:Send,U:Send+Owned>(items:T[],f:Fn<Share>(T)->U)->U[]{
     return parallel_map(items,0,|item: T, unused: u64| -> U f(item));
 }
 
 // `count` independent jobs, job `i` calling f(i); results in index order, so this is the parallel
 // "map over 0..count" and the shape a chunked loop takes when the caller does its own splits.
-pub fn run<U:Send>(count:u64,f:Fn(u64)->U)->U[]{
+pub fn run<U:Send+Owned>(count:u64,f:Fn<Share>(u64)->U)->U[]{
     mut index=u64[];
     for i in count{index.push(i);}
     return parallel_map(index,0,|i: u64, unused: u64| -> U f(i));
@@ -68,7 +68,7 @@ pub fn run<U:Send>(count:u64,f:Fn(u64)->U)->U[]{
 // The split is still two worth-paying passes over the data (each element leaves the vector and
 // enters its chunk) because a split without an exclusive borrow cannot hand out slices; that pass
 // is what stage 2's `&mut [T]` chunks remove.
-pub fn for_chunks<T:Send,U:Send>(data:T[],chunks:u64,f:Fn(T[])->U)->U[]{
+pub fn for_chunks<T:Send+Owned,U:Send+Owned>(data:T[],chunks:u64,f:Fn<Share>(T[])->U)->U[]{
     n:=data.len();
     if n==0{return U[];}
     mut count=chunks;
@@ -102,7 +102,7 @@ pub fn for_chunks<T:Send,U:Send>(data:T[],chunks:u64,f:Fn(T[])->U)->U[]{
 // holds has its own length, so an index past it is a bounds abort, and there is no way to name the
 // caller's data again - the argument is an exclusive loan of the whole thing, so any capture that
 // could reach it (a move, a shared slice, an exclusive slice) is a borrow error at the call site.
-pub fn chunks_mut<T:Send>(data: (&mut [T]), chunks: u64, f: Fn((&mut [T]))->unit) -> unit {
+pub fn chunks_mut<T:Send>(data: (&mut [T]), chunks: u64, f: Fn<Share>((&mut [T]))->unit) -> unit {
     parallel_for_chunks(data, chunks, f);
 }
 
@@ -113,11 +113,13 @@ pub fn chunks_mut<T:Send>(data: (&mut [T]), chunks: u64, f: Fn((&mut [T]))->unit
 // this module; `second` never leaves the calling thread and is called once, so it is an `FnMut`
 // and may write its own captures.
 pub struct Pair<A,B>{first:A,second:B}
-pub fn join<A:Send,B:Send>(first:Fn()->A,second:FnMut()->B)->Pair<A,B>{
+pub fn join<A:Send+Owned,B:Owned>(first:Fn<Send>()->A,second:FnMut()->B)->Pair<A,B>{
     mut here=second;
-    mut one=u64[0];
-    mut done=parallel_map(one,0,|i: u64, unused: u64| -> A first());
-    return Pair{first:done.pop()!,second:here()};
+    // `first` is a job of its own, waited on before this returns: that wait is what lets it borrow
+    // the caller's frame, and why its captures need only be transferable, not shareable.
+    job:=parallel_spawn(first);
+    b:=here();
+    return Pair{first:parallel_join(job),second:b};
 }
 
 // A job handle: `spawn` starts a job and returns it, `wait` takes its result. This is spawn-then-wait
@@ -126,9 +128,9 @@ pub fn join<A:Send,B:Send>(first:Fn()->A,second:FnMut()->B)->Pair<A,B>{
 // result comes back owned. The compiler refuses a callback that captured a borrow, because the
 // handle's type would not record that lifetime; everything else about the handle is ownership:
 // dropping it instead of waiting on it waits and discards, so a job never outlives its last owner.
-pub fn spawn<R:Send>(f:Fn()->R)->Job<R>{
+pub fn spawn<R:Send+Owned>(f:FnMut<Send,Owned>()->R)->Job<R>{
     return parallel_spawn(f);
 }
-pub fn wait<R:Send>(job:Job<R>)->R{
+pub fn wait<R:Send+Owned>(job:Job<R>)->R{
     return parallel_join(job);
 }
