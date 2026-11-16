@@ -1,0 +1,57 @@
+use hashmap;
+use hash;
+// A `&mut` to a record reaches the record wherever it lives: a local, a field, a vector element, a
+// map value. `exchange` hands back the old value whole, assignment through a field replaces part,
+// and every owned field is dropped exactly once.
+struct Name {
+    text: string,
+    n: u64
+}
+struct Pair {
+    left: Name,
+    right: Name
+}
+impl Drop for Name {
+    fn drop(self: &mut Name) {
+        println("drop {} {}", self.text, self.n);
+    }
+}
+fn mk(text: string, n: u64) -> Name {
+    return Name { text: text, n: n };
+}
+fn swap_in<a>(slot: (&a mut Name), n: u64) -> Name {
+    return exchange(slot, mk("new", n));
+}
+fn bump<a>(slot: (&a mut Name)) {
+    slot.n = slot.n + 100;
+    slot.text.append("!");
+}
+fn peek<a>(slot: (&a Name)) -> u64 {
+    return slot.n + slot.text.len();
+}
+fn main() -> u64 {
+    mut local = mk("local", 1);
+    old := swap_in(&mut local, 2);
+    println("{} {} / {} {}", old.text, old.n, local.text, local.n);
+    bump(&mut local);
+    println("{} {}", local.text, peek(&local));
+
+    mut pair = Pair { left: mk("left", 3), right: mk("right", 4) };
+    was := swap_in(&mut pair.right, 5);
+    bump(&mut pair.left);
+    println("{} {} / {} {} / {} {}", was.text, was.n, pair.left.text, pair.left.n, pair.right.text, pair.right.n);
+
+    mut v = Name[];
+    v.push(mk("zero", 6));
+    v.push(mk("one", 7));
+    out := swap_in(&mut v[1], 8);
+    bump(&mut v[0]);
+    println("{} {} / {} {} / {} {}", out.text, out.n, v[0].text, v[0].n, v[1].text, peek(&v[1]));
+
+    mut m: [string: Name] = [:];
+    m["k"] = mk("value", 9);
+    bump(&mut m["k"]);
+    println("{} {}", m["k"].text, m["k"].n);
+    println("end");
+    return 0;
+}
