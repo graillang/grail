@@ -8,6 +8,28 @@
   enum, a vector, a string or a number is what it was. Interface files state it (`ref record =
   address` on the `abi` line), so an object built by an earlier compiler is refused instead of
   linked. First stage of docs/design/unboxed-values.md.
+- **Native backend: float operations are not calls.** `+ - * /`, comparisons, negation, `abs`,
+  `sqrt` and conversions from integers of up to 32 bits (and signed 64-bit to `f64`) are emitted in
+  line, and so is access to `f32[]`/`u32[]`/`i32[]` elements and to narrow fields of `extern "C"`
+  records (one emitter, `sized_load`/`sized_store`). The LLVM backend keeps the called forms its
+  lifter rewrites. One million `x[i] = x[i] * a + y[i]` over `f32[]` goes from 7.6 ms to about 4 ms
+  a pass. `float-operations-agree-across-backends` pins every operation over edge values. The LLVM
+  lifter also treats `rt_refine`, `rt_task_fail` and the other runtime exits as non-returning.
+- `bench/` has `xform_f32`, `xform_f64`, `dot_f32` and `dot_f64`, with a README.
+
+- **LLVM backend: a failed check no longer costs the loop it guards.** `rt_fail` and `rt_trap` never
+  return, and the lifter now says so (`unreachable` after the call), as it already did for
+  `rt_abort`. A checked access to an 8-byte element (`f64[]`, `u64[]`) used to leave a returning call
+  in the loop body, which clobbered every register the loop held. A one-million-element `x[i] =
+  x[i] * a + y[i]` pass over `f64[]` goes from about 1.3 ms to 0.64 ms, and the `f64` dot product
+  from 2.0 ms to 0.62 ms (scalar C: 0.65 ms).
+
+- **`f32` arithmetic on the native backend rounds in hardware.** Every `f32` result used to be
+  rounded by a runtime routine written with integer shifts and a division; it is now one narrowing
+  and one widening conversion on x86-64, aarch64 and riscv64. A one-million-element `x[i] = x[i] * a
+  + y[i]` pass over `f32[]` goes from 259 ms to 7.6 ms. Non-NaN results are bit-identical to before
+  (`f32-round-hardware-matches-reference` checks four million words on every target); a result that
+  is a NaN is a quiet NaN and its payload bits are not promised.
 
 - `hash::write_byte` states its precondition in its signature (`value: u64 where value < 256`)
   instead of asserting it in its body: a caller that can show the value is a byte pays no check,
