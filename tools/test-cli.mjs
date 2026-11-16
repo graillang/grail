@@ -332,14 +332,18 @@ const fast = ['--interval', '40', '--debounce', '60'];
   assert.match(records[0].rendered, /^error\[E0005\][\s\S]*\^/, 'the record carries the caret form for a human');
   checks += 5;
 
-  // `grail build --watch`: one summary line naming the image, and a rebuilt one on change.
+  // `grail build --watch`: one summary line naming the image, and a rebuilt one on change. `-o` keeps
+  // this watcher's assembly out of `target/main.s`, which is the file the `check --watch` above
+  // compiles and then removes (a check writes no artefact): two watchers on one entry in one
+  // directory otherwise race, and the build assembles a file the check has just deleted. That race
+  // is what made this case fail as `error N ms` with `no such file or directory: target/main.s`.
   writeFileSync(file, ok);
-  const building = new Watcher(['build', '--watch', ...fast, 'main.grl'], dir);
-  assert.match(await building.at(1, 'the first build cycle'), /^built target\/main \d+ ms$/, 'a build cycle names what it built'); checks++;
-  assert.equal(String(execute(join(dir, 'target/main'), [], hostTarget).stdout), '42\n', 'the first cycle wrote a runnable image'); checks++;
+  const building = new Watcher(['build', '--watch', ...fast, 'main.grl', '-o', 'target/watched'], dir);
+  assert.match(await building.at(1, 'the first build cycle'), /^built target\/watched \d+ ms$/, 'a build cycle names what it built'); checks++;
+  assert.equal(String(execute(join(dir, 'target/watched'), [], hostTarget).stdout), '42\n', 'the first cycle wrote a runnable image'); checks++;
   writeFileSync(file, 'fn main() {\n    println(43);\n}\n');
-  assert.match(await building.at(2, 'the build cycle after a change'), /^built target\/main \d+ ms$/); checks++;
-  assert.equal(String(execute(join(dir, 'target/main'), [], hostTarget).stdout), '43\n', 'the rebuild replaced the image'); checks++;
+  assert.match(await building.at(2, 'the build cycle after a change'), /^built target\/watched \d+ ms$/); checks++;
+  assert.equal(String(execute(join(dir, 'target/watched'), [], hostTarget).stdout), '43\n', 'the rebuild replaced the image'); checks++;
 
   // SIGINT ends every watcher promptly. A signal has no handler to catch it (the runtime installs
   // none, and a builtin cannot be added without breaking the published bootstrap), so the process

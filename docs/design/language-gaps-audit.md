@@ -206,7 +206,12 @@ lesson is not "be careful", it is "change the shape first":
 
 1. **Flatten `options()` into a table** (word -> kind -> field), as its own commit with no behaviour
    change, gated by "every existing flag still parses". This is the step that removes the brace
-   hazard for every later flag.
+   hazard for every later flag. **Done**: `cli.grl` holds one `Flag` row per word in `flag_table()`,
+   and `options()` is a loop over it - a `word` -> `kind` -> `field` row, one setter per kind
+   (switch, text, list, number, ignored), and the watch flags (`--watch`, `--json`,
+   `--interval MS`, `--debounce MS`, `--diagnostics-json FILE`) left their own function for the same
+   table, so there is one place a flag is spelled and no nesting left to wedge open.
+   `bun tools/test-cli.mjs` reports 311 formatter/tool checks before and after the change.
 2. **Then the refusal.** An unknown `--word` sets `bad` and the build reports
    ``grail: unknown option `--x`; `grail build --help` lists the options this command takes``. The
    pass-through allowlist (`--separate`, `--print-inputs`, `--skip-body`, `--reported`, `--interface`,

@@ -2954,33 +2954,170 @@ fn flag_bits<a>(o: (&a Options), check_only: bool = false) -> u64 {
         + o.no_sites
         * 256;
 }
-// The watch flags: `--watch`, `--json`, `--interval MS`, `--debounce MS` and
-// `--diagnostics-json FILE`. Returns 0 for a word that is not one of them, otherwise 1 plus the
-// number of value arguments it took.
-fn watch_option<a, b>(o: (&a mut Options), word: &b [u8], args: (&b u8[][]), at: u64) -> u64 {
-    if eq(view(word), view("--watch")) {
-        // Watch mode: stay alive and re-run the cycle on change.
+// ---- The driver's own flags, as a table ----------------------------------------------------------
+// One row per word the driver reads: `word` is what the command line says, `kind` says what follows
+// it and what the driver does with it, and `field` names the `Options` slot the value lands in. A new
+// flag is a new row plus one arm of the setter its kind picks, never another level of
+// `else { if .. } else { .. }` - that nesting is what made a half-applied flag edit leave the
+// compiler unable to parse its own source (docs/design/language-gaps-audit.md, 4.1).
+struct Flag {
+    word: u8[],
+    kind: u64,
+    field: u64
+}
+// No argument: the word's presence is the value.
+const FLAG_SWITCH: u64 = 0;
+// One argument, stored: `o.field = the word that follows`.
+const FLAG_TEXT: u64 = 1;
+// One argument, appended: `o.field.push(the word that follows)` (`--module-root` repeats).
+const FLAG_LIST: u64 = 2;
+// One argument, a decimal count: `o.field = number_of(the word that follows)`.
+const FLAG_NUMBER: u64 = 3;
+// The word is accepted and stores nothing: `--per-module` names the shape a build already has.
+const FLAG_IGNORED: u64 = 4;
+// The slots `field` names. The numbers are a private index into the setters below; a table row never
+// says what a number means, and two words that store different numbers in one field are two slots.
+const F_CHECK: u64 = 1;
+const F_DEBUG: u64 = 2;
+const F_DENY: u64 = 3;
+const F_SPLIT: u64 = 4;
+const F_OVERFLOW_WRAP: u64 = 5;
+const F_OVERFLOW_CHECKED: u64 = 6;
+const F_CACHE: u64 = 7;
+const F_WHOLE: u64 = 8;
+const F_NO_SITES: u64 = 9;
+const F_VERIFY: u64 = 10;
+const F_WATCH: u64 = 11;
+const F_JSON: u64 = 12;
+const F_NO_ENTRY: u64 = 13;
+const F_OUTPUT: u64 = 20;
+const F_TARGET: u64 = 21;
+const F_IFACE: u64 = 22;
+const F_IFACE_EMIT: u64 = 23;
+const F_DIAG: u64 = 24;
+const F_INPUTS: u64 = 25;
+const F_ROOTS: u64 = 30;
+const F_INTERVAL: u64 = 40;
+const F_DEBOUNCE: u64 = 41;
+// The flag table: every word the driver reads. `--` and a positional path are not rows - the first
+// ends the driver's words and the second is an input - so `options` handles both around the lookup.
+fn flag_table() -> Flag[] {
+    return Flag[
+        Flag { word: copy(view("-o")), kind: FLAG_TEXT, field: F_OUTPUT },
+        Flag { word: copy(view("--target")), kind: FLAG_TEXT, field: F_TARGET },
+        Flag { word: copy(view("--module-root")), kind: FLAG_LIST, field: F_ROOTS },
+        Flag { word: copy(view("--emit-interface")), kind: FLAG_TEXT, field: F_IFACE_EMIT },
+        Flag { word: copy(view("--no-entry")), kind: FLAG_SWITCH, field: F_NO_ENTRY },
+        Flag { word: copy(view("--print-inputs")), kind: FLAG_TEXT, field: F_INPUTS },
+        Flag { word: copy(view("--check")), kind: FLAG_SWITCH, field: F_CHECK },
+        Flag { word: copy(view("--debug")), kind: FLAG_SWITCH, field: F_DEBUG },
+        Flag { word: copy(view("--deny-ambient-host")), kind: FLAG_SWITCH, field: F_DENY },
+        Flag { word: copy(view("--split")), kind: FLAG_SWITCH, field: F_SPLIT },
+        Flag { word: copy(view("--per-module")), kind: FLAG_IGNORED, field: 0 },
+        Flag { word: copy(view("--whole-program")), kind: FLAG_SWITCH, field: F_WHOLE },
+        Flag { word: copy(view("--cache")), kind: FLAG_SWITCH, field: F_CACHE },
+        Flag { word: copy(view("--overflow=wrap")), kind: FLAG_SWITCH, field: F_OVERFLOW_WRAP },
+        Flag {
+            word: copy(view("--overflow=checked")),
+            kind: FLAG_SWITCH,
+            field: F_OVERFLOW_CHECKED,
+        },
+        Flag { word: copy(view("--no-error-sites")), kind: FLAG_SWITCH, field: F_NO_SITES },
+        Flag { word: copy(view("--interface")), kind: FLAG_TEXT, field: F_IFACE },
+        Flag { word: copy(view("--verify")), kind: FLAG_SWITCH, field: F_VERIFY },
+        Flag { word: copy(view("--watch")), kind: FLAG_SWITCH, field: F_WATCH },
+        Flag { word: copy(view("--json")), kind: FLAG_SWITCH, field: F_JSON },
+        Flag { word: copy(view("--diagnostics-json")), kind: FLAG_TEXT, field: F_DIAG },
+        Flag { word: copy(view("--interval")), kind: FLAG_NUMBER, field: F_INTERVAL },
+        Flag { word: copy(view("--debounce")), kind: FLAG_NUMBER, field: F_DEBOUNCE }
+    ];
+}
+// The row for `word`, or `table.len()` when no row has it: a sentinel rather than an optional, so the
+// caller's shape stays one comparison.
+fn flag_index<a, b>(table: (&a Flag[]), word: &b [u8]) -> u64 {
+    for i in table.len() {
+        if eq(view(table[i].word), view(word)) {
+            return i;
+        }
+    }
+    return table.len();
+}
+// Whether a row takes the word after it.
+fn flag_takes_value(kind: u64) -> bool {
+    return (kind == FLAG_TEXT) || (kind == FLAG_LIST) || (kind == FLAG_NUMBER);
+}
+// `o.field = 1` for the words whose presence is the whole message; the two overflow spellings are two
+// slots because they store two different numbers. A comparison per arm, not a `match` on the slot: an
+// identifier is a binding in a pattern, so `match field { F_CHECK => .. }` would match every slot and
+// the consts in the table above would mean nothing here.
+fn switch_on<a>(o: (&a mut Options), field: u64) {
+    if field == F_CHECK {
+        o.check = 1;
+    } else if field == F_DEBUG {
+        o.debug = 1;
+    } else if field == F_DENY {
+        o.deny = 1;
+    } else if field == F_SPLIT {
+        o.split = 1;
+    } else if field == F_OVERFLOW_WRAP {
+        o.overflow = 1;
+    } else if field == F_OVERFLOW_CHECKED {
+        o.overflow = 2;
+    } else if field == F_CACHE {
+        o.cache = 1;
+    } else if field == F_WHOLE {
+        o.whole = 1;
+    } else if field == F_NO_SITES {
+        o.no_sites = 1;
+    } else if field == F_VERIFY {
+        o.verify = 1;
+    } else if field == F_WATCH {
         o.watch = 1;
-        return 1;
-    }
-    if eq(view(word), view("--json")) {
-        // One JSON object per line per cycle, for editors and the LSP.
+    } else if field == F_JSON {
         o.json = 1;
-        return 1;
+    } else if field == F_NO_ENTRY {
+        o.no_entry = 1;
     }
-    if eq(view(word), view("--diagnostics-json")) & (at + 1 < args.len()) {
-        o.diag = item(args, at + 1);
-        return 2;
+}
+// The word a flag takes, stored in the slot its row names. The kind decides which setter it is.
+fn take_value<a, b>(o: (&a mut Options), kind: u64, field: u64, word: &b [u8]) {
+    if kind == FLAG_TEXT {
+        take_text(&mut o, field, word);
+    } else if kind == FLAG_NUMBER {
+        take_number(&mut o, field, word);
+    } else {
+        take_list(&mut o, field, word);
     }
-    if eq(view(word), view("--interval")) & (at + 1 < args.len()) {
-        o.interval = number_of(view(item(args, at + 1)));
-        return 2;
+}
+fn take_text<a, b>(o: (&a mut Options), field: u64, word: &b [u8]) {
+    if field == F_OUTPUT {
+        o.output = copy(word);
+    } else if field == F_TARGET {
+        o.target = copy(word);
+    } else if field == F_IFACE {
+        o.iface = copy(word);
+    } else if field == F_IFACE_EMIT {
+        // `--emit-interface DIR` is `--interface DIR` plus "write them": the slot holds the directory
+        // and the second one says which of the two words it was.
+        o.iface = copy(word);
+        o.iface_emit = 1;
+    } else if field == F_DIAG {
+        o.diag = copy(word);
+    } else if field == F_INPUTS {
+        o.inputs = copy(word);
     }
-    if eq(view(word), view("--debounce")) & (at + 1 < args.len()) {
-        o.debounce = number_of(view(item(args, at + 1)));
-        return 2;
+}
+fn take_number<a, b>(o: (&a mut Options), field: u64, word: &b [u8]) {
+    if field == F_INTERVAL {
+        o.interval = number_of(word);
+    } else if field == F_DEBOUNCE {
+        o.debounce = number_of(word);
     }
-    return 0;
+}
+fn take_list<a, b>(o: (&a mut Options), field: u64, word: &b [u8]) {
+    if field == F_ROOTS {
+        o.roots.push(copy(word));
+    }
 }
 fn options<a>(args: (&a u8[][])) -> Options {
     mut o = Options {
@@ -3009,120 +3146,37 @@ fn options<a>(args: (&a u8[][])) -> Options {
         no_entry: 0,
         inputs: u8[],
     };
+    table := flag_table();
     mut i = 0;
     mut passthrough = 0;
     while i < args.len() {
         a := item(&args, i);
+        at := flag_index(&table, view(a));
         if passthrough != 0 {
+            // Everything after `--` belongs to the program, a word that looks like a flag included.
             o.rest.push(a);
+        } else if eq(view(a), view("--")) {
+            // The terminator is neither an input nor a flag: it is what switches the branch above on.
+            passthrough = 1;
+        } else if at == table.len() {
+            // Not a driver word: an input. The first `.grl` file is the entry, and the paths keep the
+            // order they were given in.
+            if ends(view(a), view(".grl")) & (o.file.len() == 0) {
+                o.file = copy(view(a));
+            }
+            o.paths.push(a);
+        } else if table[at].kind == FLAG_IGNORED {
+            // `--per-module` names the shape a build already has: consumed, and nothing to store.
+        } else if !flag_takes_value(table[at].kind) {
+            switch_on(&mut o, table[at].field);
+        } else if i + 1 < args.len() {
+            i += 1;
+            take_value(&mut o, table[at].kind, table[at].field, view(item(&args, i)));
         } else {
-            consumed := watch_option(&mut o, view(a), &args, i);
-            if consumed != 0 {
-                i += consumed - 1;
-            } else {
-            if eq(view(a), view("--")) {
-                passthrough = 1;
-            } else {
-                if eq(view(a), view("-o")) & (i + 1 < args.len()) {
-                    i += 1;
-                    o.output = item(&args, i);
-                } else {
-                    if eq(view(a), view("--target")) & (i + 1 < args.len()) {
-                        i += 1;
-                        o.target = item(&args, i);
-                    } else {
-                        if eq(view(a), view("--module-root")) & (i + 1 < args.len()) {
-                            // A module root is a directory, not an input. Taken for a path (what the
-                            // fall-through did), it became a source, so the resolution run - the one
-                            // that actually resolves `use` - never saw the flag.
-                            i += 1;
-                            o.roots.push(item(&args, i));
-                        } else if eq(view(a), view("--emit-interface")) & (i + 1 < args.len()) {
-                            i += 1;
-                            o.iface = item(&args, i);
-                            o.iface_emit = 1;
-                        } else if eq(view(a), view("--no-entry")) {
-                            o.no_entry = 1;
-                        } else if eq(view(a), view("--print-inputs")) & (i + 1 < args.len()) {
-                            i += 1;
-                            o.inputs = item(&args, i);
-                        } else if eq(view(a), view("--check")) {
-                            o.check = 1;
-                        } else {
-                            if eq(view(a), view("--debug")) {
-                                o.debug = 1;
-                            } else {
-                                if eq(view(a), view("--deny-ambient-host")) {
-                                    o.deny = 1;
-                                } else {
-                                    if eq(view(a), view("--split")) {
-                                        // One object per module, assembled concurrently (B1 stage 1).
-                                        o.split = 1;
-                                    } else {
-                                        if eq(view(a), view("--per-module")) {
-                                            // One compiler invocation per module was B1 stage 4's opt-in; it is how
-                                            // a multi-module program is built now, so the flag says nothing new.
-                                        } else {
-                                            if eq(view(a), view("--whole-program")) {
-                                                // Ask for the one-run build that per-module replaced.
-                                                o.whole = 1;
-                                            } else {
-                                                if eq(view(a), view("--cache")) {
-                                                    // Reuse a module's compiler run and its object, and an unchanged
-                                                    // program (B1 stage 4).
-                                                    o.cache = 1;
-                                                } else {
-                                                    if eq(view(a), view("--overflow=wrap")) {
-                                                        o.overflow = 1;
-                                                    } else {
-                                                        if eq(view(a), view("--no-error-sites")) {
-                                                            o.no_sites = 1;
-                                                        } else {
-                                                            if eq(
-                                                                view(a),
-                                                                view("--overflow=checked")
-                                                            ) {
-                                                                o.overflow = 2;
-                                                            } else {
-                                                                if eq(view(a), view("--interface"))
-                                                                    & (i + 1 < args.len()) {
-                                                                    // Module interfaces (B1 stage 2): the directory holding them.
-                                                                    i += 1;
-                                                                    o.iface = item(&args, i);
-                                                                } else {
-                                                                    if eq(
-                                                                        view(a),
-                                                                        view("--verify")
-                                                                    ) {
-                                                                        o.verify = 1;
-                                                                    } else {
-                                                                        if ends(
-                                                                            view(a),
-                                                                            view(".grl")
-                                                                        )
-                                                                            & (o.file.len() == 0) {
-                                                                            o.file = copy(view(a));
-                                                                            o.paths.push(a);
-                                                                        } else {
-                                                                            o.paths.push(a);
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            // A flag whose argument is missing cannot be read as a flag; it stays in the input list,
+            // which is where it went when the chain fell through.
+            o.paths.push(a);
         }
-            }
         i += 1;
     }
     // The whole-program cache reuses the objects `--split` writes, so it is that shape's cache. An
