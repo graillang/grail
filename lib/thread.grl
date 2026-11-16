@@ -22,12 +22,10 @@ use time;
 // contract: when the OS refuses, `spawn` returns the refusal as an error value and the closure does
 // not run. The name is a label: the OS shows what it can (15 bytes on Linux) and the rest is cut.
 //
-// The closure crosses to another thread, so its captures must be transferable and may hold no
-// borrow, and so must the result. NOT ENFORCED YET for the closure: a library signature cannot
-// state that of a closure parameter until bounds on closure types exist
-// (`FnMut<Send, Owned>((&Ctx)) -> R`, branch gaps12-closures, docs/design/closure-bounds.md), and
-// until then a closure that captures a borrow or a thread-affine value is accepted here. `spawn` is
-// re-typed when they land.
+// The closure crosses to another thread and may outlive the frame that spawned it, so the
+// signature says so: `FnMut<Send, Owned>` - its captures are transferable and none is a borrow -
+// and an `R: Send + Owned` result. `Thread<R>` is therefore Owned by construction (closure-bounds
+// note 2.10): nothing it holds is a loan.
 //
 // Not here yet: `thread::scope` (threads that borrow from the caller's frame), which waits for
 // capability bounds on closure parameters. See docs/design/threads.md.
@@ -108,13 +106,15 @@ impl<R> Drop for Thread<R> {
 
 // Start a thread running `f`. The closure and what it captured move to the thread; it is lent the
 // thread's `Ctx`.
-pub fn spawn<R: Send>(cfg: Config, f: FnMut((&Ctx)) -> R) -> Thread<R> |? Error {
+pub fn spawn<R: Send + Owned>(cfg: Config, f: FnMut<Send, Owned>((&Ctx)) -> R) -> Thread<R> |? Error {
     mut body = f;
     stack_bytes := cfg.stack_bytes;
     label := cfg.name;
     pinned := cfg.affinity;
     wanted := cfg.priority;
-    rec := thread_spawn_raw(|| -> unit {
+    mut rec = 0;
+    unsafe {
+    rec = thread_spawn_raw(|| -> unit {
         me := host::thread_self();
         mut token: CtxToken;
         ctx := Ctx { token: token, record: me };
@@ -126,6 +126,7 @@ pub fn spawn<R: Send>(cfg: Config, f: FnMut((&Ctx)) -> R) -> Thread<R> |? Error 
             }
         }
     });
+    }
     mut priority = 0;
     match wanted {
         Background => { priority = 1; },
@@ -160,7 +161,7 @@ pub fn spawn<R: Send>(cfg: Config, f: FnMut((&Ctx)) -> R) -> Thread<R> |? Error 
 
 // A captured `FnMut` is called through an exclusive borrow of the capture: that borrow is the form
 // the compiler reads as "this closure writes what it captured".
-fn run_body<a, b, R>(body: (&a mut FnMut((&Ctx)) -> R), ctx: (&b Ctx)) -> R {
+fn run_body<a, b, R>(body: (&a mut FnMut<Send, Owned>((&Ctx)) -> R), ctx: (&b Ctx)) -> R {
     return body(ctx);
 }
 // The label, cut to the 15 bytes the record (and Linux) holds.
@@ -203,7 +204,7 @@ fn put_affinity(rec: u64, pinned: CpuSet?) -> unit {
 // Wait for the thread and take its result. A thread that failed re-raises its failure here: inside
 // a task or another spawned thread that failure is contained in turn, on the main thread it ends
 // the process.
-pub fn join<R: Send>(t: Thread<R>) -> R {
+pub fn join<R: Send + Owned>(t: Thread<R>) -> R {
     mut handle = t;
     unsafe {
         result := handle.result;
@@ -219,7 +220,7 @@ pub fn join<R: Send>(t: Thread<R>) -> R {
 }
 
 // Wait for the thread; its failure, if it failed, is the value.
-pub fn try_join<R: Send>(t: Thread<R>) -> R |? TaskFailure {
+pub fn try_join<R: Send + Owned>(t: Thread<R>) -> R |? TaskFailure {
     mut handle = t;
     unsafe {
         result := handle.result;
@@ -240,7 +241,7 @@ pub fn try_join<R: Send>(t: Thread<R>) -> R |? TaskFailure {
 // failure on it is contained and forgotten. A thread still running when `main` returns does not
 // keep the process alive: the process exits without waiting, and the end-of-main leak check is not
 // made, because that thread's allocations are still its own.
-pub fn detach<R: Send>(t: Thread<R>) -> unit {
+pub fn detach<R: Send + Owned>(t: Thread<R>) -> unit {
     mut handle = t;
     unsafe {
         rec := handle.result.addr() - 80;

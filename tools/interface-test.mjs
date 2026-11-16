@@ -652,17 +652,17 @@ pub fn twice(x: u64) -> u64 {
   const version = compile(files, join(directory, 'version'), ['--interface', ifaces]);
   assert.equal(version.status, 1, 'an interface written by another compiler must be refused');
   assert.match(version.output, /was written in interface format 3/, `the version refusal must name the version it found: ${version.output}`);
-  assert.match(version.output, /this compiler reads format 5/, 'the version refusal must name the version this compiler reads');
+  assert.match(version.output, /this compiler reads format 6/, 'the version refusal must name the version this compiler reads');
 
   // ... and a file from a *newer* compiler is refused by name as well: a version this compiler
   // does not know is never half-read.
   const future = Buffer.from(original);
-  future[4] = 6;
+  future[4] = 7;
   repin(future);
   const ahead = compile(files, join(directory, 'future'), ['--interface', ifaces]);
   assert.equal(ahead.status, 1, 'an interface written by a newer compiler must be refused');
-  assert.match(ahead.output, /was written in interface format 6 by a newer compiler/, `the future-version refusal must name the version it found: ${ahead.output}`);
-  assert.match(ahead.output, /this one reads format 5/, 'the future-version refusal must name the version this compiler reads');
+  assert.match(ahead.output, /was written in interface format 7 by a newer compiler/, `the future-version refusal must name the version it found: ${ahead.output}`);
+  assert.match(ahead.output, /this one reads format 6/, 'the future-version refusal must name the version this compiler reads');
 
   // ... a truncated file is refused as truncated.
   repin(Buffer.from(original.subarray(0, Math.floor(original.length * 0.6))));
@@ -967,7 +967,7 @@ function proveGenericBodies() {
   const ifaces = emit(all, directory);
   const generic = join(ifaces, 'generic.iface');
   const text = dump(generic);
-  assert.match(text, /^grail-interface 5$/m, 'generics: the interface does not carry the current format version');
+  assert.match(text, /^grail-interface 6$/m, 'generics: the interface does not carry the current format version');
   assert.match(text, /^fn generic::twice <1> /m, 'generics: generic.iface does not declare the template');
   assert.match(text, /^\s*body$/m, 'generics: generic.iface carries no body section');
   // The body is the template's own source text, one `|` row per line, readable in a diff.

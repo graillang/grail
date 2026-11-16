@@ -4365,7 +4365,9 @@ fn call_bonds<a>(
             if n != 0 {
                 info := &c.resources[n - 1];
                 actual := info.ty;
-                if (ty_kind(&mut c, actual) == 20) & contains_borrow(&mut c, actual, 0) {
+                // The value may already be typed by a signature (it was converted to `Fn<Send>(..)`
+                // on its way here), so its type no longer shows the borrow: its place does.
+                if (ty_kind(&mut c, actual) == 20) && (contains_borrow(&mut c, actual, 0) || (closure_stated_borrower(&mut c, actual) && holds_live_loan(&mut c, source))) {
                     return_bonds(&mut c, source, holder, 1);
                 }
             }
@@ -6053,7 +6055,14 @@ fn hide_walk<a, b>(c: (&a mut C), ty: u64, trail: (&b mut u64[])) -> bool {
     if (k == 12) || (k == 20) || (k == 25) || (k == 33) {
         return true;
     }
-    if (k == 10) || (k == 6) || (k == 13) || (k == 14) || (k == 16) || (k == 29) {
+    // A job handle owns the closure it runs, whatever its result type is: `Job<u64>` shows no borrow
+    // and the job may still be reading one. Walking only the result lost the loan a wrapper's
+    // closure argument handed to the handle (call_bonds), so the borrowed value could be moved or
+    // dropped while the job ran.
+    if k == 29 {
+        return true;
+    }
+    if (k == 10) || (k == 6) || (k == 13) || (k == 14) || (k == 16) {
         return hide_walk(&mut c, arg, &mut trail);
     }
     if k == 8 {
@@ -9257,6 +9266,216 @@ fn intern_env<a>(
 fn intern_args<a>(c: (&a mut C), k: u64, arg: u64, mode: u64, regions: u64[], args: u64[]) -> u64 {
     return intern_env(&mut c, k, arg, mode, regions, args, 0);
 }
+// ---- closure bounds (docs/design/closure-bounds.md) ------------------------------------------------
+// A closure type's `mode` is a set of bits: 1 `FnMut`, and the bounds a signature states about what
+// the closure captured - 2 `Send`, 4 `Share`, 8 `Owned` (no capture holds a borrow). 16 marks the type
+// of a closure expression seen while a generic template is validated: its environment is only built
+// by a specialisation, so nothing is known of it yet and nothing is refused on its account.
+// The spelling `Fn<Send, Share, Owned>(..)` lives in two functions: `closure_bound_bit` reads a
+// name, `closure_bounds_text` writes the list.
+const CLOSURE_FNMUT: u64 = 1;
+const CLOSURE_SEND: u64 = 2;
+const CLOSURE_SHARE: u64 = 4;
+const CLOSURE_OWNED: u64 = 8;
+const CLOSURE_UNBUILT: u64 = 16;
+const CLOSURE_BOUNDS: u64 = 14;
+fn closure_bound_bit<a>(name: &a [u8]) -> u64 {
+    if same(name, view("Send")) {
+        return CLOSURE_SEND;
+    }
+    if same(name, view("Share")) {
+        return CLOSURE_SHARE;
+    }
+    if same(name, view("Owned")) {
+        return CLOSURE_OWNED;
+    }
+    return 0;
+}
+fn closure_bounds_text<a>(out: (&a mut u8[]), mode: u64) -> unit {
+    if (mode & CLOSURE_BOUNDS) == 0 {
+        return ();
+    }
+    out.push(60);
+    mut some = false;
+    if (mode & CLOSURE_SEND) != 0 {
+        push_bytes(&mut out, view("Send"));
+        some = true;
+    }
+    if (mode & CLOSURE_SHARE) != 0 {
+        if some {
+            push_bytes(&mut out, view(", "));
+        }
+        push_bytes(&mut out, view("Share"));
+        some = true;
+    }
+    if (mode & CLOSURE_OWNED) != 0 {
+        if some {
+            push_bytes(&mut out, view(", "));
+        }
+        push_bytes(&mut out, view("Owned"));
+    }
+    out.push(62);
+    return ();
+}
+// `<Send, Owned>` after `Fn` / `FnMut` in a type: the bound bits, 0 when there is no list.
+fn closure_bounds_list<a>(c: (&a mut C), fnmut: bool) -> u64 {
+    if !eat(&mut c, view("<")) {
+        return 0;
+    }
+    mut bits = 0;
+    while true {
+        name := ident(&mut c);
+        bit := closure_bound_bit(view(name));
+        if bit == 0 {
+            if (96 < name[0]) & (name[0] < 123) {
+                fail(
+                    &mut c,
+                    view("a lifetime bound on a closure type (`Fn<s>(..)`) is not implemented yet: this compiler reads `Send`, `Share` and `Owned` there")
+                );
+            }
+            fail(&mut c, view("a closure type's bounds are `Send`, `Share` and `Owned`: write `Fn<Send>(..)`"));
+        }
+        if (bits & bit) != 0 {
+            fail(&mut c, view("duplicate closure bound"));
+        }
+        bits += bit;
+        if eat(&mut c, view(">")) {
+            break;
+        }
+        expect(&mut c, view(","));
+    }
+    if fnmut & ((bits & CLOSURE_SHARE) != 0) {
+        fail(
+            &mut c,
+            view("`FnMut<Share>` is not a type: a closure that writes its captures cannot be shared by concurrent callers; use a Mutex, or `Fn<Share>`")
+        );
+    }
+    return bits;
+}
+// Whether a closure value of type `actual` meets the bounds `want` (bits) states. A closure
+// expression's type carries its environment, so its captures answer; a type from a signature has
+// only what it says. Silent: the caller decides what to report.
+fn closure_bounds_hold<a>(c: (&a mut C), actual: u64, want: u64) -> bool {
+    am := ty_mode(&mut c, actual);
+    if (am & CLOSURE_UNBUILT) != 0 {
+        return true;
+    }
+    env := ty_env(&mut c, actual);
+    if (want & CLOSURE_SEND) != 0 {
+        if (am & CLOSURE_SEND) == 0 {
+            if env == 0 {
+                return false;
+            }
+            mut trail = u64[];
+            if transfer_capability(&mut c, actual, 0, &mut trail, 0) == 0 {
+                return false;
+            }
+        }
+    }
+    if (want & CLOSURE_SHARE) != 0 {
+        if (am & CLOSURE_FNMUT) != 0 {
+            return false;
+        }
+        if (am & CLOSURE_SHARE) == 0 {
+            if env == 0 {
+                return false;
+            }
+            mut trail = u64[];
+            if transfer_capability(&mut c, actual, 1, &mut trail, 0) == 0 {
+                return false;
+            }
+        }
+    }
+    if (want & CLOSURE_OWNED) != 0 {
+        if (am & CLOSURE_OWNED) == 0 {
+            if env == 0 {
+                return false;
+            }
+            if contains_borrow(&mut c, actual, 0) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+// `actual` with the call mode and bounds of `expected`, and no environment: what the value's type
+// becomes once it is converted. Equal to `expected` exactly when the two differ in nothing else.
+fn closure_as<a>(c: (&a mut C), actual: u64, expected: u64) -> u64 {
+    result := ty_arg(&mut c, actual);
+    args := type_args(&mut c, actual);
+    return intern_args(&mut c, 20, result, ty_mode(&mut c, expected), u64[], args);
+}
+// The conversion of a closure value to a closure type a signature wrote (rule 2.3 of the note):
+// same parameters and result; `Fn` where `FnMut` is expected but not the reverse; and every bound
+// the expected type states is met by the captures (or stated by the value's own type). 1 when the
+// value converts, 0 when the two types differ in more than mode and bounds - the caller's ordinary
+// mismatch. A bound that is not met is reported here, by name, because "type mismatch" would hide
+// the capture that is the reason.
+fn closure_converts<a>(c: (&a mut C), actual: u64, expected: u64) -> u64 {
+    if (ty_kind(&mut c, actual) != 20) || (ty_kind(&mut c, expected) != 20) {
+        return 0;
+    }
+    am := ty_mode(&mut c, actual);
+    em := ty_mode(&mut c, expected);
+    if ((am & CLOSURE_FNMUT) != 0) & ((em & CLOSURE_FNMUT) == 0) {
+        return 0;
+    }
+    if (em & CLOSURE_UNBUILT) != 0 {
+        return 0;
+    }
+    erased := closure_as(&mut c, actual, expected);
+    mut map = u64[];
+    if !callable_contract(&mut c, erased, expected, &mut map, 0) {
+        return 0;
+    }
+    want := em & CLOSURE_BOUNDS;
+    if closure_bounds_hold(&mut c, actual, want) {
+        return 1;
+    }
+    closure_bound_fail(&mut c, actual, want);
+    return 0;
+}
+fn closure_bound_fail<a>(c: (&a mut C), actual: u64, want: u64) -> unit {
+    am := ty_mode(&mut c, actual);
+    env := ty_env(&mut c, actual);
+    if env == 0 {
+        mut msg = copy_bytes(view("`"));
+        push_bytes(&mut msg, view(source_type_name(&mut c, actual)));
+        push_bytes(&mut msg, view("` does not say what it captured, so it cannot be used as `"));
+        mut list = u8[];
+        closure_bounds_text(&mut list, want);
+        push_bytes(&mut msg, view("Fn"));
+        push_bytes(&mut msg, view(list));
+        push_bytes(&mut msg, view("(..)`: state the bound where this value's type is written"));
+        fail(&mut c, view(msg));
+    }
+    if ((want & CLOSURE_SHARE) != 0) & ((am & CLOSURE_FNMUT) != 0) {
+        fail(
+            &mut c,
+            view("a callback shared by concurrent workers must not write a captured value: an FnMut closure would race on its own environment; use a Mutex or return an owned result")
+        );
+    }
+    if (want & CLOSURE_SHARE) != 0 {
+        require_closure_captures(&mut c, actual, 1, view("closure capture"));
+    }
+    if (want & CLOSURE_SEND) != 0 {
+        require_closure_captures(&mut c, actual, 0, view("closure capture"));
+    }
+    fail(
+        &mut c,
+        view("this closure captures a borrow, and an `Owned` closure is required here: it may outlive what it borrows, so move the value in instead")
+    );
+    return ();
+}
+// A closure typed by a signature that states bounds but not `Owned`: a value converted to it may
+// still hold the borrows it captured, which its type no longer shows.
+fn closure_stated_borrower<a>(c: (&a mut C), ty: u64) -> bool {
+    if (ty_kind(&mut c, ty) != 20) || (ty_env(&mut c, ty) != 0) {
+        return false;
+    }
+    mode := ty_mode(&mut c, ty);
+    return ((mode & CLOSURE_BOUNDS) != 0) & ((mode & CLOSURE_OWNED) == 0);
+}
 // The environment record of a closure type, or 0 when it carries no captures.
 fn ty_env<a>(c: (&a mut C), ty: u64) -> u64 {
     if !is_type_id(ty) {
@@ -9479,7 +9698,27 @@ fn transfer_capability<a, b>(
     if k == 20 {
         env := ty_env(&mut c, ty);
         allowed = 1;
-        if env != 0 {
+        cm := ty_mode(&mut c, ty);
+        // A closure that writes its captures cannot be shared, whatever they are.
+        if (shared != 0) & ((cm & CLOSURE_FNMUT) != 0) & ((cm & CLOSURE_UNBUILT) == 0) {
+            allowed = 0;
+            why = 13;
+        }
+        // A closure type from a signature has no environment to walk: it is what it says it is,
+        // and a bare `Fn(..)` says nothing (default-deny, like a handle).
+        if (env == 0) & ((cm & CLOSURE_UNBUILT) == 0) {
+            mut need = CLOSURE_SEND;
+            if shared != 0 {
+                need = CLOSURE_SHARE;
+            }
+            if (cm & need) == 0 {
+                allowed = 0;
+                if why != 13 {
+                    why = 12;
+                }
+            }
+        }
+        if (env != 0) & (allowed != 0) {
             d := ty_arg(&mut c, env);
             count := c.decls[d].count;
             first := c.decls[d].first;
@@ -9514,6 +9753,9 @@ fn transfer_capability<a, b>(
 //   8 no capability proof for the type parameter
 //   9 an unclassified C function pointer
 //  10 a type that nests too deeply to classify
+//  11 a job handle, which cannot be shared
+//  12 a closure type from a signature that does not state the bound
+//  13 an FnMut closure, which cannot be shared
 fn deny<a>(c: (&a mut C), code: u64) -> u64 {
     if c.cap_denial == 0 {
         exchange(&mut c.cap_denial, code);
@@ -9571,6 +9813,10 @@ fn cap_denial_text<a, b>(c: (&a mut C), out: (&b mut u8[])) -> unit {
                                     } else {
                                         if code == 11 {
                                             dput(&mut out, view("a job handle cannot be shared"));
+                                        } else if code == 12 {
+                                            dput(&mut out, view("a closure whose type does not say what it captured (write `Fn<Send>(..)` or `Fn<Share>(..)` where the type is written)"));
+                                        } else if code == 13 {
+                                            dput(&mut out, view("an FnMut closure, which cannot be shared"));
                                         } else {
                                             dput(&mut out, view("a type that nests too deeply to classify"));
                                         }
@@ -9711,8 +9957,67 @@ fn require_constraints<a, b, d>(c: (&a mut C), arguments: (&b u64[]), bounds: (&
                 bound_fail(&mut c, ty, view("Share"));
             }
         }
+        // `Owned` (bit 8; bit 4 marks a value parameter, whose upper bits are its type): the type
+        // holds no borrow, and every type parameter inside it is itself known to be `Owned`.
+        if ((mask & 4) == 0) & ((mask & 8) != 0) {
+            mut trail = u64[];
+            if !owned_walk(&mut c, ty, &mut trail) {
+                mut msg = copy_bytes(view("type does not satisfy Owned: "));
+                push_bytes(&mut msg, view(source_type_name(&mut c, ty)));
+                if contains_borrow(&mut c, ty, 0) {
+                    push_bytes(&mut msg, view(" holds a borrow"));
+                } else {
+                    push_bytes(&mut msg, view(" has a type parameter that is not known to be `Owned`"));
+                }
+                fail(&mut c, view(msg));
+            }
+        }
     }
     return ();
+}
+// Whether a type is known to hold no borrow: no reference, view or slice, no closure that borrows,
+// and no type parameter without an `Owned` proof (bit 8 of its bounds).
+fn owned_walk<a, b>(c: (&a mut C), ty: u64, trail: (&b mut u64[])) -> bool {
+    if contains_borrow(&mut c, ty, 0) {
+        return false;
+    }
+    k := ty_kind(&mut c, ty);
+    arg := ty_arg(&mut c, ty);
+    if k == 9 {
+        bits := ty_mode(&mut c, ty);
+        return ((bits & 4) != 0) || ((bits & 8) != 0);
+    }
+    if (k == 30) || (k == 33) {
+        return k == 33;
+    }
+    if (k == 10) || (k == 6) || (k == 13) || (k == 16) || (k == 29) || (k == 28) {
+        return owned_walk(&mut c, arg, &mut trail);
+    }
+    if k == 20 {
+        if !owned_walk(&mut c, arg, &mut trail) {
+            return false;
+        }
+    }
+    if (k == 8) || (k == 20) || (k == 12) {
+        for i in trail.len() {
+            if trail[i] == ty {
+                return true;
+            }
+        }
+        trail.push(ty);
+        if k == 8 {
+            count := c.decls[arg].count;
+            for i in count {
+                t := field_type(&mut c, ty, i);
+                if !owned_walk(&mut c, t, &mut trail) {
+                    trail.pop()!;
+                    return false;
+                }
+            }
+        }
+        trail.pop()!;
+    }
+    return true;
 }
 // Forward declarations are optimistically incomplete while collecting headers. Recheck
 // every instantiated nominal type after all layouts are known, before generating bodies.
@@ -10239,6 +10544,9 @@ fn lifetime_parameters<a>(c: (&a mut C)) -> unit {
                         }
                         if same(view(constraint), view("Share")) & !is(&mut c, view("::")) {
                             bit = 2;
+                        }
+                        if same(view(constraint), view("Owned")) & !is(&mut c, view("::")) {
+                            bit = 8;
                         }
                         if bit == 0 {
                             mut m = module_copy(&mut c);
@@ -11025,10 +11333,27 @@ fn callable_contract<a, b>(
     }
     aa := ty_arg(&mut c, actual);
     ea := ty_arg(&mut c, expected);
-    if (ak == 5) || (ak == 7) || (ak == 27) || (ak == 10) || (ak == 20) {
+    if (ak == 5) || (ak == 7) || (ak == 27) || (ak == 10) {
         am := ty_mode(&mut c, actual);
         em := ty_mode(&mut c, expected);
         if am != em {
+            return false;
+        }
+    }
+    if ak == 20 {
+        // The call mode is part of the type. So are the bounds, but a closure expression's own type
+        // states none: its environment answers for it (closure_bounds_hold). Two signature types
+        // must state the same ones - a container of `Fn<Send>` is not a container of `Fn`.
+        am := ty_mode(&mut c, actual);
+        em := ty_mode(&mut c, expected);
+        if (am & CLOSURE_FNMUT) != (em & CLOSURE_FNMUT) {
+            return false;
+        }
+        if (ty_env(&mut c, actual) != 0) || ((am & CLOSURE_UNBUILT) != 0) {
+            if !closure_bounds_hold(&mut c, actual, em & CLOSURE_BOUNDS) {
+                return false;
+            }
+        } else if ((em & CLOSURE_UNBUILT) == 0) & ((am & CLOSURE_BOUNDS) != (em & CLOSURE_BOUNDS)) {
             return false;
         }
     }
@@ -11336,6 +11661,33 @@ fn source_type_name<a>(c: (&a mut C), ty: u64) -> u8[] {
         push_bytes(&mut out, view(inner));
         return out;
     }
+    if (k == 9) && (arg < c.tnames.len()) {
+        push_bytes(&mut out, view(c.tnames[arg]));
+        return out;
+    }
+    if (k == 20) & (ty_env(&mut c, ty) == 0) {
+        // A closure type as a signature writes it: `Fn<Send>(u64) -> u64`.
+        mode := ty_mode(&mut c, ty);
+        if (mode & CLOSURE_FNMUT) != 0 {
+            push_bytes(&mut out, view("FnMut"));
+        } else {
+            push_bytes(&mut out, view("Fn"));
+        }
+        closure_bounds_text(&mut out, mode);
+        out.push(40);
+        params := type_args(&mut c, ty);
+        for i in params.len() {
+            if i != 0 {
+                push_bytes(&mut out, view(", "));
+            }
+            inner := source_type_name(&mut c, params[i]);
+            push_bytes(&mut out, view(inner));
+        }
+        push_bytes(&mut out, view(") -> "));
+        inner := source_type_name(&mut c, arg);
+        push_bytes(&mut out, view(inner));
+        return out;
+    }
     if k == 35 {
         // The referent of a borrowed interface object prints as the dyn type it names, so
         // `&dyn Shape` reads back as it was written.
@@ -11405,16 +11757,18 @@ fn require_type<a>(c: (&a mut C), actual: u64, expected: u64) -> unit {
         fail(&mut c, view("a handle has no value in this context; pass it back to C or compare it with another handle"));
     }
     if same_type(&mut c, actual, want) == 0 {
+        // A closure value used as a closure type that says less (or, for a closure expression, as
+        // one whose bounds its captures meet): the same record, so nothing is converted.
+        if closure_converts(&mut c, actual, want) != 0 {
+            return ();
+        }
         // `Fn` and `FnMut` have the same signature and differ only in whether a call needs
         // exclusive access: say so instead of reporting a shape mismatch.
         if (ty_kind(&mut c, actual) == 20) & (ty_kind(&mut c, want) == 20) {
             am := ty_mode(&mut c, actual);
             em := ty_mode(&mut c, want);
-            if (am == 1) & (em == 0) {
-                aresult := ty_arg(&mut c, actual);
-                aregions := type_regions(&mut c, actual);
-                aargs := type_args(&mut c, actual);
-                shared := intern_args(&mut c, 20, aresult, 0, aregions, aargs);
+            if ((am & CLOSURE_FNMUT) != 0) & ((em & CLOSURE_FNMUT) == 0) {
+                shared := closure_as(&mut c, actual, want);
                 if same_type(&mut c, shared, want) != 0 {
                     fail(
                         &mut c,
@@ -12547,7 +12901,7 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
     }
     if same(view(first), view("Fn")) || same(view(first), view("FnMut")) {
         // `Fn` is callable through a shared reference; `FnMut` needs exclusive access to the value.
-        fnmut := u64(same(view(first), view("FnMut")));
+        fnmut := u64(same(view(first), view("FnMut"))) + closure_bounds_list(&mut c, same(view(first), view("FnMut")));
         expect(&mut c, view("("));
         mut params = u64[];
         if !eat(&mut c, view(")")) {
@@ -23986,7 +24340,7 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
     // exclusively for the whole call. A closure with no written capture stays `Fn`: reading it
     // through a shared reference and calling it repeatedly is still allowed.
     mut call_loan = 0;
-    if (kind == 20) & (ty_mode(&mut c, ty) == 1) {
+    if (kind == 20) & ((ty_mode(&mut c, ty) & CLOSURE_FNMUT) != 0) {
         require_exclusive_call(&mut c, pointer);
         call_conflict(&mut c, pointer);
         observe(&mut c, pointer);
@@ -26875,6 +27229,17 @@ fn require_capability_named<a, b>(c: (&a mut C), ty: u64, shared: u64, subject: 
 fn require_closure_captures<a, b>(c: (&a mut C), ty: u64, shared: u64, subject: &b [u8]) -> unit {
     env := ty_env(&mut c, ty);
     if env == 0 {
+        // A closure typed by a signature has no captures to look at: its type must state the bound
+        // (it was checked where the value got that type). A bare `Fn(..)` states nothing.
+        if ty_kind(&mut c, ty) == 20 {
+            mut need = CLOSURE_SEND;
+            if shared != 0 {
+                need = CLOSURE_SHARE;
+            }
+            if !closure_bounds_hold(&mut c, ty, need) {
+                closure_bound_fail(&mut c, ty, need);
+            }
+        }
         return ();
     }
     d := ty_arg(&mut c, env);
@@ -26899,7 +27264,7 @@ fn require_parallel_closure<a, b>(c: (&a mut C), ty: u64, shared: u64, subject: 
     if ty_kind(&mut c, ty) != 20 {
         return ();
     }
-    if (shared != 0) & (ty_mode(&mut c, ty) != 0) {
+    if (shared != 0) & ((ty_mode(&mut c, ty) & CLOSURE_FNMUT) != 0) {
         fail(
             &mut c,
             view("a callback shared by concurrent workers must not write a captured value: an FnMut closure would race on its own environment; use a Mutex or return an owned result")
@@ -27120,7 +27485,10 @@ fn parallel_with_builtin<a>(c: (&a mut C), callee: Val) -> Val {
         fail(&mut c, view("a parallel_with callback takes no arguments: what it needs it captures"));
     }
     result := ty_arg(&mut c, fty);
-    require_parallel_closure(&mut c, fty, 1, view("closure capture"));
+    // One execution runs `first` (a worker, or the caller after `second`): its environment is
+    // transferred, not shared, and a shared reference it captured is already asked to be Share by the
+    // transfer question - which is what `pool::join`'s `Fn<Send>` signature states.
+    require_parallel_closure(&mut c, fty, 0, view("closure capture"));
     require_capability_named(&mut c, result, 0, view("parallel_map result"));
     if contains_borrow(&mut c, result, 0) {
         fail(&mut c, view("parallel_map result cannot contain borrows"));
@@ -27260,22 +27628,19 @@ fn parallel_spawn_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     close_loans(&mut c);
     return own(&mut c, slot, ty);
 }
-// thread_spawn_raw(f) -> u64: the raw entry lib/thread.grl starts a thread through. It boxes the
-// closure for the runtime (rt_uthread_new) and answers with the address of a thread record that has
-// not been started; everything else about a thread is library code.
-//
-// It also makes the two checks parallel_spawn makes of a job - captures transferable, no borrow -
-// but they hold only for a closure whose type still has its environment. lib/thread.grl hands it a
-// wrapper around a closure it received as a parameter, and a parameter's closure type has no
-// environment, so through `thread::spawn` these checks pass vacuously: A BORROWING OR THREAD-AFFINE
-// CLOSURE IS ACCEPTED TODAY. The fix is not here: bounds on the closure type
-// (`FnMut<Send, Owned>(..)`, branch gaps12-closures, docs/design/closure-bounds.md) are checked
-// where a closure with a known environment converts to that type. When they land, `spawn` is
-// re-typed, the checks below are deleted and this builtin becomes callable from an `unsafe module`
-// only. The corpus cases thread-spawn-borrow-refused and thread-spawn-affine-capture-refused are
-// marked pending on that branch.
+// thread_spawn_raw(f) -> u64: the unsafe core's raw entry lib/thread.grl starts a thread through.
+// It boxes the closure for the runtime (rt_uthread_new) and answers with the address of a thread
+// record that has not been started. It checks NOTHING about the closure: what crosses to the new
+// thread is `thread::spawn`'s signature's business (`FnMut<Send, Owned>((&Ctx)) -> R`,
+// docs/design/closure-bounds.md), and this entry trusts its caller. So it is an unsafe operation:
+// callable inside an `unsafe` block or an `unsafe module`, as raw pointers are. (Not "an unsafe module
+// only": lib/thread.grl is a checked module that opens `unsafe` blocks, and an `unsafe module`
+// type-checks nothing.)
 fn thread_spawn_raw_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     expect(&mut c, view(")"));
+    if (c.raw == 0) & (c.unsafe_depth == 0) {
+        fail(&mut c, view("thread_spawn_raw is the unsafe core's raw entry: call it inside an `unsafe` block; programs use thread::spawn"));
+    }
     input := callee.t;
     inty := callee.ty;
     function := deref(&mut c, callee);
@@ -27283,21 +27648,6 @@ fn thread_spawn_raw_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     closure := ty_kind(&mut c, fty) == 20;
     if (ty_kind(&mut c, fty) != 12) & !closure {
         fail(&mut c, view("thread_spawn_raw requires a callable"));
-    }
-    if closure & (ty_kind(&mut c, inty) == 7) {
-        fail(&mut c, view("a thread takes its closure by value: a borrowed closure is still dropped by its owner"));
-    }
-    signature := type_args(&mut c, fty);
-    if signature.len() != 0 {
-        fail(&mut c, view("thread_spawn_raw takes a callable with no arguments"));
-    }
-    // One thread runs it, so the environment is transferable, not shared.
-    require_parallel_closure(&mut c, fty, 0, view("thread capture"));
-    if contains_borrow(&mut c, fty, 0) {
-        fail(
-            &mut c,
-            view("a thread may outlive this statement, so its closure cannot capture a borrow: move the value in instead")
-        );
     }
     observe(&mut c, function.t);
     mut box = imm(&mut c, 0);
@@ -28261,20 +28611,12 @@ fn literal_fits<a>(c: (&a mut C), ty: u64, value: u64, negative: u64) -> u64 {
 // same record, so this only widens the call contract - but it still moves, never copies, so the
 // environment keeps one owner.
 fn fn_as_fnmut<a>(c: (&a mut C), ty: u64, expected: u64) -> u64 {
-    if ty_mode(&mut c, ty) != 0 {
+    // A closure expression used as a signature type that states the same mode and no bounds needs
+    // no conversion: the two already compare equal (callable_contract).
+    if ty_mode(&mut c, ty) == ty_mode(&mut c, expected) {
         return 0;
     }
-    if ty_mode(&mut c, expected) != 1 {
-        return 0;
-    }
-    result := ty_arg(&mut c, ty);
-    regions := type_regions(&mut c, ty);
-    args := type_args(&mut c, ty);
-    widened := intern_args(&mut c, 20, result, 1, regions, args);
-    if same_type(&mut c, widened, expected) == 0 {
-        return 0;
-    }
-    return 1;
+    return closure_converts(&mut c, ty, expected);
 }
 // A `Fn` closure passed for a generic `FnMut(..)` parameter whose type variables are not all known
 // yet (`vecs::map(v, |x: u64| -> u64 x * 2)` learns `U` from the closure itself): `adopt_value`
@@ -28284,13 +28626,24 @@ fn widen_to_fnmut_formal<a>(c: (&a mut C), v: Val, formal: u64) -> Val {
     if (ty_kind(&mut c, v.ty) != 20) || (ty_kind(&mut c, formal) != 20) {
         return v;
     }
-    if (ty_mode(&mut c, v.ty) != 0) || (ty_mode(&mut c, formal) != 1) {
+    am := ty_mode(&mut c, v.ty);
+    fm := ty_mode(&mut c, formal);
+    if ((am & CLOSURE_FNMUT) != 0) & ((fm & CLOSURE_FNMUT) == 0) {
+        return v;
+    }
+    // The formal's bounds are known even while its type variables are not: check them against the
+    // closure now, while it still has its environment, and let the value carry them from here.
+    want := fm & CLOSURE_BOUNDS;
+    if !closure_bounds_hold(&mut c, v.ty, want) {
+        closure_bound_fail(&mut c, v.ty, want);
+    }
+    if ((am & CLOSURE_FNMUT) == (fm & CLOSURE_FNMUT)) & (want == 0) {
         return v;
     }
     result := ty_arg(&mut c, v.ty);
     regions := type_regions(&mut c, v.ty);
     args := type_args(&mut c, v.ty);
-    widened := intern_args(&mut c, 20, result, 1, regions, args);
+    widened := intern_args(&mut c, 20, result, fm & (CLOSURE_FNMUT + CLOSURE_BOUNDS), regions, args);
     return move_as(&mut c, v, widened);
 }
 // `&mut Fn(...)` used where `&mut FnMut(...)` is expected: same referent, same loan, wider call
@@ -28304,6 +28657,17 @@ fn reference_as_fnmut<a>(c: (&a mut C), slot: u64, ty: u64, expected: u64) -> u6
     }
     inner := ty_arg(&mut c, ty);
     want := ty_arg(&mut c, expected);
+    if (ty_kind(&mut c, inner) != 20) || (ty_kind(&mut c, want) != 20) {
+        return 0;
+    }
+    // Through `&mut` only the call mode widens: the referent keeps its owner's type, so a bound
+    // may neither be added nor dropped behind the reference.
+    if (ty_mode(&mut c, inner) & CLOSURE_BOUNDS) != (ty_mode(&mut c, want) & CLOSURE_BOUNDS) {
+        return 0;
+    }
+    if (ty_env(&mut c, inner) != 0) & ((ty_mode(&mut c, want) & CLOSURE_BOUNDS) != 0) {
+        return 0;
+    }
     if fn_as_fnmut(&mut c, inner, want) == 0 {
         return 0;
     }
@@ -29574,7 +29938,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                 move_out(&mut c, held);
             }
         }
-        vfn := intern_args(&mut c, 20, ret, mode, caps, copy_numbers(&params));
+        vfn := intern_args(&mut c, 20, ret, mode + CLOSURE_UNBUILT, caps, copy_numbers(&params));
         placeholder := imm(&mut c, 0);
         return own(&mut c, placeholder, vfn);
     }
@@ -39343,7 +39707,7 @@ pub fn iface_digest<a>(data: &a [u8]) -> u8[] {
 // compiler reads is refused by length. Neither can be misread as something else, which is what makes
 // adding a field a version bump and not a silent reinterpretation. `grail iface dump` renders the
 // tree the reader read, so the format stays inspectable without a second parser.
-const IFACE_VERSION: u64 = 5;
+const IFACE_VERSION: u64 = 6;
 const IFACE_TAG_MODULE: u64 = 1;
 const IFACE_TAG_TRAILER: u64 = 2;
 const IFACE_TAG_LINK: u64 = 3;
