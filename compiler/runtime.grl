@@ -4722,6 +4722,7 @@ fn rt_env_is(name: u64, value: u64) -> u64 {
 //     the capacity at +80), so the same three deque functions serve both
 // 224 this worker's runner (0 none)  232 the job handed to the runner  240 free job records
 // 248 their count  264 help-depth high-water mark  272 steps taken (the fairness tick)
+// 280 1 while this worker is counted as searching (rt_worker_loop, rt_worker_run)
 // 512..592 the Frame job deque, 640..720 the Background job deque (the Normal one is at 128)
 // 896..1024 the CPU mask a pinned worker hands the kernel
 //
@@ -4902,11 +4903,21 @@ fn rt_worker_self() -> u64 {
 // Bump the sequence unconditionally and wake a parked worker when there may be one: a worker that
 // read the sequence before looking for work either finds the new work or its wait fails with the
 // changed value, so no wake can be lost even when the parked count read is stale.
+// New work is queued. Wake a parked worker only when there is one and no worker is searching: a
+// searching worker will find the work, and in a join the forker usually takes its own fork back
+// before anyone could. The fence orders the push before the reads, as the parking worker orders its
+// count before its last look (rt_worker_loop), so one of the two always sees the other.
 fn rt_notify(s: u64) -> u64 {
-    rt_atomic_fetch_add(s + 24, 1);
-    if raw_atomic_load(s + 96) != 0 {
-        rt_syscall(202, s + 24, 129, 1);
+    rt_full_fence();
+    if raw_atomic_load(s + 96) == 0 {
+        return 0;
     }
+    if raw_atomic_load(raw_load(rt_state_jobs()) + 416) != 0 {
+        return 0;
+    }
+    rt_atomic_fetch_add(s + 24, 1);
+    rt_atomic_fetch_add(raw_load(rt_state_jobs()) + 424, 1);
+    rt_syscall(202, s + 24, 129, 1);
     return 0;
 }
 // ---- Chase-Lev deques ---------------------------------------------------------------------
@@ -5072,12 +5083,27 @@ fn rt_worker_loop(worker: u64) -> u64 {
     }
     rt_os_stack_warm(rt_sched_setting(32));
     spin := rt_sched_setting(48);
+    searching := raw_load(rt_state_jobs()) + 416;
     while true {
-        // The sequence is read before the look for work: a push after this read changes the word
-        // the wait compares, so the wait returns at once and no wakeup is lost. (Looking a few
-        // more times before sleeping was measured and did not pay: bench/sched.grl got slower.)
-        seq := raw_atomic_load(s + 24);
-        mut found = rt_worker_step(s, worker);
+        if rt_worker_step(s, worker) != 0 {
+            continue;
+        }
+        // Out of work. SEARCH before sleeping: a worker that is still looking is one a fork does
+        // not have to wake (rt_notify), which is what spares a join its system calls - in a join
+        // the forker nearly always takes its own fork back, and a woken worker would find nothing.
+        // Counted as searching until it runs something (rt_worker_run clears it, before the work
+        // runs: work that forks must not see its own worker as the one that will find the fork).
+        raw_store(worker + 280, 1);
+        rt_atomic_fetch_add(searching, 1);
+        mut found = 0;
+        mut round = 0;
+        while (found == 0) & (round < rt_worker_search_rounds()) {
+            found = rt_worker_step(s, worker);
+            round += 1;
+            if (found == 0) & (round % 16 == 0) {
+                rt_syscall(24, 0, 0, 0);
+            }
+        }
         if (found == 0) & (spin != 0) {
             // sched::Config.idle_spin_us: keep looking for that long before sleeping.
             until := rt_now_us() + spin;
@@ -5085,13 +5111,37 @@ fn rt_worker_loop(worker: u64) -> u64 {
                 found = rt_worker_step(s, worker);
             }
         }
-        if found == 0 {
-            rt_atomic_fetch_add(s + 96, 1);
-            rt_syscall(202, s + 24, 128, seq);
-            rt_atomic_fetch_sub(s + 96, 1);
+        if raw_load(worker + 280) != 0 {
+            raw_store(worker + 280, 0);
+            rt_atomic_fetch_sub(searching, 1);
         }
+        if found != 0 {
+            continue;
+        }
+        // PARK, without losing a wake: count this worker parked BEFORE the last look (a pusher
+        // reads the count after its push, both with full barriers - rt_notify), and read the
+        // sequence before it, so a wake that lands between the look and the wait changes the word
+        // the wait compares.
+        seq := raw_atomic_load(s + 24);
+        rt_atomic_fetch_add(s + 96, 1);
+        if rt_worker_step(s, worker) == 0 {
+            rt_syscall(202, s + 24, 128, seq);
+        }
+        rt_atomic_fetch_sub(s + 96, 1);
     }
     return 0;
+}
+// A full barrier with no shared write: a locked compare-and-swap on a word of this frame (x86-64
+// `lock cmpxchg`; AArch64 and RV64 lower the CAS with full barriers on both sides).
+fn rt_full_fence() -> u64 {
+    mut word = 0;
+    at := &mut word;
+    raw_atomic_cas(at, 0, 0);
+    return 0;
+}
+// How many empty looks a worker takes, yielding the CPU every sixteenth, before it parks.
+fn rt_worker_search_rounds() -> u64 {
+    return 64;
 }
 // One unit of work, or 0 when there is none. The order: this worker's jobs (LIFO - they are what a
 // join on some stack is waiting for), its tasks, injected jobs, injected tasks, then a steal pass
@@ -5140,6 +5190,10 @@ fn rt_worker_step(s: u64, w: u64) -> u64 {
     return 1;
 }
 fn rt_worker_run(s: u64, w: u64, t: u64) -> u64 {
+    if raw_load(w + 280) != 0 {
+        raw_store(w + 280, 0);
+        rt_atomic_fetch_sub(raw_load(rt_state_jobs()) + 416, 1);
+    }
     tp := raw_tp_get();
     raw_store(tp + 16, t);
     if raw_load(t) == 0 {
@@ -5246,7 +5300,8 @@ fn rt_worker_run(s: u64, w: u64, t: u64) -> u64 {
 // 40 carve pointer, 48 carve bytes left, 56 free runner records, 64 a word that stays zero (a
 // runner's cancel token), 72 free failure records (rt_job_failure_release), 104 workers started (thread-per-task mode); the Frame ring at 128 and the
 // Background ring at 256, laid out like the Normal one at 0; 400 Background jobs running, 408 the
-// cap on them (background_cap).
+// cap on them (background_cap), 416 workers searching for work (rt_worker_loop, rt_notify), 424
+// wakes issued (a futex wake each; GRAIL_SCHED_STATS prints it).
 //
 // CLASSES. A job is Frame (0), Normal (1) or Background (2), in record word 112. Each worker has a
 // deque per class and there is a ring per class. A worker takes Frame work, then Normal work, then
@@ -6303,6 +6358,8 @@ fn rt_sched_stats() -> u64 {
     n = rt_fail_num(buf, n, workers);
     n = rt_fail_put(buf, n, view(", help depth high-water "));
     n = rt_fail_num(buf, n, high);
+    n = rt_fail_put(buf, n, view(", wakes "));
+    n = rt_fail_num(buf, n, raw_load(raw_load(rt_state_jobs()) + 424));
     n = rt_fail_put(buf, n, view(", oldest background wait "));
     n = rt_fail_num(buf, n, rt_background_wait_us());
     n = rt_fail_put(buf, n, view(" us"));
