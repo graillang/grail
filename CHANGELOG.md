@@ -1,5 +1,15 @@
 ## Unreleased
 
+- **`grail build --release`** (and `grail run --release`, a project's `grail test --release`):
+  every module is compiled by the LLVM backend and its LLVM module optimised by `clang -O2`, per
+  module through the build store as before, and integer overflow wraps unless `--overflow=` says
+  otherwise. A release unit is still one object: the assembled stream and the optimised module are
+  folded together with `ld.lld -r`. Release builds are refused on macOS and Windows and with
+  `--debug` or `--split`, rather than quietly built native. Runtime failures print their message
+  without the `--> file:line` location in a release build (the location table is a native-backend
+  artefact for now). The LLVM backend's `memcpy`/`memset`/`memmove` are weak, so several modules can
+  each carry them.
+
 - **LLVM backend: loops over slices vectorise.** A slice's descriptor (`&[T]`, `&mut [T]`) cannot
   change while the slice lives, so the front end says so (F1 kind 5) and the lifter reads its
   `data` (as a pointer) and `len` once per function; element addresses are `getelementptr`s on that
