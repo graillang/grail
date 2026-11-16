@@ -285,11 +285,17 @@ struct L {
     eon: u64[],
     edata: u8[][],
     elen: u8[][],
+    // The same `data` as a `ptr` (loaded as one), so an element address can be a `getelementptr`
+    // with the allocation's provenance rather than an integer sum the optimiser cannot see through.
+    edptr: u8[][],
     // The block a set of fields was established in, and 1 when that block dominates every later
     // one (the entry block and its fall-through continuations, which have a single predecessor
     // each). The hoisted words are reused only where they are known to dominate the use.
     eblk: u64[],
     blk: u64,
+    // The id of the `body` block: the first block of the function's own code, which dominates
+    // every block of it.
+    body_blk: u64,
     // Block names in the order `begin_block` first saw them. A hoisted `data`/`len` is reused only
     // in the block that established it: that is the one placement the lifter can prove, and the
     // cross-block hoist needs the region fact docs/design/typed-ir.md describes.
@@ -303,6 +309,10 @@ struct L {
     // argument 0 is a header (0 otherwise) and its `what`.
     hcall: u64[],
     hcallwhat: u64[],
+    // The accepted header slots (parallel to hslots) that are stable for the whole function: a
+    // slice descriptor (`what` 5) written exactly once and never addressed, so the fields read where
+    // that one write happens in the first block are current everywhere after it.
+    hstable: u64[],
     // Sibling mode: 0 normally, else the element width of the typed header parameter this body is
     // being re-emitted with, the `what` of that fact, and the two incoming words for the header
     // fields at `+0` and `+8` in place of the loads.
@@ -1446,6 +1456,7 @@ fn accept_headers(l: (&mut L), instrs: (&u8[][]), facts: (&Facts), fname: (&[u8]
     exchange(&mut l.hslots, u64[]);
     exchange(&mut l.hwhat, u64[]);
     exchange(&mut l.hwidth, u64[]);
+    exchange(&mut l.hstable, u64[]);
     mut cand = u64[];
     mut cwhat = u64[];
     mut cwidth = u64[];
@@ -1466,8 +1477,9 @@ fn accept_headers(l: (&mut L), instrs: (&u8[][]), facts: (&Facts), fname: (&[u8]
             cwhat.push(f.what);
             cwidth.push(f.width);
         }
-        // Every fact naming the slot has to agree, and a header is `what` 2/3/4 only.
-        if (f.what < 2) || (f.what > 4) {
+        // Every fact naming the slot has to agree, and a header is `what` 2/3/4 (a vector) or 5 (a
+        // slice's descriptor).
+        if (f.what < 2) || (f.what > 5) {
             bad.push(f.a);
         } else {
             for j in cand.len() {
@@ -1485,10 +1497,11 @@ fn accept_headers(l: (&mut L), instrs: (&u8[][]), facts: (&Facts), fname: (&[u8]
                 rejected = 1;
             }
         }
-        if (rejected == 0) & (k < slots) & (cwhat[i] >= 2) & (cwhat[i] <= 4) & header_body_ok(&instrs, k) {
+        if (rejected == 0) & (k < slots) & (cwhat[i] >= 2) & (cwhat[i] <= 5) & header_body_ok(&instrs, k) {
             l.hslots.push(k);
             l.hwhat.push(cwhat[i]);
             l.hwidth.push(cwidth[i]);
+            l.hstable.push(u64((cwhat[i] == 5) && written_once(&instrs, k)));
         }
     }
     return ();
@@ -1497,7 +1510,7 @@ fn accept_headers(l: (&mut L), instrs: (&u8[][]), facts: (&Facts), fname: (&[u8]
 fn call_header(facts: (&Facts), fname: (&[u8]), callee: (&[u8]), ordinal: u64) -> HFact {
     for i in facts.items.len() {
         f := &facts.items[i];
-        if (f.kind != 1) || (f.a != ordinal) || (f.what < 2) || (f.what > 4) {
+        if (f.kind != 1) || (f.a != ordinal) || (f.what < 2) || (f.what > 5) {
             continue;
         }
         if !eq(view(f.fn), view(fname)) || !eq(view(f.callee), view(callee)) {
@@ -1599,12 +1612,15 @@ fn establish(l: (&mut L), k: u64, w: (&[u8])) -> unit {
         l.eon.push(0);
         l.edata.push(u8[]);
         l.elen.push(u8[]);
+        l.edptr.push(u8[]);
         l.eblk.push(0);
     }
     what := header_slot_kind(&l, k);
     h := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][copy(w)]);
-    d := header_load(&mut l, view(h), 0);
+    dp := def(&mut l, view("load ptr, ptr {}, align 8"), &u8[][copy(view(h))]);
+    d := def(&mut l, view("ptrtoint ptr {} to i64"), &u8[][copy(view(dp))]);
     ln := header_load(&mut l, view(h), 8);
+    exchange(&mut l.edptr[k], dp);
     if l.verify != 0 {
         verify_header(&mut l, w, view(h), what, view(ln));
     }
@@ -1623,6 +1639,12 @@ fn stale(l: (&mut L), k: u64) -> unit {
         l.eon.push(0);
         l.edata.push(u8[]);
         l.elen.push(u8[]);
+        l.edptr.push(u8[]);
+    }
+    // A slice's descriptor (`what` 5) is never written while the slice lives (SEQ-STABLE): no call
+    // can grow, move or truncate what it describes, so its fields stay current.
+    if header_slot_kind(&l, k) == 5 {
+        return ();
     }
     if l.eon[k] == 1 {
         l.eon[k] = 2;
@@ -1636,6 +1658,7 @@ fn unestablish(l: (&mut L), k: u64) -> unit {
         l.eon.push(0);
         l.edata.push(u8[]);
         l.elen.push(u8[]);
+        l.edptr.push(u8[]);
     }
     l.eon[k] = 0;
     return ();
@@ -1668,7 +1691,54 @@ fn reachable(l: (&L), k: u64) -> bool {
     if k >= l.eblk.len() {
         return false;
     }
-    return l.eblk[k] == l.blk;
+    if l.eblk[k] == l.blk {
+        return true;
+    }
+    // SEQ-STABLE: a slice descriptor whose one write is in the function's first block. That block
+    // dominates every other, and nothing writes the descriptor while the slice lives, so the fields
+    // read there are the fields everywhere (docs/design/release-builds-and-parity.md).
+    return (l.eblk[k] == l.body_blk) && header_stable(&l, k);
+}
+fn header_stable(l: (&L), k: u64) -> bool {
+    for i in l.hslots.len() {
+        if (l.hslots[i] == k) && (i < l.hstable.len()) {
+            return l.hstable[i] != 0;
+        }
+    }
+    return false;
+}
+// Whether slot k is written by exactly one instruction of the body and never has its address taken:
+// the destination operand is the slot itself, matched whole (`-8(%rbp)` is not `-48(%rbp)`).
+fn written_once(instrs: (&u8[][]), k: u64) -> bool {
+    needle := slot_needle(k);
+    mut writes = 0;
+    for m in instrs.len() {
+        line := view(instrs[m]);
+        if !has(line, view(needle)) {
+            continue;
+        }
+        mut comma = line.len();
+        for j in line.len() {
+            if line[j] == 44 {
+                comma = j;
+            }
+        }
+        if comma == line.len() {
+            continue;
+        }
+        dst := sub(line, comma + 1, line.len());
+        if starts(line, view("leaq ")) {
+            src := sub(line, 5, comma);
+            if eq(view(src), view(needle)) {
+                return false;
+            }
+            continue;
+        }
+        if eq(view(dst), view(needle)) {
+            writes += 1;
+        }
+    }
+    return writes == 1;
 }
 // Whether a call writes the header it is given. Everything outside this set that receives a header
 // word may grow, fill, truncate, pop, insert or clear it, and invalidates the established fields.
@@ -1924,6 +1994,63 @@ fn never_returns<a>(target: &a [u8]) -> bool {
         || eq(target, view("rt_abort_final")) || eq(target, view("rt_abort_park")) || eq(target, view("rt_hard_exit"))
         || eq(target, view("rt_stack_overflow")) || eq(target, view("rt_stack_overflow_at"));
 }
+// The accessors that return an element's address: `rt_slot` and `rt_slot4` check the index against
+// `len` first, the `u` forms were handed a proven index.
+fn address_accessor(name: (&[u8])) -> bool {
+    return eq(name, view("rt_slot")) || eq(name, view("rt_slotu")) || eq(name, view("rt_slot4")) || eq(name, view("rt_slot4u"));
+}
+// An element address from the fields an F1 fact hoisted: the bounds check against the hoisted `len`
+// (failing exactly as the accessor would - `rt_slot` reports the index, `rt_slot4` aborts), then a
+// `getelementptr` on the hoisted `data` pointer. The address keeps the allocation's provenance, so
+// LLVM can reason about it: the loop that does no more than this is one it can vectorise.
+fn element_address(l: (&mut L), target: (&[u8]), k: u64, width: u64) -> unit {
+    i := get_reg(&mut l, view("rsi"));
+    if l.verify != 0 {
+        // --verify-facts: the header this call was handed still holds the `data` and `len` the
+        // fact hoisted. A SEQ-STABLE claim about a descriptor that did change - or a vector fact
+        // whose staleness was missed - aborts here, on the first access after the change.
+        h := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][copy(view(get_reg(&mut l, view("rdi"))))]);
+        d := header_load(&mut l, view(h), 0);
+        ln := header_load(&mut l, view(h), 8);
+        sd := def(&mut l, view("icmp eq i64 {}, {}"), &u8[][d, copy(view(l.edata[k]))]);
+        sl := def(&mut l, view("icmp eq i64 {}, {}"), &u8[][ln, copy(view(l.elen[k]))]);
+        same := def(&mut l, view("and i1 {}, {}"), &u8[][sd, sl]);
+        good := fresh_block(&mut l);
+        wrong := fresh_block(&mut l);
+        emit(&mut l, view("br i1 {}, label %{}, label %{}"), &u8[][same, copy(view(good)), copy(view(wrong))]);
+        begin_block(&mut l, view(wrong));
+        emit(&mut l, view("call void @\"rt_abort.cold\"() #0"), &u8[][]);
+        emit(&mut l, view("unreachable"), &u8[][]);
+        begin_block(&mut l, view(good));
+    }
+    if eq(target, view("rt_slot")) || eq(target, view("rt_slot4")) {
+        ok := def(&mut l, view("icmp ult i64 {}, {}"), &u8[][copy(view(i)), copy(view(l.elen[k]))]);
+        good := fresh_block(&mut l);
+        wrong := fresh_block(&mut l);
+        emit(&mut l, view("br i1 {}, label %{}, label %{}"), &u8[][ok, copy(view(good)), copy(view(wrong))]);
+        begin_block(&mut l, view(wrong));
+        if eq(target, view("rt_slot")) {
+            l.calls.push(copy(view("rt_fail")));
+            emit(
+                &mut l,
+                view("call {i64, i64} @\"rt_fail\"(i64 1, i64 {}, i64 {}, i64 0, i64 0, i64 0)"),
+                &u8[][copy(view(i)), copy(view(l.elen[k]))]
+            );
+        } else {
+            emit(&mut l, view("call void @\"rt_abort.cold\"() #0"), &u8[][]);
+        }
+        emit(&mut l, view("unreachable"), &u8[][]);
+        begin_block(&mut l, view(good));
+    }
+    off := def(&mut l, view("mul i64 {}, {}"), &u8[][copy(view(i)), copy_width(width)]);
+    p := def(&mut l, view("getelementptr i8, ptr {}, i64 {}"), &u8[][copy(view(l.edptr[k])), off]);
+    r := def(&mut l, view("ptrtoint ptr {} to i64"), &u8[][p]);
+    set_reg(&mut l, view("rax"), view(r));
+    set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
+    set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
+    clear_args(&mut l);
+    return ();
+}
 fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> unit {
     if (target.len() == 0) || (target[0] == 42) {
         bad(&mut l);
@@ -2013,6 +2140,10 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
         // and a sibling call whose `data`/`len` had to be re-read here would be a longer instruction
         // sequence doing the same loads as the body it replaced.
         if (have != 0) & (chain_kind(&l, kid) == 1) & (k < l.hslots.len() + 4096) & reachable(&l, k) {
+            if address_accessor(target) {
+                element_address(&mut l, view(target), k, hf.width);
+                return ();
+            }
             a0 := get_reg(&mut l, view("rdi"));
             p := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][a0]);
             mut c = u8[];
@@ -2716,6 +2847,7 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
     exchange(&mut l.eon, u64[]);
     exchange(&mut l.edata, u8[][]);
     exchange(&mut l.elen, u8[][]);
+    exchange(&mut l.edptr, u8[][]);
     exchange(&mut l.eblk, u64[]);
     l.blk = 0;
     exchange(&mut l.dnames, u8[][]);
@@ -2938,6 +3070,7 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
     }
     emit(&mut l, view("br label %body"), &u8[][]);
     begin_block(&mut l, view("body"));
+    l.body_blk = l.blk;
     if l.verify != 0 {
         // The range facts this function used, as comments, so a test can read them off the module.
         for i in l.proof.len() {
@@ -5385,9 +5518,9 @@ fn header<a>(out: (&a mut u8[])) -> unit {
     put(&mut out, view("declare double @llvm.sqrt.f64(double)\n"));
     put(&mut out, view("define internal void @\"rt_abort.cold\"() noreturn cold noinline nounwind {\n  call {i64, i64} @\"rt_abort\"(i64 0, i64 0, i64 0, i64 0, i64 0, i64 0)\n  unreachable\n}\n"));
     // LLVM may turn copy and fill loops into these calls; Grail programs have no libc.
-    put(&mut out, view("define ptr @memset(ptr %d, i32 %c, i64 %n) #1 {\nentry:\n  %b = trunc i32 %c to i8\n  br label %loop\nloop:\n  %i = phi i64 [0, %entry], [%i1, %body]\n  %done = icmp eq i64 %i, %n\n  br i1 %done, label %exit, label %body\nbody:\n  %p = getelementptr i8, ptr %d, i64 %i\n  store i8 %b, ptr %p\n  %i1 = add i64 %i, 1\n  br label %loop\nexit:\n  ret ptr %d\n}\n"));
-    put(&mut out, view("define ptr @memcpy(ptr %d, ptr %s, i64 %n) #1 {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [0, %entry], [%i1, %body]\n  %done = icmp eq i64 %i, %n\n  br i1 %done, label %exit, label %body\nbody:\n  %q = getelementptr i8, ptr %s, i64 %i\n  %v = load i8, ptr %q\n  %p = getelementptr i8, ptr %d, i64 %i\n  store i8 %v, ptr %p\n  %i1 = add i64 %i, 1\n  br label %loop\nexit:\n  ret ptr %d\n}\n"));
-    put(&mut out, view("define ptr @memmove(ptr %d, ptr %s, i64 %n) #1 {\nentry:\n  %fwd = icmp ult ptr %d, %s\n  br i1 %fwd, label %f, label %b\nf:\n  %i = phi i64 [0, %entry], [%i1, %fb]\n  %fdone = icmp eq i64 %i, %n\n  br i1 %fdone, label %exit, label %fb\nfb:\n  %fq = getelementptr i8, ptr %s, i64 %i\n  %fv = load i8, ptr %fq\n  %fp = getelementptr i8, ptr %d, i64 %i\n  store i8 %fv, ptr %fp\n  %i1 = add i64 %i, 1\n  br label %f\nb:\n  %j = phi i64 [%n, %entry], [%j1, %bb]\n  %bdone = icmp eq i64 %j, 0\n  br i1 %bdone, label %exit, label %bb\nbb:\n  %j1 = sub i64 %j, 1\n  %bq = getelementptr i8, ptr %s, i64 %j1\n  %bv = load i8, ptr %bq\n  %bp = getelementptr i8, ptr %d, i64 %j1\n  store i8 %bv, ptr %bp\n  br label %b\nexit:\n  ret ptr %d\n}\n"));
+    put(&mut out, view("define weak ptr @memset(ptr %d, i32 %c, i64 %n) #1 {\nentry:\n  %b = trunc i32 %c to i8\n  br label %loop\nloop:\n  %i = phi i64 [0, %entry], [%i1, %body]\n  %done = icmp eq i64 %i, %n\n  br i1 %done, label %exit, label %body\nbody:\n  %p = getelementptr i8, ptr %d, i64 %i\n  store i8 %b, ptr %p\n  %i1 = add i64 %i, 1\n  br label %loop\nexit:\n  ret ptr %d\n}\n"));
+    put(&mut out, view("define weak ptr @memcpy(ptr %d, ptr %s, i64 %n) #1 {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [0, %entry], [%i1, %body]\n  %done = icmp eq i64 %i, %n\n  br i1 %done, label %exit, label %body\nbody:\n  %q = getelementptr i8, ptr %s, i64 %i\n  %v = load i8, ptr %q\n  %p = getelementptr i8, ptr %d, i64 %i\n  store i8 %v, ptr %p\n  %i1 = add i64 %i, 1\n  br label %loop\nexit:\n  ret ptr %d\n}\n"));
+    put(&mut out, view("define weak ptr @memmove(ptr %d, ptr %s, i64 %n) #1 {\nentry:\n  %fwd = icmp ult ptr %d, %s\n  br i1 %fwd, label %f, label %b\nf:\n  %i = phi i64 [0, %entry], [%i1, %fb]\n  %fdone = icmp eq i64 %i, %n\n  br i1 %fdone, label %exit, label %fb\nfb:\n  %fq = getelementptr i8, ptr %s, i64 %i\n  %fv = load i8, ptr %fq\n  %fp = getelementptr i8, ptr %d, i64 %i\n  store i8 %fv, ptr %fp\n  %i1 = add i64 %i, 1\n  br label %f\nb:\n  %j = phi i64 [%n, %entry], [%j1, %bb]\n  %bdone = icmp eq i64 %j, 0\n  br i1 %bdone, label %exit, label %bb\nbb:\n  %j1 = sub i64 %j, 1\n  %bq = getelementptr i8, ptr %s, i64 %j1\n  %bv = load i8, ptr %bq\n  %bp = getelementptr i8, ptr %d, i64 %j1\n  store i8 %bv, ptr %bp\n  br label %b\nexit:\n  ret ptr %d\n}\n"));
     return ();
 }
 fn pool_name<a>(label: &a [u8]) -> u8[] {
@@ -5514,7 +5647,7 @@ fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (
             set_add(&mut weak, view(sub(wl, 6, wl.len())));
         }
     }
-    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, dnames: u8[][], proof: u64[], rline: 0, ranges: ranges };
+    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, dnames: u8[][], proof: u64[], rline: 0, ranges: ranges };
     mut funcs = Func[];
     mut data = u8[][];
     split(&lines, &mut funcs, &mut data);

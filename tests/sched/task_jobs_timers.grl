@@ -1,0 +1,50 @@
+// Tasks that fork compute jobs while a timer task ticks. One task per worker runs parallel passes
+// in a loop; beside them a ticker sleeps 5 ms forty times. The jobs never wait, so no worker is
+// ever held for longer than a leaf, and the ticker's worst gap stays far below the 500 ms bound
+// (a bound that loose is about a stalled scheduler, not about timing). The sums prove no job was
+// lost or run twice.
+use host;
+use pool;
+
+fn pass(seed: u64) -> u64 {
+    parts := pool::run<u64>(8, |k: u64| -> u64 {
+        mut v = seed + k;
+        for i in 2000 { v = (v * 31 + i) % 1000003; }
+        return v % 97;
+    });
+    mut total = 0;
+    for i in parts.len() { total += parts[i]; }
+    return total;
+}
+fn forker(n: u64, unused: u64) -> u64 {
+    mut total = 0;
+    for i in 60 { total += pass(n * 1000 + i); }
+    return total;
+}
+fn ticker(n: u64, unused: u64) -> u64 {
+    mut worst = 0;
+    mut last = host::now_ms();
+    for i in 40 {
+        host::sleep_ms(5);
+        now := host::now_ms();
+        if now - last > worst { worst = now - last; }
+        last = now;
+    }
+    return worst;
+}
+fn body<s>(sc: (&s Scope<u64>), unused: u64) -> u64 {
+    t := spawn(sc, 0, ticker);
+    mut hs = Task<u64>[];
+    for i in host::workers() { hs.push(spawn(sc, i, forker)); }
+    mut total = 0;
+    while let Some(h) = hs.pop() { total += join(h); }
+    mut check = 0;
+    for i in host::workers() { check += forker(i, 0); }
+    assert(total == check);
+    worst := join(t);
+    assert(worst < 500);
+    return 1;
+}
+fn main() {
+    println(task_scope(0, body));
+}

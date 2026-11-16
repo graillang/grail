@@ -1,0 +1,135 @@
+// A simulated engine frame loop, the benchmark every stage of docs/design/concurrency-model.md
+// reports. 600 frames; each frame runs 32 systems as jobs (every third forks four more), one
+// in-place parallel pass over 1M elements in leaves of 4096, and a fixed "render" step on the main
+// thread. Beside the frames run an I/O task (reads a file, then sleeps 5 ms, and records how late
+// each round was) and a background task that computes and allocates throughout.
+//
+// Until a stage provides a piece, the benchmark uses what exists: the main thread renders, the
+// I/O task reports through an atomic. Output is `name value unit` lines; times are never equal
+// twice, so nothing here is a corpus expectation.
+use host;
+use pool;
+
+struct Shared {
+    stop: Atomic<u64>,
+    io_rounds: Atomic<u64>,
+    io_worst_us: Atomic<u64>,
+    bg_rounds: Atomic<u64>
+}
+fn threads() -> u64 {
+    s := host::read_file("/proc/self/status");
+    mut i = 0;
+    while i + 8 < s.len() {
+        if s[i] == 84 && s[i + 1] == 104 && s[i + 2] == 114 && s[i + 3] == 101 && s[i + 4] == 97 && s[i + 5] == 100 && s[i + 6] == 115 && s[i + 7] == 58 {
+            mut j = i + 8;
+            mut n = 0;
+            while s[j] < 48 || s[j] > 57 { j += 1; }
+            while s[j] >= 48 && s[j] <= 57 { n = n * 10 + (s[j] - 48); j += 1; }
+            return n;
+        }
+        i += 1;
+    }
+    return 0;
+}
+fn mix(x: u64) -> u64 {
+    mut v = x ^ 88172645463325252;
+    v = v ^ (v << 13); v = v ^ (v >> 7); v = v ^ (v << 17);
+    return v;
+}
+fn work(seed: u64, rounds: u64) -> u64 {
+    mut v = seed;
+    for i in rounds { v = mix(v + i); }
+    return v;
+}
+fn sub(k: u64, seed: u64) -> u64 {
+    return work(seed + k, 5000);
+}
+// One system: about 20k mixes; every third forks four sub-jobs of 5k each instead.
+fn system(i: u64, frame: u64) -> u64 {
+    if i % 3 == 0 {
+        parts := parallel_map(u64[0, 1, 2, 3], i * 31 + frame, sub);
+        return parts[0] ^ parts[1] ^ parts[2] ^ parts[3];
+    }
+    return work(i + frame, 20000);
+}
+fn leaf(s: &mut [u64]) {
+    for i in s.len() { s[i] = mix(s[i]); }
+}
+fn io_task(n: u64, sh: &Shared) -> u64 {
+    mut rounds = 0;
+    while sh.stop.load() == 0 {
+        t0 := host::now_us();
+        bytes := host::read_file("/proc/self/stat");
+        host::sleep_ms(5);
+        took := host::now_us() - t0;
+        mut late = 0;
+        if took > 5000 { late = took - 5000; }
+        if late > sh.io_worst_us.load() { sh.io_worst_us.store(late); }
+        rounds += 1;
+        sh.io_rounds.store(rounds);
+    }
+    return rounds;
+}
+// The asset importer: compute plus allocation, never waits.
+fn bg_task(n: u64, sh: &Shared) -> u64 {
+    mut rounds = 0;
+    mut acc = 0;
+    while sh.stop.load() == 0 {
+        mut v = u64[];
+        for i in 2000 { v.push(mix(i + rounds)); }
+        for i in v.len() { acc = acc ^ v[i]; }
+        rounds += 1;
+        sh.bg_rounds.store(rounds);
+    }
+    return acc;
+}
+fn body<s>(sc: (&s Scope<&Shared>), sh: &Shared) -> u64 {
+    io := spawn(sc, 0, io_task);
+    bg := spawn(sc, 0, bg_task);
+    frames := 600;
+    n := 1000000;
+    mut data = u64[];
+    for i in n { data.push(i * 2654435761); }
+    mut times = u64[];
+    mut check = 0;
+    start := host::now_us();
+    for f in frames {
+        t0 := host::now_us();
+        mut index = u64[];
+        for i in 32 { index.push(i); }
+        sys := parallel_map(index, f, system);
+        for i in sys.len() { check = check ^ sys[i]; }
+        pool::chunks_mut<u64>(&mut data[0: n], 245, leaf);
+        check = check ^ work(f, 20000); // "render" on this thread
+        times.push(host::now_us() - t0);
+    }
+    total := host::now_us() - start;
+    sh.stop.store(1);
+    join(io);
+    join(bg);
+    for i in 16 { check = check ^ data[i * 1000]; }
+    // Insertion sort: 600 values, once, after the measurement.
+    mut a = 1;
+    while a < frames {
+        mut b = a;
+        while b > 0 && times[b - 1] > times[b] {
+            t := times[b]; times[b] = times[b - 1]; times[b - 1] = t;
+            b -= 1;
+        }
+        a += 1;
+    }
+    println("frame_median {} us", times[frames / 2]);
+    println("frame_p99 {} us", times[frames * 99 / 100]);
+    println("frame_max {} us", times[frames - 1]);
+    println("frames_total {} ms", total / 1000);
+    println("io_rounds {} n", sh.io_rounds.load());
+    println("io_worst_late {} us", sh.io_worst_us.load());
+    println("bg_rounds {} n", sh.bg_rounds.load());
+    println("threads {} n", threads());
+    return check;
+}
+fn main() {
+    sh := Shared { stop: Atomic::new(0), io_rounds: Atomic::new(0), io_worst_us: Atomic::new(0), bg_rounds: Atomic::new(0) };
+    check := task_scope(&sh, body);
+    println("checksum {} -", check);
+}

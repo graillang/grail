@@ -400,11 +400,10 @@ const fixtures = [
   },
   {
     where: 'book/chapters/closures.md (a closure with annotated parameters)',
-    line: '    vecs::sort_by(&mut order, |x: &u64, y: &u64| -> bool {',
+    line: 'order.sort_by(|x: &u64, y: &u64| -> bool {',
     expect: [
       ['|x:', 'punctuation.section.closure.begin.grail'],
       ['x', 'variable.parameter.grail'],
-      ['::', 'keyword.operator.grail'],
       ['u64', 'support.type.grail'],
       ['bool', 'support.type.grail'],
       ['y:', 'variable.parameter.grail'],

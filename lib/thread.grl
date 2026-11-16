@@ -1,0 +1,326 @@
+module thread;
+use host;
+use time;
+
+// ---- dedicated OS threads -------------------------------------------------------------------------
+//
+// `thread::spawn(cfg, f)` starts an OS thread that runs one closure and is nothing else. It is not
+// a scheduler worker and not a task: `host::worker_id()` is 0 on it, nothing is stolen onto it, and
+// a wait - a lock, a sleep, a read - blocks it in the kernel. That is the point of having one: the
+// latency of a render, audio or window thread is the OS's and the program's, not the scheduler's.
+// Work reaches the scheduler from a thread the way it does from `main`: open a `task_scope`, or
+// call into `pool`.
+//
+// A thread is joined by default. `Thread<R>` is move-only and its drop joins, as a `pool::Job<R>`'s
+// drop waits; `thread::detach` is the one way to let a thread outlive its handle, and it is spelled.
+//
+// A check that fails on a spawned thread is contained the way a task's is: the thread's stack is
+// discarded whole (no destructor runs on it), the thread ends, and the failure is a value at
+// `try_join` or is re-raised by `join`. On the main thread a failure ends the process, as always.
+//
+// What the program asks of the OS for a thread - a stack size, a processor set, a priority - is a
+// contract: when the OS refuses, `spawn` returns the refusal as an error value and the closure does
+// not run. The name is a label: the OS shows what it can (15 bytes on Linux) and the rest is cut.
+//
+// The closure crosses to another thread and may outlive the frame that spawned it, so the
+// signature says so: `FnMut<Send, Owned>` - its captures are transferable and none is a borrow -
+// and an `R: Send + Owned` result. `Thread<R>` is therefore Owned by construction (closure-bounds
+// note 2.10): nothing it holds is a loan.
+//
+// Not here yet: `thread::scope` (threads that borrow from the caller's frame), which waits for
+// capability bounds on closure parameters. See docs/design/threads.md.
+
+// The proof of being on a thread - the main thread or a dedicated one - and not in a task or a pool
+// job. It holds a foreign handle nothing has classified, so it is neither transferable nor
+// shareable: no closure that can run elsewhere may capture one, which is what makes a
+// `thread::Local` safe to read through it. Only this module can make one: `spawn` lends it to the
+// thread's closure and `with_current` lends it for a callback.
+handle CtxToken;
+pub struct Ctx {
+    token: CtxToken,
+    record: u64
+}
+
+// A set of processors, by number.
+pub struct CpuSet {
+    bits: u64[]
+}
+pub fn cpus(list: u64[]) -> CpuSet {
+    mut bits = u64[];
+    for i in list.len() {
+        n := list[i];
+        while bits.len() <= n / 64 {
+            bits.push(0);
+        }
+        bits[n / 64] = bits[n / 64] | (1 << (n % 64));
+    }
+    return CpuSet { bits: bits };
+}
+
+// `Realtime(p)` is a fixed priority above every ordinary thread (SCHED_FIFO at `p`, 1 to 99, on
+// Linux; time-critical on Windows) and usually needs a privilege; `High` and `Background` are
+// above and below normal.
+pub enum Priority { Background, Normal, High, Realtime(u8) }
+
+pub struct Config {
+    name: string,        // a label for the OS to show; cut to what it can show
+    stack_bytes: u64,    // 0: 1 MiB. Always guard-paged
+    affinity: CpuSet?,   // None: unpinned
+    priority: Priority
+}
+// An unnamed, unpinned thread of normal priority with the default stack.
+pub fn config() -> Config {
+    return Config { name: "".text(), stack_bytes: 0, affinity: None, priority: Priority::Normal };
+}
+
+// Why a thread did not start. `code` is the OS's own error number.
+pub enum Refused { Stack, Affinity, Priority, Unsupported }
+pub struct Error {
+    what: Refused,
+    code: u64
+}
+
+// A running thread. The handle may be moved to another thread, which may join it.
+pub unsafe struct Thread<R>: transferable {
+    result: *mut R
+}
+
+impl<R> Drop for Thread<R> {
+    fn drop(self: &mut Thread<R>) {
+        unsafe {
+            // A handle that was joined or detached holds no thread.
+            if !self.result.is_null() {
+                rec := self.result.addr() - 80;
+                if host::thread_wait(rec) == 0 {
+                    v := self.result.read();
+                    drop(v);
+                } else {
+                    failure := host::thread_failure(rec);
+                    drop(failure);
+                }
+                host::thread_release(rec);
+            }
+        }
+    }
+}
+
+// Start a thread running `f`. The closure and what it captured move to the thread; it is lent the
+// thread's `Ctx`.
+pub fn spawn<R: Send + Owned>(cfg: Config, f: FnMut<Send, Owned>((&Ctx)) -> R) -> Thread<R> |? Error {
+    mut body = f;
+    stack_bytes := cfg.stack_bytes;
+    label := cfg.name;
+    pinned := cfg.affinity;
+    wanted := cfg.priority;
+    mut rec = 0;
+    unsafe {
+    rec = thread_spawn_raw(|| -> unit {
+        me := host::thread_self();
+        mut token: CtxToken;
+        ctx := Ctx { token: token, record: me };
+        r := run_body<R>(&mut body, &ctx);
+        unsafe {
+            // A detached thread has nobody to hand its result to: it is dropped here.
+            if host::thread_keep(me) != 0 {
+                ptr_from_addr(R, me + 80).write(r);
+            }
+        }
+    });
+    }
+    mut priority = 0;
+    match wanted {
+        Background => { priority = 1; },
+        Normal => { priority = 0; },
+        High => { priority = 2; },
+        Realtime(p) => { priority = 3 + u64(p); }
+    }
+    unsafe {
+        words := ptr_from_addr(u64, rec);
+        words.add(2).write(stack_bytes);
+        words.add(19).write(priority);
+        put_name(rec, label);
+        put_affinity(rec, pinned);
+        why := host::thread_start(rec);
+        if why != 0 {
+            code := why % 65536;
+            what := why / 65536;
+            if what == 1 {
+                return Error { what: Refused::Stack, code: code };
+            }
+            if what == 2 {
+                return Error { what: Refused::Affinity, code: code };
+            }
+            if what == 3 {
+                return Error { what: Refused::Priority, code: code };
+            }
+            return Error { what: Refused::Unsupported, code: code };
+        }
+        return Thread { result: ptr_from_addr(R, rec + 80) };
+    }
+}
+
+// A captured `FnMut` is called through an exclusive borrow of the capture: that borrow is the form
+// the compiler reads as "this closure writes what it captured".
+fn run_body<a, b, R>(body: (&a mut FnMut<Send, Owned>((&Ctx)) -> R), ctx: (&b Ctx)) -> R {
+    return body(ctx);
+}
+// The label, cut to the 15 bytes the record (and Linux) holds.
+fn put_name(rec: u64, label: string) -> unit {
+    unsafe {
+        name := ptr_from_addr(u8, rec + 384);
+        mut shown = label.len();
+        if 15 < shown {
+            shown = 15;
+        }
+        for i in shown {
+            byte := label[i];
+            name.add(i).write(byte);
+        }
+    }
+}
+fn put_affinity(rec: u64, pinned: CpuSet?) -> unit {
+    unsafe {
+        words := ptr_from_addr(u64, rec);
+        match pinned {
+            Some(set) => {
+                mut n = set.bits.len();
+                if 16 < n {
+                    n = 16;
+                }
+                words.add(16).write(n);
+                for i in n {
+                    words.add(32 + i).write(set.bits[i]);
+                }
+                if n == 0 {
+                    // A set that names nobody is still a request, and the OS refuses it.
+                    words.add(16).write(1);
+                }
+            },
+            None => {}
+        }
+    }
+}
+
+// Wait for the thread and take its result. A thread that failed re-raises its failure here: inside
+// a task or another spawned thread that failure is contained in turn, on the main thread it ends
+// the process.
+pub fn join<R: Send + Owned>(t: Thread<R>) -> R {
+    mut handle = t;
+    unsafe {
+        result := handle.result;
+        handle.result = ptr_from_addr(R, 0);
+        rec := result.addr() - 80;
+        if host::thread_wait(rec) != 0 {
+            host::thread_refail(rec);
+        }
+        r := result.read();
+        host::thread_release(rec);
+        return r;
+    }
+}
+
+// Wait for the thread; its failure, if it failed, is the value.
+pub fn try_join<R: Send + Owned>(t: Thread<R>) -> R |? TaskFailure {
+    mut handle = t;
+    unsafe {
+        result := handle.result;
+        handle.result = ptr_from_addr(R, 0);
+        rec := result.addr() - 80;
+        if host::thread_wait(rec) != 0 {
+            failure := host::thread_failure(rec);
+            host::thread_release(rec);
+            return failure;
+        }
+        r := result.read();
+        host::thread_release(rec);
+        return r;
+    }
+}
+
+// Let the thread run on without a handle. Its result is dropped on the thread when it ends, and a
+// failure on it is contained and forgotten. A thread still running when `main` returns does not
+// keep the process alive: the process exits without waiting, and the end-of-main leak check is not
+// made, because that thread's allocations are still its own.
+pub fn detach<R: Send + Owned>(t: Thread<R>) -> unit {
+    mut handle = t;
+    unsafe {
+        rec := handle.result.addr() - 80;
+        if host::thread_detach(rec) != 0 {
+            handle.result = ptr_from_addr(R, 0);
+        }
+        // Otherwise it had already finished: the handle's drop joins it, which no longer waits.
+    }
+}
+
+// Lend the calling thread's `Ctx` to `f`. `None` in a task or a pool job, which have no thread of
+// their own to speak of.
+pub fn with_current<R>(f: FnMut((&Ctx)) -> R) -> R? {
+    if host::thread_plain() == 0 {
+        return None;
+    }
+    mut call = f;
+    mut token: CtxToken;
+    ctx := Ctx { token: token, record: host::thread_self() };
+    return Some(call(&ctx));
+}
+
+// Sleep until the monotonic clock reaches `deadline`: an absolute sleep, so a loop that sleeps to
+// the next frame does not drift by the time the frame took.
+pub fn sleep_until(deadline: time::Instant) -> unit {
+    host::sleep_until_ms(deadline.millis());
+}
+
+// ---- thread-local values --------------------------------------------------------------------------
+//
+// `thread::local(make)` is a key; each thread that reads it gets a value of its own, made by `make`
+// the first time and dropped when the thread ends (the main thread's at the end of `main`). Reading
+// takes a `Ctx`, which only a thread has and which cannot leave it, so no task - which may resume
+// on another worker - can read one.
+//
+// A `Local` is a key and the function that makes a thread's first value - plain data, so a copy of
+// it (`same()`) may be moved into each thread's closure, and every copy names the same local.
+// `make` is a function value, not a closure: it runs on whichever thread reads first, and must
+// carry nothing with it. Grail has no module-level value to declare one in yet (see
+// docs/design/threads.md), so the handle is passed, or captured by copy.
+pub struct Local<T> {
+    key: u64,
+    make: fn() -> T
+}
+pub fn local<T>(make: fn() -> T) -> Local<T> {
+    return Local { key: host::thread_local_key(), make: make };
+}
+fn drop_local<T>(cell: u64, unused: u64) -> u64 {
+    unsafe {
+        p := ptr_from_addr(T, cell);
+        v := p.read();
+        drop(v);
+        free(p);
+    }
+    return 0;
+}
+impl<T> Local<T> {
+    // Another handle on the same local, for another thread's closure to own.
+    pub fn same(self: (&Local<T>)) -> Local<T> {
+        return Local { key: self.key, make: self.make };
+    }
+    pub fn with<a, R>(self: (&Local<T>), ctx: (&a Ctx), f: FnMut((&mut T)) -> R) -> R {
+        mut call = f;
+        unsafe {
+            pair := ptr_from_addr(u64, host::thread_local(self.key));
+            if pair.read() == 0 {
+                cell := alloc(u64, 1).cast(T);
+                cell.write((self.make)());
+                dropper := drop_local<T>;
+                pair.add(1).write(ptr_of(&dropper).cast(u64).read());
+                pair.write(cell.addr());
+            }
+            return call(local_value<T>(ctx, ptr_from_addr(T, pair.read())));
+        }
+    }
+}
+// The thread's value, borrowed for as long as the `Ctx` that proves which thread this is.
+fn local_value<a, T>(ctx: (&a Ctx), cell: *mut T) -> (&a mut T) {
+    unsafe {
+        return cell.as_mut();
+    }
+}

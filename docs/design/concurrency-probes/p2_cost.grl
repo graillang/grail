@@ -1,0 +1,55 @@
+use host;
+use pool;
+fn one(n: u64, c: u64) -> u64 { return n + 1; }
+fn body<s>(sc: (&s Scope<u64>), count: u64) -> u64 {
+    mut total = 0;
+    for i in count {
+        t := spawn(sc, i, one);
+        total += join(t);
+    }
+    return total;
+}
+fn burst<s>(sc: (&s Scope<u64>), count: u64) -> u64 {
+    mut hs = Task<u64>[];
+    for i in count { hs.push(spawn(sc, i, one)); }
+    mut total = 0;
+    while let Some(h) = hs.pop() { total += join(h); }
+    return total;
+}
+fn fib(n: u64) -> u64 {
+    if n < 2 { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+fn pfib(n: u64) -> u64 {
+    if n < 12 { return fib(n); }
+    p := pool::join<u64,u64>(|| -> u64 pfib(n - 1), || -> u64 pfib(n - 2));
+    return p.first + p.second;
+}
+fn main() {
+    n := 200000;
+    pool::run<u64>(4, |i: u64| -> u64 i);
+    task_scope(1, body);
+    t0 := host::now_ms();
+    mut acc = 0;
+    for i in n { acc += pool::wait(pool::spawn<u64>(|| -> u64 1)); }
+    t1 := host::now_ms();
+    println(format("pool spawn+wait x{}: {} ms = {} ns each", n, t1 - t0, (t1 - t0) * 1000000 / n));
+    t2 := host::now_ms();
+    for i in n { p := pool::join<u64,u64>(|| -> u64 1, || -> u64 2); acc += p.first; }
+    t3 := host::now_ms();
+    println(format("pool::join x{}: {} ms = {} ns each", n, t3 - t2, (t3 - t2) * 1000000 / n));
+    t4 := host::now_ms();
+    acc += task_scope(n, body);
+    t5 := host::now_ms();
+    println(format("task spawn+join (sequential) x{}: {} ms = {} ns each", n, t5 - t4, (t5 - t4) * 1000000 / n));
+    t6 := host::now_ms();
+    acc += task_scope(n, burst);
+    t7 := host::now_ms();
+    println(format("task spawn burst then join x{}: {} ms = {} ns each", n, t7 - t6, (t7 - t6) * 1000000 / n));
+    t8 := host::now_ms();
+    s := fib(32);
+    t9 := host::now_ms();
+    q := pfib(32);
+    t10 := host::now_ms();
+    println(format("fib(32) serial {} ms; nested pool::join cutoff 12 ({} joins) {} ms; equal={}", t9 - t8, 28656, t10 - t9, s == q));
+}

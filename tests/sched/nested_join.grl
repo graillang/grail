@@ -1,0 +1,30 @@
+// Nested joins under steal, many times over: every level forks one branch and runs the other, so
+// with more than one worker the forked branches are stolen while their parents are still inside
+// deeper joins. 300 rounds of a 609-join recursion; any lost, doubled or misdelivered result
+// changes the sum. Run from the main thread and from inside a task, because a forker that is a
+// task and one that is a plain thread wait differently.
+use pool;
+
+fn fib(n: u64) -> u64 {
+    if n < 2 { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+fn pfib(n: u64) -> u64 {
+    if n < 6 { return fib(n); }
+    p := pool::join<u64,u64>(|| -> u64 pfib(n - 1), || -> u64 pfib(n - 2));
+    return p.first + p.second;
+}
+fn rounds(count: u64, unused: u64) -> u64 {
+    mut total = 0;
+    for i in count { total += pfib(20); }
+    return total;
+}
+fn body<s>(sc: (&s Scope<u64>), count: u64) -> u64 {
+    a := spawn(sc, count, rounds);
+    b := spawn(sc, count, rounds);
+    return join(a) + join(b);
+}
+fn main() {
+    println(rounds(100, 0));
+    println(task_scope(100, body));
+}

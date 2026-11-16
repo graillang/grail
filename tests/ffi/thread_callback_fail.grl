@@ -1,0 +1,33 @@
+module thread_callback_fail;
+use thread;
+
+// A check that fails inside a Grail callback that C called, on a dedicated thread. The failure is
+// contained like any other on that thread: the thread's stack - C's frames on it included - is
+// discarded whole, exactly as an abort would discard it, nothing returns into C, and the failure is
+// a value at the join. What C held when it made the call (a lock, a buffer) is not released, which
+// is the price of not unwinding; a failing task pays the same.
+extern "C" fn c_checked(v: i64) -> i64 {
+    table := u64[1, 2, 3];
+    return i64(table[u64(v)]);
+}
+extern "C" lib "shim.o" fn c_apply(callback: cfn(i64) -> i64, value: i64) -> i64;
+
+fn main() -> u64 {
+    fine := thread::spawn<i64>(thread::config(), |ctx: (&thread::Ctx)| -> i64 {
+        unsafe {
+            return c_apply(c_checked, 2);
+        }
+    })!;
+    println(thread::join(fine));
+    failing := thread::spawn<i64>(thread::config(), |ctx: (&thread::Ctx)| -> i64 {
+        unsafe {
+            return c_apply(c_checked, 7);
+        }
+    })!;
+    match thread::try_join(failing) {
+        TaskFailure(e) => { println(e.message); },
+        i64(v) => { println(v); }
+    }
+    println("the process goes on");
+    return 0;
+}

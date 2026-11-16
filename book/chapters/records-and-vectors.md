@@ -19,7 +19,9 @@ that own data) cannot be repeated, since each copy would share one owner; build 
 `values.push(value)` consumes an element, and `values.pop()` takes the last one off as an option:
 `Some(element)`, or `None` when the vector is empty, so `while let Some(x) = values.pop() { ... }`
 empties it and `if let Some(x) = values.pop()` handles both cases. `values.pop()!` insists there
-is one, and stops the program with `pop from an empty vector` when there is not.
+is one, and stops the program with `pop from an empty vector` when there is not. A vector's buffer
+of 512 bytes or more starts on a 64-byte boundary (a cache line, and enough for any SIMD load); a
+smaller one starts on a 16-byte boundary.
 
 {{example:vectors}}
 
