@@ -971,7 +971,7 @@ fn rt_alloc(n: u64) -> u64 {
 // rt_alloc in a process with more than one thread. It is a function of its own so that the
 // one-thread path above stays as small as it was: the compiler measures it.
 fn rt_alloc_shared(n: u64) -> u64 {
-    if n < 65521 {
+    if n < 262129 {
         tp := raw_tp_get();
         if tp != 0 {
             // The thread's own cache (docs/design/allocator.md): no lock and no atomic from here
@@ -1063,7 +1063,7 @@ fn rt_free_shared(p: u64) -> u64 {
         rt_abort();
     }
     size := raw_load(block);
-    if size < 65537 {
+    if size < 262145 {
         tp := raw_tp_get();
         if tp != 0 {
             mut c = raw_load(tp + 64);
@@ -1098,7 +1098,7 @@ fn rt_free_shared(p: u64) -> u64 {
 }
 // ---- per-thread block caches (docs/design/allocator.md) ---------------------------------------
 // Once the process has a second thread, every OS thread allocates from and frees into a cache of
-// its own for the classes up to 64 KiB, and takes the allocator lock only to move a batch of blocks
+// its own for the classes up to 256 KiB, and takes the allocator lock only to move a batch of blocks
 // between the cache and the shared lists. The cache belongs to the OS thread - it hangs off the
 // thread record, which the thread pointer names - and never to a green task, which may resume on
 // another worker; a task leaves its worker only at a park point and the allocator is not one, so
@@ -1107,11 +1107,11 @@ fn rt_free_shared(p: u64) -> u64 {
 // Cache page (raw_map, one per thread, made by the thread's first allocation):
 //   0 next cache in the registry (state word 40)   8 live blocks: allocations minus frees made by
 //   this thread, a wrapping count that is negative on a thread that frees what others allocated
-//   64 + bin * 48, for the bins 0..11:
+//   64 + bin * 48, for the bins 0..13:
 //     0 free list head   8 blocks on it   16 next block of the reserved run   24 blocks left in it
 //     32 how many blocks the next refill asks for   40 the most the list may hold
-// The list holds at most 256 blocks and at most 128 KiB; one block over, half of it goes to the
-// shared list. A refill asks for 4 blocks the first time and twice as many each time after, up to
+// The list holds at most 256 blocks and at most 128 KiB, and never less than one block (the 128 KiB
+// and 256 KiB classes); one block over, half of it leaves as a chain. A refill asks for 4 blocks the first time and twice as many each time after, up to
 // half the bound, so a thread that lives for one call does not reserve what it will hand back.
 fn rt_cache_make(tp: u64) -> u64 {
     c := raw_map(4096);
@@ -1120,14 +1120,21 @@ fn rt_cache_make(tp: u64) -> u64 {
     }
     mut size = 32;
     mut bin = 0;
-    while bin < 12 {
+    while bin < 14 {
         mut bound = 256;
         while 131072 < bound * size {
             bound = bound / 2;
         }
+        // The two largest cached classes are over the byte bound alone: one block of each is kept.
+        if bound == 0 {
+            bound = 1;
+        }
         mut batch = 4;
         if bound < 8 {
             batch = bound / 2;
+        }
+        if batch == 0 {
+            batch = 1;
         }
         raw_store(c + 64 + bin * 48 + 32, batch);
         raw_store(c + 64 + bin * 48 + 40, bound);
@@ -1207,7 +1214,8 @@ fn rt_cache_refill(slot: u64, bin: u64, size: u64) -> u64 {
 }
 // A full bin: the newer half of its list becomes a chain.
 fn rt_cache_spill(slot: u64, bin: u64) -> u64 {
-    mut moved = rt_div(raw_load(slot + 8), 2);
+    // Not rt_div: a free must reach nothing that can fail, or `@no_alloc` cannot be proved of a drop.
+    mut moved = raw_load(slot + 8) / 2;
     if moved == 0 {
         moved = 1;
     }
@@ -1250,7 +1258,7 @@ fn rt_cache_retire(record: u64) -> u64 {
     state := raw_state();
     mut size = 32;
     mut bin = 0;
-    while bin < 12 {
+    while bin < 14 {
         slot := c + 64 + bin * 48;
         if raw_load(slot) != 0 {
             rt_chain_give(raw_load(slot), raw_load(slot + 8), bin);
@@ -1261,7 +1269,7 @@ fn rt_cache_retire(record: u64) -> u64 {
     rt_allocator_lock();
     size = 32;
     bin = 0;
-    while bin < 12 {
+    while bin < 14 {
         slot := c + 64 + bin * 48;
         head := state + 256 + bin * 8;
         // The unused rest of a run becomes ordinary free blocks: each needs its size word.
@@ -1290,12 +1298,30 @@ fn rt_cache_retire(record: u64) -> u64 {
     rt_syscall(11, c, 4096, 0);
     return 0;
 }
+// Where an arena's first block starts. An arena is a page-aligned mapping whose first two words
+// are {next arena, mapped bytes}, and every block after the first is a multiple of the class size
+// further on, so this one offset decides the alignment of every payload of the class, for good:
+// no list, run or chain computes an address. A class of 1024 bytes or more - where a request of
+// 512 bytes or more lands - starts at 48, which puts each payload (16 past its block) on a 64-byte
+// boundary; that is a promise (docs/design/allocator.md). A smaller class starts right after the
+// arena's words and its payloads are 16-byte aligned.
+fn rt_arena_first(size: u64) -> u64 {
+    if size < 1024 {
+        return 16;
+    }
+    return 48;
+}
+// The arena of a block that has a mapping to itself (a class of 512 KiB or more), from its payload.
+fn rt_own_arena(ptr: u64) -> u64 {
+    return ptr - 16 - rt_arena_first(raw_load(ptr - 16));
+}
 // A fresh arena for one class: `bump` and `left` are the class's two shared words. Lock held.
 fn rt_arena_new(bump: u64, left: u64, size: u64) -> u64 {
     state := raw_state();
+    first := rt_arena_first(size);
     mut mapsize = 1048576;
-    if mapsize < size + 16 {
-        mapsize = size + 16;
+    if mapsize < size + first {
+        mapsize = size + first;
     }
     arena := raw_map(mapsize);
     if rt_error(arena) {
@@ -1304,8 +1330,8 @@ fn rt_arena_new(bump: u64, left: u64, size: u64) -> u64 {
     raw_store(arena, raw_load(state + 32));
     raw_store(arena + 8, mapsize);
     raw_store(state + 32, arena);
-    raw_store(bump, arena + 16);
-    raw_store(left, rt_div(mapsize - 16, size));
+    raw_store(bump, arena + first);
+    raw_store(left, rt_div(mapsize - first, size));
     return 0;
 }
 fn rt_alloc_unlocked(n: u64) -> u64 {
@@ -1368,7 +1394,7 @@ fn rt_free_unlocked(ptr: u64) -> u64 {
     // Classes of at least 512 KiB occupy their own arena. Return those mappings to the OS
     // immediately; smaller freed objects remain reusable in the segregated slab caches.
     if (size < 524288) == 0 {
-        arena := ptr - 32;
+        arena := rt_own_arena(ptr);
         mut link = state + 32;
         while raw_load(link) != arena {
             next := raw_load(link);
@@ -1415,7 +1441,8 @@ fn rt_grow(ptr: u64, used: u64, need: u64) -> u64 {
         }
         rt_allocator_lock();
         state := raw_state();
-        arena := ptr - 32;
+        first := rt_arena_first(size);
+        arena := rt_own_arena(ptr);
         mut link = state + 32;
         while raw_load(link) != arena {
             next := raw_load(link);
@@ -1424,15 +1451,15 @@ fn rt_grow(ptr: u64, used: u64, need: u64) -> u64 {
             }
             link = next;
         }
-        moved := rt_syscall4(25, arena, raw_load(arena + 8), newsize + 16, 1);
+        moved := rt_syscall4(25, arena, raw_load(arena + 8), newsize + first, 1);
         if rt_error(moved) {
             rt_abort();
         }
         raw_store(link, moved);
-        raw_store(moved + 8, newsize + 16);
-        raw_store(moved + 16, newsize);
+        raw_store(moved + 8, newsize + first);
+        raw_store(moved + first, newsize);
         rt_allocator_unlock();
-        return moved + 32;
+        return moved + first + 16;
     }
     fresh := rt_alloc(need);
     rt_copy_bytes(fresh, ptr, used);
@@ -2793,7 +2820,7 @@ fn rt_thread_join(handle: u64) -> u64 {
 //   256..320     allocator bin heads          rt_alloc_unlocked          --
 //   768..832     allocator bin bump           rt_grow                    --
 //   1280..1344   allocator bin remaining      rt_grow                    --
-//   1792..1880   thread-cache chains, per bin rt_chain_give              thread-alloc
+//   1792..1896   thread-cache chains, per bin rt_chain_give              thread-alloc
 //   2048..2672   sampling profiler block      rt_prof_words              --
 //   3200         jobs block (ring, records)   rt_state_jobs              one-scheduler
 //   3216         glibc thread bridge          rt_state_host_thread       ffi-threads
