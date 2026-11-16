@@ -122,6 +122,9 @@ function selected(test, position, options) {
   return true;
 }
 function hostOnly(test, target) {
+  // `pending` names the work a case waits for: it states the behaviour that work must produce,
+  // fails until then, and is skipped rather than weakened. Removing the field is how it is armed.
+  if (test.pending) return true;
   if (test.targets && !test.targets.includes(target)) return true;
   if (test.backends && !test.backends.includes(process.env.GRAIL_BACKEND ?? 'native')) return true;
   return false;

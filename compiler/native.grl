@@ -23181,9 +23181,6 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                 continue;
             }
             if c.raw == 0 {
-                spawn_entry_check(&mut c, f - 1, v.ty);
-            }
-            if c.raw == 0 {
                 v = coerce_view(&mut c, v, c.params[template_first + index]);
             }
             if c.raw == 0 {
@@ -27150,45 +27147,20 @@ fn parallel_spawn_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     close_loans(&mut c);
     return own(&mut c, slot, ty);
 }
-// INTERIM, with thread_spawn_raw below. A closure handed to a library function arrives there as a
-// parameter, and a parameter's closure type has no environment: the two checks a thread owes its
-// closure (captures transferable, no borrow) would pass vacuously inside lib/thread.grl. So they
-// are made here, at the call of `thread::spawn`, where the argument still has its environment; a
-// closure whose environment is not known at the call (one the caller itself received as a
-// parameter) is refused rather than trusted. FOLLOW-UP: capability bounds on closure parameters
-// say this in `spawn`'s own signature; this function and `spawn_entry` go when they land.
-fn spawn_entry<a>(c: (&a C), func: u64) -> bool {
-    return same(view(c.funcs[func].module), view("thread")) && same(view(c.funcs[func].name), view("spawn"));
-}
-fn spawn_entry_check<a>(c: (&a mut C), func: u64, ty: u64) -> unit {
-    if !spawn_entry(&c, func) {
-        return ();
-    }
-    if ty_kind(&mut c, ty) != 20 {
-        return ();
-    }
-    if ty_env(&mut c, ty) == 0 {
-        fail(
-            &mut c,
-            view("thread::spawn cannot check the captures of a closure it is not handed directly: pass the closure itself, not one received as a parameter")
-        );
-    }
-    require_parallel_closure(&mut c, ty, 0, view("thread capture"));
-    if contains_borrow(&mut c, ty, 0) {
-        fail(
-            &mut c,
-            view("a thread may outlive this statement, so its closure cannot capture a borrow: move the value in instead")
-        );
-    }
-    return ();
-}
-// thread_spawn_raw(f) -> u64: the one thing lib/thread.grl cannot say for itself. A library
-// signature has no way to require that a closure parameter's captures are transferable and hold no
-// borrow, so this builtin makes exactly those two checks - the ones parallel_spawn makes of a job -
-// and boxes the closure for the runtime (rt_uthread_new); the answer is the address of a thread
-// record that has not been started. Everything else about a thread is library code. FOLLOW-UP:
-// capability bounds on closure parameters (being designed separately) replace this builtin and
-// parallel_spawn's own check; when they land, both go.
+// thread_spawn_raw(f) -> u64: the raw entry lib/thread.grl starts a thread through. It boxes the
+// closure for the runtime (rt_uthread_new) and answers with the address of a thread record that has
+// not been started; everything else about a thread is library code.
+//
+// It also makes the two checks parallel_spawn makes of a job - captures transferable, no borrow -
+// but they hold only for a closure whose type still has its environment. lib/thread.grl hands it a
+// wrapper around a closure it received as a parameter, and a parameter's closure type has no
+// environment, so through `thread::spawn` these checks pass vacuously: A BORROWING OR THREAD-AFFINE
+// CLOSURE IS ACCEPTED TODAY. The fix is not here: bounds on the closure type
+// (`FnMut<Send, Owned>(..)`, branch gaps12-closures, docs/design/closure-bounds.md) are checked
+// where a closure with a known environment converts to that type. When they land, `spawn` is
+// re-typed, the checks below are deleted and this builtin becomes callable from an `unsafe module`
+// only. The corpus cases thread-spawn-borrow-refused and thread-spawn-affine-capture-refused are
+// marked pending on that branch.
 fn thread_spawn_raw_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     expect(&mut c, view(")"));
     input := callee.t;
