@@ -1,5 +1,6 @@
 module optimize;
 use ir;
+use xxhash;
 use llvm;
 use llvm;
 
@@ -1903,21 +1904,23 @@ fn compact<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64, ns: u64) -> u6
     }
     return (used * 8 + 15) / 16 * 16;
 }
-pub fn optimize<b, c, d>(s: &b [u8], facts: (&c llvm::Facts), want_ir: u64, ir_text: (&mut u8[]), replay: (&d ir::Replay), call_syms: (&mut u8[][]), call_counts: (&mut u64[])) -> u8[] {
+pub fn optimize<b, c, d, m>(s: &b [u8], facts: (&c llvm::Facts), want_ir: u64, ir_text: (&mut u8[]), replay: (&d ir::Replay), call_syms: (&mut u8[][]), call_counts: (&mut u64[]), memo_dir: &m [u8], memo_id: &m [u8]) -> u8[] {
     mut marks = u64[];
     mut names = u8[][];
-    return optimize_parts(view(s), 0, &mut marks, &mut names, facts, want_ir, ir_text, replay, call_syms, call_counts);
+    return optimize_parts(view(s), 0, &mut marks, &mut names, facts, want_ir, ir_text, replay, call_syms, call_counts, memo_dir, memo_id);
 }
 // `optimize` plus the positions of the `--split` module markers it kept: for each marker line, the
 // output offset of the line and the module name it carries. A single-file build passes `split` 0 and
 // pays nothing. `native.grl` splits at these offsets, so the stream never has to be scanned again.
-pub fn optimize_parts<b, c, d, e>(s: &b [u8], split: u64, marks: (&mut u64[]), names: (&mut u8[][]), facts: (&c llvm::Facts), want_ir: u64, ir_text: (&mut u8[]), replay: (&e ir::Replay), call_syms: (&mut u8[][]), call_counts: (&mut u64[])) -> u8[] {
+pub fn optimize_parts<b, c, d, e, m>(s: &b [u8], split: u64, marks: (&mut u64[]), names: (&mut u8[][]), facts: (&c llvm::Facts), want_ir: u64, ir_text: (&mut u8[]), replay: (&e ir::Replay), call_syms: (&mut u8[][]), call_counts: (&mut u64[]), memo_dir: &m [u8], memo_id: &m [u8]) -> u8[] {
     // The type facts, indexed by body symbol once: the table is complete before any body is walked.
     ix := ir::index_facts(facts);
     mut o = ir::new_body();
     for i in 4096 {
         o.inl_head.push(0);
     }
+    o.memo_dir = memo_dir.copy();
+    o.memo_id = memo_id.copy();
     // A stream of any size is cut where one function ends and the next begins, and the pieces are
     // optimised by forked copies of this process: every body's work depends only on its own lines
     // and on where it stands in its unit (ir::function_begin), so the pieces put back in order are
@@ -2058,6 +2061,7 @@ fn plan<b>(s: &b [u8], jobs: u64) -> Cut[] {
 fn run_range<a, b, c, e, x>(o: (&a mut ir::Body), s: &b [u8], lo: u64, hi: u64, split: u64, marks: (&mut u64[]), names: (&mut u8[][]), facts: (&c llvm::Facts), ix: (&x ir::FactIndex), want_ir: u64, ir_text: (&mut u8[]), replay: (&e ir::Replay), call_syms: (&mut u8[][]), call_counts: (&mut u64[])) -> u64 {
     mut start = lo;
     mut inside = 0;
+    mut opened = lo;
     mut i = lo;
     while i < hi {
         if s[i] == 10 {
@@ -2070,8 +2074,8 @@ fn run_range<a, b, c, e, x>(o: (&a mut ir::Body), s: &b [u8], lo: u64, hi: u64, 
                     o.name = ir::type_symbol(view(s), a, e);
                     ir::function_begin(&mut o);
                     inside = 1;
-                }
-                if inside == 0 {
+                    opened = a;
+                } else {
                     if ir::marker(&mut o, view(s), a, e) != 0 {
                         if split != 0 {
                             marks.push(o.out.len());
@@ -2079,24 +2083,129 @@ fn run_range<a, b, c, e, x>(o: (&a mut ir::Body), s: &b [u8], lo: u64, hi: u64, 
                         }
                     }
                     o.out.append(s[a..e + 1]);
-                    i += 1;
-                    continue;
                 }
-            }
-            ir::parse(&mut o, view(s), a, e);
-            if (inside != 0) && closes_body(view(s), a, e) {
-                body(&mut o, view(s), facts, ix, want_ir, ir_text, replay, call_syms, call_counts);
-                ir::reset(&mut o);
+            } else if closes_body(view(s), a, e) {
+                one_body(&mut o, view(s), opened, start, true, facts, ix, want_ir, ir_text, replay, call_syms, call_counts);
                 inside = 0;
             }
         }
         i += 1;
     }
     if inside != 0 {
-        body(&mut o, view(s), facts, ix, want_ir, ir_text, replay, call_syms, call_counts);
-        ir::reset(&mut o);
+        one_body(&mut o, view(s), opened, start, false, facts, ix, want_ir, ir_text, replay, call_syms, call_counts);
     }
     return start;
+}
+// One body: the lines of `s[from..to]`, from its `.type` line through the line that closes it.
+//
+// What the optimiser makes of a body is a function of those lines, of the facts the front end
+// recorded about it, and of where it stands in its unit - nothing else. So when the build keeps a
+// store (`--fn-cache`), the answer is remembered under a hash of exactly those, and a body whose
+// lines have not changed since some earlier build is not parsed or optimised again: its text, its
+// inlinable copy, its typed IR and its call count are read back. This is what an edit to one
+// function of a large module costs the back end - that function.
+fn one_body<a, b, c, e, x>(o: (&a mut ir::Body), s: &b [u8], from: u64, to: u64, whole: bool, facts: (&c llvm::Facts), ix: (&x ir::FactIndex), want_ir: u64, ir_text: (&mut u8[]), replay: (&e ir::Replay), call_syms: (&mut u8[][]), call_counts: (&mut u64[])) {
+    range := ir::replay_of(replay, view(o.name));
+    mut file = u8[];
+    if whole && (o.memo_dir.len() != 0) {
+        // The key: the compiler, the unit and its label prefix, the body's ordinal in the unit
+        // (its labels are numbered from it), its facts, the replayed prologue's place in it, and
+        // whether the typed IR is wanted - and then the lines themselves, hashed twice.
+        mut meta = copy_text(view("grail-opt 1 "));
+        meta.append(view(o.memo_id));
+        meta.push(10);
+        meta.append(view(o.unit));
+        meta.push(10);
+        meta.append(view(o.uprefix));
+        meta.push(10);
+        put_word(&mut meta, o.uniq);
+        put_word(&mut meta, ir::facts_digest(ix, facts, view(o.name)));
+        if range[1] != 0 {
+            put_word(&mut meta, range[0] - from);
+            put_word(&mut meta, range[1] - from);
+        }
+        put_word(&mut meta, want_ir);
+        h1 := xxhash::hash64(s[from..to], 1) ^ xxhash::hash64(view(meta), 3);
+        h2 := xxhash::hash64(s[from..to], 2) ^ xxhash::hash64(view(meta), 4);
+        file = o.memo_dir.copy();
+        file.append(view("/opt-"));
+        hex_word(&mut file, h1);
+        hex_word(&mut file, h2);
+        if host::exists(view(file)) != 0 {
+            kept := host::read_file(view(file));
+            // Whole entries only: the last word is written last.
+            if 24 <= kept.len() {
+                mut tail = kept.len() - 8;
+                if take_word(view(kept), &mut tail) == 6072411188134084935 {
+                    mut at = 0;
+                    n := take_word(view(kept), &mut at);
+                    o.out.append(kept[at..at + n]);
+                    at += n;
+                    if take_word(view(kept), &mut at) != 0 {
+                        name := take_text(view(kept), &mut at);
+                        body_text := take_text(view(kept), &mut at);
+                        unit := take_text(view(kept), &mut at);
+                        inl_file(&mut o, name, body_text, unit);
+                    }
+                    count := take_word(view(kept), &mut at);
+                    ir_piece := take_text(view(kept), &mut at);
+                    ir_text.append(view(ir_piece));
+                    call_syms.push(o.name.copy());
+                    call_counts.push(count);
+                    return ();
+                }
+            }
+        }
+    }
+    mut start = from;
+    mut i = from;
+    while i < to {
+        if s[i] == 10 {
+            ir::parse(&mut o, view(s), start, i);
+            start = i + 1;
+        }
+        i += 1;
+    }
+    out_mark := o.out.len();
+    ir_mark := ir_text.len();
+    inl_mark := o.inl_names.len();
+    body(&mut o, view(s), facts, ix, want_ir, ir_text, replay, call_syms, call_counts);
+    if file.len() != 0 {
+        mut kept = u8[];
+        out_end := o.out.len();
+        put_text(&mut kept, o.out[out_mark..out_end]);
+        if inl_mark < o.inl_names.len() {
+            put_word(&mut kept, 1);
+            put_text(&mut kept, view(o.inl_names[inl_mark]));
+            put_text(&mut kept, view(o.inl_bodies[inl_mark]));
+            put_text(&mut kept, view(o.inl_units[inl_mark]));
+        } else {
+            put_word(&mut kept, 0);
+        }
+        put_word(&mut kept, call_counts[call_counts.len() - 1]);
+        ir_end := ir_text.len();
+        put_text(&mut kept, ir_text[ir_mark..ir_end]);
+        put_word(&mut kept, 6072411188134084935);
+        host::write_file(view(file), view(kept));
+    }
+    ir::reset(&mut o);
+}
+fn copy_text<a>(text: &a [u8]) -> u8[] {
+    mut out = u8[];
+    out.append(text);
+    return out;
+}
+fn hex_word<a>(out: (&a mut u8[]), n: u64) {
+    mut shift = 64;
+    while shift != 0 {
+        shift -= 4;
+        d := (n >> shift) & 15;
+        if d < 10 {
+            out.push(u8(48 + d));
+        } else {
+            out.push(u8(87 + d));
+        }
+    }
 }
 fn put_word<a>(out: (&a mut u8[]), n: u64) {
     mut v = n;
@@ -2167,6 +2276,8 @@ fn run_forked<a, b, c, e, x, g>(o: (&a mut ir::Body), s: &b [u8], cuts: (&g Cut[
             }
             w.uniq_next = cut.counts.copy();
             w.uniq_plain = cut.plain;
+            w.memo_dir = o.memo_dir.copy();
+            w.memo_id = o.memo_id.copy();
             mut wmarks = u64[];
             mut wnames = u8[][];
             mut wir = u8[];
