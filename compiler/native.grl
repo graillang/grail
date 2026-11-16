@@ -6029,7 +6029,8 @@ fn move_out<a>(c: (&a mut C), v: Val) -> unit {
                 fail(&mut c, view("cannot move owned field through reference"));
             }
             zero := imm(&mut c, 0);
-            rec_store(&mut c, base - 1, field, zero);
+            holder := held_record(&mut c, base - 1);
+            field_store(&mut c, base - 1, holder, field, zero);
         }
     }
     return ();
@@ -20305,6 +20306,32 @@ fn rec_store<a>(c: (&a mut C), base: u64, k: u64, value: u64) -> unit {
 fn field_word<a>(c: (&a mut C), ty: u64, k: u64) -> u64 {
     return k;
 }
+// The words a record's own storage takes: a word per field, or an `extern "C"` record's C size.
+fn record_words<a>(c: (&a mut C), ty: u64) -> u64 {
+    d := ty_arg(&mut c, ty);
+    if c.decls[d].c_layout != 0 {
+        return ffi_record_words(&mut c, d);
+    }
+    return c.decls[d].count;
+}
+fn field_store<a>(c: (&a mut C), base: u64, ty: u64, k: u64, value: u64) -> unit {
+    word := field_word(&mut c, ty, k);
+    rec_store(&mut c, base, word, value);
+    return ();
+}
+// The record type of the value a slot holds, for the two places that reach a field through a slot
+// rather than through a typed value: what owns the slot, or what the slot's reference refers to.
+fn held_record<a>(c: (&a mut C), slot: u64) -> u64 {
+    n := resource(&mut c, slot);
+    if n == 0 {
+        fail(&mut c, view("internal: a field is reached through a value with no record type"));
+    }
+    mut ty = c.resources[n - 1].ty;
+    if ty_kind(&mut c, ty) == 7 {
+        ty = ty_arg(&mut c, ty);
+    }
+    return base_type(&mut c, ty);
+}
 fn field_load<a>(c: (&a mut C), base: u64, ty: u64, k: u64, address: u64) -> u64 {
     word := field_word(&mut c, ty, k);
     return rec_load(&mut c, base, word, address);
@@ -22172,12 +22199,6 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
     mut seen = u64[];
     mut sources = u64[];
     mut deferred = u64[];
-    mut size = count;
-    if c.decls[d].c_layout != 0 {
-        size = ffi_record_words(&mut c, d);
-    }
-    sz := imm(&mut c, size);
-    n := invoke(&mut c, view("rt_rec"), one(sz));
     mut index = 0;
     if !eat_kind(&mut c, close) {
         while true {
@@ -22274,12 +22295,9 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
             }
             held := move_value(&mut c, v);
             sources.push(held.t);
-            if c.decls[d].c_layout != 0 {
-                cfield_store(&mut c, n, d, k, held.t);
-            } else {
+            if c.decls[d].c_layout == 0 {
                 fterm := pv_span_term(&mut c, astart, aend);
                 ref_field(&mut c, d, k, held.t, view(fterm), astart);
-                rec_store(&mut c, n, k, held.t);
             }
             if eat_kind(&mut c, close) {
                 break;
@@ -22314,14 +22332,22 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
         v := adopt_value(&mut c, val(slot, actual), start, end, expected);
         newslot := v.t;
         require_type(&mut c, v.ty, expected);
-        if c.decls[d].c_layout != 0 {
-            cfield_store(&mut c, n, d, k, newslot);
-        } else {
+        if c.decls[d].c_layout == 0 {
             fterm := pv_span_term(&mut c, start, end);
             ref_field(&mut c, d, k, newslot, view(fterm), start);
-            rec_store(&mut c, n, k, newslot);
         }
         exchange(&mut sources[index], newslot);
+    }
+    // The record is allocated and filled once every field has its value: where a field lies
+    // depends on the record's type arguments, and those are known only now.
+    sz := imm(&mut c, record_words(&mut c, ty));
+    n := invoke(&mut c, view("rt_rec"), one(sz));
+    for i in seen.len() {
+        if c.decls[d].c_layout != 0 {
+            cfield_store(&mut c, n, d, seen[i], sources[i]);
+        } else {
+            field_store(&mut c, n, ty, seen[i], sources[i]);
+        }
     }
     own(&mut c, n, ty);
     root := place_of(&mut c, n);
@@ -30199,7 +30225,8 @@ fn method_receiver<a>(c: (&a mut C), input: u64, inty: u64, xty: u64, formal: u6
                 if mode != 0 {
                     require_mutable_binding(&mut c, b, 0);
                 }
-                at := rec_load(&mut c, b, field, 1);
+                holder := held_record(&mut c, b);
+                at := field_load(&mut c, b, holder, field, 1);
                 n := word_reference(&mut c, at, xty);
                 root := place_of(&mut c, b);
                 target := member_place(&mut c, root, field, xty);
@@ -32020,7 +32047,7 @@ fn record_bytes<a>(c: (&a mut C), alias: u64) -> u64 {
     if c.decls[d].c_layout != 0 {
         return ffi_record_size(&mut c, d);
     }
-    return c.decls[d].count * 8;
+    return record_words(&mut c, ty) * 8;
 }
 // Exchanges the contents of the two `ty` records whose addresses are in `x` and `y`. Up to four
 // whole words are moved in line; anything else is the runtime's loop.
