@@ -429,14 +429,61 @@ Run with this branch's compiler (`grail run FILE --no-cache`):
 
 Found while building, not changed here:
 
-- **`@no_alloc` refuses every bounds-checked index** - `fn f(v: &u64[]) -> u64 { return v[3]; }` is
-  refused with `rt_slot -> rt_fail -> rt_site_here -> rt_sites_fill` - because the failure report's
-  site lookup is counted as an allocation. So `@no_alloc` code reads a static table's `len()` but not
-  `TABLE[i]`; that is the effect analysis, not statics.
-- **The run tier cannot bring back a signed vector with a negative element**: the probe prints
-  `u64(v[i])`, which stops on a negative value. Constants share it.
-- **No `'static`.** A function cannot return a borrow of a static (`fn t() -> &u64[]` has no input
-  lifetime to name). A function that wants one takes it as a parameter, or the caller reads the static.
+- **`@no_alloc` refused every bounds-checked index** (the failure report allocated). Fixed in its own
+  commit: the dying report is written in a process-state block and allocates nothing.
+- **The run tier read signed results wrong** (a negative vector element stopped the probe; a negative
+  scalar did not parse; integer results were typed `u64`). Fixed in its own commit.
+- **The run tier scales badly with many values.** Each probe compiles the whole program, and every
+  run-tier value a body of that program reads is resolved inside it by a probe of its own, so a cold
+  build with N run-tier values runs nested probes N deep: 4 values took 6.5 s, 8 took 16 s, and a
+  program with 20 did not finish in 20 minutes. Constants and statics share it; the corpus covers
+  each signed width in its own case for that reason. The cure is a probe that compiles only what the
+  probed call reaches.
+- **No `'static`** - the named follow-up `static-region` below.
 - **`--jobs` and probes.** A corpus run with `--jobs 8` saw a probe's compiler path go "(deleted)" mid-
   run; the same cases pass serially. A harness race, not a compiler fault.
 - Not done in stage 1: the prover term for a static (stage 5); records in the baked tier (stage 4).
+
+## Follow-up `static-region`: a borrow that outlives every frame (design question, not built)
+
+Decided by the director (2026-11-16): written up here, not built; it is tied to the regions the
+closure-bounds work (`docs/design/closure-bounds.md`, branch `gaps12-closures`) gives the checker.
+
+**The probe.**
+
+```grail
+static SQ: u64[] = @t();
+fn t() -> u64[] { return u64[1, 2]; }
+fn table() -> &u64[] { return SQ; }      // error: elided output reference needs one input lifetime
+pub fn main() { println("{}", table().len()); }
+```
+
+A read of `SQ` is a `&u64[]` whose target is an external place (`static_value`, the borrowed-
+parameter model), but there is no lifetime a signature can write for it: Grail's lifetimes are
+relations between inputs (book/chapters/lifetimes.md), and a function with no reference input has
+nothing for its output to be related to. So a static can be read anywhere, but a borrow of it cannot
+be returned, stored in a `struct Cursor<a>` that outlives the call, or captured by an escaping
+closure.
+
+**What `'static` would need from the region checker.**
+
+1. **A spelling.** One reserved region name, e.g. `&static T` (the lifetime position already takes a
+   bare name, `&a T`), meaning "outlives every region". It is never bound by a signature.
+2. **A place kind.** Reads of a static (and `view("literal")`, `cstr("literal")`, whose storage is
+   also static data) produce a reference whose origin is one distinguished external place - the
+   image - instead of an anonymous one. Nothing ends a loan on it, so no conflict check fires
+   against it, and it is never a frame's.
+3. **Subsumption.** `&static T` is accepted wherever `&a T` is expected, for any `a` (it is a valid
+   instantiation of every region parameter); the reverse is refused. The return check accepts a
+   `&static T` output with no input lifetime, so `fn table() -> &static u64[]` is a signature.
+4. **Records and closures.** A record `Cursor<a>` instantiated at `static` may outlive any frame; a
+   closure whose captures are only `&static` borrows has no frame origin, so the closure-bounds
+   rules (`Owned`, `Send`) treat it as a closure with no borrows. This is the part that depends on
+   the closure-bounds regions: until a closure type carries its captures' regions there is nothing
+   to put `static` into.
+5. **Interfaces.** The region travels in the interface's type records like any region; a function
+   returning `&static T` is callable across modules with no caller-side obligation.
+
+What it does not need: a run-time representation (a `&static` is the same pointer word), or any
+change to statics themselves - their reads would be typed `&static T` instead of carrying an
+anonymous external origin.
