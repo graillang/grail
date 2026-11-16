@@ -493,6 +493,11 @@ fn rt_contained_note() -> u64 {
     raw_store(rt_contained_word(), raw_load(rt_contained_word()) + 1);
     return 0;
 }
+// How many stacks a contained failure discarded beyond the one it happened on (it was raised again
+// at a join), for the same note: process-state word 3448.
+fn rt_discarded_word() -> u64 {
+    return raw_state() + 3448;
+}
 fn rt_contained() -> u64 {
     return raw_load(rt_contained_word());
 }
@@ -572,6 +577,14 @@ fn rt_refine(msg: u64, req: u64) -> u64 {
 // ` --> file:line:col` for the frame that failed, then one ` = called from` line per further frame
 // that lies in a statement - at most 32 of them.
 fn rt_fail_where(buf: u64, n: u64) -> u64 {
+    return rt_fail_where_mode(buf, n, 0);
+}
+// The innermost statement of the program's own code - not the runtime's, and not the standard
+// library's (site flag bit 62) - as one line with `mark` in front, or nothing when no frame has one.
+fn rt_fail_where_user(buf: u64, n: u64, mark: string) -> u64 {
+    return rt_fail_where_mode(buf, n, 1);
+}
+fn rt_fail_where_mode(buf: u64, n: u64, user: u64) -> u64 {
     // The program's entry stores the compiler-emitted rt_sites in state word 3400; asked for the
     // descriptor (rt_sites_fill), it fills in the tables' bounds and the caller's frame pointer. No
     // table, a refused descriptor or zeros: no location lines.
@@ -619,7 +632,12 @@ fn rt_fail_where(buf: u64, n: u64) -> u64 {
             // statements by leaving the file zero; a table written before that rule (the checked-in
             // seed is one) keeps the name and sets bit 63 instead, so both shapes skip the runtime -
             // a failure report names the program, never the runtime's frames.
-            if (name != 0) & ((flags >> 63) == 0) {
+            if (name != 0) & ((flags >> 63) == 0) & ((user == 0) | (((flags >> 62) & 1) == 0)) {
+                if user != 0 {
+                    at = rt_fail_line(buf, at, hit, " = in a job joined at ");
+                    rt_free(info);
+                    return at;
+                }
                 if lines == 0 {
                     at = rt_fail_line(buf, at, hit, " --> ");
                 } else {
@@ -653,7 +671,8 @@ fn rt_fail_line(buf: u64, n: u64, e: u64, mark: string) -> u64 {
     raw_putbyte(buf + at, 58);
     at = rt_fail_num(buf, at + 1, flags & 4294967295);
     raw_putbyte(buf + at, 58);
-    at = rt_fail_num(buf, at + 1, (flags >> 32) & 2147483647);
+    // Bits 32..61 are the column; 62 marks a standard-library statement, 63 the runtime's.
+    at = rt_fail_num(buf, at + 1, (flags >> 32) & 1073741823);
     raw_putbyte(buf + at, 10);
     return at + 1;
 }
@@ -782,7 +801,7 @@ fn rt_stack_report_line(site: u64) -> u64 {
     raw_putbyte(buf + at, 58);
     at = rt_stack_report_num(buf, at + 1, cap, flags & 4294967295);
     raw_putbyte(buf + at, 58);
-    at = rt_stack_report_num(buf, at + 1, cap, (flags >> 32) & 2147483647);
+    at = rt_stack_report_num(buf, at + 1, cap, (flags >> 32) & 1073741823);
     raw_putbyte(buf + at, 10);
     return at + 1;
 }
@@ -858,7 +877,8 @@ fn rt_bt_line(buf: u64, n: u64, name: u64, site: u64) -> u64 {
     raw_putbyte(buf + at, 58);
     at = rt_fail_num(buf, at + 1, flags & 4294967295);
     raw_putbyte(buf + at, 58);
-    at = rt_fail_num(buf, at + 1, (flags >> 32) & 2147483647);
+    // Bits 32..61 are the column; 62 marks a standard-library statement, 63 the runtime's.
+    at = rt_fail_num(buf, at + 1, (flags >> 32) & 1073741823);
     raw_putbyte(buf + at, 41);
     raw_putbyte(buf + at + 1, 10);
     return at + 2;
@@ -1504,13 +1524,20 @@ fn rt_leak_exit() -> u64 {
         rt_abort();
     }
     s := rt_new();
-    rt_reserveb(s, 160);
+    rt_reserveb(s, 220);
     buf := raw_load(s);
     mut n = rt_fail_put(buf, 0, "note: ");
     n = rt_fail_num(buf, n, live);
     n = rt_fail_put(buf, n, " allocation(s) still live after ");
     n = rt_fail_num(buf, n, failures);
-    n = rt_fail_put(buf, n, " contained task failure(s); the owners of a discarded stack are not released\n");
+    n = rt_fail_put(buf, n, " contained task failure(s)");
+    extra := raw_load(rt_discarded_word());
+    if extra != 0 {
+        n = rt_fail_put(buf, n, " (");
+        n = rt_fail_num(buf, n, failures + extra);
+        n = rt_fail_put(buf, n, " stacks discarded)");
+    }
+    n = rt_fail_put(buf, n, "; the owners of a discarded stack are not released\n");
     raw_store(s + 8, n);
     rt_write_text(2, s);
     return 0;
@@ -2836,6 +2863,7 @@ fn rt_thread_join(handle: u64) -> u64 {
 //   3400         call-site table helper       _start; rt_sites_fill      runtime-errors
 //   3408         site descriptor capacity     rt_state_sites_offer       rth-sites
 //   3416         a second thread was started  rt_allocator_lock          compile-speed
+//   3448         stacks discarded by re-raise rt_discarded_word          job-failure
 //   3456         abort report claim           rt_abort                   abort-once
 //   3464..3576   task-stack fault handler     rt_state_stack_guard       stack-guard
 //   3584         contained task failures      rt_contained              task-fail-containment
@@ -4239,26 +4267,12 @@ fn rt_job_site(f: u64, joined: u64) -> u64 {
     }
     out := rt_site_text(site);
     if joined != 0 {
-        here := rt_fail_site_full();
-        buf := raw_load(here);
-        n := raw_load(here + 8);
-        // The first line of the joining location is ` --> file:line:col`.
-        if (5 < n) & (raw_byte(buf) == 32) {
-            mut stop = 5;
-            while (stop < n) & (raw_byte(buf + stop) != 10) {
-                stop += 1;
-            }
-            line := rt_new();
-            rt_reserveb(line, stop + 40);
-            mut k = rt_fail_put(raw_load(line), 0, " = in a job joined at ");
-            rt_copy_bytes(raw_load(line) + k, buf + 5, stop - 5);
-            k += stop - 5;
-            raw_putbyte(raw_load(line) + k, 10);
-            raw_store(line + 8, k + 1);
-            rt_append(out, line);
-            rt_drop_seq(line);
-        }
-        rt_drop_seq(here);
+        line := rt_new();
+        rt_reserveb(line, rt_fail_limit() + 196);
+        n := rt_fail_where_user(raw_load(line), 0, " = in a job joined at ");
+        raw_store(line + 8, n);
+        rt_append(out, line);
+        rt_drop_seq(line);
     }
     return out;
 }
@@ -4267,6 +4281,10 @@ fn rt_job_site(f: u64, joined: u64) -> u64 {
 // the parallel region - contained by a task, or ending the process - its site is the original
 // statement plus one line naming where the job was joined, which is the caller's statement.
 fn rt_job_reraise(f: u64) -> u64 {
+    // The failure was counted where it happened; the stack it is raised on now is one more stack
+    // discarded, not one more failure (rt_contained_note counts it again when it is contained).
+    raw_store(rt_contained_word(), raw_load(rt_contained_word()) - 1);
+    raw_store(rt_discarded_word(), raw_load(rt_discarded_word()) + 1);
     j := rt_job_failing();
     if j != 0 {
         mut msg = raw_load(f + 32);

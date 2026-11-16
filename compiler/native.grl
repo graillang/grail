@@ -2413,6 +2413,7 @@ fn site_func_entry<a>(entries: (&a mut u8[]), count: u64, name: u64) -> unit {
 fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
     mut out = u8[];
     mut entries = u8[];
+    mut files_std = u64[];
     mut files = u64[];
     mut cur_file = 0;
     mut cur_line = 0;
@@ -2523,15 +2524,21 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
             site_label(&mut out, count);
             if (cur_file != 0) && !cur_internal {
                 mut known = false;
+                mut std = 0;
                 for f in files.len() {
                     if files[f] == cur_file {
                         known = true;
+                        std = files_std[f];
                     }
                 }
                 if !known {
                     files.push(cur_file);
+                    // Bit 62 marks a standard-library statement: a report that wants the program's
+                    // own place (where a job was joined) looks past those frames.
+                    std = in_std_dir(view(site_path(&c, cur_file)));
+                    files_std.push(std);
                 }
-                site_entry(&mut entries, count, cur_file, cur_line | (cur_col << 32));
+                site_entry(&mut entries, count, cur_file, cur_line | (cur_col << 32) | (std << 62));
             } else {
                 site_entry(&mut entries, count, 0, 0);
             }

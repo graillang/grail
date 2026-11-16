@@ -318,14 +318,13 @@ stack, with no unwinding (`rt_job_fail` in `compiler/runtime.grl`):
 A join on a failed job re-raises it in the forker, whose stack does the same: siblings finish
 first, and the first failure to reach a join wins (Q1). Where the failure leaves the parallel
 region - contained by a task, or ending the process from main or another plain thread - the report
-names the original statement and kind, plus one line: ` = in a job joined at FILE:LINE:COL`, the
-statement of the forker that joined it. `try_join` returns that same message and site.
+names the original statement and kind, plus one line: ` = in a job joined at FILE:LINE:COL`: the innermost statement of the joining stack in the program's own code. The site table marks standard-library statements (bit 62), so a `pool::join` failure names the user's `pool::join` line, not the fork inside `lib/pool.grl`. `try_join` returns that same message and site.
 
 - **Stack overflow stays fatal** inside a parallel region: the drain needs stack, and there is none
   at the guard page. `sched-job-stack-overflow-reports-and-exits-134` is unchanged.
 - **Cost:** none on the success path beyond one load at each join. A failure leaks what the
-  discarded frames owned, as task containment already does; the exit note counts each discarded
-  stack as one contained failure, so one failure that crossed two joins is reported as three.
+  discarded frames owned, as task containment already does; the exit note counts failures, and the stacks
+  they discarded separately ("1 contained task failure(s) (3 stacks discarded)").
 - Cases: `sched-job-failure-is-contained` (the acceptance test above),
   `sched-job-failure-drain-is-not-cancellable`; `pool-abort-eight-chunks-reports-once` and
   `pool-chunk-write-outside-aborts` still pass for main.
