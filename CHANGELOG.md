@@ -1,5 +1,20 @@
 ## Unreleased
 
+- **Fixed-size arrays, `[T; N]`** (docs/design/fixed-arrays.md, stage A1). N values back to back in
+  C layout, held in the frame: no heap allocation, no header, the length a constant of the type.
+  Literals `[a, b, c]` and `[x; N]` where an array is expected (count checked while compiling),
+  indexing and element assignment, `&[T; N]` / `&mut [T; N]` parameters, `len()`, `for x in &a`,
+  `==`, printing, `.copy()`. An index proved below N has no check; any other is one compare against
+  the constant, with no length load - on LLVM that compare is folded wherever the loop bounds imply
+  it, and element addresses keep the array's provenance, so elements stay in registers. Arrays of
+  plain data up to four words copy; larger ones move. `bench/nbody.grl` is now the fixed-array twin
+  of `bench/nbody.c`: LLVM backend at parity with clang -O2 (was 4.5x with vectors), native backend
+  0.59 s against Zig Debug's 0.90 s and Go's 0.11 s.
+- **Stack probes.** A function whose frame is larger than a page touches it a page at a time from
+  the top before allocating it (x86-64, AArch64 and RISC-V; `probe-stack` on LLVM), so a large frame
+  can no longer step over a stack's guard page: running out of stack is reported. A frame larger
+  than the 1 MiB task stack is a compile error. Windows is not probed yet.
+
 - **A failure allocates nothing, on every route.** A failed check inside a parallel job used to build
   its failure record and texts on the heap where it failed, so every `@no_alloc` function that
   could index, cast or unwrap was refused once the job-failure path existed. The failing stack now

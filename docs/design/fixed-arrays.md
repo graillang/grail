@@ -1,6 +1,6 @@
 # Fixed-size arrays
 
-2026-11-16. Proposal, not yet approved; nothing here is built. Line numbers are of `5dc07da`
+2026-11-16. Approved by the director (answers and conditions below); A1 built. Line numbers are of `5dc07da`
 (branch `gaps12-arrays`, cut from `gaps13-int-b`). `N` = `compiler/native.grl`, `O` =
 `compiler/optimize.grl`, `I` = `compiler/ir.grl`, `L` = `compiler/llvm.grl`, `W` =
 `compiler/ownership.grl`.
@@ -225,3 +225,49 @@ user-visible change. Corpus names `array-*` / `reject-array-*`.
    array (not a vector) and a vector assigned to a field becomes `copy_from`. Agreed?
 3. `[T; 0]` refused in v1?
 4. Untyped `[a, b]` stays a vector unless an array is expected (no existing program changes)?
+
+## Director's answers and conditions (2026-11-16)
+
+1. No A0: the frame-aggregate fact is unboxed stage 3a's (`llvm::fact_aggregate`, gaps12-unboxed
+   72f29d3); arrays are its first user. 2. A2 unifies extern-C array fields with arrays and deletes the
+   copy-as-vector surface, migrating abundance and the bindgen fixture; the CHANGELOG says
+   `ids := d.ids` is now an array. 3. `[T; 0]` refused in v1, revisited with A4. 4. Untyped `[a, b]`
+   stays a vector unless an array is expected.
+Conditions: native nbody is judged against Zig Debug and Go; `for x in &a` is an index loop with no
+call or allocation (asm-pinned); the slice made from an array allocates a view record until unboxed
+stage 2, kept off hot paths (lib/ read APIs take `&[T; N]` or a pointer-and-length slice); probe,
+frame-limit and 64 KiB-task cases; every case on three targets and LLVM.
+
+## A1 as built
+
+- *Representation.* An array value is the address of its bytes (`direct`, as a record). Its storage
+  is a frame aggregate per making site (`array_storage`). A new binding adopts a literal's or a
+  `.copy()`'s storage (`bind_value`); anything else bound gets a copy (`move_value`); assignment,
+  `*r = v` and `exchange` copy bytes into the destination's own storage (`assignment_tail`,
+  `record_bytes` → `swap_records`). So no two names share storage.
+- *Checks.* `rt_aslot(base, i, N, w)` (checked) and `rt_aslotu(base, i, w)` (proved, literal
+  offsets) are leaf ops 53/54, written in line by the optimiser (`cmpq %rdx,%rsi` against the
+  constant, `rt_fail(1, i, N)` on the cold path) and lifted by `llvm::array_element` to `icmp` +
+  `getelementptr inbounds` on `inttoptr(base)`, which folds to the alloca: provenance kept.
+  Proofs: `array_index_proved` asks the prover for `i < N` or `i < a.len`; a literal index is
+  checked while compiling.
+- *Ownership.* `affine_nodrop` (an exclusive reference, or an array over 32 bytes) gives an owned
+  place with no drop flag; smaller arrays are copyable roots in `bind`.
+- *Stack.* `frame_limit` sets `probes` for a frame over a page and refuses one over 1 MiB;
+  `optimize::probe_frames` writes the page walk before the frame's `subq` from the final `.set`
+  sizes, on the optimised, debug and LLVM-remainder outputs; lifted functions carry
+  `"probe-stack"="inline-asm"`. Windows (targets 3, 4) is not probed yet: its prologue is parsed
+  for unwind data, so the probe must go after the frame line there.
+- *Refused in A1* (A2/A3): by-value parameters and results, struct fields, vector elements, type
+  arguments, closure captures, non-numeric elements. No slice conversion yet, so no view record is
+  allocated anywhere by arrays.
+- *Measured* (bench/nbody.grl, now the fixed-array twin of bench/nbody.c; shared loaded host):
+  LLVM 0.128 s vs C 0.145 s (paired median of 7, spread ±0.1 s; the optimised IR of the step loop
+  has no bounds check, every access a GEP on its own alloca, `m[j]` loaded once). Native 0.59 s
+  (vectors: 1.12 s); Zig Debug 0.90 s, Go 0.109 s, Rust -O2 0.100 s. The native gap to Go is A5's:
+  the base is reloaded from a slot at each access, `i * 3 + k` keeps the dev build's overflow checks,
+  and the constant compare costs two `movabsq`.
+- *Verified.* Self-host fixed point (119.8 MB, stage 2 = stage 3); filter `array`: x86_64 31/0,
+  aarch64 29/0, riscv64 29/0, LLVM 27/0; regression filter
+  `c-array|literal|repeat|narrow|unboxed|slice|exchange|equal|stack|overflow|dyn|struct|record|tuple|closure|print|format|refine|deref|vector`
+  x86_64 656/0; book tests 12/0.

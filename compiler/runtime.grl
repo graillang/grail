@@ -9265,6 +9265,31 @@ fn rt_flat_box(src: u64, w: u64) -> u64 {
     rt_copy_bytes(box, src, w);
     return box;
 }
+// The address of element `i` of an array of `n` elements `w` bytes wide at `base`
+// (docs/design/fixed-arrays.md). `n` is the array's constant length: nothing is loaded to check it.
+fn rt_aslot(base: u64, i: u64, n: u64, w: u64) -> u64 {
+    if (i < n) == 0 {
+        rt_fail(1, i, n);
+    }
+    return wrapping_add(base, wrapping_mul(i, w));
+}
+// The same address for an index already known to be below the length.
+fn rt_aslotu(base: u64, i: u64, w: u64) -> u64 {
+    return wrapping_add(base, wrapping_mul(i, w));
+}
+// `[x; n]`: element 0 of the array at `dst` is written; copy it to the other `n - 1`, doubling.
+fn rt_array_rep(dst: u64, w: u64, n: u64) -> u64 {
+    mut have = 1;
+    while have < n {
+        mut take = have;
+        if n - have < take {
+            take = n - have;
+        }
+        rt_copy_bytes(wrapping_add(dst, have * w), dst, take * w);
+        have = have + take;
+    }
+    return 0;
+}
 fn rt_slotw(s: u64, i: u64, w: u64) -> u64 {
     if (i < raw_load(wrapping_add(s, 8))) == 0 {
         rt_fail(1, i, raw_load(wrapping_add(s, 8)));

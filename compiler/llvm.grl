@@ -1948,6 +1948,37 @@ fn never_returns<a>(target: &a [u8]) -> bool {
         || eq(target, view("rt_abort_final")) || eq(target, view("rt_abort_park")) || eq(target, view("rt_hard_exit"))
         || eq(target, view("rt_stack_overflow")) || eq(target, view("rt_stack_overflow_at"));
 }
+// The address of element `rsi` of a fixed-size array at `rdi` (docs/design/fixed-arrays.md):
+// `rt_aslot` first compares the index with the constant length in `rdx` and fails as the accessor
+// would; the address is a `getelementptr` on the array's own pointer, so it keeps the provenance
+// of the frame aggregate or record the array lives in and LLVM can keep elements in registers.
+fn array_element<a, b>(l: (&a mut L), target: &b [u8]) -> unit {
+    base := get_reg(&mut l, view("rdi"));
+    i := get_reg(&mut l, view("rsi"));
+    mut w = get_reg(&mut l, view("rdx"));
+    if eq(target, view("rt_aslot")) {
+        n := get_reg(&mut l, view("rdx"));
+        w = get_reg(&mut l, view("rcx"));
+        ok := def(&mut l, view("icmp ult i64 {}, {}"), &u8[][copy(view(i)), copy(view(n))]);
+        good := fresh_block(&mut l);
+        wrong := fresh_block(&mut l);
+        emit(&mut l, view("br i1 {}, label %{}, label %{}"), &u8[][ok, copy(view(good)), copy(view(wrong))]);
+        begin_block(&mut l, view(wrong));
+        l.calls.push(copy(view("rt_fail")));
+        emit(&mut l, view("call {i64, i64} @\"rt_fail\"(i64 1, i64 {}, i64 {}, i64 0, i64 0, i64 0)"), &u8[][copy(view(i)), copy(view(n))]);
+        emit(&mut l, view("unreachable"), &u8[][]);
+        begin_block(&mut l, view(good));
+    }
+    p := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][base]);
+    off := def(&mut l, view("mul i64 {}, {}"), &u8[][i, w]);
+    e := def(&mut l, view("getelementptr inbounds i8, ptr {}, i64 {}"), &u8[][p, off]);
+    r := def(&mut l, view("ptrtoint ptr {} to i64"), &u8[][e]);
+    set_reg(&mut l, view("rax"), view(r));
+    set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
+    set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
+    clear_args(&mut l);
+    return ();
+}
 fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> unit {
     if (target.len() == 0) || (target[0] == 42) {
         bad(&mut l);
@@ -1958,6 +1989,10 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
         emit(&mut l, view("call void @\"rt_abort.cold\"() #0"), &u8[][]);
         emit(&mut l, view("unreachable"), &u8[][]);
         ends_terminator(&mut l);
+        return ();
+    }
+    if eq(target, view("rt_aslot")) || eq(target, view("rt_aslotu")) {
+        array_element(&mut l, target);
         return ();
     }
     if eq(target, view("rt_f32_round")) {
@@ -3669,7 +3704,7 @@ fn rg_width_of(op: (&[u8])) -> u64 {
 // 1 when a call is one of the read-only accessors: it reads the sequence it is given and writes
 // neither the sequence's header nor any storage the caller owns.
 fn rg_readonly(name: (&[u8])) -> bool {
-    if starts(name, view("rt_slot")) || starts(name, view("rt_at")) {
+    if starts(name, view("rt_slot")) || starts(name, view("rt_at")) || starts(name, view("rt_aslot")) {
         return true;
     }
     if eq(name, view("rt_len")) || eq(name, view("rt_view")) || eq(name, view("rt_write")) {
@@ -5634,7 +5669,8 @@ fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (
         if (pinned == 0) & (l.fail == 0) {
             put(&mut functions, view("define {i64, i64} @\""));
             put(&mut functions, view(f.name));
-            put(&mut functions, view("\"(i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5) {\n"));
+            // A frame over a page is probed as the native backend's is (optimize::probe_frames).
+            put(&mut functions, view("\"(i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5) \"probe-stack\"=\"inline-asm\" {\n"));
             put(&mut functions, view(l.body));
             put(&mut functions, view("}\n"));
             l.lifted.push(copy(view(f.name)));
