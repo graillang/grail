@@ -2487,6 +2487,28 @@ fn site_func_entry<a>(entries: (&a mut u8[]), count: u64, name: u64) -> unit {
 // above). The runtime's own statements are entered as ranges with no file - a failure report never
 // names the runtime - and so is a function's prologue, which has no statement yet. An inline
 // `call rt_abort` becomes `call rt_trap` with its kind.
+// Whether text[a..e] starts with `prefix` / contains `part` (site_table reads lines in place).
+fn site_at<a, b>(text: &a [u8], a: u64, e: u64, prefix: &b [u8]) -> bool {
+    if e - a < prefix.len() {
+        return false;
+    }
+    for i in prefix.len() {
+        if text[a + i] != prefix[i] {
+            return false;
+        }
+    }
+    return true;
+}
+fn site_in<a, b>(text: &a [u8], a: u64, e: u64, part: &b [u8]) -> bool {
+    mut i = a;
+    while i + part.len() <= e {
+        if site_at(text, i, e, part) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
 fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
     mut out = u8[];
     mut entries = u8[];
@@ -2501,11 +2523,13 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
     mut own_internal = true;
     mut seen_own = false;
     mut pending = 0;
-    mut prev1 = u8[];
-    mut prev2 = u8[];
+    // The two code lines before this one, as ranges of `text`.
+    mut p1a = 0;
+    mut p1e = 0;
+    mut p2a = 0;
+    mut p2e = 0;
     mut pending_site = false;
     mut count = 0;
-    mut line = u8[];
     // The function table (grail_funcs): one (start, name) entry per function, name 0 for the
     // runtime's own. A frame's return address names the function it lies in, so a backtrace of a
     // returned error can say which function created it.
@@ -2515,86 +2539,107 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
     mut func_count = 0;
     mut pending_func = 0;
     mut pending_name = u8[];
-    for i in text.len() {
-        b := text[i];
-        if b != 10 {
-            line.push(b);
-            continue;
+    // Lines are read in place, and what passes through unchanged is copied in runs: `pend` is the
+    // first byte not yet copied to `out`. A line that is dropped or replaced, or that gets a label in
+    // front of it, flushes the run before it.
+    mut pend = 0;
+    mut a = 0;
+    n := text.len();
+    while a < n {
+        mut e = a;
+        while (e < n) && (text[e] != 10) {
+            e += 1;
         }
-        if site_starts(view(line), view(".gbase ")) {
-            w := site_words(view(line));
-            if w.len() == 1 {
-                base_line = w[0];
+        if e == n {
+            // A last line with no newline is copied as it is.
+            break;
+        }
+        next := e + 1;
+        if (e - a > 6) && (text[a] == 46) && (text[a + 1] == 103) {
+            if site_at(text, a, e, view(".gbase ")) {
+                w := site_words(text[a..e]);
+                if w.len() == 1 {
+                    base_line = w[0];
+                }
+                out.append(text[pend..a]);
+                pend = next;
+                a = next;
+                continue;
             }
-            line = u8[];
-            continue;
-        }
-        absolute := site_starts(view(line), view(".gposa "));
-        if absolute || site_starts(view(line), view(".gpos ")) {
-            w := site_words(view(line));
-            if w.len() == 4 {
-                internal := w[3] != 0;
-                if !seen_own {
-                    seen_own = true;
-                    own_internal = internal;
-                }
-                // An inlined runtime body keeps its function's own position.
-                if !internal || own_internal {
-                    cur_file = w[0];
-                    cur_line = w[1];
-                    if !absolute {
-                        cur_line = base_line + w[1];
+            absolute := site_at(text, a, e, view(".gposa "));
+            if absolute || site_at(text, a, e, view(".gpos ")) {
+                w := site_words(text[a..e]);
+                if w.len() == 4 {
+                    internal := w[3] != 0;
+                    if !seen_own {
+                        seen_own = true;
+                        own_internal = internal;
                     }
-                    cur_col = w[2];
-                    cur_internal = internal;
-                }
-                // The pending function's first statement names its table entry: the runtime's own
-                // functions have none, so a backtrace never prints `rt_` frames.
-                if pending_func != 0 {
-                    mut func_name = 0;
-                    if !internal {
-                        name_count += 1;
-                        func_name = name_count;
-                        push_bytes(&mut names, view(".Lgh"));
-                        decimal(&mut names, name_count);
-                        push_bytes(&mut names, view(":\n.asciz \""));
-                        for k in pending_name.len() {
-                            ch := pending_name[k];
-                            if (ch == 34) || (ch == 92) {
-                                names.push(92);
-                            }
-                            names.push(ch);
+                    // An inlined runtime body keeps its function's own position.
+                    if !internal || own_internal {
+                        cur_file = w[0];
+                        cur_line = w[1];
+                        if !absolute {
+                            cur_line = base_line + w[1];
                         }
-                        push_bytes(&mut names, view("\"\n"));
+                        cur_col = w[2];
+                        cur_internal = internal;
                     }
-                    site_func_entry(&mut funcs, pending_func, func_name);
-                    pending_func = 0;
+                    // The pending function's first statement names its table entry: the runtime's own
+                    // functions have none, so a backtrace never prints `rt_` frames.
+                    if pending_func != 0 {
+                        mut func_name = 0;
+                        if !internal {
+                            name_count += 1;
+                            func_name = name_count;
+                            push_bytes(&mut names, view(".Lgh"));
+                            decimal(&mut names, name_count);
+                            push_bytes(&mut names, view(":\n.asciz \""));
+                            for k in pending_name.len() {
+                                ch := pending_name[k];
+                                if (ch == 34) || (ch == 92) {
+                                    names.push(92);
+                                }
+                                names.push(ch);
+                            }
+                            push_bytes(&mut names, view("\"\n"));
+                        }
+                        site_func_entry(&mut funcs, pending_func, func_name);
+                        pending_func = 0;
+                    }
+                    // Held until the statement's first instruction: two statements with no code
+                    // between them would otherwise open the same address, and the later one owns it.
+                    pending_site = true;
                 }
-                // Held until the statement's first instruction: two statements with no code between
-                // them would otherwise open the same address, and the later one owns it.
-                pending_site = true;
+                out.append(text[pend..a]);
+                pend = next;
+                a = next;
+                continue;
             }
-            line = u8[];
-            continue;
-        }
-        if site_starts(view(line), view(".gkind ")) {
-            w := site_words(view(line));
-            if w.len() == 1 {
-                pending = w[0];
+            if site_at(text, a, e, view(".gkind ")) {
+                w := site_words(text[a..e]);
+                if w.len() == 1 {
+                    pending = w[0];
+                }
+                out.append(text[pend..a]);
+                pend = next;
+                a = next;
+                continue;
             }
-            line = u8[];
-            continue;
         }
+        directive := (a < e) && (text[a] == 46);
         // A function starts: positions are its own again, and the code up to its first statement -
         // its prologue - names no place.
-        if (line.len() > 1) && (line[line.len() - 1] == 58) && !site_starts(view(line), view(".")) {
+        if (e - a > 1) && (text[e - 1] == 58) && !directive {
             seen_own = false;
             own_internal = true;
             cur_file = 0;
             pending_site = false;
             // Not the data labels, whose range would swallow code, and not the PE entry, which is
             // emitted as `.globl grail_entry` then `grail_entry:` and would get the label between.
-            if !site_starts(view(line), view("rt_state:")) && !site_starts(view(line), view("rt_tls_record:")) && !site_starts(view(line), view("grail_entry:")) {
+            if !site_at(text, a, e, view("rt_state:")) && !site_at(text, a, e, view("rt_tls_record:")) && !site_at(text, a, e, view("grail_entry:")) {
+                out.append(text[pend..a]);
+                pend = a;
                 site_label(&mut out, count);
                 site_entry(&mut entries, count, 0, 0);
                 count += 1;
@@ -2607,11 +2652,13 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
                 func_count += 1;
                 site_func_label(&mut out, func_count);
                 pending_func = func_count;
-                pending_name = span_copy(view(line), 0, line.len() - 1);
+                pending_name = span_copy(text[a..e], 0, e - a - 1);
             }
         }
-        if pending_site && !site_starts(view(line), view(".")) {
+        if pending_site && !directive {
             pending_site = false;
+            out.append(text[pend..a]);
+            pend = a;
             site_label(&mut out, count);
             if (cur_file != 0) && !cur_internal {
                 mut known = false;
@@ -2631,29 +2678,27 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
         }
         // Only a check in program code is rewritten: the runtime's own aborts (rt_fail ends in one)
         // stay plain, or a failing check would report itself forever.
-        mut is_abort = site_starts(view(line), view("call rt_abort")) && (line.len() == 13) && seen_own && !own_internal;
-        if is_abort {
+        if (e - a == 13) && seen_own && !own_internal && site_at(text, a, e, view("call rt_abort")) {
             mut kind = pending;
-            if (kind == 0) && site_starts(view(prev1), view("jb ")) && site_contains(view(prev2), view("cmpq 8(%rdi),%rsi")) {
+            if (kind == 0) && site_at(text, p1a, p1e, view("jb ")) && site_in(text, p2a, p2e, view("cmpq 8(%rdi),%rsi")) {
                 kind = 1;
             }
+            out.append(text[pend..a]);
+            pend = next;
             push_bytes(&mut out, view("movq $"));
             decimal(&mut out, kind);
             push_bytes(&mut out, view(",%rdx\ncall rt_trap\n"));
             pending = 0;
-        } else {
-            push_bytes(&mut out, view(line));
-            out.push(10);
         }
-        if (line.len() != 0) && !site_starts(view(line), view(".")) {
-            prev2 = prev1;
-            prev1 = line;
+        if (a < e) && !directive {
+            p2a = p1a;
+            p2e = p1e;
+            p1a = a;
+            p1e = e;
         }
-        line = u8[];
+        a = next;
     }
-    if line.len() != 0 {
-        push_bytes(&mut out, view(line));
-    }
+    out.append(text[pend..n]);
     // A last function whose body holds no statement (the entry shim, a body of only calls emitted
     // without positions) keeps its range and no name.
     if pending_func != 0 {
