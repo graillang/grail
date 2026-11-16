@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **`thread::scope`: threads that borrow.** `thread::scope(|t| { a := t.spawn(|| ..); ..; a.join() })`
+  starts OS threads whose closures may borrow from the caller - shared or exclusive - because the
+  scope waits for every one of them before it returns. The compiler refuses two threads taking one
+  `&mut`, the body touching what a thread borrowed, and a handle leaving the scope. A failure in
+  one thread lets its siblings finish and is re-raised when the scope ends.
 - Fixed: a small leaf that takes the address of its own local (runtime.grl's `rt_frame`) was
   inlined with that local turned into a scratch register, so split and cached builds of programs
   that reach it emitted `leaq %r8,%rax` and did not assemble. Such a leaf is no longer an inline
