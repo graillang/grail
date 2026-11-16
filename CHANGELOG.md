@@ -1,5 +1,19 @@
 ## Unreleased
 
+- **A `for` header destructures a tuple element.** `for (at, c) in pairs { .. }` binds each field of
+  the element to its own name, the way `(at, c) := pairs[0]` already did, so `char_indices`,
+  `iter::zip` and `iter::enumerate` chains no longer end in `pair.0` / `pair.1`. The pattern must
+  name exactly as many fields as the element has (`the element is a 3-tuple and the pattern names
+  2`), `_` skips a position and drops what it held, an owned field such as a `u8[]` moves out of the
+  element (the element's own record is freed and nothing else is), and a non-tuple element is
+  refused naming the element type as the source spells it (`u8` for an element of a `u8[]` or a
+  `string`-shaped byte sequence, `f32`, a record's own name), and a borrowed element (`for (a, b) in
+  &pairs`) is refused with the alternative rather than the reference's internal spelling. The comma
+  form `for k, v in &m` and the counted forms are unchanged. Cases `for-tuple-pattern-halves`,
+  `for-tuple-skip-position`, `for-tuple-moves-owned-element`, `for-tuple-iterator-chain`,
+  `for-tuple-arity-mismatch`, `for-tuple-non-tuple-element`, `for-tuple-bytes-element`,
+  `for-tuple-float-element`, `for-tuple-record-element`, `for-tuple-rejects-borrowed-element`.
+
 - **A map can be iterated.** `Map::keys()`, `values()` and `iter()` (both at once) yield references
   into the map, in its storage order, borrowing it the way `iter::refs(&v)` borrows a vector - so
   `for k in m.keys() { m.insert(..) }` is refused as a borrow conflict rather than corrupting the
@@ -113,7 +127,15 @@
   built for different pair layouts refuse to link rather than dereferencing each other's pairs
   wrongly. docs/design/separate-compilation.md, "Format 4 as built"; cases `ifc-*`, and
   `tools/interface-test.mjs` proves round-trip equality and every refusal.
-- Fixed: the windows suite no longer requires the `.set .F<n>` frame-constant table on Windows ARM64, where prologues size their frame with `sub sp, #n` instead. ARM64 unwind records are still checked one per function, with length, frame-pointer pair and `mov fp, sp`.
+- Fixed: the windows suite's Windows ARM64 frame-size check never ran. It matched `.set .F<n>,<size>`,
+  but a frame constant is named in its unit's namespace (`.set .F<unit>_<n>,<size>`), so the pattern
+  matched nothing and a tolerance added for the apparent absence (`672e1da`) turned the comparison
+  into `if (haveFrameTable)`. That is the one check guarding against a wrong frame size in an unwind
+  record, which corrupts stack walks on real hardware. The table was there all along: every ARM64
+  function emits its constant, its prologue subtracts that constant (`movz/movk x10,#.F<n>; sub
+  sp,sp,x10`) and the unwind pass writes it as `.seh_stackalloc`. The suite now requires one table
+  entry per function and compares each record's `sub sp, #n` against it, so a table that disappears
+  or goes stale fails instead of skipping.
 - Fixed: `tools/interface-test.mjs` wiped `.work/interface-test/<target>` at the start of every run,
   so two runs in one checkout deleted each other's interfaces mid-run and the survivor failed with
   `has no interface for module X (expected this file)` - a directory collision, not a compiler bug.

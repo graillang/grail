@@ -3148,6 +3148,11 @@ fn raw_arguments<a>(c: (&a mut C)) -> u64[] {
 // fixed prologue `pushq %rbp / movq %rsp,%rbp / subq $.F<n>,%rsp`. Frame labels restart per
 // function, so sizes are collected in emission order and consumed by the .def functions in the
 // same order (one `.set .F<n>, <bytes>` line per function).
+// Both PE targets carry that table: windows-aarch64's prologue loads the constant into `x10` and
+// subtracts it (`framesub`), and `arm_unwind` writes the same number as `.seh_stackalloc`, so the
+// `.set` value is the single source of an unwind record's frame size. The name is not a bare
+// `.F<n>` but `.F<unit prefix>_<n>` (a `.set` is one symbol per file, and two units' counters both
+// reach n), which is why a reader of the emitted text has to match the whole name.
 struct WinUnwind {
     out: u8[],
     symbol: u8[],
@@ -10904,8 +10909,8 @@ fn paren_close<a>(c: (&a mut C)) -> u64 {
     }
     return q;
 }
-// `(a, b, c) := expr;` - a tuple's elements bound to new names; `_` skips one (it is dropped).
-fn tuple_destructure<a>(c: (&a mut C)) -> unit {
+// `( ident , ident ... )` at c.pos: the names a tuple pattern binds, in order.
+fn pattern_names<a>(c: (&a mut C)) -> u8[][] {
     expect(&mut c, view("("));
     mut names = u8[][];
     while true {
@@ -10915,6 +10920,83 @@ fn tuple_destructure<a>(c: (&a mut C)) -> unit {
         }
         expect(&mut c, view(","));
     }
+    return names;
+}
+// The pattern written back for a diagnostic: `(a, b)`.
+fn pattern_text<a>(names: (&a u8[][])) -> u8[] {
+    mut out = copy_bytes(view("("));
+    for i in names.len() {
+        if i != 0 {
+            push_bytes(&mut out, view(", "));
+        }
+        push_bytes(&mut out, view(names[i]));
+    }
+    push_bytes(&mut out, view(")"));
+    return out;
+}
+// `for (a, b) in xs`: the loop variable holds one element of `xs`, and each name in the pattern takes
+// its field out of it with the steps `(a, b) := t` uses (tuple_destructure): the field is loaded,
+// owned, bound, and the tuple itself is freed. `_` binds a position nothing reads, so what it held is
+// dropped with the rest when the iteration ends.
+fn tuple_element_bind<a, b>(c: (&a mut C), names: (&b u8[][]), ty: u64, slot: u64) -> unit {
+    mut pattern = pattern_text(names);
+    base := base_type(&mut c, ty);
+    mut ok = ty_kind(&mut c, base) == 8;
+    if ok {
+        d := ty_arg(&mut c, base);
+        ok = same(view(c.decls[d].module), view(".tuple"));
+    }
+    if !ok {
+        // `for (a, b) in &xs` is the first thing a reader who wants to keep `xs` writes; naming a
+        // reference's type would print the interface spelling, so it says what to write instead.
+        if ty_kind(&mut c, ty) == 7 {
+            mut msg = copy_bytes(view("for "));
+            push_bytes(&mut msg, view(pattern));
+            push_bytes(&mut msg, view(" takes an element apart, so the element cannot be borrowed: iterate the sequence itself (the element then moves out) or bind one name and read its fields"));
+            fail(&mut c, view(msg));
+            return ();
+        }
+        tname := source_type_name(&mut c, ty);
+        mut msg = copy_bytes(view("for "));
+        push_bytes(&mut msg, view(pattern));
+        push_bytes(&mut msg, view(" needs tuple elements: the element type is `"));
+        push_bytes(&mut msg, view(tname));
+        push_bytes(&mut msg, view("`"));
+        fail(&mut c, view(msg));
+        return ();
+    }
+    d := ty_arg(&mut c, base);
+    if c.decls[d].count != names.len() {
+        mut msg = copy_bytes(view("the element is a "));
+        decimal(&mut msg, c.decls[d].count);
+        push_bytes(&mut msg, view("-tuple and the pattern names "));
+        decimal(&mut msg, names.len());
+        fail(&mut c, view(msg));
+        return ();
+    }
+    if drop_type(&mut c, base) != 0 {
+        fail(&mut c, view("a value that implements Drop cannot be destructured"));
+        return ();
+    }
+    source := place_of(&mut c, slot);
+    for i in names.len() {
+        fty := field_type(&mut c, base, i);
+        part := rec_load(&mut c, slot, i, 0);
+        own(&mut c, part, fty);
+        dest := place_of(&mut c, part);
+        if contains_borrow(&mut c, fty, 0) {
+            transfer_bonds(&mut c, source, dest);
+        }
+        stored_source(&mut c, part, fty);
+        bind(&mut c, names[i].copy(), fty, part, 0);
+    }
+    move_out(&mut c, val(slot, ty));
+    invoke(&mut c, view("rt_free"), one(slot));
+    return ();
+}
+// `(a, b, c) := expr;` - a tuple's elements bound to new names; `_` skips one (it is dropped).
+fn tuple_destructure<a>(c: (&a mut C)) -> unit {
+    names := pattern_names(&mut c);
     expect(&mut c, view(":="));
     v := expr(&mut c, 0);
     expect(&mut c, view(";"));
@@ -28672,7 +28754,7 @@ fn show_value<a>(c: (&a mut C), input: u64, inty: u64, xty: u64) -> Val {
 // it usable afterwards. Each `next` call reborrows the iterator, so an iterator that borrows a
 // collection keeps that loan for the whole loop (the collection cannot be mutated in the body).
 // Returns false, consuming nothing, when `v` is not such an iterator.
-fn iterator_loop<a>(c: (&a mut C), name: u8[], vt: u64, vty: u64, loopbase: u64) -> bool {
+fn iterator_loop<a, b>(c: (&a mut C), name: u8[], vt: u64, vty: u64, loopbase: u64, names: (&b u8[][])) -> bool {
     mut xty = vty;
     if ty_kind(&mut c, xty) == 7 {
         xty = ty_arg(&mut c, xty);
@@ -28715,7 +28797,7 @@ fn iterator_loop<a>(c: (&a mut C), name: u8[], vt: u64, vty: u64, loopbase: u64)
         mut l = &mut c.locals[last];
         l.last = loopend;
     }
-    pattern_loop(&mut c, false, 1, copy_bytes(view("Some")), name, 1, owner, input, inty, xty, formal);
+    pattern_loop(&mut c, false, 1, copy_bytes(view("Some")), name, 1, owner, input, inty, xty, formal, names);
     // Everything the iterable expression made ends with the loop: the hidden iterator is dropped,
     // and the `&mut it` reborrow of a lent iterator releases its loan.
     cleanup(&mut c, loopbase);
@@ -28725,7 +28807,7 @@ fn iterator_loop<a>(c: (&a mut C), name: u8[], vt: u64, vty: u64, loopbase: u64)
 // The body of `loop`, `while` and `while let` (and of `for x in it` over an iterator, which is
 // `while let Some(x) = it.next()`): the header is already parsed. With `iter_owner` set, the
 // pattern's scrutinee is a call of that module's `next` on `iter_input` instead of an expression.
-fn pattern_loop<a>(
+fn pattern_loop<a, b>(
     c: (&a mut C),
     endless: bool,
     pattern: u64,
@@ -28736,7 +28818,8 @@ fn pattern_loop<a>(
     iter_input: u64,
     iter_inty: u64,
     iter_xty: u64,
-    iter_formal: u64
+    iter_formal: u64,
+    names: (&b u8[][])
 ) -> unit {
     head := label(&mut c);
     end := label(&mut c);
@@ -28815,6 +28898,9 @@ fn pattern_loop<a>(
         invoke(&mut c, view("rt_free"), one(xt));
         if has_binding != 0 {
             bind(&mut c, binding.copy(), pty, payload, 0);
+            if names.len() != 0 {
+                tuple_element_bind(&mut c, names, pty, payload);
+            }
         }
     }
     if !endless & (pattern == 0) {
@@ -35537,15 +35623,24 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
             }
             expect(&mut c, view("="));
         }
-        pattern_loop(&mut c, endless, pattern, variant, binding, has_binding, u8[], 0, 0, 0, 0);
+        mut none = u8[][];
+        pattern_loop(&mut c, endless, pattern, variant, binding, has_binding, u8[], 0, 0, 0, 0, &none);
         return ();
     }
     if eat(&mut c, view("for")) {
-        name := ident(&mut c);
+        // `for (a, b) in xs` names the parts of each tuple element: the loop variable holds one
+        // element, and `tuple_element_bind` takes it apart once it is bound.
+        mut names = u8[][];
+        mut name = copy_bytes(view("__element"));
+        if is(&mut c, view("(")) {
+            names = pattern_names(&mut c);
+        } else {
+            name = ident(&mut c);
+        }
         // The loop variable is bound (and so shadowed) below; the guard's facts name it, so keep the
-        // text in a copy of its own.
+        // text in a copy of its own. A pattern's variable is hidden, so it states nothing.
         mut loop_name = u8[];
-        if c.pv_on != 0 {
+        if (c.pv_on != 0) & (names.len() == 0) {
             loop_name = name.copy();
         }
         // `for k, v in &m` names both halves of a map pair; `map_loop` lowers that form.
@@ -35566,7 +35661,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         mut v = expr(&mut c, 0);
         iter_end := c.pos;
         if (c.raw == 0) & (v.ty != 0) {
-            if iterator_loop(&mut c, name.copy(), v.t, v.ty, loopbase) {
+            if iterator_loop(&mut c, name.copy(), v.t, v.ty, loopbase, &names) {
                 return ();
             }
         }
@@ -35642,6 +35737,12 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         }
         if (c.raw == 0) & (iterable == 0) {
             require_type(&mut c, v.ty, 0);
+        }
+        if (c.raw == 0) & (iterable == 0) & (names.len() != 0) {
+            mut msg = copy_bytes(view("for "));
+            push_bytes(&mut msg, view(pattern_text(&names)));
+            push_bytes(&mut msg, view(" needs a sequence or an iterator of tuples"));
+            fail(&mut c, view(msg));
         }
         if iterable != 0 {
             observe(&mut c, seq);
@@ -35778,6 +35879,20 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         } else {
             bind(&mut c, name, 0, i, 0);
         }
+        if names.len() != 0 {
+            last := c.locals.len() - 1;
+            slot := c.locals[last].id;
+            mut ety = c.locals[last].ty;
+            if (bytewise != 0) & (byref == 0) {
+                // A bytewise loop binds each element as the default word - the load is `rt_atb`,
+                // and the body has always worked on that word - so the local's type is not the
+                // sequence's: a `u8[]` or a `string` element is a byte. Naming the word in a
+                // refusal would name a type the sequence never held. A byte is never a tuple, so
+                // nothing is lowered with this type: the check below refuses first.
+                ety = int_type(&mut c, 8, 0);
+            }
+            tuple_element_bind(&mut c, &names, ety, slot);
+        }
         if (byref == 0) & (consume == 0) {
             entry = ownership::snapshot(&c.check);
         }
@@ -35789,13 +35904,13 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         if range != 0 {
             first := pv_span_term(&mut c, iter_at, iter_end);
             last := pv_span_term(&mut c, range_at, range_end);
-            if (first.len() != 0) & (last.len() != 0) {
+            if (first.len() != 0) & (last.len() != 0) & (loop_name.len() != 0) {
                 pv_add(&mut guard, 1, view(first), view(loop_name), 0);
                 pv_add(&mut guard, 0, view(loop_name), view(last), 0);
             }
         } else {
             last := pv_span_term(&mut c, iter_at, iter_end);
-            if last.len() != 0 {
+            if (last.len() != 0) & (loop_name.len() != 0) {
                 pv_add(&mut guard, 0, view(loop_name), view(last), 0);
             }
         }

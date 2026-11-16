@@ -29,6 +29,17 @@ for (at, c) in pairs { ... }        // error: expected a name here, found `(`
 So `char_indices()` and every `zip`/`enumerate` chain ends in `pair.0` / `pair.1`, which is exactly
 the noise the adapters exist to remove.
 
+**Done** (`0922ecd`): the header reads `( ident, .. )` in front of `in`, and the loop variable is
+opened the way `(at, c) := t` opens a tuple - `field_type`, `rec_load`, `own`, `bind`, then the
+element's record is freed - so `for (at, c) in s.char_indices()` and
+`for (i, x) in iter::enumerate(it)` name their halves, and the iterator protocol carries the pattern
+through `Some(tuple)` as well. `_` skips a position (what it held is dropped with the iteration), an
+owned field such as a `u8[]` moves out, the arity is checked by name (`the element is a 3-tuple and
+the pattern names 2`), a non-tuple element is refused naming its type, and a borrowed element
+(`for (a, b) in &pairs`, which cannot take fields out of a reference) is refused with the way out.
+The comma form
+`for k, v in &m` and the counted forms are unchanged (`for-tuple-*` cases).
+
 ### 1.3 Missing collection methods (measured, all on `u64[]`)
 ```
 u64[] has no method `iter`        v.iter()      <- blocks every adapter chain
@@ -84,6 +95,20 @@ three targets, and teach in the book.
 The test for moving something from "not doing" to "doing" is evidence, not argument: three or more
 places in the compiler, the standard library or a ported application that want it badly enough to have
 worked around it.
+
+## 2.1a A method cannot be added to one instantiation
+
+`impl Iter<u64> { .. }` — adding a method to a *concrete instantiation* of a declared generic type — is
+refused by the impl grammar, which accepts a declaration (`impl Map<K, V>`) or a written builtin type
+(`impl u8[]`, `impl<T> T[]`) but not a partially-applied one. The practical cost is small and specific:
+`sum`/`min`/`max` over an `Iter<u64>` cannot be added as methods, so the call is
+`.collect().sum()`. The workaround is honest and the reason is written where it is needed
+(`lib/iter.grl`).
+
+Recorded rather than fixed because the fix is a general one - allow `impl` on any type spelling the
+type system can intern - and that is a design decision with its own round, not a side effect of adding
+adapters. Moving it to "doing" needs evidence like everything else: three or more places that wanted a
+method on one instantiation badly enough to have worked around it.
 
 ## 2.2 Second pass: what already works, and the two gaps it found
 
@@ -193,8 +218,11 @@ lesson is not "be careful", it is "change the shape first":
   what would have to enter the key for that to change.
 - `pool-chunks-mut-timing` measures in-place mutation at ~2x owned; the old 1.33x assertion was
   failing on loaded hosts because one round served both claims. Fixed this round.
-- Windows ARM64 PE unwind records exist but carry no frame-constant table, so `sub sp, #n` is not
-  verifiable against one. Documented, not fixed.
+- Windows ARM64 PE unwind records: **done**. They always did carry a frame-constant table - one
+  `.set .F<unit>_<n>,<size>` per function - but the suite's pattern expected a bare `.F<n>`, so the
+  comparison matched nothing and the absence looked like a property of the target (`672e1da`). The
+  suite now matches the real spelling and requires one entry per function, equal to the record's
+  `sub sp, #n`.
 
 ## How to re-run this audit
 

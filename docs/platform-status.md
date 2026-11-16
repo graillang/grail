@@ -240,11 +240,13 @@ just abundance-test             # Abundance bit-exact parity (313 values, 9 prog
 just borg-test                  # Borg reference-line parity (1014 lines, 12 suites)
 ```
 
-## Windows ARM64: unwind records yes, frame-constant table no
+## Windows ARM64: unwind records and the frame-constant table
 
-An ARM64 PE object does carry one `.xdata` unwind record per function, and the windows suite
-checks them (length positive and 4-aligned, frame-pointer pair saved, `mov fp, sp` present).
-What it has no equivalent of is the `.set .F<n>,<size>` frame-constant table: an x86-64 prologue
-sizes its frame from that table, while an ARM64 prologue uses `sub sp, #n` directly. The suite
-therefore enforces the one-to-one frame-table contract where the table exists, and checks each
-record's own `FunctionLength` and prologue everywhere.
+An ARM64 PE object carries one `.xdata` unwind record per function, and the windows suite checks
+them (length positive and 4-aligned, frame-pointer pair saved, `mov fp, sp` present). Each record's
+frame is the function's own frame constant: the prologue loads `.F<unit>_<n>` into `x10` and
+subtracts it, and the unwind pass writes that same value as `.seh_stackalloc`. The suite therefore
+requires the table one-to-one with the functions and compares every record against its entry, so a
+table that disappears fails the build instead of skipping the comparison. A frame constant is named
+in its unit's namespace (`.F<unit>_<n>`, not `.F<n>`) so two units' sizes cannot decide each
+other's displacements.

@@ -4,7 +4,7 @@
 // distinct exit code when a lane is blocked or a tool is missing.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import {
@@ -441,6 +441,26 @@ function crossCompileCheck(target) {
 
 function lint() {
   const checks = [];
+
+  // A suite that reads a build artefact it did not create *in this run* can be satisfied by a
+  // previous run's file. `test-ffi` passed int6's gate on a leftover `<exe>.o` and the fresh tree in
+  // int7 exposed it immediately. This is a note rather than a failure: the fix is for each suite to
+  // own and clear its work directory, and listing the readers makes the next one visible the day it
+  // appears instead of the day a gate goes green for the wrong reason.
+  const artefactReaders = [];
+  for (const name of readdirSync('tools').filter(file => file.endsWith('.mjs'))) {
+    if (name === 'ci.mjs') continue;
+    const text = readFileSync(join('tools', name), 'utf8');
+    text.split('\n').forEach((line, index) => {
+      const call = line.match(/readFileSync\(([^)]*)\)/);
+      if (call && /\.(o|obj|s|tir|iface)['"`]/.test(call[1])) artefactReaders.push(`${name}:${index + 1}`);
+    });
+  }
+  if (artefactReaders.length !== 0) {
+    const shown = artefactReaders.slice(0, 6).join(', ');
+    console.log(`note  ${artefactReaders.length} place(s) in tools/ read a build artefact: ${shown}${artefactReaders.length > 6 ? ', ...' : ''}`);
+  }
+
   const check = (name, ok, detail = '') => checks.push({ name, ok, detail });
   let version = null;
   try { version = readVersion(); check('VERSION is semver', true, version); } catch (error) { check('VERSION is semver', false, error.message); }
