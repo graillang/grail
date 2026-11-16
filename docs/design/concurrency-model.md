@@ -594,44 +594,48 @@ stalls and the assertion fails) and `tests/sched/job_overflow.grl` (today: SIGSE
 
 Stage 1 is on `gaps12-sched` with the allocator's per-thread caches (`gaps12-alloc`) merged in.
 Before and after were run interleaved, 7 rounds each, median with the range in brackets; the
-machine was heavily loaded by other work during this run (the serial `fib(32)` took 18 ms instead
-of its usual 9), so read the columns against each other, not against the quieter baseline above.
+machine was heavily loaded by other work during this run (load average 30 on 24 CPUs; the serial
+`fib(32)` took 15 ms instead of its usual 9), so read the columns against each other, not against the quieter baseline above.
 "Before" is the baseline runtime: the separate pool and the global allocator lock.
 
 ```
-frame.frame_median            4638 [3252..5201]  ->       4371 [3063..5125]
-frame.frame_p99              11689 [8219..18751]  ->       7875 [4746..10715]
-frame.frame_max              19949 [13620..43391]  ->      11086 [6388..18428]
-frame.frames_total            3032 [2185..3465]  ->       2671 [1892..3180]
-frame.io_rounds                489 [353..554]  ->        447 [326..507]
-frame.io_worst_late          16242 [9968..35521]  ->       7660 [3964..14573]
-frame.bg_rounds              57590 [42167..67068]  ->      68613 [49893..80781]
+frame.frame_median            3694 [3137..5694]  ->       3703 [3039..4287]
+frame.frame_p99              11713 [9074..35610]  ->      10046 [5395..13297]
+frame.frame_max              33049 [13167..63793]  ->      11628 [6381..16691]
+frame.frames_total            2565 [2211..4139]  ->       2610 [1900..2771]
+frame.io_rounds                404 [358..621]  ->        425 [328..446]
+frame.io_worst_late          11520 [7205..70512]  ->       7612 [5816..29374]
+frame.bg_rounds              47505 [42599..72990]  ->      58060 [48978..74131]
 frame.threads                   50 [50..50]  ->         26 [26..26]
-sched.job_spawn_wait          7436 [6521..8375]  ->       3998 [2103..9991]
-sched.join                    9396 [8187..13209]  ->       2948 [1485..4701]
-sched.task_spawn_join        16779 [11224..28881]  ->      10352 [6737..15192]
-sched.task_burst              2738 [1281..3441]  ->       1427 [1336..4768]
-sched.fib32_serial           18282 [10135..23690]  ->      19253 [11623..20711]
-sched.fib32_join_main       369859 [161154..418276]  ->       9832 [8523..10511]
-sched.fib32_join_task       362637 [183188..417185]  ->      13656 [11897..21958]
-sched.ticker_stall          300431 [294236..310126]  ->      11530 [10060..12359]
+sched.job_spawn_wait          7759 [6175..8489]  ->       2820 [2223..6646]
+sched.join                    8923 [8610..11455]  ->       2339 [1522..3516]
+sched.task_spawn_join        17507 [15053..23219]  ->       9678 [6008..10975]
+sched.task_burst              2959 [2738..3173]  ->       1911 [1288..3256]
+sched.fib32_serial           15647 [9647..19023]  ->      14854 [10632..19804]
+sched.fib32_join_main       357761 [316835..426281]  ->      10179 [9011..27017]
+sched.fib32_join_task       372110 [302868..392226]  ->      10279 [8547..33232]
+sched.ticker_stall          300032 [299019..310098]  ->      11459 [10093..15471]
 ```
 
 - **Threads:** 50 -> 26 (24 workers, the reactor, main).
-- **`fib(32)` by nested join:** 370 ms -> 9.8 ms from the main thread, 13.7 ms from inside a task,
-  where the serial form took 18-19 ms in the same run. With `GRAIL_WORKERS` at 1, 2, 4, 8:
-  38.6, 21.6, 12.0, 8.2 ms. The stage's gate was "under 3x serial on one worker": 38.6 ms against
-  18-19 is about 2x. Before the allocator merge the same recursion still took 260-320 ms on 24
+- **`fib(32)` by nested join:** 358 ms -> 10.2 ms from the main thread, 372 -> 10.3 ms from inside
+  a task, where the serial form took 15 ms in the same run. With `GRAIL_WORKERS` at 1, 2, 4, 8:
+  39.3, 18.5, 14.9, 11.9 ms. The stage's gate was "under 3x serial on one worker": 39 ms against
+  15 is 2.6x (in a quieter run: 24 ms against 9.7). Before the allocator merge the same recursion still took 260-320 ms on 24
   workers with 94% of samples in `rt_allocator_lock` (`grail profile`): the scheduler was not the
   limit, the closure environments' allocations were.
-- **Join / job handle / task spawn+join:** 9.4 -> 2.9 us, 7.4 -> 4.0 us, 16.8 -> 10.4 us. A join
+- **Join / job handle / task spawn+join:** 8.9 -> 2.3 us, 7.8 -> 2.8 us, 17.5 -> 9.7 us. A join
   from the main thread still pays a locked injection-ring push and usually a futex wake of a
   parked worker; from a worker it is a deque push and pop.
-- **Ticker stall (P4):** 300 ms -> 11.5 ms, which is the 10 ms tick.
-- **Frame loop:** median 4.6 -> 4.4 ms, p99 11.7 -> 7.9 ms, max 19.9 -> 11.1 ms; the I/O task's
-  worst lateness 16.2 -> 7.7 ms; the background task got 19% more rounds done.
-- **Help-depth high-water mark** (`GRAIL_SCHED_STATS=1`): 9-10 in the frame loop, 17-21 in
-  `fib(32)` by join (its recursion is 21 joins deep, so a waiter can nest that many helped jobs).
+- **Ticker stall (P4):** 300 ms -> 11.5 ms, which is the 10 ms tick plus scheduling noise.
+- **Frame loop:** median unchanged (3.7 ms), p99 11.7 -> 10.0 ms, max 33.0 -> 11.6 ms; the I/O
+  task's worst lateness 11.5 -> 7.6 ms; the background task got 22% more rounds done. (An earlier
+  interleaved run, less loaded: median 4.6 -> 4.4, p99 11.7 -> 7.9, max 19.9 -> 11.1 ms.) The
+  median is bounded by the work itself on a machine this busy; the tail is what one scheduler buys.
+- **Help-depth high-water mark** (`GRAIL_SCHED_STATS=1`): 9-10 in the frame loop; 17 to 29 in
+  `fib(32)` by join. It is not bounded by the recursion depth (21 joins): a helped job joins in
+  turn and its waiter helps again, so the nesting is bounded only by the stack. That is the number
+  to watch when jobs may wait.
 - **Tried and dropped:** letting a worker look for work about 200 more times before it parks. It
   made `bench/sched.grl` slower (join 2.1 -> 3.8 us, job handle 2.1 -> 4.6 us) and did nothing for
   the frame loop on this loaded machine. Stage 5's `idle_spin_us` should be measured on a quiet one.
