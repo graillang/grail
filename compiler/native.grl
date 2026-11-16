@@ -508,6 +508,11 @@ struct C {
     decl_keys: u64[],
     spec_slots: u64[],
     spec_keys: u64[],
+    ty_slots: u64[],
+    ty_keys: u64[],
+    // What `resource` remembers: the latest record of each slot, and how much of the list it read.
+    res_last: u64[],
+    res_synced: u64,
     spec_em_slots: u64[],
     spec_em_keys: u64[],
     drop_em_slots: u64[],
@@ -3870,7 +3875,31 @@ fn needs_drop<a>(c: (&a mut C), ty: u64) -> bool {
         || (k == 30)
         || (k == 33);
 }
+// The record of the value in `slot`: the latest one made for it. `res_last[slot]` remembers that
+// record (index + 1) and is brought up to date here, so the dozen places that push a record did not
+// change; the three that swap the whole list say so (resources_swapped). A remembered entry is used
+// only if the record there still is that slot's - a record popped since leaves a stale entry, and
+// then the list is scanned as it always was.
 fn resource<a>(c: (&a mut C), slot: u64) -> u64 {
+    if c.resources.len() < c.res_synced {
+        resources_swapped(&mut c);
+    }
+    while c.res_synced < c.resources.len() {
+        at := c.resources[c.res_synced].slot;
+        while c.res_last.len() <= at {
+            c.res_last.push(0);
+        }
+        exchange(&mut c.res_synced, c.res_synced + 1);
+        c.res_last[at] = c.res_synced;
+    }
+    if slot < c.res_last.len() {
+        known := c.res_last[slot];
+        if known != 0 {
+            if c.resources[known - 1].slot == slot {
+                return known;
+            }
+        }
+    }
     mut i = c.resources.len();
     while i != 0 {
         i = i - 1;
@@ -4002,6 +4031,12 @@ fn return_bonds<a>(c: (&a mut C), src: u64, dst: u64, aggregate: u64) -> unit {
             }
         }
     }
+    return ();
+}
+// The record list was replaced by another one: what `resource` remembers is about the old list.
+fn resources_swapped<a>(c: (&a mut C)) -> unit {
+    exchange(&mut c.res_last, u64[]);
+    exchange(&mut c.res_synced, 0);
     return ();
 }
 fn close_loans<a>(c: (&a mut C)) -> unit {
@@ -9095,6 +9130,20 @@ fn numbers_equal<a, b>(a: (&a u64[]), b: (&b u64[])) -> bool {
     }
     return true;
 }
+fn ty_hash<a, b>(k: u64, arg: u64, mode: u64, env: u64, regions: (&a u64[]), args: (&b u64[])) -> u64 {
+    mut h: u64 = wrapping_mul(14695981039346656037 ^ k, 1099511628211);
+    h = wrapping_mul(h ^ arg, 1099511628211);
+    h = wrapping_mul(h ^ mode, 1099511628211);
+    h = wrapping_mul(h ^ env, 1099511628211);
+    for i in regions.len() {
+        h = wrapping_mul(h ^ regions[i], 1099511628211);
+    }
+    h = wrapping_mul(h ^ 255, 1099511628211);
+    for i in args.len() {
+        h = wrapping_mul(h ^ args[i], 1099511628211);
+    }
+    return h ^ (h >> 29);
+}
 fn intern_env<a>(
     c: (&a mut C),
     k: u64,
@@ -9104,14 +9153,29 @@ fn intern_env<a>(
     args: u64[],
     env: u64
 ) -> u64 {
-    for i in c.types.len() {
-        t := &c.types[i];
-        if (t.kind == k) & (t.arg == arg) & (t.mode == mode) & (t.env == env) {
-            if numbers_equal(&t.regions, &regions) {
-                if numbers_equal(&t.args, &args) {
-                    return i;
+    // Types are interned, so this is asked for every type the checker builds: a hashed lookup in
+    // an index kept beside the table, not a walk of every type the program has (see name_key).
+    while c.ty_keys.len() < c.types.len() {
+        old := &c.types[c.ty_keys.len()];
+        index_add(&mut c.ty_slots, &mut c.ty_keys, ty_hash(old.kind, old.arg, old.mode, old.env, &old.regions, &old.args));
+    }
+    key := ty_hash(k, arg, mode, env, &regions, &args);
+    if c.ty_slots.len() != 0 {
+        mask := c.ty_slots.len() - 1;
+        mut h = key & mask;
+        while c.ty_slots[h] != 0 {
+            i := c.ty_slots[h] - 1;
+            if c.ty_keys[i] == key {
+                t := &c.types[i];
+                if (t.kind == k) & (t.arg == arg) & (t.mode == mode) & (t.env == env) {
+                    if numbers_equal(&t.regions, &regions) {
+                        if numbers_equal(&t.args, &args) {
+                            return i;
+                        }
+                    }
                 }
             }
+            h = (h + 1) & mask;
         }
     }
     c.types.push(Ty { kind: k, arg: arg, mode: mode, regions: regions, args: args, env: env });
@@ -15076,6 +15140,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     exchange(&mut c.none_end, 0);
     exchange(&mut c.debug_vars, DebugVar[]);
     exchange(&mut c.resources, Resource[]);
+    resources_swapped(&mut c);
     exchange(&mut c.next, 0);
     // Facts are keyed by the symbol this body will be lifted under, and the `rt_f64_op` ordinals
     // restart with it. Both are known before the signature is parsed, so parameters get facts too.
@@ -28853,6 +28918,7 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
     specs_mark := c.specs.len();
     saved_locals := exchange(&mut c.locals, Local[]);
     saved_resources := exchange(&mut c.resources, Resource[]);
+    resources_swapped(&mut c);
     saved_check := exchange(&mut c.check, ownership::new());
     saved_members := exchange(&mut c.members, Member[]);
     saved_bonds := exchange(&mut c.bonds, Bond[]);
@@ -28899,6 +28965,7 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
     }
     exchange(&mut c.locals, saved_locals);
     exchange(&mut c.resources, saved_resources);
+    resources_swapped(&mut c);
     exchange(&mut c.check, saved_check);
     exchange(&mut c.members, saved_members);
     exchange(&mut c.bonds, saved_bonds);
@@ -29591,6 +29658,7 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         exchange(&mut c.cur_rpred, no_pred());
         exchange(&mut c.strict_here, 0);
         exchange(&mut c.resources, Resource[]);
+        resources_swapped(&mut c);
         exchange(&mut c.next, 0);
         exchange(&mut c.scope_end, 0);
         exchange(&mut c.loop_start, 0);
@@ -43380,6 +43448,10 @@ pub fn main() -> u64 {
         decl_keys: u64[],
         spec_slots: u64[],
         spec_keys: u64[],
+        ty_slots: u64[],
+        ty_keys: u64[],
+        res_last: u64[],
+        res_synced: 0,
         spec_em_slots: u64[],
         spec_em_keys: u64[],
         drop_em_slots: u64[],
