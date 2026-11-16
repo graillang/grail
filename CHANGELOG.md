@@ -1,5 +1,19 @@
 ## Unreleased
 
+- Fixed: **a refusal could name the wrong type.** `type_name` - the speller about half the
+  diagnostics used - answers in the interface format for anything it does not name itself, so an
+  element or argument of type `u8` read back as `(int 8u)` and an `f32` as `f64` (f32 and f64 are one
+  store kind told apart by width, and its plain-word arm answered by kind alone). The user-facing
+  messages now go through `source_type_name`, the speller the type-mismatch diagnostics already used:
+  a `Send`/`Share` bound refusal, an associated-type mismatch, the `[]`-on-a-non-sequence refusal and
+  the specialisation name in a diagnostic (`fill<Arg>`) all name `u8`, `f32` and a record as the
+  author wrote them, and a same-module record loses its qualifier (`Plain`, not `main::Plain`).
+  `type_name` keeps the interface spelling, which is what the interface round-trip refusal has to
+  report (it says what the *file* wrote and read back), and it now spells an f32 as `f32` wherever it
+  is still reached. Cases `index-invalid-type-spells-f32`,
+  `assoc-equality-bound-spells-narrow-int`; the expectation in
+  `reject-unsafe-struct-type-argument-unclassified` moves with the dropped module prefix.
+
 - **A `for` header destructures a tuple element.** `for (at, c) in pairs { .. }` binds each field of
   the element to its own name, the way `(at, c) := pairs[0]` already did, so `char_indices`,
   `iter::zip` and `iter::enumerate` chains no longer end in `pair.0` / `pair.1`. The pattern must

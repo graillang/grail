@@ -8985,19 +8985,28 @@ fn bound_fail<a, b>(c: (&a mut C), ty: u64, bound: &b [u8]) -> unit {
     push_bytes(&mut msg, view("type does not satisfy "));
     push_bytes(&mut msg, view(bound));
     push_bytes(&mut msg, view(": "));
-    name := type_name(&mut c, ty);
+    name := source_type_name(&mut c, ty);
     push_bytes(&mut msg, view(name));
     push_bytes(&mut msg, view(" is "));
     cap_denial_text(&mut c, &mut msg);
     fail(&mut c, view(msg));
     return ();
 }
-// A type as a diagnostic names it: a nominal type by `module::name`, anything else by the interface
-// format's own spelling, so a refusal never says only "the type parameter".
+// A type in the interface format's own spelling: a nominal type by `module::name`, anything else in
+// the format's syntax. A message about a type the *author* wrote wants `source_type_name` instead -
+// it spells `u8`, `f32`, `u8[]`, `&T`, and an own-module record without its module, and it falls back
+// to this - so this one is for the places where the interface format is itself the subject (the
+// round-trip refusal) and for the fallback.
 fn type_name<a>(c: (&a mut C), ty: u64) -> u8[] {
     k := ty_kind(&mut c, ty);
     arg := ty_arg(&mut c, ty);
     mut out = u8[];
+    // f32 and f64 are one store kind told apart by the width, the way `iface_type_raw` tells them
+    // apart, so the plain-word arm below must not answer for the kind alone.
+    if (k == 21) & (arg == 32) {
+        push_bytes(&mut out, view("f32"));
+        return out;
+    }
     if (k == 8) || (k == 23) || (k == 28) {
         mut module = c.decls[arg].module.copy();
         mut name = c.decls[arg].name.copy();
@@ -10213,9 +10222,9 @@ fn require_assoc_eqs<a, b>(c: (&a mut C), index: u64, map: (&b u64[])) -> unit {
                 if same_type(&mut c, given, wanted) == 0 {
                     mut message = u8[];
                     push_bytes(&mut message, view("associated type mismatch: the bound requires `"));
-                    push_bytes(&mut message, view(type_name(&mut c, wanted)));
+                    push_bytes(&mut message, view(source_type_name(&mut c, wanted)));
                     push_bytes(&mut message, view("`, the implementation gives `"));
-                    push_bytes(&mut message, view(type_name(&mut c, given)));
+                    push_bytes(&mut message, view(source_type_name(&mut c, given)));
                     push_bytes(&mut message, view("`"));
                     fail(&mut c, view(message));
                 }
@@ -17795,7 +17804,7 @@ fn fx_instance_name<a, b>(c: (&a mut C), name: &b [u8], spec: u64) -> u8[] {
         if i != 0 {
             push_bytes(&mut out, view(", "));
         }
-        spelling := type_name(&mut c, args[i]);
+        spelling := source_type_name(&mut c, args[i]);
         push_bytes(&mut out, view(spelling));
     }
     out.push(62);
@@ -32500,7 +32509,7 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
         k := ty_kind(&mut c, x.ty);
         if (k != 3) & (k != 4) & (k != 5) {
             mut msg = copy_bytes(view("`"));
-            push_bytes(&mut msg, view(type_name(&mut c, x.ty)));
+            push_bytes(&mut msg, view(source_type_name(&mut c, x.ty)));
             push_bytes(&mut msg, view("` cannot be indexed: `[]` takes a byte sequence, a vector or a view"));
             fail(&mut c, view(msg));
         }
@@ -38014,6 +38023,8 @@ fn iface_type<a, b>(c: (&a mut C), out: (&a mut u8[]), deps: (&a mut u64[]), ty:
     };
     back := iface_r_type(&mut p, &mut c);
     if back != ty {
+        // The subject here is the interface format itself, so these two names are its own spelling
+        // (`type_name`, not `source_type_name`): they say what the file wrote and read back.
         mut msg = u8[];
         push_bytes(&mut msg, view("this interface format does not round-trip a type: wrote `"));
         push_bytes(&mut msg, view(type_name(&mut c, ty)));
