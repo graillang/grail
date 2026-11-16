@@ -887,6 +887,13 @@ struct C {
     // time: every run records every body, and a linear scan per edge was quadratic in the program.
     fx_sym_slots: u64[],
     fx_sym_keys: u64[],
+    // 1 when a symbol's facts came from an interface's summary: a callee whose body is in another
+    // run, answered with what that run proved. Its own facts and witnesses are the row's.
+    fx_row: u64[],
+    // The interfaces this run wrote, kept so the summary can be added once the bodies are solved.
+    iface_out_file: u8[][],
+    iface_out_text: u8[][],
+    iface_out_module: u8[][],
     fx_body: u64[],
     fx_attr_alloc: u64[],
     fx_attr_panic: u64[],
@@ -21120,6 +21127,7 @@ fn fx_sym<a, b>(c: (&a mut C), sym: &b [u8]) -> u64 {
     index_add(&mut c.fx_sym_slots, &mut c.fx_sym_keys, key);
     c.fx_syms.push(copy_bytes(view(sym)));
     c.fx_body.push(0);
+    c.fx_row.push(0);
     c.fx_attr_alloc.push(0);
     c.fx_attr_panic.push(0);
     c.fx_own_alloc.push(0);
@@ -21484,7 +21492,7 @@ fn fx_lookup<a, b>(c: (&a mut C), name: &b [u8]) -> u64 {
 // fail.
 fn fx_callee_alloc<a>(c: (&a C), k: u64) -> u64 {
     kk := k - 1;
-    if c.fx_body[kk] != 0 {
+    if (c.fx_body[kk] != 0) || (c.fx_row[kk] != 0) {
         return c.fx_alloc[kk];
     }
     if c.fx_attr_alloc[kk] != 0 {
@@ -21494,7 +21502,7 @@ fn fx_callee_alloc<a>(c: (&a C), k: u64) -> u64 {
 }
 fn fx_callee_panic<a>(c: (&a C), k: u64) -> u64 {
     kk := k - 1;
-    if c.fx_body[kk] != 0 {
+    if (c.fx_body[kk] != 0) || (c.fx_row[kk] != 0) {
         return c.fx_panic[kk];
     }
     if c.fx_attr_panic[kk] != 0 {
@@ -42285,7 +42293,7 @@ pub fn iface_digest<a>(data: &a [u8]) -> u8[] {
 // compiler reads is refused by length. Neither can be misread as something else, which is what makes
 // adding a field a version bump and not a silent reinterpretation. `grail iface dump` renders the
 // tree the reader read, so the format stays inspectable without a second parser.
-const IFACE_VERSION: u64 = 6;
+const IFACE_VERSION: u64 = 7;
 const IFACE_TAG_MODULE: u64 = 1;
 const IFACE_TAG_TRAILER: u64 = 2;
 const IFACE_TAG_LINK: u64 = 3;
@@ -42302,6 +42310,9 @@ const IFACE_TAG_INHERENT_TYPE: u64 = 18;
 // A module static (docs/design/module-values.md): name, visibility, type and tier; the storage is in
 // the declaring module's object, so no value travels.
 const IFACE_TAG_STATIC: u64 = 19;
+// The effect summary of every function the module emitted (docs/design/effects.md, "Summaries"):
+// computed facts, not claims, so a run that calls one without its body knows what it does.
+const IFACE_TAG_FACTS: u64 = 20;
 
 // The ABI this compiler builds objects for, as the one line every interface carries: the `dyn`
 // layout (docs/design/fat-dyn.md) - a `&dyn I` is an 8-byte pointer to a 16-byte, 8-aligned
@@ -42477,6 +42488,9 @@ fn iface_tag_name(tag: u64) -> string {
     if tag == IFACE_TAG_ENV {
         return "env";
     }
+    if tag == IFACE_TAG_FACTS {
+        return "facts";
+    }
     return "unknown";
 }
 fn iface_known_tag(tag: u64) -> bool {
@@ -42484,7 +42498,7 @@ fn iface_known_tag(tag: u64) -> bool {
         || (tag == IFACE_TAG_TYPE) || (tag == IFACE_TAG_ALIAS) || (tag == IFACE_TAG_CONST)
         || (tag == IFACE_TAG_FN) || (tag == IFACE_TAG_INHERENT) || (tag == IFACE_TAG_IFACE)
         || (tag == IFACE_TAG_IMPL) || (tag == IFACE_TAG_ENV) || (tag == IFACE_TAG_INHERENT_TYPE)
-        || (tag == IFACE_TAG_STATIC);
+        || (tag == IFACE_TAG_STATIC) || (tag == IFACE_TAG_FACTS);
 }
 // Where a refusal happened, so no diagnostic says only "malformed".
 fn iface_where<a>(p: (&a IR)) -> u8[] {
@@ -44141,6 +44155,11 @@ fn iface_module_bytes<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std:
             iface_wrec(&mut out, tag, view(items[i].payload));
         }
     }
+    listed := iface_listed_fns(&items, &keep);
+    facts := iface_facts_bytes(&mut c, view(m), &listed);
+    if facts.len() != 0 {
+        iface_wrec(&mut out, IFACE_TAG_FACTS, view(facts));
+    }
     mut source_digest = digest.copy();
     if source_digest.len() == 0 {
         source := host::read_file(view(path));
@@ -44152,6 +44171,11 @@ fn iface_module_bytes<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std:
     // The trailer: the source digest, then the digest of every byte above it. The cache keys on the
     // bytes before the trailer (the surface), so a module edit that changes no declaration leaves
     // every other module's key alone.
+    iface_seal_out(&mut out, view(source_digest));
+    return out;
+}
+// The trailer: the source digest, then the digest of every byte above it.
+fn iface_seal_out<a, b>(out: (&a mut u8[]), source_digest: &b [u8]) -> unit {
     out.push(IFACE_TAG_TRAILER);
     iface_wv(&mut out, iface_vlen(source_digest.len()) + source_digest.len() + 32);
     iface_ws(&mut out, view(source_digest));
@@ -44159,6 +44183,198 @@ fn iface_module_bytes<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std:
     for i in d.len() {
         out.push(d[i]);
     }
+    return ();
+}
+// The summary record of module `m`: one entry per function of the module whose facts this run knows -
+// a body it emitted and solved, or a row it read (what makes a read file write back identically).
+// Empty when it knows none, which is what an interface written before any body was emitted carries:
+// a reader then knows nothing about those functions, and nothing is the conservative answer.
+// The functions an interface lists: the summary covers exactly these, the symbols another run can
+// name, so a file read back has a declaration for every entry.
+fn iface_listed_fns<a, b>(items: (&a IItem[]), keep: (&b u64[])) -> u64[] {
+    mut out = u64[];
+    for i in items.len() {
+        if (keep[i] != 0) && (items[i].tag == IFACE_TAG_FN) {
+            out.push(items[i].index);
+        }
+    }
+    return out;
+}
+fn iface_facts_bytes<a, b, d>(c: (&a mut C), m: &b [u8], listed: (&d u64[])) -> u8[] {
+    // One entry per symbol, in symbol order: the order a read file's declarations come back in is
+    // not the order the source declared them, and the bytes must not depend on either.
+    mut parts = u8[][];
+    mut n = 0;
+    mut seen = u8[][];
+    for li in listed.len() {
+        i := listed[li];
+        if i >= c.funcs.len() {
+            continue;
+        }
+        sym := fx_func_symbol(&mut c, i);
+        k := fx_find(&mut c, view(sym));
+        if k == 0 {
+            continue;
+        }
+        kk := k - 1;
+        mut a = 0;
+        mut p = 0;
+        if c.fx_body[kk] != 0 {
+            a = c.fx_alloc[kk];
+            p = c.fx_panic[kk];
+        } else {
+            if c.fx_row[kk] == 0 {
+                continue;
+            }
+            a = c.fx_own_alloc[kk];
+            p = c.fx_own_panic[kk];
+        }
+        mut dup = 0;
+        for j in seen.len() {
+            if same(view(seen[j]), view(sym)) {
+                dup = 1;
+            }
+        }
+        if dup != 0 {
+            continue;
+        }
+        seen.push(sym.copy());
+        mut entries = u8[];
+        mut shown = c.fx_fn_name[kk].copy();
+        if shown.len() == 0 {
+            shown = sym.copy();
+        }
+        iface_ws(&mut entries, view(sym));
+        iface_ws(&mut entries, view(shown));
+        iface_w1(&mut entries, a);
+        iface_w1(&mut entries, p);
+        iface_w1(&mut entries, c.fx_entry_panic[kk]);
+        mut at = u8[];
+        if (a != 0) && (c.fx_alloc_thru[kk] != 0) {
+            at = c.fx_syms[c.fx_alloc_thru[kk] - 1].copy();
+        }
+        mut pt = u8[];
+        if (p != 0) && (c.fx_panic_thru[kk] != 0) {
+            pt = c.fx_syms[c.fx_panic_thru[kk] - 1].copy();
+        }
+        iface_ws(&mut entries, view(at));
+        iface_ws(&mut entries, view(pt));
+        // Insertion by symbol: `seen` and `parts` stay in step.
+        mut j = parts.len();
+        parts.push(entries);
+        while (j > 0) && bytes_less(view(seen[seen.len() - 1]), view(fx_sym_of_part(&parts[j - 1]))) {
+            parts.swap(j, j - 1);
+            j -= 1;
+        }
+        n += 1;
+    }
+    if n == 0 {
+        return u8[];
+    }
+    mut body = u8[];
+    iface_wv(&mut body, n);
+    for i in parts.len() {
+        push_bytes(&mut body, view(parts[i]));
+    }
+    return body;
+}
+// The symbol an encoded summary entry starts with.
+fn fx_sym_of_part<a>(part: (&a u8[])) -> u8[] {
+    mut at = 0;
+    mut len = 0;
+    mut scale = 1;
+    mut more = 1;
+    while (more != 0) & (at < part.len()) {
+        b := part[at];
+        at += 1;
+        len = len + (b & 127) * scale;
+        if (b & 128) == 0 {
+            more = 0;
+        } else {
+            scale = scale * 128;
+        }
+    }
+    mut out = u8[];
+    for i in len {
+        out.push(part[at + i]);
+    }
+    return out;
+}
+// Byte-wise order: `a` before `b`.
+fn bytes_less<a, b>(x: &a [u8], y: &b [u8]) -> bool {
+    mut i = 0;
+    while (i < x.len()) && (i < y.len()) {
+        if x[i] != y[i] {
+            return x[i] < y[i];
+        }
+        i += 1;
+    }
+    return x.len() < y.len();
+}
+// The interface without its summary record, sealed again: the declarations alone.
+fn iface_without_facts<a>(bytes: &a [u8]) -> u8[] {
+    mut out = u8[];
+    if bytes.len() < 5 {
+        return copy_bytes(view(bytes));
+    }
+    for i in 5 {
+        out.push(bytes[i]);
+    }
+    mut at = 5;
+    mut found = 0;
+    while at < bytes.len() {
+        tag_at := at;
+        tag := bytes[at];
+        at += 1;
+        mut len = 0;
+        mut scale = 1;
+        mut more = 1;
+        while (more != 0) & (at < bytes.len()) {
+            b := bytes[at];
+            at += 1;
+            len = len + (b & 127) * scale;
+            if (b & 128) == 0 {
+                more = 0;
+            } else {
+                scale = scale * 128;
+            }
+        }
+        if tag == IFACE_TAG_TRAILER {
+            break;
+        }
+        if tag == IFACE_TAG_FACTS {
+            found = 1;
+        } else {
+            for i in tag_at..at + len {
+                out.push(bytes[i]);
+            }
+        }
+        at = at + len;
+    }
+    if found == 0 {
+        return copy_bytes(view(bytes));
+    }
+    head := iface_r_head(view(""), view(bytes));
+    iface_seal_out(&mut out, view(head.digest));
+    return out;
+}
+// `text` (an interface this run wrote before its bodies were emitted) with the summary of module `m`
+// added in front of the trailer, and sealed again: the bytes are exactly what `iface_module_bytes`
+// writes for the same module once its facts are known, so a re-read file round-trips.
+fn iface_with_facts<a, b>(c: (&a mut C), text: &a [u8], m: &b [u8]) -> u8[] {
+    exchange(&mut c.iface_env, u64[]);
+    exchange(&mut c.iface_env_names, u8[][]);
+    items := iface_items(&mut c, view(m));
+    keep := iface_keep(&items);
+    listed := iface_listed_fns(&items, &keep);
+    facts := iface_facts_bytes(&mut c, view(m), &listed);
+    if facts.len() == 0 {
+        return copy_bytes(view(text));
+    }
+    mut out = iface_surface(view(text));
+    iface_wrec(&mut out, IFACE_TAG_FACTS, view(facts));
+    head := iface_r_head(view(""), view(text));
+    iface_seal_out(&mut out, view(head.digest));
     return out;
 }
 // The trailer's offset, validated: the magic, the version, every record's framing and the file's own
@@ -45364,9 +45580,66 @@ fn iface_walk<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], source_index: u64
             iface_rec_impl(&mut c, &mut p, view(home), source_index, raw_flag);
         } else if tag == IFACE_TAG_ENV {
             iface_rec_env(&mut c, &mut p, view(home));
+        } else if tag == IFACE_TAG_FACTS {
+            iface_rec_facts(&mut c, &mut p);
         }
         iface_rend(&mut p, start);
         p.stop = saved;
+    }
+    return ();
+}
+
+// The summary record: rendered in phase 0, installed in phase 2 as the facts of callees whose
+// bodies are not in this run. A body this run emits wins over a row for the same symbol.
+fn iface_rec_facts<a>(c: (&a mut C), p: (&a mut IR)) -> unit {
+    n := iface_rv(&mut p);
+    for i in n {
+        sym := iface_rs(&mut p);
+        shown := iface_rs(&mut p);
+        a := iface_r1(&mut p);
+        pf := iface_r1(&mut p);
+        e := iface_r1(&mut p);
+        at := iface_rs(&mut p);
+        pt := iface_rs(&mut p);
+        if p.phase == 0 {
+            iface_rt_indent(&mut p, view(""));
+            push_bytes(&mut p.rtext, view("facts "));
+            push_bytes(&mut p.rtext, view(shown));
+            p.rtext.push(32);
+            decimal(&mut p.rtext, a);
+            p.rtext.push(32);
+            decimal(&mut p.rtext, pf);
+            p.rtext.push(32);
+            decimal(&mut p.rtext, e);
+            if at.len() != 0 {
+                push_bytes(&mut p.rtext, view(" alloc-via "));
+                push_bytes(&mut p.rtext, view(at));
+            }
+            if pt.len() != 0 {
+                push_bytes(&mut p.rtext, view(" fail-via "));
+                push_bytes(&mut p.rtext, view(pt));
+            }
+        }
+        if p.phase == 2 {
+            k := fx_sym(&mut c, view(sym)) - 1;
+            if c.fx_body[k] == 0 {
+                c.fx_row[k] = 1;
+                c.fx_own_alloc[k] = a;
+                c.fx_own_panic[k] = pf;
+                c.fx_entry_panic[k] = e;
+                c.fx_fn_name[k] = shown.copy();
+                mut ta = 0;
+                if at.len() != 0 {
+                    ta = fx_sym(&mut c, view(at));
+                }
+                mut tp = 0;
+                if pt.len() != 0 {
+                    tp = fx_sym(&mut c, view(pt));
+                }
+                c.fx_alloc_thru[k] = ta;
+                c.fx_panic_thru[k] = tp;
+            }
+        }
     }
     return ();
 }
@@ -45773,6 +46046,9 @@ fn iface_verify_module<a>(c: (&a mut C), index: u64) -> unit {
         iface_refuse(view(file), view(msg));
     }
     got := iface_module_bytes(&mut c, view(m), view(path), in_std, unsafe_flag, optin, view(""));
+    // The summary is what the module's bodies proved, and this check compares declarations before
+    // any body is emitted: it is left out of the comparison. The source digest pins it.
+    want = iface_without_facts(view(want));
     if same(view(want), view(got)) {
         return ();
     }
@@ -46720,6 +46996,46 @@ fn iface_file_index<a, b>(c: (&a mut C), path: &b [u8]) -> u64 {
     return 0;
 }
 
+// The interfaces this run wrote, again, now with the summaries its solved bodies give them, and the
+// manifest over the new bytes. A run that emitted no body (a check) leaves them as they were.
+fn iface_emit_facts<a>(c: (&a mut C)) -> unit {
+    if c.iface_out_file.len() == 0 {
+        return ();
+    }
+    mut manifest = u8[];
+    push_bytes(&mut manifest, view("// grail-interfaces 1\n"));
+    for i in c.iface_out_file.len() {
+        file := c.iface_out_file[i].copy();
+        m := c.iface_out_module[i].copy();
+        old := c.iface_out_text[i].copy();
+        text := iface_with_facts(&mut c, view(old), view(m));
+        if !same(view(text), view(old)) {
+            written := host::write_file(view(file), view(text));
+            if written != 0 {
+                iface_refuse(view(file), view("cannot write an interface file"));
+            }
+        }
+        mut row = u8[];
+        push_bytes(&mut row, view(m));
+        out_push(&mut row, 32);
+        push_bytes(&mut row, view(iface_digest(&text)));
+        out_push(&mut row, 32);
+        push_bytes(&mut row, view(iface_manifest_source_digest(&mut c, view(m))));
+        out_push(&mut row, 10);
+        push_bytes(&mut manifest, view(row));
+    }
+    host::write_file(view(iface_join(view(c.iface_emit), view("interfaces"), view(".manifest"))), view(manifest));
+    return ();
+}
+// The source digest the manifest records for module `m`: the digest of the file it was read from.
+fn iface_manifest_source_digest<a, b>(c: (&a mut C), m: &b [u8]) -> u8[] {
+    for i in c.iface_list.len() {
+        if same(view(c.iface_list[i].module), view(m)) {
+            return iface_digest(&host::read_file(view(c.iface_list[i].path)));
+        }
+    }
+    return u8[];
+}
 // Writes one interface per module of the program, plus the manifest that pins their bytes.
 fn iface_emit_all<a>(c: (&a mut C)) -> unit {
     dir := c.iface_emit.copy();
@@ -46765,6 +47081,9 @@ fn iface_emit_all<a>(c: (&a mut C)) -> unit {
         if written != 0 {
             iface_refuse(view(file), view("cannot write an interface file"));
         }
+        c.iface_out_file.push(file.copy());
+        c.iface_out_text.push(text.copy());
+        c.iface_out_module.push(m.copy());
         mut row = u8[];
         push_bytes(&mut row, view(m));
         out_push(&mut row, 32);
@@ -47051,6 +47370,10 @@ pub fn main() -> u64 {
         fx_syms: u8[][],
         fx_sym_slots: u64[],
         fx_sym_keys: u64[],
+        fx_row: u64[],
+        iface_out_file: u8[][],
+        iface_out_text: u8[][],
+        iface_out_module: u8[][],
         fx_body: u64[],
         fx_attr_alloc: u64[],
         fx_attr_panic: u64[],
@@ -47693,6 +48016,7 @@ pub fn main() -> u64 {
     // Every body is emitted: the effect claims are settled over the whole call graph.
     fx_solve(&mut c);
     fx_report(&mut c);
+    iface_emit_facts(&mut c);
     if c.skip_bodies.len() != 0 {
         // Every error this compile has is reported; the program is still rejected, and nothing it
         // would have written is.
