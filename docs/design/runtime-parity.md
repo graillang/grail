@@ -236,6 +236,90 @@ backend's code, read from its `.s`:
 - **Every access is bounds-checked against a length re-read from memory**, and loop variables live
   in stack slots (`incq -56(%rbp)`, `movq -104(%rbp),%rcx` in fnv's loops).
 
+## The scheduler against rayon and oneTBB
+
+The bar: match or beat Rust's rayon and C++'s oneTBB on join cost, spawn cost, fib(32) by nested
+join, and a frame loop's tail latency. Both rivals are available offline here: rayon 1.12.0 /
+rayon-core 1.13.0 from the cargo registry (`bench/rivals/sched-rayon`, `cargo build --release`) and
+oneTBB 2023.2 from the system (`bench/rivals/sched_tbb.cpp`, `g++ -O2 -std=c++20 -ltbb`), so no
+substitute was needed.
+
+`bun tools/sched-rivals.mjs [--rounds R]` runs Grail's `bench/sched.grl` and `bench/frame.grl` from
+the scheduler branch (`GRAIL_SCHED_TREE`, here `gaps12-sched` a4521aa, read-only) against the twins,
+which print the same `name value unit` lines. Grail is built three ways: `grail build --no-cache`
+(native), the LLVM backend with `--overflow=wrap` (release), and the release build with
+`GRAIL_WORKERS` set to the CPU count. That last column is like for like: rayon starts one worker per
+CPU beside the main thread, and oneTBB's default arena has one slot per CPU, the main thread's
+included. Grail's default is also one worker per CPU, which is why that column matches the release
+one. The twins:
+
+- **join**: `rayon::join` / `tbb::parallel_invoke`, 100k times with trivial halves, from the main
+  thread and (rivals only; sched.grl has no such row) from inside the pool.
+- **spawn and wait**: a scope with one spawn (rayon) / `task_group::run` + `wait` (oneTBB), against
+  Grail's `pool::spawn` + `pool::wait`.
+- **burst**: 100k spawns into one scope or task group, then all waited for.
+- **fib(32)**: serial, and by nested join with the cutoff at 12 (28,656 joins), from the main
+  thread and from inside a task.
+- **frame**: frame.grl ported. 600 frames of 32 systems (every third forks four), an in-place
+  parallel pass over 1M elements in leaves of 4096 (`par_chunks_mut(4096)` /
+  `parallel_for(blocked_range(.., 4096), simple_partitioner)`) and a render step on the main thread.
+  Beside them run an I/O thread that sleeps 5 ms per round and records how late it woke, and an
+  importer that never waits. rayon has no priorities, so its importer forks onto the same pool;
+  oneTBB's runs in a `task_arena` of low priority and the frame in one of high priority, the
+  equivalent of Grail's Background and Frame classes. The frame checksums of all three agree.
+
+These are wall-clock times measured inside each program: a join's cost and a frame's latency are
+times, not CPU totals. So each figure is the median of nine rounds, interleaved, run with nothing
+else of this work beside it. Measured 2026-11-16 on 24 CPUs, load average 18 to 30. The ratio is
+Grail over the best rival; for importer rounds it is the best rival over Grail.
+
+| | Grail-native | Grail-LLVM | LLVM, 24 workers | rayon | oneTBB | native / best | LLVM / best |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| join from the main thread (ns) | 2561 | 2803 | 2863 | 6611 | 125 | 20.5x | 22.4x |
+| join on a worker (ns) | - | - | - | 25 | 138 | | |
+| spawn a job and wait (ns) | 2758 | 2455 | 2566 | 8196 | 153 | 18.0x | 16.1x |
+| task spawn+join, one at a time (ns) | 7481 | 12424 | 12021 | - | - | | |
+| burst of 100k spawns, per spawn (ns) | 1487 | 2335 | 2359 | 800 | 164 | 9.1x | 14.2x |
+| fib(32) serial (us) | 10325 | 8514 | 7904 | 4034 | 2716 | 3.8x | 3.1x |
+| fib(32) nested join, from main (us) | 6961 | 7378 | 8723 | 1196 | 947 | 7.4x | 7.8x |
+| fib(32) nested join, in a task (us) | 6790 | 7499 | 7644 | 845 | 596 | 11.4x | 12.6x |
+| frame median (us) | 2230 | 985 | 790 | 358 | 357 | 6.3x | 2.8x |
+| frame p99 (us) | 3809 | 2061 | 2418 | 2763 | 3299 | 1.4x | **0.75x** |
+| frame max (us) | 5737 | 3043 | 3340 | 3544 | 5973 | 1.6x | **0.86x** |
+| 600 frames (ms) | 1441 | 632 | 548 | 264 | 299 | 5.5x | 2.4x |
+| I/O task worst lateness (us) | 3098 | 1874 | 2432 | 1000 | 2607 | 3.1x | 1.9x |
+| importer rounds (more is better) | 2586 | 1581 | 1563 | 3635 | 8983 | 3.5x | 5.7x |
+
+CPU seconds per whole run (median): Grail-LLVM sched 4.39, frame 3.81; rayon 15.08 and 2.68
+(rayon's idle workers spin); oneTBB 0.68 and 3.31.
+
+**Met**: the frame loop's tail. Grail-LLVM's p99 and worst frame are the best of the three
+(0.75x and 0.86x). Its Frame class runs ahead of the importer, as oneTBB's high-priority arena
+should, and rayon cannot, having no priorities.
+
+**Missed, and why:**
+
+- **A join allocates.** Each level of `pfib` allocates two closure records (`rt_rec`), and
+  `pool::join` allocates two more and an `Option` for the second result (`rt_enum`) before calling
+  `rt_parallel_with`: about five heap allocations per join. rayon's join puts a job that lives in
+  the caller's stack frame on the local deque and allocates nothing (25 ns on a worker); oneTBB's
+  `parallel_invoke` is 138 ns.
+- **The main thread is not a worker.** A join or spawn from `main` is posted to the pool and the
+  main thread waits to be woken: 2.5 to 2.9 us. rayon has the same arrangement and pays more
+  (6.6 us); oneTBB's main thread is a slot of its arena and pays 125 ns.
+- **The serial work is slower before any scheduling.** Serial fib(32) is 3.1x oneTBB's in the
+  release build, with no scheduler involved. Grail's calling convention carries three hidden
+  registers (`rsi`, `r8`, `r9`) through every call and saves five callee-saved registers per frame,
+  where g++ turns one of fib's two recursions into a loop. The same per-call cost is in every
+  system's `mix` loop, hence part of the 2.8x frame median.
+- **fib(32) by nested join barely beats serial fib**: 7.5 ms against 8.5 ms on 24 workers (1.1x),
+  where rayon gets 4.8x and oneTBB 4.6x. The allocations above are on every join's path; whether the
+  allocator's cross-thread frees or the steal path dominate has not been profiled yet (there is no
+  `perf` on this host).
+- **The importer gets fewer rounds by design**: at most a quarter of the workers run Background
+  jobs (`docs/design/concurrency-model.md`), where oneTBB lets its low-priority arena take every
+  idle thread.
+
 ## What safety costs, and what was decided about it
 
 - **Bounds checks stay**, in every build. They are removed where the refinement prover has the fact,

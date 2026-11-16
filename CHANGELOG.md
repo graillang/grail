@@ -1,5 +1,10 @@
 ## Unreleased
 
+- `bun tools/sched-rivals.mjs`: the scheduler (`bench/sched.grl`, `bench/frame.grl` from a
+  scheduler tree) against Rust's rayon and C++'s oneTBB twins (`bench/rivals/sched-rayon`,
+  `sched_tbb.cpp`): join, spawn, a burst of spawns, fib(32) by nested join and the frame loop's
+  tail. The table and the reason for each miss are in `docs/design/runtime-parity.md`.
+
 - Fixed: `bun tools/native.mjs build` rebuilt the compiler on every call. It assembled the bootstrap
   seed each time and keyed the compiler by the bootstrap's mtime, so the key never matched. The
   assembled seed is now kept under its digest and the key names the bootstrap's content; a second
