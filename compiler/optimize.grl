@@ -1122,84 +1122,178 @@ fn out_number<a>(o: (&a mut ir::Body), n: u64) {
     }
     o.out.push(48 + n % 10);
 }
-fn emit_line<a, b>(o: (&a mut ir::Body), s: &b [u8], i: u64) {
-    op := o.op[i];
+// The leaf runtime accessors written in line: 40 rt_slot, 41 rt_at, 42 rt_len, 43 rt_xchg, 44 rt_atb,
+// 45 rt_push, 46 rt_pushb, 47 rt_slotu, 48 rt_atbu, 49 rt_slot4, 50 rt_slot4u, 51 rt_at4,
+// 52 the sized element address (index * element size in %rdx, unboxed-values stage 1b) (ir.grl
+// parse). The arguments are where the call put them (%rdi, %rsi) and the result is in %rax, so the
+// text replaces the `call` exactly. `label` with `n` (and `more` for the push forms) names the local
+// labels; a bounds check that fails calls `rt_abort`, as the accessor would have.
+// This is lowering, not optimisation: `lower_leaf_calls` runs it on a build the optimiser skips.
+pub fn leaf_expansion<a, b>(out: (&a mut u8[]), op: u64, label: &b [u8], n: u64, more: u64, trap: u64) {
     if op == 40 || op == 41 || op == 44 || op == 49 || op == 51 || op == 52 {
-        n := ir::uniq_take(&mut o);
-        app(&mut o.out, view("cmpq 8(%rdi),%rsi\njb .L"));
-        opt_label(&mut o);
-        out_number(&mut o, n);
-        app(&mut o.out, view("\ncall rt_abort\n.L"));
-        opt_label(&mut o);
-        out_number(&mut o, n);
-        if op == 52 {
-            app(&mut o.out, view(":\nmovq %rsi,%rax\nimulq %rdx,%rax\naddq (%rdi),%rax\n"));
-        } else if op == 49 {
-            app(&mut o.out, view(":\nmovq (%rdi),%rax\nleaq (%rax,%rsi,4),%rax\n"));
-        } else if op == 51 {
-            app(&mut o.out, view(":\nmovq (%rdi),%rax\nmovl (%rax,%rsi,4),%eax\n"));
-        } else if op == 40 {
-            app(&mut o.out, view(":\nmovq (%rdi),%rax\nleaq (%rax,%rsi,8),%rax\n"));
+        out.append(view("cmpq 8(%rdi),%rsi\njb .L"));
+        out.append(label);
+        put_num(&mut out, n);
+        // With no site table to turn `call rt_abort` into a located `rt_trap` later (`trap`), the
+        // failure is reported here as the accessor would: an index check on the vector in %rdi,
+        // which a task can contain.
+        if trap != 0 {
+            out.append(view("\nmovq $1,%rdx\ncall rt_trap\n.L"));
         } else {
-            if op == 41 {
-                app(&mut o.out, view(":\nmovq (%rdi),%rax\nmovq (%rax,%rsi,8),%rax\n"));
-            } else {
-                app(&mut o.out, view(":\nmovq (%rdi),%rax\nmovzbq (%rax,%rsi,1),%rax\n"));
-            }
+            out.append(view("\ncall rt_abort\n.L"));
+        }
+        out.append(label);
+        put_num(&mut out, n);
+        if op == 52 {
+            out.append(view(":\nmovq %rsi,%rax\nimulq %rdx,%rax\naddq (%rdi),%rax\n"));
+        } else if op == 49 {
+            out.append(view(":\nmovq (%rdi),%rax\nleaq (%rax,%rsi,4),%rax\n"));
+        } else if op == 51 {
+            out.append(view(":\nmovq (%rdi),%rax\nmovl (%rax,%rsi,4),%eax\n"));
+        } else if op == 40 {
+            out.append(view(":\nmovq (%rdi),%rax\nleaq (%rax,%rsi,8),%rax\n"));
+        } else if op == 41 {
+            out.append(view(":\nmovq (%rdi),%rax\nmovq (%rax,%rsi,8),%rax\n"));
+        } else {
+            out.append(view(":\nmovq (%rdi),%rax\nmovzbq (%rax,%rsi,1),%rax\n"));
         }
         return ();
     }
     if op == 42 {
-        app(&mut o.out, view("movq 8(%rdi),%rax\n"));
+        out.append(view("movq 8(%rdi),%rax\n"));
+        return ();
+    }
+    if op == 43 {
+        out.append(view("movq (%rdi),%rax\nmovq %rsi,(%rdi)\n"));
         return ();
     }
     if op == 47 {
-        app(&mut o.out, view("movq (%rdi),%rax\nleaq (%rax,%rsi,8),%rax\n"));
+        out.append(view("movq (%rdi),%rax\nleaq (%rax,%rsi,8),%rax\n"));
         return ();
     }
     if op == 48 {
-        app(&mut o.out, view("movq (%rdi),%rax\nmovzbq (%rax,%rsi,1),%rax\n"));
+        out.append(view("movq (%rdi),%rax\nmovzbq (%rax,%rsi,1),%rax\n"));
         return ();
     }
     if op == 50 {
-        app(&mut o.out, view("movq (%rdi),%rax\nleaq (%rax,%rsi,4),%rax\n"));
+        out.append(view("movq (%rdi),%rax\nleaq (%rax,%rsi,4),%rax\n"));
         return ();
     }
     if op == 45 || op == 46 {
-        fast := ir::uniq_take(&mut o);
-        done := ir::uniq_take(&mut o);
-        app(&mut o.out, view("movq 8(%rdi),%rcx\ncmpq 16(%rdi),%rcx\njb .L"));
-        opt_label(&mut o);
-        out_number(&mut o, fast);
+        fast := n;
+        done := more;
+        app(&mut out, view("movq 8(%rdi),%rcx\ncmpq 16(%rdi),%rcx\njb .L"));
+        out.append(label);
+        put_num(&mut out, fast);
         if op == 45 {
-            app(&mut o.out, view("\ncall rt_push\njmp .L"));
+            app(&mut out, view("\ncall rt_push\njmp .L"));
         } else {
-            app(&mut o.out, view("\ncall rt_pushb\njmp .L"));
+            app(&mut out, view("\ncall rt_pushb\njmp .L"));
         }
-        opt_label(&mut o);
-        out_number(&mut o, done);
-        app(&mut o.out, view("\n.L"));
-        opt_label(&mut o);
-        out_number(&mut o, fast);
+        out.append(label);
+        put_num(&mut out, done);
+        app(&mut out, view("\n.L"));
+        out.append(label);
+        put_num(&mut out, fast);
         if op == 45 {
             app(
-                &mut o.out,
+                &mut out,
                 view(":\nmovq (%rdi),%rdx\nmovq %rsi,(%rdx,%rcx,8)\nincq %rcx\nmovq %rcx,8(%rdi)\n")
             );
         } else {
             app(
-                &mut o.out,
+                &mut out,
                 view(":\nleaq 1(%rcx),%rdx\nmovq %rdx,8(%rdi)\naddq (%rdi),%rcx\nmovq %rsi,%rax\nmovb %al,(%rcx)\n")
             );
         }
-        app(&mut o.out, view("movq $0,%rax\n.L"));
-        opt_label(&mut o);
-        out_number(&mut o, done);
-        app(&mut o.out, view(":\n"));
+        app(&mut out, view("movq $0,%rax\n.L"));
+        out.append(label);
+        put_num(&mut out, done);
+        app(&mut out, view(":\n"));
         return ();
     }
-    if op == 43 {
-        app(&mut o.out, view("movq (%rdi),%rax\nmovq %rsi,(%rdi)\n"));
+}
+fn put_num<a>(out: (&a mut u8[]), n: u64) {
+    if 9 < n {
+        put_num(&mut out, n / 10);
+    }
+    out.push(48 + n % 10);
+}
+// A build the optimiser does not run on (`--debug`) still gets the leaf accessors in line: every
+// line that is exactly `call NAME` for one of them becomes its expansion, with labels of its own.
+pub fn lower_leaf_calls<a>(s: &a [u8]) -> u8[] {
+    mut out = u8[];
+    mut n: u64 = 0;
+    mut a = 0;
+    while a < s.len() {
+        mut e = a;
+        while (e < s.len()) && (s[e] != 10) {
+            e += 1;
+        }
+        mut op = 0;
+        if (e - a > 7) && ir::at(view(s), a, view("call rt_")) {
+            name := s[a + 5: e].copy();
+            op = leaf_op(view(name));
+        }
+        if op != 0 {
+            n += 1;
+            first := n;
+            mut more = 0;
+            if op == 45 || op == 46 {
+                n += 1;
+                more = n;
+            }
+            leaf_expansion(&mut out, op, view("grail_leaf_"), first, more, 1);
+        } else {
+            for x in e - a {
+                out.push(s[a + x]);
+            }
+            if e < s.len() {
+                out.push(10);
+            }
+        }
+        a = e + 1;
+    }
+    return out;
+}
+fn leaf_op<a>(name: &a [u8]) -> u64 {
+    names := u8[][copy_text(view("rt_slot")), copy_text(view("rt_at")), copy_text(view("rt_len")), copy_text(view("rt_xchg")),
+        copy_text(view("rt_atb")), copy_text(view("rt_push")), copy_text(view("rt_pushb")), copy_text(view("rt_slotu")),
+        copy_text(view("rt_atbu")), copy_text(view("rt_slot4")), copy_text(view("rt_slot4u")), copy_text(view("rt_at4")),
+        copy_text(view("rt_slotw"))];
+    for i in names.len() {
+        if names[i].len() == name.len() {
+            mut same = true;
+            for j in name.len() {
+                if names[i][j] != name[j] {
+                    same = false;
+                }
+            }
+            if same {
+                return 40 + i;
+            }
+        }
+    }
+    return 0;
+}
+fn emit_line<a, b>(o: (&a mut ir::Body), s: &b [u8], i: u64) {
+    op := o.op[i];
+    if (39 < op) & (op < 53) {
+        mut label = u8[];
+        label.append(view("opt"));
+        prefix := o.uprefix.copy();
+        label.append(view(prefix));
+        label.push(95);
+        // Only the forms with labels number them, as they always have.
+        mut n = 0;
+        mut more = 0;
+        if op == 40 || op == 41 || op == 44 || op == 49 || op == 51 || op == 52 || op == 45 || op == 46 {
+            n = ir::uniq_take(&mut o);
+        }
+        if op == 45 || op == 46 {
+            more = ir::uniq_take(&mut o);
+        }
+        leaf_expansion(&mut o.out, op, view(label), n, more, 0);
         return ();
     }
     if o.chg[i] == 0 {

@@ -47804,6 +47804,12 @@ pub fn main() -> u64 {
     mut call_counts = u64[];
     if (c.debug != 0) || (c.backend != 0) {
         out = copy_bytes(view(c.out));
+        // A debug build skips the optimiser but not the lowering of the leaf accessors, which
+        // would otherwise stay calls (`rt_slot4` per `f32[]` element). The LLVM lifter models the
+        // calls themselves, so its stream keeps them.
+        if (c.debug != 0) && (c.backend == 0) && (c.emit_ir == 0) {
+            out = optimize::lower_leaf_calls(view(out));
+        }
     } else {
         if c.split != 0 {
             out = optimize::optimize_parts(view(c.out), 1, &mut c.marks, &mut c.part_names, &c.facts, c.emit_ir, &mut ir_text, &replay, &mut call_syms, &mut call_counts, view(c.fn_dir), view(c.fn_id));
