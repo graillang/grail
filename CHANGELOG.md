@@ -1,5 +1,9 @@
 ## Unreleased
 
+- A build emits a drop helper for each type whose helper something names, in the order they are
+  first named, instead of one for every type the compiler interned: the helpers nothing called are
+  gone from the assembly, and the set no longer depends on which bodies the compiler had to check.
+
 - `hash::write_byte` states its precondition in its signature (`value: u64 where value < 256`)
   instead of asserting it in its body: a caller that can show the value is a byte pays no check,
   and one that cannot gets the check at its own call, named. It was the standard library's only

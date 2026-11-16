@@ -38708,30 +38708,16 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
     // their own. A build made of several objects takes each module's code from exactly one object
     // and merges the helper parts, which is what the weak binding below allows.
     part(&mut c, view(".helpers"));
-    mut all = u64[];
-    for i in c.types.len() {
-        all.push(i);
-    }
-    for i in c.drop_refs.len() {
-        all.push(c.drop_refs[i]);
-    }
+    // The helpers emitted are the helpers something named (`drop_refs`: every naming of one goes
+    // through `drop_ref_name`), in the order they were first named - not every type the run happened
+    // to intern, in the order it interned them. A body replayed from the unit store interns nothing
+    // and names exactly what it named when it was emitted, so this set and this order are the same
+    // with a cache as without one (docs/design/incremental-compilation.md). The bodies emitted here
+    // name further helpers, so the walk keeps absorbing them: a helper that is named but never
+    // emitted is an undefined symbol at link time.
     mut at = 0;
-    mut ref_at = 0;
-    // The walk interns types of its own (a field's type is built on demand) and the bodies it emits
-    // name further helpers, so it keeps absorbing both: a helper that is named but never emitted is
-    // an undefined symbol at link time.
-    while true {
-        while all.len() < c.types.len() {
-            all.push(all.len());
-        }
-        while ref_at < c.drop_refs.len() {
-            all.push(c.drop_refs[ref_at]);
-            ref_at = ref_at + 1;
-        }
-        if at == all.len() {
-            break;
-        }
-        ty := all[at];
+    while at < c.drop_refs.len() {
+        ty := c.drop_refs[at];
         at = at + 1;
         kind := ty_kind(&mut c, ty);
         arg := ty_arg(&mut c, ty);
@@ -44337,12 +44323,12 @@ pub fn main() -> u64 {
         closures_done = emit_closures(&mut c, closures_done);
     }
     if specs_done != helpers_specs {
-        // Those bodies can intern more types, and a type with no helper is an undefined symbol.
+        // Those bodies can name more helpers, and a named helper with no body is an undefined symbol.
         emit_drops(&mut c);
     }
     emit_vtables(&mut c);
     // A vtable's drop slot is a helper too, and the bodies emitted above were the first to name
-    // some types: one more sweep costs a walk of the type table and leaves no symbol undefined.
+    // some types: one more sweep emits what they named and leaves no symbol undefined.
     emit_drops(&mut c);
     fx_end(&mut c);
     // Every body is emitted: the effect claims are settled over the whole call graph.
