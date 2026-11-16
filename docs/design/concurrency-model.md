@@ -674,7 +674,32 @@ sched.ticker_stall          300032 [299019..310098]  ->      11459 [10093..15471
   made `bench/sched.grl` slower (join 2.1 -> 3.8 us, job handle 2.1 -> 4.6 us) and did nothing for
   the frame loop on this loaded machine. Stage 5's `idle_spin_us` should be measured on a quiet one.
 
-What stage 1 did not do: contain a failure inside a parallel region (F1 above); the
+**After help bounds and F1** (stage 1 code -> current, interleaved, 7 rounds, load average 28-37
+on 24 CPUs, so wide ranges; nothing here is outside them):
+
+```
+frame.frame_median            9828 [2775..12091]  ->       9975 [2840..11075]
+frame.frame_p99              20175 [4496..43757]  ->      19759 [6863..24518]
+frame.frame_max              27454 [6554..55209]  ->      26515 [9193..55607]
+frame.frames_total            6124 [1727..8277]  ->       6207 [1928..6969]
+frame.io_rounds                944 [311..1117]  ->        962 [340..1073]
+frame.io_worst_late          14411 [4965..58400]  ->      12565 [5401..49304]
+frame.bg_rounds              71596 [50126..152155]  ->     139469 [54248..149791]
+frame.threads                   26 [26..26]  ->         26 [26..26]
+sched.job_spawn_wait          6637 [1832..11543]  ->       6265 [2595..13893]
+sched.join                    2695 [1984..14525]  ->       3841 [3042..9176]
+sched.task_spawn_join        22698 [8061..31954]  ->      12818 [6122..34728]
+sched.task_burst              5368 [1479..11181]  ->       3088 [1904..10786]
+sched.fib32_serial           19037 [10289..21564]  ->      16875 [13127..21179]
+sched.fib32_join_main        17944 [6969..27103]  ->      11274 [8929..38917]
+sched.fib32_join_task        17182 [7189..27179]  ->      19978 [9224..54104]
+sched.ticker_stall           12151 [10338..29278]  ->      11223 [10352..13121]
+```
+
+Help-depth high-water mark: 3 in the frame loop, 6 in `fib(32)` (was 9-10 and 17-29 when a waiter
+helped with any job).
+
+What stage 1 did not do: the
 `(n, grain)` split and the `chunks_mut` rename (stage 5, Q5); priority classes. `chunks_mut` still
 allocates one 24-byte slice descriptor per leaf, because a slice parameter is owned by the callee.
 A failed claim of a stale queue entry is not counted anywhere yet.
