@@ -374,18 +374,17 @@ fn rt_os_workers() -> u64 {
     }
     return workers;
 }
-// Pin the calling thread to one CPU (sched::Config.pin_workers): 0, or a negative errno.
-fn rt_os_pin(cpu: u64) -> u64 {
-    mask := rt_alloc(128);
+// Pin the calling thread to one CPU (sched::Config.pin_workers): 0, or a negative errno. `mask` is
+// 128 bytes of the caller's (a worker block's), not the heap: a worker pins itself as it starts,
+// and an allocation there could still be live when a short program's main thread exits.
+fn rt_os_pin(cpu: u64, mask: u64) -> u64 {
     mut i = 0;
     while i < 128 {
         raw_store(mask + i, 0);
         i += 8;
     }
     raw_putbyte(mask + cpu / 8, 1 << (cpu % 8));
-    r := rt_syscall(203, 0, 128, mask);
-    rt_free(mask);
-    return r;
+    return rt_syscall(203, 0, 128, mask);
 }
 // Map `count` task stacks for this worker now (sched::Config.warm_stacks), so a frame never maps one.
 fn rt_os_stack_warm(count: u64) -> u64 {
