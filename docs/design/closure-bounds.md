@@ -566,3 +566,26 @@ still calling the builtins.
 - `fmt` keeps `Fn<Send, Owned>` and any generic argument list on one line (it split them at the
   comma). `docgen` needed no change: it prints signatures from source text.
 - **Not built yet:** `Fn<s>` (stage 3, refused with "not implemented yet"), P14/H5, P27.
+
+### 6.1 The `Owned` rule, refined (director, 2026-11-16)
+
+`Owned` (and the non-parameter default) means: **every region of every borrow in the closure's
+environment appears among the regions of the closure's own type (its parameters or its result). A
+borrow the type does not name makes it not `Owned`.** Whatever stores the closure then carries the
+region in its own type (`Iter<(&a K)>`) and the existing region checks follow it. This is what
+`borrow_walk` already said of a closure type from a signature (kind 20: a result naming a lifetime
+no parameter supplies is a borrow the value holds); `closure_hidden_regions` is now the one rule for
+closure expressions too. A borrow of a local (region 0) can never be named.
+
+The stage 3 count with this reading: 0 refusals in the corpus, Abundance and Borg. The 8 lazy
+adapters of `lib/iter.grl` (`map`, `filter`, `flat_map`, `filter_map` as methods, `from_fn`,
+`from_step`, `map`, `filter`) take `FnMut<Owned>(..)`; hashmap `keys`/`values`/`iter` compile as
+before. Cases `closure-owned-*`.
+
+**Limit found while enforcing it on a field.** Typing `Iter<T>`'s own field `step: FnMut<Owned>`
+refuses `iter::map` itself: its step closure captures the source `Iter<(&a T)>` and yields `U`, so
+`a` is in no part of the closure's type. That borrow is kept today by loan flow (a generic call's
+result keeps its arguments' loans, `may_hide_borrow`), not by the type. So the non-parameter default
+`Owned` cannot be enforced on fields as stated: either such a field names the region
+(`Iter<a, T>`), or the rule counts a capture whose type is an aggregate holding the loan as
+flow-tracked. Open question Q8; the field stays a bare `FnMut` until it is decided.

@@ -9384,12 +9384,53 @@ fn closure_bounds_hold<a>(c: (&a mut C), actual: u64, want: u64) -> bool {
             if env == 0 {
                 return false;
             }
-            if contains_borrow(&mut c, actual, 0) {
+            if closure_hidden_regions(&mut c, actual).len() != 0 {
                 return false;
             }
         }
     }
     return true;
+}
+// THE `Owned` RULE (docs/design/closure-bounds.md, 2.1): every region of every borrow in a
+// closure's environment appears among the regions of the closure's own type - its parameters or
+// its result. A borrow the type does not name makes it not `Owned`. Anything that stores such a
+// closure then carries the region in its own type (`Iter<(&a K)>`), and the ordinary region checks
+// follow it; this is what `borrow_walk` already says of a closure type from a signature (a result
+// naming a lifetime no parameter supplies is a borrow the value holds), now the one rule for both.
+// Answers the captured regions the type does not name; empty when the closure is `Owned`.
+fn closure_hidden_regions<a>(c: (&a mut C), ty: u64) -> u64[] {
+    mut hidden = u64[];
+    if ty_kind(&mut c, ty) != 20 {
+        return hidden;
+    }
+    captured := type_regions(&mut c, ty);
+    if captured.len() == 0 {
+        return hidden;
+    }
+    mut trail = u64[];
+    mut named = caps_walk(&mut c, ty_arg(&mut c, ty), &mut trail);
+    params := type_args(&mut c, ty);
+    for p in params.len() {
+        more := caps_walk(&mut c, params[p], &mut trail);
+        for i in more.len() {
+            add_region(&mut named, more[i]);
+        }
+    }
+    for i in captured.len() {
+        mut seen = false;
+        // Region 0 is a local of the enclosing function: no type can name it.
+        if captured[i] != 0 {
+            for j in named.len() {
+                if named[j] == captured[i] {
+                    seen = true;
+                }
+            }
+        }
+        if !seen {
+            add_region(&mut hidden, captured[i]);
+        }
+    }
+    return hidden;
 }
 // `actual` with the call mode and bounds of `expected`, and no environment: what the value's type
 // becomes once it is converted. Equal to `expected` exactly when the two differ in nothing else.
@@ -9454,10 +9495,21 @@ fn closure_bound_fail<a>(c: (&a mut C), actual: u64, want: u64) -> unit {
     if (want & CLOSURE_SEND) != 0 {
         require_closure_captures(&mut c, actual, 0, view("closure capture"));
     }
-    fail(
-        &mut c,
-        view("this closure captures a borrow, and an `Owned` closure is required here: it may outlive what it borrows, so move the value in instead")
-    );
+    hidden := closure_hidden_regions(&mut c, actual);
+    mut msg = copy_bytes(view("this closure captures a borrow its type does not name ("));
+    mut r = 0;
+    if hidden.len() != 0 {
+        r = hidden[0];
+    }
+    if (r != 0) && (r <= c.rnames.len()) {
+        push_bytes(&mut msg, view("lifetime `"));
+        push_bytes(&mut msg, view(c.rnames[r - 1]));
+        push_bytes(&mut msg, view("`"));
+    } else {
+        push_bytes(&mut msg, view("a local of this function"));
+    }
+    push_bytes(&mut msg, view("), and an `Owned` closure is required here: whatever keeps it sees only its type. Name the borrow in the closure's result type (`-> (&a T)`) so the type carries it, or move the value in"));
+    fail(&mut c, view(msg));
     return ();
 }
 // A closure typed by a signature that states bounds but not `Owned`: a value converted to it may

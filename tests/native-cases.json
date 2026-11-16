@@ -10978,7 +10978,7 @@
     "note": "Q3 of docs/design/closure-bounds.md: a `Job<u64>` owns the closure it runs, so the loan a wrapper's closure argument handed to it stays with the handle; the borrowed vector cannot be moved while the job may read it (was accepted: use after free)",
     "source": "use pool;\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    view := &data;\n    j := pool::spawn(|| -> u64 view[0]);\n    println(eat(data));\n    println(pool::wait(j));\n}\n",
     "reject": true,
-    "diagnostic": "this closure captures a borrow, and an `Owned` closure is required here",
+    "diagnostic": "this closure captures a borrow its type does not name",
     "modules": [
       "lib/pool.grl",
       "lib/core.grl"
@@ -11023,7 +11023,7 @@
     "note": "P03: pool::spawn takes `FnMut<Send, Owned>`: the borrow is refused where the closure is written",
     "source": "// pool::spawn's promise: \"a callback that captured a borrow is refused\". Through the wrapper the\n// closure's regions are erased at the `Fn()->R` parameter, so the job can outlive the frame.\nuse pool;\nfn make() -> Job<u64> {\n    mut data = u64[1, 2, 3, 4];\n    view := &data;\n    return pool::spawn(|| -> u64 { mut t = 0; for i in 2000000 { t = t + view[i % 4]; } return t; });\n}\nfn main() {\n    j := make();\n    mut junk = u64[];\n    for i in 100000 { junk.push(i); }\n    println(pool::wait(j));\n}\n",
     "reject": true,
-    "diagnostic": "this closure captures a borrow, and an `Owned` closure is required here",
+    "diagnostic": "this closure captures a borrow its type does not name",
     "modules": [
       "lib/pool.grl",
       "lib/core.grl"
@@ -11315,5 +11315,63 @@
     "interfaces": true,
     "stdout": "43\n7\n",
     "note": "the bounds of a closure type and `Owned` on a type parameter travel in the interface row: the importer's calls are checked against `bounds_lib.iface` alone"
+  },
+  {
+    "name": "closure-owned-unnamed-region-refused",
+    "note": "`Owned` (the default of an `Iter`'s step): every region a closure borrows must appear in its own type. This one returns `&a` but also captured `extra: &b`, which nothing names; the diagnostic names `b` and the two fixes",
+    "source": "use iter;\nfn walk<a, b>(v: (&a u64[]), extra: (&b u64[])) -> iter::Iter<(&a u64)> {\n    mut i = 0;\n    return iter::from_fn(|| -> (&a u64)? {\n        if i < v.len() + extra.len() { p := i; i = i + 1; return Some(&v[p]); }\n        return None;\n    });\n}\nfn main() { a := u64[1, 2]; b := u64[3]; for x in walk(&a, &b) { println(*x); } }\n",
+    "reject": true,
+    "diagnostic": [
+      "this closure captures a borrow its type does not name (lifetime `b`)",
+      "Name the borrow in the closure's result type"
+    ]
+  },
+  {
+    "name": "closure-owned-local-borrow-refused",
+    "note": "a borrow of a local can never be named, so a closure holding one is never `Owned`",
+    "source": "use iter;\nfn walk<a>(v: (&a u64[])) -> iter::Iter<u64> {\n    local := u64[5];\n    r := &local;\n    mut i = 0;\n    return iter::from_fn(|| -> u64? { if i < r.len() { i = i + 1; return Some(r[0]); } return None; });\n}\nfn main() { a := u64[1, 2]; for x in walk(&a) { println(x); } }\n",
+    "reject": true,
+    "diagnostic": "this closure captures a borrow its type does not name (a local of this function)"
+  },
+  {
+    "name": "closure-owned-map-keys-then-mutate",
+    "note": "the region `map.keys()` names is enforced end to end: the map cannot be mutated while the iterator lives",
+    "source": "use hashmap;\nfn main() {\n    mut m: [string: u64] = [\"a\": 1, \"b\": 2];\n    mut it = m.keys();\n    m.insert(\"c\", 3);\n    println(it.next().is_some());\n}\n",
+    "reject": true,
+    "diagnostic": "borrow conflicts with active access"
+  },
+  {
+    "name": "closure-owned-map-keys-then-move",
+    "note": "...nor moved",
+    "source": "use hashmap;\nfn eat(m: [string: u64]) -> u64 { return m.len(); }\nfn main() {\n    m: [string: u64] = [\"a\": 1, \"b\": 2];\n    mut it = m.keys();\n    println(eat(m));\n    println(it.next().is_some());\n}\n",
+    "reject": true,
+    "diagnostic": "move of unavailable or borrowed value"
+  },
+  {
+    "name": "closure-owned-map-keys-then-drop",
+    "note": "...nor dropped",
+    "source": "use hashmap;\nfn main() {\n    m: [string: u64] = [\"a\": 1, \"b\": 2];\n    mut it = m.keys();\n    drop(m);\n    println(it.next().is_some());\n}\n",
+    "reject": true,
+    "diagnostic": "drop of moved or unavailable value"
+  },
+  {
+    "name": "closure-owned-mut-capture-named",
+    "note": "a captured `&a mut` whose region the result type names is `Owned`: it may be stored in an Iter",
+    "source": "use iter;\nfn counting<a>(n: (&a mut u64)) -> iter::Iter<(&a u64)> {\n    mut left = 3;\n    return iter::from_fn(|| -> (&a u64)? {\n        if left == 0 { return None; }\n        left = left - 1;\n        *n = *n + 1;\n        return None;\n    });\n}\nfn main() {\n    mut count = 0;\n    {\n        mut it = counting(&mut count);\n        while let Some(x) = it.next() { println(*x); }\n    }\n    println(count);\n}\n",
+    "stdout": "1\n"
+  },
+  {
+    "name": "closure-owned-mut-capture-blocks-writes",
+    "note": "...and the counter cannot be written while the iterator lives",
+    "source": "use iter;\nfn counting<a>(n: (&a mut u64)) -> iter::Iter<(&a u64)> {\n    return iter::from_fn(|| -> (&a u64)? { *n = *n + 1; return None; });\n}\nfn main() {\n    mut count = 0;\n    mut it = counting(&mut count);\n    count = 7;\n    println(it.next().is_some());\n}\n",
+    "reject": true,
+    "diagnostic": "assignment conflicts with live borrow"
+  },
+  {
+    "name": "closure-owned-mut-capture-blocks-reads",
+    "note": "...nor read",
+    "source": "use iter;\nfn counting<a>(n: (&a mut u64)) -> iter::Iter<(&a u64)> {\n    return iter::from_fn(|| -> (&a u64)? { *n = *n + 1; return None; });\n}\nfn main() {\n    mut count = 0;\n    mut it = counting(&mut count);\n    println(count);\n    println(it.next().is_some());\n}\n",
+    "reject": true,
+    "diagnostic": "`count`"
   }
 ]
