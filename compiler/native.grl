@@ -10469,7 +10469,7 @@ fn dyn_box<a>(c: (&a mut C), v: Val, expected: u64) -> Val {
     cell := invoke(&mut c, view("rt_rec"), one(sz));
     rec_store(&mut c, cell, 0, v.t);
     o(&mut c, view("leaq "));
-    vt := vtable_symbol(&mut c, id, concrete);
+    vt := cell_vtable_symbol(&mut c, id, concrete);
     push_bytes(&mut c.out, view(vt));
     o(&mut c, view("(%rip),%rax\n"));
     table := save(&mut c);
@@ -10664,10 +10664,25 @@ fn vtable_symbol<a>(c: (&a mut C), id: u64, concrete: u64) -> u8[] {
     }
     return name;
 }
+// The vtable an owned `dyn I` cell carries. A method takes its receiver as `&T`, and a dispatch site
+// has only the data word, without knowing the type behind it. For anything but a record that word
+// is the cell's address - the address of the word holding the value, which is what `&T` is. For a
+// record `&T` is the record's own address, which is the cell's *first word*; so a record boxed as
+// `dyn` carries this table instead, whose entries load that word and call the method. A `&dyn` made
+// from a `&T` keeps the plain table: its data word is already the reference. Everything else about
+// the cell and the pair is docs/design/fat-dyn.md unchanged.
+fn cell_vtable_symbol<a>(c: (&a mut C), id: u64, concrete: u64) -> u8[] {
+    mut name = vtable_symbol(&mut c, id, concrete);
+    if direct(&mut c, concrete) {
+        name[1] = 67;
+    }
+    return name;
+}
 fn emit_vtables<a>(c: (&a mut C)) -> unit {
     if c.vtables.len() == 0 {
         return ();
     }
+    mut thunks = u8[];
     o(&mut c, view(".data\n.p2align 3\n"));
     for i in c.vtables.len() / 2 {
         id := c.vtables[2 * i];
@@ -10678,12 +10693,21 @@ fn emit_vtables<a>(c: (&a mut C)) -> unit {
         c.out.push(10);
         push_bytes(&mut c.out, view(vt));
         o(&mut c, view(":\n.quad "));
+        // A record also gets the table its owned `dyn` cell carries (cell_vtable_symbol): the same
+        // drop word, and for each method an adapter that loads the record out of the cell.
+        boxed := direct(&mut c, concrete);
+        cell := cell_vtable_symbol(&mut c, id, concrete);
+        mut entries = copy_bytes(view(".quad "));
         if needs_drop(&mut c, concrete) {
             drop_name(&mut c, concrete);
+            dropper := drop_symbol(&mut c, concrete);
+            push_bytes(&mut entries, view(dropper));
         } else {
             o(&mut c, view("0"));
+            entries.push(48);
         }
         c.out.push(10);
+        entries.push(10);
         methods := dyn_methods(&mut c, id);
         for j in methods.len() {
             name := c.funcs[methods[j]].name.copy();
@@ -10695,9 +10719,41 @@ fn emit_vtables<a>(c: (&a mut C)) -> unit {
             o(&mut c, view(".quad "));
             mangle(&mut c, view(module), view(symbol));
             c.out.push(10);
+            if boxed {
+                target := mangle_name(&mut c, view(module), view(symbol));
+                push_bytes(&mut entries, view(".quad "));
+                push_bytes(&mut entries, view(cell));
+                entries.push(95);
+                decimal(&mut entries, j);
+                entries.push(10);
+                if c.plat == 1 {
+                    push_bytes(&mut thunks, view(".weak_definition "));
+                } else {
+                    push_bytes(&mut thunks, view(".weak "));
+                }
+                push_bytes(&mut thunks, view(cell));
+                thunks.push(95);
+                decimal(&mut thunks, j);
+                thunks.push(10);
+                push_bytes(&mut thunks, view(cell));
+                thunks.push(95);
+                decimal(&mut thunks, j);
+                push_bytes(&mut thunks, view(":\npushq %rbp\nmovq %rsp,%rbp\nmovq (%rdi),%rdi\ncall "));
+                push_bytes(&mut thunks, view(target));
+                push_bytes(&mut thunks, view("\nleave\nret\n"));
+            }
+        }
+        if boxed {
+            weak_def(&mut c);
+            push_bytes(&mut c.out, view(cell));
+            c.out.push(10);
+            push_bytes(&mut c.out, view(cell));
+            o(&mut c, view(":\n"));
+            push_bytes(&mut c.out, view(entries));
         }
     }
     o(&mut c, view(".text\n"));
+    push_bytes(&mut c.out, view(thunks));
     return ();
 }
 // Rust's object safety: every method takes the object by reference as its first parameter, and
@@ -15737,7 +15793,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             get(&mut c, slot, view("%rax"));
             o(&mut c, view("movq %rax,"));
             stack_slot(&mut c, keep);
-            o(&mut c, view("\nleaq "));
+            // The parameter is `&mut R`: the copy's own address.
+            o(&mut c, view("\nmovq "));
             stack_slot(&mut c, copy);
             o(&mut c, view(",%rax\nmovq %rax,"));
             stack_slot(&mut c, slot);
@@ -21293,6 +21350,10 @@ fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
         k := find_field(&mut c, d, view(f));
         fty := field_type(&mut c, base.ty, k);
         last := (kind(&mut c) != 46) & (address != 0);
+        // `address` 1 and 2 ask for a reference to the field, 3 for the place an assignment
+        // writes: the address of the field's word, whatever the field holds. A reference to a
+        // record field is the record's address - the field's word, loaded.
+        place := address == 3;
         mut n = 0;
         if c.decls[d].c_layout != 0 {
             more := kind(&mut c) == 46;
@@ -21300,14 +21361,17 @@ fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
             n = cfield_load(&mut c, b, d, k, last);
         } else {
             n = field_load(&mut c, b, base.ty, k, last);
+            if last & !place {
+                n = word_reference(&mut c, n, fty);
+            }
         }
         if last {
-            ty := reference_type(&mut c, fty, address == 2);
+            ty := reference_type(&mut c, fty, address >= 2);
             mut ref = n;
             // Only a C-layout container embeds the record's bytes. A plain record's field is a
             // word holding the record's own address, so `n` (that word's address) already is the
             // reference; a proxy over it would add a level and write into the container's words.
-            if (is_c_record(&mut c, fty) != 0) & (c.decls[d].c_layout != 0) {
+            if place & (is_c_record(&mut c, fty) != 0) & (c.decls[d].c_layout != 0) {
                 // An embedded record has no slot of its own: its bytes are interior to the
                 // containing struct, and `n` holds their address. A reference is a pointer to a
                 // slot that holds the record's address, so the place is a proxy slot holding the
@@ -21414,16 +21478,15 @@ fn place_slot<a>(c: (&a mut C), id: u64, ty: u64, write: u64) -> Val {
     target := place_of(&mut c, id);
     mut referent = ty;
     mut source = target;
+    mut slot = 0;
     if ty_kind(&mut c, ty) == 7 {
         source = target_of(&mut c, id);
         referent = ty_arg(&mut c, ty);
         get(&mut c, id, view("%rax"));
+        slot = save(&mut c);
     } else {
-        o(&mut c, view("leaq "));
-        stack_slot(&mut c, id);
-        o(&mut c, view(",%rax\n"));
+        slot = slot_reference(&mut c, id, ty);
     }
-    slot := save(&mut c);
     mut out = reference_type(&mut c, referent, write);
     return borrow_reference(&mut c, slot, out, id, source, write);
 }
@@ -25863,7 +25926,16 @@ fn exchange_into<a>(c: (&a mut C), a: Val, b: Val) -> Val {
         own(&mut c, old, ty);
         return val(old, ty);
     }
-    slot := apply(&mut c, view("rt_xchg"), two(a.t, b.t));
+    mut slot = 0;
+    if direct(&mut c, ty) {
+        // The reference is the record: its words and the new value's change places, and the new
+        // value's storage, which now holds the old words, is what comes back.
+        swap_records(&mut c, a.t, b.t, ty);
+        get(&mut c, b.t, view("%rax"));
+        slot = save(&mut c);
+    } else {
+        slot = apply(&mut c, view("rt_xchg"), two(a.t, b.t));
+    }
     own(&mut c, slot, ty);
     result := place_of(&mut c, slot);
     return_bonds(&mut c, destination, result, 0);
@@ -29667,7 +29739,8 @@ fn capture_field<a, b>(c: (&a mut C), name: &b [u8], address: u64, mode: u64) ->
         fty = capture_readonly_type(&mut c, fty);
     }
     if address != 0 {
-        n := rec_load(&mut c, b, k, 1);
+        at := rec_load(&mut c, b, k, 1);
+        n := word_reference(&mut c, at, fty);
         ty := reference_type(&mut c, fty, mode);
         root := place_of(&mut c, b);
         target := member_place(&mut c, root, k, fty);
@@ -29968,7 +30041,8 @@ fn mutex_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
     invoke(&mut c, view("rt_mutex_lock"), one(cell));
     get(&mut c, cell, view("%rax"));
     o(&mut c, view("leaq 8(%rax),%rax\n"));
-    pointer := save(&mut c);
+    held_at := save(&mut c);
+    pointer := word_reference(&mut c, held_at, payload);
     get(&mut c, pointer, view("%rdi"));
     get(&mut c, heldslot, view("%rsi"));
     get(&mut c, target, view("%rax"));
@@ -30089,10 +30163,7 @@ fn method_receiver<a>(c: (&a mut C), input: u64, inty: u64, xty: u64, formal: u6
                     require_mutable_binding(&mut c, input, 1);
                 }
                 target := place_of(&mut c, input);
-                o(&mut c, view("leaq "));
-                stack_slot(&mut c, input);
-                o(&mut c, view(",%rax\n"));
-                slot := save(&mut c);
+                slot := slot_reference(&mut c, input, xty);
                 r := borrow_reference(&mut c, slot, refty, input, target, mode);
                 rv = r.t;
                 rty = r.ty;
@@ -30128,7 +30199,8 @@ fn method_receiver<a>(c: (&a mut C), input: u64, inty: u64, xty: u64, formal: u6
                 if mode != 0 {
                     require_mutable_binding(&mut c, b, 0);
                 }
-                n := rec_load(&mut c, b, field, 1);
+                at := rec_load(&mut c, b, field, 1);
+                n := word_reference(&mut c, at, xty);
                 root := place_of(&mut c, b);
                 target := member_place(&mut c, root, field, xty);
                 authority := authority_of(&mut c, b);
@@ -30681,11 +30753,14 @@ fn pointer_method<a, d>(c: (&a mut C), value: Val, pty: u64, name: &d [u8]) -> V
         // the reference's frame source is an external place in the result's lifetime, borrowed and
         // bonded exactly as a returned capture is (add_external_capture).
         place := ownership::root(&mut c.check, 0, 1);
+        // The pointer addresses the word that holds the pointee; a reference to a record is that
+        // word's content.
+        reference := word_reference(&mut c, address, pointee);
         c
             .resources
             .push(
                 Resource {
-                    slot: address,
+                    slot: reference,
                     ty: rty,
                     flag: 0,
                     base: 0,
@@ -30697,8 +30772,8 @@ fn pointer_method<a, d>(c: (&a mut C), value: Val, pty: u64, name: &d [u8]) -> V
                 }
             );
         source := add_external_capture(&mut c, place, region, write);
-        set_target(&mut c, address, source, address + 1);
-        return val(address, rty);
+        set_target(&mut c, reference, source, reference + 1);
+        return val(reference, rty);
     }
     mut msg = copy_bytes(view("a raw pointer has addr, is_null, cast, add, sub, read, write, as_ref and as_mut; not "));
     push_bytes(&mut msg, view(name));
@@ -31894,7 +31969,88 @@ fn subword<a>(c: (&a mut C), alias: u64) -> bool {
 }
 // Reads the `ty` value a reference slot points at: word storage with an 8-byte load, tagged narrow
 // storage with the type's width and encoding.
+// A reference to a record is the record's own address - the word a value of the record type holds
+// - and not the address of a word holding it (docs/design/unboxed-values.md, stage 1a). So a record
+// is reached through a reference with one load fewer, a reference to a local record is the local's
+// word, and what is written through one replaces the record's words. Enums, vectors and scalars
+// keep the address of their word.
+fn direct<a>(c: (&a mut C), alias: u64) -> bool {
+    if c.raw != 0 {
+        return false;
+    }
+    ty := base_type(&mut c, alias);
+    if ty_kind(&mut c, ty) != 8 {
+        return false;
+    }
+    index := ty_arg(&mut c, ty);
+    d := &c.decls[index];
+    if d.is_enum != 0 {
+        return false;
+    }
+    // A closure's environment is not a record value anyone holds: its code is called with the
+    // address of the word holding the object (indirect_call), and that stays the closure ABI.
+    return !same(view(d.module), view(".closure"));
+}
+// The reference to the `ty` held in the word at the address in `at`: for a record the word itself,
+// loaded; for anything else the word's address, which `at` already is.
+fn word_reference<a>(c: (&a mut C), at: u64, ty: u64) -> u64 {
+    if !direct(&mut c, ty) {
+        return at;
+    }
+    get(&mut c, at, view("%rax"));
+    o(&mut c, view("movq (%rax),%rax\n"));
+    return save(&mut c);
+}
+// The reference to the `ty` a frame slot holds: the slot's word for a record, its address otherwise.
+fn slot_reference<a>(c: (&a mut C), id: u64, ty: u64) -> u64 {
+    if direct(&mut c, ty) {
+        get(&mut c, id, view("%rax"));
+    } else {
+        o(&mut c, view("leaq "));
+        stack_slot(&mut c, id);
+        o(&mut c, view(",%rax\n"));
+    }
+    return save(&mut c);
+}
+// The size in bytes of the storage a record's address names: a word per field, or the C size of
+// an `extern "C"` record (which, embedded in another, is not a whole number of words).
+fn record_bytes<a>(c: (&a mut C), alias: u64) -> u64 {
+    ty := base_type(&mut c, alias);
+    d := ty_arg(&mut c, ty);
+    if c.decls[d].c_layout != 0 {
+        return ffi_record_size(&mut c, d);
+    }
+    return c.decls[d].count * 8;
+}
+// Exchanges the contents of the two `ty` records whose addresses are in `x` and `y`. Up to four
+// whole words are moved in line; anything else is the runtime's loop.
+fn swap_records<a>(c: (&a mut C), x: u64, y: u64, ty: u64) -> unit {
+    bytes := record_bytes(&mut c, ty);
+    if (bytes % 8 != 0) || (32 < bytes) {
+        n := imm(&mut c, bytes);
+        invoke(&mut c, view("rt_swap"), three(x, y, n));
+        return ();
+    }
+    get(&mut c, x, view("%rcx"));
+    get(&mut c, y, view("%rdx"));
+    for k in bytes / 8 {
+        o(&mut c, view("movq "));
+        on(&mut c, k * 8);
+        o(&mut c, view("(%rcx),%rax\nmovq "));
+        on(&mut c, k * 8);
+        o(&mut c, view("(%rdx),%r10\nmovq %r10,"));
+        on(&mut c, k * 8);
+        o(&mut c, view("(%rcx)\nmovq %rax,"));
+        on(&mut c, k * 8);
+        o(&mut c, view("(%rdx)\n"));
+    }
+    return ();
+}
 fn ref_load<a>(c: (&a mut C), r: u64, ty: u64) -> u64 {
+    if direct(&mut c, ty) {
+        get(&mut c, r, view("%rax"));
+        return save(&mut c);
+    }
     narrow := caddr_ty(&mut c, r);
     if (narrow != 0) & (is_c_record(&mut c, narrow) == 0) {
         return caddr_load(&mut c, r, narrow);
@@ -31920,7 +32076,9 @@ fn ref_load<a>(c: (&a mut C), r: u64, ty: u64) -> u64 {
     mark(&mut c, done);
     return save(&mut c);
 }
-// Writes `value` (a `ty`) through a reference slot, as `ref_load` reads.
+// Writes `value` (a `ty`) into the word a place addresses: `r` is the address of the word that holds
+// the value, which is what a reference to anything but a record is, and what an assignment's target
+// is for a record too (field_path, address 3) - the word is replaced, the old record is not written.
 fn ref_store<a>(c: (&a mut C), r: u64, ty: u64, value: u64) -> unit {
     narrow := caddr_ty(&mut c, r);
     if narrow != 0 {
@@ -31932,7 +32090,9 @@ fn ref_store<a>(c: (&a mut C), r: u64, ty: u64, value: u64) -> unit {
         // the address the reference loads - a binding's own record, or an embedded field's interior
         // address - so the value's bytes are copied there and its buffer is released. Storing the
         // pointer would leave the fields untouched and leak the value.
-        dst := ref_load(&mut c, r, ty);
+        get(&mut c, r, view("%rax"));
+        o(&mut c, view("movq (%rax),%rax\n"));
+        dst := save(&mut c);
         caddr_store(&mut c, dst, ty, value);
         return ();
     }
@@ -33785,9 +33945,7 @@ fn map_read_place<a>(c: (&a mut C), reference: Val) -> Val {
     if target == 0 {
         fail(&mut c, view("map index has no tracked reference target"));
     }
-    get(&mut c, old, view("%rax"));
-    o(&mut c, view("movq (%rax),%rax\n"));
-    slot := save(&mut c);
+    slot := ref_load(&mut c, old, ty);
     c
         .resources
         .push(
@@ -34096,8 +34254,9 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
             return val(element, elem);
         }
         ty := reference_type(&mut c, elem, access == 2);
-        slot := apply(&mut c, view(f), two(xt, index));
+        at := apply(&mut c, view(f), two(xt, index));
         fact_seq_arg(&mut c, view(f), xt, xty);
+        slot := word_reference(&mut c, at, elem);
         if code != 0 {
             // The element's address is 4-byte storage: reads and writes through it are sized, and
             // borrowing it yields a tagged reference (tag_narrow_borrow).
@@ -35470,7 +35629,7 @@ fn chained_field_assignment<a>(c: (&a mut C)) -> unit {
         }
         k = k + 2;
     }
-    a := field_path(&mut c, base.t, base.ty, 2);
+    a := field_path(&mut c, base.t, base.ty, 3);
     target := a.t;
     fieldty := ty_arg(&mut c, a.ty);
     assignment_tail(&mut c, 0, base.t, base.ty, target, u64[1, fieldty], view(fname), record_ty);
@@ -36622,7 +36781,8 @@ fn record_match<a>(c: (&a mut C), sslot: u64, sty: u64, x: Val, byref: u64, refm
                 value := field_load(&mut c, xt, xty, k, 0);
                 bind(&mut c, binder, fty, value, 0);
             } else {
-                n := field_load(&mut c, xt, xty, k, 1);
+                at := field_load(&mut c, xt, xty, k, 1);
+                n := word_reference(&mut c, at, fty);
                 refty := reference_type(&mut c, fty, refmode);
                 target := member_place(&mut c, root, k, fty);
                 authority := authority_of(&mut c, xt);
@@ -37493,10 +37653,11 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
                     rty := reference_type(&mut c, elemty, refmode);
                     root := place_of(&mut c, seq);
                     target := member_place(&mut c, root, 0, elemty);
-                    own(&mut c, index, rty);
-                    bind_loan(&mut c, index, seq, root, refmode);
-                    set_target(&mut c, index, target, index + 1);
-                    bind(&mut c, name, rty, index, 0);
+                    item := word_reference(&mut c, index, elemty);
+                    own(&mut c, item, rty);
+                    bind_loan(&mut c, item, seq, root, refmode);
+                    set_target(&mut c, item, target, item + 1);
+                    bind(&mut c, name, rty, item, 0);
                 } else {
                     mut f = "rt_at";
                     if bytewise != 0 {
@@ -37776,7 +37937,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
                 // exclusive reference to that field, which only an `FnMut` closure may take.
                 if (kind(&mut c) == 46) & (next_kind(&mut c) != 40) {
                     head := capture_place(&mut c, view(name), 1);
-                    a := field_path(&mut c, head.t, head.ty, 2);
+                    a := field_path(&mut c, head.t, head.ty, 3);
                     target := a.t;
                     fieldty := ty_arg(&mut c, a.ty);
                     mut none = u8[];
@@ -37821,7 +37982,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
             fname = tok_text(&mut c, here_at + 1);
         }
         if kind(&mut c) == 46 {
-            a := field_path(&mut c, id, ty, 2);
+            a := field_path(&mut c, id, ty, 3);
             target = a.t;
             through = 1;
             fieldty = ty_arg(&mut c, a.ty);
@@ -38470,7 +38631,8 @@ fn match_statement<a>(c: (&a mut C)) -> unit {
                     value := rec_load(&mut c, xt, 1, 0);
                     bind(&mut c, b, pty, value, 0);
                 } else {
-                    n := rec_load(&mut c, xt, 1, 1);
+                    at := rec_load(&mut c, xt, 1, 1);
+                    n := word_reference(&mut c, at, pty);
                     refty := reference_type(&mut c, pty, refmode);
                     root := place_of(&mut c, xt);
                     target := member_place(&mut c, root, 1, pty);
@@ -38779,12 +38941,17 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                 // The user's `drop` runs first, with the value as its receiver; the field walk below
                 // releases what the fields own, as Rust does after a `Drop` impl has run.
                 if hook.len() != 0 {
-                    // A record's `&mut T` is the address of a cell holding the record pointer, not the
-                    // pointer itself, so the receiver is one scratch word (two, to keep the call
-                    // 16-byte aligned).
-                    o(&mut c, view("subq $16,%rsp\nmovq %r12,(%rsp)\nmovq %rsp,%rdi\n"));
-                    call_out(&mut c, view(hook));
-                    o(&mut c, view("addq $16,%rsp\n"));
+                    if direct(&mut c, ty) {
+                        // A record's `&mut T` is the record's address: the receiver is the value.
+                        o(&mut c, view("movq %r12,%rdi\n"));
+                        call_out(&mut c, view(hook));
+                    } else {
+                        // An enum's `&mut T` is the address of a word holding it, so the receiver
+                        // is one scratch word (two, to keep the call 16-byte aligned).
+                        o(&mut c, view("subq $16,%rsp\nmovq %r12,(%rsp)\nmovq %rsp,%rdi\n"));
+                        call_out(&mut c, view(hook));
+                        o(&mut c, view("addq $16,%rsp\n"));
+                    }
                 }
                 if (kind == 3) || (kind == 4) {
                     call_out(&mut c, view("rt_drop_seq"));
@@ -39163,16 +39330,18 @@ const IFACE_TAG_ENV: u64 = 17;
 // A written type's inherent methods (`impl<T> T[] { .. }`): the owner is a type, not a declaration.
 const IFACE_TAG_INHERENT_TYPE: u64 = 18;
 
-// The `dyn` ABI this compiler builds objects for (docs/design/fat-dyn.md), as the one line every
-// interface carries. A `&dyn I` is an 8-byte pointer to a 16-byte, 8-aligned `{data, vtable}` pair,
-// so a module that was compiled for another layout cannot be linked into the same program by
+// The ABI this compiler builds objects for, as the one line every interface carries: the `dyn`
+// layout (docs/design/fat-dyn.md) - a `&dyn I` is an 8-byte pointer to a 16-byte, 8-aligned
+// `{data, vtable}` pair - and what a reference to a record is (`ref record = address`: the record's
+// own address, docs/design/unboxed-values.md stage 1a; before it, the address of a word holding
+// that). A module that was compiled for another layout cannot be linked into the same program by
 // accident: the writer writes this line and the reader refuses a file whose line differs.
 //
 // The string is the whole spelling, `abi ` included. It is carried as one length-counted field of
 // the module header record and rendered back verbatim by `grail iface dump`, so the single-source
 // rule survives the encoding: nothing else in this compiler knows how the ABI is written.
 fn iface_dyn_abi() -> string {
-    return "abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0";
+    return "abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address";
 }
 
 // ---- writing ----

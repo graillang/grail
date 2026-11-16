@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **A reference to a record is the record's address.** `&T` and `&mut T` for a struct, a tuple or
+  an `extern "C"` record used to be the address of a word holding the record's address; a field
+  read through a reference now costs one load, not two, and a local record whose reference is
+  passed no longer has to live in memory. Nothing a safe program can observe changes: assignment
+  and `exchange` through such a reference replace the record's contents, and a reference to an
+  enum, a vector, a string or a number is what it was. Interface files state it (`ref record =
+  address` on the `abi` line), so an object built by an earlier compiler is refused instead of
+  linked. First stage of docs/design/unboxed-values.md.
+
 - `hash::write_byte` states its precondition in its signature (`value: u64 where value < 256`)
   instead of asserting it in its body: a caller that can show the value is a byte pays no check,
   and one that cannot gets the check at its own call, named. It was the standard library's only

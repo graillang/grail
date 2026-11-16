@@ -1674,6 +1674,25 @@ fn rt_enum_retag(old: u64, tag: u64) -> u64 {
     rt_free(old);
     return rt_enum(tag, payload);
 }
+// Exchanges the `n` bytes at `a` and at `b`: what `exchange` and assignment through a reference to
+// a record do, since the reference is the record's address. Whole words, then the tail bytes of an
+// `extern "C"` record whose size is not a multiple of eight.
+fn rt_swap(a: u64, b: u64, n: u64) -> u64 {
+    mut i = 0;
+    while i + 8 <= n {
+        word := raw_load(a + i);
+        raw_store(a + i, raw_load(b + i));
+        raw_store(b + i, word);
+        i = i + 8;
+    }
+    while i < n {
+        byte := raw_byte(a + i);
+        raw_putbyte(a + i, raw_byte(b + i));
+        raw_putbyte(b + i, byte);
+        i = i + 1;
+    }
+    return 0;
+}
 fn rt_xchg(p: u64, v: u64) -> u64 {
     old := raw_load(p);
     raw_store(p, v);

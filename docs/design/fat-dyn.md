@@ -91,6 +91,20 @@ ownership rules. `dynf-reject-c-boundary` pins that refusal. The `&dyn I` parame
 rest in being a *reader*: it is passed as the value rather than as an out-parameter's address, which
 is the same one-word-is-one-pointer argument the next section makes.
 
+## An owned `dyn` of a record carries its own table
+
+A method takes its receiver as `&T`, and since unboxed-values.md stage 1a a reference to a record
+is the record's own address, where a reference to anything else is the address of the word holding
+it. An owned `dyn I` cell is `{value @0, vtable @8}` either way, and a dispatch site has only the
+data word - the cell's address - without knowing which kind of type is behind it. That word is
+`&T`-shaped for a number, a vector or an enum, and for a record it is one load short. So a record
+boxed as `dyn` stores a second table in its cell (`.C<hash>` beside `.V<hash>`, same drop word),
+whose method entries are adapters: load the cell's first word into the receiver register and call
+the method (`pushq %rbp; movq %rsp,%rbp; movq (%rdi),%rdi; call m; leave; ret`). A `&dyn I` made
+from a `&T` keeps the plain table, because its data word already is the reference; a `&dyn I`
+borrowed from an owned object copies the cell's table, as it always did. Nothing else in this note
+changes: the cell, the pair, the table layout and the C boundary are as stated above.
+
 ## Two modules must agree: the interface carries the ABI
 
 A `&dyn I` crosses a module boundary, so separately compiled modules must build the same pair. The
@@ -98,8 +112,11 @@ interface format (`// grail-interface 4`) therefore carries one `abi` header lin
 `iface_module_text` and checked by `iface_load`:
 
 ```
-abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0
+abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address
 ```
+
+(`ref record = address` joined the line with unboxed-values.md stage 1a: it says what a reference
+to a record is, which every `&T` parameter depends on exactly as a `&dyn` depends on the pair.)
 
 The reader compares it with the canonical line this compiler writes and refuses a file whose line
 differs, naming the file and both spellings - a module compiled against another layout cannot be

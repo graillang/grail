@@ -109,7 +109,7 @@ than misread.
  source "tests/interfaces/pair.grl"
  sha256 "ad1f2b3cf421decab61ea22f7dfc572fec79a74a3078b3ef330f4e49a94db2d0"
  mode typed_refs=1 default_u64=1 overflow=checked target=x86_64
- abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0
+ abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address
  unsafe 0
  std 0
  host 0
@@ -536,8 +536,10 @@ evaluated once, in the defining module's context, and would mean something else 
 are keyed by index rather than written in order, so they cannot desynchronise from the parameter list,
 and a parameter that gains a default does not change any other parameter's record.
 
-The module record also carries the **`dyn` ABI** - `abi dyn pair size = 16 align = 8 word0 = data
-word1 = vtable drop = 0`, one length-counted string holding exactly what `iface_dyn_abi()` returns.
+The module record also carries the **ABI line** - `abi dyn pair size = 16 align = 8 word0 = data
+word1 = vtable drop = 0 ref record = address`, one length-counted string holding exactly what
+`iface_dyn_abi()` returns. Its last clause says what a reference to a record is (the record's own
+address, docs/design/unboxed-values.md); a stage that changes a layout changes this line.
 A `&dyn I` in a signature or a field crosses a module boundary as a pair, so two modules built for
 different layouts must not link: the reader compares the field with `iface_dyn_abi()` and refuses a
 file that states another one (`was written for another \`dyn\` ABI (...); this compiler builds

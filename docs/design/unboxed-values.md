@@ -323,6 +323,58 @@ stage 3, its first user, and `plain(ty)` to stage 1b: neither is added before so
 Files: native.grl. Acceptance: self-compile byte-identical (`tools/test-selfhost.mjs`,
 `tools/ssair-bytes.mjs`). Risk: low. Bench: unchanged within noise.
 
+**Stage 1a as built** (2026-11-16).
+- *The invariant.* For a struct, a tuple and an `extern "C"` record, `&T`/`&mut T` is the word a
+  `T` value is: the address of the record's storage. Enums, vectors, strings, scalars, closures and
+  `dyn` keep the address of their word. One predicate decides (`direct`), and three helpers make
+  every reference: `slot_reference` (from a frame slot), `word_reference` (from the address of a
+  word: a field, an element, an enum payload, a mutex cell, a raw pointer) and `ref_load` (through
+  a reference: a word copy for a record).
+- *`extern "C"` records.* Before: the address of a slot holding the address of the bytes - the
+  binding's own slot, or for a record embedded in another a *proxy slot* made for the purpose
+  (`c.embedded`). After: the address of the bytes. The proxy survives only for the target of an
+  assignment (below).
+- *Places are not references.* `x.f = v`, `v[i].f = w` and a capture's field assignment write the
+  *word* of the field: the old record is dropped and the new record's word stored, as before. This
+  is `field_path(.., 3)`. It has to stay a word store because a place may hold nothing - a field
+  that was moved out is refilled this way - and a reference never may.
+- *Uninitialised and moved-out places.* `&x`/`&mut x` needs `ownership::borrow_place`, which
+  refuses a place that is not `complete` - present and every sub-place live (ownership.grl:111-120,
+  327-333). The only live-but-unfilled place is an `extern "C"` record declared without a value,
+  whose storage is allocated at the declaration (`zero_record_binding`), so its address exists.
+  Ten corpus cases pin the refusals (`unboxed-ref-reject-*`) and one the refills.
+- *Through a reference.* `exchange(r, v)` and `*r = v` swap the storage of the referent and of the
+  new value, by the record's byte size (`swap_records`): up to four whole words in line, otherwise
+  `rt_swap(a, b, bytes)` - the one function for both kinds, exact for a 12-byte C record embedded
+  between other fields. The new value's storage, now holding the old contents, is what `exchange`
+  returns and what assignment drops. Measured on a self-compile with every swap forced through
+  the runtime: 29 swap sites in the compiler's own code (22 of 4 words, 4 of 3, 1 of 2, 2 of 17
+  words), 20,003 swaps executed out of 261 G instructions. Nothing swaps a large record in a loop.
+- *Owned `dyn` of a record.* The cell stays `{value, vtable}`. A dispatch site has only the data
+  word and cannot know the concrete type, and for a record `&T` is the cell's first word, not the
+  cell's address; so a record boxed as `dyn` carries a second table (`.C...` beside `.V...`) whose
+  entries are adapters - `pushq %rbp; movq %rsp,%rbp; movq (%rdi),%rdi; call method; leave; ret`,
+  the shape `grail_fn_thunk` already has. A `&dyn` made from a `&T` keeps the plain table.
+- *Closures.* An environment is a record type internally, and is deliberately not `direct`: its
+  code is called with the address of the word holding the object, which is the closure ABI.
+- *Reference identity.* Nothing in safe code or `lib/` compares or hashes a reference: `==` on two
+  references is a type error, `hash::Hash` has no implementation for a reference, and `.addr()`
+  exists only on raw pointers. `cptr(&r)` of an `extern "C"` record was and is the address of its
+  bytes. `Rc<T>` holds a `*mut T` to a word it allocated; `as_ref`/`as_mut` turn it into a
+  reference with `word_reference`, so for a record they now load that word.
+- *Measured* (instruction counts, which the loaded host does not disturb; wall times moved less
+  than the noise). The compiler checking the 26k-line program: 9.991 G before, 9.907 G after
+  (-0.8 %; the compiler measured is the one built by the new compiler - the first build from the
+  bootstrap compiler still has the old code inside and shows no change). Micro-benchmark, native
+  backend: `aosu` 2.345 G to 2.185 G (-6.8 %), `aosu_shuf` 2.540 G to 2.380 G (-6.3 %); LLVM
+  backend: `aosu` unchanged (LLVM had already folded the second load), `aos` -1.4 %. Peak RSS
+  unchanged at 68 MB, as expected: nothing was unboxed yet. The note's earlier guess that the saved
+  load "applies to almost every line of the compiler" was too generous - it is under one percent.
+  Binary size 27.26 MB to 27.27 MB; self-compile output 109.63 MB to 109.65 MB.
+- *Keyed artefacts.* Interface files: the `abi` line gained `ref record = address`, so a file from
+  an earlier compiler is refused. Build-store entries and per-function units are keyed by the
+  compiler's own digest (cli.grl:2779, 1546) and need no bump.
+
 **Stage 1 - flat vectors of plain records** (engine first; removes the 8 % token allocations).
 - 1a: `&T` to a record becomes the address of its words (all records, still boxed);
   assignment and `exchange` through such a reference copy words. Measurable alone: one load fewer
@@ -404,8 +456,8 @@ Stage 6 needs stage 3 only.
   (check / self-compile) the stages remove 8 / 2 % (1), 13 / 6 % (2), 5 / 2 % or more (3 - more if
   `snapshot` and `ir::ty` records, 14 % of a self-compile's allocations, are short-lived locals
   **[A]**) and 40 / 37 % (6); each also removes the matching free and, for views, a
-  call per hop. One load fewer per field access through a reference (1a) applies to almost every
-  line of the compiler. **[A]** the time saved is proportional to the count; it is measured per
+  call per hop. One load fewer per field access through a reference (1a) measured at 0.8 % of a
+  check. **[A]** the time saved is proportional to the count; it is measured per
   stage, not promised.
 - **Slower.** (a) Moves of N words: more instructions and, because the pipeline is text, more lines
   for the optimiser to parse - the self-compile already writes 110 MB of assembly [V:
