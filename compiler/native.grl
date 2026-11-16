@@ -31573,8 +31573,8 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     bt := b.t;
     if same(view(name), view("append")) {
         if c.raw == 0 {
-            if k != 4 {
-                fail(&mut c, view("append requires string destination"));
+            if (k != 4) & (k != 3) {
+                fail(&mut c, view("append requires a string or a byte vector as its destination"));
             }
             bk := ty_kind(&mut c, b.ty);
             if (bk != 3) & (bk != 4) & (bk != 5) {
@@ -31582,7 +31582,13 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             }
         }
         require_write(&mut c, xt);
-        invoke(&mut c, view("rt_append_text"), two(xt, bt));
+        if k == 3 {
+            // Bytes onto a byte vector: one reservation and one copy, where a loop of `push` is a
+            // call and a capacity test per byte.
+            invoke(&mut c, view("rt_append"), two(xt, bt));
+        } else {
+            invoke(&mut c, view("rt_append_text"), two(xt, bt));
+        }
         return val(imm(&mut c, 0), 1);
     }
     if c.raw == 0 {
