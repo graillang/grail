@@ -6,6 +6,10 @@
   pointer, which keeps their provenance. `x[i] = x[i] * a + y[i]` over one million elements goes
   from 7x to 1.2x (`f32`) and from 4x to 1.1x (`f64`) of vectorised `clang -O2`. Under
   `--verify-facts` every such access re-reads the header and aborts if it moved.
+- `bun tools/bench-rivals.mjs`: every `bench/` program against its C, Rust, Go and Zig twins
+  (`bench/rivals/`), release and debug builds of each, CPU time from `getrusage`, one table with
+  Grail's two builds as ratios to the best competitor of their bar. The numbers and the named
+  reason for every miss are in `docs/design/runtime-parity.md`, "Against other languages".
 
 - A method of a generic written-type impl whose bound the receiver does not meet says so: `v.sort()`
   on a `Point[]` is "`sort` needs `T: order::Ord`, and `Point` does not implement it", with a help
