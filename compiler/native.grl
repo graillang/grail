@@ -484,6 +484,13 @@ struct C {
     // Slots holding the address of a narrow (non-8-byte or f32) C-layout record field, paired
     // with the field type: stores and compound loads through them use the field's width.
     caddr: u64[],
+    // Slots holding the address of a plain record stored inline in another (docs/design/
+    // unboxed-values.md, stage 1b): the value is that interior address, which no one may own, so
+    // a move or an owner of it first copies the words into a box of its own (materialise).
+    interior: u64[],
+    // Per type id: 0 not yet known, else 1 + (1 if the type is a plain record) + (2 if it is a
+    // record that stores a plain record inline).
+    layout_memo: u64[],
     // An exported callback's float result: 0 none, 1 f64, 2 f32 (returned in xmm0/d0/fa0).
     export_fret: u64,
     // Set for one cfield_load: another `.field` projection follows this one.
@@ -3946,6 +3953,7 @@ fn borrow_parameter<a>(c: (&a mut C), slot: u64, ty: u64) -> Val {
     return val(slot, ty);
 }
 fn own<a>(c: (&a mut C), slot: u64, ty: u64) -> Val {
+    materialise(&mut c, slot, ty);
     if c.raw == 0 {
         k := ty_kind(&mut c, ty);
         drops := needs_drop(&mut c, ty);
@@ -5983,6 +5991,7 @@ fn move_out<a>(c: (&a mut C), v: Val) -> unit {
     if c.raw != 0 {
         return ();
     }
+    materialise(&mut c, v.t, v.ty);
     if !needs_drop(&mut c, v.ty) {
         if ty_kind(&mut c, v.ty) != 7 {
             return ();
@@ -6028,9 +6037,13 @@ fn move_out<a>(c: (&a mut C), v: Val) -> unit {
             if via != 0 {
                 fail(&mut c, view("cannot move owned field through reference"));
             }
-            zero := imm(&mut c, 0);
             holder := held_record(&mut c, base - 1);
-            field_store(&mut c, base - 1, holder, field, zero);
+            // An inline field's words stay where they are: the hole is the checker's, and the
+            // drop helper never walks an inline plain record.
+            if !inline_field(&mut c, holder, field) {
+                zero := imm(&mut c, 0);
+                field_store(&mut c, base - 1, holder, field, zero);
+            }
         }
     }
     return ();
@@ -6085,6 +6098,7 @@ fn holds_live_loan<a>(c: (&a mut C), place: u64) -> bool {
     return false;
 }
 fn move_value<a>(c: (&a mut C), v: Val) -> Val {
+    materialise(&mut c, v.t, v.ty);
     get(&mut c, v.t, view("%rax"));
     slot := save(&mut c);
     old := place_of(&mut c, v.t);
@@ -15703,6 +15717,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         }
     }
     exchange(&mut c.caddr, u64[]);
+    exchange(&mut c.interior, u64[]);
     func_directive(&mut c, view(m), view(name), view(body_symbol), export);
     if (c.debug != 0) & (c.validating == 0) {
         dstart = label(&mut c);
@@ -20304,7 +20319,151 @@ fn rec_store<a>(c: (&a mut C), base: u64, k: u64, value: u64) -> unit {
 // compare, print or drop a field. Enum tags and payloads, closure objects and `dyn` cells are words
 // by position and keep calling rec_load/rec_store directly.
 fn field_word<a>(c: (&a mut C), ty: u64, k: u64) -> u64 {
-    return k;
+    if (layout_bits(&mut c, ty) & 2) == 0 {
+        return k;
+    }
+    mut word = 0;
+    for i in k {
+        word = word + field_words(&mut c, ty, i);
+    }
+    return word;
+}
+// A plain record: a struct or tuple with no `Drop`, whose every field is a number, a bool, a char,
+// unit, a reference, a function or C pointer, or a plain record. It owns nothing, so it can be
+// stored inline in the record or the vector that holds it. This is a layout fact only: the checker
+// never asks it, and a plain record moves exactly as every record does (unboxed-values.md, 4).
+fn plain<a>(c: (&a mut C), alias: u64) -> bool {
+    if c.raw != 0 {
+        return false;
+    }
+    return (layout_bits(&mut c, alias) & 1) != 0;
+}
+// Whether field `k` of the record `ty` is a plain record stored inline: only Grail structs and
+// tuples hold them so (an enum's payload, a closure's captures and a C record keep their words).
+fn inline_field<a>(c: (&a mut C), ty: u64, k: u64) -> bool {
+    if (layout_bits(&mut c, ty) & 2) == 0 {
+        return false;
+    }
+    return plain(&mut c, field_type(&mut c, ty, k));
+}
+fn field_words<a>(c: (&a mut C), ty: u64, k: u64) -> u64 {
+    ft := field_type(&mut c, ty, k);
+    if plain(&mut c, ft) {
+        return record_words(&mut c, base_type(&mut c, ft));
+    }
+    return 1;
+}
+fn container_record<a>(c: (&a mut C), ty: u64) -> bool {
+    if ty_kind(&mut c, ty) != 8 {
+        return false;
+    }
+    index := ty_arg(&mut c, ty);
+    d := &c.decls[index];
+    if (d.is_enum != 0) || (d.c_layout != 0) || (d.opaque != 0) {
+        return false;
+    }
+    return !same(view(d.module), view(".closure"));
+}
+fn layout_bits<a>(c: (&a mut C), alias: u64) -> u64 {
+    if c.raw != 0 {
+        return 0;
+    }
+    ty := base_type(&mut c, alias);
+    while c.layout_memo.len() <= ty {
+        c.layout_memo.push(0);
+    }
+    if c.layout_memo[ty] != 0 {
+        return c.layout_memo[ty] - 1;
+    }
+    // A record being worked out is not plain to itself (a record cannot hold itself by value).
+    c.layout_memo[ty] = 1;
+    mut bits = 0;
+    if container_record(&mut c, ty) {
+        d := ty_arg(&mut c, ty);
+        mut all = c.decls[d].drop == 0;
+        mut holds = false;
+        for i in c.decls[d].count {
+            ft := base_type(&mut c, field_type(&mut c, ty, i));
+            k := ty_kind(&mut c, ft);
+            if k == 8 {
+                if (layout_bits(&mut c, ft) & 1) != 0 {
+                    holds = true;
+                } else {
+                    all = false;
+                }
+            } else if !((k == 1) || (k == 2) || (k == 7) || (k == 12) || (k == 18) || (k == 19) || (k == 21) || (k == 22) || (k == 25) || (k == 26)) {
+                all = false;
+            }
+        }
+        if all {
+            bits = bits | 1;
+        }
+        if holds {
+            bits = bits | 2;
+        }
+    }
+    c.layout_memo[ty] = bits + 1;
+    return bits;
+}
+// A plain record field read as a value: the address of its words inside the container.
+fn inline_address<a>(c: (&a mut C), base: u64, ty: u64, k: u64) -> u64 {
+    get(&mut c, base, view("%rax"));
+    o(&mut c, view("leaq "));
+    on(&mut c, field_word(&mut c, ty, k) * 8);
+    o(&mut c, view("(%rax),%rax\n"));
+    slot := save(&mut c);
+    c.interior.push(slot);
+    return slot;
+}
+// A value that is about to be owned or moved and is still an interior address gets a box of its
+// own holding a copy of the words, and the slot holds the box from here on.
+fn materialise<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
+    if c.interior.len() == 0 {
+        return ();
+    }
+    mut found = c.interior.len();
+    for i in c.interior.len() {
+        if c.interior[i] == slot {
+            found = i;
+        }
+    }
+    if found == c.interior.len() {
+        return ();
+    }
+    if !plain(&mut c, ty) {
+        return ();
+    }
+    c.interior[found] = 18446744073709551615;
+    words := record_words(&mut c, base_type(&mut c, ty));
+    n := imm(&mut c, words);
+    box := invoke(&mut c, view("rt_rec"), one(n));
+    bytes := imm(&mut c, words * 8);
+    invoke(&mut c, view("rt_copy_bytes"), three(box, slot, bytes));
+    get(&mut c, box, view("%rax"));
+    o(&mut c, view("movq %rax,"));
+    stack_slot(&mut c, slot);
+    c.out.push(10);
+    return ();
+}
+// Moves the boxed plain record `value` into the words at `dst`, and frees the box.
+fn copy_into<a>(c: (&a mut C), dst: u64, value: u64, ty: u64) -> unit {
+    words := record_words(&mut c, base_type(&mut c, ty));
+    bytes := imm(&mut c, words * 8);
+    invoke(&mut c, view("rt_copy_bytes"), three(dst, value, bytes));
+    invoke(&mut c, view("rt_free"), one(value));
+    return ();
+}
+// A reference to field `k`: its interior address when the field is stored inline, else the
+// reference made from the field's word.
+fn field_reference<a>(c: (&a mut C), base: u64, ty: u64, k: u64) -> u64 {
+    if inline_field(&mut c, ty, k) {
+        // A reference, not a value: it is never owned, so it is not an interior value.
+        slot := inline_address(&mut c, base, ty, k);
+        c.interior.pop();
+        return slot;
+    }
+    at := field_load(&mut c, base, ty, k, 1);
+    return word_reference(&mut c, at, field_type(&mut c, ty, k));
 }
 // The words a record's own storage takes: a word per field, or an `extern "C"` record's C size.
 fn record_words<a>(c: (&a mut C), ty: u64) -> u64 {
@@ -20312,9 +20471,22 @@ fn record_words<a>(c: (&a mut C), ty: u64) -> u64 {
     if c.decls[d].c_layout != 0 {
         return ffi_record_words(&mut c, d);
     }
-    return c.decls[d].count;
+    if (layout_bits(&mut c, ty) & 2) == 0 {
+        return c.decls[d].count;
+    }
+    count := c.decls[d].count;
+    return field_word(&mut c, ty, count);
 }
 fn field_store<a>(c: (&a mut C), base: u64, ty: u64, k: u64, value: u64) -> unit {
+    if inline_field(&mut c, ty, k) {
+        get(&mut c, base, view("%rax"));
+        o(&mut c, view("leaq "));
+        on(&mut c, field_word(&mut c, ty, k) * 8);
+        o(&mut c, view("(%rax),%rax\n"));
+        dst := save(&mut c);
+        copy_into(&mut c, dst, value, field_type(&mut c, ty, k));
+        return ();
+    }
     word := field_word(&mut c, ty, k);
     rec_store(&mut c, base, word, value);
     return ();
@@ -20333,6 +20505,9 @@ fn held_record<a>(c: (&a mut C), slot: u64) -> u64 {
     return base_type(&mut c, ty);
 }
 fn field_load<a>(c: (&a mut C), base: u64, ty: u64, k: u64, address: u64) -> u64 {
+    if inline_field(&mut c, ty, k) {
+        return inline_address(&mut c, base, ty, k);
+    }
     word := field_word(&mut c, ty, k);
     return rec_load(&mut c, base, word, address);
 }
@@ -21387,9 +21562,10 @@ fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
             exchange(&mut c.cfield_more, more);
             n = cfield_load(&mut c, b, d, k, last);
         } else {
-            n = field_load(&mut c, b, base.ty, k, last);
             if last & !place {
-                n = word_reference(&mut c, n, fty);
+                n = field_reference(&mut c, b, base.ty, k);
+            } else {
+                n = field_load(&mut c, b, base.ty, k, last);
             }
         }
         if last {
@@ -21398,7 +21574,10 @@ fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
             // Only a C-layout container embeds the record's bytes. A plain record's field is a
             // word holding the record's own address, so `n` (that word's address) already is the
             // reference; a proxy over it would add a level and write into the container's words.
-            if place & (is_c_record(&mut c, fty) != 0) & (c.decls[d].c_layout != 0) {
+            outer := c.decls[d].c_layout;
+            holder := base.ty;
+            embeds := ((is_c_record(&mut c, fty) != 0) & (outer != 0)) || inline_field(&mut c, holder, k);
+            if place & embeds {
                 // An embedded record has no slot of its own: its bytes are interior to the
                 // containing struct, and `n` holds their address. A reference is a pointer to a
                 // slot that holds the record's address, so the place is a proxy slot holding the
@@ -30226,8 +30405,7 @@ fn method_receiver<a>(c: (&a mut C), input: u64, inty: u64, xty: u64, formal: u6
                     require_mutable_binding(&mut c, b, 0);
                 }
                 holder := held_record(&mut c, b);
-                at := field_load(&mut c, b, holder, field, 1);
-                n := word_reference(&mut c, at, xty);
+                n := field_reference(&mut c, b, holder, field);
                 root := place_of(&mut c, b);
                 target := member_place(&mut c, root, field, xty);
                 authority := authority_of(&mut c, b);
@@ -32110,6 +32288,14 @@ fn ref_store<a>(c: (&a mut C), r: u64, ty: u64, value: u64) -> unit {
     narrow := caddr_ty(&mut c, r);
     if narrow != 0 {
         caddr_store(&mut c, r, narrow, value);
+        return ();
+    }
+    if plain(&mut c, ty) & embedded_place(&mut c, r) {
+        // An inline plain record's place: the new value's words replace the old ones.
+        get(&mut c, r, view("%rax"));
+        o(&mut c, view("movq (%rax),%rax\n"));
+        dst := save(&mut c);
+        copy_into(&mut c, dst, value, ty);
         return ();
     }
     if is_c_record(&mut c, ty) != 0 {
@@ -36808,8 +36994,7 @@ fn record_match<a>(c: (&a mut C), sslot: u64, sty: u64, x: Val, byref: u64, refm
                 value := field_load(&mut c, xt, xty, k, 0);
                 bind(&mut c, binder, fty, value, 0);
             } else {
-                at := field_load(&mut c, xt, xty, k, 1);
-                n := word_reference(&mut c, at, fty);
+                n := field_reference(&mut c, xt, xty, k);
                 refty := reference_type(&mut c, fty, refmode);
                 target := member_place(&mut c, root, k, fty);
                 authority := authority_of(&mut c, xt);
@@ -38270,8 +38455,9 @@ fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, t
     }
     // An embedded C record's old bytes are plain data, overwritten in place (no drop). The place
     // is either the interior address itself (an address slot) or the proxy slot that holds it.
-    embedded := (is_c_record(&mut c, fieldty) != 0)
-        & ((caddr_ty(&mut c, target) != 0) | embedded_place(&mut c, target));
+    embedded := ((is_c_record(&mut c, fieldty) != 0)
+        & ((caddr_ty(&mut c, target) != 0) | embedded_place(&mut c, target)))
+        | (plain(&mut c, fieldty) & embedded_place(&mut c, target));
     if through != 0 && !embedded {
         if needs_drop(&mut c, fieldty) {
             get(&mut c, target, view("%rax"));
@@ -39068,7 +39254,7 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                                 o(&mut c, view("movq 8(%r12),%rdi\n"));
                                 drop_call(&mut c, t);
                                 mark(&mut c, skip);
-                            } else {
+                            } else if !inline_field(&mut c, ty, i) {
                                 o(&mut c, view("movq "));
                                 on(&mut c, field_word(&mut c, ty, i) * 8);
                                 o(&mut c, view("(%r12),%rdi\n"));
@@ -43761,6 +43947,8 @@ pub fn main() -> u64 {
         validating: 0,
         ffi_fixed: 0,
         caddr: u64[],
+        interior: u64[],
+        layout_memo: u64[],
         export_fret: 0,
         cfield_more: 0,
         alias_next: 1,
