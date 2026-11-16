@@ -10972,5 +10972,36 @@
       "riscv64"
     ],
     "note": "the result of `pop()` is an option, spelled the way it is written"
+  },
+  {
+    "name": "job-handle-holds-closure-loan-generic",
+    "note": "Q3 of docs/design/closure-bounds.md: a `Job<u64>` owns the closure it runs, so the loan a wrapper's closure argument handed to it stays with the handle; the borrowed vector cannot be moved while the job may read it (was accepted: use after free)",
+    "source": "use pool;\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    view := &data;\n    j := pool::spawn(|| -> u64 view[0]);\n    println(eat(data));\n    println(pool::wait(j));\n}\n",
+    "reject": true,
+    "diagnostic": "move of unavailable or borrowed value",
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "job-handle-holds-closure-loan-wrapper",
+    "note": "the same through a non-generic wrapper: the loss was in the handle's type, not in the generic call",
+    "source": "fn sp(f: Fn()->u64) -> Job<u64> { return parallel_spawn(f); }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    view := &data;\n    j := sp(|| -> u64 view[0]);\n    println(eat(data));\n    println(parallel_join(j));\n}\n",
+    "reject": true,
+    "diagnostic": "move of unavailable or borrowed value"
+  },
+  {
+    "name": "job-handle-in-record-holds-closure-loan",
+    "note": "a record holding the handle holds the loan too",
+    "source": "struct Keep { j: Job<u64>, n: u64 }\nfn sp(f: Fn()->u64) -> Job<u64> { return parallel_spawn(f); }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    view := &data;\n    k := Keep { j: sp(|| -> u64 view[0]), n: 1 };\n    println(eat(data));\n    println(parallel_join(k.j));\n}\n",
+    "reject": true,
+    "diagnostic": "move of unavailable or borrowed value"
+  },
+  {
+    "name": "job-handle-loan-ends-at-wait",
+    "note": "once the job is waited on its handle is gone and the loan with it: the vector may move again",
+    "source": "fn sp(f: Fn()->u64) -> Job<u64> { return parallel_spawn(f); }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    mut got = 0;\n    {\n        view := &data;\n        j := sp(|| -> u64 view[0]);\n        got = parallel_join(j);\n    }\n    println(got + eat(data));\n}\n",
+    "stdout": "5\n"
   }
 ]
