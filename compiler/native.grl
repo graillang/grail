@@ -16551,6 +16551,113 @@ fn inherent_method_for<a, b>(c: (&a mut C), ty: u64, name: &b [u8]) -> u64 {
     }
     return generic;
 }
+// Why a written-type impl that defines `name` does not apply to a receiver of type `ty`: the first
+// bound its parameters state that the receiver's type does not meet, as (message, help); both empty
+// when no impl defines the name for that shape of type. `v.sort()` on a `P[]` is "`sort` needs
+// `T: order::Ord`, and `P` does not implement it", not "`P[]` has no method `sort`".
+fn inherent_unmet_bound<a, b>(c: (&a mut C), ty: u64, name: &b [u8]) -> (u8[], u8[]) {
+    for i in c.inherent_types.len() {
+        key := inherent_type_base() + i + 1;
+        record := impl_record(&mut c, key);
+        if record == 0 {
+            continue;
+        }
+        count := c.impl_params[record - 1].tnames.len();
+        mut map = u64[];
+        for k in count {
+            map.push(NO_TYPE);
+        }
+        pattern := c.inherent_types[i];
+        if !inherent_pattern_fits(&mut c, pattern, ty, &mut map) {
+            continue;
+        }
+        owner := inherent_type_module(key);
+        m := find_func(&mut c, view(owner), view(name));
+        if m == 0 {
+            continue;
+        }
+        sets := copy_constraints(&c.impl_params[record - 1].interfaces);
+        for k in count {
+            bound := map[k];
+            if (bound == NO_TYPE) || (k >= sets.len()) {
+                continue;
+            }
+            for j in sets[k].len() {
+                iface := sets[k][j];
+                if satisfies_interface(&mut c, bound, iface) {
+                    continue;
+                }
+                tname := c.impl_params[record - 1].tnames[k].copy();
+                mut iname = c.interfaces[iface - 1].module.copy();
+                push_bytes(&mut iname, view("::"));
+                push_bytes(&mut iname, view(c.interfaces[iface - 1].name));
+                shown := source_type_name(&mut c, bound);
+                mut msg = copy_bytes(view("`"));
+                push_bytes(&mut msg, view(name));
+                push_bytes(&mut msg, view("` needs `"));
+                push_bytes(&mut msg, view(tname));
+                push_bytes(&mut msg, view(": "));
+                push_bytes(&mut msg, view(iname));
+                push_bytes(&mut msg, view("`, and `"));
+                push_bytes(&mut msg, view(shown));
+                push_bytes(&mut msg, view("` does not implement it"));
+                home := c.funcs[m - 1].home.copy();
+                mut help = copy_bytes(view("`"));
+                push_bytes(&mut help, view(name));
+                push_bytes(&mut help, view("` is defined in `impl<"));
+                for q in count {
+                    if q != 0 {
+                        push_bytes(&mut help, view(", "));
+                    }
+                    push_bytes(&mut help, view(c.impl_params[record - 1].tnames[q]));
+                    if q < sets.len() {
+                        for r in sets[q].len() {
+                            if r == 0 {
+                                push_bytes(&mut help, view(": "));
+                            } else {
+                                push_bytes(&mut help, view(" + "));
+                            }
+                            push_bytes(&mut help, view(c.interfaces[sets[q][r] - 1].module));
+                            push_bytes(&mut help, view("::"));
+                            push_bytes(&mut help, view(c.interfaces[sets[q][r] - 1].name));
+                        }
+                    }
+                }
+                push_bytes(&mut help, view("> "));
+                tnames := copy_names(&c.impl_params[record - 1].tnames);
+                push_bytes(&mut help, view(impl_pattern_name(&mut c, pattern, &tnames)));
+                push_bytes(&mut help, view("` (module `"));
+                push_bytes(&mut help, view(home));
+                push_bytes(&mut help, view("`); implement `"));
+                push_bytes(&mut help, view(iname));
+                push_bytes(&mut help, view("` for `"));
+                push_bytes(&mut help, view(shown));
+                push_bytes(&mut help, view("` to call it"));
+                return (msg, help);
+            }
+        }
+    }
+    return (u8[], u8[]);
+}
+// A written-type impl's owner as written: its parameters by name (`T[]`, `[T]`).
+fn impl_pattern_name<a, b>(c: (&a mut C), ty: u64, tnames: (&b u8[][])) -> u8[] {
+    k := ty_kind(&mut c, ty);
+    if (k == 9) && (ty_arg(&mut c, ty) < tnames.len()) {
+        return tnames[ty_arg(&mut c, ty)].copy();
+    }
+    if k == 6 {
+        mut out = impl_pattern_name(&mut c, ty_arg(&mut c, ty), &tnames);
+        push_bytes(&mut out, view("[]"));
+        return out;
+    }
+    if k == 27 {
+        mut out = copy_bytes(view("["));
+        push_bytes(&mut out, view(impl_pattern_name(&mut c, ty_arg(&mut c, ty), &tnames)));
+        out.push(93);
+        return out;
+    }
+    return source_type_name(&mut c, ty);
+}
 fn ambiguous_inherent_fail<a, b>(c: (&a mut C), ty: u64, name: &b [u8]) -> unit {
     mut msg = copy_bytes(view("ambiguous method: two inherent impls define `"));
     push_bytes(&mut msg, view(name));
@@ -31381,6 +31488,11 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         || same(view(name), view("push_char"))
         || same(view(name), view("append"));
     if !known {
+        unmet := inherent_unmet_bound(&mut c, xty, view(name));
+        if unmet.0.len() != 0 {
+            diag_help(&mut c, view(unmet.1));
+            fail(&mut c, view(unmet.0));
+        }
         recv := source_type_name(&mut c, xty);
         mut msg = copy_bytes(view("`"));
         push_bytes(&mut msg, view(recv));

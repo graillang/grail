@@ -1,5 +1,10 @@
 ## Unreleased
 
+- A method of a generic written-type impl whose bound the receiver does not meet says so: `v.sort()`
+  on a `Point[]` is "`sort` needs `T: order::Ord`, and `Point` does not implement it", with a help
+  line naming the impl (`impl<T: order::Ord> T[]`, module `vecs`), where it was "`Point[]` has no
+  method `sort`".
+
 - Fixed: a `&mut self` method of a written-type impl (`v[i].deps.insert_sorted(x)`, from
   `impl<T: order::Ord> T[]`) called on a field of a vector element was refused as "mutation through
   readonly frame": the check that borrows an indexed element mutably looked only at methods of the
