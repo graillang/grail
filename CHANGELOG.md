@@ -1,5 +1,11 @@
 ## Unreleased
 
+- The LLVM backend builds programs for AArch64 and RISC-V again. A lifted function the stream
+  declares `.weak` (a generic instance, a drop helper) got a `.globl` entry thunk, which the
+  assembler rejects (`changed binding to STB_GLOBAL`); the thunk now keeps the weak binding. And
+  an AArch64 module is compiled with atomics inline (`-mno-outline-atomics`): clang's default
+  calls `__aarch64_cas8_acq_rel` in libgcc, which a Grail program does not link.
+
 - Fixed: an `extern "C"` call with no arguments that was the first thing in its function left the
   thread pointer on libc's side in a libc-linked program, so later runtime calls on that thread
   (starting a thread, for one) read the wrong record.
