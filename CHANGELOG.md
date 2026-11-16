@@ -405,6 +405,28 @@
   and theirs: `--use-named`, `--use-module NAME`) and the run reads those, in that order, and
   nothing else; without the flags a directory is read in name order.
 
+- **A closure inside a closure may capture what the outer one captured.** A captured shared
+  reference is re-borrowed, and a captured `&mut` vector or slice is re-borrowed as an exclusive
+  slice, keeping the original borrow - the shape every scoped spawn has
+  (`scope(|t| t.spawn(|| use(rx)))`). It was an `undefined name` error. An expression-bodied closure
+  without a result type may now capture a local borrow (it was "parameter requires a declared
+  lifetime").
+- **`Fn<s>(..)`: a closure type may name the lifetime its borrows come from**, so a record labelled
+  `s` can keep closures that borrow (`struct Holder<s> { items: (Fn<s>() -> u64)[] }`) and keeps
+  their loans alive while it lives. A record whose closure field states no bound (`iter::Iter<T>`)
+  is no longer accepted for `T: Owned`; its hidden borrows stay local.
+- **Soundness: a closure parameter borrows for the call.** A parameter typed `Fn(..)`/`FnMut(..)`
+  (without `Owned`) may be called and passed on during the call, and nothing more: returning it,
+  storing it (a push through `&mut`, a field), or capturing it in a closure that is returned is
+  refused. Before, a callee could keep a closure that borrowed the caller's frame and call it after
+  the frame was gone (a use after free in safe code). A record holding a borrowing closure can no
+  longer be boxed as `dyn`, and a job spawned from a call-scoped closure keeps its loans, so a
+  wrapper must wait on it before returning. **What stops compiling, and the fix:** a function that
+  keeps a closure it was given must say so - `f: Fn<Owned>(..)` (it then borrows only what its type
+  names); its callers move values in instead of borrowing them, or name the borrow in the closure's
+  result type. The lazy `iter` adapters (`map`, `filter`, `flat_map`, `filter_map`, `from_fn`,
+  `from_step`) now take `FnMut<Owned>(..)`; no program in the corpus, Abundance or Borg needed a
+  change. (`docs/design/closure-bounds.md`, stage 3.)
 - **Closure types state what the closure may capture: `Fn<Send>`, `Fn<Share>`, `Fn<Owned>`.**
   A closure parameter, field or element can now say its captures may move to another thread
   (`Send`), be used from several at once (`Share`, `Fn` only), or hold no borrow (`Owned`), and

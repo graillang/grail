@@ -4729,7 +4729,9 @@ fn call_bonds<a>(
         // A closure argument can carry lifetimes its parameter's `Fn(...)` type does not name. The
         // caller keeps the loan by handing it to the result: a callee that returns the callable
         // cannot make it outlive what it borrows.
-        if kind == 20 {
+        // Only a parameter that may keep the closure: one typed without `Owned` borrows it for the
+        // call (docs/design/closure-bounds.md, stage 3), so nothing of it reaches the result.
+        if (kind == 20) && ((ty_mode(&mut c, ty) & CLOSURE_OWNED) != 0) {
             n := resource(&mut c, slot);
             if n != 0 {
                 info := &c.resources[n - 1];
@@ -4785,7 +4787,9 @@ fn check_writeback<a>(c: (&a mut C), destination: u64, ty: u64, source: u64) -> 
     if c.raw != 0 {
         return ();
     }
-    if !contains_borrow(&mut c, ty, 0) {
+    // A stored closure (or a record of one) shows no borrow in its type but may still hold one -
+    // a call-scoped closure parameter, or a closure that captured a reference: its loans decide.
+    if !contains_borrow(&mut c, ty, 0) && !(may_hide_borrow(&mut c, ty) && holds_live_loan(&mut c, source)) {
         return ();
     }
     region := region_of(&mut c, destination);
@@ -4839,6 +4843,12 @@ fn check_writeback<a>(c: (&a mut C), destination: u64, ty: u64, source: u64) -> 
                         }
                     }
                     if (r == 0) || (found == 0) {
+                        if (ty_kind(&mut c, ty) == 20) & !contains_borrow(&mut c, ty, 0) {
+                            fail(
+                                &mut c,
+                                view("this closure may only be used during the call it was passed to (a parameter typed `Fn(..)` borrows for the call), so it cannot be stored here: take `Fn<Owned>(..)` to keep it")
+                            );
+                        }
                         fail(&mut c, view("captured writeback violates invariant lifetime"));
                     }
                 }
@@ -5421,6 +5431,16 @@ fn init_parameter<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
             set_target(&mut c, slot, source, slot + 1);
         }
         return ();
+    }
+    // A closure parameter that does not say `Owned` borrows for the call only
+    // (docs/design/closure-bounds.md, 2.3): it holds a loan of a place no type can name (region 0,
+    // like a local's), so the callee may call it and pass it on to another such parameter, but
+    // returning it, storing it, or capturing it in a closure that is returned or stored is the
+    // ordinary escape error.
+    if (k == 20) && (ty_env(&mut c, ty) == 0) && ((mode & (CLOSURE_OWNED + CLOSURE_UNBUILT)) == 0) && (rs.len() == 0) {
+        call := external_place(&mut c, 0, 0);
+        scoped := ownership::borrow_place(&mut c.check, call, 0);
+        bond_kind(&mut c, holder, scoped, 1);
     }
     captures := type_caps(&mut c, ty, 0);
     for i in captures.len() {
@@ -10183,7 +10203,17 @@ fn closure_bound_bit<a>(name: &a [u8]) -> u64 {
     return 0;
 }
 fn closure_bounds_text<a>(out: (&a mut u8[]), mode: u64) -> unit {
+    closure_bounds_text_named(&mut out, mode, view(""));
+    return ();
+}
+fn closure_bounds_text_named<a, b>(out: (&a mut u8[]), mode: u64, region: &b [u8]) -> unit {
+    if ((mode & CLOSURE_BOUNDS) == 0) & (region.len() == 0) {
+        return ();
+    }
     if (mode & CLOSURE_BOUNDS) == 0 {
+        out.push(60);
+        push_bytes(&mut out, region);
+        out.push(62);
         return ();
     }
     out.push(60);
@@ -10205,11 +10235,18 @@ fn closure_bounds_text<a>(out: (&a mut u8[]), mode: u64) -> unit {
         }
         push_bytes(&mut out, view("Owned"));
     }
+    if region.len() != 0 {
+        push_bytes(&mut out, view(", "));
+        push_bytes(&mut out, region);
+    }
     out.push(62);
     return ();
 }
 // `<Send, Owned>` after `Fn` / `FnMut` in a type: the bound bits, 0 when there is no list.
-fn closure_bounds_list<a>(c: (&a mut C), fnmut: bool) -> u64 {
+// A lifetime in the list (`Fn<s>(..)`) is pushed onto `regions`: the closure's borrows come from
+// `s`, which the type now carries like a reference's lifetime, so whatever holds the closure is
+// labelled `s` and the ordinary region checks follow its loans (docs/design/closure-bounds.md, 2.4).
+fn closure_bounds_list<a, b>(c: (&a mut C), fnmut: bool, regions: (&b mut u64[])) -> u64 {
     if !eat(&mut c, view("<")) {
         return 0;
     }
@@ -10219,12 +10256,26 @@ fn closure_bounds_list<a>(c: (&a mut C), fnmut: bool) -> u64 {
         bit := closure_bound_bit(view(name));
         if bit == 0 {
             if (96 < name[0]) & (name[0] < 123) {
-                fail(
-                    &mut c,
-                    view("a lifetime bound on a closure type (`Fn<s>(..)`) is not implemented yet: this compiler reads `Send`, `Share` and `Owned` there")
-                );
+                mut found = 0;
+                for i in c.rnames.len() {
+                    if same(view(c.rnames[i]), view(name)) {
+                        found = i + 1;
+                    }
+                }
+                if found == 0 {
+                    fail(&mut c, view("undeclared lifetime"));
+                }
+                if regions.len() != 0 {
+                    fail(&mut c, view("a closure type names at most one lifetime: `Fn<s>(..)`"));
+                }
+                regions.push(found);
+                if eat(&mut c, view(">")) {
+                    break;
+                }
+                expect(&mut c, view(","));
+                continue;
             }
-            fail(&mut c, view("a closure type's bounds are `Send`, `Share` and `Owned`: write `Fn<Send>(..)`"));
+            fail(&mut c, view("a closure type's bounds are `Send`, `Share`, `Owned` and one lifetime: write `Fn<Send>(..)`"));
         }
         if (bits & bit) != 0 {
             fail(&mut c, view("duplicate closure bound"));
@@ -10234,6 +10285,9 @@ fn closure_bounds_list<a>(c: (&a mut C), fnmut: bool) -> u64 {
             break;
         }
         expect(&mut c, view(","));
+    }
+    if ((bits & CLOSURE_OWNED) != 0) & (regions.len() != 0) {
+        fail(&mut c, view("`Owned` and a lifetime cannot both bound a closure: `Owned` names no borrow beyond its signature, a lifetime names the one it may hold"));
     }
     if fnmut & ((bits & CLOSURE_SHARE) != 0) {
         fail(
@@ -10909,6 +10963,8 @@ fn require_constraints<a, b, d>(c: (&a mut C), arguments: (&b u64[]), bounds: (&
                 push_bytes(&mut msg, view(source_type_name(&mut c, ty)));
                 if contains_borrow(&mut c, ty, 0) {
                     push_bytes(&mut msg, view(" holds a borrow"));
+                } else if may_hide_borrow(&mut c, ty) {
+                    push_bytes(&mut msg, view(" holds a closure whose type does not say it is `Owned`, so it may hold a borrow"));
                 } else {
                     push_bytes(&mut msg, view(" has a type parameter that is not known to be `Owned`"));
                 }
@@ -10937,6 +10993,20 @@ fn owned_walk<a, b>(c: (&a mut C), ty: u64, trail: (&b mut u64[])) -> bool {
         return owned_walk(&mut c, arg, &mut trail);
     }
     if k == 20 {
+        // A closure is `Owned` when its type says so, or - a closure expression - when every
+        // borrow it captured is named in its type. A bare `Fn(..)` field says nothing, so a record
+        // holding one (an `Iter<T>`) is not `Owned`: its hidden borrows travel by loan flow and
+        // cannot cross a lifetime boundary (docs/design/closure-bounds.md, 6.1).
+        mode := ty_mode(&mut c, ty);
+        if (mode & CLOSURE_UNBUILT) == 0 {
+            if ty_env(&mut c, ty) == 0 {
+                if (mode & CLOSURE_OWNED) == 0 {
+                    return false;
+                }
+            } else if closure_hidden_regions(&mut c, ty).len() != 0 {
+                return false;
+            }
+        }
         if !owned_walk(&mut c, arg, &mut trail) {
             return false;
         }
@@ -11711,7 +11781,10 @@ fn dyn_box<a>(c: (&a mut C), v: Val, expected: u64) -> Val {
     if find_implementation(&mut c, id, concrete) == 0 {
         fail(&mut c, view("this type does not implement the interface the dyn type names"));
     }
-    if contains_borrow(&mut c, concrete, 0) {
+    // The type, or - for a value whose type cannot show a borrow it holds (a record with a closure
+    // field) - the value itself: a `dyn` erases both.
+    if contains_borrow(&mut c, concrete, 0)
+        || (may_hide_borrow(&mut c, concrete) && holds_live_loan(&mut c, place_of(&mut c, v.t))) {
         fail(&mut c, view("a dyn value cannot hold borrowed data: its lifetime would be lost"));
     }
     fixed := type_args(&mut c, expected);
@@ -12673,7 +12746,12 @@ fn source_type_name<a>(c: (&a mut C), ty: u64) -> u8[] {
         } else {
             push_bytes(&mut out, view("Fn"));
         }
-        closure_bounds_text(&mut out, mode);
+        crs := type_regions(&mut c, ty);
+        mut rname = u8[];
+        if (crs.len() == 1) && (crs[0] != 0) && (crs[0] <= c.rnames.len()) {
+            rname = c.rnames[crs[0] - 1].copy();
+        }
+        closure_bounds_text_named(&mut out, mode, view(rname));
         out.push(40);
         params := type_args(&mut c, ty);
         for i in params.len() {
@@ -13901,7 +13979,9 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
     }
     if same(view(first), view("Fn")) || same(view(first), view("FnMut")) {
         // `Fn` is callable through a shared reference; `FnMut` needs exclusive access to the value.
-        fnmut := u64(same(view(first), view("FnMut"))) + closure_bounds_list(&mut c, same(view(first), view("FnMut")));
+        mut closure_regions = u64[];
+        fnmut := u64(same(view(first), view("FnMut")))
+            + closure_bounds_list(&mut c, same(view(first), view("FnMut")), &mut closure_regions);
         expect(&mut c, view("("));
         mut params = u64[];
         if !eat(&mut c, view(")")) {
@@ -13919,7 +13999,7 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
         }
         expect(&mut c, view("->"));
         result := parse_type(&mut c);
-        return intern_args(&mut c, 20, result, fnmut, u64[], params);
+        return intern_args(&mut c, 20, result, fnmut, closure_regions, params);
     }
     if same(view(first), view("cfn")) {
         // C function pointer: one word, no environment, called with the C ABI. Only
@@ -30373,6 +30453,22 @@ fn parallel_spawn_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     if contains_borrow(&mut c, result, 0) {
         fail(&mut c, view("a job result cannot contain borrows: the job owns what it returns"));
     }
+    // A closure whose type cannot show what it borrows (a call-scoped parameter forwarded by a
+    // wrapper) still holds loans: the job takes them over, so the handle cannot outlive them
+    // (docs/design/closure-bounds.md, 2.10). A wrapper that waits before returning is fine.
+    mut held_loans = u64[];
+    if c.raw == 0 {
+        fplace := place_of(&mut c, function.t);
+        if fplace != 0 {
+            for i in c.bonds.len() {
+                holder := c.bonds[i].holder;
+                loan := c.bonds[i].loan;
+                if ownership::ancestor(&c.check, fplace, holder) && (loan_live(&mut c, loan) != 0) {
+                    held_loans.push(loan);
+                }
+            }
+        }
+    }
     if contains_task(&mut c, result, 0) {
         fail(&mut c, view("a pool job cannot return a Task or Job handle"));
     }
@@ -30396,9 +30492,14 @@ fn parallel_spawn_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     mut pargs = two(target, box);
     slot := invoke(&mut c, view("rt_parallel_spawn"), pargs);
     ty := intern(&mut c, 29, result);
+    job := own(&mut c, slot, ty);
+    jplace := place_of(&mut c, slot);
+    for i in held_loans.len() {
+        bond_kind(&mut c, jplace, held_loans[i], 1);
+    }
     release_temporary(&mut c, input);
     close_loans(&mut c);
-    return own(&mut c, slot, ty);
+    return job;
 }
 // thread_spawn_raw(f) -> u64: the unsafe core's raw entry lib/thread.grl starts a thread through.
 // It boxes the closure for the runtime (rt_uthread_new) and answers with the address of a thread
@@ -31997,6 +32098,16 @@ fn capture_borrow<a>(c: (&a mut C), ty: u64) -> bool {
     }
     return false;
 }
+// A capture whose type cannot show a borrow but whose value holds one - a call-scoped closure
+// parameter, a record with a closure field: its loans are the closure's too.
+fn capture_hides_loan<a>(c: (&a mut C), slot: u64, ty: u64) -> bool {
+    // An `Owned` closure type names whatever it borrows, so its loans are the ones its signature's
+    // regions stand for; only a call-scoped one holds a loan its type cannot show.
+    if (ty_kind(&mut c, ty) == 20) && (ty_env(&mut c, ty) == 0) && ((ty_mode(&mut c, ty) & CLOSURE_OWNED) != 0) {
+        return false;
+    }
+    return may_hide_borrow(&mut c, ty) && holds_live_loan(&mut c, place_of(&mut c, slot));
+}
 // The lifetimes the loans held anywhere inside a captured aggregate borrow.
 fn capture_aggregate_regions<a, b>(c: (&a mut C), slot: u64, caps: (&b mut u64[])) -> unit {
     place := place_of(&mut c, slot);
@@ -32358,7 +32469,17 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
         slot := l.id;
         ty := l.ty;
         own(&mut c, slot, ty);
-        init_parameter(&mut c, slot, ty);
+        // A local borrow - `rx := &x` - names no region: it is a value of the enclosing body, not an
+        // input with a declared lifetime, and this probe only wants the expression's type.
+        lk := ty_kind(&mut c, ty);
+        if ((lk == 5) || (lk == 7) || (lk == 27)) && (type_regions(&mut c, ty).len() == 0) {
+            source := add_external_capture(&mut c, place_of(&mut c, slot), 0, ty_mode(&mut c, ty));
+            if lk == 7 {
+                set_target(&mut c, slot, source, slot + 1);
+            }
+        } else {
+            init_parameter(&mut c, slot, ty);
+        }
     }
     exchange(&mut c.pos, start);
     v := expr(&mut c, 0);
@@ -32606,6 +32727,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
     }
     end := c.pos;
     // Captures: enclosing locals named in the body (not parameters, fields, paths or inner bindings).
+    mut nested_mark = 18446744073709551615;
     mut captures = u8[][];
     mut inner = u8[][];
     mut i = start;
@@ -32649,6 +32771,34 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                     & closure_free_name(&mut c, view(name), &inner)
                     & closure_free_name(&mut c, view(name), &captures) {
                     if find_local(&mut c, view(name)) != 0 {
+                        captures.push(name);
+                    } else if nested_shared_capture(&mut c, view(name)) {
+                        // A closure inside a closure body naming a capture of the enclosing one: the
+                        // captured shared reference is re-borrowed into a local of the same name -
+                        // `name := load(&name)`, which keeps the loan it came from - and that local is
+                        // what this closure captures. The local is unbound again once the closure is
+                        // built, so the enclosing body's later uses read its own capture as before.
+                        if nested_mark == 18446744073709551615 {
+                            nested_mark = c.locals.len();
+                        }
+                        mut copied = val(0, NO_TYPE);
+                        if nested_exclusive_capture(&mut c, view(name)) {
+                            // An exclusive slice (or `&mut T[]`) is re-borrowed whole, as `&mut x[:]`
+                            // would be: the nested closure holds an exclusive slice whose loan is a
+                            // child of the enclosing capture's, so the body cannot touch it meanwhile.
+                            field := capture_field(&mut c, view(name), 0, 0);
+                            fk := ty_kind(&mut c, field.ty);
+                            mut base = field;
+                            if fk == 7 {
+                                base = deref(&mut c, base);
+                            }
+                            copied = whole_slice(&mut c, base, true);
+                        } else {
+                            field := capture_field(&mut c, view(name), 1, 0);
+                            copied = deref_value(&mut c, field);
+                        }
+                        copied = move_value(&mut c, copied);
+                        bind(&mut c, name.copy(), copied.ty, copied.t, 0);
                         captures.push(name);
                     }
                 }
@@ -32708,7 +32858,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
             // A capture contributes the lifetime it borrows to the closure's type.
             if capture_borrow(&mut c, ty) {
                 add_region(&mut caps, capture_region(&mut c, id));
-            } else if contains_borrow(&mut c, ty, 0) {
+            } else if contains_borrow(&mut c, ty, 0) || capture_hides_loan(&mut c, id, ty) {
                 capture_aggregate_regions(&mut c, id, &mut caps);
             }
             observe(&mut c, id);
@@ -32719,6 +32869,9 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
         }
         vfn := intern_args(&mut c, 20, ret, mode + CLOSURE_UNBUILT, caps, copy_numbers(&params));
         placeholder := imm(&mut c, 0);
+        if nested_mark != 18446744073709551615 {
+            pop_locals(&mut c, nested_mark);
+        }
         return own(&mut c, placeholder, vfn);
     }
     // Environment record type: {__code, __drop, captures...}.
@@ -32745,7 +32898,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
         if borrow {
             add_region(&mut caps, capture_region(&mut c, id));
             field = capture_field_type(&mut c, ty);
-        } else if contains_borrow(&mut c, ty, 0) {
+        } else if contains_borrow(&mut c, ty, 0) || capture_hides_loan(&mut c, id, ty) {
             capture_aggregate_regions(&mut c, id, &mut caps);
         }
         c.fields.push(Field { name: name.copy(), ty: field, pred: no_pred() });
@@ -32841,8 +32994,9 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
             rec_store(&mut c, obj, 2 + j, pointer);
             move_out(&mut c, val(slot, ty));
         } else if needs_drop(&mut c, ty) {
-            if contains_borrow(&mut c, ty, 0) {
-                // An aggregate holding a borrow: its loans go with it into the environment field.
+            if contains_borrow(&mut c, ty, 0) || capture_hides_loan(&mut c, slot, ty) {
+                // An aggregate holding a borrow - or a closure whose type cannot show the one it
+                // holds - so its loans go with it into the environment field.
                 root := place_of(&mut c, obj);
                 field_place := member_place(&mut c, root, 2 + j, ty);
                 source := place_of(&mut c, slot);
@@ -32893,7 +33047,70 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                 }
             );
     }
+    if nested_mark != 18446744073709551615 {
+        pop_locals(&mut c, nested_mark);
+    }
     return val(obj, fnty);
+}
+// Whether `name` is a capture of the closure whose body is being compiled, holding a shared
+// reference, view or slice that a nested closure may re-borrow.
+fn nested_shared_capture<a, b>(c: (&a mut C), name: &b [u8]) -> bool {
+    current := c.closure_env;
+    if current == 0 {
+        return false;
+    }
+    mut found = false;
+    cl := &c.closures[current - 1];
+    for j in cl.captures.len() {
+        x := &cl.captures[j];
+        if same(view(x), view(name)) {
+            found = true;
+        }
+    }
+    if !found {
+        return false;
+    }
+    probe := capture_field(&mut c, view(name), 0, 0);
+    k := ty_kind(&mut c, probe.ty);
+    if ((k == 5) || (k == 7) || (k == 27)) && (ty_mode(&mut c, probe.ty) == 0) {
+        return true;
+    }
+    return nested_exclusive_capture(&mut c, view(name));
+}
+// A writable capture of an exclusive slice, or of `&mut T[]`, which a nested closure re-borrows as
+// an exclusive slice over the whole of it. Any other exclusive reference has no re-borrow form.
+fn nested_exclusive_capture<a, b>(c: (&a mut C), name: &b [u8]) -> bool {
+    if capture_writable(&mut c, view(name)) == 0 {
+        return false;
+    }
+    probe := capture_field(&mut c, view(name), 0, 0);
+    k := ty_kind(&mut c, probe.ty);
+    if ty_mode(&mut c, probe.ty) == 0 {
+        return false;
+    }
+    if k == 27 {
+        return true;
+    }
+    return (k == 7) && (ty_kind(&mut c, ty_arg(&mut c, probe.ty)) == 6);
+}
+// `&mut x[:]` / `&x[:]` without tokens: a typed slice over the whole vector or slice `x`.
+fn whole_slice<a>(c: (&a mut C), x: Val, write: bool) -> Val {
+    xt := x.t;
+    elem := ty_arg(&mut c, x.ty);
+    start := imm(&mut c, 0);
+    end := apply(&mut c, view("rt_len"), one(xt));
+    mut width = 8;
+    if narrow_code(&mut c, elem) != 0 {
+        width = 4;
+    }
+    mut args = two(xt, start);
+    args.push(end);
+    args.push(imm(&mut c, width));
+    result := apply(&mut c, view("rt_vslice"), args);
+    sty := intern_full(&mut c, 27, elem, u64(write), u64[]);
+    own(&mut c, result, sty);
+    view_bonds(&mut c, result, xt, write, false);
+    return val(result, sty);
 }
 fn copy_bytes<a>(x: &a [u8]) -> u8[] {
     mut o = u8[];

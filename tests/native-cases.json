@@ -11297,21 +11297,21 @@
   {
     "name": "job-handle-holds-closure-loan-wrapper",
     "note": "the same through a non-generic wrapper: the loss was in the handle's type, not in the generic call",
-    "source": "fn sp(f: Fn<Send>()->u64) -> Job<u64> { return parallel_spawn(f); }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    view := &data;\n    j := sp(|| -> u64 view[0]);\n    println(eat(data));\n    println(parallel_join(j));\n}\n",
+    "source": "fn sp(f: Fn<Send, Owned>()->u64) -> Job<u64> { return parallel_spawn(f); }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    view := &data;\n    j := sp(|| -> u64 view[0]);\n    println(eat(data));\n    println(parallel_join(j));\n}\n",
     "reject": true,
-    "diagnostic": "move of unavailable or borrowed value"
+    "diagnostic": "this closure captures a borrow its type does not name"
   },
   {
     "name": "job-handle-in-record-holds-closure-loan",
     "note": "a record holding the handle holds the loan too",
-    "source": "struct Keep { j: Job<u64>, n: u64 }\nfn sp(f: Fn<Send>()->u64) -> Job<u64> { return parallel_spawn(f); }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    view := &data;\n    k := Keep { j: sp(|| -> u64 view[0]), n: 1 };\n    println(eat(data));\n    println(parallel_join(k.j));\n}\n",
+    "source": "struct Keep { j: Job<u64>, n: u64 }\nfn sp(f: Fn<Send, Owned>()->u64) -> Job<u64> { return parallel_spawn(f); }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    view := &data;\n    k := Keep { j: sp(|| -> u64 view[0]), n: 1 };\n    println(eat(data));\n    println(parallel_join(k.j));\n}\n",
     "reject": true,
-    "diagnostic": "move of unavailable or borrowed value"
+    "diagnostic": "this closure captures a borrow its type does not name"
   },
   {
     "name": "job-handle-loan-ends-at-wait",
-    "note": "once the job is waited on its handle is gone and the loan with it: the vector may move again",
-    "source": "fn sp(f: Fn<Send>()->u64) -> Job<u64> { return parallel_spawn(f); }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    mut got = 0;\n    {\n        view := &data;\n        j := sp(|| -> u64 view[0]);\n        got = parallel_join(j);\n    }\n    println(got + eat(data));\n}\n",
+    "note": "a wrapper that waits on the job before it returns may spawn a call-scoped closure: the handle took the closure's loans and is gone at the wait, so the vector may move again",
+    "source": "fn run(f: Fn<Send>()->u64) -> u64 { j := parallel_spawn(f); return parallel_join(j); }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    mut got = 0;\n    {\n        view := &data;\n        got = run(|| -> u64 view[0]);\n    }\n    println(got + eat(data));\n}\n",
     "stdout": "5\n"
   },
   {
@@ -11454,7 +11454,7 @@
     "note": "P19",
     "source": "// call_bonds hands a borrowing closure argument's loan to the call's result. Does that hold the\n// borrowed data in place?\nfn id(f: Fn()->u64) -> Fn()->u64 { return f; }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    view := &data;\n    g := id(|| -> u64 view[0]);\n    println(eat(data));\n    println(g());\n}\n",
     "reject": true,
-    "diagnostic": "move of unavailable or borrowed value"
+    "diagnostic": "returned borrow escapes its declared input lifetime"
   },
   {
     "name": "closure-bounds-p20-local-closure-keeps-loan",
@@ -11537,18 +11537,11 @@
     "diagnostic": "`FnMut<Share>` is not a type"
   },
   {
-    "name": "closure-bounds-lifetime-bound-not-yet",
-    "note": "stage 3 of the note",
-    "source": "fn each<s>(f: Fn<s>(u64) -> unit) -> unit { }\nfn main() { }\n",
-    "reject": true,
-    "diagnostic": "a lifetime bound on a closure type (`Fn<s>(..)`) is not implemented yet"
-  },
-  {
     "name": "closure-bounds-unknown-bound",
     "note": "the list reads three names",
     "source": "fn each(f: Fn<Sync>(u64) -> unit) -> unit { }\nfn main() { }\n",
     "reject": true,
-    "diagnostic": "a closure type's bounds are `Send`, `Share` and `Owned`"
+    "diagnostic": "a closure type's bounds are `Send`, `Share`, `Owned` and one lifetime"
   },
   {
     "name": "closure-bounds-container-is-exact",
@@ -15395,5 +15388,216 @@
       "riscv64"
     ],
     "note": "an owned parameter beside a refined one, called with a proved argument, then the heap is used again and the end-of-main allocator balance check runs: the old second entry restored callee-saved registers it never saved and corrupted the caller"
+  },
+  {
+    "name": "closure-bounds-lifetime-undeclared",
+    "note": "a closure lifetime must be declared like any other",
+    "source": "fn each(f: Fn<s>(u64) -> unit) -> unit { }\nfn main() { }\n",
+    "reject": true,
+    "diagnostic": "undeclared lifetime"
+  },
+  {
+    "name": "closure-call-scoped-stash-refused",
+    "note": "P14 / H5: a parameter typed `Fn(..)` borrows for the call; pushing it into storage that outlives the call is refused (was a use after free: SIGSEGV)",
+    "source": "// A callee that keeps the closure somewhere other than its result.\nstruct Q { items: (Fn()->u64)[] }\nfn stash<a>(q: (&a mut Q), f: Fn()->u64) -> unit { q.items.push(f); }\nfn fill<a>(q: (&a mut Q)) -> unit {\n    mut data = u64[41, 2, 3, 4];\n    view := &data;\n    stash(&mut q, || -> u64 view[0] + 1);\n}\nfn main() {\n    mut q = Q { items: (Fn()->u64)[] };\n    fill(&mut q);\n    mut junk = u64[9, 9, 9, 9, 9, 9];\n    f := q.items.pop()!;\n    println(f());\n}\n",
+    "reject": true,
+    "diagnostic": "this closure may only be used during the call it was passed to"
+  },
+  {
+    "name": "closure-call-scoped-dyn-over-fn-field-refused",
+    "note": "P27: a record holding a borrowing closure in an `Fn` field cannot be boxed as `dyn` (was: called after the frame was gone, exit 134)",
+    "source": "// The one way a borrow gets behind a `dyn`: a record whose field is an erased `Fn()->u64`. The\n// record \"holds no borrow\", so it may be boxed, kept, and called after the frame is gone.\ninterface Peek { fn peek(self: &Self) -> u64; }\nstruct Lazy { f: Fn()->u64 }\nimpl Peek for Lazy { fn peek(self: &Self) -> u64 { g := &self.f; return g(); } }\nstruct Q { items: (dyn Peek)[] }\nfn stash<a>(q: (&a mut Q), p: dyn Peek) -> unit { q.items.push(p); }\nfn fill<a>(q: (&a mut Q)) -> unit {\n    mut data = u64[41, 2, 3, 4];\n    view := &data;\n    stash(&mut q, Lazy { f: || -> u64 view[0] + 1 });\n}\nfn main() {\n    mut q = Q { items: (dyn Peek)[] };\n    fill(&mut q);\n    mut junk = u64[9, 9, 9, 9, 9, 9];\n    p := q.items.pop()!;\n    println(p.peek());\n}\n",
+    "reject": true,
+    "diagnostic": "a dyn value cannot hold borrowed data"
+  },
+  {
+    "name": "closure-call-scoped-return-refused",
+    "note": "returning a call-scoped closure parameter",
+    "source": "fn id(f: Fn() -> u64) -> Fn() -> u64 { return f; }\nfn main() { n := 1; g := id(|| -> u64 n); println(g()); }\n",
+    "reject": true,
+    "diagnostic": "returned borrow escapes its declared input lifetime"
+  },
+  {
+    "name": "closure-call-scoped-captured-and-returned-refused",
+    "note": "a call-scoped parameter captured by a closure that is returned escapes with it",
+    "source": "fn twice(f: Fn(u64) -> u64) -> Fn(u64) -> u64 { return |x: u64| -> u64 f(f(x)); }\nfn main() { n := 3; g := twice(|x: u64| -> u64 x + n); println(g(1)); }\n",
+    "reject": true,
+    "diagnostic": "returned borrow escapes its declared input lifetime"
+  },
+  {
+    "name": "closure-call-scoped-captured-locally",
+    "note": "...captured by a closure that stays in the call, it is fine",
+    "source": "fn twice(f: Fn(u64) -> u64) -> u64 { g := |x: u64| -> u64 f(x); h := g; return h(1); }\nfn main() { n := 3; println(twice(|x: u64| -> u64 x + n)); }\n",
+    "stdout": "4\n"
+  },
+  {
+    "name": "closure-call-scoped-forward-and-owned-store",
+    "note": "a call-scoped parameter may be called, aliased and passed on to another call-scoped parameter; one typed `Fn<Owned>` may be stored",
+    "source": "struct Q { items: (Fn() -> u64)[] }\nfn keep(q: (&mut Q), f: Fn<Owned>() -> u64) -> unit { q.items.push(f); }\nfn pass(f: Fn() -> u64) -> u64 { mut g = f; return run(g); }\nfn run(f: Fn() -> u64) -> u64 { return f(); }\nfn main() {\n    mut q = Q { items: (Fn() -> u64)[] };\n    n := 20;\n    keep(&mut q, || -> u64 n + 1);\n    println(pass(|| -> u64 n));\n    f := q.items.pop()!;\n    println(f());\n}\n",
+    "stdout": "20\n21\n"
+  },
+  {
+    "name": "closure-call-scoped-spawn-wrapper-must-wait",
+    "note": "a wrapper may hand its call-scoped closure to a job only if it waits before returning: the job takes over the closure's loans, so returning the handle is refused",
+    "source": "fn sp(f: Fn<Send>() -> u64) -> Job<u64> { return parallel_spawn(f); }\nfn main() { println(parallel_join(sp(|| -> u64 1))); }\n",
+    "reject": true,
+    "diagnostic": "returned borrow escapes its declared input lifetime"
+  },
+  {
+    "name": "iter-hidden-borrow-not-sent-to-job",
+    "note": "Q8 (a)/(b): an Iter mapped over `iter::refs(&v)` holds v's loan by flow and its `step` field is a bare `FnMut`, so it is not Send and cannot ride into a job (stands in for `thread::spawn`, which takes the same `FnMut<Send, Owned>`)",
+    "source": "use pool;\nuse iter;\nfn main() {\n    v := u64[1, 2, 3];\n    it := iter::map(iter::refs(&v), |x: &u64| -> u64 *x * 2);\n    j := pool::spawn(|| -> u64 { mut s = 0; for x in it { s += x; } return s; });\n    println(pool::wait(j));\n}\n",
+    "reject": true,
+    "diagnostic": "cannot transfer closure capture `it`",
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "iter-hidden-borrow-not-a-task-item",
+    "note": "...nor be handed to a task",
+    "source": "use iter;\nfn total(it: iter::Iter<u64>, unused: u64) -> u64 { mut s = 0; for x in it { s += x; } return s; }\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    v := u64[1, 2, 3];\n    it := iter::map(iter::refs(&v), |x: &u64| -> u64 *x + base);\n    t := spawn(sc, it, total);\n    return join(t);\n}\nfn main() { println(task_scope(10, body)); }\n",
+    "reject": true,
+    "diagnostic": "cannot transfer spawned item: step is a closure whose type does not say what it captured"
+  },
+  {
+    "name": "iter-hidden-borrow-not-returned",
+    "note": "...nor be returned past the vector it borrows: call_bonds bonded the mapped Iter to `refs(&v)`'s loans",
+    "source": "use iter;\nfn doubled() -> iter::Iter<u64> {\n    v := u64[1, 2, 3];\n    return iter::map(iter::refs(&v), |x: &u64| -> u64 *x * 2);\n}\nfn main() { for x in doubled() { println(x); } }\n",
+    "reject": true,
+    "diagnostic": "returned borrow escapes its declared input lifetime"
+  },
+  {
+    "name": "iter-hidden-borrow-blocks-push",
+    "note": "...nor be kept across a mutation of the vector",
+    "source": "use iter;\nfn main() {\n    mut v = u64[1, 2, 3];\n    it := iter::map(iter::refs(&v), |x: &u64| -> u64 *x * 2);\n    v.push(4);\n    for x in it { println(x); }\n}\n",
+    "reject": true,
+    "diagnostic": "mutation conflicts with live borrow"
+  },
+  {
+    "name": "iter-hidden-borrow-local-use",
+    "note": "...and consumed locally it is fine, and the vector is free again afterwards",
+    "source": "use iter;\nfn main() {\n    mut v = u64[1, 2, 3];\n    {\n        it := iter::map(iter::refs(&v), |x: &u64| -> u64 *x * 2);\n        mut s = 0;\n        for x in it { s += x; }\n        println(s);\n    }\n    v.push(4);\n    println(v.len());\n}\n",
+    "stdout": "12\n4\n"
+  },
+  {
+    "name": "iter-hidden-borrow-not-owned",
+    "note": "a record with a bare closure field is not `Owned`: `Owned` is the only way across a lifetime boundary",
+    "source": "use iter;\nfn keep<T: Owned>(t: T) -> u64 { return 1; }\nfn main() { v := u64[1, 2]; it := iter::map(iter::refs(&v), |x: &u64| -> u64 *x); println(keep(it)); }\n",
+    "reject": true,
+    "diagnostic": "type does not satisfy Owned: iter::Iter<u64> holds a closure whose type does not say it is `Owned`"
+  },
+  {
+    "name": "iter-hidden-borrow-not-send",
+    "note": "...nor Send",
+    "source": "use iter;\nfn keep<T: Send>(t: T) -> u64 { return 1; }\nfn main() { v := u64[1, 2]; it := iter::map(iter::refs(&v), |x: &u64| -> u64 *x); println(keep(it)); }\n",
+    "reject": true,
+    "diagnostic": "type does not satisfy Send: iter::Iter<u64>"
+  },
+  {
+    "name": "closure-region-stored-in-holder",
+    "note": "`Fn<s>(..)`: a closure whose borrows come from `s`; a holder labelled `s` may keep it, and calls through it work",
+    "source": "struct Holder<s> { items: (Fn<s>() -> u64)[] }\nfn holder<s>(f: Fn<s>() -> u64) -> Holder<s> { mut v = (Fn<s>() -> u64)[]; v.push(f); return Holder { items: v }; }\nfn add<a, s>(h: (&a mut Holder<s>), f: Fn<s>() -> u64) -> unit { h.items.push(f); }\nfn total<a, s>(h: (&a Holder<s>)) -> u64 { mut t = 0; for i in h.items.len() { f := &h.items[i]; t += f(); } return t; }\nfn main() {\n    data := u64[1, 2, 3];\n    r := &data;\n    mut h = holder(|| -> u64 r[0]);\n    r2 := &data;\n    add(&mut h, || -> u64 r2[2]);\n    println(total(&h));\n}\n",
+    "stdout": "4\n"
+  },
+  {
+    "name": "closure-region-holder-keeps-loan",
+    "note": "...the holder keeps the closure's loans: the borrowed vector cannot move while it lives",
+    "source": "struct Holder<s> { items: (Fn<s>() -> u64)[] }\nfn holder<s>(f: Fn<s>() -> u64) -> Holder<s> { mut v = (Fn<s>() -> u64)[]; v.push(f); return Holder { items: v }; }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    data := u64[1, 2, 3];\n    r := &data;\n    h := holder(|| -> u64 r[0]);\n    println(eat(data));\n    println(h.items.len());\n}\n",
+    "reject": true,
+    "diagnostic": "move of unavailable or borrowed value"
+  },
+  {
+    "name": "closure-region-local-escapes",
+    "note": "...a closure borrowing a local cannot leave in a `Holder<s>` returned past that local",
+    "source": "struct Holder<s> { items: (Fn<s>() -> u64)[] }\nfn holder<s>(f: Fn<s>() -> u64) -> Holder<s> { mut v = (Fn<s>() -> u64)[]; v.push(f); return Holder { items: v }; }\nfn mk<s>(x: (&s u64[])) -> Holder<s> {\n    local := u64[7];\n    lr := &local;\n    return holder(|| -> u64 lr[0]);\n}\nfn main() { d := u64[1]; h := mk(&d); println(h.items.len()); }\n",
+    "reject": true,
+    "diagnostic": "returned borrow escapes its declared input lifetime"
+  },
+  {
+    "name": "closure-region-from-input",
+    "note": "...one borrowing the input labelled `s` can",
+    "source": "struct Holder<s> { items: (Fn<s>() -> u64)[] }\nfn holder<s>(f: Fn<s>() -> u64) -> Holder<s> { mut v = (Fn<s>() -> u64)[]; v.push(f); return Holder { items: v }; }\nfn mk<s>(x: (&s u64[])) -> Holder<s> { return holder(|| -> u64 x[0] + 1); }\nfn main() { d := u64[41]; h := mk(&d); f := &h.items[0]; println(f()); }\n",
+    "stdout": "42\n"
+  },
+  {
+    "name": "closure-region-call-scoped-not-stored",
+    "note": "a call-scoped `Fn(..)` parameter cannot be stored where an `Fn<s>` is kept",
+    "source": "fn put<a, s>(v: (&a mut (Fn<s>() -> u64)[]), f: Fn() -> u64) -> unit { v.push(f); }\nfn main() { }\n",
+    "reject": true,
+    "diagnostic": "captured writeback violates invariant lifetime"
+  },
+  {
+    "name": "closure-nested-capture-shared",
+    "note": "a closure inside a closure body may capture the enclosing closure's captured shared reference: it is re-borrowed (`load(&rx)`) and the original loan kept",
+    "source": "fn main(){ x := u64[5]; rx := &x; f := || -> u64 { g := || -> u64 rx[0]; return g(); }; println(f()); }\n",
+    "stdout": "5\n"
+  },
+  {
+    "name": "closure-nested-capture-twice",
+    "note": "...twice, and the body still reads its own capture afterwards",
+    "source": "fn main(){ x := u64[5,6,7]; rx := &x; f := || -> u64 { g := || -> u64 rx[0]; h := || -> u64 rx[2]; return g() + h() + rx[1]; }; println(f()); }\n",
+    "stdout": "18\n"
+  },
+  {
+    "name": "closure-nested-capture-keeps-loan",
+    "note": "...and the nested closure keeps the borrow: the vector cannot move while it lives",
+    "source": "fn eat(v: u64[]) -> u64 { return v.len(); }\nfn main(){ x := u64[5,6,7]; rx := &x; f := || -> Fn() -> u64 { return || -> u64 rx[0]; }; g := f(); println(eat(x)); println(g()); }\n",
+    "reject": true,
+    "diagnostic": "move of unavailable or borrowed value"
+  },
+  {
+    "name": "closure-expression-body-captures-local-borrow",
+    "note": "an expression-bodied closure without a result type capturing a local borrow (the result-type probe refused it: `parameter requires a declared lifetime`)",
+    "source": "fn main(){ x := u64[4]; rx := &x; f := || rx[0] + 1; println(f()); }\n",
+    "stdout": "5\n"
+  },
+  {
+    "name": "scope-spawn-shared-borrows",
+    "note": "the minimal inline-running scope of docs/design/closure-bounds.md section 7: two spawned closures share `&x`",
+    "source": "struct Threads<s> { done: (FnMut<s>() -> u64)[] }\nfn scope<s, R>(body: FnMut<s>((&mut Threads<s>)) -> R) -> R {\n    mut t = Threads { done: (FnMut<s>() -> u64)[] };\n    mut b = body;\n    r := b(&mut t);\n    while let Some(f) = t.done.pop() { mut g = f; g(); }\n    return r;\n}\nfn spawn<a, s>(t: (&a mut Threads<s>), f: FnMut<s>() -> u64) -> unit { t.done.push(f); }\nfn main() {\n    x := u64[1, 2];\n    rx := &x;\n    n := scope(|t| -> u64 { spawn(&mut t, || -> u64 rx[0]); spawn(&mut t, || -> u64 rx[1]); return 7; });\n    println(n);\n}\n",
+    "stdout": "7\n"
+  },
+  {
+    "name": "scope-spawn-disjoint-exclusive",
+    "note": "the minimal inline-running scope of docs/design/closure-bounds.md section 7: disjoint `&mut x` and `&mut y` in two spawns; both writes land",
+    "source": "struct Threads<s> { done: (FnMut<s>() -> u64)[] }\nfn scope<s, R>(body: FnMut<s>((&mut Threads<s>)) -> R) -> R {\n    mut t = Threads { done: (FnMut<s>() -> u64)[] };\n    mut b = body;\n    r := b(&mut t);\n    while let Some(f) = t.done.pop() { mut g = f; g(); }\n    return r;\n}\nfn spawn<a, s>(t: (&a mut Threads<s>), f: FnMut<s>() -> u64) -> unit { t.done.push(f); }\nfn main() {\n    mut x = u64[1, 2];\n    mut y = u64[3];\n    mx := &mut x;\n    my := &mut y;\n    n := scope(|t| -> u64 { spawn(&mut t, || -> u64 { mx[0] = 5; return 1; }); spawn(&mut t, || -> u64 { my[0] = 6; return 2; }); return 3; });\n    println(n);\n    println(x[0] + y[0]);\n}\n",
+    "stdout": "3\n11\n"
+  },
+  {
+    "name": "scope-spawn-same-exclusive-refused",
+    "note": "the minimal inline-running scope of docs/design/closure-bounds.md section 7: two spawns cannot both hold `&mut x`",
+    "source": "struct Threads<s> { done: (FnMut<s>() -> u64)[] }\nfn scope<s, R>(body: FnMut<s>((&mut Threads<s>)) -> R) -> R {\n    mut t = Threads { done: (FnMut<s>() -> u64)[] };\n    mut b = body;\n    r := b(&mut t);\n    while let Some(f) = t.done.pop() { mut g = f; g(); }\n    return r;\n}\nfn spawn<a, s>(t: (&a mut Threads<s>), f: FnMut<s>() -> u64) -> unit { t.done.push(f); }\nfn main() {\n    mut x = u64[1, 2];\n    {\n        mx := &mut x;\n        n := scope(|t| -> u64 { spawn(&mut t, || -> u64 { mx[0] = 5; return 1; }); spawn(&mut t, || -> u64 { mx[1] = 6; return 2; }); return 3; });\n        println(n);\n    }\n}\n",
+    "reject": true,
+    "diagnostic": "reference is suspended or expired"
+  },
+  {
+    "name": "scope-spawn-body-local-refused",
+    "note": "the minimal inline-running scope of docs/design/closure-bounds.md section 7: a spawn cannot capture a borrow of the body's own local: the scope outlives it",
+    "source": "struct Threads<s> { done: (FnMut<s>() -> u64)[] }\nfn scope<s, R>(body: FnMut<s>((&mut Threads<s>)) -> R) -> R {\n    mut t = Threads { done: (FnMut<s>() -> u64)[] };\n    mut b = body;\n    r := b(&mut t);\n    while let Some(f) = t.done.pop() { mut g = f; g(); }\n    return r;\n}\nfn spawn<a, s>(t: (&a mut Threads<s>), f: FnMut<s>() -> u64) -> unit { t.done.push(f); }\nfn main() {\n    n := scope(|t| -> u64 { y := u64[1]; ry := &y; spawn(&mut t, || -> u64 ry[0]); return 1; });\n    println(n);\n}\n",
+    "reject": true,
+    "diagnostic": "captured writeback violates invariant lifetime"
+  },
+  {
+    "name": "scope-body-uses-after-spawn-refused",
+    "note": "the minimal inline-running scope of docs/design/closure-bounds.md section 7: the body cannot touch data a spawn borrowed mutably until the scope joins",
+    "source": "struct Threads<s> { done: (FnMut<s>() -> u64)[] }\nfn scope<s, R>(body: FnMut<s>((&mut Threads<s>)) -> R) -> R {\n    mut t = Threads { done: (FnMut<s>() -> u64)[] };\n    mut b = body;\n    r := b(&mut t);\n    while let Some(f) = t.done.pop() { mut g = f; g(); }\n    return r;\n}\nfn spawn<a, s>(t: (&a mut Threads<s>), f: FnMut<s>() -> u64) -> unit { t.done.push(f); }\nfn main() {\n    mut x = u64[1, 2];\n    {\n        mx := &mut x;\n        n := scope(|t| -> u64 { spawn(&mut t, || -> u64 { mx[0] = 5; return 1; }); mx[1] = 9; return 3; });\n        println(n);\n    }\n}\n",
+    "reject": true,
+    "diagnostic": "borrow conflicts with active access"
+  },
+  {
+    "name": "scope-body-writes-shared-spawn-refused",
+    "note": "the minimal inline-running scope of docs/design/closure-bounds.md section 7: ...nor write what a spawn reads",
+    "source": "struct Threads<s> { done: (Fn<s>() -> u64)[] }\nfn scope<s, R>(body: FnMut<s>((&mut Threads<s>)) -> R) -> R {\n    mut t = Threads { done: (Fn<s>() -> u64)[] };\n    mut b = body;\n    r := b(&mut t);\n    mut i = 0;\n    while i < t.done.len() { f := &t.done[i]; f(); i += 1; }\n    return r;\n}\nfn spawn<a, s>(t: (&a mut Threads<s>), f: Fn<s>() -> u64) -> unit { t.done.push(f); }\nfn main() {\n    mut x = u64[1, 2];\n    mx := &mut x;\n    n := scope(|t| -> u64 { spawn(&mut t, || -> u64 mx[0]); mx[0] = 9; return 1; });\n    println(n);\n}\n",
+    "reject": true,
+    "diagnostic": "borrow conflicts with active access"
+  },
+  {
+    "name": "scope-handle-cannot-leave-body",
+    "note": "the minimal inline-running scope of docs/design/closure-bounds.md section 7: a scoped handle carries the scope's lifetime and cannot be the scope's result",
+    "source": "struct ScopedThread<s> { id: u64 }\nstruct Threads<s> { done: (FnMut<s>() -> u64)[] }\nfn scope<s, R: Owned>(body: FnMut<s>((&mut Threads<s>)) -> R) -> R {\n    mut t = Threads { done: (FnMut<s>() -> u64)[] };\n    mut b = body;\n    r := b(&mut t);\n    while let Some(f) = t.done.pop() { mut g = f; g(); }\n    return r;\n}\nfn spawn<a, s>(t: (&a mut Threads<s>), f: FnMut<s>() -> u64) -> ScopedThread<s> { t.done.push(f); return ScopedThread { id: 1 }; }\nfn main() {\n    x := u64[1];\n    rx := &x;\n    h := scope(|t| spawn(&mut t, || -> u64 rx[0]));\n    println(h.id);\n}\n",
+    "reject": true,
+    "diagnostic": "returned borrow escapes its declared input lifetime"
   }
 ]
