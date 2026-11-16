@@ -28,6 +28,40 @@
   they are not the method of the same name: `strings::chars(t)` is a lazy `iter::Iter<char>`
   (`t.chars()` is every code point at once, a `char[]`), and `vecs::contains(&v, &x)` takes any
   `hash::Equal` element (the built-in `v.contains(x)` takes integer and bool elements only).
+- Fixed (test harness): **`test-native --jobs N` made every stripe build a second compiler** - the
+  parent passed its compiler as `GRAIL_COMPILER`, which `buildCompiler()` reads as the base to build
+  from - all into one directory at once, and each finished build was renamed over the binary the
+  other stripes were running, so a compile-time probe found its compiler "(deleted)". Stripes now run
+  the parent's compiler (`GRAIL_TEST_COMPILER`), and a finished build is put in place by a hard link
+  that never replaces an existing one.
+
+- Fixed: **a compile-time call with a signed result came back wrong.** A vector of signed integers
+  with a negative element stopped the probe (it printed each element through a checked `u64(..)`),
+  a negative scalar was read back as digits only, and every integer result was typed `u64`. Signed
+  elements are now printed as `i64`, a leading `-` is read, and the result keeps its own integer
+  type - in a `const`, a `NAME := f();` binding, a baked `static` and an `@f()` expression.
+
+- Fixed: **`@no_alloc` refused every function with a check that can fail** - an index, an overflow,
+  a division, a narrowing, an unwrap, a refined parameter - because the failure report allocated:
+  its texts were heap strings (`rt_new`, `rt_reserveb`, `rt_alloc`, and the runtime's literals are
+  heap values), and it reached the compiler's site-table helper through an unnamed indirect call.
+  The dying report is now written in a process-state report block (`rt_state` grows to 8192 bytes),
+  its literals are static views, and the helper call is a named edge. The checks still fail, so
+  `@no_panic` still refuses them.
+
+- **Module statics, baked tier** (docs/design/module-values.md, stage 1): `static NAME: T = init;`
+  where `init` is a constant expression or `@f(...)` computed while compiling. A static is one
+  read-only object in the declaring module's object: a number or `bool` read is a load, any other
+  read is a borrow (`TABLE[i]`, `TABLE.len()`, a `&u64[]` argument) that never copies or allocates,
+  so `@no_alloc` code may read it - unlike a `const` table or string, which is rebuilt at every read.
+  Types: integers, `bool`, `string`, vectors of integers and bytes. Refused with a reason: `static
+  mut`, a missing type, assignment or mutation, a borrow or a non-shareable type, a generic or
+  function-local static, a plain call (the lazy tier, not built yet), and an `@` initialiser that
+  cannot run at compile time. `pub static` crosses modules through the interface file.
+
+- Fixed: a module binding whose compile-time call was refused (`LOCK := make();` returning a
+  `Mutex`) was reported at the end of whichever file the compiler had parsed last - often
+  `lib/result.grl:129` - when nothing read it. The diagnostic now points at the binding.
 
 - Fixed: an effect attribute's name anywhere in a source file - a comment, a string - made the build
   one compiler run over the whole program, because the driver searched the bytes. It now looks for

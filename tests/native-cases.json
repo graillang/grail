@@ -6101,6 +6101,201 @@
     "note": "a module constant that calls a function is computed by the run tier (was refused before C3)"
   },
   {
+    "name": "comptime-unread-binding-error-at-binding",
+    "source": "fn make() -> Mutex<u64> {\n    return Mutex(0);\n}\nLOCK := make();\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "a compile-time call must give an integer, a bool, a string, bytes or a vector of integers",
+      "4 | LOCK := make();"
+    ],
+    "note": "a module binding nothing reads is computed at the end of the compile; its refusal points at the binding, not at the last file parsed (it pointed at lib/result.grl)"
+  },
+  {
+    "name": "static-baked-scalars",
+    "source": "const PAGE: u64 = 4096;\nstatic MASK: u64 = PAGE - 1;\nstatic NEG: i32 = -7;\nstatic ON: bool = PAGE > 1;\nstatic NAME: string = \"grail\";\nfn main() -> u64 {\n    println(MASK);\n    println(NEG);\n    println(ON);\n    println(NAME);\n    println(NAME.len());\n    return 0;\n}\n",
+    "stdout": "4095\n-7\ntrue\ngrail\n5\n",
+    "note": "module-values stage 1: baked statics from a constant expression (over a const), a negative literal, a bool expression and a string literal; a scalar read is a load of the static's word"
+  },
+  {
+    "name": "static-baked-table-no-copy",
+    "source": "static SQ: u64[] = @squares();\nstatic NAME: string = \"grail\";\nfn squares() -> u64[] {\n    mut v = u64[];\n    for i in 8 {\n        v.push(i * i);\n    }\n    return v;\n}\n@no_alloc\nfn sizes() -> u64 {\n    return SQ.len() + NAME.len();\n}\nfn sum(v: &u64[]) -> u64 {\n    mut t = 0;\n    for i in v.len() {\n        t += v[i];\n    }\n    return t;\n}\nfn main() -> u64 {\n    println(sizes());\n    println(SQ[3]);\n    println(sum(SQ));\n    r := SQ;\n    println(r[7]);\n    mut own = SQ.copy();\n    own.push(64);\n    println(own.len());\n    println(SQ.len());\n    return 0;\n}\n",
+    "stdout": "13\n9\n140\n49\n9\n8\n",
+    "note": "a table static is one object in read-only data: reading it borrows it (`@no_alloc` accepts `SQ.len()`, which a `NAME := f();` table constant refuses because each read copies), it passes as `&u64[]`, a binding of it is a borrow, and `.copy()` makes an owned vector"
+  },
+  {
+    "name": "static-baked-narrow-tables",
+    "source": "static SMALL: i16[] = @smalls();\nstatic WORDS: u32[] = @words();\nstatic BYTES: u8[] = @bytes();\nfn smalls() -> i16[] {\n    mut v = i16[];\n    v.push(3);\n    v.push(30000);\n    return v;\n}\nfn words() -> u32[] {\n    mut v = u32[];\n    v.push(70000);\n    v.push(4000000000);\n    return v;\n}\nfn bytes() -> u8[] {\n    mut v = u8[];\n    v.push(65);\n    v.push(255);\n    return v;\n}\nfn main() -> u64 {\n    println(SMALL[1]);\n    println(WORDS[0]);\n    println(WORDS[1]);\n    println(BYTES[1]);\n    println(BYTES.len() + WORDS.len() + SMALL.len());\n    return 0;\n}\n",
+    "stdout": "30000\n70000\n4000000000\n255\n6\n",
+    "note": "a table static is laid out as the runtime lays out a vector: a byte per u8, four bytes per 32-bit element, a word otherwise (the run tier hands it back in C layout)"
+  },
+  {
+    "name": "static-pub-across-modules",
+    "files": [
+      "tests/interfaces/table_user.grl"
+    ],
+    "modules": [
+      "tests/interfaces/table.grl"
+    ],
+    "interfaces": true,
+    "stdout": "12\ntrue\ntable\n55\n25\n8\n",
+    "note": "a pub static read from another module, built from source and interface-first: the interface carries the static's name, type and tier, and the storage is a symbol in the declaring module's object"
+  },
+  {
+    "name": "static-private-across-modules",
+    "files": [
+      "tests/interfaces/table_private_user.grl"
+    ],
+    "modules": [
+      "tests/interfaces/table.grl"
+    ],
+    "reject": true,
+    "diagnostic": "HIDDEN",
+    "note": "a static without `pub` is private to its module"
+  },
+  {
+    "name": "static-mut-refused",
+    "source": "static mut X: u64 = 1;\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "`static mut` does not exist",
+    "note": "S2: no mutable statics anywhere; mutation goes through a Mutex or an Atomic"
+  },
+  {
+    "name": "static-needs-type",
+    "source": "static X = 1;\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "a static needs its type",
+    "note": "S1: a static's type is always written"
+  },
+  {
+    "name": "static-assign-refused",
+    "source": "static X: u64 = 1;\nfn main() -> u64 {\n    X = 2;\n    return X;\n}\n",
+    "reject": true,
+    "diagnostic": "a static is immutable",
+    "note": "a static cannot be assigned"
+  },
+  {
+    "name": "static-push-refused",
+    "source": "static T: u64[] = @t();\nfn t() -> u64[] {\n    return u64[1, 2];\n}\nfn main() -> u64 {\n    T.push(3);\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "mutation through readonly frame",
+    "note": "a read of a static is a shared borrow, so it cannot be mutated through"
+  },
+  {
+    "name": "static-move-out-refused",
+    "source": "static T: u64[] = @t();\nfn t() -> u64[] {\n    return u64[1, 2];\n}\nfn take(v: u64[]) -> u64 {\n    return v.len();\n}\nfn main() -> u64 {\n    return take(T);\n}\n",
+    "reject": true,
+    "diagnostic": "expected `u64[]`, found `&u64[]`",
+    "note": "a static cannot be moved out of: its read is a borrow, and `.copy()` is the owned value"
+  },
+  {
+    "name": "static-holds-borrow-refused",
+    "source": "static T: &[u8] = \"x\";\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "a static cannot hold a borrow",
+    "note": "S3: no borrows in a static"
+  },
+  {
+    "name": "static-not-shareable-refused",
+    "source": "handle H;\nstatic X: H = 0;\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "a static is reachable from every thread at once, so its type must be shareable",
+    "note": "S3: a static's type must be shareable; an unaudited handle is thread-affine"
+  },
+  {
+    "name": "static-lazy-tier-not-built",
+    "source": "static L: Mutex<u64> = Mutex(0);\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "needs code run while the program runs (the lazy tier), which is not built yet",
+    "note": "a Mutex static needs the lazy tier, which waits for sync::Once (gaps12-sync)"
+  },
+  {
+    "name": "static-run-time-call-refused",
+    "source": "static T: u64[] = t();\nfn t() -> u64[] {\n    return u64[1, 2];\n}\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "write `@f(...)` to compute it while compiling",
+    "note": "S4: the tier is chosen by spelling; a plain call is the lazy tier"
+  },
+  {
+    "name": "static-generic-refused",
+    "source": "static T<X>: u64 = 1;\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "a static cannot be generic",
+    "note": "S1: no generic statics"
+  },
+  {
+    "name": "static-in-fn-refused",
+    "source": "fn main() -> u64 {\n    static X: u64 = 1;\n    return X;\n}\n",
+    "reject": true,
+    "diagnostic": "a static is declared at module level",
+    "note": "S1: no function-local statics"
+  },
+  {
+    "name": "static-at-cannot-bake",
+    "source": "static T: u64 = @now();\nfn now() -> u64 {\n    return host::now_ms();\n}\nfn main() -> u64 {\n    return T;\n}\n",
+    "reject": true,
+    "diagnostic": "compile-time code cannot use files, the clock, the network or processes",
+    "note": "S4: an `@` initialiser that cannot run at compile time is an error, never a quiet switch to the lazy tier"
+  },
+  {
+    "name": "static-name-clashes-const",
+    "source": "const X: u64 = 1;\nstatic X: u64 = 2;\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "a constant named `X` is already declared",
+    "note": "a static and a constant share a module's names"
+  },
+  {
+    "name": "static-wrong-type",
+    "source": "static T: u32[] = @t();\nfn t() -> u64[] {\n    return u64[1, 2];\n}\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "static `T` is declared `u32[]`, and `@t()` gives `u64[]`",
+    "note": "the initialiser's type must be the declared type"
+  },
+  {
+    "name": "static-out-of-range",
+    "source": "static T: u8 = 300;\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "integer 300 is out of range for u8",
+    "note": "a constant-expression initialiser must fit the declared type"
+  },
+  {
+    "name": "static-cycle-refused",
+    "source": "static T: u64 = @f();\nfn f() -> u64 {\n    return T + 1;\n}\nfn main() -> u64 {\n    return T;\n}\n",
+    "reject": true,
+    "diagnostic": "is still being computed",
+    "note": "S5: a static whose compile-time initialiser reads itself is a cycle"
+  },
+  {
+    "name": "static-float-not-built",
+    "source": "static F: f64 = 1.5;\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "a float static is not built yet",
+    "note": "floats are not a baked type yet; a const serves"
+  },
+  {
+    "name": "comptime-signed-i8-min-neg-max",
+    "source": "const C8_MIN: i8 = -128;\nconst C8_NEG: i8 = -1;\nconst C8_MAX: i8 = 127;\nfn table8() -> i8[] {\n    mut v = i8[];\n    v.push(-128);\n    v.push(-1);\n    v.push(127);\n    return v;\n}\nfn min8() -> i8 {\n    return -128;\n}\nfn neg8() -> i8 {\n    return -1;\n}\nfn max8() -> i8 {\n    return 127;\n}\nK8 := table8();\nR8 := min8();\nstatic S8: i8[] = @table8();\nstatic M8: i8 = @min8();\nstatic N8: i8 = -1;\nfn main() -> u64 {\n    println(C8_MIN);\n    println(C8_NEG);\n    println(C8_MAX);\n    println(K8[0]);\n    println(K8[1]);\n    println(K8[2]);\n    println(R8);\n    println(S8[0]);\n    println(S8[1]);\n    println(S8[2]);\n    println(M8);\n    println(N8);\n    println(@min8());\n    println(@neg8());\n    println(@max8());\n    return 0;\n}\n",
+    "stdout": "-128\n-1\n127\n-128\n-1\n127\n-128\n-128\n-1\n127\n-128\n-1\n-128\n-1\n127\n",
+    "note": "i8 at its minimum, -1 and its maximum in a const, a run-tier constant table and scalar (`K := table()`, `R := min()`), a baked static table and scalar (`@table()`, `@min()`), a constant-expression static and `@f()` in an expression. The run tier printed a signed vector through `u64(v[i])`, which stopped on a negative element, read a scalar back as digits only, and typed every integer result u64"
+  },
+  {
+    "name": "comptime-signed-i16-min-neg-max",
+    "source": "const C16_MIN: i16 = -32768;\nconst C16_NEG: i16 = -1;\nconst C16_MAX: i16 = 32767;\nfn table16() -> i16[] {\n    mut v = i16[];\n    v.push(-32768);\n    v.push(-1);\n    v.push(32767);\n    return v;\n}\nfn min16() -> i16 {\n    return -32768;\n}\nfn neg16() -> i16 {\n    return -1;\n}\nfn max16() -> i16 {\n    return 32767;\n}\nK16 := table16();\nR16 := min16();\nstatic S16: i16[] = @table16();\nstatic M16: i16 = @min16();\nstatic N16: i16 = -1;\nfn main() -> u64 {\n    println(C16_MIN);\n    println(C16_NEG);\n    println(C16_MAX);\n    println(K16[0]);\n    println(K16[1]);\n    println(K16[2]);\n    println(R16);\n    println(S16[0]);\n    println(S16[1]);\n    println(S16[2]);\n    println(M16);\n    println(N16);\n    println(@min16());\n    println(@neg16());\n    println(@max16());\n    return 0;\n}\n",
+    "stdout": "-32768\n-1\n32767\n-32768\n-1\n32767\n-32768\n-32768\n-1\n32767\n-32768\n-1\n-32768\n-1\n32767\n",
+    "note": "i16 at its minimum, -1 and its maximum in a const, a run-tier constant table and scalar (`K := table()`, `R := min()`), a baked static table and scalar (`@table()`, `@min()`), a constant-expression static and `@f()` in an expression. The run tier printed a signed vector through `u64(v[i])`, which stopped on a negative element, read a scalar back as digits only, and typed every integer result u64"
+  },
+  {
+    "name": "comptime-signed-i32-min-neg-max",
+    "source": "const C32_MIN: i32 = -2147483648;\nconst C32_NEG: i32 = -1;\nconst C32_MAX: i32 = 2147483647;\nfn table32() -> i32[] {\n    mut v = i32[];\n    v.push(-2147483648);\n    v.push(-1);\n    v.push(2147483647);\n    return v;\n}\nfn min32() -> i32 {\n    return -2147483648;\n}\nfn neg32() -> i32 {\n    return -1;\n}\nfn max32() -> i32 {\n    return 2147483647;\n}\nK32 := table32();\nR32 := min32();\nstatic S32: i32[] = @table32();\nstatic M32: i32 = @min32();\nstatic N32: i32 = -1;\nfn main() -> u64 {\n    println(C32_MIN);\n    println(C32_NEG);\n    println(C32_MAX);\n    println(K32[0]);\n    println(K32[1]);\n    println(K32[2]);\n    println(R32);\n    println(S32[0]);\n    println(S32[1]);\n    println(S32[2]);\n    println(M32);\n    println(N32);\n    println(@min32());\n    println(@neg32());\n    println(@max32());\n    return 0;\n}\n",
+    "stdout": "-2147483648\n-1\n2147483647\n-2147483648\n-1\n2147483647\n-2147483648\n-2147483648\n-1\n2147483647\n-2147483648\n-1\n-2147483648\n-1\n2147483647\n",
+    "note": "i32 at its minimum, -1 and its maximum in a const, a run-tier constant table and scalar (`K := table()`, `R := min()`), a baked static table and scalar (`@table()`, `@min()`), a constant-expression static and `@f()` in an expression. The run tier printed a signed vector through `u64(v[i])`, which stopped on a negative element, read a scalar back as digits only, and typed every integer result u64"
+  },
+  {
+    "name": "comptime-signed-i64-min-neg-max",
+    "source": "const C64_MIN: i64 = -9223372036854775808;\nconst C64_NEG: i64 = -1;\nconst C64_MAX: i64 = 9223372036854775807;\nfn table64() -> i64[] {\n    mut v = i64[];\n    v.push(-9223372036854775807 - 1);\n    v.push(-1);\n    v.push(9223372036854775807);\n    return v;\n}\nfn min64() -> i64 {\n    return -9223372036854775807 - 1;\n}\nfn neg64() -> i64 {\n    return -1;\n}\nfn max64() -> i64 {\n    return 9223372036854775807;\n}\nK64 := table64();\nR64 := min64();\nstatic S64: i64[] = @table64();\nstatic M64: i64 = @min64();\nstatic N64: i64 = -1;\nfn main() -> u64 {\n    println(C64_MIN);\n    println(C64_NEG);\n    println(C64_MAX);\n    println(K64[0]);\n    println(K64[1]);\n    println(K64[2]);\n    println(R64);\n    println(S64[0]);\n    println(S64[1]);\n    println(S64[2]);\n    println(M64);\n    println(N64);\n    println(@min64());\n    println(@neg64());\n    println(@max64());\n    return 0;\n}\n",
+    "stdout": "-9223372036854775808\n-1\n9223372036854775807\n-9223372036854775808\n-1\n9223372036854775807\n-9223372036854775808\n-9223372036854775808\n-1\n9223372036854775807\n-9223372036854775808\n-1\n-9223372036854775808\n-1\n9223372036854775807\n",
+    "note": "i64 at its minimum, -1 and its maximum in a const, a run-tier constant table and scalar (`K := table()`, `R := min()`), a baked static table and scalar (`@table()`, `@min()`), a constant-expression static and `@f()` in an expression. The run tier printed a signed vector through `u64(v[i])`, which stopped on a negative element, read a scalar back as digits only, and typed every integer result u64"
+  },
+  {
     "name": "comptime-module-if-record-layout",
     "source": "extern \"C\" record H { a: u32 }\n@if size_of(H) == 4 {\n    fn f() -> u64 {\n        return 1;\n    }\n}\nfn main() -> u64 {\n    return 0;\n}\n",
     "reject": true,
@@ -8023,6 +8218,32 @@
     "backends": [
       "native"
     ]
+  },
+  {
+    "name": "effects-no-alloc-failing-checks-accepted",
+    "source": "@no_alloc\nfn add(a: u64, b: u64) -> u64 {\n    return a + b;\n}\n@no_alloc\nfn div(a: u64, b: u64) -> u64 {\n    return a / b;\n}\n@no_alloc\nfn narrow(a: u64) -> u8 {\n    return u8(a);\n}\n@no_alloc\nfn unwrap(x: u64?) -> u64 {\n    return x!;\n}\n@no_alloc\nfn first(v: &u64[]) -> u64 {\n    return v[0];\n}\n@no_alloc\nfn pick(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn main() -> u64 {\n    v := u64[1, 2, 3];\n    println(add(1, 2));\n    println(div(6, 3));\n    println(narrow(7));\n    println(unwrap(Some(4)));\n    println(first(&v));\n    println(pick(&v, 2));\n    return 0;\n}\n",
+    "stdout": "3\n2\n7\n4\n1\n3\n",
+    "note": "a check that can fail (index, overflow, division, narrowing, unwrap, a refined parameter) no longer makes a `@no_alloc` function allocate: the dying report is built in the process-state report block, the runtime's literals there are static views, and the call to the compiler's site helper is a named edge. Each still fails, so `@no_panic` still refuses them"
+  },
+  {
+    "name": "effects-no-alloc-index-failure-reports-site",
+    "source": "@no_alloc\nfn third(v: &u64[]) -> u64 {\n    return v[3];\n}\nfn main() -> u64 {\n    v := u64[1, 2, 3, 4];\n    println(third(&v));\n    w := u64[1];\n    println(third(&w));\n    return 0;\n}\n",
+    "stdout": "4\n",
+    "signal": "SIGABRT",
+    "stderr": [
+      "error: index 3 out of bounds for length 1\n --> ",
+      ":3:5\n = called from ",
+      ":9:5\n"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a bounds failure inside a `@no_alloc` function still says what failed, where, and who called it, written from the static report block"
   },
   {
     "name": "effects-no-alloc-push-refused",

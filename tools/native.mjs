@@ -1,7 +1,7 @@
 // Build/test orchestration only. Language checking and instruction selection live in Grail.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, renameSync, rmSync, statSync, accessSync, constants as fsConstants } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, renameSync, rmSync, statSync, accessSync, linkSync, constants as fsConstants } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { constants as zlibConstants, zstdCompressSync, zstdDecompressSync } from 'node:zlib';
@@ -395,6 +395,19 @@ export function bootstrapCompiler() {
 // path and succeeded looked like a build and was not one, which cost two people a debugging
 // session. Use `bootstrapCompiler()` when you want the compiler to build WITH, and
 // `bun tools/native.mjs compiler` to print a path without building anything.
+// Put a finished build in place without ever replacing one that is already there. A rename over an
+// existing executable unlinks the file other processes are running, so their /proc/self/exe reads
+// "... (deleted)" and anything that re-runs the compiler by its own path (a compile-time probe)
+// fails. A hard link fails instead when the name exists; the loser keeps the winner's identical
+// build and drops its own.
+function claimExecutable(pending, executable) {
+  try {
+    linkSync(pending, executable);
+  } catch (error) {
+    if (error?.code !== 'EEXIST') throw error;
+  }
+  rmSync(pending, { force: true });
+}
 export function buildCompiler() {
   const base = bootstrapCompiler();
   const baseStat = statSync(base);
@@ -418,7 +431,7 @@ export function buildCompiler() {
   // unconditionally until the reseed drops them.
   command([base, '--default-u64', '--typed-refs', output, ...compilerSources], { env: compilerEnvironment() });
   const pending = assemble(output, join(directory, `grail.pending.${process.pid}`));
-  renameSync(pending, executable);
+  claimExecutable(pending, executable);
   for (const leftover of [output, pending, `${pending}.o`, `${pending}.s`]) {
     if (existsSync(leftover)) rmSync(leftover);
   }
@@ -473,7 +486,7 @@ export function buildReleaseCompiler({ log = () => {} } = {}) {
     rmSync(pending);
     throw new Error('the release compiler does not emit what the native build emits for the compiler\'s own sources: not accepted');
   }
-  renameSync(pending, executable);
+  claimExecutable(pending, executable);
   writeFileSync(latest, `${executable}\n`);
   return executable;
 }

@@ -131,7 +131,25 @@ fn rt_fail(kind: u64, a: u64, b: u64) -> u64 {
     if rt_abort_begin() == 0 {
         rt_abort_park();
     }
-    return rt_report_die(rt_fail_body_text(kind, a, b), rt_fail_site_full());
+    // The report is built in the process-state report block, never on the heap: a failure may be
+    // raised where the allocator lock is held, and `@no_alloc` code may index (its bounds check
+    // reaches this function), so the dying path does not touch the allocator at all.
+    buf := rt_report_buf();
+    mut n = rt_fail_put(buf, 0, view("error: "));
+    n = rt_fail_body(kind, a, b, buf, n);
+    raw_putbyte(buf + n, 10);
+    n = rt_fail_where(buf, n + 1);
+    rt_write_all(2, buf, n);
+    return rt_abort_final();
+}
+// The failure report block: process-state words 4096..8152 hold the text, 8152..8192 the site
+// descriptor rt_fail_where fills. Only the holder of the abort claim writes it, so one block serves
+// every thread. rt_fail_limit() + the longest single piece written past it stays inside 4056 bytes.
+fn rt_report_buf() -> u64 {
+    return raw_state() + 4096;
+}
+fn rt_report_sites() -> u64 {
+    return raw_state() + 8152;
 }
 // An inline check in compiled code failed (the compiler rewrote its `call rt_abort`): for an index
 // check the vector is in `a` and the index in `b`.
@@ -171,7 +189,7 @@ fn rt_site_text(entry: u64) -> u64 {
     rt_reserveb(s, 400);
     mut n = 0;
     if entry != 0 {
-        n = rt_fail_line(raw_load(s), 0, entry, " --> ");
+        n = rt_fail_line(raw_load(s), 0, entry, view(" --> "));
     }
     raw_store(s + 8, n);
     return s;
@@ -366,59 +384,59 @@ fn rt_site_here(scratch: u64) -> u64 {
 fn rt_fail_body(kind: u64, a: u64, b: u64, buf: u64, n: u64) -> u64 {
     mut at = n;
     if kind == 1 {
-        at = rt_fail_put(buf, at, "index ");
+        at = rt_fail_put(buf, at, view("index "));
         at = rt_fail_num(buf, at, a);
-        at = rt_fail_put(buf, at, " out of bounds for length ");
+        at = rt_fail_put(buf, at, view(" out of bounds for length "));
         at = rt_fail_num(buf, at, b);
     } else if kind == 2 {
-        at = rt_fail_put(buf, at, "arithmetic overflow");
+        at = rt_fail_put(buf, at, view("arithmetic overflow"));
     } else if kind == 3 {
-        at = rt_fail_put(buf, at, "negative value converted to an unsigned type");
+        at = rt_fail_put(buf, at, view("negative value converted to an unsigned type"));
     } else if kind == 4 {
-        at = rt_fail_put(buf, at, "value has no matching variant");
+        at = rt_fail_put(buf, at, view("value has no matching variant"));
     } else if kind == 5 {
-        at = rt_fail_put(buf, at, "division by zero");
+        at = rt_fail_put(buf, at, view("division by zero"));
     } else if kind == 6 {
-        at = rt_fail_put(buf, at, "unwrap of None or Err");
+        at = rt_fail_put(buf, at, view("unwrap of None or Err"));
     } else if kind == 7 {
-        at = rt_fail_put(buf, at, "range ");
+        at = rt_fail_put(buf, at, view("range "));
         at = rt_fail_num(buf, at, a);
-        at = rt_fail_put(buf, at, "..");
+        at = rt_fail_put(buf, at, view(".."));
         at = rt_fail_num(buf, at, b);
-        at = rt_fail_put(buf, at, " out of bounds");
+        at = rt_fail_put(buf, at, view(" out of bounds"));
     } else if kind == 8 {
-        at = rt_fail_put(buf, at, "pop from an empty vector");
+        at = rt_fail_put(buf, at, view("pop from an empty vector"));
     } else if kind == 9 {
-        at = rt_fail_put(buf, at, "byte value ");
+        at = rt_fail_put(buf, at, view("byte value "));
         at = rt_fail_num(buf, at, a);
-        at = rt_fail_put(buf, at, " does not fit in u8");
+        at = rt_fail_put(buf, at, view(" does not fit in u8"));
     } else if kind == 10 {
-        at = rt_fail_put(buf, at, "C array length mismatch: got ");
+        at = rt_fail_put(buf, at, view("C array length mismatch: got "));
         at = rt_fail_num(buf, at, a);
-        at = rt_fail_put(buf, at, " elements for an array of ");
+        at = rt_fail_put(buf, at, view(" elements for an array of "));
         at = rt_fail_num(buf, at, b);
     } else if kind == 11 {
-        at = rt_fail_put(buf, at, "index out of bounds");
+        at = rt_fail_put(buf, at, view("index out of bounds"));
     } else if kind == 12 {
-        at = rt_fail_put(buf, at, "assertion failed");
+        at = rt_fail_put(buf, at, view("assertion failed"));
     } else if kind == 13 {
-        at = rt_fail_put(buf, at, "the task failed");
+        at = rt_fail_put(buf, at, view("the task failed"));
     } else if kind == 14 {
         // A conversion whose value the target type cannot hold: `u8(300)`. The type is the code
         // `rt_int_cast` was given, so the report names it the way the source did.
-        at = rt_fail_put(buf, at, "value ");
+        at = rt_fail_put(buf, at, view("value "));
         at = rt_fail_num(buf, at, a);
-        at = rt_fail_put(buf, at, " does not fit in ");
+        at = rt_fail_put(buf, at, view(" does not fit in "));
         at = rt_fail_type(buf, at, b);
     } else if kind == 15 {
         // The same, for a negative value and a signed target, where the word in the register is the
         // two's-complement of the number the program wrote.
-        at = rt_fail_put(buf, at, "value -");
+        at = rt_fail_put(buf, at, view("value -"));
         at = rt_fail_num(buf, at, a);
-        at = rt_fail_put(buf, at, " does not fit in ");
+        at = rt_fail_put(buf, at, view(" does not fit in "));
         at = rt_fail_type(buf, at, b);
     } else {
-        at = rt_fail_put(buf, at, "the program aborted");
+        at = rt_fail_put(buf, at, view("the program aborted"));
     }
     return at;
 }
@@ -496,9 +514,8 @@ fn rt_write_text(fd: u64, s: u64) -> u64 {
 fn rt_fail_limit() -> u64 {
     return 3900;
 }
-// A literal at the call site is a heap value in this module and no dropper releases it; that is
-// invisible to rt_fail, which ends the process, and rt_backtrace therefore writes its punctuation
-// byte by byte instead of calling this.
+// `text` is a static view (`view("...")`): a bare literal in this module is a heap value, and the
+// failure report must not allocate. rt_backtrace writes its punctuation byte by byte instead.
 fn rt_fail_put(buf: u64, n: u64, text: string) -> u64 {
     mut at = n;
     for i in text.len() {
@@ -538,8 +555,8 @@ fn rt_refine(msg: u64, req: u64) -> u64 {
     if rt_abort_begin() == 0 {
         rt_abort_park();
     }
-    buf := rt_alloc(1024);
-    mut n = rt_fail_put(buf, 0, "error: refinement violated: ");
+    buf := rt_report_buf();
+    mut n = rt_fail_put(buf, 0, view("error: refinement violated: "));
     mut i = 0;
     while (raw_byte(msg + i) != 0) & (n < rt_fail_limit() - 400) {
         raw_putbyte(buf + n, raw_byte(msg + i));
@@ -564,16 +581,15 @@ fn rt_fail_where(buf: u64, n: u64) -> u64 {
     // The program's entry stores the compiler-emitted rt_sites in state word 3400; asked for the
     // descriptor (rt_sites_fill), it fills in the tables' bounds and the caller's frame pointer. No
     // table, a refused descriptor or zeros: no location lines.
-    info := rt_alloc(rt_sites_words() * 8);
+    // Reached only by the holder of the abort claim, so the report block's descriptor words are free.
+    info := rt_report_sites();
     have := rt_sites_fill(info);
     if have < 3 {
-        rt_free(info);
         return n;
     }
     begin := raw_load(info);
     end := raw_load(info + 8);
     if (begin == 0) + (end <= begin) {
-        rt_free(info);
         return n;
     }
     mut frame = raw_load(info + 16);
@@ -610,9 +626,9 @@ fn rt_fail_where(buf: u64, n: u64) -> u64 {
             // a failure report names the program, never the runtime's frames.
             if (name != 0) & ((flags >> 63) == 0) {
                 if lines == 0 {
-                    at = rt_fail_line(buf, at, hit, " --> ");
+                    at = rt_fail_line(buf, at, hit, view(" --> "));
                 } else {
-                    at = rt_fail_line(buf, at, hit, " = called from ");
+                    at = rt_fail_line(buf, at, hit, view(" = called from "));
                 }
                 lines = lines + 1;
             }
@@ -1493,11 +1509,11 @@ fn rt_leak_exit() -> u64 {
     s := rt_new();
     rt_reserveb(s, 160);
     buf := raw_load(s);
-    mut n = rt_fail_put(buf, 0, "note: ");
+    mut n = rt_fail_put(buf, 0, view("note: "));
     n = rt_fail_num(buf, n, live);
-    n = rt_fail_put(buf, n, " allocation(s) still live after ");
+    n = rt_fail_put(buf, n, view(" allocation(s) still live after "));
     n = rt_fail_num(buf, n, failures);
-    n = rt_fail_put(buf, n, " contained task failure(s); the owners of a discarded stack are not released\n");
+    n = rt_fail_put(buf, n, view(" contained task failure(s); the owners of a discarded stack are not released\n"));
     raw_store(s + 8, n);
     rt_write_text(2, s);
     return 0;
@@ -2844,6 +2860,8 @@ fn rt_thread_join(handle: u64) -> u64 {
 //   3600..3840   stack-fault report scratch  rt_stack_report_words      main-stack-overflow
 //   3840         Windows fiber state          os-windows                 --
 //   3856..       Windows fiber table          os-windows                 --
+//   4096..8152   failure report text          rt_report_buf              statics-no-alloc
+//   8152..8192   failure report descriptor    rt_report_sites            statics-no-alloc
 //
 // Not a claim: thread-record word 48 (raw_state() + 176 for the main thread). os-windows keeps the
 // per-thread WaitOnAddress expected value there, so nothing else may use it. The pool did, which was
