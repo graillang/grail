@@ -491,6 +491,10 @@ struct C {
     // Per type id: 0 not yet known, else 1 + (1 if the type is a plain record) + (2 if it is a
     // record that stores a plain record inline).
     layout_memo: u64[],
+    // Per type id, for a record that stores a plain record inline: for each field its word offset
+    // times two, plus one when the field is itself inline, and then the record's size in words
+    // times two. Empty until asked (field_layout). Types are never removed, so it never goes stale.
+    layout_offsets: u64[][],
     // An exported callback's float result: 0 none, 1 f64, 2 f32 (returned in xmm0/d0/fa0).
     export_fret: u64,
     // Set for one cfield_load: another `.field` projection follows this one.
@@ -20535,11 +20539,35 @@ fn field_word<a>(c: (&a mut C), ty: u64, k: u64) -> u64 {
     if (layout_bits(&mut c, ty) & 2) == 0 {
         return k;
     }
-    mut word = 0;
-    for i in k {
-        word = word + field_words(&mut c, ty, i);
+    at := field_layout(&mut c, ty);
+    return c.layout_offsets[at][k] / 2;
+}
+// The offsets table of a record that holds plain records inline, worked out once per type.
+fn field_layout<a>(c: (&a mut C), alias: u64) -> u64 {
+    ty := base_type(&mut c, alias);
+    while c.layout_offsets.len() <= ty {
+        c.layout_offsets.push(u64[]);
     }
-    return word;
+    if c.layout_offsets[ty].len() != 0 {
+        return ty;
+    }
+    d := ty_arg(&mut c, ty);
+    count := c.decls[d].count;
+    mut table = u64[];
+    mut word = 0;
+    for i in count {
+        ft := field_type(&mut c, ty, i);
+        if plain(&mut c, ft) {
+            table.push(word * 2 + 1);
+            word = word + record_words(&mut c, base_type(&mut c, ft));
+        } else {
+            table.push(word * 2);
+            word = word + 1;
+        }
+    }
+    table.push(word * 2);
+    c.layout_offsets[ty] = table;
+    return ty;
 }
 // A plain record: a struct or tuple with no `Drop`, whose every field is a number, a bool, a char,
 // unit, a reference, a function or C pointer, or a plain record. It owns nothing, so it can be
@@ -20582,14 +20610,8 @@ fn inline_field<a>(c: (&a mut C), ty: u64, k: u64) -> bool {
     if (layout_bits(&mut c, ty) & 2) == 0 {
         return false;
     }
-    return plain(&mut c, field_type(&mut c, ty, k));
-}
-fn field_words<a>(c: (&a mut C), ty: u64, k: u64) -> u64 {
-    ft := field_type(&mut c, ty, k);
-    if plain(&mut c, ft) {
-        return record_words(&mut c, base_type(&mut c, ft));
-    }
-    return 1;
+    at := field_layout(&mut c, ty);
+    return (c.layout_offsets[at][k] & 1) != 0;
 }
 fn container_record<a>(c: (&a mut C), ty: u64) -> bool {
     if ty_kind(&mut c, ty) != 8 {
@@ -20707,8 +20729,9 @@ fn record_words<a>(c: (&a mut C), ty: u64) -> u64 {
     if (layout_bits(&mut c, ty) & 2) == 0 {
         return c.decls[d].count;
     }
-    count := c.decls[d].count;
-    return field_word(&mut c, ty, count);
+    at := field_layout(&mut c, ty);
+    count := c.layout_offsets[at].len() - 1;
+    return c.layout_offsets[at][count] / 2;
 }
 fn field_store<a>(c: (&a mut C), base: u64, ty: u64, k: u64, value: u64) -> unit {
     if inline_field(&mut c, ty, k) {
@@ -44289,6 +44312,7 @@ pub fn main() -> u64 {
         caddr: u64[],
         interior: u64[],
         layout_memo: u64[],
+        layout_offsets: u64[][],
         export_fret: 0,
         cfield_more: 0,
         alias_next: 1,
