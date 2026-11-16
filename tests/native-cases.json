@@ -8034,11 +8034,27 @@
   },
   {
     "name": "main-stack-overflow-reports-and-exits-134",
-    "note": "Recursion on the main thread runs the kernel's stack out. There is no page the runtime can make PROT_NONE there, so the fault is recognised by its distance from the interrupted stack pointer (read out of ucontext) and reported on the alternate stack: the same message a task's overflow prints, the statement the frame was entering, and status 134. The fault lands in a frame's prologue, whose statement entry carries no position, so the location is the first statement of the function that overflowed.",
+    "note": "Recursion on the main thread runs the kernel's stack out. There is no page the runtime can make PROT_NONE there, so the fault is recognised by its distance from the interrupted stack pointer (read out of ucontext) and reported on the alternate stack: the same message a task's overflow prints, the statement the frame was entering, and status 134. The fault lands in a frame's prologue, whose statement entry carries no position, so the location is the first statement of the function that overflowed. On every backend: the location line is pinned by main-stack-overflow-names-the-place, native only.",
     "source": "// The main thread's stack is the kernel's: it has no PROT_NONE page and no guard, and before\n// this handler existed a program that ran it out died of SIGSEGV with empty stderr. The fault\n// address is inside a stack's worth of the interrupted stack pointer, so it is named as what it\n// is - `error: stack overflow`, the statement the overflowing frame was entering, status 134 -\n// and not left as an unexplained signal.\nfn f(n: u64) -> u64 {\n    if n == 0 {\n        return 0;\n    }\n    return 1 + f(n - 1);\n}\nfn main() {\n    println(\"before\");\n    println(f(100000000));\n}\n",
     "stdout": "before\n",
     "status": 134,
-    "stderr": ["error: stack overflow\n", " --> "]
+    "stderr": [
+      "error: stack overflow\n"
+    ]
+  },
+  {
+    "name": "main-stack-overflow-names-the-place",
+    "note": "the report names where the stack ran out; the location comes from the site table, which only the native backend emits (the LLVM path has none: docs/testing.md)",
+    "source": "// The main thread's stack is the kernel's: it has no PROT_NONE page and no guard, and before\n// this handler existed a program that ran it out died of SIGSEGV with empty stderr. The fault\n// address is inside a stack's worth of the interrupted stack pointer, so it is named as what it\n// is - `error: stack overflow`, the statement the overflowing frame was entering, status 134 -\n// and not left as an unexplained signal.\nfn f(n: u64) -> u64 {\n    if n == 0 {\n        return 0;\n    }\n    return 1 + f(n - 1);\n}\nfn main() {\n    println(\"before\");\n    println(f(100000000));\n}\n",
+    "stdout": "before\n",
+    "status": 134,
+    "stderr": [
+      "error: stack overflow\n",
+      " --> "
+    ],
+    "backends": [
+      "native"
+    ]
   },
   {
     "name": "wild-pointer-dies-by-sigsegv-without-an-overflow-report",
