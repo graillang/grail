@@ -23,6 +23,25 @@ Every claim is marked **[V]** verified (file:line in this tree, or a probe whose
 | D9 | Parallel loops: teach the borrow checker index ranges, or construct disjointness in builtins? | Construct it: one N-ary builtin `parallel_for_zip` and `split_at_mut`. Range-aware loans only if those prove too narrow (stage 6, optional). |
 | D10 | Dynamic ECS (component sets chosen at run time)? | Runtime borrow flags per column, in a library. Static columns (record fields) are checked at compile time. |
 
+### Decided by the director, 2026-11-16
+
+- **D1** yes, and wider: stage 0 (hardware `f32` rounding) plus stage 0b - a float operation on the
+  native backend must not be a call at all. Both are being built on branch `gaps12-float`.
+- **D2, D3, D4, D5, D6, D8, D10**: as recommended.
+- **D7 / Q6**: 64-byte alignment is guaranteed for payloads of 512 bytes or more, not for every
+  buffer of 64. It lands after the allocator fast-path rewrite on `gaps12-alloc`.
+- **D9**: construct disjointness (`parallel_for_zip`, `split_at_mut` with the sibling-loan flag);
+  range-aware loans stay deferred. The split is given as a **grain** (elements per piece), not a chunk
+  count, matching `docs/design/concurrency-model.md` (branch `gaps12-concurrency-design`): recursive
+  halving down to the grain, results combined in index order, a function of `(n, grain)` only.
+  Stage 1 here waits for that design's stage 1 (jobs on the one scheduler).
+- **Q1**: NaN payload bits are unspecified. A float result that is a NaN is a quiet NaN and nothing
+  more is promised; tests compare bit patterns of non-NaN results and NaN-ness of the rest.
+- **Q2**: multi-word values, SIMD included, go by hidden pointer in the first version; the
+  unboxed-values note owns the rule.
+- **Q3**: `mul_add` is absent in v1. **Q4**: no runtime CPU dispatch in v1. **Q5**: integer lanes
+  always wrap, documented.
+
 ## 1. What exists
 
 ### 1.1 Float arithmetic, native backend
@@ -344,16 +363,18 @@ supplies three of the four things an ECS-style loop needs:
 
 ```grl
 // builtin; lib/pool.grl wraps it as pool::zip2, zip3, zip4 with ordinary generic signatures
-parallel_for_zip(chunks, f, &mut pos[0: n], &vel[0: n], &mut life[0: n]);
+parallel_for_zip(grain, f, &mut pos[0: n], &vel[0: n], &mut life[0: n]);
 
-pool::zip2(&mut pos[0: n], &vel[0: n], 16,
+pool::zip2(&mut pos[0: n], &vel[0: n], 4096,
     |p: &mut [f32], v: &[f32]| -> unit {
         for i in p.len() { p[i] = p[i] + v[i] * DT; }
     });
 ```
 
 - Any number of slice arguments, each `&mut [T]` or `&[T]`, element types independent. The callback
-  takes the same list; chunk `k` of every slice covers the same index range.
+  takes the same list; every piece covers the same index range of every slice. `grain` is elements
+  per piece: the range is halved recursively until a piece is no longer than the grain, so the split
+  is a function of `(n, grain)` only (the job model's rule, `docs/design/concurrency-model.md`).
 - **Compile-time, existing checks reused:** each argument takes its loan at the call, so the same
   vector twice with one `&mut` is today's `E0008`; exclusive elements must be transferable, shared
   elements shareable; the callback is `Fn` with shareable captures and cannot capture any argument's
@@ -366,19 +387,20 @@ pool::zip2(&mut pos[0: n], &vel[0: n], 16,
   but not `v[i]`; the builtin states the fact `v.len() == p.len()` at callback entry so the prover can
   drop the second check **[A: needs the prover to accept a builtin-stated fact]**.
 - Runtime: `rt_parallel_for_chunks` (`runtime.grl:2992`) already takes a width; it becomes an array
-  of `{data, width}` pairs. Chunk size is rounded to whole cache lines (3.1).
+  of `{data, width}` pairs. A grain is rounded up to whole cache lines where the element size divides 64 (3.1).
 
 Two smaller additions with the same construction:
 
 ```grl
 // the chunk's first index, for reading captured tables or writing an owned per-chunk result
-pool::chunks_mut_at(&mut xs[0: n], 16, |base: u64, s: &mut [f32]| -> unit { ... });
-// read-only reduction, results in chunk order, so the answer depends on `chunks` and nothing else
-sums := pool::map_chunks(&xs[0: n], 16, |s: &[f32]| -> f32 simd::sum(s));
+pool::chunks_mut_at(&mut xs[0: n], 4096, |base: u64, s: &mut [f32]| -> unit { ... });
+// read-only reduction, combined in index order, so the answer depends on (n, grain) and nothing else
+total := pool::reduce_chunks(&xs[0: n], 4096, 0.0, |s: &[f32]| -> f32 simd::sum(s), |a: f32, b: f32| -> f32 a + b);
 ```
 
-Chunk count is always an argument, never "number of cores", because float reductions depend on it and
-D4 wants the same answer on every machine.
+The grain is always an argument, never derived from the number of cores, because float reductions
+depend on the split and D4 wants the same answer on every machine. The names follow the job model's
+`chunks_mut(data, grain, f)`, `range` and `reduce`.
 
 ### 4.3 `split_at_mut`: disjoint ranges without teaching the checker ranges
 
@@ -400,8 +422,8 @@ from the job design: a structured `join` whose branches may capture borrows.
 ```grl
 pub struct World { pos: f32[], vel: f32[], health: u32[], names: string[] }
 
-fn integrate(pos: (&mut [f32]), vel: (&[f32])) -> unit { pool::zip2(pos, vel, 16, step); }
-fn regen(health: (&mut [u32])) -> unit { pool::chunks_mut(health, 16, heal); }
+fn integrate(pos: (&mut [f32]), vel: (&[f32])) -> unit { pool::zip2(pos, vel, 4096, step); }
+fn regen(health: (&mut [u32])) -> unit { pool::chunks_mut(health, 4096, heal); }
 
 fn frame(w: (&mut World)) -> unit {
     n := w.pos.len();
@@ -459,7 +481,7 @@ From the **thread / job model**:
 2. `&mut [T]` classified as transferable *within* such a scope (it is refused as a capture now).
 3. A waiting worker helps run jobs (nested `parallel_for_zip` inside a system must not deadlock);
    `tests/pool/chunks_mut.grl` shows this holds for `parallel_for_chunks` **[V]**.
-4. No dependence on worker count in results: chunk counts stay explicit.
+4. No dependence on worker count in results: splits depend on `(n, grain)` only.
 5. SIMD types classified as plain data.
 
 ## 5. Alternatives rejected
@@ -501,7 +523,8 @@ today's numbers from 1.3. To be added to `bench/` in stage 0.
 | Stage | What | Files | Tests | Benchmark: today -> target | Risks |
 |---|---|---|---|---|---|
 | 0 | Native `f32` rounding in hardware: replace `call rt_f32_round` with `cvtsd2ss; cvtss2sd` on x86 and a `cf32round` pseudo-op elsewhere | `native.grl` (sites at 31209, 32894, 34703, 35065, 37989 and the float-op path), `machine.grl` (next to `cf32bits`, :964), keep `rt_f32_round` for the seed | differential test: 1M random and edge binary64 words, hardware against `rt_f32_round`; existing float corpus on three targets | native transform 259 437 -> under 10 000 (the `f64[]` figure) **[A]** | NaN payloads: the software path returns a NaN word unchanged, `cvtsd2ss` quiets and truncates it - decide which is the definition (Q1). Subnormal and tie cases are the differential test's job. |
-| 1 | `parallel_for_zip`, `pool::zip2/3/4`, `chunks_mut_at`, `map_chunks`, `split_at_mut` | `native.grl` (beside `parallel_for_chunks_builtin`, :26985), `runtime.grl` (:2992), `ownership.grl` (sibling flag), `lib/pool.grl`, `book/chapters/concurrency.md` | content-comparing tests like `tests/pool/chunks_mut.grl`; reject cases: same vector twice, unequal lengths (abort text), captured argument, `FnMut` | parallel transform over two arrays: not expressible today; single array 493 us at 1 chunk, 115 us at 4 -> zip2 within 10% of that | Loan bookkeeping for N arguments; the sibling flag is the only soundness-relevant line and needs its own negative tests. |
+| 0b | Native float operations inline, not `call rt_f64_op` (comparisons and conversions too) | decided on `gaps12-float` | bit-identical output against the call form on three targets | native `f32` and `f64` transform within 5x of scalar C (230 us) | must keep what the LLVM lifter keys on (`typed-ir.md` F1/F2) |
+| 1 | `parallel_for_zip`, `pool::zip2/3/4`, `chunks_mut_at`, `reduce_chunks`, `split_at_mut`; waits for the job model's stage 1 | `native.grl` (beside `parallel_for_chunks_builtin`, :26985), `runtime.grl` (:2992), `ownership.grl` (sibling flag), `lib/pool.grl`, `book/chapters/concurrency.md` | content-comparing tests like `tests/pool/chunks_mut.grl`; reject cases: same vector twice, unequal lengths (abort text), captured argument, `FnMut` | parallel transform over two arrays: not expressible today; single array 493 us at 1 chunk, 115 us at 4 -> zip2 within 10% of that | Loan bookkeeping for N arguments; the sibling flag is the only soundness-relevant line and needs its own negative tests. |
 | 2 | `align(N)` on `extern "C"` records and fields, `packed`, allocator alignment guarantee, `offset_of` | `native.grl` (:14123-14261, :17227), `runtime.grl` (`rt_alloc_unlocked`), `bindgen.grl`, `docs/ffi.md` | `@assert(size_of/align_of/offset_of)` against a C shim, as `tests/ffi/c_arrays.grl` does; address-modulo test for buffers | false-sharing benchmark (N workers incrementing adjacent against `align(64)` counters): **not measured, to be written in this stage** | Allocator change touches every program: run the whole corpus; the seed compiler's 8-aligned statics (`runtime.grl:977-981`). |
 | 3 | SIMD types on the LLVM backend, scalar-lane lowering on native, `lib/simd.grl` | `native.grl` (types, operators, `vop` emission), `llvm.grl` (lift `vop`), `machine.grl` + x86 path (lane expansion), `optimize.grl`/`ir.grl` (pass-through), `lib/simd.grl`, book chapter | every operation against a scalar reference on random lanes; identical output native against LLVM on three targets (the bit-identical oracle); edge lanes NaN, +-0, subnormal | LLVM transform 700 -> 100 or less (C: 77); LLVM dot 604 -> 100 or less (C fast-math: 84; strict C: 611) | Multi-word values in a one-word-per-value front end: argument passing and returns of 16/32-byte values need an ABI decision (Q2). The text optimiser misreading a `vop` slot as dead. |
 | 4 | Real SSE2 and NEON for `vop` on native; `--cpu=` and `target.features` | `machine.grl`, `native.grl`, `cli.grl`, `tools/native.mjs` | same tests as stage 3, now exercising the new encodings; qemu for aarch64 | native transform -> within 3x of C -O2 **[A]** | Assembler coverage on all supported hosts, Windows and macOS object paths. |
@@ -513,6 +536,8 @@ work fixes its layout rules. 3 depends on nothing here but shares the multi-word
 flat records.
 
 ## 7. Open questions
+
+Q1-Q6 are answered in section 0 (decided by the director); Q7 and Q8 remain.
 
 - **Q1.** Is the result of an `f32` operation on a NaN defined bit-for-bit? Stage 0 changes NaN
   payload behaviour unless the hardware rounding is followed by a fix-up.
