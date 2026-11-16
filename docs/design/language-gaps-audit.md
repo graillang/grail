@@ -32,7 +32,7 @@ the noise the adapters exist to remove.
 **Done** (`0922ecd`): the header reads `( ident, .. )` in front of `in`, and the loop variable is
 opened the way `(at, c) := t` opens a tuple - `field_type`, `rec_load`, `own`, `bind`, then the
 element's record is freed - so `for (at, c) in s.char_indices()` and
-`for (i, x) in iter::enumerate(it)` name their halves, and the iterator protocol carries the pattern
+`for (i, x) in it.enumerate()` name their halves, and the iterator protocol carries the pattern
 through `Some(tuple)` as well. `_` skips a position (what it held is dropped with the iteration), an
 owned field such as a `u8[]` moves out, the arity is checked by name (`the element is a 3-tuple and
 the pattern names 2`), a non-tuple element is refused naming its type, and a borrowed element
@@ -118,7 +118,7 @@ destructuring in a `match` arm (`P { x, y } => ...`), slice and string ranges (`
 `s[1..3]`), `format` with width and alignment (`"{:>6}|{:<4}|{:^5}"`), a hashmap literal indexed
 directly (`m["b"] = 2`, with `use hashmap;`), `Option` combinators (`is_some`, `unwrap_or`),
 closures capturing their environment, range patterns (`0..5 => ...`), `if let Some(v) = x`, tuples
-returned and read as `t.0`/`t.1`, and `vecs::sort(&mut v)` with `use vecs;`.
+returned and read as `t.0`/`t.1`, and `v.sort()` with `use vecs;`.
 
 Two gaps the pass found, neither in Tier 1 and both worth having:
 

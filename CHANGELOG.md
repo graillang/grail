@@ -1,5 +1,22 @@
 ## Unreleased
 
+- Removed: **the free-function forms of the `strings`, `vecs` and `iter` methods.** Each was one line
+  calling the method; call the method instead. `lib/strings.grl`: `strings::starts_with`,
+  `ends_with`, `split`, `trim`, `to_upper`, `to_lower`, `replace`, `repeat`, `contains`, `find`,
+  `parse_u64`, `parse_i64`, `is_utf8`, `utf8_error`, `char_count`, `is_char_boundary`,
+  `slice_chars`, `char_indices`, `to_text_lossy` (`strings::find(t, x)` is `t.find(x)`),
+  `join_with(&parts, sep)` (`parts.join_with(sep)`), `push_char(&mut out, c)` (`out.push_char(c)`)
+  and `parse_num(t)` (`t.parse_u64()`). `lib/vecs.grl`: `vecs::map`, `fold`, `sum`
+  (`vecs::map(v, f)` is `v.map(f)`), `filter_nums(v, f)` (`v.filter(f)`), `reverse`, `sort`,
+  `is_sorted`, `sort_by`, `sort_by_key`, `binary_search`, `insert_sorted` (`vecs::sort_by(&mut v, f)`
+  is `v.sort_by(f)`), `sort_nums(&mut v)` (`v.sort()`), and `min_index(&v)`/`max_index(&v)`, which
+  stopped the program on an empty vector (`v.min_index()!`; the method returns `u64?`).
+  `lib/iter.grl`: `iter::map`, `filter`, `take`, `enumerate`, `zip` and `collect`
+  (`iter::collect(iter::map(it, f))` is `it.map(f).collect()`). Two free functions stay because
+  they are not the method of the same name: `strings::chars(t)` is a lazy `iter::Iter<char>`
+  (`t.chars()` is every code point at once, a `char[]`), and `vecs::contains(&v, &x)` takes any
+  `hash::Equal` element (the built-in `v.contains(x)` takes integer and bool elements only).
+
 - Fixed: an effect attribute's name anywhere in a source file - a comment, a string - made the build
   one compiler run over the whole program, because the driver searched the bytes. It now looks for
   the attribute itself (`@no_alloc`, `@no_panic` outside comments and strings).

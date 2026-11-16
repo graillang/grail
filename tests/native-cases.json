@@ -2458,7 +2458,7 @@
   },
   {
     "name": "sort-needs-ord",
-    "source": "use vecs;struct P{x:u64}fn main(){mut v=P[P{x:1}];vecs::sort(&mut v);}",
+    "source": "use vecs;struct P{x:u64}fn main(){mut v=P[P{x:1}];v.sort();}",
     "modules": [
       "lib/vecs.grl",
       "lib/order.grl",
@@ -2624,7 +2624,7 @@
   },
   {
     "name": "closures-in-generic-functions",
-    "source": "use vecs;\nfn scale_all<T>(items:T[],factor:u64,f:Fn(T,u64)->T)->T[]{offset:=factor;return vecs::map(items,|x: T| -> T f(x,offset));}\nfn times(x:u64,k:u64)->u64{return x*k;}\nfn twice<T>(v:T,g:Fn(T)->T)->T{h:=|y: T| -> T g(y);return h(v);}\nfn main(){r:=scale_all(u64[1,2,3],10,|x: u64, k: u64| -> u64 x*k);println(r);println(twice(5,|x: u64| -> u64 x+1));s:=twice(u8[1],|b: u8[]| -> u8[] b);println(s.len());}\n",
+    "source": "use vecs;\nfn scale_all<T>(items:T[],factor:u64,f:Fn(T,u64)->T)->T[]{offset:=factor;return items.map(|x: T| -> T f(x,offset));}\nfn times(x:u64,k:u64)->u64{return x*k;}\nfn twice<T>(v:T,g:Fn(T)->T)->T{h:=|y: T| -> T g(y);return h(v);}\nfn main(){r:=scale_all(u64[1,2,3],10,|x: u64, k: u64| -> u64 x*k);println(r);println(twice(5,|x: u64| -> u64 x+1));s:=twice(u8[1],|b: u8[]| -> u8[] b);println(s.len());}\n",
     "modules": [
       "lib/vecs.grl",
       "lib/order.grl",
@@ -4544,8 +4544,8 @@
   },
   {
     "name": "sort-by-and-sorted-sets",
-    "note": "vecs::sort_by with a named comparator (functions coerce to Fn), sort_by_key, Ord for f32, insert_sorted/binary_search",
-    "source": "use vecs;\nstruct G { depth: u64, terminal: bool, id: u64 }\nfn before<a, b>(x: (&a G), y: (&b G)) -> bool {\n    if x.terminal != y.terminal {\n        return x.terminal;\n    }\n    return x.depth > y.depth;\n}\nfn mod4<a>(x: (&a u64)) -> u64 {\n    return *x % 4;\n}\nfn main() {\n    mut g = G[G { depth: 1, terminal: false, id: 0 }, G { depth: 3, terminal: true, id: 1 }, G { depth: 2, terminal: false, id: 2 }, G { depth: 3, terminal: false, id: 3 }, G { depth: 1, terminal: true, id: 4 }, G { depth: 2, terminal: false, id: 5 }];\n    // terminal first, then deeper first; stable\n    vecs::sort_by(&mut g, before);\n    for e in &g { print(\"{} \", e.id); }\n    println(\"\");\n    mut w = u64[5, 3, 9, 3, 1];\n    vecs::sort_by_key(&mut w, mod4);\n    println(\"{}\", w);\n    mut f = f32[2.5, -1.0, 0.5];\n    vecs::sort(&mut f);\n    println(\"{}\", f);\n    mut set = u64[];\n    for x in u64[7, 3, 7, 1, 9, 3] { vecs::insert_sorted(&mut set, x); }\n    println(\"{}\", set);\n    for q in u64[9, 4] {\n        match vecs::binary_search(&set, &q) {\n            Some(i) => { println(\"{} at {}\", q, i); },\n            None => { println(\"{} absent\", q); }\n        }\n    }\n}\n",
+    "note": "sort_by with a named comparator (functions coerce to Fn), sort_by_key, Ord for f32, insert_sorted/binary_search",
+    "source": "use vecs;\nstruct G { depth: u64, terminal: bool, id: u64 }\nfn before<a, b>(x: (&a G), y: (&b G)) -> bool {\n    if x.terminal != y.terminal {\n        return x.terminal;\n    }\n    return x.depth > y.depth;\n}\nfn mod4<a>(x: (&a u64)) -> u64 {\n    return *x % 4;\n}\nfn main() {\n    mut g = G[G { depth: 1, terminal: false, id: 0 }, G { depth: 3, terminal: true, id: 1 }, G { depth: 2, terminal: false, id: 2 }, G { depth: 3, terminal: false, id: 3 }, G { depth: 1, terminal: true, id: 4 }, G { depth: 2, terminal: false, id: 5 }];\n    // terminal first, then deeper first; stable\n    g.sort_by(before);\n    for e in &g { print(\"{} \", e.id); }\n    println(\"\");\n    mut w = u64[5, 3, 9, 3, 1];\n    w.sort_by_key(mod4);\n    println(\"{}\", w);\n    mut f = f32[2.5, -1.0, 0.5];\n    f.sort();\n    println(\"{}\", f);\n    mut set = u64[];\n    for x in u64[7, 3, 7, 1, 9, 3] { set.insert_sorted(x); }\n    println(\"{}\", set);\n    for q in u64[9, 4] {\n        match set.binary_search(&q) {\n            Some(i) => { println(\"{} at {}\", q, i); },\n            None => { println(\"{} absent\", q); }\n        }\n    }\n}\n",
     "stdout": "1 4 3 2 5 0 \n[5, 9, 1, 3, 3]\n[-1.0, 0.5, 2.5]\n[1, 3, 7, 9]\n9 at 3\n4 absent\n",
     "status": 0,
     "modules": [
@@ -4570,7 +4570,7 @@
   {
     "name": "closure-reference-parameters",
     "note": "closures with reference parameters (borrowed fresh per call): single and repeated uses, early return, as sort_by comparators",
-    "source": "use vecs;\nstruct G { depth: u64, terminal: bool, id: u64 }\nfn main() {\n    mut g = G[G { depth: 1, terminal: false, id: 0 }, G { depth: 3, terminal: true, id: 1 }, G { depth: 2, terminal: false, id: 2 }, G { depth: 3, terminal: false, id: 3 }, G { depth: 1, terminal: true, id: 4 }, G { depth: 2, terminal: false, id: 5 }];\n    // terminal first, then deeper first; stable\n    vecs::sort_by(&mut g, |x: &G, y: &G| -> bool { if x.terminal != y.terminal { return x.terminal; } return x.depth > y.depth; });\n    for e in &g { print(\"{} \", e.id); }\n    println(\"\");\n    mut w = u64[5, 3, 9, 3, 1];\n    vecs::sort_by_key(&mut w, |x: &u64| -> u64 *x % 4);\n    println(\"{}\", w);\n    mut f = f32[2.5, -1.0, 0.5];\n    vecs::sort(&mut f);\n    println(\"{}\", f);\n    mut set = u64[];\n    for x in u64[7, 3, 7, 1, 9, 3] { vecs::insert_sorted(&mut set, x); }\n    println(\"{}\", set);\n}\n",
+    "source": "use vecs;\nstruct G { depth: u64, terminal: bool, id: u64 }\nfn main() {\n    mut g = G[G { depth: 1, terminal: false, id: 0 }, G { depth: 3, terminal: true, id: 1 }, G { depth: 2, terminal: false, id: 2 }, G { depth: 3, terminal: false, id: 3 }, G { depth: 1, terminal: true, id: 4 }, G { depth: 2, terminal: false, id: 5 }];\n    // terminal first, then deeper first; stable\n    g.sort_by(|x: &G, y: &G| -> bool { if x.terminal != y.terminal { return x.terminal; } return x.depth > y.depth; });\n    for e in &g { print(\"{} \", e.id); }\n    println(\"\");\n    mut w = u64[5, 3, 9, 3, 1];\n    w.sort_by_key(|x: &u64| -> u64 *x % 4);\n    println(\"{}\", w);\n    mut f = f32[2.5, -1.0, 0.5];\n    f.sort();\n    println(\"{}\", f);\n    mut set = u64[];\n    for x in u64[7, 3, 7, 1, 9, 3] { set.insert_sorted(x); }\n    println(\"{}\", set);\n}\n",
     "stdout": "1 4 3 2 5 0 \n[5, 9, 1, 3, 3]\n[-1.0, 0.5, 2.5]\n[1, 3, 7, 9]\n",
     "status": 0,
     "modules": [
@@ -5061,7 +5061,7 @@
   },
   {
     "name": "closure-captured-slice-sort-by",
-    "source": "use vecs;\nstruct Group { depth: u64, deps: u64[] }\nfn main() {\n    mut gs = Group[];\n    gs.push(Group { depth: 5, deps: u64[] });\n    gs.push(Group { depth: 1, deps: u64[1] });\n    gs.push(Group { depth: 3, deps: u64[1, 2] });\n    groups := &gs;\n    mut order = u64[0; groups.len()];\n    for i in order.len() { order[i] = i; }\n    vecs::sort_by(&mut order, |x: &u64, y: &u64| -> bool {\n        gx := &groups[*x];\n        gy := &groups[*y];\n        return ((u64(gx.deps.len() != 0) << 32) | (4294967295 - gx.depth)) < ((u64(gy.deps.len() != 0) << 32) | (4294967295 - gy.depth));\n    });\n    for i in order.len() { println(\"{}\", order[i]); }\n}\n",
+    "source": "use vecs;\nstruct Group { depth: u64, deps: u64[] }\nfn main() {\n    mut gs = Group[];\n    gs.push(Group { depth: 5, deps: u64[] });\n    gs.push(Group { depth: 1, deps: u64[1] });\n    gs.push(Group { depth: 3, deps: u64[1, 2] });\n    groups := &gs;\n    mut order = u64[0; groups.len()];\n    for i in order.len() { order[i] = i; }\n    order.sort_by(|x: &u64, y: &u64| -> bool {\n        gx := &groups[*x];\n        gy := &groups[*y];\n        return ((u64(gx.deps.len() != 0) << 32) | (4294967295 - gx.depth)) < ((u64(gy.deps.len() != 0) << 32) | (4294967295 - gy.depth));\n    });\n    for i in order.len() { println(\"{}\", order[i]); }\n}\n",
     "stdout": "0\n2\n1\n",
     "modules": [
       "lib/vecs.grl",
@@ -5163,8 +5163,8 @@
   },
   {
     "name": "closure-fnmut-sort-by-counts",
-    "note": "vecs::sort_by takes FnMut: a comparator that counts its calls through a captured `&mut` is accepted, sorts correctly, and the count is visible to the caller afterwards. (A plain captured number is the closure's own copy, so counting into it leaves the caller's binding unchanged; the reference is what reaches the caller.)",
-    "source": "use vecs;\nfn main() {\n    mut items = u64[3, 1, 2];\n    mut seen = 0;\n    counter := &mut seen;\n    vecs::sort_by(&mut items, |a: &u64, b: &u64| -> bool { *counter += 1; return *a < *b; });\n    println(\"{} {} {} {}\", items[0], items[1], items[2], seen > 0);\n}\n",
+    "note": "sort_by takes FnMut: a comparator that counts its calls through a captured `&mut` is accepted, sorts correctly, and the count is visible to the caller afterwards. (A plain captured number is the closure's own copy, so counting into it leaves the caller's binding unchanged; the reference is what reaches the caller.)",
+    "source": "use vecs;\nfn main() {\n    mut items = u64[3, 1, 2];\n    mut seen = 0;\n    counter := &mut seen;\n    items.sort_by(|a: &u64, b: &u64| -> bool { *counter += 1; return *a < *b; });\n    println(\"{} {} {} {}\", items[0], items[1], items[2], seen > 0);\n}\n",
     "stdout": "1 2 3 true\n",
     "modules": [
       "lib/vecs.grl",
@@ -5995,7 +5995,7 @@
       "lib/core.grl",
       "lib/iter.grl"
     ],
-    "source": "use core;\nuse iter;\nfn main() -> u64 {\n    squares := iter::collect(iter::map(iter::upto(1, 6), |x: u64| -> u64 x * x));\n    println(squares.len());\n    for s in &squares {\n        println(*s);\n    }\n    mut evens = 0;\n    for e in iter::filter(iter::upto(0, 10), |x: &u64| -> bool *x % 2 == 0) {\n        evens = evens + e;\n    }\n    println(evens);\n    for p in iter::enumerate(iter::take(iter::upto(100, 1000), 3)) {\n        println(\"{} {}\", p.0, p.1);\n    }\n    for z in iter::zip(iter::upto(1, 4), iter::of(squares)) {\n        println(\"{} {}\", z.0, z.1);\n    }\n    words := iter::collect(iter::map(iter::of(u8[][u8[1], u8[2, 2], u8[3, 3, 3]]), |w: u8[]| -> u64 w.len()));\n    println(words.len() + words[2]);\n    return 0;\n}\n",
+    "source": "use core;\nuse iter;\nfn main() -> u64 {\n    squares := iter::upto(1, 6).map(|x: u64| -> u64 x * x).collect();\n    println(squares.len());\n    for s in &squares {\n        println(*s);\n    }\n    mut evens = 0;\n    for e in iter::upto(0, 10).filter(|x: &u64| -> bool *x % 2 == 0) {\n        evens = evens + e;\n    }\n    println(evens);\n    for p in iter::upto(100, 1000).take(3).enumerate() {\n        println(\"{} {}\", p.0, p.1);\n    }\n    for z in iter::upto(1, 4).zip(iter::of(squares)) {\n        println(\"{} {}\", z.0, z.1);\n    }\n    words := iter::of(u8[][u8[1], u8[2, 2], u8[3, 3, 3]]).map(|w: u8[]| -> u64 w.len()).collect();\n    println(words.len() + words[2]);\n    return 0;\n}\n",
     "stdout": "5\n1\n4\n9\n16\n25\n20\n0 100\n1 101\n2 102\n1 1\n2 4\n3 9\n6\n",
     "status": 0,
     "note": "lib/iter: upto, of, map, filter, take, enumerate, zip, collect over the closure-backed Iter<T>, iterated by for through the protocol"
@@ -6279,7 +6279,7 @@
   },
   {
     "name": "iterator-adapter-references",
-    "source": "use core;\nuse iter;\n\nfn first<a>(v: &a u64[]) -> Fn() -> (&a u64) {\n    return || -> (&a u64) {\n        return &v[0];\n    };\n}\n\nfn main() -> u64 {\n    mut prices = u64[3, 4, 5];\n    mut total = 0;\n    for p in iter::refs(&prices) {\n        total = total + *p;\n    }\n    firsts := iter::collect(iter::take(iter::refs(&prices), 2));\n    println(\"{} {}\", total, firsts.len());\n    // The closure owns its environment, so its borrow lasts until its scope ends.\n    {\n        f := first(&prices);\n        println(*f());\n    }\n    prices.push(total);\n    println(prices.len());\n    return 0;\n}\n",
+    "source": "use core;\nuse iter;\n\nfn first<a>(v: &a u64[]) -> Fn() -> (&a u64) {\n    return || -> (&a u64) {\n        return &v[0];\n    };\n}\n\nfn main() -> u64 {\n    mut prices = u64[3, 4, 5];\n    mut total = 0;\n    for p in iter::refs(&prices) {\n        total = total + *p;\n    }\n    firsts := iter::refs(&prices).take(2).collect();\n    println(\"{} {}\", total, firsts.len());\n    // The closure owns its environment, so its borrow lasts until its scope ends.\n    {\n        f := first(&prices);\n        println(*f());\n    }\n    prices.push(total);\n    println(prices.len());\n    return 0;\n}\n",
     "stdout": "12 2\n3\n4\n",
     "modules": [
       "lib/iter.grl",
@@ -6380,7 +6380,7 @@
   },
   {
     "name": "iter-filter-reference-items",
-    "source": "use iter;\nfn main() -> u64 {\n    v := u64[1, 2, 3, 4, 5];\n    mut total = 0;\n    for x in iter::filter(iter::refs(&v), |x: &&u64| -> bool **x % 2 == 1) {\n        total = total + *x;\n    }\n    println(total);\n    return 0;\n}\n",
+    "source": "use iter;\nfn main() -> u64 {\n    v := u64[1, 2, 3, 4, 5];\n    mut total = 0;\n    for x in iter::refs(&v).filter(|x: &&u64| -> bool **x % 2 == 1) {\n        total = total + *x;\n    }\n    println(total);\n    return 0;\n}\n",
     "modules": [
       "lib/iter.grl",
       "lib/core.grl"
@@ -6540,7 +6540,7 @@
   },
   {
     "name": "strings-search-and-replace",
-    "source": "use strings;\nuse core;\nfn main(){\n    t := \"hello world\".text();\n    assert(strings::starts_with(view(t), view(\"hello\")));\n    assert(!strings::starts_with(view(t), view(\"world\")));\n    assert(strings::ends_with(view(t), view(\"world\")));\n    assert(!strings::ends_with(view(t), view(\"hello\")));\n    assert(strings::find(view(t), view(\"o w\"))! == 4);\n    assert(strings::find(view(t), view(\"missing\")) == None);\n    assert(strings::contains(view(t), view(\"lo wo\")));\n    assert(!strings::contains(view(t), view(\"nope\")));\n    println(strings::replace(view(t), view(\"world\"), view(\"grail\")));\n}\n",
+    "source": "use strings;\nuse core;\nfn main(){\n    t := \"hello world\".text();\n    assert(view(t).starts_with(view(\"hello\")));\n    assert(!view(t).starts_with(view(\"world\")));\n    assert(view(t).ends_with(view(\"world\")));\n    assert(!view(t).ends_with(view(\"hello\")));\n    assert(view(t).find(view(\"o w\"))! == 4);\n    assert(view(t).find(view(\"missing\")) == None);\n    assert(view(t).contains(view(\"lo wo\")));\n    assert(!view(t).contains(view(\"nope\")));\n    println(view(t).replace(view(\"world\"), view(\"grail\")));\n}\n",
     "modules": [
       "lib/strings.grl",
       "lib/core.grl",
@@ -6550,7 +6550,7 @@
   },
   {
     "name": "strings-parse-and-print-numbers",
-    "source": "use strings;\nuse core;\nfn parsed_u64<a>(text: &a [u8]) -> string {\n    match strings::parse_u64(text) {\n        Some(value) => { return strings::from_u64(value); },\n        None => { return \"none\".text(); }\n    }\n}\nfn parsed_i64<a>(text: &a [u8]) -> string {\n    match strings::parse_i64(text) {\n        Some(value) => { return strings::from_i64(value); },\n        None => { return \"none\".text(); }\n    }\n}\nfn main(){\n    println(parsed_u64(view(\"0\")));\n    println(parsed_u64(view(\"18446744073709551615\")));\n    println(parsed_u64(view(\"18446744073709551616\")));\n    println(parsed_u64(view(\"\")));\n    println(parsed_u64(view(\"-1\")));\n    println(parsed_u64(view(\"12x\")));\n    println(parsed_i64(view(\"-9223372036854775808\")));\n    println(parsed_i64(view(\"9223372036854775807\")));\n    println(parsed_i64(view(\"9223372036854775808\")));\n    println(parsed_i64(view(\"+42\")));\n    println(parsed_i64(view(\"-\")));\n    println(strings::from_u64(0));\n    println(strings::from_i64(-1));\n    println(strings::from_i64(-9223372036854775808));\n}\n",
+    "source": "use strings;\nuse core;\nfn parsed_u64<a>(text: &a [u8]) -> string {\n    match text.parse_u64() {\n        Some(value) => { return strings::from_u64(value); },\n        None => { return \"none\".text(); }\n    }\n}\nfn parsed_i64<a>(text: &a [u8]) -> string {\n    match text.parse_i64() {\n        Some(value) => { return strings::from_i64(value); },\n        None => { return \"none\".text(); }\n    }\n}\nfn main(){\n    println(parsed_u64(view(\"0\")));\n    println(parsed_u64(view(\"18446744073709551615\")));\n    println(parsed_u64(view(\"18446744073709551616\")));\n    println(parsed_u64(view(\"\")));\n    println(parsed_u64(view(\"-1\")));\n    println(parsed_u64(view(\"12x\")));\n    println(parsed_i64(view(\"-9223372036854775808\")));\n    println(parsed_i64(view(\"9223372036854775807\")));\n    println(parsed_i64(view(\"9223372036854775808\")));\n    println(parsed_i64(view(\"+42\")));\n    println(parsed_i64(view(\"-\")));\n    println(strings::from_u64(0));\n    println(strings::from_i64(-1));\n    println(strings::from_i64(-9223372036854775808));\n}\n",
     "modules": [
       "lib/strings.grl",
       "lib/core.grl",
@@ -6703,7 +6703,7 @@
   },
   {
     "name": "copy-reference-through-reference",
-    "source": "use iter;\nfn main() -> u64 {\n    v := u64[1, 2, 3, 4];\n    mut t = 0;\n    for x in iter::filter(iter::refs(&v), |x: &&u64| -> bool {\n        r := *x;\n        return *r % 2 == 0;\n    }) {\n        t = t + *x;\n    }\n    println(t);\n    return 0;\n}\n",
+    "source": "use iter;\nfn main() -> u64 {\n    v := u64[1, 2, 3, 4];\n    mut t = 0;\n    for x in iter::refs(&v).filter(|x: &&u64| -> bool {\n        r := *x;\n        return *r % 2 == 0;\n    }) {\n        t = t + *x;\n    }\n    println(t);\n    return 0;\n}\n",
     "modules": [
       "lib/iter.grl",
       "lib/core.grl"
@@ -6732,7 +6732,7 @@
   },
   {
     "name": "iter-map-reference-items",
-    "source": "use iter;\nfn main() -> u64 {\n    v := u64[1, 2, 3];\n    doubled := iter::refs(&v).map(|x: &u64| -> u64 *x * 10).collect();\n    println(doubled.len());\n    mut t = 0;\n    for d in iter::map(iter::refs(&v), |x: &u64| -> u64 *x + 1) {\n        t = t + d;\n    }\n    println(t);\n    return 0;\n}\n",
+    "source": "use iter;\nfn main() -> u64 {\n    v := u64[1, 2, 3];\n    doubled := iter::refs(&v).map(|x: &u64| -> u64 *x * 10).collect();\n    println(doubled.len());\n    mut t = 0;\n    for d in iter::refs(&v).map(|x: &u64| -> u64 *x + 1) {\n        t = t + d;\n    }\n    println(t);\n    return 0;\n}\n",
     "modules": [
       "lib/iter.grl",
       "lib/core.grl"
@@ -6742,7 +6742,7 @@
   },
   {
     "name": "iter-map-reference-items-keeps-borrow",
-    "source": "use iter;\nfn main() -> u64 {\n    mut v = u64[1, 2, 3];\n    m := iter::map(iter::refs(&v), |x: &u64| -> u64 *x + 1);\n    v.push(4);\n    println(m.count());\n    return 0;\n}\n",
+    "source": "use iter;\nfn main() -> u64 {\n    mut v = u64[1, 2, 3];\n    m := iter::refs(&v).map(|x: &u64| -> u64 *x + 1);\n    v.push(4);\n    println(m.count());\n    return 0;\n}\n",
     "modules": [
       "lib/iter.grl",
       "lib/core.grl"
@@ -6753,7 +6753,7 @@
   },
   {
     "name": "iter-map-reference-items-keeps-borrow-store",
-    "source": "use iter;\nfn main() -> u64 {\n    mut v = u64[1, 2, 3];\n    m := iter::map(iter::refs(&v), |x: &u64| -> u64 *x + 1);\n    v[0] = 9;\n    println(m.count());\n    return 0;\n}\n",
+    "source": "use iter;\nfn main() -> u64 {\n    mut v = u64[1, 2, 3];\n    m := iter::refs(&v).map(|x: &u64| -> u64 *x + 1);\n    v[0] = 9;\n    println(m.count());\n    return 0;\n}\n",
     "modules": [
       "lib/iter.grl",
       "lib/core.grl"
@@ -6885,7 +6885,7 @@
   {
     "name": "for-tuple-iterator-chain",
     "modules": ["lib/core.grl", "lib/iter.grl"],
-    "source": "use core;\nuse iter;\nfn main() {\n    mut weighted = 0;\n    for (i, v) in iter::enumerate(iter::upto(5, 8)) {\n        weighted += i * v;\n    }\n    println(weighted);\n    mut products = 0;\n    for (a, b) in iter::zip(iter::upto(1, 4), iter::upto(10, 13)) {\n        products += a * b;\n    }\n    println(products);\n}\n",
+    "source": "use core;\nuse iter;\nfn main() {\n    mut weighted = 0;\n    for (i, v) in iter::upto(5, 8).enumerate() {\n        weighted += i * v;\n    }\n    println(weighted);\n    mut products = 0;\n    for (a, b) in iter::upto(1, 4).zip(iter::upto(10, 13)) {\n        products += a * b;\n    }\n    println(products);\n}\n",
     "stdout": "20\n68\n",
     "note": "a for pattern over an iterator (the Some(x) protocol): zip and enumerate chains name their halves instead of .0/.1"
   },
@@ -9077,7 +9077,7 @@
   },
   {
     "name": "utf8-validated-string-operations",
-    "source": "use utf8;\nuse core;\nuse io;\nuse strings;\n\n// A validated value: construction refuses ill-formed bytes with the offset, every operation\n// preserves validity, and the bytes come back out without a copy.\nfn main(){\n    good := utf8::from_bytes(view(\"g\\u{e4}ns\"))!;\n    println(good.len());\n    println(good.char_count());\n    println(good.show());\n    match utf8::from_bytes(view(\"ab\")) {\n        e: utf8::Error => { println(e.show()); },\n        v: utf8::Utf8String => { println(v.show()); }\n    }\n    mut broken = u8[];\n    broken.push(97);\n    broken.push(197);\n    broken.push(44);\n    match utf8::from_bytes(view(broken)) {\n        e: utf8::Error => { println(e.show()); },\n        v: utf8::Utf8String => { println(v.show()); }\n    }\n    // slices at character boundaries, and one that is not\n    left := good.slice_chars(0, 1)!;\n    println(left.show());\n    match good.slice_chars(1, 2) {\n        e: utf8::Error => { println(e.show()); },\n        v: utf8::Utf8String => { println(v.show()); }\n    }\n    whole := good.slice_chars(0, good.len())!;\n    println(whole.same(&good));\n    // concatenation and replacement preserve the invariant\n    joined := left.concat(&good);\n    println(joined.show());\n    replaced := good.replace(&left, &utf8::from_text(\"x\".text()));\n    println(replaced.show());\n    println(joined.same(&joined.copy()));\n    // ASCII case mapping is total, anything else is refused by code point\n    println(utf8::from_text(\"Hello\".text()).to_upper()!.show());\n    println(utf8::from_text(\"Hello\".text()).to_ascii_lower().show());\n    match good.to_upper() {\n        e: utf8::Error => { println(e.show()); },\n        v: utf8::Utf8String => { println(v.show()); }\n    }\n    // every code point of valid text decodes: no U+FFFD substitution can occur\n    mut codepoints = u64[];\n    for c in good.chars() {\n        codepoints.push(u64(c));\n    }\n    println(codepoints.len());\n    println(codepoints[1]);\n    // the view is the bytes, not a copy\n    raw := good.as_bytes();\n    println(raw.len());\n    println(strings::is_utf8(raw));\n    // the unchecked hatch, used where the bytes are known good\n    mut hatched = utf8::empty();\n    unsafe {\n        hatched = utf8::from_unchecked(view(\"safe\"));\n    }\n    println(hatched.show());\n    println(\"done\");\n}\n",
+    "source": "use utf8;\nuse core;\nuse io;\nuse strings;\n\n// A validated value: construction refuses ill-formed bytes with the offset, every operation\n// preserves validity, and the bytes come back out without a copy.\nfn main(){\n    good := utf8::from_bytes(view(\"g\\u{e4}ns\"))!;\n    println(good.len());\n    println(good.char_count());\n    println(good.show());\n    match utf8::from_bytes(view(\"ab\")) {\n        e: utf8::Error => { println(e.show()); },\n        v: utf8::Utf8String => { println(v.show()); }\n    }\n    mut broken = u8[];\n    broken.push(97);\n    broken.push(197);\n    broken.push(44);\n    match utf8::from_bytes(view(broken)) {\n        e: utf8::Error => { println(e.show()); },\n        v: utf8::Utf8String => { println(v.show()); }\n    }\n    // slices at character boundaries, and one that is not\n    left := good.slice_chars(0, 1)!;\n    println(left.show());\n    match good.slice_chars(1, 2) {\n        e: utf8::Error => { println(e.show()); },\n        v: utf8::Utf8String => { println(v.show()); }\n    }\n    whole := good.slice_chars(0, good.len())!;\n    println(whole.same(&good));\n    // concatenation and replacement preserve the invariant\n    joined := left.concat(&good);\n    println(joined.show());\n    replaced := good.replace(&left, &utf8::from_text(\"x\".text()));\n    println(replaced.show());\n    println(joined.same(&joined.copy()));\n    // ASCII case mapping is total, anything else is refused by code point\n    println(utf8::from_text(\"Hello\".text()).to_upper()!.show());\n    println(utf8::from_text(\"Hello\".text()).to_ascii_lower().show());\n    match good.to_upper() {\n        e: utf8::Error => { println(e.show()); },\n        v: utf8::Utf8String => { println(v.show()); }\n    }\n    // every code point of valid text decodes: no U+FFFD substitution can occur\n    mut codepoints = u64[];\n    for c in good.chars() {\n        codepoints.push(u64(c));\n    }\n    println(codepoints.len());\n    println(codepoints[1]);\n    // the view is the bytes, not a copy\n    raw := good.as_bytes();\n    println(raw.len());\n    println(raw.is_utf8());\n    // the unchecked hatch, used where the bytes are known good\n    mut hatched = utf8::empty();\n    unsafe {\n        hatched = utf8::from_unchecked(view(\"safe\"));\n    }\n    println(hatched.show());\n    println(\"done\");\n}\n",
     "modules": [
       "lib/utf8.grl",
       "lib/strings.grl",
@@ -9089,7 +9089,7 @@
   },
   {
     "name": "utf8-fuzz-construction-invariant",
-    "source": "use utf8;\nuse core;\nuse strings;\n\n// The invariant, checked by construction from arbitrary bytes: a deterministic pseudo-random walk\n// over 10,000 mutations of a valid string. Every value the constructor accepts must re-validate,\n// and every refusal must name an offset that is really there.\nfn next(slot: (&mut u64)) -> u64 {\n    // xorshift64: deterministic, and no table to keep in step.\n    mut x = exchange(slot, 0);\n    x = x ^ wrapping_mul(x, 8192);\n    x = x ^ (x / 131072);\n    x = x ^ wrapping_mul(x, 32);\n    exchange(slot, x);\n    return x;\n}\nfn main(){\n    mut seed = 88172645463325252;\n    base := utf8::from_text(\"Grail \\u{4e16}\\u{754c} caf\\u{e9} \\u{1f600}\".text());\n    mut accepted = 0;\n    mut refused = 0;\n    mut round = 0;\n    while round < 10000 {\n        mut mutant = base.as_bytes().copy();\n        roll := next(&mut seed) % 4;\n        at := next(&mut seed) % (mutant.len() + 1);\n        if roll == 0 {\n            mutant.push(u8(next(&mut seed) % 256));\n        } else {\n            if roll == 1 {\n                if mutant.len() != 0 {\n                    mutant.pop()!;\n                }\n            } else {\n                if mutant.len() != 0 {\n                    index := next(&mut seed) % mutant.len();\n                    mutant[index] = u8(next(&mut seed) % 256);\n                }\n            }\n        }\n        match utf8::from_bytes(view(mutant)) {\n            e: utf8::Error => {\n                refused = refused + 1;\n                // the offset is inside the byte string the constructor was handed\n                mut check_offset = 0;\n                match e {\n                    InvalidUtf8(at) => { check_offset = at; },\n                    _ => { check_offset = 0; }\n                }\n                if check_offset > mutant.len() {\n                    println(\"offset out of range\");\n                    return ();\n                }\n            },\n            value: utf8::Utf8String => {\n                accepted = accepted + 1;\n                if !strings::is_utf8(value.as_bytes()) {\n                    println(\"accepted invalid UTF-8\");\n                    return ();\n                }\n                // re-validation through the checked constructor agrees\n                again := utf8::from_bytes(value.as_bytes())!;\n                if !again.same(&value) {\n                    println(\"re-validation disagreed\");\n                    return ();\n                }\n                if value.char_count() == 0 {\n                    println(\"char count lost\");\n                    return ();\n                }\n            }\n        }\n        round = round + 1;\n    }\n    println(accepted > 0);\n    println(refused > 0);\n    println(accepted + refused == 10000);\n    println(\"done\");\n}\n",
+    "source": "use utf8;\nuse core;\nuse strings;\n\n// The invariant, checked by construction from arbitrary bytes: a deterministic pseudo-random walk\n// over 10,000 mutations of a valid string. Every value the constructor accepts must re-validate,\n// and every refusal must name an offset that is really there.\nfn next(slot: (&mut u64)) -> u64 {\n    // xorshift64: deterministic, and no table to keep in step.\n    mut x = exchange(slot, 0);\n    x = x ^ wrapping_mul(x, 8192);\n    x = x ^ (x / 131072);\n    x = x ^ wrapping_mul(x, 32);\n    exchange(slot, x);\n    return x;\n}\nfn main(){\n    mut seed = 88172645463325252;\n    base := utf8::from_text(\"Grail \\u{4e16}\\u{754c} caf\\u{e9} \\u{1f600}\".text());\n    mut accepted = 0;\n    mut refused = 0;\n    mut round = 0;\n    while round < 10000 {\n        mut mutant = base.as_bytes().copy();\n        roll := next(&mut seed) % 4;\n        at := next(&mut seed) % (mutant.len() + 1);\n        if roll == 0 {\n            mutant.push(u8(next(&mut seed) % 256));\n        } else {\n            if roll == 1 {\n                if mutant.len() != 0 {\n                    mutant.pop()!;\n                }\n            } else {\n                if mutant.len() != 0 {\n                    index := next(&mut seed) % mutant.len();\n                    mutant[index] = u8(next(&mut seed) % 256);\n                }\n            }\n        }\n        match utf8::from_bytes(view(mutant)) {\n            e: utf8::Error => {\n                refused = refused + 1;\n                // the offset is inside the byte string the constructor was handed\n                mut check_offset = 0;\n                match e {\n                    InvalidUtf8(at) => { check_offset = at; },\n                    _ => { check_offset = 0; }\n                }\n                if check_offset > mutant.len() {\n                    println(\"offset out of range\");\n                    return ();\n                }\n            },\n            value: utf8::Utf8String => {\n                accepted = accepted + 1;\n                if !value.as_bytes().is_utf8() {\n                    println(\"accepted invalid UTF-8\");\n                    return ();\n                }\n                // re-validation through the checked constructor agrees\n                again := utf8::from_bytes(value.as_bytes())!;\n                if !again.same(&value) {\n                    println(\"re-validation disagreed\");\n                    return ();\n                }\n                if value.char_count() == 0 {\n                    println(\"char count lost\");\n                    return ();\n                }\n            }\n        }\n        round = round + 1;\n    }\n    println(accepted > 0);\n    println(refused > 0);\n    println(accepted + refused == 10000);\n    println(\"done\");\n}\n",
     "modules": [
       "lib/utf8.grl",
       "lib/strings.grl",
@@ -9936,7 +9936,7 @@
   },
   {
     "name": "useres-std-by-name",
-    "source": "use strings;\n\nfn main() -> u64 {\n    println(strings::char_count(view(\"grail\")));\n    return 0;\n}\n",
+    "source": "use strings;\n\nfn main() -> u64 {\n    println(view(\"grail\").char_count());\n    return 0;\n}\n",
     "stdout": "5\n",
     "note": "no file is named: `use strings;` is resolved through the std root the harness passes a build, and strings' own `use core;` and `use iter;` come with it (docs/design/module-resolution.md)"
   },
