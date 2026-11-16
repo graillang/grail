@@ -673,6 +673,9 @@ struct C {
     // 1 while an assignment's target path is read: its last field is written directly (and its
     // predicate owed there), not lent out, so `field_path` records it instead of refusing the loan.
     ref_assign_target: u64,
+    // 1 while a refined function's body labels and declares itself: its symbol is `<name>.proved`,
+    // and `<name>` is the checking wrapper emitted after it (ref_wrapper).
+    proved_label: u64,
     // That field, one-based record declaration and zero-based index (0 when none was read).
     ref_assign_d: u64,
     ref_assign_k: u64,
@@ -858,25 +861,19 @@ struct C {
     fx_pending_panic: u64,
     fx_bounded: u64,
     // Where the body being recorded starts in `c.out`, whether it is trusted code (the runtime, a drop
-    // helper), how many calls it has recorded, and the byte range of its `.proved` entry's replayed
-    // prologue: bytes `fx_end`'s consistency check skips, because the checked entry already counted
-    // them.
+    // helper) and how many calls it has recorded.
     fx_out_start: u64,
     fx_trusted: u64,
     fx_calls: u64,
-    fx_skip_lo: u64,
-    fx_skip_hi: u64,
     // A refined parameter's check in the checked entry: the caller's obligation, not a body edge.
     fx_entry_panic: u64[],
     // Where the body's edge list started, so a retried body's discarded edges go with its bytes.
     fx_edge_mark: u64,
     // Per body that claimed an effect, in emission order: its symbol, the `call` instructions it
-    // emitted, and the byte range of a replayed `.proved` prologue (0, 0 when it has none).
+    // emitted.
     // `compile_end` holds the count against the calls the typed IR parses out of the same body.
     fx_body_sym: u8[][],
     fx_body_calls: u64[],
-    fx_body_lo: u64[],
-    fx_body_hi: u64[],
     // ---- the per-function codegen cache (`--fn-cache DIR`) ----------------------------------
     // The directory units are filed in, the two hashes every unit's key is built from (the option
     // vector and the declaration surface), where the cursor for a declaration's line has got to,
@@ -7230,6 +7227,82 @@ fn ref_pred_count<a>(c: (&a mut C)) -> u64 {
         }
     }
     return n;
+}
+// The checking entry of a function with refined parameters, emitted after its body: an ordinary
+// function `<name>` that stores the arguments, checks each parameter predicate (an entry fact of
+// this record: the caller's obligation), puts the arguments back and calls `<name>.proved`, whose
+// result it returns in `%rax`. Every unproved caller, a function value and a vtable reach it; a
+// proved call skips it. More than six parameters arrive as a record behind `%r9`, which the body
+// frees: the wrapper reads the rest from it for the checks and passes `%r9` through untouched.
+fn ref_wrapper<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &d [u8], export: u64, count: u64, position: u64, claimed_alloc: u64, claimed_panic: u64, entry_state: ownership::State) -> unit {
+    after := exchange(&mut c.check, entry_state);
+    func_directive(&mut c, view(m), view(name), view(body_symbol), export);
+    label_at := c.out.len();
+    export_name(&mut c, view(m), view(name), view(body_symbol), export);
+    mut sym = u8[];
+    for i in c.out.len() - label_at {
+        sym.push(c.out[label_at + i]);
+    }
+    o(&mut c, view(":\n"));
+    fx_begin(&mut c, view(sym), view(name), c.file, position, claimed_alloc, claimed_panic);
+    o(&mut c, view("pushq %rbp\nmovq %rsp,%rbp\n"));
+    frame := label(&mut c);
+    if c.target == 4 {
+        o(&mut c, view("framesub "));
+        fname(&mut c, frame);
+        c.out.push(10);
+    } else {
+        o(&mut c, view("subq $"));
+        fname(&mut c, frame);
+        o(&mut c, view(",%rsp\n"));
+    }
+    mut regs = count;
+    if 6 < count {
+        regs = 5;
+    }
+    for i in regs {
+        o(&mut c, view("movq "));
+        o(&mut c, view(argreg(i)));
+        c.out.push(44);
+        stack_slot(&mut c, i);
+        c.out.push(10);
+    }
+    mut spill = 0;
+    if 6 < count {
+        spill = fresh(&mut c);
+        o(&mut c, view("movq %r9,"));
+        stack_slot(&mut c, spill);
+        c.out.push(10);
+        for k in count - 5 {
+            o(&mut c, view("movq "));
+            on(&mut c, k * 8);
+            o(&mut c, view("(%r9),%rax\nmovq %rax,"));
+            stack_slot(&mut c, 5 + k);
+            c.out.push(10);
+        }
+    }
+    ref_params(&mut c);
+    for i in regs {
+        o(&mut c, view("movq "));
+        stack_slot(&mut c, i);
+        c.out.push(44);
+        o(&mut c, view(argreg(i)));
+        c.out.push(10);
+    }
+    if spill != 0 {
+        o(&mut c, view("movq "));
+        stack_slot(&mut c, spill);
+        o(&mut c, view(",%r9\n"));
+    }
+    call_proved_out(&mut c, view(sym));
+    o(&mut c, view("leave\nret\n.set "));
+    fname(&mut c, frame);
+    c.out.push(44);
+    on(&mut c, (c.next + 1) / 2 * 16);
+    c.out.push(10);
+    fx_end(&mut c);
+    exchange(&mut c.check, after);
+    return ();
 }
 // Whether field `k` of record `d` carries a predicate. Such a field is written only where the
 // predicate is owed - a literal, `r.f = v` and `r.f op= v` - so no `&mut` to it may exist: through
@@ -14925,6 +14998,9 @@ fn export_name<a, b, d, e>(c: (&a mut C), m: &b [u8], n: &d [u8], symbol: &e [u8
         return ();
     }
     mangle(&mut c, view(m), view(n));
+    if c.proved_label != 0 {
+        o(&mut c, view(".proved"));
+    }
     return ();
 }
 // Does the declaration at `start` (the `fn` keyword) have a body? Scans to the first
@@ -16194,6 +16270,11 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         }
     }
     exchange(&mut c.caddr, u64[]);
+    // A function with refined parameters is two: the body, `<name>.proved`, which a proved call
+    // enters and which checks nothing, and `<name>`, a wrapper emitted after it that checks the
+    // parameters and calls the body (ref_wrapper). Both are ordinary functions to every later pass.
+    wrapped := (export == 0) & (c.raw == 0) & (ref_pred_count(&mut c) != 0);
+    exchange(&mut c.proved_label, u64(wrapped));
     func_directive(&mut c, view(m), view(name), view(body_symbol), export);
     if (c.debug != 0) & (c.validating == 0) {
         dstart = label(&mut c);
@@ -16209,6 +16290,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     label_at := c.out.len();
     export_name(&mut c, view(m), view(name), view(body_symbol), export);
     label_end := c.out.len();
+    exchange(&mut c.proved_label, 0);
     // The body's own label, exactly as a `call` to it spells it: the effect facts are keyed by it.
     mut fx_label = u8[];
     for i in label_end - label_at {
@@ -16302,7 +16384,13 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // The parameter refinements hold here: the parameters are the arguments they were given and
     // their bookkeeping is done (a view's target is tracked), and the first statement has not been
     // reached, so a failure inside the check reports the call site rather than a line of this body.
-    ref_params(&mut c);
+    // The wrapper checks the parameters as they are here, before the body moved any of them.
+    mut entry_state = ownership::new();
+    if wrapped {
+        entry_state = ownership::snapshot(&c.check);
+    } else {
+        ref_params(&mut c);
+    }
     // A refined parameter can state what the body's bounds checks need (pv_bce), for this body only.
     old_bce_index := exchange(&mut c.bce_index, u8[]);
     old_bce_base := exchange(&mut c.bce_base, u8[]);
@@ -16400,6 +16488,9 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         record_debug_func(&mut c, view(name), view(m), &site);
     }
     fx_end(&mut c);
+    if wrapped {
+        ref_wrapper(&mut c, view(m), view(name), view(body_symbol), export, count, position, claimed_alloc, claimed_panic, entry_state);
+    }
     exchange(&mut c.hints, u64[]);
     // ---- file this body as a unit, if its emission stayed inside its own bytes ----------------
     //
@@ -19558,8 +19649,6 @@ fn fx_begin<a, b, d>(c: (&a mut C), sym: &b [u8], name: &d [u8], file: u64, pos:
     edges := c.fx_edge_from.len();
     exchange(&mut c.fx_edge_mark, edges);
     exchange(&mut c.fx_calls, 0);
-    exchange(&mut c.fx_skip_lo, 0);
-    exchange(&mut c.fx_skip_hi, 0);
     if trusted != 0 {
         fx_root(&mut c, k, view(sym));
     }
@@ -19657,15 +19746,18 @@ fn fx_would_trap<a, b>(c: (&a mut C), callee: &b [u8]) -> unit {
     fx_edge(&mut c, view(callee), 0);
     return ();
 }
-// A direct call whose arguments proved every refinement of the callee's parameters. It enters the
-// callee at its one entry, whose checks then hold by the proof: they are not this body's to answer
-// for (edge kind 8). A second entry past the checks was a byte copy of the prologue taken before the
-// optimiser rewrote it, and restored callee-saved registers it had never saved.
+// A direct call whose arguments proved every refinement of the callee's parameters: it calls the
+// body, `<callee>.proved`, which checks nothing, so it costs what a call to a function with no
+// predicate costs. (An earlier second entry was a byte copy of the prologue taken before the
+// optimiser rewrote it, and restored callee-saved registers it had never saved; the body is now a
+// function of its own and the checks live in the wrapper, ref_wrapper.)
 fn call_proved_out<a, b>(c: (&a mut C), callee: &b [u8]) -> unit {
-    fx_edge(&mut c, view(callee), 8);
+    mut target = copy_bytes(view(callee));
+    push_bytes(&mut target, view(".proved"));
+    fx_edge(&mut c, view(target), 8);
     fx_called(&mut c);
     o(&mut c, view("call "));
-    o(&mut c, callee);
+    o(&mut c, view(target));
     c.out.push(10);
     return ();
 }
@@ -19757,16 +19849,13 @@ fn fx_helper<a, b>(c: (&a mut C), sym: &b [u8]) -> unit {
     exchange(&mut c.fx_trusted, 1);
     exchange(&mut c.fx_out_start, c.out.len());
     exchange(&mut c.fx_calls, 0);
-    exchange(&mut c.fx_skip_lo, 0);
-    exchange(&mut c.fx_skip_hi, 0);
     exchange(&mut c.fx_cur, k + 1);
     return ();
 }
 // The body ends, and the one thing that is still read from the bytes is checked: the number of `call`
 // lines the body emitted has to be the number of calls it recorded. A disagreement means a call site
 // exists that does not go through the recording helpers - a compiler bug that would otherwise be a
-// silently weaker proof. The replayed prologue of the `.proved` entry is skipped: those are bytes
-// already accounted for, copied to the second entry.
+// silently weaker proof.
 fn fx_end<a>(c: (&a mut C)) -> unit {
     cur := c.fx_cur;
     if cur == 0 {
@@ -19774,18 +19863,16 @@ fn fx_end<a>(c: (&a mut C)) -> unit {
     }
     exchange(&mut c.fx_cur, 0);
     from := cur - 1;
-    // The calls this body emitted, with the range of a replayed `.proved` prologue: the comparison
+    // The calls this body emitted: the comparison
     // that used to scan these bytes for `call` lines happens once, against the typed IR's call list
     // (`fx_check_calls`, called where the optimizer has parsed every body).
     c.fx_body_sym.push(c.fx_syms[from].copy());
     c.fx_body_calls.push(c.fx_calls);
-    c.fx_body_lo.push(c.fx_skip_lo);
-    c.fx_body_hi.push(c.fx_skip_hi);
     exchange(&mut c.fx_calls, 0);
     return ();
 }
 // The check the byte scan used to make: every body that claimed an effect recorded exactly as many
-// calls as the typed IR parsed out of its bytes (outside any replayed prologue). A call site that
+// calls as the typed IR parsed out of its bytes. A call site that
 // bypasses `call_out`, `call_slot_out`, `call_dispatch_out` or `call_entry_out` would leave the IR
 // with a call the recorder never saw - a silently weaker proof - so it is refused here.
 fn fx_check_calls<a, b, d>(c: (&a mut C), syms: (&b u8[][]), counts: (&d u64[])) {
@@ -24047,10 +24134,9 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
     // discharged here. A method call, an interface method solved to an implementation, and a foreign
     // call proved nothing about the code they reach, and keep the checked entry.
     mut proved = 0;
-    // `ref_entry` emits no second entry for the LLVM backend (its prologue is written in frame-symbol
-    // arithmetic the lifter does not model), so nothing is proved here either: an effect that a proof
-    // would have discharged is refused by name instead of being discharged and then left checked.
-    if (c.raw == 0) & (c.validating == 0) & (method == 0) & (c.funcs[f - 1].ext == 0) & (c.funcs[f - 1].contract == 0) & (c.backend == 0) {
+    // Every backend lifts the body and its checking wrapper as two ordinary functions (ref_wrapper),
+    // so a proof is used wherever it is found.
+    if (c.raw == 0) & (c.validating == 0) & (method == 0) & (c.funcs[f - 1].ext == 0) & (c.funcs[f - 1].contract == 0) {
         strict := u64(ref_strict(&c));
         proved = pv_call_proved(&mut c, f, count, &spans, call_at, strict);
     }
@@ -44295,6 +44381,7 @@ pub fn main() -> u64 {
         pv_pred_mode: 0,
         pv_arith_ok: 0,
         ref_assign_target: 0,
+        proved_label: 0,
         ref_assign_d: 0,
         ref_assign_k: 0,
         strict_refinements: 0,
@@ -44419,14 +44506,10 @@ pub fn main() -> u64 {
         fx_out_start: 0,
         fx_trusted: 0,
         fx_calls: 0,
-        fx_skip_lo: 0,
-        fx_skip_hi: 0,
         fx_entry_panic: u64[],
         fx_edge_mark: 0,
         fx_body_sym: u8[][],
         fx_body_calls: u64[],
-        fx_body_lo: u64[],
-        fx_body_hi: u64[],
         fn_dir: u8[],
         fn_id: u8[],
         fn_quiet: 0,
@@ -45189,22 +45272,15 @@ pub fn main() -> u64 {
     mut out = u8[];
     // The typed IR of each body, as the optimizer parsed it, when --emit-ir asked for it.
     mut ir_text = u8[];
-    // Where each body's replayed `.proved` prologue sits, so the optimizer can count the calls the
-    // body really emits and this end can hold that count against what the effect checker recorded.
-    mut rsym = u8[][];
-    for i in c.fx_body_sym.len() {
-        rsym.push(c.fx_body_sym[i].copy());
-    }
-    replay := ir::Replay { sym: rsym, lo: c.fx_body_lo.copy(), hi: c.fx_body_hi.copy() };
     mut call_syms = u8[][];
     mut call_counts = u64[];
     if (c.debug != 0) || (c.backend != 0) {
         out = copy_bytes(view(c.out));
     } else {
         if c.split != 0 {
-            out = optimize::optimize_parts(view(c.out), 1, &mut c.marks, &mut c.part_names, &c.facts, c.emit_ir, &mut ir_text, &replay, &mut call_syms, &mut call_counts, view(c.fn_dir), view(c.fn_id));
+            out = optimize::optimize_parts(view(c.out), 1, &mut c.marks, &mut c.part_names, &c.facts, c.emit_ir, &mut ir_text, &mut call_syms, &mut call_counts, view(c.fn_dir), view(c.fn_id));
         } else {
-            out = optimize::optimize(view(c.out), &c.facts, c.emit_ir, &mut ir_text, &replay, &mut call_syms, &mut call_counts, view(c.fn_dir), view(c.fn_id));
+            out = optimize::optimize(view(c.out), &c.facts, c.emit_ir, &mut ir_text, &mut call_syms, &mut call_counts, view(c.fn_dir), view(c.fn_id));
         }
         // The check the byte scan used to make, now from the IR: a call site that bypasses the
         // recording helpers is a compiler bug, and a bug here is a silently weaker proof.

@@ -2,7 +2,7 @@
 
 Status: implemented (gaps round, G24; arithmetic sound under wrapping in both overflow modes,
 2026-11-16): the syntax (`a483462`), the runtime checks that keep the
-feature sound (`031fd33`), the prover with its second entry point (`a6fe6b0`, `3fee023`; the second entry was removed on 2026-11-16 - a copy of the prologue taken before optimisation, it corrupted the caller's callee-saved registers),
+feature sound (`031fd33`), the prover with its second entry point (`a6fe6b0`, `3fee023`; the copied second entry was replaced on 2026-11-16 - a copy of the prologue taken before optimisation, it corrupted the caller's callee-saved registers - by a checking wrapper that calls the body, `ref_wrapper`),
 bounds-check elimination from a refined parameter (`a0d2dda`), strict mode (`5001170`), the
 `--verify-facts` cross-check on the native backend (`4ef15d8`) and the fact walker over the typed IR
 that replaced the token re-walk (`dc5c73b`).
@@ -338,7 +338,7 @@ refusing an unproved one; a function value still checking; and a cross-module pr
 interface. The `pv-` cases are the typed-IR walk's own: a match pattern and a match guard proving a
 call (and a sibling arm, which has no such fact, keeping its check), a shadowing binding killing its
 block's facts and restoring the outer ones after it, and a `for` guard proving a call inside the body
-and ending with it. Each proving case is accepted under `@strict` (the asm pins on a `.proved` entry went with that entry, 2026-11-16) and the refusing
+and ending with it. Each proving case asserts the call reaches `<symbol>.proved` and not the wrapper, and the refusing
 case asserts the runtime check fires, so neither can pass by accident.
 
 The switch was measured before the re-walk was deleted, with the same compiler built twice and the

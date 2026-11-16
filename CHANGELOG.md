@@ -1,5 +1,13 @@
 ## Unreleased
 
+- **Proved calls cost nothing again, on every target and on the LLVM backend.** A function with
+  refined parameters is two ordinary functions: the body, `<symbol>.proved`, with no checks, and
+  `<symbol>`, a wrapper that checks the parameters and calls it. A proved call calls the body
+  directly - the same instructions as a call to a function with no predicate (measured on
+  x86_64, aarch64 and riscv64: identical bodies, identical call sites). An unproved call pays one
+  call/return on top of its checks. The LLVM backend now uses proofs too (it skipped the prover
+  while the second entry was a prologue copy it could not lift).
+
 - A call whose constant arguments break the callee's predicate (`split(v, 0, f)` with
   `grain: u64 where grain > 0`) is a compile error in every mode; it used to compile and fail at
   run time. Only constants, and names the facts equate with one, are judged false.
