@@ -799,6 +799,8 @@ function corpusCases() {
     const test = cases[i];
     if (test.targets && !test.targets.includes(target)) continue;
     if (test.removedSyntax) continue;
+    // A pending case states behaviour another piece of work must produce (tools/test-native.mjs).
+    if (test.pending) continue;
     const modules = (test.modules ?? []).map(file => resolve(root, file));
     // A case with no second module has nothing to read from an interface; its own interface is
     // still emitted and checked when `--full` asks for every case.

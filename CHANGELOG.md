@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **A `Mutex` wait costs nothing, and a failed holder poisons it instead of hanging everyone.**
+  A task or thread waiting for a lock now parks - eight tasks waiting through a 300 ms hold used a
+  processor each, and now use under 100 ms of CPU together. When a task or a spawned thread fails
+  inside `lock_with`, the lock is released and the mutex is poisoned: the next `lock_with` fails with
+  `mutex poisoned: its holder failed at FILE:LINE:COL` (the next locker used to wait for ever).
+  `sync::recover_with(&m, ctx, f)` gets in anyway and clears the poison; `sync::try_lock_with` and
+  `sync::is_poisoned` are new. `thread::join` from a task parks instead of starting a helper thread.
+  `docs/design/parking.md`, `bench/mutex.grl`.
+
 - **One set of worker threads: jobs run on the scheduler.** `parallel_map`,
   `parallel_for_chunks`, `pool::join` and job handles used to run on a pool of threads separate
   from the scheduler that runs tasks, so a program that used both had two threads per CPU (50 on a
