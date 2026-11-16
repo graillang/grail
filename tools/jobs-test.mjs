@@ -102,4 +102,25 @@ assert.equal(tokensIn(fdC), 2, "a build under make's jobserver must give every t
 assert.ok(underMake.peak <= 1 + 2 * 3, `make -j3 ran ${underMake.peak} compiler processes at once`);
 closeSync(fdC);
 console.log(`jobs: (c) under make -j3: at most ${underMake.peak} compiler processes at once, every token back`);
+// (d) errors in bodies: three bodies of the 1000-function program refuse to check, one in each part
+// of the module. Checked and compiled in one process and with the bodies forced across workers, the
+// diagnostics, their order and the exit status are the same - a worker that hits an error stops,
+// and the module goes back to one process, which reports what one process reports.
+let broken = scalingProgram(1000);
+for (const k of [120, 510, 930]) broken = broken.replace(`fn work${k}(v: &u64[], k: u64) -> u64 {\n    mut total = 0;`, `fn work${k}(v: &u64[], k: u64) -> u64 {\n    mut total = "text" + 1;`);
+const brokenFile = join(work, 'broken.grl');
+writeFileSync(brokenFile, broken);
+const refuse = (args, env) => {
+  const r = spawnSync(compiler, args, { cwd: work, encoding: 'utf8', env: { ...process.env, ...env }, maxBuffer: 1 << 26 });
+  return { status: r.status, said: `${r.stdout}${r.stderr}` };
+};
+for (const [what, args] of [['grail check', ['check', brokenFile]], ['a compile', ['--target', 'x86_64', join(work, 'broken.s'), brokenFile, join(root, 'compiler/runtime.grl'), join(root, 'compiler/os-linux.grl')]]]) {
+  const one = refuse(args, { GRAIL_JOBS: '1' });
+  const many = refuse(args, { GRAIL_JOBS: '4', GRAIL_BODY_SLICE: '2' });
+  assert.notEqual(one.status, 0, `${what} of the broken program must fail`);
+  assert.equal((one.said.match(/^error/gm) ?? []).length >= 3, true, `${what} must report the three errors:\n${one.said}`);
+  assert.equal(many.status, one.status, `${what}: the exit status differs with parallel bodies`);
+  assert.equal(many.said, one.said, `${what}: the diagnostics differ with parallel bodies`);
+}
+console.log('jobs: (d) errors in three bodies: the same diagnostics, in the same order, with the same status');
 console.log('jobserver verified');

@@ -15547,7 +15547,7 @@ fn par_start<a>(c: (&a mut C), files: u64) -> unit {
     if (c.plat != 0) | (c.target != 0) | (c.debug != 0) | (c.backend != 0) | (c.emit_ir != 0) {
         return ();
     }
-    if (c.fx_any != 0) | (c.exports.len() != 0) | (c.validating != 0) | (c.skip_bodies.len() != 0) | (c.check_only != 0) {
+    if (c.fx_any != 0) | (c.exports.len() != 0) | (c.validating != 0) | (c.skip_bodies.len() != 0) {
         return ();
     }
     slice := host::env(view("GRAIL_BODY_SLICE"));
@@ -15716,7 +15716,7 @@ fn par_take<a, b>(c: (&a mut C), owner: u64, file: u64, off: u64, outcome: (&b m
         return fncache::none();
     }
     exchange(outcome, kind);
-    u := fncache::decode(bytes);
+    u := fncache::decode_piped(bytes);
     if u.key.len() == 0 {
         par_fall_back(&mut c, view("a body worker sent a unit that does not decode"));
     }
@@ -15729,6 +15729,11 @@ fn par_record<a, b>(c: (&a mut C), at_off: u64, kind: u64, u: (&b fncache::Unit)
     iface_wv(&mut c.par_buf, kind);
     if kind == 0 {
         iface_wv(&mut c.par_buf, 0);
+    } else if c.check_only != 0 {
+        // A check run writes no assembly and runs no optimiser: what the parent needs of a checked
+        // body is that it checked, and what it asks of the run - its registrations.
+        checked := fncache::Unit { key: u.key.copy(), text: u8[], facts: u8[], regs: u.regs.copy() };
+        iface_ws(&mut c.par_buf, view(fncache::encode(&checked)));
     } else {
         iface_ws(&mut c.par_buf, view(fncache::encode(u)));
     }

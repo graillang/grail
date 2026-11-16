@@ -6,7 +6,7 @@
   compiler compiling itself goes from 38.7 s in one process to 18.3 s; a 1000-function program from
   4.2 s to 2.1 s. A body with an error is reported exactly as before: any worker that does not
   finish sends the module back to one process. The first body of each module is now a cache unit
-  too.
+  too. `grail check` is parallel the same way (the compiler's own sources: 13.6 s to 6.0 s).
 
 - **One jobserver per build.** `grail build` runs at most `GRAIL_JOBS` (default: the processor count)
   compiler processes at once across everything it starts - module runs and their optimiser workers
