@@ -493,7 +493,7 @@ export function compileOnly(compiler, inputs, directory, { target = hostTarget, 
 }
 // backend 'llvm' (or GRAIL_BACKEND=llvm) lowers through compiler/llvm.grl: the compiler writes
 // NAME.s.ll beside NAME.s, clang -O2 compiles it, and the object joins the link.
-export function compileProgram(compiler, inputs, directory, { target = hostTarget, overflow = 'checked', name = 'program', interfaces = null, runtime = join(root, 'compiler/runtime.grl'), osRuntime = join(root, 'compiler/os-linux.grl'), darwin = join(root, 'compiler/darwin.grl'), frameworks = [], sdk = process.env.GRAIL_SDK, sign = false, backend = process.env.GRAIL_BACKEND ?? 'native', verifyFacts = process.env.GRAIL_VERIFY_FACTS === '1', rangeFacts = process.env.GRAIL_RANGE_FACTS === '1', extra = [] } = {}) {
+export function compileProgram(compiler, inputs, directory, { target = hostTarget, overflow = 'checked', name = 'program', interfaces = null, runtime = join(root, 'compiler/runtime.grl'), osRuntime = join(root, 'compiler/os-linux.grl'), darwin = join(root, 'compiler/darwin.grl'), frameworks = [], sdk = process.env.GRAIL_SDK, sign = false, backend = process.env.GRAIL_BACKEND ?? 'native', verifyFacts = process.env.GRAIL_VERIFY_FACTS === '1', rangeFacts = process.env.GRAIL_RANGE_FACTS === '1', extra = [], output = null } = {}) {
   targetName(target);
   if (!['checked', 'wrap'].includes(overflow)) throw new Error('overflow must be checked or wrap');
   mkdirSync(directory, { recursive: true });
@@ -508,7 +508,9 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
   // `interfaces` compiles against the interface directory a previous emit produced instead of the
   // modules' sources (B1 stage 2). It changes what the checker sees, not what it is given.
   const interfaceFlags = interfaces ? ['--interface', interfaces] : [];
-  command([compiler, ...interfaceFlags, ...(llvm ? ['--backend=llvm'] : []), ...(verifyFacts ? ['--verify-facts'] : []), ...(rangeFacts ? ['--range-facts'] : []), ...extra, '--target', target, `--overflow=${overflow}`, assembly, ...files]);
+  const compiled = command([compiler, ...interfaceFlags, ...(llvm ? ['--backend=llvm'] : []), ...(verifyFacts ? ['--verify-facts'] : []), ...(rangeFacts ? ['--range-facts'] : []), ...extra, '--target', target, `--overflow=${overflow}`, assembly, ...files]);
+  // `output`, when a caller passes an array, receives what the compiler printed.
+  if (output) output.push(`${compiled.stdout ?? ''}${compiled.stderr ?? ''}`);
   const linkArgs = linkInputs(readFileSync(assembly, 'utf8'), dirname(resolve(root, inputs[0])));
   if (llvm) {
     const object = join(directory, `${name}.ll.o`);

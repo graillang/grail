@@ -423,6 +423,8 @@ struct C {
     lunits: u8[][],
     lnext: u64[],
     rnext: u64[],
+    // The line the `.gpos` markers being written count from (site_base).
+    gbase: u64,
     // A function's labels are its own: `.L<lpart>_<f>_<n>`, where `f` is the function's ordinal in
     // its unit (`fnext` counts them per unit) and `n` restarts at 1 with each function - so the text
     // of a body does not depend on how many labels the bodies before it minted, and an edit to one
@@ -901,7 +903,18 @@ struct C {
     fn_at_col: u64,
     fn_hits: u64,
     fn_filed: u64,
-    fn_kept: u64
+    fn_kept: u64,
+    // What the body being emitted asked of the run, for its unit (fn_reg_drop, fn_reg_spec): the
+    // registrations as they will be filed, and the type each one named, to check the spelling
+    // reads back as the same type. `fn_rec` is 1 while a body that may be filed is being emitted.
+    fn_rec: u64,
+    fn_regs: u8[],
+    fn_reg_types: u64[],
+    // One count per rule that keeps a body from being a unit (the FN_* indices): how often the
+    // body being emitted did the thing (`fn_uses`, read by fn_marks), and how many bodies each rule
+    // excluded in this run (`fn_why`, printed with the run's account).
+    fn_uses: u64[],
+    fn_why: u64[]
 }
 
 fn same<a, b>(x: &a [u8], y: &b [u8]) -> bool {
@@ -2260,6 +2273,16 @@ fn debug_sections<a, b>(c: &a C, entry: &b [u8]) -> u8[] {
 fn site_table_on<a>(c: (&a C)) -> bool {
     return (c.plat == 0) && (c.backend == 0) && (c.debug == 0) && (c.split == 0) && (c.no_sites == 0);
 }
+// `.gbase LINE`: the line the `.gpos` markers after it count from. A function states its own first
+// line before its body, so the body's markers say how far down the function a statement is and not
+// how far down the file: a body's text is the same wherever in the file it stands.
+fn site_base<a>(c: (&a mut C), line: u64) -> unit {
+    exchange(&mut c.gbase, line);
+    o(&mut c, view(".gbase "));
+    on(&mut c, line);
+    c.out.push(10);
+    return ();
+}
 fn site_pos<a>(c: (&a mut C)) -> unit {
     p := c.pos;
     if c.toks.len() <= p {
@@ -2267,12 +2290,18 @@ fn site_pos<a>(c: (&a mut C)) -> unit {
     }
     line := c.toks[p].line;
     col := c.toks[p].col;
+    if line < c.gbase {
+        // A statement from above the function being emitted (a body replayed from another place):
+        // the base moves up to it, and the body's text now names a line of the file.
+        fn_use(&mut c, FN_ABSOLUTE);
+        site_base(&mut c, line);
+    }
     // The last word says whether this is the unsafe runtime (runtime.grl, os-*.grl), whose sites a
     // failure report skips to find the program's own.
     o(&mut c, view(".gpos "));
     on(&mut c, c.file);
     c.out.push(32);
-    on(&mut c, line);
+    on(&mut c, line - c.gbase);
     c.out.push(32);
     on(&mut c, col);
     c.out.push(32);
@@ -2432,6 +2461,9 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
     mut cur_file = 0;
     mut cur_line = 0;
     mut cur_col = 0;
+    // The line `.gpos` counts from, as the last `.gbase` gave it. `.gposa` is a position that does
+    // not count from it: the optimizer writes those in a body it copied out of another function.
+    mut base_line = 0;
     mut cur_internal = false;
     mut own_internal = true;
     mut seen_own = false;
@@ -2456,7 +2488,16 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
             line.push(b);
             continue;
         }
-        if site_starts(view(line), view(".gpos ")) {
+        if site_starts(view(line), view(".gbase ")) {
+            w := site_words(view(line));
+            if w.len() == 1 {
+                base_line = w[0];
+            }
+            line = u8[];
+            continue;
+        }
+        absolute := site_starts(view(line), view(".gposa "));
+        if absolute || site_starts(view(line), view(".gpos ")) {
             w := site_words(view(line));
             if w.len() == 4 {
                 internal := w[3] != 0;
@@ -2468,6 +2509,9 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
                 if !internal || own_internal {
                     cur_file = w[0];
                     cur_line = w[1];
+                    if !absolute {
+                        cur_line = base_line + w[1];
+                    }
                     cur_col = w[2];
                     cur_internal = internal;
                 }
@@ -5991,9 +6035,18 @@ fn drop_name<a>(c: (&a mut C), ty: u64) -> unit {
     return ();
 }
 // A drop helper's name, and the request for its body: naming one is what makes the drop walk emit it.
+// Every naming goes through here, and a unit records each one (fn_reg_drop): a replayed body names
+// its helpers again by calling this, so what the drop walk sees is what a fresh emission shows it.
+// The name itself can ask for a generic `Drop` implementation's specialisation (drop_hook_symbol);
+// that request is part of naming the helper, made again whenever the helper is named again, so it
+// is not recorded separately.
 fn drop_ref_name<a>(c: (&a mut C), ty: u64) -> u8[] {
+    fn_reg_drop(&mut c, ty);
     c.drop_refs.push(ty);
-    return drop_symbol(&mut c, ty);
+    rec := exchange(&mut c.fn_rec, 0);
+    name := drop_symbol(&mut c, ty);
+    exchange(&mut c.fn_rec, rec);
+    return name;
 }
 // A call to a type's drop helper: the `Drop` reached through the compiler's glue is a real edge.
 fn drop_call_out<a>(c: (&a mut C), ty: u64) -> unit {
@@ -7046,6 +7099,8 @@ fn pred_of_text<a, b, d>(c: (&a mut C), label: &b [u8], text: &d [u8]) -> Pred {
 }
 // `file:line:col` of a token in `file`: where a declaration is written, for the requirement line.
 fn src_where<a>(c: (&a mut C), file: u64, pos: u64) -> u8[] {
+    // The text this returns names a line of the file, and it is going into the body's bytes.
+    fn_use(&mut c, FN_ABSOLUTE);
     saved_file := c.file;
     saved_pos := c.pos;
     if (saved_file != file) & (file != 0) {
@@ -10561,6 +10616,7 @@ fn dyn_box<a>(c: (&a mut C), v: Val, expected: u64) -> Val {
 // Record the (interface, concrete type) pair whose vtable this program builds; both an owned `dyn I`
 // and a `&dyn I` need one.
 fn register_vtable<a>(c: (&a mut C), id: u64, concrete: u64) -> unit {
+    fn_use(&mut c, FN_VTABLE);
     mut known = false;
     for i in c.vtables.len() / 2 {
         if (c.vtables[2 * i] == id) && (same_type(&mut c, c.vtables[2 * i + 1], concrete) != 0) {
@@ -14503,6 +14559,7 @@ fn ffi_link<a, b>(c: (&a mut C), input: &b [u8]) -> unit {
     // The link request is program-wide (it is emitted once, at the head of the stream), but an
     // interface has to know which module asked for it so a build that reads the module's
     // declarations instead of its source still asks the linker for the same input.
+    fn_use(&mut c, FN_LINK);
     c.lib_owner.push(module_copy(&mut c));
     for i in c.libs.len() {
         if same(view(c.libs[i]), view(input)) {
@@ -14857,36 +14914,188 @@ fn fn_place<a>(c: (&a mut C), pos: u64) -> FnPlace {
     return FnPlace { line: line, col: col };
 }
 
-// The counters whose movement means a body reached outside its own bytes: a closure body, a
-// specialisation, a drop helper, a vtable, a link input, a compile-time constant, a debug record,
-// the fn thunk, an effect record. Each of those is emitted by a later step, so a replay that
-// skipped the registration would hand the link an object missing a symbol.
+// The rules that keep a body from being a unit in this pass, as indices into `fn_uses`/`fn_why`.
+// Each is something the body hands the run that a unit does not record, so a replay that skipped it
+// would leave a later step without it: a closure body, a vtable, a link input, a constant, the fn
+// thunk and an effect record are emitted or settled later; a synthesised declaration (a tuple, a
+// result union, a closure environment) changes the declaration table the bodies after it start
+// with; a position spelled as text names a line of the file. Drop helpers and specialisations are
+// not here: a unit records those and a replay asks again (fn_reg_drop, fn_reg_spec).
+const FN_CLOSURE: u64 = 0;
+const FN_VTABLE: u64 = 1;
+const FN_LINK: u64 = 2;
+const FN_CONSTANT: u64 = 3;
+const FN_THUNK: u64 = 4;
+const FN_ABSOLUTE: u64 = 5;
+const FN_DECLARATION: u64 = 6;
+const FN_UNSPELLED: u64 = 7;
+const FN_FIRST: u64 = 8;
+const FN_EFFECT: u64 = 9;
+fn fn_rule_name(rule: u64) -> string {
+    if rule == FN_CLOSURE {
+        return "closure";
+    }
+    if rule == FN_VTABLE {
+        return "vtable";
+    }
+    if rule == FN_LINK {
+        return "link input";
+    }
+    if rule == FN_CONSTANT {
+        return "constant";
+    }
+    if rule == FN_THUNK {
+        return "fn thunk";
+    }
+    if rule == FN_ABSOLUTE {
+        return "absolute position";
+    }
+    if rule == FN_DECLARATION {
+        return "synthesised declaration";
+    }
+    if rule == FN_UNSPELLED {
+        return "unspellable type";
+    }
+    if rule == FN_FIRST {
+        return "first of part";
+    }
+    return "effect record";
+}
+// The body being emitted did something rule `rule` names. Every use counts, not only the first of
+// the run: a body that uses a vtable an earlier body registered depends on it exactly as much.
+fn fn_use<a>(c: (&a mut C), rule: u64) -> unit {
+    c.fn_uses[rule] = c.fn_uses[rule] + 1;
+    return ();
+}
+// Where every rule stands; a body is a unit when none of them moved while it was emitted.
 fn fn_marks<a>(c: (&a C)) -> u64[] {
-    mut m = u64[];
-    m.push(c.closures.len());
-    m.push(c.specs.len());
-    m.push(c.drop_refs.len());
-    m.push(c.drop_names.len());
-    m.push(c.vtables.len());
-    m.push(c.libs.len());
-    m.push(c.constants.len());
-    m.push(c.debug_funcs.len());
-    m.push(c.fn_thunk_used);
-    m.push(c.fx_syms.len());
-    m.push(c.fx_body_sym.len());
+    mut m = c.fn_uses.copy();
+    m[FN_CLOSURE] = c.closures.len();
+    m[FN_CONSTANT] = c.constants.len();
+    m[FN_DECLARATION] = c.decls.len();
+    m[FN_EFFECT] = c.fx_syms.len() + c.fx_body_sym.len();
     return m;
 }
-
-fn fn_marks_same<a, b>(a: (&a u64[]), b: (&b u64[])) -> bool {
-    if a.len() != b.len() {
-        return false;
+// A type as a registration spells it: structurally, the way an interface does. False when the type
+// has no such spelling.
+fn fn_spell<a>(c: (&a mut C), out: (&a mut u8[]), ty: u64) -> bool {
+    mut deps = u64[];
+    old_lenient := exchange(&mut c.spell_lenient, 1);
+    old_failed := exchange(&mut c.spell_failed, 0);
+    iface_w_type(&mut c, &mut out, &mut deps, ty);
+    failed := c.spell_failed;
+    exchange(&mut c.spell_lenient, old_lenient);
+    exchange(&mut c.spell_failed, old_failed);
+    return failed == 0;
+}
+// The body names type `ty`'s drop helper: registration `1 <type>`.
+fn fn_reg_drop<a>(c: (&a mut C), ty: u64) -> unit {
+    if c.fn_rec == 0 {
+        return ();
     }
-    for i in a.len() {
-        if a[i] != b[i] {
-            return false;
+    mut rec = u8[];
+    rec.push(1);
+    if !fn_spell(&mut c, &mut rec, ty) {
+        fn_use(&mut c, FN_UNSPELLED);
+        return ();
+    }
+    push_bytes(&mut c.fn_regs, view(rec));
+    c.fn_reg_types.push(ty);
+    return ();
+}
+// The body asks for `template` instantiated at `map`: registration `2 <template> <n> <type>...`.
+// The template is its index in the function table, which the declaration surface in the key fixes.
+fn fn_reg_spec<a, b>(c: (&a mut C), template: u64, map: (&b u64[])) -> unit {
+    if c.fn_rec == 0 {
+        return ();
+    }
+    mut rec = u8[];
+    rec.push(2);
+    iface_wv(&mut rec, template);
+    iface_wv(&mut rec, map.len());
+    for i in map.len() {
+        if !fn_spell(&mut c, &mut rec, map[i]) {
+            fn_use(&mut c, FN_UNSPELLED);
+            return ();
         }
     }
-    return true;
+    push_bytes(&mut c.fn_regs, view(rec));
+    for i in map.len() {
+        c.fn_reg_types.push(map[i]);
+    }
+    return ();
+}
+// One registration, read back: `kind` 1 names the drop helper of `types[0]`, 2 asks for `template`
+// at `types`.
+struct FnReg {
+    kind: u64,
+    template: u64,
+    types: u64[]
+}
+// The registrations of a unit, with every type interned in this run. `ok` goes to 0 when a record is
+// not one this compiler writes, and then nothing of the unit may be applied.
+fn fn_regs_read<a, b, d>(c: (&a mut C), data: &b [u8], ok: (&d mut u64)) -> FnReg[] {
+    mut out = FnReg[];
+    mut p = IR { data: data.copy(), at: 0, stop: data.len(), path: copy_bytes(view("the unit store")), phase: 2, rtext: u8[], what: u8[] };
+    while p.at < p.stop {
+        kind := iface_r1(&mut p);
+        if kind == 1 {
+            ty := iface_r_type(&mut p, &mut c);
+            out.push(FnReg { kind: 1, template: 0, types: u64[ty] });
+        } else if kind == 2 {
+            template := iface_rv(&mut p);
+            n := iface_rv(&mut p);
+            if (c.funcs.len() <= template) | (p.stop < n) {
+                exchange(ok, 0);
+                return out;
+            }
+            mut types = u64[];
+            for i in n {
+                types.push(iface_r_type(&mut p, &mut c));
+            }
+            out.push(FnReg { kind: 2, template: template, types: types });
+        } else {
+            exchange(ok, 0);
+            return out;
+        }
+    }
+    return out;
+}
+// PRODUCE, the last step: what the body just emitted handed the run, as a unit. The text starts
+// after the body's `.gbase` line; the facts are the ones recorded since `fact_mark`; the
+// registrations are the ones `fn_reg_drop` and `fn_reg_spec` wrote down.
+fn fn_unit_of<a>(c: (&a mut C), key: u8[], text_mark: u64, fact_mark: u64) -> fncache::Unit {
+    mut text = u8[];
+    text.append(c.out[text_mark..c.out.len()]);
+    return fncache::Unit { key: key, text: text, facts: fn_facts_encode(&c, fact_mark), regs: c.fn_regs.copy() };
+}
+// APPLY: put a unit into the run, as the next function of the current part. The function takes its
+// ordinal, states the line its positions count from, and then the unit is everything else: its
+// text, its facts, and its registrations made again through the calls a fresh emission makes
+// (drop_ref_name, specialize) - so the drop walk and the specialisation queue see the same requests
+// in the same order whether the body was compiled in this run or in an earlier one.
+fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), line: u64) -> unit {
+    k := c.lunit;
+    if (k != 0) & (k <= c.fnext.len()) {
+        c.fnext[k - 1] = c.fnext[k - 1] + 1;
+    }
+    if site_table_on(&c) {
+        site_base(&mut c, line);
+    }
+    c.out.append(view(u.text));
+    fn_facts_restore(&mut c, view(u.facts));
+    for i in regs.len() {
+        kind := regs[i].kind;
+        template := regs[i].template;
+        types := regs[i].types.copy();
+        if kind == 1 {
+            drop_ref_name(&mut c, types[0]);
+        } else {
+            specialize(&mut c, template, &types);
+        }
+    }
+    exchange(&mut c.hints, u64[]);
+    return ();
 }
 
 // The key of one unit: a text record naming every input its bytes are a function of.
@@ -14897,9 +15106,11 @@ fn fn_marks_same<a, b>(a: (&a u64[]), b: (&b u64[])) -> bool {
 //   the run's declaration surface (fn_surface_now: every name, type, layout and signature, no body);
 //   the declaration's own source text, from `fn` to the closing brace;
 //   its typed signature, spelled structurally (`iface_w_type`) after substitution;
-//   the line and column it starts at, which `.gpos` bakes into the body;
-//   the label and `.Lrfp` numbers it starts at, and the declaration count it starts with (a body
-//   that synthesised a declaration before this one changes what this one can see).
+//   the file's index and the column it starts at, which `.gpos` prints (the line is not here: a
+//   body counts its positions from its own first line, which `.gbase` states outside its text);
+//   its ordinal among the functions of its unit, which its labels spell;
+//   the declaration count it starts with (a body that synthesised a declaration before this one
+//   changes what this one can see).
 //
 // An empty key means "not a unit": a type with no interface spelling cannot be named, and a unit
 // keyed by a partial signature would be reused on a guess.
@@ -14921,7 +15132,7 @@ fn fn_key<a, b, d>(c: (&a mut C), unit: &b [u8], symbol: &d [u8], from: u64, to:
     }
     place := fn_place(&mut c, at);
     mut key = u8[];
-    push_bytes(&mut key, view("grail-fnkey 1\nunit "));
+    push_bytes(&mut key, view("grail-fnkey 2\nunit "));
     push_bytes(&mut key, view(unit));
     push_bytes(&mut key, view("\nprefix "));
     push_bytes(&mut key, view(c.lpart));
@@ -14937,9 +15148,9 @@ fn fn_key<a, b, d>(c: (&a mut C), unit: &b [u8], symbol: &d [u8], from: u64, to:
     push_bytes(&mut key, view(fncache::hash(c.src[from: to])));
     push_bytes(&mut key, view("\nsig "));
     push_bytes(&mut key, view(fncache::hash(view(sig))));
-    push_bytes(&mut key, view("\nat "));
-    push_bytes(&mut key, view(decimal_bytes(place.line)));
-    key.push(32);
+    push_bytes(&mut key, view("\nfile "));
+    push_bytes(&mut key, view(decimal_bytes(c.file)));
+    push_bytes(&mut key, view("\ncolumn "));
     push_bytes(&mut key, view(decimal_bytes(place.col)));
     push_bytes(&mut key, view("\nordinal "));
     push_bytes(&mut key, view(decimal_bytes(scope_next(&c))));
@@ -15033,6 +15244,14 @@ fn fn_surface_now<a>(c: (&a mut C)) -> u8[] {
         pub := c.constants[i].public;
         ty := c.constants[i].ty;
         val := c.constants[i].value;
+        if CT_PENDING <= ty {
+            // A constant a compile-time call has yet to give: its value will reach the bodies that
+            // name it, and nothing here can say what it will be - the function that computes it is
+            // a body, and bodies are not part of the surface. No surface, no units.
+            exchange(&mut c.spell_lenient, old_lenient);
+            exchange(&mut c.spell_failed, old_failed);
+            return u8[];
+        }
         iface_ws(&mut out, view(m));
         iface_ws(&mut out, view(n));
         iface_ws(&mut out, view(text));
@@ -15649,12 +15868,20 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // ---- the per-function codegen cache: replay this body if the store has it ----------------
     //
     // The key names the declaration's own source text and its typed signature, so nothing here has
-    // parsed the body: a hit skips the body's tokens, its checking, its lowering and its emission,
-    // and puts back the label numbers the replayed bytes spell. A body is filed (below, at the end
-    // of this function) only when its emission added nothing outside its own bytes.
+    // parsed the body: a hit is a load and an apply (fn_apply), and it skips the body's tokens, its
+    // checking, its lowering and its emission. A body that misses is emitted below, taken as a unit
+    // at the end of this function, filed, and applied the same way.
     mut fn_key_text = u8[];
     mut fn_marks_at = u64[];
     mut fn_candidate = 0;
+    mut fn_line = 0;
+    if position < c.toks.len() {
+        fn_line = c.toks[position].line;
+    }
+    fn_drop_mark := c.drop_refs.len();
+    if fn_on(&c) & (c.current_spec == 0) & !same(view(c.part), view(unit)) {
+        c.fn_why[FN_FIRST] = c.fn_why[FN_FIRST] + 1;
+    }
     if fn_open(&mut c, view(unit)) {
         // The symbol the label will spell: `body_label` is the one spelling both `func_directive`
         // and the label use, so a unit's key names exactly the symbol its bytes define.
@@ -15667,28 +15894,35 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             hit := fncache::load(view(c.fn_dir), view(fncache::hash(view(key))));
             if hit.key.len() != 0 {
                 if same(view(hit.key), view(key)) {
-                    for i in hit.text.len() {
-                        c.out.push(hit.text[i]);
+                    // All of its registrations, or none of the unit.
+                    mut readable = 1;
+                    regs := fn_regs_read(&mut c, view(hit.regs), &mut readable);
+                    if readable != 0 {
+                        fn_apply(&mut c, &hit, &regs, fn_line);
+                        c.fn_hits = c.fn_hits + 1;
+                        skip_braces(&mut c);
+                        return ();
                     }
-                    // The replayed text spells the ordinal the key named: it is spent.
-                    k := c.lunit;
-                    if (k != 0) & (k <= c.fnext.len()) {
-                        c.fnext[k - 1] = c.fnext[k - 1] + 1;
-                    }
-                    fn_facts_restore(&mut c, view(hit.facts));
-                    exchange(&mut c.hints, u64[]);
-                    c.fn_hits = c.fn_hits + 1;
-                    skip_braces(&mut c);
-                    return ();
                 }
             }
             fn_key_text = key;
             fn_marks_at = fn_marks(&c);
             fn_candidate = 1;
+            exchange(&mut c.fn_rec, 1);
+            exchange(&mut c.fn_regs, u8[]);
+            exchange(&mut c.fn_reg_types, u64[]);
+        } else {
+            c.fn_why[FN_UNSPELLED] = c.fn_why[FN_UNSPELLED] + 1;
+            c.fn_kept = c.fn_kept + 1;
         }
     }
     part(&mut c, view(unit));
     scope_begin(&mut c);
+    if site_table_on(&c) && (c.validating == 0) && (position < c.toks.len()) {
+        site_base(&mut c, fn_line);
+    }
+    // A unit's text starts here, after the line that says where the function is.
+    text_mark := c.out.len();
     mut body_symbol = u8[];
     push_bytes(&mut body_symbol, view(export_symbol));
     if (c.target == 3) & (export == 2) {
@@ -15903,6 +16137,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // A literal binding learned its type from a later use: discard this attempt and recompile.
     if c.retry != 0 {
         scope_undo(&mut c);
+        exchange(&mut c.fn_rec, 0);
         exchange(&mut c.part, part_mark);
         exchange(&mut c.lpart, part_lpart);
         exchange(&mut c.label, part_label);
@@ -15949,31 +16184,62 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     fx_end(&mut c);
     exchange(&mut c.hints, u64[]);
     scope_end(&mut c);
-    // ---- file this body as a unit, if its emission stayed inside its own bytes ----------------
+    // ---- take this body as a unit, if the run got nothing from it a unit does not record ------
     //
-    // The marks say what the body added to the *run*: a closure body, a specialisation, a drop
-    // helper, a vtable, a link input, a compile-time constant, a debug record or an effect record
-    // is emitted by a later step, so a replay that skipped the registration would hand the link an
-    // object missing a symbol. Such a body is emitted exactly as before and is never filed.
+    // The marks say what the body handed the run outside a unit (the FN_* rules): such a body
+    // stays as it was emitted and is never filed. Any other body is taken as a unit, filed, and
+    // then put into the run the way a hit is - what it left in the output, the fact table and the
+    // drop requests is taken back out and `fn_apply` puts the unit in - so a body compiled in this
+    // run and a body replayed from the store reach the run by one route.
     if fn_candidate != 0 {
+        exchange(&mut c.fn_rec, 0);
         now := fn_marks(&c);
-        if fn_marks_same(&fn_marks_at, &now) {
-            mut text = u8[];
-            for i in out_mark .. c.out.len() {
-                text.push(c.out[i]);
+        mut unit_ok = 1;
+        for i in now.len() {
+            if fn_marks_at[i] != now[i] {
+                c.fn_why[i] = c.fn_why[i] + 1;
+                unit_ok = 0;
             }
+        }
+        mut regs = FnReg[];
+        if unit_ok != 0 {
+            // The registrations have to read back as the types the body named: a spelling that
+            // interned to another type would ask the run for something else on a replay.
+            mut readable = 1;
+            written := c.fn_regs.copy();
+            regs = fn_regs_read(&mut c, view(written), &mut readable);
+            mut at = 0;
+            for i in regs.len() {
+                for j in regs[i].types.len() {
+                    if (c.fn_reg_types.len() <= at) || (c.fn_reg_types[at] != regs[i].types[j]) {
+                        readable = 0;
+                    }
+                    at += 1;
+                }
+            }
+            if (readable == 0) | (at != c.fn_reg_types.len()) {
+                c.fn_why[FN_UNSPELLED] = c.fn_why[FN_UNSPELLED] + 1;
+                unit_ok = 0;
+            }
+        }
+        if unit_ok != 0 {
+            produced := fn_unit_of(&mut c, fn_key_text, text_mark, fact_mark);
             // The file's name is the key's hash; the key record itself travels inside the entry,
             // so two keys that collide make a miss and never a wrong hit.
-            filed := fncache::hash(view(fn_key_text));
-            rec := fncache::Unit {
-                key: fn_key_text,
-                text: text,
-                labels: 0,
-                refs: 0,
-                facts: fn_facts_encode(&c, fact_mark)
-            };
-            fncache::save(view(c.fn_dir), view(filed), &rec);
+            fncache::save(view(c.fn_dir), view(fncache::hash(view(produced.key))), &produced);
             c.fn_filed = c.fn_filed + 1;
+            while out_mark < c.out.len() {
+                c.out.pop()!;
+            }
+            llvm::facts_truncate(&mut c.facts, fact_mark);
+            while fn_drop_mark < c.drop_refs.len() {
+                c.drop_refs.pop()!;
+            }
+            k := c.lunit;
+            if (k != 0) & (k <= c.fnext.len()) {
+                c.fnext[k - 1] = c.fnext[k - 1] - 1;
+            }
+            fn_apply(&mut c, &produced, &regs, fn_line);
         } else {
             c.fn_kept = c.fn_kept + 1;
         }
@@ -19280,8 +19546,7 @@ fn fx_vtable_drop<a>(c: (&a mut C), iface: u64) -> unit {
             concrete := c.vtables[2 * i + 1];
             if needs_drop(&mut c, concrete) {
                 // Naming the helper is what asks the drop walk for it.
-                c.drop_refs.push(concrete);
-                name := drop_symbol(&mut c, concrete);
+                name := drop_ref_name(&mut c, concrete);
                 fx_edge(&mut c, view(name), 0);
             }
         }
@@ -22486,6 +22751,12 @@ fn special_name<a>(c: (&a mut C), index: u64) -> u8[] {
     return out;
 }
 fn specialize<a, b>(c: (&a mut C), template: u64, map: (&b u64[])) -> u64 {
+    if c.fn_rec != 0 {
+        // Every request, not only the one that creates the entry: a body that names a
+        // specialisation another body asked for first must still ask when it is replayed alone.
+        asked := copy_numbers(map);
+        fn_reg_spec(&mut c, template, &asked);
+    }
     f := &c.funcs[template];
     mut next = f.regions;
     first := f.first;
@@ -23917,6 +24188,7 @@ fn function_as_closure<a>(c: (&a mut C), v: Val, expected: u64) -> Val {
     rec_store(&mut c, obj, 1, dropper);
     rec_store(&mut c, obj, 2, v.t);
     exchange(&mut c.fn_thunk_used, 1);
+    fn_use(&mut c, FN_THUNK);
     own(&mut c, obj, expected);
     return val(obj, expected);
 }
@@ -29892,6 +30164,10 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         weak := c.closures[i].weak;
         part(&mut c, view(unit));
         scope_begin(&mut c);
+        if site_table_on(&c) && (start < c.toks.len()) {
+            base_line := c.toks[start].line;
+            site_base(&mut c, base_line);
+        }
         // A closure of a specialisation is weak like the specialisation: func_directive states the
         // binding once, so a per-module object never sees `.globl` turn `.weak`.
         mut mark = 0;
@@ -43628,6 +43904,7 @@ pub fn main() -> u64 {
         lunits: u8[][],
         lnext: u64[],
         rnext: u64[],
+        gbase: 0,
         fscope: 0,
         fnext: u64[],
         marks: u64[],
@@ -43920,7 +44197,12 @@ pub fn main() -> u64 {
         fn_at_col: 1,
         fn_hits: 0,
         fn_filed: 0,
-        fn_kept: 0
+        fn_kept: 0,
+        fn_rec: 0,
+        fn_regs: u8[],
+        fn_reg_types: u64[],
+        fn_uses: u64[0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        fn_why: u64[0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     };
     exchange(&mut c.target, host::target());
     for k in 5 {
@@ -44673,7 +44955,26 @@ pub fn main() -> u64 {
         push_bytes(&mut line, view(decimal_bytes(c.fn_filed)));
         push_bytes(&mut line, view(" filed, "));
         push_bytes(&mut line, view(decimal_bytes(c.fn_kept)));
-        push_bytes(&mut line, view(" not units\n"));
+        push_bytes(&mut line, view(" not units"));
+        // Which rules kept them out, and how many bodies each (a body can meet several).
+        mut listed = 0;
+        for rule in c.fn_why.len() {
+            if c.fn_why[rule] != 0 {
+                if listed == 0 {
+                    push_bytes(&mut line, view(" ("));
+                } else {
+                    push_bytes(&mut line, view(", "));
+                }
+                push_bytes(&mut line, view(fn_rule_name(rule)));
+                line.push(32);
+                push_bytes(&mut line, view(decimal_bytes(c.fn_why[rule])));
+                listed += 1;
+            }
+        }
+        if listed != 0 {
+            line.push(41);
+        }
+        line.push(10);
         host::print(view(line));
     }
     if c.check_only != 0 {

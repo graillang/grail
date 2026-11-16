@@ -55,6 +55,11 @@ pub struct Body {
     gen: u8[],
     out: u8[],
     weird: u64,
+    // The line the `.gpos` markers of the body being read count from: the last `.gbase` before it
+    // (gbase_line). And the inlinable copy the body just optimised made, as it was written - with
+    // its markers still counting from that line - which is the form a remembered body keeps.
+    gbase: u64,
+    inl_rel: u8[],
     // The numbering this body's labels are in (label_number), 0 before its first numbered label.
     lscope: u64,
     maxslot: u64,
@@ -574,6 +579,59 @@ pub fn numbered<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) -> u64 {
     return packed & 4294967295;
 }
 
+// `.gbase LINE`, between bodies: the line the next body's `.gpos` markers count from. 1 when the
+// line was one.
+pub fn gbase_line<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) -> u64 {
+    if (e - a < 8) || (s[a] != 46) || (s[a + 1] != 103) || !at(view(s), a, view(".gbase ")) {
+        return 0;
+    }
+    mut n = 0;
+    mut i = a + 7;
+    while i < e {
+        n = n * 10 + u64(s[i] - 48);
+        i += 1;
+    }
+    exchange(&mut o.gbase, n);
+    return 1;
+}
+// A body copied out of its function to be pasted into another: its `.gpos FILE LINE COL RAW` markers
+// count from the function's own base, which is not the base where it will stand, so each becomes
+// `.gposa` with the line itself. A copy that has been through here has no `.gpos` left, so doing it
+// twice changes nothing.
+pub fn absolute_positions<a>(body: &a [u8], base: u64) -> u8[] {
+    mut out = u8[];
+    mut start = 0;
+    mut i = 0;
+    n := body.len();
+    while i < n {
+        if body[i] == 10 {
+            if (i - start > 6) && (body[start] == 46) && (body[start + 1] == 103) && at(view(body), start, view(".gpos ")) {
+                // `.gpos FILE ` is copied, the line is rewritten, the rest is copied.
+                mut p = start + 6;
+                while (p < i) && (body[p] != 32) {
+                    p += 1;
+                }
+                mut line = 0;
+                mut q = p + 1;
+                while (q < i) && (body[q] != 32) {
+                    line = line * 10 + u64(body[q] - 48);
+                    q += 1;
+                }
+                append(&mut out, view(".gposa"));
+                out.append(body[start + 5..p + 1]);
+                append_num(&mut out, line + base);
+                out.append(body[q..i + 1]);
+            } else {
+                out.append(body[start..i + 1]);
+            }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    out.append(body[start..n]);
+    return out;
+}
+
 // The marker line: `.grail_part <unit> <label prefix>`, and the unit fields it sets. 1 when the
 // line was one.
 pub fn marker<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) -> u64 {
@@ -1031,6 +1089,8 @@ pub fn new_body() -> Body {
         gen: u8[],
         out: u8[],
         weird: 0,
+        gbase: 0,
+        inl_rel: u8[],
         lscope: 0,
         maxslot: 0,
         table: u64[],
