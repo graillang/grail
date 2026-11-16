@@ -1,0 +1,1340 @@
+module asm_x86;
+use elf;
+
+// The internal x86-64 assembler (docs/design/compile-speed.md, stage 4): the assembly text the
+// compiler writes, in, an ELF relocatable object, out. It reads exactly the subset of AT&T syntax
+// the compiler emits, and encodes every instruction the way LLVM's MC layer does - the same
+// instruction forms, immediate and displacement widths and jump relaxation - so its object can be
+// held byte for byte against clang's (tools/asm-oracle.mjs). Anything outside the subset is an
+// error naming the line, never a guess.
+//
+// One pass reads the text into section buffers. Bytes whose value is not known yet are recorded:
+// a *patch* is a field holding an absolute expression over `.set` symbols (frame sizes are set
+// after the body that uses them), a *fixup* is a field that refers to a label (resolved here, or
+// left to the linker as a relocation), and an *item* is an instruction whose length depends on
+// what it refers to (a jump to a label, an ALU immediate that is a `.set` symbol). Items only
+// occur in `.text`. After the pass the items are sized - jumps grow from short to long until every
+// one fits, LLVM's fixed point - and the sections are laid out.
+
+const ABS: u64 = 0xfff1;
+// Fixup kinds.
+const FX_PC: u64 = 1;
+const FX_CALL: u64 = 2;
+const FX_ABS64: u64 = 3;
+const FX_TPOFF: u64 = 4;
+const FX_ABS32: u64 = 5;
+// Item kinds.
+const IT_JCC: u64 = 1;
+const IT_JMP: u64 = 2;
+const IT_ALU: u64 = 3;
+
+pub struct A {
+    // Mnemonics, directives and registers: FNV hash of the name to an id.
+    nt_hash: u64[],
+    nt_id: u64[],
+    // Symbols, and their table.
+    sym_name: u8[][],
+    sym_hash: u64[],
+    sym_sec: u64[],
+    sym_pos: u64[],
+    sym_k: u64[],
+    sym_bind: u64[],
+    sym_type: u64[],
+    sym_ref: u64[],
+    st_id: u64[],
+    st_count: u64,
+    // Sections. The current one's bytes live in `buf` while it is current.
+    sec_name: u8[][],
+    sec_type: u64[],
+    sec_flags: u64[],
+    sec_align: u64[],
+    sec_data: u8[][],
+    sec_size: u64[],
+    sec_sym: u64[],
+    cur: u64,
+    nobits: u64,
+    buf: u8[],
+    stack: u64[],
+    fx_sec: u64[],
+    fx_pos: u64[],
+    fx_k: u64[],
+    fx_kind: u64[],
+    fx_sym: u64[],
+    fx_add: u64[],
+    pt_sec: u64[],
+    pt_pos: u64[],
+    pt_width: u64[],
+    pt_sym: u64[],
+    pt_neg: u64[],
+    pt_div: u64[],
+    pt_add: u64[],
+    it_pos: u64[],
+    it_kind: u64[],
+    it_a: u64[],
+    it_b: u64[],
+    it_sym: u64[],
+    it_size: u64[],
+    it_neg: u64[],
+    it_div: u64[],
+    it_add: u64[],
+    // The line being read: its end, and a cursor.
+    at: u64,
+    le: u64,
+    line: u64,
+    // The last expression read: an optional symbol (index + 1) with a sign and a divisor, a
+    // constant, and a modifier (1: @tpoff).
+    ex_sym: u64,
+    ex_neg: u64,
+    ex_div: u64,
+    ex_add: u64,
+    ex_mod: u64,
+    // The operands of the instruction being read. Kinds: 1 register, 2 immediate, 3 memory, 4 a
+    // bare symbol (a call or jump target), 5 `*%reg`. A register is its number plus 32 times its
+    // class (1 byte, 2 word, 4 dword, 8 qword, 16 xmm).
+    nops: u64,
+    ok: u64[],
+    oreg: u64[],
+    m_base: u64,
+    m_index: u64,
+    m_scale: u64,
+    m_seg: u64,
+    m_rip: u64,
+    d_sym: u64,
+    d_neg: u64,
+    d_div: u64,
+    d_add: u64,
+    d_mod: u64,
+    d_has: u64,
+    im_sym: u64,
+    im_neg: u64,
+    im_div: u64,
+    im_add: u64,
+    err: u8[]
+}
+
+pub struct Result {
+    object: u8[],
+    error: u8[]
+}
+
+fn fnv<b>(s: &b [u8], a: u64, e: u64) -> u64 {
+    mut h: u64 = 0xcbf29ce484222325;
+    mut i = a;
+    while i < e {
+        h = wrapping_mul(h ^ s[i], 0x100000001b3);
+        i += 1;
+    }
+    return h;
+}
+
+fn def<a, b>(o: (&a mut A), name: &b [u8], id: u64) {
+    h := fnv(name, 0, name.len());
+    mut i = h & 1023;
+    while o.nt_id[i] != 0 {
+        i = (i + 1) & 1023;
+    }
+    o.nt_hash[i] = h;
+    o.nt_id[i] = id;
+}
+
+fn lookup<a, b>(o: (&a A), s: &b [u8], a0: u64, e: u64) -> u64 {
+    h := fnv(s, a0, e);
+    mut i = h & 1023;
+    while o.nt_id[i] != 0 {
+        if o.nt_hash[i] == h {
+            return o.nt_id[i];
+        }
+        i = (i + 1) & 1023;
+    }
+    return 0;
+}
+
+// Registers: id 1000 + number + 32 * class.
+fn regs<a>(o: (&a mut A)) {
+    q := u8[][view("rax").copy(), view("rcx").copy(), view("rdx").copy(), view("rbx").copy(), view("rsp").copy(), view("rbp").copy(), view("rsi").copy(), view("rdi").copy()];
+    d := u8[][view("eax").copy(), view("ecx").copy(), view("edx").copy(), view("ebx").copy(), view("esp").copy(), view("ebp").copy(), view("esi").copy(), view("edi").copy()];
+    w := u8[][view("ax").copy(), view("cx").copy(), view("dx").copy(), view("bx").copy(), view("sp").copy(), view("bp").copy(), view("si").copy(), view("di").copy()];
+    b := u8[][view("al").copy(), view("cl").copy(), view("dl").copy(), view("bl").copy(), view("spl").copy(), view("bpl").copy(), view("sil").copy(), view("dil").copy()];
+    for i in 8 {
+        def(&mut o, view(q[i]), 1000 + i + 32 * 8);
+        def(&mut o, view(d[i]), 1000 + i + 32 * 4);
+        def(&mut o, view(w[i]), 1000 + i + 32 * 2);
+        def(&mut o, view(b[i]), 1000 + i + 32 * 1);
+    }
+    for n in 8 {
+        mut r = view("r").copy();
+        num(&mut r, n + 8);
+        def(&mut o, view(r), 1000 + n + 8 + 32 * 8);
+        mut rd = r.copy();
+        rd.push('d');
+        def(&mut o, view(rd), 1000 + n + 8 + 32 * 4);
+        mut rw = r.copy();
+        rw.push('w');
+        def(&mut o, view(rw), 1000 + n + 8 + 32 * 2);
+        mut rb = r.copy();
+        rb.push('b');
+        def(&mut o, view(rb), 1000 + n + 8 + 32 * 1);
+    }
+    for n in 16 {
+        mut x = view("xmm").copy();
+        num(&mut x, n);
+        def(&mut o, view(x), 1000 + n + 32 * 16);
+    }
+    def(&mut o, view("rip"), 1999);
+    def(&mut o, view("fs"), 1998);
+}
+
+fn num<a>(out: (&a mut u8[]), n: u64) {
+    if 9 < n {
+        num(&mut out, n / 10);
+    }
+    out.push(48 + n % 10);
+}
+
+// Directives: ids 1..40.
+fn directives<a>(o: (&a mut A)) {
+    def(&mut o, view(".quad"), 1);
+    def(&mut o, view(".byte"), 2);
+    def(&mut o, view(".type"), 3);
+    def(&mut o, view(".set"), 4);
+    def(&mut o, view(".pushsection"), 5);
+    def(&mut o, view(".popsection"), 6);
+    def(&mut o, view(".p2align"), 7);
+    def(&mut o, view(".weak"), 8);
+    def(&mut o, view(".asciz"), 9);
+    def(&mut o, view(".section"), 10);
+    def(&mut o, view(".text"), 11);
+    def(&mut o, view(".globl"), 12);
+    def(&mut o, view(".zero"), 13);
+    def(&mut o, view(".bss"), 14);
+    def(&mut o, view(".data"), 15);
+    def(&mut o, view(".balign"), 16);
+    def(&mut o, view(".long"), 17);
+    def(&mut o, view(".short"), 18);
+    def(&mut o, view(".word"), 19);
+    def(&mut o, view(".ascii"), 20);
+}
+
+pub fn new() -> A {
+    mut nh = u64[];
+    mut ni = u64[];
+    for i in 1024 {
+        nh.push(0);
+        ni.push(0);
+    }
+    mut st = u64[];
+    for i in 1024 {
+        st.push(0);
+    }
+    mut o = A {
+        nt_hash: nh,
+        nt_id: ni,
+        sym_name: u8[][],
+        sym_hash: u64[],
+        sym_sec: u64[],
+        sym_pos: u64[],
+        sym_k: u64[],
+        sym_bind: u64[],
+        sym_type: u64[],
+        sym_ref: u64[],
+        st_id: st,
+        st_count: 0,
+        sec_name: u8[][],
+        sec_type: u64[],
+        sec_flags: u64[],
+        sec_align: u64[],
+        sec_data: u8[][],
+        sec_size: u64[],
+        sec_sym: u64[],
+        cur: 0,
+        nobits: 0,
+        buf: u8[],
+        stack: u64[],
+        fx_sec: u64[],
+        fx_pos: u64[],
+        fx_k: u64[],
+        fx_kind: u64[],
+        fx_sym: u64[],
+        fx_add: u64[],
+        pt_sec: u64[],
+        pt_pos: u64[],
+        pt_width: u64[],
+        pt_sym: u64[],
+        pt_neg: u64[],
+        pt_div: u64[],
+        pt_add: u64[],
+        it_pos: u64[],
+        it_kind: u64[],
+        it_a: u64[],
+        it_b: u64[],
+        it_sym: u64[],
+        it_size: u64[],
+        it_neg: u64[],
+        it_div: u64[],
+        it_add: u64[],
+        at: 0,
+        le: 0,
+        line: 0,
+        ex_sym: 0,
+        ex_neg: 0,
+        ex_div: 1,
+        ex_add: 0,
+        ex_mod: 0,
+        nops: 0,
+        ok: u64[0, 0, 0],
+        oreg: u64[0, 0, 0],
+        m_base: 0,
+        m_index: 0,
+        m_scale: 0,
+        m_seg: 0,
+        m_rip: 0,
+        d_sym: 0,
+        d_neg: 0,
+        d_div: 1,
+        d_add: 0,
+        d_mod: 0,
+        d_has: 0,
+        im_sym: 0,
+        im_neg: 0,
+        im_div: 1,
+        im_add: 0,
+        err: u8[]
+    };
+    directives(&mut o);
+    mnemonics(&mut o);
+    regs(&mut o);
+    t := view(".text");
+    section(&mut o, t, 0, t.len(), 1, 6, 4);
+    return o;
+}
+
+fn fail<a, b>(o: (&a mut A), what: &b [u8]) {
+    if o.err.len() == 0 {
+        o.err.append(view("line "));
+        num(&mut o.err, o.line);
+        o.err.append(view(": "));
+        o.err.append(what);
+    }
+}
+
+// ---- symbols ----------------------------------------------------------------------------------
+
+fn same_name<a, b>(o: (&a A), id: u64, s: &b [u8], a0: u64, e: u64) -> bool {
+    if o.sym_name[id].len() != e - a0 {
+        return false;
+    }
+    for i in e - a0 {
+        if o.sym_name[id][i] != s[a0 + i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn rehash<a>(o: (&a mut A)) {
+    size := o.st_id.len() * 2;
+    mut t = u64[];
+    for i in size {
+        t.push(0);
+    }
+    mask := size - 1;
+    for id in o.sym_name.len() {
+        mut i = o.sym_hash[id] & mask;
+        while t[i] != 0 {
+            i = (i + 1) & mask;
+        }
+        t[i] = id + 1;
+    }
+    o.st_id = t;
+}
+
+fn new_symbol<a, b>(o: (&a mut A), s: &b [u8], a0: u64, e: u64, h: u64) -> u64 {
+    id := o.sym_name.len();
+    mut n = u8[];
+    n.append(s[a0: e]);
+    o.sym_name.push(n);
+    o.sym_hash.push(h);
+    o.sym_sec.push(0);
+    o.sym_pos.push(0);
+    o.sym_k.push(0);
+    o.sym_bind.push(0);
+    o.sym_type.push(0);
+    o.sym_ref.push(0);
+    return id;
+}
+
+// The symbol named by s[a0..e], created on first mention.
+fn symbol<a, b>(o: (&a mut A), s: &b [u8], a0: u64, e: u64) -> u64 {
+    if (o.sym_name.len() + 1) * 2 > o.st_id.len() {
+        rehash(&mut o);
+    }
+    h := fnv(s, a0, e);
+    mask := o.st_id.len() - 1;
+    mut i = h & mask;
+    loop {
+        id := o.st_id[i];
+        if id == 0 {
+            break;
+        }
+        if (o.sym_hash[id - 1] == h) && same_name(&o, id - 1, s, a0, e) {
+            return id - 1;
+        }
+        i = (i + 1) & mask;
+    }
+    id := new_symbol(&mut o, s, a0, e, h);
+    o.st_id[i] = id + 1;
+    return id;
+}
+
+fn temporary<a>(o: (&a A), id: u64) -> bool {
+    n := o.sym_name[id].len();
+    return (n > 1) && (o.sym_name[id][0] == '.') && (o.sym_name[id][1] == 'L');
+}
+
+// ---- sections ---------------------------------------------------------------------------------
+
+fn pos<a>(o: (&a A)) -> u64 {
+    if o.nobits != 0 {
+        return o.sec_size[o.cur];
+    }
+    return o.buf.len();
+}
+
+fn switch_to<a>(o: (&a mut A), k: u64) {
+    if k == o.cur {
+        return ();
+    }
+    old := exchange(&mut o.buf, u8[]);
+    exchange(&mut o.sec_data[o.cur], old);
+    o.buf = exchange(&mut o.sec_data[k], u8[]);
+    o.cur = k;
+    if o.sec_type[k] == 8 {
+        o.nobits = 1;
+    } else {
+        o.nobits = 0;
+    }
+}
+
+// The section named s[a0..e], created with the given type, flags and alignment when it is new;
+// the new current section either way.
+fn section<a, b>(o: (&a mut A), s: &b [u8], a0: u64, e: u64, ty: u64, flags: u64, align: u64) {
+    for k in o.sec_name.len() {
+        if o.sec_name[k].len() == e - a0 {
+            mut same = true;
+            for i in e - a0 {
+                if o.sec_name[k][i] != s[a0 + i] {
+                    same = false;
+                    break;
+                }
+            }
+            if same {
+                switch_to(&mut o, k);
+                return ();
+            }
+        }
+    }
+    k := o.sec_name.len();
+    mut n = u8[];
+    n.append(s[a0: e]);
+    o.sec_name.push(n);
+    o.sec_type.push(ty);
+    o.sec_flags.push(flags);
+    o.sec_align.push(align);
+    o.sec_data.push(u8[]);
+    o.sec_size.push(0);
+    // The section symbol: unnamed, local, created with the section, so it takes its place in the
+    // creation order of the symbol table the way LLVM's does.
+    sid := o.sym_name.len();
+    o.sym_name.push(u8[]);
+    o.sym_hash.push(0);
+    o.sym_sec.push(k + 1);
+    o.sym_pos.push(0);
+    o.sym_k.push(0);
+    o.sym_bind.push(0);
+    o.sym_type.push(3);
+    o.sym_ref.push(0);
+    o.sec_sym.push(sid);
+    if k == 0 {
+        o.cur = 0;
+        return ();
+    }
+    switch_to(&mut o, k);
+}
+
+fn named_section<a, b>(o: (&a mut A), s: &b [u8], a0: u64, e: u64) {
+    // Flags and type when a `.section` line does not give them, from the name, as LLVM infers them.
+    mut ty = 1;
+    mut flags = 0;
+    if at_word(s, a0, e, view(".rodata")) {
+        flags = 2;
+    }
+    if at_word(s, a0, e, view(".data")) {
+        flags = 3;
+    }
+    if at_word(s, a0, e, view(".bss")) {
+        flags = 3;
+        ty = 8;
+    }
+    if at_word(s, a0, e, view(".tbss")) {
+        flags = 0x403;
+        ty = 8;
+    }
+    if at_word(s, a0, e, view(".text")) {
+        flags = 6;
+    }
+    section(&mut o, s, a0, e, ty, flags, 1);
+}
+
+fn at_word<b, c>(s: &b [u8], a0: u64, e: u64, w: &c [u8]) -> bool {
+    if e - a0 != w.len() {
+        return false;
+    }
+    for i in w.len() {
+        if s[a0 + i] != w[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+// ---- reading ----------------------------------------------------------------------------------
+
+fn skip<a, b>(o: (&a mut A), s: &b [u8]) {
+    while (o.at < o.le) && ((s[o.at] == ' ') || (s[o.at] == 9)) {
+        o.at += 1;
+    }
+}
+
+fn name_char(c: u64) -> bool {
+    return ((c >= 'a') && (c <= 'z')) || ((c >= 'A') && (c <= 'Z')) || ((c >= '0') && (c <= '9')) || (c == '_') || (c == '.') || (c == '$');
+}
+
+// A name at the cursor: its end.
+fn name_end<a, b>(o: (&a A), s: &b [u8]) -> u64 {
+    mut i = o.at;
+    while (i < o.le) && name_char(s[i]) {
+        i += 1;
+    }
+    return i;
+}
+
+fn expect<a, b>(o: (&a mut A), s: &b [u8], c: u64) {
+    skip(&mut o, s);
+    if (o.at < o.le) && (s[o.at] == c) {
+        o.at += 1;
+        return ();
+    }
+    fail(&mut o, view("unexpected text"));
+}
+
+// A decimal or hexadecimal number at the cursor, with an optional minus sign.
+fn number<a, b>(o: (&a mut A), s: &b [u8]) -> u64 {
+    skip(&mut o, s);
+    mut neg = false;
+    if (o.at < o.le) && (s[o.at] == '-') {
+        neg = true;
+        o.at += 1;
+    }
+    mut v: u64 = 0;
+    start := o.at;
+    if (o.at + 1 < o.le) && (s[o.at] == '0') && ((s[o.at + 1] == 'x') || (s[o.at + 1] == 'X')) {
+        o.at += 2;
+        while o.at < o.le {
+            c := s[o.at];
+            if (c >= '0') && (c <= '9') {
+                v = wrapping_add(wrapping_mul(v, 16), c - '0');
+            } else if (c >= 'a') && (c <= 'f') {
+                v = wrapping_add(wrapping_mul(v, 16), c - 'a' + 10);
+            } else if (c >= 'A') && (c <= 'F') {
+                v = wrapping_add(wrapping_mul(v, 16), c - 'A' + 10);
+            } else {
+                break;
+            }
+            o.at += 1;
+        }
+    } else {
+        while (o.at < o.le) && (s[o.at] >= '0') && (s[o.at] <= '9') {
+            v = wrapping_add(wrapping_mul(v, 10), s[o.at] - '0');
+            o.at += 1;
+        }
+    }
+    if o.at == start {
+        fail(&mut o, view("expected a number"));
+    }
+    if neg {
+        return wrapping_sub(0, v);
+    }
+    return v;
+}
+
+fn is_digit(c: u64) -> bool {
+    return (c >= '0') && (c <= '9');
+}
+
+// An expression: terms joined by `+` and `-`, a term a number or a symbol, optionally divided by a
+// number; at most one symbol, with an optional `@tpoff`. Stops at `(`, `,` or the line's end.
+fn expr<a, b>(o: (&a mut A), s: &b [u8]) {
+    o.ex_sym = 0;
+    o.ex_neg = 0;
+    o.ex_div = 1;
+    o.ex_add = 0;
+    o.ex_mod = 0;
+    mut neg = false;
+    loop {
+        skip(&mut o, s);
+        while (o.at < o.le) && (s[o.at] == '-') {
+            neg = !neg;
+            o.at += 1;
+            skip(&mut o, s);
+        }
+        if o.at >= o.le {
+            fail(&mut o, view("expression ends early"));
+            return ();
+        }
+        if is_digit(s[o.at]) {
+            mut v = number(&mut o, s);
+            if (o.at < o.le) && (s[o.at] == '/') {
+                o.at += 1;
+                d := number(&mut o, s);
+                v = v / d;
+            }
+            if neg {
+                o.ex_add = wrapping_sub(o.ex_add, v);
+            } else {
+                o.ex_add = wrapping_add(o.ex_add, v);
+            }
+        } else {
+            e := name_end(&o, s);
+            if (e == o.at) || (o.ex_sym != 0) {
+                fail(&mut o, view("unsupported expression"));
+                return ();
+            }
+            o.ex_sym = symbol(&mut o, s, o.at, e) + 1;
+            if neg {
+                o.ex_neg = 1;
+            }
+            o.at = e;
+            if (o.at < o.le) && (s[o.at] == '/') {
+                o.at += 1;
+                o.ex_div = number(&mut o, s);
+            }
+            if (o.at < o.le) && (s[o.at] == '@') {
+                o.at += 1;
+                me := name_end(&o, s);
+                if at_word(s, o.at, me, view("tpoff")) {
+                    o.ex_mod = 1;
+                } else {
+                    fail(&mut o, view("unsupported symbol modifier"));
+                }
+                o.at = me;
+            }
+        }
+        skip(&mut o, s);
+        if (o.at < o.le) && (s[o.at] == '+') {
+            neg = false;
+            o.at += 1;
+        } else if (o.at < o.le) && (s[o.at] == '-') {
+            neg = true;
+            o.at += 1;
+        } else {
+            return ();
+        }
+    }
+}
+
+fn emit_le<a>(o: (&a mut A), v: u64, width: u64) {
+    for i in width {
+        o.buf.push((v >> (8 * i)) & 255);
+    }
+}
+
+// A field of `width` bytes at the current position holding the last expression: its value now
+// when it has no symbol, a patch when its symbol is a `.set` constant (decided at the end), a
+// fixup otherwise. `kind` is the fixup kind for a symbol that is a label.
+fn field<a>(o: (&a mut A), width: u64, kind: u64, extra: u64) {
+    if o.ex_sym == 0 {
+        emit_le(&mut o, o.ex_add, width);
+        return ();
+    }
+    sym := o.ex_sym - 1;
+    if (o.ex_mod == 0) && ((o.ex_neg != 0) || (o.ex_div != 1) || const_name(&o, sym)) {
+        o.pt_sec.push(o.cur);
+        o.pt_pos.push(o.buf.len());
+        o.pt_width.push(width);
+        o.pt_sym.push(sym);
+        o.pt_neg.push(o.ex_neg);
+        o.pt_div.push(o.ex_div);
+        o.pt_add.push(o.ex_add);
+        emit_le(&mut o, 0, width);
+        return ();
+    }
+    mut k = kind;
+    if o.ex_mod == 1 {
+        k = FX_TPOFF;
+    }
+    o.fx_sec.push(o.cur);
+    o.fx_pos.push(o.buf.len());
+    o.fx_k.push(o.it_pos.len());
+    o.fx_kind.push(k);
+    o.fx_sym.push(sym);
+    o.fx_add.push(wrapping_sub(o.ex_add, extra));
+    o.sym_ref[sym] = 1;
+    emit_le(&mut o, 0, width);
+}
+
+// A symbol that only a `.set` defines. Frame-size symbols are spelled `.F...`; a `.set` seen
+// before the use also counts.
+fn const_name<a>(o: (&a A), sym: u64) -> bool {
+    if o.sym_sec[sym] == ABS {
+        return true;
+    }
+    n := o.sym_name[sym].len();
+    return (n > 1) && (o.sym_name[sym][0] == '.') && (o.sym_name[sym][1] == 'F');
+}
+
+// ---- directives -------------------------------------------------------------------------------
+
+fn data<a, b>(o: (&a mut A), s: &b [u8], width: u64) {
+    if o.nobits != 0 {
+        fail(&mut o, view("data in a section without contents"));
+        return ();
+    }
+    loop {
+        expr(&mut o, s);
+        if width == 8 {
+            field(&mut o, 8, FX_ABS64, 0);
+        } else if width == 4 {
+            field(&mut o, 4, FX_ABS32, 0);
+        } else {
+            if o.ex_sym != 0 {
+                fail(&mut o, view("a symbol in a byte or word"));
+                return ();
+            }
+            emit_le(&mut o, o.ex_add, width);
+        }
+        skip(&mut o, s);
+        if (o.at < o.le) && (s[o.at] == ',') {
+            o.at += 1;
+        } else {
+            return ();
+        }
+    }
+}
+
+fn string<a, b>(o: (&a mut A), s: &b [u8], zero: bool) {
+    expect(&mut o, s, '"');
+    while (o.at < o.le) && (s[o.at] != '"') {
+        mut c = s[o.at];
+        o.at += 1;
+        if (c == 92) && (o.at < o.le) {
+            c = s[o.at];
+            o.at += 1;
+            if c == 'n' {
+                c = 10;
+            } else if c == 't' {
+                c = 9;
+            } else if c == 'r' {
+                c = 13;
+            } else if c == 'b' {
+                c = 8;
+            } else if c == 'f' {
+                c = 12;
+            } else if (c >= '0') && (c <= '7') {
+                mut v = c - '0';
+                mut n = 1;
+                while (n < 3) && (o.at < o.le) && (s[o.at] >= '0') && (s[o.at] <= '7') {
+                    v = v * 8 + s[o.at] - '0';
+                    o.at += 1;
+                    n += 1;
+                }
+                c = v & 255;
+            } else if c == 'x' {
+                mut v = 0;
+                while o.at < o.le {
+                    d := s[o.at];
+                    if (d >= '0') && (d <= '9') {
+                        v = v * 16 + d - '0';
+                    } else if (d >= 'a') && (d <= 'f') {
+                        v = v * 16 + d - 'a' + 10;
+                    } else if (d >= 'A') && (d <= 'F') {
+                        v = v * 16 + d - 'A' + 10;
+                    } else {
+                        break;
+                    }
+                    o.at += 1;
+                }
+                c = v & 255;
+            }
+        }
+        o.buf.push(c);
+    }
+    expect(&mut o, s, '"');
+    if zero {
+        o.buf.push(0);
+    }
+}
+
+fn align_to<a>(o: (&a mut A), n: u64) {
+    if n > o.sec_align[o.cur] {
+        o.sec_align[o.cur] = n;
+    }
+    if o.nobits != 0 {
+        while o.sec_size[o.cur] % n != 0 {
+            o.sec_size[o.cur] = o.sec_size[o.cur] + 1;
+        }
+        return ();
+    }
+    if (o.cur == 0) && (o.buf.len() % n != 0) {
+        fail(&mut o, view("alignment inside code is not supported"));
+        return ();
+    }
+    while o.buf.len() % n != 0 {
+        o.buf.push(0);
+    }
+}
+
+// `.section NAME[,"FLAGS"[,@TYPE]]`, and `.pushsection` with the same operands.
+fn section_line<a, b>(o: (&a mut A), s: &b [u8]) {
+    skip(&mut o, s);
+    a0 := o.at;
+    // A section name runs to the comma (`.note.GNU-stack` is one).
+    mut e = o.at;
+    while (e < o.le) && (s[e] != ',') && (s[e] != ' ') && (s[e] != 9) {
+        e += 1;
+    }
+    o.at = e;
+    skip(&mut o, s);
+    if (o.at >= o.le) || (s[o.at] != ',') {
+        named_section(&mut o, s, a0, e);
+        return ();
+    }
+    o.at += 1;
+    expect(&mut o, s, '"');
+    mut flags = 0;
+    while (o.at < o.le) && (s[o.at] != '"') {
+        c := s[o.at];
+        if c == 'a' {
+            flags = flags | 2;
+        } else if c == 'w' {
+            flags = flags | 1;
+        } else if c == 'x' {
+            flags = flags | 4;
+        } else if c == 'T' {
+            flags = flags | 0x400;
+        } else {
+            fail(&mut o, view("unsupported section flag"));
+        }
+        o.at += 1;
+    }
+    expect(&mut o, s, '"');
+    mut ty = 1;
+    skip(&mut o, s);
+    if (o.at < o.le) && (s[o.at] == ',') {
+        o.at += 1;
+        expect(&mut o, s, '@');
+        te := name_end(&o, s);
+        if at_word(s, o.at, te, view("nobits")) {
+            ty = 8;
+        } else if !at_word(s, o.at, te, view("progbits")) {
+            fail(&mut o, view("unsupported section type"));
+        }
+        o.at = te;
+    }
+    section(&mut o, s, a0, e, ty, flags, 1);
+}
+
+fn sym_operand<a, b>(o: (&a mut A), s: &b [u8]) -> u64 {
+    skip(&mut o, s);
+    e := name_end(&o, s);
+    if e == o.at {
+        fail(&mut o, view("expected a symbol"));
+        return 0;
+    }
+    id := symbol(&mut o, s, o.at, e);
+    o.at = e;
+    return id;
+}
+
+fn directive<a, b>(o: (&a mut A), s: &b [u8], id: u64) {
+    if id == 1 {
+        data(&mut o, s, 8);
+    } else if id == 2 {
+        data(&mut o, s, 1);
+    } else if id == 3 {
+        sym := sym_operand(&mut o, s);
+        expect(&mut o, s, ',');
+        expect(&mut o, s, '@');
+        te := name_end(&o, s);
+        if at_word(s, o.at, te, view("function")) {
+            o.sym_type[sym] = 2;
+        } else if at_word(s, o.at, te, view("object")) {
+            o.sym_type[sym] = 1;
+        } else {
+            fail(&mut o, view("unsupported symbol type"));
+        }
+        o.at = te;
+    } else if id == 4 {
+        sym := sym_operand(&mut o, s);
+        expect(&mut o, s, ',');
+        expr(&mut o, s);
+        if o.ex_sym != 0 {
+            fail(&mut o, view("`.set` to a symbol is not supported"));
+        }
+        o.sym_sec[sym] = ABS;
+        o.sym_pos[sym] = o.ex_add;
+    } else if id == 5 {
+        o.stack.push(o.cur);
+        section_line(&mut o, s);
+    } else if id == 6 {
+        if o.stack.len() == 0 {
+            fail(&mut o, view("`.popsection` without `.pushsection`"));
+            return ();
+        }
+        k := o.stack.pop()!;
+        switch_to(&mut o, k);
+    } else if (id == 7) || (id == 16) {
+        n := number(&mut o, s);
+        if id == 7 {
+            align_to(&mut o, 1 << n);
+        } else {
+            align_to(&mut o, n);
+        }
+    } else if id == 8 {
+        sym := sym_operand(&mut o, s);
+        o.sym_bind[sym] = 2;
+    } else if id == 9 {
+        string(&mut o, s, true);
+    } else if id == 20 {
+        string(&mut o, s, false);
+    } else if id == 10 {
+        section_line(&mut o, s);
+    } else if id == 11 {
+        switch_to(&mut o, 0);
+    } else if id == 12 {
+        sym := sym_operand(&mut o, s);
+        if o.sym_bind[sym] == 0 {
+            o.sym_bind[sym] = 1;
+        }
+    } else if id == 13 {
+        n := number(&mut o, s);
+        if o.nobits != 0 {
+            o.sec_size[o.cur] = o.sec_size[o.cur] + n;
+        } else {
+            for i in n {
+                o.buf.push(0);
+            }
+        }
+    } else if id == 14 {
+        b := view(".bss");
+        named_section(&mut o, b, 0, b.len());
+    } else if id == 15 {
+        d := view(".data");
+        named_section(&mut o, d, 0, d.len());
+    } else if id == 17 {
+        data(&mut o, s, 4);
+    } else if (id == 18) || (id == 19) {
+        data(&mut o, s, 2);
+    } else {
+        fail(&mut o, view("unsupported directive"));
+    }
+}
+
+fn label<a, b>(o: (&a mut A), s: &b [u8], a0: u64, e: u64) {
+    id := symbol(&mut o, s, a0, e);
+    if o.sym_sec[id] != 0 {
+        fail(&mut o, view("symbol defined twice"));
+        return ();
+    }
+    o.sym_sec[id] = o.cur + 1;
+    o.sym_pos[id] = pos(&o);
+    if o.cur == 0 {
+        o.sym_k[id] = o.it_pos.len();
+    }
+}
+
+fn read_line<a, b>(o: (&a mut A), s: &b [u8]) {
+    skip(&mut o, s);
+    if o.at >= o.le {
+        return ();
+    }
+    if (s[o.at] == '/') || (s[o.at] == '#') {
+        return ();
+    }
+    // A label: a name followed directly by `:`.
+    mut i = o.at;
+    while (i < o.le) && name_char(s[i]) {
+        i += 1;
+    }
+    if (i < o.le) && (s[i] == ':') && (i > o.at) {
+        label(&mut o, s, o.at, i);
+        o.at = i + 1;
+        skip(&mut o, s);
+        if o.at >= o.le {
+            return ();
+        }
+        i = o.at;
+        while (i < o.le) && name_char(s[i]) {
+            i += 1;
+        }
+    }
+    id := lookup(&o, s, o.at, i);
+    if s[o.at] == '.' {
+        if (id == 0) || (id > 40) {
+            fail(&mut o, view("unsupported directive"));
+            return ();
+        }
+        o.at = i;
+        directive(&mut o, s, id);
+    } else {
+        if (id < 100) || (id >= 1000) {
+            fail(&mut o, view("unsupported instruction"));
+            return ();
+        }
+        o.at = i;
+        instruction(&mut o, s, id);
+    }
+    skip(&mut o, s);
+    if (o.err.len() == 0) && (o.at < o.le) {
+        fail(&mut o, view("unexpected text after the operands"));
+    }
+}
+
+// ---- layout -----------------------------------------------------------------------------------
+
+fn fits8(v: u64) -> bool {
+    return wrapping_add(v, 128) < 256;
+}
+
+fn fits32(v: u64) -> bool {
+    return wrapping_add(v, 0x80000000) < 0x100000000;
+}
+
+fn value_of<a>(o: (&a mut A), sym: u64, neg: u64, div: u64, add: u64) -> u64 {
+    if o.sym_sec[sym] != ABS {
+        fail(&mut o, view("an expression over a symbol that is not a constant: "));
+        o.err.append(view(o.sym_name[sym]));
+        return 0;
+    }
+    mut v = o.sym_pos[sym] / div;
+    if neg != 0 {
+        v = wrapping_sub(0, v);
+    }
+    return wrapping_add(v, add);
+}
+
+fn put_le<a>(out: (&a mut u8[]), at: u64, v: u64, width: u64) {
+    for i in width {
+        out[at + i] = (v >> (8 * i)) & 255;
+    }
+}
+
+fn prefix<a>(o: (&a A)) -> u64[] {
+    mut pre = u64[];
+    mut sum = 0;
+    for i in o.it_pos.len() {
+        pre.push(sum);
+        sum += o.it_size[i];
+    }
+    pre.push(sum);
+    return pre;
+}
+
+// Where a text label or field ends up: its position among the fixed bytes plus the lengths of the
+// items before it.
+fn final_text<a>(pre: (&a u64[]), at: u64, k: u64) -> u64 {
+    return at + pre[k];
+}
+
+fn target<a, b>(o: (&a A), pre: (&b u64[]), sym: u64) -> u64 {
+    return o.sym_pos[sym] + pre[o.sym_k[sym]];
+}
+
+fn relax<a>(o: (&a mut A)) -> u64[] {
+    for i in o.it_pos.len() {
+        if o.it_kind[i] == IT_ALU {
+            v := value_of(&mut o, o.it_sym[i], o.it_neg[i], o.it_div[i], o.it_add[i]);
+            o.it_add[i] = v;
+            if fits8(v) {
+                o.it_size[i] = 4;
+            } else {
+                o.it_size[i] = 7;
+            }
+        } else {
+            sym := o.it_sym[i];
+            if o.sym_sec[sym] != 1 {
+                fail(&mut o, view("a jump to a label outside this object's code: "));
+                o.err.append(view(o.sym_name[sym]));
+            }
+            o.it_size[i] = 2;
+        }
+    }
+    mut pre = prefix(&o);
+    mut changed = true;
+    while changed && (o.err.len() == 0) {
+        changed = false;
+        for i in o.it_pos.len() {
+            if (o.it_kind[i] != IT_ALU) && (o.it_size[i] == 2) {
+                d := wrapping_sub(target(&o, &pre, o.it_sym[i]), o.it_pos[i] + pre[i] + 2);
+                if !fits8(d) {
+                    if o.it_kind[i] == IT_JCC {
+                        o.it_size[i] = 6;
+                    } else {
+                        o.it_size[i] = 5;
+                    }
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            pre = prefix(&o);
+        }
+    }
+    return pre;
+}
+
+fn text_bytes<a, b>(o: (&a A), pre: (&b u64[]), fixed: u8[]) -> u8[] {
+    mut out = u8[];
+    mut from = 0;
+    for i in o.it_pos.len() {
+        out.append(fixed[from: o.it_pos[i]]);
+        from = o.it_pos[i];
+        kind := o.it_kind[i];
+        if kind == IT_ALU {
+            out.push(o.it_b[i]);
+            if o.it_size[i] == 4 {
+                out.push(0x83);
+                out.push(o.it_a[i]);
+                out.push(o.it_add[i] & 255);
+            } else {
+                out.push(0x81);
+                out.push(o.it_a[i]);
+                v := o.it_add[i];
+                for j in 4 {
+                    out.push((v >> (8 * j)) & 255);
+                }
+            }
+        } else {
+            size := o.it_size[i];
+            d := wrapping_sub(target(&o, pre, o.it_sym[i]), o.it_pos[i] + pre[i] + size);
+            if size == 2 {
+                if kind == IT_JCC {
+                    out.push(0x70 + o.it_a[i]);
+                } else {
+                    out.push(0xeb);
+                }
+                out.push(d & 255);
+            } else {
+                if kind == IT_JCC {
+                    out.push(0x0f);
+                    out.push(0x80 + o.it_a[i]);
+                } else {
+                    out.push(0xe9);
+                }
+                for j in 4 {
+                    out.push((d >> (8 * j)) & 255);
+                }
+            }
+        }
+    }
+    out.append(fixed[from: fixed.len()]);
+    return out;
+}
+
+fn sym_final<a, b>(o: (&a A), pre: (&b u64[]), sym: u64) -> u64 {
+    if o.sym_sec[sym] == 1 {
+        return target(o, pre, sym);
+    }
+    return o.sym_pos[sym];
+}
+
+pub fn assemble<b>(s: &b [u8]) -> Result {
+    mut o = new();
+    mut a0 = 0;
+    while (a0 < s.len()) && (o.err.len() == 0) {
+        mut e = a0;
+        while (e < s.len()) && (s[e] != 10) {
+            e += 1;
+        }
+        o.line += 1;
+        o.at = a0;
+        o.le = e;
+        read_line(&mut o, s);
+        a0 = e + 1;
+    }
+    switch_to(&mut o, 0);
+    if o.err.len() != 0 {
+        return Result { object: u8[], error: o.err.copy() };
+    }
+    // Constants over `.set` symbols.
+    for i in o.pt_sec.len() {
+        v := value_of(&mut o, o.pt_sym[i], o.pt_neg[i], o.pt_div[i], o.pt_add[i]);
+        if (o.pt_width[i] == 4) && !fits32(v) {
+            fail(&mut o, view("a constant does not fit its field"));
+        }
+        put_le(&mut o.sec_data[o.pt_sec[i]], o.pt_pos[i], v, o.pt_width[i]);
+    }
+    pre := relax(&mut o);
+    if o.err.len() != 0 {
+        return Result { object: u8[], error: o.err.copy() };
+    }
+    fixed := exchange(&mut o.sec_data[0], u8[]);
+    o.sec_data[0] = text_bytes(&o, &pre, fixed);
+    // Fixups: resolved here when the target is a local label of the same section and the field is
+    // relative, relocations otherwise.
+    mut r_sec = u64[];
+    mut r_off = u64[];
+    mut r_type = u64[];
+    mut r_sym = u64[];
+    mut r_add = u64[];
+    for i in o.fx_sec.len() {
+        sec := o.fx_sec[i];
+        mut at = o.fx_pos[i];
+        if sec == 0 {
+            at = final_text(&pre, at, o.fx_k[i]);
+        }
+        sym := o.fx_sym[i];
+        kind := o.fx_kind[i];
+        add := o.fx_add[i];
+        defined := (o.sym_sec[sym] != 0) && (o.sym_sec[sym] != ABS);
+        local := o.sym_bind[sym] == 0;
+        if kind == FX_TPOFF {
+            r_sec.push(sec);
+            r_off.push(at);
+            r_type.push(23);
+            r_sym.push(sym);
+            r_add.push(add);
+            continue;
+        }
+        if o.sym_sec[sym] == ABS {
+            // A constant: no relocation at all.
+            v := wrapping_add(o.sym_pos[sym], add);
+            if (kind == FX_PC) || (kind == FX_CALL) {
+                fail(&mut o, view("a relative reference to a constant"));
+            }
+            if kind == FX_ABS64 {
+                put_le(&mut o.sec_data[sec], at, v, 8);
+            } else {
+                put_le(&mut o.sec_data[sec], at, v, 4);
+            }
+            continue;
+        }
+        if (kind == FX_PC) || (kind == FX_CALL) {
+            if defined && local && (o.sym_sec[sym] == sec + 1) {
+                v := wrapping_sub(wrapping_add(sym_final(&o, &pre, sym), add), at);
+                put_le(&mut o.sec_data[sec], at, v, 4);
+                continue;
+            }
+            r_sec.push(sec);
+            r_off.push(at);
+            if defined && local {
+                r_type.push(2);
+                r_sym.push(o.sec_sym[o.sym_sec[sym] - 1]);
+                r_add.push(wrapping_add(add, sym_final(&o, &pre, sym)));
+            } else {
+                if kind == FX_CALL {
+                    r_type.push(4);
+                } else {
+                    r_type.push(2);
+                }
+                r_sym.push(sym);
+                r_add.push(add);
+            }
+            continue;
+        }
+        r_sec.push(sec);
+        r_off.push(at);
+        if kind == FX_ABS64 {
+            r_type.push(1);
+        } else {
+            r_type.push(10);
+        }
+        if defined && local {
+            r_sym.push(o.sec_sym[o.sym_sec[sym] - 1]);
+            r_add.push(wrapping_add(add, sym_final(&o, &pre, sym)));
+        } else {
+            r_sym.push(sym);
+            r_add.push(add);
+        }
+    }
+    for i in r_sym.len() {
+        o.sym_ref[r_sym[i]] = 1;
+    }
+    if o.err.len() != 0 {
+        return Result { object: u8[], error: o.err.copy() };
+    }
+    return Result { object: object(&mut o, &pre, &r_sec, &r_off, &r_type, &r_sym, &r_add), error: u8[] };
+}
+
+fn object<a, b, c>(o: (&a mut A), pre: (&b u64[]), r_sec: (&c u64[]), r_off: (&c u64[]), r_type: (&c u64[]), r_sym: (&c u64[]), r_add: (&c u64[])) -> u8[] {
+    mut out = elf::new(62);
+    for k in o.sec_name.len() {
+        out.sec_name.push(o.sec_name[k].copy());
+        out.sec_type.push(o.sec_type[k]);
+        out.sec_flags.push(o.sec_flags[k]);
+        out.sec_align.push(o.sec_align[k]);
+        out.sec_data.push(exchange(&mut o.sec_data[k], u8[]));
+        out.sec_size.push(o.sec_size[k]);
+    }
+    // The symbol table: locals first, each group in creation order. Temporaries (`.L`) never
+    // appear; a section symbol only when a relocation names it; an undefined symbol only when
+    // something refers to it or binds it.
+    mut index = u64[];
+    for id in o.sym_name.len() {
+        index.push(0);
+    }
+    for pass in 2 {
+        for id in o.sym_name.len() {
+            if temporary(&o, id) {
+                continue;
+            }
+            if (o.sym_type[id] == 3) && (o.sym_ref[id] == 0) {
+                continue;
+            }
+            undefined := o.sym_sec[id] == 0;
+            if undefined && (o.sym_ref[id] == 0) && (o.sym_bind[id] == 0) {
+                continue;
+            }
+            mut bind = o.sym_bind[id];
+            if undefined && (bind == 0) {
+                bind = 1;
+            }
+            if (pass == 0) != (bind == 0) {
+                continue;
+            }
+            mut ty = o.sym_type[id];
+            sec := o.sym_sec[id];
+            if (sec != 0) && (sec != ABS) && ((o.sec_flags[sec - 1] & 0x400) != 0) && (ty == 0) {
+                ty = 6;
+            }
+            index[id] = out.sym_name.len() + 1;
+            out.sym_name.push(o.sym_name[id].copy());
+            out.sym_info.push((bind << 4) | ty);
+            out.sym_sec.push(sec);
+            if (sec == 0) || (sec == ABS) {
+                out.sym_value.push(o.sym_pos[id]);
+            } else {
+                out.sym_value.push(sym_final(&o, pre, id));
+            }
+        }
+        if pass == 0 {
+            out.nlocal = out.sym_name.len();
+        }
+    }
+    for i in r_sec.len() {
+        out.r_sec.push(r_sec[i]);
+        out.r_off.push(r_off[i]);
+        out.r_type.push(r_type[i]);
+        out.r_sym.push(index[r_sym[i]]);
+        out.r_add.push(r_add[i]);
+    }
+    return elf::write(&out);
+}
+
+// ---- instructions -----------------------------------------------------------------------------
+
+fn mnemonics<a>(o: (&a mut A)) {
+}
+
+fn instruction<a, b>(o: (&a mut A), s: &b [u8], id: u64) {
+    fail(&mut o, view("instructions are not implemented yet"));
+}
