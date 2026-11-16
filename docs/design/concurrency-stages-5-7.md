@@ -136,3 +136,142 @@ counters and from every `Atomic` in a record.
    **Recommend now**: the API is what users write, and the layout change is invisible to them.
 2. AArch64 baseline v8.0 LL/SC, LSE later behind a target feature? **Recommend yes.**
 3. Is `fetch_min/max` signedness taken from `T`? **Recommend yes** (no separate `umin` name).
+
+## Stage 6: blocking foreign calls
+
+### What exists
+
+- A foreign call is a direct C-ABI call. Its only runtime step is the thread-pointer switch to
+  the thread's libc TCB [V native.grl `ffi_emit_call`, :13990; `tls_enter_foreign`]. On a worker it
+  occupies the worker for the whole call (decision B3). `rt_blocking_enter` only prints a one-time
+  warning [V runtime.grl `rt_blocking_enter`].
+- The runtime's own blocking operations (`host::read_file`, `write_file`, `command`, sleep without
+  a timer) go through `rt_blocking_call`/`rt_io`, then `rt_offload` [V runtime.grl:5023, :5040,
+  :5055]. That **creates an OS thread for each call** (map 1 MiB, clone, join, unmap) and parks the
+  task until the thread is done.
+- What makes a handoff possible already: a task's context switch saves to and restores from the
+  *thread record* (word 8, the scheduler stack pointer, [V os-linux.grl `rt_os_ctx_enter`/`leave`]),
+  not from the worker block. So a thread can give its worker block (deques, runner, free lists) to
+  another thread while it keeps running the task's stack, and still switch back to its own
+  scheduler frame afterwards.
+
+### Proposal
+
+**Declaration.** `extern "C" blocking lib "c" fn fsync(fd: i32) -> i32;`. `blocking` sits
+among the `lib`/`as` clauses of `extern_declaration` [V native.grl:14868]. It is a property of the
+foreign function: a bit beside `ext` in the function record, and ` blocking=1` beside ` extern=`
+in the interface record [V native.grl:41941]. Interface readers that do not know the field ignore
+it [A: check `iface_r_*`]; otherwise the format version goes up. A `cfn` type may say
+`blocking cfn(...)` later; not in this stage.
+
+**The model: worker blocks and threads are separate.** A *worker block* (Go's P) is the deques,
+the runner, the free lists and the stats. A *thread* (Go's M) runs one. Today they are one-to-one
+for life. Stage 6 lets a block move:
+
+- **Enter** (before the TCB switch, at every `blocking` call site): on a thread that runs no
+  worker block (main, a plain thread, a C thread) it does nothing - one load and a branch. On a
+  worker it marks the block "in a blocking call since T" and pins the task (task word, below). If
+  the block has queued work, or another worker is parked while work is queued anywhere, it hands
+  the block to a spare thread now. Otherwise it hands it off lazily: *sysmon* (below) does it if
+  the call is still running after 50 us.
+- **Leave** (after the call): if the block is still this thread's, it clears the mark and
+  continues - one load and a store. If the block was handed off, the thread tries to take a free
+  block (one whose thread became a spare); failing that it flags its task runnable, switches back
+  to its own scheduler frame (thread record word 8), puts the task on the injection ring, and
+  becomes a spare itself.
+- **Spares** are parked OS threads, created on demand and reused. Their number is capped at 2x
+  workers by default (`sched::Config.max_spares`, 1..256). A handoff that finds no spare and the
+  cap reached does not hand off; the block stays occupied, as today, and the warning below says
+  so once. Idle spares above `workers` exit after 1 s.
+- **Sysmon** is not a new thread: the reactor already has a timer heap and wakes for timers. When
+  any block is in a blocking call it arms a 50 us tick, and on each tick hands off every block
+  that has been in a call for 50 us or more while work is queued. With nothing blocked it arms
+  nothing.
+- **`rt_offload` folds into this.** `host::read_file` in a task becomes enter, the syscall on the
+  task's own thread, then leave. No thread is created per call, the task does not switch, and the
+  worker's queue moves to a spare only if the call actually takes long. `rt_offload`,
+  `rt_offload_main` and the per-call thread spawn are deleted. Windows keeps its completion-port
+  path for descriptor I/O; its other offloads use the same handoff (fibers switch exactly like
+  the Linux stack switch: `SwitchToFiber(thread record word 8)` [V os-windows.grl:1086-1092]).
+
+**By caller.**
+
+| caller | what `blocking` does |
+|---|---|
+| main or a plain thread (`thread::spawn`) | nothing; the thread blocks, which is its own business |
+| a green task on a worker | enter/leave above; other tasks and jobs keep running on a spare |
+| a job (it runs on a runner, which is a task) | the same; the job's forker waits as for any long job |
+| a C thread calling into Grail that then calls a `blocking` function | nothing (no worker block) |
+
+**Pinning, and callbacks during the call.** While a task is inside any foreign call that can call
+back - known at compile time: the foreign function takes a `cfn` or a handle with callbacks - it
+must not migrate. C frames are on its stack, and C may hold thread-local state. A pin counter in
+the task record (incremented by enter, decremented by leave) makes `rt_suspend` block the
+*thread* on the task's park word instead of switching stacks (exactly the thread-per-task mode's
+suspend [V runtime.grl `rt_suspend`]). A callback may therefore sleep, lock, join a task or fork
+jobs. Its waits block the thread, and its forks behave as from a plain thread: the forker claims
+its own jobs back and helps with nothing, because the block may already be on a spare. This also
+closes a hole that exists **today**: a callback that parks inside a non-blocking foreign call
+switches the task, C frames and all, onto whichever worker resumes it. Pinning applies to every
+foreign call that can call back, `blocking` or not.
+
+**Cancellation.** A foreign call cannot be interrupted. Cancellation is observed when it returns,
+at the task's next cancellable wait. A `blocking` call does not set the cancellable-wait word.
+Interruptible blocking I/O is what `host::read_fd` with the reactor is for.
+
+**A non-`blocking` call that blocks anyway.** It still costs a worker for its duration (B3). Sysmon
+can see it if every foreign call on a worker records "in a foreign call since T" - two stores per
+call, one before and one after. With that:
+- a worker in a foreign call for more than 10 ms while work is queued is handed off by sysmon
+  exactly like a `blocking` one, and the runtime says once, naming the symbol, that it should be
+  declared `blocking`;
+- every foreign call site gets the leave check (one load and a branch), because any call may come
+  back to a handed-off block.
+
+**Recommendation:** do it. The cost is two stores, a load and a branch per foreign call, which is
+noise next to the call itself (to be measured: `bench/ffi_call.grl`, a tight loop of a trivial C
+function). In exchange, a blocking C call cannot stall the scheduler any more, whatever it was
+declared. `blocking` then means "hand off at once, do not wait 10 ms". The existing
+`rt_blocking_enter` warning is replaced by the sysmon warning, which names the function.
+
+### Files, tests, benchmark
+
+- Files: `compiler/native.grl` (parse, record bit, interface field, call-site enter/leave and pin,
+  the per-call marker), `compiler/runtime.grl` (blocks vs threads, spares, handoff, sysmon tick,
+  `rt_offload` deleted, `rt_blocking_enter` replaced), `os-linux.grl` / `os-windows.grl` /
+  `darwin.grl` (spare thread start, the reactor tick), `lib/thread.grl` / `sched::Config`
+  (`max_spares`), `docs/ffi.md`, `docs/design/decisions-b2-b6.md` (B3 amended), the book,
+  `CHANGELOG.md`.
+- Corpus cases (x86_64 executes; aarch64 and riscv64 under qemu; Windows via `windows.mjs check`):
+  - `ffi-blocking-does-not-stall-tasks`: `tests/concurrency/blocking_call.grl` turned around. One
+    worker per task makes a 100 ms `usleep` declared `blocking`; a ticker task's worst gap stays
+    under 20 ms.
+  - `ffi-undeclared-blocking-is-handed-off`: the same with no `blocking`. Worst gap under 30 ms,
+    and stderr names `usleep` once.
+  - `ffi-spares-are-reused`: 1000 blocking calls from 8 tasks, then the thread count is at most
+    workers + reactor + main + `max_spares`.
+  - `offload-does-not-create-a-thread-per-call`: 1000 `host::read_file` from a task, with the same
+    thread bound.
+  - `ffi-callback-during-blocking-call-may-wait`: C calls back, and the callback sleeps, joins a
+    task and forks a `pool::join`; the results are correct and the task did not migrate (it
+    compares the thread record before and after).
+  - `ffi-callback-parks-without-migrating`: the same through a non-`blocking` call (the hole
+    above).
+  - `ffi-blocking-in-interface`: a module exports a `blocking` extern, and a separately compiled
+    user module gets the handoff (asm pin on the enter call).
+  - `ffi-blocking-on-main-is-a-plain-call`: asm pin; no handoff on a plain thread at run time.
+- Benchmark: `bench/frame.grl` with a mode in which one task calls a `blocking` 100 ms
+  `usleep` in a loop (and one in which it is undeclared). Report frame median, p99 and max, and
+  the I/O task's lateness, against no blocking task and against today. Expected: today's stall
+  (one worker gone per blocking task, and a stalled frame when they exceed the workers) is gone.
+  Plus `bench/ffi_call.grl` for the per-call cost of the marker.
+
+### Decisions for stage 6
+
+1. The per-call "in a foreign call" marker and sysmon handoff for undeclared calls.
+   **Recommend yes.**
+2. Spare cap default 2x workers, idle spares above `workers` exit after 1 s. **Recommend yes.**
+3. Pin every foreign call that can call back, not only `blocking` ones (closes today's
+   migration hole). **Recommend yes.**
+4. Sysmon on the reactor's timer, 50 us for declared calls and 10 ms for undeclared ones.
+   **Recommend yes**; the numbers are a starting point to measure.
