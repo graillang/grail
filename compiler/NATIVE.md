@@ -25,11 +25,14 @@ fn main() {
 }
 ```
 
-`print(value)` and `println(value)` are builtin prelude operations for `u64`, strings, byte owners
-and byte views; `println()` emits an empty line. Text/buffer output takes a checked readonly borrow
-for the call, does not consume the owner, and releases temporary views with normal cleanup.
-There is no formatting/interpolation or general display trait. The names `print`/`println` are
-reserved. Ordinary unit-returning functions may also omit the result annotation and final return.
+`print(value)` and `println(value)` are builtin operations for integers of every width, `bool`,
+`char`, floats, text, byte owners and views, vectors of those, any type with a `show` method, and
+any record whose fields print (its default text is `Name { field: value }`). The first argument may
+be a format string: `{}` takes the next argument, `{:>8.2}` pads and rounds, `{{`/`}}` are braces,
+and `format(...)` builds a `string` the same way. A name in braces (`{n}`) is refused - the
+placeholder takes its value from the argument list. `println()` emits an empty line. Output takes a
+checked readonly borrow for the call and does not consume the owner. The names `print`/`println`
+are reserved. Ordinary unit-returning functions may omit the result annotation and final return.
 
 Named `main` never prints its return value. Unit main exits with status 0; explicit `->u64`
 sets the OS exit status (low eight bits on Linux). A main may accept one readonly argv view;
@@ -80,12 +83,13 @@ numeric harness. This is not the recommended application entry convention.
   identity and control) and translates Darwin flag bits, `struct dirent` layout and `errno`.
   Link with `ld64.lld -platform_version macos 11.0 11.0 -lSystem -e _main`. See
   [macOS backend](../docs/design/macos-backend.md).
-- Everything above the object format is shared. Neither Mach-O nor PE images are **executed** by
-  this repository's tests, so macOS and Windows runtime behaviour is unverified until it runs on
-  their hardware. Darwin reports `ENOSYS` for threads, `mutex<T>`, the readiness reactor and
-  sockets; Windows x86-64 emits COFF objects and PE32+ images but has no Win32 OS layer yet, and
-  Grail-internal calls there still use the private register convention. See
-  [platform status](../docs/platform-status.md).
+- Everything above the object format is shared. Windows x86-64 has its own OS layer
+  (`compiler/os-windows.grl`: files, processes, threads, green tasks on fibers, wide-character
+  paths) and its images are executed under Wine by `tools/windows.mjs check`; the compiler itself
+  runs there (`tools/windows.mjs selfhost`). Mach-O images are linked and their load commands and
+  signatures checked, but nothing in this repository executes them, so macOS runtime behaviour is
+  unverified until it runs on that hardware; Windows ARM64 objects are built and their unwind
+  tables checked, and are not executed either. See [platform status](../docs/platform-status.md).
 
 ## Ownership and cleanup checkpoint
 
@@ -256,10 +260,13 @@ syntax, not the type system.
 
 ## Collection expressions and generic parameters
 
-Collection literals are `u8[10, 20, 30]` and `T[...]` (empty forms use `[]`). Use postfix
-`.push(value)`, `.pop()`, `.len()`, `.copy()` and `.text()`; strings append with `.append(source)`.
-Free collection helper spellings and constructor parentheses are removed. `.pop()` aborts on an
-empty collection, unlike Rust's Option-returning pop. Generic user functions and types are checked and specialized by the Grail-written compiler.
+Collection literals are `[10, 20, 30]` (a vector whose element type is the first element's, or the
+vector type the context expects), `T[...]` with the element type leading, `[v; n]` for `n` copies,
+and `["key": value]` for a map - the colon is what makes it a map. The empty forms `[]` and `[:]`
+name no element and need an expected type; `T[]` and `[K: V]()` say it themselves. A `[` after an
+expression is indexing. Use postfix `.push(value)`, `.pop()`, `.len()`, `.copy()` and `.text()`;
+strings append with `.append(source)`. Generic user functions and types are checked and specialized
+by the Grail-written compiler.
 
 `true` and `false` are reserved numeric truth literals (one and zero). Generic type parameters
 are uppercase names without a `type` keyword, e.g. `fn identity<T>` and `fn replace<a,T>`;
@@ -267,15 +274,17 @@ lowercase names are lifetimes, which precede type parameters. Existing universal
 
 ## Callable and concurrency foundations
 
-Typed capture-free function values, structural `Send`/`Share` bounds and opaque `atomic<u64>`
-are implemented in the sole compiler, including cross-target lowering. See
-[callables and transfer](../docs/design/callables-and-transfer.md) for syntax and restrictions.
-These foundations do **not** yet provide capturing closures, worker scheduling, task scopes,
-cancellation or colourless readiness I/O; those remain in progress.
+Function values, capturing closures (`Fn` and `FnMut`), structural `Send`/`Share` bounds,
+`Atomic<u64>` and `Mutex<T>` are implemented in the sole compiler, including cross-target lowering.
+See [callables and transfer](../docs/design/callables-and-transfer.md) and
+[closures](../docs/design/closures.md). Task scopes run on an M:N work-stealing scheduler with
+guarded stacks ([scheduler](../docs/design/scheduler.md)), and a failed task is a value its parent
+joins ([task failure](../docs/design/task-failure-containment.md)).
 
-Explicit static user-defined interfaces and concrete implementations share the bound syntax with
-structural capabilities. See [interfaces](../docs/design/interfaces.md) for dispatch, coherence and
-current restrictions; generic interfaces, associated types and dynamic objects are not implemented.
+User-defined interfaces share the bound syntax with the structural capabilities, with generic
+interfaces, associated types, interface inheritance, generic methods and dynamic objects (`dyn I`
+owned, `&dyn I` borrowed without allocation). See [interfaces](../docs/design/interfaces.md) for
+dispatch and coherence.
 
 Real worker threads (`parallel_map`), `mutex<T>`, hash maps and a sharded concurrent map are
 described with their limits in [structured parallelism](../docs/design/structured-parallelism.md).
