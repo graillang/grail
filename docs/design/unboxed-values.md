@@ -5,42 +5,30 @@ Every factual claim is marked **[V]** (verified: read at the cited `file:line` o
 measured here) or **[A]** (assumed: inferred, not checked). Measurements were taken on a shared
 24-core host under load (another gate was running), best of three; treat them as ±10 %.
 
-## Decisions for the owner
+## Decided by the director, 2026-11-16
 
-1. **The model.** Keep a `Val` one word. An aggregate (record, tuple, enum, view, later a vector
-   header) is *denoted by the address of its words*; what changes is where the words live: inline in
-   the frame, the enclosing record, the vector buffer - not in a heap block of their own.
-   *Recommend: yes.* It is what a record `Val` already is (a pointer to its words), so the front
-   end's 121 `save` sites and 195 runtime-call sites keep their shape.
-2. **Order.** You expected "vectors of plain-data records inline" and "views as two words" first.
-   *Recommend: confirm both as stages 1 and 2, with two corrections.* (a) Stage 1 must also change
-   what `&T` to a record is (below), or flat elements cannot be borrowed. (b) For *compile speed*
-   neither is the largest item: 68-74 % of the compiler's allocations are vector headers and
-   buffers, 19-20 % records, 6-13 % view records (measured below), and in a full build allocation
-   is 20 % of the work, not 40 %. Views still go second because they are cheap.
-3. **Floats on the native backend are a separate blocker for the engine.** The 1M-`{x,y,z: f32}`
-   benchmark runs 11.8 s natively against 0.14 s through LLVM and 0.05 s in C, because every `f32`
-   operation is a call (`rt_f64_op` + `rt_f32_round`). No layout work moves that number.
-   *Recommend: decide whether the engine ships on the LLVM backend only; if not, inline float
-   arithmetic in the native stream is its own task, ahead of stage 1 in value.*
-4. **Layout of a plain record.** *Recommend: word-granular first (each field 8 bytes, as today),
-   C-like packing in declared order as a later stage (stage 7); `size_of` stays refused for non-extern
-   records until then,* so the layout is not promised before it is final.
-5. **Recursive types.** Inline options make `next: Node?` infinitely large. *Recommend: the compiler
-   boxes the field that closes a cycle (it already finds those edges); no new syntax now.* An explicit
-   `Box<T>` can come later and would need a two-step bootstrap.
-6. **View ABI.** *Recommend: a view is a handle to a `{pointer, length}` pair that lives in a frame, a
-   record, a vector buffer or a vector header - never the heap - returned in two registers. This is
-   exactly the `DynPair` rule of `docs/design/fat-dyn.md`.* Passing views in two registers is a
-   later optimisation, not a prerequisite.
-7. **Vector and string headers inline (three words).** *Recommend: yes, as stage 6.* It is the
-   largest allocation count in the compiler (40 %) but touches every runtime function that returns a
-   vector, so it goes after frames can hold aggregates.
-8. **No opt-in attribute.** *Recommend: every record that qualifies is unboxed; "plain data" is a
-   property the compiler computes, not something the programmer writes.*
-9. **Bootstrap.** *Recommend: no transitional compiler per stage and no reseed per stage* (this
-   corrects compile-speed.md's "a reseed per sub-stage"): a representation change alters emitted
-   code, not the source the seed must read. Reseed at publication, as `docs/testing.md` already says.
+The owner has made run-time parity with C and Rust in release builds a pillar (Abundance is a
+demanding game), so this work is ordered by what the engine needs; compile speed comes second.
+
+1. **The model: yes.** A `Val` stays one slot. An aggregate (record, tuple, enum, view, later a
+   vector header) is denoted by the address of its words; the words live inline in the frame, the
+   enclosing record or the vector buffer, not in a heap block of their own.
+2. **Order: 0, 1, 3, packed layout, 2, 4, 5, 6** (stage numbers as in section 6). Vector maths
+   before views: the engine needs records in frames more than the compiler needs the 6-13 %.
+3. **Floats on the native backend** are fixed elsewhere (branch `gaps12-float`). Release builds ship
+   on the LLVM backend; the native backend is the development build, with a bar of 3x scalar C.
+4. **Sub-word loads and stores are never calls, from stage 1 on.** After stage 1 an engine keeps
+   its hot data in `extern "C" record[]`; a runtime call per `f32` field would undo the stage.
+   Packed layout for plain Grail records stays late; inline sized access does not.
+5. **Recursive types:** the compiler boxes the field that closes a cycle. No new syntax.
+6. **View ABI:** a `{pointer, length}` pair that is never on the heap, returned in two registers.
+7. **Vector and string headers inline** as stage 6.
+8. **No opt-in attribute.** "Plain data" is computed.
+9. **Bootstrap by fixed point, no reseed per stage.** Each stage's commit message names the
+   compiler that built it.
+
+Still open, with the owner: whether `q := v[i]` on a plain record stays a borrow or becomes a copy.
+Until answered it keeps today's meaning (a borrow), and section 4 says what guards that.
 
 ## 1. Where the one-word assumption lives
 
@@ -264,6 +252,22 @@ aggregate result fits.
   expression parser needs measuring (`docs/design/main-stack-overflow.md`).
 - **Recursive types** need an indirection the compiler inserts (decision 5).
 
+**What the checker would do by itself, and why it must not.** A place is `copy` when its type needs
+no drop: `copy := !needs_drop(ty) & (kind != 7)` (`member_place`, N:4147-4148), and `own` gives a
+value an owner record only when it needs a drop (N:3948-3952). Today `needs_drop` is true for every
+record because the box must be freed (N:3873), and that one fact is what makes records move-only.
+- *Stage 1:* locals stay boxed, so `needs_drop` stays true for every record and nothing changes.
+  Flat elements and inline fields are places inside an owner; their type still answers
+  `needs_drop = true`, so they stay non-`copy`. No language change.
+- *Stage 3:* a plain record in a frame owns nothing. If `needs_drop` simply became false for it,
+  every plain record would silently become `copy`: `b := a; a.x` would compile, `v[i]` would read
+  by value instead of borrowing, and E0006 would stop firing for them. **That is a language change
+  made by accident.** So stage 3 splits the question in two: `needs_drop(ty)` (is there anything to
+  free: false for a plain record in a frame) and a new `affine(ty)` (is it moved rather than
+  copied: true for every record and enum until the owner decides otherwise). `member_place`, `own`
+  and the alias paths ask `affine`; only the drop emitters ask `needs_drop`. Whether small plain
+  records later become `copy` is then one predicate and one decision, not a side effect.
+
 ## 5. Alternatives considered
 
 - **Escape analysis only** (keep the model, stack-allocate boxes that do not escape). Removes some
@@ -292,19 +296,21 @@ compiles alongside (`runtime.grl` is compiled from source by the same compiler i
 old compiler builds C1 (old layout inside, emits new layout); C1 builds C2; C2 builds C3; the
 acceptance is `C2.s == C3.s`. **Zero transitional compilers, three builds, no reseed.** A stage
 needs a two-step bootstrap only if the compiler's own sources start using new *syntax* (none of
-these stages adds any; `Box<T>` would). `tools/test-selfhost.mjs`'s "byte-identical before and
-after" cannot hold across a stage and must be replaced by the fixed point for that commit.
+these stages adds any; `Box<T>` would). `tools/test-selfhost.mjs` is exactly this fixed point
+(stage 2 against stage 3), so it stays the acceptance test of every stage; stage 0 additionally
+keeps stage 2 identical to the one built before it.
 Interface files gain a layout line beside the `dyn` ABI line (N:39162), bumped per stage, so
 objects of two layouts never link.
 
 Every stage: benchmark = `bun tools/compile-bench.mjs` (self-compile; plus `--release`) and the
 micro-benchmark, on both backends; allocation count from callgrind on `check syn1000`.
 
-**Stage 0 - plumbing, no behaviour change.** Generalise the `DynPair` fact to "aggregate of N words
-at slot k" in `llvm.grl` facts, `ir.grl`/`optimize.grl` (`pair[n]` becomes a width), fncache fact
-framing; add a layout table (size, per-field offset) beside `Decl`, with `rec_load`/`rec_store`
-reading it (offsets stay `k*8`); add `plain(ty)`. Files: native.grl, ir.grl, optimize.grl, llvm.grl,
-fncache.grl. Acceptance: self-compile byte-identical (`tools/test-selfhost.mjs`,
+**Stage 0 - plumbing, no behaviour change.** One layout question, `field_word(ty, k)` (the word a
+field starts at; `k` today), asked by every site that reads, writes, compares, destructures,
+prints or drops a record field, so that stage 1b changes one function and not twenty sites; and
+the inventory in the appendix. The N-word frame fact (the `DynPair` fact generalised) belongs to
+stage 3, its first user, and `plain(ty)` to stage 1b: neither is added before something reads it.
+Files: native.grl. Acceptance: self-compile byte-identical (`tools/test-selfhost.mjs`,
 `tools/ssair-bytes.mjs`). Risk: low. Bench: unchanged within noise.
 
 **Stage 1 - flat vectors of plain records** (engine first; removes the 8 % token allocations).
@@ -325,6 +331,10 @@ fncache.grl. Acceptance: self-compile byte-identical (`tools/test-selfhost.mjs`,
 - Acceptance: new corpus cases for push/index/`&v[i]`/`&mut v[i]`/swap/insert/remove/slice/iterate
   over nested plain records; E0008 cases unchanged; an assembly assertion that `&v[i]` has no load of
   an element pointer; `extern "C" record[]` passed to a C function that sums it; fixed point.
+- Sized access (decision 4): a field of an `extern "C" record` narrower than a word is read and
+  written with `movl`/`movzbq`/`movb`-class instructions in the stream instead of calls to
+  `rt_load_sized`/`rt_store_sized` (N:20502); the three targets and the lifter learn the widths
+  they do not yet spell (16-bit, sign-extending, `f32` to and from a register).
 - Bench: `aosu`, `aosu_shuf`, `aos`. Target on LLVM: shuffled = unshuffled, RSS <= 30 MB, time
   within 1.5x of the column version. `push` still builds a box and frees it until stage 3.
 
@@ -360,13 +370,13 @@ corpus, fixed point.
 **Stage 6 - vector and string headers inline.** Every runtime function that returns a vector takes
 a destination instead. Removes the 40 %. Risk: breadth of runtime.grl; literals' static headers.
 
-**Stage 7 - packed layout** (`f32` in 4 bytes, natural alignment, declared order), `size_of` for
-plain records, sub-word loads spelled inline instead of `rt_load_sized`/`rt_store_sized` calls
-(N:20502). This is the stage that makes `V3` 12 bytes; until then an engine uses `extern "C"
+**Stage 7 - packed layout** (`f32` in 4 bytes, natural alignment, declared order) and `size_of`
+for plain records; inline sized access is already there from stage 1. Ordered right after stage 3
+(decision 2). This is the stage that makes `V3` 12 bytes; until then an engine uses `extern "C"
 record` for GPU data, which stage 1 already stores flat.
 
-Stages 2 and 3 are independent of each other after stage 1 and can swap if vector maths matters
-more than compile time. Stage 6 needs stage 3 only.
+Stages 2 and 3 are independent of each other after stage 1; the decided order runs 3 first.
+Stage 6 needs stage 3 only.
 
 ## 7. Compile speed, both directions
 
@@ -388,16 +398,35 @@ more than compile time. Stage 6 needs stage 3 only.
 
 ## Open questions
 
-1. Does the engine ship on the LLVM backend only (decision 3)?
-2. Given the release compiler already self-compiles in 2.98 s and allocation is 20 % of that work,
-   is stage 3 of compile-speed.md still ordered before direct object emission (its stage 4)? The
-   optimiser's text pass is 51 %. The engine's needs justify stages 1-3 here on their own.
-3. Should a by-value read of a plain element (`q := v[i]`) stay a borrow, or become a copy for
-   small plain records? Staying a borrow changes nothing; a copy is friendlier for vector maths but
-   is a language change (an implicit `Copy`).
-4. Owned `dyn I` cell layout once the value is N words: `{vtable, words...}` or a pointer to the
-   words; fat-dyn.md pins `{value @0, vtable @8}` today.
-5. Tasks, `Mutex<T>` and channels carry one word across threads [A]; with inline aggregates they
-   need the size too. Not inventoried here.
-6. Hash maps (`[K: V]`) are library values [V: N:32130]; whether their storage becomes flat follows
-   from stage 1 only if they are built on `T[]` [A].
+1. `q := v[i]` on a small plain record: borrow (today) or implicit copy? With the owner.
+2. Owned `dyn I` over an N-word value: `{vtable, words...}` or a pointer to the words; fat-dyn.md
+   pins `{value @0, vtable @8}` today. To be proposed at stage 3.
+3. Given the release compiler self-compiles in 2.98 s and allocation is 20 % of that work, where
+   stages 2 and 6 stand against direct object emission is a compile-speed.md question.
+
+## Appendix: aggregates that cross a thread or live in library storage
+
+Inventory for stage 0 (all **[V]** unless marked). None of these blocks stage 1; each names the
+stage that must handle it.
+- **`Mutex<T>`**: `rt_mutex_new(value)` takes one word (N:26688); the cell is `{lock, value}` and
+  `lock` hands the body the address of the value word, `leaq 8(cell)` (N:29957-29958), which is a
+  `&mut T` in today's meaning (the slot that holds the pointer). *Stage 1a:* for a record `T` the
+  body's `&mut T` must be the record's words, so `lock` loads the word instead of taking its
+  address. *Stage 3:* the cell holds the words inline.
+- **Tasks**: `rt_task_spawn(scope, f, item, arity, dropper)` moves one item word in, and the result
+  is one word with a dropper (N:27295-27315; R:3655). Boxed records keep working unchanged through
+  stage 1; at stage 3 an aggregate item or result is boxed at the spawn (it crosses a thread and
+  outlives the frame).
+- **`parallel_map` / `parallel_for_chunks`**: over a vector of words; `rt_parallel_for_chunks`
+  already takes an element width (R:2900, R:2992). *Stage 1b:* a flat `T[]` passes its element size
+  there; `parallel_map` over a flat vector hands each call an element address.
+- **`Atomic<u64>`**: scalar only (kind 11). Unaffected.
+- **Channels**: there are none (grep of `lib/` and the compiler).
+- **Hash maps**: `[K: V]` is `lib/hashmap.grl`'s `Map`, whose storage is `Slot<K, V>[]` plus
+  `u64[][]` buckets (lib/hashmap.grl:20-26). Its entries become flat at stage 1b exactly when
+  `Slot<K, V>` is plain for that `K` and `V`; no change to the library.
+  `lib/concurrent_map.grl` is `Mutex<[K: V]>[]` (line 9) and follows `Mutex`.
+- **`lib/arena.grl`**: `Slot<T>[]` (line 28) - the same rule as the map.
+- **`lib/rc.grl`**: `Rc<T>` holds a `*mut T` (line 23). **[A]** a raw pointer to a record is the
+  record's address already; to be read before 1a, since 1a changes what a *reference* to a record
+  is and the two meet at `unsafe` conversions.
