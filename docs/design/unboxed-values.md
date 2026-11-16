@@ -15,8 +15,9 @@ measured here) or **[A]** (assumed: inferred, not checked). Measurements were ta
 2. **Order.** You expected "vectors of plain-data records inline" and "views as two words" first.
    *Recommend: confirm both as stages 1 and 2, with two corrections.* (a) Stage 1 must also change
    what `&T` to a record is (below), or flat elements cannot be borrowed. (b) For *compile speed*
-   neither is the largest item: 68 % of the compiler's allocations are vector headers and buffers,
-   19 % records, 13 % view records (measured below). Views still go second because they are cheap.
+   neither is the largest item: 68-74 % of the compiler's allocations are vector headers and
+   buffers, 19-20 % records, 6-13 % view records (measured below), and in a full build allocation
+   is 20 % of the work, not 40 %. Views still go second because they are cheap.
 3. **Floats on the native backend are a separate blocker for the engine.** The 1M-`{x,y,z: f32}`
    benchmark runs 11.8 s natively against 0.14 s through LLVM and 0.05 s in C, because every `f32`
    operation is a call (`rt_f64_op` + `rt_f32_round`). No layout work moves that number.
@@ -130,8 +131,7 @@ line differs (N:39154-39164). Record layout has no such line because layout is u
 **Caches.** A per-function unit stores text, labels and opaque facts (`compiler/fncache.grl:4-33`);
 its key includes the declaration surface and typed signature (N:14806-14820). A module's store key
 names the compiler's own digest (`compiler/cli.grl:1541-1546`). So a new compiler never reuses an
-old-layout object; nothing to migrate. **[A]** that `id.compiler` digests the binary and not a
-version string - read the comment, not the code that fills it.
+old-layout object; nothing to migrate. (`id.compiler` is the digest of the executable, cli.grl:2779.)
 
 **Debug info.** A record is described as `8 * count` bytes, a view as 16 (N:1638, N:1684).
 
@@ -149,7 +149,10 @@ Compiler: `.work/native/256d304c54af594175cf5c2c/grail`, built from `78c8c6e` by
 | check generic (100x20) | 1.703 |
 | **self-compile** | **11.267** |
 
-RELEASE_ROW
+The compiler as shipped (`--release`: the same sources through LLVM, 6.6 MB against 27 MB) **[V]**:
+check syn1000 0.228 s, check hello 0.038 s, build hello `--no-cache` 0.186 s, check generic 0.277 s,
+**self-compile 2.982 s**. compile-speed.md's target of "self-compile at or under 10 s" is already
+met by the release build; stage 3 should be judged against 2.98 s, not against 41.6 s.
 
 **Where the compiler's allocations come from** (`valgrind --tool=callgrind`, `GRAIL_JOBS=1`,
 `grail check` of the 26k-line scaling program; 9.99 G instructions, 5.85 M allocations) **[V]**
@@ -160,14 +163,30 @@ RELEASE_ROW
 | vector buffers (`rt_grow`) | 1,630,905 | 28 % | not by this note |
 | records (`rt_rec`) | 1,104,724 | 19 % | stages 1 and 3 |
 | - of which `Val` | 308,284 | 5 % | stage 3 |
-| - of which tokens (`Tok[]`, built twice) | 449,318 | 8 % | stage 1 |
+| - of which tokens (built twice: lexer.grl:411, N:9151) | 449,318 | 8 % | stage 1 |
 | sub-slice view records (`rt_slice`) | 745,217 | 13 % | stage 2 |
 | enums (`rt_enum`) | 0 | 0 % | - |
 
 `rt_alloc_unlocked` + `rt_free_unlocked` + `rt_free` + `rt_alloc` + `rt_drop_seq` + `rt_view_free`
 are 38.4 % of all instructions in that run, which agrees with compile-speed.md's "about 40 %".
 
-SELF_PROFILE
+**The same for a self-compile** (one process, 261 G instructions, 60.0 M allocations) **[V]**
+
+| allocation | calls | share |
+| --- | --- | --- |
+| vector buffers (`rt_grow`) | 22,190,870 | 37 % |
+| vector/string headers (`rt_new`) | 22,086,774 | 37 % |
+| records (`rt_rec`) | 12,211,248 | 20 % |
+| - `ownership::snapshot` | 5,498,647 | 9 % |
+| - `ir::ty` (the optimiser's type record) | 2,833,631 | 5 % |
+| - `Val` | 1,101,305 | 2 % |
+| - tokens | 1,235,766 | 2 % |
+| sub-slice view records | 3,542,555 | 6 % |
+| enums | 0 | 0 % |
+
+Here the allocator and view runtime are **20 %** of instructions, not 40 %: the optimiser and its
+IR are 51 % (`optimize::*` 24 %, `ir::*` 27 %), the front end 14.5 %. So "40 % is allocation" holds
+for a check and not for a full build, and unboxing can remove at most a fifth of a self-compile.
 
 **Data-oriented micro-benchmark** (sources in section 5; 1M records, built by `push`, 20 passes of
 transform-in-place then sum; `--overflow=wrap`) **[V]**
@@ -229,7 +248,8 @@ aggregate result fits.
 **Would change**
 - **Moves copy N words** instead of one. A large record moved in a loop gets slower. The
   compiler's context is one record of about 450 fields (compile-speed.md); it is passed by `&mut`
-  everywhere **[A]**, so it is not moved, but a stage must count words moved to prove it.
+  everywhere (built once, N:43508; no function takes or returns `C` by value, by grep) **[V]**,
+  so it is not moved; a stage should still count words moved.
 - **Identity.** A record no longer has a stable heap address; moving it changes its address. No safe
   code can see this [V: `==` is structural; A: there is no address-of-to-integer for a Grail record
   outside `unsafe`].
@@ -268,7 +288,7 @@ aggregate result fits.
 
 Bootstrap, once, for all stages. A stage changes the code the compiler *emits* and the runtime it
 compiles alongside (`runtime.grl` is compiled from source by the same compiler in every build
-[V: `tools/native.mjs:18`, `:494`]). The sources stay readable by the previous compiler, so:
+[V: `tools/native.mjs:488`]). The sources stay readable by the previous compiler, so:
 old compiler builds C1 (old layout inside, emits new layout); C1 builds C2; C2 builds C3; the
 acceptance is `C2.s == C3.s`. **Zero transitional compilers, three builds, no reseed.** A stage
 needs a two-step bootstrap only if the compiler's own sources start using new *syntax* (none of
@@ -290,7 +310,8 @@ fncache.grl. Acceptance: self-compile byte-identical (`tools/test-selfhost.mjs`,
 **Stage 1 - flat vectors of plain records** (engine first; removes the 8 % token allocations).
 - 1a: `&T` to a record becomes the address of its words (all records, still boxed);
   assignment and `exchange` through such a reference copy words. Measurable alone: one load fewer
-  on every `c.field` through `c: &mut C`.
+  on every `c.field` through `c: &mut C`. Risk: `mut r: R;` passed as `&mut r` before it holds a
+  value needs its storage to exist at the declaration (as extern records already do, N:36886).
 - 1b: plain records nest inline in plain records; `T[]` of a plain record (or of an `extern "C"
   record`) stores elements inline. Element size becomes a parameter of the vector runtime
   (`rt_push`, `rt_slot`, `rt_at`, insert/remove/swap/truncate/copy) and of the optimiser's inline
@@ -311,7 +332,7 @@ fncache.grl. Acceptance: self-compile byte-identical (`tools/test-selfhost.mjs`,
 A sub-slice writes two frame slots declared as a pair and yields their address; results come back
 in `%rax:%rdx`; a view field or element is two inline words (layout table from stage 0, flat
 elements from stage 1); `rt_view_record`, `rt_view_free` and the `& 8` address test in `rt_free`
-(R:974-984) are deleted. Files: native.grl (the 14 `rt_view`/`rt_slice`/`rt_vslice` sites and view
+(R:974-984) are deleted. Files: native.grl (the 10 `rt_view`/`rt_slice`/`rt_vslice` sites and view
 drops), runtime.grl, llvm.grl (descriptor fact 5), optimize.grl. Risks: a handle to a frame pair
 escaping its frame - bind, store and return must copy; a view inside an enum payload before stage 5
 (keep one boxed pair there until then). Acceptance: zero `rt_alloc` from slicing in callgrind;
@@ -349,8 +370,10 @@ more than compile time. Stage 6 needs stage 3 only.
 
 ## 7. Compile speed, both directions
 
-- **Faster.** Allocator work is 38 % of a check. By allocation count the stages remove 8 % (1),
-  13 % (2), 5 % or more (3) and 40 % (6); each also removes the matching free and, for views, a
+- **Faster.** Allocator work is 38 % of a check and 20 % of a self-compile. By allocation count
+  (check / self-compile) the stages remove 8 / 2 % (1), 13 / 6 % (2), 5 / 2 % or more (3 - more if
+  `snapshot` and `ir::ty` records, 14 % of a self-compile's allocations, are short-lived locals
+  **[A]**) and 40 / 37 % (6); each also removes the matching free and, for views, a
   call per hop. One load fewer per field access through a reference (1a) applies to almost every
   line of the compiler. **[A]** the time saved is proportional to the count; it is measured per
   stage, not promised.
@@ -366,7 +389,9 @@ more than compile time. Stage 6 needs stage 3 only.
 ## Open questions
 
 1. Does the engine ship on the LLVM backend only (decision 3)?
-2. Is `C` (the compiler context) ever moved by value? If so stage 3 needs a fix there first.
+2. Given the release compiler already self-compiles in 2.98 s and allocation is 20 % of that work,
+   is stage 3 of compile-speed.md still ordered before direct object emission (its stage 4)? The
+   optimiser's text pass is 51 %. The engine's needs justify stages 1-3 here on their own.
 3. Should a by-value read of a plain element (`q := v[i]`) stay a borrow, or become a copy for
    small plain records? Staying a borrow changes nothing; a copy is friendlier for vector maths but
    is a language change (an implicit `Copy`).
