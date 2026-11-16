@@ -135,9 +135,11 @@ A job that waits - sleeps, reads a descriptor, joins a task - does not hold a wo
 way a task does and another worker's job runs meanwhile. A thread waiting in a join helps only with work its own
 forked job created, so joining while holding a `Mutex` is safe unless that work takes the same lock.
 
-What it still does not do: a failure inside a parallel call is still a process abort (a stolen
-branch may be borrowing the failing stack's frames, so that stack cannot simply be discarded),
-there are no dependency edges between jobs, and a graph of asset jobs can still starve interactive
+A failure inside a parallel call is contained the same way: the other branches finish, the
+failure is raised again where the call joins, and inside a task `try_join` reports it with the
+statement that failed. From `main` it still ends the program, naming that statement.
+
+What it still does not do: there are no dependency edges between jobs, and a graph of asset jobs can still starve interactive
 work because there is one queue class.
 `docs/design/parallelism.md` states each of those with the reason.
 

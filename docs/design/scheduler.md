@@ -104,10 +104,12 @@ worker like any task, finishes its job and ends. A job that never waits pays for
 runner's stack is a task stack, so a job that overflows it gets the task's report (it was an
 unexplained SIGSEGV on a pool thread).
 
-**Failure.** A failed check inside a parallel region - in a job, or in a task that still has forks
-outstanding - ends the process (status 134, one report), as a pool job's failure always did.
-Containing it needs the failing stack kept alive until every stolen child that borrows its frames
-has finished; that is follow-up F1 in `concurrency-model.md`.
+**Failure.** A failed check inside a parallel region is contained: the failing stack releases its
+locks (once gaps12-sync is merged), waits - not cancellably - for every fork it has not joined,
+publishes the failure to every job it was running, and is discarded; each forker re-raises at its
+join, and where the failure leaves the region it is contained by the task or ends the process with
+one report naming the original statement and the join. A stack overflow stays fatal. The mechanism
+is `concurrency-model.md`, "F1".
 
 **Locks.** Because help is limited to the waiter's own job's descendants, a join while holding a
 `Mutex` can deadlock only where the sequential program would. When locks are tracked per record a

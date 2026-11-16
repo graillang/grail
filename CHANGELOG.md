@@ -20,8 +20,12 @@
     scheduler's floor of two.
   - `pool::wait(pool::spawn(f))` from a thread that waits at once may now run `f` on that thread.
   - `GRAIL_SCHED_STATS=1` prints the worker count and the deepest nesting of helped jobs at exit.
-  - Still a process abort: a failed check inside a parallel call (follow-up F1 in
-    `docs/design/concurrency-model.md`). A thread waiting in a join helps only with work forked by the job
+  - **A failure inside a parallel call is contained.** A failed check in a job no longer ends the
+    process: the jobs it forked finish, the failure is raised again at the join, and a task that
+    made the call fails as tasks already do - `try_join` returns the check's message, the
+    statement that failed and a line naming the join. From `main` the program ends as before, now
+    with that same report. A stack overflow is still fatal. Until locks are tracked per task, a
+    job that fails inside `lock_with` while a sibling waits for that lock waits forever. A thread waiting in a join helps only with work forked by the job
     it waits for, and not at all with less than an eighth of its stack left, so helping never
     stacks more on a stack than the sequential program would.
   `docs/design/scheduler.md` ("Jobs") is the mechanism; `lib/pool.grl`'s signatures are unchanged.

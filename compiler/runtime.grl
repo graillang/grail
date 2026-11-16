@@ -125,6 +125,10 @@ fn rt_stack_overflow_at(site: u64) -> u64 {
 //    The claim is taken before any text is built, so a second failing thread cannot garble the
 //    report.
 fn rt_fail(kind: u64, a: u64, b: u64) -> u64 {
+    j := rt_job_failing();
+    if j != 0 {
+        return rt_job_fail(j, kind, a, b, rt_site_here(j + 200) & 18446744073709551614, 0, 0);
+    }
     t := rt_containable();
     if t != 0 {
         return rt_contain_site(t, kind, a, b, rt_site_here(t + 200), 0);
@@ -153,9 +157,9 @@ fn rt_containable() -> u64 {
     if rt_task_threads() != 0 {
         return 0;
     }
-    // Inside a parallel region (word 152: a runner, a task with forks outstanding, a task running a
-    // job) a failure still ends the process: a contained failure discards the stack, and a stolen
-    // child may be borrowing its frames. docs/design/concurrency-model.md, follow-up F1.
+    // Inside a parallel region (word 152, the stack list, is not empty) a failure is not contained
+    // here: it goes through rt_job_fail first, which drains the stack's forks - a stolen child may be
+    // borrowing its frames - and empties the list before it contains the task.
     if raw_load(t + 152) != 0 {
         return 0;
     }
@@ -3086,7 +3090,11 @@ fn rt_job_wait(j: u64) -> u64 {
     rt_job_await(j);
     rt_region_leave();
     r := raw_load(j + 40);
+    f := raw_load(j + 80);
     rt_job_release(j);
+    if f != 0 {
+        rt_job_reraise(f);
+    }
     return r;
 }
 // `parallel_with(first, second)`, which is pool::join: `first` is forked as a job and `second` runs
@@ -3608,6 +3616,9 @@ fn rt_worker_run(s: u64, w: u64, t: u64) -> u64 {
             rt_wake(joiner);
         }
         if runner {
+            if raw_load(w + 224) == t {
+                raw_store(w + 224, 0); // this worker's own runner, ended by a contained failure
+            }
             // A runner that had parked inside a job, was resumed as a task and has now finished
             // that job: nothing joins it, so its record goes back here.
             rt_runner_free(t);
@@ -3643,7 +3654,8 @@ fn rt_worker_run(s: u64, w: u64, t: u64) -> u64 {
 // ---- jobs on the scheduler ------------------------------------------------------------------
 // Job record, 128 bytes: 0 function, 8/16/24 its three arguments, 32 state, 40 result,
 // 48 free-list link, 56 acknowledgement of a task waiter's wake, 64 link in its forker's stack list,
-// 72 link in its runner's stack list, 120 parent (the job that was running when this one was
+// 72 link in its runner's stack list, 80 its failure (0: none; else a five-word record, below),
+// 120 parent (the job that was running when this one was
 // forked, 0 at a root).
 // State: 0 free, 1 pending, 3 done, 4 claimed with an OS thread asleep on this word, 2 claimed by a
 // thread that is not a worker, 8 * (i + 1) claimed by worker i (so a waiter knows whose deque the
@@ -3753,6 +3765,7 @@ fn rt_job_new() -> u64 {
         rt_spin_unlock(j + 24);
     }
     raw_store(r + 56, 0);
+    raw_store(r + 80, 0);
     return r;
 }
 // Only the forker releases, and only a finished job (or a descriptor, whose state is held at done).
@@ -3896,6 +3909,9 @@ fn rt_job_exec(r: u64) -> u64 {
     if t != 0 {
         rt_list_set(t, raw_load(r + 72));
     }
+    return rt_job_publish(r);
+}
+fn rt_job_publish(r: u64) -> u64 {
     old := rt_atomic_swap(r + 32, 3);
     if old == 4 {
         rt_syscall(202, r + 32, 129, 2147483647);
@@ -4097,8 +4113,173 @@ fn rt_job_join(r: u64) -> u64 {
         rt_list_set(t, raw_load(r + 64));
     }
     res := raw_load(r + 40);
+    f := raw_load(r + 80);
     rt_job_release(r);
+    if f != 0 {
+        rt_job_reraise(f);
+    }
     return res;
+}
+
+// ---- a failure inside a parallel region (F1) -----------------------------------------------------
+// The stack whose failure is handled here, or 0: a green task or runner that is inside a parallel
+// region (its stack list is not empty). Anything else fails as it always has.
+fn rt_job_failing() -> u64 {
+    t := rt_job_stack();
+    if t == 0 {
+        return 0;
+    }
+    if rt_list_head(t) == 0 {
+        return 0;
+    }
+    return t;
+}
+// The stack `t` failed (kind, a, b; `site` a statement-table entry, or an owned text with bit 0
+// set; `msg` an owned text or 0). Nothing unwinds. In order, on this same stack:
+//   0. Locks: release and poison every lock this stack holds, before it waits for anything - a
+//      stolen child may be waiting for one of them. That is rt_held_settle on gaps12-sync, which
+//      tracks held locks per record; it is called here when that branch is merged. Until then a
+//      job that fails inside `lock_with` while a sibling waits for the lock waits forever.
+//   1. Drain: every fork this stack has not joined is either taken back unrun (still pending) or
+//      waited for (running elsewhere: it may be borrowing these frames). Nothing else is run - no
+//      help, no claim of anything else - and the wait is not cancellable (rt_job_settle).
+//   2. Every job this stack was running gets the failure and is published as done; their forkers
+//      re-raise it at their joins (rt_job_reraise), and their own stacks then do the same.
+//   3. The stack is discarded: a runner ends; a task is contained as any failed task is.
+// A stack overflow does not come here: the drain needs stack, so it stays fatal.
+fn rt_job_fail(t: u64, kind: u64, a: u64, b: u64, site: u64, msg: u64, joined: u64) -> u64 {
+    // rt_held_settle(t, site);   <- gaps12-sync: release and poison held locks first.
+    f := rt_alloc(40);
+    raw_store(f, kind);
+    raw_store(f + 8, a);
+    raw_store(f + 16, b);
+    raw_store(f + 24, site);
+    raw_store(f + 32, msg);
+    // 1. Drain the forks (untagged entries), all of them, before any job is published.
+    mut e = rt_list_head(t);
+    while e != 0 {
+        if (e & 1) != 0 {
+            e = raw_load(e - 1 + 72);
+        } else {
+            rt_job_settle(e);
+            e = raw_load(e + 64);
+        }
+    }
+    // 2. Publish the jobs being run here (tagged entries), innermost first. A job this stack forked
+    //    and ran itself appears as a fork too; it is released below, after it is published.
+    e = rt_list_head(t);
+    while e != 0 {
+        if (e & 1) != 0 {
+            r := e - 1;
+            e = raw_load(r + 72);
+            raw_store(r + 80, f);
+            rt_job_publish(r);
+        } else {
+            e = raw_load(e + 64);
+        }
+    }
+    e = rt_list_head(t);
+    while e != 0 {
+        if (e & 1) != 0 {
+            e = raw_load(e - 1 + 72);
+        } else {
+            r := e;
+            e = raw_load(r + 64);
+            if raw_load(r + 80) != f {
+                rt_job_release(r);
+            }
+        }
+    }
+    raw_store(t + 152, 0);
+    // 3. Discard the stack.
+    if raw_load(t + 104) == 3 {
+        return rt_contain_tail(t);
+    }
+    return rt_contain_text(t, kind, rt_job_message(f), rt_job_site(f, joined));
+}
+// Bring a fork this failing stack has not joined to done without running anything: take it back
+// if nobody has it, else wait - parked, not cancellable, re-testing after every wake.
+fn rt_job_settle(r: u64) -> u64 {
+    while true {
+        st := raw_atomic_load(r + 32);
+        if st == 3 {
+            return 0;
+        }
+        if st == 1 {
+            if raw_atomic_cas(r + 32, 1, 2) == 1 {
+                raw_atomic_store(r + 32, 3);
+                return 0;
+            }
+        } else {
+            rt_job_park(r);
+        }
+    }
+    return 0;
+}
+// A failure's message, as a fresh owned text: the record is shared by every job it was published
+// to, so each re-raise copies what it hands on.
+fn rt_job_message(f: u64) -> u64 {
+    msg := raw_load(f + 32);
+    if msg != 0 {
+        out := rt_new();
+        rt_append(out, msg);
+        return out;
+    }
+    return rt_fail_body_text(raw_load(f), raw_load(f + 8), raw_load(f + 16));
+}
+// Its site, as a fresh owned text: the original statement, then - the first time it crosses a
+// join - one line naming where it was joined (`joined` set). A site that is already a text has
+// crossed a join before and is copied as it is.
+fn rt_job_site(f: u64, joined: u64) -> u64 {
+    site := raw_load(f + 24);
+    if (site & 1) != 0 {
+        out := rt_new();
+        rt_append(out, site & 18446744073709551614);
+        return out;
+    }
+    out := rt_site_text(site);
+    if joined != 0 {
+        here := rt_fail_site_full();
+        buf := raw_load(here);
+        n := raw_load(here + 8);
+        // The first line of the joining location is ` --> file:line:col`.
+        if (5 < n) & (raw_byte(buf) == 32) {
+            mut stop = 5;
+            while (stop < n) & (raw_byte(buf + stop) != 10) {
+                stop += 1;
+            }
+            line := rt_new();
+            rt_reserveb(line, stop + 40);
+            mut k = rt_fail_put(raw_load(line), 0, " = in a job joined at ");
+            rt_copy_bytes(raw_load(line) + k, buf + 5, stop - 5);
+            k += stop - 5;
+            raw_putbyte(raw_load(line) + k, 10);
+            raw_store(line + 8, k + 1);
+            rt_append(out, line);
+            rt_drop_seq(line);
+        }
+        rt_drop_seq(here);
+    }
+    return out;
+}
+// The forker's side: the joined job failed, so this stack fails with the same failure. Inside a
+// parallel region it is handed on as it is (the statement entry, not yet a text); where it leaves
+// the parallel region - contained by a task, or ending the process - its site is the original
+// statement plus one line naming where the job was joined, which is the caller's statement.
+fn rt_job_reraise(f: u64) -> u64 {
+    j := rt_job_failing();
+    if j != 0 {
+        mut msg = raw_load(f + 32);
+        if msg != 0 {
+            msg = rt_job_message(f);
+        }
+        site := raw_load(f + 24);
+        if (site & 1) != 0 {
+            return rt_job_fail(j, raw_load(f), 0, 0, rt_job_site(f, 0) | 1, rt_job_message(f), 1);
+        }
+        return rt_job_fail(j, raw_load(f), raw_load(f + 8), raw_load(f + 16), site, msg, 1);
+    }
+    return rt_fail_text(raw_load(f), rt_job_message(f), rt_job_site(f, 1));
 }
 // A thread that is not running a task counts its parallel regions in thread-record word 24, in
 // steps of 16 so the word never reads as a worker marker: inside a region it may fail at the same
@@ -4451,6 +4632,10 @@ fn rt_task_join(t: u64) -> u64 {
 // Report a failure that already has its texts: contained by an enclosing task if there is one
 // (task-record words 184/192 then carry the two texts), fatal from the top of the program.
 fn rt_fail_text(kind: u64, msg: u64, site: u64) -> u64 {
+    j := rt_job_failing();
+    if j != 0 {
+        return rt_job_fail(j, kind, 0, 0, site | 1, msg, 0);
+    }
     t := rt_containable();
     if t != 0 {
         return rt_contain_text(t, kind, msg, site);
@@ -4507,6 +4692,10 @@ fn rt_task_site(t: u64) -> u64 {
 // Contained exactly like a failed check, so it is a value at the join or the end of the process.
 fn rt_task_fail(text: u64) -> u64 {
     msg := rt_lit(raw_load(text), raw_load(wrapping_add(text, 8)));
+    j := rt_job_failing();
+    if j != 0 {
+        return rt_job_fail(j, 13, 0, 0, rt_site_here(j + 200) & 18446744073709551614, msg, 0);
+    }
     t := rt_containable();
     if t != 0 {
         return rt_contain_site(t, 13, 0, 0, rt_site_here(t + 200), msg);
