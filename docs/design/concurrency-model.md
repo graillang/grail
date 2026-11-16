@@ -21,6 +21,27 @@ unchanged by this note. Claims are tagged **[V file:line]** (read in the code at
 | D10 | `GRAIL_TASKS=thread` mode | **Remove once `thread::spawn` ships.** It is a second semantics with no `Send` check [V runtime.grl:3099-3106]; explicit threads replace its one use. |
 | D11 | Worker count and core reservation | **`sched::start(Config)` before first use; default one worker per CPU**; an engine reserves cores for pinned threads by asking for fewer workers. |
 
+### Decided by the director, 2026-11-16
+
+- **D1-D7, D9-D11:** as recommended.
+- **D8:** three classes, strict between them, `background_cap`. No age promotion in the first
+  version; the scheduler exports how long the oldest `Background` job has waited so starvation is
+  visible, and the question is revisited with numbers (this settles Q3).
+- **Q1:** siblings finish; the first failure is re-raised at scope exit.
+- **Q2:** `select` is deferred and not designed here.
+- **Q4:** library types over an unsafe core; `Mutex<T>` stays the builtin it is. If the
+  callback-scoped borrow of a payload cannot be expressed to the checker from library code, that is
+  a language gap to report and fix, not a reason to add builtins.
+- **Q5:** the grain form gets a new name, `chunks_mut(data, count, f)` is removed in the same
+  change and every caller migrated (stage 5). No silent change of meaning, no alias.
+- **Q6:** an error. **Q7:** `host::fork` keeps refusing once a thread exists (the compiler's own
+  forked optimiser relies on being single-threaded). **Q8:** a failing spawned thread is contained
+  like a task.
+- **Added to 2.1 (helping):** while a stolen job is outstanding a worker takes from its own deque
+  first and steals only jobs of the same or a higher class than the one it waits for. Each worker
+  keeps a high-water mark of help nesting depth, reported by the benchmark, so the "joins parked
+  beneath a waiting job" risk is measured.
+
 ## 1. What exists
 
 ### 1.1 Three kinds of thread, two independent schedulers
