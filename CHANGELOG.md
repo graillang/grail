@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **`--debug` builds write vector element access in line.** The leaf accessors (`rt_slot`, `rt_at`,
+  `rt_slot4`, `rt_at4`, `rt_len`, `rt_push`, ...) were expanded only by the optimiser, so a debug
+  build called them for every element; the expansion is lowering and now runs without the
+  optimiser too (`optimize::lower_leaf_calls`). A failed index check in a debug build reports
+  through `rt_trap`, so a task still contains it. The `f32` transform benchmark in a debug build
+  goes from 57 ms to 6.3 ms a pass. 16-bit loads and stores are in line on aarch64 and riscv64 too.
+
 - **Native backend: float operations are not calls.** `+ - * /`, comparisons, negation, `abs`,
   `sqrt` and conversions from integers of up to 32 bits (and signed 64-bit to `f64`) are emitted in
   line, and so is access to `f32[]`/`u32[]`/`i32[]` elements and to narrow fields of `extern "C"`
