@@ -307,7 +307,7 @@ function proveDigests(directory) {
     // dereferences wrongly.
     assert.match(
       text,
-      /^abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address$/m,
+      /^abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline$/m,
       `${path}: the header does not state the \`dyn\` ABI`,
     );
     // Write, read, write again: the reader rebuilds the model the writer started from.

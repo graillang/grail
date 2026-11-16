@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **Records of plain data are stored inline.** A struct or tuple with no `Drop` whose fields are
+  numbers, bools, chars, references or other such records is now stored in place where it is a
+  field of another record or an element of a vector, and so is every `extern "C"` record in a
+  vector: `Vertex[]` is one buffer of vertices, laid out as a C array, not a vector of pointers.
+  One million three-word records take 24 MB instead of 69 MB, and iterating them in a shuffled
+  order costs what iterating them in order does. What a program may write and what it means do not
+  change - a plain record still moves, and `q := v[i]` still borrows. Interface files say
+  `record plain = inline`. Second stage of docs/design/unboxed-values.md.
+
 - **A reference to a record is the record's address.** `&T` and `&mut T` for a struct, a tuple or
   an `extern "C"` record used to be the address of a word holding the record's address; a field
   read through a reference now costs one load, not two, and a local record whose reference is
