@@ -11,7 +11,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { buildCompiler, compilerSources, root } from './native.mjs';
+import { buildCompiler, buildReleaseCompiler, compilerSources, root } from './native.mjs';
 
 // The scaling program: N copies of {record, constructor, 15-line loop fn} and a main calling each.
 // Linear work per copy, so a compiler whose time grows faster than N is doing something per pair.
@@ -98,11 +98,17 @@ function best(argv, cwd, runs) {
 if (import.meta.main ?? process.argv[1] === new URL(import.meta.url).pathname) {
   const quick = process.argv.includes('--quick');
   const runs = Number(process.env.GRAIL_BENCH_RUNS ?? 3);
-  const compiler = process.env.GRAIL_COMPILER && existsSync(process.env.GRAIL_COMPILER) ? resolve(process.env.GRAIL_COMPILER) : buildCompiler();
+  // `--release` measures the compiler as it ships (tools/native.mjs, buildReleaseCompiler): the same
+  // sources through the LLVM backend. Without it the natively built compiler is measured - the one
+  // the tests run - or the one GRAIL_COMPILER names, which is how the gate passes its own.
+  const release = process.argv.includes('--release');
+  const compiler = release
+    ? buildReleaseCompiler({ log: line => console.error(line) })
+    : process.env.GRAIL_COMPILER && existsSync(process.env.GRAIL_COMPILER) ? resolve(process.env.GRAIL_COMPILER) : buildCompiler();
   const work = join(root, '.work/compile-bench');
   rmSync(work, { recursive: true, force: true });
   mkdirSync(work, { recursive: true });
-  const results = { compiler, mode: quick ? 'quick' : 'full', runs, best_of: runs, scaling: {}, at: new Date().toISOString() };
+  const results = { compiler, build: release ? 'release' : 'native', mode: quick ? 'quick' : 'full', runs, best_of: runs, scaling: {}, at: new Date().toISOString() };
   const report = (name, seconds, lines) => console.log(`${name.padEnd(28)} ${seconds.toFixed(3).padStart(9)} s${lines ? `  (${lines} lines)` : ''}`);
 
   for (const n of quick ? [250, 1000] : [250, 1000, 4000]) {
@@ -170,6 +176,6 @@ if (import.meta.main ?? process.argv[1] === new URL(import.meta.url).pathname) {
   }
   if (results.exponent !== undefined) console.log(`scaling exponent log(t4000/t1000)/log 4 = ${results.exponent} (t4000/t1000 = ${results.ratio_4000_1000})`);
   console.log(`scaling exponent log(t1000/t250)/log 4 = ${results.exponent_250_1000}   (best of ${runs})`);
-  writeFileSync(join(root, '.work/compile-bench.json'), JSON.stringify(results, null, 2) + '\n');
-  console.log(`compile-bench: check hello ${results.hello_check} s, build hello after an edit ${results.hello_build_after_edit} s, t1000 ${s[1000].seconds} s${results.ratio_4000_1000 ? `, t4000/t1000 ${results.ratio_4000_1000}` : ''}${results.self_compile ? `, self-compile ${results.self_compile} s` : ''}`);
+  writeFileSync(join(root, release ? '.work/compile-bench-release.json' : '.work/compile-bench.json'), JSON.stringify(results, null, 2) + '\n');
+  console.log(`compile-bench${release ? ' (release compiler)' : ''}: check hello ${results.hello_check} s, build hello after an edit ${results.hello_build_after_edit} s, t1000 ${s[1000].seconds} s${results.ratio_4000_1000 ? `, t4000/t1000 ${results.ratio_4000_1000}` : ''}${results.self_compile ? `, self-compile ${results.self_compile} s` : ''}`);
 }
