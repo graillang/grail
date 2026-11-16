@@ -489,6 +489,17 @@ struct C {
     imports: Import[],
     fields: Field[],
     funcs: Func[],
+    // The (module, name) index of `funcs` and of `decls` (see name_key).
+    func_slots: u64[],
+    func_keys: u64[],
+    decl_slots: u64[],
+    decl_keys: u64[],
+    spec_slots: u64[],
+    spec_keys: u64[],
+    spec_em_slots: u64[],
+    spec_em_keys: u64[],
+    drop_em_slots: u64[],
+    drop_em_keys: u64[],
     params: u64[],
     locals: Local[],
     next: u64,
@@ -536,6 +547,11 @@ struct C {
     site_off: u64,
     site_line: u64,
     site_col: u64,
+    // The same cursor for `position_text` (where a declaration starts).
+    decl_file: u64,
+    decl_off: u64,
+    decl_line: u64,
+    decl_col: u64,
     // `--comptime-probe`: this compile builds the probe program for a compile-time call (C3).
     probe_mode: u64,
     // `@for f in fields(T)` bindings in scope, innermost last: name, decl, field index.
@@ -859,6 +875,149 @@ fn same<a, b>(x: &a [u8], y: &b [u8]) -> bool {
         }
     }
     return true;
+}
+// ---- Hashed lookup by (module, name) -------------------------------------------------------------
+// The declaration tables (functions, types) are append-only vectors searched by a module and a name.
+// A scan compared every entry, and each comparison built two views, so a program of N functions paid
+// N comparisons per call it compiled: the whole build was quadratic in its declaration count
+// (docs/design/compile-speed.md). Each table now has an open-addressed index beside it: `slots`
+// holds entry index + 1 (0 is empty) and `keys[i]` is the hash entry `i` was filed under, so growing
+// re-files without re-reading a name. The index is brought up to date by the lookup itself (the
+// tables are pushed to from a dozen places, and none of them has to know): entries are filed in
+// index order and never removed, so of two entries with one name the probe meets the earlier first,
+// which is the answer the scan gave.
+fn name_key<a, b>(m: &a [u8], n: &b [u8]) -> u64 {
+    mut h: u64 = 14695981039346656037;
+    for i in m.len() {
+        h = wrapping_mul(h ^ u64(m[i]), 1099511628211);
+    }
+    // A byte no name holds, so (`ab`, `c`) and (`a`, `bc`) are different keys.
+    h = wrapping_mul(h ^ 255, 1099511628211);
+    for i in n.len() {
+        h = wrapping_mul(h ^ u64(n[i]), 1099511628211);
+    }
+    return h;
+}
+fn index_file<a>(slots: (&a mut u64[]), key: u64, value: u64) -> unit {
+    mask := slots.len() - 1;
+    mut h = key & mask;
+    while slots[h] != 0 {
+        h = (h + 1) & mask;
+    }
+    slots[h] = value;
+    return ();
+}
+// File entry `keys.len()` under `key`. The table stays at most half full.
+fn index_add<a, b>(slots: (&a mut u64[]), keys: (&b mut u64[]), key: u64) -> unit {
+    keys.push(key);
+    if slots.len() < keys.len() * 2 {
+        mut size = 64;
+        while size < keys.len() * 4 {
+            size = size * 2;
+        }
+        mut grown = u64[];
+        for i in size {
+            grown.push(0);
+        }
+        for i in keys.len() {
+            index_file(&mut grown, keys[i], i + 1);
+        }
+        exchange(slots, grown);
+        return ();
+    }
+    index_file(slots, key, keys.len());
+    return ();
+}
+// Cut the index back to `len` entries. The entries leaving are the last ones filed, and linear
+// probing undone last-in-first-out leaves the table exactly as it was before they were filed, so
+// each is found by its own key and its slot is cleared.
+fn index_cut<a, b>(slots: (&a mut u64[]), keys: (&b mut u64[]), len: u64) -> unit {
+    while len < keys.len() {
+        value := keys.len();
+        key := keys.pop();
+        mask := slots.len() - 1;
+        mut h = key & mask;
+        while slots[h] != value {
+            h = (h + 1) & mask;
+        }
+        slots[h] = 0;
+    }
+    return ();
+}
+// The same index for a list of names (`list[i]` is filed under its own bytes). A list that was cut
+// back since the last lookup is cut back here too.
+fn names_sync<a, b, d>(slots: (&a mut u64[]), keys: (&b mut u64[]), list: (&d u8[][])) -> unit {
+    if list.len() < keys.len() {
+        index_cut(slots, keys, list.len());
+    }
+    while keys.len() < list.len() {
+        key := name_key(view(""), view(list[keys.len()]));
+        index_add(slots, keys, key);
+    }
+    return ();
+}
+// Index + 1 of `name` in `list`, or 0.
+fn names_find<a, b, d, e>(
+    slots: (&a mut u64[]),
+    keys: (&b mut u64[]),
+    list: (&d u8[][]),
+    name: &e [u8]
+) -> u64 {
+    names_sync(slots, keys, list);
+    if slots.len() == 0 {
+        return 0;
+    }
+    key := name_key(view(""), name);
+    mask := slots.len() - 1;
+    mut h = key & mask;
+    while slots[h] != 0 {
+        i := slots[h] - 1;
+        if keys[i] == key {
+            if same(view(list[i]), name) {
+                return i + 1;
+            }
+        }
+        h = (h + 1) & mask;
+    }
+    return 0;
+}
+// A specialisation's key: its template and its canonical type arguments.
+fn spec_hash<a>(template: u64, args: (&a u64[])) -> u64 {
+    mut h: u64 = wrapping_mul(14695981039346656037 ^ template, 1099511628211);
+    for i in args.len() {
+        h = wrapping_mul(h ^ args[i], 1099511628211);
+        h = h ^ (h >> 29);
+    }
+    return h;
+}
+fn spec_index_sync<a>(c: (&a mut C)) -> unit {
+    if c.specs.len() < c.spec_keys.len() {
+        // A speculative compile was undone (a closure's result inferred by compiling its body).
+        index_cut(&mut c.spec_slots, &mut c.spec_keys, c.specs.len());
+    }
+    while c.spec_keys.len() < c.specs.len() {
+        i := c.spec_keys.len();
+        key := spec_hash(c.specs[i].template, &c.specs[i].args);
+        index_add(&mut c.spec_slots, &mut c.spec_keys, key);
+    }
+    return ();
+}
+// Bring the function index up to the table: file every entry pushed since the last lookup.
+fn func_index_sync<a>(c: (&a mut C)) -> unit {
+    while c.func_keys.len() < c.funcs.len() {
+        i := c.func_keys.len();
+        key := name_key(view(c.funcs[i].module), view(c.funcs[i].name));
+        index_add(&mut c.func_slots, &mut c.func_keys, key);
+    }
+    return ();
+}
+fn decl_index_sync<a>(c: (&a mut C)) -> unit {
+    while c.decl_keys.len() < c.decls.len() {
+        i := c.decl_keys.len();
+        key := name_key(view(c.decls[i].module), view(c.decls[i].name));
+        index_add(&mut c.decl_slots, &mut c.decl_keys, key);
+    }
+    return ();
 }
 fn div(n: u64, d: u64) -> u64 {
     mut q = 0;
@@ -5677,10 +5836,8 @@ fn drop_symbol<a>(c: (&a mut C), ty: u64) -> u8[] {
 // first: the name is the identity, and two entries can share one.
 fn spec_taken<a>(c: (&a mut C), index: u64) -> u64 {
     name := special_name(&mut c, index);
-    for i in c.spec_emitted.len() {
-        if same(view(c.spec_emitted[i]), view(name)) {
-            return 1;
-        }
+    if names_find(&mut c.spec_em_slots, &mut c.spec_em_keys, &c.spec_emitted, view(name)) != 0 {
+        return 1;
     }
     c.spec_emitted.push(name.copy());
     return 0;
@@ -5688,10 +5845,8 @@ fn spec_taken<a>(c: (&a mut C), index: u64) -> u64 {
 // True when this helper has already been defined in this object, whatever index asked first.
 fn drop_taken<a>(c: (&a mut C), ty: u64) -> u64 {
     name := drop_symbol(&mut c, ty);
-    for i in c.drop_emitted.len() {
-        if same(view(c.drop_emitted[i]), view(name)) {
-            return 1;
-        }
+    if names_find(&mut c.drop_em_slots, &mut c.drop_em_keys, &c.drop_emitted, view(name)) != 0 {
+        return 1;
     }
     c.drop_emitted.push(name.copy());
     return 0;
@@ -6045,11 +6200,34 @@ fn position_text<a>(c: (&a mut C), at: u64) -> u8[] {
         tok = 0;
     }
     start := c.toks[tok].start;
-    pos := diag_pos(&c.src, start);
+    // Line and column, counted on from the last declaration in the same file: declarations are
+    // visited in order, and counting from the top for each one made a file of N declarations cost
+    // N scans of it (docs/design/compile-speed.md). Going back restarts from the top.
+    if (c.decl_file != c.file) || (start < c.decl_off) {
+        exchange(&mut c.decl_file, c.file);
+        exchange(&mut c.decl_off, 0);
+        exchange(&mut c.decl_line, 1);
+        exchange(&mut c.decl_col, 1);
+    }
+    mut line = c.decl_line;
+    mut col = c.decl_col;
+    mut i = c.decl_off;
+    while (i < start) && (i < c.src.len()) {
+        if c.src[i] == 10 {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+        i += 1;
+    }
+    exchange(&mut c.decl_off, i);
+    exchange(&mut c.decl_line, line);
+    exchange(&mut c.decl_col, col);
     out.push(58);
-    push_bytes(&mut out, view(decimal_bytes(pos.line)));
+    push_bytes(&mut out, view(decimal_bytes(line)));
     out.push(58);
-    push_bytes(&mut out, view(decimal_bytes(pos.column)));
+    push_bytes(&mut out, view(decimal_bytes(col)));
     return out;
 }
 fn find_constant<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> u64 {
@@ -10910,10 +11088,20 @@ fn find_alias<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> u64 {
 }
 // Declaration index + 1, or 0.
 fn find_decl_internal<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> u64 {
-    for i in c.decls.len() {
-        x := &c.decls[i];
-        if same(view(x.module), view(m)) & same(view(x.name), view(n)) {
-            return i + 1;
+    decl_index_sync(&mut c);
+    if c.decl_slots.len() != 0 {
+        key := name_key(m, n);
+        mask := c.decl_slots.len() - 1;
+        mut h = key & mask;
+        while c.decl_slots[h] != 0 {
+            i := c.decl_slots[h] - 1;
+            if c.decl_keys[i] == key {
+                x := &c.decls[i];
+                if same(view(x.module), view(m)) & same(view(x.name), view(n)) {
+                    return i + 1;
+                }
+            }
+            h = (h + 1) & mask;
         }
     }
     // `.tuple::TupleN` (an interface file naming a tuple type): made on first use.
@@ -11258,11 +11446,21 @@ fn find_decl<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> u64 {
 }
 fn find_func<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> u64 {
     mut found = 0;
-    for i in c.funcs.len() {
-        x := &c.funcs[i];
-        if same(view(x.module), view(m)) & same(view(x.name), view(n)) {
-            found = i + 1;
-            break;
+    func_index_sync(&mut c);
+    if c.func_slots.len() != 0 {
+        key := name_key(m, n);
+        mask := c.func_slots.len() - 1;
+        mut h = key & mask;
+        while c.func_slots[h] != 0 {
+            i := c.func_slots[h] - 1;
+            if c.func_keys[i] == key {
+                x := &c.funcs[i];
+                if same(view(x.module), view(m)) & same(view(x.name), view(n)) {
+                    found = i + 1;
+                    break;
+                }
+            }
+            h = (h + 1) & mask;
         }
     }
     if (found != 0) && (c.funcs[found - 1].public == 0) {
@@ -21334,15 +21532,28 @@ fn specialize<a, b>(c: (&a mut C), template: u64, map: (&b u64[])) -> u64 {
         a := canonical_type(&mut c, t, &mut next);
         args.push(a);
     }
-    for i in c.specs.len() {
-        old := &c.specs[i];
-        if old.template == template {
-            if numbers_equal(&old.args, &args) {
-                return i;
+    spec_index_sync(&mut c);
+    if c.spec_slots.len() != 0 {
+        key := spec_hash(template, &args);
+        mask := c.spec_slots.len() - 1;
+        mut h = key & mask;
+        while c.spec_slots[h] != 0 {
+            i := c.spec_slots[h] - 1;
+            if c.spec_keys[i] == key {
+                old := &c.specs[i];
+                if old.template == template {
+                    if numbers_equal(&old.args, &args) {
+                        return i;
+                    }
+                }
             }
+            h = (h + 1) & mask;
         }
     }
-    if 1024 < c.specs.len() {
+    // The limit is what stops a generic that instantiates itself at an ever larger type
+    // (`f<T>` calling `f<T[]>`); a real program's instantiations are counted in thousands, and the
+    // lookup above no longer scans them.
+    if 65536 < c.specs.len() {
         fail(&mut c, view("generic specialization expansion limit"));
     }
     start := c.params.len();
@@ -41938,6 +42149,16 @@ pub fn main() -> u64 {
         imports: Import[],
         fields: Field[],
         funcs: Func[],
+        func_slots: u64[],
+        func_keys: u64[],
+        decl_slots: u64[],
+        decl_keys: u64[],
+        spec_slots: u64[],
+        spec_keys: u64[],
+        spec_em_slots: u64[],
+        spec_em_keys: u64[],
+        drop_em_slots: u64[],
+        drop_em_keys: u64[],
         params: u64[],
         locals: Local[],
         next: 0,
@@ -41966,6 +42187,10 @@ pub fn main() -> u64 {
         site_off: 0,
         site_line: 1,
         site_col: 1,
+        decl_file: 0,
+        decl_off: 0,
+        decl_line: 1,
+        decl_col: 1,
         probe_mode: 0,
         ct_loop_names: u8[][],
         ct_loop_decls: u64[],

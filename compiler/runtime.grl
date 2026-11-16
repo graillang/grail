@@ -933,12 +933,23 @@ fn rt_div(n: u64, d: u64) -> u64 {
 }
 // The allocator state is shared by workers; every mutation is serialized.
 // This lock uses reserved process-state storage, never allocates or suspends while held.
+// Until the process starts its second thread (rt_thread_start sets word 3416 first) nothing can
+// contend for the lock, so it is not taken: an uncontended atomic exchange and release around every
+// allocation and free were a tenth of the compiler's own run time (docs/design/compile-speed.md).
+// The word is only ever set, and only by a thread that holds no lock, so a lock/unlock pair always
+// sees one value of it.
 fn rt_allocator_lock() -> u64 {
+    if raw_load(raw_state() + 3416) == 0 {
+        return 0;
+    }
     lock := raw_state() + 64;
     while raw_atomic_cas(lock, 0, 1) != 0 {}
     return 0;
 }
 fn rt_allocator_unlock() -> u64 {
+    if raw_load(raw_state() + 3416) == 0 {
+        return 0;
+    }
     raw_atomic_store_release(raw_state() + 64, 0);
     return 0;
 }
@@ -2259,6 +2270,8 @@ fn rt_thread_spawn_detached(entry: u64, arg: u64) -> u64 {
 // libc the runtime clones the thread itself on a 1 MiB region with a guard page, and the kernel
 // clears the TID word.
 fn rt_thread_start(entry: u64, arg: u64, handle: u64) -> u64 {
+    // From here on the allocator is shared: see rt_allocator_lock.
+    raw_atomic_store_release(raw_state() + 3416, 1);
     bridge := raw_load(rt_state_host_thread());
     if (bridge == 0) & (raw_load(raw_state() + 184) != 0) & (raw_target() != 3) & (raw_target() != 4) {
         // libc is loaded but pthread_create was not linked: a thread cloned here would have no TCB,
@@ -2404,6 +2417,7 @@ fn rt_thread_join(handle: u64) -> u64 {
 //   3392         Windows thread bridge        os-windows: rt_win_bridge  --
 //   3400         call-site table helper       _start; rt_sites_fill      runtime-errors
 //   3408         site descriptor capacity     rt_state_sites_offer       rth-sites
+//   3416         a second thread was started  rt_allocator_lock          compile-speed
 //   3456         abort report claim           rt_abort                   abort-once
 //   3464..3576   task-stack fault handler     rt_state_stack_guard       stack-guard
 //   3584         contained task failures      rt_contained              task-fail-containment
