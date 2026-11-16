@@ -814,17 +814,6 @@ function richProject(count) {
     `use rich;\n\npub fn main() -> u64 {\n    v := u64[1, 2, 3, 4];\n    println(rich::work5(&v, 5) + rich::work9(&v, 9) + rich::work${count - 1}(&v, 3));\n    return 0;\n}\n`,
   );
 }
-// A module run reads the interfaces its build directory holds when it starts, and the unit key names
-// what the run read - so the units a cold build files (every module running at once, the other
-// modules' interfaces not yet written) are not the units a later run of that module alone looks
-// for. One run of the module alone - after a comment is appended to it, which moves no declaration
-// - files them under the key every later single-module run computes.
-// (docs/design/incremental-compilation.md, "What a run reads")
-function settleUnits(output, path) {
-  writeFileSync(path, `${readFileSync(path, 'utf8')}// settled\n`);
-  const settled = build(['--cache', '-o', output]);
-  assert.equal(settled.status, 0, `the settling build failed\n${settled.output}`);
-}
 function proveIndependentUnits(count) {
   const output = join(project, 'target/rich');
   const richPath = join(project, 'src/rich.grl');
@@ -837,7 +826,6 @@ function proveIndependentUnits(count) {
   const bodies = 2 * count - 1;
   const coldRich = forModule(unitLines(cold.output), 'rich');
   assert.deepEqual(coldRich, { hits: 0, filed: bodies, kept: 0 }, `every body of the rich module after its first is a unit - drop helpers and specialisations are replayable registrations:\n${cold.output}`);
-  settleUnits(output, richPath);
   // One edit, then: the cached build's account, its assembly and image, and the same tree built
   // with no cache to the same output name.
   const edited = (what, from, to) => {
@@ -875,7 +863,7 @@ function proveIndependentUnits(count) {
 // asked for it, so a body that is replayed has to ask again: when `first` stops asking, `second`
 // - unchanged, replayed - is the only body that names the symbol. A unit that recorded only the
 // registrations it was the first to make hands the linker an undefined symbol here.
-const sharedSource = (first, tail = '') => `module shared;
+const sharedSource = first => `module shared;
 
 fn same<T>(x: T, n: u64) -> T {
     return x;
@@ -889,7 +877,7 @@ pub fn first(x: u64) -> u64 {
 pub fn second(x: u64) -> u64 {
     return same(x, 2);
 }
-${tail}`;
+`;
 function proveRegistrations() {
   const output = join(project, 'target/shared');
   rmSync(store, { recursive: true, force: true });
@@ -899,9 +887,8 @@ function proveRegistrations() {
   const cold = build(['--cache', '-o', output]);
   assert.equal(cold.status, 0, `the cold build failed\n${cold.output}`);
   assert.equal(run(output), '7', 'the cold build prints the wrong answer');
-  settleUnits(output, join(project, 'src/shared.grl'));
   // `first` no longer names the specialisation; `second` still does.
-  writeFileSync(join(project, 'src/shared.grl'), sharedSource('x | 8', '// settled\n'));
+  writeFileSync(join(project, 'src/shared.grl'), sharedSource('x | 8'));
   const after = build(['--cache', '-o', output]);
   assert.equal(after.status, 0, `a replayed body must register what it names - the build after the first user of a specialisation stopped using it failed:\n${after.output}`);
   const shared = forModule(unitLines(after.output), 'shared');
