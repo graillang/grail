@@ -265,6 +265,15 @@ const fixtures = [
     modules: [],
     hostOnly: true,
   },
+  {
+    // A failed check inside a callback C called, on a dedicated thread: contained, the C frames
+    // discarded with the stack, and a value at try_join (lib/thread.grl).
+    name: 'thread_callback_fail',
+    stdout: '3\nindex 7 out of bounds for length 3\nthe process goes on\n',
+    symbols: ['c_apply'],
+    defines: ['c_checked'],
+    modules: ['lib/thread.grl', 'lib/time.grl'],
+  },
 ];
 const selected = process.argv[2] ? [targetName(process.argv[2])] : [hostTarget, ...targets.filter(t => t !== hostTarget)];
 const compiler = buildCompiler();

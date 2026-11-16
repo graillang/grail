@@ -28,7 +28,12 @@ selection in N child processes, one stripe each, and merges the reports in case 
 then stops each stripe, not the whole run.
 
 Environment (kept for the gates that predate the flags): GRAIL_TEST_FILTER, GRAIL_TEST_SHARD,
-GRAIL_TEST_RESUME=1, GRAIL_TEST_JOBS, GRAIL_BACKEND, GRAIL_VERIFY_FACTS.`;
+GRAIL_TEST_RESUME=1, GRAIL_TEST_JOBS, GRAIL_BACKEND, GRAIL_VERIFY_FACTS.
+
+--unit-identity (x86_64, native backend) does not run the programs: it compiles every case that
+compiles three times - with no unit store, with an empty one, with the one the second compile
+filled - and requires the three assemblies to be byte-identical and every filed unit to replay
+(docs/design/incremental-compilation.md, "Per-function units").`;
 
 function parseArguments(argv) {
   const options = {
@@ -42,6 +47,7 @@ function parseArguments(argv) {
     list: false,
     failFast: false,
     update: false,
+    unitIdentity: process.env.GRAIL_UNIT_IDENTITY === '1',
     paths: [],
   };
   const value = (flag, i) => {
@@ -54,6 +60,7 @@ function parseArguments(argv) {
     if (arg === '--list') options.list = true;
     else if (arg === '--fail-fast') options.failFast = true;
     else if (arg === '--update') options.update = true;
+    else if (arg === '--unit-identity') options.unitIdentity = true;
     else if (arg === '--filter') { options.filter = value(arg, i); i++; }
     else if (arg.startsWith('--filter=')) options.filter = arg.slice('--filter='.length);
     else if (arg === '--shard') { options.shard = value(arg, i); i++; }
@@ -91,6 +98,14 @@ function parseArguments(argv) {
   return options;
 }
 
+// A case's arguments. One that climbs out of the case's directory to the repository
+// (`../../../../tests/lib/zlib`) was written for the unstriped layout, where a case directory is four
+// levels down; a striped run (`--jobs N`) is one level deeper, so the path is made absolute here
+// instead of meaning a different place depending on how the run was split.
+function caseArgs(test) {
+  return (test.args ?? []).map(arg => arg.startsWith('../../../../') ? join(root, arg.slice('../../../../'.length)) : arg);
+}
+
 // ---- the corpus's own invariants -------------------------------------------------------------
 // Kept internal source on the modern dialect, including comments and diagnostics.
 function checkSources(cases) {
@@ -122,6 +137,9 @@ function selected(test, position, options) {
   return true;
 }
 function hostOnly(test, target) {
+  // `pending` names the work a case waits for: it states the behaviour that work must produce,
+  // fails until then, and is skipped rather than weakened. Removing the field is how it is armed.
+  if (test.pending) return true;
   if (test.targets && !test.targets.includes(target)) return true;
   if (test.backends && !test.backends.includes(process.env.GRAIL_BACKEND ?? 'native')) return true;
   return false;
@@ -184,6 +202,13 @@ function pinText(pin) {
 // ---- one case --------------------------------------------------------------------------------
 // `observed` is filled in as the case runs, so a failure report can show the actual values even
 // when the assertion that failed only named one of them.
+// Where two assemblies first differ, as the two lines there.
+function describeDifference(a, b) {
+  let at = 0;
+  while (at < a.length && at < b.length && a[at] === b[at]) at++;
+  const line = bytes => { const from = bytes.lastIndexOf(10, at - 1) + 1; let to = bytes.indexOf(10, at); if (to < 0) to = bytes.length; return JSON.stringify(bytes.subarray(from, to).toString()); };
+  return `first difference at byte ${at}: ${line(a)} / ${line(b)}`;
+}
 function runCase(test, position, context) {
   const { compiler, target, work, snapshot, runtime, osRuntime, roots } = context;
   // `noRoots` is the compile the compiler's own diagnostic is about: no module root at all.
@@ -329,6 +354,57 @@ function runCase(test, position, context) {
       viaInterface = { ifaces };
     }
     const executable = compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', runtime, osRuntime, extra: [...caseRoots, ...(test.flags ?? [])] });
+    if (context.unitIdentity) {
+      // The per-function unit store against this case: the assembly above was written with no store.
+      // Twice more to the same path - an empty store, which files every unit and puts each one into
+      // the run the way a replay does, then that store warm, which replays them - and all three
+      // have to be the same bytes: a unit that is not the body a fresh emission writes is a silent
+      // miscompile, and a registration a replay does not make again is a missing symbol.
+      const assembly = join(directory, 'program.s');
+      const plain = readFileSync(assembly);
+      const store = join(directory, 'units');
+      const withStore = () => {
+        const output = [];
+        compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', runtime, osRuntime, extra: [...caseRoots, ...(test.flags ?? []), '--fn-cache', store, '--fn-cache-id', 'unit-identity'], output });
+        // `why` is the compiler's own account of the rules that kept bodies out, summed per rule.
+        const account = { hits: 0, filed: 0, kept: 0, why: {} };
+        for (const m of output.join('').matchAll(/grail: fn-cache: \S+: (\d+) hit, (\d+) filed, (\d+) not units(?: \(([^)]*)\))?/g)) {
+          account.hits += Number(m[1]); account.filed += Number(m[2]); account.kept += Number(m[3]);
+          for (const item of (m[4] ?? '').split(', ').filter(Boolean)) { const at = item.lastIndexOf(' '); account.why[item.slice(0, at)] = (account.why[item.slice(0, at)] ?? 0) + Number(item.slice(at + 1)); }
+        }
+        return { bytes: readFileSync(assembly), account };
+      };
+      const empty = withStore();
+      const warm = withStore();
+      assert.ok(plain.equals(empty.bytes), `${test.name}: with an empty unit store the assembly is not the assembly a compile with no store writes (${describeDifference(plain, empty.bytes)})`);
+      assert.ok(plain.equals(warm.bytes), `${test.name}: with a warm unit store the assembly is not the assembly a compile with no store writes (${describeDifference(plain, warm.bytes)})`);
+      assert.equal(empty.account.hits, 0, `${test.name}: an empty unit store replayed a body`);
+      assert.equal(warm.account.hits, empty.account.filed, `${test.name}: every unit the first compile filed must replay in the second`);
+      assert.equal(warm.account.filed, 0, `${test.name}: a warm unit store filed a unit again`);
+      // And the same three ways with `--debug`: a debug build names its functions' labels and builds
+      // its line table from positions, so it is the build that notices a label or a position the
+      // unit layer spells differently - and `compileProgram` assembles it, which is what refuses a
+      // table that names a label no body defines. A case some other flag keeps from `--debug` is
+      // left to its own flags.
+      let debugChecked = 0;
+      if (!(test.flags ?? []).includes('--debug')) {
+        const debugAssembly = join(directory, 'program-debug.s');
+        const debug = more => { compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', runtime, osRuntime, name: 'program-debug', extra: [...caseRoots, ...(test.flags ?? []), '--debug', ...more] }); return readFileSync(debugAssembly); };
+        const plainDebug = debug([]);
+        {
+          const debugStore = join(directory, 'units-debug');
+          const unitFlags = ['--fn-cache', debugStore, '--fn-cache-id', 'unit-identity'];
+          const emptyDebug = debug(unitFlags);
+          const warmDebug = debug(unitFlags);
+          assert.ok(plainDebug.equals(emptyDebug), `${test.name}: --debug with an empty unit store is not --debug with no store (${describeDifference(plainDebug, emptyDebug)})`);
+          assert.ok(plainDebug.equals(warmDebug), `${test.name}: --debug with a warm unit store is not --debug with no store (${describeDifference(plainDebug, warmDebug)})`);
+          debugChecked = 1;
+        }
+      }
+      result.units = { ...empty.account, debug: debugChecked };
+      result.outcome = 'pass';
+      return result;
+    }
     // A codegen case pins what a build must (and must not) find in the assembly it emitted: a proved
     // entry point, or a bounds check the refinements removed. `compileProgram` leaves the `.s` beside
     // the program.
@@ -342,10 +418,10 @@ function runCase(test, position, context) {
     // The interface build is a second program from the same sources; it has to behave the same.
     const interfaceExecutable = viaInterface ? compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', runtime, osRuntime, name: 'program-interface', interfaces: viaInterface.ifaces, extra: caseRoots }) : null;
     if (test.compileOnly) { result.outcome = 'pass'; return result; }
-    // A case may pin the environment it needs (`"env": {"GRAIL_POOL_WORKERS": "1"}`), which is how a
-    // test proves a pool size the host would not otherwise choose. Everything else is inherited.
+    // A case may pin the environment it needs (`"env": {"GRAIL_WORKERS": "1"}`), which is how a
+    // test proves a worker count the host would not otherwise choose. Everything else is inherited.
     const options = test.env ? { cwd: directory, env: { ...process.env, ...test.env } } : { cwd: directory };
-    const ran = execute(executable, test.args ?? [], target, options);
+    const ran = execute(executable, caseArgs(test), target, options);
     if (ran.error) throw ran.error;
     observed.stdout = ran.stdout.toString();
     observed.stderr = ran.stderr.toString();
@@ -370,7 +446,7 @@ function runCase(test, position, context) {
       }
     }
     if (interfaceExecutable) {
-      const ifaceResult = execute(interfaceExecutable, test.args ?? [], target, options);
+      const ifaceResult = execute(interfaceExecutable, caseArgs(test), target, options);
       assert.equal(ifaceResult.status, ran.status, `${test.name}: the interface build exits differently: ${ifaceResult.stderr}`);
       assert.equal(ifaceResult.stdout.toString(), ran.stdout.toString(), `${test.name}: the interface build prints something else`);
     }
@@ -483,13 +559,14 @@ function stage(context) {
 
 // Runs the selection in this process. The report is a value: a --jobs parent merges one per stripe.
 function runSelection(options, context) {
-  const report = { passed: 0, failed: 0, skipped: 0, resumed: 0, failures: [] };
+  const report = { passed: 0, failed: 0, skipped: 0, resumed: 0, failures: [], units: { hits: 0, filed: 0, kept: 0, debug: 0, programs: 0, why: {} } };
   for (const [position, test] of context.cases.entries()) {
     if (hostOnly(test, options.target)) { report.skipped++; continue; }
     if (!selected(test, position, options)) continue;
     const marker = join(context.markers, test.name);
     if (options.resume && existsSync(marker)) { report.resumed++; continue; }
     const result = runCase(test, position, context);
+    if (result.units) { report.units.programs++; for (const field of ['hits', 'filed', 'kept', 'debug']) report.units[field] += result.units[field]; for (const [rule, n] of Object.entries(result.units.why ?? {})) report.units.why[rule] = (report.units.why[rule] ?? 0) + n; }
     if (result.outcome === 'pass') {
       report.passed++;
       if (options.resume) writeFileSync(marker, '');
@@ -507,6 +584,7 @@ function summaryLine(options, report, updated, filtered) {
   if (updated) parts.push(`updated ${updated}`);
   if (report.resumed) parts.push(`resumed ${report.resumed}`);
   if (filtered) parts.push(`not-selected ${filtered}`);
+  if (report.units?.programs) parts.push(`unit-identity: ${report.units.programs} programs compiled three ways, ${report.units.filed} units filed and replayed, ${report.units.kept} bodies not units, ${report.units.debug} also with --debug; rules that kept a body out: ${Object.entries(report.units.why).map(([rule, n]) => `${rule} ${n}`).join(', ') || 'none'}`);
   return `${options.target}: ${parts.join(' ')}`;
 }
 
@@ -534,7 +612,13 @@ function spawnStripe(options, argv, stripe, compiler) {
     const resultFile = join(root, `.work/native-tests/stripe-${stripe}-${process.pid}.json`);
     const env = {
       ...process.env,
+      // The stripe runs exactly this compiler. It used to receive it only as GRAIL_COMPILER, which
+      // buildCompiler() reads as the *base* to build with, so every stripe built a second compiler
+      // from it into one shared directory at once, and each finished build replaced the file the
+      // other stripes were already running - their /proc/self/exe went "(deleted)" and a
+      // compile-time probe, which re-runs the compiler by that path, failed.
       GRAIL_COMPILER: compiler,
+      GRAIL_TEST_COMPILER: compiler,
       GRAIL_TEST_JOBS: '1',
       GRAIL_TEST_STRIPE: `${stripe}/${options.jobs}`,
       GRAIL_TEST_RESULT_FILE: resultFile,
@@ -572,7 +656,12 @@ if (!isChild) checkSources(cases);
 const sources = cases.map(test => test.files?.[0] ?? 'inline source');
 // The backend names the work directory, so a native and an LLVM run of one target can overlap; a
 // stripe gets its own subdirectory, so two children never share a case directory or a snapshot.
-const backend = `${process.env.GRAIL_BACKEND ?? 'native'}${process.env.GRAIL_VERIFY_FACTS === '1' ? '+facts' : ''}`;
+if (options.unitIdentity && (options.target !== 'x86_64' || (process.env.GRAIL_BACKEND ?? 'native') !== 'native')) {
+  console.error('test-native: --unit-identity is the per-function unit store, which is the Linux x86_64 native backend');
+  process.exit(2);
+}
+// A work directory and pass markers of its own for each kind of run: two can be in flight at once.
+const backend = `${process.env.GRAIL_BACKEND ?? 'native'}${process.env.GRAIL_VERIFY_FACTS === '1' ? '+facts' : ''}${options.unitIdentity ? '+units' : ''}`;
 const backendLabel = backend === 'native' ? options.target : `${options.target}-${backend}`;
 const baseWork = join(root, '.work/native-tests', backendLabel);
 const work = options.stripe ? join(baseWork, `stripe-${options.stripe.index + 1}-${options.stripe.count}`) : baseWork;
@@ -598,7 +687,7 @@ if (!isChild && options.jobs > 1) {
     childArgv.push(argv[i]);
   }
   const stripes = await Promise.all(Array.from({ length: options.jobs }, (_, index) => spawnStripe(options, childArgv, index + 1, compiler)));
-  const merged = { passed: 0, failed: 0, skipped: 0, resumed: 0, failures: [] };
+  const merged = { passed: 0, failed: 0, skipped: 0, resumed: 0, failures: [], units: { hits: 0, filed: 0, kept: 0, debug: 0, programs: 0, why: {} } };
   const updates = [];
   let crashed = 0;
   for (const stripe of stripes) {
@@ -608,6 +697,8 @@ if (!isChild && options.jobs > 1) {
       continue;
     }
     for (const field of ['passed', 'failed', 'skipped', 'resumed']) merged[field] += stripe.report[field];
+    for (const field of ['hits', 'filed', 'kept', 'debug', 'programs']) merged.units[field] += stripe.report.units?.[field] ?? 0;
+    for (const [rule, n] of Object.entries(stripe.report.units?.why ?? {})) merged.units.why[rule] = (merged.units.why[rule] ?? 0) + n;
     merged.failures.push(...stripe.report.failures);
     updates.push(...(stripe.report.updates ?? []));
   }
@@ -626,13 +717,13 @@ if (!isChild && options.jobs > 1) {
   process.exit(crashed || (options.update ? unresolved : merged.failed) ? 1 : 0);
 }
 
-const compiler = buildCompiler();
+const compiler = process.env.GRAIL_TEST_COMPILER ?? buildCompiler();
 // Key by the compiler's content-addressed directory, not its file name: every build is named
 // `grail`. The markers are shared by every stripe: a pass is a property of the compiler, not of the
 // process that observed it.
 const markers = join(baseWork, 'pass', `${basename(dirname(compiler))}-${backend}`);
 mkdirSync(markers, { recursive: true });
-const context = stage({ cases, compiler, target: options.target, work, markers, sources });
+const context = { ...stage({ cases, compiler, target: options.target, work, markers, sources }), unitIdentity: options.unitIdentity };
 const report = runSelection(options, context);
 const updates = options.update ? applyUpdates(report.failures) : [];
 const changes = updates.filter(update => Object.keys(update.fields).length).map(update => ({ position: update.position, fields: update.fields }));

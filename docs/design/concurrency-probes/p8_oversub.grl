@@ -1,0 +1,35 @@
+use host;
+use pool;
+fn spin(n: u64) -> u64 {
+    mut x = n; mut i = 0;
+    while i < 150000000 { x = (x ^ i) + 1 & 1048575; i += 1; }
+    return x;
+}
+fn t(n: u64, c: u64) -> u64 { return spin(n); }
+fn tasks<s>(sc: (&s Scope<u64>), c: u64) -> u64 {
+    mut hs = Task<u64>[];
+    for i in c { hs.push(spawn(sc, i, t)); }
+    mut total = 0;
+    while let Some(h) = hs.pop() { total += join(h); }
+    return total;
+}
+fn both<s>(sc: (&s Scope<u64>), c: u64) -> u64 {
+    mut hs = Task<u64>[];
+    for i in c { hs.push(spawn(sc, i, t)); }
+    r := pool::run<u64>(c, |i: u64| -> u64 spin(i));
+    mut total = 0;
+    while let Some(h) = hs.pop() { total += join(h); }
+    return total;
+}
+fn main() {
+    w := host::workers();
+    pool::run<u64>(w, |i: u64| -> u64 i);
+    t0 := host::now_ms();
+    task_scope(w, tasks);
+    t1 := host::now_ms();
+    pool::run<u64>(w, |i: u64| -> u64 spin(i));
+    t2 := host::now_ms();
+    task_scope(w, both);
+    t3 := host::now_ms();
+    println(format("{} cpus: {} spinning tasks {} ms; {} spinning pool jobs {} ms; both at once {} ms (ideal on one worker set: {} ms)", w, w, t1 - t0, w, t2 - t1, t3 - t2, (t1 - t0) + (t2 - t1)));
+}

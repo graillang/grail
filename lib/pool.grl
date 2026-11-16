@@ -1,11 +1,12 @@
 module pool;
 
-// Data-parallel jobs over the process-wide pool (docs/design/parallelism.md, stages 1 and 2).
+// Data-parallel jobs on the scheduler's workers (docs/design/scheduler.md, "Jobs";
+// docs/design/parallelism.md for the ownership rules).
 //
 // THE OWNERSHIP RULE, in one line: everything a job's closure touches it owns or borrows
 // exclusively. A job takes its inputs by value, builds an owned result, and the only shared memory
 // two jobs can see is what the language says they may: read-only data classified shareable. On top
-// of that stage 2 adds one primitive whose inputs are *constructed* disjoint - `chunks_mut` hands
+// of that stage 2 adds one primitive whose inputs are *constructed* disjoint - `split_mut` hands
 // each job an exclusive `&mut [T]` over its own region of the caller's slice - and a job handle,
 // `spawn`/`wait`, for the two-statement form. No reference ever crosses a job boundary.
 //
@@ -40,12 +41,14 @@ module pool;
 //     result inside the callback instead of returning a captured value.
 //
 // Ordering is a property of the API, not of the scheduler: results come back in input order
-// whatever order the jobs finish in.
+// whatever order the jobs finish in. And the split is a property of the data, not of the machine:
+// every function here cuts its work into pieces that depend on the length and the grain alone, never
+// on how many workers there are, so a reduction gives the same bits on any number of cores.
 //
 // A named `fn` passed where a `Fn` is expected needs the type arguments written out
 // (`pool::map<u64,u64>(items, work)`, `pool::spawn<u64>(work)`) - a `fn` value and an `Fn` signature
 // are different types to inference, which is a property of the language, not of this module. An
-// anonymous closure infers. The builtins (`parallel_map`, `parallel_for_chunks`, `parallel_spawn`)
+// anonymous closure infers. The builtins (`parallel_map`, `parallel_split`, `parallel_spawn`)
 // accept either form directly.
 
 // One job per input element, results in input order. The closure captures are read-only on every
@@ -62,25 +65,19 @@ pub fn run<U:Send+Owned>(count:u64,f:Fn<Share>(u64)->U)->U[]{
     return parallel_map(index,0,|i: u64, unused: u64| -> U f(i));
 }
 
-// The chunked shape, and the one Abundance's geometry/encode/compress work uses: consume the
-// vector, hand each job one contiguous, exclusively owned chunk, and concatenate the results in
-// chunk order. Elements are moved into their chunk, never copied, and no chunk can see another.
-// The split is still two worth-paying passes over the data (each element leaves the vector and
-// enters its chunk) because a split without an exclusive borrow cannot hand out slices; that pass
-// is what stage 2's `&mut [T]` chunks remove.
-pub fn for_chunks<T:Send+Owned,U:Send+Owned>(data:T[],chunks:u64,f:Fn<Share>(T[])->U)->U[]{
+// The owned, chunked shape: consume the vector, hand each job one contiguous, exclusively owned
+// piece of at most `grain` elements, and return the results in piece order. Elements are moved into
+// their piece, never copied, and no piece can see another. Moving every element into a piece is two
+// passes over the data; `split_mut` hands out the caller's own elements instead.
+pub fn split<T:Send+Owned,U:Send+Owned>(data:T[],grain:u64 where grain > 0,f:Fn<Share>(T[])->U)->U[]{
     n:=data.len();
     if n==0{return U[];}
-    mut count=chunks;
-    if count==0{count=1;}
-    if n<count{count=n;}
-    size:=(n+count-1)/count;
-    // Reverse once so chunks come out in input order while elements are popped (moved), not copied.
+    // Reverse once so pieces come out in input order while elements are popped (moved), not copied.
     mut source=data;mut rev=T[];
     while let Some(popped) = source.pop() { rev.push(popped); }
     mut parts=T[][];
     while rev.len()!=0{
-        mut take=size;
+        mut take=grain;
         if rev.len()<take{take=rev.len();}
         mut part=T[];
         mut i=0;
@@ -90,24 +87,49 @@ pub fn for_chunks<T:Send+Owned,U:Send+Owned>(data:T[],chunks:u64,f:Fn<Share>(T[]
     return parallel_map(parts,0,|part: T[], unused: u64| -> U f(part));
 }
 
-// The in-place chunked shape, and the one Abundance's geometry/encode/compress work wants. The
-// compiler splits the exclusive slice into disjoint exclusive chunks, so each job writes the
-// caller's own elements: nothing is moved and nothing is copied, which is the whole difference from
-// `for_chunks`. The split is constructed from `chunks` and the length alone - chunk k is
-// [k*size, min(n, k*size+size)) with size = ceil(n/chunks) - so no element can belong to two jobs
-// and no job can address another's region. Asking for more chunks than elements gives one chunk per
-// element; asking for zero gives one chunk.
+// The in-place shape, and the one a frame's systems want: the compiler splits the exclusive slice
+// into disjoint exclusive pieces of at most `grain` elements, and each job writes the caller's own
+// elements - nothing is moved and nothing is copied. Piece k is [k*grain, min(n, (k+1)*grain)),
+// a function of the length and the grain alone, so no element can belong to two jobs, no job can
+// address another's region, and the pieces are the same on any machine.
 //
 // Inside the callback ordinary Grail rules apply, which is what makes the writes safe: the slice it
 // holds has its own length, so an index past it is a bounds abort, and there is no way to name the
 // caller's data again - the argument is an exclusive loan of the whole thing, so any capture that
 // could reach it (a move, a shared slice, an exclusive slice) is a borrow error at the call site.
-pub fn chunks_mut<T:Send>(data: (&mut [T]), chunks: u64, f: Fn<Share>((&mut [T]))->unit) -> unit {
-    parallel_for_chunks(data, chunks, f);
+pub fn split_mut<T:Send>(data: (&mut [T]), grain: u64 where grain > 0, f: Fn<Share>((&mut [T]))->unit) -> unit {
+    parallel_split(data, grain, f);
 }
 
-// Two branches of a job graph, both owned: `first` runs on a worker while `second` runs on the
-// calling thread, so both make progress and the results come back owned, in the order given.
+// The index ranges [0, n) in pieces of at most `grain`: f(lo, hi) for each piece, results in piece
+// order. For loops whose body reads shared data and builds a result per piece.
+pub fn range<U:Send+Owned>(n:u64,grain:u64 where grain > 0,f:Fn<Share>(u64,u64)->U)->U[]{
+    mut starts=u64[];
+    mut lo=0;
+    while lo<n{starts.push(lo);lo+=grain;}
+    return parallel_map(starts,0,|start: u64, unused: u64| -> U {
+        mut hi=start+grain;
+        if n<hi{hi=n;}
+        return f(start,hi);
+    });
+}
+
+// `leaf` over the pieces of [0, n), then `merge` folds the results in index order starting from
+// `zero`: merge(...merge(merge(zero, r0), r1)..., rk). The pieces and the order of the fold are
+// fixed by `n` and `grain`, so a floating-point reduction gives the same bits on any number of
+// workers - the property a frame loop's physics and a build's checksums both need.
+pub fn reduce<R:Send+Owned>(n:u64,grain:u64 where grain > 0,zero:R,leaf:Fn<Share>(u64,u64)->R,merge:Fn<Share>(R,R)->R)->R{
+    mut parts=range<R>(n,grain,leaf);
+    mut rev=R[];
+    while let Some(p) = parts.pop() { rev.push(p); }
+    mut acc=zero;
+    while let Some(p) = rev.pop() { acc=merge(acc,p); }
+    return acc;
+}
+
+// Two branches of a job graph, both owned: `first` is forked for any worker to take while `second`
+// runs on the calling thread, and if nobody took `first` the caller runs it afterwards, so a join
+// with no free worker costs about two calls. The results come back owned, in the order given.
 // This is what "spawn two jobs, then join" means without a handle that could outlive the call.
 // `first` crosses to a worker, so it is an `Fn` with classified captures like every callback in
 // this module; `second` never leaves the calling thread and is called once, so it is an `FnMut`
@@ -115,11 +137,35 @@ pub fn chunks_mut<T:Send>(data: (&mut [T]), chunks: u64, f: Fn<Share>((&mut [T])
 pub struct Pair<A,B>{first:A,second:B}
 pub fn join<A:Send+Owned,B:Owned>(first:Fn<Send>()->A,second:FnMut()->B)->Pair<A,B>{
     mut here=second;
-    // `first` is a job of its own, waited on before this returns: that wait is what lets it borrow
-    // the caller's frame, and why its captures need only be transferable, not shareable.
-    job:=parallel_spawn(first);
-    b:=here();
-    return Pair{first:parallel_join(job),second:b};
+    // `first` is forked as a job and joined before this returns (parallel_with): that join is what
+    // lets it borrow the caller's frame, and it runs once, on one thread, so its captures need only
+    // be transferable, not shareable. It is a structured fork, so if `second` fails, the failing
+    // stack waits for `first` before it is discarded (docs/design/concurrency-model.md, F1).
+    mut slot: B? = None;
+    out := &mut slot;
+    a := parallel_with(first, || -> unit { *out = Some(here()); });
+    return Pair{first:a,second:slot!};
+}
+
+// Priority classes. Frame work is taken before Normal work, and Normal before tasks and Background
+// work, on every worker; at most a quarter of the workers (at least one) run Background jobs at
+// once, so an asset import cannot occupy the machine when a frame's jobs arrive. Nothing is
+// preempted: a running Background job finishes.
+pub enum Class { Frame, Normal, Background }
+
+// Run `f` with every job it forks - and every job those fork - in `class`. The class belongs to the
+// stack doing the forking, not to each call, so a whole fork tree has one class and no pool
+// signature mentions it. `f` may run as a job of that class and is joined before this returns, so
+// it may borrow what the caller has and its captures need only be transferable.
+// `host::background_wait_us()` reports how long the oldest queued Background job has waited.
+pub fn with_class<A:Send+Owned>(class: Class, f: Fn<Send>()->A) -> A {
+    mut code = 1;
+    match class {
+        Frame => { code = 0; },
+        Normal => { code = 1; },
+        Background => { code = 2; },
+    }
+    return parallel_class(code, f);
 }
 
 // A job handle: `spawn` starts a job and returns it, `wait` takes its result. This is spawn-then-wait

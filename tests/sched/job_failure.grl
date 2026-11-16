@@ -1,0 +1,78 @@
+// A failure inside a parallel call is contained like a task's. A task forks eight chunks over its
+// own vector; chunk 3 fails an index check while the others are still writing. `try_join` on the
+// task returns the failure - the check's own message and the statement that failed, plus the line
+// naming where the job was joined - the other chunks finished their writes first (the failing
+// stack waited for them before it was discarded), and a sibling task's result is intact.
+use host;
+use pool;
+
+fn write_chunk(s: &mut [u64]) {
+    if s[0] == 300 {
+        bad := u64[1];
+        s[0] = bad[s.len()];
+    }
+    for i in s.len() { s[i] = s[i] + 1; }
+    host::sleep_ms(20);
+}
+fn fails(n: u64, data: &Mutex<u64[]>) -> u64 {
+    mut v = u64[];
+    for i in 800 { v.push(i); }
+    pool::split_mut<u64>(&mut v[0: 800], 100, write_chunk);
+    return v[0];
+}
+fn fine(n: u64, data: &Mutex<u64[]>) -> u64 {
+    parts := pool::run<u64>(8, |i: u64| -> u64 i * 2);
+    mut total = 0;
+    for i in parts.len() { total += parts[i]; }
+    return total;
+}
+// Each line of a site, as its marker and the file name without directories: the corpus runs
+// from a staged, renamed copy, so the directories are not the source tree's.
+fn print_tails(bytes: u8[]) {
+    mut line = u8[];
+    for i in bytes.len() {
+        b := bytes[i];
+        if b == 10 {
+            mut start = 0;
+            mut first = line.len();
+            for k in line.len() {
+                if line[k] == 47 {
+                    start = k + 1;
+                    if first == line.len() { first = k; }
+                }
+                // The corpus also renames the file `N-files-0-NAME`: keep NAME.
+                if line[k] == 45 && first < k { start = k + 1; }
+            }
+            mut keep = 0;
+            for k in first {
+                if line[k] == 32 { keep = k + 1; }
+            }
+            if first == line.len() { keep = 0; start = 0; }
+            mut out = u8[];
+            for k in keep { out.push(line[k]); }
+            for k in line.len() - start { out.push(line[start + k]); }
+            println(out.text());
+            line = u8[];
+        } else {
+            line.push(b);
+        }
+    }
+}
+fn body<s>(sc: (&s Scope<&Mutex<u64[]>>), data: &Mutex<u64[]>) -> u64 {
+    a := spawn(sc, 0, fails);
+    b := spawn(sc, 0, fine);
+    match try_join(a) {
+        v: u64 => println(v),
+        f: TaskFailure => {
+            host::print(f.message);
+            host::print(view("\n"));
+            print_tails(f.site);
+        }
+    }
+    return join(b);
+}
+fn main() {
+    data := Mutex::new(u64[]);
+    println(task_scope(&data, body));
+    println("still running");
+}

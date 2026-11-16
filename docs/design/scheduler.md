@@ -1,7 +1,8 @@
-# The M:N task scheduler
+# The M:N scheduler: tasks and jobs on one set of workers
 
-This is the mechanism behind `spawn`, `task_scope`, `host::sleep_ms` and the readiness waits in
-`host::read_fd`/`write_fd` on every platform. The user-visible contract is
+This is the mechanism behind `spawn`, `task_scope`, `host::sleep_ms`, the readiness waits in
+`host::read_fd`/`write_fd`, and every parallel call (`parallel_map`, `parallel_for_chunks`,
+`pool::join`, job handles) on every platform. The user-visible contract is
 [concurrency-v1.md](concurrency-v1.md); this file states what implements it, why the pieces are
 shaped the way they are, and what is verified where.
 
@@ -9,8 +10,10 @@ shaped the way they are, and what is verified where.
 
 A process has one scheduler worker per CPU (`rt_os_workers`, floor two, ceiling 64). The floor is
 not an optimisation: a cooperative task that spins waiting for a sibling needs a sibling *thread*
-to run on, and the `meet` regression fixture does exactly that. Thread-per-task mode
-(`GRAIL_TASKS=thread`) creates no workers at all.
+to run on, and the `meet` regression fixture does exactly that. `GRAIL_WORKERS=n` (1 to 64) sets
+the count and is honoured as given; a test that needs four threads at once asks for them. These are
+the only compute threads: there is no separate job pool. Thread-per-task mode (`GRAIL_TASKS=thread`)
+starts the workers only when the first job is forked, because jobs are all they run there.
 
 Each worker owns a **Chase-Lev deque** (`rt_deque_push/pop/steal`): the owner pushes and pops at the
 bottom (the tail) and a thief steals at the top (the head) with a CAS. The owner's tail store is the
@@ -27,8 +30,11 @@ so is the wake that a join, a channel or a reactor event produces from outside a
 a lock-protected ring of 8192 entries; when even that is full the pusher yields and re-tries, which
 cannot deadlock because the other workers drain it.
 
-An idle worker takes work in this order: its own deque, the injection ring, one steal pass over the
-other workers starting at a random victim (a per-worker xorshift). Only then does it park.
+Each worker has a second deque of the same kind for **jobs** (8192 entries), and there is a second
+injection ring for jobs forked by a thread that is not a worker. A worker takes work in this order:
+its own jobs, its own tasks, injected jobs, injected tasks, one steal pass for jobs and one for
+tasks, each starting at a random victim (a per-worker xorshift). Only then does it park. Its own
+jobs come first because some stack is inside a join waiting for them.
 
 ## Parking and waking
 
@@ -39,7 +45,8 @@ never knows which.
 
 The protocol has no lost wakeups:
 
-1. The worker reads the sequence, then looks for work.
+1. The worker reads the sequence, then looks for work (`rt_worker_loop`; the read used to come
+   after the look, which left a window in which a push went unnoticed until the next one).
 2. If it finds none it publishes itself as parked and waits on the sequence with the value it read.
 3. A pusher bumps the sequence *unconditionally* and wakes one waiter if one is parked.
 
@@ -51,6 +58,71 @@ without a wake per task.
 A finished task wakes its joiner onto the *waker's* deque, so a `join` in a task on worker B pushes
 the joiner onto B's deque and the next pop is cheap. Wakeups that come from the reactor or an
 offload thread go through the injection ring, because those threads have no deque.
+
+## Jobs
+
+A job is run-to-completion work forked by a structured call: a leaf range of `parallel_map` or
+`parallel_for_chunks`, the first branch of `pool::join` (`parallel_with`), a `Job<R>` handle. It is
+a 64-byte record - function, three arguments, state, result - and nothing else: no thread and no
+stack of its own.
+
+**Records are type-stable.** They are carved from mapped pages that are never unmapped and recycled
+through free lists (one per worker, touched only by the thread running on that worker, plus a
+locked list for threads that are not workers), so forking calls no allocator. A record is released
+only by its forker, after it has seen the job done.
+
+**A queue entry is a hint; the claim is a CAS.** The only way to run a job is to win
+`CAS(state, pending -> claimed)` on its record. So:
+
+- the forker can always take its own job back by pointer, wherever its entry went - which is how
+  an unstolen fork is run inline at the join, how a forker whose task migrated still finishes, and
+  the whole of "a thread that is not a worker helps with its own scope only" (it claims by pointer
+  and never takes an entry from a queue);
+- an entry that outlives its job is harmless: it names a record that is free, running, done, or
+  pending again as a later job - and in that last case claiming it runs that later job exactly once,
+  which is what its forker is waiting for.
+
+**Classes.** Each worker has a job deque per class (Frame, Normal, Background) and there is a job
+ring per class. A worker takes Frame work, then Normal work, then tasks, then Background work, and
+reserves one of the Background cap's slots (a CAS) before it takes a Background job; the job gives
+it back when it finishes. A job's class is its parent's; a root fork takes the class its stack was
+given by `pool::with_class` (record word 112). An entry found in a class's queue whose record now
+has another class is a stale entry naming a later job, and is skipped rather than claimed. Every
+61st step a worker looks at the injected tasks first.
+
+**Loops split by halving.** A parallel call forks the upper half of its leaves as one job and
+descends into the lower half, joining on the way back. The leaves are a function of the element
+count and the grain (`parallel_split`), or of the count alone (`parallel_map`: at most 256), never
+of the worker count or of who ran what.
+
+**Joining.** A forker that reaches its join claims its job by pointer if it is still pending and
+runs it. If somebody else has it, a waiter on a worker *leapfrogs*: it takes only work forked by
+that job or its descendants (each record names its parent; the claim word names the worker whose
+deque holds the job's forks), so nothing is stacked on it that a sequential run would not have
+stacked there. `rt_job_may_help` is the one place that decides whether to help at all: not off a
+worker, not with less than an eighth of the stack left. With nothing to take, it parks (a task
+parks as a task; a plain thread sleeps on the record's state word). Each worker records the deepest
+help nesting it saw, and `GRAIL_SCHED_STATS=1` prints the maximum at exit.
+
+**Runners.** A worker does not run a job on its scheduler stack. It enters its *runner*, a green
+task whose body claims the handed job, drains the worker's job deque and goes idle. Inside a job
+there is therefore always a current task, so a job that waits - a sleep, a descriptor, a join, an
+offloaded call - parks exactly as a task does: the worker sees its runner leave without being
+idle, forgets it, and makes a fresh runner for its next job, while the parked one is resumed by any
+worker like any task, finishes its job and ends. A job that never waits pays for none of this. A
+runner's stack is a task stack, so a job that overflows it gets the task's report (it was an
+unexplained SIGSEGV on a pool thread).
+
+**Failure.** A failed check inside a parallel region is contained: the failing stack releases its
+locks (once gaps12-sync is merged), waits - not cancellably - for every fork it has not joined,
+publishes the failure to every job it was running, and is discarded; each forker re-raises at its
+join, and where the failure leaves the region it is contained by the task or ends the process with
+one report naming the original statement and the join. A stack overflow stays fatal. The mechanism
+is `concurrency-model.md`, "F1".
+
+**Locks.** Because help is limited to the waiter's own job's descendants, a join while holding a
+`Mutex` can deadlock only where the sequential program would. When locks are tracked per record a
+waiter that holds one will not help at all.
 
 ## Stacks
 
@@ -133,8 +205,8 @@ and exits; every other failing thread parks on that word forever and is ended by
 two messages and race their own `SIGABRT` against the exit, which sometimes killed the process by
 signal instead of exiting 134.
 
-A runtime thread (a scheduler worker or a pool worker) does not raise `SIGABRT` at all: it exits 134
-directly. A signal sent to a multi-threaded process is delivered to whichever thread the kernel
+A scheduler worker does not raise `SIGABRT` at all, and neither does any other thread while it is
+inside a parallel region (it runs leaves beside the workers): it exits 134 directly. A signal sent to a multi-threaded process is delivered to whichever thread the kernel
 picks - often a parked sibling returning to user space - so raising it from one of several threads
 that may fail together is exactly the race above. The main thread, an offload helper and a thread
 foreign code created keep `SIGABRT`, which is what a parent process observes for an ordinary abort.
@@ -157,5 +229,10 @@ enough for user code to use for its own accounting.
 | timers, sleep overlap | `task-sleep-timers-overlap`, `tasks-sleep-overlap` (Windows) |
 | stack overflow report + status 134 | `task-stack-overflow-reports-and-exits-134`; Windows case static |
 | one report per race of failures | `pool-abort-eight-chunks-reports-once`, `pool-chunk-write-outside-aborts` |
+| nested joins under steal, from a thread and from tasks | `sched-nested-join-under-steal` (x86-64, aarch64, riscv64) |
+| tasks fork jobs while timers tick | `sched-task-forks-jobs-while-timers-tick` |
+| a job that waits holds no worker | `sched-job-wait-does-not-hold-a-worker` |
+| a job's stack overflow is reported | `sched-job-stack-overflow-reports-and-exits-134` |
+| nested parallel work with one worker | `pool-nested-one-worker` (`GRAIL_WORKERS=1`) |
 | Windows fibers across workers, completion port, timers | `windows.mjs check` (Wine: 42 executed) |
 | macOS kqueue/ulock/guard pages | static: both Mach-O targets assemble and link (`bun tools/test-macos.mjs` is blocked by a pre-existing assembler failure, see the note there) |

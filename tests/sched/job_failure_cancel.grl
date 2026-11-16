@@ -1,0 +1,42 @@
+// The drain of a failing job is not cancellable. A task forks two jobs: one sleeps 200 ms, the
+// other fails at once, so the failing stack waits for the sleeper before it is discarded. Meanwhile
+// the body cancels the scope. The cancel must not cut the drain short (the sleeper may still be
+// using the frames), so the failure arrives only after the sleeper has finished, and it arrives as
+// the failure, not as something else.
+use host;
+use pool;
+
+struct Shared {
+    slept: Atomic<u64>
+}
+fn leaf(i: u64, sh: &Shared) -> u64 {
+    if i == 0 {
+        host::sleep_ms(200);
+        sh.slept.store(1);
+        return 0;
+    }
+    host::sleep_ms(20);
+    bad := u64[1];
+    return bad[i + 4];
+}
+fn work(n: u64, sh: &Shared) -> u64 {
+    r := parallel_map(u64[0, 1], sh, leaf);
+    return r[0];
+}
+fn body<s>(sc: (&s Scope<&Shared>), sh: &Shared) -> u64 {
+    t := spawn(sc, 0, work);
+    host::sleep_ms(60);
+    sc.cancel();
+    match try_join(t) {
+        v: u64 => println(v),
+        f: TaskFailure => {
+            host::print(f.message);
+            host::print(view("\n"));
+        }
+    }
+    return sh.slept.load();
+}
+fn main() {
+    sh := Shared { slept: Atomic::new(0) };
+    println(task_scope(&sh, body));
+}

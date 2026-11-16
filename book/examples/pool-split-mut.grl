@@ -1,0 +1,25 @@
+// In-place splitting: `parallel_split` cuts an exclusive slice into disjoint exclusive pieces of at
+// most `grain` elements and hands each job a `&mut [T]` over its own. The caller's own vector is the
+// one that changes - no element is moved into a piece and no second vector is built.
+use pool;
+
+fn triple(s: &mut [u64]) {
+    for i in s.len() { s[i] = s[i] * 3; }
+}
+
+fn main() {
+    mut data = u64[1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+    // The split is arithmetic, not a convention: piece k is [k*grain, min(n, (k+1)*grain)). Ten
+    // elements in pieces of four is 4, 4 and 2, every element belongs to exactly one of them, and
+    // the pieces are the same on any number of cores.
+    parallel_split(&mut data[0: 10], 4, triple);
+
+    // The library form, here with a closure: pieces of five over ten elements is 5 and 5, and each
+    // job adds one to its own five.
+    pool::split_mut(&mut data[0: 10], 5, |s: &mut [u64]| -> unit {
+        for i in s.len() { s[i] = s[i] + 1; }
+    });
+
+    for i in data.len() { println(data[i]); }
+}

@@ -1,5 +1,5 @@
-// The Rust twin of examples/pool-chunks-mut.grl. Rust has no pool in `std`, so the equivalent of
-// `parallel_for_chunks` is `chunks_mut` plus one scoped thread per chunk: `chunks_mut(size)` is the
+// The Rust twin of examples/pool-split-mut.grl. Rust has no pool in `std`, so the equivalent of
+// `parallel_split` is `chunks_mut` plus one scoped thread per chunk: `chunks_mut(size)` is the
 // same arithmetic split (4, 4, 2 then 5, 5), each thread gets an exclusive borrow of its own chunk,
 // and `thread::scope` joins them all before the vector is read again.
 fn triple(s: &mut [u64]) {
