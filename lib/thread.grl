@@ -250,13 +250,14 @@ pub fn detach<R: Send>(t: Thread<R>) -> unit {
 
 // Lend the calling thread's `Ctx` to `f`. `None` in a task or a pool job, which have no thread of
 // their own to speak of.
-pub fn with_current<R>(f: Fn((&Ctx)) -> R) -> R? {
+pub fn with_current<R>(f: FnMut((&Ctx)) -> R) -> R? {
     if host::thread_plain() == 0 {
         return None;
     }
+    mut call = f;
     mut token: CtxToken;
     ctx := Ctx { token: token, record: host::thread_self() };
-    return Some(f(&ctx));
+    return Some(call(&ctx));
 }
 
 // Sleep until the monotonic clock reaches `deadline`: an absolute sleep, so a loop that sleeps to
@@ -288,7 +289,8 @@ fn drop_local<T>(cell: u64, unused: u64) -> u64 {
     return 0;
 }
 impl<T> Local<T> {
-    pub fn with<a, R>(self: (&Local<T>), ctx: (&a Ctx), f: Fn((&mut T)) -> R) -> R {
+    pub fn with<a, R>(self: (&Local<T>), ctx: (&a Ctx), f: FnMut((&mut T)) -> R) -> R {
+        mut call = f;
         unsafe {
             pair := ptr_from_addr(u64, host::thread_local(self.key));
             if pair.read() == 0 {
@@ -298,7 +300,7 @@ impl<T> Local<T> {
                 pair.add(1).write(ptr_of(&dropper).cast(u64).read());
                 pair.write(cell.addr());
             }
-            return f(local_value<T>(ctx, ptr_from_addr(T, pair.read())));
+            return call(local_value<T>(ctx, ptr_from_addr(T, pair.read())));
         }
     }
 }

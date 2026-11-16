@@ -1489,6 +1489,14 @@ fn rt_live() -> u64 {
 // the number it sees on fd 2 and lets the program exit normally. It never reports nothing: an
 // unexplained balance is either aborted on or printed.
 fn rt_leak_exit() -> u64 {
+    // The main thread's locals (thread::Local) are dropped as any thread's are when it ends.
+    tp := raw_tp_get();
+    if tp != 0 {
+        rt_locals_drop(tp);
+    }
+    if raw_atomic_load(rt_detached_word()) != 0 {
+        return 0;
+    }
     live := rt_live();
     if live == 0 {
         return 0;
@@ -1512,6 +1520,10 @@ fn rt_leak_exit() -> u64 {
 fn rt_shutdown() -> u64 {
     rt_prof_dump();
     state := raw_state();
+    if raw_atomic_load(rt_detached_word()) != 0 {
+        // A detached thread is still running on these arenas; the exit that follows reclaims them.
+        return 0;
+    }
     mut arena = raw_load(state + 32);
     while arena != 0 {
         next := raw_load(arena);
@@ -2889,6 +2901,10 @@ fn rt_uthread_main(rec: u64) -> u64 {
             rt_drop_seq(raw_load(rec + 184) & 18446744073709551614);
         }
         rt_free(rec);
+        // Its cache is retired by rt_thread_main after this returns, so the count the leak check
+        // reads is whole whether or not this thread has gone.
+        rt_cache_retire(tp);
+        rt_atomic_fetch_sub(rt_detached_word(), 1);
         return 0;
     }
     raw_atomic_store(rec + 96, 1);
@@ -2933,7 +2949,19 @@ fn f_host_thread_keep(rec: u64) -> u64 {
 // 1: detached, the thread frees its own record when it ends. 0: it had already finished (or kept a
 // result), so the caller still owns the handle and joins it.
 fn f_host_thread_detach(rec: u64) -> u64 {
-    return raw_atomic_cas(rec + 104, 0, 1) == 0;
+    // Counted before the claim, so the thread's own decrement can never come first.
+    rt_atomic_fetch_add(rt_detached_word(), 1);
+    if raw_atomic_cas(rec + 104, 0, 1) == 0 {
+        return 1;
+    }
+    rt_atomic_fetch_sub(rt_detached_word(), 1);
+    return 0;
+}
+// How many detached threads are still running (process-state word 56). While there is one, the end
+// of main neither checks for leaks nor unmaps the arenas: that thread's allocations are its own,
+// and it is still using them when the process exits without waiting for it.
+fn rt_detached_word() -> u64 {
+    return raw_state() + 56;
 }
 fn rt_uthread_wait_now(rec: u64, unused: u64) -> u64 {
     while raw_atomic_load(rec + 96) == 0 {
@@ -3110,6 +3138,7 @@ fn rt_thread_join(handle: u64) -> u64 {
 //   32           allocator arena list         rt_shutdown                --
 //   40           thread-cache registry        rt_cache_make              thread-alloc
 //   48           next thread::Local key       f_host_thread_local_key    threads
+//   56           detached threads running     rt_detached_word           threads
 //   64           allocator lock word          rt_allocator_lock          --
 //   72           green scheduler block        rt_sched                   --
 //   80           green scheduler create CAS   rt_sched                   --

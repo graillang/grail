@@ -23175,6 +23175,9 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                 continue;
             }
             if c.raw == 0 {
+                spawn_entry_check(&mut c, f - 1, v.ty);
+            }
+            if c.raw == 0 {
                 v = coerce_view(&mut c, v, c.params[template_first + index]);
             }
             if c.raw == 0 {
@@ -27140,6 +27143,38 @@ fn parallel_spawn_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     release_temporary(&mut c, input);
     close_loans(&mut c);
     return own(&mut c, slot, ty);
+}
+// INTERIM, with thread_spawn_raw below. A closure handed to a library function arrives there as a
+// parameter, and a parameter's closure type has no environment: the two checks a thread owes its
+// closure (captures transferable, no borrow) would pass vacuously inside lib/thread.grl. So they
+// are made here, at the call of `thread::spawn`, where the argument still has its environment; a
+// closure whose environment is not known at the call (one the caller itself received as a
+// parameter) is refused rather than trusted. FOLLOW-UP: capability bounds on closure parameters
+// say this in `spawn`'s own signature; this function and `spawn_entry` go when they land.
+fn spawn_entry<a>(c: (&a C), func: u64) -> bool {
+    return same(view(c.funcs[func].module), view("thread")) && same(view(c.funcs[func].name), view("spawn"));
+}
+fn spawn_entry_check<a>(c: (&a mut C), func: u64, ty: u64) -> unit {
+    if !spawn_entry(&c, func) {
+        return ();
+    }
+    if ty_kind(&mut c, ty) != 20 {
+        return ();
+    }
+    if ty_env(&mut c, ty) == 0 {
+        fail(
+            &mut c,
+            view("thread::spawn cannot check the captures of a closure it is not handed directly: pass the closure itself, not one received as a parameter")
+        );
+    }
+    require_parallel_closure(&mut c, ty, 0, view("thread capture"));
+    if contains_borrow(&mut c, ty, 0) {
+        fail(
+            &mut c,
+            view("a thread may outlive this statement, so its closure cannot capture a borrow: move the value in instead")
+        );
+    }
+    return ();
 }
 // thread_spawn_raw(f) -> u64: the one thing lib/thread.grl cannot say for itself. A library
 // signature has no way to require that a closure parameter's captures are transferable and hold no
