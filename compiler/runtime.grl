@@ -2882,17 +2882,9 @@ fn rt_park_until(b: u64, q: u64, until: u64, flags: u64) -> u64 {
         // that has this word set, so one of the two sees the other.
         raw_atomic_store(owner + 128, 1);
     }
-    mut timer = 0;
     mut poll = 0;
-    if (until != 0) & (owner != 0) & (rt_task_threads() == 0) {
-        now := f_host_now_ms();
-        if now < until {
-            if (rt_os_reactor() != 0) & (rt_os_timer(rt_sched(), owner, until - now) == 0) {
-                timer = 1;
-            } else {
-                poll = 1;
-            }
-        }
+    if (until != 0) & (owner != 0) & ((rt_task_threads() != 0) | (rt_os_reactor() == 0)) {
+        poll = 1;
     }
     mut code = 0;
     while raw_atomic_load(b + 8) == 0 {
@@ -2922,7 +2914,22 @@ fn rt_park_until(b: u64, q: u64, until: u64, flags: u64) -> u64 {
             if poll {
                 rt_yield();
             } else {
-                rt_suspend(owner);
+                if until != 0 {
+                    // A timer for what is left of the deadline, armed per pass (see rt_sleep_for).
+                    now := f_host_now_ms();
+                    mut armed = 0;
+                    if now < until {
+                        armed = rt_os_timer(rt_sched(), owner, until - now) == 0;
+                    }
+                    if armed {
+                        rt_suspend(owner);
+                        rt_os_timer_done(rt_sched(), owner);
+                    } else {
+                        rt_yield();
+                    }
+                } else {
+                    rt_suspend(owner);
+                }
             }
         } else {
             if until != 0 {
@@ -2934,9 +2941,6 @@ fn rt_park_until(b: u64, q: u64, until: u64, flags: u64) -> u64 {
     }
     if cancellable {
         raw_atomic_store(owner + 128, 0);
-    }
-    if timer {
-        rt_os_timer_done(rt_sched(), owner);
     }
     // The waker finished under this lock: nothing of this wait is in flight after it.
     rt_q_lock(q);
@@ -3703,23 +3707,30 @@ fn rt_sleep_for(ms: u64, flags: u64) -> u64 {
         return rt_wait_answer(4, flags);
     }
     s := rt_sched();
-    if rt_os_timer(s, t, ms) != 0 {
-        raw_atomic_store(t + 128, 0);
-        rt_sleep_plain(ms);
-        return 0;
-    }
     until := f_host_now_ms() + ms;
-    while true {
+    mut left = ms;
+    while left != 0 {
+        // A timer per pass, for what is left: a wake that came early (another wake, or a clock
+        // that reads a millisecond short when the timer fires) re-arms instead of sleeping for
+        // good on a timer that has already fired.
+        if rt_os_timer(s, t, left) != 0 {
+            raw_atomic_store(t + 128, 0);
+            rt_sleep_plain(left);
+            return 0;
+        }
         rt_suspend(t);
+        rt_os_timer_done(s, t);
         if raw_atomic_load(token) != 0 {
             break;
         }
-        if (f_host_now_ms() < until) == 0 {
-            break;
+        now := f_host_now_ms();
+        if now < until {
+            left = until - now;
+        } else {
+            left = 0;
         }
     }
     raw_atomic_store(t + 128, 0);
-    rt_os_timer_done(s, t);
     raw_atomic_cas(t + 24, 3, 0);
     if raw_atomic_load(token) != 0 {
         return rt_wait_answer(4, flags);
@@ -6218,15 +6229,22 @@ fn f_host_sleep_ms(ms: u64) -> u64 {
 }
 fn rt_sleep_job(t: u64, ms: u64) -> u64 {
     s := rt_sched();
-    if rt_os_timer(s, t, ms) != 0 {
-        rt_sleep_plain(ms);
-        return 0;
-    }
     until := f_host_now_ms() + ms;
-    while f_host_now_ms() < until {
+    mut left = ms;
+    while left != 0 {
+        if rt_os_timer(s, t, left) != 0 {
+            rt_sleep_plain(left);
+            return 0;
+        }
         rt_suspend(t);
+        rt_os_timer_done(s, t);
+        now := f_host_now_ms();
+        if now < until {
+            left = until - now;
+        } else {
+            left = 0;
+        }
     }
-    rt_os_timer_done(s, t);
     raw_atomic_cas(t + 24, 3, 0);
     return 0;
 }
