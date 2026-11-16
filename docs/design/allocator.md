@@ -114,3 +114,7 @@ one-thread program): `check syn1000` 1.38 s before and 1.39 s after in quiet run
 0.27 s both, `build hello --no-cache` 0.56 s both. A first version that put the cache path inside
 `rt_alloc` itself cost 5% here - a larger frame on the one-thread path - which is why the threaded
 path is a function of its own (`rt_alloc_shared`, `rt_free_shared`).
+
+**Known cost, to revisit.** That split puts one extra call on every threaded allocation and free
+(`rt_alloc` -> `rt_alloc_shared`). It was accepted to keep the one-thread path unmoved; when the
+optimiser can inline the threaded path without growing the one-thread frame, the call should go.
