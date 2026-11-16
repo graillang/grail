@@ -1,5 +1,9 @@
 ## Unreleased
 
+- Fixed: an `extern "C"` call with no arguments that was the first thing in its function left the
+  thread pointer on libc's side in a libc-linked program, so later runtime calls on that thread
+  (starting a thread, for one) read the wrong record.
+
 - Fixed: **a module's compiler run read every interface that happened to be in the build
   directory.** With modules compiling at the same time that was a race - a run could list and open
   an interface another run was still writing - and it made what a run read depend on timing and on
