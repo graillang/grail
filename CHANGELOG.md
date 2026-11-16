@@ -47,6 +47,20 @@
 - A build emits a drop helper for each type whose helper something names, in the order they are
   first named, instead of one for every type the compiler interned: the helpers nothing called are
   gone from the assembly, and the set no longer depends on which bodies the compiler had to check.
+- **A buffer of 512 bytes or more starts on a 64-byte boundary.** Every allocation of that size -
+  a vector's storage, a byte buffer, a record that large - is cache-line aligned, on every path and
+  every thread; smaller ones stay 16-byte aligned. It costs 32 bytes per megabyte arena and nothing
+  per allocation, and it is a promise from now on (`docs/design/allocator.md`).
+
+- **Threads no longer queue for the allocator.** Once a program has a second thread, every OS
+  thread allocates from and frees into a cache of its own for blocks up to 256 KiB, with no lock
+  and no atomic operation; the lock is taken only to move a batch of blocks between a cache and
+  the shared lists. Pool workers that allocate and free small vectors and records went from 10.5
+  million pairs a second with one worker and 0.5 with 24 (slower with every worker added) to 12.7
+  and 126 on a 12-core machine. A block may be freed on any thread, a thread that ends gives its
+  cache back, and the end-of-main leak check still counts exactly. A one-thread program runs the
+  code it always ran. macOS, which has no threads in this runtime, is unchanged.
+  `docs/design/allocator.md`; `bench/alloc_threads.grl`, `bench/alloc_handoff.grl`.
 
 - `hash::write_byte` states its precondition in its signature (`value: u64 where value < 256`)
   instead of asserting it in its body: a caller that can show the value is a byte pays no check,

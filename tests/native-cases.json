@@ -10984,5 +10984,78 @@
       "native"
     ],
     "note": "the foreign call takes main's first stack slot; the thread pointer must be the Grail record again afterwards, or starting the scheduler's threads runs pthread_create on a zero thread pointer"
+  },
+  {
+    "name": "alloc-threads-cross-free-exit-and-live-count",
+    "files": [
+      "compiler/tests/alloc_threads.grl"
+    ],
+    "stdout": "0\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "per-thread allocator caches: blocks freed on another thread, threads ending with a full cache, 300 threads that allocate once, view records dropped on another thread and a producer/consumer ring - the live count is exact after every join and the mapped arenas stop growing"
+  },
+  {
+    "name": "alloc-threads-leak-on-ended-thread-aborts",
+    "files": [
+      "compiler/tests/alloc_threads_leak.grl"
+    ],
+    "stdout": "1\n",
+    "signal": "SIGABRT",
+    "targets": [
+      "x86_64"
+    ],
+    "note": "a block leaked by a thread that has ended is counted by the end-of-main leak check"
+  },
+  {
+    "name": "alloc-threads-double-free-in-cache-aborts",
+    "files": [
+      "compiler/tests/alloc_threads_double_free.grl"
+    ],
+    "signal": "SIGABRT",
+    "targets": [
+      "x86_64"
+    ],
+    "note": "a second free of a block that sits in a thread cache stops the program"
+  },
+  {
+    "name": "alloc-threads-pool-results-freed-by-waiter",
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "source": "use pool;\nstruct Row {\n    id: u64,\n    cells: u64[]\n}\nfn build(i: u64) -> Row[] {\n    mut rows = Row[];\n    for k in 40 {\n        mut cells = u64[];\n        for c in (i + k) % 13 + 1 {\n            cells.push(i * 1000 + k + c);\n        }\n        rows.push(Row { id: k, cells: cells });\n    }\n    return rows;\n}\nfn main() {\n    mut total = 0;\n    for round in 60 {\n        made := pool::run<Row[]>(16, |i: u64| -> Row[] build(i + round));\n        for i in made.len() {\n            for k in made[i].len() {\n                total += made[i][k].cells.len() + made[i][k].cells[0] % 7;\n            }\n        }\n    }\n    println(total);\n}\n",
+    "stdout": "383956\n",
+    "note": "every job's rows are allocated on a pool worker and released by the thread that waited: the blocks cross threads through the caches, and the program still ends with nothing live"
+  },
+  {
+    "name": "alloc-threads-task-helper-threads-allocate",
+    "targets": [
+      "x86_64"
+    ],
+    "source": "use host;\nfn read(n: u64, unused: u64) -> u64 {\n    text := host::read_file(\"/proc/self/stat\");\n    mut kept = u64[];\n    for i in n % 9 + 1 {\n        kept.push(text.len() + i);\n    }\n    return kept.len() / kept.len();\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    mut many = Task<u64>[];\n    for i in 64 {\n        many.push(spawn(sc, i, read));\n    }\n    mut total = 0;\n    while many.len() != 0 {\n        total += join(many.pop()!);\n    }\n    return total;\n}\nfn main() {\n    println(task_scope(0, body));\n}\n",
+    "stdout": "64\n",
+    "note": "64 tasks each hand a blocking read to a helper thread that allocates the result and ends; the task frees it on whichever worker resumes it"
+  },
+  {
+    "name": "alloc-align-64-from-512-bytes-on-every-path-and-thread",
+    "files": [
+      "compiler/tests/alloc_align.grl"
+    ],
+    "stdout": "0\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "the allocator's promise: a payload of 512 bytes or more starts on a 64-byte boundary and every payload on a 16-byte one - before the process has threads, on four threads at once, after blocks were freed on other threads, and for a block with its own mapping as it grows"
   }
 ]
