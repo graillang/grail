@@ -396,6 +396,28 @@ call, or a call after anything started it, returns an error value; it does not a
 4. The class lives on the forking stack (`with_class`) rather than being an argument of every
    call. **Recommend**; `pool::scope(class, ...)` from the model note becomes unnecessary.
 
+## Stage 5 as built
+
+5a (9b2051b) splits by grain, 5b (705d5d7) the classes, 5c `sched::start`. Pinning is Linux only
+(Windows `SetThreadAffinityMask` and macOS have none yet; the setting is ignored there), and stacks
+are warmed on Linux and macOS (a Windows fiber's stack is the OS's).
+
+The frame benchmark now runs its systems as `Frame` jobs and the importer as a `Background` fork
+tree. With and without the importer, interleaved, 7 rounds each, medians (load average about 19):
+
+```
+frame_median     with importer     2222 [1956..2377]   without     2029 [1729..2299]
+frame_p99        with importer     3610 [2981..3845]   without     3264 [2649..14834]
+frame_max        with importer     4379 [3574..5634]   without     4126 [3751..25190]
+io_worst_late    with importer     2561 [2167..3752]   without     2964 [1914..6705]
+bg_rounds        with importer     2632 [2328..2909]   without        0 [0..0]
+```
+
+That is +10.6% on p99 and +9.5% on the median, against a gate of 10%: at the line, not under it.
+The cap is a quarter of the workers (6 of 24), and the importer's pieces are not preempted. A
+lower default cap, or Background pieces that check for queued Frame work between items, are the
+two levers if the gate is to hold with margin.
+
 ## Compiler bug found while building stage 5
 
 A function with an owned vector parameter and a refined parameter corrupts something on return:

@@ -1,0 +1,26 @@
+// With one worker and a fixed seed the interleaving is the program's, not the machine's: tasks that
+// yield to each other print the same order on every run and every host, which is what a test of a
+// frame's systems needs. (The corpus pins the order; it would change only with the scheduler.)
+unsafe module runtime;
+use sched;
+
+fn step(n: u64, unused: u64) -> u64 {
+    for i in 3 {
+        println("task {} round {}", n, i);
+        rt_yield();
+    }
+    return n;
+}
+fn body<s>(sc: (&s Scope<u64>), unused: u64) -> u64 {
+    a := spawn(sc, 1, step);
+    b := spawn(sc, 2, step);
+    c := spawn(sc, 3, step);
+    return join(a) + join(b) + join(c);
+}
+fn main() {
+    mut config = sched::defaults();
+    config.workers = 1;
+    config.seed = 7;
+    if !sched::start(config) { println("not applied"); }
+    println(task_scope(0, body));
+}

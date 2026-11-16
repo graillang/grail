@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **`sched::start(config)`** (`lib/sched.grl`) sets the scheduler up before anything starts it:
+  `workers`, `background_cap`, `idle_spin_us`, `pin_workers` (Linux), `warm_stacks` (task stacks
+  mapped up front, so a frame never maps one) and `seed` (a reproducible steal order). It returns
+  false - it never aborts - when the scheduler already started or settings were already applied.
+  `GRAIL_WORKERS` still wins over `workers`.
+
 - **Priority classes for parallel work.** `pool::with_class(pool::Class::Frame | Normal | Background,
   f)` runs `f` with every job it forks - and every job those fork - in that class. Workers take
   Frame work before Normal work, Normal before tasks, and tasks before Background work. At most a

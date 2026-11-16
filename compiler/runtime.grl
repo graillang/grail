@@ -2865,6 +2865,7 @@ fn rt_thread_join(handle: u64) -> u64 {
 //   3400         call-site table helper       _start; rt_sites_fill      runtime-errors
 //   3408         site descriptor capacity     rt_state_sites_offer       rth-sites
 //   3416         a second thread was started  rt_allocator_lock          compile-speed
+//   3424         scheduler config block       rt_sched_config            sched-start
 //   3448         stacks discarded by re-raise rt_discarded_word          job-failure
 //   3456         abort report claim           rt_abort                   abort-once
 //   3464..3576   task-stack fault handler     rt_state_stack_guard       stack-guard
@@ -3297,6 +3298,9 @@ fn rt_sched() -> u64 {
         }
         mut workers = rt_env_number(view("GRAIL_WORKERS="));
         if workers == 0 {
+            workers = rt_sched_setting(8);
+        }
+        if workers == 0 {
             workers = rt_os_workers();
         }
         if 64 < workers {
@@ -3393,6 +3397,11 @@ fn rt_sched_worker_new(s: u64, index: u64) -> u64 {
     raw_store(w + 32, s);
     raw_store(w + 40, index);
     raw_store(w + 80, cap);
+    seed := rt_sched_setting(40);
+    if seed != 0 {
+        // A fixed seed fixes every worker's victim order (sched::Config.seed).
+        raw_store(w + 72, wrapping_add(wrapping_mul(seed, index + 1), 2654435761) | 1);
+    }
     jobs := raw_map(rt_job_deque_capacity() * 8);
     if rt_error(jobs) {
         rt_abort();
@@ -3595,12 +3604,25 @@ fn rt_worker_loop(worker: u64) -> u64 {
     // Give this scheduler thread whatever it needs to switch onto a task's stack (nothing on a
     // platform whose switch is a stack swap, a fiber conversion on Windows).
     rt_os_sched_prepare();
+    if rt_sched_setting(24) != 0 {
+        rt_os_pin(raw_load(worker + 40) % rt_cpus());
+    }
+    rt_os_stack_warm(rt_sched_setting(32));
+    spin := rt_sched_setting(48);
     while true {
         // The sequence is read before the look for work: a push after this read changes the word
         // the wait compares, so the wait returns at once and no wakeup is lost. (Looking a few
         // more times before sleeping was measured and did not pay: bench/sched.grl got slower.)
         seq := raw_atomic_load(s + 24);
-        if rt_worker_step(s, worker) == 0 {
+        mut found = rt_worker_step(s, worker);
+        if (found == 0) & (spin != 0) {
+            // sched::Config.idle_spin_us: keep looking for that long before sleeping.
+            until := rt_now_us() + spin;
+            while (found == 0) & (rt_now_us() < until) {
+                found = rt_worker_step(s, worker);
+            }
+        }
+        if found == 0 {
             rt_atomic_fetch_add(s + 96, 1);
             rt_syscall(202, s + 24, 128, seq);
             rt_atomic_fetch_sub(s + 96, 1);
@@ -3786,7 +3808,10 @@ fn rt_jobs_create(workers: u64) -> u64 {
         raw_store(ring + 88, 8192);
         c += 1;
     }
-    mut cap = workers / 4;
+    mut cap = rt_sched_setting(16);
+    if cap == 0 {
+        cap = workers / 4;
+    }
     if cap == 0 {
         cap = 1;
     }
@@ -4631,6 +4656,50 @@ fn rt_parallel_class(class: u64, f: u64, env: u64) -> u64 {
     res := rt_job_call0(f, env, 0);
     raw_store(tp + 112, old);
     return res;
+}
+// sched::start(Config): the settings the scheduler is made with, applied only before it exists.
+// Block (raw_map, process-state word 3424): 8 workers, 16 background cap, 24 pin workers,
+// 32 stacks warmed per worker, 40 steal seed, 48 idle spin in microseconds; 0 everywhere means the
+// default. 0 when it was applied, 1 when the scheduler already existed or a config was already set:
+// the caller gets an answer, never an abort.
+fn f_host_sched_start(workers: u64, cap: u64, pin: u64, warm: u64, seed: u64, spin: u64) -> u64 {
+    if raw_atomic_load(raw_state() + 80) != 0 {
+        return 1;
+    }
+    block := raw_map(4096);
+    if rt_error(block) {
+        rt_abort();
+    }
+    mut w = workers;
+    if 64 < w {
+        w = 64;
+    }
+    raw_store(block + 8, w);
+    raw_store(block + 16, cap);
+    raw_store(block + 24, pin);
+    raw_store(block + 32, warm);
+    raw_store(block + 40, seed);
+    raw_store(block + 48, spin);
+    if raw_atomic_cas(rt_sched_config(), 0, block) != 0 {
+        rt_syscall(11, block, 4096, 0);
+        return 1;
+    }
+    // The scheduler may have been made between the first test and the publication: then the
+    // settings came too late, and saying so is the honest answer.
+    if raw_atomic_load(raw_state() + 80) != 0 {
+        return 1;
+    }
+    return 0;
+}
+fn rt_sched_config() -> u64 {
+    return raw_state() + 3424;
+}
+fn rt_sched_setting(offset: u64) -> u64 {
+    block := raw_atomic_load(rt_sched_config());
+    if block == 0 {
+        return 0;
+    }
+    return raw_load(block + offset);
 }
 // GRAIL_SCHED_STATS=1: one line on stderr at exit.
 fn rt_sched_stats() -> u64 {
