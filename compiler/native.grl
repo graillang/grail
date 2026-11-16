@@ -756,6 +756,13 @@ struct C {
     // trusting either side. Nothing here changes the whole-program path when all three are off.
     iface_dir: u8[],
     iface_use: u8[],
+    // `--use-named` and `--use-module NAME` (repeatable): the modules whose interfaces this run
+    // reads from the `--use` directory, in this order, and no others. A build that compiles modules at the same time names
+    // them (the modules this one uses, and theirs), so a run neither depends on nor opens an
+    // interface another run may still be writing. Without it every interface in the directory is
+    // read, in name order.
+    iface_only: u8[][],
+    iface_only_on: u64,
     no_entry: u64,
     iface_used: u8[][],
     // The module whose body is being compiled right now, and the modules whose requested
@@ -13763,6 +13770,12 @@ fn ffi_emit_call<a, b, d, e, f>(
     mut tls = 0;
     if tls_bridge(&mut c) {
         tls = fresh(&mut c);
+        if tls == 0 {
+            // 0 below means "no thread pointer was saved", and it is also the first slot a function
+            // hands out: a call with no arguments that opens its function would never restore the
+            // record, and everything after it would run on libc's thread pointer.
+            tls = fresh(&mut c);
+        }
         tls_enter_foreign(&mut c, tls);
     }
     if area != 0 {
@@ -18612,6 +18625,17 @@ fn mod_known<a>(c: (&a C), name: &a [u8]) -> bool {
 fn mod_from_iface<a>(c: (&a C), name: &a [u8]) -> bool {
     if c.iface_use.len() == 0 {
         return false;
+    }
+    if c.iface_only_on != 0 {
+        mut named = false;
+        for i in c.iface_only.len() {
+            if same(view(c.iface_only[i]), view(name)) {
+                named = true;
+            }
+        }
+        if !named {
+            return false;
+        }
     }
     path := iface_join(view(c.iface_use), view(name), view(".iface"));
     return host::exists(view(path)) != 0;
@@ -43305,7 +43329,22 @@ fn iface_check_manifest<a, b>(c: (&a mut C), dir: &b [u8]) -> unit {
 // object its own module was compiled into - so nothing is emitted for it here; that is what makes a
 // generic body emitted once instead of once per importer.
 fn iface_load_used<a, b>(c: (&a mut C), dir: &b [u8]) -> unit {
-    entries := host::list_dir(view(dir));
+    // Which files, and in what order: the modules the build named, as it named them; or everything
+    // in the directory by name, so the order is not the file system's.
+    mut entries = u8[][];
+    if c.iface_only_on != 0 {
+        for i in c.iface_only.len() {
+            mut entry = c.iface_only[i].copy();
+            push_bytes(&mut entry, view(".iface"));
+            entries.push(entry);
+        }
+    } else {
+        listed := host::list_dir(view(dir));
+        order := iface_sorted(&listed);
+        for i in order.len() {
+            entries.push(listed[order[i]].copy());
+        }
+    }
     mut known = u8[][];
     count := c.mod_base + c.mod_files.len();
     mut i = 2;
@@ -43333,9 +43372,16 @@ fn iface_load_used<a, b>(c: (&a mut C), dir: &b [u8]) -> unit {
         push_bytes(&mut file, view(dir));
         file.push(47);
         push_bytes(&mut file, view(entry));
-        name := iface_module_name(view(file));
-        if name.len() == 0 {
-            continue;
+        mut name = u8[];
+        if c.iface_only_on != 0 {
+            // The build named the module: the file is not opened to learn its name, and one that is
+            // missing is an error below, not something to skip.
+            name = c.iface_only[k].copy();
+        } else {
+            name = iface_module_name(view(file));
+            if name.len() == 0 {
+                continue;
+            }
         }
         mut have = 0;
         for j in known.len() {
@@ -43350,6 +43396,13 @@ fn iface_load_used<a, b>(c: (&a mut C), dir: &b [u8]) -> unit {
         }
         if have != 0 {
             continue;
+        }
+        if (c.iface_only_on != 0) && (host::exists(view(file)) == 0) {
+            mut missing = u8[];
+            push_bytes(&mut missing, view("has no interface for module `"));
+            push_bytes(&mut missing, view(name));
+            push_bytes(&mut missing, view("`, which this run was told to read (--use-module)"));
+            iface_refuse(view(file), view(missing));
         }
         module := iface_load(&mut c, view(file), view(""), 1);
         if !same(view(module), view(name)) {
@@ -43822,6 +43875,8 @@ pub fn main() -> u64 {
         cap_segs: u8[][],
         iface_dir: u8[],
         iface_use: u8[],
+        iface_only: u8[][],
+        iface_only_on: 0,
         no_entry: 0,
         iface_used: u8[][],
         body_module: u8[],
@@ -44052,6 +44107,17 @@ pub fn main() -> u64 {
             }
             exchange(&mut c.iface_use, host::arg(offset + 2));
             offset += 2;
+        } else if same(view(option), view("--use-module")) {
+            if argc < offset + 3 {
+                fail_option(&mut c, view("--use-module needs a module name"));
+            }
+            c.iface_only.push(host::arg(offset + 2));
+            exchange(&mut c.iface_only_on, 1);
+            offset += 2;
+        } else if same(view(option), view("--use-named")) {
+            // Only the modules `--use-module` names are read, even when it names none.
+            exchange(&mut c.iface_only_on, 1);
+            offset += 1;
         } else if same(view(option), view("--module-root")) {
             // A directory a `use NAME;` is resolved in: `DIR/NAME.grl`. Repeatable, and tried in the
             // order given (docs/design/module-resolution.md).

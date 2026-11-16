@@ -396,4 +396,19 @@ const fast = ['--interval', '40', '--debounce', '60'];
   const passed = run(['run', 'args.grl', '--', '--bogus', 'x'], dir);
   assert.equal(passed.stdout.trim().split('\n').pop(), '3', 'the program sees its own name and both words'); checks++;
 }
+// An effect attribute's name in a comment or a string is not a claim: only a claim makes a build one
+// compiler run over the whole program, and the runtime is a source of every build.
+{
+  const dir = join(work, 'effect-words'); mkdirSync(dir, { recursive: true });
+  const store = { ...process.env, GRAIL_CACHE_DIR: join(dir, 'store') };
+  const build = (file) => spawnSync(grail, ['build', file, '--cache', '-o', 'target/out'], { cwd: dir, encoding: 'utf8', env: store });
+  writeFileSync(join(dir, 'words.grl'), '// @no_alloc is only mentioned here\nfn main() {\n    println("@no_panic in a string");\n}\n');
+  const words = build('words.grl');
+  assert.equal(words.status, 0, words.stdout + words.stderr);
+  assert.match(words.stdout + words.stderr, /grail: cache: /, 'a mention in a comment or a string leaves the build per module'); checks++;
+  writeFileSync(join(dir, 'claim.grl'), '@no_alloc\nfn twice(n: u64) -> u64 {\n    return n + n;\n}\nfn main() {\n    println(twice(2));\n}\n');
+  const claim = build('claim.grl');
+  assert.equal(claim.status, 0, claim.stdout + claim.stderr);
+  assert.doesNotMatch(claim.stdout + claim.stderr, /grail: cache: /, 'a claimed effect is still proved over the whole program'); checks++;
+}
 console.log(`cli: ${checks} formatter/tool checks passed`);

@@ -291,11 +291,74 @@ fn effects_claimed<a>(command: (&a u8[][]), at: u64) -> bool {
             continue;
         }
         text := host::read_file(view(file));
-        if has_text(view(text), view("@no_alloc")) || has_text(view(text), view("@no_panic")) {
+        if claims_effect(view(text)) {
             return true;
         }
     }
     return false;
+}
+// Whether a source text carries `@no_alloc` or `@no_panic` as an attribute: outside a comment and
+// outside a string, and not as the start of a longer word. Searching the bytes found the attribute's
+// name in a comment of the runtime, and since the runtime is a source of every build, every build
+// silently became a whole-program one.
+fn claims_effect<a>(text: &a [u8]) -> bool {
+    n := text.len();
+    mut i = 0;
+    while i < n {
+        ch := text[i];
+        if (ch == 47) && (i + 1 < n) && (text[i + 1] == 47) {
+            while (i < n) && (text[i] != 10) {
+                i += 1;
+            }
+            continue;
+        }
+        if ch == 34 {
+            i += 1;
+            while (i < n) && (text[i] != 34) {
+                if text[i] == 92 {
+                    i += 1;
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if ch == 39 {
+            // A character literal: `'"'` must not open a string.
+            if (i + 2 < n) && (text[i + 1] == 92) {
+                i += 4;
+                continue;
+            }
+            if (i + 2 < n) && (text[i + 2] == 39) {
+                i += 3;
+                continue;
+            }
+        }
+        if ch == 64 {
+            if effect_word(text, i + 1, view("no_alloc")) || effect_word(text, i + 1, view("no_panic")) {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    return false;
+}
+fn effect_word<a, b>(text: &a [u8], at: u64, word: &b [u8]) -> bool {
+    if text.len() < at + word.len() {
+        return false;
+    }
+    for k in word.len() {
+        if text[at + k] != word[k] {
+            return false;
+        }
+    }
+    end := at + word.len();
+    if end == text.len() {
+        return true;
+    }
+    b := text[end];
+    letter := ((64 < b) && (b < 91)) || ((96 < b) && (b < 123)) || (b == 95) || ((47 < b) && (b < 58));
+    return !letter;
 }
 fn ends_with_grl<a>(s: &a [u8]) -> bool {
     n := s.len();
@@ -303,23 +366,6 @@ fn ends_with_grl<a>(s: &a [u8]) -> bool {
         return false;
     }
     return (s[n - 4] == 46) && (s[n - 3] == 103) && (s[n - 2] == 114) && (s[n - 1] == 108);
-}
-fn has_text<a, b>(text: &a [u8], needle: &b [u8]) -> bool {
-    if needle.len() > text.len() {
-        return false;
-    }
-    mut i = 0;
-    while i + needle.len() <= text.len() {
-        mut j = 0;
-        while (j < needle.len()) && (text[i + j] == needle[j]) {
-            j += 1;
-        }
-        if j == needle.len() {
-            return true;
-        }
-        i += 1;
-    }
-    return false;
 }
 // The compiler's link requests: each `// grail-link: INPUT` line of the assembly. Absolute paths
 // and flags pass through, relative object/archive/shared inputs resolve against `base` (the entry
@@ -1873,8 +1919,11 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
             }
             name := groups[g].name.copy();
             stem := path_join(view(dir), view(name));
+            // The modules this run reads: what it uses, and theirs. They are finished (that is what
+            // made this one ready), so their interfaces are whole; the run is told to read those
+            // and no others, whatever else is in the directory by now.
+            reads := unit_reads(&groups, &base, g);
             if cache != 0 {
-                reads := unit_reads(&groups, &base, g);
                 keys[g] = unit_key(&mut store, id, view(target), view(name), &groups[g].files, view(ifaces), &reads);
                 if unit_restore(&mut store, view(keys[g]), view(stem), view(ifaces), view(name)) {
                     state[g] = 2;
@@ -1891,6 +1940,15 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
             if !eq(view(name), view(base[0])) {
                 compile.push(copy(view("--use")));
                 compile.push(ifaces.copy());
+                // A module with no interface file has no surface to read (the runtime's is the
+                // compiler's own knowledge of it).
+                compile.push(copy(view("--use-named")));
+                for r in reads.len() {
+                    if host::exists(view(path_join(view(ifaces), view(cat(view(reads[r]), view(".iface")))))) != 0 {
+                        compile.push(copy(view("--use-module")));
+                        compile.push(reads[r].copy());
+                    }
+                }
             }
             compile.push(copy(view("--emit-interface")));
             compile.push(ifaces.copy());
