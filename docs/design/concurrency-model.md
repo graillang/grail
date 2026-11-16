@@ -189,7 +189,7 @@ A job is a run-to-completion closure created by a structured call. Its record
 `{fn, env, state, link}` lives **in the forking frame** (`join`, loops) or in the scope's bump
 block (`scope.spawn`), so spawning allocates nothing. The forker cannot return before the job is
 done, which is what makes a frame-held record and borrowed captures sound - the same argument
-`chunks_mut` already relies on [V lib/pool.grl:93-109].
+`chunks_mut` already relies on [V lib/pool.grl:92-107].
 
 Mechanics (replaces `rt_pool_*`):
 
@@ -204,7 +204,7 @@ Mechanics (replaces `rt_pool_*`):
   It also gives every job the overflow report tasks have (today: SIGSEGV [P6]).
 - A thread that is not a worker (main, render) may fork jobs. It pushes to the injection queue of
   the scope's class and **helps with jobs of its own scope only** - never an unrelated job, the
-  reason the pool gives for not helping at all [V runtime.grl:2841-2844].
+  reason the pool gives for not helping at all [V runtime.grl:2840-2844].
 - A parallel loop is recursive halving down to a grain: `log2(n/grain)` steal-able records, no
   job array, no descriptor allocation. The grain and the split are functions of `n` and `grain`
   only, never of the worker count (2.9).
@@ -289,7 +289,7 @@ pub fn sleep_until(deadline: time::Instant) -> unit;                   // absolu
 ```
 
 - `Thread<R>` is move-only and **its drop joins**, the rule `Job<R>` already has
-  [V lib/pool.grl:122-128]. `thread::detach(t)` is the explicit opt-out and requires captures with
+  [V lib/pool.grl:123-128]. `thread::detach(t)` is the explicit opt-out and requires captures with
   no borrows. The main thread is a thread: `main` may call `thread::with_current`.
 - A thread is never a worker: `host::worker_id()` is 0, nothing is stolen onto it, and a wait
   blocks it in the kernel. That is the point - latency on it is the OS's and the program's, not
@@ -343,7 +343,7 @@ seed })` must run before anything starts the scheduler; later it is an error val
 One runtime operation underlies all of it: **park the current execution on a wait node**. The
 node `{who, next, token}` is in the waiter's frame (no allocation). `who` is a task - parked with
 the existing `rt_suspend`/`rt_wake` protocol, which already tolerates wake-before-park
-[V runtime.grl:3536-3577] - or a thread record, parked on its own futex word. A waker never needs
+[V runtime.grl:3534-3577] - or a thread record, parked on its own futex word. A waker never needs
 to know which. Lists are guarded by a word lock held for a few instructions.
 
 | Primitive | API (module `sync` / `chan`) | Task (or job) that must wait | Thread that must wait |
@@ -459,7 +459,7 @@ or yields a handle whose drop waits. The only detach is `thread::detach`, and it
 - **Zig.** Removed its async and is rebuilding I/O as an interface passed explicitly. The lesson
   taken is the negative one: do not put suspension in the type system. Grail's stackful tasks
   already give direct-style code without it.
-- **C++ job systems and fiber engines** (enkiTS, Unreal's task graph, Naughty Dog's fibers). They
+- **C++ job systems and fiber engines** (enkiTS, Unreal's task graph, Naughty Dog's fibers; from memory, [A]). They
   confirm the split in D3: a small set of named pinned threads beside a job pool, priority classes,
   spin-before-park. Naughty Dog runs *every* job on a fiber so any job may wait; 2.1 gets the same
   property lazily, paying for a stack only when a job actually waits.
