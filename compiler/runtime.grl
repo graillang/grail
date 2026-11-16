@@ -4699,6 +4699,7 @@ fn rt_env_is(name: u64, value: u64) -> u64 {
 // 224 this worker's runner (0 none)  232 the job handed to the runner  240 free job records
 // 248 their count  264 help-depth high-water mark  272 steps taken (the fairness tick)
 // 512..592 the Frame job deque, 640..720 the Background job deque (the Normal one is at 128)
+// 896..1024 the CPU mask a pinned worker hands the kernel
 //
 // The deque is a Chase-Lev deque with a fixed capacity (rt_deque_capacity, 131072 entries): the
 // owner pushes and pops at the bottom, a thief steals at the top with a CAS on the head. A fixed
@@ -5042,7 +5043,8 @@ fn rt_worker_loop(worker: u64) -> u64 {
     // platform whose switch is a stack swap, a fiber conversion on Windows).
     rt_os_sched_prepare();
     if rt_sched_setting(24) != 0 {
-        rt_os_pin(raw_load(worker + 40) % rt_cpus());
+        // Worker i on CPU i; more workers than CPUs get EINVAL and stay unpinned.
+        rt_os_pin(raw_load(worker + 40), worker + 896);
     }
     rt_os_stack_warm(rt_sched_setting(32));
     spin := rt_sched_setting(48);
