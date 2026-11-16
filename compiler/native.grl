@@ -944,7 +944,7 @@ fn index_add<a, b>(slots: (&a mut u64[]), keys: (&b mut u64[]), key: u64) -> uni
 fn index_cut<a, b>(slots: (&a mut u64[]), keys: (&b mut u64[]), len: u64) -> unit {
     while len < keys.len() {
         value := keys.len();
-        key := keys.pop();
+        key := keys.pop()!;
         mask := slots.len() - 1;
         mut h = key & mask;
         while slots[h] != value {
@@ -4245,7 +4245,7 @@ fn caps_walk<a, b>(c: (&a mut C), ty: u64, trail: (&b mut u64[])) -> u64[] {
                 add_region(&mut rs, r);
             }
         }
-        trail.pop();
+        trail.pop()!;
     }
     return rs;
 }
@@ -6016,11 +6016,11 @@ fn hide_walk<a, b>(c: (&a mut C), ty: u64, trail: (&b mut u64[])) -> bool {
         for i in count {
             t := field_type(&mut c, ty, i);
             if hide_walk(&mut c, t, &mut trail) {
-                trail.pop();
+                trail.pop()!;
                 return true;
             }
         }
-        trail.pop();
+        trail.pop()!;
     }
     return false;
 }
@@ -7037,7 +7037,7 @@ fn pred_value<a, b, d, e>(c: (&a mut C), pred: Pred, names: (&b u8[][]), slots: 
     exchange(&mut c.pos, pred.lo);
     v := expr(&mut c, 0);
     while mark < c.locals.len() {
-        c.locals.pop();
+        c.locals.pop()!;
     }
     if (saved_file != pred.file) & (pred.file != 0) {
         load_file(&mut c, saved_file);
@@ -8151,10 +8151,10 @@ fn pv_ir_close<a>(c: (&a mut C)) -> unit {
     if c.pv_marks.len() == 0 {
         return ();
     }
-    mark := c.pv_marks.pop();
-    trmark := c.pv_trmarks.pop();
+    mark := c.pv_marks.pop()!;
+    trmark := c.pv_trmarks.pop()!;
     while mark < c.pv_facts.len() {
-        c.pv_facts.pop();
+        c.pv_facts.pop()!;
     }
     if trmark < c.pv_trail.len() {
         // Only the atoms a binding made *in this block* shadowed come back here. A binding made
@@ -9382,11 +9382,11 @@ fn transfer_capability<a, b>(
             args := type_args(&mut c, ty);
             for i in args.len() {
                 if transfer_capability(&mut c, args[i], shared, &mut trail, depth + 1) == 0 {
-                    trail.pop();
+                    trail.pop()!;
                     return 0;
                 }
             }
-            trail.pop();
+            trail.pop()!;
             return true;
         }
         count := c.decls[arg].count;
@@ -9398,10 +9398,10 @@ fn transfer_capability<a, b>(
             c.cap_segs.push(name);
             if transfer_capability(&mut c, field, shared, &mut trail, depth + 1)
                 == 0 {
-                trail.pop();
+                trail.pop()!;
                 return 0;
             }
-            c.cap_segs.pop();
+            c.cap_segs.pop()!;
         }
     }
     // A closure's environment counts, not just its signature: the captures are what a worker can
@@ -9420,14 +9420,14 @@ fn transfer_capability<a, b>(
                 c.cap_segs.push(name);
                 if transfer_capability(&mut c, field, shared, &mut trail, depth + 1)
                     == 0 {
-                    trail.pop();
+                    trail.pop()!;
                     return 0;
                 }
-                c.cap_segs.pop();
+                c.cap_segs.pop()!;
             }
         }
     }
-    trail.pop();
+    trail.pop()!;
     if allowed != 0 {
         return true;
     }
@@ -9974,7 +9974,7 @@ fn all_supers<a>(c: (&a mut C), id: u64) -> u64[] {
     mut out = u64[];
     mut todo = copy_numbers(&c.interfaces[id - 1].supers);
     while todo.len() != 0 {
-        s := todo.pop();
+        s := todo.pop()!;
         mut seen = s == id;
         for i in out.len() {
             if out[i] == s {
@@ -11156,11 +11156,11 @@ fn borrow_walk<a, b>(c: (&a mut C), ty: u64, trail: (&b mut u64[])) -> bool {
         for i in count {
             t := field_type(&mut c, ty, i);
             if borrow_walk(&mut c, t, &mut trail) {
-                trail.pop();
+                trail.pop()!;
                 return true;
             }
         }
-        trail.pop();
+        trail.pop()!;
     }
     return false;
 }
@@ -11189,6 +11189,15 @@ fn source_type_name<a>(c: (&a mut C), ty: u64) -> u8[] {
     if ty == 0 {
         push_bytes(&mut out, view("u64"));
         return out;
+    }
+    // `T?` is spelled the way it is written, not as the `result::Option<T>` it names.
+    if is_option_storage(&mut c, ty) {
+        inner := type_args(&mut c, ty);
+        if inner.len() == 1 {
+            mut text = source_type_name(&mut c, inner[0]);
+            text.push(63);
+            return text;
+        }
     }
     k := ty_kind(&mut c, ty);
     arg := ty_arg(&mut c, ty);
@@ -13091,11 +13100,11 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
     }
     mut reverse = Field[];
     while pending.len() != 0 {
-        reverse.push(pending.pop());
+        reverse.push(pending.pop()!);
     }
     first := c.fields.len();
     while reverse.len() != 0 {
-        c.fields.push(reverse.pop());
+        c.fields.push(reverse.pop()!);
     }
     carried := c.decls[d - 1].declared_at.copy();
     exchange(
@@ -14224,11 +14233,11 @@ fn ffi_record<a>(c: (&a mut C), pass: u64) -> unit {
     eat(&mut c, view(";"));
     mut reverse = Field[];
     while pending.len() != 0 {
-        reverse.push(pending.pop());
+        reverse.push(pending.pop()!);
     }
     first := c.fields.len();
     while reverse.len() != 0 {
-        c.fields.push(reverse.pop());
+        c.fields.push(reverse.pop()!);
     }
     carried := c.decls[d - 1].declared_at.copy();
     exchange(
@@ -15636,14 +15645,14 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             c.rnext[part_lunit - 1] = part_ref;
         }
         while out_mark < c.out.len() {
-            c.out.pop();
+            c.out.pop()!;
         }
         // Facts describe the text just discarded, so they go with it.
         llvm::facts_truncate(&mut c.facts, fact_mark);
         edge_mark := c.fx_edge_mark;
         fx_edges_truncate(&mut c, edge_mark);
         while closure_mark < c.closures.len() {
-            c.closures.pop();
+            c.closures.pop()!;
         }
         // The retried body creates its closures again, so their ordinals start where they did.
         exchange(&mut c.spec_closures, spec_closure_mark);
@@ -17479,7 +17488,7 @@ fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [
     }
     mut body = printed.copy();
     while (body.len() > 0) && (body[body.len() - 1] == 10) {
-        body.pop();
+        body.pop()!;
     }
     if rty != 0 {
         return CTRes { ty: rty, value: u64(same(view(body), view("true"))), text: u8[] };
@@ -17581,9 +17590,9 @@ fn ct_for<a>(c: (&a mut C)) -> unit {
         c.ct_loop_index.push(i);
         exchange(&mut c.pos, open);
         block(&mut c);
-        c.ct_loop_names.pop();
-        c.ct_loop_decls.pop();
-        c.ct_loop_index.pop();
+        c.ct_loop_names.pop()!;
+        c.ct_loop_decls.pop()!;
+        c.ct_loop_index.pop()!;
     }
     exchange(&mut c.loop_start, old_start);
     exchange(&mut c.loop_end, old_end);
@@ -18527,13 +18536,13 @@ fn fx_why<a, b>(c: (&a mut C), why: &b [u8]) -> unit {
 // leave its calls behind for the attempt that replaces them.
 fn fx_edges_truncate<a>(c: (&a mut C), mark: u64) -> unit {
     while mark < c.fx_edge_from.len() {
-        c.fx_edge_from.pop();
-        c.fx_edge_name.pop();
-        c.fx_edge_to.pop();
-        c.fx_edge_kind.pop();
-        c.fx_edge_file.pop();
-        c.fx_edge_pos.pop();
-        c.fx_edge_why.pop();
+        c.fx_edge_from.pop()!;
+        c.fx_edge_name.pop()!;
+        c.fx_edge_to.pop()!;
+        c.fx_edge_kind.pop()!;
+        c.fx_edge_file.pop()!;
+        c.fx_edge_pos.pop()!;
+        c.fx_edge_why.pop()!;
     }
     return ();
 }
@@ -19655,7 +19664,7 @@ fn local_ty<a>(c: (&a mut C), i: u64) -> u64 {
 }
 fn pop_locals<a>(c: (&a mut C), mark: u64) -> unit {
     while mark < c.locals.len() {
-        c.locals.pop();
+        c.locals.pop()!;
     }
     return ();
 }
@@ -21910,7 +21919,7 @@ fn emit_specializations<a>(c: (&a mut C)) -> unit {
             part_ref := c.ref_next;
             replay_function(&mut c, i);
             while saved < c.out.len() {
-                c.out.pop();
+                c.out.pop()!;
             }
             exchange(&mut c.part, part_mark);
             exchange(&mut c.lpart, part_lpart);
@@ -25473,11 +25482,11 @@ fn pointer_walk<a, b>(c: (&a mut C), ty: u64, trail: (&b mut u64[])) -> bool {
         for i in count {
             t := field_type(&mut c, ty, i);
             if pointer_walk(&mut c, t, &mut trail) {
-                trail.pop();
+                trail.pop()!;
                 return true;
             }
         }
-        trail.pop();
+        trail.pop()!;
     }
     return false;
 }
@@ -26576,11 +26585,11 @@ fn task_walk<a, b>(c: (&a mut C), ty: u64, trail: (&b mut u64[])) -> bool {
         for i in count {
             t := field_type(&mut c, ty, i);
             if task_walk(&mut c, t, &mut trail) {
-                trail.pop();
+                trail.pop()!;
                 return true;
             }
         }
-        trail.pop();
+        trail.pop()!;
     }
     return false;
 }
@@ -26945,7 +26954,7 @@ fn big_trim<a>(x: (&a mut u64[])) -> unit {
         if x[x.len() - 1] != 0 {
             break;
         }
-        x.pop();
+        x.pop()!;
     }
     return ();
 }
@@ -28438,13 +28447,13 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
     result := v.ty;
     exchange(&mut c.pos, enter);
     while out_mark < c.out.len() {
-        c.out.pop();
+        c.out.pop()!;
     }
     while closures_mark < c.closures.len() {
-        c.closures.pop();
+        c.closures.pop()!;
     }
     while specs_mark < c.specs.len() {
-        c.specs.pop();
+        c.specs.pop()!;
     }
     exchange(&mut c.locals, saved_locals);
     exchange(&mut c.resources, saved_resources);
@@ -30701,9 +30710,18 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
                 fail(&mut c, view("pop requires bytes/vector"));
             }
         }
+        // `v.pop()` is `T?`: `None` when there is nothing to take. `v.pop()!` insists, and is read
+        // here as one operation - the element comes straight out, with no option built and taken
+        // apart - which is also what an `unsafe module`'s untyped pop is.
+        insist := (c.raw != 0) || eat(&mut c, view("!"));
         if k == 3 {
             require_write(&mut c, xt);
-            return val(apply(&mut c, view("rt_popb"), one(xt)), 0);
+            if insist {
+                return val(apply(&mut c, view("rt_popb"), one(xt)), 0);
+            }
+            had := apply(&mut c, view("rt_len"), one(xt));
+            byte := apply(&mut c, view("rt_popb_quiet"), one(xt));
+            return pop_option(&mut c, had, byte, 0);
         }
         root := place_of(&mut c, xt);
         if c.raw == 0 {
@@ -30713,17 +30731,31 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         require_write(&mut c, xt);
         code := narrow_code(&mut c, ty);
         if code != 0 {
-            unit := apply(&mut c, view("rt_pop4"), one(xt));
+            if insist {
+                unit := apply(&mut c, view("rt_pop4"), one(xt));
+                element := narrow_decode(&mut c, code, unit);
+                own(&mut c, element, ty);
+                return val(element, ty);
+            }
+            had := apply(&mut c, view("rt_len"), one(xt));
+            unit := apply(&mut c, view("rt_pop4_quiet"), one(xt));
             element := narrow_decode(&mut c, code, unit);
-            own(&mut c, element, ty);
-            return val(element, ty);
+            return pop_option(&mut c, had, element, ty);
         }
-        slot := apply(&mut c, view("rt_pop"), one(xt));
-        own(&mut c, slot, ty);
-        result := place_of(&mut c, slot);
+        if insist {
+            slot := apply(&mut c, view("rt_pop"), one(xt));
+            own(&mut c, slot, ty);
+            result := place_of(&mut c, slot);
+            return_bonds(&mut c, root, result, 1);
+            stored_source(&mut c, slot, ty);
+            return val(slot, ty);
+        }
+        had := apply(&mut c, view("rt_len"), one(xt));
+        word := apply(&mut c, view("rt_pop_quiet"), one(xt));
+        out := pop_option(&mut c, had, word, ty);
+        result := place_of(&mut c, out.t);
         return_bonds(&mut c, root, result, 1);
-        stored_source(&mut c, slot, ty);
-        return val(slot, ty);
+        return out;
     }
     if (k == 3) & (same(view(name), view("clear")) || same(view(name), view("truncate"))) {
         mut keep = 0;
@@ -31402,6 +31434,22 @@ fn is_vector_type<a>(c: (&a mut C), ty: u64) -> bool {
         return false;
     }
     return (ty == 2) || (ty_kind(&mut c, ty) == 6);
+}
+// The `T?` a `pop()` answers: `Some(element)` when the collection had one (`had` is its length
+// before the pop), `None` when it was empty. The runtime builds the option, so the generated code
+// has no branch and the element's ownership passes straight into it.
+fn pop_option<a>(c: (&a mut C), had: u64, element: u64, ty: u64) -> Val {
+    mut oa = u64[];
+    oa.push(ty);
+    opt := named_type(&mut c, copy_bytes(view("result")), copy_bytes(view("Option")), oa);
+    d := ty_arg(&mut c, opt);
+    some := success_variant(&mut c, d);
+    mut args = two(had, element);
+    args.push(imm(&mut c, some));
+    args.push(imm(&mut c, 1 - some));
+    slot := invoke(&mut c, view("rt_pop_option"), args);
+    own(&mut c, slot, opt);
+    return val(slot, opt);
 }
 // Maps remain ordinary nominal library values; only their concise surface is compiler-owned.
 fn is_map_type<a>(c: (&a mut C), ty: u64) -> bool {
