@@ -1,5 +1,7 @@
 ## Unreleased
 
+- Removed: `iter::from_step`, an exact copy of `iter::from_fn`. Write `iter::from_fn(step)`.
+
 - Removed: **the free-function forms of the `strings`, `vecs` and `iter` methods.** Each was one line
   calling the method; call the method instead. `lib/strings.grl`: `strings::starts_with`,
   `ends_with`, `split`, `trim`, `to_upper`, `to_lower`, `replace`, `repeat`, `contains`, `find`,

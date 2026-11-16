@@ -147,7 +147,7 @@ from a compile error:
 
 **B. A map has no iteration surface.** **Done** (`8d0ac36`, on `main`): `keys()`, `values()` and
 `iter()`, yielding references in storage order and borrowing the map like `iter::refs(&v)` borrows a
-vector, plus `iter::from_step` as the seam for building an iterator outside `iter`. The original
+vector, plus `iter::from_fn` as the seam for building an iterator outside `iter`. The original
 finding: `hashmap` exposes `get`, `get_mut`, `insert`, `remove`,
 `contains`, `entry`, `len`, `key_at`, `value_at`, `value_at_mut`, `entry_at` - and nothing else.
 There is no `keys()`, no `values()`, no `iter()`, and `for k, v in &m` does not exist. Iterating a
