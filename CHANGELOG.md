@@ -9,6 +9,10 @@
   (`bench/rivals/`), release and debug builds of each, CPU time from `getrusage`, one table with
   Grail's two builds as ratios to the best competitor of their bar. The numbers and the named
   reason for every miss are in `docs/design/runtime-parity.md`, "Against other languages".
+  Every column targets baseline x86-64 (Zig gets `-mcpu=baseline`); a second table builds the
+  rivals for the host CPU, and a third counts instructions. `bench/sieve`, `matmul` and `xform`
+  (all twins) now make every round depend on the one before, so no compiler can drop a round:
+  their printed results changed.
 
 - A method of a generic written-type impl whose bound the receiver does not meet says so: `v.sort()`
   on a `Point[]` is "`sort` needs `T: order::Ord`, and `Point` does not implement it", with a help
