@@ -11583,9 +11583,13 @@ fn dyn_box<a>(c: (&a mut C), v: Val, expected: u64) -> Val {
     }
     register_vtable(&mut c, id, concrete);
     observe(&mut c, v.t);
+    mut value = v.t;
+    if framed(&mut c, concrete) {
+        value = frame_box(&mut c, v.t, concrete);
+    }
     sz := imm(&mut c, 2);
     cell := invoke(&mut c, view("rt_rec"), one(sz));
-    rec_store(&mut c, cell, 0, v.t);
+    rec_store(&mut c, cell, 0, value);
     o(&mut c, view("leaq "));
     vt := cell_vtable_symbol(&mut c, id, concrete);
     push_bytes(&mut c.out, view(vt));
@@ -11819,8 +11823,13 @@ fn emit_vtables<a>(c: (&a mut C)) -> unit {
         mut entries = copy_bytes(view(".quad "));
         if needs_drop(&mut c, concrete) {
             drop_name(&mut c, concrete);
-            dropper := drop_symbol(&mut c, concrete);
-            push_bytes(&mut entries, view(dropper));
+            if framed(&mut c, concrete) {
+                // The cell's value is the box dyn_box made: freeing it is the whole drop.
+                push_bytes(&mut entries, view("rt_free"));
+            } else {
+                dropper := drop_ref_name(&mut c, concrete);
+                push_bytes(&mut entries, view(dropper));
+            }
         } else {
             o(&mut c, view("0"));
             entries.push(48);
