@@ -61,7 +61,9 @@ const rounds = roundsAt >= 0 ? Number(argv[roundsAt + 1]) : 0;
 if (roundsAt >= 0 && !(rounds >= 1)) throw new Error('--rounds needs a count of at least 1');
 const rest = roundsAt >= 0 ? argv.filter((_, i) => i !== roundsAt && i !== roundsAt + 1) : argv;
 const names = rest.length ? rest
-  : readdirSync(join(root, 'bench')).filter(f => f.endsWith('.grl')).map(f => f.slice(0, -4)).sort();
+  : readdirSync(join(root, 'bench')).filter(f => f.endsWith('.grl')).map(f => f.slice(0, -4))
+    // A program with no C twin measures itself (bench/README.md) and is not part of the comparison.
+    .filter(name => existsSync(join(root, 'bench', `${name}.c`))).sort();
 const work = mkdtempSync(join(tmpdir(), 'grail-bench-'));
 let failed = 0;
 try {

@@ -640,8 +640,8 @@ fn rt_win_thread_main(record: u64) -> u64 {
 // handle array is stored out of band in the stack slack, so portable code stays unchanged.
 fn rt_win_thread_clone(start_slot: u64, tid_word: u64) -> u64 {
     record := raw_load(start_slot + 8);
-    top := record + 64;
-    raw_store(top - 96, tid_word);
+    // Two words under the start block (record - 16, record - 8), in the stack's slack.
+    raw_store(record - 32, tid_word);
     raw_store(tid_word, 1);
     scratch := rt_win_scratch();
     raw_store(scratch + 8, 0);
@@ -650,10 +650,10 @@ fn rt_win_thread_clone(start_slot: u64, tid_word: u64) -> u64 {
     if handle == 0 {
         return wrapping_sub(0, 11);
     }
-    raw_store(top - 88, handle);
+    raw_store(record - 24, handle);
     // Detached spawns pass a word inside the thread's own stack; joinable ones pass the handle
     // array from rt_alloc. Only the latter needs tracking for a join.
-    if (tid_word < record) + (record + 64 < tid_word) {
+    if (tid_word < record) + (record + 128 < tid_word) {
         rt_win_register(tid_word, handle);
     }
     return handle;
