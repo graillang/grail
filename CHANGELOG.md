@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **A foreign call costs what it costs in C (x86-64).** In a program that loaded libc, every
+  `extern "C"` call switched the thread pointer to libc's TCB and back, and on x86-64 a write to the
+  FS base is a system call (`arch_prctl`): two per call, about 660 ns for a call to `labs`. The
+  thread pointer now stays libc's TCB for the life of the thread, and the runtime finds its own
+  thread record through an initial-exec TLS word (`rt_tls_record`) - one fs-relative load, as
+  before. Measured on 10M `labs` calls, best of five: about 3 ns a call against C's 2-3 ns
+  (`bench/ffi_call.grl` and its C twin). AArch64 and RISC-V, whose thread-pointer write is a
+  register move, and programs that never load libc keep the record as the thread pointer.
+
 - **`sched::start(config)`** (`lib/sched.grl`) sets the scheduler up before anything starts it:
   `workers`, `background_cap`, `idle_spin_us`, `pin_workers` (Linux), `warm_stacks` (task stacks
   mapped up front, so a frame never maps one) and `seed` (a reproducible steal order). It returns

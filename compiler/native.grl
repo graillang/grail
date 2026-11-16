@@ -2883,24 +2883,32 @@ fn tls_thread_stubs<a>(c: (&a mut C)) -> unit {
     o(&mut c, view(".weak pthread_create\n.weak pthread_detach\n"));
     o(&mut c, view(".globl rt_host_thread\nrt_host_thread:\npushq %rbp\nmovq %rsp,%rbp\nsubq $48,%rsp\n"));
     o(&mut c, view("movq %rdi,-8(%rbp)\nmovq %rsi,-16(%rbp)\nmovq %rsi,-8(%rdi)\nmovl $1,%eax\nmovq %rax,(%rsi)\n"));
-    tp_read(&mut c);
-    o(&mut c, view("movq %rax,-24(%rbp)\nmovq 56(%rax),%rsi\n"));
-    tp_write(&mut c);
+    // AArch64 and RV64 run Grail on the record and switch to the TCB around pthread_create; x86-64
+    // already runs on the TCB (raw_tp_get), so it switches nothing.
+    if c.target != 0 {
+        tp_read(&mut c);
+        o(&mut c, view("movq %rax,-24(%rbp)\nmovq 56(%rax),%rsi\n"));
+        tp_write(&mut c);
+    }
     o(&mut c, view("leaq -32(%rbp),%rdi\nxorl %esi,%esi\nleaq rt_host_thread_start(%rip),%rdx\nmovq -8(%rbp),%rcx\ncall pthread_create\nmovq %rax,-40(%rbp)\ntestq %rax,%rax\n"));
     failed := label(&mut c);
     jump(&mut c, view("jne"), failed);
     o(&mut c, view("movq -32(%rbp),%rdi\ncall pthread_detach\n"));
     mark(&mut c, failed);
-    o(&mut c, view("movq -24(%rbp),%rsi\n"));
-    tp_write(&mut c);
+    if c.target != 0 {
+        o(&mut c, view("movq -24(%rbp),%rsi\n"));
+        tp_write(&mut c);
+    }
     o(&mut c, view("movq -40(%rbp),%rcx\nxorl %eax,%eax\nsubq %rcx,%rax\nleave\nret\n"));
     o(&mut c, view("rt_host_thread_start:\npushq %rbp\nmovq %rsp,%rbp\nsubq $16,%rsp\nmovq %rdi,-8(%rbp)\n"));
     tp_read(&mut c);
     o(&mut c, view("movq -8(%rbp),%rcx\nmovq 8(%rcx),%rcx\nmovq %rax,56(%rcx)\n"));
     tls_record_address(&mut c);
     o(&mut c, view("movq -8(%rbp),%rcx\nmovq 8(%rcx),%rcx\nmovq %rcx,(%rax)\nmovq %rcx,%rdi\ncall rt_thread_main\n"));
-    o(&mut c, view("movq -8(%rbp),%rcx\nmovq 8(%rcx),%rcx\nmovq 56(%rcx),%rsi\n"));
-    tp_write(&mut c);
+    if c.target != 0 {
+        o(&mut c, view("movq -8(%rbp),%rcx\nmovq 8(%rcx),%rcx\nmovq 56(%rcx),%rsi\n"));
+        tp_write(&mut c);
+    }
     // Load the TID word's address before releasing it: once it reads 0 the joiner may unmap the
     // block and the record.
     o(&mut c, view("movq -8(%rbp),%rcx\nmovq -8(%rcx),%rdi\nmovq %rdi,-16(%rbp)\nxorl %eax,%eax\nsfence\nmovq %rax,(%rdi)\n"));
@@ -2934,6 +2942,11 @@ fn tls_capture<a>(c: (&a mut C)) -> unit {
 // Foreign call entry: when this thread has a libc TCB, `slot` keeps the record and the thread
 // pointer becomes the TCB; otherwise `slot` is 0 and nothing changes.
 fn tls_enter_foreign<a>(c: (&a mut C), slot: u64) -> unit {
+    if c.target == 0 {
+        // x86-64: the thread pointer already is libc's TCB when there is one (raw_tp_get), so a
+        // foreign call switches nothing and costs nothing beyond the call.
+        return ();
+    }
     o(&mut c, view("xorl %eax,%eax\nmovq %rax,"));
     stack_slot(&mut c, slot);
     c.out.push(10);
@@ -2977,11 +2990,15 @@ fn tls_enter_callback<a>(c: (&a mut C), slot: u64, adopt: u64) -> unit {
     stack_slot(&mut c, adopt);
     o(&mut c, view(",%rsi\nmovq %rsi,(%rax)\n"));
     mark(&mut c, have);
-    tp_read(&mut c);
-    o(&mut c, view("movq %rax,"));
-    stack_slot(&mut c, slot);
-    c.out.push(10);
-    tp_write(&mut c);
+    if c.target != 0 {
+        // x86-64 keeps libc's TCB as the thread pointer; the record is reached through
+        // `rt_tls_record`, which the lines above made sure names one.
+        tp_read(&mut c);
+        o(&mut c, view("movq %rax,"));
+        stack_slot(&mut c, slot);
+        c.out.push(10);
+        tp_write(&mut c);
+    }
     mark(&mut c, done);
     return ();
 }
@@ -3018,6 +3035,9 @@ fn callback_copy_back<a>(c: (&a mut C)) -> unit {
 }
 // Undo either entry: restore the thread pointer `slot` saved, if it saved one.
 fn tls_leave<a>(c: (&a mut C), slot: u64) -> unit {
+    if c.target == 0 {
+        return (); // x86-64 never switched (tls_enter_foreign, tls_enter_callback)
+    }
     o(&mut c, view("movq "));
     stack_slot(&mut c, slot);
     o(&mut c, view(",%rsi\ntestq %rsi,%rsi\n"));
@@ -25260,7 +25280,19 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
                 o(&mut c, view("xorq %rax,%rax\n"));
             } else {
                 if c.target == 0 {
+                    // x86-64 Linux: in a process that loaded libc the thread pointer is libc's TCB for
+                    // good (a write to FS is a system call, which made every foreign call cost two),
+                    // and the record is this thread's `rt_tls_record` word; otherwise the thread
+                    // pointer is the record. One fs-relative load either way.
+                    other := label(&mut c);
+                    done := label(&mut c);
+                    o(&mut c, view("cmpq $0,rt_state+184(%rip)\n"));
+                    jump(&mut c, view("je"), other);
+                    o(&mut c, view("movq %fs:rt_tls_record@tpoff,%rax\n"));
+                    jump(&mut c, view("jmp"), done);
+                    mark(&mut c, other);
                     o(&mut c, view("movq %fs:0,%rax\n"));
+                    mark(&mut c, done);
                 } else {
                     o(&mut c, view("tpget\n"));
                 }
@@ -25282,8 +25314,17 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
                 o(&mut c, view("xorq %rax,%rax\n"));
             } else {
             if c.target == 0 {
+                // With libc loaded the record is published, not installed (see raw_tp_get).
                 get(&mut c, args[0], view("%rsi"));
+                other := label(&mut c);
+                done := label(&mut c);
+                o(&mut c, view("cmpq $0,rt_state+184(%rip)\n"));
+                jump(&mut c, view("je"), other);
+                o(&mut c, view("movq %rsi,%fs:rt_tls_record@tpoff\nxorl %eax,%eax\n"));
+                jump(&mut c, view("jmp"), done);
+                mark(&mut c, other);
                 o(&mut c, view("movl $4098,%edi\nmovl $158,%eax\nsyscall\n"));
+                mark(&mut c, done);
             } else {
                 get(&mut c, args[0], view("%rdi"));
                 o(&mut c, view("tpset\n"));
