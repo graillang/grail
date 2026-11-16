@@ -301,7 +301,7 @@ constructor. Limitation: the body must be a closure *expression* at the call (or
 type written), because R-env needs the expected type; a pre-built closure value will have its
 spawns refused. `task_scope` and `pool::scope` are the same signature with a context parameter.
 
-**Assumed, to be prototyped first (stage 3):** that bonding a closure's loans to a holder reached
+**Assumed, to be prototyped first (stage 5):** that bonding a closure's loans to a holder reached
 through a *shared* reference (`self: (&Self)`) behaves as P23 shows for `&mut` [A]; if not,
 `spawn` takes `(&mut Self)`, which a scope body can supply.
 
@@ -462,6 +462,24 @@ pointers already are].
 | `Scope<C>` never `Send`/`Share` | the library type's own classification |
 | `contains_task` | **not expressed** - Q1 |
 
+### 2.10 Library handles (director's note, 2026-11-16)
+
+Q3 was a builtin handle (`Job<R>`) that owned a closure while its type showed only the result. When
+`Job`, `Task` and `Thread` become library records over the unsafe core the same question returns,
+and one of two rules must cover each handle - checked by a case when stage 2 moves `pool::spawn`:
+
+- **The handle is `Owned` by construction.** `Thread<R>` and `Job<R>` take `FnMut<Send, Owned>`
+  closures and an `R: Owned` result, so nothing they hold is a borrow and there is no loan to keep.
+  This is the rule for every handle that may outlive its frame.
+- **The handle names the region in its type.** `ScopedThread<s, T>`, `Task<s, T>`: the closure is
+  `FnMut<Send, s>`, the handle is `Handle<s, ..>`, and the ordinary region rules keep the loan for as
+  long as the handle lives.
+
+A library handle that stores a borrowing closure behind a raw pointer *without* either rule is
+exactly Q3 again; `may_hide_borrow` cannot see through a raw pointer, so an `unsafe struct` holding
+one must state `s` in its type or take only `Owned` closures. That is a rule for the unsafe module's
+author, recorded here so the stage 2 review checks it.
+
 ## 3. Why not B or C
 
 - **B alone (generic `F` with bounds).** Half of it exists and is kept. But the concurrency model
@@ -531,3 +549,20 @@ still calling the builtins.
   refusing corpus case when stage 0 lands.
 - **Q7. How much existing code returns or stores a closure parameter** (stage 3 migration) - needs
   one corpus run, which this note was told not to make.
+
+## 6. Implementation status (gaps12-closures)
+
+- **Q3 fix** - `hide_walk` answers "may hide a borrow" for a job handle (commit a39c615).
+- **Stages 0 and 1** - built. `Fn<Send|Share|Owned>(..)` and `FnMut<..>(..)` parse
+  (`closure_bounds_list`; spelling in `closure_bound_bit` / `closure_bounds_text`); the bounds are
+  bits 2/4/8 of a closure type's `mode` (bit 16 marks a closure seen during template validation);
+  `closure_converts` is rule 2.3 (1), (2), (4) and the `Owned` half of (3); an environment-less
+  closure is classified by its own bits (`transfer_capability` denial codes 12, 13);
+  `Owned` is bit 8 of a type parameter's bounds (`owned_walk`). A closure argument converted to a
+  bounded signature type keeps its loans through `call_bonds` (`closure_stated_borrower`).
+  Interface format 6. `lib/pool.grl` re-typed per 2.8, except `join`'s first branch, which is
+  `Fn<Send>` until stage 4. Every probe except P13/P14/P22/P27 (hole cases, covered by the Q3 cases
+  or by stage 3) is a corpus case `closure-bounds-p*`, plus 22 cases for the feature itself.
+- `fmt` keeps `Fn<Send, Owned>` and any generic argument list on one line (it split them at the
+  comma). `docgen` needed no change: it prints signatures from source text.
+- **Not built yet:** `Fn<s>` (stage 3, refused with "not implemented yet"), P14/H5, P27.

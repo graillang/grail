@@ -1,5 +1,23 @@
 ## Unreleased
 
+- **Closure types state what the closure may capture: `Fn<Send>`, `Fn<Share>`, `Fn<Owned>`.**
+  A closure parameter, field or element can now say its captures may move to another thread
+  (`Send`), be used from several at once (`Share`, `Fn` only), or hold no borrow (`Owned`), and
+  `Owned` is a new bound on type parameters (`R: Send + Owned`). `lib/pool.grl` states them:
+  `pool::map`/`run`/`for_chunks`/`chunks_mut` take `Fn<Share>(..)`, `pool::spawn` takes
+  `FnMut<Send, Owned>() -> R`, `pool::join`'s first branch is `Fn<Send>() -> A`. This closes three
+  soundness holes in safe code: a wrapper over the parallel builtins let a thread-affine handle, or a
+  shared `&mut`, reach a worker, and a record with an `Fn` field carried a handle capture into
+  `parallel_map`. (`docs/design/closure-bounds.md`; interface format 6.)
+  **What stops compiling, and the fix:**
+  - A bare `Fn(..)` is no longer `Send` or `Share`. A record with an `Fn(..)` field sent to a worker,
+    a `Fn(..)` passed to a `T: Send` generic, or a `Fn(..)` parameter forwarded to `parallel_spawn`,
+    `parallel_map` or a `pool` function is refused with "does not say what it captured". Write the
+    bound where the type is written: `Fn<Send>(..)` (one worker) or `Fn<Share>(..)` (several).
+  - `pool::spawn` refuses a closure that captured a borrow where the closure is written, and every
+    `pool` callback refuses an `FnMut` one: move the value in, or return an owned result.
+  - Interfaces written by an older compiler are refused: re-emit them with
+    `grail check --interface DIR`.
 - **Soundness: a job handle keeps what its closure borrowed.** A closure that borrowed a value,
   passed through a wrapper such as `pool::spawn`, left a `Job<R>` that the checker believed held
   no borrow, so the borrowed value could be moved or dropped while the job was still reading it
