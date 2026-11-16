@@ -199,10 +199,10 @@ taken (its value will reach bodies, and the function that computes it is a body,
 | the typed signature, spelled by `iface_w_type` | types after substitution, structurally |
 | the file's index and the column the declaration starts at | `.gpos` prints both |
 | the function's ordinal in its unit | its labels spell it |
-| the declaration count it starts with | see "The declaration count" below |
 
 Gone from the key since version 1: the line the declaration starts at, and the label and `.Lrfp`
-numbers it starts at - the three fields that made an edit to one body miss every body after it.
+numbers it starts at - the three fields that made an edit to one body miss every body after it -
+and, since version 3, the declaration count the body starts with (below).
 
 ### The declaration count in the key
 
@@ -213,9 +213,10 @@ function-value record (`fn_value_decl`) and closure environments. Measured rathe
 whole x86_64 corpus (689 programs that compile) was compiled with three extra tuple declarations
 synthesised before the first body, shifting every later declaration index, and every assembly was
 byte-identical to the unshifted compile. So nothing in the emitted text was found to depend on the
-count; names reach symbols by module and name (`type_key`), not by index. The count stays in the
-key in this pass, and the "synthesises a declaration" rule keeps it stable across cold and warm
-runs; removing it is a decision for the pass that adds parallel bodies.
+count; names reach symbols by module and name (`type_key`), not by index. So the count is not in
+the key (version 3), and the experiment is permanent: `--shift-declarations N` synthesises N tuple
+declarations before the first body, and `--unit-identity` compiles every case with it and requires
+the same assembly. A text dependency on declaration order that creeps in later fails that leg.
 
 ### What a run reads
 

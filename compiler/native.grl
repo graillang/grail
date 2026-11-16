@@ -901,6 +901,8 @@ struct C {
     fn_at_off: u64,
     fn_at_line: u64,
     fn_at_col: u64,
+    // `--shift-declarations N`: tuple declarations synthesised before the first body (a test switch).
+    shift_decls: u64,
     fn_hits: u64,
     fn_filed: u64,
     fn_kept: u64,
@@ -15102,9 +15104,9 @@ fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), l
 //   its typed signature, spelled structurally (`iface_w_type`) after substitution;
 //   the file's index and the column it starts at, which `.gpos` prints (the line is not here: a
 //   body counts its positions from its own first line, which `.gbase` states outside its text);
-//   its ordinal among the functions of its unit, which its labels spell;
-//   the declaration count it starts with (a body that synthesised a declaration before this one
-//   changes what this one can see).
+//   its ordinal among the functions of its unit, which its labels spell.
+// Not the number of declarations it starts with: no body's text depends on it, which
+// `--shift-declarations` checks over the whole corpus (`tools/test-native.mjs --unit-identity`).
 //
 // An empty key means "not a unit": a type with no interface spelling cannot be named, and a unit
 // keyed by a partial signature would be reused on a guess.
@@ -15126,7 +15128,7 @@ fn fn_key<a, b, d>(c: (&a mut C), unit: &b [u8], symbol: &d [u8], from: u64, to:
     }
     place := fn_place(&mut c, at);
     mut key = u8[];
-    push_bytes(&mut key, view("grail-fnkey 2\nunit "));
+    push_bytes(&mut key, view("grail-fnkey 3\nunit "));
     push_bytes(&mut key, view(unit));
     push_bytes(&mut key, view("\nprefix "));
     push_bytes(&mut key, view(c.lpart));
@@ -15148,8 +15150,6 @@ fn fn_key<a, b, d>(c: (&a mut C), unit: &b [u8], symbol: &d [u8], from: u64, to:
     push_bytes(&mut key, view(decimal_bytes(place.col)));
     push_bytes(&mut key, view("\nordinal "));
     push_bytes(&mut key, view(decimal_bytes(scope_next(&c))));
-    push_bytes(&mut key, view("\ndecls "));
-    push_bytes(&mut key, view(decimal_bytes(c.decls.len())));
     push_bytes(&mut key, view("\nraw "));
     push_bytes(&mut key, view(decimal_bytes(c.raw)));
     key.push(10);
@@ -15327,6 +15327,11 @@ fn fn_flags_now<a>(c: (&a mut C)) -> u8[] {
     // A hand-run compiler has no `--fn-cache-id`, so its executable stands in for one: the path it
     // is being run from, its size and its modification time. A unit is code *this* compiler emitted,
     // and replaying a previous compiler's would be exactly the stale splice this cache must not do.
+    // With `--fn-cache-id` the driver has named the compiler by its content, and a binary renamed
+    // into place again (same bytes, new time) is the same compiler.
+    if c.fn_id.len() != 0 {
+        return fncache::hash(view(out));
+    }
     exe := host::exe_path();
     push_bytes(&mut out, view("exe "));
     push_bytes(&mut out, view(exe));
@@ -44189,6 +44194,7 @@ pub fn main() -> u64 {
         fn_at_off: 0,
         fn_at_line: 1,
         fn_at_col: 1,
+        shift_decls: 0,
         fn_hits: 0,
         fn_filed: 0,
         fn_kept: 0,
@@ -44352,6 +44358,22 @@ pub fn main() -> u64 {
             }
             c.iface_only.push(host::arg(offset + 2));
             exchange(&mut c.iface_only_on, 1);
+            offset += 2;
+        } else if same(view(option), view("--shift-declarations")) {
+            // A test switch (`tools/test-native.mjs --unit-identity`): synthesise this many tuple
+            // declarations before the first body, so every declaration a body synthesises gets a
+            // different index than it would. The assembly must not change: a body's text may not
+            // depend on how many declarations exist, which is what lets a unit be compiled apart from
+            // the bodies before it (docs/design/incremental-compilation.md).
+            if argc < offset + 3 {
+                fail_option(&mut c, view("--shift-declarations needs a count"));
+            }
+            words := host::arg(offset + 2);
+            mut n = 0;
+            for i in words.len() {
+                n = n * 10 + u64(words[i] - 48);
+            }
+            exchange(&mut c.shift_decls, n);
             offset += 2;
         } else if same(view(option), view("--use-named")) {
             // Only the modules `--use-module` names are read, even when it names none.
@@ -44694,6 +44716,14 @@ pub fn main() -> u64 {
                 }
             }
             iface_emit_all(&mut c);
+        }
+        if (pass == 1) & (c.shift_decls != 0) {
+            // Largest first, so each is a new declaration.
+            for i in c.shift_decls {
+                if i < 11 {
+                    tuple_decl(&mut c, 12 - i);
+                }
+            }
         }
         if (pass == 1) & (c.fn_dir.len() != 0) {
             // The declaration surface is final once every declaration is known. Both hashes are

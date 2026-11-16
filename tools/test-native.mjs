@@ -32,7 +32,8 @@ GRAIL_TEST_RESUME=1, GRAIL_TEST_JOBS, GRAIL_BACKEND, GRAIL_VERIFY_FACTS.
 
 --unit-identity (x86_64, native backend) does not run the programs: it compiles every case that
 compiles three times - with no unit store, with an empty one, with the one the second compile
-filled - and requires the three assemblies to be byte-identical and every filed unit to replay
+filled - and requires the three assemblies to be byte-identical and every filed unit to replay; and
+once more with --shift-declarations 3, which must not change the assembly either
 (docs/design/incremental-compilation.md, "Per-function units").`;
 
 function parseArguments(argv) {
@@ -363,6 +364,12 @@ function runCase(test, position, context) {
         }
         return { bytes: readFileSync(assembly), account };
       };
+      // The declaration count is not in a unit's key because no body's text depends on it: with
+      // three tuple declarations synthesised before the first body, every later declaration index
+      // moves and the assembly must not.
+      compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', runtime, osRuntime, extra: [...caseRoots, ...(test.flags ?? []), '--shift-declarations', '3'] });
+      const shifted = readFileSync(assembly);
+      assert.ok(plain.equals(shifted), `${test.name}: with the declaration indices shifted the assembly changed (${describeDifference(plain, shifted)})`);
       const empty = withStore();
       const warm = withStore();
       assert.ok(plain.equals(empty.bytes), `${test.name}: with an empty unit store the assembly is not the assembly a compile with no store writes (${describeDifference(plain, empty.bytes)})`);
