@@ -178,7 +178,6 @@ first of the run. A body that trips one stays as emitted and is never filed. The
 | **synthesises a declaration** (the first tuple of a size, the first result union, a closure environment) | a replay synthesises nothing, so the bodies after it would start with a different declaration count than the run that filed them, and their keys carry it |
 | names a type with **no interface spelling**, in its signature or in a registration | a key or a registration that cannot say the type would be a guess |
 | records an **effect** | a run with effect records files no units at all |
-| is the **first body of a part** | `part()` writes the `.grail_part`/`.text` marker inside that body's bytes |
 
 Also outside this layer, as before: a generic template (it is replayed per specialisation), a
 specialisation replay, and whole runs of the shapes `fn_on` refuses - `--debug`, `--backend=llvm`,
@@ -293,6 +292,111 @@ quarter more CPU than one without (above), paid once per unit and only by a run 
 the unit covers the front end and the emitter; the optimiser has its own per-body memo
 (`one_body`), which this pass makes effective after an edit - a body's text no longer shifts when
 another body changes, so its memo entry is found - but the passes over the whole stream still run.
+
+The first body of a part used to be excluded because `part()` writes the part's marker inside its
+bytes. Its unit's text starts after the marker (the point `func` takes a unit back to, `apply_mark`),
+and a hit or a worker's unit opens the part before it is applied, so since the parallel-bodies pass
+the first body is a unit like any other.
+
+## Parallel bodies
+
+**Implemented** (2026-11-16, branch `gaps12-parbodies`). A unit is a value produced by compiling one
+body and applied to the run by `fn_apply`, so the bodies of one module can be produced by several
+processes and applied by one.
+
+- **The shape.** After the declaration passes (`par_start`, called before pass 3 walks the files),
+  the module's source is cut into slices of about equal size, counted in bytes over the files in
+  order. The process forks one worker per slice after the first; the copies share its memory until
+  they write, so they start with every declaration, signature, interface and the declaration
+  surface. Each worker walks pass 3 like the parent, compiles the bodies of its slice into units -
+  keying, loading from the store and filing exactly as one process does - and skips every other
+  body the way a hit does (it opens the part and spends the function's ordinal, so its labels are
+  numbered as the parent's). It keeps what it made in memory and writes it to its pipe once, when
+  it has walked past its slice, so it never waits on the parent while it compiles.
+- **The parent** compiles the first slice itself and, as its walk reaches each later body, reads
+  that worker's stream (once, the first time it needs it) and applies the unit the worker sent if
+  its key is the key the parent computes for the body - the route a cache hit takes. A body a
+  worker reported as not a unit (a closure, a vtable, ...: the rules above), or one whose key does
+  not match, the parent compiles itself, in place. The walk, its counters and its registrations are
+  therefore the ones a single process has, and the output is byte-identical at any worker count.
+- **Diagnostics.** Today a body's error is printed by `fail`, and `next_error` runs the compile
+  again with that body skipped to report the next one (up to 20 runs); an error outside a body ends
+  the compile. A worker never reports: `fail` in a worker exits at once. The parent finds the
+  stream short (or the status non-zero), collects every worker, says so under `GRAIL_DEBUG` ("the
+  rest of this module is compiled in one process"), and compiles every remaining body itself - so
+  the first error, the re-runs, the text, the order and the exit status are exactly one process's.
+  A re-run with `--skip-body` does not fork. `tools/jobs-test.mjs` (d) checks three errors spread
+  over a 1000-function module, for `grail check` and for a compile.
+- **Check runs.** `--check` walks the same way (it returns only before the optimiser), so it is
+  parallel too. Its workers send a unit with no text and no facts - a check writes no assembly and
+  runs no optimiser - only the key and the registrations, which the parent applies so the
+  specialisations and drop helpers the checked bodies ask for are still checked. That is everything
+  else a checked body contributes to a check run: the closures and vtables it creates are the
+  non-unit rules, so the parent checks those bodies itself, and the effect tables turn the whole
+  layer off.
+- **What else a body contributes.** Audited before this pass, by every vector `func` and what it
+  calls can push to (`c.<field>.push`): besides its text, facts and registrations a body leaves only
+  per-body state (borrow and prover state, hints, the `caddr`/`embedded`/`pointers` places, reset
+  at its entry), memos that never reach text (`caps_memo`, the interned type table, file caches),
+  the interface names a `dyn` type adds to `dyn_ifaces` (read only by `check_interfaces`, which runs
+  before any body), diagnostics (`reported`, `diag_json`: only `fail` writes them, and it ends the
+  process) and the effect tables (any effect record turns units off for the run). So the store lost
+  nothing on a hit before this pass either.
+- **The cut cannot matter.** A unit's text is a function of its key - the identity leg shows a
+  replay equals a fresh emission, and `--shift-declarations` that declaration indices do not reach
+  text - and the parent applies in source order. To make that a test rather than an argument,
+  `GRAIL_BODY_SLICE=2` forces two processes with the source cut in two and `GRAIL_BODY_SLICE=1`
+  deals the bodies out in turn, so that no process compiles two consecutive bodies;
+  `GRAIL_TEST_BODY_WORKER_DIE=1` makes the first worker die at once. The `unit-identity` leg
+  compiles every corpus program all three ways and requires the one-process bytes.
+- **When.** Not with `--debug`, the LLVM backend, `--emit-ir`, PE/Mach-O, ARM/RISC-V, `--export`,
+  a run with effect records or a `--skip-body` re-run (`par_start`'s conditions, the same shape the
+  store's units need), and not when the source is under 128 KB per worker (`PAR_MIN`): below that a
+  fork and a pipe cost more than the bodies. The worker count is `GRAIL_JOBS` or the processor
+  count, reduced to that size, and then to the tokens the jobserver has free.
+- **The parent takes a slice.** It compiles the first slice rather than waiting: measured against
+  a variant where every slice goes to a worker and the parent only applies, there was no
+  difference beyond the host's noise (self-check 6.1-8.9 s against 6.4-8.5 s, self-compile 17.4-19.0
+  s against 15.8-19.1 s, load average near 38), and the variant runs one process more, so the
+  parent keeps its slice.
+
+### The jobserver
+
+`grail build` runs one compiler process per module, each forks optimiser workers, and each now
+forks body workers: bounded by the processor count each, that is hundreds of processes on a large
+project. `compiler/jobs.grl` is one counter for the whole build, in GNU make's protocol: a fifo
+holding one byte per token, `N - 1` tokens for `N` jobs because every process owns one implicit
+token. The outermost `grail build` makes it beside its output (`OUT.jobs`, removed when the build
+ends) and names it to the processes it starts in `GRAIL_JOBSERVER`; a build started under `make -j`
+finds make's in `MAKEFLAGS` (`--jobserver-auth=fifo:PATH`) and uses it instead. The driver's
+module runs, the optimiser's workers (`run_forked`) and the body workers all take tokens from it.
+
+- A token is taken by the process that starts the work and given back by that process after it has
+  waited for the work - never by the work itself - so a worker that dies cannot lose one; the
+  optimiser's failure exit and every return of the driver give back what they hold.
+- A take never waits (`host::read_fd` with bit 62 set reads what is there and returns). A process
+  that gets no token runs fewer workers or does the work itself, so no set of processes can each
+  hold tokens while waiting for another's - a waiting take would allow that deadlock.
+- With no jobserver in the environment a process behaves as before, bounded by its own count.
+- `host::open(path, 2)` makes the fifo if it is missing and opens it for reading and writing,
+  non-blocking; pipes are close-on-exec, so a pair of descriptors would not reach the module runs.
+
+`tools/jobs-test.mjs` checks a body worker that dies (one-process bytes, the fallback said, every
+token back), a 17-run build under `GRAIL_JOBS=3` (at most 7 compiler processes at once: the driver,
+and per token one module run - its wrapper and its compiler - or one worker), and a build under a
+make-style fifo (its tokens all back afterwards). On the 24-module benchmark with `GRAIL_JOBS=4` the
+peak is 9 processes where the previous compiler ran 49.
+
+### Not yet: effects
+
+Any effect claim (`@no_alloc`, `@no_panic`) turns units off for the whole run, so a program with
+one gets neither the store's per-function layer nor parallel bodies. The effect checker records per
+body which functions it calls and whether it allocates or fails, and settles the claims over the
+whole call graph at the end (`fx_solve`). Those per-body records are exactly what a unit would
+have to carry - one summary per body: its own allocation and failure facts and its call edges -
+for the parent to put them into the effect tables on apply, as it puts the registrations. That is
+the next widening of the unit, and it is a contained one: the solver already works from the
+tables, not from the bodies.
 
 ## What a module run can now skip, per edit (the numbers `tools/cache-test.mjs` prints)
 

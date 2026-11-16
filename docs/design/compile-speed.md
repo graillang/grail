@@ -264,6 +264,32 @@ assembler; the front end has left the profile's top ten. That is the argument fo
 below: units are already values that are produced and applied separately, which is what workers
 compiling the bodies that miss need.
 
+### Bodies in parallel, and one jobserver for the build
+
+A module's function bodies are compiled by forked workers into units and applied in source order
+by the parent (`docs/design/incremental-compilation.md`, "Parallel bodies"); `grail check` the same
+way, its units carrying only registrations. One GNU-make-style jobserver per build bounds module
+runs, optimiser workers and body workers together. Integer conversions are in line: a widening is
+no code at all, on every target and backend, and a narrowing a compare and a branch.
+
+Best of three on a shared host (load average 20-40), before = 723c743, after = this pass:
+
+| | `GRAIL_JOBS=1` before | after | default before | after |
+| --- | --- | --- | --- | --- |
+| self-compile | 24.3 s | 24.8 s | 14.0 s | 11.4 s |
+| self `--check` | 10.7 s | 8.3 s | 7.5 s | 3.7 s |
+| syn4000 `grail check` | 7.4 s | 5.5 s | 5.9 s | 4.1 s |
+| syn4000 `grail build --no-cache` | 16.7 s | 14.1 s | 10.6 s | 11.0 s |
+| 24-module cold `grail build --cache` | | | 10.9-12.8 s | 10.0-12.9 s |
+
+At `GRAIL_JOBS=1` the gain is the in-line conversions alone (`rt_int_cast` was 8 % of the
+compiler's profile; 0.3 % now). At the default the self-check halves; the self-compile gains less
+because its back end - the optimiser's whole-stream passes and the assembler - is now most of it,
+and syn4000's build is one module whose optimiser workers already used the machine. The 24-module
+cold build is within noise: its modules are small enough that each runs in one process, and 24
+of them already fill 24 processors. FNV-1a over 64 MiB eight times (`bench/fnv.grl`): 3.71 s to
+0.84 s; the instructions of its 1 MiB variant, by valgrind, 1.11 G to 0.25 G.
+
 ## The order of the remaining work
 
 2. *(done: see above.)* What is left of it is `grail check` reading interfaces from the store.
