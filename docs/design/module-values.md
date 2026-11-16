@@ -21,6 +21,24 @@ changes until the decisions below are taken. Line numbers are for this branch's
 | S10 | Today's table/string constants copy on every read (probes 2, 8) | **Leave `const` a value; teach statics as the shared-table form.** Making a `string` constant's read a static view (no `rt_string_lit`) is a separate small change worth doing. |
 | S11 | Diagnostic bug found by the probes | **Fix separately**: a record- or `Mutex`-returning `NAME := f();` reports its error at `lib/result.grl:129`, not at the binding (probes 4, 5). |
 
+### Decided by the director, 2026-11-16
+
+- **S1, S2, S3, S4, S5, S7, S8, S9:** as recommended.
+- **S6, changed:** the lazy tier is built on `sync::Once` from concurrency stage 3 (branch
+  `gaps12-sync`). An initialiser that fails sends the `Once` back to empty; the failing caller is
+  contained like any task failure, and the next reader runs the initialiser again. A waiting reader
+  parks through the same parking operation. Statics get `Once`'s semantics, not a process abort, and
+  the runtime has one once-mechanism, not two. §3.3 and §3.5 below describe the superseded design
+  and are rewritten when the lazy tier is built. **The lazy tier is not built until `gaps12-sync`
+  lands.**
+- **S10:** `const` semantics stay. "A string or table constant allocates or copies on every read"
+  (probes 2, 3, 8) is a **named follow-up and a performance defect**, not only a design question:
+  `const-read-copies` in §9.
+- **S11:** yes, a separate small fix; it may go first.
+- **Go:** stage 1 (the baked tier: constant expressions and `@f()` baked into the image, the
+  interface record, the per-function cache surface, refusals, book section) and S11, on branch
+  `gaps12-statics-impl`.
+
 ## 1. What exists today
 
 ### 1.1 `const` and the module binding
@@ -355,6 +373,7 @@ Stage 3 rewrites `lib/thread.grl`'s comment and its tests to declare their `Loca
 | 3. thread-locals | after `gaps12-threads` lands: `Local` statics in `lib/thread.grl` docs/tests, threads.md "what that needs" closed | `thread-local-static-per-thread`, `thread-local-static-dropped-per-thread` | `thread-local-static-ctx-in-task-refused` (existing `Ctx` rule, now with a static) |
 | 4. baked records | run-tier serialisation of records/enums of data; migrate `cli.grl` flag table | `static-baked-record-table` | `static-baked-handle-refused` |
 | 5. prover values | baked scalar values as facts | `static-baked-value-proves-bound` | - |
+| follow-up `const-read-copies` | a `string` constant read is a static view and a table constant read is a borrow of one static object where the use only borrows (S10: the meaning of `a := TABLE` is unchanged) | probes 2 and 8 accepted under `@no_alloc` | - |
 
 Book: a new section **"Module values: `const` and `static`"** in `book/chapters/modules.md` (when to
 use which, the two tiers, the type rule, exit order), a paragraph and cross-link in
