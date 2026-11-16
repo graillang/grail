@@ -162,6 +162,25 @@
   they are not the method of the same name: `strings::chars(t)` is a lazy `iter::Iter<char>`
   (`t.chars()` is every code point at once, a `char[]`), and `vecs::contains(&v, &x)` takes any
   `hash::Equal` element (the built-in `v.contains(x)` takes integer and bool elements only).
+- Fixed: **a chain of more than eight compile-time values hung the build.** The compile that hit
+  the nesting limit re-ran itself to report its next error, up to 20 times, and inside a probe each
+  re-run repeated every probe beneath it, so the failure multiplied through the chain (12 values
+  had not finished after four minutes). A probe now stops at its first error; the same program
+  fails in half a second.
+
+- **The refinement prover knows statics and constants** (module-values stage 5): an integer static
+  or constant is its value (`small(LIMIT)` with `x < 10` and `LIMIT = 8` calls the proved entry),
+  and a baked string's or table's `.len()` is its length (`get(SQ, 3)` on an 8-element static is
+  proved), at the caller and at the callee's renamed obligation alike. A local that shadows the
+  name hides it; a value that breaks the bound proves nothing and the check stays.
+
+- **Baked statics hold records** (module-values stage 4): `static FLAGS: Flag[] = @flags();` and
+  `static BOX: Box = @make_box();` for plain records whose fields are integers, bools, strings,
+  vectors or such records again, at any depth. The run tier prints the value field by field and
+  the compiler lays it out as read-only objects (one word per field), so a read borrows it. A record
+  holding a thread-affine handle is refused as not shareable; a `NAME := f();` binding that computes
+  a record says to make it a static; enums and generic records are refused as not built yet.
+
 - Fixed (test harness): **`test-native --jobs N` made every stripe build a second compiler** - the
   parent passed its compiler as `GRAIL_COMPILER`, which `buildCompiler()` reads as the base to build
   from - all into one directory at once, and each finished build was renamed over the binary the

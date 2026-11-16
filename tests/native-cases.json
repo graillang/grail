@@ -11852,7 +11852,7 @@
     "source": "fn make() -> Mutex<u64> {\n    return Mutex(0);\n}\nLOCK := make();\nfn main() -> u64 {\n    return 0;\n}\n",
     "reject": true,
     "diagnostic": [
-      "a compile-time call must give an integer, a bool, a string, bytes or a vector of integers",
+      "a compile-time call must give an integer, a bool, a string, bytes, a vector or a plain record of those",
       "4 | LOCK := make();"
     ],
     "note": "a module binding nothing reads is computed at the end of the compile; its refusal points at the binding, not at the last file parsed (it pointed at lib/result.grl)"
@@ -11884,7 +11884,7 @@
       "tests/interfaces/table.grl"
     ],
     "interfaces": true,
-    "stdout": "12\ntrue\ntable\n55\n25\n8\n",
+    "stdout": "12\ntrue\ntable\n55\n25\n8\nlow\n-5\nhigh\n",
     "note": "a pub static read from another module, built from source and interface-first: the interface carries the static's name, type and tier, and the storage is a symbol in the declaring module's object"
   },
   {
@@ -15694,5 +15694,99 @@
       "aarch64",
       "riscv64"
     ]
+  },
+  {
+    "name": "comptime-probe-error-reported-once",
+    "source": "static T: u64 = @f();\nfn f() -> u64 {\n    return 3;\n}\nfn g() -> u64 {\n    return \"x\";\n}\nfn main() -> u64 {\n    return T;\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "type mismatch"
+    ],
+    "diagnosticCount": 1,
+    "note": "a compile-time probe stops at its first error (no reruns to find the next): the error is reported once, then the outer compile names the call. Reruns inside probes re-ran every probe beneath them, which made a failure deep in a chain exponential (docs/design/comptime-speed.md)"
+  },
+  {
+    "name": "static-baked-record-table",
+    "source": "struct Flag {\n    name: string,\n    takes_value: bool,\n    short: u8,\n    weight: i32,\n    aliases: string[]\n}\nstruct Box {\n    origin: Point,\n    sizes: u64[],\n    label: string\n}\nstruct Point {\n    x: i64,\n    y: i64\n}\nstatic FLAGS: Flag[] = @flags();\nstatic BOX: Box = @make_box();\nfn flags() -> Flag[] {\n    mut v = Flag[];\n    v.push(Flag { name: \"output\", takes_value: true, short: 111, weight: -3, aliases: string[\"out\", \"o\"] });\n    v.push(Flag { name: \"verbose\", takes_value: false, short: 118, weight: 7, aliases: string[] });\n    return v;\n}\nfn make_box() -> Box {\n    return Box { origin: Point { x: -1, y: 2 }, sizes: u64[3, 4], label: \"a\\nb\" };\n}\n@no_alloc\nfn count() -> u64 {\n    return FLAGS.len() + FLAGS[0].name.len() + FLAGS[0].aliases.len() + BOX.sizes.len();\n}\nfn main() -> u64 {\n    for i in FLAGS.len() {\n        f := FLAGS[i];\n        println(\"{} {} {} {} {}\", f.name, f.takes_value, f.short, f.weight, f.aliases.len());\n    }\n    println(FLAGS[0].aliases[1]);\n    println(BOX.origin.x);\n    println(BOX.origin.y);\n    println(BOX.sizes[1]);\n    println(BOX.label);\n    println(count());\n    return 0;\n}\n",
+    "stdout": "output true 111 -3 2\nverbose false 118 7 0\no\n-1\n2\n4\na\nb\n12\n",
+    "note": "module-values stage 4: a table of plain records (string, bool, u8, i32 and string-vector fields) and a record holding a record, a vector and a two-line string, baked by `@f()` into read-only objects (one word per field, as rt_rec lays a record out) and read by borrowing; `@no_alloc` reads through them"
+  },
+  {
+    "name": "static-baked-handle-refused",
+    "source": "handle H;\nstruct Holder {\n    h: H,\n    n: u64\n}\nstatic X: Holder = @make();\nfn make() -> Holder {\n    return Holder { h: 0, n: 1 };\n}\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "a static is reachable from every thread at once, so its type must be shareable, and `Holder` is not",
+    "note": "a record holding a thread-affine handle is not shareable, so it cannot be a static"
+  },
+  {
+    "name": "static-record-constant-refused",
+    "source": "struct P {\n    x: u64\n}\nORIGIN := origin();\nfn origin() -> P {\n    return P { x: 1 };\n}\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "which a constant cannot hold",
+    "note": "a module binding that computes a record says to make it a static"
+  },
+  {
+    "name": "static-enum-not-built",
+    "source": "enum E {\n    A,\n    B(u64)\n}\nstatic X: E = @make();\nfn make() -> E {\n    return E::A;\n}\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "an enum or a generic record is not one of them yet",
+    "note": "enums are data but not baked yet"
+  },
+  {
+    "name": "static-prover-known-values",
+    "source": "static SQ: u64[] = @squares();\nstatic LIMIT: u64 = 8;\nconst CLIMIT: u64 = 8;\nfn squares() -> u64[] {\n    mut v = u64[];\n    for i in 8 {\n        v.push(i * i);\n    }\n    return v;\n}\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn small(x: u64 where x < 10) -> u64 {\n    return x;\n}\nfn walk() -> u64 {\n    mut t = 0;\n    for i in SQ.len() {\n        t += get(SQ, i);\n    }\n    return t;\n}\nfn fixed() -> u64 {\n    return get(SQ, 3);\n}\nfn lim() -> u64 {\n    return small(LIMIT);\n}\nfn clim() -> u64 {\n    return small(CLIMIT);\n}\nfn direct() -> u64 {\n    mut t = 0;\n    for i in SQ.len() {\n        t += SQ[i];\n    }\n    return t;\n}\nfn main() -> u64 {\n    println(walk() + fixed() + lim() + clim() + direct());\n    return 0;\n}\n",
+    "stdout": "305\n",
+    "asm": [
+      {
+        "in": "f_main_walk",
+        "text": "call f_main_get.proved"
+      },
+      {
+        "in": "f_main_fixed",
+        "text": "call f_main_get.proved"
+      },
+      {
+        "in": "f_main_lim",
+        "text": "call f_main_small.proved"
+      },
+      {
+        "in": "f_main_clim",
+        "text": "call f_main_small.proved"
+      }
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "note": "module-values stage 5: the prover reads a static's name as a term (it never changes), an integer static's or constant's value as a literal, and a baked table's `.len()` as its length - so `get(SQ, i)` in `for i in SQ.len()`, `get(SQ, 3)` (SQ has 8 elements), `small(LIMIT)` and `small(CLIMIT)` (8 < 10) call the proved entries"
+  },
+  {
+    "name": "static-prover-stays-sound",
+    "source": "static SQ: u64[] = @squares();\nstatic LIMIT: u64 = 8;\nstatic BIG: u64 = 12;\nfn squares() -> u64[] {\n    mut v = u64[];\n    for i in 8 {\n        v.push(i * i);\n    }\n    return v;\n}\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn small(x: u64 where x < 10) -> u64 {\n    return x;\n}\nfn shadow() -> u64 {\n    LIMIT := 20;\n    return small(LIMIT);\n}\nfn big() -> u64 {\n    return small(BIG);\n}\nfn past() -> u64 {\n    return get(SQ, 9);\n}\nfn main() -> u64 {\n    println(get(SQ, 7));\n    println(past());\n    return 0;\n}\n",
+    "stdout": "49\n",
+    "signal": "SIGABRT",
+    "stderr": "error: refinement violated: i < v.len()\n",
+    "asmAbsent": [
+      {
+        "in": "f_main_shadow",
+        "text": "call f_main_small.proved"
+      },
+      {
+        "in": "f_main_big",
+        "text": "call f_main_small.proved"
+      },
+      {
+        "in": "f_main_past",
+        "text": "call f_main_get.proved"
+      }
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a local that shadows a static is not the static's value, a static whose value breaks the bound (12 < 10) proves nothing, and `get(SQ, 9)` on an 8-element static stays checked and fails at run time"
   }
 ]
