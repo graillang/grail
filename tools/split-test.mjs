@@ -240,6 +240,10 @@ for (const test of cases) {
 // (4) The driver: `grail build --split` must produce the same program as `grail build`.
 {
   const project = join(work, 'project');
+  // A store of this test's own, empty at the start: the per-module section below counts compiler
+  // runs, and a module restored from a store some earlier build filled has none to count.
+  process.env.GRAIL_CACHE_DIR = join(work, 'store');
+  rmSync(process.env.GRAIL_CACHE_DIR, { recursive: true, force: true });
   mkdirSync(join(project, 'src'), { recursive: true });
   writeFileSync(join(project, 'grail.toml'), '[package]\nname = "split-demo"\nversion = "0.1.0"\n');
   writeFileSync(join(project, 'src/util.grl'), 'module util;\n\npub fn twice(x: u64) -> u64 {\n    return x * 2;\n}\n\npub fn report(name: &[u8], value: u64) {\n    print(name);\n    print(" = ");\n    println(value);\n}\n');
@@ -273,6 +277,9 @@ for (const test of cases) {
   build(['--whole-program', '-o', 'target/whole']);
   build(['-o', 'target/modules']);
   // `--per-module` asked for this build before it was the default; the alias must still mean it.
+  // Its store is emptied first: the build above just filed every module, and a restored module is
+  // not a compiler run.
+  rmSync(process.env.GRAIL_CACHE_DIR, { recursive: true, force: true });
   build(['--per-module', '-o', 'target/alias']);
   const whole = run(join(project, 'target/whole'));
   const modules = run(join(project, 'target/modules'));
