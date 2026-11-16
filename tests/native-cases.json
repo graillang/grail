@@ -11577,5 +11577,168 @@
       "aarch64",
       "riscv64"
     ]
+  },
+  {
+    "name": "atomic-widths-wrap",
+    "note": "Atomic<T> for u8..u64, i8..i64 and bool on the 8-byte cell: each width wraps at its own size (a narrow add/sub is a compare-exchange loop that cuts the sum back), and fetch_min/fetch_max compare as T does at the boundaries of every width.",
+    "files": [
+      "tests/atomics/widths.grl"
+    ],
+    "stdout": "250\n4\n4\n255\n255\n255\n0\n127\n-128\n-128\n127\n127\n127\n-128\n0\n65535\n0\n0\n32768\n32767\n-32768\n32767\n32767\n-32768\n32767\n4294967295\n1\n1\n2147483648\n2147483647\n2147483647\n-2147483648\n-2147483648\n-1\n-2147483648\n18446744073709551615\n0\n0\n9223372036854775808\n9223372036854775807\n9223372036854775807\n-9223372036854775808\n-9223372036854775808\n-1\n-9223372036854775808\n0\n12\n8\n11\n244\n7\n9\n9\nfalse\ntrue\ntrue\nfalse\nfalse\ntrue\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "atomic-methods-every-order",
+    "note": "Every load, store, read-modify-write and compare-exchange name under every ordering it has, plus fences and spin_hint, in a function that is @no_alloc and @no_panic: the methods are inline atom.* ops, not runtime calls. compare_exchange_weak returns whether it stored.",
+    "files": [
+      "tests/atomics/orders.grl"
+    ],
+    "stdout": "1906\n10\nfalse\n-3\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "atomic-litmus-message-passing-and-counters",
+    "note": "Message passing (relaxed data, release flag, acquire read) over 20000 rounds, and 24 jobs counting through compare_exchange, a compare_exchange_weak retry loop, fetch_add and a 16-bit fetch_add that wraps, with fetch_min/fetch_max at the i64, u8 and i8 boundaries. Store buffering is tools/test-atomics-litmus.mjs: under qemu-aarch64 it reports instead of asserting.",
+    "files": [
+      "tests/atomics/litmus.grl"
+    ],
+    "stdout": "0\n48000\n48000\n48000\n8320\n11\n-12\n230\n232\n-77\n100\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "atomic-invalid-order-has-no-name",
+    "source": "fn main(){a:=Atomic::new(1);a.load_release();}",
+    "reject": true,
+    "diagnostic": "Atomic<u64> has no method `load_release`; the loads are load, load_relaxed and load_acquire"
+  },
+  {
+    "name": "atomic-store-acquire-has-no-name",
+    "source": "fn main(){a:=Atomic::new(u8(1));a.store_acquire(2);}",
+    "reject": true,
+    "diagnostic": "Atomic<u8> has no method `store_acquire`; the stores are store, store_relaxed and store_release"
+  },
+  {
+    "name": "atomic-bool-has-no-arithmetic",
+    "source": "fn main(){a:=Atomic::new(true);a.fetch_add(true);}",
+    "reject": true,
+    "diagnostic": "an Atomic<bool> has load, store, swap"
+  },
+  {
+    "name": "atomic-element-must-be-an-integer-or-bool",
+    "source": "fn f(a:Atomic<f64>)->u64{return 0;}fn main(){}",
+    "reject": true,
+    "diagnostic": "Atomic<T> holds u8, u16, u32, u64, i8, i16, i32, i64 or bool"
+  },
+  {
+    "name": "atomic-argument-has-the-element-type",
+    "source": "fn main(){a:=Atomic::new(u8(1));b:u64=7;a.store(b);}",
+    "reject": true
+  },
+  {
+    "name": "atomic-x86-inline-ops",
+    "note": "x86-64: a sequentially consistent load is a plain mov (stores are xchg), with no mfence; fetch_add is one lock xadd and no call; a seq_cst store is xchg.",
+    "source": "fn get<a>(c:(&a Atomic<u64>))->u64{return c.load();}fn add<a>(c:(&a Atomic<u64>))->u64{return c.fetch_add(3);}fn put<a>(c:(&a Atomic<u64>))->unit{c.store(4);}fn main(){c:=Atomic::new(1);println(add(&c));put(&c);println(get(&c));}",
+    "stdout": "1\n4\n",
+    "targets": [
+      "x86_64"
+    ],
+    "asm": [
+      {
+        "in": "f_main_get",
+        "text": "# atom.load seqcst u64\nmovq (%rdi),%rax\n"
+      },
+      {
+        "in": "f_main_add",
+        "text": "# atom.rmw add seqcst u64\nlock xaddq %rax,(%rdi)\n"
+      },
+      {
+        "in": "f_main_put",
+        "text": "# atom.store seqcst u64\nxchgq %rax,(%rdi)\n"
+      }
+    ],
+    "asmAbsent": [
+      {
+        "in": "f_main_get",
+        "text": "mfence"
+      },
+      {
+        "in": "f_main_add",
+        "text": "call"
+      }
+    ]
+  },
+  {
+    "name": "atomic-aarch64-acquire-is-ldar",
+    "note": "AArch64 v8.0: an acquire load is ldar, a release store stlr, a relaxed fetch_add an ldxr/stxr loop with no barrier.",
+    "source": "fn get<a>(c:(&a Atomic<u64>))->u64{return c.load_acquire();}fn put<a>(c:(&a Atomic<u64>))->unit{c.store_release(4);}fn add<a>(c:(&a Atomic<u64>))->u64{return c.fetch_add_relaxed(3);}fn main(){c:=Atomic::new(1);println(add(&c));put(&c);println(get(&c));}",
+    "stdout": "1\n4\n",
+    "targets": [
+      "aarch64"
+    ],
+    "asm": [
+      {
+        "in": "f_main_get",
+        "text": "ldar x9,[x0]"
+      },
+      {
+        "in": "f_main_put",
+        "text": "stlr x9,[x0]"
+      },
+      {
+        "in": "f_main_add",
+        "text": "ldxr x10,[x0]"
+      }
+    ],
+    "asmAbsent": [
+      {
+        "in": "f_main_get",
+        "text": "dmb"
+      },
+      {
+        "in": "f_main_add",
+        "text": "dmb"
+      },
+      {
+        "in": "f_main_add",
+        "text": "ldaxr"
+      }
+    ]
+  },
+  {
+    "name": "atomic-riscv64-relaxed-fetch-add-is-amoadd",
+    "note": "RV64: a relaxed fetch_add is one amoadd.d with no fence; an acquire one is amoadd.d.aq.",
+    "source": "fn add<a>(c:(&a Atomic<u64>))->u64{return c.fetch_add_relaxed(3);}fn acq<a>(c:(&a Atomic<u64>))->u64{return c.fetch_add_acquire(1);}fn main(){c:=Atomic::new(1);println(add(&c));println(acq(&c));println(c.load());}",
+    "stdout": "1\n4\n5\n",
+    "targets": [
+      "riscv64"
+    ],
+    "asm": [
+      {
+        "in": "f_main_add",
+        "text": "amoadd.d t0,t0,(a0)"
+      },
+      {
+        "in": "f_main_acq",
+        "text": "amoadd.d.aq t0,t0,(a0)"
+      }
+    ],
+    "asmAbsent": [
+      {
+        "in": "f_main_add",
+        "text": "fence"
+      }
+    ]
   }
 ]

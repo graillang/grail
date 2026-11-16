@@ -137,6 +137,120 @@ counters and from every `Atomic` in a record.
 2. AArch64 baseline v8.0 LL/SC, LSE later behind a target feature? **Recommend yes.**
 3. Is `fetch_min/max` signedness taken from `T`? **Recommend yes** (no separate `umin` name).
 
+### Stage 7: as built
+
+Branch `gaps12-atomics`. Decisions 1-3 were taken as recommended: narrow widths now, on the 8-byte
+cell; AArch64 v8.0 LL/SC with LSE later; `fetch_min`/`fetch_max` signedness from `T`.
+
+**The ops.** `native.grl` writes one line per atomic operation, with fixed registers: the cell in
+`%rdi`, the operand or expected value in `%rax`, the new value of a compare-exchange in `%rcx`, and
+the result in `%rax`.
+
+- `atom.load ORDER WIDTH`, `atom.store ORDER WIDTH`, `atom.rmw OP ORDER WIDTH`
+- `atom.cas ORDER WIDTH` and `atom.casw ORDER WIDTH` (the weak form)
+- `atom.fence ORDER` and `atom.spin`
+
+Each target lowers them in one place:
+
+- `machine.grl` `atomic_instruction` for AArch64 and RV64.
+- `machine.grl` `atomics_x86` for x86-64 ELF and PE, as the last step before the image is written.
+  Each expansion is preceded by its op as a `# atom...` comment.
+- `llvm.grl` `lift_atom`, which uses the real orderings: `load atomic ... acquire`,
+  `atomicrmw ... acq_rel`, `cmpxchg weak ... acquire acquire`.
+
+Lifted AArch64 functions carry `"target-features"="-outline-atomics"`, because clang otherwise
+calls libgcc's `__aarch64_*` helpers, and a Grail program links no libgcc.
+
+The lowering follows the table above, with these specifics:
+
+- A narrow add/sub is a CAS loop (x86), an exclusive-pair loop (AArch64) or an LR/SC loop (RV64)
+  that cuts the sum back to the width.
+- On RV64, and/or/xor/min/max/swap of every width are a single `.d` AMO, because the cell holds
+  the value extended as `T` is.
+- x86 and/or/xor/min/max are a `lock cmpxchg` loop. The "result unused, so a plain `lock and`"
+  form is not taken: the front end does not know at the call that the result is discarded.
+
+The runtime's `raw_atomic_*` intrinsics emit the same ops. So every `rt_task_wait` and
+`rt_job_await` SC load lost its `mfence`, and every acquire load its `lfence`. `rt_atomic_load`,
+`_store`, `_compare_exchange`, `_fetch_add`, `_fetch_sub` and `_swap` (and the three `_relaxed`/
+`_acquire`/`_release` forms) are deleted. The runtime's own fetch-add/sub/swap are the new
+intrinsics `raw_atomic_fetch_add`, `raw_atomic_fetch_sub` and `raw_atomic_swap`, and `raw_spin_hint`
+is new too.
+
+**The seed compiler.** The seed (`grail-c6`) does not know those four names. `runtime.grl`
+therefore defines CAS-loop functions under the same names, which the seed calls. A compiler that
+has the intrinsics never calls them, because a raw intrinsic (builtin id above 100) is no longer
+shadowed by a module function of the same name. The functions go at the next reseed.
+
+**`compare_exchange_weak` returns `bool`.** The strong form returns the value it saw, as before.
+The weak form cannot do the same: when a store-conditional fails spuriously, the value it saw *is*
+the expected one, so a caller could not tell a spurious failure from success. It therefore returns
+whether it stored, and a retry loop reloads with `load_relaxed`.
+
+Two alternatives were rejected:
+
+- Rust's shape, `-> T |? T` (`Ok(previous)` / `Err(observed)`), would allocate a result record per
+  call while enums are boxed, which defeats the operation.
+- C++'s shape, `(&mut expected, new) -> bool`, takes a local's address. The text optimiser then
+  cannot keep that local in a register, so the loop is usually slower here.
+
+**Types.** `Atomic<T>` is kind 11 with the element as its argument. `Atomic<u64>` is still
+`intern(11, 0)`, so every existing program means what it meant. The type is spelled `Atomic<T>` in
+diagnostics, keys on its element, and writes the element into interfaces, so the interface format
+is now 7. `Atomic::new(v)` takes its element from `v`, like `Mutex::new`: `Atomic::new(0)` is
+`Atomic<u64>`, and a narrow cell is `Atomic::new(u8(0))`. A literal argument to a method adopts the
+element type. `fence()`, `fence_acquire()`, `fence_release()` and `spin_hint()` are builtins
+(shadowable, as every non-raw builtin is), not a `sync` module, because the language has none.
+
+**The optimiser.** An `atom.*` line is an unknown instruction to every pass (`ir.grl` `parse`), and
+that is the barrier, whatever the ordering:
+
+- `forward` drops every slot and register fact at it.
+- `live_pass` makes every register live across it, so `dead_defs` cannot drop its inputs, and it is
+  never deleted itself.
+- A body holding one is not inlined.
+- No pass moves an instruction past another.
+
+So nothing is forwarded, merged, hoisted or dropped across any atomic op, and two relaxed ops stay
+two. Frame slots whose address escapes were already never forwarded or promoted, and those are the
+only frame memory another thread can see. `tools/test-optimiser-atomics.mjs` reads the optimised
+x86-64 assembly through the `# atom...` comments. It fails if an acquire load leaves its spin loop,
+if the relaxed read it guards moves into or before the loop, if a pointer read before an acquire is
+not read again after it, or if two relaxed loads or stores become one.
+
+**Litmus.** `tools/test-atomics-litmus.mjs` runs message passing, store buffering (seq_cst), the
+24-job CAS / weak-CAS / fetch_add counters with min/max at the boundaries, and the width test on
+x86_64, aarch64 and riscv64 under both backends: 18 of 18 pass. Store buffering found one thing.
+Under qemu-aarch64 11.1.3 on an x86 host, `stlr` followed by `ldar` can reorder, which ARMv8
+forbids. The native backend gave 3-19 forbidden outcomes per 20,000 rounds and the LLVM backend
+342-687, with LLVM's own lowering. qemu puts a barrier before the store-release and after the
+load-acquire but none between them. The lowering stays the standard `stlr`/`ldar` mapping (decided
+with the director). The test recognises qemu by the CPU it reports, implementer `0x00`, which is
+reserved for software, and reports instead of asserting there; real AArch64 hardware asserts. The
+book's concurrency chapter, "Litmus tests", lists which tests can catch a fault under qemu and which
+only on hardware.
+
+**Measured** (x86-64, `bench/atomics.grl`, same source built by the compiler before and after).
+Instructions per iteration come from callgrind, as the slope between 100,000 and 200,000
+iterations; an empty loop iteration is 10.1. Wall time is the median of five runs on a heavily
+loaded 24-CPU machine.
+
+| op | instructions before | instructions after | ns/op before | ns/op after |
+|---|---|---|---|---|
+| `load` (SC) | 26.0 | 17.0 | 15.4 | 1.39 |
+| `load_acquire` | 26.0 | 17.0 | 7.65 | 1.26 |
+| `store` (SC, `xchg` both) | 25.0 | 13.0 | 1.82 | 1.99 |
+| `store_release` | 26.0 | 13.0 | 1.57 | 1.00 |
+| `fetch_add` | 53.1 | 17.1 | 18.5 | 1.84 |
+| `swap` | 50.1 | 17.1 | 17.7 | 2.01 |
+| `compare_exchange` | 36.1 | 24.1 | 2.41 | 2.09 |
+| Mutex `lock_with` round trip | 213.0 | 176.0 | 42.7 | 11.4 |
+| `fetch_add`, 24 jobs on one cell | - | - | 45.1 | 10.7 |
+
+The SC load was a call and an `mfence`, and `fetch_add`/`swap` were a call and a CAS loop; each is
+now one instruction. The Mutex round trip gains through `rt_mutex_unlock`'s `fetch_sub`, now a
+`lock xadd`. The SPSC ring (2M items) is too noisy on this machine to quote.
+
 ## Stage 6: blocking foreign calls
 
 ### What exists

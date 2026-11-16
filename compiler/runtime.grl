@@ -2595,40 +2595,23 @@ fn rt_append_text(dst: u64, src: u64) -> u64 {
 }
 
 // Opaque atomic words. Public safe types never expose these numeric addresses.
+// The cell of an `Atomic<T>`: one word holding the value extended to 64 bits. Its methods are the
+// `atom.*` ops at the call site (native.grl `atomic_method`), not calls into the runtime. The cell
+// is published by whatever hands its owner to another thread, so the first store is relaxed.
 fn rt_atomic_new(value: u64) -> u64 {
     p := rt_alloc(8);
-    raw_atomic_store(p, value);
+    raw_atomic_store_relaxed(p, value);
     return p;
 }
-fn rt_atomic_load(p: u64) -> u64 {
-    return raw_atomic_load(p);
-}
-fn rt_atomic_load_relaxed(p: u64) -> u64 {
-    return raw_atomic_load_relaxed(p);
-}
-fn rt_atomic_load_acquire(p: u64) -> u64 {
-    return raw_atomic_load_acquire(p);
-}
-fn rt_atomic_store(p: u64, value: u64) -> u64 {
-    raw_atomic_store(p, value);
-    return 0;
-}
-fn rt_atomic_store_relaxed(p: u64, value: u64) -> u64 {
-    raw_atomic_store_relaxed(p, value);
-    return 0;
-}
-fn rt_atomic_store_release(p: u64, value: u64) -> u64 {
-    raw_atomic_store_release(p, value);
-    return 0;
-}
-fn rt_atomic_compare_exchange(p: u64, expected: u64, value: u64) -> u64 {
-    return raw_atomic_cas(p, expected, value);
-}
-fn rt_atomic_fetch_add(p: u64, value: u64) -> u64 {
+
+// Bootstrap fallbacks for the seed compiler, which predates the `raw_atomic_fetch_add`,
+// `raw_atomic_fetch_sub` and `raw_atomic_swap` intrinsics: built by it, these are the calls; built
+// by a compiler that has the intrinsics, the name is the intrinsic (a raw intrinsic is never
+// shadowed, native.grl) and these bodies are never called. Delete them at the next reseed.
+fn raw_atomic_fetch_add(p: u64, value: u64) -> u64 {
     mut old = raw_atomic_load(p);
     while true {
-        next := wrapping_add(old, value);
-        observed := raw_atomic_cas(p, old, next);
+        observed := raw_atomic_cas(p, old, wrapping_add(old, value));
         if observed == old {
             return old;
         }
@@ -2636,11 +2619,10 @@ fn rt_atomic_fetch_add(p: u64, value: u64) -> u64 {
     }
     return 0;
 }
-fn rt_atomic_fetch_sub(p: u64, value: u64) -> u64 {
+fn raw_atomic_fetch_sub(p: u64, value: u64) -> u64 {
     mut old = raw_atomic_load(p);
     while true {
-        next := wrapping_sub(old, value);
-        observed := raw_atomic_cas(p, old, next);
+        observed := raw_atomic_cas(p, old, wrapping_sub(old, value));
         if observed == old {
             return old;
         }
@@ -2648,7 +2630,7 @@ fn rt_atomic_fetch_sub(p: u64, value: u64) -> u64 {
     }
     return 0;
 }
-fn rt_atomic_swap(p: u64, value: u64) -> u64 {
+fn raw_atomic_swap(p: u64, value: u64) -> u64 {
     mut old = raw_atomic_load(p);
     while true {
         observed := raw_atomic_cas(p, old, value);
@@ -2669,7 +2651,7 @@ fn rt_mutex_new(value: u64) -> u64 {
     return p;
 }
 fn rt_mutex_unlock(p: u64) -> u64 {
-    if rt_atomic_fetch_sub(p, 1) != 1 {
+    if raw_atomic_fetch_sub(p, 1) != 1 {
         raw_atomic_store(p, 0);
         rt_syscall(202, p, 129, 1);
     }
@@ -3416,7 +3398,7 @@ fn rt_worker_self() -> u64 {
 // read the sequence before looking for work either finds the new work or its wait fails with the
 // changed value, so no wake can be lost even when the parked count read is stale.
 fn rt_notify(s: u64) -> u64 {
-    rt_atomic_fetch_add(s + 24, 1);
+    raw_atomic_fetch_add(s + 24, 1);
     if raw_atomic_load(s + 96) != 0 {
         rt_syscall(202, s + 24, 129, 1);
     }
@@ -3581,9 +3563,9 @@ fn rt_worker_loop(worker: u64) -> u64 {
         // more times before sleeping was measured and did not pay: bench/sched.grl got slower.)
         seq := raw_atomic_load(s + 24);
         if rt_worker_step(s, worker) == 0 {
-            rt_atomic_fetch_add(s + 96, 1);
+            raw_atomic_fetch_add(s + 96, 1);
             rt_syscall(202, s + 24, 128, seq);
-            rt_atomic_fetch_sub(s + 96, 1);
+            raw_atomic_fetch_sub(s + 96, 1);
         }
     }
     return 0;
@@ -3639,7 +3621,7 @@ fn rt_worker_run(s: u64, w: u64, t: u64) -> u64 {
         rt_os_ctx_release(t);
         raw_atomic_store(t + 96, 1);
         rt_syscall(202, t + 96, 129, 2147483647);
-        joiner := rt_atomic_swap(t + 88, 1);
+        joiner := raw_atomic_swap(t + 88, 1);
         if 1 < joiner {
             rt_wake(joiner);
         }
@@ -3940,7 +3922,7 @@ fn rt_job_exec(r: u64) -> u64 {
     return rt_job_publish(r);
 }
 fn rt_job_publish(r: u64) -> u64 {
-    old := rt_atomic_swap(r + 32, 3);
+    old := raw_atomic_swap(r + 32, 3);
     if old == 4 {
         rt_syscall(202, r + 32, 129, 2147483647);
     } else if 4095 < old {
@@ -4520,11 +4502,11 @@ fn rt_mutex_lock(p: u64) -> u64 {
         return 0;
     }
     if state != 2 {
-        state = rt_atomic_swap(p, 2);
+        state = raw_atomic_swap(p, 2);
     }
     while state != 0 {
         rt_syscall(202, p, 128, 2);
-        state = rt_atomic_swap(p, 2);
+        state = raw_atomic_swap(p, 2);
     }
     return 0;
 }
@@ -4721,7 +4703,7 @@ fn rt_task_fail(text: u64) -> u64 {
 // already released their own stack, so this is a no-op there.
 fn rt_task_reap(t: u64) -> u64 {
     if rt_task_threads() {
-        h := rt_atomic_swap(t + 152, 0);
+        h := raw_atomic_swap(t + 152, 0);
         if h != 0 {
             rt_thread_join(h);
         }
@@ -7699,13 +7681,13 @@ fn rt_prof_handler(sig: u64, info: u64, ctx: u64) -> u64 {
     if page == 0 {
         return 0;
     }
-    i := rt_atomic_fetch_add(page + 24, 1);
+    i := raw_atomic_fetch_add(page + 24, 1);
     if i < raw_load(page + 16) {
         // The kernel's rt_sigframe keeps the ucontext at a fixed offset from the third handler
         // argument; RIP is gregs[16] inside its sigcontext, 40 + 16 * 8.
         raw_store(raw_load(page + 8) + i * 8, raw_load(ctx + 168));
     } else {
-        rt_atomic_fetch_add(page + 32, 1);
+        raw_atomic_fetch_add(page + 32, 1);
     }
     return 0;
 }

@@ -1,0 +1,111 @@
+// Litmus tests for the atomics family (docs/design/concurrency-stages-5-7.md, "Stage 7"). Each one
+// checks an outcome the memory model forbids; a lowering that drops an ordering can produce it.
+// Store buffering is tests/atomics/litmus_sb.grl. Which of them can catch a fault under qemu (whose
+// TCG runs on a TSO host) and which only on weakly ordered hardware is recorded in
+// book/chapters/concurrency.md, "Litmus tests".
+struct Pair {
+    x: Atomic<u64>,
+    y: Atomic<u64>,
+    seen0: Atomic<u64>,
+    bad: Atomic<u64>
+}
+const ROUNDS: u64 = 20000;
+// Message passing: data written relaxed, then a flag stored with release; the reader that sees the
+// flag with acquire must see the data.
+fn message_passing<a>(role: u64, p: (&a Pair)) -> u64 {
+    for i in ROUNDS {
+        r := i + 1;
+        if role == 0 {
+            p.x.store_relaxed(r);
+            p.y.store_release(r);
+        } else {
+            while p.y.load_acquire() != r {
+                spin_hint();
+            }
+            if p.x.load_relaxed() != r {
+                p.bad.fetch_add(1);
+            }
+            // The writer starts the next round only once this one has been read.
+            p.seen0.store_release(r);
+        }
+        if role == 0 {
+            while p.seen0.load_acquire() != r {
+                spin_hint();
+            }
+        }
+    }
+    return 0;
+}
+struct Counters {
+    cas: Atomic<u64>,
+    weak: Atomic<u64>,
+    add: Atomic<u64>,
+    narrow: Atomic<u16>,
+    high: Atomic<i64>,
+    low: Atomic<i64>,
+    uhigh: Atomic<u8>,
+    ulow: Atomic<u8>,
+    shigh: Atomic<i8>,
+    slow: Atomic<i8>
+}
+const PER_THREAD: u64 = 2000;
+fn count<a>(id: u64, c: (&a Counters)) -> u64 {
+    for i in PER_THREAD {
+        // A strong compare-exchange loop: retried with the value it saw.
+        mut seen = c.cas.load_relaxed();
+        while true {
+            prior := c.cas.compare_exchange(seen, seen + 1);
+            if prior == seen {
+                break;
+            }
+            seen = prior;
+        }
+        // A weak one, which may fail spuriously and says only whether it stored.
+        mut cur = c.weak.load_relaxed();
+        while !c.weak.compare_exchange_weak_acqrel(cur, cur + 1) {
+            cur = c.weak.load_relaxed();
+        }
+        c.add.fetch_add_relaxed(1);
+        c.narrow.fetch_add_acqrel(u16(7));
+    }
+    v := i64(id) - 12;
+    c.high.fetch_max(v);
+    c.low.fetch_min(v);
+    c.uhigh.fetch_max_release(u8(id * 10));
+    c.ulow.fetch_min_acquire(u8(255 - id));
+    c.shigh.fetch_max(i8(id) - 100);
+    c.slow.fetch_min_relaxed(i8(id) + 100);
+    return id;
+}
+fn main() {
+    p := Pair { x: Atomic::new(0), y: Atomic::new(0), seen0: Atomic::new(0), bad: Atomic::new(0) };
+    parallel_map(u64[0, 1], &p, message_passing);
+    println(p.bad.load());
+    c := Counters {
+        cas: Atomic::new(0),
+        weak: Atomic::new(0),
+        add: Atomic::new(0),
+        narrow: Atomic::new(u16(0)),
+        high: Atomic::new(i64(-9223372036854775808)),
+        low: Atomic::new(i64(9223372036854775807)),
+        uhigh: Atomic::new(u8(0)),
+        ulow: Atomic::new(u8(255)),
+        shigh: Atomic::new(i8(-128)),
+        slow: Atomic::new(i8(127)),
+    };
+    mut ids = u64[];
+    for i in 24 {
+        ids.push(i);
+    }
+    parallel_map(ids, &c, count);
+    println(c.cas.load());
+    println(c.weak.load());
+    println(c.add.load());
+    println(c.narrow.load());
+    println(c.high.load());
+    println(c.low.load());
+    println(c.uhigh.load());
+    println(c.ulow.load());
+    println(c.shigh.load());
+    println(c.slow.load());
+}

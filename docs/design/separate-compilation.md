@@ -38,7 +38,7 @@ version, flags)`.
 
 ### Interface contents
 
-A versioned, length-counted record stream with one writer and one reader (format 6, built; see
+A versioned, length-counted record stream with one writer and one reader (format 7, built; see
 "Format 4 as built" below). This section described a line-oriented text format when it was written;
 that shape was replaced because its reader was a hand-written parser of a file the compiler had just
 written - two implementations of one format, which is exactly what the record stream removes. The
@@ -614,7 +614,7 @@ to look like. Nothing else should parse the bytes: a tool that needs to know wha
 runs the dump, and a test that needs to *corrupt* one changes a byte it located through the record
 framing (`tools/interface-test.mjs` does exactly that). The dump's shape is as stable as the format
 version: a field added to a record appears on the line of the record it belongs to, and a script that
-reads the dump sees the same grammar across format 6 files.
+reads the dump sees the same grammar across format 7 files.
 
 ### The surface, computed structurally
 
@@ -636,8 +636,8 @@ half-installed: the prologue, the framing of every record, the trailer's digest 
 
 1. **not an interface** - no `GRIF` header;
 2. **old text format** - a file that begins `// grail-interface`: `was written in the old text
-   interface format; this compiler reads interface format 6. Re-emit it with \`grail check --interface DIR\``;
-3. **wrong version** - `was written in interface format 3; this compiler reads format 6` (and, for a
+   interface format; this compiler reads interface format 7. Re-emit it with \`grail check --interface DIR\``;
+3. **wrong version** - `was written in interface format 3; this compiler reads format 7` (and, for a
    newer file, `by a newer compiler`);
 4. **truncated** - `is truncated: <record> needs N more bytes and the file ends there`, or `a record
    says it is longer than the rest of the file`;
