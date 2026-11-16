@@ -82,6 +82,14 @@ only by its forker, after it has seen the job done.
   pending again as a later job - and in that last case claiming it runs that later job exactly once,
   which is what its forker is waiting for.
 
+**Classes.** Each worker has a job deque per class (Frame, Normal, Background) and there is a job
+ring per class. A worker takes Frame work, then Normal work, then tasks, then Background work, and
+reserves one of the Background cap's slots (a CAS) before it takes a Background job; the job gives
+it back when it finishes. A job's class is its parent's; a root fork takes the class its stack was
+given by `pool::with_class` (record word 112). An entry found in a class's queue whose record now
+has another class is a stale entry naming a later job, and is skipped rather than claimed. Every
+61st step a worker looks at the injected tasks first.
+
 **Loops split by halving.** A parallel call forks the upper half of its leaves as one job and
 descends into the lower half, joining on the way back. The leaves are a function of the element
 count and the grain (`parallel_split`), or of the count alone (`parallel_map`: at most 256), never

@@ -1,5 +1,13 @@
 ## Unreleased
 
+- **Priority classes for parallel work.** `pool::with_class(pool::Class::Frame | Normal | Background,
+  f)` runs `f` with every job it forks - and every job those fork - in that class. Workers take
+  Frame work before Normal work, Normal before tasks, and tasks before Background work. At most a
+  quarter of the workers (at least one) take Background jobs at once, so an asset import cannot
+  occupy the machine when a frame's jobs arrive. Nothing is preempted. `host::background_wait_us()`
+  (and the `GRAIL_SCHED_STATS=1` line) reports how long the oldest queued Background job has
+  waited, so starvation is visible. Every 61st scheduling step looks at the injected tasks first.
+
 - **Parallel splits are by grain, and never depend on the machine.** `pool::split_mut(data, grain, f)`
   replaces `pool::chunks_mut(data, count, f)`, and `pool::split(data, grain, f)` replaces
   `pool::for_chunks(data, count, f)`: each job gets a piece of at most `grain` elements. The builtin

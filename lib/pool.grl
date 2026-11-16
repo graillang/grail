@@ -152,6 +152,27 @@ pub fn join<A:Send+Owned,B:Owned>(first:Fn<Send>()->A,second:FnMut()->B)->Pair<A
     return Pair{first:a,second:slot!};
 }
 
+// Priority classes. Frame work is taken before Normal work, and Normal before tasks and Background
+// work, on every worker; at most a quarter of the workers (at least one) run Background jobs at
+// once, so an asset import cannot occupy the machine when a frame's jobs arrive. Nothing is
+// preempted: a running Background job finishes.
+pub enum Class { Frame, Normal, Background }
+
+// Run `f` with every job it forks - and every job those fork - in `class`. The class belongs to the
+// stack doing the forking, not to each call, so a whole fork tree has one class and no pool
+// signature mentions it. `f` may run as a job of that class and is joined before this returns, so
+// it may borrow what the caller has and its captures need only be transferable.
+// `host::background_wait_us()` reports how long the oldest queued Background job has waited.
+pub fn with_class<A:Send+Owned>(class: Class, f: Fn<Send>()->A) -> A {
+    mut code = 1;
+    match class {
+        Frame => { code = 0; },
+        Normal => { code = 1; },
+        Background => { code = 2; },
+    }
+    return parallel_class(code, f);
+}
+
 // A job handle: `spawn` starts a job and returns it, `wait` takes its result. This is spawn-then-wait
 // outside a structured call, so the caller can do other work (or start a second job) between the
 // two, and the handle may outlive the frame it was made in - its captures were moved into it and its

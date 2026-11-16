@@ -3263,7 +3263,8 @@ fn rt_env_is(name: u64, value: u64) -> u64 {
 // 128..208 the job deque, laid out as the task deque is from word 0 (buffer, head, tail, mask, and
 //     the capacity at +80), so the same three deque functions serve both
 // 224 this worker's runner (0 none)  232 the job handed to the runner  240 free job records
-// 248 their count  264 help-depth high-water mark
+// 248 their count  264 help-depth high-water mark  272 steps taken (the fairness tick)
+// 512..592 the Frame job deque, 640..720 the Background job deque (the Normal one is at 128)
 //
 // The deque is a Chase-Lev deque with a fixed capacity (rt_deque_capacity, 131072 entries): the
 // owner pushes and pops at the bottom, a thief steals at the top with a CAS on the head. A fixed
@@ -3314,7 +3315,7 @@ fn rt_sched() -> u64 {
             raw_store(array + i * 8, rt_sched_worker_new(made, i));
             i += 1;
         }
-        rt_jobs_create();
+        rt_jobs_create(workers);
         // Workers start only once the array and the rings they are reachable through are complete,
         // and the block is published first: rt_sched's other callers spin on word 72.
         raw_atomic_store(state + 72, made);
@@ -3399,6 +3400,21 @@ fn rt_sched_worker_new(s: u64, index: u64) -> u64 {
     raw_store(w + 128, jobs);
     raw_store(w + 152, rt_job_deque_capacity() - 1);
     raw_store(w + 208, rt_job_deque_capacity());
+    // The Frame and Background deques, laid out like the Normal one.
+    mut c = 0;
+    while c < 3 {
+        if c != 1 {
+            d := rt_job_deque(w, c);
+            buf := raw_map(rt_job_deque_capacity() * 8);
+            if rt_error(buf) {
+                rt_abort();
+            }
+            raw_store(d, buf);
+            raw_store(d + 24, rt_job_deque_capacity() - 1);
+            raw_store(d + 80, rt_job_deque_capacity());
+        }
+        c += 1;
+    }
     return w;
 }
 // The worker block of the calling thread, or 0 for every other thread (the main thread, the
@@ -3597,25 +3613,34 @@ fn rt_worker_loop(worker: u64) -> u64 {
 // for jobs and one for tasks, each starting at a random victim. A job is not run on the scheduler
 // stack: it is handed to the worker's runner (rt_runner_main).
 fn rt_worker_step(s: u64, w: u64) -> u64 {
-    mut j = rt_deque_pop(w + 128);
+    // Every 61st step looks at the task ring first, so a worker that keeps finding its own work
+    // cannot leave injected tasks (wakes from the reactor, spawns from other threads) waiting.
+    tick := raw_load(w + 272) + 1;
+    raw_store(w + 272, tick);
+    if tick % 61 == 0 {
+        t := rt_inject_pop(s);
+        if t != 0 {
+            rt_worker_run(s, w, t);
+            return 1;
+        }
+    }
+    mut j = rt_job_take(s, w, 0);
+    if j == 0 {
+        j = rt_job_take(s, w, 1);
+    }
     if j == 0 {
         mut t = rt_deque_pop(w);
         if t == 0 {
-            j = rt_job_inject_pop();
-        }
-        if (t == 0) & (j == 0) {
             t = rt_inject_pop(s);
         }
-        if (t == 0) & (j == 0) {
-            j = rt_job_steal(s, w);
-        }
-        if (t == 0) & (j == 0) {
+        if t == 0 {
             t = rt_worker_steal(s, w);
         }
         if t != 0 {
             rt_worker_run(s, w, t);
             return 1;
         }
+        j = rt_job_take_background(s, w);
     }
     if j == 0 {
         return 0;
@@ -3687,7 +3712,8 @@ fn rt_worker_run(s: u64, w: u64, t: u64) -> u64 {
 // Job record, 128 bytes: 0 function, 8/16/24 its three arguments, 32 state, 40 result,
 // 48 free-list link, 56 acknowledgement of a task waiter's wake, 64 link in its forker's stack list,
 // 72 link in its runner's stack list, 80 its failure (0: none; else a five-word record, below),
-// 120 parent (the job that was running when this one was
+// 88 1 while it holds one of the Background cap's slots, 104 when it was queued (Background only,
+// microseconds), 112 its class (0 Frame, 1 Normal, 2 Background), 120 parent (the job that was running when this one was
 // forked, 0 at a root).
 // State: 0 free, 1 pending, 3 done, 4 claimed with an OS thread asleep on this word, 2 claimed by a
 // thread that is not a worker, 8 * (i + 1) claimed by worker i (so a waiter knows whose deque the
@@ -3733,17 +3759,38 @@ fn rt_worker_run(s: u64, w: u64, t: u64) -> u64 {
 // Jobs block (raw_state()+3200, raw_map): 0 ring lock, 8 ring head, 16 ring tail, 80 ring, 88 ring
 // capacity (the layout rt_inject_pop reads); 24 lock of the lists below, 32 free job records,
 // 40 carve pointer, 48 carve bytes left, 56 free runner records, 64 a word that stays zero (a
-// runner's cancel token), 104 workers started (thread-per-task mode).
+// runner's cancel token), 104 workers started (thread-per-task mode); the Frame ring at 128 and the
+// Background ring at 256, laid out like the Normal one at 0; 400 Background jobs running, 408 the
+// cap on them (background_cap).
+//
+// CLASSES. A job is Frame (0), Normal (1) or Background (2), in record word 112. Each worker has a
+// deque per class and there is a ring per class. A worker takes Frame work, then Normal work, then
+// tasks, then Background work - strictly - and starts a Background job only while fewer than the cap
+// are running. A job takes its parent's class (the job running on the stack that forked it); a root
+// fork takes the class the stack was given by pool::with_class (parallel_class), else Normal. A
+// queue entry is a hint (above), so an entry found in class X's queue whose record now says another
+// class is a stale entry naming a later job: it is skipped, never claimed, which keeps every job at
+// its own priority - its live entry is in its own class's queue, or its forker takes it back.
 fn rt_job_deque_capacity() -> u64 {
     return 8192;
 }
-fn rt_jobs_create() -> u64 {
+fn rt_jobs_create(workers: u64) -> u64 {
     j := raw_map(4096);
     if rt_error(j) {
         rt_abort();
     }
-    raw_store(j + 80, raw_map(65536));
-    raw_store(j + 88, 8192);
+    mut c = 0;
+    while c < 3 {
+        ring := rt_job_ring_at(j, c);
+        raw_store(ring + 80, raw_map(65536));
+        raw_store(ring + 88, 8192);
+        c += 1;
+    }
+    mut cap = workers / 4;
+    if cap == 0 {
+        cap = 1;
+    }
+    raw_store(j + 408, cap);
     raw_atomic_store(rt_state_jobs(), j);
     return j;
 }
@@ -3798,6 +3845,7 @@ fn rt_job_new() -> u64 {
     }
     raw_store(r + 56, 0);
     raw_store(r + 80, 0);
+    raw_store(r + 88, 0);
     return r;
 }
 // Only the forker releases, and only a finished job (or a descriptor, whose state is held at done).
@@ -3856,6 +3904,10 @@ fn rt_job_fork(f: u64, a: u64, b: u64, c: u64) -> u64 {
     return rt_job_make(f, a, b, c, 1);
 }
 fn rt_job_make(f: u64, a: u64, b: u64, c: u64, listed: u64) -> u64 {
+    return rt_job_make_class(f, a, b, c, listed, 3);
+}
+// `class` 3: inherit (the parent's class, else the stack's, else Normal).
+fn rt_job_make_class(f: u64, a: u64, b: u64, c: u64, listed: u64, class: u64) -> u64 {
     r := rt_job_new();
     raw_store(r, f);
     raw_store(r + 8, a);
@@ -3876,11 +3928,31 @@ fn rt_job_make(f: u64, a: u64, b: u64, c: u64, listed: u64) -> u64 {
         }
     }
     raw_store(r + 120, parent);
+    mut k = class;
+    if k == 3 {
+        if parent != 0 {
+            k = raw_load(parent + 112);
+        } else if t == 0 {
+            // A thread that keeps no stack list: its with_class setting is in its thread record,
+            // word 112, as the class plus one (0: none).
+            tp := raw_tp_get();
+            k = 1;
+            if (tp != 0) && (raw_load(tp + 112) != 0) {
+                k = raw_load(tp + 112) - 1;
+            }
+        } else {
+            k = 1;
+        }
+    }
+    raw_store(r + 112, k);
+    if k == 2 {
+        raw_store(r + 104, rt_now_us());
+    }
     raw_atomic_store(r + 32, 1);
     w := rt_worker_self();
     mut placed = 0;
     if w != 0 {
-        placed = rt_deque_push(w + 128, r);
+        placed = rt_deque_push(rt_job_deque(w, k), r);
     }
     if placed == 0 {
         placed = rt_job_inject_push(r);
@@ -3890,24 +3962,96 @@ fn rt_job_make(f: u64, a: u64, b: u64, c: u64, listed: u64) -> u64 {
     }
     return r;
 }
+fn rt_job_deque(w: u64, class: u64) -> u64 {
+    if class == 0 {
+        return w + 512;
+    }
+    if class == 2 {
+        return w + 640;
+    }
+    return w + 128;
+}
+fn rt_job_ring_at(j: u64, class: u64) -> u64 {
+    if class == 0 {
+        return j + 128;
+    }
+    if class == 2 {
+        return j + 256;
+    }
+    return j;
+}
 fn rt_job_inject_push(r: u64) -> u64 {
-    j := raw_load(rt_state_jobs());
-    rt_spin_lock(j);
-    head := raw_load(j + 8);
-    tail := raw_load(j + 16);
-    if tail - head == raw_load(j + 88) {
-        rt_spin_unlock(j);
+    ring := rt_job_ring_at(raw_load(rt_state_jobs()), raw_load(r + 112));
+    rt_spin_lock(ring);
+    head := raw_load(ring + 8);
+    tail := raw_load(ring + 16);
+    if tail - head == raw_load(ring + 88) {
+        rt_spin_unlock(ring);
         return 0;
     }
-    raw_store(raw_load(j + 80) + (tail % raw_load(j + 88)) * 8, r);
-    raw_atomic_store_release(j + 16, tail + 1);
-    rt_spin_unlock(j);
+    raw_store(raw_load(ring + 80) + (tail % raw_load(ring + 88)) * 8, r);
+    raw_atomic_store_release(ring + 16, tail + 1);
+    rt_spin_unlock(ring);
     return 1;
 }
-fn rt_job_inject_pop() -> u64 {
-    return rt_inject_pop(raw_load(rt_state_jobs()));
+// The next entry of class `class` from this worker's own deque, the class's ring, or a steal - in
+// that order - skipping stale entries whose record is now another class.
+fn rt_job_take(s: u64, w: u64, class: u64) -> u64 {
+    while true {
+        r := rt_deque_pop(rt_job_deque(w, class));
+        if r == 0 {
+            break;
+        }
+        if raw_load(r + 112) == class {
+            return r;
+        }
+    }
+    ring := rt_job_ring_at(raw_load(rt_state_jobs()), class);
+    while true {
+        r := rt_inject_pop(ring);
+        if r == 0 {
+            break;
+        }
+        if raw_load(r + 112) == class {
+            return r;
+        }
+    }
+    return rt_job_steal(s, w, class);
 }
-fn rt_job_steal(s: u64, w: u64) -> u64 {
+// Background work, if fewer than the cap are running.
+// A worker reserves one of the cap's slots before it takes a Background job (a CAS, so two workers
+// cannot both take the last one) and the job gives the slot back when it finishes: record word 88
+// says it holds one. Work a Background job's own stack runs while it waits - its forks, run inline
+// or helped - is not counted again: the stack already holds the slot.
+fn rt_job_take_background(s: u64, w: u64) -> u64 {
+    if rt_job_reserve_background() == 0 {
+        return 0;
+    }
+    r := rt_job_take(s, w, 2);
+    if r == 0 {
+        rt_atomic_fetch_sub(raw_load(rt_state_jobs()) + 400, 1);
+        return 0;
+    }
+    raw_store(r + 88, 1);
+    return r;
+}
+fn rt_job_reserve_background() -> u64 {
+    j := raw_load(rt_state_jobs());
+    while true {
+        running := raw_atomic_load(j + 400);
+        if raw_load(j + 408) <= running {
+            return 0;
+        }
+        if raw_atomic_cas(j + 400, running, running + 1) == running {
+            return 1;
+        }
+    }
+    return 0;
+}
+fn rt_now_us() -> u64 {
+    return f_host_now_us();
+}
+fn rt_job_steal(s: u64, w: u64, class: u64) -> u64 {
     workers := raw_load(s + 32);
     if 1 < workers {
         array := raw_load(s + 72);
@@ -3916,8 +4060,8 @@ fn rt_job_steal(s: u64, w: u64) -> u64 {
         while i < workers {
             victim := (start + i) % workers;
             if victim != raw_load(w + 40) {
-                r := rt_deque_steal(raw_load(array + victim * 8) + 128);
-                if r != 0 {
+                r := rt_deque_steal(rt_job_deque(raw_load(array + victim * 8), class));
+                if (r != 0) && (raw_load(r + 112) == class) {
                     return r;
                 }
             }
@@ -3931,6 +4075,7 @@ fn rt_job_steal(s: u64, w: u64) -> u64 {
 // task had registered as the waiter: that task is woken and then told so, because it must not carry
 // a wake that arrives after it has moved on.
 fn rt_job_exec(r: u64) -> u64 {
+    background := raw_load(r + 88) == 1;
     t := rt_job_stack();
     if t != 0 {
         raw_store(r + 72, rt_list_head(t));
@@ -3940,6 +4085,10 @@ fn rt_job_exec(r: u64) -> u64 {
     raw_store(r + 40, res);
     if t != 0 {
         rt_list_set(t, raw_load(r + 72));
+    }
+    if background {
+        raw_store(r + 88, 0);
+        rt_atomic_fetch_sub(raw_load(rt_state_jobs()) + 400, 1);
     }
     return rt_job_publish(r);
 }
@@ -4029,7 +4178,8 @@ fn rt_job_leap(s: u64, r: u64, claimed: u64) -> u64 {
     if raw_load(s + 32) <= index {
         return 0;
     }
-    v := raw_load(raw_load(s + 72) + index * 8) + 128;
+    // r's descendants are r's class, so they are in that class's deque.
+    v := rt_job_deque(raw_load(raw_load(s + 72) + index * 8), raw_load(r + 112));
     head := raw_atomic_load(v + 8);
     tail := raw_atomic_load(v + 16);
     if tail <= head {
@@ -4064,9 +4214,9 @@ fn rt_job_await(r: u64) -> u64 {
         if st == 1 {
             if raw_atomic_cas(r + 32, 1, rt_job_claim_word()) == 1 {
                 if w != 0 {
-                    k := rt_deque_pop(w + 128);
+                    k := rt_deque_pop(rt_job_deque(w, raw_load(r + 112)));
                     if (k != 0) & (k != r) {
-                        rt_deque_push(w + 128, k);
+                        rt_deque_push(rt_job_deque(w, raw_load(r + 112)), k);
                     }
                 }
                 rt_job_exec(r);
@@ -4086,7 +4236,7 @@ fn rt_job_await(r: u64) -> u64 {
                         // The record was recycled between the look and the claim: this is some
                         // other job. Give it back, where a worker will find it.
                         raw_atomic_store(k + 32, 1);
-                        if rt_deque_push(w + 128, k) == 0 {
+                        if rt_deque_push(rt_job_deque(w, raw_load(k + 112)), k) == 0 {
                             rt_job_inject_push(k);
                         }
                         rt_notify(s);
@@ -4200,6 +4350,10 @@ fn rt_job_fail(t: u64, kind: u64, a: u64, b: u64, site: u64, msg: u64, joined: u
             r := e - 1;
             e = raw_load(r + 72);
             raw_store(r + 80, f);
+            if raw_load(r + 88) == 1 {
+                raw_store(r + 88, 0);
+                rt_atomic_fetch_sub(raw_load(rt_state_jobs()) + 400, 1);
+            }
             rt_job_publish(r);
         } else {
             r := e;
@@ -4369,7 +4523,7 @@ fn rt_runner_main(t: u64, unused: u64) -> u64 {
         mut j = raw_load(w + 232);
         raw_store(w + 232, 0);
         if j == 0 {
-            j = rt_deque_pop(w + 128);
+            j = rt_job_take_own(w);
         }
         if j == 0 {
             raw_atomic_store(t + 24, 4);
@@ -4382,6 +4536,101 @@ fn rt_runner_main(t: u64, unused: u64) -> u64 {
         }
     }
     return 0;
+}
+// The next job from this worker's own deques, by class (the runner's drain): Frame, Normal, then
+// Background under the cap. Stale entries are skipped as in rt_job_take.
+fn rt_job_take_own(w: u64) -> u64 {
+    mut c = 0;
+    while c < 2 {
+        while true {
+            r := rt_deque_pop(rt_job_deque(w, c));
+            if r == 0 {
+                break;
+            }
+            if raw_load(r + 112) == c {
+                return r;
+            }
+        }
+        c += 1;
+    }
+    if rt_job_reserve_background() == 0 {
+        return 0;
+    }
+    while true {
+        r := rt_deque_pop(rt_job_deque(w, 2));
+        if r == 0 {
+            break;
+        }
+        if raw_load(r + 112) == 2 {
+            raw_store(r + 88, 1);
+            return r;
+        }
+    }
+    rt_atomic_fetch_sub(raw_load(rt_state_jobs()) + 400, 1);
+    return 0;
+}
+// How long the oldest queued Background job has waited, in microseconds (0: none queued). Entries
+// are read without locks: records never go away, a stale entry is filtered by state and class, and
+// the answer is a statistic, not a decision.
+fn rt_background_wait_us() -> u64 {
+    s := raw_atomic_load(raw_state() + 72);
+    if s == 0 {
+        return 0;
+    }
+    j := raw_load(rt_state_jobs());
+    now := rt_now_us();
+    mut oldest = 0;
+    workers := raw_load(s + 32);
+    mut i = 0;
+    while i <= workers {
+        mut d = 0;
+        if i < workers {
+            d = rt_job_deque(raw_load(raw_load(s + 72) + i * 8), 2);
+        } else {
+            d = rt_job_ring_at(j, 2);
+        }
+        head := raw_atomic_load(d + 8);
+        tail := raw_atomic_load(d + 16);
+        mut at = head;
+        while (at < tail) & (at < head + 4096) {
+            mut slot = 0;
+            if i < workers {
+                slot = raw_load(d) + (at & raw_load(d + 24)) * 8;
+            } else {
+                slot = raw_load(d + 80) + (at % raw_load(d + 88)) * 8;
+            }
+            r := raw_load(slot);
+            if (r != 0) && (raw_atomic_load(r + 32) == 1) && (raw_load(r + 112) == 2) {
+                stamp := raw_load(r + 104);
+                if (stamp < now) && (oldest < now - stamp) {
+                    oldest = now - stamp;
+                }
+            }
+            at += 1;
+        }
+        i += 1;
+    }
+    return oldest;
+}
+fn f_host_background_wait_us() -> u64 {
+    return rt_background_wait_us();
+}
+// `parallel_class(class, f)`, which is pool::with_class: run f with forks of class `class`. On a
+// green stack f is forked as a job of that class and joined at once, which the forker does by
+// running it here (claim by pointer) unless a worker took it first; everything it forks inherits
+// the class from it. A plain thread keeps the class in its thread record for the duration.
+fn rt_parallel_class(class: u64, f: u64, env: u64) -> u64 {
+    rt_jobs_sched();
+    if rt_job_stack() != 0 {
+        r := rt_job_make_class(rt_job_call0, f, env, 0, 1, class);
+        return rt_job_join(r);
+    }
+    tp := raw_tp_get();
+    old := raw_load(tp + 112);
+    raw_store(tp + 112, class + 1);
+    res := rt_job_call0(f, env, 0);
+    raw_store(tp + 112, old);
+    return res;
 }
 // GRAIL_SCHED_STATS=1: one line on stderr at exit.
 fn rt_sched_stats() -> u64 {
@@ -4410,6 +4659,9 @@ fn rt_sched_stats() -> u64 {
     n = rt_fail_num(buf, n, workers);
     n = rt_fail_put(buf, n, ", help depth high-water ");
     n = rt_fail_num(buf, n, high);
+    n = rt_fail_put(buf, n, ", oldest background wait ");
+    n = rt_fail_num(buf, n, rt_background_wait_us());
+    n = rt_fail_put(buf, n, " us");
     n = rt_fail_put(buf, n, "\n");
     raw_store(text + 8, n);
     rt_write_text(2, text);
