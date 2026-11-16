@@ -92,9 +92,41 @@ items.sort_by(|a: &u64, b: &u64| -> bool { *counter += 1; return *a < *b; });
 println(compares);
 ```
 
-The `pool` callbacks that run on workers (`pool::map`, `run`, `for_chunks`, `chunks_mut`, `spawn`
-and the first callback of `join`) stay `Fn`: every worker shares one closure, so a closure that
-writes its captures is refused there with the `FnMut, not Fn` message.
+The `pool` callbacks that run on workers (`pool::map`, `run`, `for_chunks`, `chunks_mut`) stay `Fn`:
+every worker shares one closure, so a closure that writes its captures is refused there with the
+`FnMut, not Fn` message.
+
+## Saying what a closure may capture
+
+A closure type can state three facts about what the closure captured, in angle brackets after `Fn`
+or `FnMut`:
+
+| Written | Means |
+|---|---|
+| `Fn<Send>(T) -> R` | every capture may move to another thread |
+| `Fn<Share>(T) -> R` | every capture may be used from several threads at once (`Fn` only) |
+| `Fn<Owned>(T) -> R` | every borrow it captured is named in its own type, so whatever keeps it carries the borrow |
+
+`Owned` precisely: every lifetime of every borrow the closure captured appears among the lifetimes
+of its own type - its parameters or its result. A closure that captures `&a Map` and returns
+`(&a K)?` is `Owned`, and an `Iter<(&a K)>` built from it keeps the map borrowed for as long as it
+lives (this is how `map.keys()` works); one that also captured `&b Other`, or any borrow of a local,
+is not. A closure that captures no borrow at all is always `Owned`.
+
+They combine (`FnMut<Send, Owned>() -> R` is what `pool::spawn` takes). They are checked where a
+closure expression meets the type - the captures are known there - and carried by the type from
+then on. A bare `Fn(..)` states none of them: it is not `Send` or `Share`, so a record with a
+`Fn(..)` field cannot cross a thread, and a parameter typed `Fn(..)` cannot be handed to one that
+asks for `Fn<Send>`:
+
+```grl
+struct Work { run: Fn<Send>() -> u64 }      // a Work may now be sent to a worker
+fn start<R: Send + Owned>(f: FnMut<Send, Owned>() -> R) -> Job<R> { return parallel_spawn(f); }
+```
+
+A type that says more is accepted where less is asked; the reverse is refused, because the value no
+longer shows its captures. A named function captures nothing and meets every bound. `Owned` is also
+a bound on a type parameter (`R: Send + Owned`): the type holds no borrow.
 
 **Try it:** use `words` again after creating `length` and read the compiler's message.
 

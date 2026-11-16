@@ -246,6 +246,24 @@ The natively built compiler, which the tests run, self-compiles in 12.6 s and ch
   list, a heap record per value. That is the unboxed-values work (docs/design/unboxed-values.md).
 - **The assembler and the linker** are most of a small edit's 0.14 s.
 
+### An edit to one function compiles one function
+
+After an edit to one body, every other body of the module is replayed from the build store's unit
+layer rather than checked and emitted again (`docs/design/incremental-compilation.md`, "Below the
+module"): a body's assembly no longer depends on the bodies before it - labels are numbered per
+function, positions count from the function's first line - and a stored body records the drop
+helpers and specialisations it asks the build for. On the compiler's own sources that is 2,707 of
+2,708 unit bodies replayed after a one-body edit (it was 927, or 711 when the edit added a line),
+and the rebuild takes about half the time of one with no store (6.9 s against 13.5 s on a shared
+host; 13.8 against 25.7 CPU seconds in one process). On syn1000 through `grail build`, 1,999 of
+2,000 bodies replay where none did, 2.7 s to 2.0 s.
+
+What an all-hit rebuild still pays is the back end's whole-stream work - the optimiser's line scan
+over text whose every body is a memo hit, the inline pass's index, the site table - and the
+assembler; the front end has left the profile's top ten. That is the argument for stages 4 and 5b
+below: units are already values that are produced and applied separately, which is what workers
+compiling the bodies that miss need.
+
 ## The order of the remaining work
 
 2. *(done: see above.)* What is left of it is `grail check` reading interfaces from the store.

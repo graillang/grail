@@ -1,0 +1,48 @@
+// A waiter with little stack left must not run other work on it. A task recurses through about
+// 85% of its 1 MiB stack and joins there; the branch it forks is stolen by another worker and forks
+// eight children, each of which recurses about 290 KiB. Those children are exactly what the waiter
+// may help with (they are its own job's work), but there is no room for one of them on what is
+// left of its stack: it must park and let the workers run them, instead of running one into the
+// guard page. Run with two workers (the case sets GRAIL_WORKERS=2): the thief and the waiter.
+use host;
+use pool;
+
+fn pad(n: u64, seed: u64) -> u64 {
+    if n == 0 { return seed; }
+    return pad(n - 1, seed) + 1;
+}
+fn child(i: u64) -> u64 {
+    return pad(6000, i) - 6000;
+}
+fn bottom(seed: u64) -> u64 {
+    started := Atomic::new(0);
+    flag := &started;
+    seen := &started;
+    p := pool::join<u64,u64>(|| -> u64 {
+        flag.store(1);
+        parts := pool::run<u64>(8, |i: u64| -> u64 child(i));
+        mut total = 0;
+        for i in parts.len() { total += parts[i]; }
+        return total;
+    }, || -> u64 {
+        // Wait until a thief has the other branch (at most a second: a busy machine must not hang).
+        t0 := host::now_ms();
+        while seen.load() == 0 && host::now_ms() - t0 < 1000 {}
+        return seed;
+    });
+    return p.first + p.second;
+}
+fn down(n: u64, seed: u64) -> u64 {
+    if n == 0 { return bottom(seed); }
+    return down(n - 1, seed) + 1;
+}
+fn task(n: u64, unused: u64) -> u64 {
+    return down(n, 0) - n;
+}
+fn body<s>(sc: (&s Scope<u64>), n: u64) -> u64 {
+    t := spawn(sc, n, task);
+    return join(t);
+}
+fn main() {
+    println(task_scope(19500, body));
+}

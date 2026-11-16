@@ -1,0 +1,67 @@
+// A record reached as an interface object four ways: an owned `dyn`, a borrow of that owned object,
+// a `&dyn` made from a `&T`, and a `&mut dyn` that writes. The method body is one function compiled
+// for the concrete record; each route must hand it the record.
+interface Shape {
+    fn area(self: &Self) -> u64;
+    fn grow(self: &mut Self, by: u64);
+    fn doubled(self: &Self) -> u64 {
+        return self.area() * 2;
+    }
+}
+struct Rect {
+    w: u64,
+    h: u64,
+    name: string
+}
+impl Shape for Rect {
+    fn area(self: &Self) -> u64 {
+        return self.w * self.h + self.name.len();
+    }
+    fn grow(self: &mut Self, by: u64) {
+        self.w = self.w + by;
+    }
+}
+impl Shape for u64 {
+    fn area(self: &Self) -> u64 {
+        return *self;
+    }
+    fn grow(self: &mut Self, by: u64) {
+        *self = *self + by;
+    }
+}
+fn through(s: &dyn Shape) -> u64 {
+    return s.area() + s.doubled();
+}
+fn widen(s: &mut dyn Shape) {
+    s.grow(10);
+}
+fn main() -> u64 {
+    mut owned: dyn Shape = Rect { w: 2, h: 3, name: "ab" };
+    println("{} {}", owned.area(), owned.doubled());
+    println(through(&owned));
+    widen(&mut owned);
+    owned.grow(1);
+    println(owned.area());
+
+    mut plain = Rect { w: 4, h: 5, name: "xyz" };
+    println(through(&plain));
+    widen(&mut plain);
+    println("{} {}", plain.w, plain.area());
+
+    mut number: dyn Shape = 7;
+    widen(&mut number);
+    println("{} {}", number.area(), through(&number));
+    mut n = 1;
+    widen(&mut n);
+    println(n);
+
+    mut many = (dyn Shape)[];
+    many.push(Rect { w: 1, h: 1, name: "" });
+    many.push(9);
+    mut total = 0;
+    for i in many.len() {
+        total = total + many[i].doubled();
+    }
+    println(total);
+    return 0;
+}

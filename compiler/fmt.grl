@@ -571,9 +571,20 @@ fn layout<a, b>(f: (&a mut F), s: &b [u8]) {
     mut header = 0;
     mut start = 1;
     mut lines = 0;
+    // Open generic brackets: a comma inside `Pair<u64, u64>` or `Fn<Send, Owned>()` separates type
+    // arguments, not the fields of the declaration it is written in.
+    mut angle = 0;
     for i in n {
         k := f.kind[i];
         c := f.code[i];
+        if (k == 4) && (f.generic[i] != 0) {
+            if c == 60 {
+                angle += 1;
+            }
+            if (c == 62) && (angle != 0) {
+                angle -= 1;
+            }
+        }
         mut top = 0;
         if stack.len() != 0 {
             top = stack[stack.len() - 1];
@@ -735,7 +746,7 @@ fn layout<a, b>(f: (&a mut F), s: &b [u8]) {
             continue;
         }
         if c == 44 {
-            if top == 2 || top == 3 {
+            if (top == 2 || top == 3) && (angle == 0) {
                 pending = 1;
                 start = 1;
             }

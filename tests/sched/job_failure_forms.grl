@@ -1,0 +1,82 @@
+// A failure inside each parallel form, called from a task, is contained at the task's try_join -
+// and the task does not stay parked. The failing leaf is often one the failing stack took back and
+// ran itself at its join; the drain once waited for that leaf too, which is waiting for itself, and
+// the task never finished (parallel_map over [0, 1, 2, 3] from a task, job 3 out of bounds).
+// Forms: parallel_map, pool::for_chunks, pool::join, and a join nested three deep.
+use host;
+use pool;
+
+fn job(i: u64, unused: u64) -> u64 {
+    if i == 3 {
+        w := u64[1];
+        return w[i];
+    }
+    return i;
+}
+fn check(i: u64) -> u64 {
+    w := u64[1];
+    return w[i];
+}
+fn by_map(n: u64, unused: u64) -> u64 {
+    out := parallel_map(u64[0, 1, 2, 3], 0, job);
+    return out.len();
+}
+fn chunk(v: u64[]) -> u64 {
+    mut total = 0;
+    for x in v { total += check(x / 100); }
+    return total;
+}
+fn by_chunks(n: u64, unused: u64) -> u64 {
+    mut v = u64[];
+    for i in 8 { v.push(i * 50); }
+    parts := pool::for_chunks<u64,u64>(v, 4, chunk);
+    return parts.len();
+}
+fn by_join(n: u64, unused: u64) -> u64 {
+    p := pool::join<u64,u64>(|| -> u64 check(5), || -> u64 0);
+    return p.first;
+}
+fn nested(depth: u64) -> u64 {
+    if depth == 0 { return check(9); }
+    p := pool::join<u64,u64>(|| -> u64 nested(depth - 1), || -> u64 depth);
+    return p.first + p.second;
+}
+fn by_nested(n: u64, unused: u64) -> u64 {
+    return nested(3);
+}
+fn report(failed: u64, what: string) {
+    if failed == 1 {
+        println("{}: contained", what);
+    } else {
+        println("{}: not contained", what);
+    }
+}
+fn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {
+    a := spawn(sc, 0, by_map);
+    match try_join(a) {
+        f: TaskFailure => report(1, "parallel_map"),
+        v: u64 => report(0, "parallel_map"),
+    }
+    b := spawn(sc, 0, by_chunks);
+    match try_join(b) {
+        f: TaskFailure => report(1, "for_chunks"),
+        v: u64 => report(0, "for_chunks"),
+    }
+    c := spawn(sc, 0, by_join);
+    match try_join(c) {
+        f: TaskFailure => report(1, "join"),
+        v: u64 => report(0, "join"),
+    }
+    d := spawn(sc, 0, by_nested);
+    match try_join(d) {
+        f: TaskFailure => report(1, "nested join"),
+        v: u64 => report(0, "nested join"),
+    }
+    return 0;
+}
+fn main() {
+    for round in 5 {
+        task_scope(0, body);
+    }
+    println("done");
+}

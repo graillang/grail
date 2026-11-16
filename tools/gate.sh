@@ -60,13 +60,26 @@ for i in 1 2 3; do leg x86_64_$i env GRAIL_TEST_SHARD=$i/3 bun tools/test-native
 for arch in aarch64 riscv64; do
   for i in 1 2 3; do leg ${arch}_$i env GRAIL_TEST_SHARD=$i/3 bun tools/test-native.mjs $arch; done
 done
+# The per-function unit store against the whole corpus: no store, an empty one, a warm one - and
+# the same with --debug - must write the same assembly (docs/design/incremental-compilation.md).
+leg unit-identity bun tools/test-native.mjs x86_64 --unit-identity --jobs 4
+# The LLVM backend on the emulated targets: the `vec` cases every gate (a minute each; generics,
+# hashmaps and threads go through the weak-symbol and atomics paths that broke there before), and one
+# third of the corpus. The third is derived from the tree being gated, not the date, so the same tree
+# always runs the same cases; the leg's name carries it, so a failure reproduces with
+# `GRAIL_BACKEND=llvm GRAIL_TEST_SHARD=<i>/3 bun tools/test-native.mjs <arch>`.
+xshard=$(( 16#$(git rev-parse 'HEAD^{tree}' | cut -c1) % 3 + 1 ))
+for arch in aarch64 riscv64; do
+  leg llvm_${arch}_vec env GRAIL_BACKEND=llvm bun tools/test-native.mjs $arch --filter vec
+  leg llvm_${arch}_shard${xshard}of3 env GRAIL_BACKEND=llvm GRAIL_TEST_SHARD=$xshard/3 bun tools/test-native.mjs $arch
+done
 for i in 1 2 3; do leg llvm_$i env GRAIL_BACKEND=llvm GRAIL_TEST_SHARD=$i/3 bun tools/test-native.mjs x86_64; done
 for i in 1 2 3; do
   leg vf_$i env GRAIL_BACKEND=llvm GRAIL_RANGE_FACTS=1 GRAIL_VERIFY_FACTS=1 GRAIL_TEST_SHARD=$i/3 bun tools/test-native.mjs x86_64
 done
 
 # Tool suites: independent of each other (each has its own .work directory).
-for t in test-selfhost test-ffi test-cli interface-test cache-test split-test test-facts test-debug-lines abundance-test borg-test grammar-test; do
+for t in test-selfhost test-ffi test-cli interface-test cache-test split-test test-facts test-optimiser-jumps test-debug-lines abundance-test borg-test grammar-test lsp-test overflow-parity-test; do
   leg $t bun tools/$t.mjs
 done
 leg windows bun tools/windows.mjs check
