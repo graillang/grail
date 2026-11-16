@@ -3972,8 +3972,7 @@ fn store_params<a>(c: (&a mut C), count: u64) -> unit {
 // codes (int_code: bits, 256 signed, 512 wrapping). The native backend emits it in line: nothing at
 // all when every value of the source fits the target, a truncation when the conversion wraps, and
 // otherwise a range test whose failing side calls `rt_int_cast` - which finds the value out of range
-// and reports it exactly as it always did. The LLVM lifter and `--emit-ir` keep the call, and so does
-// the unsafe runtime, which defines it.
+// and reports it exactly as it always did. Only the unsafe runtime, which defines it, keeps the call.
 fn int_cast<a>(c: (&a mut C), v: u64, from: u64, to: u64) -> u64 {
     fb := from & 255;
     fs := (from / 256) & 1;
@@ -3994,9 +3993,10 @@ fn int_cast<a>(c: (&a mut C), v: u64, from: u64, to: u64) -> u64 {
     if covered || ((tb == 64) && (fb == 64) && (wrap != 0)) {
         return v;
     }
-    // The rest is in line on the x86-64 native path; the LLVM lifter, `--emit-ir`, the other
-    // targets' selection and the runtime itself keep the call.
-    if (c.backend != 0) || (c.emit_ir != 0) || (c.raw != 0) || (c.target != 0) {
+    // The rest is in line on every target and backend - the word stream's compare and branch is what
+    // the other targets' selection and the LLVM lifter turn into theirs - and only the unsafe runtime,
+    // which defines `rt_int_cast`, keeps the call.
+    if c.raw != 0 {
         fv := imm(&mut c, from);
         tv := imm(&mut c, to);
         return invoke(&mut c, view("rt_int_cast"), three(v, fv, tv));
