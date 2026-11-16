@@ -21447,14 +21447,16 @@ fn static_literal_view<a>(c: (&a mut C)) -> Val {
     } else {
         o(&mut c, view(".pushsection .rodata\n"));
     }
-    o(&mut c, view(".p2align 3\n.quad 0\n.quad 2\n"));
+    // Each object starts at a multiple of 16, as an allocated block does: that is what lets the
+    // runtime tell a view's own record from a header by its address (rt_view_record).
+    o(&mut c, view(".p2align 4\n.quad 0\n.quad 2\n"));
     mark(&mut c, data);
     for i in bytes.len() {
         o(&mut c, view(".byte "));
         on(&mut c, bytes[i]);
         c.out.push(10);
     }
-    o(&mut c, view(".byte 0\n.p2align 3\n.quad 0\n.quad 2\n"));
+    o(&mut c, view(".byte 0\n.p2align 4\n.quad 0\n.quad 2\n"));
     mark(&mut c, text);
     o(&mut c, view(".quad "));
     lname(&mut c, data);
@@ -21462,7 +21464,7 @@ fn static_literal_view<a>(c: (&a mut C)) -> Val {
     on(&mut c, bytes.len());
     o(&mut c, view("\n.quad "));
     on(&mut c, bytes.len());
-    o(&mut c, view("\n.quad 0\n.quad 2\n"));
+    o(&mut c, view("\n.p2align 4\n.quad 0\n.quad 2\n"));
     mark(&mut c, desc);
     o(&mut c, view(".quad "));
     lname(&mut c, data);
@@ -38691,8 +38693,12 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                 if (kind == 3) || (kind == 4) {
                     call_out(&mut c, view("rt_drop_seq"));
                 }
-                if (kind == 5) || (kind == 11) || (kind == 27) {
+                if kind == 11 {
                     call_out(&mut c, view("rt_free"));
+                }
+                if (kind == 5) || (kind == 27) {
+                    // A view owns its record when it has one, never the header it may be instead.
+                    call_out(&mut c, view("rt_view_free"));
                 }
                 if kind == 16 {
                     o(&mut c, view("movq %r12,%rdi\n"));
