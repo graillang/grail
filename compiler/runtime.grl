@@ -66,6 +66,20 @@ fn rt_abort() -> u64 {
 // as a failed runtime check. The stack pointer is already at the guard, so a normal report that
 // walks frames could not run.
 fn rt_stack_overflow() -> u64 {
+    return rt_stack_overflow_at(0);
+}
+// The report both fault paths share: one claim, `error: stack overflow`, and the cleanup-free exit
+// at 134. `site` is the statement-table entry of the interrupted instruction, or 0 when the path
+// cannot name one - the message is printed either way, because the message is the point, and the
+// location follows it as a second line (` --> file:line:col`) in the shape every other report uses.
+// A task's stack reports its message alone, exactly as it always has; the main thread's, whose
+// frames are still intact but unreachable, names the statement it faulted in.
+//
+// Nothing is allocated here: the message goes into process-state scratch a byte at a time (a
+// literal passed as a `string` in this module would be a heap value), the location line into the
+// report block beside it, and both leave through the raw write and hard exit the one-reporter claim
+// already promises.
+fn rt_stack_overflow_at(site: u64) -> u64 {
     if rt_abort_begin() == 0 {
         rt_abort_park();
     }
@@ -77,6 +91,12 @@ fn rt_stack_overflow() -> u64 {
         n = n + 1;
     }
     rt_write_all(2, words + 16, n);
+    if site != 0 {
+        n = rt_stack_report_line(site);
+        if n != 0 {
+            rt_write_all(2, rt_stack_report_words() + 48, n);
+        }
+    }
     rt_hard_exit(134);
     return 0;
 }
@@ -638,6 +658,159 @@ fn rt_site_find(begin: u64, end: u64, addr: u64, stride: u64) -> u64 {
         if take {
             hit = e;
             hit_at = a;
+        }
+        e = e + stride;
+    }
+    return hit;
+}
+// The statement that was executing when a signal was raised, named by address instead of by
+// walking frames: the caller is a fault handler, and the stack it would walk is the one that has
+// just run out. The descriptor goes into the report block's first five words and the entry it
+// answers with is static data, so nothing is allocated and nothing on the dead stack is touched.
+// 0 when the build carries no table, the address falls outside it, or the entry names no place
+// (the runtime's own statements leave the file zero; a table written before that rule sets bit 63).
+fn rt_stack_site_for_pc(pc: u64) -> u64 {
+    if pc == 0 {
+        return 0;
+    }
+    info := rt_stack_report_words();
+    have := rt_sites_fill(info);
+    if have < 3 {
+        return 0;
+    }
+    begin := raw_load(info);
+    end := raw_load(info + 8);
+    if (begin == 0) + (end <= begin) {
+        return 0;
+    }
+    e := rt_site_find(begin, end, pc, 24);
+    if have < 5 {
+        // No function table to check against (a helper from before it existed): an entry that names
+        // a place is all there is to go on.
+        if rt_stack_site_names(e) == 0 {
+            return 0;
+        }
+        return e;
+    }
+    fbegin := raw_load(info + 24);
+    fend := raw_load(info + 32);
+    if (fbegin == 0) + (fend <= fbegin) {
+        return 0;
+    }
+    here := rt_site_find(fbegin, fend, pc, 16);
+    if here == 0 {
+        return 0;
+    }
+    if rt_stack_site_names(e) != 0 {
+        if rt_site_find(fbegin, fend, raw_load(e), 16) == here {
+            return e;
+        }
+    }
+    // The entry the fault belongs to names no place, which is how the table spells a function's
+    // entry: the prologue spills the parameters and sets up the frame, and a deep recursion usually
+    // runs its stack out right there. So the report falls forward to the first statement of the
+    // same function - the same function, because a function whose body has no statement must not
+    // borrow its neighbour's place, and the runtime's own functions have no place to borrow.
+    next := rt_site_find_next(begin, end, pc, 24);
+    if rt_stack_site_names(next) == 0 {
+        return 0;
+    }
+    if rt_site_find(fbegin, fend, raw_load(next), 16) != here {
+        return 0;
+    }
+    return next;
+}
+// Whether a statement-table entry names a place: it carries a file and is not one of the runtime's
+// own statements (written with no file; a table from before that rule sets bit 63 instead).
+fn rt_stack_site_names(e: u64) -> u64 {
+    if e == 0 {
+        return 0;
+    }
+    if raw_load(e + 8) == 0 {
+        return 0;
+    }
+    if (raw_load(e + 16) >> 63) != 0 {
+        return 0;
+    }
+    return 1;
+}
+// ` --> file:line:col` and a newline for `site`, at offset 48 of the report block, answered with
+// its length. rt_fail_line's shape, but bounded by that block instead of the failure buffer, and
+// written byte at a time for the same reason rt_bt_line is: a literal passed as a `string` here
+// would be a heap value, and this runs in a signal handler. A path that does not fit prints no line
+// at all rather than a truncated one that names a file which does not exist.
+fn rt_stack_report_line(site: u64) -> u64 {
+    buf := rt_stack_report_words() + 48;
+    cap := 192;
+    name := raw_load(site + 8);
+    mut len = 0;
+    while (raw_byte(name + len) != 0) & (len < cap) {
+        len = len + 1;
+    }
+    // " --> " (5), the path, ":line:col" (at most 22) and the newline.
+    if (cap < len) | (cap < len + 28) {
+        return 0;
+    }
+    raw_putbyte(buf, 32);
+    raw_putbyte(buf + 1, 45);
+    raw_putbyte(buf + 2, 45);
+    raw_putbyte(buf + 3, 62);
+    raw_putbyte(buf + 4, 32);
+    mut at = 5;
+    mut i = 0;
+    while i < len {
+        raw_putbyte(buf + at, raw_byte(name + i));
+        at = at + 1;
+        i = i + 1;
+    }
+    flags := raw_load(site + 16);
+    raw_putbyte(buf + at, 58);
+    at = rt_stack_report_num(buf, at + 1, cap, flags & 4294967295);
+    raw_putbyte(buf + at, 58);
+    at = rt_stack_report_num(buf, at + 1, cap, (flags >> 32) & 2147483647);
+    raw_putbyte(buf + at, 10);
+    return at + 1;
+}
+// rt_fail_num bounded by `cap` instead of the failure buffer's limit: the report block is 240
+// bytes, and a number that would not fit is left out rather than written past it.
+fn rt_stack_report_num(buf: u64, n: u64, cap: u64, v: u64) -> u64 {
+    mut digits = 0;
+    mut x = v;
+    while true {
+        digits = digits + 1;
+        x = x / 10;
+        if x == 0 {
+            break;
+        }
+    }
+    if cap < n + digits {
+        return n;
+    }
+    mut y = v;
+    mut k = digits;
+    while 0 < k {
+        k = k - 1;
+        raw_putbyte(buf + n + k, 48 + y % 10);
+        y = y / 10;
+    }
+    return n + digits;
+}
+// The table entry with the smallest address after `addr`, or 0 when none is: the statement that
+// follows a positionless entry (a function's entry, the runtime's own code), which is how a fault in
+// a prologue still finds the function it belongs to. rt_site_find's other half, with the same stride
+// convention - 24 for a statement entry, 16 for a function entry - and strict on `addr`, so an entry
+// at the fault address itself is not offered as the one after it.
+fn rt_site_find_next(begin: u64, end: u64, addr: u64, stride: u64) -> u64 {
+    mut hit = 0;
+    mut hit_at = 0;
+    mut e = begin;
+    while e < end {
+        a := raw_load(e);
+        if addr < a {
+            if (hit == 0) | (a < hit_at) {
+                hit = e;
+                hit_at = a;
+            }
         }
         e = e + stride;
     }
@@ -2228,6 +2401,8 @@ fn rt_thread_join(handle: u64) -> u64 {
 //   3456         abort report claim           rt_abort                   abort-once
 //   3464..3576   task-stack fault handler     rt_state_stack_guard       stack-guard
 //   3584         contained task failures      rt_contained              task-fail-containment
+//   3592         main thread altstack base   os-linux: rt_os_stack_guard_install_main  main-stack-overflow
+//   3600..3840   stack-fault report scratch  rt_stack_report_words      main-stack-overflow
 //   3840         Windows fiber state          os-windows                 --
 //   3856..       Windows fiber table          os-windows                 --
 //
@@ -2240,6 +2415,19 @@ fn rt_thread_join(handle: u64) -> u64 {
 // overflow. Nothing here is allocated at fault time.
 fn rt_state_stack_guard() -> u64 {
     return raw_state() + 3464;
+}
+// The stack-fault report's own scratch, written only by the fault handler and only for it: 0..40
+// the five-word site descriptor rt_sites_fill fills, 48.. the location line it builds. It sits below
+// the Windows fiber state word at 3840, so every platform sharing this block can read it, and it
+// exists because the handler may not allocate either half.
+fn rt_stack_report_words() -> u64 {
+    return raw_state() + 3600;
+}
+// The main thread's alternate signal-stack base, mapped and installed once at startup by the
+// platform module; 0 until then. It has a word of its own because the main thread has no worker
+// block to keep it in, unlike the workers rt_os_stack_guard_install installs for.
+fn rt_state_stack_alt_main() -> u64 {
+    return raw_state() + 3592;
 }
 fn rt_state_pool() -> u64 {
     return raw_state() + 3200;

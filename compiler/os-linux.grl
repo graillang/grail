@@ -242,8 +242,12 @@ fn rt_spawn_wait(paths: u64, argv: u64, envp: u64) -> u64 {
     return result;
 }
 
-// Linux keeps argv/envp from the entry stub and needs no further process setup.
+// Linux keeps argv/envp from the entry stub and needs no further process setup beyond the stack
+// fault handler: the main thread takes it, and an alternate stack to run it on, before any user code
+// can run out of stack. A program that spawns a task installs the same pair on each worker when the
+// worker starts (rt_os_sched_prepare).
 fn rt_os_init() -> u64 {
+    rt_os_stack_guard_install_main();
     return 0;
 }
 
@@ -562,8 +566,19 @@ fn rt_os_stack_guard_hit(addr: u64) -> u64 {
     }
     return (base <= addr) && (addr < base + 4096);
 }
-// Runs on the alternate stack: the faulting task stack has no room for a frame. si_addr is the
-// fourth member of the Linux siginfo_t union (offset 16 on every ELF target).
+// Runs on the alternate stack: the faulting stack has no room for a frame. si_addr is the fourth
+// member of the Linux siginfo_t union (offset 16 on every ELF target).
+//
+// Two stacks can run out and they are recognised differently. A task's stack is the runtime's own,
+// so its lowest page is PROT_NONE and the fault address lands inside it (rt_os_stack_guard_hit).
+// The main thread's stack is the kernel's - there is no page the runtime can make PROT_NONE there -
+// so the fault is recognised by its distance from the interrupted stack pointer instead
+// (rt_os_main_stack_hit), and only on a thread that is not running a task: a task's overflow is the
+// guard page's job, and a second opinion by distance would only add a way to be wrong.
+//
+// Anything else is a fault of the program's own. The default disposition is put back and the
+// handler returns, so the faulting instruction runs again and the process dies of the signal
+// exactly as it does with no handler installed.
 fn rt_os_stack_handler(sig: u64, info: u64, ctx: u64) -> u64 {
     mut addr = 0;
     if info != 0 {
@@ -572,9 +587,70 @@ fn rt_os_stack_handler(sig: u64, info: u64, ctx: u64) -> u64 {
     if rt_os_stack_guard_hit(addr) != 0 {
         rt_stack_overflow();
     }
+    if (sig == 11) & (ctx != 0) & (rt_current() == 0) {
+        if rt_os_main_stack_hit(addr, rt_os_ctx_sp(ctx)) != 0 {
+            rt_stack_overflow_at(rt_stack_site_for_pc(rt_os_ctx_pc(ctx)));
+        }
+    }
     words := rt_state_stack_guard();
     rt_syscall4(13, sig, words + 80, 0, 8);
     return 0;
+}
+// How far from the interrupted stack pointer a fault address may be and still be this stack running
+// out. 64 KiB, because a window has to hold a frame: the ordinary push faults a few bytes below sp,
+// and a function whose frame is larger than a page first touches the address it just reserved. A
+// frame that skips further than this still dies silently of its SIGSEGV, which is what it did
+// before this handler existed - the window is a diagnostic's, not a promise about what a stack can
+// hold, and it changes how much stack a program gets by nothing.
+fn rt_os_stack_fault_window() -> u64 {
+    return 65536;
+}
+// Is this fault the main thread's stack running out? The stack grows down, so the fault sits below
+// the interrupted stack pointer; a frame taken off sp puts its first touch at or a little above sp,
+// so one page upwards is admitted as well. An address anywhere else is the program's own pointer
+// and keeps the default action.
+fn rt_os_main_stack_hit(addr: u64, sp: u64) -> u64 {
+    window := rt_os_stack_fault_window();
+    if sp <= window {
+        return 0;
+    }
+    return (sp - window <= addr) && (addr < sp + 4096);
+}
+// The interrupted stack pointer and instruction pointer, out of the ucontext_t the kernel passes as
+// the handler's third argument, in the ucontext_t's own layout per target:
+//
+//   x86-64   uc_mcontext at 40:   gregs[15] RSP at 160, gregs[16] RIP at 168
+//   aarch64  uc_mcontext at 176:  sp at 432, pc at 440   (asm-generic ucontext: the sigmask comes
+//                                                        before the mcontext, which is 16-aligned)
+//   riscv64  uc_mcontext at 176:  pc at 176, sp at 192   (user_regs_struct begins pc, ra, sp)
+//
+// The numbers are offsetof() against each target's own headers, not a guess:
+//
+//   struct ucontext uc; unsigned long v[] = {offsetof(ucontext_t, uc_mcontext.gregs[REG_RSP]), ...};
+//
+// compiled by aarch64-linux-gnu-gcc and riscv64-linux-gnu-gcc and read back with readelf -x .data
+// gives 432/440 and 192/176, and x86-64's 160/168 is the pair the sampling profiler already reads
+// RIP from (rt_prof_handler). A target that is not one of these three is answered with 0, and the
+// caller then reports nothing rather than reading a field that may not be the stack pointer.
+fn rt_os_ctx_sp(ctx: u64) -> u64 {
+    t := raw_target();
+    if t == 1 {
+        return raw_load(ctx + 432);
+    }
+    if t == 2 {
+        return raw_load(ctx + 192);
+    }
+    return raw_load(ctx + 160);
+}
+fn rt_os_ctx_pc(ctx: u64) -> u64 {
+    t := raw_target();
+    if t == 1 {
+        return raw_load(ctx + 440);
+    }
+    if t == 2 {
+        return raw_load(ctx + 176);
+    }
+    return raw_load(ctx + 168);
 }
 // SA_ONSTACK | SA_SIGINFO, plus SA_RESTORER on x86-64, which requires the restorer trampoline.
 fn rt_os_stack_signal_flags() -> u64 {
@@ -592,7 +668,18 @@ fn rt_os_stack_guard_signal(sig: u64, words: u64) -> u64 {
     raw_store(sa + 24, 0);
     return rt_syscall4(13, sig, sa, 0, 8);
 }
-fn rt_os_stack_guard_install() -> u64 {
+// This thread's alternate stack: Linux sigaltstack, {sp, flags, size} at `record`.
+fn rt_os_sigaltstack(record: u64, sp: u64, size: u64) -> u64 {
+    raw_store(record, sp);
+    raw_store(record + 8, 0);
+    raw_store(record + 16, size);
+    return rt_syscall4(131, record, 0, 0, 0);
+}
+// The once-per-process half of installing, shared by every thread that installs: the restorer the
+// kernel returns through, and the zeroed SIG_DFL action the handler swaps in for a fault that is
+// not a stack overflow. Guarded by the install word, so the first thread builds it and the rest
+// wait for it rather than racing to map it twice.
+fn rt_os_stack_guard_prepare() -> u64 {
     words := rt_state_stack_guard();
     if raw_atomic_load(words + 8) != 2 {
         if raw_atomic_cas(words + 8, 0, 1) == 0 {
@@ -617,6 +704,11 @@ fn rt_os_stack_guard_install() -> u64 {
             }
         }
     }
+    return 0;
+}
+fn rt_os_stack_guard_install() -> u64 {
+    words := rt_state_stack_guard();
+    rt_os_stack_guard_prepare();
     w := rt_worker_self();
     if w != 0 {
         mut base = raw_load(w + 88);
@@ -628,15 +720,35 @@ fn rt_os_stack_guard_install() -> u64 {
                 return 0;
             }
         }
-        // Linux sigaltstack: {sp, flags, size}.
-        raw_store(w + 96, base);
-        raw_store(w + 104, 0);
-        raw_store(w + 112, 65536);
-        rt_syscall4(131, w + 96, 0, 0, 0);
+        rt_os_sigaltstack(w + 96, base, 65536);
         rt_os_stack_guard_signal(11, words);
         rt_os_stack_guard_signal(7, words);
     }
     return 0;
+}
+// The main thread installs the same handler at startup, because a program that never spawns a task
+// never reaches rt_os_sched_prepare: with no handler at all, a main-stack overflow dies of SIGSEGV
+// with empty stderr (docs/design/main-stack-overflow.md).
+//
+// The main thread has no worker block, so its alternate stack's base gets a process-state word of
+// its own, and the sigaltstack record that describes it sits in the bottom 64 bytes of that same
+// mapping: the handler's frames grow down from its top, 64 KiB above the record, so the two cannot
+// meet. Only SIGSEGV is installed here - SIGBUS is the task guard's business (a worker installs
+// both), and a main-stack overflow is a SIGSEGV on every target this covers.
+fn rt_os_stack_guard_install_main() -> u64 {
+    words := rt_state_stack_guard();
+    rt_os_stack_guard_prepare();
+    word := rt_state_stack_alt_main();
+    mut base = raw_load(word);
+    if base == 0 {
+        base = raw_map(65536);
+        if rt_error(base) != 0 {
+            return 0;
+        }
+        raw_store(word, base);
+    }
+    rt_os_sigaltstack(base, base + 64, 65536 - 64);
+    return rt_os_stack_guard_signal(11, words);
 }
 // A task's initial switch frame is what the target's switch saves, and the address it resumes into
 // is rt_green_main.
