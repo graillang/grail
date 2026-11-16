@@ -124,8 +124,39 @@ if (import.meta.main ?? process.argv[1] === new URL(import.meta.url).pathname) {
   writeFileSync(helloFile, hello);
   results.hello_check = best([compiler, 'check', helloFile], work, runs);
   report('check hello', results.hello_check);
-  results.hello_build = best([compiler, 'build', helloFile], work, runs);
-  report('build hello', results.hello_build);
+  // `build` goes through the build store by default (stage 2). Three figures, each in a store of
+  // its own so nothing outside this run is measured: a first build that finds the store empty, a
+  // rebuild after an edit, and the first build of *another* project, which is what the shared
+  // runtime and standard-library objects are for. `--no-cache` is the whole-program build.
+  const store = join(work, 'store');
+  const stored = { ...process.env, GRAIL_CACHE_DIR: store };
+  const timedIn = (argv, cwd) => {
+    const start = process.hrtime.bigint();
+    const result = spawnSync(argv[0], argv.slice(1), { cwd, encoding: 'utf8', env: stored, timeout: 1_800_000 });
+    if (result.status !== 0) throw new Error(`${argv.join(' ')} failed\n${result.stdout}${result.stderr}`);
+    return Number(process.hrtime.bigint() - start) / 1e9;
+  };
+  let cold = Infinity, edit = Infinity, other = Infinity;
+  for (let i = 0; i < runs; i++) {
+    rmSync(store, { recursive: true, force: true });
+    const a = join(work, 'project-a'), b = join(work, 'project-b');
+    for (const d of [a, b]) { rmSync(d, { recursive: true, force: true }); mkdirSync(d, { recursive: true }); }
+    writeFileSync(join(a, 'hello.grl'), hello);
+    cold = Math.min(cold, timedIn([compiler, 'build', 'hello.grl'], a));
+    writeFileSync(join(a, 'hello.grl'), hello.replace('hello, world', `hello, edit ${i}`));
+    edit = Math.min(edit, timedIn([compiler, 'build', 'hello.grl'], a));
+    writeFileSync(join(b, 'hello.grl'), hello.replace('hello, world', `another project ${i}`));
+    other = Math.min(other, timedIn([compiler, 'build', 'hello.grl'], b));
+  }
+  const round = t => Math.round(t * 1000) / 1000;
+  results.hello_build_empty_store = round(cold);
+  results.hello_build_after_edit = round(edit);
+  results.hello_build_new_project = round(other);
+  report('build hello, empty store', results.hello_build_empty_store);
+  report('build hello, after an edit', results.hello_build_after_edit);
+  report('build hello, new project', results.hello_build_new_project);
+  results.hello_build = best([compiler, 'build', helloFile, '--no-cache'], work, runs);
+  report('build hello --no-cache', results.hello_build);
 
   if (!quick) {
     const genericFile = join(work, 'generic.grl');
@@ -140,5 +171,5 @@ if (import.meta.main ?? process.argv[1] === new URL(import.meta.url).pathname) {
   if (results.exponent !== undefined) console.log(`scaling exponent log(t4000/t1000)/log 4 = ${results.exponent} (t4000/t1000 = ${results.ratio_4000_1000})`);
   console.log(`scaling exponent log(t1000/t250)/log 4 = ${results.exponent_250_1000}   (best of ${runs})`);
   writeFileSync(join(root, '.work/compile-bench.json'), JSON.stringify(results, null, 2) + '\n');
-  console.log(`compile-bench: check hello ${results.hello_check} s, t1000 ${s[1000].seconds} s${results.ratio_4000_1000 ? `, t4000/t1000 ${results.ratio_4000_1000}` : ''}${results.self_compile ? `, self-compile ${results.self_compile} s` : ''}`);
+  console.log(`compile-bench: check hello ${results.hello_check} s, build hello after an edit ${results.hello_build_after_edit} s, t1000 ${s[1000].seconds} s${results.ratio_4000_1000 ? `, t4000/t1000 ${results.ratio_4000_1000}` : ''}${results.self_compile ? `, self-compile ${results.self_compile} s` : ''}`);
 }

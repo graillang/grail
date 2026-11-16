@@ -13,6 +13,15 @@ refinement that needs the callee's code, an inferred signature) puts a floor und
 parallel builds that no later work can remove. Effects already obey it (the `effects` row of an
 interface file); new features are reviewed against it.
 
+One place breaks the rule today, and it is written down so it is not mistaken for a design: **a
+program in which any function claims `@no_alloc` or `@no_panic` is built in one compiler run**
+(`effects_claimed` in `compiler/cli.grl`), because the proof walks every body the claim can reach,
+the runtime's included. Interface files already carry an `effects` row per claimed function, so
+the fix is for a per-module run to check a call against the callee's row and for the runtime's
+functions to have rows of their own. Until then an effect claim opts a whole program out of the
+build store, which is also why the standard library does not claim effects yet: one attribute in
+`lib/` would take every program that uses that module off the fast path.
+
 ## The benchmark
 
 `bun tools/compile-bench.mjs` times the compiler, not the programs it builds. Every figure is the
@@ -87,11 +96,50 @@ index removes that; the value representation does. That is stage 3.
 The optimiser is the other half of a small build (48 % of hello world): it parses the assembly text
 the front end wrote, and then clang parses what it writes. That is stage 4.
 
+## Stage 2: the build store is the default, and it is per user
+
+Stage 2 was written down as "a precompiled runtime, platform module and `core`, shipped with the
+toolchain". Measuring first changed its shape: the per-module store `grail build --cache` already
+had (`docs/design/incremental-compilation.md`) does exactly this - one compiler run and one object
+per module, reused when nothing they are a function of moved - and it was off by default and
+private to each project. So stage 2 is two switches and one key:
+
+- **`grail build` and `grail run` go through the store by default** on the Linux targets.
+  `--no-cache` is the whole-program build; a build that is one compiler run by nature (`--debug`,
+  `--split`, `--whole-program`, `--interface`, `--emit-ir`, `--watch`) is unchanged. The default
+  build prints no cache line; `--cache` still prints its one-line report.
+- **The store is per user, not per project**: `GRAIL_CACHE_DIR`, else `$GRAIL_HOME/cache/build`,
+  else `$XDG_CACHE_HOME/grail/build`, else `$HOME/.cache/grail/build`. Every key already named the
+  compiler's own digest, the target, the flag vector and the digest of each input, so two projects
+  share exactly the entries that are the same work. The runtime, the platform module, `core` and
+  `result` are the same work for every program, which is what "shipped with the toolchain" was
+  for: the first build on a machine fills them in, and every project after that links them.
+- **A module's key also names its source path.** The object carries the path (a runtime error's
+  location), so the same text at another path is another object. Inside one project that could not
+  happen; between projects it can.
+
+Measured (best of three, each run in an empty store of its own):
+
+| hello world | before | after |
+| --- | --- | --- |
+| `build`, first on this machine | 0.72 s | 0.93 s |
+| `build` after an edit | 0.72 s | 0.15 s |
+| `build`, first build of another project | 0.72 s | 0.15 s |
+| `build`, nothing changed | 0.72 s | 0.07 s |
+| `build --no-cache` | 0.72 s | 0.73 s |
+
+The first build on a machine is slower than it was - four compiler runs instead of one - and that
+is the one build the store cannot help. What the default costs at run time was measured too,
+because a per-module build does not inline across modules: `bench/` built both ways runs the same
+(fnv 0.97, sieve 0.98, sort 1.00, nbody 0.99 as per-module time over whole-program time; the hot
+accessors are emitted inline by the front end, not by the cross-module inliner).
+
+Not done here: `grail check` still checks the runtime, the platform module and `core` from source
+every time (0.59 s for hello world). It can read their interfaces from the same store instead.
+
 ## The order of the remaining work
 
-2. **A precompiled runtime, platform module and `core`** - object plus interface, shipped with the
-   toolchain - so hello world stops paying for 7.5k lines each time. Target: `build hello` at or
-   under 0.3 s.
+2. *(done: see above.)* What is left of it is `grail check` reading interfaces from the store.
 3. **Unboxed views, records, tuples and options.** Views first: they are the allocation volume
    measured above. The one-word value assumption runs through the optimiser and every backend, so
    this has a design note of its own before any code, and a reseed per sub-stage.

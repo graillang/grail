@@ -1,5 +1,29 @@
 ## Unreleased
 
+- `hash::write_byte` states its precondition in its signature (`value: u64 where value < 256`)
+  instead of asserting it in its body: a caller that can show the value is a byte pays no check,
+  and one that cannot gets the check at its own call, named. It was the standard library's only
+  asserted precondition - the rest of `lib/` answers an out-of-range request with an option or a
+  defined result rather than requiring one.
+
+- **`grail build` reuses what it built before, by default.** A build goes through the build store
+  without `--cache`: one compiler run and one object per module, reused when nothing they depend
+  on moved. Hello world rebuilds in 0.15 s after an edit instead of 0.72 s, and in 0.07 s when
+  nothing changed. The store is now per user (`GRAIL_CACHE_DIR`, else `$XDG_CACHE_HOME/grail/build`,
+  else `~/.cache/grail/build`) rather than per project, so the runtime and standard-library objects
+  are built once per machine and a new project's first build links them (0.15 s). `--no-cache` is
+  the whole-program build; `--debug`, `--split`, `--whole-program`, `--interface`, `--emit-ir` and
+  `--watch` builds are unchanged. A program built through the store runs as fast as one built
+  whole (measured on `bench/`). `grail cache clear` and `grail cache prune` act on the per-user
+  store.
+
+- **Methods on written types, and the standard library as methods** (the postfix work): `impl<T> T[]
+  { .. }` and `impl u8[] { .. }` declare methods on a type no module declares, `&self` / `&mut
+  self` are the receiver shorthand, and `vecs`, the text helpers and the iterator adapters are
+  methods (`v.map(..)`, `it.filter(..).collect()`). A written type's methods travel in its
+  module's interface file (format 5, record `inherent_type`), so they work across separately
+  compiled modules.
+
 - **`pop()` returns an option.** `v.pop()` on a vector or a byte vector is `T?`: `Some(element)`, or
   `None` when there is nothing to take, so `while let Some(x) = v.pop() { .. }` and `if let Some(x)
   = v.pop()` replace a length test followed by a pop. `v.pop()!` is the old behaviour - the element,
