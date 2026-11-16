@@ -1621,7 +1621,11 @@ fn inline_candidate<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64) {
         name.push(s[na + x]);
     }
     unit := o.unit.copy();
-    inl_file(&mut o, name, body, unit);
+    // Filed with its positions made absolute (the copy will stand in other functions); the copy as
+    // written is what one_body remembers, since that one does not depend on where the function is.
+    absolute := ir::absolute_positions(view(body), o.gbase);
+    exchange(&mut o.inl_rel, body);
+    inl_file(&mut o, name, absolute, unit);
 }
 // Where the lines the inlining pass reads start, in `text[from..]`: a `call` and a unit marker.
 // Offsets are from the start of `text`.
@@ -1961,7 +1965,8 @@ struct Cut {
     index: u64,
     units: u8[][],
     counts: u64[],
-    plain: u64
+    plain: u64,
+    gbase: u64
 }
 fn cut_here<a>(p: (&a ir::Body), at: u64) -> Cut {
     mut units = u8[][];
@@ -1976,7 +1981,8 @@ fn cut_here<a>(p: (&a ir::Body), at: u64) -> Cut {
         index: p.uniq_index,
         units: units,
         counts: p.uniq_next.copy(),
-        plain: p.uniq_plain
+        plain: p.uniq_plain,
+        gbase: p.gbase
     };
 }
 // How many pieces: one per worker the machine has, none smaller than a megabyte of assembly (below
@@ -2045,8 +2051,8 @@ fn plan<b>(s: &b [u8], jobs: u64) -> Cut[] {
                 if opens_body(view(s), a, e) {
                     ir::function_begin(&mut p);
                     inside = true;
-                } else {
-                    ir::marker(&mut p, view(s), a, e);
+                } else if ir::marker(&mut p, view(s), a, e) == 0 {
+                    ir::gbase_line(&mut p, view(s), a, e);
                 }
             } else if closes_body(view(s), a, e) {
                 inside = false;
@@ -2081,6 +2087,8 @@ fn run_range<a, b, c, e, x>(o: (&a mut ir::Body), s: &b [u8], lo: u64, hi: u64, 
                             marks.push(o.out.len());
                             names.push(o.unit.copy());
                         }
+                    } else {
+                        ir::gbase_line(&mut o, view(s), a, e);
                     }
                     o.out.append(s[a..e + 1]);
                 }
@@ -2111,7 +2119,7 @@ fn one_body<a, b, c, e, x>(o: (&a mut ir::Body), s: &b [u8], from: u64, to: u64,
         // The key: the compiler, the unit and its label prefix, the body's ordinal in the unit
         // (its labels are numbered from it), its facts, the replayed prologue's place in it, and
         // whether the typed IR is wanted - and then the lines themselves, hashed twice.
-        mut meta = copy_text(view("grail-opt 1 "));
+        mut meta = copy_text(view("grail-opt 2 "));
         meta.append(view(o.memo_id));
         meta.push(10);
         meta.append(view(o.unit));
@@ -2145,7 +2153,7 @@ fn one_body<a, b, c, e, x>(o: (&a mut ir::Body), s: &b [u8], from: u64, to: u64,
                         name := take_text(view(kept), &mut at);
                         body_text := take_text(view(kept), &mut at);
                         unit := take_text(view(kept), &mut at);
-                        inl_file(&mut o, name, body_text, unit);
+                        inl_file(&mut o, name, ir::absolute_positions(view(body_text), o.gbase), unit);
                     }
                     count := take_word(view(kept), &mut at);
                     ir_piece := take_text(view(kept), &mut at);
@@ -2177,7 +2185,7 @@ fn one_body<a, b, c, e, x>(o: (&a mut ir::Body), s: &b [u8], from: u64, to: u64,
         if inl_mark < o.inl_names.len() {
             put_word(&mut kept, 1);
             put_text(&mut kept, view(o.inl_names[inl_mark]));
-            put_text(&mut kept, view(o.inl_bodies[inl_mark]));
+            put_text(&mut kept, view(o.inl_rel));
             put_text(&mut kept, view(o.inl_units[inl_mark]));
         } else {
             put_word(&mut kept, 0);
@@ -2276,6 +2284,7 @@ fn run_forked<a, b, c, e, x, g>(o: (&a mut ir::Body), s: &b [u8], cuts: (&g Cut[
             }
             w.uniq_next = cut.counts.copy();
             w.uniq_plain = cut.plain;
+            w.gbase = cut.gbase;
             w.memo_dir = o.memo_dir.copy();
             w.memo_id = o.memo_id.copy();
             mut wmarks = u64[];

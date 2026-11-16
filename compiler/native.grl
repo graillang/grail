@@ -423,6 +423,8 @@ struct C {
     lunits: u8[][],
     lnext: u64[],
     rnext: u64[],
+    // The line the `.gpos` markers being written count from (site_base).
+    gbase: u64,
     // A function's labels are its own: `.L<lpart>_<f>_<n>`, where `f` is the function's ordinal in
     // its unit (`fnext` counts them per unit) and `n` restarts at 1 with each function - so the text
     // of a body does not depend on how many labels the bodies before it minted, and an edit to one
@@ -1722,6 +1724,12 @@ fn record_debug_func<a, b, d>(c: (&a mut C), name: &b [u8], module: &d [u8], sit
             }
         );
     }
+    // The namespace the function's `start` and `end` labels are in, as `scoped_number` spells it.
+    mut label_space = copy_bytes(view(c.lpart));
+    if c.fscope != 0 {
+        label_space.push(95);
+        decimal(&mut label_space, c.fscope);
+    }
     c
         .debug_funcs
         .push(
@@ -1734,7 +1742,7 @@ fn record_debug_func<a, b, d>(c: (&a mut C), name: &b [u8], module: &d [u8], sit
                 end: site.end,
                 params: site.params,
                 vars: vars,
-                unit: copy_bytes(view(c.lpart))
+                unit: label_space
             }
         );
     return ();
@@ -2247,6 +2255,16 @@ fn debug_sections<a, b>(c: &a C, entry: &b [u8]) -> u8[] {
 fn site_table_on<a>(c: (&a C)) -> bool {
     return (c.plat == 0) && (c.backend == 0) && (c.debug == 0) && (c.split == 0) && (c.no_sites == 0);
 }
+// `.gbase LINE`: the line the `.gpos` markers after it count from. A function states its own first
+// line before its body, so the body's markers say how far down the function a statement is and not
+// how far down the file: a body's text is the same wherever in the file it stands.
+fn site_base<a>(c: (&a mut C), line: u64) -> unit {
+    exchange(&mut c.gbase, line);
+    o(&mut c, view(".gbase "));
+    on(&mut c, line);
+    c.out.push(10);
+    return ();
+}
 fn site_pos<a>(c: (&a mut C)) -> unit {
     p := c.pos;
     if c.toks.len() <= p {
@@ -2254,12 +2272,17 @@ fn site_pos<a>(c: (&a mut C)) -> unit {
     }
     line := c.toks[p].line;
     col := c.toks[p].col;
+    if line < c.gbase {
+        // A statement from above the function being emitted (a body replayed from another place):
+        // the base moves up to it.
+        site_base(&mut c, line);
+    }
     // The last word says whether this is the unsafe runtime (runtime.grl, os-*.grl), whose sites a
     // failure report skips to find the program's own.
     o(&mut c, view(".gpos "));
     on(&mut c, c.file);
     c.out.push(32);
-    on(&mut c, line);
+    on(&mut c, line - c.gbase);
     c.out.push(32);
     on(&mut c, col);
     c.out.push(32);
@@ -2419,6 +2442,9 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
     mut cur_file = 0;
     mut cur_line = 0;
     mut cur_col = 0;
+    // The line `.gpos` counts from, as the last `.gbase` gave it. `.gposa` is a position that does
+    // not count from it: the optimizer writes those in a body it copied out of another function.
+    mut base_line = 0;
     mut cur_internal = false;
     mut own_internal = true;
     mut seen_own = false;
@@ -2443,7 +2469,16 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
             line.push(b);
             continue;
         }
-        if site_starts(view(line), view(".gpos ")) {
+        if site_starts(view(line), view(".gbase ")) {
+            w := site_words(view(line));
+            if w.len() == 1 {
+                base_line = w[0];
+            }
+            line = u8[];
+            continue;
+        }
+        absolute := site_starts(view(line), view(".gposa "));
+        if absolute || site_starts(view(line), view(".gpos ")) {
             w := site_words(view(line));
             if w.len() == 4 {
                 internal := w[3] != 0;
@@ -2455,6 +2490,9 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
                 if !internal || own_internal {
                     cur_file = w[0];
                     cur_line = w[1];
+                    if !absolute {
+                        cur_line = base_line + w[1];
+                    }
                     cur_col = w[2];
                     cur_internal = internal;
                 }
@@ -15670,6 +15708,10 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     }
     part(&mut c, view(unit));
     scope_begin(&mut c);
+    if site_table_on(&c) && (c.validating == 0) && (position < c.toks.len()) {
+        base_line := c.toks[position].line;
+        site_base(&mut c, base_line);
+    }
     mut body_symbol = u8[];
     push_bytes(&mut body_symbol, view(export_symbol));
     if (c.target == 3) & (export == 2) {
@@ -29862,6 +29904,10 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         weak := c.closures[i].weak;
         part(&mut c, view(unit));
         scope_begin(&mut c);
+        if site_table_on(&c) && (start < c.toks.len()) {
+            base_line := c.toks[start].line;
+            site_base(&mut c, base_line);
+        }
         // A closure of a specialisation is weak like the specialisation: func_directive states the
         // binding once, so a per-module object never sees `.globl` turn `.weak`.
         mut mark = 0;
@@ -43569,6 +43615,7 @@ pub fn main() -> u64 {
         lunits: u8[][],
         lnext: u64[],
         rnext: u64[],
+        gbase: 0,
         fscope: 0,
         fnext: u64[],
         marks: u64[],
