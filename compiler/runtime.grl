@@ -127,7 +127,7 @@ fn rt_stack_overflow_at(site: u64) -> u64 {
 fn rt_fail(kind: u64, a: u64, b: u64) -> u64 {
     j := rt_job_failing();
     if j != 0 {
-        return rt_job_fail(j, kind, a, b, rt_site_here(j + 200) & 18446744073709551614, 0, 0);
+        return rt_job_fail_here(j, kind, a, b, 0);
     }
     t := rt_containable();
     if t != 0 {
@@ -136,7 +136,25 @@ fn rt_fail(kind: u64, a: u64, b: u64) -> u64 {
     if rt_abort_begin() == 0 {
         rt_abort_park();
     }
-    return rt_report_die(rt_fail_body_text(kind, a, b), rt_fail_site_full());
+    // The report is built in the process-state report block, never on the heap: a failure may be
+    // raised where the allocator lock is held, and `@no_alloc` code may index (its bounds check
+    // reaches this function), so the dying path does not touch the allocator at all.
+    buf := rt_report_buf();
+    mut n = rt_fail_put(buf, 0, view("error: "));
+    n = rt_fail_body(kind, a, b, buf, n);
+    raw_putbyte(buf + n, 10);
+    n = rt_fail_where(buf, n + 1);
+    rt_write_all(2, buf, n);
+    return rt_abort_final();
+}
+// The failure report block: process-state words 4096..8152 hold the text, 8152..8192 the site
+// descriptor rt_fail_where fills. Only the holder of the abort claim writes it, so one block serves
+// every thread. rt_fail_limit() + the longest single piece written past it stays inside 4056 bytes.
+fn rt_report_buf() -> u64 {
+    return raw_state() + 4096;
+}
+fn rt_report_sites() -> u64 {
+    return raw_state() + 8152;
 }
 // An inline check in compiled code failed (the compiler rewrote its `call rt_abort`): for an index
 // check the vector is in `a` and the index in `b`.
@@ -189,7 +207,7 @@ fn rt_site_text(entry: u64) -> u64 {
     rt_reserveb(s, 400);
     mut n = 0;
     if entry != 0 {
-        n = rt_fail_line(raw_load(s), 0, entry, " --> ");
+        n = rt_fail_line(raw_load(s), 0, entry, view(" --> "));
     }
     raw_store(s + 8, n);
     return s;
@@ -336,6 +354,12 @@ fn rt_sites_fill(out: u64) -> u64 {
 // the count the helper answered. A captured entry is static data: it stays valid long after the
 // task's stack is gone, which is what lets the join format the site later.
 fn rt_site_here(scratch: u64) -> u64 {
+    return rt_site_above(scratch, 0, 1);
+}
+// The innermost program statement on this stack among the frames above `above` (a stack address;
+// 0 for all of them), skipping standard-library statements (site flag bit 62) unless `std` is set.
+// A statement-table entry, or 0. It writes only the five scratch words it is given.
+fn rt_site_above(scratch: u64, above: u64, std: u64) -> u64 {
     have := rt_sites_fill(scratch);
     if have < 3 {
         return 0;
@@ -371,7 +395,7 @@ fn rt_site_here(scratch: u64) -> u64 {
             flags := raw_load(hit + 16);
             // A place is named only when the entry has a file; the runtime's own statements carry a
             // zero, so the walk always answers with a program location.
-            if (name != 0) & ((flags >> 63) == 0) {
+            if (name != 0) & ((flags >> 63) == 0) & (above < frame) & ((std != 0) | (((flags >> 62) & 1) == 0)) {
                 return hit;
             }
         }
@@ -384,63 +408,65 @@ fn rt_site_here(scratch: u64) -> u64 {
 fn rt_fail_body(kind: u64, a: u64, b: u64, buf: u64, n: u64) -> u64 {
     mut at = n;
     if kind == 1 {
-        at = rt_fail_put(buf, at, "index ");
+        at = rt_fail_put(buf, at, view("index "));
         at = rt_fail_num(buf, at, a);
-        at = rt_fail_put(buf, at, " out of bounds for length ");
+        at = rt_fail_put(buf, at, view(" out of bounds for length "));
         at = rt_fail_num(buf, at, b);
     } else if kind == 2 {
-        at = rt_fail_put(buf, at, "arithmetic overflow");
+        at = rt_fail_put(buf, at, view("arithmetic overflow"));
     } else if kind == 3 {
-        at = rt_fail_put(buf, at, "negative value converted to an unsigned type");
+        at = rt_fail_put(buf, at, view("negative value converted to an unsigned type"));
     } else if kind == 4 {
-        at = rt_fail_put(buf, at, "value has no matching variant");
+        at = rt_fail_put(buf, at, view("value has no matching variant"));
     } else if kind == 5 {
-        at = rt_fail_put(buf, at, "division by zero");
+        at = rt_fail_put(buf, at, view("division by zero"));
     } else if kind == 6 {
-        at = rt_fail_put(buf, at, "unwrap of None or Err");
+        at = rt_fail_put(buf, at, view("unwrap of None or Err"));
     } else if kind == 7 {
-        at = rt_fail_put(buf, at, "range ");
+        at = rt_fail_put(buf, at, view("range "));
         at = rt_fail_num(buf, at, a);
-        at = rt_fail_put(buf, at, "..");
+        at = rt_fail_put(buf, at, view(".."));
         at = rt_fail_num(buf, at, b);
-        at = rt_fail_put(buf, at, " out of bounds");
+        at = rt_fail_put(buf, at, view(" out of bounds"));
     } else if kind == 8 {
-        at = rt_fail_put(buf, at, "pop from an empty vector");
+        at = rt_fail_put(buf, at, view("pop from an empty vector"));
     } else if kind == 9 {
-        at = rt_fail_put(buf, at, "byte value ");
+        at = rt_fail_put(buf, at, view("byte value "));
         at = rt_fail_num(buf, at, a);
-        at = rt_fail_put(buf, at, " does not fit in u8");
+        at = rt_fail_put(buf, at, view(" does not fit in u8"));
     } else if kind == 10 {
-        at = rt_fail_put(buf, at, "C array length mismatch: got ");
+        at = rt_fail_put(buf, at, view("C array length mismatch: got "));
         at = rt_fail_num(buf, at, a);
-        at = rt_fail_put(buf, at, " elements for an array of ");
+        at = rt_fail_put(buf, at, view(" elements for an array of "));
         at = rt_fail_num(buf, at, b);
     } else if kind == 11 {
-        at = rt_fail_put(buf, at, "index out of bounds");
+        at = rt_fail_put(buf, at, view("index out of bounds"));
     } else if kind == 12 {
-        at = rt_fail_put(buf, at, "assertion failed");
+        at = rt_fail_put(buf, at, view("assertion failed"));
     } else if kind == 13 {
-        at = rt_fail_put(buf, at, "the task failed");
+        at = rt_fail_put(buf, at, view("the task failed"));
     } else if kind == 14 {
         // A conversion whose value the target type cannot hold: `u8(300)`. The type is the code
         // `rt_int_cast` was given, so the report names it the way the source did.
-        at = rt_fail_put(buf, at, "value ");
+        at = rt_fail_put(buf, at, view("value "));
         at = rt_fail_num(buf, at, a);
-        at = rt_fail_put(buf, at, " does not fit in ");
+        at = rt_fail_put(buf, at, view(" does not fit in "));
         at = rt_fail_type(buf, at, b);
     } else if kind == 15 {
         // The same, for a negative value and a signed target, where the word in the register is the
         // two's-complement of the number the program wrote.
-        at = rt_fail_put(buf, at, "value -");
+        at = rt_fail_put(buf, at, view("value -"));
         at = rt_fail_num(buf, at, a);
-        at = rt_fail_put(buf, at, " does not fit in ");
+        at = rt_fail_put(buf, at, view(" does not fit in "));
         at = rt_fail_type(buf, at, b);
     } else if kind == 16 {
-        at = rt_fail_put(buf, at, "the wait was cancelled");
+        at = rt_fail_put(buf, at, view("the wait was cancelled"));
     } else if kind == 17 {
-        at = rt_fail_put(buf, at, "mutex poisoned: its holder failed");
+        at = rt_fail_put(buf, at, view("mutex poisoned: its holder failed"));
+    } else if kind == 18 {
+        at = rt_fail_put(buf, at, view("a parallel split needs a grain of at least one element"));
     } else {
-        at = rt_fail_put(buf, at, "the program aborted");
+        at = rt_fail_put(buf, at, view("the program aborted"));
     }
     return at;
 }
@@ -468,7 +494,16 @@ fn rt_report_die(msg: u64, site: u64) -> u64 {
 // the worker's stack. The frames of this stack are dead from here on; the scheduler takes its
 // ordinary "this task is done" path, so the mapping is recycled and the task is published to its
 // joiner. Nothing in between is resumed or cleaned up.
+// (No function on the failure path takes more than six parameters: a seventh is passed in an
+// allocated record, and this path allocates nothing.)
 fn rt_contain_site(t: u64, kind: u64, a: u64, b: u64, site: u64, msg: u64) -> u64 {
+    raw_store(t + 232, 0);
+    return rt_contain_joined(t, kind, a, b, site, msg);
+}
+// The same, keeping the statement where the failed job was joined, which the caller has stored in
+// task word 232 (0: none). That is the last of the site walk's scratch words, free once the failure
+// is recorded; the joiner renders both lines from it (rt_task_site).
+fn rt_contain_joined(t: u64, kind: u64, a: u64, b: u64, site: u64, msg: u64) -> u64 {
     raw_store(t + 160, kind);
     raw_store(t + 168, a);
     raw_store(t + 176, b);
@@ -480,6 +515,7 @@ fn rt_contain_site(t: u64, kind: u64, a: u64, b: u64, site: u64, msg: u64) -> u6
 // The same, for a failure that already has its texts (a `join` inside a task re-raising a task's
 // recorded failure): the words are handed over, not rebuilt.
 fn rt_contain_text(t: u64, kind: u64, msg: u64, site: u64) -> u64 {
+    raw_store(t + 232, 0);
     raw_store(t + 160, kind);
     raw_store(t + 168, 0);
     raw_store(t + 176, 0);
@@ -513,6 +549,11 @@ fn rt_contained_note() -> u64 {
     raw_store(rt_contained_word(), raw_load(rt_contained_word()) + 1);
     return 0;
 }
+// How many stacks a contained failure discarded beyond the one it happened on (it was raised again
+// at a join), for the same note: process-state word 3448.
+fn rt_discarded_word() -> u64 {
+    return raw_state() + 3448;
+}
 fn rt_contained() -> u64 {
     return raw_load(rt_contained_word());
 }
@@ -527,9 +568,8 @@ fn rt_write_text(fd: u64, s: u64) -> u64 {
 fn rt_fail_limit() -> u64 {
     return 3900;
 }
-// A literal at the call site is a heap value in this module and no dropper releases it; that is
-// invisible to rt_fail, which ends the process, and rt_backtrace therefore writes its punctuation
-// byte by byte instead of calling this.
+// `text` is a static view (`view("...")`): a bare literal in this module is a heap value, and the
+// failure report must not allocate. rt_backtrace writes its punctuation byte by byte instead.
 fn rt_fail_put(buf: u64, n: u64, text: string) -> u64 {
     mut at = n;
     for i in text.len() {
@@ -569,8 +609,8 @@ fn rt_refine(msg: u64, req: u64) -> u64 {
     if rt_abort_begin() == 0 {
         rt_abort_park();
     }
-    buf := rt_alloc(1024);
-    mut n = rt_fail_put(buf, 0, "error: refinement violated: ");
+    buf := rt_report_buf();
+    mut n = rt_fail_put(buf, 0, view("error: refinement violated: "));
     mut i = 0;
     while (raw_byte(msg + i) != 0) & (n < rt_fail_limit() - 400) {
         raw_putbyte(buf + n, raw_byte(msg + i));
@@ -595,16 +635,15 @@ fn rt_fail_where(buf: u64, n: u64) -> u64 {
     // The program's entry stores the compiler-emitted rt_sites in state word 3400; asked for the
     // descriptor (rt_sites_fill), it fills in the tables' bounds and the caller's frame pointer. No
     // table, a refused descriptor or zeros: no location lines.
-    info := rt_alloc(rt_sites_words() * 8);
+    // Reached only by the holder of the abort claim, so the report block's descriptor words are free.
+    info := rt_report_sites();
     have := rt_sites_fill(info);
     if have < 3 {
-        rt_free(info);
         return n;
     }
     begin := raw_load(info);
     end := raw_load(info + 8);
     if (begin == 0) + (end <= begin) {
-        rt_free(info);
         return n;
     }
     mut frame = raw_load(info + 16);
@@ -641,9 +680,9 @@ fn rt_fail_where(buf: u64, n: u64) -> u64 {
             // a failure report names the program, never the runtime's frames.
             if (name != 0) & ((flags >> 63) == 0) {
                 if lines == 0 {
-                    at = rt_fail_line(buf, at, hit, " --> ");
+                    at = rt_fail_line(buf, at, hit, view(" --> "));
                 } else {
-                    at = rt_fail_line(buf, at, hit, " = called from ");
+                    at = rt_fail_line(buf, at, hit, view(" = called from "));
                 }
                 lines = lines + 1;
             }
@@ -673,7 +712,8 @@ fn rt_fail_line(buf: u64, n: u64, e: u64, mark: string) -> u64 {
     raw_putbyte(buf + at, 58);
     at = rt_fail_num(buf, at + 1, flags & 4294967295);
     raw_putbyte(buf + at, 58);
-    at = rt_fail_num(buf, at + 1, (flags >> 32) & 2147483647);
+    // Bits 32..61 are the column; 62 marks a standard-library statement, 63 the runtime's.
+    at = rt_fail_num(buf, at + 1, (flags >> 32) & 1073741823);
     raw_putbyte(buf + at, 10);
     return at + 1;
 }
@@ -802,7 +842,7 @@ fn rt_stack_report_line(site: u64) -> u64 {
     raw_putbyte(buf + at, 58);
     at = rt_stack_report_num(buf, at + 1, cap, flags & 4294967295);
     raw_putbyte(buf + at, 58);
-    at = rt_stack_report_num(buf, at + 1, cap, (flags >> 32) & 2147483647);
+    at = rt_stack_report_num(buf, at + 1, cap, (flags >> 32) & 1073741823);
     raw_putbyte(buf + at, 10);
     return at + 1;
 }
@@ -878,7 +918,8 @@ fn rt_bt_line(buf: u64, n: u64, name: u64, site: u64) -> u64 {
     raw_putbyte(buf + at, 58);
     at = rt_fail_num(buf, at + 1, flags & 4294967295);
     raw_putbyte(buf + at, 58);
-    at = rt_fail_num(buf, at + 1, (flags >> 32) & 2147483647);
+    // Bits 32..61 are the column; 62 marks a standard-library statement, 63 the runtime's.
+    at = rt_fail_num(buf, at + 1, (flags >> 32) & 1073741823);
     raw_putbyte(buf + at, 41);
     raw_putbyte(buf + at + 1, 10);
     return at + 2;
@@ -1532,13 +1573,20 @@ fn rt_leak_exit() -> u64 {
         rt_abort();
     }
     s := rt_new();
-    rt_reserveb(s, 160);
+    rt_reserveb(s, 220);
     buf := raw_load(s);
-    mut n = rt_fail_put(buf, 0, "note: ");
+    mut n = rt_fail_put(buf, 0, view("note: "));
     n = rt_fail_num(buf, n, live);
-    n = rt_fail_put(buf, n, " allocation(s) still live after ");
+    n = rt_fail_put(buf, n, view(" allocation(s) still live after "));
     n = rt_fail_num(buf, n, failures);
-    n = rt_fail_put(buf, n, " contained task failure(s); the owners of a discarded stack are not released\n");
+    n = rt_fail_put(buf, n, view(" contained task failure(s)"));
+    extra := raw_load(rt_discarded_word());
+    if extra != 0 {
+        n = rt_fail_put(buf, n, view(" ("));
+        n = rt_fail_num(buf, n, failures + extra);
+        n = rt_fail_put(buf, n, view(" stacks discarded)"));
+    }
+    n = rt_fail_put(buf, n, view("; the owners of a discarded stack are not released\n"));
     raw_store(s + 8, n);
     rt_write_text(2, s);
     return 0;
@@ -1858,9 +1906,8 @@ fn rt_carray_load(src: u64, n: u64, size: u64, signed: u64, kind: u64, words: u6
         } else if kind == 3 {
             rt_pushb(out, raw_byte(a));
         } else if kind == 2 {
-            r := rt_rec(words);
-            rt_copy_bytes(r, a, size);
-            rt_push(out, r);
+            // A vector of extern records stores them inline, as the C array does.
+            rt_pushw(out, rt_flat_box(a, size), size);
         } else {
             if kind == 1 {
                 rt_push(out, rt_f32_from_bits(rt_load_sized(a, 4, 0)));
@@ -1893,17 +1940,18 @@ fn rt_carray_store(dst: u64, v: u64, n: u64, size: u64, kind: u64) -> u64 {
             i = i + 1;
             continue;
         }
-        x := rt_at(v, i);
         if kind == 2 {
-            rt_copy_bytes(a, x, size);
+            rt_copy_bytes(a, rt_slotw(v, i, size), size);
+            i = i + 1;
+            continue;
+        }
+        x := rt_at(v, i);
+        if kind == 1 {
+            rt_store_sized(a, rt_f32_bits(x), 4);
+        } else if size == 8 {
+            raw_store(a, x);
         } else {
-            if kind == 1 {
-                rt_store_sized(a, rt_f32_bits(x), 4);
-            } else if size == 8 {
-                raw_store(a, x);
-            } else {
-                rt_store_sized(a, x, size);
-            }
+            rt_store_sized(a, x, size);
         }
         i = i + 1;
     }
@@ -2056,6 +2104,25 @@ fn rt_enum_retag(old: u64, tag: u64) -> u64 {
     payload := raw_load(old + 8);
     rt_free(old);
     return rt_enum(tag, payload);
+}
+// Exchanges the `n` bytes at `a` and at `b`: what `exchange` and assignment through a reference to
+// a record do, since the reference is the record's address. Whole words, then the tail bytes of an
+// `extern "C"` record whose size is not a multiple of eight.
+fn rt_swap(a: u64, b: u64, n: u64) -> u64 {
+    mut i = 0;
+    while i + 8 <= n {
+        word := raw_load(a + i);
+        raw_store(a + i, raw_load(b + i));
+        raw_store(b + i, word);
+        i = i + 8;
+    }
+    while i < n {
+        byte := raw_byte(a + i);
+        raw_putbyte(a + i, raw_byte(b + i));
+        raw_putbyte(b + i, byte);
+        i = i + 1;
+    }
+    return 0;
 }
 fn rt_xchg(p: u64, v: u64) -> u64 {
     old := raw_load(p);
@@ -3209,7 +3276,7 @@ fn rt_held_settle(b: u64, site: u64) -> u64 {
 fn rt_fail_message(kind: u64, msg: u64) -> u64 {
     j := rt_job_failing();
     if j != 0 {
-        return rt_job_fail(j, kind, 0, 0, rt_site_here(j + 200) & 18446744073709551614, msg, 0);
+        return rt_job_fail_here(j, kind, 0, 0, msg);
     }
     t := rt_containable();
     if t != 0 {
@@ -3224,7 +3291,7 @@ fn rt_mutex_poisoned(p: u64) -> u64 {
     s := rt_new();
     rt_reserveb(s, 600);
     buf := raw_load(s);
-    mut n = rt_fail_put(buf, 0, "mutex poisoned: its holder failed");
+    mut n = rt_fail_put(buf, 0, view("mutex poisoned: its holder failed"));
     site := raw_load(p + 24);
     if site != 0 {
         n = rt_fail_line(buf, n, site, " at ");
@@ -3337,7 +3404,7 @@ fn rt_rw_poisoned(l: u64) -> u64 {
     s := rt_new();
     rt_reserveb(s, 600);
     buf := raw_load(s);
-    mut n = rt_fail_put(buf, 0, "rwlock poisoned: a writer failed");
+    mut n = rt_fail_put(buf, 0, view("rwlock poisoned: a writer failed"));
     site := raw_load(l + 24);
     if site != 0 {
         n = rt_fail_line(buf, n, site, " at ");
@@ -4213,7 +4280,7 @@ fn rt_thread_join(handle: u64) -> u64 {
 }
 // ---- jobs: run-to-completion work on the scheduler's own workers -----------------------------
 // There is one set of worker threads (rt_sched). A job is a record, not a thread and not a stack:
-// `parallel_map`, `parallel_for_chunks`, `parallel_with` (pool::join) and a `Job<R>` handle all
+// `parallel_map`, `parallel_split`, `parallel_with` (pool::join) and a `Job<R>` handle all
 // fork records that any worker may run, and the code is with the scheduler below ("jobs on the
 // scheduler"). docs/design/concurrency-model.md, stage 1.
 //
@@ -4253,6 +4320,8 @@ fn rt_thread_join(handle: u64) -> u64 {
 //   3400         call-site table helper       _start; rt_sites_fill      runtime-errors
 //   3408         site descriptor capacity     rt_state_sites_offer       rth-sites
 //   3416         a second thread was started  rt_allocator_lock          compile-speed
+//   3424         scheduler config block       rt_sched_config            sched-start
+//   3448         stacks discarded by re-raise rt_discarded_word          job-failure
 //   3456         abort report claim           rt_abort                   abort-once
 //   3464..3576   task-stack fault handler     rt_state_stack_guard       stack-guard
 //   3584         contained task failures      rt_contained              task-fail-containment
@@ -4260,6 +4329,8 @@ fn rt_thread_join(handle: u64) -> u64 {
 //   3600..3840   stack-fault report scratch  rt_stack_report_words      main-stack-overflow
 //   3840         Windows fiber state          os-windows                 --
 //   3856..       Windows fiber table          os-windows                 --
+//   4096..8152   failure report text          rt_report_buf              statics-no-alloc
+//   8152..8192   failure report descriptor    rt_report_sites            statics-no-alloc
 //
 // Not a claim: thread-record word 48 (raw_state() + 176 for the main thread). os-windows keeps the
 // per-thread WaitOnAddress expected value there, so nothing else may use it. The job pool once did, which
@@ -4371,9 +4442,10 @@ fn rt_parallel_map(items: u64, context: u64, f: u64, env: u64) -> u64 {
         rt_drop_seq(items);
         return out;
     }
-    // A few leaves per worker keeps every worker busy and lets stealing even out uneven items.
-    sched := rt_jobs_sched();
-    mut leaves = raw_load(sched + 32) * 4;
+    // At most 256 leaves, a function of n alone: the same items land in the same leaves on any
+    // machine, so a reduction over the results is the same on 4 cores and on 64.
+    rt_jobs_sched();
+    mut leaves = 256;
     if n < leaves {
         leaves = n;
     }
@@ -4435,21 +4507,22 @@ fn rt_job_chunk_leaf(d: u64, k: u64) -> u64 {
     }
     return stop - start;
 }
-// Split an exclusive slice into `chunks` disjoint exclusive slices and run one job per chunk. The
-// split is constructed, never checked: chunk k is a function of n alone, so the regions cannot
-// overlap and their lengths sum to n - the invariant rt_parallel_map asserts, asserted here too.
+// Split an exclusive slice into pieces of `grain` elements (the last may be shorter) and run one leaf
+// per piece. The split is constructed, never checked: piece k is [k*grain, min(n, (k+1)*grain)), a
+// function of n and grain alone - never of how many workers there are - so the regions cannot overlap
+// and their lengths sum to n, the invariant asserted below. A zero grain is a caller's error (the
+// library states `grain > 0`; the builtin checks it).
 // The caller holds the loan on the data until this returns, so no job can outlive the slice and no
 // other code in the frame can address it while the jobs run.
-fn rt_parallel_for_chunks(s: u64, chunks: u64, f: u64, env: u64, width: u64) -> u64 {
+fn rt_parallel_split(s: u64, grain: u64, f: u64, env: u64, width: u64) -> u64 {
     n := rt_len(s);
     if n == 0 {
         return 0;
     }
-    mut count = chunks;
-    if count == 0 {
-        count = 1;
+    if grain == 0 {
+        rt_fail(18, 0, 0);
     }
-    size := (n + count - 1) / count;
+    size := grain;
     leaves := (n + size - 1) / size;
     rt_jobs_sched();
     d := rt_job_new();
@@ -4648,7 +4721,9 @@ fn rt_env_is(name: u64, value: u64) -> u64 {
 // 128..208 the job deque, laid out as the task deque is from word 0 (buffer, head, tail, mask, and
 //     the capacity at +80), so the same three deque functions serve both
 // 224 this worker's runner (0 none)  232 the job handed to the runner  240 free job records
-// 248 their count  264 help-depth high-water mark
+// 248 their count  264 help-depth high-water mark  272 steps taken (the fairness tick)
+// 512..592 the Frame job deque, 640..720 the Background job deque (the Normal one is at 128)
+// 896..1024 the CPU mask a pinned worker hands the kernel
 //
 // The deque is a Chase-Lev deque with a fixed capacity (rt_deque_capacity, 131072 entries): the
 // owner pushes and pops at the bottom, a thief steals at the top with a CAS on the head. A fixed
@@ -4681,6 +4756,9 @@ fn rt_sched() -> u64 {
         }
         mut workers = rt_env_number(view("GRAIL_WORKERS="));
         if workers == 0 {
+            workers = rt_sched_setting(8);
+        }
+        if workers == 0 {
             workers = rt_os_workers();
         }
         if 64 < workers {
@@ -4699,7 +4777,7 @@ fn rt_sched() -> u64 {
             raw_store(array + i * 8, rt_sched_worker_new(made, i));
             i += 1;
         }
-        rt_jobs_create();
+        rt_jobs_create(workers);
         // Workers start only once the array and the rings they are reachable through are complete,
         // and the block is published first: rt_sched's other callers spin on word 72.
         raw_atomic_store(state + 72, made);
@@ -4777,6 +4855,11 @@ fn rt_sched_worker_new(s: u64, index: u64) -> u64 {
     raw_store(w + 32, s);
     raw_store(w + 40, index);
     raw_store(w + 80, cap);
+    seed := rt_sched_setting(40);
+    if seed != 0 {
+        // A fixed seed fixes every worker's victim order (sched::Config.seed).
+        raw_store(w + 72, wrapping_add(wrapping_mul(seed, index + 1), 2654435761) | 1);
+    }
     jobs := raw_map(rt_job_deque_capacity() * 8);
     if rt_error(jobs) {
         rt_abort();
@@ -4784,6 +4867,21 @@ fn rt_sched_worker_new(s: u64, index: u64) -> u64 {
     raw_store(w + 128, jobs);
     raw_store(w + 152, rt_job_deque_capacity() - 1);
     raw_store(w + 208, rt_job_deque_capacity());
+    // The Frame and Background deques, laid out like the Normal one.
+    mut c = 0;
+    while c < 3 {
+        if c != 1 {
+            d := rt_job_deque(w, c);
+            buf := raw_map(rt_job_deque_capacity() * 8);
+            if rt_error(buf) {
+                rt_abort();
+            }
+            raw_store(d, buf);
+            raw_store(d + 24, rt_job_deque_capacity() - 1);
+            raw_store(d + 80, rt_job_deque_capacity());
+        }
+        c += 1;
+    }
     return w;
 }
 // The worker block of the calling thread, or 0 for every other thread (the main thread, the
@@ -4936,7 +5034,11 @@ fn rt_worker_steal(s: u64, w: u64) -> u64 {
     return 0;
 }
 fn rt_enqueue(t: u64) -> u64 {
-    s := rt_sched();
+    return rt_enqueue_in(rt_sched(), t);
+}
+// A wake: the task was parked, so the scheduler exists, and this neither makes it nor reaches
+// anything that could (a wake is on the failure path, which allocates nothing).
+fn rt_enqueue_in(s: u64, t: u64) -> u64 {
     w := rt_worker_self();
     mut placed = 0;
     if w != 0 {
@@ -4964,12 +5066,26 @@ fn rt_worker_loop(worker: u64) -> u64 {
     // Give this scheduler thread whatever it needs to switch onto a task's stack (nothing on a
     // platform whose switch is a stack swap, a fiber conversion on Windows).
     rt_os_sched_prepare();
+    if rt_sched_setting(24) != 0 {
+        // Worker i on CPU i; more workers than CPUs get EINVAL and stay unpinned.
+        rt_os_pin(raw_load(worker + 40), worker + 896);
+    }
+    rt_os_stack_warm(rt_sched_setting(32));
+    spin := rt_sched_setting(48);
     while true {
         // The sequence is read before the look for work: a push after this read changes the word
         // the wait compares, so the wait returns at once and no wakeup is lost. (Looking a few
         // more times before sleeping was measured and did not pay: bench/sched.grl got slower.)
         seq := raw_atomic_load(s + 24);
-        if rt_worker_step(s, worker) == 0 {
+        mut found = rt_worker_step(s, worker);
+        if (found == 0) & (spin != 0) {
+            // sched::Config.idle_spin_us: keep looking for that long before sleeping.
+            until := rt_now_us() + spin;
+            while (found == 0) & (rt_now_us() < until) {
+                found = rt_worker_step(s, worker);
+            }
+        }
+        if found == 0 {
             rt_atomic_fetch_add(s + 96, 1);
             rt_syscall(202, s + 24, 128, seq);
             rt_atomic_fetch_sub(s + 96, 1);
@@ -4982,25 +5098,34 @@ fn rt_worker_loop(worker: u64) -> u64 {
 // for jobs and one for tasks, each starting at a random victim. A job is not run on the scheduler
 // stack: it is handed to the worker's runner (rt_runner_main).
 fn rt_worker_step(s: u64, w: u64) -> u64 {
-    mut j = rt_deque_pop(w + 128);
+    // Every 61st step looks at the task ring first, so a worker that keeps finding its own work
+    // cannot leave injected tasks (wakes from the reactor, spawns from other threads) waiting.
+    tick := raw_load(w + 272) + 1;
+    raw_store(w + 272, tick);
+    if tick % 61 == 0 {
+        t := rt_inject_pop(s);
+        if t != 0 {
+            rt_worker_run(s, w, t);
+            return 1;
+        }
+    }
+    mut j = rt_job_take(s, w, 0);
+    if j == 0 {
+        j = rt_job_take(s, w, 1);
+    }
     if j == 0 {
         mut t = rt_deque_pop(w);
         if t == 0 {
-            j = rt_job_inject_pop();
-        }
-        if (t == 0) & (j == 0) {
             t = rt_inject_pop(s);
         }
-        if (t == 0) & (j == 0) {
-            j = rt_job_steal(s, w);
-        }
-        if (t == 0) & (j == 0) {
+        if t == 0 {
             t = rt_worker_steal(s, w);
         }
         if t != 0 {
             rt_worker_run(s, w, t);
             return 1;
         }
+        j = rt_job_take_background(s, w);
     }
     if j == 0 {
         return 0;
@@ -5072,7 +5197,8 @@ fn rt_worker_run(s: u64, w: u64, t: u64) -> u64 {
 // Job record, 128 bytes: 0 function, 8/16/24 its three arguments, 32 state, 40 result,
 // 48 free-list link, 56 acknowledgement of a task waiter's wake, 64 link in its forker's stack list,
 // 72 link in its runner's stack list, 80 its failure (0: none; else a five-word record, below),
-// 120 parent (the job that was running when this one was
+// 88 1 while it holds one of the Background cap's slots, 104 when it was queued (Background only,
+// microseconds), 112 its class (0 Frame, 1 Normal, 2 Background), 120 parent (the job that was running when this one was
 // forked, 0 at a root).
 // State: 0 free, 1 pending, 3 done, 4 claimed with an OS thread asleep on this word, 2 claimed by a
 // thread that is not a worker, 8 * (i + 1) claimed by worker i (so a waiter knows whose deque the
@@ -5118,17 +5244,41 @@ fn rt_worker_run(s: u64, w: u64, t: u64) -> u64 {
 // Jobs block (raw_state()+3200, raw_map): 0 ring lock, 8 ring head, 16 ring tail, 80 ring, 88 ring
 // capacity (the layout rt_inject_pop reads); 24 lock of the lists below, 32 free job records,
 // 40 carve pointer, 48 carve bytes left, 56 free runner records, 64 a word that stays zero (a
-// runner's cancel token), 104 workers started (thread-per-task mode).
+// runner's cancel token), 72 free failure records (rt_job_failure_release), 104 workers started (thread-per-task mode); the Frame ring at 128 and the
+// Background ring at 256, laid out like the Normal one at 0; 400 Background jobs running, 408 the
+// cap on them (background_cap).
+//
+// CLASSES. A job is Frame (0), Normal (1) or Background (2), in record word 112. Each worker has a
+// deque per class and there is a ring per class. A worker takes Frame work, then Normal work, then
+// tasks, then Background work - strictly - and starts a Background job only while fewer than the cap
+// are running. A job takes its parent's class (the job running on the stack that forked it); a root
+// fork takes the class the stack was given by pool::with_class (parallel_class), else Normal. A
+// queue entry is a hint (above), so an entry found in class X's queue whose record now says another
+// class is a stale entry naming a later job: it is skipped, never claimed, which keeps every job at
+// its own priority - its live entry is in its own class's queue, or its forker takes it back.
 fn rt_job_deque_capacity() -> u64 {
     return 8192;
 }
-fn rt_jobs_create() -> u64 {
+fn rt_jobs_create(workers: u64) -> u64 {
     j := raw_map(4096);
     if rt_error(j) {
         rt_abort();
     }
-    raw_store(j + 80, raw_map(65536));
-    raw_store(j + 88, 8192);
+    mut c = 0;
+    while c < 3 {
+        ring := rt_job_ring_at(j, c);
+        raw_store(ring + 80, raw_map(65536));
+        raw_store(ring + 88, 8192);
+        c += 1;
+    }
+    mut cap = rt_sched_setting(16);
+    if cap == 0 {
+        cap = workers / 4;
+    }
+    if cap == 0 {
+        cap = 1;
+    }
+    raw_store(j + 408, cap);
     raw_atomic_store(rt_state_jobs(), j);
     return j;
 }
@@ -5183,6 +5333,7 @@ fn rt_job_new() -> u64 {
     }
     raw_store(r + 56, 0);
     raw_store(r + 80, 0);
+    raw_store(r + 88, 0);
     return r;
 }
 // Only the forker releases, and only a finished job (or a descriptor, whose state is held at done).
@@ -5241,6 +5392,10 @@ fn rt_job_fork(f: u64, a: u64, b: u64, c: u64) -> u64 {
     return rt_job_make(f, a, b, c, 1);
 }
 fn rt_job_make(f: u64, a: u64, b: u64, c: u64, listed: u64) -> u64 {
+    return rt_job_make_class(f, a, b, c, listed, 3);
+}
+// `class` 3: inherit (the parent's class, else the stack's, else Normal).
+fn rt_job_make_class(f: u64, a: u64, b: u64, c: u64, listed: u64, class: u64) -> u64 {
     r := rt_job_new();
     raw_store(r, f);
     raw_store(r + 8, a);
@@ -5261,11 +5416,31 @@ fn rt_job_make(f: u64, a: u64, b: u64, c: u64, listed: u64) -> u64 {
         }
     }
     raw_store(r + 120, parent);
+    mut k = class;
+    if k == 3 {
+        if parent != 0 {
+            k = raw_load(parent + 112);
+        } else if t == 0 {
+            // A thread that keeps no stack list: its with_class setting is in its thread record,
+            // word 112, as the class plus one (0: none).
+            tp := raw_tp_get();
+            k = 1;
+            if (tp != 0) && (raw_load(tp + 112) != 0) {
+                k = raw_load(tp + 112) - 1;
+            }
+        } else {
+            k = 1;
+        }
+    }
+    raw_store(r + 112, k);
+    if k == 2 {
+        raw_store(r + 104, rt_now_us());
+    }
     raw_atomic_store(r + 32, 1);
     w := rt_worker_self();
     mut placed = 0;
     if w != 0 {
-        placed = rt_deque_push(w + 128, r);
+        placed = rt_deque_push(rt_job_deque(w, k), r);
     }
     if placed == 0 {
         placed = rt_job_inject_push(r);
@@ -5275,24 +5450,96 @@ fn rt_job_make(f: u64, a: u64, b: u64, c: u64, listed: u64) -> u64 {
     }
     return r;
 }
+fn rt_job_deque(w: u64, class: u64) -> u64 {
+    if class == 0 {
+        return w + 512;
+    }
+    if class == 2 {
+        return w + 640;
+    }
+    return w + 128;
+}
+fn rt_job_ring_at(j: u64, class: u64) -> u64 {
+    if class == 0 {
+        return j + 128;
+    }
+    if class == 2 {
+        return j + 256;
+    }
+    return j;
+}
 fn rt_job_inject_push(r: u64) -> u64 {
-    j := raw_load(rt_state_jobs());
-    rt_spin_lock(j);
-    head := raw_load(j + 8);
-    tail := raw_load(j + 16);
-    if tail - head == raw_load(j + 88) {
-        rt_spin_unlock(j);
+    ring := rt_job_ring_at(raw_load(rt_state_jobs()), raw_load(r + 112));
+    rt_spin_lock(ring);
+    head := raw_load(ring + 8);
+    tail := raw_load(ring + 16);
+    if tail - head == raw_load(ring + 88) {
+        rt_spin_unlock(ring);
         return 0;
     }
-    raw_store(raw_load(j + 80) + (tail % raw_load(j + 88)) * 8, r);
-    raw_atomic_store_release(j + 16, tail + 1);
-    rt_spin_unlock(j);
+    raw_store(raw_load(ring + 80) + (tail % raw_load(ring + 88)) * 8, r);
+    raw_atomic_store_release(ring + 16, tail + 1);
+    rt_spin_unlock(ring);
     return 1;
 }
-fn rt_job_inject_pop() -> u64 {
-    return rt_inject_pop(raw_load(rt_state_jobs()));
+// The next entry of class `class` from this worker's own deque, the class's ring, or a steal - in
+// that order - skipping stale entries whose record is now another class.
+fn rt_job_take(s: u64, w: u64, class: u64) -> u64 {
+    while true {
+        r := rt_deque_pop(rt_job_deque(w, class));
+        if r == 0 {
+            break;
+        }
+        if raw_load(r + 112) == class {
+            return r;
+        }
+    }
+    ring := rt_job_ring_at(raw_load(rt_state_jobs()), class);
+    while true {
+        r := rt_inject_pop(ring);
+        if r == 0 {
+            break;
+        }
+        if raw_load(r + 112) == class {
+            return r;
+        }
+    }
+    return rt_job_steal(s, w, class);
 }
-fn rt_job_steal(s: u64, w: u64) -> u64 {
+// Background work, if fewer than the cap are running.
+// A worker reserves one of the cap's slots before it takes a Background job (a CAS, so two workers
+// cannot both take the last one) and the job gives the slot back when it finishes: record word 88
+// says it holds one. Work a Background job's own stack runs while it waits - its forks, run inline
+// or helped - is not counted again: the stack already holds the slot.
+fn rt_job_take_background(s: u64, w: u64) -> u64 {
+    if rt_job_reserve_background() == 0 {
+        return 0;
+    }
+    r := rt_job_take(s, w, 2);
+    if r == 0 {
+        rt_atomic_fetch_sub(raw_load(rt_state_jobs()) + 400, 1);
+        return 0;
+    }
+    raw_store(r + 88, 1);
+    return r;
+}
+fn rt_job_reserve_background() -> u64 {
+    j := raw_load(rt_state_jobs());
+    while true {
+        running := raw_atomic_load(j + 400);
+        if raw_load(j + 408) <= running {
+            return 0;
+        }
+        if raw_atomic_cas(j + 400, running, running + 1) == running {
+            return 1;
+        }
+    }
+    return 0;
+}
+fn rt_now_us() -> u64 {
+    return f_host_now_us();
+}
+fn rt_job_steal(s: u64, w: u64, class: u64) -> u64 {
     workers := raw_load(s + 32);
     if 1 < workers {
         array := raw_load(s + 72);
@@ -5301,8 +5548,8 @@ fn rt_job_steal(s: u64, w: u64) -> u64 {
         while i < workers {
             victim := (start + i) % workers;
             if victim != raw_load(w + 40) {
-                r := rt_deque_steal(raw_load(array + victim * 8) + 128);
-                if r != 0 {
+                r := rt_deque_steal(rt_job_deque(raw_load(array + victim * 8), class));
+                if (r != 0) && (raw_load(r + 112) == class) {
                     return r;
                 }
             }
@@ -5316,6 +5563,12 @@ fn rt_job_steal(s: u64, w: u64) -> u64 {
 // task had registered as the waiter: that task is woken and then told so, because it must not carry
 // a wake that arrives after it has moved on.
 fn rt_job_exec(r: u64) -> u64 {
+    // An address in this frame (word 96): frames above it are the job's forker's, when the forker
+    // ran the job itself; a failure's join site is looked for there (rt_job_fail).
+    mut mark = 0;
+    here := &mut mark;
+    raw_store(r + 96, here);
+    background := raw_load(r + 88) == 1;
     t := rt_job_stack();
     if t != 0 {
         raw_store(r + 72, rt_list_head(t));
@@ -5325,6 +5578,10 @@ fn rt_job_exec(r: u64) -> u64 {
     raw_store(r + 40, res);
     if t != 0 {
         rt_list_set(t, raw_load(r + 72));
+    }
+    if background {
+        raw_store(r + 88, 0);
+        rt_atomic_fetch_sub(raw_load(rt_state_jobs()) + 400, 1);
     }
     return rt_job_publish(r);
 }
@@ -5364,8 +5621,7 @@ fn rt_frame() -> u64 {
 //     be run is one this stack would have run anyway (rt_job_leap), so the room is a safety net
 //     for the runtime's own frames, not the bound. Where the stack's bounds are not known (a
 //     Windows fiber) the bound below is all there is.
-//   - (When locks are tracked per record: not while this stack holds one. docs/design/
-//     concurrency-model.md, 2.1.)
+//   - Not while this stack holds a lock (rt_holds_any).
 fn rt_job_may_help(w: u64) -> u64 {
     if w == 0 {
         return 0;
@@ -5379,6 +5635,11 @@ fn rt_job_may_help(w: u64) -> u64 {
         if rt_frame() < base + 4096 + raw_load(t + 16) / 8 {
             return 0;
         }
+    }
+    // A waiter that holds a lock does not help: a job it ran might want that lock. It parks, and
+    // is promoted like any waiting job.
+    if rt_holds_any() != 0 {
+        return 0;
     }
     return 1;
 }
@@ -5414,7 +5675,8 @@ fn rt_job_leap(s: u64, r: u64, claimed: u64) -> u64 {
     if raw_load(s + 32) <= index {
         return 0;
     }
-    v := raw_load(raw_load(s + 72) + index * 8) + 128;
+    // r's descendants are r's class, so they are in that class's deque.
+    v := rt_job_deque(raw_load(raw_load(s + 72) + index * 8), raw_load(r + 112));
     head := raw_atomic_load(v + 8);
     tail := raw_atomic_load(v + 16);
     if tail <= head {
@@ -5449,9 +5711,9 @@ fn rt_job_await(r: u64) -> u64 {
         if st == 1 {
             if raw_atomic_cas(r + 32, 1, rt_job_claim_word()) == 1 {
                 if w != 0 {
-                    k := rt_deque_pop(w + 128);
+                    k := rt_deque_pop(rt_job_deque(w, raw_load(r + 112)));
                     if (k != 0) & (k != r) {
-                        rt_deque_push(w + 128, k);
+                        rt_deque_push(rt_job_deque(w, raw_load(r + 112)), k);
                     }
                 }
                 rt_job_exec(r);
@@ -5471,7 +5733,7 @@ fn rt_job_await(r: u64) -> u64 {
                         // The record was recycled between the look and the claim: this is some
                         // other job. Give it back, where a worker will find it.
                         raw_atomic_store(k + 32, 1);
-                        if rt_deque_push(w + 128, k) == 0 {
+                        if rt_deque_push(rt_job_deque(w, raw_load(k + 112)), k) == 0 {
                             rt_job_inject_push(k);
                         }
                         rt_notify(s);
@@ -5562,7 +5824,18 @@ fn rt_job_failing() -> u64 {
 //      re-raise it at their joins (rt_job_reraise), and their own stacks then do the same.
 //   3. The stack is discarded: a runner ends; a task is contained as any failed task is.
 // A stack overflow does not come here: the drain needs stack, so it stays fatal.
-fn rt_job_fail(t: u64, kind: u64, a: u64, b: u64, site: u64, msg: u64, joined: u64) -> u64 {
+// A failure raised on this stack by the statement that is running: its site is found here (the walk
+// uses the record's scratch words, the last of which then says "no join site known yet").
+fn rt_job_fail_here(t: u64, kind: u64, a: u64, b: u64, msg: u64) -> u64 {
+    site := rt_site_here(t + 200) & 18446744073709551614;
+    raw_store(t + 232, 0);
+    return rt_job_fail(t, kind, a, b, site, msg);
+}
+// The statement where the failed job was joined, when the caller knows it (a joiner re-raising), is
+// in the stack's word 232 (rt_job_fail_joined); 0 there means "find it here".
+fn rt_job_fail(t: u64, kind: u64, a: u64, b: u64, site: u64, msg: u64) -> u64 {
+    joined := raw_load(t + 232);
+    raw_store(t + 232, 0);
     // 0. Locks first (rt_held_settle takes the record's waiter block; a site that is an owned text
     // names no statement, so the poison records none).
     mut poison_site = site;
@@ -5570,53 +5843,112 @@ fn rt_job_fail(t: u64, kind: u64, a: u64, b: u64, site: u64, msg: u64, joined: u
         poison_site = 0;
     }
     rt_held_settle(t + 240, poison_site);
-    f := rt_alloc(40);
+    // The failure record is not a heap allocation: a failure may be raised where the allocator lock
+    // is held, and inside `@no_alloc` code, so nothing on this path touches the allocator. It comes
+    // from the jobs block's free list (rt_job_failure_record), and word 40 counts the jobs it is
+    // published to: each joiner gives one back after it has built the texts (rt_job_reraise), and
+    // the last returns the record to the list, so a program that contains a failure every frame
+    // runs in bounded memory.
+    f := rt_job_failure_record();
+    // Where the failed job was joined, as a statement entry: given by a joiner that re-raises it, or
+    // - for a job this stack's own forker ran here - the first program statement above the job's
+    // frame. A job a worker stole has no forker frames here; its joiner fills it in.
+    mut join_at = joined;
+    if join_at == 0 {
+        newest := rt_list_head(t);
+        mut walk0 = newest;
+        while walk0 != 0 {
+            if (walk0 & 1) != 0 {
+                break;
+            }
+            walk0 = raw_load(walk0 + 64);
+        }
+        if walk0 != 0 {
+            join_at = rt_site_above(t + 200, raw_load(walk0 - 1 + 96), 0);
+        }
+    }
+    raw_store(f + 56, join_at);
+    mut users = 0;
+    mut walk = rt_list_head(t);
+    while walk != 0 {
+        if (walk & 1) != 0 {
+            users += 1;
+            walk = raw_load(walk - 1 + 72);
+        } else {
+            walk = raw_load(walk + 64);
+        }
+    }
+    raw_store(f + 40, users);
     raw_store(f, kind);
     raw_store(f + 8, a);
     raw_store(f + 16, b);
     raw_store(f + 24, site);
     raw_store(f + 32, msg);
-    // 1. Drain the forks (untagged entries), all of them, before any job is published.
+    // 1 and 2 in one walk of the stack list, newest entry first. A fork is settled before any job
+    // older than it is published: the forks a job made (newer than it) may be borrowing that job's
+    // frames and, through its captures, its forker's - which publishing lets the forker free. A
+    // fork older than a job is settled after that job is published, because it may be waiting for
+    // it: a job this stack helped with is a descendant of the fork it was waiting for. A fork this
+    // stack took back and ran itself is published as the job (its newer, tagged entry) before its
+    // fork entry is reached.
     mut e = rt_list_head(t);
-    while e != 0 {
-        if (e & 1) != 0 {
-            e = raw_load(e - 1 + 72);
-        } else {
-            rt_job_settle(e);
-            e = raw_load(e + 64);
-        }
-    }
-    // 2. Publish the jobs being run here (tagged entries), innermost first. A job this stack forked
-    //    and ran itself appears as a fork too; it is released below, after it is published.
-    e = rt_list_head(t);
     while e != 0 {
         if (e & 1) != 0 {
             r := e - 1;
             e = raw_load(r + 72);
             raw_store(r + 80, f);
+            if raw_load(r + 88) == 1 {
+                raw_store(r + 88, 0);
+                rt_atomic_fetch_sub(raw_load(rt_state_jobs()) + 400, 1);
+            }
             rt_job_publish(r);
-        } else {
-            e = raw_load(e + 64);
-        }
-    }
-    e = rt_list_head(t);
-    while e != 0 {
-        if (e & 1) != 0 {
-            e = raw_load(e - 1 + 72);
         } else {
             r := e;
             e = raw_load(r + 64);
+            // A published job's record is its forker's from then on, so links are read before.
+            // A fork this stack took back and ran is already published (its job entry is newer), so
+            // this finds it done and does not wait for itself.
+            rt_job_settle(r);
+            // This stack forked it, so this stack releases it - unless it ran it itself, in which
+            // case the record carries the failure and stays (a leak, like the stack's own frames).
             if raw_load(r + 80) != f {
                 rt_job_release(r);
             }
         }
     }
     raw_store(t + 152, 0);
-    // 3. Discard the stack.
+    if users == 0 {
+        rt_job_failure_release(f);
+    }
+    // 3. Discard the stack. A task keeps the failure as numbers (or as the texts a joiner already
+    // built, when it was raised again at a join), and its own joiner formats it: this path builds
+    // no text.
     if raw_load(t + 104) == 3 {
         return rt_contain_tail(t);
     }
-    return rt_contain_text(t, kind, rt_job_message(f), rt_job_site(f, joined));
+    if (site & 1) != 0 {
+        return rt_contain_text(t, kind, msg, site & 18446744073709551614);
+    }
+    raw_store(t + 232, join_at);
+    return rt_contain_joined(t, kind, a, b, site, msg);
+}
+// A failure record - kind, two operands, site, message, users, join site (words 0..40, 56) - from the jobs block's
+// free list or its pages (rt_job_carve), never the heap.
+fn rt_job_failure_record() -> u64 {
+    j := raw_load(rt_state_jobs());
+    rt_spin_lock(j + 24);
+    f := rt_job_carve(j, 72, 64);
+    rt_spin_unlock(j + 24);
+    return f;
+}
+// The free-list link is word 48, as for every record rt_job_carve hands out.
+fn rt_job_failure_release(f: u64) -> u64 {
+    j := raw_load(rt_state_jobs());
+    rt_spin_lock(j + 24);
+    raw_store(f + 48, raw_load(j + 72));
+    raw_store(j + 72, f);
+    rt_spin_unlock(j + 24);
+    return 0;
 }
 // Bring a fork this failing stack has not joined to done without running anything: take it back
 // if nobody has it, else wait - parked, not cancellable, re-testing after every wake.
@@ -5637,50 +5969,15 @@ fn rt_job_settle(r: u64) -> u64 {
     }
     return 0;
 }
-// A failure's message, as a fresh owned text: the record is shared by every job it was published
-// to, so each re-raise copies what it hands on.
+// A failure's message text, copied for the joiner (the record is shared by every job it was
+// published to), or 0 when the message is dictated by the kind.
 fn rt_job_message(f: u64) -> u64 {
     msg := raw_load(f + 32);
-    if msg != 0 {
-        out := rt_new();
-        rt_append(out, msg);
-        return out;
+    if msg == 0 {
+        return 0;
     }
-    return rt_fail_body_text(raw_load(f), raw_load(f + 8), raw_load(f + 16));
-}
-// Its site, as a fresh owned text: the original statement, then - the first time it crosses a
-// join - one line naming where it was joined (`joined` set). A site that is already a text has
-// crossed a join before and is copied as it is.
-fn rt_job_site(f: u64, joined: u64) -> u64 {
-    site := raw_load(f + 24);
-    if (site & 1) != 0 {
-        out := rt_new();
-        rt_append(out, site & 18446744073709551614);
-        return out;
-    }
-    out := rt_site_text(site);
-    if joined != 0 {
-        here := rt_fail_site_full();
-        buf := raw_load(here);
-        n := raw_load(here + 8);
-        // The first line of the joining location is ` --> file:line:col`.
-        if (5 < n) & (raw_byte(buf) == 32) {
-            mut stop = 5;
-            while (stop < n) & (raw_byte(buf + stop) != 10) {
-                stop += 1;
-            }
-            line := rt_new();
-            rt_reserveb(line, stop + 40);
-            mut k = rt_fail_put(raw_load(line), 0, " = in a job joined at ");
-            rt_copy_bytes(raw_load(line) + k, buf + 5, stop - 5);
-            k += stop - 5;
-            raw_putbyte(raw_load(line) + k, 10);
-            raw_store(line + 8, k + 1);
-            rt_append(out, line);
-            rt_drop_seq(line);
-        }
-        rt_drop_seq(here);
-    }
+    out := rt_new();
+    rt_append(out, msg);
     return out;
 }
 // The forker's side: the joined job failed, so this stack fails with the same failure. Inside a
@@ -5688,19 +5985,70 @@ fn rt_job_site(f: u64, joined: u64) -> u64 {
 // the parallel region - contained by a task, or ending the process - its site is the original
 // statement plus one line naming where the job was joined, which is the caller's statement.
 fn rt_job_reraise(f: u64) -> u64 {
+    // The failure was counted where it happened; the stack it is raised on now is one more stack
+    // discarded, not one more failure (rt_contained_note counts it again when it is contained).
+    raw_store(rt_contained_word(), raw_load(rt_contained_word()) - 1);
+    raw_store(rt_discarded_word(), raw_load(rt_discarded_word()) + 1);
+    // Numbers, as at the failure: the kind, the operands, the failing statement and - the first
+    // time the failure crosses a join - this joiner's own statement. Whoever reports it renders
+    // both lines from them; only a message text is copied (the record is shared).
+    kind := raw_load(f);
+    a := raw_load(f + 8);
+    b := raw_load(f + 16);
+    site := raw_load(f + 24);
+    msg := rt_job_message(f);
+    mut joined = raw_load(f + 56);
+    if rt_atomic_fetch_sub(f + 40, 1) == 1 {
+        rt_job_failure_release(f);
+    }
+    me := rt_current();
+    if (joined == 0) & ((site & 1) == 0) {
+        if me != 0 {
+            joined = rt_site_above(me + 200, 0, 0);
+        }
+    }
     j := rt_job_failing();
     if j != 0 {
-        mut msg = raw_load(f + 32);
-        if msg != 0 {
-            msg = rt_job_message(f);
-        }
-        site := raw_load(f + 24);
-        if (site & 1) != 0 {
-            return rt_job_fail(j, raw_load(f), 0, 0, rt_job_site(f, 0) | 1, rt_job_message(f), 1);
-        }
-        return rt_job_fail(j, raw_load(f), raw_load(f + 8), raw_load(f + 16), site, msg, 1);
+        raw_store(j + 232, joined);
+        return rt_job_fail(j, kind, a, b, site, msg);
     }
-    return rt_fail_text(raw_load(f), rt_job_message(f), rt_job_site(f, 1));
+    t := rt_containable();
+    if t != 0 {
+        if (site & 1) != 0 {
+            return rt_contain_text(t, kind, msg, site & 18446744073709551614);
+        }
+        raw_store(t + 232, joined);
+        return rt_contain_joined(t, kind, a, b, site, msg);
+    }
+    // Ends the process: one report, the failing statement first, then the join.
+    if rt_abort_begin() == 0 {
+        rt_abort_park();
+    }
+    buf := rt_report_buf();
+    if (joined == 0) & ((site & 1) == 0) {
+        joined = rt_site_above(rt_report_sites(), 0, 0);
+    }
+    mut n = rt_fail_put(buf, 0, view("error: "));
+    if msg != 0 {
+        rt_copy_bytes(buf + n, raw_load(msg), raw_load(msg + 8));
+        n += raw_load(msg + 8);
+    } else {
+        n = rt_fail_body(kind, a, b, buf, n);
+    }
+    raw_putbyte(buf + n, 10);
+    n += 1;
+    if (site & 1) != 0 {
+        text := site & 18446744073709551614;
+        rt_copy_bytes(buf + n, raw_load(text), raw_load(text + 8));
+        n += raw_load(text + 8);
+    } else if site != 0 {
+        n = rt_fail_line(buf, n, site, view(" --> "));
+    }
+    if joined != 0 {
+        n = rt_fail_line(buf, n, joined, view(" = in a job joined at "));
+    }
+    rt_write_all(2, buf, n);
+    return rt_abort_final();
 }
 // A thread that is not running a task counts its parallel regions in thread-record word 24, in
 // steps of 16 so the word never reads as a worker marker: inside a region it may fail at the same
@@ -5775,7 +6123,7 @@ fn rt_runner_main(t: u64, unused: u64) -> u64 {
         mut j = raw_load(w + 232);
         raw_store(w + 232, 0);
         if j == 0 {
-            j = rt_deque_pop(w + 128);
+            j = rt_job_take_own(w);
         }
         if j == 0 {
             raw_atomic_store(t + 24, 4);
@@ -5788,6 +6136,145 @@ fn rt_runner_main(t: u64, unused: u64) -> u64 {
         }
     }
     return 0;
+}
+// The next job from this worker's own deques, by class (the runner's drain): Frame, Normal, then
+// Background under the cap. Stale entries are skipped as in rt_job_take.
+fn rt_job_take_own(w: u64) -> u64 {
+    mut c = 0;
+    while c < 2 {
+        while true {
+            r := rt_deque_pop(rt_job_deque(w, c));
+            if r == 0 {
+                break;
+            }
+            if raw_load(r + 112) == c {
+                return r;
+            }
+        }
+        c += 1;
+    }
+    if rt_job_reserve_background() == 0 {
+        return 0;
+    }
+    while true {
+        r := rt_deque_pop(rt_job_deque(w, 2));
+        if r == 0 {
+            break;
+        }
+        if raw_load(r + 112) == 2 {
+            raw_store(r + 88, 1);
+            return r;
+        }
+    }
+    rt_atomic_fetch_sub(raw_load(rt_state_jobs()) + 400, 1);
+    return 0;
+}
+// How long the oldest queued Background job has waited, in microseconds (0: none queued). Entries
+// are read without locks: records never go away, a stale entry is filtered by state and class, and
+// the answer is a statistic, not a decision.
+fn rt_background_wait_us() -> u64 {
+    s := raw_atomic_load(raw_state() + 72);
+    if s == 0 {
+        return 0;
+    }
+    j := raw_load(rt_state_jobs());
+    now := rt_now_us();
+    mut oldest = 0;
+    workers := raw_load(s + 32);
+    mut i = 0;
+    while i <= workers {
+        mut d = 0;
+        if i < workers {
+            d = rt_job_deque(raw_load(raw_load(s + 72) + i * 8), 2);
+        } else {
+            d = rt_job_ring_at(j, 2);
+        }
+        head := raw_atomic_load(d + 8);
+        tail := raw_atomic_load(d + 16);
+        mut at = head;
+        while (at < tail) & (at < head + 4096) {
+            mut slot = 0;
+            if i < workers {
+                slot = raw_load(d) + (at & raw_load(d + 24)) * 8;
+            } else {
+                slot = raw_load(d + 80) + (at % raw_load(d + 88)) * 8;
+            }
+            r := raw_load(slot);
+            if (r != 0) && (raw_atomic_load(r + 32) == 1) && (raw_load(r + 112) == 2) {
+                stamp := raw_load(r + 104);
+                if (stamp < now) && (oldest < now - stamp) {
+                    oldest = now - stamp;
+                }
+            }
+            at += 1;
+        }
+        i += 1;
+    }
+    return oldest;
+}
+fn f_host_background_wait_us() -> u64 {
+    return rt_background_wait_us();
+}
+// `parallel_class(class, f)`, which is pool::with_class: run f with forks of class `class`. On a
+// green stack f is forked as a job of that class and joined at once, which the forker does by
+// running it here (claim by pointer) unless a worker took it first; everything it forks inherits
+// the class from it. A plain thread keeps the class in its thread record for the duration.
+fn rt_parallel_class(class: u64, f: u64, env: u64) -> u64 {
+    rt_jobs_sched();
+    if rt_job_stack() != 0 {
+        r := rt_job_make_class(rt_job_call0, f, env, 0, 1, class);
+        return rt_job_join(r);
+    }
+    tp := raw_tp_get();
+    old := raw_load(tp + 112);
+    raw_store(tp + 112, class + 1);
+    res := rt_job_call0(f, env, 0);
+    raw_store(tp + 112, old);
+    return res;
+}
+// sched::start(Config): the settings the scheduler is made with, applied only before it exists.
+// Block (raw_map, process-state word 3424): 8 workers, 16 background cap, 24 pin workers,
+// 32 stacks warmed per worker, 40 steal seed, 48 idle spin in microseconds; 0 everywhere means the
+// default. 0 when it was applied, 1 when the scheduler already existed or a config was already set:
+// the caller gets an answer, never an abort.
+fn f_host_sched_start(workers: u64, cap: u64, pin: u64, warm: u64, seed: u64, spin: u64) -> u64 {
+    if raw_atomic_load(raw_state() + 80) != 0 {
+        return 1;
+    }
+    block := raw_map(4096);
+    if rt_error(block) {
+        rt_abort();
+    }
+    mut w = workers;
+    if 64 < w {
+        w = 64;
+    }
+    raw_store(block + 8, w);
+    raw_store(block + 16, cap);
+    raw_store(block + 24, pin);
+    raw_store(block + 32, warm);
+    raw_store(block + 40, seed);
+    raw_store(block + 48, spin);
+    if raw_atomic_cas(rt_sched_config(), 0, block) != 0 {
+        rt_syscall(11, block, 4096, 0);
+        return 1;
+    }
+    // The scheduler may have been made between the first test and the publication: then the
+    // settings came too late, and saying so is the honest answer.
+    if raw_atomic_load(raw_state() + 80) != 0 {
+        return 1;
+    }
+    return 0;
+}
+fn rt_sched_config() -> u64 {
+    return raw_state() + 3424;
+}
+fn rt_sched_setting(offset: u64) -> u64 {
+    block := raw_atomic_load(rt_sched_config());
+    if block == 0 {
+        return 0;
+    }
+    return raw_load(block + offset);
 }
 // GRAIL_SCHED_STATS=1: one line on stderr at exit.
 fn rt_sched_stats() -> u64 {
@@ -5812,11 +6299,14 @@ fn rt_sched_stats() -> u64 {
     text := rt_new();
     rt_reserveb(text, 160);
     buf := raw_load(text);
-    mut n = rt_fail_put(buf, 0, "grail: sched: workers ");
+    mut n = rt_fail_put(buf, 0, view("grail: sched: workers "));
     n = rt_fail_num(buf, n, workers);
-    n = rt_fail_put(buf, n, ", help depth high-water ");
+    n = rt_fail_put(buf, n, view(", help depth high-water "));
     n = rt_fail_num(buf, n, high);
-    n = rt_fail_put(buf, n, "\n");
+    n = rt_fail_put(buf, n, view(", oldest background wait "));
+    n = rt_fail_num(buf, n, rt_background_wait_us());
+    n = rt_fail_put(buf, n, view(" us"));
+    n = rt_fail_put(buf, n, view("\n"));
     raw_store(text + 8, n);
     rt_write_text(2, text);
     return 0;
@@ -5891,7 +6381,7 @@ fn rt_wake(t: u64) -> u64 {
             }
         } else if s == 2 {
             if raw_atomic_cas(t + 24, 2, 0) == 2 {
-                rt_enqueue(t);
+                rt_enqueue_in(raw_atomic_load(raw_state() + 72), t);
                 return 0;
             }
         } else {
@@ -6032,7 +6522,8 @@ fn rt_task_join(t: u64) -> u64 {
 fn rt_fail_text(kind: u64, msg: u64, site: u64) -> u64 {
     j := rt_job_failing();
     if j != 0 {
-        return rt_job_fail(j, kind, 0, 0, site | 1, msg, 0);
+        raw_store(j + 232, 0);
+        return rt_job_fail(j, kind, 0, 0, site | 1, msg);
     }
     t := rt_containable();
     if t != 0 {
@@ -6084,7 +6575,16 @@ fn rt_task_site(t: u64) -> u64 {
         // A re-raised failure already carries its site text; bit 0 says so.
         return site & 18446744073709551614;
     }
-    return rt_site_text(site);
+    out := rt_site_text(site);
+    joined := raw_load(t + 232);
+    if joined != 0 {
+        line := rt_new();
+        rt_reserveb(line, 400);
+        raw_store(line + 8, rt_fail_line(raw_load(line), 0, joined, view(" = in a job joined at ")));
+        rt_append(out, line);
+        rt_drop_seq(line);
+    }
+    return out;
 }
 // An explicit task failure (`task_fail(msg)`): the caller's own text, with the location of the call.
 // Contained exactly like a failed check, so it is a value at the join or the end of the process.
@@ -6092,7 +6592,7 @@ fn rt_task_fail(text: u64) -> u64 {
     msg := rt_lit(raw_load(text), raw_load(wrapping_add(text, 8)));
     j := rt_job_failing();
     if j != 0 {
-        return rt_job_fail(j, 13, 0, 0, rt_site_here(j + 200) & 18446744073709551614, msg, 0);
+        return rt_job_fail_here(j, 13, 0, 0, msg);
     }
     t := rt_containable();
     if t != 0 {
@@ -8895,6 +9395,103 @@ fn rt_vec_reverse4(s: u64) -> u64 {
     mut i = 0;
     while i < rt_div(n, 2) {
         rt_vec_swap4(s, i, n - 1 - i);
+        i += 1;
+    }
+    return 0;
+}
+// ---- flat vectors: elements of `w` bytes stored inline (docs/design/unboxed-values.md, 1b) ----
+// A vector of plain records or `extern "C"` records holds the elements' bytes, `w` each, after one
+// another; the header is the same {pointer, length, capacity}, counted in elements. A value taken out
+// of one is a box of its own (rt_flat_box); a value put in is copied from its box, which is freed.
+fn rt_flat_box(src: u64, w: u64) -> u64 {
+    // Rounded up to whole words; rt_div is a software division and this runs per element.
+    box := rt_alloc((w + 7) & 18446744073709551608);
+    rt_copy_bytes(box, src, w);
+    return box;
+}
+fn rt_slotw(s: u64, i: u64, w: u64) -> u64 {
+    if (i < raw_load(wrapping_add(s, 8))) == 0 {
+        rt_fail(1, i, raw_load(wrapping_add(s, 8)));
+    }
+    return wrapping_add(raw_load(s), wrapping_mul(i, w));
+}
+fn rt_pushw(s: u64, src: u64, w: u64) -> u64 {
+    n := raw_load(wrapping_add(s, 8));
+    cap := raw_load(wrapping_add(s, 16));
+    if n == cap {
+        mut capacity = cap * 2;
+        if capacity == 0 {
+            capacity = 8;
+        }
+        // No product here can overflow: 2^40 elements of at most 2^20 bytes.
+        if (1099511627776 < capacity) + (1048576 < w) {
+            rt_abort();
+        }
+        ptr := rt_grow(raw_load(s), wrapping_mul(n, w), wrapping_mul(capacity, w));
+        raw_store(s, ptr);
+        raw_store(wrapping_add(s, 16), capacity);
+    }
+    rt_copy_bytes(wrapping_add(raw_load(s), wrapping_mul(n, w)), src, w);
+    raw_store(wrapping_add(s, 8), n + 1);
+    rt_free(src);
+    return 0;
+}
+fn rt_popw(s: u64, w: u64) -> u64 {
+    n := raw_load(wrapping_add(s, 8));
+    if n == 0 {
+        rt_fail(8, 0, 0);
+    }
+    raw_store(wrapping_add(s, 8), n - 1);
+    return rt_flat_box(wrapping_add(raw_load(s), wrapping_mul(n - 1, w)), w);
+}
+fn rt_popw_quiet(s: u64, w: u64) -> u64 {
+    if raw_load(wrapping_add(s, 8)) == 0 {
+        return 0;
+    }
+    return rt_popw(s, w);
+}
+fn rt_vec_insertw(s: u64, index: u64, src: u64, w: u64) -> u64 {
+    n := rt_len(s);
+    if n < index {
+        rt_abort();
+    }
+    rt_pushw(s, rt_flat_box(src, w), w);
+    mut i = n;
+    while index < i {
+        rt_copy_bytes(rt_slotw(s, i, w), rt_slotw(s, i - 1, w), w);
+        i -= 1;
+    }
+    rt_copy_bytes(rt_slotw(s, index, w), src, w);
+    rt_free(src);
+    return 0;
+}
+fn rt_vec_removew(s: u64, index: u64, w: u64) -> u64 {
+    n := rt_len(s);
+    if (index < n) == 0 {
+        rt_abort();
+    }
+    v := rt_flat_box(rt_slotw(s, index, w), w);
+    mut i = index;
+    while i + 1 < n {
+        rt_copy_bytes(rt_slotw(s, i, w), rt_slotw(s, i + 1, w), w);
+        i += 1;
+    }
+    raw_store(wrapping_add(s, 8), n - 1);
+    return v;
+}
+fn rt_vec_swapw(s: u64, i: u64, j: u64, w: u64) -> u64 {
+    a := rt_slotw(s, i, w);
+    b := rt_slotw(s, j, w);
+    if i != j {
+        rt_swap(a, b, w);
+    }
+    return 0;
+}
+fn rt_vec_reversew(s: u64, w: u64) -> u64 {
+    n := rt_len(s);
+    mut i = 0;
+    while i < (n >> 1) {
+        rt_vec_swapw(s, i, n - 1 - i, w);
         i += 1;
     }
     return 0;

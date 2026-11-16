@@ -1,0 +1,53 @@
+// One generic body, three shapes of referent: a number, a record and an enum. `&mut T` must mean
+// "the place a T lives" for each, so replacing and swapping through it behaves the same.
+struct P {
+    x: u64,
+    tag: string
+}
+enum Shape {
+    Dot,
+    Line(u64)
+}
+fn replace<a, T>(slot: (&a mut T), value: T) -> T {
+    return exchange(slot, value);
+}
+fn rotate<a, T>(v: (&a mut T[]), fresh: T) -> T {
+    old := exchange(&mut v[0], fresh);
+    return exchange(&mut v[1], old);
+}
+fn show(s: (&Shape)) -> u64 {
+    match s {
+        Dot => { return 0; },
+        Line(n) => { return n; },
+    }
+}
+fn take_p<a>(m: (&a mut P), with: P) -> P {
+    return exchange(m, with);
+}
+fn main() -> u64 {
+    mut n = 1;
+    println(replace(&mut n, 2) + n);
+
+    mut p = P { x: 3, tag: "three" };
+    q := replace(&mut p, P { x: 4, tag: "four" });
+    println("{} {} {} {}", q.x, q.tag, p.x, p.tag);
+
+    mut s = Shape::Line(5);
+    t := replace(&mut s, Shape::Dot);
+    println("{} {}", show(&t), show(&s));
+
+    mut ns = u64[10, 20];
+    println(rotate(&mut ns, 30) + ns[0] + ns[1]);
+    mut ps = P[P { x: 1, tag: "a" }, P { x: 2, tag: "b" }];
+    r := rotate(&mut ps, P { x: 3, tag: "c" });
+    println("{}{} {}{} {}{}", r.x, r.tag, ps[0].x, ps[0].tag, ps[1].x, ps[1].tag);
+    mut ss = Shape[Shape::Line(7), Shape::Dot];
+    u := rotate(&mut ss, Shape::Line(9));
+    println("{} {} {}", show(&u), show(&ss[0]), show(&ss[1]));
+
+    lock := Mutex::new(P { x: 11, tag: "locked" });
+    before := lock.lock_with(P { x: 12, tag: "swapped" }, take_p);
+    after := lock.lock_with(P { x: 13, tag: "again" }, take_p);
+    println("{} {} {} {}", before.x, before.tag, after.x, after.tag);
+    return 0;
+}

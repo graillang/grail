@@ -71,17 +71,32 @@ fn io_task(n: u64, sh: &Shared) -> u64 {
     return rounds;
 }
 // The asset importer: compute plus allocation, never waits.
-fn bg_task(n: u64, sh: &Shared) -> u64 {
-    mut rounds = 0;
+// The asset importer: a Background fork tree of compute and allocation that never waits. With an
+// argument the benchmark runs without it, which is the baseline the importer's cost is read from.
+fn bg_piece(i: u64, rounds: u64) -> u64 {
+    mut v = u64[];
+    for k in 2000 { v.push(mix(k + rounds + i)); }
     mut acc = 0;
-    while sh.stop.load() == 0 {
-        mut v = u64[];
-        for i in 2000 { v.push(mix(i + rounds)); }
-        for i in v.len() { acc = acc ^ v[i]; }
-        rounds += 1;
-        sh.bg_rounds.store(rounds);
-    }
+    for k in v.len() { acc = acc ^ v[k]; }
     return acc;
+}
+fn bg_task(n: u64, sh: &Shared) -> u64 {
+    if host::argc() > 1 {
+        return 0;
+    }
+    return pool::with_class<u64>(pool::Class::Background, || -> u64 {
+        mut rounds = 0;
+        mut acc = 0;
+        while sh.stop.load() == 0 {
+            mut items = u64[];
+            for i in 16 { items.push(i); }
+            parts := parallel_map(items, rounds, bg_piece);
+            for i in parts.len() { acc = acc ^ parts[i]; }
+            rounds += 1;
+            sh.bg_rounds.store(rounds);
+        }
+        return acc;
+    });
 }
 fn body<s>(sc: (&s Scope<&Shared>), sh: &Shared) -> u64 {
     io := spawn(sc, 0, io_task);
@@ -95,11 +110,13 @@ fn body<s>(sc: (&s Scope<&Shared>), sh: &Shared) -> u64 {
     start := host::now_us();
     for f in frames {
         t0 := host::now_us();
-        mut index = u64[];
-        for i in 32 { index.push(i); }
-        sys := parallel_map(index, f, system);
+        sys := pool::with_class<u64[]>(pool::Class::Frame, || -> u64[] {
+            mut index = u64[];
+            for i in 32 { index.push(i); }
+            return parallel_map(index, f, system);
+        });
         for i in sys.len() { check = check ^ sys[i]; }
-        pool::chunks_mut<u64>(&mut data[0: n], 245, leaf);
+        pool::split_mut<u64>(&mut data[0: n], 4096, leaf);
         check = check ^ work(f, 20000); // "render" on this thread
         times.push(host::now_us() - t0);
     }

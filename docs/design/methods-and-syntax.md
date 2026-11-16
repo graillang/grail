@@ -89,32 +89,34 @@ the sign, and `{:.2}` (alone or as `{:8.2}`) gives an `f64` exactly 2 decimals.
 
 ## Vector helpers (`lib/vecs.grl`)
 
-`vecs::map(items, f)` (moves each item into a closure `Fn(T) -> U`), `vecs::filter_nums`,
-`vecs::sum`, `vecs::max_num`, `vecs::sort_nums` (in place), `vecs::reverse` and `vecs::contains`
-(for `hash::Equal` element types).
+Methods on `T[]`: `v.map(f)` (moves each item into a closure `FnMut(T) -> U`), `filter`,
+`filter_map`, `flat_map`, `fold`, `reduce`, `for_each`, `any`, `all`, `count`, `find`, `position`,
+`get`, `first`, `last`, `dedup` (for `hash::Equal` elements) and `sum` (on `u64[]`). The free
+`vecs::contains(&v, &x)` compares any `hash::Equal` element type; the built-in `v.contains(x)` takes
+integer and bool elements.
 
-`vecs::sort(borrow_mut(v))` sorts any vector whose element type implements `order::Ord`
+`v.sort()` sorts any vector whose element type implements `order::Ord`
 (`less(left, right) -> bool`; provided for integers, `f64` with NaN last, `u8[]` and `string`). It is
-a stable merge sort that moves elements instead of copying them. `vecs::is_sorted`, `min_index` and
-`max_index` use the same order. Implement `order::Ord` for your own types to sort them.
-`vecs::sort_by(&mut v, less)` sorts stably by a comparator `FnMut(&T, &T) -> bool` (any function with
-that signature, or a closure, which may write its captures); `vecs::sort_by_key(&mut v, key)` by a `u64` key computed once per
-element. Sorted-vector sets: `vecs::insert_sorted(&mut v, x)` (keeps order, rejects duplicates) and
-`vecs::binary_search(&v, &x) -> u64?`.
+a stable merge sort that moves elements instead of copying them. `is_sorted`, `min`, `max`,
+`min_index` and `max_index` use the same order. Implement `order::Ord` for your own types to sort them.
+`v.sort_by(less)` sorts stably by a comparator `FnMut(&T, &T) -> bool` (any function with
+that signature, or a closure, which may write its captures); `v.sort_by_key(key)` by a `u64` key computed once per
+element. Sorted-vector sets: `v.insert_sorted(x)` (keeps order, rejects duplicates) and
+`v.binary_search(&x) -> u64?`.
 
 ## Text helpers (`lib/strings.grl`)
 
-`strings::starts_with`, `ends_with`, `find` (→ `num?`), `contains`, `split` (on a byte),
-`trim`, `join_with`, ASCII `to_upper`/`to_lower`, and `parse_num` (→ `num?`, `None` for
-non-digits or overflow), `replace` and `repeat`. UTF-8 (Rust's `str` API): `is_utf8` and
+Built-in methods on byte text: `starts_with`, `ends_with`, `contains`, `split` (on a byte), `trim`,
+`to_upper`/`to_lower`, `replace`, `repeat`, `chars` (a `char[]`) and `push_char` (on `u8[]`).
+`lib/strings.grl` adds methods on `[u8]`: `find` (→ `u64?`), `parse_u64` and `parse_i64` (→ `None`
+for bad input or overflow), `lines`, `split_whitespace`, and UTF-8 (Rust's `str` API): `is_utf8` and
 `utf8_error` (→ `u64?`, the offset of the first ill-formed sequence, strict validation),
-`chars`/`char_indices` (lazy `iter::Iter<char>` and `iter::Iter<(u64, char)>`; invalid input
-decodes to one U+FFFD per maximal subpart), `char_count`, `is_char_boundary`,
-`slice_chars(text, lo, hi)` (a view; both offsets must be char boundaries), and
-`encode_utf8`/`push_char` (a `char`'s encoding, 1 to 4 bytes). The iterators own a copy of the
-bytes: an `iter::Iter<T>` carries no lifetime, so a borrow of the argument cannot live inside it.
-`strings::to_upper/to_lower` are ASCII-only; the built-in methods also map Latin, Greek and
-Cyrillic letters.
+`char_indices` (a lazy `iter::Iter<(u64, char)>`; invalid input decodes to one U+FFFD per maximal
+subpart), `char_count`, `is_char_boundary`, `slice_chars(lo, hi)` (a view; both offsets must be char
+boundaries) and `to_text_lossy`; `parts.join_with(sep)` on `u8[][]`; and the free functions
+`strings::chars(text)` (a lazy `iter::Iter<char>`), `encode_utf8`, `from_u64` and `from_i64`. The
+iterators own a copy of the bytes: an `iter::Iter<T>` carries no lifetime, so a borrow of the
+receiver cannot live inside it.
 
 ## Constants
 

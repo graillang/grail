@@ -250,6 +250,10 @@ gate is 2–3 hours; run it in a watched job that logs to a file rather than hol
   equivalent Rust program.
 - `abundance-test.mjs`, `borg-test.mjs` — the ports, compared bit-for-bit against their C++ and
   reference outputs.
+- `test-optimiser-jumps.mjs` — the text optimiser follows its jumps: a loop with a branch keeps its
+  state in registers across the back edge, and over the compiler's own sources (`GRAIL_OPT_STATS=1`
+  writes `# grail-jumps <known> <unknown>` before each body) at least 99% of the direct jumps have a
+  target the passes know.
 - `test-facts.mjs` — both typed-IR facts (docs/design/typed-ir.md): F2's `f32` fixtures' exact values
   with and without `--verify-facts` and the round-trip check in the module, F1's header facts on a
   vector read through its own header (the fact table in the module, the slots and call arguments
@@ -267,13 +271,21 @@ gate is 2–3 hours; run it in a watched job that logs to a file rather than hol
 ## The full gate
 
 `tools/gate.sh [--reseed] [LOGDIR]` runs every leg the merge gate needs: the corpus on x86-64,
-AArch64 and RISC-V, the LLVM backend plain and with range facts verified, and every tool suite
+AArch64 and RISC-V, the LLVM backend plain and with range facts verified on x86-64 and on the
+emulated targets (below), and every tool suite
 (self-host, FFI, CLI, interface, cache, split, facts, debug lines, Abundance, Borg, grammar,
 Windows under Wine, the book, lint). `--reseed` first republishes the bootstrap; `bootstrap.mjs
 update all` already proves self-hosting and assembly identity on every target, so no separate
 `verify` follows. At most three legs run at once - this machine has crashed under more - and
 independent legs overlap within that cap. Each leg logs to `LOGDIR/<leg>.log` ending in `exit=N`;
 `LOGDIR/summary.txt` lists failures first, and `LOGDIR/DONE` is written last.
+
+The LLVM backend on AArch64 and RISC-V is two legs per target: `llvm_<arch>_vec`, the `vec` cases
+(about a minute each), and `llvm_<arch>_shard<i>of3`, one third of the corpus (about 25 minutes
+under qemu). The third is not rotated by date: `i` is the first hex digit of
+`git rev-parse HEAD^{tree}` mod 3, plus 1, so the same tree always runs the same cases and the leg's
+name says which. Reproduce a failure with `GRAIL_BACKEND=llvm GRAIL_TEST_SHARD=<i>/3 bun
+tools/test-native.mjs <arch>`. `ci.mjs lint` checks that the legs are there.
 
 ### Two builds of the same compiler must not share a path
 
