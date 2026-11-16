@@ -9489,6 +9489,12 @@ fn rt_slotw(s: u64, i: u64, w: u64) -> u64 {
     return wrapping_add(raw_load(s), wrapping_mul(i, w));
 }
 fn rt_pushw(s: u64, src: u64, w: u64) -> u64 {
+    rt_pushwk(s, src, w);
+    rt_free(src);
+    return 0;
+}
+// rt_pushw without freeing the source: the source is frame words (--frame-records).
+fn rt_pushwk(s: u64, src: u64, w: u64) -> u64 {
     n := raw_load(wrapping_add(s, 8));
     cap := raw_load(wrapping_add(s, 16));
     if n == cap {
@@ -9506,7 +9512,6 @@ fn rt_pushw(s: u64, src: u64, w: u64) -> u64 {
     }
     rt_copy_bytes(wrapping_add(raw_load(s), wrapping_mul(n, w)), src, w);
     raw_store(wrapping_add(s, 8), n + 1);
-    rt_free(src);
     return 0;
 }
 fn rt_popw(s: u64, w: u64) -> u64 {
@@ -9524,6 +9529,11 @@ fn rt_popw_quiet(s: u64, w: u64) -> u64 {
     return rt_popw(s, w);
 }
 fn rt_vec_insertw(s: u64, index: u64, src: u64, w: u64) -> u64 {
+    rt_vec_insertwk(s, index, src, w);
+    rt_free(src);
+    return 0;
+}
+fn rt_vec_insertwk(s: u64, index: u64, src: u64, w: u64) -> u64 {
     n := rt_len(s);
     if n < index {
         rt_abort();
@@ -9535,7 +9545,6 @@ fn rt_vec_insertw(s: u64, index: u64, src: u64, w: u64) -> u64 {
         i -= 1;
     }
     rt_copy_bytes(rt_slotw(s, index, w), src, w);
-    rt_free(src);
     return 0;
 }
 fn rt_vec_removew(s: u64, index: u64, w: u64) -> u64 {

@@ -73,6 +73,8 @@ pub struct Body {
     // The `DynPair`s this body builds, as the address-indexed slots the passes use, read from
     // `llvm::facts_dyn_pairs` in `build` (docs/design/fat-dyn.md).
     dyn_pairs: u64[],
+    // The word count of each entry of `dyn_pairs` (2 for a `DynPair`, more for a frame record).
+    pair_widths: u64[],
     pair: u64[],
     ret2: u64,
     inl_names: u8[][],
@@ -1227,6 +1229,7 @@ pub fn reset<a>(o: (&a mut Body)) {
     o.m1.clear();
     exchange(&mut o.gen, u8[]);
     exchange(&mut o.dyn_pairs, u64[]);
+    exchange(&mut o.pair_widths, u64[]);
     exchange(&mut o.pair, u64[]);
     exchange(&mut o.ret2, 0);
     exchange(&mut o.weird, 0);
@@ -1288,6 +1291,7 @@ pub fn new_body() -> Body {
         zfrom: 0,
         zto: 0,
         dyn_pairs: u64[],
+        pair_widths: u64[],
         pair: u64[],
         ret2: 0,
         inl_names: u8[][],
@@ -1530,6 +1534,8 @@ pub fn build<a, b, c, d>(o: (&a mut Body), s: &b [u8], facts: (&c llvm::Facts), 
     exchange(&mut o.ret2, 0);
     if o.name.len() != 0 {
         llvm::facts_dyn_pairs(facts, view(o.name), &mut o.dyn_pairs);
+        exchange(&mut o.pair_widths, u64[]);
+        llvm::facts_pair_widths(facts, view(o.name), &mut o.pair_widths);
         for q in o.dyn_pairs.len() {
             first := o.dyn_pairs[q] + 1;
             exchange(&mut o.dyn_pairs[q], first);
@@ -1660,14 +1666,10 @@ fn slot_ty<a, b, c, d>(o: (&a Body), facts: (&b llvm::Facts), ix: (&d FactIndex)
             width = width_of_what(k >> 8, 1);
         }
     }
-    mut pair = 0;
     for p in o.dyn_pairs.len() {
         if o.dyn_pairs[p] == slot {
-            pair = 1;
+            width = o.pair_widths[p];
         }
-    }
-    if pair != 0 {
-        width = 2;
     }
     return ty(t, width);
 }
