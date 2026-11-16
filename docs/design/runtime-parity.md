@@ -226,6 +226,24 @@ reloads below, and a loop with more independent work would show them.
   (strict IEEE), which hides most of the 3.7x. Against C with the same heap arrays (matmul_heap.c)
   the gap is 1.04x. Item 4.
 
+**The float branch, measured the same way.** The float agent's P2 (`gaps12-float` 6117799,
+"slices are SEQ-STABLE - descriptor fields read once, element addresses as getelementptr") targets
+exactly the xform cause above. `bun tools/bench-rivals.mjs --branch gaps12-float xform_f32 xform_f64
+dot_f32 dot_f64` against `--compiler` this tree's (`gaps13-int` db2d35e sources), back to back,
+best of three, load average 25 to 33:
+
+| program | Grail-LLVM, db2d35e | Grail-LLVM, gaps12-float 7c03db2 | best rival | ratio before | ratio after | instructions over C, before / after |
+| --- | --- | --- | --- | --- | --- | --- |
+| xform_f32 | 0.132 s | 0.022 s | 0.018 s (C) | 5.61x | **1.19x** | 10.23x / 1.33x |
+| xform_f64 | 0.146 s | 0.039 s | 0.036 s (C) | 4.03x | **1.07x** | 6.29x / 1.24x |
+| dot_f32 | 0.136 s | 0.135 s | 0.129 s (Zig) | 1.04x | 1.04x | 1.88x / 1.19x |
+| dot_f64 | 0.138 s | 0.144 s | 0.135 s (C) | 1.04x | 1.07x | 1.75x / 1.47x |
+
+The claim stands: xform_f32 goes from about 6x to 1.2x, and xform_f64 to within noise. The dot
+times do not move because the serial sum already set their pace, but they now retire far fewer
+instructions. What is left on xform_f32 (1.33x the instructions) has not been read from the code
+yet.
+
 **Where the development bar is missed: everywhere but ffi_call** (2.2x to 5.4x the best of Go,
 Rust dev and Zig Debug in time, 3.6x to 10x in instructions). Grail-native is faster than Rust's
 dev profile on every row, and slower than Zig Debug and Go on every row but ffi_call. The native
