@@ -6047,6 +6047,167 @@
     "note": "a module binding nothing reads is computed at the end of the compile; its refusal points at the binding, not at the last file parsed (it pointed at lib/result.grl)"
   },
   {
+    "name": "static-baked-scalars",
+    "source": "const PAGE: u64 = 4096;\nstatic MASK: u64 = PAGE - 1;\nstatic NEG: i32 = -7;\nstatic ON: bool = PAGE > 1;\nstatic NAME: string = \"grail\";\nfn main() -> u64 {\n    println(MASK);\n    println(NEG);\n    println(ON);\n    println(NAME);\n    println(NAME.len());\n    return 0;\n}\n",
+    "stdout": "4095\n-7\ntrue\ngrail\n5\n",
+    "note": "module-values stage 1: baked statics from a constant expression (over a const), a negative literal, a bool expression and a string literal; a scalar read is a load of the static's word"
+  },
+  {
+    "name": "static-baked-table-no-copy",
+    "source": "static SQ: u64[] = @squares();\nstatic NAME: string = \"grail\";\nfn squares() -> u64[] {\n    mut v = u64[];\n    for i in 8 {\n        v.push(i * i);\n    }\n    return v;\n}\n@no_alloc\nfn sizes() -> u64 {\n    return SQ.len() + NAME.len();\n}\nfn sum(v: &u64[]) -> u64 {\n    mut t = 0;\n    for i in v.len() {\n        t += v[i];\n    }\n    return t;\n}\nfn main() -> u64 {\n    println(sizes());\n    println(SQ[3]);\n    println(sum(SQ));\n    r := SQ;\n    println(r[7]);\n    mut own = SQ.copy();\n    own.push(64);\n    println(own.len());\n    println(SQ.len());\n    return 0;\n}\n",
+    "stdout": "13\n9\n140\n49\n9\n8\n",
+    "note": "a table static is one object in read-only data: reading it borrows it (`@no_alloc` accepts `SQ.len()`, which a `NAME := f();` table constant refuses because each read copies), it passes as `&u64[]`, a binding of it is a borrow, and `.copy()` makes an owned vector"
+  },
+  {
+    "name": "static-baked-narrow-tables",
+    "source": "static SMALL: i16[] = @smalls();\nstatic WORDS: u32[] = @words();\nstatic BYTES: u8[] = @bytes();\nfn smalls() -> i16[] {\n    mut v = i16[];\n    v.push(3);\n    v.push(30000);\n    return v;\n}\nfn words() -> u32[] {\n    mut v = u32[];\n    v.push(70000);\n    v.push(4000000000);\n    return v;\n}\nfn bytes() -> u8[] {\n    mut v = u8[];\n    v.push(65);\n    v.push(255);\n    return v;\n}\nfn main() -> u64 {\n    println(SMALL[1]);\n    println(WORDS[0]);\n    println(WORDS[1]);\n    println(BYTES[1]);\n    println(BYTES.len() + WORDS.len() + SMALL.len());\n    return 0;\n}\n",
+    "stdout": "30000\n70000\n4000000000\n255\n6\n",
+    "note": "a table static is laid out as the runtime lays out a vector: a byte per u8, four bytes per 32-bit element, a word otherwise (the run tier hands it back in C layout)"
+  },
+  {
+    "name": "static-pub-across-modules",
+    "files": [
+      "tests/interfaces/table_user.grl"
+    ],
+    "modules": [
+      "tests/interfaces/table.grl"
+    ],
+    "interfaces": true,
+    "stdout": "12\ntrue\ntable\n55\n25\n8\n",
+    "note": "a pub static read from another module, built from source and interface-first: the interface carries the static's name, type and tier, and the storage is a symbol in the declaring module's object"
+  },
+  {
+    "name": "static-private-across-modules",
+    "files": [
+      "tests/interfaces/table_private_user.grl"
+    ],
+    "modules": [
+      "tests/interfaces/table.grl"
+    ],
+    "reject": true,
+    "diagnostic": "HIDDEN",
+    "note": "a static without `pub` is private to its module"
+  },
+  {
+    "name": "static-mut-refused",
+    "source": "static mut X: u64 = 1;\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "`static mut` does not exist",
+    "note": "S2: no mutable statics anywhere; mutation goes through a Mutex or an Atomic"
+  },
+  {
+    "name": "static-needs-type",
+    "source": "static X = 1;\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "a static needs its type",
+    "note": "S1: a static's type is always written"
+  },
+  {
+    "name": "static-assign-refused",
+    "source": "static X: u64 = 1;\nfn main() -> u64 {\n    X = 2;\n    return X;\n}\n",
+    "reject": true,
+    "diagnostic": "a static is immutable",
+    "note": "a static cannot be assigned"
+  },
+  {
+    "name": "static-push-refused",
+    "source": "static T: u64[] = @t();\nfn t() -> u64[] {\n    return u64[1, 2];\n}\nfn main() -> u64 {\n    T.push(3);\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "mutation through readonly frame",
+    "note": "a read of a static is a shared borrow, so it cannot be mutated through"
+  },
+  {
+    "name": "static-move-out-refused",
+    "source": "static T: u64[] = @t();\nfn t() -> u64[] {\n    return u64[1, 2];\n}\nfn take(v: u64[]) -> u64 {\n    return v.len();\n}\nfn main() -> u64 {\n    return take(T);\n}\n",
+    "reject": true,
+    "diagnostic": "expected `u64[]`, found `&u64[]`",
+    "note": "a static cannot be moved out of: its read is a borrow, and `.copy()` is the owned value"
+  },
+  {
+    "name": "static-holds-borrow-refused",
+    "source": "static T: &[u8] = \"x\";\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "a static cannot hold a borrow",
+    "note": "S3: no borrows in a static"
+  },
+  {
+    "name": "static-not-shareable-refused",
+    "source": "handle H;\nstatic X: H = 0;\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "a static is reachable from every thread at once, so its type must be shareable",
+    "note": "S3: a static's type must be shareable; an unaudited handle is thread-affine"
+  },
+  {
+    "name": "static-lazy-tier-not-built",
+    "source": "static L: Mutex<u64> = Mutex(0);\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "needs code run while the program runs (the lazy tier), which is not built yet",
+    "note": "a Mutex static needs the lazy tier, which waits for sync::Once (gaps12-sync)"
+  },
+  {
+    "name": "static-run-time-call-refused",
+    "source": "static T: u64[] = t();\nfn t() -> u64[] {\n    return u64[1, 2];\n}\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "write `@f(...)` to compute it while compiling",
+    "note": "S4: the tier is chosen by spelling; a plain call is the lazy tier"
+  },
+  {
+    "name": "static-generic-refused",
+    "source": "static T<X>: u64 = 1;\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "a static cannot be generic",
+    "note": "S1: no generic statics"
+  },
+  {
+    "name": "static-in-fn-refused",
+    "source": "fn main() -> u64 {\n    static X: u64 = 1;\n    return X;\n}\n",
+    "reject": true,
+    "diagnostic": "a static is declared at module level",
+    "note": "S1: no function-local statics"
+  },
+  {
+    "name": "static-at-cannot-bake",
+    "source": "static T: u64 = @now();\nfn now() -> u64 {\n    return host::now_ms();\n}\nfn main() -> u64 {\n    return T;\n}\n",
+    "reject": true,
+    "diagnostic": "compile-time code cannot use files, the clock, the network or processes",
+    "note": "S4: an `@` initialiser that cannot run at compile time is an error, never a quiet switch to the lazy tier"
+  },
+  {
+    "name": "static-name-clashes-const",
+    "source": "const X: u64 = 1;\nstatic X: u64 = 2;\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "a constant named `X` is already declared",
+    "note": "a static and a constant share a module's names"
+  },
+  {
+    "name": "static-wrong-type",
+    "source": "static T: u32[] = @t();\nfn t() -> u64[] {\n    return u64[1, 2];\n}\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "static `T` is declared `u32[]`, and `@t()` gives `u64[]`",
+    "note": "the initialiser's type must be the declared type"
+  },
+  {
+    "name": "static-out-of-range",
+    "source": "static T: u8 = 300;\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "integer 300 is out of range for u8",
+    "note": "a constant-expression initialiser must fit the declared type"
+  },
+  {
+    "name": "static-cycle-refused",
+    "source": "static T: u64 = @f();\nfn f() -> u64 {\n    return T + 1;\n}\nfn main() -> u64 {\n    return T;\n}\n",
+    "reject": true,
+    "diagnostic": "is still being computed",
+    "note": "S5: a static whose compile-time initialiser reads itself is a cycle"
+  },
+  {
+    "name": "static-float-not-built",
+    "source": "static F: f64 = 1.5;\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "a float static is not built yet",
+    "note": "floats are not a baked type yet; a const serves"
+  },
+  {
     "name": "comptime-module-if-record-layout",
     "source": "extern \"C\" record H { a: u32 }\n@if size_of(H) == 4 {\n    fn f() -> u64 {\n        return 1;\n    }\n}\nfn main() -> u64 {\n    return 0;\n}\n",
     "reject": true,

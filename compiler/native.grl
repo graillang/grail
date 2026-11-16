@@ -274,6 +274,22 @@ struct Constant {
     value: u64,
     text: u8[]
 }
+// A module static (docs/design/module-values.md): one object at one address, in the declaring
+// module's object. Stage 1 is the baked tier only - the value is computed while compiling (a
+// constant expression or `@f(...)`) and emitted as read-only data, so a read is an address and
+// nothing runs, allocates or is freed.
+struct Static {
+    module: u8[],
+    name: u8[],
+    declared_at: u8[],
+    file: u64,
+    at: u64,
+    public: u64,
+    // NO_TYPE until the second pass parses the declared type.
+    ty: u64,
+    // 1 when the declaration came from an interface: another object defines the storage.
+    imported: u64
+}
 struct Spec {
     template: u64,
     args: u64[],
@@ -613,6 +629,9 @@ struct C {
     // of one is `inherent_type_base()` plus its 1-based position here (inherent_type_base).
     inherent_types: u64[],
     constants: Constant[],
+    statics: Static[],
+    // Where a static read parks the result of a call it makes only for its effect.
+    static_scratch: u64,
     impl_params: ImplParams[],
     receiver: u64,
     // The receiver type of the call being compiled, or NO_TYPE before it is prepared: id 0 is u64,
@@ -6312,6 +6331,10 @@ fn first_declared_at<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> u8[] {
     if k != 0 {
         return c.constants[k - 1].declared_at.copy();
     }
+    st := find_static(&mut c, view(m), view(n));
+    if st != 0 {
+        return c.statics[st - 1].declared_at.copy();
+    }
     return u8[];
 }
 // "a struct named `P` is already declared at input.grl:1:8: rename one, or remove it". Two
@@ -6342,7 +6365,19 @@ fn refuse_duplicate_constant<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8], 
     if find_constant(&mut c, view(m), view(name)) != 0 {
         duplicate_declared(&mut c, view("constant"), view(name), view(m), at);
     }
+    if find_static(&mut c, view(m), view(name)) != 0 {
+        duplicate_declared(&mut c, view("static"), view(name), view(m), at);
+    }
     return ();
+}
+fn find_static<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> u64 {
+    for i in c.statics.len() {
+        k := &c.statics[i];
+        if same(view(k.module), view(m)) & same(view(k.name), view(n)) {
+            return i + 1;
+        }
+    }
+    return 0;
 }
 // A parameter list naming one binding twice: the second shadows the first for the whole body, so the
 // first argument can never be read.
@@ -14973,6 +15008,19 @@ fn fn_surface_now<a>(c: (&a mut C)) -> u8[] {
         iface_wv(&mut out, val);
         iface_w_type(&mut c, &mut out, &mut deps, ty);
     }
+    // A static reaches a reader's text as its symbol and, through its type, as a load or a borrow;
+    // its value and initialiser do not, so an edit to them rebuilds only the declaring module.
+    for i in c.statics.len() {
+        m := c.statics[i].module.copy();
+        n := c.statics[i].name.copy();
+        pub := c.statics[i].public;
+        ty := c.statics[i].ty;
+        iface_ws(&mut out, view("static"));
+        iface_ws(&mut out, view(m));
+        iface_ws(&mut out, view(n));
+        iface_wv(&mut out, pub);
+        iface_w_type(&mut c, &mut out, &mut deps, ty);
+    }
     for i in c.imports.len() {
         m := c.imports[i].module.copy();
         n := c.imports[i].name.copy();
@@ -18459,6 +18507,359 @@ fn constant_value<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> Val
     }
     return val(0, NO_TYPE);
 }
+// ---- module statics: the baked tier (docs/design/module-values.md, stage 1) ------------------------
+//
+// `static NAME: T = init;` is one object at one address. The first pass registers the name, the
+// second its declared type (every read needs only that and the symbol), the third checks the type
+// rules, computes the value and emits it as read-only data in the declaring module's part, under a
+// global symbol. A scalar is a word; a string or a vector of integers is a real object behind
+// block headers in state 2, which rt_free leaves alone, so a read borrows it and never copies it.
+fn static_symbol<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> u8[] {
+    mut out = u8[];
+    if c.plat == 1 {
+        out.push(95);
+    }
+    push_bytes(&mut out, view("s_"));
+    push_bytes(&mut out, m);
+    out.push(95);
+    push_bytes(&mut out, n);
+    return out;
+}
+// In a compile-time probe, whether `m::n` is the static whose value the probe is computing.
+fn static_pending_here<a, b>(m: &a [u8], n: &b [u8]) -> bool {
+    mut key = copy_bytes(m);
+    push_bytes(&mut key, view("::"));
+    push_bytes(&mut key, n);
+    pending := host::env(view("GRAIL_COMPTIME_PENDING"));
+    return ct_list_has(view(pending), view(key));
+}
+// A read of `m::n`, or a value with type NO_TYPE when no static has that name. A scalar is loaded
+// (a copy of the word); anything else is a shared borrow of the object, whose target is storage
+// outside every frame - the same external place a borrowed parameter's referent is.
+fn static_value<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> Val {
+    k := find_static(&mut c, module, name);
+    if k == 0 {
+        return val(0, NO_TYPE);
+    }
+    ty := c.statics[k - 1].ty;
+    if c.statics[k - 1].public == 0 {
+        home := c.statics[k - 1].module.copy();
+        require_visible(&mut c, view(home), name);
+    }
+    if !is_type_id(ty) {
+        fail(&mut c, view("internal: a static is read before its type is known"));
+    }
+    if (c.probe_mode != 0) && static_pending_here(module, name) {
+        // The probe computing this static reached a read of it: a cycle, reported by the runner.
+        stop := invoke(&mut c, view("rt_comptime_cycle"), u64[]);
+        exchange(&mut c.static_scratch, stop);
+    }
+    sym := static_symbol(&mut c, module, name);
+    o(&mut c, view("leaq "));
+    o(&mut c, view(sym));
+    o(&mut c, view("(%rip),%rax\n"));
+    if integer(&mut c, ty) || is_bool(&mut c, ty) {
+        o(&mut c, view("movq (%rax),%rax\n"));
+        word := save(&mut c);
+        return val(word, ty);
+    }
+    slot := save(&mut c);
+    rty := reference_type(&mut c, ty, 0);
+    own(&mut c, slot, rty);
+    if c.raw == 0 {
+        holder := place_of(&mut c, slot);
+        source := add_external_capture(&mut c, holder, 0, 0);
+        set_target(&mut c, slot, source, slot + 1);
+    }
+    return val(slot, rty);
+}
+// The baked tier's types: integers, bool, string, and vectors of integers or bytes - exactly the
+// values the run tier can bring back as data.
+fn static_baked_type<a>(c: (&a mut C), ty: u64) -> bool {
+    if integer(&mut c, ty) || is_bool(&mut c, ty) || (ty == 3) {
+        return true;
+    }
+    return ct_seq_elem(&mut c, ty) != NO_TYPE;
+}
+fn static_refuse<a, b>(c: (&a mut C), at: u64, msg: &b [u8]) -> unit {
+    exchange(&mut c.pos, at);
+    fail(&mut c, msg);
+}
+// What a static may hold (S3): no borrow, a shareable type, and - until the lazy tier exists - a
+// type the baked tier can compute.
+fn static_type_rules<a>(c: (&a mut C), ty: u64, at: u64) -> unit {
+    shown := source_type_name(&mut c, ty);
+    k := ty_kind(&mut c, ty);
+    if (k == 5) || (k == 7) || (k == 27) || contains_borrow(&mut c, ty, 0) {
+        mut msg = copy_bytes(view("a static cannot hold a borrow: `"));
+        push_bytes(&mut msg, view(shown));
+        push_bytes(&mut msg, view("` refers to storage some frame owns, and a static outlives every frame; store owned data"));
+        static_refuse(&mut c, at, view(msg));
+    }
+    capability_begin(&mut c);
+    mut trail = u64[];
+    if transfer_capability(&mut c, ty, 1, &mut trail, 0) == 0 {
+        mut msg = copy_bytes(view("a static is reachable from every thread at once, so its type must be shareable, and `"));
+        push_bytes(&mut msg, view(shown));
+        push_bytes(&mut msg, view("` is not: "));
+        cap_denial_text(&mut c, &mut msg);
+        static_refuse(&mut c, at, view(msg));
+    }
+    if is_float(&mut c, ty) {
+        static_refuse(&mut c, at, view("a float static is not built yet; use `const NAME: f64 = ...;`"));
+    }
+    if !static_baked_type(&mut c, ty) {
+        mut msg = copy_bytes(view("a static of type `"));
+        push_bytes(&mut msg, view(shown));
+        push_bytes(&mut msg, view("` needs code run while the program runs (the lazy tier), which is not built yet: a static is an integer, a bool, a string or a vector of integers, computed while compiling"));
+        static_refuse(&mut c, at, view(msg));
+    }
+    return ();
+}
+fn static_quad<a>(c: (&a mut C), value: u64) -> unit {
+    if value >= 9223372036854775808 {
+        o(&mut c, view("-"));
+        on(&mut c, wrapping_sub(0, value));
+    } else {
+        on(&mut c, value);
+    }
+    return ();
+}
+// The storage of static `i`, in its module's part. `ready` is 0 only inside the probe computing
+// this static: its storage exists so the probe links, and every read of it stops the probe.
+fn static_emit<a, b>(c: (&a mut C), i: u64, ready: u64, value: u64, text: &b [u8]) -> unit {
+    module := c.statics[i].module.copy();
+    name := c.statics[i].name.copy();
+    ty := c.statics[i].ty;
+    unit := unit_module(&mut c, view(module));
+    part(&mut c, view(unit));
+    sym := static_symbol(&mut c, view(module), view(name));
+    if c.plat == 1 {
+        o(&mut c, view(".pushsection __DATA,__const\n"));
+    } else {
+        o(&mut c, view(".pushsection .rodata\n"));
+    }
+    if integer(&mut c, ty) || is_bool(&mut c, ty) {
+        o(&mut c, view(".p2align 3\n.globl "));
+        o(&mut c, view(sym));
+        o(&mut c, view("\n"));
+        o(&mut c, view(sym));
+        o(&mut c, view(":\n.quad "));
+        static_quad(&mut c, value * ready);
+        o(&mut c, view("\n.popsection\n"));
+        return ();
+    }
+    // The object's bytes as the runtime lays a vector out: one byte per u8, four per 32-bit
+    // element, a word for everything else. The run tier hands a table back in C layout.
+    mut bytes = u8[];
+    mut n = 0;
+    if ready != 0 {
+        if ty == 3 {
+            n = text.len();
+            for j in text.len() {
+                bytes.push(text[j]);
+            }
+        } else {
+            elem := ct_seq_elem(&mut c, ty);
+            e := carray_elem_of(&mut c, elem);
+            size := e[0];
+            signed := e[1];
+            mut width = 8;
+            if e[2] == 3 {
+                width = 1;
+            }
+            if e[2] == 4 {
+                width = 4;
+            }
+            n = value;
+            for j in n {
+                mut w = 0;
+                for b in size {
+                    w = w | (u64(text[j * size + b]) << (8 * b));
+                }
+                if (signed != 0) && (size < 8) && (((w >> (8 * size - 1)) & 1) != 0) {
+                    w = w | wrapping_sub(0, 1 << (8 * size));
+                }
+                for b in width {
+                    bytes.push((w >> (8 * b)) & 255);
+                }
+            }
+        }
+    }
+    data := label(&mut c);
+    obj := label(&mut c);
+    o(&mut c, view(".p2align 4\n.quad 0\n.quad 2\n"));
+    mark(&mut c, data);
+    for j in bytes.len() {
+        o(&mut c, view(".byte "));
+        on(&mut c, bytes[j]);
+        c.out.push(10);
+    }
+    o(&mut c, view(".byte 0\n.p2align 4\n.quad 0\n.quad 2\n"));
+    mark(&mut c, obj);
+    o(&mut c, view(".quad "));
+    lname(&mut c, data);
+    o(&mut c, view("\n.quad "));
+    on(&mut c, n);
+    o(&mut c, view("\n.quad "));
+    on(&mut c, n);
+    o(&mut c, view("\n.p2align 3\n.globl "));
+    o(&mut c, view(sym));
+    o(&mut c, view("\n"));
+    o(&mut c, view(sym));
+    o(&mut c, view(":\n.quad "));
+    lname(&mut c, obj);
+    o(&mut c, view("\n.popsection\n"));
+    return ();
+}
+fn static_skip_item<a>(c: (&a mut C)) -> unit {
+    while !is(&mut c, view(";")) {
+        if kind(&mut c) == 0 {
+            fail(&mut c, view("expected `;` after a static's initialiser"));
+        }
+        advance(&mut c);
+    }
+    advance(&mut c);
+    return ();
+}
+fn static_declaration<a>(c: (&a mut C), pass: u64) -> unit {
+    expect(&mut c, view("static"));
+    at_name := c.pos;
+    name := ident(&mut c);
+    module := module_copy(&mut c);
+    if pass == 1 {
+        if same(view(name), view("mut")) {
+            static_refuse(&mut c, at_name, view("`static mut` does not exist: a static is immutable, because every thread can read it; put the part that changes in a Mutex or an Atomic"));
+        }
+        if is(&mut c, view("<")) {
+            fail(&mut c, view("a static cannot be generic: it is one object at one address"));
+        }
+        if !is(&mut c, view(":")) {
+            fail(&mut c, view("a static needs its type: `static NAME: T = value;`"));
+        }
+        refuse_duplicate_constant(&mut c, view(module), view(name), at_name);
+        declared := position_text(&mut c, at_name);
+        static_public := c.decl_public;
+        c.statics.push(
+            Static {
+                module: module.copy(),
+                name: name.copy(),
+                declared_at: declared,
+                file: c.file,
+                at: at_name,
+                public: static_public,
+                ty: NO_TYPE,
+                imported: 0
+            }
+        );
+        static_skip_item(&mut c);
+        return ();
+    }
+    i := find_static(&mut c, view(module), view(name)) - 1;
+    expect(&mut c, view(":"));
+    if is(&mut c, view("&")) {
+        static_refuse(&mut c, at_name, view("a static cannot hold a borrow: a reference refers to storage some frame owns, and a static outlives every frame; store owned data"));
+    }
+    ty := parse_type(&mut c);
+    if pass == 2 {
+        exchange(&mut c.statics[i].ty, ty);
+        static_skip_item(&mut c);
+        return ();
+    }
+    static_type_rules(&mut c, ty, at_name);
+    expect(&mut c, view("="));
+    init := c.pos;
+    mut value = 0;
+    mut text = u8[];
+    mut ready = 1;
+    k := kind(&mut c);
+    if k == 64 {
+        advance(&mut c);
+        if !ct_call_ahead(&mut c) {
+            fail(&mut c, view("`@` on a static's initialiser takes a call: `static TABLE: u64[] = @build();`"));
+        }
+        call := ct_take_call_text(&mut c);
+        mut key = module.copy();
+        push_bytes(&mut key, view("::"));
+        push_bytes(&mut key, view(name));
+        if (c.probe_mode != 0) && static_pending_here(view(module), view(name)) {
+            ready = 0;
+        } else {
+            exchange(&mut c.pos, init);
+            r := run_tier(&mut c, view(module), view(call), view(key));
+            if r.ty != ty {
+                mut msg = copy_bytes(view("static `"));
+                push_bytes(&mut msg, view(name));
+                push_bytes(&mut msg, view("` is declared `"));
+                push_bytes(&mut msg, view(source_type_name(&mut c, ty)));
+                push_bytes(&mut msg, view("`, and `@"));
+                push_bytes(&mut msg, view(call));
+                push_bytes(&mut msg, view("` gives `"));
+                push_bytes(&mut msg, view(source_type_name(&mut c, r.ty)));
+                push_bytes(&mut msg, view("`"));
+                static_refuse(&mut c, init, view(msg));
+            }
+            value = r.value;
+            text = r.text;
+            static_skip_item(&mut c);
+            static_emit(&mut c, i, ready, value, view(text));
+            return ();
+        }
+    } else if k == 3 {
+        if ty != 3 {
+            mut msg = copy_bytes(view("a string literal initialises a `string` static; this one is `"));
+            push_bytes(&mut msg, view(source_type_name(&mut c, ty)));
+            push_bytes(&mut msg, view("`"));
+            fail(&mut c, view(msg));
+        }
+        text = decode_literal(&mut c, c.pos);
+        advance(&mut c);
+    } else if k == 5 {
+        fail(&mut c, view("a float static is not built yet; use `const NAME: f64 = ...;`"));
+    } else if ct_call_ahead(&mut c) {
+        fail(&mut c, view("this call would run when the program runs: a static with a run-time initialiser is the lazy tier, which is not built yet; write `@f(...)` to compute it while compiling"));
+    } else {
+        if !(integer(&mut c, ty) || is_bool(&mut c, ty)) {
+            mut msg = copy_bytes(view("a `"));
+            push_bytes(&mut msg, view(source_type_name(&mut c, ty)));
+            push_bytes(&mut msg, view("` static is computed by a call: `static NAME: T = @build();`"));
+            fail(&mut c, view(msg));
+        }
+        if eat(&mut c, view("-")) {
+            if (kind(&mut c) != 2) || !integer(&mut c, ty) {
+                fail(&mut c, view("only an integer literal can be negated in a static's initialiser"));
+            }
+            t := tok_text(&mut c, c.pos);
+            v := literal_value(&mut c, view(t));
+            if literal_fits(&mut c, ty, v, 1) == 0 {
+                fail(&mut c, view(literal_range_msg_v(&mut c, ty, v, 1)));
+            }
+            advance(&mut c);
+            value = wrapping_sub(0, v);
+        } else {
+            v := ct_expr(&mut c, 0);
+            if v.ty == ct_tag_ty() {
+                static_refuse(&mut c, init, view("a target tag is not a value a program can hold; compare it in @if"));
+            }
+            if is_bool(&mut c, ty) != is_bool(&mut c, v.ty) {
+                mut msg = copy_bytes(view("static `"));
+                push_bytes(&mut msg, view(name));
+                push_bytes(&mut msg, view("` is declared `"));
+                push_bytes(&mut msg, view(source_type_name(&mut c, ty)));
+                push_bytes(&mut msg, view("`, and its initialiser is not"));
+                static_refuse(&mut c, init, view(msg));
+            }
+            if integer(&mut c, ty) && (literal_fits(&mut c, ty, v.value, 0) == 0) {
+                exchange(&mut c.pos, init);
+                fail(&mut c, view(literal_range_msg_v(&mut c, ty, v.value, 0)));
+            }
+            value = v.value;
+        }
+    }
+    expect(&mut c, view(";"));
+    static_emit(&mut c, i, ready, value, view(text));
+    return ();
+}
 // 1 when `path` is in a directory that also holds core.grl: the standard-library directory in
 // the repository (lib/) and in every installed layout (std/). Both separators are accepted.
 fn in_std_dir<a>(path: &a [u8]) -> u64 {
@@ -20157,6 +20558,10 @@ fn declaration_item<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         }
         if is(&mut c, view("handle")) {
             handle_declaration(&mut c, pass);
+            return ();
+        }
+        if is(&mut c, view("static")) && ((kind_at(&mut c, c.pos + 1) == 1)) {
+            static_declaration(&mut c, pass);
             return ();
         }
         if is(&mut c, view("type")) {
@@ -32890,6 +33295,10 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
             if constant.ty != NO_TYPE {
                 return constant;
             }
+            st := static_value(&mut c, view(first), view(second));
+            if st.ty != NO_TYPE {
+                return st;
+            }
         }
         return call(&mut c, view(first), view(second));
     }
@@ -33178,6 +33587,10 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
     constant := constant_value(&mut c, view(m), view(first));
     if constant.ty != NO_TYPE {
         return constant;
+    }
+    st := static_value(&mut c, view(m), view(first));
+    if st.ty != NO_TYPE {
+        return st;
     }
     vp := value_param(&mut c, view(first));
     if vp != 0 {
@@ -36964,6 +37377,9 @@ fn statement<a>(c: (&a mut C)) -> unit {
 }
 fn statement_body<a>(c: (&a mut C)) -> unit {
     emit_loc(&mut c);
+    if is(&mut c, view("static")) && (kind_at(&mut c, c.pos + 1) == 1) {
+        fail(&mut c, view("a static is declared at module level, not inside a function: move it out of the body"));
+    }
     after := c.pos + 1;
     if (kind(&mut c) == 64) && is_at(&mut c, after, view("bounded")) {
         // `@bounded(N) while ...`: the claim is proved here, before the loop is compiled.
@@ -37818,6 +38234,10 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
                 }
                 capture_assignment(&mut c, view(name));
                 return ();
+            }
+            here_module := module_copy(&mut c);
+            if find_static(&mut c, view(here_module), view(name)) != 0 {
+                fail(&mut c, view("a static is immutable, because every thread can read it: put the part that changes in a Mutex or an Atomic"));
             }
             fail(&mut c, view("undefined assignment"));
         }
@@ -39195,6 +39615,9 @@ const IFACE_TAG_IMPL: u64 = 16;
 const IFACE_TAG_ENV: u64 = 17;
 // A written type's inherent methods (`impl<T> T[] { .. }`): the owner is a type, not a declaration.
 const IFACE_TAG_INHERENT_TYPE: u64 = 18;
+// A module static (docs/design/module-values.md): name, visibility, type and tier; the storage is in
+// the declaring module's object, so no value travels.
+const IFACE_TAG_STATIC: u64 = 19;
 
 // The `dyn` ABI this compiler builds objects for (docs/design/fat-dyn.md), as the one line every
 // interface carries. A `&dyn I` is an 8-byte pointer to a 16-byte, 8-aligned `{data, vtable}` pair,
@@ -39346,6 +39769,9 @@ fn iface_tag_name(tag: u64) -> string {
     if tag == IFACE_TAG_CONST {
         return "const";
     }
+    if tag == IFACE_TAG_STATIC {
+        return "static";
+    }
     if tag == IFACE_TAG_FN {
         return "fn";
     }
@@ -39370,7 +39796,8 @@ fn iface_known_tag(tag: u64) -> bool {
     return (tag == IFACE_TAG_MODULE) || (tag == IFACE_TAG_TRAILER) || (tag == IFACE_TAG_LINK)
         || (tag == IFACE_TAG_TYPE) || (tag == IFACE_TAG_ALIAS) || (tag == IFACE_TAG_CONST)
         || (tag == IFACE_TAG_FN) || (tag == IFACE_TAG_INHERENT) || (tag == IFACE_TAG_IFACE)
-        || (tag == IFACE_TAG_IMPL) || (tag == IFACE_TAG_ENV) || (tag == IFACE_TAG_INHERENT_TYPE);
+        || (tag == IFACE_TAG_IMPL) || (tag == IFACE_TAG_ENV) || (tag == IFACE_TAG_INHERENT_TYPE)
+        || (tag == IFACE_TAG_STATIC);
 }
 // Where a refusal happened, so no diagnostic says only "malformed".
 fn iface_where<a>(p: (&a IR)) -> u8[] {
@@ -40418,6 +40845,21 @@ fn iface_enc_const<a>(c: (&a mut C), index: u64, deps: (&a mut u64[])) -> u8[] {
     }
     return body;
 }
+// A static's record: what a reader needs to name its storage. Tier 1 is the baked tier, the only one
+// built; a reader refuses any other.
+fn iface_enc_static<a>(c: (&a mut C), index: u64, deps: (&a mut u64[])) -> u8[] {
+    module := c.statics[index].module.copy();
+    name := c.statics[index].name.copy();
+    ty := c.statics[index].ty;
+    public := c.statics[index].public;
+    mut body = u8[];
+    iface_ws(&mut body, view(module));
+    iface_ws(&mut body, view(name));
+    iface_w1(&mut body, public);
+    iface_type(&mut c, &mut body, &mut deps, ty);
+    iface_w1(&mut body, 1);
+    return body;
+}
 // An environment record: the captures of a closure type, under a name local to this file.
 fn iface_enc_env<a>(c: (&a mut C), decl: u64, deps: (&a mut u64[])) -> u8[] {
     first := c.decls[decl].first;
@@ -40505,6 +40947,34 @@ fn iface_items<a>(c: (&a mut C), m: &a [u8]) -> IItem[] {
                 index: index,
                 name: const_names[order3[i]].copy(),
                 public: c.constants[index].public,
+                owner: 0,
+                parent: 0,
+                payload: payload,
+                deps: deps,
+                text: text
+            }
+        );
+    }
+    mut stats = u64[];
+    mut stat_names = u8[][];
+    for i in c.statics.len() {
+        if same(view(c.statics[i].module), view(m)) {
+            stats.push(i);
+            stat_names.push(c.statics[i].name.copy());
+        }
+    }
+    order5 := iface_sorted(&stat_names);
+    for i in order5.len() {
+        index := stats[order5[i]];
+        mut deps = u64[];
+        mut text = u8[];
+        payload := iface_enc_static(&mut c, index, &mut deps);
+        items.push(
+            IItem {
+                tag: IFACE_TAG_STATIC,
+                index: index,
+                name: stat_names[order5[i]].copy(),
+                public: c.statics[index].public,
                 owner: 0,
                 parent: 0,
                 payload: payload,
@@ -41438,6 +41908,45 @@ fn iface_rec_const<a>(c: (&a mut C), p: (&a mut IR)) -> unit {
     }
     return ();
 }
+fn iface_rec_static<a>(c: (&a mut C), p: (&a mut IR)) -> unit {
+    module := iface_rs(&mut p);
+    name := iface_rs(&mut p);
+    public := iface_r1(&mut p);
+    if p.phase == 0 {
+        iface_rt_indent(&mut p, view(""));
+        push_bytes(&mut p.rtext, view("static "));
+        push_bytes(&mut p.rtext, view(module));
+        push_bytes(&mut p.rtext, view("::"));
+        push_bytes(&mut p.rtext, view(name));
+        iface_rt_num(&mut p, view(" public="), public);
+        p.rtext.push(32);
+    }
+    ty := iface_r_type(&mut p, &mut c);
+    tier := iface_r1(&mut p);
+    if p.phase == 0 {
+        iface_rt_num(&mut p, view(" tier "), tier);
+    }
+    if p.phase == 2 {
+        if tier != 1 {
+            iface_bad(&mut p, view("carries a static of a tier this compiler does not build"));
+        }
+        if find_static(&mut c, view(module), view(name)) == 0 {
+            c.statics.push(
+                Static {
+                    module: copy_bytes(view(module)),
+                    name: copy_bytes(view(name)),
+                    declared_at: u8[],
+                    file: 0,
+                    at: 0,
+                    public: public,
+                    ty: ty,
+                    imported: 1
+                }
+            );
+        }
+    }
+    return ();
+}
 // A function record. `module` is where it is filed (the module itself, `.inherent_N`, `.interface_N`
 // or `.impl_N`) and `home` is the module whose interface carries it; `owner` and `contract` travel in
 // the record, so the reader installs exactly what the writer wrote instead of re-deriving them.
@@ -42154,6 +42663,8 @@ fn iface_walk<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], source_index: u64
             iface_rec_alias(&mut c, &mut p);
         } else if tag == IFACE_TAG_CONST {
             iface_rec_const(&mut c, &mut p);
+        } else if tag == IFACE_TAG_STATIC {
+            iface_rec_static(&mut c, &mut p);
         } else if tag == IFACE_TAG_FN {
             iface_rec_fn(&mut c, &mut p, view(home), view(home), view(""), source_index, raw_flag, 0, 0, 0, 0);
         } else if tag == IFACE_TAG_INHERENT {
@@ -43707,6 +44218,8 @@ pub fn main() -> u64 {
         inherent: 0,
         inherent_types: u64[],
         constants: Constant[],
+        statics: Static[],
+        static_scratch: 0,
         impl_params: ImplParams[],
         receiver: 0,
         receiver_ty: NO_TYPE,
