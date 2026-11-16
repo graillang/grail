@@ -27,8 +27,12 @@ demanding game), so this work is ordered by what the engine needs; compile speed
 9. **Bootstrap by fixed point, no reseed per stage.** Each stage's commit message names the
    compiler that built it.
 
-Still open, with the owner: whether `q := v[i]` on a plain record stays a borrow or becomes a copy.
-Until answered it keeps today's meaning (a borrow), and section 4 says what guards that.
+**Decided by the owner, 2026-11-16: small plain records copy.** A plain record - no owned fields,
+no drop - of at most 4 words copies implicitly on assignment, argument passing and element read
+(`a := b`, `p := positions[i]`), as numbers do. A larger plain record stays move-only and needs an
+explicit `.copy()`. It is automatic; the type does not declare it. This takes effect **at stage 3
+and not before**: through stages 0 and 1 `q := v[i]` borrows and `b := a` moves, exactly as today,
+and those stages do not change what the checker accepts (section 4 says what guards that).
 
 ## 1. Where the one-word assumption lives
 
@@ -256,17 +260,23 @@ aggregate result fits.
 no drop: `copy := !needs_drop(ty) & (kind != 7)` (`member_place`, N:4147-4148), and `own` gives a
 value an owner record only when it needs a drop (N:3948-3952). Today `needs_drop` is true for every
 record because the box must be freed (N:3873), and that one fact is what makes records move-only.
-- *Stage 1:* locals stay boxed, so `needs_drop` stays true for every record and nothing changes.
-  Flat elements and inline fields are places inside an owner; their type still answers
-  `needs_drop = true`, so they stay non-`copy`. No language change.
+- *Stage 1:* nothing changes, provided `needs_drop` keeps answering true for every record, plain
+  or not - and it must, because a plain record in a local is still a box to free. The programs
+  that would change meaning if stage 1b instead taught `needs_drop` that a plain record "owns
+  nothing" (tempting, since a flat element has nothing to free) are exactly these, for a plain `P`:
+  `b := a; use(a)` (E0006 today, would compile); `q := v[i]; v.push(..)` and `q := v[i]; v[i] = ..`
+  (E0008 today: `q` borrows `v`; would compile, with `q` a dangling interior address); `a := r.f;
+  r.f = ..` for a plain field (E0008 today); `take(a); use(a)` (E0006 today); and a plain element
+  or field moved out of its container without leaving a hole. Stage 1b therefore adds `plain(ty)`
+  as a *layout* predicate only, never consulted by `member_place`, `own`, `move_out` or the alias
+  paths, and its corpus keeps one refusing case for each line above.
 - *Stage 3:* a plain record in a frame owns nothing. If `needs_drop` simply became false for it,
-  every plain record would silently become `copy`: `b := a; a.x` would compile, `v[i]` would read
-  by value instead of borrowing, and E0006 would stop firing for them. **That is a language change
-  made by accident.** So stage 3 splits the question in two: `needs_drop(ty)` (is there anything to
-  free: false for a plain record in a frame) and a new `affine(ty)` (is it moved rather than
-  copied: true for every record and enum until the owner decides otherwise). `member_place`, `own`
-  and the alias paths ask `affine`; only the drop emitters ask `needs_drop`. Whether small plain
-  records later become `copy` is then one predicate and one decision, not a side effect.
+  *every* plain record would silently become `copy`, whatever its size. So stage 3 splits the
+  question in two: `needs_drop(ty)` (is there anything to free: false for a plain record in a
+  frame) and a new `affine(ty)` (is it moved rather than copied). `member_place`, `own` and the
+  alias paths ask `affine`; only the drop emitters ask `needs_drop`. The owner's decision is then
+  one line: `affine(ty)` is false for a plain record of at most 4 words and true for every other
+  record and enum. That is a deliberate language change with its own cases, not a side effect.
 
 ## 5. Alternatives considered
 
@@ -356,7 +366,17 @@ Files: native.grl (constructors, binding, moves, call and return paths, drop fla
 stage; frame growth and prologue zeroing; a callee keeping an argument address past the call (it
 must copy to store); drop flags per aggregate rather than per pointer. Acceptance: no `rt_rec` in
 a function that builds, passes and returns plain records (assembly assertion); stack-depth test on
-the deepest corpus program; fixed point. Bench: all; expect the micro-benchmark build phase to drop.
+the deepest corpus program; fixed point.
+*Language change shipped with this stage (owner's decision):* plain records of at most 4 words
+copy. Corpus: accepted - `b := a` on a 3-word plain record then both used; `p := v[i]` then
+`v.push(..)` and `v[i] = ..` with `p` still read (it is a copy now, not a borrow); a 4-word record
+passed to a function and used after. Refused - `b := a; use(a)` on a 5-word plain record, E0006
+with a message that names `.copy()`; the same for a record of any size with an owned field or an
+`impl Drop`. Words are counted after inline nesting (a record of two 3-word records is 6 words).
+Book: the ownership chapter's "what copies" list gains "a record of plain data no larger than four
+words"; the records chapter says the size is what decides, shows `.copy()` for larger ones, and
+notes that adding a fifth word or an owned field to a record turns its copies into moves - a
+compile error at each use, never a silent change of meaning. Changelog entry in the same commit. Bench: all; expect the micro-benchmark build phase to drop.
 
 **Stage 4 - records with drop and owned fields inline** (in records and vectors). Drop helpers
 split into in-place and boxed. Risk: partial moves out of inline fields, drop of a half-built
@@ -398,10 +418,9 @@ Stage 6 needs stage 3 only.
 
 ## Open questions
 
-1. `q := v[i]` on a small plain record: borrow (today) or implicit copy? With the owner.
-2. Owned `dyn I` over an N-word value: `{vtable, words...}` or a pointer to the words; fat-dyn.md
+1. Owned `dyn I` over an N-word value: `{vtable, words...}` or a pointer to the words; fat-dyn.md
    pins `{value @0, vtable @8}` today. To be proposed at stage 3.
-3. Given the release compiler self-compiles in 2.98 s and allocation is 20 % of that work, where
+2. Given the release compiler self-compiles in 2.98 s and allocation is 20 % of that work, where
    stages 2 and 6 stand against direct object emission is a compile-speed.md question.
 
 ## Appendix: aggregates that cross a thread or live in library storage
