@@ -1,5 +1,11 @@
 ## Unreleased
 
+- Fixed: **a compile-time call with a signed result came back wrong.** A vector of signed integers
+  with a negative element stopped the probe (it printed each element through a checked `u64(..)`),
+  a negative scalar was read back as digits only, and every integer result was typed `u64`. Signed
+  elements are now printed as `i64`, a leading `-` is read, and the result keeps its own integer
+  type - in a `const`, a `NAME := f();` binding, a baked `static` and an `@f()` expression.
+
 - Fixed: **`@no_alloc` refused every function with a check that can fail** - an index, an overflow,
   a division, a narrowing, an unwrap, a refined parameter - because the failure report allocated:
   its texts were heap strings (`rt_new`, `rt_reserveb`, `rt_alloc`, and the runtime's literals are
