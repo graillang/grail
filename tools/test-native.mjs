@@ -355,8 +355,12 @@ function runCase(test, position, context) {
       const withStore = () => {
         const output = [];
         compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', runtime, osRuntime, extra: [...caseRoots, ...(test.flags ?? []), '--fn-cache', store, '--fn-cache-id', 'unit-identity'], output });
-        const account = { hits: 0, filed: 0, kept: 0 };
-        for (const m of output.join('').matchAll(/grail: fn-cache: \S+: (\d+) hit, (\d+) filed, (\d+) not units/g)) { account.hits += Number(m[1]); account.filed += Number(m[2]); account.kept += Number(m[3]); }
+        // `why` is the compiler's own account of the rules that kept bodies out, summed per rule.
+        const account = { hits: 0, filed: 0, kept: 0, why: {} };
+        for (const m of output.join('').matchAll(/grail: fn-cache: \S+: (\d+) hit, (\d+) filed, (\d+) not units(?: \(([^)]*)\))?/g)) {
+          account.hits += Number(m[1]); account.filed += Number(m[2]); account.kept += Number(m[3]);
+          for (const item of (m[4] ?? '').split(', ').filter(Boolean)) { const at = item.lastIndexOf(' '); account.why[item.slice(0, at)] = (account.why[item.slice(0, at)] ?? 0) + Number(item.slice(at + 1)); }
+        }
         return { bytes: readFileSync(assembly), account };
       };
       const empty = withStore();
@@ -544,14 +548,14 @@ function stage(context) {
 
 // Runs the selection in this process. The report is a value: a --jobs parent merges one per stripe.
 function runSelection(options, context) {
-  const report = { passed: 0, failed: 0, skipped: 0, resumed: 0, failures: [], units: { hits: 0, filed: 0, kept: 0, debug: 0, programs: 0 } };
+  const report = { passed: 0, failed: 0, skipped: 0, resumed: 0, failures: [], units: { hits: 0, filed: 0, kept: 0, debug: 0, programs: 0, why: {} } };
   for (const [position, test] of context.cases.entries()) {
     if (hostOnly(test, options.target)) { report.skipped++; continue; }
     if (!selected(test, position, options)) continue;
     const marker = join(context.markers, test.name);
     if (options.resume && existsSync(marker)) { report.resumed++; continue; }
     const result = runCase(test, position, context);
-    if (result.units) { report.units.programs++; for (const field of ['hits', 'filed', 'kept', 'debug']) report.units[field] += result.units[field]; }
+    if (result.units) { report.units.programs++; for (const field of ['hits', 'filed', 'kept', 'debug']) report.units[field] += result.units[field]; for (const [rule, n] of Object.entries(result.units.why ?? {})) report.units.why[rule] = (report.units.why[rule] ?? 0) + n; }
     if (result.outcome === 'pass') {
       report.passed++;
       if (options.resume) writeFileSync(marker, '');
@@ -569,7 +573,7 @@ function summaryLine(options, report, updated, filtered) {
   if (updated) parts.push(`updated ${updated}`);
   if (report.resumed) parts.push(`resumed ${report.resumed}`);
   if (filtered) parts.push(`not-selected ${filtered}`);
-  if (report.units?.programs) parts.push(`unit-identity: ${report.units.programs} programs compiled three ways, ${report.units.filed} units filed and replayed, ${report.units.kept} bodies not units, ${report.units.debug} also with --debug`);
+  if (report.units?.programs) parts.push(`unit-identity: ${report.units.programs} programs compiled three ways, ${report.units.filed} units filed and replayed, ${report.units.kept} bodies not units, ${report.units.debug} also with --debug; rules that kept a body out: ${Object.entries(report.units.why).map(([rule, n]) => `${rule} ${n}`).join(', ') || 'none'}`);
   return `${options.target}: ${parts.join(' ')}`;
 }
 
@@ -666,7 +670,7 @@ if (!isChild && options.jobs > 1) {
     childArgv.push(argv[i]);
   }
   const stripes = await Promise.all(Array.from({ length: options.jobs }, (_, index) => spawnStripe(options, childArgv, index + 1, compiler)));
-  const merged = { passed: 0, failed: 0, skipped: 0, resumed: 0, failures: [], units: { hits: 0, filed: 0, kept: 0, debug: 0, programs: 0 } };
+  const merged = { passed: 0, failed: 0, skipped: 0, resumed: 0, failures: [], units: { hits: 0, filed: 0, kept: 0, debug: 0, programs: 0, why: {} } };
   const updates = [];
   let crashed = 0;
   for (const stripe of stripes) {
@@ -677,6 +681,7 @@ if (!isChild && options.jobs > 1) {
     }
     for (const field of ['passed', 'failed', 'skipped', 'resumed']) merged[field] += stripe.report[field];
     for (const field of ['hits', 'filed', 'kept', 'debug', 'programs']) merged.units[field] += stripe.report.units?.[field] ?? 0;
+    for (const [rule, n] of Object.entries(stripe.report.units?.why ?? {})) merged.units.why[rule] = (merged.units.why[rule] ?? 0) + n;
     merged.failures.push(...stripe.report.failures);
     updates.push(...(stripe.report.updates ?? []));
   }

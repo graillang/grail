@@ -12,7 +12,8 @@
   or the fn thunk, add a link input or a constant, synthesise a declaration (the first tuple of a
   size, the first result union) or spell a source position as text are compiled every time, as is
   the first body of each module; the build's `fn-cache:` line says how many bodies each rule kept
-  out. `GRAIL_FN_CACHE=0` turns the layer off.
+  out. A program with a compile-time constant no longer stops a build through the store with
+  `internal: no type where one is required`.
 
 - A build emits a drop helper for each type whose helper something names, in the order they are
   first named, instead of one for every type the compiler interned: the helpers nothing called are
