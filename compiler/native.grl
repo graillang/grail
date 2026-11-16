@@ -13763,6 +13763,12 @@ fn ffi_emit_call<a, b, d, e, f>(
     mut tls = 0;
     if tls_bridge(&mut c) {
         tls = fresh(&mut c);
+        if tls == 0 {
+            // 0 below means "no thread pointer was saved", and it is also the first slot a function
+            // hands out: a call with no arguments that opens its function would never restore the
+            // record, and everything after it would run on libc's thread pointer.
+            tls = fresh(&mut c);
+        }
         tls_enter_foreign(&mut c, tls);
     }
     if area != 0 {
@@ -24197,6 +24203,9 @@ fn builtin_id<a>(n: &a [u8]) -> u64 {
     if same(view(n), view("parallel_with")) {
         return 58;
     }
+    if same(view(n), view("thread_spawn_raw")) {
+        return 59;
+    }
     if same(view(n), view("task_scope")) {
         return 33;
     }
@@ -26666,6 +26675,9 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
     if id == 58 {
         return parallel_with_builtin(&mut c, a);
     }
+    if id == 59 {
+        return thread_spawn_raw_builtin(&mut c, a);
+    }
     if id == 33 {
         return task_scope_builtin(&mut c, a);
     }
@@ -27229,6 +27241,64 @@ fn parallel_spawn_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     release_temporary(&mut c, input);
     close_loans(&mut c);
     return own(&mut c, slot, ty);
+}
+// thread_spawn_raw(f) -> u64: the raw entry lib/thread.grl starts a thread through. It boxes the
+// closure for the runtime (rt_uthread_new) and answers with the address of a thread record that has
+// not been started; everything else about a thread is library code.
+//
+// It also makes the two checks parallel_spawn makes of a job - captures transferable, no borrow -
+// but they hold only for a closure whose type still has its environment. lib/thread.grl hands it a
+// wrapper around a closure it received as a parameter, and a parameter's closure type has no
+// environment, so through `thread::spawn` these checks pass vacuously: A BORROWING OR THREAD-AFFINE
+// CLOSURE IS ACCEPTED TODAY. The fix is not here: bounds on the closure type
+// (`FnMut<Send, Owned>(..)`, branch gaps12-closures, docs/design/closure-bounds.md) are checked
+// where a closure with a known environment converts to that type. When they land, `spawn` is
+// re-typed, the checks below are deleted and this builtin becomes callable from an `unsafe module`
+// only. The corpus cases thread-spawn-borrow-refused and thread-spawn-affine-capture-refused are
+// marked pending on that branch.
+fn thread_spawn_raw_builtin<a>(c: (&a mut C), callee: Val) -> Val {
+    expect(&mut c, view(")"));
+    input := callee.t;
+    inty := callee.ty;
+    function := deref(&mut c, callee);
+    fty := function.ty;
+    closure := ty_kind(&mut c, fty) == 20;
+    if (ty_kind(&mut c, fty) != 12) & !closure {
+        fail(&mut c, view("thread_spawn_raw requires a callable"));
+    }
+    if closure & (ty_kind(&mut c, inty) == 7) {
+        fail(&mut c, view("a thread takes its closure by value: a borrowed closure is still dropped by its owner"));
+    }
+    signature := type_args(&mut c, fty);
+    if signature.len() != 0 {
+        fail(&mut c, view("thread_spawn_raw takes a callable with no arguments"));
+    }
+    // One thread runs it, so the environment is transferable, not shared.
+    require_parallel_closure(&mut c, fty, 0, view("thread capture"));
+    if contains_borrow(&mut c, fty, 0) {
+        fail(
+            &mut c,
+            view("a thread may outlive this statement, so its closure cannot capture a borrow: move the value in instead")
+        );
+    }
+    observe(&mut c, function.t);
+    mut box = imm(&mut c, 0);
+    mut target = function.t;
+    if closure {
+        get(&mut c, function.t, view("%rax"));
+        o(&mut c, view("movq (%rax),%rax\n"));
+        target = save(&mut c);
+        get(&mut c, function.t, view("%rax"));
+        object := save(&mut c);
+        if c.raw == 0 {
+            move_out(&mut c, function);
+        }
+        box = apply(&mut c, view("rt_job_box"), one(object));
+    }
+    slot := invoke(&mut c, view("rt_uthread_new"), two(target, box));
+    release_temporary(&mut c, input);
+    close_loans(&mut c);
+    return val(slot, 0);
 }
 // parallel_join(h) -> R: take the result and free the record. The handle moves in, so no wait can
 // happen twice and nothing can reach the record afterwards.
@@ -38656,6 +38726,12 @@ fn stmt<a>(c: (&a mut C)) -> unit {
     close_loans(&mut c);
     return ();
 }
+fn host_fn_unsafe<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
+    host_fn(&mut c, name, ret);
+    last := c.funcs.len() - 1;
+    c.funcs[last].unsafe_fn = 1;
+    return ();
+}
 fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
     first := c.params.len();
     if same(view(name), view("arg")) || same(view(name), view("print_num")) {
@@ -38676,6 +38752,19 @@ fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
         }
     }
     if same(view(name), view("sleep_ms")) || same(view(name), view("close")) {
+        c.params.push(0);
+    }
+    // The plumbing of lib/thread.grl (runtime.grl, "dedicated threads"): each takes a thread
+    // record's address, except thread_local, which takes a key.
+    if same(view(name), view("thread_start"))
+        || same(view(name), view("thread_keep"))
+        || same(view(name), view("thread_detach"))
+        || same(view(name), view("thread_wait"))
+        || same(view(name), view("thread_release"))
+        || same(view(name), view("thread_failure"))
+        || same(view(name), view("thread_refail"))
+        || same(view(name), view("thread_local"))
+        || same(view(name), view("sleep_until_ms")) {
         c.params.push(0);
     }
     if same(view(name), view("read_fd")) {
@@ -43925,6 +44014,21 @@ pub fn main() -> u64 {
     host_fn(&mut c, view("wall_ms"), 0);
     host_fn(&mut c, view("worker_id"), 0);
     host_fn(&mut c, view("workers"), 0);
+    // Dedicated threads. The ones that take a record's address are `unsafe`: lib/thread.grl is
+    // their caller, and nothing checks the address.
+    host_fn(&mut c, view("thread_self"), 0);
+    host_fn(&mut c, view("thread_plain"), 0);
+    host_fn(&mut c, view("thread_local_key"), 0);
+    host_fn(&mut c, view("sleep_until_ms"), 0);
+    host_fn_unsafe(&mut c, view("thread_local"), 0);
+    host_fn_unsafe(&mut c, view("thread_start"), 0);
+    host_fn_unsafe(&mut c, view("thread_keep"), 0);
+    host_fn_unsafe(&mut c, view("thread_detach"), 0);
+    host_fn_unsafe(&mut c, view("thread_wait"), 0);
+    host_fn_unsafe(&mut c, view("thread_release"), 0);
+    host_fn_unsafe(&mut c, view("thread_refail"), 0);
+    failure := task_failure_type(&mut c);
+    host_fn_unsafe(&mut c, view("thread_failure"), failure);
     numbers := intern(&mut c, 6, 0);
     host_fn(&mut c, view("pipe"), numbers);
     host_fn(&mut c, view("read_fd"), 2);

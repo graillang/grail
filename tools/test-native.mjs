@@ -91,6 +91,14 @@ function parseArguments(argv) {
   return options;
 }
 
+// A case's arguments. One that climbs out of the case's directory to the repository
+// (`../../../../tests/lib/zlib`) was written for the unstriped layout, where a case directory is four
+// levels down; a striped run (`--jobs N`) is one level deeper, so the path is made absolute here
+// instead of meaning a different place depending on how the run was split.
+function caseArgs(test) {
+  return (test.args ?? []).map(arg => arg.startsWith('../../../../') ? join(root, arg.slice('../../../../'.length)) : arg);
+}
+
 // ---- the corpus's own invariants -------------------------------------------------------------
 // Kept internal source on the modern dialect, including comments and diagnostics.
 function checkSources(cases) {
@@ -122,6 +130,9 @@ function selected(test, position, options) {
   return true;
 }
 function hostOnly(test, target) {
+  // `pending` names the work a case waits for: it states the behaviour that work must produce,
+  // fails until then, and is skipped rather than weakened. Removing the field is how it is armed.
+  if (test.pending) return true;
   if (test.targets && !test.targets.includes(target)) return true;
   if (test.backends && !test.backends.includes(process.env.GRAIL_BACKEND ?? 'native')) return true;
   return false;
@@ -345,7 +356,7 @@ function runCase(test, position, context) {
     // A case may pin the environment it needs (`"env": {"GRAIL_WORKERS": "1"}`), which is how a
     // test proves a worker count the host would not otherwise choose. Everything else is inherited.
     const options = test.env ? { cwd: directory, env: { ...process.env, ...test.env } } : { cwd: directory };
-    const ran = execute(executable, test.args ?? [], target, options);
+    const ran = execute(executable, caseArgs(test), target, options);
     if (ran.error) throw ran.error;
     observed.stdout = ran.stdout.toString();
     observed.stderr = ran.stderr.toString();
@@ -370,7 +381,7 @@ function runCase(test, position, context) {
       }
     }
     if (interfaceExecutable) {
-      const ifaceResult = execute(interfaceExecutable, test.args ?? [], target, options);
+      const ifaceResult = execute(interfaceExecutable, caseArgs(test), target, options);
       assert.equal(ifaceResult.status, ran.status, `${test.name}: the interface build exits differently: ${ifaceResult.stderr}`);
       assert.equal(ifaceResult.stdout.toString(), ran.stdout.toString(), `${test.name}: the interface build prints something else`);
     }

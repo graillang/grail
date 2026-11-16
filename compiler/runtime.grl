@@ -148,7 +148,14 @@ fn rt_trap(a: u64, b: u64, kind: u64) -> u64 {
 fn rt_containable() -> u64 {
     t := rt_current();
     if t == 0 {
-        return 0;
+        // A dedicated thread (lib/thread.grl) is not a task, but its closure runs on a stack the
+        // runtime entered by a switch, and its record has a task record's failure words: the
+        // failure is contained the same way (rt_uthread_main).
+        tp := raw_tp_get();
+        if tp == 0 {
+            return 0;
+        }
+        return raw_load(tp + 80);
     }
     if rt_task_threads() != 0 {
         return 0;
@@ -1491,6 +1498,14 @@ fn rt_live() -> u64 {
 // the number it sees on fd 2 and lets the program exit normally. It never reports nothing: an
 // unexplained balance is either aborted on or printed.
 fn rt_leak_exit() -> u64 {
+    // The main thread's locals (thread::Local) are dropped as any thread's are when it ends.
+    tp := raw_tp_get();
+    if tp != 0 {
+        rt_locals_drop(tp);
+    }
+    if raw_atomic_load(rt_detached_word()) != 0 {
+        return 0;
+    }
     live := rt_live();
     if live == 0 {
         return 0;
@@ -1515,6 +1530,10 @@ fn rt_shutdown() -> u64 {
     rt_sched_stats();
     rt_prof_dump();
     state := raw_state();
+    if raw_atomic_load(rt_detached_word()) != 0 {
+        // A detached thread is still running on these arenas; the exit that follows reclaims them.
+        return 0;
+    }
     mut arena = raw_load(state + 32);
     while arena != 0 {
         next := raw_load(arena);
@@ -2683,7 +2702,8 @@ fn rt_thread_spawn_detached(entry: u64, arg: u64) -> u64 {
 // mapped region: {0 self, 8 scheduler sp, 16 current task, 24 entry then the runtime-worker marker,
 // 32 arg, 40 TID word of a persistent thread, 48 Windows wait value, 56 host TLS base, 64 the
 // thread's allocator cache (rt_cache_make; 0 until it allocates), 72 frees made with no cache
-// (rt_cache_for_free), 80..120 unused}. Word 24 is
+// (rt_cache_for_free), 80 the record of the dedicated thread whose closure this thread is running
+// (rt_uthread_main; 0 on every other thread), 88 the thread's locals (rt_locals), 96..120 unused}. Word 24 is
 // the entry only until rt_thread_main has read it; a scheduler worker then stores a non-zero
 // marker there so rt_abort_signals can tell a runtime worker from any other thread. Word 56 is this thread's libc TCB,
 // which every foreign call made on the thread switches to (0: there is none, the call runs on the
@@ -2779,6 +2799,306 @@ fn rt_thread_main(record: u64) -> u64 {
     rt_cache_retire(record);
     return 0;
 }
+// ---- dedicated threads (lib/thread.grl; docs/design/threads.md) --------------------------------
+// A dedicated thread is an OS thread that runs one closure and is nothing else: not a scheduler
+// worker, not a task (rt_current() is 0 on it, so a wait blocks it in the kernel and nothing is
+// stolen onto it). The closure does not run on the OS stack. rt_uthread_main maps a guard-paged
+// stack of the size the program asked for and switches onto it, exactly as a worker enters a task,
+// which gives three things at once: the stack size is honoured whether or not glibc made the
+// thread; running off its end is the task-stack overflow report; and a failed check is contained
+// the way a task's is - the failure is written into the record, the stack is left by a switch and
+// discarded whole, and the thread then ends normally on its own stack (its allocator cache is
+// retired, glibc tears its TCB down, the joiner is woken).
+//
+// Thread record (rt_alloc, 408 bytes; the words containment touches are where a task record has
+// them, so rt_contain_site, rt_task_message and rt_task_site serve both):
+//   0 saved stack pointer / fiber   8 stack base   16 stack bytes (in: the request, 0 = 1 MiB)
+//   24 OS thread handle (rt_thread_spawn)   40 closure code   48 closure box
+//   80 result word (written by the library's wrapper, which knows its type)
+//   96 finished (futex word)
+//   104 ownership: 0 running and joinable, 1 detached, 2 finished, 3 result kept for a joiner
+//   112 start latch (futex word: 0 starting, 1 running, 2 refused)   120 why it was refused
+//   128 affinity words in use (0: unpinned)   144 completed   152 priority (0 normal, 1 background,
+//   2 high, 3 + p realtime p)   160..192 failure   200..239 site scratch
+//   256..383 affinity mask, 16 words   384..399 name, NUL-terminated (15 bytes shown by Linux)
+// A refusal is attribute * 65536 + errno: attribute 1 stack, 2 affinity, 3 priority, 4 no threads
+// on this platform.
+fn rt_uthread_new(f: u64, box: u64) -> u64 {
+    rec := rt_alloc(408);
+    raw_store(rec + 40, f);
+    raw_store(rec + 48, box);
+    return rec;
+}
+// The closure goes with a thread that never ran it.
+fn rt_uthread_drop_closure(rec: u64) -> u64 {
+    box := raw_load(rec + 48);
+    if box != 0 {
+        obj := raw_load(box);
+        raw_call2(raw_load(obj + 8), obj, 0);
+        rt_free(box);
+        raw_store(rec + 48, 0);
+    }
+    return 0;
+}
+fn f_host_thread_start(rec: u64) -> u64 {
+    if rt_os_threads() == 0 {
+        rt_uthread_drop_closure(rec);
+        rt_free(rec);
+        return 4 * 65536 + 38;
+    }
+    raw_store(rec + 24, rt_thread_spawn(rt_uthread_main, rec));
+    while raw_atomic_load(rec + 112) == 0 {
+        rt_syscall(202, rec + 112, 128, 0);
+    }
+    if raw_atomic_load(rec + 112) == 2 {
+        why := raw_load(rec + 120);
+        rt_thread_join(raw_load(rec + 24));
+        rt_uthread_drop_closure(rec);
+        rt_free(rec);
+        return why;
+    }
+    return 0;
+}
+fn rt_uthread_refuse(rec: u64, why: u64) -> u64 {
+    raw_store(rec + 120, why);
+    raw_atomic_store(rec + 112, 2);
+    rt_syscall(202, rec + 112, 129, 2147483647);
+    return 0;
+}
+// The thread itself, on its OS stack. Everything the program asked of the OS is applied here, by
+// the thread, before the closure runs; a refusal is reported to the spawner and the closure does
+// not run.
+fn rt_uthread_main(rec: u64) -> u64 {
+    tp := raw_tp_get();
+    // Not a runtime worker (rt_abort_signals, f_host_thread_plain): the entry word is spent.
+    raw_store(tp + 24, 0);
+    why := rt_os_thread_attr(rec);
+    if why != 0 {
+        return rt_uthread_refuse(rec, why);
+    }
+    mut size = raw_load(rec + 16);
+    if size == 0 {
+        size = 1048576;
+    }
+    if size < 16384 {
+        size = 16384;
+    }
+    if 1099511627776 < size {
+        return rt_uthread_refuse(rec, 65536 + 12);
+    }
+    // Whole pages, and one more below them for the guard.
+    size = (rt_div(size + 4095, 4096) + 1) * 4096;
+    if rt_os_body_new(rec, size) != 0 {
+        return rt_uthread_refuse(rec, 65536 + 12);
+    }
+    alt := rt_os_thread_guard();
+    raw_store(tp + 80, rec);
+    raw_atomic_store(rec + 112, 1);
+    rt_syscall(202, rec + 112, 129, 2147483647);
+    rt_os_ctx_enter(rec);
+    // Back on the OS stack: the closure returned, or a failure left its stack where it stood.
+    raw_store(tp + 80, 0);
+    rt_os_body_free(rec);
+    rt_os_thread_unguard(alt);
+    rt_locals_drop(tp);
+    if raw_atomic_cas(rec + 104, 0, 2) == 1 {
+        // Detached: nobody will ask. A failure's text goes with the record.
+        msg := raw_load(rec + 192);
+        if msg != 0 {
+            rt_drop_seq(msg);
+        }
+        if (raw_load(rec + 184) & 1) == 1 {
+            rt_drop_seq(raw_load(rec + 184) & 18446744073709551614);
+        }
+        rt_free(rec);
+        // Its cache is retired by rt_thread_main after this returns, so the count the leak check
+        // reads is whole whether or not this thread has gone.
+        rt_cache_retire(tp);
+        rt_atomic_fetch_sub(rt_detached_word(), 1);
+        return 0;
+    }
+    raw_atomic_store(rec + 96, 1);
+    rt_syscall(202, rec + 96, 129, 2147483647);
+    return 0;
+}
+// The closure, on the thread's mapped stack. The library's wrapper stores the result itself
+// (f_host_thread_keep), so what comes back here is nothing.
+fn rt_uthread_run(rec: u64) -> u64 {
+    box := raw_load(rec + 48);
+    raw_call2(raw_load(rec + 40), box, 0);
+    if box != 0 {
+        obj := raw_load(box);
+        raw_call2(raw_load(obj + 8), obj, 0);
+        rt_free(box);
+        raw_store(rec + 48, 0);
+    }
+    raw_store(rec + 144, 1);
+    return 0;
+}
+fn rt_uthread_enter() -> u64 {
+    rec := raw_load(raw_tp_get() + 80);
+    rt_uthread_run(rec);
+    rt_os_ctx_leave(rec);
+    rt_abort();
+    return 0;
+}
+// The record of the dedicated thread that is running, for the wrapper; 0 anywhere else.
+fn f_host_thread_self() -> u64 {
+    tp := raw_tp_get();
+    if tp == 0 {
+        return 0;
+    }
+    return raw_load(tp + 80);
+}
+// The wrapper has a result: 1 says a joiner may still come for it, so the wrapper writes it into
+// word 80; 0 says the thread was detached, and the wrapper drops it where it stands. The claim and
+// a detach are one compare-and-swap each, so exactly one of them wins.
+fn f_host_thread_keep(rec: u64) -> u64 {
+    return raw_atomic_cas(rec + 104, 0, 3) == 0;
+}
+// 1: detached, the thread frees its own record when it ends. 0: it had already finished (or kept a
+// result), so the caller still owns the handle and joins it.
+fn f_host_thread_detach(rec: u64) -> u64 {
+    // Counted before the claim, so the thread's own decrement can never come first.
+    rt_atomic_fetch_add(rt_detached_word(), 1);
+    if raw_atomic_cas(rec + 104, 0, 1) == 0 {
+        return 1;
+    }
+    rt_atomic_fetch_sub(rt_detached_word(), 1);
+    return 0;
+}
+// How many detached threads are still running (process-state word 56). While there is one, the end
+// of main neither checks for leaks nor unmaps the arenas: that thread's allocations are its own,
+// and it is still using them when the process exits without waiting for it.
+fn rt_detached_word() -> u64 {
+    return raw_state() + 56;
+}
+fn rt_uthread_wait_now(rec: u64, unused: u64) -> u64 {
+    while raw_atomic_load(rec + 96) == 0 {
+        rt_syscall(202, rec + 96, 128, 0);
+    }
+    return 0;
+}
+// Wait for the thread's closure to end; the answer is the failure kind, 0 when it returned. A green
+// task hands the wait to a helper thread and parks (rt_blocking_call), so its worker keeps running
+// other tasks; any other caller blocks in the kernel.
+fn f_host_thread_wait(rec: u64) -> u64 {
+    if raw_atomic_load(rec + 96) == 0 {
+        if rt_task_threads() {
+            rt_uthread_wait_now(rec, 0);
+        } else {
+            rt_blocking_call(rt_uthread_wait_now, rec, 0);
+        }
+    }
+    return raw_load(rec + 160);
+}
+// After the wait: reap the OS thread and free the record. Whatever the record held - a result, a
+// failure's texts - has been taken by the caller.
+fn f_host_thread_release(rec: u64) -> u64 {
+    rt_thread_join(raw_load(rec + 24));
+    rt_free(rec);
+    return 0;
+}
+// A failed thread's `{kind, message, site}`, the record a failed task's try_join carries.
+fn f_host_thread_failure(rec: u64) -> u64 {
+    kind := raw_load(rec + 160);
+    msg := rt_task_message(rec);
+    site := rt_task_site(rec);
+    out := rt_alloc(24);
+    raw_store(out, kind);
+    raw_store(out + 8, msg);
+    raw_store(out + 16, site);
+    return out;
+}
+// `join` of a failed thread: release it and report its failure here, by the rules of any failure
+// that already has its texts - contained by an enclosing task or thread, fatal on the main thread.
+fn f_host_thread_refail(rec: u64) -> u64 {
+    kind := raw_load(rec + 160);
+    msg := rt_task_message(rec);
+    site := rt_task_site(rec);
+    f_host_thread_release(rec);
+    return rt_fail_text(kind, msg, site);
+}
+// Whether the caller is a thread in the sense of lib/thread.grl - the main thread or a dedicated
+// one - and not a task or a runtime worker, which may not hold a thread::Ctx.
+fn f_host_thread_plain() -> u64 {
+    tp := raw_tp_get();
+    if tp == 0 {
+        return 1;
+    }
+    return (raw_load(tp + 16) == 0) & (raw_load(tp + 24) == 0);
+}
+// Sleep until the monotonic clock (host::now_ms) reads `deadline_ms`. A task parks on the ordinary
+// sleep path for what is left; a thread sleeps to the absolute time in the kernel, so a frame loop
+// does not drift by the time it spent working.
+fn f_host_sleep_until_ms(deadline_ms: u64) -> u64 {
+    if (rt_current() != 0) & (rt_task_threads() == 0) {
+        now := f_host_now_ms();
+        if now < deadline_ms {
+            f_host_sleep_ms(deadline_ms - now);
+        }
+        return 0;
+    }
+    return rt_os_sleep_until(deadline_ms);
+}
+// thread::Local: a key is a small number handed out once per Local, and a thread's table holds one
+// {value, dropper} pair per key it has touched. The answer is the address of the pair for `key` on
+// this thread, zeroed the first time: lib/thread.grl stores the boxed value and the function that
+// drops it there. The main thread's table hangs off its own record like any other.
+fn f_host_thread_local_key() -> u64 {
+    return rt_atomic_fetch_add(raw_state() + 48, 1);
+}
+fn f_host_thread_local(key: u64) -> u64 {
+    tp := raw_tp_get();
+    if tp == 0 {
+        rt_abort();
+    }
+    mut table = raw_load(tp + 88);
+    mut have = 0;
+    if table != 0 {
+        have = raw_load(table);
+    }
+    if (key < have) == 0 {
+        mut want = have * 2;
+        if want < key + 1 {
+            want = key + 1;
+        }
+        if want < 8 {
+            want = 8;
+        }
+        fresh := rt_alloc(8 + want * 16);
+        if table != 0 {
+            rt_copy_bytes(fresh + 8, table + 8, have * 16);
+            rt_free(table);
+        }
+        raw_store(fresh, want);
+        raw_store(tp + 88, fresh);
+        table = fresh;
+    }
+    return table + 8 + key * 16;
+}
+// A thread's locals: thread-record word 88 holds a block of {count, then per key: value word,
+// dropper} that lib/thread.grl fills in (f_host_thread_local). Dropped on the thread, before its
+// cache is retired; the main thread's at the end of main, before the leak check.
+fn rt_locals_drop(tp: u64) -> u64 {
+    table := raw_load(tp + 88);
+    if table == 0 {
+        return 0;
+    }
+    raw_store(tp + 88, 0);
+    n := raw_load(table);
+    mut i = 0;
+    while i < n {
+        value := raw_load(table + 8 + i * 16);
+        drop := raw_load(table + 16 + i * 16);
+        if drop != 0 {
+            raw_call2(drop, value, 0);
+        }
+        i = i + 1;
+    }
+    rt_free(table);
+    return 0;
+}
 fn rt_thread_join(handle: u64) -> u64 {
     while true {
         tid := raw_atomic_load(handle);
@@ -2813,6 +3133,8 @@ fn rt_thread_join(handle: u64) -> u64 {
 //   24           allocator live count         rt_live                    --
 //   32           allocator arena list         rt_shutdown                --
 //   40           thread-cache registry        rt_cache_make              thread-alloc
+//   48           next thread::Local key       f_host_thread_local_key    threads
+//   56           detached threads running     rt_detached_word           threads
 //   64           allocator lock word          rt_allocator_lock          --
 //   72           green scheduler block        rt_sched                   --
 //   80           green scheduler create CAS   rt_sched                   --
