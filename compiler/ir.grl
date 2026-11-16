@@ -751,7 +751,8 @@ pub fn parse<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) {
     // 45 rt_push / 46 rt_pushb (inline store when capacity remains, runtime call to grow),
     // 47 rt_slotu / 48 rt_atbu (proven in-bounds element address / byte load),
     // 49 rt_slot4 / 50 rt_slot4u (the address of a 4-byte element, checked / proven),
-    // 51 rt_at4 (bounds-checked zero-extending load of a 4-byte element).
+    // 51 rt_at4 (bounds-checked zero-extending load of a 4-byte element),
+    // 52 rt_slotw (the address of an element `rdx` bytes wide in a vector of inline records).
     if (op == 15) & (comma == e) & (e - first > 5) & (e - first < 10) {
         if (s[first] == 114) & (s[first + 1] == 116) & (s[first + 2] == 95) {
             mut fast = 0;
@@ -790,6 +791,9 @@ pub fn parse<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) {
             }
             if same_range(view(s), first, e, view("rt_at4")) {
                 fast = 51;
+            }
+            if same_range(view(s), first, e, view("rt_slotw")) {
+                fast = 52;
             }
             if fast != 0 {
                 // stays: the written place is indexed (`&mut o.op[last]`), and two-phase defers
@@ -898,6 +902,9 @@ pub fn reads<a>(o: (&a Body), i: u64) -> u64 {
         || op == 51 {
         return 192;
     }
+    if op == 52 {
+        return 196;
+    }
     if op == 42 {
         return 128;
     }
@@ -930,7 +937,7 @@ pub fn writes<a>(o: (&a Body), i: u64) -> u64 {
     if op == 45 || op == 46 {
         return caller_saved();
     }
-    if (46 < op) & (op < 52) {
+    if (46 < op) & (op < 53) {
         return 1;
     }
     return all_regs();
@@ -1489,10 +1496,10 @@ pub fn count_calls<a>(o: (&a Body), lo: u64, hi: u64) -> u64 {
     mut n: u64 = 0;
     for i in o.op.len() {
         // A call line, plus the leaf accessors `parse` re-tags from `call rt_slot` and friends into
-        // pseudo-instructions 40..51: the front end wrote them with `call_out`, so they are calls the
+        // pseudo-instructions 40..52: the front end wrote them with `call_out`, so they are calls the
         // recorder counted even when the printer inlines them.
         mut call = o.op[i] == 15;
-        if (39 < o.op[i]) & (o.op[i] < 52) {
+        if (39 < o.op[i]) & (o.op[i] < 53) {
             call = true;
         }
         if call {
