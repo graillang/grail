@@ -402,6 +402,59 @@ export function buildCompiler() {
   }
   return executable;
 }
+// The compiler as it should be run: the same sources, lowered through the LLVM backend and compiled
+// with clang -O2. It emits byte-for-byte what the natively built compiler emits - that is checked
+// here, on the compiler's own sources, before the binary is accepted - and it does so several times
+// faster, because the native backend trades the speed of the code it writes for the speed of
+// writing it (docs/design/compile-speed.md). `buildCompiler()` stays what the tests build with: it
+// is the product of the native backend, and so the thing they exist to test.
+//
+// The lowering is the slow step (the LLVM text of the compiler is about a gigabyte), so a release
+// compiler from an earlier build of these sources' ancestors does it when it can read them:
+// GRAIL_RELEASE_BASE names one, else the last one this worktree built. The identity check below is
+// what makes that safe - a base that miscompiles produces a compiler whose output differs.
+export function buildReleaseCompiler({ log = () => {} } = {}) {
+  if (hostTarget !== 'x86_64') throw new Error('the release compiler is built on x86_64 Linux for now');
+  const native = buildCompiler();
+  const directory = dirname(native);
+  const executable = join(directory, 'grail-release');
+  if (existsSync(executable)) return executable;
+  const latest = join(root, '.work/native/release-latest');
+  const candidates = [process.env.GRAIL_RELEASE_BASE, existsSync(latest) ? readFileSync(latest, 'utf8').trim() : null]
+    .filter(path => path && existsSync(path));
+  const stem = join(directory, `release.${process.pid}`);
+  const flags = ['--default-u64', '--typed-refs'];
+  let lowered = false;
+  for (const base of [...candidates, native]) {
+    log(`lowering with ${base}`);
+    const run = spawnSync(base, [...flags, '--backend=llvm', `${stem}.s`, ...compilerSources], { encoding: 'utf8', env: compilerEnvironment(), maxBuffer: 1 << 26 });
+    if (run.status === 0) { lowered = true; break; }
+    log(`  that compiler cannot read these sources (${(run.stderr ?? '').trim().split('\n')[0]}); trying the next`);
+  }
+  if (!lowered) throw new Error('no compiler could lower the compiler through the LLVM backend');
+  log('clang -O2');
+  command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[hostTarget]}`, '-O2', '-c', `${stem}.s.ll`, '-o', `${stem}.ll.o`]);
+  command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[hostTarget]}`, '-c', `${stem}.s`, '-o', `${stem}.o`]);
+  const pending = `${stem}.pending`;
+  command([process.env.GRAIL_LINKER ?? 'ld.lld', '-m', emulations[hostTarget], `${stem}.o`, `${stem}.ll.o`, '-o', pending]);
+  // The acceptance test: both compilers compile the compiler, and the two outputs are one file.
+  log('checking that it emits what the native build emits');
+  const outputs = [native, pending].map((compiler, index) => {
+    const out = `${stem}.check${index}.s`;
+    command([compiler, ...flags, out, ...compilerSources], { env: compilerEnvironment() });
+    const digest = createHash('sha256').update(readFileSync(out)).digest('hex');
+    rmSync(out);
+    return digest;
+  });
+  for (const leftover of [`${stem}.s`, `${stem}.s.ll`, `${stem}.o`, `${stem}.ll.o`]) if (existsSync(leftover)) rmSync(leftover);
+  if (outputs[0] !== outputs[1]) {
+    rmSync(pending);
+    throw new Error('the release compiler does not emit what the native build emits for the compiler\'s own sources: not accepted');
+  }
+  renameSync(pending, executable);
+  writeFileSync(latest, `${executable}\n`);
+  return executable;
+}
 // The compiler's own sources without the portable runtime and the host's platform module:
 // compileProgram appends those per target, so this is what "the compiler, as a program" means.
 export function targetCompilerInputs() {
@@ -461,12 +514,15 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   }
   if (mode === 'build') {
     console.log(buildCompiler());
+  } else if (mode === 'release') {
+    // The compiler to ship and to measure: `bun tools/native.mjs release`.
+    console.log(buildReleaseCompiler({ log: line => console.error(line) }));
   } else if (mode === 'compiler') {
     // `bun tools/native.mjs compiler --target macos-aarch64`: the compiler as a Mach-O binary.
     const at = process.argv.indexOf('--target');
     const target = at === -1 ? hostTarget : process.argv[at + 1];
     console.log(buildTargetCompiler(target).executable ?? buildTargetCompiler(target));
   } else {
-    throw new Error('usage: bun tools/native.mjs <build|compiler> [--target T]');
+    throw new Error('usage: bun tools/native.mjs <build|release|compiler> [--target T]');
   }
 }

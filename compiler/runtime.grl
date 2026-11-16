@@ -971,7 +971,17 @@ fn rt_zero(p: u64, n: u64) -> u64 {
     }
     return 0;
 }
-fn rt_free(p: u64) -> u64 {
+fn rt_free(at: u64) -> u64 {
+    mut p = at;
+    if (p & 8) != 0 {
+        // A view record (rt_view_record): its block starts one word earlier. The one other thing at
+        // such an address is a static object from a compiler that aligned those to 8 - the seed a
+        // bootstrap starts from - and a static object is never freed.
+        if raw_load(p - 8) == 2 {
+            return 0;
+        }
+        p = p - 8;
+    }
     if raw_load(raw_state() + 3416) == 0 {
         rt_free_unlocked(p);
         return 0;
@@ -1397,11 +1407,29 @@ fn rt_write(s: u64, i: u64, v: u64) -> u64 {
     raw_putbyte(wrapping_add(raw_load(s), i), v);
     return 0;
 }
+// ---- views -------------------------------------------------------------------------------------
+// A view is two words, {pointer, length}: the first two words of a vector's header, which is why a
+// view of a whole vector needs no record of its own - it is the header (rt_view). A view of part of
+// one does need a record, and the two must be told apart when a view is dropped, because a record is
+// freed and a header is its owner's. The address says which: every block the allocator hands out,
+// and every static object the compiler emits, starts at a multiple of 16, and a view record is the
+// second word onward of a 32-byte block, so its address is 8 more than a multiple of 16. Nothing is
+// read to decide, so a view may be dropped after the vector it was taken from.
+fn rt_view_record() -> u64 {
+    return rt_alloc(32) + 8;
+}
+// Drop a view: free its record if it has one.
+fn rt_view_free(v: u64) -> u64 {
+    if (v & 8) != 0 {
+        rt_free(v);
+    }
+    return 0;
+}
 fn rt_slice(s: u64, a: u64, b: u64) -> u64 {
     if (b < a) + (raw_load(wrapping_add(s, 8)) < b) {
         rt_fail(7, a, b);
     }
-    v := rt_alloc(24);
+    v := rt_view_record();
     raw_store(v, wrapping_add(raw_load(s), a));
     raw_store(v + 8, b - a);
     return v;
@@ -1411,13 +1439,21 @@ fn rt_vslice(s: u64, a: u64, b: u64, width: u64) -> u64 {
     if (b < a) + (raw_load(wrapping_add(s, 8)) < b) {
         rt_fail(7, a, b);
     }
-    v := rt_alloc(24);
+    v := rt_view_record();
     raw_store(v, wrapping_add(raw_load(s), wrapping_mul(a, width)));
     raw_store(v + 8, b - a);
     return v;
 }
+// A view of everything `s` holds. A vector's header already starts {pointer, length}, so the view of
+// a whole vector is the header itself: nothing is allocated and dropping it frees nothing
+// (rt_view_free). This was seven in ten of every allocation the compiler made
+// (docs/design/compile-speed.md). A view of a view record is a record of its own, as before: the
+// two are dropped separately.
 fn rt_view(s: u64) -> u64 {
-    return rt_slice(s, 0, raw_load(wrapping_add(s, 8)));
+    if (s & 8) != 0 {
+        return rt_slice(s, 0, raw_load(wrapping_add(s, 8)));
+    }
+    return s;
 }
 // Checked, zero-copy C string view: the sequence must be NUL-terminated. No
 // allocation and no copy, so the bytes stay owned by the caller. (rt_cstr copies
@@ -1645,6 +1681,12 @@ fn rt_xchg(p: u64, v: u64) -> u64 {
 }
 fn rt_drop_seq(s: u64) -> u64 {
     if s != 0 {
+        // A literal's static object (block state 2) owns nothing and is never freed. Most of what
+        // is dropped is one of those - every `view("text")` has one - so it is settled here and
+        // not by two calls of rt_free that each find the same thing out.
+        if raw_load(s - 8) == 2 {
+            return 0;
+        }
         rt_free(raw_load(s));
         rt_free(s);
     }
@@ -1692,7 +1734,7 @@ fn f_host_read_file(path: u64) -> u64 {
 }
 fn rt_read_file_blocking(path: u64) -> u64 {
     name := rt_cstr(path);
-    rt_free(path);
+    rt_view_free(path);
     if name == 0 {
         rt_abort();
     }
@@ -1746,22 +1788,22 @@ fn f_host_write_file(path: u64, data: u64) -> u64 {
 }
 fn rt_write_file_blocking(path: u64, data: u64) -> u64 {
     name := rt_cstr(path);
-    rt_free(path);
+    rt_view_free(path);
     if name == 0 {
-        rt_free(data);
+        rt_view_free(data);
         return 22;
     }
     fd := rt_syscall(2, name, 524865, 438);
     rt_free(name);
     if rt_error(fd) {
-        rt_free(data);
+        rt_view_free(data);
         return wrapping_sub(0, fd);
     }
     packed := rt_pack(data);
     result := rt_write_all(fd, packed, rt_len(data));
     closed := rt_syscall(3, fd, 0, 0);
     rt_free(packed);
-    rt_free(data);
+    rt_view_free(data);
     if result != 0 {
         return result;
     }
@@ -1774,7 +1816,7 @@ fn f_host_print(data: u64) -> u64 {
     packed := rt_pack(data);
     err := rt_write_all(1, packed, rt_len(data));
     rt_free(packed);
-    rt_free(data);
+    rt_view_free(data);
     if err != 0 {
         rt_abort();
     }
@@ -2927,7 +2969,8 @@ fn rt_pool_chunk_job(d: u64, k: u64) -> u64 {
     if n < stop {
         stop = n;
     }
-    slot := rt_alloc(24);
+    // A slice of its own, which the callback drops as any slice is dropped (rt_view_free).
+    slot := rt_view_record();
     raw_store(slot, raw_load(d + 16) + start * raw_load(d + 24));
     raw_store(slot + 8, stop - start);
     // The callback takes one argument, so the second word is unused: it holds 0 for a plain
@@ -3994,7 +4037,7 @@ fn f_host_write_fd(fd: u64, data: u64) -> u64 {
         }
     }
     rt_free(packed);
-    rt_free(data);
+    rt_view_free(data);
     return done;
 }
 fn f_host_close(fd: u64) -> u64 {
@@ -4121,13 +4164,13 @@ fn f_host_env(name: u64) -> u64 {
                 while raw_byte(p + n + 1 + m) != 0 {
                     m += 1;
                 }
-                rt_free(name);
+                rt_view_free(name);
                 return rt_bytes_from(p + n + 1, m);
             }
         }
         ep = ep + 8;
     }
-    rt_free(name);
+    rt_view_free(name);
     return rt_new();
 }
 // The running image's own path. This is what lets the driver re-invoke itself, so it is the
@@ -4146,7 +4189,7 @@ fn f_host_exe_path() -> u64 {
 }
 fn f_host_exists(path: u64) -> u64 {
     name := rt_cstr(path);
-    rt_free(path);
+    rt_view_free(path);
     if name == 0 {
         return 0;
     }
@@ -4156,7 +4199,7 @@ fn f_host_exists(path: u64) -> u64 {
 }
 fn f_host_mkdir(path: u64) -> u64 {
     name := rt_cstr(path);
-    rt_free(path);
+    rt_view_free(path);
     if name == 0 {
         return 22;
     }
@@ -4174,7 +4217,7 @@ fn f_host_mkdir(path: u64) -> u64 {
 fn f_host_list_dir(path: u64) -> u64 {
     out := rt_new();
     name := rt_cstr(path);
-    rt_free(path);
+    rt_view_free(path);
     if name == 0 {
         return out;
     }
@@ -4580,7 +4623,7 @@ fn rt_ipv4(text: u64) -> u64 {
         i += 1;
     }
     addr = addr + part * shift;
-    rt_free(text);
+    rt_view_free(text);
     return addr;
 }
 fn f_host_tcp_connect(host: u64, port: u64) -> u64 {
@@ -4617,7 +4660,7 @@ fn f_host_tcp_connect(host: u64, port: u64) -> u64 {
 // negative errno (as a wrapped word) instead of aborting.
 fn f_host_open(path: u64, write: u64) -> u64 {
     name := rt_cstr(path);
-    rt_free(path);
+    rt_view_free(path);
     if name == 0 {
         return wrapping_sub(0, 22);
     }
@@ -5705,7 +5748,7 @@ fn rt_fmt_value(acc: u64, v: u64, code: u64) -> u64 {
 // Removes a file (directory==0) or an empty directory; 0 or a positive errno.
 fn f_host_remove(path: u64, directory: u64) -> u64 {
     name := rt_cstr(path);
-    rt_free(path);
+    rt_view_free(path);
     if name == 0 {
         return 22;
     }
@@ -5723,7 +5766,7 @@ fn f_host_remove(path: u64, directory: u64) -> u64 {
 // Creates a directory; 0 or a positive errno (17 when it already exists).
 fn f_host_create_dir(path: u64) -> u64 {
     name := rt_cstr(path);
-    rt_free(path);
+    rt_view_free(path);
     if name == 0 {
         return 22;
     }
@@ -5744,7 +5787,7 @@ fn f_host_create_dir(path: u64) -> u64 {
 fn f_host_stat(path: u64, follow: u64) -> u64 {
     out := rt_new();
     name := rt_cstr(path);
-    rt_free(path); // a byte-view argument belongs to the host function, as in f_host_open
+    rt_view_free(path); // a byte-view argument belongs to the host function, as in f_host_open
     mut code = 22;
     if name != 0 {
         code = rt_stat(name, follow, out);
@@ -5767,8 +5810,8 @@ fn f_host_stat(path: u64, follow: u64) -> u64 {
 fn f_host_rename(from: u64, to: u64) -> u64 {
     a := rt_cstr(from);
     b := rt_cstr(to);
-    rt_free(from);
-    rt_free(to);
+    rt_view_free(from);
+    rt_view_free(to);
     mut code = 22;
     if (a != 0) & (b != 0) {
         code = rt_rename(a, b);
@@ -5851,8 +5894,8 @@ fn f_host_spawn(args: u64, env: u64, out_fd: u64, err_fd: u64) -> u64 {
 fn f_host_symlink(target: u64, link: u64) -> u64 {
     a := rt_cstr(target);
     b := rt_cstr(link);
-    rt_free(target);
-    rt_free(link);
+    rt_view_free(target);
+    rt_view_free(link);
     mut code = 22;
     if (a != 0) & (b != 0) {
         code = rt_symlink(a, b);
@@ -6640,6 +6683,20 @@ fn rt_vec_reverse(s: u64) -> u64 {
     return 0;
 }
 fn rt_vec_truncate(s: u64, keep: u64, dropper: u64) -> u64 {
+    if dropper == 0 {
+        // Plain words: clear the tail and set the length, instead of a pop per element.
+        n := raw_load(s + 8);
+        if keep < n {
+            base := raw_load(s);
+            mut i = keep;
+            while i < n {
+                raw_store(base + i * 8, 0);
+                i += 1;
+            }
+            raw_store(s + 8, keep);
+        }
+        return 0;
+    }
     while keep < rt_len(s) {
         v := rt_pop(s);
         if dropper != 0 {

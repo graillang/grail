@@ -54,7 +54,11 @@ fn is_type_id(ty: u64) -> bool {
 struct Tok {
     kind: u64,
     start: u64,
-    end: u64
+    end: u64,
+    // Where the token starts, 1-based, worked out once when the file is read: every position a
+    // diagnostic, a debug row or a runtime-error site needs is a lookup, not a scan of the source.
+    line: u64,
+    col: u64
 }
 struct Ty {
     kind: u64,
@@ -454,6 +458,8 @@ struct C {
     // unit per emitted function (docs/design/typed-ir.md, "The serializer").
     emit_ir: u64,
     no_sites: u64,
+    // `--check`: stop after the last diagnostic can have been given.
+    check_only: u64,
     // --f1-what=N: a test aid that records a deliberately wrong F1 kind for every binding, so the
     // checks --verify-facts emits can be shown to fire (docs/design/typed-ir.md, "Tests that catch
     // a wrong fact"). 0, the default, records the type the front end actually has.
@@ -549,15 +555,6 @@ struct C {
     // Set when a compile-time expression read a value parameter that is not bound yet.
     ct_unbound: u64,
     // site_pos's position cache (file, byte offset, line, column).
-    site_file: u64,
-    site_off: u64,
-    site_line: u64,
-    site_col: u64,
-    // The same cursor for `position_text` (where a declaration starts).
-    decl_file: u64,
-    decl_off: u64,
-    decl_line: u64,
-    decl_col: u64,
     // `--comptime-probe`: this compile builds the probe program for a compile-time call (C3).
     probe_mode: u64,
     // `@for f in fields(T)` bindings in scope, innermost last: name, decl, field index.
@@ -1035,27 +1032,6 @@ fn decl_index_sync<a>(c: (&a mut C)) -> unit {
     }
     return ();
 }
-fn div(n: u64, d: u64) -> u64 {
-    mut q = 0;
-    mut r = n;
-    while !(r < d) {
-        mut m = d;
-        mut k = 1;
-        while true {
-            if 9223372036854775807 < m {
-                break;
-            }
-            if r < m + m {
-                break;
-            }
-            m = m + m;
-            k = k + k;
-        }
-        r = r - m;
-        q = q + k;
-    }
-    return q;
-}
 
 // ---- output ----
 fn o<a, b>(c: (&a mut C), s: &b [u8]) -> unit {
@@ -1066,7 +1042,7 @@ fn o<a, b>(c: (&a mut C), s: &b [u8]) -> unit {
 }
 fn on<a>(c: (&a mut C), n: u64) -> unit {
     if 9 < n {
-        on(&mut c, div(n, 10));
+        on(&mut c, n / 10);
     }
     c.out.push(48 + n % 10);
     return ();
@@ -1368,17 +1344,10 @@ fn debug_locs<a>(text: &a [u8]) -> u8[] {
     return out;
 }
 fn source_line<a>(c: &a C, pos: u64) -> u64 {
-    mut line = 1;
     if c.toks.len() <= pos {
-        return line;
+        return 1;
     }
-    st := c.toks[pos].start;
-    for i in st {
-        if c.src[i] == 10 {
-            line += 1;
-        }
-    }
-    return line;
+    return c.toks[pos].line;
 }
 // ---- DWARF .debug_info emission (Linux x86-64) ----
 fn dput<a, b>(out: (&a mut u8[]), text: &b [u8]) -> unit {
@@ -1389,7 +1358,7 @@ fn dput<a, b>(out: (&a mut u8[]), text: &b [u8]) -> unit {
 }
 fn dnum<a>(out: (&a mut u8[]), n: u64) -> unit {
     if 9 < n {
-        dnum(&mut out, div(n, 10));
+        dnum(&mut out, n / 10);
     }
     out.push(48 + n % 10);
     return ();
@@ -2263,30 +2232,8 @@ fn site_pos<a>(c: (&a mut C)) -> unit {
     if c.toks.len() <= p {
         return ();
     }
-    st := c.toks[p].start;
-    // Line and column, counted on from the last position in the same file (statements are mostly
-    // visited in order; going back restarts from the top).
-    if (c.site_file != c.file) || (st < c.site_off) {
-        exchange(&mut c.site_file, c.file);
-        exchange(&mut c.site_off, 0);
-        exchange(&mut c.site_line, 1);
-        exchange(&mut c.site_col, 1);
-    }
-    mut line = c.site_line;
-    mut col = c.site_col;
-    mut i = c.site_off;
-    while (i < st) && (i < c.src.len()) {
-        if c.src[i] == 10 {
-            line += 1;
-            col = 1;
-        } else {
-            col += 1;
-        }
-        i += 1;
-    }
-    exchange(&mut c.site_off, st);
-    exchange(&mut c.site_line, line);
-    exchange(&mut c.site_col, col);
+    line := c.toks[p].line;
+    col := c.toks[p].col;
     // The last word says whether this is the unsafe runtime (runtime.grl, os-*.grl), whose sites a
     // failure report skips to find the program's own.
     o(&mut c, view(".gpos "));
@@ -2690,18 +2637,8 @@ fn emit_loc<a>(c: (&a mut C)) -> unit {
     if c.toks.len() <= p {
         return ();
     }
-    t := &c.toks[p];
-    st := t.start;
-    mut line = 1;
-    mut column = 1;
-    for i in st {
-        if c.src[i] == 10 {
-            line += 1;
-            column = 1;
-        } else {
-            column += 1;
-        }
-    }
+    line := c.toks[p].line;
+    column := c.toks[p].col;
     file := c.file - 1;
     if c.target == 3 {
         if c.validating != 0 {
@@ -3378,7 +3315,7 @@ fn put_text(out: (&mut u8[]), t: &[u8]) -> unit {
 }
 fn put_number(out: (&mut u8[]), n: u64) -> unit {
     if 9 < n {
-        put_number(&mut out, div(n, 10));
+        put_number(&mut out, n / 10);
     }
     out.push(48 + n % 10);
     return ();
@@ -6232,31 +6169,8 @@ fn position_text<a>(c: (&a mut C), at: u64) -> u8[] {
     if c.toks.len() <= tok {
         tok = 0;
     }
-    start := c.toks[tok].start;
-    // Line and column, counted on from the last declaration in the same file: declarations are
-    // visited in order, and counting from the top for each one made a file of N declarations cost
-    // N scans of it (docs/design/compile-speed.md). Going back restarts from the top.
-    if (c.decl_file != c.file) || (start < c.decl_off) {
-        exchange(&mut c.decl_file, c.file);
-        exchange(&mut c.decl_off, 0);
-        exchange(&mut c.decl_line, 1);
-        exchange(&mut c.decl_col, 1);
-    }
-    mut line = c.decl_line;
-    mut col = c.decl_col;
-    mut i = c.decl_off;
-    while (i < start) && (i < c.src.len()) {
-        if c.src[i] == 10 {
-            line += 1;
-            col = 1;
-        } else {
-            col += 1;
-        }
-        i += 1;
-    }
-    exchange(&mut c.decl_off, i);
-    exchange(&mut c.decl_line, line);
-    exchange(&mut c.decl_col, col);
+    line := c.toks[tok].line;
+    col := c.toks[tok].col;
     out.push(58);
     push_bytes(&mut out, view(decimal_bytes(line)));
     out.push(58);
@@ -9119,9 +9033,21 @@ fn load_file<a>(c: (&a mut C), index: u64) -> unit {
     }
     mut toks = Tok[];
     lexed := lexer::tokenize(view(src));
+    mut line = 1;
+    mut col = 1;
+    mut at = 0;
     for i in lexed.len() {
         t := &lexed[i];
-        toks.push(Tok { kind: t.kind, start: t.start, end: t.end });
+        while at < t.start {
+            if src[at] == 10 {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+            at += 1;
+        }
+        toks.push(Tok { kind: t.kind, start: t.start, end: t.end, line: line, col: col });
     }
     drop(lexed);
     exchange(&mut c.toks, toks);
@@ -15739,7 +15665,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     o(&mut c, view("xorq %rax,%rax\nleave\nret\n.set "));
     fname(&mut c, frame);
     c.out.push(44);
-    on(&mut c, div(c.next + 1, 2) * 16);
+    on(&mut c, (c.next + 1) / 2 * 16);
     c.out.push(10);
     if (c.debug != 0) & (c.validating == 0) {
         dend = label(&mut c);
@@ -21447,14 +21373,16 @@ fn static_literal_view<a>(c: (&a mut C)) -> Val {
     } else {
         o(&mut c, view(".pushsection .rodata\n"));
     }
-    o(&mut c, view(".p2align 3\n.quad 0\n.quad 2\n"));
+    // Each object starts at a multiple of 16, as an allocated block does: that is what lets the
+    // runtime tell a view's own record from a header by its address (rt_view_record).
+    o(&mut c, view(".p2align 4\n.quad 0\n.quad 2\n"));
     mark(&mut c, data);
     for i in bytes.len() {
         o(&mut c, view(".byte "));
         on(&mut c, bytes[i]);
         c.out.push(10);
     }
-    o(&mut c, view(".byte 0\n.p2align 3\n.quad 0\n.quad 2\n"));
+    o(&mut c, view(".byte 0\n.p2align 4\n.quad 0\n.quad 2\n"));
     mark(&mut c, text);
     o(&mut c, view(".quad "));
     lname(&mut c, data);
@@ -21462,7 +21390,7 @@ fn static_literal_view<a>(c: (&a mut C)) -> Val {
     on(&mut c, bytes.len());
     o(&mut c, view("\n.quad "));
     on(&mut c, bytes.len());
-    o(&mut c, view("\n.quad 0\n.quad 2\n"));
+    o(&mut c, view("\n.p2align 4\n.quad 0\n.quad 2\n"));
     mark(&mut c, desc);
     o(&mut c, view(".quad "));
     lname(&mut c, data);
@@ -22272,7 +22200,7 @@ fn canonical_type<a, b>(c: (&a mut C), ty: u64, next: (&b mut u64)) -> u64 {
 }
 fn decimal<a>(out: (&a mut u8[]), n: u64) -> unit {
     if 9 < n {
-        decimal(&mut out, div(n, 10));
+        decimal(&mut out, n / 10);
     }
     out.push(48 + n % 10);
     return ();
@@ -29775,7 +29703,7 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         o(&mut c, view("xorq %rax,%rax\nleave\nret\n.set "));
         fname(&mut c, frame);
         c.out.push(44);
-        on(&mut c, div(c.next + 1, 2) * 16);
+        on(&mut c, (c.next + 1) / 2 * 16);
         c.out.push(10);
         exchange(&mut c.closure_env, 0);
         i += 1;
@@ -38691,8 +38619,12 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                 if (kind == 3) || (kind == 4) {
                     call_out(&mut c, view("rt_drop_seq"));
                 }
-                if (kind == 5) || (kind == 11) || (kind == 27) {
+                if kind == 11 {
                     call_out(&mut c, view("rt_free"));
+                }
+                if (kind == 5) || (kind == 27) {
+                    // A view owns its record when it has one, never the header it may be instead.
+                    call_out(&mut c, view("rt_view_free"));
                 }
                 if kind == 16 {
                     o(&mut c, view("movq %r12,%rdi\n"));
@@ -43446,6 +43378,7 @@ pub fn main() -> u64 {
         emit_ir: 0,
         range_facts: 0,
         no_sites: 0,
+        check_only: 0,
         f1_what: 0,
         debug_funcs: DebugFunc[],
         debug_vars: DebugVar[],
@@ -43509,14 +43442,6 @@ pub fn main() -> u64 {
         decl_public: 1,
         vis_off: 0,
         ct_unbound: 0,
-        site_file: 0,
-        site_off: 0,
-        site_line: 1,
-        site_col: 1,
-        decl_file: 0,
-        decl_off: 0,
-        decl_line: 1,
-        decl_col: 1,
         probe_mode: 0,
         ct_loop_names: u8[][],
         ct_loop_decls: u64[],
@@ -43897,6 +43822,12 @@ pub fn main() -> u64 {
             }
             exchange(&mut c.fn_id, host::arg(offset + 2));
             offset += 2;
+        } else if same(view(option), view("--check")) {
+            // Check only: every diagnostic a build gives is given by the passes over the source, so
+            // the run ends when they do - no optimiser, no location table, nothing written. This is
+            // what `grail check` runs (docs/design/compile-speed.md).
+            exchange(&mut c.check_only, 1);
+            offset += 1;
         } else if same(view(option), view("--no-entry")) {
             // A run that emits one module's code for a link, not a program: no entry stub, so the
             // process state is defined once, by the run that holds the entry.
@@ -44445,6 +44376,9 @@ pub fn main() -> u64 {
         push_bytes(&mut line, view(decimal_bytes(c.fn_kept)));
         push_bytes(&mut line, view(" not units\n"));
         host::print(view(line));
+    }
+    if c.check_only != 0 {
+        return 0;
     }
     mut out = u8[];
     // The typed IR of each body, as the optimizer parsed it, when --emit-ir asked for it.
