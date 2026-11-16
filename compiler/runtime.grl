@@ -1145,7 +1145,9 @@ fn rt_cache_for_free(tp: u64) -> u64 {
     }
     return rt_cache_make(tp);
 }
-// An empty bin: take blocks from the shared list, or failing that reserve a run of unused ones.
+// An empty bin: take a chain another cache gave up, or blocks from the shared list (freed before
+// the process had threads, or by a thread with no cache), or failing both reserve a run of unused
+// ones.
 fn rt_cache_refill(slot: u64, bin: u64, size: u64) -> u64 {
     state := raw_state();
     want := raw_load(slot + 32);
@@ -1153,7 +1155,17 @@ fn rt_cache_refill(slot: u64, bin: u64, size: u64) -> u64 {
         raw_store(slot + 32, want * 2);
     }
     head := state + 256 + bin * 8;
+    chains := state + 1792 + bin * 8;
     rt_allocator_lock();
+    chain := raw_load(chains);
+    if chain != 0 {
+        // What another cache spilled or left behind, taken whole: nothing is walked under the lock.
+        raw_store(chains, raw_load(chain + 16));
+        rt_allocator_unlock();
+        raw_store(slot, chain);
+        raw_store(slot + 8, raw_load(chain + 24));
+        return 0;
+    }
     first := raw_load(head);
     if first != 0 {
         mut last = first;
@@ -1184,7 +1196,7 @@ fn rt_cache_refill(slot: u64, bin: u64, size: u64) -> u64 {
     rt_allocator_unlock();
     return 0;
 }
-// A full bin: the newer half of its list goes to the shared list in one splice.
+// A full bin: the newer half of its list becomes a chain.
 fn rt_cache_spill(slot: u64, bin: u64) -> u64 {
     mut moved = rt_div(raw_load(slot + 8), 2);
     if moved == 0 {
@@ -1199,10 +1211,20 @@ fn rt_cache_spill(slot: u64, bin: u64) -> u64 {
     }
     raw_store(slot, raw_load(last + 8));
     raw_store(slot + 8, raw_load(slot + 8) - moved);
-    head := raw_state() + 256 + bin * 8;
+    raw_store(last + 8, 0);
+    rt_chain_give(first, moved, bin);
+    return 0;
+}
+// Blocks leave a cache as a chain: a list linked through the state words and ending in 0, whose
+// first block also carries, in its two payload words, the next chain of the class (state words
+// 1792 + bin * 8) and the chain's length. A refill takes one whole, so the lock is held for a few
+// stores however many blocks move. The smallest class has exactly those two payload words.
+fn rt_chain_give(first: u64, count: u64, bin: u64) -> u64 {
+    chains := raw_state() + 1792 + bin * 8;
+    raw_store(first + 24, count);
     rt_allocator_lock();
-    raw_store(last + 8, raw_load(head));
-    raw_store(head, first);
+    raw_store(first + 16, raw_load(chains));
+    raw_store(chains, first);
     rt_allocator_unlock();
     return 0;
 }
@@ -1217,21 +1239,22 @@ fn rt_cache_retire(record: u64) -> u64 {
     }
     raw_store(record + 64, 0);
     state := raw_state();
-    rt_allocator_lock();
     mut size = 32;
     mut bin = 0;
     while bin < 12 {
         slot := c + 64 + bin * 48;
-        head := state + 256 + bin * 8;
-        first := raw_load(slot);
-        if first != 0 {
-            mut last = first;
-            while raw_load(last + 8) != 0 {
-                last = raw_load(last + 8);
-            }
-            raw_store(last + 8, raw_load(head));
-            raw_store(head, first);
+        if raw_load(slot) != 0 {
+            rt_chain_give(raw_load(slot), raw_load(slot + 8), bin);
         }
+        size = size * 2;
+        bin = bin + 1;
+    }
+    rt_allocator_lock();
+    size = 32;
+    bin = 0;
+    while bin < 12 {
+        slot := c + 64 + bin * 48;
+        head := state + 256 + bin * 8;
         // The unused rest of a run becomes ordinary free blocks: each needs its size word.
         mut block = raw_load(slot + 16);
         mut left = raw_load(slot + 24);
@@ -2774,6 +2797,7 @@ fn rt_thread_join(handle: u64) -> u64 {
 //   256..320     allocator bin heads          rt_alloc_unlocked          --
 //   768..832     allocator bin bump           rt_grow                    --
 //   1280..1344   allocator bin remaining      rt_grow                    --
+//   1792..1880   thread-cache chains, per bin rt_chain_give              thread-alloc
 //   2048..2672   sampling profiler block      rt_prof_words              --
 //   3200         job pool pointer             rt_state_pool              job-pool
 //   3208         job pool creation CAS        rt_state_pool_cas          job-pool

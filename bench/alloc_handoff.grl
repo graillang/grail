@@ -1,0 +1,33 @@
+// Allocator hand-off: W pool workers each build 4000 small vectors per round and the main thread
+// drops them all, so every block is freed on a thread that did not allocate it. Prints one line per
+// W: workers, million blocks handed over per second. Notes in docs/design/allocator.md.
+// Run it:  grail build bench/alloc_handoff.grl -o /tmp/alloc_handoff && /tmp/alloc_handoff
+use host;
+use pool;
+fn build(seed: u64) -> u64[][] {
+    mut out = u64[][];
+    for i in 4000 {
+        out.push(u64[seed, i, seed + i]);
+    }
+    return out;
+}
+fn main() {
+    rounds := 60;
+    for w in u64[1, 2, 4, 8, 16, 24] {
+        start := host::now_ms();
+        mut total = 0;
+        for r in rounds {
+            made := pool::run<u64[][]>(w, |i: u64| -> u64[][] build(i + r));
+            for i in made.len() {
+                total += made[i].len();
+            }
+        }
+        mut elapsed = host::now_ms() - start;
+        if elapsed == 0 {
+            elapsed = 1;
+        }
+        assert(total == w * rounds * 4000);
+        rate := total * 2 / elapsed;
+        println("{} workers: {}.{} M blocks/s", w, rate / 1000, rate % 1000 / 100);
+    }
+}
