@@ -1,5 +1,4 @@
 module ir;
-use span;
 use llvm;
 
 // The typed IR of the word stream: instructions that define and use values, one unit per emitted
@@ -116,24 +115,26 @@ pub fn put<a>(v: (&a mut u64[]), i: u64, x: u64) {
     exchange(&mut v[i], x);
 }
 
-// `s[a..e]` equals `w`. The range is a `Span`: it carries the slice it was made from, so the only
-// bytes it can name are that slice's (`docs/design/range-values.md`). `span_of` refuses a range the
-// slice does not have when the span is made, which is why no guard here checks `e` against `s.len()`
-// any more: there is no second, unwritten end left for a caller to supply.
-pub fn same<b, d>(r: span::Span<b>, w: &d [u8]) -> bool {
-    return r.same_as(w);
-}
-
-// `span_of` is `lib/span.grl`'s constructor (the compiler builds with that module); the range it
-// makes is the same value user code gets, not a private copy of the idea.
-pub fn span_of<a>(s: &a [u8], start: u64, end: u64) -> span::Span<a> {
-    return span::span_of(s, start, end);
-}
-
 // `s` at `a` opens with `w`: the extent comes from the needle, so the window cannot be wider than
-// the thing it is compared with, and `span_of` refuses one that runs past the end of `s`.
+// the thing it is compared with, and a window that runs past the end of `s` is unequal.
 pub fn at<b, d>(s: &b [u8], a: u64, w: &d [u8]) -> bool {
-    return span_of(s, a, a + w.len()).same_as(w);
+    return same_range(s, a, a + w.len(), w);
+}
+
+// `s[a..e]` is `w`, compared in place. It answers what `span::span_of(s, a, e).same_as(w)` answers
+// (docs/design/range-values.md) - a range `s` does not have is unequal to everything - without
+// making the span: the optimiser asks this of every line it reads, and a record per question was a
+// tenth of a build (docs/design/compile-speed.md).
+pub fn same_range<b, d>(s: &b [u8], a: u64, e: u64, w: &d [u8]) -> bool {
+    if (e < a) || (s.len() < e) || (e - a != w.len()) {
+        return false;
+    }
+    for i in w.len() {
+        if s[a + i] != w[i] {
+            return false;
+        }
+    }
+    return true;
 }
 
 pub fn bit(r: u64) -> u64 {
@@ -465,7 +466,7 @@ pub fn classify<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64, second: u64)
                 }
                 // -N(%rbp) with decimal N is a frame slot.
                 if (c == 45) & (e - a > 7) {
-                    if same(span_of(view(s), e - 6, e), view("(%rbp)")) {
+                    if same_range(view(s), e - 6, e, view("(%rbp)")) {
                         mut n = 0;
                         mut ok = 1;
                         for i in e - 7 - a {
@@ -534,7 +535,7 @@ pub fn label_number<a, b, d>(s: &a [u8], a: u64, e: u64, uprefix: &d [u8]) -> u6
         }
         return n + 1;
     }
-    if !same(span_of(view(s), at, e), view(uprefix)) | (e <= at + uprefix.len() + 1) {
+    if !same_range(view(s), at, e, view(uprefix)) | (e <= at + uprefix.len() + 1) {
         return 0;
     }
     mut i = 0;
@@ -583,7 +584,7 @@ pub fn marker<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) -> u64 {
     // where it left them, or start at zero the first time.
     mut k = 0;
     while k < o.uniq_units.len() {
-        if same(span_of(view(o.uniq_units[k]), 0, unit.len()), view(unit)) {
+        if same_range(view(o.uniq_units[k]), 0, unit.len(), view(unit)) {
             break;
         }
         k += 1;
@@ -732,31 +733,31 @@ pub fn parse<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) {
     if (op == 15) & (comma == e) & (e - first > 5) & (e - first < 9) {
         if (s[first] == 114) & (s[first + 1] == 116) & (s[first + 2] == 95) {
             mut fast = 0;
-            if same(span_of(view(s), first, e), view("rt_slot")) {
+            if same_range(view(s), first, e, view("rt_slot")) {
                 fast = 40;
             }
-            if same(span_of(view(s), first, e), view("rt_at")) {
+            if same_range(view(s), first, e, view("rt_at")) {
                 fast = 41;
             }
-            if same(span_of(view(s), first, e), view("rt_len")) {
+            if same_range(view(s), first, e, view("rt_len")) {
                 fast = 42;
             }
-            if same(span_of(view(s), first, e), view("rt_xchg")) {
+            if same_range(view(s), first, e, view("rt_xchg")) {
                 fast = 43;
             }
-            if same(span_of(view(s), first, e), view("rt_atb")) {
+            if same_range(view(s), first, e, view("rt_atb")) {
                 fast = 44;
             }
-            if same(span_of(view(s), first, e), view("rt_push")) {
+            if same_range(view(s), first, e, view("rt_push")) {
                 fast = 45;
             }
-            if same(span_of(view(s), first, e), view("rt_pushb")) {
+            if same_range(view(s), first, e, view("rt_pushb")) {
                 fast = 46;
             }
-            if same(span_of(view(s), first, e), view("rt_slotu")) {
+            if same_range(view(s), first, e, view("rt_slotu")) {
                 fast = 47;
             }
-            if same(span_of(view(s), first, e), view("rt_atbu")) {
+            if same_range(view(s), first, e, view("rt_atbu")) {
                 fast = 48;
             }
             if fast != 0 {

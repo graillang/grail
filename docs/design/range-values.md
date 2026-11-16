@@ -134,3 +134,14 @@ bytes: `span_of` yields `1..0` for a range its slice does not have, `same_as` an
 - **The compiler's own copy.** The compiler is built without the standard prelude
   (`tools/native.mjs` lists its sources), so it now lists `lib/core.grl` and says `core::Span`;
   user programs get `Span` from the always-compiled prelude, unqualified.
+
+## The compiler's own comparisons, since compile speed became the priority
+
+The compiler no longer builds a `Span` to compare a range with a needle. `ir::same_range(s, a, e, w)`
+answers what `span::span_of(s, a, e).same_as(w)` answers - a range `s` does not have is unequal to
+everything, in one function, with no second end a caller can get wrong - and it does so in place:
+a span is a record, a record is a heap block, and the optimiser asks this question of every line it
+reads (`docs/design/compile-speed.md`). `lib/span.grl` is unchanged and is no longer one of the
+compiler's own sources (`tools/native.mjs`, `compilerStdSources`); the paragraphs above that say the
+compiler's `same`/`at` take a span describe the code as it was before that change. The span becomes
+the compiler's own type again when records stop being heap blocks.

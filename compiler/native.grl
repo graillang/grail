@@ -6098,8 +6098,25 @@ fn tok_text<a>(c: (&a mut C), i: u64) -> u8[] {
     return (c.src[st: en]).copy();
 }
 fn is<a, b>(c: (&a mut C), s: &b [u8]) -> bool {
-    t := tok_text(&mut c, c.pos);
-    return same(view(t), s);
+    return tok_is(&mut c, c.pos, s);
+}
+// Whether token `i` is spelled `s`, read from the source in place. `is` is asked for every keyword
+// at every statement, and copying the token out to compare it was four allocations a question
+// (docs/design/compile-speed.md). A position past the stream is the empty token, as `tok_text` has it.
+fn tok_is<a, b>(c: (&a mut C), i: u64, s: &b [u8]) -> bool {
+    if c.toks.len() <= i {
+        return s.len() == 0;
+    }
+    st := c.toks[i].start;
+    if c.toks[i].end - st != s.len() {
+        return false;
+    }
+    for k in s.len() {
+        if c.src[st + k] != s[k] {
+            return false;
+        }
+    }
+    return true;
 }
 // Edit distance between two names (insertions, deletions, substitutions), for "did you mean".
 fn edit_distance<a, b>(x: &a [u8], y: &b [u8]) -> u64 {
@@ -11885,8 +11902,7 @@ fn lifetime_candidate<a>(c: (&a mut C), p: u64) -> bool {
 }
 fn is_at<a, b>(c: (&a mut C), p: u64, text: &b [u8]) -> bool {
     if p < c.toks.len() {
-        t := tok_text(&mut c, p);
-        return same(view(t), view(text));
+        return tok_is(&mut c, p, text);
     }
     return false;
 }

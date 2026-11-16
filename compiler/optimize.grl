@@ -1,5 +1,4 @@
 module optimize;
-use span;
 use ir;
 use llvm;
 use llvm;
@@ -795,7 +794,7 @@ fn peephole<a, b>(o: (&a mut ir::Body), s: &b [u8], first: u64, last: u64) {
                     if c < last {
                         if (o.op[c] == 15)
                             & (o.k0[c] == 4)
-                            & ir::same(ir::span_of(view(s), o.s0[c], o.e0[c]), view("rt_abort")) {
+                            & ir::same_range(view(s), o.s0[c], o.e0[c], view("rt_abort")) {
                             x := next_insn(&o, c, last);
                             if x < last {
                                 if (o.op[x] == 10)
@@ -1245,7 +1244,7 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8]) {
                 j := next_live(&o, i, last);
                 if j < last {
                     if (o.op[j] == 15) & (o.k0[j] == 4) {
-                        if ir::same(ir::span_of(view(s), o.s0[j], o.e0[j]), view("rt_abort")) {
+                        if ir::same_range(view(s), o.s0[j], o.e0[j], view("rt_abort")) {
                             if (o.lab[t] != 0)
                                 & (next_live(&o, j, last) == t)
                                 & (refs[o.lab[t] - 1 - base] == 1) {
@@ -1462,7 +1461,7 @@ fn inline_candidate<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64) {
                         if o.k0[i] != 4 {
                             return ();
                         }
-                        if !ir::same(ir::span_of(view(s), o.s0[i], o.e0[i]), view("rt_abort")) {
+                        if !ir::same_range(view(s), o.s0[i], o.e0[i], view("rt_abort")) {
                             return ();
                         }
                     }
@@ -1614,11 +1613,11 @@ fn inline_calls<a>(o: (&a mut ir::Body), split: u64, marks: (&a mut u64[])) {
                         ul := u.len();
                         if ul != 0 {
                             // `same` is this module's slice-vs-token comparison: whole, so 0..len.
-                            if !ir::same(ir::span_of(view(o.inl_units[k - 1]), 0, ul), view(u)) {
+                            if !ir::same_range(view(o.inl_units[k - 1]), 0, ul, view(u)) {
                                 here = 0;
                             }
                         }
-                        if (here != 0) & ir::same(ir::span_of(view(text), a + 5, e), view(n)) {
+                        if (here != 0) & ir::same_range(view(text), a + 5, e, view(n)) {
                             site += 1;
                             emit_body(&mut o, k - 1, site, view(uprefix));
                             done = 1;
@@ -1808,8 +1807,8 @@ fn compact<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64, ns: u64) -> u6
                                     & (o.v1[a] == 1)
                                     & (o.op[b] == 0)
                                     & (o.op[d] == 0)
-                                    & ir::same(ir::span_of(view(s), o.ls[d], o.le[d]), view("rep stosq"))
-                                    & ir::same(ir::span_of(view(s), o.ls[b], o.le[b]), view("xorl %eax,%eax")) {
+                                    & ir::same_range(view(s), o.ls[d], o.le[d], view("rep stosq"))
+                                    & ir::same_range(view(s), o.ls[b], o.le[b], view("xorl %eax,%eax")) {
                                     kill(&mut o, i);
                                     kill(&mut o, a);
                                     kill(&mut o, b);
@@ -1862,7 +1861,7 @@ pub fn optimize_parts<b, c, d, e>(s: &b [u8], split: u64, marks: (&mut u64[]), n
             if inside == 0 {
                 if (e - a > 15) & (s[a] == 46) & (s[a + 1] == 116) {
                     if !ir::at(view(s), a, view(".type ")) {} else {
-                        if ir::same(ir::span_of(view(s), e - 9, e), view("@function")) {
+                        if ir::same_range(view(s), e - 9, e, view("@function")) {
                             // The body's symbol, which is the key its type facts are filed under.
                             o.name = ir::type_symbol(view(s), a, e);
                             inside = 1;
