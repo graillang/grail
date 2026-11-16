@@ -85,7 +85,10 @@ same one-reporter claim a failed runtime check uses (below).
   handler has 64 KiB of stack that is not the exhausted one. The handler checks that `si_addr` lies
   in the running task's guard page; anything else restores `SIG_DFL` and dies as before. x86-64
   installs an `SA_RESTORER` trampoline (`rt_sigreturn`); the other ELF targets use the generic
-  `rt_sigaction` table (134/132), which the platform module maps for them.
+  `rt_sigaction` table (134/132), which the platform module maps for them. The **main thread** takes
+  the same handler and its own alternate stack at startup, and recognises its overflow by the fault
+  address being within a window of the interrupted stack pointer instead of by a guard page it does
+  not have (`docs/design/main-stack-overflow.md`).
 - macOS: the same shape with Darwin's `struct sigaction`/`stack_t` layouts, `SIGSEGV` = 11 and
   `SIGBUS` = 10, and `si_addr` at offset 24 of Darwin's `siginfo_t`.
 - Windows: `AddVectoredExceptionHandler` on `STATUS_STACK_OVERFLOW` (0xC00000FD); any other code

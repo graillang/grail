@@ -441,6 +441,25 @@
 
 ## Unreleased
 
+- Fixed: **a program that ran the main thread's stack out died with an empty stderr**. `f(100000000)`
+  in a recursive function exited 139 (SIGSEGV) with nothing said, because the guard page and the
+  `rt_stack_overflow` report belonged to task stacks and the main thread's stack is the kernel's -
+  there is no page the runtime can make `PROT_NONE` there. The main thread now installs the same
+  `SIGSEGV` handler on an alternate stack at startup (a 64 KiB mapping, its base in a process-state
+  word of its own) and reports a fault as an overflow when the fault address is within 64 KiB below,
+  or one page above, the interrupted stack pointer read out of `ucontext` - `error: stack overflow`,
+  the statement the overflowing frame was entering as ` --> file:line:col`, and status 134 through
+  the same one-reporter claim a task's overflow uses. Anything farther away restores `SIG_DFL` and
+  returns, so a genuine wild pointer still dies by SIGSEGV with no report; recursion that ends
+  normally is untouched, and a task's overflow still prints the same message. Nothing is allocated
+  in the handler. `ucontext` offsets per target (`os-linux.grl`): x86-64 `sp` 160 / `pc` 168,
+  aarch64 432 / 440, riscv64 192 / 176 - `offsetof()` against each target's own headers. A fault in
+  a function's prologue, which the statement table marks positionless, is attributed to that
+  function's first statement, verified through the function table. Cases
+  `main-stack-overflow-reports-and-exits-134` (x86-64, aarch64, riscv64),
+  `wild-pointer-dies-by-sigsegv-without-an-overflow-report` (x86-64) and
+  `deep-recursion-that-ends-is-unaffected` (all three). docs/design/main-stack-overflow.md.
+
 - Changed: the call-site table helper the compiler emits (`compiler/native.grl` `rt_sites`) and the
   runtime that calls it (`compiler/runtime.grl`) now carry their length instead of agreeing on fixed
   offsets. The signature is `words_written = rt_sites(out, capacity_words)`, and the descriptor is

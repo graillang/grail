@@ -8015,6 +8015,29 @@
     "stderr": "error: "
   },
   {
+    "name": "main-stack-overflow-reports-and-exits-134",
+    "note": "Recursion on the main thread runs the kernel's stack out. There is no page the runtime can make PROT_NONE there, so the fault is recognised by its distance from the interrupted stack pointer (read out of ucontext) and reported on the alternate stack: the same message a task's overflow prints, the statement the frame was entering, and status 134. The fault lands in a frame's prologue, whose statement entry carries no position, so the location is the first statement of the function that overflowed.",
+    "source": "// The main thread's stack is the kernel's: it has no PROT_NONE page and no guard, and before\n// this handler existed a program that ran it out died of SIGSEGV with empty stderr. The fault\n// address is inside a stack's worth of the interrupted stack pointer, so it is named as what it\n// is - `error: stack overflow`, the statement the overflowing frame was entering, status 134 -\n// and not left as an unexplained signal.\nfn f(n: u64) -> u64 {\n    if n == 0 {\n        return 0;\n    }\n    return 1 + f(n - 1);\n}\nfn main() {\n    println(\"before\");\n    println(f(100000000));\n}\n",
+    "stdout": "before\n",
+    "status": 134,
+    "stderr": ["error: stack overflow\n", " --> "]
+  },
+  {
+    "name": "wild-pointer-dies-by-sigsegv-without-an-overflow-report",
+    "targets": ["x86_64"],
+    "note": "The stack-fault handler must not swallow a real memory fault: a null dereference is far from the stack pointer, so the handler restores the default disposition and the process dies of SIGSEGV with nothing on stderr. Needs libc, so it runs on x86_64 only (the cross targets link without one).",
+    "source": "// A genuine memory fault: libc's strlen dereferences a null pointer. The fault address is\n// nowhere near the stack pointer, so the stack-fault handler must put the default disposition\n// back and let the process die of SIGSEGV exactly as it does with no handler installed - a\n// handler that reported a wild pointer as a stack overflow would hide real bugs.\nextern \"C\" lib \"c\" as \"strlen\" fn c_strlen(s: CPtr) -> u64;\nfn main() {\n    println(\"before\");\n    mut n = 0;\n    unsafe {\n        n = c_strlen(cnull());\n    }\n    println(n);\n}\n",
+    "stdout": "before\n",
+    "signal": "SIGSEGV",
+    "stderrAbsent": ["stack overflow"]
+  },
+  {
+    "name": "deep-recursion-that-ends-is-unaffected",
+    "note": "The same recursion a thousand frames deep, well inside the stack: the fault handler never fires, stderr stays empty, and the result is the program's own.",
+    "source": "// The same recursion as the main-stack-overflow case, a thousand frames deep: the handler\n// never fires, nothing is printed on fd 2, and the program's own result is unchanged.\nfn f(n: u64) -> u64 {\n    if n == 0 {\n        return 0;\n    }\n    return 1 + f(n - 1);\n}\nfn main() {\n    println(f(1000));\n}\n",
+    "stdout": "1000\n"
+  },
+  {
     "name": "task-stack-overflow-reports-and-exits-134",
     "note": "A task recurses past the bottom of its 1 MiB stack into the PROT_NONE guard page: the alternate-stack fault handler names the overflow and exits 134, and the program never reaches its join.",
     "source": "// Deep recursion inside a task runs into the guard page at the bottom of its stack. The fault is\n// recognised as a task-stack overflow and reported once, by name, with status 134 - not as a silent\n// write into the neighbouring mapping and not as an unexplained SIGSEGV.\nfn deep(n: u64, unused: u64) -> u64 {\n    if n == 0 {\n        return 0;\n    }\n    return deep(n - 1, 0) + 1;\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    t := spawn(sc, 1000000, deep);\n    return join(t);\n}\nfn main() {\n    println(\"before\");\n    println(task_scope(0, body));\n}\n",
