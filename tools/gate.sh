@@ -97,12 +97,22 @@ leg runtime-bench-native bun tools/bench.mjs --rounds 3
 wait
 GRAIL_BACKEND=llvm leg runtime-bench-llvm bun tools/bench.mjs --rounds 3
 wait
+# Against other languages (docs/design/runtime-parity.md and compile-speed.md, "Against ..."): run
+# time against C, Rust, Go and Zig twins, the scheduler against rayon and oneTBB, compile speed
+# against Go, Zig and cargo. One at a time, after everything else, alone. Reports: each fails only
+# when a program's output differs, never on a ratio, and skips a toolchain that is not installed.
+leg bench-rivals bun tools/bench-rivals.mjs
+wait
+leg sched-rivals bun tools/sched-rivals.mjs
+wait
+leg compile-rivals bun tools/compile-rivals.mjs
+wait
 
 # One line per leg, failures first.
 for f in "$G"/*.log; do
   if rg -q 'exit=[1-9]' "$f"; then echo "FAIL $(basename "$f" .log): $(rg 'AssertionError|error' "$f" | head -1 | cut -c1-120)"; fi
 done > "$G/summary.txt"
 for f in "$G"/*.log; do
-  if rg -q 'exit=0' "$f"; then echo "ok   $(basename "$f" .log): $(rg 'passed|identical|verified|agree|checks|ffi:|facts:|program|compile-bench:|runtime-bench' "$f" | tail -1 | cut -c1-100)"; fi
+  if rg -q 'exit=0' "$f"; then echo "ok   $(basename "$f" .log): $(rg 'passed|identical|verified|agree|checks|ffi:|facts:|program|compile-bench:|runtime-bench|-rivals \(|note:' "$f" | tail -1 | cut -c1-100)"; fi
 done >> "$G/summary.txt"
 echo done > "$G/DONE"
