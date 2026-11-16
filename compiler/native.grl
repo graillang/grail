@@ -54,7 +54,11 @@ fn is_type_id(ty: u64) -> bool {
 struct Tok {
     kind: u64,
     start: u64,
-    end: u64
+    end: u64,
+    // Where the token starts, 1-based, worked out once when the file is read: every position a
+    // diagnostic, a debug row or a runtime-error site needs is a lookup, not a scan of the source.
+    line: u64,
+    col: u64
 }
 struct Ty {
     kind: u64,
@@ -551,15 +555,6 @@ struct C {
     // Set when a compile-time expression read a value parameter that is not bound yet.
     ct_unbound: u64,
     // site_pos's position cache (file, byte offset, line, column).
-    site_file: u64,
-    site_off: u64,
-    site_line: u64,
-    site_col: u64,
-    // The same cursor for `position_text` (where a declaration starts).
-    decl_file: u64,
-    decl_off: u64,
-    decl_line: u64,
-    decl_col: u64,
     // `--comptime-probe`: this compile builds the probe program for a compile-time call (C3).
     probe_mode: u64,
     // `@for f in fields(T)` bindings in scope, innermost last: name, decl, field index.
@@ -1349,17 +1344,10 @@ fn debug_locs<a>(text: &a [u8]) -> u8[] {
     return out;
 }
 fn source_line<a>(c: &a C, pos: u64) -> u64 {
-    mut line = 1;
     if c.toks.len() <= pos {
-        return line;
+        return 1;
     }
-    st := c.toks[pos].start;
-    for i in st {
-        if c.src[i] == 10 {
-            line += 1;
-        }
-    }
-    return line;
+    return c.toks[pos].line;
 }
 // ---- DWARF .debug_info emission (Linux x86-64) ----
 fn dput<a, b>(out: (&a mut u8[]), text: &b [u8]) -> unit {
@@ -2244,30 +2232,8 @@ fn site_pos<a>(c: (&a mut C)) -> unit {
     if c.toks.len() <= p {
         return ();
     }
-    st := c.toks[p].start;
-    // Line and column, counted on from the last position in the same file (statements are mostly
-    // visited in order; going back restarts from the top).
-    if (c.site_file != c.file) || (st < c.site_off) {
-        exchange(&mut c.site_file, c.file);
-        exchange(&mut c.site_off, 0);
-        exchange(&mut c.site_line, 1);
-        exchange(&mut c.site_col, 1);
-    }
-    mut line = c.site_line;
-    mut col = c.site_col;
-    mut i = c.site_off;
-    while (i < st) && (i < c.src.len()) {
-        if c.src[i] == 10 {
-            line += 1;
-            col = 1;
-        } else {
-            col += 1;
-        }
-        i += 1;
-    }
-    exchange(&mut c.site_off, st);
-    exchange(&mut c.site_line, line);
-    exchange(&mut c.site_col, col);
+    line := c.toks[p].line;
+    col := c.toks[p].col;
     // The last word says whether this is the unsafe runtime (runtime.grl, os-*.grl), whose sites a
     // failure report skips to find the program's own.
     o(&mut c, view(".gpos "));
@@ -2671,18 +2637,8 @@ fn emit_loc<a>(c: (&a mut C)) -> unit {
     if c.toks.len() <= p {
         return ();
     }
-    t := &c.toks[p];
-    st := t.start;
-    mut line = 1;
-    mut column = 1;
-    for i in st {
-        if c.src[i] == 10 {
-            line += 1;
-            column = 1;
-        } else {
-            column += 1;
-        }
-    }
+    line := c.toks[p].line;
+    column := c.toks[p].col;
     file := c.file - 1;
     if c.target == 3 {
         if c.validating != 0 {
@@ -6213,31 +6169,8 @@ fn position_text<a>(c: (&a mut C), at: u64) -> u8[] {
     if c.toks.len() <= tok {
         tok = 0;
     }
-    start := c.toks[tok].start;
-    // Line and column, counted on from the last declaration in the same file: declarations are
-    // visited in order, and counting from the top for each one made a file of N declarations cost
-    // N scans of it (docs/design/compile-speed.md). Going back restarts from the top.
-    if (c.decl_file != c.file) || (start < c.decl_off) {
-        exchange(&mut c.decl_file, c.file);
-        exchange(&mut c.decl_off, 0);
-        exchange(&mut c.decl_line, 1);
-        exchange(&mut c.decl_col, 1);
-    }
-    mut line = c.decl_line;
-    mut col = c.decl_col;
-    mut i = c.decl_off;
-    while (i < start) && (i < c.src.len()) {
-        if c.src[i] == 10 {
-            line += 1;
-            col = 1;
-        } else {
-            col += 1;
-        }
-        i += 1;
-    }
-    exchange(&mut c.decl_off, i);
-    exchange(&mut c.decl_line, line);
-    exchange(&mut c.decl_col, col);
+    line := c.toks[tok].line;
+    col := c.toks[tok].col;
     out.push(58);
     push_bytes(&mut out, view(decimal_bytes(line)));
     out.push(58);
@@ -9100,9 +9033,21 @@ fn load_file<a>(c: (&a mut C), index: u64) -> unit {
     }
     mut toks = Tok[];
     lexed := lexer::tokenize(view(src));
+    mut line = 1;
+    mut col = 1;
+    mut at = 0;
     for i in lexed.len() {
         t := &lexed[i];
-        toks.push(Tok { kind: t.kind, start: t.start, end: t.end });
+        while at < t.start {
+            if src[at] == 10 {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+            at += 1;
+        }
+        toks.push(Tok { kind: t.kind, start: t.start, end: t.end, line: line, col: col });
     }
     drop(lexed);
     exchange(&mut c.toks, toks);
@@ -43463,14 +43408,6 @@ pub fn main() -> u64 {
         decl_public: 1,
         vis_off: 0,
         ct_unbound: 0,
-        site_file: 0,
-        site_off: 0,
-        site_line: 1,
-        site_col: 1,
-        decl_file: 0,
-        decl_off: 0,
-        decl_line: 1,
-        decl_col: 1,
         probe_mode: 0,
         ct_loop_names: u8[][],
         ct_loop_decls: u64[],
