@@ -6,6 +6,15 @@
   writes numbers only (kind, operands, the statement's site) into a record that is not heap
   memory. The joiner builds the message and the site text, on a healthy stack. A wake on that path
   no longer reaches scheduler creation.
+- Fixed: `bun tools/native.mjs build` rebuilt the compiler on every call. It assembled the bootstrap
+  seed each time and keyed the compiler by the bootstrap's mtime, so the key never matched. The
+  assembled seed is now kept under its digest and the key names the bootstrap's content; a second
+  build with nothing changed takes milliseconds (`tools/test-cli.mjs` checks it).
+
+- `bun tools/bench-rivals.mjs`: every `bench/` program against its C, Rust, Go and Zig twins
+  (`bench/rivals/`), release and debug builds of each, CPU time from `getrusage`, one table with
+  Grail's two builds as ratios to the best competitor of their bar. The numbers and the named
+  reason for every miss are in `docs/design/runtime-parity.md`, "Against other languages".
 
 - **A foreign call costs what it costs in C (x86-64).** In a program that loaded libc, every
   `extern "C"` call switched the thread pointer to libc's TCB and back, and on x86-64 a write to the
