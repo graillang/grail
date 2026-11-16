@@ -11045,5 +11045,238 @@
       "riscv64"
     ],
     "note": "the allocator's promise: a payload of 512 bytes or more starts on a 64-byte boundary and every payload on a 16-byte one - before the process has threads, on four threads at once, after blocks were freed on other threads, and for a block with its own mapping as it grows"
+  },
+  {
+    "name": "thread-join-result-and-drop-joins",
+    "source": "use thread;\nuse host;\nstruct Shared { hits: Atomic<u64> }\nfn main() {\n    s := Shared { hits: Atomic::new(0) };\n    r := &s;\n    {\n        t := thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 { host::sleep_ms(30); return 7; })!;\n        println(\"spawned\");\n    }\n    println(\"dropped after the thread ended\");\n    t2 := thread::spawn<string>(thread::config(), |ctx: (&thread::Ctx)| -> string { return \"owned\".text(); })!;\n    println(thread::join(t2));\n    println(host::worker_id());\n}\n",
+    "modules": [
+      "lib/thread.grl",
+      "lib/time.grl"
+    ],
+    "stdout": "spawned\ndropped after the thread ended\nowned\n0\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "lib/thread.grl: join returns the closure's owned result; a handle dropped without a join waits for its thread and drops the result; a dedicated thread is not a worker (worker_id 0)"
+  },
+  {
+    "name": "thread-failure-is-a-value-and-join-reraises",
+    "source": "use thread;\nfn boom(n: u64) -> u64 {\n    v := u64[1, 2, 3];\n    return v[n];\n}\nfn main() {\n    t := thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 { return boom(7); })!;\n    match thread::try_join(t) {\n        TaskFailure(e) => { println(\"failed: {}\", e.message); },\n        u64(v) => { println(v); }\n    }\n    ok := thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 { return boom(1); })!;\n    println(thread::join(ok));\n    again := thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 { return boom(9); })!;\n    println(thread::join(again));\n    println(\"not reached\");\n}\n",
+    "modules": [
+      "lib/thread.grl",
+      "lib/time.grl"
+    ],
+    "stdout": "failed: index 7 out of bounds for length 3\n2\n",
+    "signal": "SIGABRT",
+    "stderr": [
+      "error: index 9 out of bounds for length 3\n"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "note": "a failed check on a spawned thread is contained like a task's: a value at try_join, and re-raised by join - on the main thread that ends the process with the thread's own message"
+  },
+  {
+    "name": "thread-stack-size-honoured-and-overflow-reported",
+    "source": "use thread;\nfn deep(n: u64) -> u64 {\n    if n == 0 { return 0; }\n    return deep(n - 1) + 1;\n}\nfn main() {\n    mut big = thread::config();\n    big.stack_bytes = 64 * 1048576;\n    t := thread::spawn<u64>(big, |ctx: (&thread::Ctx)| -> u64 { return deep(200000); })!;\n    println(thread::join(t));\n    mut small = thread::config();\n    small.stack_bytes = 65536;\n    println(\"before\");\n    u := thread::spawn<u64>(small, |ctx: (&thread::Ctx)| -> u64 { return deep(200000); })!;\n    println(thread::join(u));\n}\n",
+    "modules": [
+      "lib/thread.grl",
+      "lib/time.grl"
+    ],
+    "stdout": "200000\nbefore\n",
+    "status": 134,
+    "stderr": "error: stack overflow\n",
+    "targets": [
+      "x86_64"
+    ],
+    "note": "stack_bytes is the stack the closure runs on: the same recursion passes on 64 MiB and runs off 64 KiB into the guard page, which is the named overflow report, not a SIGSEGV"
+  },
+  {
+    "name": "thread-detach-finished-and-still-running-at-exit",
+    "source": "use thread;\nuse host;\nstruct Flag { done: Atomic<u64> }\nfn main() {\n    // A detached thread that finishes: its result is dropped on the thread.\n    quick := thread::spawn<string>(thread::config(), |ctx: (&thread::Ctx)| -> string { return \"dropped by the thread\".text(); })!;\n    thread::detach(quick);\n    host::sleep_ms(50);\n    // One that is still running when main returns: the process exits without it.\n    slow := thread::spawn<u64[]>(thread::config(), |ctx: (&thread::Ctx)| -> u64[] {\n        mut kept = u64[1, 2, 3];\n        host::sleep_ms(5000);\n        return kept;\n    })!;\n    thread::detach(slow);\n    host::sleep_ms(20);\n    println(\"main returns\");\n}\n",
+    "modules": [
+      "lib/thread.grl",
+      "lib/time.grl"
+    ],
+    "stdout": "main returns\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a detached thread drops its own result when it ends; one still running when main returns does not hold the process, and the leak check is not made against its live blocks"
+  },
+  {
+    "name": "thread-ctx-not-sendable",
+    "source": "use thread;\nfn peek(ctx: (&thread::Ctx), i: u64) -> u64 { return i; }\nfn main() {\n    r := thread::with_current<u64>(|ctx: (&thread::Ctx)| -> u64 {\n        out := parallel_map(u64[1, 2], 0, |i: u64, unused: u64| -> u64 peek(ctx, i));\n        return out.len();\n    });\n    println(1);\n}\n",
+    "modules": [
+      "lib/thread.grl",
+      "lib/time.grl"
+    ],
+    "reject": true,
+    "diagnostic": "cannot share closure capture `ctx`: ctx.token is thread-affine",
+    "targets": [
+      "x86_64"
+    ],
+    "note": "a thread::Ctx holds an unclassified foreign handle, so no closure that crosses to a worker can capture one"
+  },
+  {
+    "name": "thread-spawn-borrow-refused",
+    "source": "use thread;\nfn main() {\n    v := u64[1, 2, 3];\n    r := &v;\n    t := thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 { return r.len(); })!;\n    println(thread::join(t));\n}\n",
+    "modules": [
+      "lib/thread.grl",
+      "lib/time.grl"
+    ],
+    "reject": true,
+    "diagnostic": "its closure cannot capture a borrow",
+    "targets": [
+      "x86_64"
+    ],
+    "note": "the interim call-site rule: thread::spawn's closure is checked where it still has its environment"
+  },
+  {
+    "name": "thread-spawn-affine-capture-refused",
+    "source": "use thread;\nhandle H;\nfn keep(h: H) -> u64 { return 1; }\nfn main() {\n    mut h: H;\n    t := thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 { return keep(h); })!;\n    println(thread::join(t));\n}\n",
+    "modules": [
+      "lib/thread.grl",
+      "lib/time.grl"
+    ],
+    "reject": true,
+    "diagnostic": "cannot transfer thread capture `h`: h is thread-affine",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "thread-spawn-forwarded-closure-refused",
+    "source": "use thread;\nfn start(f: Fn((&thread::Ctx)) -> u64) -> u64 {\n    t := thread::spawn<u64>(thread::config(), f)!;\n    return thread::join(t);\n}\nfn main() {\n    println(start(|ctx: (&thread::Ctx)| -> u64 5));\n}\n",
+    "modules": [
+      "lib/thread.grl",
+      "lib/time.grl"
+    ],
+    "reject": true,
+    "diagnostic": "thread::spawn cannot check the captures of a closure it is not handed directly",
+    "targets": [
+      "x86_64"
+    ],
+    "note": "a closure received as a parameter has no environment in its type, so it is refused rather than trusted"
+  },
+  {
+    "name": "thread-spawn-owned-captures-and-fnmut",
+    "source": "use thread;\nfn main() {\n    v := u64[1, 2, 3];\n    mut n = 10;\n    t := thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 { n += v.len(); return n; })!;\n    println(thread::join(t));\n}\n",
+    "modules": [
+      "lib/thread.grl",
+      "lib/time.grl"
+    ],
+    "stdout": "13\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "thread-local-per-thread-and-dropped-at-exit",
+    "source": "use thread;\nstruct Tally { n: u64, log: u64[] }\nfn fresh() -> Tally {\n    return Tally { n: 100, log: u64[] };\n}\nfn bump(counter: (&thread::Local<Tally>), ctx: (&thread::Ctx), by: u64) -> u64 {\n    return counter.with(ctx, |t: (&mut Tally)| -> u64 { t.n += by; t.log.push(by); return t.n + t.log.len(); });\n}\nfn main() {\n    counter := thread::local<Tally>(fresh);\n    mut threads: thread::Thread<u64>[] = [];\n    for i in 4 {\n        mine := counter.same();\n        threads.push(thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 {\n            for k in i {\n                bump(&mine, ctx, 10);\n            }\n            return bump(&mine, ctx, 1);\n        })!);\n    }\n    while let Some(t) = threads.pop() {\n        println(thread::join(t));\n    }\n    on_main := thread::with_current<u64>(|ctx: (&thread::Ctx)| -> u64 bump(&counter, ctx, 5))!;\n    println(on_main);\n}\n",
+    "modules": [
+      "lib/thread.grl",
+      "lib/time.grl"
+    ],
+    "stdout": "135\n124\n113\n102\n106\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "each thread reading a thread::Local gets its own value, made on first use; the values own vectors, so the exact leak check at exit proves each was dropped when its thread ended (main's at the end of main)"
+  },
+  {
+    "name": "thread-with-current-none-in-task",
+    "source": "use thread;\nfn in_task(n: u64, unused: u64) -> u64 {\n    got := thread::with_current<u64>(|ctx: (&thread::Ctx)| -> u64 7);\n    if got.is_none() { return 1; }\n    return 0;\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    t := spawn(sc, 0, in_task);\n    return join(t);\n}\nfn main() {\n    println(task_scope(0, body));\n    on_main := thread::with_current<u64>(|ctx: (&thread::Ctx)| -> u64 7);\n    println(on_main!);\n    t := thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 {\n        return thread::with_current<u64>(|inner: (&thread::Ctx)| -> u64 9)!;\n    })!;\n    println(thread::join(t));\n}\n",
+    "modules": [
+      "lib/thread.grl",
+      "lib/time.grl"
+    ],
+    "stdout": "1\n7\n9\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "thread-name-affinity-priority-refusals",
+    "source": "use thread;\nuse host;\nfn show(e: thread::Error) -> unit {\n    match e.what {\n        Stack => { println(\"refused: stack {}\", e.code); },\n        Affinity => { println(\"refused: affinity {}\", e.code); },\n        Priority => { println(\"refused: priority {}\", e.code); },\n        Unsupported => { println(\"refused: unsupported {}\", e.code); }\n    }\n}\nfn main() {\n    mut named = thread::config();\n    named.name = \"a-very-long-thread-name\".text();\n    t := thread::spawn<u8[]>(named, |ctx: (&thread::Ctx)| -> u8[] {\n        return host::read_file(\"/proc/thread-self/comm\");\n    })!;\n    print(thread::join(t));\n    // Pinning to processor 0 is granted or refused by the OS; either way it is an answer.\n    mut pinned = thread::config();\n    pinned.affinity = Some(thread::cpus(u64[0]));\n    match thread::spawn<u64>(pinned, |ctx: (&thread::Ctx)| -> u64 { return 1; }) {\n        thread::Thread<u64>(p) => { println(\"pin answered {}\", thread::join(p)); },\n        thread::Error(e) => { println(\"pin answered {}\", u64(e.code != 0)); }\n    }\n    mut nowhere = thread::config();\n    nowhere.affinity = Some(thread::cpus(u64[1000]));\n    match thread::spawn<u64>(nowhere, |ctx: (&thread::Ctx)| -> u64 { println(\"must not run\"); return 1; }) {\n        thread::Thread<u64>(p) => { println(thread::join(p)); },\n        thread::Error(e) => { show(e); }\n    }\n    mut urgent = thread::config();\n    // Priority 0 is not a realtime priority: the OS refuses it whoever asks.\n    urgent.priority = thread::Priority::Realtime(0);\n    match thread::spawn<u64>(urgent, |ctx: (&thread::Ctx)| -> u64 { return 1; }) {\n        thread::Thread<u64>(p) => { println(\"realtime granted {}\", thread::join(p)); },\n        thread::Error(e) => { show(e); }\n    }\n    mut quiet = thread::config();\n    quiet.priority = thread::Priority::Background;\n    println(thread::join(thread::spawn<u64>(quiet, |ctx: (&thread::Ctx)| -> u64 { return 3; })!));\n}\n",
+    "modules": [
+      "lib/thread.grl",
+      "lib/time.grl"
+    ],
+    "stdout": "a-very-long-thr\npin answered 1\nrefused: affinity 22\nrefused: priority 22\n3\n",
+    "targets": [
+      "x86_64"
+    ],
+    "note": "the name is a label cut to what Linux shows; a processor set the OS refuses and a priority it refuses are error values and the closure does not run"
+  },
+  {
+    "name": "thread-join-from-task-keeps-worker-running",
+    "source": "use thread;\nuse host;\nstruct Ticks { n: Atomic<u64> }\nfn ticker(n: u64, c: (&Ticks)) -> u64 {\n    for i in n {\n        host::sleep_ms(10);\n        c.n.fetch_add(1);\n    }\n    return n;\n}\nfn joiner(n: u64, c: (&Ticks)) -> u64 {\n    t := thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 { host::sleep_ms(200); return 5; })!;\n    r := thread::join(t);\n    // The timer task kept running on the scheduler while this task waited for the thread.\n    assert(c.n.load() >= 5);\n    return r;\n}\nfn body<s>(sc: (&s Scope<(&Ticks)>), c: (&Ticks)) -> u64 {\n    a := spawn(sc, 30, ticker);\n    b := spawn(sc, 0, joiner);\n    return join(b) + join(a);\n}\nfn main() {\n    ticks := Ticks { n: Atomic::new(0) };\n    println(task_scope(&ticks, body));\n}\n",
+    "modules": [
+      "lib/thread.grl",
+      "lib/time.grl"
+    ],
+    "stdout": "35\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a task that joins a thread hands the wait to a helper and parks: the timer task on the same scheduler keeps ticking meanwhile"
+  },
+  {
+    "name": "thread-sleep-until",
+    "source": "use thread;\nuse time;\nfn main() {\n    start := time::now();\n    thread::sleep_until(start.after_ms(60));\n    waited := start.elapsed_ms();\n    println((waited >= 60) && (waited < 1000));\n    // A deadline already past returns at once.\n    thread::sleep_until(start);\n    println(time::now().millis() != 0);\n}\n",
+    "modules": [
+      "lib/thread.grl",
+      "lib/time.grl"
+    ],
+    "stdout": "true\ntrue\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "thread-failure-holding-mutex-leaves-it-locked",
+    "source": "use thread;\nuse rc;\nuse host;\nstruct Shared { total: Mutex<u64>, entered: Atomic<u64> }\nfn bad<a>(v: (&a mut u64), n: u64) -> u64 {\n    *v += 1;\n    w := u64[1];\n    return w[n];\n}\nfn peek<a>(v: (&a mut u64), n: u64) -> u64 { return *v; }\nfn main() {\n    s := rc::arc_new(Shared { total: Mutex::new(0), entered: Atomic::new(0) });\n    one := s.clone();\n    t := thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 {\n        return one.get().total.lock_with(5, bad);\n    })!;\n    match thread::try_join(t) {\n        TaskFailure(e) => { println(\"thread failed: {}\", e.message); },\n        u64(v) => { println(v); }\n    }\n    // The failed thread's stack was discarded with the lock held: nothing unlocked it, so the next\n    // locker waits for good. This is what a failing task does too.\n    two := s.clone();\n    waiter := thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 {\n        got := two.get().total.lock_with(0, peek);\n        two.get().entered.store(1);\n        return got;\n    })!;\n    thread::detach(waiter);\n    host::sleep_ms(200);\n    println(\"second locker got in: {}\", s.get().entered.load());\n}\n",
+    "modules": [
+      "lib/thread.grl",
+      "lib/time.grl",
+      "lib/rc.grl"
+    ],
+    "stdout": "thread failed: index 5 out of bounds for length 1\nsecond locker got in: 0\n",
+    "targets": [
+      "x86_64"
+    ],
+    "note": "what a failing task does, pinned for a thread: the stack is discarded with the lock held and nothing unlocks it, so the next locker waits for good"
+  },
+  {
+    "name": "thread-in-libc-program-contained-failure",
+    "source": "use thread;\nextern \"C\" lib \"c\" fn getpid() -> i32;\nfn main() {\n    unsafe { println(getpid() != 0); }\n    t := thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 { v := u64[1]; return v[3]; })!;\n    match thread::try_join(t) {\n        TaskFailure(e) => { println(\"failed: {}\", e.message); },\n        u64(v) => { println(v); }\n    }\n}\n",
+    "modules": [
+      "lib/thread.grl",
+      "lib/time.grl"
+    ],
+    "stdout": "true\nfailed: index 3 out of bounds for length 1\n",
+    "stderr": [
+      "note: ",
+      "contained task failure(s)"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "note": "a glibc-created thread: the closure still runs on the runtime's mapped stack, the failure is contained and the thread ends through glibc's own exit; also the foreign call that opens main (the thread pointer is restored after it)"
   }
 ]
