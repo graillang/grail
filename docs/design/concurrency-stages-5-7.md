@@ -441,8 +441,11 @@ fn main() {
 }
 ```
 
-Without `where k > 0` it prints 14 and 3. Until it is fixed, `pool::split` checks its grain with an
-`assert` instead of the refinement its siblings carry.
+Without `where k > 0` it prints 14 and 3. The cause was the refined function's second, "proved"
+entry: a copy of the prologue as it was before optimisation, jumping into the optimised body, so the
+shared epilogue restored callee-saved registers the copy had never saved. That entry is gone (a
+proved call is a plain call, docs/design/refinements.md), the `refinement-owned-param-*` cases pin
+it, and `pool::split` states `where grain > 0` like its siblings.
 
 ## Follow-up (recorded, not scheduled): a vDSO clock
 
