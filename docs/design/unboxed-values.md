@@ -460,6 +460,43 @@ words"; the records chapter says the size is what decides, shows `.copy()` for l
 notes that adding a fifth word or an owned field to a record turns its copies into moves - a
 compile error at each use, never a silent change of meaning. Changelog entry in the same commit. Bench: all; expect the micro-benchmark build phase to drop.
 
+**Stage 3 as approved** (director's go, 2026-11-16; not yet built). Goals: the per-element box
+copy on push and on take disappears, allocation and instruction counts fall below the pre-1b
+numbers (check syn1000: 5,847,821 allocations, 9.91 G instructions; self-compile: 60,129,657 and
+259.2 G, all on the 7754dea sources), and the `aosu` loop reaches clang -O2 parity on LLVM.
+Invariant: a plain record never has a heap box of its own; in a frame it is N adjacent slots and
+its value is the address of slot 0. Non-plain records stay boxed; enums until stage 5.
+- *3a, frame storage.* A plain record's constructor writes N fresh adjacent frame slots, declared
+  by a fact (the `DynPair` fact generalised to "aggregate of N words at slot k"; optimize.grl's
+  `pair[n]` becomes a width, llvm.grl makes one `[N x i64]` alloca). `materialise` copies into fresh
+  frame slots instead of a box; `rt_pushw` stops freeing its source. Anything that keeps the value
+  past the statement copies words, never the address: inline fields and flat vectors already do;
+  the four boxed holders - closure capture, Mutex payload, task item, dyn cell - box on store.
+  Cases (director's condition 1): for each of the four, one where the frame the record came from
+  has returned before the holder is read, and one under the allocator-balance check.
+- *3b, arguments by address.* The caller passes its slots' address; a callee copies before storing.
+- *3c, results.* A plain result of at most two words returns in rax:rdx (the dyn-result rule,
+  generalised), a larger one through a hidden destination pointer. Interface line gains `record
+  result = registers`. At the C boundary (`extern "C"`, callbacks, `byval`) the platform's own rule
+  applies, never this one (condition 2); cases: a C function returning `{f32, f32}` and one
+  returning `{u64, f64}`.
+- *3d, the owner's copy rule.* `affine(ty)` split from `needs_drop(ty)`. A record copies implicitly
+  when it has no owned field, no `Drop`, at most 4 words after nesting, **and every reference field,
+  nested ones included, is a shared `&`** (director's correction: two copies of a `&mut` would be two
+  live exclusive borrows). Cases - accepted: a 3-word copy with both used; `p := v[i]` then push and
+  `v[i] =` while `p` is read; a 4-word record passed then used; a copied record holding `&T` with both
+  copies used. Refused: a 5-word implicit copy (message names `.copy()`); a record with an owned field
+  or `Drop`; an implicit copy of `{ a: &mut u64 }` then use of both; mutating the referent of a `&T`
+  field while a copy of the record is alive (both copies carry the loan, which stays live while
+  either does). Book (ownership and records chapters) and changelog in the same commit.
+- *3e, the loop.* Compare `aosu` with clang -O2 on the LLVM backend, read the optimised IR of the hot
+  loop, fix what is ours; if what remains is the descriptor hoist shared with gaps12-float P2/P3,
+  report it with the IR (condition 3).
+Verification per sub-step (the director's load rule): `bun tools/test-selfhost.mjs`, a filtered
+corpus (`unboxed-|record|struct|tuple|closure|mutex|task|dyn|ffi|c-array`, counts reported), test-ffi
+for 3b/3c, interface-test for 3c; callgrind counts after 3a and 3d. Each sub-step is one commit
+whose message says where it stands.
+
 **Stage 4 - records with drop and owned fields inline** (in records and vectors). Drop helpers
 split into in-place and boxed. Risk: partial moves out of inline fields, drop of a half-built
 vector on panic paths. Acceptance: allocator-balance corpus, `impl Drop` order cases.
