@@ -217,6 +217,35 @@ development build does.
 - `tools/overflow-parity-test.mjs` (in the gate and in CI) checks every corpus case that states a
   refinement or an effect under both modes and requires the same outcome and the same diagnostics.
 
+- **Offsets are summed exactly or not at all.** Every addition of a `k`, `ao` or `bo` - settling a
+  side, the predicate's constant on top of an argument's, the `else` negation, an edge of the
+  difference graph and every path Floyd-Warshall builds from them - goes through `pv_k_sum`. It
+  refuses an operand or a result whose magnitude passes `2^60`, and the caller then abandons the
+  atom, drops the edge or ignores the path: fewer proofs, never a wrong one. Within the limit a
+  64-bit sum is exact (`2^60 + 2^60 < 2^63`), so every distance the graph holds is the exact sum
+  of the offsets along its path, and `pv_inf` (`2^62`) cannot be reached by a sum. A source
+  constant has at most fifteen digits (below `2^50`), so a few of them never come near the limit;
+  the cases `refinement-wrap-large-offsets-*` push two maximal ones and the predicate's through a
+  path, and show the boundary exactly (`a + K <= b` proves `a + K <= b` and not `a + K < b`).
+- **What each branch of a condition gets.** A condition states atoms only when it is a conjunction
+  (`&&`) of comparisons the prover reads; then the then-branch gets every conjunct, and the
+  `else` gets the negation only when there is exactly one conjunct. Everything else states nothing
+  in either branch:
+  - `a || b`: nothing in the then-branch (either disjunct may be the true one); nothing in the
+    `else` either today, although `!a` and `!b` both hold there - a proof that could be added,
+    and when it is, `!a` may settle `b`'s sides, since both hold at every use in that branch.
+  - `!(a && b)`, `!(a || b)`: a `!` is not read, so nothing in either branch.
+  - `a & b`, `a | b` (non-short-circuit): not a conjunction the prover reads, nothing in either.
+  Cases: `refinement-disjunction-*`, `refinement-negated-*`, `refinement-bitwise-*`.
+  A side's no-wrap condition is settled only with atoms that hold wherever that side's value is
+  used: the facts in scope at the condition (after the loop's kill, for a guard) and the
+  conjuncts to its left, which a short-circuit `&&` has already found true.
+- **Each loop form is pinned.** `while`, `loop` with a guarded `break`, `while let`, an iterator
+  `for`, a counted `for` and a map `for` each have a case (`refinement-loop-form-*`, and
+  `refinement-wrap-loop-guard-call-*` for `while`) where a call in the guard or the body's first
+  statement would be proved from a fact the body ends; each is refused under `@strict` and fires
+  at run time on the second iteration in both modes.
+
 One observation not used: `(x + a) + b` wraps to the same value as `x + (a + b)` whatever the
 intermediate does, so the argument's own no-wrap condition is not needed when the total is what
 is settled. The rule above is the stricter one this design states.

@@ -18,6 +18,8 @@
     check in a checked build;
   - `@bounded` no longer reads a bound from a predicate whose bounded side has a constant
     (`where n + 1 < 100`): that bounds the wrapped sum, not `n`.
+  Every sum of offsets in the prover is exact or abandoned (limit 2^60), so a chain of large
+  constants cannot overflow into a wrong proof.
   Fixed on the way: a call in a `while` guard was proved from facts that the loop's body ends, so
   `@strict` accepted a guard that indexed out of bounds on its second evaluation.
 

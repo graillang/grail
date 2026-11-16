@@ -7361,6 +7361,27 @@ fn copy_atom_value<a>(x: (&a Atom)) -> Atom {
 fn pv_inf() -> i64 {
     return 4611686018427387904;
 }
+// Every sum of offsets in the prover goes through here. An offset is a signed 64-bit word, and a
+// sum that left its range would be a wrong number in a proof; so a sum whose operands or result pass
+// `2^60` in magnitude sets `bad`, and whoever asked abandons the atom or the path as "not proved".
+// Inside the limit the addition is exact (`2^60 + 2^60` fits). The distances of the difference graph
+// stay inside it too, since every one of them is such a sum, which keeps `pv_inf` out of reach.
+fn pv_k_limit() -> i64 {
+    return 1152921504606846976;
+}
+fn pv_k_sum<a>(x: i64, y: i64, bad: (&a mut u64)) -> i64 {
+    limit := pv_k_limit();
+    if (x > limit) || (y > limit) || (x < 0 - limit) || (y < 0 - limit) {
+        exchange(bad, 1);
+        return 0;
+    }
+    sum := x + y;
+    if (sum > limit) || (sum < 0 - limit) {
+        exchange(bad, 1);
+        return 0;
+    }
+    return sum;
+}
 fn pv_tok<a>(c: (&a mut C), i: u64) -> u8[] {
     if i >= c.toks.len() {
         return u8[];
@@ -7664,8 +7685,9 @@ fn pv_fold<a>(t: &a [u8], o: i64) -> u8[] {
     if !pv_digits(view(t)) {
         return u8[];
     }
-    v := pv_number(view(t)) + o;
-    if v < 0 {
+    mut bad = 0;
+    v := pv_k_sum(pv_number(view(t)), o, &mut bad);
+    if (bad != 0) || (v < 0) {
         return u8[];
     }
     mut out = u8[];
@@ -7822,7 +7844,12 @@ fn pv_settle<a, b>(c: (&a mut C), facts: (&a Atom[]), raw: (&b Atom), out: (&a m
         return false;
     }
     // `x + ka REL y + kb` is `x REL y + (kb - ka)`.
-    out.push(Atom { rel: raw.rel, a: x, b: y, k: raw.k + kb - ka, ao: 0, bo: 0 });
+    mut bad = 0;
+    k := pv_k_sum(pv_k_sum(raw.k, kb, &mut bad), 0 - ka, &mut bad);
+    if bad != 0 {
+        return false;
+    }
+    out.push(Atom { rel: raw.rel, a: x, b: y, k: k, ao: 0, bo: 0 });
     return true;
 }
 // A conjunction settled left to right into `facts`: every atom of it holds where it is stated, so an
@@ -7855,7 +7882,11 @@ fn pv_settle_all<a>(c: (&a mut C), raws: (&a Atom[]), facts: (&a mut Atom[]), ou
 // to wrap: the argument's, and then the combined constant's (nothing to show when it is zero).
 fn pv_oblige_side<a, b, d>(c: (&a mut C), facts: (&a Atom[]), x: &b [u8], o: i64, pa: i64, k: (&d mut i64)) -> u8[] {
     exchange(k, 0);
-    total := o + pa;
+    mut bad = 0;
+    total := pv_k_sum(o, pa, &mut bad);
+    if bad != 0 {
+        return u8[];
+    }
     if total == 0 {
         return copy_bytes(view(x));
     }
@@ -7982,7 +8013,11 @@ fn pv_negation<a>(atoms: (&a Atom[]), out: (&a mut Atom[])) -> unit {
     k := x.k;
     if rel == 0 {
         // `!(a < b + k)` is `b <= a - k - 1`.
-        pv_add(&mut out, 1, view(b), view(a), 0 - k - 1);
+        mut bad = 0;
+        nk := pv_k_sum(0 - k, i64(0) - i64(1), &mut bad);
+        if bad == 0 {
+            pv_add(&mut out, 1, view(b), view(a), nk);
+        }
         return ();
     }
     if rel == 1 {
@@ -8065,6 +8100,10 @@ fn pv_implies<a>(facts: (&a Atom[]), rel: u64, a: &a [u8], b: &a [u8], k: i64) -
         }
         return false;
     }
+    // An offset outside the range sums are exact in proves nothing (pv_k_sum).
+    if (k > pv_k_limit()) || (k < 0 - pv_k_limit()) {
+        return false;
+    }
     // The difference graph: `d[j * n + i]` is the smallest `i - j` the facts allow, closed by
     // Floyd-Warshall over the terms the facts and the obligation mention. A literal is an exact
     // vertex, so `16` and `20` order each other.
@@ -8127,9 +8166,16 @@ fn pv_implies<a>(facts: (&a Atom[]), rel: u64, a: &a [u8], b: &a [u8], k: i64) -
             return false;
         }
         mut w = facts[i].k;
+        mut bad = 0;
         if r == 0 {
             // `a < b + k` is `a - b <= k - 1`.
-            w = w - 1;
+            w = pv_k_sum(w, i64(0) - i64(1), &mut bad);
+        } else {
+            w = pv_k_sum(w, 0, &mut bad);
+        }
+        if bad != 0 {
+            // A fact whose offset cannot be summed exactly is left out: fewer edges, fewer proofs.
+            continue;
         }
         if w < d[yi * n + xi] {
             d[yi * n + xi] = w;
@@ -8148,8 +8194,11 @@ fn pv_implies<a>(facts: (&a Atom[]), rel: u64, a: &a [u8], b: &a [u8], k: i64) -
                 for w0 in n {
                     B := d[mid * n + w0];
                     if B != pv_inf() {
-                        if A + B < d[u0 * n + w0] {
-                            d[u0 * n + w0] = A + B;
+                        // A path whose length cannot be summed exactly is not a path.
+                        mut bad = 0;
+                        through := pv_k_sum(A, B, &mut bad);
+                        if (bad == 0) && (through < d[u0 * n + w0]) {
+                            d[u0 * n + w0] = through;
                         }
                     }
                 }
@@ -8807,8 +8856,9 @@ fn pv_proved<a, b>(c: (&a mut C), pred: Pred, names: (&a u8[][]), terms: (&a u8[
             mut kb: i64 = 0;
             x = pv_oblige_side(&mut c, &facts, view(x), 0, atoms[j].ao, &mut ka);
             y = pv_oblige_side(&mut c, &facts, view(y), 0, atoms[j].bo, &mut kb);
-            ok = (x.len() != 0) & (y.len() != 0);
-            k = k + kb - ka;
+            mut bad = 0;
+            k = pv_k_sum(pv_k_sum(k, kb, &mut bad), 0 - ka, &mut bad);
+            ok = (x.len() != 0) & (y.len() != 0) & (bad == 0);
         }
         if ok {
             ok = pv_holds(&facts, rel, view(x), view(y), k);
@@ -8982,8 +9032,9 @@ fn pv_call_proved<a>(c: (&a mut C), f: u64, count: u64, spans: (&a u64[]), at: u
                     mut kb: i64 = 0;
                     x = pv_oblige_side(&mut c, &facts, view(x), oa, atoms[j].ao, &mut ka);
                     y = pv_oblige_side(&mut c, &facts, view(y), ob, atoms[j].bo, &mut kb);
-                    ok = (x.len() != 0) & (y.len() != 0);
-                    k = k + kb - ka;
+                    mut bad = 0;
+                    k = pv_k_sum(pv_k_sum(k, kb, &mut bad), 0 - ka, &mut bad);
+                    ok = (x.len() != 0) & (y.len() != 0) & (bad == 0);
                 }
             }
             if ok {
