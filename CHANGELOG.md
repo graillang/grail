@@ -72,10 +72,24 @@
   pointer, which keeps their provenance. `x[i] = x[i] * a + y[i]` over one million elements goes
   from 7x to 1.2x (`f32`) and from 4x to 1.1x (`f64`) of vectorised `clang -O2`. Under
   `--verify-facts` every such access re-reads the header and aborts if it moved.
+
+- **A failure allocates nothing, on every route.** A failed check inside a parallel job used to build
+  its failure record and texts on the heap where it failed, so every `@no_alloc` function that
+  could index, cast or unwrap was refused once the job-failure path existed. The failing stack now
+  writes numbers only (kind, operands, the statement's site) into a record that is not heap
+  memory. The joiner builds the message and the site text, on a healthy stack. A wake on that path
+  no longer reaches scheduler creation.
+- Fixed: `bun tools/native.mjs build` rebuilt the compiler on every call. It assembled the bootstrap
+  seed each time and keyed the compiler by the bootstrap's mtime, so the key never matched. The
+  assembled seed is now kept under its digest and the key names the bootstrap's content; a second
+  build with nothing changed takes milliseconds (`tools/test-cli.mjs` checks it).
+
 - `bun tools/bench-rivals.mjs`: every `bench/` program against its C, Rust, Go and Zig twins
   (`bench/rivals/`), release and debug builds of each, CPU time from `getrusage`, one table with
   Grail's two builds as ratios to the best competitor of their bar. The numbers and the named
   reason for every miss are in `docs/design/runtime-parity.md`, "Against other languages".
+
+
 
 - **A foreign call costs what it costs in C (x86-64).** In a program that loaded libc, every
   `extern "C"` call switched the thread pointer to libc's TCB and back, and on x86-64 a write to the
@@ -277,6 +291,11 @@
   that is rounded to `f32` at once (`addsd; cvtsd2ss; cvtss2sd`) is the single-precision one
   (`addss`): exact for + - * / and sqrt, since 53 >= 2*24 + 2. Loads that feed anything else are
   widened in place of the copy. `f32-held-as-binary32-in-registers` pins the results.
+- The float arithmetic is SSE text on AArch64 and RISC-V too, translated by machine.grl (xmm0/1 to
+  d0/d1 and ft0/ft1, xmm8..xmm14 to v17..v23 and ft2..ft8, all caller-saved), so floats are kept in
+  registers there as on x86-64; compares and integer conversions stay `fop`. And a call to a
+  runtime exit or a drop helper reads only the argument registers it takes, so a value left in
+  %rcx before one is no longer kept alive for it.
 
 - **Records of plain data are stored inline.** A struct or tuple with no `Drop` whose fields are
   numbers, bools, chars, references or other such records is now stored in place where it is a
