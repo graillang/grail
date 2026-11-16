@@ -210,6 +210,26 @@ fn opname<a>(o: (&a mut ir::Body), op: u64) {
         app(&mut o.out, view("cvtsi2sdq"));
         return ();
     }
+    if op == 72 {
+        app(&mut o.out, view("addss"));
+        return ();
+    }
+    if op == 73 {
+        app(&mut o.out, view("subss"));
+        return ();
+    }
+    if op == 74 {
+        app(&mut o.out, view("mulss"));
+        return ();
+    }
+    if op == 75 {
+        app(&mut o.out, view("divss"));
+        return ();
+    }
+    if op == 76 {
+        app(&mut o.out, view("sqrtss"));
+        return ();
+    }
     // An operation this table does not know is a bug in the caller.
     assert(false);
 }
@@ -1401,7 +1421,10 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8]) {
     forward(&mut o, &mut f, view(s), first, last);
     dead_stores(&mut o, &mut f, first, last);
     dead_defs(&mut o, view(s), first, last);
-    // Promotion: weights grow 4x per loop nesting level (backward jumps).
+    // Promotion: weights grow 16x per loop nesting level (backward jumps), so a slot touched once
+    // an iteration outweighs any handful of straight-line accesses - at 4x, a function's drop flags
+    // (set, tested and cleared outside the loop) took the registers and the loop bound stayed in the
+    // frame.
     mut chosen = u64[];
     mut slots = u64[];
     mut xchosen = u64[];
@@ -1435,7 +1458,7 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8]) {
                     lv = 4;
                 }
                 while 0 < lv {
-                    w = w * 4;
+                    w = w * 16;
                     lv -= 1;
                 }
                 for j in 2 {
@@ -1478,6 +1501,14 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8]) {
                 }
             }
         }
+        // Which promoted slot each rewritten line reads (lsrc) and writes (ldst), +1: the f32
+        // narrowing needs the slot behind a register that several slots share.
+        mut lsrc = u64[];
+        mut ldst = u64[];
+        for i in last {
+            lsrc.push(0);
+            ldst.push(0);
+        }
         if (chosen.len() != 0) || (xchosen.len() != 0) {
             for i in last {
                 if o.del[i] == 0 {
@@ -1497,6 +1528,11 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8]) {
                             for c in xslots.len() {
                                 if xslots[c] * 8 == v {
                                     set_operand(&mut o, i, j, 7, xchosen[c]);
+                                    if j == 0 {
+                                        ir::put(&mut lsrc, i, xslots[c] + 1);
+                                    } else {
+                                        ir::put(&mut ldst, i, xslots[c] + 1);
+                                    }
                                 }
                             }
                         }
@@ -1511,8 +1547,9 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8]) {
             forward(&mut o, &mut g, view(s), first, last);
             dead_defs(&mut o, view(s), first, last);
             if xchosen.len() != 0 {
-                xmm_moves(&mut o, view(s), last);
+                xmm_moves(&mut o, view(s), last, &mut lsrc);
                 dead_defs(&mut o, view(s), first, last);
+                xmm_narrow(&mut o, view(s), &lsrc, &ldst, &xslots, last);
             }
         }
     }
@@ -1851,7 +1888,7 @@ fn xmm_choose<a, b, c>(o: (&a ir::Body), s: &b [u8], f: (&c mut F), ns: u64, pro
 // only a way between two SSE ones. The first move stays for dead_defs to remove when R is dead.
 // X promoted (kind 7) may be some lines back, provided nothing between writes R or X; a parsed SSE
 // register (kind 6) is tracked by nobody, so its move must be the line just before.
-fn xmm_moves<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
+fn xmm_moves<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64, lsrc: (&mut u64[])) {
     for j in last {
         if (o.del[j] != 0) || (o.op[j] != 1) || (o.k0[j] != 1) {
             continue;
@@ -1895,10 +1932,258 @@ fn xmm_moves<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
                 }
             }
             if clean {
+                // j now reads what `found` read.
+                was := lsrc[found];
+                ir::put(&mut lsrc, j, was);
                 ir::put(&mut o.op, j, 68);
                 set_operand(&mut o, j, 0, o.k0[found], o.v0[found]);
                 set_range(&mut o, j, 0, o.s0[found], o.e0[found]);
             }
+        }
+    }
+}
+// Operand j of line i is the parsed SSE register written s[a..e].
+fn xmm_is<a, b>(o: (&a ir::Body), s: &b [u8], i: u64, j: u64, a: u64, e: u64) -> bool {
+    if j == 0 {
+        return (o.k0[i] == 6) && ir::same_range(view(s), o.s0[i], o.e0[i], view(s[a: e]));
+    }
+    return (o.k1[i] == 6) && ir::same_range(view(s), o.s1[i], o.e1[i], view(s[a: e]));
+}
+// Whether the scratch SSE register written s[a..e] is dead after line i: the next mention in the
+// block overwrites it whole, followed through at most `depth` jumps. A label, an unfollowed jump, a
+// call that returns or an unknown instruction first counts as a use.
+fn xmm_dead_after<a, b>(o: (&a ir::Body), s: &b [u8], i: u64, a: u64, e: u64, depth: u64) -> bool {
+    last := o.op.len();
+    if depth == 0 {
+        return false;
+    }
+    mut j = i;
+    for step in 12 {
+        j = next_live(&o, j, last);
+        if j >= last {
+            return false;
+        }
+        op := o.op[j];
+        // Past a runtime exit nothing is read; a bounds check's failure arm is one.
+        if (op == 15) && never_returns(&o, view(s), j) {
+            return true;
+        }
+        if (op == 16 || ((16 < op) && (op < 25))) && (o.k0[j] == 4) {
+            // A check's conditional jump around its exit: the register must be dead at the target too.
+            t := jump_target(&o, j);
+            if (t >= last) || !xmm_dead_after(&o, view(s), t, a, e, depth - 1) {
+                return false;
+            }
+            if op == 16 {
+                return true;
+            }
+            continue;
+        }
+        if (op == 100) || (op == 0) || (op == 15) || (op == 29) || (op == 30) || ir::is_jump(op) {
+            return false;
+        }
+        if xmm_is(&o, view(s), j, 0, a, e) {
+            return false;
+        }
+        if xmm_is(&o, view(s), j, 1, a, e) {
+            // Whole-register writes; the arithmetic and the compare read their destination too.
+            return (op == 1) || (op == 68) || (op == 70) || (op == 71) || (op == 65) || (op == 66);
+        }
+    }
+    return false;
+}
+// f32 values in binary32 (P2). A promoted slot is narrow when every store into it is a value just
+// made by `cvtss2sd` (so binary32-exact) or zero, and every load is a `movaps` into a scratch
+// register. It then holds the binary32 value: a store copies it before the widening, and a load
+// feeds either an operation narrowed with it - `OPsd; cvtsd2ss; cvtss2sd` over two narrow loads is
+// `OPss; cvtss2sd`, exact for + - * / and sqrt since 53 >= 2*24 + 2 (the argument llvm.grl's lifter
+// makes) - or is widened by a `cvtss2sd` in the `movaps`'s place.
+// The position in `xslots` of the slot recorded as n + 1 (xslots.len() when absent).
+fn slot_index(xslots: (&u64[]), tag: u64) -> u64 {
+    mut c = 0;
+    while (c < xslots.len()) && (xslots[c] + 1 != tag) {
+        c += 1;
+    }
+    return c;
+}
+fn xmm_narrow<a, b>(o: (&a mut ir::Body), s: &b [u8], lsrc: (&u64[]), ldst: (&u64[]), xslots: (&u64[]), last: u64) {
+    mut ok = u64[];
+    for c in xslots.len() {
+        ok.push(1);
+    }
+    for i in last {
+        if o.del[i] != 0 {
+            continue;
+        }
+        op := o.op[i];
+        if ldst[i] != 0 {
+            c := slot_index(xslots, ldst[i]);
+            mut p = i;
+            while 0 < p {
+                p -= 1;
+                if (o.del[p] == 0) && (o.op[p] != 101) {
+                    break;
+                }
+            }
+            mut good = false;
+            if (op == 68) && (o.k0[i] == 6) && (p < i) && (o.op[p] == 65) && (o.k0[p] == 6)
+                && xmm_is(&o, view(s), p, 1, o.s0[i], o.e0[i]) && xmm_is(&o, view(s), p, 0, o.s0[i], o.e0[i]) {
+                good = true;
+            }
+            if (op == 1) && (o.k0[i] == 1) && (p < i) && (o.k1[p] == 1) && (o.v1[p] == o.v0[i]) {
+                if ((o.op[p] == 1) || (o.op[p] == 2)) && (o.k0[p] == 3) && (imm_value(&o, view(s), p) == 0) {
+                    good = true;
+                }
+                if (o.op[p] == 10) && (o.k0[p] == 1) && (o.v0[p] == o.v0[i]) {
+                    good = true;
+                }
+            }
+            if !good && (c < ok.len()) {
+                ir::put(&mut ok, c, 0);
+            }
+        }
+        if lsrc[i] != 0 {
+            c := slot_index(xslots, lsrc[i]);
+            if !((op == 68) && (o.k0[i] == 7) && (o.k1[i] == 6)) && (c < ok.len()) {
+                ir::put(&mut ok, c, 0);
+            }
+        }
+    }
+    mut any = false;
+    for c in xslots.len() {
+        if ok[c] != 0 {
+            any = true;
+        }
+    }
+    if !any {
+        return ();
+    }
+    // Narrow loads, each with the line that consumes its scratch register (last: none usable).
+    mut loads = u64[];
+    mut uses = u64[];
+    for i in last {
+        if (o.del[i] != 0) || (lsrc[i] == 0) || (o.op[i] != 68) || (o.k0[i] != 7) {
+            continue;
+        }
+        c := slot_index(xslots, lsrc[i]);
+        if (c == xslots.len()) || (ok[c] == 0) {
+            continue;
+        }
+        a := o.s1[i];
+        e := o.e1[i];
+        mut user = last;
+        mut j = i;
+        for step in 8 {
+            j = next_live(&o, j, last);
+            if j >= last {
+                break;
+            }
+            op := o.op[j];
+            if (op == 100) || (op == 0) || (op == 15) || ir::is_jump(op) {
+                break;
+            }
+            if xmm_is(&o, view(s), j, 0, a, e) || xmm_is(&o, view(s), j, 1, a, e) {
+                user = j;
+                break;
+            }
+        }
+        loads.push(i);
+        uses.push(user);
+    }
+    // Each consumer: an f32 rounding of the loaded value is already done; an operation is narrowed
+    // when every operand it reads comes from a narrow load and its result is rounded to f32 at once.
+    mut narrowed = u64[];
+    for x in loads.len() {
+        narrowed.push(0);
+    }
+    for x in loads.len() {
+        u := uses[x];
+        if (u == last) || (narrowed[x] != 0) {
+            continue;
+        }
+        op := o.op[u];
+        if (op == 66) && xmm_is(&o, view(s), u, 0, o.s1[loads[x]], o.e1[loads[x]])
+            && xmm_is(&o, view(s), u, 1, o.s1[loads[x]], o.e1[loads[x]]) {
+            kill(&mut o, u);
+            ir::put(&mut narrowed, x, 1);
+            continue;
+        }
+        if (59 < op) && (op < 65) && (o.k0[u] == 6) && (o.k1[u] == 6) {
+            // The operands: both from narrow loads consumed here.
+            mut both = true;
+            mut mine = u64[];
+            for j in 2 {
+                mut a = o.s0[u];
+                mut e = o.e0[u];
+                if j != 0 {
+                    a = o.s1[u];
+                    e = o.e1[u];
+                }
+                mut found = loads.len();
+                for y in loads.len() {
+                    if (uses[y] == u) && ir::same_range(view(s), o.s1[loads[y]], o.e1[loads[y]], view(s[a: e])) {
+                        found = y;
+                    }
+                }
+                if found == loads.len() {
+                    both = false;
+                } else {
+                    mine.push(found);
+                }
+            }
+            r1 := next_live(&o, u, last);
+            mut r2 = last;
+            if r1 < last {
+                r2 = next_live(&o, r1, last);
+            }
+            if both && (r2 < last) && (o.op[r1] == 66) && (o.op[r2] == 65)
+                && xmm_is(&o, view(s), r1, 0, o.s1[u], o.e1[u]) && xmm_is(&o, view(s), r1, 1, o.s1[u], o.e1[u])
+                && xmm_is(&o, view(s), r2, 0, o.s1[u], o.e1[u]) && xmm_is(&o, view(s), r2, 1, o.s1[u], o.e1[u]) {
+                ir::put(&mut o.op, u, op + 12);
+                ir::put(&mut o.chg, u, 1);
+                kill(&mut o, r1);
+                for m in mine.len() {
+                    ir::put(&mut narrowed, mine[m], 1);
+                }
+            }
+        }
+    }
+    // Every other narrow load widens.
+    for x in loads.len() {
+        if narrowed[x] == 0 {
+            ir::put(&mut o.op, loads[x], 65);
+            ir::put(&mut o.chg, loads[x], 1);
+        }
+    }
+    // Narrow stores copy the binary32 value: `cvtss2sd %xmmN,%xmmN; movaps %xmmN,%xmmK` becomes
+    // `movaps %xmmN,%xmmK; cvtss2sd %xmmN,%xmmN`, and the widening goes when nothing reads it.
+    for i in last {
+        if (o.del[i] != 0) || (ldst[i] == 0) || (o.op[i] != 68) || (o.k1[i] != 7) || (o.k0[i] != 6) {
+            continue;
+        }
+        c := slot_index(xslots, ldst[i]);
+        if (c == xslots.len()) || (ok[c] == 0) {
+            continue;
+        }
+        mut p = i;
+        while 0 < p {
+            p -= 1;
+            if (o.del[p] == 0) && (o.op[p] != 101) {
+                break;
+            }
+        }
+        k := o.v1[i];
+        a := o.s0[i];
+        e := o.e0[i];
+        ir::put(&mut o.op, p, 68);
+        set_operand(&mut o, p, 1, 7, k);
+        ir::put(&mut o.op, i, 65);
+        set_operand(&mut o, i, 0, 6, 0);
+        set_range(&mut o, i, 0, a, e);
+        set_operand(&mut o, i, 1, 6, 0);
+        set_range(&mut o, i, 1, a, e);
+        if xmm_dead_after(&o, view(s), i, a, e, 3) {
+            kill(&mut o, i);
         }
     }
 }

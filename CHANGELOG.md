@@ -7,7 +7,13 @@
   `ucomisd`, ...) touch no general register; before, each was an unknown instruction across which
   nothing could be removed. And a compare-and-branch now fuses even when the loop's exit runs
   through several drop-flag tests. On x86-64, CPU time: nbody 1.42 s -> 1.16 s, xform_f32 1.08 ->
-  0.80, dot_f64 0.72 -> 0.62. The compiler compiles itself about 3.6% slower.
+  0.80, dot_f64 0.72 -> 0.62. A loop's slots now outweigh straight-line ones 16 to 1 (was 4), so a
+  loop bound gets a register before a drop flag does.
+- **Native backend: `f32` arithmetic in single precision.** A promoted `f32` local whose every
+  value comes from a widening (or is zero) is held as binary32, and an operation on two such values
+  that is rounded to `f32` at once (`addsd; cvtsd2ss; cvtss2sd`) is the single-precision one
+  (`addss`): exact for + - * / and sqrt, since 53 >= 2*24 + 2. Loads that feed anything else are
+  widened in place of the copy. `f32-held-as-binary32-in-registers` pins the results.
 
 - **Native backend: float operations are not calls.** `+ - * /`, comparisons, negation, `abs`,
   `sqrt` and conversions from integers of up to 32 bits (and signed 64-bit to `f64`) are emitted in

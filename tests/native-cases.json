@@ -3101,6 +3101,12 @@
     "signal": "SIGABRT"
   },
   {
+    "name": "f32-held-as-binary32-in-registers",
+    "source": "// f32 values held as binary32 in SSE registers (optimize.grl `xmm_narrow`): a copy from one f32\n// local to another, an accumulator that starts at zero, a mix of f32 and f64 in one expression, and\n// a result read as f64 must all print what they print with every value widened.\nfn scale_add(x: (&mut [f32]), y: (&[f32]), a: f32) -> unit {\n    n := x.len();\n    mut i = 0;\n    while i < n {\n        x[i] = x[i] * a + y[i];\n        i += 1;\n    }\n}\nfn dot(x: (&[f32]), y: (&[f32])) -> f32 {\n    mut s: f32 = 0.0;\n    for i in x.len() {\n        s = s + x[i] * y[i];\n    }\n    return s;\n}\nfn main() {\n    mut x = f32[];\n    mut y = f32[];\n    mut xv: f32 = 0.0;\n    mut yv: f32 = 0.0;\n    for i in 1000 {\n        x.push(xv);\n        y.push(yv);\n        prev := xv;\n        xv = prev + 0.5;\n        if 3.0 < xv { xv = 0.0; }\n        yv = yv + 0.25;\n        if 1.0 < yv { yv = 0.0; }\n    }\n    for pass in 20 {\n        scale_add(&mut x[0: 1000], &y[0: 1000], 0.999);\n    }\n    mut sum: f64 = 0.0;\n    mut wide: f64 = 0.0;\n    for i in 1000 {\n        sum = sum + f64(x[i]);\n        t := x[i] * 1.5;\n        wide = wide + f64(t) / 3.0;\n    }\n    println(sum);\n    println(wide);\n    println(dot(&x[0: 1000], &y[0: 1000]));\n    a: f32 := 1.1;\n    b: f32 := a;\n    c: f32 := b * b - a / 3.0;\n    println(c);\n    println(c.sqrt());\n}\n",
+    "stdout": "11374.381978392601\n5687.191032667957\n8164.1943\n0.84333336\n0.91833186\n",
+    "note": "P2 of the xmm work: f32 locals narrowed to binary32 in SSE registers by the optimiser; a copy between two f32 locals once carried the source slot's tag and lost the destination's, and xform printed 181.35 for 91903667.2"
+  },
+  {
     "name": "raw-module-sized-integer-arithmetic",
     "targets": ["x86_64"],
     "source": "// A sized integer keeps its stated signedness inside an `unsafe module`, whose other values are\n// untyped words: 0 - 1 is -1, the comparison against 0 is signed, i8 120 + 7 stops at 127.\n// The `extern \"C\"` declaration carries a `cfn` parameter, the shape the report named.\nunsafe module runtime;\nextern \"C\" lib \"c\" fn qsort(base: u64, n: u64, size: u64, cmp: cfn(u64, u64) -> i32) -> unit;\nfn main() {\n    mut x: i32 = 0;\n    x = x - 1;\n    println(x);\n    println(x < 0);\n    mut small: i8 = 120;\n    small = small + 7;\n    println(small);\n    mut wide: i64 = 0;\n    wide = wide - 1;\n    println(wide < 0);\n}\n",
