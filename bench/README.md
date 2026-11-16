@@ -8,3 +8,5 @@
   run it directly. Both are explained, with numbers, in `docs/design/allocator.md`.
 - `mutex.grl`: one `Mutex` taken 20000 times per contender with a short hold, at 1, 2, 8 and 24
   contenders; wall and CPU ms. Build and run it directly; numbers in `docs/design/parking.md`.
+- `shard_read.grl`: a read-mostly map behind one `Mutex` and behind one `sync::RwLock`, 24 tasks;
+  the measurement behind `concurrent_map`'s shard lock (`docs/design/parking.md`).

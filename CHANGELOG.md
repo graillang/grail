@@ -1,5 +1,17 @@
 ## Unreleased
 
+- **`lib/sync.grl`: `RwLock`, `Condition`, `Once`, `Latch`, `Barrier`, `Semaphore`.** All park
+  instead of spinning, and every wait has an `_until(deadline)` form answering
+  `time::WaitError::{Cancelled, TimedOut}`. A task waiting in a long wait - a condition, a latch, a
+  barrier, a semaphore, another caller's `Once` initialiser, `time::sleep_ms` - now wakes when its
+  scope is cancelled and ends as a `Cancelled` failure (`try_join` reports kind 16; `join`
+  re-raises; the cancelled scope itself does not); `time::try_sleep_ms` answers instead. Lock
+  waits are not cancellable; `sync::lock_until`, `read_until` and `write_until` are. A writer that
+  fails poisons an `RwLock`, permits come back from a failed holder, and a failed `Once`
+  initialiser lets the next caller try. `docs/design/parking.md`.
+- `thread::spawn` states what it needs: `f: FnMut<Send, Owned>((&Ctx)) -> R` with `R: Send + Owned`,
+  so a closure that captures a borrow or a thread-affine value is refused at the call.
+
 - **A `Mutex` wait costs nothing, and a failed holder poisons it instead of hanging everyone.**
   A task or thread waiting for a lock now parks - eight tasks waiting through a 300 ms hold used a
   processor each, and now use under 100 ms of CPU together. When a task or a spawned thread fails

@@ -1,8 +1,8 @@
 # Parking: one way to wait
 
-Stage 3 of [concurrency-model.md](concurrency-model.md), push A: the parking operation, `Mutex<T>`
-on it, poison, and `thread::join` on it. Push B (`lib/sync.grl`'s `RwLock`, `Condition`, `Once`,
-`Latch`, `Barrier`, `Semaphore`; cancellation and deadlines for every wait) is not done yet.
+Stage 3 of [concurrency-model.md](concurrency-model.md): the parking operation; `Mutex<T>` on it with
+poison; `thread::join` on it; and `lib/sync.grl` - `RwLock`, `Condition`, `Once`, `Latch`,
+`Barrier`, `Semaphore` - with a deadline and cancellation for every wait.
 
 ## The waiter block and the queue
 
@@ -83,3 +83,57 @@ asks it (an execution that holds a lock parks instead of helping).
 A joiner parks on the thread record's queue (word 136); the thread publishes "finished" and wakes
 every joiner under that queue's lock. No offload helper thread per join any more
 (`thread-join-parks-without-helper-threads`).
+
+## Deadlines and cancellation (`rt_park_until`)
+
+Every wait has a deadline form (`_until(time::Instant)`) and a cancellable form. `rt_park_until`
+takes a deadline on the monotonic clock and a "cancellable" flag. A task's deadline is the
+scheduler's timer (the one `sleep_ms` parks on); a thread's is the kernel wait's timeout
+(`rt_os_wait_ms`: a futex with a timeout on Linux, `WaitOnAddress` with one on Windows). Where no
+timer can be armed for a task (Windows) it yields and looks at the clock. Cancellation reuses the
+existing mechanism: the waiting task sets its "in a cancellable wait" word, which `rt_cancel` wakes;
+on any wake the loop looks at the scope's token. Giving up takes the block off the queue under the
+queue lock - if a waker got to it first the grant stands and the wait succeeds.
+
+What the waiter sees:
+
+- `_until` and `try_` forms answer `R |? time::WaitError` (`Cancelled`, `TimedOut`).
+- A plain LONG wait (`Condition.wait_with`, `Latch.wait`, `Barrier.wait`, `Semaphore.acquire_with`,
+  `Once.get_or_init` while another initialises, `time::sleep_ms`) that is cancelled ends its task
+  with a failure of kind 16, "the wait was cancelled". `try_join` reports it as a `TaskFailure` with
+  that kind; `join` re-raises it; a scope that was itself cancelled does NOT re-raise an abandoned
+  child that ended Cancelled - that is what was asked for. (Before this change a cancelled task had
+  no outcome of its own: only descriptor waits noticed, and answered -125.) `time::try_sleep_ms`
+  answers instead of failing.
+- A plain LOCK wait (`lock_with`, `read_with`, `write_with`) is not cancellable: it is bounded by its
+  holder's progress, and cancelling a task that holds lock A while it waits for B would leave A
+  poisoned. `sync::lock_until`, `read_until`, `write_until` are the cancellable forms.
+- `join` (of a task or a thread) is not cancellable: it is how a scope winds down.
+- A thread has no scope and is never cancelled; it has deadlines.
+
+## The `sync` types
+
+| type | blocks on | failure while holding | Send / Share |
+|---|---|---|---|
+| `Mutex<T>` (builtin) | lock | released, poisoned | as before |
+| `RwLock<T>` | read / write, writer-preferring | writer: released, poisoned; reader: released | `unsafe struct ...: transferable, shareable` - each type argument must classify too, so Share needs `T: Share` |
+| `Condition` | `wait_with(&m, ctx, ready, then)` | (holds the mutex only inside `then`) | transferable, shareable |
+| `Latch`, `Barrier` | until zero / until a round completes (one leader) | - | transferable, shareable |
+| `Semaphore` | FIFO permits | permits returned | transferable, shareable |
+| `Permit` (from `try_acquire`) | - | returned | neither: it holds a private unclassified handle, so the permits stay with the execution whose failure returns them |
+| `Once<T>` | until the first initialiser finishes | back to empty; the next caller initialises | transferable, shareable |
+
+Callbacks borrow for the call only (plain `Fn` / `FnMut` parameters) and results are `R: Owned`, so
+the guarded payload cannot leave a callback. Closure-bounds note 2.10: none of these types stores a
+closure, behind a raw pointer or otherwise - each callback is called inside the method that
+received it - so neither rule is needed; `Thread<R>` is `Owned` by construction.
+
+Held-list entries other than a mutex are 48-byte nodes (kind 2 permits, 3 read, 4 write, 5 a Once
+being initialised); `rt_held_settle` handles each kind, frees the nodes, and still never allocates
+or parks.
+
+`concurrent_map`'s shards stay `Mutex`es. Measured (`bench/shard_read.grl`, 24 tasks, one
+4096-entry map, one write in 64): an RwLock shard took 1684-1796 ms where a Mutex shard took
+2775-2932 ms. Faster - but an `RwLock<[K: V]>` is shareable only when `K` and `V` are, and
+`concurrent_map::Map` asks only `Send` of them today, so moving its read paths is an API change
+(`K, V: Share`), left for a decision.

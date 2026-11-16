@@ -11357,7 +11357,7 @@
   },
   {
     "name": "mutex-poisoned-by-failed-holder-and-recovered",
-    "source": "use sync;\nuse thread;\nuse rc;\nstruct Shared { m: Mutex<u64> }\nfn bad<a>(v: (&a mut u64), n: u64) -> u64 {\n    *v += 1;\n    w := u64[1];\n    return w[n];\n}\nfn peek<a>(v: (&a mut u64), n: u64) -> u64 { return *v; }\nfn fix<a>(v: (&a mut u64), n: u64) -> u64 { *v = n; return *v; }\nfn fails(n: u64, s: (&Shared)) -> u64 {\n    return s.m.lock_with(5, bad);\n}\nfn reads(n: u64, s: (&Shared)) -> u64 {\n    return s.m.lock_with(0, peek);\n}\nfn tries(n: u64, s: (&Shared)) -> u64 {\n    return sync::try_lock_with(&s.m, 0, peek)!;\n}\nfn body<sc>(scope: (&sc Scope<(&Shared)>), s: (&Shared)) -> u64 {\n    t := spawn(scope, 0, fails);\n    match try_join(t) {\n        TaskFailure(e) => { println(\"task failed: {}\", e.message); },\n        u64(v) => { println(v); }\n    }\n    println(sync::is_poisoned(&s.m));\n    // A later locker fails, naming the first failure.\n    u := spawn(scope, 0, reads);\n    match try_join(u) {\n        TaskFailure(e) => {\n            m := e.message;\n            // \"mutex poisoned: its holder failed at FILE:8:5\", whatever the path to FILE is.\n            println(\"{} {}\", e.kind, m.len() > 40);\n            println(m[m.len() - 3] == 56);\n        },\n        u64(v) => { println(v); }\n    }\n    // try_lock_with fails the same way: \"not available\" would hide it.\n    w := spawn(scope, 0, tries);\n    match try_join(w) {\n        TaskFailure(e) => { println(\"try: {}\", e.kind); },\n        u64(v) => { println(v); }\n    }\n    println(sync::recover_with(&s.m, 7, fix));\n    println(sync::is_poisoned(&s.m));\n    return s.m.lock_with(0, peek);\n}\nfn main() {\n    s := Shared { m: Mutex::new(0) };\n    println(task_scope(&s, body));\n    // A thread that fails holding the lock poisons it the same way.\n    a := rc::arc_new(Shared { m: Mutex::new(0) });\n    one := a.clone();\n    t := thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 { return one.get().m.lock_with(9, bad); })!;\n    match thread::try_join(t) {\n        TaskFailure(e) => { println(\"thread failed: {}\", e.message); },\n        u64(v) => { println(v); }\n    }\n    shared := a.get();\n    println(sync::is_poisoned(&shared.m));\n}\n",
+    "source": "use sync;\nuse thread;\nuse rc;\nstruct Shared { m: Mutex<u64> }\nfn bad<a>(v: (&a mut u64), n: u64) -> u64 {\n    *v += 1;\n    w := u64[1];\n    return w[n];\n}\nfn peek<a>(v: (&a mut u64), n: u64) -> u64 { return *v; }\nfn fix<a>(v: (&a mut u64), n: u64) -> u64 { *v = n; return *v; }\nfn fails(n: u64, s: (&Shared)) -> u64 {\n    return s.m.lock_with(5, bad);\n}\nfn reads(n: u64, s: (&Shared)) -> u64 {\n    return s.m.lock_with(0, peek);\n}\nfn tries(n: u64, s: (&Shared)) -> u64 {\n    return sync::try_lock_with(&s.m, 0, |v: (&mut u64), k: u64| -> u64 *v)!;\n}\nfn body<sc>(scope: (&sc Scope<(&Shared)>), s: (&Shared)) -> u64 {\n    t := spawn(scope, 0, fails);\n    match try_join(t) {\n        TaskFailure(e) => { println(\"task failed: {}\", e.message); },\n        u64(v) => { println(v); }\n    }\n    println(sync::is_poisoned(&s.m));\n    // A later locker fails, naming the first failure.\n    u := spawn(scope, 0, reads);\n    match try_join(u) {\n        TaskFailure(e) => {\n            m := e.message;\n            // \"mutex poisoned: its holder failed at FILE:8:5\", whatever the path to FILE is.\n            println(\"{} {}\", e.kind, m.len() > 40);\n            println(m[m.len() - 3] == 56);\n        },\n        u64(v) => { println(v); }\n    }\n    // try_lock_with fails the same way: \"not available\" would hide it.\n    w := spawn(scope, 0, tries);\n    match try_join(w) {\n        TaskFailure(e) => { println(\"try: {}\", e.kind); },\n        u64(v) => { println(v); }\n    }\n    println(sync::recover_with(&s.m, 7, |v: (&mut u64), k: u64| -> u64 { *v = k; return *v; }));\n    println(sync::is_poisoned(&s.m));\n    return s.m.lock_with(0, peek);\n}\nfn main() {\n    s := Shared { m: Mutex::new(0) };\n    println(task_scope(&s, body));\n    // A thread that fails holding the lock poisons it the same way.\n    a := rc::arc_new(Shared { m: Mutex::new(0) });\n    one := a.clone();\n    t := thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 { return one.get().m.lock_with(9, bad); })!;\n    match thread::try_join(t) {\n        TaskFailure(e) => { println(\"thread failed: {}\", e.message); },\n        u64(v) => { println(v); }\n    }\n    shared := a.get();\n    println(sync::is_poisoned(&shared.m));\n}\n",
     "modules": [
       "lib/sync.grl",
       "lib/thread.grl",
@@ -11888,5 +11888,97 @@
       "x86_64"
     ],
     "note": "pool::join's first branch is Fn<Send> and parallel_with asks Send of it: a `&T` capture still requires T to be Share, which is what makes the concurrent second branch reading the same T sound"
+  },
+  {
+    "name": "sync-every-primitive-together",
+    "source": "use sync;\nuse time;\nstruct Shared { m: Mutex<u64>, rw: sync::RwLock<u64[]>, c: sync::Condition, l: sync::Latch, b: sync::Barrier, s: sync::Semaphore, o: sync::Once<u64[]> }\nfn push<a>(v: (&a mut u64), n: u64) -> u64 { *v += n; return *v; }\nfn worker(n: u64, s: (&Shared)) -> u64 {\n    s.rw.write_with(n, |v: (&mut u64[]), k: u64| -> u64 { v.push(k); return v.len(); });\n    s.m.lock_with(1, push);\n    s.c.notify_all();\n    s.l.count_down();\n    lead := s.b.wait();\n    got := s.s.acquire_with(1, n, |k: u64| -> u64 k);\n    first := s.o.get_or_init(|| -> u64[] u64[7, 8]);\n    return got + u64(lead) * 100 + first.len() * 1000;\n}\nfn body<sc>(scope: (&sc Scope<(&Shared)>), s: (&Shared)) -> u64 {\n    mut many = Task<u64>[];\n    for i in 4 {\n        many.push(spawn(scope, i, worker));\n    }\n    s.l.wait();\n    n := s.c.wait_with(&s.m, 0, |v: (&u64), k: (&u64)| -> bool *v == 4, |v: (&mut u64), k: u64| -> u64 *v);\n    mut total = 0;\n    while let Some(t) = many.pop() {\n        total += join(t);\n    }\n    return total + n * 10000 + s.rw.read_with(0, |v: (&u64[]), k: u64| -> u64 v.len());\n}\nfn main() {\n    s := Shared { m: Mutex::new(0), rw: sync::rwlock<u64[]>(u64[]), c: sync::condition(), l: sync::latch(4), b: sync::barrier(4), s: sync::semaphore(2), o: sync::once<u64[]>() };\n    println(task_scope(&s, body));\n    match s.l.wait_until(time::now().after_ms(10)) {\n        time::WaitError(e) => { println(\"latch timed out?\"); },\n        unit(u) => { println(\"latch open\"); }\n    }\n    match s.b.wait_until(time::now().after_ms(30)) {\n        time::WaitError(e) => { println(\"barrier timed out\"); },\n        bool(lead) => { println(lead); }\n    }\n}\n",
+    "modules": [
+      "lib/sync.grl",
+      "lib/time.grl"
+    ],
+    "stdout": "48110\nlatch open\nbarrier timed out\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "RwLock, Mutex, Condition, Latch, Barrier, Semaphore and Once used by four tasks at once; the deadline forms answer TimedOut"
+  },
+  {
+    "name": "sync-wait-cancelled-by-scope-on-each-primitive",
+    "source": "use sync;\nuse time;\nuse host;\n// One waiter on each primitive, its scope cancelled while it waits: a plain wait ends the task as\n// Cancelled, a `_until` form answers Cancelled, and the cancelled scope re-raises nothing.\nstruct Shared { m: Mutex<u64>, c: sync::Condition, l: sync::Latch, b: sync::Barrier, s: sync::Semaphore, rw: sync::RwLock<u64>, out: Mutex<u64[]> }\nfn note<a>(v: (&a mut u64[]), n: u64) -> u64 { v.push(n); return v.len(); }\nfn total<a>(v: (&a mut u64[]), n: u64) -> u64 {\n    mut t = 0;\n    for i in v.len() {\n        t += v[i];\n    }\n    return t;\n}\nfn on_condition(n: u64, s: (&Shared)) -> u64 {\n    return s.c.wait_with(&s.m, 0, |v: (&u64), k: (&u64)| -> bool *v == 99, |v: (&mut u64), k: u64| -> u64 *v);\n}\nfn on_latch(n: u64, s: (&Shared)) -> u64 { s.l.wait(); return 1; }\nfn on_barrier(n: u64, s: (&Shared)) -> u64 { s.b.wait(); return 1; }\nfn on_semaphore(n: u64, s: (&Shared)) -> u64 { return s.s.acquire_with(1, 0, |k: u64| -> u64 k); }\nfn on_sleep(n: u64, s: (&Shared)) -> u64 { time::sleep_ms(5000); return 1; }\nfn on_try_sleep(n: u64, s: (&Shared)) -> u64 {\n    match time::try_sleep_ms(5000) {\n        time::WaitError(e) => { s.out.lock_with(10, note); },\n        unit(u) => {}\n    }\n    return 0;\n}\nfn on_latch_until(n: u64, s: (&Shared)) -> u64 {\n    match s.l.wait_until(time::now().after_ms(5000)) {\n        time::WaitError(e) => {\n            match e {\n                Cancelled => { s.out.lock_with(20, note); },\n                TimedOut => { s.out.lock_with(21, note); }\n            }\n        },\n        unit(u) => {}\n    }\n    return 0;\n}\nfn on_rw_until(n: u64, s: (&Shared)) -> u64 {\n    match s.rw.write_until(time::now().after_ms(5000), 0, |v: (&mut u64), k: u64| -> u64 *v) {\n        time::WaitError(e) => { s.out.lock_with(30, note); },\n        u64(v) => {}\n    }\n    return 0;\n}\nfn holder(n: u64, s: (&Shared)) -> u64 {\n    return s.rw.read_with(0, |v: (&u64), k: u64| -> u64 { host::sleep_ms(400); return *v; });\n}\nfn body<sc>(scope: (&sc Scope<(&Shared)>), s: (&Shared)) -> u64 {\n    spawn(scope, 0, holder);\n    spawn(scope, 0, on_condition);\n    spawn(scope, 0, on_latch);\n    spawn(scope, 0, on_barrier);\n    spawn(scope, 0, on_semaphore);\n    spawn(scope, 0, on_sleep);\n    spawn(scope, 0, on_try_sleep);\n    spawn(scope, 0, on_latch_until);\n    spawn(scope, 0, on_rw_until);\n    host::sleep_ms(100);\n    scope.cancel();\n    return 0;\n}\nfn main() {\n    s := Shared { m: Mutex::new(0), c: sync::condition(), l: sync::latch(1), b: sync::barrier(2), s: sync::semaphore(0), rw: sync::rwlock<u64>(5), out: Mutex::new(u64[]) };\n    start := host::now_ms();\n    println(task_scope(&s, body));\n    println(host::now_ms() - start < 2000);\n    println(s.out.lock_with(0, total));\n}\n",
+    "modules": [
+      "lib/sync.grl",
+      "lib/time.grl"
+    ],
+    "stdout": "0\ntrue\n60\n",
+    "stderr": [
+      "note: ",
+      "6 contained task failure(s)"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "note": "a cancelled scope wakes a waiter on a Condition, a Latch, a Barrier, a Semaphore, a sleep and a read lock's holder; plain waits end their task as Cancelled (not re-raised by the cancelled scope), try_sleep_ms and the _until forms answer Cancelled; everything ends well before the 5 s waits"
+  },
+  {
+    "name": "sync-failure-while-holding-each-primitive",
+    "source": "use sync;\nuse host;\nstruct Shared { rw: sync::RwLock<u64>, s: sync::Semaphore, o: sync::Once<u64>, inits: Atomic<u64> }\nfn writer_fails(n: u64, s: (&Shared)) -> u64 {\n    return s.rw.write_with(7, |v: (&mut u64), k: u64| -> u64 { *v = 1; w := u64[1]; return w[k]; });\n}\nfn reader_fails(n: u64, s: (&Shared)) -> u64 {\n    return s.rw.read_with(8, |v: (&u64), k: u64| -> u64 { w := u64[1]; return w[k]; });\n}\nfn reader(n: u64, s: (&Shared)) -> u64 {\n    return s.rw.read_with(0, |v: (&u64), k: u64| -> u64 *v);\n}\nfn permit_fails(n: u64, s: (&Shared)) -> u64 {\n    return s.s.acquire_with(2, 9, |k: u64| -> u64 { w := u64[1]; return w[k]; });\n}\nfn first_init_fails(n: u64, s: (&Shared)) -> u64 {\n    v := s.o.get_or_init(|| -> u64 { s.inits.fetch_add(1); host::sleep_ms(50); w := u64[1]; return w[3]; });\n    return *v;\n}\nfn later_init(n: u64, s: (&Shared)) -> u64 {\n    host::sleep_ms(10);\n    v := s.o.get_or_init(|| -> u64 { s.inits.fetch_add(1); return 42; });\n    return *v;\n}\nfn kind_of(t: TaskFailure) -> u64 { return t.kind; }\nfn body<sc>(scope: (&sc Scope<(&Shared)>), s: (&Shared)) -> u64 {\n    // A reader that fails gives its share back, and nothing is poisoned.\n    match try_join(spawn(scope, 0, reader_fails)) { TaskFailure(e) => { println(\"reader failed\"); }, u64(v) => {} }\n    println(s.rw.is_poisoned());\n    println(join(spawn(scope, 0, reader)));\n    // A writer that fails poisons it; a later reader fails naming it; recover_with puts it right.\n    match try_join(spawn(scope, 0, writer_fails)) { TaskFailure(e) => { println(\"writer failed\"); }, u64(v) => {} }\n    println(s.rw.is_poisoned());\n    match try_join(spawn(scope, 0, reader)) { TaskFailure(e) => { println(\"reader: {}\", e.kind); }, u64(v) => { println(v); } }\n    println(s.rw.recover_with(0, |v: (&mut u64), k: u64| -> u64 { *v = 5; return *v; }));\n    println(join(spawn(scope, 0, reader)));\n    // Permits come back when their holder fails.\n    match try_join(spawn(scope, 0, permit_fails)) { TaskFailure(e) => { println(\"permit holder failed\"); }, u64(v) => {} }\n    println(s.s.try_acquire(2).is_some());\n    // A failed initialiser leaves the Once empty; the waiter behind it runs its own.\n    a := spawn(scope, 0, first_init_fails);\n    b := spawn(scope, 0, later_init);\n    match try_join(a) { TaskFailure(e) => { println(\"init failed\"); }, u64(v) => { println(v); } }\n    println(join(b));\n    println(s.inits.load());\n    return 0;\n}\nfn main() {\n    s := Shared { rw: sync::rwlock<u64>(3), s: sync::semaphore(2), o: sync::once<u64>(), inits: Atomic::new(0) };\n    println(task_scope(&s, body));\n}\n",
+    "modules": [
+      "lib/sync.grl",
+      "lib/time.grl"
+    ],
+    "stdout": "reader failed\nfalse\n3\nwriter failed\ntrue\nreader: 17\n5\n5\npermit holder failed\ntrue\ninit failed\n42\n2\n0\n",
+    "stderr": [
+      "note: "
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "note": "a failed reader gives its share back unpoisoned; a failed writer poisons the RwLock until recover_with; semaphore permits come back; a failed Once initialiser leaves it empty and the next caller initialises"
+  },
+  {
+    "name": "sync-condition-ping-pong-no-lost-wakeup",
+    "source": "use sync;\n// Ping-pong through one Condition, 24 pairs at once, 2000 round trips each: every notify reaches\n// the waiter it was meant for, or the counts below would stall or differ.\nstruct Shared { m: Mutex<u64[]>, c: sync::Condition }\nfn total<a>(v: (&a mut u64[]), n: u64) -> u64 {\n    mut t = 0;\n    for i in v.len() {\n        t += v[i];\n    }\n    return t;\n}\nfn turn(side: u64, s: (&Shared)) -> u64 {\n    pair := side / 2;\n    me := side % 2;\n    for i in 2000 {\n        s.c.wait_with(&s.m, pair, |v: (&u64[]), k: (&u64)| -> bool v[*k] % 2 == me, |v: (&mut u64[]), k: u64| -> u64 { v[k] += 1; return v[k]; });\n        s.c.notify_all();\n    }\n    return 0;\n}\nfn body<sc>(scope: (&sc Scope<(&Shared)>), s: (&Shared)) -> u64 {\n    mut many = Task<u64>[];\n    for i in 48 {\n        many.push(spawn(scope, i, turn));\n    }\n    while let Some(t) = many.pop() {\n        join(t);\n    }\n    return s.m.lock_with(0, total);\n}\nfn main() {\n    s := Shared { m: Mutex::new(u64[0; 24]), c: sync::condition() };\n    println(task_scope(&s, body));\n}\n",
+    "modules": [
+      "lib/sync.grl",
+      "lib/time.grl"
+    ],
+    "stdout": "96000\n",
+    "targets": [
+      "x86_64"
+    ],
+    "note": "24 pairs ping-pong 2000 times through one Condition: a lost notify would stall it"
+  },
+  {
+    "name": "sync-condition-ping-pong-no-lost-wakeup-llvm",
+    "source": "use sync;\n// Ping-pong through one Condition, 24 pairs at once, 2000 round trips each: every notify reaches\n// the waiter it was meant for, or the counts below would stall or differ.\nstruct Shared { m: Mutex<u64[]>, c: sync::Condition }\nfn total<a>(v: (&a mut u64[]), n: u64) -> u64 {\n    mut t = 0;\n    for i in v.len() {\n        t += v[i];\n    }\n    return t;\n}\nfn turn(side: u64, s: (&Shared)) -> u64 {\n    pair := side / 2;\n    me := side % 2;\n    for i in 2000 {\n        s.c.wait_with(&s.m, pair, |v: (&u64[]), k: (&u64)| -> bool v[*k] % 2 == me, |v: (&mut u64[]), k: u64| -> u64 { v[k] += 1; return v[k]; });\n        s.c.notify_all();\n    }\n    return 0;\n}\nfn body<sc>(scope: (&sc Scope<(&Shared)>), s: (&Shared)) -> u64 {\n    mut many = Task<u64>[];\n    for i in 48 {\n        many.push(spawn(scope, i, turn));\n    }\n    while let Some(t) = many.pop() {\n        join(t);\n    }\n    return s.m.lock_with(0, total);\n}\nfn main() {\n    s := Shared { m: Mutex::new(u64[0; 24]), c: sync::condition() };\n    println(task_scope(&s, body));\n}\n",
+    "modules": [
+      "lib/sync.grl",
+      "lib/time.grl"
+    ],
+    "stdout": "96000\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "llvm"
+    ]
+  },
+  {
+    "name": "sync-cancelled-outcome-at-try-join-join-and-scope-exit",
+    "source": "use sync;\nuse host;\n// What a Cancelled outcome is: try_join reports it with kind 16; join re-raises it; and the scope\n// that was cancelled does not re-raise the children it ended.\nstruct Shared { l: sync::Latch }\nfn waits(n: u64, s: (&Shared)) -> u64 { s.l.wait(); return 1; }\nfn inner<sc>(scope: (&sc Scope<(&Shared)>), s: (&Shared)) -> u64 {\n    t := spawn(scope, 0, waits);\n    host::sleep_ms(30);\n    scope.cancel();\n    match try_join(t) {\n        TaskFailure(e) => { println(\"try_join: kind {} {}\", e.kind, e.message); },\n        u64(v) => { println(v); }\n    }\n    spawn(scope, 0, waits);\n    return 7;\n}\nfn rejoin<sc>(scope: (&sc Scope<(&Shared)>), s: (&Shared)) -> u64 {\n    t := spawn(scope, 0, waits);\n    host::sleep_ms(30);\n    scope.cancel();\n    return join(t);\n}\nfn outer(n: u64, s: (&Shared)) -> u64 {\n    return task_scope(s, rejoin);\n}\nfn top<sc>(scope: (&sc Scope<(&Shared)>), s: (&Shared)) -> u64 {\n    match try_join(spawn(scope, 0, outer)) {\n        TaskFailure(e) => { println(\"join re-raised: kind {}\", e.kind); },\n        u64(v) => { println(v); }\n    }\n    return 0;\n}\nfn main() {\n    s := Shared { l: sync::latch(1) };\n    println(task_scope(&s, inner));\n    task_scope(&s, top);\n}\n",
+    "modules": [
+      "lib/sync.grl",
+      "lib/time.grl"
+    ],
+    "stdout": "try_join: kind 16 the wait was cancelled\n7\njoin re-raised: kind 16\n",
+    "stderr": [
+      "note: "
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "note": "a Cancelled task is a TaskFailure of kind 16 at try_join; join re-raises it; the scope that was cancelled does not re-raise an abandoned Cancelled child"
   }
 ]
