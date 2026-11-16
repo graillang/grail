@@ -546,6 +546,7 @@ function lint() {
   }
   check('LSP/debugger/profiler plan exists', existsSync(join(root, 'docs/tooling/lsp-debugger-profiler.md')));
   check('FFI test runner exists', existsSync(join(root, 'tools/test-ffi.mjs')));
+  check('the compile-speed benchmark exists and the gate runs it', existsSync(join(root, 'tools/compile-bench.mjs')) && readFileSync(join(root, 'tools/gate.sh'), 'utf8').includes('tools/compile-bench.mjs'));
   check('C header importer exists', existsSync(join(root, 'compiler/bindgen.grl')));
   check('C header importer is in the compiler source list',
     readFileSync(join(root, 'tools/native.mjs'), 'utf8').includes("'bindgen'"));

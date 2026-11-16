@@ -6097,13 +6097,13 @@ fn tok_text<a>(c: (&a mut C), i: u64) -> u8[] {
     en := t.end;
     return (c.src[st: en]).copy();
 }
+// Whether the current token is spelled `s`, read from the source in place. `is` is asked for every
+// keyword at every statement, and copying the token out to compare it was four allocations a
+// question (docs/design/compile-speed.md). A position past the stream is the empty token, as
+// `tok_text` has it. The loop is written out here, in `is_at` and in `eat` rather than shared:
+// handing a view on to another function makes a new view record, which is the cost being removed.
 fn is<a, b>(c: (&a mut C), s: &b [u8]) -> bool {
-    return tok_is(&mut c, c.pos, s);
-}
-// Whether token `i` is spelled `s`, read from the source in place. `is` is asked for every keyword
-// at every statement, and copying the token out to compare it was four allocations a question
-// (docs/design/compile-speed.md). A position past the stream is the empty token, as `tok_text` has it.
-fn tok_is<a, b>(c: (&a mut C), i: u64, s: &b [u8]) -> bool {
+    i := c.pos;
     if c.toks.len() <= i {
         return s.len() == 0;
     }
@@ -6715,11 +6715,24 @@ fn fail_option<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
     return ();
 }
 fn eat<a, b>(c: (&a mut C), s: &b [u8]) -> bool {
-    if is(&mut c, s) {
-        advance(&mut c);
-        return true;
+    i := c.pos;
+    if c.toks.len() <= i {
+        if s.len() != 0 {
+            return false;
+        }
+    } else {
+        st := c.toks[i].start;
+        if c.toks[i].end - st != s.len() {
+            return false;
+        }
+        for k in s.len() {
+            if c.src[st + k] != s[k] {
+                return false;
+            }
+        }
     }
-    return false;
+    advance(&mut c);
+    return true;
 }
 fn expect<a, b>(c: (&a mut C), s: &b [u8]) -> unit {
     want := s.copy();
@@ -11901,10 +11914,19 @@ fn lifetime_candidate<a>(c: (&a mut C), p: u64) -> bool {
     return token_starts_type(&mut c, p + 1) || is_at(&mut c, p + 1, view("mut"));
 }
 fn is_at<a, b>(c: (&a mut C), p: u64, text: &b [u8]) -> bool {
-    if p < c.toks.len() {
-        return tok_is(&mut c, p, text);
+    if c.toks.len() <= p {
+        return false;
     }
-    return false;
+    st := c.toks[p].start;
+    if c.toks[p].end - st != text.len() {
+        return false;
+    }
+    for k in text.len() {
+        if c.src[st + k] != text[k] {
+            return false;
+        }
+    }
+    return true;
 }
 fn lifetime_region<a>(c: (&a mut C), name: &a [u8]) -> u64 {
     for i in c.rnames.len() {

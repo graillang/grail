@@ -140,4 +140,5 @@ if (import.meta.main ?? process.argv[1] === new URL(import.meta.url).pathname) {
   if (results.exponent !== undefined) console.log(`scaling exponent log(t4000/t1000)/log 4 = ${results.exponent} (t4000/t1000 = ${results.ratio_4000_1000})`);
   console.log(`scaling exponent log(t1000/t250)/log 4 = ${results.exponent_250_1000}   (best of ${runs})`);
   writeFileSync(join(root, '.work/compile-bench.json'), JSON.stringify(results, null, 2) + '\n');
+  console.log(`compile-bench: check hello ${results.hello_check} s, t1000 ${s[1000].seconds} s${results.ratio_4000_1000 ? `, t4000/t1000 ${results.ratio_4000_1000}` : ''}${results.self_compile ? `, self-compile ${results.self_compile} s` : ''}`);
 }

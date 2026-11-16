@@ -70,12 +70,16 @@ leg windows bun tools/windows.mjs check
 leg book bun tools/book.mjs check
 leg lint bun tools/ci.mjs lint
 wait
+# Compile speed, after every other leg has finished so nothing else is running beside it: a report
+# of the numbers in docs/design/compile-speed.md, which fails only when a compile itself does.
+leg compile-bench bun tools/compile-bench.mjs
+wait
 
 # One line per leg, failures first.
 for f in "$G"/*.log; do
   if rg -q 'exit=[1-9]' "$f"; then echo "FAIL $(basename "$f" .log): $(rg 'AssertionError|error' "$f" | head -1 | cut -c1-120)"; fi
 done > "$G/summary.txt"
 for f in "$G"/*.log; do
-  if rg -q 'exit=0' "$f"; then echo "ok   $(basename "$f" .log): $(rg 'passed|identical|verified|agree|checks|ffi:|facts:|program' "$f" | tail -1 | cut -c1-100)"; fi
+  if rg -q 'exit=0' "$f"; then echo "ok   $(basename "$f" .log): $(rg 'passed|identical|verified|agree|checks|ffi:|facts:|program|compile-bench:' "$f" | tail -1 | cut -c1-100)"; fi
 done >> "$G/summary.txt"
 echo done > "$G/DONE"

@@ -1,5 +1,18 @@
 ## Unreleased
 
+- **The compiler is 2x to 9x faster, and its time is linear in program size.** Checking a
+  104k-line program of 4,000 small declarations took 166 s and takes 18 s; the compiler compiles
+  itself in 42 s instead of 74 s; hello world checks in 0.59 s instead of 1.19 s. Nothing it emits
+  changed (the self-compile is byte-identical). What was fixed, from a profile of the compiler
+  itself: function, type, specialisation and emitted-helper lookups were scans that allocated per
+  candidate and are now hashed; every generic specialisation re-read and re-tokenised its source
+  file; the allocator took its lock in a single-threaded process; a keyword test copied the token
+  it compared; the optimiser built a record per comparison. A program may now have 65,536 generic
+  specialisations (the limit was 1,024). `bun tools/compile-bench.mjs` measures all of it (scaling
+  at three sizes with the fitted exponent, hello world, a generic-heavy program, the self-compile),
+  the gate records the numbers, and `docs/design/compile-speed.md` has the table, the findings and
+  the order of the remaining work.
+
 - Fixed, **soundness**: **a refinement fact survived a write in a loop.** `mut i = 0; while i < 3 {
   take0(i); i += 1; }` with `take0(i: u64 where i == 0)` compiled under `@strict` and printed
   `0 1 2`: the fact `i == 0` from before the loop was still believed at the body's first statement
