@@ -589,3 +589,17 @@ result keeps its arguments' loans, `may_hide_borrow`), not by the type. So the n
 `Owned` cannot be enforced on fields as stated: either such a field names the region
 (`Iter<a, T>`), or the rule counts a capture whose type is an aggregate holding the loan as
 flow-tracked. Open question Q8; the field stays a bare `FnMut` until it is decided.
+
+### 6.2 Stage 3 (call-scoped closure parameters) - built
+
+- `init_parameter`: a closure parameter whose type is not `Owned` holds a loan of a place no type
+  can name (region 0, like a local's). Returning it is the ordinary escape error; storing it through
+  `&mut` is refused by `check_writeback`, which now also checks a stored value whose type cannot show
+  a borrow (`may_hide_borrow` and a live loan) with its own diagnostic; capturing it carries the loan
+  into the closure (`capture_hides_loan` in `closure_literal`, both paths, and the environment
+  field takes its bonds). `dyn_box` refuses a value that holds a loan its type cannot show (P27).
+- `call_bonds` hands a closure argument's loans to the call's result only when the formal is
+  `Owned`: a call-scoped formal cannot keep the closure, so its result holds nothing of it.
+- `parallel_spawn` makes the job take over the loans of the closure it runs (the builtin face of
+  2.10), so a wrapper over it either waits before returning or takes `Fn<Owned>`.
+- Cases `closure-call-scoped-*` (P14, P27 and the shapes of the count). `Fn<s>` is next.

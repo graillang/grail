@@ -10987,21 +10987,21 @@
   {
     "name": "job-handle-holds-closure-loan-wrapper",
     "note": "the same through a non-generic wrapper: the loss was in the handle's type, not in the generic call",
-    "source": "fn sp(f: Fn<Send>()->u64) -> Job<u64> { return parallel_spawn(f); }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    view := &data;\n    j := sp(|| -> u64 view[0]);\n    println(eat(data));\n    println(parallel_join(j));\n}\n",
+    "source": "fn sp(f: Fn<Send, Owned>()->u64) -> Job<u64> { return parallel_spawn(f); }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    view := &data;\n    j := sp(|| -> u64 view[0]);\n    println(eat(data));\n    println(parallel_join(j));\n}\n",
     "reject": true,
-    "diagnostic": "move of unavailable or borrowed value"
+    "diagnostic": "this closure captures a borrow its type does not name"
   },
   {
     "name": "job-handle-in-record-holds-closure-loan",
     "note": "a record holding the handle holds the loan too",
-    "source": "struct Keep { j: Job<u64>, n: u64 }\nfn sp(f: Fn<Send>()->u64) -> Job<u64> { return parallel_spawn(f); }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    view := &data;\n    k := Keep { j: sp(|| -> u64 view[0]), n: 1 };\n    println(eat(data));\n    println(parallel_join(k.j));\n}\n",
+    "source": "struct Keep { j: Job<u64>, n: u64 }\nfn sp(f: Fn<Send, Owned>()->u64) -> Job<u64> { return parallel_spawn(f); }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    view := &data;\n    k := Keep { j: sp(|| -> u64 view[0]), n: 1 };\n    println(eat(data));\n    println(parallel_join(k.j));\n}\n",
     "reject": true,
-    "diagnostic": "move of unavailable or borrowed value"
+    "diagnostic": "this closure captures a borrow its type does not name"
   },
   {
     "name": "job-handle-loan-ends-at-wait",
-    "note": "once the job is waited on its handle is gone and the loan with it: the vector may move again",
-    "source": "fn sp(f: Fn<Send>()->u64) -> Job<u64> { return parallel_spawn(f); }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    mut got = 0;\n    {\n        view := &data;\n        j := sp(|| -> u64 view[0]);\n        got = parallel_join(j);\n    }\n    println(got + eat(data));\n}\n",
+    "note": "a wrapper that waits on the job before it returns may spawn a call-scoped closure: the handle took the closure's loans and is gone at the wait, so the vector may move again",
+    "source": "fn run(f: Fn<Send>()->u64) -> u64 { j := parallel_spawn(f); return parallel_join(j); }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    mut got = 0;\n    {\n        view := &data;\n        got = run(|| -> u64 view[0]);\n    }\n    println(got + eat(data));\n}\n",
     "stdout": "5\n"
   },
   {
@@ -11144,7 +11144,7 @@
     "note": "P19",
     "source": "// call_bonds hands a borrowing closure argument's loan to the call's result. Does that hold the\n// borrowed data in place?\nfn id(f: Fn()->u64) -> Fn()->u64 { return f; }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    view := &data;\n    g := id(|| -> u64 view[0]);\n    println(eat(data));\n    println(g());\n}\n",
     "reject": true,
-    "diagnostic": "move of unavailable or borrowed value"
+    "diagnostic": "returned borrow escapes its declared input lifetime"
   },
   {
     "name": "closure-bounds-p20-local-closure-keeps-loan",
@@ -11373,5 +11373,52 @@
     "source": "use iter;\nfn counting<a>(n: (&a mut u64)) -> iter::Iter<(&a u64)> {\n    return iter::from_fn(|| -> (&a u64)? { *n = *n + 1; return None; });\n}\nfn main() {\n    mut count = 0;\n    mut it = counting(&mut count);\n    println(count);\n    println(it.next().is_some());\n}\n",
     "reject": true,
     "diagnostic": "`count`"
+  },
+  {
+    "name": "closure-call-scoped-stash-refused",
+    "note": "P14 / H5: a parameter typed `Fn(..)` borrows for the call; pushing it into storage that outlives the call is refused (was a use after free: SIGSEGV)",
+    "source": "// A callee that keeps the closure somewhere other than its result.\nstruct Q { items: (Fn()->u64)[] }\nfn stash<a>(q: (&a mut Q), f: Fn()->u64) -> unit { q.items.push(f); }\nfn fill<a>(q: (&a mut Q)) -> unit {\n    mut data = u64[41, 2, 3, 4];\n    view := &data;\n    stash(&mut q, || -> u64 view[0] + 1);\n}\nfn main() {\n    mut q = Q { items: (Fn()->u64)[] };\n    fill(&mut q);\n    mut junk = u64[9, 9, 9, 9, 9, 9];\n    f := q.items.pop()!;\n    println(f());\n}\n",
+    "reject": true,
+    "diagnostic": "this closure may only be used during the call it was passed to"
+  },
+  {
+    "name": "closure-call-scoped-dyn-over-fn-field-refused",
+    "note": "P27: a record holding a borrowing closure in an `Fn` field cannot be boxed as `dyn` (was: called after the frame was gone, exit 134)",
+    "source": "// The one way a borrow gets behind a `dyn`: a record whose field is an erased `Fn()->u64`. The\n// record \"holds no borrow\", so it may be boxed, kept, and called after the frame is gone.\ninterface Peek { fn peek(self: &Self) -> u64; }\nstruct Lazy { f: Fn()->u64 }\nimpl Peek for Lazy { fn peek(self: &Self) -> u64 { g := &self.f; return g(); } }\nstruct Q { items: (dyn Peek)[] }\nfn stash<a>(q: (&a mut Q), p: dyn Peek) -> unit { q.items.push(p); }\nfn fill<a>(q: (&a mut Q)) -> unit {\n    mut data = u64[41, 2, 3, 4];\n    view := &data;\n    stash(&mut q, Lazy { f: || -> u64 view[0] + 1 });\n}\nfn main() {\n    mut q = Q { items: (dyn Peek)[] };\n    fill(&mut q);\n    mut junk = u64[9, 9, 9, 9, 9, 9];\n    p := q.items.pop()!;\n    println(p.peek());\n}\n",
+    "reject": true,
+    "diagnostic": "a dyn value cannot hold borrowed data"
+  },
+  {
+    "name": "closure-call-scoped-return-refused",
+    "note": "returning a call-scoped closure parameter",
+    "source": "fn id(f: Fn() -> u64) -> Fn() -> u64 { return f; }\nfn main() { n := 1; g := id(|| -> u64 n); println(g()); }\n",
+    "reject": true,
+    "diagnostic": "returned borrow escapes its declared input lifetime"
+  },
+  {
+    "name": "closure-call-scoped-captured-and-returned-refused",
+    "note": "a call-scoped parameter captured by a closure that is returned escapes with it",
+    "source": "fn twice(f: Fn(u64) -> u64) -> Fn(u64) -> u64 { return |x: u64| -> u64 f(f(x)); }\nfn main() { n := 3; g := twice(|x: u64| -> u64 x + n); println(g(1)); }\n",
+    "reject": true,
+    "diagnostic": "returned borrow escapes its declared input lifetime"
+  },
+  {
+    "name": "closure-call-scoped-captured-locally",
+    "note": "...captured by a closure that stays in the call, it is fine",
+    "source": "fn twice(f: Fn(u64) -> u64) -> u64 { g := |x: u64| -> u64 f(x); h := g; return h(1); }\nfn main() { n := 3; println(twice(|x: u64| -> u64 x + n)); }\n",
+    "stdout": "4\n"
+  },
+  {
+    "name": "closure-call-scoped-forward-and-owned-store",
+    "note": "a call-scoped parameter may be called, aliased and passed on to another call-scoped parameter; one typed `Fn<Owned>` may be stored",
+    "source": "struct Q { items: (Fn() -> u64)[] }\nfn keep(q: (&mut Q), f: Fn<Owned>() -> u64) -> unit { q.items.push(f); }\nfn pass(f: Fn() -> u64) -> u64 { mut g = f; return run(g); }\nfn run(f: Fn() -> u64) -> u64 { return f(); }\nfn main() {\n    mut q = Q { items: (Fn() -> u64)[] };\n    n := 20;\n    keep(&mut q, || -> u64 n + 1);\n    println(pass(|| -> u64 n));\n    f := q.items.pop()!;\n    println(f());\n}\n",
+    "stdout": "20\n21\n"
+  },
+  {
+    "name": "closure-call-scoped-spawn-wrapper-must-wait",
+    "note": "a wrapper may hand its call-scoped closure to a job only if it waits before returning: the job takes over the closure's loans, so returning the handle is refused",
+    "source": "fn sp(f: Fn<Send>() -> u64) -> Job<u64> { return parallel_spawn(f); }\nfn main() { println(parallel_join(sp(|| -> u64 1))); }\n",
+    "reject": true,
+    "diagnostic": "returned borrow escapes its declared input lifetime"
   }
 ]

@@ -4353,7 +4353,9 @@ fn call_bonds<a>(
         // A closure argument can carry lifetimes its parameter's `Fn(...)` type does not name. The
         // caller keeps the loan by handing it to the result: a callee that returns the callable
         // cannot make it outlive what it borrows.
-        if kind == 20 {
+        // Only a parameter that may keep the closure: one typed without `Owned` borrows it for the
+        // call (docs/design/closure-bounds.md, stage 3), so nothing of it reaches the result.
+        if (kind == 20) && ((ty_mode(&mut c, ty) & CLOSURE_OWNED) != 0) {
             n := resource(&mut c, slot);
             if n != 0 {
                 info := &c.resources[n - 1];
@@ -4409,7 +4411,9 @@ fn check_writeback<a>(c: (&a mut C), destination: u64, ty: u64, source: u64) -> 
     if c.raw != 0 {
         return ();
     }
-    if !contains_borrow(&mut c, ty, 0) {
+    // A stored closure (or a record of one) shows no borrow in its type but may still hold one -
+    // a call-scoped closure parameter, or a closure that captured a reference: its loans decide.
+    if !contains_borrow(&mut c, ty, 0) && !(may_hide_borrow(&mut c, ty) && holds_live_loan(&mut c, source)) {
         return ();
     }
     region := region_of(&mut c, destination);
@@ -4463,6 +4467,12 @@ fn check_writeback<a>(c: (&a mut C), destination: u64, ty: u64, source: u64) -> 
                         }
                     }
                     if (r == 0) || (found == 0) {
+                        if (ty_kind(&mut c, ty) == 20) & !contains_borrow(&mut c, ty, 0) {
+                            fail(
+                                &mut c,
+                                view("this closure may only be used during the call it was passed to (a parameter typed `Fn(..)` borrows for the call), so it cannot be stored here: take `Fn<Owned>(..)` to keep it")
+                            );
+                        }
                         fail(&mut c, view("captured writeback violates invariant lifetime"));
                     }
                 }
@@ -5045,6 +5055,16 @@ fn init_parameter<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
             set_target(&mut c, slot, source, slot + 1);
         }
         return ();
+    }
+    // A closure parameter that does not say `Owned` borrows for the call only
+    // (docs/design/closure-bounds.md, 2.3): it holds a loan of a place no type can name (region 0,
+    // like a local's), so the callee may call it and pass it on to another such parameter, but
+    // returning it, storing it, or capturing it in a closure that is returned or stored is the
+    // ordinary escape error.
+    if (k == 20) && (ty_env(&mut c, ty) == 0) && ((mode & (CLOSURE_OWNED + CLOSURE_UNBUILT)) == 0) {
+        call := external_place(&mut c, 0, 0);
+        scoped := ownership::borrow_place(&mut c.check, call, 0);
+        bond_kind(&mut c, holder, scoped, 1);
     }
     captures := type_caps(&mut c, ty, 0);
     for i in captures.len() {
@@ -10813,7 +10833,10 @@ fn dyn_box<a>(c: (&a mut C), v: Val, expected: u64) -> Val {
     if find_implementation(&mut c, id, concrete) == 0 {
         fail(&mut c, view("this type does not implement the interface the dyn type names"));
     }
-    if contains_borrow(&mut c, concrete, 0) {
+    // The type, or - for a value whose type cannot show a borrow it holds (a record with a closure
+    // field) - the value itself: a `dyn` erases both.
+    if contains_borrow(&mut c, concrete, 0)
+        || (may_hide_borrow(&mut c, concrete) && holds_live_loan(&mut c, place_of(&mut c, v.t))) {
         fail(&mut c, view("a dyn value cannot hold borrowed data: its lifetime would be lost"));
     }
     fixed := type_args(&mut c, expected);
@@ -27525,6 +27548,22 @@ fn parallel_spawn_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     if contains_borrow(&mut c, result, 0) {
         fail(&mut c, view("a job result cannot contain borrows: the job owns what it returns"));
     }
+    // A closure whose type cannot show what it borrows (a call-scoped parameter forwarded by a
+    // wrapper) still holds loans: the job takes them over, so the handle cannot outlive them
+    // (docs/design/closure-bounds.md, 2.10). A wrapper that waits before returning is fine.
+    mut held_loans = u64[];
+    if c.raw == 0 {
+        fplace := place_of(&mut c, function.t);
+        if fplace != 0 {
+            for i in c.bonds.len() {
+                holder := c.bonds[i].holder;
+                loan := c.bonds[i].loan;
+                if ownership::ancestor(&c.check, fplace, holder) && (loan_live(&mut c, loan) != 0) {
+                    held_loans.push(loan);
+                }
+            }
+        }
+    }
     if contains_task(&mut c, result, 0) {
         fail(&mut c, view("a pool job cannot return a Task or Job handle"));
     }
@@ -27548,9 +27587,14 @@ fn parallel_spawn_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     mut pargs = two(target, box);
     slot := invoke(&mut c, view("rt_parallel_spawn"), pargs);
     ty := intern(&mut c, 29, result);
+    job := own(&mut c, slot, ty);
+    jplace := place_of(&mut c, slot);
+    for i in held_loans.len() {
+        bond_kind(&mut c, jplace, held_loans[i], 1);
+    }
     release_temporary(&mut c, input);
     close_loans(&mut c);
-    return own(&mut c, slot, ty);
+    return job;
 }
 // parallel_join(h) -> R: take the result and free the record. The handle moves in, so no wait can
 // happen twice and nothing can reach the record afterwards.
@@ -29102,6 +29146,16 @@ fn capture_borrow<a>(c: (&a mut C), ty: u64) -> bool {
     }
     return false;
 }
+// A capture whose type cannot show a borrow but whose value holds one - a call-scoped closure
+// parameter, a record with a closure field: its loans are the closure's too.
+fn capture_hides_loan<a>(c: (&a mut C), slot: u64, ty: u64) -> bool {
+    // An `Owned` closure type names whatever it borrows, so its loans are the ones its signature's
+    // regions stand for; only a call-scoped one holds a loan its type cannot show.
+    if (ty_kind(&mut c, ty) == 20) && (ty_env(&mut c, ty) == 0) && ((ty_mode(&mut c, ty) & CLOSURE_OWNED) != 0) {
+        return false;
+    }
+    return may_hide_borrow(&mut c, ty) && holds_live_loan(&mut c, place_of(&mut c, slot));
+}
 // The lifetimes the loans held anywhere inside a captured aggregate borrow.
 fn capture_aggregate_regions<a, b>(c: (&a mut C), slot: u64, caps: (&b mut u64[])) -> unit {
     place := place_of(&mut c, slot);
@@ -29813,7 +29867,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
             // A capture contributes the lifetime it borrows to the closure's type.
             if capture_borrow(&mut c, ty) {
                 add_region(&mut caps, capture_region(&mut c, id));
-            } else if contains_borrow(&mut c, ty, 0) {
+            } else if contains_borrow(&mut c, ty, 0) || capture_hides_loan(&mut c, id, ty) {
                 capture_aggregate_regions(&mut c, id, &mut caps);
             }
             observe(&mut c, id);
@@ -29850,7 +29904,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
         if borrow {
             add_region(&mut caps, capture_region(&mut c, id));
             field = capture_field_type(&mut c, ty);
-        } else if contains_borrow(&mut c, ty, 0) {
+        } else if contains_borrow(&mut c, ty, 0) || capture_hides_loan(&mut c, id, ty) {
             capture_aggregate_regions(&mut c, id, &mut caps);
         }
         c.fields.push(Field { name: name.copy(), ty: field, pred: no_pred() });
@@ -29946,8 +30000,9 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
             rec_store(&mut c, obj, 2 + j, pointer);
             move_out(&mut c, val(slot, ty));
         } else if needs_drop(&mut c, ty) {
-            if contains_borrow(&mut c, ty, 0) {
-                // An aggregate holding a borrow: its loans go with it into the environment field.
+            if contains_borrow(&mut c, ty, 0) || capture_hides_loan(&mut c, slot, ty) {
+                // An aggregate holding a borrow - or a closure whose type cannot show the one it
+                // holds - so its loans go with it into the environment field.
                 root := place_of(&mut c, obj);
                 field_place := member_place(&mut c, root, 2 + j, ty);
                 source := place_of(&mut c, slot);
