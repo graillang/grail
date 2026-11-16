@@ -127,7 +127,7 @@ fn rt_stack_overflow_at(site: u64) -> u64 {
 fn rt_fail(kind: u64, a: u64, b: u64) -> u64 {
     j := rt_job_failing();
     if j != 0 {
-        return rt_job_fail(j, kind, a, b, rt_site_here(j + 200) & 18446744073709551614, 0);
+        return rt_job_fail_here(j, kind, a, b, 0);
     }
     t := rt_containable();
     if t != 0 {
@@ -354,6 +354,12 @@ fn rt_sites_fill(out: u64) -> u64 {
 // the count the helper answered. A captured entry is static data: it stays valid long after the
 // task's stack is gone, which is what lets the join format the site later.
 fn rt_site_here(scratch: u64) -> u64 {
+    return rt_site_above(scratch, 0, 1);
+}
+// The innermost program statement on this stack among the frames above `above` (a stack address;
+// 0 for all of them), skipping standard-library statements (site flag bit 62) unless `std` is set.
+// A statement-table entry, or 0. It writes only the five scratch words it is given.
+fn rt_site_above(scratch: u64, above: u64, std: u64) -> u64 {
     have := rt_sites_fill(scratch);
     if have < 3 {
         return 0;
@@ -389,7 +395,7 @@ fn rt_site_here(scratch: u64) -> u64 {
             flags := raw_load(hit + 16);
             // A place is named only when the entry has a file; the runtime's own statements carry a
             // zero, so the walk always answers with a program location.
-            if (name != 0) & ((flags >> 63) == 0) {
+            if (name != 0) & ((flags >> 63) == 0) & (above < frame) & ((std != 0) | (((flags >> 62) & 1) == 0)) {
                 return hit;
             }
         }
@@ -488,7 +494,16 @@ fn rt_report_die(msg: u64, site: u64) -> u64 {
 // the worker's stack. The frames of this stack are dead from here on; the scheduler takes its
 // ordinary "this task is done" path, so the mapping is recycled and the task is published to its
 // joiner. Nothing in between is resumed or cleaned up.
+// (No function on the failure path takes more than six parameters: a seventh is passed in an
+// allocated record, and this path allocates nothing.)
 fn rt_contain_site(t: u64, kind: u64, a: u64, b: u64, site: u64, msg: u64) -> u64 {
+    raw_store(t + 232, 0);
+    return rt_contain_joined(t, kind, a, b, site, msg);
+}
+// The same, keeping the statement where the failed job was joined, which the caller has stored in
+// task word 232 (0: none). That is the last of the site walk's scratch words, free once the failure
+// is recorded; the joiner renders both lines from it (rt_task_site).
+fn rt_contain_joined(t: u64, kind: u64, a: u64, b: u64, site: u64, msg: u64) -> u64 {
     raw_store(t + 160, kind);
     raw_store(t + 168, a);
     raw_store(t + 176, b);
@@ -500,6 +515,7 @@ fn rt_contain_site(t: u64, kind: u64, a: u64, b: u64, site: u64, msg: u64) -> u6
 // The same, for a failure that already has its texts (a `join` inside a task re-raising a task's
 // recorded failure): the words are handed over, not rebuilt.
 fn rt_contain_text(t: u64, kind: u64, msg: u64, site: u64) -> u64 {
+    raw_store(t + 232, 0);
     raw_store(t + 160, kind);
     raw_store(t + 168, 0);
     raw_store(t + 176, 0);
@@ -616,14 +632,6 @@ fn rt_refine(msg: u64, req: u64) -> u64 {
 // ` --> file:line:col` for the frame that failed, then one ` = called from` line per further frame
 // that lies in a statement - at most 32 of them.
 fn rt_fail_where(buf: u64, n: u64) -> u64 {
-    return rt_fail_where_mode(buf, n, 0);
-}
-// The innermost statement of the program's own code - not the runtime's, and not the standard
-// library's (site flag bit 62) - as one ` = in a job joined at` line, or nothing when no frame has one.
-fn rt_fail_where_user(buf: u64, n: u64) -> u64 {
-    return rt_fail_where_mode(buf, n, 1);
-}
-fn rt_fail_where_mode(buf: u64, n: u64, user: u64) -> u64 {
     // The program's entry stores the compiler-emitted rt_sites in state word 3400; asked for the
     // descriptor (rt_sites_fill), it fills in the tables' bounds and the caller's frame pointer. No
     // table, a refused descriptor or zeros: no location lines.
@@ -670,10 +678,7 @@ fn rt_fail_where_mode(buf: u64, n: u64, user: u64) -> u64 {
             // statements by leaving the file zero; a table written before that rule (the checked-in
             // seed is one) keeps the name and sets bit 63 instead, so both shapes skip the runtime -
             // a failure report names the program, never the runtime's frames.
-            if (name != 0) & ((flags >> 63) == 0) & ((user == 0) | (((flags >> 62) & 1) == 0)) {
-                if user != 0 {
-                    return rt_fail_line(buf, at, hit, view(" = in a job joined at "));
-                }
+            if (name != 0) & ((flags >> 63) == 0) {
                 if lines == 0 {
                     at = rt_fail_line(buf, at, hit, view(" --> "));
                 } else {
@@ -3267,7 +3272,7 @@ fn rt_held_settle(b: u64, site: u64) -> u64 {
 fn rt_fail_message(kind: u64, msg: u64) -> u64 {
     j := rt_job_failing();
     if j != 0 {
-        return rt_job_fail(j, kind, 0, 0, rt_site_here(j + 200) & 18446744073709551614, msg);
+        return rt_job_fail_here(j, kind, 0, 0, msg);
     }
     t := rt_containable();
     if t != 0 {
@@ -5213,7 +5218,7 @@ fn rt_worker_run(s: u64, w: u64, t: u64) -> u64 {
 // Jobs block (raw_state()+3200, raw_map): 0 ring lock, 8 ring head, 16 ring tail, 80 ring, 88 ring
 // capacity (the layout rt_inject_pop reads); 24 lock of the lists below, 32 free job records,
 // 40 carve pointer, 48 carve bytes left, 56 free runner records, 64 a word that stays zero (a
-// runner's cancel token), 72 free failure records (never refilled: a failure record is not freed), 104 workers started (thread-per-task mode); the Frame ring at 128 and the
+// runner's cancel token), 72 free failure records (rt_job_failure_release), 104 workers started (thread-per-task mode); the Frame ring at 128 and the
 // Background ring at 256, laid out like the Normal one at 0; 400 Background jobs running, 408 the
 // cap on them (background_cap).
 //
@@ -5532,6 +5537,11 @@ fn rt_job_steal(s: u64, w: u64, class: u64) -> u64 {
 // task had registered as the waiter: that task is woken and then told so, because it must not carry
 // a wake that arrives after it has moved on.
 fn rt_job_exec(r: u64) -> u64 {
+    // An address in this frame (word 96): frames above it are the job's forker's, when the forker
+    // ran the job itself; a failure's join site is looked for there (rt_job_fail).
+    mut mark = 0;
+    here := &mut mark;
+    raw_store(r + 96, here);
     background := raw_load(r + 88) == 1;
     t := rt_job_stack();
     if t != 0 {
@@ -5788,7 +5798,18 @@ fn rt_job_failing() -> u64 {
 //      re-raise it at their joins (rt_job_reraise), and their own stacks then do the same.
 //   3. The stack is discarded: a runner ends; a task is contained as any failed task is.
 // A stack overflow does not come here: the drain needs stack, so it stays fatal.
+// A failure raised on this stack by the statement that is running: its site is found here (the walk
+// uses the record's scratch words, the last of which then says "no join site known yet").
+fn rt_job_fail_here(t: u64, kind: u64, a: u64, b: u64, msg: u64) -> u64 {
+    site := rt_site_here(t + 200) & 18446744073709551614;
+    raw_store(t + 232, 0);
+    return rt_job_fail(t, kind, a, b, site, msg);
+}
+// The statement where the failed job was joined, when the caller knows it (a joiner re-raising), is
+// in the stack's word 232 (rt_job_fail_joined); 0 there means "find it here".
 fn rt_job_fail(t: u64, kind: u64, a: u64, b: u64, site: u64, msg: u64) -> u64 {
+    joined := raw_load(t + 232);
+    raw_store(t + 232, 0);
     // 0. Locks first (rt_held_settle takes the record's waiter block; a site that is an owned text
     // names no statement, so the poison records none).
     mut poison_site = site;
@@ -5798,9 +5819,40 @@ fn rt_job_fail(t: u64, kind: u64, a: u64, b: u64, site: u64, msg: u64) -> u64 {
     rt_held_settle(t + 240, poison_site);
     // The failure record is not a heap allocation: a failure may be raised where the allocator lock
     // is held, and inside `@no_alloc` code, so nothing on this path touches the allocator. It comes
-    // from the jobs block's own pages and is never freed (a contained failure leaks it, as it leaks
-    // the discarded frames' owners).
+    // from the jobs block's free list (rt_job_failure_record), and word 40 counts the jobs it is
+    // published to: each joiner gives one back after it has built the texts (rt_job_reraise), and
+    // the last returns the record to the list, so a program that contains a failure every frame
+    // runs in bounded memory.
     f := rt_job_failure_record();
+    // Where the failed job was joined, as a statement entry: given by a joiner that re-raises it, or
+    // - for a job this stack's own forker ran here - the first program statement above the job's
+    // frame. A job a worker stole has no forker frames here; its joiner fills it in.
+    mut join_at = joined;
+    if join_at == 0 {
+        newest := rt_list_head(t);
+        mut walk0 = newest;
+        while walk0 != 0 {
+            if (walk0 & 1) != 0 {
+                break;
+            }
+            walk0 = raw_load(walk0 + 64);
+        }
+        if walk0 != 0 {
+            join_at = rt_site_above(t + 200, raw_load(walk0 - 1 + 96), 0);
+        }
+    }
+    raw_store(f + 56, join_at);
+    mut users = 0;
+    mut walk = rt_list_head(t);
+    while walk != 0 {
+        if (walk & 1) != 0 {
+            users += 1;
+            walk = raw_load(walk - 1 + 72);
+        } else {
+            walk = raw_load(walk + 64);
+        }
+    }
+    raw_store(f + 40, users);
     raw_store(f, kind);
     raw_store(f + 8, a);
     raw_store(f + 16, b);
@@ -5839,6 +5891,9 @@ fn rt_job_fail(t: u64, kind: u64, a: u64, b: u64, site: u64, msg: u64) -> u64 {
         }
     }
     raw_store(t + 152, 0);
+    if users == 0 {
+        rt_job_failure_release(f);
+    }
     // 3. Discard the stack. A task keeps the failure as numbers (or as the texts a joiner already
     // built, when it was raised again at a join), and its own joiner formats it: this path builds
     // no text.
@@ -5848,15 +5903,26 @@ fn rt_job_fail(t: u64, kind: u64, a: u64, b: u64, site: u64, msg: u64) -> u64 {
     if (site & 1) != 0 {
         return rt_contain_text(t, kind, msg, site & 18446744073709551614);
     }
-    return rt_contain_site(t, kind, a, b, site, msg);
+    raw_store(t + 232, join_at);
+    return rt_contain_joined(t, kind, a, b, site, msg);
 }
-// Five words for a failure record, from the jobs block's pages (rt_job_carve), never the heap.
+// A failure record - kind, two operands, site, message, users, join site (words 0..40, 56) - from the jobs block's
+// free list or its pages (rt_job_carve), never the heap.
 fn rt_job_failure_record() -> u64 {
     j := raw_load(rt_state_jobs());
     rt_spin_lock(j + 24);
     f := rt_job_carve(j, 72, 64);
     rt_spin_unlock(j + 24);
     return f;
+}
+// The free-list link is word 48, as for every record rt_job_carve hands out.
+fn rt_job_failure_release(f: u64) -> u64 {
+    j := raw_load(rt_state_jobs());
+    rt_spin_lock(j + 24);
+    raw_store(f + 48, raw_load(j + 72));
+    raw_store(j + 72, f);
+    rt_spin_unlock(j + 24);
+    return 0;
 }
 // Bring a fork this failing stack has not joined to done without running anything: take it back
 // if nobody has it, else wait - parked, not cancellable, re-testing after every wake.
@@ -5877,36 +5943,15 @@ fn rt_job_settle(r: u64) -> u64 {
     }
     return 0;
 }
-// A failure's message, as a fresh owned text: the record is shared by every job it was published
-// to, so each re-raise copies what it hands on.
+// A failure's message text, copied for the joiner (the record is shared by every job it was
+// published to), or 0 when the message is dictated by the kind.
 fn rt_job_message(f: u64) -> u64 {
     msg := raw_load(f + 32);
-    if msg != 0 {
-        out := rt_new();
-        rt_append(out, msg);
-        return out;
+    if msg == 0 {
+        return 0;
     }
-    return rt_fail_body_text(raw_load(f), raw_load(f + 8), raw_load(f + 16));
-}
-// Its site, as a fresh owned text: the original statement, then - the first time it crosses a
-// join - one line naming where it was joined (`joined` set). A site that is already a text has
-// crossed a join before and is copied as it is.
-fn rt_job_site(f: u64, joined: u64) -> u64 {
-    site := raw_load(f + 24);
-    if (site & 1) != 0 {
-        out := rt_new();
-        rt_append(out, site & 18446744073709551614);
-        return out;
-    }
-    out := rt_site_text(site);
-    if joined != 0 {
-        line := rt_new();
-        rt_reserveb(line, rt_fail_limit() + 196);
-        n := rt_fail_where_user(raw_load(line), 0);
-        raw_store(line + 8, n);
-        rt_append(out, line);
-        rt_drop_seq(line);
-    }
+    out := rt_new();
+    rt_append(out, msg);
     return out;
 }
 // The forker's side: the joined job failed, so this stack fails with the same failure. Inside a
@@ -5918,10 +5963,66 @@ fn rt_job_reraise(f: u64) -> u64 {
     // discarded, not one more failure (rt_contained_note counts it again when it is contained).
     raw_store(rt_contained_word(), raw_load(rt_contained_word()) - 1);
     raw_store(rt_discarded_word(), raw_load(rt_discarded_word()) + 1);
-    // The joiner is a healthy stack, so this is where the texts are built (and may allocate): the
-    // message, and the site with the line naming this join. Every stack the failure is raised on
-    // from here carries them as they are.
-    return rt_fail_text(raw_load(f), rt_job_message(f), rt_job_site(f, 1));
+    // Numbers, as at the failure: the kind, the operands, the failing statement and - the first
+    // time the failure crosses a join - this joiner's own statement. Whoever reports it renders
+    // both lines from them; only a message text is copied (the record is shared).
+    kind := raw_load(f);
+    a := raw_load(f + 8);
+    b := raw_load(f + 16);
+    site := raw_load(f + 24);
+    msg := rt_job_message(f);
+    mut joined = raw_load(f + 56);
+    if rt_atomic_fetch_sub(f + 40, 1) == 1 {
+        rt_job_failure_release(f);
+    }
+    me := rt_current();
+    if (joined == 0) & ((site & 1) == 0) {
+        if me != 0 {
+            joined = rt_site_above(me + 200, 0, 0);
+        }
+    }
+    j := rt_job_failing();
+    if j != 0 {
+        raw_store(j + 232, joined);
+        return rt_job_fail(j, kind, a, b, site, msg);
+    }
+    t := rt_containable();
+    if t != 0 {
+        if (site & 1) != 0 {
+            return rt_contain_text(t, kind, msg, site & 18446744073709551614);
+        }
+        raw_store(t + 232, joined);
+        return rt_contain_joined(t, kind, a, b, site, msg);
+    }
+    // Ends the process: one report, the failing statement first, then the join.
+    if rt_abort_begin() == 0 {
+        rt_abort_park();
+    }
+    buf := rt_report_buf();
+    if (joined == 0) & ((site & 1) == 0) {
+        joined = rt_site_above(rt_report_sites(), 0, 0);
+    }
+    mut n = rt_fail_put(buf, 0, view("error: "));
+    if msg != 0 {
+        rt_copy_bytes(buf + n, raw_load(msg), raw_load(msg + 8));
+        n += raw_load(msg + 8);
+    } else {
+        n = rt_fail_body(kind, a, b, buf, n);
+    }
+    raw_putbyte(buf + n, 10);
+    n += 1;
+    if (site & 1) != 0 {
+        text := site & 18446744073709551614;
+        rt_copy_bytes(buf + n, raw_load(text), raw_load(text + 8));
+        n += raw_load(text + 8);
+    } else if site != 0 {
+        n = rt_fail_line(buf, n, site, view(" --> "));
+    }
+    if joined != 0 {
+        n = rt_fail_line(buf, n, joined, view(" = in a job joined at "));
+    }
+    rt_write_all(2, buf, n);
+    return rt_abort_final();
 }
 // A thread that is not running a task counts its parallel regions in thread-record word 24, in
 // steps of 16 so the word never reads as a worker marker: inside a region it may fail at the same
@@ -6395,6 +6496,7 @@ fn rt_task_join(t: u64) -> u64 {
 fn rt_fail_text(kind: u64, msg: u64, site: u64) -> u64 {
     j := rt_job_failing();
     if j != 0 {
+        raw_store(j + 232, 0);
         return rt_job_fail(j, kind, 0, 0, site | 1, msg);
     }
     t := rt_containable();
@@ -6447,7 +6549,16 @@ fn rt_task_site(t: u64) -> u64 {
         // A re-raised failure already carries its site text; bit 0 says so.
         return site & 18446744073709551614;
     }
-    return rt_site_text(site);
+    out := rt_site_text(site);
+    joined := raw_load(t + 232);
+    if joined != 0 {
+        line := rt_new();
+        rt_reserveb(line, 400);
+        raw_store(line + 8, rt_fail_line(raw_load(line), 0, joined, view(" = in a job joined at ")));
+        rt_append(out, line);
+        rt_drop_seq(line);
+    }
+    return out;
 }
 // An explicit task failure (`task_fail(msg)`): the caller's own text, with the location of the call.
 // Contained exactly like a failed check, so it is a value at the join or the end of the process.
@@ -6455,7 +6566,7 @@ fn rt_task_fail(text: u64) -> u64 {
     msg := rt_lit(raw_load(text), raw_load(wrapping_add(text, 8)));
     j := rt_job_failing();
     if j != 0 {
-        return rt_job_fail(j, 13, 0, 0, rt_site_here(j + 200) & 18446744073709551614, msg);
+        return rt_job_fail_here(j, 13, 0, 0, msg);
     }
     t := rt_containable();
     if t != 0 {
