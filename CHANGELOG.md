@@ -1,5 +1,35 @@
 ## Unreleased
 
+- **Writing interfaces no longer costs the square of the declarations.** The interface writer put
+  each list of names in order with a selection sort, and looked up every type's inherent methods
+  by scanning every function of the program. A stable merge sort and a by-module index of the
+  functions give the same interface bytes: an edited build of the 104k-line syn4000 program (one
+  body changed, warm store) takes 36% fewer instructions.
+- **Arrays by value and arrays of owners** (fixed-arrays.md, A3). Functions take and return
+  `[T; N]` by value (a result travels in a short-lived box until results are in registers);
+  `extern "C"` signatures refuse an array by value with a message naming the pointer form.
+  Arrays may hold strings, vectors, options and records that own data: they move, drop their
+  elements at the end of their scope, and replace an element by dropping the old one.
+- **Generic array lengths** (A4): `fn sum<@n: u64>(a: &[f32; n])`, inferred from the argument's
+  array type or given (`zeros<4>()`), and record value parameters as lengths
+  (`struct Mat<@R: u64, @C: u64> { m: [[f32; C]; R] }`).
+
+- **Arrays in records, vectors and C structs; arrays as slices** (fixed-arrays.md, A2). `[T; N]`
+  is a field of structs, tuples and generic records (inline) and the element of a flat vector
+  (`[f32; 4][]` is a C `float[n][4]`). Elements may be plain or extern records and C handles. `&a`
+  is a `&[T]` / `&mut [T]` / `&[u8]` where one is expected, `a[lo: hi]` a sub-slice, every slice
+  method works on an array, and `a.copy_from(&v)` copies a vector of exactly N in.
+- **Changed: an `extern "C" record` field `[T; N]` is now an array, not a vector.** `ids := d.ids`
+  is a `[u32; 4]`; `d.ids[3]` reads and writes in place and `&d.name` is a `&[u8]`. Initialise and
+  assign it with an array literal (`name: [0; 16]` where `u8[0; 16]` was written); a vector is
+  copied in with `d.ids.copy_from(&v)`, which checks the length. The copy-as-vector surface
+  (`rt_carray_store`, the field-assignment special case) is gone.
+- The landing queue's build host runs the aarch64 legs under the patched qemu-aarch64:
+  `tools/land-remote.sh` builds it there with `tools/qemu/build.sh` before starting the legs, and
+  `tools/land.sh --remote-status` (`just land-status-remote`) prints each emulated leg's verdict for
+  the newest landing. `build.sh` names any missing build dependency and the packages that provide it.
+  Beside the emulated legs the build host runs the front-end fuzzer at 2000 cases, seeded from the
+  landing, and `--remote-status` reports it with the shrunk input of anything it found.
 - **Grail assembles its own x86-64 code.** `grail build` and `grail run` on Linux x86-64 no longer
   run clang to assemble. The compiler's own assembler (`grail asm IN.s -o OUT.o`,
   `compiler/asm_x86.grl` and `compiler/elf.grl`) writes the ELF objects. It covers exactly the
@@ -15,6 +45,15 @@
   beside it (`OBJ.units`): a function whose text did not change is replayed, not assembled again
   (`GRAIL_ASM_UNITS_VERIFY=1` checks the replayed object against a plain assembly).
 
+- **Callable bounds: `fn map<U, F: FnMut(T) -> U>(self, f: F)`.** A type parameter may be bound by a
+  closure type; a value of that type is callable in the generic body, the closure's own type is what
+  the specialisation is made for, and its parameters and result are inferred from it. A closure whose
+  type is known - a local closure, or one given for such a parameter - is now called directly, by its
+  body's symbol, instead of through its code word, so the optimiser can inline it. The `vecs`
+  callback methods (`map`, `filter`, `fold`, `any`, `all`, `find`, `position`, `sort_by`, ...) take
+  callable bounds. A closure given for a callable-bound parameter without `Owned` is lent for the call,
+  as an `Fn(..)` parameter is. Fixed with it: two capture-free closures with the same signature given
+  to one generic function were one specialisation; they are two.
 - **`grail check` is incremental.** It goes through the build store as `grail build` does: one
   compiler run per module, a module whose inputs did not change is not checked again, and in a
   module that is, the unchanged function bodies replay. A check after an edit to one module checks
@@ -119,6 +158,15 @@
   I/O task of `bench/frame.grl` hung on this about one run in four.
 - A Background job's cap slot is taken with the job's claim, so a slot cannot leak to a job
   another stack runs.
+- Fixed: on windows-x86_64 every `@no_alloc` function that indexes, casts or unwraps was refused
+  (`lib/strings.grl`'s `is_char_boundary` among them, so `bun tools/windows.mjs check` failed): the
+  runtime's calls through the import table were unknown edges, and the syscall dispatcher the
+  failure path calls reached `rt_alloc` through the pipe arm's heap-allocated SECURITY_ATTRIBUTES. An
+  import-table OS call in the runtime is now modelled as a syscall (no Grail heap, no failure), and
+  CreatePipe's attributes live in process state.
+- Added: sockets on Windows. `lib/net.grl`'s TCP layer now works on `windows-x86_64` instead of reporting `ENOSYS`: Winsock is started once per process (`WSAStartup` 2.2) and cleaned up on exit, a socket is an overlapped `WSASocketW` descriptor in the platform's own record list, and a receive or send is an overlapped `WSARecv`/`WSASend` whose completion the waiter takes from the request's own event - on an offload thread, so a task blocked on a socket parks and never holds a worker. `connect` is ConnectEx, resolved through `WSAIoctl(SIO_GET_EXTENSION_FUNCTION_POINTER)` because no DLL exports it on every stack, with `SO_UPDATE_CONNECT_CONTEXT` and a forced bind (and a blocking fallback), and `raw_win_call` now passes up to eight word arguments with the Win64 caller frame so the extension pointer can be called. `accept` is a blocking `accept` on an offload thread: `AcceptEx` was implemented first and withdrawn, because under Wine - the only host that runs these tests - it and a cooperative accept both complete only for an already-queued connection. Winsock errors map onto the errno space the portable layer reports (`WSAEWOULDBLOCK` never reaches a task, and `WSAECONNRESET`/`WSAECONNABORTED` on a receive are end of stream, not an error). `win-sockets-echo` runs the whole path under Wine, non-ASCII text included. Not implemented: driving sockets from the I/O completion port (it cannot be verified on this host, and the design says what it would need), UDP (`WSARecvFrom`/`WSASendTo` have no portable operation or library API to reach them), and cancellation of a task blocked in a socket call. Design and evidence: *Sockets* and *Sockets: what is verified* in docs/design/windows-backend.md.
+- Added: wide-character paths on Windows. Every file and process entry point is now the `-W` one - `CreateFileW`, `CreateDirectoryW`, `DeleteFileW`, `RemoveDirectoryW`, `GetFileAttributesW`, `GetCurrentDirectoryW`, `GetModuleFileNameW`, `CreateProcessW`, `GetCommandLineW`, `GetEnvironmentStringsW`/`FreeEnvironmentStringsW` - so a file name outside the system code page is no longer mangled into the ANSI code page. One convention holds it together: every entry point in `compiler/os-windows.grl` takes and returns UTF-8, and `rt_win_wide`/`rt_win_utf8_of` convert at the FFI boundary in a fixed 128 KiB arena (five 16 KiB slots, no user allocation), so no call site converts by hand. The encoder refuses invalid UTF-8 with `EINVAL` instead of replacing bytes - overlong forms, bare continuation bytes, truncated sequences, encoded surrogates and code points above U+10FFFF - and encodes a code point past U+FFFF as the surrogate pair UTF-16 requires; text the OS hands back with an unpaired surrogate becomes U+FFFD in the one inbound helper, because refusing `argv[0]` would leave a process with no arguments. `CreateProcessW` gets the MSVC quoting rules applied to UTF-16 units (`rt_win_quote_w`/`rt_win_split_w`), so an argument survives the trip in both directions, and its environment block is UTF-16 with `CREATE_UNICODE_ENVIRONMENT` - without that flag Windows reads a non-NULL block as ANSI and the child sees an empty environment. `host::list_dir` works on Windows for the first time: a read-only open of a directory returns an enumeration backed by `FindFirstFileW`, and `rt_syscall(217)` rewrites the find results into the `dirent64` stream the portable decoder already parses, as the Darwin module does for `getdirentries64`. `GetModuleFileNameW` also wires `host::exe_path` (it answered nothing before). Six dead Win32 import declarations are gone with their entries: `ExitThread`, `GetEnvironmentVariableA`, `SetFilePointerEx`, `FlushFileBuffers`, `MoveFileA` (no portable rename operation calls it) and `GetSystemTimeAsFileTime`. `tools/test-windows.mjs` now fails the suite if any case's object imports an ANSI entry point, and runs `win-unicode-paths` under Wine: Latin-1, CJK and emoji file names, a non-ASCII directory, a non-ASCII working directory and argument, and the `EINVAL` refusal. Design: *Text at the Win32 boundary* in docs/design/windows-backend.md.
+
 - **Fixed: an LLVM-backend miscompile of a vector grown through its address.** A call handed `&mut v`
   receives the slot's address, not the header word, so the lifter did not count it as a call that
   can grow `v`, and the `len`/`data` it had read before the call were used after it: `pad(&mut out,

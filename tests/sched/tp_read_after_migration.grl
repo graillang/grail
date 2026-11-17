@@ -1,0 +1,25 @@
+// Two reads of the thread pointer in one function, with a suspension between them, must each see
+// the thread they run on: a task resumes on whichever worker takes it. Under the LLVM backend the
+// read is lifted as inline assembly with a side effect so it is never merged or hoisted; a merged
+// read would make the second worker id always equal the first. 400 tasks on 4 workers each read
+// their worker, sleep, and read again; at least one must have moved.
+use host;
+
+fn hop(n: u64, unused: u64) -> u64 {
+    before := host::worker_id();
+    host::sleep_ms(1 + n % 3);
+    after := host::worker_id();
+    if before != after { return 1; }
+    return 0;
+}
+fn body<s>(sc: (&s Scope<u64>), count: u64) -> u64 {
+    mut hs = Task<u64>[];
+    for i in count { hs.push(spawn(sc, i, hop)); }
+    mut moved = 0;
+    while let Some(h) = hs.pop() { moved += join(h); }
+    return moved;
+}
+fn main() {
+    moved := task_scope(400, body);
+    println(moved > 0);
+}
