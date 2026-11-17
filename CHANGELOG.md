@@ -1,5 +1,11 @@
 ## Unreleased
 
+- The orphan rule's diagnostic names the modules: an `impl I for T` written outside the modules that
+  declare `I` and `T` now says where it was written, where the interface and the type are declared
+  (or that no module declares the type, leaving only the interface's), and the fix - move the impl
+  there, or wrap the type in a struct the module declares. The rule itself is unchanged; the book's
+  generics chapter now states it ("Where an implementation may live"). A scan of the corpus, lib/,
+  the Abundance port and the borg sources found no impl it refuses besides the reject cases.
 - **`lib/chan.grl`: a bounded multi-producer multi-consumer channel.** `chan::bounded<T>(n)` with
   `send` (waits while full; false once closed), `recv` (waits while empty; `None` once closed and
   empty) and `close`; waits park, as every `sync` wait does. `bench/chan.grl` measures it against

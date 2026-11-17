@@ -89,6 +89,36 @@ impl<T: Show> Show for Box<T> {
 }
 ```
 
+## Where an implementation may live
+
+An `impl I for T` must be written in the module that declares `I` or in the module that declares
+`T`; a generic type such as `Box<T>` counts as declared where `Box` is. A type no module declares -
+`u64`, `u8[]`, a type parameter in `impl<T> I for T` - leaves only the interface's module. This is
+the orphan rule: two modules can never both implement one interface for one type, so which
+implementation a call uses never depends on which modules a program happens to `use`.
+
+When you need an interface from one module on a type from another, wrap the type in a struct your
+module declares and implement the interface for the wrapper:
+
+```grl
+use interface_contracts;
+use orphan_point;
+
+struct ValuedPoint {
+    p: orphan_point::Point
+}
+impl interface_contracts::Value for ValuedPoint {
+    fn value<a>(self: (&a Self)) -> u64 {
+        return self.p.x;
+    }
+}
+```
+
+Writing the impl directly is refused, naming both declaring modules: ``implementation must own the
+interface or nominal type: `impl interface_contracts::Value for orphan_point::Point` is written in module `main`,
+but the interface is declared in `interface_contracts` and the type in `orphan_point`; move the impl
+to one of those modules, or wrap the type ...``.
+
 ## Operators
 
 Implement an interface from `ops` and the operator works on your type (Rust's `std::ops`):

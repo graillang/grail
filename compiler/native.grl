@@ -23082,7 +23082,35 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
             }
         }
         if permitted == 0 {
-            fail(&mut c, view("implementation must own the interface or nominal type"));
+            // The orphan rule: an implementation lives with its interface or with its type, so two
+            // modules can never both implement one interface for one type and the impl a call
+            // resolves to does not depend on which modules a program happens to `use`.
+            iface_name := c.interfaces[contract - 1].name.copy();
+            iface_home := c.interfaces[contract - 1].module.copy();
+            type_name := source_type_name(&mut c, ty);
+            mut msg = copy_bytes(view("implementation must own the interface or nominal type: `impl "));
+            if iface_home.len() != 0 {
+                push_bytes(&mut msg, view(iface_home));
+                push_bytes(&mut msg, view("::"));
+            }
+            push_bytes(&mut msg, view(iface_name));
+            push_bytes(&mut msg, view(" for "));
+            push_bytes(&mut msg, view(type_name));
+            push_bytes(&mut msg, view("` is written in module `"));
+            push_bytes(&mut msg, view(owner));
+            push_bytes(&mut msg, view("`, but the interface is declared in `"));
+            push_bytes(&mut msg, view(iface_home));
+            if ty_kind(&mut c, ty) == 8 {
+                push_bytes(&mut msg, view("` and the type in `"));
+                push_bytes(&mut msg, view(c.decls[ty_arg(&mut c, ty)].module));
+                push_bytes(&mut msg, view("`; move the impl to one of those modules"));
+            } else {
+                push_bytes(&mut msg, view("` and the type is declared by no module, so the impl belongs in `"));
+                push_bytes(&mut msg, view(iface_home));
+                push_bytes(&mut msg, view("`"));
+            }
+            push_bytes(&mut msg, view(", or wrap the type in a struct this module declares and implement the interface for the wrapper"));
+            fail(&mut c, view(msg));
         }
         c
             .implementations
