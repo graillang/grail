@@ -8,11 +8,54 @@
   `extern "C" nonblocking`. Refusals name the chain (`nap -> sleep_ms -> f_host_sleep_ms ->
   rt_sleep_for`). A check that can fail does not block (the failure ends the frame). Interface
   format 12: the `effects` row and the `facts` record carry it.
+- png unfilters the common layout through addresses (`bytes::data_addr`, new) into an image sized
+  once, under the length guard that already bounds every row, instead of a push and a checked index
+  per byte. The 4K png: Grail-LLVM 6.44G -> 5.50G instructions (0.71 -> 0.61 s; stb_image 0.41 s),
+  Grail-native 17.7G -> 16.8G.
+- zstd's backward bit reader keeps a 64-bit window and reloads it about once per sequence instead
+  of assembling a word on every read: the 20 MB archive 11.9G -> 11.75G instructions on Grail-LLVM.
+- **Inflate refills its bit buffer a word at a time** (`bytes::load_u64`, a new unaligned
+  little-endian word read), instead of a byte per loop step, while eight input bytes remain. The 4K
+  png: Grail-LLVM 7.47G -> 6.44G instructions (0.85 -> 0.71 s; libpng 0.41 s, stb_image 0.41 s),
+  Grail-native 19.8G -> 17.7G.
+- Bounds checks: an index `t & L` is at most `L`, so a table lookup through a mask that matches the
+  table (`next[s & 511]` on a 512-entry table) needs no check. The loop-invariant pass runs only in
+  a body `func()` compiles, where a failed kept fact can recompile the function; a closure body
+  compiled elsewhere uses the plain kill.
+
+- **Closures given for a generic `F` live in the frame (S6(A)).** A closure whose type is its own
+  literal's - a local closure, or one passed for a callable-bound parameter - is now held as its
+  environment's words in the caller's frame, copied on a move and dropped in place, and called
+  directly: no heap object, as in Rust. It is boxed once, where it meets an erased `Fn(..)` type, a job
+  or thread payload, or a `&Fn(..)` parameter. A closure written inside a generic function sees that
+  specialisation's types, so it may call a captured callable-bound `f` (`|i| f()` inside `pool::run`'s
+  adapters). Bound violations through a generic `F` now give the same messages as through `Fn(..)`.
+- **Fix: every closure expression is a type of its own.** Two closure literals with the same
+  signature and environment shape compared equal inside a generic type, so `k = keep(|| ..)` could
+  replace a `Keep<F>` built from another literal; calls through it then ran the first literal's body
+  (callable-bound calls are direct), and a borrowing closure could outlive what it borrowed. It is now
+  a type mismatch, as in Rust.
+- **`split` and `lines` scan eight bytes per step** with `bytes::find_byte`, so `strings` now uses
+  the `bytes` module (a program that lists its modules adds `lib/bytes.grl`). bench/strings.grl:
+  Grail-LLVM 4.53G -> 3.63G instructions, 0.37 s (Rust 3.23G); Grail-native 13.7G -> 12.1G.
 - **`bytes::copy_back(v, distance, length)`**: the LZ77 match copy, appending `length` bytes copied
   from `distance` back (overlap allowed, as DEFLATE and zstd require), a word at a time when the
   distance is at least eight. Inflate and zstd use it instead of a push per byte: the 20 MB zstd
   archive Grail-LLVM 14.4G -> 11.9G instructions (1.43 -> 1.24 s), the 4K png 8.07G -> 7.47G
   (0.91 -> 0.85 s).
+- A push onto a vector or a text that has room is a store and a length again, in a release build too:
+  growing moved out of `rt_push` into a cold `rt_push_slow`, so the call a release program makes
+  into the runtime no longer saves five registers on every push. Abundance's slowest program
+  (abgeo) runs 6% fewer instructions; `rt_push` went from 17% to 6-8% of its time.
+- **Native backend: a scaled array index is computed once per straight line.** nbody's `p[i*3+k]`
+  computed `3*i` again for every `k`; it is now computed once into a free scratch register and the
+  later accesses read `8k(%rdi,%r8,8)`. nbody executes 5% fewer instructions.
+- **C calling a Grail callback is cheaper (x86-64).** A callback whose arguments all arrive in
+  registers is entered through a frameless thunk that pins the thread's record, calls the body and
+  unpins; only a thread C created takes the framed path that adopts a record. A full-word body is
+  an ordinary register function, so release builds optimise it. A C loop calling a callback (10 M
+  calls): 42 -> 26 instructions per call native, 47 -> 22 LLVM (C calling C: 11).
+
 - Fixed: an interface whose methods carry default bodies could not be read back and written again
   unchanged ("does not round-trip"): the reader kept a default body only as the source it compiles,
   not as the method's text.
@@ -83,6 +126,16 @@
   when a check or `len()` in the loop needs it) into registers on the way into the loop, and the
   accesses inside read those. An unchecked access needs only the data register. fnv executes 11%
   fewer instructions.
+- Bounds checks across loops that rebuild their vectors: a fact a `while` body's writes would end
+  (`v.len == n` when the body swaps `v` with another vector) is kept while the body is compiled and
+  checked where the body ends; if it holds again it holds at every evaluation of the guard and
+  after the loop, and if not the function is compiled again without it. Assignments now state what
+  they store (`v = tmp` gives `v.len == tmp.len`), a write keeps what its name tied together
+  (`v.len == n` and `tmp.len == v.len` leave `tmp.len == n`), `x := y.copy()` has `y`'s length,
+  `if hi > n { hi = n; }` leaves `hi <= n`, and an index `t - c` with `c <= t` and `n / 2` are
+  read. Sort's checks in `main` go from 12 to 7.
+  `for x in v` reads its element unchecked when the body mentions `v` only as `v[...]` and
+  `v.len()` (no closure): the length the loop counted to cannot change.
 
 - **Interface format 11:** an interface's trailer ends with `fast_hash` of the bytes before it (XXH64
   under four seeds, the build store's digest) instead of SHA-256. It guards against corruption, which
