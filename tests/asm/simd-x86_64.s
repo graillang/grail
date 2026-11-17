@@ -43,4 +43,11 @@ vfmadd231ps %xmm1,%xmm0,%xmm2
 vfmadd231pd %xmm9,%xmm12,%xmm10
 vfmadd231ps %xmm15,%xmm8,%xmm3
 vfmadd231pd %xmm2,%xmm13,%xmm14
+vmovups (%rax),%ymm0
+vmovups 32(%rdi),%ymm7
+vmovups %ymm0,(%rdi)
+vmovups (%r9),%ymm11
+vmovups %ymm12,64(%r12)
+vmovups (%rax,%r10,8),%ymm2
+vzeroupper
 ret
