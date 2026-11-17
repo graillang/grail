@@ -1,5 +1,9 @@
 ## Unreleased
 
+- Native Linux builds give every compiled function a symbol type and size (`.type @function`,
+  `.size`), so readelf, perf and debuggers name addresses inside them; the compiler's assembler
+  writes them as STT_FUNC with st_size.
+
 - **Closures given for a generic `F` live in the frame (S6(A)).** A closure whose type is its own
   literal's - a local closure, or one passed for a callable-bound parameter - is now held as its
   environment's words in the caller's frame, copied on a move and dropped in place, and called
