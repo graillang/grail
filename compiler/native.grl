@@ -3154,7 +3154,13 @@ fn shape_pair_result<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
 // outlive the return.
 fn save_result<a>(c: (&a mut C), ret: u64) -> u64 {
     if framed(&mut c, ret) {
-        // Until results travel in registers (stage 3c) a framed result comes back boxed.
+        words := record_words(&mut c, base_type(&mut c, ret));
+        if words <= 2 {
+            // Word 0 in rax, word 1 in rdx (docs/design/unboxed-values.md, 3c): stored straight
+            // into frame words of this call site.
+            return frame_from_registers(&mut c, words);
+        }
+        // A larger result comes back boxed until it has a destination pointer (3c, part 2).
         slot := save(&mut c);
         unbox_into_frame(&mut c, slot, ret);
         return slot;
@@ -22608,6 +22614,21 @@ fn flat_push<a>(c: (&a mut C), elem: u64) -> string {
     }
     return "rt_pushw";
 }
+// The runtime calls a task's, a job's and parallel_map's function itself and keeps one word of its
+// result, and parallel_map hands each call one word of its vector: a plain record is neither one
+// word nor a pointer it may keep (it comes back in two registers, and a vector of them is inline).
+// Until those calls go through an adapter (docs/design/unboxed-values.md, stage 3c), such a program
+// is refused rather than miscompiled.
+fn refuse_framed_through_runtime<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
+    if (c.raw == 0) & framed(&mut c, ty) {
+        mut msg = copy_bytes(what);
+        push_bytes(&mut msg, view(" cannot be a plain record yet (`"));
+        push_bytes(&mut msg, view(source_type_name(&mut c, ty)));
+        push_bytes(&mut msg, view("`): return or pass it boxed, for example as a one-element vector"));
+        fail(&mut c, view(msg));
+    }
+    return ();
+}
 // Whether `ty` is a plain record, which lives in the frame (docs/design/unboxed-values.md, stage 3a):
 // its value is the address of frame words, its drop frees nothing, and a holder that keeps it past
 // the statement boxes it.
@@ -22629,6 +22650,47 @@ fn frame_alloc<a>(c: (&a mut C), words: u64) -> u64 {
     stack_slot(&mut c, first);
     o(&mut c, view(",%rax\n"));
     return save(&mut c);
+}
+// The words of a framed result just returned in rax (and rdx), stored into fresh frame words.
+fn frame_from_registers<a>(c: (&a mut C), words: u64) -> u64 {
+    mut first = 0;
+    for j in words {
+        first = fresh(&mut c);
+    }
+    if c.facts_fn.len() != 0 {
+        llvm::fact_aggregate(&mut c.facts, copy_bytes(view(c.facts_fn)), first, words);
+    }
+    o(&mut c, view("movq %rax,"));
+    stack_slot(&mut c, first);
+    c.out.push(10);
+    if words == 2 {
+        o(&mut c, view("movq %rdx,"));
+        stack_slot(&mut c, first - 1);
+        c.out.push(10);
+    }
+    o(&mut c, view("leaq "));
+    stack_slot(&mut c, first);
+    o(&mut c, view(",%rax\n"));
+    return save(&mut c);
+}
+// Returns the framed record at `slot`: up to two words in rax:rdx (the second live at the `ret`, a
+// fact like a returned DynPair's), a larger one as a box until it has a destination pointer.
+fn frame_result<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
+    words := record_words(&mut c, base_type(&mut c, ty));
+    if words > 2 {
+        boxed := frame_box(&mut c, slot, ty);
+        get(&mut c, boxed, view("%rax"));
+        return ();
+    }
+    if words == 2 {
+        dyn_result(&mut c);
+        get(&mut c, slot, view("%rcx"));
+        o(&mut c, view("movq 8(%rcx),%rdx\nmovq (%rcx),%rax\n"));
+        return ();
+    }
+    get(&mut c, slot, view("%rcx"));
+    o(&mut c, view("movq (%rcx),%rax\n"));
+    return ();
 }
 // A copy of the framed record at the address in `src`, in fresh frame slots of this site.
 fn frame_copy<a>(c: (&a mut C), src: u64, ty: u64) -> u64 {
@@ -29572,6 +29634,8 @@ fn parallel_map_builtin<a>(c: (&a mut C), items: Val) -> Val {
     if contains_borrow(&mut c, result, 0) {
         fail(&mut c, view("parallel_map result cannot contain borrows"));
     }
+    refuse_framed_through_runtime(&mut c, result, view("a parallel_map result"));
+    refuse_framed_through_runtime(&mut c, item, view("a parallel_map item"));
     if contains_task(&mut c, result, 0) || contains_task(&mut c, item, 0) {
         fail(&mut c, view("parallel_map cannot move Task or job handles between threads"));
     }
@@ -29853,6 +29917,7 @@ fn parallel_spawn_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     if contains_borrow(&mut c, result, 0) {
         fail(&mut c, view("a job result cannot contain borrows: the job owns what it returns"));
     }
+    refuse_framed_through_runtime(&mut c, result, view("a pool job's result"));
     if contains_task(&mut c, result, 0) {
         fail(&mut c, view("a pool job cannot return a Task or Job handle"));
     }
@@ -30079,6 +30144,7 @@ fn spawn_builtin<a>(c: (&a mut C), scope: Val) -> Val {
     }
     require_sendable_owned(&mut c, item.ty, view("spawned item"));
     require_sendable_owned(&mut c, result, view("spawned result"));
+    refuse_framed_through_runtime(&mut c, result, view("a spawned task's result"));
     value := item.t;
     if c.raw == 0 {
         move_out(&mut c, item);
@@ -32682,8 +32748,7 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
             move_out(&mut c, val(v.t, v.ty));
             cleanup(&mut c, 0);
             if framed(&mut c, v.ty) {
-                boxed := frame_box(&mut c, v.t, v.ty);
-                get(&mut c, boxed, view("%rax"));
+                frame_result(&mut c, v.t, v.ty);
             } else {
                 get(&mut c, v.t, view("%rax"));
             }
@@ -40142,8 +40207,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
             get(&mut c, v.t, view("%rax"));
             o(&mut c, view("movq 8(%rax),%rdx\nmovq (%rax),%rax\n"));
         } else if framed(&mut c, v.ty) {
-            boxed := frame_box(&mut c, v.t, v.ty);
-            get(&mut c, boxed, view("%rax"));
+            frame_result(&mut c, v.t, v.ty);
         } else {
             get(&mut c, v.t, view("%rax"));
         }
