@@ -3251,6 +3251,16 @@ fn rt_held_push(p: u64) -> u64 {
 }
 fn rt_held_node(object: u64, count: u64, kind: u64) -> u64 {
     b := rt_block_fast();
+    // The first slot is the one a callback-scoped hold almost always finds free.
+    first := wrapping_add(b, 56);
+    if (raw_load(wrapping_add(b, 48)) != 0) & (raw_load(wrapping_add(first, 32)) == 0) {
+        raw_store(first, object);
+        raw_store(wrapping_add(first, 8), count);
+        raw_store(wrapping_add(first, 32), kind);
+        raw_store(wrapping_add(first, 16), raw_load(wrapping_add(b, 32)));
+        raw_store(wrapping_add(b, 32), first);
+        return first;
+    }
     slots := raw_load(wrapping_add(b, 48));
     mut n = 0;
     mut i = 0;
@@ -3305,6 +3315,13 @@ fn rt_held_unlink(b: u64, e: u64) -> u64 {
 // The newest node of `kind` on `object`, taken off the list and freed; its count is the answer.
 fn rt_held_drop(object: u64, kind: u64) -> u64 {
     b := rt_block_fast();
+    head := raw_load(wrapping_add(b, 32));
+    if (head == wrapping_add(b, 56)) & (raw_load(head) == object) & (raw_load(wrapping_add(head, 32)) == kind) {
+        // The newest hold, in the first slot: unlinked and freed in place.
+        raw_store(wrapping_add(b, 32), raw_load(wrapping_add(head, 16)));
+        raw_store(wrapping_add(head, 32), 0);
+        return raw_load(wrapping_add(head, 8));
+    }
     mut at = raw_load(wrapping_add(b, 32));
     while at != 0 {
         if (raw_load(wrapping_add(at, 32)) == kind) & (raw_load(at) == object) {
