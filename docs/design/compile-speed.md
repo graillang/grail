@@ -441,7 +441,9 @@ State (landed on main): steps 1-3. The COFF writer (`compiler/coff.grl`), x86 CO
 `tests/asm/directives-windows-x86_64.s` are identical to clang's. Step 5 is in: non-debug Windows x86-64
 builds assemble in-process (`assemble_object` target 3, `compile_mode`, `tools/native.mjs` and
 `tools/windows.mjs assemble`; C shims and CodeView text still go to clang), checked against clang with
-GRAIL_ASM_ORACLE=1 in `windows.mjs check`. Remaining: step 4 (CodeView), then delete clang for the target.
+GRAIL_ASM_ORACLE=1 in `windows.mjs check`. Step 4 is in too: `.cv_*` and `.secrel32`/`.secidx` in `.debug$S`, as LLVM's CodeViewContext writes
+them (the Windows debug hello, 8083 line rows, is identical to clang's), so Windows x86-64 assembles
+without clang in every build; only C shims still use it, as a C compiler.
 The hooks step 5 used: in `native.grl assemble_object` add `c.plat` Windows → `asm_x86::assemble_for(3, ...)`;
 in `cli.grl compile_mode` let `internal` include `windows-x86_64` (the assemble prefix gets `--target
 windows-x86_64`); in `tools/native.mjs assemble` the same; then `tools/windows.mjs` under wine on that path,

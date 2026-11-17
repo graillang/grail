@@ -178,7 +178,7 @@ if (import.meta.main) {
     const dir = join(import.meta.dir, '..', 'tests/asm');
     let bad = 0;
     for (const name of readdirSync(dir).filter(f => f.endsWith('.s')).sort()) {
-      const t = name.replace(/^directives-/, '').replace(/\.s$/, '');
+      const t = name.match(/(windows-x86_64|x86_64|aarch64|riscv64)\.s$/)[1];
       const result = checkFile(join(dir, name), work, assembler, t);
       console.log(result ? `FAIL ${name}: ${result}` : `ok ${name}`);
       if (result) bad++;

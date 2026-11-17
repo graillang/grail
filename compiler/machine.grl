@@ -2648,6 +2648,233 @@ fn simd_x86_packed<a>(o: (&a mut Out), s: (&Simd)) -> bool {
     }
     return false;
 }
+// S3b, AArch64: the `simd.` ops NEON does exactly as the scalar lanes would, 16 bytes at a time
+// (docs/design/simd.md). Operands load with `ldr q`; v0..v5 are scratch (the optimiser keeps floats
+// in v17..v23, d16 is the conversions' scratch). What NEON cannot do with the same result - a 64-bit
+// multiply or min/max, to_i32, a shuffle, a lane read - is left to the scalar lanes (false).
+fn a64_ldq<a, b>(o: (&a mut Out), v: u64, base: &b [u8], off: u64) -> unit {
+    put(&mut o, view("ldr q"));
+    u64(&mut o, v);
+    put(&mut o, view(",["));
+    put(&mut o, base);
+    put(&mut o, view(",#"));
+    u64(&mut o, off);
+    put(&mut o, view("]\n"));
+    return ();
+}
+fn a64_stq<a>(o: (&a mut Out), v: u64, off: u64) -> unit {
+    put(&mut o, view("str q"));
+    u64(&mut o, v);
+    put(&mut o, view(",[x0,#"));
+    u64(&mut o, off);
+    put(&mut o, view("]\n"));
+    return ();
+}
+// `OP vD.T, vN.T, vM.T`.
+fn a64_v3<a, b, c>(o: (&a mut Out), op: &b [u8], t: &c [u8], d: u64, n: u64, m: u64) -> unit {
+    put(&mut o, op);
+    put(&mut o, view(" v"));
+    u64(&mut o, d);
+    put(&mut o, view("."));
+    put(&mut o, t);
+    put(&mut o, view(",v"));
+    u64(&mut o, n);
+    put(&mut o, view("."));
+    put(&mut o, t);
+    put(&mut o, view(",v"));
+    u64(&mut o, m);
+    put(&mut o, view("."));
+    put(&mut o, t);
+    put(&mut o, view("\n"));
+    return ();
+}
+fn simd_a64_packed<a>(o: (&a mut Out), s: (&Simd)) -> bool {
+    op := s.op;
+    bits := s.bits;
+    float := s.elem == 1;
+    uns := s.elem == 4;
+    chunks := s.lanes * bits / 128;
+    mut t = "4s";
+    if bits == 64 {
+        t = "2d";
+    }
+    if bits == 8 {
+        t = "16b";
+    }
+    if (op <= 7) && !((op == 4) && !float) && !((op == 3) && !float && (bits == 64)) {
+        for c in chunks {
+            a64_ldq(&mut o, 0, view("x1"), 16 * c);
+            a64_ldq(&mut o, 1, view("x2"), 16 * c);
+            if float && (op <= 4) {
+                names := u8[][copy_text(view("fadd")), copy_text(view("fsub")), copy_text(view("fmul")), copy_text(view("fdiv"))];
+                a64_v3(&mut o, view(names[op - 1]), view(t), 0, 0, 1);
+            } else if op <= 3 {
+                names := u8[][copy_text(view("add")), copy_text(view("sub")), copy_text(view("mul"))];
+                a64_v3(&mut o, view(names[op - 1]), view(t), 0, 0, 1);
+            } else {
+                names := u8[][copy_text(view("and")), copy_text(view("orr")), copy_text(view("eor"))];
+                a64_v3(&mut o, view(names[op - 5]), view("16b"), 0, 0, 1);
+            }
+            a64_stq(&mut o, 0, 16 * c);
+        }
+        return true;
+    }
+    if ((op == 8) || (op == 9)) && (float || (bits != 64)) {
+        for c in chunks {
+            a64_ldq(&mut o, 0, view("x1"), 16 * c);
+            a64_ldq(&mut o, 1, view("x2"), 16 * c);
+            if float {
+                // The scalar rule: b where b < a (min) / b > a (max), else a; a NaN b keeps a (the compare
+                // is false), and a NaN a gives b.
+                if op == 8 {
+                    a64_v3(&mut o, view("fcmgt"), view(t), 2, 0, 1);
+                } else {
+                    a64_v3(&mut o, view("fcmgt"), view(t), 2, 1, 0);
+                }
+                a64_v3(&mut o, view("bsl"), view("16b"), 2, 1, 0);
+                a64_v3(&mut o, view("fcmeq"), view(t), 3, 0, 0);
+                a64_v3(&mut o, view("bsl"), view("16b"), 3, 2, 1);
+                a64_stq(&mut o, 3, 16 * c);
+            } else {
+                mut name = "smin";
+                if uns && (op == 8) {
+                    name = "umin";
+                }
+                if uns && (op == 9) {
+                    name = "umax";
+                }
+                if !uns && (op == 9) {
+                    name = "smax";
+                }
+                a64_v3(&mut o, view(name), view(t), 0, 0, 1);
+                a64_stq(&mut o, 0, 16 * c);
+            }
+        }
+        return true;
+    }
+    if (10 <= op) && (op <= 15) {
+        for c in chunks {
+            a64_ldq(&mut o, 0, view("x1"), 16 * c);
+            a64_ldq(&mut o, 1, view("x2"), 16 * c);
+            mut eq = "cmeq";
+            mut gt = "cmgt";
+            mut ge = "cmge";
+            if float {
+                eq = "fcmeq";
+                gt = "fcmgt";
+                ge = "fcmge";
+            } else if uns {
+                gt = "cmhi";
+                ge = "cmhs";
+            }
+            if (op == 10) || (op == 11) {
+                a64_v3(&mut o, view(eq), view(t), 0, 0, 1);
+            } else if op == 12 {
+                a64_v3(&mut o, view(gt), view(t), 0, 1, 0);
+            } else if op == 13 {
+                a64_v3(&mut o, view(ge), view(t), 0, 1, 0);
+            } else if op == 14 {
+                a64_v3(&mut o, view(gt), view(t), 0, 0, 1);
+            } else {
+                a64_v3(&mut o, view(ge), view(t), 0, 0, 1);
+            }
+            if op == 11 {
+                put(&mut o, view("not v0.16b,v0.16b\n"));
+            }
+            a64_stq(&mut o, 0, 16 * c);
+        }
+        return true;
+    }
+    if op == 16 {
+        for c in chunks {
+            a64_ldq(&mut o, 0, view("x1"), 16 * c);
+            a64_ldq(&mut o, 1, view("x2"), 16 * c);
+            a64_ldq(&mut o, 2, view("x3"), 16 * c);
+            a64_v3(&mut o, view("bsl"), view("16b"), 0, 1, 2);
+            a64_stq(&mut o, 0, 16 * c);
+        }
+        return true;
+    }
+    if op == 17 {
+        for c in chunks {
+            a64_ldq(&mut o, 0, view("x1"), 16 * c);
+            put(&mut o, view("not v0.16b,v0.16b\n"));
+            a64_stq(&mut o, 0, 16 * c);
+        }
+        return true;
+    }
+    if op == 18 {
+        if s.elem == 3 {
+            put(&mut o, view("sub x9,xzr,x9\n"));
+        }
+        if float && (bits == 32) {
+            put(&mut o, view("fmov d0,x9\nfcvt s0,d0\ndup v0.4s,v0.s[0]\n"));
+        } else if bits == 64 {
+            put(&mut o, view("dup v0.2d,x9\n"));
+        } else {
+            put(&mut o, view("dup v0."));
+            put(&mut o, view(t));
+            put(&mut o, view(",w9\n"));
+        }
+        for c in chunks {
+            a64_stq(&mut o, 0, 16 * c);
+        }
+        return true;
+    }
+    if (op == 20) && float {
+        a64_ldq(&mut o, 0, view("x1"), 0);
+        if chunks == 2 {
+            a64_ldq(&mut o, 1, view("x1"), 16);
+            a64_v3(&mut o, view("fadd"), view(t), 0, 0, 1);
+        }
+        if bits == 32 {
+            put(&mut o, view("ext v1.16b,v0.16b,v0.16b,#8\nfadd v0.4s,v0.4s,v1.4s\nfaddp s0,v0.2s\nfcvt d0,s0\nfmov x9,d0\n"));
+        } else {
+            put(&mut o, view("faddp d0,v0.2d\nfmov x9,d0\n"));
+        }
+        return true;
+    }
+    if (op == 21) || (op == 30) || (op == 31) {
+        for c in chunks {
+            a64_ldq(&mut o, 0, view("x1"), 16 * c);
+            a64_stq(&mut o, 0, 16 * c);
+        }
+        return true;
+    }
+    if (op == 22) || (op == 23) {
+        // A mask lane is all ones or all zeros, so the byte-wise maximum (any) or minimum (all) of
+        // the mask's bytes answers for every lane width.
+        for c in chunks {
+            a64_ldq(&mut o, 0, view("x1"), 16 * c);
+            if op == 22 {
+                put(&mut o, view("umaxv b0,v0.16b\n"));
+            } else {
+                put(&mut o, view("uminv b0,v0.16b\n"));
+            }
+            if c == 0 {
+                put(&mut o, view("umov w9,v0.b[0]\n"));
+            } else {
+                put(&mut o, view("umov w10,v0.b[0]\n"));
+                if op == 22 {
+                    put(&mut o, view("orr x9,x9,x10\n"));
+                } else {
+                    put(&mut o, view("and x9,x9,x10\n"));
+                }
+            }
+        }
+        put(&mut o, view("cmp x9,#0\ncset x9,ne\n"));
+        return true;
+    }
+    if op == 28 {
+        for c in chunks {
+            a64_ldq(&mut o, 0, view("x1"), 16 * c);
+            put(&mut o, view("scvtf v0.4s,v0.4s\n"));
+            a64_stq(&mut o, 0, 16 * c);
+        }
+        return true;
+    }
+    return false;
+}
 // F[f] = the binary64 whose top 16 bits are `top` and the rest zero (the bounds toi32 compares with).
 fn simd_fconst<a, b>(o: (&a mut Out), f: u64, top: &b [u8]) -> unit {
     if o.target == 1 {
@@ -2692,6 +2919,9 @@ fn simd_iconst<a>(o: (&a mut Out), v: u64) -> unit {
 }
 pub fn simd_expand<a>(o: (&a mut Out), s: (&Simd)) -> unit {
     if simd_x86(&o) && simd_x86_packed(&mut o, &s) {
+        return ();
+    }
+    if (o.target == 1) && simd_a64_packed(&mut o, &s) {
         return ();
     }
     eb := s.bits / 8;
