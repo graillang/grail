@@ -4,6 +4,15 @@
   removes the bounds checks it covers. A closure literal written as `parallel_for_zip`'s argument
   also starts knowing that every piece is as long as the first, so `v[i]` under `for i in p.len()`
   has no check (a closure passed through a variable keeps it).
+- **`bytes::copy_back(v, distance, length)`**: the LZ77 match copy, appending `length` bytes copied
+  from `distance` back (overlap allowed, as DEFLATE and zstd require), a word at a time when the
+  distance is at least eight. Inflate and zstd use it instead of a push per byte: the 20 MB zstd
+  archive Grail-LLVM 14.4G -> 11.9G instructions (1.43 -> 1.24 s), the 4K png 8.07G -> 7.47G
+  (0.91 -> 0.85 s).
+- A push onto a vector or a text that has room is a store and a length again, in a release build too:
+  growing moved out of `rt_push` into a cold `rt_push_slow`, so the call a release program makes
+  into the runtime no longer saves five registers on every push. Abundance's slowest program
+  (abgeo) runs 6% fewer instructions; `rt_push` went from 17% to 6-8% of its time.
 
 - Fixed: an interface whose methods carry default bodies could not be read back and written again
   unchanged ("does not round-trip"): the reader kept a default body only as the source it compiles,
@@ -20,6 +29,9 @@
   division fix included), Grail-native 107G -> 21.4G.
 - `pool::chunks_mut_at` (exclusive pieces with their first index) and `pool::reduce_chunks` (a
   read-only reduction folded in index order, the same bits on any number of workers).
+- A Grail callback called from C settles on its thread record once at entry and pins and unpins
+  through it, instead of choosing between `rt_tls_record` and the thread pointer at each end
+  (x86-64). A C loop calling a Grail callback 10 M times: LLVM 52 -> 47 instructions per call.
 
 - The native backend computes SIMD operations with packed SSE2 on x86-64 (lane arithmetic, compares,
   select, splat, sums, 4-lane shuffles, `any`/`all`, `to_f32`), with exactly the same results as
@@ -79,7 +91,7 @@
   an older compiler are refused by version and regenerated.
 - Windows x86-64 builds (non-debug) assemble in the compiler too: `compiler/coff.grl` writes COFF
   objects byte-identical to clang's, `.pdata`/`.xdata` unwind for every function included
-  (`grail asm --target windows-x86_64`). Debug builds keep clang until CodeView is written. Fixed:
+  (`grail asm --target windows-x86_64`), debug builds included (CodeView line tables). Fixed:
   `movsd` encoded as `movdqu` (the two shared an internal id).
 - **Sized and signed arithmetic no longer divides in software.** The runtime's `rt_div` was a
   shift-and-subtract loop, and every overflow check of a sized or signed multiply and every sized or
@@ -238,6 +250,11 @@
   writes interfaces records its bodies now; `tools/test-cli.mjs` checks a program using each lib/
   module.
 - The internal assembler takes `.previous`.
+- **Integer map keys hash in registers.** `hash::Hash` has a defaulted `table_hash`, the SipHash-1-3
+  value a map uses (the default streams through `hash`, as before); the integer types give it as
+  `hash::word_hash`, the same value computed straight-line with no hasher state in memory. User
+  `Hash` impls need no change. bench/hashmap.grl: Grail-LLVM 0.88G -> 0.77G instructions and 0.30
+  -> 0.27 s user (Rust 0.64G, 0.21 s), Grail-native 3.21G -> 2.69G.
 - **Fix: every closure expression is a type of its own.** Two closure literals with the same
   signature and environment shape compared equal inside a generic type, so `k = keep(|| ..)` could
   replace a `Keep<F>` built from another literal; calls through it then ran the first literal's body
