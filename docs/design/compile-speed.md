@@ -470,6 +470,34 @@ and delete clang for that target as for Linux.
 5. In-process path for the Windows target in `assemble_object` and the driver, the windows leg
    (tools/windows.mjs under wine) on it, then delete the clang requirement as for Linux.
 
+### macOS (Mach-O), in progress
+
+The last target that still assembles with clang. The survey of the macOS arm64 hello (`--target
+macos-aarch64`, 6.5 MB of text, the same runtime as Linux through `darwinify`):
+
+- Instructions: the AArch64 subset `asm_a64.grl` already encodes, plus nothing new.
+- Directives: `.build_version macos, 11, 0`, `.section __DATA,__bss`, `.pushsection __TEXT,__const`,
+  `.weak_definition`, `.space`, and the ELF subset otherwise.
+- Operand modifiers: `sym@PAGE` / `sym@PAGEOFF` in place of `:lo12:`.
+- clang's object: one unnamed LC_SEGMENT_64 with `__TEXT,__text` (attributes 0x80000400 pure
+  instructions + some instructions), `__TEXT,__const` twice?, `__DATA,__const`, `__DATA,__bss`
+  (zerofill); LC_BUILD_VERSION; LC_SYMTAB; LC_DYSYMTAB. Relocations: ARM64_RELOC_PAGE21 /
+  PAGEOFF12 (with a preceding ARM64_RELOC_ADDEND for a nonzero addend), BRANCH26 for calls to
+  undefined symbols, UNSIGNED for data words; local labels resolved in place; no section-relative
+  relocation for temporaries (Mach-O keeps `L`-prefixed names out of the symbol table but relocates
+  against the section by number, r_extern = 0).
+
+Plan, each step against clang through `asm-oracle --target macos-aarch64` (llvm-readobj's view, as
+for COFF; no Mac is needed to compare objects):
+1. `compiler/macho.grl`: the header, LC_SEGMENT_64 with its sections, LC_BUILD_VERSION, LC_SYMTAB,
+   LC_DYSYMTAB (locals, externals, undefined in that order, each sorted by name), the relocation
+   records (r_address, symbolnum, pcrel, length, extern, type), string table.
+2. `asm_x86` target 4: the A64 encoder with Mach-O sections, `@PAGE`/`@PAGEOFF`, the Darwin
+   directives; resolution rules above.
+3. Compact unwind (`__LD,__compact_unwind`) if the compiler starts emitting `.cfi_*` for macOS;
+   today it emits none, and clang adds none.
+4. In-process path for `macos-aarch64`, then `macos-x86_64` (the x86 encoder with X86_64_RELOC_*).
+
 ## The order of the remaining work
 
 2. *(done: see above.)* What is left of it is `grail check` reading interfaces from the store.
