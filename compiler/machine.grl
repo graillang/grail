@@ -3041,8 +3041,20 @@ fn float_sse<a, b, c, d>(o: (&a mut Out), op: &b [u8], src: &c [u8], dst: &d [u8
     }
     single := eq(view(op), view("addss")) || eq(view(op), view("subss")) || eq(view(op), view("mulss"))
         || eq(view(op), view("divss")) || eq(view(op), view("sqrtss")) || eq(view(op), view("cvtsd2ss"));
-    fs := freg(target, view(src), single && !eq(view(op), view("cvtsd2ss")));
+    mut fs = freg(target, view(src), single && !eq(view(op), view("cvtsd2ss")));
     fd := freg(target, view(dst), single);
+    if (fs.len() == 0) && (fd.len() != 0) && (src.len() != 0) && (src[0] != 37) && (src[0] != 36) && !single
+        && (eq(view(op), view("addsd")) || eq(view(op), view("subsd")) || eq(view(op), view("mulsd")) || eq(view(op), view("divsd"))) {
+        // A memory operand (optimize.grl `xmm_memops`): loaded into d31 / ft11, which nothing else uses.
+        address(&mut o, view(src));
+        if arm {
+            put(&mut o, view("ldr d31,[x13]\n"));
+            fs = copy_text(view("d31"));
+        } else {
+            put(&mut o, view("fld ft11,0(t3)\n"));
+            fs = copy_text(view("ft11"));
+        }
+    }
     if (fs.len() == 0) || (fd.len() == 0) {
         return false;
     }

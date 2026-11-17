@@ -434,6 +434,19 @@ and spends a quarter of its time writing the interface (`iface_sorted`, routed t
 The in-process assembler covers Linux ELF on x86-64, AArch64 and RISC-V. Windows x86-64 still
 assembles with clang. The work to change that, in order, each step landable on its own:
 
+State (landed on main): steps 1-3. The COFF writer (`compiler/coff.grl`), x86 COFF fixups,
+`.def`/`.scl`/`.type`/`.endef`, `.seh_*` to `.xdata`/`.pdata`, `call/jmp *mem`, `movdqu`, weak externals;
+`grail asm --target windows-x86_64`; `asm-oracle --target windows-x86_64` compares through llvm-readobj
+(offsets and string-table placement excluded); the Windows hello object (640 KB) and
+`tests/asm/directives-windows-x86_64.s` are identical to clang's. Step 5 is in: non-debug Windows x86-64
+builds assemble in-process (`assemble_object` target 3, `compile_mode`, `tools/native.mjs` and
+`tools/windows.mjs assemble`; C shims and CodeView text still go to clang), checked against clang with
+GRAIL_ASM_ORACLE=1 in `windows.mjs check`. Remaining: step 4 (CodeView), then delete clang for the target.
+The hooks step 5 used: in `native.grl assemble_object` add `c.plat` Windows → `asm_x86::assemble_for(3, ...)`;
+in `cli.grl compile_mode` let `internal` include `windows-x86_64` (the assemble prefix gets `--target
+windows-x86_64`); in `tools/native.mjs assemble` the same; then `tools/windows.mjs` under wine on that path,
+and delete clang for that target as for Linux.
+
 1. **Directive survey** (done). The Windows stream (hello, `--target windows-x86_64`) uses, besides
    the ELF subset: `.def NAME` / `.scl 2` / `.type 32` / `.endef` (a function symbol's storage class
    and type); `.seh_proc`, `.seh_pushreg %rbp`, `.seh_setframe %rbp, 0`, `.seh_stackalloc N`,

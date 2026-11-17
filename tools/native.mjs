@@ -202,7 +202,7 @@ export function assemble(source, executable, target = hostTarget, linkArgs = [],
   const object = `${executable}.${process.pid}.o`;
   const stable = `${executable}.o`;
   const flags = target === 'riscv64' ? ['-march=rv64imafd', '-mabi=lp64d'] : [];
-  if ((target === 'x86_64' || target === 'aarch64' || target === 'riscv64') && internalAssembler) {
+  if ((target === 'x86_64' || target === 'aarch64' || target === 'riscv64' || (target === 'windows-x86_64' && !/\.cv_file/.test(readFileSync(source, 'latin1').slice(0, 4096)))) && internalAssembler) {
     command([internalAssembler, 'asm', ...(target === 'x86_64' ? [] : ['--target', target]), source, '-o', object]);
     if (process.env.GRAIL_ASM_ORACLE === '1') {
       // The oracle (tools/asm-oracle.mjs): clang's object from the same text must be the same.

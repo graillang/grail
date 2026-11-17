@@ -778,6 +778,10 @@ struct C {
     statics: Static[],
     ct_calls: CtCall[],
     ct_done: CtDone[],
+    // R4 (comptime-speed.md): in a probe compile, the functions the probe reaches by name, as
+    // (file, position) pairs; a body outside them is not compiled. 0 in r4_on: compile everything.
+    r4_on: u64,
+    r4_keep: u64[],
     // The module-binding guards a probe compile has defined (static_probe_init).
     ct_guards: u8[][],
     // Where the batch probe writes the bodies each value reached (ct_write_deps), or empty.
@@ -843,6 +847,11 @@ struct C {
     // 1 while an assignment's target path is read: its last field is written directly (and its
     // predicate owed there), not lent out, so `field_path` records it instead of refusing the loan.
     ref_assign_target: u64,
+    // `--report-checks`: the checks left in the program's own functions, as the site table met
+    // them, printed after the build (report_checks_print).
+    report_checks: u64,
+    checks_report: u8[],
+    checks_count: u64,
     // 1 when the index the next accessor checks was proved, but --verify-facts keeps the check: the
     // accessor's edge is marked (kind 16), so the check is not a failure the function answers
     // for - as a proved addition's kept check is not (binary).
@@ -1635,6 +1644,10 @@ fn assemble_object<a, b>(c: (&a mut C), image: &b [u8]) -> asm_x86::Result {
     if ((c.target == 1) || (c.target == 2)) && (c.plat == 0) {
         return asm_x86::assemble_for(c.target, copy_bytes(view(image)));
     }
+    // Windows x86-64 (target 3): the x86 encoder with a COFF object.
+    if c.target == 3 {
+        return asm_x86::assemble_for(3, copy_bytes(view(image)));
+    }
     if c.fn_id.len() == 0 {
         return asm_x86::assemble(copy_bytes(view(image)));
     }
@@ -2040,7 +2053,7 @@ fn debug_type_of<a>(c: (&a mut C), ty: u64, c_layout: u64) -> u64 {
             if inline_field(&mut c, ty, i) {
                 mt = c.debug_types[mt].pointee;
             }
-            members.push(DebugMember { name: c.fields[c.decls[d].first + i].name.copy(), ty: mt, offset: 8 * field_word(&mut c, ty, i) });
+            members.push(DebugMember { name: c.fields[c.decls[d].first + i].name.copy(), ty: mt, offset: field_offset(&mut c, ty, i) });
         }
         exchange(&mut c.debug_types[s].members, members);
         return debug_pointer(&mut c, s);
@@ -2858,6 +2871,65 @@ fn site_in<a, b>(text: &a [u8], a: u64, e: u64, part: &b [u8]) -> bool {
     }
     return false;
 }
+// The name of a failure kind (rt_fail's codes) for the checks report.
+fn check_kind_name(kind: u64) -> string {
+    if (kind == 1) || (kind == 7) || (kind == 11) || (kind == 64) {
+        return "index";
+    }
+    if kind == 2 {
+        return "overflow";
+    }
+    if kind == 5 {
+        return "divide";
+    }
+    if (kind == 3) || (kind == 9) || (kind == 14) || (kind == 15) {
+        return "conversion";
+    }
+    if kind == 6 {
+        return "unwrap";
+    }
+    if kind == 12 {
+        return "assertion";
+    }
+    return "other";
+}
+// One residual check: `function  file:line:col  kind`.
+fn report_check<a, b>(c: (&a mut C), func: &b [u8], file: u64, line: u64, col: u64, kind: &b [u8]) -> unit {
+    if c.report_checks == 0 {
+        return ();
+    }
+    mut row = copy_bytes(view("  "));
+    push_bytes(&mut row, view(func));
+    row.push(9);
+    if file != 0 {
+        push_bytes(&mut row, view(file_path(&mut c, file)));
+        row.push(58);
+        decimal(&mut row, line);
+        row.push(58);
+        decimal(&mut row, col);
+    } else {
+        push_bytes(&mut row, view("(no location)"));
+    }
+    row.push(9);
+    push_bytes(&mut row, view(kind));
+    row.push(10);
+    push_bytes(&mut c.checks_report, view(row));
+    exchange(&mut c.checks_count, c.checks_count + 1);
+    return ();
+}
+// The number in `movq $K,%REG` on the code line `a..e`, or 0.
+fn site_imm<a, b>(text: &a [u8], a: u64, e: u64, reg: &b [u8]) -> u64 {
+    if !site_at(text, a, e, view("movq $")) || !site_in(text, a, e, view(reg)) {
+        return 0;
+    }
+    mut v = 0;
+    mut i = a + 6;
+    while (i < e) && (47 < text[i]) && (text[i] < 58) {
+        v = v * 10 + u64(text[i]) - 48;
+        i += 1;
+    }
+    return v;
+}
 fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
     mut out = u8[];
     mut entries = u8[];
@@ -2889,6 +2961,7 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
     mut func_count = 0;
     mut pending_func = 0;
     mut pending_name = u8[];
+    mut report_fn = u8[];
     // Lines are read in place, and what passes through unchanged is copied in runs: `pend` is the
     // first byte not yet copied to `out`. A line that is dropped or replaced, or that gets a label in
     // front of it, flushes the run before it.
@@ -3003,6 +3076,7 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
                 site_func_label(&mut out, func_count);
                 pending_func = func_count;
                 pending_name = span_copy(text[a..e], 0, e - a - 1);
+                report_fn = pending_name.copy();
             }
         }
         if pending_site && !directive {
@@ -3042,12 +3116,32 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
             if site_at(text, p1a, p1e, view("jb ")) && site_in(text, p2a, p2e, view("cmpq 8(%rdi),%rsi")) {
                 kind = 1;
             }
+            report_check(&mut c, view(report_fn), cur_file, cur_line, cur_col, view(check_kind_name(kind)));
             out.append(text[pend..a]);
             pend = next;
             push_bytes(&mut out, view("movq $"));
             decimal(&mut out, kind);
             push_bytes(&mut out, view(",%rdx\ncall rt_trap\n"));
             pending = 0;
+        }
+        // The other shapes a check takes in program code: a trap the optimiser already placed, a
+        // checked accessor call, an array's `rt_fail`, a refinement's entry check.
+        if (c.report_checks != 0) && seen_own && !own_internal && !directive && (a < e) {
+            if site_at(text, a, e, view("call rt_trap")) {
+                report_check(&mut c, view(report_fn), cur_file, cur_line, cur_col, view(check_kind_name(site_imm(text, p1a, p1e, view("%rdx")))));
+            }
+            if site_at(text, a, e, view("call rt_fail")) {
+                report_check(&mut c, view(report_fn), cur_file, cur_line, cur_col, view(check_kind_name(site_imm(text, p1a, p1e, view("%rdi")))));
+            }
+            if site_at(text, a, e, view("call rt_refine")) {
+                report_check(&mut c, view(report_fn), cur_file, cur_line, cur_col, view("refinement"));
+            }
+            if site_at(text, a, e, view("call rt_")) {
+                callee := span_copy(text[a..e], 5, e - a);
+                if fx_index_accessor(view(callee)) {
+                    report_check(&mut c, view(report_fn), cur_file, cur_line, cur_col, view("index"));
+                }
+            }
         }
         if (a < e) && !directive {
             p2a = p1a;
@@ -4651,9 +4745,16 @@ fn release_call_args<a>(c: (&a mut C), area: u64) -> unit {
 // (0 an integer word or none, 1 f64, 2 f32). Only for x86-64 SysV calls whose every argument is in
 // a register and whose result is a scalar: the lifter then emits the call with those C types, so
 // the floats travel in the vector registers the platform ABI puts them in.
-fn ffi_signature_fact<a, b, d>(c: (&a mut C), argtypes: (&b u64[]), ret: u64, symbol: &d [u8], abi: u64) -> unit {
+fn ffi_signature_fact<a, b, d, e>(c: (&a mut C), argtypes: (&b u64[]), formals: (&e u64[]), ret: u64, symbol: &d [u8], abi: u64) -> unit {
     if (c.backend == 0) || (c.validating != 0) || (c.target != 0) || (abi != 0) {
         return ();
+    }
+    // A record passed `byval` crosses as its fields (one or two registers, or memory): not one word,
+    // so a call with one is left to the native text, which places it by its classification.
+    for i in formals.len() {
+        if ffi_byval(&mut c, formals[i]) {
+            return ();
+        }
     }
     mut ints = 0;
     mut floats = 0;
@@ -17810,7 +17911,7 @@ fn ffi_emit_call<a, b, d, e, f>(
         o(&mut c, view(",%eax\n"));
     }
     if (symbol.len() != 0) && (area == 0) && (fixed == args.len()) && (rmode == 0) && (copies == 0) {
-        ffi_signature_fact(&mut c, argtypes, ret, view(symbol), abi);
+        ffi_signature_fact(&mut c, argtypes, formals, ret, view(symbol), abi);
     }
     if symbol.len() == 0 {
         if c.target == 0 {
@@ -19885,6 +19986,12 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         return ();
     }
     if pass == 1 {
+        body_brace(&mut c, position);
+        skip_braces(&mut c);
+        return ();
+    }
+    if (pass == 3) && (typecount == 0) && (c.r4_on != 0) && !r4_kept(&c, c.file, position) {
+        // R4: a probe compiles only what its values reach; this body is not one of them.
         body_brace(&mut c, position);
         skip_braces(&mut c);
         return ();
@@ -23203,6 +23310,24 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
         value_tmp := path_cat(view(path_cat(view(dir), view(tag))), view(".value"));
         host::write_file(view(probe_src), view(probe));
         self := host::exe_path();
+        // The runtime, the platform module and the standard library are the same in every probe:
+        // they are compiled once into a base object with their interfaces (ct_probe_base), and a
+        // probe compiles only itself and the program's own sources against them.
+        mut user_files = u8[][];
+        mut base_files = u8[][];
+        for i in files.len() {
+            if ct_std_path(view(files[i])) {
+                base_files.push(files[i].copy());
+            } else {
+                user_files.push(files[i].copy());
+            }
+        }
+        mut base_mods = u8[][];
+        base_dir := ct_probe_base(&mut c, view(self), &base_files, &mut base_mods, soft);
+        if base_dir.len() == 0 {
+            exchange(status_out, 1);
+            return u8[];
+        }
         mut cmd = ct_shell_quote(view(self));
         mut opt = 1;
         while opt < offset + 1 {
@@ -23221,10 +23346,14 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
             }
             opt += 1;
         }
-        // Probes share a function cache of their own: the runtime and the standard library are most
-        // of a probe's compile and are the same in every probe (comptime-speed.md); a probe never
-        // replays a normal compile's bodies, whose static reads are compiled differently.
-        push_bytes(&mut cmd, view(" --fn-cache .work/comptime/fn --fn-cache-quiet"));
+        push_bytes(&mut cmd, view(" --use "));
+        push_bytes(&mut cmd, view(ct_shell_quote(view(path_cat(view(base_dir), view("/if"))))));
+        push_bytes(&mut cmd, view(" --use-named"));
+        for m in base_mods.len() {
+            push_bytes(&mut cmd, view(" --use-module "));
+            push_bytes(&mut cmd, view(base_mods[m]));
+        }
+        push_bytes(&mut cmd, view(" --separate"));
         // Assembled in process (`--object`), as a build is: a probe needs no C toolchain, only the
         // linker a build uses.
         push_bytes(&mut cmd, view(" --target x86_64 --object "));
@@ -23233,9 +23362,9 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
         push_bytes(&mut cmd, view(ct_shell_quote(view(probe_s))));
         cmd.push(32);
         push_bytes(&mut cmd, view(ct_shell_quote(view(probe_src))));
-        for i in files.len() {
+        for i in user_files.len() {
             cmd.push(32);
-            push_bytes(&mut cmd, view(ct_shell_quote(view(files[i]))));
+            push_bytes(&mut cmd, view(ct_shell_quote(view(user_files[i]))));
         }
         mut pending = host::env(view("GRAIL_COMPTIME_PENDING"));
         if key.len() != 0 {
@@ -23270,7 +23399,7 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
             // A diagnostic is printed on stdout; the value's own probe reports it if it matters.
             push_bytes(&mut compile, view(" > /dev/null 2>&1"));
         }
-        mut sh = u8[][copy_bytes(view("sh")), copy_bytes(view("-c")), compile];
+        mut sh = u8[][copy_bytes(view("sh")), copy_bytes(view("-c")), compile.copy()];
         if host::command(sh) != 0 {
             if soft != 0 {
                 exchange(status_out, 1);
@@ -23295,8 +23424,23 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
         if ld.len() == 0 {
             ld = copy_bytes(view("ld.lld"));
         }
-        mut link = u8[][ld, copy_bytes(view("-m")), copy_bytes(view("elf_x86_64")), copy_bytes(view("-static")), probe_o.copy(), copy_bytes(view("-o")), probe_exe.copy()];
-        if host::command(link) != 0 {
+        mut link = u8[][ld, copy_bytes(view("-m")), copy_bytes(view("elf_x86_64")), copy_bytes(view("-static")), probe_o.copy(), path_cat(view(base_dir), view("/base.o")), copy_bytes(view("-o")), probe_exe.copy()];
+        mut link2 = u8[][];
+        for li in link.len() {
+            link2.push(link[li].copy());
+        }
+        mut linked = host::command(link) == 0;
+        if !linked {
+            // R4 left out a function the probe uses after all (reached in a way a name walk does not
+            // see): compile the whole program and link again.
+            mut whole = copy_bytes(view("GRAIL_PROBE_WHOLE=1 "));
+            push_bytes(&mut whole, view(compile));
+            mut sh3 = u8[][copy_bytes(view("sh")), copy_bytes(view("-c")), whole];
+            if host::command(sh3) == 0 {
+                linked = host::command(link2) == 0;
+            }
+        }
+        if !linked {
             if soft != 0 {
                 exchange(status_out, 1);
                 return u8[];
@@ -23919,6 +24063,236 @@ fn ct_batch<a>(c: (&a mut C)) -> unit {
     for r in results.len() {
         c.ct_done.push(CtDone { key: results[r].key.copy(), res: CTRes { ty: results[r].res.ty, value: results[r].res.value, text: results[r].res.text.copy() } });
     }
+    return ();
+}
+// Whether a path is the runtime's, a platform module's or the standard library's.
+fn ct_std_path<a>(path: &a [u8]) -> bool {
+    if in_std_dir(path) != 0 {
+        return true;
+    }
+    mut cut = 0;
+    for i in path.len() {
+        if (path[i] == 47) || (path[i] == 92) {
+            cut = i + 1;
+        }
+    }
+    base := slice_bytes(path, cut, path.len());
+    return same(view(base), view("runtime.grl")) || same(view(base), view("os-linux.grl")) || same(view(base), view("os-windows.grl")) || same(view(base), view("darwin.grl"));
+}
+// The probes' base: the runtime, the platform module and the standard library modules `files`
+// names, compiled once (separately, no entry) into `<build store>/probe-base/<key>/base.o` with their
+// interfaces in `if/`. The key is the compiler, the options and every file's contents, so a base is
+// reused until one of them changes. Answers the directory, or empty (with the failure reported,
+// unless `soft`); `mods` gets the modules that have an interface, for `--use-module`.
+fn ct_probe_base<a, b>(c: (&a mut C), self: &b [u8], files: (&a u8[][]), mods: (&a mut u8[][]), soft: u64) -> u8[] {
+    mut keyed = copy_bytes(view("grail-probe-base 1\n"));
+    push_bytes(&mut keyed, self);
+    keyed.push(10);
+    // The compiler as the function cache names a hand-run one: its path, size and time.
+    parts := host::stat(self, 1);
+    if 5 < parts.len() {
+        decimal(&mut keyed, parts[2]);
+        keyed.push(32);
+        decimal(&mut keyed, parts[4]);
+        keyed.push(46);
+        decimal(&mut keyed, parts[5]);
+    }
+    keyed.push(10);
+    mut flags = u8[];
+    offset := c.arg_offset;
+    mut opt = 1;
+    while opt < offset + 1 {
+        a := host::arg(opt);
+        if starts_with(view(a), view("--overflow=")) {
+            flags.push(32);
+            push_bytes(&mut flags, view(a));
+        } else if same(view(a), view("--module-root")) {
+            flags.push(32);
+            push_bytes(&mut flags, view("--module-root"));
+            flags.push(32);
+            push_bytes(&mut flags, view(ct_shell_quote(view(host::arg(opt + 1)))));
+            opt += 1;
+        }
+        opt += 1;
+    }
+    push_bytes(&mut keyed, view(flags));
+    for i in files.len() {
+        push_bytes(&mut keyed, view(files[i]));
+        keyed.push(10);
+        push_bytes(&mut keyed, view(fncache::hash(view(host::read_file(view(files[i]))))));
+        keyed.push(10);
+    }
+    digest := iface_digest(&keyed);
+    root := cli::probe_base_root();
+    mut dir = root.copy();
+    dir.push(47);
+    for i in 24 {
+        dir.push(digest[i]);
+    }
+    ifdir := path_cat(view(dir), view("/if"));
+    object := path_cat(view(dir), view("/base.o"));
+    if host::exists(view(object)) == 0 {
+        // Built in a directory of its own and renamed into place, so two compiles that build the same
+        // base at once never see half of one.
+        mut tmp = dir.copy();
+        push_bytes(&mut tmp, view(".tmp"));
+        decimal(&mut tmp, host::now_ms());
+        host::command(u8[][copy_bytes(view("rm")), copy_bytes(view("-rf")), tmp.copy()]);
+        host::command(u8[][copy_bytes(view("mkdir")), copy_bytes(view("-p")), path_cat(view(tmp), view("/if"))]);
+        mut cmd = ct_shell_quote(self);
+        push_bytes(&mut cmd, view(flags));
+        push_bytes(&mut cmd, view(" --target x86_64 --emit-interface "));
+        push_bytes(&mut cmd, view(ct_shell_quote(view(path_cat(view(tmp), view("/if"))))));
+        push_bytes(&mut cmd, view(" --separate --no-entry --object "));
+        push_bytes(&mut cmd, view(ct_shell_quote(view(path_cat(view(tmp), view("/base.o"))))));
+        cmd.push(32);
+        push_bytes(&mut cmd, view(ct_shell_quote(view(path_cat(view(tmp), view("/base.s"))))));
+        for i in files.len() {
+            cmd.push(32);
+            push_bytes(&mut cmd, view(ct_shell_quote(view(files[i]))));
+        }
+        if soft != 0 {
+            push_bytes(&mut cmd, view(" > /dev/null 2>&1"));
+        }
+        mut sh = u8[][copy_bytes(view("sh")), copy_bytes(view("-c")), cmd];
+        if host::command(sh) != 0 {
+            if soft == 0 {
+                fail(&mut c, view("compile-time values: compiling the runtime and the standard library for the probes failed (the errors above)"));
+            }
+            return u8[];
+        }
+        host::command(u8[][copy_bytes(view("mkdir")), copy_bytes(view("-p")), root.copy()]);
+        mut mv = u8[][copy_bytes(view("mv")), copy_bytes(view("-T")), tmp.copy(), dir.copy()];
+        if host::command(mv) != 0 {
+            // Another compile put the same base in place first: use it, drop ours.
+            host::command(u8[][copy_bytes(view("rm")), copy_bytes(view("-rf")), tmp.copy()]);
+        }
+    }
+    // The standard library modules: one interface each, named by the file (the runtime has none).
+    for i in files.len() {
+        f := files[i].copy();
+        mut cut = 0;
+        for j in f.len() {
+            if f[j] == 47 {
+                cut = j + 1;
+            }
+        }
+        n := slice_bytes(view(f), cut, f.len());
+        if (in_std_dir(view(f)) != 0) && (n.len() > 4) {
+            m := slice_bytes(view(n), 0, n.len() - 4);
+            if host::exists(view(path_cat(view(ifdir), view(path_cat(view("/"), view(path_cat(view(m), view(".iface")))))))) != 0 {
+                mods.push(m);
+            }
+        }
+    }
+    return dir;
+}
+// ---- R4: a probe compiles only what its values reach (docs/design/comptime-speed.md) -----------------
+fn r4_kept<a>(c: (&a C), file: u64, pos: u64) -> bool {
+    for i in c.r4_keep.len() / 2 {
+        if (c.r4_keep[2 * i] == file) && (c.r4_keep[2 * i + 1] == pos) {
+            return true;
+        }
+    }
+    return false;
+}
+// Before the bodies of a probe compile: the functions reachable by name from the probe's own,
+// token by token - a call, a method call and a generic's instantiation all name the function, so a
+// name reaches every function that has it - plus every `drop`, which runs without being named. A
+// reached body that names `dyn` or makes a closure reaches what a name walk cannot see: then the
+// probe compiles everything. GRAIL_PROBE_WHOLE=1 turns it off (the fallback when a link finds a
+// skipped function after all).
+fn r4_compute<a>(c: (&a mut C)) -> unit {
+    if (c.probe_mode == 0) || (host::env(view("GRAIL_PROBE_WHOLE")).len() != 0) {
+        return ();
+    }
+    n := c.funcs.len();
+    mut seen = u64[];
+    for i in n {
+        seen.push(0);
+    }
+    mut work = u64[];
+    for i in n {
+        m := c.funcs[i].module.copy();
+        nm := c.funcs[i].name.copy();
+        if same(view(m), view("grail_probe")) || same(view(nm), view("drop")) {
+            seen[i] = 1;
+            work.push(i);
+        }
+    }
+    saved_file := c.file;
+    saved_pos := c.pos;
+    mut whole = false;
+    while (work.len() != 0) && !whole {
+        f := work.pop()!;
+        file := c.funcs[f].file;
+        if file == 0 {
+            continue;
+        }
+        if file != c.file {
+            load_file(&mut c, file);
+            exchange(&mut c.file, file);
+        }
+        mut i = c.funcs[f].pos;
+        // To the body's opening brace, then through its matching close.
+        while (i < c.toks.len()) && (kind_at(&mut c, i) != 123) && (kind_at(&mut c, i) != 0) && (kind_at(&mut c, i) != 59) {
+            i += 1;
+        }
+        if kind_at(&mut c, i) != 123 {
+            continue;
+        }
+        mut depth = 0;
+        mut prev = u8[];
+        while i < c.toks.len() {
+            k := kind_at(&mut c, i);
+            if k == 0 {
+                break;
+            }
+            t := tok_text(&mut c, i);
+            if k == 123 {
+                depth += 1;
+            }
+            if k == 125 {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            if same(view(t), view("dyn")) {
+                whole = true;
+                break;
+            }
+            if (same(view(t), view("|")) || same(view(t), view("||"))) && (same(view(prev), view("(")) || same(view(prev), view(",")) || same(view(prev), view("=")) || same(view(prev), view(":=")) || same(view(prev), view("return"))) {
+                whole = true;
+                break;
+            }
+            if k == 1 {
+                for g in n {
+                    if (seen[g] == 0) && same(view(c.funcs[g].name), view(t)) {
+                        seen[g] = 1;
+                        work.push(g);
+                    }
+                }
+            }
+            prev = t;
+            i += 1;
+        }
+    }
+    if c.file != saved_file {
+        load_file(&mut c, saved_file);
+        exchange(&mut c.file, saved_file);
+    }
+    exchange(&mut c.pos, saved_pos);
+    if whole {
+        return ();
+    }
+    for f in n {
+        if seen[f] != 0 {
+            c.r4_keep.push(c.funcs[f].file);
+            c.r4_keep.push(c.funcs[f].pos);
+        }
+    }
+    exchange(&mut c.r4_on, 1);
     return ();
 }
 fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [u8]) -> CTRes {
@@ -24823,7 +25197,7 @@ fn static_bake<a>(c: (&a mut C), ty: u64, text: &a [u8], at: (&a mut u64), is_la
         o(&mut c, view(".p2align 4\n.quad 0\n.quad 2\n"));
         mark(&mut c, data);
         for j in words.len() {
-            static_quad_label(&mut c, words[j], kinds[j]);
+            static_item(&mut c, words[j], kinds[j]);
         }
         o(&mut c, view(".quad 0\n.p2align 4\n.quad 0\n.quad 2\n"));
         mark(&mut c, obj);
@@ -24845,7 +25219,7 @@ fn static_bake<a>(c: (&a mut C), ty: u64, text: &a [u8], at: (&a mut u64), is_la
     o(&mut c, view(".p2align 4\n.quad 0\n.quad 2\n"));
     mark(&mut c, rec);
     for j in words.len() {
-        static_quad_label(&mut c, words[j], kinds[j]);
+        static_item(&mut c, words[j], kinds[j]);
     }
     if words.len() == 0 {
         o(&mut c, view(".quad 0\n"));
@@ -24854,21 +25228,72 @@ fn static_bake<a>(c: (&a mut C), ty: u64, text: &a [u8], at: (&a mut u64), is_la
 }
 // The words of record `ty`, read from the flat form, appended to `words` (with `kinds` saying
 // which are labels): a plain record held in a field contributes its own words in place.
+// Items are laid out as the record is (field_offset, stage 7): a kind is 0 or 1 for a word (a number
+// or a label), 2 * width for a narrow number, and 16 + 32 * n for n bytes of padding.
 fn static_bake_fields<a>(c: (&a mut C), ty: u64, text: &a [u8], at: (&a mut u64), words: (&a mut u64[]), kinds: (&a mut u64[])) -> unit {
     d := ty_arg(&mut c, ty);
     first := c.decls[d].first;
     count := c.decls[d].count;
+    mut pos = 0;
     for j in count {
         fty := c.fields[first + j].ty;
+        off := field_offset(&mut c, ty, j);
+        if pos < off {
+            words.push(0);
+            kinds.push(16 + 32 * (off - pos));
+        }
         if inline_field(&mut c, ty, j) {
             static_bake_fields(&mut c, base_type(&mut c, fty), text, &mut at, &mut words, &mut kinds);
+            pos = off + value_bytes(&mut c, base_type(&mut c, fty));
         } else {
             mut flag = 0;
             w := static_bake(&mut c, fty, text, &mut at, &mut flag);
+            width := narrow_width(&mut c, base_type(&mut c, fty));
             words.push(w);
-            kinds.push(flag);
+            if (width < 8) && (flag == 0) {
+                kinds.push(2 * width);
+                pos = off + width;
+            } else {
+                kinds.push(flag);
+                pos = off + 8;
+            }
         }
     }
+    total := value_bytes(&mut c, ty);
+    if pos < total {
+        words.push(0);
+        kinds.push(16 + 32 * (total - pos));
+    }
+    return ();
+}
+fn static_item<a>(c: (&a mut C), word: u64, kind: u64) -> unit {
+    if kind >= 16 {
+        o(&mut c, view(".zero "));
+        on(&mut c, (kind - 16) / 32);
+        c.out.push(10);
+        return ();
+    }
+    if kind <= 1 {
+        static_quad_label(&mut c, word, kind);
+        return ();
+    }
+    width := kind / 2;
+    if width == 1 {
+        o(&mut c, view(".byte "));
+    } else if width == 2 {
+        o(&mut c, view(".short "));
+    } else {
+        o(&mut c, view(".long "));
+    }
+    mut mask = 4294967295;
+    if width == 1 {
+        mask = 255;
+    }
+    if width == 2 {
+        mask = 65535;
+    }
+    on(&mut c, word & mask);
+    c.out.push(10);
     return ();
 }
 
@@ -27755,7 +28180,27 @@ fn fx_unknown_why<a>(c: (&a mut C), k: u64) -> u8[] {
             return c.fx_edge_why[e].copy();
         }
     }
+    // A named callee with neither a body in this run nor a summary it read: a run given part of a
+    // program (`grail OUT.s main.grl` without the runtime's sources) cannot see what it does.
+    for e in c.fx_edge_from.len() {
+        if (c.fx_edge_from[e] == k) & (c.fx_edge_name[e].len() != 0) & (c.fx_edge_to[e] == 0) & ((c.fx_edge_kind[e] & 1) != 0) {
+            mut out = copy_bytes(view("`"));
+            push_bytes(&mut out, view(c.fx_edge_name[e]));
+            push_bytes(&mut out, view("`, whose body and effect summary this run does not have: compile it with the program (the runtime's sources for an `rt_` function), or use `grail build`"));
+            return out;
+        }
+    }
     return u8[];
+}
+// Whether the unknown edge of record `k` is a call by name (a callee this run cannot see) rather than
+// through a function value or a vtable.
+fn fx_unknown_named<a>(c: (&a C), k: u64) -> bool {
+    for e in c.fx_edge_from.len() {
+        if (c.fx_edge_from[e] == k) & (c.fx_edge_to[e] == 0) & ((c.fx_edge_kind[e] & 1) != 0) {
+            return c.fx_edge_name[e].len() != 0;
+        }
+    }
+    return false;
 }
 // Where a chain of witnesses ends (at most `spending` links): the record whose fact is its own, or
 // came through an edge nothing names. `panic` picks the failure chain.
@@ -27827,14 +28272,22 @@ fn fx_report<a>(c: (&a mut C)) -> unit {
                 push_bytes(&mut msg, view("` performs a heap allocation"));
                 push_bytes(&mut msg, view("\n = move the allocation out of the function, or keep the attribute off it"));
             } else {
-                push_bytes(&mut msg, view("` performs a heap allocation: it makes an indirect call the compiler cannot follow"));
+                if fx_unknown_named(&c, k) {
+                    push_bytes(&mut msg, view("` performs a heap allocation: it makes a call the compiler cannot follow"));
+                } else {
+                    push_bytes(&mut msg, view("` performs a heap allocation: it makes an indirect call the compiler cannot follow"));
+                }
                 why := fx_unknown_why(&mut c, k);
                 if why.len() != 0 {
                     push_bytes(&mut msg, view(" (the target is "));
                     push_bytes(&mut msg, view(why));
                     push_bytes(&mut msg, view(")"));
                 }
-                push_bytes(&mut msg, view("\n = a call through a function value or a vtable may allocate; name the callee, or keep the attribute off"));
+                if fx_unknown_named(&c, k) {
+                    push_bytes(&mut msg, view("\n = this run sees the call but not the callee; give it the callee's source or summary"));
+                } else {
+                    push_bytes(&mut msg, view("\n = a call through a function value or a vtable may allocate; name the callee, or keep the attribute off"));
+                }
                 at_file = fx_unknown_file_of(&mut c, k);
                 at_pos = fx_unknown_pos_of(&mut c, k);
             }
@@ -27870,14 +28323,22 @@ fn fx_report<a>(c: (&a mut C)) -> unit {
                 push_bytes(&mut msg, view("` can fail"));
                 push_bytes(&mut msg, view("\n = prove the check away, or keep the attribute off the function"));
             } else {
-                push_bytes(&mut msg, view("` can fail: it makes an indirect call the compiler cannot follow"));
+                if fx_unknown_named(&c, k) {
+                    push_bytes(&mut msg, view("` can fail: it makes a call the compiler cannot follow"));
+                } else {
+                    push_bytes(&mut msg, view("` can fail: it makes an indirect call the compiler cannot follow"));
+                }
                 why := fx_unknown_why(&mut c, k);
                 if why.len() != 0 {
                     push_bytes(&mut msg, view(" (the target is "));
                     push_bytes(&mut msg, view(why));
                     push_bytes(&mut msg, view(")"));
                 }
-                push_bytes(&mut msg, view("\n = a call through a function value or a vtable may fail; name the callee, or keep the attribute off"));
+                if fx_unknown_named(&c, k) {
+                    push_bytes(&mut msg, view("\n = this run sees the call but not the callee; give it the callee's source or summary"));
+                } else {
+                    push_bytes(&mut msg, view("\n = a call through a function value or a vtable may fail; name the callee, or keep the attribute off"));
+                }
                 at_file = fx_unknown_file_of(&mut c, k);
                 at_pos = fx_unknown_pos_of(&mut c, k);
             }
@@ -28542,12 +29003,74 @@ fn rec_store<a>(c: (&a mut C), base: u64, k: u64, value: u64) -> unit {
 // (docs/design/unboxed-values.md, stage 1b) changes this answer and not the sites that read, bind,
 // compare, print or drop a field. Enum tags and payloads, closure objects and `dyn` cells are words
 // by position and keep calling rec_load/rec_store directly.
-fn field_word<a>(c: (&a mut C), ty: u64, k: u64) -> u64 {
-    if (layout_bits(&mut c, ty) & 2) == 0 {
-        return k;
+// The byte offset field `k` of the record `ty` starts at (stage 7: C layout - declared order, each
+// field at its natural alignment). A record that is not held as its words (a closure environment,
+// a C record, an enum's block) keeps a word per field.
+fn field_offset<a>(c: (&a mut C), ty: u64, k: u64) -> u64 {
+    if !framable(&mut c, ty) || is_array(&mut c, ty) {
+        return k * 8;
     }
     at := field_layout(&mut c, ty);
     return c.layout_offsets[at][k] / 2;
+}
+// The (bytes, alignment) a field of type `ft` takes in a record: a held-inline value its own, a
+// sized integer narrower than a word or an f32 its width, anything else a word.
+fn member_bytes<a>(c: (&a mut C), ft: u64) -> u64 {
+    t := base_type(&mut c, ft);
+    if framable(&mut c, t) {
+        return value_bytes(&mut c, t);
+    }
+    return narrow_width(&mut c, t);
+}
+fn member_align<a>(c: (&a mut C), ft: u64) -> u64 {
+    t := base_type(&mut c, ft);
+    if is_array(&mut c, t) {
+        return member_align(&mut c, ty_arg(&mut c, t));
+    }
+    if small_enum(&mut c, t) {
+        return 8;
+    }
+    if framable(&mut c, t) {
+        at := field_layout(&mut c, t);
+        n := c.layout_offsets[at].len();
+        return c.layout_offsets[at][n - 1];
+    }
+    return narrow_width(&mut c, t);
+}
+// 1, 2 or 4 for a sized integer of that width or an f32, 8 for every other scalar or handle.
+fn narrow_width<a>(c: (&a mut C), t: u64) -> u64 {
+    k := ty_kind(&mut c, t);
+    if k == 18 {
+        bits := ty_arg(&mut c, t);
+        if (bits == 8) || (bits == 16) || (bits == 32) {
+            return bits / 8;
+        }
+    }
+    if (k == 21) && is_f32(&mut c, t) {
+        return 4;
+    }
+    return 8;
+}
+fn round_up(n: u64, align: u64) -> u64 {
+    return (n + align - 1) / align * align;
+}
+// The bytes a value held as its words takes: a record's fields laid out and rounded up to its
+// alignment, then its live word (stage 4) if it has one.
+fn value_bytes<a>(c: (&a mut C), ty: u64) -> u64 {
+    if is_array(&mut c, ty) {
+        return array_bytes(&mut c, ty);
+    }
+    if small_enum(&mut c, ty) {
+        return enum_words(&mut c, ty) * 8;
+    }
+    at := field_layout(&mut c, ty);
+    n := c.layout_offsets[at].len();
+    align := c.layout_offsets[at][n - 1];
+    mut bytes = round_up(c.layout_offsets[at][n - 2] / 2, align);
+    if live_word(&mut c, ty) {
+        bytes = round_up(bytes, 8) + 8;
+    }
+    return bytes;
 }
 // The offsets table of a record that holds plain records inline, worked out once per type.
 fn field_layout<a>(c: (&a mut C), alias: u64) -> u64 {
@@ -28560,19 +29083,30 @@ fn field_layout<a>(c: (&a mut C), alias: u64) -> u64 {
     }
     d := ty_arg(&mut c, ty);
     count := c.decls[d].count;
+    // Entries: each field's byte offset * 2 + 1 when it is held inline, then the end of the last
+    // field * 2, then the record's alignment.
     mut table = u64[];
-    mut word = 0;
+    mut at = 0;
+    mut align = 1;
     for i in count {
         ft := field_type(&mut c, ty, i);
-        if framable(&mut c, ft) {
-            table.push(word * 2 + 1);
-            word = word + record_words(&mut c, base_type(&mut c, ft));
-        } else {
-            table.push(word * 2);
-            word = word + 1;
+        a := member_align(&mut c, ft);
+        if align < a {
+            align = a;
         }
+        at = round_up(at, a);
+        if framable(&mut c, ft) {
+            table.push(at * 2 + 1);
+        } else {
+            table.push(at * 2);
+        }
+        at = at + member_bytes(&mut c, ft);
     }
-    table.push(word * 2);
+    if live_word(&mut c, ty) && (align < 8) {
+        align = 8;
+    }
+    table.push(at * 2);
+    table.push(align);
     c.layout_offsets[ty] = table;
     return ty;
 }
@@ -28597,7 +29131,7 @@ fn flat_bytes<a>(c: (&a mut C), elem: u64) -> u64 {
         return array_bytes(&mut c, ty);
     }
     if framable(&mut c, ty) {
-        return record_words(&mut c, ty) * 8;
+        return value_bytes(&mut c, ty);
     }
     if is_c_record(&mut c, ty) != 0 {
         return ffi_record_size(&mut c, ty_arg(&mut c, ty));
@@ -28621,7 +29155,7 @@ fn flat_element<a>(c: (&a mut C), seq: u64, index: u64, width: u64, unchecked: b
 // Whether field `k` of the record `ty` is a plain record stored inline: only Grail structs and
 // tuples hold them so (an enum's payload, a closure's captures and a C record keep their words).
 fn inline_field<a>(c: (&a mut C), ty: u64, k: u64) -> bool {
-    if (layout_bits(&mut c, ty) & 2) == 0 {
+    if (layout_bits(&mut c, ty) & 2) == 0 || !framable(&mut c, ty) || is_array(&mut c, ty) {
         return false;
     }
     at := field_layout(&mut c, ty);
@@ -28799,7 +29333,7 @@ fn frame_drops<a>(c: (&a mut C), ty: u64) -> bool {
 fn inline_address<a>(c: (&a mut C), base: u64, ty: u64, k: u64) -> u64 {
     get(&mut c, base, view("%rax"));
     o(&mut c, view("leaq "));
-    on(&mut c, field_word(&mut c, ty, k) * 8);
+    on(&mut c, field_offset(&mut c, ty, k));
     o(&mut c, view("(%rax),%rax\n"));
     slot := save(&mut c);
     c.interior.push(slot);
@@ -28856,8 +29390,11 @@ fn retag_enum<a>(c: (&a mut C), xt: u64, tag: u64, ty: u64, from: u64) -> u64 {
         return invoke(&mut c, view("rt_enum_retag"), two(xt, tag));
     }
     if small {
-        // Same payload words, new tag: a copy of the whole value.
-        words := enum_words(&mut c, base_type(&mut c, from));
+        // Same payload words, new tag: a copy of the value, as many words as both layouts have.
+        mut words = enum_words(&mut c, base_type(&mut c, from));
+        if enum_words(&mut c, base_type(&mut c, ty)) < words {
+            words = enum_words(&mut c, base_type(&mut c, ty));
+        }
         n := frame_alloc(&mut c, enum_words(&mut c, base_type(&mut c, ty)));
         get(&mut c, xt, view("%rdx"));
         get(&mut c, n, view("%rcx"));
@@ -29141,8 +29678,8 @@ fn copy_into<a>(c: (&a mut C), dst: u64, value: u64, ty: u64) -> unit {
         array_copy(&mut c, dst, value, array_bytes(&mut c, ty));
         return ();
     }
-    words := record_words(&mut c, base_type(&mut c, ty));
-    bytes := imm(&mut c, words * 8);
+    // Exactly the value's bytes: the place may be an inline field with another right after it.
+    bytes := imm(&mut c, record_bytes(&mut c, ty));
     invoke(&mut c, view("rt_copy_bytes"), three(dst, value, bytes));
     if !framed(&mut c, ty) {
         invoke(&mut c, view("rt_free"), one(value));
@@ -29176,13 +29713,11 @@ fn record_words<a>(c: (&a mut C), ty: u64) -> u64 {
     if c.decls[d].c_layout != 0 {
         return ffi_record_words(&mut c, d);
     }
-    live := u64(live_word(&mut c, ty));
-    if (layout_bits(&mut c, ty) & 2) == 0 {
+    if !framable(&mut c, ty) {
+        live := u64(live_word(&mut c, ty));
         return c.decls[d].count + live;
     }
-    at := field_layout(&mut c, ty);
-    count := c.layout_offsets[at].len() - 1;
-    return c.layout_offsets[at][count] / 2 + live;
+    return (value_bytes(&mut c, ty) + 7) / 8;
 }
 // Whether the struct `ty` carries a live word after its fields (unboxed-values.md, stage 4): one
 // with its own `Drop`. Its constructor sets the word to 1; moving it out of the place that holds it
@@ -29201,14 +29736,26 @@ fn field_store<a>(c: (&a mut C), base: u64, ty: u64, k: u64, value: u64) -> unit
     if inline_field(&mut c, ty, k) {
         get(&mut c, base, view("%rax"));
         o(&mut c, view("leaq "));
-        on(&mut c, field_word(&mut c, ty, k) * 8);
+        on(&mut c, field_offset(&mut c, ty, k));
         o(&mut c, view("(%rax),%rax\n"));
         dst := save(&mut c);
         copy_into(&mut c, dst, value, field_type(&mut c, ty, k));
         return ();
     }
-    word := field_word(&mut c, ty, k);
-    rec_store(&mut c, base, word, value);
+    off := field_offset(&mut c, ty, k);
+    ft := field_type(&mut c, ty, k);
+    width := narrow_width(&mut c, base_type(&mut c, ft));
+    if framable(&mut c, ty) && (width < 8) {
+        // A narrow field is written at its width (stage 7).
+        get(&mut c, base, view("%rax"));
+        o(&mut c, view("leaq "));
+        on(&mut c, off);
+        o(&mut c, view("(%rax),%rax\n"));
+        addr := save(&mut c);
+        sized_store(&mut c, addr, value, width, u64(is_f32(&mut c, ft)));
+        return ();
+    }
+    rec_store(&mut c, base, off / 8, value);
     return ();
 }
 // The record type of the value a slot holds, for the two places that reach a field through a slot
@@ -29228,8 +29775,29 @@ fn field_load<a>(c: (&a mut C), base: u64, ty: u64, k: u64, address: u64) -> u64
     if inline_field(&mut c, ty, k) {
         return inline_address(&mut c, base, ty, k);
     }
-    word := field_word(&mut c, ty, k);
-    return word_load(&mut c, base, word, address);
+    off := field_offset(&mut c, ty, k);
+    ft := field_type(&mut c, ty, k);
+    width := narrow_width(&mut c, base_type(&mut c, ft));
+    if framable(&mut c, ty) && (width < 8) {
+        // A narrow field is read at its width; its address is an exact narrow address, which
+        // references read and write as C record fields' are (c.caddr).
+        get(&mut c, base, view("%rax"));
+        o(&mut c, view("leaq "));
+        on(&mut c, off);
+        o(&mut c, view("(%rax),%rax\n"));
+        addr := save(&mut c);
+        if address != 0 {
+            c.caddr.push(addr);
+            c.caddr.push(base_type(&mut c, ft));
+            return addr;
+        }
+        mut signed = 0;
+        if ty_kind(&mut c, ft) == 18 {
+            signed = ty_mode(&mut c, ft);
+        }
+        return sized_load(&mut c, addr, width, signed, u64(is_f32(&mut c, ft)));
+    }
+    return word_load(&mut c, base, off / 8, address);
 }
 // C-layout field access: exact byte offset, exact field width. Fields narrower than
 // eight bytes use portable byte-wise helpers so every target stays correct without
@@ -30368,8 +30936,9 @@ fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
             } else {
                 n = field_load(&mut c, b, base.ty, k, last);
             }
-            if last & subword(&mut c, fty) {
-                // Every field of a Grail record is at least a word: the address is untagged.
+            if last & subword(&mut c, fty) & (narrow_width(&mut c, base_type(&mut c, fty)) == 8) {
+                // A sub-word value held in a word field (a bool, a char): the address is untagged
+                // and the field is the word. A narrow field's address is in c.caddr (field_load).
                 c.word_refs.push(n);
             }
         }
@@ -41259,6 +41828,20 @@ fn simd_named<a, b>(c: (&a mut C), n: &b [u8]) -> u64 {
     return intern_full(&mut c, 36, int_type(&mut c, b, 1), l + 1024, u64[]);
 }
 fn is_simd_name<a>(n: &a [u8]) -> bool {
+    // Asked of every name a primary starts with, so the common answer comes first: every SIMD type
+    // name is a lane letter (f, i, u, m), a width and `x` at index 2 or 3, four to six bytes. Only a
+    // name of that shape is looked up in the list below, which stays the one table of SIMD names
+    // (building it for every identifier was a twelfth of a check).
+    if (n.len() < 4) || (6 < n.len()) {
+        return false;
+    }
+    k := n[0];
+    if (k != 102) && (k != 105) && (k != 117) && (k != 109) {
+        return false;
+    }
+    if (n[2] != 120) && (n[3] != 120) {
+        return false;
+    }
     names := u8[][copy_bytes(view("f32x4")), copy_bytes(view("f32x8")), copy_bytes(view("f64x2")), copy_bytes(view("f64x4")), copy_bytes(view("i32x4")), copy_bytes(view("i32x8")), copy_bytes(view("i64x2")), copy_bytes(view("i64x4")), copy_bytes(view("u8x16")), copy_bytes(view("u8x32")), copy_bytes(view("u32x4")), copy_bytes(view("u32x8")), copy_bytes(view("m8x16")), copy_bytes(view("m8x32")), copy_bytes(view("m32x4")), copy_bytes(view("m32x8")), copy_bytes(view("m64x2")), copy_bytes(view("m64x4"))];
     for i in names.len() {
         if same(view(n), view(names[i])) {
@@ -44057,6 +44640,9 @@ fn record_bytes<a>(c: (&a mut C), alias: u64) -> u64 {
     if c.decls[d].c_layout != 0 {
         return ffi_record_size(&mut c, d);
     }
+    if framable(&mut c, ty) {
+        return value_bytes(&mut c, ty);
+    }
     return record_words(&mut c, ty) * 8;
 }
 // Exchanges the contents of the two `ty` records whose addresses are in `x` and `y`. Up to four
@@ -45771,8 +46357,16 @@ fn propagate_union<a>(c: (&a mut C), x: Val, unwrap: u64) -> Val {
         mark(&mut c, endmap);
         validate_return(&mut c, val(xt, x.ty));
         move_out(&mut c, val(xt, x.ty));
+        // The object now carries the result's tag; when the two unions are laid out differently (an
+        // inline `u64 | E` propagated into a boxed `string | E`, or inline ones of different sizes)
+        // it is rebuilt in the result's layout.
+        mut out = xt;
+        if (framed(&mut c, x.ty) || framed(&mut c, result)) && (same_type(&mut c, x.ty, result) == 0) {
+            tag := word_load(&mut c, xt, 0, 0);
+            out = retag_enum(&mut c, xt, tag, result, x.ty);
+        }
         cleanup(&mut c, 0);
-        return_value(&mut c, xt, x.ty);
+        return_value(&mut c, out, result);
         o(&mut c, view("leave\nret\n"));
     }
     mark(&mut c, ok);
@@ -46366,7 +46960,7 @@ fn pv_loop_mark<a>(c: (&a C)) -> u64[] {
 }
 // After a loop's body: one fact per sequence the body indexed and nothing in it killed - no write, no
 // mutable loan, no call that could reach it - so its header's data and length are what they were at
-// the loop head on every iteration (kind 7, docs/design/native-range-facts.md). The optimiser's
+// the loop head on every iteration (kind 8, docs/design/native-range-facts.md). The optimiser's
 // descriptor hoisting reads it; the unchecked accessor carries the per-access proof itself.
 fn pv_loop_facts<a>(c: (&a mut C), at: (&a u64[]), head: u64) -> unit {
     if !pv_ir_live(&c) || (c.facts_fn.len() == 0) {
@@ -51804,7 +52398,7 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                                 mark(&mut c, skip);
                             } else if !inline_field(&mut c, ty, i) {
                                 o(&mut c, view("movq "));
-                                on(&mut c, field_word(&mut c, ty, i) * 8);
+                                on(&mut c, field_offset(&mut c, ty, i));
                                 o(&mut c, view("(%r12),%rdi\n"));
                                 holder_drop(&mut c, t);
                             }
@@ -51858,12 +52452,12 @@ fn emit_drop_in_place<a, b>(c: (&a mut C), ty: u64, hook: &b [u8]) -> unit {
                     continue;
                 }
                 o(&mut c, view("leaq "));
-                on(&mut c, field_word(&mut c, ty, i) * 8);
+                on(&mut c, field_offset(&mut c, ty, i));
                 o(&mut c, view("(%r12),%rdi\n"));
                 call_out(&mut c, view(drop_in_place_ref(&mut c, t)));
             } else {
                 o(&mut c, view("movq "));
-                on(&mut c, field_word(&mut c, ty, i) * 8);
+                on(&mut c, field_offset(&mut c, ty, i));
                 o(&mut c, view("(%r12),%rdi\n"));
                 holder_drop(&mut c, t);
             }
@@ -52058,6 +52652,176 @@ fn s256_block(h: (&mut u64[]), text: &[u8], at: u64, w: (&mut u64[]), k: (&u64[]
     exchange(&mut h[7], h7);
     return ();
 }
+const XP1: u64 = 11400714785074694791;
+const XP2: u64 = 14029467366897019727;
+const XP3: u64 = 1609587929392839161;
+const XP4: u64 = 9650029242287828579;
+const XP5: u64 = 2870177450012600261;
+fn xx_rotl(x: u64, r: u64) -> u64 {
+    return (x << r) | (x >> (64 - r));
+}
+fn xx_round(acc: u64, lane: u64) -> u64 {
+    return wrapping_mul(xx_rotl(wrapping_add(acc, wrapping_mul(lane, XP2)), 31), XP1);
+}
+fn xx_merge(acc: u64, lane: u64) -> u64 {
+    return wrapping_add(wrapping_mul(acc ^ xx_round(0, lane), XP1), XP4);
+}
+// The address of a byte sequence's first byte: the first word of the header its value points to.
+fn bytes_base<a>(data: &a [u8]) -> u64 {
+    mut v: u64 = 0;
+    unsafe {
+        header := ptr_of(&data).cast(u64).read();
+        v = ptr_from_addr(u64, header).read();
+    }
+    return v;
+}
+fn word_at(p: u64) -> u64 {
+    mut v: u64 = 0;
+    unsafe {
+        v = ptr_from_addr(u64, p).read();
+    }
+    return v;
+}
+fn half_at(p: u64) -> u64 {
+    mut v: u64 = 0;
+    unsafe {
+        v = u64(ptr_from_addr(u32, p).read());
+    }
+    return v;
+}
+// XXH64's last steps, from the four lanes of the stripes (or the seed alone for a short input).
+fn xx_finish<a, b>(data: &a [u8], p: u64, from: u64, seed: u64, lanes: (&b u64[])) -> u64 {
+    n := data.len();
+    mut at = from;
+    mut h: u64 = 0;
+    if n >= 32 {
+        h = wrapping_add(wrapping_add(xx_rotl(lanes[0], 1), xx_rotl(lanes[1], 7)), wrapping_add(xx_rotl(lanes[2], 12), xx_rotl(lanes[3], 18)));
+        h = xx_merge(h, lanes[0]);
+        h = xx_merge(h, lanes[1]);
+        h = xx_merge(h, lanes[2]);
+        h = xx_merge(h, lanes[3]);
+    } else {
+        h = wrapping_add(seed, XP5);
+    }
+    h = wrapping_add(h, n);
+    while at + 8 <= n {
+        h = wrapping_add(wrapping_mul(xx_rotl(h ^ xx_round(0, word_at(p + at)), 27), XP1), XP4);
+        at += 8;
+    }
+    if at + 4 <= n {
+        h = wrapping_add(wrapping_mul(xx_rotl(h ^ wrapping_mul(half_at(p + at), XP1), 23), XP2), XP3);
+        at += 4;
+    }
+    while at < n {
+        h = wrapping_mul(xx_rotl(h ^ wrapping_mul(u64(data[at]), XP5), 11), XP1);
+        at += 1;
+    }
+    h = wrapping_mul(h ^ (h >> 33), XP2);
+    h = wrapping_mul(h ^ (h >> 29), XP3);
+    return h ^ (h >> 32);
+}
+fn push_be64<a>(out: (&a mut u8[]), v: u64) -> unit {
+    mut shift: u64 = 64;
+    while shift != 0 {
+        shift -= 8;
+        out.push(u8((v >> shift) & 255));
+    }
+    return ();
+}
+// The digest of the build store and of an interface's trailer: XXH64 of `data` under the seeds 0, 1,
+// 2 and 3, 32 raw bytes (each hash big-endian). Both guard against corruption, not against a writer
+// who means harm - anything that can write the store or an interface can rewrite the digest too -
+// and four independent 64-bit hashes over every byte do that at a few instructions a byte, read a
+// word at a time, where SHA-256 in this language costs hundreds.
+pub fn fast_hash<a>(data: &a [u8]) -> u8[] {
+    n := data.len();
+    mut p: u64 = 0;
+    if n != 0 {
+        p = bytes_base(data);
+    }
+    // Sixteen accumulators: XXH64's four lanes for each of the four seeds, one pass over the words.
+    mut a1 = wrapping_add(XP1, XP2);
+    mut a2 = XP2;
+    mut a3: u64 = 0;
+    mut a4 = wrapping_sub(0, XP1);
+    mut b1 = wrapping_add(a1, 1);
+    mut b2 = wrapping_add(a2, 1);
+    mut b3: u64 = 1;
+    mut b4 = wrapping_add(a4, 1);
+    mut c1 = wrapping_add(a1, 2);
+    mut c2 = wrapping_add(a2, 2);
+    mut c3: u64 = 2;
+    mut c4 = wrapping_add(a4, 2);
+    mut d1 = wrapping_add(a1, 3);
+    mut d2 = wrapping_add(a2, 3);
+    mut d3: u64 = 3;
+    mut d4 = wrapping_add(a4, 3);
+    mut at: u64 = 0;
+    // `at + 32 <= n` cannot overflow (n is a length) and neither can an address inside the data.
+    mut q = p;
+    mut stripes = n / 32;
+    while stripes != 0 {
+        mut w1: u64 = 0;
+        mut w2: u64 = 0;
+        mut w3: u64 = 0;
+        mut w4: u64 = 0;
+        unsafe {
+            w1 = ptr_from_addr(u64, q).read();
+            w2 = ptr_from_addr(u64, wrapping_add(q, 8)).read();
+            w3 = ptr_from_addr(u64, wrapping_add(q, 16)).read();
+            w4 = ptr_from_addr(u64, wrapping_add(q, 24)).read();
+        }
+        w1 = wrapping_mul(w1, XP2);
+        w2 = wrapping_mul(w2, XP2);
+        w3 = wrapping_mul(w3, XP2);
+        w4 = wrapping_mul(w4, XP2);
+        a1 = wrapping_add(a1, w1);
+        a1 = wrapping_mul((a1 << 31) | (a1 >> 33), XP1);
+        a2 = wrapping_add(a2, w2);
+        a2 = wrapping_mul((a2 << 31) | (a2 >> 33), XP1);
+        a3 = wrapping_add(a3, w3);
+        a3 = wrapping_mul((a3 << 31) | (a3 >> 33), XP1);
+        a4 = wrapping_add(a4, w4);
+        a4 = wrapping_mul((a4 << 31) | (a4 >> 33), XP1);
+        b1 = wrapping_add(b1, w1);
+        b1 = wrapping_mul((b1 << 31) | (b1 >> 33), XP1);
+        b2 = wrapping_add(b2, w2);
+        b2 = wrapping_mul((b2 << 31) | (b2 >> 33), XP1);
+        b3 = wrapping_add(b3, w3);
+        b3 = wrapping_mul((b3 << 31) | (b3 >> 33), XP1);
+        b4 = wrapping_add(b4, w4);
+        b4 = wrapping_mul((b4 << 31) | (b4 >> 33), XP1);
+        c1 = wrapping_add(c1, w1);
+        c1 = wrapping_mul((c1 << 31) | (c1 >> 33), XP1);
+        c2 = wrapping_add(c2, w2);
+        c2 = wrapping_mul((c2 << 31) | (c2 >> 33), XP1);
+        c3 = wrapping_add(c3, w3);
+        c3 = wrapping_mul((c3 << 31) | (c3 >> 33), XP1);
+        c4 = wrapping_add(c4, w4);
+        c4 = wrapping_mul((c4 << 31) | (c4 >> 33), XP1);
+        d1 = wrapping_add(d1, w1);
+        d1 = wrapping_mul((d1 << 31) | (d1 >> 33), XP1);
+        d2 = wrapping_add(d2, w2);
+        d2 = wrapping_mul((d2 << 31) | (d2 >> 33), XP1);
+        d3 = wrapping_add(d3, w3);
+        d3 = wrapping_mul((d3 << 31) | (d3 >> 33), XP1);
+        d4 = wrapping_add(d4, w4);
+        d4 = wrapping_mul((d4 << 31) | (d4 >> 33), XP1);
+        q = wrapping_add(q, 32);
+        stripes -= 1;
+    }
+    at = n - n % 32;
+    mut out = u8[];
+    la := u64[a1, a2, a3, a4];
+    lb := u64[b1, b2, b3, b4];
+    lc := u64[c1, c2, c3, c4];
+    ld := u64[d1, d2, d3, d4];
+    push_be64(&mut out, xx_finish(data, p, at, 0, &la));
+    push_be64(&mut out, xx_finish(data, p, at, 1, &lb));
+    push_be64(&mut out, xx_finish(data, p, at, 2, &lc));
+    push_be64(&mut out, xx_finish(data, p, at, 3, &ld));
+    return out;
+}
 // The 32-byte SHA-256 digest of a byte view.
 fn sha256<a>(data: &a [u8]) -> u8[] {
     mut h = u64[0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
@@ -52122,7 +52886,7 @@ pub fn iface_digest<a>(data: &a [u8]) -> u8[] {
 //
 //   file  := "GRIF" VERSION:u8 record* trailer
 //   record:= tag:u8 len:VAR payload[len]
-//   trailer  tag 2, payload = source digest + SHA-256 of every byte before it
+//   trailer  tag 2, payload = source digest + fast_hash of every byte before it (32 bytes)
 //
 // `VAR` is LEB128. Every record states its own length, every string its own length and every type
 // is a record of its own, so the reader can prove it consumed exactly what the writer emitted:
@@ -52137,7 +52901,7 @@ pub fn iface_digest<a>(data: &a [u8]) -> u8[] {
 // Format 7 added the effect summary rows of every listed function; format 8 gives an `Atomic<T>`
 // its element type; format 9 carries a `dyn` type's bounds; format 10 adds the SIMD vector types
 // (kind 36: the element, and the lane count in the mode).
-const IFACE_VERSION: u64 = 10;
+const IFACE_VERSION: u64 = 11;
 const IFACE_TAG_MODULE: u64 = 1;
 const IFACE_TAG_TRAILER: u64 = 2;
 const IFACE_TAG_LINK: u64 = 3;
@@ -52176,7 +52940,7 @@ const IFACE_TAG_INLINE: u64 = 21;
 // the module header record and rendered back verbatim by `grail iface dump`, so the single-source
 // rule survives the encoding: nothing else in this compiler knows how the ABI is written.
 fn iface_dyn_abi() -> string {
-    return "abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame args = 6 registers then stack";
+    return "abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame args = 6 registers then stack layout = c";
 }
 
 // ---- writing ----
@@ -54118,7 +54882,7 @@ fn iface_seal_out<a, b>(out: (&a mut u8[]), source_digest: &b [u8]) -> unit {
     out.push(IFACE_TAG_TRAILER);
     iface_wv(&mut out, iface_vlen(source_digest.len()) + source_digest.len() + 32);
     iface_ws(&mut out, view(source_digest));
-    d := sha256(&out);
+    d := fast_hash(&out);
     for i in d.len() {
         out.push(d[i]);
     }
@@ -54405,7 +55169,7 @@ fn iface_seal<a>(path: &a [u8], data: &a [u8], vouched: bool) -> u8[] {
             for i in cover {
                 prefix.push(data[i]);
             }
-            got := sha256(&prefix);
+            got := fast_hash(&prefix);
             mut ok = 1;
             for i in 32 {
                 if got[i] != data[cover + i] {
@@ -57504,6 +58268,8 @@ pub fn main() -> u64 {
         statics: Static[],
         ct_calls: CtCall[],
         ct_done: CtDone[],
+        r4_on: 0,
+        r4_keep: u64[],
         ct_guards: u8[][],
         ct_deps_path: u8[],
         static_scratch: 0,
@@ -57541,6 +58307,9 @@ pub fn main() -> u64 {
         pv_arith_ok: 0,
         addr_arg: 0,
         ref_assign_target: 0,
+        report_checks: 0,
+        checks_report: u8[],
+        checks_count: 0,
         fx_verified_index: 0,
         dyn_result_seen: 0,
         proved_label: 0,
@@ -58127,7 +58896,10 @@ pub fn main() -> u64 {
                                     exchange(&mut c.backend, 1);
                                     offset += 1;
                                 } else {
-                                    if same(view(option), view("--forge-index-facts")) {
+                                    if same(view(option), view("--report-checks")) {
+                                        exchange(&mut c.report_checks, 1);
+                                        offset += 1;
+                                    } else if same(view(option), view("--forge-index-facts")) {
                                         exchange(&mut c.forge_index, 1);
                                         offset += 1;
                                     } else if starts_with(view(option), view("--forge-indirect=")) {
@@ -58312,6 +59084,7 @@ pub fn main() -> u64 {
         }
         if pass == 2 {
             jobs::phase(view("declarations"));
+            r4_compute(&mut c);
             par_start(&mut c, n);
             // From the bodies on, a check writes no text (`quiet`): its units are check units, with
             // the registrations and no text (fn_unit_of), as cargo's metadata is to its rlib.
@@ -58742,6 +59515,13 @@ pub fn main() -> u64 {
     if site_table_on(&c) {
         jobs::phase(view("optimised"));
         tabled := site_table(&mut c, view(out));
+        if c.report_checks != 0 {
+            mut head = copy_bytes(view("checks left in the program's own functions: "));
+            decimal(&mut head, c.checks_count);
+            head.push(10);
+            host::print(view(head));
+            host::print(view(c.checks_report));
+        }
         jobs::phase(view("location-table"));
         out = tabled;
     }
