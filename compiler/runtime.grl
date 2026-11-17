@@ -147,14 +147,30 @@ fn rt_fail(kind: u64, a: u64, b: u64) -> u64 {
     rt_write_all(2, buf, n);
     return rt_abort_final();
 }
-// The failure report block: process-state words 4096..8152 hold the text, 8152..8192 the site
-// descriptor rt_fail_where fills. Only the holder of the abort claim writes it, so one block serves
-// every thread. rt_fail_limit() + the longest single piece written past it stays inside 4056 bytes.
+// The failure report block: 8192 bytes mapped when the first report needs them - the text in bytes
+// 0..8152, the site descriptor rt_fail_where fills in 8152..8192 - with its address kept in
+// process-state word 3432. Only the holder of the abort claim writes it, so one block serves every
+// thread. It is mapped, not taken from the heap (a failure may be raised where the allocator lock
+// is held, and `@no_alloc` code may fail a check), and not a part of rt_state: the entry stub that
+// sizes rt_state is the compiling compiler's, so a binary built by an older compiler (the compiler
+// itself, built by its seed) has only the 4096 bytes that compiler gave it.
+fn rt_report_block() -> u64 {
+    word := raw_state() + 3432;
+    mut block = raw_load(word);
+    if block == 0 {
+        block = raw_map(8192);
+        if rt_error(block) {
+            rt_hard_exit(134);
+        }
+        raw_store(word, block);
+    }
+    return block;
+}
 fn rt_report_buf() -> u64 {
-    return raw_state() + 4096;
+    return rt_report_block();
 }
 fn rt_report_sites() -> u64 {
-    return raw_state() + 8152;
+    return rt_report_block() + 8152;
 }
 // An inline check in compiled code failed (the compiler rewrote its `call rt_abort`): for an index
 // check the vector is in `a` and the index in `b`.
@@ -1406,94 +1422,148 @@ fn rt_arena_new(bump: u64, left: u64, size: u64) -> u64 {
     raw_store(left, rt_div(mapsize - first, size));
     return 0;
 }
+// The size class of a request: classes are 32 * 2^bin bytes, header included. The four smallest
+// (requests up to 240 bytes - most of them) are a compare chain; the rest double up to the request.
+fn rt_alloc_bin(n: u64) -> u64 {
+    if n < 17 {
+        return 0;
+    }
+    if n < 49 {
+        return 1;
+    }
+    if n < 113 {
+        return 2;
+    }
+    if n < 241 {
+        return 3;
+    }
+    mut size = 512;
+    mut bin = 4;
+    while size < wrapping_add(n, 16) {
+        size = wrapping_add(size, size);
+        bin = wrapping_add(bin, 1);
+    }
+    return bin;
+}
+// The class of a block that has one: its size word is a power of two from 32.
+fn rt_block_bin(size: u64) -> u64 {
+    if size < 65 {
+        return u64(size == 64);
+    }
+    if size == 128 {
+        return 2;
+    }
+    if size == 256 {
+        return 3;
+    }
+    mut n = 512;
+    mut bin = 4;
+    while n < size {
+        n = wrapping_add(n, n);
+        bin = wrapping_add(bin, 1);
+    }
+    return bin;
+}
+// The one-thread allocator (and the shared lists' code under the lock). Every address below stays
+// inside process state or an arena the allocator mapped, so the arithmetic wraps rather than
+// checks: an overflow check per addition was a third of what an allocation cost.
 fn rt_alloc_unlocked(n: u64) -> u64 {
     state := raw_state();
     if 1152921504606846976 < n {
         rt_abort();
     }
-    mut size = 32;
-    mut bin = 0;
-    while size < n + 16 {
-        size = size * 2;
-        bin = bin + 1;
-    }
-    head := state + 256 + bin * 8;
-    mut block = raw_load(head);
-    mut reused = 0;
+    bin := rt_alloc_bin(n);
+    bin8 := wrapping_mul(bin, 8);
+    head := wrapping_add(wrapping_add(state, 256), bin8);
+    block := raw_load(head);
     if block != 0 {
-        raw_store(head, raw_load(block + 8));
-        reused = 1;
-    } else {
-        bump := state + 768 + bin * 8;
-        left := state + 1280 + bin * 8;
-        if raw_load(left) == 0 {
-            rt_arena_new(bump, left, size);
+        raw_store(head, raw_load(wrapping_add(block, 8)));
+        raw_store(wrapping_add(block, 8), 1);
+        ptr := wrapping_add(block, 16);
+        // Reuse is cleared as far as was asked for: no caller reads past its request (a vector's
+        // capacity is the request, never the class). Fresh blocks come from zeroed mappings. The two
+        // smallest classes - most allocations - clear their whole payload with fixed stores (16 and
+        // 48 bytes: cheaper than a loop's setup); the others clear the request's words.
+        if bin == 0 {
+            raw_store(ptr, 0);
+            raw_store(wrapping_add(ptr, 8), 0);
+        } else if bin == 1 {
+            raw_store(ptr, 0);
+            raw_store(wrapping_add(ptr, 8), 0);
+            raw_store(wrapping_add(ptr, 16), 0);
+            raw_store(wrapping_add(ptr, 24), 0);
+            raw_store(wrapping_add(ptr, 32), 0);
+            raw_store(wrapping_add(ptr, 40), 0);
+        } else {
+            mut i = 0;
+            while i < n {
+                raw_store(wrapping_add(ptr, i), 0);
+                i = wrapping_add(i, 8);
+            }
         }
-        block = raw_load(bump);
-        raw_store(bump, block + size);
-        raw_store(left, raw_load(left) - 1);
-        raw_store(block, size);
+        raw_store(wrapping_add(state, 24), wrapping_add(raw_load(wrapping_add(state, 24)), 1));
+        return ptr;
     }
-    raw_store(block + 8, 1);
-    ptr := block + 16;
-    // Bump allocations come from freshly mapped (already zero) memory; only reuse is cleared, and
-    // only as far as was asked for: no caller reads past its request (a vector's capacity is the
-    // request, never the class).
-    if reused {
-        mut i = 0;
-        while i < n {
-            raw_store(ptr + i, 0);
-            i = i + 8;
+    size := 32 << bin;
+    bump := wrapping_add(wrapping_add(state, 768), bin8);
+    left := wrapping_add(wrapping_add(state, 1280), bin8);
+    if raw_load(left) == 0 {
+        rt_arena_new(bump, left, size);
+    }
+    fresh := raw_load(bump);
+    raw_store(bump, wrapping_add(fresh, size));
+    raw_store(left, wrapping_sub(raw_load(left), 1));
+    raw_store(fresh, size);
+    raw_store(wrapping_add(fresh, 8), 1);
+    raw_store(wrapping_add(state, 24), wrapping_add(raw_load(wrapping_add(state, 24)), 1));
+    return wrapping_add(fresh, 16);
+}
+// A block with a mapping of its own goes back to the OS. Out of line, so the small-block path
+// above needs no saved registers.
+fn rt_free_own(ptr: u64) -> u64 {
+    state := raw_state();
+    arena := rt_own_arena(ptr);
+    mut link = state + 32;
+    while raw_load(link) != arena {
+        next := raw_load(link);
+        if next == 0 {
+            rt_abort();
         }
+        link = next;
     }
-    raw_store(state + 24, wrapping_add(raw_load(state + 24), 1));
-    return ptr;
+    length := raw_load(arena + 8);
+    raw_store(link, raw_load(arena));
+    raw_store(state + 24, wrapping_sub(raw_load(state + 24), 1));
+    err := rt_syscall(11, arena, length, 0);
+    if rt_error(err) {
+        rt_abort();
+    }
+    return 0;
 }
 fn rt_free_unlocked(ptr: u64) -> u64 {
     if ptr == 0 {
         return 0;
     }
     state := raw_state();
-    block := ptr - 16;
+    block := wrapping_sub(ptr, 16);
+    st := raw_load(wrapping_add(block, 8));
     // State 2 marks a static block (a string literal's view descriptor): never freed.
-    if raw_load(block + 8) == 2 {
+    if st == 2 {
         return 0;
     }
-    if raw_load(block + 8) != 1 {
+    if st != 1 {
         rt_abort();
     }
     size := raw_load(block);
     // Classes of at least 512 KiB occupy their own arena. Return those mappings to the OS
     // immediately; smaller freed objects remain reusable in the segregated slab caches.
     if (size < 524288) == 0 {
-        arena := rt_own_arena(ptr);
-        mut link = state + 32;
-        while raw_load(link) != arena {
-            next := raw_load(link);
-            if next == 0 {
-                rt_abort();
-            }
-            link = next;
-        }
-        length := raw_load(arena + 8);
-        raw_store(link, raw_load(arena));
-        raw_store(state + 24, wrapping_sub(raw_load(state + 24), 1));
-        err := rt_syscall(11, arena, length, 0);
-        if rt_error(err) {
-            rt_abort();
-        }
-        return 0;
+        return rt_free_own(ptr);
     }
-    mut n = 32;
-    mut bin = 0;
-    while n < size {
-        n = n * 2;
-        bin = bin + 1;
-    }
-    head := state + 256 + bin * 8;
-    raw_store(block + 8, raw_load(head));
+    head := wrapping_add(wrapping_add(state, 256), wrapping_mul(rt_block_bin(size), 8));
+    raw_store(wrapping_add(block, 8), raw_load(head));
     raw_store(head, block);
-    raw_store(state + 24, wrapping_sub(raw_load(state + 24), 1));
+    raw_store(wrapping_add(state, 24), wrapping_sub(raw_load(wrapping_add(state, 24)), 1));
     return 0;
 }
 // Resizes an allocation to hold at least `need` bytes, keeping the first `used`. A block in its own
@@ -2672,40 +2742,24 @@ fn rt_append_text(dst: u64, src: u64) -> u64 {
 }
 
 // Opaque atomic words. Public safe types never expose these numeric addresses.
+// The cell of an `Atomic<T>`: one word holding the value extended to 64 bits. Its methods are the
+// `atom.*` ops at the call site (native.grl `atomic_method`), not calls into the runtime. The cell
+// is published by whatever hands its owner to another thread, so the first store is relaxed.
 fn rt_atomic_new(value: u64) -> u64 {
     p := rt_alloc(8);
-    raw_atomic_store(p, value);
+    raw_atomic_store_relaxed(p, value);
     return p;
 }
-fn rt_atomic_load(p: u64) -> u64 {
-    return raw_atomic_load(p);
-}
-fn rt_atomic_load_relaxed(p: u64) -> u64 {
-    return raw_atomic_load_relaxed(p);
-}
-fn rt_atomic_load_acquire(p: u64) -> u64 {
-    return raw_atomic_load_acquire(p);
-}
-fn rt_atomic_store(p: u64, value: u64) -> u64 {
-    raw_atomic_store(p, value);
-    return 0;
-}
-fn rt_atomic_store_relaxed(p: u64, value: u64) -> u64 {
-    raw_atomic_store_relaxed(p, value);
-    return 0;
-}
-fn rt_atomic_store_release(p: u64, value: u64) -> u64 {
-    raw_atomic_store_release(p, value);
-    return 0;
-}
-fn rt_atomic_compare_exchange(p: u64, expected: u64, value: u64) -> u64 {
-    return raw_atomic_cas(p, expected, value);
-}
-fn rt_atomic_fetch_add(p: u64, value: u64) -> u64 {
+
+// Bootstrap fallbacks for the seed compiler, which predates the `raw_atomic_fetch_add`,
+// `raw_atomic_fetch_sub`, `raw_atomic_swap` and `raw_atomic_fence` intrinsics: built by it, these
+// are the calls; built by a compiler that has the intrinsics, the name is the intrinsic (a raw
+// intrinsic is never shadowed, native.grl) and these bodies are never called. Delete them at the
+// next reseed.
+fn raw_atomic_fetch_add(p: u64, value: u64) -> u64 {
     mut old = raw_atomic_load(p);
     while true {
-        next := wrapping_add(old, value);
-        observed := raw_atomic_cas(p, old, next);
+        observed := raw_atomic_cas(p, old, wrapping_add(old, value));
         if observed == old {
             return old;
         }
@@ -2713,11 +2767,10 @@ fn rt_atomic_fetch_add(p: u64, value: u64) -> u64 {
     }
     return 0;
 }
-fn rt_atomic_fetch_sub(p: u64, value: u64) -> u64 {
+fn raw_atomic_fetch_sub(p: u64, value: u64) -> u64 {
     mut old = raw_atomic_load(p);
     while true {
-        next := wrapping_sub(old, value);
-        observed := raw_atomic_cas(p, old, next);
+        observed := raw_atomic_cas(p, old, wrapping_sub(old, value));
         if observed == old {
             return old;
         }
@@ -2725,7 +2778,15 @@ fn rt_atomic_fetch_sub(p: u64, value: u64) -> u64 {
     }
     return 0;
 }
-fn rt_atomic_swap(p: u64, value: u64) -> u64 {
+// The seed lowers its compare-and-swap with full barriers on both sides on every target, so a CAS
+// on a word of this frame is its full fence.
+fn raw_atomic_fence() -> u64 {
+    mut word = 0;
+    at := &mut word;
+    raw_atomic_cas(at, 0, 0);
+    return 0;
+}
+fn raw_atomic_swap(p: u64, value: u64) -> u64 {
     mut old = raw_atomic_load(p);
     while true {
         observed := raw_atomic_cas(p, old, value);
@@ -2954,17 +3015,9 @@ fn rt_park_until(b: u64, q: u64, until: u64, flags: u64) -> u64 {
         // that has this word set, so one of the two sees the other.
         raw_atomic_store(owner + 128, 1);
     }
-    mut timer = 0;
     mut poll = 0;
-    if (until != 0) & (owner != 0) & (rt_task_threads() == 0) {
-        now := f_host_now_ms();
-        if now < until {
-            if (rt_os_reactor() != 0) & (rt_os_timer(rt_sched(), owner, until - now) == 0) {
-                timer = 1;
-            } else {
-                poll = 1;
-            }
-        }
+    if (until != 0) & (owner != 0) & ((rt_task_threads() != 0) | (rt_os_reactor() == 0)) {
+        poll = 1;
     }
     mut code = 0;
     while raw_atomic_load(b + 8) == 0 {
@@ -2994,7 +3047,22 @@ fn rt_park_until(b: u64, q: u64, until: u64, flags: u64) -> u64 {
             if poll {
                 rt_yield();
             } else {
-                rt_suspend(owner);
+                if until != 0 {
+                    // A timer for what is left of the deadline, armed per pass (see rt_sleep_for).
+                    now := f_host_now_ms();
+                    mut armed = 0;
+                    if now < until {
+                        armed = rt_os_timer(rt_sched(), owner, until - now) == 0;
+                    }
+                    if armed {
+                        rt_suspend(owner);
+                        rt_os_timer_done(rt_sched(), owner);
+                    } else {
+                        rt_yield();
+                    }
+                } else {
+                    rt_suspend(owner);
+                }
             }
         } else {
             if until != 0 {
@@ -3006,9 +3074,6 @@ fn rt_park_until(b: u64, q: u64, until: u64, flags: u64) -> u64 {
     }
     if cancellable {
         raw_atomic_store(owner + 128, 0);
-    }
-    if timer {
-        rt_os_timer_done(rt_sched(), owner);
     }
     // The waker finished under this lock: nothing of this wait is in flight after it.
     rt_q_lock(q);
@@ -3305,6 +3370,29 @@ fn rt_mutex_poisoned(p: u64) -> u64 {
     return rt_fail_message(17, s);
 }
 fn rt_mutex_lock(p: u64) -> u64 {
+    // The uncontended path, inline: one compare-and-swap from 0 (free, not poisoned, nobody queued)
+    // and the held-list push on the waiter block the thread pointer leads to. Everything else -
+    // a held lock, a poisoned one, a thread with no block yet - takes the general path.
+    tp := raw_tp_get();
+    if tp != 0 {
+        t := raw_load(wrapping_add(tp, 16));
+        mut b = 0;
+        if t != 0 {
+            b = wrapping_add(t, 240);
+        } else {
+            b = raw_load(wrapping_add(tp, 96));
+        }
+        if b != 0 {
+            if raw_atomic_cas(p, 0, 1) == 0 {
+                raw_store(wrapping_add(p, 16), raw_load(wrapping_add(b, 32)));
+                raw_store(wrapping_add(b, 32), p);
+                return 0;
+            }
+        }
+    }
+    return rt_mutex_lock_slow(p);
+}
+fn rt_mutex_lock_slow(p: u64) -> u64 {
     rt_mutex_acquire(p);
     if (raw_atomic_load(p) & 4) != 0 {
         rt_mutex_release(p);
@@ -3313,6 +3401,27 @@ fn rt_mutex_lock(p: u64) -> u64 {
     return rt_held_push(p);
 }
 fn rt_mutex_unlock(p: u64) -> u64 {
+    // Inline: a callback-scoped lock is the newest entry of its holder's list, and with nobody
+    // queued and nothing flagged the word goes from 1 back to 0 in one compare-and-swap.
+    tp := raw_tp_get();
+    if tp != 0 {
+        t := raw_load(wrapping_add(tp, 16));
+        mut b = 0;
+        if t != 0 {
+            b = wrapping_add(t, 240);
+        } else {
+            b = raw_load(wrapping_add(tp, 96));
+        }
+        if b != 0 {
+            if raw_load(wrapping_add(b, 32)) == p {
+                raw_store(wrapping_add(b, 32), raw_load(wrapping_add(p, 16)));
+                if raw_atomic_cas(p, 1, 0) != 1 {
+                    rt_mutex_release(p);
+                }
+                return 0;
+            }
+        }
+    }
     rt_held_pop(p);
     return rt_mutex_release(p);
 }
@@ -3775,23 +3884,30 @@ fn rt_sleep_for(ms: u64, flags: u64) -> u64 {
         return rt_wait_answer(4, flags);
     }
     s := rt_sched();
-    if rt_os_timer(s, t, ms) != 0 {
-        raw_atomic_store(t + 128, 0);
-        rt_sleep_plain(ms);
-        return 0;
-    }
     until := f_host_now_ms() + ms;
-    while true {
+    mut left = ms;
+    while left != 0 {
+        // A timer per pass, for what is left: a wake that came early (another wake, or a clock
+        // that reads a millisecond short when the timer fires) re-arms instead of sleeping for
+        // good on a timer that has already fired.
+        if rt_os_timer(s, t, left) != 0 {
+            raw_atomic_store(t + 128, 0);
+            rt_sleep_plain(left);
+            return 0;
+        }
         rt_suspend(t);
+        rt_os_timer_done(s, t);
         if raw_atomic_load(token) != 0 {
             break;
         }
-        if (f_host_now_ms() < until) == 0 {
-            break;
+        now := f_host_now_ms();
+        if now < until {
+            left = until - now;
+        } else {
+            left = 0;
         }
     }
     raw_atomic_store(t + 128, 0);
-    rt_os_timer_done(s, t);
     raw_atomic_cas(t + 24, 3, 0);
     if raw_atomic_load(token) != 0 {
         return rt_wait_answer(4, flags);
@@ -4051,7 +4167,7 @@ fn rt_uthread_main(rec: u64) -> u64 {
         // Its cache is retired by rt_thread_main after this returns, so the count the leak check
         // reads is whole whether or not this thread has gone.
         rt_cache_retire(tp);
-        rt_atomic_fetch_sub(rt_detached_word(), 1);
+        raw_atomic_fetch_sub(rt_detached_word(), 1);
         return 0;
     }
     // Finished is published under the joiners' queue lock, and each joiner is woken under it: a
@@ -4107,11 +4223,11 @@ fn f_host_thread_keep(rec: u64) -> u64 {
 // result), so the caller still owns the handle and joins it.
 fn f_host_thread_detach(rec: u64) -> u64 {
     // Counted before the claim, so the thread's own decrement can never come first.
-    rt_atomic_fetch_add(rt_detached_word(), 1);
+    raw_atomic_fetch_add(rt_detached_word(), 1);
     if raw_atomic_cas(rec + 104, 0, 1) == 0 {
         return 1;
     }
-    rt_atomic_fetch_sub(rt_detached_word(), 1);
+    raw_atomic_fetch_sub(rt_detached_word(), 1);
     return 0;
 }
 // How many detached threads are still running (process-state word 56). While there is one, the end
@@ -4156,6 +4272,19 @@ fn f_host_thread_failure(rec: u64) -> u64 {
     raw_store(out + 16, site);
     return out;
 }
+// A failed scoped thread's failure, raised here; the record stays for its scope to release.
+fn f_host_thread_reraise(rec: u64) -> u64 {
+    kind := raw_load(rec + 160);
+    msg := rt_task_message(rec);
+    site := rt_task_site(rec);
+    return rt_fail_text(kind, msg, site);
+}
+// A failed thread's two failure texts, dropped (a sibling of the failure a scope re-raises).
+fn f_host_thread_forget_failure(rec: u64) -> u64 {
+    rt_drop_seq(rt_task_message(rec));
+    rt_drop_seq(rt_task_site(rec));
+    return 0;
+}
 // `join` of a failed thread: release it and report its failure here, by the rules of any failure
 // that already has its texts - contained by an enclosing task or thread, fatal on the main thread.
 fn f_host_thread_refail(rec: u64) -> u64 {
@@ -4192,7 +4321,7 @@ fn f_host_sleep_until_ms(deadline_ms: u64) -> u64 {
 // this thread, zeroed the first time: lib/thread.grl stores the boxed value and the function that
 // drops it there. The main thread's table hangs off its own record like any other.
 fn f_host_thread_local_key() -> u64 {
-    return rt_atomic_fetch_add(raw_state() + 48, 1);
+    return raw_atomic_fetch_add(raw_state() + 48, 1);
 }
 fn f_host_thread_local(key: u64) -> u64 {
     tp := raw_tp_get();
@@ -4302,6 +4431,7 @@ fn rt_thread_join(handle: u64) -> u64 {
 //   3408         site descriptor capacity     rt_state_sites_offer       rth-sites
 //   3416         a second thread was started  rt_allocator_lock          compile-speed
 //   3424         scheduler config block       rt_sched_config            sched-start
+//   3432         failure report block address rt_report_block            statics-no-alloc
 //   3448         stacks discarded by re-raise rt_discarded_word          job-failure
 //   3456         abort report claim           rt_abort                   abort-once
 //   3464..3576   task-stack fault handler     rt_state_stack_guard       stack-guard
@@ -4310,8 +4440,6 @@ fn rt_thread_join(handle: u64) -> u64 {
 //   3600..3840   stack-fault report scratch  rt_stack_report_words      main-stack-overflow
 //   3840         Windows fiber state          os-windows                 --
 //   3856..       Windows fiber table          os-windows                 --
-//   4096..8152   failure report text          rt_report_buf              statics-no-alloc
-//   8152..8192   failure report descriptor    rt_report_sites            statics-no-alloc
 //
 // Not a claim: thread-record word 48 (raw_state() + 176 for the main thread). os-windows keeps the
 // per-thread WaitOnAddress expected value there, so nothing else may use it. The job pool once did, which
@@ -4368,15 +4496,28 @@ fn rt_job_map_leaf(d: u64, k: u64) -> u64 {
     if n < stop {
         stop = n;
     }
+    iw := raw_load(d + 64);
+    rw := raw_load(d + 72);
     mut i = start;
     while i < stop {
+        mut item = 0;
+        if iw == 0 {
+            item = raw_load(items + i * 8);
+        } else {
+            item = items + i * iw;
+        }
         mut r = 0;
         if env == 0 {
-            r = raw_call2(f, raw_load(items + i * 8), context);
+            r = raw_call2(f, item, context);
         } else {
-            r = raw_call3(f, env, raw_load(items + i * 8), context);
+            r = raw_call3(f, env, item, context);
         }
-        raw_store(out + i * 8, r);
+        if rw == 0 {
+            raw_store(out + i * 8, r);
+        } else {
+            rt_copy_bytes(out + i * rw, r, rw);
+            rt_free(r);
+        }
         i += 1;
     }
     return stop - start;
@@ -4412,12 +4553,25 @@ fn rt_job_split_chunks(d: u64, lo: u64, hi: u64) -> u64 {
 // leaves finish in. Every fork is joined before this returns, so no worker can still write into
 // `out` (or read `items`) afterwards; that is the whole structured-join contract.
 fn rt_parallel_map(items: u64, context: u64, f: u64, env: u64) -> u64 {
+    return rt_parallel_mapw(items, context, f, env, 0, 0);
+}
+// parallel_map over inline elements or into inline results (docs/design/unboxed-values.md): `iw` is
+// the width in bytes of an inline item (each call is handed the item's address, which is the
+// record), `rw` of an inline result (each call returns a box, copied into place and freed); 0 is a
+// word either way.
+fn rt_parallel_mapw(items: u64, context: u64, f: u64, env: u64, iw: u64, rw: u64) -> u64 {
     n := rt_len(items);
     out := rt_new();
-    mut i = 0;
-    while i < n {
-        rt_push(out, 0);
-        i += 1;
+    if rw == 0 {
+        mut i = 0;
+        while i < n {
+            rt_push(out, 0);
+            i += 1;
+        }
+    } else if n != 0 {
+        raw_store(out, rt_grow(0, 0, wrapping_mul(n, rw)));
+        raw_store(wrapping_add(out, 8), n);
+        raw_store(wrapping_add(out, 16), n);
     }
     if n == 0 {
         rt_drop_seq(items);
@@ -4440,6 +4594,8 @@ fn rt_parallel_map(items: u64, context: u64, f: u64, env: u64) -> u64 {
     raw_store(d + 40, raw_load(out));
     raw_store(d + 48, n);
     raw_store(d + 56, chunk);
+    raw_store(d + 64, iw);
+    raw_store(d + 72, rw);
     rt_region_enter();
     written := rt_job_split(d, 0, leaves, 0);
     rt_region_leave();
@@ -4703,6 +4859,7 @@ fn rt_env_is(name: u64, value: u64) -> u64 {
 //     the capacity at +80), so the same three deque functions serve both
 // 224 this worker's runner (0 none)  232 the job handed to the runner  240 free job records
 // 248 their count  264 help-depth high-water mark  272 steps taken (the fairness tick)
+// 280 1 while this worker is counted as searching (rt_worker_loop, rt_worker_run)
 // 512..592 the Frame job deque, 640..720 the Background job deque (the Normal one is at 128)
 // 896..1024 the CPU mask a pinned worker hands the kernel
 //
@@ -4883,11 +5040,21 @@ fn rt_worker_self() -> u64 {
 // Bump the sequence unconditionally and wake a parked worker when there may be one: a worker that
 // read the sequence before looking for work either finds the new work or its wait fails with the
 // changed value, so no wake can be lost even when the parked count read is stale.
+// New work is queued. Wake a parked worker only when there is one and no worker is searching: a
+// searching worker will find the work, and in a join the forker usually takes its own fork back
+// before anyone could. The fence orders the push before the reads, as the parking worker orders its
+// count before its last look (rt_worker_loop), so one of the two always sees the other.
 fn rt_notify(s: u64) -> u64 {
-    rt_atomic_fetch_add(s + 24, 1);
-    if raw_atomic_load(s + 96) != 0 {
-        rt_syscall(202, s + 24, 129, 1);
+    rt_full_fence();
+    if raw_atomic_load(s + 96) == 0 {
+        return 0;
     }
+    if raw_atomic_load(raw_load(rt_state_jobs()) + 416) != 0 {
+        return 0;
+    }
+    raw_atomic_fetch_add(s + 24, 1);
+    raw_atomic_fetch_add(raw_load(rt_state_jobs()) + 424, 1);
+    rt_syscall(202, s + 24, 129, 1);
     return 0;
 }
 // ---- Chase-Lev deques ---------------------------------------------------------------------
@@ -5053,12 +5220,27 @@ fn rt_worker_loop(worker: u64) -> u64 {
     }
     rt_os_stack_warm(rt_sched_setting(32));
     spin := rt_sched_setting(48);
+    searching := raw_load(rt_state_jobs()) + 416;
     while true {
-        // The sequence is read before the look for work: a push after this read changes the word
-        // the wait compares, so the wait returns at once and no wakeup is lost. (Looking a few
-        // more times before sleeping was measured and did not pay: bench/sched.grl got slower.)
-        seq := raw_atomic_load(s + 24);
-        mut found = rt_worker_step(s, worker);
+        if rt_worker_step(s, worker) != 0 {
+            continue;
+        }
+        // Out of work. SEARCH before sleeping: a worker that is still looking is one a fork does
+        // not have to wake (rt_notify), which is what spares a join its system calls - in a join
+        // the forker nearly always takes its own fork back, and a woken worker would find nothing.
+        // Counted as searching until it runs something (rt_worker_run clears it, before the work
+        // runs: work that forks must not see its own worker as the one that will find the fork).
+        raw_store(worker + 280, 1);
+        raw_atomic_fetch_add(searching, 1);
+        mut found = 0;
+        mut round = 0;
+        while (found == 0) & (round < rt_worker_search_rounds()) {
+            found = rt_worker_step(s, worker);
+            round += 1;
+            if (found == 0) & (round % 16 == 0) {
+                rt_syscall(24, 0, 0, 0);
+            }
+        }
         if (found == 0) & (spin != 0) {
             // sched::Config.idle_spin_us: keep looking for that long before sleeping.
             until := rt_now_us() + spin;
@@ -5066,13 +5248,36 @@ fn rt_worker_loop(worker: u64) -> u64 {
                 found = rt_worker_step(s, worker);
             }
         }
-        if found == 0 {
-            rt_atomic_fetch_add(s + 96, 1);
-            rt_syscall(202, s + 24, 128, seq);
-            rt_atomic_fetch_sub(s + 96, 1);
+        if raw_load(worker + 280) != 0 {
+            raw_store(worker + 280, 0);
+            raw_atomic_fetch_sub(searching, 1);
         }
+        if found != 0 {
+            continue;
+        }
+        // PARK, without losing a wake: count this worker parked BEFORE the last look (a pusher
+        // reads the count after its push, both with full barriers - rt_notify), and read the
+        // sequence before it, so a wake that lands between the look and the wait changes the word
+        // the wait compares.
+        seq := raw_atomic_load(s + 24);
+        raw_atomic_fetch_add(s + 96, 1);
+        if rt_worker_step(s, worker) == 0 {
+            rt_syscall(202, s + 24, 128, seq);
+        }
+        raw_atomic_fetch_sub(s + 96, 1);
     }
     return 0;
+}
+// A full barrier with no shared write: the sequentially consistent fence (`mfence`, `dmb ish`,
+// `fence rw,rw`). A compare-and-swap is no stand-in: on AArch64 and RV64 it orders its own access,
+// not the loads and stores around it.
+fn rt_full_fence() -> u64 {
+    raw_atomic_fence();
+    return 0;
+}
+// How many empty looks a worker takes, yielding the CPU every sixteenth, before it parks.
+fn rt_worker_search_rounds() -> u64 {
+    return 64;
 }
 // One unit of work, or 0 when there is none. The order: this worker's jobs (LIFO - they are what a
 // join on some stack is waiting for), its tasks, injected jobs, injected tasks, then a steal pass
@@ -5121,6 +5326,10 @@ fn rt_worker_step(s: u64, w: u64) -> u64 {
     return 1;
 }
 fn rt_worker_run(s: u64, w: u64, t: u64) -> u64 {
+    if raw_load(w + 280) != 0 {
+        raw_store(w + 280, 0);
+        raw_atomic_fetch_sub(raw_load(rt_state_jobs()) + 416, 1);
+    }
     tp := raw_tp_get();
     raw_store(tp + 16, t);
     if raw_load(t) == 0 {
@@ -5134,7 +5343,7 @@ fn rt_worker_run(s: u64, w: u64, t: u64) -> u64 {
         rt_os_ctx_release(t);
         raw_atomic_store(t + 96, 1);
         rt_syscall(202, t + 96, 129, 2147483647);
-        joiner := rt_atomic_swap(t + 88, 1);
+        joiner := raw_atomic_swap(t + 88, 1);
         if 1 < joiner {
             rt_wake(joiner);
         }
@@ -5227,7 +5436,8 @@ fn rt_worker_run(s: u64, w: u64, t: u64) -> u64 {
 // 40 carve pointer, 48 carve bytes left, 56 free runner records, 64 a word that stays zero (a
 // runner's cancel token), 72 free failure records (rt_job_failure_release), 104 workers started (thread-per-task mode); the Frame ring at 128 and the
 // Background ring at 256, laid out like the Normal one at 0; 400 Background jobs running, 408 the
-// cap on them (background_cap).
+// cap on them (background_cap), 416 workers searching for work (rt_worker_loop, rt_notify), 424
+// wakes issued (a futex wake each; GRAIL_SCHED_STATS prints it).
 //
 // CLASSES. A job is Frame (0), Normal (1) or Background (2), in record word 112. Each worker has a
 // deque per class and there is a ring per class. A worker takes Frame work, then Normal work, then
@@ -5497,12 +5707,22 @@ fn rt_job_take_background(s: u64, w: u64) -> u64 {
         return 0;
     }
     r := rt_job_take(s, w, 2);
-    if r == 0 {
-        rt_atomic_fetch_sub(raw_load(rt_state_jobs()) + 400, 1);
-        return 0;
+    return rt_job_hold_background(r);
+}
+// The slot reserved for a Background job goes with the job only once the job is this worker's: it
+// is claimed here, at once. An entry is a hint, so its job may already be another stack's - claimed
+// by its forker - and a slot marked on a job that someone else runs would never come back (which
+// is how the cap once leaked away until Background work stopped). The claimed job is handed on
+// tagged with bit 0, so the runner does not claim it again.
+fn rt_job_hold_background(r: u64) -> u64 {
+    if (r != 0) && (raw_atomic_cas(r + 32, 1, rt_job_claim_word()) == 1) {
+        raw_store(r + 88, 1);
+        return r + 1;
     }
-    raw_store(r + 88, 1);
-    return r;
+    raw_atomic_fetch_sub(raw_load(rt_state_jobs()) + 400, 1);
+    // A slot came back: queued Background work may be waiting for it.
+    rt_notify(raw_atomic_load(raw_state() + 72));
+    return 0;
 }
 fn rt_job_reserve_background() -> u64 {
     j := raw_load(rt_state_jobs());
@@ -5562,12 +5782,15 @@ fn rt_job_exec(r: u64) -> u64 {
     }
     if background {
         raw_store(r + 88, 0);
-        rt_atomic_fetch_sub(raw_load(rt_state_jobs()) + 400, 1);
+        raw_atomic_fetch_sub(raw_load(rt_state_jobs()) + 400, 1);
+        // A slot of the cap came free: Background work that waited for one may be queued with every
+        // worker parked (a worker that could not take it parked), so it needs a wake now.
+        rt_notify(raw_atomic_load(raw_state() + 72));
     }
     return rt_job_publish(r);
 }
 fn rt_job_publish(r: u64) -> u64 {
-    old := rt_atomic_swap(r + 32, 3);
+    old := raw_atomic_swap(r + 32, 3);
     if old == 4 {
         rt_syscall(202, r + 32, 129, 2147483647);
     } else if 4095 < old {
@@ -5880,7 +6103,7 @@ fn rt_job_fail(t: u64, kind: u64, a: u64, b: u64, site: u64, msg: u64) -> u64 {
             raw_store(r + 80, f);
             if raw_load(r + 88) == 1 {
                 raw_store(r + 88, 0);
-                rt_atomic_fetch_sub(raw_load(rt_state_jobs()) + 400, 1);
+                raw_atomic_fetch_sub(raw_load(rt_state_jobs()) + 400, 1);
             }
             rt_job_publish(r);
         } else {
@@ -5979,7 +6202,7 @@ fn rt_job_reraise(f: u64) -> u64 {
     site := raw_load(f + 24);
     msg := rt_job_message(f);
     mut joined = raw_load(f + 56);
-    if rt_atomic_fetch_sub(f + 40, 1) == 1 {
+    if raw_atomic_fetch_sub(f + 40, 1) == 1 {
         rt_job_failure_release(f);
     }
     me := rt_current();
@@ -6110,6 +6333,8 @@ fn rt_runner_main(t: u64, unused: u64) -> u64 {
             raw_atomic_store(t + 24, 4);
             rt_os_ctx_leave(t);
             raw_atomic_store(t + 24, 0);
+        } else if (j & 1) != 0 {
+            rt_job_exec(j - 1); // a Background job, claimed when its slot was taken
         } else {
             if raw_atomic_cas(j + 32, 1, rt_job_claim_word()) == 1 {
                 rt_job_exec(j);
@@ -6143,11 +6368,10 @@ fn rt_job_take_own(w: u64) -> u64 {
             break;
         }
         if raw_load(r + 112) == 2 {
-            raw_store(r + 88, 1);
-            return r;
+            return rt_job_hold_background(r);
         }
     }
-    rt_atomic_fetch_sub(raw_load(rt_state_jobs()) + 400, 1);
+    raw_atomic_fetch_sub(raw_load(rt_state_jobs()) + 400, 1);
     return 0;
 }
 // How long the oldest queued Background job has waited, in microseconds (0: none queued). Entries
@@ -6284,6 +6508,8 @@ fn rt_sched_stats() -> u64 {
     n = rt_fail_num(buf, n, workers);
     n = rt_fail_put(buf, n, view(", help depth high-water "));
     n = rt_fail_num(buf, n, high);
+    n = rt_fail_put(buf, n, view(", wakes "));
+    n = rt_fail_num(buf, n, raw_load(raw_load(rt_state_jobs()) + 424));
     n = rt_fail_put(buf, n, view(", oldest background wait "));
     n = rt_fail_num(buf, n, rt_background_wait_us());
     n = rt_fail_put(buf, n, view(" us"));
@@ -6589,7 +6815,7 @@ fn rt_task_fail(text: u64) -> u64 {
 // already released their own stack, so this is a no-op there.
 fn rt_task_reap(t: u64) -> u64 {
     if rt_task_threads() {
-        h := rt_atomic_swap(t + 152, 0);
+        h := raw_atomic_swap(t + 152, 0);
         if h != 0 {
             rt_thread_join(h);
         }
@@ -6723,15 +6949,22 @@ fn f_host_sleep_ms(ms: u64) -> u64 {
 }
 fn rt_sleep_job(t: u64, ms: u64) -> u64 {
     s := rt_sched();
-    if rt_os_timer(s, t, ms) != 0 {
-        rt_sleep_plain(ms);
-        return 0;
-    }
     until := f_host_now_ms() + ms;
-    while f_host_now_ms() < until {
+    mut left = ms;
+    while left != 0 {
+        if rt_os_timer(s, t, left) != 0 {
+            rt_sleep_plain(left);
+            return 0;
+        }
         rt_suspend(t);
+        rt_os_timer_done(s, t);
+        now := f_host_now_ms();
+        if now < until {
+            left = until - now;
+        } else {
+            left = 0;
+        }
     }
-    rt_os_timer_done(s, t);
     raw_atomic_cas(t + 24, 3, 0);
     return 0;
 }
@@ -6806,30 +7039,52 @@ fn f_host_pipe() -> u64 {
     return out;
 }
 // Reads up to max bytes; suspends (green) while no data is available. Empty on end/cancel.
-fn f_host_read_fd(fd: u64, max: u64) -> u64 {
+// `max` with bit 62 set (2^62 + n) reads at most n bytes and does not wait: nothing to read yet is an
+// empty vector (the jobserver's token take, compiler/jobs.grl).
+fn f_host_read_fd(fd: u64, asked: u64) -> u64 {
     out := rt_new();
+    now_only := (asked / 4611686018427387904) & 1;
+    max := asked % 4611686018427387904;
     if max == 0 {
         return out;
     }
-    buf := rt_alloc(max);
+    // A large read lands in the result's own buffer; a small one in a scratch buffer, so a vector
+    // holding a few bytes does not keep a megabyte of capacity.
+    direct := 65535 < max;
+    mut buf = 0;
+    if direct {
+        rt_reserveb(out, max);
+        buf = raw_load(out);
+    } else {
+        buf = rt_alloc(max);
+    }
     while true {
         n := rt_io(rt_read_now, fd, buf, max);
         if n == wrapping_sub(0, 11) {
+            if now_only {
+                break;
+            }
             if rt_wait_fd(fd, 1) != 0 {
                 break;
             }
         } else {
-            if rt_error(n) == 0 {
-                mut i = 0;
-                while i < n {
-                    rt_pushb(out, raw_byte(buf + i));
-                    i += 1;
+            if (rt_error(n) == 0) & (n != 0) {
+                // One copy of what arrived at most, not a push per byte: the compiler reads its
+                // workers' output through here, a hundred megabytes of it.
+                if direct {
+                    raw_store(out + 8, n);
+                } else {
+                    rt_reserveb(out, n);
+                    rt_copy_bytes(raw_load(out), buf, n);
+                    raw_store(out + 8, n);
                 }
             }
             break;
         }
     }
-    rt_free(buf);
+    if !direct {
+        rt_free(buf);
+    }
     return out;
 }
 // Writes everything (suspending while the pipe is full); returns bytes written.
@@ -7471,7 +7726,9 @@ fn f_host_tcp_connect(host: u64, port: u64) -> u64 {
 }
 
 // Opens a file for reading (write==0) or writing (create/truncate). Returns the descriptor or a
-// negative errno (as a wrapped word) instead of aborting.
+// negative errno (as a wrapped word) instead of aborting. `write == 2` is the jobserver's fifo
+// (compiler/jobs.grl): made first if the path does not exist, then opened for reading and writing
+// and non-blocking, so a process that holds it open never sees its end.
 fn f_host_open(path: u64, write: u64) -> u64 {
     name := rt_cstr(path);
     rt_view_free(path);
@@ -7479,7 +7736,11 @@ fn f_host_open(path: u64, write: u64) -> u64 {
         return wrapping_sub(0, 22);
     }
     mut flags = 524288;
-    if write {
+    if write == 2 {
+        // mknodat(AT_FDCWD, name, S_IFIFO | 0600, 0); an existing one is the one to open.
+        rt_syscall(259, wrapping_sub(0, 100), name, 4480);
+        flags = 526338;
+    } else if write {
         flags = 524865;
     }
     fd := rt_syscall(2, name, flags, 438);
@@ -9293,7 +9554,10 @@ fn rt_slot4u(s: u64, i: u64) -> u64 {
 }
 fn rt_slot4(s: u64, i: u64) -> u64 {
     if (i < raw_load(wrapping_add(s, 8))) == 0 {
-        rt_abort();
+        // Reported like rt_slot's: an index check names the index and the length, and a task can
+        // contain it. The native backend writes this check in line; this body is what the LLVM
+        // backend calls.
+        rt_fail(1, i, raw_load(wrapping_add(s, 8)));
     }
     return wrapping_add(raw_load(s), wrapping_mul(i, 4));
 }
@@ -9383,6 +9647,31 @@ fn rt_flat_box(src: u64, w: u64) -> u64 {
     rt_copy_bytes(box, src, w);
     return box;
 }
+// The address of element `i` of an array of `n` elements `w` bytes wide at `base`
+// (docs/design/fixed-arrays.md). `n` is the array's constant length: nothing is loaded to check it.
+fn rt_aslot(base: u64, i: u64, n: u64, w: u64) -> u64 {
+    if (i < n) == 0 {
+        rt_fail(1, i, n);
+    }
+    return wrapping_add(base, wrapping_mul(i, w));
+}
+// The same address for an index already known to be below the length.
+fn rt_aslotu(base: u64, i: u64, w: u64) -> u64 {
+    return wrapping_add(base, wrapping_mul(i, w));
+}
+// `[x; n]`: element 0 of the array at `dst` is written; copy it to the other `n - 1`, doubling.
+fn rt_array_rep(dst: u64, w: u64, n: u64) -> u64 {
+    mut have = 1;
+    while have < n {
+        mut take = have;
+        if n - have < take {
+            take = n - have;
+        }
+        rt_copy_bytes(wrapping_add(dst, have * w), dst, take * w);
+        have = have + take;
+    }
+    return 0;
+}
 fn rt_slotw(s: u64, i: u64, w: u64) -> u64 {
     if (i < raw_load(wrapping_add(s, 8))) == 0 {
         rt_fail(1, i, raw_load(wrapping_add(s, 8)));
@@ -9390,6 +9679,12 @@ fn rt_slotw(s: u64, i: u64, w: u64) -> u64 {
     return wrapping_add(raw_load(s), wrapping_mul(i, w));
 }
 fn rt_pushw(s: u64, src: u64, w: u64) -> u64 {
+    rt_pushwk(s, src, w);
+    rt_free(src);
+    return 0;
+}
+// rt_pushw without freeing the source: a plain record's source is frame words.
+fn rt_pushwk(s: u64, src: u64, w: u64) -> u64 {
     n := raw_load(wrapping_add(s, 8));
     cap := raw_load(wrapping_add(s, 16));
     if n == cap {
@@ -9407,7 +9702,6 @@ fn rt_pushw(s: u64, src: u64, w: u64) -> u64 {
     }
     rt_copy_bytes(wrapping_add(raw_load(s), wrapping_mul(n, w)), src, w);
     raw_store(wrapping_add(s, 8), n + 1);
-    rt_free(src);
     return 0;
 }
 fn rt_popw(s: u64, w: u64) -> u64 {
@@ -9425,6 +9719,11 @@ fn rt_popw_quiet(s: u64, w: u64) -> u64 {
     return rt_popw(s, w);
 }
 fn rt_vec_insertw(s: u64, index: u64, src: u64, w: u64) -> u64 {
+    rt_vec_insertwk(s, index, src, w);
+    rt_free(src);
+    return 0;
+}
+fn rt_vec_insertwk(s: u64, index: u64, src: u64, w: u64) -> u64 {
     n := rt_len(s);
     if n < index {
         rt_abort();
@@ -9436,7 +9735,6 @@ fn rt_vec_insertw(s: u64, index: u64, src: u64, w: u64) -> u64 {
         i -= 1;
     }
     rt_copy_bytes(rt_slotw(s, index, w), src, w);
-    rt_free(src);
     return 0;
 }
 fn rt_vec_removew(s: u64, index: u64, w: u64) -> u64 {
@@ -9597,11 +9895,20 @@ fn rt_vec_swap(s: u64, i: u64, j: u64) -> u64 {
     return 0;
 }
 fn rt_vec_reverse(s: u64) -> u64 {
-    n := rt_len(s);
-    mut i = 0;
-    while i < rt_div(n, 2) {
-        rt_vec_swap(s, i, n - 1 - i);
-        i += 1;
+    // Two pointers meeting in the middle: one load and one store per word, no per-element call or
+    // bounds check (both ends are inside the vector by construction).
+    n := raw_load(wrapping_add(s, 8));
+    if n < 2 {
+        return 0;
+    }
+    mut lo = raw_load(s);
+    mut hi = wrapping_add(lo, wrapping_mul(n - 1, 8));
+    while lo < hi {
+        w := raw_load(lo);
+        raw_store(lo, raw_load(hi));
+        raw_store(hi, w);
+        lo = wrapping_add(lo, 8);
+        hi = wrapping_sub(hi, 8);
     }
     return 0;
 }
@@ -9662,6 +9969,9 @@ fn rt_vec_contains(s: u64, v: u64) -> u64 {
 //
 // The control page is the first 4096 bytes of the sample mapping:
 //   0 magic  8 sample base  16 capacity  24 claimed  32 dropped  40 rate  48 cpu start (ns)
+//   56 words per sample: 1, or 8 for a request of version 2 (`grail profile --callers`), whose
+//      samples are the instruction pointer and then up to seven return addresses, read up the
+//      frame-pointer chain and ended by a zero. A version-1 request takes exactly the old path.
 fn rt_prof_words() -> u64 {
     return raw_state() + 2048;
 }
@@ -9674,13 +9984,42 @@ fn rt_prof_handler(sig: u64, info: u64, ctx: u64) -> u64 {
     if page == 0 {
         return 0;
     }
-    i := rt_atomic_fetch_add(page + 24, 1);
+    i := raw_atomic_fetch_add(page + 24, 1);
     if i < raw_load(page + 16) {
         // The kernel's rt_sigframe keeps the ucontext at a fixed offset from the third handler
         // argument; RIP is gregs[16] inside its sigcontext, 40 + 16 * 8.
-        raw_store(raw_load(page + 8) + i * 8, raw_load(ctx + 168));
+        depth := raw_load(page + 56);
+        if depth < 2 {
+            raw_store(raw_load(page + 8) + i * 8, raw_load(ctx + 168));
+        } else {
+            // The callers: every Grail frame keeps rbp, so the chain gives the return addresses.
+            // A frame pointer is followed only while it lies above the interrupted stack pointer,
+            // within 64 MiB of it, aligned and climbing - a leaf caught in its prologue or a frame
+            // without one ends the chain rather than sending the handler to read anywhere.
+            slot := raw_load(page + 8) + i * depth * 8;
+            raw_store(slot, raw_load(ctx + 168));
+            sp := raw_load(ctx + 160);
+            mut bp = raw_load(ctx + 120);
+            mut j = 1;
+            while j < depth {
+                if (bp < sp) | (sp + 67108864 < bp) | ((bp & 7) != 0) {
+                    break;
+                }
+                raw_store(slot + j * 8, raw_load(bp + 8));
+                next := raw_load(bp);
+                j += 1;
+                if next <= bp {
+                    break;
+                }
+                bp = next;
+            }
+            while j < depth {
+                raw_store(slot + j * 8, 0);
+                j += 1;
+            }
+        }
     } else {
-        rt_atomic_fetch_add(page + 32, 1);
+        raw_atomic_fetch_add(page + 32, 1);
     }
     return 0;
 }
@@ -9778,8 +10117,13 @@ fn rt_prof_start() -> u64 {
     // "1 RATE CAPACITY PATH": the format version, the sampling rate in Hz, the sample capacity and
     // the file the raw addresses go to. The CLI writes it; a hand-written file is accepted too.
     v := rt_prof_token(text, n, 0);
-    if rt_prof_num(text, n, v) != 1 {
+    version := rt_prof_num(text, n, v);
+    if (version != 1) & (version != 2) {
         return 0;
+    }
+    mut depth = 1;
+    if version == 2 {
+        depth = 8;
     }
     mut r = rt_prof_end(text, n, v);
     mut rate = rt_prof_num(text, n, rt_prof_token(text, n, r));
@@ -9809,7 +10153,7 @@ fn rt_prof_start() -> u64 {
         used = used + 1;
     }
     raw_putbyte(words + 128 + used, 0);
-    page := raw_map(4096 + cap * 8);
+    page := raw_map(4096 + cap * 8 * depth);
     if rt_error(page) {
         return 0;
     }
@@ -9848,6 +10192,7 @@ fn rt_prof_start() -> u64 {
     raw_store(page + 24, 0);
     raw_store(page + 32, 0);
     raw_store(page + 40, rate);
+    raw_store(page + 56, depth);
     ts := words + 608;
     if rt_error(rt_syscall(228, 2, ts, 0)) {
         raw_store(page + 48, 0);
@@ -9897,8 +10242,14 @@ fn rt_prof_dump() -> u64 {
     // "GRPROF2\n" then rate, capacity, count, dropped and the CPU nanoseconds the samples cover:
     // the rate a caller asks for is capped by the kernel's timer granularity, so the report derives
     // the effective rate from this measurement instead of assuming the request was honoured.
+    // "GRPROF3\n" for samples with their callers, `page + 56` words each.
     h := words + 352;
-    raw_store(h, 734726995712168519);
+    depth := raw_load(page + 56);
+    if depth < 2 {
+        raw_store(h, 734726995712168519);
+    } else {
+        raw_store(h, 735008470688879175);
+    }
     raw_store(h + 8, raw_load(page + 40));
     raw_store(h + 16, cap);
     raw_store(h + 24, count);
@@ -9910,7 +10261,11 @@ fn rt_prof_dump() -> u64 {
     }
     raw_store(h + 40, cpu);
     if rt_write_all(fd, h, 48) == 0 {
-        rt_write_all(fd, raw_load(page + 8), count * 8);
+        mut words_each = depth;
+        if words_each < 2 {
+            words_each = 1;
+        }
+        rt_write_all(fd, raw_load(page + 8), count * 8 * words_each);
     }
     rt_syscall(3, fd, 0, 0);
     return 0;

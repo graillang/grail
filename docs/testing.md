@@ -64,6 +64,24 @@ wrong number. It is off by default because the check costs a compare per fact us
 
 `ci.mjs lint` is the cheapest check and catches most documentation and workflow drift.
 
+## The aarch64 emulator
+
+The aarch64 legs run under the repository's own `qemu-aarch64-static`: QEMU 11.1.3 with
+`tools/qemu/stlr-rcsc.patch`, built by `tools/qemu/build.sh` into
+`.work/architectures/toolchain/usr/bin/`, which `runner()` in `tools/native.mjs` uses ahead of
+`PATH` (only `GRAIL_QEMU_AARCH64` comes first). Stock 11.1.3 puts a barrier before a store-release
+and after a load-acquire but none between them, so on an x86 host an `stlr` followed by an `ldar`
+can pass each other, which ARMv8 forbids (both are RCsc). The store-buffering litmus test
+(`tests/atomics/litmus_sb.grl`) caught it: at 200,000 rounds stock qemu let through 31-704
+forbidden outcomes for the native backend and 2,469-7,458 for LLVM, and the patched build none.
+Two barriers, one after each store-release form, close it, with no measurable cost on the filtered
+corpus. The build script fetches the tarballs, checks their sha256, builds a static zlib (the host
+has no `libz.a`) and QEMU, and needs no root; it does nothing when the installed binary is already
+this one, so `tools/gate.sh` runs it every time and prints the version line of the emulator its legs
+use. Check a binary with `--version`: it must end in `(grail-stlr-rcsc)`.
+`bun tools/test-atomics-litmus.mjs` asserts store buffering under that binary, and only reports
+under any other qemu.
+
 ## Two traps worth knowing
 
 **Do not set `GRAIL_SYSROOT_*` unless you have a real glibc sysroot.** The cross targets link
@@ -138,6 +156,27 @@ way. A builtin used *only* by user code (a program, `lib/`, a fixture) does not 
 is resolved when that program is compiled by a compiler that has the new table, and the seed is only
 ever asked to compile the compiler's own sources. If the compiler's own sources must call the
 builtin, a reseed on the same branch is part of the change, not a follow-up.
+
+**A source change the seed cannot read needs the same two steps, with no new builtin.** The seed
+also carries the rules it was built with, so a `compiler/*.grl` written in a rule a later compiler
+added is rejected although every name resolves. Two-phase `exchange` arguments are the case that
+has now needed this twice in one round: `exchange(&mut c.pos, c.pos + 1)` is accepted by a compiler
+with the two-phase builtin and refused by a seed recorded before it, as an ordinary borrow error
+rather than an unknown name:
+
+```text
+error: reference access conflicts with active borrow
+    --> compiler/native.grl:5727:32
+     |
+5727 |     exchange(&mut c.pos, c.pos + 1);
+     |                                ^
+```
+
+The steps do not change - a `GRAIL_COMPILER` built from these sources with a seed it can still
+read, `bootstrap.mjs stage <target>` (or `update all`) with that variable set, `verify`, and the
+reseed committed on the same branch - and neither does the reason: the checked-in seed is the
+compiler as it was, so a branch first written in a newer rule can only reseed itself through a
+compiler that reads it.
 
 The fresh-clone step is the one to run before pushing such a change. `GRAIL_COMPILER` makes every
 suite pass while the published seed still cannot build the compiler, so a branch can be green locally
@@ -299,11 +338,16 @@ loses the race harmlessly. That is what makes `GATE_JOBS > 1` safe for the tool 
 
 ## Landing on main
 
-Every branch lands through one queue: `bash tools/land.sh BRANCH` (or `just land BRANCH`). The branch
-must already contain `origin/main`: merge main into it and resolve the conflicts on the branch, where
-the owner knows both sides. The queue runs one landing at a time on exactly that tree: the build, the
-self-host fixed point, the x86_64 corpus in three shards and the tool suites, retrying a failure once
-on its own. Green fast-forwards main; anything else leaves main unchanged and says why. The emulated
-aarch64/riscv64 legs then run on the build host and are fixed forward. `tools/land-known.txt` lists
-the failures that do not block, each with an owner; it only ever shrinks. `tools/land.sh --status`
-shows the queue and the last landings.
+Every branch lands through one service: `bash tools/land.sh BRANCH` (or `just land BRANCH`) queues
+it and returns; `--wait` blocks until the verdict, `--status` shows the queue. The service
+(`tools/landsvc/landd.py`, run as a daemon on the build host from `$HOME/grail-landsvc`) takes up to
+four queued branches, merges each onto current `origin/main` in its own worktree (a clean merge, or
+one whose only conflicts are corpus cases and prose, which `tools/merge-cases.mjs` settles), and runs
+the fast gate once on the combined tree: the build, the self-host fixed point, the x86_64 corpus in
+three shards and every tool suite, each failure retried once on its own. Green fast-forwards main and
+each branch; a red train is retried one branch at a time, so one bad branch cannot block the others;
+a branch that does not merge is refused with its conflicting files. Results are in the service's
+`results/BRANCH.txt` and in `landings.txt`. The emulated aarch64/riscv64 legs then run on the remote
+build host and are fixed forward. `tools/land-known.txt` lists the failures that do not block, each
+with an owner; it only ever shrinks. Killing the process that queued a branch does not stop its
+landing: the service owns the gate.

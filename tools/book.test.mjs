@@ -106,3 +106,41 @@ test('supporting module files have real side-by-side Rust analogues', () => {
   writeFileSync(path, JSON.stringify(manifest));
   expect(() => loadBook(path)).toThrow('counterpart for each supporting module');
 });
+test('performance charts render from a results file: SVG, direction captions, ratios, met marks, no script', async () => {
+  const { renderResults, rowRatio } = await import('./perf-charts.mjs');
+  const { perfBlock } = await import('./book.mjs');
+  const fixture = JSON.parse(readFileSync(join(root, 'tools/fixtures/perf-results.json'), 'utf8'));
+  const html = renderResults(fixture);
+  expect((html.match(/<svg /g) ?? []).length).toBe(2); // one chart per charted table
+  expect(html).toContain('Lower is better');
+  expect(html).toContain('except rows marked ↑, where higher is better');
+  expect(html).toContain('importer rounds ↑');
+  expect(html).toContain('logarithmic axis'); // the scheduler rows span more than 8x
+  expect(html).toContain('linear axis');
+  expect(html).toContain('Grail 1.02x the fastest rival · met'); // fnv: 0.55 / 0.54, under 1.05
+  expect(html).toContain('Grail 6.84x the fastest rival'); // xform_f32: 0.13 / 0.019
+  expect(html).toContain('Grail 0.74x the fastest rival · met'); // frame p99
+  expect(rowRatio(fixture.tables[1], fixture.tables[1].rows[1])).toBeCloseTo(2.4); // higher is better: 3600 / 1500
+  expect(html).toContain('A table without a chart'); // a numbers-only table still renders as a table
+  expect(html).toContain('0123456789ab (fixture)');
+  expect(html).toContain('<text x="0" y="41" class="perf-axis perf-source">Grail 0123456789ab (fixture); measured 2026-11-16, load average 1.00 on 4 CPUs.</text>'); // provenance inside each chart
+  expect(html).toContain('bun tools/bench-rivals.mjs --runs 3');
+  expect(html).not.toMatch(/<script|https?:\/\/(?!www\.w3\.org\/2000\/svg)/);
+  expect(html).not.toContain('\n'); // one line: a raw HTML block markdown leaves alone
+  expect(perfBlock('perf-results#release', join(root, 'tools/fixtures'))).toContain('<svg ');
+  expect(() => perfBlock('perf-results#no-such-table', join(root, 'tools/fixtures'))).toThrow('no table');
+  expect(perfBlock('perf-results#no-such-table|numbers-only', join(root, 'tools/fixtures'))).toContain('A table without a chart'); // the first table present
+  expect(() => renderResults({ schema: 2 })).toThrow('not a rivals result file');
+});
+test('the Performance chapter renders every committed result file', () => {
+  const chapter = book.chapters.find(c => c.slug === 'performance');
+  expect(chapter).toBeDefined();
+  const text = readFileSync(sourcePath(chapter.source), 'utf8');
+  for (const name of ['bench-rivals', 'compile-rivals', 'sched-rivals']) {
+    expect(existsSync(join(root, 'bench/results', `${name}.json`))).toBe(true);
+    expect(text).toContain(`{{perf:${name}`);
+  }
+  const html = expand(text, book);
+  for (const id of ['chart-release', 'chart-dev', 'chart-compile', 'chart-scheduler']) expect(html).toContain(`id="${id}"`);
+  expect(html).toContain('higher is better');
+});

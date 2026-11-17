@@ -3,6 +3,7 @@ import { readFileSync, mkdirSync, writeFileSync, copyFileSync, rmSync } from 'no
 import { resolve, dirname, relative, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
+import { chart, numbers, provenance, renderResults } from './perf-charts.mjs';
 
 export const root = resolve(import.meta.dir, '..');
 const source = join(root, 'book');
@@ -39,9 +40,27 @@ export function loadBook(manifest = join(source, 'book.json')) {
   }
   return book;
 }
+// `{{perf:NAME}}` is a rivals result file, bench/results/NAME.json, as charts and tables
+// (tools/perf-charts.mjs); `{{perf:NAME#TABLE}}` one of its tables (`#A|B` the first it has), `{{perf:NAME#provenance}}` its
+// machine, load, commit and commands. The files are committed, so the book never runs a benchmark.
+export const resultsDirectory = join(root, 'bench/results');
+export function perfBlock(spec, directory = resultsDirectory) {
+  const [name, part] = spec.split('#');
+  if (!/^[a-z][a-z0-9-]*$/.test(name)) throw new Error(`Invalid results name: ${name}`);
+  const data = JSON.parse(readFileSync(join(directory, `${name}.json`), 'utf8'));
+  if (!part) return renderResults(data);
+  if (part === 'provenance') return provenance(data);
+  // `#a|b`: the first of the tables the file has - a file charted by instructions carries a CPU-time
+  // table where one charted by CPU time carries an instructions table.
+  const table = part.split('|').map(id => data.tables.find(t => t.id === id)).find(Boolean);
+  if (!table) throw new Error(`bench/results/${name}.json has no table ${part}`);
+  return `${table.chart ? chart(table, data) : ''}${numbers(table)}`;
+}
 export function expand(text, book, used = new Set()) {
-  return text.replace(/\{\{(example|source):([^}]+)\}\}/g, (_, kind, id) => {
+  return text.replace(/\{\{(example|source|perf):([^}]+)\}\}/g, (_, kind, id) => {
     if (kind === 'source') return `\n\`\`\`grl\n${readFileSync(sourcePath(id), 'utf8')}\`\`\`\n`;
+    // One line of HTML with blank lines around it: a raw HTML block that markdown leaves alone.
+    if (kind === 'perf') return `\n\n${perfBlock(id)}\n\n`;
     const example = book.examples.find(e => e.id === id);
     if (!example) throw new Error(`Unknown example: ${id}`);
     used.add(id);

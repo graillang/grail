@@ -153,7 +153,17 @@ pub fn encode<a>(u: (&a Unit)) -> u8[] {
     return out;
 }
 
+// A unit as a body worker sends it through its pipe: the same framing, and in a check run (whose
+// text nobody reads) the text may be empty. Never a store entry: `decode` keeps refusing those.
+pub fn decode_piped(bytes: u8[]) -> Unit {
+    return decode_text(bytes, 1);
+}
+
 pub fn decode(bytes: u8[]) -> Unit {
+    return decode_text(bytes, 0);
+}
+
+fn decode_text(bytes: u8[], empty_text: u64) -> Unit {
     if bytes.len() < 5 {
         return none();
     }
@@ -167,7 +177,7 @@ pub fn decode(bytes: u8[]) -> Unit {
     regs := rs(&mut r);
     check := rs(&mut r);
     // The bytes after the last field would be a record this compiler did not write.
-    if (r.ok == 0) | (r.at != r.data.len()) | (key.len() == 0) | (text.len() == 0) {
+    if (r.ok == 0) | (r.at != r.data.len()) | (key.len() == 0) | ((text.len() == 0) & (empty_text == 0)) {
         return none();
     }
     u := Unit { key: key, text: text, facts: facts, regs: regs };

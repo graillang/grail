@@ -5,6 +5,7 @@ use fmt;
 use explain;
 use bindgen;
 use pkg;
+use jobs;
 use xxhash;
 
 // The `grail` command-line tool. The same binary is the compiler: subcommands drive it by
@@ -280,68 +281,6 @@ fn collect<a, b>(dir: &a [u8], out: (&b mut u8[][])) {
             }
         }
     }
-}
-// Whether a source of the build claims a checked effect (docs/design/effects.md).
-fn effects_claimed<a>(command: (&a u8[][]), at: u64) -> bool {
-    mut k = at;
-    while k < command.len() {
-        file := item(command, k);
-        k += 1;
-        if !ends_with_grl(view(file)) {
-            continue;
-        }
-        text := host::read_file(view(file));
-        if claims_effect(view(text)) {
-            return true;
-        }
-    }
-    return false;
-}
-// Whether a source text carries `@no_alloc` or `@no_panic` as an attribute: outside a comment and
-// outside a string, and not as the start of a longer word. Searching the bytes found the attribute's
-// name in a comment of the runtime, and since the runtime is a source of every build, every build
-// silently became a whole-program one.
-fn claims_effect<a>(text: &a [u8]) -> bool {
-    n := text.len();
-    mut i = 0;
-    while i < n {
-        ch := text[i];
-        if (ch == 47) && (i + 1 < n) && (text[i + 1] == 47) {
-            while (i < n) && (text[i] != 10) {
-                i += 1;
-            }
-            continue;
-        }
-        if ch == 34 {
-            i += 1;
-            while (i < n) && (text[i] != 34) {
-                if text[i] == 92 {
-                    i += 1;
-                }
-                i += 1;
-            }
-            i += 1;
-            continue;
-        }
-        if ch == 39 {
-            // A character literal: `'"'` must not open a string.
-            if (i + 2 < n) && (text[i + 1] == 92) {
-                i += 4;
-                continue;
-            }
-            if (i + 2 < n) && (text[i + 2] == 39) {
-                i += 3;
-                continue;
-            }
-        }
-        if ch == 64 {
-            if effect_word(text, i + 1, view("no_alloc")) || effect_word(text, i + 1, view("no_panic")) {
-                return true;
-            }
-        }
-        i += 1;
-    }
-    return false;
 }
 fn effect_word<a, b>(text: &a [u8], at: u64, word: &b [u8]) -> bool {
     if text.len() < at + word.len() {
@@ -1176,18 +1115,13 @@ fn compile_mode<a, b, d, e, g, k>(
     at := source_start(&command, view(asm));
     if (whole == 0)
         & (split == 0)
-        & (check_only == 0)
+        & ((check_only == 0) || (cache != 0))
         & (iface.len() == 0)
         & (at < command.len())
         & linux_target(view(target)) {
         groups = source_groups(&command, at);
         if (cache != 0) || (program_modules(&groups) > 1) {
             per_module = 1;
-        }
-        // `@no_alloc` and `@no_panic` are proved over every body the program can reach, the runtime's
-        // included, so a program that claims them is compiled in one run.
-        if effects_claimed(&command, at) {
-            per_module = 0;
         }
         if per_module != 0 {
             // One run per module, so every module the program has needs a group, and the module set is
@@ -1242,7 +1176,22 @@ fn compile_mode<a, b, d, e, g, k>(
         }
     }
     if per_module != 0 {
-        return per_module_build(
+        // One jobserver for every process of this build (compiler/jobs.grl): the module runs, their
+        // optimiser workers and their body workers all take their tokens from it. A build started
+        // inside one (`make -j`, or another `grail`) uses that one; otherwise this process makes
+        // it, beside the output, and the processes it starts find it in their environment.
+        mut js = jobs::open();
+        mut env = host::environment();
+        mut made = u8[];
+        if js.rfd == 0 {
+            path := cat(view(output), view(".jobs"));
+            js = jobs::create(view(path), jobs::count());
+            if js.rfd != 0 {
+                env.push(cat(view("GRAIL_JOBSERVER="), view(path)));
+                made = path;
+            }
+        }
+        built := per_module_build(
             &command,
             at,
             &mut groups,
@@ -1253,8 +1202,16 @@ fn compile_mode<a, b, d, e, g, k>(
             &mut store,
             &id,
             view(program),
-            cache
+            cache,
+            &mut js,
+            &env
         );
+        jobs::give_all(&mut js);
+        if made.len() != 0 {
+            host::close(js.rfd);
+            host::remove(view(made), 0);
+        }
+        return built;
     }
     if host::command(command) != 0 {
         return 1;
@@ -1686,6 +1643,19 @@ fn unit_key<a, b, d, e, g, k, r>(
             names.push(file);
         }
     }
+    // The effect summary of a module with no interface (the runtime's `runtime.facts`): what this
+    // run's own summaries are computed from, so a change in it is a change in this run's input.
+    for i in reads.len() {
+        facts := cat(view(reads[i]), view(".facts"));
+        fpath := path_join(view(ifaces), view(facts));
+        if host::exists(view(fpath)) != 0 {
+            push_bytes(&mut buf, view("facts "));
+            push_bytes(&mut buf, view(cache_digest_file(&mut store, view(fpath))));
+            buf.push(32);
+            push_bytes(&mut buf, view(facts));
+            buf.push(10);
+        }
+    }
     for i in names.len() {
         n := item(&names, i);
         // An interface's surface: every byte before the trailer, which carries only the source
@@ -1721,6 +1691,7 @@ fn unit_restore<a, b, d, e, g>(
     mut links_blob = u8[];
     mut obj_blob = u8[];
     mut iface_blob = u8[];
+    mut facts_blob = u8[];
     for i in rows.len() {
         w := words(view(item(&rows, i)));
         if (2 <= w.len()) & eq(view(item(&w, 0)), view("links")) {
@@ -1732,6 +1703,9 @@ fn unit_restore<a, b, d, e, g>(
         if (2 <= w.len()) & eq(view(item(&w, 0)), view("iface")) {
             iface_blob = item(&w, 1);
         }
+        if (2 <= w.len()) & eq(view(item(&w, 0)), view("facts")) {
+            facts_blob = item(&w, 1);
+        }
     }
     if (links_blob.len() == 0) || (obj_blob.len() == 0) {
         return false;
@@ -1740,6 +1714,9 @@ fn unit_restore<a, b, d, e, g>(
         return false;
     }
     if (iface_blob.len() != 0) && !cache_blob_ok(&mut store, view(iface_blob)) {
+        return false;
+    }
+    if (facts_blob.len() != 0) && !cache_blob_ok(&mut store, view(facts_blob)) {
         return false;
     }
     if cache_blob_restore(&mut store, view(links_blob), view(unit_links_path(view(stem))), 0) != 0 {
@@ -1751,6 +1728,12 @@ fn unit_restore<a, b, d, e, g>(
     if iface_blob.len() != 0 {
         dest := path_join(view(ifaces), view(cat(view(name), view(".iface"))));
         if cache_blob_restore(&mut store, view(iface_blob), view(dest), 0) != 0 {
+            return false;
+        }
+    }
+    if facts_blob.len() != 0 {
+        dest := path_join(view(ifaces), view(cat(view(name), view(".facts"))));
+        if cache_blob_restore(&mut store, view(facts_blob), view(dest), 0) != 0 {
             return false;
         }
     }
@@ -1813,11 +1796,112 @@ fn unit_file<a, b, d, e, g>(
         push_bytes(&mut record, view(b));
         record.push(10);
     }
+    // The runtime's effect summary: the one output a run writes beside the interfaces that is not an
+    // interface (docs/design/effects.md).
+    facts := path_join(view(ifaces), view(cat(view(name), view(".facts"))));
+    if host::exists(view(facts)) != 0 {
+        b := cache_blob_put(&mut store, view(facts));
+        if b.len() != 64 {
+            return ();
+        }
+        push_bytes(&mut record, view("facts "));
+        push_bytes(&mut record, view(b));
+        record.push(10);
+    }
     cache_record_put(&mut store, view("unit"), view(key), view(record));
     return ();
 }
 // Whether every module `g` reads is finished: the base (the runtime) for all of them, then the
 // modules it uses.
+// A check's record of one module: what a run that reads it needs - its interface and its facts - and
+// no object, so a build never takes it for its own (unit_restore asks for the object). Filed under
+// the same key as a build's record, in a kind of its own.
+fn unit_file_check<a, b, e, g>(store: (&a mut Cache), key: &b [u8], ifaces: &e [u8], name: &g [u8]) -> unit {
+    mut record = u8[];
+    push_bytes(&mut record, view("// grail-cache-check 1\nmodule "));
+    push_bytes(&mut record, view(name));
+    record.push(10);
+    for ext in 2 {
+        mut suffix = copy(view(".iface"));
+        mut word = copy(view("iface "));
+        if ext == 1 {
+            suffix = copy(view(".facts"));
+            word = copy(view("facts "));
+        }
+        file := path_join(view(ifaces), view(cat(view(name), view(suffix))));
+        if host::exists(view(file)) != 0 {
+            b := cache_blob_put(&mut store, view(file));
+            if b.len() != 64 {
+                return ();
+            }
+            push_bytes(&mut record, view(word));
+            push_bytes(&mut record, view(b));
+            record.push(10);
+        }
+    }
+    cache_record_put(&mut store, view("check"), view(key), view(record));
+    return ();
+}
+// A check's restore: a build's record of the module (the same key) or a check's, of which only the
+// interface and the facts are put back.
+fn unit_restore_check<a, b, e, g>(store: (&a mut Cache), key: &b [u8], ifaces: &e [u8], name: &g [u8]) -> bool {
+    for kind in 2 {
+        mut what = copy(view("unit"));
+        if kind == 1 {
+            what = copy(view("check"));
+        }
+        path := cache_record_path(view(store.root), view(what), view(key));
+        if host::exists(view(path)) == 0 {
+            continue;
+        }
+        cache_touch(view(store.root), view(what), view(key));
+        rows := lines(view(host::read_file(view(path))));
+        mut ok = true;
+        mut blobs = u8[][];
+        mut dests = u8[][];
+        for i in rows.len() {
+            w := words(view(item(&rows, i)));
+            if (2 <= w.len()) & (eq(view(item(&w, 0)), view("iface")) || eq(view(item(&w, 0)), view("facts"))) {
+                b := item(&w, 1);
+                if !cache_blob_ok(&mut store, view(b)) {
+                    ok = false;
+                }
+                mut suffix = copy(view(".iface"));
+                if eq(view(item(&w, 0)), view("facts")) {
+                    suffix = copy(view(".facts"));
+                }
+                blobs.push(b);
+                dests.push(path_join(view(ifaces), view(cat(view(name), view(suffix)))));
+            }
+        }
+        if !ok {
+            continue;
+        }
+        mut restored = true;
+        for i in blobs.len() {
+            if cache_blob_restore(&mut store, view(blobs[i]), view(dests[i]), 0) != 0 {
+                restored = false;
+            }
+        }
+        if restored {
+            return true;
+        }
+    }
+    return false;
+}
+// The first module of `reads` that has errors, or was not checked because of them (done == 2).
+fn failed_read<a, b>(groups: (&a ModuleGroup[]), reads: (&b u8[][])) -> u8[] {
+    for r in reads.len() {
+        g := group_of(groups, view(reads[r]));
+        if (g != 0) && (groups[g - 1].done == 2) {
+            return groups[g - 1].name.copy();
+        }
+    }
+    return u8[];
+}
+fn reads_failed<a, b>(groups: (&a ModuleGroup[]), reads: (&b u8[][])) -> bool {
+    return failed_read(groups, reads).len() != 0;
+}
 fn unit_ready<a, b>(groups: (&a ModuleGroup[]), base: (&b u8[][]), g: u64) -> bool {
     for b in base.len() {
         if eq(view(base[b]), view(groups[g].name)) {
@@ -1921,7 +2005,7 @@ fn unit_build_command<a>(args: (&a u8[][])) -> u64 {
     }
     return 0;
 }
-fn per_module_build<a, d, e, g, k, m, n, x, y>(
+fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
     command: (&a u8[][]),
     at: u64,
     groups: (&x mut ModuleGroup[]),
@@ -1932,7 +2016,9 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
     store: (&m mut Cache),
     id: (&n BuildId),
     program: &y [u8],
-    cache: u64
+    cache: u64,
+    js: (&jb mut jobs::Jobs),
+    env: (&ev u8[][])
 ) -> u64 {
     compiler := item(&command, 0);
     mut flags = u8[][];
@@ -1958,6 +2044,16 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
     }
     entry_name := groups[0].name.copy();
     base := u8[][copy(view("runtime"))];
+    // A check: each module's run stops when its diagnostics are given (`--check`), nothing is
+    // assembled or linked, and a module with errors does not stop the others - the modules that
+    // read it are not checked, and the ones that do not still are.
+    mut checking = false;
+    for f in flags.len() {
+        if eq(view(item(&flags, f)), view("--check")) {
+            checking = true;
+        }
+    }
+    mut failed = 0;
     // A release unit is compiled by the LLVM backend: the compile command carries the word.
     mut release = 0;
     for f in flags.len() {
@@ -1999,11 +2095,13 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
         statuses.push(0);
     }
     mut running = 0;
-    limit := host::cpus();
+    // A module run is started on this process's own token when nothing is running, and on a token
+    // from the jobserver otherwise; each is given back when a run is waited for (`running -= 1`
+    // below gives one back whenever this process holds one).
     while built < groups.len() {
         // Start every module whose dependencies are finished.
         for g in groups.len() {
-            if (groups[g].done != 0) || (state[g] != 0) || (limit <= running) {
+            if (groups[g].done != 0) || (state[g] != 0) {
                 continue;
             }
             if !unit_ready(&groups, &base, g) {
@@ -2015,12 +2113,25 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
             // made this one ready), so their interfaces are whole; the run is told to read those
             // and no others, whatever else is in the directory by now.
             reads := unit_reads(&groups, &base, g);
+            // A module that reads one with errors is not checked: its turn records that.
+            if checking && reads_failed(&groups, &reads) {
+                state[g] = 4;
+                continue;
+            }
             if cache != 0 {
                 keys[g] = unit_key(&mut store, id, view(target), view(name), &groups[g].files, view(ifaces), &reads);
-                if unit_restore(&mut store, view(keys[g]), view(stem), view(ifaces), view(name)) {
+                if checking {
+                    if unit_restore_check(&mut store, view(keys[g]), view(ifaces), view(name)) {
+                        state[g] = 2;
+                        continue;
+                    }
+                } else if unit_restore(&mut store, view(keys[g]), view(stem), view(ifaces), view(name)) {
                     state[g] = 2;
                     continue;
                 }
+            }
+            if (running != 0) && !jobs::take(&mut js) {
+                continue;
             }
             // One process, two steps: this module's code alone, global so the link can bind it,
             // read against the interfaces of the modules it uses; then the assembler.
@@ -2069,31 +2180,43 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
             for f in groups[g].files.len() {
                 compile.push(groups[g].files[f].copy());
             }
-            run.push(decimal(compile.len()));
-            for k in compile.len() {
-                run.push(compile[k].copy());
-            }
-            unit_object := cat(view(stem), view(".o"));
-            run.push(decimal(prefix.len() + 3));
-            for k in prefix.len() {
-                run.push(item(&prefix, k));
-            }
-            run.push(cat(view(stem), view(".s")));
-            run.push(copy(view("-o")));
-            if release != 0 {
-                run.push(release_part(view(unit_object)));
-                steps := release_optimise(&prefix, view(cat(view(stem), view(".s"))), view(unit_object), view(emulation));
-                for q in steps.len() {
-                    run.push(decimal(steps[q].len()));
-                    for w in steps[q].len() {
-                        run.push(item(&steps[q], w));
-                    }
+            if checking {
+                // Only the compiler: a check has no assembly to turn into an object.
+                run = u8[][];
+                for k in compile.len() {
+                    run.push(compile[k].copy());
                 }
             } else {
-                run.push(unit_object.copy());
+                run.push(decimal(compile.len()));
+                for k in compile.len() {
+                    run.push(compile[k].copy());
+                }
+                unit_object := cat(view(stem), view(".o"));
+                run.push(decimal(prefix.len() + 3));
+                for k in prefix.len() {
+                    run.push(item(&prefix, k));
+                }
+                run.push(cat(view(stem), view(".s")));
+                run.push(copy(view("-o")));
+                if release != 0 {
+                    run.push(release_part(view(unit_object)));
+                    steps := release_optimise(&prefix, view(cat(view(stem), view(".s"))), view(unit_object), view(emulation));
+                    for q in steps.len() {
+                        run.push(decimal(steps[q].len()));
+                        for w in steps[q].len() {
+                            run.push(item(&steps[q], w));
+                        }
+                    }
+                } else {
+                    run.push(unit_object.copy());
+                }
             }
             pair := host::pipe();
-            pid := host::spawn(run, host::environment(), pair[1], pair[1]);
+            mut child_env = u8[][];
+            for k in env.len() {
+                child_env.push(item(&env, k));
+            }
+            pid := host::spawn(run, child_env, pair[1], pair[1]);
             host::close(pair[1]);
             if 9223372036854775807 < pid {
                 host::close(pair[0]);
@@ -2120,6 +2243,20 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
                 )
             );
             return 1;
+        }
+        if state[pick] == 4 {
+            // Not checked: it reads a module with errors, whose interface it would be checked
+            // against. One line, in the order the modules are recorded, and its readers in turn.
+            pick_reads := unit_reads(&groups, &base, pick);
+            mut line = cat(view("grail: not checked: `"), view(groups[pick].name));
+            line = cat(view(line), view("` depends on `"));
+            line = cat(view(line), view(failed_read(&groups, &pick_reads)));
+            line = cat(view(line), view("`, which has errors"));
+            say(view(line));
+            groups[pick].done = 2;
+            failed += 1;
+            built += 1;
+            continue;
         }
         if state[pick] == 0 {
             // Ready, and not started only because every processor is busy. One running module is
@@ -2148,12 +2285,19 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
             exchange(&mut outputs[oldest], early);
             state[oldest] = 3;
             running -= 1;
+            jobs::give(&mut js);
             continue;
         }
         name := groups[pick].name.copy();
         stem := path_join(view(dir), view(name));
         unit_asm := cat(view(stem), view(".s"));
         unit_obj := cat(view(stem), view(".o"));
+        if (state[pick] == 2) && checking {
+            store.hits += 1;
+            groups[pick].done = 1;
+            built += 1;
+            continue;
+        }
         if state[pick] == 2 {
             store.hits += 1;
         } else {
@@ -2174,10 +2318,29 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
                 host::close(pipes[pick]);
                 status = host::wait(pids[pick]);
                 running -= 1;
+                jobs::give(&mut js);
                 state[pick] = 3;
             }
             if said.len() != 0 {
                 host::print(view(said));
+            }
+            if checking && (status != 0) {
+                // A check goes on: this module's errors are given, the modules that read it are not
+                // checked, and the others still are.
+                groups[pick].done = 2;
+                failed += 1;
+                built += 1;
+                continue;
+            }
+            if checking {
+                if cache != 0 {
+                    store.misses += 1;
+                    store.names.push(name.copy());
+                    unit_file_check(&mut store, view(keys[pick]), view(ifaces), view(name));
+                }
+                groups[pick].done = 1;
+                built += 1;
+                continue;
             }
             if status != 0 {
                 // The modules still running are left to finish; nothing of theirs is recorded.
@@ -2207,6 +2370,12 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
         }
         groups[pick].done = 1;
         built += 1;
+    }
+    if checking {
+        if cache != 0 {
+            cache_report(&mut store, 2);
+        }
+        return u64(failed != 0);
     }
     if link_objects(view(output), view(target), view(emulation), &objects, &link) != 0 {
         return 1;
@@ -2322,6 +2491,7 @@ fn link_objects<a, b, d, e, g>(
 //   map/prog/<key>   every input the build reads, the compiler and the toolchain  -> the image
 //   map/lnk/<key>    the object set, the link inputs and the linker               -> the image
 //   map/mod/<key>    one module's inputs and the assembler                        -> its object
+//   map/check/<key>  one module's inputs, checked (a unit key)                    -> its interface
 //
 // The store is content addressed under .work/cache/<target>:
 //
@@ -2420,6 +2590,7 @@ fn cache_ensure<a>(c: (&a mut Cache)) -> unit {
     host::mkdir(view(path_join(view(c.root), view("map/lnk"))));
     host::mkdir(view(path_join(view(c.root), view("map/mod"))));
     host::mkdir(view(path_join(view(c.root), view("map/unit"))));
+    host::mkdir(view(path_join(view(c.root), view("map/check"))));
     host::mkdir(view(path_join(view(c.root), view("stage"))));
     // One generation per build that opens the store: what `grail cache prune` measures age in.
     generation := cache_generation(view(c.root)) + 1;
@@ -2599,7 +2770,7 @@ fn cache_command<a>(args: (&a u8[][])) -> u64 {
         root := path_join(view(base), view(item(&targets, t)));
         now := cache_generation(view(root));
         mut live = u8[];
-        kinds := u8[][copy(view("prog")), copy(view("lnk")), copy(view("mod")), copy(view("unit"))];
+        kinds := u8[][copy(view("prog")), copy(view("lnk")), copy(view("mod")), copy(view("unit")), copy(view("check"))];
         for k in kinds.len() {
             dir := path_join(view(path_join(view(root), view("map"))), view(item(&kinds, k)));
             if host::exists(view(dir)) == 0 {
@@ -2909,6 +3080,10 @@ fn cache_build_id<a, b, d, e, g>(
             i += 2;
         } else if eq(view(a), view("--diagnostics-json")) & (i + 1 < argv.len()) {
             i += 2;
+        } else if eq(view(a), view("--check")) {
+            // A check and a build of one module read the same inputs and agree on its interface:
+            // the key is the same, and a check reuses a build's record (unit_restore_check).
+            i += 1;
         } else {
             if (eq(view(a), view("--interface")) || eq(view(a), view("--emit-interface")))
                 & (i + 1 < argv.len()) {
@@ -3063,7 +3238,9 @@ fn cache_report<a>(c: (&a mut Cache), relinked: u64) -> unit {
         host::print(view(")"));
     }
     host::print(view("; "));
-    if relinked == 0 {
+    if relinked == 2 {
+        host::print(view("checked"));
+    } else if relinked == 0 {
         host::print(view("image reused"));
     } else {
         host::print(view("image linked"));
@@ -3801,6 +3978,7 @@ fn build_pass<a, b, c>(h: (&a Home), o: (&b mut Options), diag: &c [u8]) -> u64 
         name := copy(view(p.name));
         o.output = path_join(view("target"), view(name));
     }
+    project_overflow(&mut o, &p);
     return compile(
         h: &h,
         entry: view(p.entry),
@@ -3816,11 +3994,55 @@ fn build_pass<a, b, c>(h: (&a Home), o: (&b mut Options), diag: &c [u8]) -> u64 
         inputs: view(o.inputs)
     );
 }
+// One overflow mode per build, decided by the root (docs/design/release-builds-and-parity.md):
+// `--overflow=` on the command line, else the root package's `overflow` key, else the build mode's
+// default (checked, or wrap for `--release`). A dependency's own key is not used, and the build says
+// so once, naming it.
+fn project_overflow<a, b>(o: (&a mut Options), p: (&b pkg::Plan)) -> unit {
+    if (o.overflow == 0) && eq(view(p.overflow), view("wrap")) {
+        o.overflow = 1;
+    }
+    if (o.overflow == 0) && eq(view(p.overflow), view("checked")) {
+        o.overflow = 2;
+    }
+    if p.ignored_overflow.len() != 0 {
+        mut note = copy(view("grail: note: the `overflow` key of "));
+        for i in p.ignored_overflow.len() {
+            if i != 0 {
+                push_bytes(&mut note, view(", "));
+            }
+            push_bytes(&mut note, view(item(&p.ignored_overflow, i)));
+        }
+        push_bytes(&mut note, view(" is not used: a build has one overflow mode, the root package's"));
+        say(view(note));
+    }
+    return ();
+}
 fn check_command<a>(args: (&a u8[][])) -> u64 {
     mut o = options(&args);
     h := home();
     if h.runtime.len() == 0 {
         return 1;
+    }
+    // A check goes through the build store as a build does (docs/design/incremental-compilation.md,
+    // "An incremental check"): one run per module, a module whose inputs did not move is not run
+    // again, and inside a run the unchanged bodies are replayed - so a check after an edit costs the
+    // edited module, not the program.
+    if (o.cache == 0)
+        & (o.no_cache == 0)
+        & linux_target(view(o.target))
+        & (o.debug == 0)
+        & (o.split == 0)
+        & (o.whole == 0)
+        & (o.iface.len() == 0)
+        & (o.iface_emit == 0)
+        & (o.emit_ir == 0)
+        & (o.watch == 0)
+        & (o.no_entry == 0)
+        & (o.inputs.len() == 0)
+        & (o.diag.len() == 0) {
+        o.cache = 1;
+        o.cache_quiet = 1;
     }
     if o.watch != 0 {
         return watch(&h, &mut o, 1);
@@ -4603,7 +4825,18 @@ fn test_failure<a, b>(file: &a [u8], status: u64, log_path: &b [u8], note: &b [u
 }
 // Build and run one test program in this process. With `log` non-empty its output is captured.
 fn test_run_here<a, b, d>(h: (&a Home), o: (&a TestOptions), file: &a [u8], log: &b [u8]) -> u64 {
-    modules := u8[][];
+    // In a project, a test sees the root's modules and every dependency's - its dev-dependencies
+    // too, which no other build sees (docs/packages.md): the plan grail.lock already resolved.
+    mut modules = u8[][];
+    if host::exists(view("grail.toml")) != 0 {
+        p := pkg::plan(1);
+        if p.name.len() == 0 {
+            return 1;
+        }
+        for i in p.modules.len() {
+            modules.push(item(&p.modules, i));
+        }
+    }
     out := test_binary(view(file));
     status := compile(h: h, entry: view(file), modules: &modules, output: view(out), target: view(o.target), flags: test_bits(&o));
     if status != 0 {
@@ -5246,6 +5479,10 @@ fn profile_scratch() -> u8[] {
 }
 fn profile_command<a>(args: (&a u8[][])) -> u64 {
     mut rate: u64 = 200;
+    // `--callers`: each sample also carries up to seven return addresses (the runtime walks the frame
+    // pointers), and the report adds inclusive time and who calls the hottest functions. Without it
+    // the request, the samples and the runtime's handler are exactly what they were.
+    mut callers = false;
     mut out_path = u8[];
     mut i: u64 = 0;
     while i < args.len() {
@@ -5260,6 +5497,8 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
         } else if eq(view(a), view("--out")) && (i + 1 < args.len()) {
             i += 1;
             out_path = item(&args, i);
+        } else if eq(view(a), view("--callers")) {
+            callers = true;
         } else {
             break;
         }
@@ -5271,7 +5510,7 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
         i += 1;
     }
     if rest.len() == 0 {
-        say(view("usage: grail profile [--rate N] [--out FILE] -- PROGRAM [ARGS]"));
+        say(view("usage: grail profile [--rate N] [--callers] [--out FILE] -- PROGRAM [ARGS]"));
         return 2;
     }
     if (rate == 0) || (1000000 < rate) {
@@ -5298,6 +5537,9 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
     }
     samples := path_join(view(dir), view("samples"));
     mut text = decimal(1);
+    if callers {
+        text = decimal(2);
+    }
     text.push(32);
     text = cat(view(text), view(decimal(rate)));
     text.push(32);
@@ -5336,7 +5578,7 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
         say(view("grail profile: truncated sample file"));
         return 1;
     }
-    if (data[0] != 71) || (data[6] != 50) {
+    if (data[0] != 71) || ((data[6] != 50) && (data[6] != 51)) {
         say(
             view("grail profile: unsupported sample format; rebuild the program with this compiler")
         );
@@ -5347,7 +5589,11 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
     count := le64(view(data), 24);
     dropped := le64(view(data), 32);
     cpu_ns := le64(view(data), 40);
-    if data.len() < 48 + count * 8 {
+    mut each: u64 = 1;
+    if data[6] == 51 {
+        each = 8;
+    }
+    if data.len() < 48 + count * 8 * each {
         say(view("grail profile: truncated sample file"));
         return 1;
     }
@@ -5419,7 +5665,7 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
     if elf && (kind != 3) {
         mut k: u64 = 0;
         while k < count {
-            slot := symbol_at(&symbols, &order, le64(view(data), 48 + k * 8));
+            slot := symbol_at(&symbols, &order, le64(view(data), 48 + k * 8 * each));
             counts[slot] = counts[slot] + 1;
             k += 1;
         }
@@ -5467,6 +5713,9 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
     total = cat(view(total), view(pad_left(view(share_text(count, count)), 6)));
     total = cat(view(total), view("  total"));
     push_line(&mut out, view(total));
+    if (each != 1) && elf && (kind != 3) {
+        profile_callers(&mut out, view(data), count, each, &symbols, &order, &counts, &rows, width);
+    }
     host::print(view(out));
     if out_path.len() != 0 {
         if host::write_file(view(out_path), out) != 0 {
@@ -5476,6 +5725,137 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
         }
     }
     return status;
+}
+
+// The caller view of a `--callers` profile: for every function, the samples in which it is anywhere
+// on the stack (inclusive, each sample counted once per function); then, for the ten hottest leaf
+// functions, which function called them and which was the first caller outside the runtime - the
+// view that says *which* code allocates when `rt_alloc_unlocked` tops the table. A return address
+// is attributed to the function containing the call (the address before it). A leaf caught before
+// its frame is set up reports its caller's caller as its caller.
+fn profile_callers<a, b, d, e, g>(out: (&a mut u8[]), data: &b [u8], count: u64, each: u64, symbols: (&d Symbol[]), order: (&e u64[]), leaf: (&g u64[]), rows: (&g u64[]), width: u64) -> unit {
+    unknown := symbols.len();
+    mut inclusive = u64[];
+    for n in symbols.len() + 1 {
+        inclusive.push(0);
+    }
+    mut seen = u64[];
+    for n in symbols.len() + 1 {
+        seen.push(0);
+    }
+    // frame(k, j): the function of the j-th address of sample k.
+    for k in count {
+        for j in each {
+            pc := le64(view(data), 48 + (k * each + j) * 8);
+            if (j != 0) && (pc == 0) {
+                break;
+            }
+            mut at = pc;
+            if (j != 0) && (0 < at) {
+                at -= 1;
+            }
+            f := symbol_at(symbols, order, at);
+            if seen[f] != k + 1 {
+                seen[f] = k + 1;
+                inclusive[f] = inclusive[f] + 1;
+            }
+        }
+    }
+    push_line(&mut out, view(""));
+    push_line(&mut out, view("  inclusive: samples with the function anywhere on the stack"));
+    by := by_count(&inclusive, order);
+    mut shown = 0;
+    for n in by.len() {
+        if (25 <= shown) || (inclusive[by[n]] == 0) {
+            break;
+        }
+        line := profile_row(inclusive[by[n]], count, view(symbols[by[n]].function), view(symbols[by[n]].module), width);
+        push_line(&mut out, view(line));
+        shown += 1;
+    }
+    push_line(&mut out, view(""));
+    push_line(&mut out, view("  callers of the hottest functions: the caller, and the first caller outside the runtime"));
+    mut top = 0;
+    for r in rows.len() {
+        hot := rows[r];
+        if (10 <= top) || (leaf[hot] == 0) {
+            break;
+        }
+        top += 1;
+        mut direct = u64[];
+        mut outside = u64[];
+        for n in symbols.len() + 1 {
+            direct.push(0);
+            outside.push(0);
+        }
+        for k in count {
+            pc := le64(view(data), 48 + k * each * 8);
+            if symbol_at(symbols, order, pc) != hot {
+                continue;
+            }
+            mut first = unknown;
+            mut away = unknown;
+            for j in each {
+                if j == 0 {
+                    continue;
+                }
+                ret := le64(view(data), 48 + (k * each + j) * 8);
+                if ret == 0 {
+                    break;
+                }
+                f := symbol_at(symbols, order, ret - 1);
+                if first == unknown {
+                    first = f;
+                }
+                if (away == unknown) && (f != unknown) && !eq(view(symbols[f].module), view("runtime")) {
+                    away = f;
+                    break;
+                }
+            }
+            direct[first] = direct[first] + 1;
+            outside[away] = outside[away] + 1;
+        }
+        mut head = copy(view("    "));
+        head = cat(view(head), view(symbols[hot].function));
+        head = cat(view(head), view(" ("));
+        head = cat(view(head), view(decimal(leaf[hot])));
+        head = cat(view(head), view(" samples)"));
+        push_line(&mut out, view(head));
+        for pass in 2 {
+            mut list = direct.copy();
+            mut label = copy(view("      called by"));
+            if pass == 1 {
+                list = outside.copy();
+                label = copy(view("      from"));
+            }
+            push_line(&mut out, view(label));
+            order_by := by_count(&list, order);
+            mut listed = 0;
+            for n in order_by.len() {
+                if (6 <= listed) || (list[order_by[n]] == 0) {
+                    break;
+                }
+                line := profile_row(list[order_by[n]], leaf[hot], view(symbols[order_by[n]].function), view(symbols[order_by[n]].module), width);
+                push_line(&mut out, view(cat(view("    "), view(line))));
+                listed += 1;
+            }
+            if list[unknown] != 0 {
+                line := profile_row(list[unknown], leaf[hot], view("[unknown]"), view("-"), width);
+                push_line(&mut out, view(cat(view("    "), view(line))));
+            }
+        }
+    }
+    return ();
+}
+fn profile_row<a, b>(n: u64, total: u64, function: &a [u8], module: &b [u8], width: u64) -> u8[] {
+    mut line = copy(view("  "));
+    line = cat(view(line), view(pad_left(view(decimal(n)), 7)));
+    line = cat(view(line), view(" "));
+    line = cat(view(line), view(pad_left(view(share_text(n, total)), 6)));
+    line = cat(view(line), view("  "));
+    line = cat(view(line), view(padded(function, width + 2)));
+    line = cat(view(line), module);
+    return line;
 }
 
 // `grail doc [--out DIR] [FILES or DIRS]`: the reference documentation of a source tree, as one HTML

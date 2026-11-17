@@ -61,6 +61,43 @@ Any vector can be sliced (see [Views and slices](views.html)).
 
 **Try it:** use `u8[][]`, push `u8[]`, and inspect the popped buffer's length.
 
+## Fixed-size arrays
+
+`[T; N]` is `N` values of `T` back to back, with no heap allocation and no length word: the
+length is part of the type. A local array lives in the function's frame, which is what a vector
+in an engine's hot loop - a position, a matrix row, a small scratch buffer - wants. The layout is
+C's: `[f32; 4]` is 16 bytes, `[[f32; 4]; 4]` is 64, and `size_of`/`align_of` answer for arrays of
+numbers.
+
+{{example:arrays}}
+
+- **Literals.** Where an array type is expected, a bracket literal is that array: `[1.0, 2.0, 3.0]`
+  gives every element, `[0.0; 16]` repeats one. The count is checked while compiling. With no
+  expected type, `[1, 2, 3]` is still a vector. An array starts full, so `mut a: [f32; 4];` without
+  a value is refused, and `N` is a positive constant.
+- **Indexing.** `a[i]`, `a[i] = x`, `a[i] += x`, `&a[i]`, `&mut a[i]` and `m[i][j]` work as on a
+  vector. An index the compiler can prove is below `N` - a `for i in N` loop, `for i in a.len()`, a
+  refined `i: u64 where i < N`, a literal - has no check; a literal past the end is a compile
+  error. Any other index is one compare against the constant `N`, and a failure stops the program
+  with `index 7 out of bounds for length 4` and where.
+- **`a.len()`** is the constant `N`. `for x in &a` and `for x in &mut a` borrow each element, as for a
+  vector, and compile to a counted loop with no iterator.
+- **Copying.** An array of plain data of at most four words (32 bytes) copies on binding, as a
+  number does; a larger one moves, and `a.copy()` copies it. Assigning an array, `a = b` or
+  `*r = b`, copies the elements into `a`'s own storage.
+- **`==`** compares element by element (floats as IEEE, so `-0.0 == 0.0`), and an array prints as
+  a vector does: `[1, 2, 3]`.
+- **References.** A function takes an array as `&[T; N]` to read it and `&mut [T; N]` to change it;
+  that is one word, the address of the elements.
+- **Not yet.** In this release an array lives in a local: it cannot be a parameter or result by
+  value, a field of a struct, an element of a vector, a type argument or a closure's capture, and
+  its elements are numbers or other arrays. Those come next (docs/design/fixed-arrays.md). An
+  `extern "C" record` field written `[T; N]` still reads as a vector copied out of it.
+- **Large arrays** live in the frame, as in C. A frame larger than a page is touched a page at a
+  time from the top as the function starts, so running out of stack is always reported as
+  `stack overflow` and never steps over the guard page; a frame larger than the 1 MiB stack a task
+  runs on is refused at the array that makes it so - keep such data in a vector or a static.
+
 ## Returning several values
 
 A function can return several values in a named record. `Stats` gives each result a clear name, and

@@ -97,6 +97,10 @@ fn rt_syscall(n: u64, a: u64, b: u64, c: u64) -> u64 {
     if n == 258 {
         return raw_syscall(34, a, b, c);
     }
+    if n == 259 {
+        // mknodat; the device number is ignored for a fifo.
+        return raw_syscall(33, a, b, c);
+    }
     if n == 59 {
         return raw_syscall(221, a, b, c);
     }
@@ -334,6 +338,11 @@ fn rt_comptime_check(n: u64, a: u64) -> u64 {
     if (n == 1) & ((a == 1) | (a == 2)) {
         return 0;
     }
+    // A failed check in compile-time code ends the probe the way it ends a program: SIGABRT to
+    // itself (rt_abort_final). Only its own process: signalling another one is an effect.
+    if (n == 62) & (a == raw_syscall(39, 0, 0, 0)) {
+        return 0;
+    }
     if rt_comptime_allowed(n) {
         return 0;
     }
@@ -469,7 +478,7 @@ fn rt_os_reactor_loop(s: u64) -> u64 {
                 i += 1;
             }
         }
-        rt_atomic_fetch_add(s + 56, 1);
+        raw_atomic_fetch_add(s + 56, 1);
     }
     return 0;
 }

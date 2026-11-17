@@ -20,6 +20,13 @@ book-run example *args:
 book-test:
     bun test tools/book.test.mjs
 
+# Re-run the benchmarks against other languages and refresh bench/results/, the files the book's
+# Performance chapter renders (one at a time, on a machine doing nothing else if you can).
+bench-results:
+    bun tools/bench-rivals.mjs --json bench/results/bench-rivals.json
+    bun tools/sched-rivals.mjs --json bench/results/sched-rivals.json
+    bun tools/compile-rivals.mjs --json bench/results/compile-rivals.json
+
 # Verify Grail examples without compiling the optional Rust comparisons.
 book-check-grail:
     bun tools/book.mjs check --grail-only

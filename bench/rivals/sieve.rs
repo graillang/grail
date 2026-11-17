@@ -1,20 +1,24 @@
-// Sieve of Eratosthenes up to 50 million, three times; prints the prime count (twin of bench/sieve.c).
+// Sieve of Eratosthenes up to 50 million, three rounds; prints the sum of the prime counts
+// (twin of bench/sieve.c; each round's limit depends on the previous round's count).
 fn main() {
     let n: usize = 50000000;
-    let mut count: u64 = 0;
+    let mut count: usize = 0;
+    let mut total: usize = 0;
     for _ in 0..3 {
-        let mut composite = vec![false; n + 1];
+        let limit = n - (count & 1);
+        let mut composite = vec![false; limit + 1];
         count = 0;
-        for i in 2..=n {
+        for i in 2..=limit {
             if !composite[i] {
                 count += 1;
                 let mut j = i * i;
-                while j <= n {
+                while j <= limit {
                     composite[j] = true;
                     j += i;
                 }
             }
         }
+        total += count;
     }
-    println!("{}", count);
+    println!("{}", total);
 }

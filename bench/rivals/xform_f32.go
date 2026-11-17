@@ -30,6 +30,7 @@ func main() {
 	var a float32 = 0.999
 	for pass := 0; pass < 200; pass++ {
 		scaleAdd(x, y, a)
+		a = 0.999 - x[pass]*0.000000001
 	}
 	sum := 0.0
 	for i := 0; i < n; i++ {
