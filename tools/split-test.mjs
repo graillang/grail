@@ -55,7 +55,21 @@ function manifestOf(asm) {
   return { path, parts, link };
 }
 
+// Every label is defined once: an assembler reports a second definition, but only as an error
+// on whichever line it meets it; naming the label here says which copy (two inlined copies of one
+// body in one unit, for one, shared a return label when the unit came in two parts).
+function assertLabelsUnique(source) {
+  const seen = new Set();
+  for (const line of readFileSync(source, 'utf8').split('\n')) {
+    const m = /^(\.L[A-Za-z0-9_.$]*):$/.exec(line);
+    if (!m) continue;
+    assert.ok(!seen.has(m[1]), `${source}: label ${m[1]} defined twice`);
+    seen.add(m[1]);
+  }
+}
+
 function assembleOne(source, object) {
+  assertLabelsUnique(source);
   command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[target]}`, '-c', source, '-o', object]);
 }
 

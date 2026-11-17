@@ -187,8 +187,8 @@ error: the entry `main::helper` was picked because this module has no `main`, an
 return `u64`; it returns `u8[]`. Give the program a `pub fn main()`
  --> input.grl:1:5
 
-error: no `main` and no public function with at most one parameter to use as the entry:
-add `pub fn main()`
+error: no `main` in input.grl: a program needs `pub fn main()` (or a public function taking nothing
+or the argument view); a module without one is a library, used from a program
  --> input.grl:1:1
 
 error: `main` must return unit or u64; this one returns `u8[]`

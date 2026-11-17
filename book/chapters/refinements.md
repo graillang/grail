@@ -110,7 +110,16 @@ fn grow(b: &mut Batch) {
 
 In return, a record read through a shared reference or a binding that is not `mut` satisfies its
 field predicates: `fn half(b: &Batch)` may pass `b.size` where `size > 0` is required, proved.
-A predicate relating two fields (`hi: u64 where lo <= hi`) is not supported yet and is refused.
+A predicate may relate fields of the same record:
+
+```grl
+struct Span { lo: u64, hi: u64 where lo <= hi }
+```
+
+It is owed once a literal has every field, and at every write of either field; a mutable borrow of
+either is refused. Under `@strict`, a literal is proved from what the program knows about the
+values, and `p.hi = 5` alone cannot be (nothing says what `p.lo` is then): rebuild the record
+instead. A `Span` read through a shared reference gives `s.lo <= s.hi` as a fact.
 
 ### Arithmetic in a condition
 
