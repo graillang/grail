@@ -35182,6 +35182,19 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                         callable := callable_formal(&mut c, f - 1, formal);
                         if (callable != NO_TYPE) && ((ty_kind(&mut c, v.ty) == 20) || (ty_kind(&mut c, v.ty) == 12)) {
                             infer_callable(&mut c, callable, v.ty, &mut map);
+                            // The capability bounds are checked on this argument now, while its
+                            // captures are the ones in question: a later argument's own errors
+                            // (another closure capturing the same binding) must not hide them.
+                            if (ty_kind(&mut c, v.ty) == 20) && (ty_env(&mut c, v.ty) != 0) {
+                                bm := ty_mode(&mut c, callable);
+                                gm := ty_mode(&mut c, v.ty);
+                                if ((gm & CLOSURE_FNMUT) != 0) & ((bm & CLOSURE_FNMUT) == 0) {
+                                    fail(&mut c, view("a closure that mutates a captured value is FnMut, not Fn: this callable bound is `Fn`"));
+                                }
+                                if !closure_bounds_hold(&mut c, v.ty, bm & CLOSURE_BOUNDS) {
+                                    closure_bound_fail(&mut c, v.ty, bm & CLOSURE_BOUNDS);
+                                }
+                            }
                         }
                     }
                 } else {
@@ -42700,11 +42713,19 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
             root := place_of(&mut c, obj);
             field_place := member_place(&mut c, root, 2 + j, ty);
             source := place_of(&mut c, slot);
-            transfer_bonds(&mut c, source, field_place);
             get(&mut c, slot, view("%rax"));
             pointer := save(&mut c);
             rec_store(&mut c, obj, 2 + j, pointer);
-            move_out(&mut c, val(slot, ty));
+            // A shared reference is copied, as Rust's `&T` is: the field holds the same shared
+            // loans and the binding stays usable - two closures may capture one `r := &x`. An
+            // exclusive reference moves, loans and all.
+            sk := ty_kind(&mut c, ty);
+            if ((sk == 5) || (sk == 7) || (sk == 27)) && (ty_mode(&mut c, ty) == 0) {
+                return_bonds(&mut c, source, field_place, 1);
+            } else {
+                transfer_bonds(&mut c, source, field_place);
+                move_out(&mut c, val(slot, ty));
+            }
         } else if needs_drop(&mut c, ty) {
             if contains_borrow(&mut c, ty, 0) || capture_hides_loan(&mut c, slot, ty) {
                 // An aggregate holding a borrow - or a closure whose type cannot show the one it
