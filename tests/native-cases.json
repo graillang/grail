@@ -17396,6 +17396,71 @@
     "stdout": "contained\n0\n"
   },
   {
+    "name": "interface-default-methods-across-modules",
+    "files": [
+      "tests/defaults/shapes_user.grl"
+    ],
+    "modules": [
+      "tests/defaults/shapes.grl"
+    ],
+    "interfaces": true,
+    "stdout": "18\n9\n27\n7\n17\n",
+    "note": "default interface method bodies travel in the interface (as their text, like a generic template's), so an implementation in another module gets them: a default used, a default overridden, a default calling a required method and a default calling another default, also through a generic function of the interface's module (was: `missing interface method (it has no default body)`)"
+  },
+  {
+    "name": "callable-bound-fresh-ref-function-refused",
+    "note": "a callable bound's reference parameter with a lifetime the bound names nowhere else is fresh on every call (higher-ranked): a named function that ties it to the context's lifetime (`C = &mut Out<'a>`) could store the guarded `&mut T` past the lock (found by /root/thread_alloc moving lib/sync.grl to callable bounds)",
+    "source": "struct Box1<T> { v: T }\nfn with_lock<a, T, C, R: Owned, F: FnMut((&mut T), C) -> R>(m: (&a mut Box1<T>), ctx: C, f: F) -> R { mut g = f; return g(&mut m.v, ctx); }\nstruct Out<a> { slot: (&a mut u64[])[] }\nfn leak<a, b>(v: (&a mut u64[]), out: (&b mut Out<a>)) -> u64 { out.slot.push(v); return 0; }\nfn main() { mut m = Box1 { v: u64[1] }; mut other = u64[9]; mut out = Out { slot: [] }; with_lock(&mut m, &mut out, leak); println(out.slot.len()); }\n",
+    "reject": true,
+    "diagnostic": "its parameter 1 is a reference the bound gives it fresh on every call"
+  },
+  {
+    "name": "callable-bound-fresh-ref-closure-refused",
+    "note": "...a closure that names the outer lifetime for that parameter and captures storage labelled with it is refused the same way",
+    "source": "struct Box1<T> { v: T }\nfn with_lock<a, T, C, R: Owned, F: FnMut((&mut T), C) -> R>(m: (&a mut Box1<T>), ctx: C, f: F) -> R { mut g = f; return g(&mut m.v, ctx); }\nstruct Out<a> { slot: (&a mut u64[])[] }\nfn stash<a, b>(m: (&a mut Box1<u64[]>), out: (&b mut Out<a>)) -> u64 {\n    return with_lock(&mut m, 0, |v: (&a mut u64[]), k: u64| -> u64 { out.slot.push(v); return 0; });\n}\nfn main() { mut m = Box1 { v: u64[1] }; mut out = Out { slot: [] }; println(stash(&mut m, &mut out)); }\n",
+    "reject": true,
+    "diagnostic": "its parameter 1 is a reference the bound gives it fresh on every call"
+  },
+  {
+    "name": "callable-bound-fresh-ref-function-independent",
+    "note": "...a function whose lifetimes are independent is accepted",
+    "source": "struct Box1<T> { v: T }\nfn with_lock<a, T, C, R: Owned, F: FnMut((&mut T), C) -> R>(m: (&a mut Box1<T>), ctx: C, f: F) -> R { mut g = f; return g(&mut m.v, ctx); }\nfn count<a, b>(v: (&a mut u64[]), extra: (&b u64)) -> u64 { v.push(*extra); return v.len(); }\nfn main() { mut m = Box1 { v: u64[1] }; k := 5; println(with_lock(&mut m, &k, count)); }\n",
+    "stdout": "2\n"
+  },
+  {
+    "name": "callable-bound-fresh-ref-closure",
+    "note": "...and so is a closure with elided reference parameters",
+    "source": "struct Box1<T> { v: T }\nfn with_lock<a, T, C, R: Owned, F: FnMut((&mut T), C) -> R>(m: (&a mut Box1<T>), ctx: C, f: F) -> R { mut g = f; return g(&mut m.v, ctx); }\nfn main() { mut m = Box1 { v: u64[1] }; println(with_lock(&mut m, 3, |v: (&mut u64[]), k: u64| -> u64 { v.push(k); return v.len(); })); }\n",
+    "stdout": "2\n"
+  },
+  {
+    "name": "callable-bound-fresh-ref-vecs-any-refused",
+    "note": "the same hole through a vecs callback on main: `any`'s `FnMut((&T)) -> bool` given a closure that keeps each element reference in captured storage",
+    "source": "use vecs;\nfn keep_refs<a, b>(v: (&a u64[]), out: (&b mut (&a u64)[])) -> bool { return v.any(|x: (&a u64)| -> bool { out.push(x); return false; }); }\nfn main() { v := u64[1, 2]; mut out = (&u64)[]; println(keep_refs(&v, &mut out)); }\n",
+    "reject": true,
+    "diagnostic": "is a reference the bound gives it fresh on every call"
+  },
+  {
+    "name": "callable-bound-fresh-ref-filter-adapter-refused",
+    "note": "...through the typed Filter adapter",
+    "source": "use iter;\nfn keep_refs<a, b>(v: (&a u64[]), out: (&b mut (&a u64)[])) -> u64 {\n    return iter::over(v.copy()).filter(|x: (&a u64)| -> bool { out.push(x); return true; }).fold(0, |s: u64, x: u64| -> u64 s + x);\n}\nfn main() { v := u64[1, 2]; mut out = (&u64)[]; println(keep_refs(&v, &mut out)); }\n",
+    "reject": true,
+    "diagnostic": "is a reference the bound gives it fresh on every call"
+  },
+  {
+    "name": "callable-bound-fresh-ref-returned-refused",
+    "note": "...and a function returning the fresh reference (`fn grab<b>(v: &b mut u64[]) -> &b mut u64[]` for `F: FnMut((&mut T)) -> R`)",
+    "source": "fn apply<a, T, R, F: FnMut((&mut T)) -> R>(x: (&a mut T), f: F) -> R { mut g = f; return g(&mut x); }\nfn grab<b>(v: (&b mut u64[])) -> (&b mut u64[]) { return v; }\nfn get<a>(v: (&a mut u64[])) -> u64 { r := apply(&mut v, grab); return r.len(); }\nfn main() { mut v = u64[1]; println(get(&mut v)); }\n",
+    "reject": true,
+    "diagnostic": "is a reference the bound gives it fresh on every call"
+  },
+  {
+    "name": "callable-bound-fresh-ref-vecs-plain",
+    "note": "plain reference callbacks of vecs are unaffected",
+    "source": "use vecs;\nfn main() { v := u64[3, 1, 2]; mut w = v.copy(); w.sort_by(|a: &u64, b: &u64| -> bool *a < *b); println(w[0]); println(v.any(|x: &u64| -> bool *x > 2)); }\n",
+    "stdout": "1\ntrue\n"
+  },
+  {
     "name": "unboxed-layout-guards",
     "files": [
       "compiler/tests/unboxed_layout_guards.grl"

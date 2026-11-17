@@ -11691,6 +11691,91 @@ fn infer_from_callables<a, b>(c: (&a mut C), sets: (&a u64[][]), map: (&b mut u6
     }
     return ();
 }
+// A callable bound is higher-ranked in its free lifetimes: a reference parameter whose lifetime the
+// bound names nowhere else (`F: FnMut((&mut T), C) -> R`) is a fresh lifetime on every call, so the
+// closure or function given for it must not tie that parameter's lifetime to anything else it can
+// reach - another parameter (a context `C = &mut Out<'a>`), its result, or what it captured -
+// or the callee's guarded `&mut T` could be stored where it outlives the call. Empty when `actual`
+// is independent enough; otherwise the parameter index (1-based) that is tied.
+fn callable_tied_param<a>(c: (&a mut C), actual: u64, bound: u64) -> u64 {
+    ak := ty_kind(&mut c, actual);
+    if (ak != 20) && (ak != 12) {
+        return 0;
+    }
+    bp := type_args(&mut c, bound);
+    ap := type_args(&mut c, actual);
+    if bp.len() != ap.len() {
+        return 0;
+    }
+    for i in bp.len() {
+        bk := ty_kind(&mut c, bp[i]);
+        if (bk != 5) && (bk != 7) && (bk != 27) {
+            continue;
+        }
+        // The bound's own lifetime for this parameter: free unless something else in the bound
+        // names it.
+        mut trail = u64[];
+        mine := caps_walk(&mut c, bp[i], &mut trail);
+        mut others = u64[];
+        for j in bp.len() {
+            if j != i {
+                mut t2 = u64[];
+                more := caps_walk(&mut c, bp[j], &mut t2);
+                for q in more.len() {
+                    add_region(&mut others, more[q]);
+                }
+            }
+        }
+        mut t3 = u64[];
+        res := caps_walk(&mut c, ty_arg(&mut c, bound), &mut t3);
+        for q in res.len() {
+            add_region(&mut others, res[q]);
+        }
+        mut free = true;
+        for q in mine.len() {
+            for r in others.len() {
+                if mine[q] == others[r] {
+                    free = false;
+                }
+            }
+        }
+        if !free {
+            continue;
+        }
+        // The argument's lifetime for it must be named nowhere else the argument can reach.
+        mut t4 = u64[];
+        theirs := caps_walk(&mut c, ap[i], &mut t4);
+        mut reach = u64[];
+        for j in ap.len() {
+            if j != i {
+                mut t5 = u64[];
+                more := caps_walk(&mut c, ap[j], &mut t5);
+                for q in more.len() {
+                    add_region(&mut reach, more[q]);
+                }
+            }
+        }
+        mut t6 = u64[];
+        ares := caps_walk(&mut c, ty_arg(&mut c, actual), &mut t6);
+        for q in ares.len() {
+            add_region(&mut reach, ares[q]);
+        }
+        if ak == 20 {
+            captured := type_regions(&mut c, actual);
+            for q in captured.len() {
+                add_region(&mut reach, captured[q]);
+            }
+        }
+        for q in theirs.len() {
+            for r in reach.len() {
+                if (theirs[q] != 0) && (theirs[q] == reach[r]) {
+                    return i + 1;
+                }
+            }
+        }
+    }
+    return 0;
+}
 // One entry of a parameter's requirement set, met by `ty` with the parameters bound by `map`: an
 // interface, or a callable bound (the closure or function `ty` converts to the bound).
 fn meets_requirement<a, b>(c: (&a mut C), ty: u64, id: u64, map: (&b u64[])) -> bool {
@@ -11712,6 +11797,9 @@ fn meets_requirement<a, b>(c: (&a mut C), ty: u64, id: u64, map: (&b u64[])) -> 
             return (ty_kind(&mut c, t) == 20) || (ty_kind(&mut c, t) == 12);
         }
         bound := bind_types(&mut c, id - CALLABLE_BOUND, &map);
+        if callable_tied_param(&mut c, t, bound) != 0 {
+            return false;
+        }
         if same_type(&mut c, t, bound) != 0 {
             return true;
         }
@@ -12891,6 +12979,15 @@ fn require_interfaces<a, b, d>(c: (&a mut C), arguments: (&b u64[]), sets: (&d u
                 // A closure written inside a specialisation is typed by its aliases, one passed in
                 // from outside by plain types: either form of the bound is met.
                 aliased := bind_types(&mut c, id - CALLABLE_BOUND, &arguments);
+                tied := callable_tied_param(&mut c, given, bound);
+                if tied != 0 {
+                    mut msg = copy_bytes(view("this argument does not meet the callable bound `"));
+                    push_bytes(&mut msg, view(source_type_name(&mut c, bound)));
+                    push_bytes(&mut msg, view("`: its parameter "));
+                    decimal(&mut msg, tied);
+                    push_bytes(&mut msg, view(" is a reference the bound gives it fresh on every call, but its lifetime is tied to another parameter, its result or a capture, so it could be kept past the call"));
+                    fail(&mut c, view(msg));
+                }
                 if (same_type(&mut c, given, bound) == 0) && (closure_converts(&mut c, given, bound) == 0)
                     && (same_type(&mut c, given, aliased) == 0) && (closure_converts(&mut c, given, aliased) == 0) {
                     if !((ty_kind(&mut c, given) == 12) && (ty_kind(&mut c, bound) == 20)) {
@@ -20477,9 +20574,13 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
         exchange(&mut c.output_region, 0);
         // `fn name(...) -> T { body }` is a default: an implementation may leave it out.
         mut default = 0;
+        mut default_text = u8[];
         if is(&mut c, view("{")) {
             default = header + 1;
             skip_braces(&mut c);
+            // The default's own text travels in the interface (as a generic template's does), so an
+            // implementation in another module can be given it.
+            default_text = (c.src[c.toks[header].start: c.toks[c.pos - 1].end]).copy();
         } else {
             expect(&mut c, view(";"));
         }
@@ -20521,7 +20622,7 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
                     owner: 0,
                     ext: 0,
                     symbol: u8[],
-                    body: u8[],
+                    body: default_text,
                     ppreds: Pred[],
                     rpred: no_pred(),
                     pnames: u8[][],
@@ -53143,7 +53244,7 @@ fn iface_rec_fn<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], module: &a [u8]
         file := virtual_source(&mut c, view(label), view(body));
         exchange(&mut c.funcs[index].file, file);
         exchange(&mut c.funcs[index].pos, 0);
-        exchange(&mut c.funcs[index].body, body);
+        exchange(&mut c.funcs[index].body, body.copy());
     }
     if section == 3 {
         // An implementation's method list is what dispatch walks.
@@ -53153,8 +53254,31 @@ fn iface_rec_fn<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], module: &a [u8]
     if section == 2 {
         // The interface's own method list is what `check_interfaces` compares an implementation
         // against, so it has to be as complete as the implementations are.
+        // A default body travels as its text: it becomes a source of its own, compiled for every
+        // implementation that leaves the method out, as it is in the interface's own module.
+        mut dfile = 0;
+        if body.len() != 0 {
+            mut label = u8[];
+            push_bytes(&mut label, view(p.path));
+            label.push(58);
+            push_bytes(&mut label, view(module));
+            push_bytes(&mut label, view("::"));
+            push_bytes(&mut label, view(name));
+            push_bytes(&mut label, view("#default"));
+            dfile = virtual_source(&mut c, view(label), view(body));
+        }
         mut item = &mut c.interfaces[contract - 1];
+        while item.defaults.len() < item.methods.len() {
+            item.defaults.push(0);
+            item.default_files.push(0);
+        }
         item.methods.push(index);
+        if dfile != 0 {
+            item.defaults.push(1);
+        } else {
+            item.defaults.push(0);
+        }
+        item.default_files.push(dfile);
     }
     return ();
 }

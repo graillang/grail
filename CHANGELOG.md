@@ -1,5 +1,16 @@
 ## Unreleased
 
+- **Soundness: a callable bound's reference parameters are fresh on every call.** In
+  `F: FnMut((&mut T), C) -> R` the `&mut T` has a lifetime the bound names nowhere else, so - as in
+  Rust's `for<'a>` elision - the closure or function given for `F` must accept any lifetime there. One
+  whose signature ties it to another parameter, its result or a capture (`fn leak<a, b>(v: &a mut T,
+  out: &b mut Out<a>)`) could keep the reference past the call and is now refused: "its parameter N
+  is a reference the bound gives it fresh on every call". It was accepted since callable bounds
+  landed (through `vecs` callbacks and the typed iterator adapters too).
+- **Fix: default interface methods work across modules.** An interface's default method bodies were
+  not carried in its `.iface`, so an implementation in another module failed with
+  "missing interface method (it has no default body)" under separate compilation (a single run was
+  fine). The default's text now travels with the method record, as a generic template's does.
 - **The standard map is one open-addressed table** (`lib/hashmap.grl`). Keys, values and their
   hashes are stored densely in insertion order (iteration order and `key_at`/`value_at` are
   unchanged), indexed by one table of slot words (a 32-bit hash tag and the entry index) with
