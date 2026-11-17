@@ -132,7 +132,9 @@ export function targetName(target) {
   return target;
 }
 export function command(argv, options = {}) {
-  const result = spawnSync(argv[0], argv.slice(1), { cwd: root, maxBuffer: 16 * 1024 * 1024, timeout: 900_000, ...options });
+  // GRAIL_COMMAND_TIMEOUT (seconds) raises the limit for a step known to be long on a loaded host,
+  // such as clang -O2 over the whole compiler's LLVM module in `release`.
+  const result = spawnSync(argv[0], argv.slice(1), { cwd: root, maxBuffer: 16 * 1024 * 1024, timeout: Number(process.env.GRAIL_COMMAND_TIMEOUT ?? 900) * 1000, ...options });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${argv.join(' ')} failed (${result.signal ?? result.status})\n${result.stdout ?? ''}${result.stderr ?? ''}`);
   return result;
@@ -200,7 +202,7 @@ export function assemble(source, executable, target = hostTarget, linkArgs = [],
   const object = `${executable}.${process.pid}.o`;
   const stable = `${executable}.o`;
   const flags = target === 'riscv64' ? ['-march=rv64imafd', '-mabi=lp64d'] : [];
-  if ((target === 'x86_64' || target === 'aarch64' || target === 'riscv64') && internalAssembler && !process.env.GRAIL_ASSEMBLER && process.env.GRAIL_ASSEMBLER_INTERNAL !== '0') {
+  if ((target === 'x86_64' || target === 'aarch64' || target === 'riscv64') && internalAssembler) {
     command([internalAssembler, 'asm', ...(target === 'x86_64' ? [] : ['--target', target]), source, '-o', object]);
     if (process.env.GRAIL_ASM_ORACLE === '1') {
       // The oracle (tools/asm-oracle.mjs): clang's object from the same text must be the same.
@@ -429,10 +431,8 @@ function claimExecutable(pending, executable) {
   }
   rmSync(pending, { force: true });
 }
-// The internal assembler (`grail asm`, compiler/asm_x86.grl) assembles x86-64 objects once the tree's
-// compiler exists, as `grail build` does; the compiler's own build, `GRAIL_ASSEMBLER` and
-// `GRAIL_ASSEMBLER_INTERNAL=0` use clang (the fallback kept until the internal assembler's oracle,
-// tools/asm-oracle.mjs, has been green through one landing).
+// The internal assembler (`grail asm`, compiler/asm_x86.grl) assembles Linux objects once the tree's
+// compiler exists, as `grail build` does; only the compiler's own first build uses clang.
 let internalAssembler = null;
 // A tool that runs a compiler it was handed (a test stripe) assembles with that compiler.
 export function useAssemblerOf(compiler) {
@@ -494,7 +494,8 @@ export function buildReleaseCompiler({ log = () => {} } = {}) {
   const candidates = [process.env.GRAIL_RELEASE_BASE, existsSync(latest) ? readFileSync(latest, 'utf8').trim() : null]
     .filter(path => path && existsSync(path));
   const stem = join(directory, `release.${process.pid}`);
-  const flags = ['--default-u64', '--typed-refs'];
+  // A release build wraps on overflow, as every `grail build --release` does.
+  const flags = ['--default-u64', '--typed-refs', '--overflow=wrap'];
   let lowered = false;
   for (const base of [...candidates, native]) {
     log(`lowering with ${base}`);

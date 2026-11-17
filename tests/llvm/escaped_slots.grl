@@ -1,0 +1,47 @@
+// Address-taken multi-word frame values in lifted functions (llvm.grl escaped_overreach): an
+// Option<u64> from pop() written through its address, a three-word record passed by address, at
+// several frame layouts - fewer and more locals around them - so a value that the lifter splits
+// into one-word allocas would corrupt a neighbour, as 18e6943's pool::split did.
+struct Trio { a: u64, b: u64, c: u64 }
+fn sum3(t: Trio) -> u64 {
+    return t.a + t.b * 2 + t.c * 3;
+}
+fn reverse(v: u64[]) -> u64[] {
+    mut source = v;
+    mut rev = u64[];
+    while let Some(x) = source.pop() { rev.push(x); }
+    return rev;
+}
+fn reverse_wide(v: u64[], k: u64) -> u64[] {
+    mut pad0 = k + 1;
+    mut source = v;
+    mut pad1 = k * 3;
+    mut rev = u64[];
+    mut pad2 = pad0 + pad1;
+    while let Some(x) = source.pop() {
+        pad2 = pad2 ^ x;
+        rev.push(x + pad0 - pad0);
+    }
+    mut pad3 = pad2 + pad1;
+    rev.push(pad3 - pad3);
+    return rev;
+}
+fn trios<T>(items: T[], f: fn(T) -> u64) -> u64 {
+    mut total = 0;
+    mut source = items;
+    mut before = 7;
+    while let Some(x) = source.pop() {
+        t := Trio { a: f(x), b: before, c: total };
+        total += sum3(t);
+        before += 1;
+    }
+    return total;
+}
+fn id(x: u64) -> u64 { return x; }
+fn main() {
+    a := reverse(u64[1, 2, 3, 4, 5]);
+    println("{} {} {}", a.len(), a[0], a[4]);
+    b := reverse_wide(u64[10, 20, 30], 4);
+    println("{} {} {}", b.len(), b[0], b[3]);
+    println(trios<u64>(u64[1, 2, 3], id));
+}

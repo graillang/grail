@@ -571,12 +571,6 @@
     "signal": "SIGABRT"
   },
   {
-    "name": "runtime-checks-survive-wrap-option",
-    "source": "unsafe module runtime;pub fn audit()->u64{return 0-1;}",
-    "overflow": "wrap",
-    "signal": "SIGABRT"
-  },
-  {
     "name": "abort-in-c-callback-arithmetic",
     "files": [
       "tests/abort/callback_abort.grl"
@@ -8139,13 +8133,10 @@
     "backends": [
       "native"
     ],
-    "asm": [
-      "call f_main_take.proved"
-    ],
     "asmAbsent": [
       "call f_main_take\n"
     ],
-    "note": "an arm whose pattern is one literal states `n == 16` in that arm: the call's `align % 16 == 0` is settled there and enters the proved entry"
+    "note": "an arm whose pattern is one literal states `n == 16` in that arm: the call's `align % 16 == 0` is settled there and enters the proved entry (the proved body is a leaf the optimiser inlines, so what is pinned is that the checking wrapper is never called)"
   },
   {
     "name": "pv-match-pattern-scoped",
@@ -8176,13 +8167,10 @@
     "backends": [
       "native"
     ],
-    "asm": [
-      "call f_main_take.proved"
-    ],
     "asmAbsent": [
       "call f_main_take\n"
     ],
-    "note": "a guard is what reaching the arm's body means: `_ if n % 16 == 0` states it there, and the call enters the proved entry"
+    "note": "a guard is what reaching the arm's body means: `_ if n % 16 == 0` states it there, and the call enters the proved entry (the proved body is a leaf the optimiser inlines, so what is pinned is that the checking wrapper is never called)"
   },
   {
     "name": "pv-let-shadow-proves",
@@ -8194,13 +8182,10 @@
     "backends": [
       "native"
     ],
-    "asm": [
-      "call f_main_get.proved"
-    ],
     "asmAbsent": [
       "call f_main_get\n"
     ],
-    "note": "a shadowing binding kills the facts about the name it shadows for its own block only: after the block the refined parameter's `i < v.len()` is back, and the call needs no check"
+    "note": "a shadowing binding kills the facts about the name it shadows for its own block only: after the block the refined parameter's `i < v.len()` is back, and the call needs no check (the proved body is a leaf the optimiser inlines, so what is pinned is that the checking wrapper is never called)"
   },
   {
     "name": "pv-let-shadow-scoped",
@@ -8231,13 +8216,10 @@
     "backends": [
       "native"
     ],
-    "asm": [
-      "call f_main_at.proved"
-    ],
     "asmAbsent": [
       "call f_main_at\n"
     ],
-    "note": "`for k in 0..n` states `0 <= k < n` inside the body, which is exactly at's `k < n`: the call enters the proved entry"
+    "note": "`for k in 0..n` states `0 <= k < n` inside the body, which is exactly at's `k < n`: the call enters the proved entry (the proved body is a leaf the optimiser inlines, so what is pinned is that the checking wrapper is never called)"
   },
   {
     "name": "pv-for-guard-scoped",
@@ -8268,13 +8250,10 @@
     "backends": [
       "native"
     ],
-    "asm": [
-      "call f_main_take_second.proved"
-    ],
     "asmAbsent": [
       "call f_main_take_second\n"
     ],
-    "note": "an arm binds `x`, not `i` or `v`: the facts that held before the match are still about the names the arm uses, so the call enters the proved entry (the token walk dropped every fact at a `match`)"
+    "note": "an arm binds `x`, not `i` or `v`: the facts that held before the match are still about the names the arm uses, so the call enters the proved entry (the token walk dropped every fact at a `match`) (the proved body is a leaf the optimiser inlines, so what is pinned is that the checking wrapper is never called)"
   },
   {
     "name": "effects-accepted",
@@ -17240,19 +17219,6 @@
     "diagnostic": "`a` was moved"
   },
   {
-    "name": "reject-array-owned-field",
-    "reject": true,
-    "note": "an array of owners is not a field yet: records with drops are not inline until unboxed stage 4",
-    "source": "struct S {\n    names: [string; 2]\n}\nfn main() {\n}\n",
-    "diagnostic": "an array as a field, when its elements own data, is not supported yet"
-  },
-  {
-    "name": "reject-array-owned-vector-element",
-    "reject": true,
-    "source": "fn main() {\n    v: [string; 2][] = [];\n}\n",
-    "diagnostic": "an array as a vector's element, when its elements own data, is not supported yet"
-  },
-  {
     "name": "array-generic-length",
     "note": "a value parameter is an array's length (fixed-arrays.md, A4): inferred from the argument's array type, given explicitly, or a record's value parameter; each length is its own specialisation",
     "source": "fn sum<@n: u64>(a: &[f32; n]) -> f32 {\n    mut t: f32 = 0.0;\n    for i in n {\n        t = t + a[i];\n    }\n    return t;\n}\nfn first<T, @n: u64>(a: &[T; n]) -> u64 {\n    return a.len();\n}\nfn zeros<@n: u64>() -> [u64; n] {\n    return [0; n];\n}\nstruct Mat<@R: u64, @C: u64> {\n    m: [[f32; C]; R]\n}\nfn trace<@k: u64>(m: &Mat<k, k>) -> f32 {\n    mut t: f32 = 0.0;\n    for i in k {\n        t = t + m.m[i][i];\n    }\n    return t;\n}\nfn main() {\n    a: [f32; 3] = [1.0, 2.0, 3.0];\n    b: [f32; 5] = [1.0; 5];\n    println(\"{} {}\", sum(&a), sum(&b));\n    u: [u8; 4] = [1, 2, 3, 4];\n    println(first(&u));\n    z := zeros<4>();\n    println(z);\n    m := Mat<2, 2> { m: [[1.0, 2.0], [3.0, 4.0]] };\n    println(trace(&m));\n}\n",
@@ -17585,5 +17551,47 @@
     "targets": [
       "x86_64"
     ]
+  },
+  {
+    "name": "raw-overflow-follows-build-mode-wrap",
+    "source": "unsafe module runtime;\nfn main() {\n    mut a: u64 = 18446744073709551615;\n    a = a + 2;\n    println(a);\n}\n",
+    "overflow": "wrap",
+    "stdout": "1\n",
+    "note": "Raw (`unsafe module`) code follows the build's overflow mode like all other code: under wrap (and so under --release) an overflowing add wraps. Code that must check uses explicit checked operations."
+  },
+  {
+    "name": "raw-overflow-follows-build-mode-checked",
+    "source": "unsafe module runtime;\nfn main() {\n    mut a: u64 = 18446744073709551615;\n    a = a + 2;\n    println(a);\n}\n",
+    "signal": "SIGABRT",
+    "note": "The same raw add traps in a checked (development) build."
+  },
+  {
+    "name": "array-owned-in-records-and-vectors",
+    "note": "arrays of owners as struct fields (inline, dropped in place with the struct), inside a vector of such structs, as flat vector elements (truncate drops the removed ones in place) and in a Mutex (its box drops the elements, then is freed); the program ends with nothing allocated",
+    "source": "struct Team {\n    names: [string; 3],\n    lead: u64\n}\nstruct Grid {\n    rows: [u64[]; 2]\n}\nfn main() {\n    mut t = Team { names: [\"a\".text(), \"b\".text(), \"c\".text()], lead: 1 };\n    println(\"{} {}\", t.names[t.lead], t.names.len());\n    t.names[0] = \"z\".text();\n    println(t.names);\n    mut g = Grid { rows: [u64[1], u64[2, 3]] };\n    g.rows[1].push(4);\n    println(g.rows);\n    mut ts: Team[] = [];\n    ts.push(t);\n    ts.push(Team { names: [\"x\".text(), \"y\".text(), \"w\".text()], lead: 2 });\n    println(\"{} {}\", ts[1].names[2], ts.len());\n    last := ts.pop()!;\n    println(last.names);\n    mut vs: [string; 2][] = [];\n    vs.push([\"p\".text(), \"q\".text()]);\n    vs.push([\"r\".text(), \"s\".text()]);\n    vs.truncate(1);\n    println(\"{} {}\", vs.len(), vs[0][1]);\n    m := Mutex::new([\"m\".text(), \"n\".text()]);\n}\n",
+    "stdout": "b 3\n[\"z\", \"b\", \"c\"]\n[[1], [2, 3, 4]]\nw 2\n[\"x\", \"y\", \"w\"]\n1 q\n"
+  },
+  {
+    "name": "unboxed-inline-errors",
+    "files": [
+      "compiler/tests/unboxed_inline_errors.grl"
+    ],
+    "stdout": "2469137779000 10000\n",
+    "note": "stage 5b: `u64 |? Bad` with a plain-record error is three frame words {tag, payload words}, returned through the result destination, matched and propagated by `?` with no rt_enum"
+  },
+  {
+    "name": "llvm-escaped-multiword-slots",
+    "files": [
+      "tests/llvm/escaped_slots.grl"
+    ],
+    "stdout": "5 5 1\n4 30 0\n363\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native",
+      "llvm"
+    ],
+    "note": "address-taken two- and three-word frame values (an Option from pop(), a record built in a loop) inside lifted functions at different frame layouts: a lifter that gave such a value one-word allocas would write into a neighbour (18e6943's pool::split SIGSEGV); llvm.grl escaped_overreach keeps any body that would, native"
   }
 ]

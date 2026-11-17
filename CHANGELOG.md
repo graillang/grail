@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **Small runtime functions are inlined into every module.** A small runtime body (the scheduler's
+  `rt_current`, `rt_list_set`, `rt_list_head`, ...) is now inlined where another module calls it,
+  in every build shape: a per-module build carries the bodies in `runtime.facts`. A failure inside
+  such a copy reports the calling statement. Measured with callgrind on one worker, against main:
+  a join 3102 -> 3059 instructions, a spawn 1845 -> 1810.
+- **Fixed: a release build of a program that calls C's `memcpy` failed to compile.** The LLVM
+  module defines `memcpy`/`memset`/`memmove` itself, and an `extern "C"` declaration of the same
+  name added a second, conflicting one ("invalid redefinition of function 'memcpy'"); the stdmap DNS
+  and IPv6 cases failed under `GRAIL_BACKEND=llvm`. Those names are no longer declared again.
 - `host::stack_left()`: the bytes left on the current green task's stack above its guard page (0 off
   a task), for recursive code that wants to stop or fork before it overflows.
 - The scheduler's "enough stack left to help" check read the address of a helper's dead local,
@@ -35,6 +44,16 @@
   builds) wrote their `sha256sum` output to one file in the store, and one run could take another's
   digest and file a module under another module's interface ("core.iface describes module `io`").
   Each such command now writes to a directory it claims for itself.
+- Removed: `--assembler=clang`. The internal assembler has been byte-identical to clang through a
+  landing on every target it covers, so Linux x86-64, AArch64 and RISC-V builds always use it and
+  `GRAIL_ASSEMBLER` no longer overrides it there (it still names the C compiler and the assembler
+  for release builds, macOS and Windows).
+- Arrays whose elements own data (`[string; 3]`, `[u64[]; 4]`) can be struct fields and vector
+  elements: held inline and flat like every array, dropped in place with their holder.
+- Fix: stack probes were skipped for every frame since frames also save callee-saved registers
+  (`subq $.F<n>+K,%rsp`); a frame over a page could step over the guard page again. The probe
+  matches that form, covers the K bytes, and the pinned case checks it on every target.
+
 - **C calls with floats are optimised in release builds (call ABI S8a).** A function that called a
   C function with `f64`/`f32` arguments or a float result had to stay unoptimised on the LLVM
   backend (its floats travel in vector registers a lifted call did not carry). The front end now
@@ -56,6 +75,21 @@
   refused, and a reader through a shared reference or a non-`mut` binding gets it as a fact. A name
   that is not a field of the record is still refused at the struct. Strict mode proves literals; a
   single-field write it cannot prove, and says to rebuild the record.
+- **Raw code follows the build's overflow mode, and the release compiler wraps.** Arithmetic in an
+  `unsafe module` used to be checked whatever the build asked for; it now traps in a checked build
+  and wraps in a wrapping one (`--release`, `--overflow=wrap`) like all other code. Code that must
+  wrap says so with `wrapping_*`, as the runtime's address arithmetic does. `tools/native.mjs
+  release` lowers the compiler with `--overflow=wrap`, as every release build does, so the release
+  compiler no longer checks after nearly every address addition. `GRAIL_COMMAND_TIMEOUT` raises
+  tools/native.mjs's per-step time limit on a loaded host.
+- Fixed a silent release miscompile: a two- or three-word value whose address is taken (an `Option`
+  from `pop()`, a small record passed by address) could be lowered by the LLVM backend as separate
+  one-word stack objects when its width fact was missing, so writing its second word overwrote a
+  neighbour - `pool::split` crashed under `--release` on 18e6943. The lifter now checks every access
+  through an address-taken slot against the slot's declared width and keeps a body that reaches
+  past it in native code (`--verify-facts` makes it an error). With that, the thread-pointer reads
+  are lifted again (now with a memory clobber), so `rt_current`, the mutex fast path and the
+  allocator's threaded path are optimised in release builds.
 
 - AArch64 and RV64 native code drops moves that move nothing (call ABI S7): the word machine's
   result register is x9 (t0) and its first argument x0 (a0), and moves go through the scratch x10
@@ -201,8 +235,7 @@
   re-reads the module's assembly (`--object`), and its objects are byte-identical to clang's from the same text
   (`tools/asm-oracle.mjs`; the gate's `asm-oracle` leg checks every corpus program). In the release
   compiler it assembles the syn4000 program's 35 MB of assembly in 0.41 s against clang's 1.37 s,
-  and the self-compile's 119 MB in 1.1 s against 5.2 s. `--assembler=clang` (and `GRAIL_ASSEMBLER`)
-  still choose clang; the flag goes once the oracle has been green through one landing. Debug
+  and the self-compile's 119 MB in 1.1 s against 5.2 s. Debug
   builds go through it too (it writes `.debug_line` from `.file`/`.loc` as LLVM does); the other
   targets still use clang. It lowers the portable atomic operations as it reads them, so an x86
   build no longer rewrites the whole stream for them first. It keeps each object's function units
