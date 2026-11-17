@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **`lib/chan.grl`: a bounded multi-producer multi-consumer channel.** `chan::bounded<T>(n)` with
+  `send` (waits while full; false once closed), `recv` (waits while empty; `None` once closed and
+  empty) and `close`; waits park, as every `sync` wait does. `bench/chan.grl` measures it against
+  crossbeam-channel and Go's chan in `tools/bench-rivals.mjs`.
+
 - Inflate calls its bit refill only when the buffer is short of the bits a symbol or extra field
   needs (a word refill holds 56 or more), instead of on every symbol: the 4K png Grail-LLVM 4.94G ->
   4.66G instructions (0.59 -> 0.53 s; stb_image 0.37 s), Grail-native 16.1G -> 15.1G.

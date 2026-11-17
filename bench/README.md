@@ -47,3 +47,5 @@ records what stands between each backend and C on them.
   contenders; wall and CPU ms. Build and run it directly; numbers in `docs/design/parking.md`.
 - `shard_read.grl`: a read-mostly map behind one `Mutex` and behind one `sync::RwLock`, 24 tasks;
   the measurement behind `concurrent_map`'s shard lock (`docs/design/parking.md`).
+- `chan.grl`: a bounded channel at 1:1, 4:1 and 4:4 and a ping-pong, against crossbeam-channel, Go's
+  chan and mutex+condvar rings in C and Zig; run by `tools/bench-rivals.mjs chan`.
