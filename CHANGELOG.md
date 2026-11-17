@@ -32,6 +32,17 @@
   DashMap's rule - and a value also `Owned`, since `insert` and `remove` hand the old one back. A
   map of a type that is transferable but not shareable is refused with
   `type does not satisfy Share`, naming the type.
+- Fixed (statics, after the merge with unboxed records and the prover rework): a static's
+  initialiser is evaluated in its own module's scope whoever asks for it first, so `PAGE - 1` finds
+  `PAGE` when the interface writer asks at the end of the compile; a baked record is laid out as the
+  record layout now has it (a plain record held in a field inline, a vector of plain records flat)
+  and read through the record's address, which is what a record reference now is.
+
+- **A compile-time probe never starts another probe** (comptime-speed R1). Inside a probe a read of
+  a run-tier value calls a value function the probe defines - a static is computed once on first
+  read behind a guard, a module binding at each read - so N values cost N flat compiles instead of
+  a chain N deep (12 values: 7.6 s; before, never finished). A cycle is a compile error naming every
+  value on it and the path (`main::A -> main::B -> main::A`).
 
 - **`thread::scope`: threads that borrow.** `thread::scope(|t| { a := t.spawn(|| ..); ..; a.join() })`
   starts OS threads whose closures may borrow from the caller - shared or exclusive - because the

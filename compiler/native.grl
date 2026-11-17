@@ -275,6 +275,16 @@ struct Constant {
     value: u64,
     text: u8[]
 }
+// A run-tier value of the program: a module binding `NAME := f(...);` or a static `@f(...)`. Every
+// probe defines a wrapper for each (ct_probe_wrappers), so code the probe compiles reads a value by
+// calling its initialiser instead of starting another probe (docs/design/comptime-speed.md, R1).
+struct CtCall {
+    module: u8[],
+    name: u8[],
+    // The call's source text, unqualified, as written.
+    text: u8[],
+    is_static: u64
+}
 // A module static (docs/design/module-values.md): one object at one address, in the declaring
 // module's object. Stage 1 is the baked tier only - the value is computed while compiling (a
 // constant expression or `@f(...)`) and emitted as read-only data, so a read is an address and
@@ -687,6 +697,7 @@ struct C {
     inherent_types: u64[],
     constants: Constant[],
     statics: Static[],
+    ct_calls: CtCall[],
     // Where a static read parks the result of a call it makes only for its effect.
     static_scratch: u64,
     impl_params: ImplParams[],
@@ -9937,6 +9948,11 @@ fn pv_strict_fail<a, b>(c: (&a mut C), pred: Pred, pos: u64, need: &b [u8]) -> u
     return ();
 }
 fn pv_strict_fail_why<a, b, d>(c: (&a mut C), pred: Pred, pos: u64, need: &b [u8], why: &d [u8]) -> unit {
+    // In a probe a static's value is not known while compiling (it is computed by the probe), so a
+    // proof that needed it is missing there; the check stays, which is all the probe needs.
+    if c.probe_mode != 0 {
+        return ();
+    }
     text := pred_text(&mut c, pred);
     mut facts = Atom[];
     pv_ir_read(&mut c, &mut facts);
@@ -20510,7 +20526,7 @@ fn ct_pending_type<a>(c: (&a mut C), i: u64) -> u64 {
         return NO_TYPE;
     }
     ret := c.funcs[f - 1].ret;
-    if is_bool(&mut c, ret) || (ret == 3) || (ct_seq_elem(&mut c, ret) != NO_TYPE) || integer(&mut c, ret) {
+    if is_bool(&mut c, ret) || (ret == 3) || (ct_seq_elem(&mut c, ret) != NO_TYPE) || integer(&mut c, ret) || static_structured(&mut c, ret) {
         return ret;
     }
     return 0;
@@ -20576,6 +20592,264 @@ fn ct_shell_quote<a>(text: &a [u8]) -> u8[] {
     out.push(39);
     return out;
 }
+// `text` (a call) with `module`'s own names qualified, so the probe module can say it.
+fn ct_qualify<a, b>(c: (&a mut C), module: &b [u8], text: &b [u8]) -> u8[] {
+    toks := lexer::tokenize(text);
+    mut qualified = u8[];
+    mut last_end = 0;
+    for i in toks.len() {
+        tstart := toks[i].start;
+        tend := toks[i].end;
+        tkind := toks[i].kind;
+        for j in last_end..tstart {
+            qualified.push(text[j]);
+        }
+        word := slice_bytes(text, tstart, tend);
+        prev_scope := (i >= 1) && (toks[i - 1].kind == 260);
+        prev_dot := (i >= 1) && (toks[i - 1].kind == 46);
+        next_scope := (i + 1 < toks.len()) && (toks[i + 1].kind == 260);
+        if (tkind == 1) && !prev_scope && !prev_dot && !next_scope && (ct_module_names(&mut c, module, view(word)) != 0) {
+            push_bytes(&mut qualified, module);
+            push_bytes(&mut qualified, view("::"));
+        }
+        push_bytes(&mut qualified, view(word));
+        last_end = tend;
+    }
+    for j in last_end..text.len() {
+        qualified.push(text[j]);
+    }
+    return qualified;
+}
+fn ct_add_use<a>(uses: (&a mut u8[][]), m: &a [u8]) -> unit {
+    for i in uses.len() {
+        if same(view(uses[i]), m) {
+            return ();
+        }
+    }
+    uses.push(copy_bytes(m));
+    return ();
+}
+// A run-tier type spelled so the probe module can write it: records by `module::Name`.
+fn ct_type_src<a>(c: (&a mut C), ty: u64, uses: (&a mut u8[][])) -> u8[] {
+    if (ty == 3) || (ty == 2) || integer(&mut c, ty) || is_bool(&mut c, ty) {
+        return source_type_name(&mut c, ty);
+    }
+    k := ty_kind(&mut c, ty);
+    if k == 6 {
+        mut out = ct_type_src(&mut c, ty_arg(&mut c, ty), &mut uses);
+        push_bytes(&mut out, view("[]"));
+        return out;
+    }
+    if k == 8 {
+        d := ty_arg(&mut c, ty);
+        m := c.decls[d].module.copy();
+        ct_add_use(&mut uses, view(m));
+        mut out = m.copy();
+        push_bytes(&mut out, view("::"));
+        push_bytes(&mut out, view(c.decls[d].name));
+        return out;
+    }
+    return source_type_name(&mut c, ty);
+}
+// The type a run-tier value has: a static's declared type, a binding's call's result type.
+fn ct_call_type<a>(c: (&a mut C), k: u64) -> u64 {
+    m := c.ct_calls[k].module.copy();
+    n := c.ct_calls[k].name.copy();
+    if c.ct_calls[k].is_static != 0 {
+        st := find_static(&mut c, view(m), view(n));
+        if st != 0 {
+            return c.statics[st - 1].ty;
+        }
+        return NO_TYPE;
+    }
+    kc := find_constant(&mut c, view(m), view(n));
+    if kc == 0 {
+        return NO_TYPE;
+    }
+    ty := c.constants[kc - 1].ty;
+    if ty == CT_PENDING {
+        return ct_pending_type(&mut c, kc - 1);
+    }
+    return ty;
+}
+// The result type of the function a run-tier call names (`f(...)` or `m::f(...)` read in `module`),
+// or NO_TYPE when no such function is known.
+fn ct_call_result<a, b>(c: (&a mut C), module: &b [u8], text: &b [u8]) -> u64 {
+    toks := lexer::tokenize(text);
+    if toks.len() == 0 {
+        return NO_TYPE;
+    }
+    mut fmod = copy_bytes(module);
+    mut fname = slice_bytes(text, toks[0].start, toks[0].end);
+    if (toks.len() > 2) && (toks[1].kind == 260) {
+        fmod = fname.copy();
+        fname = slice_bytes(text, toks[2].start, toks[2].end);
+    }
+    f := ct_module_names(&mut c, view(fmod), view(fname));
+    if f == 0 {
+        return NO_TYPE;
+    }
+    return c.funcs[f - 1].ret;
+}
+// The symbol suffix of a run-tier value's probe functions.
+fn ct_value_tag<a>(m: &a [u8], n: &a [u8]) -> u8[] {
+    mut out = copy_bytes(m);
+    push_bytes(&mut out, view("__"));
+    push_bytes(&mut out, n);
+    return out;
+}
+// For every run-tier value of the program, two probe functions: `grail_value__M__N()`, which
+// computes it (announcing itself on stderr, so a cycle can be traced back), and
+// `grail_cycle__M__N()`, which a read reaching it while it is being computed calls before the
+// probe stops. Reads inside a probe call these instead of starting another probe.
+fn ct_probe_wrappers<a>(c: (&a mut C), uses: (&a mut u8[][])) -> u8[] {
+    mut out = u8[];
+    for k in c.ct_calls.len() {
+        ty := ct_call_type(&mut c, k);
+        if !is_type_id(ty) {
+            continue;
+        }
+        m := c.ct_calls[k].module.copy();
+        n := c.ct_calls[k].name.copy();
+        ct_add_use(&mut uses, view(m));
+        tag := ct_value_tag(view(m), view(n));
+        mut key = m.copy();
+        push_bytes(&mut key, view("::"));
+        push_bytes(&mut key, view(n));
+        ctext := c.ct_calls[k].text.copy();
+        if c.ct_calls[k].is_static != 0 {
+            // The wrapper returns the static's declared type, so the call must give exactly it; a
+            // mismatch is the static's own error, reported at it before any probe is written.
+            got := ct_call_result(&mut c, view(m), view(ctext));
+            if is_type_id(got) && (got != ty) {
+                st := find_static(&mut c, view(m), view(n)) - 1;
+                mut msg = copy_bytes(view("static `"));
+                push_bytes(&mut msg, view(n));
+                push_bytes(&mut msg, view("` is declared `"));
+                push_bytes(&mut msg, view(source_type_name(&mut c, ty)));
+                push_bytes(&mut msg, view("`, and `@"));
+                push_bytes(&mut msg, view(ctext));
+                push_bytes(&mut msg, view("` gives `"));
+                push_bytes(&mut msg, view(source_type_name(&mut c, got)));
+                push_bytes(&mut msg, view("`"));
+                sfile := c.statics[st].file;
+                sat := c.statics[st].init_at;
+                fail_in_file(&mut c, sfile, sat, view(msg));
+            }
+        }
+        call := ct_qualify(&mut c, view(m), view(ctext));
+        tsrc := ct_type_src(&mut c, ty, &mut uses);
+        push_bytes(&mut out, view("pub fn grail_value__"));
+        push_bytes(&mut out, view(tag));
+        push_bytes(&mut out, view("() -> "));
+        push_bytes(&mut out, view(tsrc));
+        push_bytes(&mut out, view(" {\n    host::write_fd(2, view(\"@enter "));
+        push_bytes(&mut out, view(key));
+        push_bytes(&mut out, view("\\n\"));\n    v := "));
+        push_bytes(&mut out, view(call));
+        push_bytes(&mut out, view(";\n    host::write_fd(2, view(\"@leave "));
+        push_bytes(&mut out, view(key));
+        push_bytes(&mut out, view("\\n\"));\n    return v;\n}\npub fn grail_cycle__"));
+        push_bytes(&mut out, view(tag));
+        push_bytes(&mut out, view("() -> u64 {\n    host::write_fd(2, view(\"@cycle "));
+        push_bytes(&mut out, view(key));
+        push_bytes(&mut out, view("\\n\"));\n    return 0;\n}\n"));
+    }
+    return out;
+}
+// The probe's stderr without its trace lines: what the runtime itself reported.
+fn ct_trace_report<a>(trace: &a [u8]) -> u8[] {
+    mut out = u8[];
+    mut start = 0;
+    for i in trace.len() + 1 {
+        if (i == trace.len()) || (trace[i] == 10) {
+            if (i > start) && (trace[start] != 64) {
+                for j in start..i {
+                    out.push(trace[j]);
+                }
+                out.push(10);
+            }
+            start = i + 1;
+        }
+    }
+    return out;
+}
+// "`A` and `B` depend on each other while compiling: A -> B -> A", from the trace: the values
+// entered and not yet left, from the one the cycle reached back to.
+fn ct_trace_cycle<a>(trace: &a [u8]) -> u8[] {
+    mut stack = u8[][];
+    mut target = u8[];
+    mut start = 0;
+    for i in trace.len() + 1 {
+        if (i == trace.len()) || (trace[i] == 10) {
+            line := slice_bytes(trace, start, i);
+            if ct_list_has_prefix(view(line), view("@enter ")) {
+                stack.push(slice_bytes(view(line), 7, line.len()));
+            } else if ct_list_has_prefix(view(line), view("@leave ")) {
+                if stack.len() != 0 {
+                    stack.pop()!;
+                }
+            } else if ct_list_has_prefix(view(line), view("@cycle ")) {
+                target = slice_bytes(view(line), 7, line.len());
+            }
+            start = i + 1;
+        }
+    }
+    if target.len() == 0 {
+        return u8[];
+    }
+    mut from = stack.len();
+    for i in stack.len() {
+        if same(view(stack[i]), view(target)) {
+            from = i;
+            break;
+        }
+    }
+    if from == stack.len() {
+        return u8[];
+    }
+    mut path = u8[];
+    mut names = u8[][];
+    for i in from..stack.len() {
+        push_bytes(&mut path, view(stack[i]));
+        push_bytes(&mut path, view(" -> "));
+        ct_add_use(&mut names, view(stack[i]));
+    }
+    push_bytes(&mut path, view(target));
+    mut msg = u8[];
+    if names.len() == 1 {
+        push_bytes(&mut msg, view("`"));
+        push_bytes(&mut msg, view(names[0]));
+        push_bytes(&mut msg, view("` depends on itself while compiling: "));
+    } else {
+        for i in names.len() {
+            if i != 0 {
+                if i + 1 == names.len() {
+                    push_bytes(&mut msg, view(" and "));
+                } else {
+                    push_bytes(&mut msg, view(", "));
+                }
+            }
+            push_bytes(&mut msg, view("`"));
+            push_bytes(&mut msg, view(names[i]));
+            push_bytes(&mut msg, view("`"));
+        }
+        push_bytes(&mut msg, view(" depend on each other while compiling: "));
+    }
+    push_bytes(&mut msg, view(path));
+    return msg;
+}
+fn ct_list_has_prefix<a, b>(text: &a [u8], prefix: &b [u8]) -> bool {
+    if text.len() < prefix.len() {
+        return false;
+    }
+    for i in prefix.len() {
+        if text[i] != prefix[i] {
+            return false;
+        }
+    }
+    return true;
+}
 fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [u8]) -> CTRes {
     // The call's function, for its result type.
     toks := lexer::tokenize(text);
@@ -20624,33 +20898,25 @@ fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [
         se := ct_seq_elem(&mut c, rty);
         elem_signed = (ty_kind(&mut c, se) == 18) && (ty_mode(&mut c, se) != 0);
     }
-    // The probe: this module's names qualified, the value printed.
-    mut qualified = u8[];
-    mut last_end = 0;
-    for i in toks.len() {
-        tstart := toks[i].start;
-        tend := toks[i].end;
-        tkind := toks[i].kind;
-        for j in last_end..tstart {
-            qualified.push(text[j]);
-        }
-        word := slice_bytes(text, tstart, tend);
-        prev_scope := (i >= 1) && (toks[i - 1].kind == 260);
-        prev_dot := (i >= 1) && (toks[i - 1].kind == 46);
-        next_scope := (i + 1 < toks.len()) && (toks[i + 1].kind == 260);
-        if (tkind == 1) && !prev_scope && !prev_dot && !next_scope && (ct_module_names(&mut c, module, view(word)) != 0) {
-            push_bytes(&mut qualified, module);
-            push_bytes(&mut qualified, view("::"));
-        }
-        push_bytes(&mut qualified, view(word));
-        last_end = tend;
+    // The probe: this module's names qualified, the value printed. A named value is read by its
+    // name, so the probe reaches it through the same guarded initialisation every other read does
+    // and a cycle back to it is seen; an `@f()` in an expression is the call itself.
+    mut qualified = ct_qualify(&mut c, module, text);
+    if key.len() != 0 {
+        qualified = copy_bytes(key);
     }
-    for j in last_end..text.len() {
-        qualified.push(text[j]);
+    mut uses = u8[][];
+    uses.push(copy_bytes(module));
+    wrappers := ct_probe_wrappers(&mut c, &mut uses);
+    mut probe = copy_bytes(view("module grail_probe;\n\n"));
+    for u in uses.len() {
+        push_bytes(&mut probe, view("use "));
+        push_bytes(&mut probe, view(uses[u]));
+        push_bytes(&mut probe, view(";\n"));
     }
-    mut probe = copy_bytes(view("module grail_probe;\n\nuse "));
-    push_bytes(&mut probe, module);
-    push_bytes(&mut probe, view(";\n\nfn main() -> u64 {\n    v := "));
+    push_bytes(&mut probe, view("use host;\n\n"));
+    push_bytes(&mut probe, view(wrappers));
+    push_bytes(&mut probe, view("fn main() -> u64 {\n    v := "));
     push_bytes(&mut probe, view(qualified));
     if rty == 3 {
         push_bytes(&mut probe, view(";\n    print(v);\n    return 0;\n}\n"));
@@ -20785,15 +21051,30 @@ fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [
         push_bytes(&mut run, view(ct_shell_quote(view(probe_exe))));
         push_bytes(&mut run, view(" > "));
         push_bytes(&mut run, view(ct_shell_quote(view(value_tmp))));
+        // The probe's stderr carries its trace (`@enter`/`@leave`/`@cycle` lines from the value
+        // functions) and, on a failure, the runtime's report; both are read back below.
+        err_tmp := path_cat(view(path_cat(view(dir), view(tag))), view(".err"));
+        push_bytes(&mut run, view(" 2> "));
+        push_bytes(&mut run, view(ct_shell_quote(view(err_tmp))));
         mut sh2 = u8[][copy_bytes(view("sh")), copy_bytes(view("-c")), run];
         status := host::command(sh2);
         if status != 0 {
+            trace := host::read_file(view(err_tmp));
+            report := ct_trace_report(view(trace));
+            if report.len() != 0 {
+                host::write_fd(2, view(report));
+            }
             mut msg = copy_bytes(view("compile-time call `"));
             push_bytes(&mut msg, text);
             if status == 124 {
                 push_bytes(&mut msg, view("` ran past the 30 s limit"));
             } else if status == 4 {
-                push_bytes(&mut msg, view("` reads a constant that is still being computed: the constants depend on each other in a cycle"));
+                cycle := ct_trace_cycle(view(trace));
+                if cycle.len() != 0 {
+                    msg = cycle;
+                } else {
+                    push_bytes(&mut msg, view("` reads a constant that is still being computed: the constants depend on each other in a cycle"));
+                }
             } else {
                 push_bytes(&mut msg, view("` aborted (exit "));
                 decimal(&mut msg, status);
@@ -20803,7 +21084,7 @@ fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [
         }
         mut mv = u8[][copy_bytes(view("mv")), copy_bytes(view("-f")), value_tmp.copy(), out_path.copy()];
         host::command(mv);
-        mut tidy = u8[][copy_bytes(view("rm")), copy_bytes(view("-f")), probe_src.copy(), probe_s.copy(), probe_exe.copy()];
+        mut tidy = u8[][copy_bytes(view("rm")), copy_bytes(view("-f")), probe_src.copy(), probe_s.copy(), probe_exe.copy(), err_tmp.copy()];
         host::command(tidy);
     }
     printed := host::read_file(view(out_path));
@@ -21003,6 +21284,7 @@ fn module_binding<a>(c: (&a mut C), pass: u64) -> unit {
         // used - by then every function's signature is known - by compiling and running a probe.
         text = ct_take_call_text(&mut c);
         expect(&mut c, view(";"));
+        c.ct_calls.push(CtCall { module: module.copy(), name: name.copy(), text: text.copy(), is_static: 0 });
         constant_public := c.decl_public;
         c.constants.push(Constant { module: module, name: name, declared_at: declared, file: c.file, at: at_name,  public: constant_public, ty: CT_PENDING, value: 0, text: text });
         return ();
@@ -21151,33 +21433,28 @@ fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
 }
 fn constant_value<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> Val {
     if c.probe_mode != 0 {
-        // In a probe, a constant still being evaluated cannot be known; reading it is a cycle only
-        // if the probed call gets there, so the read becomes a run-time stop the runner reports.
-        mut key = copy_bytes(module);
-        push_bytes(&mut key, view("::"));
-        push_bytes(&mut key, name);
-        pending := host::env(view("GRAIL_COMPTIME_PENDING"));
-        if ct_list_has(view(pending), view(key)) {
-            for i in c.constants.len() {
-                if same(view(c.constants[i].module), module) && same(view(c.constants[i].name), name) {
-                    slot := invoke(&mut c, view("rt_comptime_cycle"), u64[]);
-                    pty := ct_pending_type(&mut c, i);
-                    if pty == 3 {
-                        // Never reached at run time (the call above exits); a real string keeps the
-                        // ownership checker's view of the program whole.
-                        empty := u8[];
-                        return string_from_bytes(&mut c, &empty);
+        // In a probe a module binding the probe has not been told is computed where it is read,
+        // by the value function the probe defines - never by another probe.
+        for i in c.constants.len() {
+            if same(view(c.constants[i].module), module) && same(view(c.constants[i].name), name) && (c.constants[i].ty == CT_PENDING) {
+                pty := ct_pending_type(&mut c, i);
+                if is_type_id(pty) {
+                    if c.constants[i].public == 0 {
+                        home := c.constants[i].module.copy();
+                        require_visible(&mut c, view(home), name);
                     }
-                    if (pty != 0) && (ct_seq_elem(&mut c, pty) != NO_TYPE) {
-                        fresh := invoke(&mut c, view("rt_new"), u64[]);
-                        return own(&mut c, fresh, pty);
+                    t := static_probe_init(&mut c, module, name, view(""), 0);
+                    if (pty == 3) || (pty == 2) || ((pty != 0) && (ct_seq_elem(&mut c, pty) != NO_TYPE)) || static_structured(&mut c, pty) {
+                        return own(&mut c, t, pty);
                     }
-                    return val(slot, pty);
+                    return val(t, pty);
                 }
             }
         }
     }
-    resolve_pending_named(&mut c, module, name);
+    if c.probe_mode == 0 {
+        resolve_pending_named(&mut c, module, name);
+    }
     for i in c.constants.len() {
         k := &c.constants[i];
         if same(view(k.module), view(module)) & same(view(k.name), view(name)) {
@@ -21263,6 +21540,65 @@ fn static_pending_here<a, b>(m: &a [u8], n: &b [u8]) -> bool {
     pending := host::env(view("GRAIL_COMPTIME_PENDING"));
     return ct_list_has(view(pending), view(key));
 }
+fn static_guard_symbol<a, b>(m: &a [u8], n: &b [u8]) -> u8[] {
+    mut out = copy_bytes(view("g_"));
+    push_bytes(&mut out, m);
+    out.push(95);
+    push_bytes(&mut out, n);
+    return out;
+}
+// Inside a probe, the code a read of run-tier value `m::n` runs first: for a static (`memo` 1) its
+// guard says whether it is done; if not, the value function the probe defines computes it into
+// the static's word. For a module binding (`memo` 0) the value is computed at every read, as a
+// constant is a value at every use, and the guard only marks "being computed". A read that finds
+// it being computed is a cycle: the probe says which (grail_cycle__) and stops.
+fn static_probe_init<a, b, d, e>(c: (&a mut C), m: &b [u8], n: &d [u8], sym: &e [u8], memo: u64) -> u64 {
+    guard := static_guard_symbol(m, n);
+    tag := ct_value_tag(m, n);
+    mut value_fn = copy_bytes(view("grail_value__"));
+    push_bytes(&mut value_fn, view(tag));
+    mut cycle_fn = copy_bytes(view("grail_cycle__"));
+    push_bytes(&mut cycle_fn, view(tag));
+    value_sym := mangle_name(&mut c, view("grail_probe"), view(value_fn));
+    cycle_sym := mangle_name(&mut c, view("grail_probe"), view(cycle_fn));
+    done := label(&mut c);
+    start := label(&mut c);
+    if memo == 0 {
+        o(&mut c, view(".comm "));
+        o(&mut c, view(guard));
+        o(&mut c, view(",8,8\n"));
+    }
+    o(&mut c, view("movq "));
+    o(&mut c, view(guard));
+    o(&mut c, view("(%rip),%rax\n"));
+    if memo != 0 {
+        o(&mut c, view("cmpq $2,%rax\n"));
+        jump(&mut c, view("je"), done);
+    }
+    o(&mut c, view("cmpq $1,%rax\n"));
+    jump(&mut c, view("jne"), start);
+    said := invoke(&mut c, view(cycle_sym), u64[]);
+    exchange(&mut c.static_scratch, said);
+    stop := invoke(&mut c, view("rt_comptime_cycle"), u64[]);
+    exchange(&mut c.static_scratch, stop);
+    mark(&mut c, start);
+    o(&mut c, view("movq $1,"));
+    o(&mut c, view(guard));
+    o(&mut c, view("(%rip)\n"));
+    t := invoke(&mut c, view(value_sym), u64[]);
+    if memo != 0 {
+        get(&mut c, t, view("%rax"));
+        o(&mut c, view("movq %rax,"));
+        o(&mut c, view(sym));
+        o(&mut c, view("(%rip)\nmovq $2,"));
+    } else {
+        o(&mut c, view("movq $0,"));
+    }
+    o(&mut c, view(guard));
+    o(&mut c, view("(%rip)\n"));
+    mark(&mut c, done);
+    return t;
+}
 // A read of `m::n`, or a value with type NO_TYPE when no static has that name. A scalar is loaded
 // (a copy of the word); anything else is a shared borrow of the object, whose target is storage
 // outside every frame - the same external place a borrowed parameter's referent is.
@@ -21279,12 +21615,13 @@ fn static_value<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> Val {
     if !is_type_id(ty) {
         fail(&mut c, view("internal: a static is read before its type is known"));
     }
-    if (c.probe_mode != 0) && static_pending_here(module, name) {
-        // The probe computing this static reached a read of it: a cycle, reported by the runner.
-        stop := invoke(&mut c, view("rt_comptime_cycle"), u64[]);
-        exchange(&mut c.static_scratch, stop);
-    }
     sym := static_symbol(&mut c, module, name);
+    if c.probe_mode != 0 {
+        static_resolve(&mut c, k - 1);
+        if (c.statics[k - 1].state == 2) && (c.statics[k - 1].ready == 0) {
+            static_probe_init(&mut c, module, name, view(sym), 1);
+        }
+    }
     o(&mut c, view("leaq "));
     o(&mut c, view(sym));
     o(&mut c, view("(%rip),%rax\n"));
@@ -21293,7 +21630,9 @@ fn static_value<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> Val {
         word := save(&mut c);
         return val(word, ty);
     }
-    slot := save(&mut c);
+    // The word's address; a record's reference is the record's own address (word_reference).
+    mut slot = save(&mut c);
+    slot = word_reference(&mut c, slot, ty);
     rty := reference_type(&mut c, ty, 0);
     own(&mut c, slot, rty);
     if c.raw == 0 {
@@ -21511,20 +21850,26 @@ fn static_bake<a>(c: (&a mut C), ty: u64, text: &a [u8], at: (&a mut u64), is_la
             }
             return static_seq_object(&mut c, &bytes, n);
         }
-        // Elements that are objects themselves: each is emitted first, then the word table.
+        // Elements that are objects themselves: each is emitted first, then the word table. A
+        // vector of plain records holds its elements' words inline instead (flat_bytes).
         mut words = u64[];
         mut kinds = u64[];
+        flat := (ty_kind(&mut c, base_type(&mut c, elem)) == 8) && plain(&mut c, elem);
         for j in n {
-            mut flag = 0;
-            w := static_bake(&mut c, elem, text, &mut at, &mut flag);
-            words.push(w);
-            kinds.push(flag);
+            if flat {
+                static_bake_fields(&mut c, base_type(&mut c, elem), text, &mut at, &mut words, &mut kinds);
+            } else {
+                mut flag = 0;
+                w := static_bake(&mut c, elem, text, &mut at, &mut flag);
+                words.push(w);
+                kinds.push(flag);
+            }
         }
         data := label(&mut c);
         obj := label(&mut c);
         o(&mut c, view(".p2align 4\n.quad 0\n.quad 2\n"));
         mark(&mut c, data);
-        for j in n {
+        for j in words.len() {
             static_quad_label(&mut c, words[j], kinds[j]);
         }
         o(&mut c, view(".quad 0\n.p2align 4\n.quad 0\n.quad 2\n"));
@@ -21538,29 +21883,40 @@ fn static_bake<a>(c: (&a mut C), ty: u64, text: &a [u8], at: (&a mut u64), is_la
         c.out.push(10);
         return obj;
     }
-    // A record: one word per field, as rt_rec lays it out.
-    d := ty_arg(&mut c, ty);
-    first := c.decls[d].first;
-    count := c.decls[d].count;
+    // A record: its words as the record's layout has them (field_layout) - a word per field, and a
+    // plain record held in a field laid inline in its parent's words.
     mut words = u64[];
     mut kinds = u64[];
-    for j in count {
-        mut flag = 0;
-        fty := c.fields[first + j].ty;
-        w := static_bake(&mut c, fty, text, &mut at, &mut flag);
-        words.push(w);
-        kinds.push(flag);
-    }
+    static_bake_fields(&mut c, ty, text, &mut at, &mut words, &mut kinds);
     rec := label(&mut c);
     o(&mut c, view(".p2align 4\n.quad 0\n.quad 2\n"));
     mark(&mut c, rec);
-    for j in count {
+    for j in words.len() {
         static_quad_label(&mut c, words[j], kinds[j]);
     }
-    if count == 0 {
+    if words.len() == 0 {
         o(&mut c, view(".quad 0\n"));
     }
     return rec;
+}
+// The words of record `ty`, read from the flat form, appended to `words` (with `kinds` saying
+// which are labels): a plain record held in a field contributes its own words in place.
+fn static_bake_fields<a>(c: (&a mut C), ty: u64, text: &a [u8], at: (&a mut u64), words: (&a mut u64[]), kinds: (&a mut u64[])) -> unit {
+    d := ty_arg(&mut c, ty);
+    first := c.decls[d].first;
+    count := c.decls[d].count;
+    for j in count {
+        fty := c.fields[first + j].ty;
+        if inline_field(&mut c, ty, j) {
+            static_bake_fields(&mut c, base_type(&mut c, fty), text, &mut at, &mut words, &mut kinds);
+        } else {
+            mut flag = 0;
+            w := static_bake(&mut c, fty, text, &mut at, &mut flag);
+            words.push(w);
+            kinds.push(flag);
+        }
+    }
+    return ();
 }
 
 fn static_refuse<a, b>(c: (&a mut C), at: u64, msg: &b [u8]) -> unit {
@@ -21625,6 +21981,22 @@ fn static_emit<a, b>(c: (&a mut C), i: u64, ready: u64, value: u64, text: &b [u8
     unit := unit_module(&mut c, view(module));
     part(&mut c, view(unit));
     sym := static_symbol(&mut c, view(module), view(name));
+    if ready == 0 {
+        // A probe's run-tier static: a writable word the first read fills, and its guard
+        // (0 not started, 1 being computed, 2 done).
+        o(&mut c, view(".pushsection .data\n.p2align 3\n.globl "));
+        o(&mut c, view(sym));
+        o(&mut c, view("\n"));
+        o(&mut c, view(sym));
+        o(&mut c, view(":\n.quad 0\n"));
+        guard := static_guard_symbol(view(module), view(name));
+        o(&mut c, view(".globl "));
+        o(&mut c, view(guard));
+        o(&mut c, view("\n"));
+        o(&mut c, view(guard));
+        o(&mut c, view(":\n.quad 0\n.popsection\n"));
+        return ();
+    }
     if c.plat == 1 {
         o(&mut c, view(".pushsection __DATA,__const\n"));
     } else {
@@ -21857,6 +22229,14 @@ fn static_declaration<a>(c: (&a mut C), pass: u64) -> unit {
             fail(&mut c, view("a static needs an initialiser: `static NAME: T = value;`"));
         }
         exchange(&mut c.statics[i].init_at, c.pos + 1);
+        if kind_at(&mut c, c.pos + 1) == 64 {
+            advance(&mut c);
+            advance(&mut c);
+            if ct_call_ahead(&mut c) {
+                call := ct_take_call_text(&mut c);
+                c.ct_calls.push(CtCall { module: module.copy(), name: name.copy(), text: call, is_static: 1 });
+            }
+        }
         static_skip_item(&mut c);
         return ();
     }
@@ -21884,6 +22264,10 @@ fn static_resolve<a>(c: (&a mut C), i: u64) -> unit {
         exchange(&mut c.file, file);
     }
     module := c.statics[i].module.copy();
+    // The initialiser's names are its module's: a constant it reads (`PAGE - 1`) is looked up in
+    // the static's module, whoever asks for the value - the interface writer runs after the last
+    // module has been read, so the current module is then someone else's.
+    saved_module := exchange(&mut c.module, module.copy());
     name := c.statics[i].name.copy();
     ty := c.statics[i].ty;
     at_name := c.statics[i].at;
@@ -21904,7 +22288,9 @@ fn static_resolve<a>(c: (&a mut C), i: u64) -> unit {
         mut key = module.copy();
         push_bytes(&mut key, view("::"));
         push_bytes(&mut key, view(name));
-        if (c.probe_mode != 0) && static_pending_here(view(module), view(name)) {
+        if c.probe_mode != 0 {
+            // Inside a probe a run-tier static is computed by the probe itself, on first read
+            // (static_value): no probe starts another.
             ready = 0;
         } else {
             exchange(&mut c.pos, init);
@@ -21981,6 +22367,7 @@ fn static_resolve<a>(c: (&a mut C), i: u64) -> unit {
     exchange(&mut c.statics[i].text, text);
     exchange(&mut c.statics[i].ready, ready);
     exchange(&mut c.statics[i].state, 2);
+    exchange(&mut c.module, saved_module);
     if file != saved_file {
         load_file(&mut c, saved_file);
         exchange(&mut c.file, saved_file);
@@ -50075,6 +50462,7 @@ pub fn main() -> u64 {
         inherent_types: u64[],
         constants: Constant[],
         statics: Static[],
+        ct_calls: CtCall[],
         static_scratch: 0,
         impl_params: ImplParams[],
         receiver: 0,
@@ -50935,7 +51323,11 @@ pub fn main() -> u64 {
     // Every body is emitted: the effect claims are settled over the whole call graph.
     jobs::phase(view("drops-vtables"));
     fx_solve(&mut c);
-    fx_report(&mut c);
+    // A probe is not the program: its job is to run initialisers, and a body it compiles may read a
+    // value through a lazy initialiser the program itself never calls. Claims are the program's.
+    if c.probe_mode == 0 {
+        fx_report(&mut c);
+    }
     iface_emit_facts(&mut c);
     if c.skip_bodies.len() != 0 {
         // Every error this compile has is reported; the program is still rejected, and nothing it
@@ -51080,7 +51472,10 @@ pub fn main() -> u64 {
     }
     // The leak check: balanced -> return, a leak -> abort, a leak after a contained task failure ->
     // a note on fd 2 and a normal exit (rt_leak_exit; see task-failure-containment.md).
-    o(&mut c, view("call rt_leak_exit\n"));
+    if c.probe_mode == 0 {
+        // A probe keeps the values it built on purpose (statics initialised lazily inside it).
+        o(&mut c, view("call rt_leak_exit\n"));
+    }
     o(&mut c, view("call rt_shutdown\n"));
     emit_exit(&mut c, view("movq %r14,%rdi\n"));
     if c.target == 3 {
