@@ -1,5 +1,18 @@
 ## Unreleased
 
+- **Native backend: a slice's `data` and `len` live in registers.** The type facts are recorded on
+  the native path too, and the optimiser reads F1's slice-descriptor fact: a slice written once at
+  the top of a function keeps its data pointer and length in two callee-saved registers, so a
+  checked access is `cmpq %rL,%rsi; jb` and an indexed load (`movq (%rD,%rsi,8),%rax`), and
+  `n := x.len()` is the length's register. A failed check still names the index and the length
+  (`rt_trap` kind 64; `slice-hoisted-len-index-message`). With it: `movl`/`movb` are known
+  instructions (they were barriers across which every register was live); a float slot is found
+  through the temporaries the front end copies results through; a float held in a register across a
+  drop helper call is saved around it; and the type facts of a frame slot are looked up under the
+  table's own numbering (`-8(k+1)(%rbp)` is slot k), which the typed IR had off by one.
+  Instructions per element against scalar C: xform_f32 8.7x -> 6.9x, xform_f64 7.1x -> 5.6x,
+  dot_f32 10.8x -> 8.9x, dot_f64 8.6x -> 6.7x, matmul 12.4x -> 11.4x.
+
 - **`grail build --release`** (and `grail run --release`, a project's `grail test --release`):
   every module is compiled by the LLVM backend and its LLVM module optimised by `clang -O2`, per
   module through the build store as before, and integer overflow wraps unless `--overflow=` says

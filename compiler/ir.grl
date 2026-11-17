@@ -223,6 +223,14 @@ pub fn call_args<b>(s: &b [u8], a: u64, e: u64) -> u64 {
     return 0;
 }
 pub fn float_opcode<b>(s: &b [u8], a: u64, space: u64) -> u64 {
+    // The narrow moves the front end writes for 4-byte and byte elements: before they had numbers
+    // they were unknown instructions, across which every register was live.
+    if same_range(view(s), a, space, view("movl")) {
+        return 98;
+    }
+    if same_range(view(s), a, space, view("movb")) {
+        return 99;
+    }
     if same_range(view(s), a, space, view("addsd")) {
         return 60;
     }
@@ -275,6 +283,12 @@ pub fn float_opcode<b>(s: &b [u8], a: u64, space: u64) -> u64 {
         return 76;
     }
     return 0;
+}
+// The element accessors 40, 41, 44, 49, 51, 47, 48, 50 with the slice's `data` and `len` in the
+// registers operands 0 and 1 name instead of read through the descriptor in rdi (90..97, in that
+// order; optimize.grl `desc_choose`).
+pub fn is_desc_op(op: u64) -> bool {
+    return (89 < op) && (op < 98);
 }
 pub fn is_float_op(op: u64) -> bool {
     return (59 < op) && (op < 77);
@@ -926,6 +940,13 @@ pub fn parse<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) {
     // A float instruction is understood only in the shapes the front end writes: no frame slot, and a
     // register destination (an SSE register, or a general one for the conversions to integer).
     // Anything else - a memory destination above all, which would be a store - stays unknown.
+    if (op == 98) || (op == 99) {
+        n := o.k0.len() - 1;
+        if (o.k0[n] == 2) || (o.k1[n] == 2) {
+            last := o.op.len() - 1;
+            exchange(&mut o.op[last], 0);
+        }
+    }
     if is_float_op(op) {
         n := o.k0.len() - 1;
         if (o.k0[n] == 2) || (o.k1[n] == 2) || ((o.k1[n] != 1) && (o.k1[n] != 6)) {
@@ -1109,6 +1130,14 @@ pub fn reads<a>(o: (&a Body), i: u64) -> u64 {
     if op == 42 {
         return 128;
     }
+    if (op == 98) || (op == 99) {
+        // movl / movb: the source, and the registers of a memory destination's address.
+        return src | dst_address(&o, i);
+    }
+    if is_desc_op(op) {
+        // The index in rsi and the hoisted data and len registers the operands name.
+        return 64 | src | dst;
+    }
     if is_float_op(op) {
         // movd, cvttsd2si, cvtsi2sdq: the destination is written, not read.
         if (op == 69) || (op == 70) || (op == 71) {
@@ -1147,6 +1176,12 @@ pub fn writes<a>(o: (&a Body), i: u64) -> u64 {
     }
     if (46 < op) & (op < 53) {
         return 1;
+    }
+    if is_desc_op(op) {
+        return 1;
+    }
+    if (op == 98) || (op == 99) {
+        return dst_writes(&o, i);
     }
     if is_float_op(op) {
         if (op == 69) || (op == 70) {
@@ -1419,6 +1454,14 @@ pub fn facts_digest<a, b, c>(ix: (&a FactIndex), facts: (&b llvm::Facts), name: 
     }
     return total;
 }
+// The type fact of the frame word `-8n(%rbp)` (n = N/8, as the optimiser numbers slots): the table
+// files it as slot n - 1, since its slot k covers [-8(k+1), -8k) (llvm.grl `slot_needle`).
+pub fn frame_fact<a, b, c>(ix: (&a FactIndex), facts: (&b llvm::Facts), name: &c [u8], n: u64) -> u64 {
+    if n == 0 {
+        return 0;
+    }
+    return slot_fact(ix, facts, name, n - 1);
+}
 // The slot's type fact from the index: `(what << 8) | width` in the table's own encodings, or 0.
 fn slot_fact<a, b, c>(ix: (&a FactIndex), facts: (&b llvm::Facts), name: &c [u8], slot: u64) -> u64 {
     if ix.count == 0 {
@@ -1635,9 +1678,7 @@ fn slot_ty<a, b, c, d>(o: (&a Body), facts: (&b llvm::Facts), ix: (&d FactIndex)
     mut t: u64 = 0;
     mut width: u64 = 1;
     if slot != 0 {
-        // The table files a slot under the same number the stream spells in `-N(%rbp)`: the
-        // `--verify-facts` dump reads `slot 4` for the `-32(%rbp)` frame word.
-        k := slot_fact(ix, facts, view(o.name), slot);
+        k := frame_fact(ix, facts, view(o.name), slot);
         if k != 0 {
             t = ty_of_what(k >> 8);
             width = width_of_what(k >> 8, 1);
