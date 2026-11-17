@@ -4,6 +4,8 @@
   7, so a stable vector whose slot number matched an indirect call's ordinal (with a loop head
   label of 6 or less) could make the lifter pass that call too few arguments. The stability fact
   is now kind 8.
+- docs: `docs/design/ctfe.md` - an in-compiler evaluator over checked IR for compile-time values (design only).
+
 - **R4: a compile-time probe compiles only what its values reach.** Before the bodies, a probe walks
   the bodies its value functions reach, name by name (a call, a method, a generic's template), and
   compiles only those; one that makes a closure or names `dyn` compiles the whole program, and a link
