@@ -1,5 +1,11 @@
 ## Unreleased
 
+- Fixed: the release compiler could be built by an older release compiler's LLVM backend and
+  accepted although it miscompiled its own assembler (programs printed stray zero bytes). The
+  release build now always lowers with the current native compiler, and accepts the result only
+  when it compiles the compiler to the same text and the same objects as the native build and its
+  programs pass a corpus slice (hello, strings, alloc, thread, sched).
+
 - The internal assembler takes `.previous`.
 
 - **Text costs less to build and parse.** A string literal is checked to be UTF-8 while compiling,
