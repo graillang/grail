@@ -1,5 +1,10 @@
 ## Unreleased
 
+- Parallel loops over several columns: `parallel_for_zip(grain, f, s1, .., s4)` and
+  `pool::zip2/zip3/zip4` with generic callable bounds (simd-layout-parallel-loops.md 4.2). One split,
+  the same index range of every slice per piece, equal lengths checked once, a piece per worker;
+  same-vector-twice, captured arguments and `FnMut` callbacks are the ordinary refusals.
+
 - `left, right := split_at_mut(s, mid)`: two exclusive halves of one slice, usable at once
   (simd-layout-parallel-loops.md 4.3). The borrow checker gains sibling loan groups - halves of one
   split never conflict with each other or with what is reborrowed from them - and nothing about
