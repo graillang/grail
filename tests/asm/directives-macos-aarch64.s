@@ -35,3 +35,13 @@ _rt_state: .space 4096
 .p2align 4
 _tail:
 ret
+.pushsection __TEXT,__cstring
+Ls1:
+.asciz "grain > 0"
+.popsection
+.data
+.p2align 3
+_d1: .quad _main
+.text
+_after_data:
+ret

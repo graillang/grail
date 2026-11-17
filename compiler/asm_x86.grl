@@ -48,6 +48,18 @@ pub struct A {
     // start symbol (ltmpN) per section, `.build_version`'s minimum OS version.
     macho: u64,
     macho_minos: u64,
+    // Mach-O compact unwind: the open frame's state (`cfi_open`, its CFA register - 31 sp, 29 fp -
+    // and offset, the saved registers and their CFA offsets) and, per closed frame, its start and
+    // end labels and encoding.
+    cfi_open: u64,
+    cfi_reg: u64,
+    cfi_off: u64,
+    cfi_saved: u64[],
+    cfi_at: u64[],
+    cfi_start_sym: u64,
+    cu_start: u64[],
+    cu_end: u64[],
+    cu_enc: u64[],
     // `.def NAME` ... `.endef`: the symbol being described (index + 1), and each symbol's COFF
     // storage class (0: from its binding) and type.
     def_sym: u64,
@@ -416,6 +428,11 @@ fn directives<a>(o: (&a mut A)) {
     def(&mut o, view(".4byte"), D_4BYTE);
     def(&mut o, view(".previous"), D_PREVIOUS);
     def(&mut o, view(".size"), D_SIZE);
+    def(&mut o, view(".cfi_startproc"), D_CFI_STARTPROC);
+    def(&mut o, view(".cfi_endproc"), D_CFI_ENDPROC);
+    def(&mut o, view(".cfi_def_cfa"), D_CFI_DEF_CFA);
+    def(&mut o, view(".cfi_def_cfa_offset"), D_CFI_DEF_CFA_OFFSET);
+    def(&mut o, view(".cfi_offset"), D_CFI_OFFSET);
     def(&mut o, view(".build_version"), D_BUILD_VERSION);
     def(&mut o, view(".weak_definition"), D_WEAK_DEFINITION);
     def(&mut o, view(".space"), D_ZERO);
@@ -464,6 +481,15 @@ pub fn new() -> A {
         coff: 0,
         macho: 0,
         macho_minos: 0,
+        cfi_open: 0,
+        cfi_reg: 31,
+        cfi_off: 0,
+        cfi_saved: u64[],
+        cfi_at: u64[],
+        cfi_start_sym: 0,
+        cu_start: u64[],
+        cu_end: u64[],
+        cu_enc: u64[],
         def_sym: 0,
         seh_sym: u64[],
         seh_pos: u64[],
@@ -1464,6 +1490,13 @@ fn directive<a>(o: (&a mut A), id: u64) {
                 o.buf.push(0);
             }
         }
+    } else if (id == D_BSS) && (o.macho != 0) {
+        // Mach-O spells the ELF shorthands as segment,section.
+        b := view("__DATA,__bss");
+        section(&mut o, b, 0, b.len(), 8, 3, 1);
+    } else if (id == D_DATA) && (o.macho != 0) {
+        d := view("__DATA,__data");
+        section(&mut o, d, 0, d.len(), 1, 3, 1);
     } else if id == D_BSS {
         b := view(".bss");
         named_section(&mut o, b, 0, b.len());
@@ -1556,6 +1589,8 @@ fn directive<a>(o: (&a mut A), id: u64) {
         o.def_log.push(end);
         o.sz_sym.push(sym);
         o.sz_end.push(end);
+    } else if (id >= D_CFI_STARTPROC) && (id <= D_CFI_OFFSET) {
+        cfi_directive(&mut o, id);
     } else if id == D_BUILD_VERSION {
         // `.build_version macos, MAJOR, MINOR[, PATCH]`
         skip(&mut o);
@@ -2270,6 +2305,9 @@ fn run<a>(o: (&a mut A)) -> Result {
 fn finish<a>(o: (&a mut A)) -> Result {
     n := o.src.len();
     chunk_finish(&mut o, n);
+    if (o.macho != 0) && (o.cu_start.len() != 0) && (o.err.len() == 0) {
+        compact_unwind(&mut o);
+    }
     // Every section's bytes back in its slot.
     last := exchange(&mut o.buf, u8[]);
     exchange(&mut o.sec_data[o.cur], last);
@@ -2888,6 +2926,11 @@ const D_BUILD_VERSION: u64 = 49;
 const D_WEAK_DEFINITION: u64 = 50;
 const D_SUBSECTIONS: u64 = 51;
 const D_SIZE: u64 = 52;
+const D_CFI_STARTPROC: u64 = 53;
+const D_CFI_ENDPROC: u64 = 54;
+const D_CFI_DEF_CFA: u64 = 55;
+const D_CFI_DEF_CFA_OFFSET: u64 = 56;
+const D_CFI_OFFSET: u64 = 57;
 const I_MOVQ: u64 = 100;
 const I_MOVL: u64 = 101;
 const I_MOVB: u64 = 102;
@@ -5650,7 +5693,7 @@ fn macho_section_line<a>(o: (&a mut A)) {
     name := o.src[a0: e].copy();
     mut ty = 1;
     mut flags = 2;
-    if at_word(view(name), 0, name.len(), view("__DATA,__bss")) || at_word(view(name), 0, name.len(), view("__DATA,__common")) {
+    if at_word(view(name), 0, name.len(), view("__DATA,__bss")) || at_word(view(name), 0, name.len(), view("__DATA,__common")) || at_word(view(name), 0, name.len(), view("__DATA,__thread_bss")) {
         ty = 8;
         flags = 3;
     } else if at_word(view(name), 0, 6, view("__DATA")) {
@@ -5670,6 +5713,18 @@ fn macho_type(kind: u64) -> u64 {
     }
     if kind == asm_a64::fx_lo12() {
         return 4;
+    }
+    if kind == asm_a64::fx_got_page() {
+        return 5;
+    }
+    if kind == asm_a64::fx_got_lo12() {
+        return 6;
+    }
+    if kind == asm_a64::fx_tlv_page() {
+        return 8;
+    }
+    if kind == asm_a64::fx_tlv_lo12() {
+        return 9;
     }
     return 0;
 }
@@ -5695,9 +5750,9 @@ fn macho_fixup<a, c>(o: (&a mut A), i: u64, r_sec: (&c mut u64[]), r_off: (&c mu
         return ();
     }
     defined := o.sym_sec[sym] != 0;
-    // A `.weak_definition` that is not `.globl` is still local to the object: LLVM resolves a
-    // branch to it in place.
-    local := o.sym_bind[sym] == 0;
+    // Without `.subsections_via_symbols` a branch within a section is resolved in place (LLVM's
+    // MachO rule), except to a global weak definition, which the linker may replace.
+    local := !((o.sym_bind[sym] != 0) && (o.sym_class[sym] == 0x80));
     branch := (kind == asm_a64::fx_call26()) || (kind == asm_a64::fx_jump26()) || (kind == asm_a64::fx_cond19()) || (kind == asm_a64::fx_adr21());
     if branch && defined && local && (o.sym_sec[sym] == sec + 1) {
         delta := wrapping_sub(wrapping_add(o.sym_pos[sym], add), at);
@@ -5707,7 +5762,8 @@ fn macho_fixup<a, c>(o: (&a mut A), i: u64, r_sec: (&c mut u64[]), r_off: (&c mu
     }
     mut target = sym;
     mut addend = add;
-    if defined && temporary(&o, sym) {
+    got := (kind == asm_a64::fx_got_page()) || (kind == asm_a64::fx_got_lo12()) || (kind == asm_a64::fx_tlv_page()) || (kind == asm_a64::fx_tlv_lo12());
+    if defined && temporary(&o, sym) && !got {
         target = o.sec_sym[o.sym_sec[sym] - 1];
         addend = wrapping_add(add, o.sym_pos[sym]);
     }
@@ -5762,7 +5818,8 @@ fn sort_by_name<a>(o: (&a A), ids: (&mut u64[])) {
 fn macho_object<a, c>(o: (&a mut A), r_sec: (&c u64[]), r_off: (&c u64[]), r_type: (&c u64[]), r_sym: (&c u64[]), r_add: (&c u64[])) -> u8[] {
     mut out = macho::new(0x100000c);
     out.minos = o.macho_minos;
-    // Header order: sections in creation order, zerofill ones last; addresses one after another.
+    // Headers in creation order; addresses laid out with zerofill sections after every other one
+    // (LLVM's MachObjectWriter).
     mut order = u64[];
     for k in o.sec_name.len() {
         if o.sec_type[k] != 8 {
@@ -5776,24 +5833,29 @@ fn macho_object<a, c>(o: (&a mut A), r_sec: (&c u64[]), r_off: (&c u64[]), r_typ
     }
     mut hdr = u64[];
     mut addr = u64[];
+    mut sizes = u64[];
     for k in o.sec_name.len() {
-        hdr.push(0);
+        hdr.push(k);
         addr.push(0);
+        if o.sec_type[k] == 8 {
+            sizes.push(o.sec_size[k]);
+        } else {
+            sizes.push(o.sec_data[k].len());
+        }
     }
     mut at = 0;
     for h in order.len() {
         k := order[h];
-        hdr[k] = h;
         a := o.sec_align[k];
         while at % a != 0 {
             at += 1;
         }
         addr[k] = at;
-        mut size = o.sec_data[k].len();
-        if o.sec_type[k] == 8 {
-            size = o.sec_size[k];
-        }
-        at += size;
+        at += sizes[k];
+    }
+    for k in o.sec_name.len() {
+        a := o.sec_align[k];
+        size := sizes[k];
         name := view(o.sec_name[k]);
         mut comma = 0;
         while name[comma] != ',' {
@@ -5806,6 +5868,23 @@ fn macho_object<a, c>(o: (&a mut A), r_sec: (&c u64[]), r_off: (&c u64[]), r_typ
             flags = 1;
         } else if (o.sec_flags[k] & 4) != 0 {
             flags = 0x80000400;
+        } else if at_word(name, 0, name.len(), view("__TEXT,__cstring")) {
+            // S_CSTRING_LITERALS
+            flags = 2;
+        } else if at_word(name, 0, name.len(), view("__DATA,__thread_vars")) {
+            // S_THREAD_LOCAL_VARIABLES
+            flags = 0x13;
+        } else if at_word(name, 0, name.len(), view("__DATA,__thread_data")) {
+            // S_THREAD_LOCAL_REGULAR
+            flags = 0x11;
+        }
+        if at_word(name, 0, name.len(), view("__LD,__compact_unwind")) {
+            // S_ATTR_DEBUG
+            flags = 0x02000000;
+        }
+        if at_word(name, 0, name.len(), view("__DATA,__thread_bss")) {
+            // S_THREAD_LOCAL_ZEROFILL
+            flags = 0x12;
         }
         out.flags.push(flags);
         mut log = 0;
@@ -5890,6 +5969,28 @@ fn macho_object<a, c>(o: (&a mut A), r_sec: (&c u64[]), r_off: (&c u64[]), r_typ
             out.sym_value.push(value);
         }
     }
+    // Compact unwind: each entry's function start, relocated against __text by section ordinal
+    // (r_extern 0), last entry first, as LLVM writes them.
+    if o.cu_start.len() != 0 {
+        mut cu = 0;
+        for k in o.sec_name.len() {
+            if at_word(view(o.sec_name[k]), 0, o.sec_name[k].len(), view("__LD,__compact_unwind")) {
+                cu = k;
+            }
+        }
+        mut e = o.cu_start.len();
+        while e > 0 {
+            e -= 1;
+            out.r_sec.push(hdr[cu]);
+            out.r_off.push(32 * e);
+            out.r_sym.push(hdr[o.sym_sec[o.cu_start[e]] - 1] + 1);
+            out.r_extern.push(0);
+            out.r_type.push(0);
+            out.r_pcrel.push(0);
+            out.r_len.push(3);
+            out.r_addend.push(0);
+        }
+    }
     out.nlocal = locals.len();
     out.nextdef = exts.len();
     out.nundef = undefs.len();
@@ -5900,6 +6001,7 @@ fn macho_object<a, c>(o: (&a mut A), r_sec: (&c u64[]), r_off: (&c u64[]), r_typ
         out.r_sec.push(hdr[r_sec[i]]);
         out.r_off.push(r_off[i]);
         out.r_sym.push(index[r_sym[i]]);
+        out.r_extern.push(1);
         t := r_type[i];
         if (t == 4) || (t == 8) {
             out.r_type.push(0);
@@ -5913,7 +6015,7 @@ fn macho_object<a, c>(o: (&a mut A), r_sec: (&c u64[]), r_off: (&c u64[]), r_typ
         } else {
             mt := t >> 8;
             out.r_type.push(mt);
-            if (mt == 2) || (mt == 3) {
+            if (mt == 2) || (mt == 3) || (mt == 5) || (mt == 8) {
                 out.r_pcrel.push(1);
             } else {
                 out.r_pcrel.push(0);
@@ -6314,5 +6416,161 @@ fn rec_row_run<a, b>(o: (&a mut A), r: (&b Rec), j: u64) {
         o.im_div = r.idiv[j];
         o.im_add = r.iadd[j];
         execute(&mut o, r.mn[j]);
+    }
+}
+
+// ---- Mach-O compact unwind (.cfi_* -> __LD,__compact_unwind) -------------------------------------
+// The frame shapes compact unwind expresses on arm64 (LLVM's AArch64 generateCompactUnwindEncoding):
+// frameless, with a stack of up to 65520 bytes (`.cfi_def_cfa_offset N`), or a frame-pointer frame
+// (`.cfi_def_cfa w29, 16`, `.cfi_offset w30, -8`, `.cfi_offset w29, -16`) saving x19-x28 in
+// ascending pairs below it. Anything else would need DWARF (__eh_frame) and is refused.
+
+fn cfi_label<a>(o: (&a mut A)) -> u64 {
+    mut name = view("Lcfi ").copy();
+    num(&mut name, 2 * o.cu_start.len() + o.cfi_open);
+    outer := exchange(&mut o.src, name);
+    o.nh_a = 1;
+    o.nh_e = 0;
+    l := symbol(&mut o, 0, o.src.len());
+    o.src = outer;
+    o.nh_a = 1;
+    o.nh_e = 0;
+    o.sym_sec[l] = o.cur + 1;
+    o.sym_pos[l] = pos(&o);
+    o.sym_k[l] = o.it_pos.len();
+    return l;
+}
+
+// A register operand of a .cfi directive: w/x N (the DWARF number for x0-x30), or sp (31).
+fn cfi_register<a>(o: (&a mut A)) -> u64 {
+    skip(&mut o);
+    c := peek(&o);
+    if (c == 'w') || (c == 'x') {
+        o.at += 1;
+        return number(&mut o);
+    }
+    if (c == 's') && (o.at + 1 < o.le) && (o.src[o.at + 1] == 'p') {
+        o.at += 2;
+        return 31;
+    }
+    return number(&mut o);
+}
+
+fn signed_number<a>(o: (&a mut A)) -> u64 {
+    skip(&mut o);
+    if peek(&o) == '-' {
+        o.at += 1;
+        return wrapping_sub(0, number(&mut o));
+    }
+    return number(&mut o);
+}
+
+fn cfi_directive<a>(o: (&a mut A), id: u64) {
+    o.chunk_ok = 0;
+    if (o.macho == 0) || (o.target != 1) {
+        fail(&mut o, view("`.cfi_*` is supported for macOS arm64 (compact unwind) only"));
+        return ();
+    }
+    if id == D_CFI_STARTPROC {
+        if o.cfi_open != 0 {
+            fail(&mut o, view("`.cfi_startproc` inside a frame"));
+            return ();
+        }
+        o.cfi_start_sym = cfi_label(&mut o);
+        o.cfi_open = 1;
+        o.cfi_reg = 31;
+        o.cfi_off = 0;
+        o.cfi_saved = u64[];
+        o.cfi_at = u64[];
+        return ();
+    }
+    if o.cfi_open == 0 {
+        fail(&mut o, view("a `.cfi_*` directive outside `.cfi_startproc`"));
+        return ();
+    }
+    // A CFA rule after a register save is a shape only DWARF describes (LLVM reads the frame's
+    // instructions in order): refused below, as compact unwind cannot hold it.
+    if ((id == D_CFI_DEF_CFA) || (id == D_CFI_DEF_CFA_OFFSET)) && (o.cfi_saved.len() != 0) {
+        o.cfi_reg = 99;
+    }
+    if (id == D_CFI_DEF_CFA) && (o.cfi_reg != 99) {
+        o.cfi_reg = cfi_register(&mut o);
+        expect(&mut o, ',');
+        o.cfi_off = signed_number(&mut o);
+        return ();
+    }
+    if id == D_CFI_DEF_CFA {
+        return ();
+    }
+    if id == D_CFI_DEF_CFA_OFFSET {
+        if o.cfi_reg != 99 {
+            o.cfi_off = signed_number(&mut o);
+        }
+        return ();
+    }
+    if id == D_CFI_OFFSET {
+        r := cfi_register(&mut o);
+        expect(&mut o, ',');
+        o.cfi_saved.push(r);
+        o.cfi_at.push(signed_number(&mut o));
+        return ();
+    }
+    // .cfi_endproc
+    end := cfi_label(&mut o);
+    o.cfi_open = 0;
+    mut enc = 0;
+    if (o.cfi_reg == 31) && (o.cfi_saved.len() == 0) {
+        if (o.cfi_off % 16 != 0) || (o.cfi_off / 16 > 0xfff) {
+            fail(&mut o, view("a frameless stack compact unwind cannot describe"));
+            return ();
+        }
+        enc = 0x02000000 | ((o.cfi_off / 16) << 12);
+    } else if (o.cfi_reg == 29) && (o.cfi_off == 16) && (o.cfi_saved.len() >= 2) && (o.cfi_saved.len() % 2 == 0)
+        && (o.cfi_saved[0] == 30) && (o.cfi_at[0] == wrapping_sub(0, 8))
+        && (o.cfi_saved[1] == 29) && (o.cfi_at[1] == wrapping_sub(0, 16)) {
+        enc = 0x04000000;
+        mut slot = 24;
+        mut i = 2;
+        while i < o.cfi_saved.len() {
+            r := o.cfi_saved[i];
+            ok := (r >= 19) && (r <= 27) && ((r - 19) % 2 == 0) && (o.cfi_saved[i + 1] == r + 1)
+                && (o.cfi_at[i] == wrapping_sub(0, slot)) && (o.cfi_at[i + 1] == wrapping_sub(0, slot + 8));
+            if !ok {
+                fail(&mut o, view("a register save compact unwind cannot describe (it would need __eh_frame)"));
+                return ();
+            }
+            enc = enc | (1 << ((r - 19) / 2));
+            slot += 16;
+            i += 2;
+        }
+    } else {
+        fail(&mut o, view("a frame compact unwind cannot describe (it would need __eh_frame)"));
+        return ();
+    }
+    o.cu_start.push(o.cfi_start_sym);
+    o.cu_end.push(end);
+    o.cu_enc.push(enc);
+}
+
+// The __LD,__compact_unwind section: per frame, its start (the address; relocated in
+// macho_object), length, encoding, and no personality or LSDA.
+fn compact_unwind<a>(o: (&a mut A)) {
+    if o.cfi_open != 0 {
+        fail(&mut o, view("`.cfi_startproc` without `.cfi_endproc`"));
+        return ();
+    }
+    name := view("__LD,__compact_unwind");
+    section(&mut o, name, 0, name.len(), 1, 0, 8);
+    for e in o.cu_start.len() {
+        start := o.cu_start[e];
+        if (o.sym_sec[start] != 1) || (o.sym_sec[o.cu_end[e]] != 1) {
+            fail(&mut o, view("a compact unwind frame outside __text"));
+            return ();
+        }
+        emit_le(&mut o, o.sym_pos[start], 8);
+        emit_le(&mut o, o.sym_pos[o.cu_end[e]] - o.sym_pos[start], 4);
+        emit_le(&mut o, o.cu_enc[e], 4);
+        emit_le(&mut o, 0, 8);
+        emit_le(&mut o, 0, 8);
     }
 }
