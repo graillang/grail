@@ -3623,16 +3623,20 @@ fn inline_candidate<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64) {
     mut used = 0;
     // rbx, rsp, rbp (outside slots) and r12..r15 must not appear.
     forbidden := 8 + 16 + 32 + 4096 + 8192 + 16384 + 32768;
+    dead := unreachable_lines(&o, prologue);
     for i in last {
-        if (prologue < i) & (o.del[i] == 0) {
+        if (prologue < i) & (o.del[i] == 0) & (dead[i] == 0) {
             op := o.op[i];
             if op == 101 {
-                if i + 1 != last {
+                if (i + 1 != last) && !site_directive(&o, view(s), i) {
                     return ();
                 }
             } else {
                 if op != 100 {
-                    count += 1;
+                    // A `leave` is not in the copy (the copy has no frame), so it is not counted.
+                    if op != 29 {
+                        count += 1;
+                    }
                     if 24 < count {
                         return ();
                     }
@@ -3735,7 +3739,7 @@ fn inline_candidate<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64) {
         }
     }
     for i in last {
-        if (prologue < i) & (o.del[i] == 0) & (i + 1 != last) {
+        if (prologue < i) & (o.del[i] == 0) & (dead[i] == 0) & (i + 1 != last) {
             op := o.op[i];
             if op == 30 {
                 app(&mut o.out, view("jmp .Lret\n"));
@@ -3767,6 +3771,39 @@ fn inline_candidate<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64) {
     absolute := ir::absolute_positions(view(body), o.gbase);
     exchange(&mut o.inl_rel, body);
     inl_file(&mut o, name, absolute, unit);
+}
+// The instructions after the prologue no path reaches: those after a `ret`, a `jmp` or a call that
+// does not return, up to the next label. A body's fall-off return (`xorq %rax,%rax; leave; ret` after
+// its last `return`) is the usual one. They are not part of an inlined copy, so they do not count
+// against its size either. 1 marks an unreachable instruction; directives are never marked.
+fn unreachable_lines<a>(o: (&a ir::Body), prologue: u64) -> u64[] {
+    last := o.op.len();
+    mut dead = u64[];
+    mut off = false;
+    for i in last {
+        op := o.op[i];
+        if op == 100 {
+            off = false;
+        }
+        if off && (op != 100) && (op != 101) && (o.del[i] == 0) {
+            dead.push(1);
+        } else {
+            dead.push(0);
+        }
+        if (prologue < i) && (o.del[i] == 0) && ((op == 30) || (op == 16)) {
+            off = true;
+        }
+    }
+    return dead;
+}
+// A statement's position or a failure's kind (`.gpos`, `.gposa`, `.gkind`): the site markers every
+// statement carries in a build with error locations. They do not keep a body from being inlined; any
+// other directive does. The copy keeps them - its positions made absolute when it is filed - so a
+// failure inside it reports the line it was written on, and inline_calls states the caller's
+// position again after the copy.
+fn site_directive<a, b>(o: (&a ir::Body), s: &b [u8], i: u64) -> bool {
+    a := o.ls[i];
+    return ir::at(view(s), a, view(".gpos ")) || ir::at(view(s), a, view(".gposa ")) || ir::at(view(s), a, view(".gkind "));
 }
 // Where the lines the inlining pass reads start, in `text[from..]`: a `call` and a unit marker.
 // Offsets are from the start of `text`.
@@ -3842,6 +3879,15 @@ fn inline_calls<a, b>(o: (&a mut ir::Body), split: u64, marks: (&a mut u64[]), l
                             o.out.append(text[pend..a]);
                             pend = start;
                             emit_body(&mut o, k - 1, site, view(uprefix));
+                            // The caller's code after the copy is the caller's statement again.
+                            p := caller_position(view(text), a);
+                            if p < a {
+                                mut pe = p;
+                                while text[pe] != 10 {
+                                    pe += 1;
+                                }
+                                o.out.append(text[p..pe + 1]);
+                            }
                             done = 1;
                             break;
                         }
@@ -3902,6 +3948,27 @@ fn inline_calls<a, b>(o: (&a mut ir::Body), split: u64, marks: (&a mut u64[]), l
         }
     }
     o.out.append(text[pend..text.len()]);
+}
+// Where the caller's statement marker for the call at `call` starts (the last `.gpos` line of the
+// function before it), or `call` when the function has none before it: the lines are read back from
+// the call to the function's `.type` line, which a statement is never far from.
+fn caller_position<a>(text: &a [u8], call: u64) -> u64 {
+    mut e = call;
+    while 0 < e {
+        // `e` is the start of a line; the line before it ends at e - 1.
+        mut b = e - 1;
+        while (0 < b) && (text[b - 1] != 10) {
+            b -= 1;
+        }
+        if (text[b] == 46) && (b + 6 < e) && (text[b + 1] == 103) && (text[b + 2] == 112) && (text[b + 3] == 111) && (text[b + 4] == 115) && (text[b + 5] == 32) {
+            return b;
+        }
+        if (text[b] == 46) && (b + 6 < e) && (text[b + 1] == 116) && ir::at(view(text), b, view(".type ")) {
+            return call;
+        }
+        e = b;
+    }
+    return call;
 }
 // `_i<unit prefix>_<site>` on every `.L` in the body: the site number disambiguates two copies of
 // one body, and the unit prefix keeps a body label without a prefix of its own (`.Lret`) apart from

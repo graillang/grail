@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **The optimiser inlines small functions in ordinary builds again.** A small leaf (at most 24
+  instructions, no call but a failure exit) was only inlined when it carried no statement-position
+  marker, and every statement of a build with error locations carries one, so outside
+  `--no-error-sites` almost nothing was inlined (3 bodies on the scheduler's join probe, 57 with the
+  flag). The markers now travel with the copy. A failure inside an inlined function still reports
+  the line it was written on, but the inlined function is no longer a frame of its own: its caller's
+  `= called from` line is the next one shown. Measured (callgrind, one worker): a join 3406 -> 3355
+  instructions, a spawn 2089 -> 1858; the compiler's own text +0.4%.
+
 - **C calls with floats are optimised in release builds (call ABI S8a).** A function that called a
   C function with `f64`/`f32` arguments or a float result had to stay unoptimised on the LLVM
   backend (its floats travel in vector registers a lifted call did not carry). The front end now
