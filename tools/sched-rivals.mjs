@@ -68,10 +68,15 @@ if (have.tbb) {
 // thread; oneTBB: that many arena slots, the main thread's included). Grail's default is the same,
 // one worker per CPU; this column states it, so the comparison is like for like whatever the
 // platform's default becomes.
-const threads = cpus().length;
+// RIVALS_THREADS (set by tools/quiet-window.sh when it pins the run to a CPU set) is the thread
+// count every runtime is given; otherwise one per CPU, each runtime's default.
+const threads = Number(process.env.RIVALS_THREADS) || cpus().length;
+const pinned = Boolean(process.env.RIVALS_THREADS);
 const wide = `grail-llvm-w${threads}`;
 exe[wide] = exe['grail-llvm'];
 const envOf = { [wide]: { GRAIL_WORKERS: String(threads) } };
+if (pinned) for (const c of ['grail-native', 'grail-llvm']) envOf[c] = { GRAIL_WORKERS: String(threads) };
+const rivalEnv = pinned ? { RAYON_NUM_THREADS: String(threads) } : {};
 const columns = ['grail-native', 'grail-llvm', wide, 'rayon', 'onetbb'].filter(c => exe[c]);
 const rivalsHere = ['rayon', 'onetbb'].filter(c => exe[c]);
 
@@ -83,7 +88,7 @@ const checksums = {};
 for (let r = 0; r < rounds; r++) {
   for (const column of columns) {
     for (const name of ['sched', 'frame']) {
-      const m = measure(exe[column][name], { env: { ...process.env, ...envOf[column] } });
+      const m = measure(exe[column][name], { env: { ...process.env, ...rivalEnv, ...envOf[column] } });
       (cpu[`${column}.${name}`] ??= []).push(m.cpu);
       for (const line of m.stdout.trim().split('\n')) {
         const [key, value, unit] = line.split(' ');
