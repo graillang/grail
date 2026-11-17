@@ -1,5 +1,13 @@
 ## Unreleased
 
+- **Release builds inline small functions across modules.** A call to a function of another module
+  was declared with a generic six-argument type that never matched the callee's real definition,
+  so LLVM never inlined it: small std helpers (`bytes::load_u64`, hash and string methods) stayed
+  calls in every release program. Each module's interface now records the signature its body was
+  defined with, and importers declare their calls with it (interface format 13).
+  `bench/hashmap.grl` -7.6% instructions; a loop over `bytes::load_u64` -27%.
+  `tools/release-signature-test.mjs` fails on any cross-module declaration that disagrees with
+  its definition.
 - **Release builds keep vector headers in registers across element stores (TBAA).** The LLVM lifter
   writes the word and 4-byte element accessors (`rt_slot`, `rt_slot4`, `rt_at4` and their unchecked
   forms) in place: the header's `data`/`len` loads carry a `header` type tag, and every load or store
