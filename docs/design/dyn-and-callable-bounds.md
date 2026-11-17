@@ -214,3 +214,20 @@ at compile time instead of freeing or keeping a frame address. Checked by reintr
 frame was retyped as a boxed closure without being boxed". A closure body of a specialisation sees
 that specialisation's bindings and bounds (`Closure.spec`, restored as `closure_spec` while the body is
 emitted). The `CLOSURES_FRAMED` switch is gone.
+
+### 6.2 S6(A) measured (on main 75050fb1)
+
+`typed_chain.grl` (10M `u64`, map `x*2` -> filter `%3 == 0` -> fold, best of five, load about 55),
+main before S6(A) against main with it, same machine state:
+
+| | before | S6(A) | hand loop | Rust chain |
+|---|---|---|---|---|
+| `--release` (LLVM) | 126 ms | **63 ms** | 16-17 ms | 6.9 ms |
+| native | 260 ms | 261 ms | 20-30 ms | - |
+
+With the closures held inline, LLVM inlines more of the chain: 7.4x down to 3.9x of the hand loop.
+The native backend is unchanged because it inlines leaf calls only: a chain element still costs
+about ten non-leaf direct calls (nested `next`s, the closure bodies, `rt_pop`, whose empty path calls
+`rt_fail`, so it is never a leaf). The 1.2x target needs /root/xinline's S3 (non-leaf inlining) on
+native and the remaining inlining on LLVM; the library and type side is done. `strings` has no
+callback parameters to move (2d is empty).
