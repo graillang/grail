@@ -18,6 +18,12 @@
   instead of five filter tests per byte, a fresh vector per row and a byte-by-byte copy. A 4096x4096
   RGBA texture: Grail-LLVM 41.1G -> 8.1G instructions (3.65 -> 0.91 s; libpng 0.40 s, the runtime's
   division fix included), Grail-native 107G -> 21.4G.
+- `pool::chunks_mut_at` (exclusive pieces with their first index) and `pool::reduce_chunks` (a
+  read-only reduction folded in index order, the same bits on any number of workers).
+- A Grail callback called from C settles on its thread record once at entry and pins and unpins
+  through it, instead of choosing between `rt_tls_record` and the thread pointer at each end
+  (x86-64). A C loop calling a Grail callback 10 M times: LLVM 52 -> 47 instructions per call.
+
 - The native backend computes SIMD operations with packed SSE2 on x86-64 (lane arithmetic, compares,
   select, splat, sums, 4-lane shuffles, `any`/`all`, `to_f32`), with exactly the same results as
   before. A dot product, a 4x4 matrix product and an AoS-to-SoA transpose run 2-5x faster natively.
@@ -47,6 +53,15 @@
   registers by its SysV eightbyte classes (INTEGER in general registers, SSE in vector registers)
   or, over 16 bytes, as `ptr byval` on the stack - matching the native placement. tools/test-ffi.mjs
   now runs every FFI fixture on the LLVM backend too (x86-64, with --verify-facts).
+- `bench/ecs_par.c` and `bench/rivals/ecs_par.*`: the parallel ECS benchmark's C/OpenMP, Rust/rayon, Go
+  and Zig twins; `bun tools/bench-rivals.mjs --workers 1,4,8 --metric wall` runs a program at each
+  worker count with every runtime told its threads. `bash tools/quiet-window.sh` takes the wall-time
+  measurements (sched-rivals, the parallel benchmark, the kernels) in one command, pinned with
+  taskset, when the machine has been quietened.
+- **Native backend: unchecked multiplies by a constant are cheap.** A multiply the prover bounded
+  (an array index `i * 3`) no longer loads the constant and uses `mulq`: it is
+  `leaq (%r12,%r12,2),%rax` for 3, 5 and 9, a shift for a power of two, else `imulq $c`. nbody
+  executes 13% fewer instructions.
 
 - An effect refusal over a callee the run cannot see (compiling a program to assembly without the
   runtime's sources) names it - "the target is `rt_len`, whose body and effect summary this run does
@@ -67,7 +82,7 @@
   an older compiler are refused by version and regenerated.
 - Windows x86-64 builds (non-debug) assemble in the compiler too: `compiler/coff.grl` writes COFF
   objects byte-identical to clang's, `.pdata`/`.xdata` unwind for every function included
-  (`grail asm --target windows-x86_64`). Debug builds keep clang until CodeView is written. Fixed:
+  (`grail asm --target windows-x86_64`), debug builds included (CodeView line tables). Fixed:
   `movsd` encoded as `movdqu` (the two shared an internal id).
 - **Sized and signed arithmetic no longer divides in software.** The runtime's `rt_div` was a
   shift-and-subtract loop, and every overflow check of a sized or signed multiply and every sized or

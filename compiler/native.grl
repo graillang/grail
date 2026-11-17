@@ -715,6 +715,8 @@ struct C {
     // Slot holding the host TLS base inside an exported function's body, or 0.
     export_tls: u64,
     export_adopt: u64,
+    // The thread record a callback pinned (tls_enter_callback), for its exits.
+    export_pin: u64,
     // The pass a module-level compile-time form runs in (0 inside a function body).
     ct_pass: u64,
     ct_in_if: bool,
@@ -3559,7 +3561,43 @@ fn tls_enter_foreign<a>(c: (&a mut C), slot: u64) -> unit {
 // the matching tls_leave_callback unpublishes and unmaps it, so the thread is again unknown to the
 // runtime once C regains control. Nested callbacks on that thread find the published record and
 // adopt nothing. In a static program the thread pointer already is the record and `slot` is 0.
-fn tls_enter_callback<a>(c: (&a mut C), slot: u64, adopt: u64) -> unit {
+//
+// On x86-64 the record the entry settles on is kept in `pin` (call ABI, the callback thunk): the
+// pin count is incremented and decremented through it, instead of choosing between rt_tls_record
+// and the thread pointer again at each end.
+fn tls_enter_callback<a>(c: (&a mut C), slot: u64, adopt: u64, pin: u64) -> unit {
+    if c.target == 0 {
+        o(&mut c, view("xorl %eax,%eax\nmovq %rax,"));
+        stack_slot(&mut c, slot);
+        o(&mut c, view("\nmovq %rax,"));
+        stack_slot(&mut c, adopt);
+        c.out.push(10);
+        other := label(&mut c);
+        have := label(&mut c);
+        pinned := label(&mut c);
+        o(&mut c, view("cmpq $0,rt_state+184(%rip)\n"));
+        jump(&mut c, view("je"), other);
+        o(&mut c, view("movq %fs:rt_tls_record@tpoff,%rsi\ntestq %rsi,%rsi\n"));
+        jump(&mut c, view("jne"), have);
+        call_out(&mut c, view("rt_adopt_record"));
+        o(&mut c, view("movq %rax,"));
+        stack_slot(&mut c, adopt);
+        o(&mut c, view("\nmovq %rax,%rsi\n"));
+        tls_record_address(&mut c);
+        o(&mut c, view("movq %rsi,(%rax)\n"));
+        mark(&mut c, have);
+        o(&mut c, view("movq %rsi,"));
+        stack_slot(&mut c, pin);
+        c.out.push(10);
+        jump(&mut c, view("jmp"), pinned);
+        mark(&mut c, other);
+        o(&mut c, view("movq %fs:0,%rsi\nmovq %rsi,"));
+        stack_slot(&mut c, pin);
+        c.out.push(10);
+        mark(&mut c, pinned);
+        o(&mut c, view("addq $1,120(%rsi)\n"));
+        return ();
+    }
     o(&mut c, view("xorl %eax,%eax\nmovq %rax,"));
     stack_slot(&mut c, slot);
     o(&mut c, view("\nmovq %rax,"));
@@ -3673,8 +3711,14 @@ fn callback_pin<a, b>(c: (&a mut C), op: &b [u8]) -> unit {
 // Leave a callback: restore the caller's thread pointer, then, if this entry adopted the thread,
 // clear `rt_tls_record` (now on the caller's TCB, so the TLS word is addressable) and unmap the
 // record. Runs before the return value is loaded, so it may clobber any register.
-fn tls_leave_callback<a>(c: (&a mut C), slot: u64, adopt: u64) -> unit {
-    callback_pin(&mut c, view("subq"));
+fn tls_leave_callback<a>(c: (&a mut C), slot: u64, adopt: u64, pin: u64) -> unit {
+    if c.target == 0 {
+        o(&mut c, view("movq "));
+        stack_slot(&mut c, pin);
+        o(&mut c, view(",%rax\nsubq $1,120(%rax)\n"));
+    } else {
+        callback_pin(&mut c, view("subq"));
+    }
     tls_leave(&mut c, slot);
     done := label(&mut c);
     o(&mut c, view("movq "));
@@ -20753,12 +20797,15 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     }
     mut tls_slot = 0;
     mut adopt_slot = 0;
+    mut pin_slot = 0;
     if (export == 2) & tls_bridge(&mut c) {
         tls_slot = fresh(&mut c);
         adopt_slot = fresh(&mut c);
-        tls_enter_callback(&mut c, tls_slot, adopt_slot);
+        pin_slot = fresh(&mut c);
+        tls_enter_callback(&mut c, tls_slot, adopt_slot, pin_slot);
         exchange(&mut c.export_tls, tls_slot);
         exchange(&mut c.export_adopt, adopt_slot);
+        exchange(&mut c.export_pin, pin_slot);
     }
     // An `unsafe fn`'s body sits one level down: raw pointers and foreign calls in it need no inner
     // `unsafe` block, and the caller owes the block instead.
@@ -20776,6 +20823,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     }
     exchange(&mut c.export_tls, 0);
     exchange(&mut c.export_adopt, 0);
+    exchange(&mut c.export_pin, 0);
     if c.terminated == 0 {
         callback_copy_back(&mut c);
     }
@@ -20787,7 +20835,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     }
     cleanup(&mut c, 0);
     if tls_slot != 0 {
-        tls_leave_callback(&mut c, tls_slot, adopt_slot);
+        tls_leave_callback(&mut c, tls_slot, adopt_slot, pin_slot);
     }
     frame_limit(&mut c);
     o(&mut c, view("xorq %rax,%rax\nleave\nret\n.set "));
@@ -38341,10 +38389,15 @@ fn parallel_split_builtin<a>(c: (&a mut C), data: Val) -> Val {
         fail(&mut c, view("parallel_split requires a callable"));
     }
     signature := type_args(&mut c, fty);
-    if signature.len() != 1 {
-        fail(&mut c, view("parallel_split callback takes (&mut [T])"));
+    // (&mut [T]), or (u64, &mut [T]) for each piece's first index too (pool::chunks_mut_at).
+    with_at := signature.len() == 2;
+    if (signature.len() != 1) && !with_at {
+        fail(&mut c, view("parallel_split callback takes (&mut [T]) or (u64, &mut [T])"));
     }
-    require_type(&mut c, slice, signature[0]);
+    if with_at {
+        require_type(&mut c, signature[0], 0);
+    }
+    require_type(&mut c, slice, signature[signature.len() - 1]);
     result := ty_arg(&mut c, fty);
     if ty_kind(&mut c, result) != 2 {
         fail(&mut c, view("parallel_split callback returns unit: write the elements"));
@@ -38370,7 +38423,8 @@ fn parallel_split_builtin<a>(c: (&a mut C), data: Val) -> Val {
     mut pargs = three(data.t, chunks.t, target);
     pargs.push(env);
     pargs.push(width);
-    slot := invoke(&mut c, view("rt_parallel_split"), pargs);
+    pargs.push(imm(&mut c, u64(with_at)));
+    slot := invoke(&mut c, view("rt_parallel_split_at"), pargs);
     release_temporary(&mut c, data.t);
     release_temporary(&mut c, input);
     close_loans(&mut c);
@@ -50297,7 +50351,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         cleanup(&mut c, 0);
         restore := c.export_tls;
         if restore != 0 {
-            tls_leave_callback(&mut c, restore, c.export_adopt);
+            tls_leave_callback(&mut c, restore, c.export_adopt, c.export_pin);
         }
         if borrowed_object(&mut c, v.ty) != 0 {
             // The pair travels by value: data in %rax, vtable in %rdx. The caller stores both in its
@@ -58276,6 +58330,7 @@ pub fn main() -> u64 {
         pending_symbol: u8[],
         export_tls: 0,
         export_adopt: 0,
+        export_pin: 0,
         ct_pass: 0,
         ct_in_if: false,
         decl_public: 1,
