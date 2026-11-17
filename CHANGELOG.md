@@ -4,6 +4,10 @@
   a general register (`movq (%rax),%rax; movq %rax,%xmm8`) is `movsd (%rax),%xmm8`, and a store the
   same way back; the internal assembler encodes `movsd`, and AArch64 and RISC-V translate it to
   `ldr`/`str` and `fld`/`fsd`. nbody executes 7% fewer instructions.
+- **Native backend: fixed-size array elements are addressed directly.** An element access reads its
+  base and index from the registers that hold them instead of copies in `%rdi`/`%rsi`, and a load
+  of the element takes the scaled address as its operand (`movsd (%r12,%rbx,8),%xmm9`) instead of
+  computing it with `leaq` first. nbody executes another 10% fewer instructions.
 
 - **Raw address offsets.** In an `unsafe module`, the address operand of `raw_load`/`raw_store`
   and their narrow forms written as `p + k` with a literal `k` has no overflow check and is folded
