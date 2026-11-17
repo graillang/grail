@@ -1,5 +1,13 @@
 ## Unreleased
 
+- **Raw code follows the build's overflow mode, and the release compiler wraps.** Arithmetic in an
+  `unsafe module` used to be checked whatever the build asked for; it now traps in a checked build
+  and wraps in a wrapping one (`--release`, `--overflow=wrap`) like all other code. Code that must
+  wrap says so with `wrapping_*`, as the runtime's address arithmetic does. `tools/native.mjs
+  release` lowers the compiler with `--overflow=wrap`, as every release build does, so the release
+  compiler no longer checks after nearly every address addition. `GRAIL_COMMAND_TIMEOUT` raises
+  tools/native.mjs's per-step time limit on a loaded host.
+
 - AArch64 and RV64 native code drops moves that move nothing (call ABI S7): the word machine's
   result register is x9 (t0) and its first argument x0 (a0), and moves go through the scratch x10
   (t1), so calls and returns were full of `mov x0,x9` after `mov x9,x10; mov x10,x0`. A value number
