@@ -1,8 +1,8 @@
 // Build/test orchestration only. Language checking and instruction selection live in Grail.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, renameSync, rmSync, statSync, accessSync, constants as fsConstants } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, renameSync, rmSync, statSync, accessSync, linkSync, constants as fsConstants } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { constants as zlibConstants, zstdCompressSync, zstdDecompressSync } from 'node:zlib';
 export const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -181,6 +181,14 @@ export function dynamicLinkFlags(target, linkArgs) {
   const loader = (dynamicLoaders[target] ?? []).find(candidate => existsSync(candidate));
   // libc always: the runtime creates its threads through a weak pthread_create (docs/ffi.md).
   return [...(loader ? ['--dynamic-linker', loader] : []), '-L/usr/lib', '-L/usr/lib64', '-lc'];
+}
+// What clang needs to compile an LLVM module for a target, besides the triple. RISC-V: the ISA and
+// ABI the assembly is written for. AArch64: atomics inline - clang's default for Linux calls
+// `__aarch64_cas8_acq_rel` and friends in libgcc, and a Grail program links no libgcc.
+export function moduleFlags(target) {
+  if (target === 'riscv64') return ['-march=rv64imafd', '-mabi=lp64d'];
+  if (target === 'aarch64') return ['-mno-outline-atomics'];
+  return [];
 }
 export function assemble(source, executable, target = hostTarget, linkArgs = [], { frameworkArgs = [], sign = false, sdk = undefined } = {}) {
   targetName(target);
@@ -380,19 +388,41 @@ export function bootstrapCompiler() {
   const assembly = seedAssemblyPath(hostTarget);
   const directory = join(root, '.work/native', 'seed');
   mkdirSync(directory, { recursive: true });
-  return assemble(assembly, join(directory, 'bootstrap'));
+  // Named by the seed's digest (the cached assembly is `<digest>.s`) and assembled once: assembling
+  // it on every call gave the bootstrap a new mtime each time, and buildCompiler's key - which named
+  // that mtime - then rebuilt the whole compiler on every `build`.
+  const executable = join(directory, `bootstrap-${basename(assembly, '.s')}`);
+  if (existsSync(executable)) return executable;
+  const pending = assemble(assembly, join(directory, `bootstrap.pending.${process.pid}`));
+  claimExecutable(pending, executable);
+  for (const leftover of [pending, `${pending}.o`]) if (existsSync(leftover)) rmSync(leftover);
+  return executable;
 }
 // The tree's compiler: ALWAYS built from compilerSources by the bootstrap, cached by a hash of
 // what went into it. It never hands back the bootstrap itself - a `build` that printed a supplied
 // path and succeeded looked like a build and was not one, which cost two people a debugging
 // session. Use `bootstrapCompiler()` when you want the compiler to build WITH, and
 // `bun tools/native.mjs compiler` to print a path without building anything.
+// Put a finished build in place without ever replacing one that is already there. A rename over an
+// existing executable unlinks the file other processes are running, so their /proc/self/exe reads
+// "... (deleted)" and anything that re-runs the compiler by its own path (a compile-time probe)
+// fails. A hard link fails instead when the name exists; the loser keeps the winner's identical
+// build and drops its own.
+function claimExecutable(pending, executable) {
+  try {
+    linkSync(pending, executable);
+  } catch (error) {
+    if (error?.code !== 'EEXIST') throw error;
+  }
+  rmSync(pending, { force: true });
+}
 export function buildCompiler() {
   const base = bootstrapCompiler();
-  const baseStat = statSync(base);
   const hash = createHash('sha256');
   hash.update(readFileSync(fileURLToPath(import.meta.url)));
-  hash.update(`${base}\u0000${baseStat.size}\u0000${baseStat.mtimeMs}\u0000`);
+  // The base by content, never by path or mtime: the same bootstrap rebuilt or copied elsewhere is
+  // the same compiler, and a different one at the same path is not.
+  hash.update(`${digest(readFileSync(base))}\u0000`);
   for (const file of compilerSources) hash.update(readFileSync(file));
   const directory = join(root, '.work/native', hash.digest('hex').slice(0, 24));
   const executable = join(directory, 'grail');
@@ -410,7 +440,7 @@ export function buildCompiler() {
   // unconditionally until the reseed drops them.
   command([base, '--default-u64', '--typed-refs', output, ...compilerSources], { env: compilerEnvironment() });
   const pending = assemble(output, join(directory, `grail.pending.${process.pid}`));
-  renameSync(pending, executable);
+  claimExecutable(pending, executable);
   for (const leftover of [output, pending, `${pending}.o`, `${pending}.s`]) {
     if (existsSync(leftover)) rmSync(leftover);
   }
@@ -447,7 +477,7 @@ export function buildReleaseCompiler({ log = () => {} } = {}) {
   }
   if (!lowered) throw new Error('no compiler could lower the compiler through the LLVM backend');
   log('clang -O2');
-  command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[hostTarget]}`, '-O2', '-c', `${stem}.s.ll`, '-o', `${stem}.ll.o`]);
+  command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[hostTarget]}`, ...moduleFlags(hostTarget), '-O2', '-c', `${stem}.s.ll`, '-o', `${stem}.ll.o`]);
   command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[hostTarget]}`, '-c', `${stem}.s`, '-o', `${stem}.o`]);
   const pending = `${stem}.pending`;
   command([process.env.GRAIL_LINKER ?? 'ld.lld', '-m', emulations[hostTarget], `${stem}.o`, `${stem}.ll.o`, '-o', pending]);
@@ -465,7 +495,7 @@ export function buildReleaseCompiler({ log = () => {} } = {}) {
     rmSync(pending);
     throw new Error('the release compiler does not emit what the native build emits for the compiler\'s own sources: not accepted');
   }
-  renameSync(pending, executable);
+  claimExecutable(pending, executable);
   writeFileSync(latest, `${executable}\n`);
   return executable;
 }
@@ -514,7 +544,7 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
   const linkArgs = linkInputs(readFileSync(assembly, 'utf8'), dirname(resolve(root, inputs[0])));
   if (llvm) {
     const object = join(directory, `${name}.ll.o`);
-    command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[target]}`, '-O2', '-c', `${assembly}.ll`, '-o', object]);
+    command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[target]}`, ...moduleFlags(target), '-O2', '-c', `${assembly}.ll`, '-o', object]);
     linkArgs.unshift(object);
   }
   const framework = machoTargets.includes(target) ? frameworkArguments(frameworks, { directory, sdk }) : { args: [] };

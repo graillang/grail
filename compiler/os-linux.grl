@@ -43,6 +43,9 @@ fn rt_syscall(n: u64, a: u64, b: u64, c: u64) -> u64 {
     if n == 204 {
         return raw_syscall(123, a, b, c);
     }
+    if n == 203 {
+        return raw_syscall(122, a, b, c);
+    }
     if n == 231 {
         return raw_syscall(94, a, b, c);
     }
@@ -110,6 +113,19 @@ fn rt_syscall(n: u64, a: u64, b: u64, c: u64) -> u64 {
     if n == 62 {
         return raw_syscall(129, a, b, c);
     }
+    // A dedicated thread's attributes: prctl, sched_setaffinity, sched_setscheduler, setpriority.
+    if n == 157 {
+        return raw_syscall(167, a, b, c);
+    }
+    if n == 203 {
+        return raw_syscall(122, a, b, c);
+    }
+    if n == 144 {
+        return raw_syscall(119, a, b, c);
+    }
+    if n == 141 {
+        return raw_syscall(140, a, b, c);
+    }
     return wrapping_sub(0, 38);
 }
 
@@ -153,6 +169,12 @@ fn rt_syscall4(n: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
     }
     if n == 271 {
         return raw_syscall4(73, a, b, c, d); // ppoll
+    }
+    if n == 230 {
+        return raw_syscall4(115, a, b, c, d); // clock_nanosleep
+    }
+    if n == 202 {
+        return raw_syscall4(98, a, b, c, d); // futex with a timeout
     }
     return wrapping_sub(0, 38);
 }
@@ -356,6 +378,27 @@ fn rt_os_workers() -> u64 {
     }
     return workers;
 }
+// Pin the calling thread to one CPU (sched::Config.pin_workers): 0, or a negative errno. `mask` is
+// 128 bytes of the caller's (a worker block's), not the heap: a worker pins itself as it starts,
+// and an allocation there could still be live when a short program's main thread exits.
+fn rt_os_pin(cpu: u64, mask: u64) -> u64 {
+    mut i = 0;
+    while i < 128 {
+        raw_store(mask + i, 0);
+        i += 8;
+    }
+    raw_putbyte(mask + cpu / 8, 1 << (cpu % 8));
+    return rt_syscall(203, 0, 128, mask);
+}
+// Map `count` task stacks for this worker now (sched::Config.warm_stacks), so a frame never maps one.
+fn rt_os_stack_warm(count: u64) -> u64 {
+    mut i = 0;
+    while i < count {
+        rt_os_stack_give(rt_os_stack_reserve());
+        i += 1;
+    }
+    return 0;
+}
 fn rt_os_sched_prepare() -> u64 {
     // Installs the process-wide task-stack fault handler and this worker's alternate signal stack.
     rt_os_stack_guard_install();
@@ -430,7 +473,7 @@ fn rt_os_reactor_loop(s: u64) -> u64 {
                 i += 1;
             }
         }
-        rt_atomic_fetch_add(s + 56, 1);
+        raw_atomic_fetch_add(s + 56, 1);
     }
     return 0;
 }
@@ -559,7 +602,12 @@ fn rt_os_stack_guard_hit(addr: u64) -> u64 {
     if tp == 0 {
         return 0;
     }
-    t := raw_load(tp + 16);
+    mut t = raw_load(tp + 16);
+    if t == 0 {
+        // Not a task: the closure of a dedicated thread runs on a guarded stack of the same shape,
+        // and its record keeps the base and size in the same two words (rt_uthread_main).
+        t = raw_load(tp + 80);
+    }
     if t == 0 {
         return 0;
     }
@@ -757,8 +805,11 @@ fn rt_os_stack_guard_install_main() -> u64 {
 // A task's initial switch frame is what the target's switch saves, and the address it resumes into
 // is rt_green_main.
 fn rt_os_ctx_new(t: u64) -> u64 {
-    size := rt_os_stack_size();
-    stack := rt_os_stack_take();
+    return rt_os_ctx_frame(t, rt_os_stack_take(), rt_os_stack_size(), rt_green_main);
+}
+// The switch frame at the top of `stack`, resuming into `entry`; the stack's base and size go into
+// the record, where the guard-page test looks for them.
+fn rt_os_ctx_frame(t: u64, stack: u64, size: u64, entry: u64) -> u64 {
     raw_store(t + 8, stack);
     raw_store(t + 16, size);
     // x86-64 8 words (resume first); AArch64 22 words (resume first); RISC-V 26 words (resume
@@ -774,9 +825,117 @@ fn rt_os_ctx_new(t: u64) -> u64 {
         slot = 25;
     }
     frame := stack + size - words * 8;
-    raw_store(frame + slot * 8, rt_green_main);
+    raw_store(frame + slot * 8, entry);
     raw_store(t, frame);
     return frame;
+}
+// ---- dedicated threads (runtime.grl rt_uthread_main) -------------------------------------------
+fn rt_os_threads() -> u64 {
+    return 1;
+}
+// The stack a dedicated thread's closure runs on: `size` bytes, the lowest page PROT_NONE, pages
+// committed by the kernel as they are touched. 0, or 1 when the mapping was refused.
+fn rt_os_body_new(rec: u64, size: u64) -> u64 {
+    stack := raw_map(size);
+    if rt_error(stack) {
+        return 1;
+    }
+    if rt_error(rt_syscall(10, stack, 4096, 0)) {
+        rt_syscall(11, stack, size, 0);
+        return 1;
+    }
+    rt_os_ctx_frame(rec, stack, size, rt_uthread_enter);
+    return 0;
+}
+fn rt_os_body_free(rec: u64) -> u64 {
+    rt_syscall(11, raw_load(rec + 8), raw_load(rec + 16), 0);
+    return 0;
+}
+// The alternate signal stack the overflow report runs on, for a thread that is not a scheduler
+// worker: its sigaltstack record sits in the mapping's first 64 bytes, as the main thread's does.
+// The answer is the mapping, for rt_os_thread_unguard; 0 when there is none.
+fn rt_os_thread_guard() -> u64 {
+    words := rt_state_stack_guard();
+    rt_os_stack_guard_prepare();
+    base := raw_map(65536);
+    if rt_error(base) {
+        return 0;
+    }
+    rt_os_sigaltstack(base, base + 64, 65536 - 64);
+    rt_os_stack_guard_signal(11, words);
+    rt_os_stack_guard_signal(7, words);
+    return base;
+}
+fn rt_os_thread_unguard(base: u64) -> u64 {
+    if base == 0 {
+        return 0;
+    }
+    // SS_DISABLE, so the kernel holds no pointer into the mapping when it goes.
+    raw_store(base, 0);
+    raw_store(base + 8, 2);
+    raw_store(base + 16, 0);
+    rt_syscall4(131, base, 0, 0, 0);
+    rt_syscall(11, base, 65536, 0);
+    return 0;
+}
+// What the program asked of the OS for this thread, applied by the thread itself. The name is a
+// label: the kernel shows 15 bytes of it and a longer one is cut, never refused. Affinity and
+// priority are contracts: a refusal is the answer (attribute * 65536 + errno) and the closure does
+// not run. Background is SCHED_IDLE, high is a nice value of -10, realtime p is SCHED_FIFO at p.
+fn rt_os_thread_attr(rec: u64) -> u64 {
+    if raw_byte(rec + 384) != 0 {
+        rt_syscall(157, 15, rec + 384, 0);
+    }
+    words := raw_load(rec + 128);
+    if words != 0 {
+        r := rt_syscall(203, 0, words * 8, rec + 256);
+        if rt_error(r) {
+            return 2 * 65536 + wrapping_sub(0, r);
+        }
+    }
+    priority := raw_load(rec + 152);
+    if priority != 0 {
+        mut r = 0;
+        // struct sched_param is one int; the record's site scratch is free until a failure.
+        raw_store(rec + 200, 0);
+        if priority == 1 {
+            r = rt_syscall(144, 0, 5, rec + 200);
+        } else {
+            if priority == 2 {
+                r = rt_syscall(141, 0, 0, wrapping_sub(0, 10));
+            } else {
+                raw_store(rec + 200, priority - 3);
+                r = rt_syscall(144, 0, 1, rec + 200);
+            }
+        }
+        if rt_error(r) {
+            return 3 * 65536 + wrapping_sub(0, r);
+        }
+    }
+    return 0;
+}
+// Wait on `addr` while it holds `expected`, for at most `ms` milliseconds (a futex wait with a
+// relative timeout). A wake, a timeout and an interruption all just return: the caller looks again.
+fn rt_os_wait_ms(addr: u64, expected: u64, ms: u64) -> u64 {
+    if ms == 0 {
+        return 0;
+    }
+    spec := rt_alloc(16);
+    raw_store(spec, rt_div(ms, 1000));
+    raw_store(spec + 8, (ms % 1000) * 1000000);
+    rt_syscall4(202, addr, 128, expected, spec);
+    rt_free(spec);
+    return 0;
+}
+// clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME): an interrupted sleep is simply asked again,
+// because the deadline does not move.
+fn rt_os_sleep_until(deadline_ms: u64) -> u64 {
+    spec := rt_alloc(16);
+    raw_store(spec, rt_div(deadline_ms, 1000));
+    raw_store(spec + 8, (deadline_ms % 1000) * 1000000);
+    while rt_syscall4(230, 1, 1, spec, 0) == wrapping_sub(0, 4) {}
+    rt_free(spec);
+    return 0;
 }
 fn rt_os_ctx_enter(t: u64) -> u64 {
     w := raw_tp_get();

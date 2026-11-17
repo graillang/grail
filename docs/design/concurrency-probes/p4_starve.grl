@@ -1,0 +1,29 @@
+use host;
+use pool;
+fn blocker(n: u64, c: u64) -> u64 {
+    r := pool::run<u64>(1, |i: u64| -> u64 { host::sleep_ms(300); return host::worker_id(); });
+    return r[0];
+}
+fn ticker(n: u64, c: u64) -> u64 {
+    mut worst = 0;
+    mut last = host::now_ms();
+    for i in 40 {
+        host::sleep_ms(10);
+        now := host::now_ms();
+        if now - last > worst { worst = now - last; }
+        last = now;
+    }
+    return worst;
+}
+fn body<s>(sc: (&s Scope<u64>), c: u64) -> u64 {
+    t := spawn(sc, 0, ticker);
+    host::sleep_ms(30);
+    mut hs = Task<u64>[];
+    for i in host::workers() { hs.push(spawn(sc, i, blocker)); }
+    while let Some(h) = hs.pop() { join(h); }
+    return join(t);
+}
+fn main() {
+    w := host::workers();
+    println(format("workers={}: a 10 ms ticker task beside {} tasks that each wait for a 300 ms pool job: worst tick gap {} ms", w, w, task_scope(0, body)));
+}

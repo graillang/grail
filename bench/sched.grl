@@ -1,0 +1,107 @@
+// Scheduler micro-benchmarks for docs/design/concurrency-model.md: what a join, a job handle and a
+// task cost, a nested-join recursion against its serial form, and how long a timer task stalls
+// while every worker's task waits for a job. `name value unit` lines; not a corpus expectation.
+use host;
+use pool;
+
+fn one(n: u64, c: u64) -> u64 { return n + 1; }
+fn seq<s>(sc: (&s Scope<u64>), count: u64) -> u64 {
+    mut total = 0;
+    for i in count {
+        t := spawn(sc, i, one);
+        total += join(t);
+    }
+    return total;
+}
+fn burst<s>(sc: (&s Scope<u64>), count: u64) -> u64 {
+    mut hs = Task<u64>[];
+    for i in count { hs.push(spawn(sc, i, one)); }
+    mut total = 0;
+    while let Some(h) = hs.pop() { total += join(h); }
+    return total;
+}
+fn fib(n: u64) -> u64 {
+    if n < 2 { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+// 28 656 joins for n = 32 with the cutoff at 12.
+fn pfib(n: u64) -> u64 {
+    if n < 12 { return fib(n); }
+    p := pool::join<u64,u64>(|| -> u64 pfib(n - 1), || -> u64 pfib(n - 2));
+    return p.first + p.second;
+}
+// The same recursion started from inside a task, which is where an engine's systems fork.
+fn pfib_task(n: u64, c: u64) -> u64 { return pfib(n); }
+fn in_task<s>(sc: (&s Scope<u64>), n: u64) -> u64 {
+    t := spawn(sc, n, pfib_task);
+    return join(t);
+}
+// Joins made by a stack that is itself a worker's: the number nested parallelism pays per level.
+fn joins_here(n: u64, c: u64) -> u64 {
+    mut acc = 0;
+    t0 := host::now_us();
+    for i in n {
+        p := pool::join<u64,u64>(|| -> u64 1, || -> u64 2);
+        acc += p.first;
+    }
+    return (host::now_us() - t0) * 1000 / n + acc - n;
+}
+fn join_on_worker<s>(sc: (&s Scope<u64>), n: u64) -> u64 {
+    t := spawn(sc, n, joins_here);
+    return join(t);
+}
+fn blocker(n: u64, c: u64) -> u64 {
+    r := pool::run<u64>(1, |i: u64| -> u64 { host::sleep_ms(300); return i; });
+    return r[0];
+}
+fn ticker(n: u64, c: u64) -> u64 {
+    mut worst = 0;
+    mut last = host::now_us();
+    for i in 40 {
+        host::sleep_ms(10);
+        now := host::now_us();
+        if now - last > worst { worst = now - last; }
+        last = now;
+    }
+    return worst;
+}
+fn stall<s>(sc: (&s Scope<u64>), c: u64) -> u64 {
+    t := spawn(sc, 0, ticker);
+    host::sleep_ms(30);
+    mut hs = Task<u64>[];
+    for i in host::workers() { hs.push(spawn(sc, i, blocker)); }
+    while let Some(h) = hs.pop() { join(h); }
+    return join(t);
+}
+fn main() {
+    n := 100000;
+    pool::run<u64>(4, |i: u64| -> u64 i);
+    task_scope(1, seq);
+    mut acc = 0;
+    t0 := host::now_us();
+    for i in n { acc += pool::wait(pool::spawn<u64>(|| -> u64 1)); }
+    t1 := host::now_us();
+    println("job_spawn_wait {} ns", (t1 - t0) * 1000 / n);
+    for i in n { p := pool::join<u64,u64>(|| -> u64 1, || -> u64 2); acc += p.first; }
+    t2 := host::now_us();
+    println("join {} ns", (t2 - t1) * 1000 / n);
+    println("join_on_worker {} ns", task_scope(n, join_on_worker));
+    acc += task_scope(n, seq);
+    t3 := host::now_us();
+    println("task_spawn_join {} ns", (t3 - t2) * 1000 / n);
+    acc += task_scope(n, burst);
+    t4 := host::now_us();
+    println("task_burst {} ns", (t4 - t3) * 1000 / n);
+    s := fib(32);
+    t5 := host::now_us();
+    println("fib32_serial {} us", t5 - t4);
+    q := pfib(32);
+    t6 := host::now_us();
+    println("fib32_join_main {} us", t6 - t5);
+    r := task_scope(32, in_task);
+    t7 := host::now_us();
+    println("fib32_join_task {} us", t7 - t6);
+    assert(s == q);
+    assert(s == r);
+    println("ticker_stall {} us", task_scope(0, stall));
+}

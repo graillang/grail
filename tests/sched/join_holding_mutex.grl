@@ -1,0 +1,60 @@
+// A stack that holds a mutex and waits in a join must not run a job that wants that mutex. One
+// task holds the lock across a parallel pass whose leaves do not touch it; other tasks fork jobs
+// that take the same lock for an instant. A waiter that helped with any job could pick one of
+// those up on top of the lock holder's own frames, where it would wait forever for a lock its own
+// stack holds. A waiter takes only work forked by its own stolen job, so that cannot happen; when
+// locks are tracked per record a waiter that holds one will not help at all.
+use host;
+use pool;
+
+struct Shared {
+    lock: Mutex<u64>,
+    done: Atomic<u64>
+}
+fn spin(n: u64) -> u64 {
+    mut v = 1;
+    for i in n { v = (v * 31 + i) % 1000003; }
+    return v;
+}
+fn bump(total: &mut u64, by: u64) -> u64 {
+    *total += by;
+    return *total;
+}
+// Runs with the lock held: sixteen leaves that never touch the lock, several times over.
+fn held_pass(total: &mut u64, rounds: u64) -> u64 {
+    for round in rounds {
+        parts := pool::run<u64>(16, |i: u64| -> u64 spin(20000 + i));
+        for i in parts.len() { *total += parts[i] % 2; }
+    }
+    return *total;
+}
+fn holder(n: u64, sh: &Shared) -> u64 {
+    r := sh.lock.lock_with(40, held_pass);
+    sh.done.store(1);
+    return r;
+}
+// Forks jobs that each take the lock for an instant, until the holder is done.
+fn locker(n: u64, sh: &Shared) -> u64 {
+    mut count = 0;
+    while sh.done.load() == 0 {
+        got := parallel_map(u64[1, 1, 1, 1], sh, lock_once);
+        count += got.len();
+    }
+    return count;
+}
+fn lock_once(by: u64, sh: &Shared) -> u64 {
+    return sh.lock.lock_with(by, bump);
+}
+fn body<s>(sc: (&s Scope<&Shared>), sh: &Shared) -> u64 {
+    a := spawn(sc, 0, holder);
+    b := spawn(sc, 1, locker);
+    c := spawn(sc, 2, locker);
+    join(a);
+    join(b);
+    join(c);
+    return 1;
+}
+fn main() {
+    sh := Shared { lock: Mutex::new(0), done: Atomic::new(0) };
+    println(task_scope(&sh, body));
+}

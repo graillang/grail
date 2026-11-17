@@ -75,6 +75,40 @@ interface marked private, usable by the generic's code and still not nameable.
 The Grail-written compiler is the sole implementation; declarations, generic bodies and
 dependencies are checked before an output artifact is replaced.
 
+## Module values: `const` and `static`
+
+A module can hold two kinds of named value. A `const` is a value: the compiler pastes it into every
+place that names it. A `static` is an object: one of it exists, at one address, and every reader
+borrows that one.
+
+{{example:statics}}
+
+- `static NAME: T = init;` always writes its type. Today a static is *baked*: its initialiser is a
+  constant expression or `@f(...)`, it is computed while compiling, and the program carries it as
+  read-only data. Nothing runs before `main`, nothing is allocated when it is read, and nothing is
+  freed when the program ends.
+- Reading a number or a `bool` static copies the word. Reading any other static borrows it:
+  `SQUARES[3]`, `SQUARES.len()` and `sum(SQUARES)` (a `&u64[]` parameter) all look at the one
+  table, and `r := SQUARES;` binds a borrow of it. `SQUARES.copy()` is an owned vector to change.
+- A static never changes. `static mut` does not exist, `X = 2` and `X.push(..)` are compile errors,
+  and passing it where an owned `u64[]` is expected is a type error (`found &u64[]`).
+- Its type must be shareable, because every thread can read it, and must not hold a borrow. A
+  thread-affine handle or a reference is refused at the declaration.
+- A static may be a plain record, or a table of them, as long as every field is something a
+  static can hold: `static FLAGS: Flag[] = @flags();` builds the table while compiling and the
+  program reads `FLAGS[i].name` without building anything.
+- `pub static` exports it like a function. Another module reads `table::SQUARES`; its interface
+  file carries the static's name and type, and the object code lives only in the module that
+  declares it.
+
+Which one to use: `const` for numbers you compare against and fold into other constants
+(`@if`, `size_of`, array bounds); `static` for a table, a text or anything that should exist once.
+A `const` string or table is rebuilt at every read - a copy, an allocation - which a static is not.
+
+Statics computed while the program runs (a `Mutex`, a `thread::Local`, a table built from the
+environment) are designed but not built yet; until then such a declaration is a compile error that
+says so (`docs/design/module-values.md`).
+
 ## Building modules: the work a build can skip
 
 There is no Rust comparison in this section, and that is not an omission: these are build-driver

@@ -1,0 +1,45 @@
+// PENDING on gaps12-sync (rt_held_settle): register as `sched-job-fails-holding-mutex-while-sibling-waits`
+// when locks are tracked per record. A job fails inside `lock_with` while its sibling waits for the
+// same lock. The failing stack must release and poison the lock before it drains (waits for the
+// sibling); without that the sibling waits for the lock and the drain waits for the sibling.
+// Expected: the task's try_join reports the index failure; the sibling's lock_with fails as
+// poisoned; the process keeps running.
+use host;
+use pool;
+
+fn fail_inside(v: &mut u64, i: u64) -> u64 {
+    host::sleep_ms(50);
+    bad := u64[1];
+    return bad[i];
+}
+fn bump(v: &mut u64, i: u64) -> u64 {
+    *v += i;
+    return *v;
+}
+fn leaf(i: u64, m: &Mutex<u64>) -> u64 {
+    if i == 1 {
+        return m.lock_with(5, fail_inside);
+    }
+    host::sleep_ms(10);
+    return m.lock_with(1, bump);
+}
+fn work(n: u64, m: &Mutex<u64>) -> u64 {
+    r := parallel_map(u64[0, 1], m, leaf);
+    return r[0];
+}
+fn body<s>(sc: (&s Scope<&Mutex<u64>>), m: &Mutex<u64>) -> u64 {
+    t := spawn(sc, 0, work);
+    match try_join(t) {
+        v: u64 => println(v),
+        f: TaskFailure => {
+            host::print(f.message);
+            host::print(view("\n"));
+        }
+    }
+    return 1;
+}
+fn main() {
+    m := Mutex::new(0);
+    println(task_scope(&m, body));
+    println("still running");
+}

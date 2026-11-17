@@ -1,0 +1,136 @@
+unsafe module runtime;
+// The per-thread allocator caches, driven directly (docs/design/allocator.md): blocks freed on a
+// thread that did not allocate them, threads that end with blocks still in their cache, view
+// records crossing threads, and the live count the end-of-main leak check reads.
+
+// Bytes of every arena the allocator has mapped: what "memory stays bounded" is measured with.
+fn at_mapped() -> u64 {
+    mut total = 0;
+    rt_allocator_lock();
+    mut arena = raw_load(raw_state() + 32);
+    while arena != 0 {
+        total = total + raw_load(arena + 8);
+        arena = raw_load(arena);
+    }
+    rt_allocator_unlock();
+    return total;
+}
+// Fills table[0..n) with blocks of `size` bytes, each proved zero and then dirtied.
+fn at_fill(table: u64) -> u64 {
+    n := raw_load(table);
+    size := raw_load(table + 8);
+    mut i = 0;
+    while i < n {
+        b := rt_alloc(size);
+        mut j = 0;
+        while j < size {
+            assert(raw_load(b + j) == 0);
+            raw_store(b + j, 18446744073709551615);
+            j = j + 8;
+        }
+        raw_store(table + 16 + i * 8, b);
+        i = i + 1;
+    }
+    return 0;
+}
+fn at_drain(table: u64) -> u64 {
+    n := raw_load(table);
+    mut i = 0;
+    while i < n {
+        rt_free(raw_load(table + 16 + i * 8));
+        i = i + 1;
+    }
+    return 0;
+}
+fn at_drain_views(table: u64) -> u64 {
+    n := raw_load(table);
+    mut i = 0;
+    while i < n {
+        rt_view_free(raw_load(table + 16 + i * 8));
+        i = i + 1;
+    }
+    return 0;
+}
+fn at_once(unused: u64) -> u64 {
+    rt_free(rt_alloc(24));
+    return 0;
+}
+// A single-producer ring of 1024 words: 0 head (consumer), 8 tail (producer), 16.. the slots.
+fn at_produce(ring: u64) -> u64 {
+    mut i = 0;
+    while i < 300000 {
+        b := rt_alloc(48);
+        assert(raw_load(b) == 0);
+        raw_store(b, i + 1);
+        tail := raw_atomic_load(ring + 8);
+        while tail - raw_atomic_load(ring) == 1024 {
+            rt_syscall(24, 0, 0, 0);
+        }
+        raw_store(ring + 16 + (tail & 1023) * 8, b);
+        raw_atomic_store(ring + 8, tail + 1);
+        i = i + 1;
+    }
+    return 0;
+}
+pub fn audit() -> u64 {
+    before := rt_live();
+    table := rt_alloc(16 + 600 * 8);
+    raw_store(table, 600);
+    raw_store(table + 8, 40);
+    // Allocated by a thread that ends, freed here; then allocated here, freed by a thread that
+    // ends with every one of them in its cache. 200 rounds must not map more than the first 20.
+    mut settled = 0;
+    mut round = 0;
+    while round < 200 {
+        rt_thread_join(rt_thread_spawn(at_fill, table));
+        assert(rt_live() == before + 601);
+        at_drain(table);
+        at_fill(table);
+        rt_thread_join(rt_thread_spawn(at_drain, table));
+        assert(rt_live() == before + 1);
+        if round == 20 {
+            settled = at_mapped();
+        }
+        round = round + 1;
+    }
+    assert(at_mapped() == settled);
+    // View records (a block's address plus 8) made here and dropped on another thread.
+    mut i = 0;
+    while i < 600 {
+        raw_store(table + 16 + i * 8, rt_view_record());
+        i = i + 1;
+    }
+    rt_thread_join(rt_thread_spawn(at_drain_views, table));
+    assert(rt_live() == before + 1);
+    // Many threads that allocate once and end.
+    i = 0;
+    while i < 300 {
+        rt_thread_join(rt_thread_spawn(at_once, 0));
+        i = i + 1;
+    }
+    assert(rt_live() == before + 1);
+    assert(at_mapped() == settled);
+    // A producer thread and this thread as the consumer: 300000 blocks pass through a ring that
+    // holds 1024, so the arenas may grow by a class's first mapping and no further.
+    ring := rt_alloc(16 + 1024 * 8);
+    producer := rt_thread_spawn(at_produce, ring);
+    mut got = 0;
+    while got < 300000 {
+        head := raw_atomic_load(ring);
+        if head == raw_atomic_load(ring + 8) {
+            rt_syscall(24, 0, 0, 0);
+        } else {
+            b := raw_load(ring + 16 + (head & 1023) * 8);
+            assert(raw_load(b) == got + 1);
+            rt_free(b);
+            raw_atomic_store(ring, head + 1);
+            got = got + 1;
+        }
+    }
+    rt_thread_join(producer);
+    assert(at_mapped() < settled + 3145728);
+    rt_free(ring);
+    rt_free(table);
+    assert(rt_live() == before);
+    return rt_live() - before;
+}

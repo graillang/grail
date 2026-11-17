@@ -1,0 +1,34 @@
+// Job records are recycled across classes: three tasks fork the same nested work as Frame, Normal
+// and Background at once, over and over, so records freed by one class's joins are taken by
+// another's forks while stale entries for them still sit in the old class's queues. A stale entry
+// must be skipped, not claimed (claiming would run a job at the wrong priority, or twice); the
+// checksums prove every job ran exactly once.
+use pool;
+
+fn fib(n: u64) -> u64 {
+    if n < 2 { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+fn pfib(n: u64) -> u64 {
+    if n < 8 { return fib(n); }
+    p := pool::join<u64,u64>(|| -> u64 pfib(n - 1), || -> u64 pfib(n - 2));
+    return p.first + p.second;
+}
+fn rounds(class: u64, unused: u64) -> u64 {
+    mut total = 0;
+    for i in 40 {
+        if class == 0 { total += pool::with_class<u64>(pool::Class::Frame, || -> u64 pfib(18)); }
+        if class == 1 { total += pool::with_class<u64>(pool::Class::Normal, || -> u64 pfib(18)); }
+        if class == 2 { total += pool::with_class<u64>(pool::Class::Background, || -> u64 pfib(18)); }
+    }
+    return total;
+}
+fn body<s>(sc: (&s Scope<u64>), unused: u64) -> u64 {
+    a := spawn(sc, 0, rounds);
+    b := spawn(sc, 1, rounds);
+    c := spawn(sc, 2, rounds);
+    return join(a) + join(b) + join(c);
+}
+fn main() {
+    println(task_scope(0, body));
+}

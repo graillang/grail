@@ -1,0 +1,34 @@
+module sched;
+use host;
+
+// The scheduler's settings, applied by `start` before anything has started the scheduler (the first
+// task, job or parallel call does). A field left at zero takes the default.
+//
+//   workers         worker threads (default: one per CPU; GRAIL_WORKERS in the environment wins).
+//                   An engine that pins its own render and audio threads asks for fewer.
+//   background_cap  workers that may take Background jobs at once (default: a quarter, at least one).
+//   idle_spin_us    how long an idle worker keeps looking for work before it sleeps; trades CPU for
+//                   wake-up latency (default 0: sleep at once).
+//   pin_workers     pin worker i to CPU i (Linux; elsewhere it is ignored).
+//   warm_stacks     task stacks each worker maps at start, so a frame never maps one (Linux, macOS).
+//   seed            the steal order's seed, for reproducible interleavings with `workers: 1`.
+pub struct Config {
+    workers: u64,
+    background_cap: u64,
+    idle_spin_us: u64,
+    pin_workers: bool,
+    warm_stacks: u64,
+    seed: u64
+}
+
+pub fn defaults() -> Config {
+    return Config { workers: 0, background_cap: 0, idle_spin_us: 0, pin_workers: false, warm_stacks: 0, seed: 0 };
+}
+
+// Apply `config`. True when it was applied; false when the scheduler had already started, or a
+// config had already been applied - settings arrive once, before the first parallel work.
+pub fn start(config: Config) -> bool {
+    mut pin: u64 = 0;
+    if config.pin_workers { pin = 1; }
+    return host::sched_start(config.workers, config.background_cap, pin, config.warm_stacks, config.seed, config.idle_spin_us) == 0;
+}

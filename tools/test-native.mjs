@@ -100,6 +100,14 @@ function parseArguments(argv) {
   return options;
 }
 
+// A case's arguments. One that climbs out of the case's directory to the repository
+// (`../../../../tests/lib/zlib`) was written for the unstriped layout, where a case directory is four
+// levels down; a striped run (`--jobs N`) is one level deeper, so the path is made absolute here
+// instead of meaning a different place depending on how the run was split.
+function caseArgs(test) {
+  return (test.args ?? []).map(arg => arg.startsWith('../../../../') ? join(root, arg.slice('../../../../'.length)) : arg);
+}
+
 // ---- the corpus's own invariants -------------------------------------------------------------
 // Kept internal source on the modern dialect, including comments and diagnostics.
 function checkSources(cases) {
@@ -131,6 +139,9 @@ function selected(test, position, options) {
   return true;
 }
 function hostOnly(test, target) {
+  // `pending` names the work a case waits for: it states the behaviour that work must produce,
+  // fails until then, and is skipped rather than weakened. Removing the field is how it is armed.
+  if (test.pending) return true;
   if (test.targets && !test.targets.includes(target)) return true;
   if (test.backends && !test.backends.includes(process.env.GRAIL_BACKEND ?? 'native')) return true;
   return false;
@@ -436,10 +447,10 @@ function runCase(test, position, context) {
     // The interface build is a second program from the same sources; it has to behave the same.
     const interfaceExecutable = viaInterface ? compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', runtime, osRuntime, name: 'program-interface', interfaces: viaInterface.ifaces, extra: caseRoots }) : null;
     if (test.compileOnly) { result.outcome = 'pass'; return result; }
-    // A case may pin the environment it needs (`"env": {"GRAIL_POOL_WORKERS": "1"}`), which is how a
-    // test proves a pool size the host would not otherwise choose. Everything else is inherited.
+    // A case may pin the environment it needs (`"env": {"GRAIL_WORKERS": "1"}`), which is how a
+    // test proves a worker count the host would not otherwise choose. Everything else is inherited.
     const options = test.env ? { cwd: directory, env: { ...process.env, ...test.env } } : { cwd: directory };
-    const ran = execute(executable, test.args ?? [], target, options);
+    const ran = execute(executable, caseArgs(test), target, options);
     if (ran.error) throw ran.error;
     observed.stdout = ran.stdout.toString();
     observed.stderr = ran.stderr.toString();
@@ -464,7 +475,7 @@ function runCase(test, position, context) {
       }
     }
     if (interfaceExecutable) {
-      const ifaceResult = execute(interfaceExecutable, test.args ?? [], target, options);
+      const ifaceResult = execute(interfaceExecutable, caseArgs(test), target, options);
       assert.equal(ifaceResult.status, ran.status, `${test.name}: the interface build exits differently: ${ifaceResult.stderr}`);
       assert.equal(ifaceResult.stdout.toString(), ran.stdout.toString(), `${test.name}: the interface build prints something else`);
     }
@@ -630,7 +641,13 @@ function spawnStripe(options, argv, stripe, compiler) {
     const resultFile = join(root, `.work/native-tests/stripe-${stripe}-${process.pid}.json`);
     const env = {
       ...process.env,
+      // The stripe runs exactly this compiler. It used to receive it only as GRAIL_COMPILER, which
+      // buildCompiler() reads as the *base* to build with, so every stripe built a second compiler
+      // from it into one shared directory at once, and each finished build replaced the file the
+      // other stripes were already running - their /proc/self/exe went "(deleted)" and a
+      // compile-time probe, which re-runs the compiler by that path, failed.
       GRAIL_COMPILER: compiler,
+      GRAIL_TEST_COMPILER: compiler,
       GRAIL_TEST_JOBS: '1',
       GRAIL_TEST_STRIPE: `${stripe}/${options.jobs}`,
       GRAIL_TEST_RESULT_FILE: resultFile,
@@ -731,7 +748,7 @@ if (!isChild && options.jobs > 1) {
   process.exit(crashed || (options.update ? unresolved : merged.failed) ? 1 : 0);
 }
 
-const compiler = buildCompiler();
+const compiler = process.env.GRAIL_TEST_COMPILER ?? buildCompiler();
 // Key by the compiler's content-addressed directory, not its file name: every build is named
 // `grail`. The markers are shared by every stripe: a pass is a property of the compiler, not of the
 // process that observed it.

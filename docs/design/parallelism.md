@@ -236,12 +236,17 @@ room for that even if priorities are not implemented yet.
 
 ### The runtime: one bounded work-stealing pool
 
+> **Superseded.** The pool described in this subsection no longer exists: jobs run on the
+> scheduler's own workers (`docs/design/scheduler.md`, "Jobs"; `docs/design/concurrency-model.md`,
+> stage 1). `GRAIL_POOL_WORKERS` became `GRAIL_WORKERS`, a waiting thread now runs its own forks,
+> and `rt_pool_*` is gone. What follows is the record of what was built first and why.
+
 `compiler/runtime.grl` owns one process-wide pool, created by the first parallel call and never
 destroyed. Reused rather than reinvented:
 
 - `rt_thread_spawn_detached` - the same persistent-thread primitive the green scheduler and the
   blocking offload path use; workers are plain OS threads with 1 MiB stacks and a guard page.
-- `rt_mutex_lock`/`rt_mutex_unlock` (futex), `rt_spin_lock`, `rt_atomic_*`, `rt_alloc`/`rt_free`,
+- `rt_mutex_lock`/`rt_mutex_unlock` (futex), `rt_spin_lock`, the `raw_atomic_*` intrinsics, `rt_alloc`/`rt_free`,
   `raw_map` for infrastructure that must not count as user allocation, `rt_cpus`, `rt_abort`.
 - `rt_offload` is untouched and remains the blocking path: a blocking foreign call never runs on a
   pool worker, so it cannot exhaust the CPU pool.
@@ -357,8 +362,9 @@ What this does **not** buy, and must not be read as buying:
 
 Tested by native cases (`tests/native-cases.json`, fixtures in `tests/pool/`):
 
-- nested parallel work completes on a **one-worker** pool (`pool-nested-one-worker`,
-  `GRAIL_POOL_WORKERS=1`) - the helping scheduler is the only thing that makes that non-deadlocking;
+- nested parallel work completes with **one worker** (`pool-nested-one-worker`,
+  `GRAIL_WORKERS=1`) - a waiter that runs its own forks is the only thing that makes that
+  non-deadlocking;
 - one long job among trivial ones does not deadlock and its result lands in its own slot
   (`pool-uneven-work-no-deadlock`);
 - results are independent of completion order (`pool-map-input-order`: job 0 sleeps longest);
@@ -389,7 +395,7 @@ Designed but not observable in safe code yet:
 
 ### Measured (24 reported cores, 3M CPU-bound u64 elements, 1 job vs 4 jobs, best of two rounds)
 
-| `GRAIL_POOL_WORKERS` | one job | four jobs | speedup |
+| workers | one job | four jobs | speedup |
 |---:|---:|---:|---:|
 | 1 | 27 ms | 28 ms | 0.96x (assertion fails, as it must) |
 | 2 | 28 ms | 15 ms | 1.9x |
@@ -496,7 +502,7 @@ both of which are structured.
 
 `pool::for_chunks` (owned) against `parallel_for_chunks` (in place), milliseconds:
 
-| `GRAIL_POOL_WORKERS` | owned 1 chunk | owned 8 | in place 1 chunk | in place 8 | in-place speedup |
+| workers | owned 1 chunk | owned 8 | in place 1 chunk | in place 8 | in-place speedup |
 |---:|---:|---:|---:|---:|---:|
 | 1 | 104 | 107 | 45 | 48 | 0.94x |
 | 2 | 99 | 80 | 44 | 31 | 1.4x |
@@ -514,7 +520,7 @@ single-job gap (at least 1.33x) and the parallel one (eight in-place chunks at l
 than one, above four cores), and prints all four times to stderr.
 
 `parallel_map` is untouched: the existing `pool-speedup-four-workers` case measures 33 ms (one job)
-and 11 ms (four jobs) at `GRAIL_POOL_WORKERS=4`, against 33 ms and 12 ms before this change.
+and 11 ms (four jobs) with four workers, against 33 ms and 12 ms before this change.
 
 ### What stage 4 still needs
 

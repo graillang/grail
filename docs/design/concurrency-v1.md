@@ -12,7 +12,7 @@ parallel name. The initial platform set is Linux x86-64, AArch64 and RV64 with a
 - Numeric/unit values qualify; collections and aggregates require the corresponding capability
   for every contained value. A shared reference requires a Share referent. Exclusive references
   can transfer only with exclusive authority and a lifetime that outlasts the joined task.
-- An opaque `atomic<num>` owns one aligned atomic word. Every access to its contents is atomic;
+- An opaque `Atomic<T>` (T an integer of 8 to 64 bits or `bool`) owns one aligned atomic word. Every access to its contents is atomic;
   safe code cannot obtain a plain mutable reference to that word. An atomic field does not grant
   write permission to surrounding fields or make an otherwise non-shareable aggregate Share.
 - Shared mutation of non-atomic values requires a typed synchronization primitive. A lock guard
@@ -21,11 +21,17 @@ parallel name. The initial platform set is Linux x86-64, AArch64 and RV64 with a
 - Task closures/callables, explicit context, arguments and results must satisfy transfer rules.
   Generic bodies cannot assume Send/Share without a checked bound. Unknown types stay affine.
 
-Atomic methods will encode permissible ordering (e.g. acquire loads and release stores), so a
-release-load/acquire-store is not an accidentally accepted ordering combination. Sequentially
-consistent load/store/CAS are the initial baseline; stronger-than-requested lowering is valid but
-must not be sold as an optimized weak-order implementation. Integer atomic fetch arithmetic is
-explicitly modular. CAS is strong unless an API explicitly says weak.
+Atomic methods encode their ordering in the name (stage 7, docs/design/concurrency-stages-5-7.md):
+`load`/`load_relaxed`/`load_acquire`, `store`/`store_relaxed`/`store_release`, and every
+read-modify-write and compare-exchange bare or with `_relaxed`, `_acquire`, `_release` or
+`_acqrel`. A release load or an acquire store has no name, so it is a "no method" error rather than
+an accepted combination. The bare name is sequentially consistent. Each ordering is lowered as
+itself on every target and in LLVM IR (no ordering is carried as a stronger fence), and the text
+optimiser treats every atomic op as a barrier. Integer atomic fetch arithmetic is modular at the
+element's width; `fetch_min`/`fetch_max` take their signedness from the element type. CAS is
+strong (`compare_exchange`, returning the value seen) unless the API says weak
+(`compare_exchange_weak`, returning whether it stored), and a failure ordering is derived from the
+success ordering as C++ derives it.
 
 ## Structured task lifetime
 
@@ -68,7 +74,7 @@ or exposing Future state machines. This does **not** erase scheduling semantics:
   process, so two tasks failing at once print one message, not two. The main thread, an offload
   helper and a thread foreign code created raise SIGABRT on POSIX (the platform's cleanup-free exit
   then follows: `exit_group` on Linux, `TerminateProcess` on Windows, `_exit` on macOS); a scheduler
-  or pool worker exits with status 134 directly, because a signal raised from one of several
+  worker (and any thread inside a parallel region) exits with status 134 directly, because a signal raised from one of several
   threads that may fail together is delivered to whichever thread the kernel picks and can race the
   exit. `exit(2)` and `ExitProcess` are never used on this path because they run atexit handlers,
   C++ destructors or DLL detach. This work does not claim panic isolation or unwinding that the

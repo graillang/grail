@@ -114,8 +114,11 @@ ok('every header fact is a vector kind (2/3/4)',
 ok('the accessor gets a typed sibling', /define internal \{i64, i64\} @"rt_slot\.h2w8"/.test(f1ir));
 ok('the sibling states the header is 24 bytes at eight-byte alignment',
   /define internal \{i64, i64\} @"rt_slot\.h2w8"\(ptr nocapture nofree dereferenceable\(24\) align 8 %a0/.test(f1ir));
-ok('a fact-carrying site passes a real ptr', /\(ptr nocapture nofree dereferenceable\(24\) align 8 %t\d+/.test(f1ir));
-ok('the header fields are passed in, not re-loaded', /dereferenceable\(24\) align 8 %t\d+, i64 %t\d+, i64 %t\d+, i64 %t\d+, i64 %t\d+, i64 %t\d+, i64 %t\d+, i64 %t\d+\)/.test(f1ir));
+// An element address under a fact is written in place: the bounds check against the hoisted
+// `len` and a `getelementptr` on the hoisted `data` pointer, so neither field is re-loaded and the
+// address keeps its provenance (the sibling stays for the accessors that return a value).
+ok('a fact-carrying element address is a getelementptr on the hoisted data pointer',
+  /= load ptr, ptr %t\d+, align 8/.test(f1ir) && /getelementptr i8, ptr %t\d+, i64 %t\d+\n%t\d+ = ptrtoint ptr/.test(f1ir));
 ok('the header loads are `align 8`', /load i64, ptr %t\d+, align 8/.test(f1ir));
 // A vector may still grow, so the lowering claims nothing about its header being invariant: the
 // hoist is the two loads it emits itself, not a promise to LLVM.
@@ -133,6 +136,28 @@ const wrongRun = run([wrong.exe]);
 ok('a wrong fact aborts under --verify-facts', wrongRun.status !== 0,
   `exit ${wrongRun.status}, printed ${JSON.stringify(wrongRun.stdout.trim())}`);
 ok('the right facts do not abort', run([f1checked.exe]).status === 0);
+
+// ---- SEQ-STABLE: a slice's descriptor is read once per function, and a forged claim aborts ----
+// docs/design/release-builds-and-parity.md. A slice (`&[T]`, `&mut [T]`) gets the F1 kind 5, its
+// `data` is loaded as a pointer at the one write of its slot, and every element address in the
+// function is a `getelementptr` on it. `--f1-what=5` claims the same of every binding, including a
+// vector that grows inside the loop that reads it; under --verify-facts each access re-reads the
+// header and the first one after the growth aborts.
+const stableWant = '198.5\n5175\n781\n';
+const stable = build('seq-stable', 'seq_stable.grl', { backend: 'llvm' });
+const stableRun = run([stable.exe]);
+ok('slice loops print the reference values', stableRun.stdout === stableWant, JSON.stringify(stableRun.stdout));
+const stableIr = readFileSync(stable.ll, 'utf8');
+ok('a slice element address is a getelementptr on the hoisted data pointer',
+  /= load ptr, ptr %t\d+, align 8/.test(stableIr) && /getelementptr i8, ptr %t\d+, i64 %t\d+/.test(stableIr));
+const stableChecked = build('seq-stable-verify', 'seq_stable.grl', { backend: 'llvm', verifyFacts: true });
+const stableCheckedRun = run([stableChecked.exe]);
+ok('slice facts hold under --verify-facts', stableCheckedRun.status === 0 && stableCheckedRun.stdout === stableWant,
+  `exit ${stableCheckedRun.status}, printed ${JSON.stringify(stableCheckedRun.stdout)}`);
+const forged = build('seq-stable-forged', 'seq_stable.grl', { backend: 'llvm', verifyFacts: true, extra: ['--f1-what=5'] });
+const forgedRun = run([forged.exe]);
+ok('a forged SEQ-STABLE fact aborts under --verify-facts', forgedRun.status !== 0,
+  `exit ${forgedRun.status}, printed ${JSON.stringify(forgedRun.stdout.trim())}`);
 
 // ---- the range fact: a proved index, the check removed, and the check put back ----
 // `u8[0; 10]` gives the analysis a literal length and `while i < 5` bounds the index, so every access

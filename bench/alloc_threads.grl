@@ -1,0 +1,48 @@
+// Allocator scaling: W pool workers each build and drop small vectors, records and texts. Nothing
+// is shared between the jobs except the allocator, so the rate should grow with W up to the core
+// count. Prints one line per W: workers, million allocate/free pairs per second, speed-up over W=1.
+// Run it:  grail build bench/alloc_threads.grl -o /tmp/alloc_threads && /tmp/alloc_threads
+// It has no C twin, so tools/bench.mjs skips it; the numbers are in docs/design/allocator.md.
+use host;
+use pool;
+struct Node {
+    id: u64,
+    name: u8[],
+    kids: u64[]
+}
+// One round is 8 allocations and 8 frees: a record's two vectors, a vector of 8 words that grows
+// twice (32, 64 and 96-byte classes), a text, and their headers.
+fn churn(rounds: u64) -> u64 {
+    mut total = 0;
+    for r in rounds {
+        mut v = u64[];
+        for i in 9 {
+            v.push(r + i);
+        }
+        mut name = u8[];
+        name.push(65);
+        node := Node { id: r, name: name, kids: u64[r, r + 1] };
+        mut held = Node[];
+        held.push(node);
+        total += v[8] + held[0].kids[1] + held[0].name.len();
+    }
+    return total;
+}
+fn main() {
+    rounds := 2000000;
+    mut base = 0;
+    for w in u64[1, 2, 4, 8, 16, 24] {
+        start := host::now_ms();
+        sums := pool::run<u64>(w, |i: u64| -> u64 churn(rounds));
+        mut elapsed = host::now_ms() - start;
+        if elapsed == 0 {
+            elapsed = 1;
+        }
+        assert(sums.len() == w);
+        rate := w * rounds * 8 / elapsed;
+        if base == 0 {
+            base = rate;
+        }
+        println("{} workers: {}.{} M pairs/s, x{}.{}", w, rate / 1000, rate % 1000 / 100, rate / base, rate * 10 / base % 10);
+    }
+}

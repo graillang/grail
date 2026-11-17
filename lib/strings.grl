@@ -3,8 +3,8 @@ use core;
 use iter;
 
 // Byte-oriented text helpers, as methods on `[u8]` (any byte text: a byte vector, a string, a view
-// or a slice reads the same way). A value receiver is viewed for the call, so `bytes.trim()` and
-// `view(bytes).trim()` are both the written `strings::trim(view(bytes))`.
+// or a slice reads the same way). A value receiver is viewed for the call, so `bytes.find(x)` and
+// `view(bytes).find(x)` are the same call.
 //
 // `starts_with`, `ends_with`, `trim`, `split`, `replace`, `repeat`, `chars`, `to_upper`, `to_lower`
 // and `contains` are the compiler's own methods on byte text; the rest live here.
@@ -147,6 +147,7 @@ impl [u8] {
     // Whether offset `i` starts a character: 0, the end, or a byte that is not a continuation byte.
     // A byte offset inside a multi-byte sequence is not a boundary, whatever the bytes say about
     // validity.
+    @no_alloc
     pub fn is_char_boundary(&self, i: u64) -> bool {
         if i == 0 {
             return true;
@@ -300,6 +301,8 @@ impl u8[][] {
 
 // ---- UTF-8 steps ------------------------------------------------------------------------------
 // The sequence length a leading byte starts, or 0 when no sequence can start with it.
+@no_alloc
+@no_panic
 pub fn utf8_width(lead: u8) -> u64 {
     if lead < 128 {
         return 1;
@@ -475,91 +478,19 @@ pub fn from_i64(value: i64) -> string {
     return out.text();
 }
 
-// ---- the free names, kept for the callers that have not moved to the postfix form -------------
-// The builtin text methods, under the names this module published first. Each is the method call.
-pub fn starts_with<a, b>(text: (&a [u8]), prefix: (&b [u8])) -> bool {
-    return text.starts_with(prefix);
-}
-pub fn ends_with<a, b>(text: (&a [u8]), suffix: (&b [u8])) -> bool {
-    return text.ends_with(suffix);
-}
-pub fn split<a>(text: (&a [u8]), separator: u64) -> u8[][] {
-    return text.split(separator);
-}
-pub fn trim<a>(text: (&a [u8])) -> u8[] {
-    return text.trim();
-}
-pub fn to_upper<a>(text: (&a [u8])) -> u8[] {
-    return text.to_upper();
-}
-pub fn to_lower<a>(text: (&a [u8])) -> u8[] {
-    return text.to_lower();
-}
-pub fn replace<a, b, d>(text: (&a [u8]), from: (&b [u8]), to: (&d [u8])) -> u8[] {
-    return text.replace(from, to);
-}
-pub fn repeat<a>(text: (&a [u8]), count: u64) -> u8[] {
-    return text.repeat(count);
-}
-pub fn find<a, b>(text: (&a [u8]), needle: (&b [u8])) -> u64? {
-    return text.find(needle);
-}
-// The same parser under its historical name, used by existing callers.
-pub fn parse_num<a>(text: (&a [u8])) -> u64? {
-    return text.parse_u64();
-}
-pub fn parse_u64<a>(text: (&a [u8])) -> u64? {
-    return text.parse_u64();
-}
-pub fn parse_i64<a>(text: (&a [u8])) -> i64? {
-    return text.parse_i64();
-}
-pub fn join_with<a, b>(parts: (&a u8[][]), separator: (&b [u8])) -> u8[] {
-    return parts.join_with(separator);
-}
-pub fn is_utf8<a>(text: (&a [u8])) -> bool {
-    return text.is_utf8();
-}
-pub fn utf8_error<a>(text: (&a [u8])) -> u64? {
-    return text.utf8_error();
-}
-pub fn char_count<a>(text: (&a [u8])) -> u64 {
-    return text.char_count();
-}
-pub fn is_char_boundary<a>(text: (&a [u8]), i: u64) -> bool {
-    return text.is_char_boundary(i);
-}
-pub fn slice_chars<a>(text: (&a [u8]), lo: u64, hi: u64) -> (&a [u8]) {
-    return text.slice_chars(lo, hi);
-}
-    // Every code point in order, lazily; invalid sequences decode to U+FFFD by maximal subpart. The
-    // iterator owns a copy of the bytes: an `iter::Iter<T>` carries no lifetime, so Grail cannot
-    // keep a borrow of the receiver alive inside it (Rust's `str::chars` borrows instead).
+// Every code point in order, lazily; invalid sequences decode to U+FFFD by maximal subpart. The
+// iterator owns a copy of the bytes: an `iter::Iter<T>` carries no lifetime, so Grail cannot keep a
+// borrow of the text alive inside it (Rust's `str::chars` borrows instead). The `.chars()` method on
+// byte text is the compiler's own and returns every code point at once, as a `char[]`.
 pub fn chars<a>(text: (&a [u8])) -> iter::Iter<char> {
-        mut bytes = text.copy();
-        mut at = 0;
-        return iter::from_fn(|| -> char? {
-            if at >= bytes.len() {
-                return None;
-            }
-            step := decode_owned(&bytes, at);
-            at = at + step.1;
-            return Some(step.0);
-        });
-    }
-pub fn char_indices<a>(text: (&a [u8])) -> iter::Iter<(u64, char)> {
-    return text.char_indices();
-}
-pub fn to_text_lossy<a>(text: (&a [u8])) -> string {
-    return text.to_text_lossy();
-}
-pub fn contains<a, b>(text: (&a [u8]), needle: (&b [u8])) -> bool {
-    if let Some(i) = text.find(needle) {
-        return true;
-    }
-    return false;
-}
-pub fn push_char<a>(out: (&a mut u8[]), c: char) {
-    out.push_char(c);
-    return ();
+    mut bytes = text.copy();
+    mut at = 0;
+    return iter::from_fn(|| -> char? {
+        if at >= bytes.len() {
+            return None;
+        }
+        step := decode_owned(&bytes, at);
+        at = at + step.1;
+        return Some(step.0);
+    });
 }
