@@ -369,32 +369,25 @@ pub fn over<T>(v: T[]) -> VecIter<T> {
 impl<T> Iterator for VecIter<T> {
     type Item = T;
     fn next(self: &mut Self) -> T? {
-        return vec_next(self);
+        if self.rev.len() == 0 {
+            return None;
+        }
+        return Some(self.rev.pop()!);
     }
-}
-// Each adapter's step, shared by its `Iterator` impl and the inherent `next` a `for` loop uses.
-fn vec_next<a, T>(it: (&a mut VecIter<T>)) -> T? {
-    if it.rev.len() == 0 {
-        return None;
-    }
-    return Some(it.rev.pop()!);
 }
 // Each adapter names its item type (`U`, `T`), so the next adapter's callback is typed by it.
 pub struct Map<I, U, F> { it: I, f: F }
 impl<I: Iterator, U, F: FnMut(I::Item) -> U> Iterator for Map<I, U, F> {
     type Item = U;
     fn next(self: &mut Self) -> U? {
-        return map_next(self);
-    }
-}
-fn map_next<a, I: Iterator, U, F: FnMut(I::Item) -> U>(m: (&a mut Map<I, U, F>)) -> U? {
-    match m.it.next() {
-        Some(x) => {
-            g := &mut m.f;
-            return Some(g(x));
-        },
-        None => {
-            return None;
+        match self.it.next() {
+            Some(x) => {
+                g := &mut self.f;
+                return Some(g(x));
+            },
+            None => {
+                return None;
+            }
         }
     }
 }
@@ -402,22 +395,22 @@ pub struct Filter<I, F> { it: I, keep: F }
 impl<I: Iterator, F: FnMut((&I::Item)) -> bool> Iterator for Filter<I, F> {
     type Item = I::Item;
     fn next(self: &mut Self) -> I::Item? {
-        return filter_next(self);
-    }
-}
-fn filter_next<a, I: Iterator, F: FnMut((&I::Item)) -> bool>(m: (&a mut Filter<I, F>)) -> I::Item? {
-    while let Some(x) = m.it.next() {
-        k := &mut m.keep;
-        if k(&x) {
-            return Some(x);
+        while let Some(x) = self.it.next() {
+            k := &mut self.keep;
+            if k(&x) {
+                return Some(x);
+            }
         }
+        return None;
     }
-    return None;
 }
 // The adapters chain as methods on each other, ending in `fold` or a `while let` loop.
 impl<T> VecIter<T> {
     pub fn next(self: &mut Self) -> T? {
-        return vec_next(self);
+        if self.rev.len() == 0 {
+            return None;
+        }
+        return Some(self.rev.pop()!);
     }
     pub fn map<U, F: FnMut(T) -> U>(self: Self, f: F) -> Map<VecIter<T>, U, F> {
         return Map { it: self, f: f };
@@ -432,7 +425,15 @@ impl<T> VecIter<T> {
 // (An inherent block over an adapter states the same parameters and bounds as its Iterator impl.)
 impl<I: Iterator, U, F: FnMut(I::Item) -> U> Map<I, U, F> {
     pub fn next(self: &mut Self) -> U? {
-        return map_next(self);
+        match self.it.next() {
+            Some(x) => {
+                g := &mut self.f;
+                return Some(g(x));
+            },
+            None => {
+                return None;
+            }
+        }
     }
     pub fn map<V, G: FnMut(U) -> V>(self: Self, g: G) -> Map<Map<I, U, F>, V, G> {
         return Map { it: self, f: g };
@@ -446,7 +447,13 @@ impl<I: Iterator, U, F: FnMut(I::Item) -> U> Map<I, U, F> {
 }
 impl<I: Iterator, F: FnMut((&I::Item)) -> bool> Filter<I, F> {
     pub fn next(self: &mut Self) -> I::Item? {
-        return filter_next(self);
+        while let Some(x) = self.it.next() {
+            k := &mut self.keep;
+            if k(&x) {
+                return Some(x);
+            }
+        }
+        return None;
     }
     pub fn map<V, G: FnMut(I::Item) -> V>(self: Self, g: G) -> Map<Filter<I, F>, V, G> {
         return Map { it: self, f: g };

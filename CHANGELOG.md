@@ -69,6 +69,29 @@
   At most 10,000 threads may be blocked in foreign calls; the next one ends the program with a
   message instead of exhausting the machine.
 
+- **SIMD vector types (S1).** `f32x4`, `f32x8`, `f64x2`, `f64x4`, `i32x4` and `i32x8`, with masks
+  `m32x4`, `m32x8`, `m64x2` and `m64x4`.
+  - They are plain values. Lane-wise `+ - * /` work on floats; wrapping `+ - *` and `& | ^` on
+    integers; `& | ^` on masks.
+  - Constructors are `splat`, `new` and `load` (from a slice or an array, one bounds check per
+    vector). Methods are `store`, `sum` (a fixed halving tree, bit-identical everywhere), `lane`,
+    `min`/`max` (the scalar NaN and tie rule) and the compares `eq ne lt le gt ge`, which give masks.
+    A mask has `select`, `any`, `all` and `not`.
+  - The LLVM backend lowers them to vector IR. A dot product runs within 5% of the same loop in C
+    with SSE2 intrinsics, its loop entirely in registers. The native backend computes the same
+    results lane by lane; packed SSE2 and NEON come later.
+  - Interfaces are format 10.
+- Fixed: an `Atomic<T>`'s element was not part of its type, so an `Atomic<u8>` could be passed where
+  an `Atomic<u64>` was expected.
+- Stack probes have a backstop: after the probe pass, any frame line (`subq $.F<n>[+K],%rsp`,
+  `framesub`, or a literal `subq`) whose frame is larger than a page without its probe is an
+  internal compiler error naming the function, so a new spelling of the frame line cannot drop the
+  probe silently again. Frames within 128 bytes of a page are probed when the saved-register area
+  carries them over it.
+
+- Fixed: `grail fmt` could break a long expression inside `<<` or `>>` (each is two `<`/`>` tokens),
+  or start a continuation line with `<`, and the output then read as a generic argument list and no
+  longer parsed. A wrapped line now never starts with `<` or `>`.
 - **Small runtime functions are inlined into every module.** A small runtime body (the scheduler's
   `rt_current`, `rt_list_set`, `rt_list_head`, ...) is now inlined where another module calls it,
   in every build shape: a per-module build carries the bodies in `runtime.facts`. A failure inside
@@ -122,6 +145,10 @@
 - Fix: stack probes were skipped for every frame since frames also save callee-saved registers
   (`subq $.F<n>+K,%rsp`); a frame over a page could step over the guard page again. The probe
   matches that form, covers the K bytes, and the pinned case checks it on every target.
+- `bun tools/compile-rivals.mjs` measures a no-op rebuild beside the cold build, the edited build and
+  both checks, runs the rival twins as well as the generated programs, and reports instructions in one
+  process (the primary figure) and wall time at four jobs; the results are `bench/results/compile.json`
+  and the Performance chapter names the cause of every row where Grail is behind.
 
 - **C calls with floats are optimised in release builds (call ABI S8a).** A function that called a
   C function with `f64`/`f32` arguments or a float result had to stay unoptimised on the LLVM
