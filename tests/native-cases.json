@@ -17945,5 +17945,39 @@
     "note": "f32x4::load takes a fixed-size array reference: a `[f32; 16]` field and the `[f32; 4]` rows of a `[[f32; 4]; 4]` field are loaded in place, no copy (fixed-arrays.md section 6; simd.md); an out-of-range lane is the load's one bounds check",
     "source": "struct Mat {\n    m: [f32; 16],\n    rows: [[f32; 4]; 4]\n}\nfn total(x: &Mat) -> f32 {\n    mut acc = f32x4::splat(0.0);\n    for i in 4 {\n        acc = acc + f32x4::load(&x.m, i * 4);\n    }\n    return acc.sum();\n}\nfn rowsum(x: &Mat) -> f32 {\n    mut acc = f32x4::splat(0.0);\n    for r in 4 {\n        acc = acc + f32x4::load(&x.rows[r], 0);\n    }\n    return acc.sum();\n}\nfn main() {\n    mut m = Mat { m: [1.0; 16], rows: [[2.0; 4]; 4] };\n    m.m[5] = 3.0;\n    println(\"{} {}\", total(&m), rowsum(&m));\n}\n",
     "stdout": "18 32\n"
+  },
+  {
+    "name": "closure-literals-are-distinct-types",
+    "note": "each closure expression is a type of its own: a `Keep<F>` built from one cannot be assigned one built from another (found by /root/call_abi; it was accepted, and the call through it ran the first closure's body - a miscompile, and with a borrowing second closure a use after free)",
+    "source": "struct Keep<F> { f: F }\nfn keep<F: Fn() -> u64>(f: F) -> Keep<F> { return Keep { f: f }; }\nfn main() { v := u64[1, 2, 3, 4, 5]; mut k = keep(|| -> u64 0); k = keep(|| -> u64 v.len()); g := &k.f; println(g()); }\n",
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "closure-literals-are-distinct-types-borrow",
+    "note": "...the borrow-escape shape of the same bug: the second closure borrowed a vector dropped before the call",
+    "source": "struct Keep<F> { f: F }\nfn keep<F: Fn() -> u64>(f: F) -> Keep<F> { return Keep { f: f }; }\nfn main() { mut k = keep(|| -> u64 7); { v := u64[1, 2, 3]; k = keep(|| -> u64 v.len()); } g := &k.f; println(g()); }\n",
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "callable-struct-result-keeps-loans",
+    "note": "a closure for F stored in a returned `Keep<F>` keeps its loans: the borrowed vector cannot move while the Keep lives",
+    "source": "struct Keep<F> { f: F }\nfn keep<F: Fn() -> u64>(f: F) -> Keep<F> { return Keep { f: f }; }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() { v := u64[1, 2]; r := &v; k := keep(|| -> u64 r.len()); println(eat(v)); g := &k.f; println(g()); }\n",
+    "reject": true,
+    "diagnostic": "move of unavailable or borrowed value"
+  },
+  {
+    "name": "callable-returned-f-keeps-loans",
+    "note": "...and returned as F itself",
+    "source": "fn twice<F: Fn() -> u64>(f: F) -> F { return f; }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() { v := u64[1, 2]; r := &v; g := twice(|| -> u64 r.len()); println(eat(v)); println(g()); }\n",
+    "reject": true,
+    "diagnostic": "move of unavailable or borrowed value"
+  },
+  {
+    "name": "callable-struct-result-plain",
+    "note": "plain use of a Keep<F>",
+    "source": "struct Keep<F> { f: F }\nfn keep<F: Fn() -> u64>(f: F) -> Keep<F> { return Keep { f: f }; }\nfn main() { v := u64[1, 2]; k := keep(|| -> u64 v.len()); g := &k.f; println(g()); }\n",
+    "stdout": "2\n"
   }
 ]
