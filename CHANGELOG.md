@@ -11,6 +11,31 @@
   not carried in its `.iface`, so an implementation in another module failed with
   "missing interface method (it has no default body)" under separate compilation (a single run was
   fine). The default's text now travels with the method record, as a generic template's does.
+- **Changed: `split`, `trim`, `lines` and `split_whitespace` return views, and live in `strings`.**
+  They were the compiler's own methods (and `strings` methods) returning owned copies; now they are
+  `strings` methods (`use strings;`) returning views of the text (`(&[u8])[]`, `&[u8]`), like
+  Rust's `&str` pieces, and `trim_start`/`trim_end` join them. A view keeps the text borrowed, so a
+  piece that must outlive it is `split_owned(sep)` or `piece.copy()`. `for x in v` over a vector of
+  views borrows each one in place, as `for x in &v` does. Views print and format as text.
+- **`parse_f64`** (`strings`): decimal text to the nearest double, ties to even, as Rust's and Go's
+  parsers: Clinger's exact path, then Eisel-Lemire over a 128-bit power-of-five table, then an exact
+  big-integer fallback; `inf`/`infinity`/`nan`, overflow to infinity (`"1e400"`) and underflow to
+  zero. It lives in the new module `float`, which `json` now uses too (its own bignum-only path is
+  gone).
+- **`out.append_format("{}:{};", a, b)`** writes `format`'s text onto the end of a `string` or byte
+  vector with no string of its own (Rust's `write!`); onto a string only the new tail is checked to
+  be UTF-8, and not at all when every argument is a number, bool, char or string.
+- Integers print without a buffer per number or a software division per digit (`rt_fmt_num` wrote
+  each number into a fresh allocation through a shift-and-subtract divide): two digits per division,
+  straight into the output. bench/strings.grl (now `split` views, `parse_f64`, `append_format`, as
+  its Rust twin): Grail-LLVM 11.65G -> 4.53G instructions (Rust 3.23G), Grail-native 35.7G -> 13.7G.
+- The LLVM backend no longer mistakes a static's storage between two functions for a function (a
+  module with a `static` and functions after it failed to assemble).
+- `grail check` is about a fifth cheaper again: a check files *check units* - what a function asks
+  of the build, without its assembly - and writes no assembly at all; a build does not take a check
+  unit for its own and compiles that function. The compiler is no longer hashed on every command
+  (its digest is kept in the store by path, size and time).
+
 - **The standard map is one open-addressed table** (`lib/hashmap.grl`). Keys, values and their
   hashes are stored densely in insertion order (iteration order and `key_at`/`value_at` are
   unchanged), indexed by one table of slot words (a 32-bit hash tag and the entry index) with
@@ -26,6 +51,13 @@
   failure kind before its own check; when the optimiser removed that check (a divisor it proved
   non-zero), the kind stayed pending and named the next check in the function. A pending kind now
   ends with its statement, and an inlined bounds check is recognised by its shape first.
+- **A foreign call that holds a worker for more than 10 ms is handed off.** Every `extern "C"`
+  call on x86-64 Linux counts itself in and out on its worker (about 1.2 ns a call, measured on
+  10M calls of `labs`), and a scheduler monitor thread looks every 5 ms: a worker inside one foreign
+  call for two looks while work is queued is given to a spare, as a `blocking` call would have
+  been at once. The runtime says so once, naming the function, so it can be declared `blocking`.
+  At most 10,000 threads may be blocked in foreign calls; the next one ends the program with a
+  message instead of exhausting the machine.
 
 - **Small runtime functions are inlined into every module.** A small runtime body (the scheduler's
   `rt_current`, `rt_list_set`, `rt_list_head`, ...) is now inlined where another module calls it,
@@ -357,6 +389,15 @@
   comparison of two constants) is decided at compile time; an accumulator worked on in %rax
   (`movq %r12,%rax; xorq ...,%rax; imulq ...,%rax; movq %rax,%r12`) is worked on in its own
   register. fnv executes 15% fewer instructions, sieve 3%.
+- **Native backend: callee-saved registers are shared by variables whose lives do not overlap.** The
+  optimiser kept one register per promoted local for the whole function, so the variables of a
+  function's first loop held the registers its later loops needed. Locals are now coloured by
+  interference, as float locals already were. fnv executes 4% fewer instructions, nbody 3%.
+- **Native backend: a call to a Grail function keeps alive only the registers it takes.** The
+  signature fact (the argument words LLVM's `define` uses) is now recorded for native builds too,
+  and a direct call to a body with one reads only that many argument registers instead of all six,
+  so a value left in, say, `%rcx` before a one-argument call is no longer kept for it. fib(32):
+  112.8M -> 105.8M instructions (Go 102.9M).
 
 - **Native backend: a slice's `data` and `len` live in registers.** The type facts are recorded on
   the native path too, and the optimiser reads F1's slice-descriptor fact: a slice written once at

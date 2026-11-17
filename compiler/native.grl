@@ -3464,6 +3464,60 @@ fn tls_enter_callback<a>(c: (&a mut C), slot: u64, adopt: u64) -> unit {
     callback_pin(&mut c, view("addq"));
     return ();
 }
+// The foreign-call marker (rt_sysmon): %r11 = this thread's record, then the block's counter word.
+fn ffi_marker_enter<a>(c: (&a mut C), slot: u64) -> unit {
+    other := label(&mut c);
+    have := label(&mut c);
+    none := label(&mut c);
+    done := label(&mut c);
+    o(&mut c, view("cmpq $0,rt_state+184(%rip)\n"));
+    jump(&mut c, view("je"), other);
+    o(&mut c, view("movq %fs:rt_tls_record@tpoff,%r11\n"));
+    jump(&mut c, view("jmp"), have);
+    mark(&mut c, other);
+    o(&mut c, view("movq %fs:0,%r11\n"));
+    mark(&mut c, have);
+    o(&mut c, view("cmpq $2,24(%r11)\n"));
+    jump(&mut c, view("jne"), none);
+    o(&mut c, view("movq 32(%r11),%r11\nmovq 320(%r11),%r11\nincq (%r11)\n"));
+    jump(&mut c, view("jmp"), done);
+    mark(&mut c, none);
+    o(&mut c, view("xorl %r11d,%r11d\n"));
+    mark(&mut c, done);
+    o(&mut c, view("movq %r11,"));
+    stack_slot(&mut c, slot);
+    c.out.push(10);
+    return ();
+}
+// The call's end: count out (a locked increment, because the monitor may have marked the word with
+// its top bit at the same moment); a set top bit says the worker was given away during the call, and
+// rt_foreign_lost makes this thread block-less and names the symbol once.
+fn ffi_marker_leave<a, b>(c: (&a mut C), slot: u64, symbol: &b [u8]) -> unit {
+    done := label(&mut c);
+    o(&mut c, view("movq "));
+    stack_slot(&mut c, slot);
+    o(&mut c, view(",%r11\ntestq %r11,%r11\n"));
+    jump(&mut c, view("je"), done);
+    o(&mut c, view("lock incq (%r11)\n"));
+    jump(&mut c, view("jns"), done);
+    o(&mut c, view("subq $32,%rsp\nmovq %rax,(%rsp)\nmovq %rdx,8(%rsp)\nmovq %xmm0,%r10\nmovq %r10,16(%rsp)\nmovq %xmm1,%r10\nmovq %r10,24(%rsp)\n"));
+    // The symbol's name, NUL-ended, as read-only data (as a `cstr` literal is emitted).
+    name := label(&mut c);
+    o(&mut c, view(".pushsection .rodata\n"));
+    mark(&mut c, name);
+    for i in symbol.len() {
+        o(&mut c, view(".byte "));
+        on(&mut c, symbol[i]);
+        c.out.push(10);
+    }
+    o(&mut c, view(".byte 0\n.popsection\nleaq "));
+    lname(&mut c, name);
+    o(&mut c, view("(%rip),%rdi\n"));
+    call_out(&mut c, view("rt_foreign_lost"));
+    o(&mut c, view("movq 16(%rsp),%r10\nmovq %r10,%xmm0\nmovq 24(%rsp),%r10\nmovq %r10,%xmm1\nmovq (%rsp),%rax\nmovq 8(%rsp),%rdx\naddq $32,%rsp\n"));
+    mark(&mut c, done);
+    return ();
+}
 // While a callback runs there are C frames under it on this stack, so the task (if this thread is
 // running one) must not resume on another thread: thread-record word 120 counts the callbacks this
 // thread is inside, and rt_suspend blocks the thread instead of switching the task away while it
@@ -4547,11 +4601,13 @@ fn ffi_signature_fact<a, b, d>(c: (&a mut C), argtypes: (&b u64[]), ret: u64, sy
     llvm::fact_ffi(&mut c.facts, copy_bytes(view(symbol)), ints, floats, mask, result);
     return ();
 }
-// The LLVM backend's signature fact for the body being emitted: its argument words, six in
+// The signature fact for the body being emitted: its argument words, six in
 // registers and the rest on the stack (with the hidden result address when it has one). The lifter
 // defines the body and its calls with exactly these words (llvm.grl `signatures`).
 fn signature_fact<a>(c: (&a mut C), declared: u64) -> unit {
-    if (c.backend == 0) || (c.validating != 0) || (c.facts_fn.len() == 0) {
+    // The native optimiser reads it too: a direct call to this body reads only its argument
+    // registers (ir.grl `exact_calls`).
+    if !wants_facts(&c) {
         return ();
     }
     mut words = arg_words(&c, declared);
@@ -17220,6 +17276,15 @@ fn ffi_emit_call<a, b, d, e, f>(
     if block_here {
         call_out(&mut c, view("rt_blocking_enter"));
     }
+    // Every other foreign call on x86-64 Linux marks the worker as inside a foreign call (an odd
+    // count in the word block word 320 names), so the scheduler's monitor can give the worker away
+    // if the call holds it for more than 10 ms (rt_sysmon). The word's address is kept in the call's
+    // `tls` slot for the exit; 0 there means "not on a worker". Clobbers %rax and %r11 only, before
+    // any argument register is loaded.
+    marked := (!blocking) & (c.target == 0) & (c.plat == 0) & (tls != 0);
+    if marked {
+        ffi_marker_enter(&mut c, tls);
+    }
     if area != 0 {
         if x86 {
             o(&mut c, view("subq $"));
@@ -17411,6 +17476,9 @@ fn ffi_emit_call<a, b, d, e, f>(
         }
     } else {
         call_out(&mut c, view(symbol));
+    }
+    if marked {
+        ffi_marker_leave(&mut c, tls, view(symbol));
     }
     if block_here {
         // The result registers survive the runtime call: rax, rdx, xmm0 and xmm1, in 32 bytes of
@@ -18452,6 +18520,10 @@ fn fn_reg_type<a, b>(p: (&a mut IR), c: (&b mut C)) -> u64 {
 // after the body's `.gbase` line; the facts are the ones recorded since `fact_mark`; the
 // registrations are the ones `fn_reg_drop` and `fn_reg_spec` wrote down.
 fn fn_unit_of<a>(c: (&a mut C), key: u8[], text_mark: u64, fact_mark: u64) -> fncache::Unit {
+    // A check's unit has no text and no facts: a check writes neither, and a build refuses it.
+    if c.check_only != 0 {
+        return fncache::Unit { key: key, text: u8[], facts: u8[], regs: c.fn_regs.copy() };
+    }
     mut text = u8[];
     text.append(c.out[text_mark..c.out.len()]);
     return fncache::Unit { key: key, text: text, facts: fn_facts_encode(&c, fact_mark), regs: c.fn_regs.copy() };
@@ -18528,8 +18600,11 @@ fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), l
             lines += 1;
         }
     }
-    c.out.append(view(u.text));
-    fn_facts_restore(&mut c, view(u.facts));
+    // A check keeps no text and runs no optimiser, so a unit's text and facts are not put back.
+    if c.check_only == 0 {
+        c.out.append(view(u.text));
+        fn_facts_restore(&mut c, view(u.facts));
+    }
     for i in regs.len() {
         kind := regs[i].kind;
         template := regs[i].template;
@@ -18681,7 +18756,7 @@ fn fn_key<a, b, d>(c: (&a mut C), unit: &b [u8], symbol: &d [u8], from: u64, to:
     }
     place := fn_place(&mut c, at);
     mut key = u8[];
-    push_bytes(&mut key, view("grail-fnkey 3\nunit "));
+    push_bytes(&mut key, view("grail-fnkey 4\nunit "));
     push_bytes(&mut key, view(unit));
     push_bytes(&mut key, view("\nprefix "));
     push_bytes(&mut key, view(c.lpart));
@@ -18693,10 +18768,16 @@ fn fn_key<a, b, d>(c: (&a mut C), unit: &b [u8], symbol: &d [u8], from: u64, to:
     push_bytes(&mut key, view(c.fn_id));
     push_bytes(&mut key, view("\nsurface "));
     push_bytes(&mut key, view(c.fn_surface));
+    // The declaration and the signature as they are, each after its length: the key is hashed once,
+    // for the file's name, rather than each piece being hashed into it first.
     push_bytes(&mut key, view("\ndecl "));
-    push_bytes(&mut key, view(fncache::hash(c.src[from: to])));
+    push_bytes(&mut key, view(decimal_bytes(to - from)));
+    key.push(32);
+    key.append(c.src[from: to]);
     push_bytes(&mut key, view("\nsig "));
-    push_bytes(&mut key, view(fncache::hash(view(sig))));
+    push_bytes(&mut key, view(decimal_bytes(sig.len())));
+    key.push(32);
+    key.append(view(sig));
     push_bytes(&mut key, view("\nfile "));
     push_bytes(&mut key, view(decimal_bytes(c.file)));
     push_bytes(&mut key, view("\ncolumn "));
@@ -19893,7 +19974,11 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             from_worker := par_unit.key.len() != 0;
             mut hit = par_unit;
             if (hit.key.len() == 0) & (c.fn_dir.len() != 0) {
-                hit = fncache::load(view(c.fn_dir), view(fncache::hash(view(key))));
+                if c.check_only != 0 {
+                    hit = fncache::load_checked(view(c.fn_dir), view(fncache::hash(view(key))));
+                } else {
+                    hit = fncache::load(view(c.fn_dir), view(fncache::hash(view(key))));
+                }
                 par_outcome = 2;
             }
             if hit.key.len() != 0 {
@@ -34684,10 +34769,21 @@ fn format_brace_refuse<a, b>(c: (&a mut C), text: &b [u8], at: u64) -> unit {
 // format("x = {}", x) -> string, with the same compile-time placeholder checks as print.
 fn format_builtin<a>(c: (&a mut C)) -> Val {
     expect(&mut c, view("("));
+    acc := invoke(&mut c, view("rt_new"), u64[]);
+    // A fresh string is checked whole by rt_fmt_finish.
+    raw := format_pieces(&mut c, acc);
+    slot := invoke(&mut c, view("rt_fmt_finish"), one(acc));
+    return own(&mut c, slot, 3);
+}
+// The literal and its arguments up to the closing `)`, appended to the byte buffer `acc`: what
+// `format(...)` builds into a fresh buffer and `out.append_format(...)` into `out`. True when an
+// argument may have written bytes that are not UTF-8 (a byte vector, a view, a record or vector
+// shown through its fields, a padded spec); numbers, bools, chars and strings never do.
+fn format_pieces<a>(c: (&a mut C), acc: u64) -> bool {
+    mut raw = false;
     if kind(&mut c) != 3 {
         fail(&mut c, view("format needs a string literal"));
     }
-    acc := invoke(&mut c, view("rt_new"), u64[]);
     text := decode_literal(&mut c, c.pos);
     advance(&mut c);
     mut piece = u8[];
@@ -34714,6 +34810,7 @@ fn format_builtin<a>(c: (&a mut C)) -> Val {
             piece = u8[];
             end := sp.end;
             format_spec_arg(&mut c, acc, sp);
+            raw = true;
             i = end;
             continue;
         }
@@ -34724,6 +34821,10 @@ fn format_builtin<a>(c: (&a mut C)) -> Val {
                 fail(&mut c, view("missing argument for {} in format string"));
             }
             input := expr(&mut c, 0);
+            ak := ty_kind(&mut c, input.ty);
+            if !((input.ty == 0) || (ak == 1) || (ak == 4) || (ak == 18) || (ak == 19) || (ak == 21) || (ak == 22)) {
+                raw = true;
+            }
             format_arg(&mut c, acc, input);
             i += 2;
             continue;
@@ -34739,8 +34840,7 @@ fn format_builtin<a>(c: (&a mut C)) -> Val {
         fail(&mut c, view("more arguments than {} placeholders in format string"));
     }
     expect(&mut c, view(")"));
-    slot := invoke(&mut c, view("rt_fmt_finish"), one(acc));
-    return own(&mut c, slot, 3);
+    return raw;
 }
 fn format_raw<a, b>(c: (&a mut C), acc: u64, piece: &b [u8]) -> unit {
     if piece.len() == 0 {
@@ -40745,12 +40845,9 @@ fn text_method<a, b>(c: (&a mut C), xt: u64, k: u64, name: &b [u8]) -> Val {
         release_temporary(&mut c, arg.t);
         return val(r, bt);
     }
-    if same(view(name), view("to_upper")) || same(view(name), view("to_lower")) || same(view(name), view("trim")) {
+    if same(view(name), view("to_upper")) || same(view(name), view("to_lower")) {
         expect(&mut c, view(")"));
-        mut f = "rt_seq_trim";
-        if same(view(name), view("to_upper")) {
-            f = "rt_seq_upper";
-        }
+        mut f = "rt_seq_upper";
         if same(view(name), view("to_lower")) {
             f = "rt_seq_lower";
         }
@@ -40785,15 +40882,6 @@ fn text_method<a, b>(c: (&a mut C), xt: u64, k: u64, name: &b [u8]) -> Val {
         r := invoke(&mut c, view("rt_seq_chars"), one(xt));
         ch := char_type(&mut c);
         vt := intern(&mut c, 6, ch);
-        return own(&mut c, r, vt);
-    }
-    if same(view(name), view("split")) {
-        sep := expr(&mut c, 0);
-        require_type(&mut c, sep.ty, 0);
-        expect(&mut c, view(")"));
-        valid := imm(&mut c, k == 4);
-        r := invoke(&mut c, view("rt_seq_split"), three(xt, sep.t, valid));
-        vt := intern(&mut c, 6, result);
         return own(&mut c, r, vt);
     }
     return val(0, NO_TYPE);
@@ -41627,6 +41715,25 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         slot := apply(&mut c, view(f), one(xt));
         release_temporary(&mut c, input);
         return own(&mut c, slot, ty);
+    }
+    // `out.append_format("{}:{};", a, b)`: `format`'s text written onto the end of `out`, with no
+    // string of its own (Rust's `write!(out, ...)`). Onto a string, only the new tail is checked to
+    // be UTF-8.
+    if same(view(name), view("append_format")) {
+        if (c.raw == 0) & (k != 3) & (k != 4) {
+            fail(&mut c, view("append_format requires a string or a byte vector as its destination"));
+        }
+        require_write(&mut c, xt);
+        mut start = 0;
+        if k == 4 {
+            start = invoke(&mut c, view("rt_len"), one(xt));
+        }
+        raw := format_pieces(&mut c, xt);
+        if (k == 4) & raw {
+            invoke(&mut c, view("rt_utf8_from"), two(xt, start));
+        }
+        release_temporary(&mut c, input);
+        return val(imm(&mut c, 0), 1);
     }
     if same(view(name), view("is_empty")) {
         expect(&mut c, view(")"));
@@ -48231,8 +48338,15 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
                 if (k == 6) || (k == 27) {
                     a := ty_arg(&mut c, x.ty);
                     elemty = a;
-                    // Owners are moved out one at a time; plain scalar loops copy.
-                    if (!scalar(&mut c, a)) & (ty_kind(&mut c, v.ty) == 6) {
+                    // Owners are moved out one at a time; plain scalar loops copy. Shared views
+                    // and references (`text.split(10)` gives `(&[u8])[]`) are borrowed in place, as
+                    // `for x in &v` does: moving one out would drop the loan it carries.
+                    ak := ty_kind(&mut c, a);
+                    shared_elem := ((ak == 5) || (ak == 7)) & (ty_mode(&mut c, a) == 0);
+                    if shared_elem & (ty_kind(&mut c, v.ty) == 6) {
+                        byref = 1;
+                        refmode = 0;
+                    } else if (!scalar(&mut c, a)) & (ty_kind(&mut c, v.ty) == 6) {
                         owned := move_value(&mut c, v);
                         bind(&mut c, copy_bytes(view("__iterated")), owned.ty, owned.t, 0);
                         hidden_local = c.locals.len();
@@ -56430,8 +56544,9 @@ pub fn main() -> u64 {
         if pass == 2 {
             jobs::phase(view("declarations"));
             par_start(&mut c, n);
-            // From the bodies on, a check writes no text (`quiet`); a unit store would keep it.
-            if (c.check_only != 0) & (c.fn_dir.len() == 0) {
+            // From the bodies on, a check writes no text (`quiet`): its units are check units, with
+            // the registrations and no text (fn_unit_of), as cargo's metadata is to its rlib.
+            if c.check_only != 0 {
                 exchange(&mut c.quiet, 1);
             }
         }
