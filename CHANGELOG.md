@@ -6,6 +6,14 @@
   instead of five filter tests per byte, a fresh vector per row and a byte-by-byte copy. A 4096x4096
   RGBA texture: Grail-LLVM 41.1G -> 8.1G instructions (3.65 -> 0.91 s; libpng 0.40 s, the runtime's
   division fix included), Grail-native 107G -> 21.4G.
+- The native backend computes SIMD operations with packed SSE2 on x86-64 (lane arithmetic, compares,
+  select, splat, sums, 4-lane shuffles, `any`/`all`, `to_f32`), with exactly the same results as
+  before. A dot product, a 4x4 matrix product and an AoS-to-SoA transpose run 2-5x faster natively.
+  The internal assembler encodes the new instructions identically to clang.
+- **`bytes::find_byte(text, from, b)`**: where byte `b` next occurs, eight bytes per step (a word
+  read and the has-zero-byte test), in plain Grail. The compiler's line scanners use it - the
+  optimiser's body reader, the frame-probe and inlining scans, the site table: 6.4% fewer
+  instructions compiling a 4000-function file, 7.2% for the compiler itself.
 - **zstd decodes with fewer allocations and a word-at-a-time bit reader.** The sequence-code tables
   were vector literals built on every lookup (four per sequence) and the backward bit reader took
   one bit per step; the tables are static text indexed in place and the reader assembles whole
@@ -24,6 +32,12 @@
   so every `@no_alloc` function that indexes was refused there. The failure path and the scheduler
   use `rt_syscall_low` (write to a handle, exit, park, wake, yield, sleep, clock, unmap), and the
   profile dump creates and closes its file with `rt_create_file`/`rt_close_file`.
+- **Native backend: a vector the loop cannot change is read once before the loop.** With the
+  front end's loop-stability fact, the optimiser loads the vector's data pointer (and its length,
+  when a check or `len()` in the loop needs it) into registers on the way into the loop, and the
+  accesses inside read those. An unchecked access needs only the data register. fnv executes 11%
+  fewer instructions.
+
 - **Interface format 11:** an interface's trailer ends with `fast_hash` of the bytes before it (XXH64
   under four seeds, the build store's digest) instead of SHA-256. It guards against corruption, which
   is all a digest in the file itself can do; the source digest stays SHA-256. Interfaces written by
@@ -38,6 +52,14 @@
   2048x2048 image: Grail-LLVM 25.8G -> 6.9G instructions, Grail-native 128G -> 38.6G. A case pins
   division, remainder and multiplication at the edges of every width (checked and wrapping), and
   `MIN / -1`, `MIN * -1`, division and remainder by zero and products one past the maximum abort.
+- **The linux-x86_64 release package ships the release-built compiler.** `tools/ci.mjs` builds the
+  compiler with the native backend as before (the bootstrap and fixed point) and then the release
+  compiler from it (`tools/native.mjs release`: LLVM backend and clang -O2, accepted on identical
+  text, objects and a corpus slice), and packages the release one - several times faster at
+  compiling (`check` of a 104 000-line program: 11.2 G against 25.8 G instructions).
+  `GRAIL_SHIP_NATIVE=1` ships the native build. `tools/compile-perf.mjs` measures
+  `GRAIL_RELEASE_COMPILER` beside the dev compiler when it is set.
+
 - Fixed: the per-loop stability fact and the LLVM backend's indirect-call fact both used fact kind
   7, so a stable vector whose slot number matched an indirect call's ordinal (with a loop head
   label of 6 or less) could make the lifter pass that call too few arguments. The stability fact

@@ -4793,17 +4793,20 @@ fn rt_job_map_leaf(d: u64, k: u64) -> u64 {
     context := raw_load(d + 16);
     items := raw_load(d + 24);
     out := raw_load(d + 40);
-    n := raw_load(d + 48);
-    start := k * raw_load(d + 56);
+    // Words 48 and 56 carry the inline item and result widths in their top 24 bits (word 64 and
+    // up belong to the job record's list links, which the scheduler writes).
+    n := raw_load(d + 48) & 1099511627775;
+    per := raw_load(d + 56) & 1099511627775;
+    iw := raw_load(d + 56) >> 40;
+    rw := raw_load(d + 48) >> 40;
+    start := k * per;
     if n <= start {
         return 0;
     }
-    mut stop = start + raw_load(d + 56);
+    mut stop = start + per;
     if n < stop {
         stop = n;
     }
-    iw := raw_load(d + 64);
-    rw := raw_load(d + 72);
     mut i = start;
     while i < stop {
         mut item = 0;
@@ -4984,10 +4987,8 @@ fn rt_parallel_mapw(items: u64, context: u64, f: u64, env: u64, iw: u64, rw: u64
     raw_store(d + 16, context);
     raw_store(d + 24, raw_load(items));
     raw_store(d + 40, raw_load(out));
-    raw_store(d + 48, n);
-    raw_store(d + 56, chunk);
-    raw_store(d + 64, iw);
-    raw_store(d + 72, rw);
+    raw_store(d + 48, n | (rw << 40));
+    raw_store(d + 56, chunk | (iw << 40));
     rt_region_enter();
     written := rt_job_split(d, 0, leaves, 0);
     rt_region_leave();

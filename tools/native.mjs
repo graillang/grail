@@ -37,7 +37,7 @@ if (!process.env.GRAIL_CACHE_DIR) {
   process.env.GRAIL_CACHE_DIR = store;
   process.on('exit', () => rmSync(store, { recursive: true, force: true }));
 }
-const compilerStdSources = ['xxhash'].map(n => join(root, 'lib', `${n}.grl`));
+const compilerStdSources = ['xxhash', 'bytes'].map(n => join(root, 'lib', `${n}.grl`));
 compilerSources.push(...compilerStdSources);
 export const triples = { x86_64: 'x86_64-linux-gnu', aarch64: 'aarch64-linux-gnu', riscv64: 'riscv64-linux-gnu', 'macos-x86_64': 'x86_64-apple-macos11', 'macos-aarch64': 'arm64-apple-macos11' };
 export const emulations = { x86_64: 'elf_x86_64', aarch64: 'aarch64elf', riscv64: 'elf64lriscv' };
