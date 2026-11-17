@@ -533,6 +533,11 @@ struct C {
     no_sites: u64,
     // `--check`: stop after the last diagnostic can have been given.
     check_only: u64,
+    // A check-only run with no unit store writes no assembly, so the text emitters (`o`, `on`, the
+    // slot and label spellers) write nothing while this is 1 (docs/design/compile-speed.md). The
+    // stream is never read back in such a run, except by a diagnostic (`fail` turns this off) and
+    // for a body's own label (func turns it off around that).
+    quiet: u64,
     // --f1-what=N: a test aid that records a deliberately wrong F1 kind for every binding, so the
     // checks --verify-facts emits can be shown to fire (docs/design/typed-ir.md, "Tests that catch
     // a wrong fact"). 0, the default, records the type the front end actually has.
@@ -605,6 +610,17 @@ struct C {
     res_synced: u64,
     bond_head: u64[],
     bond_next: u64[],
+    // The same bonds by holder (`bond_hhead[place]`, `bond_hnext[bond]`), and `bond_under[place]`
+    // nonzero when some bond's holder is that place or lies inside it; `bond_unranged` when a holder
+    // was not a place yet, which sends every question back to the whole list (bonds_sync).
+    bond_hhead: u64[],
+    bond_hnext: u64[],
+    bond_under: u64[],
+    bond_unranged: u64,
+    // For each `<` of the loaded file, the `>` that closes it (or the token count when none does),
+    // when `angle_ok` says the table is about the token stream there now (angle_sync).
+    angle_close: u64[],
+    angle_ok: u64,
     spec_em_slots: u64[],
     spec_em_keys: u64[],
     drop_em_slots: u64[],
@@ -882,6 +898,8 @@ struct C {
     // interned type, so a reference can never outrun its definition.
     drop_refs: u64[],
     drop_names: u8[][],
+    // By interned type: 1 once the drop walk has emitted its helper or found it emitted (emit_drops).
+    drop_walked: u64[],
     spec_emitted: u8[][],
     spell_lenient: u64,
     spell_failed: u64,
@@ -970,9 +988,8 @@ struct C {
     fx_pending_alloc: u64,
     fx_pending_panic: u64,
     fx_bounded: u64,
-    // Where the body being recorded starts in `c.out`, whether it is trusted code (the runtime, a drop
-    // helper) and how many calls it has recorded.
-    fx_out_start: u64,
+    // Whether the body being recorded is trusted code (the runtime, a drop helper) and how many calls
+    // it has recorded.
     fx_trusted: u64,
     fx_calls: u64,
     // A refined parameter's check in the checked entry: the caller's obligation, not a body edge.
@@ -1243,12 +1260,18 @@ fn decl_index_sync<a>(c: (&a mut C)) -> unit {
 
 // ---- output ----
 fn o<a, b>(c: (&a mut C), s: &b [u8]) -> unit {
+    if c.quiet != 0 {
+        return ();
+    }
     for i in s.len() {
         c.out.push(s[i]);
     }
     return ();
 }
 fn on<a>(c: (&a mut C), n: u64) -> unit {
+    if c.quiet != 0 {
+        return ();
+    }
     if 9 < n {
         on(&mut c, n / 10);
     }
@@ -3116,6 +3139,9 @@ fn val(t: u64, ty: u64) -> Val {
 
 // Every intermediate and binding has an rbp-relative eight-byte stack slot.
 fn stack_slot<a>(c: (&a mut C), id: u64) -> unit {
+    if c.quiet != 0 {
+        return ();
+    }
     c.out.push(45);
     on(&mut c, (id + 1) * 8);
     o(&mut c, view("(%rbp)"));
@@ -3369,6 +3395,9 @@ fn tls_leave<a>(c: (&a mut C), slot: u64) -> unit {
 }
 fn save<a>(c: (&a mut C)) -> u64 {
     n := fresh(&mut c);
+    if c.quiet != 0 {
+        return n;
+    }
     o(&mut c, view("movq %rax,"));
     stack_slot(&mut c, n);
     c.out.push(10);
@@ -3414,6 +3443,9 @@ fn save_result<a>(c: (&a mut C), ret: u64) -> u64 {
     return save(&mut c);
 }
 fn get<a, b>(c: (&a mut C), id: u64, reg: &b [u8]) -> unit {
+    if c.quiet != 0 {
+        return ();
+    }
     o(&mut c, view("movq "));
     stack_slot(&mut c, id);
     c.out.push(44);
@@ -3485,6 +3517,9 @@ fn scope_undo<a>(c: (&a mut C)) -> unit {
 // `<unit prefix>_<n>` outside a function, `<unit prefix>_<f>_<n>` inside one: what follows `.L`,
 // `.F`, `.Lrfp` and `.Lrfr`. Copies, because `o` borrows `c` mutably and the prefix is a field of it.
 fn scoped_number<a>(c: (&a mut C), n: u64) -> unit {
+    if c.quiet != 0 {
+        return ();
+    }
     prefix := c.lpart.copy();
     o(&mut c, view(prefix));
     c.out.push(95);
@@ -4489,11 +4524,17 @@ fn bond_kind<a>(c: (&a mut C), holder: u64, loan: u64, guard: u64) -> unit {
     if (holder == 0) || (loan == 0) {
         return ();
     }
-    for i in c.bonds.len() {
-        mut b = &c.bonds[i];
-        if (b.holder == holder) & (b.loan == loan) & (b.guard == guard) {
+    // Only the holder's own bonds can be the same bond (bonds_sync).
+    bonds_sync(&mut c);
+    mut j = 0;
+    if holder < c.bond_hhead.len() {
+        j = c.bond_hhead[holder];
+    }
+    while j != 0 {
+        if (c.bonds[j - 1].loan == loan) & (c.bonds[j - 1].guard == guard) {
             return ();
         }
+        j = c.bond_hnext[j - 1];
     }
     c.bonds.push(Bond { holder: holder, loan: loan, guard: guard });
     return ();
@@ -4508,6 +4549,10 @@ fn loan_live<a>(c: (&a mut C), loan: u64) -> u64 {
 }
 fn transfer_bonds<a>(c: (&a mut C), src: u64, dst: u64) -> unit {
     if (src == 0) || (dst == 0) {
+        return ();
+    }
+    // A source no bond is held under has nothing to pass on (bond_under).
+    if !bond_under(&mut c, src) {
         return ();
     }
     n := c.bonds.len();
@@ -4526,6 +4571,10 @@ fn transfer_bonds<a>(c: (&a mut C), src: u64, dst: u64) -> unit {
 }
 fn return_bonds<a>(c: (&a mut C), src: u64, dst: u64, aggregate: u64) -> unit {
     if (src == 0) || (dst == 0) {
+        return ();
+    }
+    // A source no bond is held under has nothing to pass on (bond_under).
+    if !bond_under(&mut c, src) {
         return ();
     }
     n := c.bonds.len();
@@ -4567,13 +4616,56 @@ fn bonds_sync<a>(c: (&a mut C)) -> unit {
         }
         c.bond_next.push(c.bond_head[loan]);
         c.bond_head[loan] = at + 1;
+        holder := c.bonds[at].holder;
+        while c.bond_hhead.len() <= holder {
+            c.bond_hhead.push(0);
+        }
+        c.bond_hnext.push(c.bond_hhead[holder]);
+        c.bond_hhead[holder] = at + 1;
+        // A place's parent never changes, so the marks only accumulate; a marked place's parents are
+        // marked already.
+        if c.check.places.len() < holder {
+            exchange(&mut c.bond_unranged, 1);
+        }
+        mut p = holder;
+        while (p != 0) & (p <= c.check.places.len()) {
+            while c.bond_under.len() <= p {
+                c.bond_under.push(0);
+            }
+            if c.bond_under[p] != 0 {
+                break;
+            }
+            c.bond_under[p] = 1;
+            p = c.check.places[p - 1].parent;
+        }
     }
     return ();
 }
 fn bonds_swapped<a>(c: (&a mut C)) -> unit {
     exchange(&mut c.bond_head, u64[]);
     exchange(&mut c.bond_next, u64[]);
+    exchange(&mut c.bond_hhead, u64[]);
+    exchange(&mut c.bond_hnext, u64[]);
+    exchange(&mut c.bond_under, u64[]);
+    exchange(&mut c.bond_unranged, 0);
     return ();
+}
+// Whether some bond's holder is `place` or lies inside it: `ownership::ancestor(place, holder)` asked
+// of every bond, answered from the marks bonds_sync leaves up each holder's parents.
+fn bond_under<a>(c: (&a mut C), place: u64) -> bool {
+    bonds_sync(&mut c);
+    if c.bond_unranged != 0 {
+        for i in c.bonds.len() {
+            if ownership::ancestor(&c.check, place, c.bonds[i].holder) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (place == 0) || (c.check.places.len() < place) || (c.bond_under.len() <= place) {
+        return false;
+    }
+    return c.bond_under[place] != 0;
 }
 // The record list was replaced by another one: what `resource` remembers is about the old list.
 fn resources_swapped<a>(c: (&a mut C)) -> unit {
@@ -5225,9 +5317,10 @@ fn last_name<a, b>(c: (&a mut C), name: &b [u8], from: u64, to: u64) -> u64 {
             }
             depth = depth - 1;
         }
+        // The tokens are read in place: this scan visits every token of the scope for every
+        // binding, and copying each one out to compare it was most of a check's allocations.
         if (kind == 1) & (hidden == 0) & (pending == 0) {
-            token := tok_text(&mut c, i);
-            if same(view(token), view("mut")) {
+            if (en - st == 3) && (c.src[st] == 109) && (c.src[st + 1] == 117) && (c.src[st + 2] == 116) {
                 mut declaration = 1;
                 if i != 0 {
                     if kind_at(&mut c, i - 1) == 38 {
@@ -5235,15 +5328,36 @@ fn last_name<a, b>(c: (&a mut C), name: &b [u8], from: u64, to: u64) -> u64 {
                     }
                 }
                 if declaration != 0 {
-                    declared := tok_text(&mut c, i + 1);
-                    if same(view(declared), view(name)) {
+                    // Past the last token is the empty text, as `tok_text` has it.
+                    mut declared = name.len() == 0;
+                    if i + 1 < c.toks.len() {
+                        ds := c.toks[i + 1].start;
+                        de := c.toks[i + 1].end;
+                        declared = de - ds == name.len();
+                        mut j = 0;
+                        while declared && (j < name.len()) {
+                            if c.src[ds + j] != name[j] {
+                                declared = false;
+                            }
+                            j = j + 1;
+                        }
+                    }
+                    if declared {
                         pending = depth + 1;
                         skip = i + 1;
                     }
                 }
             }
             if kind_at(&mut c, i + 1) == 261 {
-                if same(view(token), view(name)) {
+                mut named = en - st == name.len();
+                mut j = 0;
+                while named && (j < name.len()) {
+                    if c.src[st + j] != name[j] {
+                        named = false;
+                    }
+                    j = j + 1;
+                }
+                if named {
                     pending = depth + 1;
                     skip = i;
                 }
@@ -5332,13 +5446,8 @@ fn expire_locals<a>(c: (&a mut C)) -> unit {
         mut carrier = k == 5 || k == 7 || k == 27;
         root := place_of(&mut c, slot);
         if (k == 6) || (k == 8) || (k == 26) {
-            for j in c.bonds.len() {
-                mut b = &c.bonds[j];
-                holder := b.holder;
-                if ownership::ancestor(&c.check, root, holder) {
-                    carrier = true;
-                    break;
-                }
+            if bond_under(&mut c, root) {
+                carrier = true;
             }
         }
         if carrier {
@@ -6108,18 +6217,49 @@ fn observe<a>(c: (&a mut C), slot: u64) -> unit {
     k := ty_kind(&mut c, ty);
     if (k == 5) || (k == 7) || (k == 27) {
         mut checked = 0;
-        for i in c.bonds.len() {
-            mut b = &c.bonds[i];
-            h := b.holder;
-            loan := b.loan;
-            guard := b.guard;
-            if (guard == 0) & ownership::ancestor(&c.check, h, place) {
-                if loan_live(&mut c, loan) != 0 {
-                    checked = 1;
-                    if ownership::use_loan(&c.check, loan, 0) != 0 {
-                        fail(&mut c, view("reference is suspended or expired"));
+        // The bonds held by `place` or by a place it lies inside (bonds_sync): the holders are the
+        // place's own chain of parents. The order they are visited in is not the list's, which no
+        // answer depends on - each refusal is the same diagnostic at the same token.
+        bonds_sync(&mut c);
+        if c.bond_unranged != 0 {
+            for i in c.bonds.len() {
+                mut b = &c.bonds[i];
+                h := b.holder;
+                loan := b.loan;
+                guard := b.guard;
+                if (guard == 0) & ownership::ancestor(&c.check, h, place) {
+                    if loan_live(&mut c, loan) != 0 {
+                        checked = 1;
+                        if ownership::use_loan(&c.check, loan, 0) != 0 {
+                            fail(&mut c, view("reference is suspended or expired"));
+                        }
                     }
                 }
+            }
+        } else {
+            mut h = place;
+            if c.check.places.len() < place {
+                h = 0;
+            }
+            while h != 0 {
+                mut j = 0;
+                if h < c.bond_hhead.len() {
+                    j = c.bond_hhead[h];
+                }
+                while j != 0 {
+                    loan := c.bonds[j - 1].loan;
+                    guard := c.bonds[j - 1].guard;
+                    if guard == 0 {
+                        if loan_live(&mut c, loan) != 0 {
+                            checked = 1;
+                            if ownership::use_loan(&c.check, loan, 0) != 0 {
+                                fail(&mut c, view("reference is suspended or expired"));
+                            }
+                        }
+                    }
+                    j = c.bond_hnext[j - 1];
+                }
+                h = c.check.places[h - 1].parent;
             }
         }
         if checked == 0 {
@@ -7095,6 +7235,8 @@ fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
     if c.par_me != 0 {
         host::exit(3);
     }
+    // The diagnostic is rendered through the emitters.
+    exchange(&mut c.quiet, 0);
     p := c.pos;
     m := tok_text(&mut c, p);
     // The offending token's width: the caret run under the primary line, and the width a driver
@@ -7391,8 +7533,8 @@ fn eat<a, b>(c: (&a mut C), s: &b [u8]) -> bool {
     return true;
 }
 fn expect<a, b>(c: (&a mut C), s: &b [u8]) -> unit {
-    want := s.copy();
     if !eat(&mut c, s) {
+        want := s.copy();
         mut msg = copy_bytes(view("expected `"));
         push_bytes(&mut msg, view(want));
         msg.push(96);
@@ -9527,7 +9669,6 @@ fn pv_loop_kill<a>(c: (&a mut C), open: u64, end: u64) -> unit {
     mut i = open + 1;
     while i < end {
         if kind_at(&mut c, i) == 1 {
-            n := tok_text(&mut c, i);
             nk := kind_at(&mut c, i + 1);
             // `x = ...` and `x += ...` change what the name means from here on.
             mut hit = u64((nk == 61) || ((261 < nk) & (nk < 269)));
@@ -9543,13 +9684,13 @@ fn pv_loop_kill<a>(c: (&a mut C), open: u64, end: u64) -> unit {
             if (hit == 0) & (2 <= i) {
                 // `&mut x` lends x out exclusively, so a call in the body may write it.
                 if (kind_at(&mut c, i - 1) == 1) & (kind_at(&mut c, i - 2) == 38) {
-                    w := tok_text(&mut c, i - 1);
-                    if same(view(w), view("mut")) {
+                    if is_at(&mut c, i - 1, view("mut")) {
                         hit = 1;
                     }
                 }
             }
             if hit != 0 {
+                n := tok_text(&mut c, i);
                 pv_ir_wrote(&mut c, view(n));
             }
         }
@@ -10360,6 +10501,7 @@ fn load_file<a>(c: (&a mut C), index: u64) -> unit {
         load_file_reset(&mut c);
         return ();
     }
+    exchange(&mut c.angle_ok, 0);
     if c.file_loaded != 0 {
         parked := c.file_loaded - 1;
         mut slot = c.file_cache_index.len();
@@ -15236,11 +15378,25 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
 // parameter. Declaration heads (`fn`, `struct`, `module`, `use`, ...) are recognised only at the
 // top level and may name bindings.
 fn is_keyword<a>(name: &a [u8]) -> bool {
-    words := u8[][copy_bytes(view("mut")), copy_bytes(view("if")), copy_bytes(view("else")), copy_bytes(view("while")), copy_bytes(view("for")), copy_bytes(view("in")), copy_bytes(view("loop")), copy_bytes(view("match")), copy_bytes(view("return")), copy_bytes(view("break")), copy_bytes(view("continue")), copy_bytes(view("unsafe")), copy_bytes(view("true")), copy_bytes(view("false"))];
-    for i in words.len() {
-        if same(view(words[i]), view(name)) {
-            return true;
-        }
+    // Asked of every binding: matched by length and then bytes, with nothing built per question.
+    n := name.len();
+    if n == 2 {
+        return (name[0] == 105) && ((name[1] == 102) || (name[1] == 110));
+    }
+    if n == 3 {
+        return ((name[0] == 109) && (name[1] == 117) && (name[2] == 116)) || ((name[0] == 102) && (name[1] == 111) && (name[2] == 114));
+    }
+    if n == 4 {
+        return same(name, view("else")) || same(name, view("loop")) || same(name, view("true"));
+    }
+    if n == 5 {
+        return same(name, view("while")) || same(name, view("match")) || same(name, view("break")) || same(name, view("false"));
+    }
+    if n == 6 {
+        return same(name, view("return")) || same(name, view("unsafe"));
+    }
+    if n == 8 {
+        return same(name, view("continue"));
     }
     return false;
 }
@@ -16672,7 +16828,7 @@ fn receiver_shorthand<a>(c: (&a mut C)) -> (u64, u64) {
     if is(&mut c, view("&")) {
         receiver = 1;
     } else {
-        if (kind(&mut c) == 1) & same(view(tok_text(&mut c, c.pos)), view("self")) {
+        if (kind(&mut c) == 1) & is_at(&mut c, c.pos, view("self")) {
             next := kind_at(&mut c, c.pos + 1);
             if (next == 41) || (next == 44) || (next == 59) {
                 receiver = 2;
@@ -18765,9 +18921,12 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             c.out.push(10);
         }
     }
+    // Spelled even in a quiet run: it is read back.
+    quiet := exchange(&mut c.quiet, 0);
     label_at := c.out.len();
     export_name(&mut c, view(m), view(name), view(body_symbol), export);
     label_end := c.out.len();
+    exchange(&mut c.quiet, quiet);
     exchange(&mut c.proved_label, 0);
     // The body's own label, exactly as a `call` to it spells it: the effect facts are keyed by it.
     mut fx_label = u8[];
@@ -24571,7 +24730,6 @@ fn fx_begin<a, b, d>(c: (&a mut C), sym: &b [u8], name: &d [u8], file: u64, pos:
     c.fx_entry_panic[k] = 0;
     trusted := c.raw;
     exchange(&mut c.fx_trusted, trusted);
-    exchange(&mut c.fx_out_start, c.out.len());
     edges := c.fx_edge_from.len();
     exchange(&mut c.fx_edge_mark, edges);
     exchange(&mut c.fx_calls, 0);
@@ -24813,7 +24971,6 @@ fn fx_helper<a, b>(c: (&a mut C), sym: &b [u8]) -> unit {
     c.fx_own_alloc[k] = 0;
     c.fx_own_panic[k] = 0;
     exchange(&mut c.fx_trusted, 1);
-    exchange(&mut c.fx_out_start, c.out.len());
     exchange(&mut c.fx_calls, 0);
     exchange(&mut c.fx_cur, k + 1);
     return ();
@@ -39888,24 +40045,36 @@ fn simple_type_head<a, b>(c: (&a mut C), name: &b [u8]) -> bool {
     return false;
 }
 // `Name[` or `Name<...>[` in expression position: a type-first collection literal.
+// The `<`/`>` matching of the loaded token stream, made once per file: a stack of the open `<`, each
+// `>` closing the latest, which is where a walk from that `<` counting the two would stop.
+fn angle_sync<a>(c: (&a mut C)) -> unit {
+    if c.angle_ok != 0 {
+        return ();
+    }
+    n := c.toks.len();
+    mut close = u64[n; n];
+    mut open = u64[];
+    for i in n {
+        k := c.toks[i].kind;
+        if k == 60 {
+            open.push(i);
+        }
+        if (k == 62) & (open.len() != 0) {
+            close[open.pop()!] = i;
+        }
+    }
+    exchange(&mut c.angle_close, close);
+    exchange(&mut c.angle_ok, 1);
+    return ();
+}
 fn type_literal_ahead<a, b>(c: (&a mut C), name: &b [u8]) -> bool {
     p := c.pos;
     if kind_at(&mut c, p) == 60 {
-        mut depth = 0;
-        mut q = p;
-        while q < c.toks.len() {
-            k := kind_at(&mut c, q);
-            if k == 60 {
-                depth += 1;
-            }
-            if k == 62 {
-                depth -= 1;
-                if depth == 0 {
-                    break;
-                }
-            }
-            q += 1;
-        }
+        // The `>` that brings the count of `<` minus `>` back to where it was before this `<`
+        // (angle_sync): every `a < b` asked this, and with no `>` after it the walk went to the end
+        // of the file.
+        angle_sync(&mut c);
+        q := c.angle_close[p];
         if kind_at(&mut c, q + 1) != 91 {
             return false;
         }
@@ -41604,8 +41773,7 @@ fn len_bound_ahead<a, b>(c: (&a mut C), name: &b [u8]) -> u8[] {
     if (kind_at(&mut c, p) != 1) || (kind_at(&mut c, p + 1) != 46) || (kind_at(&mut c, p + 3) != 40) || (kind_at(&mut c, p + 4) != 41) || (kind_at(&mut c, p + 5) != 123) {
         return u8[];
     }
-    method := tok_text(&mut c, p + 2);
-    if !same(view(method), view("len")) {
+    if !is_at(&mut c, p + 2, view("len")) {
         return u8[];
     }
     base := tok_text(&mut c, p);
@@ -41641,8 +41809,7 @@ fn len_bound_ahead<a, b>(c: (&a mut C), name: &b [u8]) -> u8[] {
                 if (nk == 46) & (j + 5 < c.toks.len()) {
                     if (kind_at(&mut c, j + 3) == 40)
                         & (kind_at(&mut c, j + 4) == 41) {
-                        m := tok_text(&mut c, j + 2);
-                        if same(view(m), view("len")) {
+                        if is_at(&mut c, j + 2, view("len")) {
                             ok = 1;
                         }
                     }
@@ -46915,8 +47082,16 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
         at = at + 1;
         kind := ty_kind(&mut c, ty);
         arg := ty_arg(&mut c, ty);
+        // `drop_refs` has a type once per naming: a type this walk has settled is settled.
+        if (ty < c.drop_walked.len()) && (c.drop_walked[ty] != 0) {
+            continue;
+        }
         if concrete_type(&mut c, ty) {
             if needs_drop(&mut c, ty) {
+                while c.drop_walked.len() <= ty {
+                    c.drop_walked.push(0);
+                }
+                c.drop_walked[ty] = 1;
                 // One definition per key, not per interned index: two indices can describe the same
                 // drop - a view of one element type and a view of another both only release the
                 // backing store - and the key is what decides identity. The body is a function of
@@ -52272,6 +52447,7 @@ pub fn main() -> u64 {
         range_facts: 0,
         no_sites: 0,
         check_only: 0,
+        quiet: 0,
         f1_what: 0,
         debug_funcs: DebugFunc[],
         debug_vars: DebugVar[],
@@ -52332,6 +52508,12 @@ pub fn main() -> u64 {
         res_synced: 0,
         bond_head: u64[],
         bond_next: u64[],
+        bond_hhead: u64[],
+        bond_hnext: u64[],
+        bond_under: u64[],
+        bond_unranged: 0,
+        angle_close: u64[],
+        angle_ok: 0,
         spec_em_slots: u64[],
         spec_em_keys: u64[],
         drop_em_slots: u64[],
@@ -52498,6 +52680,7 @@ pub fn main() -> u64 {
         drop_generic: 0,
         drop_refs: u64[],
         drop_names: u8[][],
+        drop_walked: u64[],
         spec_emitted: u8[][],
         spell_lenient: 0,
         spell_failed: 0,
@@ -52554,7 +52737,6 @@ pub fn main() -> u64 {
         fx_pending_alloc: 0,
         fx_pending_panic: 0,
         fx_bounded: 0,
-        fx_out_start: 0,
         fx_trusted: 0,
         fx_calls: 0,
         fx_entry_panic: u64[],
@@ -53130,6 +53312,10 @@ pub fn main() -> u64 {
         if pass == 2 {
             jobs::phase(view("declarations"));
             par_start(&mut c, n);
+            // From the bodies on, a check writes no text (`quiet`); a unit store would keep it.
+            if (c.check_only != 0) & (c.fn_dir.len() == 0) {
+                exchange(&mut c.quiet, 1);
+            }
         }
         mut i = 2;
         while i < n {

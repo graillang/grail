@@ -27,6 +27,17 @@
   `&Outer` is `Outer *`, a plain field is the record itself at its real offset, and a flat vector's
   element is the record (`tests/debug_members.grl`, `tools/test-debug-lines.mjs`).
 
+- **`grail check` grows linearly with function length.** The borrow checker answered "is any
+  bond held under this place?", "which bonds does this reference rest on?" and "is this bond new?"
+  by scanning every bond the function had made, after every statement and every use, so one long
+  function cost the square of its length. The bonds are now indexed by holder, with a mark on each
+  place that holds one inside it. A binding's last use is found by reading the scope's tokens in
+  place, and a name is told from a keyword without building a keyword list per binding. `grail
+  check` no longer spells the assembly it throws away: the text emitters write nothing in a
+  check-only run. Checking the 104k-line syn4000 program takes 47% fewer instructions, and the
+  verdicts are the same: `tools/check-diff.mjs` compiles every corpus
+  source and example with two compilers and compares their output byte for byte (with `--build`,
+  the assembly too).
 - **Fixed: an LLVM-backend miscompile of a vector grown through its address.** A call handed `&mut v`
   receives the slot's address, not the header word, so the lifter did not count it as a call that
   can grow `v`, and the `len`/`data` it had read before the call were used after it: `pad(&mut out,
