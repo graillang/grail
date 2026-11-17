@@ -1,13 +1,47 @@
 ## Unreleased
 
+- After each landing the build host also runs the closure-passing fuzzer (`tools/fuzz-closures.mjs`, 400
+  cases, compile and run) next to the front-end fuzzer. `tools/land.sh --remote-status` reports both.
+- Fixed: when two or more sequences proved stable across one loop had their data pointers hoisted
+  before its head (optimize.grl item 6), only the last one's load was emitted, and the others'
+  accesses used an unset register (`damp(v, p)` with both slices proved crashed with SIGSEGV). Every
+  sequence of a loop head is now loaded. `loop-hoist-two-slices-one-head` and
+  `loop-hoist-three-slices-one-head` pin it on all three targets.
+
+- **UTF-8 validation skips ASCII eight bytes at a time** (`.text()`, string literals that need a
+  run-time check, `append_format` onto a string), as Rust's `from_utf8` does: aligned words with no
+  high bit set are passed whole, and the multi-byte checks are unchanged. No load is misaligned on
+  any target. A case covers every alignment and four rejections just past word boundaries.
+- The standard library claims `@no_block` where its bodies prove it: every `math` function, the
+  `hash` writers and `finish`, `u64[].sum`, `[u8].is_char_boundary` and `strings::utf8_width`.
+
+- New: `@no_block`, a checked effect: a function and everything it calls makes no blocking call - no
+  park (locks, channels, conditions, joins), sleep, file or socket I/O, or C function not declared
+  `extern "C" nonblocking`. Refusals name the chain (`nap -> sleep_ms -> f_host_sleep_ms ->
+  rt_sleep_for`). A check that can fail does not block (the failure ends the frame). Interface
+  format 12: the `effects` row and the `facts` record carry it.
+- png unfilters the common layout through addresses (`bytes::data_addr`, new) into an image sized
+  once, under the length guard that already bounds every row, instead of a push and a checked index
+  per byte. The 4K png: Grail-LLVM 6.44G -> 5.50G instructions (0.71 -> 0.61 s; stb_image 0.41 s),
+  Grail-native 17.7G -> 16.8G.
+- zstd's backward bit reader keeps a 64-bit window and reloads it about once per sequence instead
+  of assembling a word on every read: the 20 MB archive 11.9G -> 11.75G instructions on Grail-LLVM.
 - Closure bodies are proved like function bodies: a loop bound or a condition in a closure now
   removes the bounds checks it covers. A closure literal written as `parallel_for_zip`'s argument
   also starts knowing that every piece is as long as the first, so `v[i]` under `for i in p.len()`
   has no check (a closure passed through a variable keeps it).
+- `mul_add` on f32 and f64 vectors: `a * b + c` per lane with one rounding, identical to C's `fma`
+  on every target and backend. AArch64 uses `fmla`, RISC-V `fmadd`, and baseline x86-64 an exact
+  software routine in the runtime, which is slow there.
 - **Inflate refills its bit buffer a word at a time** (`bytes::load_u64`, a new unaligned
   little-endian word read), instead of a byte per loop step, while eight input bytes remain. The 4K
   png: Grail-LLVM 7.47G -> 6.44G instructions (0.85 -> 0.71 s; libpng 0.41 s, stb_image 0.41 s),
   Grail-native 19.8G -> 17.7G.
+- Bounds checks: an index `t & L` is at most `L`, so a table lookup through a mask that matches the
+  table (`next[s & 511]` on a 512-entry table) needs no check. The loop-invariant pass runs only in
+  a body `func()` compiles, where a failed kept fact can recompile the function; a closure body
+  compiled elsewhere uses the plain kill.
+
 - **Closures given for a generic `F` live in the frame (S6(A)).** A closure whose type is its own
   literal's - a local closure, or one passed for a callable-bound parameter - is now held as its
   environment's words in the caller's frame, copied on a move and dropped in place, and called
@@ -35,6 +69,11 @@
 - **Native backend: a scaled array index is computed once per straight line.** nbody's `p[i*3+k]`
   computed `3*i` again for every `k`; it is now computed once into a free scratch register and the
   later accesses read `8k(%rdi,%r8,8)`. nbody executes 5% fewer instructions.
+- **C calling a Grail callback is cheaper (x86-64).** A callback whose arguments all arrive in
+  registers is entered through a frameless thunk that pins the thread's record, calls the body and
+  unpins; only a thread C created takes the framed path that adopts a record. A full-word body is
+  an ordinary register function, so release builds optimise it. A C loop calling a callback (10 M
+  calls): 42 -> 26 instructions per call native, 47 -> 22 LLVM (C calling C: 11).
 
 - Fixed: an interface whose methods carry default bodies could not be read back and written again
   unchanged ("does not round-trip"): the reader kept a default body only as the source it compiles,

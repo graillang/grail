@@ -3319,6 +3319,32 @@ fn lift_simd<a, b>(l: (&a mut L), line: &b [u8]) -> unit {
         simd_store(&mut l, view(vt), view(v), view(pd), &s);
         return ();
     }
+    if op == 32 {
+        pa := address(&mut l, view("(%rsi)"));
+        pb := address(&mut l, view("(%rdx)"));
+        pc := address(&mut l, view("(%rcx)"));
+        a := simd_load(&mut l, view(vt), view(pa), &s);
+        b := simd_load(&mut l, view(vt), view(pb), &s);
+        cv := simd_load(&mut l, view(vt), view(pc), &s);
+        mut t = copy(view("call "));
+        put(&mut t, view(vt));
+        put(&mut t, view(" @llvm.fma.v"));
+        num(&mut t, n);
+        if s.bits == 32 {
+            put(&mut t, view("f32("));
+        } else {
+            put(&mut t, view("f64("));
+        }
+        put(&mut t, view(vt));
+        put(&mut t, view(" {}, "));
+        put(&mut t, view(vt));
+        put(&mut t, view(" {}, "));
+        put(&mut t, view(vt));
+        put(&mut t, view(" {})"));
+        r := def(&mut l, view(t), &u8[][a, b, cv]);
+        simd_store(&mut l, view(vt), view(r), view(pd), &s);
+        return ();
+    }
     if op == 27 {
         pa := address(&mut l, view("(%rsi)"));
         pb := address(&mut l, view("(%rdx)"));
@@ -7925,6 +7951,11 @@ fn header<a>(out: (&a mut u8[])) -> unit {
     put(&mut out, view("declare {i64, i1} @llvm.ssub.with.overflow.i64(i64, i64)\n"));
     put(&mut out, view("declare {i64, i1} @llvm.smul.with.overflow.i64(i64, i64)\n"));
     put(&mut out, view("declare double @llvm.sqrt.f64(double)\n"));
+    // The SIMD mul_add (lift_simd): only for targets with a fused instruction, where it is one.
+    put(&mut out, view("declare <4 x float> @llvm.fma.v4f32(<4 x float>, <4 x float>, <4 x float>)\n"));
+    put(&mut out, view("declare <8 x float> @llvm.fma.v8f32(<8 x float>, <8 x float>, <8 x float>)\n"));
+    put(&mut out, view("declare <2 x double> @llvm.fma.v2f64(<2 x double>, <2 x double>, <2 x double>)\n"));
+    put(&mut out, view("declare <4 x double> @llvm.fma.v4f64(<4 x double>, <4 x double>, <4 x double>)\n"));
     put(&mut out, view("define internal void @\"rt_abort.cold\"() noreturn cold noinline nounwind {\n  call {i64, i64} @\"rt_abort\"(i64 0, i64 0, i64 0, i64 0, i64 0, i64 0)\n  unreachable\n}\n"));
     // LLVM may turn copy and fill loops into these calls; Grail programs have no libc.
     put(&mut out, view("define weak ptr @memset(ptr %d, i32 %c, i64 %n) #1 {\nentry:\n  %b = trunc i32 %c to i8\n  br label %loop\nloop:\n  %i = phi i64 [0, %entry], [%i1, %body]\n  %done = icmp eq i64 %i, %n\n  br i1 %done, label %exit, label %body\nbody:\n  %p = getelementptr i8, ptr %d, i64 %i\n  store i8 %b, ptr %p\n  %i1 = add i64 %i, 1\n  br label %loop\nexit:\n  ret ptr %d\n}\n"));

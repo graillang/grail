@@ -470,6 +470,17 @@ and delete clang for that target as for Linux.
 5. In-process path for the Windows target in `assemble_object` and the driver, the windows leg
    (tools/windows.mjs under wine) on it, then delete the clang requirement as for Linux.
 
+### Instruction records (in-memory-ir S4)
+
+`asm_x86::Rec` (SoA, one row per line) is what the optimiser hands the assembler instead of text:
+text rows (`mn` 0: labels, directives) are read as lines, instruction rows are encoded from their
+fields by `execute`, the same encoder the text reader feeds. `asm_x86::assemble_records(target, &recs)`
+is the entry; `records_of(target, text)` builds rows from text for the self-test (`grail asm --records`,
+in the `asm-oracle --suite`), which holds the record path byte-identical to the text path on every
+x86-64 suite file (syn4000's 35 MB too). The optimiser fills the rows directly once its decode (S3)
+and its post-optimisation passes (S5) work on records; until then the hook is per function after
+`site_table`.
+
 ### macOS (Mach-O), in progress
 
 The last target that still assembles with clang. The survey of the macOS arm64 hello (`--target
