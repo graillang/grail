@@ -612,6 +612,11 @@ struct C {
     fmod_names: u8[][],
     fmod_ids: u64[][],
     fmod_n: u64,
+    // The digest of each source file the interface writer has read this run, by path, and the
+    // file's length: one sha256 per source instead of one per question (iface_source_digest).
+    srcdig_paths: u8[][],
+    srcdig_vals: u8[][],
+    srcdig_lens: u64[],
     funcs: Func[],
     // The (module, name) index of `funcs` and of `decls` (see name_key).
     func_slots: u64[],
@@ -5715,7 +5720,7 @@ fn last_name<a, b>(c: (&a mut C), name: &b [u8], from: u64, to: u64) -> u64 {
                     }
                 }
             }
-            if kind_at(&mut c, i + 1) == 261 {
+            if (i + 1 < c.toks.len()) && (c.toks[i + 1].kind == 261) {
                 mut named = en - st == name.len();
                 mut j = 0;
                 while named && (j < name.len()) {
@@ -5730,24 +5735,28 @@ fn last_name<a, b>(c: (&a mut C), name: &b [u8], from: u64, to: u64) -> u64 {
                 }
             }
         }
-        mut use = 1;
-        if i != 0 {
-            prev := kind_at(&mut c, i - 1);
-            if (prev == 46) || (prev == 260) {
-                use = 0;
+        // Whether the token is a use is asked only of a name of the right length: the neighbours
+        // are read for that one, not for every token of the scope.
+        if kind == 1 && en - st == name.len() && i != skip && hidden == 0 {
+            mut use = 1;
+            if i != 0 {
+                prev := c.toks[i - 1].kind;
+                if (prev == 46) || (prev == 260) {
+                    use = 0;
+                }
             }
-        }
-        // `name(` is a use too: a local holding a closure (or a reference to one) is called by its
-        // name, and the call reads it. Counting a same-named function's call as well only keeps the
-        // local alive a little longer, which is the conservative side.
-        mut next = kind_at(&mut c, i + 1);
-        if (next == 58) || (next == 260) || (next == 261) {
-            use = 0;
-        }
-        if kind == 1 && en - st == name.len() && i != skip && hidden == 0 && use != 0 {
-            mut matched = 1;
+            // `name(` is a use too: a local holding a closure (or a reference to one) is called by its
+            // name, and the call reads it. Counting a same-named function's call as well only keeps the
+            // local alive a little longer, which is the conservative side.
+            if i + 1 < c.toks.len() {
+                next := c.toks[i + 1].kind;
+                if (next == 58) || (next == 260) || (next == 261) {
+                    use = 0;
+                }
+            }
+            mut matched = use;
             mut j = 0;
-            while j < en - st {
+            while (matched != 0) && (j < en - st) {
                 if c.src[st + j] != name[j] {
                     matched = 0;
                     break;
@@ -52063,11 +52072,10 @@ fn iface_module_bytes<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std:
     }
     mut source_digest = digest.copy();
     if source_digest.len() == 0 {
-        source := host::read_file(view(path));
-        if source.len() == 0 {
+        if iface_source_len(&mut c, view(path)) == 0 {
             iface_refuse(view(path), view("cannot read the source this interface describes"));
         }
-        source_digest = iface_digest(&source);
+        source_digest = iface_source_digest(&mut c, view(path));
     }
     // The trailer: the source digest, then the digest of every byte above it. The cache keys on the
     // bytes before the trailer (the surface), so a module edit that changes no declaration leaves
@@ -55125,10 +55133,36 @@ fn iface_emit_facts<a>(c: (&a mut C)) -> unit {
     return ();
 }
 // The source digest the manifest records for module `m`: the digest of the file it was read from.
+// The sha256 of the source file at `path`, read and digested once per run: the interface's trailer,
+// its manifest row and the facts' manifest all name the same source.
+fn iface_source_digest<a, b>(c: (&a mut C), path: &b [u8]) -> u8[] {
+    for i in c.srcdig_paths.len() {
+        if same(view(c.srcdig_paths[i]), view(path)) {
+            return c.srcdig_vals[i].copy();
+        }
+    }
+    source := host::read_file(view(path));
+    digest := iface_digest(&source);
+    c.srcdig_paths.push(copy_bytes(view(path)));
+    c.srcdig_vals.push(digest.copy());
+    c.srcdig_lens.push(source.len());
+    return digest;
+}
+// The length of that source file (after iface_source_digest has read it).
+fn iface_source_len<a, b>(c: (&a mut C), path: &b [u8]) -> u64 {
+    iface_source_digest(&mut c, view(path));
+    for i in c.srcdig_paths.len() {
+        if same(view(c.srcdig_paths[i]), view(path)) {
+            return c.srcdig_lens[i];
+        }
+    }
+    return 0;
+}
 fn iface_manifest_source_digest<a, b>(c: (&a mut C), m: &b [u8]) -> u8[] {
     for i in c.iface_list.len() {
         if same(view(c.iface_list[i].module), view(m)) {
-            return iface_digest(&host::read_file(view(c.iface_list[i].path)));
+            path := c.iface_list[i].path.copy();
+            return iface_source_digest(&mut c, view(path));
         }
     }
     return u8[];
@@ -55186,7 +55220,7 @@ fn iface_emit_all<a>(c: (&a mut C)) -> unit {
         out_push(&mut row, 32);
         push_bytes(&mut row, view(iface_digest(&text)));
         out_push(&mut row, 32);
-        push_bytes(&mut row, view(iface_digest(&host::read_file(view(path)))));
+        push_bytes(&mut row, view(iface_source_digest(&mut c, view(path))));
         out_push(&mut row, 10);
         push_bytes(&mut manifest, view(row));
     }
@@ -55289,6 +55323,9 @@ pub fn main() -> u64 {
         fmod_names: u8[][],
         fmod_ids: u64[][],
         fmod_n: 0,
+        srcdig_paths: u8[][],
+        srcdig_vals: u8[][],
+        srcdig_lens: u64[],
         funcs: Func[],
         func_slots: u64[],
         func_keys: u64[],
