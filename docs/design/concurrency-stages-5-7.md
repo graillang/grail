@@ -753,3 +753,21 @@ closure environments and the `Pair`: call_abi S6 and unboxed 3c). Most of the re
 small runtime functions that the native backend does not inline (`rt_job_stack`, `rt_list_set`,
 `rt_current`, `rt_worker_self`: 30-50 instructions each, several times per join). Inlining them,
 or the LLVM build doing so (item 6), is what gets the scheduler's own share to rayon's level.
+
+### Item 6 as built: why LLVM was slower, and the fix
+
+A function that reads the thread pointer contains `movq %fs:0` or `movq %fs:rt_tls_record@tpoff`,
+which the lifter did not handle. So every runtime accessor that touches the thread record
+(`rt_current`, `rt_worker_self`, `rt_job_block`, `rt_job_stack` and everything that calls them
+without inlining) stayed native, and each call from lifted code crossed the native-convention
+boundary: a join on a worker cost 5,572 instructions under LLVM against about 3,100 native. The
+lifter now reads `%fs:0` as `load i64, ptr addrspace(257) null`, the record word as an
+initial-exec thread-local (`@rt_tls_record`, defined by the native part), and `sym+offset(%rip)`
+operands as a byte offset from the symbol. The accessors lift, and LLVM inlines them: **a join on a
+worker is 1,807 instructions under LLVM** (native ~3,100). The ordered atomics are already in (stage
+7, merged earlier), so no `fence seq_cst` remains on these paths.
+
+Three LLVM-backend cases fail before and after this change, and so are not caused by it:
+`sched-job-failure-is-contained` and `sched-join-failure-names-the-user-join` (the failing
+statement's site line is missing, which points at the frame walk under LLVM frames), and
+`mutex-poisoned-by-failed-holder-and-recovered` (sync's).

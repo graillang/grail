@@ -926,13 +926,31 @@ fn address<a, b>(l: (&a mut L), op: &b [u8]) -> u8[] {
             bad(&mut l);
             return copy(view("null"));
         }
-        l.refs.push(copy(view(disp)));
-        l.addrs.push(copy(view(disp)));
+        // `sym+offset(%rip)`: the symbol, then a byte offset from it.
+        mut plus = disp.len();
+        for i in disp.len() {
+            if (disp[i] == 43) & (plus == disp.len()) {
+                plus = i;
+            }
+        }
+        name := sub(view(disp), 0, plus);
+        l.refs.push(copy(view(name)));
+        l.addrs.push(copy(view(name)));
         mut sym = u8[];
         put(&mut sym, view("@\""));
-        put(&mut sym, view(disp));
+        put(&mut sym, view(name));
         sym.push(34);
-        return sym;
+        if plus == disp.len() {
+            return sym;
+        }
+        off := parse_int(view(sub(view(disp), plus + 1, disp.len())));
+        if off.ok == 0 {
+            bad(&mut l);
+            return copy(view("null"));
+        }
+        mut ot = u8[];
+        inum(&mut ot, off.v);
+        return def(&mut l, view("getelementptr i8, ptr {}, i64 {}"), &u8[][sym, ot]);
     }
     mut d: i64 = 0;
     if disp.len() != 0 {
@@ -1014,6 +1032,21 @@ fn value<a, b>(l: (&a mut L), op: &b [u8], width: u64) -> u8[] {
         inum(&mut out, n.v);
         return out;
     }
+    if starts(op, view("%fs:")) {
+        // The thread pointer (x86-64): `%fs:0` is the TCB's self word, and `%fs:rt_tls_record@tpoff`
+        // this thread's record word, which LLVM reaches as an initial-exec thread-local. Both lift,
+        // so the runtime's small accessors are lifted - and inlined - instead of staying native.
+        rest := sub(op, 4, op.len());
+        if eq(view(rest), view("0")) {
+            return def(&mut l, view("load i64, ptr addrspace(257) null"), &u8[][]);
+        }
+        if eq(view(rest), view("rt_tls_record@tpoff")) {
+            l.refs.push(copy(view("rt_tls_record")));
+            return def(&mut l, view("load i64, ptr @\"rt_tls_record\""), &u8[][]);
+        }
+        bad(&mut l);
+        return copy(view("0"));
+    }
     if op[0] == 37 {
         name := sub(op, 1, op.len());
         if is_xmm(view(name)) {
@@ -1050,6 +1083,15 @@ fn value<a, b>(l: (&a mut L), op: &b [u8], width: u64) -> u8[] {
 // Writes a value: registers take the whole word (with the alias's width rules), memory `width` bits.
 fn store<a, b, c>(l: (&a mut L), op: &b [u8], v: &c [u8], width: u64) -> unit {
     if op.len() == 0 {
+        bad(&mut l);
+        return ();
+    }
+    if starts(op, view("%fs:")) {
+        if eq(view(sub(op, 4, op.len())), view("rt_tls_record@tpoff")) && (width == 64) {
+            l.refs.push(copy(view("rt_tls_record")));
+            emit(&mut l, view("store i64 {}, ptr @\"rt_tls_record\""), &u8[][copy(v)]);
+            return ();
+        }
         bad(&mut l);
         return ();
     }
@@ -6447,6 +6489,9 @@ fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (
                 put(&mut ir, view(".c"));
             }
             put(&mut ir, view("\"(i64, i64, i64, i64, i64, i64)\n"));
+        } else if eq(r, view("rt_tls_record")) {
+            // The thread's record word: an initial-exec thread-local the native part defines.
+            put(&mut ir, view("@\"rt_tls_record\" = external hidden thread_local(initialexec) global i64\n"));
         } else {
             put(&mut ir, view("@\""));
             put(&mut ir, view(name));
