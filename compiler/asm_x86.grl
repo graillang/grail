@@ -30,6 +30,9 @@ const FX_TPOFF: u64 = 4;
 const FX_ABS32: u64 = 5;
 const FX_ABS32S: u64 = 6;
 const FX_DIFF: u64 = 7;
+// COFF debug info: a section-relative offset (4 bytes) and a section index (2 bytes).
+const FX_SECREL: u64 = 8;
+const FX_SECIDX: u64 = 9;
 // Item kinds.
 const IT_JCC: u64 = 1;
 const IT_JMP: u64 = 2;
@@ -62,6 +65,19 @@ pub struct A {
     sc_extra: u64[],
     sc_slots: u64[],
     xdata_sec: u64,
+    // CodeView: `.cv_file` names by number, the `.cv_loc` waiting for an instruction, and the rows
+    // (function, file, line, column, and a label at the instruction).
+    cv_name: u8[][],
+    cv_pending: u64,
+    cv_func: u64,
+    cv_file: u64,
+    cv_line: u64,
+    cv_col: u64,
+    cvr_func: u64[],
+    cvr_file: u64[],
+    cvr_line: u64[],
+    cvr_col: u64[],
+    cvr_sym: u64[],
     sym_class: u64[],
     sym_ctype: u64[],
     // RISC-V: how many `.Lpcrel_hiN` labels `lla` has made, the current section's mapping state
@@ -391,6 +407,14 @@ fn directives<a>(o: (&a mut A)) {
     def(&mut o, view(".seh_stackalloc"), D_SEH_STACKALLOC);
     def(&mut o, view(".seh_endprologue"), D_SEH_ENDPROLOGUE);
     def(&mut o, view(".seh_endproc"), D_SEH_ENDPROC);
+    def(&mut o, view(".cv_file"), D_CV_FILE);
+    def(&mut o, view(".cv_func_id"), D_CV_FUNC_ID);
+    def(&mut o, view(".cv_loc"), D_CV_LOC);
+    def(&mut o, view(".cv_linetable"), D_CV_LINETABLE);
+    def(&mut o, view(".cv_filechecksums"), D_CV_FILECHECKSUMS);
+    def(&mut o, view(".cv_stringtable"), D_CV_STRINGTABLE);
+    def(&mut o, view(".secrel32"), D_SECREL32);
+    def(&mut o, view(".secidx"), D_SECIDX);
     def(&mut o, view(".8byte"), D_8BYTE);
 }
 
@@ -433,6 +457,17 @@ pub fn new() -> A {
         sc_extra: u64[],
         sc_slots: u64[],
         xdata_sec: 0,
+        cv_name: u8[][],
+        cv_pending: 0,
+        cv_func: 0,
+        cv_file: 0,
+        cv_line: 0,
+        cv_col: 0,
+        cvr_func: u64[],
+        cvr_file: u64[],
+        cvr_line: u64[],
+        cvr_col: u64[],
+        cvr_sym: u64[],
         sym_class: u64[],
         sym_ctype: u64[],
         pcrel_count: 0,
@@ -1136,11 +1171,15 @@ fn data<a>(o: (&a mut A), width: u64) {
         } else if width == 4 {
             field(&mut o, 4, FX_ABS32, 0);
         } else {
-            if o.ex_sym != 0 {
+            if o.ex_sym2 != 0 {
+                // A difference of two labels (CodeView record lengths).
+                field(&mut o, width, FX_ABS32, 0);
+            } else if o.ex_sym != 0 {
                 fail(&mut o, view("a symbol in a byte or word"));
                 return ();
+            } else {
+                emit_le(&mut o, o.ex_add, width);
             }
-            emit_le(&mut o, o.ex_add, width);
         }
         skip(&mut o);
         if (peek(&o) == ',') {
@@ -1426,6 +1465,8 @@ fn directive<a>(o: (&a mut A), id: u64) {
         note_attr(&mut o, o.def_sym - 1);
     } else if id == D_ENDEF {
         o.def_sym = 0;
+    } else if (id >= D_CV_FILE) && (id <= D_SECIDX) {
+        cv_directive(&mut o, id);
     } else if (id >= D_SEH_PROC) && (id <= D_SEH_ENDPROC) {
         seh_directive(&mut o, id);
     } else if id == D_PREVIOUS {
@@ -2001,6 +2042,7 @@ fn run<a>(o: (&a mut A)) -> Result {
         }
         if hit {
             take_loc(&mut o);
+            cv_take(&mut o);
             // Only data lines are remembered on AArch64 and RISC-V: they still mark data.
             if o.target != 0 {
                 map_to(&mut o, 2);
@@ -2622,6 +2664,14 @@ const D_SEH_SETFRAME: u64 = 37;
 const D_SEH_STACKALLOC: u64 = 38;
 const D_SEH_ENDPROLOGUE: u64 = 39;
 const D_SEH_ENDPROC: u64 = 40;
+const D_CV_FILE: u64 = 41;
+const D_CV_FUNC_ID: u64 = 42;
+const D_CV_LOC: u64 = 43;
+const D_CV_LINETABLE: u64 = 44;
+const D_CV_FILECHECKSUMS: u64 = 45;
+const D_CV_STRINGTABLE: u64 = 46;
+const D_SECREL32: u64 = 47;
+const D_SECIDX: u64 = 48;
 const I_MOVQ: u64 = 100;
 const I_MOVL: u64 = 101;
 const I_MOVB: u64 = 102;
@@ -3246,6 +3296,7 @@ fn instruction<a>(o: (&a mut A), first: u64) {
         return ();
     }
     take_loc(&mut o);
+    cv_take(&mut o);
     mut id = first;
     if (id == I_LOCK) || (id == I_REP) {
         // `lock` and `rep` are prefixes of the instruction that follows on the line.
@@ -4599,6 +4650,29 @@ fn coff_fixup<a, b, c>(o: (&a mut A), pre: (&b u64[]), i: u64, r_sec: (&c mut u6
         put_le(&mut o.sec_data[sec], at, v, width);
         return ();
     }
+    if (kind == FX_SECREL) || (kind == FX_SECIDX) {
+        r_sec.push(sec);
+        r_off.push(at);
+        mut field = add;
+        if (o.sym_sec[sym] != 0) && temporary(&o, sym) {
+            r_sym.push(coff_secsym(o.sym_sec[sym] - 1));
+            if kind == FX_SECREL {
+                field = wrapping_add(field, sym_final(&o, pre, sym));
+            }
+        } else {
+            r_sym.push(sym);
+            o.sym_ref[sym] = 1;
+        }
+        r_add.push(0);
+        if kind == FX_SECREL {
+            r_type.push(11);
+            put_le(&mut o.sec_data[sec], at, field, 4);
+        } else {
+            r_type.push(10);
+            put_le(&mut o.sec_data[sec], at, field, 2);
+        }
+        return ();
+    }
     defined := o.sym_sec[sym] != 0;
     // `.scl 2` makes a symbol external, like `.globl`; a weak definition here is resolved here.
     local := (o.sym_bind[sym] != 1) && (o.sym_class[sym] != 2);
@@ -4647,6 +4721,10 @@ fn coff_characteristics<a>(o: (&a A), k: u64) -> u64 {
         c = 0xc0000040;
     } else {
         c = 0x40000040;
+    }
+    // `.debug$S`/`.debug$T`: discardable.
+    if (o.sec_name[k].len() > 6) && at_word(view(o.sec_name[k]), 0, 6, view(".debug")) {
+        c = c | 0x02000000;
     }
     mut log = 0;
     mut a = o.sec_align[k];
@@ -4948,4 +5026,225 @@ fn seh_tables<a, b, c>(o: (&a mut A), pre: (&b u64[]), r_sec: (&c mut u64[]), r_
         }
     }
     o.sec_data[pk] = d;
+}
+
+// ---- CodeView (.debug$S line information, as LLVM's CodeViewContext writes it) -------------------
+
+// The pending `.cv_loc` becomes a row at the instruction about to be emitted, through a label there.
+fn cv_take<a>(o: (&a mut A)) {
+    if (o.cv_pending == 0) || (o.cur != 0) {
+        return ();
+    }
+    o.cv_pending = 0;
+    mut name = view(".Lcv ").copy();
+    num(&mut name, o.cvr_sym.len());
+    outer := exchange(&mut o.src, name);
+    o.nh_a = 1;
+    o.nh_e = 0;
+    l := symbol(&mut o, 0, o.src.len());
+    o.src = outer;
+    o.nh_a = 1;
+    o.nh_e = 0;
+    o.sym_sec[l] = 1;
+    o.sym_pos[l] = pos(&o);
+    o.sym_k[l] = o.it_pos.len();
+    o.cvr_func.push(o.cv_func);
+    o.cvr_file.push(o.cv_file);
+    o.cvr_line.push(o.cv_line);
+    o.cvr_col.push(o.cv_col);
+    o.cvr_sym.push(l);
+}
+
+// The CodeView string table: "\0" then each file name once, in file-number order; `at` the offset
+// of each file's name.
+fn cv_strings<a>(o: (&a A), at: (&mut u64[])) -> u8[] {
+    mut table = u8[];
+    table.push(0);
+    for n in o.cv_name.len() {
+        name := view(o.cv_name[n]);
+        mut found = table.len();
+        mut i = 0;
+        while i < table.len() {
+            mut e = i;
+            while table[e] != 0 {
+                e += 1;
+            }
+            if (e - i == name.len()) && (name.len() != 0) && at_word(view(table), i, e, name) {
+                found = i;
+                break;
+            }
+            i = e + 1;
+        }
+        at.push(found);
+        if found == table.len() {
+            table.append(name);
+            table.push(0);
+        }
+    }
+    return table;
+}
+
+fn cv_diff<a>(o: (&a mut A), later: u64, earlier: u64) {
+    o.ex_sym = later + 1;
+    o.ex_sym2 = earlier + 1;
+    o.ex_neg = 0;
+    o.ex_div = 1;
+    o.ex_add = 0;
+    o.ex_mod = 0;
+    field(&mut o, 4, FX_ABS32, 0);
+}
+
+fn cv_directive<a>(o: (&a mut A), id: u64) {
+    o.cacheable = 0;
+    o.chunk_ok = 0;
+    if id == D_CV_FILE {
+        n := number(&mut o);
+        skip(&mut o);
+        start := o.buf.len();
+        string(&mut o, false);
+        mut name = u8[];
+        name.append(o.buf[start: o.buf.len()]);
+        o.buf.truncate(start);
+        while o.cv_name.len() < n {
+            o.cv_name.push(u8[]);
+        }
+        o.cv_name[n - 1] = name;
+        return ();
+    }
+    if id == D_CV_FUNC_ID {
+        number(&mut o);
+        return ();
+    }
+    if id == D_CV_LOC {
+        // Two `.cv_loc`s in a row: the first still gets its row (LLVM's emitCVLocDirective).
+        cv_take(&mut o);
+        o.cv_func = number(&mut o);
+        o.cv_file = number(&mut o);
+        o.cv_line = number(&mut o);
+        skip(&mut o);
+        o.cv_col = 0;
+        if (o.at < o.le) && (peek(&o) >= '0') && (peek(&o) <= '9') {
+            o.cv_col = number(&mut o);
+        }
+        o.cv_pending = 1;
+        return ();
+    }
+    if (id == D_SECREL32) || (id == D_SECIDX) {
+        sym := sym_operand(&mut o);
+        o.ex_sym = sym + 1;
+        o.ex_sym2 = 0;
+        o.ex_neg = 0;
+        o.ex_div = 1;
+        o.ex_add = 0;
+        o.ex_mod = 0;
+        if id == D_SECREL32 {
+            fixup_coff(&mut o, sym, FX_SECREL, 4);
+        } else {
+            fixup_coff(&mut o, sym, FX_SECIDX, 2);
+        }
+        return ();
+    }
+    if id == D_CV_FILECHECKSUMS {
+        mut at = u64[];
+        cv_strings(&o, &mut at);
+        emit_le(&mut o, 0xf4, 4);
+        emit_le(&mut o, 8 * o.cv_name.len(), 4);
+        for n in o.cv_name.len() {
+            emit_le(&mut o, at[n], 4);
+            emit_le(&mut o, 0, 4);
+        }
+        return ();
+    }
+    if id == D_CV_STRINGTABLE {
+        mut at = u64[];
+        table := cv_strings(&o, &mut at);
+        emit_le(&mut o, 0xf3, 4);
+        emit_le(&mut o, table.len(), 4);
+        o.buf.append(view(table));
+        return ();
+    }
+    // `.cv_linetable F, BEGIN, END`.
+    f := number(&mut o);
+    expect(&mut o, ',');
+    begin := sym_operand(&mut o);
+    expect(&mut o, ',');
+    end := sym_operand(&mut o);
+    mut rows = u64[];
+    mut columns = false;
+    for r in o.cvr_func.len() {
+        if o.cvr_func[r] == f {
+            rows.push(r);
+            if o.cvr_col[r] != 0 {
+                columns = true;
+            }
+        }
+    }
+    // The length: the function header and, per run of rows in one file, a block.
+    mut size = 12;
+    mut i = 0;
+    while i < rows.len() {
+        mut j = i;
+        while (j < rows.len()) && (o.cvr_file[rows[j]] == o.cvr_file[rows[i]]) {
+            j += 1;
+        }
+        size += 12 + 8 * (j - i);
+        if columns {
+            size += 4 * (j - i);
+        }
+        i = j;
+    }
+    emit_le(&mut o, 0xf2, 4);
+    emit_le(&mut o, size, 4);
+    fixup_coff(&mut o, begin, FX_SECREL, 4);
+    fixup_coff(&mut o, begin, FX_SECIDX, 2);
+    if columns {
+        emit_le(&mut o, 1, 2);
+    } else {
+        emit_le(&mut o, 0, 2);
+    }
+    cv_diff(&mut o, end, begin);
+    i = 0;
+    while i < rows.len() {
+        file := o.cvr_file[rows[i]];
+        mut j = i;
+        while (j < rows.len()) && (o.cvr_file[rows[j]] == file) {
+            j += 1;
+        }
+        emit_le(&mut o, 8 * (file - 1), 4);
+        emit_le(&mut o, j - i, 4);
+        mut block = 12 + 8 * (j - i);
+        if columns {
+            block += 4 * (j - i);
+        }
+        emit_le(&mut o, block, 4);
+        mut k = i;
+        while k < j {
+            cv_diff(&mut o, o.cvr_sym[rows[k]], begin);
+            emit_le(&mut o, o.cvr_line[rows[k]], 4);
+            k += 1;
+        }
+        if columns {
+            k = i;
+            while k < j {
+                emit_le(&mut o, o.cvr_col[rows[k]], 2);
+                emit_le(&mut o, 0, 2);
+                k += 1;
+            }
+        }
+        i = j;
+    }
+}
+
+// A COFF debug fixup (`FX_SECREL`, `FX_SECIDX`) against `sym` at the current position.
+fn fixup_coff<a>(o: (&a mut A), sym: u64, kind: u64, width: u64) {
+    o.fx_sec.push(o.cur);
+    o.fx_pos.push(o.buf.len());
+    o.fx_k.push(o.it_pos.len());
+    o.fx_kind.push(kind);
+    o.fx_sym.push(sym);
+    o.fx_sym2.push(0);
+    o.fx_width.push(width);
+    o.fx_add.push(0);
+    o.sym_ref[sym] = 1;
+    emit_le(&mut o, 0, width);
 }

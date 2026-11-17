@@ -14,7 +14,7 @@
   an older compiler are refused by version and regenerated.
 - Windows x86-64 builds (non-debug) assemble in the compiler too: `compiler/coff.grl` writes COFF
   objects byte-identical to clang's, `.pdata`/`.xdata` unwind for every function included
-  (`grail asm --target windows-x86_64`). Debug builds keep clang until CodeView is written. Fixed:
+  (`grail asm --target windows-x86_64`), debug builds included (CodeView line tables). Fixed:
   `movsd` encoded as `movdqu` (the two shared an internal id).
 
 - **Sized and signed arithmetic no longer divides in software.** The runtime's `rt_div` was a
