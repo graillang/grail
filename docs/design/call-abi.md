@@ -268,3 +268,10 @@ optimiser_labels, then S6 after unboxed 3a lands (it builds on 3a's frame aggreg
   difference on LLVM is the GPR<->xmm moves at each edge. S8a lifts C-boundary float calls with a
   typed call from a per-symbol FFI fact; S8b gives internal lifted bodies `double` parameters where
   the signature fact says a word is a float. Neither changes the native convention.
+- **S8a (C-boundary float calls lifted, x86-64).** native.grl `ffi_signature_fact` records, per C
+  symbol, the integer words, the float arguments (f32 mask) and the result kind for a call whose
+  arguments are all in registers (no stack area, not variadic, no records); llvm.grl
+  `lower_ffi_call` passes the floats from %xmm0-7 as `double`/`float` and puts the result back in
+  %rax or %xmm0, and the symbol is declared with those types. Disagreeing call sites leave a symbol
+  untyped. The stay-native rule remains for every other shape (it now fires only there).
+  Fixture: compiler/tests/ffi_float_calls.grl in tools/test-facts.mjs.
