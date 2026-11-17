@@ -11,7 +11,8 @@
   compiler it assembles the syn4000 program's 35 MB of assembly in 0.41 s against clang's 1.37 s,
   and the self-compile's 119 MB in 1.1 s against 5.2 s. `--assembler=clang` (and `GRAIL_ASSEMBLER`)
   still choose clang; the flag goes once the oracle has been green through one landing. Debug
-  builds and the other targets still use clang.
+  builds go through it too (it writes `.debug_line` from `.file`/`.loc` as LLVM does); the other
+  targets still use clang.
 
 - Fixed: a small leaf that takes the address of its own local (runtime.grl's `rt_frame`) was
   inlined with that local turned into a scratch register, so split and cached builds of programs

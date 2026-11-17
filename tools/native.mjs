@@ -191,7 +191,7 @@ export function moduleFlags(target) {
   if (target === 'aarch64') return ['-mno-outline-atomics'];
   return [];
 }
-export function assemble(source, executable, target = hostTarget, linkArgs = [], { frameworkArgs = [], sign = false, sdk = undefined, debug = false } = {}) {
+export function assemble(source, executable, target = hostTarget, linkArgs = [], { frameworkArgs = [], sign = false, sdk = undefined } = {}) {
   targetName(target);
   // Unique per process: two concurrent builds of the same target otherwise truncate each
   // other's object file mid-assembly, which clang reports as SIGBUS. `object` is this process's
@@ -200,8 +200,7 @@ export function assemble(source, executable, target = hostTarget, linkArgs = [],
   const object = `${executable}.${process.pid}.o`;
   const stable = `${executable}.o`;
   const flags = target === 'riscv64' ? ['-march=rv64imafd', '-mabi=lp64d'] : [];
-  // Debug builds keep clang until the internal assembler writes .debug_line (stage 4, S3).
-  if (target === 'x86_64' && !debug && internalAssembler && !process.env.GRAIL_ASSEMBLER && process.env.GRAIL_ASSEMBLER_INTERNAL !== '0') {
+  if (target === 'x86_64' && internalAssembler && !process.env.GRAIL_ASSEMBLER && process.env.GRAIL_ASSEMBLER_INTERNAL !== '0') {
     command([internalAssembler, 'asm', source, '-o', object]);
     if (process.env.GRAIL_ASM_ORACLE === '1') {
       // The oracle (tools/asm-oracle.mjs): clang's object from the same text must be the same.
@@ -576,7 +575,7 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
     linkArgs.unshift(object);
   }
   const framework = machoTargets.includes(target) ? frameworkArguments(frameworks, { directory, sdk }) : { args: [] };
-  return assemble(assembly, join(directory, name), target, linkArgs, { frameworkArgs: framework.args, sign, sdk, debug: extra.includes('--debug') });
+  return assemble(assembly, join(directory, name), target, linkArgs, { frameworkArgs: framework.args, sign, sdk });
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const mode = process.argv[2] ?? 'build';
