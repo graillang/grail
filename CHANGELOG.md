@@ -3,6 +3,14 @@
 - Fixed: `grail fmt` could break a long expression inside `<<` or `>>` (each is two `<`/`>` tokens),
   or start a continuation line with `<`, and the output then read as a generic argument list and no
   longer parsed. A wrapped line now never starts with `<` or `>`.
+- **Faster rebuilds after an edit: unchanged functions' optimised code comes from the store.** A
+  body replayed from the function store carried its parameters' type facts twice, so its key in the
+  optimiser's memo differed from the one it was filed under and every body of an edited module was
+  optimised again. The facts are now the fresh emission's, and the memo hits for every unchanged
+  body: `grail build` of a 4000-function file after a one-function edit went from 95.7G to 34.0G
+  instructions (GRAIL_JOBS=1). The stack-probe check reads the assembly once with no per-line
+  copies, and the inlining pass's call lines travel with each remembered body instead of being found
+  by a scan of the whole output.
 - The internal assembler takes `.previous`.
 
 - **Integer map keys hash in registers.** `hash::Hash` has a defaulted `table_hash`, the SipHash-1-3
