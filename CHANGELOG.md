@@ -3,8 +3,10 @@
 - **`extern "C" blocking fn`**: a foreign function declared `blocking` (a read, a wait, a present)
   does not take a worker with it. On a worker running a green task, the call hands the worker's
   queues to a spare thread for its duration and the calling thread keeps the task - C's frames and
-  thread-locals stay where they are - then becomes a spare itself. Spares are reused, there are at
-  most twice the worker count of them, and an idle one exits after a second. Off a worker the
+  thread-locals stay where they are - then becomes a spare itself. Spares are reused - a
+  thread is made only when none is idle - and an idle one exits after a second once more than the
+  worker count are waiting. `host::read_file`, `write_file` and `command` from a task work the same
+  way now, instead of starting a thread for every call. Off a worker the
   declaration changes nothing. x86-64 Linux for now; elsewhere `blocking` is a plain call. The old
   `rt_blocking_enter` warning ("a blocking foreign call is running on a green task's scheduler
   thread") is gone with the unsafe hook that produced it.
