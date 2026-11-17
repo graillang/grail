@@ -1,5 +1,11 @@
 ## Unreleased
 
+- Bounds checks on decoder state: facts about the fields of a `&mut` record or a `mut` record
+  binding (`z.at < z.data.len()`) are kept until something can change that field - a write of the
+  path (`z.at += 1`), a mutable loan of it (`z.data.pop()`), or a call or method that receives `z`
+  itself. A loan of one field (`z.out.push(..)`) ends that field's facts only, so
+  `while z.at < z.data.len() { z.out.push(z.data[z.at]); z.at += 1; }` reads unchecked.
+
 - Bounds checks: an index `t & L` is at most `L`, so a table lookup through a mask that matches the
   table (`next[s & 511]` on a 512-entry table) needs no check. The loop-invariant pass runs only in
   a body `func()` compiles, where a failed kept fact can recompile the function; a closure body

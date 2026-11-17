@@ -9405,7 +9405,7 @@ fn pv_term<a>(c: (&a mut C), at: u64, used: (&a mut u64)) -> u8[] {
     // is the path, and it means one value for as long as the binding lives (pv_field_stable).
     if (c.pv_pred_mode == 0) & (kind_at(&mut c, at + 1) == 46) & (kind_at(&mut c, at + 2) == 1) & (kind_at(&mut c, at + 3) != 40) {
         f := tok_text(&mut c, at + 2);
-        if pv_field_stable(&mut c, view(t), view(f)) {
+        if pv_field_stable(&mut c, view(t), view(f)) || pv_field_tracked(&mut c, view(t), view(f)) {
             mut out = t.copy();
             out.push(46);
             push_bytes(&mut out, view(f));
@@ -9465,6 +9465,84 @@ fn pv_field_stable<a, b, d>(c: (&a mut C), root: &b [u8], field: &d [u8]) -> boo
     fk := ty_kind(&mut c, fty);
     // An integer of any width, or an owned vector (whose length is the term).
     return (fty == 0) || (fk == 18) || (fty == 2) || (fk == 6);
+}
+// Whether `root.field` may be a term although the body can write it: the root is a `mut` record
+// binding or a `&mut` reference to a record (unique: nothing else can write through it while this
+// body holds it), and the field is a plain value or an owned vector. Its facts then live by kill
+// rules on the path (pv_path_kills, pv_loop_kill, field assignments): a write of `root.field`
+// ends what was known of it, and handing `root` itself to a call or a method ends all of `root`.
+fn pv_field_tracked<a, b, d>(c: (&a mut C), root: &b [u8], field: &d [u8]) -> bool {
+    l := find_local(&mut c, root);
+    if l == 0 {
+        return false;
+    }
+    lty := local_ty(&mut c, l - 1);
+    mut rty = lty;
+    if ty_kind(&mut c, lty) == 7 {
+        if ty_mode(&mut c, lty) == 0 {
+            return false;
+        }
+        rty = ty_arg(&mut c, lty);
+    } else {
+        if c.locals[l - 1].mutable == 0 {
+            return false;
+        }
+    }
+    rty = base_type(&mut c, rty);
+    if ty_kind(&mut c, rty) != 8 {
+        return false;
+    }
+    d := ty_arg(&mut c, rty);
+    if (c.decls[d].is_enum != 0) || (c.decls[d].c_layout != 0) {
+        return false;
+    }
+    idx := field_index(&mut c, d, field);
+    if idx == 0 {
+        return false;
+    }
+    fty := field_type(&mut c, rty, idx - 1);
+    fk := ty_kind(&mut c, fty);
+    return (fty == 0) || (fk == 18) || (fty == 2) || (fk == 6);
+}
+// The path `a.b.c` starting at token `at` (a name not after a `.`): its text and the index of the
+// token after it. Only plain field steps; a call or an index ends it.
+fn pv_path_at<a>(c: (&a mut C), at: u64, next: (&a mut u64)) -> u8[] {
+    mut out = tok_text(&mut c, at);
+    mut i = at + 1;
+    while (kind_at(&mut c, i) == 46) && (kind_at(&mut c, i + 1) == 1) && (kind_at(&mut c, i + 2) != 40) {
+        out.push(46);
+        push_bytes(&mut out, view(tok_text(&mut c, i + 1)));
+        i += 2;
+    }
+    exchange(next, i);
+    return out;
+}
+// What a span does to tracked paths (pv_field_tracked), token by token: `p = ..`, `p op= ..` and a
+// mutating method `p.m(..)` end the facts of `p`; a method called on the root itself ends all of it.
+// Returns the names it handled, so the caller does not treat them as plain mentions.
+fn pv_path_kills<a>(c: (&a mut C), lo: u64, hi: u64) -> unit {
+    mut i = lo;
+    while i < hi {
+        if (kind_at(&mut c, i) == 1) && !((i > 0) && (kind_at(&mut c, i - 1) == 46)) && (kind_at(&mut c, i + 1) == 46) {
+            root := tok_text(&mut c, i);
+            if (kind_at(&mut c, i + 2) == 1) && pv_field_tracked(&mut c, view(root), view(tok_text(&mut c, i + 2))) {
+                mut j = 0;
+                path := pv_path_at(&mut c, i, &mut j);
+                nk := kind_at(&mut c, j);
+                if (nk == 61) || ((261 < nk) & (nk < 269)) {
+                    pv_ir_wrote(&mut c, view(path));
+                } else if (nk == 46) && (kind_at(&mut c, j + 1) == 1) && (kind_at(&mut c, j + 2) == 40) {
+                    if !pv_pure_test(view(tok_text(&mut c, j + 1))) {
+                        pv_ir_wrote(&mut c, view(path));
+                    }
+                }
+                i = j;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    return ();
 }
 // The predicate of `root.field` when the path is one value for the binding's life (pv_field_stable):
 // every write of a refined field checks its predicate (a literal, `r.f = v`, `r.f op= v`) and no
@@ -11012,6 +11090,7 @@ fn pv_loop_kill<a>(c: (&a mut C), open: u64, end: u64) -> unit {
         }
         i += 1;
     }
+    pv_path_kills(&mut c, open + 1, end);
     if pv_span_calls_closure(&mut c, open, end) {
         pv_caps_kill(&mut c);
     }
@@ -11073,12 +11152,21 @@ fn pv_ir_statement<a>(c: (&a mut C), lo: u64, hi: u64) -> unit {
     if !pv_span_calls(&mut c, lo, hi) {
         return ();
     }
+    pv_path_kills(&mut c, lo, hi);
     mut i = lo;
-    // A name written kills the facts that mention it; with none held there is nothing to kill.
+    // A name written kills the facts that mention it; with none held there is nothing to kill. A
+    // tracked root read through a path (`z.data[i]`, `z.at`) is not handed to the call: only the
+    // paths pv_path_kills saw written lose their facts, and a bare `z` loses all of them.
     while (i < hi) & (c.pv_facts.len() != 0) {
         if kind_at(&mut c, i) == 1 {
             n := tok_text(&mut c, i);
-            pv_ir_called(&mut c, view(n));
+            mut through_path = false;
+            if (kind_at(&mut c, i + 1) == 46) && (kind_at(&mut c, i + 2) == 1) && !((i > 0) && (kind_at(&mut c, i - 1) == 46)) {
+                through_path = pv_field_tracked(&mut c, view(n), view(tok_text(&mut c, i + 2)));
+            }
+            if !through_path {
+                pv_ir_called(&mut c, view(n));
+            }
         }
         i += 1;
     }
@@ -37781,9 +37869,31 @@ fn pv_lent<a>(c: (&a mut C), place: u64) -> unit {
         }
         root.push(b);
     }
-    if root.len() != 0 {
-        pv_ir_wrote(&mut c, view(root));
+    if root.len() == 0 {
+        return ();
     }
+    // A loan of one field of a tracked root (pv_field_tracked: a `&mut` record or a `mut` record
+    // binding) can change that field and nothing else of the root: only its path is forgotten.
+    mut start = 0;
+    if (name.len() > 0) && (name[0] == 42) {
+        start = 1;
+    }
+    if (start + root.len() < name.len()) && (name[start + root.len()] == 46) {
+        mut field = u8[];
+        mut i = start + root.len() + 1;
+        while (i < name.len()) && (name[i] != 46) && (name[i] != 91) {
+            field.push(name[i]);
+            i += 1;
+        }
+        if (field.len() != 0) && pv_field_tracked(&mut c, view(root), view(field)) {
+            mut path = root.copy();
+            path.push(46);
+            push_bytes(&mut path, view(field));
+            pv_ir_wrote(&mut c, view(path));
+            return ();
+        }
+    }
+    pv_ir_wrote(&mut c, view(root));
     return ();
 }
 fn lend<a>(c: (&a mut C), place: u64, mode: u64) -> u64 {
@@ -47600,17 +47710,32 @@ fn pv_index_ok<a>(c: (&a mut C), bracket: u64, lo: u64, hi: u64, base: u64) -> b
     if kind_at(&mut c, bracket - 1) != 1 {
         return false;
     }
+    mut name = tok_text(&mut c, bracket - 1);
     if bracket >= 2 {
         pk := kind_at(&mut c, bracket - 2);
-        // `s.v[i]`, `f()[i]`, `a[j][i]`: the base is no local the facts name.
-        // `s.v[i]`, `f()[i]`, `a[j][i]`, `m::v[i]`: the base is no local the facts name.
-        if (pk == 46) || (pk == 93) || (pk == 41) || (pk == 260) {
+        // `f()[i]`, `a[j][i]`, `m::v[i]`: the base is no local the facts name.
+        if (pk == 93) || (pk == 41) || (pk == 260) {
             return false;
         }
+        if pk == 46 {
+            // `root.field[i]`: the base is a field path the facts can name, when its root is a
+            // local and the field stays one value (pv_field_stable) or is tracked by the path kill
+            // rules (pv_field_tracked). Only one step: `a.b.c[i]` is not read.
+            if (bracket < 3) || (kind_at(&mut c, bracket - 3) != 1) || ((bracket >= 4) && (kind_at(&mut c, bracket - 4) == 46)) {
+                return false;
+            }
+            root := tok_text(&mut c, bracket - 3);
+            if !pv_field_stable(&mut c, view(root), view(name)) && !pv_field_tracked(&mut c, view(root), view(name)) {
+                return false;
+            }
+            mut path = root.copy();
+            path.push(46);
+            push_bytes(&mut path, view(name));
+            name = path;
+        }
     }
-    // The token before `[` is the whole base: the local it names, as bound here, is what is indexed.
-    name := tok_text(&mut c, bracket - 1);
-    if find_local(&mut c, view(name)) == 0 {
+    // The base, as bound here, is what is indexed: a local, or a field path of one.
+    if !contains_text(view(name), view(".")) && (find_local(&mut c, view(name)) == 0) {
         return false;
     }
     c.pv_indexed.push(name.copy());
@@ -47858,12 +47983,16 @@ fn index_view_inner<a>(c: (&a mut C), value: Val, access: u64) -> Val {
     view_bonds(&mut c, slot, x.t, 0, false);
     release_temporary(&mut c, input);
     mut start = 0;
+    mut view_lo = 0;
+    mut view_hi = 0;
     if is(&mut c, view(":")) || dotdot_at(&mut c) {
         start = imm(&mut c, 0);
     } else {
         bstart := c.pos;
         mut bound = expr(&mut c, 0);
         bend := c.pos;
+        view_lo = bstart;
+        view_hi = bend;
         if c.raw == 0 {
             bound = adopt_value(&mut c, bound, bstart, bend, 0);
             require_type(&mut c, bound.ty, 0);
@@ -47894,7 +48023,11 @@ fn index_view_inner<a>(c: (&a mut C), value: Val, access: u64) -> Val {
         release_temporary(&mut c, slot);
         return val(result, vty);
     }
-    f := "rt_atb";
+    mut f = "rt_atb";
+    // One byte through the view of a sequence the facts name (`z.data[z.at]` through `z: &mut Z`).
+    if (view_hi != 0) && is(&mut c, view("]")) && pv_index_ok(&mut c, bracket, view_lo, view_hi, input) {
+        f = "rt_atbu";
+    }
     expect(&mut c, view("]"));
     result := apply(&mut c, view(f), two(slot, start));
     release_temporary(&mut c, slot);
@@ -51769,6 +51902,22 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         assignment_tail(&mut c, l, id, ty, target, u64[through, fieldty, assigned_d, assigned_k, assigned_base, assigned_rty], view(field_name), record_ty);
         // `x = e` writes the binding; `x.f = e` writes a field of what `x` owns, which is not a fact
         // about `x`'s own value.
+        if through != 0 {
+            // `a.b = e`, `a.b op= e`: the facts of the path written end (pv_field_tracked keeps
+            // facts on fields of a `&mut` record or a `mut` record binding). An element write
+            // (`a.v[i] = e`) changes no length and ends nothing here.
+            mut start = op_at - 1;
+            while (start >= 2) && (kind_at(&mut c, start) == 1) && (kind_at(&mut c, start - 1) == 46) && (kind_at(&mut c, start - 2) == 1) {
+                start -= 2;
+            }
+            if (kind_at(&mut c, start) == 1) && (kind_at(&mut c, op_at - 1) == 1) && (start < op_at - 1) {
+                mut j = 0;
+                path := pv_path_at(&mut c, start, &mut j);
+                if j == op_at {
+                    pv_ir_wrote(&mut c, view(path));
+                }
+            }
+        }
         if through == 0 {
             pv_ir_wrote(&mut c, view(written));
             // Then `x = e` states what a binding `x := e` states, when `e` does not read `x` (its
