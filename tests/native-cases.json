@@ -16674,5 +16674,62 @@
       "riscv64"
     ],
     "note": "a vector that was not empty before the loop gets no `len == n` fact (its length is n + 1); the program stays correct"
+  },
+  {
+    "name": "bce-interval-fixed-array",
+    "source": "fn sum(p: &[u64; 15]) -> u64 {\n    mut s: u64 = 0;\n    for i in 5 {\n        for k in 3 {\n            s = s + p[i * 3 + k];\n        }\n    }\n    return s;\n}\nfn main() {\n    a: [u64; 15] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];\n    println(sum(&a));\n}\n",
+    "stdout": "120\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "asmAbsent": [
+      {
+        "in": "f_main_sum",
+        "text": "call rt_fail\n"
+      },
+      {
+        "in": "f_main_sum",
+        "text": "call rt_aslot"
+      }
+    ],
+    "note": "`p[i * 3 + k]` with `i < 5` and `k < 3` is at most 14 < 15: the interval reading proves it, and a release build computes the same value since nothing in it can wrap"
+  },
+  {
+    "name": "bce-interval-too-wide-kept",
+    "source": "fn sum(p: &[u64; 15]) -> u64 {\n    mut s: u64 = 0;\n    for i in 5 {\n        for k in 4 {\n            s = s + p[i * 3 + k];\n        }\n    }\n    return s;\n}\nfn main() {\n    a: [u64; 15] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];\n    println(sum(&a));\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "",
+    "stderr": [
+      "index 15 out of bounds for length 15"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "with `k < 4` the largest index is 16: not proved, the check stays and fires"
+  },
+  {
+    "name": "bce-interval-vector",
+    "source": "fn sum(v: &u64[]) -> u64 {\n    mut s: u64 = 0;\n    if v.len() == 12 {\n        for i in 4 {\n            for k in 3 {\n                s = s + v[i * 3 + k];\n            }\n        }\n    }\n    return s;\n}\nfn main() {\n    v := u64[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];\n    println(sum(&v));\n}\n",
+    "stdout": "78\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "asmAbsent": [
+      {
+        "in": "f_main_sum",
+        "text": "movq $1,%rdx\ncall rt_trap"
+      },
+      {
+        "in": "f_main_sum",
+        "text": "call rt_slot\n"
+      }
+    ],
+    "note": "the interval reading against a vector's length known from a guard: at most 11 < 12 == v.len"
   }
 ]

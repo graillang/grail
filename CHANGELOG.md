@@ -1,5 +1,11 @@
 ## Unreleased
 
+- Bounds checks: an index that is a sum of `term * constant` products and constants - `p[i * 3 +
+  k]` - is proved in bounds when every term has a literal upper bound in the facts and the largest
+  value the sum can take is below the length (a fixed array's constant, or a vector's `len()` the
+  facts know). The sum is bounded far below 2^64, so a release build computes the value that was
+  proved. nbody's own array checks go from 24 to 0.
+
 - Bounds checks: a vector filled from empty by a counted loop - `for i in n { v.push(x); }`, one
   push per iteration, no `break` or `continue` - has `v.len == n` after the loop, so a later
   `for i in n { v[i] }` indexes without a check. The ECS benchmark's update loop loses all 18 of its

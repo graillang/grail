@@ -27370,18 +27370,101 @@ fn array_literal<a>(c: (&a mut C), ty: u64) -> Val {
     c.array_fresh.push(store);
     return own(&mut c, store, ty);
 }
+// The largest value a `u64` term can have by the facts: the least literal bound `t < L` (`L - 1`) or
+// `t <= L` among them; -1 when there is none.
+fn pv_upper<a, b>(facts: (&a Atom[]), t: &b [u8]) -> i64 {
+    if pv_digits(view(t)) {
+        return pv_number(view(t));
+    }
+    mut best: i64 = -1;
+    for i in facts.len() {
+        x := &facts[i];
+        if (x.rel > 1) || !same(view(x.a), view(t)) || !pv_digits(view(x.b)) {
+            continue;
+        }
+        mut bad = 0;
+        mut m = pv_k_sum(pv_number(view(x.b)), x.k, &mut bad);
+        if x.rel == 0 {
+            m = pv_k_sum(m, i64(0) - i64(1), &mut bad);
+        }
+        if (bad == 0) & (0 <= m) & ((best < 0) || (m < best)) {
+            best = m;
+        }
+    }
+    return best;
+}
+// The interval reading of an index (docs/design/native-range-facts.md): tokens `lo..hi` as a sum of
+// products `t * L` (or `L * t`, or `t`) and literals, each `t` a `u64` term with a literal upper bound
+// in the facts. The answer is the largest value the sum can take, or -1 when the index is not of
+// that shape. The sum is computed in the integers and refused past 2^40, so the value the machine
+// computes - which wraps in a release build - is the value bounded: nothing in it can wrap.
+fn pv_index_max<a>(c: (&a mut C), facts: (&a Atom[]), lo: u64, hi: u64) -> i64 {
+    limit: i64 = 1099511627776;
+    mut total: i64 = 0;
+    mut i = lo;
+    while i < hi {
+        mut used = 0;
+        t := pv_term(&mut c, i, &mut used);
+        if t.len() == 0 {
+            return -1;
+        }
+        mut m = pv_upper(&facts, view(t));
+        if (m < 0) || !pv_u64_term(&mut c, view(t)) {
+            return -1;
+        }
+        i = i + used;
+        while (i < hi) && (kind_at(&mut c, i) == 42) {
+            mut u2 = 0;
+            t2 := pv_term(&mut c, i + 1, &mut u2);
+            if t2.len() == 0 {
+                return -1;
+            }
+            m2 := pv_upper(&facts, view(t2));
+            if (m2 < 0) || !pv_u64_term(&mut c, view(t2)) {
+                return -1;
+            }
+            if (m > limit) || (m2 > limit) {
+                return -1;
+            }
+            m = m * m2;
+            if m > limit {
+                return -1;
+            }
+            i = i + 1 + u2;
+        }
+        total = total + m;
+        if total > limit {
+            return -1;
+        }
+        if i < hi {
+            if kind_at(&mut c, i) != 43 {
+                return -1;
+            }
+            i = i + 1;
+            if i >= hi {
+                return -1;
+            }
+        }
+    }
+    return total;
+}
 // Whether the facts prove the index spelled by tokens `lo..hi` is below the array's length: the
 // constant N, or `a.len` when the array is the local `a` (what `for i in a.len()` states).
 fn array_index_proved<a, b>(c: (&a mut C), lo: u64, hi: u64, n: u64, base: &b [u8]) -> bool {
     if !pv_ir_live(&c) || (hi <= lo) {
         return false;
     }
+    mut facts = Atom[];
+    pv_ir_read(&mut c, &mut facts);
+    // `p[i * 3 + k]` with `i < 5` and `k < 3`: its largest value against the constant length.
+    top := pv_index_max(&mut c, &facts, lo, hi);
+    if (top >= 0) && (u64(top) < n) {
+        return true;
+    }
     term := pv_span_term(&mut c, lo, hi);
     if term.len() == 0 {
         return false;
     }
-    mut facts = Atom[];
-    pv_ir_read(&mut c, &mut facts);
     mut bound = u8[];
     decimal(&mut bound, n);
     if pv_holds(&facts, 0, view(term), view(bound), 0) {
@@ -40452,6 +40535,9 @@ fn pv_index_ok<a>(c: (&a mut C), bracket: u64, lo: u64, hi: u64, base: u64) -> b
         return false;
     }
     c.pv_indexed.push(name.copy());
+    if pv_index_interval(&mut c, view(name), lo, hi) {
+        return true;
+    }
     mut used = 0;
     term := pv_term(&mut c, lo, &mut used);
     if term.len() == 0 {
@@ -40474,6 +40560,20 @@ fn pv_index_ok<a>(c: (&a mut C), bracket: u64, lo: u64, hi: u64, base: u64) -> b
     mut len = name.copy();
     push_bytes(&mut len, view(".len"));
     return pv_implies(&facts, 0, view(term), view(len), 0 - off);
+}
+// The interval reading for a vector: the index's largest value (pv_index_max) below `v.len`.
+fn pv_index_interval<a, b>(c: (&a mut C), name: &b [u8], lo: u64, hi: u64) -> bool {
+    mut facts = Atom[];
+    pv_ir_read(&mut c, &mut facts);
+    top := pv_index_max(&mut c, &facts, lo, hi);
+    if top < 0 {
+        return false;
+    }
+    mut len = copy_bytes(view(name));
+    push_bytes(&mut len, view(".len"));
+    mut lit = u8[];
+    decimal(&mut lit, u64(top));
+    return pv_implies(&facts, 0, view(lit), view(len), 0);
 }
 fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
     old := exchange(&mut c.pv_element, u64(access != 0));
