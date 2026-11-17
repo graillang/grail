@@ -78,7 +78,10 @@ struct Jpeg {
     scan_n: u64,
     order: u64[],
     restart_interval: u64,
-    todo: i64
+    todo: i64,
+    // IDCT scratch, kept between blocks: 64 and 8 entries.
+    idct_v: i64[],
+    idct_e: i64[]
 }
 
 const NONE: u64 = 255;
@@ -102,9 +105,11 @@ fn empty_huff() -> Huff {
     return Huff { fast: zeros_u(512), code: zeros_u(256), values: zeros_u(256), size: zeros_u(257), maxcode: zeros_u(18), delta: zeros_i(17) };
 }
 
+// The natural-order position of zigzag index k (16 trailing entries keep k + run in range), as
+// text: each byte is the position + 48.
+static ZIGZAG: string = "018@923:AHPIB;45<CJQX`YRKD=67>ELSZahib[TMF?GNU\\cjkd]VOW^elmf_gnooooooooooooooooo";
 fn dezigzag(k: u64) -> u64 {
-    table := u64[0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63];
-    return table[k];
+    return ZIGZAG[k] - 48;
 }
 fn bmask(n: u64) -> u64 {
     return (1 << n) - 1;
@@ -595,7 +600,7 @@ fn clamp(x: i64) -> u64 {
 }
 
 // One 1D pass: returns t0..t3 and x0..x3 as stb's STBI__IDCT_1D macro leaves them.
-fn idct_1d<a>(s: (&a i64[]), base: u64, step: u64) -> i64[] {
+fn idct_1d<a, b>(s: (&a i64[]), base: u64, step: u64, e: (&b mut i64[])) -> unit {
     s0 := s[base];
     s1 := s[base + step];
     s2 := s[base + step * 2];
@@ -638,11 +643,19 @@ fn idct_1d<a>(s: (&a i64[]), base: u64, step: u64) -> i64[] {
     t2 += p2 + p3;
     t1 += p2 + p4;
     t0 += p1 + p3;
-    return i64[t0, t1, t2, t3, x0, x1, x2, x3];
+    e[0] = t0;
+    e[1] = t1;
+    e[2] = t2;
+    e[3] = t3;
+    e[4] = x0;
+    e[5] = x1;
+    e[6] = x2;
+    e[7] = x3;
+    return ();
 }
 
-fn idct_block<a, b>(out: (&a mut u8[]), at: u64, stride: u64, d: (&b i64[]), base: u64) -> unit {
-    mut v = zeros_i(64);
+// v (64 entries) and e (8) are scratch the caller keeps between blocks.
+fn idct_block<a, b, c, g>(out: (&a mut u8[]), at: u64, stride: u64, d: (&b i64[]), base: u64, v: (&c mut i64[]), e: (&g mut i64[])) -> unit {
     for i in 8 {
         c := base + i;
         if (d[c + 8] == 0) && (d[c + 16] == 0) && (d[c + 24] == 0) && (d[c + 32] == 0) && (d[c + 40] == 0) && (d[c + 48] == 0) && (d[c + 56] == 0) {
@@ -651,7 +664,7 @@ fn idct_block<a, b>(out: (&a mut u8[]), at: u64, stride: u64, d: (&b i64[]), bas
                 v[i + r * 8] = dc;
             }
         } else {
-            e := idct_1d(&d, c, 8);
+            idct_1d(&d, c, 8, &mut e);
             t0 := e[0];
             t1 := e[1];
             t2 := e[2];
@@ -672,7 +685,7 @@ fn idct_block<a, b>(out: (&a mut u8[]), at: u64, stride: u64, d: (&b i64[]), bas
     }
     bias := i64(16842752);
     for i in 8 {
-        e := idct_1d(&v, i * 8, 1);
+        idct_1d(&v, i * 8, 1, &mut e);
         t0 := e[0];
         t1 := e[1];
         t2 := e[2];
@@ -697,7 +710,11 @@ fn idct_block<a, b>(out: (&a mut u8[]), at: u64, stride: u64, d: (&b i64[]), bas
 // IDCT a decoded block into component n's plane.
 fn store_block<a, b>(z: (&a mut Jpeg), n: u64, data: (&b i64[]), base: u64, at: u64) -> unit {
     stride := z.comps[n].w2;
-    idct_block(&mut z.comps[n].data, at, stride, &data, base);
+    mut v = exchange(&mut z.idct_v, i64[]);
+    mut e = exchange(&mut z.idct_e, i64[]);
+    idct_block(&mut z.comps[n].data, at, stride, &data, base, &mut v, &mut e);
+    exchange(&mut z.idct_v, v);
+    exchange(&mut z.idct_e, e);
     return ();
 }
 
@@ -1362,44 +1379,44 @@ fn assemble<a>(z: (&a Jpeg), req: u64) -> Image {
                 }
             }
         }
+        // Each pixel goes straight onto `pixels`.
         for i in z.width {
-            mut px = u8[];
             if 3 <= n {
                 if z.n == 3 {
                     if is_rgb {
-                        px.push(rows[0][i]);
-                        px.push(rows[1][i]);
-                        px.push(rows[2][i]);
+                        pixels.push(rows[0][i]);
+                        pixels.push(rows[1][i]);
+                        pixels.push(rows[2][i]);
                     } else {
-                        ycbcr(&mut px, rows[0][i], rows[1][i], rows[2][i]);
+                        ycbcr(&mut pixels, rows[0][i], rows[1][i], rows[2][i]);
                     }
                 } else {
                     if z.n == 4 {
                         m := rows[3][i];
                         if z.app14 == 0 {
-                            px.push(blinn(rows[0][i], m));
-                            px.push(blinn(rows[1][i], m));
-                            px.push(blinn(rows[2][i], m));
+                            pixels.push(blinn(rows[0][i], m));
+                            pixels.push(blinn(rows[1][i], m));
+                            pixels.push(blinn(rows[2][i], m));
                         } else {
                             if z.app14 == 2 {
                                 mut tmp = u8[];
                                 ycbcr(&mut tmp, rows[0][i], rows[1][i], rows[2][i]);
-                                px.push(blinn(255 - tmp[0], m));
-                                px.push(blinn(255 - tmp[1], m));
-                                px.push(blinn(255 - tmp[2], m));
+                                pixels.push(blinn(255 - tmp[0], m));
+                                pixels.push(blinn(255 - tmp[1], m));
+                                pixels.push(blinn(255 - tmp[2], m));
                             } else {
-                                ycbcr(&mut px, rows[0][i], rows[1][i], rows[2][i]);
+                                ycbcr(&mut pixels, rows[0][i], rows[1][i], rows[2][i]);
                             }
                         }
                     } else {
                         y := rows[0][i];
-                        px.push(y);
-                        px.push(y);
-                        px.push(y);
+                        pixels.push(y);
+                        pixels.push(y);
+                        pixels.push(y);
                     }
                 }
                 if n == 4 {
-                    px.push(255);
+                    pixels.push(255);
                 }
             } else {
                 mut g: u64 = 0;
@@ -1417,13 +1434,10 @@ fn assemble<a>(z: (&a Jpeg), req: u64) -> Image {
                         }
                     }
                 }
-                px.push(g);
+                pixels.push(g);
                 if n == 2 {
-                    px.push(255);
+                    pixels.push(255);
                 }
-            }
-            for value in px {
-                pixels.push(value);
             }
         }
     }
@@ -1446,7 +1460,7 @@ pub fn decode<a>(data: &a [u8], desired: u64) -> Image? {
         dcs.push(empty_huff());
         acs.push(empty_huff());
     }
-    mut z = Jpeg { dc: dcs, ac: acs, fast_ac: zeros_i(2048), dequant: zeros_u(256), comps: Comp[], width: 0, height: 0, n: 0, h_max: 1, v_max: 1, mcu_x: 0, mcu_y: 0, progressive: false, spec_start: 0, spec_end: 0, succ_high: 0, succ_low: 0, eob_run: 0, jfif: false, app14: -1, rgb: 0, scan_n: 0, order: zeros_u(4), restart_interval: 0, todo: 0 };
+    mut z = Jpeg { dc: dcs, ac: acs, fast_ac: zeros_i(2048), dequant: zeros_u(256), comps: Comp[], width: 0, height: 0, n: 0, h_max: 1, v_max: 1, mcu_x: 0, mcu_y: 0, progressive: false, spec_start: 0, spec_end: 0, succ_high: 0, succ_low: 0, eob_run: 0, jfif: false, app14: -1, rgb: 0, scan_n: 0, order: zeros_u(4), restart_interval: 0, todo: 0, idct_v: zeros_i(64), idct_e: zeros_i(8) };
     if !decode_image(&mut r, &mut z) {
         return None;
     }
