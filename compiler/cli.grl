@@ -6,6 +6,7 @@ use explain;
 use bindgen;
 use pkg;
 use jobs;
+use llvm;
 use xxhash;
 use asm_x86;
 
@@ -266,6 +267,18 @@ fn home() -> Home {
     }
     say(view("grail: cannot find the Grail runtime; set GRAIL_HOME"));
     return Home { runtime: u8[], std: u8[] , roots: u8[][] };
+}
+// The runtime and the x86-64 Linux platform module, as home() finds them: what a compile-time probe
+// is compiled with when the compile that asks for it reads them as interfaces (a module of a separate
+// build), so the probe still links on its own. Empty when there is no runtime to find.
+pub fn probe_runtime_sources() -> u8[][] {
+    h := home();
+    if h.runtime.len() == 0 {
+        return u8[][];
+    }
+    mut out = u8[][h.runtime.copy()];
+    out.push(path_join(view(dirname(view(h.runtime))), view("os-linux.grl")));
+    return out;
 }
 fn collect<a, b>(dir: &a [u8], out: (&b mut u8[][])) {
     entries := host::list_dir(view(dir));
@@ -830,6 +843,7 @@ fn build_argv<a, b, d, e, g, k>(
     strict := (flags / 1024) % 2;
     emit_ir := (flags / 2048) % 2;
     release := (flags / 8192) % 2;
+    report_checks := (flags / 16384) % 2;
     mut command = u8[][host::exe_path(), copy(view("--target")), copy(view(target))];
     if release != 0 {
         command.push(copy(view("--backend=llvm")));
@@ -845,6 +859,9 @@ fn build_argv<a, b, d, e, g, k>(
     }
     if verify_facts != 0 {
         command.push(copy(view("--verify-facts")));
+    }
+    if report_checks != 0 {
+        command.push(copy(view("--report-checks")));
     }
     if debug != 0 {
         command.push(copy(view("--debug")));
@@ -922,31 +939,13 @@ fn build_argv<a, b, d, e, g, k>(
     return command;
 }
 // True when the entry or any module source mentions `@embed(`.
-fn sources_embed<a, b>(entry: &a [u8], modules: (&b u8[][])) -> bool {
-    mut files = u8[][copy(view(entry))];
-    for i in modules.len() {
-        files.push(item(&modules, i));
+fn sources_embed<a, b, d>(store: (&d mut Cache), entry: &a [u8], modules: (&b u8[][])) -> bool {
+    if cache_file_info(&mut store, view(entry), true).embed {
+        return true;
     }
-    needle := "@embed(";
-    for f in files.len() {
-        path := item(&files, f);
-        if host::exists(view(path)) == 0 {
-            continue;
-        }
-        text := host::read_file(view(path));
-        mut i = 0;
-        while i + needle.len() <= text.len() {
-            mut hit = true;
-            for j in needle.len() {
-                if text[i + j] != needle[j] {
-                    hit = false;
-                    break;
-                }
-            }
-            if hit {
-                return true;
-            }
-            i += 1;
+    for i in modules.len() {
+        if cache_file_info(&mut store, view(item(&modules, i)), true).embed {
+            return true;
         }
     }
     return false;
@@ -964,14 +963,11 @@ fn release_optimise<a, b>(assemble: (&a u8[][]), asm: &b [u8], object: &b [u8], 
     lifted := cat(view(asm), view(".ll"));
     optimised := cat(view(object), view(".ll.o"));
     native_part := release_part(view(object));
-    mut clang = u8[][];
+    // `grail llvm-compile` runs `clang -O2` over the module cut in parts, in parallel.
+    mut clang = u8[][host::exe_path(), copy(view("llvm-compile")), lifted.copy(), optimised.copy(), copy(view(emulation))];
     for i in assemble.len() {
         clang.push(item(&assemble, i));
     }
-    clang.push(copy(view("-O2")));
-    clang.push(lifted.copy());
-    clang.push(copy(view("-o")));
-    clang.push(optimised.copy());
     merge := u8[][
         tool(view("GRAIL_LINKER"), view("ld.lld")),
         copy(view("-m")),
@@ -1007,6 +1003,7 @@ fn compile_mode<a, b, d, e, g, k>(
     mut cache = (flags / 64) % 2;
     whole := (flags / 128) % 2;
     release := (flags / 8192) % 2;
+    report_checks := (flags / 16384) % 2;
     if release != 0 {
         // The LLVM backend lifts the Linux streams; a release build of another platform, or one
         // that asks for what the lifter cannot carry, is refused rather than built native.
@@ -1024,7 +1021,21 @@ fn compile_mode<a, b, d, e, g, k>(
             return 1;
         }
     }
-    if (cache != 0) && sources_embed(view(entry), &modules) {
+    // The store, which also answers what the driver asks of the sources (`fp/`, cache_file_info).
+    // A build with no store reads each source for its answers.
+    mut store = Cache {
+        root: u8[],
+        cwd: host::cwd(),
+        hits: 0,
+        misses: 0,
+        names: u8[][],
+        quiet: (flags / 4096) % 2,
+    };
+    if cache != 0 {
+        store.root = cache_root(view(target));
+        cache_ensure(&mut store);
+    }
+    if (cache != 0) && sources_embed(&mut store, view(entry), &modules) {
         // `@embed` reads a file the cache does not key on, so its result cannot be reused safely.
         say(
             view(
@@ -1032,6 +1043,7 @@ fn compile_mode<a, b, d, e, g, k>(
             )
         );
         cache = 0;
+        store.root = u8[];
     }
     asm := cat(view(output), view(".s"));
     object := cat(view(output), view(".o"));
@@ -1065,7 +1077,9 @@ fn compile_mode<a, b, d, e, g, k>(
     // The assembler: the compiler's own (`grail asm`, compiler/asm_x86.grl) for a Linux x86-64
     // build it covers (Linux x86-64, AArch64, RISC-V), clang otherwise (a release build's LLVM
     // module, macOS, Windows).
-    internal := (eq(view(target), view("x86_64")) || eq(view(target), view("aarch64")) || eq(view(target), view("riscv64")))
+    // Windows debug builds keep clang until the internal assembler writes CodeView.
+    internal := (eq(view(target), view("x86_64")) || eq(view(target), view("aarch64")) || eq(view(target), view("riscv64"))
+        || (eq(view(target), view("windows-x86_64")) && (debug == 0)))
         && (release == 0);
     mut assemble = u8[][tool(view("GRAIL_ASSEMBLER"), view("clang"))];
     if internal {
@@ -1136,14 +1150,14 @@ fn compile_mode<a, b, d, e, g, k>(
         & (iface.len() == 0)
         & (at < command.len())
         & linux_target(view(target)) {
-        groups = source_groups(&command, at);
+        groups = source_groups(&mut store, &command, at);
         if (cache != 0) || (program_modules(&groups) > 1) {
             per_module = 1;
         }
         if per_module != 0 {
             // One run per module, so every module the program has needs a group, and the module set is
             // the compiler's: it resolves `use` through the roots and names what it will compile.
-            groups = resolved_groups(&command, at, view(cat(view(asm), view(".inputs"))));
+            groups = resolved_groups(&mut store, &command, at, view(cat(view(asm), view(".inputs"))));
             if groups.len() == 0 {
                 return 1;
             }
@@ -1156,14 +1170,6 @@ fn compile_mode<a, b, d, e, g, k>(
     }
     // B1 stage 4: an unchanged program is not rebuilt at all, and what is rebuilt assembles and links
     // through the content-addressed store. Without --cache nothing below changes a thing.
-    mut store = Cache {
-        root: cache_root(view(target)),
-        fast: 0,
-        hits: 0,
-        misses: 0,
-        names: u8[][],
-        quiet: (flags / 4096) % 2,
-    };
     mut id = BuildId {
         flags: u8[],
         compiler: u8[],
@@ -1176,8 +1182,6 @@ fn compile_mode<a, b, d, e, g, k>(
     };
     mut program = u8[];
     if cache != 0 {
-        store.fast = cache_hash_tool();
-        cache_ensure(&mut store);
         id = cache_build_id(&mut store, &command, view(asm), view(emulation), &assemble);
         program = cache_program_key(&mut store, &id, view(target), view(asm));
         // `--verify` asks for the interfaces to be checked against the sources, and `--check` asks for
@@ -1414,40 +1418,6 @@ fn ident_byte(c: u8) -> bool {
         || ((c >= 48) & (c <= 57))
         || (c == 95);
 }
-// The word after each line-leading `keyword` of a source file (`module NAME;`, `use NAME;`).
-fn scan_words<a, b>(path: &a [u8], keyword: &b [u8]) -> u8[][] {
-    text := host::read_file(view(path));
-    mut out = u8[][];
-    mut i = 0;
-    while i < text.len() {
-        while (i < text.len()) && ((text[i] == 32) || (text[i] == 9) || (text[i] == 13)) {
-            i += 1;
-        }
-        mut word = u8[];
-        while (i < text.len()) && ident_byte(text[i]) {
-            word.push(text[i]);
-            i += 1;
-        }
-        if eq(view(word), view(keyword)) {
-            while (i < text.len()) && ((text[i] == 32) || (text[i] == 9)) {
-                i += 1;
-            }
-            mut name = u8[];
-            while (i < text.len()) && ident_byte(text[i]) {
-                name.push(text[i]);
-                i += 1;
-            }
-            if name.len() != 0 {
-                out.push(name);
-            }
-        }
-        while (i < text.len()) && (text[i] != 10) {
-            i += 1;
-        }
-        i += 1;
-    }
-    return out;
-}
 fn group_of<a, b>(groups: (&a ModuleGroup[]), name: &b [u8]) -> u64 {
     for i in groups.len() {
         if eq(view(groups[i].name), view(name)) {
@@ -1468,20 +1438,20 @@ fn source_start<a, b>(command: (&a u8[][]), asm: &b [u8]) -> u64 {
 // last in every build command and declare no module: the compiler treats them as module `runtime`,
 // the base every module's code calls into, so that group is built first. Any other file without a
 // `module` line is the entry's, module `main`.
-fn source_groups<a>(command: (&a u8[][]), at: u64) -> ModuleGroup[] {
+fn source_groups<a, d>(store: (&d mut Cache), command: (&a u8[][]), at: u64) -> ModuleGroup[] {
     mut groups = ModuleGroup[];
     count := command.len() - at - 1;
     for j in count {
         file := item(&command, at + 1 + j);
-        names := scan_words(view(file), view("module"));
+        mut info = cache_file_info(&mut store, view(file), true);
         mut name = copy(view("main"));
         if count - 2 <= j {
             name = copy(view("runtime"));
         }
-        if names.len() != 0 {
-            name = item(&names, 0);
+        if info.module.len() != 0 {
+            name = info.module.copy();
         }
-        uses := scan_words(view(file), view("use"));
+        uses := exchange(&mut info.uses, u8[][]);
         g := group_of(&groups, view(name));
         if g == 0 {
             groups.push(ModuleGroup { name: name, files: u8[][file], uses: uses, done: 0 });
@@ -1494,12 +1464,145 @@ fn source_groups<a>(command: (&a u8[][]), at: u64) -> ModuleGroup[] {
     }
     return groups;
 }
+// The module set a command resolves to, remembered: `inputs/<key>` holds the compiler's answer to
+// `--print-inputs` with the stamp of every file it named and of every directory resolution looked
+// in (each module root, each named file's directory, the working directory and its `src/`). A
+// directory's time moves when an entry is added or removed, a file's when it is written, so while
+// every stamp holds the compiler would answer the same, and no compiler is started to ask it.
+fn resolved_key<a, b, d>(store: (&a mut Cache), probe: (&b u8[][]), command: (&d u8[][])) -> u8[] {
+    if store.root.len() == 0 {
+        return u8[];
+    }
+    mut text = copy(view("grail-inputs 1\n"));
+    push_bytes(&mut text, view(store.cwd));
+    text.push(10);
+    // The compiler that answers: its path and stamp.
+    exe := item(command, 0);
+    push_bytes(&mut text, view(file_stamp(view(exe))));
+    text.push(10);
+    for i in probe.len() {
+        push_bytes(&mut text, view(item(probe, i)));
+        text.push(10);
+    }
+    return path_join(view(path_join(view(store.root), view("inputs"))), view(store_hash(view(text))[0..32]));
+}
+// The directories a resolution of `command` reads, beside the files it settled on.
+fn resolved_dirs<a, b>(store: (&a mut Cache), command: (&b u8[][]), settled: (&b u8[][])) -> u8[][] {
+    mut dirs = u8[][copy(view(".")), copy(view("src"))];
+    for i in command.len() {
+        word := item(command, i);
+        if eq(view(word), view("--module-root")) && (i + 1 < command.len()) {
+            dirs.push(item(command, i + 1));
+        } else if ends_with_grl(view(word)) {
+            dirs.push(dirname(view(word)));
+        }
+    }
+    for i in settled.len() {
+        dirs.push(dirname(view(item(settled, i))));
+    }
+    mut unique = u8[][];
+    for i in dirs.len() {
+        mut seen = false;
+        for k in unique.len() {
+            if eq(view(unique[k]), view(dirs[i])) {
+                seen = true;
+            }
+        }
+        if !seen {
+            unique.push(dirs[i].copy());
+        }
+    }
+    return unique;
+}
+fn resolved_paths<a>(text: &a [u8]) -> u8[][] {
+    mut paths = u8[][];
+    rows := lines(view(text));
+    for r in rows.len() {
+        row := item(&rows, r);
+        for k in row.len() {
+            if row[k] == 9 {
+                paths.push(row[k + 1..row.len()].copy());
+                break;
+            }
+        }
+    }
+    return paths;
+}
+fn resolved_inputs<a>(note: &a [u8]) -> u8[] {
+    if (note.len() == 0) || (host::exists(view(note)) == 0) {
+        return u8[];
+    }
+    // `F <stamp>\t<path>` and `D <stamp>\t<dir>` lines, a `--` line, then the answer.
+    body := host::read_file(view(note));
+    mut i = 0;
+    while i < body.len() {
+        mut end = i;
+        while (end < body.len()) && (body[end] != 10) {
+            end += 1;
+        }
+        row := body[i..end].copy();
+        if eq(view(row), view("--")) {
+            return body[end + 1..body.len()].copy();
+        }
+        mut tab = 0;
+        while (tab < row.len()) && (row[tab] != 9) {
+            tab += 1;
+        }
+        if (row.len() < 3) || (tab == row.len()) {
+            return u8[];
+        }
+        path := row[tab + 1..row.len()].copy();
+        mut now = u8[];
+        if row[0] == 70 {
+            now = file_stamp(view(path));
+        } else {
+            now = dir_stamp(view(path));
+        }
+        if !eq(view(row[2..tab]), view(now)) {
+            return u8[];
+        }
+        i = end + 1;
+    }
+    return u8[];
+}
+fn resolved_note<a, b, d, e>(store: (&a mut Cache), note: &b [u8], command: (&d u8[][]), text: &e [u8]) -> unit {
+    if note.len() == 0 {
+        return ();
+    }
+    settled := resolved_paths(view(text));
+    mut body = u8[];
+    for i in settled.len() {
+        path := item(&settled, i);
+        stamp := file_stamp(view(path));
+        // A file written moments ago may still change within its time's granularity.
+        if (stamp.len() == 0) || stamp_recent(view(path)) {
+            return ();
+        }
+        push_bytes(&mut body, view("F "));
+        push_bytes(&mut body, view(stamp));
+        body.push(9);
+        push_bytes(&mut body, view(path));
+        body.push(10);
+    }
+    dirs := resolved_dirs(&mut store, command, &settled);
+    for i in dirs.len() {
+        push_bytes(&mut body, view("D "));
+        push_bytes(&mut body, view(dir_stamp(view(dirs[i]))));
+        body.push(9);
+        push_bytes(&mut body, view(dirs[i]));
+        body.push(10);
+    }
+    push_bytes(&mut body, view("--\n"));
+    push_bytes(&mut body, view(text));
+    cache_put_file(&mut store, view(note), view(body));
+    return ();
+}
 // The modules the build will really compile, as the compiler settles them: the entry, the modules named
 // on the command line, the runtime and platform files, and everything the `use` lines reached through a
 // module root (docs/design/module-resolution.md). The driver asks (`--print-inputs FILE`) rather than
 // scanning for a module set of its own, so a per-module build has a group for every module the program
 // has - including the standard ones - and no unit is compiled twice.
-fn resolved_groups<a>(command: (&a u8[][]), at: u64, list: &a [u8]) -> ModuleGroup[] {
+fn resolved_groups<a, d>(store: (&d mut Cache), command: (&a u8[][]), at: u64, list: &a [u8]) -> ModuleGroup[] {
     mut probe = u8[][];
     for i in at {
         probe.push(item(&command, i));
@@ -1510,12 +1613,18 @@ fn resolved_groups<a>(command: (&a u8[][]), at: u64, list: &a [u8]) -> ModuleGro
         probe.push(item(&command, at + i));
     }
     mut groups = ModuleGroup[];
-    if host::command(probe) != 0 {
-        // The compiler printed why (an unresolvable `use` names the module and the roots it searched).
-        return groups;
+    note := resolved_key(&mut store, &probe, command);
+    mut text = resolved_inputs(view(note));
+    if text.len() == 0 {
+        if host::command(probe) != 0 {
+            // The compiler printed why (an unresolvable `use` names the module and the roots it
+            // searched).
+            return groups;
+        }
+        text = host::read_file(view(list));
+        host::remove(view(list), 0);
+        resolved_note(&mut store, view(note), command, view(text));
     }
-    text := host::read_file(view(list));
-    host::remove(view(list), 0);
     mut start = 0;
     mut i = 0;
     while i <= text.len() {
@@ -1536,7 +1645,7 @@ fn resolved_groups<a>(command: (&a u8[][]), at: u64, list: &a [u8]) -> ModuleGro
                 for j in cut + 1..i {
                     path.push(text[j]);
                 }
-                uses := scan_words(view(path), view("use"));
+                uses := cache_file_info(&mut store, view(path), true).uses;
                 g := group_of(&groups, view(name));
                 if g == 0 {
                     groups.push(ModuleGroup { name: name, files: u8[][path], uses: uses, done: 0 });
@@ -1689,12 +1798,12 @@ fn unit_key<a, b, d, e, g, k, r>(
         text := host::read_file(view(path_join(view(ifaces), view(n))));
         surface := native::iface_surface(view(text));
         push_bytes(&mut buf, view("interface "));
-        push_bytes(&mut buf, view(native::iface_digest(&surface)));
+        push_bytes(&mut buf, view(store_hash(view(surface))));
         buf.push(32);
         push_bytes(&mut buf, view(n));
         buf.push(10);
     }
-    return native::iface_digest(&buf);
+    return store_hash(view(buf));
 }
 // Put a module run's outputs back from the store: its object, the link inputs its own sources ask
 // for, and its interface. Any missing or damaged blob makes it a miss (nothing is half-restored that
@@ -1989,6 +2098,124 @@ fn unit_reads<a, b>(groups: (&a ModuleGroup[]), base: (&b u8[][]), g: u64) -> u8
 // `grail unit-build N <N compiler words> <assembler words>`: one module's compiler run and then its
 // assembly, as one process, so a build can start several modules at once and wait for each as a
 // whole. Not a command a person runs.
+// `grail llvm-compile IN.ll OUT.o EMULATION CLANG...`: `CLANG -O2 -c` over the lifted module IN.ll,
+// cut into parts (llvm::split_module) compiled at once - as many as the build's jobserver grants,
+// about one per 4 MB of IR - and linked into one relocatable OUT.o. A release unit's optimisation is
+// then bounded by its largest part rather than by the whole module.
+fn llvm_compile_command<a>(args: (&a u8[][])) -> u64 {
+    if args.len() < 4 {
+        say(view("usage: grail llvm-compile IN.ll OUT.o EMULATION CLANG [ARGS...]"));
+        return 1;
+    }
+    input := item(&args, 0);
+    output := item(&args, 1);
+    emulation := item(&args, 2);
+    mut clang = u8[][];
+    mut i = 3;
+    while i < args.len() {
+        clang.push(item(&args, i));
+        i += 1;
+    }
+    text := host::read_file(view(input));
+    mut wanted = text.len() / 4194304 + 1;
+    mut cap = host::cpus();
+    asked := host::env(view("GRAIL_JOBS"));
+    if asked.len() != 0 {
+        cap = number_of(view(asked));
+    }
+    if 32 < cap {
+        cap = 32;
+    }
+    if cap < wanted {
+        wanted = cap;
+    }
+    mut js = jobs::open();
+    if 1 < wanted {
+        granted := jobs::workers(&mut js, wanted);
+        wanted = granted;
+    }
+    if wanted < 2 {
+        jobs::give_all(&mut js);
+        mut run = u8[][];
+        for c in clang.len() {
+            run.push(item(&clang, c));
+        }
+        run.push(copy(view("-O2")));
+        run.push(copy(view(input)));
+        run.push(copy(view("-o")));
+        run.push(copy(view(output)));
+        return host::command(run);
+    }
+    plan := llvm::split_plan(view(text), wanted);
+    // Unique to this unit's module: internal functions keep their own names in every part of it.
+    suffix := cat(view("u"), view(decimal(xxhash::hash64(view(input), 0))));
+    mut pids = u64[];
+    mut objects = u8[][];
+    mut compiled = u8[][];
+    mut destinations = u8[][];
+    parts_store := path_join(view(cache_base()), view("llvm-parts"));
+    cache_mkdirs(view(parts_store));
+    for k in plan.count {
+        mut name = copy(view(input));
+        push_bytes(&mut name, view("."));
+        push_bytes(&mut name, view(decimal(k)));
+        part := cat(view(name), view(".ll"));
+        object := cat(view(name), view(".o"));
+        part_text := llvm::split_part(view(text), &plan, k, view(suffix));
+        // A part's object is stored under the digest of its text and the compile command, so a
+        // rebuild after an edit compiles only the parts whose functions changed.
+        mut keyed = u8[];
+        for c in clang.len() {
+            push_bytes(&mut keyed, view(item(&clang, c)));
+            keyed.push(0);
+        }
+        push_bytes(&mut keyed, view(part_text));
+        stored := path_join(view(parts_store), view(cat(view(decimal(xxhash::hash64(view(keyed), 0))), view(".o"))));
+        if host::exists(view(stored)) != 0 {
+            objects.push(stored);
+            continue;
+        }
+        host::write_file(view(part), view(part_text));
+        compiled.push(object.copy());
+        destinations.push(stored);
+        mut run = u8[][];
+        for c in clang.len() {
+            run.push(item(&clang, c));
+        }
+        run.push(copy(view("-O2")));
+        run.push(part.copy());
+        run.push(copy(view("-o")));
+        run.push(object.copy());
+        pids.push(host::spawn(run, host::environment(), 2, 2));
+        objects.push(object);
+    }
+    mut bad = 0;
+    for k in pids.len() {
+        if (9223372036854775807 < pids[k]) || (host::wait(pids[k]) != 0) {
+            bad = 1;
+        }
+    }
+    jobs::give_all(&mut js);
+    if bad != 0 {
+        say(view("grail: clang -O2 failed on a part of the LLVM module"));
+        return 1;
+    }
+    // Into the store: copied under a name of this process's, then renamed, so a reader never sees a
+    // half-written object.
+    for q in compiled.len() {
+        bytes := host::read_file(view(item(&compiled, q)));
+        pending := cat(view(item(&destinations, q)), view(cat(view(".tmp"), view(decimal(host::now_ms())))));
+        host::write_file(view(pending), view(bytes));
+        host::rename(view(pending), view(item(&destinations, q)));
+    }
+    mut link = u8[][tool(view("GRAIL_LINKER"), view("ld.lld")), copy(view("-m")), copy(view(emulation)), copy(view("-r"))];
+    for k in objects.len() {
+        link.push(item(&objects, k));
+    }
+    link.push(copy(view("-o")));
+    link.push(copy(view(output)));
+    return host::command(link);
+}
 fn unit_build_command<a>(args: (&a u8[][])) -> u64 {
     if args.len() == 0 {
         return 1;
@@ -2168,6 +2395,10 @@ fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
             if !eq(view(name), view(base[0])) {
                 compile.push(copy(view("--use")));
                 compile.push(ifaces.copy());
+                // Every interface in that directory was written by a run of this build or restored
+                // from a store blob whose bytes hashed to its name: the run need not hash each one
+                // again to check its trailer.
+                compile.push(copy(view("--use-vouched")));
                 // A module with no interface file has no surface to read (the runtime's is the
                 // compiler's own knowledge of it).
                 compile.push(copy(view("--use-named")));
@@ -2211,8 +2442,9 @@ fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
             for f in groups[g].files.len() {
                 compile.push(groups[g].files[f].copy());
             }
-            if checking {
-                // Only the compiler: a check has no assembly to turn into an object.
+            if checking || (inproc && (release == 0)) {
+                // Only the compiler: a check has no assembly to turn into an object, and an
+                // in-process assembly has its object when the run ends.
                 run = u8[][];
                 for k in compile.len() {
                     run.push(compile[k].copy());
@@ -2529,13 +2761,19 @@ fn link_objects<a, b, d, e, g>(
 //
 // The store is content addressed under .work/cache/<target>:
 //
-//   blob/<sha256>    artifact bytes; the file name is the digest of the bytes inside it
+//   blob/<digest>    artifact bytes; the file name is the digest of the bytes inside it (store_hash)
 //   map/KIND/<key>   a record: `field value` lines naming the blob the key produced
-//   stage/           every write lands here first and is renamed into place, so a crash leaves no
-//                    half-written entry
+//   fp/<id>          what is known of one file at one stamp (size, time, inode, device): its digest,
+//                    and for a source its module, its `use`s and whether it embeds (cache_file_info)
+//   inputs/<key>     a command's resolved module set, with the stamps it holds under
+//   tool-id/<id>     an external tool's identity, per binary stamp
+//   stage/           every write lands in a directory of its own here and is renamed into place, so
+//                    a crash leaves no half-written entry
 //
-// A blob is only reused after its bytes have been hashed again and matched against the name it is
-// filed under, so a corrupted, truncated or unreadable entry is a miss - never a wrong build.
+// A blob is only reused when its bytes hash to the name it is filed under. Its `fp/` record answers
+// that without a read while the blob keeps the stamp it was filed with; a blob written since (a bad
+// disk, a killed build, an edit) has another stamp and is hashed again, so a corrupted, truncated or
+// unreadable entry is a miss - never a wrong build.
 //
 // The module key is the one the design note asks for: the module's source digest, the digests of the
 // interfaces it reads, the compiler's digest, the target, every flag that changes code generation and
@@ -2546,9 +2784,8 @@ fn link_objects<a, b, d, e, g>(
 // When stage 4 proper (one compiler invocation per module) lands, the guard becomes redundant.
 struct Cache {
     root: u8[],
-    // 1 when the host has sha256sum: a 12 MB compiler binary then hashes in milliseconds instead of
-    // the seconds the in-language reader costs.
-    fast: u64,
+    // The working directory, which the `fp/` records of relative paths are keyed under.
+    cwd: u8[],
     hits: u64,
     misses: u64,
     // The modules that missed, in emission order, for the one-line report.
@@ -2597,6 +2834,12 @@ fn cache_base() -> u8[] {
     }
     return copy(view(".work/cache"));
 }
+// Where compile-time probes keep their base objects (the runtime and the standard library compiled
+// once, docs/design/comptime-speed.md): inside the build store, so `grail cache clear` and `prune`
+// cover them.
+pub fn probe_base_root() -> u8[] {
+    return path_join(view(cache_base()), view("probe-base"));
+}
 fn cache_root<a>(target: &a [u8]) -> u8[] {
     return path_join(view(cache_base()), view(target));
 }
@@ -2613,9 +2856,9 @@ fn cache_mkdirs<a>(path: &a [u8]) -> unit {
     return ();
 }
 // A directory of the store's stage that only this call writes in: builds that share a store run at
-// once, and the one `stage/digest` file they all wrote their command output to handed a run another
-// run's digest - a module filed under another module's interface ("core.iface describes module
-// `io`"). Creating a directory is what claims it: only one process can.
+// once, so no two writers may share a staging path (one shared file once handed a run another run's
+// digest - "core.iface describes module `io`"). Creating a directory is what claims it: only one
+// process can.
 fn cache_claim_tmp<a>(c: (&a mut Cache)) -> u8[] {
     stage := cache_stage(&mut c);
     base := host::now_ms();
@@ -2647,6 +2890,9 @@ fn cache_ensure<a>(c: (&a mut Cache)) -> unit {
     host::mkdir(view(path_join(view(c.root), view("map/unit"))));
     host::mkdir(view(path_join(view(c.root), view("map/check"))));
     host::mkdir(view(path_join(view(c.root), view("stage"))));
+    host::mkdir(view(path_join(view(c.root), view("fp"))));
+    host::mkdir(view(path_join(view(c.root), view("tool-id"))));
+    host::mkdir(view(path_join(view(c.root), view("inputs"))));
     // One generation per build that opens the store: what `grail cache prune` measures age in.
     generation := cache_generation(view(c.root)) + 1;
     host::write_file(view(path_join(view(c.root), view("generation"))), view(decimal(generation)));
@@ -2666,96 +2912,289 @@ fn cache_touch<a, b, d>(root: &a [u8], kind: &b [u8], key: &d [u8]) -> unit {
     host::write_file(view(used), view(decimal(cache_generation(view(root)))));
     return ();
 }
-// Whether `sha256sum` can stand in for the in-language digest. It is the same SHA-256 either way.
-fn cache_hash_tool() -> u64 {
-    mut run = u8[][
-        copy(view("sh")),
-        copy(view("-c")),
-        copy(view("command -v sha256sum >/dev/null 2>&1"))
-    ];
-    if host::command(run) == 0 {
-        return 1;
+// ---- the store's own I/O: hashing, file facts and writes, all in this process ----
+//
+// A build or check starts no helper process to hash or file anything: every digest below is
+// `store_hash`, every write is a staging file renamed into place, every copy is a read and a write.
+//
+// The content digest of the store (blob names, source digests, record keys): native::fast_hash as
+// 64 hex digits.
+pub fn store_hash<a>(data: &a [u8]) -> u8[] {
+    raw := native::fast_hash(data);
+    mut out = u8[];
+    for i in raw.len() {
+        out.push(hex_digit(u64(raw[i]) >> 4));
+        out.push(hex_digit(u64(raw[i]) & 15));
     }
-    return 0;
+    return out;
 }
-// The SHA-256 of a file as 64 lowercase hex characters; empty when the file cannot be read.
-// The compiler's digest, once per binary: the store remembers it beside the binary's path, size and
-// modification time, and a command whose binary matches all three reads it back instead of hashing
-// 30 MB again - which cost more than the whole check of a small program. A binary rewritten in
-// place changes its time, a rebuilt one its size or time.
-fn cache_compiler_id<a, b>(c: (&a mut Cache), exe: &b [u8]) -> u8[] {
-    st := host::stat(view(exe), 1);
-    if (st.len() < 6) || (st[0] != 0) {
-        return cache_digest_file(&mut c, view(exe));
-    }
-    mut stamp = copy(view(exe));
-    stamp.push(10);
-    stamp = cat(view(stamp), view(decimal(st[2])));
-    stamp.push(32);
-    stamp = cat(view(stamp), view(decimal(st[4])));
-    stamp.push(32);
-    stamp = cat(view(stamp), view(decimal(st[5])));
-    stamp.push(10);
-    dir := path_join(view(c.root), view("compiler-id"));
-    host::mkdir(view(dir));
-    note := path_join(view(dir), view(native::iface_digest(&stamp)));
-    if host::exists(view(note)) != 0 {
-        text := host::read_file(view(note));
-        if (text.len() == stamp.len() + 64) && eq(view(text[0..stamp.len()]), view(stamp)) {
-            return text[stamp.len()..text.len()].copy();
-        }
-    }
-    digest := cache_digest_file(&mut c, view(exe));
-    if digest.len() == 64 {
-        // Two commands writing it at once write the same bytes; the reader checks them whole.
-        pending := path_join(view(cache_stage(&mut c)), view(cat(view("cid."), view(native::iface_digest(&stamp)))));
-        if host::write_file(view(pending), view(cat(view(stamp), view(digest)))) == 0 {
-            host::rename(view(pending), view(note));
-        }
-    }
-    return digest;
+// What the store knows about one file without reading it again: its digest, and for a source the
+// three things the driver reads sources for - the module it declares, the modules it `use`s and
+// whether it embeds a file. Filed under `fp/` by the file's identity (cache_file_info).
+struct FileInfo {
+    digest: u8[],
+    module: u8[],
+    uses: u8[][],
+    embed: bool
 }
-fn cache_digest_file<a, b>(c: (&a mut Cache), path: &b [u8]) -> u8[] {
-    if host::exists(view(path)) == 0 {
+// A file's identity as the kernel reports it: size, modification time to the nanosecond, inode and
+// device - what cargo and go compare before they hash. Empty when it is not a regular file. A
+// directory has a stamp too (dir_stamp): its time moves when an entry is added or removed.
+fn file_stamp<a>(path: &a [u8]) -> u8[] {
+    st := host::stat(view(path), 1);
+    if (st.len() < 12) || (st[0] != 0) || (st[1] != 1) {
         return u8[];
     }
-    // The command's output goes to a directory this call claimed (cache_claim_tmp).
-    tmp := cache_claim_tmp(&mut c);
-    if (c.fast != 0) && (tmp.len() != 0) {
-        out := path_join(view(tmp), view("out"));
-        mut script = u8[];
-        push_bytes(&mut script, view("sha256sum "));
-        sh_word(&mut script, view(path));
-        push_bytes(&mut script, view(" > "));
-        sh_word(&mut script, view(out));
-        mut run = u8[][copy(view("sh")), copy(view("-c")), script];
-        mut text = u8[];
-        if host::command(run) == 0 {
-            if host::exists(view(out)) != 0 {
-                text = host::read_file(view(out));
+    return stamp_text(&st);
+}
+fn stamp_text<a>(st: (&a u64[])) -> u8[] {
+    mut out = decimal(st[2]);
+    out.push(32);
+    push_bytes(&mut out, view(decimal(st[4])));
+    out.push(32);
+    push_bytes(&mut out, view(decimal(st[5])));
+    out.push(32);
+    push_bytes(&mut out, view(decimal(st[10])));
+    out.push(32);
+    push_bytes(&mut out, view(decimal(st[11])));
+    return out;
+}
+fn dir_stamp<a>(path: &a [u8]) -> u8[] {
+    st := host::stat(view(path), 1);
+    if (st.len() < 12) || (st[0] != 0) {
+        return copy(view("-"));
+    }
+    mut out = decimal(st[1]);
+    out.push(32);
+    push_bytes(&mut out, view(stamp_text(&st)));
+    return out;
+}
+// Whether a file was written in the last tenth of a second: written again within the kernel's
+// timestamp granularity it could keep its size and time, so such a file is not recorded by its
+// stamp until it is older.
+fn stamp_recent<a>(path: &a [u8]) -> bool {
+    st := host::stat(view(path), 1);
+    if (st.len() < 12) || (st[0] != 0) {
+        return true;
+    }
+    written := st[4] * 1000 + st[5] / 1000000;
+    return host::wall_ms() < written + 100;
+}
+fn fp_path<a, b>(c: (&a mut Cache), path: &b [u8]) -> u8[] {
+    // A relative path names a file only together with the working directory.
+    mut name = u8[];
+    if (path.len() == 0) || (path[0] != 47) {
+        name = copy(view(c.cwd));
+        name.push(0);
+    }
+    push_bytes(&mut name, view(path));
+    h := store_hash(view(name));
+    return path_join(view(path_join(view(c.root), view("fp"))), view(h[0..32]));
+}
+// The word after each line-leading `keyword` (`module NAME;`, `use NAME;`).
+fn source_words<a, b>(text: &a [u8], keyword: &b [u8]) -> u8[][] {
+    mut out = u8[][];
+    mut i = 0;
+    while i < text.len() {
+        while (i < text.len()) && ((text[i] == 32) || (text[i] == 9) || (text[i] == 13)) {
+            i += 1;
+        }
+        mut start = i;
+        while (i < text.len()) && ident_byte(text[i]) {
+            i += 1;
+        }
+        if eq(view(text[start..i]), view(keyword)) {
+            while (i < text.len()) && ((text[i] == 32) || (text[i] == 9)) {
+                i += 1;
+            }
+            start = i;
+            while (i < text.len()) && ident_byte(text[i]) {
+                i += 1;
+            }
+            if i != start {
+                out.push(text[start..i].copy());
             }
         }
-        cache_release_tmp(view(tmp));
-        if 64 <= text.len() {
-            mut digest = u8[];
-            for i in 64 {
-                digest.push(text[i]);
+        while (i < text.len()) && (text[i] != 10) {
+            i += 1;
+        }
+        i += 1;
+    }
+    return out;
+}
+fn mentions_embed<a>(text: &a [u8]) -> bool {
+    needle := "@embed(";
+    mut i = 0;
+    while i + needle.len() <= text.len() {
+        if text[i] == 64 {
+            mut hit = true;
+            for j in needle.len() {
+                if text[i + j] != needle[j] {
+                    hit = false;
+                    break;
+                }
             }
-            return digest;
+            if hit {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    return false;
+}
+fn info_of<a>(text: &a [u8], scan: bool) -> FileInfo {
+    mut info = FileInfo { digest: store_hash(text), module: u8[], uses: u8[][], embed: false };
+    if scan {
+        names := source_words(text, view("module"));
+        if names.len() != 0 {
+            info.module = item(&names, 0);
+        }
+        info.uses = source_words(text, view("use"));
+        info.embed = mentions_embed(text);
+    }
+    return info;
+}
+// The record: the path, the stamp, the digest, then `-` for a file read only for its digest, or the
+// module (`-` for none), the embed flag and the `use`d names.
+fn fp_write<a, b, d, e>(c: (&a mut Cache), path: &b [u8], stamp: &d [u8], info: (&e FileInfo), scan: bool) -> unit {
+    if (c.root.len() == 0) || (stamp.len() == 0) {
+        return ();
+    }
+    mut body = copy(view(path));
+    body.push(10);
+    push_bytes(&mut body, view(stamp));
+    body.push(10);
+    push_bytes(&mut body, view(info.digest));
+    body.push(10);
+    if scan {
+        if info.module.len() == 0 {
+            body.push(45);
+        } else {
+            push_bytes(&mut body, view(info.module));
+        }
+        body.push(10);
+        if info.embed {
+            body.push(49);
+        } else {
+            body.push(48);
+        }
+        for u in info.uses.len() {
+            body.push(32);
+            push_bytes(&mut body, view(info.uses[u]));
+        }
+    } else {
+        body.push(45);
+    }
+    body.push(10);
+    cache_put_file(&mut c, view(fp_path(&mut c, path)), view(body));
+    return ();
+}
+// Note a digest the driver already knows - a file it has just read whole, or written - so the next
+// question about that file is answered from its stamp.
+fn fp_note<a, b, d>(c: (&a mut Cache), path: &b [u8], digest: &d [u8]) -> unit {
+    info := FileInfo { digest: copy(view(digest)), module: u8[], uses: u8[][], embed: false };
+    fp_write(&mut c, path, view(file_stamp(path)), &info, false);
+    return ();
+}
+// What the store knows about a file: answered from `fp/` when the file's stamp is the one recorded
+// (no byte of it is read), else from one read that is then recorded. `scan` asks for the source
+// facts as well as the digest. The digest is empty when the file is not there.
+fn cache_file_info<a, b>(c: (&a mut Cache), path: &b [u8], scan: bool) -> FileInfo {
+    stamp := file_stamp(path);
+    if stamp.len() == 0 {
+        return FileInfo { digest: u8[], module: u8[], uses: u8[][], embed: false };
+    }
+    mut note = u8[];
+    if c.root.len() != 0 {
+        note = fp_path(&mut c, path);
+    }
+    if (note.len() != 0) && (host::exists(view(note)) != 0) {
+        rows := lines(view(host::read_file(view(note))));
+        if (rows.len() >= 4) && eq(view(rows[0]), view(path)) && eq(view(rows[1]), view(stamp)) && (rows[2].len() == 64) {
+            if !scan {
+                return FileInfo { digest: rows[2].copy(), module: u8[], uses: u8[][], embed: false };
+            }
+            if rows.len() >= 5 {
+                // The fifth line is the embed flag, then the `use`d names.
+                w := words(view(rows[4]));
+                mut info = FileInfo { digest: rows[2].copy(), module: rows[3].copy(), uses: u8[][], embed: false };
+                if eq(view(info.module), view("-")) {
+                    info.module = u8[];
+                }
+                for k in w.len() {
+                    if k == 0 {
+                        info.embed = eq(view(w[0]), view("1"));
+                    } else {
+                        info.uses.push(w[k].copy());
+                    }
+                }
+                return info;
+            }
         }
     }
-    return native::iface_digest(&host::read_file(view(path)));
+    text := host::read_file(view(path));
+    info := info_of(view(text), scan);
+    if !stamp_recent(path) {
+        fp_write(&mut c, path, view(stamp), &info, scan);
+    }
+    return info;
 }
-// A toolchain's identity: the words it is invoked with plus the version it reports. Nothing cheaper
-// separates two builds of the same tool.
+// The digest of a file's bytes (store_hash), empty when it cannot be read.
+fn cache_digest_file<a, b>(c: (&a mut Cache), path: &b [u8]) -> u8[] {
+    return cache_file_info(&mut c, path, false).digest;
+}
+// Write `bytes` to `dest` whole or not at all: into a staging directory this call claimed, then
+// rename(2) over the destination.
+fn cache_put_file<a, b, d>(c: (&a mut Cache), dest: &b [u8], bytes: &d [u8]) -> bool {
+    tmp := cache_claim_tmp(&mut c);
+    if tmp.len() == 0 {
+        return false;
+    }
+    pending := path_join(view(tmp), view("out"));
+    mut ok = host::write_file(view(pending), view(bytes)) == 0;
+    if ok {
+        ok = host::rename(view(pending), view(dest)) == 0;
+    }
+    cache_release_tmp(view(tmp));
+    return ok;
+}
+// A toolchain's identity: the words it is invoked with plus the version it reports. The internal
+// assembler is the compiler's own binary, so its identity is the compiler's digest; any other tool
+// is asked for its version once per binary - the answer is filed under `tool-id/` by the words and
+// the stamp of the file PATH resolves the first one to, so a reinstalled tool is asked again.
 fn cache_tool_id<a, b>(c: (&a mut Cache), words_in: (&b u8[][])) -> u8[] {
     mut text = u8[];
+    for i in words_in.len() {
+        push_bytes(&mut text, view(item(&words_in, i)));
+        text.push(10);
+    }
+    exe := host::exe_path();
+    if (words_in.len() >= 2) && eq(view(words_in[0]), view(exe)) && eq(view(words_in[1]), view("asm")) {
+        push_bytes(&mut text, view("compiler "));
+        push_bytes(&mut text, view(cache_digest_file(&mut c, view(exe))));
+        return store_hash(view(text));
+    }
+    mut note = u8[];
+    if words_in.len() != 0 {
+        resolved := tool_path(view(words_in[0]));
+        stamp := file_stamp(view(resolved));
+        if (stamp.len() != 0) && (c.root.len() != 0) {
+            mut key = copy(view(text));
+            push_bytes(&mut key, view(resolved));
+            key.push(10);
+            push_bytes(&mut key, view(stamp));
+            note = path_join(view(path_join(view(c.root), view("tool-id"))), view(store_hash(view(key))[0..32]));
+            if host::exists(view(note)) != 0 {
+                known := host::read_file(view(note));
+                if known.len() == 64 {
+                    return known;
+                }
+            }
+        }
+    }
     mut script = u8[];
     for i in words_in.len() {
-        word := item(&words_in, i);
-        push_bytes(&mut text, view(word));
-        text.push(10);
-        sh_word(&mut script, view(word));
+        sh_word(&mut script, view(item(&words_in, i)));
         script.push(32);
     }
     tmp := cache_claim_tmp(&mut c);
@@ -2766,12 +3205,40 @@ fn cache_tool_id<a, b>(c: (&a mut Cache), words_in: (&b u8[][])) -> u8[] {
     mut run = u8[][copy(view("sh")), copy(view("-c")), script];
     if (tmp.len() != 0) && (host::command(run) == 0) {
         if host::exists(view(out)) != 0 {
-            version := host::read_file(view(out));
-            push_bytes(&mut text, view(version));
+            push_bytes(&mut text, view(host::read_file(view(out))));
         }
     }
     cache_release_tmp(view(tmp));
-    return native::iface_digest(&text);
+    digest := store_hash(view(text));
+    if note.len() != 0 {
+        cache_put_file(&mut c, view(note), view(digest));
+    }
+    return digest;
+}
+// Where a command word runs from: itself when it names a path, else the first PATH entry holding a
+// regular file of that name (empty when none does).
+fn tool_path<a>(word: &a [u8]) -> u8[] {
+    for i in word.len() {
+        if word[i] == 47 {
+            return copy(view(word));
+        }
+    }
+    dirs := host::env(view("PATH"));
+    mut start = 0;
+    mut i = 0;
+    while i <= dirs.len() {
+        if (i == dirs.len()) || (dirs[i] == 58) {
+            if i > start {
+                candidate := path_join(view(dirs[start..i]), view(word));
+                if file_stamp(view(candidate)).len() != 0 {
+                    return candidate;
+                }
+            }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    return u8[];
 }
 fn cache_record_path<a, b, d>(root: &a [u8], kind: &b [u8], key: &d [u8]) -> u8[] {
     map := path_join(view(root), view("map"));
@@ -2810,22 +3277,17 @@ fn cache_rest<a>(row: &a [u8], start: u64) -> u8[] {
     }
     return out;
 }
-// Publish a record: write it in `stage/`, then rename it into place.
+// Publish a record: write it in a staging directory, then rename it into place.
 fn cache_record_put<a, b, d, e>(
     c: (&a mut Cache),
     kind: &b [u8],
     key: &d [u8],
     body: &e [u8]
 ) -> unit {
-    stage := cache_stage(&mut c);
-    name := cat(view("rec."), view(key));
-    pending := path_join(view(stage), view(name));
-    if host::write_file(view(pending), view(body)) != 0 {
+    dest := cache_record_path(view(c.root), view(kind), view(key));
+    if !cache_put_file(&mut c, view(dest), view(body)) {
         return ();
     }
-    dest := cache_record_path(view(c.root), view(kind), view(key));
-    mut run = u8[][copy(view("mv")), copy(view("-f")), pending, dest];
-    host::command(run);
     cache_touch(view(c.root), view(kind), view(key));
     return ();
 }
@@ -2837,10 +3299,13 @@ fn hex_byte(b: u8) -> bool {
 // `grail cache clear` empties the store. Both cover every target under the store (cache_base).
 fn cache_command<a>(args: (&a u8[][])) -> u64 {
     if args.len() == 0 {
-        say(view("usage: grail cache prune [--keep N] | grail cache clear"));
+        say(view("usage: grail cache prune [--keep N] | grail cache clear | grail cache warm [--target T]"));
         return 1;
     }
     sub := item(&args, 0);
+    if eq(view(sub), view("warm")) {
+        return cache_warm(&args);
+    }
     if eq(view(sub), view("clear")) {
         mut run = u8[][copy(view("rm")), copy(view("-rf")), cache_base()];
         host::command(run);
@@ -2848,7 +3313,7 @@ fn cache_command<a>(args: (&a u8[][])) -> u64 {
         return 0;
     }
     if !eq(view(sub), view("prune")) {
-        say(view("usage: grail cache prune [--keep N] | grail cache clear"));
+        say(view("usage: grail cache prune [--keep N] | grail cache clear | grail cache warm [--target T]"));
         return 1;
     }
     mut keep = 10;
@@ -2863,6 +3328,13 @@ fn cache_command<a>(args: (&a u8[][])) -> u64 {
     if host::exists(view(base)) == 0 {
         host::print(view("cache: empty\n"));
         return 0;
+    }
+    // Probe bases are rebuilt on demand (one compile of the runtime and the standard library), so
+    // a prune drops them all rather than tracking their use.
+    probes := probe_base_root();
+    if host::exists(view(probes)) != 0 {
+        mut drop_probes = u8[][copy(view("rm")), copy(view("-rf")), probes.copy()];
+        host::command(drop_probes);
     }
     targets := host::list_dir(view(base));
     for t in targets.len() {
@@ -2941,6 +3413,18 @@ fn cache_command<a>(args: (&a u8[][])) -> u64 {
             removal := u8[][copy(view("rm")), copy(view("-rf")), fn_dir];
             host::command(removal);
         }
+        // What the store remembers about files, tools and module sets is rebuilt by the next build
+        // that asks: dropped whole, like the per-function store.
+        notes := u8[][copy(view("fp")), copy(view("tool-id")), copy(view("inputs"))];
+        for n in notes.len() {
+            dir := path_join(view(root), view(item(&notes, n)));
+            if host::exists(view(dir)) != 0 {
+                entries := host::list_dir(view(dir));
+                for e in entries.len() {
+                    host::remove(view(path_join(view(dir), view(item(&entries, e)))), 0);
+                }
+            }
+        }
     }
     mut line = copy(view("cache: pruned "));
     push_bytes(&mut line, view(decimal(records_dropped)));
@@ -2954,40 +3438,108 @@ fn cache_command<a>(args: (&a u8[][])) -> u64 {
     host::print(view(line));
     return 0;
 }
-// File an artifact under the digest of its bytes, through a staging copy and a rename.
+// `grail cache warm [--target T]`: check and build every standard module into the store, as a
+// toolchain ships its standard library ready (rustup's libstd, Go's std in GOCACHE): a project's
+// first check then compiles only its own modules. One program that `use`s every module of the
+// standard directory is checked and built in the store's stage, through the ordinary commands, so
+// the records it files are exactly the ones a project's build would look up. The install step runs
+// it; running it again is a no-op.
+fn cache_warm<a>(args: (&a u8[][])) -> u64 {
+    h := home();
+    if h.std.len() == 0 {
+        return 1;
+    }
+    mut target = u8[];
+    if (args.len() == 3) && eq(view(item(args, 1)), view("--target")) {
+        target = item(args, 2);
+    }
+    mut store = Cache { root: u8[], cwd: host::cwd(), hits: 0, misses: 0, names: u8[][], quiet: 1 };
+    mut program = u8[];
+    entries := host::list_dir(view(h.std));
+    mut count = 0;
+    for e in entries.len() {
+        name := item(&entries, e);
+        if !ends_with_grl(view(name)) {
+            continue;
+        }
+        info := cache_file_info(&mut store, view(path_join(view(h.std), view(name))), true);
+        if info.module.len() != 0 {
+            push_bytes(&mut program, view("use "));
+            push_bytes(&mut program, view(info.module));
+            push_bytes(&mut program, view(";\n"));
+            count += 1;
+        }
+    }
+    push_bytes(&mut program, view("fn main() {}\n"));
+    // The program lives in the target's stage, which `grail cache prune` empties.
+    mut named = target.copy();
+    if named.len() == 0 {
+        named = target_name(host::target());
+    }
+    stage := path_join(view(cache_root(view(named))), view("stage"));
+    cache_mkdirs(view(stage));
+    dir := path_join(view(stage), view(cat(view("warm."), view(decimal(host::now_us())))));
+    host::mkdir(view(dir));
+    entry := path_join(view(dir), view("main.grl"));
+    host::write_file(view(entry), view(program));
+    exe := host::exe_path();
+    mut failed = 0;
+    for step in 2 {
+        mut run = u8[][exe.copy()];
+        if step == 0 {
+            run.push(copy(view("check")));
+        } else {
+            run.push(copy(view("build")));
+        }
+        run.push(entry.copy());
+        run.push(copy(view("-o")));
+        run.push(path_join(view(dir), view("warm")));
+        if target.len() != 0 {
+            run.push(copy(view("--target")));
+            run.push(target.copy());
+        }
+        if host::command(run) != 0 {
+            failed = 1;
+        }
+    }
+    removal := u8[][copy(view("rm")), copy(view("-rf")), dir];
+    host::command(removal);
+    mut line = copy(view("cache: warm: "));
+    push_bytes(&mut line, view(decimal(count)));
+    push_bytes(&mut line, view(" standard modules checked and built"));
+    if failed != 0 {
+        push_bytes(&mut line, view(" (a step failed; what it filed stays)"));
+    }
+    say(view(line));
+    return failed;
+}
+// File an artifact under the digest of its bytes: one read, then a staging copy renamed into place.
 fn cache_blob_put<a, b>(c: (&a mut Cache), path: &b [u8]) -> u8[] {
-    digest := cache_digest_file(&mut c, view(path));
-    if digest.len() != 64 {
+    if host::exists(view(path)) == 0 {
         return u8[];
     }
-    blobs := path_join(view(c.root), view("blob"));
-    blob := path_join(view(blobs), view(digest));
+    bytes := host::read_file(view(path));
+    digest := store_hash(view(bytes));
+    fp_note(&mut c, view(path), view(digest));
     // A blob that is already filed under this name is only reused if its bytes still hash to it: a
     // corrupted entry is replaced, so corruption costs one rebuild and not every build after it.
     if cache_blob_ok(&mut c, view(digest)) {
         return digest;
     }
-    stage := cache_stage(&mut c);
-    name := cat(view("blob."), view(digest));
-    pending := path_join(view(stage), view(name));
-    host::remove(view(pending), 0);
-    mut copy_run = u8[][copy(view("cp")), copy(view(path)), copy(view(pending))];
-    if host::command(copy_run) != 0 {
+    blob := path_join(view(path_join(view(c.root), view("blob"))), view(digest));
+    if !cache_put_file(&mut c, view(blob), view(bytes)) {
         return u8[];
     }
-    mut move_run = u8[][copy(view("mv")), copy(view("-f")), pending, blob];
-    if host::command(move_run) != 0 {
-        return u8[];
-    }
+    fp_note(&mut c, view(blob), view(digest));
     return digest;
 }
-// A blob is usable only when its bytes still hash to the name it is filed under.
+// A blob is usable only when its bytes still hash to the name it is filed under - which its `fp/`
+// record answers without a read while the blob's stamp is the one it was filed with.
 fn cache_blob_ok<a, b>(c: (&a mut Cache), digest: &b [u8]) -> bool {
     if digest.len() != 64 {
         return false;
     }
-    blobs := path_join(view(c.root), view("blob"));
-    blob := path_join(view(blobs), view(digest));
+    blob := path_join(view(path_join(view(c.root), view("blob"))), view(digest));
     if host::exists(view(blob)) == 0 {
         return false;
     }
@@ -2995,27 +3547,36 @@ fn cache_blob_ok<a, b>(c: (&a mut Cache), digest: &b [u8]) -> bool {
     return eq(view(actual), view(digest));
 }
 // Put a filed artifact back at `dest`, through a staging name so `dest` is only ever the whole file.
+// An executable image needs its mode bits, which only `chmod` gives a new file here: that one case
+// is a shell step.
 fn cache_blob_restore<a, b, d>(
     c: (&a mut Cache),
     digest: &b [u8],
     dest: &d [u8],
     executable: u64
 ) -> u64 {
-    blobs := path_join(view(c.root), view("blob"));
-    blob := path_join(view(blobs), view(digest));
+    blob := path_join(view(path_join(view(c.root), view("blob"))), view(digest));
     if host::exists(view(blob)) == 0 {
         return 1;
     }
     pending := cat(view(dest), view(".cache-pending"));
+    if executable == 0 {
+        if host::write_file(view(pending), view(host::read_file(view(blob)))) != 0 {
+            return 1;
+        }
+        if host::rename(view(pending), view(dest)) != 0 {
+            return 1;
+        }
+        fp_note(&mut c, view(dest), view(digest));
+        return 0;
+    }
     mut script = u8[];
     push_bytes(&mut script, view("set -e\ncp "));
     sh_word(&mut script, view(blob));
     script.push(32);
     sh_word(&mut script, view(pending));
-    if executable != 0 {
-        push_bytes(&mut script, view("\nchmod 755 "));
-        sh_word(&mut script, view(pending));
-    }
+    push_bytes(&mut script, view("\nchmod 755 "));
+    sh_word(&mut script, view(pending));
     push_bytes(&mut script, view("\nmv -f "));
     sh_word(&mut script, view(pending));
     script.push(32);
@@ -3024,6 +3585,7 @@ fn cache_blob_restore<a, b, d>(
     if host::command(run) != 0 {
         return 1;
     }
+    fp_note(&mut c, view(dest), view(digest));
     return 0;
 }
 fn cache_contains<a, b>(text: &a [u8], needle: &b [u8]) -> bool {
@@ -3170,9 +3732,8 @@ fn cache_build_id<a, b, d, e, g>(
             i += 2;
         } else if eq(view(a), view("--module-root")) & (i + 1 < argv.len()) {
             // `--module-root DIR` names the directory `use` resolves modules in, and DIR is a
-            // *directory*: taken for a source it made the key hash the stdlib folder (`sha256sum`
-            // on a directory) once the resolver started passing it. The flag is in the key; the
-            // modules it makes reachable are hashed one by one as the sources they are.
+            // *directory*, not a source to hash. The flag is in the key; the modules it makes
+            // reachable are hashed one by one as the sources they are.
             push_bytes(&mut flagbuf, view("module-root "));
             push_bytes(&mut flagbuf, view(item(&argv, i + 1)));
             flagbuf.push(10);
@@ -3214,9 +3775,9 @@ fn cache_build_id<a, b, d, e, g>(
             }
         }
     }
-    id.flags = native::iface_digest(&flagbuf);
+    id.flags = store_hash(view(flagbuf));
     exe := host::exe_path();
-    id.compiler = cache_compiler_id(&mut c, view(exe));
+    id.compiler = cache_digest_file(&mut c, view(exe));
     // The assembler's identity: clang's `--version`, or for the internal assembler (`grail asm`) the
     // compiler's own digest above, which is the same binary.
     id.assembler = cache_tool_id(&mut c, assemble);
@@ -3256,7 +3817,7 @@ fn cache_program_key<a, b, d, e>(
         push_bytes(&mut buf, view(item(&id.digests, i)));
         buf.push(10);
     }
-    return native::iface_digest(&buf);
+    return store_hash(view(buf));
 }
 fn cache_module_key<a, b, d, e, g>(
     c: (&a mut Cache),
@@ -3316,7 +3877,7 @@ fn cache_module_key<a, b, d, e, g>(
             }
         }
     }
-    return native::iface_digest(&buf);
+    return store_hash(view(buf));
 }
 // The one line a cached build prints: what was reused, what was not, and what ran.
 fn cache_report<a>(c: (&a mut Cache), relinked: u64) -> unit {
@@ -3518,7 +4079,7 @@ fn cache_split<a, b, d, e, g, k, m>(
         push_bytes(&mut linkbuf, view(cache_digest_file(&mut c, view(input))));
         linkbuf.push(10);
     }
-    link_key := native::iface_digest(&linkbuf);
+    link_key := store_hash(view(linkbuf));
     image := cache_field(view(c.root), view("lnk"), view(link_key), view("blob"));
     mut linked: u64 = 0;
     mut final = copy(view(image));
@@ -3590,6 +4151,9 @@ struct Options {
     // proof that is wrong aborts at the call instead of passing unnoticed. Without it the flag
     // never reached the compiler, and the check it exists to keep was the check nobody saw.
     verify_facts: u64,
+    // `--report checks`: the build prints every check left in the program's own functions, with its
+    // location and kind. One uncached run, so a cached module cannot hide its checks.
+    report_checks: u64,
     // `--strict-refinements`: an obligation the prover cannot settle is refused, program-wide.
     strict: u64,
     // `--no-cache`: one compiler run over the whole program, nothing read from or filed in the
@@ -3660,6 +4224,8 @@ fn flag_bits<a>(o: (&a Options), check_only: bool = false) -> u64 {
         * 4096
         + o.release
         * 8192
+        + o.report_checks
+        * 16384
         // A release build wraps by default; `--overflow=` on the command line still decides.
         + u64((o.release != 0) && (o.overflow == 0))
         * 16;
@@ -3701,6 +4267,7 @@ const F_WATCH: u64 = 11;
 const F_JSON: u64 = 12;
 const F_NO_ENTRY: u64 = 13;
 const F_VERIFY_FACTS: u64 = 14;
+const F_REPORT: u64 = 42;
 const F_STRICT: u64 = 15;
 const F_NO_CACHE: u64 = 17;
 const F_EMIT_IR: u64 = 16;
@@ -3741,6 +4308,7 @@ fn flag_table() -> Flag[] {
         },
         Flag { word: copy(view("--no-error-sites")), kind: FLAG_SWITCH, field: F_NO_SITES },
         Flag { word: copy(view("--verify-facts")), kind: FLAG_SWITCH, field: F_VERIFY_FACTS },
+        Flag { word: copy(view("--report")), kind: FLAG_TEXT, field: F_REPORT },
         Flag { word: copy(view("--strict-refinements")), kind: FLAG_SWITCH, field: F_STRICT },
         Flag { word: copy(view("--emit-ir")), kind: FLAG_SWITCH, field: F_EMIT_IR },
         Flag { word: copy(view("--interface")), kind: FLAG_TEXT, field: F_IFACE },
@@ -3877,6 +4445,13 @@ fn take_text<a, b>(o: (&a mut Options), field: u64, word: &b [u8]) {
         o.output = copy(word);
     } else if field == F_TARGET {
         o.target = copy(word);
+    } else if field == F_REPORT {
+        if !eq(word, view("checks")) {
+            say(view("grail: `--report` takes `checks`: the runtime checks left in the program's own functions"));
+            host::exit(2);
+        }
+        o.report_checks = 1;
+        o.no_cache = 1;
     } else if field == F_IFACE {
         o.iface = copy(word);
     } else if field == F_IFACE_EMIT {
@@ -3919,6 +4494,7 @@ fn options<a>(args: (&a u8[][])) -> Options {
         iface: u8[],
         verify: 0,
         verify_facts: 0,
+        report_checks: 0,
         strict: 0,
         emit_ir: 0,
         release: 0,
@@ -6042,6 +6618,7 @@ fn help() {
         )
     );
     say(view("  grail cache clear                  empty the build cache"));
+    say(view("  grail cache warm [--target T]      check and build the standard library into the cache"));
     say(view("  grail explain CODE                 what an error code means (error[E0004])"));
     say(view("  grail doc [--out DIR] [FILES|DIRS] reference documentation: HTML per module + index.json"));
     say(view("  grail bindgen HEADER.h -o OUT.grl  import a C header as extern \"C\" declarations [-I DIR] [-l LIB]"));
@@ -6114,6 +6691,7 @@ pub fn is_command<a>(name: &a [u8]) -> bool {
         || eq(view(name), view("profile"))
         || eq(view(name), view("cache"))
         || eq(view(name), view("unit-build"))
+        || eq(view(name), view("llvm-compile"))
         || eq(view(name), view("explain"))
         || eq(view(name), view("asm"))
         || eq(view(name), view("doc"))
@@ -6171,6 +6749,9 @@ pub fn run() -> u64 {
     }
     if eq(view(name), view("unit-build")) {
         return unit_build_command(&args);
+    }
+    if eq(view(name), view("llvm-compile")) {
+        return llvm_compile_command(&args);
     }
     if eq(view(name), view("explain")) {
         // `grail explain E0004`: what an error code means and how it is usually fixed.
