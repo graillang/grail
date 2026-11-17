@@ -541,6 +541,12 @@ struct C {
     // checks --verify-facts emits can be shown to fire (docs/design/typed-ir.md, "Tests that catch
     // a wrong fact"). 0, the default, records the type the front end actually has.
     f1_what: u64,
+    // --forge-signature=SYMBOL:WORDS: a test aid that records SYMBOL's signature fact with WORDS
+    // argument words, so the lifter's signature checks can be shown to fire. Empty by default.
+    forge_sig: u8[],
+    forge_words: u64,
+    // 1 when the forged signature also drops the body's `dyn_result` fact.
+    forge_result: u64,
     debug_funcs: DebugFunc[],
     debug_vars: DebugVar[],
     debug_types: DebugType[],
@@ -4067,6 +4073,21 @@ fn win_unwind_line<a, b>(u: (&a mut WinUnwind), text: &b [u8], a: u64, e: u64) -
                 frame = u.frames[u.frame_at];
             }
             u.frame_at = u.frame_at + 1;
+            // `subq $.Fn+N,%rsp`: the optimiser folded the callee-saved area into the frame
+            // adjustment (docs/design/call-abi.md S4), so the allocation is N bytes more.
+            mut plus = a;
+            while (plus < e) && (text[plus] != 43) {
+                plus += 1;
+            }
+            if plus < e {
+                mut extra = 0;
+                mut d = plus + 1;
+                while (d < e) && (47 < text[d]) && (text[d] < 58) {
+                    extra = extra * 10 + u64(text[d]) - 48;
+                    d += 1;
+                }
+                frame = frame + extra;
+            }
             push_line(&mut u.out, view(text), a, e);
             put_text(&mut u.out, view(".seh_stackalloc "));
             put_number(&mut u.out, frame);
@@ -4402,47 +4423,91 @@ fn imm<a>(c: (&a mut C), n: u64) -> u64 {
     o(&mut c, view(",%rax\n"));
     return save(&mut c);
 }
-// Grail's own calling convention passes six words in registers. A call with more arguments keeps
-// the first five in registers and passes the rest in a heap record whose address is the sixth
-// register; the callee copies them into its frame and frees the record. ABI-neutral: only
-// register moves and loads/stores through a pointer, which every target lowers.
-fn load_call_args<a, b>(c: (&a mut C), args: (&b u64[]), shift: u64) -> unit {
+// Grail's own calling convention passes six words in registers and the rest on the stack: word
+// 6 + k at 8k(%rsp) when the call is made, in an outgoing area of a multiple of 16 bytes that the
+// caller reserves here and releases after the call (`release_call_args`). The callee finds word
+// 6 + k at 16 + 8k(%rbp) on every target (`stack_params`). The returned size is the area's.
+// AArch64 and RV64 spell the area with the pseudo-instructions the C-ABI calls use (`cstack`,
+// `cstarg`, `cunstack`), which machine.grl lowers.
+fn load_call_args<a, b>(c: (&a mut C), args: (&b u64[]), shift: u64) -> u64 {
     total := args.len() + shift;
     if total <= 6 {
         for i in args.len() {
             r := argreg(i + shift);
             get(&mut c, args[i], view(r));
         }
-        return ();
+        return 0;
     }
-    extra := total - 5;
-    n := imm(&mut c, extra);
-    record := invoke(&mut c, view("rt_rec"), one(n));
+    extra := total - 6;
+    area := 16 * ((extra + 1) / 2);
+    x86 := (c.target == 0) || (c.target == 3);
+    if x86 {
+        o(&mut c, view("subq $"));
+        on(&mut c, area);
+        o(&mut c, view(",%rsp\n"));
+    } else {
+        o(&mut c, view("cstack "));
+        on(&mut c, area);
+        c.out.push(10);
+    }
     for k in extra {
-        get(&mut c, record, view("%rcx"));
-        get(&mut c, args[5 - shift + k], view("%rax"));
-        o(&mut c, view("movq %rax,"));
-        on(&mut c, k * 8);
-        o(&mut c, view("(%rcx)\n"));
+        get(&mut c, args[6 - shift + k], view("%rax"));
+        if x86 {
+            ffi_store_stack(&mut c, 1, k * 8);
+        } else {
+            ffi_store_stack(&mut c, 0, k * 8);
+        }
     }
-    for i in 5 - shift {
+    for i in 6 - shift {
         r := argreg(i + shift);
         get(&mut c, args[i], view(r));
     }
-    get(&mut c, record, view("%r9"));
+    return area;
+}
+// After the call: the outgoing area `load_call_args` reserved, if any, is released.
+fn release_call_args<a>(c: (&a mut C), area: u64) -> unit {
+    if area == 0 {
+        return ();
+    }
+    if (c.target == 0) || (c.target == 3) {
+        o(&mut c, view("addq $"));
+        on(&mut c, area);
+        o(&mut c, view(",%rsp\n"));
+    } else {
+        o(&mut c, view("cunstack "));
+        on(&mut c, area);
+        c.out.push(10);
+    }
     return ();
 }
-// Prologue: parameter i of `count` into frame slot i (see load_call_args for more than six).
-fn store_params<a>(c: (&a mut C), declared: u64) -> unit {
-    // A function whose result is a plain record of more than two words also takes, after its
-    // declared parameters, the address the caller wants the result written to (result_dest).
-    mut count = declared;
-    if c.result_dest != 0 {
-        count = declared + 1;
+// The LLVM backend's signature fact for the body being emitted: its argument words, six in
+// registers and the rest on the stack (with the hidden result address when it has one). The lifter
+// defines the body and its calls with exactly these words (llvm.grl `signatures`).
+fn signature_fact<a>(c: (&a mut C), declared: u64) -> unit {
+    if (c.backend == 0) || (c.validating != 0) || (c.facts_fn.len() == 0) {
+        return ();
     }
+    mut words = arg_words(&c, declared);
+    if (c.forge_sig.len() != 0) && same(view(c.forge_sig), view(c.facts_fn)) {
+        words = c.forge_words;
+    }
+    llvm::fact_signature(&mut c.facts, copy_bytes(view(c.facts_fn)), words);
+    return ();
+}
+// The argument words a function takes: its declared parameters and, for a plain record result of
+// more than two words, the address the caller wants it written to (result_dest) after them.
+fn arg_words<a>(c: (&a C), declared: u64) -> u64 {
+    if c.result_dest != 0 {
+        return declared + 1;
+    }
+    return declared;
+}
+// Prologue: the register arguments (the first six words) into their frame slots (arg_slot).
+fn store_params<a>(c: (&a mut C), declared: u64) -> unit {
+    count := arg_words(&c, declared);
     mut regs = count;
     if 6 < count {
-        regs = 5;
+        regs = 6;
     }
     for i in regs {
         reg := argreg(i);
@@ -4452,16 +4517,23 @@ fn store_params<a>(c: (&a mut C), declared: u64) -> unit {
         stack_slot(&mut c, arg_slot(&c, declared, i));
         c.out.push(10);
     }
-    if 6 < count {
-        for k in count - 5 {
-            o(&mut c, view("movq "));
-            on(&mut c, k * 8);
-            o(&mut c, view("(%r9),%rax\nmovq %rax,"));
-            stack_slot(&mut c, arg_slot(&c, declared, 5 + k));
-            c.out.push(10);
-        }
-        o(&mut c, view("movq %r9,%rdi\n"));
-    call_out(&mut c, view("rt_free"));
+    return ();
+}
+// After the frame is cleared: parameter 6 + k from the caller's outgoing area, 16 + 8k(%rbp), into
+// frame slot 6 + k (see load_call_args). The cleared range excludes the parameter slots, so the
+// order is free, and keeping these loads past the clearing leaves the prologue the shape the
+// lifter reads.
+fn stack_params<a>(c: (&a mut C), declared: u64) -> unit {
+    count := arg_words(&c, declared);
+    if count <= 6 {
+        return ();
+    }
+    for k in count - 6 {
+        o(&mut c, view("movq "));
+        on(&mut c, 16 + k * 8);
+        o(&mut c, view("(%rbp),%rax\nmovq %rax,"));
+        stack_slot(&mut c, arg_slot(&c, declared, 6 + k));
+        c.out.push(10);
     }
     return ();
 }
@@ -8260,8 +8332,7 @@ fn ref_pred_count<a>(c: (&a mut C)) -> u64 {
 // function `<name>` that stores the arguments, checks each parameter predicate (an entry fact of
 // this record: the caller's obligation), puts the arguments back and calls `<name>.proved`, whose
 // result it returns in `%rax`. Every unproved caller, a function value and a vtable reach it; a
-// proved call skips it. More than six parameters arrive as a record behind `%r9`, which the body
-// frees: the wrapper reads the rest from it for the checks and passes `%r9` through untouched.
+// proved call skips it. Words past the sixth arrive on the stack and are passed on the same way.
 fn ref_wrapper<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &d [u8], export: u64, count: u64, position: u64, claimed_alloc: u64, claimed_panic: u64, entry_state: ownership::State) -> unit {
     after := exchange(&mut c.check, entry_state);
     func_directive(&mut c, view(m), view(name), view(body_symbol), export);
@@ -8303,36 +8374,59 @@ fn ref_wrapper<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &
     if total != count {
         dslot = fresh(&mut c);
     }
+    // Six words arrive in registers and the rest on the stack, word 6 + k at 16 + 8k(%rbp)
+    // (load_call_args): all are stored for the checks, and handed on the same way.
     mut regs = total;
     if 6 < total {
-        regs = 5;
+        regs = 6;
     }
-    for i in regs {
-        o(&mut c, view("movq "));
-        o(&mut c, view(argreg(i)));
-        c.out.push(44);
+    for i in total {
+        if i < 6 {
+            o(&mut c, view("movq "));
+            o(&mut c, view(argreg(i)));
+            c.out.push(44);
+        } else {
+            o(&mut c, view("movq "));
+            on(&mut c, 16 + (i - 6) * 8);
+            o(&mut c, view("(%rbp),%rax\nmovq %rax,"));
+        }
         if i < count {
             stack_slot(&mut c, i);
         } else {
             stack_slot(&mut c, dslot);
         }
         c.out.push(10);
-    }
-    mut spill = 0;
-    if 6 < total {
-        spill = fresh(&mut c);
-        o(&mut c, view("movq %r9,"));
-        stack_slot(&mut c, spill);
-        c.out.push(10);
-        for k in count - 5 {
-            o(&mut c, view("movq "));
-            on(&mut c, k * 8);
-            o(&mut c, view("(%r9),%rax\nmovq %rax,"));
-            stack_slot(&mut c, 5 + k);
-            c.out.push(10);
-        }
     }
     ref_params(&mut c);
+    mut area = 0;
+    if 6 < total {
+        extra := total - 6;
+        area = 16 * ((extra + 1) / 2);
+        x86 := (c.target == 0) || (c.target == 3);
+        if x86 {
+            o(&mut c, view("subq $"));
+            on(&mut c, area);
+            o(&mut c, view(",%rsp\n"));
+        } else {
+            o(&mut c, view("cstack "));
+            on(&mut c, area);
+            c.out.push(10);
+        }
+        for k in extra {
+            o(&mut c, view("movq "));
+            if 6 + k < count {
+                stack_slot(&mut c, 6 + k);
+            } else {
+                stack_slot(&mut c, dslot);
+            }
+            o(&mut c, view(",%rax\n"));
+            if x86 {
+                ffi_store_stack(&mut c, 1, k * 8);
+            } else {
+                ffi_store_stack(&mut c, 0, k * 8);
+            }
+        }
+    }
     for i in regs {
         o(&mut c, view("movq "));
         if i < count {
@@ -8344,12 +8438,8 @@ fn ref_wrapper<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &
         o(&mut c, view(argreg(i)));
         c.out.push(10);
     }
-    if spill != 0 {
-        o(&mut c, view("movq "));
-        stack_slot(&mut c, spill);
-        o(&mut c, view(",%r9\n"));
-    }
     call_proved_out(&mut c, view(sym));
+    release_call_args(&mut c, area);
     o(&mut c, view("leave\nret\n.set "));
     fname(&mut c, frame);
     c.out.push(44);
@@ -12970,6 +13060,9 @@ fn dyn_pair_of_words<a, b, d>(c: (&a mut C), data: &b [u8], table: &d [u8]) -> u
 // pair in its own frame (save_result).
 fn dyn_result<a>(c: (&a mut C)) -> unit {
     exchange(&mut c.dyn_result_seen, 1);
+    if (c.forge_result != 0) && same(view(c.forge_sig), view(c.facts_fn)) {
+        return ();
+    }
     if c.facts_fn.len() != 0 {
         llvm::fact_dyn_result(&mut c.facts, copy_bytes(view(c.facts_fn)));
     }
@@ -16803,8 +16896,16 @@ fn ffi_emit_call<a, b, d, e, f>(
         o(&mut c, view(",%eax\n"));
     }
     if symbol.len() == 0 {
-        get(&mut c, target, view("%rax"));
-        call_slot_out(&mut c, view("call *%rax\n"), view("a closure call"));
+        if c.target == 0 {
+            // A C call through a `cfn` value. %r11 is no argument register, %al may already hold
+            // the vector count of a variadic callee, and `call *%r11` is the spelling the LLVM
+            // lifter keeps native: it lifts `call *%rax`, which is always the Grail convention.
+            get(&mut c, target, view("%r11"));
+            call_slot_out(&mut c, view("call *%r11\n"), view("a call through a C function pointer"));
+        } else {
+            get(&mut c, target, view("%rax"));
+            call_slot_out(&mut c, view("call *%rax\n"), view("a closure call"));
+        }
     } else {
         call_out(&mut c, view(symbol));
     }
@@ -19461,6 +19562,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         exchange(&mut c.export_fret, 0);
         begin_result_dest(&mut c, ret, count);
         store_params(&mut c, count);
+        signature_fact(&mut c, count);
     }
     // The parameter refinements hold here, where the parameters are the arguments they were given.
     // Before the frame zeroing on purpose: the check's own return address must stay inside the
@@ -19472,6 +19574,9 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     o(&mut c, view("/8-"));
     on(&mut c, kept_slots(&c, count));
     o(&mut c, view(",%rcx\nxorl %eax,%eax\nrep stosq\n"));
+    if export != 2 {
+        stack_params(&mut c, count);
+    }
     for i in count {
         mut l = &c.locals[i];
         slot := l.id;
@@ -32030,7 +32135,7 @@ fn emit_resolved_call<a>(
     if dest != 0 {
         sent.push(dest);
     }
-    load_call_args(&mut c, &sent, 0);
+    area := load_call_args(&mut c, &sent, 0);
     if dyn_entry != 0 {
         if dyn_pair != 0 {
             // A borrowed object's receiver is the handle to its pair: word 0 is the value (the
@@ -32059,6 +32164,7 @@ fn emit_resolved_call<a>(
             call_out(&mut c, view(callee));
         }
     }
+    release_call_args(&mut c, area);
     slot := save_result(&mut c, ret);
     own(&mut c, slot, ret);
     shape_pair_result(&mut c, slot, ret);
@@ -32688,7 +32794,7 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
     if dest != 0 {
         args.push(dest);
     }
-    load_call_args(&mut c, &args, shift);
+    area := load_call_args(&mut c, &args, shift);
     if shift != 0 {
         get(&mut c, envp, view("%rdi"));
     }
@@ -32702,6 +32808,7 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
         get(&mut c, target, view("%rax"));
         call_slot_out(&mut c, view("call *%rax\n"), view("a function value"));
     }
+    release_call_args(&mut c, area);
     slot := save_result(&mut c, resulttype);
     own(&mut c, slot, resulttype);
     shape_pair_result(&mut c, slot, resulttype);
@@ -39030,6 +39137,7 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         o(&mut c, view("/8-"));
         on(&mut c, kept_slots(&c, count));
         o(&mut c, view(",%rcx\nxorl %eax,%eax\nrep stosq\n"));
+        stack_params(&mut c, count);
         for j in count {
             mut l = &c.locals[j];
             slot := l.id;
@@ -49207,14 +49315,16 @@ const IFACE_TAG_FACTS: u64 = 20;
 // `{data, vtable}` pair - and what a reference to a record is (`ref record = address`: the record's
 // own address, docs/design/unboxed-values.md stage 1a; before it, the address of a word holding
 // that), and that a plain record held by a record or a vector is stored inline (`record plain =
-// inline`, stage 1b). A module that was compiled for another layout cannot be linked into the same program by
+// inline`, stage 1b), and that a call passes six words in registers and the rest on the stack
+// (`args = 6 registers then stack`, docs/design/call-abi.md S3; before it, the rest in a heap record
+// behind the sixth register). A module that was compiled for another layout cannot be linked into the same program by
 // accident: the writer writes this line and the reader refuses a file whose line differs.
 //
 // The string is the whole spelling, `abi ` included. It is carried as one length-counted field of
 // the module header record and rendered back verbatim by `grail iface dump`, so the single-source
 // rule survives the encoding: nothing else in this compiler knows how the ABI is written.
 fn iface_dyn_abi() -> string {
-    return "abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame";
+    return "abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame args = 6 registers then stack";
 }
 
 // ---- writing ----
@@ -54261,6 +54371,9 @@ pub fn main() -> u64 {
         check_only: 0,
         quiet: 0,
         f1_what: 0,
+        forge_sig: u8[],
+        forge_words: 0,
+        forge_result: 0,
         debug_funcs: DebugFunc[],
         debug_vars: DebugVar[],
         debug_types: DebugType[],
@@ -55000,7 +55113,40 @@ pub fn main() -> u64 {
                                     exchange(&mut c.backend, 1);
                                     offset += 1;
                                 } else {
-                                    if starts_with(view(option), view("--f1-what=")) {
+                                    if starts_with(view(option), view("--forge-signature=")) {
+                                        // A test aid: record SYMBOL's signature fact with WORDS
+                                        // argument words instead of its real count, so the lifter's
+                                        // checks of a wrong signature can be shown to fire.
+                                        // `:1` after WORDS also records a one-word result for a
+                                        // body that returns two (no `dyn_result` fact).
+                                        mut colon = 0;
+                                        mut second = 0;
+                                        for d in option.len() - 18 {
+                                            if option[18 + d] == 58 {
+                                                if colon == 0 {
+                                                    colon = 18 + d;
+                                                } else {
+                                                    second = 18 + d;
+                                                }
+                                            }
+                                        }
+                                        mut end = option.len();
+                                        if second != 0 {
+                                            end = second;
+                                            exchange(&mut c.forge_result, 1);
+                                        }
+                                        mut n = 0;
+                                        for d in end - colon - 1 {
+                                            n = n * 10 + u64(option[colon + 1 + d]) - 48;
+                                        }
+                                        mut sym = u8[];
+                                        for d in colon - 18 {
+                                            sym.push(option[18 + d]);
+                                        }
+                                        exchange(&mut c.forge_sig, sym);
+                                        exchange(&mut c.forge_words, n);
+                                        offset += 1;
+                                    } else if starts_with(view(option), view("--f1-what=")) {
                                         // A test aid: record a deliberately wrong F1 kind so the
                                         // --verify-facts checks can be shown to fire.
                                         mut n = 0;
@@ -55601,6 +55747,10 @@ pub fn main() -> u64 {
         if c.backend != 0 {
             // LLVM IR for the lifted functions beside the native remainder: PATH.ll and PATH.
             lowered := llvm::lower(view(out), view("x86_64-unknown-linux-gnu"), &c.facts, c.verify_facts, c.range_facts);
+            if lowered.error.len() != 0 {
+                host::print(view(lowered.error));
+                return 1;
+            }
             mut ir_path = copy_bytes(view(path));
             push_bytes(&mut ir_path, view(".ll"));
             written := host::write_file(view(ir_path), view(lowered.ir));
@@ -55624,6 +55774,10 @@ pub fn main() -> u64 {
         // LLVM IR (PATH.ll) for the lifted functions; the remainder goes through the usual
         // instruction selection, followed by the calling-convention thunks.
         lowered := llvm::lower_for(view(out), target, &c.facts, c.verify_facts, c.range_facts);
+        if lowered.error.len() != 0 {
+            host::print(view(lowered.error));
+            return 1;
+        }
         mut ir_path = copy_bytes(view(path));
         push_bytes(&mut ir_path, view(".ll"));
         written := host::write_file(view(ir_path), view(lowered.ir));

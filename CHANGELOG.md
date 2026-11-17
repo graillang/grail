@@ -1,5 +1,40 @@
 ## Unreleased
 
+- AArch64 and RV64 native code drops moves that move nothing (call ABI S7): the word machine's
+  result register is x9 (t0) and its first argument x0 (a0), and moves go through the scratch x10
+  (t1), so calls and returns were full of `mov x0,x9` after `mov x9,x10; mov x10,x0`. A value number
+  per register drops a move between two registers known equal; 1.5 % fewer lines in a small
+  program's output on both targets.
+
+- **Cheaper prologues on the native backend (call ABI S4-S5).** The callee-saved save area is
+  part of the one frame adjustment (`subq $.Fn+16,%rsp`, where there were two), a promoted register
+  or a cleared frame slot is zeroed only when the body may read it before writing it, and a first
+  statement that returns without a call (`if n < 2 { return n; }`) is tested on the argument
+  registers before the prologue, which moves behind it (shrink-wrapping). fib(32) on a dev build:
+  155.1 M -> 112.8 M instructions (Go: 102.9 M); its base case is now four instructions.
+- Fixed (LLVM backend): a function that called a C function with a float argument or read a float
+  result kept that value in a vector register the lifted call never passed or returned, so
+  `cbstk-callback-stack-arguments` printed NaN (0 on older builds). Such a body now stays native.
+
+- **A call with more than six arguments no longer allocates (call ABI S3).** Words past the sixth
+  went in a heap record behind the sixth register, which the callee copied and freed: an
+  `rt_rec` and an `rt_free` per call. They now travel on the stack in the platform's layout (word
+  6 + k at 8k(%rsp) at the call, 16 + 8k(%rbp) in the callee) on x86-64, AArch64 and RV64, and the
+  LLVM backend lifts both sides. A 7-argument call loop (10 M calls): native 3,670 M -> 430 M
+  instructions, LLVM 1,990 M -> 17.5 M. The interface ABI line gains `args = 6 registers then
+  stack`, so an interface written for the old convention is refused.
+
+- **Release builds call like C (LLVM backend, call ABI S1-S2).** A lifted function used to take and
+  pass all six argument registers and return two words, and was almost never internal, so LLVM
+  kept unused words alive across every call: fib(32) ran 112.8 M instructions against clang's 67.1 M.
+  The front end now records each function's argument words; the lifter defines and calls it with
+  exactly those and one result word (two for a `&dyn` result), and functions native code does not
+  call are internal. fib(32) is 74.9 M, the shape clang emits. A wrong signature fact is refused, and
+  an error under `--verify-facts`. Calls through closures, vtables and function values are lifted on
+  x86-64 too, so the functions that make them are optimised instead of shipping as unoptimised
+  text (`&Fn` call loop: 430 M -> 120 M instructions).
+
+- `tools/land.sh BRANCH` (`just land`) lands a branch on main through one queue: the branch must already contain main, the fast gate runs on exactly its tree, and green fast-forwards main. Emulated targets run after the landing on the build host.
 - Fixed: the internal assembler refused `.hidden` (the runtime's `rt_sites_fill`), so every LLVM
   release build failed at `grail asm`. It now takes `.hidden`, `.protected`, `.internal` and
   `.comm`, and `.word` is 32 bits on AArch64. `tests/asm/` holds every ELF directive the
