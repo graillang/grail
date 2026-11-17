@@ -281,11 +281,28 @@ fn mark_generics<a, b>(f: (&a mut F), s: &b [u8]) {
         if punct(&f, i, 60) && 0 < i {
             if f.kind[i - 1] == 1 {
                 mut depth = 0;
+                // Parentheses and brackets inside type arguments are balanced (`Fn<(u64, u64)>`), so a
+                // '>' met while one is open is a comparison or a shift: `i < (n >> 1)` is not generic.
+                mut nest = 0;
                 mut j = i;
                 mut found = 0;
                 while j < n {
                     k := f.kind[j];
                     c := f.code[j];
+                    if k == 4 {
+                        if c == 40 || c == 91 {
+                            nest += 1;
+                        }
+                        if c == 41 || c == 93 {
+                            if nest == 0 {
+                                break;
+                            }
+                            nest -= 1;
+                        }
+                        if (c == 62) && (nest != 0) {
+                            break;
+                        }
+                    }
                     mut ok = k == 1 || k == 2;
                     if k == 4 {
                         ok = c == 60

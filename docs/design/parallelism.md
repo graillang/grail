@@ -246,7 +246,7 @@ destroyed. Reused rather than reinvented:
 
 - `rt_thread_spawn_detached` - the same persistent-thread primitive the green scheduler and the
   blocking offload path use; workers are plain OS threads with 1 MiB stacks and a guard page.
-- `rt_mutex_lock`/`rt_mutex_unlock` (futex), `rt_spin_lock`, `rt_atomic_*`, `rt_alloc`/`rt_free`,
+- `rt_mutex_lock`/`rt_mutex_unlock` (futex), `rt_spin_lock`, the `raw_atomic_*` intrinsics, `rt_alloc`/`rt_free`,
   `raw_map` for infrastructure that must not count as user allocation, `rt_cpus`, `rt_abort`.
 - `rt_offload` is untouched and remains the blocking path: a blocking foreign call never runs on a
   pool worker, so it cannot exhaust the CPU pool.

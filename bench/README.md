@@ -6,6 +6,11 @@
   small vectors and records; prints the rate per worker count. Build and run it directly.
 - `alloc_handoff.grl`: allocator hand-off - pool workers allocate, the main thread frees. Build and
   run it directly. Both are explained, with numbers, in `docs/design/allocator.md`.
+- `atomics.grl`: one uncontended load, store, fetch_add, swap and compare_exchange on an
+  `Atomic<u64>`, a Mutex round trip, 24 jobs on one fetch_add and an SPSC ring of release stores and
+  acquire loads (`atomics all`); `atomics OP:N` runs one op N times, for callgrind at two N. The
+  numbers before and after the inline `atom.*` ops are in `docs/design/concurrency-stages-5-7.md`,
+  "Stage 7: as built".
 - `ffi_call.grl` / `ffi_call.c`: the cost of a foreign call - 10M calls of libc's `labs`, best of
   five rounds, and the same loop without the call, so `ffi_call_only` is the call alone. The C twin
   is built with `-fno-builtin`, so its `labs` is a real call through the PLT as Grail's is. The bar:
@@ -26,6 +31,14 @@ pairs the runs on a busy machine. See the header of `tools/bench.mjs`.
 | `matmul` | an `f32` inner product with a loop-carried sum |
 | `xform_f32`, `xform_f64` | `x[i] = x[i] * a + y[i]` over one million elements: the simple loop C vectorises, so the ratio is the distance to vectorised C |
 | `dot_f32`, `dot_f64` | a strict-IEEE dot product over one million elements: a serial sum C does not vectorise, so the ratio is the distance to scalar C |
+
+`bench/rivals/` holds a Rust, a Go and a Zig twin of each program (and of `ffi_call`, which is on
+`gaps12-sched`), plus the scheduler twins (`sched-rayon/`, `sched_tbb.cpp`).
+`bun tools/bench-rivals.mjs` times all of them against Grail's two builds, and
+`bun tools/sched-rivals.mjs` the scheduler against rayon and oneTBB; the tables are in
+`docs/design/runtime-parity.md`, "Against other languages". `bench/results/` holds their latest
+results as JSON (`--json`), which the book's Performance chapter draws; `just bench-results`
+refreshes them.
 
 `xform` and `dot` are the loops of `docs/design/simd-layout-parallel-loops.md` (section 1.3), which
 records what stands between each backend and C on them.
