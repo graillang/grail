@@ -445,5 +445,15 @@ const fast = ['--interval', '40', '--debounce', '60'];
   const first = (r) => (r.stdout + r.stderr).split('\n').find((l) => l.startsWith('error:')) ?? '';
   assert.match(first(per), /`@no_alloc` function `loud` performs a heap allocation: it calls loud -> push_one -> grow -> rt_push/, first(per)); checks++;
   assert.equal(first(per), first(whole), 'the per-module refusal names the chain the whole-program one does'); checks++;
+  // A `dyn` value of an interface another module declares public: its implementations are not this
+  // run's to see, so a claim over its drop is refused with that reason, per module and whole-program.
+  writeFileSync(join(dir, 'speak.grl'), 'module speak;\npub interface Speak {\n    fn speak(self: &Self) -> u64;\n}\npub struct Quiet { tag: u64 }\nimpl Speak for Quiet {\n    fn speak(self: &Quiet) -> u64 {\n        return self.tag;\n    }\n}\npub fn quiet(t: u64) -> dyn Speak {\n    return Quiet { tag: t };\n}\n');
+  writeFileSync(join(dir, 'sink.grl'), 'use speak;\n@no_alloc\nfn sink(s: dyn speak::Speak) -> u64 {\n    return 0;\n}\nfn main() {\n    println(sink(speak::quiet(3)));\n}\n');
+  for (const extra of [[], ['--whole-program']]) {
+    const dyn = build('sink.grl', extra);
+    assert.equal(dyn.status, 1, `a dyn drop of a public interface refuses the claim (${extra.join(' ') || 'per module'})`);
+    assert.match(first(dyn), /`@no_alloc` function `sink` performs a heap allocation/, first(dyn));
+    assert.match(dyn.stdout + dyn.stderr, /the drop of a `dyn Speak` value, whose implementations this module cannot see: `Speak` is public/, dyn.stdout + dyn.stderr); checks++;
+  }
 }
 console.log(`cli: ${checks} formatter/tool checks passed`);

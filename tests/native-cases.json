@@ -8333,6 +8333,27 @@
     "note": "dropping a `dyn` value runs the vtable's drop slot; the compiler built that vtable from recorded entries, so the slot is resolved to the concrete drop helper and the user `Drop` that allocates is found - the old text scan stopped at `call *%rax`"
   },
   {
+    "name": "fx-effects-drop-glue-dyn-public-refused",
+    "note": "A `dyn` value of a public interface may hold an implementation from a module this run cannot see, so its drop is an unknown edge in every build shape: the same program with a private `Speak` is accepted (fx-effects-drop-glue-accepted).",
+    "source": "pub interface Speak {\n    fn speak(self: &Self) -> u64;\n}\nstruct Marker { tag: u64 }\nstruct Star { tag: u64 }\nimpl Speak for Marker {\n    fn speak(self: &Marker) -> u64 {\n        return self.tag;\n    }\n}\nimpl Speak for Star {\n    fn speak(self: &Star) -> u64 {\n        return self.tag;\n    }\n}\nimpl Drop for Marker {\n    fn drop(self: &mut Marker) {\n        self.tag = 7;\n    }\n}\nimpl Drop for Star {\n    fn drop(self: &mut Star) {\n        self.tag = 8;\n    }\n}\n@no_alloc\nfn sink(s: dyn Speak) -> u64 {\n    return 0;\n}\n@no_alloc\nfn sink_all(v: (dyn Speak)[]) -> u64 {\n    return 0;\n}\nfn main() -> u64 {\n    s: dyn Speak = Marker { tag: 2 };\n    println(\"{}\", sink(s));\n    mut all = (dyn Speak)[];\n    all.push(Marker { tag: 3 });\n    all.push(Star { tag: 4 });\n    println(\"{}\", sink_all(all));\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "the drop of a `dyn Speak` value, whose implementations this module cannot see: `Speak` is public"
+  },
+  {
+    "name": "fx-effects-stdlib-claims",
+    "note": "The standard library's claimed functions (`u64[].sum`, `hash::write_num`, `hash::finish`, `strings::utf8_width`) are callable from `@no_alloc` code.",
+    "source": "use vecs;\nuse hash;\nuse strings;\n@no_alloc\nfn total(v: &u64[]) -> u64 {\n    return v.sum();\n}\n@no_alloc\nfn digest(h: hash::Hasher, x: u64) -> u64 {\n    mut s = h;\n    hash::write_num(&mut s, x);\n    return hash::finish(s);\n}\n@no_alloc\nfn width(b: u8) -> u64 {\n    return strings::utf8_width(b);\n}\nfn main() {\n    v := u64[1, 2, 3];\n    println(total(&v));\n    println(digest(hash::hasher(1, 2), 7) != 0);\n    println(width(226));\n}\n",
+    "modules": [
+      "lib/vecs.grl",
+      "lib/hash.grl",
+      "lib/strings.grl",
+      "lib/iter.grl",
+      "lib/order.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "6\ntrue\n3\n"
+  },
+  {
     "name": "fx-effects-drop-glue-accepted",
     "source": "interface Speak {\n    fn speak(self: &Self) -> u64;\n}\nstruct Marker { tag: u64 }\nstruct Star { tag: u64 }\nimpl Speak for Marker {\n    fn speak(self: &Marker) -> u64 {\n        return self.tag;\n    }\n}\nimpl Speak for Star {\n    fn speak(self: &Star) -> u64 {\n        return self.tag;\n    }\n}\nimpl Drop for Marker {\n    fn drop(self: &mut Marker) {\n        self.tag = 7;\n    }\n}\nimpl Drop for Star {\n    fn drop(self: &mut Star) {\n        self.tag = 8;\n    }\n}\n@no_alloc\nfn sink(s: dyn Speak) -> u64 {\n    return 0;\n}\n@no_alloc\nfn sink_all(v: (dyn Speak)[]) -> u64 {\n    return 0;\n}\nfn main() -> u64 {\n    s: dyn Speak = Marker { tag: 2 };\n    println(\"{}\", sink(s));\n    mut all = (dyn Speak)[];\n    all.push(Marker { tag: 3 });\n    all.push(Star { tag: 4 });\n    println(\"{}\", sink_all(all));\n    return 0;\n}\n",
     "stdout": "0\n0\n",
