@@ -4854,7 +4854,8 @@ fn signatures<a, b>(facts: (&a Facts), taken: (&b Set)) -> Set {
     for i in facts.items.len() {
         f := &facts.items[i];
         if (f.kind == FACT_IMPORTED_SIGNATURE) && !set_has(&own, view(f.fn)) && (f.a != 0) {
-            set_put(&mut out, view(f.fn), f.a);
+            // The low 32 bits are the sig_code; above them the defining run's reference mask.
+            set_put(&mut out, view(f.fn), f.a & 4294967295);
         }
     }
     return out;
@@ -4863,7 +4864,7 @@ fn signatures<a, b>(facts: (&a Facts), taken: (&b Set)) -> Set {
 fn ref_signatures<a, b>(facts: (&a Facts), sigs: (&b Set)) -> Set {
     mut n = 0;
     for i in facts.items.len() {
-        if facts.items[i].kind == FACT_SIGNATURE {
+        if (facts.items[i].kind == FACT_SIGNATURE) || (facts.items[i].kind == FACT_IMPORTED_SIGNATURE) {
             n += 1;
         }
     }
@@ -4872,6 +4873,11 @@ fn ref_signatures<a, b>(facts: (&a Facts), sigs: (&b Set)) -> Set {
         f := &facts.items[i];
         if (f.kind == FACT_SIGNATURE) && (f.b != 0) && (set_get(&sigs, view(f.fn)) != 0) {
             set_put(&mut out, view(f.fn), f.b + 1);
+        }
+        // Another module's body: its reference mask came with its signature (sig_codes' high bits),
+        // so this run declares and calls it with the same `ptr` parameters it was defined with.
+        if (f.kind == FACT_IMPORTED_SIGNATURE) && ((f.a >> 32) != 0) && (set_get(&out, view(f.fn)) == 0) {
+            set_put(&mut out, view(f.fn), (f.a >> 32) + 1);
         }
     }
     return out;
@@ -9944,7 +9950,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
             code := set_get(&l.sigs, view(f.fn));
             if code != 0 {
                 sig_names.push(copy(view(f.fn)));
-                sig_codes.push(code);
+                sig_codes.push(code + (ref_mask(&l, view(f.fn)) << 32));
             }
         }
     }
