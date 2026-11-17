@@ -589,6 +589,13 @@ struct C {
     res_synced: u64,
     bond_head: u64[],
     bond_next: u64[],
+    // The same bonds by holder (`bond_hhead[place]`, `bond_hnext[bond]`), and `bond_under[place]`
+    // nonzero when some bond's holder is that place or lies inside it; `bond_unranged` when a holder
+    // was not a place yet, which sends every question back to the whole list (bonds_sync).
+    bond_hhead: u64[],
+    bond_hnext: u64[],
+    bond_under: u64[],
+    bond_unranged: u64,
     spec_em_slots: u64[],
     spec_em_keys: u64[],
     drop_em_slots: u64[],
@@ -4399,11 +4406,17 @@ fn bond_kind<a>(c: (&a mut C), holder: u64, loan: u64, guard: u64) -> unit {
     if (holder == 0) || (loan == 0) {
         return ();
     }
-    for i in c.bonds.len() {
-        mut b = &c.bonds[i];
-        if (b.holder == holder) & (b.loan == loan) & (b.guard == guard) {
+    // Only the holder's own bonds can be the same bond (bonds_sync).
+    bonds_sync(&mut c);
+    mut j = 0;
+    if holder < c.bond_hhead.len() {
+        j = c.bond_hhead[holder];
+    }
+    while j != 0 {
+        if (c.bonds[j - 1].loan == loan) & (c.bonds[j - 1].guard == guard) {
             return ();
         }
+        j = c.bond_hnext[j - 1];
     }
     c.bonds.push(Bond { holder: holder, loan: loan, guard: guard });
     return ();
@@ -4418,6 +4431,10 @@ fn loan_live<a>(c: (&a mut C), loan: u64) -> u64 {
 }
 fn transfer_bonds<a>(c: (&a mut C), src: u64, dst: u64) -> unit {
     if (src == 0) || (dst == 0) {
+        return ();
+    }
+    // A source no bond is held under has nothing to pass on (bond_under).
+    if !bond_under(&mut c, src) {
         return ();
     }
     n := c.bonds.len();
@@ -4436,6 +4453,10 @@ fn transfer_bonds<a>(c: (&a mut C), src: u64, dst: u64) -> unit {
 }
 fn return_bonds<a>(c: (&a mut C), src: u64, dst: u64, aggregate: u64) -> unit {
     if (src == 0) || (dst == 0) {
+        return ();
+    }
+    // A source no bond is held under has nothing to pass on (bond_under).
+    if !bond_under(&mut c, src) {
         return ();
     }
     n := c.bonds.len();
@@ -4477,13 +4498,56 @@ fn bonds_sync<a>(c: (&a mut C)) -> unit {
         }
         c.bond_next.push(c.bond_head[loan]);
         c.bond_head[loan] = at + 1;
+        holder := c.bonds[at].holder;
+        while c.bond_hhead.len() <= holder {
+            c.bond_hhead.push(0);
+        }
+        c.bond_hnext.push(c.bond_hhead[holder]);
+        c.bond_hhead[holder] = at + 1;
+        // A place's parent never changes, so the marks only accumulate; a marked place's parents are
+        // marked already.
+        if c.check.places.len() < holder {
+            exchange(&mut c.bond_unranged, 1);
+        }
+        mut p = holder;
+        while (p != 0) & (p <= c.check.places.len()) {
+            while c.bond_under.len() <= p {
+                c.bond_under.push(0);
+            }
+            if c.bond_under[p] != 0 {
+                break;
+            }
+            c.bond_under[p] = 1;
+            p = c.check.places[p - 1].parent;
+        }
     }
     return ();
 }
 fn bonds_swapped<a>(c: (&a mut C)) -> unit {
     exchange(&mut c.bond_head, u64[]);
     exchange(&mut c.bond_next, u64[]);
+    exchange(&mut c.bond_hhead, u64[]);
+    exchange(&mut c.bond_hnext, u64[]);
+    exchange(&mut c.bond_under, u64[]);
+    exchange(&mut c.bond_unranged, 0);
     return ();
+}
+// Whether some bond's holder is `place` or lies inside it: `ownership::ancestor(place, holder)` asked
+// of every bond, answered from the marks bonds_sync leaves up each holder's parents.
+fn bond_under<a>(c: (&a mut C), place: u64) -> bool {
+    bonds_sync(&mut c);
+    if c.bond_unranged != 0 {
+        for i in c.bonds.len() {
+            if ownership::ancestor(&c.check, place, c.bonds[i].holder) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (place == 0) || (c.check.places.len() < place) || (c.bond_under.len() <= place) {
+        return false;
+    }
+    return c.bond_under[place] != 0;
 }
 // The record list was replaced by another one: what `resource` remembers is about the old list.
 fn resources_swapped<a>(c: (&a mut C)) -> unit {
@@ -5129,15 +5193,36 @@ fn last_name<a, b>(c: (&a mut C), name: &b [u8], from: u64, to: u64) -> u64 {
                     }
                 }
                 if declaration != 0 {
-                    declared := tok_text(&mut c, i + 1);
-                    if same(view(declared), view(name)) {
+                    // Past the last token is the empty text, as `tok_text` has it.
+                    mut declared = name.len() == 0;
+                    if i + 1 < c.toks.len() {
+                        ds := c.toks[i + 1].start;
+                        de := c.toks[i + 1].end;
+                        declared = de - ds == name.len();
+                        mut j = 0;
+                        while declared && (j < name.len()) {
+                            if c.src[ds + j] != name[j] {
+                                declared = false;
+                            }
+                            j = j + 1;
+                        }
+                    }
+                    if declared {
                         pending = depth + 1;
                         skip = i + 1;
                     }
                 }
             }
             if kind_at(&mut c, i + 1) == 261 {
-                if same(view(token), view(name)) {
+                mut named = en - st == name.len();
+                mut j = 0;
+                while named && (j < name.len()) {
+                    if c.src[st + j] != name[j] {
+                        named = false;
+                    }
+                    j = j + 1;
+                }
+                if named {
                     pending = depth + 1;
                     skip = i;
                 }
@@ -5226,13 +5311,8 @@ fn expire_locals<a>(c: (&a mut C)) -> unit {
         mut carrier = k == 5 || k == 7 || k == 27;
         root := place_of(&mut c, slot);
         if (k == 6) || (k == 8) || (k == 26) {
-            for j in c.bonds.len() {
-                mut b = &c.bonds[j];
-                holder := b.holder;
-                if ownership::ancestor(&c.check, root, holder) {
-                    carrier = true;
-                    break;
-                }
+            if bond_under(&mut c, root) {
+                carrier = true;
             }
         }
         if carrier {
@@ -5994,18 +6074,49 @@ fn observe<a>(c: (&a mut C), slot: u64) -> unit {
     k := ty_kind(&mut c, ty);
     if (k == 5) || (k == 7) || (k == 27) {
         mut checked = 0;
-        for i in c.bonds.len() {
-            mut b = &c.bonds[i];
-            h := b.holder;
-            loan := b.loan;
-            guard := b.guard;
-            if (guard == 0) & ownership::ancestor(&c.check, h, place) {
-                if loan_live(&mut c, loan) != 0 {
-                    checked = 1;
-                    if ownership::use_loan(&c.check, loan, 0) != 0 {
-                        fail(&mut c, view("reference is suspended or expired"));
+        // The bonds held by `place` or by a place it lies inside (bonds_sync): the holders are the
+        // place's own chain of parents. The order they are visited in is not the list's, which no
+        // answer depends on - each refusal is the same diagnostic at the same token.
+        bonds_sync(&mut c);
+        if c.bond_unranged != 0 {
+            for i in c.bonds.len() {
+                mut b = &c.bonds[i];
+                h := b.holder;
+                loan := b.loan;
+                guard := b.guard;
+                if (guard == 0) & ownership::ancestor(&c.check, h, place) {
+                    if loan_live(&mut c, loan) != 0 {
+                        checked = 1;
+                        if ownership::use_loan(&c.check, loan, 0) != 0 {
+                            fail(&mut c, view("reference is suspended or expired"));
+                        }
                     }
                 }
+            }
+        } else {
+            mut h = place;
+            if c.check.places.len() < place {
+                h = 0;
+            }
+            while h != 0 {
+                mut j = 0;
+                if h < c.bond_hhead.len() {
+                    j = c.bond_hhead[h];
+                }
+                while j != 0 {
+                    loan := c.bonds[j - 1].loan;
+                    guard := c.bonds[j - 1].guard;
+                    if guard == 0 {
+                        if loan_live(&mut c, loan) != 0 {
+                            checked = 1;
+                            if ownership::use_loan(&c.check, loan, 0) != 0 {
+                                fail(&mut c, view("reference is suspended or expired"));
+                            }
+                        }
+                    }
+                    j = c.bond_hnext[j - 1];
+                }
+                h = c.check.places[h - 1].parent;
             }
         }
         if checked == 0 {
@@ -49610,6 +49721,10 @@ pub fn main() -> u64 {
         res_synced: 0,
         bond_head: u64[],
         bond_next: u64[],
+        bond_hhead: u64[],
+        bond_hnext: u64[],
+        bond_under: u64[],
+        bond_unranged: 0,
         spec_em_slots: u64[],
         spec_em_keys: u64[],
         drop_em_slots: u64[],

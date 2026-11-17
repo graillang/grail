@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **`grail check` grows linearly with function length.** The borrow checker answered "is any
+  bond held under this place?", "which bonds does this reference rest on?" and "is this bond new?"
+  by scanning every bond the function had made, after every statement and every use, so one long
+  function cost the square of its length. The bonds are now indexed by holder, with a mark on each
+  place that holds one inside it. Checking the 104k-line syn4000 program takes 26% fewer
+  instructions, and the verdicts are the same: `tools/check-diff.mjs` compiles every corpus
+  source and example with two compilers and compares their output byte for byte (with `--build`,
+  the assembly too).
 - **`thread::scope`: threads that borrow.** `thread::scope(|t| { a := t.spawn(|| ..); ..; a.join() })`
   starts OS threads whose closures may borrow from the caller - shared or exclusive - because the
   scope waits for every one of them before it returns. The compiler refuses two threads taking one
