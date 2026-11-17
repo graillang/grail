@@ -1,5 +1,10 @@
 ## Unreleased
 
+- Fixed: the per-loop stability fact and the LLVM backend's indirect-call fact both used fact kind
+  7, so a stable vector whose slot number matched an indirect call's ordinal (with a loop head
+  label of 6 or less) could make the lifter pass that call too few arguments. The stability fact
+  is now kind 8.
+
 - The optimiser parses each distinct instruction line once per compile and replays the record for
   its repeats (a label operand is numbered again, the frame-slot bookkeeping redone): byte-identical
   output, 2.6% fewer instructions for a 4000-function file. The plan for taking the remaining text
