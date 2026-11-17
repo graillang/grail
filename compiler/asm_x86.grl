@@ -1,6 +1,7 @@
 module asm_x86;
 use elf;
 use coff;
+use macho;
 use host;
 use machine;
 use asm_a64;
@@ -43,6 +44,10 @@ pub struct A {
     target: u64,
     // 1 for a Windows (COFF) object: x86-64 code, COFF sections, symbols and relocations.
     coff: u64,
+    // 1 for a macOS (Mach-O) object: sections named SEGMENT,SECTION, `L` temporaries, a section
+    // start symbol (ltmpN) per section, `.build_version`'s minimum OS version.
+    macho: u64,
+    macho_minos: u64,
     // `.def NAME` ... `.endef`: the symbol being described (index + 1), and each symbol's COFF
     // storage class (0: from its binding) and type.
     def_sym: u64,
@@ -398,6 +403,10 @@ fn directives<a>(o: (&a mut A)) {
     def(&mut o, view(".comm"), D_COMM);
     def(&mut o, view(".4byte"), D_4BYTE);
     def(&mut o, view(".previous"), D_PREVIOUS);
+    def(&mut o, view(".build_version"), D_BUILD_VERSION);
+    def(&mut o, view(".weak_definition"), D_WEAK_DEFINITION);
+    def(&mut o, view(".space"), D_ZERO);
+    def(&mut o, view(".subsections_via_symbols"), D_SUBSECTIONS);
     def(&mut o, view(".def"), D_DEF);
     def(&mut o, view(".scl"), D_SCL);
     def(&mut o, view(".endef"), D_ENDEF);
@@ -440,6 +449,8 @@ pub fn new() -> A {
     mut o = A {
         target: 0,
         coff: 0,
+        macho: 0,
+        macho_minos: 0,
         def_sym: 0,
         seh_sym: u64[],
         seh_pos: u64[],
@@ -730,6 +741,10 @@ pub fn symbol<a>(o: (&a mut A), a0: u64, e: u64) -> u64 {
 
 fn temporary<a>(o: (&a A), id: u64) -> bool {
     n := o.sym_name[id].len();
+    if o.macho != 0 {
+        // Mach-O's assembler-local prefix is `L`; `.L` names are ordinary local symbols there.
+        return (n > 0) && (o.sym_name[id][0] == 'L');
+    }
     return (n > 1) && (o.sym_name[id][0] == '.') && (o.sym_name[id][1] == 'L');
 }
 
@@ -821,6 +836,11 @@ fn section<a, b>(o: (&a mut A), s: &b [u8], a0: u64, e: u64, ty: u64, flags: u64
     o.sym_seen.push(0);
     o.sym_slot.push(0);
     o.sec_sym.push(sid);
+    if o.macho != 0 {
+        mut lt = view("ltmp").copy();
+        num(&mut lt, k);
+        o.sym_name[sid] = lt;
+    }
     if k == 0 {
         o.cur = 0;
         return ();
@@ -1264,6 +1284,10 @@ fn align_to<a>(o: (&a mut A), n: u64) {
 
 // `.section NAME[,"FLAGS"[,@TYPE]]`, and `.pushsection` with the same operands.
 fn section_line<a>(o: (&a mut A)) {
+    if o.macho != 0 {
+        macho_section_line(&mut o);
+        return ();
+    }
     skip(&mut o);
     a0 := o.at;
     // A section name runs to the comma (`.note.GNU-stack` is one).
@@ -1469,6 +1493,27 @@ fn directive<a>(o: (&a mut A), id: u64) {
         cv_directive(&mut o, id);
     } else if (id >= D_SEH_PROC) && (id <= D_SEH_ENDPROC) {
         seh_directive(&mut o, id);
+    } else if id == D_BUILD_VERSION {
+        // `.build_version macos, MAJOR, MINOR[, PATCH]`
+        skip(&mut o);
+        o.at = name_end(&mut o);
+        expect(&mut o, ',');
+        major := number(&mut o);
+        expect(&mut o, ',');
+        minor := number(&mut o);
+        mut patch = 0;
+        skip(&mut o);
+        if peek(&o) == ',' {
+            o.at += 1;
+            patch = number(&mut o);
+        }
+        o.macho_minos = (major << 16) | (minor << 8) | patch;
+    } else if id == D_WEAK_DEFINITION {
+        sym := sym_operand(&mut o);
+        o.sym_class[sym] = 0x80;
+        note_attr(&mut o, sym);
+    } else if id == D_SUBSECTIONS {
+        fail(&mut o, view("`.subsections_via_symbols` is not supported"));
     } else if id == D_PREVIOUS {
         // `.previous`: back to the section before the last change (MCStreamer's previous
         // section; a `.pushsection` entry's own after a pop).
@@ -1883,6 +1928,8 @@ pub fn command<a>(args: (&a u8[][])) -> u64 {
             tgt = 2;
         } else if at_word(view(args[1]), 0, args[1].len(), view("windows-x86_64")) {
             tgt = 3;
+        } else if at_word(view(args[1]), 0, args[1].len(), view("macos-aarch64")) {
+            tgt = 4;
         }
         if tgt != 0 {
             if rest.len() != 3 {
@@ -2109,6 +2156,10 @@ fn run<a>(o: (&a mut A)) -> Result {
     mut r_sym = u64[];
     mut r_add = u64[];
     for i in o.fx_sec.len() {
+        if (o.target == 1) && (o.macho != 0) {
+            macho_fixup(&mut o, i, &mut r_sec, &mut r_off, &mut r_type, &mut r_sym, &mut r_add);
+            continue;
+        }
         if o.target == 1 {
             a64_fixup(&mut o, &pre, i, &mut r_sec, &mut r_off, &mut r_type, &mut r_sym, &mut r_add);
             continue;
@@ -2530,6 +2581,9 @@ fn object<a, b, c>(o: (&a mut A), pre: (&b u64[]), r_sec: (&c u64[]), r_off: (&c
     if o.coff != 0 {
         return coff_object(&mut o, pre, r_sec, r_off, r_type, r_sym);
     }
+    if o.macho != 0 {
+        return macho_object(&mut o, r_sec, r_off, r_type, r_sym, r_add);
+    }
     mut machine = 62;
     if o.target == 1 {
         machine = 183;
@@ -2672,6 +2726,9 @@ const D_CV_FILECHECKSUMS: u64 = 45;
 const D_CV_STRINGTABLE: u64 = 46;
 const D_SECREL32: u64 = 47;
 const D_SECIDX: u64 = 48;
+const D_BUILD_VERSION: u64 = 49;
+const D_WEAK_DEFINITION: u64 = 50;
+const D_SUBSECTIONS: u64 = 51;
 const I_MOVQ: u64 = 100;
 const I_MOVL: u64 = 101;
 const I_MOVB: u64 = 102;
@@ -4335,6 +4392,9 @@ pub fn all_digits<a>(o: (&a A), a0: u64, e: u64) -> bool {
 // The hidden symbol of numeric label `N`'s n-th definition (`.Ltmp.N.n`).
 fn numeric_symbol<a>(o: (&a mut A), digits: &a [u8], n: u64) -> u64 {
     mut name = view(".Lnum.").copy();
+    if o.macho != 0 {
+        name = view("Lnum.").copy();
+    }
     name.append(digits);
     name.push('.');
     num(&mut name, n);
@@ -4381,7 +4441,8 @@ fn numeric_def<a>(o: (&a mut A), a0: u64, e: u64) -> u64 {
 
 // A mapping symbol ($x before code, $d before data) when the current section changes what it holds.
 pub fn map_to<a>(o: (&a mut A), kind: u64) {
-    if o.target == 0 {
+    // (Mach-O has no mapping symbols.)
+    if (o.target == 0) || (o.macho != 0) {
         return ();
     }
     if o.target == 2 {
@@ -4448,6 +4509,15 @@ pub fn new_target(target: u64) -> A {
 }
 
 pub fn assemble_for(target: u64, text: u8[]) -> Result {
+    // 4: macOS arm64 - the AArch64 encoder with a Mach-O object.
+    if target == 4 {
+        mut m = new_target(1);
+        m.macho = 1;
+        m.sec_name[0] = view("__TEXT,__text").copy();
+        m.sym_name[m.sec_sym[0]] = view("ltmp0").copy();
+        m.src = text;
+        return run(&mut m);
+    }
     // 3: Windows x86-64 - the x86 encoder with a COFF object.
     if target == 3 {
         mut w = new();
@@ -5350,4 +5420,295 @@ fn fixup_coff<a>(o: (&a mut A), sym: u64, kind: u64, width: u64) {
     o.fx_add.push(0);
     o.sym_ref[sym] = 1;
     emit_le(&mut o, 0, width);
+}
+
+// ---- macOS (Mach-O) -----------------------------------------------------------------------------
+
+// `.section SEG,SECT[,...]` / `.pushsection SEG,SECT`: the section named `SEG,SECT`.
+fn macho_section_line<a>(o: (&a mut A)) {
+    skip(&mut o);
+    a0 := o.at;
+    o.at = name_end(&mut o);
+    expect(&mut o, ',');
+    skip(&mut o);
+    e := name_end(&mut o);
+    o.at = e;
+    // Section attributes after a second comma are taken from the name instead.
+    while o.at < o.le {
+        o.at += 1;
+    }
+    name := o.src[a0: e].copy();
+    mut ty = 1;
+    mut flags = 2;
+    if at_word(view(name), 0, name.len(), view("__DATA,__bss")) || at_word(view(name), 0, name.len(), view("__DATA,__common")) {
+        ty = 8;
+        flags = 3;
+    } else if at_word(view(name), 0, 6, view("__DATA")) {
+        flags = 3;
+    } else if at_word(view(name), 0, name.len(), view("__TEXT,__text")) {
+        flags = 6;
+    }
+    section(&mut o, view(name), 0, name.len(), ty, flags, 1);
+}
+
+fn macho_type(kind: u64) -> u64 {
+    if (kind == asm_a64::fx_call26()) || (kind == asm_a64::fx_jump26()) {
+        return 2;
+    }
+    if kind == asm_a64::fx_adrp() {
+        return 3;
+    }
+    if kind == asm_a64::fx_lo12() {
+        return 4;
+    }
+    return 0;
+}
+
+// An AArch64 Mach-O fixup: in place for a branch to a local label of the same section; else a
+// relocation against the symbol, or against its section's start symbol (ltmpN) for an `L`
+// temporary. r_type carries the Mach-O type, r_add the addend (in the field for UNSIGNED, an
+// ARM64_RELOC_ADDEND entry for PAGE21/PAGEOFF12).
+fn macho_fixup<a, c>(o: (&a mut A), i: u64, r_sec: (&c mut u64[]), r_off: (&c mut u64[]), r_type: (&c mut u64[]), r_sym: (&c mut u64[]), r_add: (&c mut u64[])) {
+    sec := o.fx_sec[i];
+    at := o.fx_pos[i];
+    sym := o.fx_sym[i];
+    kind := o.fx_kind[i];
+    add := o.fx_add[i];
+    if kind == FX_DIFF {
+        other := o.fx_sym2[i];
+        v := wrapping_add(wrapping_sub(o.sym_pos[sym], o.sym_pos[other]), add);
+        put_le(&mut o.sec_data[sec], at, v, o.fx_width[i]);
+        return ();
+    }
+    if o.sym_sec[sym] == ABS {
+        put_le(&mut o.sec_data[sec], at, wrapping_add(o.sym_pos[sym], add), o.fx_width[i]);
+        return ();
+    }
+    defined := o.sym_sec[sym] != 0;
+    local := (o.sym_bind[sym] == 0) && (o.sym_class[sym] != 0x80);
+    branch := (kind == asm_a64::fx_call26()) || (kind == asm_a64::fx_jump26()) || (kind == asm_a64::fx_cond19()) || (kind == asm_a64::fx_adr21());
+    if branch && defined && local && (o.sym_sec[sym] == sec + 1) {
+        delta := wrapping_sub(wrapping_add(o.sym_pos[sym], add), at);
+        if a64_local(&mut o, sec, at, kind, delta) {
+            return ();
+        }
+    }
+    mut target = sym;
+    mut addend = add;
+    if defined && temporary(&o, sym) {
+        target = o.sec_sym[o.sym_sec[sym] - 1];
+        addend = wrapping_add(add, o.sym_pos[sym]);
+    }
+    o.sym_ref[target] = 1;
+    r_sec.push(sec);
+    r_off.push(at);
+    r_sym.push(target);
+    if (kind == FX_ABS64) || (kind == FX_ABS32) {
+        mut width = 4;
+        if kind == FX_ABS64 {
+            width = 8;
+        }
+        put_le(&mut o.sec_data[sec], at, addend, width);
+        r_type.push(width);
+        r_add.push(0);
+        return ();
+    }
+    t := macho_type(kind);
+    if t == 0 {
+        fail(&mut o, view("a relocation Mach-O does not have"));
+    }
+    r_type.push(t << 8);
+    r_add.push(addend);
+}
+
+fn name_less<a, b>(x: &a [u8], y: &b [u8]) -> bool {
+    mut i = 0;
+    while (i < x.len()) && (i < y.len()) {
+        if x[i] != y[i] {
+            return x[i] < y[i];
+        }
+        i += 1;
+    }
+    return x.len() < y.len();
+}
+
+fn sort_by_name<a>(o: (&a A), ids: (&mut u64[])) {
+    // Insertion sort; the external and undefined lists are short.
+    mut i = 1;
+    while i < ids.len() {
+        v := ids[i];
+        mut j = i;
+        while (j > 0) && name_less(view(o.sym_name[v]), view(o.sym_name[ids[j - 1]])) {
+            ids[j] = ids[j - 1];
+            j -= 1;
+        }
+        ids[j] = v;
+        i += 1;
+    }
+}
+
+fn macho_object<a, c>(o: (&a mut A), r_sec: (&c u64[]), r_off: (&c u64[]), r_type: (&c u64[]), r_sym: (&c u64[]), r_add: (&c u64[])) -> u8[] {
+    mut out = macho::new(0x100000c);
+    out.minos = o.macho_minos;
+    // Header order: sections in creation order, zerofill ones last; addresses one after another.
+    mut order = u64[];
+    for k in o.sec_name.len() {
+        if o.sec_type[k] != 8 {
+            order.push(k);
+        }
+    }
+    for k in o.sec_name.len() {
+        if o.sec_type[k] == 8 {
+            order.push(k);
+        }
+    }
+    mut hdr = u64[];
+    mut addr = u64[];
+    for k in o.sec_name.len() {
+        hdr.push(0);
+        addr.push(0);
+    }
+    mut at = 0;
+    for h in order.len() {
+        k := order[h];
+        hdr[k] = h;
+        a := o.sec_align[k];
+        while at % a != 0 {
+            at += 1;
+        }
+        addr[k] = at;
+        mut size = o.sec_data[k].len();
+        if o.sec_type[k] == 8 {
+            size = o.sec_size[k];
+        }
+        at += size;
+        name := view(o.sec_name[k]);
+        mut comma = 0;
+        while name[comma] != ',' {
+            comma += 1;
+        }
+        out.seg.push(name[0: comma].copy());
+        out.sect.push(name[comma + 1: name.len()].copy());
+        mut flags = 0;
+        if o.sec_type[k] == 8 {
+            flags = 1;
+        } else if (o.sec_flags[k] & 4) != 0 {
+            flags = 0x80000400;
+        }
+        out.flags.push(flags);
+        mut log = 0;
+        while (1 << log) < a {
+            log += 1;
+        }
+        out.align.push(log);
+        out.addr.push(addr[k]);
+        out.size.push(size);
+        if o.sec_type[k] == 8 {
+            out.zerofill.push(1);
+            out.data.push(u8[]);
+        } else {
+            out.zerofill.push(0);
+            out.data.push(exchange(&mut o.sec_data[k], u8[]));
+        }
+    }
+    // Symbols: locals in creation order, then external definitions and undefined, each by name.
+    mut locals = u64[];
+    mut exts = u64[];
+    mut undefs = u64[];
+    for id in o.sym_name.len() {
+        if temporary(&o, id) || (o.sym_name[id].len() == 0) {
+            continue;
+        }
+        sec := o.sym_sec[id];
+        if sec == 0 {
+            if (o.sym_ref[id] != 0) || (o.sym_bind[id] != 0) {
+                undefs.push(id);
+            }
+            continue;
+        }
+        if o.sym_bind[id] != 0 {
+            exts.push(id);
+        } else {
+            locals.push(id);
+        }
+    }
+    sort_by_name(&o, &mut exts);
+    sort_by_name(&o, &mut undefs);
+    mut index = u64[];
+    for id in o.sym_name.len() {
+        index.push(0);
+    }
+    lists := u64[0, 1, 2];
+    for l in lists.len() {
+        mut ids = u64[];
+        if l == 0 {
+            ids = locals.copy();
+        } else if l == 1 {
+            ids = exts.copy();
+        } else {
+            ids = undefs.copy();
+        }
+        for j in ids.len() {
+            id := ids[j];
+            index[id] = out.sym_name.len();
+            out.sym_name.push(o.sym_name[id].copy());
+            sec := o.sym_sec[id];
+            mut ty = 0;
+            mut sect = 0;
+            mut value = 0;
+            mut desc = 0;
+            if sec == ABS {
+                ty = 2;
+                value = o.sym_pos[id];
+                desc = 0x20;
+            } else if sec != 0 {
+                ty = 0xe;
+                sect = hdr[sec - 1] + 1;
+                value = addr[sec - 1] + o.sym_pos[id];
+            }
+            if l != 0 {
+                ty = ty | 1;
+            }
+            if o.sym_class[id] == 0x80 {
+                desc = desc | 0x80;
+            }
+            out.sym_type.push(ty);
+            out.sym_sect.push(sect);
+            out.sym_desc.push(desc);
+            out.sym_value.push(value);
+        }
+    }
+    out.nlocal = locals.len();
+    out.nextdef = exts.len();
+    out.nundef = undefs.len();
+    // Relocations: within each section, last fixup first, as LLVM writes them.
+    mut i = r_sec.len();
+    while i > 0 {
+        i -= 1;
+        out.r_sec.push(hdr[r_sec[i]]);
+        out.r_off.push(r_off[i]);
+        out.r_sym.push(index[r_sym[i]]);
+        t := r_type[i];
+        if (t == 4) || (t == 8) {
+            out.r_type.push(0);
+            out.r_pcrel.push(0);
+            if t == 8 {
+                out.r_len.push(3);
+            } else {
+                out.r_len.push(2);
+            }
+            out.r_addend.push(0);
+        } else {
+            mt := t >> 8;
+            out.r_type.push(mt);
+            if (mt == 2) || (mt == 3) {
+                out.r_pcrel.push(1);
+            } else {
+                out.r_pcrel.push(0);
+            }
+            out.r_len.push(2);
+            out.r_addend.push(r_add[i]);
+        }
+    }
+    return macho::write(&out);
 }
