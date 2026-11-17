@@ -104,6 +104,10 @@
   comparison of two constants) is decided at compile time; an accumulator worked on in %rax
   (`movq %r12,%rax; xorq ...,%rax; imulq ...,%rax; movq %rax,%r12`) is worked on in its own
   register. fnv executes 15% fewer instructions, sieve 3%.
+- **Native backend: callee-saved registers are shared by variables whose lives do not overlap.** The
+  optimiser kept one register per promoted local for the whole function, so the variables of a
+  function's first loop held the registers its later loops needed. Locals are now coloured by
+  interference, as float locals already were. fnv executes 4% fewer instructions, nbody 3%.
 
 - **Native backend: a slice's `data` and `len` live in registers.** The type facts are recorded on
   the native path too, and the optimiser reads F1's slice-descriptor fact: a slice written once at
