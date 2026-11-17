@@ -5003,6 +5003,19 @@ fn borrow_parameter<a>(c: (&a mut C), slot: u64, ty: u64) -> Val {
     return val(slot, ty);
 }
 fn own<a>(c: (&a mut C), slot: u64, ty: u64) -> Val {
+    // S6(A) backstop: a slot that holds a framed closure (its frame words' address) re-owned as an
+    // erased closure (a boxed object's word) without going through move_as would hand a frame
+    // address to whatever drops or keeps the erased value. Every such conversion boxes, so this is
+    // a compiler bug, caught here at compile time rather than as a use after free.
+    if (c.raw == 0) && (ty_kind(&mut c, base_type(&mut c, ty)) == 20) && (closure_record(&mut c, ty) == ty) {
+        held := resource(&mut c, slot);
+        if held != 0 {
+            was := c.resources[held - 1].ty;
+            if (closure_record(&mut c, was) != was) && framed(&mut c, was) {
+                fail(&mut c, view("internal: a closure held in the frame was retyped as a boxed closure without being boxed (S6(A) erase missed)"));
+            }
+        }
+    }
     materialise(&mut c, slot, ty);
     if c.raw == 0 {
         drops := needs_drop(&mut c, ty);
@@ -39029,14 +39042,7 @@ fn closure_erase<a>(c: (&a mut C), v: Val, expected: u64) -> Val {
     if (same_type(&mut c, v.ty, expected) == 0) && (closure_converts(&mut c, v.ty, expected) == 0) {
         return val(0, NO_TYPE);
     }
-    source := place_of(&mut c, v.t);
-    boxed := frame_box(&mut c, v.t, v.ty);
-    move_out(&mut c, val(v.t, v.ty));
-    own(&mut c, boxed, expected);
-    if source != 0 {
-        transfer_bonds(&mut c, source, place_of(&mut c, boxed));
-    }
-    return val(boxed, expected);
+    return move_as(&mut c, v, expected);
 }
 fn adopt_value<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) -> Val {
     if (c.raw == 0) & (expected != 0) & (expected != NO_TYPE) {

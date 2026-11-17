@@ -201,3 +201,16 @@ through `closure_erase`: `widen_to_fnmut_formal` and generic argument inference 
 `Iter.map`), record field initialisers and field stores, `move_as`, capture of a closure into another
 closure, parallel/thread payloads (`parallel_map`, `thread::spawn`, scopes), `Mutex`/`dyn` cells.
 Then the tail drop and `rt_vec_take` for `VecIter`.
+
+### 6.1 S6(A): one funnel, one backstop
+
+Every conversion of a framed closure (its environment's frame words) to an erased closure type goes
+through `move_as`, which boxes it (`frame_box`) and moves its loans: `adopt_value` (via
+`closure_erase`, which checks the bounds first), `widen_to_fnmut_formal`, and `closure_object` (job and
+thread payloads). The backstop is in `own`: a slot holding a framed closure that is re-owned under an
+erased closure type without having been boxed is an internal compiler error, so a missed path fails
+at compile time instead of freeing or keeping a frame address. Checked by reintroducing one miss
+(`widen_to_fnmut_formal` skipping the box): the compile stops with "internal: a closure held in the
+frame was retyped as a boxed closure without being boxed". A closure body of a specialisation sees
+that specialisation's bindings and bounds (`Closure.spec`, restored as `closure_spec` while the body is
+emitted). The `CLOSURES_FRAMED` switch is gone.
