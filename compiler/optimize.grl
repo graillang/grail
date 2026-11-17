@@ -1676,6 +1676,19 @@ fn reg_read_later<a, b>(s: &a [u8], from: u64, reg: &b [u8], low: &b [u8]) -> bo
     return false;
 }
 pub fn f32_const_ops<a>(s: &a [u8]) -> u8[] {
+    // Every rewrite below starts at a `cvtss2sd` line: a stream with none - any program without f32
+    // arithmetic - is returned as it is, without walking it line by line.
+    mut any = false;
+    mut x = 0;
+    while (x + 8 <= s.len()) && !any {
+        if (s[x] == 99) && ir::at(view(s), x, view("cvtss2sd")) {
+            any = true;
+        }
+        x += 1;
+    }
+    if !any {
+        return s.copy();
+    }
     mut out = u8[];
     mut a = 0;
     while a < s.len() {
