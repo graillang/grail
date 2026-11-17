@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **Field predicates may relate fields of the same record:** `struct Span { lo: u64, hi: u64 where
+  lo <= hi }`. A literal owes the predicate once every field has its value, every write of a field it
+  reads owes it over the new value and the other fields, a mutable borrow of any such field is
+  refused, and a reader through a shared reference or a non-`mut` binding gets it as a fact. A name
+  that is not a field of the record is still refused at the struct. Strict mode proves literals; a
+  single-field write it cannot prove, and says to rebuild the record.
+
 - AArch64 and RV64 native code drops moves that move nothing (call ABI S7): the word machine's
   result register is x9 (t0) and its first argument x0 (a0), and moves go through the scratch x10
   (t1), so calls and returns were full of `mov x0,x9` after `mov x9,x10; mov x10,x0`. A value number
