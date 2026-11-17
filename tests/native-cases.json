@@ -3114,26 +3114,6 @@
     "note": "a 19-digit f32 constant immediate is not zero: the narrowing pass took imm_value's 'cannot read' (0) for the value 0"
   },
   {
-    "name": "loop-hoist-two-slices-one-head",
-    "source": "// Two slices proved in range in one loop (nf2, /root/fixed_arrays): both data pointers are loaded\n// before the loop head; only one was, and the other access used an unset register (SIGSEGV).\nfn damp(v: &mut [f32], p: &mut [f32] where p.len() == v.len()) {\n    for i in v.len() {\n        v[i] = v[i] * 0.5;\n        p[i] = p[i] + v[i];\n    }\n}\nfn main() {\n    n := 4096;\n    mut a = f32[1.0; n];\n    mut b = f32[0.0; n];\n    damp(&mut a[0: n], &mut b[0: n]);\n    println(b[7]);\n}\n",
-    "stdout": "0.5\n",
-    "targets": [
-      "x86_64",
-      "aarch64",
-      "riscv64"
-    ]
-  },
-  {
-    "name": "loop-hoist-three-slices-one-head",
-    "source": "// Three slices with proved accesses share one loop head: each needs its data pointer loaded before\n// the loop (optimize.grl item 6), not only the last one recorded for that head.\nfn mix(a: &mut [f64], b: &mut [f64] where b.len() == a.len(), c: &mut [f64] where c.len() == a.len()) {\n    for i in a.len() {\n        a[i] = a[i] * 2.0;\n        b[i] = b[i] + a[i];\n        c[i] = c[i] + b[i] * 0.5;\n    }\n}\nfn main() {\n    n := 1000;\n    mut a = f64[1.0; n];\n    mut b = f64[0.5; n];\n    mut c = f64[0.0; n];\n    mix(&mut a[0: n], &mut b[0: n], &mut c[0: n]);\n    println(a[3]);\n    println(b[999]);\n    println(c[500]);\n}\n",
-    "stdout": "2\n2.5\n1.25\n",
-    "targets": [
-      "x86_64",
-      "aarch64",
-      "riscv64"
-    ]
-  },
-  {
     "name": "raw-module-sized-integer-arithmetic",
     "targets": [
       "x86_64"
@@ -8088,34 +8068,6 @@
       "native"
     ],
     "note": "what a `match` drops stays dropped: the `if` after it cannot leave a fact behind for the call below"
-  },
-  {
-    "name": "utf8-word-scan-every-alignment",
-    "files": [
-      "compiler/tests/utf8_word_scan.grl",
-      "lib/core.grl"
-    ],
-    "stdout": "utf8 scan: 200 ok\n"
-  },
-  {
-    "name": "utf8-reject-continuation-after-9-ascii",
-    "source": "fn main() { mut b = u8[]; for i in 9 { b.push(97); } b.push(128); for i in 9 { b.push(98); } println(b.text()); }\n",
-    "signal": "SIGABRT"
-  },
-  {
-    "name": "utf8-reject-truncated-after-16-ascii",
-    "source": "fn main() { mut b = u8[]; for i in 16 { b.push(97); } b.push(195); for i in 9 { b.push(98); } println(b.text()); }\n",
-    "signal": "SIGABRT"
-  },
-  {
-    "name": "utf8-reject-surrogate-after-23-ascii",
-    "source": "fn main() { mut b = u8[]; for i in 23 { b.push(97); } b.push(237); b.push(160); b.push(128); for i in 9 { b.push(98); } println(b.text()); }\n",
-    "signal": "SIGABRT"
-  },
-  {
-    "name": "utf8-reject-ff-after-8-ascii",
-    "source": "fn main() { mut b = u8[]; for i in 8 { b.push(97); } b.push(255); for i in 9 { b.push(98); } println(b.text()); }\n",
-    "signal": "SIGABRT"
   },
   {
     "name": "utf8-helpers",
@@ -18739,49 +18691,6 @@
     "diagnostic": "cannot transfer closure capture `r`: r.h is thread-affine"
   },
   {
-    "name": "fx-no-block-accepted",
-    "note": "`@no_block` accepts indexing (a failure ends the frame, so the failure path's report and park are past the guarantee) and a C function declared `nonblocking` (docs/design/effects.md, \"Blocking\").",
-    "source": "extern \"C\" nonblocking lib \"c\" fn labs(x: i64) -> i64;\n@no_block\nfn pick(v: &u64[], i: u64) -> u64 {\n    return v[i] + v.len();\n}\n@no_block\nfn mag(x: i64) -> i64 {\n    mut r: i64 = 0;\n    unsafe {\n        r = labs(x);\n    }\n    return r;\n}\nfn main() {\n    v := u64[1, 2, 3];\n    println(pick(&v, 1));\n    println(mag(i64(0) - 4));\n}\n",
-    "stdout": "5\n4\n"
-  },
-  {
-    "name": "fx-no-block-try-acquire-accepted",
-    "note": "A non-parking operation - `try_acquire` - is accepted under `@no_block`.",
-    "source": "use sync;\n@no_block\nfn grab(s: &sync::Semaphore) -> u64 {\n    got := s.try_acquire(1);\n    if got.is_some() {\n        return 1;\n    }\n    return 0;\n}\nfn main() {\n    s := sync::semaphore(1);\n    println(grab(&s));\n}\n",
-    "modules": [
-      "lib/sync.grl",
-      "lib/thread.grl",
-      "lib/time.grl",
-      "lib/rc.grl"
-    ],
-    "stdout": "1\n"
-  },
-  {
-    "name": "fx-no-block-sleep-refused",
-    "note": "A sleep blocks: the refusal names the chain to the runtime's sleep.",
-    "source": "use time;\n@no_block\nfn nap() {\n    time::sleep_ms(1);\n    return ();\n}\nfn main() {\n    nap();\n}\n",
-    "modules": [
-      "lib/time.grl",
-      "lib/core.grl"
-    ],
-    "reject": true,
-    "diagnostic": "`@no_block` function `nap` can block: it calls nap -> sleep_ms -> f_host_sleep_ms -> rt_sleep_for"
-  },
-  {
-    "name": "fx-no-block-print-refused",
-    "note": "Printing writes to a file descriptor, which can block.",
-    "source": "@no_block\nfn say(x: u64) {\n    println(x);\n    return ();\n}\nfn main() {\n    say(1);\n}\n",
-    "reject": true,
-    "diagnostic": "`@no_block` function `say` can block: it calls say -> rt_print_number -> rt_write_all"
-  },
-  {
-    "name": "fx-no-block-c-call-refused",
-    "note": "A C function not declared `nonblocking` may block.",
-    "source": "extern \"C\" lib \"c\" fn labs(x: i64) -> i64;\n@no_block\nfn mag(x: i64) -> i64 {\n    mut r: i64 = 0;\n    unsafe {\n        r = labs(x);\n    }\n    return r;\n}\nfn main() {\n    println(mag(i64(0) - 4));\n}\n",
-    "reject": true,
-    "diagnostic": "the target is `labs`, a C function not declared `nonblocking`"
-  },
-  {
     "name": "pool-chunks-mut-at-and-reduce-chunks",
     "note": "pool::chunks_mut_at hands each exclusive piece its first index; pool::reduce_chunks folds per-piece results in index order (simd-layout-parallel-loops.md 4.2, D4)",
     "source": "use pool;\nfn main() {\n    n := 1000;\n    mut xs = u64[0; n];\n    pool::chunks_mut_at(&mut xs[0: n], 64, |base: u64, s: &mut [u64]| -> unit {\n        for i in s.len() {\n            s[i] = base + i;\n        }\n    });\n    ok := pool::reduce_chunks<u64, bool>(&xs[0: n], 100, true, |s: &[u64]| -> bool {\n        mut good = true;\n        for i in s.len() - 1 {\n            if s[i + 1] != s[i] + 1 {\n                good = false;\n            }\n        }\n        return good;\n    }, |a: bool, b: bool| -> bool a && b);\n    total := pool::reduce_chunks<u64, u64>(&xs[0: n], 128, 0, |s: &[u64]| -> u64 {\n        mut t = 0;\n        for i in s.len() {\n            t += s[i];\n        }\n        return t;\n    }, |a: u64, b: u64| -> u64 a + b);\n    mut fs = f64[0.1; 10000];\n    s1 := pool::reduce_chunks<f64, f64>(&fs[0: 10000], 333, 0.0, |s: &[f64]| -> f64 {\n        mut t = 0.0;\n        for i in s.len() {\n            t = t + s[i];\n        }\n        return t;\n    }, |a: f64, b: f64| -> f64 a + b);\n    println(\"{} {} {}\", ok, total, s1);\n}\n",
@@ -18801,21 +18710,6 @@
     "reject": true,
     "source": "fn main() {\n    mut xs = u64[0; 8];\n    parallel_split(&mut xs[0: 8], 2, |a: u64, b: u64, s: &mut [u64]| -> unit { s[0] = a + b; });\n}\n",
     "diagnostic": "parallel_split callback takes (&mut [T]) or (u64, &mut [T])"
-  },
-  {
-    "name": "fx-no-block-stdlib-claims",
-    "note": "The standard library's `@no_block` claims - every `math` function, the `hash` writers and `finish`, `u64[].sum`, `[u8].is_char_boundary`, `strings::utf8_width` - are proved, and a `@no_block` frame function can call them all.",
-    "source": "use math;\nuse hash;\nuse vecs;\nuse strings;\n@no_block\nfn frame(x: f64, v: &u64[], t: &[u8]) -> u64 {\n    a := math::sin(x) + math::cos(x) + math::sqrt(x) + math::pow(x, 2.5) + math::atan2(x, 1.0) + math::ln(x + 1.0) + math::exp(x) + math::log10(x + 1.0) + math::log2(x + 1.0) + math::tan(x) + math::atan(x) + math::powi(x, 3) + math::abs(x) + math::floor(x) + math::ceil(x) + math::round(x);\n    mut h = hash::hasher(1, 2);\n    hash::write_num(&mut h, v.sum());\n    hash::write_byte(&mut h, 7);\n    hash::write_bytes(&mut h, t);\n    w := strings::utf8_width(t[0]);\n    b := t.is_char_boundary(1);\n    mut r = hash::finish(h) + w;\n    if b {\n        r = r + 1;\n    }\n    if a > 0.0 {\n        r = r + 1;\n    }\n    return r;\n}\nfn main() {\n    v := u64[1, 2, 3];\n    t := \"héllo\".text();\n    println(frame(0.5, &v, view(t)) != 0);\n}\n",
-    "modules": [
-      "lib/math.grl",
-      "lib/vecs.grl",
-      "lib/hash.grl",
-      "lib/strings.grl",
-      "lib/iter.grl",
-      "lib/order.grl",
-      "lib/core.grl"
-    ],
-    "stdout": "true\n"
   },
   {
     "name": "bce-loop-invariant-swap",
@@ -18957,6 +18851,120 @@
       "riscv64"
     ],
     "note": "a mask of 1023 against a table of 512 proves nothing: the check stays and fires for 1000"
+  },
+  {
+    "name": "unboxed-views",
+    "files": [
+      "compiler/tests/unboxed_views.grl"
+    ],
+    "stdout": "2000\n4 14\n12\n2 33 63\n18\n",
+    "note": "views as two words held in frame words: a static string viewed per call, a sub-slice returned in two registers, views stored in a record and in a vector, slices of slices - no rt_slice/rt_view_record per view"
+  },
+  {
+    "name": "loop-hoist-two-slices-one-head",
+    "source": "// Two slices proved in range in one loop (nf2, /root/fixed_arrays): both data pointers are loaded\n// before the loop head; only one was, and the other access used an unset register (SIGSEGV).\nfn damp(v: &mut [f32], p: &mut [f32] where p.len() == v.len()) {\n    for i in v.len() {\n        v[i] = v[i] * 0.5;\n        p[i] = p[i] + v[i];\n    }\n}\nfn main() {\n    n := 4096;\n    mut a = f32[1.0; n];\n    mut b = f32[0.0; n];\n    damp(&mut a[0: n], &mut b[0: n]);\n    println(b[7]);\n}\n",
+    "stdout": "0.5\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "loop-hoist-three-slices-one-head",
+    "source": "// Three slices with proved accesses share one loop head: each needs its data pointer loaded before\n// the loop (optimize.grl item 6), not only the last one recorded for that head.\nfn mix(a: &mut [f64], b: &mut [f64] where b.len() == a.len(), c: &mut [f64] where c.len() == a.len()) {\n    for i in a.len() {\n        a[i] = a[i] * 2.0;\n        b[i] = b[i] + a[i];\n        c[i] = c[i] + b[i] * 0.5;\n    }\n}\nfn main() {\n    n := 1000;\n    mut a = f64[1.0; n];\n    mut b = f64[0.5; n];\n    mut c = f64[0.0; n];\n    mix(&mut a[0: n], &mut b[0: n], &mut c[0: n]);\n    println(a[3]);\n    println(b[999]);\n    println(c[500]);\n}\n",
+    "stdout": "2\n2.5\n1.25\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "utf8-word-scan-every-alignment",
+    "files": [
+      "compiler/tests/utf8_word_scan.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "utf8 scan: 200 ok\n"
+  },
+  {
+    "name": "utf8-reject-continuation-after-9-ascii",
+    "source": "fn main() { mut b = u8[]; for i in 9 { b.push(97); } b.push(128); for i in 9 { b.push(98); } println(b.text()); }\n",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "utf8-reject-truncated-after-16-ascii",
+    "source": "fn main() { mut b = u8[]; for i in 16 { b.push(97); } b.push(195); for i in 9 { b.push(98); } println(b.text()); }\n",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "utf8-reject-surrogate-after-23-ascii",
+    "source": "fn main() { mut b = u8[]; for i in 23 { b.push(97); } b.push(237); b.push(160); b.push(128); for i in 9 { b.push(98); } println(b.text()); }\n",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "utf8-reject-ff-after-8-ascii",
+    "source": "fn main() { mut b = u8[]; for i in 8 { b.push(97); } b.push(255); for i in 9 { b.push(98); } println(b.text()); }\n",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "fx-no-block-accepted",
+    "note": "`@no_block` accepts indexing (a failure ends the frame, so the failure path's report and park are past the guarantee) and a C function declared `nonblocking` (docs/design/effects.md, \"Blocking\").",
+    "source": "extern \"C\" nonblocking lib \"c\" fn labs(x: i64) -> i64;\n@no_block\nfn pick(v: &u64[], i: u64) -> u64 {\n    return v[i] + v.len();\n}\n@no_block\nfn mag(x: i64) -> i64 {\n    mut r: i64 = 0;\n    unsafe {\n        r = labs(x);\n    }\n    return r;\n}\nfn main() {\n    v := u64[1, 2, 3];\n    println(pick(&v, 1));\n    println(mag(i64(0) - 4));\n}\n",
+    "stdout": "5\n4\n"
+  },
+  {
+    "name": "fx-no-block-try-acquire-accepted",
+    "note": "A non-parking operation - `try_acquire` - is accepted under `@no_block`.",
+    "source": "use sync;\n@no_block\nfn grab(s: &sync::Semaphore) -> u64 {\n    got := s.try_acquire(1);\n    if got.is_some() {\n        return 1;\n    }\n    return 0;\n}\nfn main() {\n    s := sync::semaphore(1);\n    println(grab(&s));\n}\n",
+    "modules": [
+      "lib/sync.grl",
+      "lib/thread.grl",
+      "lib/time.grl",
+      "lib/rc.grl"
+    ],
+    "stdout": "1\n"
+  },
+  {
+    "name": "fx-no-block-sleep-refused",
+    "note": "A sleep blocks: the refusal names the chain to the runtime's sleep.",
+    "source": "use time;\n@no_block\nfn nap() {\n    time::sleep_ms(1);\n    return ();\n}\nfn main() {\n    nap();\n}\n",
+    "modules": [
+      "lib/time.grl",
+      "lib/core.grl"
+    ],
+    "reject": true,
+    "diagnostic": "`@no_block` function `nap` can block: it calls nap -> sleep_ms -> f_host_sleep_ms -> rt_sleep_for"
+  },
+  {
+    "name": "fx-no-block-print-refused",
+    "note": "Printing writes to a file descriptor, which can block.",
+    "source": "@no_block\nfn say(x: u64) {\n    println(x);\n    return ();\n}\nfn main() {\n    say(1);\n}\n",
+    "reject": true,
+    "diagnostic": "`@no_block` function `say` can block: it calls say -> rt_print_number -> rt_write_all"
+  },
+  {
+    "name": "fx-no-block-c-call-refused",
+    "note": "A C function not declared `nonblocking` may block.",
+    "source": "extern \"C\" lib \"c\" fn labs(x: i64) -> i64;\n@no_block\nfn mag(x: i64) -> i64 {\n    mut r: i64 = 0;\n    unsafe {\n        r = labs(x);\n    }\n    return r;\n}\nfn main() {\n    println(mag(i64(0) - 4));\n}\n",
+    "reject": true,
+    "diagnostic": "the target is `labs`, a C function not declared `nonblocking`"
+  },
+  {
+    "name": "fx-no-block-stdlib-claims",
+    "note": "The standard library's `@no_block` claims - every `math` function, the `hash` writers and `finish`, `u64[].sum`, `[u8].is_char_boundary`, `strings::utf8_width` - are proved, and a `@no_block` frame function can call them all.",
+    "source": "use math;\nuse hash;\nuse vecs;\nuse strings;\n@no_block\nfn frame(x: f64, v: &u64[], t: &[u8]) -> u64 {\n    a := math::sin(x) + math::cos(x) + math::sqrt(x) + math::pow(x, 2.5) + math::atan2(x, 1.0) + math::ln(x + 1.0) + math::exp(x) + math::log10(x + 1.0) + math::log2(x + 1.0) + math::tan(x) + math::atan(x) + math::powi(x, 3) + math::abs(x) + math::floor(x) + math::ceil(x) + math::round(x);\n    mut h = hash::hasher(1, 2);\n    hash::write_num(&mut h, v.sum());\n    hash::write_byte(&mut h, 7);\n    hash::write_bytes(&mut h, t);\n    w := strings::utf8_width(t[0]);\n    b := t.is_char_boundary(1);\n    mut r = hash::finish(h) + w;\n    if b {\n        r = r + 1;\n    }\n    if a > 0.0 {\n        r = r + 1;\n    }\n    return r;\n}\nfn main() {\n    v := u64[1, 2, 3];\n    t := \"h\u00e9llo\".text();\n    println(frame(0.5, &v, view(t)) != 0);\n}\n",
+    "modules": [
+      "lib/math.grl",
+      "lib/vecs.grl",
+      "lib/hash.grl",
+      "lib/strings.grl",
+      "lib/iter.grl",
+      "lib/order.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "true\n"
   },
   {
     "name": "parallel-for-zip-literal-proves-every-index",
@@ -19134,5 +19142,38 @@
         "text": "mulsd"
       }
     ]
+  },
+  {
+    "name": "closure-shared-ref-captured-twice",
+    "note": "a shared reference binding captured by two closures: it is copied, as Rust's `&T` is, and both closures hold the shared loan (the first used to move it: `r` was moved)",
+    "source": "struct Holder { n: u64 }\nfn main() { holder := Holder { n: 4 }; r := &holder; a := || -> u64 r.n; b := || -> u64 r.n + 1; println(a() + b()); }\n",
+    "stdout": "9\n"
+  },
+  {
+    "name": "closure-shared-ref-captured-twice-generic-join",
+    "note": "...the same through a generic `F: Fn<Send>` join and an erased second branch (/root/concurrency_design's pool::join shape)",
+    "source": "struct Holder { n: u64 }\nstruct Pair<A, B> { first: A, second: B }\nfn join<A: Send + Owned, B: Owned, F: Fn<Send>() -> A>(first: F, second: FnMut() -> B) -> Pair<A, B> { mut g = second; return Pair { first: first(), second: g() }; }\nfn main() { holder := Holder { n: 4 }; r := &holder; p := join(|| -> u64 r.n, || -> u64 r.n + 1); println(p.first + p.second); }\n",
+    "stdout": "9\n"
+  },
+  {
+    "name": "closure-shared-ref-capture-keeps-loan",
+    "note": "...the copy keeps the loan: the vector cannot move while the closure lives",
+    "source": "fn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() { x := u64[1, 2]; r := &x; a := || -> u64 r.len(); println(eat(x)); println(a()); }\n",
+    "reject": true,
+    "diagnostic": "move of unavailable or borrowed value"
+  },
+  {
+    "name": "closure-exclusive-ref-capture-moves",
+    "note": "an exclusive reference still moves into the closure",
+    "source": "fn main() { mut x = u64[1, 2]; r := &mut x; a := || -> u64 r.len(); println(r.len()); println(a()); }\n",
+    "reject": true,
+    "diagnostic": "`r` was moved"
+  },
+  {
+    "name": "callable-bound-transfer-checked-per-argument",
+    "note": "a capture that cannot cross a thread is reported for the closure given for a generic `F: Fn<Send>`, before a later argument's errors (blocker 3 of gaps12-genericF)",
+    "source": "handle H: transferable;\nstruct Holder { h: H, n: u64 }\nstruct Pair<A, B> { first: A, second: B }\nfn join<A: Send + Owned, B: Owned, F: Fn<Send>() -> A>(first: F, second: FnMut() -> B) -> Pair<A, B> { mut g = second; return Pair { first: first(), second: g() }; }\nfn main() {\n    mut raw: H;\n    holder := Holder { h: raw, n: 4 };\n    r := &holder;\n    pair := join(|| -> u64 r.n, || -> u64 r.n + 1);\n    println(pair.first + pair.second);\n}\n",
+    "reject": true,
+    "diagnostic": "cannot transfer closure capture `r`: r.h is thread-affine"
   }
 ]
