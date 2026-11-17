@@ -1,5 +1,7 @@
 ## Unreleased
 
+- After each landing the build host also runs the closure-passing fuzzer (`tools/fuzz-closures.mjs`, 400
+  cases, compile and run) next to the front-end fuzzer. `tools/land.sh --remote-status` reports both.
 - png unfilters the common layout through addresses (`bytes::data_addr`, new) into an image sized
   once, under the length guard that already bounds every row, instead of a push and a checked index
   per byte. The 4K png: Grail-LLVM 6.44G -> 5.50G instructions (0.71 -> 0.61 s; stb_image 0.41 s),
