@@ -2279,6 +2279,375 @@ fn simd_widen<a>(o: (&a mut Out)) -> unit {
     }
     return ();
 }
+// S3, x86-64: the `simd.` ops SSE2 does exactly as the scalar lanes would, as packed instructions,
+// 16 bytes at a time (docs/design/simd.md). Every load goes through `movups` into a register, since a
+// legacy SSE memory operand must be 16-byte aligned; %xmm0..%xmm5 are scratch, as in the lanes. What
+// SSE2 cannot do with the same result - an i32 or i64 multiply, unsigned or 64-bit compares, the
+// saturating to_i32, a shuffle, a lane read - is left to the scalar lanes (false).
+fn simd_movups<a, b>(o: (&a mut Out), base: &b [u8], off: u64, reg: &b [u8], load: bool) -> unit {
+    put(&mut o, view("movups "));
+    if load {
+        u64(&mut o, off);
+        put(&mut o, view("("));
+        put(&mut o, base);
+        put(&mut o, view("),"));
+        put(&mut o, reg);
+    } else {
+        put(&mut o, reg);
+        put(&mut o, view(","));
+        u64(&mut o, off);
+        put(&mut o, view("("));
+        put(&mut o, base);
+        put(&mut o, view(")"));
+    }
+    put(&mut o, view("\n"));
+    return ();
+}
+fn simd_has<a>(list: (&a u64[]), k: u64) -> bool {
+    for i in list.len() {
+        if list[i] == k {
+            return true;
+        }
+    }
+    return false;
+}
+// %xmm{r} = select(%xmm{m}, %xmm{a}, %xmm{b}) by bits, through %xmm{t}; %xmm{m} is consumed.
+fn simd_xblend<a>(o: (&a mut Out), m: u64, a: u64, b: u64, t: u64) -> u64 {
+    put(&mut o, view("movaps %xmm"));
+    u64(&mut o, m);
+    put(&mut o, view(",%xmm"));
+    u64(&mut o, t);
+    put(&mut o, view("\nandps %xmm"));
+    u64(&mut o, a);
+    put(&mut o, view(",%xmm"));
+    u64(&mut o, t);
+    put(&mut o, view("\nandnps %xmm"));
+    u64(&mut o, b);
+    put(&mut o, view(",%xmm"));
+    u64(&mut o, m);
+    put(&mut o, view("\norps %xmm"));
+    u64(&mut o, t);
+    put(&mut o, view(",%xmm"));
+    u64(&mut o, m);
+    put(&mut o, view("\n"));
+    return m;
+}
+fn simd_x86_packed<a>(o: (&a mut Out), s: (&Simd)) -> bool {
+    op := s.op;
+    bits := s.bits;
+    float := s.elem == 1;
+    chunks := s.lanes * bits / 128;
+    mut ps = "ps";
+    if bits == 64 {
+        ps = "pd";
+    }
+    // Lane-wise binary ops: add sub mul div (floats), add sub (integers), and or xor (any lanes).
+    if (op <= 7) && !((op == 3) && !float) && !((op == 4) && !float) {
+        for c in chunks {
+            simd_movups(&mut o, view("%rsi"), 16 * c, view("%xmm0"), true);
+            simd_movups(&mut o, view("%rdx"), 16 * c, view("%xmm1"), true);
+            if float && (op <= 4) {
+                names := u8[][copy_text(view("add")), copy_text(view("sub")), copy_text(view("mul")), copy_text(view("div"))];
+                put(&mut o, view(names[op - 1]));
+                put(&mut o, view(ps));
+            } else if op <= 2 {
+                if op == 1 {
+                    put(&mut o, view("padd"));
+                } else {
+                    put(&mut o, view("psub"));
+                }
+                if bits == 8 {
+                    put(&mut o, view("b"));
+                } else if bits == 32 {
+                    put(&mut o, view("d"));
+                } else {
+                    put(&mut o, view("q"));
+                }
+            } else {
+                names := u8[][copy_text(view("andps")), copy_text(view("orps")), copy_text(view("xorps"))];
+                put(&mut o, view(names[op - 5]));
+            }
+            put(&mut o, view(" %xmm1,%xmm0\n"));
+            simd_movups(&mut o, view("%rdi"), 16 * c, view("%xmm0"), false);
+        }
+        return true;
+    }
+    if ((op == 8) || (op == 9)) && (float || ((bits == 8) && (s.elem == 4)) || ((bits == 32) && (s.elem == 2))) {
+        for c in chunks {
+            simd_movups(&mut o, view("%rsi"), 16 * c, view("%xmm0"), true);
+            simd_movups(&mut o, view("%rdx"), 16 * c, view("%xmm1"), true);
+            mut r = 0;
+            if bits == 8 {
+                if op == 8 {
+                    put(&mut o, view("pminub %xmm1,%xmm0\n"));
+                } else {
+                    put(&mut o, view("pmaxub %xmm1,%xmm0\n"));
+                }
+            } else if !float {
+                // min: b where a > b; max: b where b > a; a otherwise (equal lanes are equal).
+                if op == 8 {
+                    put(&mut o, view("movaps %xmm0,%xmm2\npcmpgtd %xmm1,%xmm2\n"));
+                } else {
+                    put(&mut o, view("movaps %xmm1,%xmm2\npcmpgtd %xmm0,%xmm2\n"));
+                }
+                r = simd_xblend(&mut o, 2, 1, 0, 3);
+            } else {
+                // The scalar rule: b where b < a (min) or a < b (max), else a; then a NaN b gives a and a
+                // NaN a gives b (cmp $1 is less-than, $3 unordered).
+                if op == 8 {
+                    put(&mut o, view("movaps %xmm1,%xmm2\ncmp"));
+                    put(&mut o, view(ps));
+                    put(&mut o, view(" $1,%xmm0,%xmm2\n"));
+                } else {
+                    put(&mut o, view("movaps %xmm0,%xmm2\ncmp"));
+                    put(&mut o, view(ps));
+                    put(&mut o, view(" $1,%xmm1,%xmm2\n"));
+                }
+                r1 := simd_xblend(&mut o, 2, 1, 0, 3);
+                put(&mut o, view("movaps %xmm1,%xmm3\ncmp"));
+                put(&mut o, view(ps));
+                put(&mut o, view(" $3,%xmm1,%xmm3\n"));
+                r2 := simd_xblend(&mut o, 3, 0, r1, 4);
+                put(&mut o, view("movaps %xmm0,%xmm4\ncmp"));
+                put(&mut o, view(ps));
+                put(&mut o, view(" $3,%xmm0,%xmm4\n"));
+                r = simd_xblend(&mut o, 4, 1, r2, 5);
+            }
+            mut reg = copy_text(view("%xmm"));
+            reg.push(48 + r);
+            simd_movups(&mut o, view("%rdi"), 16 * c, view(reg), false);
+        }
+        return true;
+    }
+    if (10 <= op) && (op <= 15) && (float || (s.elem == 2) || (s.elem == 3) || ((s.elem == 4) && (op <= 11))) && !(!float && (bits == 64)) {
+        for c in chunks {
+            simd_movups(&mut o, view("%rsi"), 16 * c, view("%xmm0"), true);
+            simd_movups(&mut o, view("%rdx"), 16 * c, view("%xmm1"), true);
+            mut out = "%xmm0";
+            if float {
+                // cmpps: dst = dst PRED src with 0 eq, 1 lt, 2 le, 4 neq (unordered or unequal).
+                preds := u64[0, 4, 1, 2, 1, 2];
+                put(&mut o, view("cmp"));
+                put(&mut o, view(ps));
+                put(&mut o, view(" $"));
+                u64(&mut o, preds[op - 10]);
+                if op >= 14 {
+                    // gt / ge: b lt / le a.
+                    put(&mut o, view(",%xmm0,%xmm1\n"));
+                    out = "%xmm1";
+                } else {
+                    put(&mut o, view(",%xmm1,%xmm0\n"));
+                }
+            } else {
+                mut w = "d";
+                if bits == 8 {
+                    w = "b";
+                }
+                if (op == 10) || (op == 11) {
+                    put(&mut o, view("pcmpeq"));
+                    put(&mut o, view(w));
+                    put(&mut o, view(" %xmm1,%xmm0\n"));
+                } else if (op == 14) || (op == 13) {
+                    // gt: a > b; le: not (a > b).
+                    put(&mut o, view("pcmpgt"));
+                    put(&mut o, view(w));
+                    put(&mut o, view(" %xmm1,%xmm0\n"));
+                } else {
+                    // lt: b > a; ge: not (b > a).
+                    put(&mut o, view("pcmpgt"));
+                    put(&mut o, view(w));
+                    put(&mut o, view(" %xmm0,%xmm1\n"));
+                    out = "%xmm1";
+                }
+                if (op == 11) || (op == 13) || (op == 15) {
+                    put(&mut o, view("pcmpeqd %xmm2,%xmm2\nxorps %xmm2,"));
+                    put(&mut o, view(out));
+                    put(&mut o, view("\n"));
+                }
+            }
+            simd_movups(&mut o, view("%rdi"), 16 * c, view(out), false);
+        }
+        return true;
+    }
+    if op == 16 {
+        for c in chunks {
+            simd_movups(&mut o, view("%rsi"), 16 * c, view("%xmm0"), true);
+            simd_movups(&mut o, view("%rdx"), 16 * c, view("%xmm1"), true);
+            simd_movups(&mut o, view("%rcx"), 16 * c, view("%xmm2"), true);
+            put(&mut o, view("andps %xmm0,%xmm1\nandnps %xmm2,%xmm0\norps %xmm1,%xmm0\n"));
+            simd_movups(&mut o, view("%rdi"), 16 * c, view("%xmm0"), false);
+        }
+        return true;
+    }
+    if op == 17 {
+        for c in chunks {
+            simd_movups(&mut o, view("%rsi"), 16 * c, view("%xmm0"), true);
+            put(&mut o, view("pcmpeqd %xmm1,%xmm1\nxorps %xmm1,%xmm0\n"));
+            simd_movups(&mut o, view("%rdi"), 16 * c, view("%xmm0"), false);
+        }
+        return true;
+    }
+    if (op == 18) && (bits != 8) {
+        if s.elem == 3 {
+            put(&mut o, view("negq %rax\n"));
+        }
+        if float && (bits == 32) {
+            put(&mut o, view("movq %rax,%xmm0\ncvtsd2ss %xmm0,%xmm0\nshufps $0,%xmm0,%xmm0\n"));
+        } else if bits == 32 {
+            put(&mut o, view("movd %eax,%xmm0\npshufd $0,%xmm0,%xmm0\n"));
+        } else {
+            put(&mut o, view("movq %rax,%xmm0\nmovlhps %xmm0,%xmm0\n"));
+        }
+        for c in chunks {
+            simd_movups(&mut o, view("%rdi"), 16 * c, view("%xmm0"), false);
+        }
+        return true;
+    }
+    if (op == 20) && float {
+        // The halving tree: a 256-bit vector's halves added first, then within the 128 bits.
+        simd_movups(&mut o, view("%rsi"), 0, view("%xmm0"), true);
+        if chunks == 2 {
+            simd_movups(&mut o, view("%rsi"), 16, view("%xmm1"), true);
+            put(&mut o, view("add"));
+            put(&mut o, view(ps));
+            put(&mut o, view(" %xmm1,%xmm0\n"));
+        }
+        put(&mut o, view("movaps %xmm0,%xmm1\nmovhlps %xmm0,%xmm1\nadd"));
+        put(&mut o, view(ps));
+        put(&mut o, view(" %xmm1,%xmm0\n"));
+        if bits == 32 {
+            put(&mut o, view("movaps %xmm0,%xmm1\nshufps $85,%xmm1,%xmm1\naddss %xmm1,%xmm0\ncvtss2sd %xmm0,%xmm0\n"));
+        }
+        put(&mut o, view("movq %xmm0,%rax\n"));
+        return true;
+    }
+    if (op == 21) || (op == 30) || (op == 31) {
+        for c in chunks {
+            simd_movups(&mut o, view("%rsi"), 16 * c, view("%xmm0"), true);
+            simd_movups(&mut o, view("%rdi"), 16 * c, view("%xmm0"), false);
+        }
+        return true;
+    }
+    if (op == 22) || (op == 23) {
+        mut per = s.lanes / chunks;
+        for c in chunks {
+            simd_movups(&mut o, view("%rsi"), 16 * c, view("%xmm0"), true);
+            if bits == 8 {
+                put(&mut o, view("pmovmskb %xmm0,"));
+            } else {
+                put(&mut o, view("movmsk"));
+                put(&mut o, view(ps));
+                put(&mut o, view(" %xmm0,"));
+            }
+            if c == 0 {
+                put(&mut o, view("%eax\n"));
+            } else {
+                put(&mut o, view("%ecx\nshlq $"));
+                u64(&mut o, per);
+                put(&mut o, view(",%rcx\norq %rcx,%rax\n"));
+            }
+        }
+        if op == 22 {
+            put(&mut o, view("testq %rax,%rax\nsetne %al\nmovzbq %al,%rax\n"));
+        } else {
+            // All lanes set: the bits plus one are 2^lanes, and nothing less is.
+            put(&mut o, view("addq $1,%rax\nshrq $"));
+            u64(&mut o, s.lanes);
+            put(&mut o, view(",%rax\n"));
+        }
+        return true;
+    }
+    if (op == 27) && (bits == 32) && (s.lanes == 4) {
+        // A 4x32 shuffle as shufps, which takes the result's low two lanes from its destination and
+        // the high two from its source. Lanes 0-3 are the first operand's, 4-7 the second's.
+        idx := s.idx.copy();
+        if ((idx[0] / 4) == (idx[1] / 4)) && ((idx[2] / 4) == (idx[3] / 4)) {
+            // One shufps: the low half's operand in %xmm0, the high half's in %xmm1.
+            if idx[0] < 4 {
+                simd_movups(&mut o, view("%rsi"), 0, view("%xmm0"), true);
+            } else {
+                simd_movups(&mut o, view("%rdx"), 0, view("%xmm0"), true);
+            }
+            if idx[2] < 4 {
+                simd_movups(&mut o, view("%rsi"), 0, view("%xmm1"), true);
+            } else {
+                simd_movups(&mut o, view("%rdx"), 0, view("%xmm1"), true);
+            }
+            imm := (idx[0] % 4) | ((idx[1] % 4) << 2) | ((idx[2] % 4) << 4) | ((idx[3] % 4) << 6);
+            put(&mut o, view("shufps $"));
+            u64(&mut o, imm);
+            put(&mut o, view(",%xmm1,%xmm0\n"));
+            simd_movups(&mut o, view("%rdi"), 0, view("%xmm0"), false);
+            return true;
+        }
+        // Two shufps: gather the (at most two) first-operand lanes and (at most two) second-operand
+        // lanes the result names into t = [a_p, a_q, b_r, b_s], then permute t.
+        mut fa = u64[];
+        mut fb = u64[];
+        for j in 4 {
+            k := idx[j];
+            if k < 4 {
+                if !simd_has(&fa, k) {
+                    fa.push(k);
+                }
+            } else if !simd_has(&fb, k - 4) {
+                fb.push(k - 4);
+            }
+        }
+        if (fa.len() > 2) || (fb.len() > 2) {
+            return false;
+        }
+        while fa.len() < 2 {
+            mut first = 0;
+            if fa.len() > 0 {
+                first = fa[0];
+            }
+            fa.push(first);
+        }
+        while fb.len() < 2 {
+            mut first = 0;
+            if fb.len() > 0 {
+                first = fb[0];
+            }
+            fb.push(first);
+        }
+        simd_movups(&mut o, view("%rsi"), 0, view("%xmm0"), true);
+        simd_movups(&mut o, view("%rdx"), 0, view("%xmm1"), true);
+        put(&mut o, view("shufps $"));
+        u64(&mut o, fa[0] | (fa[1] << 2) | (fb[0] << 4) | (fb[1] << 6));
+        put(&mut o, view(",%xmm1,%xmm0\n"));
+        mut imm = 0;
+        for j in 4 {
+            k := idx[j];
+            mut at = 0;
+            if k < 4 {
+                if fa[0] != k {
+                    at = 1;
+                }
+            } else {
+                at = 2;
+                if fb[0] != k - 4 {
+                    at = 3;
+                }
+            }
+            imm = imm | (at << (2 * j));
+        }
+        put(&mut o, view("shufps $"));
+        u64(&mut o, imm);
+        put(&mut o, view(",%xmm0,%xmm0\n"));
+        simd_movups(&mut o, view("%rdi"), 0, view("%xmm0"), false);
+        return true;
+    }
+    if op == 28 {
+        for c in chunks {
+            simd_movups(&mut o, view("%rsi"), 16 * c, view("%xmm0"), true);
+            put(&mut o, view("cvtdq2ps %xmm0,%xmm0\n"));
+            simd_movups(&mut o, view("%rdi"), 16 * c, view("%xmm0"), false);
+        }
+        return true;
+    }
+    return false;
+}
 // F[f] = the binary64 whose top 16 bits are `top` and the rest zero (the bounds toi32 compares with).
 fn simd_fconst<a, b>(o: (&a mut Out), f: u64, top: &b [u8]) -> unit {
     if o.target == 1 {
@@ -2322,6 +2691,9 @@ fn simd_iconst<a>(o: (&a mut Out), v: u64) -> unit {
     return ();
 }
 pub fn simd_expand<a>(o: (&a mut Out), s: (&Simd)) -> unit {
+    if simd_x86(&o) && simd_x86_packed(&mut o, &s) {
+        return ();
+    }
     eb := s.bits / 8;
     n := s.lanes;
     op := s.op;
@@ -3041,8 +3413,20 @@ fn float_sse<a, b, c, d>(o: (&a mut Out), op: &b [u8], src: &c [u8], dst: &d [u8
     }
     single := eq(view(op), view("addss")) || eq(view(op), view("subss")) || eq(view(op), view("mulss"))
         || eq(view(op), view("divss")) || eq(view(op), view("sqrtss")) || eq(view(op), view("cvtsd2ss"));
-    fs := freg(target, view(src), single && !eq(view(op), view("cvtsd2ss")));
+    mut fs = freg(target, view(src), single && !eq(view(op), view("cvtsd2ss")));
     fd := freg(target, view(dst), single);
+    if (fs.len() == 0) && (fd.len() != 0) && (src.len() != 0) && (src[0] != 37) && (src[0] != 36) && !single
+        && (eq(view(op), view("addsd")) || eq(view(op), view("subsd")) || eq(view(op), view("mulsd")) || eq(view(op), view("divsd"))) {
+        // A memory operand (optimize.grl `xmm_memops`): loaded into d31 / ft11, which nothing else uses.
+        address(&mut o, view(src));
+        if arm {
+            put(&mut o, view("ldr d31,[x13]\n"));
+            fs = copy_text(view("d31"));
+        } else {
+            put(&mut o, view("fld ft11,0(t3)\n"));
+            fs = copy_text(view("ft11"));
+        }
+    }
     if (fs.len() == 0) || (fd.len() == 0) {
         return false;
     }

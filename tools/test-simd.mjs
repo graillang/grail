@@ -29,11 +29,19 @@ function check(program, name, stdout, wanted, longest) {
   // The lifted functions are internal, so LLVM may inline the SIMD function into its caller and its
   // symbol may be gone: the loop is found in the object clang wrote for the lifted code.
   const dump = spawnSync('objdump', ['-d', '--no-show-raw-insn', join(work, `${name}.ll.o`)], { encoding: 'utf8' }).stdout;
-  const insns = dump.split('\n').map(line => {
-    const m = /^\s*([0-9a-f]+):\s+(.*)$/.exec(line);
-    return m ? { at: parseInt(m[1], 16), text: m[2].trim() } : null;
-  }).filter(Boolean);
-  const loops = [];
+  // Each function may sit in a section of its own, all starting at address 0, so loops are found
+// within one function's instructions at a time.
+const functions = [];
+for (const line of dump.split('\n')) {
+  if (/^[0-9a-f]+ <[^>]+>:$/.test(line)) {
+    functions.push([]);
+    continue;
+  }
+  const m = /^\s*([0-9a-f]+):\s+(.*)$/.exec(line);
+  if (m && functions.length) functions[functions.length - 1].push({ at: parseInt(m[1], 16), text: m[2].trim() });
+}
+const loops = [];
+for (const insns of functions) {
   for (const insn of insns) {
     const m = /^j([a-z]+)\s+([0-9a-f]+)\b/.exec(insn.text);
     if (!m || m[1] === 'mp') continue;
@@ -41,7 +49,8 @@ function check(program, name, stdout, wanted, longest) {
     if (head >= insn.at) continue;
     loops.push(insns.filter(i => i.at >= head && i.at <= insn.at));
   }
-  const loop = loops.find(body => wanted.every(w => body.some(i => w.test(i.text))));
+}
+const loop = loops.find(body => wanted.every(w => body.some(i => w.test(i.text))));
   ok(`${program}: a loop with ${wanted.join(' ')}`, loop !== undefined, `${loops.length} loops`);
   if (!loop) return;
   const shown = loop.map(i => i.text).join('\n');

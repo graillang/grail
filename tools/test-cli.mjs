@@ -154,6 +154,19 @@ checks += 10;
   assert.match(fs.readFileSync(join(outA, 'index.html'), 'utf8'), /data-name="hashmap Map"/, 'the index carries the search data');
   checks += 7;
 }
+// `grail build --report checks`: every check left in the program's own functions, with its location
+// and kind; an index the prover settled is not among them.
+{
+  writeFileSync(join(work, 'checks.grl'), 'fn total(v: &u64[], k: u64) -> u64 {\n    mut s: u64 = 0;\n    for i in v.len() {\n        s = s + v[i];\n    }\n    return s / k + v[k];\n}\nfn main() {\n    v := u64[1, 2, 3];\n    println(total(&v, 1));\n}\n');
+  const r = spawnSync(grail, ['build', 'checks.grl', '-o', join(work, 'checks'), '--report', 'checks'], { cwd: work, encoding: 'utf8', timeout: 300_000 });
+  assert.equal(r.status, 0, `--report checks builds: ${r.stdout}${r.stderr}`);
+  const rows = r.stdout.split('\n').filter(line => line.includes('f_main_total'));
+  assert.deepEqual(rows.map(line => line.split('\t').slice(1).join(' ').replace(/^.*checks\.grl/, 'checks.grl')),
+    ['checks.grl:4:9 overflow', 'checks.grl:6:5 divide', 'checks.grl:6:5 index', 'checks.grl:6:5 overflow'], `the report of total: ${r.stdout}`);
+  const bad = spawnSync(grail, ['build', 'checks.grl', '--report', 'nope'], { cwd: work, encoding: 'utf8' });
+  assert.notEqual(bad.status, 0, '--report takes only `checks`');
+  checks += 3;
+}
 // 4. Cross targets: the grail tool itself (formatter) and programs it builds.
 writeFileSync(join(work, 'hello.grl'), 'fn main() {\n    println(42);\n}\n');
 for (const target of ['x86_64', 'aarch64', 'riscv64']) {

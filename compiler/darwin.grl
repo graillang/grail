@@ -10,6 +10,23 @@ unsafe module runtime;
 // libSystem signals failure with -1; the runtime's negative-errno test is the same predicate.
 // Native system-call numbers stay behind this portable runtime boundary.
 // Operation IDs are stable runtime identifiers, not the target's Linux syscall ABI.
+// The syscalls the runtime's own machinery needs - writing a report, exiting, parking and waking a
+// thread, yielding, the clock, unmapping - through a dispatcher that offers nothing else. On Linux it is
+// rt_syscall itself. On a platform whose rt_syscall emulates every call (os-windows.grl), the failure
+// path calling the full dispatcher "reached" every arm, sockets included, and every effect claim that
+// can fail went with it (docs/design/effects.md).
+// Create (or truncate) a regular file to write, and close what it returned: the two calls the
+// failure path's profile dump makes. They are not the general dispatcher so that the failure path
+// reaches no directory or socket code through them (see rt_syscall_low).
+fn rt_create_file(path: u64, flags: u64, mode: u64) -> u64 {
+    return rt_syscall(2, path, flags, mode);
+}
+fn rt_close_file(fd: u64) -> u64 {
+    return rt_syscall(3, fd, 0, 0);
+}
+fn rt_syscall_low(n: u64, a: u64, b: u64, c: u64) -> u64 {
+    return rt_syscall(n, a, b, c);
+}
 fn rt_syscall(n: u64, a: u64, b: u64, c: u64) -> u64 {
     // This module is the Mach-O platform layer: the runtime calls the libSystem bridge directly,
     // so the compiler needs no Darwin branch in raw_syscall.
