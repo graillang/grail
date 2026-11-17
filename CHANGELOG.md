@@ -1,5 +1,36 @@
 ## Unreleased
 
+- The native backend computes SIMD operations with packed SSE2 on x86-64 (lane arithmetic, compares,
+  select, splat, sums, 4-lane shuffles, `any`/`all`, `to_f32`), with exactly the same results as
+  before. A dot product, a 4x4 matrix product and an AoS-to-SoA transpose run 2-5x faster natively.
+  The internal assembler encodes the new instructions identically to clang.
+- **`bytes::find_byte(text, from, b)`**: where byte `b` next occurs, eight bytes per step (a word
+  read and the has-zero-byte test), in plain Grail. The compiler's line scanners use it - the
+  optimiser's body reader, the frame-probe and inlining scans, the site table: 6.4% fewer
+  instructions compiling a 4000-function file, 7.2% for the compiler itself.
+- **zstd decodes with fewer allocations and a word-at-a-time bit reader.** The sequence-code tables
+  were vector literals built on every lookup (four per sequence) and the backward bit reader took
+  one bit per step; the tables are static text indexed in place and the reader assembles whole
+  bytes. A 20 MB archive (126 MB out): Grail-LLVM 44.8G -> 14.4G instructions (4.38 -> 1.43 s;
+  libzstd 0.29 s), Grail-native 124G -> 35.2G.
+- **jpeg decodes without an allocation per block or per pixel.** The zigzag table was a vector
+  literal built on every lookup, each 8x8 IDCT allocated its 64-entry work area and each 1-D pass
+  returned a fresh vector, and every pixel was assembled in a vector of its own before being copied
+  out. The table is now static text, the IDCT works in scratch kept between blocks, and pixels go
+  straight to the image. A 2048x2048 photo: Grail-LLVM 6.9G -> 1.6G instructions (0.60 -> 0.14 s;
+  it was 25.8G before the runtime's division fix), Grail-native 38.6G -> 24.3G.
+- An effect refusal over a callee the run cannot see (compiling a program to assembly without the
+  runtime's sources) names it - "the target is `rt_len`, whose body and effect summary this run does
+  not have" - instead of calling it an indirect call.
+- Fixed (windows-x86_64): the failure path reached the socket arms of the Windows syscall emulation,
+  so every `@no_alloc` function that indexes was refused there. The failure path and the scheduler
+  use `rt_syscall_low` (write to a handle, exit, park, wake, yield, sleep, clock, unmap), and the
+  profile dump creates and closes its file with `rt_create_file`/`rt_close_file`.
+- **Native backend: a vector the loop cannot change is read once before the loop.** With the
+  front end's loop-stability fact, the optimiser loads the vector's data pointer (and its length,
+  when a check or `len()` in the loop needs it) into registers on the way into the loop, and the
+  accesses inside read those. An unchecked access needs only the data register. fnv executes 11%
+  fewer instructions.
 - Bounds checks across loops that rebuild their vectors: a fact a `while` body's writes would end
   (`v.len == n` when the body swaps `v` with another vector) is kept while the body is compiled and
   checked where the body ends; if it holds again it holds at every evaluation of the guard and
@@ -13,12 +44,29 @@
   under four seeds, the build store's digest) instead of SHA-256. It guards against corruption, which
   is all a digest in the file itself can do; the source digest stays SHA-256. Interfaces written by
   an older compiler are refused by version and regenerated.
+- Windows x86-64 builds (non-debug) assemble in the compiler too: `compiler/coff.grl` writes COFF
+  objects byte-identical to clang's, `.pdata`/`.xdata` unwind for every function included
+  (`grail asm --target windows-x86_64`). Debug builds keep clang until CodeView is written. Fixed:
+  `movsd` encoded as `movdqu` (the two shared an internal id).
+- **Sized and signed arithmetic no longer divides in software.** The runtime's `rt_div` was a
+  shift-and-subtract loop, and every overflow check of a sized or signed multiply and every sized or
+  signed division and remainder went through it; it is now the hardware divide. jpeg decoding of a
+  2048x2048 image: Grail-LLVM 25.8G -> 6.9G instructions, Grail-native 128G -> 38.6G. A case pins
+  division, remainder and multiplication at the edges of every width (checked and wrapping), and
+  `MIN / -1`, `MIN * -1`, division and remainder by zero and products one past the maximum abort.
+- **The linux-x86_64 release package ships the release-built compiler.** `tools/ci.mjs` builds the
+  compiler with the native backend as before (the bootstrap and fixed point) and then the release
+  compiler from it (`tools/native.mjs release`: LLVM backend and clang -O2, accepted on identical
+  text, objects and a corpus slice), and packages the release one - several times faster at
+  compiling (`check` of a 104 000-line program: 11.2 G against 25.8 G instructions).
+  `GRAIL_SHIP_NATIVE=1` ships the native build. `tools/compile-perf.mjs` measures
+  `GRAIL_RELEASE_COMPILER` beside the dev compiler when it is set.
+
 - Fixed: the per-loop stability fact and the LLVM backend's indirect-call fact both used fact kind
   7, so a stable vector whose slot number matched an indirect call's ordinal (with a loop head
   label of 6 or less) could make the lifter pass that call too few arguments. The stability fact
   is now kind 8.
 - docs: `docs/design/ctfe.md` - an in-compiler evaluator over checked IR for compile-time values (design only).
-
 - **R4: a compile-time probe compiles only what its values reach.** Before the bodies, a probe walks
   the bodies its value functions reach, name by name (a call, a method, a generic's template), and
   compiles only those; one that makes a closure or names `dyn` compiles the whole program, and a link
@@ -35,14 +83,12 @@
   its first word (the record was counted as one argument word); such calls are placed by the
   native C classification again. A typed C call whose loaded argument registers exceed its fact is
   now refused (an error under `--verify-facts`).
-
 - Fixed (release builds): a function calling a blocking `extern "C"` function was left unoptimised
   since the foreign-call marker landed - the marker's locked counter, thread-pointer read and
   register save around `rt_foreign_lost` were text the LLVM lifter refused. It now lifts them
   (`lock incq`/`decq` as `atomicrmw` with the flags of the new value, the save area as words),
   and calls to Grail's own functions no longer trip the vector-register guard meant for C calls.
   tools/test-facts.mjs checks that a blocking-extern caller is lifted.
-
 - `grail check` no longer builds the list of SIMD type names for every identifier it reads: names
   that cannot be one (wrong length, first letter or `x` position) are rejected first. This was 7% of
   checking a large program since the SIMD types arrived.
@@ -83,7 +129,6 @@
   refinement, ...). A check the prover removed is not listed, so what stays in a hot loop is
   visible. The report run is uncached, so a module from the build store cannot hide its checks.
   The compiler's own flag is `--report-checks`.
-
 - **`grail cache warm [--target T]`** checks and builds every standard module into the build store,
   as rustup ships libstd: a project's first check then compiles only its own modules. The installers
   run it (not under DESTDIR), and compile-perf's template store is now a warmed one. Dev compiler,
@@ -108,7 +153,6 @@
   release build now always lowers with the current native compiler, and accepts the result only
   when it compiles the compiler to the same text and the same objects as the native build and its
   programs pass a corpus slice (hello, strings, alloc, thread, sched).
-
 - **`host::chmod(path, mode)`**: sets a file's permission bits, 0 or a positive errno (fchmodat on
   Linux, chmod on macOS, and 0 on Windows, which has no bits to set). The build store will use it to
   give a restored executable image its mode without a shell, once the bootstrap seed knows it.

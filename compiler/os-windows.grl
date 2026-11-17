@@ -284,6 +284,17 @@ fn rt_win_write(handle: u64, buf: u64, len: u64) -> u64 {
         }
         return wrapping_sub(0, 9);
     }
+    return rt_win_write_handle(handle, buf, len);
+}
+// A write to a file or console handle (no descriptor-table entry): what the failure path's report and
+// the profile dump write to, through rt_syscall_low.
+fn rt_win_write_handle(handle: u64, buf: u64, len: u64) -> u64 {
+    if handle == 0 {
+        return wrapping_sub(0, 9);
+    }
+    if rt_win_entry(handle) != 0 {
+        return wrapping_sub(0, 9);
+    }
     scratch := rt_win_scratch();
     raw_store(scratch, 0);
     if raw_win32(WriteFile, handle, buf, len, scratch, 0) == 0 {
@@ -1156,6 +1167,74 @@ fn rt_win_clock(spec: u64) -> u64 {
 fn rt_hard_exit(code: u64) -> u64 {
     raw_win32(TerminateProcess, wrapping_sub(0, 1), code);
     return 0;
+}
+// The runtime's own syscalls (see rt_syscall_low in os-linux.grl): the arms of rt_syscall the
+// failure path and the scheduler use, and none of the file, pipe, directory or socket ones, so what
+// reaches it reaches no Winsock pointer, no heap and no failure through them.
+// Create (or truncate) a regular file to write, and close it: the profile dump's two calls on the
+// failure path. A create never opens a directory, so this is rt_win_open without the enumeration
+// branch (which enrols a descriptor and allocates), and the handle is closed directly.
+fn rt_create_file(path: u64, flags: u64, mode: u64) -> u64 {
+    units := rt_win_wide(0, path);
+    if rt_error(units) {
+        return units;
+    }
+    wide := rt_win_wslot(0);
+    mut access = 1073741824; // GENERIC_WRITE
+    if (flags & 3) == 2 {
+        access = 3221225472; // GENERIC_READ|GENERIC_WRITE
+    }
+    handle := raw_win32(CreateFileW, wide, access, 3, 0, 2, 128, 0); // CREATE_ALWAYS
+    if handle == wrapping_sub(0, 1) {
+        return rt_win_errno();
+    }
+    return handle;
+}
+fn rt_close_file(fd: u64) -> u64 {
+    raw_win32(CloseHandle, fd);
+    return 0;
+}
+fn rt_syscall_low(n: u64, a: u64, b: u64, c: u64) -> u64 {
+    if n == 1 {
+        return rt_win_write_handle(rt_win_handle(a), b, c);
+    }
+    if n == 11 {
+        rt_win_reap(a);
+        return rt_win_unmap(a);
+    }
+    if n == 24 {
+        raw_win32(SwitchToThread);
+        return 0;
+    }
+    if n == 35 {
+        return rt_win_sleep(a);
+    }
+    if n == 39 {
+        return raw_win32(GetCurrentProcessId);
+    }
+    if n == 60 {
+        return raw_win32(ExitProcess, a);
+    }
+    if n == 231 {
+        return raw_win32(ExitProcess, a & 255);
+    }
+    if n == 62 {
+        return 0;
+    }
+    if n == 202 {
+        // Linux futex encoding: FUTEX_WAKE is op bit 0, FUTEX_PRIVATE_FLAG is bit 7.
+        if (b & 128) == 0 {
+            return rt_win_join_wait(a);
+        }
+        if (b & 1) != 0 {
+            return rt_win_wake(a, c);
+        }
+        return rt_win_wait(a, c);
+    }
+    if n == 228 {
+        return rt_win_clock(b);
+    }
+    return wrapping_sub(0, 38);
 }
 fn rt_syscall(n: u64, a: u64, b: u64, c: u64) -> u64 {
     if n == 0 {

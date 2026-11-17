@@ -1,0 +1,77 @@
+module bytes;
+
+// Byte search over byte text, eight bytes per step.
+//
+// A line scanner - the optimiser's, the site table's, the assembler's reader - spends most of its
+// time finding the next newline. One checked index per byte is several instructions a byte; here a
+// word of eight bytes is read at once and tested for the byte with the has-zero-byte identity:
+// with `w` the word XOR the byte repeated eight times, `(w - 0x01..01) & !w & 0x80..80` is non-zero
+// exactly when some byte of `w` is zero, and the lowest flagged byte is the first match. The tail
+// shorter than a word is the text's last word, read again and shifted. Unaligned word reads are
+// what x86-64 and AArch64 do natively.
+
+const ONES: u64 = 72340172838076673;
+const NEG_ONES: u64 = 18374403900871474943;
+const HIGHS: u64 = 9259542123273814144;
+const ALL: u64 = 18446744073709551615;
+
+// Where byte `b` (0 to 255) first occurs in `s` at or after `from`, or `s.len()` when it does not.
+pub fn find_byte<a>(s: &a [u8], from: u64, b: u64) -> u64 {
+    n := s.len();
+    if n <= from {
+        return n;
+    }
+    if n < 8 {
+        mut i = from;
+        while i < n {
+            if u64(s[i]) == b {
+                return i;
+            }
+            i += 1;
+        }
+        return n;
+    }
+    // The view's word is the address of its `{data, len}` header.
+    unsafe {
+        data := ptr_from_addr(u64, ptr_of(&s).cast(u64).read()).read();
+        pattern := (b & 255) * ONES;
+        mut i = from;
+        while i + 8 <= n {
+            w := ptr_from_addr(u64, data + i).read() ^ pattern;
+            found := wrapping_add(w, NEG_ONES) & (w ^ ALL) & HIGHS;
+            if found != 0 {
+                return i + lowest_byte(found);
+            }
+            i += 8;
+        }
+        if i < n {
+            // The last eight bytes, shifted so the first unread one is the low byte; the bytes
+            // shifted in are not the text's and are masked off (a false hit carries only upward,
+            // so the lowest true one is exact).
+            shift := (i - (n - 8)) * 8;
+            w := (ptr_from_addr(u64, data + n - 8).read() >> shift) ^ pattern;
+            found := wrapping_add(w, NEG_ONES) & (w ^ ALL) & (HIGHS >> shift);
+            if found != 0 {
+                return i + lowest_byte(found);
+            }
+        }
+        return n;
+    }
+}
+// The index of the lowest byte whose high bit is set in `found` (which has one set).
+fn lowest_byte(found: u64) -> u64 {
+    mut low = found & wrapping_mul(found, ALL);
+    mut k = 0;
+    if 4294967296 <= low {
+        k = 4;
+        low = low >> 32;
+    }
+    if 65536 <= low {
+        k += 2;
+        low = low >> 16;
+    }
+    if 256 <= low {
+        k += 1;
+    }
+    return k;
+}
