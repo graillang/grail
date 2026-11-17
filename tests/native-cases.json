@@ -8422,6 +8422,7 @@
   },
   {
     "name": "task-sleep-timers-overlap",
+    "timing": true,
     "note": "Green tasks sleep on the platform timer and wake in parallel: eight 30 ms sleeps finish in far less than the serial 240 ms.",
     "source": "use host;\n// Eight sleeping tasks must overlap: a serial sleep would take 8 * 30 ms, and the assertion below\n// fails long before that.\nfn nap(n: u64, unused: u64) -> u64 {\n    host::sleep_ms(30);\n    return n;\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    mut many = Task<u64>[];\n    for i in 8 {\n        many.push(spawn(sc, i, nap));\n    }\n    mut total = 0;\n    while many.len() != 0 {\n        total += join(many.pop()!);\n    }\n    return total;\n}\nfn main() {\n    start := host::now_ms();\n    println(task_scope(0, body));\n    elapsed := host::now_ms() - start;\n    assert(elapsed < 400);\n}\n",
     "stdout": "28\n"
@@ -11347,6 +11348,7 @@
   },
   {
     "name": "pool-split-mut-timing",
+    "timing": true,
     "note": "The measured case for stage 2: the same 3M-u64 CPU-bound workload through the owned chunk split and through the in-place split, best of three. Asserts the copy is gone (one owned chunk at least 1.33x slower than one in-place chunk, both single-job, so no core count can explain it) and that parallelism still pays (eight in-place chunks at least 1.5x faster than one, asserted only above four cores). stderr carries the times; stdout is a fixed token.",
     "files": [
       "tests/pool/split_mut_timing.grl"
@@ -11686,6 +11688,7 @@
   },
   {
     "name": "sched-task-forks-jobs-while-timers-tick",
+    "timing": true,
     "note": "One task per worker forks compute jobs in a loop while a ticker task sleeps 5 ms forty times; the sums prove no job was lost and the ticker's worst gap stays under a bound that only a stalled scheduler exceeds.",
     "files": [
       "tests/sched/task_jobs_timers.grl"
@@ -11701,6 +11704,7 @@
   },
   {
     "name": "sched-job-wait-does-not-hold-a-worker",
+    "timing": true,
     "note": "Every worker's task forks one job that sleeps 300 ms while a ticker task sleeps 10 ms at a time: the sleeping job parks its runner and the waiting task parks too, so the ticker keeps ticking. With jobs on a pool of their own each waiting task put a scheduler thread to sleep and the ticker stalled for the whole 300 ms.",
     "files": [
       "tests/sched/job_wait_in_task.grl"
@@ -11806,6 +11810,7 @@
   },
   {
     "name": "sched-help-stops-when-the-stack-is-low",
+    "timing": true,
     "note": "A task recurses through about 90% of its stack and joins there while a thief runs its forked branch, which forks eight children of about 290 KiB each. They are its own job's work, so leapfrogging may take them, but there is no room for one: the room check makes the waiter park instead of running one into the guard page.",
     "files": [
       "tests/sched/help_depth.grl"
@@ -11872,6 +11877,7 @@
   },
   {
     "name": "sched-join-failure-names-the-user-join",
+    "timing": true,
     "note": "A branch of a user's pool::join, run by another worker, fails. try_join reports the failing statement and, as the join, the user's own pool::join line rather than the fork inside lib/pool.grl (standard-library sites carry bit 62 in the site table and are skipped for that line). The exit note counts one failure, and the stacks it discarded separately.",
     "files": [
       "tests/sched/join_failure_site.grl"
@@ -15179,6 +15185,7 @@
   },
   {
     "name": "thread-sleep-until",
+    "timing": true,
     "source": "use thread;\nuse time;\nfn main() {\n    start := time::now();\n    thread::sleep_until(start.after_ms(60));\n    waited := start.elapsed_ms();\n    println((waited >= 60) && (waited < 1000));\n    // A deadline already past returns at once.\n    thread::sleep_until(start);\n    println(time::now().millis() != 0);\n}\n",
     "modules": [
       "lib/thread.grl",
@@ -15224,6 +15231,7 @@
   },
   {
     "name": "mutex-waiters-park-burn-no-cpu",
+    "timing": true,
     "source": "use host;\nstruct Shared { m: Mutex<u64> }\n// Process user + system time in clock ticks (1/100 s), from /proc/self/stat fields 14 and 15.\nfn cpu_ticks() -> u64 {\n    text := host::read_file(\"/proc/self/stat\");\n    mut i = 0;\n    while text[i] != 41 {\n        i += 1;\n    }\n    mut field = 2;\n    mut total = 0;\n    mut n = 0;\n    while i < text.len() {\n        c := text[i];\n        if c == 32 {\n            if (field == 14) || (field == 15) {\n                total += n;\n            }\n            field += 1;\n            n = 0;\n        } else if (c >= 48) && (c <= 57) {\n            n = n * 10 + u64(c - 48);\n        }\n        i += 1;\n    }\n    return total;\n}\nfn hold<a>(v: (&a mut u64), ms: u64) -> u64 {\n    host::sleep_ms(ms);\n    *v += 1;\n    return *v;\n}\nfn bump<a>(v: (&a mut u64), by: u64) -> u64 {\n    *v += by;\n    return *v;\n}\nfn holder(n: u64, s: (&Shared)) -> u64 {\n    return s.m.lock_with(300, hold);\n}\nfn waiter(n: u64, s: (&Shared)) -> u64 {\n    host::sleep_ms(30);\n    return s.m.lock_with(1, bump);\n}\nfn body<sc>(scope: (&sc Scope<(&Shared)>), s: (&Shared)) -> u64 {\n    mut many = Task<u64>[];\n    many.push(spawn(scope, 0, holder));\n    for i in 8 {\n        many.push(spawn(scope, i, waiter));\n    }\n    mut last = 0;\n    while let Some(t) = many.pop() {\n        r := join(t);\n        if last < r { last = r; }\n    }\n    return last;\n}\nfn main() {\n    s := Shared { m: Mutex::new(0) };\n    before := cpu_ticks();\n    start := host::now_ms();\n    println(task_scope(&s, body));\n    wall := host::now_ms() - start;\n    used := (cpu_ticks() - before) * 10;\n    // Eight waiters through a 300 ms hold: parked, they burn (almost) nothing.\n    println((wall >= 300) && (used < 100));\n}\n",
     "modules": [
       "lib/core.grl"
@@ -15370,6 +15378,7 @@
   },
   {
     "name": "sync-wait-cancelled-by-scope-on-each-primitive",
+    "timing": true,
     "source": "use sync;\nuse time;\nuse host;\n// One waiter on each primitive, its scope cancelled while it waits: a plain wait ends the task as\n// Cancelled, a `_until` form answers Cancelled, and the cancelled scope re-raises nothing.\nstruct Shared { m: Mutex<u64>, c: sync::Condition, l: sync::Latch, b: sync::Barrier, s: sync::Semaphore, rw: sync::RwLock<u64>, out: Mutex<u64[]>, holding: Atomic<u64> }\nfn note<a>(v: (&a mut u64[]), n: u64) -> u64 { v.push(n); return v.len(); }\nfn total<a>(v: (&a mut u64[]), n: u64) -> u64 {\n    mut t = 0;\n    for i in v.len() {\n        t += v[i];\n    }\n    return t;\n}\nfn on_condition(n: u64, s: (&Shared)) -> u64 {\n    return s.c.wait_with(&s.m, 0, |v: (&u64), k: (&u64)| -> bool *v == 99, |v: (&mut u64), k: u64| -> u64 *v);\n}\nfn on_latch(n: u64, s: (&Shared)) -> u64 { s.l.wait(); return 1; }\nfn on_barrier(n: u64, s: (&Shared)) -> u64 { s.b.wait(); return 1; }\nfn on_semaphore(n: u64, s: (&Shared)) -> u64 { return s.s.acquire_with(1, 0, |k: u64| -> u64 k); }\nfn on_sleep(n: u64, s: (&Shared)) -> u64 { time::sleep_ms(5000); return 1; }\nfn on_try_sleep(n: u64, s: (&Shared)) -> u64 {\n    match time::try_sleep_ms(5000) {\n        time::WaitError(e) => { s.out.lock_with(10, note); },\n        unit(u) => {}\n    }\n    return 0;\n}\nfn on_latch_until(n: u64, s: (&Shared)) -> u64 {\n    match s.l.wait_until(time::now().after_ms(5000)) {\n        time::WaitError(e) => {\n            match e {\n                Cancelled => { s.out.lock_with(20, note); },\n                TimedOut => { s.out.lock_with(21, note); }\n            }\n        },\n        unit(u) => {}\n    }\n    return 0;\n}\nfn on_rw_until(n: u64, s: (&Shared)) -> u64 {\n    // Behind the holder for certain: the holder has the read lock before this asks to write.\n    while s.holding.load() == 0 {\n        host::sleep_ms(1);\n    }\n    match s.rw.write_until(time::now().after_ms(5000), 0, |v: (&mut u64), k: u64| -> u64 *v) {\n        time::WaitError(e) => { s.out.lock_with(30, note); },\n        u64(v) => {}\n    }\n    return 0;\n}\nfn holder(n: u64, s: (&Shared)) -> u64 {\n    // Holds the read lock through the cancellation without waiting on anything cancellable, so the\n    // writer below is certainly parked behind it when the scope is cancelled.\n    return s.rw.read_with(0, |v: (&u64), k: u64| -> u64 { s.holding.store(1); until := host::now_ms() + 400; while host::now_ms() < until {} return *v; });\n}\nfn body<sc>(scope: (&sc Scope<(&Shared)>), s: (&Shared)) -> u64 {\n    spawn(scope, 0, holder);\n    spawn(scope, 0, on_condition);\n    spawn(scope, 0, on_latch);\n    spawn(scope, 0, on_barrier);\n    spawn(scope, 0, on_semaphore);\n    spawn(scope, 0, on_sleep);\n    spawn(scope, 0, on_try_sleep);\n    spawn(scope, 0, on_latch_until);\n    spawn(scope, 0, on_rw_until);\n    while s.holding.load() == 0 {\n        host::sleep_ms(1);\n    }\n    host::sleep_ms(100);\n    scope.cancel();\n    return 0;\n}\nfn main() {\n    s := Shared { m: Mutex::new(0), c: sync::condition(), l: sync::latch(1), b: sync::barrier(2), s: sync::semaphore(0), rw: sync::rwlock<u64>(5), out: Mutex::new(u64[]), holding: Atomic::new(0) };\n    start := host::now_ms();\n    println(task_scope(&s, body));\n    println(host::now_ms() - start < 2000);\n    println(s.out.lock_with(0, total));\n}\n",
     "modules": [
       "lib/sync.grl",
@@ -15769,6 +15778,7 @@
   },
   {
     "name": "sched-frame-not-starved-by-background",
+    "timing": true,
     "note": "A background task keeps Background jobs of about 30 ms queued (32 at a time) while the main thread runs Frame passes of 64 short leaves: the worst Frame pass stays within a loose bound of its time alone, at most the cap (2 of 8 workers) plus the forking stack run Background work at once, and host::background_wait_us() reports that the oldest queued Background job has waited.",
     "files": [
       "tests/sched/classes.grl"
@@ -16224,6 +16234,7 @@
   },
   {
     "name": "sched-fork-reaches-a-thief",
+    "timing": true,
     "note": "200 rounds of a fork made while the other workers are parked; the branch that stays waits for a thief to start the forked one (500 ms at most). A worker that found work while searching used to stay counted as searching while it ran it, so its own forks woke nobody and stranded until the timeout; zero rounds may time out.",
     "files": [
       "tests/sched/fork_reaches_thief.grl"
@@ -16996,6 +17007,7 @@
   },
   {
     "name": "sleep-woken-early-rearms-its-timer",
+    "timing": true,
     "note": "A task's sleep that is woken before its deadline (a wake left pending by an earlier wait, or the timer's rounding) re-arms the timer for what is left instead of suspending on the one-shot registration that may already have fired: an I/O-style task sleeping 5 ms at a time beside parallel frames used to hang about one run in four (bench/frame.grl).",
     "files": [
       "tests/sched/task_jobs_timers.grl"
