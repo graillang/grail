@@ -92,15 +92,72 @@ The Windows OS layer implements the operation IDs the portable runtime already u
 | Operation | Win32 calls |
 | --- | --- |
 | read / write / close | `ReadFile`, `WriteFile`, `CloseHandle` (`GetStdHandle` for fd 0..2) |
-| open | `CreateFileA` with Linux access/disposition flags translated |
+| open | `CreateFileW` with Linux access/disposition flags translated |
 | mapped memory | `VirtualAlloc` (`raw_map`), `VirtualFree` (munmap) |
 | process | `ExitProcess`, `GetCurrentProcessId` |
 | time | `GetTickCount64` (monotonic ms), `Sleep` |
-| files/directories | `GetFileAttributesA`, `CreateDirectoryA`, `DeleteFileA`, `RemoveDirectoryA` |
-| startup | `GetCommandLineA` + `GetEnvironmentStringsA`, `SwitchToThread` |
+| files/directories | `GetFileAttributesW`, `CreateDirectoryW`, `DeleteFileW`, `RemoveDirectoryW` |
+| directory stream | `FindFirstFileW`, `FindNextFileW`, `FindClose`, rewritten as a dirent64 stream |
+| startup | `GetCommandLineW` + `GetEnvironmentStringsW`/`FreeEnvironmentStringsW`, `SwitchToThread` |
+| child process | `CreateProcessW` with a UTF-16 command line and environment block |
 | threads | `CreateThread`, `WaitForSingleObject`, `CloseHandle` |
+| sockets | `WSAStartup`/`WSACleanup`, `WSASocketW`, `bind`, `listen`, `accept`, `connect` (ConnectEx), `WSARecv`, `WSASend`, `getsockname`, `setsockopt`, `closesocket` (ws2_32) |
 | address waits | `WaitOnAddress`, `WakeByAddressSingle`, `WakeByAddressAll` (kernelbase.dll) |
 | COM startup | `CoInitializeEx`, `CoUninitialize` (combase.dll) |
+
+No `-A` entry point is reachable from a Grail image. `tools/test-windows.mjs` asserts that against
+every case's object, with the list of ANSI entry points it refuses in `ansiImports`, so a
+`CreateFileA` reintroduced anywhere fails the suite rather than quietly mangling a path.
+
+### Text at the Win32 boundary
+
+One convention, stated once and used everywhere: **every entry point in `os-windows.grl` takes and
+returns UTF-8**, and the wide form exists only between a conversion helper and the call that follows
+it. `rt_cstr` in the portable runtime produces the NUL-terminated UTF-8; `rt_win_wide(slot, utf8)`
+turns it into UTF-16 in a fixed conversion slot and reports the unit count or a negative errno; and
+`rt_win_utf8_of(dst, cap, wide, units)` is the answer in the other direction for `FindFirstFileW`
+results, `GetModuleFileNameW`, `GetCurrentDirectoryW`, the environment block and the command line.
+No call site converts by hand, which is what keeps a new file operation from forgetting.
+
+Conversion lives in one 128 KiB mapping made at startup: five 16 KiB slots, four for UTF-16 (8 KiB
+units each) and one for the UTF-8 of a wide result. The arena is untracked memory claimed at state
+word 3600, so converting costs no user allocation in either direction and `rt_syscall`'s allocation
+path stays untouched. A path of more than 8191 units is refused with `ENAMETOOLONG` rather than
+truncated.
+
+The two directions have deliberately different failure policies:
+
+- **Outbound (a path a program produced)**: invalid UTF-8 is refused with `EINVAL`. No replacement
+  character is ever written into a file name, so a program that builds a name out of bytes that are
+  not text gets an error it can report instead of a differently-spelled file. The encoder rejects
+  overlong forms, bare continuation bytes, truncated sequences, encoded surrogates and code points
+  above U+10FFFF, and encodes a code point above U+FFFF as the surrogate pair UTF-16 requires.
+- **Inbound (text the OS handed us)**: an unpaired surrogate becomes U+FFFD, in
+  `rt_win_wide_cp` and only there. A command line or an environment entry is not something the
+  program can fix by retrying, and refusing `argv[0]` would leave the process with no arguments at
+  all. `rt_win_utf8_of` still refuses such text for a *path result* (a directory entry that cannot
+  be represented is skipped rather than turned into a name that does not exist).
+
+`rt_win_split_w` is the wide command-line splitter: the same CommandLineToArgvW rules as before
+(backslash only escapes a quote, a quote is escaped by doubling the backslashes in front of it) but
+applied to UTF-16 units, with each kept unit re-encoded as UTF-8 as it is written. `rt_win_quote_w`
+is the inverse for `CreateProcessW`, so an argument survives the trip in both directions.
+
+The environment block for a child is UTF-16 and sorted case-insensitively, as `CreateProcessW`
+requires, and the call passes `CREATE_UNICODE_ENVIRONMENT`. Without that flag Windows reads a
+non-NULL block as ANSI bytes, which turns a UTF-16 environment into a one-letter variable name and
+an otherwise empty list - the first bug the wide environment had, and the reason the argument is
+worth stating here.
+
+Directories are the one place where the portable interface and Win32 disagree about what a
+descriptor *is*: the portable layer opens a directory with `open` and reads it with `getdents`.
+`rt_win_open` therefore answers a read-only open of a directory with an enumeration - a tagged
+descriptor in the platform's own list, backed by `FindFirstFileW` - and `rt_syscall(217)` rewrites
+the find results into the Linux `dirent64` record stream the portable decoder already parses (record
+length at 16, type at 18, name at 19), exactly as `darwin.grl` translates `getdirentries64`. The
+attribute query decides which case a path is, not a failed `CreateFileW`: Wine opens a directory
+handle where Windows returns `ERROR_ACCESS_DENIED`, and a platform layer that depended on that
+difference listed nothing at all under Wine.
 
 ### COM interop
 
@@ -136,6 +193,77 @@ COM limits: one static in-process object, a single IID match, no `CoCreateInstan
 no apartment-model or cross-apartment tests (only `CoInitializeEx`/`CoUninitialize` balance).
 `raw_win_call`/`raw_win_local` pass at most four word arguments and no floating-point or
 aggregate parameters. The ARM64 side is static-only because no ARM64 Windows runner exists.
+
+### Sockets
+
+The runtime's socket operations (`rt_syscall` 41 socket, 42 connect, 49 bind, 50 listen, 51
+getsockname, and `rt_accept4`) are Winsock calls. Winsock is started once per process
+(`WSAStartup` 2.2, in state word 3616, one winner under a compare-and-swap and the losers waiting)
+and cleaned up once from the exit paths (`WSACleanup` before `ExitProcess`), so a program that makes
+a hundred connections starts the stack once.
+
+A socket descriptor is a record in the same list the directory enumerations use (kind 1), so the
+portable layer still passes one word around and `rt_win_read`, `rt_win_write`, `rt_win_close` and
+`rt_syscall` are the only places that know a descriptor is not a handle. The record carries the
+socket's `OVERLAPPED` at +32 - one operation per descriptor at a time - plus the byte count and error
+of the last completion, the buffer and length handed to `WSARecv`/`WSASend`, the `WSABUF`, the flags
+word, and a manual-reset event that is both the request's `hEvent` and the handle a waiter blocks on.
+The field list at the top of the socket section in `compiler/os-windows.grl` is the authoritative one.
+
+**Readiness is the operation.** A receive or a send is an overlapped `WSARecv`/`WSASend`; the waiter
+blocks in `WSAGetOverlappedResult` on the request's event, which is the one completion mechanism
+Winsock delivers for every operation, every host and every socket. A task never performs that wait on
+its own worker: it hands the wait to an offload thread and parks, exactly as `host::read_file` does,
+and the reactor wakes it with the offload's completion. `WSA_IO_PENDING` is the ordinary answer for a
+call that completes later and never reaches the task; any other error means the operation was never
+issued, and its errno goes straight back to the caller.
+
+**The completion port is not used for sockets.** Sockets can be joined to the scheduler's port with
+`CreateIoCompletionPort`, and a completion's `lpOverlapped` maps back to the record with one
+subtraction - both were implemented and exercised - but the port then has to be the thing that
+settles the record, and under Wine, the only host that can run these tests, neither a cooperative
+accept nor `AcceptEx` ever posts a completion for one: a port-based waiter would spend its life
+waiting for a packet the host never sends, so the port path was withdrawn together with `AcceptEx`.
+Making sockets completion-port-driven is therefore remaining work, not a limitation of the design:
+it needs a host where a completion is guaranteed, and a generation counter on the record so a late
+packet cannot settle the operation that replaced it.
+
+**connect** is ConnectEx, the only overlapped connect Winsock offers. It requires a bound socket, so
+an unbound one is bound to 0.0.0.0:0 first (a socket the program bound itself answers `WSAEINVAL`,
+which is not an error here), and `SO_UPDATE_CONNECT_CONTEXT` is set afterwards so the handle carries
+the connection's properties. ConnectEx is not an import: Windows' `mswsock.dll` exports it, Wine's
+`ws2_32` and `mswsock` do not, so the runtime asks Winsock for the extension function pointer with
+`WSAIoctl(SIO_GET_EXTENSION_FUNCTION_POINTER)` and caches it in state word 3632. Calling that pointer
+needs seven arguments, which is why `raw_win_call` now takes up to eight word arguments and emits the
+same caller frame `raw_win32` does. If a stack has no ConnectEx, the fallback is a blocking connect on
+an offload thread.
+
+**accept** is a blocking `accept` on an offload thread, and that is a withdrawal rather than a first
+choice. `AcceptEx` was implemented first - accept socket created up front, `SO_UPDATE_ACCEPT_CONTEXT`
+from the listening socket, `getsockname` afterwards - and it completes only while the connection is
+already queued: under Wine it never wakes when the request has to wait for one, so a server built on
+it accepted the first client and then hung. The same is true of a blocking `accept` issued from an
+offload thread while the connection arrives later, which is why an accept loop over concurrently
+connecting clients does not finish under Wine (see *Sockets: what is verified*). A blocking accept on
+a helper thread is what the rest of this platform layer does with a call that blocks, it needs no
+port, and `win-sockets-echo` runs it end to end.
+
+**Limits.** One operation per descriptor at a time (the record holds one `OVERLAPPED`; the portable
+layer never has two tasks reading the same socket). AF_INET only - no IPv6 and no name lookup, as on
+the other targets. Datagram sockets are created but `WSARecvFrom`/`WSASendTo` are not implemented:
+nothing in the portable runtime or `lib/net.grl` reaches them, so they would be dead code. A task
+blocked in a socket operation is not cancellable, because it parks in an offload completion rather
+than a cancellable wait, exactly as `host::read_file` behaves. And the joinable-thread table is still
+15 slots inside the process state block, so a program holding more than 15 blocking host operations
+at once can have a join release a stack it should have waited for; the socket tests stay under it.
+
+**Error mapping** turns Winsock's space into the errno space the portable layer reports:
+`WSAEWOULDBLOCK` to `EAGAIN` (which never surfaces to a task, because every operation here
+completes), `WSAEINPROGRESS`/`WSAEALREADY` to their errno values, `WSAECONNREFUSED` to
+`ECONNREFUSED`, `WSAEADDRINUSE` to `EADDRINUSE`, `WSAENOTSOCK` to `EBADF`, and
+`ERROR_OPERATION_ABORTED` to `ECANCELED`. `WSAECONNRESET`, `WSAECONNABORTED` and
+`ERROR_NETNAME_DELETED` on a *receive* are end of stream (0 bytes), not an error: reading a closed
+connection returns what it got, which is what a portable read loop tests for.
 
 ### Threads and address waits (x86-64)
 
@@ -280,8 +408,9 @@ nonzero entry RVA, a `kernel32.dll` import descriptor and a non-empty exception 
 programs (hello, integer printing, file write/read, full argv list) are compiled and inspected by
 `tools/windows.mjs check`.
 
-ARM64 limits: the runtime gaps (threads, sockets, directory streams, `mremap`, ANSI-only paths,
-integer-only import arguments) are the same as x86-64. Execution is not testable on this host:
+ARM64 limits: the runtime gaps (sockets, threads on ARM64, `CreateProcessW` over seven register
+arguments, integer-only import arguments) are the same as x86-64, and the path layer is shared
+because it is the same source file. Execution is not testable on this host:
 Wine on x86-64 cannot run an ARM64 PE image and `qemu-aarch64-static` is a Linux-ELF emulator, so
 ARM64 acceptance requires an ARM64 Windows host, ARM64 Wine, or a Windows-on-ARM machine.
 
@@ -298,7 +427,8 @@ as Linux ELF (clone/futex), so the portable test itself is cross-checked. For ev
 - the object is `COFF-x86-64` with `IMAGE_FILE_MACHINE_AMD64`, `grail_entry` defined in `.text`,
   and every `__imp_*` reference provided by the generated library;
 - the image is PE32+ console with a nonzero entry RVA and a `kernel32.dll` import descriptor
-  containing `ExitProcess`, `WriteFile`, `GetCommandLineA` and `CreateFileA` where used;
+  containing `ExitProcess`, `WriteFile`, `GetCommandLineW` and `CreateFileW` where used, and no
+  object imports an ANSI entry point from the `ansiImports` list;
 - when Wine is installed, the program's stdout and exit code match the expected values (the
   repository-local `.work/wine-prefix` is used unless `WINEPREFIX` is set);
 - the ARM64 cases produce a `COFF-ARM64` / `IMAGE_FILE_MACHINE_ARM64` object with the page/offset/
@@ -334,11 +464,12 @@ as Linux ELF (clone/futex), so the portable test itself is cross-checked. For ev
   back to it, and the blocking host operations (`host::read_file`, `host::write_file`,
   `host::command`, `host::read_fd`, `host::write_fd`, `host::sleep_ms`) run on a helper thread while
   the task parks, because there is no epoll, eventfd or timerfd. `GRAIL_TASKS=thread` restores the
-  old thread-per-task scheduler as an opt-in. Sockets,
-  directory listing, `exe_path` (`GetModuleFileNameA` is not wired) and `mremap` are missing. Environment lookups walk the
-  pointer table built from `GetEnvironmentStringsA`; `GetEnvironmentVariableA` is unused.
-- **ANSI paths only.** `CreateFileA`/`GetFileAttributesA` truncate non-ANSI names to the active
-  code page; the `*W` APIs and UTF-16 conversion are future work.
+  old thread-per-task scheduler as an opt-in. `mremap` is emulated by allocate-copy-release;
+  sockets on the completion port are still missing.
+- **Paths are UTF-8 with a UTF-16 boundary.** Every file and process entry point is the `-W` one and
+  a name outside the system code page round-trips; see *Text at the Win32 boundary* above.
+- **Long paths are not enabled.** Conversion refuses a path above 8191 units, and the `\\?\` prefix
+  that would lift `MAX_PATH` is neither added nor documented for the user to add.
 - **Command-line quoting** implements the documented backslash/quote rules; `CommandLineToArgvW`
   corner cases and CRT globbing are not tested.
 
@@ -351,9 +482,29 @@ as Linux ELF (clone/futex), so the portable test itself is cross-checked. For ev
    `CreateThread`, joins and address waits are done; an IOCP reactor is not implemented and the
    runtime offloads a blocking host operation to a helper thread instead).
 4. Allocation: `mremap` emulation by allocate-copy-release and a Windows-aware arena policy.
-5. Files and processes: directory streams (`FindFirstFileA`), `GetModuleFileNameA`,
-   `MoveFileA`/remove semantics, and the `*W` APIs with UTF-16 conversion.
+5. Files: `rename` (the runtime has no portable rename operation, so `MoveFileExW` has no caller
+   yet) and file metadata (`stat` beyond existence).
 6. CLI integration: `grail build --target windows-x86_64` currently points at
    `tools/windows.mjs`; the import library writer and PE link could move into the Grail tool.
 7. Runtime acceptance: run the native corpus under Wine, including ownership aborts and UTF-8
    rejection, once unwinding and the error paths exist.
+
+## Sockets: what is verified, and what is not
+
+`win-sockets-echo` runs under Wine and proves the whole path once: `WSAStartup`, an ephemeral
+`bind`, `listen`, an overlapped `ConnectEx` whose completion the reactor delivers, `accept`, an
+overlapped `WSASend` carrying `ping` plus an emoji, the matching `WSARecv`, the reply, a peer close
+read as 0 bytes, and `closesocket` for all three descriptors. `tools/test-windows.mjs` also checks
+the object's import slots, so the Winsock entry points (`WSASocketW`, `WSARecv`, `WSASend`,
+`WSAIoctl`, `bind`, `listen`, `accept`, `setsockopt`, `closesocket`) have to be in the import table
+of an image that uses them.
+
+Open: a server task that accepts in a loop while other tasks connect does not finish under Wine. The
+evidence is narrow and reproducible - a connection that is already queued is accepted, a connection
+that arrives after the accept call never wakes it, whether the call is `AcceptEx` or a blocking
+`accept` on an offload thread, and the client's own `ConnectEx` does complete (it reports a valid
+descriptor). Every piece of the machinery is therefore exercised, but the "accept then wait" shape is
+not, and on Windows hardware it has to be re-measured before this row is called done. The
+completion-port waiter described above is not in the tree for the same reason, and cancellation of a
+task blocked in a socket operation is not implemented either: the task parks in the offload
+completion, which is not a cancellable wait, exactly as `host::read_file` behaves today.

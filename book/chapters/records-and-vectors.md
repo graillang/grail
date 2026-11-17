@@ -7,6 +7,15 @@ are still released when the record ends.
 
 {{example:records}}
 
+A record is held as its words wherever it is held: in the function's frame, inline in the record
+that contains it, and back to back in a vector (`Person[]` stores each `Person`'s words in its
+buffer). Only what a record owns - its strings, vectors and other heap data - is on the heap, never
+the record itself, whether or not it owns anything or implements `Drop`. When a record ends, its
+fields are dropped in place, in declaration order, after its own `drop` if it has one; a vector
+drops its elements in index order. Moving a field out leaves that field empty, so only the rest is
+dropped. A record held in an enum, a closure, a `Mutex`, a `dyn` value or a task result is boxed
+there, and freed with it.
+
 `[10, 20, 30]` is a vector: the first element fixes the element type, and every other element is
 checked against it. Where the context already names a vector type - a typed binding, a parameter, a
 field, a return type, an enclosing literal - the literal takes that type instead, so
@@ -87,12 +96,36 @@ numbers.
   `*r = b`, copies the elements into `a`'s own storage.
 - **`==`** compares element by element (floats as IEEE, so `-0.0 == 0.0`), and an array prints as
   a vector does: `[1, 2, 3]`.
-- **References.** A function takes an array as `&[T; N]` to read it and `&mut [T; N]` to change it;
-  that is one word, the address of the elements.
-- **Not yet.** In this release an array lives in a local: it cannot be a parameter or result by
-  value, a field of a struct, an element of a vector, a type argument or a closure's capture, and
-  its elements are numbers or other arrays. Those come next (docs/design/fixed-arrays.md). An
-  `extern "C" record` field written `[T; N]` still reads as a vector copied out of it.
+- **References and slices.** A function takes an array as `&[T; N]` to read it and `&mut [T; N]`
+  to change it; that is one word, the address of the elements, and the fastest way in. Where a
+  slice is expected, `&a` is one: `&[T]`, `&mut [T]` (for `&mut a`), or `&[u8]` for a `[u8; N]`, and
+  `a[lo: hi]` is a sub-slice. Every slice method works on an array, and `a.copy_from(&v)` copies a
+  vector or slice of exactly `N` elements in (the length is checked as it runs). Until views are
+  pairs in the frame, making a slice from an array allocates its `{pointer, length}` record, so a
+  hot path takes `&[T; N]`.
+- **Where arrays live.** In locals, as fields of structs, tuples and generic records (inline, as a
+  plain record's fields are), and as the elements of a vector: `[f32; 4][]` stores its elements
+  back to back, a C `float[n][4]`, with `push`, `insert`, `remove`, `pop()!`, indexing and
+  iteration. Elements are numbers, C handles and pointers, plain or extern records, or arrays.
+- **C structs.** An `extern "C" record` field `[T; N]` is an array: `d.ids[3]` and `d.ids[3] = 7`
+  work in place, `&d.name` is a `&[u8]`, `d.ids = [1, 2, 3, 4]` assigns it whole, and reading the
+  whole field (`ids := d.ids`) copies it, as reading an embedded C struct does.
+- **By value.** A function can take and return arrays: `fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3]`.
+  An argument is a copy the callee owns (or the array itself, moved, when it is large or owns
+  data). Until results travel in registers, a returned array comes back through one short-lived
+  heap block, so a hot inner function fills a `&mut [T; N]` instead. `extern "C"` functions take
+  and return arrays only as pointers, as C does.
+- **Owned elements.** `[string; 3]`, `[u64[]; 4]`, `[T?; 2]` and arrays of records that own data
+  hold one owner per element. Such an array always moves, drops its elements when it ends,
+  replaces an element by dropping the old one, and reading `a[i]` borrows the element. A literal
+  gives every element; a repeat `[x; N]` of an owner is refused, as for vectors.
+- **Generic length.** A value parameter can be the length: `fn sum<@n: u64>(a: &[f32; n]) -> f32`
+  is inferred from the argument (`sum(&v)` with `v: [f32; 3]` is `sum<3>`), given explicitly
+  (`zeros<4>()`), or a record's own (`struct Mat<@R: u64, @C: u64> { m: [[f32; C]; R] }`). Each
+  length is a specialisation of its own, so `n` is a constant inside the body.
+- **Not yet.** An array cannot be an enum payload or an option (so `pop()` without `!` on a
+  vector of arrays is refused) or a closure's capture, and an array whose elements own data
+  cannot be a struct field or a vector element. Those come next (docs/design/fixed-arrays.md).
 - **Large arrays** live in the frame, as in C. A frame larger than a page is touched a page at a
   time from the top as the function starts, so running out of stack is always reported as
   `stack overflow` and never steps over the guard page; a frame larger than the 1 MiB stack a task
