@@ -264,6 +264,12 @@
   and multiplying. And a float operation on values held in SSE registers works on them directly
   (`subsd %xmm9,%xmm8`) instead of copying both into the scratch pair and the result back. nbody
   executes 27% fewer instructions.
+- **Native backend: three small rewrites.** A local whose address is taken only to load it at once
+  (`leaq -N(%rbp),%R` ... `movq (%R),%R`) is loaded directly, so it can be kept in a register; a
+  shift by a constant uses the immediate, and the run-time check of a constant shift count (or any
+  comparison of two constants) is decided at compile time; an accumulator worked on in %rax
+  (`movq %r12,%rax; xorq ...,%rax; imulq ...,%rax; movq %rax,%r12`) is worked on in its own
+  register. fnv executes 15% fewer instructions, sieve 3%.
 
 - **Native backend: a slice's `data` and `len` live in registers.** The type facts are recorded on
   the native path too, and the optimiser reads F1's slice-descriptor fact: a slice written once at
