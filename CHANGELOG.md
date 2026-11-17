@@ -47,6 +47,14 @@
   specialisations are emitted after the rest) could give two inlined copies of one body the same
   return label, and the output did not assemble. Each unit now numbers its inline sites across all
   its parts; `split-test` checks that no assembly it builds defines a label twice.
+- **`extern "C" blocking fn`**: a foreign function declared `blocking` (a read, a wait, a present)
+  does not take a worker with it. On a worker running a green task, the call hands the worker's
+  queues to a spare thread for its duration and the calling thread keeps the task - C's frames and
+  thread-locals stay where they are - then becomes a spare itself. Spares are reused, there are at
+  most twice the worker count of them, and an idle one exits after a second. Off a worker the
+  declaration changes nothing. x86-64 Linux for now; elsewhere `blocking` is a plain call. The old
+  `rt_blocking_enter` warning ("a blocking foreign call is running on a green task's scheduler
+  thread") is gone with the unsafe hook that produced it.
 
 - Fixed: the internal assembler refused `.hidden` (the runtime's `rt_sites_fill`), so every LLVM
   release build failed at `grail asm`. It now takes `.hidden`, `.protected`, `.internal` and
