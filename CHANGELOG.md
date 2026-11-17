@@ -59,6 +59,11 @@
   function, and a `dead_defs` run on a function unedited since a run that removed nothing is
   skipped; the output is byte-identical. A cold build of the 4,000-function scaling program executes
   3.0% fewer instructions (100.9G -> 97.8G).
+- The macOS arm64 assembler covers the rest of Mach-O: GOT and thread-local-variable loads
+  (`@GOTPAGE`/`@GOTPAGEOFF`, `@TLVPPAGE`/`@TLVPPAGEOFF`), `__thread_bss`/`__thread_vars`,
+  `__cstring`, `.data`, and compact unwind (`__LD,__compact_unwind` from `.cfi_*` frames); objects
+  are held to clang's structurally (`GRAIL_ASM_ORACLE=1` now covers macOS builds). Fixed: `.data` in
+  a macOS build crashed the assembler, and C-string sections had the wrong Mach-O type.
 
 - **`bench-rivals` no longer charts a build that printed the wrong answer.** It already failed the
   run when a build's output differed from C's, but still wrote that build's figures into the

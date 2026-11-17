@@ -505,8 +505,11 @@ for COFF; no Mac is needed to compare objects):
    records (r_address, symbolnum, pcrel, length, extern, type), string table.
 2. `asm_x86` target 4: the A64 encoder with Mach-O sections, `@PAGE`/`@PAGEOFF`, the Darwin
    directives; resolution rules above.
-3. Compact unwind (`__LD,__compact_unwind`) if the compiler starts emitting `.cfi_*` for macOS;
-   today it emits none, and clang adds none.
+3. Done (step 2): GOT and TLV loads, the thread-local sections, `__cstring`, `.data`, and compact
+   unwind from `.cfi_*` (frameless and frame-pointer frames with x19-x28 pairs; a shape needing DWARF
+   is refused, not written as __eh_frame). The compiler emits none of the GOT/TLV/CFI forms for
+   macOS yet; they are held to clang by tests/asm/*-macos-aarch64.s. `GRAIL_ASM_ORACLE=1` compares
+   every macOS corpus object with clang's.
 4. In-process path for `macos-aarch64`, then `macos-x86_64` (the x86 encoder with X86_64_RELOC_*).
 
 ## The order of the remaining work

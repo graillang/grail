@@ -1,6 +1,6 @@
 // Build/test orchestration only. Language checking and instruction selection live in Grail.
 import { cpus } from 'node:os';
-import { compareObjects } from './asm-oracle.mjs';
+import { compareMachO, compareObjects } from './asm-oracle.mjs';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, renameSync, rmSync, statSync, accessSync, linkSync, constants as fsConstants } from 'node:fs';
@@ -201,10 +201,11 @@ export function assembleObject(source, object, target = hostTarget) {
   const flags = target === 'riscv64' ? ['-march=rv64imafd', '-mabi=lp64d'] : [];
   if ((target === 'x86_64' || target === 'aarch64' || target === 'riscv64' || target === 'windows-x86_64' || target === 'macos-aarch64') && internalAssembler) {
     command([internalAssembler, 'asm', ...(target === 'x86_64' ? [] : ['--target', target]), source, '-o', object]);
-    if (process.env.GRAIL_ASM_ORACLE === '1' && target !== 'windows-x86_64' && target !== 'macos-aarch64') {
+    if (process.env.GRAIL_ASM_ORACLE === '1' && target !== 'windows-x86_64') {
       const reference = `${object}.clang.o`;
       command(['clang', `--target=${triples[target]}`, ...flags, '-c', source, '-o', reference]);
-      const diff = compareObjects(readFileSync(reference), readFileSync(object));
+      // Mach-O compares structurally (llvm-readobj's view; tools/asm-oracle.mjs compareMachO).
+      const diff = target === 'macos-aarch64' ? compareMachO(reference, object) : compareObjects(readFileSync(reference), readFileSync(object));
       rmSync(reference);
       if (diff) throw new Error(`internal assembler differs from clang on ${source}: ${typeof diff === 'string' ? diff : diff.message}`);
     }

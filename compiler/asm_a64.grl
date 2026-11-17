@@ -30,6 +30,20 @@ pub fn fx_tprel_hi12() -> u64 {
 pub fn fx_tprel_lo12() -> u64 {
     return 26;
 }
+// Mach-O's GOT and thread-local-variable page and page-offset loads (`@GOTPAGE`, `@GOTPAGEOFF`,
+// `@TLVPPAGE`, `@TLVPPAGEOFF`).
+pub fn fx_got_page() -> u64 {
+    return 28;
+}
+pub fn fx_got_lo12() -> u64 {
+    return 29;
+}
+pub fn fx_tlv_page() -> u64 {
+    return 30;
+}
+pub fn fx_tlv_lo12() -> u64 {
+    return 31;
+}
 pub fn fx_adr21() -> u64 {
     return 27;
 }
@@ -383,6 +397,18 @@ fn page_modifier<a>(o: (&a mut asm_x86::A), kind: u64) -> u64 {
     if asm_x86::at_src(&o, a0, e, view("PAGEOFF")) {
         return fx_lo12();
     }
+    if asm_x86::at_src(&o, a0, e, view("GOTPAGE")) {
+        return fx_got_page();
+    }
+    if asm_x86::at_src(&o, a0, e, view("GOTPAGEOFF")) {
+        return fx_got_lo12();
+    }
+    if asm_x86::at_src(&o, a0, e, view("TLVPPAGE")) {
+        return fx_tlv_page();
+    }
+    if asm_x86::at_src(&o, a0, e, view("TLVPPAGEOFF")) {
+        return fx_tlv_lo12();
+    }
     asm_x86::fail(&mut o, view("unsupported symbol modifier"));
     return kind;
 }
@@ -483,7 +509,15 @@ fn mem<a>(o: (&a mut asm_x86::A), base: (&mut u64), off: (&mut u64), mode: (&mut
     asm_x86::skip(&mut o);
     if asm_x86::peek(&o) == ',' {
         o.at += 1;
-        *off = imm(&mut o);
+        asm_x86::skip(&mut o);
+        c := asm_x86::peek(&o);
+        if (o.macho != 0) && (c != '#') && (c != '-') && ((c < '0') || (c > '9')) {
+            // Mach-O `[xN, sym@PAGEOFF]` (or @GOTPAGEOFF, @TLVPPAGEOFF): the offset is the linker's.
+            label_ref(&mut o, fx_lo12());
+            *off = 0;
+        } else {
+            *off = imm(&mut o);
+        }
         *mode = 1;
     }
     asm_x86::expect(&mut o, ']');
