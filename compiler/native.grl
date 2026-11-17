@@ -27373,17 +27373,23 @@ fn array_literal<a>(c: (&a mut C), ty: u64) -> Val {
 // The largest value a `u64` term can have by the facts: the least literal bound `t < L` (`L - 1`) or
 // `t <= L` among them; -1 when there is none.
 fn pv_upper<a, b>(facts: (&a Atom[]), t: &b [u8]) -> i64 {
-    if pv_digits(view(t)) {
-        return pv_number(view(t));
+    // A term the facts equate with a literal (`n := 256`) is that literal.
+    r := pv_resolve(&facts, view(t));
+    if pv_digits(view(r)) {
+        return pv_number(view(r));
     }
     mut best: i64 = -1;
     for i in facts.len() {
         x := &facts[i];
-        if (x.rel > 1) || !same(view(x.a), view(t)) || !pv_digits(view(x.b)) {
+        if (x.rel > 1) || !same(view(x.a), view(t)) {
+            continue;
+        }
+        bound := pv_resolve(&facts, view(x.b));
+        if !pv_digits(view(bound)) {
             continue;
         }
         mut bad = 0;
-        mut m = pv_k_sum(pv_number(view(x.b)), x.k, &mut bad);
+        mut m = pv_k_sum(pv_number(view(bound)), x.k, &mut bad);
         if x.rel == 0 {
             m = pv_k_sum(m, i64(0) - i64(1), &mut bad);
         }
@@ -27399,6 +27405,24 @@ fn pv_upper<a, b>(facts: (&a Atom[]), t: &b [u8]) -> i64 {
 // that shape. The sum is computed in the integers and refused past 2^40, so the value the machine
 // computes - which wraps in a release build - is the value bounded: nothing in it can wrap.
 fn pv_index_max<a>(c: (&a mut C), facts: (&a Atom[]), lo: u64, hi: u64) -> i64 {
+    return pv_span_bound(&mut c, &facts, lo, hi, false);
+}
+// The value of tokens `lo..hi` when every term in it is a literal or equal to one by the facts
+// (`n * n` with `n := 256` is 65536); -1 otherwise. Same shape and limit as pv_index_max.
+fn pv_span_value<a>(c: (&a mut C), facts: (&a Atom[]), lo: u64, hi: u64) -> i64 {
+    return pv_span_bound(&mut c, &facts, lo, hi, true);
+}
+fn pv_span_term_bound<a, b>(facts: (&a Atom[]), t: &b [u8], exact: bool) -> i64 {
+    if exact {
+        r := pv_resolve(&facts, view(t));
+        if pv_digits(view(r)) {
+            return pv_number(view(r));
+        }
+        return -1;
+    }
+    return pv_upper(&facts, view(t));
+}
+fn pv_span_bound<a>(c: (&a mut C), facts: (&a Atom[]), lo: u64, hi: u64, exact: bool) -> i64 {
     limit: i64 = 1099511627776;
     mut total: i64 = 0;
     mut i = lo;
@@ -27408,7 +27432,7 @@ fn pv_index_max<a>(c: (&a mut C), facts: (&a Atom[]), lo: u64, hi: u64) -> i64 {
         if t.len() == 0 {
             return -1;
         }
-        mut m = pv_upper(&facts, view(t));
+        mut m = pv_span_term_bound(&facts, view(t), exact);
         if (m < 0) || !pv_u64_term(&mut c, view(t)) {
             return -1;
         }
@@ -27419,7 +27443,7 @@ fn pv_index_max<a>(c: (&a mut C), facts: (&a Atom[]), lo: u64, hi: u64) -> i64 {
             if t2.len() == 0 {
                 return -1;
             }
-            m2 := pv_upper(&facts, view(t2));
+            m2 := pv_span_term_bound(&facts, view(t2), exact);
             if (m2 < 0) || !pv_u64_term(&mut c, view(t2)) {
                 return -1;
             }
@@ -44225,7 +44249,16 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
                 pv_add(&mut guard, 0, view(loop_name), view(last), 0);
             }
         } else {
-            last := pv_span_term(&mut c, iter_at, iter_end);
+            mut last = pv_span_term(&mut c, iter_at, iter_end);
+            if (last.len() == 0) & pv_ir_live(&c) {
+                // `for i in n * n`: a count the facts make constant is that literal.
+                mut facts = Atom[];
+                pv_ir_read(&mut c, &mut facts);
+                value := pv_span_value(&mut c, &facts, iter_at, iter_end);
+                if value >= 0 {
+                    decimal(&mut last, u64(value));
+                }
+            }
             if (last.len() != 0) & (loop_name.len() != 0) {
                 pv_add(&mut guard, 0, view(loop_name), view(last), 0);
             }
@@ -44235,6 +44268,14 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         mut grown_to = u8[];
         if range == 0 {
             grown_to = pv_span_term(&mut c, iter_at, iter_end);
+            if (grown_to.len() == 0) & pv_ir_live(&c) {
+                mut facts = Atom[];
+                pv_ir_read(&mut c, &mut facts);
+                value := pv_span_value(&mut c, &facts, iter_at, iter_end);
+                if value >= 0 {
+                    decimal(&mut grown_to, u64(value));
+                }
+            }
             grown = pv_push_loop(&mut c, open, loopend, view(grown_to));
         }
         pv_ir_statement(&mut c, iter_at, c.pos);
