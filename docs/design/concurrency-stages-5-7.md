@@ -730,3 +730,26 @@ from the leaf alone. That is code generation for a recursive function (frame set
 arithmetic) and belongs to the code-generation owners. The scheduler's share is the per-join
 column: 3,563 instructions against rayon's 1,100 and TBB's 900. Most of what is left is the two
 closure environments (`rt_rec`) and the `Pair` (call_abi S6, unboxed 3c), then items 3 and 4.
+
+### Items 3-5 as built (gaps12-join), and where the counters stand
+
+- **Item 3:** a forker that runs its own fork publishes with a release store (no swap), there is
+  one worker lookup per fork, and the scheduler's fast path is one load.
+- **Item 4:** the external slot (scheduler.md, "The external slot"). Join from main went from 6,146
+  to 3,205 instructions, and from about 1.8 us to about 450 ns wall time at load 20-30.
+- **Item 5:** a job handle's closure needs no heap box; the job's frame holds the word the ABI
+  reads. Task records still come from the allocator (the burst row): their lifetime belongs to the
+  scope and the gaps12-sync waiter words, which is the next piece.
+
+| instructions | d58fa04 | gaps12-join now | rayon | oneTBB |
+|---|---:|---:|---:|---:|
+| join on a worker | 4,940 | ~3,100 | 153 | 713 |
+| join from main | 6,146 | 3,205 | (injected) | 719 |
+| job spawn+wait | 2,663 | 1,920 | 1,740 | 894 |
+| fib(20) by join, per join | 5,091 | ~3,250 | ~1,100 | ~900 |
+
+Of the ~3,100 left in a join on a worker, about 1,300 are the three remaining allocations (two
+closure environments and the `Pair`: call_abi S6 and unboxed 3c). Most of the rest is calls between
+small runtime functions that the native backend does not inline (`rt_job_stack`, `rt_list_set`,
+`rt_current`, `rt_worker_self`: 30-50 instructions each, several times per join). Inlining them,
+or the LLVM build doing so (item 6), is what gets the scheduler's own share to rayon's level.

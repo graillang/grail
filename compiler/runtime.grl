@@ -4540,31 +4540,30 @@ fn rt_parallel_split(s: u64, grain: u64, f: u64, env: u64, width: u64) -> u64 {
 // job by then the waiter runs it itself.
 //
 // The closure object cannot stay in the caller's frame, because the handle may outlive a statement
-// and the calling thread keeps running while the job does: `box` is a one-word heap slot holding the
-// object pointer, which is exactly the slot the closure ABI reads (the callee's first argument is
-// the address of a word holding the object). The job owns the object and drops it - calling the
-// environment record's own drop, the same call the frame would have made - before it publishes the
-// result.
-fn rt_parallel_spawn(f: u64, box: u64) -> u64 {
+// and the calling thread keeps running while the job does: the job record keeps the object pointer
+// (argument word 24), and the job's own frame holds the one word the closure ABI reads while it
+// calls (the callee's first argument is the address of a word holding the object). No box is
+// allocated. The job owns the object and drops it - calling the environment record's own drop, the
+// same call the frame would have made - before it publishes the result.
+fn rt_parallel_spawn(f: u64, object: u64) -> u64 {
     rt_jobs_sched();
-    return rt_job_make(rt_job_boxed, box, f, 0, 0);
+    return rt_job_make(rt_job_boxed, 0, f, object, 0);
 }
-// The one-word heap slot the closure ABI reads: rt_job_boxed passes its address as the callee's
-// first argument, and the callee loads the object from it. Made and freed here, so the box belongs
-// to the job's lifetime and no frame owns it.
+// The one-word heap slot the closure ABI reads, for a closure handed to a thread
+// (thread_spawn_raw): the thread's entry passes its address as the callee's first argument.
 fn rt_job_box(object: u64) -> u64 {
     box := rt_alloc(8);
     raw_store(box, object);
     return box;
 }
-fn rt_job_boxed(box: u64, f: u64, unused: u64) -> u64 {
-    if box == 0 {
+fn rt_job_boxed(unused: u64, f: u64, object: u64) -> u64 {
+    if object == 0 {
         return raw_call2(f, 0, 0);
     }
-    r := raw_call2(f, box, 0);
-    obj := raw_load(box);
-    raw_call2(raw_load(obj + 8), obj, 0);
-    rt_free(box);
+    mut slot = object;
+    at := &mut slot;
+    r := raw_call2(f, at, 0);
+    raw_call2(raw_load(object + 8), object, 0);
     return r;
 }
 // `parallel_join(handle)` and a handle's drop: the result word, and the record goes back.

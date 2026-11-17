@@ -32824,7 +32824,8 @@ fn parallel_spawn_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     mut box = imm(&mut c, 0);
     mut target = function.t;
     if closure {
-        // The box is the slot the closure ABI reads: `code(box, ...)` loads the object from it.
+        // The callee reads the object through a one-word slot (`code(slot, ...)`), which the job's
+        // frame provides.
         get(&mut c, function.t, view("%rax"));
         o(&mut c, view("movq (%rax),%rax\n"));
         target = save(&mut c);
@@ -32835,7 +32836,9 @@ fn parallel_spawn_builtin<a>(c: (&a mut C), callee: Val) -> Val {
             // calls the object's own drop (the environment record's) once.
             move_out(&mut c, function);
         }
-        box = apply(&mut c, view("rt_job_box"), one(object));
+        // The job record keeps the object and its frame holds the word the ABI reads
+        // (rt_job_boxed): nothing is allocated for it.
+        box = object;
     }
     mut pargs = two(target, box);
     slot := invoke(&mut c, view("rt_parallel_spawn"), pargs);
