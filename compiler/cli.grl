@@ -968,17 +968,19 @@ fn release_optimise<a, b>(assemble: (&a u8[][]), asm: &b [u8], object: &b [u8], 
     for i in assemble.len() {
         clang.push(item(&assemble, i));
     }
+    // ThinLTO across units (docs/design/separate-compilation.md, "Release builds: ThinLTO across
+    // modules"): the parts are bitcode, and the unit object is one flat archive of the native part
+    // and every part (`L` takes the members of the parts' archive; lld reads no nested archives).
+    clang.push(copy(view("-flto=thin")));
+    clear := u8[][copy(view("rm")), copy(view("-f")), copy(view(object))];
     merge := u8[][
-        tool(view("GRAIL_LINKER"), view("ld.lld")),
-        copy(view("-m")),
-        copy(view(emulation)),
-        copy(view("-r")),
+        tool(view("GRAIL_AR"), view("llvm-ar")),
+        copy(view("qcsDL")),
+        copy(view(object)),
         native_part.copy(),
-        optimised.copy(),
-        copy(view("-o")),
-        copy(view(object))
+        optimised.copy()
     ];
-    return u8[][][clang, merge];
+    return u8[][][clang, clear, merge];
 }
 fn compile_mode<a, b, d, e, g, k>(
     h: (&a Home),
@@ -1075,11 +1077,10 @@ fn compile_mode<a, b, d, e, g, k>(
         pe = 1;
     }
     // The assembler: the compiler's own (`grail asm`, compiler/asm_x86.grl) for a Linux x86-64
-    // build it covers (Linux x86-64, AArch64, RISC-V), clang otherwise (a release build's LLVM
-    // module, macOS, Windows).
-    // Windows debug builds keep clang until the internal assembler writes CodeView.
+    // build it covers (Linux x86-64, AArch64, RISC-V; Windows x86-64), clang otherwise (a release
+    // build's LLVM module, macOS, Windows on Arm).
     internal := (eq(view(target), view("x86_64")) || eq(view(target), view("aarch64")) || eq(view(target), view("riscv64"))
-        || (eq(view(target), view("windows-x86_64")) && (debug == 0)))
+        || eq(view(target), view("windows-x86_64")))
         && (release == 0);
     mut assemble = u8[][tool(view("GRAIL_ASSEMBLER"), view("clang"))];
     if internal {
@@ -2116,6 +2117,14 @@ fn llvm_compile_command<a>(args: (&a u8[][])) -> u64 {
         clang.push(item(&args, i));
         i += 1;
     }
+    // With `-flto=thin` the parts are ThinLTO bitcode and OUT is an archive of them: a relocatable
+    // link of bitcode would run full LTO over this unit alone and close it to the other units.
+    mut thin = false;
+    for c in clang.len() {
+        if eq(view(item(&clang, c)), view("-flto=thin")) {
+            thin = true;
+        }
+    }
     text := host::read_file(view(input));
     mut wanted = text.len() / 4194304 + 1;
     mut cap = host::cpus();
@@ -2143,8 +2152,16 @@ fn llvm_compile_command<a>(args: (&a u8[][])) -> u64 {
         run.push(copy(view("-O2")));
         run.push(copy(view(input)));
         run.push(copy(view("-o")));
-        run.push(copy(view(output)));
-        return host::command(run);
+        if !thin {
+            run.push(copy(view(output)));
+            return host::command(run);
+        }
+        bitcode := cat(view(input), view(".bc"));
+        run.push(bitcode.copy());
+        if host::command(run) != 0 {
+            return 1;
+        }
+        return thin_archive(view(output), &u8[][bitcode]);
     }
     plan := llvm::split_plan(view(text), wanted);
     // Unique to this unit's module: internal functions keep their own names in every part of it.
@@ -2208,6 +2225,9 @@ fn llvm_compile_command<a>(args: (&a u8[][])) -> u64 {
         host::write_file(view(pending), view(bytes));
         host::rename(view(pending), view(item(&destinations, q)));
     }
+    if thin {
+        return thin_archive(view(output), &objects);
+    }
     mut link = u8[][tool(view("GRAIL_LINKER"), view("ld.lld")), copy(view("-m")), copy(view(emulation)), copy(view("-r"))];
     for k in objects.len() {
         link.push(item(&objects, k));
@@ -2215,6 +2235,16 @@ fn llvm_compile_command<a>(args: (&a u8[][])) -> u64 {
     link.push(copy(view("-o")));
     link.push(copy(view(output)));
     return host::command(link);
+}
+// `output` as a fresh archive of `members` (ThinLTO bitcode parts): `r` would update an archive left
+// by an earlier build in place, so it is removed first.
+fn thin_archive<a, b>(output: &a [u8], members: (&b u8[][])) -> u64 {
+    host::remove(output, 0);
+    mut ar = u8[][tool(view("GRAIL_AR"), view("llvm-ar")), copy(view("rcsD")), copy(output)];
+    for k in members.len() {
+        ar.push(item(&members, k));
+    }
+    return host::command(ar);
 }
 fn unit_build_command<a>(args: (&a u8[][])) -> u64 {
     if args.len() == 0 {
@@ -2643,7 +2673,11 @@ fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
         }
         return u64(failed != 0);
     }
-    if link_objects(view(output), view(target), view(emulation), &objects, &link) != 0 {
+    mut thin_cache = u8[];
+    if cache != 0 {
+        thin_cache = path_join(view(cache_base()), view("thinlto"));
+    }
+    if link_objects(view(output), view(target), view(emulation), &objects, &link, view(thin_cache)) != 0 {
         return 1;
     }
     if cache != 0 {
@@ -2704,6 +2738,31 @@ fn unit_links<a>(stem: &a [u8]) -> u8[][] {
     }
     return out;
 }
+// Whether `path` is an archive (`!<arch>`), which is what a release unit is.
+fn is_archive<a>(path: &a [u8]) -> bool {
+    head := host::read_file(path);
+    return (head.len() >= 8) && eq(view(head[0..8]), view("!<arch>\n"));
+}
+// How many ThinLTO backends the link runs: GRAIL_JOBS when it is set, else the processors, at most 8.
+fn thin_jobs() -> u64 {
+    asked := host::env(view("GRAIL_JOBS"));
+    mut n: u64 = 0;
+    for i in asked.len() {
+        if (48 <= asked[i]) && (asked[i] <= 57) {
+            n = n * 10 + u64(asked[i] - 48);
+        }
+    }
+    if n == 0 {
+        n = host::cpus();
+        if 8 < n {
+            n = 8;
+        }
+    }
+    if n == 0 {
+        n = 1;
+    }
+    return n;
+}
 // Add a link input once: two modules may ask for the same library, and the link needs it once.
 fn add_link<a, b>(link: (&a mut u8[][]), input: &b [u8]) -> unit {
     for i in link.len() {
@@ -2718,20 +2777,39 @@ fn add_link<a, b>(link: (&a mut u8[][]), input: &b [u8]) -> unit {
 }
 // One link, from objects already on disk: the cache reuses exactly this, so a cached image and an
 // uncached one are the same link of the same objects.
-fn link_objects<a, b, d, e, g>(
+fn link_objects<a, b, d, e, g, k>(
     output: &a [u8],
     target: &b [u8],
     emulation: &d [u8],
     objects: (&e u8[][]),
-    inputs: (&g u8[][])
+    inputs: (&g u8[][]),
+    thin_cache: &k [u8] = view("")
 ) -> u64 {
     mut link = u8[][
         tool(view("GRAIL_LINKER"), view("ld.lld")),
         copy(view("-m")),
         copy(view(emulation))
     ];
+    // Release units are archives of a native part and ThinLTO bitcode (release_optimise): every
+    // member is part of the program, and the bitcode is optimised across units here.
+    mut thin = false;
+    for i in objects.len() {
+        if is_archive(view(item(&objects, i))) {
+            thin = true;
+        }
+    }
+    if thin {
+        link.push(copy(view("--whole-archive")));
+    }
     for i in objects.len() {
         link.push(item(&objects, i));
+    }
+    if thin {
+        link.push(copy(view("--no-whole-archive")));
+        link.push(cat(view("--thinlto-jobs="), view(decimal(thin_jobs()))));
+        if thin_cache.len() != 0 {
+            link.push(cat(view("--thinlto-cache-dir="), thin_cache));
+        }
     }
     for i in inputs.len() {
         link.push(item(&inputs, i));
@@ -2917,174 +2995,15 @@ fn cache_touch<a, b, d>(root: &a [u8], kind: &b [u8], key: &d [u8]) -> unit {
 // A build or check starts no helper process to hash or file anything: every digest below is
 // `store_hash`, every write is a staging file renamed into place, every copy is a read and a write.
 //
-// The content digest of the store (blob names, source digests, record keys): XXH64 of the bytes
-// under the seeds 0, 1, 2 and 3, as 64 hex digits. Content addressing needs collisions to be
-// improbable, not hard to construct - an attacker who can write the store can write any record -
-// and four independent 64-bit hashes over every byte are that at a few instructions a byte, where
-// SHA-256 in this language costs hundreds. The words are read eight bytes at a time.
-const XP1: u64 = 11400714785074694791;
-const XP2: u64 = 14029467366897019727;
-const XP3: u64 = 1609587929392839161;
-const XP4: u64 = 9650029242287828579;
-const XP5: u64 = 2870177450012600261;
-fn xx_rotl(x: u64, r: u64) -> u64 {
-    return (x << r) | (x >> (64 - r));
-}
-fn xx_round(acc: u64, lane: u64) -> u64 {
-    return wrapping_mul(xx_rotl(wrapping_add(acc, wrapping_mul(lane, XP2)), 31), XP1);
-}
-fn xx_merge(acc: u64, lane: u64) -> u64 {
-    return wrapping_add(wrapping_mul(acc ^ xx_round(0, lane), XP1), XP4);
-}
-// The address of a byte sequence's first byte: the first word of the header its value points to.
-fn bytes_base<a>(data: &a [u8]) -> u64 {
-    mut v: u64 = 0;
-    unsafe {
-        header := ptr_of(&data).cast(u64).read();
-        v = ptr_from_addr(u64, header).read();
-    }
-    return v;
-}
-fn word_at(p: u64) -> u64 {
-    mut v: u64 = 0;
-    unsafe {
-        v = ptr_from_addr(u64, p).read();
-    }
-    return v;
-}
-fn half_at(p: u64) -> u64 {
-    mut v: u64 = 0;
-    unsafe {
-        v = u64(ptr_from_addr(u32, p).read());
-    }
-    return v;
-}
-// XXH64's last steps, from the four lanes of the stripes (or the seed alone for a short input).
-fn xx_finish<a, b>(data: &a [u8], p: u64, from: u64, seed: u64, lanes: (&b u64[])) -> u64 {
-    n := data.len();
-    mut at = from;
-    mut h: u64 = 0;
-    if n >= 32 {
-        h = wrapping_add(wrapping_add(xx_rotl(lanes[0], 1), xx_rotl(lanes[1], 7)), wrapping_add(xx_rotl(lanes[2], 12), xx_rotl(lanes[3], 18)));
-        h = xx_merge(h, lanes[0]);
-        h = xx_merge(h, lanes[1]);
-        h = xx_merge(h, lanes[2]);
-        h = xx_merge(h, lanes[3]);
-    } else {
-        h = wrapping_add(seed, XP5);
-    }
-    h = wrapping_add(h, n);
-    while at + 8 <= n {
-        h = wrapping_add(wrapping_mul(xx_rotl(h ^ xx_round(0, word_at(p + at)), 27), XP1), XP4);
-        at += 8;
-    }
-    if at + 4 <= n {
-        h = wrapping_add(wrapping_mul(xx_rotl(h ^ wrapping_mul(half_at(p + at), XP1), 23), XP2), XP3);
-        at += 4;
-    }
-    while at < n {
-        h = wrapping_mul(xx_rotl(h ^ wrapping_mul(u64(data[at]), XP5), 11), XP1);
-        at += 1;
-    }
-    h = wrapping_mul(h ^ (h >> 33), XP2);
-    h = wrapping_mul(h ^ (h >> 29), XP3);
-    return h ^ (h >> 32);
-}
-fn push_hex64<a>(out: (&a mut u8[]), v: u64) -> unit {
-    mut shift: u64 = 64;
-    while shift != 0 {
-        shift -= 4;
-        out.push(hex_digit((v >> shift) & 15));
-    }
-    return ();
-}
+// The content digest of the store (blob names, source digests, record keys): native::fast_hash as
+// 64 hex digits.
 pub fn store_hash<a>(data: &a [u8]) -> u8[] {
-    n := data.len();
-    mut p: u64 = 0;
-    if n != 0 {
-        p = bytes_base(data);
-    }
-    // Sixteen accumulators: XXH64's four lanes for each of the four seeds, one pass over the words.
-    mut a1 = wrapping_add(XP1, XP2);
-    mut a2 = XP2;
-    mut a3: u64 = 0;
-    mut a4 = wrapping_sub(0, XP1);
-    mut b1 = wrapping_add(a1, 1);
-    mut b2 = wrapping_add(a2, 1);
-    mut b3: u64 = 1;
-    mut b4 = wrapping_add(a4, 1);
-    mut c1 = wrapping_add(a1, 2);
-    mut c2 = wrapping_add(a2, 2);
-    mut c3: u64 = 2;
-    mut c4 = wrapping_add(a4, 2);
-    mut d1 = wrapping_add(a1, 3);
-    mut d2 = wrapping_add(a2, 3);
-    mut d3: u64 = 3;
-    mut d4 = wrapping_add(a4, 3);
-    mut at: u64 = 0;
-    // `at + 32 <= n` cannot overflow (n is a length) and neither can an address inside the data.
-    mut q = p;
-    mut stripes = n / 32;
-    while stripes != 0 {
-        mut w1: u64 = 0;
-        mut w2: u64 = 0;
-        mut w3: u64 = 0;
-        mut w4: u64 = 0;
-        unsafe {
-            w1 = ptr_from_addr(u64, q).read();
-            w2 = ptr_from_addr(u64, wrapping_add(q, 8)).read();
-            w3 = ptr_from_addr(u64, wrapping_add(q, 16)).read();
-            w4 = ptr_from_addr(u64, wrapping_add(q, 24)).read();
-        }
-        w1 = wrapping_mul(w1, XP2);
-        w2 = wrapping_mul(w2, XP2);
-        w3 = wrapping_mul(w3, XP2);
-        w4 = wrapping_mul(w4, XP2);
-        a1 = wrapping_add(a1, w1);
-        a1 = wrapping_mul((a1 << 31) | (a1 >> 33), XP1);
-        a2 = wrapping_add(a2, w2);
-        a2 = wrapping_mul((a2 << 31) | (a2 >> 33), XP1);
-        a3 = wrapping_add(a3, w3);
-        a3 = wrapping_mul((a3 << 31) | (a3 >> 33), XP1);
-        a4 = wrapping_add(a4, w4);
-        a4 = wrapping_mul((a4 << 31) | (a4 >> 33), XP1);
-        b1 = wrapping_add(b1, w1);
-        b1 = wrapping_mul((b1 << 31) | (b1 >> 33), XP1);
-        b2 = wrapping_add(b2, w2);
-        b2 = wrapping_mul((b2 << 31) | (b2 >> 33), XP1);
-        b3 = wrapping_add(b3, w3);
-        b3 = wrapping_mul((b3 << 31) | (b3 >> 33), XP1);
-        b4 = wrapping_add(b4, w4);
-        b4 = wrapping_mul((b4 << 31) | (b4 >> 33), XP1);
-        c1 = wrapping_add(c1, w1);
-        c1 = wrapping_mul((c1 << 31) | (c1 >> 33), XP1);
-        c2 = wrapping_add(c2, w2);
-        c2 = wrapping_mul((c2 << 31) | (c2 >> 33), XP1);
-        c3 = wrapping_add(c3, w3);
-        c3 = wrapping_mul((c3 << 31) | (c3 >> 33), XP1);
-        c4 = wrapping_add(c4, w4);
-        c4 = wrapping_mul((c4 << 31) | (c4 >> 33), XP1);
-        d1 = wrapping_add(d1, w1);
-        d1 = wrapping_mul((d1 << 31) | (d1 >> 33), XP1);
-        d2 = wrapping_add(d2, w2);
-        d2 = wrapping_mul((d2 << 31) | (d2 >> 33), XP1);
-        d3 = wrapping_add(d3, w3);
-        d3 = wrapping_mul((d3 << 31) | (d3 >> 33), XP1);
-        d4 = wrapping_add(d4, w4);
-        d4 = wrapping_mul((d4 << 31) | (d4 >> 33), XP1);
-        q = wrapping_add(q, 32);
-        stripes -= 1;
-    }
-    at = n - n % 32;
+    raw := native::fast_hash(data);
     mut out = u8[];
-    la := u64[a1, a2, a3, a4];
-    lb := u64[b1, b2, b3, b4];
-    lc := u64[c1, c2, c3, c4];
-    ld := u64[d1, d2, d3, d4];
-    push_hex64(&mut out, xx_finish(data, p, at, 0, &la));
-    push_hex64(&mut out, xx_finish(data, p, at, 1, &lb));
-    push_hex64(&mut out, xx_finish(data, p, at, 2, &lc));
-    push_hex64(&mut out, xx_finish(data, p, at, 3, &ld));
+    for i in raw.len() {
+        out.push(hex_digit(u64(raw[i]) >> 4));
+        out.push(hex_digit(u64(raw[i]) & 15));
+    }
     return out;
 }
 // What the store knows about one file without reading it again: its digest, and for a source the

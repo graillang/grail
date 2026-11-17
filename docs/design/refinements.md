@@ -385,7 +385,13 @@ Done (index checks in each benchmark's own functions, `tools/checks-native.mjs`)
 - `grail build --report checks` (the compiler's `--report-checks`): each residual check in the
   program's own functions with location and kind, from the site-table pass (`report_check`).
 
-Next, in order: sort (the clamp `if hi > n { hi = n }`, `tmp := v.copy()` length equality,
+- The loop-invariant pass (`pv_loop_kill_spec`, `pv_spec_check`): a `while` body is compiled under
+  the facts its writes would kill, checked at the body's end (in `block()`); a fact that fails is
+  dropped for that loop and the function is compiled again (`c.retry`). No `continue` in the body;
+  facts are put back after the loop only when it has no `break`. Sort 12 -> 7 checks in `main`.
+
+Next, in order: sort's remaining checks (facts in the right operand of `||`, and the merge step's
+`else` branch); sieve (the clamp `if hi > n { hi = n }`, `tmp := v.copy()` length equality,
 lengths equal across the v/tmp swap - this needs a loop invariant: the body reassigns both vectors,
 so today's loop kill drops their length facts at the head); sieve's `j += i` overflow (a
 loop-carried bound `j <= limit`, `i <= limit`).

@@ -511,7 +511,8 @@ declaration kind meant a new spelling, a new parse rule and a new way to lose a 
 ```
 file   := "GRIF" VERSION:u8 record* trailer
 record := tag:u8 len:VAR payload[len]
-trailer   tag 2: source digest, then 32 raw bytes of SHA-256 over every byte before them
+trailer   tag 2: source digest, then 32 raw bytes of fast_hash over every byte before them
+          (XXH64 under the seeds 0-3, each big-endian; format 11 - format 10 carried SHA-256 there)
 ```
 
 `VAR` is LEB128, so a small count costs one byte. One tag per declaration kind:
@@ -519,7 +520,7 @@ trailer   tag 2: source digest, then 32 raw bytes of SHA-256 over every byte bef
 | tag | record | carries |
 | --- | --- | --- |
 | 1 | `module` | module, source path, `std`/`unsafe`/`host`, overflow mode, target, and the `dyn` ABI |
-| 2 | `trailer` | the source's SHA-256, then the file's own digest |
+| 2 | `trailer` | the source's SHA-256, then the file's own digest (fast_hash: it guards against corruption, as the build store's does) |
 | 3 | `link` | one `extern "C" lib` input |
 | 10 | `type` | kind (struct/record/enum/handle), parameter and lifetime counts, `transfer`/`share`, bounds, requirements, fields with their names, types and refinements |
 | 11 | `alias` | name and the type it denotes |
@@ -1228,6 +1229,26 @@ candidate (`expand_copy`, three levels, a site number per copy). A leaf whose sl
 callee-saved registers is a candidate too: those registers are the caller's in a copy, so the copy
 holds the values in free scratch registers (`rename_register`; a body that also uses a narrower name
 of the register is refused). The size cap is 32 IR lines.
+
+### Release builds: ThinLTO across modules
+
+A release unit is lifted to LLVM and optimised by `clang -O2` per module, so a small function of one
+module stayed a call from every other module (the hash's `write_num` in the map's loop, `core::some`
+in the iterator chain): LLVM inlines only what is in the module it is optimising. Copying small
+bodies into importers (`available_externally`) was the plan; ThinLTO does it with LLVM's own cost
+model and no copy in the interface. `grail llvm-compile` runs `clang -O2 -flto=thin` on each part
+of the unit's module and leaves the parts as bitcode in an archive; `release_optimise` makes the
+unit object one flat archive of its native part and those parts (`llvm-ar qcsDL`: lld reads no
+nested archives); the link takes every member (`--whole-archive`), imports the small bodies across
+units and optimises and generates code in parallel (`--thinlto-jobs`), with its cache in the build
+store (`<store>/thinlto`, beside `llvm-parts`). A function LLVM does not inline keeps its one
+definition in its own module, so nothing changes about what links. The release compiler's own
+build goes the same way (`tools/native.mjs release`).
+
+Measured on `bench/hashmap.grl` (fresh store): 1,235M -> 823M instructions; a cold build 15.6 s ->
+12.6 s (per part, codegen moves to the link and runs in parallel); a rebuild after one function of
+`main` changes 0.66 s -> 0.82 s (the warm ThinLTO link re-imports and re-optimises what the edit
+reaches), against 0.65 s for `cargo build --release` after the same edit of its twin.
 
 ### The frame constant, which was a latent miscompile
 

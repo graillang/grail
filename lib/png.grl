@@ -97,6 +97,66 @@ fn unfilter<a, b>(p: (&a Png), raw: &b [u8], start: u64, x: u64, y: u64) -> u8[]
         prior.push(0);
     }
     mut at = start;
+    // The common layout (whole-byte samples, no channel to add): each row is unfiltered straight
+    // into `out`, one loop per filter type, the prior row read back from `out`.
+    if (depth >= 8) && (img_n == out_n) {
+        fb := filter_bytes;
+        for j in y {
+            filter := raw[at];
+            at += 1;
+            if 4 < filter {
+                return None;
+            }
+            base := out.len();
+            if (filter == 0) || ((filter == 2) && (j == 0)) {
+                for k in nk {
+                    out.push(raw[at + k]);
+                }
+            } else if filter == 1 {
+                for k in nk {
+                    if k < fb {
+                        out.push(raw[at + k]);
+                    } else {
+                        out.push((raw[at + k] + out[base + k - fb]) & 255);
+                    }
+                }
+            } else if filter == 2 {
+                for k in nk {
+                    out.push((raw[at + k] + out[base - nk + k]) & 255);
+                }
+            } else if filter == 3 {
+                for k in nk {
+                    mut left: u64 = 0;
+                    if k >= fb {
+                        left = out[base + k - fb];
+                    }
+                    mut up: u64 = 0;
+                    if j > 0 {
+                        up = out[base - nk + k];
+                    }
+                    out.push((raw[at + k] + ((up + left) >> 1)) & 255);
+                }
+            } else {
+                for k in nk {
+                    mut left: u64 = 0;
+                    mut up: u64 = 0;
+                    mut ul: u64 = 0;
+                    if k >= fb {
+                        left = out[base + k - fb];
+                    }
+                    if j > 0 {
+                        up = out[base - nk + k];
+                        if k >= fb {
+                            ul = out[base - nk + k - fb];
+                        }
+                    }
+                    out.push((raw[at + k] + paeth(left, up, ul)) & 255);
+                }
+            }
+            at += nk;
+        }
+        return Some(out);
+    }
     for j in y {
         mut filter = raw[at];
         at += 1;

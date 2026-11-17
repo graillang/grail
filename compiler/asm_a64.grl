@@ -69,6 +69,10 @@ fn reg<a>(o: (&a mut asm_x86::A)) -> u64 {
         cls = 4;
     } else if c == 's' {
         cls = 5;
+    } else if c == 'q' {
+        cls = 6;
+    } else if c == 'b' {
+        cls = 7;
     } else {
         return 0;
     }
@@ -329,7 +333,8 @@ fn cond<a>(o: (&a mut asm_x86::A), a0: u64, e: u64) -> u64 {
 
 // A label operand: a fixup of `kind` at the instruction about to be emitted. `1f`/`1b` name the
 // next / previous numeric label 1.
-fn label_ref<a>(o: (&a mut asm_x86::A), kind: u64) {
+fn label_ref<a>(o: (&a mut asm_x86::A), kind0: u64) {
+    mut kind = kind0;
     asm_x86::skip(&mut o);
     a0 := o.at;
     e := asm_x86::name_end(&mut o);
@@ -345,6 +350,7 @@ fn label_ref<a>(o: (&a mut asm_x86::A), kind: u64) {
         sym = asm_x86::symbol(&mut o, a0, e);
     }
     o.at = e;
+    kind = page_modifier(&mut o, kind);
     mut add = 0;
     asm_x86::skip(&mut o);
     if (asm_x86::peek(&o) == '+') || (asm_x86::peek(&o) == '-') {
@@ -357,7 +363,28 @@ fn label_ref<a>(o: (&a mut asm_x86::A), kind: u64) {
             add = n;
         }
     }
+    kind = page_modifier(&mut o, kind);
     asm_x86::fixup(&mut o, sym, kind, add);
+}
+
+// Mach-O's `sym@PAGE` (the adrp page) and `sym@PAGEOFF` (the low 12 bits): the fixup kind.
+fn page_modifier<a>(o: (&a mut asm_x86::A), kind: u64) -> u64 {
+    asm_x86::skip(&mut o);
+    if asm_x86::peek(&o) != '@' {
+        return kind;
+    }
+    o.at += 1;
+    a0 := o.at;
+    e := asm_x86::name_end(&mut o);
+    o.at = e;
+    if asm_x86::at_src(&o, a0, e, view("PAGE")) {
+        return fx_adrp();
+    }
+    if asm_x86::at_src(&o, a0, e, view("PAGEOFF")) {
+        return fx_lo12();
+    }
+    asm_x86::fail(&mut o, view("unsupported symbol modifier"));
+    return kind;
 }
 
 // `:lo12:sym` / `#:tprel_hi12:sym` style operands.
@@ -541,6 +568,15 @@ fn addsub<a>(o: (&a mut asm_x86::A), op0: u64, cmp: bool) {
         );
         return ();
     }
+    // Mach-O `add xD, xN, sym@PAGEOFF`: the immediate form with a PAGEOFF12 fixup.
+    save := o.at;
+    if reg(&mut o) == 0 {
+        o.at = save;
+        label_ref(&mut o, fx_lo12());
+        word(&mut o, 0x11000000 | (op << 29) | (sf(d) << 31) | (rn(n) << 5) | rn(d));
+        return ();
+    }
+    o.at = save;
     m := need_reg(&mut o);
     amount := opt_lsl(&mut o);
     if ((d >> 5) == 3) || ((n >> 5) == 3) {
@@ -712,12 +748,17 @@ fn ldst<a>(o: (&a mut asm_x86::A), size0: u64, load0: u64) {
     } else if (t >> 5) == 5 {
         size = 2;
         v = 0x04000000;
+    } else if (t >> 5) == 6 {
+        // A q register: 128 bits, size 0 with opc's high bit (bit 23) and a 16-byte scale.
+        size = 4;
+        v = 0x04800000;
     }
     mut base = 0;
     mut off = 0;
     mut mode = 0;
     mem(&mut o, &mut base, &mut off, &mut mode);
     scale := 1 << size;
+    size = size & 3;
     if (mode == 2) || (mode == 3) {
         mut idx = 1;
         if mode == 2 {
@@ -836,8 +877,245 @@ fn fty(r: u64) -> u64 {
     return 0;
 }
 
+
+// ---- NEON vector forms (the native SIMD lowering, docs/design/simd.md S3) ------------------------
+// A vector operand is `vN.T` with T one of 16b, 8h, 4s, 2d (Q=1) or 8b, 4h, 2s, 1d (Q=0); an element
+// operand is `vN.T[K]`. vector_operand returns 1 + N + 32 * code, the code holding the size
+// (0 b, 1 h, 2 s, 3 d) in bits 0-1, Q in bit 2, bit 3 for an element and its index from bit 8, and
+// bit 4 always (so a vector operand is never 0).
+fn vector_operand<a>(o: (&a mut asm_x86::A)) -> u64 {
+    asm_x86::skip(&mut o);
+    a0 := o.at;
+    if (a0 >= o.le) || (o.src[a0] != 'v') {
+        return 0;
+    }
+    mut i = a0 + 1;
+    mut n = 0;
+    while (i < o.le) && (o.src[i] >= '0') && (o.src[i] <= '9') {
+        n = n * 10 + o.src[i] - '0';
+        i += 1;
+    }
+    if (i == a0 + 1) || (n > 31) || (i >= o.le) || (o.src[i] != '.') {
+        return 0;
+    }
+    i += 1;
+    mut count = 0;
+    while (i < o.le) && (o.src[i] >= '0') && (o.src[i] <= '9') {
+        count = count * 10 + o.src[i] - '0';
+        i += 1;
+    }
+    if i >= o.le {
+        return 0;
+    }
+    c := o.src[i];
+    mut size = 4;
+    if c == 'b' {
+        size = 0;
+    } else if c == 'h' {
+        size = 1;
+    } else if c == 's' {
+        size = 2;
+    } else if c == 'd' {
+        size = 3;
+    }
+    if size == 4 {
+        return 0;
+    }
+    i += 1;
+    if count == 0 {
+        if (i >= o.le) || (o.src[i] != '[') {
+            return 0;
+        }
+        i += 1;
+        mut k = 0;
+        while (i < o.le) && (o.src[i] >= '0') && (o.src[i] <= '9') {
+            k = k * 10 + o.src[i] - '0';
+            i += 1;
+        }
+        if (i >= o.le) || (o.src[i] != ']') {
+            return 0;
+        }
+        o.at = i + 1;
+        return 1 + n + 32 * (16 | 8 | size | (k << 8));
+    }
+    mut q = 0;
+    if count * (8 << size) == 128 {
+        q = 4;
+    } else if count * (8 << size) != 64 {
+        return 0;
+    }
+    o.at = i;
+    return 1 + n + 32 * (16 | q | size);
+}
+fn need_vector<a>(o: (&a mut asm_x86::A)) -> u64 {
+    v := vector_operand(&mut o);
+    if v == 0 {
+        asm_x86::fail(&mut o, view("expected a vector register"));
+    }
+    return v;
+}
+fn vn(v: u64) -> u64 {
+    return (v - 1) & 31;
+}
+fn varr(v: u64) -> u64 {
+    return (v - 1) >> 5;
+}
+fn vq(v: u64) -> u64 {
+    return (varr(v) >> 2) & 1;
+}
+fn vsize(v: u64) -> u64 {
+    return varr(v) & 3;
+}
+// Whether the operand after the mnemonic is a vector register (the vector form of add, fadd, ...).
+fn vector_next<a>(o: (&a mut asm_x86::A)) -> bool {
+    at := o.at;
+    v := vector_operand(&mut o);
+    o.at = at;
+    return v != 0;
+}
+// `op Vd.T, Vn.T, Vm.T`. `kind`: 0 the size in bits 22-23 (integers), 1 the float sz bit 22 (4s 0,
+// 2d 1), 2 no size field (bitwise).
+fn vector_three<a>(o: (&a mut asm_x86::A), base: u64, kind: u64) {
+    d := need_vector(&mut o);
+    comma(&mut o);
+    n := need_vector(&mut o);
+    comma(&mut o);
+    m := need_vector(&mut o);
+    mut sz = 0;
+    if kind == 0 {
+        sz = vsize(d) << 22;
+    } else if kind == 1 {
+        sz = (vsize(d) & 1) << 22;
+    }
+    word(&mut o, base | (vq(d) << 30) | sz | (vn(m) << 16) | (vn(n) << 5) | vn(d));
+}
+// `op Vd.T, Vn.T`, or with kind 3 an across-lanes result in a scalar register (`umaxv b0, v1.16b`).
+fn vector_two<a>(o: (&a mut asm_x86::A), base: u64, kind: u64) {
+    mut dn = 0;
+    if kind == 3 {
+        r := need_reg(&mut o);
+        dn = rn(r);
+    } else {
+        d := need_vector(&mut o);
+        dn = vn(d);
+    }
+    comma(&mut o);
+    n := need_vector(&mut o);
+    mut sz = 0;
+    if (kind == 0) || (kind == 3) {
+        sz = vsize(n) << 22;
+    } else if kind == 1 {
+        sz = (vsize(n) & 1) << 22;
+    }
+    word(&mut o, base | (vq(n) << 30) | sz | (vn(n) << 5) | dn);
+}
+// The vector instructions the native SIMD lowering writes, when the first operand is a vector
+// register; false otherwise (the scalar instruction of the same name encodes the line).
+fn vector_instruction<a>(o: (&a mut asm_x86::A), a0: u64, e: u64) -> bool {
+    if !vector_next(&mut o) {
+        return false;
+    }
+    names := u8[][
+        view("fadd").copy(), view("fsub").copy(), view("fmul").copy(), view("fdiv").copy(),
+        view("add").copy(), view("sub").copy(), view("mul").copy(),
+        view("and").copy(), view("orr").copy(), view("eor").copy(), view("bic").copy(), view("bsl").copy(),
+        view("fcmeq").copy(), view("fcmge").copy(), view("fcmgt").copy(),
+        view("cmeq").copy(), view("cmgt").copy(), view("cmge").copy(), view("cmhi").copy(), view("cmhs").copy(),
+        view("smin").copy(), view("smax").copy(), view("umin").copy(), view("umax").copy()
+    ];
+    bases := u64[
+        0x0e20d400, 0x0ea0d400, 0x2e20dc00, 0x2e20fc00,
+        0x0e208400, 0x2e208400, 0x0e209c00,
+        0x0e201c00, 0x0ea01c00, 0x2e201c00, 0x0e601c00, 0x2e601c00,
+        0x0e20e400, 0x2e20e400, 0x2ea0e400,
+        0x2e208c00, 0x0e203400, 0x0e203c00, 0x2e203400, 0x2e203c00,
+        0x0e206c00, 0x0e206400, 0x2e206c00, 0x2e206400
+    ];
+    kinds := u64[1, 1, 1, 1, 0, 0, 0, 2, 2, 2, 2, 2, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    for i in names.len() {
+        if simple(&o, a0, e, view(names[i])) {
+            vector_three(&mut o, bases[i], kinds[i]);
+            return true;
+        }
+    }
+    if simple(&o, a0, e, view("not")) || simple(&o, a0, e, view("mvn")) {
+        vector_two(&mut o, 0x2e205800, 2);
+        return true;
+    }
+    if simple(&o, a0, e, view("scvtf")) {
+        vector_two(&mut o, 0x0e21d800, 1);
+        return true;
+    }
+    if simple(&o, a0, e, view("dup")) {
+        // `dup Vd.T, Wn|Xn` or `dup Vd.T, Vn.T[K]`.
+        d := need_vector(&mut o);
+        comma(&mut o);
+        size := vsize(d);
+        el := vector_operand(&mut o);
+        if el != 0 {
+            k := (varr(el) >> 8) & 15;
+            imm5 := ((k << 1) | 1) << size;
+            word(&mut o, 0x0e000400 | (vq(d) << 30) | (imm5 << 16) | (vn(el) << 5) | vn(d));
+        } else {
+            r := need_reg(&mut o);
+            word(&mut o, 0x0e000c00 | (vq(d) << 30) | ((1 << size) << 16) | (rn(r) << 5) | vn(d));
+        }
+        return true;
+    }
+    if simple(&o, a0, e, view("ext")) {
+        d := need_vector(&mut o);
+        comma(&mut o);
+        n := need_vector(&mut o);
+        comma(&mut o);
+        m := need_vector(&mut o);
+        comma(&mut o);
+        k := imm(&mut o);
+        word(&mut o, 0x2e000000 | (vq(d) << 30) | (vn(m) << 16) | ((k & 15) << 11) | (vn(n) << 5) | vn(d));
+        return true;
+    }
+    return false;
+}
+// The forms with a scalar first operand: `umaxv`/`uminv`, scalar `faddp`, `umov` from an element.
+fn vector_scalar_instruction<a>(o: (&a mut asm_x86::A), a0: u64, e: u64) -> bool {
+    if simple(&o, a0, e, view("umaxv")) {
+        vector_two(&mut o, 0x2e30a800, 3);
+        return true;
+    }
+    if simple(&o, a0, e, view("uminv")) {
+        vector_two(&mut o, 0x2e31a800, 3);
+        return true;
+    }
+    if simple(&o, a0, e, view("faddp")) {
+        // `faddp Sd, Vn.2s` / `faddp Dd, Vn.2d`: the two lanes added.
+        d := need_reg(&mut o);
+        comma(&mut o);
+        n := need_vector(&mut o);
+        word(&mut o, 0x7e30d800 | ((vsize(n) & 1) << 22) | (vn(n) << 5) | rn(d));
+        return true;
+    }
+    if simple(&o, a0, e, view("umov")) {
+        // `umov Wd, Vn.s[K]`, `umov Xd, Vn.d[K]`, `umov Wd, Vn.b[K]`.
+        d := need_reg(&mut o);
+        comma(&mut o);
+        el := need_vector(&mut o);
+        size := vsize(el);
+        k := (varr(el) >> 8) & 15;
+        imm5 := ((k << 1) | 1) << size;
+        mut q = 0;
+        if size == 3 {
+            q = 1;
+        }
+        word(&mut o, 0x0e003c00 | (q << 30) | (imm5 << 16) | (vn(el) << 5) | rn(d));
+        return true;
+    }
+    return false;
+}
+
 pub fn instruction<a>(o: (&a mut asm_x86::A), a0: u64, e: u64) {
     o.at = e;
+    if vector_instruction(&mut o, a0, e) || vector_scalar_instruction(&mut o, a0, e) {
+        return ();
+    }
     if simple(&o, a0, e, view("mov")) {
         mov(&mut o);
     } else if simple(&o, a0, e, view("add")) {

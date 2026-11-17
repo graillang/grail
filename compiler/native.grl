@@ -1,6 +1,7 @@
 module native;
 use fncache;
 use jobs;
+use bytes;
 use lexer;
 use host;
 use explain;
@@ -247,7 +248,9 @@ struct Closure {
     // the closure with it (next_error). Without it the re-run skipped whichever body happened to be
     // checked last, met the same error again and chained to the 20-run cap.
     body_file: u64,
-    body_pos: u64
+    body_pos: u64,
+    // The specialisation it was written in (`c.current_spec`), 0 outside one.
+    spec: u64
 }
 struct ImplParams {
     decl: u64,
@@ -561,6 +564,9 @@ struct C {
     // `Fn(..)` type, which the checker gives the call's scope (init_parameter): a closure literal
     // that is that whole argument gets its environment in the caller's frame (call ABI S6 (B)).
     lent_arg_at: u64,
+    // Slots holding a closure literal's frame environment built for a lent parameter (S6(B)): passed
+    // to that parameter as they are, never boxed by the S6(A) erase (the callee only borrows it).
+    lent_frames: u64[],
     // The argument words of the call load_call_args last set up and where the text was then; the
     // next `call *%rax` with no call between records them (indirect_fact). And where the function
     // being emitted begins, to number its indirect calls as the lifter does.
@@ -620,6 +626,9 @@ struct C {
     layout_offsets: u64[][],
     // An exported callback's float result: 0 none, 1 f64, 2 f32 (returned in xmm0/d0/fa0).
     export_fret: u64,
+    // 1 while the callback being emitted is entered through callback_thunk (it pins; the body does
+    // not bridge the thread record again).
+    cb_thunked: u64,
     // Set for one cfield_load: another `.field` projection follows this one.
     cfield_more: u64,
     alias_next: u64,
@@ -714,6 +723,8 @@ struct C {
     // Slot holding the host TLS base inside an exported function's body, or 0.
     export_tls: u64,
     export_adopt: u64,
+    // The thread record a callback pinned (tls_enter_callback), for its exits.
+    export_pin: u64,
     // The pass a module-level compile-time form runs in (0 inside a function body).
     ct_pass: u64,
     ct_in_if: bool,
@@ -760,6 +771,10 @@ struct C {
     closures: Closure[],
     fn_thunk_used: u64,
     closure_env: u64,
+    // The specialisation a closure body being emitted belongs to (its `Closure.spec`): the body is
+    // compiled after the specialisation is, with its bindings restored, and callable-bound calls in
+    // it read the template's bounds through this.
+    closure_spec: u64,
     // What the next closure literal is expected to be (closure_hint): its parameter types and result,
     // each NO_TYPE when not known yet.
     hint_params: u64[],
@@ -846,6 +861,19 @@ struct C {
     // 1 while an assignment's target path is read: its last field is written directly (and its
     // predicate owed there), not lent out, so `field_path` records it instead of refusing the loan.
     ref_assign_target: u64,
+    // The loop-invariant pass (docs/design/refinements.md, "Loop invariants"): the facts a `while`
+    // body's writes would kill are kept while the body is compiled, and checked where the body ends.
+    // `pv_spec_open` is the `{` of the body being compiled under them, `pv_spec_cands` the facts kept,
+    // `pv_spec_failed`/`pv_spec_dropped` pair each body with a kept fact it broke: the function is
+    // compiled again without keeping that one.
+    pv_spec_open: u64,
+    // 1 inside a body `func()` compiles, which recompiles itself when a kept fact fails (c.retry):
+    // only there may a loop be compiled under kept facts. `pv_begin` clears it, so a body started
+    // elsewhere (a closure's) never speculates.
+    pv_spec_ok: u64,
+    pv_spec_cands: Atom[],
+    pv_spec_failed: u64[],
+    pv_spec_dropped: Atom[],
     // `--report-checks`: the checks left in the program's own functions, as the site table met
     // them, printed after the build (report_checks_print).
     report_checks: u64,
@@ -2968,10 +2996,7 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
     mut a = 0;
     n := text.len();
     while a < n {
-        mut e = a;
-        while (e < n) && (text[e] != 10) {
-            e += 1;
-        }
+        e := bytes::find_byte(view(text), a, 10);
         if e == n {
             // A last line with no newline is copied as it is.
             break;
@@ -3561,7 +3586,43 @@ fn tls_enter_foreign<a>(c: (&a mut C), slot: u64) -> unit {
 // the matching tls_leave_callback unpublishes and unmaps it, so the thread is again unknown to the
 // runtime once C regains control. Nested callbacks on that thread find the published record and
 // adopt nothing. In a static program the thread pointer already is the record and `slot` is 0.
-fn tls_enter_callback<a>(c: (&a mut C), slot: u64, adopt: u64) -> unit {
+//
+// On x86-64 the record the entry settles on is kept in `pin` (call ABI, the callback thunk): the
+// pin count is incremented and decremented through it, instead of choosing between rt_tls_record
+// and the thread pointer again at each end.
+fn tls_enter_callback<a>(c: (&a mut C), slot: u64, adopt: u64, pin: u64) -> unit {
+    if c.target == 0 {
+        o(&mut c, view("xorl %eax,%eax\nmovq %rax,"));
+        stack_slot(&mut c, slot);
+        o(&mut c, view("\nmovq %rax,"));
+        stack_slot(&mut c, adopt);
+        c.out.push(10);
+        other := label(&mut c);
+        have := label(&mut c);
+        pinned := label(&mut c);
+        o(&mut c, view("cmpq $0,rt_state+184(%rip)\n"));
+        jump(&mut c, view("je"), other);
+        o(&mut c, view("movq %fs:rt_tls_record@tpoff,%rsi\ntestq %rsi,%rsi\n"));
+        jump(&mut c, view("jne"), have);
+        call_out(&mut c, view("rt_adopt_record"));
+        o(&mut c, view("movq %rax,"));
+        stack_slot(&mut c, adopt);
+        o(&mut c, view("\nmovq %rax,%rsi\n"));
+        tls_record_address(&mut c);
+        o(&mut c, view("movq %rsi,(%rax)\n"));
+        mark(&mut c, have);
+        o(&mut c, view("movq %rsi,"));
+        stack_slot(&mut c, pin);
+        c.out.push(10);
+        jump(&mut c, view("jmp"), pinned);
+        mark(&mut c, other);
+        o(&mut c, view("movq %fs:0,%rsi\nmovq %rsi,"));
+        stack_slot(&mut c, pin);
+        c.out.push(10);
+        mark(&mut c, pinned);
+        o(&mut c, view("addq $1,120(%rsi)\n"));
+        return ();
+    }
     o(&mut c, view("xorl %eax,%eax\nmovq %rax,"));
     stack_slot(&mut c, slot);
     o(&mut c, view("\nmovq %rax,"));
@@ -3675,8 +3736,92 @@ fn callback_pin<a, b>(c: (&a mut C), op: &b [u8]) -> unit {
 // Leave a callback: restore the caller's thread pointer, then, if this entry adopted the thread,
 // clear `rt_tls_record` (now on the caller's TCB, so the TLS word is addressable) and unmap the
 // record. Runs before the return value is loaded, so it may clobber any register.
-fn tls_leave_callback<a>(c: (&a mut C), slot: u64, adopt: u64) -> unit {
-    callback_pin(&mut c, view("subq"));
+// Whether callback_thunk can stand in front of this callback: every parameter is a register word
+// or a float (none on the stack: the thunk's own return address and saved word sit between C's
+// stack arguments and the body), none is a C record by value or by `&mut`, and the result is not
+// a record.
+fn callback_thunkable<a>(c: (&a mut C), count: u64, ret: u64) -> bool {
+    mut ints = 0;
+    mut floats = 0;
+    for i in count {
+        ty := c.locals[i].ty;
+        if (is_c_record(&mut c, ty) != 0) || (ffi_record_out_param(&mut c, ty) != 0) || ffi_byval(&mut c, ty) {
+            return false;
+        }
+        if is_float(&mut c, ty) {
+            floats += 1;
+        } else {
+            if ffi_words(&mut c, ty) != 1 {
+                return false;
+            }
+            ints += 1;
+        }
+    }
+    if (6 < ints) || (8 < floats) {
+        return false;
+    }
+    if (ret != 1) && (ty_kind(&mut c, ret) == 8) {
+        return false;
+    }
+    return true;
+}
+// The frameless entry of a C callback (x86-64): the body is entered with the registers C called
+// with. The fast path is the thread's record found (threaded process) or the thread pointer
+// (static program); pinned through it, the body called with the record saved on the stack (which
+// also keeps the call 16-byte aligned), unpinned. A thread C created has no record: the framed
+// path saves the argument registers, adopts one (rt_adopt_record) and publishes it in
+// rt_tls_record, calls the body pinned, then unpublishes and releases it.
+fn callback_thunk<a, b, d>(c: (&a mut C), symbol: &b [u8], body: &d [u8]) -> unit {
+    stat := label(&mut c);
+    pin := label(&mut c);
+    slow := label(&mut c);
+    o(&mut c, view(symbol));
+    o(&mut c, view(":\ncmpq $0,rt_state+184(%rip)\n"));
+    jump(&mut c, view("je"), stat);
+    o(&mut c, view("movq %fs:rt_tls_record@tpoff,%rax\ntestq %rax,%rax\n"));
+    jump(&mut c, view("je"), slow);
+    jump(&mut c, view("jmp"), pin);
+    mark(&mut c, stat);
+    o(&mut c, view("movq %fs:0,%rax\n"));
+    mark(&mut c, pin);
+    o(&mut c, view("addq $1,120(%rax)\npushq %rax\ncall "));
+    o(&mut c, view(body));
+    o(&mut c, view("\npopq %rcx\nsubq $1,120(%rcx)\nret\n"));
+    mark(&mut c, slow);
+    o(&mut c, view("pushq %rbp\nmovq %rsp,%rbp\nsubq $128,%rsp\nmovq %rdi,(%rsp)\nmovq %rsi,8(%rsp)\nmovq %rdx,16(%rsp)\nmovq %rcx,24(%rsp)\nmovq %r8,32(%rsp)\nmovq %r9,40(%rsp)\n"));
+    for x in 8 {
+        o(&mut c, view("movq %xmm"));
+        on(&mut c, x);
+        o(&mut c, view(","));
+        on(&mut c, 56 + x * 8);
+        o(&mut c, view("(%rsp)\n"));
+    }
+    o(&mut c, view("call rt_adopt_record\nmovq %rax,48(%rsp)\nmovq %rax,%rsi\n"));
+    tls_record_address(&mut c);
+    o(&mut c, view("movq %rsi,(%rax)\naddq $1,120(%rsi)\nmovq (%rsp),%rdi\nmovq 8(%rsp),%rsi\nmovq 16(%rsp),%rdx\nmovq 24(%rsp),%rcx\nmovq 32(%rsp),%r8\nmovq 40(%rsp),%r9\n"));
+    for x in 8 {
+        o(&mut c, view("movq "));
+        on(&mut c, 56 + x * 8);
+        o(&mut c, view("(%rsp),%xmm"));
+        on(&mut c, x);
+        c.out.push(10);
+    }
+    o(&mut c, view("call "));
+    o(&mut c, view(body));
+    // The result (rax, rdx, xmm0) survives the unpin and the release.
+    o(&mut c, view("\nmovq %rax,(%rsp)\nmovq %rdx,8(%rsp)\nmovq %xmm0,16(%rsp)\nmovq 48(%rsp),%rdi\nsubq $1,120(%rdi)\n"));
+    tls_record_address(&mut c);
+    o(&mut c, view("xorl %ecx,%ecx\nmovq %rcx,(%rax)\nmovq 48(%rsp),%rdi\ncall rt_release_record\nmovq (%rsp),%rax\nmovq 8(%rsp),%rdx\nmovq 16(%rsp),%xmm0\nleave\nret\n"));
+    return ();
+}
+fn tls_leave_callback<a>(c: (&a mut C), slot: u64, adopt: u64, pin: u64) -> unit {
+    if c.target == 0 {
+        o(&mut c, view("movq "));
+        stack_slot(&mut c, pin);
+        o(&mut c, view(",%rax\nsubq $1,120(%rax)\n"));
+    } else {
+        callback_pin(&mut c, view("subq"));
+    }
     tls_leave(&mut c, slot);
     done := label(&mut c);
     o(&mut c, view("movq "));
@@ -4745,16 +4890,52 @@ fn release_call_args<a>(c: (&a mut C), area: u64) -> unit {
 // The LLVM backend's FFI fact for a C function this body calls (call ABI S8a): its integer argument
 // words, its float arguments in order (bit k of the mask set when the k-th is an f32) and its result
 // (0 an integer word or none, 1 f64, 2 f32). Only for x86-64 SysV calls whose every argument is in
-// a register and whose result is a scalar: the lifter then emits the call with those C types, so
-// the floats travel in the vector registers the platform ABI puts them in.
-fn ffi_signature_fact<a, b, d>(c: (&a mut C), argtypes: (&b u64[]), ret: u64, symbol: &d [u8], abi: u64) -> unit {
+// a register (records passed byval by their eightbyte classes) and whose result is a scalar: the
+// lifter then emits the call with those C types, so the floats travel in the vector registers the
+// platform ABI puts them in.
+fn ffi_signature_fact<a, b, d, e>(c: (&a mut C), argtypes: (&b u64[]), formals: (&e u64[]), ret: u64, symbol: &d [u8], abi: u64, area: u64) -> unit {
     if (c.backend == 0) || (c.validating != 0) || (c.target != 0) || (abi != 0) {
         return ();
     }
+    // A record passed `byval` crosses per its SysV classification (ffi_byval_mode, the same decision
+    // the native call placement makes): each INTEGER eightbyte is one more integer word, each SSE
+    // eightbyte one more vector register, passed as a double so its bits (one f64, or two f32) cross
+    // whole. A record in memory (over 16 bytes, or out of registers) keeps the native call.
     mut ints = 0;
     mut floats = 0;
     mut mask = 0;
+    mut memory = u8[];
     for i in argtypes.len() {
+        if (i < formals.len()) && ffi_byval(&mut c, formals[i]) {
+            inner := ty_arg(&mut c, formals[i]);
+            d := ty_arg(&mut c, inner);
+            size := ffi_record_size(&mut c, d);
+            words := ffi_align_up(size, 8) / 8;
+            leaves := ffi_leaves(&mut c, d, 0);
+            decision := ffi_byval_mode(&mut c, abi, size, words, &leaves, ints, floats);
+            if decision[0] == 0 {
+                continue;
+            }
+            if decision[0] == 2 {
+                // MEMORY: the record's words go in the outgoing area, in argument order.
+                if 255 < words {
+                    return ();
+                }
+                memory.push(words);
+                continue;
+            }
+            if decision[0] != 5 {
+                return ();
+            }
+            for e in decision.len() - 1 {
+                if decision[1 + e] == 1 {
+                    floats += 1;
+                } else {
+                    ints += 1;
+                }
+            }
+            continue;
+        }
         ty := argtypes[i];
         if is_float(&mut c, ty) {
             if is_f32(&mut c, ty) {
@@ -4778,7 +4959,15 @@ fn ffi_signature_fact<a, b, d>(c: (&a mut C), argtypes: (&b u64[]), ret: u64, sy
             result = 2;
         }
     }
-    llvm::fact_ffi(&mut c.facts, copy_bytes(view(symbol)), ints, floats, mask, result);
+    // The outgoing area must be exactly the MEMORY records (no scalar argument overflowed into it).
+    mut mwords = 0;
+    for k in memory.len() {
+        mwords += u64(memory[k]);
+    }
+    if (16 * ((mwords + 1) / 2) != area) || (7 < memory.len()) {
+        return ();
+    }
+    llvm::fact_ffi(&mut c.facts, copy_bytes(view(symbol)), ints, floats, mask, result, memory);
     return ();
 }
 // The signature fact for the body being emitted: its argument words, six in
@@ -5107,6 +5296,19 @@ fn borrow_parameter<a>(c: (&a mut C), slot: u64, ty: u64) -> Val {
     return val(slot, ty);
 }
 fn own<a>(c: (&a mut C), slot: u64, ty: u64) -> Val {
+    // S6(A) backstop: a slot that holds a framed closure (its frame words' address) re-owned as an
+    // erased closure (a boxed object's word) without going through move_as would hand a frame
+    // address to whatever drops or keeps the erased value. Every such conversion boxes, so this is
+    // a compiler bug, caught here at compile time rather than as a use after free.
+    if (c.raw == 0) && (ty_kind(&mut c, base_type(&mut c, ty)) == 20) && (closure_record(&mut c, ty) == ty) {
+        held := resource(&mut c, slot);
+        if held != 0 {
+            was := c.resources[held - 1].ty;
+            if (closure_record(&mut c, was) != was) && framed(&mut c, was) {
+                fail(&mut c, view("internal: a closure held in the frame was retyped as a boxed closure without being boxed (S6(A) erase missed)"));
+            }
+        }
+    }
     materialise(&mut c, slot, ty);
     if c.raw == 0 {
         drops := needs_drop(&mut c, ty);
@@ -7287,6 +7489,7 @@ fn drop_name<a>(c: (&a mut C), ty: u64) -> unit {
 // that request is part of naming the helper, made again whenever the helper is named again, so it
 // is not recorded separately.
 fn drop_ref_name<a>(c: (&a mut C), ty: u64) -> u8[] {
+    ty := closure_record(&mut c, ty);
     fn_reg_drop(&mut c, ty);
     c.drop_refs.push(ty);
     rec := exchange(&mut c.fn_rec, 0);
@@ -10570,6 +10773,32 @@ fn pv_ir_wrote<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
         return ();
     }
     c.pv_kill_log.push(copy_bytes(view(name)));
+    // What the name tied together survives it: from `X == A + p` and `X == B + q`, with X a term of
+    // the name and A, B not, `A == B + (q - p)`. Sorting a pair of vectors by swapping them keeps
+    // `v.len == n` through `tmp.len == v.len` this way.
+    mut ties_t = u8[][];
+    mut ties_x = u8[][];
+    mut ties_k = i64[];
+    for i in c.pv_facts.len() {
+        x := &c.pv_facts[i];
+        if x.rel != 2 {
+            continue;
+        }
+        am := pv_mentions(view(x.a), view(name));
+        bm := pv_mentions(view(x.b), view(name));
+        if am & !bm & (x.b.len() != 0) {
+            // a == b + k: the name's term a is b + k.
+            ties_x.push(x.a.copy());
+            ties_t.push(x.b.copy());
+            ties_k.push(x.k);
+        }
+        if bm & !am {
+            // a == b + k: the name's term b is a - k.
+            ties_x.push(x.b.copy());
+            ties_t.push(x.a.copy());
+            ties_k.push(0 - x.k);
+        }
+    }
     mut keep = u64[];
     for i in c.pv_facts.len() {
         x := &c.pv_facts[i];
@@ -10577,6 +10806,19 @@ fn pv_ir_wrote<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
         keep.push(u64(!hit));
     }
     pv_ir_keep(&mut c, &keep);
+    for i in ties_t.len() {
+        for j in i + 1..ties_t.len() {
+            if !same(view(ties_x[i]), view(ties_x[j])) || same(view(ties_t[i]), view(ties_t[j])) {
+                continue;
+            }
+            // X == Ti + ki and X == Tj + kj: Ti == Tj + (kj - ki).
+            mut bad = 0;
+            k := pv_k_sum(ties_k[j], 0 - ties_k[i], &mut bad);
+            if bad == 0 {
+                pv_add(&mut c.pv_facts, 2, view(ties_t[i]), view(ties_t[j]), k);
+            }
+        }
+    }
     return ();
 }
 // The pure tests a predicate may use: spelled like a method call, but they read their receiver and
@@ -10674,6 +10916,149 @@ fn pv_caps_kill<a>(c: (&a mut C)) -> unit {
 // the second iteration a fact that held at the loop's entry no longer holds there. So every name the
 // body assigns, mutably borrows or method-calls is killed here, before the body's block opens; the
 // guard's own facts are added by the block that follows, and are true at every iteration.
+// The loop-invariant pass, at the end of a `while` body compiled under kept facts: each must hold
+// again where the body falls through to the guard. A body that cannot fall through (it ends in a
+// `return` or a `break`) keeps them for free. One that fails marks the loop, and the function is
+// compiled again with the kill (c.retry); the bytes of this attempt are discarded.
+fn pv_spec_check<a>(c: (&a mut C), brace: u64) -> unit {
+    if c.terminated != 0 {
+        return ();
+    }
+    mut facts = Atom[];
+    pv_ir_read(&mut c, &mut facts);
+    // Every kept fact that does not hold again is dropped for this loop, and the function is
+    // compiled again under the others; the dropped list only grows, so this ends.
+    mut any = false;
+    for i in c.pv_spec_cands.len() {
+        x := &c.pv_spec_cands[i];
+        if !pv_holds(&facts, x.rel, view(x.a), view(x.b), x.k) {
+            c.pv_spec_failed.push(brace);
+            c.pv_spec_dropped.push(copy_atom_value(&x));
+            any = true;
+        }
+    }
+    if any {
+        exchange(&mut c.retry, 1);
+    }
+    return ();
+}
+// Whether a loop body leaves the length of the local `name` alone: every mention is an element
+// (`name[...]`) or the length itself (`name.len()`), and no closure in the body could reach it.
+fn pv_len_untouched<a, b>(c: (&a mut C), open: u64, end: u64, name: &b [u8]) -> bool {
+    if find_local(&mut c, view(name)) == 0 {
+        return false;
+    }
+    mut i = open + 1;
+    while i < end {
+        k := kind_at(&mut c, i);
+        if k == 124 {
+            return false;
+        }
+        if (k == 1) && same(view(tok_text(&mut c, i)), view(name)) && !((i > 0) && (kind_at(&mut c, i - 1) == 46)) {
+            nk := kind_at(&mut c, i + 1);
+            if nk != 91 {
+                if !((nk == 46) && is_at(&mut c, i + 2, view("len")) && (kind_at(&mut c, i + 3) == 40)) {
+                    return false;
+                }
+            }
+        }
+        i += 1;
+    }
+    return true;
+}
+// Whether the tokens of a body hold a `continue`: a second way back to the guard, which the check
+// at the body's end does not see. Such a loop is not compiled under kept facts.
+fn pv_has_continue<a>(c: (&a mut C), open: u64, end: u64) -> bool {
+    mut i = open + 1;
+    while i < end {
+        if (kind_at(&mut c, i) == 1) && is_at(&mut c, i, view("continue")) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+// `if X > B { X = B; }` with no `else`, `X` a name and `B` a term that does not mention it: either
+// way `X <= B` after it - the branch made it so, and its negation said so.
+fn pv_clamp<a>(c: (&a mut C), cond_at: u64, cond_end: u64) -> unit {
+    if !pv_ir_live(&c) || (cond_end < cond_at + 3) || (kind_at(&mut c, cond_at) != 1) || (kind_at(&mut c, cond_at + 1) != 62) {
+        return ();
+    }
+    x := tok_text(&mut c, cond_at);
+    b := pv_span_term(&mut c, cond_at + 2, cond_end);
+    if (b.len() == 0) || pv_mentions(view(b), view(x)) {
+        return ();
+    }
+    blen := cond_end - cond_at - 2;
+    at := cond_end;
+    if (kind_at(&mut c, at) != 123) || !same(view(tok_text(&mut c, at + 1)), view(x)) || (kind_at(&mut c, at + 2) != 61) {
+        return ();
+    }
+    for i in blen {
+        if !same(view(tok_text(&mut c, at + 3 + i)), view(tok_text(&mut c, cond_at + 2 + i))) {
+            return ();
+        }
+    }
+    if (kind_at(&mut c, at + 3 + blen) != 59) || (kind_at(&mut c, at + 4 + blen) != 125) {
+        return ();
+    }
+    if (kind_at(&mut c, at + 5 + blen) == 1) && is_at(&mut c, at + 5 + blen, view("else")) {
+        return ();
+    }
+    pv_add(&mut c.pv_facts, 1, view(x), view(b), 0);
+    return ();
+}
+// Whether a body holds a `break` of its own loop (or of an inner one: counted conservatively).
+fn pv_has_break<a>(c: (&a mut C), open: u64, end: u64) -> bool {
+    mut i = open + 1;
+    while i < end {
+        if (kind_at(&mut c, i) == 1) && is_at(&mut c, i, view("break")) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+// The kill of a `while` loop under the invariant pass: what the kill removes is put back as the
+// candidates the body's end must re-establish, unless this body failed that before.
+fn pv_loop_kill_spec<a>(c: (&a mut C), open: u64, end: u64) -> unit {
+    if !pv_ir_live(&c) {
+        return ();
+    }
+    if (c.pv_spec_ok == 0) || pv_has_continue(&mut c, open, end) {
+        pv_loop_kill(&mut c, open, end);
+        return ();
+    }
+    mut before = Atom[];
+    pv_ir_read(&mut c, &mut before);
+    pv_loop_kill(&mut c, open, end);
+    mut after = Atom[];
+    pv_ir_read(&mut c, &mut after);
+    mut cands = Atom[];
+    for i in before.len() {
+        x := &before[i];
+        if (x.rel > 2) || pv_holds(&after, x.rel, view(x.a), view(x.b), x.k) {
+            continue;
+        }
+        // A fact this loop's body broke on an earlier attempt is not kept again.
+        mut dropped = false;
+        for d in c.pv_spec_failed.len() {
+            y := &c.pv_spec_dropped[d];
+            if (c.pv_spec_failed[d] == open) && (y.rel == x.rel) && (y.k == x.k) && same(view(y.a), view(x.a)) && same(view(y.b), view(x.b)) {
+                dropped = true;
+            }
+        }
+        if !dropped {
+            cands.push(copy_atom_value(&x));
+        }
+    }
+    for i in cands.len() {
+        pv_add(&mut c.pv_facts, cands[i].rel, view(cands[i].a), view(cands[i].b), cands[i].k);
+    }
+    exchange(&mut c.pv_spec_cands, cands);
+    exchange(&mut c.pv_spec_open, open);
+    return ();
+}
 fn pv_loop_kill<a>(c: (&a mut C), open: u64, end: u64) -> unit {
     if !pv_ir_live(&c) {
         return ();
@@ -10791,6 +11176,18 @@ fn pv_ir_value<a, b>(c: (&a mut C), name: &b [u8], lo: u64, hi: u64) -> unit {
         return ();
     }
     pv_bind_bounds(&mut c, view(name), lo, hi);
+    // `x := y` and `x := y.copy()` with `y` a vector local: the two have one length.
+    if (kind_at(&mut c, lo) == 1) && ((hi == lo + 1) || ((hi == lo + 5) && (kind_at(&mut c, lo + 1) == 46) && is_at(&mut c, lo + 2, view("copy")) && (kind_at(&mut c, lo + 3) == 40))) {
+        src := tok_text(&mut c, lo);
+        l := find_local(&mut c, view(src));
+        if (l != 0) && (ty_kind(&mut c, local_ty(&mut c, l - 1)) == 6) && !same(view(src), view(name)) {
+            mut a = copy_bytes(view(name));
+            push_bytes(&mut a, view(".len"));
+            mut b = src.copy();
+            push_bytes(&mut b, view(".len"));
+            pv_add(&mut c.pv_facts, 2, view(a), view(b), 0);
+        }
+    }
     // `v := T[]`: an empty vector, whose length a counted push loop then states (pv_push_loop).
     if (hi == lo + 3) & (kind_at(&mut c, lo) == 1) & (kind_at(&mut c, lo + 1) == 91) & (kind_at(&mut c, lo + 2) == 93) {
         mut len = copy_bytes(view(name));
@@ -11022,6 +11419,7 @@ fn pv_ir_range<a, b>(c: (&a mut C), out: (&a mut Atom[]), name: &b [u8], lo: u64
 // caller proved it, which is what a proved call means), and nothing of this body is left behind for
 // the next one the compile emits.
 fn pv_begin<a>(c: (&a mut C)) -> unit {
+    exchange(&mut c.pv_spec_ok, 0);
     exchange(&mut c.pv_on, 0);
     exchange(&mut c.pv_kill_log, u8[][]);
     exchange(&mut c.pv_indexed, u8[][]);
@@ -12307,10 +12705,14 @@ fn param_callable<a>(c: (&a mut C), ty: u64) -> u64 {
 // For a specialisation's binding `alias` of a callable-bound parameter: the bound with the
 // specialisation's bindings substituted, or NO_TYPE.
 fn spec_callable_signature<a>(c: (&a mut C), alias: u64) -> u64 {
-    if (c.current_spec == 0) || (c.current_spec > c.specs.len()) {
+    mut spec = c.current_spec;
+    if spec == 0 {
+        spec = c.closure_spec;
+    }
+    if (spec == 0) || (spec > c.specs.len()) {
         return NO_TYPE;
     }
-    template := c.specs[c.current_spec - 1].template;
+    template := c.specs[spec - 1].template;
     for j in c.bindings.len() {
         if c.bindings[j] == alias {
             if j < c.funcs[template].constraints.len() {
@@ -12324,6 +12726,47 @@ fn spec_callable_signature<a>(c: (&a mut C), alias: u64) -> u64 {
         }
     }
     return NO_TYPE;
+}
+// In a specialisation, a value typed by a closure expression's own type that a callable-bound
+// parameter was bound to - a capture of it, or a closure body's copy of it - is typed by that
+// binding (the alias), as the body's other types are; closure types are unique per literal.
+fn spec_closure_alias<a>(c: (&a mut C), ty: u64) -> u64 {
+    if ((c.current_spec == 0) && (c.closure_spec == 0)) || (ty_kind(&mut c, ty) != 20) || (ty_env(&mut c, ty) == 0) {
+        return ty;
+    }
+    for j in c.bindings.len() {
+        b := c.bindings[j];
+        if (b != NO_TYPE) && (ty_kind(&mut c, b) == 10) && (base_type(&mut c, b) == ty) {
+            return b;
+        }
+    }
+    return ty;
+}
+// The type a call of a callable-bound value takes: in a specialisation the closure's own environment
+// (so the call is direct) with the bound's signature under the specialisation's bindings (`T`, `U`
+// as the body sees them, so arguments and result line up); in a template the bound itself.
+fn callable_calltype<a>(c: (&a mut C), pty: u64, bound: u64) -> u64 {
+    if ty_kind(&mut c, pty) != 10 {
+        // A capture of the parameter inside a specialisation's closure: its type is the template's,
+        // so the bound is read with the specialisation's bindings.
+        if (c.current_spec != 0) && (c.validating == 0) && (c.bindings.len() != 0) {
+            bindings := copy_numbers(&c.bindings);
+            return bind_types(&mut c, bound, &bindings);
+        }
+        return bound;
+    }
+    sig := spec_callable_signature(&mut c, pty);
+    if sig == NO_TYPE {
+        return bound;
+    }
+    if ty_kind(&mut c, bound) == 20 {
+        return intern_env(&mut c, 20, ty_arg(&mut c, sig), ty_mode(&mut c, bound), type_regions(&mut c, bound), type_args(&mut c, sig), ty_env(&mut c, bound));
+    }
+    // A named function given for F: called through its pointer with the bound's signature.
+    if ty_kind(&mut c, bound) == 12 {
+        return intern_args(&mut c, 12, ty_arg(&mut c, sig), 0, u64[], type_args(&mut c, sig));
+    }
+    return bound;
 }
 // The callable bound of the type parameter `formal` of function `f` (index), or NO_TYPE.
 fn callable_formal<a>(c: (&a mut C), f: u64, formal: u64) -> u64 {
@@ -13403,6 +13846,18 @@ fn require_interfaces<a, b, d>(c: (&a mut C), arguments: (&b u64[]), sets: (&d u
                 }
                 if (same_type(&mut c, given, bound) == 0) && (closure_converts(&mut c, given, bound) == 0)
                     && (same_type(&mut c, given, aliased) == 0) && (closure_converts(&mut c, given, aliased) == 0) {
+                    // The precise reasons first, as for an erased closure parameter: the call mode,
+                    // then the bounds on what it captured.
+                    if (ty_kind(&mut c, given) == 20) && (ty_kind(&mut c, bound) == 20) && (ty_env(&mut c, given) != 0) {
+                        gm := ty_mode(&mut c, given);
+                        bm := ty_mode(&mut c, bound);
+                        if ((gm & CLOSURE_FNMUT) != 0) & ((bm & CLOSURE_FNMUT) == 0) {
+                            fail(&mut c, view("a closure that mutates a captured value is FnMut, not Fn: this callable bound is `Fn`"));
+                        }
+                        if !closure_bounds_hold(&mut c, given, bm & CLOSURE_BOUNDS) {
+                            closure_bound_fail(&mut c, given, bm & CLOSURE_BOUNDS);
+                        }
+                    }
                     if !((ty_kind(&mut c, given) == 12) && (ty_kind(&mut c, bound) == 20)) {
                         mut msg = copy_bytes(view("this argument does not meet the callable bound `"));
                         push_bytes(&mut msg, view(source_type_name(&mut c, bound)));
@@ -17905,8 +18360,8 @@ fn ffi_emit_call<a, b, d, e, f>(
         on(&mut c, floats);
         o(&mut c, view(",%eax\n"));
     }
-    if (symbol.len() != 0) && (area == 0) && (fixed == args.len()) && (rmode == 0) && (copies == 0) {
-        ffi_signature_fact(&mut c, argtypes, ret, view(symbol), abi);
+    if (symbol.len() != 0) && (fixed == args.len()) && (rmode == 0) && (copies == 0) {
+        ffi_signature_fact(&mut c, argtypes, formals, ret, view(symbol), abi, area);
     }
     if symbol.len() == 0 {
         if c.target == 0 {
@@ -18932,6 +19387,10 @@ fn fn_regs_decode<a, b, d>(c: (&a mut C), data: &b [u8], ok: (&d mut u64)) -> Fn
         } else if kind == 3 {
             data := iface_rs(&mut p);
             out.push(FnReg { kind: 3, template: 0, types: u64[], data: data });
+        } else if kind == 4 {
+            // A result adapter the body names (result_adapter): its shape code.
+            code := iface_rv(&mut p);
+            out.push(FnReg { kind: 4, template: code, types: u64[], data: u8[] });
         } else {
             exchange(ok, 0);
             return out;
@@ -19074,6 +19533,8 @@ fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), l
             drop_symbol_known(&mut c, types[0]);
         } else if kind == 3 {
             fx_unit_replay(&mut c, view(regs[i].data), text_at, at, claim_alloc, claim_panic);
+        } else if kind == 4 {
+            box_thunk_add(&mut c, template);
         } else {
             specialize(&mut c, template, &types);
         }
@@ -20557,6 +21018,19 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             c.out.push(10);
         }
         o(&mut c, view("addq $168,%rsp\npopq %rsi\npopq %rdi\nret\n"));
+    } else if (export == 2) && (c.target == 0) && tls_bridge(&mut c) && callback_thunkable(&mut c, count, ret) {
+        // A callback whose arguments all arrive in registers gets a frameless entry (call ABI, the
+        // callback thunk): it pins the thread's record, calls the body - the same function under
+        // `<symbol>_grail_body`, entered with C's registers untouched - and unpins. Only a thread
+        // C created (no record yet) takes the framed path that adopts one around the call.
+        push_bytes(&mut body_symbol, view("_grail_body"));
+        if exported(&mut c, view(name)) != 0 {
+            o(&mut c, view(".globl "));
+            o(&mut c, view(export_symbol));
+            c.out.push(10);
+        }
+        callback_thunk(&mut c, view(export_symbol), view(body_symbol));
+        exchange(&mut c.cb_thunked, 1);
     } else {
         if exported(&mut c, view(name)) != 0 {
             o(&mut c, view(".globl "));
@@ -20569,6 +21043,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     exchange(&mut c.boxed, u64[]);
     exchange(&mut c.word_refs, u64[]);
     exchange(&mut c.temps, u64[]);
+        exchange(&mut c.lent_frames, u64[]);
     // A function with refined parameters is two: the body, `<name>.proved`, which a proved call
     // enters and which checks nothing, and `<name>`, a wrapper emitted after it that checks the
     // parameters and calls the body (ref_wrapper). Both are ordinary functions to every later pass.
@@ -20622,7 +21097,27 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         o(&mut c, view(",%rsp\n"));
     }
     if export == 2 {
-        callback_params(&mut c, count);
+        // A thunked body whose parameters are all full words (no float, nothing C passes narrow)
+        // takes them exactly as a Grail function does, so it is stored like one and carries a
+        // signature fact: the LLVM backend lifts it (call ABI, the callback thunk).
+        // (Not in a raw `unsafe module`, whose bodies keep multi-word values the facts do not
+        // describe: those keep the callback text, which the lifter leaves native as before.)
+        mut words_only = (c.cb_thunked != 0) && (c.raw == 0);
+        for i in count {
+            pty := c.locals[i].ty;
+            if is_float(&mut c, pty) || (ffi_narrow(&mut c, pty).len() != 0) {
+                words_only = false;
+            }
+        }
+        if (ret != 1) && is_float(&mut c, ret) {
+            words_only = false;
+        }
+        if words_only {
+            store_params(&mut c, count);
+            signature_fact(&mut c, count);
+        } else {
+            callback_params(&mut c, count);
+        }
         mut fret = 0;
         if ret != 1 {
             if is_float(&mut c, ret) {
@@ -20711,12 +21206,15 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     }
     mut tls_slot = 0;
     mut adopt_slot = 0;
-    if (export == 2) & tls_bridge(&mut c) {
+    mut pin_slot = 0;
+    if (export == 2) & tls_bridge(&mut c) & (exchange(&mut c.cb_thunked, 0) == 0) {
         tls_slot = fresh(&mut c);
         adopt_slot = fresh(&mut c);
-        tls_enter_callback(&mut c, tls_slot, adopt_slot);
+        pin_slot = fresh(&mut c);
+        tls_enter_callback(&mut c, tls_slot, adopt_slot, pin_slot);
         exchange(&mut c.export_tls, tls_slot);
         exchange(&mut c.export_adopt, adopt_slot);
+        exchange(&mut c.export_pin, pin_slot);
     }
     // An `unsafe fn`'s body sits one level down: raw pointers and foreign calls in it need no inner
     // `unsafe` block, and the caller owes the block instead.
@@ -20727,13 +21225,16 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // The facts of this body start at its entry, where a refined parameter holds because the entry
     // checked it or the caller proved it (what a proved call means), and they are this body's alone.
     pv_begin(&mut c);
+    exchange(&mut c.pv_spec_ok, 1);
     block(&mut c);
+    exchange(&mut c.pv_spec_ok, 0);
     pv_end(&mut c);
     if unsafe_fn != 0 {
         exchange(&mut c.unsafe_depth, depth);
     }
     exchange(&mut c.export_tls, 0);
     exchange(&mut c.export_adopt, 0);
+    exchange(&mut c.export_pin, 0);
     if c.terminated == 0 {
         callback_copy_back(&mut c);
     }
@@ -20745,7 +21246,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     }
     cleanup(&mut c, 0);
     if tls_slot != 0 {
-        tls_leave_callback(&mut c, tls_slot, adopt_slot);
+        tls_leave_callback(&mut c, tls_slot, adopt_slot, pin_slot);
     }
     frame_limit(&mut c);
     o(&mut c, view("xorq %rax,%rax\nleave\nret\n.set "));
@@ -28175,7 +28676,27 @@ fn fx_unknown_why<a>(c: (&a mut C), k: u64) -> u8[] {
             return c.fx_edge_why[e].copy();
         }
     }
+    // A named callee with neither a body in this run nor a summary it read: a run given part of a
+    // program (`grail OUT.s main.grl` without the runtime's sources) cannot see what it does.
+    for e in c.fx_edge_from.len() {
+        if (c.fx_edge_from[e] == k) & (c.fx_edge_name[e].len() != 0) & (c.fx_edge_to[e] == 0) & ((c.fx_edge_kind[e] & 1) != 0) {
+            mut out = copy_bytes(view("`"));
+            push_bytes(&mut out, view(c.fx_edge_name[e]));
+            push_bytes(&mut out, view("`, whose body and effect summary this run does not have: compile it with the program (the runtime's sources for an `rt_` function), or use `grail build`"));
+            return out;
+        }
+    }
     return u8[];
+}
+// Whether the unknown edge of record `k` is a call by name (a callee this run cannot see) rather than
+// through a function value or a vtable.
+fn fx_unknown_named<a>(c: (&a C), k: u64) -> bool {
+    for e in c.fx_edge_from.len() {
+        if (c.fx_edge_from[e] == k) & (c.fx_edge_to[e] == 0) & ((c.fx_edge_kind[e] & 1) != 0) {
+            return c.fx_edge_name[e].len() != 0;
+        }
+    }
+    return false;
 }
 // Where a chain of witnesses ends (at most `spending` links): the record whose fact is its own, or
 // came through an edge nothing names. `panic` picks the failure chain.
@@ -28247,14 +28768,22 @@ fn fx_report<a>(c: (&a mut C)) -> unit {
                 push_bytes(&mut msg, view("` performs a heap allocation"));
                 push_bytes(&mut msg, view("\n = move the allocation out of the function, or keep the attribute off it"));
             } else {
-                push_bytes(&mut msg, view("` performs a heap allocation: it makes an indirect call the compiler cannot follow"));
+                if fx_unknown_named(&c, k) {
+                    push_bytes(&mut msg, view("` performs a heap allocation: it makes a call the compiler cannot follow"));
+                } else {
+                    push_bytes(&mut msg, view("` performs a heap allocation: it makes an indirect call the compiler cannot follow"));
+                }
                 why := fx_unknown_why(&mut c, k);
                 if why.len() != 0 {
                     push_bytes(&mut msg, view(" (the target is "));
                     push_bytes(&mut msg, view(why));
                     push_bytes(&mut msg, view(")"));
                 }
-                push_bytes(&mut msg, view("\n = a call through a function value or a vtable may allocate; name the callee, or keep the attribute off"));
+                if fx_unknown_named(&c, k) {
+                    push_bytes(&mut msg, view("\n = this run sees the call but not the callee; give it the callee's source or summary"));
+                } else {
+                    push_bytes(&mut msg, view("\n = a call through a function value or a vtable may allocate; name the callee, or keep the attribute off"));
+                }
                 at_file = fx_unknown_file_of(&mut c, k);
                 at_pos = fx_unknown_pos_of(&mut c, k);
             }
@@ -28290,14 +28819,22 @@ fn fx_report<a>(c: (&a mut C)) -> unit {
                 push_bytes(&mut msg, view("` can fail"));
                 push_bytes(&mut msg, view("\n = prove the check away, or keep the attribute off the function"));
             } else {
-                push_bytes(&mut msg, view("` can fail: it makes an indirect call the compiler cannot follow"));
+                if fx_unknown_named(&c, k) {
+                    push_bytes(&mut msg, view("` can fail: it makes a call the compiler cannot follow"));
+                } else {
+                    push_bytes(&mut msg, view("` can fail: it makes an indirect call the compiler cannot follow"));
+                }
                 why := fx_unknown_why(&mut c, k);
                 if why.len() != 0 {
                     push_bytes(&mut msg, view(" (the target is "));
                     push_bytes(&mut msg, view(why));
                     push_bytes(&mut msg, view(")"));
                 }
-                push_bytes(&mut msg, view("\n = a call through a function value or a vtable may fail; name the callee, or keep the attribute off"));
+                if fx_unknown_named(&c, k) {
+                    push_bytes(&mut msg, view("\n = this run sees the call but not the callee; give it the callee's source or summary"));
+                } else {
+                    push_bytes(&mut msg, view("\n = a call through a function value or a vtable may fail; name the callee, or keep the attribute off"));
+                }
                 at_file = fx_unknown_file_of(&mut c, k);
                 at_pos = fx_unknown_pos_of(&mut c, k);
             }
@@ -28963,10 +29500,12 @@ fn rec_store<a>(c: (&a mut C), base: u64, k: u64, value: u64) -> unit {
 // compare, print or drop a field. Enum tags and payloads, closure objects and `dyn` cells are words
 // by position and keep calling rec_load/rec_store directly.
 // The byte offset field `k` of the record `ty` starts at (stage 7: C layout - declared order, each
-// field at its natural alignment). A record that is not held as its words (a closure environment,
-// a C record, an enum's block) keeps a word per field.
+// field at its natural alignment). A record that is not held as its words (a C record, an enum's
+// block) keeps a word per field, and so does a closure environment (S6(A): framed, but its body and
+// its capture code address capture k at word 2 + k).
 fn field_offset<a>(c: (&a mut C), ty: u64, k: u64) -> u64 {
-    if !framable(&mut c, ty) || is_array(&mut c, ty) {
+    ty := closure_record(&mut c, ty);
+    if !framable(&mut c, ty) || is_array(&mut c, ty) || closure_env_record(&mut c, ty) {
         return k * 8;
     }
     at := field_layout(&mut c, ty);
@@ -28982,7 +29521,10 @@ fn member_bytes<a>(c: (&a mut C), ft: u64) -> u64 {
     return narrow_width(&mut c, t);
 }
 fn member_align<a>(c: (&a mut C), ft: u64) -> u64 {
-    t := base_type(&mut c, ft);
+    t := base_type(&mut c, closure_record(&mut c, ft));
+    if closure_env_record(&mut c, t) {
+        return 8;
+    }
     if is_array(&mut c, t) {
         return member_align(&mut c, ty_arg(&mut c, t));
     }
@@ -29019,6 +29561,11 @@ fn round_up(n: u64, align: u64) -> u64 {
 // The bytes a value held as its words takes: a record's fields laid out and rounded up to its
 // alignment, then its live word (stage 4) if it has one.
 fn value_bytes<a>(c: (&a mut C), ty: u64) -> u64 {
+    // A closure held as its environment record (S6(A)): a word per field.
+    ty := closure_record(&mut c, ty);
+    if closure_env_record(&mut c, ty) {
+        return c.decls[ty_arg(&mut c, ty)].count * 8;
+    }
     if is_array(&mut c, ty) {
         return array_bytes(&mut c, ty);
     }
@@ -29039,7 +29586,7 @@ fn value_bytes<a>(c: (&a mut C), ty: u64) -> u64 {
 }
 // The offsets table of a record that holds plain records inline, worked out once per type.
 fn field_layout<a>(c: (&a mut C), alias: u64) -> u64 {
-    ty := base_type(&mut c, alias);
+    ty := base_type(&mut c, closure_record(&mut c, alias));
     while c.layout_offsets.len() <= ty {
         c.layout_offsets.push(u64[]);
     }
@@ -29084,6 +29631,7 @@ fn field_layout<a>(c: (&a mut C), alias: u64) -> u64 {
 // Layout is a property of the type alone, never of the module being compiled: the drop helpers are
 // emitted after the last (raw) module, and they must lay a vector out as everyone else does.
 fn plain<a>(c: (&a mut C), alias: u64) -> bool {
+    alias := closure_record(&mut c, alias);
     if is_simd(&mut c, alias) {
         return true;
     }
@@ -29207,6 +29755,21 @@ fn inline_payload<a>(c: (&a mut C), ety: u64, pty: u64) -> bool {
     p := base_type(&mut c, pty);
     return (ty_kind(&mut c, p) == 8) && framed(&mut c, p);
 }
+// S6(A): a closure value whose type is a closure expression's own (it names its environment record)
+// is that record, held like any framed record - words in the frame, copied on a move, dropped in
+// place - so every layout question about it is a question about the environment record. A closure
+// type from a signature (no environment) stays a word (a boxed object).
+fn closure_record<a>(c: (&a mut C), alias: u64) -> u64 {
+    // A specialisation's binding of a closure type is an alias of it (kind 10).
+    ty := base_type(&mut c, alias);
+    if (ty_kind(&mut c, ty) == 20) && (c.raw == 0) {
+        env := ty_env(&mut c, ty);
+        if env != 0 {
+            return env;
+        }
+    }
+    return alias;
+}
 fn container_record<a>(c: (&a mut C), ty: u64) -> bool {
     if ty_kind(&mut c, ty) != 8 {
         return false;
@@ -29216,9 +29779,19 @@ fn container_record<a>(c: (&a mut C), ty: u64) -> bool {
     if (d.is_enum != 0) || (d.c_layout != 0) || (d.opaque != 0) {
         return false;
     }
+    // A closure's environment holds each capture in a word of its own (the closure body and the
+    // capture code address them so), so it is never a container of inline records - though it is
+    // itself framed (layout_bits).
     return !same(view(d.module), view(".closure"));
 }
+fn closure_env_record<a>(c: (&a mut C), ty: u64) -> bool {
+    if ty_kind(&mut c, ty) != 8 {
+        return false;
+    }
+    return same(view(c.decls[ty_arg(&mut c, ty)].module), view(".closure"));
+}
 fn layout_bits<a>(c: (&a mut C), alias: u64) -> u64 {
+    alias := closure_record(&mut c, alias);
     ty := base_type(&mut c, alias);
     // An array of plain data is plain: its bytes are stored inline wherever it is held. One that
     // owns its elements is not (until records with drops are inline, unboxed-values.md stage 4).
@@ -29247,6 +29820,25 @@ fn layout_bits<a>(c: (&a mut C), alias: u64) -> u64 {
     if small_enum(&mut c, ty) {
         // Plain, and held as its words (5a): a small enum is frame words wherever it is held.
         bits = 5;
+    }
+    if closure_env_record(&mut c, ty) {
+        // S6(A): framed - its words in the frame - with every field a word; plain when no capture
+        // owns anything.
+        d := ty_arg(&mut c, ty);
+        mut all = c.decls[d].drop == 0;
+        for i in c.decls[d].count {
+            ft := base_type(&mut c, field_type(&mut c, ty, i));
+            k := ty_kind(&mut c, ft);
+            if (k == 8) || (k == 32) || (k == 20) {
+                all = false;
+            } else if !((k == 0) || (k == 1) || (k == 2) || (k == 7) || (k == 12) || (k == 18) || (k == 19) || (k == 21) || (k == 22) || (k == 25) || (k == 26)) {
+                all = false;
+            }
+        }
+        bits = 4;
+        if all {
+            bits = 5;
+        }
     }
     if container_record(&mut c, ty) {
         d := ty_arg(&mut c, ty);
@@ -29292,6 +29884,7 @@ fn layout_bits<a>(c: (&a mut C), alias: u64) -> u64 {
 }
 // Whether `ty` is held as its own words (layout bit 4): a struct, a tuple or an array.
 fn framable<a>(c: (&a mut C), alias: u64) -> bool {
+    alias := closure_record(&mut c, alias);
     ty := base_type(&mut c, alias);
     // An array, and a SIMD vector (docs/design/simd.md), are always frame values.
     if is_array(&mut c, ty) || is_simd(&mut c, ty) {
@@ -29678,6 +30271,7 @@ fn field_reference<a>(c: (&a mut C), base: u64, ty: u64, k: u64) -> u64 {
 }
 // The words a record's own storage takes: a word per field, or an `extern "C"` record's C size.
 fn record_words<a>(c: (&a mut C), ty: u64) -> u64 {
+    ty := closure_record(&mut c, ty);
     if is_simd(&mut c, ty) {
         return simd_words(&mut c, ty);
     }
@@ -29702,6 +30296,7 @@ fn record_words<a>(c: (&a mut C), ty: u64) -> u64 {
 // leaves every word 0, and its in-place drop does nothing - its `drop` included - when the word is 0.
 // A struct without its own `Drop` needs none: its owners' words are 0 when absent.
 fn live_word<a>(c: (&a mut C), alias: u64) -> bool {
+    alias := closure_record(&mut c, alias);
     ty := base_type(&mut c, alias);
     if (ty == 0) || (ty_kind(&mut c, ty) != 8) || (c.raw != 0) {
         return false;
@@ -32252,10 +32847,27 @@ fn pv_span_bound<a>(c: (&a mut C), facts: (&a Atom[]), lo: u64, hi: u64, exact: 
             return -1;
         }
         mut m = pv_span_term_bound(&facts, view(t), exact);
+        i = i + used;
+        // `t & L`: a mask is at most its literal, whatever `t` is (a table lookup `next[s & 511]`).
+        if !exact && (i + 1 < hi) && (kind_at(&mut c, i) == 38) && pv_digits(view(tok_text(&mut c, i + 1))) {
+            mask := pv_number(view(tok_text(&mut c, i + 1)));
+            if (m < 0) || (mask < m) {
+                m = mask;
+            }
+            i = i + 2;
+        }
         if (m < 0) || !pv_u64_term(&mut c, view(t)) {
             return -1;
         }
-        i = i + used;
+        // `t / L`: at most the bound of `t` divided by the literal.
+        if (i + 1 < hi) && (kind_at(&mut c, i) == 47) {
+            d := tok_text(&mut c, i + 1);
+            if !pv_digits(view(d)) || (pv_number(view(d)) == 0) || exact {
+                return -1;
+            }
+            m = m / pv_number(view(d));
+            i = i + 2;
+        }
         while (i < hi) && (kind_at(&mut c, i) == 42) {
             mut u2 = 0;
             t2 := pv_term(&mut c, i + 1, &mut u2);
@@ -34586,16 +35198,23 @@ fn result_adapter<a>(c: (&a mut C), kind: u64, args: u64, words: u64) -> u8[] {
     name.push(95);
     decimal(&mut name, words);
     code := (kind * 16 + args) * 65536 + words;
-    mut known = false;
+    // Every naming is a registration of the body's unit: the adapters are emitted once, after the
+    // bodies, for the shapes the run's bodies named - a replayed body names its own again.
+    if c.fn_rec != 0 {
+        c.fn_regs.push(4);
+        iface_wv(&mut c.fn_regs, code);
+    }
+    box_thunk_add(&mut c, code);
+    return name;
+}
+fn box_thunk_add<a>(c: (&a mut C), code: u64) -> unit {
     for i in c.box_thunks.len() {
         if c.box_thunks[i] == code {
-            known = true;
+            return ();
         }
     }
-    if !known {
-        c.box_thunks.push(code);
-    }
-    return name;
+    c.box_thunks.push(code);
+    return ();
 }
 // The adapter rt_parallel_zip calls per piece: %rdi is a block {callback, environment, view 1 ..
 // view n}; the callback is called with the environment first when it is a closure (the closure ABI:
@@ -34973,7 +35592,7 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
     if kind == 20 {
         o(&mut c, view("movq (%rax),%rax\n"));
         shift = 1;
-        if ty_kind(&mut c, inty) == 7 {
+        if (ty_kind(&mut c, inty) == 7) && !direct(&mut c, ty) {
             get(&mut c, input, view("%rax"));
         } else {
             o(&mut c, view("leaq "));
@@ -38281,10 +38900,15 @@ fn parallel_split_builtin<a>(c: (&a mut C), data: Val) -> Val {
         fail(&mut c, view("parallel_split requires a callable"));
     }
     signature := type_args(&mut c, fty);
-    if signature.len() != 1 {
-        fail(&mut c, view("parallel_split callback takes (&mut [T])"));
+    // (&mut [T]), or (u64, &mut [T]) for each piece's first index too (pool::chunks_mut_at).
+    with_at := signature.len() == 2;
+    if (signature.len() != 1) && !with_at {
+        fail(&mut c, view("parallel_split callback takes (&mut [T]) or (u64, &mut [T])"));
     }
-    require_type(&mut c, slice, signature[0]);
+    if with_at {
+        require_type(&mut c, signature[0], 0);
+    }
+    require_type(&mut c, slice, signature[signature.len() - 1]);
     result := ty_arg(&mut c, fty);
     if ty_kind(&mut c, result) != 2 {
         fail(&mut c, view("parallel_split callback returns unit: write the elements"));
@@ -38310,7 +38934,8 @@ fn parallel_split_builtin<a>(c: (&a mut C), data: Val) -> Val {
     mut pargs = three(data.t, chunks.t, target);
     pargs.push(env);
     pargs.push(width);
-    slot := invoke(&mut c, view("rt_parallel_split"), pargs);
+    pargs.push(imm(&mut c, u64(with_at)));
+    slot := invoke(&mut c, view("rt_parallel_split_at"), pargs);
     release_temporary(&mut c, data.t);
     release_temporary(&mut c, input);
     close_loans(&mut c);
@@ -38497,11 +39122,22 @@ fn parallel_class_builtin<a>(c: (&a mut C), klass: Val) -> Val {
 //
 // That is why it cannot dangle: nothing reachable from a handle is frame memory, and the handle
 // owns both the environment and the result until one wait consumes it.
+// S6(A): a closure held as frame words, handed to something that keeps it past the frame (a job, a
+// thread, a runtime payload), becomes its boxed object: the environment's words copied into a box,
+// the loans moved with them. Anything else is returned as it is.
+fn closure_object<a>(c: (&a mut C), v: Val) -> Val {
+    if (closure_record(&mut c, v.ty) == v.ty) || !framed(&mut c, v.ty) {
+        return v;
+    }
+    t := base_type(&mut c, v.ty);
+    erased := intern_args(&mut c, 20, ty_arg(&mut c, t), ty_mode(&mut c, t), type_regions(&mut c, t), type_args(&mut c, t));
+    return move_as(&mut c, v, erased);
+}
 fn parallel_spawn_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     expect(&mut c, view(")"));
     input := callee.t;
     inty := callee.ty;
-    function := deref(&mut c, callee);
+    mut function = deref(&mut c, callee);
     fty := function.ty;
     closure := ty_kind(&mut c, fty) == 20;
     if (ty_kind(&mut c, fty) != 12) & !closure {
@@ -38549,6 +39185,9 @@ fn parallel_spawn_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     if contains_task(&mut c, result, 0) {
         fail(&mut c, view("a pool job cannot return a Task or Job handle"));
     }
+    // A framed closure (S6(A)) becomes the boxed object the runtime keeps as the payload; the
+    // checks above saw its environment.
+    function = closure_object(&mut c, function);
     observe(&mut c, function.t);
     mut box = imm(&mut c, 0);
     mut target = function.t;
@@ -38608,12 +39247,15 @@ fn thread_spawn_raw_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     }
     input := callee.t;
     inty := callee.ty;
-    function := deref(&mut c, callee);
+    mut function = deref(&mut c, callee);
     fty := function.ty;
     closure := ty_kind(&mut c, fty) == 20;
     if (ty_kind(&mut c, fty) != 12) & !closure {
         fail(&mut c, view("thread_spawn_raw requires a callable"));
     }
+    // A framed closure (S6(A)) becomes the boxed object the runtime keeps as the payload; the
+    // checks above saw its environment.
+    function = closure_object(&mut c, function);
     observe(&mut c, function.t);
     mut box = imm(&mut c, 0);
     mut target = function.t;
@@ -39638,7 +40280,10 @@ fn widen_to_fnmut_formal<a>(c: (&a mut C), v: Val, formal: u64) -> Val {
     if !closure_bounds_hold(&mut c, v.ty, want) {
         closure_bound_fail(&mut c, v.ty, want);
     }
-    if ((am & CLOSURE_FNMUT) == (fm & CLOSURE_FNMUT)) & (want == 0) {
+    // A framed closure (S6(A)) given for an erased formal is always converted - boxed by move_as -
+    // even when the call mode and bounds already agree.
+    framed_closure := closure_record(&mut c, v.ty) != v.ty;
+    if ((am & CLOSURE_FNMUT) == (fm & CLOSURE_FNMUT)) & (want == 0) & !framed_closure {
         return v;
     }
     result := ty_arg(&mut c, v.ty);
@@ -39681,7 +40326,29 @@ fn reference_as_fnmut<a>(c: (&a mut C), slot: u64, ty: u64, expected: u64) -> u6
     return 1;
 }
 // `move_value`, re-owning the moved value under a wider call contract (`Fn` used as `FnMut`).
+fn lent_frame<a>(c: &a C, slot: u64) -> bool {
+    for i in c.lent_frames.len() {
+        if c.lent_frames[i] == slot {
+            return true;
+        }
+    }
+    return false;
+}
 fn move_as<a>(c: (&a mut C), v: Val, ty: u64) -> Val {
+    // A framed closure moved into an erased closure type is boxed (S6(A)): the erased type is a
+    // word, the boxed object.
+    if (ty_kind(&mut c, base_type(&mut c, v.ty)) == 20) && (ty_kind(&mut c, base_type(&mut c, ty)) == 20)
+        && (closure_record(&mut c, v.ty) != v.ty) && (closure_record(&mut c, ty) == ty) && framed(&mut c, v.ty)
+        && !lent_frame(&c, v.t) {
+        source := place_of(&mut c, v.t);
+        boxed := frame_box(&mut c, v.t, v.ty);
+        move_out(&mut c, val(v.t, v.ty));
+        own(&mut c, boxed, ty);
+        if source != 0 {
+            transfer_bonds(&mut c, source, place_of(&mut c, boxed));
+        }
+        return val(boxed, ty);
+    }
     get(&mut c, v.t, view("%rax"));
     slot := save(&mut c);
     old := place_of(&mut c, v.t);
@@ -39786,6 +40453,22 @@ fn is_option_storage<a>(c: (&a mut C), ty: u64) -> bool {
     return same(view(decl.module), view("result")) & same(view(decl.name), view("Option"));
 }
 // A bare literal (including a negated one) takes a sized integer type from its context.
+// S6(A): a closure held as its environment record's frame words, used where an erased closure type
+// (`Fn(..)` from a signature, no environment) is expected, becomes the boxed object that type is:
+// its words copied into a box, its loans moved to the box. The bounds are checked first, while the
+// environment is still known. Returns a value of NO_TYPE when nothing is converted.
+fn closure_erase<a>(c: (&a mut C), v: Val, expected: u64) -> Val {
+    if (closure_record(&mut c, v.ty) == v.ty) || (ty_env(&mut c, base_type(&mut c, expected)) != 0) {
+        return val(0, NO_TYPE);
+    }
+    if !framed(&mut c, v.ty) {
+        return val(0, NO_TYPE);
+    }
+    if (same_type(&mut c, v.ty, expected) == 0) && (closure_converts(&mut c, v.ty, expected) == 0) {
+        return val(0, NO_TYPE);
+    }
+    return move_as(&mut c, v, expected);
+}
 fn adopt_value<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) -> Val {
     if (c.raw == 0) & (expected != 0) & (expected != NO_TYPE) {
         if borrowed_object(&mut c, expected) != 0 {
@@ -39800,11 +40483,35 @@ fn adopt_value<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) ->
             return function_as_closure(&mut c, v, expected);
         }
         if (ty_kind(&mut c, v.ty) == 20) & (ty_kind(&mut c, expected) == 20) {
+            erased := closure_erase(&mut c, val(v.t, v.ty), expected);
+            if erased.ty != NO_TYPE {
+                return erased;
+            }
             if fn_as_fnmut(&mut c, v.ty, expected) != 0 {
                 return move_as(&mut c, v, expected);
             }
         }
         if (ty_kind(&mut c, v.ty) == 7) & (ty_kind(&mut c, expected) == 7) {
+            // `&g` of a framed closure (its environment's address) where `&Fn(..)` is expected (the
+            // address of a word holding the object): the address is spilled into a frame word, whose
+            // address is the erased reference. The frame outlives the borrow.
+            inner := ty_arg(&mut c, v.ty);
+            want := ty_arg(&mut c, expected);
+            if (ty_kind(&mut c, base_type(&mut c, want)) == 20) && (closure_record(&mut c, want) == want)
+                && (closure_record(&mut c, inner) != inner) && direct(&mut c, inner) {
+                word := fresh(&mut c);
+                get(&mut c, v.t, view("%rax"));
+                o(&mut c, view("movq %rax,"));
+                stack_slot(&mut c, word);
+                o(&mut c, view("\nleaq "));
+                stack_slot(&mut c, word);
+                o(&mut c, view(",%rax\nmovq %rax,"));
+                // The reference slot itself now holds the spilled word's address: it keeps its
+                // checked source and its loans.
+                stack_slot(&mut c, v.t);
+                c.out.push(10);
+                return val(v.t, expected);
+            }
             if reference_as_fnmut(&mut c, v.t, v.ty, expected) != 0 {
                 return val(v.t, expected);
             }
@@ -40609,6 +41316,7 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
     saved_boxed := exchange(&mut c.boxed, u64[]);
     saved_word_refs := exchange(&mut c.word_refs, u64[]);
     saved_temps := exchange(&mut c.temps, u64[]);
+    saved_lent_frames := exchange(&mut c.lent_frames, u64[]);
     saved_scope := exchange(&mut c.scope_end, end);
     saved_loop_start := exchange(&mut c.loop_start, 0);
     saved_loop_end := exchange(&mut c.loop_end, 0);
@@ -40672,6 +41380,7 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
     exchange(&mut c.boxed, saved_boxed);
     exchange(&mut c.word_refs, saved_word_refs);
     exchange(&mut c.temps, saved_temps);
+    exchange(&mut c.lent_frames, saved_lent_frames);
     exchange(&mut c.scope_end, saved_scope);
     exchange(&mut c.loop_start, saved_loop_start);
     exchange(&mut c.loop_end, saved_loop_end);
@@ -41125,15 +41834,19 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
     decl := c.decls.len() - 1;
     envty := intern_args(&mut c, 8, decl, 0, u64[], u64[]);
     fnty := intern_env(&mut c, 20, ret, mode, caps, copy_numbers(&params), envty);
-    // Build the object: in the caller's frame when it is the whole argument of a lent parameter
-    // (the literal ends the argument), else on the heap.
+    // Build the object: its environment's words in the caller's frame - the whole argument of a lent
+    // parameter (S6(B); the literal ends the argument), or any closure held as its own type (S6(A))
+    // - else on the heap.
     frame_env := lent_start && ((kind(&mut c) == 44) || (kind(&mut c) == 41)) && (c.validating == 0);
     mut obj = 0;
-    if frame_env {
+    if frame_env || framed(&mut c, fnty) {
         obj = frame_alloc(&mut c, count);
     } else {
         sz := imm(&mut c, count);
         obj = invoke(&mut c, view("rt_rec"), one(sz));
+    }
+    if frame_env {
+        c.lent_frames.push(obj);
     }
     // The environment's place exists before the captures are stored, so a borrowed capture can
     // record its loan against the field it lands in.
@@ -41255,6 +41968,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                     mode: mode,
                     body_file: c.body_file,
                     body_pos: c.body_pos,
+                    spec: c.current_spec,
                 }
             );
     }
@@ -41508,6 +42222,7 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         exchange(&mut c.boxed, u64[]);
         exchange(&mut c.word_refs, u64[]);
         exchange(&mut c.temps, u64[]);
+        exchange(&mut c.lent_frames, u64[]);
         // Facts made in the body (a frame record, a DynPair) are about the body's own frame, under
         // the symbol it is emitted as.
         exchange(&mut c.facts_fn, body_label(&c, view(".closure"), view(symbol), view(""), 0));
@@ -41541,6 +42256,7 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         bn := copy_numbers(&closure.bindings);
         exchange(&mut c.tnames, tn);
         exchange(&mut c.bindings, bn);
+        exchange(&mut c.closure_spec, closure.spec);
         exchange(&mut c.closure_env, i + 1);
         exchange(&mut c.result, ret);
         envty := intern_args(&mut c, 8, decl, 0, u64[], u64[]);
@@ -41649,6 +42365,7 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         c.out.push(10);
         scope_end(&mut c);
         exchange(&mut c.closure_env, 0);
+        exchange(&mut c.closure_spec, 0);
         i += 1;
     }
     return i;
@@ -42807,7 +43524,10 @@ fn pattern_loop<a, b>(
     // before the guard is compiled: a call in it is proved, and a constant in it is settled, only
     // from facts that hold at every evaluation.
     loop_at := pv_loop_mark(&c);
-    pv_loop_kill(&mut c, open, loopend);
+    old_spec_open := c.pv_spec_open;
+    old_spec_cands := exchange(&mut c.pv_spec_cands, Atom[]);
+    exchange(&mut c.pv_spec_open, 0);
+    pv_loop_kill_spec(&mut c, open, loopend);
     mark(&mut c, head);
     mut nomatch = 0;
     mut scrutinee = 0;
@@ -42891,6 +43611,15 @@ fn pattern_loop<a, b>(
     entry := ownership::snapshot(&c.check);
     exchange(&mut c.terminated, 0);
     block(&mut c);
+    // The kept facts hold at every evaluation of the guard (the check at the body's end saw them
+    // hold again), and with no `break` the guard is the only way out: they hold after the loop.
+    // The body's own writes took them out of the list while it was compiled, so they go back here.
+    kept := exchange(&mut c.pv_spec_cands, old_spec_cands);
+    mut restore = Atom[];
+    if (c.pv_spec_open == open) && (c.retry == 0) && !pv_has_break(&mut c, open, loopend) {
+        restore = kept;
+    }
+    exchange(&mut c.pv_spec_open, old_spec_open);
     pv_loop_facts(&mut c, &loop_at, head);
     // The pattern's binding ends with each iteration, before the jump back: release it first, so
     // neither the backedge check nor the state the loop exits with still holds this iteration's
@@ -42938,6 +43667,9 @@ fn pattern_loop<a, b>(
         exchange(&mut c.terminated, 1);
     }
     pv_ir_close(&mut c);
+    for i in restore.len() {
+        pv_add(&mut c.pv_facts, restore[i].rel, view(restore[i].a), view(restore[i].b), restore[i].k);
+    }
     return ();
 }
 // Built-in methods on string / bytes / views. Results are new values; `string` input gives `string`.
@@ -44567,6 +45299,11 @@ fn direct<a>(c: (&a mut C), alias: u64) -> bool {
     if c.raw != 0 {
         return false;
     }
+    // A framed closure (S6(A)) is its environment's words, so a reference to it is their address,
+    // as for a record; a call through it spills that address into a word (indirect_call).
+    if (closure_record(&mut c, alias) != alias) && framed(&mut c, alias) {
+        return true;
+    }
     ty := base_type(&mut c, alias);
     // An array value is the address of its bytes, as a record's is.
     if ty_kind(&mut c, ty) == 32 {
@@ -44612,7 +45349,7 @@ fn record_bytes<a>(c: (&a mut C), alias: u64) -> u64 {
     if is_array(&mut c, alias) {
         return array_bytes(&mut c, alias);
     }
-    ty := base_type(&mut c, alias);
+    ty := base_type(&mut c, closure_record(&mut c, alias));
     d := ty_arg(&mut c, ty);
     if c.decls[d].c_layout != 0 {
         return ffi_record_size(&mut c, d);
@@ -45995,24 +46732,11 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
             if ty_kind(&mut c, pty) == 7 {
                 pty = ty_arg(&mut c, pty);
             }
+            pty = spec_closure_alias(&mut c, pty);
             bound := param_callable(&mut c, pty);
             if bound != NO_TYPE {
                 slot := local_id(&mut c, local - 1);
-                // In a specialisation the call keeps the closure's own environment (so it is
-                // direct) and takes the bound's signature with the specialisation's bindings
-                // (`T`, `U` as the body sees them), so arguments and result line up with the body.
-                mut calltype = bound;
-                if ty_kind(&mut c, pty) == 10 {
-                    sig := spec_callable_signature(&mut c, pty);
-                    if (sig != NO_TYPE) && (ty_kind(&mut c, bound) == 20) {
-                        calltype = intern_env(&mut c, 20, ty_arg(&mut c, sig), ty_mode(&mut c, bound), type_regions(&mut c, bound), type_args(&mut c, sig), ty_env(&mut c, bound));
-                    }
-                    // A named function given for F: called through its pointer with the bound's
-                    // signature, as the body sees it.
-                    if (sig != NO_TYPE) && (ty_kind(&mut c, bound) == 12) {
-                        calltype = intern_args(&mut c, 12, ty_arg(&mut c, sig), 0, u64[], type_args(&mut c, sig));
-                    }
-                }
+                calltype := callable_calltype(&mut c, pty, bound);
                 if ty_kind(&mut c, outer) == 7 {
                     viaref := intern_full(&mut c, 7, calltype, ty_mode(&mut c, outer), type_regions(&mut c, outer));
                     return indirect_call(&mut c, val(slot, viaref), 0);
@@ -46022,6 +46746,17 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
         }
         if local == 0 {
             captured := capture_field(&mut c, view(first), 0, 0);
+            // A captured callable-bound value (`|x| f(x)` inside a generic body): called like the
+            // parameter it was captured from.
+            if captured.ty != NO_TYPE {
+                // An environment field holds the plain closure type; the specialisation's binding
+                // that names it (closure types are unique per literal) is what the body sees.
+                cty := spec_closure_alias(&mut c, captured.ty);
+                cbound := param_callable(&mut c, cty);
+                if cbound != NO_TYPE {
+                    return indirect_call(&mut c, val(captured.t, callable_calltype(&mut c, cty, cbound)), 0);
+                }
+            }
             if captured.ty != NO_TYPE {
                 ck := ty_kind(&mut c, captured.ty);
                 if (ck == 12) || (ck == 20) || (ck == 25) {
@@ -47034,8 +47769,11 @@ fn pv_index_ok<a>(c: (&a mut C), bracket: u64, lo: u64, hi: u64, base: u64) -> b
     }
     mut off: i64 = 0;
     at := lo + used;
+    mut facts = Atom[];
+    pv_ir_read(&mut c, &mut facts);
     if at != hi {
-        if (kind_at(&mut c, at) != 43) || (at + 2 != hi) {
+        sign := kind_at(&mut c, at);
+        if ((sign != 43) && (sign != 45)) || (at + 2 != hi) {
             return false;
         }
         lit := tok_text(&mut c, at + 1);
@@ -47043,9 +47781,14 @@ fn pv_index_ok<a>(c: (&a mut C), bracket: u64, lo: u64, hi: u64, base: u64) -> b
             return false;
         }
         off = pv_number(view(lit));
+        if sign == 45 {
+            // `t - c` is the integer it looks like only where `c <= t` (NW-); otherwise it wraps.
+            if !pv_implies(&facts, 1, view(lit), view(term), 0) {
+                return false;
+            }
+            off = 0 - off;
+        }
     }
-    mut facts = Atom[];
-    pv_ir_read(&mut c, &mut facts);
     mut len = name.copy();
     push_bytes(&mut len, view(".len"));
     return pv_implies(&facts, 0, view(term), view(len), 0 - off);
@@ -47952,6 +48695,7 @@ fn block<a>(c: (&a mut C)) -> unit {
     end := block_end(&mut c, c.pos);
     oldend := c.scope_end;
     exchange(&mut c.scope_end, end);
+    brace := c.pos;
     expect(&mut c, view("{"));
     // One scope of facts per block: what a condition or an arm's pattern stated for it holds here,
     // and a binding's shadowing of a name it mentions ends with it (docs/design/refinements.md).
@@ -47960,6 +48704,9 @@ fn block<a>(c: (&a mut C)) -> unit {
     mut owners = c.resources.len();
     while !is(&mut c, view("}")) {
         stmt(&mut c);
+    }
+    if (c.pv_spec_open != 0) && (c.pv_spec_open == brace) {
+        pv_spec_check(&mut c, brace);
     }
     advance(&mut c);
     cleanup(&mut c, owners);
@@ -50236,7 +50983,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         cleanup(&mut c, 0);
         restore := c.export_tls;
         if restore != 0 {
-            tls_leave_callback(&mut c, restore, c.export_adopt);
+            tls_leave_callback(&mut c, restore, c.export_adopt, c.export_pin);
         }
         if borrowed_object(&mut c, v.ty) != 0 {
             // The pair travels by value: data in %rax, vtable in %rdx. The caller stores both in its
@@ -50760,9 +51507,18 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
                     set_target(&mut c, item, target, item + 1);
                     bind(&mut c, name, rty, item, 0);
                 } else {
+                    // `for x in v` reads element i after `i < n`, n the length when the loop began:
+                    // in bounds while nothing in the body can change v's length (pv_len_untouched).
+                    mut whole = false;
+                    if (iter_end == iter_at + 1) && (kind_at(&mut c, iter_at) == 1) && (c.raw == 0) && (c.verify_facts == 0) {
+                        whole = pv_len_untouched(&mut c, open, loopend, view(tok_text(&mut c, iter_at)));
+                    }
                     mut f = "rt_at";
                     if bytewise != 0 {
                         f = "rt_atb";
+                        if whole {
+                            f = "rt_atbu";
+                        }
                     }
                     if consume != 0 {
                         f = "rt_take";
@@ -50771,10 +51527,18 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
                     mut element = 0;
                     if (width != 0) & (bytewise == 0) {
                         // The element's words, read in place; owning them copies them to a box.
-                        element = flat_element(&mut c, seq, i, width, false);
+                        element = flat_element(&mut c, seq, i, width, whole);
                         c.interior.push(element);
                     } else {
-                        element = invoke(&mut c, view(f), two(seq, i));
+                        if whole && (bytewise == 0) && (consume == 0) {
+                            // The element's word, through the unchecked address.
+                            at := invoke(&mut c, view("rt_slotu"), two(seq, i));
+                            get(&mut c, at, view("%rax"));
+                            o(&mut c, view("movq (%rax),%rax\n"));
+                            element = save(&mut c);
+                        } else {
+                            element = invoke(&mut c, view(f), two(seq, i));
+                        }
                     }
                     if consume != 0 {
                         own(&mut c, element, elemty);
@@ -50959,6 +51723,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         }
         exchange(&mut c.terminated, yt & nt);
         mark(&mut c, end);
+        pv_clamp(&mut c, cond_at, cond_end);
         return ();
     }
     if statement_builtin(&mut c, view("drop")) {
@@ -51144,11 +51909,25 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
             }
             record_ty = shape;
         }
+        op_at := c.pos;
         assignment_tail(&mut c, l, id, ty, target, u64[through, fieldty, assigned_d, assigned_k, assigned_base, assigned_rty], view(field_name), record_ty);
         // `x = e` writes the binding; `x.f = e` writes a field of what `x` owns, which is not a fact
         // about `x`'s own value.
         if through == 0 {
             pv_ir_wrote(&mut c, view(written));
+            // Then `x = e` states what a binding `x := e` states, when `e` does not read `x` (its
+            // old value is gone): `v = tmp` gives `v.len == tmp.len`.
+            if (kind_at(&mut c, op_at) == 61) && (c.pv_on != 0) && (op_at + 2 < c.pos) {
+                mut reads = false;
+                for t in op_at + 1..c.pos - 1 {
+                    if (kind_at(&mut c, t) == 1) && same(view(tok_text(&mut c, t)), view(written)) {
+                        reads = true;
+                    }
+                }
+                if !reads {
+                    pv_ir_value(&mut c, view(written), op_at + 1, c.pos - 1);
+                }
+            }
         }
         return ();
     }
@@ -52445,6 +53224,7 @@ fn emit_drop_in_place<a, b>(c: (&a mut C), ty: u64, hook: &b [u8]) -> unit {
 }
 // Names the in-place drop of `ty` and asks for it to be emitted (its boxed helper is emitted with it).
 fn drop_in_place_ref<a>(c: (&a mut C), alias: u64) -> u8[] {
+    alias := closure_record(&mut c, alias);
     // An alias (a bound type parameter) names the helper of the type it stands for.
     ty := base_type(&mut c, alias);
     drop_ref_name(&mut c, ty);
@@ -52628,6 +53408,176 @@ fn s256_block(h: (&mut u64[]), text: &[u8], at: u64, w: (&mut u64[]), k: (&u64[]
     exchange(&mut h[7], h7);
     return ();
 }
+const XP1: u64 = 11400714785074694791;
+const XP2: u64 = 14029467366897019727;
+const XP3: u64 = 1609587929392839161;
+const XP4: u64 = 9650029242287828579;
+const XP5: u64 = 2870177450012600261;
+fn xx_rotl(x: u64, r: u64) -> u64 {
+    return (x << r) | (x >> (64 - r));
+}
+fn xx_round(acc: u64, lane: u64) -> u64 {
+    return wrapping_mul(xx_rotl(wrapping_add(acc, wrapping_mul(lane, XP2)), 31), XP1);
+}
+fn xx_merge(acc: u64, lane: u64) -> u64 {
+    return wrapping_add(wrapping_mul(acc ^ xx_round(0, lane), XP1), XP4);
+}
+// The address of a byte sequence's first byte: the first word of the header its value points to.
+fn bytes_base<a>(data: &a [u8]) -> u64 {
+    mut v: u64 = 0;
+    unsafe {
+        header := ptr_of(&data).cast(u64).read();
+        v = ptr_from_addr(u64, header).read();
+    }
+    return v;
+}
+fn word_at(p: u64) -> u64 {
+    mut v: u64 = 0;
+    unsafe {
+        v = ptr_from_addr(u64, p).read();
+    }
+    return v;
+}
+fn half_at(p: u64) -> u64 {
+    mut v: u64 = 0;
+    unsafe {
+        v = u64(ptr_from_addr(u32, p).read());
+    }
+    return v;
+}
+// XXH64's last steps, from the four lanes of the stripes (or the seed alone for a short input).
+fn xx_finish<a, b>(data: &a [u8], p: u64, from: u64, seed: u64, lanes: (&b u64[])) -> u64 {
+    n := data.len();
+    mut at = from;
+    mut h: u64 = 0;
+    if n >= 32 {
+        h = wrapping_add(wrapping_add(xx_rotl(lanes[0], 1), xx_rotl(lanes[1], 7)), wrapping_add(xx_rotl(lanes[2], 12), xx_rotl(lanes[3], 18)));
+        h = xx_merge(h, lanes[0]);
+        h = xx_merge(h, lanes[1]);
+        h = xx_merge(h, lanes[2]);
+        h = xx_merge(h, lanes[3]);
+    } else {
+        h = wrapping_add(seed, XP5);
+    }
+    h = wrapping_add(h, n);
+    while at + 8 <= n {
+        h = wrapping_add(wrapping_mul(xx_rotl(h ^ xx_round(0, word_at(p + at)), 27), XP1), XP4);
+        at += 8;
+    }
+    if at + 4 <= n {
+        h = wrapping_add(wrapping_mul(xx_rotl(h ^ wrapping_mul(half_at(p + at), XP1), 23), XP2), XP3);
+        at += 4;
+    }
+    while at < n {
+        h = wrapping_mul(xx_rotl(h ^ wrapping_mul(u64(data[at]), XP5), 11), XP1);
+        at += 1;
+    }
+    h = wrapping_mul(h ^ (h >> 33), XP2);
+    h = wrapping_mul(h ^ (h >> 29), XP3);
+    return h ^ (h >> 32);
+}
+fn push_be64<a>(out: (&a mut u8[]), v: u64) -> unit {
+    mut shift: u64 = 64;
+    while shift != 0 {
+        shift -= 8;
+        out.push(u8((v >> shift) & 255));
+    }
+    return ();
+}
+// The digest of the build store and of an interface's trailer: XXH64 of `data` under the seeds 0, 1,
+// 2 and 3, 32 raw bytes (each hash big-endian). Both guard against corruption, not against a writer
+// who means harm - anything that can write the store or an interface can rewrite the digest too -
+// and four independent 64-bit hashes over every byte do that at a few instructions a byte, read a
+// word at a time, where SHA-256 in this language costs hundreds.
+pub fn fast_hash<a>(data: &a [u8]) -> u8[] {
+    n := data.len();
+    mut p: u64 = 0;
+    if n != 0 {
+        p = bytes_base(data);
+    }
+    // Sixteen accumulators: XXH64's four lanes for each of the four seeds, one pass over the words.
+    mut a1 = wrapping_add(XP1, XP2);
+    mut a2 = XP2;
+    mut a3: u64 = 0;
+    mut a4 = wrapping_sub(0, XP1);
+    mut b1 = wrapping_add(a1, 1);
+    mut b2 = wrapping_add(a2, 1);
+    mut b3: u64 = 1;
+    mut b4 = wrapping_add(a4, 1);
+    mut c1 = wrapping_add(a1, 2);
+    mut c2 = wrapping_add(a2, 2);
+    mut c3: u64 = 2;
+    mut c4 = wrapping_add(a4, 2);
+    mut d1 = wrapping_add(a1, 3);
+    mut d2 = wrapping_add(a2, 3);
+    mut d3: u64 = 3;
+    mut d4 = wrapping_add(a4, 3);
+    mut at: u64 = 0;
+    // `at + 32 <= n` cannot overflow (n is a length) and neither can an address inside the data.
+    mut q = p;
+    mut stripes = n / 32;
+    while stripes != 0 {
+        mut w1: u64 = 0;
+        mut w2: u64 = 0;
+        mut w3: u64 = 0;
+        mut w4: u64 = 0;
+        unsafe {
+            w1 = ptr_from_addr(u64, q).read();
+            w2 = ptr_from_addr(u64, wrapping_add(q, 8)).read();
+            w3 = ptr_from_addr(u64, wrapping_add(q, 16)).read();
+            w4 = ptr_from_addr(u64, wrapping_add(q, 24)).read();
+        }
+        w1 = wrapping_mul(w1, XP2);
+        w2 = wrapping_mul(w2, XP2);
+        w3 = wrapping_mul(w3, XP2);
+        w4 = wrapping_mul(w4, XP2);
+        a1 = wrapping_add(a1, w1);
+        a1 = wrapping_mul((a1 << 31) | (a1 >> 33), XP1);
+        a2 = wrapping_add(a2, w2);
+        a2 = wrapping_mul((a2 << 31) | (a2 >> 33), XP1);
+        a3 = wrapping_add(a3, w3);
+        a3 = wrapping_mul((a3 << 31) | (a3 >> 33), XP1);
+        a4 = wrapping_add(a4, w4);
+        a4 = wrapping_mul((a4 << 31) | (a4 >> 33), XP1);
+        b1 = wrapping_add(b1, w1);
+        b1 = wrapping_mul((b1 << 31) | (b1 >> 33), XP1);
+        b2 = wrapping_add(b2, w2);
+        b2 = wrapping_mul((b2 << 31) | (b2 >> 33), XP1);
+        b3 = wrapping_add(b3, w3);
+        b3 = wrapping_mul((b3 << 31) | (b3 >> 33), XP1);
+        b4 = wrapping_add(b4, w4);
+        b4 = wrapping_mul((b4 << 31) | (b4 >> 33), XP1);
+        c1 = wrapping_add(c1, w1);
+        c1 = wrapping_mul((c1 << 31) | (c1 >> 33), XP1);
+        c2 = wrapping_add(c2, w2);
+        c2 = wrapping_mul((c2 << 31) | (c2 >> 33), XP1);
+        c3 = wrapping_add(c3, w3);
+        c3 = wrapping_mul((c3 << 31) | (c3 >> 33), XP1);
+        c4 = wrapping_add(c4, w4);
+        c4 = wrapping_mul((c4 << 31) | (c4 >> 33), XP1);
+        d1 = wrapping_add(d1, w1);
+        d1 = wrapping_mul((d1 << 31) | (d1 >> 33), XP1);
+        d2 = wrapping_add(d2, w2);
+        d2 = wrapping_mul((d2 << 31) | (d2 >> 33), XP1);
+        d3 = wrapping_add(d3, w3);
+        d3 = wrapping_mul((d3 << 31) | (d3 >> 33), XP1);
+        d4 = wrapping_add(d4, w4);
+        d4 = wrapping_mul((d4 << 31) | (d4 >> 33), XP1);
+        q = wrapping_add(q, 32);
+        stripes -= 1;
+    }
+    at = n - n % 32;
+    mut out = u8[];
+    la := u64[a1, a2, a3, a4];
+    lb := u64[b1, b2, b3, b4];
+    lc := u64[c1, c2, c3, c4];
+    ld := u64[d1, d2, d3, d4];
+    push_be64(&mut out, xx_finish(data, p, at, 0, &la));
+    push_be64(&mut out, xx_finish(data, p, at, 1, &lb));
+    push_be64(&mut out, xx_finish(data, p, at, 2, &lc));
+    push_be64(&mut out, xx_finish(data, p, at, 3, &ld));
+    return out;
+}
 // The 32-byte SHA-256 digest of a byte view.
 fn sha256<a>(data: &a [u8]) -> u8[] {
     mut h = u64[0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
@@ -52692,7 +53642,7 @@ pub fn iface_digest<a>(data: &a [u8]) -> u8[] {
 //
 //   file  := "GRIF" VERSION:u8 record* trailer
 //   record:= tag:u8 len:VAR payload[len]
-//   trailer  tag 2, payload = source digest + SHA-256 of every byte before it
+//   trailer  tag 2, payload = source digest + fast_hash of every byte before it (32 bytes)
 //
 // `VAR` is LEB128. Every record states its own length, every string its own length and every type
 // is a record of its own, so the reader can prove it consumed exactly what the writer emitted:
@@ -52707,7 +53657,7 @@ pub fn iface_digest<a>(data: &a [u8]) -> u8[] {
 // Format 7 added the effect summary rows of every listed function; format 8 gives an `Atomic<T>`
 // its element type; format 9 carries a `dyn` type's bounds; format 10 adds the SIMD vector types
 // (kind 36: the element, and the lane count in the mode).
-const IFACE_VERSION: u64 = 10;
+const IFACE_VERSION: u64 = 11;
 const IFACE_TAG_MODULE: u64 = 1;
 const IFACE_TAG_TRAILER: u64 = 2;
 const IFACE_TAG_LINK: u64 = 3;
@@ -54688,7 +55638,7 @@ fn iface_seal_out<a, b>(out: (&a mut u8[]), source_digest: &b [u8]) -> unit {
     out.push(IFACE_TAG_TRAILER);
     iface_wv(&mut out, iface_vlen(source_digest.len()) + source_digest.len() + 32);
     iface_ws(&mut out, view(source_digest));
-    d := sha256(&out);
+    d := fast_hash(&out);
     for i in d.len() {
         out.push(d[i]);
     }
@@ -54975,7 +55925,7 @@ fn iface_seal<a>(path: &a [u8], data: &a [u8], vouched: bool) -> u8[] {
             for i in cover {
                 prefix.push(data[i]);
             }
-            got := sha256(&prefix);
+            got := fast_hash(&prefix);
             mut ok = 1;
             for i in 32 {
                 if got[i] != data[cover + i] {
@@ -55663,6 +56613,11 @@ fn iface_rec_fn<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], module: &a [u8]
         file := virtual_source(&mut c, view(label), view(body));
         exchange(&mut c.funcs[index].file, file);
         exchange(&mut c.funcs[index].pos, 0);
+    }
+    // The method keeps its text whatever it is used for: a template's body, an interface method's
+    // default (which section 2 below compiles from a source of its own). Writing this interface
+    // again reproduces it byte for byte only if every record keeps it.
+    if body.len() != 0 {
         exchange(&mut c.funcs[index].body, body.copy());
     }
     if section == 3 {
@@ -57933,6 +58888,7 @@ pub fn main() -> u64 {
         forge_words: 0,
         forge_result: 0,
         lent_arg_at: 0,
+        lent_frames: u64[],
         pending_words: 0,
         forge_indirect: u8[],
         pending_at: 0,
@@ -57976,6 +58932,7 @@ pub fn main() -> u64 {
         layout_memo: u64[],
         layout_offsets: u64[][],
         export_fret: 0,
+        cb_thunked: 0,
         cfield_more: 0,
         alias_next: 1,
         types: Ty[],
@@ -58040,6 +58997,7 @@ pub fn main() -> u64 {
         pending_symbol: u8[],
         export_tls: 0,
         export_adopt: 0,
+        export_pin: 0,
         ct_pass: 0,
         ct_in_if: false,
         decl_public: 1,
@@ -58065,6 +59023,7 @@ pub fn main() -> u64 {
         closures: Closure[],
         fn_thunk_used: 0,
         closure_env: 0,
+        closure_spec: 0,
         hint_params: u64[],
         hint_ret: NO_TYPE,
         hint_set: 0,
@@ -58113,6 +59072,11 @@ pub fn main() -> u64 {
         pv_arith_ok: 0,
         addr_arg: 0,
         ref_assign_target: 0,
+        pv_spec_open: 0,
+        pv_spec_ok: 0,
+        pv_spec_cands: Atom[],
+        pv_spec_failed: u64[],
+        pv_spec_dropped: Atom[],
         report_checks: 0,
         checks_report: u8[],
         checks_count: 0,

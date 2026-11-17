@@ -1,4 +1,5 @@
 // Build/test orchestration only. Language checking and instruction selection live in Grail.
+import { cpus } from 'node:os';
 import { compareObjects } from './asm-oracle.mjs';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -16,7 +17,7 @@ export const allTargets = [...targets, ...machoTargets];
 export const hostTarget = ({ x64: 'x86_64', arm64: 'aarch64', riscv64: 'riscv64' })[process.arch];
 // The compiler itself is a Linux host binary: its platform module is os-linux. darwin.grl (and
 // os-windows.grl) are per-target platform modules selected when building for those targets.
-export const compilerSources = ['native', 'lexer', 'ownership', 'machine', 'optimize', 'llvm', 'ir', 'fncache', 'jobs', 'asm_x86', 'asm_a64', 'asm_rv64', 'elf', 'coff', 'fmt', 'explain', 'bindgen', 'pkg', 'docgen', 'cli', 'runtime', 'os-linux'].map(n => join(root, 'compiler', `${n}.grl`));
+export const compilerSources = ['native', 'lexer', 'ownership', 'machine', 'optimize', 'llvm', 'ir', 'fncache', 'jobs', 'asm_x86', 'asm_a64', 'asm_rv64', 'elf', 'coff', 'macho', 'fmt', 'explain', 'bindgen', 'pkg', 'docgen', 'cli', 'runtime', 'os-linux'].map(n => join(root, 'compiler', `${n}.grl`));
 // A standard module the compiler itself uses: `grail build --watch` hashes its inputs with XXH64
 // (lib/xxhash.grl), so the compiler is built with that module in its source list.
 // Every tool builds through a store of its own run, inside this worktree: a test run must neither
@@ -37,7 +38,7 @@ if (!process.env.GRAIL_CACHE_DIR) {
   process.env.GRAIL_CACHE_DIR = store;
   process.on('exit', () => rmSync(store, { recursive: true, force: true }));
 }
-const compilerStdSources = ['xxhash'].map(n => join(root, 'lib', `${n}.grl`));
+const compilerStdSources = ['xxhash', 'bytes'].map(n => join(root, 'lib', `${n}.grl`));
 compilerSources.push(...compilerStdSources);
 export const triples = { x86_64: 'x86_64-linux-gnu', aarch64: 'aarch64-linux-gnu', riscv64: 'riscv64-linux-gnu', 'macos-x86_64': 'x86_64-apple-macos11', 'macos-aarch64': 'arm64-apple-macos11' };
 export const emulations = { x86_64: 'elf_x86_64', aarch64: 'aarch64elf', riscv64: 'elf64lriscv' };
@@ -193,6 +194,26 @@ export function moduleFlags(target) {
   if (target === 'aarch64') return ['-mno-outline-atomics'];
   return [];
 }
+// One assembly file to one object: the compiler's own assembler for the targets it covers (Linux
+// x86-64/AArch64/RISC-V, Windows x86-64), clang for the rest (macOS). GRAIL_ASM_ORACLE=1 holds each
+// internal ELF object to clang's from the same text (tools/asm-oracle.mjs).
+export function assembleObject(source, object, target = hostTarget) {
+  const flags = target === 'riscv64' ? ['-march=rv64imafd', '-mabi=lp64d'] : [];
+  if ((target === 'x86_64' || target === 'aarch64' || target === 'riscv64' || target === 'windows-x86_64') && internalAssembler) {
+    command([internalAssembler, 'asm', ...(target === 'x86_64' ? [] : ['--target', target]), source, '-o', object]);
+    if (process.env.GRAIL_ASM_ORACLE === '1' && target !== 'windows-x86_64') {
+      const reference = `${object}.clang.o`;
+      command(['clang', `--target=${triples[target]}`, ...flags, '-c', source, '-o', reference]);
+      const diff = compareObjects(readFileSync(reference), readFileSync(object));
+      rmSync(reference);
+      if (diff) throw new Error(`internal assembler differs from clang on ${source}: ${typeof diff === 'string' ? diff : diff.message}`);
+    }
+    return object;
+  }
+  command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[target]}`, ...flags, '-c', source, '-o', object]);
+  return object;
+}
+
 export function assemble(source, executable, target = hostTarget, linkArgs = [], { frameworkArgs = [], sign = false, sdk = undefined } = {}) {
   targetName(target);
   // Unique per process: two concurrent builds of the same target otherwise truncate each
@@ -201,20 +222,7 @@ export function assemble(source, executable, target = hostTarget, linkArgs = [],
   // scratch copy is renamed into place once assembly succeeds.
   const object = `${executable}.${process.pid}.o`;
   const stable = `${executable}.o`;
-  const flags = target === 'riscv64' ? ['-march=rv64imafd', '-mabi=lp64d'] : [];
-  if ((target === 'x86_64' || target === 'aarch64' || target === 'riscv64' || (target === 'windows-x86_64' && !/\.cv_file/.test(readFileSync(source, 'latin1').slice(0, 4096)))) && internalAssembler) {
-    command([internalAssembler, 'asm', ...(target === 'x86_64' ? [] : ['--target', target]), source, '-o', object]);
-    if (process.env.GRAIL_ASM_ORACLE === '1') {
-      // The oracle (tools/asm-oracle.mjs): clang's object from the same text must be the same.
-      const reference = `${object}.clang.o`;
-      command(['clang', `--target=${triples[target]}`, '-c', source, '-o', reference]);
-      const diff = compareObjects(readFileSync(reference), readFileSync(object));
-      rmSync(reference);
-      if (diff) throw new Error(`internal assembler differs from clang on ${source}: ${typeof diff === 'string' ? diff : diff.message}`);
-    }
-  } else {
-    command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[target]}`, ...flags, '-c', source, '-o', object]);
-  }
+  assembleObject(source, object, target);
   if (machoTargets.includes(target)) {
     // An SDK supplies the real libSystem.tbd; a cross-build without one links against a stub
     // exported from this object's own imports.
@@ -501,10 +509,13 @@ export function buildReleaseCompiler({ log = () => {} } = {}) {
   log('clang -O2');
   // Cut in parts and compiled in parallel (`grail llvm-compile`): one clang -O2 over the whole
   // compiler's module is serial and takes most of the build.
-  command([native, 'llvm-compile', `${stem}.s.ll`, `${stem}.ll.o`, emulations[hostTarget], process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[hostTarget]}`, ...moduleFlags(hostTarget), '-c']);
+  // `-flto=thin`: the parts are ThinLTO bitcode in an archive, and the link below optimises across
+  // them (a function of one part is inlined into another), with the backend run in parallel.
+  command([native, 'llvm-compile', `${stem}.s.ll`, `${stem}.ll.o`, emulations[hostTarget], process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[hostTarget]}`, ...moduleFlags(hostTarget), '-c', '-flto=thin']);
   command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[hostTarget]}`, '-c', `${stem}.s`, '-o', `${stem}.o`]);
   const pending = `${stem}.pending`;
-  command([process.env.GRAIL_LINKER ?? 'ld.lld', '-m', emulations[hostTarget], `${stem}.o`, `${stem}.ll.o`, '-o', pending]);
+  const thinJobs = Math.max(1, Math.min(Number(process.env.GRAIL_JOBS) || cpus().length, 8));
+  command([process.env.GRAIL_LINKER ?? 'ld.lld', '-m', emulations[hostTarget], `${stem}.o`, '--whole-archive', `${stem}.ll.o`, '--no-whole-archive', `--thinlto-jobs=${thinJobs}`, `--thinlto-cache-dir=${join(root, '.work/thinlto')}`, '-o', pending]);
   for (const leftover of [`${stem}.s`, `${stem}.s.ll`, `${stem}.o`, `${stem}.ll.o`]) if (existsSync(leftover)) rmSync(leftover);
   for (const part of readdirSync(directory).filter(name => name.startsWith(`${basename(stem)}.s.ll.`))) rmSync(join(directory, part));
   // The acceptance test, before the binary is accepted:

@@ -29,6 +29,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { fastDigest, storeDigest } from './store-hash.mjs';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
@@ -123,32 +124,6 @@ function run(binary) {
 }
 const bytes = path => readFileSync(path);
 const digest = data => createHash('sha256').update(data).digest('hex');
-// The store's own content digest (compiler/cli.grl, store_hash): XXH64 under the seeds 0..3, each
-// as 16 hex digits - what a blob's file name is.
-const M64 = (1n << 64n) - 1n;
-const XP = [11400714785074694791n, 14029467366897019727n, 1609587929392839161n, 9650029242287828579n, 2870177450012600261n];
-const rotl = (x, r) => ((x << r) | (x >> (64n - r))) & M64;
-const xround = (acc, lane) => (rotl((acc + lane * XP[1]) & M64, 31n) * XP[0]) & M64;
-const xmerge = (acc, lane) => (((acc ^ xround(0n, lane)) * XP[0]) & M64) + XP[3] & M64;
-function xxh64(data, seed) {
-  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-  const n = data.length;
-  let at = 0, h;
-  if (n >= 32) {
-    const v = [(seed + XP[0] + XP[1]) & M64, (seed + XP[1]) & M64, seed, (seed - XP[0]) & M64];
-    for (; at + 32 <= n; at += 32) for (let k = 0; k < 4; k++) v[k] = xround(v[k], view.getBigUint64(at + 8 * k, true));
-    h = (rotl(v[0], 1n) + rotl(v[1], 7n) + rotl(v[2], 12n) + rotl(v[3], 18n)) & M64;
-    for (let k = 0; k < 4; k++) h = xmerge(h, v[k]);
-  } else h = (seed + XP[4]) & M64;
-  h = (h + BigInt(n)) & M64;
-  for (; at + 8 <= n; at += 8) h = ((rotl(h ^ xround(0n, view.getBigUint64(at, true)), 27n) * XP[0]) & M64) + XP[3] & M64;
-  if (at + 4 <= n) { h = ((rotl(h ^ ((BigInt(view.getUint32(at, true)) * XP[0]) & M64), 23n) * XP[1]) & M64) + XP[2] & M64; at += 4; }
-  for (; at < n; at++) h = (rotl(h ^ ((BigInt(data[at]) * XP[4]) & M64), 11n) * XP[0]) & M64;
-  h = ((h ^ (h >> 33n)) * XP[1]) & M64;
-  h = ((h ^ (h >> 29n)) * XP[2]) & M64;
-  return h ^ (h >> 32n);
-}
-const storeDigest = data => [0n, 1n, 2n, 3n].map(seed => xxh64(data, seed).toString(16).padStart(16, '0')).join('');
 // Interfaces are the typed record stream docs/design/separate-compilation.md describes: `GRIF`, a
 // version byte, then `tag, len, payload` records, then a trailer whose last 32 bytes are the digest
 // of everything before them. These read that framing only, so this test can change one byte of one
@@ -214,7 +189,7 @@ function constValueAt(bytes, name) {
 }
 function sealFile(bytes) {
   const body = Buffer.from(bytes.subarray(0, bytes.length - 32));
-  createHash('sha256').update(body).digest().copy(bytes, bytes.length - 32);
+  fastDigest(body).copy(bytes, bytes.length - 32);
   return bytes;
 }
 function dump(path) {
@@ -1062,6 +1037,32 @@ function proveCheck() {
   return { cold, edited, broken };
 }
 
+// ---- (n) a replayed body's result adapter ----------------------------------------------------
+// A task spawned with a record item runs through an adapter the run emits once, after the bodies,
+// for every shape its bodies named. A body replayed from its unit has to name its adapter again, or the
+// rebuilt module links with an undefined `grail_result_adapter_*`.
+function proveAdapter() {
+  const dir = join(work, 'adapter');
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, 'grail.toml'), '[package]\nname = "adapt"\nversion = "0.1.0"\n');
+  const lib = other => `module adapt;\n\nstruct Pair {\n    a: u64,\n    b: u64\n}\nfn body(p: Pair, unused: u64) -> u64 {\n    return p.a + p.b;\n}\n// A task whose item is a record: the runtime runs it through an adapter that unboxes the item.\nfn work<s>(scope: (&s Scope<u64>), unused: u64) -> u64 {\n    handle := spawn(scope, Pair { a: 15, b: 25 }, body);\n    return join(handle);\n}\npub fn run() -> u64 {\n    return task_scope(2, work);\n}\npub fn other() -> u64 {\n    return ${other};\n}\n`;
+  writeFileSync(join(dir, 'src/adapt.grl'), lib('1'));
+  writeFileSync(join(dir, 'src/main.grl'), 'use adapt;\n\nfn main() {\n    println(adapt::run() + adapt::other());\n}\n');
+  const env = { ...process.env, GRAIL_CACHE_DIR: join(dir, 'store') };
+  const buildIt = () => spawnSync(compiler, ['build', '--cache', '-o', 'target/adapt'], { cwd: dir, encoding: 'utf8', env, timeout: 900_000 });
+  const cold = buildIt();
+  assert.equal(cold.status, 0, `the cold build failed\n${cold.stdout}${cold.stderr}`);
+  assert.equal(spawnSync(join(dir, 'target/adapt'), [], { encoding: 'utf8' }).stdout, '41\n', 'the cold build prints the wrong answer');
+  // `other` changes; `run` and `work` replay.
+  writeFileSync(join(dir, 'src/adapt.grl'), lib('2'));
+  const warm = buildIt();
+  assert.equal(warm.status, 0, `the build replaying a body that names a result adapter failed\n${warm.stdout}${warm.stderr}`);
+  assert.ok(forModule(unitLines(`${warm.stdout}${warm.stderr}`), 'adapt').hits >= 1, `the bodies of adapt must replay\n${warm.stdout}`);
+  assert.equal(spawnSync(join(dir, 'target/adapt'), [], { encoding: 'utf8' }).stdout, '42\n', 'the warm build prints the wrong answer');
+  return 'a replayed body names its result adapter again';
+}
+
 function reportIndependent(independent, registrations) {
   const t = value => `${value.toFixed(1)}ms`;
   console.log(`(j) one body   ${independent.bodies} bodies with drop helpers and specialisations, all units; after each edit one is emitted and the rest replay, byte-identical`);
@@ -1074,6 +1075,10 @@ function reportIndependent(independent, registrations) {
 // ---- run --------------------------------------------------------------------------------------
 // The timings come first, from an empty store, so "cold" means cold.
 // `--units` runs only the per-function sections (j) and (k), for work on that layer.
+if (flags.includes('--adapter')) {
+  console.log(`(n) adapter    ${proveAdapter()}`);
+  process.exit(0);
+}
 if (flags.includes('--check')) {
   const checks = proveCheck();
   console.log(`(m) check      ${checks.edited.line.hits} modules reused after one edit`);
@@ -1186,6 +1191,7 @@ const independent = proveIndependentUnits(flags.includes('--big') ? 1000 : 150);
 const memoKeys = proveMemoKeys();
 const memoEdit = proveMemoEdit();
 const checks = proveCheck();
+const adapter = proveAdapter();
 const finalStore = proveStore();
 
 const ms = value => `${value.toFixed(1)}ms`;
@@ -1220,6 +1226,7 @@ console.log(`               ${ms(units.clean.ms).padStart(10)}  a clean build of
 reportIndependent(independent, registrations);
 console.log(`(m) check      a check after an edit to one module checks it alone (${checks.edited.line.hits} modules reused); errors in two modules are both reported and their readers are not checked`);
 console.log(`(l) memo edit  an edit to one of ${memoEdit.cold} optimised bodies re-optimises it alone`);
+console.log(`(n) adapter    ${adapter}`);
 console.log(`(l) memo keys  a warm rebuild of the compiler: ${memoKeys.hits} bodies replayed, every remembered optimisation checked against a fresh one`);
 console.log(`(f) pruning    --keep 0 after an edit dropped ${pruning.pruned.records} records and ${pruning.pruned.blobs} blobs; next build ${pruning.again.hits} hit, ${pruning.again.misses} miss`);
 console.log(`(o) comptime   probes: cold ${comptimeValues.cold.probes}, unchanged ${comptimeValues.warm.probes}, an edit elsewhere ${comptimeValues.elsewhere.probes}, an edit to a reached body ${comptimeValues.reached.probes}, then elsewhere again ${comptimeValues.again.probes}`);
