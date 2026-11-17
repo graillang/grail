@@ -94,6 +94,15 @@
   (C: 6.4-6.6). Windows x64 keeps a locked increment and AArch64/RV64 a sequentially consistent one,
   each its own barrier. Without `membarrier` (a kernel before 4.14) undeclared calls are not handed
   off. The protocol and its race argument: docs/design/concurrency-model.md, 2.4.1.
+- **Fixed: a release-build miscompile of float arithmetic in closures (bench/ecs_par).** A closure
+  body's float-operation facts were numbered on from the body emitted before it, while the LLVM
+  lifter counts each function's calls from zero, so a fact named another call: the gravity
+  closure's `p + v * DT` was lowered as a multiply and the y positions were lost (ecs_par printed
+  500666023.38 in release, 751091934.76 everywhere else). The counters now restart in every
+  closure body. The lifter also stops relying on the numbering: it reads the opcode the stream
+  passes to `rt_f64_op` (tracked through registers and frame slots), refuses a fact naming another
+  operation, and lowers a call without a fact to the one IEEE double operation the runtime
+  performs, with one result word in %rax and nothing written to %rdx.
 
 - **`bench-rivals` no longer charts a build that printed the wrong answer.** It already failed the
   run when a build's output differed from C's, but still wrote that build's figures into the
