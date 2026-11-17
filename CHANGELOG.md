@@ -5,15 +5,29 @@
   empty) and `close`; waits park, as every `sync` wait does. `bench/chan.grl` measures it against
   crossbeam-channel and Go's chan in `tools/bench-rivals.mjs`.
 
+- A per-function unit's key, and a module run's declaration record key, carry a digest of the run's
+  declaration surface instead of its bytes (key formats `grail-fnkey 5`, `grail-declrec 3`; units
+  filed before miss once). compile-perf build_syn1000_edited 6.379G -> 6.266G (-1.8%).
 - Inflate calls its bit refill only when the buffer is short of the bits a symbol or extra field
   needs (a word refill holds 56 or more), instead of on every symbol: the 4K png Grail-LLVM 4.94G ->
   4.66G instructions (0.59 -> 0.53 s; stb_image 0.37 s), Grail-native 16.1G -> 15.1G.
+- Fixed (soundness): the interval proof removed the overflow check of `a * b` when each operand was
+  at most 2^40, but their product can reach 2^80; the product of the bounds must now stay below 2^62
+  (`bce-product-bound-kept`). The interval reading of an index (`i * n + k`) also formed its
+  products before testing them, which can wrap in a compiler built with wrapping arithmetic; it now
+  tests by division first.
+
 - xxhash reads its eight-byte lanes with one load (`bytes::load_u64`) now that the call inlines,
   instead of assembling each from eight indexed bytes: the 20 MB zstd archive (whose frames carry
   an XXH64 checksum) Grail-LLVM 5.88G -> 5.09G instructions, 0.65 -> 0.55 s (libzstd 0.26 s).
 - Small allocations clear their block with two fixed stores instead of the general loop: every
   request up to 16 bytes (a tree node, a box) is served from the smallest bin, whose blocks hold at
   least 16. bench/bintrees.grl: Grail-LLVM 4.89G -> 4.15G instructions, Grail-native 14.2G -> 13.7G.
+- **`Iterator::fold`, with internal iteration.** The `Iterator` interface has a default `fold`, and
+  the typed adapters `Map` and `Filter` override it to hand a composed callback to the iterator they
+  wrap, so a chain runs as its source's single loop rather than a `next` call per item that loops
+  inside each filter. The adapters' inherent `fold` methods are gone (they are the interface's
+  now); `iter::fold_all(it, init, f)` calls it.
 - `grail build --release --report checks` reports the checks that survived LLVM's optimisation and
   the thin-LTO link: it reads the linked image (llvm-objdump; `GRAIL_OBJDUMP` overrides it) and
   counts each branch from a program function to rt_fail, rt_trap, rt_abort (with its `.cold` parts)
@@ -38,6 +52,14 @@
   build and recorded if its stamp and bytes are unchanged, and the resolved module set waits for it.
   Dev compiler, the 104,000-line syn4000: a build right after an edited build 0.340G -> 0.005G
   instructions, a check after an edited check 0.343G -> 0.008G.
+- Compiling is a little cheaper: the optimiser's liveness tables are allocated at full size once per
+  body instead of grown a push at a time (cold build of a 104k-line program: 93.9G -> 92.1G
+  instructions, output unchanged).
+- **The optimiser skips dead-code runs that cannot change anything.** It counts its edits to a
+  function, and a `dead_defs` run on a function unedited since a run that removed nothing is
+  skipped; the output is byte-identical. A cold build of the 4,000-function scaling program executes
+  3.0% fewer instructions (100.9G -> 97.8G).
+
 - **`bench-rivals` no longer charts a build that printed the wrong answer.** It already failed the
   run when a build's output differed from C's, but still wrote that build's figures into the
   results, so a miscompiled program could chart as the fastest. Such a figure is now left out and

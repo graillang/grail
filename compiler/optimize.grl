@@ -248,28 +248,47 @@ fn opname<a>(o: (&a mut ir::Body), op: u64) {
     assert(false);
 }
 fn set_operand<a>(o: (&a mut ir::Body), i: u64, j: u64, k: u64, v: u64) {
+    bump(&mut o);
     if j == 0 {
         ir::put(&mut o.k0, i, k);
+        bump(&mut o);
         ir::put(&mut o.v0, i, v);
+        bump(&mut o);
         ir::put(&mut o.m0, i, 0);
+        bump(&mut o);
     } else {
         ir::put(&mut o.k1, i, k);
+        bump(&mut o);
         ir::put(&mut o.v1, i, v);
+        bump(&mut o);
         ir::put(&mut o.m1, i, 0);
+        bump(&mut o);
     }
     ir::put(&mut o.chg, i, 1);
 }
 fn set_range<a>(o: (&a mut ir::Body), i: u64, j: u64, a: u64, e: u64) {
+    bump(&mut o);
     if j == 0 {
         ir::put(&mut o.s0, i, a);
+        bump(&mut o);
         ir::put(&mut o.e0, i, e);
+        bump(&mut o);
     } else {
         ir::put(&mut o.s1, i, a);
+        bump(&mut o);
         ir::put(&mut o.e1, i, e);
+        bump(&mut o);
     }
 }
+// One edit to the body's lines: what `dead_defs` reads changed (see `ir::Body.edits`).
+fn bump<a>(o: (&a mut ir::Body)) {
+    was := o.edits;
+    exchange(&mut o.edits, was + 1);
+}
 fn kill<a>(o: (&a mut ir::Body), i: u64) {
+    bump(&mut o);
     ir::put(&mut o.del, i, 1);
+    bump(&mut o);
 }
 struct F {
     // Slot facts (index N/8): register holding the value (+1) and its version, known
@@ -342,6 +361,7 @@ fn forward_read<a, c>(o: (&a mut ir::Body), f: (&c mut F), i: u64, j: u64, n: u6
         set_operand(&mut o, i, 0, lk, lv);
         set_range(&mut o, i, 0, la, le);
         ir::put(&mut o.op, i, 2);
+        bump(&mut o);
         return ();
     }
     if f.sreg[n] != 0 {
@@ -485,6 +505,7 @@ fn forward<a, b, c>(o: (&a mut ir::Body), f: (&c mut F), s: &b [u8], first: u64,
                     set_range(&mut o, i, 0, la, le);
                     if wide {
                         ir::put(&mut o.op, i, 2);
+                        bump(&mut o);
                     }
                 }
             }
@@ -622,21 +643,20 @@ struct LiveFx {
 }
 fn live_fx<a>(o: (&a ir::Body)) -> LiveFx {
     last := o.op.len();
-    mut fx = LiveFx { rd: u64[], wr: u64[], tgt: u64[] };
+    // Allocated at their full length once: grown a push at a time, the three vectors were a third
+    // of the optimiser's reallocation (cold syn4000 build).
+    mut fx = LiveFx { rd: u64[0; last], wr: u64[0; last], tgt: u64[0; last] };
     for i in last {
         op := o.op[i];
-        mut r = 0;
-        mut w = 0;
-        mut t = last;
         if (op == 16) || ((16 < op) && (op < 25)) {
-            t = jump_target(&o, i);
-        } else if (op != 100) && (op != 101) && (op != 0) && (op != 29) && (op != 30) {
-            r = ir::reads(&o, i);
-            w = ir::writes(&o, i);
+            fx.tgt[i] = jump_target(&o, i);
+        } else {
+            fx.tgt[i] = last;
+            if (op != 100) && (op != 101) && (op != 0) && (op != 29) && (op != 30) {
+                fx.rd[i] = ir::reads(&o, i);
+                fx.wr[i] = ir::writes(&o, i);
+            }
         }
-        fx.rd.push(r);
-        fx.wr.push(w);
-        fx.tgt.push(t);
     }
     return fx;
 }
@@ -719,6 +739,19 @@ fn live_pass<a, c, d, e>(o: (&a mut ir::Body), lin: (&c mut u64[]), fx: (&d Live
     return changed;
 }
 fn dead_defs<a, b>(o: (&a mut ir::Body), s: &b [u8], first: u64, last: u64) {
+    // A run that removed nothing, and no edit since: this one would remove nothing either.
+    if (o.dd_at != 0) && (o.dd_at == o.edits + 1) {
+        return ();
+    }
+    before := o.edits;
+    dead_defs_run(&mut o, view(s), first, last);
+    if o.edits == before {
+        exchange(&mut o.dd_at, before + 1);
+    } else {
+        exchange(&mut o.dd_at, 0);
+    }
+}
+fn dead_defs_run<a, b>(o: (&a mut ir::Body), s: &b [u8], first: u64, last: u64) {
     mut lin = u64[];
     for i in last {
         lin.push(0);
@@ -962,6 +995,7 @@ fn peephole<a, b>(o: (&a mut ir::Body), s: &b [u8], first: u64, last: u64) {
                                                 }
                                             }
                                             ir::put(&mut o.op, c, nj);
+                                            bump(&mut o);
                                             ir::put(&mut o.chg, c, 1);
                                             kill(&mut o, i);
                                             kill(&mut o, a);
@@ -1032,19 +1066,25 @@ fn peephole<a, b>(o: (&a mut ir::Body), s: &b [u8], first: u64, last: u64) {
                                                         shift += 1;
                                                     }
                                                     ir::put(&mut o.op, i, 1);
+                                                    bump(&mut o);
                                                     set_operand(&mut o, i, 0, 1, 0);
                                                     set_operand(&mut o, i, 1, 1, 2);
                                                     ir::put(&mut o.op, j, 8);
+                                                    bump(&mut o);
                                                     gen_imm(&mut o, v - 1, j, 0);
                                                     set_operand(&mut o, j, 1, 1, 2);
                                                     ir::put(&mut o.op, c, 34);
+                                                    bump(&mut o);
                                                     gen_imm(&mut o, shift, c, 0);
                                                     set_operand(&mut o, c, 1, 1, 0);
                                                     kill(&mut o, x);
                                                     kill(&mut o, d);
                                                     ir::put(&mut o.tr, i, 0);
+                                                    bump(&mut o);
                                                     ir::put(&mut o.tr, j, 0);
+                                                    bump(&mut o);
                                                     ir::put(&mut o.tr, c, 0);
+                                                    bump(&mut o);
                                                 }
                                             }
                                         }
@@ -2064,6 +2104,7 @@ fn emit_frame_slot<a, b>(o: (&a mut ir::Body), s: &b [u8], p: u64, k: u64) {
 // rather than mis-lowered.
 fn build_pairs<a>(o: (&a mut ir::Body), ns: u64) {
     exchange(&mut o.pair, u64[]);
+    bump(&mut o);
     if o.dyn_pairs.len() == 0 {
         return ();
     }
@@ -2076,11 +2117,14 @@ fn build_pairs<a>(o: (&a mut ir::Body), ns: u64) {
         // Word j of the value is slot n - j: all of them must be frame slots of this body.
         if (0 < n) & (words - 1 <= n) & (n < ns) {
             ir::put(&mut o.pair, n, 1);
+            bump(&mut o);
             for j in 1..words {
                 ir::put(&mut o.pair, n - j, 2);
+                bump(&mut o);
             }
         } else {
             exchange(&mut o.weird, 1);
+            bump(&mut o);
         }
     }
 }
@@ -2147,10 +2191,12 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
             // with one is never inlined into another frame (inline_candidate).
             if (op == 3) & (o.k0[i] == 4) & ir::at(view(s), o.s0[i], view("-.F")) {} else if (op == 1) & (o.k0[i] == 4) & (o.k1[i] == 1) & ir::incoming_arg(view(s), o.s0[i], o.e0[i]) {} else {
                 exchange(&mut o.weird, 1);
+                bump(&mut o);
             }
         }
         if ((o.m1[i] >> 5) & 1) != 0 {
             exchange(&mut o.weird, 1);
+            bump(&mut o);
         }
         if (op == 5) & (prologue == 0) & (o.k1[i] == 1) & (o.v1[i] == 4) & (i == 4) {
             if ir::at(view(s), o.s0[i], view("$.F")) {
@@ -2182,6 +2228,7 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
             }
             if prev != 29 {
                 exchange(&mut o.weird, 1);
+                bump(&mut o);
             }
         }
     }
@@ -2198,6 +2245,7 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
         base = minlab - 1;
     }
     exchange(&mut o.base, base);
+    bump(&mut o);
     mut refs = u64[];
     if minlab != 0 {
         for x in maxlab - base + 1 {
@@ -2207,6 +2255,7 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
         for i in last {
             if o.lab[i] != 0 {
                 ir::put(&mut o.table, o.lab[i] - 1 - base, i + 1);
+                bump(&mut o);
             }
         }
         for i in last {
@@ -2269,8 +2318,11 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
                                 & (next_live(&o, j, last) == t)
                                 & (refs[o.lab[t] - 1 - base] == 1) {
                                 ir::put(&mut o.tr, i, 1);
+                                bump(&mut o);
                                 ir::put(&mut o.tr, j, 1);
+                                bump(&mut o);
                                 ir::put(&mut o.tr, t, 1);
+                                bump(&mut o);
                             }
                         }
                     }
@@ -2494,10 +2546,12 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
                 op := o.op[i];
                 if op == 42 {
                     ir::put(&mut o.op, i, 1);
+                    bump(&mut o);
                     set_operand(&mut o, i, 0, 1, dlen[k]);
                     set_operand(&mut o, i, 1, 1, 0);
                 } else {
                     ir::put(&mut o.op, i, desc_form(op));
+                    bump(&mut o);
                     set_operand(&mut o, i, 0, 1, ddata[k]);
                     set_operand(&mut o, i, 1, 1, dlen[k]);
                 }
@@ -2513,10 +2567,12 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
             if (j < last) && (o.k0[j] == 4) && ir::same_range(view(s), o.s0[j], o.e0[j], view("(%rax)")) {
                 if (o.op[i] == 90) && (o.op[j] == 1) && (o.k1[j] == 1) && (o.v1[j] == 0) {
                     ir::put(&mut o.op, i, 91);
+                    bump(&mut o);
                     kill(&mut o, j);
                 }
                 if (o.op[i] == 93) && (o.op[j] == 98) && (o.k1[j] == 6) && ir::same_range(view(s), o.s1[j], o.e1[j], view("%eax")) {
                     ir::put(&mut o.op, i, 94);
+                    bump(&mut o);
                     kill(&mut o, j);
                 }
             }
@@ -3525,6 +3581,7 @@ fn xmm_moves<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64, lsrc: (&mut u64[
                 was := lsrc[found];
                 ir::put(&mut lsrc, j, was);
                 ir::put(&mut o.op, j, 68);
+                bump(&mut o);
                 set_operand(&mut o, j, 0, o.k0[found], o.v0[found]);
                 set_range(&mut o, j, 0, o.s0[found], o.e0[found]);
             }
@@ -3757,6 +3814,7 @@ fn xmm_narrow<a, b>(o: (&a mut ir::Body), s: &b [u8], lsrc: (&u64[]), ldst: (&u6
                 && xmm_is(&o, view(s), r1, 0, o.s1[u], o.e1[u]) && xmm_is(&o, view(s), r1, 1, o.s1[u], o.e1[u])
                 && xmm_is(&o, view(s), r2, 0, o.s1[u], o.e1[u]) && xmm_is(&o, view(s), r2, 1, o.s1[u], o.e1[u]) {
                 ir::put(&mut o.op, u, op + 12);
+                bump(&mut o);
                 ir::put(&mut o.chg, u, 1);
                 kill(&mut o, r1);
                 for m in mine.len() {
@@ -3769,6 +3827,7 @@ fn xmm_narrow<a, b>(o: (&a mut ir::Body), s: &b [u8], lsrc: (&u64[]), ldst: (&u6
     for x in loads.len() {
         if narrowed[x] == 0 {
             ir::put(&mut o.op, loads[x], 65);
+            bump(&mut o);
             ir::put(&mut o.chg, loads[x], 1);
         }
     }
@@ -3793,8 +3852,10 @@ fn xmm_narrow<a, b>(o: (&a mut ir::Body), s: &b [u8], lsrc: (&u64[]), ldst: (&u6
         a := o.s0[i];
         e := o.e0[i];
         ir::put(&mut o.op, p, 68);
+        bump(&mut o);
         set_operand(&mut o, p, 1, 7, k);
         ir::put(&mut o.op, i, 65);
+        bump(&mut o);
         set_operand(&mut o, i, 0, 6, 0);
         set_range(&mut o, i, 0, a, e);
         set_operand(&mut o, i, 1, 6, 0);
@@ -4142,10 +4203,12 @@ fn array_imms<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
         }
         if o.op[i] == 53 {
             ir::put(&mut o.op, i, 86);
+            bump(&mut o);
             set_operand(&mut o, i, 0, 3, 0);
             set_range(&mut o, i, 0, o.s0[nl - 1], o.e0[nl - 1]);
         } else {
             ir::put(&mut o.op, i, 87);
+            bump(&mut o);
         }
         set_operand(&mut o, i, 1, 3, w);
     }
@@ -4272,11 +4335,13 @@ fn array_regs<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
                 end := o.gen.len();
                 set_operand(&mut o, j, 0, 5, 0);
                 ir::put(&mut o.m0, j, (1 << base) | (1 << index));
+                bump(&mut o);
                 set_range(&mut o, j, 0, start, end);
                 v = v | 16777216;
             }
         }
         ir::put(&mut o.v1, i, v);
+        bump(&mut o);
     }
 }
 fn app_gen<a, b>(o: (&a mut ir::Body), t: &b [u8]) {
@@ -4562,6 +4627,7 @@ fn const_branches<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
         kill(&mut o, i);
         if taken {
             ir::put(&mut o.op, j, 16);
+            bump(&mut o);
             ir::put(&mut o.chg, j, 1);
             // What lies between the jump and its target, with no label of its own, is not reached;
             // a jump to the line after it is nothing.
@@ -4879,6 +4945,7 @@ fn offset_loads<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
         end := o.gen.len();
         set_operand(&mut o, j, 0, 5, 0);
         ir::put(&mut o.m0, j, 1 << r);
+        bump(&mut o);
         set_range(&mut o, j, 0, start, end);
         kill(&mut o, i);
     }
@@ -4908,6 +4975,7 @@ fn xmm_loads<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
             continue;
         }
         ir::put(&mut o.op, p, 77);
+        bump(&mut o);
         set_operand(&mut o, p, 1, o.k1[j], o.v1[j]);
         set_range(&mut o, p, 1, o.s1[j], o.e1[j]);
         kill(&mut o, j);
@@ -4943,6 +5011,7 @@ fn xmm_stores<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
             continue;
         }
         ir::put(&mut o.op, j, 77);
+        bump(&mut o);
         set_operand(&mut o, j, 0, o.k0[p], o.v0[p]);
         set_range(&mut o, j, 0, o.s0[p], o.e0[p]);
         kill(&mut o, p);
@@ -4973,6 +5042,7 @@ fn xmm_memops<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
         m0 := o.m0[p];
         set_operand(&mut o, j, 0, o.k0[p], o.v0[p]);
         ir::put(&mut o.m0, j, m0);
+        bump(&mut o);
         set_range(&mut o, j, 0, o.s0[p], o.e0[p]);
         kill(&mut o, p);
     }
@@ -5028,8 +5098,10 @@ fn const_muls<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
             o.gen.push(41);
             end := o.gen.len();
             ir::put(&mut o.op, j, 3);
+            bump(&mut o);
             set_operand(&mut o, j, 0, 5, 0);
             ir::put(&mut o.m0, j, 1 << x);
+            bump(&mut o);
             set_range(&mut o, j, 0, start, end);
             set_operand(&mut o, j, 1, 1, 0);
             if mv < last {
@@ -5038,9 +5110,11 @@ fn const_muls<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
         } else if (1 << sh) == c {
             gen_imm(&mut o, sh, j, 0);
             ir::put(&mut o.op, j, 33);
+            bump(&mut o);
             set_operand(&mut o, j, 1, 1, 0);
         } else {
             ir::put(&mut o.op, j, 14);
+            bump(&mut o);
             set_operand(&mut o, j, 0, 3, c);
             set_range(&mut o, j, 0, o.s0[i], o.e0[i]);
             set_operand(&mut o, j, 1, 1, 0);
@@ -5244,6 +5318,7 @@ fn index_cse<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
             m := (o.m0[u0] & (all_regs_mask() - 64)) | (1 << tr);
             set_operand(&mut o, u0, 0, 5, 0);
             ir::put(&mut o.m0, u0, m);
+            bump(&mut o);
             set_range(&mut o, u0, 0, start, end);
         }
     }
@@ -6871,5 +6946,6 @@ fn run_forked<a, b, c, e, x, g, h>(o: (&a mut ir::Body), s: &b [u8], cuts: (&g C
     }
     // Handed back in the body's label table, which nothing uses between bodies.
     exchange(&mut o.table, all_lines);
+    bump(&mut o);
     return true;
 }

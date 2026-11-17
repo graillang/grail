@@ -19313,5 +19313,30 @@
     ],
     "stdout": "18\n25\nk1 6\n8\n9\n1\nbad 0 1\nok 4\nok 4\n",
     "note": "enums whose payloads own memory (a string, a vector of themselves) held inline as {tag, payload words}: built, returned as T |? E, stored in records and vectors, matched, moved out, replaced; each owned payload dropped once (the end-of-main leak check)"
+  },
+  {
+    "name": "iter-fold-internal-iteration",
+    "note": "Iterator has a default `fold`; Map and Filter override it to pass a composed callback down (internal iteration), and `fold` through `I: Iterator` reaches the override",
+    "source": "use iter;\nfn total<I: iter::Iterator<Item = u64>>(it: I) -> u64 { return it.fold(0, |a: u64, x: u64| -> u64 a + x); }\nfn main() {\n    v := u64[1, 2, 3, 4, 5, 6];\n    k := 10;\n    s := iter::over(v.copy()).map(|x: u64| -> u64 x * k).filter(|x: &u64| -> bool *x % 20 == 0).fold(0, |a: u64, x: u64| -> u64 a + x);\n    println(s);\n    println(total(iter::over(v.copy()).map(|x: u64| -> u64 x + 1)));\n    println(iter::fold_all(iter::over(v), 1, |a: u64, x: u64| -> u64 a * x));\n}\n",
+    "stdout": "120\n27\n720\n",
+    "modules": [
+      "lib/iter.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "bce-product-bound-kept",
+    "source": "fn mul(a: u64, b: u64) -> u64 {\n    if a < 1099511627776 && b < 1099511627776 {\n        return a * b;\n    }\n    return 0;\n}\nfn main() {\n    println(mul(3, 4));\n    println(mul(1099511627775, 1099511627775));\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "12\n",
+    "stderr": [
+      "arithmetic overflow"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "each operand below 2^40 does not bound their product (up to 2^80): the multiplication keeps its overflow check, which fires (the interval proof accepted it before)"
   }
 ]
