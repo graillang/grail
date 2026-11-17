@@ -1,5 +1,9 @@
 ## Unreleased
 
+- **Interface format 11:** an interface's trailer ends with `fast_hash` of the bytes before it (XXH64
+  under four seeds, the build store's digest) instead of SHA-256. It guards against corruption, which
+  is all a digest in the file itself can do; the source digest stays SHA-256. Interfaces written by
+  an older compiler are refused by version and regenerated.
 - **`grail cache warm [--target T]`** checks and builds every standard module into the build store,
   as rustup ships libstd: a project's first check then compiles only its own modules. The installers
   run it (not under DESTDIR), and compile-perf's template store is now a warmed one. Dev compiler,
