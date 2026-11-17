@@ -1,5 +1,10 @@
 ## Unreleased
 
+- Release builds optimise the runtime's job, task and thread runners again: they make calls
+  through code pointers and were kept unoptimised after lifting them raced on the thread pointer.
+  That race is fixed (every thread-pointer read is now an opaque one), and
+  alloc-threads-pool-results-freed-by-waiter passes 50 runs of 50.
+
 - **The optimiser inlines small functions in ordinary builds again.** A small leaf (at most 24
   instructions, no call but a failure exit) was only inlined when it carried no statement-position
   marker, and every statement of a build with error locations carries one, so outside
