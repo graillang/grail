@@ -9,6 +9,13 @@
   off; the fn-cache report counts template checks apart from bodies. Fixed on the way: a body that
   asked for a `parallel_for_zip` adapter could be a unit whose replay did not ask again (the adapter
   went missing from a warm build); it is no longer a unit.
+- **Faster release rebuilds, within a machine's memory.** After an edit to one function, a release
+  build re-optimises only the ~128 KB LLVM part that holds it and re-runs the ThinLTO backend for
+  that part alone; the unit archive is written in one step and the native part is assembled by the
+  compiler itself. `bench/hashmap.grl`, one function edited: 0.82 s -> 0.56 s median (cargo
+  --release on the Rust twin, measured alongside: 0.74 s). Part compiles are admitted against the
+  memory available, so a release build of the compiler fits a 16 GB machine instead of being
+  killed for memory.
 - After each landing the build host also runs the closure-passing fuzzer (`tools/fuzz-closures.mjs`, 400
   cases, compile and run) next to the front-end fuzzer. `tools/land.sh --remote-status` reports both.
 - Fixed: when two or more sequences proved stable across one loop had their data pointers hoisted
