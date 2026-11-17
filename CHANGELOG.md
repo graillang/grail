@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **`dyn<Send> I`, `dyn<Share> I` and `dyn<s> I`.** An interface object can now say what the value
+  behind it may do: `dyn<Send> I` may cross to another thread (a `parallel_map` item, a task item,
+  `T: Send`), `&dyn<Share> I` may be shared by workers, and `dyn<s> I` may hold borrowed data from
+  `s` (its loans are kept). The bound is checked where a value is boxed, against its concrete type;
+  bounds may be dropped (`dyn<Send> I` to `dyn I`) but not added. A bare `dyn I` is unchanged - it
+  holds no borrow and is neither Send nor Share - and its refusal now says to write `dyn<Send> I`.
+  `Owned` is never written on `dyn`. Interface format 9.
 - **Faster iteration over owned vectors.** `iter::of(v)` and the consuming `vecs` methods (`map`,
   `fold`, `filter`, `filter_map`, `flat_map`, `for_each`, `reduce`, ...) no longer copy the vector
   into a reversed one by popping and pushing every element (an option allocated per element, twice):
