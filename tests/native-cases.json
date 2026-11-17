@@ -14894,28 +14894,11 @@
     "note": "a closure's write of a captured record's field is checked like any field write"
   },
   {
-    "name": "refinement-field-cross-field-refused",
-    "source": "struct P {\n    lo: u64,\n    hi: u64 where lo <= hi\n}\nfn main() {\n    p := P { lo: 1, hi: 3 };\n    println(p.hi);\n}\n",
-    "reject": true,
-    "diagnostic": [
-      "a field predicate may name only its own field: `lo` is not `hi`"
-    ],
-    "targets": [
-      "x86_64",
-      "aarch64",
-      "riscv64"
-    ],
-    "backends": [
-      "native"
-    ],
-    "note": "a predicate naming another field was read in the constructor's scope; it is refused until cross-field predicates are designed"
-  },
-  {
     "name": "refinement-field-outer-name-refused",
     "source": "fn main() {\n    println(1);\n}\nstruct P {\n    n: u64 where n < LIMIT\n}\n",
     "reject": true,
     "diagnostic": [
-      "a field predicate may name only its own field: `LIMIT` is not `n`"
+      "a field predicate may name only fields of its record: `LIMIT` is not a field of `P`"
     ],
     "targets": [
       "x86_64",
@@ -17019,6 +17002,44 @@
     ]
   },
   {
+    "name": "iter-typed-chain-fold",
+    "note": "typed adapters (docs/design/dyn-and-callable-bounds.md 2c): `iter::over(v).map(..).filter(..).fold(..)` is one nested type, each callback its own closure type, every call direct",
+    "source": "use iter;\nfn main() { v := u64[1, 2, 3, 4]; t := iter::over(v.copy()).map(|x: u64| -> u64 x * 2).filter(|x: &u64| -> bool *x % 3 == 0).fold(0, |s: u64, x: u64| -> u64 s + x); println(t); }\n",
+    "stdout": "6\n",
+    "modules": [
+      "lib/iter.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "iter-typed-for-loop",
+    "note": "a `for` loop over a typed adapter (inherent `next`)",
+    "source": "use iter;\nfn main() { mut t = 0; for x in iter::over(u64[1, 2, 3]).map(|x: u64| -> u64 x + 1) { t += x; } println(t); }\n",
+    "stdout": "9\n",
+    "modules": [
+      "lib/iter.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "callable-bound-impl-parameter",
+    "note": "a callable bound on an impl's parameter (`impl<U, F: FnMut(u64) -> U> W<U, F>`): the impl's own type and its field `f: F` carry the bound, so `self.f` is callable",
+    "source": "pub struct W<U, F> { f: F, u: U }\nimpl<U, F: FnMut(u64) -> U> W<U, F> {\n    pub fn run(self: &mut Self, x: u64) -> U { g := &mut self.f; return g(x); }\n}\nfn main() { mut w = W { f: |x: u64| -> u64 x + 1, u: 0 }; println(w.run(4)); }\n",
+    "stdout": "5\n"
+  },
+  {
+    "name": "callable-bound-impl-parameter-interface",
+    "files": [
+      "tests/callable/holder_user.grl"
+    ],
+    "modules": [
+      "tests/callable/holder.grl"
+    ],
+    "interfaces": true,
+    "stdout": "5\n",
+    "note": "...and through an interface file: the impl's callable bound travels with its parameter record"
+  },
+  {
     "name": "unboxed-task-items",
     "files": [
       "compiler/tests/unboxed_task_items.grl"
@@ -17369,5 +17390,189 @@
       "riscv64"
     ],
     "note": "a module with no `main` still runs its first public function that takes nothing, and prints what it returns"
+  },
+  {
+    "name": "stage4-owned-records-inline",
+    "note": "unboxed-values.md stage 4: structs that own strings and vectors are held as their words - in a frame, inline in another struct, flat in a vector - with no box of their own; dropped in place in declaration order after a user Drop, vector elements in index order; the program ends with nothing allocated",
+    "source": "struct Name {\n    first: string,\n    last: string\n}\nstruct Person {\n    name: Name,\n    tags: u64[],\n    age: u64\n}\nstruct Loud {\n    id: u64,\n    label: string\n}\nimpl Drop for Loud {\n    fn drop(self: &mut Loud) {\n        println(\"drop {} {}\", self.id, self.label);\n    }\n}\nstruct Pair {\n    a: Loud,\n    b: Loud\n}\nfn make(f: &[u8], age: u64) -> Person {\n    return Person { name: Name { first: f.text(), last: \"x\".text() }, tags: u64[age], age: age };\n}\nfn total(ps: &Person[]) -> u64 {\n    mut t = 0;\n    for p in ps {\n        t += p.age + p.name.first.len();\n    }\n    return t;\n}\nfn main() {\n    p := make(view(\"ann\"), 30);\n    println(\"{} {} {}\", p.name.first, p.tags, p.age);\n    mut ps: Person[] = [];\n    ps.push(p);\n    ps.push(make(view(\"bob\"), 40));\n    ps.push(make(view(\"cy\"), 50));\n    println(total(&ps));\n    q := ps.remove(0);\n    println(\"{} {}\", q.name.first, ps.len());\n    last := ps.pop()!;\n    println(\"{} {}\", last.name.last, ps.len());\n    ps[0] = make(view(\"dee\"), 1);\n    println(ps[0].name.first);\n    mut n = make(view(\"eve\"), 2);\n    first := n.name.first;\n    n.name.first = \"fay\".text();\n    println(\"{} {}\", first, n.name.first);\n    moved := n.name;\n    println(moved.last);\n    {\n        pr := Pair { a: Loud { id: 1, label: \"a\".text() }, b: Loud { id: 2, label: \"b\".text() } };\n        println(pr.a.id + pr.b.id);\n    }\n    mut ls: Loud[] = [];\n    ls.push(Loud { id: 3, label: \"c\".text() });\n    ls.push(Loud { id: 4, label: \"d\".text() });\n    println(\"end\");\n}\n",
+    "stdout": "ann [30] 30\n128\nann 2\nx 1\ndee\neve fay\nx\n3\ndrop 1 a\ndrop 2 b\nend\ndrop 3 c\ndrop 4 d\n"
+  },
+  {
+    "name": "stage4-owned-records-no-box",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "building and returning an owning struct allocates its owners, not the struct",
+    "source": "struct P {\n    name: string,\n    tags: u64[]\n}\nfn make(n: u64) -> P {\n    return P { name: \"p\".text(), tags: u64[n] };\n}\nfn main() {\n    p := make(3);\n    println(\"{} {}\", p.name, p.tags);\n}\n",
+    "stdout": "p [3]\n",
+    "asmAbsent": [
+      {
+        "in": "f_main_make",
+        "text": "rt_rec"
+      },
+      {
+        "in": "f_main_main",
+        "text": "rt_rec"
+      }
+    ]
+  },
+  {
+    "name": "stage4-inline-field-assigned",
+    "note": "assigning a whole owning struct to an inline field drops the old one in place and copies the new words in",
+    "source": "struct Known {\n    open: u64[],\n    end: u64[],\n    key: u8[][]\n}\nstruct Body {\n    ls: u64[],\n    n: u64,\n    known: Known\n}\nfn no_known() -> Known {\n    return Known { open: u64[], end: u64[], key: u8[][] };\n}\nfn checked(k: &Known) -> Known {\n    mut out = no_known();\n    for i in k.open.len() {\n        out.open.push(k.open[i] + 1);\n        out.end.push(k.end[i]);\n    }\n    out.key.push(u8[120]);\n    return out;\n}\nfn main() {\n    mut b = Body { ls: u64[], n: 0, known: no_known() };\n    k := Known { open: u64[1, 2], end: u64[3, 4], key: u8[][] };\n    b.known = checked(&k);\n    b.known = checked(&k);\n    println(\"{} {} {}\", b.known.open, b.known.end, b.known.key.len());\n}\n",
+    "stdout": "[2, 3] [3, 4] 1\n"
+  },
+  {
+    "name": "stage4-partial-move-then-refill",
+    "note": "moving an owner out of a field leaves 0, which the in-place drop reads as absent; refilling the field makes it owned again; every kind of owner word (string, vector, box of an enum, dyn cell, Mutex cell, Rc) is nonzero while it is live",
+    "source": "use rc;\nenum E {\n    A(string),\n    B\n}\nstruct All {\n    s: string,\n    v: u64[],\n    e: E,\n    m: Mutex<u64>,\n    r: rc::Rc<string>\n}\nfn main() {\n    mut a = All { s: \"s\".text(), v: u64[1], e: E::A(\"e\".text()), m: Mutex::new(5), r: rc::new(\"r\".text()) };\n    s := a.s;\n    v := a.v;\n    e := a.e;\n    r := a.r;\n    println(\"{} {} {}\", s, v, r.get());\n    a.s = \"t\".text();\n    a.v = u64[2];\n    a.e = E::B;\n    a.r = rc::new(\"q\".text());\n    println(\"{} {} {}\", a.s, a.v, a.r.get());\n    match e {\n        A(x) => println(x),\n        B => println(\"b\"),\n    }\n}\n",
+    "stdout": "s [1] r\nt [2] q\ne\n"
+  },
+  {
+    "name": "stage4-move-out-of-drop-field",
+    "note": "a struct with its own Drop moved out of the struct that holds it inline: its words there are left 0, its live word included, so the holder's drop skips it and it is dropped once, where it went",
+    "source": "struct L {\n    n: u64\n}\nimpl Drop for L {\n    fn drop(self: &mut L) {\n        println(\"drop {}\", self.n);\n    }\n}\nstruct H {\n    l: L,\n    m: L,\n    k: u64\n}\nfn main() {\n    {\n        h := H { l: L { n: 1 }, m: L { n: 2 }, k: 3 };\n        x := h.l;\n        println(\"moved {} {}\", x.n, h.k);\n    }\n    println(\"end\");\n}\n",
+    "stdout": "moved 1 3\ndrop 1\ndrop 2\nend\n"
+  },
+  {
+    "name": "stage4-failure-in-drop-is-contained",
+    "note": "a user Drop that fails inside a task: the failure is contained like any task failure; the task's frame is discarded, not unwound, so the fields its drop had not reached leak and the end-of-main leak check reports that instead of aborting (docs/design/task-failure-containment.md)",
+    "source": "struct Bad {\n    n: u64\n}\nimpl Drop for Bad {\n    fn drop(self: &mut Bad) {\n        v := u64[1];\n        println(v[self.n]);\n    }\n}\nstruct Pair {\n    bad: Bad,\n    text: string\n}\nfn work(n: u64, unused: u64) -> u64 {\n    p := Pair { bad: Bad { n: n }, text: \"left\".text() };\n    return p.text.len();\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    t := spawn(sc, 5, work);\n    match try_join(t) {\n        n: u64 => {\n            return n;\n        },\n        f: TaskFailure => {\n            println(\"contained\");\n            return 0;\n        },\n    }\n}\nfn main() {\n    println(task_scope(0, body));\n}\n",
+    "stdout": "contained\n0\n"
+  },
+  {
+    "name": "refinement-field-cross-literal-checked",
+    "source": "struct P {\n    lo: u64,\n    hi: u64 where lo <= hi\n}\nfn seven() -> u64 {\n    return 7;\n}\nfn main() {\n    p := P { lo: 1, hi: 3 };\n    println(p.hi - p.lo);\n    x := seven();\n    q := P { lo: x, hi: 3 };\n    println(q.hi);\n}\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a predicate across fields is checked once the literal has every field: `lo <= hi` with `lo` the stored 7",
+    "signal": "SIGABRT",
+    "stdout": "2\n",
+    "stderr": [
+      "error: refinement violated: lo <= hi\n --> ",
+      "input.grl:12:",
+      "required by P.hi"
+    ]
+  },
+  {
+    "name": "refinement-field-cross-no-capture",
+    "source": "struct P {\n    lo: u64,\n    hi: u64 where lo <= hi\n}\nfn seven() -> u64 {\n    return 7;\n}\nfn main() {\n    lo := 0;\n    x := seven();\n    q := P { hi: 3, lo: x };\n    println(q.hi + lo);\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "",
+    "stderr": [
+      "error: refinement violated: lo <= hi\n --> ",
+      "input.grl:11:"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a local named `lo` is not the field: the predicate reads the record's own `lo` (7), whichever order the literal gives the fields in"
+  },
+  {
+    "name": "refinement-field-cross-strict-proved",
+    "source": "@strict;\nstruct P {\n    lo: u64,\n    hi: u64 where lo <= hi\n}\nfn mk(a: u64, b: u64 where a <= b) -> P {\n    return P { lo: a, hi: b };\n}\nfn need_le(x: u64, y: u64 where x <= y) -> u64 {\n    return y - x;\n}\nfn span(p: &P) -> u64 {\n    return need_le(p.lo, p.hi);\n}\nfn main() {\n    p := mk(2, 5);\n    println(span(&p));\n}\n",
+    "stdout": "3\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "strict mode proves the literal from `a <= b`, and a reader through `&P` gets `p.lo <= p.hi` as a fact that proves the call"
+  },
+  {
+    "name": "refinement-field-cross-strict-unproved",
+    "source": "@strict;\nstruct P {\n    lo: u64,\n    hi: u64 where lo <= hi\n}\nfn mk(a: u64, b: u64) -> P {\n    return P { lo: a, hi: b };\n}\nfn main() {\n    println(mk(2, 5).hi);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot prove the refinement `lo <= hi`"
+    ],
+    "note": "nothing relates `a` and `b`, so strict mode refuses the literal"
+  },
+  {
+    "name": "refinement-field-cross-write-checked",
+    "source": "struct P {\n    lo: u64,\n    hi: u64 where lo <= hi\n}\nfn seven() -> u64 {\n    return 7;\n}\nfn main() {\n    mut p = P { lo: 1, hi: 3 };\n    p.hi = 5;\n    println(p.hi);\n    p.lo = seven();\n    println(p.lo);\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "5\n",
+    "stderr": [
+      "error: refinement violated: lo <= hi\n --> ",
+      "input.grl:12:"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "writing either field owes the predicate over the new value and the other field as the record holds it, also when the predicate belongs to the other field"
+  },
+  {
+    "name": "refinement-field-cross-write-strict-refused",
+    "source": "@strict;\nstruct P {\n    lo: u64,\n    hi: u64 where lo <= hi\n}\nfn main() {\n    mut p = P { lo: 1, hi: 3 };\n    p.hi = 5;\n    println(p.hi);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot prove the refinement `lo <= hi`",
+      "rebuild the record with a literal"
+    ],
+    "note": "a single-field write leaves the other field without a term (the root is `mut`), so strict mode asks for a literal instead"
+  },
+  {
+    "name": "refinement-field-cross-loan-refused",
+    "source": "struct P {\n    lo: u64,\n    hi: u64 where lo <= hi\n}\nfn zap(x: &mut u64) {\n    *x = 9;\n}\nfn main() {\n    mut p = P { lo: 1, hi: 3 };\n    zap(&mut p.lo);\n    println(p.lo);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot borrow the refined field `P.lo` mutably"
+    ],
+    "note": "`lo` has no predicate of its own, but `hi`'s reads it: a loan of it is refused like a loan of a refined field"
+  },
+  {
+    "name": "refinement-field-cross-compound",
+    "source": "struct P {\n    lo: u64,\n    hi: u64 where lo <= hi\n}\nfn main() {\n    mut p = P { lo: 1, hi: 3 };\n    p.hi -= 3;\n    println(p.hi);\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "",
+    "stderr": [
+      "error: refinement violated: lo <= hi\n --> ",
+      "input.grl:7:"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a compound assignment owes the predicate across fields too"
+  },
+  {
+    "name": "refinement-field-cross-vector-length",
+    "source": "struct B {\n    n: u64,\n    items: u64[] where items.len() <= n\n}\nfn main() {\n    b := B { n: 4, items: u64[1, 2] };\n    println(b.items.len());\n    c := B { n: 1, items: u64[1, 2] };\n    println(c.n);\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "2\n",
+    "stderr": [
+      "error: refinement violated: items.len() <= n\n --> ",
+      "input.grl:8:"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a vector's length against another field"
+  },
+  {
+    "name": "refinement-field-cross-type-refused",
+    "source": "struct Q {\n    n: u64\n}\nstruct P {\n    q: Q,\n    hi: u64 where q < hi\n}\nfn main() {\n    println(1);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "a field predicate may read only integer, float and vector fields: `q` is not one"
+    ],
+    "note": "a field of another type cannot be read by a predicate"
   }
 ]

@@ -1680,6 +1680,7 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
             }
         }
     }
+    slot_loads(&mut o, view(s), last);
     // Frame shape: escaping slots, prologue position, label table and loop depth.
     mut prologue = 0;
     mut regs_used = 0;
@@ -1827,6 +1828,7 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
     dead_stores(&mut o, &mut f, first, last);
     dead_defs(&mut o, view(s), first, last);
     array_imms(&mut o, view(s), last);
+    const_branches(&mut o, view(s), last);
     dead_defs(&mut o, view(s), first, last);
     // Promotion: weights grow 16x per loop nesting level (backward jumps), so a slot touched once
     // an iteration outweighs any handful of straight-line accesses - at 4x, a function's drop flags
@@ -2124,6 +2126,7 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
     }
     peephole(&mut o, view(s), first, last);
     dead_defs(&mut o, view(s), first, last);
+    retarget(&mut o, view(s), last);
     newframe := compact(&mut o, view(s), prologue, ns);
     // Rule 3 (call ABI S4): of the cleared range, only the slots that may be read before written.
     mut zkeep = u64[];
@@ -3603,6 +3606,234 @@ fn prev_live<a>(o: (&a ir::Body), i: u64) -> u64 {
         }
     }
     return i;
+}
+// `leaq -N(%rbp),%R; movq (%R),%R` is `movq -N(%rbp),%R` (dev-gap item 7): the address is used once,
+// by a load that overwrites it. Without the leaq the slot is no longer address-taken, so it can be
+// promoted when nothing else takes its address; a word of a two-word value or an aggregate
+// (`o.pair`) stays as it is, since the other words are reached through the same address.
+fn slot_loads<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
+    names := u8[][
+        copy_text(view("(%rax)")), copy_text(view("(%rcx)")), copy_text(view("(%rdx)")),
+        copy_text(view("(%rbx)")), copy_text(view("(%rsp)")), copy_text(view("(%rbp)")),
+        copy_text(view("(%rsi)")), copy_text(view("(%rdi)"))
+    ];
+    // How often each frame word is named, to know a temporary written and read once.
+    mut uses = u64[];
+    for n in o.maxslot / 8 + 1 {
+        uses.push(0);
+    }
+    for i in last {
+        if o.del[i] == 0 {
+            if (o.k0[i] == 2) && (o.v0[i] / 8 < uses.len()) {
+                was := uses[o.v0[i] / 8];
+                ir::put(&mut uses, o.v0[i] / 8, was + 1);
+            }
+            if (o.k1[i] == 2) && (o.v1[i] / 8 < uses.len()) {
+                was := uses[o.v1[i] / 8];
+                ir::put(&mut uses, o.v1[i] / 8, was + 1);
+            }
+        }
+    }
+    for i in last {
+        if (o.del[i] != 0) || (o.op[i] != 3) || (o.k0[i] != 2) || (o.k1[i] != 1) {
+            continue;
+        }
+        n := o.v0[i] / 8;
+        if (n < o.pair.len()) && (o.pair[n] != 0) {
+            continue;
+        }
+        mut r = o.v1[i];
+        mut j = next_live(&o, i, last);
+        // Through a temporary the stream parks the address in: `movq %R,T; movq T,%R2`, T named
+        // nowhere else.
+        mut t1 = last;
+        mut t2 = last;
+        if (j < last) && (o.op[j] == 1) && (o.k0[j] == 1) && (o.v0[j] == r) && (o.k1[j] == 2) {
+            k := next_live(&o, j, last);
+            tn := o.v1[j] / 8;
+            if (k < last) && (o.op[k] == 1) && (o.k0[k] == 2) && (o.v0[k] == o.v1[j]) && (o.k1[k] == 1)
+                && (tn < uses.len()) && (uses[tn] == 2) && ((tn >= o.pair.len()) || (o.pair[tn] == 0)) {
+                t1 = j;
+                t2 = k;
+                r = o.v1[k];
+                j = next_live(&o, k, last);
+            } else {
+                continue;
+            }
+        }
+        if (r >= names.len()) || (j >= last) || (o.op[j] != 1) || (o.k0[j] != 4) || (o.k1[j] != 1) || (o.v1[j] != r) {
+            continue;
+        }
+        if !ir::same_range(view(s), o.s0[j], o.e0[j], view(names[r])) {
+            continue;
+        }
+        set_operand(&mut o, j, 0, 2, o.v0[i]);
+        kill(&mut o, i);
+        if t1 < last {
+            kill(&mut o, t1);
+            kill(&mut o, t2);
+        }
+    }
+}
+// Constants where the front end loads them into registers (dev-gap item 8). A shift whose count is a
+// constant below 64 in %rcx shifts by the immediate (`shlq $13,%rax`); and a comparison of a
+// constant register with an immediate whose only reader is the conditional jump after it decides
+// that jump - it is `jmp` or nothing - which is how the checks of constant shift counts and other
+// constant conditions disappear. A jump's other successor reads no flags, or it is not folded.
+fn const_branches<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
+    for i in last {
+        if o.del[i] != 0 {
+            continue;
+        }
+        op := o.op[i];
+        if ((op == 33) || (op == 34)) && (((o.k0[i] == 1) && (o.v0[i] == 1)) || ((o.k0[i] == 6) && ir::same_range(view(s), o.s0[i], o.e0[i], view("%cl")))) {
+            w := imm_writer(&o, view(s), i, 1);
+            if w != 0 {
+                v := imm_value(&o, view(s), w - 1);
+                if (v != 0) && (v - 1 < 64) {
+                    set_operand(&mut o, i, 0, 3, v - 1);
+                    set_range(&mut o, i, 0, o.s0[w - 1], o.e0[w - 1]);
+                }
+            }
+            continue;
+        }
+        if (op != 6) || (o.k0[i] != 3) || (o.k1[i] != 1) {
+            continue;
+        }
+        j := next_live(&o, i, last);
+        if (j >= last) || !((16 < o.op[j]) && (o.op[j] < 25)) || (o.k0[j] != 4) {
+            continue;
+        }
+        w := imm_writer(&o, view(s), i, o.v1[i]);
+        b := imm_value(&o, view(s), i);
+        if (w == 0) || (b == 0) {
+            continue;
+        }
+        av := imm_value(&o, view(s), w - 1) - 1;
+        bv := b - 1;
+        t := jump_target(&o, j);
+        f := next_live(&o, j, last);
+        if (t >= last) || (f >= last) || reads_flags(&o, t, last) || reads_flags(&o, f, last) {
+            continue;
+        }
+        jop := o.op[j];
+        mut taken = false;
+        if (jop == 17) || (jop == 18) {
+            taken = av == bv;
+        } else if (jop == 19) || (jop == 20) {
+            taken = av != bv;
+        } else if (jop == 21) || (jop == 22) {
+            taken = av >= bv;
+        } else {
+            taken = av < bv;
+        }
+        kill(&mut o, i);
+        if taken {
+            ir::put(&mut o.op, j, 16);
+            ir::put(&mut o.chg, j, 1);
+            // What lies between the jump and its target, with no label of its own, is not reached;
+            // a jump to the line after it is nothing.
+            if j < t {
+                mut clean = true;
+                mut x = j + 1;
+                while x < t {
+                    if (o.del[x] == 0) && (o.op[x] == 100) {
+                        clean = false;
+                    }
+                    x += 1;
+                }
+                if clean {
+                    x = j + 1;
+                    while x < t {
+                        if (o.del[x] == 0) && (o.op[x] != 101) {
+                            kill(&mut o, x);
+                        }
+                        x += 1;
+                    }
+                    kill(&mut o, j);
+                }
+            }
+        } else {
+            kill(&mut o, j);
+        }
+    }
+}
+// Whether the code reached at line i (after labels and directives) may read the flags: a
+// conditional jump, a set, an add or subtract with carry, or anything the optimiser does not know.
+fn reads_flags<a>(o: (&a ir::Body), i: u64, last: u64) -> bool {
+    mut j = i;
+    while (j < last) && ((o.del[j] != 0) || (o.op[j] == 101) || (o.op[j] == 100)) {
+        j += 1;
+    }
+    if j >= last {
+        return true;
+    }
+    op := o.op[j];
+    return (op == 0) || ((16 < op) && (op < 25)) || (op == 25) || (op == 26) || (op == 27);
+}
+// An accumulator worked on in %rax (dev-gap item 10): `movq %A,%rax; OP x,%rax; ... movq %rax,%A`
+// with %rax dead afterwards is the same operations on %A. The lines are consecutive, each OP is an
+// arithmetic operation writing %rax whose source is not memory addressed through %rax, and %A is a
+// register none of them names as its source unless it is %rax's own value.
+fn retarget<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
+    for i in last {
+        if (o.del[i] != 0) || (o.op[i] != 1) || (o.k0[i] != 1) || (o.k1[i] != 1) || (o.v1[i] != 0) {
+            continue;
+        }
+        a := o.v0[i];
+        if (a == 0) || (a == 4) || (a == 5) {
+            continue;
+        }
+        mut j = next_live(&o, i, last);
+        mut n = 0;
+        mut ok = true;
+        while (j < last) && (n < 6) {
+            op := o.op[j];
+            if (op == 1) && (o.k0[j] == 1) && (o.v0[j] == 0) && (o.k1[j] == 1) && (o.v1[j] == a) {
+                break;
+            }
+            touch := ir::reads(&o, j) | ir::writes(&o, j);
+            if (op != 0) && (op != 100) && !ir::is_jump(op) && (op != 15) && (((touch & 1) == 0) && (((touch >> a) & 1) == 0)) {
+                // A line touching neither %rax nor %A (a constant loaded for the next operation).
+                j = next_live(&o, j, last);
+                continue;
+            }
+            if !ir::arith(op) || (o.k1[j] != 1) || (o.v1[j] != 0) {
+                ok = false;
+                break;
+            }
+            if (o.k0[j] == 1) && (o.v0[j] == a) {
+                ok = false;
+                break;
+            }
+            if ((o.k0[j] == 4) || (o.k0[j] == 6)) && ((((ir::reads(&o, j) >> a) & 1) != 0) || ((ir::reads(&o, j) & 1) != 0 && (o.k0[j] != 1))) {
+                // A memory or unparsed source naming %rax or %A: not this shape.
+                ok = false;
+                break;
+            }
+            n += 1;
+            j = next_live(&o, j, last);
+        }
+        if !ok || (n == 0) || (j >= last) || (o.op[j] != 1) || (o.v1[j] != a) {
+            continue;
+        }
+        if !dead_after(&o, j, 0, 6) {
+            continue;
+        }
+        mut x = next_live(&o, i, last);
+        while x < j {
+            if ir::arith(o.op[x]) && (o.k1[x] == 1) && (o.v1[x] == 0) {
+                if (o.k0[x] == 1) && (o.v0[x] == 0) {
+                    set_operand(&mut o, x, 0, 1, a);
+                }
+                set_operand(&mut o, x, 1, 1, a);
+                ir::put(&mut o.chg, x, 1);
+            }
+            x = next_live(&o, x, last);
+        }
+        kill(&mut o, i);
+        kill(&mut o, j);
+    }
 }
 fn name_hash<b>(s: &b [u8], a: u64, e: u64) -> u64 {
     mut h = 0;
