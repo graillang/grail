@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **Native backend: a vector the loop cannot change is read once before the loop.** With the
+  front end's loop-stability fact, the optimiser loads the vector's data pointer (and its length,
+  when a check or `len()` in the loop needs it) into registers on the way into the loop, and the
+  accesses inside read those. An unchecked access needs only the data register. fnv executes 11%
+  fewer instructions.
+
 - Fixed: the per-loop stability fact and the LLVM backend's indirect-call fact both used fact kind
   7, so a stable vector whose slot number matched an indirect call's ordinal (with a loop head
   label of 6 or less) could make the lifter pass that call too few arguments. The stability fact
