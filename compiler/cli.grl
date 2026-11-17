@@ -964,23 +964,24 @@ fn release_optimise<a, b>(assemble: (&a u8[][]), asm: &b [u8], object: &b [u8], 
     optimised := cat(view(object), view(".ll.o"));
     native_part := release_part(view(object));
     // `grail llvm-compile` runs `clang -O2` over the module cut in parts, in parallel.
-    mut clang = u8[][host::exe_path(), copy(view("llvm-compile")), lifted.copy(), optimised.copy(), copy(view(emulation))];
-    for i in assemble.len() {
-        clang.push(item(&assemble, i));
+    mut clang = u8[][host::exe_path(), copy(view("llvm-compile")), copy(view("--native")), native_part.copy(), lifted.copy(), copy(view(object)), copy(view(emulation))];
+    // Clang for the LLVM module, whatever assembled the native part (`grail asm` on Linux).
+    clang.push(tool(view("GRAIL_ASSEMBLER"), view("clang")));
+    if eq(view(emulation), view("aarch64elf")) {
+        clang.push(copy(view("--target=aarch64-linux-gnu")));
+    } else if eq(view(emulation), view("elf64lriscv")) {
+        clang.push(copy(view("--target=riscv64-linux-gnu")));
+        clang.push(copy(view("-march=rv64imafd")));
+        clang.push(copy(view("-mabi=lp64d")));
+    } else {
+        clang.push(copy(view("--target=x86_64-linux-gnu")));
     }
+    clang.push(copy(view("-c")));
     // ThinLTO across units (docs/design/separate-compilation.md, "Release builds: ThinLTO across
     // modules"): the parts are bitcode, and the unit object is one flat archive of the native part
     // and every part (`L` takes the members of the parts' archive; lld reads no nested archives).
     clang.push(copy(view("-flto=thin")));
-    clear := u8[][copy(view("rm")), copy(view("-f")), copy(view(object))];
-    merge := u8[][
-        tool(view("GRAIL_AR"), view("llvm-ar")),
-        copy(view("qcsDL")),
-        copy(view(object)),
-        native_part.copy(),
-        optimised.copy()
-    ];
-    return u8[][][clang, clear, merge];
+    return u8[][][clang];
 }
 fn compile_mode<a, b, d, e, g, k>(
     h: (&a Home),
@@ -1077,12 +1078,12 @@ fn compile_mode<a, b, d, e, g, k>(
         pe = 1;
     }
     // The assembler: the compiler's own (`grail asm`, compiler/asm_x86.grl) for a Linux x86-64
-    // build it covers (Linux x86-64, AArch64, RISC-V), clang otherwise (a release build's LLVM
-    // module, macOS, Windows).
+    // build it covers (Linux x86-64, AArch64, RISC-V) - a release build's native part included, which
+    // it assembles to the same symbols as clang in a third of the time - and clang otherwise (macOS,
+    // Windows). A release build's LLVM module is clang's either way (`grail llvm-compile`).
     // Windows debug builds keep clang until the internal assembler writes CodeView.
-    internal := (eq(view(target), view("x86_64")) || eq(view(target), view("aarch64")) || eq(view(target), view("riscv64"))
-        || (eq(view(target), view("windows-x86_64")) && (debug == 0)))
-        && (release == 0);
+    linux := eq(view(target), view("x86_64")) || eq(view(target), view("aarch64")) || eq(view(target), view("riscv64"));
+    internal := (linux || (eq(view(target), view("windows-x86_64")) && (debug == 0))) && ((release == 0) || linux);
     mut assemble = u8[][tool(view("GRAIL_ASSEMBLER"), view("clang"))];
     if internal {
         assemble = u8[][host::exe_path(), copy(view("asm"))];
@@ -2105,15 +2106,23 @@ fn unit_reads<a, b>(groups: (&a ModuleGroup[]), base: (&b u8[][]), g: u64) -> u8
 // about one per 4 MB of IR - and linked into one relocatable OUT.o. A release unit's optimisation is
 // then bounded by its largest part rather than by the whole module.
 fn llvm_compile_command<a>(args: (&a u8[][])) -> u64 {
-    if args.len() < 4 {
-        say(view("usage: grail llvm-compile IN.ll OUT.o EMULATION CLANG [ARGS...]"));
+    // `--native PATH`: a release unit's native part, put into OUT's archive beside the parts (ThinLTO
+    // only), so the unit object is written in one step.
+    mut first = 0;
+    mut native = u8[];
+    if (args.len() > 1) && eq(view(item(&args, 0)), view("--native")) {
+        native = item(&args, 1);
+        first = 2;
+    }
+    if args.len() < first + 4 {
+        say(view("usage: grail llvm-compile [--native PART.o] IN.ll OUT.o EMULATION CLANG [ARGS...]"));
         return 1;
     }
-    input := item(&args, 0);
-    output := item(&args, 1);
-    emulation := item(&args, 2);
+    input := item(&args, first);
+    output := item(&args, first + 1);
+    emulation := item(&args, first + 2);
     mut clang = u8[][];
-    mut i = 3;
+    mut i = first + 3;
     while i < args.len() {
         clang.push(item(&args, i));
         i += 1;
@@ -2128,6 +2137,15 @@ fn llvm_compile_command<a>(args: (&a u8[][])) -> u64 {
     }
     text := host::read_file(view(input));
     mut wanted = text.len() / 4194304 + 1;
+    if thin {
+        // Smaller parts, so an edit to one function re-parses and re-optimises a small part (each
+        // part is stored by its text) and the link's backend re-runs only on that part. The count
+        // depends on the text alone, so the parts of an unchanged module are the same every build.
+        wanted = text.len() / 131072 + 1;
+        if 16 < wanted {
+            wanted = 16;
+        }
+    }
     mut cap = host::cpus();
     asked := host::env(view("GRAIL_JOBS"));
     if asked.len() != 0 {
@@ -2136,15 +2154,25 @@ fn llvm_compile_command<a>(args: (&a u8[][])) -> u64 {
     if 32 < cap {
         cap = 32;
     }
-    if cap < wanted {
+    if (cap < wanted) && !thin {
         wanted = cap;
     }
     mut js = jobs::open();
-    if 1 < wanted {
-        granted := jobs::workers(&mut js, wanted);
-        wanted = granted;
+    mut running = wanted;
+    if cap < running {
+        running = cap;
     }
-    if wanted < 2 {
+    if 1 < running {
+        granted := jobs::workers(&mut js, running);
+        running = granted;
+        if !thin {
+            wanted = granted;
+        }
+    }
+    if running == 0 {
+        running = 1;
+    }
+    if (wanted < 2) && !thin {
         jobs::give_all(&mut js);
         mut run = u8[][];
         for c in clang.len() {
@@ -2168,7 +2196,12 @@ fn llvm_compile_command<a>(args: (&a u8[][])) -> u64 {
     // Unique to this unit's module: internal functions keep their own names in every part of it.
     suffix := cat(view("u"), view(decimal(xxhash::hash64(view(input), 0))));
     mut pids = u64[];
+    mut waited = 0;
+    mut bad = 0;
     mut objects = u8[][];
+    if native.len() != 0 {
+        objects.push(native.copy());
+    }
     mut compiled = u8[][];
     mut destinations = u8[][];
     parts_store := path_join(view(cache_base()), view("llvm-parts"));
@@ -2204,14 +2237,21 @@ fn llvm_compile_command<a>(args: (&a u8[][])) -> u64 {
         run.push(part.copy());
         run.push(copy(view("-o")));
         run.push(object.copy());
+        // At most `running` at once: the jobserver granted that many.
+        if pids.len() - waited >= running {
+            if (9223372036854775807 < pids[waited]) || (host::wait(pids[waited]) != 0) {
+                bad = 1;
+            }
+            waited += 1;
+        }
         pids.push(host::spawn(run, host::environment(), 2, 2));
         objects.push(object);
     }
-    mut bad = 0;
-    for k in pids.len() {
-        if (9223372036854775807 < pids[k]) || (host::wait(pids[k]) != 0) {
+    while waited < pids.len() {
+        if (9223372036854775807 < pids[waited]) || (host::wait(pids[waited]) != 0) {
             bad = 1;
         }
+        waited += 1;
     }
     jobs::give_all(&mut js);
     if bad != 0 {
@@ -2239,9 +2279,11 @@ fn llvm_compile_command<a>(args: (&a u8[][])) -> u64 {
 }
 // `output` as a fresh archive of `members` (ThinLTO bitcode parts): `r` would update an archive left
 // by an earlier build in place, so it is removed first.
+// No symbol table (`S`): the link takes every member (--whole-archive), and building one would
+// make llvm-ar read every bitcode member.
 fn thin_archive<a, b>(output: &a [u8], members: (&b u8[][])) -> u64 {
     host::remove(output, 0);
-    mut ar = u8[][tool(view("GRAIL_AR"), view("llvm-ar")), copy(view("rcsD")), copy(output)];
+    mut ar = u8[][tool(view("GRAIL_AR"), view("llvm-ar")), copy(view("rcSD")), copy(output)];
     for k in members.len() {
         ar.push(item(&members, k));
     }
@@ -2275,8 +2317,9 @@ fn unit_build_command<a>(args: (&a u8[][])) -> u64 {
         for k in n {
             command.push(item(&args, i + 1 + k));
         }
+        lowering := (command.len() > 1) && eq(view(item(&command, 1)), view("llvm-compile"));
         if host::command(command) != 0 {
-            if step == 0 {
+            if (step == 0) && !lowering {
                 say(view("grail: assembling failed (needs clang)"));
             } else {
                 say(view("grail: optimising the LLVM module failed (needs clang and ld.lld)"));
@@ -2467,7 +2510,12 @@ fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
             inproc := !checking && (prefix.len() >= 2) && eq(view(item(&prefix, 1)), view("asm"));
             if inproc {
                 compile.push(copy(view("--object")));
-                compile.push(cat(view(stem), view(".o")));
+                if release != 0 {
+                    // The native part; llvm-compile puts it in the unit's archive.
+                    compile.push(release_part(view(cat(view(stem), view(".o")))));
+                } else {
+                    compile.push(cat(view(stem), view(".o")));
+                }
             }
             compile.push(cat(view(stem), view(".s")));
             for f in groups[g].files.len() {
@@ -2485,8 +2533,18 @@ fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
                 for k in compile.len() {
                     run.push(compile[k].copy());
                 }
-                // In-process assembly needs no steps: the compiler run wrote the object (`--object`).
+                // In-process assembly needs no assembler step: the compiler run wrote the object
+                // (`--object`); a release unit still has its LLVM module to compile and archive.
                 unit_object := cat(view(stem), view(".o"));
+                if inproc && (release != 0) {
+                    steps := release_optimise(&prefix, view(cat(view(stem), view(".s"))), view(unit_object), view(emulation));
+                    for q in steps.len() {
+                        run.push(decimal(steps[q].len()));
+                        for w in steps[q].len() {
+                            run.push(item(&steps[q], w));
+                        }
+                    }
+                }
                 if !inproc {
                     run.push(decimal(prefix.len() + 3));
                     for k in prefix.len() {
