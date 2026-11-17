@@ -253,7 +253,7 @@ fn expr_and<a>(o: (&a mut asm_x86::A)) -> u64 {
     }
 }
 
-fn expr_or<a>(o: (&a mut asm_x86::A)) -> u64 {
+pub fn expr_or<a>(o: (&a mut asm_x86::A)) -> u64 {
     mut v = expr_and(&mut o);
     loop {
         asm_x86::skip(&mut o);
@@ -628,12 +628,17 @@ fn mov<a>(o: (&a mut asm_x86::A)) {
 }
 
 // Loads and stores of a general register: size 3 (x), 2 (w), 0 (byte); load 1 or 0.
-fn ldst<a>(o: (&a mut asm_x86::A), size0: u64, load: u64) {
+fn ldst<a>(o: (&a mut asm_x86::A), size0: u64, load0: u64) {
+    // load0: 0 store, 1 load, 2 load sign-extended (to 64 bits for an x register, 32 for w).
+    mut load = load0;
     t := need_reg(&mut o);
     comma(&mut o);
     mut size = size0;
     if (size == 3) && (sf(t) == 0) {
         size = 2;
+    }
+    if (load0 == 2) && (sf(t) == 0) {
+        load = 3;
     }
     // A float register: the SIMD&FP form (V); d is 64-bit, s 32-bit.
     mut v = 0;
@@ -751,6 +756,39 @@ pub fn instruction<a>(o: (&a mut asm_x86::A), a0: u64, e: u64) {
         ldst(&mut o, 1, 1);
     } else if simple(&o, a0, e, view("strh")) {
         ldst(&mut o, 1, 0);
+    } else if simple(&o, a0, e, view("ldrsb")) {
+        ldst(&mut o, 0, 2);
+    } else if simple(&o, a0, e, view("ldrsh")) {
+        ldst(&mut o, 1, 2);
+    } else if simple(&o, a0, e, view("ldrsw")) {
+        ldst(&mut o, 2, 2);
+    } else if simple(&o, a0, e, view("sxtb")) || simple(&o, a0, e, view("sxth")) || simple(&o, a0, e, view("sxtw")) {
+        d := need_reg(&mut o);
+        comma(&mut o);
+        n := need_reg(&mut o);
+        mut imms = 7;
+        if simple(&o, a0, e, view("sxth")) {
+            imms = 15;
+        } else if simple(&o, a0, e, view("sxtw")) {
+            imms = 31;
+        }
+        word(&mut o, 0x13000000 | (sf(d) << 31) | (sf(d) << 22) | (imms << 10) | (rn(n) << 5) | rn(d));
+    } else if simple(&o, a0, e, view("ldxr")) {
+        t := need_reg(&mut o);
+        comma(&mut o);
+        asm_x86::expect(&mut o, '[');
+        n := need_reg(&mut o);
+        asm_x86::expect(&mut o, ']');
+        word(&mut o, 0x885f7c00 | (sf(t) << 30) | (rn(n) << 5) | rn(t));
+    } else if simple(&o, a0, e, view("stxr")) {
+        st := need_reg(&mut o);
+        comma(&mut o);
+        t := need_reg(&mut o);
+        comma(&mut o);
+        asm_x86::expect(&mut o, '[');
+        n := need_reg(&mut o);
+        asm_x86::expect(&mut o, ']');
+        word(&mut o, 0x88007c00 | (sf(t) << 30) | (rn(st) << 16) | (rn(n) << 5) | rn(t));
     } else if simple(&o, a0, e, view("ldp")) {
         pair(&mut o, 1);
     } else if simple(&o, a0, e, view("stp")) {

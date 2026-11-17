@@ -60,6 +60,11 @@
   `sitofp`/`uitofp` to `float`, chosen by the source's signedness. Both round once to nearest even,
   as the runtime does, so results are bit-identical (the float matrix pins the edge values). A loop of
   three million conversions goes from 50 to 32 ms.
+- **The internal assembler covers AArch64 and RISC-V.** `grail build --target aarch64` and
+  `--target riscv64` (Linux) assemble in the compiler run too (`compiler/asm_a64.grl`,
+  `compiler/asm_rv64.grl`; `grail asm --target T`), debug builds included. Their objects are
+  byte-identical to clang's: the syn4000 program on both targets, and all 540 single-source corpus
+  programs on AArch64 (`bun tools/asm-oracle.mjs --target aarch64 --corpus`).
 
 - Fixed: the internal assembler refused `.hidden` (the runtime's `rt_sites_fill`), so every LLVM
   release build failed at `grail asm`. It now takes `.hidden`, `.protected`, `.internal` and
