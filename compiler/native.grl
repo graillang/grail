@@ -21605,7 +21605,7 @@ fn constant_value<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> Val
                         home := c.constants[i].module.copy();
                         require_visible(&mut c, view(home), name);
                     }
-                    t := static_probe_init(&mut c, module, name, view(""), 0);
+                    t := static_probe_init(&mut c, module, name, view(""), 0, pty);
                     if (pty == 3) || (pty == 2) || ((pty != 0) && (ct_seq_elem(&mut c, pty) != NO_TYPE)) || static_structured(&mut c, pty) {
                         return own(&mut c, t, pty);
                     }
@@ -21714,7 +21714,7 @@ fn static_guard_symbol<a, b>(m: &a [u8], n: &b [u8]) -> u8[] {
 // the static's word. For a module binding (`memo` 0) the value is computed at every read, as a
 // constant is a value at every use, and the guard only marks "being computed". A read that finds
 // it being computed is a cycle: the probe says which (grail_cycle__) and stops.
-fn static_probe_init<a, b, d, e>(c: (&a mut C), m: &b [u8], n: &d [u8], sym: &e [u8], memo: u64) -> u64 {
+fn static_probe_init<a, b, d, e>(c: (&a mut C), m: &b [u8], n: &d [u8], sym: &e [u8], memo: u64, ty: u64) -> u64 {
     guard := static_guard_symbol(m, n);
     tag := ct_value_tag(m, n);
     mut value_fn = copy_bytes(view("grail_value__"));
@@ -21747,7 +21747,18 @@ fn static_probe_init<a, b, d, e>(c: (&a mut C), m: &b [u8], n: &d [u8], sym: &e 
     o(&mut c, view("movq $1,"));
     o(&mut c, view(guard));
     o(&mut c, view("(%rip)\n"));
-    t := invoke(&mut c, view(value_sym), u64[]);
+    mut t = 0;
+    if framed(&mut c, ty) {
+        // A plain record comes back as a result does (save_result); the static's word holds a box
+        // of its own, which word_reference reads as the record.
+        call_out(&mut c, view(value_sym));
+        t = save_result(&mut c, ty);
+        if memo != 0 {
+            t = frame_box(&mut c, t, ty);
+        }
+    } else {
+        t = invoke(&mut c, view(value_sym), u64[]);
+    }
     if memo != 0 {
         get(&mut c, t, view("%rax"));
         o(&mut c, view("movq %rax,"));
@@ -21781,7 +21792,7 @@ fn static_value<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> Val {
     if c.probe_mode != 0 {
         static_resolve(&mut c, k - 1);
         if (c.statics[k - 1].state == 2) && (c.statics[k - 1].ready == 0) {
-            static_probe_init(&mut c, module, name, view(sym), 1);
+            static_probe_init(&mut c, module, name, view(sym), 1, ty);
         }
     }
     o(&mut c, view("leaq "));
