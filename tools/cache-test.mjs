@@ -13,7 +13,9 @@
 //  (e) interfaces  - an interface tampered the way `tools/interface-test.mjs` tampers one (edit,
 //                    re-digested, manifest rewritten) misses the module that reads it, and only it;
 //  (f) corruption  - a corrupted store entry is a miss and a rebuild, never a wrong binary, and the
-//                    entry is repaired instead of missing forever.
+//                    entry is repaired instead of missing forever;
+//  (m) comptime    - a compile-time value reruns its probe when a body it reached changes, and only
+//                    then.
 //
 // (c) is also where the *independence* of a module's emitted text is pinned, by measurement rather
 // than by argument: every label is minted in its module's own namespace from a counter that restarts
@@ -1021,6 +1023,59 @@ const corruption = proveCorruption();
 const pruning = provePruning();
 const modules = proveModules();
 const editCost = proveEditCost(flags.includes('--big') ? 2000 : 400);
+// (m) compile-time values (docs/design/comptime-speed.md, R3): a value is cached with what its
+// computation read - the bodies the probe reached, the non-function declarations, the other values -
+// so an edit elsewhere runs no probe, and an edit to a body the value reached runs exactly one. The
+// probes are counted by the link each one makes (GRAIL_CC), in a project of its own.
+function proveComptimeValues() {
+  const dir = join(work, 'comptime');
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  const log = join(dir, 'cc.log');
+  const wrapper = join(dir, 'cc.sh');
+  writeFileSync(wrapper, `#!/bin/sh\necho link >> ${log}\nexec cc "$@"\n`, { mode: 0o755 });
+  const source = (step, extra) => `static A: u64 = @fa();
+static B: u64 = @fb();
+fn fa() -> u64 {
+    mut t = 0;
+    for i in 10 {
+        t += i * ${step};
+    }
+    return t;
+}
+fn fb() -> u64 {
+    return 7;
+}
+${extra}
+fn main() -> u64 {
+    println(A);
+    println(B);
+    return 0;
+}
+`;
+  const file = join(dir, 'main.grl');
+  const step = (text) => {
+    writeFileSync(file, text);
+    writeFileSync(log, '');
+    const result = spawnSync(compiler, ['run', file, '--no-cache'], { cwd: dir, encoding: 'utf8', env: { ...process.env, GRAIL_CC: wrapper }, timeout: 600_000 });
+    assert.equal(result.status, 0, `compile-time values: the build failed: ${result.stdout}${result.stderr}`);
+    return { out: result.stdout, probes: readFileSync(log, 'utf8').split('\n').filter(Boolean).length };
+  };
+  const cold = step(source(1, ''));
+  assert.equal(cold.out, '45\n7\n');
+  assert.equal(cold.probes, 1, 'a cold build computes every value in one probe');
+  const warm = step(source(1, ''));
+  assert.equal(warm.probes, 0, 'an unchanged build runs no probe');
+  const elsewhere = step(source(1, 'fn unrelated() -> u64 {\n    return 1;\n}\n'));
+  assert.equal(elsewhere.probes, 0, 'an edit no value reached runs no probe');
+  const reached = step(source(2, 'fn unrelated() -> u64 {\n    return 1;\n}\n'));
+  assert.equal(reached.out, '90\n7\n');
+  assert.equal(reached.probes, 1, 'an edit to a body a value reached runs the probe again');
+  const again = step(source(2, 'fn unrelated() -> u64 {\n    return 2;\n}\n'));
+  assert.equal(again.probes, 0, 'and after it, an edit elsewhere runs none');
+  return { cold, warm, elsewhere, reached, again };
+}
+const comptimeValues = proveComptimeValues();
 const units = proveUnits(flags.includes('--big') ? 2000 : 400);
 const registrations = proveRegistrations();
 const independent = proveIndependentUnits(flags.includes('--big') ? 1000 : 150);
@@ -1061,5 +1116,6 @@ reportIndependent(independent, registrations);
 console.log(`(m) check      a check after an edit to one module checks it alone (${checks.edited.line.hits} modules reused); errors in two modules are both reported and their readers are not checked`);
 console.log(`(l) memo keys  a warm rebuild of the compiler: ${memoKeys.hits} bodies replayed, every remembered optimisation checked against a fresh one`);
 console.log(`(f) pruning    --keep 0 after an edit dropped ${pruning.pruned.records} records and ${pruning.pruned.blobs} blobs; next build ${pruning.again.hits} hit, ${pruning.again.misses} miss`);
+console.log(`(m) comptime   probes: cold ${comptimeValues.cold.probes}, unchanged ${comptimeValues.warm.probes}, an edit elsewhere ${comptimeValues.elsewhere.probes}, an edit to a reached body ${comptimeValues.reached.probes}, then elsewhere again ${comptimeValues.again.probes}`);
 console.log('');
 console.log('build cache verified');

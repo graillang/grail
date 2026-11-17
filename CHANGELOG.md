@@ -38,6 +38,21 @@
   verdicts are the same: `tools/check-diff.mjs` compiles every corpus
   source and example with two compilers and compares their output byte for byte (with `--build`,
   the assembly too).
+- Fixed: **a failed check inside the compiler itself faulted instead of reporting.** The failure
+  report was written in process-state bytes 4096..8192, but `rt_state` is sized by the entry stub
+  of the compiler that built the binary, and the compiler is built by its seed, which gives 4096.
+  The report block is now mapped on first use (its address in state word 3432), so it is the same
+  in every binary, and `rt_state` is 4096 bytes again.
+
+- **Compile-time values cost one probe per build, and none when nothing they read changed**
+  (comptime-speed R2, R3). Every run-tier value a build needs is computed by one probe; each is then
+  cached with what it read - the program's function bodies its computation reached, the
+  non-function declarations, the other values, the runtime and standard library files, the compiler
+  and the options - so an edit anywhere else runs no probe. 100 values: one probe (+2.3 s CPU on a
+  first build, +0.9 s once the probes' function cache is warm), and no probe on a warm rebuild or
+  after an unrelated edit. A value that fails names itself, its call and its declaration (a failed
+  check, a refused effect, an exit).
+
 - **Fixed: an LLVM-backend miscompile of a vector grown through its address.** A call handed `&mut v`
   receives the slot's address, not the header word, so the lifter did not count it as a call that
   can grow `v`, and the `len`/`data` it had read before the call were used after it: `pad(&mut out,
@@ -370,7 +385,7 @@
   a division, a narrowing, an unwrap, a refined parameter - because the failure report allocated:
   its texts were heap strings (`rt_new`, `rt_reserveb`, `rt_alloc`, and the runtime's literals are
   heap values), and it reached the compiler's site-table helper through an unnamed indirect call.
-  The dying report is now written in a process-state report block (`rt_state` grows to 8192 bytes),
+  The dying report is now written in a report block mapped on first use,
   its literals are static views, and the helper call is a named edge. The checks still fail, so
   `@no_panic` still refuses them.
 

@@ -147,14 +147,30 @@ fn rt_fail(kind: u64, a: u64, b: u64) -> u64 {
     rt_write_all(2, buf, n);
     return rt_abort_final();
 }
-// The failure report block: process-state words 4096..8152 hold the text, 8152..8192 the site
-// descriptor rt_fail_where fills. Only the holder of the abort claim writes it, so one block serves
-// every thread. rt_fail_limit() + the longest single piece written past it stays inside 4056 bytes.
+// The failure report block: 8192 bytes mapped when the first report needs them - the text in bytes
+// 0..8152, the site descriptor rt_fail_where fills in 8152..8192 - with its address kept in
+// process-state word 3432. Only the holder of the abort claim writes it, so one block serves every
+// thread. It is mapped, not taken from the heap (a failure may be raised where the allocator lock
+// is held, and `@no_alloc` code may fail a check), and not a part of rt_state: the entry stub that
+// sizes rt_state is the compiling compiler's, so a binary built by an older compiler (the compiler
+// itself, built by its seed) has only the 4096 bytes that compiler gave it.
+fn rt_report_block() -> u64 {
+    word := raw_state() + 3432;
+    mut block = raw_load(word);
+    if block == 0 {
+        block = raw_map(8192);
+        if rt_error(block) {
+            rt_hard_exit(134);
+        }
+        raw_store(word, block);
+    }
+    return block;
+}
 fn rt_report_buf() -> u64 {
-    return raw_state() + 4096;
+    return rt_report_block();
 }
 fn rt_report_sites() -> u64 {
-    return raw_state() + 8152;
+    return rt_report_block() + 8152;
 }
 // An inline check in compiled code failed (the compiler rewrote its `call rt_abort`): for an index
 // check the vector is in `a` and the index in `b`.
@@ -4312,6 +4328,7 @@ fn rt_thread_join(handle: u64) -> u64 {
 //   3408         site descriptor capacity     rt_state_sites_offer       rth-sites
 //   3416         a second thread was started  rt_allocator_lock          compile-speed
 //   3424         scheduler config block       rt_sched_config            sched-start
+//   3432         failure report block address rt_report_block            statics-no-alloc
 //   3448         stacks discarded by re-raise rt_discarded_word          job-failure
 //   3456         abort report claim           rt_abort                   abort-once
 //   3464..3576   task-stack fault handler     rt_state_stack_guard       stack-guard
@@ -4320,8 +4337,6 @@ fn rt_thread_join(handle: u64) -> u64 {
 //   3600..3840   stack-fault report scratch  rt_stack_report_words      main-stack-overflow
 //   3840         Windows fiber state          os-windows                 --
 //   3856..       Windows fiber table          os-windows                 --
-//   4096..8152   failure report text          rt_report_buf              statics-no-alloc
-//   8152..8192   failure report descriptor    rt_report_sites            statics-no-alloc
 //
 // Not a claim: thread-record word 48 (raw_state() + 176 for the main thread). os-windows keeps the
 // per-thread WaitOnAddress expected value there, so nothing else may use it. The job pool once did, which
