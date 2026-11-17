@@ -1,3 +1,5 @@
+# Changelog
+
 ## Unreleased
 
 - **Native backend: a slice's `data` and `len` live in registers.** The type facts are recorded on
@@ -29,6 +31,16 @@
   pointer, which keeps their provenance. `x[i] = x[i] * a + y[i]` over one million elements goes
   from 7x to 1.2x (`f32`) and from 4x to 1.1x (`f64`) of vectorised `clang -O2`. Under
   `--verify-facts` every such access re-reads the header and aborts if it moved.
+
+- Fixed: the native optimiser took an `f32` constant whose 64-bit immediate it cannot read (2.0 is
+  `$4611686018427387904`, more than 18 digits) for zero, held the variable as binary32 and read 2.0
+  back as 0.0. It changed Abundance's abgeo mesh digests (meshopt's `quadric_error_attr`);
+  `f32-constant-wide-immediate-not-narrowed` pins it.
+
+- Fixed: a small leaf that takes the address of its own local (runtime.grl's `rt_frame`) was
+  inlined with that local turned into a scratch register, so split and cached builds of programs
+  that reach it emitted `leaq %r8,%rax` and did not assemble. Such a leaf is no longer an inline
+  candidate.
 
 - **A failure allocates nothing, on every route.** A failed check inside a parallel job used to build
   its failure record and texts on the heap where it failed, so every `@no_alloc` function that
@@ -302,10 +314,6 @@
   an AArch64 module is compiled with atomics inline (`-mno-outline-atomics`): clang's default
   calls `__aarch64_cas8_acq_rel` in libgcc, which a Grail program does not link.
 
-- Fixed: an `extern "C"` call with no arguments that was the first thing in its function left the
-  thread pointer on libc's side in a libc-linked program, so later runtime calls on that thread
-  (starting a thread, for one) read the wrong record.
-
 - **An edit to one function recompiles that function.** The per-function layer of the build store
   now replays every other body of the module: a body's assembly no longer depends on the bodies
   before it (labels are numbered per function, `.L<unit>_<function>_<n>`, and its positions count
@@ -434,24 +442,6 @@
   674319 today; the rest are a hand-written body the optimiser leaves alone and two indirect jumps).
   The compiler's self-compile assembly is 0.5% smaller (111.9 MB from 112.5 MB) and the compiler
   compiles itself 2% faster (16.5 s from 16.9 s); `bench/` programs use 9-14% less CPU time.
-
-- A build emits a drop helper for each type whose helper something names, in the order they are
-  first named, instead of one for every type the compiler interned: the helpers nothing called are
-  gone from the assembly, and the set no longer depends on which bodies the compiler had to check.
-- **A buffer of 512 bytes or more starts on a 64-byte boundary.** Every allocation of that size -
-  a vector's storage, a byte buffer, a record that large - is cache-line aligned, on every path and
-  every thread; smaller ones stay 16-byte aligned. It costs 32 bytes per megabyte arena and nothing
-  per allocation, and it is a promise from now on (`docs/design/allocator.md`).
-
-- **Threads no longer queue for the allocator.** Once a program has a second thread, every OS
-  thread allocates from and frees into a cache of its own for blocks up to 256 KiB, with no lock
-  and no atomic operation; the lock is taken only to move a batch of blocks between a cache and
-  the shared lists. Pool workers that allocate and free small vectors and records went from 10.5
-  million pairs a second with one worker and 0.5 with 24 (slower with every worker added) to 12.7
-  and 126 on a 12-core machine. A block may be freed on any thread, a thread that ends gives its
-  cache back, and the end-of-main leak check still counts exactly. A one-thread program runs the
-  code it always ran. macOS, which has no threads in this runtime, is unchanged.
-  `docs/design/allocator.md`; `bench/alloc_threads.grl`, `bench/alloc_handoff.grl`.
 
 - `hash::write_byte` states its precondition in its signature (`value: u64 where value < 256`)
   instead of asserting it in its body: a caller that can show the value is a byte pays no check,
@@ -675,7 +665,6 @@
   work on the driver, as they already did on the compiler. `--print-inputs` writes the module set the
   build resolved and still builds.
 - A call that passes too many arguments has a case pinning its message; it had none.
-
 
 - Added: **the per-function codegen cache** (`compiler/fncache.grl`, `--fn-cache DIR`). A module run
   that misses can now replay the functions whose inputs did not move: a function's whole emitted
@@ -1056,9 +1045,7 @@
   and returns `0xCBF43926`, and every refusal is asserted) and by the `cimp-fixture-layout` corpus case
   on every target.
 
-# Changelog
-
-## Unreleased
+- `grail fmt` no longer reads `i < (n >> 1)` as a generic argument list (it wrote `i<(n> > 1)`, which does not parse): a `>` met inside an open parenthesis or bracket closes no type arguments.
 
 - Fixed: **a program that ran the main thread's stack out died with an empty stderr**. `f(100000000)`
   in a recursive function exited 139 (SIGSEGV) with nothing said, because the guard page and the
@@ -1710,31 +1697,6 @@
   missed here, and the pipeline's entry-point names now come out of the SPIR-V into byte-sequence
   bindings instead. Both are `compiler/` bugs and `compiler/` is off limits in this increment, so they
   are reported rather than patched.
-- Typed-IR range facts for the LLVM backend (F3), behind `--range-facts`: the lifter derives, from
-  the word stream alone, that a slot holds an integer in `[lo, hi]` at a point, and uses it where
-  the front end's bounds check lives. A *state* is one flat vector per block over the 14 registers, the frame slots
-  and one length per sequence identity; the facts are established from literals, masks, truncations
-  to a narrow type, arithmetic over facts already held, and comparisons already checked on the path
-  -- including the 0/1 word the front end materialises every `while` guard into, whose operands the
-  analysis follows back through the copies that carried them -- and they are dropped by a write to
-  the location, by an address that escapes, by any call that may take an argument by reference, and
-  by a narrowing that is not provably in range. Where a fact puts an accessor's index below the
-  sequence's length, the accessor's body is emitted in place of the call with the bounds compare and
-  its cold `rt_abort` removed, `align 8`/`align 4`/`align 1` by element width; `--verify-facts`
-  re-inserts exactly that check (a cold abort if any index is out of range), and writes the verdicts
-  into the module as `; range` comments. Nothing else changes: the word stream is byte-identical to
-  the F1 branch's on all five benchmarks, and `optimize.grl`, `machine.grl` and the native backend
-  are untouched. Measured with `tools/bench.mjs --rounds 9` against `typed-ir-f1`: **no benchmark
-  moves** (0.519/0.571/1.076/0.169/0.224 s, the same as before within the spread) because **no check
-  is removed on any of the five** -- their sequences are filled by counted push loops, whose trip
-  count this pass does not summarise, and `nbody` hands its vectors to `energy(&p, ...)`, an escape
-  the rules drop the fact on. What it does prove is a fixture's `v[i]` under a literal-length
-  sequence and a `while i < 5` guard, identically through the native backend, LLVM, and LLVM with
-  `--verify-facts`. It costs compile time (3.2 s -> 6.0 s end to end on `sieve`). See
-  `docs/design/typed-ir.md`, "Implemented: the range fact (F3)", including the one rule that would
-  make the benchmarks prove. Off by default: with the pass on, compile time is 3.2 s -> 5.5 s on
-  `sieve` for no runtime gain yet, so default builds are unchanged (3.2 s / 3.3 s, F1's numbers) and
-  `tools/test-facts.mjs` exercises the pass on a fixture instead.
 - FFI: a C callback's extern-record parameter is borrowed, not owned. The parameter prologue marked
   every parameter as an owning binding, so the epilogue ran the record's drop glue on the address C
   handed over — freeing the caller's struct (or its stack) — and the process then aborted inside the
@@ -2155,35 +2117,6 @@
   and [docs/design/decisions-b2-b6.md](docs/design/decisions-b2-b6.md) records what landed for B1,
   B2 and B7.
 - Fixed: the `FnMut` entry below had a duplicated half-paragraph spliced into it.
-- Borg journals replay into the in-memory session state (`borg/src/replay.grl`). The module folds a
-  decoded event stream with the rules of `SessionState::reduce`/`apply` (session_store.rs:906-959,
-  1036-1041, 1320-1336) over the five transcript kinds `borg/src/events.grl` carries, and
-  reconstructs exactly what those kinds write: the sequence cursor, when the session started, the
-  activity clock, status and detail, the title with the rule that a generated title is final
-  (session_store.rs:952), the first and latest prompt and the latest reply. It folds typed events
-  rather than bytes, so it cannot disagree with the reader about what an event says, and
-  `replay_stream` propagates the reader's refusal — a cut tail, an unknown tag — instead of folding
-  the rows that arrived before the cut; a refused stream yields no state at all. An event that cannot
-  apply is refused by name with the index that stopped the fold and never skipped or forced:
-  `sequence` (not the expected `last + 1`), `session` (another session's `session_id`),
-  `unknown-actor` and `unknown-message-status` (outside `EventActor`'s and `MessageStatus`'
-  four variants), and `stream` (the reader's own code). The one rule that drops rather than refuses —
-  a title event while the current title was generated — is the model's own rule, so replay counts
-  the drop (`titles_frozen`) instead of rejecting a journal Borg writes. `borg_events` gains typed
-  accessors (`title_value`, `status_value`, `actor_value`, `tokens_value`, ...) so a fold can tell an
-  absent optional from a text that happens to be `-`, and `no_event()`. `borg/tests/replay_test.grl`
-  covers a clean journal, the empty one (which replays to the default state, not an error),
-  out-of-order, unknown actor, unknown message status, a foreign session, the sticky title, and a
-  journal read back from the typed byte stream intact and cut short, then generates journals: a
-  seeded xorshift makes six events per seed and each seed must replay to the same checksum twice and
-  to the same checksum as `prefix + [last]` versus `replay(prefix)` plus a direct `apply` — refusals
-  compared by index and reason, so both sides must fail identically. The committed reference
-  (`borg/tests/parity/ref/src/bin/replay.rs`) is an independent implementation of the same rules and
-  of the byte stream, and the suite compares fingerprints and FNV-1a checksums field by field.
-  `docs/design/borg-agent-port.md` records what replay reconstructs, the refusal table, and what it
-  cannot cover yet: a real journal also carries `PlanProjected`, `SubagentRegistered` and provider
-  events, whose unknown tags the reader refuses, so replaying one fails by name rather than
-  returning the subset it understood.
 - Explicit environments for spawned processes: `host::command_with(argv, env)` runs `argv` with
   `env` as the child's *whole* environment and returns the same status encoding `host::command`
   returns (0–255 exit code, 128+N for a signal, 256+errno when the child could not be started, and
@@ -3011,17 +2944,6 @@
   in `fa0`/`fa1` (and an integer in `a0`); everything else keeps the integer-register or hidden
   pointer rules (Win64 by size). `tests/ffi/float_record_results.grl` covers five shapes on three
   Linux targets and Windows x64.
-- String literals decode escapes strictly: `\u{...}` (a Unicode scalar value, encoded as UTF-8)
-  now works in strings as it already did in character literals, `\xHH` is limited to `\x7F` so
-  a literal can never be invalid UTF-8, and an unknown escape such as `\q` is a compile error
-  instead of being kept as literal text.
-- `u8[]` has `.clear()` and `.truncate(n)` like other vectors (`clear` used to be a parse error).
-- `module::Type[]` and `module::Type[...]` collection literals work for another module's types.
-- In i64 mode an unsuffixed literal that does not fit `i64` (e.g. `9223372036854775808`) is a
-  compile error; it used to wrap silently to a negative value.
-- Standard-library modules are recognised by location (a file in the directory holding
-  `core.grl`) rather than a hard-coded name list, so every `lib/` module, including new ones,
-  compiles in the stdlib's own literal mode regardless of the program's mode.
 - `Some(value)` and `None` are the only option spellings: `core::some` / `core::none` are now
   rejected in every build mode (the legacy `--default-u64` mode used by the test suites still
   accepted them), and the remaining uses in `lib/`, `borg/`, the examples, the compiler tests and
