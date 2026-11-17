@@ -1,5 +1,8 @@
 ## Unreleased
 
+- xxhash reads its eight-byte lanes with one load (`bytes::load_u64`) now that the call inlines,
+  instead of assembling each from eight indexed bytes: the 20 MB zstd archive (whose frames carry
+  an XXH64 checksum) Grail-LLVM 5.88G -> 5.09G instructions, 0.65 -> 0.55 s (libzstd 0.26 s).
 - Small allocations clear their block with two fixed stores instead of the general loop: every
   request up to 16 bytes (a tree node, a box) is served from the smallest bin, whose blocks hold at
   least 16. bench/bintrees.grl: Grail-LLVM 4.89G -> 4.15G instructions, Grail-native 14.2G -> 13.7G.
