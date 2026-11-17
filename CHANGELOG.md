@@ -5,6 +5,11 @@
   distance is at least eight. Inflate and zstd use it instead of a push per byte: the 20 MB zstd
   archive Grail-LLVM 14.4G -> 11.9G instructions (1.43 -> 1.24 s), the 4K png 8.07G -> 7.47G
   (0.91 -> 0.85 s).
+- A push onto a vector or a text that has room is a store and a length again, in a release build too:
+  growing moved out of `rt_push` into a cold `rt_push_slow`, so the call a release program makes
+  into the runtime no longer saves five registers on every push. Abundance's slowest program
+  (abgeo) runs 6% fewer instructions; `rt_push` went from 17% to 6-8% of its time.
+
 - Fixed: an interface whose methods carry default bodies could not be read back and written again
   unchanged ("does not round-trip"): the reader kept a default body only as the source it compiles,
   not as the method's text.
