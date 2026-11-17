@@ -11886,7 +11886,6 @@
   },
   {
     "name": "sched-help-stops-when-the-stack-is-low",
-    "timing": true,
     "note": "A task recurses through about 90% of its stack and joins there while a thief runs its forked branch, which forks eight children of about 290 KiB each. They are its own job's work, so leapfrogging may take them, but there is no room for one: the room check makes the waiter park instead of running one into the guard page.",
     "files": [
       "tests/sched/help_depth.grl"
@@ -11953,7 +11952,6 @@
   },
   {
     "name": "sched-join-failure-names-the-user-join",
-    "timing": true,
     "note": "A branch of a user's pool::join, run by another worker, fails. try_join reports the failing statement and, as the join, the user's own pool::join line rather than the fork inside lib/pool.grl (standard-library sites carry bit 62 in the site table and are skipped for that line). The exit note counts one failure, and the stacks it discarded separately. Native only: an LLVM build carries no statement table, so a site cannot be named there (an LLVM backend gap, recorded in concurrency-stages-5-7.md).",
     "files": [
       "tests/sched/join_failure_site.grl"
@@ -17947,6 +17945,40 @@
     "stdout": "18 32\n"
   },
   {
+    "name": "closure-literals-are-distinct-types",
+    "note": "each closure expression is a type of its own: a `Keep<F>` built from one cannot be assigned one built from another (found by /root/call_abi; it was accepted, and the call through it ran the first closure's body - a miscompile, and with a borrowing second closure a use after free)",
+    "source": "struct Keep<F> { f: F }\nfn keep<F: Fn() -> u64>(f: F) -> Keep<F> { return Keep { f: f }; }\nfn main() { v := u64[1, 2, 3, 4, 5]; mut k = keep(|| -> u64 0); k = keep(|| -> u64 v.len()); g := &k.f; println(g()); }\n",
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "closure-literals-are-distinct-types-borrow",
+    "note": "...the borrow-escape shape of the same bug: the second closure borrowed a vector dropped before the call",
+    "source": "struct Keep<F> { f: F }\nfn keep<F: Fn() -> u64>(f: F) -> Keep<F> { return Keep { f: f }; }\nfn main() { mut k = keep(|| -> u64 7); { v := u64[1, 2, 3]; k = keep(|| -> u64 v.len()); } g := &k.f; println(g()); }\n",
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "callable-struct-result-keeps-loans",
+    "note": "a closure for F stored in a returned `Keep<F>` keeps its loans: the borrowed vector cannot move while the Keep lives",
+    "source": "struct Keep<F> { f: F }\nfn keep<F: Fn() -> u64>(f: F) -> Keep<F> { return Keep { f: f }; }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() { v := u64[1, 2]; r := &v; k := keep(|| -> u64 r.len()); println(eat(v)); g := &k.f; println(g()); }\n",
+    "reject": true,
+    "diagnostic": "move of unavailable or borrowed value"
+  },
+  {
+    "name": "callable-returned-f-keeps-loans",
+    "note": "...and returned as F itself",
+    "source": "fn twice<F: Fn() -> u64>(f: F) -> F { return f; }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() { v := u64[1, 2]; r := &v; g := twice(|| -> u64 r.len()); println(eat(v)); println(g()); }\n",
+    "reject": true,
+    "diagnostic": "move of unavailable or borrowed value"
+  },
+  {
+    "name": "callable-struct-result-plain",
+    "note": "plain use of a Keep<F>",
+    "source": "struct Keep<F> { f: F }\nfn keep<F: Fn() -> u64>(f: F) -> Keep<F> { return Keep { f: f }; }\nfn main() { v := u64[1, 2]; k := keep(|| -> u64 v.len()); g := &k.f; println(g()); }\n",
+    "stdout": "2\n"
+  },
+  {
     "name": "split-at-mut-halves",
     "note": "split_at_mut (simd-layout-parallel-loops.md 4.3): two exclusive halves of one slice, used at once and passed on, split again; the vector is whole again when they end",
     "source": "fn fill(s: &mut [u64], v: u64) {\n    for i in s.len() {\n        s[i] = v + i;\n    }\n}\nfn main() {\n    mut xs = u64[0; 10];\n    {\n        left, right := split_at_mut(&mut xs[0: 10], 4);\n        fill(&mut left[:], 100);\n        fill(&mut right[:], 200);\n        left[0] = right[0];\n        println(\"{} {}\", left.len(), right.len());\n        a, b := split_at_mut(right, 3);\n        a[0] = 7;\n        b[0] = 8;\n    }\n    println(xs);\n}\n",
@@ -18006,6 +18038,25 @@
     "note": "a bare `return;` in a function that takes a borrow is not a returned borrow (the unit value was read from slot 0, the first parameter)",
     "source": "fn bump(s: &mut [u64], depth: u64) {\n    if depth == 0 {\n        return;\n    }\n    s[0] += 1;\n}\nfn main() {\n    mut xs = u64[0; 8];\n    bump(&mut xs[0: 8], 2);\n    println(xs);\n}\n",
     "stdout": "[1, 0, 0, 0, 0, 0, 0, 0]\n"
+  },
+  {
+    "name": "ffi-nonblocking-call-is-bare",
+    "note": "A foreign function declared `extern \"C\" nonblocking` is called with no foreign-call marker (a bare call): the call works as any foreign call does.",
+    "source": "extern \"C\" nonblocking lib \"c\" fn labs(x: i64) -> i64;\nfn main() {\n    mut r: i64 = 0;\n    unsafe {\n        r = labs(i64(0) - 42);\n    }\n    println(r);\n}\n",
+    "stdout": "42\n",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "ffi-blocking-and-nonblocking-refused",
+    "note": "A foreign function cannot be both.",
+    "source": "extern \"C\" blocking nonblocking lib \"c\" fn labs(x: i64) -> i64;\nfn main() {}\n",
+    "reject": true,
+    "diagnostic": "`blocking` or `nonblocking`, not both",
+    "targets": [
+      "x86_64"
+    ]
   },
   {
     "name": "parallel-for-zip-columns",

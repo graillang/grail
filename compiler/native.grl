@@ -547,6 +547,14 @@ struct C {
     forge_words: u64,
     // 1 when the forged signature also drops the body's `dyn_result` fact.
     forge_result: u64,
+    // The argument words of the call load_call_args last set up and where the text was then; the
+    // next `call *%rax` with no call between records them (indirect_fact). And where the function
+    // being emitted begins, to number its indirect calls as the lifter does.
+    pending_words: u64,
+    // --forge-indirect=SYMBOL (a test aid): that body's indirect facts are one word short.
+    forge_indirect: u8[],
+    pending_at: u64,
+    fn_text_at: u64,
     debug_funcs: DebugFunc[],
     debug_vars: DebugVar[],
     debug_types: DebugType[],
@@ -567,6 +575,9 @@ struct C {
     // C symbols declared `extern "C" blocking`, and whether the call being emitted is one of them.
     ffi_blocking: u8[][],
     ffi_block_now: u64,
+    // C symbols declared `extern "C" nonblocking`: promised never to block, so their calls carry no
+    // foreign-call marker (a bare call, C-to-C cost) and the monitor never hands them off.
+    ffi_nonblocking: u8[][],
     // Slots holding the address of a narrow (non-8-byte or f32) C-layout record field, paired
     // with the field type: stores and compound loads through them use the field's width.
     caddr: u64[],
@@ -4567,8 +4578,11 @@ fn load_call_args<a, b>(c: (&a mut C), args: (&b u64[]), shift: u64) -> u64 {
             r := argreg(i + shift);
             get(&mut c, args[i], view(r));
         }
+        exchange(&mut c.pending_words, total + 1);
+        exchange(&mut c.pending_at, c.out.len());
         return 0;
     }
+    exchange(&mut c.pending_words, 0);
     extra := total - 6;
     area := 16 * ((extra + 1) / 2);
     x86 := (c.target == 0) || (c.target == 3);
@@ -8575,6 +8589,7 @@ fn ref_wrapper<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &
     after := exchange(&mut c.check, entry_state);
     func_directive(&mut c, view(m), view(name), view(body_symbol), export);
     label_at := c.out.len();
+    body_text_at := exchange(&mut c.fn_text_at, label_at);
     export_name(&mut c, view(m), view(name), view(body_symbol), export);
     mut sym = u8[];
     for i in c.out.len() - label_at {
@@ -8688,6 +8703,7 @@ fn ref_wrapper<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &
     if body_facts.len() != 0 {
         exchange(&mut c.facts_fn, body_facts);
     }
+    exchange(&mut c.fn_text_at, body_text_at);
     return ();
 }
 // Whether field `k` of record `d` carries a predicate. Such a field is written only where the
@@ -14148,6 +14164,13 @@ fn callable_contract<a, b>(
         if (am & CLOSURE_FNMUT) != (em & CLOSURE_FNMUT) {
             return false;
         }
+        // Each closure expression is a type of its own: two of them are the same type only if they
+        // are the same literal (the environment record names it), whatever their signatures - or a
+        // `Keep<F>` built from one could be assigned one built from another, and calls through it,
+        // which go straight to the first literal's body, would run the wrong closure.
+        if (ty_env(&mut c, actual) != 0) && (ty_env(&mut c, expected) != 0) && (ty_env(&mut c, actual) != ty_env(&mut c, expected)) {
+            return false;
+        }
         if (ty_env(&mut c, actual) != 0) || ((am & CLOSURE_UNBUILT) != 0) {
             if !closure_bounds_hold(&mut c, actual, em & CLOSURE_BOUNDS) {
                 return false;
@@ -17264,7 +17287,9 @@ fn ffi_emit_call<a, b, d, e, f>(
         fixed = c.ffi_fixed;
     }
     exchange(&mut c.ffi_fixed, 0);
-    blocking := exchange(&mut c.ffi_block_now, 0) != 0;
+    block_mode := exchange(&mut c.ffi_block_now, 0);
+    blocking := block_mode == 1;
+    nonblocking := block_mode == 2;
     abi := ffi_abi(&mut c);
     x86 := abi < 2;
     nint := ffi_int_regs(abi);
@@ -17413,7 +17438,7 @@ fn ffi_emit_call<a, b, d, e, f>(
     // if the call holds it for more than 10 ms (rt_sysmon). The word's address is kept in the call's
     // `tls` slot for the exit; 0 there means "not on a worker". Clobbers %rax and %r11 only, before
     // any argument register is loaded.
-    marked := (!blocking) & (c.target == 0) & (c.plat == 0) & (tls != 0);
+    marked := (!blocking) & (!nonblocking) & (c.target == 0) & (c.plat == 0) & (tls != 0);
     if marked {
         ffi_marker_enter(&mut c, tls);
     }
@@ -18183,8 +18208,14 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     mut input = u8[];
     mut symbol = u8[];
     mut blocking = 0;
+    mut nonblocking = 0;
     while true {
-        if eat(&mut c, view("blocking")) {
+        if eat(&mut c, view("nonblocking")) {
+            // `extern "C" nonblocking fn ...`: the call never blocks (math, an engine API that only
+            // records commands). It is a bare call; if it does block after all, the cost is latency -
+            // its worker is held - never safety.
+            nonblocking = 1;
+        } else if eat(&mut c, view("blocking")) {
             // `extern "C" blocking fn ...`: the call may block for long (a read, a wait, a
             // vkQueuePresentKHR): on a worker it gives the worker to a spare thread for its duration.
             blocking = 1;
@@ -18245,8 +18276,14 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     if symbol.len() == 0 {
         symbol = name.copy();
     }
+    if (blocking != 0) & (nonblocking != 0) {
+        fail(&mut c, view("a foreign function is `blocking` or `nonblocking`, not both"));
+    }
     if blocking != 0 {
         c.ffi_blocking.push(symbol.copy());
+    }
+    if nonblocking != 0 {
+        c.ffi_nonblocking.push(symbol.copy());
     }
     // Byte-view parameters need an input lifetime context, exactly like a Grail
     // function signature; the region is irrelevant to the C ABI.
@@ -19714,6 +19751,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     }
     sym_unit := symbol_unit(&mut c, view(m));
     exchange(&mut c.facts_fn, body_label(&c, view(sym_unit), view(label), view(export_symbol), export));
+    exchange(&mut c.fn_text_at, c.out.len());
+    exchange(&mut c.pending_words, 0);
     exchange(&mut c.f64_ops, 0);
     exchange(&mut c.call_ord, 0);
     // The F1 call ordinals are per callee *and per function*, exactly as the lifter counts them.
@@ -20124,6 +20163,11 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                         }
                         // The first body of a part opens it; the unit's text starts after that.
                         part(&mut c, view(unit));
+                        // The signature's parameter facts were recorded on the way here, and the
+                        // unit's facts hold them already: without this a replayed body carries them
+                        // twice, its facts digest differs from a fresh emission's, and the
+                        // optimiser's memo (optimize.grl one_body) misses for every unchanged body.
+                        llvm::facts_truncate(&mut c.facts, fact_mark);
                         fn_apply(&mut c, &hit, &regs, fn_line, position, claimed_alloc, claimed_panic);
                         if par_outcome == 1 {
                             c.fn_filed = c.fn_filed + 1;
@@ -26666,9 +26710,11 @@ fn fx_instance_name<a, b>(c: (&a mut C), name: &b [u8], spec: u64) -> u8[] {
 // apart. A specialisation inherits the template's claim - that is the obligation - and its own body
 // is what proves or refuses it.
 fn fx_begin<a, b, d>(c: (&a mut C), sym: &b [u8], name: &d [u8], file: u64, pos: u64, no_alloc: u64, no_panic: u64) -> unit {
-    // Every run that emits code records every body: its facts are the summary its interface carries.
-    // A check-only run carries none, so it records only when it has a claim to check.
-    if (c.check_only != 0) && (c.fx_any == 0) {
+    // Every run records every body: its facts are the summary its interface carries. A check-only run
+    // that writes no interface carries none, so it records only when it has a claim to check; one that
+    // writes interfaces (a module of `grail check`) records too, or the runs after it would find no
+    // summary - the runtime's least of all - and refuse every claim that calls it.
+    if (c.check_only != 0) && (c.fx_any == 0) && (c.iface_emit.len() == 0) {
         return ();
     }
     if c.validating != 0 {
@@ -26851,11 +26897,56 @@ fn iface_reason<a>(c: (&a mut C), iface: u64) -> u8[] {
     return out;
 }
 fn call_slot_out<a, b, d>(c: (&a mut C), text: &b [u8], why: &d [u8]) -> unit {
+    if same(text, view("call *%rax\n")) {
+        indirect_fact(&mut c);
+    }
     fx_edge(&mut c, view(""), 0);
     fx_why(&mut c, view(why));
     fx_called(&mut c);
     o(&mut c, text);
     return ();
+}
+// The LLVM backend's fact for the `call *%rax` about to be emitted (call ABI S6, the six-word form):
+// how many argument words it really passes, so the lifter passes `poison` for the rest instead of
+// whatever the other argument registers hold. Only when load_call_args set this call up and no call
+// was emitted since (its words are then exactly these); keyed by the call's ordinal among the
+// function's `call *%rax` lines, counted in the text as the lifter counts them.
+fn indirect_fact<a>(c: (&a mut C)) -> unit {
+    words := exchange(&mut c.pending_words, 0);
+    if (c.backend == 0) || (c.validating != 0) || (c.facts_fn.len() == 0) || (words == 0) || (c.target != 0) {
+        return ();
+    }
+    if text_has_call(&c, c.pending_at) {
+        return ();
+    }
+    ord := text_count(&c, c.fn_text_at, view("call *%rax\n"));
+    mut n = words - 1;
+    if (n != 0) && (c.forge_indirect.len() != 0) && same(view(c.forge_indirect), view(c.facts_fn)) {
+        n -= 1;
+    }
+    llvm::fact_indirect(&mut c.facts, copy_bytes(view(c.facts_fn)), ord, n);
+    return ();
+}
+fn text_has_call<a>(c: (&a C), from: u64) -> bool {
+    return text_count(&c, from, view("call")) != 0;
+}
+// How many times `pat` starts a line of the text from `from` on.
+fn text_count<a, b>(c: (&a C), from: u64, pat: &b [u8]) -> u64 {
+    mut n = 0;
+    mut i = from;
+    while i + pat.len() <= c.out.len() {
+        if ((i == 0) || (c.out[i - 1] == 10)) && (c.out[i] == pat[0]) {
+            mut k = 1;
+            while (k < pat.len()) && (c.out[i + k] == pat[k]) {
+                k += 1;
+            }
+            if k == pat.len() {
+                n += 1;
+            }
+        }
+        i += 1;
+    }
+    return n;
 }
 // Whether the body being emitted is the runtime's rt_sites_fill, whose one raw call reaches the
 // compiler-emitted rt_sites helper.
@@ -26958,7 +27049,7 @@ fn fx_vtable_drop<a>(c: (&a mut C), iface: u64) -> unit {
 // A drop helper's body starts: trusted code, recorded like a function so a caller's claim is followed
 // through it to the user `Drop` it calls.
 fn fx_helper<a, b>(c: (&a mut C), sym: &b [u8]) -> unit {
-    if (c.check_only != 0) && (c.fx_any == 0) {
+    if (c.check_only != 0) && (c.fx_any == 0) && (c.iface_emit.len() == 0) {
         return ();
     }
     k := fx_sym(&mut c, view(sym)) - 1;
@@ -33194,6 +33285,11 @@ fn emit_resolved_call<a>(
         for bi in c.ffi_blocking.len() {
             if same(view(c.ffi_blocking[bi]), view(ffi_symbol)) {
                 c.ffi_block_now = 1;
+            }
+        }
+        for bi in c.ffi_nonblocking.len() {
+            if same(view(c.ffi_nonblocking[bi]), view(ffi_symbol)) {
+                c.ffi_block_now = 2;
             }
         }
         // The declared parameter types decide which arguments cross by value (`byval`); the values
@@ -40361,6 +40457,8 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         // Facts made in the body (a frame record, a DynPair) are about the body's own frame, under
         // the symbol it is emitted as.
         exchange(&mut c.facts_fn, body_label(&c, view(".closure"), view(symbol), view(""), 0));
+        exchange(&mut c.fn_text_at, c.out.len());
+        exchange(&mut c.pending_words, 0);
         exchange(&mut c.scope_end, 0);
         exchange(&mut c.loop_start, 0);
         exchange(&mut c.loop_end, 0);
@@ -51197,9 +51295,6 @@ fn s256_k() -> u64[] {
         0xc67178f2
     ];
 }
-fn s256_rotr(x: u64, n: u64) -> u64 {
-    return ((x >> n) | (x << (32 - n))) & S256MASK;
-}
 // Compresses the 64-byte block text[at:at+64] into `h`, using `w` as the message schedule.
 fn s256_block(h: (&mut u64[]), text: &[u8], at: u64, w: (&mut u64[]), k: (&u64[])) {
     for t in 16 {
@@ -51209,8 +51304,10 @@ fn s256_block(h: (&mut u64[]), text: &[u8], at: u64, w: (&mut u64[]), k: (&u64[]
     for t in 16..64 {
         x := w[t - 15];
         y := w[t - 2];
-        s0 := s256_rotr(x, 7) ^ s256_rotr(x, 18) ^ (x >> 3);
-        s1 := s256_rotr(y, 17) ^ s256_rotr(y, 19) ^ (y >> 10);
+        // The rotations written out (every word is below 2^32, and the sum is masked below): a call
+        // per rotation was most of what a block cost.
+        s0 := (((x >> 7) | (x << 25)) ^ ((x >> 18) | (x << 14)) ^ (x >> 3)) & S256MASK;
+        s1 := (((y >> 17) | (y << 15)) ^ ((y >> 19) | (y << 13)) ^ (y >> 10)) & S256MASK;
         // stays: the written place is indexed (`&mut w[t]`), and two-phase defers only a plain
         // `&mut path`, so the value's reads of `w` are part of taking the place.
         packed := w[t - 16] + s0 + w[t - 7] + s1;
@@ -51225,10 +51322,10 @@ fn s256_block(h: (&mut u64[]), text: &[u8], at: u64, w: (&mut u64[]), k: (&u64[]
     mut g: u64 = h[6];
     mut i: u64 = h[7];
     for t in 64 {
-        s1 := s256_rotr(e, 6) ^ s256_rotr(e, 11) ^ s256_rotr(e, 25);
+        s1 := (((e >> 6) | (e << 26)) ^ ((e >> 11) | (e << 21)) ^ ((e >> 25) | (e << 7))) & S256MASK;
         ch := (e & f) ^ ((e ^ S256MASK) & g);
         t1 := i + s1 + ch + k[t] + w[t];
-        s0 := s256_rotr(a, 2) ^ s256_rotr(a, 13) ^ s256_rotr(a, 22);
+        s0 := (((a >> 2) | (a << 30)) ^ ((a >> 13) | (a << 19)) ^ ((a >> 22) | (a << 10))) & S256MASK;
         maj := (a & b) ^ (a & c) ^ (b & c);
         i = g;
         g = f;
@@ -52531,7 +52628,23 @@ fn iface_enc_fn<a>(c: (&a mut C), index: u64, deps: (&a mut u64[]), text: (&a mu
     iface_w1(&mut body_bytes, public);
     iface_wv(&mut body_bytes, types);
     iface_wv(&mut body_bytes, regions);
-    iface_wv(&mut body_bytes, ext);
+    // Bit 8 of the extern word: the function is `extern "C" blocking` (ffi_blocking), so a caller in
+    // another module hands its worker off too.
+    mut ext_word = ext;
+    if ext != 0 {
+        for bi in c.ffi_blocking.len() {
+            if same(view(c.ffi_blocking[bi]), view(symbol)) {
+                ext_word = ext | 256;
+            }
+        }
+        // Bit 9: `nonblocking`.
+        for bi in c.ffi_nonblocking.len() {
+            if same(view(c.ffi_nonblocking[bi]), view(symbol)) {
+                ext_word = ext | 512;
+            }
+        }
+    }
+    iface_wv(&mut body_bytes, ext_word);
     iface_ws(&mut body_bytes, view(symbol));
     iface_w1(&mut body_bytes, strict);
     iface_wv(&mut body_bytes, params.len());
@@ -54005,8 +54118,24 @@ fn iface_rec_fn<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], module: &a [u8]
     public := iface_r1(&mut p);
     types := iface_rv(&mut p);
     regions := iface_rv(&mut p);
-    ext := iface_rv(&mut p);
+    ext_word := iface_rv(&mut p);
+    ext := ext_word & 255;
     symbol := iface_rs(&mut p);
+    if (ext_word & 512) != 0 {
+        c.ffi_nonblocking.push(symbol.copy());
+    }
+    // `extern "C" blocking` in the module that declared it (bit 8): calls from here hand off too.
+    if (ext_word & 256) != 0 {
+        mut known = false;
+        for bi in c.ffi_blocking.len() {
+            if same(view(c.ffi_blocking[bi]), view(symbol)) {
+                known = true;
+            }
+        }
+        if !known {
+            c.ffi_blocking.push(symbol.copy());
+        }
+    }
     strict := iface_r1(&mut p);
     if p.phase == 0 {
         iface_rt_indent(&mut p, view(indent));
@@ -54039,6 +54168,12 @@ fn iface_rec_fn<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], module: &a [u8]
         iface_rt_num(&mut p, view(" lifetimes="), regions);
         if ext != 0 {
             iface_rt_num(&mut p, view(" extern="), ext);
+            if (ext_word & 256) != 0 {
+                push_bytes(&mut p.rtext, view(" blocking"));
+            }
+            if (ext_word & 512) != 0 {
+                push_bytes(&mut p.rtext, view(" nonblocking"));
+            }
             push_bytes(&mut p.rtext, view(" symbol="));
             push_bytes(&mut p.rtext, view(symbol));
         }
@@ -56510,6 +56645,10 @@ pub fn main() -> u64 {
         forge_sig: u8[],
         forge_words: 0,
         forge_result: 0,
+        pending_words: 0,
+        forge_indirect: u8[],
+        pending_at: 0,
+        fn_text_at: 0,
         debug_funcs: DebugFunc[],
         debug_vars: DebugVar[],
         debug_types: DebugType[],
@@ -56538,6 +56677,7 @@ pub fn main() -> u64 {
         ffi_fixed: 0,
         ffi_blocking: u8[][],
         ffi_block_now: 0,
+        ffi_nonblocking: u8[][],
         caddr: u64[],
         interior: u64[],
         box_thunks: u64[],
@@ -57262,7 +57402,16 @@ pub fn main() -> u64 {
                                     exchange(&mut c.backend, 1);
                                     offset += 1;
                                 } else {
-                                    if starts_with(view(option), view("--forge-signature=")) {
+                                    if starts_with(view(option), view("--forge-indirect=")) {
+                                        // A test aid: SYMBOL's indirect-call facts say one word
+                                        // fewer than the call passes (indirect_fact).
+                                        mut sym = u8[];
+                                        for d in option.len() - 17 {
+                                            sym.push(option[17 + d]);
+                                        }
+                                        exchange(&mut c.forge_indirect, sym);
+                                        offset += 1;
+                                    } else if starts_with(view(option), view("--forge-signature=")) {
                                         // A test aid: record SYMBOL's signature fact with WORDS
                                         // argument words instead of its real count, so the lifter's
                                         // checks of a wrong signature can be shown to fire.
