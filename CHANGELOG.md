@@ -26,6 +26,13 @@
   the same index range of every slice per piece, equal lengths checked once, a piece per worker;
   same-vector-twice, captured arguments and `FnMut` callbacks are the ordinary refusals.
 
+- **More small functions are inlined, and dispatch wrappers too.** The inliner filed a candidate
+  under the first label of its body, which in a build with error locations is a statement's site
+  label, not the function's symbol, so most small leaves were never matched to their calls. They are
+  now filed under their symbol. A body whose only call is the last thing it does (`rt_alloc` picking
+  `rt_alloc_unlocked` or `rt_alloc_shared`) is inlined as its test and the call it makes. Measured
+  (callgrind, one worker, minimum of five): a join 2911 -> 2888 instructions, a spawn 1757 -> 1741,
+  fib(20) by nested join -0.24%. An inlined wrapper is not a frame of its own in a backtrace.
 - Fixed: `grail fmt` could break a long expression inside `<<` or `>>` (each is two `<`/`>` tokens),
   or start a continuation line with `<`, and the output then read as a generic argument list and no
   longer parsed. A wrapped line now never starts with `<` or `>`.

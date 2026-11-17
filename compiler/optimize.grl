@@ -4247,7 +4247,7 @@ fn inline_candidate<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64) {
                         if o.k0[i] != 4 {
                             return ();
                         }
-                        if !ir::same_range(view(s), o.s0[i], o.e0[i], view("rt_abort")) {
+                        if !never_returns(&o, view(s), i) && !tail_call(&o, i, last, &dead) {
                             return ();
                         }
                     }
@@ -4354,11 +4354,15 @@ fn inline_candidate<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64) {
     while mark < o.out.len() {
         o.out.pop()!;
     }
-    na := o.ls[1];
-    ne := o.le[1] - 1;
-    mut name = u8[];
-    for x in ne - na {
-        name.push(s[na + x]);
+    // Filed under the body's symbol, from its `.type` line: the line after it is a statement's site
+    // label (`.Lgs<n>:`) in a build with error locations, not the symbol's own label.
+    mut name = o.name.copy();
+    if name.len() == 0 {
+        na := o.ls[1];
+        ne := o.le[1] - 1;
+        for x in ne - na {
+            name.push(s[na + x]);
+        }
     }
     unit := o.unit.copy();
     // Filed with its positions made absolute (the copy will stand in other functions); the copy as
@@ -4366,6 +4370,30 @@ fn inline_candidate<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64) {
     absolute := ir::absolute_positions(view(body), o.gbase);
     exchange(&mut o.inl_rel, body);
     inl_file(&mut o, name, absolute, unit);
+}
+// A direct call the body returns straight after (`call X`, then `leave; ret`): nothing of the body
+// is live across it, so its copy may keep the call - a dispatcher like rt_alloc, which picks one of
+// two routines, is inlined as its test and the call it picks. The call is made at the caller's stack
+// pointer, which is aligned at a call site, and it clobbers only what the call it replaces did.
+fn tail_call<a, b>(o: (&a ir::Body), i: u64, last: u64, dead: (&b u64[])) -> bool {
+    mut j = i + 1;
+    mut seen = 0;
+    while j < last {
+        if (o.del[j] == 0) && (dead[j] == 0) {
+            op := o.op[j];
+            if (op != 100) && (op != 101) {
+                if (seen == 0) && (op == 29) {
+                    seen = 1;
+                } else if (seen == 1) && (op == 30) {
+                    return true;
+                } else {
+                    return false;
+                }
+            }
+        }
+        j += 1;
+    }
+    return false;
 }
 // The instructions after the prologue no path reaches: those after a `ret`, a `jmp` or a call that
 // does not return, up to the next label. A body's fall-off return (`xorq %rax,%rax; leave; ret` after
