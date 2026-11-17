@@ -4573,18 +4573,19 @@ fn rt_job_wait(j: u64) -> u64 {
     }
     return r;
 }
-// `parallel_with(first, second)`, which is pool::join: `first` is forked as a job and `second` runs
-// here, now, on the caller's stack; then the fork is joined - run here if no worker took it. Both
-// callbacks take no argument; `env` is 0 for a plain function and the closure ABI's slot address
-// otherwise. The value is `first`'s result word.
-fn rt_parallel_with(f1: u64, env1: u64, f2: u64, env2: u64) -> u64 {
+// `parallel_with(first, second, combine)`, which is pool::join: `first` is forked as a job and
+// `second` runs here, now, on the caller's stack; then the fork is joined - run here if no worker
+// took it - and the value is combine(first's word, second's word), `combine` being a plain function.
+// Both callbacks take no argument; `env` is 0 for a plain function and the closure ABI's slot
+// address otherwise.
+fn rt_parallel_with(f1: u64, env1: u64, f2: u64, env2: u64, combine: u64) -> u64 {
     rt_jobs_sched();
     r := rt_job_fork(rt_job_call0, f1, env1, 0);
     rt_region_enter();
-    rt_job_call0(f2, env2, 0);
-    res := rt_job_join(r);
+    second := rt_job_call0(f2, env2, 0);
+    first := rt_job_join(r);
     rt_region_leave();
-    return res;
+    return raw_call2(combine, first, second);
 }
 fn rt_job_call0(f: u64, env: u64, unused: u64) -> u64 {
     if env == 0 {

@@ -136,15 +136,15 @@ pub fn reduce<R:Send+Owned>(n:u64,grain:u64 where grain > 0,zero:R,leaf:Fn<Share
 // and may write its own captures.
 pub struct Pair<A,B>{first:A,second:B}
 pub fn join<A:Send+Owned,B:Owned>(first:Fn<Send>()->A,second:FnMut()->B)->Pair<A,B>{
-    mut here=second;
     // `first` is forked as a job and joined before this returns (parallel_with): that join is what
     // lets it borrow the caller's frame, and it runs once, on one thread, so its captures need only
     // be transferable, not shareable. It is a structured fork, so if `second` fails, the failing
-    // stack waits for `first` before it is discarded (docs/design/concurrency-model.md, F1).
-    mut slot: B? = None;
-    out := &mut slot;
-    a := parallel_with(first, || -> unit { *out = Some(here()); });
-    return Pair{first:a,second:slot!};
+    // stack waits for `first` before it is discarded (docs/design/concurrency-model.md, F1). Both
+    // results come back through `pair_of`, so nothing but the Pair itself is allocated here.
+    return parallel_with(first, second, pair_of<A,B>);
+}
+fn pair_of<A,B>(first: A, second: B) -> Pair<A,B> {
+    return Pair{first:first,second:second};
 }
 
 // Priority classes. Frame work is taken before Normal work, and Normal before tasks and Background

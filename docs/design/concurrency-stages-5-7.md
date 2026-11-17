@@ -574,3 +574,27 @@ system call, and does no write to a shared line unless something was stolen.
 **Order:** 2 (the wake rule; largest, and independent of everyone), 1, 3, 4, 5, then 6 with stage 7.
 Each step is re-measured with `bench/sched.grl`, `bench/frame.grl` and the rivals' tool, and
 reported per row against rayon and TBB.
+
+### Item 1 as built (gaps12-join) and the counters
+
+`parallel_with(first, second, combine)` now hands both results to a plain function, and
+`pool::join` is `parallel_with(first, second, pair_of<A,B>)`: no option, no inner closure, and
+`second` returns its value. Removed: allocations 3, 4 and 5 of the six above.
+
+Instructions per operation (`tools/sched-ic.sh`; callgrind, one worker, (2N - N) / N). Load does not
+move these numbers:
+
+| | Grail before (d58fa04) | Grail item 1 | rayon | oneTBB |
+|---|---:|---:|---:|---:|
+| join on a worker | 4,940 | 3,434 | 153 | 713 |
+| job spawn+wait | 2,663 | 2,663 | 1,740 | 894 |
+| fib(20) by join (88 joins) | 929,606 | 795,167 | 230,743 | 211,106 |
+| ... of which per join | 5,091 | 3,563 | ~1,100 | ~900 |
+| fib(20) serial | 481,618 | | C: 132,146 | |
+
+**The leaf is 3.6x C, and that is not the scheduler.** Grail's serial `fib(20)` takes 481,618
+instructions where C's takes 132,146. Before any join, fib-by-join is therefore about 2x the rivals
+from the leaf alone. That is code generation for a recursive function (frame set-up, checked
+arithmetic) and belongs to the code-generation owners. The scheduler's share is the per-join
+column: 3,563 instructions against rayon's 1,100 and TBB's 900. Most of what is left is the two
+closure environments (`rt_rec`) and the `Pair` (call_abi S6, unboxed 3c), then items 3 and 4.
