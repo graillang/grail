@@ -642,11 +642,18 @@ fn live_fx<a>(o: (&a ir::Body)) -> LiveFx {
 }
 // Function-wide backward liveness over the label graph (iterated to a fixed point); unknown
 // jump targets and unrecognized instructions make every register live.
-fn live_pass<a, c, d>(o: (&a mut ir::Body), lin: (&c mut u64[]), fx: (&d LiveFx), remove: u64) -> u64 {
+// Returns 1 when a label's set changed, and then `settled` says whether the next round is certain
+// to change nothing: a backward pass reads a label before it (a loop's head, through a backward
+// jump) as the previous round left it, and everything else as this round makes it, so when every
+// such read saw the value its label ends this round with, the next round reads, and makes, exactly
+// what this one did.
+fn live_pass<a, c, d, e>(o: (&a mut ir::Body), lin: (&c mut u64[]), fx: (&d LiveFx), remove: u64, settled: (&e mut u64)) -> u64 {
     last := o.op.len();
     mut live = 0;
     mut i = last;
     mut changed = 0;
+    mut back_at = u64[];
+    mut back_saw = u64[];
     while 0 < i {
         i -= 1;
         if (o.del[i] == 0) & (o.tr[i] == 0) {
@@ -663,6 +670,10 @@ fn live_pass<a, c, d>(o: (&a mut ir::Body), lin: (&c mut u64[]), fx: (&d LiveFx)
                         mut there = ir::all_regs();
                         if t < last {
                             there = lin[t];
+                            if t < i {
+                                back_at.push(t);
+                                back_saw.push(there);
+                            }
                         }
                         if op == 16 {
                             live = there;
@@ -698,6 +709,13 @@ fn live_pass<a, c, d>(o: (&a mut ir::Body), lin: (&c mut u64[]), fx: (&d LiveFx)
             }
         }
     }
+    mut same = 1;
+    for k in back_at.len() {
+        if lin[back_at[k]] != back_saw[k] {
+            same = 0;
+        }
+    }
+    exchange(settled, same);
     return changed;
 }
 fn dead_defs<a, b>(o: (&a mut ir::Body), s: &b [u8], first: u64, last: u64) {
@@ -706,15 +724,21 @@ fn dead_defs<a, b>(o: (&a mut ir::Body), s: &b [u8], first: u64, last: u64) {
         lin.push(0);
     }
     fx := live_fx(&o);
+    mut settled = 0;
     mut rounds = 0;
     while rounds < 50 {
         rounds += 1;
-        if live_pass(&mut o, &mut lin, &fx, 0) == 0 {
+        if live_pass(&mut o, &mut lin, &fx, 0, &mut settled) == 0 {
+            break;
+        }
+        // The round after a settled one would change nothing: it is counted, not run.
+        if (settled != 0) && (rounds < 50) {
+            rounds += 1;
             break;
         }
     }
     if rounds < 50 {
-        live_pass(&mut o, &mut lin, &fx, 1);
+        live_pass(&mut o, &mut lin, &fx, 1, &mut settled);
     }
 }
 fn next_live<a>(o: (&a ir::Body), i: u64, last: u64) -> u64 {
