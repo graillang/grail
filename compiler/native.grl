@@ -52,15 +52,6 @@ fn is_type_id(ty: u64) -> bool {
     return ty < CT_PENDING;
 }
 
-struct Tok {
-    kind: u64,
-    start: u64,
-    end: u64,
-    // Where the token starts, 1-based, worked out once when the file is read: every position a
-    // diagnostic, a debug row or a runtime-error site needs is a lookup, not a scan of the source.
-    line: u64,
-    col: u64
-}
 struct Ty {
     kind: u64,
     arg: u64,
@@ -458,7 +449,9 @@ struct Atom {
 }
 struct C {
     src: u8[],
-    toks: Tok[],
+    // The loaded file's tokens. Each knows where it starts (line, col), worked out once by the
+    // lexer: every position a diagnostic, a debug row or a runtime-error site needs is a lookup.
+    toks: lexer::Token[],
     pos: u64,
     out: u8[],
     // 1 (--split): mark module boundaries in `out` and write one assembly file per module.
@@ -591,7 +584,7 @@ struct C {
     file_loaded: u64,
     file_cache_index: u64[],
     file_cache_src: u8[][],
-    file_cache_toks: Tok[][],
+    file_cache_toks: lexer::Token[][],
     funcs: Func[],
     // The (module, name) index of `funcs` and of `decls` (see name_key).
     func_slots: u64[],
@@ -6838,7 +6831,13 @@ fn tok_text<a>(c: (&a mut C), i: u64) -> u8[] {
     t := &c.toks[i];
     st := t.start;
     en := t.end;
-    return (c.src[st: en]).copy();
+    // Filled in place: a slice of the source and a copy of it was a view record more per token.
+    n := en - st;
+    mut out = u8[0; n];
+    for k in n {
+        out[k] = c.src[st + k];
+    }
+    return out;
 }
 // Whether the current token is spelled `s`, read from the source in place. `is` is asked for every
 // keyword at every statement, and copying the token out to compare it was four allocations a
@@ -10465,9 +10464,9 @@ fn load_file<a>(c: (&a mut C), index: u64) -> unit {
         if slot == c.file_cache_index.len() {
             c.file_cache_index.push(parked);
             c.file_cache_src.push(u8[]);
-            c.file_cache_toks.push(Tok[]);
+            c.file_cache_toks.push(lexer::Token[]);
         }
-        old_toks := exchange(&mut c.toks, Tok[]);
+        old_toks := exchange(&mut c.toks, lexer::Token[]);
         old_src := exchange(&mut c.src, u8[]);
         exchange(&mut c.file_cache_toks[slot], old_toks);
         exchange(&mut c.file_cache_src[slot], old_src);
@@ -10476,7 +10475,7 @@ fn load_file<a>(c: (&a mut C), index: u64) -> unit {
     for i in c.file_cache_index.len() {
         if c.file_cache_index[i] == index {
             // The entry stays in the list, empty, until this file is parked again.
-            back_toks := exchange(&mut c.file_cache_toks[i], Tok[]);
+            back_toks := exchange(&mut c.file_cache_toks[i], lexer::Token[]);
             back_src := exchange(&mut c.file_cache_src[i], u8[]);
             exchange(&mut c.toks, back_toks);
             exchange(&mut c.src, back_src);
@@ -10501,25 +10500,7 @@ fn load_file<a>(c: (&a mut C), index: u64) -> unit {
         push_bytes(&mut path, view(arg));
         src = host::read_file(view(path));
     }
-    mut toks = Tok[];
-    lexed := lexer::tokenize(view(src));
-    mut line = 1;
-    mut col = 1;
-    mut at = 0;
-    for i in lexed.len() {
-        t := &lexed[i];
-        while at < t.start {
-            if src[at] == 10 {
-                line += 1;
-                col = 1;
-            } else {
-                col += 1;
-            }
-            at += 1;
-        }
-        toks.push(Tok { kind: t.kind, start: t.start, end: t.end, line: line, col: col });
-    }
-    drop(lexed);
+    toks := lexer::tokenize(view(src));
     exchange(&mut c.toks, toks);
     exchange(&mut c.src, src);
     exchange(&mut c.pos, 0);
@@ -50793,7 +50774,7 @@ fn iface_emit_all<a>(c: (&a mut C)) -> unit {
 pub fn main() -> u64 {
     mut c = C {
         src: u8[],
-        toks: Tok[],
+        toks: lexer::Token[],
         pos: 0,
         out: u8[],
         split: 0,
@@ -50860,7 +50841,7 @@ pub fn main() -> u64 {
         file_loaded: 0,
         file_cache_index: u64[],
         file_cache_src: u8[][],
-        file_cache_toks: Tok[][],
+        file_cache_toks: lexer::Token[][],
         funcs: Func[],
         func_slots: u64[],
         func_keys: u64[],
