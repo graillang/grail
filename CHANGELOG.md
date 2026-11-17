@@ -114,6 +114,11 @@
   every 8th build (`GRAIL_CACHE_MAX`, 2 GiB by default; `GRAIL_CACHE_GC_EVERY`). An evicted entry is
   only ever a miss. 25 one-body edits of a 40-function module grew the store from 7.1 to 22.9 MB;
   with a cap of 1.3 times the cold build it ends at 6.9 MB.
+- **Constant promotion of literal vectors.** `table := u64[1, 0, 1, ...];` whose elements are integer
+  literals, bound to an immutable name the rest of its block only indexes or measures, is now one
+  read-only object emitted once instead of a vector built on the heap at every execution (meshopt's
+  `can_collapse`/`has_opposite` rebuilt a 36-entry table per call). A literal that is mutated,
+  moved, returned, borrowed out or captured by a closure still allocates fresh.
 
 - **`bench-rivals` no longer charts a build that printed the wrong answer.** It already failed the
   run when a build's output differed from C's, but still wrote that build's figures into the
