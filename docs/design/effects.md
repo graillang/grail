@@ -139,7 +139,7 @@ The summary travels three ways:
 
 A row's facts install as the callee's own facts and its witness as the next link, so a refusal in
 module A names the chain through B and the runtime exactly as a whole-program build does:
-`loud -> push_one -> grow -> rt_push -> rt_grow` (`tools/test-cli.mjs` holds the two equal).
+`loud -> push_one -> grow -> rt_push -> rt_push_slow -> rt_grow` (`tools/test-cli.mjs` holds the two equal).
 
 Modules build in dependency order (a `use` cycle is refused by the per-module driver), so every
 summary a run reads exists before it starts; recursion inside a run is the fixpoint's.
