@@ -2281,6 +2281,8 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
     dead_defs(&mut o, view(s), first, last);
     retarget(&mut o, view(s), last);
     offset_loads(&mut o, view(s), last);
+    array_regs(&mut o, view(s), last);
+    dead_defs(&mut o, view(s), first, last);
     xmm_loads(&mut o, view(s), last);
     xmm_stores(&mut o, view(s), last);
     newframe := compact(&mut o, view(s), prologue, ns);
@@ -3648,26 +3650,190 @@ fn array_imms<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
         set_operand(&mut o, i, 1, 3, w);
     }
 }
-// 86 / 87: operand 0 is the length's immediate (86), operand 1's value the width.
+// 86 / 87: operand 0 is the length's immediate (86); operand 1's value is the width (low byte), the
+// index and base registers when array_regs found them (bits 8 and 16, +1; else rsi and rdi) and bit
+// 24 when the address was folded into the load after it (array_regs), so no `leaq` is emitted.
 fn array_imm_expansion<a, b>(o: (&a mut ir::Body), s: &b [u8], i: u64) {
+    v := o.v1[i];
+    mut base = 7;
+    mut index = 6;
+    if ((v >> 16) & 255) != 0 {
+        base = ((v >> 16) & 255) - 1;
+    }
+    if ((v >> 8) & 255) != 0 {
+        index = ((v >> 8) & 255) - 1;
+    }
     if o.op[i] == 86 {
         n := ir::uniq_take(&mut o);
         app(&mut o.out, view("cmpq "));
         emit_operand(&mut o, view(s), i, 0);
-        app(&mut o.out, view(",%rsi\njb .L"));
+        app(&mut o.out, view(",%"));
+        reg_name(&mut o, index);
+        app(&mut o.out, view("\njb .L"));
         opt_label(&mut o);
         out_number(&mut o, n);
         // rt_fail(1, index, length) as rt_aslot reports it: the length the check no longer loaded.
-        app(&mut o.out, view("\nmovq "));
+        app(&mut o.out, view("\n"));
+        if index != 6 {
+            app(&mut o.out, view("movq %"));
+            reg_name(&mut o, index);
+            app(&mut o.out, view(",%rsi\n"));
+        }
+        app(&mut o.out, view("movq "));
         emit_operand(&mut o, view(s), i, 0);
         app(&mut o.out, view(",%rdx\nmovq $1,%rdi\ncall rt_fail\n.L"));
         opt_label(&mut o);
         out_number(&mut o, n);
         app(&mut o.out, view(":\n"));
     }
-    app(&mut o.out, view("leaq (%rdi,%rsi,"));
-    out_number(&mut o, o.v1[i]);
+    if ((v >> 24) & 1) != 0 {
+        return ();
+    }
+    app(&mut o.out, view("leaq (%"));
+    reg_name(&mut o, base);
+    app(&mut o.out, view(",%"));
+    reg_name(&mut o, index);
+    o.out.push(44);
+    out_number(&mut o, v & 255);
     app(&mut o.out, view("),%rax\n"));
+}
+// The registers a fixed-size array access reads its base and index from (dev-gap nbody item 3):
+// `movq %rB,%rdi; movq %rI,%rsi` before an op 86/87 in the same straight line, with neither source
+// written between, become the op's own operands, so the copies die; and a load through the address
+// right after (`movq/movzbq/movl/movsd (%rax),X`, %rax dead or the destination) takes the scaled
+// operand `(%rB,%rI,W)` itself, without the `leaq`.
+fn array_regs<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
+    for i in last {
+        if (o.del[i] != 0) || ((o.op[i] != 86) && (o.op[i] != 87)) {
+            continue;
+        }
+        w := o.v1[i] & 255;
+        mut base = 7;
+        mut index = 6;
+        for want in 2 {
+            target := 7 - want;
+            mut p = i;
+            mut steps = 0;
+            while (0 < p) && (steps < 8) {
+                p -= 1;
+                if (o.del[p] != 0) || (o.op[p] == 101) {
+                    continue;
+                }
+                steps += 1;
+                op := o.op[p];
+                if (op == 100) || (op == 0) || (op == 15) || ir::is_jump(op) {
+                    break;
+                }
+                if ((ir::writes(&o, p) >> target) & 1) != 0 {
+                    if (op == 1) && (o.k0[p] == 1) && (o.k1[p] == 1) && (o.v1[p] == target) {
+                        src := o.v0[p];
+                        // The source must keep its value up to the access.
+                        mut clean = (src != 4) && (src != 5) && (src != 0);
+                        mut x = p + 1;
+                        while x < i {
+                            if (o.del[x] == 0) && (((ir::writes(&o, x) >> src) & 1) != 0) {
+                                clean = false;
+                            }
+                            x += 1;
+                        }
+                        if clean {
+                            if target == 7 {
+                                base = src;
+                            } else {
+                                index = src;
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        mut v = w;
+        if base != 7 {
+            v = v | ((base + 1) << 16);
+        }
+        if index != 6 {
+            v = v | ((index + 1) << 8);
+        }
+        // The load right after, through (%rax).
+        j := next_live(&o, i, last);
+        if (j < last) && ((o.op[j] == 1) || (o.op[j] == 28) || (o.op[j] == 98) || (o.op[j] == 77)) && (o.k0[j] == 4)
+            && ir::same_range(view(s), o.s0[j], o.e0[j], view("(%rax)")) && ((w == 1) || (w == 2) || (w == 4) || (w == 8)) {
+            overwrites := (o.k1[j] == 1) && (o.v1[j] == 0);
+            if overwrites || dead_after(&o, j, 0, 6) {
+                start := o.gen.len();
+                app_gen(&mut o, view("(%"));
+                gen_reg(&mut o, base);
+                app_gen(&mut o, view(",%"));
+                gen_reg(&mut o, index);
+                o.gen.push(44);
+                gen_number(&mut o, w);
+                o.gen.push(41);
+                end := o.gen.len();
+                set_operand(&mut o, j, 0, 5, 0);
+                ir::put(&mut o.m0, j, (1 << base) | (1 << index));
+                set_range(&mut o, j, 0, start, end);
+                v = v | 16777216;
+            }
+        }
+        ir::put(&mut o.v1, i, v);
+    }
+}
+fn app_gen<a, b>(o: (&a mut ir::Body), t: &b [u8]) {
+    for x in t.len() {
+        o.gen.push(t[x]);
+    }
+}
+// A general register's name (without %) into the generated text.
+fn gen_reg<a>(o: (&a mut ir::Body), r: u64) {
+    if r == 0 {
+        app_gen(&mut o, view("rax"));
+    }
+    if r == 1 {
+        app_gen(&mut o, view("rcx"));
+    }
+    if r == 2 {
+        app_gen(&mut o, view("rdx"));
+    }
+    if r == 3 {
+        app_gen(&mut o, view("rbx"));
+    }
+    if r == 4 {
+        app_gen(&mut o, view("rsp"));
+    }
+    if r == 5 {
+        app_gen(&mut o, view("rbp"));
+    }
+    if r == 6 {
+        app_gen(&mut o, view("rsi"));
+    }
+    if r == 7 {
+        app_gen(&mut o, view("rdi"));
+    }
+    if r == 8 {
+        app_gen(&mut o, view("r8"));
+    }
+    if r == 9 {
+        app_gen(&mut o, view("r9"));
+    }
+    if r == 10 {
+        app_gen(&mut o, view("r10"));
+    }
+    if r == 11 {
+        app_gen(&mut o, view("r11"));
+    }
+    if r == 12 {
+        app_gen(&mut o, view("r12"));
+    }
+    if r == 13 {
+        app_gen(&mut o, view("r13"));
+    }
+    if r == 14 {
+        app_gen(&mut o, view("r14"));
+    }
+    if r == 15 {
+        app_gen(&mut o, view("r15"));
+    }
 }
 // Two-address SSE arithmetic (dev-gap item 2). The front end computes every float operation in the
 // scratch pair - `movaps %xmmA,%xmm0; movaps %xmmB,%xmm1; OPsd %xmm1,%xmm0; movaps %xmm0,%xmmD` -

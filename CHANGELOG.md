@@ -4,9 +4,7 @@
   module into parts - shared declarations, each function in one part, internal functions renamed
   per unit - and runs `clang -O2` on all of them at once under the jobserver, then joins them. A
   release unit, and the release compiler itself (`tools/native.mjs release`), is no longer bound by
-  one serial `clang -O2` over a gigabyte of IR. The release compiler is now always lowered by the
-  native compiler of the same sources, and accepted only if it compiles the compiler to the same
-  assembly and the same in-process object and its builds pass a corpus slice.
+  one serial `clang -O2` over a gigabyte of IR.
 
 - **`grail cache warm [--target T]`** checks and builds every standard module into the build store,
   as rustup ships libstd: a project's first check then compiles only its own modules. The installers
@@ -27,6 +25,12 @@
   - With the LLVM backend, a 4x4 matrix product and an array-of-structs to struct-of-arrays
     transpose run as the same loops as C with SSE2 intrinsics: 1.04x and 1.17x C's instructions,
     the same time within the machine's noise.
+- Fixed: the release compiler could be built by an older release compiler's LLVM backend and
+  accepted although it miscompiled its own assembler (programs printed stray zero bytes). The
+  release build now always lowers with the current native compiler, and accepts the result only
+  when it compiles the compiler to the same text and the same objects as the native build and its
+  programs pass a corpus slice (hello, strings, alloc, thread, sched).
+
 - **`host::chmod(path, mode)`**: sets a file's permission bits, 0 or a positive errno (fchmodat on
   Linux, chmod on macOS, and 0 on Windows, which has no bits to set). The build store will use it to
   give a restored executable image its mode without a shell, once the bootstrap seed knows it.
@@ -39,7 +43,8 @@
   build reads no source, the compiler's `--print-inputs` answer is remembered under the stamps of
   what it read (`inputs/`), and a tool's `--version` is asked once per binary (`tool-id/`). A module
   run with in-process assembly is one process, not a `grail unit-build` wrapper and the compiler.
-  `host::read_file` reads straight into its result instead of pushing byte by byte. With the dev
+  `host::read_file` reads straight into its result instead of pushing byte by byte, sized from the
+  file's own size. With the dev
   compiler and GRAIL_JOBS=1, in user-space instructions: hello no-op build 0.235G -> 0.008G, hello
   check 0.310G -> 0.058G, hello build 0.453G -> 0.140G. `grail cache prune` drops `fp/`, `inputs/`
   and `tool-id/` whole.
@@ -106,6 +111,10 @@
   a general register (`movq (%rax),%rax; movq %rax,%xmm8`) is `movsd (%rax),%xmm8`, and a store the
   same way back; the internal assembler encodes `movsd`, and AArch64 and RISC-V translate it to
   `ldr`/`str` and `fld`/`fsd`. nbody executes 7% fewer instructions.
+- **Native backend: fixed-size array elements are addressed directly.** An element access reads its
+  base and index from the registers that hold them instead of copies in `%rdi`/`%rsi`, and a load
+  of the element takes the scaled address as its operand (`movsd (%r12,%rbx,8),%xmm9`) instead of
+  computing it with `leaq` first. nbody executes another 10% fewer instructions.
 
 - **Raw address offsets.** In an `unsafe module`, the address operand of `raw_load`/`raw_store`
   and their narrow forms written as `p + k` with a literal `k` has no overflow check and is folded

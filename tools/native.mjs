@@ -480,26 +480,24 @@ function buildTreeCompiler() {
 // writing it (docs/design/compile-speed.md). `buildCompiler()` stays what the tests build with: it
 // is the product of the native backend, and so the thing they exist to test.
 //
-// The native compiler of these sources lowers it, never an older release binary, and the result is
-// accepted only when it compiles the compiler to the same assembly and the same object as the native
-// one and its builds pass a slice of the corpus (GRAIL_RELEASE_SLICE, a test filter; 0 skips it).
-// The LLVM module is compiled in parallel parts (`grail llvm-compile`).
+// The native compiler of these sources lowers them (never an older release binary, whose older
+// LLVM backend could carry a miscompile in), and the result is accepted only if it compiles the
+// compiler to the same text and objects and its programs pass a corpus slice. The LLVM module is
+// compiled in parallel parts (`grail llvm-compile`).
 export function buildReleaseCompiler({ log = () => {} } = {}) {
   if (hostTarget !== 'x86_64') throw new Error('the release compiler is built on x86_64 Linux for now');
   const native = buildCompiler();
   const directory = dirname(native);
   const executable = join(directory, 'grail-release');
   if (existsSync(executable)) return executable;
-  const latest = join(root, '.work/native/release-latest');
   const stem = join(directory, `release.${process.pid}`);
   // A release build wraps on overflow, as every `grail build --release` does.
   const flags = ['--default-u64', '--typed-refs', '--overflow=wrap'];
-  // Lowered by the native compiler built from these sources and nothing else: an older release
-  // binary lowers with whatever lifter bugs it was built with (one miscompiled the in-process
-  // assembler and still passed a text-only acceptance).
+  // The lowering is always the current native compiler's: an older release binary would carry
+  // an older LLVM backend, and a miscompile in it into the new compiler.
   log(`lowering with ${native}`);
   const run = spawnSync(native, [...flags, '--backend=llvm', `${stem}.s`, ...compilerSources], { encoding: 'utf8', env: compilerEnvironment(), maxBuffer: 1 << 26 });
-  if (run.status !== 0) throw new Error(`the native compiler could not lower the compiler through the LLVM backend\n${run.stderr ?? ''}`);
+  if (run.status !== 0) throw new Error(`lowering the compiler through the LLVM backend failed (${run.signal ?? run.status}): ${(run.stderr ?? '').trim().split('\n')[0]}`);
   log('clang -O2');
   // Cut in parts and compiled in parallel (`grail llvm-compile`): one clang -O2 over the whole
   // compiler's module is serial and takes most of the build.
@@ -507,38 +505,38 @@ export function buildReleaseCompiler({ log = () => {} } = {}) {
   command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[hostTarget]}`, '-c', `${stem}.s`, '-o', `${stem}.o`]);
   const pending = `${stem}.pending`;
   command([process.env.GRAIL_LINKER ?? 'ld.lld', '-m', emulations[hostTarget], `${stem}.o`, `${stem}.ll.o`, '-o', pending]);
-  // The acceptance test, three parts. (1) Both compilers compile the compiler and the two outputs
-  // are one file; (2) both assemble it in process to the same object; (3) the release compiler's own
-  // builds of a runtime slice of the corpus run correctly.
+  for (const leftover of [`${stem}.s`, `${stem}.s.ll`, `${stem}.o`, `${stem}.ll.o`]) if (existsSync(leftover)) rmSync(leftover);
+  for (const part of readdirSync(directory).filter(name => name.startsWith(`${basename(stem)}.s.ll.`))) rmSync(join(directory, part));
+  // The acceptance test, before the binary is accepted:
+  // (1) both compilers compile the compiler to one assembly file, and (2) each one's own assembler
+  // (`grail asm`, which every release build runs and the text alone does not exercise) makes one
+  // object of it;
   log('checking that it emits what the native build emits');
   const outputs = [native, pending].map((compiler, index) => {
     const out = `${stem}.check${index}.s`;
     const object = `${stem}.check${index}.o`;
-    command([compiler, ...flags, '--object', object, out, ...compilerSources], { env: compilerEnvironment() });
+    command([compiler, ...flags, out, ...compilerSources], { env: compilerEnvironment() });
+    command([compiler, 'asm', out, '-o', object]);
     const digest = createHash('sha256').update(readFileSync(out)).update(readFileSync(object)).digest('hex');
     rmSync(out);
     rmSync(object);
     return digest;
   });
-  if (outputs[0] === outputs[1] && process.env.GRAIL_RELEASE_SLICE !== '0') {
-    log('running a corpus slice through its builds');
-    const slice = spawnSync('bun', [join(root, 'tools/test-native.mjs'), hostTarget, '--jobs', '4'], {
-      cwd: root, encoding: 'utf8', maxBuffer: 1 << 26,
-      env: { ...process.env, GRAIL_COMPILER: pending, GRAIL_BACKEND: 'native', GRAIL_TEST_FILTER: process.env.GRAIL_RELEASE_SLICE ?? '^(vec|f32|f64|str|hash|fmt|float|pool-chunks|unboxed)' },
-    });
-    if (slice.status !== 0) {
-      rmSync(pending);
-      throw new Error(`the release compiler's builds fail the corpus slice: not accepted\n${(slice.stdout ?? '').split('\n').filter(l => l.startsWith('FAIL')).slice(0, 10).join('\n')}`);
-    }
-  }
-  for (const leftover of [`${stem}.s`, `${stem}.s.ll`, `${stem}.o`, `${stem}.ll.o`]) if (existsSync(leftover)) rmSync(leftover);
-  for (const part of readdirSync(directory).filter(name => name.startsWith(`${basename(stem)}.s.ll.`))) rmSync(join(directory, part));
   if (outputs[0] !== outputs[1]) {
     rmSync(pending);
     throw new Error('the release compiler does not emit what the native build emits for the compiler\'s own sources: not accepted');
   }
+  // (3) programs it builds run: a slice of the corpus through its own `grail build` path.
+  log('running a corpus slice with it');
+  const slice = spawnSync('bun', [join(root, 'tools/test-native.mjs'), hostTarget, '--jobs', '4'], {
+    cwd: root, encoding: 'utf8', maxBuffer: 1 << 26,
+    env: { ...process.env, GRAIL_TEST_COMPILER: pending, GRAIL_TEST_FILTER: '^(hello|string|alloc|thread|sched)' },
+  });
+  if (slice.status !== 0) {
+    rmSync(pending);
+    throw new Error(`the release compiler's programs fail the corpus slice: not accepted\n${(slice.stdout ?? '').split('\n').filter(l => /FAIL|passed/.test(l)).join('\n')}`);
+  }
   claimExecutable(pending, executable);
-  writeFileSync(latest, `${executable}\n`);
   return executable;
 }
 // The compiler's own sources without the portable runtime and the host's platform module:

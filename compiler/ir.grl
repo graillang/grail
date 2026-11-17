@@ -1213,8 +1213,23 @@ pub fn reads<a>(o: (&a Body), i: u64) -> u64 {
         return src | dst_address(&o, i);
     }
     if (op == 86) || (op == 87) {
-        // A fixed-size array's element with the length and width as immediates: base and index.
-        return 192;
+        // A fixed-size array's element with the length and width as immediates: base and index -
+        // rdi and rsi, or the registers optimize.grl `array_regs` put in operand 1 (bits 8.. and
+        // 16.., each +1).
+        mut m = 0;
+        b := (o.v1[i] >> 16) & 255;
+        x := (o.v1[i] >> 8) & 255;
+        if b != 0 {
+            m = m | (1 << (b - 1));
+        } else {
+            m = m | 128;
+        }
+        if x != 0 {
+            m = m | (1 << (x - 1));
+        } else {
+            m = m | 64;
+        }
+        return m;
     }
     if is_desc_op(op) {
         // The index in rsi and the hoisted data and len registers the operands name; the byte store
@@ -1267,6 +1282,10 @@ pub fn writes<a>(o: (&a Body), i: u64) -> u64 {
         return 1;
     }
     if (op == 86) || (op == 87) {
+        // The address in %rax, unless it was folded into the load after it (bit 24).
+        if ((o.v1[i] >> 24) & 1) != 0 {
+            return 0;
+        }
         return 1;
     }
     if (op == 98) || (op == 99) {
