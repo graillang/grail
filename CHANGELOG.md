@@ -1,5 +1,14 @@
 ## Unreleased
 
+- Fixed a silent release miscompile: a two- or three-word value whose address is taken (an `Option`
+  from `pop()`, a small record passed by address) could be lowered by the LLVM backend as separate
+  one-word stack objects when its width fact was missing, so writing its second word overwrote a
+  neighbour - `pool::split` crashed under `--release` on 18e6943. The lifter now checks every access
+  through an address-taken slot against the slot's declared width and keeps a body that reaches
+  past it in native code (`--verify-facts` makes it an error). With that, the thread-pointer reads
+  are lifted again (now with a memory clobber), so `rt_current`, the mutex fast path and the
+  allocator's threaded path are optimised in release builds.
+
 - AArch64 and RV64 native code drops moves that move nothing (call ABI S7): the word machine's
   result register is x9 (t0) and its first argument x0 (a0), and moves go through the scratch x10
   (t1), so calls and returns were full of `mov x0,x9` after `mov x9,x10; mov x10,x0`. A value number
