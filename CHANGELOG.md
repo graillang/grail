@@ -13,6 +13,11 @@
   compiler and GRAIL_JOBS=1, in user-space instructions: hello no-op build 0.235G -> 0.008G, hello
   check 0.310G -> 0.058G, hello build 0.453G -> 0.140G. `grail cache prune` drops `fp/`, `inputs/`
   and `tool-id/` whole.
+- **Short floats print without big integers.** A double whose shortest form has at most 15 digits
+  and lies in [1e-7, 1e22) (`0.25`, `1.037`, `123.5`) is printed from a candidate checked exactly
+  with one correctly rounded operation (Clinger), with the same text as before; longer ones still
+  go through Burger & Dybvig. Decimal-shaped values print about twice as fast (LLVM 729M -> 384M
+  instructions for 6,000 of them).
 - Fixed: `grail fmt` could break a long expression inside `<<` or `>>` (each is two `<`/`>` tokens),
   or start a continuation line with `<`, and the output then read as a generic argument list and no
   longer parsed. A wrapped line now never starts with `<` or `>`.
@@ -31,7 +36,6 @@
   writes interfaces records its bodies now; `tools/test-cli.mjs` checks a program using each lib/
   module.
 - The internal assembler takes `.previous`.
-
 - **Integer map keys hash in registers.** `hash::Hash` has a defaulted `table_hash`, the SipHash-1-3
   value a map uses (the default streams through `hash`, as before); the integer types give it as
   `hash::word_hash`, the same value computed straight-line with no hasher state in memory. User
