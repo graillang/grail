@@ -2096,6 +2096,8 @@ fn rt_view_record() -> u64 {
     return rt_alloc(32) + 8;
 }
 // Drop a view: free its record if it has one.
+// The heap view records a compiler from before two-word views makes (8 past a 16-aligned block). A
+// compiler from after never calls this: its views are frame words (docs/design/unboxed-values.md).
 fn rt_view_free(v: u64) -> u64 {
     if (v & 8) != 0 {
         rt_free(v);
@@ -2126,6 +2128,7 @@ fn rt_vslice(s: u64, a: u64, b: u64, width: u64) -> u64 {
 // (rt_view_free). This was seven in ten of every allocation the compiler made
 // (docs/design/compile-speed.md). A view of a view record is a record of its own, as before: the
 // two are dropped separately.
+// For code from a compiler before two-word views (the seed); a newer one never calls it (view_of).
 fn rt_view(s: u64) -> u64 {
     if (s & 8) != 0 {
         return rt_slice(s, 0, raw_load(wrapping_add(s, 8)));
