@@ -7633,6 +7633,15 @@ fn kind_at<a>(c: (&a mut C), i: u64) -> u64 {
     return t.kind;
 }
 fn advance<a>(c: (&a mut C)) -> unit {
+    // A scan for a closing token (`;`, `)`, `}`) that never comes runs into the end of the file: the
+    // cursor may step onto the end-of-file token, but stepping past it is a truncated program, not
+    // a token to skip. Without this the scan spun forever on an unfinished declaration.
+    if c.toks.len() <= c.pos {
+        if c.toks.len() != 0 {
+            exchange(&mut c.pos, c.toks.len() - 1);
+        }
+        fail(&mut c, view("unexpected end of file"));
+    }
     exchange(&mut c.pos, c.pos + 1);
     return ();
 }
@@ -40316,6 +40325,33 @@ fn int_binary<a>(c: (&a mut C), k: u64, left: u64, right: u64, ty: u64) -> Val {
         if ((k == 43 || k == 45 || k == 42) && bits < 64) || ((k == 43 || k == 45) && bits == 64 && signed != 0) || (k == 47 || k == 37) {
             fx_would_trap(&mut c, view("rt_abort"));
         }
+    }
+    // Wrapping +, - and * are the 64-bit result cut to the type's width - its low bits, zero- or
+    // sign-extended - which is what rt_int returns for them, without a call per operation.
+    if !checked && (k == 43 || k == 45 || k == 42) {
+        get(&mut c, right, view("%rcx"));
+        get(&mut c, left, view("%rax"));
+        if k == 43 {
+            o(&mut c, view("addq %rcx,%rax\n"));
+        }
+        if k == 45 {
+            o(&mut c, view("subq %rcx,%rax\n"));
+        }
+        if k == 42 {
+            o(&mut c, view("imulq %rcx,%rax\n"));
+        }
+        if bits < 64 {
+            o(&mut c, view("shlq $"));
+            on(&mut c, 64 - bits);
+            if signed != 0 {
+                o(&mut c, view(",%rax\nsarq $"));
+            } else {
+                o(&mut c, view(",%rax\nshrq $"));
+            }
+            on(&mut c, 64 - bits);
+            o(&mut c, view(",%rax\n"));
+        }
+        return val(save(&mut c), ty);
     }
     code := int_code(&mut c, ty);
     op := imm(&mut c, k);

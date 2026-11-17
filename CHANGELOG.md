@@ -1,5 +1,9 @@
 ## Unreleased
 
+- Fixed: a file that ends inside a declaration (an unfinished `extern` parameter list, say) made the
+  compiler loop forever; it now reports `unexpected end of file`.
+- With `--overflow=wrap`, `+`, `-` and `*` on sized and signed integers are plain machine operations
+  instead of a runtime call each (the FNV benchmark built in wrap mode runs 31% fewer instructions).
 - Fixed: an interface whose methods carry default bodies could not be read back and written again
   unchanged ("does not round-trip"): the reader kept a default body only as the source it compiles,
   not as the method's text.
