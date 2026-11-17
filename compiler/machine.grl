@@ -1199,6 +1199,11 @@ pub fn has_atomics<a>(input: &a [u8]) -> bool {
                 return true;
             }
         }
+        if (input[i] == 115) && ((i == 0) || (input[i - 1] == 10)) {
+            if starts(view(input[i:]), view("simd.")) {
+                return true;
+            }
+        }
     }
     return false;
 }
@@ -1210,7 +1215,13 @@ pub fn atomics_x86<a>(input: &a [u8]) -> u8[] {
             line := input[start: i];
             start = i + 1;
             a := atom_parse(view(line));
-            if a.kind == 0 {
+            sv := simd_parse(view(line));
+            if sv.op != 0 {
+                put(&mut o, view("# "));
+                put(&mut o, view(line));
+                put(&mut o, view("\n"));
+                simd_expand(&mut o, &sv);
+            } else if a.kind == 0 {
                 put(&mut o, view(line));
                 put(&mut o, view("\n"));
             } else {
@@ -1335,6 +1346,1001 @@ fn atom_x86<a>(o: (&a mut Out), a: (&Atom)) -> unit {
     put(&mut o, view("\n"));
     return ();
 }
+// ---- SIMD: the `simd.*` stream ops (docs/design/simd.md) ----------------------------------------
+// native.grl writes one line per operation on a SIMD value, with fixed registers: the address of
+// the destination vector in %rdi, of the first operand in %rsi, of the second in %rdx, of a
+// select's false operand in %rcx; a scalar going in or coming out is in %rax. native.grl loads all
+// four address registers before every line (a zero for an unused one), so the expansion may use
+// %rax, %rcx (once its operand is read) and %xmm0/%xmm1 as scratch, as atom.* lines do.
+//   simd.OP SHAPE [K]
+// SHAPE is the operands' shape: f32x4 f32x8 f64x2 f64x4 i32x4 i32x8 m32x4 m32x8 m64x2 m64x4. A
+// compare writes the mask of the same lane width. OP is add sub mul div and or xor min max eq ne lt
+// le gt ge select not splat lane sum copy any all; K is a lane index (lane).
+// The lowering here is the S1 one on every native target: one scalar lane at a time with the
+// instructions scalar code already uses - the x86-64 subset the internal assembler encodes, and
+// the AArch64 and RV64 forms machine.grl writes for scalars - so a lane computes exactly what the
+// scalar operation computes. LLVM lifts the line to vector IR (llvm.grl `lift_simd`).
+pub struct Simd {
+    // The op's index in simd_ops() plus 1; 0 when the line is not a SIMD op.
+    op: u64,
+    // 1 float, 2 signed integer, 3 mask.
+    elem: u64,
+    bits: u64,
+    lanes: u64,
+    k: u64
+}
+fn simd_ops() -> u8[][] {
+    return u8[][
+        copy_text(view("add")), copy_text(view("sub")), copy_text(view("mul")), copy_text(view("div")),
+        copy_text(view("and")), copy_text(view("or")), copy_text(view("xor")), copy_text(view("min")),
+        copy_text(view("max")), copy_text(view("eq")), copy_text(view("ne")), copy_text(view("lt")),
+        copy_text(view("le")), copy_text(view("gt")), copy_text(view("ge")), copy_text(view("select")),
+        copy_text(view("not")), copy_text(view("splat")), copy_text(view("lane")), copy_text(view("sum")),
+        copy_text(view("copy")), copy_text(view("any")), copy_text(view("all"))
+    ];
+}
+fn simd_number<a>(s: &a [u8]) -> u64 {
+    mut n = 0;
+    for i in s.len() {
+        if (s[i] < 48) || (57 < s[i]) {
+            return 0;
+        }
+        n = n * 10 + s[i] - 48;
+    }
+    return n;
+}
+pub fn simd_parse<a>(line: &a [u8]) -> Simd {
+    mut s = Simd { op: 0, elem: 0, bits: 0, lanes: 0, k: 0 };
+    if !starts(view(line), view("simd.")) {
+        return s;
+    }
+    words := split(view(line), 32);
+    if (words.len() < 2) || (3 < words.len()) {
+        bad(view(line));
+    }
+    name := words[0][5:].copy();
+    ops := simd_ops();
+    for i in ops.len() {
+        if eq(view(name), view(ops[i])) {
+            s.op = i + 1;
+        }
+    }
+    shape := words[1].copy();
+    mut x = 0;
+    for i in shape.len() {
+        if shape[i] == 120 {
+            x = i;
+        }
+    }
+    if (s.op == 0) || (x < 2) {
+        bad(view(line));
+    }
+    if shape[0] == 102 {
+        s.elem = 1;
+    }
+    if shape[0] == 105 {
+        s.elem = 2;
+    }
+    if shape[0] == 109 {
+        s.elem = 3;
+    }
+    s.bits = simd_number(view(shape[1: x]));
+    s.lanes = simd_number(view(shape[x + 1:]));
+    if (s.elem == 0) || ((s.bits != 32) & (s.bits != 64)) || ((s.lanes != 2) & (s.lanes != 4) & (s.lanes != 8)) {
+        bad(view(line));
+    }
+    if words.len() == 3 {
+        s.k = simd_number(view(words[2]));
+    }
+    return s;
+}
+fn simd_x86<a>(o: (&a Out)) -> bool {
+    return (o.target != 1) & (o.target != 2);
+}
+// General scratch register `g` (0 or 1), 64-bit name.
+fn simd_g<a>(o: (&a Out), g: u64) -> string {
+    if o.target == 1 {
+        if g == 0 {
+            return "x9";
+        }
+        return "x10";
+    }
+    if o.target == 2 {
+        if g == 0 {
+            return "t0";
+        }
+        return "t1";
+    }
+    if g == 0 {
+        return "%rax";
+    }
+    return "%rcx";
+}
+fn simd_g32<a>(o: (&a Out), g: u64) -> string {
+    if o.target == 1 {
+        if g == 0 {
+            return "w9";
+        }
+        return "w10";
+    }
+    if o.target == 2 {
+        return simd_g(&o, g);
+    }
+    if g == 0 {
+        return "%eax";
+    }
+    return "%ecx";
+}
+// Address register `b`: 0 the destination, 1 the first operand, 2 the second, 3 the third.
+fn simd_b<a>(o: (&a Out), b: u64) -> string {
+    if o.target == 1 {
+        if b == 0 {
+            return "x0";
+        }
+        if b == 1 {
+            return "x1";
+        }
+        if b == 2 {
+            return "x2";
+        }
+        return "x3";
+    }
+    if o.target == 2 {
+        if b == 0 {
+            return "a0";
+        }
+        if b == 1 {
+            return "a1";
+        }
+        if b == 2 {
+            return "a2";
+        }
+        return "a3";
+    }
+    if b == 0 {
+        return "%rdi";
+    }
+    if b == 1 {
+        return "%rsi";
+    }
+    if b == 2 {
+        return "%rdx";
+    }
+    return "%rcx";
+}
+// Float scratch register `f` (0 or 1) at `bits`.
+fn simd_f<a>(o: (&a Out), f: u64, bits: u64) -> string {
+    if o.target == 1 {
+        if bits == 32 {
+            if f == 0 {
+                return "s0";
+            }
+            return "s1";
+        }
+        if f == 0 {
+            return "d0";
+        }
+        return "d1";
+    }
+    if o.target == 2 {
+        if f == 0 {
+            return "ft0";
+        }
+        return "ft1";
+    }
+    if f == 0 {
+        return "%xmm0";
+    }
+    return "%xmm1";
+}
+// `OFF(BASE)` / `[BASE,#OFF]`.
+fn simd_mem<a>(o: (&a mut Out), b: u64, off: u64) -> unit {
+    if o.target == 1 {
+        put(&mut o, view("[")); 
+        put(&mut o, view(simd_b(&o, b)));
+        put(&mut o, view(",#"));
+        u64(&mut o, off);
+        put(&mut o, view("]"));
+        return ();
+    }
+    u64(&mut o, off);
+    put(&mut o, view("("));
+    put(&mut o, view(simd_b(&o, b)));
+    put(&mut o, view(")"));
+    return ();
+}
+fn simd_line<a, b, d>(o: (&a mut Out), op: &b [u8], first: &d [u8]) -> unit {
+    put(&mut o, op);
+    put(&mut o, view(" "));
+    put(&mut o, first);
+    return ();
+}
+// G[g] = the `bits`-bit integer at OFF(B[b]), sign-extended.
+fn simd_ldi<a>(o: (&a mut Out), g: u64, b: u64, off: u64, bits: u64) -> unit {
+    if o.target == 1 {
+        if bits == 32 {
+            simd_line(&mut o, view("ldr"), view(simd_g32(&o, g)));
+            put(&mut o, view(","));
+            simd_mem(&mut o, b, off);
+            r := simd_g(&o, g);
+            put(&mut o, view("\nlsl "));
+            put(&mut o, view(r));
+            put(&mut o, view(","));
+            put(&mut o, view(r));
+            put(&mut o, view(",#32\nasr "));
+            put(&mut o, view(r));
+            put(&mut o, view(","));
+            put(&mut o, view(r));
+            put(&mut o, view(",#32\n"));
+            return ();
+        }
+        simd_line(&mut o, view("ldr"), view(simd_g(&o, g)));
+        put(&mut o, view(","));
+        simd_mem(&mut o, b, off);
+        put(&mut o, view("\n"));
+        return ();
+    }
+    if o.target == 2 {
+        if bits == 32 {
+            simd_line(&mut o, view("lw"), view(simd_g(&o, g)));
+        } else {
+            simd_line(&mut o, view("ld"), view(simd_g(&o, g)));
+        }
+        put(&mut o, view(","));
+        simd_mem(&mut o, b, off);
+        put(&mut o, view("\n"));
+        return ();
+    }
+    if bits == 32 {
+        put(&mut o, view("movslq "));
+    } else {
+        put(&mut o, view("movq "));
+    }
+    simd_mem(&mut o, b, off);
+    put(&mut o, view(","));
+    put(&mut o, view(simd_g(&o, g)));
+    put(&mut o, view("\n"));
+    return ();
+}
+// The low `bits` of G[g] stored at OFF(destination).
+fn simd_sti<a>(o: (&a mut Out), g: u64, off: u64, bits: u64) -> unit {
+    if o.target == 1 {
+        if bits == 32 {
+            simd_line(&mut o, view("str"), view(simd_g32(&o, g)));
+        } else {
+            simd_line(&mut o, view("str"), view(simd_g(&o, g)));
+        }
+        put(&mut o, view(","));
+        simd_mem(&mut o, 0, off);
+        put(&mut o, view("\n"));
+        return ();
+    }
+    if o.target == 2 {
+        if bits == 32 {
+            simd_line(&mut o, view("sw"), view(simd_g(&o, g)));
+        } else {
+            simd_line(&mut o, view("sd"), view(simd_g(&o, g)));
+        }
+        put(&mut o, view(","));
+        simd_mem(&mut o, 0, off);
+        put(&mut o, view("\n"));
+        return ();
+    }
+    if bits == 32 {
+        simd_line(&mut o, view("movl"), view(simd_g32(&o, g)));
+    } else {
+        simd_line(&mut o, view("movq"), view(simd_g(&o, g)));
+    }
+    put(&mut o, view(","));
+    simd_mem(&mut o, 0, off);
+    put(&mut o, view("\n"));
+    return ();
+}
+// F[f] = the float at OFF(B[b]). On x86-64 through %rax (the internal assembler has no SSE load).
+fn simd_ldf<a>(o: (&a mut Out), f: u64, b: u64, off: u64, bits: u64) -> unit {
+    if o.target == 1 {
+        simd_line(&mut o, view("ldr"), view(simd_f(&o, f, bits)));
+        put(&mut o, view(","));
+        simd_mem(&mut o, b, off);
+        put(&mut o, view("\n"));
+        return ();
+    }
+    if o.target == 2 {
+        if bits == 32 {
+            simd_line(&mut o, view("flw"), view(simd_f(&o, f, bits)));
+        } else {
+            simd_line(&mut o, view("fld"), view(simd_f(&o, f, bits)));
+        }
+        put(&mut o, view(","));
+        simd_mem(&mut o, b, off);
+        put(&mut o, view("\n"));
+        return ();
+    }
+    if bits == 32 {
+        put(&mut o, view("movl "));
+        simd_mem(&mut o, b, off);
+        put(&mut o, view(",%eax\nmovd %eax,"));
+    } else {
+        put(&mut o, view("movq "));
+        simd_mem(&mut o, b, off);
+        put(&mut o, view(",%rax\nmovq %rax,"));
+    }
+    put(&mut o, view(simd_f(&o, f, bits)));
+    put(&mut o, view("\n"));
+    return ();
+}
+fn simd_stf<a>(o: (&a mut Out), f: u64, off: u64, bits: u64) -> unit {
+    if o.target == 1 {
+        simd_line(&mut o, view("str"), view(simd_f(&o, f, bits)));
+        put(&mut o, view(","));
+        simd_mem(&mut o, 0, off);
+        put(&mut o, view("\n"));
+        return ();
+    }
+    if o.target == 2 {
+        if bits == 32 {
+            simd_line(&mut o, view("fsw"), view(simd_f(&o, f, bits)));
+        } else {
+            simd_line(&mut o, view("fsd"), view(simd_f(&o, f, bits)));
+        }
+        put(&mut o, view(","));
+        simd_mem(&mut o, 0, off);
+        put(&mut o, view("\n"));
+        return ();
+    }
+    if bits == 32 {
+        simd_line(&mut o, view("movd"), view(simd_f(&o, f, bits)));
+        put(&mut o, view(",%eax\nmovl %eax,"));
+    } else {
+        simd_line(&mut o, view("movq"), view(simd_f(&o, f, bits)));
+        put(&mut o, view(",%rax\nmovq %rax,"));
+    }
+    simd_mem(&mut o, 0, off);
+    put(&mut o, view("\n"));
+    return ();
+}
+// F0 = F0 op F1 for op 1..4 (add sub mul div).
+fn simd_fbin<a>(o: (&a mut Out), op: u64, bits: u64) -> unit {
+    mut name = "add";
+    if op == 2 {
+        name = "sub";
+    }
+    if op == 3 {
+        name = "mul";
+    }
+    if op == 4 {
+        name = "div";
+    }
+    if o.target == 1 {
+        put(&mut o, view("f"));
+        put(&mut o, view(name));
+        put(&mut o, view(" "));
+        put(&mut o, view(simd_f(&o, 0, bits)));
+        put(&mut o, view(","));
+        put(&mut o, view(simd_f(&o, 0, bits)));
+        put(&mut o, view(","));
+        put(&mut o, view(simd_f(&o, 1, bits)));
+        put(&mut o, view("\n"));
+        return ();
+    }
+    if o.target == 2 {
+        put(&mut o, view("f"));
+        put(&mut o, view(name));
+        if bits == 32 {
+            put(&mut o, view(".s ft0,ft0,ft1\n"));
+        } else {
+            put(&mut o, view(".d ft0,ft0,ft1\n"));
+        }
+        return ();
+    }
+    put(&mut o, view(name));
+    if bits == 32 {
+        put(&mut o, view("ss %xmm1,%xmm0\n"));
+    } else {
+        put(&mut o, view("sd %xmm1,%xmm0\n"));
+    }
+    return ();
+}
+// G0 = G0 op G1 for op 1 add, 2 sub, 3 mul, 5 and, 6 or, 7 xor (64-bit; a 32-bit lane keeps the low half).
+fn simd_ibin<a>(o: (&a mut Out), op: u64) -> unit {
+    if o.target == 1 {
+        mut name = "add";
+        if op == 2 {
+            name = "sub";
+        }
+        if op == 3 {
+            name = "mul";
+        }
+        if op == 5 {
+            name = "and";
+        }
+        if op == 6 {
+            name = "orr";
+        }
+        if op == 7 {
+            name = "eor";
+        }
+        put(&mut o, view(name));
+        put(&mut o, view(" x9,x9,x10\n"));
+        return ();
+    }
+    if o.target == 2 {
+        mut name = "add";
+        if op == 2 {
+            name = "sub";
+        }
+        if op == 3 {
+            name = "mul";
+        }
+        if op == 5 {
+            name = "and";
+        }
+        if op == 6 {
+            name = "or";
+        }
+        if op == 7 {
+            name = "xor";
+        }
+        put(&mut o, view(name));
+        put(&mut o, view(" t0,t0,t1\n"));
+        return ();
+    }
+    mut name = "addq";
+    if op == 2 {
+        name = "subq";
+    }
+    if op == 3 {
+        name = "imulq";
+    }
+    if op == 5 {
+        name = "andq";
+    }
+    if op == 6 {
+        name = "orq";
+    }
+    if op == 7 {
+        name = "xorq";
+    }
+    put(&mut o, view(name));
+    put(&mut o, view(" %rcx,%rax\n"));
+    return ();
+}
+// G0 = 1 when F0 cc F1 holds, else 0; cc 10 eq, 11 ne, 12 lt, 13 le, 14 gt, 15 ge. Ordered except ne,
+// as the scalar comparisons are: a NaN lane is unequal and neither less nor greater.
+fn simd_fcmp<a>(o: (&a mut Out), cc: u64, bits: u64) -> unit {
+    if o.target == 1 {
+        put(&mut o, view("fcmp "));
+        put(&mut o, view(simd_f(&o, 0, bits)));
+        put(&mut o, view(","));
+        put(&mut o, view(simd_f(&o, 1, bits)));
+        put(&mut o, view("\ncset x9,"));
+        if cc == 10 {
+            put(&mut o, view("eq\n"));
+        }
+        if cc == 11 {
+            put(&mut o, view("ne\n"));
+        }
+        if cc == 12 {
+            put(&mut o, view("mi\n"));
+        }
+        if cc == 13 {
+            put(&mut o, view("ls\n"));
+        }
+        if cc == 14 {
+            put(&mut o, view("gt\n"));
+        }
+        if cc == 15 {
+            put(&mut o, view("ge\n"));
+        }
+        return ();
+    }
+    if o.target == 2 {
+        mut sfx = ".d";
+        if bits == 32 {
+            sfx = ".s";
+        }
+        if (cc == 10) || (cc == 11) {
+            put(&mut o, view("feq"));
+        }
+        if (cc == 12) || (cc == 14) {
+            put(&mut o, view("flt"));
+        }
+        if (cc == 13) || (cc == 15) {
+            put(&mut o, view("fle"));
+        }
+        put(&mut o, view(sfx));
+        if cc < 14 {
+            put(&mut o, view(" t0,ft0,ft1\n"));
+        } else {
+            put(&mut o, view(" t0,ft1,ft0\n"));
+        }
+        if cc == 11 {
+            put(&mut o, view("xori t0,t0,1\n"));
+        }
+        return ();
+    }
+    mut u = "ucomisd ";
+    if bits == 32 {
+        u = "ucomiss ";
+    }
+    put(&mut o, view(u));
+    if (cc == 12) || (cc == 13) {
+        put(&mut o, view("%xmm0,%xmm1\n"));
+    } else {
+        put(&mut o, view("%xmm1,%xmm0\n"));
+    }
+    if (cc == 10) || (cc == 11) {
+        put(&mut o, view("sete %al\nsetnp %cl\nandb %cl,%al\nmovzbq %al,%rax\n"));
+        if cc == 11 {
+            put(&mut o, view("xorq $1,%rax\n"));
+        }
+        return ();
+    }
+    if (cc == 12) || (cc == 14) {
+        put(&mut o, view("seta %al\nmovzbq %al,%rax\n"));
+    } else {
+        put(&mut o, view("setae %al\nmovzbq %al,%rax\n"));
+    }
+    return ();
+}
+// G0 = 1 when G0 cc G1 holds (signed), else 0.
+fn simd_icmp<a>(o: (&a mut Out), cc: u64) -> unit {
+    if o.target == 1 {
+        put(&mut o, view("cmp x9,x10\ncset x9,"));
+        if cc == 10 {
+            put(&mut o, view("eq\n"));
+        }
+        if cc == 11 {
+            put(&mut o, view("ne\n"));
+        }
+        if cc == 12 {
+            put(&mut o, view("lt\n"));
+        }
+        if cc == 13 {
+            put(&mut o, view("le\n"));
+        }
+        if cc == 14 {
+            put(&mut o, view("gt\n"));
+        }
+        if cc == 15 {
+            put(&mut o, view("ge\n"));
+        }
+        return ();
+    }
+    if o.target == 2 {
+        if cc == 10 {
+            put(&mut o, view("sub t0,t0,t1\nseqz t0,t0\n"));
+        }
+        if cc == 11 {
+            put(&mut o, view("sub t0,t0,t1\nsnez t0,t0\n"));
+        }
+        if cc == 12 {
+            put(&mut o, view("slt t0,t0,t1\n"));
+        }
+        if cc == 13 {
+            put(&mut o, view("slt t0,t1,t0\nxori t0,t0,1\n"));
+        }
+        if cc == 14 {
+            put(&mut o, view("slt t0,t1,t0\n"));
+        }
+        if cc == 15 {
+            put(&mut o, view("slt t0,t0,t1\nxori t0,t0,1\n"));
+        }
+        return ();
+    }
+    put(&mut o, view("cmpq %rcx,%rax\nset"));
+    if cc == 10 {
+        put(&mut o, view("e"));
+    }
+    if cc == 11 {
+        put(&mut o, view("ne"));
+    }
+    if cc == 12 {
+        put(&mut o, view("l"));
+    }
+    if cc == 13 {
+        put(&mut o, view("le"));
+    }
+    if cc == 14 {
+        put(&mut o, view("g"));
+    }
+    if cc == 15 {
+        put(&mut o, view("ge"));
+    }
+    put(&mut o, view(" %al\nmovzbq %al,%rax\n"));
+    return ();
+}
+// G0 = -G0 (a 0/1 truth to a 0/-1 lane) and G0 = ~G0.
+fn simd_neg<a>(o: (&a mut Out)) -> unit {
+    if o.target == 1 {
+        put(&mut o, view("sub x9,xzr,x9\n"));
+    } else if o.target == 2 {
+        put(&mut o, view("neg t0,t0\n"));
+    } else {
+        put(&mut o, view("negq %rax\n"));
+    }
+    return ();
+}
+fn simd_not<a>(o: (&a mut Out)) -> unit {
+    if o.target == 1 {
+        put(&mut o, view("sub x9,xzr,x9\nsub x9,x9,#1\n"));
+    } else if o.target == 2 {
+        put(&mut o, view("not t0,t0\n"));
+    } else {
+        put(&mut o, view("notq %rax\n"));
+    }
+    return ();
+}
+// Labels: `.Latom` on x86-64, where the internal assembler gives each line's labels a prefix of
+// their own (asm_x86 `atom_line`), the target's label otherwise.
+fn simd_label<a>(o: (&a mut Out), n: u64) -> unit {
+    if simd_x86(&o) {
+        put(&mut o, view(".Latom"));
+        u64(&mut o, n);
+        return ();
+    }
+    label(&mut o, n);
+    return ();
+}
+fn simd_mark<a>(o: (&a mut Out), n: u64) -> unit {
+    simd_label(&mut o, n);
+    put(&mut o, view(":\n"));
+    return ();
+}
+fn simd_jmp<a>(o: (&a mut Out), n: u64) -> unit {
+    if o.target == 1 {
+        put(&mut o, view("b "));
+    } else if o.target == 2 {
+        put(&mut o, view("j "));
+    } else {
+        put(&mut o, view("jmp "));
+    }
+    simd_label(&mut o, n);
+    put(&mut o, view("\n"));
+    return ();
+}
+// To `n` when G0 is zero.
+fn simd_jz<a>(o: (&a mut Out), n: u64) -> unit {
+    if o.target == 1 {
+        put(&mut o, view("cbz x9,"));
+    } else if o.target == 2 {
+        put(&mut o, view("beqz t0,"));
+    } else {
+        put(&mut o, view("testq %rax,%rax\nje "));
+    }
+    simd_label(&mut o, n);
+    put(&mut o, view("\n"));
+    return ();
+}
+// To `n` when F[f] is a NaN.
+fn simd_jnan<a>(o: (&a mut Out), f: u64, bits: u64, n: u64) -> unit {
+    r := simd_f(&o, f, bits);
+    if o.target == 1 {
+        put(&mut o, view("fcmp "));
+        put(&mut o, view(r));
+        put(&mut o, view(","));
+        put(&mut o, view(r));
+        put(&mut o, view("\nb.vs "));
+    } else if o.target == 2 {
+        if bits == 32 {
+            put(&mut o, view("feq.s t0,"));
+        } else {
+            put(&mut o, view("feq.d t0,"));
+        }
+        put(&mut o, view(r));
+        put(&mut o, view(","));
+        put(&mut o, view(r));
+        put(&mut o, view("\nbeqz t0,"));
+    } else {
+        if bits == 32 {
+            put(&mut o, view("ucomiss "));
+        } else {
+            put(&mut o, view("ucomisd "));
+        }
+        put(&mut o, view(r));
+        put(&mut o, view(","));
+        put(&mut o, view(r));
+        put(&mut o, view("\njp "));
+    }
+    simd_label(&mut o, n);
+    put(&mut o, view("\n"));
+    return ();
+}
+// To `n` when F[x] < F[y] (neither is a NaN here).
+fn simd_jflt<a>(o: (&a mut Out), x: u64, y: u64, bits: u64, n: u64) -> unit {
+    rx := simd_f(&o, x, bits);
+    ry := simd_f(&o, y, bits);
+    if o.target == 1 {
+        put(&mut o, view("fcmp "));
+        put(&mut o, view(rx));
+        put(&mut o, view(","));
+        put(&mut o, view(ry));
+        put(&mut o, view("\nb.mi "));
+    } else if o.target == 2 {
+        if bits == 32 {
+            put(&mut o, view("flt.s t0,"));
+        } else {
+            put(&mut o, view("flt.d t0,"));
+        }
+        put(&mut o, view(rx));
+        put(&mut o, view(","));
+        put(&mut o, view(ry));
+        put(&mut o, view("\nbnez t0,"));
+    } else {
+        if bits == 32 {
+            put(&mut o, view("ucomiss "));
+        } else {
+            put(&mut o, view("ucomisd "));
+        }
+        put(&mut o, view(ry));
+        put(&mut o, view(","));
+        put(&mut o, view(rx));
+        put(&mut o, view("\njb "));
+    }
+    simd_label(&mut o, n);
+    put(&mut o, view("\n"));
+    return ();
+}
+// To `n` when G[x] < G[y], signed.
+fn simd_jilt<a>(o: (&a mut Out), x: u64, y: u64, n: u64) -> unit {
+    gx := simd_g(&o, x);
+    gy := simd_g(&o, y);
+    if o.target == 1 {
+        put(&mut o, view("cmp "));
+        put(&mut o, view(gx));
+        put(&mut o, view(","));
+        put(&mut o, view(gy));
+        put(&mut o, view("\nb.lt "));
+    } else if o.target == 2 {
+        put(&mut o, view("blt "));
+        put(&mut o, view(gx));
+        put(&mut o, view(","));
+        put(&mut o, view(gy));
+        put(&mut o, view(","));
+    } else {
+        put(&mut o, view("cmpq "));
+        put(&mut o, view(gy));
+        put(&mut o, view(","));
+        put(&mut o, view(gx));
+        put(&mut o, view("\njl "));
+    }
+    simd_label(&mut o, n);
+    put(&mut o, view("\n"));
+    return ();
+}
+// F0 (an f32) widened to binary64 and its bits in G0, as every f32 word holds it.
+fn simd_widen<a>(o: (&a mut Out)) -> unit {
+    if o.target == 1 {
+        put(&mut o, view("fcvt d0,s0\nfmov x9,d0\n"));
+    } else if o.target == 2 {
+        put(&mut o, view("fcvt.d.s ft0,ft0\nfmv.x.d t0,ft0\n"));
+    } else {
+        put(&mut o, view("cvtss2sd %xmm0,%xmm0\nmovq %xmm0,%rax\n"));
+    }
+    return ();
+}
+pub fn simd_expand<a>(o: (&a mut Out), s: (&Simd)) -> unit {
+    eb := s.bits / 8;
+    n := s.lanes;
+    op := s.op;
+    float := s.elem == 1;
+    bits := s.bits;
+    if (op <= 7) && !((op == 4) & !float) {
+        for i in n {
+            off := i * eb;
+            if float & (op <= 4) {
+                simd_ldf(&mut o, 0, 1, off, bits);
+                simd_ldf(&mut o, 1, 2, off, bits);
+                simd_fbin(&mut o, op, bits);
+                simd_stf(&mut o, 0, off, bits);
+            } else {
+                simd_ldi(&mut o, 0, 1, off, bits);
+                simd_ldi(&mut o, 1, 2, off, bits);
+                simd_ibin(&mut o, op);
+                simd_sti(&mut o, 0, off, bits);
+            }
+        }
+        return ();
+    }
+    if (op == 8) || (op == 9) {
+        // min/max as the scalar rule has it: a NaN operand gives the other one, and the first
+        // operand wins a tie (so min(+0.0, -0.0) is +0.0).
+        for i in n {
+            off := i * eb;
+            take_a := fresh(&mut o);
+            take_b := fresh(&mut o);
+            done := fresh(&mut o);
+            if float {
+                simd_ldf(&mut o, 0, 1, off, bits);
+                simd_ldf(&mut o, 1, 2, off, bits);
+                simd_jnan(&mut o, 0, bits, take_b);
+                simd_jnan(&mut o, 1, bits, take_a);
+                if op == 8 {
+                    simd_jflt(&mut o, 1, 0, bits, take_b);
+                } else {
+                    simd_jflt(&mut o, 0, 1, bits, take_b);
+                }
+                simd_mark(&mut o, take_a);
+                simd_stf(&mut o, 0, off, bits);
+                simd_jmp(&mut o, done);
+                simd_mark(&mut o, take_b);
+                simd_stf(&mut o, 1, off, bits);
+            } else {
+                simd_ldi(&mut o, 0, 1, off, bits);
+                simd_ldi(&mut o, 1, 2, off, bits);
+                if op == 8 {
+                    simd_jilt(&mut o, 1, 0, take_b);
+                } else {
+                    simd_jilt(&mut o, 0, 1, take_b);
+                }
+                simd_mark(&mut o, take_a);
+                simd_sti(&mut o, 0, off, bits);
+                simd_jmp(&mut o, done);
+                simd_mark(&mut o, take_b);
+                simd_sti(&mut o, 1, off, bits);
+            }
+            simd_mark(&mut o, done);
+        }
+        return ();
+    }
+    if (10 <= op) && (op <= 15) {
+        for i in n {
+            off := i * eb;
+            if float {
+                simd_ldf(&mut o, 0, 1, off, bits);
+                simd_ldf(&mut o, 1, 2, off, bits);
+                simd_fcmp(&mut o, op, bits);
+            } else {
+                simd_ldi(&mut o, 0, 1, off, bits);
+                simd_ldi(&mut o, 1, 2, off, bits);
+                simd_icmp(&mut o, op);
+            }
+            simd_neg(&mut o);
+            simd_sti(&mut o, 0, off, bits);
+        }
+        return ();
+    }
+    if op == 16 {
+        // select: the mask's lane is all ones or all zeros; the chosen lane's bits are copied.
+        for i in n {
+            off := i * eb;
+            other := fresh(&mut o);
+            done := fresh(&mut o);
+            simd_ldi(&mut o, 0, 1, off, bits);
+            simd_jz(&mut o, other);
+            simd_ldi(&mut o, 0, 2, off, bits);
+            simd_jmp(&mut o, done);
+            simd_mark(&mut o, other);
+            simd_ldi(&mut o, 0, 3, off, bits);
+            simd_mark(&mut o, done);
+            simd_sti(&mut o, 0, off, bits);
+        }
+        return ();
+    }
+    if op == 17 {
+        for i in n {
+            simd_ldi(&mut o, 0, 1, i * eb, bits);
+            simd_not(&mut o);
+            simd_sti(&mut o, 0, i * eb, bits);
+        }
+        return ();
+    }
+    if op == 18 {
+        if float & (bits == 32) {
+            // The scalar is an f32 word (binary64 holding an f32 value): narrowed exactly.
+            if o.target == 1 {
+                put(&mut o, view("fmov d0,x9\nfcvt s0,d0\n"));
+            } else if o.target == 2 {
+                put(&mut o, view("fmv.d.x ft0,t0\nfcvt.s.d ft0,ft0\n"));
+            } else {
+                put(&mut o, view("movq %rax,%xmm0\ncvtsd2ss %xmm0,%xmm0\n"));
+            }
+            if simd_x86(&o) {
+                put(&mut o, view("movd %xmm0,%eax\n"));
+                for i in n {
+                    simd_sti(&mut o, 0, i * eb, bits);
+                }
+            } else {
+                for i in n {
+                    simd_stf(&mut o, 0, i * eb, bits);
+                }
+            }
+            return ();
+        }
+        for i in n {
+            simd_sti(&mut o, 0, i * eb, bits);
+        }
+        return ();
+    }
+    if op == 19 {
+        if float & (bits == 32) {
+            simd_ldf(&mut o, 0, 1, s.k * eb, bits);
+            simd_widen(&mut o);
+        } else {
+            simd_ldi(&mut o, 0, 1, s.k * eb, bits);
+        }
+        return ();
+    }
+    if op == 20 {
+        // sum: the halving tree, fixed so every target and backend adds in one order: lane i of
+        // the first level is l[i] + l[i + n/2], and so on down to one lane. The levels are kept in
+        // the destination, a scratch vector of the same shape.
+        mut half = n / 2;
+        mut from = 1;
+        while 0 < half {
+            for i in half {
+                if float {
+                    simd_ldf(&mut o, 0, from, i * eb, bits);
+                    simd_ldf(&mut o, 1, from, (i + half) * eb, bits);
+                    simd_fbin(&mut o, 1, bits);
+                    simd_stf(&mut o, 0, i * eb, bits);
+                } else {
+                    simd_ldi(&mut o, 0, from, i * eb, bits);
+                    simd_ldi(&mut o, 1, from, (i + half) * eb, bits);
+                    simd_ibin(&mut o, 1);
+                    simd_sti(&mut o, 0, i * eb, bits);
+                }
+            }
+            from = 0;
+            half = half / 2;
+        }
+        if float & (bits == 32) {
+            simd_ldf(&mut o, 0, 0, 0, bits);
+            simd_widen(&mut o);
+        } else {
+            simd_ldi(&mut o, 0, 0, 0, bits);
+        }
+        return ();
+    }
+    if op == 21 {
+        for i in n * eb / 8 {
+            simd_ldi(&mut o, 0, 1, i * 8, 64);
+            simd_sti(&mut o, 0, i * 8, 64);
+        }
+        return ();
+    }
+    if (op == 22) || (op == 23) {
+        simd_ldi(&mut o, 0, 1, 0, bits);
+        for i in n - 1 {
+            simd_ldi(&mut o, 1, 1, (i + 1) * eb, bits);
+            if op == 22 {
+                simd_ibin(&mut o, 6);
+            } else {
+                simd_ibin(&mut o, 5);
+            }
+        }
+        if op == 22 {
+            if o.target == 1 {
+                put(&mut o, view("cmp x9,#0\ncset x9,ne\n"));
+            } else if o.target == 2 {
+                put(&mut o, view("snez t0,t0\n"));
+            } else {
+                put(&mut o, view("testq %rax,%rax\nsetne %al\nmovzbq %al,%rax\n"));
+            }
+        } else {
+            if o.target == 1 {
+                put(&mut o, view("cmn x9,#1\ncset x9,eq\n"));
+            } else if o.target == 2 {
+                put(&mut o, view("addi t0,t0,1\nseqz t0,t0\n"));
+            } else {
+                put(&mut o, view("cmpq $-1,%rax\nsete %al\nmovzbq %al,%rax\n"));
+            }
+        }
+        return ();
+    }
+    bad(view("simd op"));
+    return ();
+}
+// AArch64 and RV64: a `simd.` line lowered in place (`instruction`).
+fn simd_instruction<a, b>(o: (&a mut Out), line: &b [u8]) -> bool {
+    s := simd_parse(view(line));
+    if s.op == 0 {
+        return false;
+    }
+    simd_expand(&mut o, &s);
+    return true;
+}
+
 // ---- Windows ARM64 imports ----------------------------------------------------------------
 // The internal argument registers map to x0..x7, which is exactly the Win64 ARM64 order, so an
 // import only needs the IAT indirection, 64 bytes of home space and the result move into x9.
@@ -1832,6 +2838,9 @@ fn instruction<a, b>(o: (&a mut Out), line: &b [u8]) -> unit {
         }
     }
     if atomic_instruction(&mut o, view(line)) {
+        return ();
+    }
+    if simd_instruction(&mut o, view(line)) {
         return ();
     }
     if starts(view((op)), view("j")) {
