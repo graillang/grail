@@ -7,6 +7,11 @@
   an `element` tag. Safe Grail cannot point one into the other, so LLVM hoists the header loads out of
   loops and vectorises them: bench/ecs goes from 3.45 G to 0.94 G instructions, sort from 7.53 G to
   7.24 G.
+- `pool::join` takes its first branch as a generic `F: Fn<Send>() -> A`, so a closure given for it is
+  held in the frame and called directly (no heap environment). An explicit type-argument list may
+  leave out trailing parameters that only a callable bound names (`pool::join<u64, u64>(a, b)` still
+  compiles), and a closure given for a callable-bound parameter has its capture bounds checked as
+  the argument is taken, as an erased `Fn<Send>()` parameter's are.
 
 - **A standard generic is checked once per surface, not once per run.** The check
   `emit_specializations` owes every template a run instantiates (a replay of its body with its own
