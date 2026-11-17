@@ -5393,8 +5393,8 @@ fn rt_env_is(name: u64, value: u64) -> u64 {
 // 248 their count  264 help-depth high-water mark  272 steps taken (the fairness tick)
 // 280 1 while this worker is counted as searching (rt_worker_loop, rt_worker_run)
 // 296 link in the jobs block's list of blocks waiting for a thread (rt_block_give)
-// 304 the first foreign-call counter, 320 the counter the owner uses now (odd: inside a foreign
-// call), 328 the value the monitor saw last, 336 how many ticks it has stayed
+// 304..312 the first foreign-call pair {seq, retaken}, 320 the pair the owner uses now (`seq` odd:
+// inside a foreign call; rt_sysmon), 328 the `seq` the monitor saw last, 336 how many ticks it stayed
 // 512..592 the Frame job deque, 640..720 the Background job deque (the Normal one is at 128)
 // 896..1024 the CPU mask a pinned worker hands the kernel
 //
@@ -5483,33 +5483,44 @@ fn rt_sched_start(s: u64) -> u64 {
     }
     return 0;
 }
-// The monitor: every 5 ms it looks at each worker's foreign-call counter. A worker whose counter
-// has stayed odd - inside one foreign call - for two looks (more than 10 ms) while work is queued
-// is given to a spare: the monitor marks the counter's top bit with a compare-and-swap (which fails
-// if the call returned meanwhile), gives the block a fresh counter and hands it to rt_block_give.
-// The thread in the call finds the bit when it counts out (ffi_marker_leave) and becomes
-// block-less (rt_foreign_lost). Declared `blocking` calls never get here; they hand off at once.
+// The monitor: every 5 ms it looks at each worker's foreign-call pair (block word 320: `seq`, then
+// `retaken`). A worker whose `seq` has stayed at the same odd value - inside one foreign call - for
+// two looks (more than 10 ms) while work is queued is asked back: `retaken` := 1, a full barrier in
+// every thread of the process (rt_os_retake_barrier: membarrier on x86-64 Linux), then `seq` again.
+// Unchanged, the call is still running: a compare-and-swap of `retaken` 1 -> 2 takes the block - the
+// block gets a fresh pair and goes to rt_block_give - unless the thread cancelled first. Changed, the
+// call ended: `retaken` goes back to 0. The thread settles its side in rt_foreign_return. Why this is
+// race-free: docs/design/concurrency-model.md, 2.4.1. Declared `blocking` calls never get here; they
+// hand off at once.
 fn rt_sysmon(s: u64) -> u64 {
     j := raw_load(rt_state_jobs());
     raw_store(j + 488, 0);
     raw_store(j + 496, 5000000);
     workers := raw_load(s + 32);
     array := raw_load(s + 72);
+    // Without a process-wide barrier (a kernel before membarrier) an undeclared call is never taken
+    // back: the thread's plain marker cannot be read safely.
+    ready := rt_os_retake_barrier(1);
     while true {
         rt_syscall(35, j + 488, 0, 0);
         mut i = 0;
-        while i < workers {
+        while (i < workers) & (ready != 0) {
             w := raw_load(array + i * 8);
-            counter := raw_load(w + 320);
-            v := raw_atomic_load(counter);
-            if ((v & 1) == 1) & (v == raw_load(w + 328)) & ((v >> 63) == 0) {
+            pair := raw_load(w + 320);
+            v := raw_atomic_load(pair);
+            if ((v & 1) == 1) & (v == raw_load(w + 328)) {
                 raw_store(w + 336, raw_load(w + 336) + 1);
             } else {
                 raw_store(w + 336, 0);
             }
             raw_store(w + 328, v);
             if (2 <= raw_load(w + 336)) && (rt_work_queued(s) != 0) {
-                if raw_atomic_cas(counter, v, v | 9223372036854775808) == v {
+                raw_atomic_store(pair + 8, 1);
+                rt_full_fence();
+                rt_os_retake_barrier(0);
+                if raw_atomic_load(pair) != v {
+                    raw_atomic_cas(pair + 8, 1, 0);
+                } else if raw_atomic_cas(pair + 8, 1, 2) == 1 {
                     owner := raw_load(w + 48);
                     if (owner != 0) && (raw_load(w + 224) == raw_load(owner + 16)) {
                         raw_store(w + 224, 0);
@@ -5518,6 +5529,7 @@ fn rt_sysmon(s: u64) -> u64 {
                     fresh := rt_job_carve(j, 504, 64);
                     rt_spin_unlock(j + 24);
                     raw_store(fresh, 0);
+                    raw_store(fresh + 8, 0);
                     raw_store(w + 320, fresh);
                     raw_store(w + 328, 0);
                     raw_store(w + 336, 0);
@@ -5526,6 +5538,15 @@ fn rt_sysmon(s: u64) -> u64 {
             }
             i += 1;
         }
+    }
+    return 0;
+}
+// A foreign call came back and found `retaken` set (ffi_hooks_leave in native.grl): settle it.
+// 1 -> 0 cancels the monitor's retake and this thread keeps its block; 2 means the block was taken
+// during the call; 0 means the monitor cancelled first.
+fn rt_foreign_return(symbol: u64, pair: u64) -> u64 {
+    if raw_atomic_cas(pair + 8, 1, 0) == 2 {
+        rt_foreign_lost(symbol);
     }
     return 0;
 }

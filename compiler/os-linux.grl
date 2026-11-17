@@ -465,6 +465,24 @@ fn rt_os_stack_warm(count: u64) -> u64 {
     }
     return 0;
 }
+// The monitor's barrier for taking a worker back from a foreign call (rt_sysmon). `setup` 1: can
+// this process retake at all - on x86-64 the call's marker is plain stores and a load, so it needs
+// membarrier, registered here (MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED); AArch64 and RV64 mark
+// with a sequentially consistent increment, which is its own barrier. `setup` 0: issue it
+// (MEMBARRIER_CMD_PRIVATE_EXPEDITED: every running thread of the process passes a full barrier).
+fn rt_os_retake_barrier(setup: u64) -> u64 {
+    if raw_target() != 0 {
+        return 1;
+    }
+    if setup != 0 {
+        if rt_error(rt_syscall(324, 16, 0, 0)) {
+            return 0;
+        }
+        return 1;
+    }
+    rt_syscall(324, 8, 0, 0);
+    return 1;
+}
 fn rt_os_sched_prepare() -> u64 {
     // Installs the process-wide task-stack fault handler and this worker's alternate signal stack.
     rt_os_stack_guard_install();

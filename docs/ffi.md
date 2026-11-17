@@ -766,19 +766,23 @@ blocking (the default), so its foreign-call marker is included. x86-64, 2026-11-
 
 | shape | C -> C | Grail native | Grail LLVM | where the difference is |
 |---|---|---|---|---|
-| (a) three `i64` | 9 | 22 | 14 | the marker (counter in, locked counter out) |
+| (a) three `i64` | 9 | 22 | 15 | the marker (counter in, counter out plus one load; no locked instruction since the asymmetric-fence marker) |
 | (b) `byval` 16-byte record | 8 | 293 | 190 | the record literal is boxed per iteration (`rt_rec` + drop), not the call |
 | (b) `byval` {f64, i64} | 13 | 298 | 205 | same |
 | (b) `byval` 24-byte record (memory) | 15 | 311 | 208 | same |
 | (b) record result in rax:rdx | 9 | 305 | 203 | same (the result record is boxed) |
-| (c) `f64` arguments and result | 6 | 25 | 16 | the marker |
+| (c) `f64` arguments and result | 6 | 25 | 15 | the marker |
 | (c) `f32` | 8 | 27 | 13 | the marker |
 | (d) `&[u8]` (pointer, length) | 10 | 95 | 128 | a drop helper runs per call on the view's temporary |
 | (e) C calling a Grail callback, once per call | 9 | 54 | 22 | the callback thunk (pin) and the body's checked add |
 | (f) a Grail callback called 10 M times inside one C loop (qsort's shape) | 11 | 26 | 22 | the thunk's pin (~6) and the body's checked add |
 
 Scalars and floats are within the marker's cost of C (about 5 instructions on LLVM; the
-`nonblocking` attribute removes it). Records passed by value and returned cost 25x C because an
+`nonblocking` attribute removes it). Since the marker has no locked instruction (the scheduler's
+monitor pays with `membarrier` instead; docs/design/concurrency-model.md, 2.4.1), its time cost is
+small: user cycles per call on LLVM, before -> after, against C: three `i64` 8.6 -> 8.7 (C 6.5),
+`f64` 14.5 -> 8.8 (C 6.4), `f32` 8.2 -> 6.8 (C 6.6). What is left is the marker's entry, which finds
+the thread's record and its worker block (a libc-mode branch, a kind test and two loads). Records passed by value and returned cost 25x C because an
 `extern "C"` record is still a heap box in Grail (unboxed-values.md has C records outside the frame
 layout): the call is cheap, building the argument is not. The view row's cost is its temporary's
 drop. The callback rows are the entry thunk. These three are the open items; the table is
