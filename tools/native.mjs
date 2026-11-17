@@ -1,4 +1,5 @@
 // Build/test orchestration only. Language checking and instruction selection live in Grail.
+import { cpus } from 'node:os';
 import { compareObjects } from './asm-oracle.mjs';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -37,7 +38,7 @@ if (!process.env.GRAIL_CACHE_DIR) {
   process.env.GRAIL_CACHE_DIR = store;
   process.on('exit', () => rmSync(store, { recursive: true, force: true }));
 }
-const compilerStdSources = ['xxhash'].map(n => join(root, 'lib', `${n}.grl`));
+const compilerStdSources = ['xxhash', 'bytes'].map(n => join(root, 'lib', `${n}.grl`));
 compilerSources.push(...compilerStdSources);
 export const triples = { x86_64: 'x86_64-linux-gnu', aarch64: 'aarch64-linux-gnu', riscv64: 'riscv64-linux-gnu', 'macos-x86_64': 'x86_64-apple-macos11', 'macos-aarch64': 'arm64-apple-macos11' };
 export const emulations = { x86_64: 'elf_x86_64', aarch64: 'aarch64elf', riscv64: 'elf64lriscv' };
@@ -501,10 +502,13 @@ export function buildReleaseCompiler({ log = () => {} } = {}) {
   log('clang -O2');
   // Cut in parts and compiled in parallel (`grail llvm-compile`): one clang -O2 over the whole
   // compiler's module is serial and takes most of the build.
-  command([native, 'llvm-compile', `${stem}.s.ll`, `${stem}.ll.o`, emulations[hostTarget], process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[hostTarget]}`, ...moduleFlags(hostTarget), '-c']);
+  // `-flto=thin`: the parts are ThinLTO bitcode in an archive, and the link below optimises across
+  // them (a function of one part is inlined into another), with the backend run in parallel.
+  command([native, 'llvm-compile', `${stem}.s.ll`, `${stem}.ll.o`, emulations[hostTarget], process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[hostTarget]}`, ...moduleFlags(hostTarget), '-c', '-flto=thin']);
   command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[hostTarget]}`, '-c', `${stem}.s`, '-o', `${stem}.o`]);
   const pending = `${stem}.pending`;
-  command([process.env.GRAIL_LINKER ?? 'ld.lld', '-m', emulations[hostTarget], `${stem}.o`, `${stem}.ll.o`, '-o', pending]);
+  const thinJobs = Math.max(1, Math.min(Number(process.env.GRAIL_JOBS) || cpus().length, 8));
+  command([process.env.GRAIL_LINKER ?? 'ld.lld', '-m', emulations[hostTarget], `${stem}.o`, '--whole-archive', `${stem}.ll.o`, '--no-whole-archive', `--thinlto-jobs=${thinJobs}`, `--thinlto-cache-dir=${join(root, '.work/thinlto')}`, '-o', pending]);
   for (const leftover of [`${stem}.s`, `${stem}.s.ll`, `${stem}.o`, `${stem}.ll.o`]) if (existsSync(leftover)) rmSync(leftover);
   for (const part of readdirSync(directory).filter(name => name.startsWith(`${basename(stem)}.s.ll.`))) rmSync(join(directory, part));
   // The acceptance test, before the binary is accepted:

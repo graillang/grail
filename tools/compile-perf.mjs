@@ -14,7 +14,12 @@
 //                                         (growth faster than linear)
 //   bun tools/compile-perf.mjs --update   write the baseline from this run; a change that makes a
 //                                         figure smaller updates it in the same commit
-//   GRAIL_COMPILER selects the compiler (default: build the tree's)
+//   GRAIL_COMPILER names the compiler that builds the tree's (default: the tree's own build)
+// The compiler measured is always stage 2: the tree's compiler built by the tree's compiler. How
+// fast a compiler runs depends on the backend that compiled it, so a figure taken with a compiler
+// some other seed built (an older checkout's, the landing service's base) measures that seed's
+// code generation too, and two runners would disagree about one tree. Stage 2 is a function of the
+// tree alone - the self-host fixed point is that stage 2 and stage 3 are the same bytes.
 import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -31,7 +36,14 @@ const work = join(root, '.work/compile-perf', `run-${process.pid}`);
 rmSync(work, { recursive: true, force: true });
 mkdirSync(work, { recursive: true });
 process.on('exit', () => rmSync(work, { recursive: true, force: true }));
-const compiler = process.env.GRAIL_COMPILER && existsSync(process.env.GRAIL_COMPILER) ? process.env.GRAIL_COMPILER : buildCompiler();
+const stage1 = process.env.GRAIL_COMPILER && existsSync(process.env.GRAIL_COMPILER) ? process.env.GRAIL_COMPILER : buildCompiler();
+const stage2 = spawnSync('bun', [join(root, 'tools/native.mjs'), 'build'], { cwd: root, encoding: 'utf8', env: { ...process.env, GRAIL_COMPILER: stage1 }, maxBuffer: 1 << 26 });
+const compiler = stage2.status === 0 ? stage2.stdout.trim().split('\n').pop() : '';
+if (!existsSync(compiler)) {
+  console.error(`compile-perf: the tree's compiler did not build itself (stage 2)\n${stage2.stdout}${stage2.stderr}`);
+  process.exit(1);
+}
+console.log(`compile-perf: measuring stage 2 ${compiler}`);
 const measure = measurer(root, join(root, '.work/compile-perf'));
 
 const programs = {
@@ -95,7 +107,7 @@ if (release && existsSync(release)) {
 
 if (update) {
   const commit = spawnSync('git', ['-C', root, 'rev-parse', '--short=12', 'HEAD'], { encoding: 'utf8' }).stdout.trim() || 'unknown';
-  writeFileSync(baselinePath, `${JSON.stringify({ what: 'user instructions of `grail check` (hello, syn1000, syn4000) and `grail build` (syn1000 cold, then after a one-function edit), GRAIL_JOBS=1, a store holding only the toolchain modules, dev compiler (tools/compile-perf.mjs)', ...figures, ratio: Number(ratio.toFixed(3)), head: commit }, null, 2)}\n`);
+  writeFileSync(baselinePath, `${JSON.stringify({ what: 'user instructions of `grail check` (hello, syn1000, syn4000) and `grail build` (syn1000 cold, then after a one-function edit), GRAIL_JOBS=1, stage-2 compiler, a store holding only the toolchain modules, dev compiler (tools/compile-perf.mjs)', ...figures, ratio: Number(ratio.toFixed(3)), head: commit }, null, 2)}\n`);
   console.log(`compile-perf: baseline written to ${baselinePath}`);
   process.exit(0);
 }

@@ -1,6 +1,7 @@
 module native;
 use fncache;
 use jobs;
+use bytes;
 use lexer;
 use host;
 use explain;
@@ -2968,10 +2969,7 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
     mut a = 0;
     n := text.len();
     while a < n {
-        mut e = a;
-        while (e < n) && (text[e] != 10) {
-            e += 1;
-        }
+        e := bytes::find_byte(view(text), a, 10);
         if e == n {
             // A last line with no newline is copied as it is.
             break;
@@ -4745,23 +4743,52 @@ fn release_call_args<a>(c: (&a mut C), area: u64) -> unit {
 // The LLVM backend's FFI fact for a C function this body calls (call ABI S8a): its integer argument
 // words, its float arguments in order (bit k of the mask set when the k-th is an f32) and its result
 // (0 an integer word or none, 1 f64, 2 f32). Only for x86-64 SysV calls whose every argument is in
-// a register and whose result is a scalar: the lifter then emits the call with those C types, so
-// the floats travel in the vector registers the platform ABI puts them in.
-fn ffi_signature_fact<a, b, d, e>(c: (&a mut C), argtypes: (&b u64[]), formals: (&e u64[]), ret: u64, symbol: &d [u8], abi: u64) -> unit {
+// a register (records passed byval by their eightbyte classes) and whose result is a scalar: the
+// lifter then emits the call with those C types, so the floats travel in the vector registers the
+// platform ABI puts them in.
+fn ffi_signature_fact<a, b, d, e>(c: (&a mut C), argtypes: (&b u64[]), formals: (&e u64[]), ret: u64, symbol: &d [u8], abi: u64, area: u64) -> unit {
     if (c.backend == 0) || (c.validating != 0) || (c.target != 0) || (abi != 0) {
         return ();
     }
-    // A record passed `byval` crosses as its fields (one or two registers, or memory): not one word,
-    // so a call with one is left to the native text, which places it by its classification.
-    for i in formals.len() {
-        if ffi_byval(&mut c, formals[i]) {
-            return ();
-        }
-    }
+    // A record passed `byval` crosses per its SysV classification (ffi_byval_mode, the same decision
+    // the native call placement makes): each INTEGER eightbyte is one more integer word, each SSE
+    // eightbyte one more vector register, passed as a double so its bits (one f64, or two f32) cross
+    // whole. A record in memory (over 16 bytes, or out of registers) keeps the native call.
     mut ints = 0;
     mut floats = 0;
     mut mask = 0;
+    mut memory = u8[];
     for i in argtypes.len() {
+        if (i < formals.len()) && ffi_byval(&mut c, formals[i]) {
+            inner := ty_arg(&mut c, formals[i]);
+            d := ty_arg(&mut c, inner);
+            size := ffi_record_size(&mut c, d);
+            words := ffi_align_up(size, 8) / 8;
+            leaves := ffi_leaves(&mut c, d, 0);
+            decision := ffi_byval_mode(&mut c, abi, size, words, &leaves, ints, floats);
+            if decision[0] == 0 {
+                continue;
+            }
+            if decision[0] == 2 {
+                // MEMORY: the record's words go in the outgoing area, in argument order.
+                if 255 < words {
+                    return ();
+                }
+                memory.push(words);
+                continue;
+            }
+            if decision[0] != 5 {
+                return ();
+            }
+            for e in decision.len() - 1 {
+                if decision[1 + e] == 1 {
+                    floats += 1;
+                } else {
+                    ints += 1;
+                }
+            }
+            continue;
+        }
         ty := argtypes[i];
         if is_float(&mut c, ty) {
             if is_f32(&mut c, ty) {
@@ -4785,7 +4812,15 @@ fn ffi_signature_fact<a, b, d, e>(c: (&a mut C), argtypes: (&b u64[]), formals: 
             result = 2;
         }
     }
-    llvm::fact_ffi(&mut c.facts, copy_bytes(view(symbol)), ints, floats, mask, result);
+    // The outgoing area must be exactly the MEMORY records (no scalar argument overflowed into it).
+    mut mwords = 0;
+    for k in memory.len() {
+        mwords += u64(memory[k]);
+    }
+    if (16 * ((mwords + 1) / 2) != area) || (7 < memory.len()) {
+        return ();
+    }
+    llvm::fact_ffi(&mut c.facts, copy_bytes(view(symbol)), ints, floats, mask, result, memory);
     return ();
 }
 // The signature fact for the body being emitted: its argument words, six in
@@ -17912,8 +17947,8 @@ fn ffi_emit_call<a, b, d, e, f>(
         on(&mut c, floats);
         o(&mut c, view(",%eax\n"));
     }
-    if (symbol.len() != 0) && (area == 0) && (fixed == args.len()) && (rmode == 0) && (copies == 0) {
-        ffi_signature_fact(&mut c, argtypes, formals, ret, view(symbol), abi);
+    if (symbol.len() != 0) && (fixed == args.len()) && (rmode == 0) && (copies == 0) {
+        ffi_signature_fact(&mut c, argtypes, formals, ret, view(symbol), abi, area);
     }
     if symbol.len() == 0 {
         if c.target == 0 {
@@ -38306,10 +38341,15 @@ fn parallel_split_builtin<a>(c: (&a mut C), data: Val) -> Val {
         fail(&mut c, view("parallel_split requires a callable"));
     }
     signature := type_args(&mut c, fty);
-    if signature.len() != 1 {
-        fail(&mut c, view("parallel_split callback takes (&mut [T])"));
+    // (&mut [T]), or (u64, &mut [T]) for each piece's first index too (pool::chunks_mut_at).
+    with_at := signature.len() == 2;
+    if (signature.len() != 1) && !with_at {
+        fail(&mut c, view("parallel_split callback takes (&mut [T]) or (u64, &mut [T])"));
     }
-    require_type(&mut c, slice, signature[0]);
+    if with_at {
+        require_type(&mut c, signature[0], 0);
+    }
+    require_type(&mut c, slice, signature[signature.len() - 1]);
     result := ty_arg(&mut c, fty);
     if ty_kind(&mut c, result) != 2 {
         fail(&mut c, view("parallel_split callback returns unit: write the elements"));
@@ -38335,7 +38375,8 @@ fn parallel_split_builtin<a>(c: (&a mut C), data: Val) -> Val {
     mut pargs = three(data.t, chunks.t, target);
     pargs.push(env);
     pargs.push(width);
-    slot := invoke(&mut c, view("rt_parallel_split"), pargs);
+    pargs.push(imm(&mut c, u64(with_at)));
+    slot := invoke(&mut c, view("rt_parallel_split_at"), pargs);
     release_temporary(&mut c, data.t);
     release_temporary(&mut c, input);
     close_loans(&mut c);
@@ -55859,6 +55900,11 @@ fn iface_rec_fn<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], module: &a [u8]
         file := virtual_source(&mut c, view(label), view(body));
         exchange(&mut c.funcs[index].file, file);
         exchange(&mut c.funcs[index].pos, 0);
+    }
+    // The method keeps its text whatever it is used for: a template's body, an interface method's
+    // default (which section 2 below compiles from a source of its own). Writing this interface
+    // again reproduces it byte for byte only if every record keeps it.
+    if body.len() != 0 {
         exchange(&mut c.funcs[index].body, body.copy());
     }
     if section == 3 {
