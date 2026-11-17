@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- AArch64 and RV64 native code drops moves that move nothing (call ABI S7): the word machine's
+  result register is x9 (t0) and its first argument x0 (a0), and moves go through the scratch x10
+  (t1), so calls and returns were full of `mov x0,x9` after `mov x9,x10; mov x10,x0`. A value number
+  per register drops a move between two registers known equal; 1.5 % fewer lines in a small
+  program's output on both targets.
+
 - **Cheaper prologues on the native backend (call ABI S4-S5).** The callee-saved save area is
   part of the one frame adjustment (`subq $.Fn+16,%rsp`, where there were two), a promoted register
   or a cleared frame slot is zeroed only when the body may read it before writing it, and a first

@@ -1,7 +1,7 @@
 # The cost of a call in Grail: the convention as it was, the approved one, and where it stands
 
 Status: report approved by the director 2026-11-16; plan S1-S7 approved in the order S1, S2, S3,
-S4/S5, S6 (after unboxed stage 3a), S7. Done: S1, S2, S3, S4, S5 (see "Progress" at the end).
+S4/S5, S6 (after unboxed stage 3a), S7. Done: S1, S2, S3, S4, S5, S7 (see "Progress" at the end).
 
 Tree: gaps12-callabi = origin/gaps13-int-b at 5dc07da. Measurements: perf_event user-mode instruction
 and cycle counters (own wrapper, `.work/probe/icount`; no `perf` binary on this host), load 20-30.
@@ -257,3 +257,14 @@ optimiser_labels, then S6 after unboxed 3a lands (it builds on 3a's frame aggreg
   (Go 102.9 M); base case `cmpq $2,%rdi; jae; movq %rdi,%rax; ret`. Corpus: callabi-shrink-wrap-guard,
   callabi-one-frame-adjustment. What is left of fib's gap is the optimiser's: two dead trap-operand
   `movabs` (block-local dead_defs), the first result spilled to the frame, `mov; sub; mov` for `lea`.
+- **S7 (AArch64/RV64 moves, native).** machine.grl `same_moves`, the last pass of `lower`: a value
+  number per integer register follows `mov D,S` (64-bit moves only: `mov w9,w10` zero-extends), drops a
+  move whose two registers already share a number, gives every register any other line names a
+  fresh one, and forgets everything at a label, branch, call, return, system call or encoded
+  instruction. Probe program: 227,979 -> 224,637 lines on AArch64, 228,896 -> 225,600 on RV64;
+  fib's base case returns with `mov x10,x0; mov x9,x10; ret`.
+- **S8 (planned after measurement).** A float called out of line through a function value (10 M
+  calls): C -O2 12 instructions per call, Grail LLVM 19 (+58 %; +9 % cycles), native 62. The
+  difference on LLVM is the GPR<->xmm moves at each edge. S8a lifts C-boundary float calls with a
+  typed call from a per-symbol FFI fact; S8b gives internal lifted bodies `double` parameters where
+  the signature fact says a word is a float. Neither changes the native convention.
