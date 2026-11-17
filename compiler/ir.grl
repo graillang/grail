@@ -873,6 +873,17 @@ pub fn parse<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) {
                     if op == 0 {
                         op = float_opcode(view(s), a, space);
                     }
+                    // An atomic op (`atom.*`, machine.grl "atomics") is an unknown instruction to
+                    // every pass, whatever its order, and that is the barrier: no slot or register
+                    // fact survives it (forward), every register is live across it and it is never
+                    // deleted (live_pass, dead_defs), a body holding one is not inlined, and no pass
+                    // moves an instruction past another. So nothing is forwarded, merged, hoisted or
+                    // dropped across an acquire, a release or a sequentially consistent op, and a
+                    // relaxed one is neither eliminated nor merged with its neighbour.
+                    // tools/test-optimiser-atomics.mjs holds this.
+                    if at(view(s), a, view("atom.")) {
+                        op = 0;
+                    }
                 }
             }
         } else {
@@ -1741,10 +1752,8 @@ fn record_call<a, b>(o: (&a mut Body), s: &b [u8], i: u64) {
     o.calls.push(Call { ins: i, kind: kind, who: who });
 }
 
-// The calls a body carries, outside `[lo, hi)` -- a `.proved` entry replays a byte copy of the
-// checked entry's prologue, and those bytes hold calls the recorder already counted once, where they
-// were emitted. `lo == hi` means the body has no replay.
-pub fn count_calls<a>(o: (&a Body), lo: u64, hi: u64) -> u64 {
+// The calls a body carries: what the effect recorder counted where it emitted them.
+pub fn count_calls<a>(o: (&a Body)) -> u64 {
     mut n: u64 = 0;
     for i in o.op.len() {
         // A call line, plus the leaf accessors `parse` re-tags from `call rt_slot` and friends into
@@ -1755,43 +1764,12 @@ pub fn count_calls<a>(o: (&a Body), lo: u64, hi: u64) -> u64 {
             call = true;
         }
         if call {
-            // Outside the replayed range: before it, or at/after its end.
-            if (lo == hi) || ((o.ls[i] < lo) || (o.ls[i] >= hi)) {
-                n += 1;
-            }
+            n += 1;
         }
     }
     return n;
 }
 
-// Where each body's replayed prologue sits in its own text, by body symbol. The front end fills it
-// where it copies the prologue; the IR reads it so the count of parsed `call` instructions can be
-// held against the calls the emitter recorded (docs/design/effects.md).
-pub struct Replay {
-    sym: u8[][],
-    lo: u64[],
-    hi: u64[]
-}
-pub fn replay_none() -> Replay {
-    return Replay { sym: u8[][], lo: u64[], hi: u64[] };
-}
-// The replay range of `name`, or `0, 0` when the body has none.
-pub fn replay_of<a, b>(r: (&a Replay), name: &b [u8]) -> u64[] {
-    for i in r.sym.len() {
-        if r.sym[i].len() == name.len() {
-            mut same_bytes = 1;
-            for j in name.len() {
-                if r.sym[i][j] != name[j] {
-                    same_bytes = 0;
-                }
-            }
-            if same_bytes != 0 {
-                return u64[r.lo[i], r.hi[i]];
-            }
-        }
-    }
-    return u64[0, 0];
-}
 
 // ---------------------------------------------------------------------------------------------
 // The serializer: one function per unit, versioned, textual.
