@@ -597,6 +597,18 @@ arguments). It does not disable move, drop, borrow or lifetime checking inside t
 block. Declarations themselves may be written at module scope without an `unsafe`
 marker; it is the call that crosses the boundary.
 
+## Raw address offsets in unsafe modules
+
+Integer arithmetic in an `unsafe module` follows the build's overflow mode like all other code:
+a size or count computed as `n * 8` aborts on overflow in a checked build. The one exception is
+address formation. The address operand of `raw_load`, `raw_store`, `raw_byte`, `raw_putbyte`,
+`raw_load32` and `raw_store32` written as `p + k` or `p - k`, with `k` a literal, is not integer
+arithmetic: it has no overflow check in any build, and the native backend folds it into the
+instruction's addressing (`raw_load(p + 16)` is `movq 16(%rax),%rax`). This is Rust's `ptr.add`
+rule: keeping such an address inside its object is the unsafe author's contract. Only the whole
+operand counts - `raw_load((p + 8) * 2)` checks its arithmetic as usual - and a computed offset
+(`p + i * 8`) is arithmetic too. The corpus pins both halves (`raw-address-offset-*`).
+
 ## Ownership across the boundary
 
 - Values crossing into C by value are passed as scalars or pointer/length pairs; no

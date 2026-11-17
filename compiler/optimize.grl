@@ -2276,6 +2276,7 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
     peephole(&mut o, view(s), first, last);
     dead_defs(&mut o, view(s), first, last);
     retarget(&mut o, view(s), last);
+    offset_loads(&mut o, view(s), last);
     newframe := compact(&mut o, view(s), prologue, ns);
     // Rule 3 (call ABI S4): of the cleared range, only the slots that may be read before written.
     mut zkeep = u64[];
@@ -4147,6 +4148,55 @@ fn gpr_colour<a, c>(o: (&a ir::Body), f: (&c mut F), own: (&u64[]), ns: u64, pal
             mreg.push(pal[k]);
             ir::put(&mut f.bad, cands[c], 1);
         }
+    }
+}
+// `addq $k,%R; movq (%R),%X` is `movq k(%R),%X` when %R is the destination or dead after: a raw
+// field load (`raw_load(p + 16)`, docs/design/decisions "raw address offsets") without the add.
+// Loads only - movq, movzbq, movl - whose memory operand is the source.
+fn offset_loads<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
+    names := u8[][
+        copy_text(view("(%rax)")), copy_text(view("(%rcx)")), copy_text(view("(%rdx)")),
+        copy_text(view("(%rbx)")), copy_text(view("(%rsp)")), copy_text(view("(%rbp)")),
+        copy_text(view("(%rsi)")), copy_text(view("(%rdi)"))
+    ];
+    for i in last {
+        if (o.del[i] != 0) || (o.op[i] != 4) || (o.k0[i] != 3) || (o.k1[i] != 1) || (o.v1[i] > 7) {
+            continue;
+        }
+        r := o.v1[i];
+        if (r == 4) || (r == 5) {
+            continue;
+        }
+        k := imm_value(&o, view(s), i);
+        if (k == 0) || (k - 1 > 2147483647) {
+            continue;
+        }
+        j := next_live(&o, i, last);
+        if j >= last {
+            continue;
+        }
+        op := o.op[j];
+        if !((op == 1) || (op == 28) || (op == 98)) || (o.k0[j] != 4) {
+            continue;
+        }
+        if !ir::same_range(view(s), o.s0[j], o.e0[j], view(names[r])) {
+            continue;
+        }
+        overwrites := (o.k1[j] == 1) && (o.v1[j] == r);
+        if !overwrites && !dead_after(&o, j, r, 6) {
+            continue;
+        }
+        // The flags of the add are not read: the next line is a load.
+        start := o.gen.len();
+        gen_number(&mut o, k - 1);
+        for x in names[r].len() {
+            o.gen.push(names[r][x]);
+        }
+        end := o.gen.len();
+        set_operand(&mut o, j, 0, 5, 0);
+        ir::put(&mut o.m0, j, 1 << r);
+        set_range(&mut o, j, 0, start, end);
+        kill(&mut o, i);
     }
 }
 fn name_hash<b>(s: &b [u8], a: u64, e: u64) -> u64 {

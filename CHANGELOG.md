@@ -8,6 +8,34 @@
   instructions (GRAIL_JOBS=1). The stack-probe check reads the assembly once with no per-line
   copies, and the inlining pass's call lines travel with each remembered body instead of being found
   by a scan of the whole output.
+- The internal assembler takes `.previous`.
+
+- **Integer map keys hash in registers.** `hash::Hash` has a defaulted `table_hash`, the SipHash-1-3
+  value a map uses (the default streams through `hash`, as before); the integer types give it as
+  `hash::word_hash`, the same value computed straight-line with no hasher state in memory. User
+  `Hash` impls need no change. bench/hashmap.grl: Grail-LLVM 0.88G -> 0.77G instructions and 0.30
+  -> 0.27 s user (Rust 0.64G, 0.21 s), Grail-native 3.21G -> 2.69G.
+- **Fix: every closure expression is a type of its own.** Two closure literals with the same
+  signature and environment shape compared equal inside a generic type, so `k = keep(|| ..)` could
+  replace a `Keep<F>` built from another literal; calls through it then ran the first literal's body
+  (callable-bound calls are direct), and a borrowing closure could outlive what it borrowed. It is now
+  a type mismatch, as in Rust.
+- **Text costs less to build and parse.** A string literal is checked to be UTF-8 while compiling,
+  so making a `string` of it is a copy with no run-time check; appending a `string` onto a `string`
+  no longer re-checks it; `format` hands its buffer over as the string instead of copying it, and
+  checks it only when an argument may carry non-UTF-8 bytes. `json` copies a plain string in one
+  step, writes one with no escapes in one append, and skips the whitespace call when the next byte
+  is not whitespace. bench/json.grl: Grail-LLVM 4.48G -> 3.15G instructions (Rust 1.64G),
+  Grail-native 14.3G -> 9.8G.
+- **Raw address offsets.** In an `unsafe module`, the address operand of `raw_load`/`raw_store`
+  and their narrow forms written as `p + k` with a literal `k` has no overflow check and is folded
+  into the load's addressing (`movq 16(%rax),%rax`); other integer arithmetic there still follows
+  the build's overflow mode. The runtime loses about 950 of its 2,664 overflow checks
+  (docs/ffi.md; decision record "Raw address offsets").
+- SIMD loads and stores take fixed-size array fields in place (`f32x4::load(&mat.m, 4)` on a
+  `[f32; 16]` field, a row of `[[f32; 4]; 4]`); test-simd checks the loop over a vector of such
+  structs stays in registers on LLVM.
+
 - **Soundness: a callable bound's reference parameters are fresh on every call.** In
   `F: FnMut((&mut T), C) -> R` the `&mut T` has a lifetime the bound names nowhere else, so - as in
   Rust's `for<'a>` elision - the closure or function given for `F` must accept any lifetime there. One
@@ -87,6 +115,9 @@
   probe silently again. Frames within 128 bytes of a page are probed when the saved-register area
   carries them over it.
 
+- Fixed: `grail fmt` could break a long expression inside `<<` or `>>` (each is two `<`/`>` tokens),
+  or start a continuation line with `<`, and the output then read as a generic argument list and no
+  longer parsed. A wrapped line now never starts with `<` or `>`.
 - **Small runtime functions are inlined into every module.** A small runtime body (the scheduler's
   `rt_current`, `rt_list_set`, `rt_list_head`, ...) is now inlined where another module calls it,
   in every build shape: a per-module build carries the bodies in `runtime.facts`. A failure inside
@@ -110,6 +141,11 @@
   `I: Iterator`. `iter::Iter<T>` is unchanged (the erased form for `from_fn`, `dyn Iterator` or a
   field). Callable bounds now work on an impl's own parameters (`impl<U, F: FnMut(u64) -> U> W<U, F>`)
   and through interface files.
+- Release builds pass only the words a call through a closure, function value or `dyn` slot uses:
+  the other argument registers are `poison` rather than whatever they held, so LLVM no longer
+  keeps stale values alive to fill them. dyncall: 719 M -> 679 M instructions (Rust -O: 648 M). A
+  wrong word count is refused (an error under `--verify-facts`; `--forge-indirect=SYMBOL` shows it).
+
 - Release builds optimise the runtime's job, task and thread runners again: they make calls
   through code pointers and were kept unoptimised after lifting them raced on the thread pointer.
   That race is fixed (every thread-pointer read is now an opaque one), and
@@ -140,6 +176,10 @@
 - Fix: stack probes were skipped for every frame since frames also save callee-saved registers
   (`subq $.F<n>+K,%rsp`); a frame over a page could step over the guard page again. The probe
   matches that form, covers the K bytes, and the pinned case checks it on every target.
+- `bun tools/compile-rivals.mjs` measures a no-op rebuild beside the cold build, the edited build and
+  both checks, runs the rival twins as well as the generated programs, and reports instructions in one
+  process (the primary figure) and wall time at four jobs; the results are `bench/results/compile.json`
+  and the Performance chapter names the cause of every row where Grail is behind.
 
 - **C calls with floats are optimised in release builds (call ABI S8a).** A function that called a
   C function with `f64`/`f32` arguments or a float result had to stay unoptimised on the LLVM
