@@ -44,6 +44,14 @@
   assign it with an array literal (`name: [0; 16]` where `u8[0; 16]` was written); a vector is
   copied in with `d.ids.copy_from(&v)`, which checks the length. The copy-as-vector surface
   (`rt_carray_store`, the field-assignment special case) is gone.
+- **A callback from C keeps its task on its thread.** A Grail function that C called from a green
+  task could wait (sleep, lock, join) and the task then resumed on another worker, so it returned
+  into C's frames on a different OS thread - with C's thread-locals and locks belonging to the old
+  one. A thread now counts the callbacks it is inside, and a task that waits there blocks its
+  thread instead of moving (`callback_pins_task`: 181 of 200 calls came back on another thread
+  before, none now). While it waits, that worker runs nothing else; handing the worker's queue to a
+  spare thread is the next step of stage 6.
+
 - The landing queue's build host runs the aarch64 legs under the patched qemu-aarch64:
   `tools/land-remote.sh` builds it there with `tools/qemu/build.sh` before starting the legs, and
   `tools/land.sh --remote-status` (`just land-status-remote`) prints each emulated leg's verdict for
