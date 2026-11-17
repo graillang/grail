@@ -1,5 +1,10 @@
 ## Unreleased
 
+- Release builds pass only the words a call through a closure, function value or `dyn` slot uses:
+  the other argument registers are `poison` rather than whatever they held, so LLVM no longer
+  keeps stale values alive to fill them. dyncall: 719 M -> 679 M instructions (Rust -O: 648 M). A
+  wrong word count is refused (an error under `--verify-facts`; `--forge-indirect=SYMBOL` shows it).
+
 - Release builds optimise the runtime's job, task and thread runners again: they make calls
   through code pointers and were kept unoptimised after lifting them raced on the thread pointer.
   That race is fixed (every thread-pointer read is now an opaque one), and

@@ -111,6 +111,12 @@ pub fn fact_signature<a>(facts: (&a mut Facts), name: u8[], words: u64) -> unit 
     facts.items.push(Fact { kind: 5, fn: name, a: words, b: 0, callee: u8[], what: 0, width: 0 });
     return ();
 }
+// The `ord`-th `call *%rax` of the body `name` passes `words` argument words (native.grl
+// indirect_fact); the lifter passes `poison` for the other argument registers of the six-word form.
+pub fn fact_indirect<a>(facts: (&a mut Facts), name: u8[], ord: u64, words: u64) -> unit {
+    facts.items.push(Fact { kind: 7, fn: name, a: ord, b: words, callee: u8[], what: 0, width: 0 });
+    return ();
+}
 // The C function `name` takes `ints` integer words and `floats` float arguments (bit k of `mask`
 // set when the k-th is an f32) and returns `result` (0 a word or nothing, 1 f64, 2 f32): native.grl
 // `ffi_signature_fact`. A lifted call to it is typed accordingly (lower_call, call ABI S8a).
@@ -246,6 +252,22 @@ fn dump_facts<a>(out: (&a mut u8[]), facts: (&a Facts)) -> unit {
         if f.kind == 5 {
             put(&mut out, view(" signature "));
             num(&mut out, f.a);
+            out.push(10);
+            continue;
+        }
+        if f.kind == 7 {
+            put(&mut out, view(" indirect "));
+            num(&mut out, f.a);
+            put(&mut out, view(" words "));
+            num(&mut out, f.b);
+            out.push(10);
+            continue;
+        }
+        if f.kind == 6 {
+            put(&mut out, view(" ffi ints "));
+            num(&mut out, f.a);
+            put(&mut out, view(" floats "));
+            num(&mut out, f.b);
             out.push(10);
             continue;
         }
@@ -420,6 +442,8 @@ struct L {
     // The outgoing argument area of the call being set up (area_instruction).
     area: u8[][],
     areaopen: u64,
+    // The argument registers written since the last call (lower_indirect_call's check).
+    argwritten: u64,
     // The FFI facts (ffi_signatures).
     ffis: Set,
     // Vector registers written and not read since (a pending float argument), and ones not written
@@ -2503,6 +2527,9 @@ fn array_element<a, b>(l: (&a mut L), target: &b [u8]) -> unit {
 fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> unit {
     // A call hands the argument registers on; passing a stale %rdx is not reading a result.
     l.rdxdead = 0;
+    // The argument loads this call was set up with; the next call's start afresh, whichever path
+    // lowers this one.
+    loaded := exchange(&mut l.argwritten, 0);
     fcode := set_get(&l.ffis, target);
     typed_ffi := (fcode > 1) && (set_get(&l.sigs, target) == 0) && (l.target == 0) && (l.areaopen == 0);
     if !typed_ffi {
@@ -2519,7 +2546,7 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
     // `call *%rax` is a Grail-convention call through a code pointer; a C call through a `cfn`
     // value is spelled `call *%r11` (native.grl) and, like an import thunk's, stays native.
     if eq(target, view("*%rax")) && (l.target == 0) {
-        lower_indirect_call(&mut l, view(sub(target, 2, target.len())));
+        lower_indirect_call(&mut l, view(sub(target, 2, target.len())), &facts, loaded);
         return ();
     }
     if (target.len() == 0) || (target[0] == 42) {
@@ -2723,7 +2750,32 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
 // which is the form every function whose address is taken keeps (`signatures`). x86-64 only: on
 // AArch64 and RV64 a code pointer names the native-convention entry, which an IR call cannot reach
 // without a thunk, so those bodies stay native.
-fn lower_indirect_call<a, b>(l: (&a mut L), reg: &b [u8]) -> unit {
+fn lower_indirect_call<a, b, d>(l: (&a mut L), reg: &b [u8], facts: (&d Facts), loaded: u64) -> unit {
+    // How many argument words this call passes (an indirect fact), 6 when nothing says. A fact is
+    // checked against the argument registers written since the last call: one past its count was
+    // set up for this call, so the fact is wrong (sig_wrong) and all six are passed.
+    ord := callee_ordinal(&mut l, view("*%rax"));
+    mut words = 6;
+    for i in facts.items.len() {
+        f := &facts.items[i];
+        if (f.kind == 7) && (f.a == ord) && eq(view(f.fn), view(l.fname)) && (f.b <= 6) {
+            words = f.b;
+        }
+    }
+    if (words < 6) && ((loaded >> words) != 0) {
+        mut why = copy(view("an indirect call passes "));
+        num(&mut why, words);
+        put(&mut why, view(" words but %"));
+        mut hi = words;
+        while ((loaded >> hi) & 1) == 0 {
+            hi += 1;
+        }
+        put(&mut why, view(arg_reg(hi)));
+        put(&mut why, view(" was loaded for it"));
+        fname := copy(view(l.fname));
+        sig_wrong(&mut l, view(fname), view(why));
+        return ();
+    }
     if l.areaopen != 0 {
         bad(&mut l);
         return ();
@@ -2731,7 +2783,13 @@ fn lower_indirect_call<a, b>(l: (&a mut L), reg: &b [u8]) -> unit {
     invalidate_args(&mut l, view("*"));
     fp := get_reg(&mut l, reg);
     p := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][fp]);
-    args := call_args_n(&mut l, 6);
+    mut args = call_args_n(&mut l, words);
+    for i in 6 - words {
+        if (words + i) != 0 {
+            put(&mut args, view(", "));
+        }
+        put(&mut args, view("i64 poison"));
+    }
     pair := def(&mut l, view("call {i64, i64} {}({})"), &u8[][p, args]);
     r0 := def(&mut l, view("extractvalue {i64, i64} {}, 0"), &u8[][copy(view(pair))]);
     r1 := def(&mut l, view("extractvalue {i64, i64} {}, 1"), &u8[][pair]);
@@ -2988,6 +3046,23 @@ fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit
     }
     if area_instruction(&mut l, view(op), view(rest)) {
         return ();
+    }
+    // An argument load as load_call_args emits it - a frame slot into an argument register - for
+    // lower_indirect_call's check of its word count. The arguments are loaded in one run of moves
+    // right before the call, so any other instruction (a division's operand load is followed by its
+    // `idivq`, a compare by its jump) starts the count again.
+    if !starts(view(op), view("mov")) && !starts(view(op), view("lea")) && !eq(view(op), view("call")) {
+        l.argwritten = 0;
+    }
+    if eq(view(op), view("movq")) && has(view(rest), view("(%rbp),%")) {
+        mut pc = rest.len();
+        while (pc > 0) && (rest[pc - 1] != 37) {
+            pc -= 1;
+        }
+        ai := arg_index(view(sub(view(rest), pc, rest.len())));
+        if (ai < 6) && (pc >= 8) && (rest[pc - 2] == 44) {
+            l.argwritten = l.argwritten | (1 << ai);
+        }
     }
     o := operands(view(rest));
     n := o.len();
@@ -4157,6 +4232,7 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
     exchange(&mut l.curline, u8[]);
     exchange(&mut l.area, u8[][]);
     l.areaopen = 0;
+    l.argwritten = 0;
     l.xpend = 0;
     l.xstale = 18446744073709551615;
     l.rdxdead = 0;
@@ -7335,7 +7411,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
             set_add(&mut weak, view(sub(wl, 6, wl.len())));
         }
     }
-    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0, ffis: set_new(16), xpend: 0, xstale: 18446744073709551615 };
+    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0, argwritten: 0, ffis: set_new(16), xpend: 0, xstale: 18446744073709551615 };
     // A function whose address is taken (`NAME(%rip)`, or named by data such as a vtable) is
     // called through a pointer by code that does not know its signature, so it keeps the six-word
     // form: an indirect call passes six words and reads rax:rdx, and LLVM must never see a call
