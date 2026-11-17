@@ -4,6 +4,12 @@
   checked the bound and the byte range again; it is now the bounds check and one `movb`, and a
   slice's store uses the hoisted data and length. The byte range is the front end's: a `u8` value,
   or the check it emits before the store. The sieve benchmark executes 58% fewer instructions.
+- **Native backend: fixed-size array elements and float arithmetic take fewer instructions.** An
+  array element whose length and element width are constants is checked against an immediate and
+  addressed with a scaled index (`cmpq $15,%rsi; leaq (%rdi,%rsi,8),%rax`) instead of loading both
+  and multiplying. And a float operation on values held in SSE registers works on them directly
+  (`subsd %xmm9,%xmm8`) instead of copying both into the scratch pair and the result back. nbody
+  executes 27% fewer instructions.
 
 - **Native backend: a slice's `data` and `len` live in registers.** The type facts are recorded on
   the native path too, and the optimiser reads F1's slice-descriptor fact: a slice written once at

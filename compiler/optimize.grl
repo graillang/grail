@@ -1432,6 +1432,10 @@ fn emit_line<a, b>(o: (&a mut ir::Body), s: &b [u8], i: u64) {
         desc_expansion(&mut o, i);
         return ();
     }
+    if (op == 86) || (op == 87) {
+        array_imm_expansion(&mut o, view(s), i);
+        return ();
+    }
     if (39 < op) & (op < 56) {
         mut label = u8[];
         label.append(view("opt"));
@@ -1690,6 +1694,8 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
     }
     forward(&mut o, &mut f, view(s), first, last);
     dead_stores(&mut o, &mut f, first, last);
+    dead_defs(&mut o, view(s), first, last);
+    array_imms(&mut o, view(s), last);
     dead_defs(&mut o, view(s), first, last);
     // Promotion: weights grow 16x per loop nesting level (backward jumps), so a slot touched once
     // an iteration outweighs any handful of straight-line accesses - at 4x, a function's drop flags
@@ -1961,6 +1967,7 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
                 xmm_moves(&mut o, view(s), last, &mut lsrc);
                 dead_defs(&mut o, view(s), first, last);
                 xmm_narrow(&mut o, view(s), &lsrc, &ldst, &xslots, last);
+                xmm_fold(&mut o, view(s), last);
             }
         }
     }
@@ -2522,7 +2529,11 @@ fn xmm_dead_after<a, b>(o: (&a ir::Body), s: &b [u8], i: u64, a: u64, e: u64, de
             }
             continue;
         }
-        if (op == 100) || (op == 0) || (op == 15) || (op == 29) || (op == 30) || ir::is_jump(op) {
+        // A label: whether this value is read depends only on what follows, whatever else jumps here.
+        if op == 100 {
+            continue;
+        }
+        if (op == 0) || (op == 15) || (op == 29) || (op == 30) || ir::is_jump(op) {
             return false;
         }
         if xmm_is(&o, view(s), j, 0, a, e) {
@@ -2919,6 +2930,196 @@ fn desc_alias<a>(o: (&a ir::Body), dacc: (&u64[]), k: u64, prologue: u64) -> u64
 // and nothing on the stack, so registers can be saved around it on the stack.
 fn drop_call<a, b>(o: (&a ir::Body), s: &b [u8], i: u64) -> bool {
     return (o.k0[i] == 4) && (o.e0[i] - o.s0[i] == 18) && ir::at(view(s), o.s0[i], view(".D"));
+}
+// The immediate a register holds at line i: the last line before it in the same straight line that
+// writes `r`, when that is `movq/movabsq $imm,%r` with a value imm_value can read. Returns that
+// line (+1), 0 when there is none.
+fn imm_writer<a, b>(o: (&a ir::Body), s: &b [u8], i: u64, r: u64) -> u64 {
+    mut p = i;
+    mut steps = 0;
+    while (0 < p) && (steps < 8) {
+        p -= 1;
+        if (o.del[p] != 0) || (o.op[p] == 101) {
+            continue;
+        }
+        steps += 1;
+        op := o.op[p];
+        if (op == 100) || (op == 0) || (op == 15) || ir::is_jump(op) {
+            return 0;
+        }
+        if ((ir::writes(&o, p) >> r) & 1) != 0 {
+            if ((op == 1) || (op == 2)) && (o.k0[p] == 3) && (o.k1[p] == 1) && (o.v1[p] == r) && (imm_value(&o, view(s), p) != 0) {
+                return p + 1;
+            }
+            return 0;
+        }
+    }
+    return 0;
+}
+// A fixed-size array's element (ops 53 rt_aslot / 54 rt_aslotu) whose length and width the front
+// end loaded as constants just before (`movabsq $N,%rdx; movabsq $w,%rcx`) takes them as immediates
+// (86 / 87): `cmpq $N,%rsi` and `leaq (%rdi,%rsi,w)`, so the constant loads die. Only widths 1, 2,
+// 4 and 8 (the scaled forms) and a length that fits an imm32.
+fn array_imms<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
+    for i in last {
+        if (o.del[i] != 0) || ((o.op[i] != 53) && (o.op[i] != 54)) {
+            continue;
+        }
+        mut nl = 0;
+        mut wl = 0;
+        if o.op[i] == 53 {
+            nl = imm_writer(&o, view(s), i, 2);
+            wl = imm_writer(&o, view(s), i, 1);
+            if nl == 0 {
+                continue;
+            }
+            if imm_value(&o, view(s), nl - 1) > 2147483648 {
+                continue;
+            }
+        } else {
+            wl = imm_writer(&o, view(s), i, 2);
+        }
+        if wl == 0 {
+            continue;
+        }
+        w := imm_value(&o, view(s), wl - 1) - 1;
+        if !((w == 1) || (w == 2) || (w == 4) || (w == 8)) {
+            continue;
+        }
+        if o.op[i] == 53 {
+            ir::put(&mut o.op, i, 86);
+            set_operand(&mut o, i, 0, 3, 0);
+            set_range(&mut o, i, 0, o.s0[nl - 1], o.e0[nl - 1]);
+        } else {
+            ir::put(&mut o.op, i, 87);
+        }
+        set_operand(&mut o, i, 1, 3, w);
+    }
+}
+// 86 / 87: operand 0 is the length's immediate (86), operand 1's value the width.
+fn array_imm_expansion<a, b>(o: (&a mut ir::Body), s: &b [u8], i: u64) {
+    if o.op[i] == 86 {
+        n := ir::uniq_take(&mut o);
+        app(&mut o.out, view("cmpq "));
+        emit_operand(&mut o, view(s), i, 0);
+        app(&mut o.out, view(",%rsi\njb .L"));
+        opt_label(&mut o);
+        out_number(&mut o, n);
+        // rt_fail(1, index, length) as rt_aslot reports it: the length the check no longer loaded.
+        app(&mut o.out, view("\nmovq "));
+        emit_operand(&mut o, view(s), i, 0);
+        app(&mut o.out, view(",%rdx\nmovq $1,%rdi\ncall rt_fail\n.L"));
+        opt_label(&mut o);
+        out_number(&mut o, n);
+        app(&mut o.out, view(":\n"));
+    }
+    app(&mut o.out, view("leaq (%rdi,%rsi,"));
+    out_number(&mut o, o.v1[i]);
+    app(&mut o.out, view("),%rax\n"));
+}
+// Two-address SSE arithmetic (dev-gap item 2). The front end computes every float operation in the
+// scratch pair - `movaps %xmmA,%xmm0; movaps %xmmB,%xmm1; OPsd %xmm1,%xmm0; movaps %xmm0,%xmmD` -
+// and once A, B and D are promoted registers the scratch is only a way between them. With the four
+// lines consecutive and the scratch dead after them it is `OPsd %xmmB,%xmmD` when D is A, the
+// operands swapped when D is B and the operation commutes, else `movaps %xmmA,%xmmD; OPsd
+// %xmmB,%xmmD`. sqrt (one operand) is `sqrtsd %xmmA,%xmmD`.
+fn xmm_fold<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
+    for i in last {
+        if o.del[i] != 0 {
+            continue;
+        }
+        op := o.op[i];
+        binary := ((59 < op) && (op < 64)) || ((71 < op) && (op < 76));
+        sqrt := (op == 64) || (op == 76);
+        if !(binary || sqrt) || (o.k1[i] != 6) {
+            continue;
+        }
+        // Binary: the source scratch is copied from a promoted register on the line before, and the
+        // destination scratch on the line before that. sqrt: the destination copy just before.
+        mut l1 = i;
+        mut l2 = last;
+        mut y = 99;
+        if binary {
+            if (o.k0[i] != 6) || xmm_is(&o, view(s), i, 0, o.s1[i], o.e1[i]) {
+                continue;
+            }
+            p := prev_live(&o, i);
+            if (p >= i) || (o.op[p] != 68) || (o.k0[p] != 7) || !xmm_is(&o, view(s), p, 1, o.s0[i], o.e0[i]) {
+                continue;
+            }
+            l2 = p;
+            y = o.v0[p];
+            l1 = prev_live(&o, p);
+            if l1 >= p {
+                continue;
+            }
+        } else {
+            if !xmm_is(&o, view(s), i, 0, o.s1[i], o.e1[i]) {
+                continue;
+            }
+            l1 = prev_live(&o, i);
+            if l1 >= i {
+                continue;
+            }
+        }
+        if (o.op[l1] != 68) || (o.k0[l1] != 7) || !xmm_is(&o, view(s), l1, 1, o.s1[i], o.e1[i]) {
+            continue;
+        }
+        x := o.v0[l1];
+        // The line after copies the result into a promoted register, and the scratch is dead.
+        l4 := next_live(&o, i, last);
+        if (l4 >= last) || (o.op[l4] != 68) || (o.k1[l4] != 7) || !xmm_is(&o, view(s), l4, 0, o.s1[i], o.e1[i]) {
+            continue;
+        }
+        d := o.v1[l4];
+        if !xmm_dead_after(&o, view(s), l4, o.s1[i], o.e1[i], 3) {
+            continue;
+        }
+        if binary && !xmm_dead_after(&o, view(s), l4, o.s0[i], o.e0[i], 3) {
+            continue;
+        }
+        commutes := (op == 60) || (op == 62) || (op == 72) || (op == 74);
+        if sqrt {
+            set_operand(&mut o, i, 0, 7, x);
+            set_operand(&mut o, i, 1, 7, d);
+            kill(&mut o, l1);
+            kill(&mut o, l4);
+            continue;
+        }
+        if d == x {
+            set_operand(&mut o, i, 0, 7, y);
+            set_operand(&mut o, i, 1, 7, d);
+            kill(&mut o, l1);
+            kill(&mut o, l2);
+            kill(&mut o, l4);
+        } else if (d == y) && commutes {
+            set_operand(&mut o, i, 0, 7, x);
+            set_operand(&mut o, i, 1, 7, d);
+            kill(&mut o, l1);
+            kill(&mut o, l2);
+            kill(&mut o, l4);
+        } else if d != y {
+            // movaps %xmmX,%xmmD in place of the first scratch copy.
+            set_operand(&mut o, l1, 1, 7, d);
+            set_operand(&mut o, i, 0, 7, y);
+            set_operand(&mut o, i, 1, 7, d);
+            kill(&mut o, l2);
+            kill(&mut o, l4);
+        }
+    }
+}
+fn prev_live<a>(o: (&a ir::Body), i: u64) -> u64 {
+    mut p = i;
+    while 0 < p {
+        p -= 1;
+        if (o.del[p] == 0) && (o.op[p] != 101) {
+            if o.op[p] == 100 {
+                return i;
+            }
+            return p;
+        }
+    }
+    return i;
 }
 fn name_hash<b>(s: &b [u8], a: u64, e: u64) -> u64 {
     mut h = 0;
