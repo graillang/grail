@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **R4: a compile-time probe compiles only what its values reach.** Before the bodies, a probe walks
+  the bodies its value functions reach, name by name (a call, a method, a generic's template), and
+  compiles only those; one that makes a closure or names `dyn` compiles the whole program, and a link
+  that finds a function left out recompiles with everything. A recomputed value in a 1600-function
+  program now costs +0.0-0.2 s instead of +1.1 s. The probes' base objects live in the build store
+  (`<store>/probe-base`), which `grail cache clear` and `prune` cover.
+
 - **A compile-time probe no longer compiles the runtime and the standard library.** They are
   compiled once into a cached base object with their interfaces (`.work/comptime/base/<key>`, keyed
   by the compiler, the options and their sources), and each probe compiles only itself and the
