@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `tools/land.sh BRANCH` (`just land`) lands a branch on main through one queue: the branch must already contain main, the fast gate runs on exactly its tree, and green fast-forwards main. Emulated targets run after the landing on the build host.
 - Fixed: the native optimiser took an `f32` constant whose 64-bit immediate it cannot read (2.0 is
   `$4611686018427387904`, more than 18 digits) for zero, held the variable as binary32 and read 2.0
   back as 0.0. It changed Abundance's abgeo mesh digests (meshopt's `quadric_error_attr`);
