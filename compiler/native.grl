@@ -930,6 +930,11 @@ struct C {
     par_hits: u64,
     // Where the lines the optimiser's cut planning reads were written (optimize::plan_from).
     plan_at: u64[],
+    // The types registrations spelled, already read in this run, by their bytes (fn_reg_type).
+    reg_slots: u64[],
+    reg_keys: u64[],
+    reg_blobs: u8[][],
+    reg_types: u64[],
     // The bodies applied from units, for the optimiser (ir::Known).
     known: ir::Known,
     // Armed (par_start) but not forked yet: the walk forks when it has compiled `par_threshold`
@@ -6150,6 +6155,14 @@ fn drop_hook_symbol<a>(c: (&a mut C), ty: u64) -> u8[] {
     module := c.funcs[actual].module.copy();
     unit := symbol_unit(&mut c, view(module));
     return body_label(&c, view(unit), view(label), view(""), 0);
+}
+// drop_symbol's memo filled for `ty`, without a copy of the name.
+fn drop_symbol_known<a>(c: (&a mut C), ty: u64) -> unit {
+    if (ty < c.drop_names.len()) && (c.drop_names[ty].len() != 0) {
+        return ();
+    }
+    drop_symbol(&mut c, ty);
+    return ();
 }
 fn drop_symbol<a>(c: (&a mut C), ty: u64) -> u8[] {
     while c.drop_names.len() <= ty {
@@ -15201,11 +15214,18 @@ struct FnReg {
 // not one this compiler writes, and then nothing of the unit may be applied.
 fn fn_regs_read<a, b, d>(c: (&a mut C), data: &b [u8], ok: (&d mut u64)) -> FnReg[] {
     mut out = FnReg[];
+    if data.len() == 0 {
+        return out;
+    }
+    return fn_regs_decode(&mut c, data, ok);
+}
+fn fn_regs_decode<a, b, d>(c: (&a mut C), data: &b [u8], ok: (&d mut u64)) -> FnReg[] {
+    mut out = FnReg[];
     mut p = IR { data: data.copy(), at: 0, stop: data.len(), path: copy_bytes(view("the unit store")), phase: 2, rtext: u8[], what: u8[] };
     while p.at < p.stop {
         kind := iface_r1(&mut p);
         if kind == 1 {
-            ty := iface_r_type(&mut p, &mut c);
+            ty := fn_reg_type(&mut p, &mut c);
             out.push(FnReg { kind: 1, template: 0, types: u64[ty] });
         } else if kind == 2 {
             template := iface_rv(&mut p);
@@ -15216,7 +15236,7 @@ fn fn_regs_read<a, b, d>(c: (&a mut C), data: &b [u8], ok: (&d mut u64)) -> FnRe
             }
             mut types = u64[];
             for i in n {
-                types.push(iface_r_type(&mut p, &mut c));
+                types.push(fn_reg_type(&mut p, &mut c));
             }
             out.push(FnReg { kind: 2, template: template, types: types });
         } else {
@@ -15225,6 +15245,40 @@ fn fn_regs_read<a, b, d>(c: (&a mut C), data: &b [u8], ok: (&d mut u64)) -> FnRe
         }
     }
     return out;
+}
+// One type of a registration. Bodies name the same types over and over (a string's drop helper,
+// `same<u64>`), and reading a spelling interns it: the same bytes are the same type every time in
+// a run, so a spelling read once is looked up by its bytes after that.
+fn fn_reg_type<a, b>(p: (&a mut IR), c: (&b mut C)) -> u64 {
+    start := p.at;
+    // A type record is its tag, its length and that many bytes (iface_w_type).
+    mut at = start + 1;
+    mut len = 0;
+    mut scale = 1;
+    while (at < p.stop) && (scale < 72057594037927936) {
+        b := u64(p.data[at]);
+        at += 1;
+        len = len + (b & 127) * scale;
+        if (b & 128) == 0 {
+            break;
+        }
+        scale = scale * 128;
+    }
+    end := at + len;
+    if (p.stop < end) || (p.stop <= start) {
+        return iface_r_type(&mut p, &mut c);
+    }
+    found := names_find(&mut c.reg_slots, &mut c.reg_keys, &c.reg_blobs, p.data[start..end]);
+    if found != 0 {
+        p.at = end;
+        return c.reg_types[found - 1];
+    }
+    ty := iface_r_type(&mut p, &mut c);
+    if p.at == end {
+        c.reg_blobs.push(p.data[start..end].copy());
+        c.reg_types.push(ty);
+    }
+    return ty;
 }
 // PRODUCE, the last step: what the body just emitted handed the run, as a unit. The text starts
 // after the body's `.gbase` line; the facts are the ones recorded since `fact_mark`; the
@@ -15297,7 +15351,11 @@ fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), l
         template := regs[i].template;
         types := regs[i].types.copy();
         if kind == 1 {
-            drop_ref_name(&mut c, types[0]);
+            // What drop_ref_name does, without the copy of the name it returns: the helper is
+            // requested, and its name is made now - making it can ask for a generic `Drop`
+            // implementation's specialisation, and that request has to come at this point.
+            c.drop_refs.push(types[0]);
+            drop_symbol_known(&mut c, types[0]);
         } else {
             specialize(&mut c, template, &types);
         }
@@ -44837,6 +44895,10 @@ pub fn main() -> u64 {
         par_jobs: jobs::none(),
         par_hits: 0,
         plan_at: u64[],
+        reg_slots: u64[],
+        reg_keys: u64[],
+        reg_blobs: u8[][],
+        reg_types: u64[],
         known: ir::no_known(),
         par_armed: 0,
         par_misses: 0,
