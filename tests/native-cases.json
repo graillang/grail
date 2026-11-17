@@ -19268,5 +19268,21 @@
     "name": "simd-nan-bits-canonical",
     "source": "fn main() {\n    zero: f32 = 0.0;\n    v := f32x4::new(zero / zero, 1.5, -(zero / zero), -2.0);\n    mut r = u32[0, 0, 0, 0];\n    v.bits().store(&mut r[:], 0);\n    println(\"{} {} {} {}\", r[0], r[1], r[2], r[3]);\n    w := f64x2::splat(0.0);\n    m := f64x2::new(1.0, 0.0) / w;\n    mut q = i64[0, 0];\n    (m - m).bits().store(&mut q[:], 0);\n    println(\"{} {}\", q[0], q[1]);\n}\n",
     "stdout": "2143289344 1069547520 2143289344 3221225472\n9221120237041090560 9221120237041090560\n"
+  },
+  {
+    "name": "chan-bounded-close-and-mpmc-checksum",
+    "source": "use chan;\nuse thread;\nuse rc;\nfn main() {\n    c := chan::bounded<u64>(4);\n    for i in 3 { c.send(i + 10); }\n    println(c.recv()!);\n    c.close();\n    println(c.recv()!);\n    println(c.recv()!);\n    println(c.recv().is_none());\n    println(c.send(5));\n    // Four producers and four consumers through eight slots: every value arrives once.\n    m := rc::arc_new(chan::bounded<u64>(8));\n    mut senders: thread::Thread<u64>[] = [];\n    for p in 4 {\n        mine := m.clone();\n        senders.push(thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 {\n            ch := mine.get();\n            for i in 20000 { ch.send(p * 100000 + i + 1); }\n            return 0;\n        })!);\n    }\n    mut receivers: thread::Thread<u64>[] = [];\n    for q in 4 {\n        mine := m.clone();\n        receivers.push(thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 {\n            ch := mine.get();\n            mut sum = 0;\n            while let Some(v) = ch.recv() { sum += v; }\n            return sum;\n        })!);\n    }\n    while let Some(t) = senders.pop() { thread::join(t); }\n    m.get().close();\n    mut total = 0;\n    while let Some(t) = receivers.pop() { total += thread::join(t); }\n    println(total);\n}\n",
+    "modules": [
+      "lib/chan.grl",
+      "lib/sync.grl",
+      "lib/time.grl",
+      "lib/thread.grl",
+      "lib/rc.grl"
+    ],
+    "stdout": "10\n11\n12\ntrue\nfalse\n12800040000\n",
+    "targets": [
+      "x86_64"
+    ],
+    "note": "lib/chan.grl: values arrive in order, close lets the rest drain, recv answers None and send false once closed; 4 producers x 20000 values through 8 slots to 4 consumers arrive exactly once"
   }
 ]
