@@ -4,6 +4,11 @@
   little-endian word read), instead of a byte per loop step, while eight input bytes remain. The 4K
   png: Grail-LLVM 7.47G -> 6.44G instructions (0.85 -> 0.71 s; libpng 0.41 s, stb_image 0.41 s),
   Grail-native 19.8G -> 17.7G.
+- Bounds checks: an index `t & L` is at most `L`, so a table lookup through a mask that matches the
+  table (`next[s & 511]` on a 512-entry table) needs no check. The loop-invariant pass runs only in
+  a body `func()` compiles, where a failed kept fact can recompile the function; a closure body
+  compiled elsewhere uses the plain kill.
+
 - **Closures given for a generic `F` live in the frame (S6(A)).** A closure whose type is its own
   literal's - a local closure, or one passed for a callable-bound parameter - is now held as its
   environment's words in the caller's frame, copied on a move and dropped in place, and called
