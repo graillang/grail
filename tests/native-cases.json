@@ -11839,7 +11839,7 @@
   },
   {
     "name": "sched-job-failure-is-contained",
-    "note": "A task forks eight chunks over its own vector and one fails an index check while the others are still writing. The failing stack waits for its outstanding forks, then the failure is re-raised at the join and the task is contained: try_join returns the check's message with the original statement and the line naming the join, a sibling task's result is intact, and the process keeps running.",
+    "note": "A task forks eight chunks over its own vector and one fails an index check while the others are still writing. The failing stack waits for its outstanding forks, then the failure is re-raised at the join and the task is contained: try_join returns the check's message with the original statement and the line naming the join, a sibling task's result is intact, and the process keeps running. Native only: an LLVM build carries no statement table, so a site cannot be named there (an LLVM backend gap, recorded in concurrency-stages-5-7.md).",
     "files": [
       "tests/sched/job_failure.grl"
     ],
@@ -11848,11 +11848,11 @@
       "lib/core.grl"
     ],
     "stdout": "index 100 out of bounds for length 1\n --> job_failure.grl:12:9\n = in a job joined at job_failure.grl:20:5\n56\nstill running\n",
-    "backends": [
-      "native"
-    ],
     "targets": [
       "x86_64"
+    ],
+    "backends": [
+      "native"
     ]
   },
   {
@@ -11872,7 +11872,7 @@
   },
   {
     "name": "sched-join-failure-names-the-user-join",
-    "note": "A branch of a user's pool::join, run by another worker, fails. try_join reports the failing statement and, as the join, the user's own pool::join line rather than the fork inside lib/pool.grl (standard-library sites carry bit 62 in the site table and are skipped for that line). The exit note counts one failure, and the stacks it discarded separately.",
+    "note": "A branch of a user's pool::join, run by another worker, fails. try_join reports the failing statement and, as the join, the user's own pool::join line rather than the fork inside lib/pool.grl (standard-library sites carry bit 62 in the site table and are skipped for that line). The exit note counts one failure, and the stacks it discarded separately. Native only: an LLVM build carries no statement table, so a site cannot be named there (an LLVM backend gap, recorded in concurrency-stages-5-7.md).",
     "files": [
       "tests/sched/join_failure_site.grl"
     ],
@@ -11887,6 +11887,9 @@
     "stderr": "after 1 contained task failure(s) (",
     "targets": [
       "x86_64"
+    ],
+    "backends": [
+      "native"
     ]
   },
   {
@@ -17066,5 +17069,22 @@
     "note": "a closure capturing a call-scoped parameter may be given to a callable-bound parameter and the result returned: the callee only borrows the closure for the call",
     "source": "use vecs;\nfn scale<T>(items: T[], f: Fn(T) -> T) -> T[] { return items.map(|x: T| -> T f(x)); }\nfn main() { r := scale(u64[1, 2], |x: u64| -> u64 x * 10); println(r[1]); }\n",
     "stdout": "20\n"
+  },
+  {
+    "name": "sched-thread-pointer-read-after-migration",
+    "note": "Two reads of the thread pointer in one function with a sleep between them see the thread each runs on (400 tasks on 4 workers; at least one moves). Under the LLVM backend the read is inline assembly with a side effect, never merged across the suspension.",
+    "files": [
+      "tests/sched/tp_read_after_migration.grl"
+    ],
+    "modules": [
+      "lib/core.grl"
+    ],
+    "env": {
+      "GRAIL_WORKERS": "4"
+    },
+    "stdout": "true\n",
+    "targets": [
+      "x86_64"
+    ]
   }
 ]
