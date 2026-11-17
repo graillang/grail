@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **A lost wakeup in nested joins is fixed.** A waiter that took a stale queue entry for a recycled
+  job record gave it back with a plain store of "pending", which could erase the forker's
+  registration as the job's waiter in the moment between: the job was then published to nobody
+  and the forker slept for ever. It now gives the job back with a compare-and-swap, and runs the job
+  itself when its forker is already waiting. `sched-wake-not-lost-under-constant-parking` hung
+  about one run in four under aarch64 emulation; 0 of 50 now.
+
 - A program whose `main` takes the argument view and is run without one now prints `usage: PROGRAM NAME`
   on stderr, with the parameter's declared name, before exiting 2. It used to exit 2 silently.
 - The SIMD benchmarks (`bench/simd_dot`, `simd_mat4`, `simd_aos`) take `check` for a three-round run that
