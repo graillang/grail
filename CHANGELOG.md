@@ -1,5 +1,10 @@
 ## Unreleased
 
+- Bounds checks: a vector filled from empty by a counted loop - `for i in n { v.push(x); }`, one
+  push per iteration, no `break` or `continue` - has `v.len == n` after the loop, so a later
+  `for i in n { v[i] }` indexes without a check. The ECS benchmark's update loop loses all 18 of its
+  checks. A push inside a branch, an early exit, or a vector that was not empty states nothing.
+
 - **Fixed: an LLVM-backend miscompile of a vector grown through its address.** A call handed `&mut v`
   receives the slot's address, not the header word, so the lifter did not count it as a call that
   can grow `v`, and the `len`/`data` it had read before the call were used after it: `pad(&mut out,
