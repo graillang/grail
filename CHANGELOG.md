@@ -1,5 +1,10 @@
 ## Unreleased
 
+- Windows x86-64 builds (non-debug) assemble in the compiler too: `compiler/coff.grl` writes COFF
+  objects byte-identical to clang's, `.pdata`/`.xdata` unwind for every function included
+  (`grail asm --target windows-x86_64`). Debug builds keep clang until CodeView is written. Fixed:
+  `movsd` encoded as `movdqu` (the two shared an internal id).
+
 - The optimiser parses each distinct instruction line once per compile and replays the record for
   its repeats (a label operand is numbered again, the frame-slot bookkeeping redone): byte-identical
   output, 2.6% fewer instructions for a 4000-function file. The plan for taking the remaining text
