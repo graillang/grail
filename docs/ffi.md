@@ -896,8 +896,8 @@ its TCB (errno, malloc tcache, stack guard, DTV). On Linux the compiler bridges 
 - every thread's record carries its own host TLS base in record word 56: the thread's glibc TCB, or 0
   in a static program that never loaded libc. `_start` stores the loader's base for the main thread
   before `rt_thread_init` installs the main record;
-- in a process that loaded libc, every thread the runtime creates (pool workers, green-task scheduler
-  threads, the reactor, offload threads, `GRAIL_TASKS=thread` task threads) is created by glibc's
+- in a process that loaded libc, every thread the runtime creates (scheduler workers, which run green
+  tasks and jobs, the reactor, offload threads, `GRAIL_TASKS=thread` task threads) is created by glibc's
   `pthread_create`, so it has a real TCB that glibc built and will tear down itself; a static program
   keeps cloning its own threads, which have no TCB and need none;
 - every `extern "C"` call switches to the calling thread's own TCB and back, and does not switch at
@@ -906,7 +906,7 @@ its TCB (errno, malloc tcache, stack guard, DTV). On Linux the compiler bridges 
   `rt_tls_record`, an initial-exec ELF TLS word of the executable that glibc allocates in every thread
   it creates, switches to it, and restores the caller's TCB on every return path.
 
-So foreign calls are valid on any runtime thread, including from pool jobs and green tasks, and libc
+So foreign calls are valid on any runtime thread, including from jobs and green tasks, and libc
 state is the calling thread's: errno set on a worker is not the main thread's errno. A callback runs
 on the thread that called into C, with that thread's record (on a green task's scheduler thread, the
 task that made the foreign call). **A callback that arrives on a thread C created itself** finds no Grail record and adopts one:

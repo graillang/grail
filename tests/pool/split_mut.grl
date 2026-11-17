@@ -1,0 +1,119 @@
+// In-place splitting: parallel_split cuts an exclusive slice into disjoint exclusive pieces of at
+// most `grain` elements
+// and every job writes the caller's own elements. Nothing is copied, so the split has to be right:
+// each element is written exactly once by exactly one chunk.
+//
+// Every check below compares CONTENT, never a count. A callback that ran twice doubles its elements,
+// one that never ran leaves them, and one that wrote outside its chunk would either fault on the
+// bounds check (the slice it holds has its own length) or fail the borrow checker at the call site.
+use pool;
+
+fn triple(s: &mut [u64]) {
+    for i in s.len() { s[i] = s[i] * 3; }
+}
+fn plus_one(s: &mut [u64]) {
+    for i in s.len() { s[i] = s[i] + 1; }
+}
+fn doubled(s: &mut [f32]) {
+    for i in s.len() { s[i] = s[i] * 2.0; }
+}
+fn stamp(s: &mut [u32]) {
+    for i in s.len() { s[i] = s[i] + 1000; }
+}
+// Nested splitting: a chunk callback splits a vector it owns and chunks that too. The pool is reused
+// and a waiting worker helps, so this cannot deadlock however few workers there are.
+fn nested(s: &mut [u64]) {
+    mut local = u64[];
+    for i in s.len() { local.push(s[i]); }
+    n := local.len();
+    parallel_split(&mut local[0: n], 1, plus_one);
+    for i in s.len() { s[i] = local[i] * 10; }
+}
+// Content comparison, not a count: an element written twice, never written, or written by the wrong
+// chunk shows up here as a difference.
+fn fill_bytes(data: &mut [u8], value: u8) {
+    parallel_split(data, 2, |s: &mut [u8]| -> unit { for i in s.len() { s[i] = value; } });
+}
+fn expect_u64(label: &[u8], got: u64[], want: u64[]) -> unit {
+    mut ok = got.len() == want.len();
+    if ok {
+        for i in got.len() {
+            if got[i] != want[i] { ok = false; }
+        }
+    }
+    if ok == false {
+        host::write_fd(2, format("{}: split content does not match the expected elements\n", label).text());
+        assert(false);
+    }
+    return ();
+}
+fn main() {
+    // Uneven: 10 elements in pieces of 4 is 4, 4, 2. Each element multiplied once, so a chunk that
+    // ran twice, half-ran or overlapped another shows up as a wrong element.
+    mut even = u64[1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    parallel_split(&mut even[0: 10], 4, triple);
+    expect_u64(view("uneven"), even, u64[3, 6, 9, 12, 15, 18, 21, 24, 27, 30]);
+
+    // One piece: the grain is the whole slice, one job.
+    mut single = u64[1, 2, 3, 4, 5];
+    parallel_split(&mut single[0: 5], 5, triple);
+    expect_u64(view("one chunk"), single, u64[3, 6, 9, 12, 15]);
+
+    // A grain larger than the slice: one piece, the same answer as a grain of exactly the length.
+    mut zero = u64[2, 3];
+    parallel_split(&mut zero[0: 2], 100, triple);
+    expect_u64(view("zero chunks"), zero, u64[6, 9]);
+
+    // A grain of one: one element per piece, still exactly once each.
+    mut few = u64[1, 2, 3];
+    parallel_split(&mut few[0: 3], 1, triple);
+    expect_u64(view("more chunks than elements"), few, u64[3, 6, 9]);
+
+    // More pieces than workers: 1000 elements in pieces of 16 (63 pieces).
+    mut many = u64[];
+    for i in 1000 { many.push(i); }
+    parallel_split(&mut many[0: 1000], 16, plus_one);
+    mut expect_many = u64[];
+    for i in 1000 { expect_many.push(i + 1); }
+    expect_u64(view("sixty-four chunks"), many, expect_many);
+
+    // Only the slice is touched: a sub-range leaves its neighbours alone.
+    mut part = u64[1, 2, 3, 4, 5, 6];
+    parallel_split(&mut part[2: 4], 1, triple);
+    expect_u64(view("sub-range"), part, u64[1, 2, 9, 12, 5, 6]);
+
+    // An empty slice runs no job at all and is not an error.
+    mut none = u64[];
+    parallel_split(&mut none[0: 0], 4, triple);
+    assert(none.len() == 0);
+
+    // Nested splitting: jobs that split work of their own.
+    mut outer = u64[1, 2, 3, 4, 5, 6];
+    parallel_split(&mut outer[0: 6], 3, nested);
+    expect_u64(view("nested"), outer, u64[20, 30, 40, 50, 60, 70]);
+
+    // Narrow elements keep their 4-byte stride, bytes their own width.
+    mut floats = f32[1.0, 2.0, 3.0, 4.0];
+    parallel_split(&mut floats[0: 4], 2, doubled);
+    assert(floats[0] == 2.0);
+    assert(floats[3] == 8.0);
+    mut words = u32[1, 2, 3, 4, 5, 6];
+    parallel_split(&mut words[0: 6], 2, stamp);
+    assert(words[0] == 1001);
+    assert(words[5] == 1006);
+    // A byte buffer is a mutable view (`&mut [u8]`), so it is chunked through one: the element type
+    // of a view is a byte, one byte apart, and no classification question arises.
+    mut raw = u8[1, 2, 3, 4];
+    fill_bytes(&mut raw, 7);
+    assert(raw[0] == 7);
+    assert(raw[3] == 7);
+
+    // Through the library surface, with the closure capturing a shared value.
+    mut through = u64[1, 2, 3, 4, 5, 6];
+    factor := 11;
+    pool::split_mut(&mut through[0: 6], 2, |s: &mut [u64]| -> unit {
+        for i in s.len() { s[i] = s[i] * factor; }
+    });
+    expect_u64(view("pool::split_mut"), through, u64[11, 22, 33, 44, 55, 66]);
+    println("ok");
+}

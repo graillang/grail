@@ -55,6 +55,13 @@ pub struct Body {
     gen: u8[],
     out: u8[],
     weird: u64,
+    // The line the `.gpos` markers of the body being read count from: the last `.gbase` before it
+    // (gbase_line). And the inlinable copy the body just optimised made, as it was written - with
+    // its markers still counting from that line - which is the form a remembered body keeps.
+    gbase: u64,
+    inl_rel: u8[],
+    // The numbering this body's labels are in (label_number), 0 before its first numbered label.
+    lscope: u64,
     maxslot: u64,
     table: u64[],
     base: u64,
@@ -66,6 +73,8 @@ pub struct Body {
     // The `DynPair`s this body builds, as the address-indexed slots the passes use, read from
     // `llvm::facts_dyn_pairs` in `build` (docs/design/fat-dyn.md).
     dyn_pairs: u64[],
+    // The word count of each entry of `dyn_pairs` (2 for a `DynPair`, more for a frame record).
+    pair_widths: u64[],
     pair: u64[],
     ret2: u64,
     inl_names: u8[][],
@@ -114,7 +123,23 @@ pub struct Body {
     // Where optimised bodies are remembered between builds, and the compiler they were made by
     // (optimize.grl, the body memo). Empty: nothing is remembered.
     memo_dir: u8[],
-    memo_id: u8[]
+    memo_id: u8[],
+    // Bodies the front end applied from its unit store (Known), so the optimiser neither looks for
+    // them line by line nor hashes their text for the memo.
+    known: Known
+}
+
+// The bodies of a stream that are units the front end applied, in stream order: where each one's
+// opening `.type` line starts, where its closing `.set` line ends, and the hash of its unit's key.
+// A unit's text is a function of its key (docs/design/incremental-compilation.md), so the key
+// stands for the text in the body memo's key.
+pub struct Known {
+    open: u64[],
+    end: u64[],
+    key: u8[][]
+}
+pub fn no_known() -> Known {
+    return Known { open: u64[], end: u64[], key: u8[][] };
 }
 
 pub fn put<a>(v: (&a mut u64[]), i: u64, x: u64) {
@@ -161,6 +186,116 @@ pub fn caller_saved() -> u64 {
 // r10 and r11 too. Without them a store to %r10 before a call looks dead and is deleted.
 pub fn arg_regs() -> u64 {
     return 4038;
+}
+
+// The SSE instructions the front end writes, numbered 60..71, and the single-precision arithmetic
+// the optimiser narrows f32 operations to, 72..76: the optimiser knows they touch no
+// general register except the ones named (the integer side of `movd`, `cvttsd2si`, `cvtsi2sdq`)
+// and no memory. Before they had numbers they were unknown instructions, after which every
+// register was live and nothing could be removed across them.
+// The argument registers a call reads, when the callee is one whose arguments are known: the runtime
+// exits (llvm.grl `never_returns`, and `rt_abort`; rdi, rsi, rdx by arity, runtime.grl and
+// os-linux.grl) and the compiler's drop helpers (`.D` and 16 hex digits, native.grl `drop_symbol`),
+// which take the value in rdi alone. A register mask with bit 63 set; 0 for any other call, which
+// reads every argument register.
+pub fn call_args<b>(s: &b [u8], a: u64, e: u64) -> u64 {
+    if (e - a == 18) && at(view(s), a, view(".D")) {
+        return 9223372036854775808 + 128;
+    }
+    if same_range(view(s), a, e, view("rt_abort")) {
+        return 9223372036854775808 + 0;
+    }
+    if same_range(view(s), a, e, view("rt_fail")) {
+        return 9223372036854775808 + 196;
+    }
+    if same_range(view(s), a, e, view("rt_trap")) {
+        return 9223372036854775808 + 196;
+    }
+    if same_range(view(s), a, e, view("rt_refine")) {
+        return 9223372036854775808 + 192;
+    }
+    if same_range(view(s), a, e, view("rt_task_fail")) {
+        return 9223372036854775808 + 128;
+    }
+    if same_range(view(s), a, e, view("rt_fail_text")) {
+        return 9223372036854775808 + 196;
+    }
+    if same_range(view(s), a, e, view("rt_report_die")) {
+        return 9223372036854775808 + 192;
+    }
+    if same_range(view(s), a, e, view("rt_abort_final")) {
+        return 9223372036854775808 + 0;
+    }
+    if same_range(view(s), a, e, view("rt_abort_park")) {
+        return 9223372036854775808 + 0;
+    }
+    if same_range(view(s), a, e, view("rt_hard_exit")) {
+        return 9223372036854775808 + 128;
+    }
+    if same_range(view(s), a, e, view("rt_stack_overflow")) {
+        return 9223372036854775808 + 0;
+    }
+    if same_range(view(s), a, e, view("rt_stack_overflow_at")) {
+        return 9223372036854775808 + 128;
+    }
+    return 0;
+}
+pub fn float_opcode<b>(s: &b [u8], a: u64, space: u64) -> u64 {
+    if same_range(view(s), a, space, view("addsd")) {
+        return 60;
+    }
+    if same_range(view(s), a, space, view("subsd")) {
+        return 61;
+    }
+    if same_range(view(s), a, space, view("mulsd")) {
+        return 62;
+    }
+    if same_range(view(s), a, space, view("divsd")) {
+        return 63;
+    }
+    if same_range(view(s), a, space, view("sqrtsd")) {
+        return 64;
+    }
+    if same_range(view(s), a, space, view("cvtss2sd")) {
+        return 65;
+    }
+    if same_range(view(s), a, space, view("cvtsd2ss")) {
+        return 66;
+    }
+    if same_range(view(s), a, space, view("ucomisd")) {
+        return 67;
+    }
+    if same_range(view(s), a, space, view("movaps")) {
+        return 68;
+    }
+    if same_range(view(s), a, space, view("cvttsd2si")) {
+        return 69;
+    }
+    if same_range(view(s), a, space, view("movd")) {
+        return 70;
+    }
+    if same_range(view(s), a, space, view("cvtsi2sdq")) {
+        return 71;
+    }
+    if same_range(view(s), a, space, view("addss")) {
+        return 72;
+    }
+    if same_range(view(s), a, space, view("subss")) {
+        return 73;
+    }
+    if same_range(view(s), a, space, view("mulss")) {
+        return 74;
+    }
+    if same_range(view(s), a, space, view("divss")) {
+        return 75;
+    }
+    if same_range(view(s), a, space, view("sqrtss")) {
+        return 76;
+    }
+    return 0;
+}
+pub fn is_float_op(op: u64) -> bool {
+    return (59 < op) && (op < 77);
 }
 
 pub fn opcode_key(k: u64) -> u64 {
@@ -451,24 +586,15 @@ pub fn classify<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64, second: u64)
                 k = 3;
             } else {
                 m = mentions(view(s), a, e);
-                if (c == 46) & (e - a > 2) {
-                    if s[a + 1] == 76 {
-                        mut n = 0;
-                        mut digits = 0;
-                        mut i = a + 2;
-                        while i < e {
-                            d := s[i];
-                            if d < 48 || 57 < d {
-                                break;
-                            }
-                            n = n * 10 + d - 48;
-                            digits += 1;
-                            i += 1;
-                        }
-                        if digits != 0 {
-                            v = n + 1;
-                        }
+                if c == 46 {
+                    // A label, alone (a jump's operand) or with an addressing suffix
+                    // (`.L..(%rip)`): the reading the label's own line gets, so a reference is
+                    // counted against the label whichever way it is made.
+                    mut j = a + 1;
+                    while (j < e) && (alnum(s[j]) || (s[j] == 95)) {
+                        j += 1;
                     }
+                    v = numbered(&mut o, view(s), a, j);
                 }
                 // -N(%rbp) with decimal N is a frame slot.
                 if (c == 45) & (e - a > 7) {
@@ -516,56 +642,122 @@ pub fn classify<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64, second: u64)
     }
 }
 
-// The counter a label carries: `.L<unit prefix>_<n>` is numbered, everything else is opaque text
-// (`.Lopt` expansions, refinement strings, `.Lret` in an inlined body). A stream with no marker -
-// a caller that hands the optimizer text it produced itself - keeps the old `.L<n>` numbering.
+// The counter a label carries: `.L<unit prefix>_<n>` (minted outside any function) and
+// `.L<unit prefix>_<f>_<n>` (minted by the unit's function number `f`) are numbered `n`, everything
+// else is opaque text (`.Lopt` expansions, refinement strings, `.Lret` in an inlined body). A stream
+// with no marker - a caller that hands the optimizer text it produced itself - keeps the old `.L<n>`
+// numbering.
+//
+// Returns 0 for a label that is not numbered, else `scope * 2^32 + n + 1`, where the scope says
+// which numbering the label is in: 1 for the unit's own, `f + 1` for function `f`'s. One body's
+// labels are all in one - the numbers are only unique within it - so a body that mixes two is left
+// as it was written (parse).
 pub fn label_number<a, b, d>(s: &a [u8], a: u64, e: u64, uprefix: &d [u8]) -> u64 {
     if (e <= a + 2) || !at(view(s), a, view(".L")) {
         return 0;
     }
     mut at = a + 2;
-    if uprefix.len() == 0 {
-        mut n = 0;
-        mut ok = 1;
-        while at < e {
-            d := s[at];
+    if uprefix.len() != 0 {
+        // Opens with `<prefix>_` and has something after it.
+        if !at(view(s), at, view(uprefix)) || (e <= at + uprefix.len() + 1) || (s[at + uprefix.len()] != 95) {
+            return 0;
+        }
+        at += uprefix.len() + 1;
+    }
+    // One run of digits, or two with `_` between them.
+    mut scope = 1;
+    mut n = 0;
+    mut digits = 0;
+    while at < e {
+        d := s[at];
+        if (d == 95) & (digits != 0) & (scope == 1) & (uprefix.len() != 0) {
+            scope = n + 1;
+            n = 0;
+            digits = 0;
+        } else {
             if (d < 48) || (57 < d) {
-                ok = 0;
-                break;
+                return 0;
             }
             n = n * 10 + (d - 48);
-            at += 1;
+            digits += 1;
         }
-        if (ok == 0) || (at == a + 2) {
-            return 0;
-        }
-        return n + 1;
+        at += 1;
     }
-    if !same_range(view(s), at, e, view(uprefix)) | (e <= at + uprefix.len() + 1) {
+    if digits == 0 {
         return 0;
     }
+    return scope * 4294967296 + n + 1;
+}
+
+// A label's number plus one as this body reads it, 0 for a label that is not numbered - for the
+// label's own line and for a jump's operand alike, so the two cannot disagree about a spelling. A
+// second numbering in one body marks the body weird.
+pub fn numbered<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) -> u64 {
+    packed := label_number(view(s), a, e, view(o.uprefix));
+    if packed == 0 {
+        return 0;
+    }
+    scope := packed >> 32;
+    if o.lscope == 0 {
+        exchange(&mut o.lscope, scope);
+    } else if o.lscope != scope {
+        // Two numberings in one body: the numbers are not this body's alone.
+        exchange(&mut o.weird, 1);
+    }
+    return packed & 4294967295;
+}
+
+// `.gbase LINE`, between bodies: the line the next body's `.gpos` markers count from. 1 when the
+// line was one.
+pub fn gbase_line<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) -> u64 {
+    if (e - a < 8) || (s[a] != 46) || (s[a + 1] != 103) || !at(view(s), a, view(".gbase ")) {
+        return 0;
+    }
+    mut n = 0;
+    mut i = a + 7;
+    while i < e {
+        n = n * 10 + u64(s[i] - 48);
+        i += 1;
+    }
+    exchange(&mut o.gbase, n);
+    return 1;
+}
+// A body copied out of its function to be pasted into another: its `.gpos FILE LINE COL RAW` markers
+// count from the function's own base, which is not the base where it will stand, so each becomes
+// `.gposa` with the line itself. A copy that has been through here has no `.gpos` left, so doing it
+// twice changes nothing.
+pub fn absolute_positions<a>(body: &a [u8], base: u64) -> u8[] {
+    mut out = u8[];
+    mut start = 0;
     mut i = 0;
-    while i < uprefix.len() {
-        if s[at + i] != uprefix[i] {
-            return 0;
+    n := body.len();
+    while i < n {
+        if body[i] == 10 {
+            if (i - start > 6) && (body[start] == 46) && (body[start + 1] == 103) && at(view(body), start, view(".gpos ")) {
+                // `.gpos FILE ` is copied, the line is rewritten, the rest is copied.
+                mut p = start + 6;
+                while (p < i) && (body[p] != 32) {
+                    p += 1;
+                }
+                mut line = 0;
+                mut q = p + 1;
+                while (q < i) && (body[q] != 32) {
+                    line = line * 10 + u64(body[q] - 48);
+                    q += 1;
+                }
+                append(&mut out, view(".gposa"));
+                out.append(body[start + 5..p + 1]);
+                append_num(&mut out, line + base);
+                out.append(body[q..i + 1]);
+            } else {
+                out.append(body[start..i + 1]);
+            }
+            start = i + 1;
         }
         i += 1;
     }
-    at += uprefix.len();
-    if s[at] != 95 {
-        return 0;
-    }
-    at += 1;
-    mut n = 0;
-    while at < e {
-        d := s[at];
-        if (d < 48) || (57 < d) {
-            return 0;
-        }
-        n = n * 10 + (d - 48);
-        at += 1;
-    }
-    return n + 1;
+    out.append(body[start..n]);
+    return out;
 }
 
 // The marker line: `.grail_part <unit> <label prefix>`, and the unit fields it sets. 1 when the
@@ -660,7 +852,7 @@ pub fn parse<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) {
         if a < e {
             if s[e - 1] == 58 {
                 op = 100;
-                lab = label_number(view(s), a, e - 1, view(o.uprefix));
+                lab = numbered(&mut o, view(s), a, e - 1);
             } else {
                 if s[a] == 46 {
                     op = 101;
@@ -678,6 +870,9 @@ pub fn parse<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) {
                         }
                     }
                     op = opcode_key(k);
+                    if op == 0 {
+                        op = float_opcode(view(s), a, space);
+                    }
                 }
             }
         } else {
@@ -746,11 +941,38 @@ pub fn parse<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) {
     } else {
         classify(&mut o, view(s), e, e, 1);
     }
+    // A float instruction is understood only in the shapes the front end writes: no frame slot, and a
+    // register destination (an SSE register, or a general one for the conversions to integer).
+    // Anything else - a memory destination above all, which would be a store - stays unknown.
+    if is_float_op(op) {
+        n := o.k0.len() - 1;
+        if (o.k0[n] == 2) || (o.k1[n] == 2) || ((o.k1[n] != 1) && (o.k1[n] != 6)) {
+            last := o.op.len() - 1;
+            exchange(&mut o.op[last], 0);
+        }
+    }
+    // A call whose callee's arguments are known says which registers it reads (call_args): a drop
+    // helper reads rdi, not the six registers a call is otherwise assumed to, so what the caller left
+    // in %rcx is not kept alive for it. The mask rides in the call operand's register mask with bit
+    // 63 set (`reads`).
+    if (op == 15) & (comma == e) & (o.k0[o.k0.len() - 1] == 4) {
+        known := call_args(view(s), first, e);
+        if known != 0 {
+            n := o.m0.len() - 1;
+            exchange(&mut o.m0[n], known);
+        }
+    }
     // Calls to the leaf runtime accessors become pseudo-instructions expanded inline at emission:
     // 40 rt_slot, 41 rt_at (bounds-checked element address / load), 42 rt_len, 43 rt_xchg, 44 rt_atb (byte load),
     // 45 rt_push / 46 rt_pushb (inline store when capacity remains, runtime call to grow),
-    // 47 rt_slotu / 48 rt_atbu (proven in-bounds element address / byte load).
-    if (op == 15) & (comma == e) & (e - first > 5) & (e - first < 9) {
+    // 47 rt_slotu / 48 rt_atbu (proven in-bounds element address / byte load),
+    // 49 rt_slot4 / 50 rt_slot4u (the address of a 4-byte element, checked / proven),
+    // 51 rt_at4 (bounds-checked zero-extending load of a 4-byte element),
+    // 52 rt_slotw (the address of an element `rdx` bytes wide in a vector of inline records),
+    // 53 rt_aslot (the address of element `rsi` of a fixed-size array at `rdi`: `rdx` elements of
+    // `rcx` bytes, both constants; docs/design/fixed-arrays.md), 54 rt_aslotu (the same address for
+    // an index known to be in bounds: `rdi + rsi * rdx`).
+    if (op == 15) & (comma == e) & (e - first > 5) & (e - first < 10) {
         if (s[first] == 114) & (s[first + 1] == 116) & (s[first + 2] == 95) {
             mut fast = 0;
             if same_range(view(s), first, e, view("rt_slot")) {
@@ -779,6 +1001,24 @@ pub fn parse<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) {
             }
             if same_range(view(s), first, e, view("rt_atbu")) {
                 fast = 48;
+            }
+            if same_range(view(s), first, e, view("rt_slot4")) {
+                fast = 49;
+            }
+            if same_range(view(s), first, e, view("rt_slot4u")) {
+                fast = 50;
+            }
+            if same_range(view(s), first, e, view("rt_at4")) {
+                fast = 51;
+            }
+            if same_range(view(s), first, e, view("rt_slotw")) {
+                fast = 52;
+            }
+            if same_range(view(s), first, e, view("rt_aslot")) {
+                fast = 53;
+            }
+            if same_range(view(s), first, e, view("rt_aslotu")) {
+                fast = 54;
             }
             if fast != 0 {
                 // stays: the written place is indexed (`&mut o.op[last]`), and two-phase defers
@@ -840,6 +1080,9 @@ pub fn reads<a>(o: (&a Body), i: u64) -> u64 {
     src := mask_of(o.k0[i], o.v0[i], o.m0[i]);
     dst := mask_of(o.k1[i], o.v1[i], o.m1[i]);
     if op == 15 {
+        if (o.m0[i] >> 63) != 0 {
+            return o.m0[i] & all_regs();
+        }
         return arg_regs() | src;
     }
     if op == 100 || op == 101 || op == 29 || op == 32 || is_jump(op) {
@@ -881,11 +1124,30 @@ pub fn reads<a>(o: (&a Body), i: u64) -> u64 {
         || op == 45
         || op == 46
         || op == 47
-        || op == 48 {
+        || op == 48
+        || op == 49
+        || op == 50
+        || op == 51 {
         return 192;
+    }
+    if op == 52 {
+        return 196;
+    }
+    if op == 53 {
+        return 198;
+    }
+    if op == 54 {
+        return 196;
     }
     if op == 42 {
         return 128;
+    }
+    if is_float_op(op) {
+        // movd, cvttsd2si, cvtsi2sdq: the destination is written, not read.
+        if (op == 69) || (op == 70) || (op == 71) {
+            return src;
+        }
+        return src | dst;
     }
     return all_regs();
 }
@@ -916,8 +1178,14 @@ pub fn writes<a>(o: (&a Body), i: u64) -> u64 {
     if op == 45 || op == 46 {
         return caller_saved();
     }
-    if op == 47 || op == 48 {
+    if (46 < op) & (op < 55) {
         return 1;
+    }
+    if is_float_op(op) {
+        if (op == 69) || (op == 70) {
+            return dst_writes(&o, i);
+        }
+        return 0;
     }
     return all_regs();
 }
@@ -976,9 +1244,11 @@ pub fn reset<a>(o: (&a mut Body)) {
     o.m1.clear();
     exchange(&mut o.gen, u8[]);
     exchange(&mut o.dyn_pairs, u64[]);
+    exchange(&mut o.pair_widths, u64[]);
     exchange(&mut o.pair, u64[]);
     exchange(&mut o.ret2, 0);
     exchange(&mut o.weird, 0);
+    exchange(&mut o.lscope, 0);
     exchange(&mut o.zline, 0);
     exchange(&mut o.maxslot, 0);
     // The typed-IR layer is per body too: a body starts with no values, no calls and no type facts.
@@ -1024,6 +1294,9 @@ pub fn new_body() -> Body {
         gen: u8[],
         out: u8[],
         weird: 0,
+        gbase: 0,
+        inl_rel: u8[],
+        lscope: 0,
         maxslot: 0,
         table: u64[],
         base: 0,
@@ -1033,6 +1306,7 @@ pub fn new_body() -> Body {
         zfrom: 0,
         zto: 0,
         dyn_pairs: u64[],
+        pair_widths: u64[],
         pair: u64[],
         ret2: 0,
         inl_names: u8[][],
@@ -1062,7 +1336,8 @@ pub fn new_body() -> Body {
         calls: Call[],
         name: u8[],
         memo_dir: u8[],
-        memo_id: u8[]
+        memo_id: u8[],
+        known: no_known()
     };
 }
 
@@ -1274,6 +1549,8 @@ pub fn build<a, b, c, d>(o: (&a mut Body), s: &b [u8], facts: (&c llvm::Facts), 
     exchange(&mut o.ret2, 0);
     if o.name.len() != 0 {
         llvm::facts_dyn_pairs(facts, view(o.name), &mut o.dyn_pairs);
+        exchange(&mut o.pair_widths, u64[]);
+        llvm::facts_pair_widths(facts, view(o.name), &mut o.pair_widths);
         for q in o.dyn_pairs.len() {
             first := o.dyn_pairs[q] + 1;
             exchange(&mut o.dyn_pairs[q], first);
@@ -1404,14 +1681,10 @@ fn slot_ty<a, b, c, d>(o: (&a Body), facts: (&b llvm::Facts), ix: (&d FactIndex)
             width = width_of_what(k >> 8, 1);
         }
     }
-    mut pair = 0;
     for p in o.dyn_pairs.len() {
         if o.dyn_pairs[p] == slot {
-            pair = 1;
+            width = o.pair_widths[p];
         }
-    }
-    if pair != 0 {
-        width = 2;
     }
     return ty(t, width);
 }
@@ -1473,10 +1746,10 @@ pub fn count_calls<a>(o: (&a Body)) -> u64 {
     mut n: u64 = 0;
     for i in o.op.len() {
         // A call line, plus the leaf accessors `parse` re-tags from `call rt_slot` and friends into
-        // pseudo-instructions 40..48: the front end wrote them with `call_out`, so they are calls the
+        // pseudo-instructions 40..54: the front end wrote them with `call_out`, so they are calls the
         // recorder counted even when the printer inlines them.
         mut call = o.op[i] == 15;
-        if (39 < o.op[i]) & (o.op[i] < 49) {
+        if (39 < o.op[i]) & (o.op[i] < 55) {
             call = true;
         }
         if call {
@@ -1495,7 +1768,7 @@ fn append<a, b>(out: (&a mut u8[]), t: &b [u8]) {
         out.push(t[i]);
     }
 }
-fn append_num<a>(out: (&a mut u8[]), n: u64) {
+pub fn append_num<a>(out: (&a mut u8[]), n: u64) {
     mut digits = u8[];
     mut v = n;
     if v == 0 {

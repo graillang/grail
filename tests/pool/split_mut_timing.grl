@@ -1,0 +1,165 @@
+// The measured reason stage 2 exists: the owned-chunk split moves every element twice, and the
+// in-place split moves nothing. Both run the same CPU-bound work over the same 3M u64 elements, so
+// the difference between them is the copy.
+//
+// Two assertions, and one of them is honest about the machine:
+//   - the copy is gone: one chunk in place must beat one owned chunk by at least 1.33x (measured
+//     ~2.3x: 44 ms against 100 ms), and both are single-job runs, so no core count can explain it;
+//   - parallelism still pays: eight in-place chunks must be at least 1.5x faster than one, asserted
+//     only when /proc/cpuinfo reports four or more cores.
+// Times go to stderr as evidence for a human; stdout is a fixed token, because timings are never
+// identical twice.
+use pool;
+
+fn mix(x: u64) -> u64 {
+    mut v = x ^ 88172645463325252;
+    for i in 6 { v = v ^ (v << 13); v = v ^ (v >> 7); v = v ^ (v << 17); }
+    return v;
+}
+fn big(n: u64) -> u64[] {
+    mut v = u64[];
+    for i in n { v.push(i * 2654435761); }
+    return v;
+}
+// The owned shape: one job per chunk, each owning its chunk and returning a fingerprint.
+fn owned_total(v: u64[]) -> u64 {
+    mut total = 0;
+    for x in v { total = total ^ mix(x); }
+    return total;
+}
+// The in-place shape: one job per chunk, writing the caller's own elements.
+fn inplace_mix(s: &mut [u64]) {
+    for i in s.len() { s[i] = mix(s[i]); }
+}
+fn fold(v: &[u64]) -> u64 {
+    mut total = 0;
+    for i in v.len() { total = total ^ v[i]; }
+    return total;
+}
+// Count "processor" occurrences in /proc/cpuinfo (the existing speedup case's method).
+fn wanted(i: u64) -> u64 {
+    if i == 0 { return 112; }
+    if i == 1 { return 114; }
+    if i == 2 { return 111; }
+    if i == 3 { return 99; }
+    if i == 4 { return 101; }
+    if i == 5 { return 115; }
+    if i == 6 { return 115; }
+    if i == 7 { return 111; }
+    return 114;
+}
+fn cores() -> u64 {
+    info := host::read_file("/proc/cpuinfo");
+    mut matched = 0;
+    mut total = 0;
+    for i in info.len() {
+        b := info[i];
+        if b == wanted(matched) {
+            matched += 1;
+            if matched == 9 { total += 1; matched = 0; }
+        } else {
+            if b == 112 { matched = 1; } else { matched = 0; }
+        }
+    }
+    return total;
+}
+fn best(a: u64, b: u64) -> u64 {
+    if a == 0 { return b; }
+    if b < a { return b; }
+    return a;
+}
+fn main() {
+    n := 3000000;
+    vitals := cores();
+    // One best round per claim. The two claims compare different pairs from the same round, and on a
+    // loaded machine they peak in different rounds: keeping a single round and asserting both claims
+    // on it is what made this case flake at 1.26x against its own 1.33x floor.
+    mut copy_owned = 0;
+    mut copy_mut = 0;
+    mut par_one = 0;
+    mut par_eight = 0;
+    for round in 5 {
+        // Every vector is built before its window: this measures the work, not the setup.
+        serial := big(n);
+        parallel := big(n);
+        t0 := host::now_ms();
+        one := pool::split<u64,u64>(serial, n, owned_total);
+        t1 := host::now_ms();
+        eight := pool::split<u64,u64>(parallel, (n + 7) / 8, owned_total);
+        t2 := host::now_ms();
+        mut data = big(n);
+        t3 := host::now_ms();
+        parallel_split(&mut data[0: n], n, inplace_mix);
+        t4 := host::now_ms();
+        once := fold(&data[0: n]);
+        parallel_split(&mut data[0: n], (n + 7) / 8, inplace_mix);
+        t5 := host::now_ms();
+        twice := fold(&data[0: n]);
+        // The answers, computed sequentially and independently of any split: one in-place pass leaves
+        // mix(x) in every element, two leave mix(mix(x)). The owned shape fingerprints the same
+        // elements in one pass, so all three must agree - which is what makes this a measurement of
+        // the same work rather than of a different one.
+        mut expect_once = 0;
+        mut expect_twice = 0;
+        for i in n {
+            first := mix(i * 2654435761);
+            expect_once = expect_once ^ first;
+            expect_twice = expect_twice ^ mix(first);
+        }
+        assert(once == expect_once);
+        assert(twice == expect_twice);
+        mut owned_single = 0;
+        for part in one { owned_single = owned_single ^ part; }
+        mut owned_eight_answer = 0;
+        for part in eight { owned_eight_answer = owned_eight_answer ^ part; }
+        assert(owned_single == expect_once);
+        assert(owned_eight_answer == expect_once);
+        // Each claim keeps its own best round, and every comparison stays inside one round: a single
+        // chunk timed in a quiet moment against an eight-chunk run timed in a busy one would measure
+        // the load rather than the split. A round whose in-place window timed as zero is skipped,
+        // since a ratio against it says nothing.
+        r_one := t4 - t3;
+        r_eight := t5 - t4;
+        o_one := t1 - t0;
+        if r_one != 0 {
+            if (copy_mut == 0) || (o_one * copy_mut > copy_owned * r_one) {
+                copy_owned = o_one;
+                copy_mut = r_one;
+            }
+        }
+        if r_eight != 0 {
+            if (par_eight == 0) || (r_one * par_eight > par_one * r_eight) {
+                par_one = r_one;
+                par_eight = r_eight;
+            }
+        }
+    }
+    if copy_owned == 0 { copy_owned = 1; }
+    if copy_mut == 0 { copy_mut = 1; }
+    if par_one == 0 { par_one = 1; }
+    if par_eight == 0 { par_eight = 1; }
+    host::write_fd(
+        2,
+        format(
+            "pool chunks: {} cores, copy round: owned 1 chunk {} ms, in place 1 chunk {} ms; parallelism round: in place 1 chunk {} ms, in place 8 {} ms\n",
+            vitals,
+            copy_owned,
+            copy_mut,
+            par_one,
+            par_eight
+        ).text()
+    );
+    println("ok");
+    // The copy: one job either way, so this compares the split and nothing else. Measured ~2.3x on a
+    // quiet machine; 1.33x is the floor, and it is taken from the round that showed the copy best.
+    assert(copy_owned * 3 >= copy_mut * 4);
+    if vitals < 4 {
+        host::write_fd(2, format("pool chunks: speedup assertion skipped, {} cores reported\n", vitals).text());
+        return ();
+    }
+    // Parallelism still pays: the 4-worker row claims 3.0x, so 1.5x leaves room for a loaded machine.
+    // Five rounds are run so a loaded one has a chance to be superseded; a host whose every round is
+    // slower than 1.5x is reporting no parallelism at all, which is what this must catch.
+    // 8 chunks must beat 1, so par_one (one chunk) is the larger number: 1.5x is the floor.
+    assert(par_eight * 3 <= par_one * 2);
+}

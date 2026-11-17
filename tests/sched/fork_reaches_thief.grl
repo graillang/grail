@@ -1,0 +1,33 @@
+// A fork made while the other workers are parked must reach one of them. The branch that stays
+// waits (at most half a second) until a thief has started the forked one; with no other work about,
+// a fork that no worker is woken for strands until that timeout. That happened when a worker that
+// found work while searching was still counted as searching while it ran it: its own forks then
+// saw "someone is searching" and woke nobody. 200 rounds, each after the machine went idle; the
+// count of rounds that timed out must be zero.
+use host;
+use pool;
+
+fn round(n: u64, unused: u64) -> u64 {
+    started := Atomic::new(0);
+    flag := &started;
+    seen := &started;
+    p := pool::join<u64,u64>(|| -> u64 { flag.store(1); return 1; }, || -> u64 {
+        t0 := host::now_ms();
+        while seen.load() == 0 && host::now_ms() - t0 < 500 {}
+        if seen.load() == 0 { return 1; }
+        return 0;
+    });
+    return p.second;
+}
+fn body<s>(sc: (&s Scope<u64>), rounds: u64) -> u64 {
+    mut stranded = 0;
+    for i in rounds {
+        t := spawn(sc, i, round);
+        stranded += join(t);
+        host::sleep_ms(2);
+    }
+    return stranded;
+}
+fn main() {
+    println(task_scope(200, body));
+}

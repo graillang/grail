@@ -18,7 +18,7 @@ Grail has no traits, so the protocol is structural: the compiler looks for an in
 that shape. A plain `for` over a vector is unaffected and compiles to the same counted loop as
 before.
 
-An element that is a tuple can be opened in the header: `for (i, x) in iter::enumerate(it)` binds
+An element that is a tuple can be opened in the header: `for (i, x) in it.enumerate()` binds
 both halves, and `for (_, value) in indexed` skips one. The pattern has to name exactly as many
 fields as the element has; a non-tuple element is refused naming its type, and an owned field such
 as a `u8[]` moves out of the element, whose record is then freed.

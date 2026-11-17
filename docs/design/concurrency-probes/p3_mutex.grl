@@ -1,0 +1,20 @@
+use host;
+struct Shared { m: Mutex<u64>, spins: Atomic<u64> }
+fn hold(v: &mut u64, ms: u64) -> u64 { host::sleep_ms(ms); *v += 1; return *v; }
+fn bump(v: &mut u64, n: u64) -> u64 { *v += n; return *v; }
+fn holder(n: u64, sh: &Shared) -> u64 { return sh.m.lock_with(300, hold); }
+fn waiter(n: u64, sh: &Shared) -> u64 { host::sleep_ms(20); return sh.m.lock_with(1, bump); }
+fn body<s>(sc: (&s Scope<&Shared>), sh: &Shared) -> u64 {
+    a := spawn(sc, 0, holder);
+    mut hs = Task<u64>[];
+    for i in 8 { hs.push(spawn(sc, i, waiter)); }
+    mut t = join(a);
+    while let Some(h) = hs.pop() { t += join(h); }
+    return t;
+}
+fn main() {
+    sh := Shared { m: Mutex::new(0), spins: Atomic::new(0) };
+    t0 := host::now_ms();
+    r := task_scope(&sh, body);
+    println(format("holder sleeps 300 ms inside lock_with, 8 tasks wait for the lock: wall {} ms", host::now_ms() - t0));
+}

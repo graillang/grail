@@ -1,0 +1,68 @@
+use rc;
+// The other routes by which a reference to a record is made: a pattern that binds by reference, a
+// loop over `&v`, a closure that captures by reference, a method receiver on a field of a field, an
+// `Rc`, and a reference stored in another record.
+struct Inner {
+    n: u64,
+    label: string
+}
+struct Outer {
+    a: Inner,
+    b: Inner,
+    spare: Inner?
+}
+struct Holder<a> {
+    held: (&a Inner)
+}
+impl Inner {
+    fn score(self: &Self) -> u64 {
+        return self.n + self.label.len();
+    }
+    fn add(self: &mut Self, k: u64) {
+        self.n = self.n + k;
+    }
+}
+fn total<a>(o: (&a Outer)) -> u64 {
+    mut t = o.a.score() + o.b.score();
+    match &o.spare {
+        Some(s) => { t = t + s.score(); },
+        None => {},
+    }
+    return t;
+}
+fn main() -> u64 {
+    mut o = Outer { a: Inner { n: 1, label: "a" }, b: Inner { n: 2, label: "bb" }, spare: Some(Inner { n: 3, label: "ccc" }) };
+    println(total(&o));
+    o.a.add(10);
+    o.b.add(20);
+    match &mut o.spare {
+        Some(s) => { s.add(30); },
+        None => {},
+    }
+    println(total(&o));
+    match &o {
+        Outer { a, b, .. } => { println("{} {}", a.score(), b.label); },
+    }
+
+    mut v = Inner[Inner { n: 1, label: "x" }, Inner { n: 2, label: "yy" }];
+    for item in &mut v {
+        item.add(100);
+    }
+    mut sum = 0;
+    for item in &v {
+        sum = sum + item.score();
+    }
+    println(sum);
+
+    h := Holder { held: &v[1] };
+    println(h.held.score());
+
+    extra := Inner { n: 7, label: "seven" };
+    mut f = |k: u64| -> u64 extra.score() + k;
+    println(f(1));
+
+    shared := rc::new(Inner { n: 40, label: "rc" });
+    other := shared.clone();
+    println("{} {}", shared.get().score(), other.get().label);
+    return 0;
+}

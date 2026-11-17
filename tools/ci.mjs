@@ -546,8 +546,12 @@ function lint() {
   }
   check('LSP/debugger/profiler plan exists', existsSync(join(root, 'docs/tooling/lsp-debugger-profiler.md')));
   check('FFI test runner exists', existsSync(join(root, 'tools/test-ffi.mjs')));
+  check('the gate runs the jobserver test', readFileSync(join(root, 'tools/gate.sh'), 'utf8').includes('jobs-test') && existsSync(join(root, 'tools/jobs-test.mjs')));
+  check('the gate compiles the corpus with no unit store, an empty one and a warm one', readFileSync(join(root, 'tools/gate.sh'), 'utf8').includes('tools/test-native.mjs x86_64 --unit-identity') && readFileSync(join(root, 'tools/test-native.mjs'), 'utf8').includes('--unit-identity'));
   check('the compile-speed benchmark exists and the gate runs it', existsSync(join(root, 'tools/compile-bench.mjs')) && readFileSync(join(root, 'tools/gate.sh'), 'utf8').includes('tools/compile-bench.mjs'));
+  check('the gate runs the benchmarks against other languages, one at a time after the rest', (text => ['bench-rivals', 'sched-rivals', 'compile-rivals'].every(tool => new RegExp(`leg ${tool} bun tools/${tool}\\.mjs[^\\n]*\\nwait\\n`).test(text) && existsSync(join(root, `tools/${tool}.mjs`))) && text.indexOf('leg bench-rivals') > text.indexOf('leg runtime-bench-llvm'))(readFileSync(join(root, 'tools/gate.sh'), 'utf8')));
   check('the runtime benchmark against C runs in the gate on both backends', (text => text.includes('runtime-bench-native') && text.includes('runtime-bench-llvm'))(readFileSync(join(root, 'tools/gate.sh'), 'utf8')));
+  check('the gate runs the LLVM backend on aarch64 and riscv64: vec every gate and one tree-derived third', (text => ['rev-parse \'HEAD^{tree}\'', 'GRAIL_BACKEND=llvm bun tools/test-native.mjs $arch --filter vec', 'GRAIL_BACKEND=llvm GRAIL_TEST_SHARD=$xshard/3 bun tools/test-native.mjs $arch'].every(part => text.includes(part)) && /for arch in aarch64 riscv64; do\n  leg llvm_\$\{arch\}_vec/.test(text))(readFileSync(join(root, 'tools/gate.sh'), 'utf8')));
   check('C header importer exists', existsSync(join(root, 'compiler/bindgen.grl')));
   check('C header importer is in the compiler source list',
     readFileSync(join(root, 'tools/native.mjs'), 'utf8').includes("'bindgen'"));
@@ -583,6 +587,7 @@ function lint() {
   check('LSP server exists', existsSync(join(root, 'tools/lsp/main.grl')));
   check('LSP stdio test exists', existsSync(join(root, 'tools/lsp-test.mjs')));
   check('CI runs the LSP stdio test', readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8').includes('tools/lsp-test.mjs'));
+  check('the gate runs the LSP stdio test', /^for t in [^;\n]*\blsp-test\b[^;\n]*; do$/m.test(readFileSync(join(root, 'tools/gate.sh'), 'utf8')));
   check('VS Code extension manifest exists', existsSync(join(root, 'editors/vscode/package.json')));
   check('TextMate grammar for .grl exists', existsSync(join(root, 'editors/vscode/syntaxes/grail.tmLanguage.json')));
   const grammarTest = spawnSync(process.execPath, [join(root, 'tools/grammar-test.mjs')], { encoding: 'utf8' });

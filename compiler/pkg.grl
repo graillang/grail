@@ -1951,6 +1951,9 @@ struct Manifest {
     version: u8[],
     grl_version: u8[],
     entry: u8[],
+    // `overflow = "checked" | "wrap"`, or empty: the integer overflow mode of a build whose root this
+    // package is. A dependency's key is not read for its build (one mode per build).
+    overflow: u8[],
     registry: u8[],
     deps: Dep[],
     text: u8[]
@@ -2019,6 +2022,9 @@ fn package_key_ok<a>(key: &a [u8]) -> bool {
         return true;
     }
     if eqb(view(key), view("repository")) {
+        return true;
+    }
+    if eqb(view(key), view("overflow")) {
         return true;
     }
     return false;
@@ -2265,6 +2271,7 @@ pub fn manifest_parse<a>(text: &a [u8]) -> Manifest |? Err {
     mut version = u8[];
     mut grl_version = u8[];
     mut entry = u8[];
+    mut overflow = u8[];
     for i in pkg.entries.len() {
         mut e = &pkg.entries[i];
         if !package_key_ok(view(e.key)) {
@@ -2272,6 +2279,20 @@ pub fn manifest_parse<a>(text: &a [u8]) -> Manifest |? Err {
                 e.line,
                 catb(view("unknown [package] key <"), view(catb(view(e.key), view(">"))))
             );
+        }
+        if eqb(view(e.key), view("overflow")) {
+            ev := &e.value;
+            match ev {
+                TStr(s) => {
+                    if !eqb(view(s), view("checked")) && !eqb(view(s), view("wrap")) {
+                        return err(e.line, copyb(view("[package] overflow must be \"checked\" or \"wrap\"")));
+                    }
+                    overflow = copyb(view(s));
+                },
+                _ => {
+                    return err(e.line, copyb(view("[package] overflow must be \"checked\" or \"wrap\"")));
+                }
+            }
         }
         if eqb(view(e.key), view("name"))
             || eqb(view(e.key), view("version"))
@@ -2398,6 +2419,7 @@ pub fn manifest_parse<a>(text: &a [u8]) -> Manifest |? Err {
         version: version,
         grl_version: grl_version,
         entry: entry,
+        overflow: overflow,
         registry: registry,
         deps: deps,
         text: copyb(view(text)),
@@ -2420,6 +2442,11 @@ pub fn manifest_report<a>(text: &a [u8]) -> u8[] {
             if m.grl_version.len() != 0 {
                 pushb(&mut out, view("grl-version "));
                 pushb(&mut out, view(m.grl_version));
+                out.push('\n');
+            }
+            if m.overflow.len() != 0 {
+                pushb(&mut out, view("overflow "));
+                pushb(&mut out, view(m.overflow));
                 out.push('\n');
             }
             if m.registry.len() != 0 {
@@ -4008,10 +4035,14 @@ pub struct Plan {
     version: u8[],
     entry: u8[],
     modules: u8[][],
-    registry: u8[]
+    registry: u8[],
+    // The root package's `overflow` key ("checked", "wrap" or empty), and the dependencies whose
+    // own key this build does not use.
+    overflow: u8[],
+    ignored_overflow: u8[][]
 }
 fn plan_new() -> Plan {
-    return Plan { name: u8[], version: u8[], entry: u8[], modules: u8[][], registry: u8[] };
+    return Plan { name: u8[], version: u8[], entry: u8[], modules: u8[][], registry: u8[], overflow: u8[], ignored_overflow: u8[][] };
 }
 // The compiler's own version, which `grl-version` requirements are checked against. One literal,
 // used by `grail version` too: a release bumps it here.
@@ -4053,6 +4084,7 @@ fn empty_manifest() -> Manifest {
         version: u8[],
         grl_version: u8[],
         entry: u8[],
+        overflow: u8[],
         registry: u8[],
         deps: Dep[],
         text: u8[],
@@ -4659,6 +4691,7 @@ pub fn plan_at(dir: u8[], dev: u64, err: (&a mut u8[])) -> Plan {
     out.name = copyb(view(m.name));
     out.version = copyb(view(m.version));
     out.entry = path_join(view(dir), view(m.entry));
+    out.overflow = copyb(view(m.overflow));
     // The root's own sources first (minus the entry), then every locked package in lock order.
     root_files := src_files(view(dir));
     for i in root_files.len() {
@@ -4679,6 +4712,11 @@ pub fn plan_at(dir: u8[], dev: u64, err: (&a mut u8[])) -> Plan {
         pkg_dir := node_dir(&mut store, &n, view(dir), &mut err);
         if pkg_dir.len() == 0 {
             return plan_new();
+        }
+        mut dep_err = u8[];
+        dm := load_manifest_at(view(pkg_dir), &mut dep_err);
+        if dm.overflow.len() != 0 {
+            out.ignored_overflow.push(copyb(view(n.name)));
         }
         files := src_files(view(pkg_dir));
         if files.len() == 0 {

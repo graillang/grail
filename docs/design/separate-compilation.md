@@ -38,7 +38,7 @@ version, flags)`.
 
 ### Interface contents
 
-A versioned, length-counted record stream with one writer and one reader (format 5, built; see
+A versioned, length-counted record stream with one writer and one reader (format 6, built; see
 "Format 4 as built" below). This section described a line-oriented text format when it was written;
 that shape was replaced because its reader was a hand-written parser of a file the compiler had just
 written - two implementations of one format, which is exactly what the record stream removes. The
@@ -70,7 +70,7 @@ Typed specialisation means the *body* must be available at every instantiation s
    separate compilation, and it needs exactly the typed IR that LLVM stage 3 wants — so it should be
    built once, not twice.
 3. **Monomorphic-only.** Instantiate generics inside their defining module and cross the boundary
-   with monomorphic symbols. Efficient, but it forbids `vecs::sort_by(&mut v, f)` from another
+   with monomorphic symbols. Efficient, but it forbids `v.sort_by(f)` (from `lib/vecs.grl`) in another
    module, which the ports already use.
 
 **Staged answer:** v1 ships option 1 — interfaces give checked surfaces, correct incrementality and
@@ -109,7 +109,7 @@ than misread.
  source "tests/interfaces/pair.grl"
  sha256 "ad1f2b3cf421decab61ea22f7dfc572fec79a74a3078b3ef330f4e49a94db2d0"
  mode typed_refs=1 default_u64=1 overflow=checked target=x86_64
- abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0
+ abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline
  unsafe 0
  std 0
  host 0
@@ -536,8 +536,10 @@ evaluated once, in the defining module's context, and would mean something else 
 are keyed by index rather than written in order, so they cannot desynchronise from the parameter list,
 and a parameter that gains a default does not change any other parameter's record.
 
-The module record also carries the **`dyn` ABI** - `abi dyn pair size = 16 align = 8 word0 = data
-word1 = vtable drop = 0`, one length-counted string holding exactly what `iface_dyn_abi()` returns.
+The module record also carries the **ABI line** - `abi dyn pair size = 16 align = 8 word0 = data
+word1 = vtable drop = 0 ref record = address record plain = inline`, one length-counted string holding exactly what
+`iface_dyn_abi()` returns. Its last clause says what a reference to a record is (the record's own
+address, docs/design/unboxed-values.md); a stage that changes a layout changes this line.
 A `&dyn I` in a signature or a field crosses a module boundary as a pair, so two modules built for
 different layouts must not link: the reader compares the field with `iface_dyn_abi()` and refuses a
 file that states another one (`was written for another \`dyn\` ABI (...); this compiler builds
@@ -614,7 +616,7 @@ to look like. Nothing else should parse the bytes: a tool that needs to know wha
 runs the dump, and a test that needs to *corrupt* one changes a byte it located through the record
 framing (`tools/interface-test.mjs` does exactly that). The dump's shape is as stable as the format
 version: a field added to a record appears on the line of the record it belongs to, and a script that
-reads the dump sees the same grammar across format 5 files.
+reads the dump sees the same grammar across format 6 files.
 
 ### The surface, computed structurally
 
@@ -636,8 +638,8 @@ half-installed: the prologue, the framing of every record, the trailer's digest 
 
 1. **not an interface** - no `GRIF` header;
 2. **old text format** - a file that begins `// grail-interface`: `was written in the old text
-   interface format; this compiler reads interface format 5. Re-emit it with \`grail check --interface DIR\``;
-3. **wrong version** - `was written in interface format 3; this compiler reads format 5` (and, for a
+   interface format; this compiler reads interface format 6. Re-emit it with \`grail check --interface DIR\``;
+3. **wrong version** - `was written in interface format 3; this compiler reads format 6` (and, for a
    newer file, `by a newer compiler`);
 4. **truncated** - `is truncated: <record> needs N more bytes and the file ends there`, or `a record
    says it is longer than the rest of the file`;
@@ -1038,7 +1040,7 @@ object path here, so they build the whole program, and an `--interface` build ch
 against its interface in one run.
 
 `tools/split-test.mjs` builds a project with a generic from another module and the standard library's
-`vecs::sort` both ways and requires the same output from eight separate runs, on x86-64, AArch64 and
+`v.sort()` (from `lib/vecs.grl`) both ways and requires the same output from eight separate runs, on x86-64, AArch64 and
 RISC-V (the cross targets are run under qemu).
 
 With `--cache`, each module's run is keyed by its inputs alone: the build's flags, compiler and

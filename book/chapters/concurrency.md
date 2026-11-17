@@ -7,29 +7,40 @@ the item, the result, the context *and* the closure's captured environment each 
 transferable (may move to another thread) and, where several workers share them, shareable. A
 foreign handle is neither until its declaration says so, so a handle captured by a closure is
 refused by name, with the capture and the path that reached it in the message. Results must hold no
-borrows. The library's opt-in generic bounds are still spelled `Send`/`Share`.
+borrows. The library's generic bounds are spelled `Send`, `Share` and `Owned`, and a closure
+parameter states the same bounds on its type: `pool::map` takes `f: Fn<Share>(T) -> U`,
+`pool::spawn` takes `f: FnMut<Send, Owned>() -> R` (see "Saying what a closure may capture" in the
+closures chapter). A wrapper that takes a bare `Fn(..)` cannot pass it on to a worker: its type no
+longer shows the captures the worker would reach.
 
 {{example:concurrency}}
 
-Behind `parallel_map` sits one process-wide pool of worker threads that steal work from each
-other, so a second call pays no thread-creation cost and a nested call reuses the same pool. For
+Behind `parallel_map` are the scheduler's worker threads, one per CPU - the same ones that run
+tasks - stealing work from each other, so a call pays no thread-creation cost, a nested call uses
+the same workers, and the calling thread runs leaves itself instead of sleeping. For
 `T[]`-shaped work, `lib/pool.grl` wraps it: `pool::map(items, f)` is the per-element form,
-`pool::run(count, f)` gives job `i` to `f(i)`, `pool::for_chunks(data, chunks, f)` consumes a vector
-and hands each job one contiguous owned chunk, and `pool::join(a, b)` runs two branches and returns
-both owned results. All of them state the same rule: everything a job's closure touches it owns, and
-results come back in input order whatever order the jobs finish in. See
+`pool::run(count, f)` gives job `i` to `f(i)`, `pool::split(data, grain, f)` consumes a vector
+and hands each job one contiguous owned piece of at most `grain` elements, `pool::range(n, grain, f)`
+calls `f(lo, hi)` per piece of `0..n`, `pool::reduce(n, grain, zero, leaf, merge)` folds the pieces'
+results in index order, and `pool::join(a, b)` forks `a` for any worker to take, runs `b` on the calling thread, and returns
+both owned results - if no worker took `a`, the caller runs it too, so a join costs little when
+there is nobody free to help. All of them state the same rule: everything a job's closure touches it owns, and
+results come back in input order whatever order the jobs finish in. And the pieces depend on the
+length and the grain only, never on the number of cores, so a floating-point `reduce` prints the
+same bits on a laptop and on a 64-core server. See
 `docs/design/parallelism.md`.
 
-`parallel_for_chunks(&mut data[a: b], chunks, f)` is the in-place form of the chunked one: the
-compiler splits an exclusive slice into disjoint exclusive chunks and hands each job `&mut [T]` over
-its own elements, so nothing is moved or copied - the same 3M-element pass that costs ~100 ms
-through `for_chunks` costs ~44 ms here, as one job. The split is `size = ceil(n/chunks)`, chunk `k`
-being `[k*size, min(n, k*size+size))`, so disjointness and coverage are arithmetic rather than a
-checked property. The `&mut` slice is the whole vector's loan, so no capture in the callback can
+`parallel_split(&mut data[a: b], grain, f)` is the in-place form of the owned one: the compiler
+splits an exclusive slice into disjoint exclusive pieces of at most `grain` elements and hands each
+job `&mut [T]` over its own elements, so nothing is moved or copied - the same 3M-element pass that
+costs ~100 ms through `pool::split` costs ~44 ms here, as one job. Piece `k` is
+`[k*grain, min(n, (k+1)*grain))`, so disjointness and coverage are arithmetic rather than a checked
+property. The `&mut` slice is the whole vector's loan, so no capture in the callback can
 reach that data, and the slice a callback holds has its own length, so an index past the chunk is a
-bounds check rather than a write into a neighbour. `pool::chunks_mut(data, chunks, f)` wraps it.
+bounds check rather than a write into a neighbour. `pool::split_mut(data, grain, f)` wraps it;
+`grain` is a `u64 where grain > 0`, so a zero grain is refused where it is written.
 
-{{example:pool-chunks-mut}}
+{{example:pool-split-mut}}
 
 `parallel_spawn(f)` returns a `Job<R>` you can wait on later with `parallel_join(job)`, or
 `pool::spawn`/`pool::wait`. A handle may outlive the statement that made it, and even the frame: its
@@ -96,14 +107,55 @@ something a program asks for with `scope.cancel()` rather than a side effect of 
 
 General `async`/`await` syntax is not provided; the scope and task APIs are the current surface.
 
+### Threads of your own
+
+A task runs on whichever scheduler worker picks it up. Some work must not: the thread that owns a
+window or a GL context, an audio callback's thread, a frame loop that has to wake on time. For that
+there is `thread::spawn(config, closure)`, an OS thread that runs one closure and is nothing else.
+
+{{example:threads}}
+
+A thread is **not a worker**. Nothing is stolen onto it, `host::worker_id()` is 0 on it, and a wait -
+a lock, a sleep, a read - blocks it in the kernel instead of parking a task. That is the point: its
+latency is the operating system's and yours, not the scheduler's. It reaches the scheduler the way
+`main` does, by opening a `task_scope` or calling into `pool`.
+
+- **Joined by default.** `Thread<R>` is move-only and its drop joins, as a `pool::Job<R>`'s drop
+  waits. `thread::join(t)` takes the owned result; `thread::detach(t)` is the one way to let a
+  thread outlive its handle, and a detached thread still running when `main` returns does not keep
+  the process alive (the exit-time allocation check is not made in that case - the thread's
+  allocations are still its own).
+- **A failure is contained**, exactly like a task's: the thread's stack is discarded whole, the
+  thread ends, `try_join` returns the `TaskFailure` and `join` re-raises it. What the dead frames
+  held stays held - a `Mutex` locked inside `lock_with` on that stack is never unlocked, for a
+  thread as for a task - so contain failures you expect, do not rely on them. On the main thread a
+  failure still ends the process.
+- **`Config`** asks the OS for a stack size, a set of processors and a priority, and those are
+  contracts: when the OS refuses one, `spawn` returns a `thread::Error` saying which and why, and
+  the closure does not run. The name is a label: the OS shows what it can (15 bytes on Linux) and
+  the rest is cut. The closure always runs on a guard-paged stack of the size asked for (1 MiB by
+  default), and running off its end is the same named `stack overflow` a task reports.
+- **`thread::Ctx`** is lent to the thread's closure, and `thread::with_current` lends the calling
+  thread's (the main thread has one; a task or a pool job gets `None`). It can be neither sent nor
+  shared, so no code that might run on another thread can hold one - which is what makes
+  `thread::Local<T>` safe: `local.with(ctx, |value| ...)` reads this thread's own value, made the
+  first time and dropped when the thread ends.
+- **`thread::sleep_until(instant)`** sleeps to a point on the monotonic clock rather than for a
+  duration, so a loop that sleeps to the next frame does not drift by the time the frame took.
+
+Not here yet: threads that borrow from the caller's frame (`thread::scope`), and the compiler does
+not yet refuse a `spawn` closure that captures a borrow or a thread-affine value - both wait for
+bounds on closure types. On macOS `spawn` returns `Unsupported`: this runtime cannot start threads
+there.
+
 ## What this month added
 
 Three things, and one of them removed work rather than adding it.
 
-- **In-place chunks.** `parallel_for_chunks(&mut [T], chunks, f)` splits the caller's own slice and
+- **In-place chunks.** `parallel_split(&mut [T], grain, f)` (then a chunk count, now a grain) splits the caller's own slice and
   gives each job an exclusive `&mut [T]` over its own elements, so the job that used to move every
   element into a chunk now writes the elements where they are. Measured on 3M `u64` with one job:
-  about 100 ms through `pool::for_chunks`, about 44 ms in place; with eight chunks on eight workers,
+  about 100 ms through the owned split (`pool::split`), about 44 ms in place; with eight chunks on eight workers,
   about 67 ms against 11 ms. The pass has no copy to pay for, which is where the difference comes
   from - it is not a scheduling improvement.
 - **A job handle.** `parallel_spawn(f) -> Job<R>` and `parallel_join(h) -> R` are spawn-then-wait as
@@ -129,9 +181,16 @@ Three things, and one of them removed work rather than adding it.
   refuses to drop an outcome that was never looked at. `docs/design/task-failure-containment.md`,
   decision B5a.
 
-What it still does not do: a *pool job*'s failure is still a process abort (a job has no scheduler
-frame to return to and no scope to report into), there are no dependency edges between jobs, and a
-graph of asset jobs can still starve interactive work because the pool has one queue class.
+A job that waits - sleeps, reads a descriptor, joins a task - does not hold a worker: it parks the
+way a task does and another worker's job runs meanwhile. A thread waiting in a join helps only with work its own
+forked job created, so joining while holding a `Mutex` is safe unless that work takes the same lock.
+
+A failure inside a parallel call is contained the same way: the other branches finish, the
+failure is raised again where the call joins, and inside a task `try_join` reports it with the
+statement that failed. From `main` it still ends the program, naming that statement.
+
+What it still does not do: there are no dependency edges between jobs, and a graph of asset jobs can still starve interactive
+work because there is one queue class.
 `docs/design/parallelism.md` states each of those with the reason.
 
 **Try it:** remove `shared.total.lock_with(1, add);` and compare the two totals.

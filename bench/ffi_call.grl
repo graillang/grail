@@ -1,0 +1,43 @@
+// The cost of a foreign call: 10M calls of libc's `labs` (a few instructions), timed, so the
+// per-call overhead of what the runtime adds around a foreign call is visible. Stage 6's bar: the
+// "in a foreign call" marker may add at most 2 ns per call. An engine makes tens of thousands of
+// Vulkan calls a frame.
+use host;
+
+extern "C" lib "c" fn labs(x: i64) -> i64;
+
+fn main() {
+    n := 10000000;
+    mut acc: i64 = 0;
+    mut best = 18446744073709551615;
+    for round in 5 {
+        t0 := host::now_us();
+        mut i: i64 = 0;
+        while i < 10000000 {
+            unsafe {
+                acc = acc + labs(i - 5000000);
+            }
+            i += 1;
+        }
+        t := host::now_us() - t0;
+        if t < best { best = t; }
+    }
+    // The same loop without the call: what is left is the call itself.
+    mut bare = 18446744073709551615;
+    for round in 5 {
+        t0 := host::now_us();
+        mut i: i64 = 0;
+        while i < 10000000 {
+            acc = acc + (i - 5000000);
+            i += 1;
+        }
+        t := host::now_us() - t0;
+        if t < bare { bare = t; }
+    }
+    // Times go to stderr, the checksum to stdout: tools/bench.mjs compares stdout with the C twin's.
+    host::write_fd(2, format("ffi_call {} ps\n", best * 1000000 / n).text());
+    mut call = 0;
+    if bare < best { call = best - bare; }
+    host::write_fd(2, format("ffi_call_only {} ps\n", call * 1000000 / n).text());
+    println("checksum {}", acc);
+}

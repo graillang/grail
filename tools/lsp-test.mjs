@@ -244,7 +244,7 @@ const URI = 'file:///virtual/session.grl';
   const arity = await client.change(URI, 4, WRONG_ARITY);
   equal(arity.params.diagnostics.length, 1, 'the arity error is reported');
   equal(arity.params.diagnostics[0].range.start.line, 4, 'line 5 (1-based) is reported as line 4');
-  ok(arity.params.diagnostics[0].message.includes('argument count'), `arity message: ${arity.params.diagnostics[0].message}`);
+  ok(arity.params.diagnostics[0].message.includes('leaves `b` without an argument'), `arity message: ${arity.params.diagnostics[0].message}`);
 
   equal(await client.stop(), 0, 'clean exit');
   equal(client.stderr, '', 'no stderr noise');

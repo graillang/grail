@@ -55,16 +55,13 @@ joined before the call returns. Therefore no task can outlive borrowed data. Che
 T and R are Send, the context is Share and a plain value, shared reference or readonly view,
 R holds no borrows, and borrowed items are references whose exclusive referents hold no borrows.
 
-Runtime: `parallel_map` is a client of the process-wide work-stealing job pool
-(`docs/design/parallelism.md`, stage 1). The pool's workers are OS threads created once with
-`clone` (1 MiB stacks with a guard page) and parked on a futex when idle; the caller does not
-participate on a worker thread but never needs to, because the workers drain the queue. The map
-splits its items into a few contiguous owned ranges per worker and submits one job per range, so
-stealing balances uneven items; results are written into their input slots, so `out` is in input
-order whatever order the jobs finish in. The call waits for every job it submitted, and its
-allocations are released before it returns. Worker count defaults to max(4, available CPUs),
-capped at 64, and `GRAIL_POOL_WORKERS` overrides it. Allocation is serialized by the allocator
-lock.
+Runtime: `parallel_map` forks jobs on the scheduler's own workers (`docs/design/scheduler.md`,
+"Jobs") - the same threads that run green tasks; there is no separate pool. The map splits its
+items into a few contiguous owned ranges per worker and forks them by halving, the caller runs
+leaves itself and takes back any fork nobody stole, and stealing balances uneven items; results
+are written into their input slots, so `out` is in input order whatever order the leaves finish
+in. Every fork is joined before the call returns. The worker count is one per CPU (floor two,
+ceiling 64) and `GRAIL_WORKERS` overrides it.
 
 Tests (`compiler/tests/parallel.grl`) include a barrier that only completes when four tasks run
 simultaneously, 16-thread atomic and mutex contention with exact totals, and 8-way concurrent map
