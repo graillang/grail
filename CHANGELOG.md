@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **Typed iterator adapters: `iter::over(v).map(..).filter(..).fold(..)`.** `iter::VecIter<T>`,
+  `iter::Map<I, U, F>` and `iter::Filter<I, F>` implement `Iterator` with each callback held by its
+  own closure type, so a chain is one nested type, specialised and called directly, with no
+  allocation per element; a `for` loop runs over any of them. `iter::fold_all(it, init, f)` folds any
+  `I: Iterator`. `iter::Iter<T>` is unchanged (the erased form for `from_fn`, `dyn Iterator` or a
+  field). Callable bounds now work on an impl's own parameters (`impl<U, F: FnMut(u64) -> U> W<U, F>`)
+  and through interface files.
 - **Callable bounds: `fn map<U, F: FnMut(T) -> U>(self, f: F)`.** A type parameter may be bound by a
   closure type; a value of that type is callable in the generic body, the closure's own type is what
   the specialisation is made for, and its parameters and result are inferred from it. A closure whose
