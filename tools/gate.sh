@@ -120,7 +120,7 @@ leg bench-engine bun tools/bench-rivals.mjs --json bench/results/engine.json has
 wait
 leg sched-rivals bun tools/sched-rivals.mjs --json bench/results/sched-rivals.json
 wait
-leg compile-rivals bun tools/compile-rivals.mjs --json bench/results/compile-rivals.json
+leg compile-rivals bun tools/compile-rivals.mjs --json bench/results/compile.json
 wait
 
 # One line per leg, failures first.

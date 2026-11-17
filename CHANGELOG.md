@@ -1,5 +1,10 @@
 ## Unreleased
 
+- `bun tools/compile-rivals.mjs` measures a no-op rebuild beside the cold build, the edited build and
+  both checks, runs the rival twins as well as the generated programs, and reports instructions in one
+  process (the primary figure) and wall time at four jobs; the results are `bench/results/compile.json`
+  and the Performance chapter names the cause of every row where Grail is behind.
+
 - **C calls with floats are optimised in release builds (call ABI S8a).** A function that called a
   C function with `f64`/`f32` arguments or a float result had to stay unoptimised on the LLVM
   backend (its floats travel in vector registers a lifted call did not carry). The front end now
