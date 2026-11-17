@@ -10,6 +10,9 @@
   removes the bounds checks it covers. A closure literal written as `parallel_for_zip`'s argument
   also starts knowing that every piece is as long as the first, so `v[i]` under `for i in p.len()`
   has no check (a closure passed through a variable keeps it).
+- `mul_add` on f32 and f64 vectors: `a * b + c` per lane with one rounding, identical to C's `fma`
+  on every target and backend. AArch64 uses `fmla`, RISC-V `fmadd`, and baseline x86-64 an exact
+  software routine in the runtime, which is slow there.
 - **Inflate refills its bit buffer a word at a time** (`bytes::load_u64`, a new unaligned
   little-endian word read), instead of a byte per loop step, while eight input bytes remain. The 4K
   png: Grail-LLVM 7.47G -> 6.44G instructions (0.85 -> 0.71 s; libpng 0.41 s, stb_image 0.41 s),

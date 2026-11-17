@@ -42768,6 +42768,11 @@ fn simd_index_literal<a>(c: (&a mut C), limit: u64) -> u64 {
 fn simd_with_elem<a>(c: (&a mut C), ty: u64, elem: u64) -> u64 {
     return intern_full(&mut c, 36, elem, simd_lanes(&mut c, ty), u64[]);
 }
+// Whether the target has a fused multiply-add at the build's CPU level: AArch64 and RV64GC always;
+// x86-64 only at a --cpu level with FMA (S4b).
+fn simd_hardware_fma<a>(c: (&a mut C)) -> bool {
+    return (c.target == 1) || (c.target == 2) || (c.target == 4);
+}
 // A scalar argument of the element type: a literal adopts it.
 fn simd_scalar_arg<a>(c: (&a mut C), elem: u64) -> u64 {
     astart := c.pos;
@@ -43024,6 +43029,48 @@ fn simd_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
         simd_copy_op(&mut c, view("copy"), dst, value.t, ty);
         return val(dst, rty);
     }
+    if same(view(name), view("mul_add")) && float {
+        // `a.mul_add(b, c)`: a * b + c in each lane with one rounding (docs/design/simd.md, S4).
+        b := simd_vector_arg(&mut c, ty);
+        expect(&mut c, view(","));
+        cc := simd_vector_arg(&mut c, ty);
+        expect(&mut c, view(")"));
+        if simd_hardware_fma(&mut c) {
+            return val(simd_emit(&mut c, view("fma"), ty, ty, value.t, b, cc, SIMD_NONE, 0, false), ty);
+        }
+        // No fused instruction at this CPU level: the runtime's exact software fused multiply-add on
+        // each lane's bits (rt_fma32/rt_fma64), as C's fma() does there. A call per lane, which also
+        // keeps LLVM from turning llvm.fma into a call to a libm the program does not link.
+        lanes := simd_lanes(&mut c, ty);
+        mut ity = simd_with_elem(&mut c, ty, int_type(&mut c, 32, 0));
+        mut helper = "rt_fma32";
+        if simd_bits(&mut c, ty) == 64 {
+            ity = simd_with_elem(&mut c, ty, int_type(&mut c, 64, 1));
+            helper = "rt_fma64";
+        }
+        lane_ty := simd_elem(&mut c, ity);
+        dst := frame_alloc(&mut c, simd_words(&mut c, ty));
+        for i in lanes {
+            x := simd_emit(&mut c, view("lane"), ity, lane_ty, value.t, SIMD_NONE, SIMD_NONE, SIMD_NONE, i, false);
+            y := simd_emit(&mut c, view("lane"), ity, lane_ty, b, SIMD_NONE, SIMD_NONE, SIMD_NONE, i, false);
+            z := simd_emit(&mut c, view("lane"), ity, lane_ty, cc, SIMD_NONE, SIMD_NONE, SIMD_NONE, i, false);
+            invoke(&mut c, view(helper), three(x, y, z));
+            r := save(&mut c);
+            zero := imm(&mut c, 0);
+            get(&mut c, dst, view("%rdi"));
+            get(&mut c, zero, view("%rsi"));
+            get(&mut c, zero, view("%rdx"));
+            get(&mut c, zero, view("%rcx"));
+            get(&mut c, r, view("%rax"));
+            mut line = copy_bytes(view("simd.insert "));
+            push_bytes(&mut line, view(simd_shape(&mut c, ity)));
+            line.push(32);
+            decimal(&mut line, i);
+            line.push(10);
+            o(&mut c, view(line));
+        }
+        return val(dst, ty);
+    }
     if (same(view(name), view("min")) || same(view(name), view("max"))) && !mask {
         other := simd_vector_arg(&mut c, ty);
         expect(&mut c, view(")"));
@@ -43066,7 +43113,7 @@ fn simd_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
     if mask {
         push_bytes(&mut msg, view("`; a mask's methods are select, any, all and not"));
     } else {
-        push_bytes(&mut msg, view("`; its methods are sum, lane, store, store_aligned, shuffle, shuffle2, min, max, eq, ne, lt, le, gt and ge, with bits and to_i32 on a float vector and to_f32 on i32 lanes"));
+        push_bytes(&mut msg, view("`; its methods are sum, lane, store, store_aligned, shuffle, shuffle2, min, max, eq, ne, lt, le, gt and ge, with bits, mul_add and to_i32 on a float vector and to_f32 on i32 lanes"));
     }
     fail(&mut c, view(msg));
     return val(0, 0);
