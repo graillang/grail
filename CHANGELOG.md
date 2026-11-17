@@ -1,5 +1,9 @@
 ## Unreleased
 
+- **`bytes::find_byte(text, from, b)`**: where byte `b` next occurs, eight bytes per step (a word
+  read and the has-zero-byte test), in plain Grail. The compiler's line scanners use it - the
+  optimiser's body reader, the frame-probe and inlining scans, the site table: 6.4% fewer
+  instructions compiling a 4000-function file, 7.2% for the compiler itself.
 - The optimiser parses each distinct instruction line once per compile and replays the record for
   its repeats (a label operand is numbered again, the frame-slot bookkeeping redone): byte-identical
   output, 2.6% fewer instructions for a 4000-function file. The plan for taking the remaining text
