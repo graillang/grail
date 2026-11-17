@@ -1,5 +1,13 @@
 ## Unreleased
 
+- **A no-op build right after an edit is a no-op.** The build store records a source by its stamp
+  only when it was read at least 10ms after its last write (one kernel time tick). It used to require
+  the file to be 100ms old when the record was written, so an edited `main.grl`, read the moment the
+  build started, was never recorded: the next build read and scanned all of it again and started a
+  compiler to resolve its modules. A source read too soon is now read once more at the end of the
+  build and recorded if its stamp and bytes are unchanged, and the resolved module set waits for it.
+  Dev compiler, the 104,000-line syn4000: a build right after an edited build 0.340G -> 0.005G
+  instructions, a check after an edited check 0.343G -> 0.008G.
 - **`bench-rivals` no longer charts a build that printed the wrong answer.** It already failed the
   run when a build's output differed from C's, but still wrote that build's figures into the
   results, so a miscompiled program could chart as the fastest. Such a figure is now left out and

@@ -1037,6 +1037,13 @@ fn compile_mode<a, b, d, e, g, k>(
         misses: 0,
         names: u8[][],
         quiet: (flags / 4096) % 2,
+        seen_paths: u8[][],
+        seen_stamps: u8[][],
+        seen: FileInfo[],
+        seen_filed: u64[],
+        pend_notes: u8[][],
+        pend_bodies: u8[][],
+        pend_waits: u8[][][],
     };
     if cache != 0 {
         store.root = cache_root(view(target));
@@ -1248,6 +1255,7 @@ fn compile_mode<a, b, d, e, g, k>(
             host::close(js.rfd);
             host::remove(view(made), 0);
         }
+        cache_seen_flush(&mut store);
         return built;
     }
     // The internal assembler runs inside the compiler run when the build is one object: the run
@@ -1584,18 +1592,23 @@ fn resolved_inputs<a>(note: &a [u8]) -> u8[] {
     }
     return u8[];
 }
-fn resolved_note<a, b, d, e>(store: (&a mut Cache), note: &b [u8], command: (&d u8[][]), text: &e [u8]) -> unit {
+fn resolved_note<a, b, d, e>(store: (&a mut Cache), note: &b [u8], command: (&d u8[][]), text: &e [u8], probe_ms: u64) -> unit {
     if note.len() == 0 {
         return ();
     }
     settled := resolved_paths(view(text));
     mut body = u8[];
+    // A file the probe read within a tick of its write may change again under the same stamp: the
+    // record waits for the end of the build, when that file is read again (cache_seen_flush).
+    mut waits = u8[][];
     for i in settled.len() {
         path := item(&settled, i);
         stamp := file_stamp(view(path));
-        // A file written moments ago may still change within its time's granularity.
-        if (stamp.len() == 0) || stamp_recent(view(path)) {
+        if stamp.len() == 0 {
             return ();
+        }
+        if !read_settled(view(path), probe_ms) {
+            waits.push(path.copy());
         }
         push_bytes(&mut body, view("F "));
         push_bytes(&mut body, view(stamp));
@@ -1613,6 +1626,12 @@ fn resolved_note<a, b, d, e>(store: (&a mut Cache), note: &b [u8], command: (&d 
     }
     push_bytes(&mut body, view("--\n"));
     push_bytes(&mut body, view(text));
+    if waits.len() != 0 {
+        store.pend_notes.push(copy(view(note)));
+        store.pend_bodies.push(body);
+        store.pend_waits.push(waits);
+        return ();
+    }
     cache_put_file(&mut store, view(note), view(body));
     return ();
 }
@@ -1635,6 +1654,7 @@ fn resolved_groups<a, d>(store: (&d mut Cache), command: (&a u8[][]), at: u64, l
     note := resolved_key(&mut store, &probe, command);
     mut text = resolved_inputs(view(note));
     if text.len() == 0 {
+        probe_ms := host::wall_ms();
         if host::command(probe) != 0 {
             // The compiler printed why (an unresolvable `use` names the module and the roots it
             // searched).
@@ -1642,7 +1662,7 @@ fn resolved_groups<a, d>(store: (&d mut Cache), command: (&a u8[][]), at: u64, l
         }
         text = host::read_file(view(list));
         host::remove(view(list), 0);
-        resolved_note(&mut store, view(note), command, view(text));
+        resolved_note(&mut store, view(note), command, view(text), probe_ms);
     }
     mut start = 0;
     mut i = 0;
@@ -3001,7 +3021,22 @@ struct Cache {
     names: u8[][],
     // 1 when the store was not asked for by name: a build uses it by default, and says nothing about
     // it unless `--cache` was written.
-    quiet: u64
+    quiet: u64,
+    // What this process already learned of a source by scanning it (cache_file_info), by path and
+    // stamp: a source written just before the build is scanned and not recorded (it may still change
+    // within its time's granularity), and a later question about it in the same build - a digest
+    // only, once the file is old enough to record - writes the whole record from here instead of a
+    // record without the scan, which the next build would have to read and scan the file again for.
+    seen_paths: u8[][],
+    seen_stamps: u8[][],
+    seen: FileInfo[],
+    // 1 once the record of seen[k] is written.
+    seen_filed: u64[],
+    // Module sets resolved from a file the probe read too soon after its write (resolved_note): the
+    // record, and the files it waits on, written by cache_seen_flush once they are verified.
+    pend_notes: u8[][],
+    pend_bodies: u8[][],
+    pend_waits: u8[][][]
 }
 struct BuildId {
     flags: u8[],
@@ -3178,16 +3213,17 @@ fn dir_stamp<a>(path: &a [u8]) -> u8[] {
     push_bytes(&mut out, view(stamp_text(&st)));
     return out;
 }
-// Whether a file was written in the last tenth of a second: written again within the kernel's
-// timestamp granularity it could keep its size and time, so such a file is not recorded by its
-// stamp until it is older.
-fn stamp_recent<a>(path: &a [u8]) -> bool {
+// Whether bytes read from `path` at `read_ms` can be recorded under its stamp: the file's time was at
+// least 10ms before the read. The kernel's file times tick at a few milliseconds, so a write after such
+// a read moves the time; a file read within a tick of its last write could be written again with the
+// same size and time, and is not recorded by its stamp until it is read again later (cache_seen_file).
+fn read_settled<a>(path: &a [u8], read_ms: u64) -> bool {
     st := host::stat(view(path), 1);
     if (st.len() < 12) || (st[0] != 0) {
-        return true;
+        return false;
     }
     written := st[4] * 1000 + st[5] / 1000000;
-    return host::wall_ms() < written + 100;
+    return written + 10 <= read_ms;
 }
 fn fp_path<a, b>(c: (&a mut Cache), path: &b [u8]) -> u8[] {
     // A relative path names a file only together with the working directory.
@@ -3341,12 +3377,86 @@ fn cache_file_info<a, b>(c: (&a mut Cache), path: &b [u8], scan: bool) -> FileIn
             }
         }
     }
+    // Scanned already in this process at this stamp: answered from memory (cache_seen_file records it).
+    for k in c.seen_paths.len() {
+        if eq(view(c.seen_paths[k]), view(path)) && eq(view(c.seen_stamps[k]), view(stamp)) {
+            mut uses = u8[][];
+            for u in c.seen[k].uses.len() {
+                uses.push(c.seen[k].uses[u].copy());
+            }
+            return FileInfo { digest: c.seen[k].digest.copy(), module: c.seen[k].module.copy(), uses: uses, embed: c.seen[k].embed };
+        }
+    }
+    read_ms := host::wall_ms();
     text := host::read_file(view(path));
     info := info_of(view(text), scan);
-    if !stamp_recent(path) {
+    settled := read_settled(path, read_ms);
+    if settled {
         fp_write(&mut c, path, view(stamp), &info, scan);
     }
+    if scan {
+        c.seen_paths.push(copy(view(path)));
+        c.seen_stamps.push(stamp.copy());
+        mut uses = u8[][];
+        for u in info.uses.len() {
+            uses.push(info.uses[u].copy());
+        }
+        c.seen.push(FileInfo { digest: info.digest.copy(), module: info.module.copy(), uses: uses, embed: info.embed });
+        c.seen_filed.push(u64(settled));
+    }
     return info;
+}
+// The end of a build: a source scanned too soon after it was written to be recorded (read_settled) is
+// read once more, now, and recorded with what the scan found when its stamp and its bytes are still
+// the ones it was scanned at - so the next build does not read and scan it again.
+fn cache_seen_flush<a>(c: (&a mut Cache)) -> unit {
+    if c.root.len() == 0 {
+        return ();
+    }
+    for k in c.seen_paths.len() {
+        if c.seen_filed[k] != 0 {
+            continue;
+        }
+        path := c.seen_paths[k].copy();
+        if !eq(view(file_stamp(view(path))), view(c.seen_stamps[k])) {
+            continue;
+        }
+        read_ms := host::wall_ms();
+        text := host::read_file(view(path));
+        if !read_settled(view(path), read_ms) || !eq(view(store_hash(view(text))), view(c.seen[k].digest)) {
+            continue;
+        }
+        mut uses = u8[][];
+        for u in c.seen[k].uses.len() {
+            uses.push(c.seen[k].uses[u].copy());
+        }
+        info := FileInfo { digest: c.seen[k].digest.copy(), module: c.seen[k].module.copy(), uses: uses, embed: c.seen[k].embed };
+        stamp := c.seen_stamps[k].copy();
+        fp_write(&mut c, view(path), view(stamp), &info, true);
+        c.seen_filed[k] = 1;
+    }
+    // A module set waits on files: each must now have a verified record at its stamp.
+    for n in c.pend_notes.len() {
+        mut ready = true;
+        for w in c.pend_waits[n].len() {
+            path := c.pend_waits[n][w].copy();
+            mut found = false;
+            for k in c.seen_paths.len() {
+                if eq(view(c.seen_paths[k]), view(path)) && (c.seen_filed[k] != 0) && eq(view(file_stamp(view(path))), view(c.seen_stamps[k])) {
+                    found = true;
+                }
+            }
+            if !found {
+                ready = false;
+            }
+        }
+        if ready {
+            note := c.pend_notes[n].copy();
+            body := c.pend_bodies[n].copy();
+            cache_put_file(&mut c, view(note), view(body));
+        }
+    }
+    return ();
 }
 // The digest of a file's bytes (store_hash), empty when it cannot be read.
 fn cache_digest_file<a, b>(c: (&a mut Cache), path: &b [u8]) -> u8[] {
@@ -3662,7 +3772,7 @@ fn cache_warm<a>(args: (&a u8[][])) -> u64 {
     if (args.len() == 3) && eq(view(item(args, 1)), view("--target")) {
         target = item(args, 2);
     }
-    mut store = Cache { root: u8[], cwd: host::cwd(), hits: 0, misses: 0, names: u8[][], quiet: 1 };
+    mut store = Cache { root: u8[], cwd: host::cwd(), hits: 0, misses: 0, names: u8[][], quiet: 1, seen_paths: u8[][], seen_stamps: u8[][], seen: FileInfo[], seen_filed: u64[], pend_notes: u8[][], pend_bodies: u8[][], pend_waits: u8[][][] };
     mut program = u8[];
     entries := host::list_dir(view(h.std));
     mut count = 0;
