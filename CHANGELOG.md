@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **`extern "C" blocking fn`**: a foreign function declared `blocking` (a read, a wait, a present)
+  does not take a worker with it. On a worker running a green task, the call hands the worker's
+  queues to a spare thread for its duration and the calling thread keeps the task - C's frames and
+  thread-locals stay where they are - then becomes a spare itself. Spares are reused, there are at
+  most twice the worker count of them, and an idle one exits after a second. Off a worker the
+  declaration changes nothing. x86-64 Linux for now; elsewhere `blocking` is a plain call. The old
+  `rt_blocking_enter` warning ("a blocking foreign call is running on a green task's scheduler
+  thread") is gone with the unsafe hook that produced it.
+
 - **A callback from C keeps its task on its thread.** A Grail function that C called from a green
   task could wait (sleep, lock, join) and the task then resumed on another worker, so it returned
   into C's frames on a different OS thread - with C's thread-locals and locks belonging to the old

@@ -4878,6 +4878,7 @@ fn rt_env_is(name: u64, value: u64) -> u64 {
 // 224 this worker's runner (0 none)  232 the job handed to the runner  240 free job records
 // 248 their count  264 help-depth high-water mark  272 steps taken (the fairness tick)
 // 280 1 while this worker is counted as searching (rt_worker_loop, rt_worker_run)
+// 296 link in the jobs block's list of blocks waiting for a thread (rt_block_give)
 // 512..592 the Frame job deque, 640..720 the Background job deque (the Normal one is at 128)
 // 896..1024 the CPU mask a pinned worker hands the kernel
 //
@@ -4955,7 +4956,7 @@ fn rt_sched_start(s: u64) -> u64 {
     workers := raw_load(s + 32);
     mut i = 0;
     while i < workers {
-        rt_thread_spawn_detached(rt_worker_loop, raw_load(array + i * 8));
+        rt_thread_spawn_detached(rt_worker_thread, raw_load(array + i * 8));
         i += 1;
     }
     if raw_load(s + 40) != 0 {
@@ -5232,6 +5233,7 @@ fn rt_worker_loop(worker: u64) -> u64 {
     tp := raw_tp_get();
     raw_store(tp + 24, 2); // runtime worker with a deque: rt_abort_signals, rt_worker_self
     raw_store(tp + 32, worker);
+    raw_store(worker + 48, tp);
     // Give this scheduler thread whatever it needs to switch onto a task's stack (nothing on a
     // platform whose switch is a stack swap, a fiber conversion on Windows).
     rt_os_sched_prepare();
@@ -5243,6 +5245,10 @@ fn rt_worker_loop(worker: u64) -> u64 {
     spin := rt_sched_setting(48);
     searching := raw_load(rt_state_jobs()) + 416;
     while true {
+        if raw_load(tp + 32) != worker {
+            // The block went to a spare while this thread was in a blocking foreign call.
+            return 0;
+        }
         if rt_worker_step(s, worker) != 0 {
             continue;
         }
@@ -5358,6 +5364,11 @@ fn rt_worker_run(s: u64, w: u64, t: u64) -> u64 {
     }
     rt_os_ctx_enter(t);
     raw_store(tp + 16, 0);
+    if raw_load(tp + 32) != w {
+        // The task made a blocking foreign call and this thread gave the block away
+        // (rt_blocking_enter): finish with the task without touching the block.
+        return rt_worker_run_detached(t);
+    }
     if raw_load(t + 144) {
         runner := raw_load(t + 104) == 3;
         // Now off the task's stack: release it, then publish completion (the joiner may free t).
@@ -5400,6 +5411,33 @@ fn rt_worker_run(s: u64, w: u64, t: u64) -> u64 {
     // across every worker instead of one push, one wake.
     if (raw_load(w + 16) != raw_load(w + 8)) | (raw_load(w + 144) != raw_load(w + 136)) {
         rt_notify(s);
+    }
+    return 0;
+}
+
+// The end of rt_worker_run on a thread that no longer holds a block: the task finished, or parked,
+// or yielded; everything it needs goes through the injection rings.
+fn rt_worker_run_detached(t: u64) -> u64 {
+    if raw_load(t + 144) {
+        runner := raw_load(t + 104) == 3;
+        rt_os_ctx_release(t);
+        raw_atomic_store(t + 96, 1);
+        rt_syscall(202, t + 96, 129, 2147483647);
+        joiner := raw_atomic_swap(t + 88, 1);
+        if 1 < joiner {
+            rt_wake(joiner);
+        }
+        if runner {
+            rt_runner_free(t);
+        }
+        return 0;
+    }
+    if raw_load(t + 136) {
+        raw_store(t + 136, 0);
+        rt_enqueue(t);
+    } else if raw_atomic_cas(t + 24, 1, 2) != 1 {
+        raw_atomic_store(t + 24, 0);
+        rt_enqueue(t);
     }
     return 0;
 }
@@ -5491,6 +5529,8 @@ fn rt_jobs_create(workers: u64) -> u64 {
         cap = 1;
     }
     raw_store(j + 408, cap);
+    raw_store(j + 472, 1);
+    raw_store(j + 480, 0);
     raw_atomic_store(rt_state_jobs(), j);
     return j;
 }
@@ -7226,34 +7266,116 @@ fn f_host_close(fd: u64) -> u64 {
     return 0;
 }
 
-// ---- blocking foreign calls (B3 contract) ----
-// The contract: a foreign call blocks the executing task. A task is green on every platform, so the
-// call occupies the scheduler thread that was running it - one of the scheduler's workers - for the
-// whole call. The runtime's own blocking operations
-// never do that: they hand off through rt_blocking_call (or park on the reactor where there is one).
-// A call the user makes through `extern "C"` or a `cfn` runs on that thread itself, so a wrapper
-// that knows it blocks declares it with rt_blocking_enter, and the runtime says so once per process
-// on stderr instead of a program quietly losing a worker. Scheduler word 64 is the "already warned"
-// flag.
+// ---- blocking foreign calls: a worker is given to a spare thread for the call ------------------
+// A worker block (deques, runner, free lists) and the OS thread running it are separate (Go's P and
+// M): `extern "C" blocking fn` calls rt_blocking_enter before the call and rt_blocking_leave after.
+// On a worker that is running a green task, enter gives the block to a spare thread - woken, or
+// made if fewer than twice the worker count exist - and this thread becomes block-less: it makes
+// the C call, and afterwards keeps running its task (forks and spawns go to the injection rings,
+// as from any thread that is not a worker) until the task parks or ends. Then its scheduler loop
+// sees it holds no block and it becomes a spare itself (rt_worker_thread). Nothing moves the task:
+// C's frames and C's thread-locals stay on this thread. A blocking call off a worker - main, a
+// plain thread, a callback (pinned, word 120) - is a plain call.
+//
+// Jobs block words: 432 lock of the list of blocks waiting for a thread (linked through block word
+// 296), 440 its head, 448 idle spares, 456 threads made beyond the workers, 464 the spares' futex
+// sequence, 472..480 a timespec of one second (how long an idle spare waits).
 fn rt_blocking_enter() -> u64 {
-    if (rt_current() == 0) | rt_task_threads() {
+    tp := raw_tp_get();
+    if tp == 0 {
         return 0;
     }
-    s := rt_sched();
-    if raw_atomic_cas(s + 64, 0, 1) == 0 {
-        rt_blocking_warn();
+    if (raw_load(tp + 24) != 2) || (raw_load(tp + 120) != 0) {
+        return 0;
+    }
+    t := raw_load(tp + 16);
+    if t == 0 {
+        return 0;
+    }
+    w := raw_load(tp + 32);
+    if raw_load(w + 224) == t {
+        // The block's runner is this task: from now on it is an ordinary task, and the block's next
+        // owner makes a fresh runner.
+        raw_store(w + 224, 0);
+    }
+    raw_store(tp + 24, 0);
+    raw_store(tp + 32, 0);
+    rt_block_give(w);
+    return 0;
+}
+// Nothing to do at the end of the call: the thread stays block-less until its task stops running
+// (rt_worker_run, rt_worker_loop), and then looks for a block like any spare.
+fn rt_blocking_leave() -> u64 {
+    return 0;
+}
+// Hand block `w` to a thread: queue it, then wake an idle spare or make one (up to twice the
+// worker count beyond the workers). With the cap reached it waits in the list for the next thread
+// that comes free - one returning from its own blocking call.
+fn rt_block_give(w: u64) -> u64 {
+    j := raw_load(rt_state_jobs());
+    rt_spin_lock(j + 432);
+    raw_store(w + 296, raw_load(j + 440));
+    raw_store(j + 440, w);
+    rt_spin_unlock(j + 432);
+    raw_atomic_fetch_add(j + 464, 1);
+    if raw_atomic_load(j + 448) != 0 {
+        rt_syscall(202, j + 464, 129, 1);
+        return 0;
+    }
+    s := raw_atomic_load(raw_state() + 72);
+    made := raw_atomic_load(j + 456);
+    if made < raw_load(s + 32) * 2 {
+        if raw_atomic_cas(j + 456, made, made + 1) == made {
+            rt_thread_spawn_detached(rt_worker_thread, 0);
+        }
     }
     return 0;
 }
-// The one line a user gets. It names the contract, the documentation and the way out; it is emitted
-// once per process because the same program will make the same call many times.
-fn rt_blocking_warn() -> u64 {
-    text := view(
-        "grail: a blocking foreign call is running on a green task's scheduler thread; that thread is unavailable until the call returns, so other runnable tasks wait for a free scheduler thread. host::read_file, host::write_file, host::command, host::read_fd, host::write_fd and host::sleep_ms hand off to an offload thread; an extern \"C\" or cfn call does not. See docs/ffi.md, \"Blocking foreign calls\".\n"
-    );
-    packed := rt_pack(text);
-    rt_write_all(2, packed, rt_len(text));
-    rt_free(packed);
+fn rt_block_take() -> u64 {
+    j := raw_load(rt_state_jobs());
+    if raw_atomic_load(j + 440) == 0 {
+        return 0;
+    }
+    rt_spin_lock(j + 432);
+    w := raw_load(j + 440);
+    if w != 0 {
+        raw_store(j + 440, raw_load(w + 296));
+    }
+    rt_spin_unlock(j + 432);
+    return w;
+}
+// A scheduler thread: run block `w` (0: start as a spare) until this thread loses it to a blocking
+// call, then wait for another block. A spare idle for a second exits when more than the worker
+// count of spares exist.
+fn rt_worker_thread(first: u64) -> u64 {
+    j := raw_load(rt_state_jobs());
+    s := raw_atomic_load(raw_state() + 72);
+    mut w = first;
+    while true {
+        if w != 0 {
+            rt_worker_loop(w);
+        }
+        w = rt_block_take();
+        while w == 0 {
+            seq := raw_atomic_load(j + 464);
+            w = rt_block_take();
+            if w != 0 {
+                break;
+            }
+            raw_atomic_fetch_add(j + 448, 1);
+            // Jobs words 472/480: a timespec of one second, written once (rt_jobs_create).
+            r := rt_syscall4(202, j + 464, 128, seq, j + 472);
+            raw_atomic_fetch_sub(j + 448, 1);
+            w = rt_block_take();
+            if (w == 0) & (r == wrapping_sub(0, 110)) {
+                // Idle for a second: keep at most the worker count of spares waiting.
+                if raw_load(s + 32) < raw_atomic_load(j + 448) + 1 {
+                    raw_atomic_fetch_sub(j + 456, 1);
+                    return 0;
+                }
+            }
+        }
+    }
     return 0;
 }
 // The only way a green task runs a blocking operation: hand it to a dedicated OS thread and suspend.

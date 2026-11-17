@@ -565,6 +565,9 @@ struct C {
     validating: u64,
     // Named-parameter count of the variadic extern call being lowered; 0 otherwise.
     ffi_fixed: u64,
+    // C symbols declared `extern "C" blocking`, and whether the call being emitted is one of them.
+    ffi_blocking: u8[][],
+    ffi_block_now: u64,
     // Slots holding the address of a narrow (non-8-byte or f32) C-layout record field, paired
     // with the field type: stores and compound loads through them use the field's width.
     caddr: u64[],
@@ -16390,6 +16393,7 @@ fn ffi_emit_call<a, b, d, e, f>(
         fixed = c.ffi_fixed;
     }
     exchange(&mut c.ffi_fixed, 0);
+    blocking := exchange(&mut c.ffi_block_now, 0) != 0;
     abi := ffi_abi(&mut c);
     x86 := abi < 2;
     nint := ffi_int_regs(abi);
@@ -16525,6 +16529,13 @@ fn ffi_emit_call<a, b, d, e, f>(
             tls = fresh(&mut c);
         }
         tls_enter_foreign(&mut c, tls);
+    }
+    // A `blocking` call on x86-64 Linux gives this thread's worker (if it is one) to a spare thread
+    // before the arguments are loaded - the runtime call clobbers the argument registers - and takes
+    // a worker back after (rt_blocking_enter / rt_blocking_leave). Elsewhere it is a plain call.
+    block_here := blocking & (c.target == 0) & (c.plat == 0);
+    if block_here {
+        call_out(&mut c, view("rt_blocking_enter"));
     }
     if area != 0 {
         if x86 {
@@ -16706,6 +16717,13 @@ fn ffi_emit_call<a, b, d, e, f>(
         call_slot_out(&mut c, view("call *%rax\n"), view("a closure call"));
     } else {
         call_out(&mut c, view(symbol));
+    }
+    if block_here {
+        // The result registers survive the runtime call: rax, rdx, xmm0 and xmm1, in 32 bytes of
+        // stack (the call's argument area is still allocated; 16-byte alignment is kept).
+        o(&mut c, view("subq $32,%rsp\nmovq %rax,(%rsp)\nmovq %rdx,8(%rsp)\nmovq %xmm0,%r10\nmovq %r10,16(%rsp)\nmovq %xmm1,%r10\nmovq %r10,24(%rsp)\n"));
+        call_out(&mut c, view("rt_blocking_leave"));
+        o(&mut c, view("movq 16(%rsp),%r10\nmovq %r10,%xmm0\nmovq 24(%rsp),%r10\nmovq %r10,%xmm1\nmovq (%rsp),%rax\nmovq 8(%rsp),%rdx\naddq $32,%rsp\n"));
     }
     if (ret != 1) & (rmode == 0) {
         if is_float(&mut c, ret) {
@@ -17265,8 +17283,13 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     }
     mut input = u8[];
     mut symbol = u8[];
+    mut blocking = 0;
     while true {
-        if eat(&mut c, view("lib")) {
+        if eat(&mut c, view("blocking")) {
+            // `extern "C" blocking fn ...`: the call may block for long (a read, a wait, a
+            // vkQueuePresentKHR): on a worker it gives the worker to a spare thread for its duration.
+            blocking = 1;
+        } else if eat(&mut c, view("lib")) {
             input = ffi_string(&mut c, view("lib requires a quoted link input"));
         } else {
             if eat(&mut c, view("as")) {
@@ -17322,6 +17345,9 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     }
     if symbol.len() == 0 {
         symbol = name.copy();
+    }
+    if blocking != 0 {
+        c.ffi_blocking.push(symbol.copy());
     }
     // Byte-view parameters need an input lifetime context, exactly like a Grail
     // function signature; the region is irrelevant to the C ABI.
@@ -31659,6 +31685,11 @@ fn emit_resolved_call<a>(
         }
         if ext == 2 {
             exchange(&mut c.ffi_fixed, count);
+        }
+        for bi in c.ffi_blocking.len() {
+            if same(view(c.ffi_blocking[bi]), view(ffi_symbol)) {
+                c.ffi_block_now = 1;
+            }
         }
         // The declared parameter types decide which arguments cross by value (`byval`); the values
         // were checked against them above.
@@ -53731,6 +53762,8 @@ pub fn main() -> u64 {
         spec_closures: 0,
         validating: 0,
         ffi_fixed: 0,
+        ffi_blocking: u8[][],
+        ffi_block_now: 0,
         caddr: u64[],
         interior: u64[],
         box_thunks: u64[],
