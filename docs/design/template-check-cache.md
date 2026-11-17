@@ -84,9 +84,9 @@ is designed with them; it is worth ~12M on iterchain, where step 1 is worth ~107
 An owner-scoped key - one that names only the template's own module and the modules it `use`s -
 would let a new project's first check hit the checks `grail cache warm` filed (hello pays about 2M
 instructions to file ~33 template checks that never hit: 45.8M with the memo against 43.8M without,
-measured on main b8a4cc4e). It is sound because the orphan rule is enforced (`implementation` in
-native.grl: an `impl I for T` lives in the module declaring `I` or the one declaring `T`; a scan of
+measured on main b8a4cc4e). It would be sound: the orphan rule is enforced (`implementation` in
+native.grl - an `impl I for T` lives in the module declaring `I` or the one declaring `T`; a scan of
 the corpus, lib/, abundance/ and borg/ found no violation in 334 impls), so nothing outside a
-template's closure can add an implementation its body could resolve to. It is not built because
-the 2M on a first check was judged not worth half a day of soundness-sensitive work (the director's
-call); the key names the whole run's declaration surface, as a digest (`grail-fnkey 5`).
+template's closure can add an implementation its body could resolve to. It is not built by
+decision: the 2M on a first check did not justify half a day of soundness-sensitive work. The key
+names the whole run's declaration surface, as a digest (`grail-fnkey 5`).
