@@ -1,5 +1,9 @@
 ## Unreleased
 
+- SIMD loads and stores take fixed-size array fields in place (`f32x4::load(&mat.m, 4)` on a
+  `[f32; 16]` field, a row of `[[f32; 4]; 4]`); test-simd checks the loop over a vector of such
+  structs stays in registers on LLVM.
+
 - **Soundness: a callable bound's reference parameters are fresh on every call.** In
   `F: FnMut((&mut T), C) -> R` the `&mut T` has a lifetime the bound names nowhere else, so - as in
   Rust's `for<'a>` elision - the closure or function given for `F` must accept any lifetime there. One

@@ -367,3 +367,13 @@ function's end (`.set`), so the prologue would need a symbolic page count in all
 and in the optimiser's prologue rewrites. Pins: `array-frame-probe-pinned` (+K, x86_64),
 `array-frame-probe-plain-frame-line` (plain, --debug), the windows leg's `array-frame-probe` and
 `array-frame-probe-task` (framesub, run under wine), and the frame cases on aarch64 and riscv64.
+
+## SIMD over arrays (2026-11-17)
+
+With SIMD S1 on main (simd.md), the boundary of section 6 holds as decided: `T::load(&a, i)` and
+`v.store(&mut a, i)` take `&[T; N]` / `&mut [T; N]`, `align_of` of a vector is its element's, so
+`[f32x4; N]` overlays `[f32; 4N]`. A field is the load's source in place: `f32x4::load(&x.m, i)` on a
+`[f32; 16]` field, and `f32x4::load(&x.rows[r], 0)` on a row of `[[f32; 4]; 4]`. On LLVM the loop
+summing those fields over a flat `Mat[]` is `movups` at the element's offsets and `addps` with no
+stack slot and no call (`tests/simd/array_field_loop.grl`, checked by `tools/test-simd.mjs`); the
+case `array-simd-loads-from-fields` checks the values on every target.
