@@ -166,7 +166,12 @@ Two printing conventions, chosen for what each line is for, and both named in th
   `display_size_is_1280x720`, `delta_time_is_1_over_64`, `delta_time_in_range`,
   `framerate_in_range`. `imgui_frame_probe.grl` does the same against the window SDL reports
   (`io.display_size_is_window_pixels`, `delta_time_is_1_over_64`). A float field that read out of
-  an `extern "C"` record as a raw word fails these on the first comparison;
+  an `extern "C"` record as a raw word fails these on the first comparison.
+  Grail's float formatting is the shortest decimal that round-trips - `1280.0` prints `1280`,
+  `0.015625` prints `0.015625`, `1280.5` prints `1280.5`, `0.1` prints `0.1` (as f32 and as f64),
+  and `1.0/3.0` prints `0.3333333333333333` - so a probe line is readable and exact for the values
+  these fields hold. The one thing it does not do is exponent notation: `1.0e-7` prints
+  `0.0000001`, which is why a field that can be very small would still want a scaled integer;
 - **exactness uses bit patterns, and says so.** The parity reference compares Grail's floats against
   C++'s floats across two printf implementations, where a decimal format could hide a 1-ulp
   difference, so the vertex positions, uvs and clip rectangles are printed as the bit pattern of

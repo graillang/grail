@@ -14,7 +14,7 @@ import { readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync, existsSync
 import { join, basename, resolve, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
-import { root, compilerSources, hostTarget, targetName, buildCompiler, compileProgram, execute } from './native.mjs';
+import { root, compilerSources, hostTarget, targetName, buildCompiler, compileProgram, execute, useAssemblerOf } from './native.mjs';
 
 const legacyReferenceSyntax = /\b(?:borrow|borrow_mut)\s*\(|\b(?:read|mut)\s*</;
 const targetNames = ['x86_64', 'aarch64', 'riscv64', 'macos-x86_64', 'macos-aarch64'];
@@ -28,7 +28,8 @@ selection in N child processes, one stripe each, and merges the reports in case 
 then stops each stripe, not the whole run.
 
 Environment (kept for the gates that predate the flags): GRAIL_TEST_FILTER, GRAIL_TEST_SHARD,
-GRAIL_TEST_RESUME=1, GRAIL_TEST_JOBS, GRAIL_BACKEND, GRAIL_VERIFY_FACTS.
+GRAIL_TEST_RESUME=1, GRAIL_TEST_JOBS, GRAIL_BACKEND, GRAIL_VERIFY_FACTS, GRAIL_TIMING (1: also run
+the "timing" cases, whose verdict is a wall-clock measurement).
 
 --unit-identity (x86_64, native backend) does not run the programs: it compiles every case that
 compiles three times - with no unit store, with an empty one, with the one the second compile
@@ -142,6 +143,10 @@ function hostOnly(test, target) {
   // `pending` names the work a case waits for: it states the behaviour that work must produce,
   // fails until then, and is skipped rather than weakened. Removing the field is how it is armed.
   if (test.pending) return true;
+  // A case whose verdict is a wall-clock measurement runs only when asked (GRAIL_TIMING=1, as the
+  // quiet-window runs set it): under load it fails without anything being wrong. Each such case has
+  // a correctness twin that asserts the result without the clock.
+  if (test.timing && process.env.GRAIL_TIMING !== '1') return true;
   if (test.targets && !test.targets.includes(target)) return true;
   if (test.backends && !test.backends.includes(process.env.GRAIL_BACKEND ?? 'native')) return true;
   return false;
@@ -749,6 +754,7 @@ if (!isChild && options.jobs > 1) {
 }
 
 const compiler = process.env.GRAIL_TEST_COMPILER ?? buildCompiler();
+useAssemblerOf(compiler);
 // Key by the compiler's content-addressed directory, not its file name: every build is named
 // `grail`. The markers are shared by every stripe: a pass is a property of the compiler, not of the
 // process that observed it.

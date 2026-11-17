@@ -38,9 +38,10 @@ version, flags)`.
 
 ### Interface contents
 
-A versioned, length-counted record stream with one writer and one reader (format 8, built; see
+A versioned, length-counted record stream with one writer and one reader (format 10, built; see
 "Format 4 as built" below; format 7 added the effect summary rows of every listed function, and
-format 8 gives an `Atomic<T>` its element type). This section described a line-oriented text format when it was written;
+format 8 gives an `Atomic<T>` its element type; format 9 the bounds of a `dyn<..> I`; format 10 the
+SIMD vector types, kind 36, docs/design/simd.md). This section described a line-oriented text format when it was written;
 A versioned, length-counted record stream with one writer and one reader (format 7, built; see
 "Format 4 as built" below). This section described a line-oriented text format when it was written;
 that shape was replaced because its reader was a hand-written parser of a file the compiler had just
@@ -112,7 +113,7 @@ than misread.
  source "tests/interfaces/pair.grl"
  sha256 "ad1f2b3cf421decab61ea22f7dfc572fec79a74a3078b3ef330f4e49a94db2d0"
  mode typed_refs=1 default_u64=1 overflow=checked target=x86_64
- abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline
+ abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame args = 6 registers then stack
  unsafe 0
  std 0
  host 0
@@ -540,7 +541,7 @@ are keyed by index rather than written in order, so they cannot desynchronise fr
 and a parameter that gains a default does not change any other parameter's record.
 
 The module record also carries the **ABI line** - `abi dyn pair size = 16 align = 8 word0 = data
-word1 = vtable drop = 0 ref record = address record plain = inline`, one length-counted string holding exactly what
+word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame args = 6 registers then stack`, one length-counted string holding exactly what
 `iface_dyn_abi()` returns. Its last clause says what a reference to a record is (the record's own
 address, docs/design/unboxed-values.md); a stage that changes a layout changes this line.
 A `&dyn I` in a signature or a field crosses a module boundary as a pair, so two modules built for
@@ -619,7 +620,7 @@ to look like. Nothing else should parse the bytes: a tool that needs to know wha
 runs the dump, and a test that needs to *corrupt* one changes a byte it located through the record
 framing (`tools/interface-test.mjs` does exactly that). The dump's shape is as stable as the format
 version: a field added to a record appears on the line of the record it belongs to, and a script that
-reads the dump sees the same grammar across format 8 files.
+reads the dump sees the same grammar across format 10 files.
 reads the dump sees the same grammar across format 7 files.
 
 ### The surface, computed structurally
@@ -880,7 +881,7 @@ and of the assembler, and an image is a function of the objects and of the linke
 
 ```
 .work/cache/<target>/
-  blob/<sha256>     artifact bytes; the file name is the digest of the bytes inside it
+  blob/<digest>     artifact bytes; the file name is the digest of the bytes inside it
   map/prog/<key>    `blob <digest>`, `parts <n>`, `output <path>`, `link <digest> <path>` ...
   map/lnk/<key>     `blob <digest>`
   map/mod/<key>     `module <name>`, `asm <digest>`, `blob <digest>`
@@ -889,12 +890,13 @@ and of the assembler, and an image is a function of the objects and of the linke
 
 This is the discipline `tools/native.mjs` and `tools/bootstrap.mjs` already use - content in the
 path, write to a staging name, rename into place - extended to a store shared by all builds of a
-target. A record is written to `stage/` and `mv`d; a blob is copied to `stage/` and `mv`d. A crash
+target. A record or a blob is written into a directory of `stage/` that one write claims, then renamed
+into place with rename(2), in the build's own process. A crash
 leaves at worst a file in `stage/`, which the next build overwrites; it can never leave a partial
 entry under a name a later build would trust.
 
-A blob is only reused after its bytes have been hashed again and matched against the name it is filed
-under, and a module entry is only reused when the digest of the assembly it was built from still
+A blob is only reused when its bytes hash to the name it is filed under (its `fp/` record answers
+while the blob keeps the stamp it was filed with; any write since makes it hashed again), and a module entry is only reused when the digest of the assembly it was built from still
 matches the assembly just emitted. So a corrupted, truncated, edited or unreadable entry is a miss and
 a rebuild, and filing a repaired artifact replaces the damaged entry instead of leaving it to miss
 forever. `tools/cache-test.mjs` damages an object, an image and a record and asserts the rebuild, the
@@ -932,11 +934,22 @@ signed or keyed manifests are still what a cache that has to resist a hostile wr
 
 ### What it costs, and what it saves
 
-A cached build pays for hashing: the compiler's own binary (12 MB), every source, the tools' version
-probes, and a `sh` per digest. That is why the store prefers the host's `sha256sum` when it is there
-and falls back to the compiler's own SHA-256 when it is not - the same digest either way, milliseconds
-instead of seconds for the big files. On the proof project a cached build costs about 55 ms of that
-overhead and saves the 0.7 s build it replaces.
+A cached build hashes in its own process and starts no helper to do it. The digest is
+`store_hash` (cli.grl): XXH64 under four seeds, read a word at a time, a few instructions a byte,
+where SHA-256 written in Grail costs hundreds. The store needs collisions to be improbable, not
+unforgeable; anything that can write the store can plant a record anyway. A file is hashed only
+when its stamp (size, nanosecond modification time, inode, device) differs from the one its `fp/`
+record holds, as cargo and go decide. A file written in the last tenth of a second is not recorded
+by its stamp, because a rewrite within the kernel's timestamp granularity could keep it. The same
+record holds what the driver reads sources for: the module a file declares, the modules it `use`s
+and whether it has an `@embed`. A no-op build therefore reads no source; it stats each input and
+reads a handful of records. The compiler's `--print-inputs` answer is remembered the same way,
+under the stamps of the files it named and of the directories resolution looked in. A tool's
+`--version` is asked once per binary stamp. A module run of a store build is told `--use-vouched`: every interface in its
+`--use` directory was written by a run of the same build or restored from a blob that hashed to its
+name, so it does not hash each one again to check its trailer. A user's `--use DIR` keeps the
+check. `grail cache warm` fills the store with every standard module's check and build records,
+which the installers run, so a project's first build compiles only its own modules.
 
 Measured by `tools/cache-test.mjs` (three modules plus runtime and `__start`, five parts; the absolute
 times move with the page cache, the ratio does not):
@@ -1163,6 +1176,38 @@ Consequences, stated rather than discovered:
   `tools/split-test.mjs` compares;
 - the single-file build keeps cross-module inlining only where the optimizer knows no unit
   boundaries; it emits the same markers, so both shapes inline identically.
+
+### Site markers in an inlined copy
+
+A candidate's body may hold the site markers a build with error locations writes for every
+statement (`.gpos`, `.gkind`); any other directive still keeps it from being inlined. The copy keeps
+them, its positions made absolute when it is filed (`ir::absolute_positions`), and `inline_calls`
+writes the caller's last `.gpos` again after each copy, so the caller's code after the call is
+attributed to the caller's statement. The rule for inlined code is therefore: **a failure inside an
+inlined copy reports the line it was written on, in its caller's frame** - the copy is not a frame,
+so the backtrace goes from that line straight to the caller's caller. A synthesised caller with no
+statement of its own (a refined function's checking wrapper, whose `.proved` body is inlined into it)
+is why the copy's own positions are kept: with only the caller's, such a failure had no position at
+all. Inline-site numbers continue per unit across all of its parts, since a unit can stand in the
+stream more than once.
+
+### Inlining across a module boundary
+
+The gate above has one door open: **the runtime**. It is in every program and every compiler run, so
+a small runtime body (`rt_current`, `rt_list_set`, ...) may stand in a call from any unit. A body
+crosses in its *crossing form* (`optimize::export_form`): its own positions are dropped, because a
+`.gposa` names a file of the run that wrote it, so a failure inside a crossed copy reports the
+caller's statement; and a body that names a local label it does not define (a constant, a string)
+does not cross at all. Labels in the copy are renamed per site, as for any copy.
+
+Where the body comes from depends on the build shape, and the bytes do not: a single-run or `--split`
+build has the runtime's bodies in its own stream, and a per-module run of another module reads them
+from `runtime.facts`, where the runtime's own run writes them after optimising as an `inline` record
+(tag 21, after the effect summary). That file's digest is already in the key of every run that reads
+it, so a changed body reruns its dependants exactly as a changed summary does. A function unit's text
+and an optimiser memo entry are taken before the inline pass (`one_body` remembers the optimised body;
+`inline_calls` runs over the whole output afterwards), so neither depends on another module's bodies
+and neither key names them; the object-encoding chunks are keyed on the final text and see the copy.
 
 ### The frame constant, which was a latent miscompile
 

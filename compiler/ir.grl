@@ -26,9 +26,9 @@ use llvm;
 //
 // A slot is one word unless the body's typed-IR facts name it the first word of a `DynPair` - the
 // 16-byte `{data, vtable}` value a borrowed interface object is (docs/design/fat-dyn.md) - and the
-// two-word result of a body that returns one is a fact too (`facts_dyn_result`). Both are read from
-// `llvm::facts_dyn_pairs`/`facts_dyn_result` in `build`, keyed by the body symbol; nothing is
-// declared in the instruction stream.
+// two-word result of a body that returns one is a fact too (kind 4). Both are read in `build`, from
+// the body's own bucket of the fact index, keyed by the body symbol; nothing is declared in the
+// instruction stream.
 // The two words are one value with one identity: allocated together, written directly, addressed
 // from the first word, kept adjacent when the frame is compacted, and never promoted, forwarded or
 // dropped - the second word's only reader is the pair's address, which no pass reasons about. Every
@@ -62,16 +62,21 @@ pub struct Body {
     inl_rel: u8[],
     // The numbering this body's labels are in (label_number), 0 before its first numbered label.
     lscope: u64,
+    // This body's slot type facts by N/8, `(what << 8) | width`, 0 for none (filled by `build`).
+    sfact: u64[],
     maxslot: u64,
     table: u64[],
+    // Where the lines the inlining pass reads (optimize.grl lines_of_interest) start in `out`,
+    // noted as each body and line is written, so the output is not scanned for them again.
+    interest: u64[],
     base: u64,
     data: u64,
     uniq: u64,
     zline: u64,
     zfrom: u64,
     zto: u64,
-    // The `DynPair`s this body builds, as the address-indexed slots the passes use, read from
-    // `llvm::facts_dyn_pairs` in `build` (docs/design/fat-dyn.md).
+    // The `DynPair`s this body builds, as the address-indexed slots the passes use, read from the
+    // body's facts in `build` (docs/design/fat-dyn.md).
     dyn_pairs: u64[],
     // The word count of each entry of `dyn_pairs` (2 for a `DynPair`, more for a frame record).
     pair_widths: u64[],
@@ -241,6 +246,14 @@ pub fn call_args<b>(s: &b [u8], a: u64, e: u64) -> u64 {
     return 0;
 }
 pub fn float_opcode<b>(s: &b [u8], a: u64, space: u64) -> u64 {
+    // The narrow moves the front end writes for 4-byte and byte elements: before they had numbers
+    // they were unknown instructions, across which every register was live.
+    if same_range(view(s), a, space, view("movl")) {
+        return 98;
+    }
+    if same_range(view(s), a, space, view("movb")) {
+        return 99;
+    }
     if same_range(view(s), a, space, view("addsd")) {
         return 60;
     }
@@ -277,6 +290,10 @@ pub fn float_opcode<b>(s: &b [u8], a: u64, space: u64) -> u64 {
     if same_range(view(s), a, space, view("cvtsi2sdq")) {
         return 71;
     }
+    // A float element loaded straight into an SSE register (optimize.grl `xmm_loads`).
+    if same_range(view(s), a, space, view("movsd")) {
+        return 77;
+    }
     if same_range(view(s), a, space, view("addss")) {
         return 72;
     }
@@ -294,8 +311,14 @@ pub fn float_opcode<b>(s: &b [u8], a: u64, space: u64) -> u64 {
     }
     return 0;
 }
+// The element accessors 40, 41, 44, 49, 51, 47, 48, 50 with the slice's `data` and `len` in the
+// registers operands 0 and 1 name instead of read through the descriptor in rdi (90..97, in that
+// order; optimize.grl `desc_choose`), and 89 for 55, the byte store.
+pub fn is_desc_op(op: u64) -> bool {
+    return (88 < op) && (op < 98);
+}
 pub fn is_float_op(op: u64) -> bool {
-    return (59 < op) && (op < 77);
+    return (59 < op) && (op < 78);
 }
 
 pub fn opcode_key(k: u64) -> u64 {
@@ -563,6 +586,22 @@ pub fn mentions<b>(s: &b [u8], a: u64, e: u64) -> u64 {
     return m;
 }
 
+// `N(%rbp)` with decimal N >= 16: a word of the caller's outgoing area, an argument past the sixth
+// (native.grl `stack_params`). It is only ever read, by a `movq` into a register.
+pub fn incoming_arg<b>(s: &b [u8], a: u64, e: u64) -> bool {
+    if (e < a + 8) || !same_range(view(s), e - 6, e, view("(%rbp)")) {
+        return false;
+    }
+    mut n = 0;
+    for i in e - 6 - a {
+        d := s[a + i];
+        if (d < 48) || (57 < d) {
+            return false;
+        }
+        n = n * 10 + d - 48;
+    }
+    return 16 <= n;
+}
 // Classifies one operand: returns kind and fills value/mask through the pair encoding.
 pub fn classify<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64, second: u64) {
     mut k = 4;
@@ -873,6 +912,8 @@ pub fn parse<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) {
                     if op == 0 {
                         op = float_opcode(view(s), a, space);
                     }
+                    // A SIMD op (`simd.*`, machine.grl "SIMD") is one too, for the same reasons: its
+                    // memory operands are named only through registers.
                     // An atomic op (`atom.*`, machine.grl "atomics") is an unknown instruction to
                     // every pass, whatever its order, and that is the barrier: no slot or register
                     // fact survives it (forward), every register is live across it and it is never
@@ -881,7 +922,7 @@ pub fn parse<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) {
                     // dropped across an acquire, a release or a sequentially consistent op, and a
                     // relaxed one is neither eliminated nor merged with its neighbour.
                     // tools/test-optimiser-atomics.mjs holds this.
-                    if at(view(s), a, view("atom.")) {
+                    if at(view(s), a, view("atom.")) || at(view(s), a, view("simd.")) {
                         op = 0;
                     }
                 }
@@ -955,6 +996,13 @@ pub fn parse<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) {
     // A float instruction is understood only in the shapes the front end writes: no frame slot, and a
     // register destination (an SSE register, or a general one for the conversions to integer).
     // Anything else - a memory destination above all, which would be a store - stays unknown.
+    if (op == 98) || (op == 99) {
+        n := o.k0.len() - 1;
+        if (o.k0[n] == 2) || (o.k1[n] == 2) {
+            last := o.op.len() - 1;
+            exchange(&mut o.op[last], 0);
+        }
+    }
     if is_float_op(op) {
         n := o.k0.len() - 1;
         if (o.k0[n] == 2) || (o.k1[n] == 2) || ((o.k1[n] != 1) && (o.k1[n] != 6)) {
@@ -1030,6 +1078,9 @@ pub fn parse<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) {
             }
             if same_range(view(s), first, e, view("rt_aslotu")) {
                 fast = 54;
+            }
+            if same_range(view(s), first, e, view("rt_write")) {
+                fast = 55;
             }
             if fast != 0 {
                 // stays: the written place is indexed (`&mut o.op[last]`), and two-phase defers
@@ -1150,8 +1201,43 @@ pub fn reads<a>(o: (&a Body), i: u64) -> u64 {
     if op == 54 {
         return 196;
     }
+    if op == 55 {
+        // rt_write: the vector in rdi, the index in rsi, the byte in rdx.
+        return 196;
+    }
     if op == 42 {
         return 128;
+    }
+    if (op == 98) || (op == 99) {
+        // movl / movb: the source, and the registers of a memory destination's address.
+        return src | dst_address(&o, i);
+    }
+    if (op == 86) || (op == 87) {
+        // A fixed-size array's element with the length and width as immediates: base and index -
+        // rdi and rsi, or the registers optimize.grl `array_regs` put in operand 1 (bits 8.. and
+        // 16.., each +1).
+        mut m = 0;
+        b := (o.v1[i] >> 16) & 255;
+        x := (o.v1[i] >> 8) & 255;
+        if b != 0 {
+            m = m | (1 << (b - 1));
+        } else {
+            m = m | 128;
+        }
+        if x != 0 {
+            m = m | (1 << (x - 1));
+        } else {
+            m = m | 64;
+        }
+        return m;
+    }
+    if is_desc_op(op) {
+        // The index in rsi and the hoisted data and len registers the operands name; the byte store
+        // also its value in rdx.
+        if op == 89 {
+            return 68 | src | dst;
+        }
+        return 64 | src | dst;
     }
     if is_float_op(op) {
         // movd, cvttsd2si, cvtsi2sdq: the destination is written, not read.
@@ -1189,8 +1275,21 @@ pub fn writes<a>(o: (&a Body), i: u64) -> u64 {
     if op == 45 || op == 46 {
         return caller_saved();
     }
-    if (46 < op) & (op < 55) {
+    if (46 < op) & (op < 56) {
         return 1;
+    }
+    if is_desc_op(op) {
+        return 1;
+    }
+    if (op == 86) || (op == 87) {
+        // The address in %rax, unless it was folded into the load after it (bit 24).
+        if ((o.v1[i] >> 24) & 1) != 0 {
+            return 0;
+        }
+        return 1;
+    }
+    if (op == 98) || (op == 99) {
+        return dst_writes(&o, i);
     }
     if is_float_op(op) {
         if (op == 69) || (op == 70) {
@@ -1308,8 +1407,10 @@ pub fn new_body() -> Body {
         gbase: 0,
         inl_rel: u8[],
         lscope: 0,
+        sfact: u64[],
         maxslot: 0,
         table: u64[],
+        interest: u64[],
         base: 0,
         data: 0,
         uniq: 0,
@@ -1466,35 +1567,6 @@ pub fn facts_digest<a, b, c>(ix: (&a FactIndex), facts: (&b llvm::Facts), name: 
     }
     return total;
 }
-// The slot's type fact from the index: `(what << 8) | width` in the table's own encodings, or 0.
-fn slot_fact<a, b, c>(ix: (&a FactIndex), facts: (&b llvm::Facts), name: &c [u8], slot: u64) -> u64 {
-    if ix.count == 0 {
-        return 0;
-    }
-    mut h: u64 = 2166136261;
-    for j in name.len() {
-        h = wrapping_mul(h ^ name[j], 16777619);
-    }
-    mut at = ix.head[h % 4096];
-    while at != 0 {
-        i := at - 1;
-        if (llvm::fact_kind(facts, i) == 0) & (llvm::fact_slot_at(facts, i) == slot) {
-            if llvm::fact_name_len(facts, i) == name.len() {
-                mut same = 1;
-                for j in name.len() {
-                    if llvm::fact_name_byte(facts, i, j) != name[j] {
-                        same = 0;
-                    }
-                }
-                if same != 0 {
-                    return (llvm::fact_what(facts, i) << 8) | (llvm::fact_width(facts, i) & 255);
-                }
-            }
-        }
-        at = ix.next[i];
-    }
-    return 0;
-}
 
 // The type a value's `what` gives: `what` 1 is an f32 (one word), 2/3/4 are vector headers of
 // element width 8/4/1, 5 is a `{data, len}` descriptor. Anything else is the untyped word.
@@ -1551,22 +1623,115 @@ pub fn type_symbol<a>(s: &a [u8], a: u64, e: u64) -> u8[] {
 // A value is minted per definition. Reads bind to the last definition of that location in the block;
 // a label starts a block, so a read across it keeps its slot (value 0) rather than claiming one
 // definition where a slot may hold several.
+// A direct call to a body whose signature fact gives its argument words reads only those argument
+// registers (rdi, rsi, rdx, rcx, r8, r9 in order), not all six: what the caller left in the others
+// is not kept alive for it. The mask rides in the call operand as `call_args` masks do (bit 63).
+fn exact_calls<a, b, c, d>(o: (&a mut Body), s: &b [u8], facts: (&c llvm::Facts), ix: (&d FactIndex)) {
+    if ix.count == 0 {
+        return ();
+    }
+    order := u64[7, 6, 2, 1, 8, 9];
+    for i in o.op.len() {
+        if (o.op[i] != 15) || (o.k0[i] != 4) || ((o.m0[i] >> 63) != 0) {
+            continue;
+        }
+        a := o.s0[i];
+        e := o.e0[i];
+        mut h: u64 = 2166136261;
+        for j in e - a {
+            h = wrapping_mul(h ^ s[a + j], 16777619);
+        }
+        mut at = ix.head[h % 4096];
+        while at != 0 {
+            f := at - 1;
+            if (llvm::fact_kind(facts, f) == 5) && (llvm::fact_name_len(facts, f) == e - a) {
+                mut same = true;
+                for j in e - a {
+                    if llvm::fact_name_byte(facts, f, j) != s[a + j] {
+                        same = false;
+                        break;
+                    }
+                }
+                if same {
+                    words := llvm::fact_slot_at(facts, f);
+                    mut m = 9223372036854775808;
+                    for k in 6 {
+                        if k < words {
+                            m = m | (1 << order[k]);
+                        }
+                    }
+                    exchange(&mut o.m0[i], m);
+                    break;
+                }
+            }
+            at = ix.next[f];
+        }
+    }
+}
 pub fn build<a, b, c, d>(o: (&a mut Body), s: &b [u8], facts: (&c llvm::Facts), ix: (&d FactIndex)) {
+    exact_calls(&mut o, view(s), facts, ix);
     // The `DynPair`s this body builds, and whether it returns one, are typed-IR facts keyed by the
     // body symbol (docs/design/fat-dyn.md): one read, here, so every consumer of the width sees the
     // same list. The fact names word 0 by the front end's slot index (slot k at `-8(k+1)`); this
     // pass indexes slots by address (`N/8` from a `-N(%rbp)` operand), so the index shifts by one.
+    // All of this body's facts in one walk of its bucket in the index: the slot types (`sfact`, by
+    // N/8), the DynPair slots and the two-word result. Scanning the whole table per body was
+    // quadratic once the native path records facts for every function.
     exchange(&mut o.dyn_pairs, u64[]);
     exchange(&mut o.ret2, 0);
-    if o.name.len() != 0 {
-        llvm::facts_dyn_pairs(facts, view(o.name), &mut o.dyn_pairs);
-        exchange(&mut o.pair_widths, u64[]);
-        llvm::facts_pair_widths(facts, view(o.name), &mut o.pair_widths);
-        for q in o.dyn_pairs.len() {
-            first := o.dyn_pairs[q] + 1;
-            exchange(&mut o.dyn_pairs[q], first);
+    exchange(&mut o.pair_widths, u64[]);
+    o.sfact.clear();
+    for n in o.maxslot / 8 + 2 {
+        o.sfact.push(0);
+    }
+    if (o.name.len() != 0) && (ix.count != 0) {
+        mut h: u64 = 2166136261;
+        for j in o.name.len() {
+            h = wrapping_mul(h ^ o.name[j], 16777619);
         }
-        exchange(&mut o.ret2, llvm::facts_dyn_result(facts, view(o.name)));
+        mut pairs = u64[];
+        mut at = ix.head[h % 4096];
+        while at != 0 {
+            i := at - 1;
+            if llvm::fact_name_len(facts, i) == o.name.len() {
+                mut same = true;
+                for j in o.name.len() {
+                    if llvm::fact_name_byte(facts, i, j) != o.name[j] {
+                        same = false;
+                        break;
+                    }
+                }
+                if same {
+                    kind := llvm::fact_kind(facts, i);
+                    if kind == 0 {
+                        // The table's slot k is the word at -8(k+1): N/8 = k + 1. The newest fact
+                        // for a slot is the one that counts, and the walk meets the newest first.
+                        n := llvm::fact_slot_at(facts, i) + 1;
+                        if (n < o.sfact.len()) && (o.sfact[n] == 0) {
+                            put(&mut o.sfact, n, (llvm::fact_what(facts, i) << 8) | (llvm::fact_width(facts, i) & 255));
+                        }
+                    }
+                    if kind == 3 {
+                        pairs.push(i);
+                    }
+                    if kind == 4 {
+                        exchange(&mut o.ret2, 1);
+                    }
+                }
+            }
+            at = ix.next[i];
+        }
+        // In table order, as the facts were recorded; a pair's width (0 recorded as 2 words).
+        mut k = pairs.len();
+        while 0 < k {
+            k -= 1;
+            o.dyn_pairs.push(llvm::fact_slot_at(facts, pairs[k]) + 1);
+            mut w = llvm::fact_width(facts, pairs[k]);
+            if w == 0 {
+                w = 2;
+            }
+            o.pair_widths.push(w);
+        }
     }
     o.dval.clear();
     o.use0.clear();
@@ -1684,9 +1849,10 @@ fn slot_ty<a, b, c, d>(o: (&a Body), facts: (&b llvm::Facts), ix: (&d FactIndex)
     mut t: u64 = 0;
     mut width: u64 = 1;
     if slot != 0 {
-        // The table files a slot under the same number the stream spells in `-N(%rbp)`: the
-        // `--verify-facts` dump reads `slot 4` for the `-32(%rbp)` frame word.
-        k := slot_fact(ix, facts, view(o.name), slot);
+        mut k = 0;
+        if slot < o.sfact.len() {
+            k = o.sfact[slot];
+        }
         if k != 0 {
             t = ty_of_what(k >> 8);
             width = width_of_what(k >> 8, 1);
@@ -1757,10 +1923,10 @@ pub fn count_calls<a>(o: (&a Body)) -> u64 {
     mut n: u64 = 0;
     for i in o.op.len() {
         // A call line, plus the leaf accessors `parse` re-tags from `call rt_slot` and friends into
-        // pseudo-instructions 40..54: the front end wrote them with `call_out`, so they are calls the
+        // pseudo-instructions 40..55: the front end wrote them with `call_out`, so they are calls the
         // recorder counted even when the printer inlines them.
         mut call = o.op[i] == 15;
-        if (39 < o.op[i]) & (o.op[i] < 55) {
+        if (39 < o.op[i]) & (o.op[i] < 56) {
             call = true;
         }
         if call {

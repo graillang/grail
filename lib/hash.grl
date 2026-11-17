@@ -1,77 +1,215 @@
 module hash;
 
-// SipHash-2-4 for keyed table hashing, not a digest/authentication API.
-// Callers supply both seed words explicitly; there is no silently fixed security seed.
-pub struct Hasher{v0:u64,v1:u64,v2:u64,v3:u64,tail:u64,used:u64,factor:u64,total:u64}
-pub interface Hash{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher));}
+// SipHash for keyed table hashing, not a digest/authentication API. `hasher` is SipHash-2-4;
+// `hash`, which the maps use, is SipHash-1-3, the variant Rust's HashMap and CPython hash tables
+// with (one compression round per word, three finalization rounds). Callers supply both seed words
+// explicitly; there is no silently fixed security seed.
+pub struct Hasher{v0:u64,v1:u64,v2:u64,v3:u64,tail:u64,used:u64,total:u64,rounds:u64}
+pub interface Hash{
+    fn hash<a,b>(value:(&a Self),state:(&b mut Hasher));
+    // The SipHash-1-3 of the value's stream from a prepared `table_hasher` state: what the maps
+    // call. The default streams through `hash`; a one-word key overrides it with `word_hash`, the
+    // same value with no state in memory.
+    fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return stream_hash(value,base);}
+}
 pub interface Equal{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool;}
 
 pub fn hasher(seed0:u64,seed1:u64)->Hasher{
     return Hasher{v0:8317987319222330741^seed0,v1:7237128888997146477^seed1,
         v2:7816392313619706465^seed0,v3:8387220255154660723^seed1,
-        tail:0,used:0,factor:1,total:0};
+        tail:0,used:0,total:0,rounds:2};
 }
-fn rotate13(n:u64)->u64{return wrapping_mul(n,8192)^(n/2251799813685248);}
-fn rotate16(n:u64)->u64{return wrapping_mul(n,65536)^(n/281474976710656);}
-fn rotate17(n:u64)->u64{return wrapping_mul(n,131072)^(n/140737488355328);}
-fn rotate21(n:u64)->u64{return wrapping_mul(n,2097152)^(n/8796093022208);}
-fn rotate32(n:u64)->u64{return wrapping_mul(n,4294967296)^(n/4294967296);}
-fn round<a>(state:(&a mut Hasher)){
-    state.v0=wrapping_add(state.v0,state.v1);state.v1=rotate13(state.v1)^state.v0;state.v0=rotate32(state.v0);
-    state.v2=wrapping_add(state.v2,state.v3);state.v3=rotate16(state.v3)^state.v2;
-    state.v0=wrapping_add(state.v0,state.v3);state.v3=rotate21(state.v3)^state.v0;
-    state.v2=wrapping_add(state.v2,state.v1);state.v1=rotate17(state.v1)^state.v2;state.v2=rotate32(state.v2);
-}
+// The state lives in locals while it is mixed, so it stays in registers. One round for the
+// table hash (SipHash-1-3); `hasher`'s SipHash-2-4 takes the second, out of line.
 fn compress<a>(state:(&a mut Hasher),word:u64){
-    state.v3=state.v3^word;round(&mut state);round(&mut state);state.v0=state.v0^word;
+    if state.rounds!=1{compress2(&mut state,word);return ();}
+    mut v0=state.v0;mut v1=state.v1;mut v2=state.v2;mut v3=state.v3^word;
+    v0=wrapping_add(v0,v1);v1=((v1<<13)|(v1>>51))^v0;v0=(v0<<32)|(v0>>32);
+    v2=wrapping_add(v2,v3);v3=((v3<<16)|(v3>>48))^v2;
+    v0=wrapping_add(v0,v3);v3=((v3<<21)|(v3>>43))^v0;
+    v2=wrapping_add(v2,v1);v1=((v1<<17)|(v1>>47))^v2;v2=(v2<<32)|(v2>>32);
+    state.v0=v0^word;state.v1=v1;state.v2=v2;state.v3=v3;
 }
+fn compress2<a>(state:(&a mut Hasher),word:u64){
+    mut v0=state.v0;mut v1=state.v1;mut v2=state.v2;mut v3=state.v3^word;
+    v0=wrapping_add(v0,v1);v1=((v1<<13)|(v1>>51))^v0;v0=(v0<<32)|(v0>>32);
+    v2=wrapping_add(v2,v3);v3=((v3<<16)|(v3>>48))^v2;
+    v0=wrapping_add(v0,v3);v3=((v3<<21)|(v3>>43))^v0;
+    v2=wrapping_add(v2,v1);v1=((v1<<17)|(v1>>47))^v2;v2=(v2<<32)|(v2>>32);
+    v0=wrapping_add(v0,v1);v1=((v1<<13)|(v1>>51))^v0;v0=(v0<<32)|(v0>>32);
+    v2=wrapping_add(v2,v3);v3=((v3<<16)|(v3>>48))^v2;
+    v0=wrapping_add(v0,v3);v3=((v3<<21)|(v3>>43))^v0;
+    v2=wrapping_add(v2,v1);v1=((v1<<17)|(v1>>47))^v2;v2=(v2<<32)|(v2>>32);
+    state.v0=v0^word;state.v1=v1;state.v2=v2;state.v3=v3;
+}
+// `tail` holds the `used` (< 8) bytes not yet compressed, little-endian.
 @no_alloc
 pub fn write_byte<a>(state:(&a mut Hasher),value:u64 where value<256){
-    state.tail=state.tail^(value*state.factor);state.used+=1;state.total=wrapping_add(state.total,1);
-    if state.used==8{word:=state.tail;compress(&mut state,word);state.tail=0;state.used=0;state.factor=1;}
-    else{state.factor=state.factor*256;}
+    state.tail=state.tail^(value<<(state.used*8));state.used+=1;state.total=wrapping_add(state.total,1);
+    if state.used==8{word:=state.tail;compress(&mut state,word);state.tail=0;state.used=0;}
 }
+// Eight bytes, little-endian: the same as eight write_byte calls, one compression.
 @no_alloc
 pub fn write_num<a>(state:(&a mut Hasher),value:u64){
-    mut remaining=value;for i in 8{write_byte(&mut state,remaining&255);remaining=remaining/256;}
+    if state.used==0{state.total=wrapping_add(state.total,8);compress(&mut state,value);}
+    else{write_unaligned(&mut state,value);}
+}
+fn write_unaligned<a>(state:(&a mut Hasher),value:u64){
+    state.total=wrapping_add(state.total,8);
+    shift:=state.used*8;word:=state.tail^(value<<shift);compress(&mut state,word);state.tail=value>>(64-shift);
+}
+// Bytes, eight at a time where they line up with the state.
+@no_alloc
+pub fn write_bytes<a,b>(state:(&a mut Hasher),data:&b [u8]){
+    n:=data.len();mut i:u64=0;
+    while (i<n)&&(state.used!=0){write_byte(&mut state,data[i]);i+=1;}
+    start:=i;
+    while i+8<=n{
+        word:=u64(data[i])|(u64(data[i+1])<<8)|(u64(data[i+2])<<16)|(u64(data[i+3])<<24)
+            |(u64(data[i+4])<<32)|(u64(data[i+5])<<40)|(u64(data[i+6])<<48)|(u64(data[i+7])<<56);
+        compress(&mut state,word);i+=8;
+    }
+    state.total=wrapping_add(state.total,i-start);
+    while i<n{write_byte(&mut state,u64(data[i]));i+=1;}
 }
 @no_alloc
-pub fn finish(state:Hasher)->u64{
-    mut current=state;word:=current.tail^((current.total&255)*72057594037927936);
-    compress(&mut current,word);current.v2=current.v2^255;
-    round(&mut current);round(&mut current);round(&mut current);round(&mut current);
-    return current.v0^current.v1^current.v2^current.v3;
+pub fn finish(state:Hasher)->u64{mut current=state;return finish_at(&mut current);}
+fn finish_at<a>(state:(&a mut Hasher))->u64{
+    word:=state.tail^((state.total&255)<<56);
+    mut v0=state.v0;mut v1=state.v1;mut v2=state.v2;mut v3=state.v3^word;
+    v0=wrapping_add(v0,v1);v1=((v1<<13)|(v1>>51))^v0;v0=(v0<<32)|(v0>>32);
+    v2=wrapping_add(v2,v3);v3=((v3<<16)|(v3>>48))^v2;
+    v0=wrapping_add(v0,v3);v3=((v3<<21)|(v3>>43))^v0;
+    v2=wrapping_add(v2,v1);v1=((v1<<17)|(v1>>47))^v2;v2=(v2<<32)|(v2>>32);
+    if state.rounds==2{
+        v0=wrapping_add(v0,v1);v1=((v1<<13)|(v1>>51))^v0;v0=(v0<<32)|(v0>>32);
+        v2=wrapping_add(v2,v3);v3=((v3<<16)|(v3>>48))^v2;
+        v0=wrapping_add(v0,v3);v3=((v3<<21)|(v3>>43))^v0;
+        v2=wrapping_add(v2,v1);v1=((v1<<17)|(v1>>47))^v2;v2=(v2<<32)|(v2>>32);
+    }
+    v0=v0^word;v2=v2^255;
+    v0=wrapping_add(v0,v1);v1=((v1<<13)|(v1>>51))^v0;v0=(v0<<32)|(v0>>32);
+    v2=wrapping_add(v2,v3);v3=((v3<<16)|(v3>>48))^v2;
+    v0=wrapping_add(v0,v3);v3=((v3<<21)|(v3>>43))^v0;
+    v2=wrapping_add(v2,v1);v1=((v1<<17)|(v1>>47))^v2;v2=(v2<<32)|(v2>>32);
+    v0=wrapping_add(v0,v1);v1=((v1<<13)|(v1>>51))^v0;v0=(v0<<32)|(v0>>32);
+    v2=wrapping_add(v2,v3);v3=((v3<<16)|(v3>>48))^v2;
+    v0=wrapping_add(v0,v3);v3=((v3<<21)|(v3>>43))^v0;
+    v2=wrapping_add(v2,v1);v1=((v1<<17)|(v1>>47))^v2;v2=(v2<<32)|(v2>>32);
+    v0=wrapping_add(v0,v1);v1=((v1<<13)|(v1>>51))^v0;v0=(v0<<32)|(v0>>32);
+    v2=wrapping_add(v2,v3);v3=((v3<<16)|(v3>>48))^v2;
+    v0=wrapping_add(v0,v3);v3=((v3<<21)|(v3>>43))^v0;
+    v2=wrapping_add(v2,v1);v1=((v1<<17)|(v1>>47))^v2;v2=(v2<<32)|(v2>>32);
+    if state.rounds==2{
+        v0=wrapping_add(v0,v1);v1=((v1<<13)|(v1>>51))^v0;v0=(v0<<32)|(v0>>32);
+        v2=wrapping_add(v2,v3);v3=((v3<<16)|(v3>>48))^v2;
+        v0=wrapping_add(v0,v3);v3=((v3<<21)|(v3>>43))^v0;
+        v2=wrapping_add(v2,v1);v1=((v1<<17)|(v1>>47))^v2;v2=(v2<<32)|(v2>>32);
+    }
+    return v0^v1^v2^v3;
 }
-impl Hash for u64{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,*value);}}
+impl Hash for u64{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,*value);}
+    fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_hash(*value,base);}}
 impl Equal for u64{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool{return *left==*right;}}
 impl Hash for u8[]{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){
-    length:=value.len();write_num(&mut state,length);for i in length{write_byte(&mut state,value[i]);}
+    write_num(&mut state,value.len());write_bytes(&mut state,view(value));
 }}
 impl Equal for u8[]{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool{
     if left.len()!=right.len(){return false;}for i in left.len(){if left[i]!=right[i]{return false;}}return true;
 }}
 impl Hash for string{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){
-    length:=value.len();write_num(&mut state,length);for i in length{write_byte(&mut state,value[i]);}
+    write_num(&mut state,value.len());write_bytes(&mut state,view(value));
 }}
 impl Equal for string{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool{
     if left.len()!=right.len(){return false;}for i in left.len(){if left[i]!=right[i]{return false;}}return true;
 }}
 // Sized integers hash their canonical 64-bit word (sign-extended for signed types).
-impl Hash for u8{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,bits(*value));}}
+impl Hash for u8{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,bits(*value));}
+    fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_hash(bits(*value),base);}}
 impl Equal for u8{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool{return *left==*right;}}
-impl Hash for u16{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,bits(*value));}}
+impl Hash for u16{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,bits(*value));}
+    fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_hash(bits(*value),base);}}
 impl Equal for u16{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool{return *left==*right;}}
-impl Hash for u32{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,bits(*value));}}
+impl Hash for u32{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,bits(*value));}
+    fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_hash(bits(*value),base);}}
 impl Equal for u32{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool{return *left==*right;}}
-impl Hash for i8{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,bits(*value));}}
+impl Hash for i8{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,bits(*value));}
+    fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_hash(bits(*value),base);}}
 impl Equal for i8{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool{return *left==*right;}}
-impl Hash for i16{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,bits(*value));}}
+impl Hash for i16{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,bits(*value));}
+    fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_hash(bits(*value),base);}}
 impl Equal for i16{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool{return *left==*right;}}
-impl Hash for i32{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,bits(*value));}}
+impl Hash for i32{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,bits(*value));}
+    fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_hash(bits(*value),base);}}
 impl Equal for i32{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool{return *left==*right;}}
-impl Hash for i64{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,bits(*value));}}
+impl Hash for i64{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,bits(*value));}
+    fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_hash(bits(*value),base);}}
 impl Equal for i64{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool{return *left==*right;}}
+// SipHash-1-3 of the value's stream under the two seed words.
 pub fn hash<a,T:Hash>(value:(&a T),seed0:u64,seed1:u64)->u64{
-    mut state=hasher(seed0,seed1);Hash::hash(value,&mut state);return finish(state);
+    base:=table_hasher(seed0,seed1);
+    return hash_from(value,&base);
+}
+// The SipHash-1-3 state `hash` starts from: a table can keep one and hash with `hash_from`.
+pub fn table_hasher(seed0:u64,seed1:u64)->Hasher{
+    return Hasher{v0:8317987319222330741^seed0,v1:7237128888997146477^seed1,
+        v2:7816392313619706465^seed0,v3:8387220255154660723^seed1,tail:0,used:0,total:0,rounds:1};
+}
+// `hash` from a prepared state (`table_hasher`), which is left as it was. Finished here rather
+// than through finish_at: one call fewer per table lookup.
+pub fn hash_from<a,b,T:Hash>(value:(&a T),base:(&b Hasher))->u64{return Hash::table_hash(value,base);}
+fn stream_hash<a,b,T:Hash>(value:(&a T),base:(&b Hasher))->u64{
+    mut state=Hasher{v0:base.v0,v1:base.v1,v2:base.v2,v3:base.v3,tail:0,used:0,total:0,rounds:1};
+    Hash::hash(value,&mut state);
+    word:=state.tail^((state.total&255)<<56);
+    mut v0=state.v0;mut v1=state.v1;mut v2=state.v2;mut v3=state.v3^word;
+    v0=wrapping_add(v0,v1);v1=((v1<<13)|(v1>>51))^v0;v0=(v0<<32)|(v0>>32);
+    v2=wrapping_add(v2,v3);v3=((v3<<16)|(v3>>48))^v2;
+    v0=wrapping_add(v0,v3);v3=((v3<<21)|(v3>>43))^v0;
+    v2=wrapping_add(v2,v1);v1=((v1<<17)|(v1>>47))^v2;v2=(v2<<32)|(v2>>32);
+    v0=v0^word;v2=v2^255;
+    v0=wrapping_add(v0,v1);v1=((v1<<13)|(v1>>51))^v0;v0=(v0<<32)|(v0>>32);
+    v2=wrapping_add(v2,v3);v3=((v3<<16)|(v3>>48))^v2;
+    v0=wrapping_add(v0,v3);v3=((v3<<21)|(v3>>43))^v0;
+    v2=wrapping_add(v2,v1);v1=((v1<<17)|(v1>>47))^v2;v2=(v2<<32)|(v2>>32);
+    v0=wrapping_add(v0,v1);v1=((v1<<13)|(v1>>51))^v0;v0=(v0<<32)|(v0>>32);
+    v2=wrapping_add(v2,v3);v3=((v3<<16)|(v3>>48))^v2;
+    v0=wrapping_add(v0,v3);v3=((v3<<21)|(v3>>43))^v0;
+    v2=wrapping_add(v2,v1);v1=((v1<<17)|(v1>>47))^v2;v2=(v2<<32)|(v2>>32);
+    v0=wrapping_add(v0,v1);v1=((v1<<13)|(v1>>51))^v0;v0=(v0<<32)|(v0>>32);
+    v2=wrapping_add(v2,v3);v3=((v3<<16)|(v3>>48))^v2;
+    v0=wrapping_add(v0,v3);v3=((v3<<21)|(v3>>43))^v0;
+    v2=wrapping_add(v2,v1);v1=((v1<<17)|(v1>>47))^v2;v2=(v2<<32)|(v2>>32);
+    return v0^v1^v2^v3;
+}
+// SipHash-1-3 of one eight-byte word from a prepared state: exactly what streaming the word gives,
+// straight-line, with the state in registers.
+pub fn word_hash<a>(word:u64,base:(&a Hasher))->u64{
+    mut v0=base.v0;mut v1=base.v1;mut v2=base.v2;mut v3=base.v3^word;
+    v0=wrapping_add(v0,v1);v1=((v1<<13)|(v1>>51))^v0;v0=(v0<<32)|(v0>>32);
+    v2=wrapping_add(v2,v3);v3=((v3<<16)|(v3>>48))^v2;
+    v0=wrapping_add(v0,v3);v3=((v3<<21)|(v3>>43))^v0;
+    v2=wrapping_add(v2,v1);v1=((v1<<17)|(v1>>47))^v2;v2=(v2<<32)|(v2>>32);
+    v0=v0^word;
+    last:u64=576460752303423488;
+    v3=v3^last;
+    v0=wrapping_add(v0,v1);v1=((v1<<13)|(v1>>51))^v0;v0=(v0<<32)|(v0>>32);
+    v2=wrapping_add(v2,v3);v3=((v3<<16)|(v3>>48))^v2;
+    v0=wrapping_add(v0,v3);v3=((v3<<21)|(v3>>43))^v0;
+    v2=wrapping_add(v2,v1);v1=((v1<<17)|(v1>>47))^v2;v2=(v2<<32)|(v2>>32);
+    v0=v0^last;v2=v2^255;
+    v0=wrapping_add(v0,v1);v1=((v1<<13)|(v1>>51))^v0;v0=(v0<<32)|(v0>>32);
+    v2=wrapping_add(v2,v3);v3=((v3<<16)|(v3>>48))^v2;
+    v0=wrapping_add(v0,v3);v3=((v3<<21)|(v3>>43))^v0;
+    v2=wrapping_add(v2,v1);v1=((v1<<17)|(v1>>47))^v2;v2=(v2<<32)|(v2>>32);
+    v0=wrapping_add(v0,v1);v1=((v1<<13)|(v1>>51))^v0;v0=(v0<<32)|(v0>>32);
+    v2=wrapping_add(v2,v3);v3=((v3<<16)|(v3>>48))^v2;
+    v0=wrapping_add(v0,v3);v3=((v3<<21)|(v3>>43))^v0;
+    v2=wrapping_add(v2,v1);v1=((v1<<17)|(v1>>47))^v2;v2=(v2<<32)|(v2>>32);
+    v0=wrapping_add(v0,v1);v1=((v1<<13)|(v1>>51))^v0;v0=(v0<<32)|(v0>>32);
+    v2=wrapping_add(v2,v3);v3=((v3<<16)|(v3>>48))^v2;
+    v0=wrapping_add(v0,v3);v3=((v3<<21)|(v3>>43))^v0;
+    v2=wrapping_add(v2,v1);v1=((v1<<17)|(v1>>47))^v2;v2=(v2<<32)|(v2>>32);
+    return v0^v1^v2^v3;
 }
 pub fn equal<a,b,T:Equal>(left:(&a T),right:(&b T))->bool{return Equal::equal(left,right);}

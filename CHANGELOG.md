@@ -1,5 +1,617 @@
 ## Unreleased
 
+- **`grail cache warm [--target T]`** checks and builds every standard module into the build store,
+  as rustup ships libstd: a project's first check then compiles only its own modules. The installers
+  run it (not under DESTDIR), and compile-perf's template store is now a warmed one. Dev compiler,
+  GRAIL_JOBS=1, a project's first check: bench/iterchain.grl 0.84G -> 0.24G, hashmap 0.72G -> 0.21G,
+  json 1.33G -> 0.20G.
+- A module run of a store build no longer re-hashes every interface it loads to check its trailer:
+  the driver passes `--use-vouched`, because each one was written by a run of that build or restored
+  from a blob whose bytes matched its content digest. Interfaces from a user's `--use DIR` or
+  `--interface DIR` keep the check. An edited bench/iterchain.grl check: 0.267G -> 0.234G.
+- **SIMD S2.**
+  - New types: `u8x16`, `u8x32`, `u32x4`, `u32x8`, `i64x2`, `i64x4` and the masks `m8x16`, `m8x32`.
+    Unsigned lanes compare, order and widen as unsigned.
+  - `shuffle` and `shuffle2` take literal lane indices.
+  - `to_f32`, and `to_i32`, which truncates, saturates and turns NaN into 0.
+  - `bits` and `T::from_bits` reinterpret lanes.
+  - `load_aligned` and `store_aligned` check the address and stop with it if it is misaligned.
+  - With the LLVM backend, a 4x4 matrix product and an array-of-structs to struct-of-arrays
+    transpose run as the same loops as C with SSE2 intrinsics: 1.04x and 1.17x C's instructions,
+    the same time within the machine's noise.
+- Fixed: the release compiler could be built by an older release compiler's LLVM backend and
+  accepted although it miscompiled its own assembler (programs printed stray zero bytes). The
+  release build now always lowers with the current native compiler, and accepts the result only
+  when it compiles the compiler to the same text and the same objects as the native build and its
+  programs pass a corpus slice (hello, strings, alloc, thread, sched).
+
+- **`host::chmod(path, mode)`**: sets a file's permission bits, 0 or a positive errno (fchmodat on
+  Linux, chmod on macOS, and 0 on Windows, which has no bits to set). The build store will use it to
+  give a restored executable image its mode without a shell, once the bootstrap seed knows it.
+- **`grail build` and `grail check` start no helper process to hash or file the build store**, and an
+  unchanged program is decided from file stamps. Every `sha256sum`, `sh -c`, `mv` and `cp` the store
+  ran (about 70 per small build) is now in-process: the store's digest is `store_hash` (XXH64 under
+  four seeds, still 64 hex digits; store keys change once), and writes go to a staging file renamed
+  into place. A new `fp/` record per file holds its digest plus the module, `use` lines and `@embed`
+  flag the driver reads sources for, keyed by size, nanosecond mtime, inode and device. So a no-op
+  build reads no source, the compiler's `--print-inputs` answer is remembered under the stamps of
+  what it read (`inputs/`), and a tool's `--version` is asked once per binary (`tool-id/`). A module
+  run with in-process assembly is one process, not a `grail unit-build` wrapper and the compiler.
+  `host::read_file` reads straight into its result instead of pushing byte by byte, sized from the
+  file's own size. With the dev
+  compiler and GRAIL_JOBS=1, in user-space instructions: hello no-op build 0.235G -> 0.008G, hello
+  check 0.310G -> 0.058G, hello build 0.453G -> 0.140G. `grail cache prune` drops `fp/`, `inputs/`
+  and `tool-id/` whole.
+- **Short floats print without big integers.** A double whose shortest form has at most 15 digits
+  and lies in [1e-7, 1e22) (`0.25`, `1.037`, `123.5`) is printed from a candidate checked exactly
+  with one correctly rounded operation (Clinger), with the same text as before; longer ones still
+  go through Burger & Dybvig. Decimal-shaped values print about twice as fast (LLVM 729M -> 384M
+  instructions for 6,000 of them).
+- Parallel loops over several columns: `parallel_for_zip(grain, f, s1, .., s4)` and
+  `pool::zip2/zip3/zip4` with generic callable bounds (simd-layout-parallel-loops.md 4.2). One split,
+  the same index range of every slice per piece, equal lengths checked once, a piece per worker;
+  same-vector-twice, captured arguments and `FnMut` callbacks are the ordinary refusals.
+
+- **More small functions are inlined, and dispatch wrappers too.** The inliner filed a candidate
+  under the first label of its body, which in a build with error locations is a statement's site
+  label, not the function's symbol, so most small leaves were never matched to their calls. They are
+  now filed under their symbol. A body whose only call is the last thing it does (`rt_alloc` picking
+  `rt_alloc_unlocked` or `rt_alloc_shared`) is inlined as its test and the call it makes. Measured
+  (callgrind, one worker, minimum of five): a join 2911 -> 2888 instructions, a spawn 1757 -> 1741,
+  fib(20) by nested join -0.24%. An inlined wrapper is not a frame of its own in a backtrace.
+- Fixed: `grail fmt` could break a long expression inside `<<` or `>>` (each is two `<`/`>` tokens),
+  or start a continuation line with `<`, and the output then read as a generic argument list and no
+  longer parsed. A wrapped line now never starts with `<` or `>`.
+- **Faster rebuilds after an edit: unchanged functions' optimised code comes from the store.** A
+  body replayed from the function store carried its parameters' type facts twice, so its key in the
+  optimiser's memo differed from the one it was filed under and every body of an edited module was
+  optimised again. The facts are now the fresh emission's, and the memo hits for every unchanged
+  body: `grail build` of a 4000-function file after a one-function edit went from 95.7G to 34.0G
+  instructions (GRAIL_JOBS=1). The stack-probe check reads the assembly once with no per-line
+  copies, and the inlining pass's call lines travel with each remembered body instead of being found
+  by a scan of the whole output.
+- Fixed: `grail check` refused every program using a module that claims an effect (`use strings;`
+  alone: "`is_char_boundary` ... makes an indirect call the compiler cannot follow"). Check runs go
+  per module, and a check-only run recorded no effect facts, so the runtime's run wrote no
+  `runtime.facts` and every claim that reaches the runtime met an unknown callee. A check run that
+  writes interfaces records its bodies now; `tools/test-cli.mjs` checks a program using each lib/
+  module.
+- The internal assembler takes `.previous`.
+- **Integer map keys hash in registers.** `hash::Hash` has a defaulted `table_hash`, the SipHash-1-3
+  value a map uses (the default streams through `hash`, as before); the integer types give it as
+  `hash::word_hash`, the same value computed straight-line with no hasher state in memory. User
+  `Hash` impls need no change. bench/hashmap.grl: Grail-LLVM 0.88G -> 0.77G instructions and 0.30
+  -> 0.27 s user (Rust 0.64G, 0.21 s), Grail-native 3.21G -> 2.69G.
+- **Fix: every closure expression is a type of its own.** Two closure literals with the same
+  signature and environment shape compared equal inside a generic type, so `k = keep(|| ..)` could
+  replace a `Keep<F>` built from another literal; calls through it then ran the first literal's body
+  (callable-bound calls are direct), and a borrowing closure could outlive what it borrowed. It is now
+  a type mismatch, as in Rust.
+- `left, right := split_at_mut(s, mid)`: two exclusive halves of one slice, usable at once
+  (simd-layout-parallel-loops.md 4.3). The borrow checker gains sibling loan groups - halves of one
+  split never conflict with each other or with what is reborrowed from them - and nothing about
+  indices; `mid <= len` is checked as it runs.
+- Fix: a bare `return;` in a function that takes a borrow no longer reports "returned borrow escapes
+  its declared input lifetime" (its unit value was read from the first parameter's slot).
+
+- **Text costs less to build and parse.** A string literal is checked to be UTF-8 while compiling,
+  so making a `string` of it is a copy with no run-time check; appending a `string` onto a `string`
+  no longer re-checks it; `format` hands its buffer over as the string instead of copying it, and
+  checks it only when an argument may carry non-UTF-8 bytes. `json` copies a plain string in one
+  step, writes one with no escapes in one append, and skips the whitespace call when the next byte
+  is not whitespace. bench/json.grl: Grail-LLVM 4.48G -> 3.15G instructions (Rust 1.64G),
+  Grail-native 14.3G -> 9.8G.
+- **Native backend: float elements go straight to and from SSE registers.** A float loaded through
+  a general register (`movq (%rax),%rax; movq %rax,%xmm8`) is `movsd (%rax),%xmm8`, and a store the
+  same way back; the internal assembler encodes `movsd`, and AArch64 and RISC-V translate it to
+  `ldr`/`str` and `fld`/`fsd`. nbody executes 7% fewer instructions.
+- **Native backend: fixed-size array elements are addressed directly.** An element access reads its
+  base and index from the registers that hold them instead of copies in `%rdi`/`%rsi`, and a load
+  of the element takes the scaled address as its operand (`movsd (%r12,%rbx,8),%xmm9`) instead of
+  computing it with `leaq` first. nbody executes another 10% fewer instructions.
+
+- **Raw address offsets.** In an `unsafe module`, the address operand of `raw_load`/`raw_store`
+  and their narrow forms written as `p + k` with a literal `k` has no overflow check and is folded
+  into the load's addressing (`movq 16(%rax),%rax`); other integer arithmetic there still follows
+  the build's overflow mode. The runtime loses about 950 of its 2,664 overflow checks
+  (docs/ffi.md; decision record "Raw address offsets").
+- SIMD loads and stores take fixed-size array fields in place (`f32x4::load(&mat.m, 4)` on a
+  `[f32; 16]` field, a row of `[[f32; 4]; 4]`); test-simd checks the loop over a vector of such
+  structs stays in registers on LLVM.
+
+- **Soundness: a callable bound's reference parameters are fresh on every call.** In
+  `F: FnMut((&mut T), C) -> R` the `&mut T` has a lifetime the bound names nowhere else, so - as in
+  Rust's `for<'a>` elision - the closure or function given for `F` must accept any lifetime there. One
+  whose signature ties it to another parameter, its result or a capture (`fn leak<a, b>(v: &a mut T,
+  out: &b mut Out<a>)`) could keep the reference past the call and is now refused: "its parameter N
+  is a reference the bound gives it fresh on every call". It was accepted since callable bounds
+  landed (through `vecs` callbacks and the typed iterator adapters too).
+- **Fix: default interface methods work across modules.** An interface's default method bodies were
+  not carried in its `.iface`, so an implementation in another module failed with
+  "missing interface method (it has no default body)" under separate compilation (a single run was
+  fine). The default's text now travels with the method record, as a generic template's does.
+- **Changed: `split`, `trim`, `lines` and `split_whitespace` return views, and live in `strings`.**
+  They were the compiler's own methods (and `strings` methods) returning owned copies; now they are
+  `strings` methods (`use strings;`) returning views of the text (`(&[u8])[]`, `&[u8]`), like
+  Rust's `&str` pieces, and `trim_start`/`trim_end` join them. A view keeps the text borrowed, so a
+  piece that must outlive it is `split_owned(sep)` or `piece.copy()`. `for x in v` over a vector of
+  views borrows each one in place, as `for x in &v` does. Views print and format as text.
+- **`parse_f64`** (`strings`): decimal text to the nearest double, ties to even, as Rust's and Go's
+  parsers: Clinger's exact path, then Eisel-Lemire over a 128-bit power-of-five table, then an exact
+  big-integer fallback; `inf`/`infinity`/`nan`, overflow to infinity (`"1e400"`) and underflow to
+  zero. It lives in the new module `float`, which `json` now uses too (its own bignum-only path is
+  gone).
+- **`out.append_format("{}:{};", a, b)`** writes `format`'s text onto the end of a `string` or byte
+  vector with no string of its own (Rust's `write!`); onto a string only the new tail is checked to
+  be UTF-8, and not at all when every argument is a number, bool, char or string.
+- Integers print without a buffer per number or a software division per digit (`rt_fmt_num` wrote
+  each number into a fresh allocation through a shift-and-subtract divide): two digits per division,
+  straight into the output. bench/strings.grl (now `split` views, `parse_f64`, `append_format`, as
+  its Rust twin): Grail-LLVM 11.65G -> 4.53G instructions (Rust 3.23G), Grail-native 35.7G -> 13.7G.
+- The LLVM backend no longer mistakes a static's storage between two functions for a function (a
+  module with a `static` and functions after it failed to assemble).
+- `grail check` is about a fifth cheaper again: a check files *check units* - what a function asks
+  of the build, without its assembly - and writes no assembly at all; a build does not take a check
+  unit for its own and compiles that function. The compiler is no longer hashed on every command
+  (its digest is kept in the store by path, size and time).
+
+- **The standard map is one open-addressed table** (`lib/hashmap.grl`). Keys, values and their
+  hashes are stored densely in insertion order (iteration order and `key_at`/`value_at` are
+  unchanged), indexed by one table of slot words (a 32-bit hash tag and the entry index) with
+  Robin Hood linear probing and backward-shift deletion, at most half full; the per-bucket vectors
+  are gone. `hash::hash` (what the maps use) is now SipHash-1-3, as Rust's and CPython's tables
+  are; `hash::hasher` stays SipHash-2-4. The hasher compresses a word at a time (`write_num`,
+  `write_bytes`) instead of byte by byte, and `hash::table_hasher`/`hash::hash_from` hash from a
+  prepared state. bench/hashmap.grl: Grail-LLVM 4.49G -> 1.10G instructions (Rust 0.64G),
+  Grail-native 28.3G -> 4.6G (best development rival 8.1G). The LLVM backend emits generic
+  specialisations `weak_odr` instead of `weak`, so LLVM may inline them, and pushing a record of
+  whole words copies words rather than calling the byte copier.
+- Fixed: a failed index check could be reported as `division by zero`. A `%` or `/` states its
+  failure kind before its own check; when the optimiser removed that check (a divisor it proved
+  non-zero), the kind stayed pending and named the next check in the function. A pending kind now
+  ends with its statement, and an inlined bounds check is recognised by its shape first.
+- **`extern "C" nonblocking fn`**: a foreign function promised never to block is called bare, with
+  no foreign-call marker - the cost of a C-to-C call. The monitor cannot hand such a call off, so a
+  wrong promise costs latency (a held worker), never safety. `blocking` and `nonblocking` now travel
+  in interface files, so a call from another module behaves as declared. `docs/ffi.md`, "Blocking
+  foreign calls", has the three forms and their costs.
+
+- **A foreign call that holds a worker for more than 10 ms is handed off.** Every `extern "C"`
+  call on x86-64 Linux counts itself in and out on its worker (about 1.2 ns a call, measured on
+  10M calls of `labs`), and a scheduler monitor thread looks every 5 ms: a worker inside one foreign
+  call for two looks while work is queued is given to a spare, as a `blocking` call would have
+  been at once. The runtime says so once, naming the function, so it can be declared `blocking`.
+  At most 10,000 threads may be blocked in foreign calls; the next one ends the program with a
+  message instead of exhausting the machine.
+
+- **SIMD vector types (S1).** `f32x4`, `f32x8`, `f64x2`, `f64x4`, `i32x4` and `i32x8`, with masks
+  `m32x4`, `m32x8`, `m64x2` and `m64x4`.
+  - They are plain values. Lane-wise `+ - * /` work on floats; wrapping `+ - *` and `& | ^` on
+    integers; `& | ^` on masks.
+  - Constructors are `splat`, `new` and `load` (from a slice or an array, one bounds check per
+    vector). Methods are `store`, `sum` (a fixed halving tree, bit-identical everywhere), `lane`,
+    `min`/`max` (the scalar NaN and tie rule) and the compares `eq ne lt le gt ge`, which give masks.
+    A mask has `select`, `any`, `all` and `not`.
+  - The LLVM backend lowers them to vector IR. A dot product runs within 5% of the same loop in C
+    with SSE2 intrinsics, its loop entirely in registers. The native backend computes the same
+    results lane by lane; packed SSE2 and NEON come later.
+  - Interfaces are format 10.
+- Fixed: an `Atomic<T>`'s element was not part of its type, so an `Atomic<u8>` could be passed where
+  an `Atomic<u64>` was expected.
+- Stack probes have a backstop: after the probe pass, any frame line (`subq $.F<n>[+K],%rsp`,
+  `framesub`, or a literal `subq`) whose frame is larger than a page without its probe is an
+  internal compiler error naming the function, so a new spelling of the frame line cannot drop the
+  probe silently again. Frames within 128 bytes of a page are probed when the saved-register area
+  carries them over it.
+
+- Fixed: `grail fmt` could break a long expression inside `<<` or `>>` (each is two `<`/`>` tokens),
+  or start a continuation line with `<`, and the output then read as a generic argument list and no
+  longer parsed. A wrapped line now never starts with `<` or `>`.
+- **Small runtime functions are inlined into every module.** A small runtime body (the scheduler's
+  `rt_current`, `rt_list_set`, `rt_list_head`, ...) is now inlined where another module calls it,
+  in every build shape: a per-module build carries the bodies in `runtime.facts`. A failure inside
+  such a copy reports the calling statement. Measured with callgrind on one worker, against main:
+  a join 3102 -> 3059 instructions, a spawn 1845 -> 1810.
+- **Fixed: a release build of a program that calls C's `memcpy` failed to compile.** The LLVM
+  module defines `memcpy`/`memset`/`memmove` itself, and an `extern "C"` declaration of the same
+  name added a second, conflicting one ("invalid redefinition of function 'memcpy'"); the stdmap DNS
+  and IPv6 cases failed under `GRAIL_BACKEND=llvm`. Those names are no longer declared again.
+- `host::stack_left()`: the bytes left on the current green task's stack above its guard page (0 off
+  a task), for recursive code that wants to stop or fork before it overflows.
+- The scheduler's "enough stack left to help" check read the address of a helper's dead local,
+  which the LLVM build may fold to anything; it compares a live one now
+  (`sched-help-stops-when-the-stack-is-low` passes under both backends; its depth is now measured
+  with `host::stack_left()` instead of being tuned to native frame sizes).
+
+- **Typed iterator adapters: `iter::over(v).map(..).filter(..).fold(..)`.** `iter::VecIter<T>`,
+  `iter::Map<I, U, F>` and `iter::Filter<I, F>` implement `Iterator` with each callback held by its
+  own closure type, so a chain is one nested type, specialised and called directly, with no
+  allocation per element; a `for` loop runs over any of them. `iter::fold_all(it, init, f)` folds any
+  `I: Iterator`. `iter::Iter<T>` is unchanged (the erased form for `from_fn`, `dyn Iterator` or a
+  field). Callable bounds now work on an impl's own parameters (`impl<U, F: FnMut(u64) -> U> W<U, F>`)
+  and through interface files.
+- Release builds pass only the words a call through a closure, function value or `dyn` slot uses:
+  the other argument registers are `poison` rather than whatever they held, so LLVM no longer
+  keeps stale values alive to fill them. dyncall: 719 M -> 679 M instructions (Rust -O: 648 M). A
+  wrong word count is refused (an error under `--verify-facts`; `--forge-indirect=SYMBOL` shows it).
+
+- Release builds optimise the runtime's job, task and thread runners again: they make calls
+  through code pointers and were kept unoptimised after lifting them raced on the thread pointer.
+  That race is fixed (every thread-pointer read is now an opaque one), and
+  alloc-threads-pool-results-freed-by-waiter passes 50 runs of 50.
+
+- **The optimiser inlines small functions in ordinary builds again.** A small leaf (at most 24
+  instructions, no call but a failure exit) was only inlined when it carried no statement-position
+  marker, and every statement of a build with error locations carries one, so outside
+  `--no-error-sites` almost nothing was inlined (3 bodies on the scheduler's join probe, 57 with the
+  flag). The markers now travel with the copy. A failure inside an inlined function still reports
+  the line it was written on, but the inlined function is no longer a frame of its own: its caller's
+  `= called from` line is the next one shown. Measured (callgrind, one worker): a join 3406 -> 3355
+  instructions, a spawn 2089 -> 1858; the compiler's own text +0.4%.
+
+- Fixed: a module exporting a `u64` constant at or above 2^63, or a negative signed constant, could
+  not be read back from its interface ("carries a number wider than 64 bits"), so `grail build` of a
+  program using such a module failed. The reader now accepts the tenth LEB128 byte that holds bit 63.
+- Fixed: builds sharing one store at once (the per-module runs of one `grail check`, or several
+  builds) wrote their `sha256sum` output to one file in the store, and one run could take another's
+  digest and file a module under another module's interface ("core.iface describes module `io`").
+  Each such command now writes to a directory it claims for itself.
+- Removed: `--assembler=clang`. The internal assembler has been byte-identical to clang through a
+  landing on every target it covers, so Linux x86-64, AArch64 and RISC-V builds always use it and
+  `GRAIL_ASSEMBLER` no longer overrides it there (it still names the C compiler and the assembler
+  for release builds, macOS and Windows).
+- Arrays whose elements own data (`[string; 3]`, `[u64[]; 4]`) can be struct fields and vector
+  elements: held inline and flat like every array, dropped in place with their holder.
+- Fix: stack probes were skipped for every frame since frames also save callee-saved registers
+  (`subq $.F<n>+K,%rsp`); a frame over a page could step over the guard page again. The probe
+  matches that form, covers the K bytes, and the pinned case checks it on every target.
+- `bun tools/compile-rivals.mjs` measures a no-op rebuild beside the cold build, the edited build and
+  both checks, runs the rival twins as well as the generated programs, and reports instructions in one
+  process (the primary figure) and wall time at four jobs; the results are `bench/results/compile.json`
+  and the Performance chapter names the cause of every row where Grail is behind.
+
+- **C calls with floats are optimised in release builds (call ABI S8a).** A function that called a
+  C function with `f64`/`f32` arguments or a float result had to stay unoptimised on the LLVM
+  backend (its floats travel in vector registers a lifted call did not carry). The front end now
+  records each C function's argument and result types, and the lifter emits the call as C types it
+  (`call double @scale(i64, double, float)`), on x86-64 for calls whose arguments are all in
+  registers. Variadic calls, records and stack arguments keep the native body.
+- **Records that own data are no longer boxed** (unboxed-values.md, stage 4). Every struct and
+  tuple - strings, vectors and `impl Drop` included - is held as its words in the frame, inline in
+  the record that contains it and flat in vectors; each type gets an in-place drop, and the boxes
+  that remain (enum payloads, closures, `Mutex`, `dyn`, task results) drop in place and free.
+  `check syn1000`: record boxes 404 k -> 71 k, peak memory 53 -> 41 MB.
+- A `dyn` call on a record now costs one call: the vtable adapter that loads the record out of
+  its cell was a function with its own frame calling the method; it is a load and a tail jump.
+  dyncall (20 M dispatches): native 1,645 M -> 1,565 M instructions, LLVM 779 M -> 719 M (Rust -O:
+  648 M).
+- **Field predicates may relate fields of the same record:** `struct Span { lo: u64, hi: u64 where
+  lo <= hi }`. A literal owes the predicate once every field has its value, every write of a field it
+  reads owes it over the new value and the other fields, a mutable borrow of any such field is
+  refused, and a reader through a shared reference or a non-`mut` binding gets it as a fact. A name
+  that is not a field of the record is still refused at the struct. Strict mode proves literals; a
+  single-field write it cannot prove, and says to rebuild the record.
+- **Raw code follows the build's overflow mode, and the release compiler wraps.** Arithmetic in an
+  `unsafe module` used to be checked whatever the build asked for; it now traps in a checked build
+  and wraps in a wrapping one (`--release`, `--overflow=wrap`) like all other code. Code that must
+  wrap says so with `wrapping_*`, as the runtime's address arithmetic does. `tools/native.mjs
+  release` lowers the compiler with `--overflow=wrap`, as every release build does, so the release
+  compiler no longer checks after nearly every address addition. `GRAIL_COMMAND_TIMEOUT` raises
+  tools/native.mjs's per-step time limit on a loaded host.
+- Fixed a silent release miscompile: a two- or three-word value whose address is taken (an `Option`
+  from `pop()`, a small record passed by address) could be lowered by the LLVM backend as separate
+  one-word stack objects when its width fact was missing, so writing its second word overwrote a
+  neighbour - `pool::split` crashed under `--release` on 18e6943. The lifter now checks every access
+  through an address-taken slot against the slot's declared width and keeps a body that reaches
+  past it in native code (`--verify-facts` makes it an error). With that, the thread-pointer reads
+  are lifted again (now with a memory clobber), so `rt_current`, the mutex fast path and the
+  allocator's threaded path are optimised in release builds.
+
+- AArch64 and RV64 native code drops moves that move nothing (call ABI S7): the word machine's
+  result register is x9 (t0) and its first argument x0 (a0), and moves go through the scratch x10
+  (t1), so calls and returns were full of `mov x0,x9` after `mov x9,x10; mov x10,x0`. A value number
+  per register drops a move between two registers known equal; 1.5 % fewer lines in a small
+  program's output on both targets.
+
+- **Cheaper prologues on the native backend (call ABI S4-S5).** The callee-saved save area is
+  part of the one frame adjustment (`subq $.Fn+16,%rsp`, where there were two), a promoted register
+  or a cleared frame slot is zeroed only when the body may read it before writing it, and a first
+  statement that returns without a call (`if n < 2 { return n; }`) is tested on the argument
+  registers before the prologue, which moves behind it (shrink-wrapping). fib(32) on a dev build:
+  155.1 M -> 112.8 M instructions (Go: 102.9 M); its base case is now four instructions.
+- Fixed (LLVM backend): a function that called a C function with a float argument or read a float
+  result kept that value in a vector register the lifted call never passed or returned, so
+  `cbstk-callback-stack-arguments` printed NaN (0 on older builds). Such a body now stays native.
+
+- **A call with more than six arguments no longer allocates (call ABI S3).** Words past the sixth
+  went in a heap record behind the sixth register, which the callee copied and freed: an
+  `rt_rec` and an `rt_free` per call. They now travel on the stack in the platform's layout (word
+  6 + k at 8k(%rsp) at the call, 16 + 8k(%rbp) in the callee) on x86-64, AArch64 and RV64, and the
+  LLVM backend lifts both sides. A 7-argument call loop (10 M calls): native 3,670 M -> 430 M
+  instructions, LLVM 1,990 M -> 17.5 M. The interface ABI line gains `args = 6 registers then
+  stack`, so an interface written for the old convention is refused.
+
+- **Release builds call like C (LLVM backend, call ABI S1-S2).** A lifted function used to take and
+  pass all six argument registers and return two words, and was almost never internal, so LLVM
+  kept unused words alive across every call: fib(32) ran 112.8 M instructions against clang's 67.1 M.
+  The front end now records each function's argument words; the lifter defines and calls it with
+  exactly those and one result word (two for a `&dyn` result), and functions native code does not
+  call are internal. fib(32) is 74.9 M, the shape clang emits. A wrong signature fact is refused, and
+  an error under `--verify-facts`. Calls through closures, vtables and function values are lifted on
+  x86-64 too, so the functions that make them are optimised instead of shipping as unoptimised
+  text (`&Fn` call loop: 430 M -> 120 M instructions).
+
+- `tools/land.sh BRANCH` (`just land`) lands a branch on main through one queue: the branch must already contain main, the fast gate runs on exactly its tree, and green fast-forwards main. Emulated targets run after the landing on the build host.
+- **Fixed: a release-build segfault in `pool::split` and the other pool shapes.** Lifting the
+  thread-pointer read and write into LLVM inline assembly (so that `rt_current`, the mutex fast path
+  and the allocator's threaded path were optimised) put the allocator's thread-cache path in the
+  lifted code, and a closure's capture was found zeroed after `pool::split` built it: five pool and
+  scheduler cases crashed under `GRAIL_BACKEND=llvm`. Functions that read or set the thread pointer
+  stay in the native stream again until the lifted form is shown correct. The landing gate now runs
+  an LLVM leg over the pool, scheduler, unboxed and vector cases (`llvm-pool` in
+  tools/landsvc/suites.txt).
+- Fixed: a single-run build of a program whose module's text comes in two parts (its generic
+  specialisations are emitted after the rest) could give two inlined copies of one body the same
+  return label, and the output did not assemble. Each unit now numbers its inline sites across all
+  its parts; `split-test` checks that no assembly it builds defines a label twice.
+- **`extern "C" blocking fn`**: a foreign function declared `blocking` (a read, a wait, a present)
+  does not take a worker with it. On a worker running a green task, the call hands the worker's
+  queues to a spare thread for its duration and the calling thread keeps the task - C's frames and
+  thread-locals stay where they are - then becomes a spare itself. Spares are reused - a
+  thread is made only when none is idle - and an idle one exits after a second once more than the
+  worker count are waiting. `host::read_file`, `write_file` and `command` from a task work the same
+  way now, instead of starting a thread for every call. Off a worker the
+  declaration changes nothing. x86-64 Linux for now; elsewhere `blocking` is a plain call. The old
+  `rt_blocking_enter` warning ("a blocking foreign call is running on a green task's scheduler
+  thread") is gone with the unsafe hook that produced it.
+- **Release builds convert integers to `f32` with one instruction.** The LLVM lifter turns
+  `rt_f32_from_int` - which halves the value in a loop and then calls `rt_f32_round` - into
+  `sitofp`/`uitofp` to `float`, chosen by the source's signedness. Both round once to nearest even,
+  as the runtime does, so results are bit-identical (the float matrix pins the edge values). A loop of
+  three million conversions goes from 50 to 32 ms.
+- **The internal assembler covers AArch64 and RISC-V.** `grail build --target aarch64` and
+  `--target riscv64` (Linux) assemble in the compiler run too (`compiler/asm_a64.grl`,
+  `compiler/asm_rv64.grl`; `grail asm --target T`), debug builds included. Their objects are
+  byte-identical to clang's: the syn4000 program on both targets, and all 540 single-source corpus
+  programs on AArch64 (`bun tools/asm-oracle.mjs --target aarch64 --corpus`).
+
+- Fixed: the internal assembler refused `.hidden` (the runtime's `rt_sites_fill`), so every LLVM
+  release build failed at `grail asm`. It now takes `.hidden`, `.protected`, `.internal` and
+  `.comm`, and `.word` is 32 bits on AArch64. `tests/asm/` holds every ELF directive the
+  compiler, runtime and LLVM backend write, checked byte-for-byte against clang by the landing
+  suite `asm-oracle` (`bun tools/asm-oracle.mjs --suite`).
+- Fixed: `grail check` of a library file (no `main`) failed with "executable entry requires readonly
+  argv view", located in an imported module's interface (`result.iface`). A module with no `main`
+  makes its first public function the entry, and that rule picked a function no entry can be (one
+  taking a `u64` or a `&dyn Shape`). It now picks only a public function taking nothing or the
+  argument view; a module with neither is told `no `main` in FILE`, located in the file.
+
+- Fixed two compiler aborts on malformed input found by the front-end fuzzer: an unmatched `)` or
+  `>` in an `extern` signature (an arithmetic overflow), and a file ending in a `//` comment or a `/`
+  with no newline (an out-of-bounds read). Both are ordinary diagnostics now.
+- `tools/fuzz-frontend.mjs` checks the unmutated source of any refused case whose first error points
+  outside the mutated file, and reports a source that fails as it is as a `baseline` bug: a library
+  that stops checking can no longer pass as a stream of fine refusals.
+- **Fixed: a small record returned from a function with a refined parameter came back wrong.** Since
+  the body became `<name>.proved` beside a checking wrapper, the typed-IR facts were still keyed by
+  `<name>`: the optimiser did not see that a two-word result is returned in `rax:rdx` and dropped the
+  second word (`mk(2, 5).hi` read 0), and the wrapper did not pass on the destination address a
+  result of more than two words is written to. The body's facts now carry its own symbol, the wrapper
+  states its two-word result too, and it forwards the hidden destination argument (also past six
+  arguments). `refinement-wrapper-two-word-result`, `refinement-wrapper-dest-result`.
+- `bun tools/abundance-perf.mjs`: every Abundance port program built through the build store (cold and
+  after a one-statement edit), run (dev and release, checked against the parity reference) and the
+  slowest profiled, on the current compiler and `--branch REF`; `bench/results/abundance.json` and a
+  section of the Performance chapter. It found that a module exporting a `u64` constant above 2^63
+  cannot be read back from its interface file, so eight of the ten programs do not build through
+  the store.
+
+- **Writing interfaces no longer costs the square of the declarations.** The interface writer put
+  each list of names in order with a selection sort, and looked up every type's inherent methods
+  by scanning every function of the program. A stable merge sort and a by-module index of the
+  functions give the same interface bytes: an edited build of the 104k-line syn4000 program (one
+  body changed, warm store) takes 36% fewer instructions.
+- **Arrays by value and arrays of owners** (fixed-arrays.md, A3). Functions take and return
+  `[T; N]` by value (a result travels in a short-lived box until results are in registers);
+  `extern "C"` signatures refuse an array by value with a message naming the pointer form.
+  Arrays may hold strings, vectors, options and records that own data: they move, drop their
+  elements at the end of their scope, and replace an element by dropping the old one.
+- **Generic array lengths** (A4): `fn sum<@n: u64>(a: &[f32; n])`, inferred from the argument's
+  array type or given (`zeros<4>()`), and record value parameters as lengths
+  (`struct Mat<@R: u64, @C: u64> { m: [[f32; C]; R] }`).
+
+- **Arrays in records, vectors and C structs; arrays as slices** (fixed-arrays.md, A2). `[T; N]`
+  is a field of structs, tuples and generic records (inline) and the element of a flat vector
+  (`[f32; 4][]` is a C `float[n][4]`). Elements may be plain or extern records and C handles. `&a`
+  is a `&[T]` / `&mut [T]` / `&[u8]` where one is expected, `a[lo: hi]` a sub-slice, every slice
+  method works on an array, and `a.copy_from(&v)` copies a vector of exactly N in.
+- **Changed: an `extern "C" record` field `[T; N]` is now an array, not a vector.** `ids := d.ids`
+  is a `[u32; 4]`; `d.ids[3]` reads and writes in place and `&d.name` is a `&[u8]`. Initialise and
+  assign it with an array literal (`name: [0; 16]` where `u8[0; 16]` was written); a vector is
+  copied in with `d.ids.copy_from(&v)`, which checks the length. The copy-as-vector surface
+  (`rt_carray_store`, the field-assignment special case) is gone.
+- **A callback from C keeps its task on its thread.** A Grail function that C called from a green
+  task could wait (sleep, lock, join) and the task then resumed on another worker, so it returned
+  into C's frames on a different OS thread - with C's thread-locals and locks belonging to the old
+  one. A thread now counts the callbacks it is inside, and a task that waits there blocks its
+  thread instead of moving (`callback_pins_task`: 181 of 200 calls came back on another thread
+  before, none now). While it waits, that worker runs nothing else; handing the worker's queue to a
+  spare thread is the next step of stage 6.
+- Fixed: **`grail check` (and a default build) of a program with a compile-time value needed a C
+  compiler, or failed.** A probe is now assembled in process and linked with the build's linker, and
+  a module of a separate build - which reads the runtime as an interface - gives its probe the
+  runtime's sources. A value the batch probe cannot compute is computed by its own probe before the
+  interfaces are written, so `check` and `build` report the same error for it (it was an internal
+  "no type" error in a separate build). Module-binding guards in a probe are defined once (the
+  internal assembler has no `.comm`).
+
+- A table static can be a vector literal of constant expressions - `static K: u64[] = u64[0x428a2f98,
+  0x71374491];` - baked with no compile-time probe. The compiler's own sources hold only such
+  constant-tier values (`ci.mjs lint` refuses a run-tier one there, which would compile the whole
+  compiler in a probe on every cold build). The runtime gains `raw_sites`, the site-table helper
+  called by name, ahead of its first use at the next reseed.
+
+- The landing queue's build host runs the aarch64 legs under the patched qemu-aarch64:
+  `tools/land-remote.sh` builds it there with `tools/qemu/build.sh` before starting the legs, and
+  `tools/land.sh --remote-status` (`just land-status-remote`) prints each emulated leg's verdict for
+  the newest landing. `build.sh` names any missing build dependency and the packages that provide it.
+  Beside the emulated legs the build host runs the front-end fuzzer at 2000 cases, seeded from the
+  landing, and `--remote-status` reports it with the shrunk input of anything it found.
+- **Grail assembles its own x86-64 code.** `grail build` and `grail run` on Linux x86-64 no longer
+  run clang to assemble. The compiler's own assembler (`grail asm IN.s -o OUT.o`,
+  `compiler/asm_x86.grl` and `compiler/elf.grl`) writes the ELF objects. It covers exactly the
+  subset the compiler emits and runs inside the compiler run, so the build no longer writes and
+  re-reads the module's assembly (`--object`), and its objects are byte-identical to clang's from the same text
+  (`tools/asm-oracle.mjs`; the gate's `asm-oracle` leg checks every corpus program). In the release
+  compiler it assembles the syn4000 program's 35 MB of assembly in 0.41 s against clang's 1.37 s,
+  and the self-compile's 119 MB in 1.1 s against 5.2 s. Debug
+  builds go through it too (it writes `.debug_line` from `.file`/`.loc` as LLVM does); the other
+  targets still use clang. It lowers the portable atomic operations as it reads them, so an x86
+  build no longer rewrites the whole stream for them first. It keeps each object's function units
+  beside it (`OBJ.units`): a function whose text did not change is replayed, not assembled again
+  (`GRAIL_ASM_UNITS_VERIFY=1` checks the replayed object against a plain assembly).
+
+- **Callable bounds: `fn map<U, F: FnMut(T) -> U>(self, f: F)`.** A type parameter may be bound by a
+  closure type; a value of that type is callable in the generic body, the closure's own type is what
+  the specialisation is made for, and its parameters and result are inferred from it. A closure whose
+  type is known - a local closure, or one given for such a parameter - is now called directly, by its
+  body's symbol, instead of through its code word, so the optimiser can inline it. The `vecs`
+  callback methods (`map`, `filter`, `fold`, `any`, `all`, `find`, `position`, `sort_by`, ...) take
+  callable bounds. A closure given for a callable-bound parameter without `Owned` is lent for the call,
+  as an `Fn(..)` parameter is. Fixed with it: two capture-free closures with the same signature given
+  to one generic function were one specialisation; they are two.
+- Engine-shaped benchmarks against C, Rust, Go and Zig (`bench/hashmap`, `bintrees`, `strings`, `json`,
+  `dyncall`, `iterchain`, `ecs`, each with matched outputs in all five languages), with a section of
+  their own in the book's Performance chapter naming why Grail is behind on each
+  (`bench/results/engine.json`, refreshed by `just bench-results` and the gate).
+
+- **`grail check` is incremental.** It goes through the build store as `grail build` does: one
+  compiler run per module, a module whose inputs did not change is not checked again, and in a
+  module that is, the unchanged function bodies replay. A check after an edit to one module checks
+  that module. A module with errors reports them; the modules that read it print one line each
+  (`not checked: `c` depends on `a`, which has errors`) and the independent modules are still
+  checked. A check and a build share their records, so a build after a check reuses its units.
+- Added: TLS over the operating system's own implementation. `lib/tls.grl` gives `TlsConfig`, `TlsClient`, `TlsStream` and a `tls::Error` that keeps four classes apart - `Verify` (the chain or name was rejected, never retried), `Protocol`, `Io` and `Closed` (already closed, or the peer's connection ended without a `close_notify`; `read` returns 0 only for a clean one). Peer verification has no switch: a client refuses to exist while its trust store is empty (`NoTrustStore`) instead of verifying nothing, the store is checked for content on Linux rather than assumed, `SSL_CERT_FILE`/`SSL_CERT_DIR` are honoured, and the name or address handed to `connect` is always checked against the certificate (`SSL_set1_host`, `X509_VERIFY_PARAM_set1_ip_asc`). The socket is never given to the C library: memory BIOs plus `WANT_READ`/`WANT_WRITE` mapped onto `host::read_fd`/`host::write_fd`, so a TLS stream suspends its task on the reactor exactly like `net::TcpStream`. One `TlsClient` is one context (and therefore one session cache), `connect_over` consumes a `net::TcpStream` so the descriptor cannot be closed twice, `shutdown` sends `close_notify` and keeps reading, `close` sends it and releases both. The Linux binding is executed: the local `openssl s_server` pair in the corpus proves the handshake is REFUSED for an untrusted self-signed certificate and ACCEPTED once it is the anchor, then 3000 bytes are echoed byte for byte; a real handshake against `example.com:443` pins the version, ALPN and subject; a missing CA and an empty system store are both refusals. The link-note rule is pinned both ways: `tls-link-notes-absent-without-import` fails if a program that never imports `tls` emits `// grail-link: ssl`/`crypto`, and `tls-trust-store-empty-refuses` pins that one which does import it emits both. macOS and Windows are refused: a build of a `tls` program for either stops with a compile-time message naming what is missing (a SecureTransport layer was written but never run, and SChannel is not implemented) - docs/design/tls.md records the plans. Book: *TLS over the system stack* in *The standard library*, and *Link inputs, and per-target bindings* in *Calling C*.
+
+- **`dyn<Send> I`, `dyn<Share> I` and `dyn<s> I`.** An interface object can now say what the value
+  behind it may do: `dyn<Send> I` may cross to another thread (a `parallel_map` item, a task item,
+  `T: Send`), `&dyn<Share> I` may be shared by workers, and `dyn<s> I` may hold borrowed data from
+  `s` (its loans are kept). The bound is checked where a value is boxed, against its concrete type;
+  bounds may be dropped (`dyn<Send> I` to `dyn I`) but not added. A bare `dyn I` is unchanged - it
+  holds no borrow and is neither Send nor Share - and its refusal now says to write `dyn<Send> I`.
+  `Owned` is never written on `dyn`. Interface format 9.
+- **Faster iteration over owned vectors.** `iter::of(v)` and the consuming `vecs` methods (`map`,
+  `fold`, `filter`, `filter_map`, `flat_map`, `for_each`, `reduce`, ...) no longer copy the vector
+  into a reversed one by popping and pushing every element (an option allocated per element, twice):
+  they reverse it in place and take elements with `pop()!`. `v.reverse()` itself is a two-pointer
+  loop instead of a bounds-checked swap call per pair (about 10x).
+- Fixed: a debugger read records wrongly after the unboxed-values layout (stages 1a and 1b). A
+  reference to a record is the record's own address, but DWARF and CodeView still described it as a
+  pointer to a pointer, so `print *o` showed garbage. A plain record held in a record or a vector is
+  stored inline, but it was described as a pointer at an 8-byte slot. Both now follow the layout:
+  `&Outer` is `Outer *`, a plain field is the record itself at its real offset, and a flat vector's
+  element is the record (`tests/debug_members.grl`, `tools/test-debug-lines.mjs`).
+
+- **`grail check` grows linearly with function length.** The borrow checker answered "is any
+  bond held under this place?", "which bonds does this reference rest on?" and "is this bond new?"
+  by scanning every bond the function had made, after every statement and every use, so one long
+  function cost the square of its length. The bonds are now indexed by holder, with a mark on each
+  place that holds one inside it. A binding's last use is found by reading the scope's tokens in
+  place, and a name is told from a keyword without building a keyword list per binding. `grail
+  check` no longer spells the assembly it throws away: the text emitters write nothing in a
+  check-only run. Checking the 104k-line syn4000 program takes 47% fewer instructions, and the
+  verdicts are the same: `tools/check-diff.mjs` compiles every corpus
+  source and example with two compilers and compares their output byte for byte (with `--build`,
+  the assembly too).
+- Fixed: **a failed check inside the compiler itself faulted instead of reporting.** The failure
+  report was written in process-state bytes 4096..8192, but `rt_state` is sized by the entry stub
+  of the compiler that built the binary, and the compiler is built by its seed, which gives 4096.
+  The report block is now mapped on first use (its address in state word 3432), so it is the same
+  in every binary, and `rt_state` is 4096 bytes again.
+
+- **Compile-time values cost one probe per build, and none when nothing they read changed**
+  (comptime-speed R2, R3). Every run-tier value a build needs is computed by one probe; each is then
+  cached with what it read - the program's function bodies its computation reached, the
+  non-function declarations, the other values, the runtime and standard library files, the compiler
+  and the options - so an edit anywhere else runs no probe. 100 values: one probe (+2.3 s CPU on a
+  first build, +0.9 s once the probes' function cache is warm), and no probe on a warm rebuild or
+  after an unrelated edit. A value that fails names itself, its call and its declaration (a failed
+  check, a refused effect, an exit).
+- **The LLVM lifter lowers a module's functions in parallel.** The functions are cut into pieces of
+  about equal size, one forked copy each as the build's jobserver allows (`GRAIL_JOBS=1` for one
+  process), and the pieces are put back in order; a function's temporaries and fresh blocks are
+  now numbered within it, so the module text is the same whatever the count. Together with the
+  table lookups that replaced the lifter's per-call and per-slot scans, lifting the compiler goes
+  from 904 s to well under the old figure on one core (136 s measured before this change).
+- **Native backend: a store into a `u8[]` is inline.** `v[i] = b` was a call to `rt_write`, which
+  checked the bound and the byte range again; it is now the bounds check and one `movb`, and a
+  slice's store uses the hoisted data and length. The byte range is the front end's: a `u8` value,
+  or the check it emits before the store. The sieve benchmark executes 58% fewer instructions.
+- **Native backend: fixed-size array elements and float arithmetic take fewer instructions.** An
+  array element whose length and element width are constants is checked against an immediate and
+  addressed with a scaled index (`cmpq $15,%rsi; leaq (%rdi,%rsi,8),%rax`) instead of loading both
+  and multiplying. And a float operation on values held in SSE registers works on them directly
+  (`subsd %xmm9,%xmm8`) instead of copying both into the scratch pair and the result back. nbody
+  executes 27% fewer instructions.
+- **Native backend: three small rewrites.** A local whose address is taken only to load it at once
+  (`leaq -N(%rbp),%R` ... `movq (%R),%R`) is loaded directly, so it can be kept in a register; a
+  shift by a constant uses the immediate, and the run-time check of a constant shift count (or any
+  comparison of two constants) is decided at compile time; an accumulator worked on in %rax
+  (`movq %r12,%rax; xorq ...,%rax; imulq ...,%rax; movq %rax,%r12`) is worked on in its own
+  register. fnv executes 15% fewer instructions, sieve 3%.
+- **Native backend: callee-saved registers are shared by variables whose lives do not overlap.** The
+  optimiser kept one register per promoted local for the whole function, so the variables of a
+  function's first loop held the registers its later loops needed. Locals are now coloured by
+  interference, as float locals already were. fnv executes 4% fewer instructions, nbody 3%.
+- **Native backend: a call to a Grail function keeps alive only the registers it takes.** The
+  signature fact (the argument words LLVM's `define` uses) is now recorded for native builds too,
+  and a direct call to a body with one reads only that many argument registers instead of all six,
+  so a value left in, say, `%rcx` before a one-argument call is no longer kept for it. fib(32):
+  112.8M -> 105.8M instructions (Go 102.9M).
+
+- **Native backend: a slice's `data` and `len` live in registers.** The type facts are recorded on
+  the native path too, and the optimiser reads F1's slice-descriptor fact: a slice written once at
+  the top of a function keeps its data pointer and length in two callee-saved registers, so a
+  checked access is `cmpq %rL,%rsi; jb` and an indexed load (`movq (%rD,%rsi,8),%rax`), and
+  `n := x.len()` is the length's register. A failed check still names the index and the length
+  (`rt_trap` kind 64; `slice-hoisted-len-index-message`). With it: `movl`/`movb` are known
+  instructions (they were barriers across which every register was live); a float slot is found
+  through the temporaries the front end copies results through; a float held in a register across a
+  drop helper call is saved around it; and the type facts of a frame slot are looked up under the
+  table's own numbering (`-8(k+1)(%rbp)` is slot k), which the typed IR had off by one.
+  Instructions per element against scalar C: xform_f32 8.7x -> 6.9x, xform_f64 7.1x -> 5.6x,
+  dot_f32 10.8x -> 8.9x, dot_f64 8.6x -> 6.7x, matmul 12.4x -> 11.4x.
+- **Allocation costs half what it did.** The size class of a small request is a compare chain
+  instead of a doubling loop, and the allocator's address arithmetic no longer checks for overflow:
+  about 38 instructions per allocation instead of 96, 30 per free instead of 44. `grail check` of a
+  104k-line program does 21% fewer instructions and uses 10% less CPU. And in a release build the
+  runtime functions that read the thread pointer - the allocator's threaded path, the current task,
+  the mutex - are now optimised by LLVM like the rest; they were left in unoptimised code.
+- Landing on main goes through a service (`tools/landsvc/landd.py`, client `tools/land.sh`): it merges each queued branch onto current main itself, gates up to four together, retries a red train one branch at a time, and cannot be stopped by killing the process that queued a branch.
+- `tools/pkg-test.mjs` passes again and runs in the gate and the landing queue. Its offline-build
+  check called `grail run --offline`, a flag only `add`, `update` and `fetch` have (a build never
+  networks); the stricter option parser refuses it, and nothing ran the suite to notice. Running
+  it found a real bug: `grail test` in a project no longer saw the root's dependencies or its
+  dev-dependencies (`use kit;` in a test failed to resolve) since the test runner was rewritten;
+  each test program now gets the plan's module list, dev-dependencies included.
+
+- **A fork wakes a worker only when none is searching.** Idle workers look for work a little longer
+  before they sleep, and a fork wakes a sleeping worker only when no worker is still looking. In a
+  join the forker usually takes its own fork back, so the old rule (a futex wake per fork whenever
+  any worker slept) cost two system calls per join. 100,000 joins on a worker now make 15 wakes.
+- **A task's sleep no longer hangs when woken early.** A sleep woken before its deadline waited
+  again on a one-shot timer that might already have fired; it now re-arms for the time left. The
+  I/O task of `bench/frame.grl` hung on this about one run in four.
+- A Background job's cap slot is taken with the job's claim, so a slot cannot leak to a job
+  another stack runs.
+- Fixed: on windows-x86_64 every `@no_alloc` function that indexes, casts or unwraps was refused
+  (`lib/strings.grl`'s `is_char_boundary` among them, so `bun tools/windows.mjs check` failed): the
+  runtime's calls through the import table were unknown edges, and the syscall dispatcher the
+  failure path calls reached `rt_alloc` through the pipe arm's heap-allocated SECURITY_ATTRIBUTES. An
+  import-table OS call in the runtime is now modelled as a syscall (no Grail heap, no failure), and
+  CreatePipe's attributes live in process state.
+- Added: sockets on Windows. `lib/net.grl`'s TCP layer now works on `windows-x86_64` instead of reporting `ENOSYS`: Winsock is started once per process (`WSAStartup` 2.2) and cleaned up on exit, a socket is an overlapped `WSASocketW` descriptor in the platform's own record list, and a receive or send is an overlapped `WSARecv`/`WSASend` whose completion the waiter takes from the request's own event - on an offload thread, so a task blocked on a socket parks and never holds a worker. `connect` is ConnectEx, resolved through `WSAIoctl(SIO_GET_EXTENSION_FUNCTION_POINTER)` because no DLL exports it on every stack, with `SO_UPDATE_CONNECT_CONTEXT` and a forced bind (and a blocking fallback), and `raw_win_call` now passes up to eight word arguments with the Win64 caller frame so the extension pointer can be called. `accept` is a blocking `accept` on an offload thread: `AcceptEx` was implemented first and withdrawn, because under Wine - the only host that runs these tests - it and a cooperative accept both complete only for an already-queued connection. Winsock errors map onto the errno space the portable layer reports (`WSAEWOULDBLOCK` never reaches a task, and `WSAECONNRESET`/`WSAECONNABORTED` on a receive are end of stream, not an error). `win-sockets-echo` runs the whole path under Wine, non-ASCII text included. Not implemented: driving sockets from the I/O completion port (it cannot be verified on this host, and the design says what it would need), UDP (`WSARecvFrom`/`WSASendTo` have no portable operation or library API to reach them), and cancellation of a task blocked in a socket call. Design and evidence: *Sockets* and *Sockets: what is verified* in docs/design/windows-backend.md.
+- Added: wide-character paths on Windows. Every file and process entry point is now the `-W` one - `CreateFileW`, `CreateDirectoryW`, `DeleteFileW`, `RemoveDirectoryW`, `GetFileAttributesW`, `GetCurrentDirectoryW`, `GetModuleFileNameW`, `CreateProcessW`, `GetCommandLineW`, `GetEnvironmentStringsW`/`FreeEnvironmentStringsW` - so a file name outside the system code page is no longer mangled into the ANSI code page. One convention holds it together: every entry point in `compiler/os-windows.grl` takes and returns UTF-8, and `rt_win_wide`/`rt_win_utf8_of` convert at the FFI boundary in a fixed 128 KiB arena (five 16 KiB slots, no user allocation), so no call site converts by hand. The encoder refuses invalid UTF-8 with `EINVAL` instead of replacing bytes - overlong forms, bare continuation bytes, truncated sequences, encoded surrogates and code points above U+10FFFF - and encodes a code point past U+FFFF as the surrogate pair UTF-16 requires; text the OS hands back with an unpaired surrogate becomes U+FFFD in the one inbound helper, because refusing `argv[0]` would leave a process with no arguments. `CreateProcessW` gets the MSVC quoting rules applied to UTF-16 units (`rt_win_quote_w`/`rt_win_split_w`), so an argument survives the trip in both directions, and its environment block is UTF-16 with `CREATE_UNICODE_ENVIRONMENT` - without that flag Windows reads a non-NULL block as ANSI and the child sees an empty environment. `host::list_dir` works on Windows for the first time: a read-only open of a directory returns an enumeration backed by `FindFirstFileW`, and `rt_syscall(217)` rewrites the find results into the `dirent64` stream the portable decoder already parses, as the Darwin module does for `getdirentries64`. `GetModuleFileNameW` also wires `host::exe_path` (it answered nothing before). Six dead Win32 import declarations are gone with their entries: `ExitThread`, `GetEnvironmentVariableA`, `SetFilePointerEx`, `FlushFileBuffers`, `MoveFileA` (no portable rename operation calls it) and `GetSystemTimeAsFileTime`. `tools/test-windows.mjs` now fails the suite if any case's object imports an ANSI entry point, and runs `win-unicode-paths` under Wine: Latin-1, CJK and emoji file names, a non-ASCII directory, a non-ASCII working directory and argument, and the `EINVAL` refusal. Design: *Text at the Win32 boundary* in docs/design/windows-backend.md.
 - Bounds checks: an index that is a sum of `term * constant` products and constants - `p[i * 3 +
   k]` - is proved in bounds when every term has a literal upper bound in the facts and the largest
   value the sum can take is below the length (a fixed array's constant, or a vector's `len()` the
@@ -178,6 +790,11 @@
   `sched_tbb.cpp`): join, spawn, a burst of spawns, fib(32) by nested join and the frame loop's
   tail. The table and the reason for each miss are in `docs/design/runtime-parity.md`.
 
+- Fixed: the native optimiser took an `f32` constant whose 64-bit immediate it cannot read (2.0 is
+  `$4611686018427387904`, more than 18 digits) for zero, held the variable as binary32 and read 2.0
+  back as 0.0. It changed Abundance's abgeo mesh digests (meshopt's `quadric_error_attr`);
+  `f32-constant-wide-immediate-not-narrowed` pins it.
+
 - Fixed: `bun tools/native.mjs build` rebuilt the compiler on every call. It assembled the bootstrap
   seed each time and keyed the compiler by the bootstrap's mtime, so the key never matched. The
   assembled seed is now kept under its digest and the key names the bootstrap's content; a second
@@ -215,6 +832,17 @@
   pointer, which keeps their provenance. `x[i] = x[i] * a + y[i]` over one million elements goes
   from 7x to 1.2x (`f32`) and from 4x to 1.1x (`f64`) of vectorised `clang -O2`. Under
   `--verify-facts` every such access re-reads the header and aborts if it moved.
+
+- Fixed: the native optimiser took an `f32` constant whose 64-bit immediate it cannot read (2.0 is
+  `$4611686018427387904`, more than 18 digits) for zero, held the variable as binary32 and read 2.0
+  back as 0.0. It changed Abundance's abgeo mesh digests (meshopt's `quadric_error_attr`);
+  `f32-constant-wide-immediate-not-narrowed` pins it.
+
+- Fixed: a small leaf that takes the address of its own local (runtime.grl's `rt_frame`) was
+  inlined with that local turned into a scratch register, so split and cached builds of programs
+  that reach it emitted `leaq %r8,%rax` and did not assemble. Such a leaf is no longer an inline
+  candidate.
+
 - **Fixed-size arrays, `[T; N]`** (docs/design/fixed-arrays.md, stage A1). N values back to back in
   C layout, held in the frame: no heap allocation, no header, the length a constant of the type.
   Literals `[a, b, c]` and `[x; N]` where an array is expected (count checked while compiling),
@@ -237,6 +865,7 @@
   writes numbers only (kind, operands, the statement's site) into a record that is not heap
   memory. The joiner builds the message and the site text, on a healthy stack. A wake on that path
   no longer reaches scheduler creation.
+
 - Fixed: `bun tools/native.mjs build` rebuilt the compiler on every call. It assembled the bootstrap
   seed each time and keyed the compiler by the bootstrap's mtime, so the key never matched. The
   assembled seed is now kept under its digest and the key names the bootstrap's content; a second
@@ -246,8 +875,10 @@
   (`bench/rivals/`), release and debug builds of each, CPU time from `getrusage`, one table with
   Grail's two builds as ratios to the best competitor of their bar. The numbers and the named
   reason for every miss are in `docs/design/runtime-parity.md`, "Against other languages".
-
-
+  Every column targets baseline x86-64 (Zig gets `-mcpu=baseline`); a second table builds the
+  rivals for the host CPU, and a third counts instructions. `bench/sieve`, `matmul` and `xform`
+  (all twins) now make every round depend on the one before, so no compiler can drop a round:
+  their printed results changed.
 
 - **A foreign call costs what it costs in C (x86-64).** In a program that loaded libc, every
   `extern "C"` call switched the thread pointer to libc's TCB and back, and on x86-64 a write to the
@@ -282,6 +913,7 @@
   per piece of `0..n`, and `pool::reduce(n, grain, zero, leaf, merge)` folds the pieces' results
   in index order. A floating-point reduction therefore prints the same bits with 1, 4 or 24
   workers (`pool-reduce-bit-identical-workers-*`).
+
   Every column targets baseline x86-64 (Zig gets `-mcpu=baseline`); a second table builds the
   rivals for the host CPU, and a third counts instructions. `bench/sieve`, `matmul` and `xform`
   (all twins) now make every round depend on the one before, so no compiler can drop a round:
@@ -351,7 +983,7 @@
   a division, a narrowing, an unwrap, a refined parameter - because the failure report allocated:
   its texts were heap strings (`rt_new`, `rt_reserveb`, `rt_alloc`, and the runtime's literals are
   heap values), and it reached the compiler's site-table helper through an unnamed indirect call.
-  The dying report is now written in a process-state report block (`rt_state` grows to 8192 bytes),
+  The dying report is now written in a report block mapped on first use,
   its literals are static views, and the helper call is a named edge. The checks still fail, so
   `@no_panic` still refuses them.
 
@@ -1603,6 +2235,7 @@
 - Fixed: seven corpus cases listed `lib/strings.grl` without `lib/iter.grl`, which its `chars`
   signature needs, and `lib/fs.grl` gained `lib/time.grl`/`lib/strings.grl`/`lib/iter.grl` as
   dependencies; the case lists follow.
+- Added: `@derive(Eq, Ord, Hash, Clone, Debug)` on a `struct` or an `enum`, generated with the comptime `@for` over the type's fields and variants (docs/design/derives.md, book *Methods*). There is no macro system: the compiler renders fixed Grail source for the derives asked for, appends it to the file's own text and parses it as ordinary items, so a derived method is checked, borrowed and dropped like a hand-written one - and `--show-derives` prints what each `@derive` generated. The derives are the standard library's own interfaces: `ops::Eq` (`==`), `order::Ord` (lexicographic over the fields and, for an enum, over the variants in declaration order), `hash::Hash` (the fields written into one `hash::Hasher` in order, a variant index first, which agrees with `Eq`), a new `clone::Clone` (`lib/clone.grl`, field-wise and refused for a borrowed view) and a new `debug::Debug` (`lib/debug.grl`, `Point { x: 1, y: 2 }` / `Circle(2)`), which also installs the inherent `show` that `println` and `format` already call. Partial derives work (`@derive(Clone, Debug)`), a generic type derives per specialisation (the header repeats the declaration's parameters and adds the interface as a bound on the parameters a field mentions), and a field it cannot handle is named with its type rather than skipped (`field `right` of type `&u64`: a borrowed view cannot be deep-cloned`). Refused: an unknown derive name, a derive listed twice, `@derive` before anything but a struct or an enum, a type with no fields or variants, `Ord` on a field with no total order, `Hash` on `f64`, and a field or variant payload without the implementation the derive needs. Corpus: `derives-eq-record`, `-ord-record`, `-hash-record`, `-clone-record`, `-debug-record`, the same five on enums, `derives-generic-record`, `derives-nested`, `derives-partial`, `derives-show-derives` and the `derives-reject-*` set.
 - Fixed: an interface method declared `-> Self` lost the specialisation's identity for its receiver. When a generic body specialised its type parameter (`T` = `u64`) and called such a method, the result was typed as the concrete type instead of the parameter, so `v.rebuild().rebuild()` or a cloned field refused to fit back into the parameter's own field, and a value produced that way carried no ownership record. The concrete type is still what finds the implementation, but a `Self` result now types as the parameter again (one layout, one word) and its drop record is added when the implementation's type has none. Corpus: `interface-self-result-in-generic`.
 - Fixed: `--backend=llvm` no longer emits the refinement prover's `<sym>.proved` entry, whose copied prologue is written in frame-symbol arithmetic (`subq $.F7,%rsp`) the lifter does not model - the assembly did not assemble (`expected relocatable expression`), and no effect could be discharged from a call whose entry did not exist. An LLVM build now proves nothing at a call site and refuses an effect that the proof alone would have satisfied (`@no_panic` function `pick` can fail`), instead of discharging it and then leaving the check in; the native backend is unchanged, and `effects-accepted` is a native-backend case.
 - Fixed: `bun tools/bootstrap.mjs stage ARCH` no longer requires the published manifest to describe the current sources. Splitting a reseed into `stage` and `publish` left the old `verify`-only manifest comparison on a bare `else`, so every `stage` run ended in `bootstrap source manifest is stale` - exactly the case a reseed exists for, and `tools/gate.sh --reseed` stopped at its first target after the self-hosting check had already passed. The comparison now runs only for `verify`; `bun tools/ci.mjs lint` pins the guard.

@@ -48,3 +48,35 @@ long ts_call_on_new_thread(ts_cb cb, long value) {
 }
 
 long ts_call_here(ts_cb cb, long value) { return cb(value); }
+
+/* Calls `callback(value)` and reports whether the C frame came back on the thread it left from:
+ * the callback may wait (a task parks), and a task that resumed on another worker would return
+ * into these frames on another OS thread. Answers the callback's value, or -1 if the thread
+ * changed under the C frame. */
+static long ts_gettid(void) {
+    /* Not pthread_self(): glibc declares it const, so two calls around the callback fold into one
+     * and the test could not see a move. The kernel's thread id is read each time. */
+    long id;
+#if defined(__x86_64__)
+    __asm__ volatile("syscall" : "=a"(id) : "a"(186L) : "rcx", "r11", "memory");
+#elif defined(__aarch64__)
+    register long x8 __asm__("x8") = 178;
+    register long x0 __asm__("x0");
+    __asm__ volatile("svc #0" : "=r"(x0) : "r"(x8) : "memory");
+    id = x0;
+#else
+    register long a7 __asm__("a7") = 178;
+    register long a0 __asm__("a0");
+    __asm__ volatile("ecall" : "=r"(a0) : "r"(a7) : "memory");
+    id = a0;
+#endif
+    return id;
+}
+long long ts_same_thread_apply(long long (*callback)(long long), long long value) {
+    long before = ts_gettid();
+    long long result = callback(value);
+    if (before != ts_gettid()) {
+        return -1;
+    }
+    return result;
+}

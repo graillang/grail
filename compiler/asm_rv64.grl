@@ -1,0 +1,1000 @@
+module asm_rv64;
+use asm_x86;
+use asm_a64;
+
+// The RISC-V (RV64IMAFD) half of the internal assembler (docs/design/compile-speed.md, stage 4):
+// the instructions machine.grl's RISC-V lowering writes, with `.option norelax` and `.option
+// norvc` (no linker relaxation, no compressed forms), encoded as LLVM's MC layer encodes them -
+// `li` by LLVM's materialisation (RISCVMatInt), `lla` as auipc+addi through a `.Lpcrel_hiN` label,
+// `call` as auipc+jalr. The reader, sections, symbols and the ELF writer are asm_x86's.
+
+pub fn fx_branch() -> u64 {
+    return 30;
+}
+pub fn fx_jal() -> u64 {
+    return 31;
+}
+pub fn fx_call() -> u64 {
+    return 32;
+}
+pub fn fx_pcrel_hi() -> u64 {
+    return 33;
+}
+pub fn fx_pcrel_lo() -> u64 {
+    return 34;
+}
+pub fn fx_tprel_hi() -> u64 {
+    return 35;
+}
+pub fn fx_tprel_lo() -> u64 {
+    return 36;
+}
+pub fn fx_tprel_add() -> u64 {
+    return 37;
+}
+
+// The ISA string LLVM writes for -march=rv64imafd, in the code mapping symbol and the attributes.
+pub fn isa() -> u8[] {
+    return view("rv64i2p1_m2p0_a2p1_f2p2_d2p2_zicsr2p0_zmmul1p0_zaamo1p0_zalrsc1p0").copy();
+}
+
+// A register name at the cursor: its number plus 32 for a float register; 64 + 0 when none.
+fn reg<a>(o: (&a mut asm_x86::A)) -> u64 {
+    asm_x86::skip(&mut o);
+    a0 := o.at;
+    e := asm_x86::name_end(&mut o);
+    n := e - a0;
+    if n < 2 {
+        return 99;
+    }
+    names := u8[][
+        view("zero").copy(),
+        view("ra").copy(),
+        view("sp").copy(),
+        view("gp").copy(),
+        view("tp").copy(),
+        view("t0").copy(),
+        view("t1").copy(),
+        view("t2").copy(),
+        view("s0").copy(),
+        view("s1").copy(),
+        view("a0").copy(),
+        view("a1").copy(),
+        view("a2").copy(),
+        view("a3").copy(),
+        view("a4").copy(),
+        view("a5").copy(),
+        view("a6").copy(),
+        view("a7").copy(),
+        view("s2").copy(),
+        view("s3").copy(),
+        view("s4").copy(),
+        view("s5").copy(),
+        view("s6").copy(),
+        view("s7").copy(),
+        view("s8").copy(),
+        view("s9").copy(),
+        view("s10").copy(),
+        view("s11").copy(),
+        view("t3").copy(),
+        view("t4").copy(),
+        view("t5").copy(),
+        view("t6").copy()
+    ];
+    for i in names.len() {
+        if asm_x86::at_src(&o, a0, e, view(names[i])) {
+            o.at = e;
+            return i;
+        }
+    }
+    if asm_x86::at_src(&o, a0, e, view("fp")) {
+        o.at = e;
+        return 8;
+    }
+    fnames := u8[][
+        view("ft0").copy(),
+        view("ft1").copy(),
+        view("ft2").copy(),
+        view("ft3").copy(),
+        view("ft4").copy(),
+        view("ft5").copy(),
+        view("ft6").copy(),
+        view("ft7").copy(),
+        view("fs0").copy(),
+        view("fs1").copy(),
+        view("fa0").copy(),
+        view("fa1").copy(),
+        view("fa2").copy(),
+        view("fa3").copy(),
+        view("fa4").copy(),
+        view("fa5").copy(),
+        view("fa6").copy(),
+        view("fa7").copy(),
+        view("fs2").copy(),
+        view("fs3").copy(),
+        view("fs4").copy(),
+        view("fs5").copy(),
+        view("fs6").copy(),
+        view("fs7").copy(),
+        view("fs8").copy(),
+        view("fs9").copy(),
+        view("fs10").copy(),
+        view("fs11").copy(),
+        view("ft8").copy(),
+        view("ft9").copy(),
+        view("ft10").copy(),
+        view("ft11").copy()
+    ];
+    for i in fnames.len() {
+        if asm_x86::at_src(&o, a0, e, view(fnames[i])) {
+            o.at = e;
+            return 32 + i;
+        }
+    }
+    // x0..x31, f0..f31
+    c := o.src[a0];
+    if (c == 'x') || (c == 'f') {
+        mut v = 0;
+        for i in n - 1 {
+            d := o.src[a0 + 1 + i];
+            if (d < '0') || (d > '9') {
+                return 99;
+            }
+            v = v * 10 + d - '0';
+        }
+        if v < 32 {
+            o.at = e;
+            if c == 'f' {
+                return 32 + v;
+            }
+            return v;
+        }
+    }
+    return 99;
+}
+
+fn need<a>(o: (&a mut asm_x86::A)) -> u64 {
+    r := reg(&mut o);
+    if r == 99 {
+        asm_x86::fail(&mut o, view("expected a register"));
+        return 0;
+    }
+    return r;
+}
+
+fn comma<a>(o: (&a mut asm_x86::A)) {
+    asm_x86::expect(&mut o, ',');
+}
+
+fn r5(r: u64) -> u64 {
+    return r & 31;
+}
+
+fn word<a>(o: (&a mut asm_x86::A), w: u64) {
+    asm_x86::emit_le(&mut o, w & 0xffffffff, 4);
+}
+
+fn rtype(f7: u64, rs2: u64, rs1: u64, f3: u64, rd: u64, op: u64) -> u64 {
+    return (f7 << 25) | (r5(rs2) << 20) | (r5(rs1) << 15) | (f3 << 12) | (r5(rd) << 7) | op;
+}
+
+fn itype(imm: u64, rs1: u64, f3: u64, rd: u64, op: u64) -> u64 {
+    return ((imm & 0xfff) << 20) | (r5(rs1) << 15) | (f3 << 12) | (r5(rd) << 7) | op;
+}
+
+fn stype(imm: u64, rs2: u64, rs1: u64, f3: u64, op: u64) -> u64 {
+    return (((imm >> 5) & 0x7f) << 25)
+        | (r5(rs2) << 20)
+        | (r5(rs1) << 15)
+        | (f3 << 12)
+        | ((imm & 31) << 7)
+        | op;
+}
+
+fn sext12(v: u64) -> u64 {
+    lo := v & 0xfff;
+    if (lo & 0x800) != 0 {
+        return lo | 0xfffffffffffff000;
+    }
+    return lo;
+}
+
+fn is_int32(v: u64) -> bool {
+    return wrapping_add(v, 0x80000000) < 0x100000000;
+}
+
+fn is_int12(v: u64) -> bool {
+    return wrapping_add(v, 0x800) < 0x1000;
+}
+
+fn ctz(v: u64) -> u64 {
+    if v == 0 {
+        return 64;
+    }
+    mut n = 0;
+    while ((v >> n) & 1) == 0 {
+        n += 1;
+    }
+    return n;
+}
+
+fn clz(v: u64) -> u64 {
+    if v == 0 {
+        return 64;
+    }
+    mut n = 0;
+    while ((v >> (63 - n)) & 1) == 0 {
+        n += 1;
+    }
+    return n;
+}
+
+// Arithmetic shift right.
+fn sra(v: u64, s: u64) -> u64 {
+    if s == 0 {
+        return v;
+    }
+    r := v >> s;
+    if (v >> 63) != 0 {
+        return r | (0xffffffffffffffff << (64 - s));
+    }
+    return r;
+}
+
+// LLVM's RISCVMatInt::generateInstSeqImpl for RV64 without Zba/Zbs: kinds 1 lui, 2 addi, 3 addiw,
+// 4 slli, 5 srli, each with its immediate.
+fn mat_impl(val: u64, kinds: (&mut u64[]), imms: (&mut u64[])) {
+    if is_int32(val) {
+        hi20 := (wrapping_add(val, 0x800) >> 12) & 0xfffff;
+        lo12 := sext12(val);
+        if hi20 != 0 {
+            kinds.push(1);
+            imms.push(hi20);
+        }
+        if (lo12 != 0) || (hi20 == 0) {
+            mut opc = 2;
+            if hi20 != 0 {
+                // ADDIW only where ADDI would leave the 32-bit range.
+                mut lui = hi20 << 12;
+                if (lui & 0x80000000) != 0 {
+                    lui = lui | 0xffffffff00000000;
+                }
+                if !is_int32(wrapping_add(lui, lo12)) {
+                    opc = 3;
+                }
+            }
+            kinds.push(opc);
+            imms.push(lo12);
+        }
+        return ();
+    }
+    lo12 := sext12(val);
+    mut v = wrapping_sub(val, lo12);
+    mut shift = 0;
+    if !is_int32(v) {
+        shift = ctz(v);
+        v = sra(v, shift);
+        if (shift > 12) && !is_int12(v) && is_int32(v << 12) {
+            shift -= 12;
+            v = v << 12;
+        }
+    }
+    mat_impl(v, &mut kinds, &mut imms);
+    if shift != 0 {
+        kinds.push(4);
+        imms.push(shift);
+    }
+    if lo12 != 0 {
+        kinds.push(2);
+        imms.push(lo12);
+    }
+}
+
+// LLVM's RISCVMatInt::generateInstSeq (the parts that apply without Zba, Zbs or fusion).
+fn materialise(val: u64, kinds: (&mut u64[]), imms: (&mut u64[])) {
+    mat_impl(val, &mut kinds, &mut imms);
+    if ((val & 0xfff) != 0) && ((val & 1) == 0) && (kinds.len() >= 2) {
+        tz := ctz(val);
+        shifted := sra(val, tz);
+        compressible := wrapping_add(shifted, 32) < 64;
+        mut k2 = u64[];
+        mut i2 = u64[];
+        mat_impl(shifted, &mut k2, &mut i2);
+        if (k2.len() + 1 < kinds.len()) || compressible {
+            k2.push(4);
+            i2.push(tz);
+            *kinds = k2;
+            *imms = i2;
+        }
+    }
+    if kinds.len() <= 2 {
+        return ();
+    }
+    if ((val >> 63) == 0) && (val != 0) {
+        lz := clz(val);
+        mut shifted = val << lz;
+        shifted = shifted | ((1 << lz) - 1);
+        mut k2 = u64[];
+        mut i2 = u64[];
+        mat_impl(shifted, &mut k2, &mut i2);
+        if k2.len() + 1 < kinds.len() {
+            k2.push(5);
+            i2.push(lz);
+            *kinds = k2;
+            *imms = i2;
+        }
+        shifted = shifted & (0xffffffffffffffff << lz);
+        mut k3 = u64[];
+        mut i3 = u64[];
+        mat_impl(shifted, &mut k3, &mut i3);
+        if k3.len() + 1 < kinds.len() {
+            k3.push(5);
+            i3.push(lz);
+            *kinds = k3;
+            *imms = i3;
+        }
+    }
+}
+
+fn li<a>(o: (&a mut asm_x86::A), rd: u64, val: u64) {
+    mut kinds = u64[];
+    mut imms = u64[];
+    materialise(val, &mut kinds, &mut imms);
+    mut src = 0;
+    for i in kinds.len() {
+        k := kinds[i];
+        v := imms[i];
+        if k == 1 {
+            word(&mut o, (v << 12) | (r5(rd) << 7) | 0x37);
+        } else if k == 2 {
+            word(&mut o, itype(v, src, 0, rd, 0x13));
+        } else if k == 3 {
+            word(&mut o, itype(v, src, 0, rd, 0x1b));
+        } else if k == 4 {
+            word(&mut o, itype(v, src, 1, rd, 0x13));
+        } else {
+            word(&mut o, itype(v, src, 5, rd, 0x13));
+        }
+        src = rd;
+    }
+}
+
+// `imm(reg)` (the immediate optional), or `%modifier(sym)(reg)`.
+fn mem<a>(o: (&a mut asm_x86::A), base: (&mut u64)) -> u64 {
+    asm_x86::skip(&mut o);
+    mut off = 0;
+    if asm_x86::peek(&o) != '(' {
+        off = asm_a64::expr_or(&mut o);
+    }
+    asm_x86::expect(&mut o, '(');
+    *base = need(&mut o);
+    asm_x86::expect(&mut o, ')');
+    return off;
+}
+
+// A label operand: a fixup of `kind` at the instruction about to be emitted.
+fn label_ref<a>(o: (&a mut asm_x86::A), kind: u64) {
+    asm_x86::skip(&mut o);
+    a0 := o.at;
+    e := asm_x86::name_end(&mut o);
+    if e == a0 {
+        asm_x86::fail(&mut o, view("expected a label"));
+        return ();
+    }
+    mut sym = 0;
+    last := o.src[e - 1];
+    if (e - a0 >= 2) && asm_x86::all_digits(&o, a0, e - 1) && ((last == 'f') || (last == 'b')) {
+        sym = asm_x86::numeric_ref(&mut o, a0, e - 1, last == 'f');
+    } else {
+        sym = asm_x86::symbol(&mut o, a0, e);
+    }
+    o.at = e;
+    mut add = 0;
+    asm_x86::skip(&mut o);
+    if (asm_x86::peek(&o) == '+') || (asm_x86::peek(&o) == '-') {
+        neg := asm_x86::peek(&o) == '-';
+        o.at += 1;
+        n := asm_x86::number(&mut o);
+        if neg {
+            add = wrapping_sub(0, n);
+        } else {
+            add = n;
+        }
+    }
+    asm_x86::fixup(&mut o, sym, kind, add);
+}
+
+// `%name(sym)`: the modifier's fixup kind (the symbol's fixup is recorded).
+fn modifier<a>(o: (&a mut asm_x86::A)) {
+    asm_x86::expect(&mut o, '%');
+    a0 := o.at;
+    e := asm_x86::name_end(&mut o);
+    o.at = e;
+    mut kind = 0;
+    if asm_x86::at_src(&o, a0, e, view("tprel_hi")) {
+        kind = fx_tprel_hi();
+    } else if asm_x86::at_src(&o, a0, e, view("tprel_lo")) {
+        kind = fx_tprel_lo();
+    } else if asm_x86::at_src(&o, a0, e, view("tprel_add")) {
+        kind = fx_tprel_add();
+    } else {
+        asm_x86::fail(&mut o, view("unsupported relocation modifier"));
+        return ();
+    }
+    asm_x86::expect(&mut o, '(');
+    label_ref(&mut o, kind);
+    asm_x86::expect(&mut o, ')');
+}
+
+fn simple<a, b>(o: (&a asm_x86::A), a0: u64, e: u64, w: &b [u8]) -> bool {
+    return asm_x86::at_src(&o, a0, e, w);
+}
+
+fn r3<a>(o: (&a mut asm_x86::A), f7: u64, f3: u64, op: u64) {
+    d := need(&mut o);
+    comma(&mut o);
+    n := need(&mut o);
+    comma(&mut o);
+    m := need(&mut o);
+    word(&mut o, rtype(f7, m, n, f3, d, op));
+}
+
+fn i3<a>(o: (&a mut asm_x86::A), f3: u64, op: u64, hi: u64) {
+    d := need(&mut o);
+    comma(&mut o);
+    n := need(&mut o);
+    comma(&mut o);
+    asm_x86::skip(&mut o);
+    if asm_x86::peek(&o) == '%' {
+        modifier(&mut o);
+        word(&mut o, itype(0, n, f3, d, op));
+        return ();
+    }
+    v := asm_a64::expr_or(&mut o);
+    word(&mut o, itype(v | hi, n, f3, d, op));
+}
+
+fn load<a>(o: (&a mut asm_x86::A), f3: u64, op: u64) {
+    d := need(&mut o);
+    comma(&mut o);
+    mut base = 0;
+    off := mem(&mut o, &mut base);
+    word(&mut o, itype(off, base, f3, d, op));
+}
+
+fn store<a>(o: (&a mut asm_x86::A), f3: u64, op: u64) {
+    s := need(&mut o);
+    comma(&mut o);
+    mut base = 0;
+    off := mem(&mut o, &mut base);
+    word(&mut o, stype(off, s, base, f3, op));
+}
+
+// AMOs and LR/SC: `funct5`, the .w/.d width (f3), and the aq/rl suffix bits in the mnemonic.
+fn amo<a>(o: (&a mut asm_x86::A), a0: u64, e: u64, funct5: u64, lr: bool) {
+    mut f3 = 3;
+    mut aq = 0;
+    mut rl = 0;
+    mut i = a0;
+    while i < e {
+        if o.src[i] == '.' {
+            j := i + 1;
+            mut k = j;
+            while (k < e) && (o.src[k] != '.') {
+                k += 1;
+            }
+            if asm_x86::at_src(&o, j, k, view("w")) {
+                f3 = 2;
+            } else if asm_x86::at_src(&o, j, k, view("aq")) {
+                aq = 1;
+            } else if asm_x86::at_src(&o, j, k, view("rl")) {
+                rl = 1;
+            } else if asm_x86::at_src(&o, j, k, view("aqrl")) {
+                aq = 1;
+                rl = 1;
+            }
+            i = k;
+        } else {
+            i += 1;
+        }
+    }
+    d := need(&mut o);
+    comma(&mut o);
+    mut src = 0;
+    if !lr {
+        src = need(&mut o);
+        comma(&mut o);
+    }
+    asm_x86::expect(&mut o, '(');
+    base := need(&mut o);
+    asm_x86::expect(&mut o, ')');
+    word(&mut o, (funct5 << 27) | (aq << 26) | (rl << 25) | rtype(0, src, base, f3, d, 0x2f));
+}
+
+fn fence_set<a>(o: (&a mut asm_x86::A)) -> u64 {
+    asm_x86::skip(&mut o);
+    a0 := o.at;
+    e := asm_x86::name_end(&mut o);
+    o.at = e;
+    mut v = 0;
+    mut i = a0;
+    while i < e {
+        c := o.src[i];
+        if c == 'i' {
+            v = v | 8;
+        } else if c == 'o' {
+            v = v | 4;
+        } else if c == 'r' {
+            v = v | 2;
+        } else if c == 'w' {
+            v = v | 1;
+        }
+        i += 1;
+    }
+    return v;
+}
+
+// The float format bits of a mnemonic suffix: `.d` 1, `.s` 0.
+fn fmt<a>(o: (&a asm_x86::A), e: u64) -> u64 {
+    if o.src[e - 1] == 's' {
+        return 0;
+    }
+    return 1;
+}
+
+// An optional rounding mode operand (`,rtz`); 7 (dynamic) when absent.
+fn rm<a>(o: (&a mut asm_x86::A), dflt: u64) -> u64 {
+    asm_x86::skip(&mut o);
+    if asm_x86::peek(&o) != ',' {
+        return dflt;
+    }
+    o.at += 1;
+    asm_x86::skip(&mut o);
+    a0 := o.at;
+    e := asm_x86::name_end(&mut o);
+    o.at = e;
+    names := u8[][
+        view("rne").copy(),
+        view("rtz").copy(),
+        view("rdn").copy(),
+        view("rup").copy(),
+        view("rmm").copy()
+    ];
+    for i in names.len() {
+        if asm_x86::at_src(&o, a0, e, view(names[i])) {
+            return i;
+        }
+    }
+    if asm_x86::at_src(&o, a0, e, view("dyn")) {
+        return 7;
+    }
+    asm_x86::fail(&mut o, view("unknown rounding mode"));
+    return 7;
+}
+
+pub fn instruction<a>(o: (&a mut asm_x86::A), a0: u64, e: u64) {
+    o.at = e;
+    if simple(&o, a0, e, view("mv")) {
+        d := need(&mut o);
+        comma(&mut o);
+        n := need(&mut o);
+        word(&mut o, itype(0, n, 0, d, 0x13));
+    } else if simple(&o, a0, e, view("li")) {
+        d := need(&mut o);
+        comma(&mut o);
+        v := asm_a64::expr_or(&mut o);
+        li(&mut o, d, v);
+    } else if simple(&o, a0, e, view("add")) {
+        d := need(&mut o);
+        comma(&mut o);
+        n := need(&mut o);
+        comma(&mut o);
+        m := need(&mut o);
+        asm_x86::skip(&mut o);
+        if asm_x86::peek(&o) == ',' {
+            o.at += 1;
+            asm_x86::skip(&mut o);
+            modifier(&mut o);
+        }
+        word(&mut o, rtype(0, m, n, 0, d, 0x33));
+    } else if simple(&o, a0, e, view("sub")) {
+        r3(&mut o, 0x20, 0, 0x33);
+    } else if simple(&o, a0, e, view("sll")) {
+        r3(&mut o, 0, 1, 0x33);
+    } else if simple(&o, a0, e, view("slt")) {
+        r3(&mut o, 0, 2, 0x33);
+    } else if simple(&o, a0, e, view("sltu")) {
+        r3(&mut o, 0, 3, 0x33);
+    } else if simple(&o, a0, e, view("xor")) {
+        r3(&mut o, 0, 4, 0x33);
+    } else if simple(&o, a0, e, view("srl")) {
+        r3(&mut o, 0, 5, 0x33);
+    } else if simple(&o, a0, e, view("sra")) {
+        r3(&mut o, 0x20, 5, 0x33);
+    } else if simple(&o, a0, e, view("or")) {
+        r3(&mut o, 0, 6, 0x33);
+    } else if simple(&o, a0, e, view("and")) {
+        r3(&mut o, 0, 7, 0x33);
+    } else if simple(&o, a0, e, view("mul")) {
+        r3(&mut o, 1, 0, 0x33);
+    } else if simple(&o, a0, e, view("mulh")) {
+        r3(&mut o, 1, 1, 0x33);
+    } else if simple(&o, a0, e, view("mulhsu")) {
+        r3(&mut o, 1, 2, 0x33);
+    } else if simple(&o, a0, e, view("mulhu")) {
+        r3(&mut o, 1, 3, 0x33);
+    } else if simple(&o, a0, e, view("div")) {
+        r3(&mut o, 1, 4, 0x33);
+    } else if simple(&o, a0, e, view("divu")) {
+        r3(&mut o, 1, 5, 0x33);
+    } else if simple(&o, a0, e, view("rem")) {
+        r3(&mut o, 1, 6, 0x33);
+    } else if simple(&o, a0, e, view("remu")) {
+        r3(&mut o, 1, 7, 0x33);
+    } else if simple(&o, a0, e, view("addi")) {
+        i3(&mut o, 0, 0x13, 0);
+    } else if simple(&o, a0, e, view("addiw")) {
+        i3(&mut o, 0, 0x1b, 0);
+    } else if simple(&o, a0, e, view("slti")) {
+        i3(&mut o, 2, 0x13, 0);
+    } else if simple(&o, a0, e, view("sltiu")) {
+        i3(&mut o, 3, 0x13, 0);
+    } else if simple(&o, a0, e, view("xori")) {
+        i3(&mut o, 4, 0x13, 0);
+    } else if simple(&o, a0, e, view("ori")) {
+        i3(&mut o, 6, 0x13, 0);
+    } else if simple(&o, a0, e, view("andi")) {
+        i3(&mut o, 7, 0x13, 0);
+    } else if simple(&o, a0, e, view("slli")) {
+        i3(&mut o, 1, 0x13, 0);
+    } else if simple(&o, a0, e, view("srli")) {
+        i3(&mut o, 5, 0x13, 0);
+    } else if simple(&o, a0, e, view("srai")) {
+        i3(&mut o, 5, 0x13, 0x400);
+    } else if simple(&o, a0, e, view("sext.w")) {
+        d := need(&mut o);
+        comma(&mut o);
+        n := need(&mut o);
+        word(&mut o, itype(0, n, 0, d, 0x1b));
+    } else if simple(&o, a0, e, view("seqz")) {
+        d := need(&mut o);
+        comma(&mut o);
+        n := need(&mut o);
+        word(&mut o, itype(1, n, 3, d, 0x13));
+    } else if simple(&o, a0, e, view("snez")) {
+        d := need(&mut o);
+        comma(&mut o);
+        n := need(&mut o);
+        word(&mut o, rtype(0, n, 0, 3, d, 0x33));
+    } else if simple(&o, a0, e, view("neg")) {
+        d := need(&mut o);
+        comma(&mut o);
+        n := need(&mut o);
+        word(&mut o, rtype(0x20, n, 0, 0, d, 0x33));
+    } else if simple(&o, a0, e, view("not")) {
+        d := need(&mut o);
+        comma(&mut o);
+        n := need(&mut o);
+        word(&mut o, itype(0xfff, n, 4, d, 0x13));
+    } else if simple(&o, a0, e, view("ld")) {
+        load(&mut o, 3, 0x03);
+    } else if simple(&o, a0, e, view("lw")) {
+        load(&mut o, 2, 0x03);
+    } else if simple(&o, a0, e, view("lh")) {
+        load(&mut o, 1, 0x03);
+    } else if simple(&o, a0, e, view("lb")) {
+        load(&mut o, 0, 0x03);
+    } else if simple(&o, a0, e, view("lbu")) {
+        load(&mut o, 4, 0x03);
+    } else if simple(&o, a0, e, view("lhu")) {
+        load(&mut o, 5, 0x03);
+    } else if simple(&o, a0, e, view("lwu")) {
+        load(&mut o, 6, 0x03);
+    } else if simple(&o, a0, e, view("sd")) {
+        store(&mut o, 3, 0x23);
+    } else if simple(&o, a0, e, view("sw")) {
+        store(&mut o, 2, 0x23);
+    } else if simple(&o, a0, e, view("sh")) {
+        store(&mut o, 1, 0x23);
+    } else if simple(&o, a0, e, view("sb")) {
+        store(&mut o, 0, 0x23);
+    } else if simple(&o, a0, e, view("fld")) {
+        load(&mut o, 3, 0x07);
+    } else if simple(&o, a0, e, view("flw")) {
+        load(&mut o, 2, 0x07);
+    } else if simple(&o, a0, e, view("fsd")) {
+        store(&mut o, 3, 0x27);
+    } else if simple(&o, a0, e, view("fsw")) {
+        store(&mut o, 2, 0x27);
+    } else if simple(&o, a0, e, view("lui")) {
+        d := need(&mut o);
+        comma(&mut o);
+        asm_x86::skip(&mut o);
+        if asm_x86::peek(&o) == '%' {
+            modifier(&mut o);
+            word(&mut o, (r5(d) << 7) | 0x37);
+        } else {
+            v := asm_a64::expr_or(&mut o);
+            word(&mut o, ((v & 0xfffff) << 12) | (r5(d) << 7) | 0x37);
+        }
+    } else if simple(&o, a0, e, view("lla")) || simple(&o, a0, e, view("la")) {
+        d := need(&mut o);
+        comma(&mut o);
+        // The auipc's own label, which the addi's relocation names.
+        hi := asm_x86::pcrel_label(&mut o);
+        label_ref(&mut o, fx_pcrel_hi());
+        word(&mut o, (r5(d) << 7) | 0x17);
+        asm_x86::fixup(&mut o, hi, fx_pcrel_lo(), 0);
+        word(&mut o, itype(0, d, 0, d, 0x13));
+    } else if simple(&o, a0, e, view("call")) {
+        label_ref(&mut o, fx_call());
+        word(&mut o, (1 << 7) | 0x17);
+        word(&mut o, itype(0, 1, 0, 1, 0x67));
+    } else if simple(&o, a0, e, view("j")) {
+        label_ref(&mut o, fx_jal());
+        word(&mut o, 0x6f);
+    } else if simple(&o, a0, e, view("jal")) {
+        label_ref(&mut o, fx_jal());
+        word(&mut o, (1 << 7) | 0x6f);
+    } else if simple(&o, a0, e, view("jr")) {
+        n := need(&mut o);
+        word(&mut o, itype(0, n, 0, 0, 0x67));
+    } else if simple(&o, a0, e, view("jalr")) {
+        d := need(&mut o);
+        asm_x86::skip(&mut o);
+        if asm_x86::peek(&o) != ',' {
+            word(&mut o, itype(0, d, 0, 1, 0x67));
+        } else {
+            comma(&mut o);
+            n := need(&mut o);
+            mut off = 0;
+            asm_x86::skip(&mut o);
+            if asm_x86::peek(&o) == ',' {
+                o.at += 1;
+                off = asm_a64::expr_or(&mut o);
+            }
+            word(&mut o, itype(off, n, 0, d, 0x67));
+        }
+    } else if simple(&o, a0, e, view("ret")) {
+        word(&mut o, 0x00008067);
+    } else if simple(&o, a0, e, view("beqz"))
+        || simple(&o, a0, e, view("bnez"))
+        || simple(&o, a0, e, view("bltz"))
+        || simple(&o, a0, e, view("bgez")) {
+        s := need(&mut o);
+        comma(&mut o);
+        mut f3 = 0;
+        if simple(&o, a0, e, view("bnez")) {
+            f3 = 1;
+        } else if simple(&o, a0, e, view("bltz")) {
+            f3 = 4;
+        } else if simple(&o, a0, e, view("bgez")) {
+            f3 = 5;
+        }
+        label_ref(&mut o, fx_branch());
+        word(&mut o, rtype(0, 0, s, f3, 0, 0x63));
+    } else if simple(&o, a0, e, view("beq"))
+        || simple(&o, a0, e, view("bne"))
+        || simple(&o, a0, e, view("blt"))
+        || simple(&o, a0, e, view("bge"))
+        || simple(&o, a0, e, view("bltu"))
+        || simple(&o, a0, e, view("bgeu")) {
+        s1 := need(&mut o);
+        comma(&mut o);
+        s2 := need(&mut o);
+        comma(&mut o);
+        mut f3 = 0;
+        if simple(&o, a0, e, view("bne")) {
+            f3 = 1;
+        } else if simple(&o, a0, e, view("blt")) {
+            f3 = 4;
+        } else if simple(&o, a0, e, view("bge")) {
+            f3 = 5;
+        } else if simple(&o, a0, e, view("bltu")) {
+            f3 = 6;
+        } else if simple(&o, a0, e, view("bgeu")) {
+            f3 = 7;
+        }
+        label_ref(&mut o, fx_branch());
+        word(&mut o, rtype(0, s2, s1, f3, 0, 0x63));
+    } else if simple(&o, a0, e, view("fence")) {
+        mut p = 15;
+        mut s = 15;
+        asm_x86::skip(&mut o);
+        if o.at < o.le {
+            p = fence_set(&mut o);
+            comma(&mut o);
+            s = fence_set(&mut o);
+        }
+        word(&mut o, (p << 24) | (s << 20) | 0x0f);
+    } else if simple(&o, a0, e, view("ecall")) {
+        word(&mut o, 0x73);
+    } else if simple(&o, a0, e, view("ebreak")) {
+        word(&mut o, 0x00100073);
+    } else if (e - a0 > 3) && asm_x86::at_src(&o, a0, a0 + 3, view("lr.")) {
+        amo(&mut o, a0, e, 2, true);
+    } else if (e - a0 > 3) && asm_x86::at_src(&o, a0, a0 + 3, view("sc.")) {
+        amo(&mut o, a0, e, 3, false);
+    } else if (e - a0 > 4) && asm_x86::at_src(&o, a0, a0 + 3, view("amo")) {
+        // amoswap amoadd amoxor amoand amoor amomin amomax amominu amomaxu
+        mut dot = a0;
+        while (dot < e) && (o.src[dot] != '.') {
+            dot += 1;
+        }
+        mut f5 = 0;
+        if asm_x86::at_src(&o, a0, dot, view("amoswap")) {
+            f5 = 1;
+        } else if asm_x86::at_src(&o, a0, dot, view("amoadd")) {
+            f5 = 0;
+        } else if asm_x86::at_src(&o, a0, dot, view("amoxor")) {
+            f5 = 4;
+        } else if asm_x86::at_src(&o, a0, dot, view("amoand")) {
+            f5 = 12;
+        } else if asm_x86::at_src(&o, a0, dot, view("amoor")) {
+            f5 = 8;
+        } else if asm_x86::at_src(&o, a0, dot, view("amomin")) {
+            f5 = 16;
+        } else if asm_x86::at_src(&o, a0, dot, view("amomax")) {
+            f5 = 20;
+        } else if asm_x86::at_src(&o, a0, dot, view("amominu")) {
+            f5 = 24;
+        } else if asm_x86::at_src(&o, a0, dot, view("amomaxu")) {
+            f5 = 28;
+        } else {
+            asm_x86::fail(&mut o, view("unsupported atomic"));
+            return ();
+        }
+        amo(&mut o, dot, e, f5, false);
+    } else if simple(&o, a0, e, view("fmv.d.x")) || simple(&o, a0, e, view("fmv.w.x")) {
+        d := need(&mut o);
+        comma(&mut o);
+        n := need(&mut o);
+        mut f7 = 0x79;
+        if simple(&o, a0, e, view("fmv.w.x")) {
+            f7 = 0x78;
+        }
+        word(&mut o, rtype(f7, 0, n, 0, d, 0x53));
+    } else if simple(&o, a0, e, view("fmv.x.d")) || simple(&o, a0, e, view("fmv.x.w")) {
+        d := need(&mut o);
+        comma(&mut o);
+        n := need(&mut o);
+        mut f7 = 0x71;
+        if simple(&o, a0, e, view("fmv.x.w")) {
+            f7 = 0x70;
+        }
+        word(&mut o, rtype(f7, 0, n, 0, d, 0x53));
+    } else if simple(&o, a0, e, view("fmv.d"))
+        || simple(&o, a0, e, view("fmv.s"))
+        || simple(&o, a0, e, view("fneg.d"))
+        || simple(&o, a0, e, view("fneg.s"))
+        || simple(&o, a0, e, view("fabs.d"))
+        || simple(&o, a0, e, view("fabs.s")) {
+        d := need(&mut o);
+        comma(&mut o);
+        n := need(&mut o);
+        mut f3 = 0;
+        if (o.src[a0 + 1] == 'n') {
+            f3 = 1;
+        } else if (o.src[a0 + 1] == 'a') {
+            f3 = 2;
+        }
+        w__ := rtype(0x10 | fmt(&o, e), n, n, f3, d, 0x53);
+        word(&mut o, w__);
+    } else if simple(&o, a0, e, view("fadd.d"))
+        || simple(&o, a0, e, view("fadd.s"))
+        || simple(&o, a0, e, view("fsub.d"))
+        || simple(&o, a0, e, view("fsub.s"))
+        || simple(&o, a0, e, view("fmul.d"))
+        || simple(&o, a0, e, view("fmul.s"))
+        || simple(&o, a0, e, view("fdiv.d"))
+        || simple(&o, a0, e, view("fdiv.s")) {
+        mut f5 = 0;
+        c := o.src[a0 + 1];
+        if c == 's' {
+            f5 = 1;
+        } else if c == 'm' {
+            f5 = 2;
+        } else if c == 'd' {
+            f5 = 3;
+        }
+        d := need(&mut o);
+        comma(&mut o);
+        n := need(&mut o);
+        comma(&mut o);
+        m := need(&mut o);
+        r := rm(&mut o, 7);
+        w__ := rtype((f5 << 2) | fmt(&o, e), m, n, r, d, 0x53);
+        word(&mut o, w__);
+    } else if simple(&o, a0, e, view("fsqrt.d")) || simple(&o, a0, e, view("fsqrt.s")) {
+        d := need(&mut o);
+        comma(&mut o);
+        n := need(&mut o);
+        r := rm(&mut o, 7);
+        w__ := rtype(0x2c | fmt(&o, e), 0, n, r, d, 0x53);
+        word(&mut o, w__);
+    } else if simple(&o, a0, e, view("feq.d"))
+        || simple(&o, a0, e, view("flt.d"))
+        || simple(&o, a0, e, view("fle.d"))
+        || simple(&o, a0, e, view("feq.s"))
+        || simple(&o, a0, e, view("flt.s"))
+        || simple(&o, a0, e, view("fle.s")) {
+        mut f3 = 2;
+        if o.src[a0 + 2] == 't' {
+            f3 = 1;
+        } else if o.src[a0 + 2] == 'e' {
+            f3 = 0;
+        }
+        if o.src[a0 + 1] == 'e' {
+            f3 = 2;
+        }
+        d := need(&mut o);
+        comma(&mut o);
+        n := need(&mut o);
+        comma(&mut o);
+        m := need(&mut o);
+        w__ := rtype(0x50 | fmt(&o, e), m, n, f3, d, 0x53);
+        word(&mut o, w__);
+    } else if (e - a0 > 5) && asm_x86::at_src(&o, a0, a0 + 5, view("fcvt.")) {
+        // fcvt.<to>.<from>: d/s float formats, w/wu/l/lu integers.
+        mut dot = a0 + 5;
+        while (dot < e) && (o.src[dot] != '.') {
+            dot += 1;
+        }
+        to0 := a0 + 5;
+        from0 := dot + 1;
+        d := need(&mut o);
+        comma(&mut o);
+        n := need(&mut o);
+        to_float := asm_x86::at_src(&o, to0, dot, view("d"))
+            || asm_x86::at_src(&o, to0, dot, view("s"));
+        from_float := asm_x86::at_src(&o, from0, e, view("d"))
+            || asm_x86::at_src(&o, from0, e, view("s"));
+        mut ity = 0;
+        if to_float && from_float {
+            // fcvt.d.s / fcvt.s.d
+            if asm_x86::at_src(&o, to0, dot, view("d")) {
+                w__ := rtype(0x21, 0, n, rm(&mut o, 0), d, 0x53);
+                word(&mut o, w__);
+            } else {
+                w__ := rtype(0x20, 1, n, rm(&mut o, 7), d, 0x53);
+                word(&mut o, w__);
+            }
+            return ();
+        }
+        mut ip0 = from0;
+        mut ip1 = e;
+        if !to_float {
+            ip0 = to0;
+            ip1 = dot;
+        }
+        if asm_x86::at_src(&o, ip0, ip1, view("wu")) {
+            ity = 1;
+        } else if asm_x86::at_src(&o, ip0, ip1, view("l")) {
+            ity = 2;
+        } else if asm_x86::at_src(&o, ip0, ip1, view("lu")) {
+            ity = 3;
+        }
+        if to_float {
+            mut f = 1;
+            if asm_x86::at_src(&o, to0, dot, view("s")) {
+                f = 0;
+            }
+            // Exact conversions (w/wu to d) take no rounding mode; LLVM writes rne (0) for those.
+            mut dflt = 7;
+            if (f == 1) && (ity < 2) {
+                dflt = 0;
+            }
+            w__ := rtype(0x68 | f, ity, n, rm(&mut o, dflt), d, 0x53);
+            word(&mut o, w__);
+        } else {
+            mut f = 1;
+            if asm_x86::at_src(&o, from0, e, view("s")) {
+                f = 0;
+            }
+            w__ := rtype(0x60 | f, ity, n, rm(&mut o, 7), d, 0x53);
+            word(&mut o, w__);
+        }
+    } else {
+        asm_x86::fail(&mut o, view("unsupported instruction"));
+    }
+}

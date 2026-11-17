@@ -24,6 +24,11 @@ statement is emitted**, not by reading the assembly back:
   sites say "a closure call", "a function value", "an imported function" or "a call through a value
   the compiler did not name". A refusal therefore reads "it makes an indirect call the compiler
   cannot follow (the target is interface `Shape` of module `m`)".
+- `call_import_out` emits a call through the import table to a named operating-system function
+  (`call *__imp_CreatePipe(%rip)`). In the runtime it is what a `syscall` instruction is on Linux:
+  the OS does the work, so it neither allocates on the Grail heap (whose roots are `rt_alloc` and
+  `rt_grow`) nor reaches a failure entry, and it records no edge. In user code an imported function
+  is code the compiler does not see, and stays an unknown edge.
 - `call_dispatch_out` emits the compiler's own dispatch inside trusted code (a closure's drop through
   the slot its body installed). Every body it can reach is a body of this build already, so it is not
   an unknown.

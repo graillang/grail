@@ -166,3 +166,28 @@ An argument that is itself a closure, and an argument borrowed (`&buf`) whose pa
 be a reference, do not fix the parameter: write it out, `|v: &[u8]|`. Where nothing fixes a
 parameter's type at all (`f := |x| x + 1`), the error names the parameter and suggests its
 annotation: ``write |x: T|``.
+
+## Callable bounds
+
+A generic function can take a closure by its own type instead of an erased `Fn(..)`:
+
+```grl
+fn apply<F: Fn(u64) -> u64>(f: F, x: u64) -> u64 { return f(x); }
+```
+
+`F` is the type of the closure given at each call, so every call site gets its own copy of `apply`
+and the call `f(x)` is direct - the optimiser can inline it. The closure's parameter and result
+types are inferred from the bound, and a closure that does not fit is refused at the call. The
+`vecs` callback methods and the typed iterator adapters (`iter::over(v).map(..).filter(..)`) take
+their callbacks this way.
+
+A reference in the bound's parameters whose lifetime the bound names nowhere else is new on every
+call, as in Rust (`F: FnMut((&mut T), C) -> R` means "for any lifetime of that `&mut T`"). So the
+closure or function given for `F` must not tie that parameter's lifetime to anything else it can
+reach - another parameter, its result, or something it captured:
+
+```grl
+fn leak<a, b>(v: (&a mut u64[]), out: (&b mut Out<a>)) -> u64 { out.slot.push(v); return 0; }
+with_lock(&mut m, &mut out, leak);   // refused: parameter 1 is fresh on every call, but `leak`
+                                     // ties it to `out`, so it could be kept past the call
+```

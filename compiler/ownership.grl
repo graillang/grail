@@ -27,7 +27,11 @@ pub struct Loan {
     source: u64,
     parent: u64,
     mode: u64,
-    live: u64
+    live: u64,
+    // A sibling group (split_at_mut, docs/design/simd-layout-parallel-loops.md 4.3): loans of one
+    // group are disjoint halves of their parent's storage, so they - and loans reborrowed from them -
+    // never conflict with each other. Zero for every other loan.
+    group: u64
 }
 pub struct State {
     places: Place[],
@@ -38,11 +42,14 @@ pub struct State {
     // A join or a restore rewrites the flags wholesale and clears `live_ok`; the list is rebuilt
     // the next time it is asked for (live_ids).
     live_list: u64[],
-    live_ok: u64
+    live_ok: u64,
+    // The group a reborrow joins while a split makes its halves (open_group), and the last one made.
+    group_now: u64,
+    groups: u64
 }
 
 pub fn new() -> State {
-    return State { places: Place[], loans: Loan[], live_list: u64[], live_ok: 1 };
+    return State { places: Place[], loans: Loan[], live_list: u64[], live_ok: 1, group_now: 0, groups: 0 };
 }
 pub fn root<a>(s: (&a mut State), copy: u64, initialized: u64) -> u64 {
     s.places.push(Place { parent: 0, status: initialized, copy: copy, filled: initialized, child: 0, next: 0 });
@@ -334,9 +341,46 @@ pub fn borrow_place<a>(s: (&a mut State), id: u64, mode: u64) -> u64 {
     if conflict(&s, id, mode) != 0 {
         return 0;
     }
-    s.loans.push(Loan { source: id, parent: 0, mode: mode, live: 1 });
+    s.loans.push(Loan { source: id, parent: 0, mode: mode, live: 1, group: 0 });
     live_made(&mut s);
     return s.loans.len();
+}
+// Opens a sibling group: the reborrows made until close_group are disjoint halves of one parent.
+pub fn open_group<a>(s: (&a mut State)) -> unit {
+    s.groups = s.groups + 1;
+    s.group_now = s.groups;
+    return ();
+}
+pub fn close_group<a>(s: (&a mut State)) -> unit {
+    s.group_now = 0;
+    return ();
+}
+// Whether loan `other` lies in a different half of a split than the access through loan `through`
+// (or than a new loan of group `extra` made from `through`): some ancestor-or-self of `other` and some
+// ancestor-or-self of `through` are distinct loans of one sibling group. A loan below `through` is
+// never disjoint from it - its conflict stands.
+fn split_apart<a>(s: (&a State), other: u64, through: u64, extra: u64) -> bool {
+    mut q = other;
+    while q != 0 {
+        if loan_ancestor(&s, q, through) {
+            return false;
+        }
+        g := s.loans[q - 1].group;
+        if g != 0 {
+            if g == extra {
+                return true;
+            }
+            mut p = through;
+            while p != 0 {
+                if (s.loans[p - 1].group == g) && (p != q) {
+                    return true;
+                }
+                p = loan_parent(&s, p);
+            }
+        }
+        q = loan_parent(&s, q);
+    }
+    return false;
 }
 fn loan_parent<a>(s: (&a State), id: u64) -> u64 {
     mut l = &s.loans[id - 1];
@@ -353,6 +397,11 @@ fn loan_ancestor<a>(s: (&a State), outer: u64, inner: u64) -> bool {
     return false;
 }
 pub fn use_loan<a>(s: (&a State), id: u64, write: u64) -> u64 {
+    return use_loan_beside(&s, id, write, 0);
+}
+// use_loan, where the live reborrows of group `group` (the halves a split is making) are not in
+// the way of making another half.
+fn use_loan_beside<a>(s: (&a State), id: u64, write: u64, group: u64) -> u64 {
     if id == 0 || s.loans.len() < id {
         return 1;
     }
@@ -369,7 +418,7 @@ pub fn use_loan<a>(s: (&a State), id: u64, write: u64) -> u64 {
         for i in s.loans.len() {
             child := &s.loans[i];
             active := child.live;
-            if active != 0 && i + 1 != id {
+            if active != 0 && i + 1 != id && ((group == 0) || (child.group != group)) {
                 if loan_ancestor(&s, id, i + 1) {
                     return 6;
                 }
@@ -389,7 +438,7 @@ pub fn reborrow<a>(s: (&a mut State), parent: u64, mode: u64) -> u64 {
     if 1 < mode {
         return 0;
     }
-    if use_loan(&s, parent, mode) != 0 {
+    if use_loan_beside(&s, parent, mode, s.group_now) != 0 {
         return 0;
     }
     mut l = &s.loans[parent - 1];
@@ -406,7 +455,7 @@ pub fn reborrow<a>(s: (&a mut State), parent: u64, mode: u64) -> u64 {
         omode := other.mode;
         osource := other.source;
         if live != 0 && i + 1 != parent {
-            if !loan_ancestor(&s, i + 1, parent) {
+            if !loan_ancestor(&s, i + 1, parent) && !split_apart(&s, i + 1, parent, s.group_now) {
                 if mode != 0 || omode != 0 {
                     if overlaps(&s, source, osource) {
                         return 0;
@@ -415,7 +464,7 @@ pub fn reborrow<a>(s: (&a mut State), parent: u64, mode: u64) -> u64 {
             }
         }
     }
-    s.loans.push(Loan { source: source, parent: authority, mode: mode, live: 1 });
+    s.loans.push(Loan { source: source, parent: authority, mode: mode, live: 1, group: s.group_now });
     live_made(&mut s);
     return s.loans.len();
 }
@@ -490,9 +539,9 @@ pub fn snapshot<a>(s: (&a State)) -> State {
     }
     for i in s.loans.len() {
         mut l = &s.loans[i];
-        loans.push(Loan { source: l.source, parent: l.parent, mode: l.mode, live: l.live });
+        loans.push(Loan { source: l.source, parent: l.parent, mode: l.mode, live: l.live, group: l.group });
     }
-    return State { places: places, loans: loans, live_list: u64[], live_ok: 0 };
+    return State { places: places, loans: loans, live_list: u64[], live_ok: 0, group_now: s.group_now, groups: s.groups };
 }
 // Conservative join: definitely initialized places intersect, possible live loans union.
 // Different storage/authority shapes are rejected instead of pretending they are interchangeable.
@@ -613,7 +662,7 @@ pub fn merge<a, b>(s: (&a mut State), saved: (&b State)) -> unit {
     mut j = s.loans.len();
     while j < saved.loans.len() {
         mut l = &saved.loans[j];
-        s.loans.push(Loan { source: l.source, parent: l.parent, mode: l.mode, live: 0 });
+        s.loans.push(Loan { source: l.source, parent: l.parent, mode: l.mode, live: 0, group: l.group });
         j = j + 1;
     }
     for i in saved.loans.len() {
@@ -715,7 +764,7 @@ pub fn access_loan<a>(s: (&a State), parent: u64, target: u64, write: u64) -> u6
         m := l.mode;
         mut p = l.source;
         if active != 0 {
-            if !loan_ancestor(&s, i + 1, parent) {
+            if !loan_ancestor(&s, i + 1, parent) && !split_apart(&s, i + 1, parent, 0) {
                 if write != 0 || m != 0 {
                     if overlaps(&s, target, p) {
                         return 3;
@@ -740,7 +789,7 @@ pub fn reborrow_place<a>(s: (&a mut State), parent: u64, target: u64, mode: u64)
     if pmode == 0 {
         authority = gp;
     }
-    s.loans.push(Loan { source: target, parent: authority, mode: mode, live: 1 });
+    s.loans.push(Loan { source: target, parent: authority, mode: mode, live: 1, group: s.group_now });
     live_made(&mut s);
     return s.loans.len();
 }

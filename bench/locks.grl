@@ -1,0 +1,92 @@
+// Lock costs against Rust (std, parking_lot) and C++ (std::mutex and friends): tools/locks-rivals.mjs.
+// Every workload runs on dedicated OS threads (thread::spawn), as the rivals' do, and prints
+// nanoseconds per operation:
+//   mutex-uncontended   one thread, lock + unlock, 5M times
+//   mutex-contended     8 threads x 200k lock + a short critical section on one Mutex
+//   rwlock-read         8 threads x 200k read locks on one RwLock (no writer)
+//   rwlock-mixed        8 threads x 200k, one write in 16
+//   condition-pingpong  2 threads, 100k round trips through one Condition (ns per round trip)
+//   semaphore-contended 8 threads x 100k acquire/release on 2 permits
+use thread;
+use sync;
+use host;
+use rc;
+struct Shared { m: Mutex<u64>, rw: sync::RwLock<u64>, c: sync::Condition, turn: Mutex<u64>, s: sync::Semaphore }
+fn bump<a>(v: (&a mut u64), n: u64) -> u64 { *v += n; return *v; }
+fn now_ns() -> u64 { return host::now_us() * 1000; }
+fn report(name: string, ns: u64, ops: u64) -> unit {
+    println("{} {}", name, ns / ops);
+}
+fn on_threads(n: u64, sh: (&rc::Arc<Shared>), work: u64) -> u64 {
+    start := now_ns();
+    mut ts: thread::Thread<u64>[] = [];
+    for i in n {
+        mine := sh.clone();
+        ts.push(thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 {
+            s := mine.get();
+            mut t = 0;
+            if work == 0 {
+                for k in 200000 { t += s.m.lock_with(1, bump); }
+            }
+            if work == 1 {
+                for k in 200000 { t += s.rw.read_with(0, |v: (&u64), u: u64| -> u64 *v); }
+            }
+            if work == 2 {
+                for k in 200000 {
+                    if k % 16 == 0 {
+                        t += s.rw.write_with(1, |v: (&mut u64), u: u64| -> u64 { *v += u; return *v; });
+                    } else {
+                        t += s.rw.read_with(0, |v: (&u64), u: u64| -> u64 *v);
+                    }
+                }
+            }
+            if work == 3 {
+                for k in 100000 { t += s.s.acquire_with(1, k, |u: u64| -> u64 u); }
+            }
+            return t;
+        })!);
+    }
+    while let Some(t) = ts.pop() {
+        thread::join(t);
+    }
+    return now_ns() - start;
+}
+fn main() {
+    sh := rc::arc_new(Shared { m: Mutex::new(0), rw: sync::rwlock<u64>(0), c: sync::condition(), turn: Mutex::new(0), s: sync::semaphore(2) });
+    // Uncontended: the dedicated-thread path, after a second thread exists (the threaded allocator
+    // and the real lock path are in force).
+    first := sh.clone();
+    report("mutex-uncontended", thread::join(thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 {
+        s := first.get();
+        start := now_ns();
+        for k in 5000000 { s.m.lock_with(1, bump); }
+        return now_ns() - start;
+    })!), 5000000);
+    report("mutex-contended", on_threads(8, &sh, 0), 1600000);
+    report("rwlock-read", on_threads(8, &sh, 1), 1600000);
+    report("rwlock-mixed", on_threads(8, &sh, 2), 1600000);
+    // Ping-pong: each side waits for its turn and hands the turn over.
+    a := sh.clone();
+    b := sh.clone();
+    start := now_ns();
+    pa := thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 {
+        s := a.get();
+        for k in 100000 {
+            s.c.wait_with(&s.turn, 0, |v: (&u64), u: (&u64)| -> bool *v % 2 == 0, |v: (&mut u64), u: u64| -> u64 { *v += 1; return *v; });
+            s.c.notify_all();
+        }
+        return 0;
+    })!;
+    pb := thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 {
+        s := b.get();
+        for k in 100000 {
+            s.c.wait_with(&s.turn, 0, |v: (&u64), u: (&u64)| -> bool *v % 2 == 1, |v: (&mut u64), u: u64| -> u64 { *v += 1; return *v; });
+            s.c.notify_all();
+        }
+        return 0;
+    })!;
+    thread::join(pa);
+    thread::join(pb);
+    report("condition-pingpong", now_ns() - start, 100000);
+    report("semaphore-contended", on_threads(8, &sh, 3), 800000);
+}

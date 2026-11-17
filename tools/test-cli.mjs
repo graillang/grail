@@ -56,6 +56,15 @@ for (const [i, file] of sources.entries()) {
   formatted.set(file, copy);
 }
 checks += sources.length;
+// Wrapped output parses again: tests/fmt/wide.grl has expressions the formatter must break at a
+// binary operator, comparisons included, and a continuation line that opens with `<` reads as
+// generic brackets (asm_x86.grl once came out of `grail fmt` refused that way).
+{
+  const wide = formatted.get(join(root, 'tests/fmt/wide.grl'));
+  assert.ok(readFileSync(wide, 'utf8') !== readFileSync(join(root, 'tests/fmt/wide.grl'), 'utf8'), 'tests/fmt/wide.grl was expected to need wrapping');
+  const reparsed = run(['check', wide], undefined, false);
+  assert.equal(reparsed.status, 0, `formatted tests/fmt/wide.grl does not check:\n${reparsed.stdout ?? ''}${reparsed.stderr ?? ''}`); checks++;
+}
 const original = join(work, 'original.s'), reformatted = join(work, 'reformatted.s');
 // Both builds are given the same module root: `lib/xxhash.grl` is one of the compiler's own sources,
 // which makes `lib/` a module root by location, and the formatted copies live somewhere else - so
@@ -135,7 +144,7 @@ checks += 10;
   assert.match(bytes?.members.find(member => member.name === 'find')?.type ?? '', /^pub fn find\(&self, needle: \(&\[u8\]\)\) -> u64\?$/, 'a method\'s signature is the text up to its body');
   assert.equal(bytes?.doc, '', 'the module block is not also the first declaration\'s doc');
   const fields = item('hashmap', 'struct', 'Map')?.members ?? [];
-  assert.ok(fields.some(field => field.name === 'entries' && field.type === 'Slot<K, V>[]'), `a record lists its fields: ${JSON.stringify(fields)}`);
+  assert.ok(fields.some(field => field.name === 'keys' && field.type === 'K[]'), `a record lists its fields: ${JSON.stringify(fields)}`);
   assert.ok((item('io', 'enum', 'Error')?.members ?? []).some(variant => variant.name === 'Other' && variant.type === 'u64'), 'an enum lists its variants and payloads');
   assert.ok(module('hashmap')?.items.some(entry => entry.kind === 'impl' && entry.name.startsWith('Map')), 'an implementation is listed');
   assert.ok(fs.readdirSync(outA).filter(name => name.endsWith('.html')).length >= 25, 'one page per module');
@@ -455,5 +464,23 @@ const fast = ['--interval', '40', '--debounce', '60'];
     assert.match(first(dyn), /`@no_alloc` function `sink` performs a heap allocation/, first(dyn));
     assert.match(dyn.stdout + dyn.stderr, /the drop of a `dyn Speak` value, whose implementations this module cannot see: `Speak` is public/, dyn.stdout + dyn.stderr); checks++;
   }
+}
+// `grail check` proves effect claims as a build does: every module of lib/ that claims one must check
+// (each module's run reads the runtime's summary, which the runtime's own check run writes), and so
+// must a program that uses one.
+{
+  const dir = join(work, 'check-claims'); mkdirSync(dir, { recursive: true });
+  const store = { ...process.env, GRAIL_CACHE_DIR: join(dir, 'store') };
+  const check = (file) => spawnSync(grail, ['check', file], { cwd: dir, encoding: 'utf8', env: store });
+  for (const entry of readdirSync(join(root, 'lib')).filter((f) => f.endsWith('.grl')).sort()) {
+    const name = entry.slice(0, -4);
+    writeFileSync(join(dir, `use_${name}.grl`), `use ${name};\nfn main() {\n    println(1);\n}\n`);
+    const r = check(`use_${name}.grl`);
+    assert.equal(r.status, 0, `grail check of a program using \`${name}\` failed\n${r.stdout}${r.stderr}`);
+  }
+  checks++;
+  writeFileSync(join(dir, 'claim_loop.grl'), '@no_alloc\nfn total(v: &u64[]) -> u64 {\n    mut t = 0;\n    for x in v {\n        t = wrapping_add(t, *x);\n    }\n    return t;\n}\nfn main() {\n    v := u64[1, 2];\n    println(total(&v));\n}\n');
+  const loop = check('claim_loop.grl');
+  assert.equal(loop.status, 0, `grail check of a claimed loop over a borrowed vector failed\n${loop.stdout}${loop.stderr}`); checks++;
 }
 console.log(`cli: ${checks} formatter/tool checks passed`);

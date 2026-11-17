@@ -167,6 +167,9 @@ fn rt_syscall4(n: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
     if n == 266 {
         return raw_syscall4(36, a, b, c, d); // symlinkat
     }
+    if n == 268 {
+        return raw_syscall4(53, a, b, c, d); // fchmodat
+    }
     if n == 271 {
         return raw_syscall4(73, a, b, c, d); // ppoll
     }
@@ -338,6 +341,11 @@ fn rt_comptime_check(n: u64, a: u64) -> u64 {
     if (n == 1) & ((a == 1) | (a == 2)) {
         return 0;
     }
+    // A failed check in compile-time code ends the probe the way it ends a program: SIGABRT to
+    // itself (rt_abort_final). Only its own process: signalling another one is an effect.
+    if (n == 62) & (a == raw_syscall(39, 0, 0, 0)) {
+        return 0;
+    }
     if rt_comptime_allowed(n) {
         return 0;
     }
@@ -361,7 +369,8 @@ fn rt_comptime_check(n: u64, a: u64) -> u64 {
 // ---- green-task execution contexts ----
 // Linux has both halves of the green design: a direct stack switch (raw_switch, emitted for the ELF
 // targets) and a readiness reactor (epoll plus eventfd/timerfd), so a task parks on an epoll
-// registration and a host operation that would block is offloaded instead (rt_offload).
+// registration and a host operation that would block runs with its worker given to a spare
+// (rt_offload).
 fn rt_os_reactor() -> u64 {
     return 1;
 }
@@ -536,11 +545,6 @@ fn rt_os_timer_done(s: u64, task: u64) -> u64 {
         raw_store(task + 32, 0);
     }
     return 0;
-}
-// A completion for an offload thread's task: Linux has no completion port, so the task goes back on
-// a deque directly.
-fn rt_os_complete(task: u64) -> u64 {
-    return rt_wake(task);
 }
 
 // ---- task stacks -------------------------------------------------------------------------------
@@ -1031,6 +1035,16 @@ fn rt_rename(from: u64, to: u64) -> u64 {
 // symlinkat(2): `target` is the text the link holds. 0 or a positive errno.
 fn rt_symlink(target: u64, link: u64) -> u64 {
     r := rt_syscall4(266, target, wrapping_sub(0, 100), link, 0);
+    if rt_error(r) {
+        return wrapping_sub(0, r);
+    }
+    return 0;
+}
+
+// fchmodat(2) relative to the working directory: the permission bits of `path`. 0 or a positive
+// errno.
+fn rt_chmod(path: u64, mode: u64) -> u64 {
+    r := rt_syscall4(268, wrapping_sub(0, 100), path, mode, 0);
     if rt_error(r) {
         return wrapping_sub(0, r);
     }

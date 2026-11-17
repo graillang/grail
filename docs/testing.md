@@ -91,6 +91,57 @@ statically by default, which needs no libc. Without a sysroot, a case that decla
 `GRAIL_SYSROOT_AARCH64` at a tree that only holds QEMU binaries *causes* the `-lc` failure, because
 it switches the link to dynamic.
 
+## Reseeding: how and when
+
+**When.** Reseed after a landing that changes what the compiler's own sources may use - a new syntax
+form (`static`), a new builtin or `raw_` intrinsic, a runtime layout the compiler itself depends
+on - and whenever `bun tools/ci.mjs preflight` (with `GRAIL_COMPILER` unset) reports the published
+bootstrap stale for a while: an old seed means every branch has to be built from somebody's
+compiler instead of from the clone. Reseed from **main**, on a branch of its own, and land it alone;
+never fold a reseed into a feature branch.
+
+**How.** The seed is the compiler's own output for each target, proved by self-hosting: the
+compiler built from main compiles the sources (`first`), that output is assembled and run to compile
+the sources again (`second`), and `first` must equal `second` byte for byte (`bootstrap.mjs`).
+
+```sh
+git checkout -b gaps-reseed origin/main
+G=$(GRAIL_COMPILER=$PWD/.work/base/grail-c6 bun tools/native.mjs build | tail -1)   # main's compiler
+GRAIL_JOBS=1 GRAIL_COMPILER=$G bun tools/bootstrap.mjs stage x86_64     # here, one job, ~5 min
+# aarch64 and riscv64 run under QEMU (up to an hour each): on the build host, not here
+git push root@borg.ml:/srv/grail/repo.git HEAD:refs/heads/gaps-reseed
+ssh root@borg.ml 'git -C /srv/grail/agents/NAME fetch -q && git -C /srv/grail/agents/NAME checkout -qf origin/gaps-reseed'
+rsync -az $G root@borg.ml:/srv/grail/agents/NAME.grail
+ssh root@borg.ml 'GRAIL_LEG_TREE=/srv/grail/agents/NAME GRAIL_LEG_COMPILER=/srv/grail/agents/NAME.grail \
+  nohup setsid /srv/grail/run-leg.sh NAME/stage-riscv64 env GRAIL_JOBS=1 bun tools/bootstrap.mjs stage riscv64 >/dev/null 2>&1 &'
+#   GRAIL_JOBS=1: under a loaded host the emulated compiler's parallel optimiser workers can time out
+#   ("an optimiser worker did not finish") after an hour of work; one process is slower but finishes
+#   aarch64 the same, with the patched QEMU first on PATH:
+#   sh -c "PATH=/srv/grail/w/.work/architectures/toolchain/usr/bin:\$PATH exec bun tools/bootstrap.mjs stage aarch64"
+# when /srv/grail/logs/NAME/stage-*.log end in exit=0, bring the staged seeds home
+rsync -az 'root@borg.ml:/srv/grail/agents/NAME/.work/bootstrap/staged/*' .work/bootstrap/staged/
+bun tools/bootstrap.mjs publish                # installs all three and the manifest, or refuses
+git add compiler/bootstrap && git commit -m "Reseed the bootstrap"
+GRAIL_COMPILER= bun tools/bootstrap.mjs verify x86_64   # the clone's view: the seed builds the tree
+```
+
+`stage` parks each target's seed under `.work/bootstrap/staged/<target>.<sources key>.seed`;
+`publish` refuses unless all three were staged from the same compiler sources, so seeds from
+different trees cannot be mixed. Do not edit `compiler/*.grl` while a stage runs: it hashes the
+sources at the start and refuses at the end if they changed. Use your own tree on the build host
+(`/srv/grail/agents/NAME`), never `/srv/grail/w` (the post-landing legs run there), and at most two
+stages at a time there. `tools/gate.sh --reseed` runs the same `stage`/`publish` steps on one machine.
+
+**A new intrinsic lands one reseed before its first use.** The runtime and the compiler's own sources
+are compiled by the seed, so they may use only what the seed knows. A new `raw_` intrinsic, builtin or
+syntax form therefore lands in two steps: first the compiler learns it (and nothing in
+`compiler/*.grl` uses it yet), then a routine reseed, then the runtime or the compiler switches to it.
+`raw_sites` (the site-table helper called by name) is in that state: it landed before its first use;
+`rt_sites_fill` moves to it from its `raw_call2` at the next reseed, deleting the named-edge special
+case for that call. For the same reason the compiler's own sources use only constant-tier statics
+and constants (`ci.mjs lint` checks it): a run-tier value would run a compile-time probe, a compile of
+the whole compiler, on every cold build of it.
+
 **The bootstrap reseed needs QEMU on `PATH` too.** `bun tools/bootstrap.mjs update all` compiles the
 compiler for every target and *runs* the aarch64/riscv64 results to check self-hosting, so without
 `$HOME/.local/qemu-static/usr/bin` on `PATH` it fails with `compiler execution failed (null)` and a
@@ -156,6 +207,27 @@ way. A builtin used *only* by user code (a program, `lib/`, a fixture) does not 
 is resolved when that program is compiled by a compiler that has the new table, and the seed is only
 ever asked to compile the compiler's own sources. If the compiler's own sources must call the
 builtin, a reseed on the same branch is part of the change, not a follow-up.
+
+**A source change the seed cannot read needs the same two steps, with no new builtin.** The seed
+also carries the rules it was built with, so a `compiler/*.grl` written in a rule a later compiler
+added is rejected although every name resolves. Two-phase `exchange` arguments are the case that
+has now needed this twice in one round: `exchange(&mut c.pos, c.pos + 1)` is accepted by a compiler
+with the two-phase builtin and refused by a seed recorded before it, as an ordinary borrow error
+rather than an unknown name:
+
+```text
+error: reference access conflicts with active borrow
+    --> compiler/native.grl:5727:32
+     |
+5727 |     exchange(&mut c.pos, c.pos + 1);
+     |                                ^
+```
+
+The steps do not change - a `GRAIL_COMPILER` built from these sources with a seed it can still
+read, `bootstrap.mjs stage <target>` (or `update all`) with that variable set, `verify`, and the
+reseed committed on the same branch - and neither does the reason: the checked-in seed is the
+compiler as it was, so a branch first written in a newer rule can only reseed itself through a
+compiler that reads it.
 
 The fresh-clone step is the one to run before pushing such a change. `GRAIL_COMPILER` makes every
 suite pass while the published seed still cannot build the compiler, so a branch can be green locally
@@ -317,11 +389,33 @@ loses the race harmlessly. That is what makes `GATE_JOBS > 1` safe for the tool 
 
 ## Landing on main
 
-Every branch lands through one queue: `bash tools/land.sh BRANCH` (or `just land BRANCH`). The branch
-must already contain `origin/main`: merge main into it and resolve the conflicts on the branch, where
-the owner knows both sides. The queue runs one landing at a time on exactly that tree: the build, the
-self-host fixed point, the x86_64 corpus in three shards and the tool suites, retrying a failure once
-on its own. Green fast-forwards main; anything else leaves main unchanged and says why. The emulated
-aarch64/riscv64 legs then run on the build host and are fixed forward. `tools/land-known.txt` lists
-the failures that do not block, each with an owner; it only ever shrinks. `tools/land.sh --status`
-shows the queue and the last landings.
+Every branch lands through one service: `bash tools/land.sh BRANCH` (or `just land BRANCH`) queues
+it and returns; `--wait` blocks until the verdict, `--status` shows the queue. The service
+(`tools/landsvc/landd.py`, run as a daemon on the build host from `$HOME/grail-landsvc`) takes up to
+four queued branches, merges each onto current `origin/main` in its own worktree (a clean merge, or
+one whose only conflicts are corpus cases and prose, which `tools/merge-cases.mjs` settles), and runs
+the fast gate once on the combined tree: the build, the self-host fixed point, the x86_64 corpus in
+three shards and every tool suite, each failure retried once on its own. Green fast-forwards main and
+each branch; a red train is retried one branch at a time, so one bad branch cannot block the others;
+a branch that does not merge is refused with its conflicting files. Results are in the service's
+`results/BRANCH.txt` and in `landings.txt`. The emulated aarch64/riscv64 legs then run on the remote
+build host and are fixed forward. `tools/land-known.txt` lists the failures that do not block, each
+with an owner; it only ever shrinks. Killing the process that queued a branch does not stop its
+landing: the service owns the gate.
+The build host's half is `tools/land-remote.sh`, run there from its checkout of main
+(`/srv/grail/w`) after each landing: the service's `remote_legs()` calls it when the tree has it. It
+runs `tools/qemu/build.sh` first, so the emulated legs use the patched qemu-aarch64 (see "The
+aarch64 emulator"; the first build takes several minutes, later ones are a no-op), then starts the
+six aarch64/riscv64 legs detached, and beside them the front-end fuzzer at 2000 cases (ten times the
+lint's seed) against the compiler that landed, seeded from the landing's stamp so each landing tries
+new inputs and a front-end hang is found within hours. Logs are in `/srv/grail/logs/STAMP/`, where
+STAMP also names the landing's local log directory; the fuzzer's `report.json` and the shrunk input
+of every bug it finds are kept in `STAMP/fuzz/`, and `bun tools/fuzz-frontend.mjs --seed SEED
+--cases 2000` reproduces a run. `tools/land.sh --remote-status` (`just land-status-remote`; the
+service's client, `tools/landsvc/land.sh`) prints the newest landing's emulator version, each leg's
+verdict - running, ok with its pass count, or FAIL with the failing cases - and the fuzzer's seed
+and summary, and exits 0 when all passed, 1 when one failed, 3 while any is running. Once every leg
+has a verdict it adds one `remote STAMP GREEN|RED` line to the service's `post.txt`, beside the
+post-landing gate's own lines. The host needs the build dependencies `build.sh` names when one is
+missing (on Ubuntu: `build-essential ninja-build pkg-config libglib2.0-dev libpcre2-dev flex bison
+python3-venv`).

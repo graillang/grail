@@ -101,6 +101,22 @@ pub fn split_mut<T:Send>(data: (&mut [T]), grain: u64 where grain > 0, f: Fn<Sha
     parallel_split(data, grain, f);
 }
 
+// Several columns in one split (docs/design/simd-layout-parallel-loops.md 4.2): every slice is cut at
+// the same indices into pieces of at most `grain` elements, and f gets the k-th piece of each - so
+// `p[i]` and `v[i]` in the callback are the same element of the same row. The slices must be equal
+// in length (checked once, as the call runs); the pieces depend on (length, grain) alone. Writes go
+// through the `&mut` slices, each an exclusive loan of its whole vector for the call, so the same
+// vector cannot be passed twice and the callback cannot capture any of them.
+pub fn zip2<A:Send, B:Share, F:Fn<Share>((&mut [A]), (&[B]))->unit>(a: (&mut [A]), b: (&[B]), grain: u64 where grain > 0, f: F) -> unit {
+    parallel_for_zip(grain, f, a, b);
+}
+pub fn zip3<A:Send, B:Share, C:Send, F:Fn<Share>((&mut [A]), (&[B]), (&mut [C]))->unit>(a: (&mut [A]), b: (&[B]), c: (&mut [C]), grain: u64 where grain > 0, f: F) -> unit {
+    parallel_for_zip(grain, f, a, b, c);
+}
+pub fn zip4<A:Send, B:Share, C:Share, D:Send, F:Fn<Share>((&mut [A]), (&[B]), (&[C]), (&mut [D]))->unit>(a: (&mut [A]), b: (&[B]), c: (&[C]), d: (&mut [D]), grain: u64 where grain > 0, f: F) -> unit {
+    parallel_for_zip(grain, f, a, b, c, d);
+}
+
 // The index ranges [0, n) in pieces of at most `grain`: f(lo, hi) for each piece, results in piece
 // order. For loops whose body reads shared data and builds a result per piece.
 pub fn range<U:Send+Owned>(n:u64,grain:u64 where grain > 0,f:Fn<Share>(u64,u64)->U)->U[]{
@@ -141,10 +157,18 @@ pub fn join<A:Send+Owned,B:Owned>(first:Fn<Send>()->A,second:FnMut()->B)->Pair<A
     // lets it borrow the caller's frame, and it runs once, on one thread, so its captures need only
     // be transferable, not shareable. It is a structured fork, so if `second` fails, the failing
     // stack waits for `first` before it is discarded (docs/design/concurrency-model.md, F1).
+    //
+    // `second`'s result goes through a slot rather than straight to a combining function: since
+    // unboxed records, a `Pair` comes back from a call in two registers, and the runtime's call of
+    // a combining function returns one word - so combining into a `Pair` there is not sound until the
+    // runtime can return two words (the follow-up named in concurrency-stages-5-7.md).
     mut slot: B? = None;
     out := &mut slot;
-    a := parallel_with(first, || -> unit { *out = Some(here()); });
+    a := parallel_with(first, || -> unit { *out = Some(here()); }, first_of<A>);
     return Pair{first:a,second:slot!};
+}
+fn first_of<A>(first: A, unused: unit) -> A {
+    return first;
 }
 
 // Priority classes. Frame work is taken before Normal work, and Normal before tasks and Background

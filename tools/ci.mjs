@@ -469,6 +469,18 @@ function lint() {
     const twice = [...new Set(names.filter((n, i) => names.indexOf(n) !== i))];
     check('every native case name is unique', twice.length === 0, twice.slice(0, 5).join(', '));
   }
+  // The compiler's own sources hold only constant-tier statics and constants: a run-tier value
+  // (`static X: T = @f();`, `X := f();`) would run a compile-time probe - a compile of the whole
+  // compiler - on every cold build of the compiler (docs/design/comptime-speed.md).
+  {
+    const offenders = [];
+    for (const name of readdirSync(join(root, 'compiler')).filter(file => file.endsWith('.grl'))) {
+      readFileSync(join(root, 'compiler', name), 'utf8').split('\n').forEach((line, index) => {
+        if (/^\s*(pub\s+)?static\s+\w+\s*:[^=]*=\s*@/.test(line) || /^\s*(pub\s+)?[A-Z_][A-Z0-9_]*\s*:=\s*[\w:]+\(/.test(line)) offenders.push(`compiler/${name}:${index + 1}`);
+      });
+    }
+    check('the compiler holds no run-tier value', offenders.length === 0, offenders.slice(0, 5).join(', '));
+  }
   let version = null;
   try { version = readVersion(); check('VERSION is semver', true, version); } catch (error) { check('VERSION is semver', false, error.message); }
   const ids = PLATFORMS.map(platform => platform.id);
@@ -621,6 +633,7 @@ function lint() {
   check('LSP server exists', existsSync(join(root, 'tools/lsp/main.grl')));
   check('LSP stdio test exists', existsSync(join(root, 'tools/lsp-test.mjs')));
   check('CI runs the LSP stdio test', readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8').includes('tools/lsp-test.mjs'));
+  check('the gate runs the package manager suite', /^for t in [^;\n]*\bpkg-test\b[^;\n]*; do$/m.test(readFileSync(join(root, 'tools/gate.sh'), 'utf8')));
   check('the gate runs the LSP stdio test', /^for t in [^;\n]*\blsp-test\b[^;\n]*; do$/m.test(readFileSync(join(root, 'tools/gate.sh'), 'utf8')));
   check('VS Code extension manifest exists', existsSync(join(root, 'editors/vscode/package.json')));
   check('TextMate grammar for .grl exists', existsSync(join(root, 'editors/vscode/syntaxes/grail.tmLanguage.json')));
