@@ -1,0 +1,26 @@
+// bench/ffi_call.grl with the call declared `extern "C" nonblocking`: no foreign-call marker, so
+// this is the bare cost of a Grail-to-C call, to compare with C's (bench/ffi_call.c) and with the
+// marked default (bench/ffi_call.grl).
+use host;
+
+extern "C" nonblocking lib "c" fn labs(x: i64) -> i64;
+
+fn main() {
+    n := 10000000;
+    mut acc: i64 = 0;
+    mut best = 18446744073709551615;
+    for round in 5 {
+        t0 := host::now_us();
+        mut i: i64 = 0;
+        while i < 10000000 {
+            unsafe {
+                acc = acc + labs(i - 5000000);
+            }
+            i += 1;
+        }
+        t := host::now_us() - t0;
+        if t < best { best = t; }
+    }
+    host::write_fd(2, format("ffi_call {} ps\n", best * 1000000 / n).text());
+    println("checksum {}", acc);
+}
