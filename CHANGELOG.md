@@ -28,6 +28,11 @@
   cache lives in the build store. `bench/hashmap.grl`: 1,235M -> 823M instructions; a one-function
   edit rebuilds in 0.82 s (cargo --release: 0.65 s). The release compiler is built the same way.
   Needs `llvm-ar` (or `GRAIL_AR`) beside clang and ld.lld.
+- Release builds optimise functions that pass C records by value: a `byval` record crosses in
+  registers by its SysV eightbyte classes (INTEGER in general registers, SSE in vector registers)
+  or, over 16 bytes, as `ptr byval` on the stack - matching the native placement. tools/test-ffi.mjs
+  now runs every FFI fixture on the LLVM backend too (x86-64, with --verify-facts).
+
 - An effect refusal over a callee the run cannot see (compiling a program to assembly without the
   runtime's sources) names it - "the target is `rt_len`, whose body and effect summary this run does
   not have" - instead of calling it an indirect call.
