@@ -12931,6 +12931,18 @@ fn resolve_callable_bounds<a>(c: (&a mut C)) -> unit {
     }
     return ();
 }
+// `ty`, or - for a type parameter bound to a closure or function - that closure or function type.
+fn callable_or_self<a>(c: (&a mut C), ty: u64) -> u64 {
+    k := ty_kind(&mut c, ty);
+    if (k == 12) || (k == 20) {
+        return ty;
+    }
+    bound := param_callable(&mut c, ty);
+    if (bound != NO_TYPE) && ((ty_kind(&mut c, bound) == 12) || (ty_kind(&mut c, bound) == 20)) {
+        return bound;
+    }
+    return ty;
+}
 // The callable bound a type parameter's own type carries (`F: FnMut(T) -> U`), or NO_TYPE.
 fn param_callable<a>(c: (&a mut C), ty: u64) -> u64 {
     mut t = ty;
@@ -12978,6 +12990,16 @@ fn spec_callable_signature<a>(c: (&a mut C), alias: u64) -> u64 {
         }
     }
     return NO_TYPE;
+}
+// Whether type parameter `i` of function `f` (index) carries a callable bound.
+fn callable_formal_at<a>(c: (&a mut C), f: u64, i: u64) -> u64 {
+    if i < c.funcs[f].constraints.len() {
+        set := copy_numbers(&c.funcs[f].constraints[i]);
+        if callable_in(&set) != NO_TYPE {
+            return 1;
+        }
+    }
+    return 0;
 }
 // In a specialisation, a value typed by a closure expression's own type that a callable-bound
 // parameter was bound to - a capture of it, or a closure body's copy of it - is typed by that
@@ -34933,6 +34955,12 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
             }
             expect(&mut c, view(","));
         }
+        // Trailing parameters that only a callable bound names (`F: Fn() -> A`) may be left out of
+        // an explicit list: the argument's closure type fixes them. `pool::join<u64, u64>(a, b)`
+        // keeps working when join takes its closures as generic `F`.
+        while (map.len() < types) && (callable_formal_at(&mut c, f - 1, map.len()) != 0) {
+            map.push(NO_TYPE);
+        }
         if map.len() != types {
             fail(&mut c, view("function type argument count"));
         }
@@ -35091,6 +35119,20 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                         if adopt_literal(&mut c, astart, aend, formal) {
                             v = val(v.t, formal);
                         }
+                    }
+                }
+            }
+            if (c.raw == 0) & (argi < count) & (types != 0) {
+                // A closure given for a callable-bound parameter (`F: Fn<Send>() -> A`): its capture
+                // bounds are checked here, as the argument is taken, as an erased `Fn<Send>()`
+                // parameter's are - not only once every argument is in, where an error a later
+                // argument makes (a capture that this closure moved) would be reported first.
+                formal := c.params[template_first + argi];
+                bound := param_callable(&mut c, formal);
+                if (bound != NO_TYPE) && (ty_kind(&mut c, bound) == 20) && (ty_kind(&mut c, v.ty) == 20) && (ty_env(&mut c, v.ty) != 0) {
+                    bm := ty_mode(&mut c, bound);
+                    if !closure_bounds_hold(&mut c, v.ty, bm & CLOSURE_BOUNDS) {
+                        closure_bound_fail(&mut c, v.ty, bm & CLOSURE_BOUNDS);
                     }
                 }
             }
@@ -39666,7 +39708,7 @@ fn parallel_split_builtin<a>(c: (&a mut C), data: Val) -> Val {
     }
     require_type(&mut c, chunks.ty, 0);
     function := deref(&mut c, callee);
-    fty := function.ty;
+    fty := callable_or_self(&mut c, function.ty);
     closure := ty_kind(&mut c, fty) == 20;
     if (ty_kind(&mut c, fty) != 12) & !closure {
         fail(&mut c, view("parallel_split requires a callable"));
@@ -39731,7 +39773,9 @@ fn parallel_with_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     input := callee.t;
     inty := callee.ty;
     function := deref(&mut c, callee);
-    fty := function.ty;
+    // A generic `F: Fn() -> A` parameter is checked and called as the closure or function its
+    // specialisation binds it to.
+    fty := callable_or_self(&mut c, function.ty);
     closure := ty_kind(&mut c, fty) == 20;
     if (ty_kind(&mut c, fty) != 12) & !closure {
         fail(&mut c, view("parallel_with requires a callable"));
@@ -39754,7 +39798,7 @@ fn parallel_with_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     input2 := other.t;
     inty2 := other.ty;
     here := deref(&mut c, other);
-    hty := here.ty;
+    hty := callable_or_self(&mut c, here.ty);
     closure2 := ty_kind(&mut c, hty) == 20;
     if (ty_kind(&mut c, hty) != 12) & !closure2 {
         fail(&mut c, view("parallel_with requires a callable"));
@@ -39774,7 +39818,10 @@ fn parallel_with_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     if cargs.len() != 2 {
         fail(&mut c, view("parallel_with's third argument takes the two results"));
     }
-    if (same_type(&mut c, cargs[0], result) == 0) | (same_type(&mut c, cargs[1], second) == 0) {
+    // In a generic body the two sides may name the same parameter differently (its binding, or the
+    // parameter); the specialisation checks the concrete types again.
+    generic := (ty_kind(&mut c, result) == 9) | (ty_kind(&mut c, result) == 10) | (ty_kind(&mut c, cargs[0]) == 9) | (ty_kind(&mut c, cargs[0]) == 10);
+    if !generic & ((same_type(&mut c, cargs[0], result) == 0) | (same_type(&mut c, cargs[1], second) == 0)) {
         fail(&mut c, view("parallel_with's third argument takes the first result, then the second"));
     }
     combined := ty_arg(&mut c, cty);
@@ -39837,7 +39884,7 @@ fn parallel_class_builtin<a>(c: (&a mut C), klass: Val) -> Val {
     input := callee.t;
     inty := callee.ty;
     function := deref(&mut c, callee);
-    fty := function.ty;
+    fty := callable_or_self(&mut c, function.ty);
     closure := ty_kind(&mut c, fty) == 20;
     if (ty_kind(&mut c, fty) != 12) & !closure {
         fail(&mut c, view("parallel_class requires a callable"));
@@ -39910,7 +39957,7 @@ fn parallel_spawn_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     input := callee.t;
     inty := callee.ty;
     mut function = deref(&mut c, callee);
-    fty := function.ty;
+    fty := callable_or_self(&mut c, function.ty);
     closure := ty_kind(&mut c, fty) == 20;
     if (ty_kind(&mut c, fty) != 12) & !closure {
         fail(&mut c, view("parallel_spawn requires a callable"));
