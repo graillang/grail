@@ -1,5 +1,9 @@
 ## Unreleased
 
+- **Interface format 11:** an interface's trailer ends with `fast_hash` of the bytes before it (XXH64
+  under four seeds, the build store's digest) instead of SHA-256. It guards against corruption, which
+  is all a digest in the file itself can do; the source digest stays SHA-256. Interfaces written by
+  an older compiler are refused by version and regenerated.
 - Fixed: the per-loop stability fact and the LLVM backend's indirect-call fact both used fact kind
   7, so a stable vector whose slot number matched an indirect call's ordinal (with a loop head
   label of 6 or less) could make the lifter pass that call too few arguments. The stability fact

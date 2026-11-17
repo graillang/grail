@@ -511,7 +511,8 @@ declaration kind meant a new spelling, a new parse rule and a new way to lose a 
 ```
 file   := "GRIF" VERSION:u8 record* trailer
 record := tag:u8 len:VAR payload[len]
-trailer   tag 2: source digest, then 32 raw bytes of SHA-256 over every byte before them
+trailer   tag 2: source digest, then 32 raw bytes of fast_hash over every byte before them
+          (XXH64 under the seeds 0-3, each big-endian; format 11 - format 10 carried SHA-256 there)
 ```
 
 `VAR` is LEB128, so a small count costs one byte. One tag per declaration kind:
@@ -519,7 +520,7 @@ trailer   tag 2: source digest, then 32 raw bytes of SHA-256 over every byte bef
 | tag | record | carries |
 | --- | --- | --- |
 | 1 | `module` | module, source path, `std`/`unsafe`/`host`, overflow mode, target, and the `dyn` ABI |
-| 2 | `trailer` | the source's SHA-256, then the file's own digest |
+| 2 | `trailer` | the source's SHA-256, then the file's own digest (fast_hash: it guards against corruption, as the build store's does) |
 | 3 | `link` | one `extern "C" lib` input |
 | 10 | `type` | kind (struct/record/enum/handle), parameter and lifetime counts, `transfer`/`share`, bounds, requirements, fields with their names, types and refinements |
 | 11 | `alias` | name and the type it denotes |
