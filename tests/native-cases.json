@@ -16249,5 +16249,113 @@
     "note": "...and once the closure is gone, `x` may move",
     "source": "struct Lock<T> { v: T }\nimpl<T> Lock<T> {\n    pub fn read_with<C, R: Owned>(self: (&Lock<T>), ctx: C, f: Fn((&T), C) -> R) -> R { return f(&self.v, ctx); }\n}\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() { x := u64[1, 2]; mut n = 0; { rx := &x; g := || -> u64 { r := rx; return r[1]; }; n = g(); } println(n + eat(x)); }\n",
     "stdout": "4\n"
+  },
+  {
+    "name": "slice-from-vector-reference",
+    "note": "`&v` of a vector is accepted for a typed-slice parameter `&[T]`: the slice over the whole vector, as `&v[:]`; also through a reference binding",
+    "source": "fn n1(v: (&[u64])) -> u64 { return v.len(); }\nfn g1<K>(v: (&[K])) -> u64 { return v.len(); }\nfn main() { x := u64[1,2]; println(n1(&x)); r := &x; println(n1(r)); println(g1(&x[:])); }\n",
+    "stdout": "2\n2\n2\n"
+  },
+  {
+    "name": "slice-from-vector-reference-generic",
+    "note": "...and for a generic `&[K]`, whose element type is inferred from the vector's (was `generic argument shape mismatch`)",
+    "source": "fn g1<K>(v: (&[K])) -> u64 { return v.len(); }\nfn main() { x := u64[1,2]; println(g1(&x)); }\n",
+    "stdout": "2\n"
+  },
+  {
+    "name": "slice-from-vector-reference-generic-nested",
+    "note": "...from inside another generic function",
+    "source": "struct Lock<T> { v: T }\nimpl<T> Lock<T> {\n    pub fn read_with<C, R: Owned>(self: (&Lock<T>), ctx: C, f: Fn((&T), C) -> R) -> R { return f(&self.v, ctx); }\n}\nfn find<a, K>(v: (&[K]), key: (&a K)) -> bool { return v.len() != 0; }\nfn t<a, b, K>(v: (&b K[]), key: (&a K)) -> bool { return find(v, key); }\nfn u<a, K: Send + Share>(l: (&Lock<K[]>), key: (&a K)) -> bool { return l.read_with(0, |v: (&K[]), unused: u64| -> bool find(v, v)); }\nfn w<a, K: Send + Share>(l: (&Lock<K[]>), key: (&a K)) -> bool { f := || -> bool key == key; return f(); }\nfn main() { l := Lock { v: u64[1, 2, 3] }; k := 2; v := u64[1]; println(t(&v, &k)); }\n",
+    "stdout": "true\n"
+  },
+  {
+    "name": "slice-from-vector-reference-in-closure",
+    "note": "...from a closure passing its `&K[]` parameter and a captured `&K` on (RwLock::read_with + find, gaps12-sync's concurrent_map)",
+    "source": "struct Lock<T> { v: T }\nimpl<T> Lock<T> {\n    pub fn read_with<C, R: Owned>(self: (&Lock<T>), ctx: C, f: Fn((&T), C) -> R) -> R { return f(&self.v, ctx); }\n}\nfn find<a, K>(v: (&[K]), key: (&a K)) -> bool { return v.len() != 0; }\nfn has<a, K: Send + Share>(l: (&Lock<K[]>), key: (&a K)) -> bool {\n    return l.read_with(0, |v: (&K[]), unused: u64| -> bool find(v, key));\n}\nfn main() { l := Lock { v: u64[1, 2, 3] }; k := 2; println(has(&l, &k)); }\n",
+    "stdout": "true\n"
+  },
+  {
+    "name": "slice-from-vector-mut-reference",
+    "note": "`&mut v` for `&mut [T]`: the writes land in the vector",
+    "source": "fn bump<K>(v: (&mut [u64]), k: K) -> unit { v[0] = v[0] + 1; }\nfn main() { mut x = u64[1, 2]; bump(&mut x, 0); bump(&mut x, 0); println(x[0]); }\n",
+    "stdout": "3\n"
+  },
+  {
+    "name": "slice-from-vector-shared-for-mut-refused",
+    "note": "a shared `&v` is not a `&mut [T]`",
+    "source": "fn bump(v: (&mut [u64])) -> unit { v[0] = 5; }\nfn main() { mut x = u64[1, 2]; bump(&x); println(x[0]); }\n",
+    "reject": true,
+    "diagnostic": "a mutable slice needs a mutable reference: write `&mut v`"
+  },
+  {
+    "name": "slice-from-vector-keeps-loan",
+    "note": "the slice borrows the vector: a slice returned from the call keeps it borrowed",
+    "source": "fn whole<a, K>(v: (&a [K])) -> (&a [K]) { return v; }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() { x := u64[7, 8]; r := whole(&x); println(eat(x)); println(r.len()); }\n",
+    "reject": true,
+    "diagnostic": "move of unavailable or borrowed value"
+  },
+  {
+    "name": "slice-from-vector-returned-slice",
+    "note": "...and reads through it",
+    "source": "fn whole<a, K>(v: (&a [K])) -> (&a [K]) { return v; }\nfn main() { x := u64[7, 8]; r := whole(&x); println(r[1]); }\n",
+    "stdout": "8\n"
+  },
+  {
+    "name": "slice-element-ref-returned",
+    "note": "`&v[i]` of a slice parameter `(&a [K])` has region `a` and may be returned (it was `returned borrow escapes`): the element reference is a re-borrow through the slice's loan",
+    "source": "fn first<a, K>(v: (&a [K])) -> (&a K) { return &v[0]; }\nfn main() { x := u64[7, 8]; r := first(&x); println(*r); }\n",
+    "stdout": "7\n"
+  },
+  {
+    "name": "slice-element-mut-ref-returned",
+    "note": "...`&mut v[i]` of `(&a mut [K])` likewise; the write lands in the caller's vector",
+    "source": "fn first_mut<a, K>(v: (&a mut [K])) -> (&a mut K) { return &mut v[0]; }\nfn main() { mut x = u64[7, 8]; { r := first_mut(&mut x); *r = 9; } println(x[0]); }\n",
+    "stdout": "9\n"
+  },
+  {
+    "name": "slice-element-ref-through-vector-reference",
+    "note": "...through a vector reference, as before",
+    "source": "fn at<a>(v: (&a u64[]), i: u64) -> (&a u64) { return &v[i]; }\nfn main() { x := u64[7, 8]; println(*at(&x, 1)); }\n",
+    "stdout": "8\n"
+  },
+  {
+    "name": "slice-element-ref-through-field",
+    "note": "...through a struct field holding a slice: the element has the field's region `d`",
+    "source": "struct Rows<d> { cells: (&d [u64]) }\nfn cell<a, d>(r: (&a Rows<d>), i: u64) -> (&d u64) { return &r.cells[i]; }\nfn main() { x := u64[7, 8]; rows := Rows { cells: &x[:] }; println(*cell(&rows, 1)); }\n",
+    "stdout": "8\n"
+  },
+  {
+    "name": "slice-element-ref-outlives-vector-refused",
+    "note": "an element reference cannot outlive the caller's vector",
+    "source": "fn first<a, K>(v: (&a [K])) -> (&a K) { return &v[0]; }\nfn leak() -> u64 { x := u64[7]; r := first(&x); return *r; }\nfn bad<a>(unused: (&a u64)) -> (&a u64) { x := u64[7]; return first(&x); }\nfn main() { println(leak()); }\n",
+    "reject": true,
+    "diagnostic": "returned borrow escapes its declared input lifetime"
+  },
+  {
+    "name": "slice-element-ref-blocks-mutation",
+    "note": "the caller cannot mutate the vector while the element reference lives",
+    "source": "fn first<a, K>(v: (&a [K])) -> (&a K) { return &v[0]; }\nfn main() { mut x = u64[7, 8]; r := first(&x); x.push(1); println(*r); }\n",
+    "reject": true,
+    "diagnostic": "mutation conflicts with live borrow"
+  },
+  {
+    "name": "slice-element-mut-ref-blocks-reads",
+    "note": "...nor read it while an exclusive element reference lives",
+    "source": "fn first_mut<a, K>(v: (&a mut [K])) -> (&a mut K) { return &mut v[0]; }\nfn main() { mut x = u64[7, 8]; r := first_mut(&mut x); println(x[1]); *r = 1; }\n",
+    "reject": true,
+    "diagnostic": "`x`"
+  },
+  {
+    "name": "slice-element-ref-suspends-slice",
+    "note": "an exclusive element reference suspends the slice it came from",
+    "source": "fn main() { mut v = u64[1, 2]; s := &mut v[0: 2]; r := &mut s[0]; s[1] = 3; *r = 5; }\n",
+    "reject": true,
+    "diagnostic": "reference is suspended or expired"
+  },
+  {
+    "name": "slice-element-ref-releases-slice",
+    "note": "...and the slice is usable again when the element reference ends",
+    "source": "fn main() { mut v = u64[1, 2]; { s := &mut v[0: 2]; { r := &mut s[0]; *r = 5; } s[1] = 3; } println(v[0] + v[1]); }\n",
+    "stdout": "8\n"
   }
 ]

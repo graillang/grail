@@ -31,6 +31,15 @@
   scope waits for every one of them before it returns. The compiler refuses two threads taking one
   `&mut`, the body touching what a thread borrowed, and a handle leaving the scope. A failure in
   one thread lets its siblings finish and is re-raised when the scope ends.
+- **A function may return a reference to an element of a slice it was given.**
+  `fn first<a, K>(v: (&a [K])) -> (&a K) { return &v[0]; }` (and `&mut v[i]` from `(&a mut [K])`)
+  was "returned borrow escapes its declared input lifetime": the element reference was a borrow of
+  the slice variable. It is now a re-borrow through the slice's own loan, with the slice's region;
+  the slice is suspended while an exclusive element reference lives.
+- **`&v` of a vector is accepted where a typed slice `&[T]` is expected**, generic or not, and
+  `&mut v` for `&mut [T]`: the slice over the whole vector, as `&v[:]` is. A generic `&[K]`
+  parameter infers `K` from the vector's elements (it was `generic argument shape mismatch`; the
+  non-generic call was a type mismatch).
 - **A closure may take a reference where a type argument stands for one, and pass a captured
   reference on.** `lock.read_with(key, |v: (&u64[]), k: (&a u64)| -> bool ..)` was a type mismatch
   when the context parameter `C` was bound to a reference (a type argument carries no lifetime; a

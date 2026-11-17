@@ -4600,6 +4600,22 @@ fn authority_of<a>(c: (&a mut C), slot: u64) -> u64 {
     mut r = &c.resources[n - 1];
     return r.authority;
 }
+// The place a slice's live loan borrows, or 0 (a slice with no tracked loan).
+fn slice_source<a>(c: (&a mut C), slot: u64) -> u64 {
+    holder := place_of(&mut c, slot);
+    if holder == 0 {
+        return 0;
+    }
+    for i in c.bonds.len() {
+        h := c.bonds[i].holder;
+        loan := c.bonds[i].loan;
+        guard := c.bonds[i].guard;
+        if (h == holder) & (guard == 0) && (loan_live(&mut c, loan) != 0) {
+            return c.check.loans[loan - 1].source;
+        }
+    }
+    return 0;
+}
 fn authority_loan<a>(c: (&a mut C), slot: u64, target: u64) -> u64 {
     holder := place_of(&mut c, slot - 1);
     for i in c.bonds.len() {
@@ -5616,6 +5632,14 @@ fn bind_loan<a>(c: (&a mut C), value: u64, source: u64, target: u64, mode: u64) 
         ty := r.ty;
         if ty_kind(&mut c, ty) == 7 {
             authority = source + 1;
+        }
+        // A slice holds its loan the way a reference does: a borrow inside what it borrows is a
+        // re-borrow through it.
+        if ty_kind(&mut c, ty) == 27 {
+            borrowed := slice_source(&mut c, source);
+            if (borrowed != 0) && ownership::ancestor(&c.check, borrowed, target) {
+                authority = source + 1;
+            }
         }
     }
     mut loan = 0;
@@ -25811,6 +25835,15 @@ fn infer_type<a, b>(c: (&a mut C), formal: u64, actual: u64, map: (&b mut u64[])
         return ();
     }
     ak := ty_kind(&mut c, actual);
+    // A vector reference passed for a typed slice is the slice over the whole vector (coerce_view):
+    // the element type is inferred from the vector's.
+    if (k == 27) && (ak == 7) {
+        inner := ty_arg(&mut c, actual);
+        if ty_kind(&mut c, inner) == 6 {
+            infer_type(&mut c, arg, ty_arg(&mut c, inner), &mut map);
+            return ();
+        }
+    }
     if k != ak {
         fail(&mut c, view("generic argument shape mismatch"));
     }
@@ -26126,6 +26159,19 @@ fn structural_eq<a>(c: (&a mut C), x: u64, y: u64, ty: u64, depth: u64) -> u64 {
 // A reference to bytes/string passed where a view (&a [u8]) is expected becomes a view of the same
 // storage (like Rust's &String -> &str); the view keeps the reference's borrow alive.
 fn coerce_view<a>(c: (&a mut C), v: Val, formal: u64) -> Val {
+    // `&v` / `&mut v` of a vector passed for a typed slice `&[T]` / `&mut [T]`: the slice over the
+    // whole vector, borrowing it as `&v[:]` would (docs/design/typed-slices.md).
+    if (ty_kind(&mut c, formal) == 27) && (ty_kind(&mut c, v.ty) == 7) {
+        inner := ty_arg(&mut c, v.ty);
+        if ty_kind(&mut c, inner) == 6 {
+            write := ty_mode(&mut c, formal) != 0;
+            if write && (ty_mode(&mut c, v.ty) == 0) {
+                fail(&mut c, view("a mutable slice needs a mutable reference: write `&mut v`"));
+            }
+            x := deref(&mut c, v);
+            return whole_slice(&mut c, x, write);
+        }
+    }
     if ty_kind(&mut c, formal) != 5 {
         return v;
     }
@@ -39624,7 +39670,16 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
             c.caddr.push(slot);
             c.caddr.push(elem);
         }
-        root := place_of(&mut c, xt);
+        mut root = place_of(&mut c, xt);
+        // A typed slice is a borrowed view: its element lives in what the slice borrows, so the
+        // element reference is a re-borrow through the slice's own loan (`&v[i]` of a slice
+        // parameter `(&a [K])` has region `a`, and the slice is suspended while it lives).
+        if (vk == 27) && (c.raw == 0) {
+            borrowed := slice_source(&mut c, xt);
+            if borrowed != 0 {
+                root = borrowed;
+            }
+        }
         target := member_place(&mut c, root, 0, elem);
         own(&mut c, slot, ty);
         bind_loan(&mut c, slot, xt, root, access == 2);
