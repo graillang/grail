@@ -124,6 +124,17 @@ is `concurrency-model.md`, "F1".
 `Mutex` can deadlock only where the sequential program would. When locks are tracked per record a
 waiter that holds one will not help at all.
 
+## The external slot: main joins like a worker
+
+The worker array has one block more than there are workers. A thread that is not a worker - main,
+a render thread - takes it with a CAS when it enters its outermost parallel region and gives it back
+when it leaves (`rt_external_take`/`rt_external_give`, thread-record word 104). While it holds the
+slot its forks go on the slot's own deques and free list instead of the locked injection ring, the
+workers steal from it like from any worker, and its join takes its own fork back from its own
+deque. It still helps with nothing (it is not a green stack). A second such thread that finds the
+slot taken uses the ring as before. Join from main went from 6,146 to 3,205 instructions and from
+about 1.8 us to about 450 ns.
+
 ## Waking: only when nobody is searching
 
 A worker that runs out of work *searches* first - 64 more looks, yielding every sixteenth - and only

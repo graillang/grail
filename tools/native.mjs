@@ -16,7 +16,7 @@ export const allTargets = [...targets, ...machoTargets];
 export const hostTarget = ({ x64: 'x86_64', arm64: 'aarch64', riscv64: 'riscv64' })[process.arch];
 // The compiler itself is a Linux host binary: its platform module is os-linux. darwin.grl (and
 // os-windows.grl) are per-target platform modules selected when building for those targets.
-export const compilerSources = ['native', 'lexer', 'ownership', 'machine', 'optimize', 'llvm', 'ir', 'fncache', 'jobs', 'asm_x86', 'asm_a64', 'elf', 'fmt', 'explain', 'bindgen', 'pkg', 'docgen', 'cli', 'runtime', 'os-linux'].map(n => join(root, 'compiler', `${n}.grl`));
+export const compilerSources = ['native', 'lexer', 'ownership', 'machine', 'optimize', 'llvm', 'ir', 'fncache', 'jobs', 'asm_x86', 'asm_a64', 'asm_rv64', 'elf', 'fmt', 'explain', 'bindgen', 'pkg', 'docgen', 'cli', 'runtime', 'os-linux'].map(n => join(root, 'compiler', `${n}.grl`));
 // A standard module the compiler itself uses: `grail build --watch` hashes its inputs with XXH64
 // (lib/xxhash.grl), so the compiler is built with that module in its source list.
 // Every tool builds through a store of its own run, inside this worktree: a test run must neither
@@ -200,8 +200,8 @@ export function assemble(source, executable, target = hostTarget, linkArgs = [],
   const object = `${executable}.${process.pid}.o`;
   const stable = `${executable}.o`;
   const flags = target === 'riscv64' ? ['-march=rv64imafd', '-mabi=lp64d'] : [];
-  if (target === 'x86_64' && internalAssembler && !process.env.GRAIL_ASSEMBLER && process.env.GRAIL_ASSEMBLER_INTERNAL !== '0') {
-    command([internalAssembler, 'asm', source, '-o', object]);
+  if ((target === 'x86_64' || target === 'aarch64' || target === 'riscv64') && internalAssembler && !process.env.GRAIL_ASSEMBLER && process.env.GRAIL_ASSEMBLER_INTERNAL !== '0') {
+    command([internalAssembler, 'asm', ...(target === 'x86_64' ? [] : ['--target', target]), source, '-o', object]);
     if (process.env.GRAIL_ASM_ORACLE === '1') {
       // The oracle (tools/asm-oracle.mjs): clang's object from the same text must be the same.
       const reference = `${object}.clang.o`;

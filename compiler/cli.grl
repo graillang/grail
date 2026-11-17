@@ -1064,19 +1064,25 @@ fn compile_mode<a, b, d, e, g, k>(
     }
     // The assembler: the compiler's own (`grail asm`, compiler/asm_x86.grl) for a Linux x86-64
     // build it covers, clang otherwise. `GRAIL_ASSEMBLER` and `--assembler=clang` choose clang.
-    internal := eq(view(target), view("x86_64"))
+    internal := (eq(view(target), view("x86_64")) || eq(view(target), view("aarch64")) || eq(view(target), view("riscv64")))
         && (host::env(view("GRAIL_ASSEMBLER")).len() == 0)
         && (release == 0)
         && (((flags / 16384) % 2) == 0);
     mut assemble = u8[][tool(view("GRAIL_ASSEMBLER"), view("clang"))];
     if internal {
         assemble = u8[][host::exe_path(), copy(view("asm"))];
+        if !eq(view(target), view("x86_64")) {
+            assemble.push(copy(view("--target")));
+            assemble.push(copy(view(target)));
+        }
     }
     if eq(view(target), view("riscv64")) {
         triple = copy(view("--target=riscv64-linux-gnu"));
         emulation = copy(view("elf64lriscv"));
-        assemble.push(copy(view("-march=rv64imafd")));
-        assemble.push(copy(view("-mabi=lp64d")));
+        if !internal {
+            assemble.push(copy(view("-march=rv64imafd")));
+            assemble.push(copy(view("-mabi=lp64d")));
+        }
     }
     if !internal {
         assemble.push(triple);
@@ -1154,7 +1160,6 @@ fn compile_mode<a, b, d, e, g, k>(
     mut store = Cache {
         root: cache_root(view(target)),
         fast: 0,
-        tmp: u8[],
         hits: 0,
         misses: 0,
         names: u8[][],
@@ -1173,8 +1178,6 @@ fn compile_mode<a, b, d, e, g, k>(
     mut program = u8[];
     if cache != 0 {
         store.fast = cache_hash_tool();
-        stage := cache_stage(&mut store);
-        store.tmp = path_join(view(stage), view("digest"));
         cache_ensure(&mut store);
         id = cache_build_id(&mut store, &command, view(asm), view(emulation), &assemble);
         program = cache_program_key(&mut store, &id, view(target), view(asm));
@@ -2200,7 +2203,7 @@ fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
                 compile.push(copy(view("--no-entry")));
             }
             // The internal assembler (`grail asm`) runs inside the module's compiler run.
-            inproc := !checking && (prefix.len() == 2) && eq(view(item(&prefix, 1)), view("asm"));
+            inproc := !checking && (prefix.len() >= 2) && eq(view(item(&prefix, 1)), view("asm"));
             if inproc {
                 compile.push(copy(view("--object")));
                 compile.push(cat(view(stem), view(".o")));
@@ -2547,7 +2550,6 @@ struct Cache {
     // 1 when the host has sha256sum: a 12 MB compiler binary then hashes in milliseconds instead of
     // the seconds the in-language reader costs.
     fast: u64,
-    tmp: u8[],
     hits: u64,
     misses: u64,
     // The modules that missed, in emission order, for the one-line report.
@@ -2611,6 +2613,28 @@ fn cache_mkdirs<a>(path: &a [u8]) -> unit {
     host::mkdir(view(prefix));
     return ();
 }
+// A directory of the store's stage that only this call writes in: builds that share a store run at
+// once, and the one `stage/digest` file they all wrote their command output to handed a run another
+// run's digest - a module filed under another module's interface ("core.iface describes module
+// `io`"). Creating a directory is what claims it: only one process can.
+fn cache_claim_tmp<a>(c: (&a mut Cache)) -> u8[] {
+    stage := cache_stage(&mut c);
+    base := host::now_ms();
+    for attempt in 1000 {
+        dir := path_join(view(stage), view(cat(view("tmp."), view(decimal(base + attempt)))));
+        if host::mkdir(view(dir)) == 0 {
+            return dir;
+        }
+    }
+    return u8[];
+}
+fn cache_release_tmp<a>(dir: &a [u8]) -> unit {
+    if dir.len() != 0 {
+        host::remove(view(path_join(view(dir), view("out"))), 0);
+        host::remove(view(dir), 1);
+    }
+    return ();
+}
 fn cache_stage<a>(c: (&a mut Cache)) -> u8[] {
     return path_join(view(c.root), view("stage"));
 }
@@ -2660,24 +2684,29 @@ fn cache_digest_file<a, b>(c: (&a mut Cache), path: &b [u8]) -> u8[] {
     if host::exists(view(path)) == 0 {
         return u8[];
     }
-    if c.fast != 0 {
+    // The command's output goes to a directory this call claimed (cache_claim_tmp).
+    tmp := cache_claim_tmp(&mut c);
+    if (c.fast != 0) && (tmp.len() != 0) {
+        out := path_join(view(tmp), view("out"));
         mut script = u8[];
         push_bytes(&mut script, view("sha256sum "));
         sh_word(&mut script, view(path));
         push_bytes(&mut script, view(" > "));
-        sh_word(&mut script, view(c.tmp));
+        sh_word(&mut script, view(out));
         mut run = u8[][copy(view("sh")), copy(view("-c")), script];
+        mut text = u8[];
         if host::command(run) == 0 {
-            if host::exists(view(c.tmp)) != 0 {
-                text := host::read_file(view(c.tmp));
-                if 64 <= text.len() {
-                    mut out = u8[];
-                    for i in 64 {
-                        out.push(text[i]);
-                    }
-                    return out;
-                }
+            if host::exists(view(out)) != 0 {
+                text = host::read_file(view(out));
             }
+        }
+        cache_release_tmp(view(tmp));
+        if 64 <= text.len() {
+            mut digest = u8[];
+            for i in 64 {
+                digest.push(text[i]);
+            }
+            return digest;
         }
     }
     return native::iface_digest(&host::read_file(view(path)));
@@ -2694,16 +2723,19 @@ fn cache_tool_id<a, b>(c: (&a mut Cache), words_in: (&b u8[][])) -> u8[] {
         sh_word(&mut script, view(word));
         script.push(32);
     }
+    tmp := cache_claim_tmp(&mut c);
+    out := path_join(view(tmp), view("out"));
     push_bytes(&mut script, view("--version > "));
-    sh_word(&mut script, view(c.tmp));
+    sh_word(&mut script, view(out));
     push_bytes(&mut script, view(" 2>&1"));
     mut run = u8[][copy(view("sh")), copy(view("-c")), script];
-    if host::command(run) == 0 {
-        if host::exists(view(c.tmp)) != 0 {
-            version := host::read_file(view(c.tmp));
+    if (tmp.len() != 0) && (host::command(run) == 0) {
+        if host::exists(view(out)) != 0 {
+            version := host::read_file(view(out));
             push_bytes(&mut text, view(version));
         }
     }
+    cache_release_tmp(view(tmp));
     return native::iface_digest(&text);
 }
 fn cache_record_path<a, b, d>(root: &a [u8], kind: &b [u8], key: &d [u8]) -> u8[] {
