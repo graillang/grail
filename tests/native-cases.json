@@ -18657,5 +18657,44 @@
       }
     ],
     "note": "`if hi > n { hi = n; }` leaves `hi <= n` either way, so `v[k]` under `k < hi` is proved"
+  },
+  {
+    "name": "bce-for-each-unchecked",
+    "source": "fn sum(data: &u8[], v: u64[]) -> u64 {\n    mut s: u64 = 0;\n    for b in data {\n        s = s + b;\n    }\n    for x in v {\n        s = s + x + v.len();\n    }\n    return s;\n}\nfn main() {\n    println(sum(&u8[1, 2, 3], u64[10, 20]));\n}\n",
+    "stdout": "40\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asmAbsent": [
+      {
+        "in": "f_main_sum",
+        "text": "call rt_atb\n"
+      },
+      {
+        "in": "f_main_sum",
+        "text": "movq $1,%rdx\ncall rt_trap"
+      }
+    ],
+    "note": "`for x in v` reads element i after `i < n`, n the length at the loop's start; a body that mentions v only as `v[...]` and `v.len()` cannot change it, so the read is unchecked"
+  },
+  {
+    "name": "bce-for-each-pop-kept",
+    "source": "fn main() {\n    mut v = u64[1, 2, 3];\n    mut s: u64 = 0;\n    for x in v {\n        s = s + x;\n        v.pop()!;\n    }\n    println(s);\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "",
+    "stderr": [
+      "out of bounds"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a body that pops v shortens it under the loop: the element read keeps its check, which fires on the third iteration"
   }
 ]

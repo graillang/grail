@@ -39,6 +39,8 @@
   (`v.len == n` and `tmp.len == v.len` leave `tmp.len == n`), `x := y.copy()` has `y`'s length,
   `if hi > n { hi = n; }` leaves `hi <= n`, and an index `t - c` with `c <= t` and `n / 2` are
   read. Sort's checks in `main` go from 12 to 7.
+  `for x in v` reads its element unchecked when the body mentions `v` only as `v[...]` and
+  `v.len()` (no closure): the length the loop counted to cannot change.
 
 - **Interface format 11:** an interface's trailer ends with `fast_hash` of the bytes before it (XXH64
   under four seeds, the build store's digest) instead of SHA-256. It guards against corruption, which
