@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **`lib/chan.grl`: a bounded multi-producer multi-consumer channel.** `chan::bounded<T>(n)` with
+  `send` (waits while full; false once closed), `recv` (waits while empty; `None` once closed and
+  empty) and `close`; waits park, as every `sync` wait does. `bench/chan.grl` measures it against
+  crossbeam-channel and Go's chan in `tools/bench-rivals.mjs`.
+
 - **`bench-rivals` no longer charts a build that printed the wrong answer.** It already failed the
   run when a build's output differed from C's, but still wrote that build's figures into the
   results, so a miscompiled program could chart as the fastest. Such a figure is now left out and
