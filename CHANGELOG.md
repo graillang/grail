@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **Native backend: float elements go straight to and from SSE registers.** A float loaded through
+  a general register (`movq (%rax),%rax; movq %rax,%xmm8`) is `movsd (%rax),%xmm8`, and a store the
+  same way back; the internal assembler encodes `movsd`, and AArch64 and RISC-V translate it to
+  `ldr`/`str` and `fld`/`fsd`. nbody executes 7% fewer instructions.
+
 - **Raw address offsets.** In an `unsafe module`, the address operand of `raw_load`/`raw_store`
   and their narrow forms written as `p + k` with a literal `k` has no overflow check and is folded
   into the load's addressing (`movq 16(%rax),%rax`); other integer arithmetic there still follows

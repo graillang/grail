@@ -211,6 +211,10 @@ fn opname<a>(o: (&a mut ir::Body), op: u64) {
         app(&mut o.out, view("cvtsi2sdq"));
         return ();
     }
+    if op == 77 {
+        app(&mut o.out, view("movsd"));
+        return ();
+    }
     if op == 98 {
         app(&mut o.out, view("movl"));
         return ();
@@ -2164,6 +2168,8 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
     dead_defs(&mut o, view(s), first, last);
     retarget(&mut o, view(s), last);
     offset_loads(&mut o, view(s), last);
+    xmm_loads(&mut o, view(s), last);
+    xmm_stores(&mut o, view(s), last);
     newframe := compact(&mut o, view(s), prologue, ns);
     // Rule 3 (call ABI S4): of the cleared range, only the slots that may be read before written.
     mut zkeep = u64[];
@@ -4084,6 +4090,71 @@ fn offset_loads<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
         ir::put(&mut o.m0, j, 1 << r);
         set_range(&mut o, j, 0, start, end);
         kill(&mut o, i);
+    }
+}
+// A float loaded through a general register - `movq MEM,%rax; movq %rax,%xmmN` with %rax dead after -
+// is `movsd MEM,%xmmN` (dev-gap nbody item 4): an element of an f64 array or vector, or a float
+// field, without the round trip.
+fn xmm_loads<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
+    for j in last {
+        if (o.del[j] != 0) || (o.op[j] != 1) || (o.k0[j] != 1) || (o.v0[j] != 0) {
+            continue;
+        }
+        if !((o.k1[j] == 7) || ((o.k1[j] == 6) && is_xmm_text(view(s), o.s1[j], o.e1[j]))) {
+            continue;
+        }
+        p := prev_live(&o, j);
+        if (p >= j) || (o.op[p] != 1) || !((o.k0[p] == 4) || (o.k0[p] == 5)) || (o.k1[p] != 1) || (o.v1[p] != 0) {
+            continue;
+        }
+        if ((o.m0[p] & 1) == 0) && (o.k0[p] == 5) {
+            // A generated operand is an address only when it names a register.
+            if o.m0[p] == 0 {
+                continue;
+            }
+        }
+        if !dead_after(&o, j, 0, 6) {
+            continue;
+        }
+        ir::put(&mut o.op, p, 77);
+        set_operand(&mut o, p, 1, o.k1[j], o.v1[j]);
+        set_range(&mut o, p, 1, o.s1[j], o.e1[j]);
+        kill(&mut o, j);
+    }
+}
+// The store side: `movq %xmmN,%rax; movq %rax,MEM` with %rax dead after is `movsd %xmmN,MEM`. It runs
+// last, after every pass that reads a memory destination's kind.
+fn xmm_stores<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
+    for p in last {
+        if (o.del[p] != 0) || (o.op[p] != 1) || (o.k1[p] != 1) || (o.v1[p] != 0) {
+            continue;
+        }
+        if !((o.k0[p] == 7) || ((o.k0[p] == 6) && is_xmm_text(view(s), o.s0[p], o.e0[p]))) {
+            continue;
+        }
+        // Up to three plain moves that leave %rax alone may come first (the address loaded into
+        // %rcx): `movq %xmm8,%rax; movq -984(%rbp),%rcx; movq %rax,(%rcx)`.
+        mut j = next_live(&o, p, last);
+        mut steps = 0;
+        while (j < last) && (steps < 3) && (o.op[j] == 1) && (o.k1[j] == 1)
+            && ((((ir::reads(&o, j) | ir::writes(&o, j)) & 1) == 0)) {
+            j = next_live(&o, j, last);
+            steps += 1;
+        }
+        if (j >= last) || (o.op[j] != 1) || (o.k0[j] != 1) || (o.v0[j] != 0) || (o.k1[j] != 4) {
+            continue;
+        }
+        if (o.m1[j] & 1) != 0 {
+            // The address uses %rax itself.
+            continue;
+        }
+        if !dead_after(&o, j, 0, 6) {
+            continue;
+        }
+        ir::put(&mut o.op, j, 77);
+        set_operand(&mut o, j, 0, o.k0[p], o.v0[p]);
+        set_range(&mut o, j, 0, o.s0[p], o.e0[p]);
+        kill(&mut o, p);
     }
 }
 fn name_hash<b>(s: &b [u8], a: u64, e: u64) -> u64 {

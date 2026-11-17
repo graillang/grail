@@ -1686,6 +1686,39 @@ fn float_sse<a, b, c, d>(o: (&a mut Out), op: &b [u8], src: &c [u8], dst: &d [u8
         }
         return false;
     }
+    if eq(view(op), view("movsd")) {
+        // A float element loaded straight into a floating-point register.
+        fd := freg(target, view(dst), false);
+        fs := freg(target, view(src), false);
+        if (fs.len() != 0) && (dst.len() != 0) && (dst[0] != 37) {
+            // The store: a floating-point register to memory.
+            address(&mut o, view(dst));
+            if arm {
+                put(&mut o, view("str "));
+                put(&mut o, view(fs));
+                put(&mut o, view(",[x13]\n"));
+            } else {
+                put(&mut o, view("fsd "));
+                put(&mut o, view(fs));
+                put(&mut o, view(",0(t3)\n"));
+            }
+            return true;
+        }
+        if (fd.len() == 0) || (src.len() == 0) || (src[0] == 37) {
+            return false;
+        }
+        address(&mut o, view(src));
+        if arm {
+            put(&mut o, view("ldr "));
+            put(&mut o, view(fd));
+            put(&mut o, view(",[x13]\n"));
+        } else {
+            put(&mut o, view("fld "));
+            put(&mut o, view(fd));
+            put(&mut o, view(",0(t3)\n"));
+        }
+        return true;
+    }
     single := eq(view(op), view("addss")) || eq(view(op), view("subss")) || eq(view(op), view("mulss"))
         || eq(view(op), view("divss")) || eq(view(op), view("sqrtss")) || eq(view(op), view("cvtsd2ss"));
     fs := freg(target, view(src), single && !eq(view(op), view("cvtsd2ss")));
