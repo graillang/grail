@@ -1,0 +1,26 @@
+use pool;
+// Plain records captured by jobs spawned in a loop, and plain parallel_map items: each job and
+// each call sees its own record (captures are boxed at the closure; items are inline in the vector).
+struct P {
+    a: u64,
+    b: u64,
+    c: u64
+}
+fn main() {
+    mut total = 0;
+    mut prev = pool::spawn(|| -> u64 0);
+    for i in 4 {
+        p := P { a: i, b: i + 1, c: i + 2 };
+        next := pool::spawn(|| -> u64 p.a * 100 + p.b * 10 + p.c);
+        total = total + pool::wait(prev);
+        prev = next;
+    }
+    total = total + pool::wait(prev);
+    println(total);
+    mut items = P[];
+    for i in 4 {
+        items.push(P { a: i, b: i + 1, c: i + 2 });
+    }
+    out := parallel_map(items, 0, |p: P, k: u64| -> u64 p.a * 100 + p.b * 10 + p.c + k);
+    println(out[0] + out[1] + out[2] + out[3]);
+}
