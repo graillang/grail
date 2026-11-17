@@ -35,6 +35,12 @@
   text (`&Fn` call loop: 430 M -> 120 M instructions).
 
 - `tools/land.sh BRANCH` (`just land`) lands a branch on main through one queue: the branch must already contain main, the fast gate runs on exactly its tree, and green fast-forwards main. Emulated targets run after the landing on the build host.
+- Fixed two compiler aborts on malformed input found by the front-end fuzzer: an unmatched `)` or
+  `>` in an `extern` signature (an arithmetic overflow), and a file ending in a `//` comment or a `/`
+  with no newline (an out-of-bounds read). Both are ordinary diagnostics now.
+- `tools/fuzz-frontend.mjs` checks the unmutated source of any refused case whose first error points
+  outside the mutated file, and reports a source that fails as it is as a `baseline` bug: a library
+  that stops checking can no longer pass as a stream of fine refusals.
 - **Fixed: a small record returned from a function with a refined parameter came back wrong.** Since
   the body became `<name>.proved` beside a checking wrapper, the typed-IR facts were still keyed by
   `<name>`: the optimiser did not see that a two-word result is returned in `rax:rdx` and dropped the
@@ -97,6 +103,11 @@
   callable bounds. A closure given for a callable-bound parameter without `Owned` is lent for the call,
   as an `Fn(..)` parameter is. Fixed with it: two capture-free closures with the same signature given
   to one generic function were one specialisation; they are two.
+- Engine-shaped benchmarks against C, Rust, Go and Zig (`bench/hashmap`, `bintrees`, `strings`, `json`,
+  `dyncall`, `iterchain`, `ecs`, each with matched outputs in all five languages), with a section of
+  their own in the book's Performance chapter naming why Grail is behind on each
+  (`bench/results/engine.json`, refreshed by `just bench-results` and the gate).
+
 - **`grail check` is incremental.** It goes through the build store as `grail build` does: one
   compiler run per module, a module whose inputs did not change is not checked again, and in a
   module that is, the unchanged function bodies replay. A check after an edit to one module checks
