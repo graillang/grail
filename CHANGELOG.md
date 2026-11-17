@@ -57,6 +57,9 @@
 - `mul_add` on f32 and f64 vectors: `a * b + c` per lane with one rounding, identical to C's `fma`
   on every target and backend. AArch64 uses `fmla`, RISC-V `fmadd`, and baseline x86-64 an exact
   software routine in the runtime, which is slow there.
+- Native Linux builds give every compiled function a symbol type and size (`.type @function`,
+  `.size`), so readelf, perf and debuggers name addresses inside them; the compiler's assembler
+  writes them as STT_FUNC with st_size.
 - **Inflate refills its bit buffer a word at a time** (`bytes::load_u64`, a new unaligned
   little-endian word read), instead of a byte per loop step, while eight input bytes remain. The 4K
   png: Grail-LLVM 7.47G -> 6.44G instructions (0.85 -> 0.71 s; libpng 0.41 s, stb_image 0.41 s),

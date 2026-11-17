@@ -1708,7 +1708,7 @@ fn assemble_object<a, b>(c: (&a mut C), image: &b [u8]) -> asm_x86::Result {
     }
     mut pack_path = copy_bytes(view(c.object));
     push_bytes(&mut pack_path, view(".units"));
-    mut header = copy_bytes(view("grail-units 2 "));
+    mut header = copy_bytes(view("grail-units 3 "));
     push_bytes(&mut header, view(c.fn_id));
     header.push(10);
     mut previous = u8[];
@@ -4808,6 +4808,37 @@ fn win_unwind<a>(text: &a [u8]) -> u8[] {
     return u.out;
 }
 
+// A function's size, closing it after its last instruction: `.size NAME, .-NAME`, so the symbol is
+// STT_FUNC with a size (profilers, readelf, debuggers name addresses by it). ELF only: COFF has no
+// symbol size (a function's extent is its .pdata entry) and Mach-O none either.
+fn size_directive<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], symbol: &d [u8], export: u64) -> unit {
+    if (c.plat == 1) || (c.target == 3) || (c.target == 4) {
+        return ();
+    }
+    at := c.out.len();
+    o(&mut c, view(".size "));
+    export_name(&mut c, view(m), view(name), view(symbol), export);
+    mut sym = u8[];
+    for i in c.out.len() - at - 6 {
+        sym.push(c.out[at + 6 + i]);
+    }
+    o(&mut c, view(", .-"));
+    push_bytes(&mut c.out, view(sym));
+    c.out.push(10);
+    return ();
+}
+// The same for a symbol already spelled (a helper's).
+fn size_named<a, b>(c: (&a mut C), sym: &b [u8]) -> unit {
+    if (c.plat == 1) || (c.target == 3) || (c.target == 4) {
+        return ();
+    }
+    o(&mut c, view(".size "));
+    push_bytes(&mut c.out, view(sym));
+    o(&mut c, view(", .-"));
+    push_bytes(&mut c.out, view(sym));
+    c.out.push(10);
+    return ();
+}
 // PE/COFF objects carry no ELF symbol type; MSVC-style .def records the function class.
 fn func_directive<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], symbol: &d [u8], export: u64) -> unit {
     // Mach-O defines a symbol by its label and carries neither .type nor .def records.
@@ -9064,6 +9095,7 @@ fn ref_wrapper<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &
     c.out.push(44);
     on(&mut c, (c.next + 1) / 2 * 16);
     c.out.push(10);
+    size_directive(&mut c, view(m), view(name), view(body_symbol), export);
     fx_end(&mut c);
     exchange(&mut c.check, after);
     if body_facts.len() != 0 {
@@ -21417,6 +21449,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     c.out.push(44);
     on(&mut c, (c.next + 1) / 2 * 16);
     c.out.push(10);
+    size_directive(&mut c, view(m), view(name), view(body_symbol), export);
     if (c.debug != 0) & (c.validating == 0) {
         dend = label(&mut c);
         mark(&mut c, dend);
@@ -42855,6 +42888,7 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         c.out.push(44);
         on(&mut c, (c.next + 1) / 2 * 16);
         c.out.push(10);
+        size_directive(&mut c, view(".closure"), view(symbol), view(symbol), 0);
         scope_end(&mut c);
         exchange(&mut c.closure_env, 0);
         exchange(&mut c.closure_spec, 0);
