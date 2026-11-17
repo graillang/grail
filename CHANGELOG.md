@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **A standard generic is checked once per surface, not once per run.** The check
+  `emit_specializations` owes every template a run instantiates (a replay of its body with its own
+  parameters opaque, its text thrown away) is now a unit of the per-function store: what it asked of
+  the run - specialisations, drop helpers, effect records - is recorded and asked again on a hit,
+  under the unit key the store already uses. Dev compiler, an edited check: bench/iterchain.grl
+  0.234G -> 0.154G, hashmap 0.203G -> 0.158G, json 0.188G -> 0.133G. `GRAIL_TEMPLATE_MEMO=0` turns it
+  off; the fn-cache report counts template checks apart from bodies. Fixed on the way: a body that
+  asked for a `parallel_for_zip` adapter could be a unit whose replay did not ask again (the adapter
+  went missing from a warm build); it is no longer a unit.
 - After each landing the build host also runs the closure-passing fuzzer (`tools/fuzz-closures.mjs`, 400
   cases, compile and run) next to the front-end fuzzer. `tools/land.sh --remote-status` reports both.
 - Fixed: when two or more sequences proved stable across one loop had their data pointers hoisted
@@ -12,6 +21,14 @@
   run-time check, `append_format` onto a string), as Rust's `from_utf8` does: aligned words with no
   high bit set are passed whole, and the multi-byte checks are unchanged. No load is misaligned on
   any target. A case covers every alignment and four rejections just past word boundaries.
+- The standard library claims `@no_block` where its bodies prove it: every `math` function, the
+  `hash` writers and `finish`, `u64[].sum`, `[u8].is_char_boundary` and `strings::utf8_width`.
+
+- New: `@no_block`, a checked effect: a function and everything it calls makes no blocking call - no
+  park (locks, channels, conditions, joins), sleep, file or socket I/O, or C function not declared
+  `extern "C" nonblocking`. Refusals name the chain (`nap -> sleep_ms -> f_host_sleep_ms ->
+  rt_sleep_for`). A check that can fail does not block (the failure ends the frame). Interface
+  format 12: the `effects` row and the `facts` record carry it.
 - png unfilters the common layout through addresses (`bytes::data_addr`, new) into an image sized
   once, under the length guard that already bounds every row, instead of a push and a checked index
   per byte. The 4K png: Grail-LLVM 6.44G -> 5.50G instructions (0.71 -> 0.61 s; stb_image 0.41 s),
@@ -34,6 +51,12 @@
   a body `func()` compiles, where a failed kept fact can recompile the function; a closure body
   compiled elsewhere uses the plain kill.
 
+- **A killed `grail build`/`grail check` leaves no compiler running.** The driver starts each module's
+  compiler run with `GRAIL_PARENT=<its pid>`; on Linux the run's runtime asks for
+  `PR_SET_PDEATHSIG`/SIGKILL at startup and exits if the driver is already gone (getppid), and on
+  Windows the driver puts such a child in a job object that kills it when the driver's handle closes.
+  The variable is consumed, so the run's own children are not affected. A driver SIGKILLed by a
+  timeout, an editor or the OOM killer used to leave its module runs going as orphans (one ran 1h45m).
 - **Closures given for a generic `F` live in the frame (S6(A)).** A closure whose type is its own
   literal's - a local closure, or one passed for a callable-bound parameter - is now held as its
   environment's words in the caller's frame, copied on a move and dropped in place, and called

@@ -113,6 +113,13 @@ const fixtures = [
       'c_bv_roundtrip40'],
   },
   {
+    // Homogeneous float aggregates of doubles by value both ways (AAPCS64 d0-d3 even at 32 bytes;
+    // SysV memory; Win64 and RV64 by reference): tests/ffi/hfa_shim.c.
+    name: 'hfa_records',
+    stdout: '34\n1234\n701234\n18\n5678\n',
+    symbols: ['c_hfa_d2', 'c_hfa_d4', 'c_hfa_d4_after', 'c_hfa_ret_d2', 'c_hfa_ret_d4'],
+  },
+  {
     // `!` on None inside an `extern "C"` callback: the unwrap reaches the checked abort path, so C
     // never resumes and the parent sees SIGABRT - not the SIGSEGV a null payload would cause. The
     // fixture is an `unsafe module` (the runtime's raw mode), which is where the defect lived.

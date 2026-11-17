@@ -187,7 +187,9 @@ struct Func {
     // calls (docs/design/effects.md). An interface carries them, so a caller in another module
     // relies on the definition's own proof.
     no_alloc: u64,
-    no_panic: u64
+    no_panic: u64,
+    // 1 for `@no_block`: the body and everything it calls makes no blocking call.
+    no_block: u64
 }
 struct Interface {
     module: u8[],
@@ -1087,6 +1089,14 @@ struct C {
     fx_body: u64[],
     fx_attr_alloc: u64[],
     fx_attr_panic: u64[],
+    // `@no_block` (docs/design/effects.md, "Blocking"): the claim, the record's own fact, the solved
+    // fact and its witness, as for `panic`; and whether the record is a failure entry, whose
+    // `block` never reaches a caller (a failure ends the frame the claim is about).
+    fx_attr_block: u64[],
+    fx_own_block: u64[],
+    fx_block: u64[],
+    fx_block_thru: u64[],
+    fx_fail_entry: u64[],
     fx_own_alloc: u64[],
     fx_own_panic: u64[],
     fx_alloc: u64[],
@@ -1108,6 +1118,7 @@ struct C {
     fx_edge_why: u8[][],
     fx_pending_alloc: u64,
     fx_pending_panic: u64,
+    fx_pending_block: u64,
     fx_bounded: u64,
     // Whether the body being recorded is trusted code (the runtime, a drop helper) and how many calls
     // it has recorded.
@@ -1188,10 +1199,17 @@ struct C {
     fn_hits: u64,
     fn_filed: u64,
     fn_kept: u64,
+    // The same three for the template checks emit_specializations replays (a validating body is a
+    // unit too, docs/design/template-check-cache.md), kept apart from the bodies this run emits.
+    tm_hits: u64,
+    tm_filed: u64,
+    tm_kept: u64,
     // What the body being emitted asked of the run, for its unit (fn_reg_drop, fn_reg_spec): the
     // registrations as they will be filed, and the type each one named, to check the spelling
     // reads back as the same type. `fn_rec` is 1 while a body that may be filed is being emitted.
     fn_rec: u64,
+    // 1 when GRAIL_TEMPLATE_MEMO=0: a validating replay is never a unit (fn_on).
+    tmemo_off: u64,
     fn_regs: u8[],
     fn_reg_types: u64[],
     // One count per rule that keeps a body from being a unit (the FN_* indices): how often the
@@ -4146,6 +4164,15 @@ fn win32_arity<a>(name: (&a [u8])) -> u64 {
     }
     if same(view(name), view("MoveFileExW")) {
         return 3;
+    }
+    if same(view(name), view("CreateJobObjectW")) {
+        return 2;
+    }
+    if same(view(name), view("SetInformationJobObject")) {
+        return 4;
+    }
+    if same(view(name), view("AssignProcessToJobObject")) {
+        return 2;
     }
     if same(view(name), view("CreatePipe")) {
         return 4;
@@ -8909,7 +8936,7 @@ fn ref_pred_count<a>(c: (&a mut C)) -> u64 {
 // this record: the caller's obligation), puts the arguments back and calls `<name>.proved`, whose
 // result it returns in `%rax`. Every unproved caller, a function value and a vtable reach it; a
 // proved call skips it. Words past the sixth arrive on the stack and are passed on the same way.
-fn ref_wrapper<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &d [u8], export: u64, count: u64, position: u64, claimed_alloc: u64, claimed_panic: u64, entry_state: ownership::State) -> unit {
+fn ref_wrapper<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &d [u8], export: u64, count: u64, position: u64, claimed_alloc: u64, claimed_panic: u64, claimed_block: u64, entry_state: ownership::State) -> unit {
     after := exchange(&mut c.check, entry_state);
     func_directive(&mut c, view(m), view(name), view(body_symbol), export);
     label_at := c.out.len();
@@ -8920,7 +8947,7 @@ fn ref_wrapper<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &
         sym.push(c.out[label_at + i]);
     }
     o(&mut c, view(":\n"));
-    fx_begin(&mut c, view(sym), view(name), c.file, position, claimed_alloc, claimed_panic);
+    fx_begin(&mut c, view(sym), view(name), c.file, position, claimed_alloc, claimed_panic, claimed_block);
     // The wrapper's own facts key, and the body's two-word result passing through it in rax:rdx.
     body_facts := c.facts_fn.copy();
     if body_facts.len() != 0 {
@@ -13530,6 +13557,7 @@ fn builtin_drop_interface<a>(c: (&a mut C)) -> unit {
                 strict: 0,
                 no_alloc: 0,
                 no_panic: 0,
+                no_block: 0,
             }
         );
     index := c.funcs.len() - 1;
@@ -18379,7 +18407,17 @@ fn ffi_emit_call<a, b, d, e, f>(
             call_slot_out(&mut c, view("call *%rax\n"), view("a closure call"));
         }
     } else {
+        edges_before := c.fx_edge_from.len();
         call_out(&mut c, view(symbol));
+        // A C function: its edge says so (128), and one declared `nonblocking` says that too (64),
+        // which `@no_block` accepts.
+        if edges_before < c.fx_edge_from.len() {
+            last := c.fx_edge_from.len() - 1;
+            c.fx_edge_kind[last] = c.fx_edge_kind[last] | 128;
+            if nonblocking {
+                c.fx_edge_kind[last] = c.fx_edge_kind[last] | 64;
+            }
+        }
     }
     if marked {
         ffi_marker_leave(&mut c, tls, view(symbol));
@@ -19144,6 +19182,7 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                 strict: 0,
                 no_alloc: 0,
                 no_panic: 0,
+                no_block: 0,
             }
         );
     return ();
@@ -19184,8 +19223,11 @@ fn fn_on<a>(c: (&a C)) -> bool {
     if c.exports.len() != 0 {
         return false;
     }
-    // A validating run throws its code away.
-    if c.validating != 0 {
+    // A validating replay throws its code away, but what it asked of the run (specialisations,
+    // drop helpers, effect records) stays: as a unit those are recorded and asked again on a hit,
+    // so a generic another module defines is checked once per surface, not once per run
+    // (docs/design/template-check-cache.md). GRAIL_TEMPLATE_MEMO=0 turns that off.
+    if (c.validating != 0) & (c.tmemo_off != 0) {
         return false;
     }
     return true;
@@ -19453,9 +19495,10 @@ fn fn_unit_of<a>(c: (&a mut C), key: u8[], text_mark: u64, fact_mark: u64) -> fn
 // text, its facts, and its registrations made again through the calls a fresh emission makes
 // (drop_ref_name, specialize) - so the drop walk and the specialisation queue see the same requests
 // in the same order whether the body was compiled in this run or in an earlier one.
-fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), line: u64, at: u64, claim_alloc: u64, claim_panic: u64) -> unit {
+fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), line: u64, at: u64, claim_alloc: u64, claim_panic: u64, claim_block: u64) -> unit {
     k := c.lunit;
-    if (k != 0) & (k <= c.fnext.len()) {
+    // A validating replay borrows its ordinal without spending it (scope_begin), and so does its unit.
+    if (c.validating == 0) & (k != 0) & (k <= c.fnext.len()) {
         c.fnext[k - 1] = c.fnext[k - 1] + 1;
     }
     if site_table_on(&c) {
@@ -19536,7 +19579,7 @@ fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), l
             c.drop_refs.push(types[0]);
             drop_symbol_known(&mut c, types[0]);
         } else if kind == 3 {
-            fx_unit_replay(&mut c, view(regs[i].data), text_at, at, claim_alloc, claim_panic);
+            fx_unit_replay(&mut c, view(regs[i].data), text_at, at, claim_alloc, claim_panic, claim_block);
         } else if kind == 4 {
             box_thunk_add(&mut c, template);
         } else if kind == 5 {
@@ -19580,6 +19623,7 @@ fn fx_unit_record<a, b>(c: (&a mut C), sym: &b [u8], text_mark: u64, at: u64, ed
     iface_ws(&mut out, view(c.fx_fn_name[kk]));
     iface_w1(&mut out, c.fx_own_alloc[kk]);
     iface_w1(&mut out, c.fx_own_panic[kk]);
+    iface_w1(&mut out, c.fx_own_block[kk]);
     iface_w1(&mut out, c.fx_entry_panic[kk]);
     iface_wv(&mut out, c.fx_body_calls[last]);
     mut n = 0;
@@ -19603,12 +19647,13 @@ fn fx_unit_record<a, b>(c: (&a mut C), sym: &b [u8], text_mark: u64, at: u64, ed
     return out;
 }
 // The record of a replayed body, put back as `fx_begin`, `fx_edge` and `fx_end` would have left it.
-fn fx_unit_replay<a, b>(c: (&a mut C), data: &b [u8], text_at: u64, at: u64, claim_alloc: u64, claim_panic: u64) -> unit {
+fn fx_unit_replay<a, b>(c: (&a mut C), data: &b [u8], text_at: u64, at: u64, claim_alloc: u64, claim_panic: u64, claim_block: u64) -> unit {
     mut p = IR { data: copy_bytes(view(data)), at: 0, stop: data.len(), path: copy_bytes(view("the unit store")), phase: 2, rtext: u8[], what: u8[] };
     sym := iface_rs(&mut p);
     shown := iface_rs(&mut p);
     own_a := iface_r1(&mut p);
     own_p := iface_r1(&mut p);
+    own_b := iface_r1(&mut p);
     entry := iface_r1(&mut p);
     calls := iface_rv(&mut p);
     k := fx_sym(&mut c, view(sym)) - 1;
@@ -19618,7 +19663,12 @@ fn fx_unit_replay<a, b>(c: (&a mut C), data: &b [u8], text_at: u64, at: u64, cla
     c.fx_panic_thru[k] = 0;
     c.fx_own_alloc[k] = own_a;
     c.fx_own_panic[k] = own_p;
+    c.fx_own_block[k] = own_b;
+    c.fx_block_thru[k] = 0;
     c.fx_entry_panic[k] = entry;
+    if claim_block != 0 {
+        c.fx_attr_block[k] = 1;
+    }
     if claim_alloc != 0 {
         c.fx_attr_alloc[k] = 1;
     }
@@ -19769,6 +19819,7 @@ fn fn_surface_now<a>(c: (&a mut C)) -> u8[] {
         strict := c.funcs[i].strict;
         no_alloc := c.funcs[i].no_alloc;
         no_panic := c.funcs[i].no_panic;
+        no_block := c.funcs[i].no_block;
         owner := c.funcs[i].owner;
         arity := c.funcs[i].types;
         iface_ws(&mut out, view(m));
@@ -19780,6 +19831,7 @@ fn fn_surface_now<a>(c: (&a mut C)) -> u8[] {
         iface_wv(&mut out, strict);
         iface_wv(&mut out, no_alloc);
         iface_wv(&mut out, no_panic);
+        iface_wv(&mut out, no_block);
         iface_wv(&mut out, owner);
         iface_wv(&mut out, arity);
         iface_wv(&mut out, npar);
@@ -20402,6 +20454,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // `@no_alloc`/`@no_panic`: the claims this body has to prove (docs/design/effects.md).
     claimed_alloc := exchange(&mut c.fx_pending_alloc, 0);
     claimed_panic := exchange(&mut c.fx_pending_panic, 0);
+    claimed_block := exchange(&mut c.fx_pending_block, 0);
     mut name = ident(&mut c);
     c.cur_name = name.copy();
     c.cur_file = c.file;
@@ -20796,6 +20849,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                     strict: c.strict_next,
                     no_alloc: claimed_alloc,
                     no_panic: claimed_panic,
+                    no_block: claimed_block,
                 }
             );
         index := c.funcs.len();
@@ -20929,7 +20983,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                         // twice, its facts digest differs from a fresh emission's, and the
                         // optimiser's memo (optimize.grl one_body) misses for every unchanged body.
                         llvm::facts_truncate(&mut c.facts, fact_mark);
-                        fn_apply(&mut c, &hit, &regs, fn_line, position, claimed_alloc, claimed_panic);
+                        fn_apply(&mut c, &hit, &regs, fn_line, position, claimed_alloc, claimed_panic, claimed_block);
                         if par_outcome == 1 {
                             c.fn_filed = c.fn_filed + 1;
                         } else {
@@ -21087,7 +21141,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     }
     o(&mut c, view(":\n"));
     fx_edge_at := c.fx_edge_from.len();
-    fx_begin(&mut c, view(fx_label), view(name), c.file, position, claimed_alloc, claimed_panic);
+    fx_begin(&mut c, view(fx_label), view(name), c.file, position, claimed_alloc, claimed_panic, claimed_block);
     o(&mut c, view("pushq %rbp\nmovq %rsp,%rbp\n"));
     frame := label(&mut c);
     exchange(&mut c.array_big, 0);
@@ -21308,7 +21362,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     }
     fx_end(&mut c);
     if wrapped {
-        ref_wrapper(&mut c, view(m), view(name), view(body_symbol), export, count, position, claimed_alloc, claimed_panic, entry_state);
+        ref_wrapper(&mut c, view(m), view(name), view(body_symbol), export, count, position, claimed_alloc, claimed_panic, claimed_block, entry_state);
     }
     exchange(&mut c.hints, u64[]);
     scope_end(&mut c);
@@ -21392,10 +21446,10 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                 c.drop_refs.pop()!;
             }
             k := c.lunit;
-            if (k != 0) & (k <= c.fnext.len()) {
+            if (c.validating == 0) & (k != 0) & (k <= c.fnext.len()) {
                 c.fnext[k - 1] = c.fnext[k - 1] - 1;
             }
-            fn_apply(&mut c, &produced, &regs, fn_line, position, claimed_alloc, claimed_panic);
+            fn_apply(&mut c, &produced, &regs, fn_line, position, claimed_alloc, claimed_panic, claimed_block);
         } else {
             c.fn_kept = c.fn_kept + 1;
         }
@@ -21686,6 +21740,7 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
                     strict: 0,
                     no_alloc: 0,
                     no_panic: 0,
+                    no_block: 0,
                 }
             );
         index := c.funcs.len() - 1;
@@ -22404,7 +22459,7 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
             // A method carries effect claims the way a function does: `@no_alloc pub fn find(..)`.
             while kind(&mut c) == 64 {
                 if fx_attr_form(&mut c) == 0 {
-                    fail(&mut c, view("a method in an impl block takes `@no_alloc` and `@no_panic` only"));
+                    fail(&mut c, view("a method in an impl block takes `@no_alloc`, `@no_panic` and `@no_block` only"));
                 }
             }
             public := u64(eat(&mut c, view("pub")));
@@ -27839,6 +27894,13 @@ fn fx_attr_form<a>(c: (&a mut C)) -> u64 {
         exchange(&mut c.fx_any, 1);
         return 1;
     }
+    if same(view(word), view("no_block")) {
+        advance(&mut c);
+        advance(&mut c);
+        exchange(&mut c.fx_pending_block, 1);
+        exchange(&mut c.fx_any, 1);
+        return 1;
+    }
     return 0;
 }
 // The record of one function symbol: index + 1, appending a fresh one when this is its first mention.
@@ -27881,6 +27943,11 @@ fn fx_sym<a, b>(c: (&a mut C), sym: &b [u8]) -> u64 {
     c.fx_fn_file.push(0);
     c.fx_fn_pos.push(0);
     c.fx_entry_panic.push(0);
+    c.fx_attr_block.push(0);
+    c.fx_own_block.push(0);
+    c.fx_block.push(0);
+    c.fx_block_thru.push(0);
+    c.fx_fail_entry.push(u64(fx_is_fail_name(view(sym))));
     return c.fx_syms.len();
 }
 // The name a diagnostic shows for a specialisation: the template's name and this instance's type
@@ -27902,7 +27969,7 @@ fn fx_instance_name<a, b>(c: (&a mut C), name: &b [u8], spec: u64) -> u8[] {
 // A body starts being recorded: one record per *emitted* body, so a generic's instances are judged
 // apart. A specialisation inherits the template's claim - that is the obligation - and its own body
 // is what proves or refuses it.
-fn fx_begin<a, b, d>(c: (&a mut C), sym: &b [u8], name: &d [u8], file: u64, pos: u64, no_alloc: u64, no_panic: u64) -> unit {
+fn fx_begin<a, b, d>(c: (&a mut C), sym: &b [u8], name: &d [u8], file: u64, pos: u64, no_alloc: u64, no_panic: u64, no_block: u64) -> unit {
     // Every run records every body: its facts are the summary its interface carries. A check-only run
     // that writes no interface carries none, so it records only when it has a claim to check; one that
     // writes interfaces (a module of `grail check`) records too, or the runs after it would find no
@@ -27922,9 +27989,12 @@ fn fx_begin<a, b, d>(c: (&a mut C), sym: &b [u8], name: &d [u8], file: u64, pos:
     c.fx_panic_thru[k] = 0;
     c.fx_own_alloc[k] = 0;
     c.fx_own_panic[k] = 0;
+    c.fx_own_block[k] = 0;
+    c.fx_block_thru[k] = 0;
     mut display = copy_bytes(view(name));
     mut claim_alloc = no_alloc;
     mut claim_panic = no_panic;
+    mut claim_block = no_block;
     if c.current_spec != 0 {
         spec := c.current_spec - 1;
         template := c.specs[spec].template;
@@ -27938,12 +28008,18 @@ fn fx_begin<a, b, d>(c: (&a mut C), sym: &b [u8], name: &d [u8], file: u64, pos:
         if c.funcs[template].no_panic != 0 {
             claim_panic = 1;
         }
+        if c.funcs[template].no_block != 0 {
+            claim_block = 1;
+        }
     }
     if claim_alloc != 0 {
         c.fx_attr_alloc[k] = 1;
     }
     if claim_panic != 0 {
         c.fx_attr_panic[k] = 1;
+    }
+    if claim_block != 0 {
+        c.fx_attr_block[k] = 1;
     }
     c.fx_fn_name[k] = display;
     c.fx_fn_file[k] = file;
@@ -27977,7 +28053,46 @@ fn fx_root<a, b>(c: (&a mut C), k: u64, sym: &b [u8]) -> unit {
     if same(view(name), view("rt_abort")) || same(view(name), view("rt_fail")) || same(view(name), view("rt_trap")) || same(view(name), view("rt_refine")) || same(view(name), view("rt_error")) {
         c.fx_own_panic[k] = 1;
     }
+    if fx_is_block_root(view(name)) {
+        c.fx_own_block[k] = 1;
+    }
     return ();
+}
+// The runtime's blocking roots (docs/design/effects.md, "Blocking"): where a thread or task waits
+// for something outside it - the one park every lock, channel, condition and join funnels into, the
+// sleeps, the waits on another thread or job, and the calls that do file, pipe or socket I/O. Not
+// here: the allocator's lock (a CAS spin), a futex wake, `sched_yield`, the clock, mmap and munmap.
+fn fx_is_block_root<a>(name: &a [u8]) -> bool {
+    roots := u8[][
+        copy_bytes(view("rt_park_until")), copy_bytes(view("rt_thread_join")), copy_bytes(view("rt_task_wait")),
+        copy_bytes(view("rt_job_park")), copy_bytes(view("rt_suspend")), copy_bytes(view("rt_sleep_for")),
+        copy_bytes(view("rt_sleep_now")), copy_bytes(view("rt_sleep_plain")), copy_bytes(view("rt_wait_fd")),
+        copy_bytes(view("rt_read_now")), copy_bytes(view("rt_write_now")), copy_bytes(view("rt_write_all")),
+        copy_bytes(view("rt_read_file_blocking")), copy_bytes(view("rt_write_file_blocking")),
+        copy_bytes(view("f_host_open")), copy_bytes(view("f_host_close")), copy_bytes(view("f_host_list_dir")),
+        copy_bytes(view("f_host_mkdir")), copy_bytes(view("f_host_create_dir")), copy_bytes(view("f_host_remove")),
+        copy_bytes(view("f_host_tcp_connect")), copy_bytes(view("f_host_tcp_listen"))
+    ];
+    for i in roots.len() {
+        if same(view(roots[i]), view(name)) {
+            return true;
+        }
+    }
+    return false;
+}
+// Whether a symbol is one of the runtime's failure entries: a call into one carries `panic` but not
+// `block`, because the failure ends the frame the claim is about (the report written and the thread
+// parked after it are past the guarantee). The leading `_` of a platform prefix is ignored.
+fn fx_is_fail_name<a>(sym: &a [u8]) -> bool {
+    mut at = 0;
+    if (sym.len() != 0) && (sym[0] == 95) {
+        at = 1;
+    }
+    mut name = u8[];
+    for i in sym.len() - at {
+        name.push(sym[at + i]);
+    }
+    return same(view(name), view("rt_abort")) || same(view(name), view("rt_fail")) || same(view(name), view("rt_trap")) || same(view(name), view("rt_refine")) || same(view(name), view("rt_error")) || same(view(name), view("rt_abort_park")) || same(view(name), view("rt_abort_final"));
 }
 // One edge of the body being emitted. `name` empty is a call nothing names - an indirect one in user
 // code - and the solver assumes it allocates and fails. `proved` marks a call that entered the
@@ -28275,6 +28390,8 @@ fn fx_helper<a, b>(c: (&a mut C), sym: &b [u8]) -> unit {
     c.fx_panic_thru[k] = 0;
     c.fx_own_alloc[k] = 0;
     c.fx_own_panic[k] = 0;
+    c.fx_own_block[k] = 0;
+    c.fx_block_thru[k] = 0;
     exchange(&mut c.fx_trusted, 1);
     exchange(&mut c.fx_calls, 0);
     exchange(&mut c.fx_cur, k + 1);
@@ -28369,6 +28486,19 @@ fn fx_callee_panic<a>(c: (&a C), k: u64) -> u64 {
     }
     return 1;
 }
+fn fx_callee_block<a>(c: (&a C), k: u64) -> u64 {
+    kk := k - 1;
+    if c.fx_fail_entry[kk] != 0 {
+        return 0;
+    }
+    if (c.fx_body[kk] != 0) || (c.fx_row[kk] != 0) {
+        return c.fx_block[kk];
+    }
+    if c.fx_attr_block[kk] != 0 {
+        return 0;
+    }
+    return 1;
+}
 // The symbol a declared function is emitted (and called) under.
 fn fx_func_symbol<a>(c: (&a mut C), i: u64) -> u8[] {
     mut out = u8[];
@@ -28397,7 +28527,8 @@ fn fx_solve<a>(c: (&a mut C)) -> unit {
     for i in c.funcs.len() {
         na := c.funcs[i].no_alloc;
         np := c.funcs[i].no_panic;
-        if (na != 0) || (np != 0) {
+        nb := c.funcs[i].no_block;
+        if (na != 0) || (np != 0) || (nb != 0) {
             sym := fx_func_symbol(&mut c, i);
             if sym.len() != 0 {
                 k := fx_sym(&mut c, view(sym)) - 1;
@@ -28408,6 +28539,9 @@ fn fx_solve<a>(c: (&a mut C)) -> unit {
                     if np != 0 {
                         c.fx_attr_panic[k] = 1;
                     }
+                    if nb != 0 {
+                        c.fx_attr_block[k] = 1;
+                    }
                 }
             }
         }
@@ -28415,6 +28549,7 @@ fn fx_solve<a>(c: (&a mut C)) -> unit {
     for i in c.fx_syms.len() {
         c.fx_alloc[i] = c.fx_own_alloc[i];
         c.fx_panic[i] = c.fx_own_panic[i];
+        c.fx_block[i] = c.fx_own_block[i];
     }
     for e in c.fx_edge_name.len() {
         // stays: the name is read twice, by the lookup and by the check below.
@@ -28443,9 +28578,10 @@ fn fx_solve<a>(c: (&a mut C)) -> unit {
     // solved callee, one more than the callee's for one passed on. The witness is chosen from it below.
     mut da = u64[0; n];
     mut dp = u64[0; n];
+    mut db = u64[0; n];
     mut work = u64[];
     for k in n {
-        if (c.fx_alloc[k] != 0) || (c.fx_panic[k] != 0) {
+        if (c.fx_alloc[k] != 0) || (c.fx_panic[k] != 0) || (c.fx_block[k] != 0) {
             work.push(k);
         }
     }
@@ -28456,10 +28592,12 @@ fn fx_solve<a>(c: (&a mut C)) -> unit {
         kind := c.fx_edge_kind[e];
         mut a = 0;
         mut p = 0;
+        mut bl = 0;
         if to != 0 {
             if c.fx_body[to - 1] == 0 {
                 a = fx_callee_alloc(&c, to);
                 p = fx_callee_panic(&c, to);
+                bl = fx_callee_block(&c, to);
                 // A checked accessor whose index was proved, kept by --verify-facts: its failure is the
                 // check of a proof, not one the function answers for.
                 if (kind & 16) != 0 {
@@ -28475,6 +28613,11 @@ fn fx_solve<a>(c: (&a mut C)) -> unit {
             if (kind & 1) != 0 {
                 a = 1;
                 p = 1;
+                // A C function declared `nonblocking` is promised not to block; anything else
+                // unknown may.
+                if (kind & 64) == 0 {
+                    bl = 1;
+                }
             }
         }
         mut set = 0;
@@ -28486,6 +28629,11 @@ fn fx_solve<a>(c: (&a mut C)) -> unit {
         if (p != 0) && (c.fx_panic[from] == 0) {
             c.fx_panic[from] = 1;
             dp[from] = 1;
+            set = 1;
+        }
+        if (bl != 0) && (c.fx_block[from] == 0) {
+            c.fx_block[from] = 1;
+            db[from] = 1;
             set = 1;
         }
         if set != 0 {
@@ -28525,6 +28673,11 @@ fn fx_solve<a>(c: (&a mut C)) -> unit {
                 dp[from] = dp[k] + 1;
                 set = 1;
             }
+            if (c.fx_block[k] != 0) && (c.fx_block[from] == 0) && (c.fx_fail_entry[k] == 0) {
+                c.fx_block[from] = 1;
+                db[from] = db[k] + 1;
+                set = 1;
+            }
             if set != 0 {
                 work.push(from);
             }
@@ -28535,16 +28688,19 @@ fn fx_solve<a>(c: (&a mut C)) -> unit {
     // that explains the fact, as the diagnostic reads.
     mut have_a = u64[0; n];
     mut have_p = u64[0; n];
+    mut have_b = u64[0; n];
     for e in c.fx_edge_from.len() {
         from := c.fx_edge_from[e];
         to := c.fx_edge_to[e];
         kind := c.fx_edge_kind[e];
         mut a = 0;
         mut p = 0;
+        mut bl = 0;
         if to != 0 {
             if c.fx_body[to - 1] == 0 {
                 a = fx_callee_alloc(&c, to);
                 p = fx_callee_panic(&c, to);
+                bl = fx_callee_block(&c, to);
                 // A checked accessor whose index was proved, kept by --verify-facts: its failure is the
                 // check of a proof, not one the function answers for.
                 if (kind & 16) != 0 {
@@ -28557,6 +28713,9 @@ fn fx_solve<a>(c: (&a mut C)) -> unit {
                 if (c.fx_panic[to - 1] != 0) && (dp[to - 1] < dp[from]) {
                     p = 1;
                 }
+                if (c.fx_block[to - 1] != 0) && (c.fx_fail_entry[to - 1] == 0) && (db[to - 1] < db[from]) {
+                    bl = 1;
+                }
             }
             if (c.fx_entry_panic[to - 1] != 0) && ((kind & 8) == 0) {
                 p = 1;
@@ -28565,6 +28724,11 @@ fn fx_solve<a>(c: (&a mut C)) -> unit {
             if (kind & 1) != 0 {
                 a = 1;
                 p = 1;
+                // A C function declared `nonblocking` is promised not to block; anything else
+                // unknown may.
+                if (kind & 64) == 0 {
+                    bl = 1;
+                }
             }
         }
         if (a != 0) && (c.fx_alloc[from] != 0) && (da[from] != 0) && (have_a[from] == 0) {
@@ -28574,6 +28738,10 @@ fn fx_solve<a>(c: (&a mut C)) -> unit {
         if (p != 0) && (c.fx_panic[from] != 0) && (dp[from] != 0) && (have_p[from] == 0) {
             c.fx_panic_thru[from] = to;
             have_p[from] = 1;
+        }
+        if (bl != 0) && (c.fx_block[from] != 0) && (db[from] != 0) && (have_b[from] == 0) {
+            c.fx_block_thru[from] = to;
+            have_b[from] = 1;
         }
     }
     return ();
@@ -28597,6 +28765,25 @@ fn fx_chain<a>(c: (&a mut C), first: u64, spending: u64) -> u8[] {
         }
         n = n + 1;
         k = c.fx_alloc_thru[idx];
+    }
+    return out;
+}
+fn fx_chain_block<a>(c: (&a mut C), first: u64, spending: u64) -> u8[] {
+    mut out = u8[];
+    mut k = first + 1;
+    mut n = 0;
+    while (k != 0) && (n < spending) {
+        idx := k - 1;
+        if n != 0 {
+            push_bytes(&mut out, view(" -> "));
+        }
+        if c.fx_fn_name[idx].len() != 0 {
+            push_bytes(&mut out, view(c.fx_fn_name[idx]));
+        } else {
+            push_bytes(&mut out, view(c.fx_syms[idx]));
+        }
+        n = n + 1;
+        k = c.fx_block_thru[idx];
     }
     return out;
 }
@@ -28688,6 +28875,14 @@ fn fx_unknown_why<a>(c: (&a mut C), k: u64) -> u8[] {
         if (c.fx_edge_from[e] == k) & (c.fx_edge_name[e].len() != 0) & (c.fx_edge_to[e] == 0) & ((c.fx_edge_kind[e] & 1) != 0) {
             mut out = copy_bytes(view("`"));
             push_bytes(&mut out, view(c.fx_edge_name[e]));
+            if (c.fx_edge_kind[e] & 128) != 0 {
+                if (c.fx_edge_kind[e] & 64) != 0 {
+                    push_bytes(&mut out, view("`, a C function declared `nonblocking`"));
+                } else {
+                    push_bytes(&mut out, view("`, a C function not declared `nonblocking`"));
+                }
+                return out;
+            }
             push_bytes(&mut out, view("`, whose body and effect summary this run does not have: compile it with the program (the runtime's sources for an `rt_` function), or use `grail build`"));
             return out;
         }
@@ -28711,8 +28906,11 @@ fn fx_chain_end<a>(c: (&a C), first: u64, spending: u64, panic: u64) -> u64 {
     mut n = 1;
     while n < spending {
         mut next = c.fx_alloc_thru[k];
-        if panic != 0 {
+        if panic == 1 {
             next = c.fx_panic_thru[k];
+        }
+        if panic == 2 {
+            next = c.fx_block_thru[k];
         }
         if next == 0 {
             return k;
@@ -28726,8 +28924,11 @@ fn fx_chain_end<a>(c: (&a C), first: u64, spending: u64, panic: u64) -> u64 {
 fn fx_chain_tail<a>(c: (&a mut C), first: u64, panic: u64) -> u8[] {
     last := fx_chain_end(&c, first, 8, panic);
     mut own = c.fx_own_alloc[last];
-    if panic != 0 {
+    if panic == 1 {
         own = c.fx_own_panic[last];
+    }
+    if panic == 2 {
+        own = c.fx_own_block[last];
     }
     if (last == first) || (own != 0) {
         return u8[];
@@ -28841,6 +29042,47 @@ fn fx_report<a>(c: (&a mut C)) -> unit {
                 } else {
                     push_bytes(&mut msg, view("\n = a call through a function value or a vtable may fail; name the callee, or keep the attribute off"));
                 }
+                at_file = fx_unknown_file_of(&mut c, k);
+                at_pos = fx_unknown_pos_of(&mut c, k);
+            }
+        }
+        fx_fail(&mut c, at_file, at_pos, msg);
+    }
+    for k in c.fx_syms.len() {
+        if (k >= c.fx_attr_block.len()) || (c.fx_body[k] == 0) || (c.fx_attr_block[k] == 0) || (c.fx_block[k] == 0) {
+            continue;
+        }
+        name := c.fx_fn_name[k].copy();
+        mut msg = copy_bytes(view("`@no_block` function `"));
+        push_bytes(&mut msg, view(name));
+        thru := c.fx_block_thru[k];
+        mut at_file = c.fx_fn_file[k];
+        mut at_pos = c.fx_fn_pos[k];
+        if thru != 0 {
+            push_bytes(&mut msg, view("` can block: it calls "));
+            chain := fx_chain_block(&mut c, k, 8);
+            push_bytes(&mut msg, view(chain));
+            push_bytes(&mut msg, view(fx_chain_tail(&mut c, k, 2)));
+            push_bytes(&mut msg, view("\n = the call chain above reaches a wait, a sleep, I/O or a C call not declared `nonblocking`"));
+            at_file = fx_edge_file_of(&mut c, k, thru);
+            at_pos = fx_edge_pos_of(&mut c, k, thru);
+        } else {
+            if c.fx_own_block[k] != 0 {
+                push_bytes(&mut msg, view("` can block"));
+                push_bytes(&mut msg, view("\n = keep the attribute off a function that waits"));
+            } else {
+                if fx_unknown_named(&c, k) {
+                    push_bytes(&mut msg, view("` can block: it makes a call the compiler cannot follow"));
+                } else {
+                    push_bytes(&mut msg, view("` can block: it makes an indirect call the compiler cannot follow"));
+                }
+                why := fx_unknown_why(&mut c, k);
+                if why.len() != 0 {
+                    push_bytes(&mut msg, view(" (the target is "));
+                    push_bytes(&mut msg, view(why));
+                    push_bytes(&mut msg, view(")"));
+                }
+                push_bytes(&mut msg, view("\n = a C function has to be declared `extern \"C\" nonblocking` to be called here; a call through a function value or a vtable may block"));
                 at_file = fx_unknown_file_of(&mut c, k);
                 at_pos = fx_unknown_pos_of(&mut c, k);
             }
@@ -29340,6 +29582,9 @@ fn toplevel_item<a>(c: (&a mut C), pass: u64) -> unit {
         }
         if c.fx_pending_panic != 0 {
             fail(&mut c, view("`@no_panic` applies to a function"));
+        }
+        if c.fx_pending_block != 0 {
+            fail(&mut c, view("`@no_block` applies to a function"));
         }
         if c.derive_pending != 0 {
             exchange(&mut c.pos, c.dr_pos);
@@ -33723,6 +33968,11 @@ fn emit_specializations<a>(c: (&a mut C)) -> unit {
     // generated code; failed checking still aborts before publishing any output.
     count := c.funcs.len();
     exchange(&mut c.validating, 1);
+    // The bodies' account is the bodies': what the checks below replay or file is counted apart.
+    hits_before := c.fn_hits;
+    filed_before := c.fn_filed;
+    kept_before := c.fn_kept;
+    why_before := c.fn_why.copy();
     for i in count {
         f := &c.funcs[i];
         types := f.types;
@@ -33756,6 +34006,13 @@ fn emit_specializations<a>(c: (&a mut C)) -> unit {
         }
     }
     exchange(&mut c.validating, 0);
+    c.tm_hits = c.tm_hits + (c.fn_hits - hits_before);
+    c.tm_filed = c.tm_filed + (c.fn_filed - filed_before);
+    c.tm_kept = c.tm_kept + (c.fn_kept - kept_before);
+    exchange(&mut c.fn_hits, hits_before);
+    exchange(&mut c.fn_filed, filed_before);
+    exchange(&mut c.fn_kept, kept_before);
+    exchange(&mut c.fn_why, why_before);
     drain_specs(&mut c, 0);
     return ();
 }
@@ -35408,6 +35665,9 @@ fn parallel_zip_builtin<a>(c: (&a mut C)) -> Val {
         o(&mut c, view("(%rcx)\n"));
     }
     o(&mut c, view("leaq "));
+    // The adapter is emitted once per object after the bodies (emit_zip_adapters), from a list a
+    // unit does not record: a body that asks for one is not a unit, or a replay would not ask again.
+    fn_use(&mut c, FN_THUNK);
     push_bytes(&mut c.out, view(zip_adapter(&mut c, closure, slices.len())));
     o(&mut c, view("(%rip),%rax\n"));
     adapter := save(&mut c);
@@ -53004,6 +53264,7 @@ fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
                 strict: 0,
                 no_alloc: 0,
                 no_panic: 0,
+                no_block: 0,
             }
         );
     return ();
@@ -53770,7 +54031,7 @@ pub fn iface_digest<a>(data: &a [u8]) -> u8[] {
 // Format 7 added the effect summary rows of every listed function; format 8 gives an `Atomic<T>`
 // its element type; format 9 carries a `dyn` type's bounds; format 10 adds the SIMD vector types
 // (kind 36: the element, and the lane count in the mode).
-const IFACE_VERSION: u64 = 11;
+const IFACE_VERSION: u64 = 12;
 const IFACE_TAG_MODULE: u64 = 1;
 const IFACE_TAG_TRAILER: u64 = 2;
 const IFACE_TAG_LINK: u64 = 3;
@@ -54951,6 +55212,7 @@ fn iface_enc_fn<a>(c: (&a mut C), index: u64, deps: (&a mut u64[]), text: (&a mu
     ret := c.funcs[index].ret;
     no_alloc := c.funcs[index].no_alloc;
     no_panic := c.funcs[index].no_panic;
+    no_block := c.funcs[index].no_block;
     body := c.funcs[index].body.copy();
     params := iface_params(&mut c, index);
     mut bounds = copy_numbers(&c.funcs[index].bounds);
@@ -55066,6 +55328,7 @@ fn iface_enc_fn<a>(c: (&a mut C), index: u64, deps: (&a mut u64[]), text: (&a mu
     iface_ws(&mut body_bytes, view(rpred));
     iface_w1(&mut body_bytes, no_alloc);
     iface_w1(&mut body_bytes, no_panic);
+    iface_w1(&mut body_bytes, no_block);
     iface_ws(&mut body_bytes, view(body));
     push_bytes(&mut text, view(body));
     return body_bytes;
@@ -55791,15 +56054,18 @@ fn iface_facts_bytes<a, b, d>(c: (&a mut C), m: &b [u8], listed: (&d u64[])) -> 
         kk := k - 1;
         mut a = 0;
         mut p = 0;
+        mut bl = 0;
         if c.fx_body[kk] != 0 {
             a = c.fx_alloc[kk];
             p = c.fx_panic[kk];
+            bl = c.fx_block[kk];
         } else {
             if c.fx_row[kk] == 0 {
                 continue;
             }
             a = c.fx_own_alloc[kk];
             p = c.fx_own_panic[kk];
+            bl = c.fx_own_block[kk];
         }
         mut dup = 0;
         for j in seen.len() {
@@ -55831,6 +56097,12 @@ fn iface_facts_bytes<a, b, d>(c: (&a mut C), m: &b [u8], listed: (&d u64[])) -> 
         }
         iface_ws(&mut entries, view(at));
         iface_ws(&mut entries, view(pt));
+        iface_w1(&mut entries, bl);
+        mut bt = u8[];
+        if (bl != 0) && (c.fx_block_thru[kk] != 0) {
+            bt = c.fx_syms[c.fx_block_thru[kk] - 1].copy();
+        }
+        iface_ws(&mut entries, view(bt));
         // Insertion by symbol: `seen` and `parts` stay in step.
         mut j = parts.len();
         parts.push(entries);
@@ -56573,6 +56845,7 @@ fn iface_rec_fn<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], module: &a [u8]
     rpred := iface_rs(&mut p);
     no_alloc := iface_r1(&mut p);
     no_panic := iface_r1(&mut p);
+    no_block := iface_r1(&mut p);
     body := iface_rs(&mut p);
     if p.phase == 0 {
         if rpred.len() != 0 {
@@ -56588,6 +56861,8 @@ fn iface_rec_fn<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], module: &a [u8]
         decimal(&mut p.rtext, no_panic);
         p.rtext.push(32);
         decimal(&mut p.rtext, strict);
+        p.rtext.push(32);
+        decimal(&mut p.rtext, no_block);
         if body.len() != 0 {
             iface_rt_indent(&mut p, view(indent));
             push_bytes(&mut p.rtext, view("body"));
@@ -56654,7 +56929,8 @@ fn iface_rec_fn<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], module: &a [u8]
         pdefaults: Pred[],
         strict: strict,
         no_alloc: no_alloc,
-        no_panic: no_panic
+        no_panic: no_panic,
+        no_block: no_block
     };
     c.funcs.push(f);
     index := c.funcs.len() - 1;
@@ -56713,7 +56989,7 @@ fn iface_rec_fn<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], module: &a [u8]
         pred := pred_of_text(&mut c, view(label), view(rpred));
         exchange(&mut c.funcs[index].rpred, pred);
     }
-    if (no_alloc != 0) || (no_panic != 0) {
+    if (no_alloc != 0) || (no_panic != 0) || (no_block != 0) {
         exchange(&mut c.fx_any, 1);
     }
     if (types != 0) & (contract == 0) & (body.len() != 0) {
@@ -57257,6 +57533,8 @@ fn iface_rec_facts<a>(c: (&a mut C), p: (&a mut IR)) -> unit {
         e := iface_r1(&mut p);
         at := iface_rs(&mut p);
         pt := iface_rs(&mut p);
+        bl := iface_r1(&mut p);
+        bt := iface_rs(&mut p);
         if p.phase == 0 {
             iface_rt_indent(&mut p, view(""));
             push_bytes(&mut p.rtext, view("facts "));
@@ -57274,6 +57552,12 @@ fn iface_rec_facts<a>(c: (&a mut C), p: (&a mut IR)) -> unit {
             if pt.len() != 0 {
                 push_bytes(&mut p.rtext, view(" fail-via "));
                 push_bytes(&mut p.rtext, view(pt));
+            }
+            push_bytes(&mut p.rtext, view(" block "));
+            decimal(&mut p.rtext, bl);
+            if bt.len() != 0 {
+                push_bytes(&mut p.rtext, view(" block-via "));
+                push_bytes(&mut p.rtext, view(bt));
             }
         }
         if p.phase == 2 {
@@ -57294,6 +57578,12 @@ fn iface_rec_facts<a>(c: (&a mut C), p: (&a mut IR)) -> unit {
                 }
                 c.fx_alloc_thru[k] = ta;
                 c.fx_panic_thru[k] = tp;
+                c.fx_own_block[k] = bl;
+                mut tb = 0;
+                if bt.len() != 0 {
+                    tb = fx_sym(&mut c, view(bt));
+                }
+                c.fx_block_thru[k] = tb;
             }
         }
     }
@@ -59311,6 +59601,11 @@ pub fn main() -> u64 {
         fx_body: u64[],
         fx_attr_alloc: u64[],
         fx_attr_panic: u64[],
+        fx_attr_block: u64[],
+        fx_own_block: u64[],
+        fx_block: u64[],
+        fx_block_thru: u64[],
+        fx_fail_entry: u64[],
         fx_own_alloc: u64[],
         fx_own_panic: u64[],
         fx_alloc: u64[],
@@ -59329,6 +59624,7 @@ pub fn main() -> u64 {
         fx_edge_why: u8[][],
         fx_pending_alloc: 0,
         fx_pending_panic: 0,
+        fx_pending_block: 0,
         fx_bounded: 0,
         fx_trusted: 0,
         fx_calls: 0,
@@ -59378,6 +59674,10 @@ pub fn main() -> u64 {
         fn_filed: 0,
         fn_kept: 0,
         fn_rec: 0,
+        tm_hits: 0,
+        tm_filed: 0,
+        tm_kept: 0,
+        tmemo_off: u64(same(view(host::env(view("GRAIL_TEMPLATE_MEMO"))), view("0"))),
         fn_regs: u8[],
         fn_reg_types: u64[],
         fn_uses: u64[0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -60332,6 +60632,15 @@ pub fn main() -> u64 {
         push_bytes(&mut line, view(" filed, "));
         push_bytes(&mut line, view(decimal_bytes(c.fn_kept)));
         push_bytes(&mut line, view(" not units"));
+        if (c.tm_hits + c.tm_filed + c.tm_kept) != 0 {
+            push_bytes(&mut line, view("; template checks "));
+            push_bytes(&mut line, view(decimal_bytes(c.tm_hits)));
+            push_bytes(&mut line, view(" hit, "));
+            push_bytes(&mut line, view(decimal_bytes(c.tm_filed)));
+            push_bytes(&mut line, view(" filed, "));
+            push_bytes(&mut line, view(decimal_bytes(c.tm_kept)));
+            push_bytes(&mut line, view(" not units"));
+        }
         // Which rules kept them out, and how many bodies each (a body can meet several).
         mut listed = 0;
         for rule in c.fn_why.len() {

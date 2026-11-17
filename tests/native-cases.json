@@ -18739,6 +18739,47 @@
     "diagnostic": "cannot transfer closure capture `r`: r.h is thread-affine"
   },
   {
+    "name": "fx-no-block-accepted",
+    "note": "`@no_block` accepts indexing (a failure ends the frame, so the failure path's report and park are past the guarantee) and a C function declared `nonblocking` (docs/design/effects.md, \"Blocking\").",
+    "source": "extern \"C\" nonblocking lib \"c\" fn labs(x: i64) -> i64;\n@no_block\nfn pick(v: &u64[], i: u64) -> u64 {\n    return v[i] + v.len();\n}\n@no_block\nfn mag(x: i64) -> i64 {\n    mut r: i64 = 0;\n    unsafe {\n        r = labs(x);\n    }\n    return r;\n}\nfn main() {\n    v := u64[1, 2, 3];\n    println(pick(&v, 1));\n    println(mag(i64(0) - 4));\n}\n",
+    "stdout": "5\n4\n"
+  },
+  {
+    "name": "fx-no-block-try-acquire-accepted",
+    "note": "A non-parking operation - `try_acquire` - is accepted under `@no_block`.",
+    "source": "use sync;\n@no_block\nfn grab(s: &sync::Semaphore) -> u64 {\n    got := s.try_acquire(1);\n    if got.is_some() {\n        return 1;\n    }\n    return 0;\n}\nfn main() {\n    s := sync::semaphore(1);\n    println(grab(&s));\n}\n",
+    "modules": [
+      "lib/sync.grl",
+      "lib/thread.grl",
+      "lib/time.grl",
+      "lib/rc.grl"
+    ],
+    "stdout": "1\n"
+  },
+  {
+    "name": "fx-no-block-sleep-refused",
+    "note": "A sleep blocks: the refusal names the chain to the runtime's sleep.",
+    "source": "use time;\n@no_block\nfn nap() {\n    time::sleep_ms(1);\n    return ();\n}\nfn main() {\n    nap();\n}\n",
+    "modules": [
+      "lib/time.grl",
+      "lib/core.grl"
+    ],
+    "reject": true,
+    "diagnostic": "`@no_block` function `nap` can block: it calls nap -> sleep_ms -> f_host_sleep_ms -> rt_sleep_for"
+  },
+  {
+    "name": "fx-no-block-print-refused",
+    "note": "Printing writes to a file descriptor, which can block.",
+    "source": "@no_block\nfn say(x: u64) {\n    println(x);\n    return ();\n}\nfn main() {\n    say(1);\n}\n",
+    "reject": true,
+    "diagnostic": "`@no_block` function `say` can block: it calls say -> rt_print_number -> rt_write_all"
+  },
+  {
+    "name": "fx-no-block-c-call-refused",
+    "note": "A C function not declared `nonblocking` may block.",
+    "source": "extern \"C\" lib \"c\" fn labs(x: i64) -> i64;\n@no_block\nfn mag(x: i64) -> i64 {\n    mut r: i64 = 0;\n    unsafe {\n        r = labs(x);\n    }\n    return r;\n}\nfn main() {\n    println(mag(i64(0) - 4));\n}\n",
+    "reject": true,
+    "diagnostic": "the target is `labs`, a C function not declared `nonblocking`",
     "name": "pool-chunks-mut-at-and-reduce-chunks",
     "note": "pool::chunks_mut_at hands each exclusive piece its first index; pool::reduce_chunks folds per-piece results in index order (simd-layout-parallel-loops.md 4.2, D4)",
     "source": "use pool;\nfn main() {\n    n := 1000;\n    mut xs = u64[0; n];\n    pool::chunks_mut_at(&mut xs[0: n], 64, |base: u64, s: &mut [u64]| -> unit {\n        for i in s.len() {\n            s[i] = base + i;\n        }\n    });\n    ok := pool::reduce_chunks<u64, bool>(&xs[0: n], 100, true, |s: &[u64]| -> bool {\n        mut good = true;\n        for i in s.len() - 1 {\n            if s[i + 1] != s[i] + 1 {\n                good = false;\n            }\n        }\n        return good;\n    }, |a: bool, b: bool| -> bool a && b);\n    total := pool::reduce_chunks<u64, u64>(&xs[0: n], 128, 0, |s: &[u64]| -> u64 {\n        mut t = 0;\n        for i in s.len() {\n            t += s[i];\n        }\n        return t;\n    }, |a: u64, b: u64| -> u64 a + b);\n    mut fs = f64[0.1; 10000];\n    s1 := pool::reduce_chunks<f64, f64>(&fs[0: 10000], 333, 0.0, |s: &[f64]| -> f64 {\n        mut t = 0.0;\n        for i in s.len() {\n            t = t + s[i];\n        }\n        return t;\n    }, |a: f64, b: f64| -> f64 a + b);\n    println(\"{} {} {}\", ok, total, s1);\n}\n",
@@ -18760,6 +18801,19 @@
     "diagnostic": "parallel_split callback takes (&mut [T]) or (u64, &mut [T])"
   },
   {
+    "name": "fx-no-block-stdlib-claims",
+    "note": "The standard library's `@no_block` claims - every `math` function, the `hash` writers and `finish`, `u64[].sum`, `[u8].is_char_boundary`, `strings::utf8_width` - are proved, and a `@no_block` frame function can call them all.",
+    "source": "use math;\nuse hash;\nuse vecs;\nuse strings;\n@no_block\nfn frame(x: f64, v: &u64[], t: &[u8]) -> u64 {\n    a := math::sin(x) + math::cos(x) + math::sqrt(x) + math::pow(x, 2.5) + math::atan2(x, 1.0) + math::ln(x + 1.0) + math::exp(x) + math::log10(x + 1.0) + math::log2(x + 1.0) + math::tan(x) + math::atan(x) + math::powi(x, 3) + math::abs(x) + math::floor(x) + math::ceil(x) + math::round(x);\n    mut h = hash::hasher(1, 2);\n    hash::write_num(&mut h, v.sum());\n    hash::write_byte(&mut h, 7);\n    hash::write_bytes(&mut h, t);\n    w := strings::utf8_width(t[0]);\n    b := t.is_char_boundary(1);\n    mut r = hash::finish(h) + w;\n    if b {\n        r = r + 1;\n    }\n    if a > 0.0 {\n        r = r + 1;\n    }\n    return r;\n}\nfn main() {\n    v := u64[1, 2, 3];\n    t := \"héllo\".text();\n    println(frame(0.5, &v, view(t)) != 0);\n}\n",
+    "modules": [
+      "lib/math.grl",
+      "lib/vecs.grl",
+      "lib/hash.grl",
+      "lib/strings.grl",
+      "lib/iter.grl",
+      "lib/order.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "true\n",
     "name": "bce-loop-invariant-swap",
     "source": "fn last(n0: u64) -> u64 {\n    n: u64 := 8;\n    mut v = u64[];\n    for i in n {\n        v.push(i + n0);\n    }\n    mut tmp = v.copy();\n    mut w: u64 = 1;\n    while w < n {\n        mut s = v;\n        v = tmp;\n        tmp = s;\n        w = w * 2;\n    }\n    return v[n - 1] + tmp[n / 2];\n}\nfn main() {\n    println(last(0));\n}\n",
     "stdout": "11\n",
