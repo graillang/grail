@@ -11,6 +11,14 @@
   its repeats (a label operand is numbered again, the frame-slot bookkeeping redone): byte-identical
   output, 2.6% fewer instructions for a 4000-function file. The plan for taking the remaining text
   hops out of the dev backend is docs/design/in-memory-ir.md.
+- **The inliner reaches further: copies inside copies, promoted registers, a 32-line cap.** A copy
+  of a small wrapper keeps the call it makes last (`rt_new` calling `rt_alloc`); that call is now
+  expanded too, three levels deep, since nothing of the copy is live across it. A small leaf whose
+  values the optimiser put in callee-saved registers (`rt_block_bin`, `rt_job_deque`) is no longer
+  refused: its copy keeps them in free scratch registers. The size cap is 32 lines, up from 24.
+  Measured (callgrind, one worker, minimum of five), against main: a join 2742 -> 2652 instructions,
+  a spawn 1631 -> 1583, fib(20) by nested join -1.7%. The compiler's own text is 4.0% larger and
+  it compiles 0.85% faster.
 - **The optimiser's liveness is linear in a function's length.** The register and frame-slot
   liveness behind dead-store removal, prologue zeroing and register colouring looked at every
   candidate slot on every line of every round; each line's effect is now worked out once per pass

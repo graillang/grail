@@ -2489,8 +2489,8 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
     if prologue != 0 {
         shrink_wrap(&mut o, fstart);
     }
-    if (prologue != 0) & (chosen.len() == 0) & (xchosen.len() == 0) & (o.zline != 0) {
-        inline_candidate(&mut o, view(s), prologue);
+    if (prologue != 0) & (xchosen.len() == 0) & (o.zline != 0) {
+        inline_candidate(&mut o, view(s), prologue, &chosen, &zchosen);
     }
 }
 // ---- shrink-wrapping (call ABI S5) ----
@@ -4571,15 +4571,21 @@ fn name_hash<b>(s: &b [u8], a: u64, e: u64) -> u64 {
 // A small leaf (no calls but rt_abort, no callee-saved registers, small cleared frame) gets a
 // frameless copy of its body: slots move to free scratch registers, returns jump to the end.
 // Calls to it are replaced by that body after all functions are optimized.
-fn inline_candidate<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64) {
+// Slots promoted to callee-saved registers (`chosen`, zeroed at entry where `zeroed` says) are the
+// caller's registers in a copy, so the copy keeps them in free scratch registers instead: a leaf's
+// copy holds nothing across a call, and the saves and restores around the body are not in it.
+fn inline_candidate<a, b, c>(o: (&a mut ir::Body), s: &b [u8], prologue: u64, chosen: (&c u64[]), zeroed: (&c u64[])) {
     if o.dyn_pairs.len() != 0 {
         return ();
     }
     last := o.op.len();
     mut count = 0;
     mut used = 0;
-    // rbx, rsp, rbp (outside slots) and r12..r15 must not appear.
-    forbidden := 8 + 16 + 32 + 4096 + 8192 + 16384 + 32768;
+    // rbx, rsp, rbp (outside slots) and r12..r15 must not appear, but for the promoted ones.
+    mut forbidden: u64 = 8 + 16 + 32 + 4096 + 8192 + 16384 + 32768;
+    for c in chosen.len() {
+        forbidden = forbidden & (18446744073709551615 ^ (1 << chosen[c]));
+    }
     dead := unreachable_lines(&o, prologue);
     for i in last {
         if (prologue < i) & (o.del[i] == 0) & (dead[i] == 0) {
@@ -4594,7 +4600,7 @@ fn inline_candidate<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64) {
                     if op != 29 {
                         count += 1;
                     }
-                    if 24 < count {
+                    if 32 < count {
                         return ();
                     }
                     if op == 0 || op == 31 || op == 32 || op == 45 || op == 46 {
@@ -4686,7 +4692,40 @@ fn inline_candidate<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64) {
             }
         }
     }
+    // A scratch register for each promoted register.
+    mut moved = u64[];
+    for c in chosen.len() {
+        mut pick = 99;
+        for f in free.len() {
+            r := free[f];
+            mut taken = (used >> r) & 1;
+            for y in regs.len() {
+                if regs[y] == r {
+                    taken = 1;
+                }
+            }
+            for y in moved.len() {
+                if moved[y] == r {
+                    taken = 1;
+                }
+            }
+            if (taken == 0) & (pick == 99) {
+                pick = r;
+            }
+        }
+        if pick == 99 {
+            return ();
+        }
+        moved.push(pick);
+    }
     mark := o.out.len();
+    for c in chosen.len() {
+        if zeroed[c] != 0 {
+            app(&mut o.out, view("movq $0,%"));
+            reg_name(&mut o, moved[c]);
+            o.out.push(10);
+        }
+    }
     // Cleared (non-parameter) slots start at zero, as the frame zeroing guaranteed.
     for x in slots.len() {
         if o.zfrom * 8 < slots[x] + 1 {
@@ -4716,6 +4755,17 @@ fn inline_candidate<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64) {
     while mark < o.out.len() {
         o.out.pop()!;
     }
+    for c in chosen.len() {
+        mut from = copy_text(view("%"));
+        reg_text(&mut from, chosen[c]);
+        mut to = copy_text(view("%"));
+        reg_text(&mut to, moved[c]);
+        renamed := rename_register(view(body), view(from), view(to));
+        if renamed.len() == 0 {
+            return ();
+        }
+        body = renamed;
+    }
     // Filed under the body's symbol, from its `.type` line: the line after it is a statement's site
     // label (`.Lgs<n>:`) in a build with error locations, not the symbol's own label.
     mut name = o.name.copy();
@@ -4732,6 +4782,59 @@ fn inline_candidate<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64) {
     absolute := ir::absolute_positions(view(body), o.gbase);
     exchange(&mut o.inl_rel, body);
     inl_file(&mut o, name, absolute, unit);
+}
+// The 64-bit name of register `r`, as reg_name spells it.
+fn reg_text<a>(out: (&a mut u8[]), r: u64) {
+    names := u8[][copy_text(view("rax")), copy_text(view("rcx")), copy_text(view("rdx")), copy_text(view("rbx")), copy_text(view("rsp")), copy_text(view("rbp")), copy_text(view("rsi")), copy_text(view("rdi")), copy_text(view("r8")), copy_text(view("r9")), copy_text(view("r10")), copy_text(view("r11")), copy_text(view("r12")), copy_text(view("r13")), copy_text(view("r14")), copy_text(view("r15"))];
+    out.append(view(names[r]));
+}
+// `text` with every `from` register (a 64-bit spelling, `%rbx`) written as `to`; nothing when the
+// register also appears under a narrower name, which this rename does not follow.
+fn rename_register<a, b, c>(text: &a [u8], from: &b [u8], to: &c [u8]) -> u8[] {
+    // Narrow spellings: %bl %bh %bx %ebx for rbx; %r12d %r12w %r12b for r12..r15.
+    mut narrow = u8[][];
+    if from.len() == 4 {
+        letter := from[2];
+        mut a = copy_text(view("%"));
+        a.push(letter);
+        a.push(108);
+        narrow.push(a);
+        mut b = copy_text(view("%"));
+        b.push(letter);
+        b.push(104);
+        narrow.push(b);
+        mut x = copy_text(view("%"));
+        x.push(letter);
+        x.push(120);
+        narrow.push(x);
+        mut e = copy_text(view("%e"));
+        e.push(letter);
+        e.push(120);
+        narrow.push(e);
+    }
+    mut out = u8[];
+    mut i = 0;
+    n := text.len();
+    while i < n {
+        for q in narrow.len() {
+            w := &narrow[q];
+            if (i + w.len() <= n) && ir::same_range(text, i, i + w.len(), view(w)) && ((i + w.len() == n) || !ir::alnum(text[i + w.len()])) {
+                return u8[];
+            }
+        }
+        if (i + from.len() <= n) && ir::same_range(text, i, i + from.len(), from) {
+            if (i + from.len() < n) && ir::alnum(text[i + from.len()]) {
+                // %r12d, %r12w, %r12b: a narrower name.
+                return u8[];
+            }
+            out.append(to);
+            i += from.len();
+        } else {
+            out.push(text[i]);
+            i += 1;
+        }
+    }
+    return out;
 }
 // A direct call the body returns straight after (`call X`, then `leave; ret`): nothing of the body
 // is live across it, so its copy may keep the call - a dispatcher like rt_alloc, which picks one of
@@ -4880,10 +4983,12 @@ fn inline_calls<a, b>(o: (&a mut ir::Body), split: u64, marks: (&a mut u64[]), l
                             site += 1;
                             o.out.append(text[pend..a]);
                             pend = start;
-                            if here != 0 {
-                                emit_body(&mut o, k - 1, site, view(uprefix));
-                            } else {
-                                emit_text(&mut o, view(cross[k - 1]), site, view(uprefix));
+                            {
+                                mut body = o.inl_bodies[k - 1].copy();
+                                if here == 0 {
+                                    body = cross[k - 1].copy();
+                                }
+                                expand_copy(&mut o, view(body), view(unit), view(uprefix), 1, &mut site, &mut cross, &mut cross_known);
                             }
                             // The caller's code after the copy is the caller's statement again.
                             p := caller_position(view(text), a);
@@ -5083,6 +5188,79 @@ fn export_bodies<a, b>(o: (&a ir::Body), own: u64, shared: (&b mut Shared)) {
             }
         }
     }
+}
+// The copy of `body` at the current site, with the calls it keeps expanded in turn when they are
+// candidates too (to COPY_DEPTH levels). A copy keeps a call only in tail position or one that does
+// not return (inline_candidate), so nothing of the copy is live across it, and the inner copy may use
+// whatever the call it replaces could clobber. Every copy takes a site number of its own.
+const COPY_DEPTH: u64 = 3;
+fn expand_copy<a, b>(o: (&a mut ir::Body), body: &b [u8], unit: &b [u8], uprefix: &b [u8], depth: u64, site: (&mut u64), cross: (&mut u8[][]), known: (&mut u64[])) {
+    mark := o.out.len();
+    emit_text(&mut o, body, *site, uprefix);
+    if depth >= COPY_DEPTH {
+        return ();
+    }
+    t := o.out[mark..o.out.len()].copy();
+    // Only when the copy keeps a call that is a candidate itself.
+    mut any = false;
+    mut start = 0;
+    for i in t.len() {
+        if t[i] == 10 {
+            if (i - start > 5) && (t[start] == 99) && ir::at(view(t), start, view("call ")) && (copy_index(&o, view(t), start + 5, i, unit, &mut cross, &mut known) != 0) {
+                any = true;
+                break;
+            }
+            start = i + 1;
+        }
+    }
+    if !any {
+        return ();
+    }
+    while mark < o.out.len() {
+        o.out.pop()!;
+    }
+    start = 0;
+    for i in t.len() {
+        if t[i] != 10 {
+            continue;
+        }
+        a := start;
+        start = i + 1;
+        if (i - a > 5) && (t[a] == 99) && ir::at(view(t), a, view("call ")) {
+            k := copy_index(&o, view(t), a + 5, i, unit, &mut cross, &mut known);
+            if k != 0 {
+                exchange(&mut site, *site + 1);
+                mut inner = o.inl_bodies[k - 1].copy();
+                if !same_text(view(o.inl_units[k - 1]), unit) && (unit.len() != 0) {
+                    inner = cross[k - 1].copy();
+                }
+                expand_copy(&mut o, view(inner), unit, uprefix, depth + 1, site, cross, known);
+                continue;
+            }
+        }
+        o.out.append(t[a..i + 1]);
+    }
+}
+fn same_text<a, b>(x: &a [u8], y: &b [u8]) -> bool {
+    return (x.len() == y.len()) && ir::same_range(x, 0, x.len(), y);
+}
+// The candidate a `call` of `t[a..e]` may be replaced by in `unit`, plus one, or 0.
+fn copy_index<a, b, c>(o: (&a ir::Body), t: &b [u8], a: u64, e: u64, unit: &c [u8], cross: (&mut u8[][]), known: (&mut u64[])) -> u64 {
+    h := name_hash(t, a, e);
+    mut k = o.inl_head[h];
+    while k != 0 {
+        n := &o.inl_names[k - 1];
+        if (n.len() == e - a) && ir::same_range(t, a, e, view(n)) {
+            if (unit.len() == 0) || same_text(view(o.inl_units[k - 1]), unit) {
+                return k;
+            }
+            if crossing(&o, k - 1, cross, known) {
+                return k;
+            }
+        }
+        k = o.inl_next[k - 1];
+    }
+    return 0;
 }
 // `_i<unit prefix>_<site>` on every `.L` in the body: the site number disambiguates two copies of
 // one body, and the unit prefix keeps a body label without a prefix of its own (`.Lret`) apart from
