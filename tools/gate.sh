@@ -54,6 +54,15 @@ case "$C" in /*) ;; *) C=$PWD/$C;; esac
 export GRAIL_COMPILER=$C GRAIL_FFI_COMPILER=$C
 export GRAIL_SYSROOT_AARCH64=/usr/aarch64-linux-gnu GRAIL_SYSROOT_RISCV64=/usr/riscv64-linux-gnu
 echo "$C" > "$G/compiler.txt"
+# The aarch64 legs run under the repository's own qemu-aarch64 (tools/qemu/build.sh; docs/testing.md,
+# "The aarch64 emulator"): stock qemu 11.1.3 lets an STLR pass a later LDAR on an x86 host, which
+# ARMv8 forbids. Built once per worktree into .work/architectures/toolchain, where runner() looks;
+# the version line of the emulator the legs actually run under goes into the summary.
+leg qemu-aarch64 tools/qemu/build.sh
+wait
+emulator=$(bun -e "import { runner } from './tools/native.mjs'; console.log(runner('aarch64')[0])")
+echo "aarch64 emulator: $emulator: $("$emulator" --version 2>&1 | head -1)" > "$G/emulator.txt"
+cat "$G/emulator.txt"
 
 # Corpus legs: native x86-64 first, then the emulated targets interleaved with the LLVM passes.
 for i in 1 2 3; do leg x86_64_$i env GRAIL_TEST_SHARD=$i/3 bun tools/test-native.mjs x86_64; done
@@ -82,7 +91,7 @@ for i in 1 2 3; do
 done
 
 # Tool suites: independent of each other (each has its own .work directory).
-for t in test-selfhost test-ffi test-cli interface-test cache-test split-test test-facts test-optimiser-jumps test-debug-lines abundance-test borg-test grammar-test lsp-test overflow-parity-test jobs-test; do
+for t in test-selfhost test-ffi test-cli interface-test cache-test split-test test-facts test-optimiser-jumps test-optimiser-atomics test-atomics-litmus test-debug-lines abundance-test borg-test grammar-test lsp-test overflow-parity-test jobs-test; do
   leg $t bun tools/$t.mjs
 done
 leg windows bun tools/windows.mjs check
@@ -119,4 +128,5 @@ done > "$G/summary.txt"
 for f in "$G"/*.log; do
   if rg -q 'exit=0' "$f"; then echo "ok   $(basename "$f" .log): $(rg 'passed|identical|verified|agree|checks|ffi:|facts:|program|compile-bench:|runtime-bench|-rivals \(|note:' "$f" | tail -1 | cut -c1-100)"; fi
 done >> "$G/summary.txt"
+cat "$G/emulator.txt" >> "$G/summary.txt" 2>/dev/null
 echo done > "$G/DONE"

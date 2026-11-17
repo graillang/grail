@@ -53,10 +53,15 @@ The compiler closes the module set itself.
   compiles, and what it writes".
 - **`use host;` is not a file.** It is a module's opt-in to the ambient `host::` interface, and
   resolution skips it.
-- **Unresolvable is a hard error**, naming the module, the file that asked, and every root searched:
+- **Unresolvable is a hard error**, naming the module, the file that asked, and every root searched,
+  at the `use` line that asked for it:
 
   ```
-  grail: cannot resolve module `nosuch` used by bad.grl: no module root holds `nosuch.grl`; searched /repo/lib, src
+  error: cannot resolve module `nosuch` used by bad.grl: no module root holds `nosuch.grl`; searched /repo/lib, src
+   --> bad.grl:1:5
+    |
+  1 | use nosuch;
+    |     ^^^^^^ no module root holds this module
   ```
 
   With no roots at all the message says so instead of naming an empty list. This replaces the confusing
