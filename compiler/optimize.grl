@@ -3338,8 +3338,6 @@ fn lines_of_interest<a, b>(text: &a [u8], from: u64, out: (&b mut u64[])) {
                     out.push(a);
                 } else if (first == 46) && (i - a > 12) && ir::at(view(text), a, view(".grail_part ")) {
                     out.push(a);
-                } else if (first == 46) && (ir::at(view(text), a, view(".gpos ")) || ir::at(view(text), a, view(".type "))) {
-                    out.push(a);
                 }
             }
         }
@@ -3360,7 +3358,6 @@ fn inline_calls<a, b>(o: (&a mut ir::Body), split: u64, marks: (&a mut u64[]), l
     mut next = 0;
     mut unit = u8[];
     mut uprefix = u8[];
-    mut position = u8[];
     mut seen_units = u8[][];
     mut seen_sites = u64[];
     mut site_unit = u8[];
@@ -3399,25 +3396,19 @@ fn inline_calls<a, b>(o: (&a mut ir::Body), split: u64, marks: (&a mut u64[]), l
                             pend = start;
                             emit_body(&mut o, k - 1, site, view(uprefix));
                             // The caller's code after the copy is the caller's statement again.
-                            if position.len() != 0 {
-                                o.out.append(view(position));
-                                o.out.push(10);
+                            p := caller_position(view(text), a);
+                            if p < a {
+                                mut pe = p;
+                                while text[pe] != 10 {
+                                    pe += 1;
+                                }
+                                o.out.append(text[p..pe + 1]);
                             }
                             done = 1;
                             break;
                         }
                         k = o.inl_next[k - 1];
                     }
-                }
-            }
-            if (done == 0) && (text[a] == 46) {
-                // The position the copies in this function are followed by: the last statement
-                // marker of the function so far, none at a function's start.
-                if ir::at(view(text), a, view(".gpos ")) {
-                    position.clear();
-                    position.append(text[a..e]);
-                } else if ir::at(view(text), a, view(".type ")) {
-                    position.clear();
                 }
             }
             if done == 0 {
@@ -3460,6 +3451,27 @@ fn inline_calls<a, b>(o: (&a mut ir::Body), split: u64, marks: (&a mut u64[]), l
         }
     }
     o.out.append(text[pend..text.len()]);
+}
+// Where the caller's statement marker for the call at `call` starts (the last `.gpos` line of the
+// function before it), or `call` when the function has none before it: the lines are read back from
+// the call to the function's `.type` line, which a statement is never far from.
+fn caller_position<a>(text: &a [u8], call: u64) -> u64 {
+    mut e = call;
+    while 0 < e {
+        // `e` is the start of a line; the line before it ends at e - 1.
+        mut b = e - 1;
+        while (0 < b) && (text[b - 1] != 10) {
+            b -= 1;
+        }
+        if (text[b] == 46) && (b + 6 < e) && (text[b + 1] == 103) && (text[b + 2] == 112) && (text[b + 3] == 111) && (text[b + 4] == 115) && (text[b + 5] == 32) {
+            return b;
+        }
+        if (text[b] == 46) && (b + 6 < e) && (text[b + 1] == 116) && ir::at(view(text), b, view(".type ")) {
+            return call;
+        }
+        e = b;
+    }
+    return call;
 }
 // The inline-site count `unit` starts from: what its previous part reached, or 0. `left`/`count` is
 // the unit being left and the sites it reached, which is filed first.
