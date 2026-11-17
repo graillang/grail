@@ -2873,8 +2873,10 @@ fn site_contains<a, b>(line: &a [u8], part: &b [u8]) -> bool {
     }
     return false;
 }
-fn site_words<a>(line: &a [u8]) -> u64[] {
-    mut out = u64[];
+// A directive line's numbers, into `out` (cleared first): site_table reads one per directive line
+// into one buffer; a fresh vector each time was an allocation per line of every function.
+fn site_words_into<a, b>(line: &a [u8], out: (&b mut u64[])) -> unit {
+    out.clear();
     mut v = 0;
     mut digits = 0;
     for i in line.len() {
@@ -2891,7 +2893,7 @@ fn site_words<a>(line: &a [u8]) -> u64[] {
     if digits != 0 {
         out.push(v);
     }
-    return out;
+    return ();
 }
 // A position's file name: a command-line input, or a generic body an interface carried (load_file).
 fn site_path<a>(c: (&a C), index: u64) -> u8[] {
@@ -3062,6 +3064,8 @@ fn site_imm<a, b>(text: &a [u8], a: u64, e: u64, reg: &b [u8]) -> u64 {
     return v;
 }
 fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
+    // One buffer for every directive line's numbers (site_words_into).
+    mut w = u64[];
     mut out = u8[];
     mut entries = u8[];
     mut files_std = u64[];
@@ -3108,7 +3112,7 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
         next := e + 1;
         if (e - a > 6) && (text[a] == 46) && (text[a + 1] == 103) {
             if site_at(text, a, e, view(".gbase ")) {
-                w := site_words(text[a..e]);
+                site_words_into(text[a..e], &mut w);
                 if w.len() == 1 {
                     base_line = w[0];
                 }
@@ -3122,7 +3126,7 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
                 // A new statement: a kind its predecessor stated for an abort that is not there any
                 // more is not this statement's.
                 pending = 0;
-                w := site_words(text[a..e]);
+                site_words_into(text[a..e], &mut w);
                 if w.len() == 4 {
                     internal := w[3] != 0;
                     if !seen_own {
@@ -3171,7 +3175,7 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
                 continue;
             }
             if site_at(text, a, e, view(".gkind ")) {
-                w := site_words(text[a..e]);
+                site_words_into(text[a..e], &mut w);
                 if w.len() == 1 {
                     pending = w[0];
                 }
