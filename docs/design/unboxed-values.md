@@ -549,6 +549,50 @@ corpus (`unboxed-|record|struct|tuple|closure|mutex|task|dyn|ffi|c-array`, count
 for 3b/3c, interface-test for 3c; callgrind counts after 3a and 3d. Each sub-step is one commit
 whose message says where it stands.
 
+**Stage 7 plan, written against stage 4's layout functions** (gaps15-stage4 0366c02; to start when
+stage 4 lands; director's order).
+*Invariant.* Every framable record (stage 4: every struct and tuple, owning or not) is laid out as C
+lays out a struct: fields in declared order, each at its natural alignment, size rounded up to the
+largest alignment. An `extern "C"` record already is; stage 7 makes every record one, so there is one
+layout and one access path instead of two. A `{x,y,z: f32}` is 12 bytes, `Vec3[]` is a C array of
+them, and `size_of`/`align_of` stop refusing plain records (they report what the layout now is).
+*Sizes.* A new `value_layout(ty) -> (bytes, align)`, per type (not per declaration, because a
+generic record's layout depends on its arguments), memoised beside `layout_offsets`:
+bool/u8/i8 1, u16/i16 2, char/u32/i32/f32 4, everything word-sized 8 (u64, f64, references, fn and C
+pointers, and any boxed value: vectors, strings, owned dyn, non-small enums), a small enum 16/8, an
+array `N * elem` at the element's alignment, a nested record its own (bytes, align). `ffi_field_size`
+/`ffi_field_align` become this function's C-record case instead of a second table.
+*Functions that change (names as in stage 4).*
+- `field_layout` stores byte offsets (offset * 2 + inline bit); `field_word` becomes `field_offset`
+  (bytes); `record_words` becomes `record_bytes` with a `words(bytes) = (bytes + 7) / 8` for
+  `frame_alloc` and the aggregate fact, which stay in words; `flat_bytes` is `record_bytes`.
+- `field_load` / `field_store`: a field narrower than 8 bytes is read with the gaps12-float
+  `sized_load(addr, width, signed, float)` and written with `sized_store`; a word field by `movq` at a
+  byte offset (the optimiser already accepts any displacement). `word_load`/`rec_store` keep word
+  offsets for enums, closures, cells.
+- References to a narrow field: the address is exact and untagged, and its referent type is known
+  at every use (`word_refs` from 3e becomes "narrow_refs: slot -> width/kind"), so `ref_load` /
+  `ref_store` emit the sized access directly; the bit-63 tagged form stays only for narrow vector
+  elements, whose width a generic `&T` cannot know (unchanged).
+- `cfield_load`/`cfield_store`/`caddr_*` collapse into the general path (their decl-indexed
+  `ffi_offset` becomes `field_offset` of the type); `structural_eq`, hashing and `Debug` printing read
+  fields through `field_load`, so padding is never read; `rt_swap`/`frame_copy`/`copy_into` copy
+  `record_bytes`, rounded up to words (the tail padding of a frame aggregate is the frame's).
+- Drop in place (`.P<key>`, stage 4) walks owned fields at their byte offsets: owners are words, so
+  they stay 8-aligned; only plain narrow fields move.
+- LLVM facts: the aggregate fact stays in words; narrow loads appear as the sized emitter's stream,
+  which the lifter already lifts (narrow vectors); interface `abi` line gains `layout = c`.
+*Risks and the test that shows each.* (1) A site that still assumes 8-byte fields (vectors of
+records, parallel_map widths, task item boxes, raw pointers' stride): every unboxed-* case, run with
+records of mixed widths - `{a: u8, b: u64, c: u16}` (padding inside), `{x: f32, y: f32, z: f32}`
+(12 bytes, not a multiple of 8), a nested `{p: Vec3, tag: u8}` (16 with tail padding). (2) Padding
+read by equality or hashing: a case comparing records whose padding differs (written through raw
+pointers). (3) Generic records at two instantiations with different layouts (`Pair<u8, u64>`,
+`Pair<u64, u8>`). (4) Frames: a 12-byte record in a 2-word aggregate; `rt_swap` of a non-word size.
+(5) Bootstrap: layout changes emitted code only; fixed point as usual. Interface line bump.
+*Bench.* aos: from 24 MB to the C 13 MB and the memory traffic of C; target the C time on LLVM once the
+descriptor hoist (P2/P3) has landed.
+
 **Stage 4 - records with drop and owned fields inline** (in records and vectors). Drop helpers
 split into in-place and boxed. Risk: partial moves out of inline fields, drop of a half-built
 vector on panic paths. Acceptance: allocator-balance corpus, `impl Drop` order cases.
