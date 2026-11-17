@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **A standard generic is checked once per surface, not once per run.** The check
+  `emit_specializations` owes every template a run instantiates (a replay of its body with its own
+  parameters opaque, its text thrown away) is now a unit of the per-function store: what it asked of
+  the run - specialisations, drop helpers, effect records - is recorded and asked again on a hit,
+  under the unit key the store already uses. Dev compiler, an edited check: bench/iterchain.grl
+  0.234G -> 0.154G, hashmap 0.203G -> 0.158G, json 0.188G -> 0.133G. `GRAIL_TEMPLATE_MEMO=0` turns it
+  off; the fn-cache report counts template checks apart from bodies. Fixed on the way: a body that
+  asked for a `parallel_for_zip` adapter could be a unit whose replay did not ask again (the adapter
+  went missing from a warm build); it is no longer a unit.
 - **Interface format 11:** an interface's trailer ends with `fast_hash` of the bytes before it (XXH64
   under four seeds, the build store's digest) instead of SHA-256. It guards against corruption, which
   is all a digest in the file itself can do; the source digest stays SHA-256. Interfaces written by

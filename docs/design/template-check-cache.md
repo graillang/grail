@@ -1,7 +1,13 @@
 # Remembering what checking a standard generic costs (design)
 
-Status: design, step 0 of the specialisation cache (owner: driver_speed; keys agreed with
-incremental_units before step 2).
+Status: step 1 built (owner: driver_speed; key and registrations agreed with incremental_units).
+As built, step 1 is not a separate memo but the per-function store itself: a validating replay is
+a unit (`fn_on`), keyed like every unit - the run's declaration surface, the body's text and
+signature, the compiler - and its registrations (specialisation, drop, effect records) are recorded
+and made again on a hit (`fn_apply`), as incremental_units required. A body that asks for something
+a unit does not record is not a unit (the FN_* rules; a `parallel_for_zip` adapter is one now). Its
+key names the whole run's surface, so it serves repeated and edited checks of a program; the
+owner-scoped key below, which would serve a new project's first check, is step 1b.
 
 ## What the time is
 
