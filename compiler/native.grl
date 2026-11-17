@@ -3641,6 +3641,9 @@ fn win32_dll<a>(name: &a [u8]) -> u8[] {
     if same(view(name), view("CoInitializeEx")) || same(view(name), view("CoUninitialize")) {
         return copy_bytes(view("combase"));
     }
+    if win32_is_winsock(view(name)) {
+        return copy_bytes(view("ws2_32"));
+    }
     return copy_bytes(view("kernel32"));
 }
 // `// grail-link: import DLL SYMBOL` for one Win32 entry point the image calls, so a driver can build
@@ -3655,33 +3658,56 @@ fn win32_link<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
     ffi_link(&mut c, view(note));
     return ();
 }
+// The Winsock entry points the Windows platform layer calls. Grouped by library, because
+// `raw_win32` writes one import note per call and the DLL name has to come from somewhere.
+fn win32_is_winsock<a>(name: (&a [u8])) -> bool {
+    if same(view(name), view("WSAStartup")) || same(view(name), view("WSACleanup")) {
+        return true;
+    }
+    if same(view(name), view("WSAGetLastError")) || same(view(name), view("WSASocketW")) {
+        return true;
+    }
+    if same(view(name), view("WSARecv")) || same(view(name), view("WSASend")) {
+        return true;
+    }
+    if same(view(name), view("WSAGetOverlappedResult")) || same(view(name), view("WSAIoctl")) {
+        return true;
+    }
+    if same(view(name), view("bind")) || same(view(name), view("listen")) {
+        return true;
+    }
+    if same(view(name), view("connect")) || same(view(name), view("accept")) {
+        return true;
+    }
+    if same(view(name), view("getsockname")) || same(view(name), view("setsockopt")) {
+        return true;
+    }
+    return same(view(name), view("closesocket"));
+}
 fn win32_arity<a>(name: (&a [u8])) -> u64 {
     if same(view(name), view("ExitProcess")) {
-        return 1;
-    }
-    if same(view(name), view("ExitThread")) {
         return 1;
     }
     if same(view(name), view("GetStdHandle")) {
         return 1;
     }
-    if same(view(name), view("GetModuleFileNameA")) {
+    if same(view(name), view("GetModuleFileNameW")) {
         return 3;
     }
-    if same(view(name), view("GetCurrentDirectoryA")) {
+    if same(view(name), view("GetCurrentDirectoryW")) {
         return 2;
     }
     if same(view(name), view("SetConsoleOutputCP")) || same(view(name), view("SetConsoleCP")) {
         return 1;
     }
-    if same(view(name), view("GetCommandLineA")) {
+    if same(view(name), view("GetCommandLineW")) {
         return 0;
     }
-    if same(view(name), view("GetEnvironmentStringsA")) {
+    if same(view(name), view("GetEnvironmentStringsW")) {
         return 0;
     }
-    if same(view(name), view("GetEnvironmentVariableA")) {
-        return 3;
+    if same(view(name), view("FreeEnvironmentStringsW")) {
+        return 1;
     }
     if same(view(name), view("GetCurrentProcessId")) {
         return 0;
@@ -3689,26 +3715,23 @@ fn win32_arity<a>(name: (&a [u8])) -> u64 {
     if same(view(name), view("GetLastError")) {
         return 0;
     }
-    if same(view(name), view("GetFileAttributesA")) {
+    if same(view(name), view("GetFileAttributesW")) {
         return 1;
     }
-    if same(view(name), view("GetFileAttributesExA")) {
+    if same(view(name), view("GetFileAttributesExW")) {
         return 3;
     }
-    if same(view(name), view("MoveFileExA")) {
+    if same(view(name), view("MoveFileExW")) {
         return 3;
     }
     if same(view(name), view("CreatePipe")) {
         return 4;
     }
-    if same(view(name), view("CreateSymbolicLinkA")) {
+    if same(view(name), view("CreateSymbolicLinkW")) {
         return 3;
     }
     if same(view(name), view("GetExitCodeProcess")) {
         return 2;
-    }
-    if same(view(name), view("GetSystemTimeAsFileTime")) {
-        return 1;
     }
     if same(view(name), view("GetTickCount64")) {
         return 0;
@@ -3719,16 +3742,13 @@ fn win32_arity<a>(name: (&a [u8])) -> u64 {
     if same(view(name), view("ReadFile")) {
         return 5;
     }
-    if same(view(name), view("CreateFileA")) {
+    if same(view(name), view("CreateFileW")) {
         return 7;
     }
-    if same(view(name), view("CreateProcessA")) {
+    if same(view(name), view("CreateProcessW")) {
         return 10;
     }
     if same(view(name), view("CloseHandle")) {
-        return 1;
-    }
-    if same(view(name), view("FlushFileBuffers")) {
         return 1;
     }
     if same(view(name), view("VirtualAlloc")) {
@@ -3764,23 +3784,77 @@ fn win32_arity<a>(name: (&a [u8])) -> u64 {
     if same(view(name), view("SwitchToThread")) {
         return 0;
     }
-    if same(view(name), view("DeleteFileA")) {
+    if same(view(name), view("DeleteFileW")) {
         return 1;
     }
-    if same(view(name), view("RemoveDirectoryA")) {
+    if same(view(name), view("RemoveDirectoryW")) {
         return 1;
     }
-    if same(view(name), view("CreateDirectoryA")) {
+    if same(view(name), view("CreateDirectoryW")) {
         return 2;
     }
-    if same(view(name), view("MoveFileA")) {
+    if same(view(name), view("FindFirstFileW")) {
         return 2;
+    }
+    if same(view(name), view("FindNextFileW")) {
+        return 2;
+    }
+    if same(view(name), view("FindClose")) {
+        return 1;
     }
     if same(view(name), view("TerminateProcess")) {
         return 2;
     }
-    if same(view(name), view("SetFilePointerEx")) {
+    if same(view(name), view("CreateEventW")) {
         return 4;
+    }
+    if same(view(name), view("CancelIoEx")) {
+        return 2;
+    }
+    if same(view(name), view("WSAStartup")) {
+        return 2;
+    }
+    if same(view(name), view("WSACleanup")) {
+        return 0;
+    }
+    if same(view(name), view("WSAGetLastError")) {
+        return 0;
+    }
+    if same(view(name), view("WSASocketW")) {
+        return 6;
+    }
+    if same(view(name), view("WSARecv")) {
+        return 7;
+    }
+    if same(view(name), view("WSASend")) {
+        return 7;
+    }
+    if same(view(name), view("WSAGetOverlappedResult")) {
+        return 5;
+    }
+    if same(view(name), view("WSAIoctl")) {
+        return 9;
+    }
+    if same(view(name), view("bind")) {
+        return 3;
+    }
+    if same(view(name), view("listen")) {
+        return 2;
+    }
+    if same(view(name), view("connect")) {
+        return 3;
+    }
+    if same(view(name), view("accept")) {
+        return 3;
+    }
+    if same(view(name), view("getsockname")) {
+        return 3;
+    }
+    if same(view(name), view("setsockopt")) {
+        return 5;
+    }
+    if same(view(name), view("closesocket")) {
+        return 1;
     }
     return 18446744073709551615;
 }
@@ -32604,7 +32678,9 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         }
     }
     if id == 135 {
-        if (args.len() == 0) || (5 < args.len()) {
+        // Up to eight word arguments: four in registers and four on the stack, which is what
+        // ConnectEx needs (a function pointer Winsock hands out rather than an import).
+        if (args.len() == 0) || (9 < args.len()) {
             fail(&mut c, view("indirect Win32 call arity"));
         }
     }
@@ -32707,6 +32783,28 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         }
         count := args.len() - 1;
         if c.target == 3 {
+            // Win64: the callee's shadow space and any arguments past the fourth live in a frame
+            // this call owns, exactly as an imported call does it. The frame is emitted for every
+            // count, so a four-argument COM call is as correct as a seven-argument ConnectEx.
+            mut stackargs = 0;
+            if 4 < count {
+                stackargs = count - 4;
+            }
+            mut size = 32 + stackargs * 8;
+            if size % 16 != 0 {
+                size = size + 8;
+            }
+            o(&mut c, view("subq $"));
+            on(&mut c, size);
+            o(&mut c, view(",%rsp\n"));
+            mut i = 4;
+            while i < count {
+                get(&mut c, args[i + 1], view("%rax"));
+                o(&mut c, view("movq %rax,"));
+                on(&mut c, 32 + (i - 4) * 8);
+                o(&mut c, view("(%rsp)\n"));
+                i = i + 1;
+            }
             if 0 < count {
                 get(&mut c, args[1], view("%rcx"));
             }
@@ -32721,6 +32819,9 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
             }
             get(&mut c, args[0], view("%r11"));
             call_slot_out(&mut c, view("call *%r11\n"), view("an imported function"));
+            o(&mut c, view("addq $"));
+            on(&mut c, size);
+            o(&mut c, view(",%rsp\n"));
         } else {
             if 0 < count {
                 get(&mut c, args[1], view("%rdi"));
