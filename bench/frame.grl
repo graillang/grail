@@ -8,7 +8,12 @@
 // I/O task reports through an atomic. Output is `name value unit` lines; times are never equal
 // twice, so nothing here is a corpus expectation.
 use host;
+
 use pool;
+// With a second argument, a task makes 100 ms blocking foreign calls throughout (stage 6: the frame
+// must not notice); with a third, the same calls undeclared, which hold a worker each.
+extern "C" blocking lib "c" as "usleep" fn usleep_blocking(us: u32) -> i32;
+extern "C" lib "c" as "usleep" fn usleep_plain(us: u32) -> i32;
 
 struct Shared {
     stop: Atomic<u64>,
@@ -98,8 +103,26 @@ fn bg_task(n: u64, sh: &Shared) -> u64 {
         return acc;
     });
 }
+fn blocker(n: u64, sh: &Shared) -> u64 {
+    mut calls = 0;
+    while sh.stop.load() == 0 {
+        unsafe {
+            if host::argc() > 3 {
+                usleep_plain(100000);
+            } else {
+                usleep_blocking(100000);
+            }
+        }
+        calls += 1;
+    }
+    return calls;
+}
 fn body<s>(sc: (&s Scope<&Shared>), sh: &Shared) -> u64 {
     io := spawn(sc, 0, io_task);
+    mut blockers = Task<u64>[];
+    if host::argc() > 2 {
+        for i in 4 { blockers.push(spawn(sc, i, blocker)); }
+    }
     bg := spawn(sc, 0, bg_task);
     frames := 600;
     n := 1000000;
@@ -123,6 +146,7 @@ fn body<s>(sc: (&s Scope<&Shared>), sh: &Shared) -> u64 {
     total := host::now_us() - start;
     sh.stop.store(1);
     join(io);
+    while blockers.len() != 0 { join(blockers.pop()!); }
     join(bg);
     for i in 16 { check = check ^ data[i * 1000]; }
     // Insertion sort: 600 values, once, after the measurement.

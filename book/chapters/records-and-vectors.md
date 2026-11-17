@@ -7,6 +7,15 @@ are still released when the record ends.
 
 {{example:records}}
 
+A record is held as its words wherever it is held: in the function's frame, inline in the record
+that contains it, and back to back in a vector (`Person[]` stores each `Person`'s words in its
+buffer). Only what a record owns - its strings, vectors and other heap data - is on the heap, never
+the record itself, whether or not it owns anything or implements `Drop`. When a record ends, its
+fields are dropped in place, in declaration order, after its own `drop` if it has one; a vector
+drops its elements in index order. Moving a field out leaves that field empty, so only the rest is
+dropped. A record held in an enum, a closure, a `Mutex`, a `dyn` value or a task result is boxed
+there, and freed with it.
+
 `[10, 20, 30]` is a vector: the first element fixes the element type, and every other element is
 checked against it. Where the context already names a vector type - a typed binding, a parameter, a
 field, a return type, an enclosing literal - the literal takes that type instead, so

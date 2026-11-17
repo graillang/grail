@@ -72,12 +72,17 @@ ok('the table names the f32 arithmetic sites', ops.length >= 10, `${ops.length} 
 ok('every f32 arithmetic fact carries an opcode', ops.every(line => /width (42|43|45|47)$/.test(line)));
 
 const ir = readFileSync(checked.ll, 'utf8');
-const main = ir.slice(ir.indexOf('define {i64, i64} @"f_main_main"'), ir.indexOf('\n}\n', ir.indexOf('define {i64, i64} @"f_main_main"')));
+// A lifted body's text, from its `define` line (whatever signature the fact gave it) to its end.
+const defined = (text, name) => {
+  const at = text.search(new RegExp(`^define [^\n]*@"${name.replace(/[.$]/g, '\\$&')}"\\(`, 'm'));
+  return at < 0 ? '' : text.slice(at, text.indexOf('\n}\n', at));
+};
+const main = defined(ir, 'f_main_main');
 ok('f32 locals become real float slots', (main.match(/alloca float/g) ?? []).length >= 3, String((main.match(/alloca float/g) ?? []).length));
 for (const kind of ['fadd float', 'fsub float', 'fmul float', 'fdiv float']) {
   ok(`the lifter emits ${kind}`, main.includes(kind));
 }
-ok('a fact-carrying call is no longer a call', !/call \{i64, i64\} @"rt_f64_op"/.test(main));
+ok('a fact-carrying call is no longer a call', !/call (i64|\{i64, i64\}) @"rt_f64_op"/.test(main));
 ok('widening is a single fpext', /fpext float .* to double/.test(main));
 // The verify check is a bit compare of the widening: one per fact use, on the cold path.
 ok('--verify-facts emits the round-trip check', /icmp eq i64 %t\d+, %t\d+/.test(main) && ir.includes('rt_abort.cold'));
@@ -181,7 +186,7 @@ ok('range fixture: --verify-facts re-inserts the check and it does not fire',
 const plainIr = readFileSync(rangePlain.ll, 'utf8');
 const onIr = readFileSync(rangeOn.ll, 'utf8');
 const checkedIr = readFileSync(rangeChecked.ll, 'utf8');
-const accessorCalls = text => (text.match(/call \{i64, i64\} @"rt_atb"/g) ?? []).length;
+const accessorCalls = text => (text.match(/call (i64|\{i64, i64\}) @"rt_atb"/g) ?? []).length;
 ok('the pass is off by default: the accessor is called and no verdict is recorded',
   accessorCalls(plainIr) > 0 && !plainIr.includes('; range '));
 ok('--range-facts proves the access it is given and stops calling the accessor',
@@ -196,10 +201,7 @@ ok('--verify-facts records the verdict it checked', /^; range \d+ 3$/m.test(chec
 // and the --range-facts build read 70 bytes past the end instead of aborting. With widening it
 // converges, and the guard (100) still does not prove the access against the length (30), so the
 // pass must keep the accessor call - the checked code - and record no verdict.
-const mainOf = text => {
-  const at = text.indexOf('define {i64, i64} @"f_main_main"');
-  return text.slice(at, text.indexOf('\n}\n', at));
-};
+const mainOf = text => defined(text, 'f_main_main');
 for (const [fixture, aborts] of [['range_long_trip.grl', true]]) {
   const tag = fixture.replace('.grl', '').replace(/_/g, '-');
   const native = run([build(`${tag}-native`, fixture, { backend: 'native' }).exe]);
@@ -230,8 +232,43 @@ for (const [fixture, expect] of [['range_long_proof.grl', '300'], ['range_push_l
   ok(`${fixture}: --verify-facts records and checks the verdict`, /^; range \d+ 3$/m.test(readFileSync(verify.ll, 'utf8')) && verifyRun.stdout === native.stdout);
 }
 
+// ---- the signature fact: exact arity and result width, and a forged one refused ----
+// A lifted body is defined with exactly its argument words and a call passes exactly those, so a
+// fact that says fewer than the body reads would hand it garbage, and one that says one result word
+// where the caller reads two would drop %rdx. The lifter finds both (a body reading an argument
+// register past its fact; a caller reading %rdx after a one-word call), drops the fact for the body
+// and for every call to it (the module is lowered again in the six-word form), and under
+// --verify-facts fails the compile naming the fact.
+const signature = build('signature', 'signature.grl', { backend: 'llvm', verifyFacts: true });
+const sigIr = readFileSync(signature.ll, 'utf8');
+ok('signature: the facts are recorded', /^; fact f_main_two signature 2$/m.test(sigIr) && /^; fact f_main_as_shape signature 1$/m.test(sigIr));
+ok('signature: a two-word body takes two words and gives one', /^define internal i64 @"f_main_two"\(i64 %a0, i64 %a1\)/m.test(sigIr), sigIr.match(/^define.*f_main_two.*$/m)?.[0]);
+ok('signature: a `&dyn` result stays two words', /^define internal \{i64, i64\} @"f_main_as_shape"\(i64 %a0\)/m.test(sigIr), sigIr.match(/^define.*f_main_as_shape.*$/m)?.[0]);
+ok('signature: the right facts run', run([signature.exe]).stdout === '44 7\n', JSON.stringify(run([signature.exe]).stdout));
+const refused = (directory, forge) => {
+  try {
+    build(directory, 'signature.grl', { backend: 'llvm', verifyFacts: true, extra: [`--forge-signature=${forge}`] });
+    return '';
+  } catch (error) {
+    return String(error.message);
+  }
+};
+const fewer = refused('signature-fewer', 'f_main_two:1');
+ok('signature: a fact with fewer argument words than the body reads fails under --verify-facts', /the signature fact of f_main_two is wrong: it gives 1 argument words and the body reads %rsi/.test(fewer), fewer.slice(0, 400));
+const narrow = refused('signature-narrow', 'f_main_as_shape:1:1');
+ok('signature: a one-word result fact for a two-word result fails under --verify-facts', /the signature fact of f_main_as_shape is wrong: it gives a one-word result and \S+ reads %rdx/.test(narrow), narrow.slice(0, 400));
+const quiet = build('signature-quiet', 'signature.grl', { backend: 'llvm', extra: ['--forge-signature=f_main_two:1'] });
+ok('signature: without --verify-facts a forged fact is dropped (six words again) and the program is right', run([quiet.exe]).stdout === '44 7\n' && /^define internal \{i64, i64\} @"f_main_two"\(i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5\)/m.test(readFileSync(quiet.ll, 'utf8')));
+
+// ---- the FFI fact: a C call with floats is lifted, typed as C types it ----
+const ffi = build('ffi-floats', 'ffi_float_calls.grl', { backend: 'llvm', verifyFacts: true });
+const ffiIr = readFileSync(ffi.ll, 'utf8');
+ok('ffi: the C functions are declared with their float types', /^declare double @"scale"\(i64, double, float\)$/m.test(ffiIr) && /^declare float @"half"\(float\)$/m.test(ffiIr));
+ok('ffi: the caller is lifted and calls them typed', /call double @"scale"\(i64 %t\d+, double %t\d+, float %t\d+\)/.test(ffiIr) && /^define [^\n]*@"f_main_main"/m.test(ffiIr));
+ok('ffi: the values are the native build\'s', run([ffi.exe]).stdout === '500\n1.5\n', JSON.stringify(run([ffi.exe]).stdout));
+
 if (failed) {
   console.log(`facts: ${failed} check(s) failed`);
   process.exit(1);
 }
-console.log('facts: the f32, F1 and range facts hold, --verify-facts checks every one of them, and a wrong fact aborts');
+console.log('facts: the f32, F1, range and signature facts hold, --verify-facts checks every one of them, and a wrong fact aborts or is refused');

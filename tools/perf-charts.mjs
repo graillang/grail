@@ -33,7 +33,8 @@ export function rowRatio(table, row, key = table.primary) {
   return (row.direction ?? table.direction) === 'higher' ? Math.max(...rivals) / mine : mine / Math.min(...rivals);
 }
 
-export function chart(table, data = undefined) {
+// `prefix` names the result file, so two files' tables of one id (release) are two elements.
+export function chart(table, data = undefined, prefix = data?.tool) {
   const cols = table.columns;
   const grailOrder = new Map(cols.filter(c => c.grail).map((c, i) => [c.key, i]));
   // Each bar: how far it is from the row's best, as a multiple: value / best where lower is better,
@@ -98,7 +99,7 @@ export function chart(table, data = undefined) {
     lx += 22 + c.label.length * 6.6;
   });
   const total = left + width + right;
-  return `<figure class="perf-chart" id="chart-${escape(table.id)}"><svg viewBox="0 0 ${total} ${height}" width="100%" role="img" aria-label="${escape(`${table.title}. ${caption}`)}" xmlns="http://www.w3.org/2000/svg">${parts.join('')}</svg><figcaption>${escape(table.title)}. ${escape(caption)}${source ? ` ${escape(source)}` : ''}</figcaption></figure>`;
+  return `<figure class="perf-chart" id="chart-${prefix ? `${escape(prefix)}-` : ''}${escape(table.id)}"><svg viewBox="0 0 ${total} ${height}" width="100%" role="img" aria-label="${escape(`${table.title}. ${caption}`)}" xmlns="http://www.w3.org/2000/svg">${parts.join('')}</svg><figcaption>${escape(table.title)}. ${escape(caption)}${source ? ` ${escape(source)}` : ''}</figcaption></figure>`;
 }
 
 export function numbers(table) {
@@ -113,7 +114,7 @@ export function numbers(table) {
 
 export function provenance(data) {
   const load = Array.isArray(data.load) ? data.load.map(escape).join(' at start, ') + ' at end' : escape(data.load ?? '');
-  const items = [
+  let items = [
     ['Grail', `<code>${escape(data.commit)}</code>`],
     ['Measured', escape(data.date)],
     ['Machine', escape(`${data.machine?.cpu ?? 'unknown'}, ${data.machine?.cpus ?? '?'} CPUs, ${data.machine?.kernel ?? ''}`)],
@@ -121,12 +122,16 @@ export function provenance(data) {
     ['Toolchains', escape(Object.values(data.versions ?? {}).join('; '))],
   ];
   const commands = (data.commands ?? []).map(c => `<li><code>${escape(c)}</code></li>`).join('');
+  // abundance-perf: the slowest program's hottest functions, and any program that did not build or run.
+  if (data.hot) items.push(['Hot spots', `${escape(data.hot.program)}, the slowest release run: ${data.hot.top.length ? data.hot.top.map(t => `<code>${escape(t.fn)}</code> ${escape(t.percent)} %`).join(', ') : 'no samples'} of its time by inclusive samples (<code>grail profile --callers</code>)`]);
+  const failed = Object.entries(data.failed ?? {});
+  if (failed.length) items.push(['Did not build or run', failed.map(([k, v]) => `${escape(k)}: ${escape(v)}`).join('; ')]);
   return `<div class="perf-provenance"><dl>${items.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl><p>Reproduce with:</p><ul>${commands}</ul></div>`;
 }
 
 // The whole result file: every charted table as a chart then its numbers, the rest as numbers.
-export function renderResults(data) {
+export function renderResults(data, prefix = data?.tool) {
   if (data?.schema !== 1 || !Array.isArray(data.tables)) throw new Error(`not a rivals result file (schema ${data?.schema})`);
-  const html = data.tables.map(t => `${t.chart ? chart(t, data) : ''}${numbers(t)}`).join('') + provenance(data);
+  const html = data.tables.map(t => `${t.chart ? chart(t, data, prefix) : ''}${numbers(t)}`).join('') + provenance(data);
   return `<section class="perf-results" data-tool="${escape(data.tool)}">${html}</section>`.replace(/\n/g, ' ');
 }

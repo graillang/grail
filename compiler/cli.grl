@@ -1064,19 +1064,25 @@ fn compile_mode<a, b, d, e, g, k>(
     }
     // The assembler: the compiler's own (`grail asm`, compiler/asm_x86.grl) for a Linux x86-64
     // build it covers, clang otherwise. `GRAIL_ASSEMBLER` and `--assembler=clang` choose clang.
-    internal := eq(view(target), view("x86_64"))
+    internal := (eq(view(target), view("x86_64")) || eq(view(target), view("aarch64")) || eq(view(target), view("riscv64")))
         && (host::env(view("GRAIL_ASSEMBLER")).len() == 0)
         && (release == 0)
         && (((flags / 16384) % 2) == 0);
     mut assemble = u8[][tool(view("GRAIL_ASSEMBLER"), view("clang"))];
     if internal {
         assemble = u8[][host::exe_path(), copy(view("asm"))];
+        if !eq(view(target), view("x86_64")) {
+            assemble.push(copy(view("--target")));
+            assemble.push(copy(view(target)));
+        }
     }
     if eq(view(target), view("riscv64")) {
         triple = copy(view("--target=riscv64-linux-gnu"));
         emulation = copy(view("elf64lriscv"));
-        assemble.push(copy(view("-march=rv64imafd")));
-        assemble.push(copy(view("-mabi=lp64d")));
+        if !internal {
+            assemble.push(copy(view("-march=rv64imafd")));
+            assemble.push(copy(view("-mabi=lp64d")));
+        }
     }
     if !internal {
         assemble.push(triple);
@@ -2200,7 +2206,7 @@ fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
                 compile.push(copy(view("--no-entry")));
             }
             // The internal assembler (`grail asm`) runs inside the module's compiler run.
-            inproc := !checking && (prefix.len() == 2) && eq(view(item(&prefix, 1)), view("asm"));
+            inproc := !checking && (prefix.len() >= 2) && eq(view(item(&prefix, 1)), view("asm"));
             if inproc {
                 compile.push(copy(view("--object")));
                 compile.push(cat(view(stem), view(".o")));

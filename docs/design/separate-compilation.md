@@ -112,7 +112,7 @@ than misread.
  source "tests/interfaces/pair.grl"
  sha256 "ad1f2b3cf421decab61ea22f7dfc572fec79a74a3078b3ef330f4e49a94db2d0"
  mode typed_refs=1 default_u64=1 overflow=checked target=x86_64
- abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame
+ abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame args = 6 registers then stack
  unsafe 0
  std 0
  host 0
@@ -540,7 +540,7 @@ are keyed by index rather than written in order, so they cannot desynchronise fr
 and a parameter that gains a default does not change any other parameter's record.
 
 The module record also carries the **ABI line** - `abi dyn pair size = 16 align = 8 word0 = data
-word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame`, one length-counted string holding exactly what
+word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame args = 6 registers then stack`, one length-counted string holding exactly what
 `iface_dyn_abi()` returns. Its last clause says what a reference to a record is (the record's own
 address, docs/design/unboxed-values.md); a stage that changes a layout changes this line.
 A `&dyn I` in a signature or a field crosses a module boundary as a pair, so two modules built for
@@ -1163,6 +1163,20 @@ Consequences, stated rather than discovered:
   `tools/split-test.mjs` compares;
 - the single-file build keeps cross-module inlining only where the optimizer knows no unit
   boundaries; it emits the same markers, so both shapes inline identically.
+
+### Site markers in an inlined copy
+
+A candidate's body may hold the site markers a build with error locations writes for every
+statement (`.gpos`, `.gkind`); any other directive still keeps it from being inlined. The copy keeps
+them, its positions made absolute when it is filed (`ir::absolute_positions`), and `inline_calls`
+writes the caller's last `.gpos` again after each copy, so the caller's code after the call is
+attributed to the caller's statement. The rule for inlined code is therefore: **a failure inside an
+inlined copy reports the line it was written on, in its caller's frame** - the copy is not a frame,
+so the backtrace goes from that line straight to the caller's caller. A synthesised caller with no
+statement of its own (a refined function's checking wrapper, whose `.proved` body is inlined into it)
+is why the copy's own positions are kept: with only the caller's, such a failure had no position at
+all. Inline-site numbers continue per unit across all of its parts, since a unit can stand in the
+stream more than once.
 
 ### The frame constant, which was a latent miscompile
 
