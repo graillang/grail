@@ -1,5 +1,12 @@
 ## Unreleased
 
+- Fixed: a debugger read records wrongly after the unboxed-values layout (stages 1a and 1b). A
+  reference to a record is the record's own address, but DWARF and CodeView still described it as a
+  pointer to a pointer, so `print *o` showed garbage. A plain record held in a record or a vector is
+  stored inline, but it was described as a pointer at an 8-byte slot. Both now follow the layout:
+  `&Outer` is `Outer *`, a plain field is the record itself at its real offset, and a flat vector's
+  element is the record (`tests/debug_members.grl`, `tools/test-debug-lines.mjs`).
+
 - **Fixed: an LLVM-backend miscompile of a vector grown through its address.** A call handed `&mut v`
   receives the slot's address, not the header word, so the lifter did not count it as a call that
   can grow `v`, and the `len`/`data` it had read before the call were used after it: `pad(&mut out,

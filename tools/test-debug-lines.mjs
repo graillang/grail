@@ -122,7 +122,7 @@ try {
     ok(['clang', '--target=x86_64-linux-gnu', '-c', asm, '-o', `${exe}.o`]);
     ok(['ld.lld', '-m', 'elf_x86_64', `${exe}.o`, '-o', exe]);
     const membersInfo = ok(['llvm-dwarfdump', '--debug-info', exe]).stdout;
-    for (const [structure, fields] of [['Outer', ['count', 'ratio', 'inner', 'label']], ['Inner', ['id', 'tag']], ['Pt', ['x', 'y', 'w']], ['u8[]', ['data', 'len', 'cap']]]) {
+    for (const [structure, fields] of [['Outer', ['count', 'ratio', 'inner', 'pos', 'label']], ['Inner', ['id', 'tag']], ['Pos', ['row', 'col']], ['Pt', ['x', 'y', 'w']], ['u8[]', ['data', 'len', 'cap']]]) {
       assert.match(membersInfo, new RegExp(`DW_TAG_structure_type\\s+DW_AT_name\\s+\\("${structure.replace(/[[\]]/g, '\\$&')}"\\)`), `no structure type ${structure}`);
       for (const field of fields) {
         assert.match(membersInfo, new RegExp(`DW_TAG_member\\s+DW_AT_name\\s+\\("${field}"\\)`), `${structure} has no member ${field}`);
@@ -134,11 +134,14 @@ try {
     if (run(['gdb', '--version']).status === 0) {
       const line = readFileSync(membersSource, 'utf8').split('\n').findIndex(row => row.includes('total := ')) + 1;
       const shown = run(['gdb', '-q', '-batch', '-ex', 'set debuginfod enabled off', '-ex', `break debug_members.grl:${line}`, '-ex', 'run',
-        '-ex', 'print **o', '-ex', 'print *(*o)->inner', '-ex', 'print (*o)->label->data', '-ex', 'print **p', '-ex', 'print (*v)->data[0]@3', '-ex', 'print (*s)->data', exe]).stdout;
-      for (const expected of ['count = 7, ratio = 2.5', 'id = 42', '"outer-label"', 'x = -3, y = 9, w = 1.5', '{10, 20, 30}', '"hello debugger"']) {
+        // A reference to a record is the record's own address (unboxed-values.md, stage 1a), and a
+        // plain record is stored inline in the record and the vector holding it (stage 1b).
+        '-ex', 'print *o', '-ex', 'print *o->inner', '-ex', 'print o->pos', '-ex', 'print o->label->data', '-ex', 'print *p', '-ex', 'print (*v)->data[0]@3', '-ex', 'print (*s)->data',
+        '-ex', 'print *q', '-ex', 'print (*ps)->data[1]', exe]).stdout;
+      for (const expected of ['count = 7, ratio = 2.5', 'id = 42', 'row = 3, col = -4', '"outer-label"', 'x = -3, y = 9, w = 1.5', '{10, 20, 30}', '"hello debugger"', 'row = 11, col = -12', 'row = 31, col = -32']) {
         assert.ok(shown.includes(expected), `gdb did not show ${expected}:\n${shown}`);
       }
-      console.log('debug-lines: gdb prints record, nested record, string, vector and C-record members');
+      console.log('debug-lines: gdb prints record, nested and inline record, string, vector, flat vector element and C-record members');
     } else {
       console.log('debug-lines: gdb not installed; member DWARF checked with llvm-dwarfdump only');
     }
@@ -210,7 +213,7 @@ try {
   {
     const membersWin = compileProgram(compiler, [join(root, 'tests/debug_members.grl')], join(work, 'windows-members'), { debug: true });
     const types = ok(['llvm-pdbutil', 'dump', '--types', membersWin.pdb]).stdout;
-    for (const [structure, size, fields] of [['Outer', 32, [['count', 0], ['ratio', 8], ['inner', 16], ['label', 24]]], ['Inner', 16, [['id', 0], ['tag', 8]]], ['Pt', 12, [['x', 0], ['y', 4], ['w', 8]]], ['u8[]', 24, [['data', 0], ['len', 8], ['cap', 16]]]]) {
+    for (const [structure, size, fields] of [['Outer', 48, [['count', 0], ['ratio', 8], ['inner', 16], ['pos', 24], ['label', 40]]], ['Inner', 16, [['id', 0], ['tag', 8]]], ['Pos', 16, [['row', 0], ['col', 8]]], ['Pt', 12, [['x', 0], ['y', 4], ['w', 8]]], ['u8[]', 24, [['data', 0], ['len', 8], ['cap', 16]]]]) {
       const full = new RegExp(`LF_STRUCTURE \\[size = \\d+\\] \`${structure.replace(/[[\]]/g, '\\$&')}\`\\s+vtable: <no type>, base list: <no type>, field list: (0x[0-9A-F]+)\\s+options: , sizeof ${size}`);
       const found = types.match(full);
       assert.ok(found, `CodeView has no full definition of ${structure} (sizeof ${size})`);
@@ -220,7 +223,8 @@ try {
       }
     }
     const membersSymbols = ok(['llvm-pdbutil', 'dump', '--symbols', membersWin.pdb]).stdout;
-    assert.match(membersSymbols, /S_REGREL32 \[size = \d+\] `o`\s+type = 0x[0-9A-F]+ \(Outer\*\*\)/, 'the local o is not typed Outer**');
+    // `o: &Outer` is the record's own address (unboxed-values.md, stage 1a): one pointer.
+    assert.match(membersSymbols, /S_REGREL32 \[size = \d+\] `o`\s+type = 0x[0-9A-F]+ \(Outer\*\)/, 'the local o is not typed Outer*');
     console.log('debug-lines: windows-x86_64 PDB describes record, string, vector and C-record members');
   }
   const unwind = ok(['llvm-readobj', '--unwind', win.object]).stdout;
