@@ -17743,5 +17743,105 @@
     "targets": [
       "x86_64"
     ]
+  },
+  {
+    "name": "simd-basics",
+    "note": "The S1 SIMD types by value (docs/design/simd.md): lane arithmetic, sum and lane reads, min/max with NaN and signed zeros, compares to masks and select, mask splat/any/all/not, loads and stores through slices and arrays. Identical on every target and backend.",
+    "files": [
+      "tests/simd/basics.grl"
+    ],
+    "stdout": "1.5\n6\n15\n-6\n-2147483648\n-2147483642\ntrue\nfalse\n4\n3\n1\n0\n-0\n62\n3\n15\ntrue\nfalse\n18\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "simd-oracle-every-op-every-lane",
+    "note": "Every S1 SIMD operation on f32x8, f32x4, f64x4, f64x2, i32x8 lane by lane against the scalar operation on edge values (signed zeros, infinities, NaN, subnormals, the largest finite values, i32 wraparound): 0 lanes differ, and the checksum of every lane's bits is the same on every target and backend.",
+    "files": [
+      "tests/simd/oracle.grl"
+    ],
+    "stdout": "0\n9290390926636514803\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "simd-inline-loop",
+    "note": "A small SIMD function called in a loop; with --backend=llvm the call is inlined and the loop is in registers (tools/test-simd.mjs holds the instructions).",
+    "files": [
+      "tests/simd/inline_loop.grl"
+    ],
+    "stdout": "177\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "simd-compare-operator-is-refused",
+    "source": "fn main() {\n    a := f32x4::splat(1.0);\n    println(a < a);\n}\n",
+    "reject": true,
+    "diagnostic": "a SIMD comparison is lane-wise and gives a mask: write `a.eq(b)`, `a.lt(b)` and so on"
+  },
+  {
+    "name": "simd-shapes-must-match",
+    "source": "fn main() {\n    a := f32x4::splat(1.0);\n    b := f64x2::splat(1.0);\n    println((a + b).sum());\n}\n",
+    "reject": true,
+    "diagnostic": "expected `f32x4`, found `f64x2`"
+  },
+  {
+    "name": "simd-lane-past-the-end",
+    "source": "fn main() {\n    a := f32x4::splat(1.0);\n    println(a.lane(4));\n}\n",
+    "reject": true,
+    "diagnostic": "the lane index is past the vector's last lane"
+  },
+  {
+    "name": "simd-store-needs-a-mutable-place",
+    "source": "fn put<a>(s: &a [f32]) {\n    f32x4::splat(1.0).store(s, 0);\n}\nfn main() {\n    v := f32[0.0, 0.0, 0.0, 0.0];\n    put(&v[:]);\n}\n",
+    "reject": true,
+    "diagnostic": "a SIMD store needs a mutable place"
+  },
+  {
+    "name": "simd-mask-has-no-arithmetic-methods",
+    "source": "fn main() {\n    m := m32x4::splat(true);\n    println(m.sum());\n}\n",
+    "reject": true,
+    "diagnostic": "`m32x4` has no method `sum`; a mask's methods are select, any, all and not"
+  },
+  {
+    "name": "simd-load-is-bounds-checked",
+    "source": "fn main() {\n    v := f32[1.0, 2.0, 3.0, 4.0, 5.0];\n    s := &v[:];\n    println(f32x4::load(s, 2).sum());\n}\n",
+    "signal": "SIGABRT",
+    "stderr": "index 5 out of bounds for length 5",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "atomic-element-is-part-of-the-type",
+    "source": "fn take(a: Atomic<u64>) -> u64 {\n    return a.load();\n}\nfn main() {\n    println(take(Atomic::new(u8(1))));\n}\n",
+    "reject": true,
+    "diagnostic": "expected `Atomic<u64>`, found `Atomic<u8>`",
+    "note": "An Atomic<T>'s element is part of its type: same_type compared only the kind, so an Atomic<u8> passed where an Atomic<u64> was wanted, and its 8-byte cell was read as the other width."
+  },
+  {
+    "name": "simd-vector-parameters",
+    "note": "Vectors as parameters (the first is frame slot 0) and results, through calls on every target and backend.",
+    "files": [
+      "tests/simd/params.grl"
+    ],
+    "stdout": "10\n10\n20\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
   }
 ]

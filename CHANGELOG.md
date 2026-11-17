@@ -59,6 +59,20 @@
   At most 10,000 threads may be blocked in foreign calls; the next one ends the program with a
   message instead of exhausting the machine.
 
+- **SIMD vector types (S1).** `f32x4`, `f32x8`, `f64x2`, `f64x4`, `i32x4` and `i32x8`, with masks
+  `m32x4`, `m32x8`, `m64x2` and `m64x4`.
+  - They are plain values. Lane-wise `+ - * /` work on floats; wrapping `+ - *` and `& | ^` on
+    integers; `& | ^` on masks.
+  - Constructors are `splat`, `new` and `load` (from a slice or an array, one bounds check per
+    vector). Methods are `store`, `sum` (a fixed halving tree, bit-identical everywhere), `lane`,
+    `min`/`max` (the scalar NaN and tie rule) and the compares `eq ne lt le gt ge`, which give masks.
+    A mask has `select`, `any`, `all` and `not`.
+  - The LLVM backend lowers them to vector IR. A dot product runs within 5% of the same loop in C
+    with SSE2 intrinsics, its loop entirely in registers. The native backend computes the same
+    results lane by lane; packed SSE2 and NEON come later.
+  - Interfaces are format 10.
+- Fixed: an `Atomic<T>`'s element was not part of its type, so an `Atomic<u8>` could be passed where
+  an `Atomic<u64>` was expected.
 - **Small runtime functions are inlined into every module.** A small runtime body (the scheduler's
   `rt_current`, `rt_list_set`, `rt_list_head`, ...) is now inlined where another module calls it,
   in every build shape: a per-module build carries the bodies in `runtime.facts`. A failure inside
