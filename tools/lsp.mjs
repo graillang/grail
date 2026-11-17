@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { buildCompiler, compileProgram, root } from './native.mjs';
 
-// lib/json.grl is the server's JSON reader; it needs core and the map module to compile.
+// lib/json.grl is the server's JSON reader; it needs core, the map module and float to compile.
 export const serverSources = [
   'tools/lsp/main.grl',
   'tools/lsp/analysis.grl',
@@ -14,6 +14,7 @@ export const serverSources = [
   'lib/hash.grl',
   'lib/hashmap.grl',
   'lib/json.grl',
+  'lib/float.grl',
 ];
 
 export function buildServer({ directory = join(root, '.work/lsp'), compiler = buildCompiler() } = {}) {

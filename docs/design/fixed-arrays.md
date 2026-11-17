@@ -341,3 +341,39 @@ binds the parameter from the argument's length. In a template the compile-time c
 `N` (literal count, literal index) wait for the specialisation (`array_parametric`). The interface
 spelling of kind 32 carries the length argument. `[T; 0]` stays refused: a specialisation that
 binds 0 is refused at the use, as a literal 0 is.
+
+## A-next as built: owned arrays as fields and elements (after unboxed stage 4)
+
+With every struct inline (unboxed-values.md, stage 4), an array of owners is laid out like any
+array: inline in a struct (`field_layout`: arrays are framable) and flat in a vector (`flat_bytes`).
+The struct's in-place drop calls the array's helper at the field's address; a flat vector's drop and
+`truncate`/`clear` call it at each element's address (`rt_vec_truncatew`). A holder that boxes one
+(`Mutex::new`, the box-on-store holders) drops it with `holder_drop`: the array's helper on the box,
+then `rt_free`. Still refused: a runtime holder that needs a dropper function for it (`drop_name`:
+a `dyn` value, a task's result), since an array has no boxed helper; enum payloads and captures as
+before. The two refusal cases became `array-owned-in-records-and-vectors`.
+
+## Probe backstop (2026-11-17)
+
+The probe was lost once, silently: frames gained a saved-register area (`subq $.F<n>+K,%rsp`) and
+`probe_frames` matched only `subq $.F<n>,%rsp`. Now `optimize::probe_backstop` runs after the
+pass over its output: every line that moves %rsp down by a `.F` constant (any `+K`), every
+`framesub`, and every literal `subq $N,%rsp` whose frame plus K is over a page must have its probe
+label, or the compiler stops with exit 70 naming the function (checked by hand by breaking the
+matcher: `f_main_fill's frame is larger than a page and has no stack probe`). The probe pass runs
+for frames within 128 bytes of a page (frame_limit) and probes when the frame plus K is over one.
+Emitting the probe where the frame is laid out was not taken: the size is known only at the
+function's end (`.set`), so the prologue would need a symbolic page count in all three assemblers
+and in the optimiser's prologue rewrites. Pins: `array-frame-probe-pinned` (+K, x86_64),
+`array-frame-probe-plain-frame-line` (plain, --debug), the windows leg's `array-frame-probe` and
+`array-frame-probe-task` (framesub, run under wine), and the frame cases on aarch64 and riscv64.
+
+## SIMD over arrays (2026-11-17)
+
+With SIMD S1 on main (simd.md), the boundary of section 6 holds as decided: `T::load(&a, i)` and
+`v.store(&mut a, i)` take `&[T; N]` / `&mut [T; N]`, `align_of` of a vector is its element's, so
+`[f32x4; N]` overlays `[f32; 4N]`. A field is the load's source in place: `f32x4::load(&x.m, i)` on a
+`[f32; 16]` field, and `f32x4::load(&x.rows[r], 0)` on a row of `[[f32; 4]; 4]`. On LLVM the loop
+summing those fields over a flat `Mat[]` is `movups` at the element's offsets and `addps` with no
+stack slot and no call (`tests/simd/array_field_loop.grl`, checked by `tools/test-simd.mjs`); the
+case `array-simd-loads-from-fields` checks the values on every target.

@@ -773,7 +773,7 @@ fn rt_win_wsa_stop() -> u64 {
     return 0;
 }
 // The scheduler's completion port, or 0 when the process has no reactor (a program that never makes
-// a task). The port lives in the scheduler block that rt_os_complete also reads.
+// a task). The port lives in the scheduler block.
 fn rt_win_port() -> u64 {
     s := raw_load(raw_state() + 72);
     if s == 0 {
@@ -1422,6 +1422,10 @@ fn rt_symlink(target: u64, link: u64) -> u64 {
     if raw_win32(CreateSymbolicLinkW, rt_win_wslot(0), rt_win_wslot(2), 0) == 0 {
         return rt_win_errno();
     }
+    return 0;
+}
+// A Windows file has no permission bits to set: whether it runs is its name's business.
+fn rt_chmod(path: u64, mode: u64) -> u64 {
     return 0;
 }
 // MoveFileExW with MOVEFILE_REPLACE_EXISTING: the destination file is replaced, a directory is only
@@ -2225,9 +2229,8 @@ fn rt_os_init() -> u64 {
 // code always sees the worker that is actually running it.
 //
 // Readiness is a completion port: CreateIoCompletionPort where the Linux build creates epoll. A
-// blocking host operation is still handed to a helper thread (rt_offload), but its completion is
-// posted to the port and the reactor wakes the parked task, instead of the helper waking it
-// directly; sleeps live on a timer heap the reactor waits on through GetQueuedCompletionStatus's
+// blocking host operation runs on the task's own thread with its worker given to a spare
+// (rt_offload); sleeps live on a timer heap the reactor waits on through GetQueuedCompletionStatus's
 // timeout. So a task program does not need an epoll, an eventfd, a timerfd or a WaitForMultipleObjects
 // set, and a reactor that cannot be created is not fatal: rt_sleep_ms falls back to offloading.
 //
@@ -2583,18 +2586,5 @@ fn rt_os_wait_fd(s: u64, fd: u64, events: u64, task: u64) -> u64 {
 }
 fn rt_os_wait_done(s: u64, fd: u64) -> u64 {
     return 0;
-}
-// A blocking operation completed on its helper thread: hand the task to the reactor through the
-// completion port, exactly as an overlapped operation's completion would arrive.
-fn rt_os_complete(task: u64) -> u64 {
-    mut port = raw_load(raw_state() + 72);
-    if port != 0 {
-        port = raw_load(port + 40); // the scheduler block's reactor handle
-    }
-    if port != 0 {
-        PostQueuedCompletionStatus(port, 0, task, 0);
-        return 0;
-    }
-    return rt_wake(task);
 }
 

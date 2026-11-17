@@ -146,3 +146,39 @@ bounds alone fix the 2x; the 114x needs the adapters to be types. Both are propo
 - **Loans.** A closure given for a callable-bound parameter without `Owned` is lent for the call: it
   neither makes the type arguments "borrowing" nor binds its loans to the result (`captured_bonds`).
 - **Moved first.** The 16 `vecs` callback methods. Measured below once the before/after pair is run.
+
+## 5. Step 2c, built: typed adapters - and where the 1.2x stands
+
+`lib/iter.grl`: `VecIter<T>` (a vector reversed once in place, popped), `Map<I, U, F>` (the item type
+`U` is a parameter so the next adapter's callback is typed by it - there is no projection syntax for
+`<Map<..> as Iterator>::Item`), `Filter<I, F>` (item `I::Item`), each with `next`, `map`, `filter` and
+`fold`, plus `fold_all<I: Iterator, A, F: FnMut(A, I::Item) -> A>`. Compiler fixes it needed: callable
+bounds on impl parameters are read right after the impl's generic list (before its own type, so
+`Self` and fields carry the bound); impl matching treats a callable entry as a bound to meet (and
+infers parameters only it names, `U`); a callable parameter forwarded to another callable-bound
+parameter is checked by its own bound, without specialisation aliases; interface records skip the
+tag in dependency lists.
+
+`lb.grl` (10M `u64`, map `x*2` -> filter `%3 == 0` -> sum, best of five, load about 30-50):
+
+| | native | `--release` (LLVM -O2) | Rust -O |
+|---|---|---|---|
+| typed chain (`iter::over`) | 432-529 ms | 158 ms | 6.9 ms (chain) |
+| hand loop | 20-28 ms | 21 ms | 6.6 ms |
+| erased `Iter` chain | 711-779 ms | 1090 ms | - |
+
+No allocation remains per element (inline `T?` from unboxed 5a covers the adapters' options; the
+asm has no `rt_enum`). **What the 1.2x still needs is inlining:** per element the native build makes
+about ten calls - three nested `next`s, two closure bodies, the out-of-line `core::some`, and empty
+drop helpers - none inlined, because the native optimiser inlines leaves only; the LLVM build
+inlines part of it (7.5x). The remaining work is in the optimiser (inline small non-leaf direct
+calls, drop the empty drop helpers, make `Some` an intrinsic), not in the library or the type system.
+
+### 5.1 The inherent hop removed
+
+Each adapter's `next` was written once (`vec_next`, `map_next`, `filter_next`) and reached from both
+the `Iterator` impl and the inherent `next` a `for` loop uses: one forwarding call per adapter per
+element. The body now sits in both. Same benchmark: native 374 ms (was 432-529), `--release`
+72 ms (was 158) against a 17 ms hand loop - 4.2x. Still to do: VecIter as an index walk (needs a
+"move element i out" primitive and a remainder drop; `rt_pop` is a call per element today), and
+S6(A) (the closure held inline).

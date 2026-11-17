@@ -265,8 +265,8 @@ a proof about the wrong value; and three writes skipped it (`&mut r.n` handed to
 `r.n -= 8`, a closure's or a nested path's write). `--strict-refinements` accepted records that
 violated their own predicates.
 
-**What a field predicate may say.** Its own field, literals, `len()` and the pure tests, and
-nothing else; the field is an integer of any width, a float, or an owned vector (through `len()`).
+**What a field predicate may say.** Fields of its own record (see *Predicates across fields*),
+literals, `len()` and the pure tests, and nothing else; the field is an integer of any width, a float, or an owned vector (through `len()`).
 Anything else is refused at the struct (`ref_field_pred_rules`). Another field, a parameter or a
 global would be read wherever the record is built, which is the bug.
 
@@ -302,14 +302,26 @@ to the path (`pv_field_facts`). A `mut` or `&mut` root gets nothing.
 
 **Cost.** Nothing when no field is refined: every hook stops at `pred.hi == 0`.
 
-### Follow-up: predicates across fields (not built, refused until then)
+### Predicates across fields (2026-11-17)
 
-`struct P { lo: u64, hi: u64 where lo <= hi }`. Sketch: every field name in the predicate is renamed
-to the record's field values - at a literal all of them, after every field is stored; at a direct
-write of any field the predicate mentions, the new value and the other fields read from the
-record - the same renaming a call's arguments get. The no-`&mut` rule extends to every field a
-predicate mentions; a trusted root's reader fact becomes `r.lo <= r.hi`; the interface carries the
-text and the field list.
+`struct P { lo: u64, hi: u64 where lo <= hi }`. A predicate may read any field of its record (an
+integer, a float or a vector's `len()`), and nothing else; a name that is not a field, or a field
+of another type, is refused at the struct (`ref_field_pred_names`).
+
+- **A literal** owes such a predicate once every field has its value (`ref_field_cross`): each field
+  name in it stands for that field's value and its term, the renaming a call's arguments get. A
+  local that happens to be called `lo` is never read.
+- **A write** of any field the predicate reads - `p.lo = v`, `p.lo op= v`, also when the predicate
+  belongs to another field - owes it before the store, over the new value and the other fields as
+  the record holds them. Those have no term (the root is `mut`), so strict mode cannot prove a
+  single-field write and asks for a literal; plain code checks it at run time.
+- **No `&mut`** to any field a predicate reads (`ref_field_refined` asks every predicate of the
+  record), by the same routes as before.
+- **A reader** through a trusted root (a non-`mut` binding or a shared reference) gets every
+  predicate that reads the field, with each field it reads renamed to its path - and only when all
+  of those paths are trusted: `fn span(p: &P)` may pass `p.lo, p.hi` where `x <= y` is owed.
+- **The interface** carries each field's predicate as text and the field list with the record, so
+  an importer renames it the same way.
 
 ## A disproved obligation (2026-11-16)
 
@@ -355,3 +367,26 @@ corpus runs at the same speed.
 
 Refinements on generic `T`, on vector elements (`u64[] where all < 10`), quantifiers, and
 user-defined predicate functions. Each fits the design later.
+
+## Bounds-check facts: working state (prover_wrap, 2026-11-17)
+
+Branch `gaps15-bce` (shared with /root/remove_forwarders; rebase before pushing, never force-push).
+Submitted to the landing service; head at the time of writing `be799a1` plus this note.
+
+Done (index checks in each benchmark's own functions, `tools/checks-native.mjs`):
+- push-loop length (`for i in n { v.push(x) }` from empty gives `v.len == n`): ecs 18 -> 0;
+- interval reading of `t * L + ... + c` against a constant or known length: nbody 24 -> 0;
+- literal equalities and constant loop counts (`n := 256`, `for i in n * n`): matmul 6 -> 0;
+- an inline byte store when the index is proved: sieve 1 -> 0;
+- `*` and `+` proved by the interval reading carry no overflow check (nbody traps 44 -> 2);
+- `--verify-facts` keeps proved checks without counting them as failures (edge kind 16 for a
+  proved accessor, `call_verified_out` for a proved call through the checking wrapper).
+
+- `grail build --report checks` (the compiler's `--report-checks`): each residual check in the
+  program's own functions with location and kind, from the site-table pass (`report_check`).
+
+Next, in order: sort (the clamp `if hi > n { hi = n }`, `tmp := v.copy()` length equality,
+lengths equal across the v/tmp swap - this needs a loop invariant: the body reassigns both vectors,
+so today's loop kill drops their length facts at the head); sieve's `j += i` overflow (a
+loop-carried bound `j <= limit`, `i <= limit`).
+

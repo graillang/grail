@@ -56,6 +56,15 @@ for (const [i, file] of sources.entries()) {
   formatted.set(file, copy);
 }
 checks += sources.length;
+// Wrapped output parses again: tests/fmt/wide.grl has expressions the formatter must break at a
+// binary operator, comparisons included, and a continuation line that opens with `<` reads as
+// generic brackets (asm_x86.grl once came out of `grail fmt` refused that way).
+{
+  const wide = formatted.get(join(root, 'tests/fmt/wide.grl'));
+  assert.ok(readFileSync(wide, 'utf8') !== readFileSync(join(root, 'tests/fmt/wide.grl'), 'utf8'), 'tests/fmt/wide.grl was expected to need wrapping');
+  const reparsed = run(['check', wide], undefined, false);
+  assert.equal(reparsed.status, 0, `formatted tests/fmt/wide.grl does not check:\n${reparsed.stdout ?? ''}${reparsed.stderr ?? ''}`); checks++;
+}
 const original = join(work, 'original.s'), reformatted = join(work, 'reformatted.s');
 // Both builds are given the same module root: `lib/xxhash.grl` is one of the compiler's own sources,
 // which makes `lib/` a module root by location, and the formatted copies live somewhere else - so
@@ -135,7 +144,7 @@ checks += 10;
   assert.match(bytes?.members.find(member => member.name === 'find')?.type ?? '', /^pub fn find\(&self, needle: \(&\[u8\]\)\) -> u64\?$/, 'a method\'s signature is the text up to its body');
   assert.equal(bytes?.doc, '', 'the module block is not also the first declaration\'s doc');
   const fields = item('hashmap', 'struct', 'Map')?.members ?? [];
-  assert.ok(fields.some(field => field.name === 'entries' && field.type === 'Slot<K, V>[]'), `a record lists its fields: ${JSON.stringify(fields)}`);
+  assert.ok(fields.some(field => field.name === 'keys' && field.type === 'K[]'), `a record lists its fields: ${JSON.stringify(fields)}`);
   assert.ok((item('io', 'enum', 'Error')?.members ?? []).some(variant => variant.name === 'Other' && variant.type === 'u64'), 'an enum lists its variants and payloads');
   assert.ok(module('hashmap')?.items.some(entry => entry.kind === 'impl' && entry.name.startsWith('Map')), 'an implementation is listed');
   assert.ok(fs.readdirSync(outA).filter(name => name.endsWith('.html')).length >= 25, 'one page per module');
@@ -144,6 +153,19 @@ checks += 10;
   assert.match(fs.readFileSync(join(outA, 'hashmap.html'), 'utf8'), /href="hashmap\.html#struct-Entry"/, 'a doc body links a uniquely named declaration');
   assert.match(fs.readFileSync(join(outA, 'index.html'), 'utf8'), /data-name="hashmap Map"/, 'the index carries the search data');
   checks += 7;
+}
+// `grail build --report checks`: every check left in the program's own functions, with its location
+// and kind; an index the prover settled is not among them.
+{
+  writeFileSync(join(work, 'checks.grl'), 'fn total(v: &u64[], k: u64) -> u64 {\n    mut s: u64 = 0;\n    for i in v.len() {\n        s = s + v[i];\n    }\n    return s / k + v[k];\n}\nfn main() {\n    v := u64[1, 2, 3];\n    println(total(&v, 1));\n}\n');
+  const r = spawnSync(grail, ['build', 'checks.grl', '-o', join(work, 'checks'), '--report', 'checks'], { cwd: work, encoding: 'utf8', timeout: 300_000 });
+  assert.equal(r.status, 0, `--report checks builds: ${r.stdout}${r.stderr}`);
+  const rows = r.stdout.split('\n').filter(line => line.includes('f_main_total'));
+  assert.deepEqual(rows.map(line => line.split('\t').slice(1).join(' ').replace(/^.*checks\.grl/, 'checks.grl')),
+    ['checks.grl:4:9 overflow', 'checks.grl:6:5 divide', 'checks.grl:6:5 index', 'checks.grl:6:5 overflow'], `the report of total: ${r.stdout}`);
+  const bad = spawnSync(grail, ['build', 'checks.grl', '--report', 'nope'], { cwd: work, encoding: 'utf8' });
+  assert.notEqual(bad.status, 0, '--report takes only `checks`');
+  checks += 3;
 }
 // 4. Cross targets: the grail tool itself (formatter) and programs it builds.
 writeFileSync(join(work, 'hello.grl'), 'fn main() {\n    println(42);\n}\n');

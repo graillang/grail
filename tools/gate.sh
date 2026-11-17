@@ -91,7 +91,7 @@ for i in 1 2 3; do
 done
 
 # Tool suites: independent of each other (each has its own .work directory).
-for t in test-selfhost test-ffi test-cli interface-test cache-test split-test test-facts test-optimiser-jumps test-optimiser-atomics test-atomics-litmus test-debug-lines abundance-test borg-test grammar-test lsp-test overflow-parity-test jobs-test pkg-test; do
+for t in test-selfhost test-ffi test-cli interface-test cache-test split-test test-facts test-optimiser-jumps test-optimiser-atomics test-atomics-litmus test-simd test-debug-lines abundance-test borg-test grammar-test lsp-test overflow-parity-test jobs-test pkg-test; do
   leg $t bun tools/$t.mjs
 done
 leg windows bun tools/windows.mjs check
@@ -114,11 +114,13 @@ wait
 # against Go, Zig and cargo. One at a time, after everything else, alone. Reports: each fails only
 # when a program's output differs, never on a ratio, and skips a toolchain that is not installed.
 # They refresh bench/results/, which the book's Performance chapter renders (`just bench-results`).
-leg bench-rivals bun tools/bench-rivals.mjs --json bench/results/bench-rivals.json
+leg bench-rivals bun tools/bench-rivals.mjs --json bench/results/bench-rivals.json dot_f32 dot_f64 ffi_call fnv matmul nbody sieve sort xform_f32 xform_f64
+wait
+leg bench-engine bun tools/bench-rivals.mjs --json bench/results/engine.json hashmap bintrees strings json dyncall iterchain ecs
 wait
 leg sched-rivals bun tools/sched-rivals.mjs --json bench/results/sched-rivals.json
 wait
-leg compile-rivals bun tools/compile-rivals.mjs --json bench/results/compile-rivals.json
+leg compile-rivals bun tools/compile-rivals.mjs --json bench/results/compile.json
 wait
 
 # One line per leg, failures first.

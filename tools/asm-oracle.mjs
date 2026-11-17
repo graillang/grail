@@ -12,7 +12,7 @@
 // (tools/native.mjs `assemble`): `GRAIL_ASM_ORACLE=1 bun tools/test-native.mjs x86_64` checks each
 // program's object and then runs the program, which is the gate's `asm-oracle` leg.
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
 export function readElf(bytes) {
@@ -97,6 +97,33 @@ export function compareObjects(want, got) {
   return null;
 }
 
+// COFF objects compare by llvm-readobj's view - section headers and contents, relocations by symbol
+// name and the symbol table - with the file offsets and string-table positions left out (LLVM tail-
+// merges its string table; the names, not where they sit, are the content).
+export function compareCoff(want, got) {
+  const view = file => {
+    const strip = text => text.split('\n').filter(l => !/^File:/.test(l)).join('\n');
+    const sections = run(['llvm-readobj', '--sections', '--section-data', file]).stdout
+      .split('\n').filter(l => !/PointerTo|Name: .*\(/.test(l)).join('\n');
+    const names = run(['llvm-readobj', '--sections', file]).stdout.split('\n').filter(l => /^\s*Name:/.test(l)).map(l => l.replace(/\(.*\)/, '')).join('\n');
+    const relocs = run(['llvm-readobj', '--relocations', file]).stdout.split('\n').map(l => l.replace(/\(\d+\)$/, '')).join('\n');
+    const symbols = run(['llvm-readobj', '--symbols', file]).stdout;
+    return { sections: strip(sections), names, relocs: strip(relocs), symbols: strip(symbols) };
+  };
+  const a = view(want);
+  const b = view(got);
+  for (const part of ['names', 'sections', 'relocs', 'symbols']) {
+    if (a[part] !== b[part]) {
+      const x = a[part].split('\n');
+      const y = b[part].split('\n');
+      let i = 0;
+      while (i < x.length && x[i] === y[i]) i++;
+      return `${part} differ at line ${i}: clang \`${(x[i] ?? '').trim()}\` internal \`${(y[i] ?? '').trim()}\`\n  context: ${x.slice(Math.max(0, i - 3), i).map(s => s.trim()).join(' | ')}`;
+    }
+  }
+  return null;
+}
+
 function run(argv) {
   const r = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', maxBuffer: 1 << 28 });
   return r;
@@ -104,11 +131,13 @@ function run(argv) {
 
 export function checkFile(source, work, assembler, target = 'x86_64') {
   const stem = join(work, basename(source).replace(/\.s$/, ''));
-  const clang = run(['clang', `--target=${target}-linux-gnu`, '-c', source, '-o', `${stem}.clang.o`]);
+  const flags = target === 'riscv64' ? ['-march=rv64imafd', '-mabi=lp64d'] : [];
+  const triple = target === 'windows-x86_64' ? 'x86_64-pc-windows-msvc' : `${target}-linux-gnu`;
+  const clang = run(['clang', `--target=${triple}`, ...flags, '-c', source, '-o', `${stem}.clang.o`]);
   if (clang.status !== 0) return `clang failed: ${clang.stderr}`;
   const ours = run([...assembler, ...(target === 'x86_64' ? [] : ['--target', target]), source, '-o', `${stem}.grail.o`]);
   if (ours.status !== 0) return `internal assembler failed: ${ours.stdout}${ours.stderr}`;
-  const diff = compareObjects(readFileSync(`${stem}.clang.o`), readFileSync(`${stem}.grail.o`));
+  const diff = target === 'windows-x86_64' ? compareCoff(`${stem}.clang.o`, `${stem}.grail.o`) : compareObjects(readFileSync(`${stem}.clang.o`), readFileSync(`${stem}.grail.o`));
   if (!diff) return null;
   if (typeof diff === 'string') return diff;
   const window = o => run(['llvm-objdump', '-d', '-r', `--start-address=${Math.max(0, diff.offset - 32)}`, `--stop-address=${diff.offset + 32}`, '-j', diff.section, o]).stdout.split('\n').slice(6).join('\n');
@@ -143,6 +172,18 @@ if (import.meta.main) {
       args.push(out);
     }
     console.log(`asm-oracle: ${args.length} corpus programs compiled for ${target} (${skipped} did not compile alone)`);
+  }
+  // `--suite`: the directive files in tests/asm, on every target the internal assembler covers.
+  if (args[0] === '--suite') {
+    const dir = join(import.meta.dir, '..', 'tests/asm');
+    let bad = 0;
+    for (const name of readdirSync(dir).filter(f => f.endsWith('.s')).sort()) {
+      const t = name.replace(/^directives-/, '').replace(/\.s$/, '');
+      const result = checkFile(join(dir, name), work, assembler, t);
+      console.log(result ? `FAIL ${name}: ${result}` : `ok ${name}`);
+      if (result) bad++;
+    }
+    process.exit(bad ? 1 : 0);
   }
   let failed = 0;
   for (const file of args) {

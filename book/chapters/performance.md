@@ -70,36 +70,139 @@ code is:
 
 {{perf:bench-rivals#provenance}}
 
+## Engine-shaped programs
+
+Small kernels say what a loop costs; an engine is mostly other work. These seven programs are the
+shapes a game engine spends its frames on, each with the same algorithm and output in C, Rust, Go
+and Zig, written the way each language is usually written:
+
+- `hashmap`: a million `u64` keys inserted into the standard map, all looked up, half removed, all
+  looked up again (C has no standard map, so its twin is the open-addressing table a C program
+  writes for itself);
+- `bintrees`: the benchmarks game's binary trees at depth 16, allocation-heavy;
+- `strings`: a million `name,int,decimal` lines built, split, parsed and formatted again;
+- `json`: a 10 MB document built, parsed into each language's dynamic value, walked and serialised
+  (Rust with `serde_json`; C, which has no JSON library, with a compact hand-written one);
+- `dyncall`: a million shapes of three kinds behind an interface object, one indirect call each;
+- `iterchain`: ten million numbers through `map`, `filter` and a sum (Go and Zig have no iterator
+  adapters in their standard libraries, so their twins are the loop; Go's uses range-over-func);
+- `ecs`: a million entities as structure-of-arrays `f32` columns, a hundred frames of integration.
+
+{{perf:engine#release}}
+
+**Why Grail is behind**, read from the code of the commit charted:
+
+- **`iterchain`: the adapters are not types.** `Iter<T>` is the erased form: every element is a call
+  through a boxed closure returning an option, once per adapter, and nothing inlines through it.
+  Rust's chain compiles to the same loop as the hand-written one. Making the adapters types with
+  callable bounds is the plan in `docs/design/dyn-and-callable-bounds.md`.
+- **`hashmap`: a bucket is a vector.** The standard map chains collisions through a `u64[]` per
+  bucket and keeps its entries in insertion order in a second vector, so a lookup reads the
+  bucket's own header, then an index, then the entry; growing the table rebuilds every bucket
+  vector. Rust's, Go's and Zig's maps are one open-addressed table. (Since replaced: the map is
+  now dense entries under one open-addressed index, hashed with SipHash-1-3 as Rust's is.)
+- **`ecs`: owned vectors re-read their headers.** The update loop stores through six vectors made
+  in the same function, and after each store the next access reloads a length and a data pointer
+  and checks the index, so the loop stays scalar where C, Rust and Zig vectorise it.
+- **`dyncall`: two calls per dispatch.** Each slot of an interface object's table is a small thunk,
+  emitted outside the optimised module, that loads the boxed value and calls the method; neither
+  call can be inlined.
+- **`strings`: every piece is a new string.** `split` returns owned copies of every line and every
+  field, and `format` builds a new string per record, where Rust's and Zig's splits hand out slices
+  of the input. The standard library also has no float parser (the JSON module carries one
+  privately), so the Grail twin parses a two-decimal number as hundredths over 100.0. (Since
+  replaced: `split` hands out views, `parse_f64` is shared with `json`, and `append_format` writes
+  into the output; a view is still a small allocation of its own.)
+- **`json`**: behind by a similar margin to the dynamic-value parsers of the other languages; where
+  its instructions go has not been profiled yet.
+- **`bintrees`** is where Grail does best: its allocator's fast path makes it execute fewer
+  instructions than C with `malloc` and Rust with `Box`. Zig, with its general-purpose allocator for
+  release builds, executes the fewest.
+
+{{perf:engine#dev}}
+
+{{perf:engine#cpu|instructions}}
+
+{{perf:engine#provenance}}
+
+## Abundance: the engine itself
+
+The programs above are written for comparison; Abundance's port is the engine this language is
+being built beside. `bun tools/abundance-perf.mjs` builds every program of the port's parity suite
+(`abundance/tests/*_test.grl`) through the build store - cold, and after one statement is added to
+`main` - runs its development and release builds with the suite's own arguments, checks the output
+against the C++ reference, and profiles the slowest release run. `--branch REF` adds another
+compiler's columns, so a change is measured on the engine the same way.
+
+{{perf:abundance#abundance-compile}}
+
+{{perf:abundance#abundance-run}}
+
+**What it found.** Every program of the port builds through the store and matches its reference
+(the ImGui program is left out where its library is not built). A cold build of a test program is
+3 to 12 G instructions, most of it the port modules it imports; after a one-statement edit to
+`main` it is 0.17 to 0.37 G, a twentieth or less, because the store replays every unchanged module
+and function. The first measurement found a store fault that stopped eight programs building - a
+module's `u64` constant above 2^63 could not be read back from its interface - and its fix is on
+main.
+
+`abgeo` (the cluster builder and its reader) is the slowest release run, and its time goes to
+building vectors rather than to geometry: growing them (`rt_grow`) and pushing onto them
+(`rt_push`) lead the profile, with integer conversion (`rt_int`) third.
+
+{{perf:abundance#abundance-compile-cpu}}
+
+{{perf:abundance#abundance-run-cpu}}
+
+{{perf:abundance#provenance}}
+
 ## Compile speed
 
-The same programs in four languages: hello world, and N copies of a record, its constructor and a
-15-line loop function, for N = 1000 and 4000. Each is checked and built, cold and after one
-function body changes. Go has no check command (`go vet` runs analyses, not the type checker's
-verdict), so its check is a build whose output is thrown away.
+The bar: Grail compiles faster than Go, Zig and rustc, and its development builds are ready sooner
+than Zig Debug's, Rust's dev profile's and Go's. The same programs are written in all four
+languages: hello world, a generated program of N records, constructors and 15-line loop functions
+(N = 1000 and 4000, about 26,000 and 104,000 lines), and the seven engine-shaped programs above.
+Each is measured five ways: a check cold and after a one-function edit, and a build cold, after
+the edit, and again with nothing changed. Go has no check command; `go vet` type-checks and then
+runs its analyses, and it is what Go's column shows. A build whose output is thrown away is in a
+table of its own further down.
 
-{{perf:compile-rivals#compile}}
+The figure is the user-space instructions of the tool and every process it started, with every
+toolchain held to one process (`GRAIL_JOBS=1`, `GOMAXPROCS=1 -p=1`, `cargo -j1`; Zig's build-exe has
+no job flag). The standard library is warm for every toolchain, as it is after an
+install: Grail's store holds what `grail cache warm` builds (every standard module, which the
+installers run), Go's build cache its standard library, Zig's cache its compiler runtime, and cargo
+works from its registry. "Cold" means a project's first build, not a toolchain's. Instruction counts do not move with the load of the shared machine, where time does.
+A second chart shows wall time with four jobs each, this machine's cap.
 
-When the chart counts instructions rather than time, work that Grail spreads over forked workers
-counts in full: a check of the largest program at four workers executes about a third more
-instructions than the same check in one process, though it finishes sooner.
+{{perf:compile#compile}}
 
-**Why it is behind.**
+{{perf:compile#compile-wall}}
 
-- **An edited check checks everything again.** `cargo check` is incremental; `grail check` is not
-  yet, and it also checks the runtime and the core library from source every time.
-- **The checker is one thread.** On the 104,000-line program Zig checks in about half the time,
-  also on one thread; about a third of Grail's front end is allocation.
-- **A build writes assembly text and parses it again.** For the large program the compiler writes
-  35.6 MB of assembly, and clang spends a quarter of the build's CPU time assembling it. Writing
-  object code directly is planned.
-- After an edit, every unchanged function body is replayed from the build store, but the back end
-  and the assembler still go over the whole module.
+**Where Grail is ahead, and where it is behind.** On the commit charted, Grail is the fastest on
+every row of hello world and the seven engine programs except one (iterchain's check after an edit,
+level with cargo): a project's first check, its first build, a rebuild after an edit and a rebuild
+with nothing changed. A no-op rebuild is decided from fingerprints without reading the program
+again, and the build store files its results in-process. On the generated programs, Grail wins
+every edited build and no-op rebuild, and the edited check of the smaller one. It is behind in
+three places, with their causes from profiles of the compiler on these programs:
 
-{{perf:compile-rivals#compile-instructions|compile-cpu}}
+- **A cold check of a large program** (1.6x Zig at 26,000 lines, 3.2x at 104,000). The check of
+  one large module hashes its interface with SHA-256 (11 % of the instructions), writes the
+  interface (10 %) and still emits code text that it throws away (6 %); allocation and copying are
+  about a quarter. Zig checks the same program on one thread in a third of the instructions.
+- **A check of a large program after an edit** (1.4x Zig at 104,000 lines). The whole module is
+  checked again, at about half the cold cost, where `cargo check` re-checks only what changed.
+- **A cold build** (1.6x Go). The optimiser is a third of the build and re-reads the front end's
+  instruction text (about 18 %), and the assembler reads the optimiser's text again. A cold build of
+  the 104,000-line program also grew from 38 to 53 billion instructions between two recent commits
+  of the compiler; that regression is being traced.
 
-{{perf:compile-rivals#compile-wall}}
+{{perf:compile#compile-go-check}}
 
-{{perf:compile-rivals#provenance}}
+{{perf:compile#compile-cpu}}
+
+{{perf:compile#provenance}}
 
 ## The scheduler
 
