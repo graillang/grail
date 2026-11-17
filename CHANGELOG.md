@@ -1,5 +1,9 @@
 ## Unreleased
 
+- Fixed: the per-loop stability fact and the LLVM backend's indirect-call fact both used fact kind
+  7, so a stable vector whose slot number matched an indirect call's ordinal (with a loop head
+  label of 6 or less) could make the lifter pass that call too few arguments. The stability fact
+  is now kind 8.
 - Fixed (release builds): a function calling a blocking `extern "C"` function was left unoptimised
   since the foreign-call marker landed - the marker's locked counter, thread-pointer read and
   register save around `rt_foreign_lost` were text the LLVM lifter refused. It now lifts them
