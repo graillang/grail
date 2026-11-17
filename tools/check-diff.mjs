@@ -21,8 +21,10 @@ const fresh = option('--new') ? resolve(option('--new')) : execFileSync('bun', [
 const build = argv.includes('--build');
 const filter = option('--filter') ? new RegExp(option('--filter')) : null;
 const jobs = Number(option('--jobs', '4'));
-const work = join(root, '.work/check-diff');
+// One directory per run, so two runs at once cannot remove each other's inputs.
+const work = join(root, '.work/check-diff', `run-${process.pid}`);
 rmSync(work, { recursive: true, force: true });
+process.on('exit', () => { if (!argv.includes('--keep') && differences.length === 0) rmSync(work, { recursive: true, force: true }); });
 mkdirSync(work, { recursive: true });
 
 const runtime = join(root, 'compiler/runtime.grl');
@@ -48,7 +50,7 @@ const walk = dir => readdirSync(dir).flatMap(f => { const p = join(dir, f); retu
 for (const dir of ['compiler/tests', 'book/examples', 'examples']) {
   for (const file of walk(join(root, dir))) {
     const name = file.slice(root.length + 1);
-    jobsList.push({ name, dir: join(work, name.replaceAll('/', '_')), files: [file], extra: [...roots, '--overflow=checked'] });
+    jobsList.push({ name, dir: join(work, `file-${jobsList.length}`), files: [file], extra: [...roots, '--overflow=checked'] });
   }
 }
 const selected = jobsList.filter(j => !filter || filter.test(j.name));
@@ -87,6 +89,7 @@ async function worker() {
     if (build && !(a.asm === null ? b.asm === null : (b.asm !== null && a.asm.equals(b.asm)))) why.push('assembly differs');
     if (why.length) {
       differences.push({ name: job.name, why, a, b });
+      mkdirSync(job.dir, { recursive: true });
       writeFileSync(join(job.dir, 'diff.txt'), `${why.join('; ')}\n--- base\n${a.stdout}${a.stderr}\n--- new\n${b.stdout}${b.stderr}\n`);
     } else if (!argv.includes('--keep')) rmSync(job.dir, { recursive: true, force: true });
     done++;
