@@ -6,8 +6,9 @@
   bond held under this place?", "which bonds does this reference rest on?" and "is this bond new?"
   by scanning every bond the function had made, after every statement and every use, so one long
   function cost the square of its length. The bonds are now indexed by holder, with a mark on each
-  place that holds one inside it. Checking the 104k-line syn4000 program takes 26% fewer
-  instructions, and the verdicts are the same: `tools/check-diff.mjs` compiles every corpus
+  place that holds one inside it. A binding's last use is found by reading the scope's tokens in
+  place, and a name is told from a keyword without building a keyword list per binding. Checking
+  the 104k-line syn4000 program takes 35% fewer instructions, and the verdicts are the same: `tools/check-diff.mjs` compiles every corpus
   source and example with two compilers and compares their output byte for byte (with `--build`,
   the assembly too).
 - **`thread::scope`: threads that borrow.** `thread::scope(|t| { a := t.spawn(|| ..); ..; a.join() })`

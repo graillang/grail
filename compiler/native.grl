@@ -5183,9 +5183,10 @@ fn last_name<a, b>(c: (&a mut C), name: &b [u8], from: u64, to: u64) -> u64 {
             }
             depth = depth - 1;
         }
+        // The tokens are read in place: this scan visits every token of the scope for every
+        // binding, and copying each one out to compare it was most of a check's allocations.
         if (kind == 1) & (hidden == 0) & (pending == 0) {
-            token := tok_text(&mut c, i);
-            if same(view(token), view("mut")) {
+            if (en - st == 3) && (c.src[st] == 109) && (c.src[st + 1] == 117) && (c.src[st + 2] == 116) {
                 mut declaration = 1;
                 if i != 0 {
                     if kind_at(&mut c, i - 1) == 38 {
@@ -14912,11 +14913,25 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
 // parameter. Declaration heads (`fn`, `struct`, `module`, `use`, ...) are recognised only at the
 // top level and may name bindings.
 fn is_keyword<a>(name: &a [u8]) -> bool {
-    words := u8[][copy_bytes(view("mut")), copy_bytes(view("if")), copy_bytes(view("else")), copy_bytes(view("while")), copy_bytes(view("for")), copy_bytes(view("in")), copy_bytes(view("loop")), copy_bytes(view("match")), copy_bytes(view("return")), copy_bytes(view("break")), copy_bytes(view("continue")), copy_bytes(view("unsafe")), copy_bytes(view("true")), copy_bytes(view("false"))];
-    for i in words.len() {
-        if same(view(words[i]), view(name)) {
-            return true;
-        }
+    // Asked of every binding: matched by length and then bytes, with nothing built per question.
+    n := name.len();
+    if n == 2 {
+        return (name[0] == 105) && ((name[1] == 102) || (name[1] == 110));
+    }
+    if n == 3 {
+        return ((name[0] == 109) && (name[1] == 117) && (name[2] == 116)) || ((name[0] == 102) && (name[1] == 111) && (name[2] == 114));
+    }
+    if n == 4 {
+        return same(name, view("else")) || same(name, view("loop")) || same(name, view("true"));
+    }
+    if n == 5 {
+        return same(name, view("while")) || same(name, view("match")) || same(name, view("break")) || same(name, view("false"));
+    }
+    if n == 6 {
+        return same(name, view("return")) || same(name, view("unsafe"));
+    }
+    if n == 8 {
+        return same(name, view("continue"));
     }
     return false;
 }
