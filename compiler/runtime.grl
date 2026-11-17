@@ -3922,7 +3922,8 @@ fn rt_thread_spawn_detached(entry: u64, arg: u64) -> u64 {
 // (rt_uthread_main; 0 on every other thread), 88 the thread's locals (rt_locals), 96 the thread's
 // waiter block (rt_waiter; 0 until it waits or holds a lock), 104 the external scheduler slot's
 // block while this thread, not a worker, holds it (rt_external_take), 112 its pool::with_class
-// setting plus one (0 none), 120 unused}. Word 24 is
+// setting plus one (0 none), 120 how many callbacks from C this thread is inside (callback_pin in
+// native.grl; rt_suspend pins the task to the thread while it is non-zero)}. Word 24 is
 // the entry only until rt_thread_main has read it; a scheduler worker then stores a non-zero
 // marker there so rt_abort_signals can tell a runtime worker from any other thread. Word 56 is this thread's libc TCB,
 // which every foreign call made on the thread switches to (0: there is none, the call runs on the
@@ -6610,6 +6611,21 @@ fn rt_task_thread_main(t: u64) -> u64 {
 }
 // Suspend the current task until rt_wake. A wake that arrives first is not lost.
 fn rt_suspend(t: u64) -> u64 {
+    tp := raw_tp_get();
+    if (tp != 0) && (raw_load(tp + 120) != 0) {
+        // Inside a callback C made on this thread (thread-record word 120): C's frames are on this
+        // stack, so the task stays on this thread - it blocks the thread on its park word (state 5)
+        // instead of switching away, and rt_wake wakes the thread.
+        if raw_atomic_cas(t + 24, 0, 5) != 0 {
+            raw_atomic_store(t + 24, 0);
+            return 0;
+        }
+        while raw_atomic_load(t + 24) == 5 {
+            rt_syscall(202, t + 24, 128, 5);
+        }
+        raw_atomic_store(t + 24, 0);
+        return 0;
+    }
     if raw_atomic_cas(t + 24, 0, 1) != 0 {
         raw_atomic_store(t + 24, 0);
         return 0;
@@ -6635,6 +6651,12 @@ fn rt_wake(t: u64) -> u64 {
                 return 0;
             }
             if raw_atomic_cas(t + 24, s, 3) == s {
+                rt_syscall(202, t + 24, 129, 1);
+                return 0;
+            }
+        } else if s == 5 {
+            // Parked pinned on its own thread (rt_suspend, inside a callback).
+            if raw_atomic_cas(t + 24, 5, 3) == 5 {
                 rt_syscall(202, t + 24, 129, 1);
                 return 0;
             }
