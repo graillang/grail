@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **Callable bounds: `fn map<U, F: FnMut(T) -> U>(self, f: F)`.** A type parameter may be bound by a
+  closure type; a value of that type is callable in the generic body, the closure's own type is what
+  the specialisation is made for, and its parameters and result are inferred from it. A closure whose
+  type is known - a local closure, or one given for such a parameter - is now called directly, by its
+  body's symbol, instead of through its code word, so the optimiser can inline it. The `vecs`
+  callback methods (`map`, `filter`, `fold`, `any`, `all`, `find`, `position`, `sort_by`, ...) take
+  callable bounds. A closure given for a callable-bound parameter without `Owned` is lent for the call,
+  as an `Fn(..)` parameter is. Fixed with it: two capture-free closures with the same signature given
+  to one generic function were one specialisation; they are two.
 - **`dyn<Send> I`, `dyn<Share> I` and `dyn<s> I`.** An interface object can now say what the value
   behind it may do: `dyn<Send> I` may cross to another thread (a `parallel_map` item, a task item,
   `T: Send`), `&dyn<Share> I` may be shared by workers, and `dyn<s> I` may hold borrowed data from

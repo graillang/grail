@@ -6213,6 +6213,19 @@ fn type_key<a>(c: (&a mut C), out: (&a mut u8[]), ty: u64, depth: u64) -> unit {
             // An environment record is synthesised per program and named by registration order, so
             // its name is not a property of the type; its captures are.
             push_bytes(&mut out, view("(env"));
+            // ...and the literal it was written as: a specialisation calls a closure's body
+            // directly (a callable-bound `F`), so two closures with the same captures and signature
+            // are two specialisations. The source position is the same for a literal synthesised
+            // twice, so that still keys one.
+            for j in c.closures.len() {
+                if c.closures[j].decl == arg {
+                    out.push(64);
+                    decimal(&mut out, c.closures[j].file);
+                    out.push(58);
+                    decimal(&mut out, c.closures[j].start);
+                    break;
+                }
+            }
             for i in count {
                 field_ty := c.fields[first + i].ty;
                 out.push(32);
@@ -10784,13 +10797,52 @@ fn closure_stated_borrower<a>(c: (&a mut C), ty: u64) -> bool {
 // 2b) travels in the parameter's requirement set beside its interface ids, as this tag plus the
 // bound's closure type, so every place that carries requirements carries it too.
 const CALLABLE_BOUND: u64 = 1099511627776;
+const CALLABLE_PENDING: u64 = 2199023255552;
 fn callable_in<a>(set: (&a u64[])) -> u64 {
     for i in set.len() {
-        if CALLABLE_BOUND <= set[i] {
+        if (CALLABLE_BOUND <= set[i]) & (set[i] < CALLABLE_PENDING) {
             return set[i] - CALLABLE_BOUND;
         }
     }
     return NO_TYPE;
+}
+// Past a callable bound in a generic list: to the `,`, `>` or `+` that ends it at depth zero (the
+// `->` of its result is one token, so its `>` does not end it).
+fn skip_callable_bound<a>(c: (&a mut C)) -> unit {
+    mut depth = 0;
+    while true {
+        k := kind(&mut c);
+        if k == 0 {
+            return ();
+        }
+        if (depth == 0) && ((k == 44) || (k == 62) || (k == 43)) {
+            return ();
+        }
+        if (k == 40) || (k == 91) || (k == 60) {
+            depth += 1;
+        }
+        if (k == 41) || (k == 93) || (k == 62) {
+            depth -= 1;
+        }
+        advance(&mut c);
+    }
+    return ();
+}
+// The callable bounds the generic list recorded by position, read now that every type parameter
+// of the declaration (an impl's included) is in scope.
+fn resolve_callable_bounds<a>(c: (&a mut C)) -> unit {
+    for i in c.type_interfaces.len() {
+        for j in c.type_interfaces[i].len() {
+            entry := c.type_interfaces[i][j];
+            if CALLABLE_PENDING <= entry {
+                here := exchange(&mut c.pos, entry - CALLABLE_PENDING);
+                bound := parse_type(&mut c);
+                exchange(&mut c.pos, here);
+                c.type_interfaces[i][j] = CALLABLE_BOUND + bound;
+            }
+        }
+    }
+    return ();
 }
 // The callable bound a type parameter's own type carries (`F: FnMut(T) -> U`), or NO_TYPE.
 fn param_callable<a>(c: (&a mut C), ty: u64) -> u64 {
@@ -11868,6 +11920,9 @@ fn require_interfaces<a, b, d>(c: (&a mut C), arguments: (&b u64[]), sets: (&d u
         set := &sets[i];
         for j in set.len() {
             id := set[j];
+            if CALLABLE_PENDING <= id {
+                continue;
+            }
             if CALLABLE_BOUND <= id {
                 // The argument is the closure (or function) a callable-bound parameter was given:
                 // its own type must convert to the bound, with the call's type arguments in it.
@@ -11969,11 +12024,15 @@ fn lifetime_parameters<a>(c: (&a mut C)) -> unit {
                     while true {
                         // `F: FnMut(T) -> U`: a callable bound, the closure type it names.
                         if (is(&mut c, view("Fn")) || is(&mut c, view("FnMut"))) && ((kind_at(&mut c, c.pos + 1) == 40) || (kind_at(&mut c, c.pos + 1) == 60)) {
-                            bound := parse_type(&mut c);
-                            if callable_in(&requirements) != NO_TYPE {
-                                fail(&mut c, view("a type parameter has at most one callable bound"));
+                            // Read once the whole parameter scope exists (an impl's `T` is added
+                            // after a method's own list): only its position is kept here.
+                            for q in requirements.len() {
+                                if CALLABLE_BOUND <= requirements[q] {
+                                    fail(&mut c, view("a type parameter has at most one callable bound"));
+                                }
                             }
-                            requirements.push(CALLABLE_BOUND + bound);
+                            requirements.push(CALLABLE_PENDING + c.pos);
+                            skip_callable_bound(&mut c);
                             if !eat(&mut c, view("+")) {
                                 break;
                             }
@@ -14482,6 +14541,9 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
                 set := copy_numbers(&c.type_interfaces[i]);
                 for j in set.len() {
                     id := set[j];
+                    if CALLABLE_PENDING <= id {
+                        continue;
+                    }
                     if CALLABLE_BOUND <= id {
                         // The parameter carries its callable bound among its proofs, so a value of
                         // type `F` can be called with the bound's signature (param_callable).
@@ -18077,6 +18139,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     if (c.inherent != 0) || (c.current_impl != 0) {
         prepend_impl_params(&mut c);
     }
+    resolve_callable_bounds(&mut c);
     if same(view(name), view("print")) || same(view(name), view("println")) {
         fail(&mut c, view("print and println are reserved prelude names"));
     }
@@ -19143,6 +19206,7 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
                 c.type_interfaces.push(copy_numbers(&own_sets[k]));
             }
         }
+        resolve_callable_bounds(&mut c);
         module := private_module(view(".interface_"), id);
         if find_func(&mut c, view(module), view(name)) != 0 {
             fail(&mut c, view("duplicate interface method"));
@@ -29308,7 +29372,19 @@ fn emit_resolved_call<a>(
     shape_pair_result(&mut c, slot, ret);
     call_writebacks(&mut c, first, &sources, &argtypes);
     // Before call_bonds, whose close_loans ends the loans of arguments the call consumed.
-    captured_bonds(&mut c, val(slot, ret), &map, &sources, &argtypes);
+    // A closure given for a callable-bound parameter that is not `Owned` is lent for the call, as an
+    // `Fn(..)` parameter is (stage 3): the result cannot hold it.
+    mut lent = u64[];
+    for j in map.len() {
+        if j < c.funcs[f - 1].constraints.len() {
+            set := copy_numbers(&c.funcs[f - 1].constraints[j]);
+            bound := callable_in(&set);
+            if (bound != NO_TYPE) && ((ty_mode(&mut c, bound) & CLOSURE_OWNED) == 0) {
+                lent.push(map[j]);
+            }
+        }
+    }
+    captured_bonds(&mut c, val(slot, ret), &map, &sources, &argtypes, &lent);
     call_bonds(&mut c, val(slot, ret), first, &sources, signature_ret);
     return val(slot, ret);
 }
@@ -29316,16 +29392,23 @@ fn emit_resolved_call<a>(
 // returned `impl Trait`): `map(refs(&v), f)` returns an `Iter<u64>` whose closure still reads `v`.
 // So the result holds the loans of every argument whose actual type carries one of them, and `v`
 // stays borrowed while the result lives (validate_return allows the same lifetimes).
-fn captured_bonds<a, b, d, e>(c: (&a mut C), result: Val, map: (&b u64[]), sources: (&d u64[]), argtypes: (&e u64[])) -> unit {
+fn captured_bonds<a, b, d, e, g>(c: (&a mut C), result: Val, map: (&b u64[]), sources: (&d u64[]), argtypes: (&e u64[]), lent: (&g u64[])) -> unit {
     if (c.raw != 0) || (map.len() == 0) {
         return ();
     }
-    // Only when a type argument holds a borrow: otherwise the result can carry none.
+    // Only when a type argument holds a borrow: otherwise the result can carry none. A closure lent
+    // to a callable-bound parameter does not count.
     mut borrowed = false;
     for i in map.len() {
         if map[i] != NO_TYPE {
             t := map[i];
-            if contains_borrow(&mut c, t, 0) {
+            mut is_lent = false;
+            for q in lent.len() {
+                if lent[q] == t {
+                    is_lent = true;
+                }
+            }
+            if !is_lent && contains_borrow(&mut c, t, 0) {
                 borrowed = true;
             }
         }
@@ -29341,6 +29424,15 @@ fn captured_bonds<a, b, d, e>(c: (&a mut C), result: Val, map: (&b u64[]), sourc
     for i in sources.len() {
         if i < argtypes.len() {
             t := argtypes[i];
+            mut is_lent = false;
+            for q in lent.len() {
+                if lent[q] == t {
+                    is_lent = true;
+                }
+            }
+            if is_lent {
+                continue;
+            }
             // A reference argument is lent for the call only; what it points at is the caller's.
                     if (ty_kind(&mut c, t) != 7) && contains_borrow(&mut c, t, 0) {
                 source := place_of(&mut c, sources[i]);
@@ -39625,10 +39717,15 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
                 // direct) and takes the bound's signature with the specialisation's bindings
                 // (`T`, `U` as the body sees them), so arguments and result line up with the body.
                 mut calltype = bound;
-                if (ty_kind(&mut c, pty) == 10) && (ty_kind(&mut c, bound) == 20) {
+                if ty_kind(&mut c, pty) == 10 {
                     sig := spec_callable_signature(&mut c, pty);
-                    if sig != NO_TYPE {
+                    if (sig != NO_TYPE) && (ty_kind(&mut c, bound) == 20) {
                         calltype = intern_env(&mut c, 20, ty_arg(&mut c, sig), ty_mode(&mut c, bound), type_regions(&mut c, bound), type_args(&mut c, sig), ty_env(&mut c, bound));
+                    }
+                    // A named function given for F: called through its pointer with the bound's
+                    // signature, as the body sees it.
+                    if (sig != NO_TYPE) && (ty_kind(&mut c, bound) == 12) {
+                        calltype = intern_args(&mut c, 12, ty_arg(&mut c, sig), 0, u64[], type_args(&mut c, sig));
                     }
                 }
                 return indirect_call(&mut c, val(slot, calltype), 0);
