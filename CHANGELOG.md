@@ -18,6 +18,12 @@
   its text changes only when its own functions do; each part's object is kept in the build store
   (`llvm-parts/`) under the digest of its text and command, and a rebuild after an edit compiles
   only the parts holding changed functions.
+- **A compile-time probe no longer compiles the runtime and the standard library.** They are
+  compiled once into a cached base object with their interfaces (`.work/comptime/base/<key>`, keyed
+  by the compiler, the options and their sources), and each probe compiles only itself and the
+  program's own sources against them, then links with the base. The fixed cost of recomputing a
+  value fell from +1.1 s to +0.07-0.11 s of CPU (the probe's function cache was invalidated by any
+  change to the program's declarations, so the runtime was recompiled after every edit).
 
 - **`grail cache warm [--target T]`** checks and builds every standard module into the build store,
   as rustup ships libstd: a project's first check then compiles only its own modules. The installers
