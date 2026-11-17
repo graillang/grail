@@ -456,6 +456,8 @@ struct L {
     ffis: Set,
     // GRAIL_LLVM_WHY: the function whose first refusal is printed (bad).
     why: u8[],
+    // Every Grail body (a signature fact names it): calls to these pass no vector registers.
+    grail_bodies: Set,
     // Vector registers written and not read since (a pending float argument), and ones not written
     // since the entry or the last call (xmm_read).
     xpend: u64,
@@ -2554,7 +2556,16 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
     fcode := set_get(&l.ffis, target);
     typed_ffi := (fcode > 1) && (set_get(&l.sigs, target) == 0) && (l.target == 0) && (l.areaopen == 0);
     if !typed_ffi {
-        xmm_call(&mut l);
+        // Grail's own symbols are mangled (`f_...`, the runtime's `rt_...`); a C function, even one
+        // Grail defines with `extern "C"`, keeps its C name.
+        if set_has(&l.grail_bodies, target) || starts(target, view("f_")) || starts(target, view("rt_")) {
+            // A Grail body takes and returns words only: nothing is passed in a vector register,
+            // and every one of them is dead after it.
+            l.xpend = 0;
+            l.xstale = 18446744073709551615;
+        } else {
+            xmm_call(&mut l);
+        }
     }
     if (l.areaopen != 0) && !eq(target, view("rt_foreign_lost")) {
         // Words on the stack: only a callee whose signature fact says it takes them. The foreign-call
@@ -4371,6 +4382,9 @@ fn lower_ffi_call<a, b>(l: (&a mut L), target: &b [u8], code: u64) -> unit {
             put(&mut args, view(def(&mut l, view("bitcast i64 {} to double"), &u8[][w])));
         }
     }
+    // The fact says which vector registers are arguments (just loaded above); any other written one
+    // (the marker's restore of %xmm1 after an earlier call) is not passed.
+    l.xpend = 0;
     xmm_call(&mut l);
     rt := ffi_ret_type(code);
     mut c = copy(view("call "));
@@ -8550,7 +8564,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
             set_add(&mut weak, view(sub(wl, 6, wl.len())));
         }
     }
-    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0, argwritten: 0, ffis: set_new(16), why: host::env(view("GRAIL_LLVM_WHY")), xpend: 0, xstale: 18446744073709551615 };
+    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0, argwritten: 0, ffis: set_new(16), why: host::env(view("GRAIL_LLVM_WHY")), grail_bodies: set_new(16), xpend: 0, xstale: 18446744073709551615 };
     // A function whose address is taken (`NAME(%rip)`, or named by data such as a vtable) is
     // called through a pointer by code that does not know its signature, so it keeps the six-word
     // form: an indirect call passes six words and reads rax:rdx, and LLVM must never see a call
@@ -8569,6 +8583,19 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
     }
     l.sigs = signatures(facts, &taken);
     l.ffis = ffi_signatures(facts);
+    mut nb = 0;
+    for i in facts.items.len() {
+        if facts.items[i].kind == 5 {
+            nb += 1;
+        }
+    }
+    mut bodies = set_new(nb + 1);
+    for i in facts.items.len() {
+        if facts.items[i].kind == 5 {
+            set_add(&mut bodies, view(facts.items[i].fn));
+        }
+    }
+    l.grail_bodies = bodies;
     // A wrong signature fact under --verify-facts: the compile fails with these lines.
     mut sigerrors = u8[];
     mut funcs = Func[];
