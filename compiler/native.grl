@@ -612,6 +612,11 @@ struct C {
     fmod_names: u8[][],
     fmod_ids: u64[][],
     fmod_n: u64,
+    // The digest of each source file the interface writer has read this run, by path, and the
+    // file's length: one sha256 per source instead of one per question (iface_source_digest).
+    srcdig_paths: u8[][],
+    srcdig_vals: u8[][],
+    srcdig_lens: u64[],
     funcs: Func[],
     // The (module, name) index of `funcs` and of `decls` (see name_key).
     func_slots: u64[],
@@ -51321,11 +51326,10 @@ fn iface_module_bytes<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std:
     }
     mut source_digest = digest.copy();
     if source_digest.len() == 0 {
-        source := host::read_file(view(path));
-        if source.len() == 0 {
+        if iface_source_len(&mut c, view(path)) == 0 {
             iface_refuse(view(path), view("cannot read the source this interface describes"));
         }
-        source_digest = iface_digest(&source);
+        source_digest = iface_source_digest(&mut c, view(path));
     }
     // The trailer: the source digest, then the digest of every byte above it. The cache keys on the
     // bytes before the trailer (the surface), so a module edit that changes no declaration leaves
@@ -54358,10 +54362,36 @@ fn iface_emit_facts<a>(c: (&a mut C)) -> unit {
     return ();
 }
 // The source digest the manifest records for module `m`: the digest of the file it was read from.
+// The sha256 of the source file at `path`, read and digested once per run: the interface's trailer,
+// its manifest row and the facts' manifest all name the same source.
+fn iface_source_digest<a, b>(c: (&a mut C), path: &b [u8]) -> u8[] {
+    for i in c.srcdig_paths.len() {
+        if same(view(c.srcdig_paths[i]), view(path)) {
+            return c.srcdig_vals[i].copy();
+        }
+    }
+    source := host::read_file(view(path));
+    digest := iface_digest(&source);
+    c.srcdig_paths.push(copy_bytes(view(path)));
+    c.srcdig_vals.push(digest.copy());
+    c.srcdig_lens.push(source.len());
+    return digest;
+}
+// The length of that source file (after iface_source_digest has read it).
+fn iface_source_len<a, b>(c: (&a mut C), path: &b [u8]) -> u64 {
+    iface_source_digest(&mut c, view(path));
+    for i in c.srcdig_paths.len() {
+        if same(view(c.srcdig_paths[i]), view(path)) {
+            return c.srcdig_lens[i];
+        }
+    }
+    return 0;
+}
 fn iface_manifest_source_digest<a, b>(c: (&a mut C), m: &b [u8]) -> u8[] {
     for i in c.iface_list.len() {
         if same(view(c.iface_list[i].module), view(m)) {
-            return iface_digest(&host::read_file(view(c.iface_list[i].path)));
+            path := c.iface_list[i].path.copy();
+            return iface_source_digest(&mut c, view(path));
         }
     }
     return u8[];
@@ -54419,7 +54449,7 @@ fn iface_emit_all<a>(c: (&a mut C)) -> unit {
         out_push(&mut row, 32);
         push_bytes(&mut row, view(iface_digest(&text)));
         out_push(&mut row, 32);
-        push_bytes(&mut row, view(iface_digest(&host::read_file(view(path)))));
+        push_bytes(&mut row, view(iface_source_digest(&mut c, view(path))));
         out_push(&mut row, 10);
         push_bytes(&mut manifest, view(row));
     }
@@ -54522,6 +54552,9 @@ pub fn main() -> u64 {
         fmod_names: u8[][],
         fmod_ids: u64[][],
         fmod_n: 0,
+        srcdig_paths: u8[][],
+        srcdig_vals: u8[][],
+        srcdig_lens: u64[],
         funcs: Func[],
         func_slots: u64[],
         func_keys: u64[],
