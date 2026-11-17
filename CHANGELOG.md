@@ -1,5 +1,10 @@
 ## Unreleased
 
+- Bounds checks: an index `t & L` is at most `L`, so a table lookup through a mask that matches the
+  table (`next[s & 511]` on a 512-entry table) needs no check. The loop-invariant pass runs only in
+  a body `func()` compiles, where a failed kept fact can recompile the function; a closure body
+  compiled elsewhere uses the plain kill.
+
 - **Closures given for a generic `F` live in the frame (S6(A)).** A closure whose type is its own
   literal's - a local closure, or one passed for a callable-bound parameter - is now held as its
   environment's words in the caller's frame, copied on a move and dropped in place, and called
