@@ -11510,7 +11510,7 @@
     "asm": [
       {
         "in": "f_main_get",
-        "text": "movabsq $8,%rdx"
+        "text": "cmpq $8,%rsi"
       },
       {
         "in": "f_main_get",
@@ -11533,6 +11533,10 @@
       {
         "in": "f_main_get",
         "text": "8(%rdi)"
+      },
+      {
+        "in": "f_main_get",
+        "text": "movabsq $8,%rdx"
       }
     ]
   },
@@ -12036,13 +12040,6 @@
       "lib/pool.grl",
       "lib/core.grl"
     ]
-  },
-  {
-    "name": "closure-bounds-p17-no-callable-bound",
-    "note": "P17: callable bounds on a type parameter are deferred (Q5)",
-    "source": "fn apply<R, F: Fn()->R>(f: F) -> R { return f(); }\nfn main() { n := 3; println(apply(|| -> u64 n + 1)); }\n",
-    "reject": true,
-    "diagnostic": "expected `,`, found `(`"
   },
   {
     "name": "closure-bounds-p18-generic-record-send",
@@ -17019,5 +17016,63 @@
     ],
     "stdout": "714\n",
     "note": "plain-record task items spawned in a loop each reach their own task (boxed at spawn, freed by the task adapter); before, every task read the last iteration's words"
+  },
+  {
+    "name": "closure-bounds-p17-callable-bound",
+    "note": "P17: a callable bound on a type parameter (`F: Fn() -> R`) - it was a parse error; built in 2b",
+    "source": "fn apply<R, F: Fn()->R>(f: F) -> R { return f(); }\nfn main() { n := 3; println(apply(|| -> u64 n + 1)); }\n",
+    "stdout": "4\n"
+  },
+  {
+    "name": "callable-bound-call",
+    "note": "`F: Fn(u64) -> u64` (docs/design/dyn-and-callable-bounds.md 2b): a value of type F is callable in the generic body; closures with and without written parameter types",
+    "source": "fn apply<F: Fn(u64) -> u64>(f: F, x: u64) -> u64 { return f(x); }\nfn main() { k := 3; println(apply(|x: u64| -> u64 x + k, 4)); println(apply(|x| x * 2, 21)); }\n",
+    "stdout": "7\n42\n"
+  },
+  {
+    "name": "callable-bound-infers-result",
+    "note": "the bound's parameters and result are inferred from the closure given for F (`U` from `|x| -> bool ..`); one specialisation per closure",
+    "source": "fn mapv<T, U, F: FnMut(T) -> U>(v: T[], f: F) -> U[] {\n    mut g = f;\n    mut out = U[];\n    mut src = v;\n    src.reverse();\n    while src.len() != 0 { out.push(g(src.pop()!)); }\n    return out;\n}\nfn main() { k := 10; r := mapv(u64[1, 2, 3], |x: u64| -> u64 x + k); println(r[0] + r[1] + r[2]); s := mapv(u64[1, 2], |x: u64| -> bool x > 1); println(s[1]); }\n",
+    "stdout": "36\ntrue\n"
+  },
+  {
+    "name": "callable-bound-mismatch-refused",
+    "note": "a closure whose signature does not meet the bound is refused at the call, naming the bound",
+    "source": "fn apply<F: Fn(u64) -> u64>(f: F, x: u64) -> u64 { return f(x); }\nfn main() { println(apply(|x: u64| -> bool x > 1, 4)); }\n",
+    "reject": true,
+    "diagnostic": "this argument does not meet the callable bound `Fn(u64) -> u64`"
+  },
+  {
+    "name": "callable-bound-named-function",
+    "note": "a named function may be given for F",
+    "source": "fn twice(x: u64) -> u64 { return x * 2; }\nfn apply<F: Fn(u64) -> u64>(f: F, x: u64) -> u64 { return f(x); }\nfn main() { println(apply(twice, 4)); }\n",
+    "stdout": "8\n"
+  },
+  {
+    "name": "callable-bound-direct-call",
+    "note": "in a callable-bound specialisation the closure is called directly, by its body's symbol, not through its code word (`call *%rax`), so the optimiser may inline it",
+    "source": "fn apply<F: Fn(u64) -> u64>(f: F, x: u64) -> u64 { return f(x); }\nfn main() { k := 3; println(apply(|x: u64| -> u64 x * k + 1, 4)); }\n",
+    "stdout": "13\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asm": [
+      "call f_.closure_main_c0"
+    ]
+  },
+  {
+    "name": "callable-bound-two-closures-two-specialisations",
+    "note": "two capture-free closures with one signature given for the same callable-bound parameter are two specialisations: each calls its own body directly (the specialisation key names the closure literal, not only its captures)",
+    "source": "fn apply<F: Fn(u64) -> bool>(f: F, x: u64) -> bool { return f(x); }\nfn main() { println(apply(|x: u64| -> bool x == 5, 5)); println(apply(|x: u64| -> bool x == 99, 5)); }\n",
+    "stdout": "true\nfalse\n"
+  },
+  {
+    "name": "callable-bound-closure-lent",
+    "note": "a closure capturing a call-scoped parameter may be given to a callable-bound parameter and the result returned: the callee only borrows the closure for the call",
+    "source": "use vecs;\nfn scale<T>(items: T[], f: Fn(T) -> T) -> T[] { return items.map(|x: T| -> T f(x)); }\nfn main() { r := scale(u64[1, 2], |x: u64| -> u64 x * 10); println(r[1]); }\n",
+    "stdout": "20\n"
   }
 ]
