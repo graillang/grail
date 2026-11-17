@@ -33872,7 +33872,7 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
     if kind == 20 {
         o(&mut c, view("movq (%rax),%rax\n"));
         shift = 1;
-        if ty_kind(&mut c, inty) == 7 {
+        if (ty_kind(&mut c, inty) == 7) && !direct(&mut c, ty) {
             get(&mut c, input, view("%rax"));
         } else {
             o(&mut c, view("leaq "));
@@ -37326,11 +37326,22 @@ fn parallel_class_builtin<a>(c: (&a mut C), klass: Val) -> Val {
 //
 // That is why it cannot dangle: nothing reachable from a handle is frame memory, and the handle
 // owns both the environment and the result until one wait consumes it.
+// S6(A): a closure held as frame words, handed to something that keeps it past the frame (a job, a
+// thread, a runtime payload), becomes its boxed object: the environment's words copied into a box,
+// the loans moved with them. Anything else is returned as it is.
+fn closure_object<a>(c: (&a mut C), v: Val) -> Val {
+    if (closure_record(&mut c, v.ty) == v.ty) || !framed(&mut c, v.ty) {
+        return v;
+    }
+    t := base_type(&mut c, v.ty);
+    erased := intern_args(&mut c, 20, ty_arg(&mut c, t), ty_mode(&mut c, t), type_regions(&mut c, t), type_args(&mut c, t));
+    return move_as(&mut c, v, erased);
+}
 fn parallel_spawn_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     expect(&mut c, view(")"));
     input := callee.t;
     inty := callee.ty;
-    function := deref(&mut c, callee);
+    mut function = deref(&mut c, callee);
     fty := function.ty;
     closure := ty_kind(&mut c, fty) == 20;
     if (ty_kind(&mut c, fty) != 12) & !closure {
@@ -37378,6 +37389,9 @@ fn parallel_spawn_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     if contains_task(&mut c, result, 0) {
         fail(&mut c, view("a pool job cannot return a Task or Job handle"));
     }
+    // A framed closure (S6(A)) becomes the boxed object the runtime keeps as the payload; the
+    // checks above saw its environment.
+    function = closure_object(&mut c, function);
     observe(&mut c, function.t);
     mut box = imm(&mut c, 0);
     mut target = function.t;
@@ -37437,12 +37451,15 @@ fn thread_spawn_raw_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     }
     input := callee.t;
     inty := callee.ty;
-    function := deref(&mut c, callee);
+    mut function = deref(&mut c, callee);
     fty := function.ty;
     closure := ty_kind(&mut c, fty) == 20;
     if (ty_kind(&mut c, fty) != 12) & !closure {
         fail(&mut c, view("thread_spawn_raw requires a callable"));
     }
+    // A framed closure (S6(A)) becomes the boxed object the runtime keeps as the payload; the
+    // checks above saw its environment.
+    function = closure_object(&mut c, function);
     observe(&mut c, function.t);
     mut box = imm(&mut c, 0);
     mut target = function.t;
@@ -43282,6 +43299,11 @@ fn subword<a>(c: (&a mut C), alias: u64) -> bool {
 fn direct<a>(c: (&a mut C), alias: u64) -> bool {
     if c.raw != 0 {
         return false;
+    }
+    // A framed closure (S6(A)) is its environment's words, so a reference to it is their address,
+    // as for a record; a call through it spills that address into a word (indirect_call).
+    if (closure_record(&mut c, alias) != alias) && framed(&mut c, alias) {
+        return true;
     }
     ty := base_type(&mut c, alias);
     // An array value is the address of its bytes, as a record's is.
