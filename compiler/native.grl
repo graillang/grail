@@ -1025,6 +1025,9 @@ struct C {
     drop_walked: u64[],
     // A drop helper's symbol by interned type (drop_ref_name).
     drop_names_by_ty: u8[][],
+    // framable's answer by type (0 not asked, 1 no, 2 yes), and layout_bits' nesting depth.
+    framable_memo: u64[],
+    layout_busy: u64,
     spec_emitted: u8[][],
     spell_lenient: u64,
     spell_failed: u64,
@@ -30568,7 +30571,15 @@ fn closure_env_record<a>(c: (&a mut C), ty: u64) -> bool {
     }
     return same(view(c.decls[ty_arg(&mut c, ty)].module), view(".closure"));
 }
+// How many layout computations are under way (layout_bits): an answer worked out inside one may
+// rest on a record still being laid out, so only an outermost one is final (framable's memo).
 fn layout_bits<a>(c: (&a mut C), alias: u64) -> u64 {
+    exchange(&mut c.layout_busy, c.layout_busy + 1);
+    bits := layout_bits_now(&mut c, alias);
+    exchange(&mut c.layout_busy, c.layout_busy - 1);
+    return bits;
+}
+fn layout_bits_now<a>(c: (&a mut C), alias: u64) -> u64 {
     alias := closure_record(&mut c, alias);
     ty := base_type(&mut c, alias);
     // An array of plain data is plain: its bytes are stored inline wherever it is held. One that
@@ -30667,6 +30678,25 @@ fn layout_bits<a>(c: (&a mut C), alias: u64) -> u64 {
 }
 // Whether `ty` is held as its own words (layout bit 4): a struct, a tuple or an array.
 fn framable<a>(c: (&a mut C), alias: u64) -> bool {
+    // Asked of every value a body touches: remembered by type once settled (2 framable, 1 not).
+    if (alias < c.framable_memo.len()) && (c.framable_memo[alias] != 0) {
+        return c.framable_memo[alias] == 2;
+    }
+    outermost := c.layout_busy == 0;
+    answer := framable_now(&mut c, alias);
+    if outermost && (alias < c.types.len()) {
+        while c.framable_memo.len() <= alias {
+            c.framable_memo.push(0);
+        }
+        mut code = 1;
+        if answer {
+            code = 2;
+        }
+        c.framable_memo[alias] = code;
+    }
+    return answer;
+}
+fn framable_now<a>(c: (&a mut C), alias: u64) -> bool {
     alias := closure_record(&mut c, alias);
     ty := base_type(&mut c, alias);
     // An array, and a SIMD vector (docs/design/simd.md), are always frame values.
@@ -60426,6 +60456,8 @@ pub fn main() -> u64 {
         drop_names: u8[][],
         drop_walked: u64[],
         drop_names_by_ty: u8[][],
+        framable_memo: u64[],
+        layout_busy: 0,
         spec_emitted: u8[][],
         spell_lenient: 0,
         spell_failed: 0,
