@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **A closure copies a captured shared reference.** `r := &x` captured by two closures used to fail
+  with "`r` was moved" at the second; a `&T` is now copied into each closure, which holds the shared
+  loan, as in Rust (an exclusive `&mut`, and a shared slice value, which owns its header, still move).
+  A closure given for a generic `F: Fn<Send>` now reports a capture that cannot cross a thread as
+  soon as it is read.
 - **Release builds inline small functions across modules.** A call to a function of another module
   was declared with a generic six-argument type that never matched the callee's real definition,
   so LLVM never inlined it: small std helpers (`bytes::load_u64`, hash and string methods) stayed
