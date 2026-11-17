@@ -113,7 +113,7 @@ than misread.
  source "tests/interfaces/pair.grl"
  sha256 "ad1f2b3cf421decab61ea22f7dfc572fec79a74a3078b3ef330f4e49a94db2d0"
  mode typed_refs=1 default_u64=1 overflow=checked target=x86_64
- abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame args = 6 registers then stack
+ abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame args = 6 registers then stack layout = c
  unsafe 0
  std 0
  host 0
@@ -1229,6 +1229,42 @@ candidate (`expand_copy`, three levels, a site number per copy). A leaf whose sl
 callee-saved registers is a candidate too: those registers are the caller's in a copy, so the copy
 holds the values in free scratch registers (`rename_register`; a body that also uses a narrower name
 of the register is refused). The size cap is 32 IR lines.
+
+### Release builds: ThinLTO across modules
+
+A release unit is lifted to LLVM and optimised by `clang -O2` per module, so a small function of one
+module stayed a call from every other module (the hash's `write_num` in the map's loop, `core::some`
+in the iterator chain): LLVM inlines only what is in the module it is optimising. Copying small
+bodies into importers (`available_externally`) was the plan; ThinLTO does it with LLVM's own cost
+model and no copy in the interface. `grail llvm-compile` runs `clang -O2 -flto=thin` on each part
+of the unit's module and leaves the parts as bitcode in an archive; `release_optimise` makes the
+unit object one flat archive of its native part and those parts (`llvm-ar qcsDL`: lld reads no
+nested archives); the link takes every member (`--whole-archive`), imports the small bodies across
+units and optimises and generates code in parallel (`--thinlto-jobs`), with its cache in the build
+store (`<store>/thinlto`, beside `llvm-parts`). A function LLVM does not inline keeps its one
+definition in its own module, so nothing changes about what links. The release compiler's own
+build goes the same way (`tools/native.mjs release`).
+
+Measured on `bench/hashmap.grl` (fresh store): 1,235M -> 823M instructions; a cold build 15.6 s ->
+12.6 s (per part, codegen moves to the link and runs in parallel); a rebuild after one function of
+`main` changes 0.66 s -> 0.82 s (the warm ThinLTO link re-imports and re-optimises what the edit
+reaches), against 0.65 s for `cargo build --release` after the same edit of its twin.
+
+### The release edit cycle, and memory
+
+What a one-function edit costs in a release build, step by step (`bench/hashmap.grl`, release
+compiler, medians under load): the module's compiler run and lowering ~110 ms; its LLVM parts
+(`clang -O2 -flto=thin`, only the changed ~128 KB part, the rest are store hits by text) ~80 ms;
+the unit archive (native part + parts, one `llvm-ar` with no symbol table) ~30 ms; the link
+~170 ms, of which the ThinLTO backend of the one changed part is ~45 ms and importing the bodies
+it calls from other modules most of the rest. The native part is assembled by `grail asm` inside
+the compiler run, as in a development build. Measured interleaved with `cargo build --release`
+after the same edit of the Rust twin: grail median 669 ms (min 334), cargo 737 ms (min 496).
+
+A part's `clang -O2` peaks at up to ~19 bytes of memory per byte of LLVM text (2.5 GB for a 134 MB
+part of the compiler's own module), so `llvm-compile` admits parts against three quarters of
+`MemAvailable` as well as the jobserver: a build fits a 16 GB machine by running fewer parts at
+once rather than being killed. The ThinLTO link stays under 0.9 GB at 8 backend jobs.
 
 ### The frame constant, which was a latent miscompile
 

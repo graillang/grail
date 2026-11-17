@@ -39,6 +39,9 @@ export const imports = {
     'GetFileAttributesW',
     'GetFileAttributesExW',
     'MoveFileExW',
+    'CreateJobObjectW',
+    'SetInformationJobObject',
+    'AssignProcessToJobObject',
     'CreatePipe',
     'CreateSymbolicLinkW',
     'GetLastError',
@@ -166,11 +169,11 @@ export function writeImportLibrary(directory = join(workDirectory, 'lib'), machi
 }
 
 // x86-64 objects come from the compiler's own assembler (`grail asm --target windows-x86_64`,
-// compiler/coff.grl), except debug text (CodeView, `.cv_*`), which clang still assembles.
+// compiler/coff.grl), CodeView debug text included.
 // GRAIL_ASM_ORACLE=1 also holds each internal object to clang's (tools/asm-oracle.mjs).
 export function assemble(source, object, target = windowsTarget) {
-  // (C sources - the FFI shims - and debug text go to clang.)
-  const internal = target === 'windows-x86_64' && /\.s$/.test(source) && !/\.cv_file/.test(readFileSync(source, 'latin1').slice(0, 4096));
+  // (C sources - the FFI shims - are compiled by clang.)
+  const internal = target === 'windows-x86_64' && /\.s$/.test(source);
   if (internal) {
     command([buildCompiler(), 'asm', '--target', 'windows-x86_64', source, '-o', object]);
     if (process.env.GRAIL_ASM_ORACLE === '1') {

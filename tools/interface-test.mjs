@@ -240,7 +240,7 @@ function fnLayout(bytes, name) {
     const p = payload(bytes, record);
     if (p.str().toString() !== name) continue;
     const at = effectsAt(bytes, p.at);
-    return { record, noAlloc: at.noAlloc, noPanic: at.noPanic, body: at.noPanic + 1 };
+    return { record, noAlloc: at.noAlloc, noPanic: at.noPanic, body: at.noPanic + 2 }; // then no_block, then the body
   }
   assert.fail(`no function record named ${name}`);
 }
@@ -317,7 +317,7 @@ function proveDigests(directory) {
     // dereferences wrongly.
     assert.match(
       text,
-      /^abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame args = 6 registers then stack$/m,
+      /^abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame args = 6 registers then stack layout = c$/m,
       `${path}: the header does not state the \`dyn\` ABI`,
     );
     // Write, read, write again: the reader rebuilds the model the writer started from.
@@ -662,17 +662,17 @@ pub fn twice(x: u64) -> u64 {
   const version = compile(files, join(directory, 'version'), ['--interface', ifaces]);
   assert.equal(version.status, 1, 'an interface written by another compiler must be refused');
   assert.match(version.output, /was written in interface format 3/, `the version refusal must name the version it found: ${version.output}`);
-  assert.match(version.output, /this compiler reads format 11/, 'the version refusal must name the version this compiler reads');
+  assert.match(version.output, /this compiler reads format 12/, 'the version refusal must name the version this compiler reads');
 
   // ... and a file from a *newer* compiler is refused by name as well: a version this compiler
   // does not know is never half-read.
   const future = Buffer.from(original);
-  future[4] = 12;
+  future[4] = 13;
   repin(future);
   const ahead = compile(files, join(directory, 'future'), ['--interface', ifaces]);
   assert.equal(ahead.status, 1, 'an interface written by a newer compiler must be refused');
-  assert.match(ahead.output, /was written in interface format 12 by a newer compiler/, `the future-version refusal must name the version it found: ${ahead.output}`);
-  assert.match(ahead.output, /this one reads format 11/, 'the future-version refusal must name the version this compiler reads');
+  assert.match(ahead.output, /was written in interface format 13 by a newer compiler/, `the future-version refusal must name the version it found: ${ahead.output}`);
+  assert.match(ahead.output, /this one reads format 12/, 'the future-version refusal must name the version this compiler reads');
 
   // ... a truncated file is refused as truncated.
   repin(Buffer.from(original.subarray(0, Math.floor(original.length * 0.6))));
@@ -1048,7 +1048,7 @@ function proveGenericBodies() {
   const ifaces = emit(all, directory);
   const generic = join(ifaces, 'generic.iface');
   const text = dump(generic);
-  assert.match(text, /^grail-interface 11$/m, 'generics: the interface does not carry the current format version');
+  assert.match(text, /^grail-interface 12$/m, 'generics: the interface does not carry the current format version');
   assert.match(text, /^fn generic::twice <1> /m, 'generics: generic.iface does not declare the template');
   assert.match(text, /^\s*body$/m, 'generics: generic.iface carries no body section');
   // The body is the template's own source text, one `|` row per line, readable in a diff.
@@ -1398,7 +1398,7 @@ function proveEffectsTravel() {
   const emit = compile(files, join(directory, 'emit'), ['--emit-interface', ifaces]);
   assert.equal(emit.status, 0, `effects: the claimed program does not compile\n${emit.output}`);
   const claimedPath = join(ifaces, 'fx_eff_lib.iface');
-  assert.match(dump(claimedPath), /^\s*effects 1 0 0$/m, 'effects: the claim did not travel in the interface');
+  assert.match(dump(claimedPath), /^\s*effects 1 0 0 0$/m, 'effects: the claim did not travel in the interface');
   // The summary is a computed fact, carried for every function the interface lists, claimed or not.
   assert.match(dump(claimedPath), /^\s*facts \S+ [01] [01] [01]/m, 'effects: the summary did not travel in the interface');
   const viaInterface = compile(files, join(directory, 'via'), ['--interface', ifaces]);

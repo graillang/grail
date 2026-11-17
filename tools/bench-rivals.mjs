@@ -41,7 +41,12 @@ const option = (name, fallback) => { const at = argv.indexOf(name); if (at < 0) 
 const runs = Number(option('--runs', 3));
 const chosen = compilerOptions(argv);
 const jsonPath = jsonOption(argv);
-const metric = option('--metric', 'cpu');
+const metric = option('--metric', 'cpu'); // cpu | instructions | wall
+// --workers 1,4,8: a parallel program is run once per count, with every runtime told that many
+// threads (GRAIL_WORKERS, RAYON_NUM_THREADS, OMP_NUM_THREADS, GOMAXPROCS, ZIG_THREADS); its rows are
+// `NAME xW`. Wall time is the figure such a run is about (--metric wall).
+const workerCounts = option('--workers', '').split(',').filter(Boolean).map(Number);
+const threadEnv = w => w ? { GRAIL_WORKERS: String(w), RAYON_NUM_THREADS: String(w), OMP_NUM_THREADS: String(w), GOMAXPROCS: String(w), ZIG_THREADS: String(w) } : {};
 const work = join(root, '.work/bench-rivals');
 rmSync(work, { recursive: true, force: true });
 mkdirSync(work, { recursive: true });
@@ -143,16 +148,20 @@ const load = [loadavg()];
 const results = {};
 const fmt = (name, v) => v === undefined ? '-' : name === 'ffi_call' && metric !== 'instructions' ? `${v.toFixed(2)}ns` : metric === 'instructions' ? `${(v / 1e9).toFixed(2)}G` : `${v.toFixed(3)}`;
 console.log(`Grail: ${measuredGrail.commit}${names.includes('ffi_call') && !existsSync(join(root, 'bench/ffi_call.grl')) ? '; ffi_call: the scheduler tree ' + schedTree : ''}`);
-console.log(`bench-rivals: ${metric === 'instructions' ? 'user-space instructions (G)' : 'CPU seconds (user+sys)'}, best of ${runs}; ffi_call: ns per call as the program reports it`);
+console.log(`bench-rivals: ${metric === 'instructions' ? 'user-space instructions (G)' : metric === 'wall' ? 'wall seconds' : 'CPU seconds (user+sys)'}, best of ${runs}${workerCounts.length ? `, at ${workerCounts.join(', ')} workers` : ''}; ffi_call: ns per call as the program reports it`);
 console.log(`${'program'.padEnd(10)} ${heads.map(h => h.padStart(12)).join(' ')}   native/dev-best  LLVM/release-best`);
 let failed = 0;
-for (const name of names) {
-  const exe = build(name);
+const rowNames = [];
+const builds = {};
+for (const [name, workers] of names.flatMap(n => workerCounts.length ? workerCounts.map(w => [n, w]) : [[n, 0]])) {
+  const exe = builds[name] ??= build(name);
+  const key = workers ? `${name} x${workers}` : name;
+  rowNames.push(key);
   const best = {}, out = {}, instructions = {}, cpu = {};
   for (let i = 0; i < runs; i++) {
     for (const column of measured) {
-      const r = measure([exe[column]]);
-      const v = selfReported(name, r) ?? (metric === 'instructions' ? r.instructions : r.cpu);
+      const r = measure([exe[column]], { env: { ...process.env, ...threadEnv(workers) } });
+      const v = selfReported(name, r) ?? (metric === 'instructions' ? r.instructions : metric === 'wall' ? r.wall : r.cpu);
       best[column] = Math.min(best[column] ?? Infinity, v);
       instructions[column] = Math.min(instructions[column] ?? Infinity, r.instructions);
       cpu[column] = Math.min(cpu[column] ?? Infinity, r.cpu);
@@ -164,8 +173,8 @@ for (const name of names) {
   const differs = measured.filter(c => JSON.stringify(numbers(out[c])) !== JSON.stringify(numbers(out.c)));
   if (differs.some(c => columns.includes(c))) failed++;
   const dev = Math.min(...devRivals.map(c => best[c])), rel = Math.min(...releaseRivals.map(c => best[c]));
-  results[name] = { best, instructions, cpu, out: out.c, native_over_dev_best: best['grail-native'] / dev, llvm_over_release_best: best['grail-llvm'] / rel, differs };
-  console.log(`${name.padEnd(10)} ${columns.map(c => fmt(name, best[c]).padStart(12)).join(' ')}   ${ratio(best['grail-native'], dev).padStart(15)}  ${ratio(best['grail-llvm'], rel).padStart(17)}${differs.length ? `   OUTPUT DIFFERS: ${differs.join(', ')}` : ''}`);
+  results[key] = { best, instructions, cpu, out: out.c, workers, native_over_dev_best: best['grail-native'] / dev, llvm_over_release_best: best['grail-llvm'] / rel, differs };
+  console.log(`${key.padEnd(10)} ${columns.map(c => fmt(name, best[c]).padStart(12)).join(' ')}   ${ratio(best['grail-native'], dev).padStart(15)}  ${ratio(best['grail-llvm'], rel).padStart(17)}${differs.length ? `   OUTPUT DIFFERS: ${differs.join(', ')}` : ''}`);
 }
 // References: C written another way, to say what a gap is made of. Each is timed like the table and
 // set against its program's C twin and Grail's release build.
@@ -190,7 +199,7 @@ for (const [ref, of] of references) {
   console.log(`${ref.padEnd(44)} ${fmt(of, best).padStart(8)} ${fmt(of, results[of].best.c).padStart(9)} ${fmt(of, results[of].best['grail-llvm']).padStart(12)}   ${ratio(results[of].best['grail-llvm'], best).padStart(14)}${same ? '' : '   OUTPUT DIFFERS'}`);
 }
 if (nativeColumns.length) console.log(`\nthe same programs built for this CPU (Grail-LLVM is still baseline x86-64)\n${'program'.padEnd(10)} ${[...nativeHeads, 'Grail-LLVM'].map(h => h.padStart(12)).join(' ')}   LLVM/native-best`);
-for (const name of nativeColumns.length ? names : []) {
+for (const name of nativeColumns.length ? rowNames : []) {
   const b = results[name].best;
   const nat = Math.min(...nativeColumns.map(c => b[c]));
   results[name].llvm_over_native_best = b['grail-llvm'] / nat;
@@ -199,7 +208,7 @@ for (const name of nativeColumns.length ? names : []) {
 // User-space instructions retired (perf_event_open, every thread), fewest of the runs: unlike time,
 // not moved by the load. ffi_call's count is the whole program's, both loops included.
 console.log(`\nuser-space instructions (G), the same builds\n${'program'.padEnd(10)} ${heads.map(h => h.padStart(12)).join(' ')}   native/dev-best  LLVM/release-best`);
-for (const name of names) {
+for (const name of rowNames) {
   const n = results[name].instructions;
   const dev = Math.min(...devRivals.map(c => n[c])), rel = Math.min(...releaseRivals.map(c => n[c]));
   console.log(`${name.padEnd(10)} ${columns.map(c => (n[c] / 1e9).toFixed(2).padStart(12)).join(' ')}   ${ratio(n['grail-native'], dev).padStart(15)}  ${ratio(n['grail-llvm'], rel).padStart(17)}`);
@@ -210,13 +219,14 @@ console.log(`load average ${load[0]} at start, ${load[1]} at end; ${Object.value
 writeFileSync(join(root, '.work/bench-rivals.json'), JSON.stringify({ grail: measuredGrail.commit, metric, runs, load, versions: v, results, at: new Date().toISOString() }, null, 2) + '\n');
 if (jsonPath) {
   const counted = kind => kind === 'instructions' || (metric === 'instructions' && kind !== 'cpu');
-  const unitOf = (name, kind) => kind === 'cpu' ? (name === 'ffi_call' ? 's CPU (whole program)' : 's CPU') : counted(kind) ? (name === 'ffi_call' ? 'G instructions (whole program)' : 'G instructions') : name === 'ffi_call' ? 'ns per call' : 's CPU';
+  const walled = kind => metric === 'wall' && kind === 'time';
+  const unitOf = (name, kind) => walled(kind) ? 's wall' : kind === 'cpu' ? (name === 'ffi_call' ? 's CPU (whole program)' : 's CPU') : counted(kind) ? (name === 'ffi_call' ? 'G instructions (whole program)' : 'G instructions') : name === 'ffi_call' ? 'ns per call' : 's CPU';
   const table = (id, title, keys, primary, threshold, chart, kind = 'time', note = undefined) => ({
     id, title, chart, threshold, primary, note, direction: 'lower',
     columns: keys.map(key => ({ key, label: headOf[key], grail: key.startsWith('grail') })),
-    rows: names.map(name => ({ name, unit: unitOf(name, kind), values: Object.fromEntries(keys.map(k => [k, kind === 'cpu' ? results[name].cpu[k] : counted(kind) ? results[name].instructions[k] / 1e9 : results[name].best[k]])) })),
+    rows: rowNames.map(name => ({ name, unit: unitOf(name.split(' ')[0], kind), values: Object.fromEntries(keys.map(k => [k, kind === 'cpu' ? results[name].cpu[k] : counted(kind) ? results[name].instructions[k] / 1e9 : results[name].best[k]])) })),
   });
-  const figure = metric === 'instructions' ? `User-space instructions (perf_event_open, every thread), fewest of ${runs}; chosen over time because the host was loaded` : `CPU time (user + sys), best of ${runs}`;
+  const figure = metric === 'wall' ? `Wall time of the whole program, best of ${runs}${workerCounts.length ? `, at ${workerCounts.join(', ')} workers` : ''}; a parallel run is about time, so this is the figure, and the load is beside it` : metric === 'instructions' ? `User-space instructions (perf_event_open, every thread), fewest of ${runs}; chosen over time because the host was loaded` : `CPU time (user + sys), best of ${runs}`;
   writeResults(jsonPath, {
     tool: 'bench-rivals', title: 'Run time against C, Rust, Go and Zig', commit: measuredGrail.commit, versions: v, load,
     commands: [`bun tools/bench-rivals.mjs --runs ${runs}${chosen.branch ? ` --branch ${chosen.branch}` : ''}`, ...Object.entries({ 'Grail-native': 'native backend, --overflow=checked', 'Grail-LLVM': '--backend=llvm --overflow=wrap, clang -O2', 'C -O2': 'clang -O2 -ffp-contract=off', 'Rust rel': 'rustc --edition 2021 -C opt-level=3', Go: 'go build (GOAMD64=v1)', 'Zig RF': 'zig build-exe -O ReleaseFast -mcpu=baseline', 'Rust dev': 'rustc --edition 2021 -C opt-level=0 -g', 'Zig Debug': 'zig build-exe -O Debug -mcpu=baseline' }).map(([k, c]) => `${k}: ${c}`)],
@@ -229,5 +239,5 @@ if (jsonPath) {
   });
 }
 // One line the gate's summary picks up: Grail-LLVM over the best release rival, per program.
-console.log(`bench-rivals (${measuredGrail.commit}): LLVM/release-best ${names.map(n => `${n} ${ratio(results[n].best['grail-llvm'], Math.min(...releaseRivals.map(c => results[n].best[c])))}`).join(', ')}`);
+console.log(`bench-rivals (${measuredGrail.commit}): LLVM/release-best ${rowNames.map(n => `${n} ${ratio(results[n].best['grail-llvm'], Math.min(...releaseRivals.map(c => results[n].best[c])))}`).join(', ')}`);
 if (failed) process.exit(1);
