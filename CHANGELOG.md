@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **Fixed: a release-build segfault in `pool::split` and the other pool shapes.** Lifting the
+  thread-pointer read and write into LLVM inline assembly (so that `rt_current`, the mutex fast path
+  and the allocator's threaded path were optimised) put the allocator's thread-cache path in the
+  lifted code, and a closure's capture was found zeroed after `pool::split` built it: five pool and
+  scheduler cases crashed under `GRAIL_BACKEND=llvm`. Functions that read or set the thread pointer
+  stay in the native stream again until the lifted form is shown correct. The landing gate now runs
+  an LLVM leg over the pool, scheduler, unboxed and vector cases (`llvm-pool` in
+  tools/landsvc/suites.txt).
+
 - Fixed: the internal assembler refused `.hidden` (the runtime's `rt_sites_fill`), so every LLVM
   release build failed at `grail asm`. It now takes `.hidden`, `.protected`, `.internal` and
   `.comm`, and `.word` is 32 bits on AArch64. `tests/asm/` holds every ELF directive the
