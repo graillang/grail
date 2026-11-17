@@ -5717,7 +5717,7 @@ fn last_name<a, b>(c: (&a mut C), name: &b [u8], from: u64, to: u64) -> u64 {
                     }
                 }
             }
-            if kind_at(&mut c, i + 1) == 261 {
+            if (i + 1 < c.toks.len()) && (c.toks[i + 1].kind == 261) {
                 mut named = en - st == name.len();
                 mut j = 0;
                 while named && (j < name.len()) {
@@ -5732,24 +5732,28 @@ fn last_name<a, b>(c: (&a mut C), name: &b [u8], from: u64, to: u64) -> u64 {
                 }
             }
         }
-        mut use = 1;
-        if i != 0 {
-            prev := kind_at(&mut c, i - 1);
-            if (prev == 46) || (prev == 260) {
-                use = 0;
+        // Whether the token is a use is asked only of a name of the right length: the neighbours
+        // are read for that one, not for every token of the scope.
+        if kind == 1 && en - st == name.len() && i != skip && hidden == 0 {
+            mut use = 1;
+            if i != 0 {
+                prev := c.toks[i - 1].kind;
+                if (prev == 46) || (prev == 260) {
+                    use = 0;
+                }
             }
-        }
-        // `name(` is a use too: a local holding a closure (or a reference to one) is called by its
-        // name, and the call reads it. Counting a same-named function's call as well only keeps the
-        // local alive a little longer, which is the conservative side.
-        mut next = kind_at(&mut c, i + 1);
-        if (next == 58) || (next == 260) || (next == 261) {
-            use = 0;
-        }
-        if kind == 1 && en - st == name.len() && i != skip && hidden == 0 && use != 0 {
-            mut matched = 1;
+            // `name(` is a use too: a local holding a closure (or a reference to one) is called by its
+            // name, and the call reads it. Counting a same-named function's call as well only keeps the
+            // local alive a little longer, which is the conservative side.
+            if i + 1 < c.toks.len() {
+                next := c.toks[i + 1].kind;
+                if (next == 58) || (next == 260) || (next == 261) {
+                    use = 0;
+                }
+            }
+            mut matched = use;
             mut j = 0;
-            while j < en - st {
+            while (matched != 0) && (j < en - st) {
                 if c.src[st + j] != name[j] {
                     matched = 0;
                     break;
