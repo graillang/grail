@@ -1,5 +1,9 @@
 ## Unreleased
 
+- The native backend computes SIMD operations with packed SSE2 on x86-64 (lane arithmetic, compares,
+  select, splat, sums, 4-lane shuffles, `any`/`all`, `to_f32`), with exactly the same results as
+  before. A dot product, a 4x4 matrix product and an AoS-to-SoA transpose run 2-5x faster natively.
+  The internal assembler encodes the new instructions identically to clang.
 - An effect refusal over a callee the run cannot see (compiling a program to assembly without the
   runtime's sources) names it - "the target is `rt_len`, whose body and effect summary this run does
   not have" - instead of calling it an indirect call.
