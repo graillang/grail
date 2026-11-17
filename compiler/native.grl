@@ -6390,6 +6390,29 @@ fn drop_symbol_known<a>(c: (&a mut C), ty: u64) -> unit {
     drop_symbol(&mut c, ty);
     return ();
 }
+// A struct's or tuple's in-place drop (unboxed-values.md, stage 4): the user's `drop`, then the
+// owners its words hold, at their offsets from the address in %rdi; it frees nothing. The boxed
+// helper (`drop_symbol`) is this and `rt_free`; a record held inline - in a frame, in another
+// record's words, flat in a vector - is dropped by this alone. For an array the helper already is
+// in place, so its name is the array's drop symbol.
+fn drop_in_place_symbol<a>(c: (&a mut C), ty: u64) -> u8[] {
+    if is_array(&mut c, ty) {
+        return drop_symbol(&mut c, ty);
+    }
+    mut name = drop_symbol(&mut c, ty);
+    name[1] = 80;
+    return name;
+}
+// Whether `ty` has a separate in-place drop: a Grail struct or tuple (not an enum, whose payload
+// is a word, nor a C record, whose bytes own nothing).
+fn in_place_record<a>(c: (&a mut C), ty: u64) -> bool {
+    if ty_kind(&mut c, ty) != 8 {
+        return false;
+    }
+    index := ty_arg(&mut c, ty);
+    d := &c.decls[index];
+    return (d.is_enum == 0) && (d.c_layout == 0);
+}
 fn drop_symbol<a>(c: (&a mut C), ty: u64) -> u8[] {
     while c.drop_names.len() <= ty {
         c.drop_names.push(u8[]);
@@ -45915,6 +45938,25 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                 // needs the name visible across parts, and a build made of several objects needs it
                 // too (B1 stage 3).
                 fx_end(&mut c);
+                if in_place_record(&mut c, ty) {
+                    emit_drop_in_place(&mut c, ty, view(hook));
+                    helper_sym := drop_symbol(&mut c, ty);
+                    fx_helper(&mut c, view(helper_sym));
+                    weak_def(&mut c);
+                    push_bytes(&mut c.out, view(helper_sym));
+                    c.out.push(10);
+                    push_bytes(&mut c.out, view(helper_sym));
+                    o(&mut c, view(":\ntestq %rdi,%rdi\n"));
+                    jump(&mut c, view("jz"), done);
+                    o(&mut c, view("pushq %rbp\nmovq %rsp,%rbp\npushq %r12\npushq %r13\nmovq %rdi,%r12\n"));
+                    call_out(&mut c, view(drop_in_place_symbol(&mut c, ty)));
+                    o(&mut c, view("movq %r12,%rdi\n"));
+                    call_out(&mut c, view("rt_free"));
+                    o(&mut c, view("popq %r13\npopq %r12\nleave\n"));
+                    mark(&mut c, done);
+                    o(&mut c, view("ret\n"));
+                    continue;
+                }
                 helper_sym := drop_symbol(&mut c, ty);
                 fx_helper(&mut c, view(helper_sym));
                 weak_def(&mut c);
@@ -46075,6 +46117,54 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
         }
     }
     return ();
+}
+// The in-place drop of the struct or tuple `ty` (drop_in_place_symbol): with its address in %rdi,
+// the user's `drop` runs on it as `&mut self`, then each field that owns something is dropped - a
+// word that holds an owner by that owner's drop, an inline record or array by its own in-place
+// drop at its address. A zero owner word is an owner moved out (a partial move leaves 0 behind), so
+// the word's drop - which starts by testing for 0 - skips it. Nothing is freed.
+fn emit_drop_in_place<a, b>(c: (&a mut C), ty: u64, hook: &b [u8]) -> unit {
+    sym := drop_in_place_symbol(&mut c, ty);
+    fx_helper(&mut c, view(sym));
+    weak_def(&mut c);
+    push_bytes(&mut c.out, view(sym));
+    c.out.push(10);
+    push_bytes(&mut c.out, view(sym));
+    o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\npushq %r12\npushq %r13\nmovq %rdi,%r12\n"));
+    if hook.len() != 0 {
+        o(&mut c, view("movq %r12,%rdi\n"));
+        call_out(&mut c, hook);
+    }
+    index := ty_arg(&mut c, ty);
+    count := c.decls[index].count;
+    for i in count {
+        t := field_type(&mut c, ty, i);
+        if needs_drop(&mut c, t) {
+            if inline_field(&mut c, ty, i) {
+                // A plain record or array held inline owns nothing; one that owns has its own
+                // in-place drop.
+                if ((layout_bits(&mut c, t) & 1) != 0) && !array_owned(&mut c, t) {
+                    continue;
+                }
+                o(&mut c, view("leaq "));
+                on(&mut c, field_word(&mut c, ty, i) * 8);
+                o(&mut c, view("(%r12),%rdi\n"));
+                call_out(&mut c, view(drop_in_place_ref(&mut c, t)));
+            } else {
+                o(&mut c, view("movq "));
+                on(&mut c, field_word(&mut c, ty, i) * 8);
+                o(&mut c, view("(%r12),%rdi\n"));
+                holder_drop(&mut c, t);
+            }
+        }
+    }
+    o(&mut c, view("popq %r13\npopq %r12\nleave\nret\n"));
+    return ();
+}
+// Names the in-place drop of `ty` and asks for it to be emitted (its boxed helper is emitted with it).
+fn drop_in_place_ref<a>(c: (&a mut C), ty: u64) -> u8[] {
+    drop_ref_name(&mut c, ty);
+    return drop_in_place_symbol(&mut c, ty);
 }
 fn emit_exit<a, b>(c: (&a mut C), argument: &b [u8]) -> unit {
     if c.target == 4 {
