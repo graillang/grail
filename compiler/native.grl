@@ -1023,6 +1023,8 @@ struct C {
     drop_names: u8[][],
     // By interned type: 1 once the drop walk has emitted its helper or found it emitted (emit_drops).
     drop_walked: u64[],
+    // A drop helper's symbol by interned type (drop_ref_name).
+    drop_names_by_ty: u8[][],
     spec_emitted: u8[][],
     spell_lenient: u64,
     spell_failed: u64,
@@ -7647,9 +7649,18 @@ fn drop_ref_name<a>(c: (&a mut C), ty: u64) -> u8[] {
     ty := closure_record(&mut c, ty);
     fn_reg_drop(&mut c, ty);
     c.drop_refs.push(ty);
+    // The helper's name is a function of the type alone (a hash of its key), asked at every drop:
+    // spelled once per type and remembered.
+    if (ty < c.drop_names_by_ty.len()) && (c.drop_names_by_ty[ty].len() != 0) {
+        return c.drop_names_by_ty[ty].copy();
+    }
     rec := exchange(&mut c.fn_rec, 0);
     name := drop_symbol(&mut c, ty);
     exchange(&mut c.fn_rec, rec);
+    while c.drop_names_by_ty.len() <= ty {
+        c.drop_names_by_ty.push(u8[]);
+    }
+    exchange(&mut c.drop_names_by_ty[ty], name.copy());
     return name;
 }
 // A call to a type's drop helper: the `Drop` reached through the compiler's glue is a real edge.
@@ -60394,6 +60405,7 @@ pub fn main() -> u64 {
         drop_refs: u64[],
         drop_names: u8[][],
         drop_walked: u64[],
+        drop_names_by_ty: u8[][],
         spec_emitted: u8[][],
         spell_lenient: 0,
         spell_failed: 0,
