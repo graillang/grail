@@ -1,5 +1,10 @@
 ## Unreleased
 
+- Overflow checks on loop-carried arithmetic: a bound may reach a literal through other terms
+  (`j <= limit`, `limit <= 50000000`), a compound assignment `x op= e` gets the overflow proof
+  `x op e` gets, and `A - (t & L)` with `L <= A` cannot wrap. The sieve's `j += i`, `i * i`, `i += 1`
+  and `n - (count & 1)` carry no check (6 -> 2 in `main`; the two left are its unbounded counters).
+
 - **`lib/chan.grl`: a bounded multi-producer multi-consumer channel.** `chan::bounded<T>(n)` with
   `send` (waits while full; false once closed), `recv` (waits while empty; `None` once closed and
   empty) and `close`; waits park, as every `sync` wait does. `bench/chan.grl` measures it against
