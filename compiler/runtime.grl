@@ -3255,6 +3255,16 @@ fn rt_held_push(p: u64) -> u64 {
 }
 fn rt_held_node(object: u64, count: u64, kind: u64) -> u64 {
     b := rt_block_fast();
+    // The first slot is the one a callback-scoped hold almost always finds free.
+    first := wrapping_add(b, 56);
+    if (raw_load(wrapping_add(b, 48)) != 0) & (raw_load(wrapping_add(first, 32)) == 0) {
+        raw_store(first, object);
+        raw_store(wrapping_add(first, 8), count);
+        raw_store(wrapping_add(first, 32), kind);
+        raw_store(wrapping_add(first, 16), raw_load(wrapping_add(b, 32)));
+        raw_store(wrapping_add(b, 32), first);
+        return first;
+    }
     slots := raw_load(wrapping_add(b, 48));
     mut n = 0;
     mut i = 0;
@@ -3309,6 +3319,13 @@ fn rt_held_unlink(b: u64, e: u64) -> u64 {
 // The newest node of `kind` on `object`, taken off the list and freed; its count is the answer.
 fn rt_held_drop(object: u64, kind: u64) -> u64 {
     b := rt_block_fast();
+    head := raw_load(wrapping_add(b, 32));
+    if (head == wrapping_add(b, 56)) & (raw_load(head) == object) & (raw_load(wrapping_add(head, 32)) == kind) {
+        // The newest hold, in the first slot: unlinked and freed in place.
+        raw_store(wrapping_add(b, 32), raw_load(wrapping_add(head, 16)));
+        raw_store(wrapping_add(head, 32), 0);
+        return raw_load(wrapping_add(head, 8));
+    }
     mut at = raw_load(wrapping_add(b, 32));
     while at != 0 {
         if (raw_load(wrapping_add(at, 32)) == kind) & (raw_load(at) == object) {
@@ -5360,8 +5377,9 @@ fn rt_worker_loop(worker: u64) -> u64 {
     raw_store(tp + 24, 2); // runtime worker with a deque: rt_abort_signals, rt_worker_self
     raw_store(tp + 32, worker);
     raw_store(worker + 48, tp);
-    // Give this scheduler thread whatever it needs to switch onto a task's stack (nothing on a
-    // platform whose switch is a stack swap, a fiber conversion on Windows).
+    // What this thread needs to switch onto a task's stack with this block: the fault handler's
+    // alternate stack is the block's (Linux, macOS), the fiber conversion is the thread's and done
+    // once (Windows) - so a thread that adopts another block calls this again.
     rt_os_sched_prepare();
     if rt_sched_setting(24) != 0 {
         // Worker i on CPU i; more workers than CPUs get EINVAL and stay unpinned.
@@ -6061,12 +6079,6 @@ fn rt_job_help(w: u64, r: u64) -> u64 {
     raw_store(t + 152, raw_load(t + 152) - 281474976710656);
     return 0;
 }
-// An address inside the calling frame, which is where the stack is now.
-fn rt_frame() -> u64 {
-    mut here = 0;
-    p := &mut here;
-    return p;
-}
 // May this waiter run another job on top of its own frames? This is the one place that decides.
 //   - Only on a worker: a thread that is not one takes back its own forks and nothing else.
 //   - Only with room: at least an eighth of the stack left above the guard page. The job that would
@@ -6084,7 +6096,12 @@ fn rt_job_may_help(w: u64) -> u64 {
     }
     base := raw_load(t + 8);
     if base != 0 {
-        if rt_frame() < base + 4096 + raw_load(t + 16) / 8 {
+        // Where the stack is now: the address of a word of this frame, compared while the word is
+        // live. (A helper returning the address of its own local hands back a dead pointer, which
+        // the LLVM build may fold to anything - and did, so the guard never refused.)
+        mut probe = base;
+        at := &mut probe;
+        if at < raw_load(at) + 4096 + raw_load(t + 16) / 8 {
             return 0;
         }
     }
@@ -6670,6 +6687,25 @@ fn rt_background_wait_us() -> u64 {
         i += 1;
     }
     return oldest;
+}
+// host::stack_left(): how many bytes of the current green task's stack are left below the caller
+// (above the guard page), or 0 off a task. For code that recurses deeply and wants to stop, or to
+// fork instead, before it runs into the guard page.
+fn f_host_stack_left() -> u64 {
+    t := rt_current();
+    if t == 0 {
+        return 0;
+    }
+    base := raw_load(t + 8);
+    if base == 0 {
+        return 0;
+    }
+    mut probe = base + 4096;
+    at := &mut probe;
+    if at < raw_load(at) {
+        return 0;
+    }
+    return at - raw_load(at);
 }
 fn f_host_background_wait_us() -> u64 {
     return rt_background_wait_us();
@@ -7398,7 +7434,8 @@ fn f_host_close(fd: u64) -> u64 {
 // On a worker that is running a green task, enter gives the block to a spare thread - woken, or
 // made if fewer than twice the worker count exist - and this thread becomes block-less: it makes
 // the C call, and afterwards keeps running its task (forks and spawns go to the injection rings,
-// as from any thread that is not a worker) until the task parks or ends. Then its scheduler loop
+// as from any thread that is not a worker) until the task parks or ends. Threads are reused, so a
+// program that makes a blocking call at a time pays for a thread once, not per call. Then its scheduler loop
 // sees it holds no block and it becomes a spare itself (rt_worker_thread). Nothing moves the task:
 // C's frames and C's thread-locals stay on this thread. A blocking call off a worker - main, a
 // plain thread, a callback (pinned, word 120) - is a plain call.
@@ -7434,9 +7471,7 @@ fn rt_blocking_enter() -> u64 {
 fn rt_blocking_leave() -> u64 {
     return 0;
 }
-// Hand block `w` to a thread: queue it, then wake an idle spare or make one (up to twice the
-// worker count beyond the workers). With the cap reached it waits in the list for the next thread
-// that comes free - one returning from its own blocking call.
+// Hand block `w` to a thread: queue it, then wake an idle spare or make one.
 fn rt_block_give(w: u64) -> u64 {
     j := raw_load(rt_state_jobs());
     rt_spin_lock(j + 432);
@@ -7448,13 +7483,13 @@ fn rt_block_give(w: u64) -> u64 {
         rt_syscall(202, j + 464, 129, 1);
         return 0;
     }
-    s := raw_atomic_load(raw_state() + 72);
-    made := raw_atomic_load(j + 456);
-    if made < raw_load(s + 32) * 2 {
-        if raw_atomic_cas(j + 456, made, made + 1) == made {
-            rt_thread_spawn_detached(rt_worker_thread, 0);
-        }
-    }
+    // No idle spare: make one. There is no hard cap on how many - every blocked call holds a
+    // thread, and a block left waiting for a thread while every thread is blocked would deadlock a
+    // program whose blocked calls wait for a task that cannot run (100 FIFO readers and their
+    // writer: colourless-io-suspension-cancel-blocking). Idle spares are what is bounded: one idle
+    // for a second exits when more than the worker count of them are waiting (rt_worker_thread).
+    raw_atomic_fetch_add(j + 456, 1);
+    rt_thread_spawn_detached(rt_worker_thread, 0);
     return 0;
 }
 fn rt_block_take() -> u64 {
@@ -7476,6 +7511,7 @@ fn rt_block_take() -> u64 {
 fn rt_worker_thread(first: u64) -> u64 {
     j := raw_load(rt_state_jobs());
     s := raw_atomic_load(raw_state() + 72);
+
     mut w = first;
     while true {
         if w != 0 {
@@ -7504,8 +7540,8 @@ fn rt_worker_thread(first: u64) -> u64 {
     }
     return 0;
 }
-// The only way a green task runs a blocking operation: hand it to a dedicated OS thread and suspend.
-// A plain OS thread already has its own thread, so it runs the call directly.
+// A green task runs a blocking operation on its own thread, having given its worker to a spare for
+// the call (rt_offload). A plain OS thread runs it directly.
 fn rt_blocking_call(f: u64, a: u64, b: u64) -> u64 {
     if rt_current() == 0 {
         return raw_call2(f, a, b);
@@ -7515,8 +7551,8 @@ fn rt_blocking_call(f: u64, a: u64, b: u64) -> u64 {
 
 // A read or write that may block. With a readiness reactor the descriptor is non-blocking and the
 // task parks in rt_wait_fd; on a platform with no readiness source (Windows) the call itself runs
-// on a helper thread and the task parks, so a task inside host::read_fd or host::write_fd does not
-// stall the scheduler. The observable behaviour is the same on both; only the mechanism differs.
+// on the task's own thread with its worker given to a spare (rt_offload), so a task inside
+// host::read_fd or host::write_fd does not stall the scheduler. The observable behaviour is the same on both; only the mechanism differs.
 fn rt_read_now(fd: u64, buf: u64, max: u64) -> u64 {
     return rt_syscall(0, fd, buf, max);
 }
@@ -7530,33 +7566,13 @@ fn rt_io(f: u64, a: u64, b: u64, c: u64) -> u64 {
     return rt_offload(f, a, b, c);
 }
 
-// Blocking-call boundary: a green task hands a blocking operation to a dedicated OS thread and
-// suspends; its worker keeps running other tasks. Job words: 0 function, 8/16/24 arguments,
-// 32 result, 40 done, 48 suspended task.
-fn rt_offload_main(job: u64) -> u64 {
-    r := raw_call3(raw_load(job), raw_load(job + 8), raw_load(job + 16), raw_load(job + 24));
-    raw_store(job + 32, r);
-    raw_atomic_store(job + 40, 1);
-    // The completion reaches the reactor on a platform with a completion port, and wakes the task
-    // directly otherwise.
-    rt_os_complete(raw_load(job + 48));
-    return 0;
-}
+// Blocking-call boundary: a blocking host operation on a green task gives the task's worker to a
+// spare thread for the call (rt_blocking_enter), exactly as an `extern "C" blocking` call does, and
+// runs it right here on this thread - no thread per call, no switch, no completion to deliver.
 fn rt_offload(f: u64, a: u64, b: u64, c: u64) -> u64 {
-    t := rt_current();
-    job := rt_alloc(56);
-    raw_store(job, f);
-    raw_store(job + 8, a);
-    raw_store(job + 16, b);
-    raw_store(job + 24, c);
-    raw_store(job + 48, t);
-    thread := rt_thread_spawn(rt_offload_main, job);
-    while raw_atomic_load(job + 40) == 0 {
-        rt_suspend(t);
-    }
-    rt_thread_join(thread);
-    r := raw_load(job + 32);
-    rt_free(job);
+    rt_blocking_enter();
+    r := raw_call3(f, a, b, c);
+    rt_blocking_leave();
     return r;
 }
 
@@ -10078,6 +10094,38 @@ fn rt_popw(s: u64, w: u64) -> u64 {
     }
     raw_store(wrapping_add(s, 8), n - 1);
     return rt_flat_box(wrapping_add(raw_load(s), wrapping_mul(n - 1, w)), w);
+}
+// rt_popw into `dst` (the caller's frame words) instead of a fresh box.
+fn rt_popw_into(s: u64, w: u64, dst: u64) -> u64 {
+    n := raw_load(wrapping_add(s, 8));
+    if n == 0 {
+        rt_fail(8, 0, 0);
+    }
+    raw_store(wrapping_add(s, 8), n - 1);
+    rt_copy_bytes(dst, wrapping_add(raw_load(s), wrapping_mul(n - 1, w)), w);
+    return dst;
+}
+// The quiet form: 1 and the element copied to `dst` when there was one, 0 when the vector was empty.
+fn rt_popw_quiet_into(s: u64, w: u64, dst: u64) -> u64 {
+    if raw_load(wrapping_add(s, 8)) == 0 {
+        return 0;
+    }
+    rt_popw_into(s, w, dst);
+    return 1;
+}
+fn rt_vec_removew_into(s: u64, index: u64, w: u64, dst: u64) -> u64 {
+    n := rt_len(s);
+    if (index < n) == 0 {
+        rt_abort();
+    }
+    rt_copy_bytes(dst, rt_slotw(s, index, w), w);
+    mut i = index;
+    while i + 1 < n {
+        rt_copy_bytes(rt_slotw(s, i, w), rt_slotw(s, i + 1, w), w);
+        i += 1;
+    }
+    raw_store(wrapping_add(s, 8), n - 1);
+    return dst;
 }
 fn rt_popw_quiet(s: u64, w: u64) -> u64 {
     if raw_load(wrapping_add(s, 8)) == 0 {

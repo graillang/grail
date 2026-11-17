@@ -571,19 +571,6 @@
     "signal": "SIGABRT"
   },
   {
-    "name": "raw-overflow-follows-build-mode-wrap",
-    "source": "unsafe module runtime;\nfn main() {\n    mut a: u64 = 18446744073709551615;\n    a = a + 2;\n    println(a);\n}\n",
-    "overflow": "wrap",
-    "stdout": "1\n",
-    "note": "Raw (`unsafe module`) code follows the build's overflow mode like all other code: under wrap (and so under --release) an overflowing add wraps. Code that must check uses explicit checked operations."
-  },
-  {
-    "name": "raw-overflow-follows-build-mode-checked",
-    "source": "unsafe module runtime;\nfn main() {\n    mut a: u64 = 18446744073709551615;\n    a = a + 2;\n    println(a);\n}\n",
-    "signal": "SIGABRT",
-    "note": "The same raw add traps in a checked (development) build."
-  },
-  {
     "name": "abort-in-c-callback-arithmetic",
     "files": [
       "tests/abort/callback_abort.grl"
@@ -17001,44 +16988,6 @@
     ]
   },
   {
-    "name": "iter-typed-chain-fold",
-    "note": "typed adapters (docs/design/dyn-and-callable-bounds.md 2c): `iter::over(v).map(..).filter(..).fold(..)` is one nested type, each callback its own closure type, every call direct",
-    "source": "use iter;\nfn main() { v := u64[1, 2, 3, 4]; t := iter::over(v.copy()).map(|x: u64| -> u64 x * 2).filter(|x: &u64| -> bool *x % 3 == 0).fold(0, |s: u64, x: u64| -> u64 s + x); println(t); }\n",
-    "stdout": "6\n",
-    "modules": [
-      "lib/iter.grl",
-      "lib/core.grl"
-    ]
-  },
-  {
-    "name": "iter-typed-for-loop",
-    "note": "a `for` loop over a typed adapter (inherent `next`)",
-    "source": "use iter;\nfn main() { mut t = 0; for x in iter::over(u64[1, 2, 3]).map(|x: u64| -> u64 x + 1) { t += x; } println(t); }\n",
-    "stdout": "9\n",
-    "modules": [
-      "lib/iter.grl",
-      "lib/core.grl"
-    ]
-  },
-  {
-    "name": "callable-bound-impl-parameter",
-    "note": "a callable bound on an impl's parameter (`impl<U, F: FnMut(u64) -> U> W<U, F>`): the impl's own type and its field `f: F` carry the bound, so `self.f` is callable",
-    "source": "pub struct W<U, F> { f: F, u: U }\nimpl<U, F: FnMut(u64) -> U> W<U, F> {\n    pub fn run(self: &mut Self, x: u64) -> U { g := &mut self.f; return g(x); }\n}\nfn main() { mut w = W { f: |x: u64| -> u64 x + 1, u: 0 }; println(w.run(4)); }\n",
-    "stdout": "5\n"
-  },
-  {
-    "name": "callable-bound-impl-parameter-interface",
-    "files": [
-      "tests/callable/holder_user.grl"
-    ],
-    "modules": [
-      "tests/callable/holder.grl"
-    ],
-    "interfaces": true,
-    "stdout": "5\n",
-    "note": "...and through an interface file: the impl's callable bound travels with its parameter record"
-  },
-  {
     "name": "unboxed-task-items",
     "files": [
       "compiler/tests/unboxed_task_items.grl"
@@ -17456,6 +17405,85 @@
     "note": "a user Drop that fails inside a task: the failure is contained like any task failure; the task's frame is discarded, not unwound, so the fields its drop had not reached leak and the end-of-main leak check reports that instead of aborting (docs/design/task-failure-containment.md)",
     "source": "struct Bad {\n    n: u64\n}\nimpl Drop for Bad {\n    fn drop(self: &mut Bad) {\n        v := u64[1];\n        println(v[self.n]);\n    }\n}\nstruct Pair {\n    bad: Bad,\n    text: string\n}\nfn work(n: u64, unused: u64) -> u64 {\n    p := Pair { bad: Bad { n: n }, text: \"left\".text() };\n    return p.text.len();\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    t := spawn(sc, 5, work);\n    match try_join(t) {\n        n: u64 => {\n            return n;\n        },\n        f: TaskFailure => {\n            println(\"contained\");\n            return 0;\n        },\n    }\n}\nfn main() {\n    println(task_scope(0, body));\n}\n",
     "stdout": "contained\n0\n"
+  },
+  {
+    "name": "unboxed-layout-guards",
+    "files": [
+      "compiler/tests/unboxed_layout_guards.grl"
+    ],
+    "stdout": "60\n20\n0\n1\n2\n3\n3 6 10\n21\n1 5\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asmAbsent": [
+      {
+        "in": "f_main_main",
+        "text": "call rt_enum\n"
+      },
+      {
+        "in": "f_main_main",
+        "text": "call rt_popw\n"
+      },
+      {
+        "in": "f_main_main",
+        "text": "call rt_flat_box"
+      }
+    ],
+    "note": "small enums in a framed record and through btree iteration stay frame words (no rt_enum: a layout-bit change re-boxed them once), struct literals are bound in place, pop and remove land in the caller's frame (no rt_popw box)"
+  },
+  {
+    "name": "raw-overflow-follows-build-mode-wrap",
+    "source": "unsafe module runtime;\nfn main() {\n    mut a: u64 = 18446744073709551615;\n    a = a + 2;\n    println(a);\n}\n",
+    "overflow": "wrap",
+    "stdout": "1\n",
+    "note": "Raw (`unsafe module`) code follows the build's overflow mode like all other code: under wrap (and so under --release) an overflowing add wraps. Code that must check uses explicit checked operations."
+  },
+  {
+    "name": "raw-overflow-follows-build-mode-checked",
+    "source": "unsafe module runtime;\nfn main() {\n    mut a: u64 = 18446744073709551615;\n    a = a + 2;\n    println(a);\n}\n",
+    "signal": "SIGABRT",
+    "note": "The same raw add traps in a checked (development) build."
+  },
+  {
+    "name": "iter-typed-chain-fold",
+    "note": "typed adapters (docs/design/dyn-and-callable-bounds.md 2c): `iter::over(v).map(..).filter(..).fold(..)` is one nested type, each callback its own closure type, every call direct",
+    "source": "use iter;\nfn main() { v := u64[1, 2, 3, 4]; t := iter::over(v.copy()).map(|x: u64| -> u64 x * 2).filter(|x: &u64| -> bool *x % 3 == 0).fold(0, |s: u64, x: u64| -> u64 s + x); println(t); }\n",
+    "stdout": "6\n",
+    "modules": [
+      "lib/iter.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "iter-typed-for-loop",
+    "note": "a `for` loop over a typed adapter (inherent `next`)",
+    "source": "use iter;\nfn main() { mut t = 0; for x in iter::over(u64[1, 2, 3]).map(|x: u64| -> u64 x + 1) { t += x; } println(t); }\n",
+    "stdout": "9\n",
+    "modules": [
+      "lib/iter.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "callable-bound-impl-parameter",
+    "note": "a callable bound on an impl's parameter (`impl<U, F: FnMut(u64) -> U> W<U, F>`): the impl's own type and its field `f: F` carry the bound, so `self.f` is callable",
+    "source": "pub struct W<U, F> { f: F, u: U }\nimpl<U, F: FnMut(u64) -> U> W<U, F> {\n    pub fn run(self: &mut Self, x: u64) -> U { g := &mut self.f; return g(x); }\n}\nfn main() { mut w = W { f: |x: u64| -> u64 x + 1, u: 0 }; println(w.run(4)); }\n",
+    "stdout": "5\n"
+  },
+  {
+    "name": "callable-bound-impl-parameter-interface",
+    "files": [
+      "tests/callable/holder_user.grl"
+    ],
+    "modules": [
+      "tests/callable/holder.grl"
+    ],
+    "interfaces": true,
+    "stdout": "5\n",
+    "note": "...and through an interface file: the impl's callable bound travels with its parameter record"
   },
   {
     "name": "refinement-field-cross-literal-checked",
