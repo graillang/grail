@@ -15685,6 +15685,12 @@ fn require_type<a>(c: (&a mut C), actual: u64, expected: u64) -> unit {
     if ffi_byval(&mut c, want) {
         want = ty_arg(&mut c, want);
     }
+    // A specialisation's binding (an alias, kind 10) where its own base type is named: the
+    // implementation reached through a bound takes `Self` as the concrete type the parameter is
+    // bound to here, and the two are one type in this specialisation.
+    if (ty_kind(&mut c, actual) == 10) && (ty_kind(&mut c, want) != 10) && (base_type(&mut c, actual) == want) {
+        return ();
+    }
     if (want == 0) & is_bool(&mut c, actual) {
         return ();
     }
@@ -32785,6 +32791,14 @@ fn infer_type<a, b>(c: (&a mut C), formal: u64, actual: u64, map: (&b mut u64[])
         return ();
     }
     ak := ty_kind(&mut c, actual);
+    // A specialisation's binding of a type parameter (an alias, kind 10) given where the callee
+    // names the concrete type: a method reached through a bound (`it.fold(..)` with `it: I`, `I`
+    // bound to `Count`) is the implementation's, whose `Self` is `Count` itself. The alias stands for
+    // its base type here.
+    if (ak == 10) && (k != 10) {
+        infer_type(&mut c, formal, base_type(&mut c, actual), &mut map);
+        return ();
+    }
     // A vector reference passed for a typed slice is the slice over the whole vector (coerce_view):
     // the element type is inferred from the vector's.
     if (k == 27) && (ak == 7) {

@@ -7,6 +7,11 @@
   build has no line tables, so a function is the grain. Only the native report forces an uncached
   build.
 
+- **An interface method generic over a callable can be called through a bound.**
+  `fn total<I: Seq>(it: I) -> u64 { return it.fold(0, |a, x| a + x); }`, where `fold` is a generic
+  interface method (`fn fold<A, G: FnMut(A, Self::Item) -> A>`), was "generic argument shape
+  mismatch"; it now reaches the implementation's method, default or overriding. This is what lets
+  iterator adapters fold internally.
 - **`bench-rivals` no longer charts a build that printed the wrong answer.** It already failed the
   run when a build's output differed from C's, but still wrote that build's figures into the
   results, so a miscompiled program could chart as the fastest. Such a figure is now left out and
