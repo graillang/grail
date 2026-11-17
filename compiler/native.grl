@@ -248,7 +248,11 @@ struct Closure {
     // the closure with it (next_error). Without it the re-run skipped whichever body happened to be
     // checked last, met the same error again and chained to the 20-run cap.
     body_file: u64,
-    body_pos: u64
+    body_pos: u64,
+    // How many parameters, from the first, are slices a builtin hands over with one length
+    // (parallel_for_zip): their bodies start knowing `pk.len == p0.len`. Zero for every other
+    // closure - only a literal written as the builtin's own argument, which nothing else can call.
+    entry_eq: u64
 }
 struct ImplParams {
     decl: u64,
@@ -34718,6 +34722,11 @@ fn emit_zip_adapters<a>(c: (&a mut C)) -> unit {
 fn parallel_zip_builtin<a>(c: (&a mut C)) -> Val {
     grain := expr(&mut c, 0);
     expect(&mut c, view(","));
+    // A closure literal written here is called by this builtin alone, so its body may start knowing
+    // what the split guarantees: every slice piece is as long as the first (closure_literal records
+    // it as the next closure).
+    literal := is(&mut c, view("|"));
+    closure_at := c.closures.len();
     callee := expr(&mut c, 0);
     input := callee.t;
     mut slices = Val[];
@@ -34799,6 +34808,9 @@ fn parallel_zip_builtin<a>(c: (&a mut C)) -> Val {
     }
     if ty_kind(&mut c, ty_arg(&mut c, fty)) != 2 {
         fail(&mut c, view("parallel_for_zip callback returns unit: write the elements"));
+    }
+    if literal && (closure_at < c.closures.len()) && (c.closures[closure_at].names.len() == slices.len()) {
+        c.closures[closure_at].entry_eq = slices.len();
     }
     require_parallel_closure(&mut c, fty, 1, view("closure capture"));
     observe(&mut c, function.t);
@@ -41321,6 +41333,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                     mode: mode,
                     body_file: c.body_file,
                     body_pos: c.body_pos,
+                    entry_eq: 0,
                 }
             );
     }
@@ -41683,7 +41696,30 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         if is(&mut c, view("{")) {
             end := block_end(&mut c, start);
             exchange(&mut c.scope_end, end);
+            // A zip callback's pieces are all as long as the first (parallel_zip_builtin): the body's
+            // block starts with `pk.len == p0.len`, so `v[i]` under `i < p.len` needs no check.
+            // The prover runs on a closure's body as on a function's (docs/design/refinements.md):
+            // its loop bounds and conditions prove its indices. A closure has no refined
+            // parameters, so it starts with no facts - but for a zip callback's lengths.
+            saved_preds := exchange(&mut c.cur_ppreds, Pred[]);
+            saved_lo := exchange(&mut c.body_lo, start);
+            saved_hi := exchange(&mut c.body_hi, end);
+            pv_begin(&mut c);
+            eq := c.closures[i].entry_eq;
+            if (eq > 1) && pv_ir_live(&c) {
+                for k in 1..eq {
+                    mut a = names[k].copy();
+                    push_bytes(&mut a, view(".len"));
+                    mut b = names[0].copy();
+                    push_bytes(&mut b, view(".len"));
+                    pv_add(&mut c.pv_pending, 2, view(a), view(b), 0);
+                }
+            }
             block(&mut c);
+            pv_end(&mut c);
+            exchange(&mut c.cur_ppreds, saved_preds);
+            exchange(&mut c.body_lo, saved_lo);
+            exchange(&mut c.body_hi, saved_hi);
             if (c.terminated == 0) & (ret != 1) {
                 fail(&mut c, view("closure may fall through without return"));
             }

@@ -1,5 +1,10 @@
 ## Unreleased
 
+- Closure bodies are proved like function bodies: a loop bound or a condition in a closure now
+  removes the bounds checks it covers. A closure literal written as `parallel_for_zip`'s argument
+  also starts knowing that every piece is as long as the first, so `v[i]` under `for i in p.len()`
+  has no check (a closure passed through a variable keeps it).
+
 - Fixed: an interface whose methods carry default bodies could not be read back and written again
   unchanged ("does not round-trip"): the reader kept a default body only as the source it compiles,
   not as the method's text.
