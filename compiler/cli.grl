@@ -4636,7 +4636,18 @@ fn test_failure<a, b>(file: &a [u8], status: u64, log_path: &b [u8], note: &b [u
 }
 // Build and run one test program in this process. With `log` non-empty its output is captured.
 fn test_run_here<a, b, d>(h: (&a Home), o: (&a TestOptions), file: &a [u8], log: &b [u8]) -> u64 {
-    modules := u8[][];
+    // In a project, a test sees the root's modules and every dependency's - its dev-dependencies
+    // too, which no other build sees (docs/packages.md): the plan grail.lock already resolved.
+    mut modules = u8[][];
+    if host::exists(view("grail.toml")) != 0 {
+        p := pkg::plan(1);
+        if p.name.len() == 0 {
+            return 1;
+        }
+        for i in p.modules.len() {
+            modules.push(item(&p.modules, i));
+        }
+    }
     out := test_binary(view(file));
     status := compile(h: h, entry: view(file), modules: &modules, output: view(out), target: view(o.target), flags: test_bits(&o));
     if status != 0 {

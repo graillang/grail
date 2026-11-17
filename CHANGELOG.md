@@ -1,5 +1,12 @@
 ## Unreleased
 
+- `tools/pkg-test.mjs` passes again and runs in the gate and the landing queue. Its offline-build
+  check called `grail run --offline`, a flag only `add`, `update` and `fetch` have (a build never
+  networks); the stricter option parser refuses it, and nothing ran the suite to notice. Running
+  it found a real bug: `grail test` in a project no longer saw the root's dependencies or its
+  dev-dependencies (`use kit;` in a test failed to resolve) since the test runner was rewritten;
+  each test program now gets the plan's module list, dev-dependencies included.
+
 - **Fixed: an LLVM-backend miscompile of a vector grown through its address.** A call handed `&mut v`
   receives the slot's address, not the header word, so the lifter did not count it as a call that
   can grow `v`, and the `len`/`data` it had read before the call were used after it: `pad(&mut out,
