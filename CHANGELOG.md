@@ -55,7 +55,26 @@
   closure) is re-borrowed instead of moved out of the closure, which was "move of unavailable or
   borrowed value"; the borrow is kept as before.
  Unreleased- Fixed: a small leaf that takes the address of its own local (runtime.grl's `rt_frame`) was
-  inlined with that local turned into a scratch register, so split and cached builds of programs
+- **An effect claim no longer makes a program one compiler run.** `@no_alloc` and `@no_panic` are
+  proved per module against per-function *summaries*: every run that emits code records every body,
+  and the facts it solves - whether a function can allocate, can fail, runs an entry check, and the
+  call each fact came through - travel in a `facts` record of every interface (format 7; interfaces
+  of format 6 are refused: re-emit them), in `runtime.facts` beside the interfaces for the runtime,
+  and in function units, which are filed and replayed in claiming programs again. A claiming program
+  builds through the module store like any other, and a refusal names the same chain across modules
+  that the whole-program build names (`loud -> push_one -> grow -> rt_push -> rt_grow`).
+  (`docs/design/effects.md`, *Summaries*.)
+  - **What changes:** dropping a `dyn I` value of a **public** interface is refused under `@no_alloc`
+    and `@no_panic` in every build shape ("the drop of a `dyn I` value, whose implementations this
+    module cannot see"): an implementation in another module may be the one dropped. Claim the
+    implementing types' `Drop` instead, or do the drop where `I` is private.
+  - Methods in `impl` blocks take `@no_alloc` and `@no_panic`.
+  - The standard library claims `@no_alloc` on `hash::write_byte`, `write_num` and `finish`,
+    `u64[].sum` and `[u8].is_char_boundary`, and `@no_alloc @no_panic` on `strings::utf8_width`.
+    Functions that return an option, a tuple or a record allocate it, so `find` and the parsers do
+    not claim.
+  - Fixed: a closure whose result type was inferred by a trial emission left that emission's calls
+    in the effect record.  inlined with that local turned into a scratch register, so split and cached builds of programs
   that reach it emitted `leaq %r8,%rax` and did not assemble. Such a leaf is no longer an inline
   candidate.
 

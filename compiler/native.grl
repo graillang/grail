@@ -19498,6 +19498,12 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
         exchange(&mut c.self_type, ty);
         expect(&mut c, view("{"));
         while !eat(&mut c, view("}")) {
+            // A method carries effect claims the way a function does: `@no_alloc pub fn find(..)`.
+            while kind(&mut c) == 64 {
+                if fx_attr_form(&mut c) == 0 {
+                    fail(&mut c, view("a method in an impl block takes `@no_alloc` and `@no_panic` only"));
+                }
+            }
             public := u64(eat(&mut c, view("pub")));
             func(&mut c, pass, public);
         }
@@ -22811,6 +22817,30 @@ fn fx_vtable_drop<a>(c: (&a mut C), iface: u64) -> unit {
     }
     if found == 0 {
         fx_edge(&mut c, view(""), 0);
+        if (0 < iface) && (iface <= c.interfaces.len()) {
+            mut why = copy_bytes(view("the drop of a `dyn "));
+            push_bytes(&mut why, view(c.interfaces[iface - 1].name));
+            push_bytes(&mut why, view("` value, whose implementations this module cannot see"));
+            if c.interfaces[iface - 1].public != 0 {
+                push_bytes(&mut why, view(": `"));
+                push_bytes(&mut why, view(c.interfaces[iface - 1].name));
+                push_bytes(&mut why, view("` is public"));
+            }
+            fx_why(&mut c, view(why));
+        }
+    }
+    // A public interface may be implemented, and its values boxed, in a module this run cannot see:
+    // the value dropped here may hold any of those implementations. Only a private one's are all
+    // here (its module is the only one that can name it), so the answer is the same in every build
+    // shape (docs/design/effects.md, "The `dyn` drop").
+    if (found != 0) && (0 < iface) && (iface <= c.interfaces.len()) && (c.interfaces[iface - 1].public != 0) {
+        fx_edge(&mut c, view(""), 0);
+        mut why = copy_bytes(view("the drop of a `dyn "));
+        push_bytes(&mut why, view(c.interfaces[iface - 1].name));
+        push_bytes(&mut why, view("` value, whose implementations this module cannot see: `"));
+        push_bytes(&mut why, view(c.interfaces[iface - 1].name));
+        push_bytes(&mut why, view("` is public"));
+        fx_why(&mut c, view(why));
     }
     // One `call *%rax` line is what the site emits, however many helpers the slot may hold.
     fx_called(&mut c);
@@ -23234,6 +23264,43 @@ fn fx_unknown_why<a>(c: (&a mut C), k: u64) -> u8[] {
     }
     return u8[];
 }
+// Where a chain of witnesses ends (at most `spending` links): the record whose fact is its own, or
+// came through an edge nothing names. `panic` picks the failure chain.
+fn fx_chain_end<a>(c: (&a C), first: u64, spending: u64, panic: u64) -> u64 {
+    mut k = first;
+    mut n = 1;
+    while n < spending {
+        mut next = c.fx_alloc_thru[k];
+        if panic != 0 {
+            next = c.fx_panic_thru[k];
+        }
+        if next == 0 {
+            return k;
+        }
+        k = next - 1;
+        n += 1;
+    }
+    return k;
+}
+// The tail a refusal adds when its chain ends in an indirect call: what the call's target is.
+fn fx_chain_tail<a>(c: (&a mut C), first: u64, panic: u64) -> u8[] {
+    last := fx_chain_end(&c, first, 8, panic);
+    mut own = c.fx_own_alloc[last];
+    if panic != 0 {
+        own = c.fx_own_panic[last];
+    }
+    if (last == first) || (own != 0) {
+        return u8[];
+    }
+    why := fx_unknown_why(&mut c, last);
+    if why.len() == 0 {
+        return u8[];
+    }
+    mut out = copy_bytes(view(", which makes an indirect call the compiler cannot follow (the target is "));
+    push_bytes(&mut out, view(why));
+    out.push(41);
+    return out;
+}
 fn fx_report<a>(c: (&a mut C)) -> unit {
     if c.fx_any == 0 {
         return ();
@@ -23258,6 +23325,7 @@ fn fx_report<a>(c: (&a mut C)) -> unit {
             push_bytes(&mut msg, view("` performs a heap allocation: it calls "));
             chain := fx_chain(&mut c, k, 8);
             push_bytes(&mut msg, view(chain));
+            push_bytes(&mut msg, view(fx_chain_tail(&mut c, k, 0)));
             push_bytes(&mut msg, view("\n = the call chain above reaches something that allocates"));
             at_file = fx_edge_file_of(&mut c, k, thru);
             at_pos = fx_edge_pos_of(&mut c, k, thru);
@@ -23300,6 +23368,7 @@ fn fx_report<a>(c: (&a mut C)) -> unit {
             push_bytes(&mut msg, view("` can fail: it calls "));
             chain := fx_chain_panic(&mut c, k, 8);
             push_bytes(&mut msg, view(chain));
+            push_bytes(&mut msg, view(fx_chain_tail(&mut c, k, 1)));
             push_bytes(&mut msg, view("\n = a callee leaves a runtime check, so the whole chain has to be check-free"));
             at_file = fx_edge_file_of(&mut c, k, thru);
             at_pos = fx_edge_pos_of(&mut c, k, thru);
@@ -34027,6 +34096,9 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
         }
     }
     out_mark := c.out.len();
+    // The trial emission records calls like any other; they are discarded with its bytes.
+    fx_edge_trial := c.fx_edge_from.len();
+    fx_calls_trial := c.fx_calls;
     closures_mark := c.closures.len();
     specs_mark := c.specs.len();
     saved_locals := exchange(&mut c.locals, Local[]);
@@ -34081,6 +34153,8 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
     while out_mark < c.out.len() {
         c.out.pop()!;
     }
+    fx_edges_truncate(&mut c, fx_edge_trial);
+    exchange(&mut c.fx_calls, fx_calls_trial);
     while closures_mark < c.closures.len() {
         c.closures.pop()!;
     }
