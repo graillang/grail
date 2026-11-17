@@ -1,0 +1,30 @@
+# Grail (tools/qemu/build.sh): make AArch64 store-release RCsc under linux-user TCG on a TSO host.
+# qemu 11.1.3 puts a barrier before STLR and after LDAR but none between an STLR and a later
+# LDAR, so on x86 (stores pass later loads) the pair reorders - forbidden by ARMv8, and caught by
+# store-buffering litmus tests with seq_cst stores/loads. A full barrier after each
+# store-release closes it. Applies to qemu-11.1.3 (patch -p1 in the source tree).
+--- a/target/arm/tcg/translate-a64.c
++++ b/target/arm/tcg/translate-a64.c
+@@ -3672,6 +3672,13 @@
+                                 true, a->rn != 31, memop);
+     do_gpr_st(s, cpu_reg(s, a->rt), clean_addr, memop, true, a->rt,
+               iss_sf, a->lasr);
++    /*
++     * Store-Release is RCsc: a later Load-Acquire (LDAR) may not be
++     * satisfied before it. The barrier above orders the store after
++     * earlier accesses only; on a host whose stores pass later loads
++     * (x86 TSO) that lets STLR; LDAR reorder. Close it with a full one.
++     */
++    tcg_gen_mb(TCG_MO_ALL | TCG_BAR_SC);
+     return true;
+ }
+ 
+@@ -4415,6 +4422,8 @@
+     /* Store-Release semantics */
+     tcg_gen_mb(TCG_MO_ALL | TCG_BAR_STRL);
+     do_gpr_st(s, cpu_reg(s, a->rt), clean_addr, mop, true, a->rt, iss_sf, true);
++    /* RCsc, as in trans_STLR: not reordered with a later Load-Acquire. */
++    tcg_gen_mb(TCG_MO_ALL | TCG_BAR_SC);
+     return true;
+ }
+ 
