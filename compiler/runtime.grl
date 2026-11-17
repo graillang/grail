@@ -3304,6 +3304,29 @@ fn rt_mutex_poisoned(p: u64) -> u64 {
     return rt_fail_message(17, s);
 }
 fn rt_mutex_lock(p: u64) -> u64 {
+    // The uncontended path, inline: one compare-and-swap from 0 (free, not poisoned, nobody queued)
+    // and the held-list push on the waiter block the thread pointer leads to. Everything else -
+    // a held lock, a poisoned one, a thread with no block yet - takes the general path.
+    tp := raw_tp_get();
+    if tp != 0 {
+        t := raw_load(wrapping_add(tp, 16));
+        mut b = 0;
+        if t != 0 {
+            b = wrapping_add(t, 240);
+        } else {
+            b = raw_load(wrapping_add(tp, 96));
+        }
+        if b != 0 {
+            if raw_atomic_cas(p, 0, 1) == 0 {
+                raw_store(wrapping_add(p, 16), raw_load(wrapping_add(b, 32)));
+                raw_store(wrapping_add(b, 32), p);
+                return 0;
+            }
+        }
+    }
+    return rt_mutex_lock_slow(p);
+}
+fn rt_mutex_lock_slow(p: u64) -> u64 {
     rt_mutex_acquire(p);
     if (raw_atomic_load(p) & 4) != 0 {
         rt_mutex_release(p);
@@ -3312,6 +3335,27 @@ fn rt_mutex_lock(p: u64) -> u64 {
     return rt_held_push(p);
 }
 fn rt_mutex_unlock(p: u64) -> u64 {
+    // Inline: a callback-scoped lock is the newest entry of its holder's list, and with nobody
+    // queued and nothing flagged the word goes from 1 back to 0 in one compare-and-swap.
+    tp := raw_tp_get();
+    if tp != 0 {
+        t := raw_load(wrapping_add(tp, 16));
+        mut b = 0;
+        if t != 0 {
+            b = wrapping_add(t, 240);
+        } else {
+            b = raw_load(wrapping_add(tp, 96));
+        }
+        if b != 0 {
+            if raw_load(wrapping_add(b, 32)) == p {
+                raw_store(wrapping_add(b, 32), raw_load(wrapping_add(p, 16)));
+                if raw_atomic_cas(p, 1, 0) != 1 {
+                    rt_mutex_release(p);
+                }
+                return 0;
+            }
+        }
+    }
     rt_held_pop(p);
     return rt_mutex_release(p);
 }
