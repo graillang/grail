@@ -1,5 +1,9 @@
 ## Unreleased
 
+- **`&v` of a vector is accepted where a typed slice `&[T]` is expected**, generic or not, and
+  `&mut v` for `&mut [T]`: the slice over the whole vector, as `&v[:]` is. A generic `&[K]`
+  parameter infers `K` from the vector's elements (it was `generic argument shape mismatch`; the
+  non-generic call was a type mismatch).
 - **A closure may take a reference where a type argument stands for one, and pass a captured
   reference on.** `lock.read_with(key, |v: (&u64[]), k: (&a u64)| -> bool ..)` was a type mismatch
   when the context parameter `C` was bound to a reference (a type argument carries no lifetime; a
