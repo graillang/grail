@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **`concurrent_map` lookups run side by side.** Its shards are `sync::RwLock`s now, so `contains`
+  and `len` on one shard no longer queue behind each other (about 1.6x faster under a read-mostly
+  load, `bench/shard_read.grl`). Keys and values must therefore be `Share` as well as `Send` -
+  DashMap's rule - and a value also `Owned`, since `insert` and `remove` hand the old one back. A
+  map of a type that is transferable but not shareable is refused with
+  `type does not satisfy Share`, naming the type.
+
 - **`thread::scope`: threads that borrow.** `thread::scope(|t| { a := t.spawn(|| ..); ..; a.join() })`
   starts OS threads whose closures may borrow from the caller - shared or exclusive - because the
   scope waits for every one of them before it returns. The compiler refuses two threads taking one
