@@ -301,8 +301,9 @@ frame-limit and 64 KiB-task cases; every case on three targets and LLVM.
   `rt_carray_store`. `rt_carray_load` stays: it serves compile-time tables and `cslice`. A
   reference to an array is never a tagged narrow reference (`tag_narrow_borrow`). Migrated:
   abundance `rhi_vulkan.grl`, `tests/ffi/c_arrays.grl`, the bindgen fixture program and test.
-- *Statics* wait for `gaps12-statics-impl` to land in this base.
+- *Statics* came with origin/gaps14-int (merged after A2).
 - *Verified.* Self-host fixed point; filter `array`: x86_64 39/0; `array|c-array|cimp`: aarch64
   38/0, riscv64 38/0, LLVM 34/0; test-ffi 81 linked and executed; bindgen-test 68 checks;
   abundance tests all pass but `abgeo_test`, which fails identically with the base compiler
-  (`5dc07da`: the geometry hashes differ from the reference on this host).
+  (`5dc07da`): a regression from the optimiser's f32 narrowing pass (2f6783c), bisected and being
+  fixed by /root/optimiser_labels, not from arrays.
