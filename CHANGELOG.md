@@ -11,6 +11,33 @@
   not carried in its `.iface`, so an implementation in another module failed with
   "missing interface method (it has no default body)" under separate compilation (a single run was
   fine). The default's text now travels with the method record, as a generic template's does.
+- **The standard map is one open-addressed table** (`lib/hashmap.grl`). Keys, values and their
+  hashes are stored densely in insertion order (iteration order and `key_at`/`value_at` are
+  unchanged), indexed by one table of slot words (a 32-bit hash tag and the entry index) with
+  Robin Hood linear probing and backward-shift deletion, at most half full; the per-bucket vectors
+  are gone. `hash::hash` (what the maps use) is now SipHash-1-3, as Rust's and CPython's tables
+  are; `hash::hasher` stays SipHash-2-4. The hasher compresses a word at a time (`write_num`,
+  `write_bytes`) instead of byte by byte, and `hash::table_hasher`/`hash::hash_from` hash from a
+  prepared state. bench/hashmap.grl: Grail-LLVM 4.49G -> 1.10G instructions (Rust 0.64G),
+  Grail-native 28.3G -> 4.6G (best development rival 8.1G). The LLVM backend emits generic
+  specialisations `weak_odr` instead of `weak`, so LLVM may inline them, and pushing a record of
+  whole words copies words rather than calling the byte copier.
+- **Small runtime functions are inlined into every module.** A small runtime body (the scheduler's
+  `rt_current`, `rt_list_set`, `rt_list_head`, ...) is now inlined where another module calls it,
+  in every build shape: a per-module build carries the bodies in `runtime.facts`. A failure inside
+  such a copy reports the calling statement. Measured with callgrind on one worker, against main:
+  a join 3102 -> 3059 instructions, a spawn 1845 -> 1810.
+- **Fixed: a release build of a program that calls C's `memcpy` failed to compile.** The LLVM
+  module defines `memcpy`/`memset`/`memmove` itself, and an `extern "C"` declaration of the same
+  name added a second, conflicting one ("invalid redefinition of function 'memcpy'"); the stdmap DNS
+  and IPv6 cases failed under `GRAIL_BACKEND=llvm`. Those names are no longer declared again.
+- `host::stack_left()`: the bytes left on the current green task's stack above its guard page (0 off
+  a task), for recursive code that wants to stop or fork before it overflows.
+- The scheduler's "enough stack left to help" check read the address of a helper's dead local,
+  which the LLVM build may fold to anything; it compares a live one now
+  (`sched-help-stops-when-the-stack-is-low` passes under both backends; its depth is now measured
+  with `host::stack_left()` instead of being tuned to native frame sizes).
+
 - **Typed iterator adapters: `iter::over(v).map(..).filter(..).fold(..)`.** `iter::VecIter<T>`,
   `iter::Map<I, U, F>` and `iter::Filter<I, F>` implement `Iterator` with each callback held by its
   own closure type, so a chain is one nested type, specialised and called directly, with no
@@ -39,6 +66,16 @@
   builds) wrote their `sha256sum` output to one file in the store, and one run could take another's
   digest and file a module under another module's interface ("core.iface describes module `io`").
   Each such command now writes to a directory it claims for itself.
+- Removed: `--assembler=clang`. The internal assembler has been byte-identical to clang through a
+  landing on every target it covers, so Linux x86-64, AArch64 and RISC-V builds always use it and
+  `GRAIL_ASSEMBLER` no longer overrides it there (it still names the C compiler and the assembler
+  for release builds, macOS and Windows).
+- Arrays whose elements own data (`[string; 3]`, `[u64[]; 4]`) can be struct fields and vector
+  elements: held inline and flat like every array, dropped in place with their holder.
+- Fix: stack probes were skipped for every frame since frames also save callee-saved registers
+  (`subq $.F<n>+K,%rsp`); a frame over a page could step over the guard page again. The probe
+  matches that form, covers the K bytes, and the pinned case checks it on every target.
+
 - **C calls with floats are optimised in release builds (call ABI S8a).** A function that called a
   C function with `f64`/`f32` arguments or a float result had to stay unoptimised on the LLVM
   backend (its floats travel in vector registers a lifted call did not carry). The front end now
@@ -54,6 +91,27 @@
   its cell was a function with its own frame calling the method; it is a load and a tail jump.
   dyncall (20 M dispatches): native 1,645 M -> 1,565 M instructions, LLVM 779 M -> 719 M (Rust -O:
   648 M).
+- **Field predicates may relate fields of the same record:** `struct Span { lo: u64, hi: u64 where
+  lo <= hi }`. A literal owes the predicate once every field has its value, every write of a field it
+  reads owes it over the new value and the other fields, a mutable borrow of any such field is
+  refused, and a reader through a shared reference or a non-`mut` binding gets it as a fact. A name
+  that is not a field of the record is still refused at the struct. Strict mode proves literals; a
+  single-field write it cannot prove, and says to rebuild the record.
+- **Raw code follows the build's overflow mode, and the release compiler wraps.** Arithmetic in an
+  `unsafe module` used to be checked whatever the build asked for; it now traps in a checked build
+  and wraps in a wrapping one (`--release`, `--overflow=wrap`) like all other code. Code that must
+  wrap says so with `wrapping_*`, as the runtime's address arithmetic does. `tools/native.mjs
+  release` lowers the compiler with `--overflow=wrap`, as every release build does, so the release
+  compiler no longer checks after nearly every address addition. `GRAIL_COMMAND_TIMEOUT` raises
+  tools/native.mjs's per-step time limit on a loaded host.
+- Fixed a silent release miscompile: a two- or three-word value whose address is taken (an `Option`
+  from `pop()`, a small record passed by address) could be lowered by the LLVM backend as separate
+  one-word stack objects when its width fact was missing, so writing its second word overwrote a
+  neighbour - `pool::split` crashed under `--release` on 18e6943. The lifter now checks every access
+  through an address-taken slot against the slot's declared width and keeps a body that reaches
+  past it in native code (`--verify-facts` makes it an error). With that, the thread-pointer reads
+  are lifted again (now with a memory clobber), so `rt_current`, the mutex fast path and the
+  allocator's threaded path are optimised in release builds.
 
 - AArch64 and RV64 native code drops moves that move nothing (call ABI S7): the word machine's
   result register is x9 (t0) and its first argument x0 (a0), and moves go through the scratch x10
@@ -105,8 +163,10 @@
 - **`extern "C" blocking fn`**: a foreign function declared `blocking` (a read, a wait, a present)
   does not take a worker with it. On a worker running a green task, the call hands the worker's
   queues to a spare thread for its duration and the calling thread keeps the task - C's frames and
-  thread-locals stay where they are - then becomes a spare itself. Spares are reused, there are at
-  most twice the worker count of them, and an idle one exits after a second. Off a worker the
+  thread-locals stay where they are - then becomes a spare itself. Spares are reused - a
+  thread is made only when none is idle - and an idle one exits after a second once more than the
+  worker count are waiting. `host::read_file`, `write_file` and `command` from a task work the same
+  way now, instead of starting a thread for every call. Off a worker the
   declaration changes nothing. x86-64 Linux for now; elsewhere `blocking` is a plain call. The old
   `rt_blocking_enter` warning ("a blocking foreign call is running on a green task's scheduler
   thread") is gone with the unsafe hook that produced it.
@@ -197,8 +257,7 @@
   re-reads the module's assembly (`--object`), and its objects are byte-identical to clang's from the same text
   (`tools/asm-oracle.mjs`; the gate's `asm-oracle` leg checks every corpus program). In the release
   compiler it assembles the syn4000 program's 35 MB of assembly in 0.41 s against clang's 1.37 s,
-  and the self-compile's 119 MB in 1.1 s against 5.2 s. `--assembler=clang` (and `GRAIL_ASSEMBLER`)
-  still choose clang; the flag goes once the oracle has been green through one landing. Debug
+  and the self-compile's 119 MB in 1.1 s against 5.2 s. Debug
   builds go through it too (it writes `.debug_line` from `.file`/`.loc` as LLVM does); the other
   targets still use clang. It lowers the portable atomic operations as it reads them, so an x86
   build no longer rewrites the whole stream for them first. It keeps each object's function units

@@ -1178,6 +1178,24 @@ is why the copy's own positions are kept: with only the caller's, such a failure
 all. Inline-site numbers continue per unit across all of its parts, since a unit can stand in the
 stream more than once.
 
+### Inlining across a module boundary
+
+The gate above has one door open: **the runtime**. It is in every program and every compiler run, so
+a small runtime body (`rt_current`, `rt_list_set`, ...) may stand in a call from any unit. A body
+crosses in its *crossing form* (`optimize::export_form`): its own positions are dropped, because a
+`.gposa` names a file of the run that wrote it, so a failure inside a crossed copy reports the
+caller's statement; and a body that names a local label it does not define (a constant, a string)
+does not cross at all. Labels in the copy are renamed per site, as for any copy.
+
+Where the body comes from depends on the build shape, and the bytes do not: a single-run or `--split`
+build has the runtime's bodies in its own stream, and a per-module run of another module reads them
+from `runtime.facts`, where the runtime's own run writes them after optimising as an `inline` record
+(tag 21, after the effect summary). That file's digest is already in the key of every run that reads
+it, so a changed body reruns its dependants exactly as a changed summary does. A function unit's text
+and an optimiser memo entry are taken before the inline pass (`one_body` remembers the optimised body;
+`inline_calls` runs over the whole output afterwards), so neither depends on another module's bodies
+and neither key names them; the object-encoding chunks are keyed on the final text and see the copy.
+
 ### The frame constant, which was a latent miscompile
 
 The per-unit change found a real defect that had nothing to do with caching. A function's frame
