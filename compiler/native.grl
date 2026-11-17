@@ -33168,6 +33168,19 @@ fn infer_type<a, b>(c: (&a mut C), formal: u64, actual: u64, map: (&b mut u64[])
         infer_type(&mut c, formal, base_type(&mut c, actual), &mut map);
         return ();
     }
+    // A named function (kind 12) given for a closure type (kind 20): the types are inferred from its
+    // parameters and result as from a closure's; the conversion itself is require_type's.
+    if (k == 20) && (ak == 12) {
+        fp := type_args(&mut c, formal);
+        ap := type_args(&mut c, actual);
+        if fp.len() == ap.len() {
+            for i in fp.len() {
+                infer_type(&mut c, fp[i], ap[i], &mut map);
+            }
+            infer_type(&mut c, arg, ty_arg(&mut c, actual), &mut map);
+            return ();
+        }
+    }
     // A vector reference passed for a typed slice is the slice over the whole vector (coerce_view):
     // the element type is inferred from the vector's.
     if (k == 27) && (ak == 7) {
@@ -35555,7 +35568,10 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
             // checker still sees each call's loan.
             mut v = val(0, 0);
             reborrow := reborrow_argument(&mut c);
-            if (argi < count) && (context != NO_TYPE) && (c.raw == 0) && lent_parameter(&mut c, c.params[template_first + argi]) {
+            // Whether a parameter is lent depends on its declared closure type alone (no `Owned`, no
+            // region), not on the call's bindings: a closure for a generic callee whose type arguments
+            // are not all fixed yet (`wait_with<a, T, C, R>` before `then` fixes R) is lent too.
+            if (argi < count) && (c.raw == 0) && lent_parameter(&mut c, c.params[template_first + argi]) {
                 exchange(&mut c.lent_arg_at, astart + 1);
             }
             if reborrow != 0 {
@@ -35682,6 +35698,21 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                             v = widen_to_fnmut_formal(&mut c, v, formal);
                         }
                         infer_type(&mut c, formal, v.ty, &mut map);
+                        // A named function given for a closure-typed parameter: once its signature
+                        // has fixed the type arguments, it becomes the closure value the parameter
+                        // is (as adopt_value does when the parameter type is known up front).
+                        if (ty_kind(&mut c, v.ty) == 12) && (ty_kind(&mut c, formal) == 20) && (resolved == 0) {
+                            mut all = true;
+                            for q in map.len() {
+                                if map[q] == NO_TYPE {
+                                    all = false;
+                                }
+                            }
+                            if all {
+                                expected := bind_types(&mut c, formal, &map);
+                                v = function_as_closure(&mut c, v, expected);
+                            }
+                        }
                         // `F: FnMut(T) -> U` given a closure: its signature fixes T and U.
                         callable := callable_formal(&mut c, f - 1, formal);
                         if (callable != NO_TYPE) && ((ty_kind(&mut c, v.ty) == 20) || (ty_kind(&mut c, v.ty) == 12)) {
