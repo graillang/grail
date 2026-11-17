@@ -12,6 +12,14 @@
   run-time check, `append_format` onto a string), as Rust's `from_utf8` does: aligned words with no
   high bit set are passed whole, and the multi-byte checks are unchanged. No load is misaligned on
   any target. A case covers every alignment and four rejections just past word boundaries.
+- The standard library claims `@no_block` where its bodies prove it: every `math` function, the
+  `hash` writers and `finish`, `u64[].sum`, `[u8].is_char_boundary` and `strings::utf8_width`.
+
+- New: `@no_block`, a checked effect: a function and everything it calls makes no blocking call - no
+  park (locks, channels, conditions, joins), sleep, file or socket I/O, or C function not declared
+  `extern "C" nonblocking`. Refusals name the chain (`nap -> sleep_ms -> f_host_sleep_ms ->
+  rt_sleep_for`). A check that can fail does not block (the failure ends the frame). Interface
+  format 12: the `effects` row and the `facts` record carry it.
 - png unfilters the common layout through addresses (`bytes::data_addr`, new) into an image sized
   once, under the length guard that already bounds every row, instead of a push and a checked index
   per byte. The 4K png: Grail-LLVM 6.44G -> 5.50G instructions (0.71 -> 0.61 s; stb_image 0.41 s),
