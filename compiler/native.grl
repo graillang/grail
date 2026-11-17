@@ -23454,6 +23454,22 @@ fn raw_call_is_sites_helper<a>(c: (&a mut C)) -> bool {
     sym := c.fx_syms[c.fx_cur - 1].copy();
     return same(view(sym), view("rt_sites_fill")) || same(view(sym), view("_rt_sites_fill"));
 }
+// A call through the import table to a named operating-system function. In the runtime (trusted code)
+// it is what a `syscall` instruction is on Linux: the OS does the work, so it neither allocates on the
+// Grail heap (whose roots are `rt_alloc` and `rt_grow`) nor reaches a Grail failure entry, and it
+// records no edge - only the `call` the IR check counts. Anywhere else an imported function is code
+// the compiler does not see, and stays an unknown edge (docs/design/effects.md).
+fn call_import_out<a, b>(c: (&a mut C), text: &b [u8]) -> unit {
+    if c.raw == 0 {
+        call_slot_out(&mut c, view(text), view("an imported function"));
+        return ();
+    }
+    if c.fx_cur != 0 {
+        fx_called(&mut c);
+    }
+    o(&mut c, text);
+    return ();
+}
 // The compiler's own dispatch inside trusted code (a closure's drop through the slot its own body
 // installed): every body it can reach is recorded itself, so it is not an unknown.
 fn call_dispatch_out<a, b>(c: (&a mut C), text: &b [u8]) -> unit {
@@ -30124,7 +30140,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
             get(&mut c, args[3], view("%r9"));
         }
         win32_link(&mut c, view(api));
-        call_slot_out(&mut c, view("call *__imp_"), view("an imported function"));
+        call_import_out(&mut c, view("call *__imp_"));
         o(&mut c, view(api));
         o(&mut c, view("(%rip)\n"));
         o(&mut c, view("addq $"));
@@ -30201,7 +30217,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
                 &mut c,
                 view("subq $48,%rsp\nxorl %ecx,%ecx\nmovl $12288,%r8d\nmovl $4,%r9d\n")
             );
-            call_slot_out(&mut c, view("call *__imp_VirtualAlloc(%rip)\n"), view("an imported function"));
+            call_import_out(&mut c, view("call *__imp_VirtualAlloc(%rip)\n"));
             o(
                 &mut c,
                 view("addq $48,%rsp\n")

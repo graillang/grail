@@ -1,5 +1,12 @@
 ## Unreleased
 
+- Fixed: on windows-x86_64 every `@no_alloc` function that indexes, casts or unwraps was refused
+  (`lib/strings.grl`'s `is_char_boundary` among them, so `bun tools/windows.mjs check` failed): the
+  runtime's calls through the import table were unknown edges, and the syscall dispatcher the
+  failure path calls reached `rt_alloc` through the pipe arm's heap-allocated SECURITY_ATTRIBUTES. An
+  import-table OS call in the runtime is now modelled as a syscall (no Grail heap, no failure), and
+  CreatePipe's attributes live in process state.
+
 - **Fixed: an LLVM-backend miscompile of a vector grown through its address.** A call handed `&mut v`
   receives the slot's address, not the header word, so the lifter did not count it as a call that
   can grow `v`, and the `len`/`data` it had read before the call were used after it: `pad(&mut out,
