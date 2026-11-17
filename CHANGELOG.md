@@ -52,6 +52,12 @@
   first build, +0.9 s once the probes' function cache is warm), and no probe on a warm rebuild or
   after an unrelated edit. A value that fails names itself, its call and its declaration (a failed
   check, a refused effect, an exit).
+- **The LLVM lifter lowers a module's functions in parallel.** The functions are cut into pieces of
+  about equal size, one forked copy each as the build's jobserver allows (`GRAIL_JOBS=1` for one
+  process), and the pieces are put back in order; a function's temporaries and fresh blocks are
+  now numbered within it, so the module text is the same whatever the count. Together with the
+  table lookups that replaced the lifter's per-call and per-slot scans, lifting the compiler goes
+  from 904 s to well under the old figure on one core (136 s measured before this change).
 
 - **Fixed: an LLVM-backend miscompile of a vector grown through its address.** A call handed `&mut v`
   receives the slot's address, not the header word, so the lifter did not count it as a call that
