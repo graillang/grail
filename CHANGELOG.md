@@ -7,6 +7,12 @@
   proved. nbody's own array checks go from 24 to 0. A name the facts equate with a literal (`n := 256`) reads as that literal, and a loop count they make
   constant (`for i in n * n`) bounds the loop variable and the vectors a push loop fills: matmul's
   checks go from 6 to 0.
+  The same interval facts prove the index arithmetic itself cannot overflow (`i * 3 + k` with `i < 5`,
+  `k < 3`): `*` and `+` on such operands carry no overflow check in any build (nbody: 44 traps in its
+  own functions -> 2). A proved byte store (`composite[j] = 1`) is one instruction (sieve: 1 -> 0).
+  Under `--verify-facts` a check a proof removed is kept and still not counted as a failure, so
+  `@no_panic` accepts the same functions in both builds (a kept index check and a proved call
+  through the checking wrapper both name the proof).
 
 - Bounds checks: a vector filled from empty by a counted loop - `for i in n { v.push(x); }`, one
   push per iteration, no `break` or `continue` - has `v.len == n` after the loop, so a later

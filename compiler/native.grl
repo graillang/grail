@@ -774,6 +774,10 @@ struct C {
     // 1 while an assignment's target path is read: its last field is written directly (and its
     // predicate owed there), not lent out, so `field_path` records it instead of refusing the loan.
     ref_assign_target: u64,
+    // 1 when the index the next accessor checks was proved, but --verify-facts keeps the check: the
+    // accessor's edge is marked (kind 16), so the check is not a failure the function answers
+    // for - as a proved addition's kept check is not (binary).
+    fx_verified_index: u64,
     // 1 while a refined function's body labels and declares itself: its symbol is `<name>.proved`,
     // and `<name>` is the checking wrapper emitted after it (ref_wrapper).
     proved_label: u64,
@@ -9676,6 +9680,7 @@ fn pv_ir_value<a, b>(c: (&a mut C), name: &b [u8], lo: u64, hi: u64) -> unit {
     if !pv_ir_live(&c) {
         return ();
     }
+    pv_bind_bounds(&mut c, view(name), lo, hi);
     // `v := T[]`: an empty vector, whose length a counted push loop then states (pv_push_loop).
     if (hi == lo + 3) & (kind_at(&mut c, lo) == 1) & (kind_at(&mut c, lo + 1) == 91) & (kind_at(&mut c, lo + 2) == 93) {
         mut len = copy_bytes(view(name));
@@ -9688,6 +9693,87 @@ fn pv_ir_value<a, b>(c: (&a mut C), name: &b [u8], lo: u64, hi: u64) -> unit {
         return ();
     }
     pv_add(&mut c.pv_facts, 2, view(name), view(t), 0);
+    return ();
+}
+// The upper bound of an operand spelled by tokens `lo..hi`: a term's (pv_upper), or `L` for
+// `t & L` / `(t & L)` with a literal `L` (a mask cannot exceed it); -1 when unknown.
+fn pv_operand_upper<a>(c: (&a mut C), facts: (&a Atom[]), lo: u64, hi: u64) -> i64 {
+    mut l = lo;
+    mut h = hi;
+    if (h > l + 1) && (kind_at(&mut c, l) == 40) && (kind_at(&mut c, h - 1) == 41) {
+        l = l + 1;
+        h = h - 1;
+    }
+    t := pv_span_term(&mut c, l, h);
+    if t.len() != 0 {
+        return pv_upper(&facts, view(t));
+    }
+    if (h == l + 3) && (kind_at(&mut c, l + 1) == 38) {
+        mask := tok_text(&mut c, l + 2);
+        if pv_digits(view(mask)) && (pv_span_term(&mut c, l, l + 1).len() != 0) {
+            return pv_number(view(mask));
+        }
+    }
+    return -1;
+}
+// What a binding's value bounds, for the index proofs:
+// - `x := A - B`, with `A` a literal (or equal to one) and `B` bounded by at most `A`: the
+//   subtraction cannot wrap, so `x <= A`;
+// - `v := T[e; n + k]`: the vector's length is the count, `v.len == n + k`, the constant settled
+//   like any side (an addition the facts cannot show unwrapped is the opaque `n+k`).
+fn pv_bind_bounds<a, b>(c: (&a mut C), name: &b [u8], lo: u64, hi: u64) -> unit {
+    mut facts = Atom[];
+    pv_ir_read(&mut c, &mut facts);
+    if (hi > lo + 2) && (kind_at(&mut c, lo + 1) == 45) {
+        mut used = 0;
+        a := pv_term(&mut c, lo, &mut used);
+        if (used == 1) && (a.len() != 0) {
+            av := pv_upper(&facts, view(a));
+            r := pv_resolve(&facts, view(a));
+            ub := pv_operand_upper(&mut c, &facts, lo + 2, hi);
+            if pv_digits(view(r)) && (0 <= ub) && (ub <= av) {
+                pv_add(&mut c.pv_facts, 1, view(name), view(r), 0);
+            }
+        }
+        return ();
+    }
+    if (hi > lo + 4) && (kind_at(&mut c, lo) == 1) && (kind_at(&mut c, lo + 1) == 91) && (kind_at(&mut c, hi - 1) == 93) {
+        mut depth = 0;
+        mut semi = 0;
+        mut i = lo + 2;
+        while i < hi - 1 {
+            k := kind_at(&mut c, i);
+            if (k == 40) || (k == 91) || (k == 123) {
+                depth += 1;
+            }
+            if (k == 41) || (k == 93) || (k == 125) {
+                if depth == 0 {
+                    return ();
+                }
+                depth -= 1;
+            }
+            if (k == 59) && (depth == 0) {
+                semi = i;
+            }
+            i += 1;
+        }
+        if semi == 0 {
+            return ();
+        }
+        mut off: i64 = 0;
+        base := pv_span_term_off(&mut c, semi + 1, hi - 1, &mut off);
+        if base.len() == 0 {
+            return ();
+        }
+        mut k: i64 = 0;
+        side := pv_side(&mut c, &facts, view(base), off, &mut k);
+        if side.len() == 0 {
+            return ();
+        }
+        mut len = copy_bytes(view(name));
+        push_bytes(&mut len, view(".len"));
+        pv_add(&mut c.pv_facts, 2, view(len), view(side), k);
+    }
     return ();
 }
 // Whether a counted loop's body (tokens between `open`, its `{`, and `end`) grows `name` by exactly
@@ -9980,6 +10066,23 @@ fn pv_arith_proof<a>(c: (&a mut C), k: u64, lstart: u64, rstart: u64, rend: u64)
     exchange(&mut c.pv_arith_ok, 0);
     if !pv_ir_live(&c) || (rstart == 0) || (rstart <= lstart) {
         return ();
+    }
+    // The interval reading: both operands' largest values from the facts (pv_span_bound, sums and
+    // products of bounded u64 terms, each far below 2^63). Their sum or product is then below 2^63
+    // too, so the operation cannot overflow: `i * 3 + k` in `p[i * 3 + k]` with `i < 5`, `k < 3`.
+    if (k == 42) || (k == 43) {
+        mut ifacts = Atom[];
+        pv_ir_read(&mut c, &mut ifacts);
+        lmax := pv_index_max(&mut c, &ifacts, lstart, rstart - 1);
+        rmax := pv_index_max(&mut c, &ifacts, rstart, rend);
+        limit: i64 = 1099511627776;
+        if (0 <= lmax) && (0 <= rmax) && (lmax <= limit) && (rmax <= limit) {
+            exchange(&mut c.pv_arith_ok, 1);
+            return ();
+        }
+        if k == 42 {
+            return ();
+        }
     }
     left := pv_span_term(&mut c, lstart, rstart - 1);
     right := pv_span_term(&mut c, rstart, rend);
@@ -23419,6 +23522,10 @@ fn fx_edge<a, b>(c: (&a mut C), name: &b [u8], proved: u64) -> unit {
     if c.fx_trusted != 0 {
         kind = kind | 4;
     }
+    if (c.fx_verified_index != 0) && fx_index_accessor(view(name)) {
+        kind = kind | 16;
+        exchange(&mut c.fx_verified_index, 0);
+    }
     c.fx_edge_kind.push(kind);
     f := c.file;
     p := c.pos;
@@ -23426,6 +23533,12 @@ fn fx_edge<a, b>(c: (&a mut C), name: &b [u8], proved: u64) -> unit {
     c.fx_edge_pos.push(p);
     c.fx_edge_why.push(u8[]);
     return ();
+}
+// The checked sequence accessors an index proof stands for.
+fn fx_index_accessor<a>(name: &a [u8]) -> bool {
+    return same(view(name), view("rt_slot")) || same(view(name), view("rt_slot4")) || same(view(name), view("rt_slotb"))
+        || same(view(name), view("rt_at")) || same(view(name), view("rt_at4")) || same(view(name), view("rt_atb"))
+        || same(view(name), view("rt_write"));
 }
 // Say why the edge just recorded names no callee. Called by the indirect call sites, which are the
 // ones that know what the target is; the solver turns it into the refusal's reason.
@@ -23470,6 +23583,19 @@ fn call_out<a, b>(c: (&a mut C), callee: &b [u8]) -> unit {
     } else {
         o(&mut c, callee);
     }
+    c.out.push(10);
+    return ();
+}
+// A proved call under `--verify-facts`: the checking wrapper is what runs, so the proof is checked,
+// but the effect is the body's - the wrapper adds only the check the proof discharged. The edge
+// names `<callee>.proved` (kind 8), the line calls `<callee>`.
+fn call_verified_out<a, b>(c: (&a mut C), callee: &b [u8]) -> unit {
+    mut body = copy_bytes(view(callee));
+    push_bytes(&mut body, view(".proved"));
+    fx_edge(&mut c, view(body), 8);
+    fx_called(&mut c);
+    o(&mut c, view("call "));
+    o(&mut c, callee);
     c.out.push(10);
     return ();
 }
@@ -23802,6 +23928,11 @@ fn fx_solve<a>(c: (&a mut C)) -> unit {
             if c.fx_body[to - 1] == 0 {
                 a = fx_callee_alloc(&c, to);
                 p = fx_callee_panic(&c, to);
+                // A checked accessor whose index was proved, kept by --verify-facts: its failure is the
+                // check of a proof, not one the function answers for.
+                if (kind & 16) != 0 {
+                    p = 0;
+                }
             } else {
                 callers[to] = callers[to] + 1;
             }
@@ -23857,7 +23988,7 @@ fn fx_solve<a>(c: (&a mut C)) -> unit {
                 da[from] = da[k] + 1;
                 set = 1;
             }
-            if (c.fx_panic[k] != 0) && (c.fx_panic[from] == 0) {
+            if (c.fx_panic[k] != 0) && (c.fx_panic[from] == 0) && ((c.fx_edge_kind[e] & 16) == 0) {
                 c.fx_panic[from] = 1;
                 dp[from] = dp[k] + 1;
                 set = 1;
@@ -23882,6 +24013,11 @@ fn fx_solve<a>(c: (&a mut C)) -> unit {
             if c.fx_body[to - 1] == 0 {
                 a = fx_callee_alloc(&c, to);
                 p = fx_callee_panic(&c, to);
+                // A checked accessor whose index was proved, kept by --verify-facts: its failure is the
+                // check of a proof, not one the function answers for.
+                if (kind & 16) != 0 {
+                    p = 0;
+                }
             } else {
                 if (c.fx_alloc[to - 1] != 0) && (da[to - 1] < da[from]) {
                     a = 1;
@@ -29246,6 +29382,8 @@ fn emit_resolved_call<a>(
         // `--verify-facts` keeps the check the proof removed, so the call keeps the checked entry.
         if (proved != 0) & (dyn_entry == 0) & (contract == 0) & (c.verify_facts == 0) {
             call_proved_out(&mut c, view(callee));
+        } else if (proved != 0) & (dyn_entry == 0) & (contract == 0) & (c.verify_facts != 0) {
+            call_verified_out(&mut c, view(callee));
         } else {
             call_out(&mut c, view(callee));
         }
@@ -40121,7 +40259,7 @@ fn binary<a>(c: (&a mut C), k: u64, left: u64, right: u64) -> u64 {
     // build traps, and the effect is recorded either way, unless the facts proved that this
     // operation cannot overflow (pv_arith_proof). `--verify-facts` checks that proof at run time,
     // in either mode, without making it a failure the function answers for.
-    proved := ((k == 43) || (k == 45)) && (c.pv_arith_ok != 0);
+    proved := ((k == 43) || (k == 45) || (k == 42)) && (c.pv_arith_ok != 0);
     exchange(&mut c.pv_arith_ok, 0);
     if (k == 43) || (k == 45) || (k == 42) {
         if proved {
@@ -40533,7 +40671,18 @@ fn pv_loop_facts<a>(c: (&a mut C), at: (&a u64[]), head: u64) -> unit {
 // plus a non-negative literal, so the value the machine computes is the value proved: a negative
 // offset could wrap in a release build, and is not read. `--verify-facts` keeps every check.
 fn pv_index_ok<a>(c: (&a mut C), bracket: u64, lo: u64, hi: u64, base: u64) -> bool {
-    if (c.raw != 0) || (c.verify_facts != 0) {
+    if c.raw != 0 {
+        return false;
+    }
+    exchange(&mut c.fx_verified_index, 0);
+    if c.verify_facts != 0 {
+        // The check stays, so the run checks the proof; the proof still decides the effect.
+        mode := exchange(&mut c.verify_facts, 0);
+        proved := pv_index_ok(&mut c, bracket, lo, hi, base);
+        exchange(&mut c.verify_facts, mode);
+        if proved {
+            exchange(&mut c.fx_verified_index, 1);
+        }
         return false;
     }
     if c.forge_index != 0 {
@@ -41383,7 +41532,7 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
                                                 }
                                                 both := is_bool(&mut c, ty)
                                                     && is_bool(&mut c, rty);
-                                                if ((k == 45) || (k == 43)) & (c.raw == 0) {
+                                                if ((k == 45) || (k == 43) || (k == 42)) & (c.raw == 0) {
                                                     pv_arith_proof(&mut c, k, lstart, rstart, rend);
                                                 }
                                                 t = binary(&mut c, k, snap, right.t);
@@ -42256,12 +42405,18 @@ fn index_assignment<a>(c: (&a mut C)) -> unit {
                 );
             }
         }
+        byte_bracket := c.pos;
         expect(&mut c, view("["));
+        byte_lo := c.pos;
         index := expr(&mut c, 0);
+        byte_hi := c.pos;
         if c.raw == 0 {
             require_type(&mut c, index.ty, 0);
         }
         expect(&mut c, view("]"));
+        // A byte store whose index the facts prove in bounds needs no accessor: the value is
+        // already known to fit a byte (a u8, or the check below), so the store is one instruction.
+        byte_proved := pv_index_ok(&mut c, byte_bracket, byte_lo, byte_hi, x.t);
         exchange(&mut c.lit_start, ls);
         exchange(&mut c.lit_end, le);
         exchange(&mut c.lit_value, lv);
@@ -42296,7 +42451,14 @@ fn index_assignment<a>(c: (&a mut C)) -> unit {
             call_out(&mut c, view("rt_abort"));
             mark(&mut c, ok);
         }
-        invoke(&mut c, view("rt_write"), args);
+        if byte_proved && (operator == 61) {
+            get(&mut c, x.t, view("%rdi"));
+            get(&mut c, index.t, view("%rsi"));
+            get(&mut c, v.t, view("%rdx"));
+            o(&mut c, view("movq (%rdi),%rax\nmovb %dl,(%rax,%rsi,1)\n"));
+        } else {
+            invoke(&mut c, view("rt_write"), args);
+        }
     }
     exchange(&mut c.pos, after);
     exchange(&mut c.pv_element, old_element);
@@ -51079,6 +51241,7 @@ pub fn main() -> u64 {
         pv_pred_mode: 0,
         pv_arith_ok: 0,
         ref_assign_target: 0,
+        fx_verified_index: 0,
         proved_label: 0,
         ref_assign_d: 0,
         ref_assign_k: 0,
