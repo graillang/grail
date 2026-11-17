@@ -241,7 +241,7 @@ chain of calls reaches the allocator, and it can fail exactly when a chain reach
 that the prover did not remove. The refusal names that chain:
 
 ```
-error: `@no_alloc` function `grow` performs a heap allocation: it calls grow -> rt_push -> rt_grow
+error: `@no_alloc` function `grow` performs a heap allocation: it calls grow -> rt_push -> rt_push_slow -> rt_grow
 ```
 
 A refined parameter's check belongs to the caller. A `@no_panic` function that calls `get` with an
@@ -270,5 +270,5 @@ allocates, and a claim on the generic itself is checked for every instance that 
 refusal names it:
 
 ```
-error: `@no_alloc` function `fill<main::File>` performs a heap allocation: it calls fill<main::File> -> rt_push -> rt_grow
+error: `@no_alloc` function `fill<main::File>` performs a heap allocation: it calls fill<main::File> -> rt_push -> rt_push_slow -> rt_grow
 ```
