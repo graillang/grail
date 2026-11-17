@@ -12,6 +12,9 @@
   that finds a function left out recompiles with everything. A recomputed value in a 1600-function
   program now costs +0.0-0.2 s instead of +1.1 s. The probes' base objects live in the build store
   (`<store>/probe-base`), which `grail cache clear` and `prune` cover.
+- **Fixed: `grail build --release` for aarch64 and riscv64 failed to link any program with more than
+  one module** (`duplicate symbol: rt_abort.c`). The thunk through which lifted code calls a native
+  function is now weak, so every unit can carry it.
 
 - Fixed (release builds): a function calling a blocking `extern "C"` function was left unoptimised
   since the foreign-call marker landed - the marker's locked counter, thread-pointer read and
