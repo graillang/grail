@@ -15,7 +15,13 @@
 # the landing on the build host (GRAIL_LAND_REMOTE) and do not hold the queue: a failure there is
 # fixed forward by the branch's owner.
 set -uo pipefail
-here=$(cd "$(dirname "$0")/.." && pwd)
+# The queue checks branches out in its own worktree, which may be where this script lives: run from a
+# copy, so the checkout cannot change the script under the running shell.
+if [ -z "${LAND_HERE:-}" ]; then
+  export LAND_HERE=$(cd "$(dirname "$0")/.." && pwd)
+  copy=$(mktemp /tmp/land.XXXXXX.sh); cp "$0" "$copy"; exec bash "$copy" "$@"
+fi
+here=$LAND_HERE
 queue=${GRAIL_LAND_DIR:-$HOME/grail-landq}
 logs=${GRAIL_LAND_LOGS:-$HOME/grail-land-logs}
 remote=${GRAIL_LAND_REMOTE:-}
