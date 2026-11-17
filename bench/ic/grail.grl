@@ -1,0 +1,27 @@
+// Instruction-count probe template: tools/sched-ic.sh substitutes MODE (0 join on a worker, 1 job
+// spawn+wait, 2 fib(20) by nested join, 88 joins) and COUNT, builds two counts and divides the
+// difference, so start-up cancels. Load cannot move the result.
+use pool;
+fn fib(n: u64) -> u64 { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); }
+fn pfib(n: u64) -> u64 {
+    if n < 12 { return fib(n); }
+    p := pool::join<u64,u64>(|| -> u64 pfib(n - 1), || -> u64 pfib(n - 2));
+    return p.first + p.second;
+}
+fn work(n: u64, mode: u64) -> u64 {
+    mut acc = 0;
+    if mode == 0 {
+        for i in n { p := pool::join<u64,u64>(|| -> u64 1, || -> u64 2); acc += p.first + p.second; }
+    } else if mode == 1 {
+        for i in n { acc += pool::wait(pool::spawn<u64>(|| -> u64 1)); }
+    } else {
+        for i in n { acc += pfib(20); }
+    }
+    return acc;
+}
+fn body<s>(sc: (&s Scope<u64>), n: u64) -> u64 {
+    t := spawn(sc, n, work_mode);
+    return join(t);
+}
+fn work_mode(n: u64, unused: u64) -> u64 { return work(n, MODE); }
+fn main() { println(task_scope(COUNT, body)); }

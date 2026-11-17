@@ -10,6 +10,19 @@ import { compileProgram, headers, inspectImage, inspectObject, inspectRelocation
 
 const elfTarget = 'x86_64';
 
+// Win32 entry points that take an ANSI path, an ANSI command line or an ANSI environment block.
+// The platform layer converts UTF-8 to UTF-16 at the FFI boundary instead, so none of these may
+// appear in a Grail image; the list is the audit, and it is checked against every case's object.
+const ansiImports = [
+  'CreateFileA', 'CreateDirectoryA', 'RemoveDirectoryA', 'DeleteFileA', 'MoveFileA',
+  'CopyFileA', 'GetFileAttributesA', 'GetFileAttributesExA', 'FindFirstFileA', 'FindNextFileA',
+  'GetCurrentDirectoryA', 'GetModuleFileNameA', 'GetFullPathNameA', 'GetTempPathA',
+  'CreateProcessA', 'GetCommandLineA', 'GetEnvironmentStringsA', 'GetEnvironmentVariableA',
+  'SetCurrentDirectoryA', 'GetStartupInfoA', 'SetFileAttributesA', 'GetLongPathNameA',
+  'GetShortPathNameA', 'SearchPathA', 'LoadLibraryA', 'SetEnvironmentVariableA',
+  'MoveFileExA', 'CreateSymbolicLinkA',
+];
+
 function importSlots(object) {
   // `__imp_` slots stay undefined in the object; the short import library defines them.
   return inspectObject(object).split('\n')
@@ -69,7 +82,10 @@ export async function check(compiler) {
   let passed = 0;
   let executed = 0;
 
+  // GRAIL_TEST_FILTER (a regex over case names) runs a subset, as the native corpus engine does.
+  const filter = process.env.GRAIL_TEST_FILTER ? new RegExp(process.env.GRAIL_TEST_FILTER) : null;
   for (const test of cases) {
+    if (filter && !filter.test(test.name)) continue;
     const directory = join(work, test.name);
     rmSync(directory, { recursive: true, force: true });
     mkdirSync(directory, { recursive: true });
@@ -130,14 +146,22 @@ export async function check(compiler) {
     assert.notEqual(Number.parseInt(entry, 16), 0, `${test.name}: image has no entry point`);
     const imported = [...inspectImage(built.executable).matchAll(/^\s+Symbol: (\S+)/gm)].map(m => m[1]);
     // The runtime's own Win32 calls: the console is set to UTF-8 at startup and the working
-    // directory is published as PWD, which is what a diagnostic path is trimmed with.
-    for (const name of ['SetConsoleOutputCP', 'SetConsoleCP', 'GetCurrentDirectoryA']) {
+    // directory is published as PWD, which is what a diagnostic path is trimmed with. Every path
+    // entry point is the wide one, and no ANSI entry point is reachable from a Grail image: the
+    // assertion below fails the build if one ever comes back.
+    for (const name of ['SetConsoleOutputCP', 'SetConsoleCP', 'GetCurrentDirectoryW']) {
       assert.ok(imported.includes(name), `${test.name}: expected ${name} in the import table`);
     }
-    for (const name of ['ExitProcess', 'WriteFile', 'GetCommandLineA', 'CreateFileA']) {
+    for (const name of ['ExitProcess', 'WriteFile', 'GetCommandLineW', 'CreateFileW']) {
       if (test.name === 'hello' || test.name === 'file-write-read') {
         assert.ok(imported.includes(name), `${test.name}: expected ${name} in the import table`);
       }
+    }
+    // The object, not just this image: an ANSI entry point would mangle any path outside the system
+    // code page, so one reaching the import table at all is a regression.
+    for (const slot of importSlots(built.object)) {
+      assert.ok(!ansiImports.includes(slot.replace('__imp_', '')),
+        `${test.name}: ANSI Win32 entry point ${slot} must not be imported (use the -W form)`);
     }
     if (test.entry) {
       for (const name of ['CreateThread', 'WaitForSingleObject', 'WaitOnAddress', 'WakeByAddressSingle']) {
@@ -156,7 +180,11 @@ export async function check(compiler) {
     // static half (it links what it names) but is not executed here; it runs on a real Windows
     // host. The only such case is the fiber stack overflow below.
     if (wine && !test.noWineRun) {
-      const run = runWine(wine, built.executable, test.args ?? [], directory, test.env ?? {});
+      // A case may ask to run in a subdirectory, which is how a non-ASCII working directory is
+      // exercised: the platform layer has to publish it as UTF-8 PWD from GetCurrentDirectoryW.
+      const runDirectory = test.cwd ? join(directory, test.cwd) : directory;
+      if (test.cwd) mkdirSync(runDirectory, { recursive: true });
+      const run = runWine(wine, built.executable, test.args ?? [], runDirectory, test.env ?? {});
       assert.equal(run.status, test.status ?? 0, `${test.name}: wine exit ${run.status}: ${run.stderr}`);
       assert.equal(run.stdout.toString(), test.stdout, `${test.name}: wine stdout`);
       // A program that aborts leaves a message and a backtrace on stderr: one substring carried
@@ -178,7 +206,7 @@ export async function check(compiler) {
 
   // windows-aarch64: PE/COFF for ARM64. There is no ARM64 Windows runner on this host, so these
   // cases are validated statically: assembly shape, COFF machine, relocations and the image.
-  const armCases = ['hello', 'integer-print', 'file-write-read', 'argument-list', 'com-interop', 'ffi-call-abi', 'thread-join', 'ffi-call-records', 'command-with-env', 'runtime-error-backtrace'];
+  const armCases = ['hello', 'integer-print', 'file-write-read', 'argument-list', 'com-interop', 'ffi-call-abi', 'thread-join', 'ffi-call-records', 'command-with-env', 'runtime-error-backtrace', 'win-unicode-paths'];
   for (const name of armCases) {
     const test = cases.find(c => c.name === name);
     const directory = join(work, `arm64-${name}`);
@@ -331,7 +359,7 @@ export async function check(compiler) {
   }
   // Thread programs are also exercised as Linux ELF, where clone/futex already work. That
   // validates the portable side of the test and keeps the Windows result comparable.
-  for (const test of cases.filter(c => c.linux)) {
+  for (const test of cases.filter(c => c.linux && (!filter || filter.test(c.name)))) {
     const directory = join(work, `linux-${test.name}`);
     rmSync(directory, { recursive: true, force: true });
     mkdirSync(directory, { recursive: true });
