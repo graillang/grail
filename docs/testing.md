@@ -411,7 +411,11 @@ lint's seed) against the compiler that landed, seeded from the landing's stamp s
 new inputs and a front-end hang is found within hours. Logs are in `/srv/grail/logs/STAMP/`, where
 STAMP also names the landing's local log directory; the fuzzer's `report.json` and the shrunk input
 of every bug it finds are kept in `STAMP/fuzz/`, and `bun tools/fuzz-frontend.mjs --seed SEED
---cases 2000` reproduces a run. `tools/land.sh --remote-status` (`just land-status-remote`; the
+--cases 2000` reproduces a run. Its baseline check compiles a source unmutated when a mutated case of
+it is refused at another file, and counts a refusal of the original as a bug; a fixture meant to be
+refused as it stands (a rejection case's own input, a strict-mode refusal) says `fuzz: refused` on
+its first line - a trailing `// fuzz: refused`, or the words inside the comment already there, so no
+pinned line number moves - and the check skips it. `tools/land.sh --remote-status` (`just land-status-remote`; the
 service's client, `tools/landsvc/land.sh`) prints the newest landing's emulator version, each leg's
 verdict - running, ok with its pass count, or FAIL with the failing cases - and the fuzzer's seed
 and summary, and exits 0 when all passed, 1 when one failed, 3 while any is running. Once every leg

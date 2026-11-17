@@ -241,9 +241,9 @@ for (const [fixture, expect] of [['range_long_proof.grl', '300'], ['range_push_l
 // --verify-facts fails the compile naming the fact.
 const signature = build('signature', 'signature.grl', { backend: 'llvm', verifyFacts: true });
 const sigIr = readFileSync(signature.ll, 'utf8');
-ok('signature: the facts are recorded', /^; fact f_main_two signature 2$/m.test(sigIr) && /^; fact f_main_as_shape signature 1$/m.test(sigIr));
+ok('signature: the facts are recorded', /^; fact f_main_two signature 2$/m.test(sigIr) && /^; fact f_main_as_shape signature 1 refs 1$/m.test(sigIr));
 ok('signature: a two-word body takes two words and gives one', /^define internal i64 @"f_main_two"\(i64 %a0, i64 %a1\)/m.test(sigIr), sigIr.match(/^define.*f_main_two.*$/m)?.[0]);
-ok('signature: a `&dyn` result stays two words', /^define internal \{i64, i64\} @"f_main_as_shape"\(i64 %a0\)/m.test(sigIr), sigIr.match(/^define.*f_main_as_shape.*$/m)?.[0]);
+ok('signature: a `&dyn` result stays two words, its reference parameter a ptr', /^define internal \{i64, i64\} @"f_main_as_shape"\(ptr %a0\)/m.test(sigIr), sigIr.match(/^define.*f_main_as_shape.*$/m)?.[0]);
 ok('signature: the right facts run', run([signature.exe]).stdout === '44 7\n', JSON.stringify(run([signature.exe]).stdout));
 const refused = (directory, forge, flag = '--forge-signature=', file = flag === '--forge-signature=' ? 'signature.grl' : 'indirect_words.grl') => {
   try {
@@ -264,7 +264,9 @@ ok('signature: without --verify-facts a forged fact is dropped (six words again)
 const ffi = build('ffi-floats', 'ffi_float_calls.grl', { backend: 'llvm', verifyFacts: true });
 const ffiIr = readFileSync(ffi.ll, 'utf8');
 ok('ffi: the C functions are declared with their float types', /^declare double @"scale"\(i64, double, float\)$/m.test(ffiIr) && /^declare float @"half"\(float\)$/m.test(ffiIr));
-ok('ffi: the caller is lifted and calls them typed', /call double @"scale"\(i64 %t\d+, double %t\d+, float %t\d+\)/.test(ffiIr) && /^define [^\n]*@"f_main_main"/m.test(ffiIr));
+// The externs are blocking (the default): the foreign-call marker around each call (native.grl
+// ffi_marker_enter/leave) must not keep the caller out of the LLVM module.
+ok('ffi: the caller of a blocking extern is lifted and calls it typed', /call double @"scale"\(i64 %t\d+, double %t\d+, float %t\d+\)/.test(ffiIr) && /^define [^\n]*@"f_main_main"/m.test(ffiIr));
 ok('ffi: the values are the native build\'s', run([ffi.exe]).stdout === '500\n1.5\n', JSON.stringify(run([ffi.exe]).stdout));
 
 // ---- the indirect-call fact: a closure call passes only its words; a short fact is refused ----
@@ -275,6 +277,11 @@ ok('indirect: the call passes poison past its words', /call \{i64, i64\} %t\d+\(
 ok('indirect: the values are right', run([indirect.exe]).stdout === '30\n', JSON.stringify(run([indirect.exe]).stdout));
 const shortFact = refused('indirect-short', 'f_main_apply', '--forge-indirect=');
 ok('indirect: a fact one word short fails under --verify-facts', /the signature fact of f_main_apply is wrong: an indirect call passes 1 words but %rsi was loaded for it/.test(shortFact), shortFact.slice(0, 400));
+
+// ---- a byval C record from a lifted body: never a one-word typed call ----
+spawnSync('cc', ['-O2', '-c', join(root, 'compiler/tests/ffi_byval.c'), '-o', join(root, 'compiler/tests/ffi_byval.o')], { stdio: 'inherit' });
+const byval = build('ffi-byval', 'ffi_byval.grl', { backend: 'llvm', verifyFacts: true });
+ok('ffi: a byval record argument crosses whole on the LLVM backend', run([byval.exe]).stdout === '7043\n', JSON.stringify(run([byval.exe]).stdout));
 
 if (failed) {
   console.log(`facts: ${failed} check(s) failed`);

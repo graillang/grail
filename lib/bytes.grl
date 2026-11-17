@@ -1,0 +1,145 @@
+module bytes;
+
+// Byte search over byte text, eight bytes per step, and the LZ77 match copy.
+//
+// A line scanner - the optimiser's, the site table's, the assembler's reader - spends most of its
+// time finding the next newline. One checked index per byte is several instructions a byte; here a
+// word of eight bytes is read at once and tested for the byte with the has-zero-byte identity:
+// with `w` the word XOR the byte repeated eight times, `(w - 0x01..01) & !w & 0x80..80` is non-zero
+// exactly when some byte of `w` is zero, and the lowest flagged byte is the first match. The tail
+// shorter than a word is the text's last word, read again and shifted. Unaligned word reads are
+// what x86-64 and AArch64 do natively.
+
+const ONES: u64 = 72340172838076673;
+const NEG_ONES: u64 = 18374403900871474943;
+const HIGHS: u64 = 9259542123273814144;
+const ALL: u64 = 18446744073709551615;
+
+// Where byte `b` (0 to 255) first occurs in `s` at or after `from`, or `s.len()` when it does not.
+pub fn find_byte<a>(s: &a [u8], from: u64, b: u64) -> u64 {
+    n := s.len();
+    if n <= from {
+        return n;
+    }
+    if n < 8 {
+        mut i = from;
+        while i < n {
+            if u64(s[i]) == b {
+                return i;
+            }
+            i += 1;
+        }
+        return n;
+    }
+    unsafe {
+        // The first byte's address (bit 63 tags a narrow reference); s is not empty here.
+        data := ptr_of(&s[0]).addr() & 9223372036854775807;
+        pattern := (b & 255) * ONES;
+        mut i = from;
+        while i + 8 <= n {
+            w := ptr_from_addr(u64, data + i).read() ^ pattern;
+            found := wrapping_add(w, NEG_ONES) & (w ^ ALL) & HIGHS;
+            if found != 0 {
+                return i + lowest_byte(found);
+            }
+            i += 8;
+        }
+        if i < n {
+            // The last eight bytes, shifted so the first unread one is the low byte; the bytes
+            // shifted in are not the text's and are masked off (a false hit carries only upward,
+            // so the lowest true one is exact).
+            shift := (i - (n - 8)) * 8;
+            w := (ptr_from_addr(u64, data + n - 8).read() >> shift) ^ pattern;
+            found := wrapping_add(w, NEG_ONES) & (w ^ ALL) & (HIGHS >> shift);
+            if found != 0 {
+                return i + lowest_byte(found);
+            }
+        }
+        return n;
+    }
+}
+// The index of the lowest byte whose high bit is set in `found` (which has one set).
+fn lowest_byte(found: u64) -> u64 {
+    mut low = found & wrapping_mul(found, ALL);
+    mut k = 0;
+    if 4294967296 <= low {
+        k = 4;
+        low = low >> 32;
+    }
+    if 65536 <= low {
+        k += 2;
+        low = low >> 16;
+    }
+    if 256 <= low {
+        k += 1;
+    }
+    return k;
+}
+
+// Appends `length` bytes to `v`, copied from `distance` bytes back from its end: the match copy of
+// LZ77 decoders (inflate, zstd). The copy may overlap what it writes, as those formats require
+// (`distance` 1 repeats the last byte). Eight bytes at a time when the source runs at least a word
+// behind the destination, so every word it reads is already written; byte by byte otherwise.
+// False, appending nothing, when `distance` is 0 or reaches before the start of `v`.
+pub fn copy_back<a>(v: (&a mut u8[]), distance: u64, length: u64) -> bool {
+    n := v.len();
+    if (distance == 0) || (n < distance) {
+        return false;
+    }
+    if length == 0 {
+        return true;
+    }
+    // Room for the copy plus one word of slack the word loop may write past it.
+    need := n + length + 8;
+    unsafe {
+        header := ptr_of(&v).cast(u64).read();
+        if ptr_from_addr(u64, header + 16).read() < need {
+            pad := u8[0; need - n];
+            v.append(view(pad));
+            v.truncate(n);
+        }
+        data := ptr_from_addr(u64, header).read();
+        dst := data + n;
+        src := dst - distance;
+        if distance >= 8 {
+            mut i: u64 = 0;
+            while i < length {
+                ptr_from_addr(u64, dst + i).write(ptr_from_addr(u64, src + i).read());
+                i += 8;
+            }
+        } else {
+            for i in length {
+                ptr_from_addr(u8, dst + i).write(ptr_from_addr(u8, src + i).read());
+            }
+        }
+        ptr_from_addr(u64, header + 8).write(n + length);
+    }
+    return true;
+}
+
+// The eight bytes of `s` at `at`, little-endian, in one load (x86-64 and AArch64 read unaligned
+// words natively). `at + 8` must not pass the end: the program stops if it does, as an index would.
+pub fn load_u64<a>(s: &a [u8], at: u64) -> u64 {
+    n := s.len();
+    assert((8 <= n) && (at <= n - 8));
+    unsafe {
+        // The first byte's address (bit 63 tags a narrow reference); s is not empty here.
+        data := ptr_of(&s[0]).addr() & 9223372036854775807;
+        return ptr_from_addr(u64, data + at).read();
+    }
+}
+
+// The address of the first byte of `s`, for code that has already proved its own bounds and
+// reads or writes the bytes through `ptr_from_addr` in an `unsafe` block. Valid until `s`'s
+// vector grows or is dropped.
+pub fn data_addr<a>(s: &a [u8]) -> u64 {
+    // Through the first element, so it reads the same whatever a view's own representation is (a
+    // view is two frame words since unboxed-values.md's two-word views). Bit 63 tags a narrow
+    // reference.
+    if s.len() == 0 {
+        return 0;
+    }
+    unsafe {
+        return ptr_of(&s[0]).addr() & 9223372036854775807;
+    }
+}

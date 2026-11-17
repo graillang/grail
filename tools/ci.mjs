@@ -2,6 +2,7 @@
 // Cross-platform CI driver. Compiler-free commands (matrix, plan, lint) run
 // everywhere; build/test/package/sign use the host compiler and report a
 // distinct exit code when a lane is blocked or a tool is missing.
+import { duplicateKeys } from './case-keys.mjs';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
@@ -12,7 +13,7 @@ import {
   detectToolchain, findRunner, gitCommit, hostPlatformId, inspectBinary, platformById,
   readVersion, root,
 } from './platforms.mjs';
-import { buildCompiler, command, compilerSources, assemble, compileProgram, digest, seedDirectory, seedFile, seedAssemblyPath, readSeedManifest } from './native.mjs';
+import { buildCompiler, buildReleaseCompiler, command, compilerSources, assemble, compileProgram, digest, seedDirectory, seedFile, seedAssemblyPath, readSeedManifest } from './native.mjs';
 import { compileProgram as compileWindowsProgram, headers as windowsHeaders, inspectImage as inspectPeImage, inspectObject as inspectPeObject } from './windows.mjs';
 import { createPackage, sha256, verifyPackage, writeChecksums } from './package.mjs';
 import { buildObjectBundle, verifyObjectBundle } from './objects.mjs';
@@ -201,12 +202,23 @@ export function buildTarget(platformId, options = {}) {
   if (binary.format !== 'elf' || binary.arch !== target.arch) {
     throw new Error(`built compiler is ${binary.format}/${binary.arch}, expected elf/${target.arch}`);
   }
+  // The shipped compiler on linux-x86_64 is the release build: the compiler lowered through the
+  // LLVM backend and clang -O2, about four times faster than the native-backend build, and
+  // accepted only when it compiles the compiler to the same text and objects as that build and
+  // passes a corpus slice (tools/native.mjs buildReleaseCompiler). The native-backend build stays
+  // the bootstrap and the fixed point; GRAIL_SHIP_NATIVE=1 ships it instead.
+  let shipped = executable;
+  let flavor = 'native';
+  if (target.id === 'linux-x86_64' && host === 'linux-x86_64' && process.env.GRAIL_SHIP_NATIVE !== '1') {
+    shipped = buildReleaseCompiler({ log: line => console.log(`release compiler: ${line}`) });
+    flavor = 'release';
+  }
   const outDir = resolve(root, options.out ?? 'dist');
   mkdirSync(outDir, { recursive: true });
   const version = options.version ?? readVersion();
   const name = artifactName(target.id, version, 'compiler');
   const artifact = join(outDir, name);
-  writeFileSync(artifact, readFileSync(executable));
+  writeFileSync(artifact, readFileSync(shipped));
   chmodSync(artifact, 0o755);
   const assemblyArtifact = join(outDir, artifactName(target.id, version, 'assembly'));
   writeFileSync(assemblyArtifact, gzipSync(readFileSync(assembly), { level: 9 }));
@@ -220,6 +232,8 @@ export function buildTarget(platformId, options = {}) {
     commit: gitCommit(),
     stage0: { kind: options.stage0 ? 'explicit' : process.env.GRAIL_COMPILER ? 'env' : 'bootstrap', path: stage0, sha256: sha256(readFileSync(stage0)), ...stage0Binary },
     binary,
+    flavor,
+    native: { sha256: sha256(readFileSync(executable)) },
     sources: sourceDigests(),
     assembly: assemblyArtifact,
   };
@@ -462,6 +476,13 @@ function lint() {
   }
 
   const check = (name, ok, detail = '') => checks.push({ name, ok, detail });
+  // Case files: an object that names a key twice is two cases fused by a merge (JSON.parse would
+  // keep only the second's values, and the first would never run).
+  for (const file of readdirSync('tests').filter(name => name.endsWith('-cases.json'))) {
+    const found = duplicateKeys(readFileSync(join('tests', file), 'utf8'));
+    check(`tests/${file} has no object with a repeated key`, found.length === 0,
+      found.map(({ line, key, names }) => `line ${line}: "${key}" twice (cases ${names.join(', ')})`).join('; '));
+  }
   // A textual merge can append the same case twice (both branches added it), and the runner would
   // then run it twice under one name: every case name is unique.
   {
@@ -597,6 +618,17 @@ function lint() {
   check('the compile-speed benchmark exists and the gate runs it', existsSync(join(root, 'tools/compile-bench.mjs')) && readFileSync(join(root, 'tools/gate.sh'), 'utf8').includes('tools/compile-bench.mjs'));
   check('the gate runs the benchmarks against other languages, one at a time after the rest', (text => ['bench-rivals', 'sched-rivals', 'compile-rivals'].every(tool => new RegExp(`leg ${tool} bun tools/${tool}\\.mjs[^\\n]*\\nwait\\n`).test(text) && existsSync(join(root, `tools/${tool}.mjs`))) && text.indexOf('leg bench-rivals') > text.indexOf('leg runtime-bench-llvm'))(readFileSync(join(root, 'tools/gate.sh'), 'utf8')));
   check('the runtime benchmark against C runs in the gate on both backends', (text => text.includes('runtime-bench-native') && text.includes('runtime-bench-llvm'))(readFileSync(join(root, 'tools/gate.sh'), 'utf8')));
+  // Fact kinds are named once (llvm.grl FACT_*): two writers once shared kind 7, and a reader of one
+  // took the other's facts as its own.
+  check('fact kinds are named constants, one number each', (() => {
+    const llvmText = readFileSync(join(root, 'compiler/llvm.grl'), 'utf8');
+    const numbers = [...llvmText.matchAll(/^pub const FACT_[A-Z0-9_]+: u64 = (\d+);/gm)].map(m => m[1]);
+    if (numbers.length === 0 || new Set(numbers).size !== numbers.length) return false;
+    for (const file of readdirSync(join(root, 'compiler')).filter(name => name.endsWith('.grl'))) {
+      if (/Fact \{ kind: \d/.test(readFileSync(join(root, 'compiler', file), 'utf8'))) return false;
+    }
+    return true;
+  })());
   check('the gate runs the LLVM backend on aarch64 and riscv64: vec every gate and one tree-derived third', (text => ['rev-parse \'HEAD^{tree}\'', 'GRAIL_BACKEND=llvm bun tools/test-native.mjs $arch --filter vec', 'GRAIL_BACKEND=llvm GRAIL_TEST_SHARD=$xshard/3 bun tools/test-native.mjs $arch'].every(part => text.includes(part)) && /for arch in aarch64 riscv64; do\n  leg llvm_\$\{arch\}_vec/.test(text))(readFileSync(join(root, 'tools/gate.sh'), 'utf8')));
   check('C header importer exists', existsSync(join(root, 'compiler/bindgen.grl')));
   check('C header importer is in the compiler source list',

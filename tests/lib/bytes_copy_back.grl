@@ -1,0 +1,46 @@
+// bytes::copy_back against a byte-by-byte copy: 3,000 random buffers, six copies each, every
+// distance (overlapping or not) and length 0..69; then the rejected distances.
+use bytes;
+fn naive<a>(v: (&a mut u8[]), d: u64, l: u64) {
+    s := v.len() - d;
+    for i in l {
+        b := v[s + i];
+        v.push(b);
+    }
+}
+fn main() {
+    mut bad: u64 = 0;
+    mut seed: u64 = 12345;
+    for trial in 3000 {
+        mut a = u8[];
+        mut b = u8[];
+        base := trial % 40 + 1;
+        for i in base {
+            seed = wrapping_add(wrapping_mul(seed, 6364136223846793005), 1442695040888963407);
+            a.push((seed >> 56) & 255);
+            b.push((seed >> 56) & 255);
+        }
+        for step in 6 {
+            seed = wrapping_add(wrapping_mul(seed, 6364136223846793005), 1442695040888963407);
+            d := (seed >> 20) % a.len() + 1;
+            l := (seed >> 40) % 70;
+            assert(bytes::copy_back(&mut a, d, l));
+            naive(&mut b, d, l);
+        }
+        if a.len() != b.len() {
+            bad += 1;
+        } else {
+            for i in a.len() {
+                if a[i] != b[i] {
+                    bad += 1;
+                    break;
+                }
+            }
+        }
+    }
+    mut e = u8[1, 2];
+    assert(!bytes::copy_back(&mut e, 0, 3));
+    assert(!bytes::copy_back(&mut e, 3, 3));
+    assert(e.len() == 2);
+    println("copy_back: {} wrong", bad);
+}

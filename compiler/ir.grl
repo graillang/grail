@@ -64,11 +64,22 @@ pub struct Body {
     lscope: u64,
     // This body's slot type facts by N/8, `(what << 8) | width`, 0 for none (filled by `build`).
     sfact: u64[],
+    // The loop-stability facts (llvm FACT_LOOP_STABLE) of this body, as pairs: the header's slot by
+    // N/8 and the loop head's label number (filled by `build`).
+    stable: u64[],
+    // compact's renumbering of the frame, old N/8 to new (0: unchanged or not renumbered).
+    slotmap: u64[],
     maxslot: u64,
     table: u64[],
     // Where the lines the inlining pass reads (optimize.grl lines_of_interest) start in `out`,
     // noted as each body and line is written, so the output is not scanned for them again.
     interest: u64[],
+    // The line memo (parse): instruction lines already parsed, by a hash of their text, kept across
+    // bodies. `pm_head` is the hash table (entry + 1, 0 empty), `pm_rec` the records, PM_STRIDE
+    // words each, and `pm_text` the lines themselves, to tell a collision from a repeat.
+    pm_head: u64[],
+    pm_rec: u64[],
+    pm_text: u8[],
     base: u64,
     data: u64,
     uniq: u64,
@@ -863,7 +874,112 @@ pub fn uniq_take<a>(o: (&a mut Body)) -> u64 {
     return n;
 }
 
+// One line of a body into the record. An instruction line (not a label, not a directive, not inside
+// string data) parses to the same record wherever it stands but for its spans, which are relative to
+// the line, and for what reads per-body state: a label operand's number (`numbered`), and the
+// frame-slot bookkeeping (`maxslot`, `weird`). So such a line is parsed once per process and later
+// copies are the kept record with those redone - the emitted lines repeat (every body of a program
+// has its `movq %rax,%rdi`), and parsing them was most of the optimiser's reading.
 pub fn parse<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) {
+    if (o.data != 0) || (e <= a) || (s[a] == 46) || (s[e - 1] == 58) {
+        parse_line(&mut o, s, a, e);
+        return ();
+    }
+    mut h: u64 = 14695981039346656037;
+    for i in a..e {
+        h = wrapping_mul(h ^ u64(s[i]), 1099511628211);
+    }
+    if o.pm_head.len() == 0 {
+        for i in PM_SLOTS {
+            o.pm_head.push(0);
+        }
+    }
+    mut slot = (h ^ (h >> 29)) & (PM_SLOTS - 1);
+    while o.pm_head[slot] != 0 {
+        r := (o.pm_head[slot] - 1) * PM_STRIDE;
+        if (o.pm_rec[r + 12] == e - a) && same_range(view(s), a, e, o.pm_text[o.pm_rec[r + 13]..o.pm_rec[r + 13] + e - a]) {
+            pm_replay(&mut o, s, a, e, r);
+            return ();
+        }
+        slot = (slot + 1) & (PM_SLOTS - 1);
+    }
+    n := o.op.len();
+    parse_line(&mut o, s, a, e);
+    // Kept while the table is under three quarters full.
+    if o.pm_rec.len() / PM_STRIDE < PM_SLOTS / 4 * 3 {
+        ir_put_head(&mut o, slot, o.pm_rec.len() / PM_STRIDE + 1);
+        o.pm_rec.push(o.op[n]);
+        o.pm_rec.push(o.me[n] - a);
+        o.pm_rec.push(o.k0[n]);
+        o.pm_rec.push(o.v0[n]);
+        o.pm_rec.push(o.s0[n] - a);
+        o.pm_rec.push(o.e0[n] - a);
+        o.pm_rec.push(o.m0[n]);
+        o.pm_rec.push(o.k1[n]);
+        o.pm_rec.push(o.v1[n]);
+        o.pm_rec.push(o.s1[n] - a);
+        o.pm_rec.push(o.e1[n] - a);
+        o.pm_rec.push(o.m1[n]);
+        o.pm_rec.push(e - a);
+        o.pm_rec.push(o.pm_text.len());
+        o.pm_text.append(s[a..e]);
+    }
+}
+const PM_SLOTS: u64 = 65536;
+const PM_STRIDE: u64 = 14;
+fn ir_put_head<a>(o: (&a mut Body), slot: u64, v: u64) {
+    put(&mut o.pm_head, slot, v);
+}
+// A kept line's record, at `a`: the spans moved to it, the label operands numbered again and the
+// frame slots counted, as classify does.
+fn pm_replay<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64, r: u64) {
+    o.ls.push(a);
+    o.le.push(e);
+    o.chg.push(0);
+    o.del.push(0);
+    o.tr.push(0);
+    o.op.push(o.pm_rec[r]);
+    o.lab.push(0);
+    o.ms.push(a);
+    o.me.push(a + o.pm_rec[r + 1]);
+    for j in 2 {
+        base := r + 2 + 5 * j;
+        k := o.pm_rec[base];
+        mut v = o.pm_rec[base + 1];
+        sa := a + o.pm_rec[base + 2];
+        se := a + o.pm_rec[base + 3];
+        m := o.pm_rec[base + 4];
+        if (k != 1) && (k != 6) && (k != 3) && (sa < se) && (s[sa] == 46) {
+            mut x = sa + 1;
+            while (x < se) && (alnum(s[x]) || (s[x] == 95)) {
+                x += 1;
+            }
+            v = numbered(&mut o, view(s), sa, x);
+        }
+        if k == 2 {
+            if v % 8 != 0 {
+                exchange(&mut o.weird, 1);
+            }
+            if o.maxslot < v {
+                exchange(&mut o.maxslot, v);
+            }
+        }
+        if j != 0 {
+            o.k1.push(k);
+            o.v1.push(v);
+            o.s1.push(sa);
+            o.e1.push(se);
+            o.m1.push(m);
+        } else {
+            o.k0.push(k);
+            o.v0.push(v);
+            o.s0.push(sa);
+            o.e0.push(se);
+            o.m0.push(m);
+        }
+    }
+}
+fn parse_line<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) {
     o.ls.push(a);
     o.le.push(e);
     o.chg.push(0);
@@ -1408,9 +1524,14 @@ pub fn new_body() -> Body {
         inl_rel: u8[],
         lscope: 0,
         sfact: u64[],
+        stable: u64[],
+        slotmap: u64[],
         maxslot: 0,
         table: u64[],
         interest: u64[],
+        pm_head: u64[],
+        pm_rec: u64[],
+        pm_text: u8[],
         base: 0,
         data: 0,
         uniq: 0,
@@ -1644,7 +1765,7 @@ fn exact_calls<a, b, c, d>(o: (&a mut Body), s: &b [u8], facts: (&c llvm::Facts)
         mut at = ix.head[h % 4096];
         while at != 0 {
             f := at - 1;
-            if (llvm::fact_kind(facts, f) == 5) && (llvm::fact_name_len(facts, f) == e - a) {
+            if (llvm::fact_kind(facts, f) == llvm::FACT_SIGNATURE) && (llvm::fact_name_len(facts, f) == e - a) {
                 mut same = true;
                 for j in e - a {
                     if llvm::fact_name_byte(facts, f, j) != s[a + j] {
@@ -1681,6 +1802,8 @@ pub fn build<a, b, c, d>(o: (&a mut Body), s: &b [u8], facts: (&c llvm::Facts), 
     exchange(&mut o.ret2, 0);
     exchange(&mut o.pair_widths, u64[]);
     o.sfact.clear();
+    o.stable.clear();
+    o.slotmap.clear();
     for n in o.maxslot / 8 + 2 {
         o.sfact.push(0);
     }
@@ -1703,7 +1826,7 @@ pub fn build<a, b, c, d>(o: (&a mut Body), s: &b [u8], facts: (&c llvm::Facts), 
                 }
                 if same {
                     kind := llvm::fact_kind(facts, i);
-                    if kind == 0 {
+                    if kind == llvm::FACT_SLOT {
                         // The table's slot k is the word at -8(k+1): N/8 = k + 1. The newest fact
                         // for a slot is the one that counts, and the walk meets the newest first.
                         n := llvm::fact_slot_at(facts, i) + 1;
@@ -1711,10 +1834,14 @@ pub fn build<a, b, c, d>(o: (&a mut Body), s: &b [u8], facts: (&c llvm::Facts), 
                             put(&mut o.sfact, n, (llvm::fact_what(facts, i) << 8) | (llvm::fact_width(facts, i) & 255));
                         }
                     }
-                    if kind == 3 {
+                    if kind == llvm::FACT_PAIR {
                         pairs.push(i);
                     }
-                    if kind == 4 {
+                    if kind == llvm::FACT_LOOP_STABLE {
+                        o.stable.push(llvm::fact_slot_at(facts, i) + 1);
+                        o.stable.push(llvm::fact_b_at(facts, i));
+                    }
+                    if kind == llvm::FACT_DYN_RESULT {
                         exchange(&mut o.ret2, 1);
                     }
                 }

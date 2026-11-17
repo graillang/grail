@@ -154,6 +154,19 @@ checks += 10;
   assert.match(fs.readFileSync(join(outA, 'index.html'), 'utf8'), /data-name="hashmap Map"/, 'the index carries the search data');
   checks += 7;
 }
+// `grail build --report checks`: every check left in the program's own functions, with its location
+// and kind; an index the prover settled is not among them.
+{
+  writeFileSync(join(work, 'checks.grl'), 'fn total(v: &u64[], k: u64) -> u64 {\n    mut s: u64 = 0;\n    for i in v.len() {\n        s = s + v[i];\n    }\n    return s / k + v[k];\n}\nfn main() {\n    v := u64[1, 2, 3];\n    println(total(&v, 1));\n}\n');
+  const r = spawnSync(grail, ['build', 'checks.grl', '-o', join(work, 'checks'), '--report', 'checks'], { cwd: work, encoding: 'utf8', timeout: 300_000 });
+  assert.equal(r.status, 0, `--report checks builds: ${r.stdout}${r.stderr}`);
+  const rows = r.stdout.split('\n').filter(line => line.includes('f_main_total'));
+  assert.deepEqual(rows.map(line => line.split('\t').slice(1).join(' ').replace(/^.*checks\.grl/, 'checks.grl')),
+    ['checks.grl:4:9 overflow', 'checks.grl:6:5 divide', 'checks.grl:6:5 index', 'checks.grl:6:5 overflow'], `the report of total: ${r.stdout}`);
+  const bad = spawnSync(grail, ['build', 'checks.grl', '--report', 'nope'], { cwd: work, encoding: 'utf8' });
+  assert.notEqual(bad.status, 0, '--report takes only `checks`');
+  checks += 3;
+}
 // 4. Cross targets: the grail tool itself (formatter) and programs it builds.
 writeFileSync(join(work, 'hello.grl'), 'fn main() {\n    println(42);\n}\n');
 for (const target of ['x86_64', 'aarch64', 'riscv64']) {
@@ -482,5 +495,38 @@ const fast = ['--interval', '40', '--debounce', '60'];
   writeFileSync(join(dir, 'claim_loop.grl'), '@no_alloc\nfn total(v: &u64[]) -> u64 {\n    mut t = 0;\n    for x in v {\n        t = wrapping_add(t, *x);\n    }\n    return t;\n}\nfn main() {\n    v := u64[1, 2];\n    println(total(&v));\n}\n');
   const loop = check('claim_loop.grl');
   assert.equal(loop.status, 0, `grail check of a claimed loop over a borrowed vector failed\n${loop.stdout}${loop.stderr}`); checks++;
+}
+
+// A killed driver leaves no compiler behind: a module run started by `grail check` dies with it
+// (os-linux.grl, rt_parent_watch: PR_SET_PDEATHSIG through GRAIL_PARENT). A timeout, an editor or
+// the OOM killer that SIGKILLs the driver used to leave the runs going as orphans.
+if (process.platform === 'linux') {
+  const dir = join(work, 'orphans');
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  let big = 'module big;\n';
+  for (let i = 0; i < 3000; i++) big += `pub fn f${i}(x: u64) -> u64 {\n    mut t = x;\n    for k in 10 {\n        t = wrapping_add(t, k * ${i});\n    }\n    return t;\n}\n`;
+  mkdirSync(join(dir, 'src'));
+  writeFileSync(join(dir, 'grail.toml'), '[package]\nname = "orphans"\nversion = "0.1.0"\n');
+  writeFileSync(join(dir, 'src/big.grl'), big);
+  writeFileSync(join(dir, 'src/main.grl'), 'use big;\nfn main() {\n    println(big::f1(1));\n}\n');
+  const pause = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  // The module runs of this build: compiler processes working in `dir`.
+  const moduleRuns = () => readdirSync('/proc').filter(name => /^\d+$/.test(name)).filter(pid => {
+    try {
+      return fs.readlinkSync(`/proc/${pid}/cwd`) === dir && readFileSync(`/proc/${pid}/comm`, 'utf8').trim() === 'grail'
+        && readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes('--separate');
+    } catch { return false; }
+  });
+  const driver = spawn(grail, ['check'], { cwd: dir, stdio: 'ignore', env: { ...process.env, GRAIL_JOBS: '1', GRAIL_CACHE_DIR: join(dir, 'store') } });
+  let seen = [];
+  for (let waited = 0; waited < 60_000 && seen.length === 0; waited += 20) { pause(20); seen = moduleRuns(); }
+  assert.ok(seen.length !== 0, 'orphans: no module run of the build was seen');
+  process.kill(driver.pid, 'SIGKILL');
+  let left = seen;
+  for (let waited = 0; waited < 5_000 && left.length !== 0; waited += 20) { pause(20); left = moduleRuns(); }
+  for (const pid of left) { try { process.kill(Number(pid), 'SIGKILL'); } catch {} }
+  assert.deepEqual(left, [], 'orphans: a module run outlived its killed driver');
+  checks++;
 }
 console.log(`cli: ${checks} formatter/tool checks passed`);

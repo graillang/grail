@@ -10,6 +10,12 @@ f:
 subq $.Fx,%rsp
 movq g_guard(%rip),%rax
 call h
+movsd (%rax),%xmm0
+movsd %xmm12,8(%r12)
+movsd (%r12,%rbx,8),%xmm3
+movdqu %xmm6,0(%rsp)
+movdqu 16(%rsp),%xmm15
+movzwq (%r8,%r9,2),%rcx
 ret
 .weak h
 .globl g

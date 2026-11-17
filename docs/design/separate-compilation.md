@@ -113,7 +113,7 @@ than misread.
  source "tests/interfaces/pair.grl"
  sha256 "ad1f2b3cf421decab61ea22f7dfc572fec79a74a3078b3ef330f4e49a94db2d0"
  mode typed_refs=1 default_u64=1 overflow=checked target=x86_64
- abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame args = 6 registers then stack
+ abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame args = 6 registers then stack layout = c
  unsafe 0
  std 0
  host 0
@@ -511,7 +511,8 @@ declaration kind meant a new spelling, a new parse rule and a new way to lose a 
 ```
 file   := "GRIF" VERSION:u8 record* trailer
 record := tag:u8 len:VAR payload[len]
-trailer   tag 2: source digest, then 32 raw bytes of SHA-256 over every byte before them
+trailer   tag 2: source digest, then 32 raw bytes of fast_hash over every byte before them
+          (XXH64 under the seeds 0-3, each big-endian; format 11 - format 10 carried SHA-256 there)
 ```
 
 `VAR` is LEB128, so a small count costs one byte. One tag per declaration kind:
@@ -519,7 +520,7 @@ trailer   tag 2: source digest, then 32 raw bytes of SHA-256 over every byte bef
 | tag | record | carries |
 | --- | --- | --- |
 | 1 | `module` | module, source path, `std`/`unsafe`/`host`, overflow mode, target, and the `dyn` ABI |
-| 2 | `trailer` | the source's SHA-256, then the file's own digest |
+| 2 | `trailer` | the source's SHA-256, then the file's own digest (fast_hash: it guards against corruption, as the build store's does) |
 | 3 | `link` | one `extern "C" lib` input |
 | 10 | `type` | kind (struct/record/enum/handle), parameter and lifetime counts, `transfer`/`share`, bounds, requirements, fields with their names, types and refinements |
 | 11 | `alias` | name and the type it denotes |
@@ -1208,6 +1209,94 @@ it, so a changed body reruns its dependants exactly as a changed summary does. A
 and an optimiser memo entry are taken before the inline pass (`one_body` remembers the optimised body;
 `inline_calls` runs over the whole output afterwards), so neither depends on another module's bodies
 and neither key names them; the object-encoding chunks are keyed on the final text and see the copy.
+
+### Small library bodies across modules: measured, deferred
+
+Carrying a small *library* body (not the runtime's) in a module's interface, so another module's
+calls to it are inlined, would need an interface format bump and a new edge (a body edit reruns the
+importers). Measured before building it, as the number of call sites it would reach - a candidate
+filed in another unit that is not the runtime: the scheduler's join probe 0, the typed iterator
+chain 0, `bench/hashmap.grl` 2 (`hash`'s `table_hash` and `equal`, called from `main`). The library's
+small accessors are generic, so their specialisations are emitted in the caller's own unit and are
+inlined already; a release build gets the rest from ThinLTO across modules. Deferred until a program
+shows the sites.
+
+### Copies inside copies, and promoted registers
+
+A candidate keeps a call only when it does not return or is the last thing the body does, so
+nothing of the copy is live across it: `inline_calls` expands such a call in turn when it names a
+candidate (`expand_copy`, three levels, a site number per copy). A leaf whose slots were promoted to
+callee-saved registers is a candidate too: those registers are the caller's in a copy, so the copy
+holds the values in free scratch registers (`rename_register`; a body that also uses a narrower name
+of the register is refused). The size cap is 32 IR lines.
+
+### Release builds: ThinLTO across modules
+
+A release unit is lifted to LLVM and optimised by `clang -O2` per module, so a small function of one
+module stayed a call from every other module (the hash's `write_num` in the map's loop, `core::some`
+in the iterator chain): LLVM inlines only what is in the module it is optimising. Copying small
+bodies into importers (`available_externally`) was the plan; ThinLTO does it with LLVM's own cost
+model and no copy in the interface. `grail llvm-compile` runs `clang -O2 -flto=thin` on each part
+of the unit's module and leaves the parts as bitcode in an archive; `release_optimise` makes the
+unit object one flat archive of its native part and those parts (`llvm-ar qcsDL`: lld reads no
+nested archives); the link takes every member (`--whole-archive`), imports the small bodies across
+units and optimises and generates code in parallel (`--thinlto-jobs`), with its cache in the build
+store (`<store>/thinlto`, beside `llvm-parts`). A function LLVM does not inline keeps its one
+definition in its own module, so nothing changes about what links. The release compiler's own
+build goes the same way (`tools/native.mjs release`).
+
+Measured on `bench/hashmap.grl` (fresh store): 1,235M -> 823M instructions; a cold build 15.6 s ->
+12.6 s (per part, codegen moves to the link and runs in parallel); a rebuild after one function of
+`main` changes 0.66 s -> 0.82 s (the warm ThinLTO link re-imports and re-optimises what the edit
+reaches), against 0.65 s for `cargo build --release` after the same edit of its twin.
+
+### The release edit cycle, and memory
+
+What a one-function edit costs in a release build, step by step (`bench/hashmap.grl`, release
+compiler, medians under load): the module's compiler run and lowering ~110 ms; its LLVM parts
+(`clang -O2 -flto=thin`, only the changed ~128 KB part, the rest are store hits by text) ~80 ms;
+the unit archive (native part + parts, one `llvm-ar` with no symbol table) ~30 ms; the link
+~170 ms, of which the ThinLTO backend of the one changed part is ~45 ms and importing the bodies
+it calls from other modules most of the rest. The native part is assembled by `grail asm` inside
+the compiler run, as in a development build. Measured interleaved with `cargo build --release`
+after the same edit of the Rust twin: grail median 669 ms (min 334), cargo 737 ms (min 496).
+
+A part's `clang -O2` peaks at up to ~19 bytes of memory per byte of LLVM text (2.5 GB for a 134 MB
+part of the compiler's own module), so `llvm-compile` admits parts against three quarters of
+`MemAvailable` as well as the jobserver: a build fits a 16 GB machine by running fewer parts at
+once rather than being killed. The ThinLTO link stays under 0.9 GB at 8 backend jobs.
+
+### Early inlining: measured, not landed
+
+Splicing a small callee's raw text into its caller *before* the per-body optimiser runs (so the
+optimiser works across the seam) was built and measured twice (branch `gaps15-xinline-early-main`,
+on main 77810c06 with B1, TBAA and late_slots). Development builds, callgrind, against main: at a
+40-line cap the typed chain went 279.3 -> 294.6 instructions per element, a fork-join 1523 -> 1575,
+fib(20) by nested join +25%, and the probe's text +76%; at a 12-line cap the chain gained 1.0%, join
+0.5%, spawn 0.8%, for +0.5% text. The optimiser does not yet clean a merged body enough for bigger
+copies to pay, and a second inliner is not worth carrying for 1%: the post-optimisation inliner
+(copies inside copies, tail-call wrappers) is the one in the tree.
+
+### Cross-module calls are declared with the callee's own signature
+
+The LLVM lifter types a body by its signature fact (its argument words, and two result words when
+it returns a pair), so `bytes::load_u64` is `define i64 @f_bytes_load_u64(i64, i64)`. A run that
+calls it from another module had no fact for it and declared the uniform six-words-in,
+two-words-out form: the call links (the registers are the same) but LLVM, ThinLTO included, never
+inlines a call whose type differs from the definition's, so no cross-module call was ever inlined
+in a release build. The defining run now records what its lowering defined every lifted body with
+(`llvm::Lowered.sig_names`/`sig_codes`, after the address-taken and wrong-fact exclusions) in a
+`signatures` record of its interface (tag 22; for the runtime, in `runtime.facts`), written again
+after lowering; a run that reads it declares and calls those bodies with exactly that type
+(`fact_imported_signature`). Like the effect facts, the record is not surface: a body edit that
+changes a code reruns nothing, and a stale code only costs the inline, since every form is the same
+calls at the machine level. Interface format 13.
+
+`tools/release-signature-test.mjs` is the guard: it builds std-heavy programs per module with
+`--release` and fails on any declaration that disagrees with another module's definition (51
+declarations across hashmap, json, strings, iterchain and bintrees). Measured, release, callgrind:
+`bench/hashmap.grl` 803.5M -> 742.2M instructions; a loop over `bytes::load_u64` 46.1M -> 33.9M;
+xxhash with `read64` through `load_u64` 1.200G -> 1.121G.
 
 ### The frame constant, which was a latent miscompile
 

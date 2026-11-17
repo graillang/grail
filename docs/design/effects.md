@@ -1,4 +1,4 @@
-# Checked effects: `@no_alloc`, `@no_panic`, `@bounded(n)`
+# Checked effects: `@no_alloc`, `@no_panic`, `@no_block`, `@bounded(n)`
 
 Status: implemented (gaps round, G26); effects moved from the emitted text to the call graph the
 front end records, per specialisation, with drop glue followed through dispatch (gaps2 round); the
@@ -139,7 +139,7 @@ The summary travels three ways:
 
 A row's facts install as the callee's own facts and its witness as the next link, so a refusal in
 module A names the chain through B and the runtime exactly as a whole-program build does:
-`loud -> push_one -> grow -> rt_push -> rt_grow` (`tools/test-cli.mjs` holds the two equal).
+`loud -> push_one -> grow -> rt_push -> rt_push_slow -> rt_grow` (`tools/test-cli.mjs` holds the two equal).
 
 Modules build in dependency order (a `use` cycle is refused by the per-module driver), so every
 summary a run reads exists before it starts; recursion inside a run is the fixpoint's.
@@ -164,9 +164,38 @@ instead of assuming the worst. The place for it is the closure-bounds work's reg
 (`docs/design/closure-bounds.md`), which already tracks what a closure value carries; it is not needed
 for per-module proofs and is not built.
 
+## Blocking
+
+`@no_block` claims that a function and everything it calls makes no blocking call, so a
+frame-critical loop can be proved free of stalls as `@no_alloc` proves it free of allocation. It is a
+third bit beside `alloc` and `panic`, carried the same way: own fact, solved fact and witness per
+record, the claim in the interface's `effects` row (its fourth number), `block` and `block-via` in
+the `facts` record, and the own fact in a function unit.
+
+The roots are where a thread or task waits for something outside it (`fx_is_block_root`): the one
+park every lock, channel, condition and join funnels into (`rt_park_until`), the waits on another
+thread or job (`rt_thread_join`, `rt_task_wait`, `rt_job_park`, `rt_suspend`), the sleeps, and the
+calls that do file, pipe or socket I/O (`rt_read_now`, `rt_write_now`, `rt_write_all`, `rt_wait_fd`,
+the host open, close, directory, connect and listen calls). A C function that is not declared
+`extern "C" nonblocking` blocks; `blocking` and unmarked count alike. A non-parking operation -
+`try_lock`, `try_acquire`, an atomic - is not a root, and neither is anything reached only through
+an indirect call, which is unknown and so assumed to block, as it is assumed to allocate and fail.
+
+Not roots: the allocator's lock, a CAS spin that never parks - so `@no_block` does not imply
+`@no_alloc`, and a contended allocator can still spin; a futex wake, `sched_yield`, the clock, and
+mmap/munmap.
+
+**The failure path does not propagate `block`.** A call into a failure entry (`rt_fail`, `rt_abort`,
+`rt_trap`, `rt_refine`, `rt_error`, `rt_abort_park`, `rt_abort_final`) carries `panic` but never
+`block`. A failure ends the frame the claim is about: the report written and the thread parked after
+it are past the guarantee, so there is no later stall to protect. `@no_alloc` decides the other way
+because an allocation on the failure path happens while the program can still observe it (the
+report text is built before anything ends); blocking after the failure is irrelevant to what
+`@no_block` promises. Without this rule every function that indexes would block.
+
 ## Interface files
 
-Interface files carry `effects <no_alloc> <no_panic> <strict>` rows after a function, written from the
+Interface files carry `effects <no_alloc> <no_panic> <strict> <no_block>` rows after a function, written from the
 declaration's claim - and now also from a generic template's claim, which is what an importer's
 instantiation inherits. An `--interface` build keeps the rows on the imported declarations, and
 `fx_solve` seeds the attributes from exactly those declarations: a callee whose body is not in this

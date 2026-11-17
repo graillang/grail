@@ -1,0 +1,265 @@
+module coff;
+
+// A COFF object for x86-64 Windows, as the internal assembler writes it (docs/design/compile-speed.md,
+// stage 4, Windows) and laid out as LLVM's WinCOFFObjectWriter lays it out: the file header, the
+// section headers, then each section's raw data followed by its relocations, then the symbol table
+// (each section's static symbol with its aux record first, then the other symbols in the order they
+// were made) and the string table.
+
+pub struct Obj {
+    sec_name: u8[][],
+    // IMAGE_SCN_* characteristics, alignment bits included.
+    sec_flags: u64[],
+    sec_data: u8[][],
+    // The size of a section without file contents (.bss).
+    sec_size: u64[],
+    sec_nobits: u64[],
+    r_sec: u64[],
+    r_off: u64[],
+    r_type: u64[],
+    // The symbol a relocation names: its index in `sym_*` (section symbols are `sec_sym`).
+    r_sym: u64[],
+    // Symbols after the section symbols, in order. `sym_sec` is the section index + 1, 0 undefined,
+    // 0xffff absolute. `sym_class` is the storage class (2 external, 3 static, 0x69 weak external),
+    // `sym_type` the type (0x20 function). A weak external's default symbol is `sym_weak` + 1.
+    sym_name: u8[][],
+    sym_value: u64[],
+    sym_sec: u64[],
+    sym_class: u64[],
+    sym_type: u64[],
+    sym_weak: u64[]
+}
+
+pub fn new() -> Obj {
+    return Obj {
+        sec_name: u8[][],
+        sec_flags: u64[],
+        sec_data: u8[][],
+        sec_size: u64[],
+        sec_nobits: u64[],
+        r_sec: u64[],
+        r_off: u64[],
+        r_type: u64[],
+        r_sym: u64[],
+        sym_name: u8[][],
+        sym_value: u64[],
+        sym_sec: u64[],
+        sym_class: u64[],
+        sym_type: u64[],
+        sym_weak: u64[]
+    };
+}
+
+fn w8<a>(out: (&a mut u8[]), v: u64) {
+    out.push(v & 255);
+}
+fn w16<a>(out: (&a mut u8[]), v: u64) {
+    out.push(v & 255);
+    out.push((v >> 8) & 255);
+}
+fn w32<a>(out: (&a mut u8[]), v: u64) {
+    out.push(v & 255);
+    out.push((v >> 8) & 255);
+    out.push((v >> 16) & 255);
+    out.push((v >> 24) & 255);
+}
+
+// The aux record's checksum, as LLVM computes it: reflected CRC-32 of the section contents, started
+// from 0 and not inverted.
+fn jamcrc<a>(data: &a [u8]) -> u64 {
+    mut table = u64[];
+    for n in 256 {
+        mut c = n;
+        for k in 8 {
+            if (c & 1) != 0 {
+                c = 0xedb88320 ^ (c >> 1);
+            } else {
+                c = c >> 1;
+            }
+        }
+        table.push(c);
+    }
+    mut crc: u64 = 0;
+    for i in data.len() {
+        crc = table[(crc ^ data[i]) & 255] ^ (crc >> 8);
+    }
+    return crc;
+}
+
+// An 8-byte name field: the name when it fits, else `/offset` into the string table (sections) or
+// zero and the offset (symbols).
+fn strtab_add<a, b>(strtab: (&a mut u8[]), name: &b [u8]) -> u64 {
+    at := strtab.len() + 4;
+    strtab.append(name);
+    strtab.push(0);
+    return at;
+}
+
+fn decimal<a>(out: (&a mut u8[]), n: u64) {
+    if 9 < n {
+        decimal(&mut out, n / 10);
+    }
+    out.push(48 + n % 10);
+}
+
+pub fn write<a>(o: (&a Obj)) -> u8[] {
+    nsec := o.sec_name.len();
+    mut strtab = u8[];
+    // Relocation counts, grouped by section in the caller's order.
+    mut nrel = u64[];
+    for k in nsec {
+        nrel.push(0);
+    }
+    for i in o.r_sec.len() {
+        nrel[o.r_sec[i]] = nrel[o.r_sec[i]] + 1;
+    }
+    // Symbol indexes: the section symbols (2 entries each), then the rest (weak externals 2).
+    mut sym_index = u64[];
+    mut next = 2 * nsec;
+    for i in o.sym_name.len() {
+        sym_index.push(next);
+        next += 1;
+        if o.sym_class[i] == 0x69 {
+            next += 1;
+        }
+    }
+    nsyms := next;
+    // Layout.
+    header_size := 20 + 40 * nsec;
+    mut at = header_size;
+    mut data_at = u64[];
+    mut rel_at = u64[];
+    for k in nsec {
+        if (o.sec_nobits[k] != 0) || (o.sec_data[k].len() == 0) {
+            data_at.push(0);
+            if o.sec_nobits[k] == 0 {
+                data_at[k] = at;
+            }
+        } else {
+            data_at.push(at);
+            at += o.sec_data[k].len();
+        }
+        if nrel[k] != 0 {
+            rel_at.push(at);
+            at += 10 * nrel[k];
+        } else {
+            rel_at.push(0);
+        }
+    }
+    symtab_at := at;
+    mut out = u8[];
+    w16(&mut out, 0x8664);
+    w16(&mut out, nsec);
+    w32(&mut out, 0);
+    w32(&mut out, symtab_at);
+    w32(&mut out, nsyms);
+    w16(&mut out, 0);
+    w16(&mut out, 0);
+    for k in nsec {
+        name := view(o.sec_name[k]);
+        if name.len() <= 8 {
+            out.append(name);
+            for p in 8 - name.len() {
+                out.push(0);
+            }
+        } else {
+            off := strtab_add(&mut strtab, name);
+            mut field = u8[];
+            field.push('/');
+            decimal(&mut field, off);
+            out.append(view(field));
+            for p in 8 - field.len() {
+                out.push(0);
+            }
+        }
+        w32(&mut out, 0);
+        w32(&mut out, 0);
+        mut size = o.sec_data[k].len();
+        if o.sec_nobits[k] != 0 {
+            size = o.sec_size[k];
+        }
+        w32(&mut out, size);
+        w32(&mut out, data_at[k]);
+        w32(&mut out, rel_at[k]);
+        w32(&mut out, 0);
+        w16(&mut out, nrel[k]);
+        w16(&mut out, 0);
+        w32(&mut out, o.sec_flags[k]);
+    }
+    for k in nsec {
+        if o.sec_nobits[k] == 0 {
+            out.append(view(o.sec_data[k]));
+        }
+        for i in o.r_sec.len() {
+            if o.r_sec[i] == k {
+                w32(&mut out, o.r_off[i]);
+                s := o.r_sym[i];
+                if s >= 0x80000000 {
+                    w32(&mut out, 2 * (s - 0x80000000));
+                } else {
+                    w32(&mut out, sym_index[s]);
+                }
+                w16(&mut out, o.r_type[i]);
+            }
+        }
+    }
+    // Symbols: each section, then the rest.
+    for k in nsec {
+        name := view(o.sec_name[k]);
+        symbol_name(&mut out, &mut strtab, name);
+        w32(&mut out, 0);
+        w16(&mut out, k + 1);
+        w16(&mut out, 0);
+        w8(&mut out, 3);
+        w8(&mut out, 1);
+        mut size = o.sec_data[k].len();
+        mut sum = 0;
+        if o.sec_nobits[k] != 0 {
+            size = o.sec_size[k];
+        } else if size != 0 {
+            sum = jamcrc(view(o.sec_data[k]));
+        }
+        w32(&mut out, size);
+        w16(&mut out, nrel[k]);
+        w16(&mut out, 0);
+        w32(&mut out, sum);
+        w16(&mut out, k + 1);
+        w8(&mut out, 0);
+        for p in 3 {
+            out.push(0);
+        }
+    }
+    for i in o.sym_name.len() {
+        symbol_name(&mut out, &mut strtab, view(o.sym_name[i]));
+        w32(&mut out, o.sym_value[i]);
+        w16(&mut out, o.sym_sec[i]);
+        w16(&mut out, o.sym_type[i]);
+        w8(&mut out, o.sym_class[i]);
+        if o.sym_class[i] == 0x69 {
+            w8(&mut out, 1);
+            w32(&mut out, sym_index[o.sym_weak[i] - 1]);
+            // IMAGE_WEAK_EXTERN_SEARCH_ALIAS
+            w32(&mut out, 3);
+            for p in 10 {
+                out.push(0);
+            }
+        } else {
+            w8(&mut out, 0);
+        }
+    }
+    w32(&mut out, strtab.len() + 4);
+    out.append(view(strtab));
+    return out;
+}
+
+fn symbol_name<a, b, c>(out: (&a mut u8[]), strtab: (&b mut u8[]), name: &c [u8]) {
+    if name.len() <= 8 {
+        out.append(name);
+        for p in 8 - name.len() {
+            out.push(0);
+        }
+        return ();
+    }
+    w32(&mut out, 0);
+    w32(&mut out, strtab_add(&mut strtab, name));
+}

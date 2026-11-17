@@ -1,0 +1,26 @@
+module ffi_hfa_records;
+
+// Homogeneous float aggregates of doubles by value, both ways: two doubles (registers on every
+// target but Win64) and four (AAPCS64 still passes and returns them in d0-d3; SysV in memory,
+// Win64 and RV64 by reference). C side: tests/ffi/hfa_shim.c.
+extern "C" record Hd2 { a: f64, b: f64 }
+extern "C" record Hd4 { a: f64, b: f64, c: f64, d: f64 }
+extern "C" lib "shim.o" fn c_hfa_d2(s: byval Hd2) -> i64;
+extern "C" lib "shim.o" fn c_hfa_d4(s: byval Hd4) -> i64;
+extern "C" lib "shim.o" fn c_hfa_d4_after(k: i64, s: byval Hd4, t: f64) -> i64;
+extern "C" lib "shim.o" fn c_hfa_ret_d2(x: f64) -> Hd2;
+extern "C" lib "shim.o" fn c_hfa_ret_d4(x: f64) -> Hd4;
+fn main() -> u64 {
+    d2 := Hd2 { a: 3.0, b: 4.0 };
+    d4 := Hd4 { a: 1.0, b: 2.0, c: 3.0, d: 4.0 };
+    unsafe {
+        println(c_hfa_d2(d2));
+        println(c_hfa_d4(d4));
+        println(c_hfa_d4_after(7, d4, 0.5));
+        r2 := c_hfa_ret_d2(1.5);
+        println(i64(r2.a * 10.0 + r2.b));
+        r4 := c_hfa_ret_d4(5.0);
+        println(i64(r4.a * 1000.0 + r4.b * 100.0 + r4.c * 10.0 + r4.d));
+    }
+    return 0;
+}

@@ -8,7 +8,7 @@ import { gzipSync } from 'node:zlib';
 import { createArchive, listArchive } from './archive.mjs';
 import { BUILD_ONLY, artifactName, gitCommit, inspectBinary, platformById, root } from './platforms.mjs';
 import { sha256, writeChecksums } from './package.mjs';
-import { buildCompiler, command, compilerSources } from './native.mjs';
+import { assembleObject as assembleWithCompiler, buildCompiler, command, compilerSources, useAssemblerOf } from './native.mjs';
 import { assemble as assembleCoff, inspectObject as inspectCoff } from './windows.mjs';
 
 export function objectName(platform, stem) {
@@ -135,8 +135,8 @@ function programSources(platform) {
 function assembleObject(platform, assembly, object) {
   const target = platformById(platform);
   if (target.objectFormat === 'coff') return assembleCoff(assembly, object);
-  command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${target.triple}`, '-c', assembly, '-o', object]);
-  return object;
+  useAssemblerOf(buildCompiler());
+  return assembleWithCompiler(assembly, object, target.compilerTarget);
 }
 
 export function inspectObject(platform, object) {

@@ -1,0 +1,58 @@
+// The parallel twin of bench/ecs.grl: the same million entities, the same hundred frames, the same
+// sum, with each frame's update run on the pool's workers through parallel_for_zip
+// (docs/design/simd-layout-parallel-loops.md 4.2). Every axis is one zip of its velocity and
+// position columns, cut into pieces of GRAIN entities - the same pieces on any number of workers,
+// and each entity is updated by exactly the arithmetic of ecs.grl, so the sum is the same bits.
+// GRAIL_WORKERS sets the worker count.
+const GRAIN: u64 = 16384;
+const DT: f32 = 0.016;
+const DAMPING: f32 = 0.999;
+const GRAVITY: f32 = 0.0981;
+fn main() {
+    n: u64 := 1000000;
+    mut px = f32[];
+    mut py = f32[];
+    mut pz = f32[];
+    mut vx = f32[];
+    mut vy = f32[];
+    mut vz = f32[];
+    mut x: u64 = 88172645463325252;
+    for i in n {
+        x = x ^ (x << 13);
+        x = x ^ (x >> 7);
+        x = x ^ (x << 17);
+        px.push(f32(i64(x % 1000)) * 0.5);
+        py.push(f32(i64((x >> 10) % 1000)) * 0.5);
+        pz.push(f32(i64((x >> 20) % 1000)) * 0.5);
+        vx.push(f32(i64((x >> 30) % 100)) * 0.01);
+        vy.push(f32(i64((x >> 40) % 100)) * 0.01);
+        vz.push(f32(i64((x >> 50) % 100)) * 0.01);
+    }
+    for frame in 100 {
+        // Each callback is a literal at the call, so its body knows `p.len == v.len` and indexes
+        // both without a check.
+        parallel_for_zip(GRAIN, |v: &mut [f32], p: &mut [f32]| -> unit {
+            for i in v.len() {
+                v[i] = v[i] * DAMPING;
+                p[i] = p[i] + v[i] * DT;
+            }
+        }, &mut vx[0: n], &mut px[0: n]);
+        parallel_for_zip(GRAIN, |v: &mut [f32], p: &mut [f32]| -> unit {
+            for i in v.len() {
+                v[i] = v[i] * DAMPING - GRAVITY * DT;
+                p[i] = p[i] + v[i] * DT;
+            }
+        }, &mut vy[0: n], &mut py[0: n]);
+        parallel_for_zip(GRAIN, |v: &mut [f32], p: &mut [f32]| -> unit {
+            for i in v.len() {
+                v[i] = v[i] * DAMPING;
+                p[i] = p[i] + v[i] * DT;
+            }
+        }, &mut vz[0: n], &mut pz[0: n]);
+    }
+    mut sum: f64 = 0.0;
+    for i in n {
+        sum = sum + f64(px[i]) + f64(py[i]) + f64(pz[i]);
+    }
+    println("{}", sum);
+}
