@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **`grail cache warm [--target T]`** checks and builds every standard module into the build store,
+  as rustup ships libstd: a project's first check then compiles only its own modules. The installers
+  run it (not under DESTDIR), and compile-perf's template store is now a warmed one. Dev compiler,
+  GRAIL_JOBS=1, a project's first check: bench/iterchain.grl 0.84G -> 0.24G, hashmap 0.72G -> 0.21G,
+  json 1.33G -> 0.20G.
+- A module run of a store build no longer re-hashes every interface it loads to check its trailer:
+  the driver passes `--use-vouched`, because each one was written by a run of that build or restored
+  from a blob whose bytes matched its content digest. Interfaces from a user's `--use DIR` or
+  `--interface DIR` keep the check. An edited bench/iterchain.grl check: 0.267G -> 0.234G.
 - **`host::chmod(path, mode)`**: sets a file's permission bits, 0 or a positive errno (fchmodat on
   Linux, chmod on macOS, and 0 on Windows, which has no bits to set). The build store will use it to
   give a restored executable image its mode without a shell, once the bootstrap seed knows it.
