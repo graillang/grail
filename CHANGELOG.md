@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **`bits(x)` of a NaN is the same on every target.** Hardware disagrees on the NaN an operation
+  makes (x86 sets the sign bit; ARM and RISC-V do not), so `bits(0.0 / 0.0)` used to be
+  `0xFFF8000000000000` on x86-64 and `0x7FF8000000000000` elsewhere. Every NaN now reads as the one
+  quiet NaN `0x7FF8000000000000`, on every target and both backends; arithmetic and printing are
+  unchanged, and other values' bits are untouched.
 - **Maps hash one-word keys with a keyed multiply mix instead of SipHash-1-3.** Integer, float and
   other one-word keys hash in about eight instructions instead of sixty, keyed by the map's two seed
   words (one mixed into the value, one as a secret odd multiplier), the same construction as the
