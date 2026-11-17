@@ -1,5 +1,9 @@
 ## Unreleased
 
+- **Inflate refills its bit buffer a word at a time** (`bytes::load_u64`, a new unaligned
+  little-endian word read), instead of a byte per loop step, while eight input bytes remain. The 4K
+  png: Grail-LLVM 7.47G -> 6.44G instructions (0.85 -> 0.71 s; libpng 0.41 s, stb_image 0.41 s),
+  Grail-native 19.8G -> 17.7G.
 - **Closures given for a generic `F` live in the frame (S6(A)).** A closure whose type is its own
   literal's - a local closure, or one passed for a callable-bound parameter - is now held as its
   environment's words in the caller's frame, copied on a move and dropped in place, and called
