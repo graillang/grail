@@ -1162,7 +1162,28 @@ fn rt_zero(p: u64, n: u64) -> u64 {
     }
     return 0;
 }
-fn rt_free(at: u64) -> u64 {
+// The free every drop makes, as small as a free can be so that a release build inlines it at every
+// call site: one thread, a small live block, a push on its class's list. Everything else - a view
+// record, a static or large block, a double free, a process with threads - is rt_free_any_slow,
+// out of line and cold.
+fn rt_free(p: u64) -> u64 {
+    if ((p & 8) == 0) & (p != 0) & (raw_load(wrapping_add(raw_state(), 3416)) == 0) {
+        block := wrapping_sub(p, 16);
+        if raw_load(wrapping_add(block, 8)) == 1 {
+            size := raw_load(block);
+            if size < 257 {
+                head := wrapping_add(raw_state(), wrapping_add(256, ((197136 >> ((size >> 6) << 2)) & 15) << 3));
+                raw_store(wrapping_add(block, 8), raw_load(head));
+                raw_store(head, block);
+                live := wrapping_add(raw_state(), 24);
+                raw_store(live, wrapping_sub(raw_load(live), 1));
+                return 0;
+            }
+        }
+    }
+    return rt_free_any_slow(p);
+}
+fn rt_free_any_slow(at: u64) -> u64 {
     mut p = at;
     if (p & 8) != 0 {
         // A view record (rt_view_record): its block starts one word earlier. The one other thing at
