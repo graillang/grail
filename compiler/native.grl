@@ -3809,12 +3809,20 @@ fn ffi_marker_enter<a>(c: (&a mut C), slot: u64) -> unit {
             o(&mut c, view("movq %fs:0,%r11\n"));
             mark(&mut c, have);
         }
-        o(&mut c, view("cmpq $2,24(%r11)\n"));
-        jump(&mut c, view("jne"), none);
-        o(&mut c, view("movq 32(%r11),%r11\nmovq 320(%r11),%r11\nincq (%r11)\n"));
-        jump(&mut c, view("jmp"), done);
-        mark(&mut c, none);
-        o(&mut c, view("xorl %r11d,%r11d\n"));
+        if c.target == 0 {
+            // Linux: record word 48 is the block's foreign-call pair, or 0 off a worker
+            // (rt_marker_cache).
+            o(&mut c, view("movq 48(%r11),%r11\ntestq %r11,%r11\n"));
+            jump(&mut c, view("je"), done);
+            o(&mut c, view("incq (%r11)\n"));
+        } else {
+            o(&mut c, view("cmpq $2,24(%r11)\n"));
+            jump(&mut c, view("jne"), none);
+            o(&mut c, view("movq 32(%r11),%r11\nmovq 320(%r11),%r11\nincq (%r11)\n"));
+            jump(&mut c, view("jmp"), done);
+            mark(&mut c, none);
+            o(&mut c, view("xorl %r11d,%r11d\n"));
+        }
         mark(&mut c, done);
         o(&mut c, view("movq %r11,"));
     } else {

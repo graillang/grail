@@ -1,5 +1,16 @@
 ## Unreleased
 
+- **A failed check inside a parallel job no longer aborts silently now and then.** The joiner that
+  re-raises a job's failure took one from the contained-failure count with a checked subtraction,
+  which trapped - inside the failure path, so without a report - when it ran before the failing stack
+  had counted the failure (exit 134 about 1 run in 10 under aarch64/riscv64 emulation). The counts
+  are atomic and wrapping now. The failure-site walk also stops where the frame chain stops being one
+  (a task stack's bottom on AArch64/RV64 left garbage there: SIGSEGV in `rt_site_above`).
+
+- The foreign-call marker reaches its worker's counter in one load (x86-64 Linux): thread-record
+  word 48 caches the running block's pair, set wherever a thread gains or loses a block. One to two
+  instructions less per default `extern "C"` call (LLVM `f64` row 15 -> 13).
+
 - **Capture-free and named-function callbacks to generic functions cost no allocation, and named
   functions are accepted.** A closure given for a lent `Fn(..)` parameter of a generic function was
   boxed whenever the call's type arguments were not all fixed yet - `Condition::wait_with`'s two
