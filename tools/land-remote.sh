@@ -17,6 +17,8 @@
 # landing's (the same one names its local log directory); the fuzzer's report.json and the shrunk
 # input of every bug it found are copied to STAMP/fuzz/, because the next landing's checkout
 # reuses .work/fuzz. Reproduce one with `bun tools/fuzz-frontend.mjs --seed SEED --cases 2000`.
+# The closure-passing fuzzer runs beside it at 400 cases (fuzz-closures.log; a bug's program is kept
+# in STAMP/fuzz-closures/; `bun tools/fuzz-closures.mjs --seed SEED --cases 400 --keep` reproduces).
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 base=/srv/grail/logs
@@ -48,22 +50,25 @@ if [ "${1:-}" = "--status" ]; then
     fi
   done
   [ -n "$(ls "$d"/aarch64_*.log "$d"/riscv64_*.log 2>/dev/null)" ] || { echo "  legs: not started yet"; [ $status = 0 ] && status=3; }
-  f="$d/fuzz.log"
+  for f in "$d/fuzz.log" "$d/fuzz-closures.log"; do
+  [ -f "$f" ] || continue
+  label=$(basename "$f" .log)
   if [ -f "$f" ]; then
     seed=$(grep -m1 '^seed ' "$f" | cut -d' ' -f2)
-    summary=$(grep '^fuzz: ' "$f" | tail -1)
+    summary=$(grep -E '^fuzz(-closures)?: ' "$f" | tail -1)
     if ! grep -q '^exit=' "$f"; then
-      echo "  fuzz (seed $seed): running"
+      echo "  $label (seed $seed): running"
       [ $status = 0 ] && status=3
     elif grep -q '^exit=0$' "$f"; then
-      echo "  fuzz (seed $seed): ok   ${summary#fuzz: }"
+      echo "  $label (seed $seed): ok   ${summary#*: }"
     else
-      echo "  fuzz (seed $seed): FAIL ${summary#fuzz: }"
+      echo "  $label (seed $seed): FAIL ${summary#*: }"
       grep -E '^BUG |^  repro |^slowest:' "$f" | head -6 | sed 's/^/    /'
-      echo "    inputs: $d/fuzz/"
+      echo "    inputs: $d/$label/"
       status=1
     fi
   fi
+  done
   exit $status
 fi
 stamp=${1:?usage: tools/land-remote.sh STAMP | --status}
@@ -87,6 +92,20 @@ cases=${GRAIL_FUZZ_CASES:-2000}
   mkdir -p "$base/$stamp/fuzz"
   cp -r .work/fuzz/report.json .work/fuzz/bugs "$base/$stamp/fuzz/" 2>/dev/null
   echo "exit=$status" >> "$base/$stamp/fuzz.log"
+) &
+# The closure-passing fuzzer (tools/fuzz-closures.mjs, docs/design/dyn-and-callable-bounds.md S6(A)):
+# compile-and-run, so a missed erase shows up as the use-after-free it is; 400 cases, the same seed.
+ccases=${GRAIL_FUZZ_CLOSURE_CASES:-400}
+(
+  echo "seed $seed cases $ccases" > "$base/$stamp/fuzz-closures.log"
+  cd /srv/grail/w && PATH=/root/.bun/bin:$PATH nice -n 15 bun tools/fuzz-closures.mjs --cases "$ccases" --seed "$seed" \
+    --jobs 2 --keep --compiler "$compiler" >> "$base/$stamp/fuzz-closures.log" 2>&1
+  status=$?
+  mkdir -p "$base/$stamp/fuzz-closures"
+  for b in $(sed -n 's/^BUG \([0-9]*\) .*/\1/p' "$base/$stamp/fuzz-closures.log"); do
+    cp -r ".work/fuzz-closures/$b" "$base/$stamp/fuzz-closures/" 2>/dev/null
+  done
+  echo "exit=$status" >> "$base/$stamp/fuzz-closures.log"
 ) &
 for t in aarch64 riscv64; do
   for i in 1 2 3; do
