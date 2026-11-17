@@ -121,14 +121,15 @@ export function toolchains() {
 // better - and each column's value), and `threshold`, the ratio to the fastest rival at or under
 // which the bar counts as met. The machine, load, versions, commit and commands come with it so a
 // chart can be reproduced.
-export function writeResults(path, { tool, title, commit, versions, load, commands, tables }) {
+export function writeResults(path, { tool, title, commit, versions, load, commands, tables, ...extra }) {
   const cpuinfo = existsSync('/proc/cpuinfo') ? readFileSync('/proc/cpuinfo', 'utf8') : '';
   const machine = {
     cpu: (cpuinfo.match(/^model name\s*:\s*(.*)$/m) ?? [])[1] ?? 'unknown',
     cpus: (cpuinfo.match(/^processor\s*:/gm) ?? []).length,
     kernel: (() => { try { return run(['uname', '-sr']).stdout.trim(); } catch { return 'unknown'; } })(),
   };
-  const data = { schema: 1, tool, title, commit, date: new Date().toISOString(), machine, load, versions, commands, tables };
+  // Anything else a tool passes (abundance-perf's hot spots and failed programs) is kept beside them.
+  const data = { schema: 1, tool, title, commit, date: new Date().toISOString(), machine, load, versions, commands, ...extra, tables };
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(data, null, 1) + '\n');
   return data;

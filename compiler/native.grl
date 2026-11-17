@@ -541,6 +541,12 @@ struct C {
     // checks --verify-facts emits can be shown to fire (docs/design/typed-ir.md, "Tests that catch
     // a wrong fact"). 0, the default, records the type the front end actually has.
     f1_what: u64,
+    // --forge-signature=SYMBOL:WORDS: a test aid that records SYMBOL's signature fact with WORDS
+    // argument words, so the lifter's signature checks can be shown to fire. Empty by default.
+    forge_sig: u8[],
+    forge_words: u64,
+    // 1 when the forged signature also drops the body's `dyn_result` fact.
+    forge_result: u64,
     debug_funcs: DebugFunc[],
     debug_vars: DebugVar[],
     debug_types: DebugType[],
@@ -558,6 +564,9 @@ struct C {
     validating: u64,
     // Named-parameter count of the variadic extern call being lowered; 0 otherwise.
     ffi_fixed: u64,
+    // C symbols declared `extern "C" blocking`, and whether the call being emitted is one of them.
+    ffi_blocking: u8[][],
+    ffi_block_now: u64,
     // Slots holding the address of a narrow (non-8-byte or f32) C-layout record field, paired
     // with the field type: stores and compound loads through them use the field's width.
     caddr: u64[],
@@ -567,6 +576,9 @@ struct C {
     interior: u64[],
     // 1 + the frame slot holding the hidden result address (needs_dest), or 0.
     result_dest: u64,
+    // Slots holding the address of a field's word in a Grail record: a plain, untagged word address,
+    // so a sub-word value there (an f32, a u8) is read and written as the word it is stored as.
+    word_refs: u64[],
     // The result adapters this object needs (box_result_thunk): closure * 4 + words.
     box_thunks: u64[],
     // Per type id: 0 not yet known, else 1 + (1 if the type is a plain record) + (2 if it is a
@@ -600,6 +612,11 @@ struct C {
     fmod_names: u8[][],
     fmod_ids: u64[][],
     fmod_n: u64,
+    // The digest of each source file the interface writer has read this run, by path, and the
+    // file's length: one sha256 per source instead of one per question (iface_source_digest).
+    srcdig_paths: u8[][],
+    srcdig_vals: u8[][],
+    srcdig_lens: u64[],
     funcs: Func[],
     // The (module, name) index of `funcs` and of `decls` (see name_key).
     func_slots: u64[],
@@ -793,12 +810,19 @@ struct C {
     // 1 while an assignment's target path is read: its last field is written directly (and its
     // predicate owed there), not lent out, so `field_path` records it instead of refusing the loan.
     ref_assign_target: u64,
+    // 1 once the body being emitted returned a two-word result (dyn_result): its wrapper returns the
+    // same rax:rdx pair and says so too.
+    dyn_result_seen: u64,
     // 1 while a refined function's body labels and declares itself: its symbol is `<name>.proved`,
     // and `<name>` is the checking wrapper emitted after it (ref_wrapper).
     proved_label: u64,
     // That field, one-based record declaration and zero-based index (0 when none was read).
     ref_assign_d: u64,
     ref_assign_k: u64,
+    // The record the assignment's path ends in, and its type: a predicate across fields reads the
+    // other fields from it when one of them is written.
+    ref_assign_base: u64,
+    ref_assign_rty: u64,
     // Strict refinements (docs/design/refinements.md): `--strict-refinements` for the whole program,
     // `@strict;` for a module (it stays with the module's name, so a replayed body keeps it), and
     // `@strict` on a declaration for the function that follows.
@@ -916,6 +940,9 @@ struct C {
     spell_lenient: u64,
     spell_failed: u64,
     drop_emitted: u8[][],
+    // Runtime bodies to inline across units: read from runtime.facts, or exported by the run that
+    // emitted them (optimize::Shared).
+    xinl: optimize::Shared,
     iface_emit: u8[],
     iface_verify: u64,
     // `--iface-dump FILE` renders a written interface's record tree and `--iface-roundtrip FILE`
@@ -1562,12 +1589,16 @@ fn write_image<a, b, d>(c: (&a mut C), path: &b [u8], image: &d [u8]) -> u64 {
 // replays the ones whose text did not move (asm_x86, function units). `GRAIL_ASM_UNITS_VERIFY=1`
 // also assembles without them and refuses a difference.
 fn assemble_object<a, b>(c: (&a mut C), image: &b [u8]) -> asm_x86::Result {
+    // AArch64 (Linux): the same reader with asm_a64's encoder; no function units yet.
+    if ((c.target == 1) || (c.target == 2)) && (c.plat == 0) {
+        return asm_x86::assemble_for(c.target, copy_bytes(view(image)));
+    }
     if c.fn_id.len() == 0 {
         return asm_x86::assemble(copy_bytes(view(image)));
     }
     mut pack_path = copy_bytes(view(c.object));
     push_bytes(&mut pack_path, view(".units"));
-    mut header = copy_bytes(view("grail-units 1 "));
+    mut header = copy_bytes(view("grail-units 2 "));
     push_bytes(&mut header, view(c.fn_id));
     header.push(10);
     mut previous = u8[];
@@ -3421,12 +3452,36 @@ fn tls_enter_callback<a>(c: (&a mut C), slot: u64, adopt: u64) -> unit {
         tp_write(&mut c);
     }
     mark(&mut c, done);
+    callback_pin(&mut c, view("addq"));
+    return ();
+}
+// While a callback runs there are C frames under it on this stack, so the task (if this thread is
+// running one) must not resume on another thread: thread-record word 120 counts the callbacks this
+// thread is inside, and rt_suspend blocks the thread instead of switching the task away while it
+// is non-zero. Clobbers %rax only.
+fn callback_pin<a, b>(c: (&a mut C), op: &b [u8]) -> unit {
+    if c.target == 0 {
+        other := label(&mut c);
+        done := label(&mut c);
+        o(&mut c, view("cmpq $0,rt_state+184(%rip)\n"));
+        jump(&mut c, view("je"), other);
+        o(&mut c, view("movq %fs:rt_tls_record@tpoff,%rax\n"));
+        jump(&mut c, view("jmp"), done);
+        mark(&mut c, other);
+        o(&mut c, view("movq %fs:0,%rax\n"));
+        mark(&mut c, done);
+    } else {
+        o(&mut c, view("tpget\n"));
+    }
+    o(&mut c, view(op));
+    o(&mut c, view(" $1,120(%rax)\n"));
     return ();
 }
 // Leave a callback: restore the caller's thread pointer, then, if this entry adopted the thread,
 // clear `rt_tls_record` (now on the caller's TCB, so the TLS word is addressable) and unmap the
 // record. Runs before the return value is loaded, so it may clobber any register.
 fn tls_leave_callback<a>(c: (&a mut C), slot: u64, adopt: u64) -> unit {
+    callback_pin(&mut c, view("subq"));
     tls_leave(&mut c, slot);
     done := label(&mut c);
     o(&mut c, view("movq "));
@@ -4037,6 +4092,21 @@ fn win_unwind_line<a, b>(u: (&a mut WinUnwind), text: &b [u8], a: u64, e: u64) -
                 frame = u.frames[u.frame_at];
             }
             u.frame_at = u.frame_at + 1;
+            // `subq $.Fn+N,%rsp`: the optimiser folded the callee-saved area into the frame
+            // adjustment (docs/design/call-abi.md S4), so the allocation is N bytes more.
+            mut plus = a;
+            while (plus < e) && (text[plus] != 43) {
+                plus += 1;
+            }
+            if plus < e {
+                mut extra = 0;
+                mut d = plus + 1;
+                while (d < e) && (47 < text[d]) && (text[d] < 58) {
+                    extra = extra * 10 + u64(text[d]) - 48;
+                    d += 1;
+                }
+                frame = frame + extra;
+            }
             push_line(&mut u.out, view(text), a, e);
             put_text(&mut u.out, view(".seh_stackalloc "));
             put_number(&mut u.out, frame);
@@ -4372,47 +4442,130 @@ fn imm<a>(c: (&a mut C), n: u64) -> u64 {
     o(&mut c, view(",%rax\n"));
     return save(&mut c);
 }
-// Grail's own calling convention passes six words in registers. A call with more arguments keeps
-// the first five in registers and passes the rest in a heap record whose address is the sixth
-// register; the callee copies them into its frame and frees the record. ABI-neutral: only
-// register moves and loads/stores through a pointer, which every target lowers.
-fn load_call_args<a, b>(c: (&a mut C), args: (&b u64[]), shift: u64) -> unit {
+// Grail's own calling convention passes six words in registers and the rest on the stack: word
+// 6 + k at 8k(%rsp) when the call is made, in an outgoing area of a multiple of 16 bytes that the
+// caller reserves here and releases after the call (`release_call_args`). The callee finds word
+// 6 + k at 16 + 8k(%rbp) on every target (`stack_params`). The returned size is the area's.
+// AArch64 and RV64 spell the area with the pseudo-instructions the C-ABI calls use (`cstack`,
+// `cstarg`, `cunstack`), which machine.grl lowers.
+fn load_call_args<a, b>(c: (&a mut C), args: (&b u64[]), shift: u64) -> u64 {
     total := args.len() + shift;
     if total <= 6 {
         for i in args.len() {
             r := argreg(i + shift);
             get(&mut c, args[i], view(r));
         }
-        return ();
+        return 0;
     }
-    extra := total - 5;
-    n := imm(&mut c, extra);
-    record := invoke(&mut c, view("rt_rec"), one(n));
+    extra := total - 6;
+    area := 16 * ((extra + 1) / 2);
+    x86 := (c.target == 0) || (c.target == 3);
+    if x86 {
+        o(&mut c, view("subq $"));
+        on(&mut c, area);
+        o(&mut c, view(",%rsp\n"));
+    } else {
+        o(&mut c, view("cstack "));
+        on(&mut c, area);
+        c.out.push(10);
+    }
     for k in extra {
-        get(&mut c, record, view("%rcx"));
-        get(&mut c, args[5 - shift + k], view("%rax"));
-        o(&mut c, view("movq %rax,"));
-        on(&mut c, k * 8);
-        o(&mut c, view("(%rcx)\n"));
+        get(&mut c, args[6 - shift + k], view("%rax"));
+        if x86 {
+            ffi_store_stack(&mut c, 1, k * 8);
+        } else {
+            ffi_store_stack(&mut c, 0, k * 8);
+        }
     }
-    for i in 5 - shift {
+    for i in 6 - shift {
         r := argreg(i + shift);
         get(&mut c, args[i], view(r));
     }
-    get(&mut c, record, view("%r9"));
+    return area;
+}
+// After the call: the outgoing area `load_call_args` reserved, if any, is released.
+fn release_call_args<a>(c: (&a mut C), area: u64) -> unit {
+    if area == 0 {
+        return ();
+    }
+    if (c.target == 0) || (c.target == 3) {
+        o(&mut c, view("addq $"));
+        on(&mut c, area);
+        o(&mut c, view(",%rsp\n"));
+    } else {
+        o(&mut c, view("cunstack "));
+        on(&mut c, area);
+        c.out.push(10);
+    }
     return ();
 }
-// Prologue: parameter i of `count` into frame slot i (see load_call_args for more than six).
-fn store_params<a>(c: (&a mut C), declared: u64) -> unit {
-    // A function whose result is a plain record of more than two words also takes, after its
-    // declared parameters, the address the caller wants the result written to (result_dest).
-    mut count = declared;
-    if c.result_dest != 0 {
-        count = declared + 1;
+// The LLVM backend's FFI fact for a C function this body calls (call ABI S8a): its integer argument
+// words, its float arguments in order (bit k of the mask set when the k-th is an f32) and its result
+// (0 an integer word or none, 1 f64, 2 f32). Only for x86-64 SysV calls whose every argument is in
+// a register and whose result is a scalar: the lifter then emits the call with those C types, so
+// the floats travel in the vector registers the platform ABI puts them in.
+fn ffi_signature_fact<a, b, d>(c: (&a mut C), argtypes: (&b u64[]), ret: u64, symbol: &d [u8], abi: u64) -> unit {
+    if (c.backend == 0) || (c.validating != 0) || (c.target != 0) || (abi != 0) {
+        return ();
     }
+    mut ints = 0;
+    mut floats = 0;
+    mut mask = 0;
+    for i in argtypes.len() {
+        ty := argtypes[i];
+        if is_float(&mut c, ty) {
+            if is_f32(&mut c, ty) {
+                mask = mask | (1 << floats);
+            }
+            floats += 1;
+        } else {
+            if ffi_words(&mut c, ty) != 1 {
+                return ();
+            }
+            ints += 1;
+        }
+    }
+    if (6 < ints) || (8 < floats) {
+        return ();
+    }
+    mut result = 0;
+    if (ret != 1) && is_float(&mut c, ret) {
+        result = 1;
+        if is_f32(&mut c, ret) {
+            result = 2;
+        }
+    }
+    llvm::fact_ffi(&mut c.facts, copy_bytes(view(symbol)), ints, floats, mask, result);
+    return ();
+}
+// The LLVM backend's signature fact for the body being emitted: its argument words, six in
+// registers and the rest on the stack (with the hidden result address when it has one). The lifter
+// defines the body and its calls with exactly these words (llvm.grl `signatures`).
+fn signature_fact<a>(c: (&a mut C), declared: u64) -> unit {
+    if (c.backend == 0) || (c.validating != 0) || (c.facts_fn.len() == 0) {
+        return ();
+    }
+    mut words = arg_words(&c, declared);
+    if (c.forge_sig.len() != 0) && same(view(c.forge_sig), view(c.facts_fn)) {
+        words = c.forge_words;
+    }
+    llvm::fact_signature(&mut c.facts, copy_bytes(view(c.facts_fn)), words);
+    return ();
+}
+// The argument words a function takes: its declared parameters and, for a plain record result of
+// more than two words, the address the caller wants it written to (result_dest) after them.
+fn arg_words<a>(c: (&a C), declared: u64) -> u64 {
+    if c.result_dest != 0 {
+        return declared + 1;
+    }
+    return declared;
+}
+// Prologue: the register arguments (the first six words) into their frame slots (arg_slot).
+fn store_params<a>(c: (&a mut C), declared: u64) -> unit {
+    count := arg_words(&c, declared);
     mut regs = count;
     if 6 < count {
-        regs = 5;
+        regs = 6;
     }
     for i in regs {
         reg := argreg(i);
@@ -4422,16 +4575,23 @@ fn store_params<a>(c: (&a mut C), declared: u64) -> unit {
         stack_slot(&mut c, arg_slot(&c, declared, i));
         c.out.push(10);
     }
-    if 6 < count {
-        for k in count - 5 {
-            o(&mut c, view("movq "));
-            on(&mut c, k * 8);
-            o(&mut c, view("(%r9),%rax\nmovq %rax,"));
-            stack_slot(&mut c, arg_slot(&c, declared, 5 + k));
-            c.out.push(10);
-        }
-        o(&mut c, view("movq %r9,%rdi\n"));
-    call_out(&mut c, view("rt_free"));
+    return ();
+}
+// After the frame is cleared: parameter 6 + k from the caller's outgoing area, 16 + 8k(%rbp), into
+// frame slot 6 + k (see load_call_args). The cleared range excludes the parameter slots, so the
+// order is free, and keeping these loads past the clearing leaves the prologue the shape the
+// lifter reads.
+fn stack_params<a>(c: (&a mut C), declared: u64) -> unit {
+    count := arg_words(&c, declared);
+    if count <= 6 {
+        return ();
+    }
+    for k in count - 6 {
+        o(&mut c, view("movq "));
+        on(&mut c, 16 + k * 8);
+        o(&mut c, view("(%rbp),%rax\nmovq %rax,"));
+        stack_slot(&mut c, arg_slot(&c, declared, 6 + k));
+        c.out.push(10);
     }
     return ();
 }
@@ -4607,7 +4767,7 @@ fn needs_drop<a>(c: (&a mut C), ty: u64) -> bool {
         // A plain or extern record element is its bytes inline, owning nothing.
         elem := ty_arg(&mut c, ty);
         if array_record_elem(&mut c, elem) {
-            return false;
+            return (is_c_record(&mut c, elem) == 0) && frame_drops(&mut c, elem);
         }
         return needs_drop(&mut c, elem);
     }
@@ -4704,9 +4864,8 @@ fn borrow_parameter<a>(c: (&a mut C), slot: u64, ty: u64) -> Val {
 fn own<a>(c: (&a mut C), slot: u64, ty: u64) -> Val {
     materialise(&mut c, slot, ty);
     if c.raw == 0 {
-        k := ty_kind(&mut c, ty);
         drops := needs_drop(&mut c, ty);
-        if drops || k == 7 || array_moves(&mut c, ty) {
+        if affine(&mut c, ty) {
             mut flag = 0;
             if drops {
                 flag = imm(&mut c, 1) + 1;
@@ -4958,7 +5117,7 @@ fn member_place<a>(c: (&a mut C), root: u64, field: u64, ty: u64) -> u64 {
             return m.place;
         }
     }
-    copy := !needs_drop(&mut c, ty) & !affine_nodrop(&mut c, ty);
+    copy := !affine(&mut c, ty);
     place := ownership::field(&mut c.check, root, copy);
     c.members.push(Member { base: root, field: field, place: place });
     return place;
@@ -5561,7 +5720,7 @@ fn last_name<a, b>(c: (&a mut C), name: &b [u8], from: u64, to: u64) -> u64 {
                     }
                 }
             }
-            if kind_at(&mut c, i + 1) == 261 {
+            if (i + 1 < c.toks.len()) && (c.toks[i + 1].kind == 261) {
                 mut named = en - st == name.len();
                 mut j = 0;
                 while named && (j < name.len()) {
@@ -5576,24 +5735,28 @@ fn last_name<a, b>(c: (&a mut C), name: &b [u8], from: u64, to: u64) -> u64 {
                 }
             }
         }
-        mut use = 1;
-        if i != 0 {
-            prev := kind_at(&mut c, i - 1);
-            if (prev == 46) || (prev == 260) {
-                use = 0;
+        // Whether the token is a use is asked only of a name of the right length: the neighbours
+        // are read for that one, not for every token of the scope.
+        if kind == 1 && en - st == name.len() && i != skip && hidden == 0 {
+            mut use = 1;
+            if i != 0 {
+                prev := c.toks[i - 1].kind;
+                if (prev == 46) || (prev == 260) {
+                    use = 0;
+                }
             }
-        }
-        // `name(` is a use too: a local holding a closure (or a reference to one) is called by its
-        // name, and the call reads it. Counting a same-named function's call as well only keeps the
-        // local alive a little longer, which is the conservative side.
-        mut next = kind_at(&mut c, i + 1);
-        if (next == 58) || (next == 260) || (next == 261) {
-            use = 0;
-        }
-        if kind == 1 && en - st == name.len() && i != skip && hidden == 0 && use != 0 {
-            mut matched = 1;
+            // `name(` is a use too: a local holding a closure (or a reference to one) is called by its
+            // name, and the call reads it. Counting a same-named function's call as well only keeps the
+            // local alive a little longer, which is the conservative side.
+            if i + 1 < c.toks.len() {
+                next := c.toks[i + 1].kind;
+                if (next == 58) || (next == 260) || (next == 261) {
+                    use = 0;
+                }
+            }
+            mut matched = use;
             mut j = 0;
-            while j < en - st {
+            while (matched != 0) && (j < en - st) {
                 if c.src[st + j] != name[j] {
                     matched = 0;
                     break;
@@ -6788,6 +6951,29 @@ fn drop_symbol_known<a>(c: (&a mut C), ty: u64) -> unit {
     drop_symbol(&mut c, ty);
     return ();
 }
+// A struct's or tuple's in-place drop (unboxed-values.md, stage 4): the user's `drop`, then the
+// owners its words hold, at their offsets from the address in %rdi; it frees nothing. The boxed
+// helper (`drop_symbol`) is this and `rt_free`; a record held inline - in a frame, in another
+// record's words, flat in a vector - is dropped by this alone. For an array the helper already is
+// in place, so its name is the array's drop symbol.
+fn drop_in_place_symbol<a>(c: (&a mut C), ty: u64) -> u8[] {
+    if is_array(&mut c, ty) {
+        return drop_symbol(&mut c, ty);
+    }
+    mut name = drop_symbol(&mut c, ty);
+    name[1] = 80;
+    return name;
+}
+// Whether `ty` has a separate in-place drop: a Grail struct or tuple (not an enum, whose payload
+// is a word, nor a C record, whose bytes own nothing).
+fn in_place_record<a>(c: (&a mut C), ty: u64) -> bool {
+    if ty_kind(&mut c, ty) != 8 {
+        return false;
+    }
+    index := ty_arg(&mut c, ty);
+    d := &c.decls[index];
+    return (d.is_enum == 0) && (d.c_layout == 0);
+}
 fn drop_symbol<a>(c: (&a mut C), ty: u64) -> u8[] {
     while c.drop_names.len() <= ty {
         c.drop_names.push(u8[]);
@@ -6835,10 +7021,15 @@ fn drop_taken<a>(c: (&a mut C), ty: u64) -> u64 {
 }
 
 fn drop_name<a>(c: (&a mut C), ty: u64) -> unit {
-    // Named as a dropper, a framed record is always a holder's box (a dyn cell, a task result).
-    if framed(&mut c, ty) {
+    // Named as a dropper, a framed record is always a holder's box (a dyn cell, a task result): freed,
+    // after its owners are dropped in place (the boxed helper) when it has any.
+    if framed(&mut c, ty) && !frame_drops(&mut c, ty) {
         push_bytes(&mut c.out, view("rt_free"));
         return ();
+    }
+    if array_owned(&mut c, ty) {
+        // Its helper drops in place and frees no box, so it cannot be a box's dropper.
+        array_stage_fail(&mut c, view("a value a runtime holder drops (a dyn value, a task's result, a vector's truncation), when its elements own data,"));
     }
     name := drop_ref_name(&mut c, ty);
     push_bytes(&mut c.out, view(name));
@@ -6862,7 +7053,12 @@ fn drop_ref_name<a>(c: (&a mut C), ty: u64) -> u8[] {
 fn drop_call_out<a>(c: (&a mut C), ty: u64) -> unit {
     // A framed record's words belong to a frame or to the place that holds them: nothing to free.
     // An array that owns its elements still drops them, in place (its helper frees no storage).
-    if framed(&mut c, ty) && !array_owned(&mut c, ty) {
+    if framed(&mut c, ty) && !frame_drops(&mut c, ty) {
+        return ();
+    }
+    // A framed value's words are where it is held, so it is dropped in place.
+    if framed(&mut c, ty) {
+        call_out(&mut c, view(drop_in_place_ref(&mut c, ty)));
         return ();
     }
     name := drop_ref_name(&mut c, ty);
@@ -6931,10 +7127,8 @@ fn move_out<a>(c: (&a mut C), v: Val) -> unit {
         return ();
     }
     materialise(&mut c, v.t, v.ty);
-    if !needs_drop(&mut c, v.ty) {
-        if !affine_nodrop(&mut c, v.ty) {
-            return ();
-        }
+    if !affine(&mut c, v.ty) {
+        return ();
     }
     index := resource(&mut c, v.t);
     if index == 0 {
@@ -7884,17 +8078,24 @@ fn pred_check<a, b, d>(c: (&a mut C), lo: u64, hi: u64, what: &b [u8], stop_a: &
     }
     return ();
 }
-// What a field predicate may say today (docs/design/refinements.md, "Field predicates"): it names
-// its own field and nothing else - another field, a parameter or a global would be read in the
-// scope of whoever builds the record - and the field is a number or an owned vector (its `len()`).
-// A predicate across fields is the named follow-up; until then it is refused here, at the struct.
-fn ref_field_pred_rules<a, b>(c: (&a mut C), field: &b [u8], ty: u64, lo: u64, hi: u64, at: u64) -> unit {
+// What a field predicate may say (docs/design/refinements.md, "Field predicates"): fields of its own
+// record and nothing else - a parameter or a global would be read in the scope of whoever builds the
+// record - each of them a number or an owned vector (its `len()`). The field's own type is checked
+// here; the names, once the record's fields are all known (ref_field_pred_names).
+fn ref_pred_type_ok<a>(c: (&a mut C), ty: u64) -> bool {
     t := base_type(&mut c, ty);
     k := ty_kind(&mut c, t);
-    if !((t == 0) || (k == 18) || (k == 21) || (k == 6)) {
+    return (t == 0) || (k == 18) || (k == 21) || (k == 6);
+}
+fn ref_field_pred_rules<a, b>(c: (&a mut C), field: &b [u8], ty: u64, lo: u64, hi: u64, at: u64) -> unit {
+    if !ref_pred_type_ok(&mut c, ty) {
         diag_label(&mut c, at, view("this field's type has no predicate the compiler checks"));
         fail(&mut c, view("a field predicate applies to an integer, a float or an owned vector (through `len()`)"));
     }
+    return ();
+}
+// Every name a field predicate reads must be a field of the record, of a type a predicate checks.
+fn ref_field_pred_names<a, b>(c: (&a mut C), record: &b [u8], fields: (&a Field[]), lo: u64, hi: u64) -> unit {
     mut i = lo;
     while i < hi {
         if kind_at(&mut c, i) == 1 {
@@ -7902,14 +8103,31 @@ fn ref_field_pred_rules<a, b>(c: (&a mut C), field: &b [u8], ty: u64, lo: u64, h
             after_dot := (i > lo) && (kind_at(&mut c, i - 1) == 46);
             call := kind_at(&mut c, i + 1) == 40;
             word := same(view(t2), view("true")) || same(view(t2), view("false"));
-            if !after_dot & !call & !word & !same(view(t2), view(field)) {
-                mut msg = copy_bytes(view("a field predicate may name only its own field: `"));
-                push_bytes(&mut msg, view(t2));
-                push_bytes(&mut msg, view("` is not `"));
-                push_bytes(&mut msg, view(field));
-                push_bytes(&mut msg, view("` (a predicate across fields is not supported yet)"));
-                exchange(&mut c.pos, i);
-                fail(&mut c, view(msg));
+            if !after_dot & !call & !word {
+                mut found = 0;
+                mut ty = 0;
+                for j in fields.len() {
+                    if same(view(fields[j].name), view(t2)) {
+                        found = 1;
+                        ty = fields[j].ty;
+                    }
+                }
+                if found == 0 {
+                    mut msg = copy_bytes(view("a field predicate may name only fields of its record: `"));
+                    push_bytes(&mut msg, view(t2));
+                    push_bytes(&mut msg, view("` is not a field of `"));
+                    push_bytes(&mut msg, view(record));
+                    push_bytes(&mut msg, view("`"));
+                    exchange(&mut c.pos, i);
+                    fail(&mut c, view(msg));
+                }
+                if !ref_pred_type_ok(&mut c, ty) {
+                    mut msg = copy_bytes(view("a field predicate may read only integer, float and vector fields: `"));
+                    push_bytes(&mut msg, view(t2));
+                    push_bytes(&mut msg, view("` is not one"));
+                    exchange(&mut c.pos, i);
+                    fail(&mut c, view(msg));
+                }
             }
         }
         i += 1;
@@ -8233,8 +8451,7 @@ fn ref_pred_count<a>(c: (&a mut C)) -> u64 {
 // function `<name>` that stores the arguments, checks each parameter predicate (an entry fact of
 // this record: the caller's obligation), puts the arguments back and calls `<name>.proved`, whose
 // result it returns in `%rax`. Every unproved caller, a function value and a vtable reach it; a
-// proved call skips it. More than six parameters arrive as a record behind `%r9`, which the body
-// frees: the wrapper reads the rest from it for the checks and passes `%r9` through untouched.
+// proved call skips it. Words past the sixth arrive on the stack and are passed on the same way.
 fn ref_wrapper<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &d [u8], export: u64, count: u64, position: u64, claimed_alloc: u64, claimed_panic: u64, entry_state: ownership::State) -> unit {
     after := exchange(&mut c.check, entry_state);
     func_directive(&mut c, view(m), view(name), view(body_symbol), export);
@@ -8246,6 +8463,14 @@ fn ref_wrapper<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &
     }
     o(&mut c, view(":\n"));
     fx_begin(&mut c, view(sym), view(name), c.file, position, claimed_alloc, claimed_panic);
+    // The wrapper's own facts key, and the body's two-word result passing through it in rax:rdx.
+    body_facts := c.facts_fn.copy();
+    if body_facts.len() != 0 {
+        exchange(&mut c.facts_fn, sym.copy());
+    }
+    if c.dyn_result_seen != 0 {
+        dyn_result(&mut c);
+    }
     o(&mut c, view("pushq %rbp\nmovq %rsp,%rbp\n"));
     frame := label(&mut c);
     if c.target == 4 {
@@ -8257,45 +8482,83 @@ fn ref_wrapper<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &
         fname(&mut c, frame);
         o(&mut c, view(",%rsp\n"));
     }
-    mut regs = count;
-    if 6 < count {
-        regs = 5;
+    // A result of more than two words comes with the caller's destination address after the
+    // declared arguments (begin_result_dest): the wrapper keeps it in a slot of its own and hands it
+    // on, so the body writes the caller's words.
+    mut total = count;
+    if c.result_dest != 0 {
+        total = count + 1;
     }
-    for i in regs {
-        o(&mut c, view("movq "));
-        o(&mut c, view(argreg(i)));
-        c.out.push(44);
-        stack_slot(&mut c, i);
-        c.out.push(10);
+    mut dslot = 0;
+    if total != count {
+        dslot = fresh(&mut c);
     }
-    mut spill = 0;
-    if 6 < count {
-        spill = fresh(&mut c);
-        o(&mut c, view("movq %r9,"));
-        stack_slot(&mut c, spill);
-        c.out.push(10);
-        for k in count - 5 {
+    // Six words arrive in registers and the rest on the stack, word 6 + k at 16 + 8k(%rbp)
+    // (load_call_args): all are stored for the checks, and handed on the same way.
+    mut regs = total;
+    if 6 < total {
+        regs = 6;
+    }
+    for i in total {
+        if i < 6 {
             o(&mut c, view("movq "));
-            on(&mut c, k * 8);
-            o(&mut c, view("(%r9),%rax\nmovq %rax,"));
-            stack_slot(&mut c, 5 + k);
-            c.out.push(10);
+            o(&mut c, view(argreg(i)));
+            c.out.push(44);
+        } else {
+            o(&mut c, view("movq "));
+            on(&mut c, 16 + (i - 6) * 8);
+            o(&mut c, view("(%rbp),%rax\nmovq %rax,"));
         }
+        if i < count {
+            stack_slot(&mut c, i);
+        } else {
+            stack_slot(&mut c, dslot);
+        }
+        c.out.push(10);
     }
     ref_params(&mut c);
+    mut area = 0;
+    if 6 < total {
+        extra := total - 6;
+        area = 16 * ((extra + 1) / 2);
+        x86 := (c.target == 0) || (c.target == 3);
+        if x86 {
+            o(&mut c, view("subq $"));
+            on(&mut c, area);
+            o(&mut c, view(",%rsp\n"));
+        } else {
+            o(&mut c, view("cstack "));
+            on(&mut c, area);
+            c.out.push(10);
+        }
+        for k in extra {
+            o(&mut c, view("movq "));
+            if 6 + k < count {
+                stack_slot(&mut c, 6 + k);
+            } else {
+                stack_slot(&mut c, dslot);
+            }
+            o(&mut c, view(",%rax\n"));
+            if x86 {
+                ffi_store_stack(&mut c, 1, k * 8);
+            } else {
+                ffi_store_stack(&mut c, 0, k * 8);
+            }
+        }
+    }
     for i in regs {
         o(&mut c, view("movq "));
-        stack_slot(&mut c, i);
+        if i < count {
+            stack_slot(&mut c, i);
+        } else {
+            stack_slot(&mut c, dslot);
+        }
         c.out.push(44);
         o(&mut c, view(argreg(i)));
         c.out.push(10);
     }
-    if spill != 0 {
-        o(&mut c, view("movq "));
-        stack_slot(&mut c, spill);
-        o(&mut c, view(",%r9\n"));
-    }
     call_proved_out(&mut c, view(sym));
+    release_call_args(&mut c, area);
     o(&mut c, view("leave\nret\n.set "));
     fname(&mut c, frame);
     c.out.push(44);
@@ -8303,6 +8566,9 @@ fn ref_wrapper<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &
     c.out.push(10);
     fx_end(&mut c);
     exchange(&mut c.check, after);
+    if body_facts.len() != 0 {
+        exchange(&mut c.facts_fn, body_facts);
+    }
     return ();
 }
 // Whether field `k` of record `d` carries a predicate. Such a field is written only where the
@@ -8316,11 +8582,129 @@ fn ref_field_refined<a>(c: (&a mut C), d: u64, k: u64) -> bool {
     if k >= c.decls[d].count {
         return false;
     }
-    f := c.decls[d].first + k;
-    if f >= c.fields.len() {
-        return false;
+    // Its own predicate, or any predicate of the record that reads it: a write through a loan would
+    // skip either.
+    count := c.decls[d].count;
+    for j in count {
+        if ref_pred_reads(&mut c, d, j, k) {
+            return true;
+        }
     }
-    return c.fields[f].pred.hi != 0;
+    return false;
+}
+// The fields field `j`'s predicate reads, as field indices (its own included when it names itself).
+// Empty when the field has no predicate.
+fn ref_pred_fields<a>(c: (&a mut C), d: u64, j: u64) -> u64[] {
+    mut out = u64[];
+    f := c.decls[d].first + j;
+    if f >= c.fields.len() {
+        return out;
+    }
+    pf := c.fields[f].pred.file;
+    plo := c.fields[f].pred.lo;
+    phi := c.fields[f].pred.hi;
+    if phi == 0 {
+        return out;
+    }
+    text := pred_text(&mut c, Pred { file: pf, lo: plo, hi: phi });
+    mut i = 0;
+    while i < text.len() {
+        ch := text[i];
+        start_word := ((96 < ch) & (ch < 123)) || ((64 < ch) & (ch < 91)) || (ch == 95);
+        if !start_word {
+            i += 1;
+            continue;
+        }
+        mut word = u8[];
+        mut e = i;
+        while e < text.len() {
+            x := text[e];
+            if ((96 < x) & (x < 123)) || ((64 < x) & (x < 91)) || (x == 95) || ((47 < x) & (x < 58)) {
+                word.push(x);
+                e += 1;
+            } else {
+                break;
+            }
+        }
+        after_dot := (i > 0) && (text[i - 1] == 46);
+        if !after_dot {
+            idx := field_index(&mut c, d, view(word));
+            if idx != 0 {
+                mut seen = 0;
+                for q in out.len() {
+                    if out[q] == idx - 1 {
+                        seen = 1;
+                    }
+                }
+                if seen == 0 {
+                    out.push(idx - 1);
+                }
+            }
+        }
+        i = e;
+    }
+    return out;
+}
+fn ref_pred_reads<a>(c: (&a mut C), d: u64, j: u64, k: u64) -> bool {
+    fs := ref_pred_fields(&mut c, d, j);
+    for q in fs.len() {
+        if fs[q] == k {
+            return true;
+        }
+    }
+    return false;
+}
+// Whether field `j`'s predicate reads a field other than `j`: such a predicate is owed where every
+// field it reads has its value (ref_field_cross), not where `j` alone is stored.
+fn ref_pred_cross<a>(c: (&a mut C), d: u64, j: u64) -> bool {
+    fs := ref_pred_fields(&mut c, d, j);
+    for q in fs.len() {
+        if fs[q] != j {
+            return true;
+        }
+    }
+    return false;
+}
+// Field `j`'s predicate across fields, over the values in `slots` (one per field of the record,
+// indexed by field) with their terms. A field without a term makes the obligation unprovable: plain
+// code checks it, strict mode refuses it.
+fn ref_field_cross<a, b, e>(c: (&a mut C), d: u64, j: u64, rty: u64, slots_by_field: (&b u64[]), terms_by_field: (&e u8[][]), pos: u64, why: &b [u8]) -> unit {
+    f := c.decls[d].first + j;
+    pf := c.fields[f].pred.file;
+    plo := c.fields[f].pred.lo;
+    phi := c.fields[f].pred.hi;
+    owner := c.decls[d].name.copy();
+    mut who = owner.copy();
+    who.push(46);
+    push_bytes(&mut who, view(c.fields[f].name));
+    fs := ref_pred_fields(&mut c, d, j);
+    mut names = u8[][];
+    mut slots = u64[];
+    mut tys = u64[];
+    mut terms = u8[][];
+    mut all_terms = 1;
+    for q in fs.len() {
+        m := fs[q];
+        names.push(c.fields[c.decls[d].first + m].name.copy());
+        slots.push(slots_by_field[m]);
+        tys.push(field_type(&mut c, rty, m));
+        t := terms_by_field[m].copy();
+        if t.len() == 0 {
+            all_terms = 0;
+        }
+        terms.push(t);
+    }
+    mut proved = 0;
+    report := u64(ref_strict(&c));
+    need := pv_need(&mut c, view(who), pf, plo);
+    if all_terms != 0 {
+        proved = pv_proved(&mut c, Pred { file: pf, lo: plo, hi: phi }, &names, &terms, pos, report, view(need));
+    }
+    if (report != 0) & (proved == 0) {
+        pv_strict_fail_why(&mut c, Pred { file: pf, lo: plo, hi: phi }, pos, view(need), view(why));
+    }
+    ref_check(&mut c, Pred { file: pf, lo: plo, hi: phi }, &names, &slots, &tys, who, pf, plo, proved, 0);
+    return ();
 }
 // The refusal of a mutable borrow of a refined field, wherever the borrow is made.
 fn ref_field_loan_fail<a>(c: (&a mut C), d: u64, k: u64) -> unit {
@@ -8407,6 +8791,9 @@ fn ref_field<a, b>(c: (&a mut C), d: u64, k: u64, slot: u64, term: &b [u8], pos:
         owner = c.decls[d].name.copy();
     }
     if phi == 0 {
+        return ();
+    }
+    if ref_pred_cross(&mut c, d, k) {
         return ();
     }
     mut who = u8[];
@@ -8755,34 +9142,79 @@ fn pv_field_facts<a, b>(c: (&a mut C), term: &b [u8], facts: (&a mut Atom[])) ->
     if (dots == 0) || (field.len() == 0) {
         return ();
     }
-    pred := pv_field_pred(&mut c, view(root), view(field));
-    if pred.hi == 0 {
-        return ();
-    }
-    mut atoms = Atom[];
-    if !pv_read_pred(&mut c, pred, &mut atoms) {
-        return ();
-    }
-    mut path = root.copy();
-    path.push(46);
-    push_bytes(&mut path, view(field));
-    names := u8[][field];
-    paths := u8[][path];
-    mut renamed = Atom[];
-    for j in atoms.len() {
-        x := &atoms[j];
-        a := pv_rename(view(x.a), &names, &paths);
-        mut b = u8[];
-        if x.b.len() != 0 {
-            b = pv_rename(view(x.b), &names, &paths);
-            if b.len() == 0 {
-                return ();
-            }
-        }
-        if a.len() == 0 {
+    // The record `root` holds, when the path is one the field-path rule trusts.
+    if pv_field_pred(&mut c, view(root), view(field)).hi == 0 {
+        // The field has no predicate of its own; another field's may still read it.
+        if !pv_field_stable(&mut c, view(root), view(field)) {
             return ();
         }
-        renamed.push(Atom { rel: x.rel, a: a, b: b, k: x.k, ao: x.ao, bo: x.bo });
+    }
+    l := find_local(&mut c, view(root));
+    if l == 0 {
+        return ();
+    }
+    d := slot_record_decl(&mut c, local_ty(&mut c, l - 1));
+    if d == 18446744073709551615 {
+        return ();
+    }
+    k0 := field_index(&mut c, d, view(field));
+    if k0 == 0 {
+        return ();
+    }
+    // Every predicate of the record that reads this field, with each field it reads renamed to its
+    // path under `root` - and only when every one of those paths is one value too.
+    mut renamed = Atom[];
+    for j in c.decls[d].count {
+        if !ref_pred_reads(&mut c, d, j, k0 - 1) {
+            continue;
+        }
+        fs := ref_pred_fields(&mut c, d, j);
+        mut names = u8[][];
+        mut paths = u8[][];
+        mut stable = 1;
+        for q in fs.len() {
+            m := fs[q];
+            mname := c.fields[c.decls[d].first + m].name.copy();
+            if !pv_field_stable(&mut c, view(root), view(mname)) {
+                stable = 0;
+            }
+            mut path = root.copy();
+            path.push(46);
+            push_bytes(&mut path, view(mname));
+            names.push(mname);
+            paths.push(path);
+        }
+        if stable == 0 {
+            continue;
+        }
+        f := c.decls[d].first + j;
+        pred := Pred { file: c.fields[f].pred.file, lo: c.fields[f].pred.lo, hi: c.fields[f].pred.hi };
+        mut atoms = Atom[];
+        if !pv_read_pred(&mut c, pred, &mut atoms) {
+            continue;
+        }
+        mut ok = 1;
+        mut these = Atom[];
+        for i in atoms.len() {
+            x := &atoms[i];
+            a := pv_rename(view(x.a), &names, &paths);
+            mut b = u8[];
+            if x.b.len() != 0 {
+                b = pv_rename(view(x.b), &names, &paths);
+                if b.len() == 0 {
+                    ok = 0;
+                }
+            }
+            if a.len() == 0 {
+                ok = 0;
+            }
+            these.push(Atom { rel: x.rel, a: a, b: b, k: x.k, ao: x.ao, bo: x.bo });
+        }
+        if ok != 0 {
+            for i in these.len() {
+                renamed.push(copy_atom_value(&these[i]));
+            }
+        }
     }
     mut settled = Atom[];
     if pv_settle_all(&mut c, &renamed, &mut facts, &mut settled) {
@@ -11227,6 +11659,62 @@ fn closure_stated_borrower<a>(c: (&a mut C), ty: u64) -> bool {
     mode := ty_mode(&mut c, ty);
     return ((mode & CLOSURE_BOUNDS) != 0) & ((mode & CLOSURE_OWNED) == 0);
 }
+// Parameters that only a callable bound names (`impl<I, U, F: FnMut(I::Item) -> U> ... for Map<I, F>`:
+// `U`) are fixed by the closure or function the bound parameter was bound to, as Rust's `Fn` bounds
+// fix their output type.
+fn infer_from_callables<a, b>(c: (&a mut C), sets: (&a u64[][]), map: (&b mut u64[])) -> unit {
+    for i in sets.len() {
+        if i < map.len() {
+            bound := callable_in(&sets[i]);
+            if (bound != NO_TYPE) && (map[i] != NO_TYPE) {
+                actual := base_type(&mut c, map[i]);
+                ak := ty_kind(&mut c, actual);
+                if (ak == 20) || (ak == 12) {
+                    infer_callable(&mut c, bound, actual, &mut map);
+                }
+            }
+        }
+    }
+    return ();
+}
+// One entry of a parameter's requirement set, met by `ty` with the parameters bound by `map`: an
+// interface, or a callable bound (the closure or function `ty` converts to the bound).
+fn meets_requirement<a, b>(c: (&a mut C), ty: u64, id: u64, map: (&b u64[])) -> bool {
+    if CALLABLE_PENDING <= id {
+        return true;
+    }
+    if CALLABLE_BOUND <= id {
+        mut t = ty;
+        if ty_kind(&mut c, t) == 10 {
+            t = ty_arg(&mut c, t);
+        }
+        mut known = true;
+        for i in map.len() {
+            if map[i] == NO_TYPE {
+                known = false;
+            }
+        }
+        if !known {
+            return (ty_kind(&mut c, t) == 20) || (ty_kind(&mut c, t) == 12);
+        }
+        bound := bind_types(&mut c, id - CALLABLE_BOUND, &map);
+        if same_type(&mut c, t, bound) != 0 {
+            return true;
+        }
+        if (ty_kind(&mut c, t) == 20) && (closure_bounds_hold(&mut c, t, ty_mode(&mut c, bound) & CLOSURE_BOUNDS)) {
+            erased := closure_as(&mut c, t, bound);
+            mut m = u64[];
+            return callable_contract(&mut c, erased, bound, &mut m, 0);
+        }
+        if ty_kind(&mut c, t) == 12 {
+            plain := intern_args(&mut c, 20, ty_arg(&mut c, t), ty_mode(&mut c, bound), u64[], type_args(&mut c, t));
+            mut m = u64[];
+            return callable_contract(&mut c, plain, bound, &mut m, 0);
+        }
+        return false;
+    }
+    return satisfies_interface(&mut c, ty, id);
+}
 // A callable bound on a type parameter (`F: FnMut(T) -> U`, docs/design/dyn-and-callable-bounds.md
 // 2b) travels in the parameter's requirement set beside its interface ids, as this tag plus the
 // bound's closure type, so every place that carries requirements carries it too.
@@ -11270,7 +11758,11 @@ fn resolve_callable_bounds<a>(c: (&a mut C)) -> unit {
             entry := c.type_interfaces[i][j];
             if CALLABLE_PENDING <= entry {
                 here := exchange(&mut c.pos, entry - CALLABLE_PENDING);
+                // A bound is an input: an elided reference in it is a fresh input lifetime, as in a
+                // parameter list (an impl header reads it outside one).
+                was := exchange(&mut c.parsing_input, 1);
                 bound := parse_type(&mut c);
+                exchange(&mut c.parsing_input, was);
                 exchange(&mut c.pos, here);
                 c.type_interfaces[i][j] = CALLABLE_BOUND + bound;
             }
@@ -12132,6 +12624,7 @@ fn impl_bindings<a>(c: (&a mut C), id: u64, actual: u64) -> u64[] {
         return u64[];
     }
     sets := copy_constraints(&c.impl_params[r - 1].interfaces);
+    infer_from_callables(&mut c, &sets, &mut map);
     for i in count {
         if map[i] == NO_TYPE {
             return u64[];
@@ -12139,7 +12632,7 @@ fn impl_bindings<a>(c: (&a mut C), id: u64, actual: u64) -> u64[] {
         if i < sets.len() {
             for k in sets[i].len() {
                 bound := map[i];
-                if !satisfies_interface(&mut c, bound, sets[i][k]) {
+                if !meets_requirement(&mut c, bound, sets[i][k], &map) {
                     return u64[];
                 }
             }
@@ -12229,6 +12722,9 @@ fn impl_param_types<a>(c: (&a mut C), id: u64) -> u64[] {
                 if sets[i][k] < CALLABLE_BOUND {
                     proof := intern(&mut c, 15, sets[i][k]);
                     proofs.push(proof);
+                } else if sets[i][k] < CALLABLE_PENDING {
+                    // The same parameter type a name resolves to (it carries its callable bound).
+                    proofs.push(sets[i][k] - CALLABLE_BOUND);
                 }
             }
         }
@@ -12360,9 +12856,30 @@ fn require_interfaces<a, b, d>(c: (&a mut C), arguments: (&b u64[]), sets: (&d u
             if CALLABLE_BOUND <= id {
                 // The argument is the closure (or function) a callable-bound parameter was given:
                 // its own type must convert to the bound, with the call's type arguments in it.
-                bound := bind_types(&mut c, id - CALLABLE_BOUND, &arguments);
-                if (same_type(&mut c, ty, bound) == 0) && (closure_converts(&mut c, ty, bound) == 0) {
-                    if !((ty_kind(&mut c, ty) == 12) && (ty_kind(&mut c, bound) == 20)) {
+                // Compared without a specialisation's aliases: the closure's own signature names the
+                // plain types its bindings stand for.
+                mut plain_args = u64[];
+                for q in arguments.len() {
+                    if arguments[q] == NO_TYPE {
+                        plain_args.push(NO_TYPE);
+                    } else {
+                        plain_args.push(base_type(&mut c, arguments[q]));
+                    }
+                }
+                bound := bind_types(&mut c, id - CALLABLE_BOUND, &plain_args);
+                // A callable parameter passed on (`f: F` given to another `G: FnMut(..)`): its own
+                // bound must meet this one.
+                mut given = base_type(&mut c, ty);
+                own := param_callable(&mut c, ty);
+                if (own != NO_TYPE) && (ty_kind(&mut c, base_type(&mut c, ty)) == 9) {
+                    given = own;
+                }
+                // A closure written inside a specialisation is typed by its aliases, one passed in
+                // from outside by plain types: either form of the bound is met.
+                aliased := bind_types(&mut c, id - CALLABLE_BOUND, &arguments);
+                if (same_type(&mut c, given, bound) == 0) && (closure_converts(&mut c, given, bound) == 0)
+                    && (same_type(&mut c, given, aliased) == 0) && (closure_converts(&mut c, given, aliased) == 0) {
+                    if !((ty_kind(&mut c, given) == 12) && (ty_kind(&mut c, bound) == 20)) {
                         mut msg = copy_bytes(view("this argument does not meet the callable bound `"));
                         push_bytes(&mut msg, view(source_type_name(&mut c, bound)));
                         push_bytes(&mut msg, view("`: it is `"));
@@ -12912,6 +13429,10 @@ fn dyn_pair_of_words<a, b, d>(c: (&a mut C), data: &b [u8], table: &d [u8]) -> u
 // in the returning frame. The fact keeps the second word live at the `ret`; the caller rebuilds the
 // pair in its own frame (save_result).
 fn dyn_result<a>(c: (&a mut C)) -> unit {
+    exchange(&mut c.dyn_result_seen, 1);
+    if (c.forge_result != 0) && same(view(c.forge_sig), view(c.facts_fn)) {
+        return ();
+    }
     if c.facts_fn.len() != 0 {
         llvm::fact_dyn_result(&mut c.facts, copy_bytes(view(c.facts_fn)));
     }
@@ -12989,7 +13510,7 @@ fn emit_vtables<a>(c: (&a mut C)) -> unit {
         mut entries = copy_bytes(view(".quad "));
         if needs_drop(&mut c, concrete) {
             drop_name(&mut c, concrete);
-            if framed(&mut c, concrete) {
+            if framed(&mut c, concrete) && !frame_drops(&mut c, concrete) {
                 // The cell's value is the box dyn_box made: freeing it is the whole drop.
                 push_bytes(&mut entries, view("rt_free"));
             } else {
@@ -13032,9 +13553,19 @@ fn emit_vtables<a>(c: (&a mut C)) -> unit {
                 push_bytes(&mut thunks, view(cell));
                 thunks.push(95);
                 decimal(&mut thunks, j);
-                push_bytes(&mut thunks, view(":\npushq %rbp\nmovq %rsp,%rbp\nmovq (%rdi),%rdi\ncall "));
-                push_bytes(&mut thunks, view(target));
-                push_bytes(&mut thunks, view("\nleave\nret\n"));
+                // The receiver is the record the cell's first word holds; the method returns to the
+                // dispatch site itself, so the adapter is a load and a jump (no frame of its own).
+                // On the LLVM backend the method may be in the other object, which a direct `jmp`
+                // cannot reach (`grail asm` relocates calls and RIP-relative operands, not jumps).
+                if (c.backend != 0) && (c.target == 0) {
+                    push_bytes(&mut thunks, view(":\nmovq (%rdi),%rdi\nleaq "));
+                    push_bytes(&mut thunks, view(target));
+                    push_bytes(&mut thunks, view("(%rip),%r11\njmp *%r11\n"));
+                } else {
+                    push_bytes(&mut thunks, view(":\nmovq (%rdi),%rdi\njmp "));
+                    push_bytes(&mut thunks, view(target));
+                    thunks.push(10);
+                }
             }
         }
         if boxed {
@@ -14648,9 +15179,6 @@ fn type_suffixes<a>(c: (&a mut C), base: u64) -> u64 {
     while is(&mut c, view("[")) {
         advance(&mut c);
         expect(&mut c, view("]"));
-        if array_owned(&mut c, out) {
-            array_stage_fail(&mut c, view("a vector's element, when its elements own data,"));
-        }
         out = vec_of(&mut c, out);
     }
     return out;
@@ -15702,9 +16230,6 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
             if (is_enum != 0) && is_array(&mut c, ty) {
                 array_stage_fail(&mut c, view("a variant's payload"));
             }
-            if array_owned(&mut c, ty) {
-                array_stage_fail(&mut c, view("a field, when its elements own data,"));
-            }
             spots.push(at_field);
             pending.push(Field { name: f, ty: ty, pred: fp });
             count = count + 1;
@@ -15718,6 +16243,13 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
         }
     }
     eat(&mut c, view(";"));
+    for i in pending.len() {
+        plo := pending[i].pred.lo;
+        phi := pending[i].pred.hi;
+        if phi != 0 {
+            ref_field_pred_names(&mut c, view(name), &pending, plo, phi);
+        }
+    }
     // A record that needs itself before it can exist has no value anyone can write: the field that
     // names it would need one first, so the type is uninhabited and the user is holding something
     // they can never build. This was accepted in silence (docs/design/frontend-robustness.md).
@@ -16433,6 +16965,7 @@ fn ffi_emit_call<a, b, d, e, f>(
         fixed = c.ffi_fixed;
     }
     exchange(&mut c.ffi_fixed, 0);
+    blocking := exchange(&mut c.ffi_block_now, 0) != 0;
     abi := ffi_abi(&mut c);
     x86 := abi < 2;
     nint := ffi_int_regs(abi);
@@ -16568,6 +17101,13 @@ fn ffi_emit_call<a, b, d, e, f>(
             tls = fresh(&mut c);
         }
         tls_enter_foreign(&mut c, tls);
+    }
+    // A `blocking` call on x86-64 Linux gives this thread's worker (if it is one) to a spare thread
+    // before the arguments are loaded - the runtime call clobbers the argument registers - and takes
+    // a worker back after (rt_blocking_enter / rt_blocking_leave). Elsewhere it is a plain call.
+    block_here := blocking & (c.target == 0) & (c.plat == 0);
+    if block_here {
+        call_out(&mut c, view("rt_blocking_enter"));
     }
     if area != 0 {
         if x86 {
@@ -16744,11 +17284,29 @@ fn ffi_emit_call<a, b, d, e, f>(
         on(&mut c, floats);
         o(&mut c, view(",%eax\n"));
     }
+    if (symbol.len() != 0) && (area == 0) && (fixed == args.len()) && (rmode == 0) && (copies == 0) {
+        ffi_signature_fact(&mut c, argtypes, ret, view(symbol), abi);
+    }
     if symbol.len() == 0 {
-        get(&mut c, target, view("%rax"));
-        call_slot_out(&mut c, view("call *%rax\n"), view("a closure call"));
+        if c.target == 0 {
+            // A C call through a `cfn` value. %r11 is no argument register, %al may already hold
+            // the vector count of a variadic callee, and `call *%r11` is the spelling the LLVM
+            // lifter keeps native: it lifts `call *%rax`, which is always the Grail convention.
+            get(&mut c, target, view("%r11"));
+            call_slot_out(&mut c, view("call *%r11\n"), view("a call through a C function pointer"));
+        } else {
+            get(&mut c, target, view("%rax"));
+            call_slot_out(&mut c, view("call *%rax\n"), view("a closure call"));
+        }
     } else {
         call_out(&mut c, view(symbol));
+    }
+    if block_here {
+        // The result registers survive the runtime call: rax, rdx, xmm0 and xmm1, in 32 bytes of
+        // stack (the call's argument area is still allocated; 16-byte alignment is kept).
+        o(&mut c, view("subq $32,%rsp\nmovq %rax,(%rsp)\nmovq %rdx,8(%rsp)\nmovq %xmm0,%r10\nmovq %r10,16(%rsp)\nmovq %xmm1,%r10\nmovq %r10,24(%rsp)\n"));
+        call_out(&mut c, view("rt_blocking_leave"));
+        o(&mut c, view("movq 16(%rsp),%r10\nmovq %r10,%xmm0\nmovq 24(%rsp),%r10\nmovq %r10,%xmm1\nmovq (%rsp),%rax\nmovq 8(%rsp),%rdx\naddq $32,%rsp\n"));
     }
     if (ret != 1) & (rmode == 0) {
         if is_float(&mut c, ret) {
@@ -17198,6 +17756,11 @@ fn extern_has_body<a>(c: (&a mut C), start: u64) -> u64 {
             depth += 1;
         }
         if (k == 41) || (k == 62) || (k == 93) {
+            if depth == 0 {
+                // A closer with no opener: not a declaration this scan can read. The parser that
+                // follows reports it where it is.
+                return 0;
+            }
             depth -= 1;
         }
         if depth == 0 {
@@ -17308,8 +17871,13 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     }
     mut input = u8[];
     mut symbol = u8[];
+    mut blocking = 0;
     while true {
-        if eat(&mut c, view("lib")) {
+        if eat(&mut c, view("blocking")) {
+            // `extern "C" blocking fn ...`: the call may block for long (a read, a wait, a
+            // vkQueuePresentKHR): on a worker it gives the worker to a spare thread for its duration.
+            blocking = 1;
+        } else if eat(&mut c, view("lib")) {
             input = ffi_string(&mut c, view("lib requires a quoted link input"));
         } else {
             if eat(&mut c, view("as")) {
@@ -17365,6 +17933,9 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     }
     if symbol.len() == 0 {
         symbol = name.copy();
+    }
+    if blocking != 0 {
+        c.ffi_blocking.push(symbol.copy());
     }
     // Byte-view parameters need an input lifetime context, exactly like a Grail
     // function signature; the region is irrelevant to the C ABI.
@@ -19055,6 +19626,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                     && public != 0
                     && count < 2
                     && typecount == 0
+                    && entry_shaped(&mut c, count, first)
             );
         file := c.file;
         raw := c.raw;
@@ -19329,11 +19901,18 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     exchange(&mut c.caddr, u64[]);
     exchange(&mut c.interior, u64[]);
     exchange(&mut c.boxed, u64[]);
+    exchange(&mut c.word_refs, u64[]);
     // A function with refined parameters is two: the body, `<name>.proved`, which a proved call
     // enters and which checks nothing, and `<name>`, a wrapper emitted after it that checks the
     // parameters and calls the body (ref_wrapper). Both are ordinary functions to every later pass.
     wrapped := (export == 0) & (c.raw == 0) & (ref_pred_count(&mut c) != 0);
     exchange(&mut c.proved_label, u64(wrapped));
+    exchange(&mut c.dyn_result_seen, 0);
+    // The body's facts are keyed by the symbol it is labelled with: a fact about `<name>` would not
+    // reach `<name>.proved`, and the optimiser would read its two-word result as one word.
+    if wrapped & (c.facts_fn.len() != 0) {
+        push_bytes(&mut c.facts_fn, view(".proved"));
+    }
     func_directive(&mut c, view(m), view(name), view(body_symbol), export);
     if (c.debug != 0) & (c.validating == 0) {
         dstart = label(&mut c);
@@ -19391,6 +19970,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         exchange(&mut c.export_fret, 0);
         begin_result_dest(&mut c, ret, count);
         store_params(&mut c, count);
+        signature_fact(&mut c, count);
     }
     // The parameter refinements hold here, where the parameters are the arguments they were given.
     // Before the frame zeroing on purpose: the check's own return address must stay inside the
@@ -19402,6 +19982,9 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     o(&mut c, view("/8-"));
     on(&mut c, kept_slots(&c, count));
     o(&mut c, view(",%rcx\nxorl %eax,%eax\nrep stosq\n"));
+    if export != 2 {
+        stack_params(&mut c, count);
+    }
     for i in count {
         mut l = &c.locals[i];
         slot := l.id;
@@ -19655,6 +20238,21 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         par_record(&mut c, at_off, 0, &none);
     }
     return ();
+}
+// Whether a function with `count` parameters starting at `first` can be the program's entry when it
+// was picked rather than written as `main`: no parameter, or the one readonly byte view argv is.
+// A library's first public function is usually neither, and picking it made the build fail at the
+// entry check - located wherever the compiler had last read, often an imported interface - instead
+// of saying the program has no `main`.
+fn entry_shaped<a>(c: (&a mut C), count: u64, first: u64) -> bool {
+    if count == 0 {
+        return true;
+    }
+    if first >= c.params.len() {
+        return false;
+    }
+    param := c.params[first];
+    return (ty_kind(&mut c, param) == 5) && (ty_mode(&mut c, param) == 0);
 }
 fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     if c.raw != 0 {
@@ -20243,6 +20841,7 @@ fn inherent_bindings<a>(c: (&a mut C), key: u64, actual: u64) -> (u64, u64[]) {
     if record != 0 {
         sets = copy_constraints(&c.impl_params[record - 1].interfaces);
     }
+    infer_from_callables(&mut c, &sets, &mut map);
     for k in count {
         mut bound = map[k];
         if bound == NO_TYPE {
@@ -20250,7 +20849,7 @@ fn inherent_bindings<a>(c: (&a mut C), key: u64, actual: u64) -> (u64, u64[]) {
         }
         if k < sets.len() {
             for j in sets[k].len() {
-                if !satisfies_interface(&mut c, bound, sets[k][j]) {
+                if !meets_requirement(&mut c, bound, sets[k][j], &map) {
                     return (0, u64[]);
                 }
             }
@@ -20330,7 +20929,11 @@ fn inherent_unmet_bound<a, b>(c: (&a mut C), ty: u64, name: &b [u8]) -> (u8[], u
             }
             for j in sets[k].len() {
                 iface := sets[k][j];
-                if satisfies_interface(&mut c, bound, iface) {
+                if meets_requirement(&mut c, bound, iface, &map) {
+                    continue;
+                }
+                if CALLABLE_BOUND <= iface {
+                    // A callable bound the receiver's closure does not meet: not this method.
                     continue;
                 }
                 tname := c.impl_params[record - 1].tnames[k].copy();
@@ -20452,6 +21055,7 @@ fn inherent_type_key<a>(c: (&a mut C), ty: u64, pass: u64) -> u64 {
     if pass == 2 {
         key := inherent_type_base() + c.inherent_types.len() + 1;
         c.inherent_types.push(ty);
+        resolve_callable_bounds(&mut c);
         c
             .impl_params
             .push(
@@ -20579,6 +21183,8 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
         exchange(&mut c.type_interfaces, u64[][]);
         if is(&mut c, view("<")) {
             lifetime_parameters(&mut c);
+            // An impl's own bounds name only its own parameters: read them before its type is.
+            resolve_callable_bounds(&mut c);
         }
         module := module_copy(&mut c);
         ty := parse_inherent_owner(&mut c);
@@ -20602,6 +21208,7 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
                 }
             }
             if pass == 2 {
+                resolve_callable_bounds(&mut c);
                 c
                     .impl_params
                     .push(
@@ -20652,10 +21259,12 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
     // `impl<T: B> I for X<T>`: a generic implementation, its methods templates over T.
     if is(&mut c, view("<")) {
         lifetime_parameters(&mut c);
+        resolve_callable_bounds(&mut c);
     }
     impl_rnames := copy_names(&c.rnames);
     impl_tnames := copy_names(&c.tnames);
     impl_bounds := copy_numbers(&c.type_bounds);
+    resolve_callable_bounds(&mut c);
     impl_ifaces := copy_constraints(&c.type_interfaces);
     mut module = module_copy(&mut c);
     mut name = ident(&mut c);
@@ -23600,7 +24209,7 @@ fn static_bake<a>(c: (&a mut C), ty: u64, text: &a [u8], at: (&a mut u64), is_la
         // vector of plain records holds its elements' words inline instead (flat_bytes).
         mut words = u64[];
         mut kinds = u64[];
-        flat := (ty_kind(&mut c, base_type(&mut c, elem)) == 8) && plain(&mut c, elem);
+        flat := (ty_kind(&mut c, base_type(&mut c, elem)) == 8) && framable(&mut c, elem);
         for j in n {
             if flat {
                 static_bake_fields(&mut c, base_type(&mut c, elem), text, &mut at, &mut words, &mut kinds);
@@ -27228,7 +27837,7 @@ fn field_layout<a>(c: (&a mut C), alias: u64) -> u64 {
     mut word = 0;
     for i in count {
         ft := field_type(&mut c, ty, i);
-        if plain(&mut c, ft) {
+        if framable(&mut c, ft) {
             table.push(word * 2 + 1);
             word = word + record_words(&mut c, base_type(&mut c, ft));
         } else {
@@ -27257,7 +27866,7 @@ fn flat_bytes<a>(c: (&a mut C), elem: u64) -> u64 {
     if is_array(&mut c, ty) {
         return array_bytes(&mut c, ty);
     }
-    if plain(&mut c, ty) {
+    if framable(&mut c, ty) {
         return record_words(&mut c, ty) * 8;
     }
     if is_c_record(&mut c, ty) != 0 {
@@ -27304,15 +27913,68 @@ fn small_enum<a>(c: (&a mut C), ty: u64) -> bool {
     for i in count {
         ft := base_type(&mut c, field_type(&mut c, ty, i));
         k := ty_kind(&mut c, ft);
-        if !((k == 1) || (k == 2) || (k == 7) || (k == 12) || (k == 18) || (k == 19) || (k == 21) || (k == 22) || (k == 25) || (k == 26)) {
-            return false;
-        }
         if (k == 7) && (ty_kind(&mut c, ty_arg(&mut c, ft)) == 35) {
             // `&dyn I` is a handle to a pair in the frame that built it.
             return false;
         }
+        if (k == 1) || (k == 2) || (k == 7) || (k == 12) || (k == 18) || (k == 19) || (k == 21) || (k == 22) || (k == 25) || (k == 26) {
+            continue;
+        }
+        // A payload that is itself plain (a plain record, a small enum) is stored inline (stage 5b).
+        if (k == 8) && (ft != ty) && plain(&mut c, ft) {
+            continue;
+        }
+        return false;
     }
     return true;
+}
+// The words of a small enum: the tag, then the largest payload.
+fn enum_words<a>(c: (&a mut C), ty: u64) -> u64 {
+    d := ty_arg(&mut c, ty);
+    count := c.decls[d].count;
+    mut most = 1;
+    for i in count {
+        ft := base_type(&mut c, field_type(&mut c, ty, i));
+        if (ty_kind(&mut c, ft) == 8) && framed(&mut c, ft) {
+            n := record_words(&mut c, ft);
+            if most < n {
+                most = n;
+            }
+        }
+    }
+    return 1 + most;
+}
+// The payload of the enum at `xt` (of type `ety`) whose variant's payload type is `pty`: a plain
+// payload of a small enum is its words inline at word 1, so the value is their address (an interior
+// value: owning it copies it out); any other payload is the word there.
+fn payload_load<a>(c: (&a mut C), xt: u64, ety: u64, pty: u64) -> u64 {
+    if inline_payload(&mut c, ety, pty) {
+        get(&mut c, xt, view("%rax"));
+        o(&mut c, view("leaq 8(%rax),%rax\n"));
+        slot := save(&mut c);
+        c.interior.push(slot);
+        return slot;
+    }
+    return rec_load(&mut c, xt, 1, 0);
+}
+// For a reference to a payload: the address of the word (rec_load address form), or for an inline
+// plain payload the address of its words, which is already the reference (payload_reference).
+fn payload_ref_word<a>(c: (&a mut C), xt: u64, ety: u64, pty: u64) -> u64 {
+    return rec_load(&mut c, xt, 1, 1);
+}
+fn payload_reference<a>(c: (&a mut C), at: u64, ety: u64, pty: u64) -> u64 {
+    if inline_payload(&mut c, ety, pty) {
+        return at;
+    }
+    return word_reference(&mut c, at, pty);
+}
+fn inline_payload<a>(c: (&a mut C), ety: u64, pty: u64) -> bool {
+    e := base_type(&mut c, ety);
+    if !small_enum(&mut c, e) {
+        return false;
+    }
+    p := base_type(&mut c, pty);
+    return (ty_kind(&mut c, p) == 8) && framed(&mut c, p);
 }
 fn container_record<a>(c: (&a mut C), ty: u64) -> bool {
     if ty_kind(&mut c, ty) != 8 {
@@ -27345,7 +28007,8 @@ fn layout_bits<a>(c: (&a mut C), alias: u64) -> u64 {
     c.layout_memo[ty] = 1;
     mut bits = 0;
     if small_enum(&mut c, ty) {
-        bits = 1;
+        // Plain, and held as its words (5a): a small enum is frame words wherever it is held.
+        bits = 5;
     }
     if container_record(&mut c, ty) {
         d := ty_arg(&mut c, ty);
@@ -27370,9 +28033,36 @@ fn layout_bits<a>(c: (&a mut C), alias: u64) -> u64 {
         if holds {
             bits = bits | 2;
         }
+        // Framable (unboxed-values.md, stage 4): held as its words wherever it is held - in a frame,
+        // inline in another record, flat in a vector - whatever it owns. Every struct and tuple is,
+        // but one being worked out is not to itself (a by-value field of its own type would be
+        // infinite), so such a field stays a boxed word.
+        bits = bits | 4;
+        for i in c.decls[d].count {
+            ft := base_type(&mut c, field_type(&mut c, ty, i));
+            if framable(&mut c, ft) {
+                bits = bits | 2;
+            }
+        }
     }
     c.layout_memo[ty] = bits + 1;
     return bits;
+}
+// Whether `ty` is held as its own words (layout bit 4): a struct, a tuple or an array.
+fn framable<a>(c: (&a mut C), alias: u64) -> bool {
+    ty := base_type(&mut c, alias);
+    if is_array(&mut c, ty) {
+        return true;
+    }
+    return (layout_bits(&mut c, ty) & 4) != 0;
+}
+// A framed value that owns something, so its words have an in-place drop: a struct or tuple that is
+// not plain, or an array of owners.
+fn frame_drops<a>(c: (&a mut C), ty: u64) -> bool {
+    if is_array(&mut c, ty) {
+        return array_owned(&mut c, ty);
+    }
+    return framed(&mut c, ty) && !plain(&mut c, ty);
 }
 // A plain record field read as a value: the address of its words inside the container.
 fn inline_address<a>(c: (&a mut C), base: u64, ty: u64, k: u64) -> u64 {
@@ -27401,16 +28091,59 @@ fn retag_enum<a>(c: (&a mut C), xt: u64, tag: u64, ty: u64, from: u64) -> u64 {
     small := framed(&mut c, from);
     if !framed(&mut c, ty) {
         if small {
+            // Into a boxed enum: a plain payload becomes a box of its own, chosen by the source's
+            // variant at run time; a word payload is the word.
             payload := word_load(&mut c, xt, 1, 0);
+            src := base_type(&mut c, from);
+            d := ty_arg(&mut c, src);
+            count := c.decls[d].count;
+            done := label(&mut c);
+            for j in count {
+                pj := field_type(&mut c, src, j);
+                if inline_payload(&mut c, src, pj) {
+                    next := label(&mut c);
+                    get(&mut c, xt, view("%rax"));
+                    o(&mut c, view("cmpq $"));
+                    on(&mut c, j);
+                    o(&mut c, view(",(%rax)\n"));
+                    jump(&mut c, view("jne"), next);
+                    get(&mut c, xt, view("%rax"));
+                    o(&mut c, view("leaq 8(%rax),%rax\n"));
+                    at := save(&mut c);
+                    boxed := frame_box(&mut c, at, pj);
+                    get(&mut c, boxed, view("%rax"));
+                    o(&mut c, view("movq %rax,"));
+                    stack_slot(&mut c, payload);
+                    c.out.push(10);
+                    jump(&mut c, view("jmp"), done);
+                    mark(&mut c, next);
+                }
+            }
+            mark(&mut c, done);
             return invoke(&mut c, view("rt_enum"), two(tag, payload));
         }
         return invoke(&mut c, view("rt_enum_retag"), two(xt, tag));
     }
-    payload := word_load(&mut c, xt, 1, 0);
-    n := enum_frame(&mut c, tag, payload);
-    if !small {
-        invoke(&mut c, view("rt_free"), one(xt));
+    if small {
+        // Same payload words, new tag: a copy of the whole value.
+        words := enum_words(&mut c, base_type(&mut c, from));
+        n := frame_alloc(&mut c, enum_words(&mut c, base_type(&mut c, ty)));
+        get(&mut c, xt, view("%rdx"));
+        get(&mut c, n, view("%rcx"));
+        for k in words {
+            o(&mut c, view("movq "));
+            on(&mut c, k * 8);
+            o(&mut c, view("(%rdx),%rax\nmovq %rax,"));
+            on(&mut c, k * 8);
+            o(&mut c, view("(%rcx)\n"));
+        }
+        get(&mut c, tag, view("%rax"));
+        o(&mut c, view("movq %rax,(%rcx)\n"));
+        return n;
     }
+    payload := word_load(&mut c, xt, 1, 0);
+    n := enum_frame(&mut c, tag, payload, ty, 1);
+    invoke(&mut c, view("rt_free"), one(xt));
     return n;
 }
 fn free_enum_shell<a>(c: (&a mut C), xt: u64, ty: u64) -> unit {
@@ -27420,11 +28153,24 @@ fn free_enum_shell<a>(c: (&a mut C), xt: u64, ty: u64) -> unit {
     return ();
 }
 // A small enum's value in frame words of this site: word 0 the tag, word 1 the payload word.
-fn enum_frame<a>(c: (&a mut C), tag: u64, payload: u64) -> u64 {
-    n := frame_alloc(&mut c, 2);
+// `ety` is the enum's type and `pty` the payload's (1 for none): a plain payload is copied in.
+fn enum_frame<a>(c: (&a mut C), tag: u64, payload: u64, ety: u64, pty: u64) -> u64 {
+    n := frame_alloc(&mut c, enum_words(&mut c, base_type(&mut c, ety)));
     get(&mut c, n, view("%rcx"));
     get(&mut c, tag, view("%rax"));
     o(&mut c, view("movq %rax,(%rcx)\n"));
+    if inline_payload(&mut c, ety, pty) {
+        words := record_words(&mut c, base_type(&mut c, pty));
+        get(&mut c, payload, view("%rdx"));
+        for k in words {
+            o(&mut c, view("movq "));
+            on(&mut c, k * 8);
+            o(&mut c, view("(%rdx),%rax\nmovq %rax,"));
+            on(&mut c, 8 + k * 8);
+            o(&mut c, view("(%rcx)\n"));
+        }
+        return n;
+    }
     get(&mut c, payload, view("%rax"));
     o(&mut c, view("movq %rax,8(%rcx)\n"));
     return n;
@@ -27433,11 +28179,11 @@ fn enum_frame<a>(c: (&a mut C), tag: u64, payload: u64) -> u64 {
 // its value is the address of frame words, its drop frees nothing, and a holder that keeps it past
 // the statement boxes it.
 fn framed<a>(c: (&a mut C), ty: u64) -> bool {
-    // An array is always frame storage (docs/design/fixed-arrays.md).
+    // An array is always frame storage (docs/design/fixed-arrays.md), whatever the switch says.
     if is_array(&mut c, ty) {
         return true;
     }
-    return plain(&mut c, ty);
+    return framable(&mut c, ty);
 }
 // N adjacent fresh frame slots holding one value, declared to every pass by an aggregate fact
 // (llvm::fact_aggregate), laid out as a DynPair is: word 0 is the slot allocated last, the lowest
@@ -27551,8 +28297,21 @@ fn unbox_into_frame<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
 // The drop of a holder's word that holds `ty`: for a framed record it is the holder's box, freed;
 // for anything else the type's drop.
 fn holder_drop<a>(c: (&a mut C), ty: u64) -> unit {
-    if framed(&mut c, ty) {
+    if array_owned(&mut c, ty) {
+        // An array has no boxed helper: its elements dropped in place, then the holder's box freed.
+        o(&mut c, view("pushq %rdi\npushq %rdi\n"));
+        call_out(&mut c, view(drop_in_place_ref(&mut c, ty)));
+        o(&mut c, view("popq %rdi\npopq %rdi\n"));
         call_out(&mut c, view("rt_free"));
+        return ();
+    }
+    if framed(&mut c, ty) && !frame_drops(&mut c, ty) {
+        call_out(&mut c, view("rt_free"));
+        return ();
+    }
+    if framed(&mut c, ty) {
+        // The holder's box: its owners dropped in place, then the box freed (the boxed helper).
+        call_out(&mut c, view(drop_ref_name(&mut c, ty)));
         return ();
     }
     drop_call(&mut c, ty);
@@ -27593,6 +28352,17 @@ fn materialise<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
     c.interior[found] = 18446744073709551615;
     if framed(&mut c, ty) {
         copy := frame_copy(&mut c, slot, ty);
+        if frame_drops(&mut c, ty) {
+            // The words moved: the place they came from (a field held inline, an element) is left
+            // all zero, which its holder's in-place drop reads as nothing to drop (a live word of 0).
+            words := record_words(&mut c, base_type(&mut c, ty));
+            get(&mut c, slot, view("%rcx"));
+            for j in words {
+                o(&mut c, view("movq $0,"));
+                on(&mut c, j * 8);
+                o(&mut c, view("(%rcx)\n"));
+            }
+        }
         get(&mut c, copy, view("%rax"));
         o(&mut c, view("movq %rax,"));
         stack_slot(&mut c, slot);
@@ -27640,18 +28410,32 @@ fn record_words<a>(c: (&a mut C), ty: u64) -> u64 {
         return (array_bytes(&mut c, ty) + 7) / 8;
     }
     if small_enum(&mut c, ty) {
-        return 2;
+        return enum_words(&mut c, ty);
     }
     d := ty_arg(&mut c, ty);
     if c.decls[d].c_layout != 0 {
         return ffi_record_words(&mut c, d);
     }
+    live := u64(live_word(&mut c, ty));
     if (layout_bits(&mut c, ty) & 2) == 0 {
-        return c.decls[d].count;
+        return c.decls[d].count + live;
     }
     at := field_layout(&mut c, ty);
     count := c.layout_offsets[at].len() - 1;
-    return c.layout_offsets[at][count] / 2;
+    return c.layout_offsets[at][count] / 2 + live;
+}
+// Whether the struct `ty` carries a live word after its fields (unboxed-values.md, stage 4): one
+// with its own `Drop`. Its constructor sets the word to 1; moving it out of the place that holds it
+// leaves every word 0, and its in-place drop does nothing - its `drop` included - when the word is 0.
+// A struct without its own `Drop` needs none: its owners' words are 0 when absent.
+fn live_word<a>(c: (&a mut C), alias: u64) -> bool {
+    ty := base_type(&mut c, alias);
+    if (ty == 0) || (ty_kind(&mut c, ty) != 8) || (c.raw != 0) {
+        return false;
+    }
+    index := ty_arg(&mut c, ty);
+    d := &c.decls[index];
+    return (d.drop != 0) && (d.is_enum == 0) && (d.c_layout == 0);
 }
 fn field_store<a>(c: (&a mut C), base: u64, ty: u64, k: u64, value: u64) -> unit {
     if inline_field(&mut c, ty, k) {
@@ -28824,6 +29608,10 @@ fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
             } else {
                 n = field_load(&mut c, b, base.ty, k, last);
             }
+            if last & subword(&mut c, fty) {
+                // Every field of a Grail record is at least a word: the address is untagged.
+                c.word_refs.push(n);
+            }
         }
         if last {
             // 2 is a `&mut` of the field, 3 the place an assignment writes (assign_field_path).
@@ -28831,6 +29619,8 @@ fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
                 if c.ref_assign_target != 0 {
                     exchange(&mut c.ref_assign_d, d + 1);
                     exchange(&mut c.ref_assign_k, k);
+                    exchange(&mut c.ref_assign_base, b);
+                    exchange(&mut c.ref_assign_rty, base.ty);
                 } else {
                     if ref_field_refined(&mut c, d, k) {
                         ref_field_loan_fail(&mut c, d, k);
@@ -29563,10 +30353,10 @@ fn structural_eq<a>(c: (&a mut C), x: u64, y: u64, ty: u64, depth: u64) -> u64 {
             if pty == 1 {
                 sub = imm(&mut c, 1);
             } else {
-                a := rec_load(&mut c, x, 1, 0);
+                a := payload_load(&mut c, x, ty, pty);
                 alias_field(&mut c, a, pty, x, 1, 1);
                 observe(&mut c, a);
-                b := rec_load(&mut c, y, 1, 0);
+                b := payload_load(&mut c, y, ty, pty);
                 alias_field(&mut c, b, pty, y, 1, 1);
                 observe(&mut c, b);
                 sub = structural_eq(&mut c, a, b, pty, depth + 1);
@@ -29730,7 +30520,7 @@ fn array_elem_bytes<a>(c: (&a mut C), alias: u64) -> u64 {
     if is_c_record(&mut c, ty) != 0 {
         return ffi_record_size(&mut c, ty_arg(&mut c, ty));
     }
-    if plain(&mut c, ty) {
+    if framable(&mut c, ty) {
         return record_words(&mut c, ty) * 8;
     }
     if (k == 19) || (k == 22) {
@@ -29760,7 +30550,7 @@ fn array_read_elem<a>(c: (&a mut C), elem: u64) -> bool {
 // bytes, reached through its address.
 fn array_record_elem<a>(c: (&a mut C), elem: u64) -> bool {
     ty := base_type(&mut c, elem);
-    return (ty != 0) && (ty_kind(&mut c, ty) == 8) && ((is_c_record(&mut c, ty) != 0) || plain(&mut c, ty));
+    return (ty != 0) && (ty_kind(&mut c, ty) == 8) && ((is_c_record(&mut c, ty) != 0) || framable(&mut c, ty));
 }
 // An element read as its value by `a[i]`: a number, a bool-free scalar, or a C word.
 fn array_scalar_elem<a>(c: (&a mut C), elem: u64) -> bool {
@@ -29782,6 +30572,14 @@ fn array_moves<a>(c: (&a mut C), ty: u64) -> bool {
 }
 // A value that is moved rather than copied but owns nothing to drop: an exclusive reference, or an
 // array larger than the copy rule's four words.
+// Whether a value of `ty` moves rather than copies - the checker's question (member_place, own,
+// move_out and every place that decides between a move and a copy). `needs_drop` is the emitters'
+// question: whether there is anything to drop or free. Today the two agree but for exclusive
+// references and arrays over the copy rule's four words, which move and drop nothing; stage 4 of
+// unboxed-values.md keeps records with owned fields inline, and there the two part further.
+fn affine<a>(c: (&a mut C), ty: u64) -> bool {
+    return needs_drop(&mut c, ty) || affine_nodrop(&mut c, ty);
+}
 fn affine_nodrop<a>(c: (&a mut C), ty: u64) -> bool {
     if c.raw != 0 {
         return false;
@@ -30396,6 +31194,10 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
     mut map = constructor_map(&mut c, d, hint);
     mut seen = u64[];
     mut sources = u64[];
+    // Each field value's term, in the order `sources` holds them: a predicate across fields reads
+    // them once the record is complete.
+    mut lit_terms = u8[][];
+    lit_at := c.pos;
     mut deferred = u64[];
     mut index = 0;
     if !eat_kind(&mut c, close) {
@@ -30495,7 +31297,10 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
             sources.push(held.t);
             if c.decls[d].c_layout == 0 {
                 fterm := pv_span_term(&mut c, astart, aend);
+                lit_terms.push(fterm.copy());
                 ref_field(&mut c, d, k, held.t, view(fterm), astart);
+            } else {
+                lit_terms.push(u8[]);
             }
             if eat_kind(&mut c, close) {
                 break;
@@ -30532,6 +31337,7 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
         require_type(&mut c, v.ty, expected);
         if c.decls[d].c_layout == 0 {
             fterm := pv_span_term(&mut c, start, end);
+            exchange(&mut lit_terms[index], fterm.copy());
             ref_field(&mut c, d, k, newslot, view(fterm), start);
         }
         exchange(&mut sources[index], newslot);
@@ -30551,6 +31357,32 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
         } else {
             field_store(&mut c, n, ty, seen[i], sources[i]);
         }
+    }
+    // A predicate across fields is owed once every field it reads has its value.
+    if c.decls[d].c_layout == 0 {
+        mut by_slot = u64[];
+        mut by_term = u8[][];
+        for i in c.decls[d].count {
+            by_slot.push(0);
+            by_term.push(u8[]);
+        }
+        for i in seen.len() {
+            exchange(&mut by_slot[seen[i]], sources[i]);
+            if i < lit_terms.len() {
+                exchange(&mut by_term[seen[i]], lit_terms[i].copy());
+            }
+        }
+        for j in c.decls[d].count {
+            if ref_pred_cross(&mut c, d, j) {
+                ref_field_cross(&mut c, d, j, ty, &by_slot, &by_term, lit_at, view("a value is not a name or a constant"));
+            }
+        }
+    }
+    if live_word(&mut c, ty) {
+        get(&mut c, n, view("%rax"));
+        o(&mut c, view("movq $1,"));
+        on(&mut c, (record_words(&mut c, ty) - 1) * 8);
+        o(&mut c, view("(%rax)\n"));
     }
     own(&mut c, n, ty);
     root := place_of(&mut c, n);
@@ -30607,15 +31439,16 @@ fn variant<a, b>(c: (&a mut C), d: u64, name: &b [u8], explicit: u64) -> Val {
     }
     tag := imm(&mut c, k);
     ty := constructed_type(&mut c, d, hint, map);
+    mut pty = 1;
     if has != 0 {
-        pty := field_type(&mut c, ty, k);
-        if framed(&mut c, pty) {
+        pty = field_type(&mut c, ty, k);
+        if framed(&mut c, pty) && !framed(&mut c, ty) {
             payload = frame_box(&mut c, payload, pty);
         }
     }
     mut n = 0;
     if framed(&mut c, ty) {
-        n = enum_frame(&mut c, tag, payload);
+        n = enum_frame(&mut c, tag, payload, ty, pty);
     } else {
         n = invoke(&mut c, view("rt_enum"), two(tag, payload));
     }
@@ -31765,6 +32598,14 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
         exchange(&mut c.none_start, saved_none_start);
         exchange(&mut c.none_end, saved_none_end);
     }
+    // A parameter only a callable bound names is fixed by the closure bound to the bound parameter.
+    {
+        mut sets = u64[][];
+        for q in c.funcs[f - 1].constraints.len() {
+            sets.push(copy_numbers(&c.funcs[f - 1].constraints[q]));
+        }
+        infer_from_callables(&mut c, &sets, &mut map);
+    }
     for i in map.len() {
         if map[i] == NO_TYPE {
             if deferred.len() != 0 {
@@ -31930,6 +32771,11 @@ fn emit_resolved_call<a>(
         if ext == 2 {
             exchange(&mut c.ffi_fixed, count);
         }
+        for bi in c.ffi_blocking.len() {
+            if same(view(c.ffi_blocking[bi]), view(ffi_symbol)) {
+                c.ffi_block_now = 1;
+            }
+        }
         // The declared parameter types decide which arguments cross by value (`byval`); the values
         // were checked against them above.
         mut formals = u64[];
@@ -31948,7 +32794,7 @@ fn emit_resolved_call<a>(
     if dest != 0 {
         sent.push(dest);
     }
-    load_call_args(&mut c, &sent, 0);
+    area := load_call_args(&mut c, &sent, 0);
     if dyn_entry != 0 {
         if dyn_pair != 0 {
             // A borrowed object's receiver is the handle to its pair: word 0 is the value (the
@@ -31977,6 +32823,7 @@ fn emit_resolved_call<a>(
             call_out(&mut c, view(callee));
         }
     }
+    release_call_args(&mut c, area);
     slot := save_result(&mut c, ret);
     own(&mut c, slot, ret);
     shape_pair_result(&mut c, slot, ret);
@@ -32606,7 +33453,7 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
     if dest != 0 {
         args.push(dest);
     }
-    load_call_args(&mut c, &args, shift);
+    area := load_call_args(&mut c, &args, shift);
     if shift != 0 {
         get(&mut c, envp, view("%rdi"));
     }
@@ -32620,6 +33467,7 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
         get(&mut c, target, view("%rax"));
         call_slot_out(&mut c, view("call *%rax\n"), view("a function value"));
     }
+    release_call_args(&mut c, area);
     slot := save_result(&mut c, resulttype);
     own(&mut c, slot, resulttype);
     shape_pair_result(&mut c, slot, resulttype);
@@ -35412,7 +36260,7 @@ fn deref_value<a>(c: (&a mut C), a: Val) -> Val {
             release_temporary(&mut c, a.t);
             return val(slot, ty);
         }
-        if needs_drop(&mut c, ty) {
+        if affine(&mut c, ty) && (ty_kind(&mut c, ty) != 7) {
             fail(&mut c, view("cannot copy an owned value out of a reference; use exchange"));
         }
     }
@@ -36130,7 +36978,7 @@ fn task_scope_builtin<a>(c: (&a mut C), context: Val) -> Val {
     get(&mut c, context.t, view("%rsi"));
     get(&mut c, body.t, view("%rax"));
     call_slot_out(&mut c, view("call *%rax\n"), view("a call through a value the compiler did not name"));
-    slot := save(&mut c);
+    slot := save_result(&mut c, result);
     invoke(&mut c, view("rt_scope_end"), one(handle));
     observe(&mut c, context.t);
     release_temporary(&mut c, input);
@@ -37201,7 +38049,7 @@ fn adopt_value<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) ->
         payload := imm(&mut c, 0);
         mut slot = 0;
         if framed(&mut c, expected) {
-            slot = enum_frame(&mut c, tag, payload);
+            slot = enum_frame(&mut c, tag, payload, expected, 1);
         } else {
             slot = invoke(&mut c, view("rt_enum"), two(tag, payload));
         }
@@ -37328,13 +38176,13 @@ fn adopt_value<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) ->
             source := place_of(&mut c, v.t);
             tag := imm(&mut c, which);
             mut payload = v.t;
-            if framed(&mut c, v.ty) {
+            if framed(&mut c, v.ty) && !framed(&mut c, expected) {
                 // An enum is a holder: the record it carries is its box.
                 payload = frame_box(&mut c, v.t, v.ty);
             }
             mut slot = 0;
             if framed(&mut c, expected) {
-                slot = enum_frame(&mut c, tag, payload);
+                slot = enum_frame(&mut c, tag, payload, expected, v.ty);
             } else {
                 slot = invoke(&mut c, view("rt_enum"), two(tag, payload));
             }
@@ -37424,7 +38272,10 @@ fn int_binary<a>(c: (&a mut C), k: u64, left: u64, right: u64, ty: u64) -> Val {
     // Sized integers are canonical (sign-extended) words, so most operations are emitted inline.
     bits := ty_arg(&mut c, ty);
     signed := ty_mode(&mut c, ty);
-    checked := c.overflow != 0 || c.raw != 0;
+    // Raw (`unsafe module`) code follows the build's overflow mode like all other code; code that
+    // must wrap says so with the wrapping_* operations, and code that must check uses explicit
+    // checked ones.
+    checked := c.overflow != 0;
     if is_comparison(k) {
         if signed != 0 {
             msb := imm(&mut c, 9223372036854775808);
@@ -37986,6 +38837,7 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
     // aside with them.
     saved_interior := exchange(&mut c.interior, u64[]);
     saved_boxed := exchange(&mut c.boxed, u64[]);
+    saved_word_refs := exchange(&mut c.word_refs, u64[]);
     saved_scope := exchange(&mut c.scope_end, end);
     saved_loop_start := exchange(&mut c.loop_start, 0);
     saved_loop_end := exchange(&mut c.loop_end, 0);
@@ -38047,6 +38899,7 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
     exchange(&mut c.next, saved_next);
     exchange(&mut c.interior, saved_interior);
     exchange(&mut c.boxed, saved_boxed);
+    exchange(&mut c.word_refs, saved_word_refs);
     exchange(&mut c.scope_end, saved_scope);
     exchange(&mut c.loop_start, saved_loop_start);
     exchange(&mut c.loop_end, saved_loop_end);
@@ -38406,7 +39259,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                 capture_aggregate_regions(&mut c, id, &mut caps);
             }
             observe(&mut c, id);
-            if needs_drop(&mut c, ty) || ty_kind(&mut c, ty) == 7 {
+            if affine(&mut c, ty) {
                 held := move_value(&mut c, val(id, ty));
                 move_out(&mut c, held);
             }
@@ -38849,6 +39702,7 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         exchange(&mut c.next, 0);
         exchange(&mut c.interior, u64[]);
         exchange(&mut c.boxed, u64[]);
+        exchange(&mut c.word_refs, u64[]);
         // Facts made in the body (a frame record, a DynPair) are about the body's own frame, under
         // the symbol it is emitted as.
         exchange(&mut c.facts_fn, body_label(&c, view(".closure"), view(symbol), view(""), 0));
@@ -38945,6 +39799,7 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         o(&mut c, view("/8-"));
         on(&mut c, kept_slots(&c, count));
         o(&mut c, view(",%rcx\nxorl %eax,%eax\nrep stosq\n"));
+        stack_params(&mut c, count);
         for j in count {
             mut l = &c.locals[j];
             slot := l.id;
@@ -39089,7 +39944,8 @@ fn mutex_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
     get(&mut c, heldslot, view("%rsi"));
     get(&mut c, target, view("%rax"));
     call_slot_out(&mut c, view("call *%rax\n"), view("a call through a value the compiler did not name"));
-    slot := save(&mut c);
+    // The callback's result as any call's is: a framed one in registers or its box (save_result).
+    slot := save_result(&mut c, result);
     invoke(&mut c, view("rt_mutex_unlock"), one(cell));
     own(&mut c, slot, result);
     if keeper != 0 {
@@ -39623,7 +40479,7 @@ fn pattern_loop<a, b>(
         jump(&mut c, view("jne"), nomatch);
         patmark = c.locals.len();
         payloads = c.resources.len();
-        payload := rec_load(&mut c, xt, 1, 0);
+        payload := payload_load(&mut c, xt, xty, pty);
         own(&mut c, payload, pty);
         source := place_of(&mut c, xt);
         dest := place_of(&mut c, payload);
@@ -40849,15 +41705,27 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             }
             expect(&mut c, view(")"));
             mut dropper = imm(&mut c, 0);
-            if needs_drop(&mut c, elem) {
+            // A word element's dropper (an inline element is dropped in place below).
+            if needs_drop(&mut c, elem) && (width == 0) {
                 o(&mut c, view("leaq "));
                 drop_name(&mut c, elem);
                 o(&mut c, view("(%rip),%rax\n"));
                 dropper = save(&mut c);
             }
             require_write(&mut c, xt);
+            if (width != 0) && frame_drops(&mut c, elem) {
+                // Inline elements that own something are dropped in place as they go.
+                o(&mut c, view("leaq "));
+                push_bytes(&mut c.out, view(drop_in_place_ref(&mut c, elem)));
+                o(&mut c, view("(%rip),%rax\n"));
+                inplace := save(&mut c);
+                mut args = three(xt, keep, imm(&mut c, width));
+                args.push(inplace);
+                invoke(&mut c, view("rt_vec_truncatew"), args);
+                return val(imm(&mut c, 0), 1);
+            }
             if (code != 0) || (width != 0) {
-                // 4-byte and inline elements own nothing: shortening is setting the length.
+                // 4-byte and plain inline elements own nothing: shortening is setting the length.
                 invoke(&mut c, view("rt_vec_truncate4"), two(xt, keep));
                 return val(imm(&mut c, 0), 1);
             }
@@ -41372,9 +42240,22 @@ fn swap_records<a>(c: (&a mut C), x: u64, y: u64, ty: u64) -> unit {
     }
     return ();
 }
+fn is_word_ref<a>(c: (&a C), slot: u64) -> bool {
+    for i in c.word_refs.len() {
+        if c.word_refs[i] == slot {
+            return true;
+        }
+    }
+    return false;
+}
 fn ref_load<a>(c: (&a mut C), r: u64, ty: u64) -> u64 {
     if direct(&mut c, ty) {
         get(&mut c, r, view("%rax"));
+        return save(&mut c);
+    }
+    if is_word_ref(&c, r) {
+        get(&mut c, r, view("%rax"));
+        o(&mut c, view("movq (%rax),%rax\n"));
         return save(&mut c);
     }
     narrow := caddr_ty(&mut c, r);
@@ -41411,8 +42292,9 @@ fn ref_store<a>(c: (&a mut C), r: u64, ty: u64, value: u64) -> unit {
         caddr_store(&mut c, r, narrow, value);
         return ();
     }
-    if plain(&mut c, ty) & embedded_place(&mut c, r) {
-        // An inline plain record's place: the new value's words replace the old ones.
+    if framed(&mut c, ty) & embedded_place(&mut c, r) {
+        // An inline record's place: the new value's words replace the old ones (an owning one was
+        // dropped in place first, by the assignment).
         get(&mut c, r, view("%rax"));
         o(&mut c, view("movq (%rax),%rax\n"));
         dst := save(&mut c);
@@ -41430,7 +42312,7 @@ fn ref_store<a>(c: (&a mut C), r: u64, ty: u64, value: u64) -> unit {
         caddr_store(&mut c, dst, ty, value);
         return ();
     }
-    if !subword(&mut c, ty) {
+    if !subword(&mut c, ty) || is_word_ref(&c, r) {
         get(&mut c, value, view("%rax"));
         get(&mut c, r, view("%rcx"));
         o(&mut c, view("movq %rax,(%rcx)\n"));
@@ -41651,7 +42533,31 @@ fn pop_option<a>(c: (&a mut C), had: u64, element: u64, ty: u64) -> Val {
         stack_slot(&mut c, tag);
         c.out.push(10);
         mark(&mut c, empty);
-        slot := enum_frame(&mut c, tag, element);
+        if inline_payload(&mut c, opt, ty) {
+            // The element came out of an inline vector as a box (or 0 when it was empty): its words
+            // are copied in only when there was one, and the box freed.
+            zero := imm(&mut c, 0);
+            slot := enum_frame(&mut c, tag, zero, opt, 1);
+            skip := label(&mut c);
+            get(&mut c, had, view("%rax"));
+            o(&mut c, view("testq %rax,%rax\n"));
+            jump(&mut c, view("jz"), skip);
+            words := record_words(&mut c, base_type(&mut c, ty));
+            get(&mut c, element, view("%rdx"));
+            get(&mut c, slot, view("%rcx"));
+            for k in words {
+                o(&mut c, view("movq "));
+                on(&mut c, k * 8);
+                o(&mut c, view("(%rdx),%rax\nmovq %rax,"));
+                on(&mut c, 8 + k * 8);
+                o(&mut c, view("(%rcx)\n"));
+            }
+            invoke(&mut c, view("rt_free"), one(element));
+            mark(&mut c, skip);
+            own(&mut c, slot, opt);
+            return val(slot, opt);
+        }
+        slot := enum_frame(&mut c, tag, element, opt, ty);
         own(&mut c, slot, opt);
         return val(slot, opt);
     }
@@ -42636,7 +43542,12 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
         // body: called with the bound's signature. A specialisation binds `F` to the closure's own
         // type and takes the branch above.
         if local != 0 {
-            pty := local_ty(&mut c, local - 1);
+            outer := local_ty(&mut c, local - 1);
+            // `g := &mut self.f` with `f: F`: the reference's referent is the callable parameter.
+            mut pty = outer;
+            if ty_kind(&mut c, pty) == 7 {
+                pty = ty_arg(&mut c, pty);
+            }
             bound := param_callable(&mut c, pty);
             if bound != NO_TYPE {
                 slot := local_id(&mut c, local - 1);
@@ -42654,6 +43565,10 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
                     if (sig != NO_TYPE) && (ty_kind(&mut c, bound) == 12) {
                         calltype = intern_args(&mut c, 12, ty_arg(&mut c, sig), 0, u64[], type_args(&mut c, sig));
                     }
+                }
+                if ty_kind(&mut c, outer) == 7 {
+                    viaref := intern_full(&mut c, 7, calltype, ty_mode(&mut c, outer), type_regions(&mut c, outer));
+                    return indirect_call(&mut c, val(slot, viaref), 0);
                 }
                 return indirect_call(&mut c, val(slot, calltype), 0);
             }
@@ -42894,7 +43809,7 @@ fn propagate_result_union<a>(c: (&a mut C), x: Val, unwrap: u64) -> Val {
     mark(&mut c, success);
     sty := success_members(&mut c, ty);
     if s == 1 {
-        payload := rec_load(&mut c, xt, 1, 0);
+        payload := payload_load(&mut c, xt, ty, sty);
         move_out(&mut c, val(xt, ty));
         free_enum_shell(&mut c, xt, ty);
         source := place_of(&mut c, xt);
@@ -42978,7 +43893,7 @@ fn propagate_union<a>(c: (&a mut C), x: Val, unwrap: u64) -> Val {
     }
     mark(&mut c, ok);
     ownership::restore(&mut c.check, &before);
-    n := rec_load(&mut c, xt, 1, 0);
+    n := payload_load(&mut c, xt, x.ty, args[0]);
     move_out(&mut c, val(xt, x.ty));
     free_enum_shell(&mut c, xt, x.ty);
     ty := args[0];
@@ -43129,7 +44044,7 @@ fn propagate<a>(c: (&a mut C), v: Val, unwrap: u64) -> Val {
             payload := imm(&mut c, 0);
             mut returned = 0;
             if framed(&mut c, result) {
-                returned = enum_frame(&mut c, tag, payload);
+                returned = enum_frame(&mut c, tag, payload, result, 1);
             } else {
                 returned = invoke(&mut c, view("rt_enum"), two(tag, payload));
             }
@@ -43164,7 +44079,7 @@ fn propagate<a>(c: (&a mut C), v: Val, unwrap: u64) -> Val {
     }
     mark(&mut c, ok);
     ownership::restore(&mut c.check, &before);
-    n := rec_load(&mut c, xt, 1, 0);
+    n := payload_load(&mut c, xt, x.ty, field_type(&mut c, x.ty, k));
     move_out(&mut c, val(xt, x.ty));
     free_enum_shell(&mut c, xt, x.ty);
     ty := field_type(&mut c, x.ty, k);
@@ -43180,7 +44095,7 @@ fn propagate<a>(c: (&a mut C), v: Val, unwrap: u64) -> Val {
 fn binary<a>(c: (&a mut C), k: u64, left: u64, right: u64) -> u64 {
     if k == 267 {
         mut f = "rt_pow";
-        if (c.overflow == 0) & (c.raw == 0) {
+        if c.overflow == 0 {
             f = "rt_wrapping_pow";
             fx_would_trap(&mut c, view("rt_pow"));
         }
@@ -43218,7 +44133,7 @@ fn binary<a>(c: (&a mut C), k: u64, left: u64, right: u64) -> u64 {
                 mark(&mut c, ok);
             }
         } else {
-            if (c.overflow != 0) || (c.raw != 0) {
+            if c.overflow != 0 {
                 ok := label(&mut c);
                 jump(&mut c, view("jnc"), ok);
                 site_kind(&mut c, 2);
@@ -43236,7 +44151,7 @@ fn binary<a>(c: (&a mut C), k: u64, left: u64, right: u64) -> u64 {
         o(&mut c, view("orq %rcx,%rax\n"));
     }
     if (k == 271) || (k == 272) {
-        if (c.overflow != 0) || (c.raw != 0) {
+        if c.overflow != 0 {
             limit := imm(&mut c, 63);
             get(&mut c, right, view("%rcx"));
             get(&mut c, limit, view("%rax"));
@@ -45147,7 +46062,7 @@ fn chained_field_assignment<a>(c: (&a mut C)) -> unit {
     a := assign_field_path(&mut c, base.t, base.ty);
     target := a.t;
     fieldty := ty_arg(&mut c, a.ty);
-    assignment_tail(&mut c, 0, base.t, base.ty, target, u64[1, fieldty, c.ref_assign_d, c.ref_assign_k], view(fname), record_ty);
+    assignment_tail(&mut c, 0, base.t, base.ty, target, u64[1, fieldty, c.ref_assign_d, c.ref_assign_k, c.ref_assign_base, c.ref_assign_rty], view(fname), record_ty);
     return ();
 }
 // Writing or mutably borrowing a string's bytes. A string literal is a `string` (read-only,
@@ -45511,7 +46426,7 @@ fn if_let<a>(c: (&a mut C)) -> unit {
     jump(&mut c, view("jne"), no);
     mark := c.locals.len();
     payloads := c.resources.len();
-    payload := rec_load(&mut c, xt, 1, 0);
+    payload := payload_load(&mut c, xt, xty, pty);
     own(&mut c, payload, pty);
     source := place_of(&mut c, xt);
     dest := place_of(&mut c, payload);
@@ -47600,7 +48515,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
                     target := a.t;
                     fieldty := ty_arg(&mut c, a.ty);
                     mut none = u8[];
-                    assignment_tail(&mut c, 0, head.t, head.ty, target, u64[1, fieldty, c.ref_assign_d, c.ref_assign_k], view(none), 0);
+                    assignment_tail(&mut c, 0, head.t, head.ty, target, u64[1, fieldty, c.ref_assign_d, c.ref_assign_k, c.ref_assign_base, c.ref_assign_rty], view(none), 0);
                     return ();
                 }
                 capture_assignment(&mut c, view(name));
@@ -47639,6 +48554,8 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         mut fname = u8[];
         mut assigned_d = 0;
         mut assigned_k = 0;
+        mut assigned_base = 0;
+        mut assigned_rty = 0;
         here_at := c.pos;
         if (kind(&mut c) == 46) & (kind_at(&mut c, here_at + 1) == 1) {
             fname = tok_text(&mut c, here_at + 1);
@@ -47650,6 +48567,8 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
             fieldty = ty_arg(&mut c, a.ty);
             assigned_d = c.ref_assign_d;
             assigned_k = c.ref_assign_k;
+            assigned_base = c.ref_assign_base;
+            assigned_rty = c.ref_assign_rty;
         }
         mut field_name = u8[];
         mut record_ty = 0;
@@ -47661,7 +48580,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
             }
             record_ty = shape;
         }
-        assignment_tail(&mut c, l, id, ty, target, u64[through, fieldty, assigned_d, assigned_k], view(field_name), record_ty);
+        assignment_tail(&mut c, l, id, ty, target, u64[through, fieldty, assigned_d, assigned_k, assigned_base, assigned_rty], view(field_name), record_ty);
         // `x = e` writes the binding; `x.f = e` writes a field of what `x` owns, which is not a fact
         // about `x`'s own value.
         if through == 0 {
@@ -47683,7 +48602,7 @@ fn discard_value<a>(c: (&a mut C), v: Val) -> unit {
         base := info.base;
         kind := ty_kind(&mut c, v.ty);
         if base != 0 {
-            if needs_drop(&mut c, v.ty) || kind == 7 {
+            if affine(&mut c, v.ty) {
                 moved := move_value(&mut c, v);
                 owner := resource(&mut c, moved.t);
                 release(&mut c, owner - 1);
@@ -47704,9 +48623,15 @@ fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, t
     // The field the path ends at, when the target was read by `assign_field_path`.
     mut assigned_d = 0;
     mut assigned_k = 0;
+    mut assigned_base = 0;
+    mut assigned_rty = 0;
     if through_fieldty.len() > 3 {
         assigned_d = through_fieldty[2];
         assigned_k = through_fieldty[3];
+    }
+    if through_fieldty.len() > 5 {
+        assigned_base = through_fieldty[4];
+        assigned_rty = through_fieldty[5];
     }
     if through != 0 {
         pin_assignment(&mut c, target);
@@ -47821,6 +48746,32 @@ fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, t
         }
         if assigned_d != 0 {
             ref_field(&mut c, assigned_d - 1, assigned_k, v.t, view(rterm), vstart);
+            // Every predicate across fields that reads this field is owed too, over the new value
+            // and the other fields as the record holds them now. Those have no term (the root is
+            // `mut`), so strict mode cannot prove such a write: it rebuilds the record instead.
+            ad := assigned_d - 1;
+            for j in c.decls[ad].count {
+                if ref_pred_cross(&mut c, ad, j) && ref_pred_reads(&mut c, ad, j, assigned_k) {
+                    fs := ref_pred_fields(&mut c, ad, j);
+                    mut by_slot = u64[];
+                    mut by_term = u8[][];
+                    for m in c.decls[ad].count {
+                        by_slot.push(0);
+                        by_term.push(u8[]);
+                    }
+                    for q in fs.len() {
+                        m := fs[q];
+                        if m == assigned_k {
+                            exchange(&mut by_slot[m], v.t);
+                            exchange(&mut by_term[m], rterm.copy());
+                        } else {
+                            loaded := field_load(&mut c, assigned_base, assigned_rty, m, 0);
+                            exchange(&mut by_slot[m], loaded);
+                        }
+                    }
+                    ref_field_cross(&mut c, ad, j, assigned_rty, &by_slot, &by_term, vstart, view("a write of one field leaves the others without a term: rebuild the record with a literal"));
+                }
+            }
         } else {
             if fname.len() != 0 {
                 ref_field_named(&mut c, rtype, view(fname), v.t, view(rterm), vstart);
@@ -47882,8 +48833,9 @@ fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, t
     // is either the interior address itself (an address slot) or the proxy slot that holds it.
     embedded := ((is_c_record(&mut c, fieldty) != 0)
         & ((caddr_ty(&mut c, target) != 0) | embedded_place(&mut c, target)))
-        | (plain(&mut c, fieldty) & embedded_place(&mut c, target));
-    if through != 0 && !embedded {
+        | (framed(&mut c, fieldty) & embedded_place(&mut c, target));
+    // An inline record that owns something is dropped in place before its words are replaced.
+    if through != 0 && (!embedded || frame_drops(&mut c, fieldty)) {
         if needs_drop(&mut c, fieldty) {
             get(&mut c, target, view("%rax"));
             o(&mut c, view("movq (%rax),%rdi\n"));
@@ -48297,8 +49249,8 @@ fn match_statement<a>(c: (&a mut C)) -> unit {
                     value := rec_load(&mut c, xt, 1, 0);
                     bind(&mut c, b, pty, value, 0);
                 } else {
-                    at := rec_load(&mut c, xt, 1, 1);
-                    n := word_reference(&mut c, at, pty);
+                    at := payload_ref_word(&mut c, xt, x.ty, pty);
+                    n := payload_reference(&mut c, at, x.ty, pty);
                     refty := reference_type(&mut c, pty, refmode);
                     root := place_of(&mut c, xt);
                     target := member_place(&mut c, root, 1, pty);
@@ -48323,7 +49275,7 @@ fn match_statement<a>(c: (&a mut C)) -> unit {
                 }
             }
         } else {
-            payload := rec_load(&mut c, xt, 1, 0);
+            payload := payload_load(&mut c, xt, x.ty, pty);
             own(&mut c, payload, pty);
             source := place_of(&mut c, xt);
             dest := place_of(&mut c, payload);
@@ -48591,7 +49543,7 @@ fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
 fn drop_call<a>(c: (&a mut C), ty: u64) -> unit {
     // A framed record's words belong to a frame or to the place that holds them: nothing to free.
     // An array that owns its elements still drops them, in place (its helper frees no storage).
-    if framed(&mut c, ty) && !array_owned(&mut c, ty) {
+    if framed(&mut c, ty) && !frame_drops(&mut c, ty) {
         return ();
     }
     // A body emitted without its bindings (a template's validation replay) cannot name a helper: the
@@ -48665,6 +49617,25 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                 // needs the name visible across parts, and a build made of several objects needs it
                 // too (B1 stage 3).
                 fx_end(&mut c);
+                if in_place_record(&mut c, ty) {
+                    emit_drop_in_place(&mut c, ty, view(hook));
+                    helper_sym := drop_symbol(&mut c, ty);
+                    fx_helper(&mut c, view(helper_sym));
+                    weak_def(&mut c);
+                    push_bytes(&mut c.out, view(helper_sym));
+                    c.out.push(10);
+                    push_bytes(&mut c.out, view(helper_sym));
+                    o(&mut c, view(":\ntestq %rdi,%rdi\n"));
+                    jump(&mut c, view("jz"), done);
+                    o(&mut c, view("pushq %rbp\nmovq %rsp,%rbp\npushq %r12\npushq %r13\nmovq %rdi,%r12\n"));
+                    call_out(&mut c, view(drop_in_place_symbol(&mut c, ty)));
+                    o(&mut c, view("movq %r12,%rdi\n"));
+                    call_out(&mut c, view("rt_free"));
+                    o(&mut c, view("popq %r13\npopq %r12\nleave\n"));
+                    mark(&mut c, done);
+                    o(&mut c, view("ret\n"));
+                    continue;
+                }
                 helper_sym := drop_symbol(&mut c, ty);
                 fx_helper(&mut c, view(helper_sym));
                 weak_def(&mut c);
@@ -48758,7 +49729,8 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                     o(&mut c, view("movq %r13,%rax\nimulq $"));
                     on(&mut c, w);
                     o(&mut c, view(",%rax\naddq %r12,%rax\n"));
-                    if is_array(&mut c, arg) {
+                    if is_array(&mut c, arg) || array_record_elem(&mut c, arg) {
+                        // An inline element is dropped in place, at its address.
                         o(&mut c, view("movq %rax,%rdi\n"));
                     } else {
                         o(&mut c, view("movq (%rax),%rdi\n"));
@@ -48769,7 +49741,24 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                     mark(&mut c, end);
                 }
                 if kind == 6 {
-                    // Inline elements (plain or C records) own nothing: only the buffer is freed.
+                    // Inline elements that own something are dropped in place, each at its address;
+                    // plain or C records own nothing. Then the buffer is freed.
+                    fw := flat_bytes(&mut c, arg);
+                    if (fw != 0) && frame_drops(&mut c, arg) {
+                        head := label(&mut c);
+                        end := label(&mut c);
+                        o(&mut c, view("xorq %r13,%r13\n"));
+                        mark(&mut c, head);
+                        o(&mut c, view("cmpq 8(%r12),%r13\n"));
+                        jump(&mut c, view("jae"), end);
+                        o(&mut c, view("movq %r13,%rdi\nimulq $"));
+                        on(&mut c, fw);
+                        o(&mut c, view(",%rdi\naddq (%r12),%rdi\n"));
+                        drop_call(&mut c, arg);
+                        o(&mut c, view("incq %r13\n"));
+                        jump(&mut c, view("jmp"), head);
+                        mark(&mut c, end);
+                    }
                     if needs_drop(&mut c, arg) & (flat_bytes(&mut c, arg) == 0) {
                         head := label(&mut c);
                         end := label(&mut c);
@@ -48825,6 +49814,65 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
         }
     }
     return ();
+}
+// The in-place drop of the struct or tuple `ty` (drop_in_place_symbol): with its address in %rdi,
+// the user's `drop` runs on it as `&mut self`, then each field that owns something is dropped - a
+// word that holds an owner by that owner's drop, an inline record or array by its own in-place
+// drop at its address. A zero owner word is an owner moved out (a partial move leaves 0 behind), so
+// the word's drop - which starts by testing for 0 - skips it. Nothing is freed.
+fn emit_drop_in_place<a, b>(c: (&a mut C), ty: u64, hook: &b [u8]) -> unit {
+    sym := drop_in_place_symbol(&mut c, ty);
+    fx_helper(&mut c, view(sym));
+    weak_def(&mut c);
+    push_bytes(&mut c.out, view(sym));
+    c.out.push(10);
+    push_bytes(&mut c.out, view(sym));
+    o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\npushq %r12\npushq %r13\nmovq %rdi,%r12\n"));
+    done := label(&mut c);
+    if live_word(&mut c, ty) {
+        // Moved out of the place that held it: nothing is here to drop.
+        o(&mut c, view("cmpq $0,"));
+        on(&mut c, (record_words(&mut c, ty) - 1) * 8);
+        o(&mut c, view("(%r12)\n"));
+        jump(&mut c, view("je"), done);
+    }
+    if hook.len() != 0 {
+        o(&mut c, view("movq %r12,%rdi\n"));
+        call_out(&mut c, hook);
+    }
+    index := ty_arg(&mut c, ty);
+    count := c.decls[index].count;
+    for i in count {
+        t := field_type(&mut c, ty, i);
+        if needs_drop(&mut c, t) {
+            if inline_field(&mut c, ty, i) {
+                // A plain record or array held inline owns nothing; one that owns has its own
+                // in-place drop.
+                if !frame_drops(&mut c, t) {
+                    continue;
+                }
+                o(&mut c, view("leaq "));
+                on(&mut c, field_word(&mut c, ty, i) * 8);
+                o(&mut c, view("(%r12),%rdi\n"));
+                call_out(&mut c, view(drop_in_place_ref(&mut c, t)));
+            } else {
+                o(&mut c, view("movq "));
+                on(&mut c, field_word(&mut c, ty, i) * 8);
+                o(&mut c, view("(%r12),%rdi\n"));
+                holder_drop(&mut c, t);
+            }
+        }
+    }
+    mark(&mut c, done);
+    o(&mut c, view("popq %r13\npopq %r12\nleave\nret\n"));
+    return ();
+}
+// Names the in-place drop of `ty` and asks for it to be emitted (its boxed helper is emitted with it).
+fn drop_in_place_ref<a>(c: (&a mut C), alias: u64) -> u8[] {
+    // An alias (a bound type parameter) names the helper of the type it stands for.
+    ty := base_type(&mut c, alias);
+    drop_ref_name(&mut c, ty);
+    return drop_in_place_symbol(&mut c, ty);
 }
 fn emit_exit<a, b>(c: (&a mut C), argument: &b [u8]) -> unit {
     if c.target == 4 {
@@ -49103,20 +50151,26 @@ const IFACE_TAG_STATIC: u64 = 19;
 // The effect summary of every function the module emitted (docs/design/effects.md, "Summaries"):
 // computed facts, not claims, so a run that calls one without its body knows what it does.
 const IFACE_TAG_FACTS: u64 = 20;
+// The small runtime bodies another unit may inline (docs/design/separate-compilation.md, "Inlining
+// across a module boundary"): the symbol and its crossing form, carried in `runtime.facts` after the
+// summary, so the readers' keys (the file's digest) move when a body does.
+const IFACE_TAG_INLINE: u64 = 21;
 
 // The ABI this compiler builds objects for, as the one line every interface carries: the `dyn`
 // layout (docs/design/fat-dyn.md) - a `&dyn I` is an 8-byte pointer to a 16-byte, 8-aligned
 // `{data, vtable}` pair - and what a reference to a record is (`ref record = address`: the record's
 // own address, docs/design/unboxed-values.md stage 1a; before it, the address of a word holding
 // that), and that a plain record held by a record or a vector is stored inline (`record plain =
-// inline`, stage 1b). A module that was compiled for another layout cannot be linked into the same program by
+// inline`, stage 1b), and that a call passes six words in registers and the rest on the stack
+// (`args = 6 registers then stack`, docs/design/call-abi.md S3; before it, the rest in a heap record
+// behind the sixth register). A module that was compiled for another layout cannot be linked into the same program by
 // accident: the writer writes this line and the reader refuses a file whose line differs.
 //
 // The string is the whole spelling, `abi ` included. It is carried as one length-counted field of
 // the module header record and rendered back verbatim by `grail iface dump`, so the single-source
 // rule survives the encoding: nothing else in this compiler knows how the ABI is written.
 fn iface_dyn_abi() -> string {
-    return "abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame";
+    return "abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame args = 6 registers then stack";
 }
 
 // ---- writing ----
@@ -49299,6 +50353,9 @@ fn iface_tag_name(tag: u64) -> string {
     if tag == IFACE_TAG_FACTS {
         return "facts";
     }
+    if tag == IFACE_TAG_INLINE {
+        return "inline";
+    }
     return "unknown";
 }
 fn iface_known_tag(tag: u64) -> bool {
@@ -49306,7 +50363,7 @@ fn iface_known_tag(tag: u64) -> bool {
         || (tag == IFACE_TAG_TYPE) || (tag == IFACE_TAG_ALIAS) || (tag == IFACE_TAG_CONST)
         || (tag == IFACE_TAG_FN) || (tag == IFACE_TAG_INHERENT) || (tag == IFACE_TAG_IFACE)
         || (tag == IFACE_TAG_IMPL) || (tag == IFACE_TAG_ENV) || (tag == IFACE_TAG_INHERENT_TYPE)
-        || (tag == IFACE_TAG_STATIC) || (tag == IFACE_TAG_FACTS);
+        || (tag == IFACE_TAG_STATIC) || (tag == IFACE_TAG_FACTS) || (tag == IFACE_TAG_INLINE);
 }
 // Where a refusal happened, so no diagnostic says only "malformed".
 fn iface_where<a>(p: (&a IR)) -> u8[] {
@@ -49353,14 +50410,17 @@ fn iface_rv<a>(p: (&a mut IR)) -> u64 {
     mut done = 0;
     while done == 0 {
         b := iface_r1(&mut p);
+        // Ten bytes carry 64 bits: the tenth, at scale 2^63, holds bit 63 alone and ends the number.
+        // (Refusing at 2^56 refused every u64 from 2^63 up, and every negative signed constant.)
+        if (scale == 9223372036854775808) && (1 < b) {
+            iface_bad(&mut p, view("carries a number wider than 64 bits"));
+            return 0;
+        }
         n = n + (b & 127) * scale;
         if (b & 128) == 0 {
             done = 1;
         } else {
             scale = scale * 128;
-            if 72057594037927936 < scale {
-                iface_bad(&mut p, view("carries a number wider than 64 bits"));
-            }
         }
     }
     return n;
@@ -50158,8 +51218,10 @@ fn iface_enc_impl_params<a>(c: (&a mut C), out: (&a mut u8[]), deps: (&a mut u64
     iface_w_reqs(&mut c, &mut out, &reqs);
     for i in reqs.len() {
         for j in reqs[i].len() {
-            deps.push(2);
-            deps.push(reqs[i][j]);
+            if reqs[i][j] < CALLABLE_BOUND {
+                deps.push(2);
+                deps.push(reqs[i][j]);
+            }
         }
     }
     return ();
@@ -51017,11 +52079,10 @@ fn iface_module_bytes<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std:
     }
     mut source_digest = digest.copy();
     if source_digest.len() == 0 {
-        source := host::read_file(view(path));
-        if source.len() == 0 {
+        if iface_source_len(&mut c, view(path)) == 0 {
             iface_refuse(view(path), view("cannot read the source this interface describes"));
         }
-        source_digest = iface_digest(&source);
+        source_digest = iface_source_digest(&mut c, view(path));
     }
     // The trailer: the source digest, then the digest of every byte above it. The cache keys on the
     // bytes before the trailer (the surface), so a module edit that changes no declaration leaves
@@ -53824,6 +54885,8 @@ fn iface_impl_self<a>(c: (&a mut C), record: u64) -> unit {
             for j in reqs[i].len() {
                 if reqs[i][j] < CALLABLE_BOUND {
                     proofs.push(intern_args(&mut c, 15, reqs[i][j], 0, u64[], u64[]));
+                } else if reqs[i][j] < CALLABLE_PENDING {
+                    proofs.push(reqs[i][j] - CALLABLE_BOUND);
                 }
             }
         }
@@ -53860,21 +54923,21 @@ fn iface_scan<a>(path: &a [u8]) -> u8[] {
         c := text[i];
         if (c == 32) || (c == 9) || (c == 10) || (c == 13) || (c == 12) {
             i += 1;
-        } else if (c == 47) & (i + 1 < text.len()) & (text[i + 1] == 47) {
-            while (i < text.len()) & (text[i] != 10) {
+        } else if (c == 47) && (i + 1 < text.len()) && (text[i + 1] == 47) {
+            while (i < text.len()) && (text[i] != 10) {
                 i += 1;
             }
         } else {
             mut word = u8[];
-            while (i < text.len()) & iface_ident_byte(text[i]) {
+            while (i < text.len()) && iface_ident_byte(text[i]) {
                 word.push(text[i]);
                 i += 1;
             }
             if same(view(word), view("module")) {
-                while (i < text.len()) & ((text[i] == 32) || (text[i] == 9)) {
+                while (i < text.len()) && ((text[i] == 32) || (text[i] == 9)) {
                     i += 1;
                 }
-                while (i < text.len()) & iface_ident_byte(text[i]) {
+                while (i < text.len()) && iface_ident_byte(text[i]) {
                     name.push(text[i]);
                     i += 1;
                 }
@@ -53985,6 +55048,15 @@ fn fx_write_runtime_facts<a>(c: (&a mut C)) -> unit {
     out.push(70);
     out.push(IFACE_VERSION);
     iface_wrec(&mut out, IFACE_TAG_FACTS, view(facts));
+    if c.xinl.names.len() != 0 {
+        mut bodies = u8[];
+        iface_wv(&mut bodies, c.xinl.names.len());
+        for i in c.xinl.names.len() {
+            iface_ws(&mut bodies, view(c.xinl.names[i]));
+            iface_ws(&mut bodies, view(c.xinl.bodies[i]));
+        }
+        iface_wrec(&mut out, IFACE_TAG_INLINE, view(bodies));
+    }
     iface_seal_out(&mut out, view(""));
     host::mkdir(view(c.iface_emit));
     file := iface_join(view(c.iface_emit), view("runtime"), view(".facts"));
@@ -54019,6 +55091,20 @@ fn fx_read_runtime_facts<a>(c: (&a mut C)) -> unit {
     len := iface_rv(&mut p);
     p.stop = p.at + len;
     iface_rec_facts(&mut c, &mut p);
+    // The inlinable bodies, when the run that wrote it exported any.
+    p.at = p.stop;
+    p.stop = data.len();
+    if (p.at < p.stop) && (data[p.at] == IFACE_TAG_INLINE) {
+        start := iface_rec(&mut p, IFACE_TAG_INLINE);
+        n := iface_rv(&mut p);
+        for i in n {
+            name := iface_rs(&mut p);
+            body := iface_rs(&mut p);
+            c.xinl.names.push(name);
+            c.xinl.bodies.push(body);
+        }
+        iface_rend(&mut p, start);
+    }
     return ();
 }
 // The interfaces this run wrote, again, now with the summaries its solved bodies give them, and the
@@ -54054,10 +55140,36 @@ fn iface_emit_facts<a>(c: (&a mut C)) -> unit {
     return ();
 }
 // The source digest the manifest records for module `m`: the digest of the file it was read from.
+// The sha256 of the source file at `path`, read and digested once per run: the interface's trailer,
+// its manifest row and the facts' manifest all name the same source.
+fn iface_source_digest<a, b>(c: (&a mut C), path: &b [u8]) -> u8[] {
+    for i in c.srcdig_paths.len() {
+        if same(view(c.srcdig_paths[i]), view(path)) {
+            return c.srcdig_vals[i].copy();
+        }
+    }
+    source := host::read_file(view(path));
+    digest := iface_digest(&source);
+    c.srcdig_paths.push(copy_bytes(view(path)));
+    c.srcdig_vals.push(digest.copy());
+    c.srcdig_lens.push(source.len());
+    return digest;
+}
+// The length of that source file (after iface_source_digest has read it).
+fn iface_source_len<a, b>(c: (&a mut C), path: &b [u8]) -> u64 {
+    iface_source_digest(&mut c, view(path));
+    for i in c.srcdig_paths.len() {
+        if same(view(c.srcdig_paths[i]), view(path)) {
+            return c.srcdig_lens[i];
+        }
+    }
+    return 0;
+}
 fn iface_manifest_source_digest<a, b>(c: (&a mut C), m: &b [u8]) -> u8[] {
     for i in c.iface_list.len() {
         if same(view(c.iface_list[i].module), view(m)) {
-            return iface_digest(&host::read_file(view(c.iface_list[i].path)));
+            path := c.iface_list[i].path.copy();
+            return iface_source_digest(&mut c, view(path));
         }
     }
     return u8[];
@@ -54115,7 +55227,7 @@ fn iface_emit_all<a>(c: (&a mut C)) -> unit {
         out_push(&mut row, 32);
         push_bytes(&mut row, view(iface_digest(&text)));
         out_push(&mut row, 32);
-        push_bytes(&mut row, view(iface_digest(&host::read_file(view(path)))));
+        push_bytes(&mut row, view(iface_source_digest(&mut c, view(path))));
         out_push(&mut row, 10);
         push_bytes(&mut manifest, view(row));
     }
@@ -54163,6 +55275,9 @@ pub fn main() -> u64 {
         check_only: 0,
         quiet: 0,
         f1_what: 0,
+        forge_sig: u8[],
+        forge_words: 0,
+        forge_result: 0,
         debug_funcs: DebugFunc[],
         debug_vars: DebugVar[],
         debug_types: DebugType[],
@@ -54189,9 +55304,12 @@ pub fn main() -> u64 {
         spec_closures: 0,
         validating: 0,
         ffi_fixed: 0,
+        ffi_blocking: u8[][],
+        ffi_block_now: 0,
         caddr: u64[],
         interior: u64[],
         box_thunks: u64[],
+        word_refs: u64[],
         result_dest: 0,
         layout_memo: u64[],
         layout_offsets: u64[][],
@@ -54212,6 +55330,9 @@ pub fn main() -> u64 {
         fmod_names: u8[][],
         fmod_ids: u64[][],
         fmod_n: 0,
+        srcdig_paths: u8[][],
+        srcdig_vals: u8[][],
+        srcdig_lens: u64[],
         funcs: Func[],
         func_slots: u64[],
         func_keys: u64[],
@@ -54328,9 +55449,12 @@ pub fn main() -> u64 {
         pv_pred_mode: 0,
         pv_arith_ok: 0,
         ref_assign_target: 0,
+        dyn_result_seen: 0,
         proved_label: 0,
         ref_assign_d: 0,
         ref_assign_k: 0,
+        ref_assign_base: 0,
+        ref_assign_rty: 0,
         strict_refinements: 0,
         strict_modules: u8[][],
         strict_next: 0,
@@ -54407,6 +55531,7 @@ pub fn main() -> u64 {
         spell_lenient: 0,
         spell_failed: 0,
         drop_emitted: u8[][],
+        xinl: optimize::new_shared(),
         iface_emit: u8[],
         iface_verify: 0,
         iface_dump: u8[],
@@ -54900,7 +56025,40 @@ pub fn main() -> u64 {
                                     exchange(&mut c.backend, 1);
                                     offset += 1;
                                 } else {
-                                    if starts_with(view(option), view("--f1-what=")) {
+                                    if starts_with(view(option), view("--forge-signature=")) {
+                                        // A test aid: record SYMBOL's signature fact with WORDS
+                                        // argument words instead of its real count, so the lifter's
+                                        // checks of a wrong signature can be shown to fire.
+                                        // `:1` after WORDS also records a one-word result for a
+                                        // body that returns two (no `dyn_result` fact).
+                                        mut colon = 0;
+                                        mut second = 0;
+                                        for d in option.len() - 18 {
+                                            if option[18 + d] == 58 {
+                                                if colon == 0 {
+                                                    colon = 18 + d;
+                                                } else {
+                                                    second = 18 + d;
+                                                }
+                                            }
+                                        }
+                                        mut end = option.len();
+                                        if second != 0 {
+                                            end = second;
+                                            exchange(&mut c.forge_result, 1);
+                                        }
+                                        mut n = 0;
+                                        for d in end - colon - 1 {
+                                            n = n * 10 + u64(option[colon + 1 + d]) - 48;
+                                        }
+                                        mut sym = u8[];
+                                        for d in colon - 18 {
+                                            sym.push(option[18 + d]);
+                                        }
+                                        exchange(&mut c.forge_sig, sym);
+                                        exchange(&mut c.forge_words, n);
+                                        offset += 1;
+                                    } else if starts_with(view(option), view("--f1-what=")) {
                                         // A test aid: record a deliberately wrong F1 kind so the
                                         // --verify-facts checks can be shown to fire.
                                         mut n = 0;
@@ -55201,7 +56359,10 @@ pub fn main() -> u64 {
             exchange(&mut c.file, at);
             exchange(&mut c.pos, 0);
         }
-        fail(&mut c, view("no `main` and no public function with at most one parameter to use as the entry: add `pub fn main()`"));
+        mut said = copy_bytes(view("no `main` in "));
+        push_bytes(&mut said, view(input_path(&c, at)));
+        push_bytes(&mut said, view(": a program needs `pub fn main()` (or a public function taking nothing or the argument view); a module without one is a library, used from a program"));
+        fail(&mut c, view(said));
     }
     f := &c.funcs[e - 1];
     m := f.module.copy();
@@ -55421,13 +56582,18 @@ pub fn main() -> u64 {
         }
     } else {
         if c.split != 0 {
-            out = optimize::optimize_parts(view(c.out), 1, &mut c.marks, &mut c.part_names, &c.facts, c.emit_ir, &mut ir_text, &mut call_syms, &mut call_counts, view(c.fn_dir), view(c.fn_id), &c.plan_at, &c.known);
+            out = optimize::optimize_parts(view(c.out), 1, &mut c.marks, &mut c.part_names, &c.facts, c.emit_ir, &mut ir_text, &mut call_syms, &mut call_counts, view(c.fn_dir), view(c.fn_id), &c.plan_at, &c.known, &mut c.xinl);
         } else {
-            out = optimize::optimize(view(c.out), &c.facts, c.emit_ir, &mut ir_text, &mut call_syms, &mut call_counts, view(c.fn_dir), view(c.fn_id), &c.plan_at, &c.known);
+            out = optimize::optimize(view(c.out), &c.facts, c.emit_ir, &mut ir_text, &mut call_syms, &mut call_counts, view(c.fn_dir), view(c.fn_id), &c.plan_at, &c.known, &mut c.xinl);
         }
         // The check the byte scan used to make, now from the IR: a call site that bypasses the
         // recording helpers is a compiler bug, and a bug here is a silently weaker proof.
         fx_check_calls(&mut c, &call_syms, &call_counts);
+        // The runtime's summary again, now with the bodies the optimiser exported (only the run
+        // that emitted the runtime writes it).
+        if c.xinl.names.len() != 0 {
+            fx_write_runtime_facts(&mut c);
+        }
     }
     if c.emit_ir != 0 {
         mut ir_path = copy_bytes(view(host::arg(1 + offset)));
@@ -55501,6 +56667,10 @@ pub fn main() -> u64 {
         if c.backend != 0 {
             // LLVM IR for the lifted functions beside the native remainder: PATH.ll and PATH.
             lowered := llvm::lower(view(out), view("x86_64-unknown-linux-gnu"), &c.facts, c.verify_facts, c.range_facts);
+            if lowered.error.len() != 0 {
+                host::print(view(lowered.error));
+                return 1;
+            }
             mut ir_path = copy_bytes(view(path));
             push_bytes(&mut ir_path, view(".ll"));
             written := host::write_file(view(ir_path), view(lowered.ir));
@@ -55524,6 +56694,10 @@ pub fn main() -> u64 {
         // LLVM IR (PATH.ll) for the lifted functions; the remainder goes through the usual
         // instruction selection, followed by the calling-convention thunks.
         lowered := llvm::lower_for(view(out), target, &c.facts, c.verify_facts, c.range_facts);
+        if lowered.error.len() != 0 {
+            host::print(view(lowered.error));
+            return 1;
+        }
         mut ir_path = copy_bytes(view(path));
         push_bytes(&mut ir_path, view(".ll"));
         written := host::write_file(view(ir_path), view(lowered.ir));

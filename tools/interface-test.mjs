@@ -22,10 +22,15 @@
 // the source file, which keeps the compiler's own digest honest.
 //
 // Usage: bun tools/interface-test.mjs [--full] [--target T]
+//
+// The corpus part runs in GRAIL_JOBS processes (default 8), each taking every Nth case and writing to
+// its own directories, while this one runs the other proofs; the cases and their verdicts are the
+// same in any number of processes. GRAIL_TEST_FILTER=REGEX runs only the corpus cases whose name
+// matches, and none of the other proofs - the retry of a failed corpus case.
 
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import assert from 'node:assert/strict';
 import { assemble, buildCompiler, command, compilerSources, emulations, hostTarget, linkInputs, root, targetName, triples } from './native.mjs';
@@ -34,8 +39,12 @@ const flags = process.argv.slice(2);
 const target = targetName(flags.includes('--target') ? flags[flags.indexOf('--target') + 1] : hostTarget);
 const full = flags.includes('--full');
 const compiler = buildCompiler();
+// `--corpus-stripe K/N`: a corpus worker of the run that started it (proveCorpusParallel).
+const stripeAt = flags.indexOf('--corpus-stripe');
+const stripe = stripeAt >= 0 ? flags[stripeAt + 1].split('/').map(Number) : null;
+const filter = process.env.GRAIL_TEST_FILTER ? new RegExp(process.env.GRAIL_TEST_FILTER) : null;
 const work = join(root, '.work/interface-test', target);
-rmSync(work, { recursive: true, force: true });
+if (!stripe) rmSync(work, { recursive: true, force: true });
 mkdirSync(work, { recursive: true });
 const runtime = join(root, 'compiler/runtime.grl');
 const platform = join(root, 'compiler/os-linux.grl');
@@ -307,7 +316,7 @@ function proveDigests(directory) {
     // dereferences wrongly.
     assert.match(
       text,
-      /^abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame$/m,
+      /^abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame args = 6 registers then stack$/m,
       `${path}: the header does not state the \`dyn\` ABI`,
     );
     // Write, read, write again: the reader rebuilds the model the writer started from.
@@ -806,13 +815,15 @@ function corpusCases() {
     // still emitted and checked when `--full` asks for every case.
     if (modules.length === 0 && !full) continue;
     if (test.compileOnly && test.reject) continue;
+    if (filter && !filter.test(test.name)) continue;
     selected.push({ index: i, test, modules });
   }
   return selected;
 }
 
 function proveCorpus() {
-  const selected = corpusCases();
+  let selected = corpusCases();
+  if (stripe) selected = selected.filter((_, k) => k % stripe[1] === stripe[0]);
   let passed = 0;
   for (const { index, test, modules } of selected) {
     const directory = join(work, `${index}-${test.name.replace(/[^A-Za-z0-9_-]/g, '_')}`);
@@ -843,6 +854,51 @@ function proveCorpus() {
     passed += 1;
   }
   return passed;
+}
+
+// The corpus in GRAIL_JOBS worker processes, started now and waited for at the end: every case's
+// builds are its own, in its own directory, so the stripes do not touch each other. A worker's
+// output goes to a file, so a full pipe cannot stall it while this process runs the other proofs.
+function startCorpus() {
+  const jobs = Math.max(1, Number(process.env.GRAIL_JOBS || 8));
+  mkdirSync(work, { recursive: true });
+  const workers = [];
+  for (let k = 0; k < jobs; k += 1) {
+    const log = join(work, `corpus-${k}.log`);
+    const out = openSync(log, 'w');
+    const args = [process.argv[1], ...flags.filter(f => f !== '--corpus-stripe'), '--corpus-stripe', `${k}/${jobs}`];
+    const child = spawn(process.execPath, args, { stdio: ['ignore', out, out], env: { ...process.env, GRAIL_JOBS: '1' } });
+    workers.push({ log, done: new Promise(resolveDone => child.on('close', status => { closeSync(out); resolveDone(status); })) });
+  }
+  return workers;
+}
+async function finishCorpus(workers) {
+  let passed = 0;
+  let failed = false;
+  for (const w of workers) {
+    const status = await w.done;
+    const text = readFileSync(w.log, 'utf8');
+    const m = text.match(/^corpus-stripe: (\d+) passed$/m);
+    if (status !== 0 || !m) {
+      console.error(text);
+      failed = true;
+    } else passed += Number(m[1]);
+  }
+  if (failed) {
+    console.error('interface-test: a corpus case failed (above)');
+    process.exit(1);
+  }
+  return passed;
+}
+if (stripe) {
+  console.log(`corpus-stripe: ${proveCorpus()} passed`);
+  process.exit(0);
+}
+const corpusWorkers = startCorpus();
+if (filter) {
+  const corpus = await finishCorpus(corpusWorkers);
+  console.log(`interface: corpus agrees with source builds: ${corpus} programs matching ${filter}`);
+  process.exit(0);
 }
 
 // ---- the proofs -------------------------------------------------------------
@@ -1263,8 +1319,36 @@ report(
   `${closureKey.key} emitted by both under one name, output ${closureKey.stdout} as built from source`,
 );
 
+// Constants with bit 63 set travel through an interface: u64::MAX, 2^63, an FNV offset basis,
+// i64::MIN and -1 are written as ten-byte LEB128 numbers, and the reader must take all ten bytes
+// back (it once refused anything from 2^56 up as "wider than 64 bits").
+function proveWideConstants() {
+  const directory = join(work, 'wide');
+  mkdirSync(directory, { recursive: true });
+  const fixtures = name => join(root, 'tests/interfaces', name);
+  const all = [fixtures('wide_main.grl'), fixtures('wide_consts.grl'), runtime, platform];
+  const source = compile(all, join(directory, 'source'));
+  assert.equal(source.status, 0, `wide: source build failed\n${source.output}`);
+  const expected = run(link(all, join(directory, 'source')));
+  assert.equal(expected.stdout, '18446744073709551615\n9223372036854775808\n14695981039346656037\n-9223372036854775808\n-1\n', 'wide: the source build prints the wrong constants');
+  const ifaces = emit(all, directory);
+  const mainDir = join(directory, 'main');
+  const constsDir = join(directory, 'consts');
+  const main = compile([fixtures('wide_main.grl'), runtime, platform], mainDir, ['--use', ifaces, '--split']);
+  assert.equal(main.status, 0, `wide: the entry module does not compile against the interface\n${main.output}`);
+  const consts = compile([fixtures('wide_consts.grl'), runtime, platform], constsDir, ['--use', ifaces, '--split', '--no-entry']);
+  assert.equal(consts.status, 0, `wide: wide_consts does not compile against interfaces\n${consts.output}`);
+  const linked = [...parts(mainDir).files, ...partsOfModule(constsDir, 'wide_consts')];
+  const ran = run(linkParts(linked, directory, 'program', mainDir));
+  assert.equal(ran.stdout, expected.stdout, `wide: read through the interface the constants print ${JSON.stringify(ran.stdout)}`);
+  return JSON.stringify(ran.stdout);
+}
+
 const units = proveUnitsAcrossModules();
 report('methods, implementations and nested generics across separately compiled modules', `output ${units} as built from source`);
+
+const wide = proveWideConstants();
+report('u64 and i64 constants with bit 63 set travel in an interface', `output ${wide} as built from source`);
 
 const naming = proveNamingIsTotal();
 report(
@@ -1389,7 +1473,7 @@ report('inherent methods on a written type travel in an interface', writtenInher
 const effects = proveEffectsTravel();
 report('checked effects travel in an interface, and only when claimed', effects);
 
-const corpus = proveCorpus();
+const corpus = await finishCorpus(corpusWorkers);
 report('corpus agrees with source builds', `${corpus} programs (interface build, verify build and source build agree)` + (full ? ' - full corpus' : ''));
 
 console.log(`\ninterface-test: ${results.length} checks passed`);

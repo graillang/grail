@@ -123,6 +123,39 @@ and Zig, written the way each language is usually written:
 
 {{perf:engine#provenance}}
 
+## Abundance: the engine itself
+
+The programs above are written for comparison; Abundance's port is the engine this language is
+being built beside. `bun tools/abundance-perf.mjs` builds every program of the port's parity suite
+(`abundance/tests/*_test.grl`) through the build store - cold, and after one statement is added to
+`main` - runs its development and release builds with the suite's own arguments, checks the output
+against the C++ reference, and profiles the slowest release run. `--branch REF` adds another
+compiler's columns, so a change is measured on the engine the same way.
+
+{{perf:abundance#abundance-compile}}
+
+{{perf:abundance#abundance-run}}
+
+**What it found.** On the commit charted, only two of the ten programs build through the store.
+Every program that imports the port's hash module stops at the same place: the interface file the
+store writes for that module carries `fnv1a64_offset`, a `u64` constant above 2^63, and reading the
+interface back refuses it as "a number wider than 64 bits". The ten-byte encoding is the correct one
+for such a value, so the reader's width check is one byte short. The same program builds as one
+compiler run, which is how the parity suite builds it, so this is a fault of the per-module build
+only; it is reported, with a three-line reproduction, to the owner of the build store. The table
+above has a dash wherever a program could not be built.
+
+Of the two that build, `abgeo` (the cluster builder and its reader) is the slowest release run, and
+its hot spots are in the program's printing and float handling rather than in the geometry: the
+runtime's number formatting and `f32` rounding sit beside meshoptimizer's own `simplify_group` at
+the top of the profile.
+
+{{perf:abundance#abundance-compile-cpu}}
+
+{{perf:abundance#abundance-run-cpu}}
+
+{{perf:abundance#provenance}}
+
 ## Compile speed
 
 The same programs in four languages: hello world, and N copies of a record, its constructor and a
