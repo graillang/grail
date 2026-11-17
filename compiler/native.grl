@@ -3827,10 +3827,12 @@ fn ffi_marker_enter<a>(c: (&a mut C), slot: u64) -> unit {
     c.out.push(10);
     return ();
 }
-// After the call, with its result in memory: count the marker out - atomically, because the monitor
-// may set the word's top bit with a compare-and-swap at the same moment - and if the bit was set the
-// worker was given away during the call, so this thread becomes block-less (rt_foreign_lost, which
-// names the function once). A `blocking` call has its own leave hook.
+// After the call, with its result in memory: count the marker out and look at the pair's `retaken`
+// word (8 bytes on). x86-64 Linux does both with plain instructions - the monitor pays for the
+// ordering with membarrier (docs/design/concurrency-model.md, 2.4.1); Windows x64 keeps a locked
+// increment, and AArch64/RV64 a sequentially consistent one, as their full barrier until theirs is
+// wired in. A non-zero `retaken` goes to rt_foreign_return, which settles the retake with one
+// compare-and-swap. A `blocking` call has its own leave hook.
 fn ffi_hooks_leave<a, b>(c: (&a mut C), slot: u64, block_here: bool, symbol: &b [u8]) -> unit {
     if block_here {
         call_out(&mut c, view("rt_blocking_leave"));
@@ -3844,15 +3846,22 @@ fn ffi_hooks_leave<a, b>(c: (&a mut C), slot: u64, block_here: bool, symbol: &b 
         stack_slot(&mut c, slot);
         o(&mut c, view(",%r11\ntestq %r11,%r11\n"));
         jump(&mut c, view("je"), done);
-        o(&mut c, view("lock incq (%r11)\n"));
-        jump(&mut c, view("jns"), done);
+        if c.target == 0 {
+            o(&mut c, view("incq (%r11)\n"));
+        } else {
+            o(&mut c, view("lock incq (%r11)\n"));
+        }
+        o(&mut c, view("cmpq $0,8(%r11)\n"));
+        jump(&mut c, view("je"), done);
+        o(&mut c, view("movq %r11,%rsi\n"));
     } else {
         o(&mut c, view("movq "));
         stack_slot(&mut c, slot);
         o(&mut c, view(",%rdi\ntestq %rdi,%rdi\n"));
         jump(&mut c, view("je"), done);
-        o(&mut c, view("movl $1,%eax\natom.rmw add seqcst u64\nshrq $63,%rax\ntestq %rax,%rax\n"));
+        o(&mut c, view("movl $1,%eax\natom.rmw add seqcst u64\nmovq 8(%rdi),%rax\ntestq %rax,%rax\n"));
         jump(&mut c, view("je"), done);
+        o(&mut c, view("movq %rdi,%rsi\n"));
     }
     // The symbol's name, NUL-ended, as read-only data (as a `cstr` literal is emitted).
     name := label(&mut c);
@@ -3866,7 +3875,7 @@ fn ffi_hooks_leave<a, b>(c: (&a mut C), slot: u64, block_here: bool, symbol: &b 
     o(&mut c, view(".byte 0\n.popsection\nleaq "));
     lname(&mut c, name);
     o(&mut c, view("(%rip),%rdi\n"));
-    call_out(&mut c, view("rt_foreign_lost"));
+    call_out(&mut c, view("rt_foreign_return"));
     mark(&mut c, done);
     return ();
 }
@@ -11894,17 +11903,30 @@ fn pv_call_give_up<a, b, d>(c: (&a mut C), report: u64, pred: Pred, at: u64, nee
 // build and is no failure of its function; `--verify-facts` emits the check anyway (`binary`).
 fn pv_arith_proof<a>(c: (&a mut C), k: u64, lstart: u64, rstart: u64, rend: u64) -> unit {
     exchange(&mut c.pv_arith_ok, 0);
-    if !pv_ir_live(&c) || (rstart == 0) || (rstart <= lstart) {
+    if (rstart == 0) || (rstart <= lstart) {
         return ();
     }
+    pv_arith_spans(&mut c, k, lstart, rstart - 1, rstart, rend);
+    return ();
+}
+// The same proof over two operand spans that need not be adjacent: `x op= e` names its left
+// operand before the operator and its right after it, with the `=` between.
+fn pv_arith_spans<a>(c: (&a mut C), k: u64, llo: u64, lhi: u64, rlo: u64, rhi: u64) -> unit {
+    exchange(&mut c.pv_arith_ok, 0);
+    if !pv_ir_live(&c) || (lhi <= llo) || (rhi <= rlo) {
+        return ();
+    }
+    lstart := llo;
+    rstart := lhi + 1;
+    rend := rhi;
     // The interval reading: both operands' largest values from the facts (pv_span_bound, sums and
     // products of bounded u64 terms, each far below 2^63). Their sum or product is then below 2^63
     // too, so the operation cannot overflow: `i * 3 + k` in `p[i * 3 + k]` with `i < 5`, `k < 3`.
     if (k == 42) || (k == 43) {
         mut ifacts = Atom[];
         pv_ir_read(&mut c, &mut ifacts);
-        lmax := pv_index_max(&mut c, &ifacts, lstart, rstart - 1);
-        rmax := pv_index_max(&mut c, &ifacts, rstart, rend);
+        lmax := pv_index_max(&mut c, &ifacts, llo, lhi);
+        rmax := pv_index_max(&mut c, &ifacts, rlo, rhi);
         limit: i64 = 1099511627776;
         // A sum of two values at most 2^40 is far from 2^63; a product needs its own bound: two
         // operands at most 2^40 each can reach 2^80, so the product of the bounds must stay below
@@ -11921,8 +11943,22 @@ fn pv_arith_proof<a>(c: (&a mut C), k: u64, lstart: u64, rstart: u64, rend: u64)
             return ();
         }
     }
-    left := pv_span_term(&mut c, lstart, rstart - 1);
-    right := pv_span_term(&mut c, rstart, rend);
+    // `A - (t & L)` with `A` a literal (or equal to one) at least `L`: the subtraction cannot wrap.
+    if k == 45 {
+        mut sfacts = Atom[];
+        pv_ir_read(&mut c, &mut sfacts);
+        a_term := pv_span_term(&mut c, llo, lhi);
+        if a_term.len() != 0 {
+            av := pv_resolve(&sfacts, view(a_term));
+            ub := pv_operand_upper(&mut c, &sfacts, rlo, rhi);
+            if pv_digits(view(av)) && (0 <= ub) && (ub <= pv_number(view(av))) {
+                exchange(&mut c.pv_arith_ok, 1);
+                return ();
+            }
+        }
+    }
+    left := pv_span_term(&mut c, llo, lhi);
+    right := pv_span_term(&mut c, rlo, rhi);
     if (left.len() == 0) || (right.len() == 0) {
         return ();
     }
@@ -33922,6 +33958,11 @@ fn array_literal<a>(c: (&a mut C), ty: u64) -> Val {
 // The largest value a `u64` term can have by the facts: the least literal bound `t < L` (`L - 1`) or
 // `t <= L` among them; -1 when there is none.
 fn pv_upper<a, b>(facts: (&a Atom[]), t: &b [u8]) -> i64 {
+    return pv_upper_depth(&facts, view(t), 3);
+}
+// pv_upper through up to `depth` bounds that are themselves terms: `j <= limit` and `limit <= 50000000`
+// give `j <= 50000000`.
+fn pv_upper_depth<a, b>(facts: (&a Atom[]), t: &b [u8], depth: u64) -> i64 {
     // A term the facts equate with a literal (`n := 256`) is that literal.
     r := pv_resolve(&facts, view(t));
     if pv_digits(view(r)) {
@@ -33934,11 +33975,17 @@ fn pv_upper<a, b>(facts: (&a Atom[]), t: &b [u8]) -> i64 {
             continue;
         }
         bound := pv_resolve(&facts, view(x.b));
-        if !pv_digits(view(bound)) {
+        mut bv: i64 = -1;
+        if pv_digits(view(bound)) {
+            bv = pv_number(view(bound));
+        } else if (depth > 0) && (bound.len() != 0) && !same(view(bound), view(t)) {
+            bv = pv_upper_depth(&facts, view(bound), depth - 1);
+        }
+        if bv < 0 {
             continue;
         }
         mut bad = 0;
-        mut m = pv_k_sum(pv_number(view(bound)), x.k, &mut bad);
+        mut m = pv_k_sum(bv, x.k, &mut bad);
         if x.rel == 0 {
             m = pv_k_sum(m, i64(0) - i64(1), &mut bad);
         }
@@ -43515,6 +43562,13 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         // Facts made in the body (a frame record, a DynPair) are about the body's own frame, under
         // the symbol it is emitted as.
         exchange(&mut c.facts_fn, body_label(&c, view(".closure"), view(symbol), view(""), 0));
+        // The call ordinals the facts are keyed by count from zero in every body, a closure's too:
+        // the lifter counts the calls of each function it lowers from zero. Left running on from
+        // the body emitted before it, an F2 fact would name another call (another opcode).
+        exchange(&mut c.f64_ops, 0);
+        exchange(&mut c.call_ord, 0);
+        exchange(&mut c.f1_names, u8[][]);
+        exchange(&mut c.f1_counts, u64[]);
         exchange(&mut c.fn_text_at, c.out.len());
         exchange(&mut c.pending_words, 0);
         exchange(&mut c.scope_end, 0);
@@ -53469,6 +53523,7 @@ fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, t
     if through != 0 {
         pin_assignment(&mut c, target);
     }
+    op_tok := c.pos;
     operator := kind(&mut c);
     advance(&mut c);
     mut oldvalue = 0;
@@ -53563,6 +53618,15 @@ fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, t
             } else {
                 if c.raw == 0 {
                     require_type(&mut c, v.ty, 0);
+                }
+                // `x op= e` is `x op e`: the same overflow proof, over the target's tokens and the
+                // value's span.
+                if ((op == 43) || (op == 45) || (op == 42)) && (c.raw == 0) && (op_tok >= 1) {
+                    mut tlo = op_tok - 1;
+                    while (tlo >= 2) && (kind_at(&mut c, tlo) == 1) && (kind_at(&mut c, tlo - 1) == 46) && (kind_at(&mut c, tlo - 2) == 1) {
+                        tlo -= 2;
+                    }
+                    pv_arith_spans(&mut c, op, tlo, op_tok, vstart, vend);
                 }
                 value := binary(&mut c, op, oldvalue, v.t);
                 v = val(value, 0);

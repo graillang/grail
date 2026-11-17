@@ -6,6 +6,11 @@
   there, or wrap the type in a struct the module declares. The rule itself is unchanged; the book's
   generics chapter now states it ("Where an implementation may live"). A scan of the corpus, lib/,
   the Abundance port and the borg sources found no impl it refuses besides the reject cases.
+- Overflow checks on loop-carried arithmetic: a bound may reach a literal through other terms
+  (`j <= limit`, `limit <= 50000000`), a compound assignment `x op= e` gets the overflow proof
+  `x op e` gets, and `A - (t & L)` with `L <= A` cannot wrap. The sieve's `j += i`, `i * i`, `i += 1`
+  and `n - (count & 1)` carry no check (6 -> 2 in `main`; the two left are its unbounded counters).
+
 - **`lib/chan.grl`: a bounded multi-producer multi-consumer channel.** `chan::bounded<T>(n)` with
   `send` (waits while full; false once closed), `recv` (waits while empty; `None` once closed and
   empty) and `close`; waits park, as every `sync` wait does. `bench/chan.grl` measures it against
@@ -29,6 +34,11 @@
 - Small allocations clear their block with two fixed stores instead of the general loop: every
   request up to 16 bytes (a tree node, a box) is served from the smallest bin, whose blocks hold at
   least 16. bench/bintrees.grl: Grail-LLVM 4.89G -> 4.15G instructions, Grail-native 14.2G -> 13.7G.
+- **`v.iter()` returns a typed `iter::SliceIter`.** Its `fold` is a counted index loop, so
+  `v.iter().map(..).filter(..).fold(..)` runs as one loop over the vector: bench/iterchain goes from
+  1130M to 250M instructions (C 106M), 109 ms to 42 ms. **What changes:** code that named the result
+  type as `iter::Iter<(&T)>` must name `iter::SliceIter<a, T>` (or call `iter::refs(&v)` for the erased
+  form); `for`, `next`, `map`, `filter` and `fold` work as before.
 - **`Iterator::fold`, with internal iteration.** The `Iterator` interface has a default `fold`, and
   the typed adapters `Map` and `Filter` override it to hand a composed callback to the iterator they
   wrap, so a chain runs as its source's single loop rather than a `next` call per item that loops
@@ -82,6 +92,22 @@
   stack instead of falling back to integer registers, and a 16-byte record with only `a7` left was
   not split between `a7` and the stack. New fixture `tests/ffi/abi_edges.grl` (all three ELF
   targets, both backends, and Windows x86-64 under Wine).
+- **A default `extern "C"` call no longer executes a locked instruction (x86-64 Linux).** The
+  foreign-call marker counts out with a plain increment and one load of a "retaken" word; the
+  scheduler's monitor, which takes a worker back from a call stuck for 10 ms, pays for the ordering
+  with `membarrier` instead. User cycles per call on LLVM: `f64` 14.5 -> 8.8, `f32` 8.2 -> 6.8
+  (C: 6.4-6.6). Windows x64 keeps a locked increment and AArch64/RV64 a sequentially consistent one,
+  each its own barrier. Without `membarrier` (a kernel before 4.14) undeclared calls are not handed
+  off. The protocol and its race argument: docs/design/concurrency-model.md, 2.4.1.
+- **Fixed: a release-build miscompile of float arithmetic in closures (bench/ecs_par).** A closure
+  body's float-operation facts were numbered on from the body emitted before it, while the LLVM
+  lifter counts each function's calls from zero, so a fact named another call: the gravity
+  closure's `p + v * DT` was lowered as a multiply and the y positions were lost (ecs_par printed
+  500666023.38 in release, 751091934.76 everywhere else). The counters now restart in every
+  closure body. The lifter also stops relying on the numbering: it reads the opcode the stream
+  passes to `rt_f64_op` (tracked through registers and frame slots), refuses a fact naming another
+  operation, and lowers a call without a fact to the one IEEE double operation the runtime
+  performs, with one result word in %rax and nothing written to %rdx.
 
 - **`bench-rivals` no longer charts a build that printed the wrong answer.** It already failed the
   run when a build's output differed from C's, but still wrote that build's figures into the
