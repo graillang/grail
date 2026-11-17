@@ -6294,7 +6294,7 @@
   },
   {
     "name": "static-prover-stays-sound",
-    "source": "static SQ: u64[] = @squares();\nstatic LIMIT: u64 = 8;\nstatic BIG: u64 = 12;\nfn squares() -> u64[] {\n    mut v = u64[];\n    for i in 8 {\n        v.push(i * i);\n    }\n    return v;\n}\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn small(x: u64 where x < 10) -> u64 {\n    return x;\n}\nfn shadow() -> u64 {\n    LIMIT := 20;\n    return small(LIMIT);\n}\nfn big() -> u64 {\n    return small(BIG);\n}\nfn past() -> u64 {\n    return get(SQ, 9);\n}\nfn main() -> u64 {\n    println(get(SQ, 7));\n    println(past());\n    return 0;\n}\n",
+    "source": "static SQ: u64[] = @squares();\nstatic LIMIT: u64 = 8;\nstatic BIG: u64 = 12;\nfn squares() -> u64[] {\n    mut v = u64[];\n    for i in 8 {\n        v.push(i * i);\n    }\n    return v;\n}\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn small(x: u64 where x < 10) -> u64 {\n    return x;\n}\n// An index the prover cannot evaluate: the call keeps its check and fails at run time.\nfn count(n: u64) -> u64 {\n    mut k = 0;\n    for i in n {\n        k += 1;\n    }\n    return k;\n}\nfn main() -> u64 {\n    println(get(SQ, 7));\n    println(get(SQ, count(9)));\n    return 0;\n}\n",
     "stdout": "49\n",
     "signal": "SIGABRT",
     "stderr": "error: refinement violated: i < v.len()\n",
@@ -6306,21 +6306,21 @@
     "backends": [
       "native"
     ],
-    "note": "`get(SQ, 9)` on an 8-element static stays checked and fails at run time; the refusals under `@strict` are static-prover-refuses-*"
+    "note": "an index the prover cannot evaluate keeps the check on an 8-element static and fails at run time; constants that break a bound are compile errors (static-prover-refuses-*)"
   },
   {
     "name": "static-prover-refuses-bad-bound",
-    "source": "static SQ: u64[] = @squares();\nstatic LIMIT: u64 = 8;\nstatic BIG: u64 = 12;\nfn squares() -> u64[] {\n    mut v = u64[];\n    for i in 8 {\n        v.push(i * i);\n    }\n    return v;\n}\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn small(x: u64 where x < 10) -> u64 {\n    return x;\n}\nfn shadow() -> u64 {\n    LIMIT := 20;\n    return small(LIMIT);\n}\n@strict\nfn big() -> u64 {\n    return small(BIG);\n}\nfn past() -> u64 {\n    return get(SQ, 9);\n}\nfn main() -> u64 {\n    println(get(SQ, 7));\n    println(past());\n    return 0;\n}\n",
+    "source": "static SQ: u64[] = @squares();\nstatic LIMIT: u64 = 8;\nstatic BIG: u64 = 12;\nfn squares() -> u64[] {\n    mut v = u64[];\n    for i in 8 {\n        v.push(i * i);\n    }\n    return v;\n}\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn small(x: u64 where x < 10) -> u64 {\n    return x;\n}\nfn big() -> u64 {\n    return small(BIG);\n}\nfn main() -> u64 {\n    println(big());\n    return 0;\n}\n",
     "reject": true,
-    "diagnostic": "cannot prove the refinement `x < 10`",
-    "note": "a static whose value breaks the bound (BIG = 12, `x < 10`) proves nothing: `@strict` refuses the call"
+    "diagnostic": "the refinement `x < 10` is false at this call",
+    "note": "a static whose value breaks the bound (BIG = 12, `x < 10`) is known at compile time, so the call is refused in every mode"
   },
   {
     "name": "static-prover-refuses-shadow",
-    "source": "static SQ: u64[] = @squares();\nstatic LIMIT: u64 = 8;\nstatic BIG: u64 = 12;\nfn squares() -> u64[] {\n    mut v = u64[];\n    for i in 8 {\n        v.push(i * i);\n    }\n    return v;\n}\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn small(x: u64 where x < 10) -> u64 {\n    return x;\n}\n@strict\nfn shadow() -> u64 {\n    LIMIT := 20;\n    return small(LIMIT);\n}\nfn big() -> u64 {\n    return small(BIG);\n}\nfn past() -> u64 {\n    return get(SQ, 9);\n}\nfn main() -> u64 {\n    println(get(SQ, 7));\n    println(past());\n    return 0;\n}\n",
+    "source": "static SQ: u64[] = @squares();\nstatic LIMIT: u64 = 8;\nstatic BIG: u64 = 12;\nfn squares() -> u64[] {\n    mut v = u64[];\n    for i in 8 {\n        v.push(i * i);\n    }\n    return v;\n}\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn small(x: u64 where x < 10) -> u64 {\n    return x;\n}\nfn shadow() -> u64 {\n    LIMIT := 20;\n    return small(LIMIT);\n}\nfn main() -> u64 {\n    println(get(SQ, LIMIT));\n    println(shadow());\n    return 0;\n}\n",
     "reject": true,
-    "diagnostic": "cannot prove the refinement `x < 10`",
-    "note": "a local that shadows a static is not the static's value (`LIMIT := 20`)"
+    "diagnostic": "the refinement `x < 10` is false at this call",
+    "note": "a local `LIMIT := 20` shadows the static `LIMIT = 8` (which would pass): the refused call is the local value"
   },
   {
     "name": "static-baked-plain-records",
