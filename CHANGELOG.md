@@ -1,5 +1,11 @@
 ## Unreleased
 
+- Fixed: **a failed check inside the compiler itself faulted instead of reporting.** The failure
+  report was written in process-state bytes 4096..8192, but `rt_state` is sized by the entry stub
+  of the compiler that built the binary, and the compiler is built by its seed, which gives 4096.
+  The report block is now mapped on first use (its address in state word 3432), so it is the same
+  in every binary, and `rt_state` is 4096 bytes again.
+
 - **Compile-time values cost one probe per build, and none when nothing they read changed**
   (comptime-speed R2, R3). Every run-tier value a build needs is computed by one probe; each is then
   cached with what it read - the program's function bodies its computation reached, the
@@ -341,7 +347,7 @@
   a division, a narrowing, an unwrap, a refined parameter - because the failure report allocated:
   its texts were heap strings (`rt_new`, `rt_reserveb`, `rt_alloc`, and the runtime's literals are
   heap values), and it reached the compiler's site-table helper through an unnamed indirect call.
-  The dying report is now written in a process-state report block (`rt_state` grows to 8192 bytes),
+  The dying report is now written in a report block mapped on first use,
   its literals are static views, and the helper call is a named edge. The checks still fail, so
   `@no_panic` still refuses them.
 
