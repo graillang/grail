@@ -505,7 +505,9 @@ export function buildReleaseCompiler({ log = () => {} } = {}) {
   }
   if (!lowered) throw new Error('no compiler could lower the compiler through the LLVM backend');
   log('clang -O2');
-  command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[hostTarget]}`, ...moduleFlags(hostTarget), '-O2', '-c', `${stem}.s.ll`, '-o', `${stem}.ll.o`]);
+  // Cut in parts and compiled in parallel (`grail llvm-compile`): one clang -O2 over the whole
+  // compiler's module is serial and takes most of the build.
+  command([native, 'llvm-compile', `${stem}.s.ll`, `${stem}.ll.o`, emulations[hostTarget], process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[hostTarget]}`, ...moduleFlags(hostTarget), '-c']);
   command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[hostTarget]}`, '-c', `${stem}.s`, '-o', `${stem}.o`]);
   const pending = `${stem}.pending`;
   command([process.env.GRAIL_LINKER ?? 'ld.lld', '-m', emulations[hostTarget], `${stem}.o`, `${stem}.ll.o`, '-o', pending]);
@@ -519,6 +521,7 @@ export function buildReleaseCompiler({ log = () => {} } = {}) {
     return digest;
   });
   for (const leftover of [`${stem}.s`, `${stem}.s.ll`, `${stem}.o`, `${stem}.ll.o`]) if (existsSync(leftover)) rmSync(leftover);
+  for (const part of readdirSync(directory).filter(name => name.startsWith(`${basename(stem)}.s.ll.`))) rmSync(join(directory, part));
   if (outputs[0] !== outputs[1]) {
     rmSync(pending);
     throw new Error('the release compiler does not emit what the native build emits for the compiler\'s own sources: not accepted');
