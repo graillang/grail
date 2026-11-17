@@ -435,7 +435,7 @@ fn rt_fail_body(kind: u64, a: u64, b: u64, buf: u64, n: u64) -> u64 {
         at = rt_fail_num(buf, at, a);
         at = rt_fail_put(buf, at, view(" does not fit in u8"));
     } else if kind == 10 {
-        at = rt_fail_put(buf, at, view("C array length mismatch: got "));
+        at = rt_fail_put(buf, at, view("array length mismatch: got "));
         at = rt_fail_num(buf, at, a);
         at = rt_fail_put(buf, at, view(" elements for an array of "));
         at = rt_fail_num(buf, at, b);
@@ -1921,41 +1921,6 @@ fn rt_carray_load(src: u64, n: u64, size: u64, signed: u64, kind: u64, words: u6
         i = i + 1;
     }
     return out;
-}
-// The vector's length must be the array's: a C array has no room for more and C reads all N.
-fn rt_carray_store(dst: u64, v: u64, n: u64, size: u64, kind: u64) -> u64 {
-    if rt_len(v) != n {
-        rt_fail(10, rt_len(v), n);
-    }
-    mut i = 0;
-    while i < n {
-        a := dst + i * size;
-        if kind == 4 {
-            rt_store_sized(a, rt_at4u(v, i), 4);
-            i = i + 1;
-            continue;
-        }
-        if kind == 3 {
-            rt_store_sized(a, rt_atb(v, i), 1);
-            i = i + 1;
-            continue;
-        }
-        if kind == 2 {
-            rt_copy_bytes(a, rt_slotw(v, i, size), size);
-            i = i + 1;
-            continue;
-        }
-        x := rt_at(v, i);
-        if kind == 1 {
-            rt_store_sized(a, rt_f32_bits(x), 4);
-        } else if size == 8 {
-            raw_store(a, x);
-        } else {
-            rt_store_sized(a, x, size);
-        }
-        i = i + 1;
-    }
-    return 0;
 }
 // `cstr_bytes(s)`: the bytes of a NUL-terminated C string, copied into a Grail byte sequence (the
 // NUL not included). A null CStr reads as empty.
@@ -9527,6 +9492,25 @@ fn rt_aslot(base: u64, i: u64, n: u64, w: u64) -> u64 {
 fn rt_aslotu(base: u64, i: u64, w: u64) -> u64 {
     return wrapping_add(base, wrapping_mul(i, w));
 }
+// A slice {base + a*w, b - a} of an array of `n` elements (docs/design/fixed-arrays.md): a view
+// record, as a vector's sub-slice is; a <= b <= n.
+fn rt_aslice(base: u64, a: u64, b: u64, w: u64, n: u64) -> u64 {
+    if (b < a) + (n < b) {
+        rt_fail(7, a, b);
+    }
+    v := rt_view_record();
+    raw_store(v, wrapping_add(base, wrapping_mul(a, w)));
+    raw_store(v + 8, b - a);
+    return v;
+}
+// `a.copy_from(&s)`: the `n` elements of the vector or slice `s`, which must hold exactly `n`.
+fn rt_array_copy_from(dst: u64, s: u64, n: u64, w: u64) -> u64 {
+    if raw_load(wrapping_add(s, 8)) != n {
+        rt_fail(10, raw_load(wrapping_add(s, 8)), n);
+    }
+    rt_copy_bytes(dst, raw_load(s), wrapping_mul(n, w));
+    return 0;
+}
 // `[x; n]`: element 0 of the array at `dst` is written; copy it to the other `n - 1`, doubling.
 fn rt_array_rep(dst: u64, w: u64, n: u64) -> u64 {
     mut have = 1;
@@ -9572,6 +9556,20 @@ fn rt_pushwk(s: u64, src: u64, w: u64) -> u64 {
     raw_store(wrapping_add(s, 8), n + 1);
     return 0;
 }
+fn rt_vec_insertwk(s: u64, index: u64, src: u64, w: u64) -> u64 {
+    n := rt_len(s);
+    if n < index {
+        rt_abort();
+    }
+    rt_pushwk(s, src, w);
+    mut i = n;
+    while index < i {
+        rt_copy_bytes(rt_slotw(s, i, w), rt_slotw(s, i - 1, w), w);
+        i -= 1;
+    }
+    rt_copy_bytes(rt_slotw(s, index, w), src, w);
+    return 0;
+}
 fn rt_popw(s: u64, w: u64) -> u64 {
     n := raw_load(wrapping_add(s, 8));
     if n == 0 {
@@ -9589,20 +9587,6 @@ fn rt_popw_quiet(s: u64, w: u64) -> u64 {
 fn rt_vec_insertw(s: u64, index: u64, src: u64, w: u64) -> u64 {
     rt_vec_insertwk(s, index, src, w);
     rt_free(src);
-    return 0;
-}
-fn rt_vec_insertwk(s: u64, index: u64, src: u64, w: u64) -> u64 {
-    n := rt_len(s);
-    if n < index {
-        rt_abort();
-    }
-    rt_pushw(s, rt_flat_box(src, w), w);
-    mut i = n;
-    while index < i {
-        rt_copy_bytes(rt_slotw(s, i, w), rt_slotw(s, i - 1, w), w);
-        i -= 1;
-    }
-    rt_copy_bytes(rt_slotw(s, index, w), src, w);
     return 0;
 }
 fn rt_vec_removew(s: u64, index: u64, w: u64) -> u64 {
