@@ -148,7 +148,7 @@ const load = [loadavg()];
 const results = {};
 const fmt = (name, v) => v === undefined ? '-' : name === 'ffi_call' && metric !== 'instructions' ? `${v.toFixed(2)}ns` : metric === 'instructions' ? `${(v / 1e9).toFixed(2)}G` : `${v.toFixed(3)}`;
 console.log(`Grail: ${measuredGrail.commit}${names.includes('ffi_call') && !existsSync(join(root, 'bench/ffi_call.grl')) ? '; ffi_call: the scheduler tree ' + schedTree : ''}`);
-console.log(`bench-rivals: ${metric === 'instructions' ? 'user-space instructions (G)' : 'CPU seconds (user+sys)'}, best of ${runs}; ffi_call: ns per call as the program reports it`);
+console.log(`bench-rivals: ${metric === 'instructions' ? 'user-space instructions (G)' : metric === 'wall' ? 'wall seconds' : 'CPU seconds (user+sys)'}, best of ${runs}${workerCounts.length ? `, at ${workerCounts.join(', ')} workers` : ''}; ffi_call: ns per call as the program reports it`);
 console.log(`${'program'.padEnd(10)} ${heads.map(h => h.padStart(12)).join(' ')}   native/dev-best  LLVM/release-best`);
 let failed = 0;
 const rowNames = [];

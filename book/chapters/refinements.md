@@ -241,7 +241,7 @@ chain of calls reaches the allocator, and it can fail exactly when a chain reach
 that the prover did not remove. The refusal names that chain:
 
 ```
-error: `@no_alloc` function `grow` performs a heap allocation: it calls grow -> rt_push -> rt_grow
+error: `@no_alloc` function `grow` performs a heap allocation: it calls grow -> rt_push -> rt_push_slow -> rt_grow
 ```
 
 A refined parameter's check belongs to the caller. A `@no_panic` function that calls `get` with an
@@ -264,11 +264,21 @@ calls the field's or the element's helper directly, and a `dyn` value's drop is 
 vtable to the drop helper of every concrete type that vtable can hold, because the compiler built
 that vtable itself.
 
+`@no_block` claims that a function never waits: no lock that can park, no sleep, no channel receive,
+no file or socket I/O, no join on unfinished work, and no C function that is not declared
+`extern "C" nonblocking`. Non-parking operations - `try_lock`, `try_acquire`, atomics - are fine, and
+so is a check that can fail: a failure ends the frame, so what the runtime does after it is past the
+promise. Allocation is not blocking (`@no_block` does not imply `@no_alloc`):
+
+```
+error: `@no_block` function `nap` can block: it calls nap -> sleep_ms -> f_host_sleep_ms -> rt_sleep_for
+```
+
 One record per emitted body means a generic is judged per instantiation. A `@no_alloc` function that
 only reaches a quiet instance of a generic is accepted even when another instance of the same generic
 allocates, and a claim on the generic itself is checked for every instance that is emitted - the
 refusal names it:
 
 ```
-error: `@no_alloc` function `fill<main::File>` performs a heap allocation: it calls fill<main::File> -> rt_push -> rt_grow
+error: `@no_alloc` function `fill<main::File>` performs a heap allocation: it calls fill<main::File> -> rt_push -> rt_push_slow -> rt_grow
 ```

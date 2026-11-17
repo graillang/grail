@@ -30,6 +30,14 @@ length and the grain only, never on the number of cores, so a floating-point `re
 same bits on a laptop and on a 64-core server. See
 `docs/design/parallelism.md`.
 
+### Parallel loops
+
+A parallel loop in Grail never asks the compiler to prove that two workers touch different
+elements. The library *constructs* the split instead - from the length and a grain alone, the same
+pieces on any machine - and hands each worker exclusive slices of its own piece, so the ordinary
+borrow rules do the rest: nothing else in the program can reach the data while the loop runs, and
+an index past a piece is a bounds check, never a write into a neighbour's.
+
 `parallel_split(&mut data[a: b], grain, f)` is the in-place form of the owned one: the compiler
 splits an exclusive slice into disjoint exclusive pieces of at most `grain` elements and hands each
 job `&mut [T]` over its own elements, so nothing is moved or copied - the same 3M-element pass that
