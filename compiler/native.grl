@@ -5140,7 +5140,18 @@ fn signature_fact<a>(c: (&a mut C), declared: u64) -> unit {
     if (c.forge_sig.len() != 0) && same(view(c.forge_sig), view(c.facts_fn)) {
         words = c.forge_words;
     }
-    llvm::fact_signature(&mut c.facts, copy_bytes(view(c.facts_fn)), words);
+    // The reference words among the first six (a `&T`, `&mut T` or `&dyn` parameter): the LLVM
+    // backend passes them as `ptr` so the caller's slot does not escape as an integer.
+    mut refs = 0;
+    for i in declared {
+        if (i < 6) && (i < c.locals.len()) {
+            pty := c.locals[i].ty;
+            if ty_kind(&mut c, pty) == 7 {
+                refs = refs | (1 << i);
+            }
+        }
+    }
+    llvm::fact_signature(&mut c.facts, copy_bytes(view(c.facts_fn)), words, refs);
     return ();
 }
 // The argument words a function takes: its declared parameters and, for a plain record result of

@@ -8,6 +8,13 @@
   loan, as in Rust (an exclusive `&mut`, and a shared slice value, which owns its header, still move).
   A closure given for a generic `F: Fn<Send>` now reports a capture that cannot cross a thread as
   soon as it is read.
+- **`dyn` calls devirtualise in release builds.** Vtables are constants in the LLVM module,
+  reference parameters cross calls as `ptr` (so a `&dyn` pair in the caller's frame no longer
+  escapes as an integer), frame-slot spills keep their pointer provenance, and slot offsets are
+  pointer arithmetic: when the vtable is known, LLVM calls the method directly and inlines it. A
+  loop calling `area()` through a `&dyn` of one type: 140 M -> 7.6 K instructions (folded). dyncall
+  (mixed types): 633 M -> 603 M (Rust -O: 648 M).
+
 - **Release builds inline small functions across modules.** A call to a function of another module
   was declared with a generic six-argument type that never matched the callee's real definition,
   so LLVM never inlined it: small std helpers (`bytes::load_u64`, hash and string methods) stayed
