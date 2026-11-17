@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **Generic code over a type that owns nothing has no drop bookkeeping.** In a specialisation, a
+  type parameter bound to a plain type (`A = u64`) answered "needs drop" like an unknown type, so
+  every value of it carried a drop flag, a drop-helper call guarded by it, and a callee-saved register
+  saved and restored to hold the flag. It now answers for the type it is bound to. bench/iterchain's
+  native build: 1.92G to 1.14G instructions.
 - **Capture-free and named-function callbacks to generic functions cost no allocation, and named
   functions are accepted.** A closure given for a lent `Fn(..)` parameter of a generic function was
   boxed whenever the call's type arguments were not all fixed yet - `Condition::wait_with`'s two
