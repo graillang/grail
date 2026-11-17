@@ -19355,5 +19355,25 @@
     "reject": true,
     "diagnostic": "a 256-bit vector crosses to C in a ymm register, which needs AVX: build with --cpu=x86-64-v3",
     "note": "S4c: an __m256 argument goes in a ymm register only when caller and callee are built for AVX; at the baseline the call is refused rather than passed some other way."
+  },
+  {
+    "name": "bce-loop-carried-sieve",
+    "source": "fn mark(k: u64) -> u64 {\n    n: u64 := 100;\n    limit := n - (k & 1);\n    mut composite = u8[0; limit + 1];\n    mut count: u64 = 0;\n    mut i: u64 = 2;\n    while i <= limit {\n        if composite[i] == 0 {\n            count = count | i;\n            mut j = i * i;\n            while j <= limit {\n                composite[j] = 1;\n                j += i;\n            }\n        }\n        i += 1;\n    }\n    return count ^ composite[limit];\n}\nfn main() {\n    println(mark(0));\n}\n",
+    "stdout": "126\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asmAbsent": [
+      {
+        "in": "f_main_mark",
+        "text": "movq $2,%rdx\ncall rt_trap"
+      }
+    ],
+    "note": "the sieve's shape: `limit := n - (k & 1)` is at most n (100), `i <= limit` and `j <= limit` hold in the loops, so `j += i`, `i * i` and `i += 1` cannot overflow - the bounds chain through `limit` - and no overflow check is left in the function"
   }
 ]

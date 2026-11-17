@@ -6,6 +6,11 @@
   there, or wrap the type in a struct the module declares. The rule itself is unchanged; the book's
   generics chapter now states it ("Where an implementation may live"). A scan of the corpus, lib/,
   the Abundance port and the borg sources found no impl it refuses besides the reject cases.
+- Overflow checks on loop-carried arithmetic: a bound may reach a literal through other terms
+  (`j <= limit`, `limit <= 50000000`), a compound assignment `x op= e` gets the overflow proof
+  `x op e` gets, and `A - (t & L)` with `L <= A` cannot wrap. The sieve's `j += i`, `i * i`, `i += 1`
+  and `n - (count & 1)` carry no check (6 -> 2 in `main`; the two left are its unbounded counters).
+
 - **`lib/chan.grl`: a bounded multi-producer multi-consumer channel.** `chan::bounded<T>(n)` with
   `send` (waits while full; false once closed), `recv` (waits while empty; `None` once closed and
   empty) and `close`; waits park, as every `sync` wait does. `bench/chan.grl` measures it against
