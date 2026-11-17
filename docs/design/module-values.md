@@ -444,6 +444,27 @@ Found while building, not changed here:
   run; the same cases pass serially. A harness race, not a compiler fault.
 - Not done in stage 1: the prover term for a static (stage 5); records in the baked tier (stage 4).
 
+## Stage 4 as built: baked records
+
+- **Types.** `static_baked_type_at`: an integer, bool, string, bytes, a vector of baked types, or a
+  plain record (not C-laid-out, not an enum, not opaque, not generic) whose fields are baked types,
+  to depth 16. Enums and generic records are refused with their own message (not built yet).
+- **Run tier.** `static_structured` types (a record, or a vector whose elements are not integers)
+  get a probe that prints the value in a flat form (`static_dump_src`): a number per line (signed
+  types through `i64`, a bool as 0/1), a string as its length then `println("{}", s)`, a vector as
+  its length then its elements, a record as its fields in declaration order. The text comes back
+  whole in `CTRes.text`.
+- **Emission.** `static_bake` reads that form and emits nested objects first: a string or vector of
+  integers as `{data, len, cap}` plus data (the stage 1 layout), a vector of objects as a word table,
+  and a record as one word per field (`rt_rec`'s layout: field k at 8k), each behind a state-2
+  header. The static's word points at the outermost object.
+- **Refusals.** A record with a thread-affine handle fails the shareable rule; a module binding or
+  an `@f()` expression whose result is structured is refused (a constant is pasted into each use, so
+  it cannot be one object) with a message naming `static`.
+- **The compiler's own tables are not migrated.** `cli.grl`'s `flag_table` and `pkg.grl`'s SHA
+  constants would be statics, but the bootstrap seed compiles the compiler's sources and does not
+  know `static`; they move after the next reseed.
+
 ## Follow-up `static-region`: a borrow that outlives every frame (design question, not built)
 
 Decided by the director (2026-11-16): written up here, not built; it is tied to the regions the
@@ -487,3 +508,22 @@ closure.
 What it does not need: a run-time representation (a `&static` is the same pointer word), or any
 change to statics themselves - their reads would be typed `&static T` instead of carrying an
 anonymous external origin.
+
+## Stage 5 as built: statics in the prover
+
+- **Terms.** A static's name was already a term (`pv_term` returns any identifier), and sound as one:
+  a static never changes, and a local that shadows it is found first.
+- **Known values.** `pv_known_literal`: in `pv_term`, a name that is an integer static or an integer
+  constant of this module with a value the prover's integer reading holds (not negative, below
+  2^62) reads as that literal; `NAME.len()` on a string or vector static reads as its length. A
+  callee's obligation renamed to the caller's terms (`v.len` with `v := SQ`) goes through the same
+  mapping (`pv_rename_known`), so both sides meet on the literal.
+- **Evaluated when asked.** `static_resolve` evaluates a static's initialiser once, at its own
+  position, whoever asks first - the prover in a body, the interface writer, the function cache's
+  surface, or the declaration in the third pass - and keeps the value on the entry (`static_fact`).
+- **Interfaces and the cache.** The static record carries the fact (`fact_kind` 1 value, 2 length)
+  and the function-cache surface includes it, because a reader's emitted call (`.proved` or not) now
+  depends on it.
+- **Not covered.** A qualified name (`table::LIMIT`) is not read as its value - the prover takes only
+  this module's names - and a direct `SQ[i]` in `for i in SQ.len()` keeps its bounds check: the
+  bounds-check pass (`pv_bce`) still serves refined parameters only.

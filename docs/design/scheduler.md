@@ -82,9 +82,18 @@ only by its forker, after it has seen the job done.
   pending again as a later job - and in that last case claiming it runs that later job exactly once,
   which is what its forker is waiting for.
 
+**Classes.** Each worker has a job deque per class (Frame, Normal, Background) and there is a job
+ring per class. A worker takes Frame work, then Normal work, then tasks, then Background work, and
+reserves one of the Background cap's slots (a CAS) before it takes a Background job; the job gives
+it back when it finishes. A job's class is its parent's; a root fork takes the class its stack was
+given by `pool::with_class` (record word 112). An entry found in a class's queue whose record now
+has another class is a stale entry naming a later job, and is skipped rather than claimed. Every
+61st step a worker looks at the injected tasks first.
+
 **Loops split by halving.** A parallel call forks the upper half of its leaves as one job and
-descends into the lower half, joining on the way back; the leaf boundaries are a function of the
-element count and the requested chunks, never of who ran what.
+descends into the lower half, joining on the way back. The leaves are a function of the element
+count and the grain (`parallel_split`), or of the count alone (`parallel_map`: at most 256), never
+of the worker count or of who ran what.
 
 **Joining.** A forker that reaches its join claims its job by pointer if it is still pending and
 runs it. If somebody else has it, a waiter on a worker *leapfrogs*: it takes only work forked by
@@ -114,6 +123,37 @@ is `concurrency-model.md`, "F1".
 **Locks.** Because help is limited to the waiter's own job's descendants, a join while holding a
 `Mutex` can deadlock only where the sequential program would. When locks are tracked per record a
 waiter that holds one will not help at all.
+
+## Waking: only when nobody is searching
+
+A worker that runs out of work *searches* first - 64 more looks, yielding every sixteenth - and only
+then parks; a fork wakes a parked worker only when one is parked and none is searching
+(`rt_notify`). In a join the forker nearly always takes its own fork back before anyone could, so a
+wake would only start a worker that finds nothing and parks again: the old rule (bump the sequence
+and wake whenever any worker is parked) cost two system calls and a write to one shared line per
+fork, which was most of a join's 2 us and why nested joins did not scale. Measured: 100,000 joins
+on a worker issue 15 wakes, where every one of them used to.
+
+**No wakeup is lost.** Two pairs of accesses, each a store then a load, with a full barrier
+between, on both sides (Dekker):
+
+- the pusher: publish the work (the deque's tail store or the ring's), full barrier
+  (`rt_full_fence`: a locked CAS on a frame word, no shared write), load `parked` (scheduler word 96)
+  and `searching` (jobs word 416);
+- a parking worker: `searching -= 1` (a locked RMW, a full barrier), load the sequence, `parked += 1`
+  (a locked RMW, a full barrier), look at every queue once more, and only then wait on the sequence
+  with the value it loaded.
+
+In the single total order of the barriers either the pusher's load of `parked`/`searching` comes
+after the worker's increment of `parked` - then it sees a parked worker and, unless one is
+searching, bumps the sequence and wakes - or the worker's last look comes after the pusher's
+publication and finds the work. A searching worker the pusher counted is one whose last look comes
+later still, so it finds the work too. A bump between the worker's sequence load and its wait makes
+the wait return at once. And a worker stops counting as searching *before* it runs what it found
+(`rt_worker_run`, worker word 280): counted while running, its own forks would see "someone is
+searching" and wake nobody - which happened, and is what `sched-fork-reaches-a-thief` pins. `sched-wake-not-lost-under-constant-parking` would hang if any of this
+were wrong; it runs on x86-64, AArch64 and RV64 (qemu, which is not a weak machine: real ARM
+hardware is still owed).
 
 ## Stacks
 

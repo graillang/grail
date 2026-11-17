@@ -1,7 +1,8 @@
 # Checked effects: `@no_alloc`, `@no_panic`, `@bounded(n)`
 
 Status: implemented (gaps round, G26); effects moved from the emitted text to the call graph the
-front end records, per specialisation, with drop glue followed through dispatch (gaps2 round).
+front end records, per specialisation, with drop glue followed through dispatch (gaps2 round); the
+proof is per run, against per-function summaries carried in interfaces (gaps12, *Summaries*).
 
 `@no_alloc` and `@no_panic` on a function, and `@bounded(n)` on a loop, are claims the compiler
 proves. None of them is trusted.
@@ -83,7 +84,8 @@ refuses it, so:
   this, the claim sat on the template's symbol - which has no body - so an allocating instantiation of
   a claimed generic was silently accepted.
 
-`grail build` compiles a program that claims an effect in one run, since the proof needs every body.
+A claim is checked in the run that emits the body: a function's in its own module's run, a generic's
+in every run that emits one of its instances.
 
 ## Drop glue
 
@@ -99,6 +101,63 @@ Dropping a value runs compiler-generated glue, and the glue is followed:
   helper of every concrete type a vtable of that interface in this build holds** - one real edge each.
   It is deliberately an over-approximation: which of them the value is cannot be known, so any of them
   that allocates or fails makes the claim false.
+
+## Summaries
+
+Checking a call never needs the callee's body (`docs/design/compile-speed.md`, the standing rule): it
+needs the callee's **summary**. Every run that emits code records every body it emits - not only
+claimed ones - and solves the fixpoint over them; the solved facts of each function are its summary:
+
+- `alloc` and `fail`: whether calling it can reach an allocation, or a failure entry;
+- `entry`: whether its checked entry runs a refined parameter's check (the caller's obligation unless
+  the call proved it, the edge kind 8 of `call_proved_out`);
+- for each fact that is set, its **witness**: the callee the fact came through.
+
+The summary travels three ways:
+
+- **Interfaces.** A `facts` record (format 7) lists the summary of every function the interface lists,
+  claimed or not, in symbol order, inside the surface - so a changed fact is a changed surface and
+  every run that read it runs again. The record is added once the bodies are solved: the interface is
+  written in pass 1, before any body, and rewritten with the record (`iface_emit_facts`). A run that
+  emits no code (a check) writes none, and a function with no summary is unknown to its callers -
+  assumed to allocate and to fail, so a missing summary refuses a claim and never accepts one.
+  `--verify` compares declarations and leaves the record out: it is a function of the bodies, which
+  the source digest pins.
+- **`runtime.facts`.** The runtime has no interface (every run knows its declarations), so the run that
+  emits its bodies writes its summary beside the interfaces; every run that reads interfaces there
+  reads it first. In a module's own run, `rt_push` allocates and `rt_abort` fails because the
+  runtime's run said so.
+- **Function units.** A unit carries its body's record - own facts, entry, call count and edges, with
+  positions relative to the `fn` token - and a replay puts it back; the fixpoint runs per run over
+  replayed and fresh edges alike, so a unit never carries a solved fact that could be stale. The claim
+  is not in the unit: it is read from the declaration as this run parses it.
+
+A row's facts install as the callee's own facts and its witness as the next link, so a refusal in
+module A names the chain through B and the runtime exactly as a whole-program build does:
+`loud -> push_one -> grow -> rt_push -> rt_grow` (`tools/test-cli.mjs` holds the two equal).
+
+Modules build in dependency order (a `use` cycle is refused by the per-module driver), so every
+summary a run reads exists before it starts; recursion inside a run is the fixpoint's.
+
+### The `dyn` drop
+
+Dropping a `dyn I` value runs the drop of whichever implementation it holds. When `I` is private to
+the module that drops it, every implementation and every box site is in that module, so the drop
+resolves to their helpers (*Drop glue*). When `I` is public, an implementation in a module this run
+cannot see may be the one dropped, so the drop is an unknown edge: a claim over it is refused,
+naming the reason - "the drop of a `dyn I` value, whose implementations this module cannot see". The
+answer is the same in every build shape. To claim such code, put the claim where the implementations
+are known: on the implementing types' `Drop` (each proved in its own module), or on a function in the
+module that declares `I` privately and does the drop.
+
+### Follow-up: closure-parametric summaries
+
+A closure call is an unknown edge, so `vecs::map`, `split` with a callback and every adapter that
+takes one cannot carry a claim today. A summary that says "allocates if parameter *k*'s callee does"
+would let an instantiation be checked against the closure literal passed there - its own summary -
+instead of assuming the worst. The place for it is the closure-bounds work's region machinery
+(`docs/design/closure-bounds.md`), which already tracks what a closure value carries; it is not needed
+for per-module proofs and is not built.
 
 ## Interface files
 
@@ -125,9 +184,8 @@ Anything else is refused, and the refusal names what is missing.
 
 ## Limits
 
-- **A `dyn` value whose vtable this build never recorded** (it arrived as a parameter or a field from
-  another object, so no `dyn` box site in this compilation named its concrete type) keeps an honest
-  unknown: the drop may allocate and may fail. Whole-program builds always have the box site.
+- **A `dyn` value of a public interface** keeps an honest unknown: an implementation from another
+  module may be the one dropped (*The `dyn` drop*).
 - **A closure's environment drop** goes through the slot the closure's own body installed
   (`call_dispatch_out`): the captures' drop helpers are reached by the compiler's dispatch, and the
   compiled bodies of those helpers are what the fixpoint sees, but the slot itself is not resolved to

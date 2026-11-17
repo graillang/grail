@@ -130,8 +130,7 @@ refusals and are marked `pending` on that work. This branch is not merged before
 
 ## Follow-ups, by name
 
-- **`thread::scope`** (threads that borrow what outlives the scope; joined at exit; first failure
-  re-raised). Deferred out of stage 2: it is built on the closure-bounds feature.
+- **`thread::scope`**: built (below).
 - **`thread::Executor`** (stage 4), **`sched::start`** and the removal of `GRAIL_TASKS=thread`
   (stage 1/2 of the scheduler work, not this branch).
 - Module-level `Local` (the language gap above).
@@ -139,3 +138,29 @@ refusals and are marked `pending` on that work. This branch is not merged before
   first stack slot never restored the thread pointer (slot 0 was read as "no slot saved"), so in a
   libc-linked program everything after a no-argument foreign call that opened a function ran on
   libc's thread pointer.
+
+## `thread::scope`
+
+    thread::scope(|t| -> u64 {
+        a := t.spawn(|| -> u64 left.len());
+        b := t.spawn(|| -> u64 { right[0] = 9; return 1; });
+        return a.join() + b.join();
+    })
+
+`scope<s, R: Owned>(body: FnMut<s>((&mut Threads<s>)) -> R) -> R`, `Threads<s>::spawn<U: Send +
+Owned>(self: (&mut Self), f: FnMut<Send, s>() -> U) -> ScopedThread<s, U>`, and `h.join()` - a
+method, because `thread::join` already names the join of a `Thread<R>` and Grail has no
+overloading. The shapes are the closure-bounds checker's (docs/design/closure-bounds.md 7.1): the
+`&mut` receiver keeps each spawn's loans alive until the scope ends and makes two spawns of one
+`&mut x` conflict, and `s` in `ScopedThread<s, U>` keeps a handle inside the body. Neither type is
+transferable or shareable.
+
+The threads start through the same raw entry as `thread::spawn` (`thread_spawn_raw`, which checks
+nothing). The scope owns every thread record: after the body returns it waits for each thread in
+order, keeps the first failure no handle took, releases every record, and only then re-raises that
+failure - siblings always finish (director Q1). A handle's `join` waits, takes the result and marks
+the record taken (a failure is raised at the join instead, and not again at scope exit); a handle
+dropped without a join waits and drops the result. Because the scope, not the handle, frees the
+record, a handle that is never dropped (an Rc cycle) still leaves no thread running past the scope.
+Such a handle's result is not dropped - its type is not known to the scope - which is a leak, not a
+dangling borrow.

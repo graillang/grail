@@ -153,14 +153,26 @@ the base is not a shared reference, in which case the bound could go stale and t
 
 ## Proved calls cost nothing
 
-A function with refined parameters has two entries. The checked one runs the parameter checks in the
-prologue; the second, `<symbol>.proved`, is the same frame and the same body with the checks skipped.
-A call site that proved every parameter's predicate calls the second; everything else - a function
-value, a `dyn` vtable entry, an interface method, a foreign call - calls the checked one, because
-nothing was proved about the code it reaches.
+A function with refined parameters is compiled as two: the body, `<symbol>.proved`, which checks
+nothing, and `<symbol>`, a small wrapper that checks the parameters and calls the body. A call site
+that proved every parameter's predicate calls the body directly - the same instructions as a call to
+a function with no predicate - and counts as a call that cannot fail under `@no_panic`. Everything
+else - an unproved call, a function value, a `dyn` vtable entry, a foreign call - reaches the
+wrapper, because nothing was proved about the code it reaches; it pays one extra call on top of the
+checks.
 
 Predicates travel in interface files, along with the parameters' names, so a caller in another module
 owes - and may prove - exactly what a caller in the same module does.
+
+## A call that can only fail
+
+When the arguments are constants - or names the facts equate with constants (`g := 0`) - that
+break the predicate, the call is not unproved but disproved, and that is a compile error in every
+mode, strict or not:
+
+```
+error: the refinement `grain > 0` is false at this call: the arguments are constants that break it
+```
 
 ## Strict mode
 

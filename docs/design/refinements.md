@@ -2,7 +2,7 @@
 
 Status: implemented (gaps round, G24; arithmetic sound under wrapping in both overflow modes,
 2026-11-16): the syntax (`a483462`), the runtime checks that keep the
-feature sound (`031fd33`), the prover with its second entry point (`a6fe6b0`, `3fee023`),
+feature sound (`031fd33`), the prover with its second entry point (`a6fe6b0`, `3fee023`; the copied second entry was replaced on 2026-11-16 - a copy of the prologue taken before optimisation, it corrupted the caller's callee-saved registers - by a checking wrapper that calls the body, `ref_wrapper`),
 bounds-check elimination from a refined parameter (`a0d2dda`), strict mode (`5001170`), the
 `--verify-facts` cross-check on the native backend (`4ef15d8`) and the fact walker over the typed IR
 that replaced the token re-walk (`dc5c73b`).
@@ -68,7 +68,7 @@ is a place where a scope, a binding or a guard is opened or closed:
 | assignment | `x = e` forgets what the facts said about `x`; `x.f = e` does not, since it writes a field of what `x` owns |
 | statement | a statement that calls may write through the names it mentions, so those are forgotten after it - a compound statement is exempt because its condition and its own statements report themselves |
 | call site | the callee's parameter predicates are discharged with the facts at the call, and the argument names are forgotten after it (a method call also forgets its receiver) |
-| body | a refined parameter holds at the body's entry - the entry checked it or the caller proved it, which is what the `.proved` entry means - and nothing is carried into the next body the compile emits (a closure body starts empty) |
+| body | a refined parameter holds at the body's entry - the entry checked it or the caller proved it, which is what a proved call means - and nothing is carried into the next body the compile emits (a closure body starts empty) |
 
 A term is a parameter's or local's name, a length spelled `v.len` (for `v.len()`), a literal, or an
 opaque term (`i+1`, `v.len-1`: an expression whose arithmetic may wrap, see below); an
@@ -311,6 +311,13 @@ record - the same renaming a call's arguments get. The no-`&mut` rule extends to
 predicate mentions; a trusted root's reader fact becomes `r.lo <= r.hi`; the interface carries the
 text and the field list.
 
+## A disproved obligation (2026-11-16)
+
+At a call, an obligation whose sides are integer literals, or names the facts equate with one, and
+which does not hold of them is a compile error in every mode (`pv_false_literal`, `pv_false_fail`):
+the call can only fail. Nothing but constants is judged false, so an obligation that is merely
+unproved keeps its check.
+
 ## Verification
 
 A `--use DIR` build is the one place a proof is not available: the interface carries the predicate's
@@ -331,7 +338,7 @@ refusing an unproved one; a function value still checking; and a cross-module pr
 interface. The `pv-` cases are the typed-IR walk's own: a match pattern and a match guard proving a
 call (and a sibling arm, which has no such fact, keeping its check), a shadowing binding killing its
 block's facts and restoring the outer ones after it, and a `for` guard proving a call inside the body
-and ending with it. Each proving case asserts the call reaches the `.proved` entry and the refusing
+and ending with it. Each proving case asserts the call reaches `<symbol>.proved` and not the wrapper, and the refusing
 case asserts the runtime check fires, so neither can pass by accident.
 
 The switch was measured before the re-walk was deleted, with the same compiler built twice and the

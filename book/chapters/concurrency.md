@@ -19,23 +19,28 @@ Behind `parallel_map` are the scheduler's worker threads, one per CPU - the same
 tasks - stealing work from each other, so a call pays no thread-creation cost, a nested call uses
 the same workers, and the calling thread runs leaves itself instead of sleeping. For
 `T[]`-shaped work, `lib/pool.grl` wraps it: `pool::map(items, f)` is the per-element form,
-`pool::run(count, f)` gives job `i` to `f(i)`, `pool::for_chunks(data, chunks, f)` consumes a vector
-and hands each job one contiguous owned chunk, and `pool::join(a, b)` forks `a` for any worker to take, runs `b` on the calling thread, and returns
+`pool::run(count, f)` gives job `i` to `f(i)`, `pool::split(data, grain, f)` consumes a vector
+and hands each job one contiguous owned piece of at most `grain` elements, `pool::range(n, grain, f)`
+calls `f(lo, hi)` per piece of `0..n`, `pool::reduce(n, grain, zero, leaf, merge)` folds the pieces'
+results in index order, and `pool::join(a, b)` forks `a` for any worker to take, runs `b` on the calling thread, and returns
 both owned results - if no worker took `a`, the caller runs it too, so a join costs little when
 there is nobody free to help. All of them state the same rule: everything a job's closure touches it owns, and
-results come back in input order whatever order the jobs finish in. See
+results come back in input order whatever order the jobs finish in. And the pieces depend on the
+length and the grain only, never on the number of cores, so a floating-point `reduce` prints the
+same bits on a laptop and on a 64-core server. See
 `docs/design/parallelism.md`.
 
-`parallel_for_chunks(&mut data[a: b], chunks, f)` is the in-place form of the chunked one: the
-compiler splits an exclusive slice into disjoint exclusive chunks and hands each job `&mut [T]` over
-its own elements, so nothing is moved or copied - the same 3M-element pass that costs ~100 ms
-through `for_chunks` costs ~44 ms here, as one job. The split is `size = ceil(n/chunks)`, chunk `k`
-being `[k*size, min(n, k*size+size))`, so disjointness and coverage are arithmetic rather than a
-checked property. The `&mut` slice is the whole vector's loan, so no capture in the callback can
+`parallel_split(&mut data[a: b], grain, f)` is the in-place form of the owned one: the compiler
+splits an exclusive slice into disjoint exclusive pieces of at most `grain` elements and hands each
+job `&mut [T]` over its own elements, so nothing is moved or copied - the same 3M-element pass that
+costs ~100 ms through `pool::split` costs ~44 ms here, as one job. Piece `k` is
+`[k*grain, min(n, (k+1)*grain))`, so disjointness and coverage are arithmetic rather than a checked
+property. The `&mut` slice is the whole vector's loan, so no capture in the callback can
 reach that data, and the slice a callback holds has its own length, so an index past the chunk is a
-bounds check rather than a write into a neighbour. `pool::chunks_mut(data, chunks, f)` wraps it.
+bounds check rather than a write into a neighbour. `pool::split_mut(data, grain, f)` wraps it;
+`grain` is a `u64 where grain > 0`, so a zero grain is refused where it is written.
 
-{{example:pool-chunks-mut}}
+{{example:pool-split-mut}}
 
 `parallel_spawn(f)` returns a `Job<R>` you can wait on later with `parallel_join(job)`, or
 `pool::spawn`/`pool::wait`. A handle may outlive the statement that made it, and even the frame: its
@@ -53,6 +58,81 @@ In the `concurrency` example above, four tasks each increment an `Atomic` counte
 exclusive access to the payload only while the lock is held. The compiler rejects callbacks that
 try to return or stash a reference to the guarded value, so the lock cannot be bypassed later.
 Waiting threads sleep in the kernel (futex) instead of spinning.
+
+### Atomics and memory orderings
+
+`Atomic<T>` holds a `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64` or `bool`. Its type comes
+from the value it starts with: `Atomic::new(0)` is an `Atomic<u64>`, as it always was, and a narrow
+cell starts from a value of its type, `Atomic::new(u8(0))`. Every operation is a method, and its
+memory ordering is part of the name. The bare name is sequentially consistent, so the short
+spelling is always the safe one:
+
+| operation | names |
+|---|---|
+| load | `load`, `load_relaxed`, `load_acquire` |
+| store | `store`, `store_relaxed`, `store_release` |
+| read-modify-write, returns the old value | `swap`, `fetch_add`, `fetch_sub`, `fetch_and`, `fetch_or`, `fetch_xor`, `fetch_min`, `fetch_max`, each also `_relaxed`, `_acquire`, `_release`, `_acqrel` |
+| compare-exchange | `compare_exchange(expected, new) -> T` returns the value it saw; `compare_exchange_weak(expected, new) -> bool` may fail spuriously and returns whether it stored; both also `_relaxed`, `_acquire`, `_release`, `_acqrel` |
+
+A pair that makes no sense has no name, so `load_release` is a "no method" error that lists the
+loads there are. `fetch_add`/`fetch_sub` wrap at `T`'s width, and `fetch_min`/`fetch_max` compare as
+`T` does: signed for `i*`, unsigned for `u*`. An `Atomic<bool>` has no arithmetic. A
+compare-exchange's failure ordering is derived as C++ derives it: acquire for `_acquire` and
+`_acqrel`, relaxed for `_relaxed` and `_release`. `fence()`, `fence_acquire()` and
+`fence_release()` are standalone fences, and `spin_hint()` tells the CPU that a loop is waiting
+(`pause`, `yield`, or RISC-V's `pause`, which is a no-op on cores without it).
+
+```grail
+mut seen = counter.load_relaxed();
+while !counter.compare_exchange_weak_acqrel(seen, seen + 1) {
+    seen = counter.load_relaxed();
+}
+```
+
+Each method compiles to the instructions at the call site. There is no runtime call, so none of
+them allocates or fails, and every one is allowed in a `@no_alloc @no_panic` function. The ops are:
+
+- **x86-64:** acquire loads and release stores are plain `mov`s. A sequentially consistent load is
+  a `mov` as well, and a sequentially consistent store is an `xchg`. A 64-bit `fetch_add` is one
+  `lock xadd`. Operations that compute the new value from the old one, such as `fetch_min` or a
+  narrow `fetch_add`, are a `lock cmpxchg` loop.
+- **AArch64:** `ldar`/`stlr`, and exclusive-pair loops (`ldaxr`/`stlxr` and their relaxed forms) on
+  the v8.0 baseline.
+- **RISC-V:** AMOs (`amoadd.d.aq` and so on), LR/SC loops, and the fences of the standard mapping.
+- **LLVM backend:** `load atomic ... acquire`, `atomicrmw ... acq_rel` and `cmpxchg weak`, with the
+  orderings the source asked for.
+
+Until records can hold values inline, an `Atomic<T>` is an 8-byte heap cell holding the value
+widened to 64 bits.
+
+### Litmus tests
+
+`bun tools/test-atomics-litmus.mjs` builds three programs for x86_64, aarch64 and riscv64, with
+both backends, and runs them. The two cross targets run under qemu-user:
+
+- `tests/atomics/litmus.grl`: message passing, with relaxed data, a release flag and an acquire
+  read, over 20,000 rounds. Then 24 jobs count through `compare_exchange`, through a
+  `compare_exchange_weak` retry loop, through `fetch_add`, and through a 16-bit `fetch_add` that
+  wraps. They also drive `fetch_min`/`fetch_max` to the i64, u8 and i8 boundaries.
+- `tests/atomics/litmus_sb.grl`: store buffering with sequentially consistent stores and loads.
+- `tests/atomics/widths.grl`: every width wraps at its own size, with min/max at every boundary.
+
+qemu-user runs the guest on the host's memory model, so on this x86 machine it is mostly stronger
+than the hardware it emulates. What each test can catch therefore depends on where it runs:
+
+| test | catches a fault under qemu (x86 host) | catches it only on real hardware |
+|---|---|---|
+| message passing (release store, acquire load) | a missing atomic on x86-64 itself | aarch64 and riscv64: the x86 host never reorders two stores or two loads, so a dropped `stlr`/`ldar` or fence goes unseen under qemu |
+| store buffering, seq_cst | x86-64 (a seq_cst store that is a plain `mov`), riscv64 (dropped fences), a lost order anywhere | aarch64: see below |
+| CAS counter, weak-CAS loop, fetch_add from 24 jobs | a read-modify-write that is not atomic, on every target | a spurious store-conditional failure, which qemu's emulated exclusives rarely produce, so the weak loop's retry path is exercised for real only on hardware |
+| min/max signedness, wrap at every width | every target (no ordering involved) | - |
+
+Store buffering is the one test that runs the other way. qemu 11.1.3 puts a barrier before an `stlr`
+and after an `ldar`, but none between the two, so on an x86 host the pair can pass each other, which
+ARMv8 forbids. LLVM's own `stlr`/`ldar` lowering shows the same forbidden outcomes there. The program
+therefore recognises the emulator by the CPU it reports, implementer `0x00` (reserved for software,
+used by no silicon vendor). Under qemu it prints the count instead of asserting. A real AArch64
+machine asserts, and it is the only place the aarch64 store-buffering result means anything.
 
 Rust's `std::thread::scope` gives the same "joined before the scope ends" guarantee with
 closures. Grail closures capture by value, so shared state is passed explicitly as the `context`
@@ -147,10 +227,10 @@ there.
 
 Three things, and one of them removed work rather than adding it.
 
-- **In-place chunks.** `parallel_for_chunks(&mut [T], chunks, f)` splits the caller's own slice and
+- **In-place chunks.** `parallel_split(&mut [T], grain, f)` (then a chunk count, now a grain) splits the caller's own slice and
   gives each job an exclusive `&mut [T]` over its own elements, so the job that used to move every
   element into a chunk now writes the elements where they are. Measured on 3M `u64` with one job:
-  about 100 ms through `pool::for_chunks`, about 44 ms in place; with eight chunks on eight workers,
+  about 100 ms through the owned split (`pool::split`), about 44 ms in place; with eight chunks on eight workers,
   about 67 ms against 11 ms. The pass has no copy to pay for, which is where the difference comes
   from - it is not a scheduling improvement.
 - **A job handle.** `parallel_spawn(f) -> Job<R>` and `parallel_join(h) -> R` are spawn-then-wait as

@@ -1,0 +1,24 @@
+// sched::start applies its settings once, before the scheduler exists, and answers rather than
+// aborting: a second call, or a call after parallel work started the scheduler, returns false. The
+// settings take effect: three workers, pinned, with warmed stacks and a fixed seed, and the work
+// that follows runs on exactly those three. (GRAIL_WORKERS must not be set: it would win.)
+use host;
+use pool;
+use sched;
+
+fn main() {
+    mut config = sched::defaults();
+    config.workers = 3;
+    config.pin_workers = true;
+    config.warm_stacks = 2;
+    config.seed = 7;
+    config.background_cap = 1;
+    println(sched::start(config));
+    println(sched::start(sched::defaults()));
+    ids := pool::run<u64>(64, |i: u64| -> u64 host::worker_id());
+    mut seen = u64[0, 0, 0, 0, 0];
+    for i in ids.len() { if ids[i] < 5 { seen[ids[i]] = 1; } }
+    println(host::workers());
+    println(seen[4] == 0);
+    println(sched::start(sched::defaults()));
+}

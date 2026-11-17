@@ -1,0 +1,31 @@
+// x[i] = x[i] * a + y[i] over one million f64, 200 passes; prints the sum (twin of bench/xform_f64.c).
+#[inline(never)]
+fn scale_add(x: &mut [f64], y: &[f64], a: f64) {
+    for (xi, yi) in x.iter_mut().zip(y) {
+        *xi = *xi * a + *yi;
+    }
+}
+fn main() {
+    let n: usize = 1000000;
+    let mut x: Vec<f64> = Vec::with_capacity(n);
+    let mut y: Vec<f64> = Vec::with_capacity(n);
+    let (mut xv, mut yv): (f64, f64) = (0.0, 0.0);
+    for _ in 0..n {
+        x.push(xv);
+        y.push(yv);
+        xv = xv + 0.5;
+        if 3.0 < xv { xv = 0.0; }
+        yv = yv + 0.25;
+        if 1.0 < yv { yv = 0.0; }
+    }
+    let mut a: f64 = 0.999;
+    for pass in 0..200 {
+        scale_add(&mut x, &y, a);
+        a = 0.999 - x[pass] * 0.000000001;
+    }
+    let mut sum = 0f64;
+    for i in 0..n {
+        sum += x[i] as f64;
+    }
+    println!("{}", sum);
+}
