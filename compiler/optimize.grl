@@ -1480,13 +1480,14 @@ pub fn probe_frames<a>(s: &a [u8], after: u64) -> u8[] {
     }
     names := &scan.names;
     sizes := &scan.sizes;
+    // Only the lines that move %rsp down can take a probe, and the scan has them: the text between
+    // them is copied in runs.
     mut out = u8[];
-    mut a = 0;
-    while a < s.len() {
-        mut e = a;
-        while (e < s.len()) && (s[e] != 10) {
-            e += 1;
-        }
+    mut pend = 0;
+    n := s.len();
+    for d in scan.down.len() / 2 {
+        a := scan.down[2 * d];
+        e := scan.down[2 * d + 1];
         mut name = u8[];
         // The frame line is `subq $.F<n>,%rsp`, or `subq $.F<n>+K,%rsp` when the frame also saves
         // callee-saved registers below the slots: the probe then covers the K bytes too.
@@ -1519,53 +1520,53 @@ pub fn probe_frames<a>(s: &a [u8], after: u64) -> u8[] {
                 }
             }
         }
-        if after != 0 {
-            for x in e - a {
-                out.push(s[a + x]);
-            }
-            out.push(10);
-        }
+        mut probe = u8[];
         if name.len() != 0 {
             for i in names.len() {
-                if names[i].len() == name.len() {
-                    mut same = true;
-                    for j in name.len() {
-                        if names[i][j] != name[j] {
-                            same = false;
-                        }
-                    }
-                    if same && (4096 < sizes[i] + extra) {
-                        pages := (sizes[i] + extra + 4095) / 4096;
-                        if after != 0 {
-                            out.append(view("movq %rbp,%rax\nmovq $"));
-                            put_num(&mut out, pages);
-                            out.append(view(",%r11\n.Lgrail_probe_"));
-                            out.append(name[1..name.len()]);
-                            out.append(view(":\nsubq $4096,%rax\nmovq (%rax),%r10\nsubq $1,%r11\njnz .Lgrail_probe_"));
-                            out.append(name[1..name.len()]);
-                            out.append(view("\n"));
-                        } else {
-                            out.append(view("movq $"));
-                            put_num(&mut out, pages);
-                            out.append(view(",%rax\n.Lgrail_probe_"));
-                            out.append(name[1..name.len()]);
-                            out.append(view(":\nsubq $4096,%rsp\nmovq $0,(%rsp)\nsubq $1,%rax\njnz .Lgrail_probe_"));
-                            out.append(name[1..name.len()]);
-                            out.append(view("\nmovq %rbp,%rsp\n"));
-                        }
+                if ir::same_range(view(name), 0, name.len(), view(names[i])) && (4096 < sizes[i] + extra) {
+                    pages := (sizes[i] + extra + 4095) / 4096;
+                    if after != 0 {
+                        probe.append(view("movq %rbp,%rax\nmovq $"));
+                        put_num(&mut probe, pages);
+                        probe.append(view(",%r11\n.Lgrail_probe_"));
+                        probe.append(name[1..name.len()]);
+                        probe.append(view(":\nsubq $4096,%rax\nmovq (%rax),%r10\nsubq $1,%r11\njnz .Lgrail_probe_"));
+                        probe.append(name[1..name.len()]);
+                        probe.append(view("\n"));
+                    } else {
+                        probe.append(view("movq $"));
+                        put_num(&mut probe, pages);
+                        probe.append(view(",%rax\n.Lgrail_probe_"));
+                        probe.append(name[1..name.len()]);
+                        probe.append(view(":\nsubq $4096,%rsp\nmovq $0,(%rsp)\nsubq $1,%rax\njnz .Lgrail_probe_"));
+                        probe.append(name[1..name.len()]);
+                        probe.append(view("\nmovq %rbp,%rsp\n"));
                     }
                 }
             }
         }
-        if after == 0 {
-            for x in e - a {
-                out.push(s[a + x]);
-            }
-            if e < s.len() {
+        if probe.len() != 0 {
+            if after == 0 {
+                // Before the frame line.
+                out.append(s[pend..a]);
+                pend = a;
+            } else if e < n {
+                // After it (Windows).
+                out.append(s[pend..e + 1]);
+                pend = e + 1;
+            } else {
+                // After a last line with no newline, which gets one.
+                out.append(s[pend..e]);
                 out.push(10);
+                pend = e;
             }
+            out.append(view(probe));
         }
-        a = e + 1;
+    }
+    out.append(s[pend..n]);
+    // Windows writes every line with its newline, a last one too.
+    if (after != 0) && (pend < n) && (s[n - 1] != 10) {
+        out.push(10);
     }
     probe_backstop(view(out));
     return out;
@@ -2068,6 +2069,8 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
     for i in last {
         dhead.push(0);
     }
+    // Several sequences can share one loop head: each links to the one stored before it (+1).
+    mut dchain = u64[];
     // At a drop helper call, the SSE registers (bit per register number) to save around it.
     mut xsave = u64[];
     for i in last {
@@ -2294,6 +2297,11 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
             dregs.push(dlen[k]);
             if ddata[k] != 99 {
                 if dloop[k] != 0 {
+                    while dchain.len() <= k {
+                        dchain.push(0);
+                    }
+                    was := dhead[dwline[k]];
+                    ir::put(&mut dchain, k, was);
                     ir::put(&mut dhead, dwline[k], k + 1);
                 } else {
                     ir::put(&mut dinit, dwline[k], k + 1);
@@ -2425,10 +2433,11 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
                 o.out.push(10);
             }
         }
-        if dhead[i] != 0 {
-            // Into the loop from above: the stable sequence's header from its frame slot (renumbered
-            // by compact), then its fields.
-            k := dhead[i] - 1;
+        // Into the loop from above: each stable sequence's header from its frame slot (renumbered by
+        // compact), then its fields - every sequence whose loop starts here, not only the last one.
+        mut hk = dhead[i];
+        while hk != 0 {
+            k := hk - 1;
             mut n = dslot[k];
             if (n < o.slotmap.len()) && (o.slotmap[n] != 0) {
                 n = o.slotmap[n];
@@ -2448,6 +2457,11 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
             app(&mut o.out, view("),%"));
             reg_name(&mut o, dregs[2 * k]);
             o.out.push(10);
+            if k < dchain.len() {
+                hk = dchain[k];
+            } else {
+                hk = 0;
+            }
         }
         mut saved = 0;
         if (xsave[i] != 0) && (o.del[i] == 0) {

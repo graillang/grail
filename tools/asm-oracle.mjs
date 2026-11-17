@@ -100,6 +100,20 @@ export function compareObjects(want, got) {
 // COFF objects compare by llvm-readobj's view - section headers and contents, relocations by symbol
 // name and the symbol table - with the file offsets and string-table positions left out (LLVM tail-
 // merges its string table; the names, not where they sit, are the content).
+// Mach-O objects compare by llvm-readobj's view - header, load commands, sections with their
+// contents, relocations and symbols - with string-table offsets left out (LLVM tail-merges and
+// reorders its string table; the names are the content).
+export function compareMachO(want, got) {
+  const view = file => run(['llvm-readobj', '--file-headers', '--sections', '--section-data', '--relocations', '--symbols', '--macho-dysymtab', file]).stdout
+    .split('\n').filter(l => !/^File:/.test(l)).map(l => l.replace(/^(\s*Name: \S+) \(\d+\)/, '$1').replace(/^(\s*StringTableSize:).*/, '$1')).join('\n');
+  const a = view(want).split('\n');
+  const b = view(got).split('\n');
+  let i = 0;
+  while (i < a.length && a[i] === b[i]) i++;
+  if (i === a.length && a.length === b.length) return null;
+  return `differ at line ${i}: clang \`${(a[i] ?? '').trim()}\` internal \`${(b[i] ?? '').trim()}\`\n  context: ${a.slice(Math.max(0, i - 6), i).map(x => x.trim()).join(' | ')}`;
+}
+
 export function compareCoff(want, got) {
   const view = file => {
     const strip = text => text.split('\n').filter(l => !/^File:/.test(l)).join('\n');
@@ -132,12 +146,12 @@ function run(argv) {
 export function checkFile(source, work, assembler, target = 'x86_64') {
   const stem = join(work, basename(source).replace(/\.s$/, ''));
   const flags = target === 'riscv64' ? ['-march=rv64imafd', '-mabi=lp64d'] : [];
-  const triple = target === 'windows-x86_64' ? 'x86_64-pc-windows-msvc' : `${target}-linux-gnu`;
+  const triple = { 'windows-x86_64': 'x86_64-pc-windows-msvc', 'macos-aarch64': 'arm64-apple-macos11', 'macos-x86_64': 'x86_64-apple-macos11' }[target] ?? `${target}-linux-gnu`;
   const clang = run(['clang', `--target=${triple}`, ...flags, '-c', source, '-o', `${stem}.clang.o`]);
   if (clang.status !== 0) return `clang failed: ${clang.stderr}`;
   const ours = run([...assembler, ...(target === 'x86_64' ? [] : ['--target', target]), source, '-o', `${stem}.grail.o`]);
   if (ours.status !== 0) return `internal assembler failed: ${ours.stdout}${ours.stderr}`;
-  const diff = target === 'windows-x86_64' ? compareCoff(`${stem}.clang.o`, `${stem}.grail.o`) : compareObjects(readFileSync(`${stem}.clang.o`), readFileSync(`${stem}.grail.o`));
+  const diff = target.startsWith('macos-') ? compareMachO(`${stem}.clang.o`, `${stem}.grail.o`) : target === 'windows-x86_64' ? compareCoff(`${stem}.clang.o`, `${stem}.grail.o`) : compareObjects(readFileSync(`${stem}.clang.o`), readFileSync(`${stem}.grail.o`));
   if (!diff) return null;
   if (typeof diff === 'string') return diff;
   const window = o => run(['llvm-objdump', '-d', '-r', `--start-address=${Math.max(0, diff.offset - 32)}`, `--stop-address=${diff.offset + 32}`, '-j', diff.section, o]).stdout.split('\n').slice(6).join('\n');
@@ -178,10 +192,21 @@ if (import.meta.main) {
     const dir = join(import.meta.dir, '..', 'tests/asm');
     let bad = 0;
     for (const name of readdirSync(dir).filter(f => f.endsWith('.s')).sort()) {
-      const t = name.replace(/^directives-/, '').replace(/\.s$/, '');
+      const t = name.match(/(windows-x86_64|macos-aarch64|macos-x86_64|x86_64|aarch64|riscv64)\.s$/)[1];
       const result = checkFile(join(dir, name), work, assembler, t);
       console.log(result ? `FAIL ${name}: ${result}` : `ok ${name}`);
       if (result) bad++;
+    }
+    // The instruction-record path (in-memory-ir S4): every x86-64 ELF file's lines turned into
+    // records and assembled from those must give the text path's object byte for byte.
+    for (const name of readdirSync(dir).filter(f => /(^|-)x86_64\.s$/.test(f) && !/windows/.test(f)).sort()) {
+      const plain = join(work, `${name}.plain.o`);
+      const recs = join(work, `${name}.records.o`);
+      const a = run([...assembler, join(dir, name), '-o', plain]);
+      const b = run([...assembler, '--records', join(dir, name), '-o', recs]);
+      const same = a.status === 0 && b.status === 0 && readFileSync(plain).equals(readFileSync(recs));
+      console.log(same ? `ok ${name} (records)` : `FAIL ${name} (records): ${b.stdout}${b.stderr}`);
+      if (!same) bad++;
     }
     process.exit(bad ? 1 : 0);
   }

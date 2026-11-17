@@ -36,7 +36,8 @@ const work = join(root, '.work/compile-perf', `run-${process.pid}`);
 rmSync(work, { recursive: true, force: true });
 mkdirSync(work, { recursive: true });
 process.on('exit', () => rmSync(work, { recursive: true, force: true }));
-const stage1 = process.env.GRAIL_COMPILER && existsSync(process.env.GRAIL_COMPILER) ? process.env.GRAIL_COMPILER : buildCompiler();
+// Stage 1: the tree's compiler built by GRAIL_COMPILER (or the bootstrap); stage 2: built by stage 1.
+const stage1 = buildCompiler();
 const stage2 = spawnSync('bun', [join(root, 'tools/native.mjs'), 'build'], { cwd: root, encoding: 'utf8', env: { ...process.env, GRAIL_COMPILER: stage1 }, maxBuffer: 1 << 26 });
 const compiler = stage2.status === 0 ? stage2.stdout.trim().split('\n').pop() : '';
 if (!existsSync(compiler)) {
