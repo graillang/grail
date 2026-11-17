@@ -1,8 +1,10 @@
 # TLS over the system TLS stack
 
-Status: **Linux/OpenSSL implemented and executed; macOS/SecureTransport implemented and
-compile-checked only; Windows/SChannel not implemented, and a Windows build of a program that uses
-`tls` stops with a compile-time message that says so.** This note fixes the API, the error taxonomy,
+Status: **Linux/OpenSSL implemented and executed; macOS/SecureTransport and Windows/SChannel not
+landed, and a macOS or Windows build of a program that uses `tls` stops with a compile-time message
+that says so.** (2026-11-17: the SecureTransport layer described below was written and
+cross-compiled but never run; it was not landed, and `lib/tls.grl` refuses macOS like Windows until a
+macOS runner executes it.) This note fixes the API, the error taxonomy,
 the trust store rules and the lifetime of a session, and records where the platform code had to live
 and why.
 
@@ -219,7 +221,7 @@ credential and context handles are sixteen bytes each, so the four state words i
 hold two addresses (a two-word allocation each) or the handle is copied into a local record per
 call.
 
-### macOS: SecureTransport (compile-checked only)
+### macOS: SecureTransport (the plan; not landed)
 
 SecureTransport rather than Network.framework: Network.framework is an asynchronous, queue-driven
 API and this layer is a synchronous pump over one descriptor - adopting it would mean owning a

@@ -206,7 +206,7 @@ port instead.
 ## TLS over the system stack
 
 `tls` puts a client TLS connection over the operating system's own implementation - OpenSSL or
-LibreSSL on Linux and the BSDs, SChannel on Windows, SecureTransport on macOS - behind the same
+LibreSSL on Linux; a macOS or Windows build of a program that uses it is refused with a message - behind the same
 ownership rules as `net`. The whole foreign surface is inside the module, so a program never names a
 C type and never writes `unsafe` to use TLS.
 

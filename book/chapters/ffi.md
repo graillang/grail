@@ -231,5 +231,5 @@ built for, so a binding that names a platform library needs a static branch:
 The branch not taken is parsed but neither type-checked nor emitted, so it asks the linker for
 nothing. On Windows the pair in the note is what the driver needs (`// grail-link: import secur32
 AcquireCredentialsHandleA`); on Mach-O targets a `lib` request is dropped rather than resolved
-against a framework, which is why the macOS binding in `lib/tls.grl` states its framework in the
-design note instead.
+against a framework, which is one reason `lib/tls.grl` refuses macOS for now: its plan, in the design
+note, needs `-framework Security`.
