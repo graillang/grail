@@ -195,25 +195,20 @@ A second chart shows wall time with four jobs each, this machine's cap.
 
 {{perf:compile#compile-wall}}
 
-**Where Grail is ahead, and where it is behind.** On the commit charted, Grail is the fastest on
-every row of hello world and the seven engine programs except one (iterchain's check after an edit,
-level with cargo): a project's first check, its first build, a rebuild after an edit and a rebuild
-with nothing changed. A no-op rebuild is decided from fingerprints without reading the program
-again, and the build store files its results in-process. On the generated programs, Grail wins
-every edited build and no-op rebuild, and the edited check of the smaller one. It is behind in
-three places, with their causes from profiles of the compiler on these programs:
+**Where Grail is ahead, and where it is behind.** On the commit charted, counting instructions,
+Grail is the fastest on every row of hello world and the seven engine programs, on every check and
+build after an edit, and on the cold check and cold build of the 26,000-line program. It is level
+with Go on the cold build of the 104,000-line program. It is behind in two places:
 
-- **A cold check of a large program** (1.6x Zig at 26,000 lines, 3.2x at 104,000). The check of
-  one large module hashes its interface with SHA-256 (11 % of the instructions), writes the
-  interface (10 %) and still emits code text that it throws away (6 %); allocation and copying are
-  about a quarter. Zig checks the same program on one thread in a third of the instructions.
-- **A check of a large program after an edit** (1.4x Zig at 104,000 lines). The whole module is
-  checked again, at about half the cold cost, where `cargo check` re-checks only what changed.
-- **A cold build** (1.6x Go). The optimiser is a third of the build and re-reads the front end's
-  instruction text (about 18 %), and the assembler reads the optimiser's text again. A cold build of
-  the 104,000-line program grew from 38 to 53 billion instructions when the release compiler was
-  first built in parts (the runtime's small accessors stopped being inlined across them), and fell
-  to 35 billion once the parts were built with ThinLTO; the chart is that compiler.
+- **A cold check of a large program** (1.95x Zig at 104,000 lines, level at 26,000). The growth is
+  linear, so the cost is per line; profiles of the compiler (`docs/design/compile-speed.md`) put
+  about a third of it in allocation, then the interface's writing and its digests.
+- **A rebuild of the large program with nothing changed** (1.3x cargo): 0.09 billion instructions
+  against 0.07, both under a twentieth of a second.
+
+The chart is the release compiler of the commit named, built with ThinLTO. The wall times were
+taken with the machine loaded (the load average is recorded with the run), so they favour the
+instruction counts as the measure.
 
 {{perf:compile#compile-go-check}}
 
