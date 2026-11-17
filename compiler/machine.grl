@@ -1355,7 +1355,8 @@ fn atom_x86<a>(o: (&a mut Out), a: (&Atom)) -> unit {
 //   simd.OP SHAPE [K]
 // SHAPE is the operands' shape: f32x4 f32x8 f64x2 f64x4 i32x4 i32x8 m32x4 m32x8 m64x2 m64x4. A
 // compare writes the mask of the same lane width. OP is add sub mul div and or xor min max eq ne lt
-// le gt ge select not splat lane sum copy any all; K is a lane index (lane).
+// le gt ge select not splat lane sum copy any all insert; K is a lane index (lane, insert: the
+// scalar in %rax becomes lane K of the vector at %rdi, the other lanes kept).
 // The lowering here is the S1 one on every native target: one scalar lane at a time with the
 // instructions scalar code already uses - the x86-64 subset the internal assembler encodes, and
 // the AArch64 and RV64 forms machine.grl writes for scalars - so a lane computes exactly what the
@@ -1376,7 +1377,7 @@ fn simd_ops() -> u8[][] {
         copy_text(view("max")), copy_text(view("eq")), copy_text(view("ne")), copy_text(view("lt")),
         copy_text(view("le")), copy_text(view("gt")), copy_text(view("ge")), copy_text(view("select")),
         copy_text(view("not")), copy_text(view("splat")), copy_text(view("lane")), copy_text(view("sum")),
-        copy_text(view("copy")), copy_text(view("any")), copy_text(view("all"))
+        copy_text(view("copy")), copy_text(view("any")), copy_text(view("all")), copy_text(view("insert"))
     ];
 }
 fn simd_number<a>(s: &a [u8]) -> u64 {
@@ -2225,7 +2226,13 @@ pub fn simd_expand<a>(o: (&a mut Out), s: (&Simd)) -> unit {
         }
         return ();
     }
-    if op == 18 {
+    if (op == 18) || (op == 24) {
+        mut first = 0;
+        mut count = n;
+        if op == 24 {
+            first = s.k;
+            count = 1;
+        }
         if float & (bits == 32) {
             // The scalar is an f32 word (binary64 holding an f32 value): narrowed exactly.
             if o.target == 1 {
@@ -2237,18 +2244,22 @@ pub fn simd_expand<a>(o: (&a mut Out), s: (&Simd)) -> unit {
             }
             if simd_x86(&o) {
                 put(&mut o, view("movd %xmm0,%eax\n"));
-                for i in n {
-                    simd_sti(&mut o, 0, i * eb, bits);
+                for i in count {
+                    simd_sti(&mut o, 0, (first + i) * eb, bits);
                 }
             } else {
-                for i in n {
-                    simd_stf(&mut o, 0, i * eb, bits);
+                for i in count {
+                    simd_stf(&mut o, 0, (first + i) * eb, bits);
                 }
             }
             return ();
         }
-        for i in n {
-            simd_sti(&mut o, 0, i * eb, bits);
+        if s.elem == 3 {
+            // A mask's lane from a bool: false 0, true all ones.
+            simd_neg(&mut o);
+        }
+        for i in count {
+            simd_sti(&mut o, 0, (first + i) * eb, bits);
         }
         return ();
     }

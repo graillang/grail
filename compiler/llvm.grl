@@ -2851,9 +2851,12 @@ fn lift_simd<a, b>(l: (&a mut L), line: &b [u8]) -> unit {
         simd_store(&mut l, view(vi), view(r), view(pd), &s);
         return ();
     }
-    if op == 18 {
+    if (op == 18) || (op == 24) {
         w := get_reg(&mut l, view("rax"));
         mut x = copy(view(w));
+        if s.elem == 3 {
+            x = def(&mut l, view("sub i64 0, {}"), &u8[][x]);
+        }
         if float & (s.bits == 32) {
             d := def(&mut l, view("bitcast i64 {} to double"), &u8[][x]);
             x = def(&mut l, view("fptrunc double {} to float"), &u8[][d]);
@@ -2861,6 +2864,18 @@ fn lift_simd<a, b>(l: (&a mut L), line: &b [u8]) -> unit {
             x = def(&mut l, view("bitcast i64 {} to double"), &u8[][x]);
         } else if s.bits == 32 {
             x = def(&mut l, view("trunc i64 {} to i32"), &u8[][x]);
+        }
+        if op == 24 {
+            old := simd_load(&mut l, view(vt), view(pd), &s);
+            mut t = copy(view("insertelement "));
+            put(&mut t, view(vt));
+            put(&mut t, view(" {}, "));
+            put(&mut t, view(e));
+            put(&mut t, view(" {}, i32 "));
+            num(&mut t, s.k);
+            v := def(&mut l, view(t), &u8[][old, x]);
+            simd_store(&mut l, view(vt), view(v), view(pd), &s);
+            return ();
         }
         mut t = copy(view("insertelement "));
         put(&mut t, view(vt));

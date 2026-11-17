@@ -6647,7 +6647,7 @@ fn type_key<a>(c: (&a mut C), out: (&a mut u8[]), ty: u64, depth: u64) -> unit {
     }
     arg := ty_arg(&mut c, ty);
     if (k == 6) || (k == 7) || (k == 10) || (k == 11) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20)
-        || (k == 25) || (k == 26) || (k == 27) || (k == 32) {
+        || (k == 25) || (k == 26) || (k == 27) || (k == 32) || (k == 36) {
         // The payload is a type.
         out.push(32);
         type_key(&mut c, &mut out, arg, depth + 1);
@@ -11788,6 +11788,10 @@ fn type_name<a>(c: (&a mut C), ty: u64) -> u8[] {
         push_bytes(&mut out, view(iface_plain_word(k)));
         return out;
     }
+    if k == 36 {
+        push_bytes(&mut out, view(simd_shape(&mut c, ty)));
+        return out;
+    }
     if k == 11 {
         push_bytes(&mut out, view("Atomic<"));
         push_bytes(&mut out, view(type_name(&mut c, arg)));
@@ -13288,7 +13292,7 @@ fn bind_types<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> u64 {
         return project(&mut c, base, mode);
     }
     if (k == 6) || (k == 27) || (k == 28) || (k == 7) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) || (k == 29)
-        || (k == 32) || (k == 34) || (k == 35) {
+        || (k == 32) || (k == 34) || (k == 35) || (k == 36) {
         arg = bind_types(&mut c, arg, &map);
     }
     if k == 32 {
@@ -13346,7 +13350,7 @@ fn concrete_type<a>(c: (&a mut C), ty: u64) -> bool {
     }
     arg := ty_arg(&mut c, ty);
     if (k == 6) || (k == 27) || (k == 7) || (k == 10) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) || (k == 29)
-        || (k == 32) || (k == 34) || (k == 35) {
+        || (k == 32) || (k == 34) || (k == 35) || (k == 36) {
         if !concrete_type(&mut c, arg) {
             return false;
         }
@@ -13684,6 +13688,10 @@ fn source_type_name<a>(c: (&a mut C), ty: u64) -> u8[] {
     }
     k := ty_kind(&mut c, ty);
     arg := ty_arg(&mut c, ty);
+    if k == 36 {
+        push_bytes(&mut out, view(simd_shape(&mut c, ty)));
+        return out;
+    }
     if k == 11 {
         push_bytes(&mut out, view("Atomic<"));
         push_bytes(&mut out, view(source_type_name(&mut c, arg)));
@@ -14679,7 +14687,7 @@ fn type_keyword<a>(c: (&a mut C), n: &a [u8]) -> bool {
     if same(view(n), view("f32")) || same(view(n), view("f64")) || same(view(n), view("unit")) || same(view(n), view("read")) {
         return true;
     }
-    if same(view(n), view("mut")) || same(view(n), view("Atomic")) || same(view(n), view("Mutex")) || same(view(n), view("Scope")) {
+    if same(view(n), view("mut")) || same(view(n), view("Atomic")) || same(view(n), view("Mutex")) || same(view(n), view("Scope")) || is_simd_name(view(n)) {
         return true;
     }
     return same(view(n), view("Task"))
@@ -15206,6 +15214,9 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
     // User declarations shadow the built-in generic types (a program may declare its own `Task`).
     here_module := module_copy(&mut c);
     shadowed := find_decl(&mut c, view(here_module), view(first)) != 0;
+    if (shadowed == false) & is_simd_name(view(first)) {
+        return simd_named(&mut c, view(first));
+    }
     if (shadowed == false) & same(view(first), view("Atomic")) {
         expect(&mut c, view("<"));
         e := parse_type(&mut c);
@@ -27247,6 +27258,9 @@ fn field_layout<a>(c: (&a mut C), alias: u64) -> u64 {
 // Layout is a property of the type alone, never of the module being compiled: the drop helpers are
 // emitted after the last (raw) module, and they must lay a vector out as everyone else does.
 fn plain<a>(c: (&a mut C), alias: u64) -> bool {
+    if is_simd(&mut c, alias) {
+        return true;
+    }
     return (layout_bits(&mut c, alias) & 1) != 0;
 }
 // The bytes a vector element of type `elem` takes when the vector stores its elements inline - a
@@ -27636,6 +27650,9 @@ fn field_reference<a>(c: (&a mut C), base: u64, ty: u64, k: u64) -> u64 {
 }
 // The words a record's own storage takes: a word per field, or an `extern "C"` record's C size.
 fn record_words<a>(c: (&a mut C), ty: u64) -> u64 {
+    if is_simd(&mut c, ty) {
+        return simd_words(&mut c, ty);
+    }
     if is_array(&mut c, ty) {
         return (array_bytes(&mut c, ty) + 7) / 8;
     }
@@ -39101,6 +39118,426 @@ fn mutex_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
     return val(slot, result);
 }
 // The element types an `Atomic<T>` holds: what fits one aligned word and has no drop.
+// ---- SIMD vector types (docs/design/simd.md) ------------------------------------------------------
+// Kind 36: `f32x4`, `f32x8`, `f64x2`, `f64x4`, `i32x4`, `i32x8` and the masks `m32x4`, `m32x8`,
+// `m64x2`, `m64x4`. The element is the type's argument (f32, f64 or i32; a mask's lanes are i32 or
+// i64), the lane count its mode, plus 1024 for a mask. A vector is a plain value in the frame (its
+// lanes packed, 16 or 32 bytes), copied as a record of words is, with no drop; every operation is one
+// `simd.` stream line (machine.grl "SIMD"), which LLVM lifts to vector IR and the native backend
+// expands lane by lane.
+fn simd_named<a, b>(c: (&a mut C), n: &b [u8]) -> u64 {
+    if (n.len() < 5) || (6 < n.len()) {
+        return 0;
+    }
+    mut x = 0;
+    for i in n.len() {
+        if n[i] == 120 {
+            x = i;
+        }
+    }
+    if x != 3 {
+        return 0;
+    }
+    head := n[0];
+    bits := n[1: 3].copy();
+    lanes := n[4:].copy();
+    mut b = 0;
+    if same(view(bits), view("32")) {
+        b = 32;
+    }
+    if same(view(bits), view("64")) {
+        b = 64;
+    }
+    mut l = 0;
+    if same(view(lanes), view("2")) {
+        l = 2;
+    }
+    if same(view(lanes), view("4")) {
+        l = 4;
+    }
+    if same(view(lanes), view("8")) {
+        l = 8;
+    }
+    if (b == 0) || (l == 0) || (b * l < 128) || (256 < b * l) {
+        return 0;
+    }
+    if head == 102 {
+        if b == 32 {
+            return intern_full(&mut c, 36, f32_type(&mut c), l, u64[]);
+        }
+        return intern_full(&mut c, 36, float_type(&mut c), l, u64[]);
+    }
+    if (head == 105) & (b == 32) {
+        return intern_full(&mut c, 36, int_type(&mut c, 32, 1), l, u64[]);
+    }
+    if head == 109 {
+        return intern_full(&mut c, 36, int_type(&mut c, b, 1), l + 1024, u64[]);
+    }
+    return 0;
+}
+fn is_simd_name<a>(n: &a [u8]) -> bool {
+    names := u8[][copy_bytes(view("f32x4")), copy_bytes(view("f32x8")), copy_bytes(view("f64x2")), copy_bytes(view("f64x4")), copy_bytes(view("i32x4")), copy_bytes(view("i32x8")), copy_bytes(view("m32x4")), copy_bytes(view("m32x8")), copy_bytes(view("m64x2")), copy_bytes(view("m64x4"))];
+    for i in names.len() {
+        if same(view(n), view(names[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+fn is_simd<a>(c: (&a mut C), ty: u64) -> bool {
+    if (ty == 0) || !is_type_id(ty) {
+        return false;
+    }
+    return ty_kind(&mut c, base_type(&mut c, ty)) == 36;
+}
+fn simd_lanes<a>(c: (&a mut C), ty: u64) -> u64 {
+    return ty_mode(&mut c, base_type(&mut c, ty)) % 1024;
+}
+fn simd_is_mask<a>(c: (&a mut C), ty: u64) -> bool {
+    return 1024 <= ty_mode(&mut c, base_type(&mut c, ty));
+}
+fn simd_elem<a>(c: (&a mut C), ty: u64) -> u64 {
+    return ty_arg(&mut c, base_type(&mut c, ty));
+}
+fn simd_float<a>(c: (&a mut C), ty: u64) -> bool {
+    return ty_kind(&mut c, simd_elem(&mut c, ty)) == 21;
+}
+fn simd_bits<a>(c: (&a mut C), ty: u64) -> u64 {
+    e := simd_elem(&mut c, ty);
+    if ty_kind(&mut c, e) == 21 {
+        if is_f32(&mut c, e) {
+            return 32;
+        }
+        return 64;
+    }
+    return ty_arg(&mut c, e);
+}
+fn simd_words<a>(c: (&a mut C), ty: u64) -> u64 {
+    return simd_lanes(&mut c, ty) * simd_bits(&mut c, ty) / 64;
+}
+// The type's name, which is also the shape word of its `simd.` lines.
+fn simd_shape<a>(c: (&a mut C), ty: u64) -> u8[] {
+    mut out = u8[];
+    if simd_is_mask(&mut c, ty) {
+        out.push(109);
+    } else if simd_float(&mut c, ty) {
+        out.push(102);
+    } else {
+        out.push(105);
+    }
+    decimal(&mut out, simd_bits(&mut c, ty));
+    out.push(120);
+    decimal(&mut out, simd_lanes(&mut c, ty));
+    return out;
+}
+// The mask a compare of `ty` gives: the same lane count and width.
+fn simd_mask_of<a>(c: (&a mut C), ty: u64) -> u64 {
+    return intern_full(&mut c, 36, int_type(&mut c, simd_bits(&mut c, ty), 1), simd_lanes(&mut c, ty) + 1024, u64[]);
+}
+// One `simd.OP SHAPE [K]` line over frame vectors: `dst` (a fresh vector of `rty`'s words when `rty`
+// is a vector type), operand addresses in `a`, `b`, `third` (slots holding addresses, or 0), a scalar
+// in `scalar` (or 0). Returns the result's slot: the vector, or the scalar left in %rax.
+fn simd_emit<a, b>(c: (&a mut C), op: &b [u8], shape_ty: u64, rty: u64, a: u64, b: u64, third: u64, scalar: u64, k: u64, scratch: bool) -> u64 {
+    mut dst = 0;
+    if is_simd(&mut c, rty) {
+        dst = frame_alloc(&mut c, simd_words(&mut c, rty));
+    } else if scratch {
+        dst = frame_alloc(&mut c, simd_words(&mut c, shape_ty));
+    } else {
+        dst = imm(&mut c, 0);
+    }
+    zero := imm(&mut c, 0);
+    get(&mut c, dst, view("%rdi"));
+    if a != 0 {
+        get(&mut c, a, view("%rsi"));
+    } else {
+        get(&mut c, zero, view("%rsi"));
+    }
+    if b != 0 {
+        get(&mut c, b, view("%rdx"));
+    } else {
+        get(&mut c, zero, view("%rdx"));
+    }
+    if third != 0 {
+        get(&mut c, third, view("%rcx"));
+    } else {
+        get(&mut c, zero, view("%rcx"));
+    }
+    if scalar != 0 {
+        get(&mut c, scalar, view("%rax"));
+    }
+    mut line = copy_bytes(view("simd."));
+    push_bytes(&mut line, op);
+    line.push(32);
+    push_bytes(&mut line, view(simd_shape(&mut c, shape_ty)));
+    if same(view(op), view("lane")) {
+        line.push(32);
+        decimal(&mut line, k);
+    }
+    line.push(10);
+    o(&mut c, view(line));
+    if is_simd(&mut c, rty) {
+        return dst;
+    }
+    return save(&mut c);
+}
+// A scalar argument of the element type: a literal adopts it.
+fn simd_scalar_arg<a>(c: (&a mut C), elem: u64) -> u64 {
+    astart := c.pos;
+    mut v = expr(&mut c, 0);
+    aend := c.pos;
+    if v.ty != elem {
+        v = adopt_value(&mut c, v, astart, aend, elem);
+    }
+    require_type(&mut c, v.ty, elem);
+    get(&mut c, v.t, view("%rax"));
+    return save(&mut c);
+}
+fn simd_vector_arg<a>(c: (&a mut C), ty: u64) -> u64 {
+    v := expr(&mut c, 0);
+    require_type(&mut c, v.ty, ty);
+    return v.t;
+}
+// The address of elements `i .. i + lanes` of `src` - a slice (`&[T]`, `&mut [T]`) or a fixed array
+// behind a reference (`&[T; N]`, `&mut [T; N]`) of the vector's element type - checked once: the last
+// index is bounds-checked as `src[i + lanes - 1]` would be (an `i` so large that the sum wraps fails the
+// same check), then the first element's address is computed without a second check.
+fn simd_elements<a>(c: (&a mut C), src: Val, index: u64, ty: u64, write: bool) -> u64 {
+    elem := simd_elem(&mut c, ty);
+    lanes := simd_lanes(&mut c, ty);
+    width := simd_bits(&mut c, ty) / 8;
+    get(&mut c, index, view("%rax"));
+    o(&mut c, view("addq $"));
+    on(&mut c, lanes - 1);
+    o(&mut c, view(",%rax\n"));
+    ok := label(&mut c);
+    jump(&mut c, view("jnc"), ok);
+    o(&mut c, view("movq $-1,%rax\n"));
+    mark(&mut c, ok);
+    last := save(&mut c);
+    mut st = src.ty;
+    if ty_kind(&mut c, st) == 7 {
+        if write & (ty_mode(&mut c, st) == 0) {
+            fail(&mut c, view("a SIMD store needs a mutable place: `&mut [T]` or `&mut [T; N]`"));
+        }
+        inner := base_type(&mut c, ty_arg(&mut c, st));
+        if is_array(&mut c, inner) {
+            if array_elem(&mut c, inner) != elem {
+                fail(&mut c, view("the array's element type is not the vector's"));
+            }
+            array_element(&mut c, src.t, last, inner, false);
+            return array_element(&mut c, src.t, index, inner, true);
+        }
+        st = inner;
+    }
+    if ty_kind(&mut c, st) == 27 {
+        if ty_arg(&mut c, st) != elem {
+            fail(&mut c, view("the slice's element type is not the vector's"));
+        }
+        if write & (ty_mode(&mut c, st) == 0) {
+            fail(&mut c, view("a SIMD store needs a mutable place: `&mut [T]` or `&mut [T; N]`"));
+        }
+        invoke(&mut c, view("rt_slotw"), three(src.t, last, imm(&mut c, width)));
+        return flat_element(&mut c, src.t, index, width, true);
+    }
+    fail(&mut c, view("a SIMD load or store reads a slice (`&[T]`) or an array reference (`&[T; N]`); for a vector `v` write `&v[:]`"));
+    return 0;
+}
+// `f32x4::splat(x)`, `f32x4::new(a, b, c, d)`, `f32x4::load(src, i)`; a mask has `splat(bool)`.
+fn simd_static<a, b>(c: (&a mut C), ty: u64, name: &b [u8]) -> Val {
+    expect(&mut c, view("("));
+    elem := simd_elem(&mut c, ty);
+    mask := simd_is_mask(&mut c, ty);
+    if same(view(name), view("splat")) {
+        mut s = 0;
+        if mask {
+            v := expr(&mut c, 0);
+            require_type(&mut c, v.ty, bool_type(&mut c));
+            // false 0, true all ones (the `simd.splat` of a mask does the negation).
+            get(&mut c, v.t, view("%rax"));
+            s = save(&mut c);
+        } else {
+            s = simd_scalar_arg(&mut c, elem);
+        }
+        expect(&mut c, view(")"));
+        return val(simd_emit(&mut c, view("splat"), ty, ty, 0, 0, 0, s, 0, false), ty);
+    }
+    if same(view(name), view("new")) && !mask {
+        lanes := simd_lanes(&mut c, ty);
+        dst := frame_alloc(&mut c, simd_words(&mut c, ty));
+        for i in lanes {
+            if i != 0 {
+                expect(&mut c, view(","));
+            }
+            s := simd_scalar_arg(&mut c, elem);
+            zero := imm(&mut c, 0);
+            get(&mut c, dst, view("%rdi"));
+            get(&mut c, zero, view("%rsi"));
+            get(&mut c, zero, view("%rdx"));
+            get(&mut c, zero, view("%rcx"));
+            get(&mut c, s, view("%rax"));
+            mut line = copy_bytes(view("simd.insert "));
+            push_bytes(&mut line, view(simd_shape(&mut c, ty)));
+            line.push(32);
+            decimal(&mut line, i);
+            line.push(10);
+            o(&mut c, view(line));
+        }
+        expect(&mut c, view(")"));
+        return val(dst, ty);
+    }
+    if same(view(name), view("load")) && !mask {
+        src := expr(&mut c, 0);
+        expect(&mut c, view(","));
+        index := simd_scalar_arg(&mut c, int_type(&mut c, 64, 0));
+        expect(&mut c, view(")"));
+        at := simd_elements(&mut c, src, index, ty, false);
+        return val(simd_emit(&mut c, view("copy"), ty, ty, at, 0, 0, 0, 0, false), ty);
+    }
+    mut msg = copy_bytes(view("`"));
+    push_bytes(&mut msg, view(simd_shape(&mut c, ty)));
+    push_bytes(&mut msg, view("` has no constructor `"));
+    push_bytes(&mut msg, name);
+    push_bytes(&mut msg, view("`; its constructors are splat, new and load (a mask has splat)"));
+    fail(&mut c, view(msg));
+    return val(0, 0);
+}
+// A method of a vector or a mask (the receiver is evaluated and `(` read).
+fn simd_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
+    ty := base_type(&mut c, value.ty);
+    elem := simd_elem(&mut c, ty);
+    mask := simd_is_mask(&mut c, ty);
+    float := simd_float(&mut c, ty);
+    if same(view(name), view("sum")) && !mask {
+        expect(&mut c, view(")"));
+        return val(simd_emit(&mut c, view("sum"), ty, elem, value.t, 0, 0, 0, 0, true), elem);
+    }
+    if same(view(name), view("lane")) && !mask {
+        // A constant lane: `v.lane(2)`.
+        if kind(&mut c) != 2 {
+            fail(&mut c, view("a lane index is an integer literal"));
+        }
+        text := tok_text(&mut c, c.pos);
+        mut k = 0;
+        for i in text.len() {
+            if (text[i] < 48) || (57 < text[i]) {
+                fail(&mut c, view("a lane index is an integer literal"));
+            }
+            k = k * 10 + text[i] - 48;
+        }
+        if simd_lanes(&mut c, ty) <= k {
+            fail(&mut c, view("the lane index is past the vector's last lane"));
+        }
+        advance(&mut c);
+        expect(&mut c, view(")"));
+        return val(simd_emit(&mut c, view("lane"), ty, elem, value.t, 0, 0, 0, k, false), elem);
+    }
+    if same(view(name), view("store")) && !mask {
+        dst := expr(&mut c, 0);
+        expect(&mut c, view(","));
+        index := simd_scalar_arg(&mut c, int_type(&mut c, 64, 0));
+        expect(&mut c, view(")"));
+        at := simd_elements(&mut c, dst, index, ty, true);
+        // The copy's destination is the elements: rdi is the address, rsi the vector.
+        zero := imm(&mut c, 0);
+        get(&mut c, at, view("%rdi"));
+        get(&mut c, value.t, view("%rsi"));
+        get(&mut c, zero, view("%rdx"));
+        get(&mut c, zero, view("%rcx"));
+        mut line = copy_bytes(view("simd.copy "));
+        push_bytes(&mut line, view(simd_shape(&mut c, ty)));
+        line.push(10);
+        o(&mut c, view(line));
+        return val(imm(&mut c, 0), intern(&mut c, 2, 0));
+    }
+    if (same(view(name), view("min")) || same(view(name), view("max"))) && !mask {
+        other := simd_vector_arg(&mut c, ty);
+        expect(&mut c, view(")"));
+        return val(simd_emit(&mut c, name, ty, ty, value.t, other, 0, 0, 0, false), ty);
+    }
+    cmps := u8[][copy_bytes(view("eq")), copy_bytes(view("ne")), copy_bytes(view("lt")), copy_bytes(view("le")), copy_bytes(view("gt")), copy_bytes(view("ge"))];
+    for i in cmps.len() {
+        if same(view(name), view(cmps[i])) && !mask {
+            other := simd_vector_arg(&mut c, ty);
+            expect(&mut c, view(")"));
+            mty := simd_mask_of(&mut c, ty);
+            return val(simd_emit(&mut c, name, ty, mty, value.t, other, 0, 0, 0, false), mty);
+        }
+    }
+    if mask && same(view(name), view("select")) {
+        // `m.select(a, b)`: a's lane where m's is set, else b's. a and b are vectors of m's shape.
+        a := expr(&mut c, 0);
+        expect(&mut c, view(","));
+        b := expr(&mut c, 0);
+        expect(&mut c, view(")"));
+        if !is_simd(&mut c, a.ty) || (simd_lanes(&mut c, a.ty) != simd_lanes(&mut c, ty)) || (simd_bits(&mut c, a.ty) != simd_bits(&mut c, ty)) || simd_is_mask(&mut c, a.ty) {
+            fail(&mut c, view("select takes two vectors with the mask's lane count and width"));
+        }
+        require_type(&mut c, b.ty, a.ty);
+        vty := base_type(&mut c, a.ty);
+        return val(simd_emit(&mut c, view("select"), vty, vty, value.t, a.t, b.t, 0, 0, false), vty);
+    }
+    if mask && (same(view(name), view("any")) || same(view(name), view("all"))) {
+        expect(&mut c, view(")"));
+        return val(simd_emit(&mut c, name, ty, bool_type(&mut c), value.t, 0, 0, 0, 0, false), bool_type(&mut c));
+    }
+    if mask && same(view(name), view("not")) {
+        expect(&mut c, view(")"));
+        return val(simd_emit(&mut c, view("not"), ty, ty, value.t, 0, 0, 0, 0, false), ty);
+    }
+    mut msg = copy_bytes(view("`"));
+    push_bytes(&mut msg, view(simd_shape(&mut c, ty)));
+    push_bytes(&mut msg, view("` has no method `"));
+    push_bytes(&mut msg, name);
+    if mask {
+        push_bytes(&mut msg, view("`; a mask's methods are select, any, all and not"));
+    } else {
+        push_bytes(&mut msg, view("`; its methods are sum, lane, store, min, max, eq, ne, lt, le, gt and ge"));
+    }
+    fail(&mut c, view(msg));
+    return val(0, 0);
+}
+// `a OP b` on two vectors of one type: lane-wise + - * / on floats, + - * (wrapping) on integers,
+// & | ^ on integers and masks. A comparison operator is refused: a lane-wise compare is a mask, and
+// `.eq(b)`, `.lt(b)` and so on say so.
+fn simd_binary<a>(c: (&a mut C), k: u64, left: u64, ty: u64, right: Val) -> Val {
+    vty := base_type(&mut c, ty);
+    if is_comparison(k) {
+        fail(&mut c, view("a SIMD comparison is lane-wise and gives a mask: write `a.eq(b)`, `a.lt(b)` and so on"));
+    }
+    require_type(&mut c, right.ty, vty);
+    mask := simd_is_mask(&mut c, vty);
+    float := simd_float(&mut c, vty);
+    mut op = "";
+    if (k == 43) & !mask {
+        op = "add";
+    }
+    if (k == 45) & !mask {
+        op = "sub";
+    }
+    if (k == 42) & !mask {
+        op = "mul";
+    }
+    if (k == 47) & float {
+        op = "div";
+    }
+    if (k == 38) & !float {
+        op = "and";
+    }
+    if (k == 124) & !float {
+        op = "or";
+    }
+    if (k == 94) & !float {
+        op = "xor";
+    }
+    if op.len() == 0 {
+        mut msg = copy_bytes(view("this operator is not defined on `"));
+        push_bytes(&mut msg, view(simd_shape(&mut c, vty)));
+        push_bytes(&mut msg, view("`"));
+        fail(&mut c, view(msg));
+    }
+    return val(simd_emit(&mut c, view(op), vty, vty, left, right.t, 0, 0, 0, false), vty);
+}
 fn atomic_element<a>(c: (&a mut C), ty: u64) -> bool {
     if (ty == 0) || is_bool(&mut c, ty) {
         return true;
@@ -40426,6 +40863,9 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     if k == 11 {
         return atomic_method(&mut c, val(xt, xty), view(name));
     }
+    if k == 36 {
+        return simd_method(&mut c, val(xt, xty), view(name));
+    }
     if k == 13 {
         return mutex_method(&mut c, val(xt, xty), view(name));
     }
@@ -41529,6 +41969,9 @@ fn simple_type_head<a, b>(c: (&a mut C), name: &b [u8]) -> bool {
     if same(view(n), view("Mutex")) {
         return true;
     }
+    if is_simd_name(view(n)) {
+        return true;
+    }
     if same(view(n), view("Atomic")) {
         return true;
     }
@@ -42287,6 +42730,11 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
             }
             return record(&mut c, d - 1, ty);
         }
+    }
+    if is_simd_name(view(first)) & is(&mut c, view("::")) {
+        advance(&mut c);
+        n := ident(&mut c);
+        return simd_static(&mut c, simd_named(&mut c, view(first)), view(n));
     }
     if same(view(first), view("Atomic")) & is(&mut c, view("::")) {
         advance(&mut c);
@@ -44177,6 +44625,13 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
                             mut rty = right.ty;
                             // An operator on a record or enum type with an operator interface
                             // implementation (or a parameter bounded by one): the method call.
+                            if (c.raw == 0) & is_simd(&mut c, ty) {
+                                over := simd_binary(&mut c, k, snap, ty, right);
+                                t = over.t;
+                                ty = over.ty;
+                                left_lit = false;
+                                continue;
+                            }
                             if c.raw == 0 {
                                 rt0 := right.t;
                                 over := operator_call(&mut c, k, val(t, ty), val(rt0, rty));
@@ -49082,8 +49537,9 @@ pub fn iface_digest<a>(data: &a [u8]) -> u8[] {
 // adding a field a version bump and not a silent reinterpretation. `grail iface dump` renders the
 // tree the reader read, so the format stays inspectable without a second parser.
 // Format 7 added the effect summary rows of every listed function; format 8 gives an `Atomic<T>`
-// its element type.
-const IFACE_VERSION: u64 = 9;
+// its element type; format 9 carries a `dyn` type's bounds; format 10 adds the SIMD vector types
+// (kind 36: the element, and the lane count in the mode).
+const IFACE_VERSION: u64 = 10;
 const IFACE_TAG_MODULE: u64 = 1;
 const IFACE_TAG_TRAILER: u64 = 2;
 const IFACE_TAG_LINK: u64 = 3;
@@ -49511,8 +49967,9 @@ fn iface_w_type<a>(c: (&a mut C), out: (&a mut u8[]), deps: (&a mut u64[]), ty: 
             iface_w_type(&mut c, &mut body, &mut deps, args[i]);
         }
     } else if (k == 6) || (k == 7) || (k == 10) || (k == 11) || (k == 13) || (k == 14) || (k == 16) || (k == 26)
-        || (k == 27) || (k == 29) || (k == 34) || (k == 35) {
-        // One nested type in the payload (an `Atomic<T>` carries its element since format 8).
+        || (k == 27) || (k == 29) || (k == 34) || (k == 35) || (k == 36) {
+        // One nested type in the payload (an `Atomic<T>` carries its element since format 8, a SIMD
+        // vector its element and lane count, in the mode, since format 9).
         iface_w_type(&mut c, &mut body, &mut deps, arg);
     } else if k == 8 {
         owner := c.decls[arg].module.copy();
@@ -49823,7 +50280,7 @@ fn iface_r_type<a>(p: (&a mut IR), c: (&a mut C)) -> u64 {
         } else {
             id = iface_intern_args(&mut p, &mut c, tag, inner, mode, rs, largs);
         }
-    } else if (tag == 6) || (tag == 7) || (tag == 11) || (tag == 13) || (tag == 14) || (tag == 16)
+    } else if (tag == 6) || (tag == 7) || (tag == 11) || (tag == 13) || (tag == 14) || (tag == 16) || (tag == 36)
         || (tag == 26) || (tag == 27) || (tag == 29) || (tag == 34) || (tag == 35) {
         if (p.phase == 0) & (tag != 35) {
             p.rtext.push(40);
@@ -53123,7 +53580,7 @@ fn iface_type_raw<a, b>(out: (&a mut u8[]), c: (&b mut C), ty: u64) -> unit {
         }
         return ();
     }
-    if (k == 6) || (k == 11) || (k == 13) || (k == 14) || (k == 16) || (k == 26) || (k == 27) || (k == 29) || (k == 32) || (k == 34) {
+    if (k == 6) || (k == 11) || (k == 13) || (k == 14) || (k == 16) || (k == 26) || (k == 27) || (k == 29) || (k == 32) || (k == 34) || (k == 36) {
         push_bytes(&mut out, view("("));
         push_bytes(&mut out, view(iface_plain_word(k)));
         iface_extra(&mut out, mode, &rs);
@@ -53332,6 +53789,9 @@ fn iface_plain_word(k: u64) -> string {
     }
     if k == 32 {
         return "array";
+    }
+    if k == 36 {
+        return "simd";
     }
     if k == 12 {
         return "fn";
