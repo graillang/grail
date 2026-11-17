@@ -113,7 +113,9 @@ git push root@borg.ml:/srv/grail/repo.git HEAD:refs/heads/gaps-reseed
 ssh root@borg.ml 'git -C /srv/grail/agents/NAME fetch -q && git -C /srv/grail/agents/NAME checkout -qf origin/gaps-reseed'
 rsync -az $G root@borg.ml:/srv/grail/agents/NAME.grail
 ssh root@borg.ml 'GRAIL_LEG_TREE=/srv/grail/agents/NAME GRAIL_LEG_COMPILER=/srv/grail/agents/NAME.grail \
-  nohup setsid /srv/grail/run-leg.sh NAME/stage-riscv64 bun tools/bootstrap.mjs stage riscv64 >/dev/null 2>&1 &'
+  nohup setsid /srv/grail/run-leg.sh NAME/stage-riscv64 env GRAIL_JOBS=1 bun tools/bootstrap.mjs stage riscv64 >/dev/null 2>&1 &'
+#   GRAIL_JOBS=1: under a loaded host the emulated compiler's parallel optimiser workers can time out
+#   ("an optimiser worker did not finish") after an hour of work; one process is slower but finishes
 #   aarch64 the same, with the patched QEMU first on PATH:
 #   sh -c "PATH=/srv/grail/w/.work/architectures/toolchain/usr/bin:\$PATH exec bun tools/bootstrap.mjs stage aarch64"
 # when /srv/grail/logs/NAME/stage-*.log end in exit=0, bring the staged seeds home
