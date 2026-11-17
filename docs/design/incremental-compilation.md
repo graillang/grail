@@ -357,9 +357,12 @@ processes and applied by one.
   compiles every corpus program all three ways and requires the one-process bytes.
 - **When.** Not with `--debug`, the LLVM backend, `--emit-ir`, PE/Mach-O, ARM/RISC-V, `--export`,
   a run with effect records or a `--skip-body` re-run (`par_start`'s conditions, the same shape the
-  store's units need), and not when the source is under 128 KB per worker (`PAR_MIN`): below that a
-  fork and a pipe cost more than the bodies. The worker count is `GRAIL_JOBS` or the processor
-  count, reduced to that size, and then to the tokens the jobserver has free.
+  store's units need), and not when the bodies are not worth it, which is measured
+  (`par_decide`): the walk compiles alone for its first 50 ms of CPU (read from /proc/self/stat, so
+  a loaded machine does not inflate it), estimates from its progress through the source what the
+  rest would cost, does not fork at all under half a second, and above it runs one process per
+  150 ms of the estimate, up to `GRAIL_JOBS` or the processor count and the tokens the jobserver
+  has free.
 - **The parent takes a slice.** It compiles the first slice rather than waiting: measured against
   a variant where every slice goes to a worker and the parent only applies, there was no
   difference beyond the host's noise (self-check 6.1-8.9 s against 6.4-8.5 s, self-compile 17.4-19.0
