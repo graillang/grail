@@ -6674,17 +6674,24 @@ fn rt_job_await(r: u64) -> u64 {
             }
             if k != 0 {
                 idle = 0;
-                if raw_atomic_cas(k + 32, 1, rt_job_claim_word()) == 1 {
+                claim := rt_job_claim_word();
+                if raw_atomic_cas(k + 32, 1, claim) == 1 {
                     if rt_job_descends(k, r) != 0 {
                         rt_job_help(w, k);
-                    } else {
+                    } else if raw_atomic_cas(k + 32, claim, 1) == claim {
                         // The record was recycled between the look and the claim: this is some
-                        // other job. Give it back, where a worker will find it.
-                        raw_atomic_store(k + 32, 1);
+                        // other job. Give it back, where a worker will find it - with a CAS: its
+                        // forker may have seen the claim and registered as its waiter meanwhile,
+                        // and a plain store of `pending` would erase that registration, so the job
+                        // would later be published to nobody and the forker would sleep for ever
+                        // (sched-wake-not-lost-under-constant-parking hung this way on aarch64).
                         if rt_deque_push(rt_job_deque(w, raw_load(k + 112)), k) == 0 {
                             rt_job_inject_push(k);
                         }
                         rt_notify(s);
+                    } else {
+                        // Its forker is waiting on it now: run it here, and the publish wakes it.
+                        rt_job_help(w, k);
                     }
                 }
             } else {
