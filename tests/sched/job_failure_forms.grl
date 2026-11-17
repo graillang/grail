@@ -2,7 +2,7 @@
 // and the task does not stay parked. The failing leaf is often one the failing stack took back and
 // ran itself at its join; the drain once waited for that leaf too, which is waiting for itself, and
 // the task never finished (parallel_map over [0, 1, 2, 3] from a task, job 3 out of bounds).
-// Forms: parallel_map, pool::for_chunks, pool::join, and a join nested three deep.
+// Forms: parallel_map, pool::split, pool::join, and a join nested three deep.
 use host;
 use pool;
 
@@ -29,7 +29,7 @@ fn chunk(v: u64[]) -> u64 {
 fn by_chunks(n: u64, unused: u64) -> u64 {
     mut v = u64[];
     for i in 8 { v.push(i * 50); }
-    parts := pool::for_chunks<u64,u64>(v, 4, chunk);
+    parts := pool::split<u64,u64>(v, 2, chunk);
     return parts.len();
 }
 fn by_join(n: u64, unused: u64) -> u64 {
@@ -59,8 +59,8 @@ fn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {
     }
     b := spawn(sc, 0, by_chunks);
     match try_join(b) {
-        f: TaskFailure => report(1, "for_chunks"),
-        v: u64 => report(0, "for_chunks"),
+        f: TaskFailure => report(1, "split"),
+        v: u64 => report(0, "split"),
     }
     c := spawn(sc, 0, by_join);
     match try_join(c) {

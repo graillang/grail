@@ -5376,7 +5376,7 @@
   },
   {
     "name": "pool-chunks-owned",
-    "note": "A CPU-bound job set: 400k elements summed in 8 owned chunks through pool::for_chunks, asserted equal to the sequential answer. The chunk split is one owned vector per job, so no reference crosses a job boundary.",
+    "note": "A CPU-bound job set: 400k elements summed in 8 owned chunks through pool::split, asserted equal to the sequential answer. The chunk split is one owned vector per job, so no reference crosses a job boundary.",
     "files": [
       "tests/pool/chunks.grl"
     ],
@@ -5752,33 +5752,6 @@
     "note": "C would write the array into storage dropped at the end of the statement"
   },
   {
-    "name": "pool-chunks-mut-split",
-    "note": "In-place chunking over an exclusive slice (parallel_for_chunks / pool::chunks_mut): uneven chunks (10 elements in 3 chunks is 4,4,2), one chunk, zero chunks, more chunks than elements, more chunks than workers (1000 in 64), a sub-range that leaves its neighbours alone, an empty slice that runs no job, nested chunking inside a chunk callback, narrow (f32/u32) elements at their 4-byte stride, a byte buffer through a &mut [u8] view, and the library wrapper. Every check compares CONTENT: a chunk that ran twice doubles its elements, one that never ran leaves them, and one that wrote outside its region would fault or fail the borrow checker.",
-    "files": [
-      "tests/pool/chunks_mut.grl"
-    ],
-    "modules": [
-      "lib/pool.grl",
-      "lib/core.grl"
-    ],
-    "stdout": "ok\n"
-  },
-  {
-    "name": "pool-chunks-mut-timing",
-    "note": "The measured case for stage 2: the same 3M-u64 CPU-bound workload through the owned chunk split and through the in-place split, best of three. Asserts the copy is gone (one owned chunk at least 1.33x slower than one in-place chunk, both single-job, so no core count can explain it) and that parallelism still pays (eight in-place chunks at least 1.5x faster than one, asserted only above four cores). stderr carries the times; stdout is a fixed token.",
-    "files": [
-      "tests/pool/chunks_mut_timing.grl"
-    ],
-    "modules": [
-      "lib/pool.grl",
-      "lib/core.grl"
-    ],
-    "targets": [
-      "x86_64"
-    ],
-    "stdout": "ok\n"
-  },
-  {
     "name": "pool-job-handle",
     "note": "spawn-then-wait outside a structured call (parallel_spawn/parallel_join, pool::spawn/wait): an owned result, two live jobs joined in the reverse of the order they started, a handle that outlives the frame that made it, a handle dropped without being waited on (its drop waits and discards), a job that runs a job and chunks a vector of its own, and results consumed by later statements.",
     "files": [
@@ -5793,49 +5766,49 @@
   {
     "name": "pool-reject-chunk-alias-vector",
     "note": "The aliasing case the in-place surface must refuse: a chunk callback that reaches the same vector the call already holds exclusively. The argument is an exclusive loan of the whole vector, so the capture cannot be formed - the refusal happens at the call site, before any job exists.",
-    "source": "fn main() {\n    mut v = u64[1, 2, 3, 4];\n    parallel_for_chunks(&mut v[0: 4], 2, |s: &mut [u64]| -> unit {\n        for i in s.len() { s[i] = v[i]; }\n    });\n}\n",
+    "source": "fn main() {\n    mut v = u64[1, 2, 3, 4];\n    parallel_split(&mut v[0: 4], 2, |s: &mut [u64]| -> unit {\n        for i in s.len() { s[i] = v[i]; }\n    });\n}\n",
     "reject": true,
     "diagnostic": "use of moved, borrowed or partially initialized value"
   },
   {
     "name": "pool-reject-chunk-mutable-capture",
     "note": "A chunk callback may not hold an exclusive slice at all: every worker calls the same closure, so a captured &mut [T] would be written by every worker at once. Refused by name, which is the closest a chunk callback gets to writing outside its own region.",
-    "source": "fn main() {\n    mut other = u64[9, 9, 9];\n    w := &mut other[0: 3];\n    mut v = u64[1, 2, 3, 4];\n    parallel_for_chunks(&mut v[0: 4], 2, |s: &mut [u64]| -> unit {\n        for i in s.len() { s[i] = w[0]; }\n    });\n}\n",
+    "source": "fn main() {\n    mut other = u64[9, 9, 9];\n    w := &mut other[0: 3];\n    mut v = u64[1, 2, 3, 4];\n    parallel_split(&mut v[0: 4], 2, |s: &mut [u64]| -> unit {\n        for i in s.len() { s[i] = w[0]; }\n    });\n}\n",
     "reject": true,
     "diagnostic": "cannot share closure capture `w`: a mutable slice or view cannot be shared"
   },
   {
     "name": "pool-reject-chunk-shared-slice",
     "note": "The in-place surface needs exclusive access, so a shared &[T] is refused rather than handed out as &mut [T].",
-    "source": "fn main() {\n    v := u64[1, 2];\n    parallel_for_chunks(&v[0: 2], 1, |s: &mut [u64]| -> unit { });\n}\n",
+    "source": "fn main() {\n    v := u64[1, 2];\n    parallel_split(&v[0: 2], 1, |s: &mut [u64]| -> unit { });\n}\n",
     "reject": true,
-    "diagnostic": "parallel_for_chunks writes through its chunks, so the slice must be exclusive"
+    "diagnostic": "parallel_split writes through its chunks, so the slice must be exclusive"
   },
   {
     "name": "pool-reject-chunk-handle-element",
     "note": "The element type goes through the same structural walk as a parallel_map item, so a slice of unaudited handles is refused by name before any job exists - exactly as &[File] is refused as a shared item.",
-    "source": "handle H;\nfn main() {\n    mut f: H;\n    mut hs = H[f];\n    parallel_for_chunks(&mut hs[0: 1], 1, |s: &mut [H]| -> unit { });\n}\n",
+    "source": "handle H;\nfn main() {\n    mut f: H;\n    mut hs = H[f];\n    parallel_split(&mut hs[0: 1], 1, |s: &mut [H]| -> unit { });\n}\n",
     "reject": true,
-    "diagnostic": "cannot transfer parallel_for_chunks element: thread-affine (a foreign handle with no audited classification)"
+    "diagnostic": "cannot transfer parallel_split element: thread-affine (a foreign handle with no audited classification)"
   },
   {
     "name": "pool-reject-chunk-handle-capture",
     "note": "The closure environment is classified for chunks exactly as for parallel_map: a handle captured by the callback reaches a thread-affine resource from every worker.",
-    "source": "handle H;\nfn main() {\n    mut f: H;\n    mut v = u64[1, 2];\n    parallel_for_chunks(&mut v[0: 2], 1, |s: &mut [u64]| -> unit { s[0] = 1; println(f == f); });\n}\n",
+    "source": "handle H;\nfn main() {\n    mut f: H;\n    mut v = u64[1, 2];\n    parallel_split(&mut v[0: 2], 1, |s: &mut [u64]| -> unit { s[0] = 1; println(f == f); });\n}\n",
     "reject": true,
     "diagnostic": "cannot share closure capture `f`: f is thread-affine (a foreign handle with no audited classification)"
   },
   {
     "name": "pool-reject-chunk-fnmut-capture",
     "note": "An FnMut closure shared by every worker would race on its own environment, the same refusal parallel_map gives.",
-    "source": "fn main() {\n    mut n = 0;\n    mut v = u64[1, 2];\n    parallel_for_chunks(&mut v[0: 2], 1, |s: &mut [u64]| -> unit { n += 1; });\n}\n",
+    "source": "fn main() {\n    mut n = 0;\n    mut v = u64[1, 2];\n    parallel_split(&mut v[0: 2], 1, |s: &mut [u64]| -> unit { n += 1; });\n}\n",
     "reject": true,
     "diagnostic": "a callback shared by concurrent workers must not write a captured value"
   },
   {
     "name": "pool-chunk-write-outside-aborts",
     "note": "The runtime half of 'a chunk cannot write outside itself': the slice a callback holds has its own length, so an index at or past that length is a bounds abort rather than a write into a sibling chunk. Nothing after the abort runs.",
-    "source": "fn main() {\n    mut v = u64[1, 2, 3, 4];\n    println(\"before\");\n    parallel_for_chunks(&mut v[0: 4], 2, |s: &mut [u64]| -> unit { s[s.len()] = 9; });\n    println(v);\n}\n",
+    "source": "fn main() {\n    mut v = u64[1, 2, 3, 4];\n    println(\"before\");\n    parallel_split(&mut v[0: 4], 2, |s: &mut [u64]| -> unit { s[s.len()] = 9; });\n    println(v);\n}\n",
     "status": 134,
     "stdout": "before\n",
     "targets": [
@@ -6140,7 +6113,7 @@
     "name": "c-array-length-positive",
     "source": "extern \"C\" record Z { a: [u8; 0] }\nfn main() -> u64 {\n    return 0;\n}\n",
     "reject": true,
-    "diagnostic": "a C array length is a positive integer constant"
+    "diagnostic": "an array length is a positive integer constant"
   },
   {
     "name": "extern-lib-link-only",
@@ -7328,14 +7301,13 @@
       "native"
     ],
     "asm": [
-      "f_main_take.proved:",
-      "call f_main_take.proved"
-    ],
-    "asmAbsent": [
-      "f_main_untaken.proved",
+      "f_main_take:",
       "call f_main_take\n"
     ],
-    "note": "a function whose parameters are refined carries a second entry; the prover routes the constant call to it, a function with no predicate carries none, and an unproved call keeps the checked entry"
+    "asmAbsent": [
+      ".proved"
+    ],
+    "note": "a proved call is a plain call to the one entry, whose checks hold by the proof; a function with no predicate is unchanged"
   },
   {
     "name": "refinement-param-proved-binding",
@@ -7348,9 +7320,12 @@
       "native"
     ],
     "asm": [
-      "call f_main_take.proved"
+      "call f_main_take\n"
     ],
-    "note": "a binding of a constant settles `align % 16 == 0` by divisibility, so the call enters past the check"
+    "note": "a binding of a constant settles `align % 16 == 0` by divisibility, so the call enters past the check",
+    "asmAbsent": [
+      ".proved"
+    ]
   },
   {
     "name": "refinement-param-checked-after-write",
@@ -7366,7 +7341,7 @@
       "call f_main_take\n"
     ],
     "asmAbsent": [
-      "call f_main_take.proved"
+      ".proved"
     ],
     "note": "a write kills the facts that name the target: the check stays, and passes because 48 is a multiple of 16"
   },
@@ -7483,9 +7458,10 @@
       "native"
     ],
     "asmAbsent": [
-      "call f_main_take.proved"
+      ".proved"
     ],
-    "note": "an indirect call proved nothing: a function value always takes the checked entry"
+    "note": "an indirect call proved nothing: a function value always takes the checked entry",
+    "asm": []
   },
   {
     "name": "refinement-loop-fact-proves-call",
@@ -7532,9 +7508,12 @@
       "native"
     ],
     "asm": [
-      "call f_refined_take.proved"
+      "call f_refined_take\n"
     ],
-    "note": "a refinement carried by an interface is owed by a caller in another module, and its constant argument proves it there too"
+    "note": "a refinement carried by an interface is owed by a caller in another module, and its constant argument proves it there too",
+    "asmAbsent": [
+      ".proved"
+    ]
   },
   {
     "name": "refinement-bce-from-param",
@@ -7828,10 +7807,10 @@
       "native"
     ],
     "asm": [
-      "call f_main_take.proved"
+      "call f_main_take\n"
     ],
     "asmAbsent": [
-      "call f_main_take\n"
+      ".proved"
     ],
     "note": "an arm whose pattern is one literal states `n == 16` in that arm: the call's `align % 16 == 0` is settled there and enters the proved entry"
   },
@@ -7865,10 +7844,10 @@
       "native"
     ],
     "asm": [
-      "call f_main_take.proved"
+      "call f_main_take\n"
     ],
     "asmAbsent": [
-      "call f_main_take\n"
+      ".proved"
     ],
     "note": "a guard is what reaching the arm's body means: `_ if n % 16 == 0` states it there, and the call enters the proved entry"
   },
@@ -7883,10 +7862,10 @@
       "native"
     ],
     "asm": [
-      "call f_main_get.proved"
+      "call f_main_get\n"
     ],
     "asmAbsent": [
-      "call f_main_get\n"
+      ".proved"
     ],
     "note": "a shadowing binding kills the facts about the name it shadows for its own block only: after the block the refined parameter's `i < v.len()` is back, and the call needs no check"
   },
@@ -7920,10 +7899,10 @@
       "native"
     ],
     "asm": [
-      "call f_main_at.proved"
+      "call f_main_at\n"
     ],
     "asmAbsent": [
-      "call f_main_at\n"
+      ".proved"
     ],
     "note": "`for k in 0..n` states `0 <= k < n` inside the body, which is exactly at's `k < n`: the call enters the proved entry"
   },
@@ -7957,10 +7936,10 @@
       "native"
     ],
     "asm": [
-      "call f_main_take_second.proved"
+      "call f_main_take_second\n"
     ],
     "asmAbsent": [
-      "call f_main_take_second\n"
+      ".proved"
     ],
     "note": "an arm binds `x`, not `i` or `v`: the facts that held before the match are still about the names the arm uses, so the call enters the proved entry (the token walk dropped every fact at a `match`)"
   },
@@ -7971,6 +7950,10 @@
     "note": "@no_alloc over a slice loop, @no_panic with a refined index and with for-len indexing, a @no_panic caller that proves the callee's refinement, @bounded(16) while Native only: the case is accepted because the refinement prover's `<sym>.proved` entry discharges the refined callee inside an `@no_panic` function, and that entry is native-only (its prologue is frame-symbol arithmetic the LLVM lifter does not model), so an LLVM build refuses the effect by name instead of discharging it and then leaving the check in.",
     "backends": [
       "native"
+    ],
+    "asm": [],
+    "asmAbsent": [
+      ".proved"
     ]
   },
   {
@@ -8103,7 +8086,7 @@
   {
     "name": "pool-abort-eight-chunks-reports-once",
     "note": "Eight parallel chunks write one past their own slice at once. The abort is reported exactly once and the process exits 134 instead of dying by SIGABRT from a second reporter.",
-    "source": "fn main() {\n    mut v = u64[1, 2, 3, 4, 5, 6, 7, 8];\n    println(\"before\");\n    parallel_for_chunks(&mut v[0: 8], 8, |s: &mut [u64]| -> unit { s[s.len()] = 9; });\n    println(v);\n}\n",
+    "source": "fn main() {\n    mut v = u64[1, 2, 3, 4, 5, 6, 7, 8];\n    println(\"before\");\n    parallel_split(&mut v[0: 8], 1, |s: &mut [u64]| -> unit { s[s.len()] = 9; });\n    println(v);\n}\n",
     "stdout": "before\n",
     "status": 134,
     "stderr": "error: "
@@ -11215,21 +11198,21 @@
   {
     "name": "job-handle-holds-closure-loan-wrapper",
     "note": "the same through a non-generic wrapper: the loss was in the handle's type, not in the generic call",
-    "source": "fn sp(f: Fn<Send>()->u64) -> Job<u64> { return parallel_spawn(f); }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    view := &data;\n    j := sp(|| -> u64 view[0]);\n    println(eat(data));\n    println(parallel_join(j));\n}\n",
+    "source": "fn sp(f: Fn<Send, Owned>()->u64) -> Job<u64> { return parallel_spawn(f); }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    view := &data;\n    j := sp(|| -> u64 view[0]);\n    println(eat(data));\n    println(parallel_join(j));\n}\n",
     "reject": true,
-    "diagnostic": "move of unavailable or borrowed value"
+    "diagnostic": "this closure captures a borrow its type does not name"
   },
   {
     "name": "job-handle-in-record-holds-closure-loan",
     "note": "a record holding the handle holds the loan too",
-    "source": "struct Keep { j: Job<u64>, n: u64 }\nfn sp(f: Fn<Send>()->u64) -> Job<u64> { return parallel_spawn(f); }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    view := &data;\n    k := Keep { j: sp(|| -> u64 view[0]), n: 1 };\n    println(eat(data));\n    println(parallel_join(k.j));\n}\n",
+    "source": "struct Keep { j: Job<u64>, n: u64 }\nfn sp(f: Fn<Send, Owned>()->u64) -> Job<u64> { return parallel_spawn(f); }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    view := &data;\n    k := Keep { j: sp(|| -> u64 view[0]), n: 1 };\n    println(eat(data));\n    println(parallel_join(k.j));\n}\n",
     "reject": true,
-    "diagnostic": "move of unavailable or borrowed value"
+    "diagnostic": "this closure captures a borrow its type does not name"
   },
   {
     "name": "job-handle-loan-ends-at-wait",
-    "note": "once the job is waited on its handle is gone and the loan with it: the vector may move again",
-    "source": "fn sp(f: Fn<Send>()->u64) -> Job<u64> { return parallel_spawn(f); }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    mut got = 0;\n    {\n        view := &data;\n        j := sp(|| -> u64 view[0]);\n        got = parallel_join(j);\n    }\n    println(got + eat(data));\n}\n",
+    "note": "a wrapper that waits on the job before it returns may spawn a call-scoped closure: the handle took the closure's loans and is gone at the wait, so the vector may move again",
+    "source": "fn run(f: Fn<Send>()->u64) -> u64 { j := parallel_spawn(f); return parallel_join(j); }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    mut got = 0;\n    {\n        view := &data;\n        got = run(|| -> u64 view[0]);\n    }\n    println(got + eat(data));\n}\n",
     "stdout": "5\n"
   },
   {
@@ -11372,7 +11355,7 @@
     "note": "P19",
     "source": "// call_bonds hands a borrowing closure argument's loan to the call's result. Does that hold the\n// borrowed data in place?\nfn id(f: Fn()->u64) -> Fn()->u64 { return f; }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    mut data = u64[1, 2, 3, 4];\n    view := &data;\n    g := id(|| -> u64 view[0]);\n    println(eat(data));\n    println(g());\n}\n",
     "reject": true,
-    "diagnostic": "move of unavailable or borrowed value"
+    "diagnostic": "returned borrow escapes its declared input lifetime"
   },
   {
     "name": "closure-bounds-p20-local-closure-keeps-loan",
@@ -11455,18 +11438,11 @@
     "diagnostic": "`FnMut<Share>` is not a type"
   },
   {
-    "name": "closure-bounds-lifetime-bound-not-yet",
-    "note": "stage 3 of the note",
-    "source": "fn each<s>(f: Fn<s>(u64) -> unit) -> unit { }\nfn main() { }\n",
-    "reject": true,
-    "diagnostic": "a lifetime bound on a closure type (`Fn<s>(..)`) is not implemented yet"
-  },
-  {
     "name": "closure-bounds-unknown-bound",
     "note": "the list reads three names",
     "source": "fn each(f: Fn<Sync>(u64) -> unit) -> unit { }\nfn main() { }\n",
     "reject": true,
-    "diagnostic": "a closure type's bounds are `Send`, `Share` and `Owned`"
+    "diagnostic": "a closure type's bounds are `Send`, `Share`, `Owned` and one lifetime"
   },
   {
     "name": "closure-bounds-container-is-exact",
@@ -11546,7 +11522,7 @@
   },
   {
     "name": "sched-job-failure-forms-from-a-task",
-    "note": "A failure in parallel_map, pool::for_chunks, pool::join and a three-deep nested join, each called from a task, is contained at try_join and the task finishes. Two drain bugs are pinned: the failing stack waited for a fork it had taken back and was running itself, and it waited for its own forks before publishing a job it had helped with, which a fork of its own was waiting for.",
+    "note": "A failure in parallel_map, pool::split, pool::join and a three-deep nested join, each called from a task, is contained at try_join and the task finishes. Two drain bugs are pinned: the failing stack waited for a fork it had taken back and was running itself, and it waited for its own forks before publishing a job it had helped with, which a fork of its own was waiting for.",
     "files": [
       "tests/sched/job_failure_forms.grl"
     ],
@@ -11554,7 +11530,7 @@
       "lib/pool.grl",
       "lib/core.grl"
     ],
-    "stdout": "parallel_map: contained\nfor_chunks: contained\njoin: contained\nnested join: contained\nparallel_map: contained\nfor_chunks: contained\njoin: contained\nnested join: contained\nparallel_map: contained\nfor_chunks: contained\njoin: contained\nnested join: contained\nparallel_map: contained\nfor_chunks: contained\njoin: contained\nnested join: contained\nparallel_map: contained\nfor_chunks: contained\njoin: contained\nnested join: contained\ndone\n",
+    "stdout": "parallel_map: contained\nsplit: contained\njoin: contained\nnested join: contained\nparallel_map: contained\nsplit: contained\njoin: contained\nnested join: contained\nparallel_map: contained\nsplit: contained\njoin: contained\nnested join: contained\nparallel_map: contained\nsplit: contained\njoin: contained\nnested join: contained\nparallel_map: contained\nsplit: contained\njoin: contained\nnested join: contained\ndone\n",
     "targets": [
       "x86_64",
       "aarch64",
@@ -11792,7 +11768,7 @@
     "source": "fn make() -> Mutex<u64> {\n    return Mutex(0);\n}\nLOCK := make();\nfn main() -> u64 {\n    return 0;\n}\n",
     "reject": true,
     "diagnostic": [
-      "a compile-time call must give an integer, a bool, a string, bytes or a vector of integers",
+      "a compile-time call must give an integer, a bool, a string, bytes, a vector or a plain record of those",
       "4 | LOCK := make();"
     ],
     "note": "a module binding nothing reads is computed at the end of the compile; its refusal points at the binding, not at the last file parsed (it pointed at lib/result.grl)"
@@ -11824,7 +11800,7 @@
       "tests/interfaces/table.grl"
     ],
     "interfaces": true,
-    "stdout": "12\ntrue\ntable\n55\n25\n8\n",
+    "stdout": "12\ntrue\ntable\n55\n25\n8\nlow\n-5\nhigh\n",
     "note": "a pub static read from another module, built from source and interface-first: the interface carries the static's name, type and tier, and the storage is a symbol in the declaring module's object"
   },
   {
@@ -14631,7 +14607,7 @@
       "lib/time.grl"
     ],
     "reject": true,
-    "diagnostic": "this closure captures a borrow, and an `Owned` closure is required here",
+    "diagnostic": "an `Owned` closure is required here",
     "targets": [
       "x86_64"
     ],
@@ -14911,7 +14887,7 @@
   },
   {
     "name": "sync-wait-cancelled-by-scope-on-each-primitive",
-    "source": "use sync;\nuse time;\nuse host;\n// One waiter on each primitive, its scope cancelled while it waits: a plain wait ends the task as\n// Cancelled, a `_until` form answers Cancelled, and the cancelled scope re-raises nothing.\nstruct Shared { m: Mutex<u64>, c: sync::Condition, l: sync::Latch, b: sync::Barrier, s: sync::Semaphore, rw: sync::RwLock<u64>, out: Mutex<u64[]> }\nfn note<a>(v: (&a mut u64[]), n: u64) -> u64 { v.push(n); return v.len(); }\nfn total<a>(v: (&a mut u64[]), n: u64) -> u64 {\n    mut t = 0;\n    for i in v.len() {\n        t += v[i];\n    }\n    return t;\n}\nfn on_condition(n: u64, s: (&Shared)) -> u64 {\n    return s.c.wait_with(&s.m, 0, |v: (&u64), k: (&u64)| -> bool *v == 99, |v: (&mut u64), k: u64| -> u64 *v);\n}\nfn on_latch(n: u64, s: (&Shared)) -> u64 { s.l.wait(); return 1; }\nfn on_barrier(n: u64, s: (&Shared)) -> u64 { s.b.wait(); return 1; }\nfn on_semaphore(n: u64, s: (&Shared)) -> u64 { return s.s.acquire_with(1, 0, |k: u64| -> u64 k); }\nfn on_sleep(n: u64, s: (&Shared)) -> u64 { time::sleep_ms(5000); return 1; }\nfn on_try_sleep(n: u64, s: (&Shared)) -> u64 {\n    match time::try_sleep_ms(5000) {\n        time::WaitError(e) => { s.out.lock_with(10, note); },\n        unit(u) => {}\n    }\n    return 0;\n}\nfn on_latch_until(n: u64, s: (&Shared)) -> u64 {\n    match s.l.wait_until(time::now().after_ms(5000)) {\n        time::WaitError(e) => {\n            match e {\n                Cancelled => { s.out.lock_with(20, note); },\n                TimedOut => { s.out.lock_with(21, note); }\n            }\n        },\n        unit(u) => {}\n    }\n    return 0;\n}\nfn on_rw_until(n: u64, s: (&Shared)) -> u64 {\n    match s.rw.write_until(time::now().after_ms(5000), 0, |v: (&mut u64), k: u64| -> u64 *v) {\n        time::WaitError(e) => { s.out.lock_with(30, note); },\n        u64(v) => {}\n    }\n    return 0;\n}\nfn holder(n: u64, s: (&Shared)) -> u64 {\n    return s.rw.read_with(0, |v: (&u64), k: u64| -> u64 { host::sleep_ms(400); return *v; });\n}\nfn body<sc>(scope: (&sc Scope<(&Shared)>), s: (&Shared)) -> u64 {\n    spawn(scope, 0, holder);\n    spawn(scope, 0, on_condition);\n    spawn(scope, 0, on_latch);\n    spawn(scope, 0, on_barrier);\n    spawn(scope, 0, on_semaphore);\n    spawn(scope, 0, on_sleep);\n    spawn(scope, 0, on_try_sleep);\n    spawn(scope, 0, on_latch_until);\n    spawn(scope, 0, on_rw_until);\n    host::sleep_ms(100);\n    scope.cancel();\n    return 0;\n}\nfn main() {\n    s := Shared { m: Mutex::new(0), c: sync::condition(), l: sync::latch(1), b: sync::barrier(2), s: sync::semaphore(0), rw: sync::rwlock<u64>(5), out: Mutex::new(u64[]) };\n    start := host::now_ms();\n    println(task_scope(&s, body));\n    println(host::now_ms() - start < 2000);\n    println(s.out.lock_with(0, total));\n}\n",
+    "source": "use sync;\nuse time;\nuse host;\n// One waiter on each primitive, its scope cancelled while it waits: a plain wait ends the task as\n// Cancelled, a `_until` form answers Cancelled, and the cancelled scope re-raises nothing.\nstruct Shared { m: Mutex<u64>, c: sync::Condition, l: sync::Latch, b: sync::Barrier, s: sync::Semaphore, rw: sync::RwLock<u64>, out: Mutex<u64[]>, holding: Atomic<u64> }\nfn note<a>(v: (&a mut u64[]), n: u64) -> u64 { v.push(n); return v.len(); }\nfn total<a>(v: (&a mut u64[]), n: u64) -> u64 {\n    mut t = 0;\n    for i in v.len() {\n        t += v[i];\n    }\n    return t;\n}\nfn on_condition(n: u64, s: (&Shared)) -> u64 {\n    return s.c.wait_with(&s.m, 0, |v: (&u64), k: (&u64)| -> bool *v == 99, |v: (&mut u64), k: u64| -> u64 *v);\n}\nfn on_latch(n: u64, s: (&Shared)) -> u64 { s.l.wait(); return 1; }\nfn on_barrier(n: u64, s: (&Shared)) -> u64 { s.b.wait(); return 1; }\nfn on_semaphore(n: u64, s: (&Shared)) -> u64 { return s.s.acquire_with(1, 0, |k: u64| -> u64 k); }\nfn on_sleep(n: u64, s: (&Shared)) -> u64 { time::sleep_ms(5000); return 1; }\nfn on_try_sleep(n: u64, s: (&Shared)) -> u64 {\n    match time::try_sleep_ms(5000) {\n        time::WaitError(e) => { s.out.lock_with(10, note); },\n        unit(u) => {}\n    }\n    return 0;\n}\nfn on_latch_until(n: u64, s: (&Shared)) -> u64 {\n    match s.l.wait_until(time::now().after_ms(5000)) {\n        time::WaitError(e) => {\n            match e {\n                Cancelled => { s.out.lock_with(20, note); },\n                TimedOut => { s.out.lock_with(21, note); }\n            }\n        },\n        unit(u) => {}\n    }\n    return 0;\n}\nfn on_rw_until(n: u64, s: (&Shared)) -> u64 {\n    // Behind the holder for certain: the holder has the read lock before this asks to write.\n    while s.holding.load() == 0 {\n        host::sleep_ms(1);\n    }\n    match s.rw.write_until(time::now().after_ms(5000), 0, |v: (&mut u64), k: u64| -> u64 *v) {\n        time::WaitError(e) => { s.out.lock_with(30, note); },\n        u64(v) => {}\n    }\n    return 0;\n}\nfn holder(n: u64, s: (&Shared)) -> u64 {\n    // Holds the read lock through the cancellation without waiting on anything cancellable, so the\n    // writer below is certainly parked behind it when the scope is cancelled.\n    return s.rw.read_with(0, |v: (&u64), k: u64| -> u64 { s.holding.store(1); until := host::now_ms() + 400; while host::now_ms() < until {} return *v; });\n}\nfn body<sc>(scope: (&sc Scope<(&Shared)>), s: (&Shared)) -> u64 {\n    spawn(scope, 0, holder);\n    spawn(scope, 0, on_condition);\n    spawn(scope, 0, on_latch);\n    spawn(scope, 0, on_barrier);\n    spawn(scope, 0, on_semaphore);\n    spawn(scope, 0, on_sleep);\n    spawn(scope, 0, on_try_sleep);\n    spawn(scope, 0, on_latch_until);\n    spawn(scope, 0, on_rw_until);\n    while s.holding.load() == 0 {\n        host::sleep_ms(1);\n    }\n    host::sleep_ms(100);\n    scope.cancel();\n    return 0;\n}\nfn main() {\n    s := Shared { m: Mutex::new(0), c: sync::condition(), l: sync::latch(1), b: sync::barrier(2), s: sync::semaphore(0), rw: sync::rwlock<u64>(5), out: Mutex::new(u64[]), holding: Atomic::new(0) };\n    start := host::now_ms();\n    println(task_scope(&s, body));\n    println(host::now_ms() - start < 2000);\n    println(s.out.lock_with(0, total));\n}\n",
     "modules": [
       "lib/sync.grl",
       "lib/time.grl"
@@ -14919,12 +14895,12 @@
     "stdout": "0\ntrue\n60\n",
     "stderr": [
       "note: ",
-      "6 contained task failure(s)"
+      "5 contained task failure(s)"
     ],
     "targets": [
       "x86_64"
     ],
-    "note": "a cancelled scope wakes a waiter on a Condition, a Latch, a Barrier, a Semaphore, a sleep and a read lock's holder; plain waits end their task as Cancelled (not re-raised by the cancelled scope), try_sleep_ms and the _until forms answer Cancelled; everything ends well before the 5 s waits"
+    "note": "a cancelled scope wakes a waiter on a Condition, a Latch, a Barrier, a Semaphore and a sleep; plain waits end their task as Cancelled (not re-raised by the cancelled scope), try_sleep_ms and the _until forms answer Cancelled; everything ends well before the 5 s waits"
   },
   {
     "name": "sync-failure-while-holding-each-primitive",
@@ -15225,5 +15201,994 @@
     ],
     "stdout": "1 2 3 4 9\n6040 true\n70 7 8\n26\n100008\n1002 box 5 3\n1002 box\n",
     "note": "plain records stored inline in plain records and in a record with a string: field-of-field reads and writes, whole-field replacement, &mut to an inline field, exchange through it, a move out and a refill, structural ==, and moving the containing value"
+  },
+  {
+    "name": "pool-split-mut",
+    "note": "In-place splitting of an exclusive slice by grain (parallel_split / pool::split_mut): uneven pieces (10 elements in pieces of 4 is 4,4,2), one piece, a grain larger than the slice, a grain of one, more pieces than workers (1000 in pieces of 16), a sub-range that leaves its neighbours alone, an empty slice that runs no job, nested chunking inside a chunk callback, narrow (f32/u32) elements at their 4-byte stride, a byte buffer through a &mut [u8] view, and the library wrapper. Every check compares CONTENT: a chunk that ran twice doubles its elements, one that never ran leaves them, and one that wrote outside its region would fault or fail the borrow checker.",
+    "files": [
+      "tests/pool/split_mut.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "ok\n"
+  },
+  {
+    "name": "pool-split-mut-timing",
+    "note": "The measured case for stage 2: the same 3M-u64 CPU-bound workload through the owned chunk split and through the in-place split, best of three. Asserts the copy is gone (one owned chunk at least 1.33x slower than one in-place chunk, both single-job, so no core count can explain it) and that parallelism still pays (eight in-place chunks at least 1.5x faster than one, asserted only above four cores). stderr carries the times; stdout is a fixed token.",
+    "files": [
+      "tests/pool/split_mut_timing.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "stdout": "ok\n"
+  },
+  {
+    "name": "array-literals-index-len",
+    "note": "fixed-size arrays in locals (docs/design/fixed-arrays.md): sized elements in C layout, nested arrays, an `&mut` parameter, compound assignment, a constant len()",
+    "source": "fn sum(a: &[f64; 3]) -> f64 {\n    return a[0] + a[1] + a[2];\n}\nfn scale(a: &mut [f64; 3], k: f64) {\n    for i in 3 {\n        a[i] = a[i] * k;\n    }\n}\nfn main() {\n    a: [f32; 4] = [1.0, 2.0, 3.5, 4.0];\n    println(a[2]);\n    println(a.len());\n    mut b: [f64; 3] = [1.0, 2.0, 3.0];\n    scale(&mut b, 2.0);\n    println(sum(&b));\n    mut z: [u8; 5] = [7; 5];\n    z[1] = 9;\n    z[2] += 1;\n    println(\"{} {} {}\", z[0], z[1], z[2]);\n    m: [[i32; 2]; 3] = [[1, -2], [3, 4], [5, 6]];\n    println(m[0][1] + m[2][0]);\n    mut t = 0.0;\n    for x in &b {\n        t = t + *x;\n    }\n    println(t);\n    k: u64 = 2;\n    println(a[k]);\n    c := a;\n    println(c[0] + a[3]);\n    w: [i16; 3] = [-300, 0, 300];\n    println(w);\n}\n",
+    "stdout": "3.5\n4\n12\n7 9 8\n3\n12\n3.5\n5\n[-300, 0, 300]\n"
+  },
+  {
+    "name": "array-equality-and-text",
+    "note": "`==` compares element by element (floats as IEEE, so -0.0 == 0.0), and an array prints as a vector does, nested and inside a format string",
+    "source": "fn main() {\n    a: [f32; 3] = [1.5, -0.0, 3.0];\n    b: [f32; 3] = [1.5, 0.0, 3.0];\n    c: [f32; 3] = [1.5, 0.0, 4.0];\n    println(a == b);\n    println(a == c);\n    println(a != c);\n    println(a);\n    m: [[u8; 2]; 2] = [[1, 2], [3, 4]];\n    println(m);\n    println(\"m = {}\", m);\n    big: [u64; 40] = [7; 40];\n    println(big[39] + big.len());\n}\n",
+    "stdout": "true\nfalse\ntrue\n[1.5, -0.0, 3.0]\n[[1, 2], [3, 4]]\nm = [[1, 2], [3, 4]]\n47\n"
+  },
+  {
+    "name": "array-small-copies",
+    "note": "the owner's copy rule: an array of plain data of at most four words copies on binding, and both names stay usable",
+    "source": "fn main() {\n    a: [f64; 4] = [1.0; 4];\n    mut b = a;\n    b[0] = 5.0;\n    println(\"{} {}\", a[0], b[0]);\n}\n",
+    "stdout": "1 5\n"
+  },
+  {
+    "name": "reject-array-large-moves",
+    "reject": true,
+    "note": "an array larger than four words moves; reading the moved-from name is refused and the help names .copy()",
+    "source": "fn main() {\n    a: [f64; 5] = [0.0; 5];\n    b := a;\n    println(a[0] + b[0]);\n}\n",
+    "diagnostic": "`a` was moved"
+  },
+  {
+    "name": "array-copy-method",
+    "note": "`.copy()` copies a large array; the copy is independent",
+    "source": "fn main() {\n    a: [u64; 6] = [3; 6];\n    mut b = a.copy();\n    b[5] = 4;\n    println(\"{} {}\", a, b);\n}\n",
+    "stdout": "[3, 3, 3, 3, 3, 3] [3, 3, 3, 3, 3, 4]\n"
+  },
+  {
+    "name": "array-assignment-never-aliases",
+    "note": "assignment copies into the variable's own storage: the literal on the right is re-evaluated each iteration while it reads the variable, and nothing shares storage",
+    "source": "fn main() {\n    mut keep: [u64; 2] = [1, 2];\n    for i in 3 {\n        keep = [keep[1], keep[0] + i];\n        b: [u64; 2] = [i, i];\n        t: [u64; 2] = b;\n        keep[0] = keep[0] + t[1];\n    }\n    println(keep);\n}\n",
+    "stdout": "[5, 4]\n"
+  },
+  {
+    "name": "array-through-reference",
+    "note": "`*r = v` and `exchange` on an array reference replace its bytes",
+    "source": "fn reset(a: &mut [f64; 3]) {\n    *a = [9.0, 8.0, 7.0];\n}\nfn main() {\n    mut a: [f64; 3] = [1.0, 2.0, 3.0];\n    reset(&mut a);\n    println(a);\n    old := exchange(&mut a, [4.0, 5.0, 6.0]);\n    println(\"{} {}\", old, a);\n    mut big: [u64; 6] = [1; 6];\n    prev := exchange(&mut big, [2; 6]);\n    println(\"{} {}\", prev, big);\n}\n",
+    "stdout": "[9.0, 8.0, 7.0]\n[9.0, 8.0, 7.0] [4.0, 5.0, 6.0]\n[1, 1, 1, 1, 1, 1] [2, 2, 2, 2, 2, 2]\n"
+  },
+  {
+    "name": "array-index-out-of-bounds-aborts",
+    "note": "an index the compiler cannot prove is checked against the constant length, and a failure reports both and where (the location comes from the site table, which only the native backend emits)",
+    "source": "fn main() {\n    a: [u64; 3] = [1, 2, 3];\n    k: u64 = 3;\n    println(a[k]);\n}\n",
+    "stderr": "error: index 3 out of bounds for length 3\n --> ",
+    "signal": "SIGABRT",
+    "backends": [
+      "native"
+    ]
+  },
+  {
+    "name": "reject-array-constant-index",
+    "reject": true,
+    "note": "a literal index is checked against N while compiling",
+    "source": "fn main() {\n    a: [u64; 3] = [1, 2, 3];\n    println(a[3]);\n}\n",
+    "diagnostic": "index 3 is out of bounds for `[u64; 3]`"
+  },
+  {
+    "name": "reject-array-literal-count",
+    "reject": true,
+    "note": "an array starts full: a literal must give exactly N elements",
+    "source": "fn main() {\n    a: [u64; 3] = [1, 2];\n}\n",
+    "diagnostic": "this literal has 2 elements, and `[u64; 3]` holds 3"
+  },
+  {
+    "name": "reject-array-repeat-count",
+    "reject": true,
+    "source": "fn main() {\n    a: [f32; 4] = [0.0; 3];\n}\n",
+    "diagnostic": "this repeat makes 3 elements, and `[f32; 4]` holds 4"
+  },
+  {
+    "name": "reject-array-uninitialised",
+    "reject": true,
+    "note": "no partially initialised arrays: a declaration without a value is refused",
+    "source": "fn main() {\n    mut a: [f32; 4];\n}\n",
+    "diagnostic": "an array starts full, so it is declared with a value"
+  },
+  {
+    "name": "reject-array-zero-length",
+    "reject": true,
+    "note": "[T; 0] is refused in v1",
+    "source": "fn main() {\n    a: [f32; 0] = [0.0; 0];\n}\n",
+    "diagnostic": "an array length is a positive integer constant"
+  },
+  {
+    "name": "reject-array-by-value-parameter",
+    "reject": true,
+    "source": "fn f(a: [f32; 4]) -> f32 {\n    return a[0];\n}\nfn main() {\n}\n",
+    "diagnostic": "an array as a parameter taken by value is not supported yet"
+  },
+  {
+    "name": "reject-array-result",
+    "reject": true,
+    "source": "fn f() -> [f32; 4] {\n    return [0.0; 4];\n}\nfn main() {\n}\n",
+    "diagnostic": "an array as a function result is not supported yet"
+  },
+  {
+    "name": "reject-array-struct-field",
+    "reject": true,
+    "source": "struct S {\n    a: [f32; 4]\n}\nfn main() {\n}\n",
+    "diagnostic": "an array as a field of a struct or a variant's payload is not supported yet"
+  },
+  {
+    "name": "reject-array-capture",
+    "reject": true,
+    "source": "fn main() {\n    a: [f32; 4] = [0.0; 4];\n    g := || a[0];\n}\n",
+    "diagnostic": "an array as a closure's capture is not supported yet"
+  },
+  {
+    "name": "reject-array-type-argument",
+    "reject": true,
+    "source": "fn main() {\n    t: ([u8; 2], u64) = ([1, 2], 3);\n}\n",
+    "diagnostic": "an array as a type argument"
+  },
+  {
+    "name": "reject-array-owned-element",
+    "reject": true,
+    "source": "fn main() {\n    a: [string; 2] = [\"a\".text(), \"b\".text()];\n}\n",
+    "diagnostic": "an array element is a number or another array in this version"
+  },
+  {
+    "name": "reject-array-write-through-shared",
+    "reject": true,
+    "source": "fn f(a: &[f32; 4]) {\n    a[0] = 1.0;\n}\nfn main() {\n}\n",
+    "diagnostic": "mutation through readonly reference"
+  },
+  {
+    "name": "reject-array-element-borrow-conflict",
+    "reject": true,
+    "note": "element places are one child of the array, as for a vector: a write to one element while another is borrowed is refused",
+    "source": "fn main() {\n    mut a: [u64; 4] = [0; 4];\n    r := &a[1];\n    a[0] = 5;\n    println(*r);\n}\n",
+    "diagnostic": ""
+  },
+  {
+    "name": "array-checks-proved-or-constant",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a loop to N, `for x in a` and a refined index have no element check; an unknown index is one compare against the constant N - no length is loaded - and a loop over an array calls nothing",
+    "source": "fn total(a: &[u64; 8]) -> u64 {\n    mut t = 0;\n    for i in 8 {\n        t += a[i];\n    }\n    return t;\n}\nfn total_each(a: &[f64; 8]) -> f64 {\n    mut t = 0.0;\n    for x in a {\n        t = t + *x;\n    }\n    return t;\n}\nfn get(a: &[u64; 8], k: u64) -> u64 {\n    return a[k];\n}\nfn at(a: &[u64; 8], i: u64 where i < 8) -> u64 {\n    return a[i];\n}\nfn main() {\n    a: [u64; 8] = [1, 2, 3, 4, 5, 6, 7, 8];\n    f: [f64; 8] = [0.5; 8];\n    println(\"{} {} {} {}\", total(&a), total_each(&f), get(&a, 7), at(&a, 2));\n}\n",
+    "stdout": "36 4 8 3\n",
+    "asm": [
+      {
+        "in": "f_main_get",
+        "text": "movabsq $8,%rdx"
+      },
+      {
+        "in": "f_main_get",
+        "text": "call rt_fail"
+      }
+    ],
+    "asmAbsent": [
+      {
+        "in": "f_main_total",
+        "text": "rt_fail"
+      },
+      {
+        "in": "f_main_total_each",
+        "text": "call"
+      },
+      {
+        "in": "f_main_at",
+        "text": "rt_fail"
+      },
+      {
+        "in": "f_main_get",
+        "text": "8(%rdi)"
+      }
+    ]
+  },
+  {
+    "name": "array-frame-over-a-page-is-probed",
+    "note": "a frame larger than a page is touched a page at a time from the top before it is allocated (on LLVM, `probe-stack`), and a deep recursion through such frames reports a stack overflow instead of stepping over the guard",
+    "source": "fn fill(depth: u64) -> u64 {\n    mut buf: [u64; 8192] = [0; 8192];\n    buf[depth % 8192] = depth;\n    if depth == 0 {\n        return buf[0];\n    }\n    return fill(depth - 1) + buf[depth % 8192];\n}\nfn main() {\n    println(fill(10));\n}\n",
+    "stdout": "55\n"
+  },
+  {
+    "name": "array-frame-probe-pinned",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "source": "fn fill(depth: u64) -> u64 {\n    mut buf: [u64; 8192] = [0; 8192];\n    buf[depth % 8192] = depth;\n    return buf[depth % 8192];\n}\nfn small(x: u64) -> u64 {\n    a: [u64; 4] = [x; 4];\n    return a[3];\n}\nfn main() {\n    println(fill(10) + small(1));\n}\n",
+    "stdout": "11\n",
+    "asm": [
+      {
+        "in": "f_main_fill",
+        "text": "movq $0,(%rsp)"
+      }
+    ],
+    "asmAbsent": [
+      {
+        "in": "f_main_small",
+        "text": ".Lgrail_probe_"
+      }
+    ]
+  },
+  {
+    "name": "array-large-frames-overflow-reports",
+    "backends": [
+      "native"
+    ],
+    "note": "recursion through 64 KiB frames runs into the stack's end page by page and is reported as an overflow, at the frame's statement",
+    "source": "fn fill(depth: u64) -> u64 {\n    mut buf: [u64; 8192] = [0; 8192];\n    buf[depth % 8192] = depth;\n    if depth == 0 {\n        return buf[0];\n    }\n    return fill(depth - 1) + buf[depth % 8192];\n}\nfn main() {\n    println(\"before\");\n    println(fill(100000));\n}\n",
+    "stdout": "before\n",
+    "status": 134,
+    "stderr": [
+      "error: stack overflow\n"
+    ]
+  },
+  {
+    "name": "reject-array-frame-over-task-stack",
+    "reject": true,
+    "note": "a frame larger than the 1 MiB stack a task runs on is refused at the largest array in it",
+    "source": "fn main() {\n    big: [u64; 200000] = [0; 200000];\n    println(big[1]);\n}\n",
+    "diagnostic": "more than the 1 MiB stack a task runs on"
+  },
+  {
+    "name": "array-in-task-frame-runs",
+    "note": "a task (1 MiB stack) with a 64 KiB array in its frame runs: the probe walks its stack from the top",
+    "source": "fn work(seed: u64, unused: u64) -> u64 {\n    mut buf: [u64; 8192] = [seed; 8192];\n    for i in 8192 {\n        buf[i] = buf[i] + i;\n    }\n    return buf[8191] + buf[0];\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    t := spawn(sc, 5, work);\n    return join(t);\n}\nfn main() {\n    println(task_scope(0, body));\n}\n",
+    "stdout": "8201\n"
+  },
+  {
+    "name": "pkg-manifest-overflow",
+    "note": "[package] overflow is the root's overflow mode for a build: \"checked\" or \"wrap\", anything else refused.",
+    "source": "use pkg;\nfn main() {\n    print(pkg::manifest_report(view(\"[package]\\nname = \\\"demo\\\"\\nversion = \\\"0.1.0\\\"\\noverflow = \\\"wrap\\\"\\n\")));\n    println(pkg::manifest_report(view(\"[package]\\nname = \\\"demo\\\"\\nversion = \\\"0.1.0\\\"\\noverflow = \\\"saturate\\\"\\n\")));\n    println(pkg::manifest_report(view(\"[package]\\nname = \\\"demo\\\"\\nversion = \\\"0.1.0\\\"\\noverflow = 1\\n\")));\n}\n",
+    "modules": [
+      "compiler/pkg.grl"
+    ],
+    "stdout": "name demo\nversion 0.1.0\nentry src/main.grl\noverflow wrap\nerror: line 4: [package] overflow must be \"checked\" or \"wrap\"\nerror: line 4: [package] overflow must be \"checked\" or \"wrap\"\n"
+  },
+  {
+    "name": "int-cast-edges",
+    "files": [
+      "tests/intcast/edges.grl"
+    ],
+    "stdout": "0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n128\n-128\n-128\n65408\n-128\n-128\n4294967168\n-128\n-128\n18446744073709551488\n-128\n-128\n255\n-1\n-1\n65535\n-1\n-1\n4294967295\n-1\n-1\n18446744073709551615\n-1\n-1\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n127\n127\n65407\n65407\n-129\n65407\n65407\n65407\n65407\n65407\n65407\n65407\n65407\n128\n-128\n65408\n65408\n-128\n65408\n65408\n65408\n65408\n65408\n65408\n65408\n65408\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n32768\n-32768\n-32768\n4294934528\n-32768\n-32768\n18446744073709518848\n-32768\n-32768\n127\n127\n65407\n-129\n-129\n4294967167\n-129\n-129\n18446744073709551487\n-129\n-129\n128\n-128\n-128\n65408\n-128\n-128\n4294967168\n-128\n-128\n18446744073709551488\n-128\n-128\n255\n-1\n-1\n65535\n-1\n-1\n4294967295\n-1\n-1\n18446744073709551615\n-1\n-1\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n0\n0\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n255\n-1\n65535\n-1\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n0\n0\n0\n0\n2147483648\n2147483648\n-2147483648\n2147483648\n2147483648\n2147483648\n2147483648\n255\n-1\n32767\n32767\n4294934527\n4294934527\n-32769\n4294934527\n4294934527\n4294934527\n4294934527\n0\n0\n32768\n-32768\n4294934528\n4294934528\n-32768\n4294934528\n4294934528\n4294934528\n4294934528\n127\n127\n65407\n-129\n4294967167\n4294967167\n-129\n4294967167\n4294967167\n4294967167\n4294967167\n128\n-128\n65408\n-128\n4294967168\n4294967168\n-128\n4294967168\n4294967168\n4294967168\n4294967168\n255\n-1\n65535\n-1\n4294967295\n4294967295\n-1\n4294967295\n4294967295\n4294967295\n4294967295\n0\n0\n0\n0\n2147483648\n-2147483648\n-2147483648\n18446744071562067968\n-2147483648\n-2147483648\n255\n-1\n32767\n32767\n4294934527\n-32769\n-32769\n18446744073709518847\n-32769\n-32769\n0\n0\n32768\n-32768\n-32768\n4294934528\n-32768\n-32768\n18446744073709518848\n-32768\n-32768\n127\n127\n65407\n-129\n-129\n4294967167\n-129\n-129\n18446744073709551487\n-129\n-129\n128\n-128\n-128\n65408\n-128\n-128\n4294967168\n-128\n-128\n18446744073709551488\n-128\n-128\n255\n-1\n-1\n65535\n-1\n-1\n4294967295\n-1\n-1\n18446744073709551615\n-1\n-1\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n0\n0\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n255\n-1\n65535\n-1\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n0\n0\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n255\n-1\n65535\n-1\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n0\n0\n0\n0\n2147483648\n2147483648\n-2147483648\n2147483648\n2147483648\n2147483648\n2147483648\n255\n-1\n65535\n-1\n4294967295\n4294967295\n-1\n4294967295\n4294967295\n4294967295\n4294967295\n0\n0\n0\n0\n0\n0\n4294967296\n4294967296\n4294967296\n4294967296\n255\n-1\n65535\n-1\n4294967295\n-1\n9223372036854775807\n9223372036854775807\n9223372036854775807\n9223372036854775807\n0\n0\n0\n0\n0\n0\n9223372036854775808\n9223372036854775808\n-9223372036854775808\n255\n-1\n65535\n-1\n2147483647\n2147483647\n18446744071562067967\n18446744071562067967\n-2147483649\n0\n0\n0\n0\n2147483648\n-2147483648\n18446744071562067968\n18446744071562067968\n-2147483648\n255\n-1\n32767\n32767\n4294934527\n-32769\n18446744073709518847\n18446744073709518847\n-32769\n0\n0\n32768\n-32768\n4294934528\n-32768\n18446744073709518848\n18446744073709518848\n-32768\n127\n127\n65407\n-129\n4294967167\n-129\n18446744073709551487\n18446744073709551487\n-129\n128\n-128\n65408\n-128\n4294967168\n-128\n18446744073709551488\n18446744073709551488\n-128\n255\n-1\n65535\n-1\n4294967295\n-1\n18446744073709551615\n18446744073709551615\n-1\n0\n0\n0\n0\n0\n0\n9223372036854775808\n-9223372036854775808\n-9223372036854775808\n255\n-1\n65535\n-1\n2147483647\n2147483647\n18446744071562067967\n-2147483649\n-2147483649\n0\n0\n0\n0\n2147483648\n-2147483648\n-2147483648\n18446744071562067968\n-2147483648\n-2147483648\n255\n-1\n32767\n32767\n4294934527\n-32769\n-32769\n18446744073709518847\n-32769\n-32769\n0\n0\n32768\n-32768\n-32768\n4294934528\n-32768\n-32768\n18446744073709518848\n-32768\n-32768\n127\n127\n65407\n-129\n-129\n4294967167\n-129\n-129\n18446744073709551487\n-129\n-129\n128\n-128\n-128\n65408\n-128\n-128\n4294967168\n-128\n-128\n18446744073709551488\n-128\n-128\n255\n-1\n-1\n65535\n-1\n-1\n4294967295\n-1\n-1\n18446744073709551615\n-1\n-1\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n0\n0\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n255\n-1\n65535\n-1\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n0\n0\n0\n0\n2147483648\n2147483648\n-2147483648\n2147483648\n2147483648\n2147483648\n2147483648\n255\n-1\n65535\n-1\n4294967295\n4294967295\n-1\n4294967295\n4294967295\n4294967295\n4294967295\n0\n0\n0\n0\n0\n0\n4294967296\n4294967296\n4294967296\n4294967296\n255\n-1\n65535\n-1\n4294967295\n-1\n9223372036854775807\n9223372036854775807\n9223372036854775807\n9223372036854775807\n",
+    "note": "Integer conversions are emitted in line on the native backend (int_cast): nothing for a widening, a truncation for a wrapping one, and a range test whose failing side calls rt_int_cast. Every width, signed and unsigned, over the edge values of each, checked where the value fits and wrapping always; the expected output is what the called form printed before."
+  },
+  {
+    "name": "int-cast-edges-wrap",
+    "files": [
+      "tests/intcast/edges.grl"
+    ],
+    "overflow": "wrap",
+    "stdout": "0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n128\n-128\n-128\n65408\n-128\n-128\n4294967168\n-128\n-128\n18446744073709551488\n-128\n-128\n255\n-1\n-1\n65535\n-1\n-1\n4294967295\n-1\n-1\n18446744073709551615\n-1\n-1\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n127\n127\n65407\n65407\n-129\n65407\n65407\n65407\n65407\n65407\n65407\n65407\n65407\n128\n-128\n65408\n65408\n-128\n65408\n65408\n65408\n65408\n65408\n65408\n65408\n65408\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n32768\n-32768\n-32768\n4294934528\n-32768\n-32768\n18446744073709518848\n-32768\n-32768\n127\n127\n65407\n-129\n-129\n4294967167\n-129\n-129\n18446744073709551487\n-129\n-129\n128\n-128\n-128\n65408\n-128\n-128\n4294967168\n-128\n-128\n18446744073709551488\n-128\n-128\n255\n-1\n-1\n65535\n-1\n-1\n4294967295\n-1\n-1\n18446744073709551615\n-1\n-1\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n0\n0\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n255\n-1\n65535\n-1\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n0\n0\n0\n0\n2147483648\n2147483648\n-2147483648\n2147483648\n2147483648\n2147483648\n2147483648\n255\n-1\n32767\n32767\n4294934527\n4294934527\n-32769\n4294934527\n4294934527\n4294934527\n4294934527\n0\n0\n32768\n-32768\n4294934528\n4294934528\n-32768\n4294934528\n4294934528\n4294934528\n4294934528\n127\n127\n65407\n-129\n4294967167\n4294967167\n-129\n4294967167\n4294967167\n4294967167\n4294967167\n128\n-128\n65408\n-128\n4294967168\n4294967168\n-128\n4294967168\n4294967168\n4294967168\n4294967168\n255\n-1\n65535\n-1\n4294967295\n4294967295\n-1\n4294967295\n4294967295\n4294967295\n4294967295\n0\n0\n0\n0\n2147483648\n-2147483648\n-2147483648\n18446744071562067968\n-2147483648\n-2147483648\n255\n-1\n32767\n32767\n4294934527\n-32769\n-32769\n18446744073709518847\n-32769\n-32769\n0\n0\n32768\n-32768\n-32768\n4294934528\n-32768\n-32768\n18446744073709518848\n-32768\n-32768\n127\n127\n65407\n-129\n-129\n4294967167\n-129\n-129\n18446744073709551487\n-129\n-129\n128\n-128\n-128\n65408\n-128\n-128\n4294967168\n-128\n-128\n18446744073709551488\n-128\n-128\n255\n-1\n-1\n65535\n-1\n-1\n4294967295\n-1\n-1\n18446744073709551615\n-1\n-1\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n0\n0\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n255\n-1\n65535\n-1\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n0\n0\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n255\n-1\n65535\n-1\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n0\n0\n0\n0\n2147483648\n2147483648\n-2147483648\n2147483648\n2147483648\n2147483648\n2147483648\n255\n-1\n65535\n-1\n4294967295\n4294967295\n-1\n4294967295\n4294967295\n4294967295\n4294967295\n0\n0\n0\n0\n0\n0\n4294967296\n4294967296\n4294967296\n4294967296\n255\n-1\n65535\n-1\n4294967295\n-1\n9223372036854775807\n9223372036854775807\n9223372036854775807\n9223372036854775807\n0\n0\n0\n0\n0\n0\n9223372036854775808\n9223372036854775808\n-9223372036854775808\n255\n-1\n65535\n-1\n2147483647\n2147483647\n18446744071562067967\n18446744071562067967\n-2147483649\n0\n0\n0\n0\n2147483648\n-2147483648\n18446744071562067968\n18446744071562067968\n-2147483648\n255\n-1\n32767\n32767\n4294934527\n-32769\n18446744073709518847\n18446744073709518847\n-32769\n0\n0\n32768\n-32768\n4294934528\n-32768\n18446744073709518848\n18446744073709518848\n-32768\n127\n127\n65407\n-129\n4294967167\n-129\n18446744073709551487\n18446744073709551487\n-129\n128\n-128\n65408\n-128\n4294967168\n-128\n18446744073709551488\n18446744073709551488\n-128\n255\n-1\n65535\n-1\n4294967295\n-1\n18446744073709551615\n18446744073709551615\n-1\n0\n0\n0\n0\n0\n0\n9223372036854775808\n-9223372036854775808\n-9223372036854775808\n255\n-1\n65535\n-1\n2147483647\n2147483647\n18446744071562067967\n-2147483649\n-2147483649\n0\n0\n0\n0\n2147483648\n-2147483648\n-2147483648\n18446744071562067968\n-2147483648\n-2147483648\n255\n-1\n32767\n32767\n4294934527\n-32769\n-32769\n18446744073709518847\n-32769\n-32769\n0\n0\n32768\n-32768\n-32768\n4294934528\n-32768\n-32768\n18446744073709518848\n-32768\n-32768\n127\n127\n65407\n-129\n-129\n4294967167\n-129\n-129\n18446744073709551487\n-129\n-129\n128\n-128\n-128\n65408\n-128\n-128\n4294967168\n-128\n-128\n18446744073709551488\n-128\n-128\n255\n-1\n-1\n65535\n-1\n-1\n4294967295\n-1\n-1\n18446744073709551615\n-1\n-1\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n0\n0\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n255\n-1\n65535\n-1\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n0\n0\n0\n0\n2147483648\n2147483648\n-2147483648\n2147483648\n2147483648\n2147483648\n2147483648\n255\n-1\n65535\n-1\n4294967295\n4294967295\n-1\n4294967295\n4294967295\n4294967295\n4294967295\n0\n0\n0\n0\n0\n0\n4294967296\n4294967296\n4294967296\n4294967296\n255\n-1\n65535\n-1\n4294967295\n-1\n9223372036854775807\n9223372036854775807\n9223372036854775807\n9223372036854775807\n",
+    "note": "The same program built with --overflow=wrap, where every conversion truncates: the values it converts all fit, so the output is the same."
+  },
+  {
+    "name": "int-cast-fail-unsigned-narrow",
+    "source": "fn get(x: u64) -> u64 {\n    return x;\n}\nfn main() -> u64 {\n    println(u8(get(300)));\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stderr": "value 300 does not fit in u8",
+    "note": "The failing side of an in-line conversion is the runtime's own report, with the value and the type."
+  },
+  {
+    "name": "int-cast-fail-negative-unsigned",
+    "source": "fn get(x: i64) -> i64 {\n    return x;\n}\nfn main() -> u64 {\n    println(u32(get(-5)));\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stderr": "negative value converted to an unsigned type",
+    "note": "The failing side of an in-line conversion is the runtime's own report, with the value and the type."
+  },
+  {
+    "name": "int-cast-fail-signed-narrow",
+    "source": "fn get(x: i64) -> i64 {\n    return x;\n}\nfn main() -> u64 {\n    println(i8(get(-200)));\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stderr": "value -200 does not fit in i8",
+    "note": "The failing side of an in-line conversion is the runtime's own report, with the value and the type."
+  },
+  {
+    "name": "int-cast-fail-unsigned-to-signed",
+    "source": "fn get(x: u64) -> u64 {\n    return x;\n}\nfn main() -> u64 {\n    println(i64(get(18446744073709551615)));\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stderr": "value 18446744073709551615 does not fit in i64",
+    "note": "The failing side of an in-line conversion is the runtime's own report, with the value and the type."
+  },
+  {
+    "name": "drv-release-check-messages",
+    "driver": true,
+    "flags": [
+      "--release",
+      "--overflow=checked"
+    ],
+    "source": "use host;\n// Every inline check kind, failing inside a task so the failure is contained and its message can\n// be printed: built with --release (the LLVM backend), whose stream has no site table.\nfn overflow(n: u64, base: u64) -> u64 { a: u64 := 18446744073709551615 - base; return a + n; }\nfn negative(n: u64, base: u64) -> u64 { x: i64 := 0 - i64(n); return u64(x); }\nfn divide(n: u64, base: u64) -> u64 { return base / (n - 1); }\nfn unwrap(n: u64, base: u64) -> u64 { mut v = u64[]; if n == 2 { v.push(1); } return v.pop()!; }\nfn index8(n: u64, base: u64) -> u64 { v := u64[10, 20, 30]; return v[n + 5]; }\nfn index4(n: u64, base: u64) -> u64 { v := f32[1.0, 2.0]; s := &v[0: 2]; return u64(s[n + 3]); }\nfn asserted(n: u64, base: u64) -> u64 { assert(n == 2); return 0; }\nfn report<s>(sc: (&s Scope<u64>), f: fn(u64, u64) -> u64) -> unit {\n    t := spawn(sc, 1, f);\n    match try_join(t) {\n        v: u64 => { println(v); },\n        e: TaskFailure => { host::print(e.message); host::print(view(\"\\n\")); },\n    }\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    report(sc, overflow);\n    report(sc, negative);\n    report(sc, divide);\n    report(sc, unwrap);\n    report(sc, index8);\n    report(sc, index4);\n    report(sc, asserted);\n    return 0;\n}\nfn main() { task_scope(0, body); }\n",
+    "stdout": "arithmetic overflow\nnegative value converted to an unsigned type\ndivision by zero\npop from an empty vector\nindex 6 out of bounds for length 3\nindex 4 out of bounds for length 2\nassertion failed\n",
+    "driverModules": [
+      "main",
+      "core"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "note": "A release build (the LLVM backend) has no site table to turn an inline `call rt_abort` into a reported failure, so the front end writes `rt_trap` with the check's kind itself, and the 4-byte accessor reports through rt_fail like the 8-byte one: every check kind fails with the message a development build prints (contained in a task, so the message can be pinned)."
+  },
+  {
+    "name": "pool-reduce-bit-identical-workers-1",
+    "note": "A float reduction over 1M terms through pool::reduce, and an ordered fold of pool::map results, print the same bits at GRAIL_WORKERS 1, 4 and 24 (three cases, one expected line): the pieces depend on the length and the grain only.",
+    "files": [
+      "tests/pool/reduce_bits.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "env": {
+      "GRAIL_WORKERS": "1"
+    },
+    "stdout": "102032.95195766681 101931.45245580416\n",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "pool-reduce-bit-identical-workers-4",
+    "note": "A float reduction over 1M terms through pool::reduce, and an ordered fold of pool::map results, print the same bits at GRAIL_WORKERS 1, 4 and 24 (three cases, one expected line): the pieces depend on the length and the grain only.",
+    "files": [
+      "tests/pool/reduce_bits.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "env": {
+      "GRAIL_WORKERS": "4"
+    },
+    "stdout": "102032.95195766681 101931.45245580416\n",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "pool-reduce-bit-identical-workers-24",
+    "note": "A float reduction over 1M terms through pool::reduce, and an ordered fold of pool::map results, print the same bits at GRAIL_WORKERS 1, 4 and 24 (three cases, one expected line): the pieces depend on the length and the grain only.",
+    "files": [
+      "tests/pool/reduce_bits.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "env": {
+      "GRAIL_WORKERS": "24"
+    },
+    "stdout": "102032.95195766681 101931.45245580416\n",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "pool-chunks-mut-is-gone",
+    "note": "chunks_mut (a chunk count) was removed when the split became a grain: no alias is left, so a call to it is an unknown function.",
+    "source": "use pool;\nfn main() {\n    mut v = u64[1, 2];\n    pool::chunks_mut(&mut v[0: 2], 1, |s: &mut [u64]| -> unit { });\n}\n",
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "reject": true,
+    "diagnostic": "chunks_mut",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "pool-split-mut-zero-grain-refused",
+    "note": "The grain of pool::split_mut is a `u64 where grain > 0`. A zero written at the call is checked where it is passed (a literal is not refused at compile time today), so the failure names the caller's line and the refinement, before any job runs.",
+    "source": "use pool;\nfn main() {\n    mut v = u64[1, 2];\n    pool::split_mut<u64>(&mut v[0: 2], 0, |s: &mut [u64]| -> unit { });\n}\n",
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "signal": "SIGABRT",
+    "stderr": "refinement violated: grain > 0",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "sched-frame-not-starved-by-background",
+    "note": "A background task keeps Background jobs of about 30 ms queued (32 at a time) while the main thread runs Frame passes of 64 short leaves: the worst Frame pass stays within a loose bound of its time alone, at most the cap (2 of 8 workers) plus the forking stack run Background work at once, and host::background_wait_us() reports that the oldest queued Background job has waited.",
+    "files": [
+      "tests/sched/classes.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "env": {
+      "GRAIL_WORKERS": "8"
+    },
+    "stdout": "1\ntrue\n",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "sched-class-records-recycled",
+    "note": "Three tasks fork the same nested joins as Frame, Normal and Background at once, forty times each: records freed by one class are reused by another while stale entries for them sit in the old class's queues. Stale entries are skipped, never claimed, and the checksum shows every job ran exactly once.",
+    "files": [
+      "tests/sched/class_records.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "310080\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "sched-start-applies-once",
+    "note": "sched::start applies its settings once, before the scheduler exists: three workers, pinned, with warmed stacks, a seed and a cap, and work then runs on exactly three workers. A second call, and a call after the scheduler started, return false instead of aborting.",
+    "files": [
+      "tests/sched/start.grl"
+    ],
+    "modules": [
+      "lib/sched.grl",
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "true\nfalse\n3\ntrue\nfalse\n",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "sched-seeded-run-reproduces",
+    "note": "With one worker and a fixed seed (sched::start), tasks that yield print the same order on every run.",
+    "files": [
+      "tests/sched/seeded.grl"
+    ],
+    "modules": [
+      "lib/sched.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "task 1 round 0\ntask 1 round 1\ntask 1 round 2\ntask 2 round 0\ntask 2 round 1\ntask 2 round 2\ntask 3 round 0\ntask 3 round 1\ntask 3 round 2\n6\n",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "sched-no-alloc-job-failure-contained",
+    "note": "A `@no_alloc` function that fails an index check runs as a parallel job inside a task: it compiles (no route of the failure path allocates - the report, the containment and the job drain write numbers only), and the failure is contained and formatted by the task's joiner.",
+    "files": [
+      "tests/sched/no_alloc_job_failure.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "index 2 out of bounds for length 2\n1\n",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "refinement-owned-param-vector-before",
+    "source": "fn f(data: u64[], k: u64 where k > 0) -> u64 {\n    mut s = u64[1, 2, 3, 4, 5];\n    mut n = 0;\n    while s.len() > 0 {\n        n += s.pop()!;\n    }\n    mut s = data;\n    mut n = 0;\n    while s.len() > 0 {\n        s.pop()!;\n        n += 1;\n    }\n    return n + k + n;\n}\nfn main() {\n    keep := u64[7, 8, 9];\n    a0 := u64[1, 2, 3, 4, 5, 6, 7, 8, 9, 10];\n    println(f(a0, 4));\n    m := 5;\n    a0 := u64[1, 2, 3, 4, 5, 6, 7, 8, 9, 10];\n    println(f(a0, m));\n    println(keep.len() + keep[2]);\n    mut w = u64[];\n    for i in 200 {\n        w.push(i);\n    }\n    mut s = \"\";\n    for i in 50 {\n        s = s + \"ab\";\n    }\n    println(w.len() + s.len());\n}\n",
+    "stdout": "24\n25\n12\n300\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "an owned parameter beside a refined one, called with a proved argument, then the heap is used again and the end-of-main allocator balance check runs: the old second entry restored callee-saved registers it never saved and corrupted the caller"
+  },
+  {
+    "name": "refinement-owned-param-vector-after",
+    "source": "fn f(k: u64 where k > 0, data: u64[]) -> u64 {\n    mut s = u64[1, 2, 3, 4, 5];\n    mut n = 0;\n    while s.len() > 0 {\n        n += s.pop()!;\n    }\n    return data.len() + k + n;\n}\nfn main() {\n    keep := u64[7, 8, 9];\n    a0 := u64[1, 2, 3, 4, 5, 6, 7, 8, 9, 10];\n    println(f(4, a0));\n    println(keep.len() + keep[2]);\n    mut w = u64[];\n    for i in 200 {\n        w.push(i);\n    }\n    mut s = \"\";\n    for i in 50 {\n        s = s + \"ab\";\n    }\n    println(w.len() + s.len());\n}\n",
+    "stdout": "29\n12\n300\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "an owned parameter beside a refined one, called with a proved argument, then the heap is used again and the end-of-main allocator balance check runs: the old second entry restored callee-saved registers it never saved and corrupted the caller"
+  },
+  {
+    "name": "refinement-owned-param-string-before",
+    "source": "fn f(text: string, k: u64 where k > 0) -> u64 {\n    mut s = u64[1, 2, 3, 4, 5];\n    mut n = 0;\n    while s.len() > 0 {\n        n += s.pop()!;\n    }\n    t := text + \"!\";\n    return t.len() + k + n;\n}\nfn main() {\n    keep := u64[7, 8, 9];\n    a0 := \"hello\";\n    println(f(a0, 4));\n    println(keep.len() + keep[2]);\n    mut w = u64[];\n    for i in 200 {\n        w.push(i);\n    }\n    mut s = \"\";\n    for i in 50 {\n        s = s + \"ab\";\n    }\n    println(w.len() + s.len());\n}\n",
+    "stdout": "25\n12\n300\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "an owned parameter beside a refined one, called with a proved argument, then the heap is used again and the end-of-main allocator balance check runs: the old second entry restored callee-saved registers it never saved and corrupted the caller"
+  },
+  {
+    "name": "refinement-owned-param-string-after",
+    "source": "fn f(k: u64 where k > 0, text: string) -> u64 {\n    mut s = u64[1, 2, 3, 4, 5];\n    mut n = 0;\n    while s.len() > 0 {\n        n += s.pop()!;\n    }\n    return text.len() + k + n;\n}\nfn main() {\n    keep := u64[7, 8, 9];\n    a0 := \"hello\";\n    println(f(4, a0));\n    println(keep.len() + keep[2]);\n    mut w = u64[];\n    for i in 200 {\n        w.push(i);\n    }\n    mut s = \"\";\n    for i in 50 {\n        s = s + \"ab\";\n    }\n    println(w.len() + s.len());\n}\n",
+    "stdout": "24\n12\n300\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "an owned parameter beside a refined one, called with a proved argument, then the heap is used again and the end-of-main allocator balance check runs: the old second entry restored callee-saved registers it never saved and corrupted the caller"
+  },
+  {
+    "name": "refinement-owned-param-record-before",
+    "source": "struct Bag {\n    items: u64[],\n    name: string\n}\nfn f(b: Bag, k: u64 where k > 0) -> u64 {\n    mut s = u64[1, 2, 3, 4, 5];\n    mut n = 0;\n    while s.len() > 0 {\n        n += s.pop()!;\n    }\n    return b.items.len() + b.name.len() + k + n;\n}\nfn main() {\n    keep := u64[7, 8, 9];\n    a0 := Bag { items: u64[1, 2, 3, 4, 5, 6, 7, 8, 9, 10], name: \"bag\" };\n    println(f(a0, 4));\n    println(keep.len() + keep[2]);\n    mut w = u64[];\n    for i in 200 {\n        w.push(i);\n    }\n    mut s = \"\";\n    for i in 50 {\n        s = s + \"ab\";\n    }\n    println(w.len() + s.len());\n}\n",
+    "stdout": "32\n12\n300\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "an owned parameter beside a refined one, called with a proved argument, then the heap is used again and the end-of-main allocator balance check runs: the old second entry restored callee-saved registers it never saved and corrupted the caller"
+  },
+  {
+    "name": "refinement-owned-param-record-after",
+    "source": "struct Bag {\n    items: u64[],\n    name: string\n}\nfn f(k: u64 where k > 0, b: Bag) -> u64 {\n    mut s = u64[1, 2, 3, 4, 5];\n    mut n = 0;\n    while s.len() > 0 {\n        n += s.pop()!;\n    }\n    return b.items.len() + b.name.len() + k + n;\n}\nfn main() {\n    keep := u64[7, 8, 9];\n    a0 := Bag { items: u64[1, 2, 3, 4, 5, 6, 7, 8, 9, 10], name: \"bag\" };\n    println(f(4, a0));\n    println(keep.len() + keep[2]);\n    mut w = u64[];\n    for i in 200 {\n        w.push(i);\n    }\n    mut s = \"\";\n    for i in 50 {\n        s = s + \"ab\";\n    }\n    println(w.len() + s.len());\n}\n",
+    "stdout": "32\n12\n300\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "an owned parameter beside a refined one, called with a proved argument, then the heap is used again and the end-of-main allocator balance check runs: the old second entry restored callee-saved registers it never saved and corrupted the caller"
+  },
+  {
+    "name": "refinement-owned-param-between-owned",
+    "source": "fn f(a: u64[], k: u64 where k > 0, b: string) -> u64 {\n    mut s = u64[1, 2, 3, 4, 5];\n    mut n = 0;\n    while s.len() > 0 {\n        n += s.pop()!;\n    }\n    return a.len() + b.len() + k + n;\n}\nfn main() {\n    keep := u64[7, 8, 9];\n    a0 := u64[1, 2, 3, 4, 5, 6, 7, 8, 9, 10];\n    a1 := \"xyz\";\n    println(f(a0, 4, a1));\n    println(keep.len() + keep[2]);\n    mut w = u64[];\n    for i in 200 {\n        w.push(i);\n    }\n    mut s = \"\";\n    for i in 50 {\n        s = s + \"ab\";\n    }\n    println(w.len() + s.len());\n}\n",
+    "stdout": "32\n12\n300\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "an owned parameter beside a refined one, called with a proved argument, then the heap is used again and the end-of-main allocator balance check runs: the old second entry restored callee-saved registers it never saved and corrupted the caller"
+  },
+  {
+    "name": "refinement-owned-param-method-self",
+    "source": "struct Bag {\n    items: u64[]\n}\nimpl Bag {\n    fn take(self: Self, k: u64 where k > 0) -> u64 {\n        mut s = u64[1, 2, 3, 4, 5];\n        mut n = 0;\n        while s.len() > 0 {\n            n += s.pop()!;\n        }\n        return self.items.len() + k + n;\n    }\n}\nfn main() {\n    keep := u64[7, 8, 9];\n    b := Bag { items: u64[1, 2, 3, 4, 5, 6, 7, 8, 9, 10] };\n    println(b.take(4));\n    println(keep.len() + keep[2]);\n    mut w = u64[];\n    for i in 200 {\n        w.push(i);\n    }\n    mut s = \"\";\n    for i in 50 {\n        s = s + \"ab\";\n    }\n    println(w.len() + s.len());\n}\n",
+    "stdout": "29\n12\n300\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "an owned parameter beside a refined one, called with a proved argument, then the heap is used again and the end-of-main allocator balance check runs: the old second entry restored callee-saved registers it never saved and corrupted the caller"
+  },
+  {
+    "name": "closure-bounds-lifetime-undeclared",
+    "note": "a closure lifetime must be declared like any other",
+    "source": "fn each(f: Fn<s>(u64) -> unit) -> unit { }\nfn main() { }\n",
+    "reject": true,
+    "diagnostic": "undeclared lifetime"
+  },
+  {
+    "name": "closure-call-scoped-stash-refused",
+    "note": "P14 / H5: a parameter typed `Fn(..)` borrows for the call; pushing it into storage that outlives the call is refused (was a use after free: SIGSEGV)",
+    "source": "// A callee that keeps the closure somewhere other than its result.\nstruct Q { items: (Fn()->u64)[] }\nfn stash<a>(q: (&a mut Q), f: Fn()->u64) -> unit { q.items.push(f); }\nfn fill<a>(q: (&a mut Q)) -> unit {\n    mut data = u64[41, 2, 3, 4];\n    view := &data;\n    stash(&mut q, || -> u64 view[0] + 1);\n}\nfn main() {\n    mut q = Q { items: (Fn()->u64)[] };\n    fill(&mut q);\n    mut junk = u64[9, 9, 9, 9, 9, 9];\n    f := q.items.pop()!;\n    println(f());\n}\n",
+    "reject": true,
+    "diagnostic": "this closure may only be used during the call it was passed to"
+  },
+  {
+    "name": "closure-call-scoped-dyn-over-fn-field-refused",
+    "note": "P27: a record holding a borrowing closure in an `Fn` field cannot be boxed as `dyn` (was: called after the frame was gone, exit 134)",
+    "source": "// The one way a borrow gets behind a `dyn`: a record whose field is an erased `Fn()->u64`. The\n// record \"holds no borrow\", so it may be boxed, kept, and called after the frame is gone.\ninterface Peek { fn peek(self: &Self) -> u64; }\nstruct Lazy { f: Fn()->u64 }\nimpl Peek for Lazy { fn peek(self: &Self) -> u64 { g := &self.f; return g(); } }\nstruct Q { items: (dyn Peek)[] }\nfn stash<a>(q: (&a mut Q), p: dyn Peek) -> unit { q.items.push(p); }\nfn fill<a>(q: (&a mut Q)) -> unit {\n    mut data = u64[41, 2, 3, 4];\n    view := &data;\n    stash(&mut q, Lazy { f: || -> u64 view[0] + 1 });\n}\nfn main() {\n    mut q = Q { items: (dyn Peek)[] };\n    fill(&mut q);\n    mut junk = u64[9, 9, 9, 9, 9, 9];\n    p := q.items.pop()!;\n    println(p.peek());\n}\n",
+    "reject": true,
+    "diagnostic": "a dyn value cannot hold borrowed data"
+  },
+  {
+    "name": "closure-call-scoped-return-refused",
+    "note": "returning a call-scoped closure parameter",
+    "source": "fn id(f: Fn() -> u64) -> Fn() -> u64 { return f; }\nfn main() { n := 1; g := id(|| -> u64 n); println(g()); }\n",
+    "reject": true,
+    "diagnostic": "returned borrow escapes its declared input lifetime"
+  },
+  {
+    "name": "closure-call-scoped-captured-and-returned-refused",
+    "note": "a call-scoped parameter captured by a closure that is returned escapes with it",
+    "source": "fn twice(f: Fn(u64) -> u64) -> Fn(u64) -> u64 { return |x: u64| -> u64 f(f(x)); }\nfn main() { n := 3; g := twice(|x: u64| -> u64 x + n); println(g(1)); }\n",
+    "reject": true,
+    "diagnostic": "returned borrow escapes its declared input lifetime"
+  },
+  {
+    "name": "closure-call-scoped-captured-locally",
+    "note": "...captured by a closure that stays in the call, it is fine",
+    "source": "fn twice(f: Fn(u64) -> u64) -> u64 { g := |x: u64| -> u64 f(x); h := g; return h(1); }\nfn main() { n := 3; println(twice(|x: u64| -> u64 x + n)); }\n",
+    "stdout": "4\n"
+  },
+  {
+    "name": "closure-call-scoped-forward-and-owned-store",
+    "note": "a call-scoped parameter may be called, aliased and passed on to another call-scoped parameter; one typed `Fn<Owned>` may be stored",
+    "source": "struct Q { items: (Fn() -> u64)[] }\nfn keep(q: (&mut Q), f: Fn<Owned>() -> u64) -> unit { q.items.push(f); }\nfn pass(f: Fn() -> u64) -> u64 { mut g = f; return run(g); }\nfn run(f: Fn() -> u64) -> u64 { return f(); }\nfn main() {\n    mut q = Q { items: (Fn() -> u64)[] };\n    n := 20;\n    keep(&mut q, || -> u64 n + 1);\n    println(pass(|| -> u64 n));\n    f := q.items.pop()!;\n    println(f());\n}\n",
+    "stdout": "20\n21\n"
+  },
+  {
+    "name": "closure-call-scoped-spawn-wrapper-must-wait",
+    "note": "a wrapper may hand its call-scoped closure to a job only if it waits before returning: the job takes over the closure's loans, so returning the handle is refused",
+    "source": "fn sp(f: Fn<Send>() -> u64) -> Job<u64> { return parallel_spawn(f); }\nfn main() { println(parallel_join(sp(|| -> u64 1))); }\n",
+    "reject": true,
+    "diagnostic": "returned borrow escapes its declared input lifetime"
+  },
+  {
+    "name": "iter-hidden-borrow-not-sent-to-job",
+    "note": "Q8 (a)/(b): an Iter mapped over `iter::refs(&v)` holds v's loan by flow and its `step` field is a bare `FnMut`, so it is not Send and cannot ride into a job (stands in for `thread::spawn`, which takes the same `FnMut<Send, Owned>`)",
+    "source": "use pool;\nuse iter;\nfn main() {\n    v := u64[1, 2, 3];\n    it := iter::map(iter::refs(&v), |x: &u64| -> u64 *x * 2);\n    j := pool::spawn(|| -> u64 { mut s = 0; for x in it { s += x; } return s; });\n    println(pool::wait(j));\n}\n",
+    "reject": true,
+    "diagnostic": "cannot transfer closure capture `it`",
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "iter-hidden-borrow-not-a-task-item",
+    "note": "...nor be handed to a task",
+    "source": "use iter;\nfn total(it: iter::Iter<u64>, unused: u64) -> u64 { mut s = 0; for x in it { s += x; } return s; }\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    v := u64[1, 2, 3];\n    it := iter::map(iter::refs(&v), |x: &u64| -> u64 *x + base);\n    t := spawn(sc, it, total);\n    return join(t);\n}\nfn main() { println(task_scope(10, body)); }\n",
+    "reject": true,
+    "diagnostic": "cannot transfer spawned item: step is a closure whose type does not say what it captured"
+  },
+  {
+    "name": "iter-hidden-borrow-not-returned",
+    "note": "...nor be returned past the vector it borrows: call_bonds bonded the mapped Iter to `refs(&v)`'s loans",
+    "source": "use iter;\nfn doubled() -> iter::Iter<u64> {\n    v := u64[1, 2, 3];\n    return iter::map(iter::refs(&v), |x: &u64| -> u64 *x * 2);\n}\nfn main() { for x in doubled() { println(x); } }\n",
+    "reject": true,
+    "diagnostic": "returned borrow escapes its declared input lifetime"
+  },
+  {
+    "name": "iter-hidden-borrow-blocks-push",
+    "note": "...nor be kept across a mutation of the vector",
+    "source": "use iter;\nfn main() {\n    mut v = u64[1, 2, 3];\n    it := iter::map(iter::refs(&v), |x: &u64| -> u64 *x * 2);\n    v.push(4);\n    for x in it { println(x); }\n}\n",
+    "reject": true,
+    "diagnostic": "mutation conflicts with live borrow"
+  },
+  {
+    "name": "iter-hidden-borrow-local-use",
+    "note": "...and consumed locally it is fine, and the vector is free again afterwards",
+    "source": "use iter;\nfn main() {\n    mut v = u64[1, 2, 3];\n    {\n        it := iter::map(iter::refs(&v), |x: &u64| -> u64 *x * 2);\n        mut s = 0;\n        for x in it { s += x; }\n        println(s);\n    }\n    v.push(4);\n    println(v.len());\n}\n",
+    "stdout": "12\n4\n"
+  },
+  {
+    "name": "iter-hidden-borrow-not-owned",
+    "note": "a record with a bare closure field is not `Owned`: `Owned` is the only way across a lifetime boundary",
+    "source": "use iter;\nfn keep<T: Owned>(t: T) -> u64 { return 1; }\nfn main() { v := u64[1, 2]; it := iter::map(iter::refs(&v), |x: &u64| -> u64 *x); println(keep(it)); }\n",
+    "reject": true,
+    "diagnostic": "type does not satisfy Owned: iter::Iter<u64> holds a closure whose type does not say it is `Owned`"
+  },
+  {
+    "name": "iter-hidden-borrow-not-send",
+    "note": "...nor Send",
+    "source": "use iter;\nfn keep<T: Send>(t: T) -> u64 { return 1; }\nfn main() { v := u64[1, 2]; it := iter::map(iter::refs(&v), |x: &u64| -> u64 *x); println(keep(it)); }\n",
+    "reject": true,
+    "diagnostic": "type does not satisfy Send: iter::Iter<u64>"
+  },
+  {
+    "name": "closure-region-stored-in-holder",
+    "note": "`Fn<s>(..)`: a closure whose borrows come from `s`; a holder labelled `s` may keep it, and calls through it work",
+    "source": "struct Holder<s> { items: (Fn<s>() -> u64)[] }\nfn holder<s>(f: Fn<s>() -> u64) -> Holder<s> { mut v = (Fn<s>() -> u64)[]; v.push(f); return Holder { items: v }; }\nfn add<a, s>(h: (&a mut Holder<s>), f: Fn<s>() -> u64) -> unit { h.items.push(f); }\nfn total<a, s>(h: (&a Holder<s>)) -> u64 { mut t = 0; for i in h.items.len() { f := &h.items[i]; t += f(); } return t; }\nfn main() {\n    data := u64[1, 2, 3];\n    r := &data;\n    mut h = holder(|| -> u64 r[0]);\n    r2 := &data;\n    add(&mut h, || -> u64 r2[2]);\n    println(total(&h));\n}\n",
+    "stdout": "4\n"
+  },
+  {
+    "name": "closure-region-holder-keeps-loan",
+    "note": "...the holder keeps the closure's loans: the borrowed vector cannot move while it lives",
+    "source": "struct Holder<s> { items: (Fn<s>() -> u64)[] }\nfn holder<s>(f: Fn<s>() -> u64) -> Holder<s> { mut v = (Fn<s>() -> u64)[]; v.push(f); return Holder { items: v }; }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    data := u64[1, 2, 3];\n    r := &data;\n    h := holder(|| -> u64 r[0]);\n    println(eat(data));\n    println(h.items.len());\n}\n",
+    "reject": true,
+    "diagnostic": "move of unavailable or borrowed value"
+  },
+  {
+    "name": "closure-region-local-escapes",
+    "note": "...a closure borrowing a local cannot leave in a `Holder<s>` returned past that local",
+    "source": "struct Holder<s> { items: (Fn<s>() -> u64)[] }\nfn holder<s>(f: Fn<s>() -> u64) -> Holder<s> { mut v = (Fn<s>() -> u64)[]; v.push(f); return Holder { items: v }; }\nfn mk<s>(x: (&s u64[])) -> Holder<s> {\n    local := u64[7];\n    lr := &local;\n    return holder(|| -> u64 lr[0]);\n}\nfn main() { d := u64[1]; h := mk(&d); println(h.items.len()); }\n",
+    "reject": true,
+    "diagnostic": "returned borrow escapes its declared input lifetime"
+  },
+  {
+    "name": "closure-region-from-input",
+    "note": "...one borrowing the input labelled `s` can",
+    "source": "struct Holder<s> { items: (Fn<s>() -> u64)[] }\nfn holder<s>(f: Fn<s>() -> u64) -> Holder<s> { mut v = (Fn<s>() -> u64)[]; v.push(f); return Holder { items: v }; }\nfn mk<s>(x: (&s u64[])) -> Holder<s> { return holder(|| -> u64 x[0] + 1); }\nfn main() { d := u64[41]; h := mk(&d); f := &h.items[0]; println(f()); }\n",
+    "stdout": "42\n"
+  },
+  {
+    "name": "closure-region-call-scoped-not-stored",
+    "note": "a call-scoped `Fn(..)` parameter cannot be stored where an `Fn<s>` is kept",
+    "source": "fn put<a, s>(v: (&a mut (Fn<s>() -> u64)[]), f: Fn() -> u64) -> unit { v.push(f); }\nfn main() { }\n",
+    "reject": true,
+    "diagnostic": "captured writeback violates invariant lifetime"
+  },
+  {
+    "name": "closure-nested-capture-shared",
+    "note": "a closure inside a closure body may capture the enclosing closure's captured shared reference: it is re-borrowed (`load(&rx)`) and the original loan kept",
+    "source": "fn main(){ x := u64[5]; rx := &x; f := || -> u64 { g := || -> u64 rx[0]; return g(); }; println(f()); }\n",
+    "stdout": "5\n"
+  },
+  {
+    "name": "closure-nested-capture-twice",
+    "note": "...twice, and the body still reads its own capture afterwards",
+    "source": "fn main(){ x := u64[5,6,7]; rx := &x; f := || -> u64 { g := || -> u64 rx[0]; h := || -> u64 rx[2]; return g() + h() + rx[1]; }; println(f()); }\n",
+    "stdout": "18\n"
+  },
+  {
+    "name": "closure-nested-capture-keeps-loan",
+    "note": "...and the nested closure keeps the borrow: the vector cannot move while it lives",
+    "source": "fn eat(v: u64[]) -> u64 { return v.len(); }\nfn main(){ x := u64[5,6,7]; rx := &x; f := || -> Fn() -> u64 { return || -> u64 rx[0]; }; g := f(); println(eat(x)); println(g()); }\n",
+    "reject": true,
+    "diagnostic": "move of unavailable or borrowed value"
+  },
+  {
+    "name": "closure-expression-body-captures-local-borrow",
+    "note": "an expression-bodied closure without a result type capturing a local borrow (the result-type probe refused it: `parameter requires a declared lifetime`)",
+    "source": "fn main(){ x := u64[4]; rx := &x; f := || rx[0] + 1; println(f()); }\n",
+    "stdout": "5\n"
+  },
+  {
+    "name": "scope-spawn-shared-borrows",
+    "note": "the minimal inline-running scope of docs/design/closure-bounds.md section 7: two spawned closures share `&x`",
+    "source": "struct Threads<s> { done: (FnMut<s>() -> u64)[] }\nfn scope<s, R>(body: FnMut<s>((&mut Threads<s>)) -> R) -> R {\n    mut t = Threads { done: (FnMut<s>() -> u64)[] };\n    mut b = body;\n    r := b(&mut t);\n    while let Some(f) = t.done.pop() { mut g = f; g(); }\n    return r;\n}\nfn spawn<a, s>(t: (&a mut Threads<s>), f: FnMut<s>() -> u64) -> unit { t.done.push(f); }\nfn main() {\n    x := u64[1, 2];\n    rx := &x;\n    n := scope(|t| -> u64 { spawn(&mut t, || -> u64 rx[0]); spawn(&mut t, || -> u64 rx[1]); return 7; });\n    println(n);\n}\n",
+    "stdout": "7\n"
+  },
+  {
+    "name": "scope-spawn-disjoint-exclusive",
+    "note": "the minimal inline-running scope of docs/design/closure-bounds.md section 7: disjoint `&mut x` and `&mut y` in two spawns; both writes land",
+    "source": "struct Threads<s> { done: (FnMut<s>() -> u64)[] }\nfn scope<s, R>(body: FnMut<s>((&mut Threads<s>)) -> R) -> R {\n    mut t = Threads { done: (FnMut<s>() -> u64)[] };\n    mut b = body;\n    r := b(&mut t);\n    while let Some(f) = t.done.pop() { mut g = f; g(); }\n    return r;\n}\nfn spawn<a, s>(t: (&a mut Threads<s>), f: FnMut<s>() -> u64) -> unit { t.done.push(f); }\nfn main() {\n    mut x = u64[1, 2];\n    mut y = u64[3];\n    mx := &mut x;\n    my := &mut y;\n    n := scope(|t| -> u64 { spawn(&mut t, || -> u64 { mx[0] = 5; return 1; }); spawn(&mut t, || -> u64 { my[0] = 6; return 2; }); return 3; });\n    println(n);\n    println(x[0] + y[0]);\n}\n",
+    "stdout": "3\n11\n"
+  },
+  {
+    "name": "scope-spawn-same-exclusive-refused",
+    "note": "the minimal inline-running scope of docs/design/closure-bounds.md section 7: two spawns cannot both hold `&mut x`",
+    "source": "struct Threads<s> { done: (FnMut<s>() -> u64)[] }\nfn scope<s, R>(body: FnMut<s>((&mut Threads<s>)) -> R) -> R {\n    mut t = Threads { done: (FnMut<s>() -> u64)[] };\n    mut b = body;\n    r := b(&mut t);\n    while let Some(f) = t.done.pop() { mut g = f; g(); }\n    return r;\n}\nfn spawn<a, s>(t: (&a mut Threads<s>), f: FnMut<s>() -> u64) -> unit { t.done.push(f); }\nfn main() {\n    mut x = u64[1, 2];\n    {\n        mx := &mut x;\n        n := scope(|t| -> u64 { spawn(&mut t, || -> u64 { mx[0] = 5; return 1; }); spawn(&mut t, || -> u64 { mx[1] = 6; return 2; }); return 3; });\n        println(n);\n    }\n}\n",
+    "reject": true,
+    "diagnostic": "reference is suspended or expired"
+  },
+  {
+    "name": "scope-spawn-body-local-refused",
+    "note": "the minimal inline-running scope of docs/design/closure-bounds.md section 7: a spawn cannot capture a borrow of the body's own local: the scope outlives it",
+    "source": "struct Threads<s> { done: (FnMut<s>() -> u64)[] }\nfn scope<s, R>(body: FnMut<s>((&mut Threads<s>)) -> R) -> R {\n    mut t = Threads { done: (FnMut<s>() -> u64)[] };\n    mut b = body;\n    r := b(&mut t);\n    while let Some(f) = t.done.pop() { mut g = f; g(); }\n    return r;\n}\nfn spawn<a, s>(t: (&a mut Threads<s>), f: FnMut<s>() -> u64) -> unit { t.done.push(f); }\nfn main() {\n    n := scope(|t| -> u64 { y := u64[1]; ry := &y; spawn(&mut t, || -> u64 ry[0]); return 1; });\n    println(n);\n}\n",
+    "reject": true,
+    "diagnostic": "captured writeback violates invariant lifetime"
+  },
+  {
+    "name": "scope-body-uses-after-spawn-refused",
+    "note": "the minimal inline-running scope of docs/design/closure-bounds.md section 7: the body cannot touch data a spawn borrowed mutably until the scope joins",
+    "source": "struct Threads<s> { done: (FnMut<s>() -> u64)[] }\nfn scope<s, R>(body: FnMut<s>((&mut Threads<s>)) -> R) -> R {\n    mut t = Threads { done: (FnMut<s>() -> u64)[] };\n    mut b = body;\n    r := b(&mut t);\n    while let Some(f) = t.done.pop() { mut g = f; g(); }\n    return r;\n}\nfn spawn<a, s>(t: (&a mut Threads<s>), f: FnMut<s>() -> u64) -> unit { t.done.push(f); }\nfn main() {\n    mut x = u64[1, 2];\n    {\n        mx := &mut x;\n        n := scope(|t| -> u64 { spawn(&mut t, || -> u64 { mx[0] = 5; return 1; }); mx[1] = 9; return 3; });\n        println(n);\n    }\n}\n",
+    "reject": true,
+    "diagnostic": "borrow conflicts with active access"
+  },
+  {
+    "name": "scope-body-writes-shared-spawn-refused",
+    "note": "the minimal inline-running scope of docs/design/closure-bounds.md section 7: ...nor write what a spawn reads",
+    "source": "struct Threads<s> { done: (Fn<s>() -> u64)[] }\nfn scope<s, R>(body: FnMut<s>((&mut Threads<s>)) -> R) -> R {\n    mut t = Threads { done: (Fn<s>() -> u64)[] };\n    mut b = body;\n    r := b(&mut t);\n    mut i = 0;\n    while i < t.done.len() { f := &t.done[i]; f(); i += 1; }\n    return r;\n}\nfn spawn<a, s>(t: (&a mut Threads<s>), f: Fn<s>() -> u64) -> unit { t.done.push(f); }\nfn main() {\n    mut x = u64[1, 2];\n    mx := &mut x;\n    n := scope(|t| -> u64 { spawn(&mut t, || -> u64 mx[0]); mx[0] = 9; return 1; });\n    println(n);\n}\n",
+    "reject": true,
+    "diagnostic": "borrow conflicts with active access"
+  },
+  {
+    "name": "scope-handle-cannot-leave-body",
+    "note": "the minimal inline-running scope of docs/design/closure-bounds.md section 7: a scoped handle carries the scope's lifetime and cannot be the scope's result",
+    "source": "struct ScopedThread<s> { id: u64 }\nstruct Threads<s> { done: (FnMut<s>() -> u64)[] }\nfn scope<s, R: Owned>(body: FnMut<s>((&mut Threads<s>)) -> R) -> R {\n    mut t = Threads { done: (FnMut<s>() -> u64)[] };\n    mut b = body;\n    r := b(&mut t);\n    while let Some(f) = t.done.pop() { mut g = f; g(); }\n    return r;\n}\nfn spawn<a, s>(t: (&a mut Threads<s>), f: FnMut<s>() -> u64) -> ScopedThread<s> { t.done.push(f); return ScopedThread { id: 1 }; }\nfn main() {\n    x := u64[1];\n    rx := &x;\n    h := scope(|t| spawn(&mut t, || -> u64 rx[0]));\n    println(h.id);\n}\n",
+    "reject": true,
+    "diagnostic": "returned borrow escapes its declared input lifetime"
+  },
+  {
+    "name": "thread-scope-borrows-and-writes-through-exclusive",
+    "source": "use thread;\nfn main() {\n    left := u64[1, 2, 3];\n    mut right = u64[0, 0];\n    rl := &left;\n    rr := &mut right;\n    n := thread::scope(|t| -> u64 {\n        a := t.spawn(|| -> u64 rl.len());\n        b := t.spawn(|| -> u64 { rr[0] = 9; return 1; });\n        return a.join() + b.join();\n    });\n    println(n);\n    println(right[0]);\n}\n",
+    "modules": [
+      "lib/thread.grl",
+      "lib/time.grl"
+    ],
+    "stdout": "4\n9\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "thread::scope on real threads: one scoped thread reads a borrowed vector, another writes through a borrowed &mut; both are joined, and the write is visible after scope returns"
+  },
+  {
+    "name": "thread-scope-joins-all-before-reraising",
+    "source": "use thread;\nuse host;\n// One scoped thread fails at once, its sibling finishes 100 ms later: the scope joins both before\n// it re-raises the failure, so the sibling's write is there when the task's failure arrives.\nstruct Shared { wrote: Atomic<u64> }\nfn bad(n: u64) -> u64 {\n    w := u64[1];\n    return w[n];\n}\nfn run(n: u64, s: (&Shared)) -> u64 {\n    return thread::scope(|t| -> u64 {\n        f := t.spawn(|| -> u64 bad(7));\n        g := t.spawn(|| -> u64 { host::sleep_ms(100); s.wrote.store(1); return 2; });\n        return 0;\n    });\n}\nfn body<sc>(scope: (&sc Scope<(&Shared)>), s: (&Shared)) -> u64 {\n    match try_join(spawn(scope, 0, run)) {\n        TaskFailure(e) => { println(\"scope failed: {}\", e.message); },\n        u64(v) => { println(v); }\n    }\n    return s.wrote.load();\n}\nfn main() {\n    s := Shared { wrote: Atomic::new(0) };\n    println(task_scope(&s, body));\n}\n",
+    "modules": [
+      "lib/thread.grl",
+      "lib/time.grl"
+    ],
+    "stdout": "scope failed: index 7 out of bounds for length 1\n1\n",
+    "stderr": [
+      "note: "
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "note": "one scoped thread fails at once, its sibling writes 100 ms later: the scope joins every thread before it re-raises the first failure, so the write is there"
+  },
+  {
+    "name": "thread-scope-second-join-is-a-move-error",
+    "source": "use thread;\nfn main() {\n    x := u64[1];\n    rx := &x;\n    n := thread::scope(|t| -> u64 {\n        h := t.spawn(|| -> u64 rx[0]);\n        a := h.join();\n        b := h.join();\n        return a + b;\n    });\n    println(n);\n}\n",
+    "modules": [
+      "lib/thread.grl",
+      "lib/time.grl"
+    ],
+    "reject": true,
+    "diagnostic": "`h` was moved",
+    "targets": [
+      "x86_64"
+    ],
+    "note": "D8: a ScopedThread is a library record whose join consumes it"
+  },
+  {
+    "name": "thread-scope-body-cannot-touch-what-a-spawn-borrowed",
+    "source": "use thread;\nfn main() {\n    mut v = u64[1, 2];\n    rv := &mut v;\n    n := thread::scope(|t| -> u64 {\n        h := t.spawn(|| -> u64 { rv[0] = 5; return 1; });\n        rv[1] = 7;\n        return h.join();\n    });\n    println(n);\n}\n",
+    "modules": [
+      "lib/thread.grl",
+      "lib/time.grl"
+    ],
+    "reject": true,
+    "diagnostic": "borrow conflicts with active access",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "sched-wake-not-lost-under-constant-parking",
+    "note": "1500 rounds of a burst of nested joins from a task, with the whole machine going idle between rounds so every worker searches, gives up and parks: a fork wakes a worker only when none is searching, so a lost wakeup would strand a round with everyone asleep and hang the case. The sum proves every job ran once.",
+    "files": [
+      "tests/sched/wake_stress.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "435900\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "sched-fork-reaches-a-thief",
+    "note": "200 rounds of a fork made while the other workers are parked; the branch that stays waits for a thief to start the forked one (500 ms at most). A worker that found work while searching used to stay counted as searching while it ran it, so its own forks woke nobody and stranded until the timeout; zero rounds may time out.",
+    "files": [
+      "tests/sched/fork_reaches_thief.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "env": {
+      "GRAIL_WORKERS": "4"
+    },
+    "stdout": "0\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "comptime-probe-error-reported-once",
+    "source": "static T: u64 = @f();\nfn f() -> u64 {\n    return 3;\n}\nfn g() -> u64 {\n    return \"x\";\n}\nfn main() -> u64 {\n    return T;\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "type mismatch"
+    ],
+    "diagnosticCount": 1,
+    "note": "a compile-time probe stops at its first error (no reruns to find the next): the error is reported once, then the outer compile names the call. Reruns inside probes re-ran every probe beneath them, which made a failure deep in a chain exponential (docs/design/comptime-speed.md)"
+  },
+  {
+    "name": "static-baked-record-table",
+    "source": "struct Flag {\n    name: string,\n    takes_value: bool,\n    short: u8,\n    weight: i32,\n    aliases: string[]\n}\nstruct Box {\n    origin: Point,\n    sizes: u64[],\n    label: string\n}\nstruct Point {\n    x: i64,\n    y: i64\n}\nstatic FLAGS: Flag[] = @flags();\nstatic BOX: Box = @make_box();\nfn flags() -> Flag[] {\n    mut v = Flag[];\n    v.push(Flag { name: \"output\", takes_value: true, short: 111, weight: -3, aliases: string[\"out\", \"o\"] });\n    v.push(Flag { name: \"verbose\", takes_value: false, short: 118, weight: 7, aliases: string[] });\n    return v;\n}\nfn make_box() -> Box {\n    return Box { origin: Point { x: -1, y: 2 }, sizes: u64[3, 4], label: \"a\\nb\" };\n}\n@no_alloc\nfn count() -> u64 {\n    return FLAGS.len() + FLAGS[0].name.len() + FLAGS[0].aliases.len() + BOX.sizes.len();\n}\nfn main() -> u64 {\n    for i in FLAGS.len() {\n        f := FLAGS[i];\n        println(\"{} {} {} {} {}\", f.name, f.takes_value, f.short, f.weight, f.aliases.len());\n    }\n    println(FLAGS[0].aliases[1]);\n    println(BOX.origin.x);\n    println(BOX.origin.y);\n    println(BOX.sizes[1]);\n    println(BOX.label);\n    println(count());\n    return 0;\n}\n",
+    "stdout": "output true 111 -3 2\nverbose false 118 7 0\no\n-1\n2\n4\na\nb\n12\n",
+    "note": "module-values stage 4: a table of plain records (string, bool, u8, i32 and string-vector fields) and a record holding a record, a vector and a two-line string, baked by `@f()` into read-only objects (one word per field, as rt_rec lays a record out) and read by borrowing; `@no_alloc` reads through them"
+  },
+  {
+    "name": "static-baked-handle-refused",
+    "source": "handle H;\nstruct Holder {\n    h: H,\n    n: u64\n}\nstatic X: Holder = @make();\nfn make() -> Holder {\n    return Holder { h: 0, n: 1 };\n}\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "a static is reachable from every thread at once, so its type must be shareable, and `Holder` is not",
+    "note": "a record holding a thread-affine handle is not shareable, so it cannot be a static"
+  },
+  {
+    "name": "static-record-constant-refused",
+    "source": "struct P {\n    x: u64\n}\nORIGIN := origin();\nfn origin() -> P {\n    return P { x: 1 };\n}\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "which a constant cannot hold",
+    "note": "a module binding that computes a record says to make it a static"
+  },
+  {
+    "name": "static-enum-not-built",
+    "source": "enum E {\n    A,\n    B(u64)\n}\nstatic X: E = @make();\nfn make() -> E {\n    return E::A;\n}\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "an enum or a generic record is not one of them yet",
+    "note": "enums are data but not baked yet"
+  },
+  {
+    "name": "static-prover-known-values",
+    "source": "static SQ: u64[] = @squares();\nstatic LIMIT: u64 = 8;\nconst CLIMIT: u64 = 8;\nfn squares() -> u64[] {\n    mut v = u64[];\n    for i in 8 {\n        v.push(i * i);\n    }\n    return v;\n}\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn small(x: u64 where x < 10) -> u64 {\n    return x;\n}\nfn walk() -> u64 {\n    mut t = 0;\n    for i in SQ.len() {\n        t += get(SQ, i);\n    }\n    return t;\n}\nfn fixed() -> u64 {\n    return get(SQ, 3);\n}\nfn lim() -> u64 {\n    return small(LIMIT);\n}\nfn clim() -> u64 {\n    return small(CLIMIT);\n}\nfn direct() -> u64 {\n    mut t = 0;\n    for i in SQ.len() {\n        t += SQ[i];\n    }\n    return t;\n}\nfn main() -> u64 {\n    println(walk() + fixed() + lim() + clim() + direct());\n    return 0;\n}\n",
+    "stdout": "305\n",
+    "asm": [
+      {
+        "in": "f_main_walk",
+        "text": "call f_main_get.proved"
+      },
+      {
+        "in": "f_main_fixed",
+        "text": "call f_main_get.proved"
+      },
+      {
+        "in": "f_main_lim",
+        "text": "call f_main_small.proved"
+      },
+      {
+        "in": "f_main_clim",
+        "text": "call f_main_small.proved"
+      }
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "note": "module-values stage 5: the prover reads a static's name as a term (it never changes), an integer static's or constant's value as a literal, and a baked table's `.len()` as its length - so `get(SQ, i)` in `for i in SQ.len()`, `get(SQ, 3)` (SQ has 8 elements), `small(LIMIT)` and `small(CLIMIT)` (8 < 10) call the proved entries"
+  },
+  {
+    "name": "static-prover-stays-sound",
+    "source": "static SQ: u64[] = @squares();\nstatic LIMIT: u64 = 8;\nstatic BIG: u64 = 12;\nfn squares() -> u64[] {\n    mut v = u64[];\n    for i in 8 {\n        v.push(i * i);\n    }\n    return v;\n}\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn small(x: u64 where x < 10) -> u64 {\n    return x;\n}\nfn shadow() -> u64 {\n    LIMIT := 20;\n    return small(LIMIT);\n}\nfn big() -> u64 {\n    return small(BIG);\n}\nfn past() -> u64 {\n    return get(SQ, 9);\n}\nfn main() -> u64 {\n    println(get(SQ, 7));\n    println(past());\n    return 0;\n}\n",
+    "stdout": "49\n",
+    "signal": "SIGABRT",
+    "stderr": "error: refinement violated: i < v.len()\n",
+    "asmAbsent": [
+      {
+        "in": "f_main_shadow",
+        "text": "call f_main_small.proved"
+      },
+      {
+        "in": "f_main_big",
+        "text": "call f_main_small.proved"
+      },
+      {
+        "in": "f_main_past",
+        "text": "call f_main_get.proved"
+      }
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a local that shadows a static is not the static's value, a static whose value breaks the bound (12 < 10) proves nothing, and `get(SQ, 9)` on an 8-element static stays checked and fails at run time"
+  },
+  {
+    "name": "unboxed-frame-holders",
+    "files": [
+      "compiler/tests/unboxed_frame_holders.grl"
+    ],
+    "stdout": "1 2 3\n2 4 6\n9\n231\n25\n26\n19\n4 2\n",
+    "note": "plain records kept by an enum payload, a closure capture, a Mutex payload, a dyn cell and a vector after the frame that built them has returned; the end-of-main leak check balances every box (unboxed-values.md stage 3a; tools/frame-records-test.mjs runs it with --frame-records too)"
   }
 ]
