@@ -21,6 +21,15 @@
   beside it (`OBJ.units`): a function whose text did not change is replayed, not assembled again
   (`GRAIL_ASM_UNITS_VERIFY=1` checks the replayed object against a plain assembly).
 
+- **Callable bounds: `fn map<U, F: FnMut(T) -> U>(self, f: F)`.** A type parameter may be bound by a
+  closure type; a value of that type is callable in the generic body, the closure's own type is what
+  the specialisation is made for, and its parameters and result are inferred from it. A closure whose
+  type is known - a local closure, or one given for such a parameter - is now called directly, by its
+  body's symbol, instead of through its code word, so the optimiser can inline it. The `vecs`
+  callback methods (`map`, `filter`, `fold`, `any`, `all`, `find`, `position`, `sort_by`, ...) take
+  callable bounds. A closure given for a callable-bound parameter without `Owned` is lent for the call,
+  as an `Fn(..)` parameter is. Fixed with it: two capture-free closures with the same signature given
+  to one generic function were one specialisation; they are two.
 - **`grail check` is incremental.** It goes through the build store as `grail build` does: one
   compiler run per module, a module whose inputs did not change is not checked again, and in a
   module that is, the unchanged function bodies replay. A check after an edit to one module checks
