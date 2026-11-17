@@ -20,6 +20,8 @@
   one module** (`duplicate symbol: rt_abort.c`). The thunk through which lifted code calls a native
   function is now weak, so every unit can carry it.
 
+  Fact kinds are now named constants in one table (`llvm::FACT_*`), every writer and reader uses
+  the names, and `ci.mjs lint` fails on a literal kind or on two names with one number.
 - Fixed (release builds): a function calling a blocking `extern "C"` function was left unoptimised
   since the foreign-call marker landed - the marker's locked counter, thread-pointer read and
   register save around `rt_foreign_lost` were text the LLVM lifter refused. It now lifts them
