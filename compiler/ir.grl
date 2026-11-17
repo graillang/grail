@@ -64,6 +64,11 @@ pub struct Body {
     lscope: u64,
     // This body's slot type facts by N/8, `(what << 8) | width`, 0 for none (filled by `build`).
     sfact: u64[],
+    // The loop-stability facts (llvm FACT_LOOP_STABLE) of this body, as pairs: the header's slot by
+    // N/8 and the loop head's label number (filled by `build`).
+    stable: u64[],
+    // compact's renumbering of the frame, old N/8 to new (0: unchanged or not renumbered).
+    slotmap: u64[],
     maxslot: u64,
     table: u64[],
     // Where the lines the inlining pass reads (optimize.grl lines_of_interest) start in `out`,
@@ -1519,6 +1524,8 @@ pub fn new_body() -> Body {
         inl_rel: u8[],
         lscope: 0,
         sfact: u64[],
+        stable: u64[],
+        slotmap: u64[],
         maxslot: 0,
         table: u64[],
         interest: u64[],
@@ -1795,6 +1802,8 @@ pub fn build<a, b, c, d>(o: (&a mut Body), s: &b [u8], facts: (&c llvm::Facts), 
     exchange(&mut o.ret2, 0);
     exchange(&mut o.pair_widths, u64[]);
     o.sfact.clear();
+    o.stable.clear();
+    o.slotmap.clear();
     for n in o.maxslot / 8 + 2 {
         o.sfact.push(0);
     }
@@ -1827,6 +1836,10 @@ pub fn build<a, b, c, d>(o: (&a mut Body), s: &b [u8], facts: (&c llvm::Facts), 
                     }
                     if kind == llvm::FACT_PAIR {
                         pairs.push(i);
+                    }
+                    if kind == llvm::FACT_LOOP_STABLE {
+                        o.stable.push(llvm::fact_slot_at(facts, i) + 1);
+                        o.stable.push(llvm::fact_b_at(facts, i));
                     }
                     if kind == llvm::FACT_DYN_RESULT {
                         exchange(&mut o.ret2, 1);
