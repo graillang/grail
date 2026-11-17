@@ -539,4 +539,28 @@ if (process.platform === 'linux') {
   assert.deepEqual(left, [], 'orphans: a module run outlived its killed driver');
   checks++;
 }
+// `grail build --release` in every shape it can take - per module through the store, again with
+// the store warm, with --no-cache, as one whole-program run, and a single file - links a program
+// that runs: the in-process object of each shape is the release unit's native part, which the
+// LLVM step archives (a whole-program run once wrote it where llvm-ar did not look).
+if (process.platform === 'linux' && process.arch === 'x64') {
+  const dir = join(work, 'release-shapes');
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, 'grail.toml'), '[package]\nname = "two"\nversion = "0.1.0"\n');
+  writeFileSync(join(dir, 'src/main.grl'), 'use util;\nfn main() {\n    println(util::twice(21));\n}\n');
+  writeFileSync(join(dir, 'src/util.grl'), 'module util;\npub fn twice(x: u64) -> u64 {\n    return x * 2;\n}\n');
+  writeFileSync(join(dir, 'one.grl'), 'fn main() {\n    println(6 * 7);\n}\n');
+  const env = { ...process.env, GRAIL_CACHE_DIR: join(dir, 'store') };
+  const shapes = [['build', '--release'], ['build', '--release'], ['build', '--release', '--no-cache'], ['build', '--release', '--whole-program'], ['build', 'one.grl', '-o', 'one', '--release', '--no-cache']];
+  for (const args of shapes) {
+    rmSync(join(dir, 'target'), { recursive: true, force: true });
+    const built = spawnSync(grail, args, { cwd: dir, encoding: 'utf8', env });
+    assert.equal(built.status, 0, `grail ${args.join(' ')} failed\n${built.stdout}${built.stderr}`);
+    const exe = args.includes('one.grl') ? join(dir, 'one') : join(dir, 'target/two');
+    const ran = spawnSync(exe, [], { encoding: 'utf8' });
+    assert.equal(ran.stdout, '42\n', `grail ${args.join(' ')}: the program printed ${JSON.stringify(ran.stdout)}`);
+    checks++;
+  }
+}
 console.log(`cli: ${checks} formatter/tool checks passed`);

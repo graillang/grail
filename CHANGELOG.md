@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **Fixed: `grail build --release` failed for a whole-program build** (a single file with
+  `--no-cache`, `--whole-program`, a claimed effect): the run assembled its in-process object as the
+  unit object while the LLVM step looked for the native part beside it (`llvm-ar: X.o.s.o: No such
+  file or directory`). The run now writes the native part, as the per-module units do;
+  tools/test-cli.mjs builds every release shape and runs the program.
+
 - The orphan rule's diagnostic names the modules: an `impl I for T` written outside the modules that
   declare `I` and `T` now says where it was written, where the interface and the type are declared
   (or that no module declares the type, leaving only the interface's), and the fix - move the impl
