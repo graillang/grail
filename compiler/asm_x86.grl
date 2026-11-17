@@ -114,8 +114,11 @@ pub struct A {
     sym_bind: u64[],
     // ELF visibility (`.hidden` 2, `.protected` 3, `.internal` 1).
     sym_vis: u64[],
-    // `.comm` sizes.
+    // `.comm` sizes, and `.size NAME, .-NAME` - the symbol, and the label marking its end (the
+    // `.` at the directive), resolved after layout.
     sym_size: u64[],
+    sz_sym: u64[],
+    sz_end: u64[],
     sym_type: u64[],
     sym_ref: u64[],
     st_id: u64[],
@@ -250,6 +253,7 @@ pub struct A {
     ck_pt: u64,
     ck_it: u64,
     ck_ln: u64,
+    ck_sz: u64,
     ck_def: u64,
     ck_attr: u64,
     units_in: u8[],
@@ -411,6 +415,7 @@ fn directives<a>(o: (&a mut A)) {
     def(&mut o, view(".comm"), D_COMM);
     def(&mut o, view(".4byte"), D_4BYTE);
     def(&mut o, view(".previous"), D_PREVIOUS);
+    def(&mut o, view(".size"), D_SIZE);
     def(&mut o, view(".build_version"), D_BUILD_VERSION);
     def(&mut o, view(".weak_definition"), D_WEAK_DEFINITION);
     def(&mut o, view(".space"), D_ZERO);
@@ -510,6 +515,8 @@ pub fn new() -> A {
         sym_bind: u64[],
         sym_vis: u64[],
         sym_size: u64[],
+        sz_sym: u64[],
+        sz_end: u64[],
         sym_type: u64[],
         sym_ref: u64[],
         st_id: st,
@@ -614,6 +621,7 @@ pub fn new() -> A {
         ck_pt: 0,
         ck_it: 0,
         ck_ln: 0,
+        ck_sz: 0,
         ck_def: 0,
         ck_attr: 0,
         units_in: u8[],
@@ -1507,6 +1515,39 @@ fn directive<a>(o: (&a mut A), id: u64) {
         cv_directive(&mut o, id);
     } else if (id >= D_SEH_PROC) && (id <= D_SEH_ENDPROC) {
         seh_directive(&mut o, id);
+    } else if id == D_SIZE {
+        // `.size NAME, .-NAME`: the size from NAME to here, in this section.
+        sym := sym_operand(&mut o);
+        expect(&mut o, ',');
+        skip(&mut o);
+        if peek(&o) != '.' {
+            fail(&mut o, view("only `.size NAME, .-NAME` is supported"));
+            return ();
+        }
+        o.at = o.le;
+        // The end label's name is unique within its chunk (the chunk's hash and a count), so a
+        // replayed function unit brings one that cannot clash.
+        mut name = view(".Lsize ").copy();
+        if o.chunk_on != 0 {
+            hex(&mut name, o.chunk_h1);
+            name.push('_');
+            num(&mut name, o.sz_sym.len() - o.ck_sz);
+        } else {
+            num(&mut name, o.sz_sym.len());
+        }
+        outer := exchange(&mut o.src, name);
+        o.nh_a = 1;
+        o.nh_e = 0;
+        end := symbol(&mut o, 0, o.src.len());
+        o.src = outer;
+        o.nh_a = 1;
+        o.nh_e = 0;
+        o.sym_sec[end] = o.cur + 1;
+        o.sym_pos[end] = pos(&o);
+        o.sym_k[end] = o.it_pos.len();
+        o.def_log.push(end);
+        o.sz_sym.push(sym);
+        o.sz_end.push(end);
     } else if id == D_BUILD_VERSION {
         // `.build_version macos, MAJOR, MINOR[, PATCH]`
         skip(&mut o);
@@ -2343,6 +2384,19 @@ fn finish<a>(o: (&a mut A)) -> Result {
     if o.err.len() != 0 {
         return Result { object: u8[], error: o.err.copy(), units: u8[], replayed: 0, encoded: 0 };
     }
+    for i in o.sz_sym.len() {
+        sym := o.sz_sym[i];
+        end := o.sz_end[i];
+        // As LLVM: the two ends must be in one section ("size expression must be absolute").
+        if o.sym_sec[sym] != o.sym_sec[end] {
+            mut said = view("size expression must be absolute: `.size ").copy();
+            said.append(view(o.sym_name[sym]));
+            said.append(view("` is measured from another section"));
+            fail(&mut o, view(said));
+            return Result { object: u8[], error: o.err.copy(), units: u8[], replayed: 0, encoded: 0 };
+        }
+        o.sym_size[sym] = sym_final(&o, &pre, end) - sym_final(&o, &pre, sym);
+    }
     obj := object(&mut o, &pre, &r_sec, &r_off, &r_type, &r_sym, &r_add);
     return Result { object: obj, error: u8[], units: exchange(&mut o.units_out, u8[]), replayed: o.replayed, encoded: o.encoded };
 }
@@ -2798,6 +2852,7 @@ const D_SECIDX: u64 = 48;
 const D_BUILD_VERSION: u64 = 49;
 const D_WEAK_DEFINITION: u64 = 50;
 const D_SUBSECTIONS: u64 = 51;
+const D_SIZE: u64 = 52;
 const I_MOVQ: u64 = 100;
 const I_MOVL: u64 = 101;
 const I_MOVB: u64 = 102;
@@ -2913,6 +2968,9 @@ const I_PMINUB: u64 = 300;
 const I_PMAXUB: u64 = 301;
 const I_PMOVMSKB: u64 = 302;
 const I_CVTDQ2PS: u64 = 303;
+// FMA3, VEX-encoded: the SIMD mul_add at --cpu=x86-64-v3 and above (docs/design/simd.md, S4b).
+const I_VFMADD231PS: u64 = 304;
+const I_VFMADD231PD: u64 = 305;
 const I_JCC: u64 = 160;
 const I_SETCC: u64 = 180;
 const I_CMOV: u64 = 250;
@@ -3037,6 +3095,8 @@ fn mnemonics<a>(o: (&a mut A)) {
     def(&mut o, view("pmaxub"), I_PMAXUB);
     def(&mut o, view("pmovmskb"), I_PMOVMSKB);
     def(&mut o, view("cvtdq2ps"), I_CVTDQ2PS);
+    def(&mut o, view("vfmadd231ps"), I_VFMADD231PS);
+    def(&mut o, view("vfmadd231pd"), I_VFMADD231PD);
     // Conditions: 160 + cc for jumps, 180 + cc for set.
     cc := u8[][view("o").copy(), view("no").copy(), view("b").copy(), view("ae").copy(), view("e").copy(), view("ne").copy(), view("be").copy(), view("a").copy(), view("s").copy(), view("ns").copy(), view("p").copy(), view("np").copy(), view("l").copy(), view("ge").copy(), view("le").copy(), view("g").copy()];
     alias := u8[][view("c").copy(), view("nae").copy(), view("nb").copy(), view("nc").copy(), view("z").copy(), view("nz").copy(), view("na").copy(), view("nbe").copy(), view("pe").copy(), view("po").copy(), view("nge").copy(), view("nl").copy(), view("ng").copy(), view("nle").copy()];
@@ -3828,6 +3888,25 @@ fn execute<a>(o: (&a mut A), id: u64) {
         rm2(&mut o, 1, 0, 0xd70f, 2, 1, 0);
     } else if id == I_CVTDQ2PS {
         rm2(&mut o, 0, 0, 0x5b0f, 2, 1, 0);
+    } else if (id == I_VFMADD231PS) || (id == I_VFMADD231PD) {
+        // `vfmadd231ps %xmmS2,%xmmS1,%xmmD`: D = S1 * S2 + D, three xmm registers. VEX.128.66.0F38
+        // (C4, R X B mmmmm=00010, W vvvv L=0 pp=01), opcode B8, ModRM 11 D S2; W is the pd form.
+        if (o.nops != 3) || (o.ok[0] != 1) || (o.ok[1] != 1) || (o.ok[2] != 1) {
+            shape(&mut o);
+            return ();
+        }
+        src2 := rn(&o, 0);
+        src1 := rn(&o, 1);
+        dst := rn(&o, 2);
+        mut w = 0;
+        if id == I_VFMADD231PD {
+            w = 1;
+        }
+        o.buf.push(0xc4);
+        o.buf.push(((1 - ((dst >> 3) & 1)) << 7) | (1 << 6) | ((1 - ((src2 >> 3) & 1)) << 5) | 2);
+        o.buf.push((w << 7) | (((15 - src1) & 15) << 3) | 1);
+        o.buf.push(0xb8);
+        o.buf.push(0xc0 | ((dst & 7) << 3) | (src2 & 7));
     } else {
         fail(&mut o, view("unsupported instruction"));
     }
@@ -3960,6 +4039,7 @@ fn chunk_begin<a>(o: (&a mut A), a0: u64, end: u64, h1: u64, h2: u64) {
     o.ck_pt = o.pt_sec.len();
     o.ck_it = o.it_pos.len();
     o.ck_ln = o.ln_pos.len();
+    o.ck_sz = o.sz_sym.len();
     o.ck_def = o.def_log.len();
     o.ck_attr = o.attr_log.len();
     o.ck_mention = o.mention_log.len();
@@ -4095,6 +4175,13 @@ fn chunk_finish<a>(o: (&a mut A), at: u64) {
         wv(&mut u, o.it_neg[i]);
         wv(&mut u, o.it_div[i]);
         wv(&mut u, o.it_add[i]);
+        i += 1;
+    }
+    wv(&mut u, o.sz_sym.len() - o.ck_sz);
+    i = o.ck_sz;
+    while i < o.sz_sym.len() {
+        wv(&mut u, o.sym_slot[o.sz_sym[i]]);
+        wv(&mut u, o.sym_slot[o.sz_end[i]]);
         i += 1;
     }
     wv(&mut u, o.ln_pos.len() - o.ck_ln);
@@ -4436,6 +4523,11 @@ fn unit_replay<a>(o: (&a mut A), u: u64) -> bool {
         o.it_neg.push(rv(&o, &mut at, &mut bad));
         o.it_div.push(rv(&o, &mut at, &mut bad));
         o.it_add.push(rv(&o, &mut at, &mut bad));
+    }
+    nz := rv(&o, &mut at, &mut bad);
+    for i in nz {
+        o.sz_sym.push(syms[rv(&o, &mut at, &mut bad)]);
+        o.sz_end.push(syms[rv(&o, &mut at, &mut bad)]);
     }
     nl := rv(&o, &mut at, &mut bad);
     for i in nl {

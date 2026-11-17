@@ -642,11 +642,18 @@ fn live_fx<a>(o: (&a ir::Body)) -> LiveFx {
 }
 // Function-wide backward liveness over the label graph (iterated to a fixed point); unknown
 // jump targets and unrecognized instructions make every register live.
-fn live_pass<a, c, d>(o: (&a mut ir::Body), lin: (&c mut u64[]), fx: (&d LiveFx), remove: u64) -> u64 {
+// Returns 1 when a label's set changed, and then `settled` says whether the next round is certain
+// to change nothing: a backward pass reads a label before it (a loop's head, through a backward
+// jump) as the previous round left it, and everything else as this round makes it, so when every
+// such read saw the value its label ends this round with, the next round reads, and makes, exactly
+// what this one did.
+fn live_pass<a, c, d, e>(o: (&a mut ir::Body), lin: (&c mut u64[]), fx: (&d LiveFx), remove: u64, settled: (&e mut u64)) -> u64 {
     last := o.op.len();
     mut live = 0;
     mut i = last;
     mut changed = 0;
+    mut back_at = u64[];
+    mut back_saw = u64[];
     while 0 < i {
         i -= 1;
         if (o.del[i] == 0) & (o.tr[i] == 0) {
@@ -663,6 +670,10 @@ fn live_pass<a, c, d>(o: (&a mut ir::Body), lin: (&c mut u64[]), fx: (&d LiveFx)
                         mut there = ir::all_regs();
                         if t < last {
                             there = lin[t];
+                            if t < i {
+                                back_at.push(t);
+                                back_saw.push(there);
+                            }
                         }
                         if op == 16 {
                             live = there;
@@ -698,6 +709,13 @@ fn live_pass<a, c, d>(o: (&a mut ir::Body), lin: (&c mut u64[]), fx: (&d LiveFx)
             }
         }
     }
+    mut same = 1;
+    for k in back_at.len() {
+        if lin[back_at[k]] != back_saw[k] {
+            same = 0;
+        }
+    }
+    exchange(settled, same);
     return changed;
 }
 fn dead_defs<a, b>(o: (&a mut ir::Body), s: &b [u8], first: u64, last: u64) {
@@ -706,15 +724,21 @@ fn dead_defs<a, b>(o: (&a mut ir::Body), s: &b [u8], first: u64, last: u64) {
         lin.push(0);
     }
     fx := live_fx(&o);
+    mut settled = 0;
     mut rounds = 0;
     while rounds < 50 {
         rounds += 1;
-        if live_pass(&mut o, &mut lin, &fx, 0) == 0 {
+        if live_pass(&mut o, &mut lin, &fx, 0, &mut settled) == 0 {
+            break;
+        }
+        // The round after a settled one would change nothing: it is counted, not run.
+        if (settled != 0) && (rounds < 50) {
+            rounds += 1;
             break;
         }
     }
     if rounds < 50 {
-        live_pass(&mut o, &mut lin, &fx, 1);
+        live_pass(&mut o, &mut lin, &fx, 1, &mut settled);
     }
 }
 fn next_live<a>(o: (&a ir::Body), i: u64, last: u64) -> u64 {
@@ -1457,6 +1481,222 @@ fn put_num<a>(out: (&a mut u8[]), n: u64) {
     }
     out.push(48 + n % 10);
 }
+// An f32 operation with an f32 constant (docs/design/fixed-arrays.md, ecs_par's loop): the float
+// lowering widens the element, operates in f64 and rounds back,
+//     movabsq $K,%rcx; cvtss2sd %xmmA,%xmm0; movq %rcx,%xmm1; OPsd %xmm1,%xmm0; cvtsd2ss %xmm0,%xmm0
+// and when K is an f32 value widened, that is exactly `OPss` with the f32 constant: both operands are
+// binary32 values and + - * / rounded once in binary64 then to binary32 equal the binary32 operation
+// (53 >= 2*24 + 2). It becomes
+//     movl $K32,%ecx; movd %ecx,%xmm1; movaps %xmmA,%xmm0; OPss %xmm1,%xmm0
+// when %rcx and %xmm1 are not read again before they are written (they now hold the binary32
+// constant rather than the binary64 one): the scan stops at a label, a jump, a call or a return, and
+// then leaves the sequence alone.
+fn f32_exact_bits(b: u64) -> u64 {
+    if (b == 0) || (b == 9223372036854775808) {
+        return (b >> 32) + 1;
+    }
+    e := (b >> 52) & 2047;
+    m := b & 4503599627370495;
+    if (m & 536870911) != 0 {
+        return 0;
+    }
+    if (e < 1023 - 126) || (1023 + 127 < e) {
+        return 0;
+    }
+    return (((b >> 63) << 31) | ((e + 127 - 1023) << 23) | (m >> 29)) + 1;
+}
+fn line_at<a>(s: &a [u8], at: u64) -> u64 {
+    mut e = at;
+    while (e < s.len()) && (s[e] != 10) {
+        e += 1;
+    }
+    return e;
+}
+// Where label `name` is defined in `s` (the line after `name:`), or s.len() + 1 when it is not.
+fn label_line<a, b>(s: &a [u8], name: &b [u8]) -> u64 {
+    mut a = 0;
+    while a < s.len() {
+        e := line_at(view(s), a);
+        if (e - a == name.len() + 1) && (s[e - 1] == 58) && ir::same_range(view(s), a, e - 1, name) {
+            return e + 1;
+        }
+        a = e + 1;
+    }
+    return s.len() + 1;
+}
+// Whether `reg` (or its low half `low`) may be read on some path from line `from` before it is
+// written whole. Paths are followed through jumps - an unconditional one goes on at its target, a
+// conditional one is followed both ways - with a budget of lines and each label visited once;
+// a call, a return, an indirect jump, a missing label or the budget running out count as a read.
+fn reg_read_later<a, b>(s: &a [u8], from: u64, reg: &b [u8], low: &b [u8]) -> bool {
+    mut work = u64[];
+    work.push(from);
+    mut seen = u8[][];
+    mut budget = 600;
+    while work.len() != 0 {
+        mut a = work.pop()!;
+        mut going = true;
+        while going {
+            if a >= s.len() {
+                return true;
+            }
+            if budget == 0 {
+                return true;
+            }
+            budget -= 1;
+            e := line_at(view(s), a);
+            line := s[a: e].copy();
+            n := line.len();
+            if (n == 0) || (line[n - 1] == 58) || (line[0] == 46) {
+                a = e + 1;
+                continue;
+            }
+            // A call clobbers %rcx and every xmm register (caller-saved in both conventions the native
+            // backend emits) after reading only its argument registers: for a scratch register it
+            // ends the path, unless the register is an argument one. A return reads only the result
+            // registers, which no scratch candidate here is. `leave` touches neither.
+            if ir::at(view(line), 0, view("call")) {
+                // Both candidates (%rcx, %xmm1) can carry an argument, so a call may read them.
+                return true;
+            }
+            if ir::at(view(line), 0, view("ret")) {
+                going = false;
+                continue;
+            }
+            if ir::at(view(line), 0, view("leave")) {
+                a = e + 1;
+                continue;
+            }
+            if line[0] == 106 {
+                // jmp/jcc LABEL
+                mut sp = 0;
+                while (sp < n) && (line[sp] != 32) {
+                    sp += 1;
+                }
+                if (sp + 1 >= n) || (line[sp + 1] != 46) {
+                    return true;
+                }
+                target := line[sp + 1: n].copy();
+                mut visited = false;
+                for k in seen.len() {
+                    if ir::same_range(view(seen[k]), 0, seen[k].len(), view(target)) {
+                        visited = true;
+                    }
+                }
+                if !visited {
+                    at := label_line(view(s), view(target));
+                    if at > s.len() {
+                        return true;
+                    }
+                    seen.push(target.copy());
+                    work.push(at);
+                }
+                if ir::at(view(line), 0, view("jmp ")) {
+                    going = false;
+                } else {
+                    a = e + 1;
+                }
+                continue;
+            }
+            mut mentions = 0;
+            mut last_is = false;
+            for x in n {
+                for which in 2 {
+                    mut r = reg.copy();
+                    if which == 1 {
+                        if low.len() == 0 {
+                            continue;
+                        }
+                        r = low.copy();
+                    }
+                    if (x + r.len() <= n) && ir::same_range(view(line), x, x + r.len(), view(r)) {
+                        mentions += 1;
+                        if (x + r.len() == n) && (x > 0) && (line[x - 1] == 44) {
+                            last_is = true;
+                        }
+                    }
+                }
+            }
+            if mentions != 0 {
+                // A whole write - a move or lea whose destination is the register and that does not
+                // read it - ends this path; anything else reads it.
+                mov := ir::at(view(line), 0, view("mov")) || ir::at(view(line), 0, view("lea"));
+                partial := ir::at(view(line), 0, view("movss")) || ir::at(view(line), 0, view("movsd")) || ir::at(view(line), 0, view("movb")) || ir::at(view(line), 0, view("movw"));
+                if mov && !partial && last_is && (mentions == 1) {
+                    going = false;
+                } else {
+                    return true;
+                }
+            } else {
+                a = e + 1;
+            }
+        }
+    }
+    return false;
+}
+pub fn f32_const_ops<a>(s: &a [u8]) -> u8[] {
+    mut out = u8[];
+    mut a = 0;
+    while a < s.len() {
+        e := line_at(view(s), a);
+        mut done = false;
+        if (e - a > 14) && ir::at(view(s), a, view("movabsq $")) && ir::at(view(s), e - 5, view(",%rcx")) {
+            l2 := e + 1;
+            e2 := line_at(view(s), l2);
+            l3 := e2 + 1;
+            e3 := line_at(view(s), l3);
+            l4 := e3 + 1;
+            e4 := line_at(view(s), l4);
+            l5 := e4 + 1;
+            e5 := line_at(view(s), l5);
+            if (e5 <= s.len()) && (l5 < s.len()) && ir::at(view(s), l2, view("cvtss2sd %xmm")) && ir::at(view(s), e2 - 6, view(",%xmm0"))
+                && ir::same_range(view(s), l3, e3, view("movq %rcx,%xmm1"))
+                && (e4 - l4 == 17) && ir::at(view(s), l4 + 3, view("sd %xmm1,%xmm0"))
+                && ir::same_range(view(s), l5, e5, view("cvtsd2ss %xmm0,%xmm0")) {
+                op := s[l4: l4 + 3].copy();
+                okop := ir::same_range(view(op), 0, 3, view("mul")) || ir::same_range(view(op), 0, 3, view("add")) || ir::same_range(view(op), 0, 3, view("sub")) || ir::same_range(view(op), 0, 3, view("div"));
+                mut bits: u64 = 0;
+                mut digits = true;
+                for x in a + 9..e - 5 {
+                    if (48 <= s[x]) & (s[x] <= 57) {
+                        bits = bits * 10 + u64(s[x] - 48);
+                    } else {
+                        digits = false;
+                    }
+                }
+                f := f32_exact_bits(bits);
+                if okop && digits && (f != 0) && (e - 5 - (a + 9) < 21) && !reg_read_later(view(s), e5 + 1, view("%rcx"), view("%ecx")) && !reg_read_later(view(s), e5 + 1, view("%xmm1"), view("")) {
+                    out.append(view("movl $"));
+                    put_num(&mut out, f - 1);
+                    out.append(view(",%ecx\nmovd %ecx,%xmm1\n"));
+                    src := s[l2 + 9: e2 - 6].copy();
+                    if !ir::same_range(view(src), 0, src.len(), view("%xmm0")) {
+                        out.append(view("movaps "));
+                        out.append(view(src));
+                        out.append(view(",%xmm0\n"));
+                    }
+                    out.append(view(op));
+                    out.append(view("ss %xmm1,%xmm0"));
+                    if e5 < s.len() {
+                        out.push(10);
+                    }
+                    a = e5 + 1;
+                    done = true;
+                }
+            }
+        }
+        if !done {
+            for x in a..e {
+                out.push(s[x]);
+            }
+            if e < s.len() {
+                out.push(10);
+            }
+            a = e + 1;
+        }
+    }
+    return out;
+}
 // A build the optimiser does not run on (`--debug`) still gets the leaf accessors in line: every
 // line that is exactly `call NAME` for one of them becomes its expansion, with labels of its own.
 // Stack probes (docs/design/fixed-arrays.md): before a frame larger than a page is allocated, the
@@ -2069,6 +2309,8 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
     for i in last {
         dhead.push(0);
     }
+    // Several sequences can share one loop head: each links to the one stored before it (+1).
+    mut dchain = u64[];
     // At a drop helper call, the SSE registers (bit per register number) to save around it.
     mut xsave = u64[];
     for i in last {
@@ -2295,6 +2537,11 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
             dregs.push(dlen[k]);
             if ddata[k] != 99 {
                 if dloop[k] != 0 {
+                    while dchain.len() <= k {
+                        dchain.push(0);
+                    }
+                    was := dhead[dwline[k]];
+                    ir::put(&mut dchain, k, was);
                     ir::put(&mut dhead, dwline[k], k + 1);
                 } else {
                     ir::put(&mut dinit, dwline[k], k + 1);
@@ -2382,6 +2629,15 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
     xmm_memops(&mut o, view(s), last);
     index_cse(&mut o, view(s), last);
     dead_defs(&mut o, view(s), first, last);
+    // Slots read only by text emitted outside the lines: a stable sequence's slot (item 6).
+    mut keep = u64[];
+    for k in dslot.len() {
+        if dloop[k] != 0 {
+            keep.push(dslot[k]);
+        }
+    }
+    late_slots(&mut o, view(s), last, &keep);
+    dead_defs(&mut o, view(s), first, last);
     newframe := compact(&mut o, view(s), prologue, ns);
     // Rule 3 (call ABI S4): of the cleared range, only the slots that may be read before written.
     mut zkeep = u64[];
@@ -2417,10 +2673,11 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
                 o.out.push(10);
             }
         }
-        if dhead[i] != 0 {
-            // Into the loop from above: the stable sequence's header from its frame slot (renumbered
-            // by compact), then its fields.
-            k := dhead[i] - 1;
+        // Into the loop from above: each stable sequence's header from its frame slot (renumbered by
+        // compact), then its fields - every sequence whose loop starts here, not only the last one.
+        mut hk = dhead[i];
+        while hk != 0 {
+            k := hk - 1;
             mut n = dslot[k];
             if (n < o.slotmap.len()) && (o.slotmap[n] != 0) {
                 n = o.slotmap[n];
@@ -2440,6 +2697,11 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
             app(&mut o.out, view("),%"));
             reg_name(&mut o, dregs[2 * k]);
             o.out.push(10);
+            if k < dchain.len() {
+                hk = dchain[k];
+            } else {
+                hk = 0;
+            }
         }
         mut saved = 0;
         if (xsave[i] != 0) && (o.del[i] == 0) {
@@ -4986,6 +5248,61 @@ fn index_cse<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
 }
 fn all_regs_mask() -> u64 {
     return 65535;
+}
+// After the late passes (index CSE, array addressing, constant multiplies) some frame slots are
+// written and never read again: `movq %rax,-952(%rbp)` keeping an index nobody reloads. A store
+// followed at once by a load of the same slot is a register move, and a plain store to a slot that
+// no line reads - not as a source, not as the destination of anything but a move, not by `leaq`,
+// not as a word of a two-word value, and not by text emitted outside the lines (`keep`, item 6's
+// loop-entry load) - goes.
+fn late_slots<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64, keep: (&u64[])) {
+    for i in last {
+        if (o.del[i] != 0) || (o.op[i] != 1) || (o.k0[i] != 1) || (o.k1[i] != 2) {
+            continue;
+        }
+        j := next_live(&o, i, last);
+        if (j < last) && (o.op[j] == 1) && (o.k0[j] == 2) && (o.v0[j] == o.v1[i]) && (o.k1[j] == 1) {
+            if o.v1[j] == o.v0[i] {
+                kill(&mut o, j);
+            } else {
+                set_operand(&mut o, j, 0, 1, o.v0[i]);
+            }
+        }
+    }
+    ns := o.maxslot / 8 + 1;
+    mut read = u64[];
+    for n in ns + 1 {
+        read.push(0);
+    }
+    for k in keep.len() {
+        if keep[k] < read.len() {
+            ir::put(&mut read, keep[k], 1);
+        }
+    }
+    for n in o.pair.len() {
+        if (n < read.len()) && (o.pair[n] != 0) {
+            ir::put(&mut read, n, 1);
+        }
+    }
+    for i in last {
+        if o.del[i] != 0 {
+            continue;
+        }
+        if (o.k0[i] == 2) && (o.v0[i] / 8 < read.len()) {
+            ir::put(&mut read, o.v0[i] / 8, 1);
+        }
+        if (o.k1[i] == 2) && (o.v1[i] / 8 < read.len()) && !((o.op[i] == 1) || (o.op[i] == 2)) {
+            ir::put(&mut read, o.v1[i] / 8, 1);
+        }
+        // An instruction the optimiser does not know reaches a slot only by naming it (counted above)
+        // or through an address `leaq` took (a read of that slot, above): the frame clearing's `rep
+        // stosq` writes every slot and reads none.
+    }
+    for i in last {
+        if (o.del[i] == 0) && ((o.op[i] == 1) || (o.op[i] == 2)) && (o.k1[i] == 2) && (o.v1[i] / 8 < read.len()) && (read[o.v1[i] / 8] == 0) {
+            kill(&mut o, i);
+        }
+    }
 }
 fn name_hash<b>(s: &b [u8], a: u64, e: u64) -> u64 {
     mut h = 0;

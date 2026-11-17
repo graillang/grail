@@ -1,14 +1,107 @@
 ## Unreleased
 
+- **Release builds inline small functions across modules.** A call to a function of another module
+  was declared with a generic six-argument type that never matched the callee's real definition,
+  so LLVM never inlined it: small std helpers (`bytes::load_u64`, hash and string methods) stayed
+  calls in every release program. Each module's interface now records the signature its body was
+  defined with, and importers declare their calls with it (interface format 13).
+  `bench/hashmap.grl` -7.6% instructions; a loop over `bytes::load_u64` -27%.
+  `tools/release-signature-test.mjs` fails on any cross-module declaration that disagrees with
+  its definition.
+- **Release builds keep vector headers in registers across element stores (TBAA).** The LLVM lifter
+  writes the word and 4-byte element accessors (`rt_slot`, `rt_slot4`, `rt_at4` and their unchecked
+  forms) in place: the header's `data`/`len` loads carry a `header` type tag, and every load or store
+  through the element address - followed through registers and frame slots within a block - carries
+  an `element` tag. Safe Grail cannot point one into the other, so LLVM hoists the header loads out of
+  loops and vectorises them: bench/ecs goes from 3.45 G to 0.94 G instructions, sort from 7.53 G to
+  7.24 G.
+- `pool::join` takes its first branch as a generic `F: Fn<Send>() -> A`, so a closure given for it is
+  held in the frame and called directly (no heap environment). An explicit type-argument list may
+  leave out trailing parameters that only a callable bound names (`pool::join<u64, u64>(a, b)` still
+  compiles), and a closure given for a callable-bound parameter has its capture bounds checked as
+  the argument is taken, as an erased `Fn<Send>()` parameter's are.
+
+- **A standard generic is checked once per surface, not once per run.** The check
+  `emit_specializations` owes every template a run instantiates (a replay of its body with its own
+  parameters opaque, its text thrown away) is now a unit of the per-function store: what it asked of
+  the run - specialisations, drop helpers, effect records - is recorded and asked again on a hit,
+  under the unit key the store already uses. Dev compiler, an edited check: bench/iterchain.grl
+  0.234G -> 0.154G, hashmap 0.203G -> 0.158G, json 0.188G -> 0.133G. `GRAIL_TEMPLATE_MEMO=0` turns it
+  off; the fn-cache report counts template checks apart from bodies. Fixed on the way: a body that
+  asked for a `parallel_for_zip` adapter could be a unit whose replay did not ask again (the adapter
+  went missing from a warm build); it is no longer a unit.
+- **Faster release rebuilds, within a machine's memory.** After an edit to one function, a release
+  build re-optimises only the ~128 KB LLVM part that holds it and re-runs the ThinLTO backend for
+  that part alone; the unit archive is written in one step and the native part is assembled by the
+  compiler itself. `bench/hashmap.grl`, one function edited: 0.82 s -> 0.56 s median (cargo
+  --release on the Rust twin, measured alongside: 0.74 s). Part compiles are admitted against the
+  memory available, so a release build of the compiler fits a 16 GB machine instead of being
+  killed for memory.
+- Native backend: an f32 `+ - * /` with an f32 constant is one binary32 instruction (`mulss` with the
+  constant's bits) instead of widen, operate in f64 and round - the same result, since both operands
+  are binary32. bench/ecs_par.grl writes its updates as zip closure literals (no bounds checks).
+
+- After each landing the build host also runs the closure-passing fuzzer (`tools/fuzz-closures.mjs`, 400
+  cases, compile and run) next to the front-end fuzzer. `tools/land.sh --remote-status` reports both.
+- Fixed: when two or more sequences proved stable across one loop had their data pointers hoisted
+  before its head (optimize.grl item 6), only the last one's load was emitted, and the others'
+  accesses used an unset register (`damp(v, p)` with both slices proved crashed with SIGSEGV). Every
+  sequence of a loop head is now loaded. `loop-hoist-two-slices-one-head` and
+  `loop-hoist-three-slices-one-head` pin it on all three targets.
+
+- **UTF-8 validation skips ASCII eight bytes at a time** (`.text()`, string literals that need a
+  run-time check, `append_format` onto a string), as Rust's `from_utf8` does: aligned words with no
+  high bit set are passed whole, and the multi-byte checks are unchanged. No load is misaligned on
+  any target. A case covers every alignment and four rejections just past word boundaries.
+- The standard library claims `@no_block` where its bodies prove it: every `math` function, the
+  `hash` writers and `finish`, `u64[].sum`, `[u8].is_char_boundary` and `strings::utf8_width`.
+
+- New: `@no_block`, a checked effect: a function and everything it calls makes no blocking call - no
+  park (locks, channels, conditions, joins), sleep, file or socket I/O, or C function not declared
+  `extern "C" nonblocking`. Refusals name the chain (`nap -> sleep_ms -> f_host_sleep_ms ->
+  rt_sleep_for`). A check that can fail does not block (the failure ends the frame). Interface
+  format 12: the `effects` row and the `facts` record carry it.
+- `grail build --cpu=x86-64-v2|v3|v4|native` builds for an x86-64 CPU level. `@if target.features.NAME`
+  (avx2, fma, sse4_2, avx512f, ...) tests the level at compile time. At v3 and above, `mul_add` is one
+  `vfmadd231ps`/`pd` on both backends; the release build's IR carries `"target-cpu"`, which ThinLTO
+  needs. Other targets refuse `--cpu`.
+- png unfilters the common layout through addresses (`bytes::data_addr`, new) into an image sized
+  once, under the length guard that already bounds every row, instead of a push and a checked index
+  per byte. The 4K png: Grail-LLVM 6.44G -> 5.50G instructions (0.71 -> 0.61 s; stb_image 0.41 s),
+  Grail-native 17.7G -> 16.8G.
+- zstd's backward bit reader keeps a 64-bit window and reloads it about once per sequence instead
+  of assembling a word on every read: the 20 MB archive 11.9G -> 11.75G instructions on Grail-LLVM.
+- Closure bodies are proved like function bodies: a loop bound or a condition in a closure now
+  removes the bounds checks it covers. A closure literal written as `parallel_for_zip`'s argument
+  also starts knowing that every piece is as long as the first, so `v[i]` under `for i in p.len()`
+  has no check (a closure passed through a variable keeps it).
+- `mul_add` on f32 and f64 vectors: `a * b + c` per lane with one rounding, identical to C's `fma`
+  on every target and backend. AArch64 uses `fmla`, RISC-V `fmadd`, and baseline x86-64 an exact
+  software routine in the runtime, which is slow there.
+- Native Linux builds give every compiled function a symbol type and size (`.type @function`,
+  `.size`), so readelf, perf and debuggers name addresses inside them; the compiler's assembler
+  writes them as STT_FUNC with st_size.
 - **Inflate refills its bit buffer a word at a time** (`bytes::load_u64`, a new unaligned
   little-endian word read), instead of a byte per loop step, while eight input bytes remain. The 4K
   png: Grail-LLVM 7.47G -> 6.44G instructions (0.85 -> 0.71 s; libpng 0.41 s, stb_image 0.41 s),
   Grail-native 19.8G -> 17.7G.
+- Bounds checks on decoder state: facts about the fields of a `&mut` record or a `mut` record
+  binding (`z.at < z.data.len()`) are kept until something can change that field - a write of the
+  path (`z.at += 1`), a mutable loan of it (`z.data.pop()`), or a call or method that receives `z`
+  itself. A loan of one field (`z.out.push(..)`) ends that field's facts only, so
+  `while z.at < z.data.len() { z.out.push(z.data[z.at]); z.at += 1; }` reads unchecked.
+
 - Bounds checks: an index `t & L` is at most `L`, so a table lookup through a mask that matches the
   table (`next[s & 511]` on a 512-entry table) needs no check. The loop-invariant pass runs only in
   a body `func()` compiles, where a failed kept fact can recompile the function; a closure body
   compiled elsewhere uses the plain kill.
 
+- **A killed `grail build`/`grail check` leaves no compiler running.** The driver starts each module's
+  compiler run with `GRAIL_PARENT=<its pid>`; on Linux the run's runtime asks for
+  `PR_SET_PDEATHSIG`/SIGKILL at startup and exits if the driver is already gone (getppid), and on
+  Windows the driver puts such a child in a job object that kills it when the driver's handle closes.
+  The variable is consumed, so the run's own children are not affected. A driver SIGKILLed by a
+  timeout, an editor or the OOM killer used to leave its module runs going as orphans (one ran 1h45m).
 - **Closures given for a generic `F` live in the frame (S6(A)).** A closure whose type is its own
   literal's - a local closure, or one passed for a callable-bound parameter - is now held as its
   environment's words in the caller's frame, copied on a move and dropped in place, and called
@@ -462,6 +555,10 @@
   through code pointers and were kept unoptimised after lifting them raced on the thread pointer.
   That race is fixed (every thread-pointer read is now an opaque one), and
   alloc-threads-pool-results-freed-by-waiter passes 50 runs of 50.
+- The front-end fuzzer's baseline check skips a fixture marked `fuzz: refused` on its first line:
+  the 21 inputs only rejection cases compile (`tests/interfaces/strictgen*.grl`, the visibility and
+  inherent-method refusals, ...) carry the marker, so a refusal they are written to produce is no
+  longer reported as a regression.
 
 - **The optimiser inlines small functions in ordinary builds again.** A small leaf (at most 24
   instructions, no call but a failure exit) was only inlined when it carried no statement-position
@@ -853,6 +950,7 @@
   push per iteration, no `break` or `continue` - has `v.len == n` after the loop, so a later
   `for i in n { v[i] }` indexes without a check. The ECS benchmark's update loop loses all 18 of its
   checks. A push inside a branch, an early exit, or a vector that was not empty states nothing.
+- Added: wide-character paths on Windows. Every file and process entry point is now the `-W` one - `CreateFileW`, `CreateDirectoryW`, `DeleteFileW`, `RemoveDirectoryW`, `GetFileAttributesW`, `GetCurrentDirectoryW`, `GetModuleFileNameW`, `CreateProcessW`, `GetCommandLineW`, `GetEnvironmentStringsW`/`FreeEnvironmentStringsW` - so a file name outside the system code page is no longer mangled into the ANSI code page. One convention holds it together: every entry point in `compiler/os-windows.grl` takes and returns UTF-8, and `rt_win_wide`/`rt_win_utf8_of` convert at the FFI boundary in a fixed 128 KiB arena (five 16 KiB slots, no user allocation), so no call site converts by hand. The encoder refuses invalid UTF-8 with `EINVAL` instead of replacing bytes - overlong forms, bare continuation bytes, truncated sequences, encoded surrogates and code points above U+10FFFF - and encodes a code point past U+FFFF as the surrogate pair UTF-16 requires; text the OS hands back with an unpaired surrogate becomes U+FFFD in the one inbound helper, because refusing `argv[0]` would leave a process with no arguments. `CreateProcessW` gets the MSVC quoting rules applied to UTF-16 units (`rt_win_quote_w`/`rt_win_split_w`), so an argument survives the trip in both directions, and its environment block is UTF-16 with `CREATE_UNICODE_ENVIRONMENT` - without that flag Windows reads a non-NULL block as ANSI and the child sees an empty environment. `host::list_dir` works on Windows for the first time: a read-only open of a directory returns an enumeration backed by `FindFirstFileW`, and `rt_syscall(217)` rewrites the find results into the `dirent64` stream the portable decoder already parses, as the Darwin module does for `getdirentries64`. `GetModuleFileNameW` also wires `host::exe_path` (it answered nothing before). Six dead Win32 import declarations are gone with their entries: `ExitThread`, `GetEnvironmentVariableA`, `SetFilePointerEx`, `FlushFileBuffers`, `MoveFileA` (no portable rename operation calls it) and `GetSystemTimeAsFileTime`. `tools/test-windows.mjs` now fails the suite if any case's object imports an ANSI entry point, and runs `win-unicode-paths` under Wine: Latin-1, CJK and emoji file names, a non-ASCII directory, a non-ASCII working directory and argument, and the `EINVAL` refusal. Design: *Text at the Win32 boundary* in docs/design/windows-backend.md. Redone on current main (2026-11-17): the metadata, rename, symbolic-link and redirected-spawn layer that landed after the first version moved to `GetFileAttributesExW`, `MoveFileExW`, `CreateSymbolicLinkW` and `CreateProcessW` too, pinned by `win-unicode-stat-rename` under Wine.
 
 - **Fixed: an LLVM-backend miscompile of a vector grown through its address.** A call handed `&mut v`
   receives the slot's address, not the header word, so the lifter did not count it as a call that

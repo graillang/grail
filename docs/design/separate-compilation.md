@@ -1250,6 +1250,43 @@ Measured on `bench/hashmap.grl` (fresh store): 1,235M -> 823M instructions; a co
 `main` changes 0.66 s -> 0.82 s (the warm ThinLTO link re-imports and re-optimises what the edit
 reaches), against 0.65 s for `cargo build --release` after the same edit of its twin.
 
+### The release edit cycle, and memory
+
+What a one-function edit costs in a release build, step by step (`bench/hashmap.grl`, release
+compiler, medians under load): the module's compiler run and lowering ~110 ms; its LLVM parts
+(`clang -O2 -flto=thin`, only the changed ~128 KB part, the rest are store hits by text) ~80 ms;
+the unit archive (native part + parts, one `llvm-ar` with no symbol table) ~30 ms; the link
+~170 ms, of which the ThinLTO backend of the one changed part is ~45 ms and importing the bodies
+it calls from other modules most of the rest. The native part is assembled by `grail asm` inside
+the compiler run, as in a development build. Measured interleaved with `cargo build --release`
+after the same edit of the Rust twin: grail median 669 ms (min 334), cargo 737 ms (min 496).
+
+A part's `clang -O2` peaks at up to ~19 bytes of memory per byte of LLVM text (2.5 GB for a 134 MB
+part of the compiler's own module), so `llvm-compile` admits parts against three quarters of
+`MemAvailable` as well as the jobserver: a build fits a 16 GB machine by running fewer parts at
+once rather than being killed. The ThinLTO link stays under 0.9 GB at 8 backend jobs.
+
+### Cross-module calls are declared with the callee's own signature
+
+The LLVM lifter types a body by its signature fact (its argument words, and two result words when
+it returns a pair), so `bytes::load_u64` is `define i64 @f_bytes_load_u64(i64, i64)`. A run that
+calls it from another module had no fact for it and declared the uniform six-words-in,
+two-words-out form: the call links (the registers are the same) but LLVM, ThinLTO included, never
+inlines a call whose type differs from the definition's, so no cross-module call was ever inlined
+in a release build. The defining run now records what its lowering defined every lifted body with
+(`llvm::Lowered.sig_names`/`sig_codes`, after the address-taken and wrong-fact exclusions) in a
+`signatures` record of its interface (tag 22; for the runtime, in `runtime.facts`), written again
+after lowering; a run that reads it declares and calls those bodies with exactly that type
+(`fact_imported_signature`). Like the effect facts, the record is not surface: a body edit that
+changes a code reruns nothing, and a stale code only costs the inline, since every form is the same
+calls at the machine level. Interface format 13.
+
+`tools/release-signature-test.mjs` is the guard: it builds std-heavy programs per module with
+`--release` and fails on any declaration that disagrees with another module's definition (51
+declarations across hashmap, json, strings, iterchain and bintrees). Measured, release, callgrind:
+`bench/hashmap.grl` 803.5M -> 742.2M instructions; a loop over `bytes::load_u64` 46.1M -> 33.9M;
+xxhash with `read64` through `load_u64` 1.200G -> 1.121G.
+
 ### The frame constant, which was a latent miscompile
 
 The per-unit change found a real defect that had nothing to do with caching. A function's frame

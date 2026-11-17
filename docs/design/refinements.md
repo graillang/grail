@@ -390,7 +390,12 @@ Done (index checks in each benchmark's own functions, `tools/checks-native.mjs`)
   dropped for that loop and the function is compiled again (`c.retry`). No `continue` in the body;
   facts are put back after the loop only when it has no `break`. Sort 12 -> 7 checks in `main`.
 
-Next, in order: sort's remaining checks (facts in the right operand of `||`, and the merge step's
+- Facts on `&mut` record fields (`pv_field_tracked`, `pv_path_kills`, the path kill in
+  `pv_lent` and at field assignments); a byte read through a field's view consults the facts.
+
+Next (not started; the wrap-up order stopped work here): `--report checks` for release builds
+(count rt_fail/rt_trap sites per function in the LLVM-optimised module); sieve's loop-carried
+bound for `j += i`; sort's remaining checks (facts in the right operand of `||`, and the merge step's
 `else` branch); sieve (the clamp `if hi > n { hi = n }`, `tmp := v.copy()` length equality,
 lengths equal across the v/tmp swap - this needs a loop invariant: the body reassigns both vectors,
 so today's loop kill drops their length facts at the head); sieve's `j += i` overflow (a

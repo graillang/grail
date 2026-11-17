@@ -10,6 +10,7 @@
 // status and signal, the failed assertion), then a stable summary line
 // `passed X failed Y skipped Z`. `--update` rewrites the expectations of the selected cases that
 // differ, and only when it is asked for.
+import { assertNoDuplicateKeys } from './case-keys.mjs';
 import { readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync, existsSync, copyFileSync } from 'node:fs';
 import { join, basename, resolve, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -209,6 +210,55 @@ function pinText(pin) {
 // ---- one case --------------------------------------------------------------------------------
 // `observed` is filled in as the case runs, so a failure report can show the actual values even
 // when the assertion that failed only named one of them.
+// The body edits of the identity mode (see its use): the text of the last function whose body has
+// a statement, edited, or nothing when the file has none.
+function mutations(text) {
+  const bodies = [...text.matchAll(/\n[ \t]*(?:pub )?fn [A-Za-z_]\w*[^{;]*\{\n/g)];
+  if (bodies.length < 2) return [];
+  const last = bodies[bodies.length - 1];
+  const at = last.index + last[0].length;
+  const rest = text.slice(at);
+  const out = [];
+  const literal = rest.match(/(?<![\w.])(\d+)(?![\w.])/);
+  if (literal && literal.index < rest.indexOf('\n}')) {
+    out.push(['a literal', text.slice(0, at) + rest.slice(0, literal.index) + String(Number(literal[1]) + 1) + rest.slice(literal.index + literal[1].length)]);
+  }
+  out.push(['an added statement', `${text.slice(0, at)}    zz_added := 3;\n${rest}`]);
+  out.push(['an error', `${text.slice(0, at)}    zz_not_a_name_anywhere();\n${rest}`]);
+  return out;
+}
+function proveMutations(test, files, directory, options) {
+  const first = files[0];
+  if (!first || !first.endsWith('.grl')) return 0;
+  const original = readFileSync(first, 'utf8');
+  const edits = mutations(original);
+  if (edits.length === 0) return 0;
+  const edit = join(directory, 'edit.grl');
+  const list = [edit, ...files.slice(1)];
+  const store = join(directory, 'units-edit');
+  const run = withStore => {
+    const extra = [...options.extra, ...(withStore ? ['--fn-cache', store, '--fn-cache-id', 'unit-identity'] : [])];
+    try {
+      compileProgram(compiler, list, directory, { ...options, name: 'edit', extra });
+      return { ok: true, text: readFileSync(join(directory, 'edit.s')) };
+    } catch (error) {
+      const said = String(error?.message ?? error).split('\n').slice(1).filter(line => !line.startsWith('grail: fn-cache')).join('\n');
+      return { ok: false, text: Buffer.from(said) };
+    }
+  };
+  writeFileSync(edit, original);
+  run(true);
+  let done = 0;
+  for (const [what, text] of edits) {
+    writeFileSync(edit, text);
+    const viaRecord = run(true);
+    const fresh = run(false);
+    assert.equal(viaRecord.ok, fresh.ok, `${test.name}: ${what}: through the body record the compile ${viaRecord.ok ? 'succeeds' : 'fails'}, without it it ${fresh.ok ? 'succeeds' : 'fails'}\n${viaRecord.text}\n---\n${fresh.text}`);
+    assert.ok(viaRecord.text.equals(fresh.text), `${test.name}: ${what}: through the body record the ${fresh.ok ? 'assembly' : 'diagnostics'} differ (${describeDifference(fresh.text, viaRecord.text)})`);
+    done += 1;
+  }
+  return done;
+}
 // Where two assemblies first differ, as the two lines there.
 function describeDifference(a, b) {
   let at = 0;
@@ -435,7 +485,13 @@ function runCase(test, position, context) {
           debugChecked = 1;
         }
       }
-      result.units = { ...empty.account, debug: debugChecked };
+      // An edited body through the module's body record (docs/design/incremental-compilation.md,
+      // "Reusing a module's run"): the case's first file is copied, compiled into a store of its own,
+      // and then one body is edited three ways - a literal, an added statement, an error. Each edit
+      // is compiled with the store, where every other body comes from the record, and without one,
+      // and the two must agree: the same assembly, or the same diagnostics and the same status.
+      const mutated = proveMutations(test, files, directory, { target, overflow: test.overflow ?? 'checked', runtime, osRuntime, extra: [...caseRoots, ...(test.flags ?? [])] });
+      result.units = { ...empty.account, debug: debugChecked, mutated };
       result.outcome = 'pass';
       return result;
     }
@@ -593,14 +649,14 @@ function stage(context) {
 
 // Runs the selection in this process. The report is a value: a --jobs parent merges one per stripe.
 function runSelection(options, context) {
-  const report = { passed: 0, failed: 0, skipped: 0, resumed: 0, failures: [], units: { hits: 0, filed: 0, kept: 0, debug: 0, programs: 0, why: {} } };
+  const report = { passed: 0, failed: 0, skipped: 0, resumed: 0, failures: [], units: { hits: 0, filed: 0, kept: 0, debug: 0, mutated: 0, programs: 0, why: {} } };
   for (const [position, test] of context.cases.entries()) {
     if (hostOnly(test, options.target)) { report.skipped++; continue; }
     if (!selected(test, position, options)) continue;
     const marker = join(context.markers, test.name);
     if (options.resume && existsSync(marker)) { report.resumed++; continue; }
     const result = runCase(test, position, context);
-    if (result.units) { report.units.programs++; for (const field of ['hits', 'filed', 'kept', 'debug']) report.units[field] += result.units[field]; for (const [rule, n] of Object.entries(result.units.why ?? {})) report.units.why[rule] = (report.units.why[rule] ?? 0) + n; }
+    if (result.units) { report.units.programs++; for (const field of ['hits', 'filed', 'kept', 'debug', 'mutated']) report.units[field] += result.units[field] ?? 0; for (const [rule, n] of Object.entries(result.units.why ?? {})) report.units.why[rule] = (report.units.why[rule] ?? 0) + n; }
     if (result.outcome === 'pass') {
       report.passed++;
       if (options.resume) writeFileSync(marker, '');
@@ -618,7 +674,7 @@ function summaryLine(options, report, updated, filtered) {
   if (updated) parts.push(`updated ${updated}`);
   if (report.resumed) parts.push(`resumed ${report.resumed}`);
   if (filtered) parts.push(`not-selected ${filtered}`);
-  if (report.units?.programs) parts.push(`unit-identity: ${report.units.programs} programs compiled three ways, ${report.units.filed} units filed and replayed, ${report.units.kept} bodies not units, ${report.units.debug} also with --debug; rules that kept a body out: ${Object.entries(report.units.why).map(([rule, n]) => `${rule} ${n}`).join(', ') || 'none'}`);
+  if (report.units?.programs) parts.push(`unit-identity: ${report.units.programs} programs compiled three ways, ${report.units.filed} units filed and replayed, ${report.units.kept} bodies not units, ${report.units.debug} also with --debug, ${report.units.mutated} body edits through the body record; rules that kept a body out: ${Object.entries(report.units.why).map(([rule, n]) => `${rule} ${n}`).join(', ') || 'none'}`);
   return `${options.target}: ${parts.join(' ')}`;
 }
 
@@ -680,6 +736,8 @@ try {
   console.error(`test-native: ${error?.message ?? error}`);
   process.exit(2);
 }
+// A repeated key would silently fuse two cases (JSON.parse keeps the last): refuse the file instead.
+assertNoDuplicateKeys(join(root, 'tests/native-cases.json'));
 const cases = JSON.parse(readFileSync(join(root, 'tests/native-cases.json'), 'utf8'));
 // Two cases with one name would run one and silently shadow the other: a clean git merge can add the
 // same case on both sides at different places, which merge-cases never sees.
@@ -730,7 +788,7 @@ if (!isChild && options.jobs > 1) {
     childArgv.push(argv[i]);
   }
   const stripes = await Promise.all(Array.from({ length: options.jobs }, (_, index) => spawnStripe(options, childArgv, index + 1, compiler)));
-  const merged = { passed: 0, failed: 0, skipped: 0, resumed: 0, failures: [], units: { hits: 0, filed: 0, kept: 0, debug: 0, programs: 0, why: {} } };
+  const merged = { passed: 0, failed: 0, skipped: 0, resumed: 0, failures: [], units: { hits: 0, filed: 0, kept: 0, debug: 0, mutated: 0, programs: 0, why: {} } };
   const updates = [];
   let crashed = 0;
   for (const stripe of stripes) {
@@ -740,7 +798,7 @@ if (!isChild && options.jobs > 1) {
       continue;
     }
     for (const field of ['passed', 'failed', 'skipped', 'resumed']) merged[field] += stripe.report[field];
-    for (const field of ['hits', 'filed', 'kept', 'debug', 'programs']) merged.units[field] += stripe.report.units?.[field] ?? 0;
+    for (const field of ['hits', 'filed', 'kept', 'debug', 'mutated', 'programs']) merged.units[field] += stripe.report.units?.[field] ?? 0;
     for (const [rule, n] of Object.entries(stripe.report.units?.why ?? {})) merged.units.why[rule] = (merged.units.why[rule] ?? 0) + n;
     merged.failures.push(...stripe.report.failures);
     updates.push(...(stripe.report.updates ?? []));

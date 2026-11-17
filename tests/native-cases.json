@@ -17264,7 +17264,7 @@
     "name": "fuzz-extern-unmatched-closer-is-a-diagnostic",
     "source": "extern \"C\" fn f(x: u64) > u64;\nfn main() {}\n",
     "reject": true,
-    "diagnostic": "expected `,`, found `(`"
+    "diagnostic": "expected `;`, found `>`"
   },
   {
     "name": "fuzz-file-ending-in-a-comment-without-newline",
@@ -18859,5 +18859,288 @@
     ],
     "stdout": "2000\n4 14\n12\n2 33 63\n18\n",
     "note": "views as two words held in frame words: a static string viewed per call, a sub-slice returned in two registers, views stored in a record and in a vector, slices of slices - no rt_slice/rt_view_record per view"
+  },
+  {
+    "name": "loop-hoist-two-slices-one-head",
+    "source": "// Two slices proved in range in one loop (nf2, /root/fixed_arrays): both data pointers are loaded\n// before the loop head; only one was, and the other access used an unset register (SIGSEGV).\nfn damp(v: &mut [f32], p: &mut [f32] where p.len() == v.len()) {\n    for i in v.len() {\n        v[i] = v[i] * 0.5;\n        p[i] = p[i] + v[i];\n    }\n}\nfn main() {\n    n := 4096;\n    mut a = f32[1.0; n];\n    mut b = f32[0.0; n];\n    damp(&mut a[0: n], &mut b[0: n]);\n    println(b[7]);\n}\n",
+    "stdout": "0.5\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "loop-hoist-three-slices-one-head",
+    "source": "// Three slices with proved accesses share one loop head: each needs its data pointer loaded before\n// the loop (optimize.grl item 6), not only the last one recorded for that head.\nfn mix(a: &mut [f64], b: &mut [f64] where b.len() == a.len(), c: &mut [f64] where c.len() == a.len()) {\n    for i in a.len() {\n        a[i] = a[i] * 2.0;\n        b[i] = b[i] + a[i];\n        c[i] = c[i] + b[i] * 0.5;\n    }\n}\nfn main() {\n    n := 1000;\n    mut a = f64[1.0; n];\n    mut b = f64[0.5; n];\n    mut c = f64[0.0; n];\n    mix(&mut a[0: n], &mut b[0: n], &mut c[0: n]);\n    println(a[3]);\n    println(b[999]);\n    println(c[500]);\n}\n",
+    "stdout": "2\n2.5\n1.25\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "utf8-word-scan-every-alignment",
+    "files": [
+      "compiler/tests/utf8_word_scan.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "utf8 scan: 200 ok\n"
+  },
+  {
+    "name": "utf8-reject-continuation-after-9-ascii",
+    "source": "fn main() { mut b = u8[]; for i in 9 { b.push(97); } b.push(128); for i in 9 { b.push(98); } println(b.text()); }\n",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "utf8-reject-truncated-after-16-ascii",
+    "source": "fn main() { mut b = u8[]; for i in 16 { b.push(97); } b.push(195); for i in 9 { b.push(98); } println(b.text()); }\n",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "utf8-reject-surrogate-after-23-ascii",
+    "source": "fn main() { mut b = u8[]; for i in 23 { b.push(97); } b.push(237); b.push(160); b.push(128); for i in 9 { b.push(98); } println(b.text()); }\n",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "utf8-reject-ff-after-8-ascii",
+    "source": "fn main() { mut b = u8[]; for i in 8 { b.push(97); } b.push(255); for i in 9 { b.push(98); } println(b.text()); }\n",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "fx-no-block-accepted",
+    "note": "`@no_block` accepts indexing (a failure ends the frame, so the failure path's report and park are past the guarantee) and a C function declared `nonblocking` (docs/design/effects.md, \"Blocking\").",
+    "source": "extern \"C\" nonblocking lib \"c\" fn labs(x: i64) -> i64;\n@no_block\nfn pick(v: &u64[], i: u64) -> u64 {\n    return v[i] + v.len();\n}\n@no_block\nfn mag(x: i64) -> i64 {\n    mut r: i64 = 0;\n    unsafe {\n        r = labs(x);\n    }\n    return r;\n}\nfn main() {\n    v := u64[1, 2, 3];\n    println(pick(&v, 1));\n    println(mag(i64(0) - 4));\n}\n",
+    "stdout": "5\n4\n"
+  },
+  {
+    "name": "fx-no-block-try-acquire-accepted",
+    "note": "A non-parking operation - `try_acquire` - is accepted under `@no_block`.",
+    "source": "use sync;\n@no_block\nfn grab(s: &sync::Semaphore) -> u64 {\n    got := s.try_acquire(1);\n    if got.is_some() {\n        return 1;\n    }\n    return 0;\n}\nfn main() {\n    s := sync::semaphore(1);\n    println(grab(&s));\n}\n",
+    "modules": [
+      "lib/sync.grl",
+      "lib/thread.grl",
+      "lib/time.grl",
+      "lib/rc.grl"
+    ],
+    "stdout": "1\n"
+  },
+  {
+    "name": "fx-no-block-sleep-refused",
+    "note": "A sleep blocks: the refusal names the chain to the runtime's sleep.",
+    "source": "use time;\n@no_block\nfn nap() {\n    time::sleep_ms(1);\n    return ();\n}\nfn main() {\n    nap();\n}\n",
+    "modules": [
+      "lib/time.grl",
+      "lib/core.grl"
+    ],
+    "reject": true,
+    "diagnostic": "`@no_block` function `nap` can block: it calls nap -> sleep_ms -> f_host_sleep_ms -> rt_sleep_for"
+  },
+  {
+    "name": "fx-no-block-print-refused",
+    "note": "Printing writes to a file descriptor, which can block.",
+    "source": "@no_block\nfn say(x: u64) {\n    println(x);\n    return ();\n}\nfn main() {\n    say(1);\n}\n",
+    "reject": true,
+    "diagnostic": "`@no_block` function `say` can block: it calls say -> rt_print_number -> rt_write_all"
+  },
+  {
+    "name": "fx-no-block-c-call-refused",
+    "note": "A C function not declared `nonblocking` may block.",
+    "source": "extern \"C\" lib \"c\" fn labs(x: i64) -> i64;\n@no_block\nfn mag(x: i64) -> i64 {\n    mut r: i64 = 0;\n    unsafe {\n        r = labs(x);\n    }\n    return r;\n}\nfn main() {\n    println(mag(i64(0) - 4));\n}\n",
+    "reject": true,
+    "diagnostic": "the target is `labs`, a C function not declared `nonblocking`"
+  },
+  {
+    "name": "fx-no-block-stdlib-claims",
+    "note": "The standard library's `@no_block` claims - every `math` function, the `hash` writers and `finish`, `u64[].sum`, `[u8].is_char_boundary`, `strings::utf8_width` - are proved, and a `@no_block` frame function can call them all.",
+    "source": "use math;\nuse hash;\nuse vecs;\nuse strings;\n@no_block\nfn frame(x: f64, v: &u64[], t: &[u8]) -> u64 {\n    a := math::sin(x) + math::cos(x) + math::sqrt(x) + math::pow(x, 2.5) + math::atan2(x, 1.0) + math::ln(x + 1.0) + math::exp(x) + math::log10(x + 1.0) + math::log2(x + 1.0) + math::tan(x) + math::atan(x) + math::powi(x, 3) + math::abs(x) + math::floor(x) + math::ceil(x) + math::round(x);\n    mut h = hash::hasher(1, 2);\n    hash::write_num(&mut h, v.sum());\n    hash::write_byte(&mut h, 7);\n    hash::write_bytes(&mut h, t);\n    w := strings::utf8_width(t[0]);\n    b := t.is_char_boundary(1);\n    mut r = hash::finish(h) + w;\n    if b {\n        r = r + 1;\n    }\n    if a > 0.0 {\n        r = r + 1;\n    }\n    return r;\n}\nfn main() {\n    v := u64[1, 2, 3];\n    t := \"h\u00e9llo\".text();\n    println(frame(0.5, &v, view(t)) != 0);\n}\n",
+    "modules": [
+      "lib/math.grl",
+      "lib/vecs.grl",
+      "lib/hash.grl",
+      "lib/strings.grl",
+      "lib/iter.grl",
+      "lib/order.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "true\n"
+  },
+  {
+    "name": "parallel-for-zip-literal-proves-every-index",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a closure literal written as parallel_for_zip's argument starts knowing every piece is as long as the first (vv.len == pp.len), so neither pp[i] nor vv[i] is checked under `for i in pp.len()`; closure bodies are proved like function bodies",
+    "source": "fn main() {\n    n := 4096;\n    mut p = f32[0.0; n];\n    v := f32[1.0; n];\n    parallel_for_zip(512, |pp: &mut [f32], vv: &[f32]| -> unit {\n        for i in pp.len() {\n            pp[i] = pp[i] + vv[i];\n        }\n    }, &mut p[0: n], &v[0: n]);\n    println(p[100]);\n}\n",
+    "stdout": "1\n",
+    "asmAbsent": [
+      {
+        "in": "f_.closure_main_c0",
+        "text": "call rt_fail"
+      },
+      {
+        "in": "f_.closure_main_c0",
+        "text": "call rt_trap"
+      }
+    ]
+  },
+  {
+    "name": "parallel-for-zip-closure-value-keeps-check",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a closure passed through a variable could be called elsewhere, so it gets no entry fact: vv[i] keeps its check (pp[i] is proved by its own loop)",
+    "source": "fn main() {\n    n := 4096;\n    mut p = f32[0.0; n];\n    v := f32[1.0; n];\n    step := |pp: &mut [f32], vv: &[f32]| -> unit {\n        for i in pp.len() {\n            pp[i] = pp[i] + vv[i];\n        }\n    };\n    parallel_for_zip(512, step, &mut p[0: n], &v[0: n]);\n    println(p[100]);\n}\n",
+    "stdout": "1\n",
+    "asm": [
+      {
+        "in": "f_.closure_main_c0",
+        "text": "call rt_trap"
+      }
+    ]
+  },
+  {
+    "name": "closure-body-keeps-enclosing-facts",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a closure literal inside a loop is compiled with the prover's state of its own; the enclosing loop's facts survive it, so `v[i]` after the literal is still proved",
+    "source": "fn main() {\n    v := u64[1, 2, 3, 4];\n    mut t = 0;\n    for i in v.len() {\n        f := |x: u64| -> u64 x;\n        t = f(v[i]);\n    }\n    println(t);\n}\n",
+    "stdout": "4\n",
+    "asmAbsent": [
+      {
+        "in": "f_main_main",
+        "text": "call rt_trap"
+      }
+    ]
+  },
+  {
+    "name": "simd-mul-add-is-fused-and-exact",
+    "note": "mul_add (docs/design/simd.md, S4) on 200,000 f32 and 100,000 f64 lanes of random bits, edge values and c = -(a * b): the same bits as C's fmaf/fma (tests/simd/fma_reference.c) on every target and backend - NEON fmla and RISC-V fmadd, and on baseline x86-64 the runtime's software fused multiply-add.",
+    "files": [
+      "tests/simd/fma.grl"
+    ],
+    "stdout": "16182726256543843928\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "simd-mul-add-needs-float-lanes",
+    "source": "fn main() {\n    v := i32x4::splat(1);\n    println(v.mul_add(v, v).sum());\n}\n",
+    "reject": true,
+    "diagnostic": "`i32x4` has no method `mul_add`"
+  },
+  {
+    "name": "bce-field-mut-ref",
+    "source": "struct Z {\n    data: u8[],\n    at: u64,\n    out: u64[]\n}\nfn drain(z: &mut Z) -> u64 {\n    while z.at < z.data.len() {\n        z.out.push(u64(z.data[z.at]));\n        z.at += 1;\n    }\n    return z.out.len();\n}\nfn main() {\n    mut z = Z { data: u8[1, 2, 3, 4, 5], at: 1, out: u64[] };\n    println(drain(&mut z));\n}\n",
+    "stdout": "4\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asmAbsent": [
+      {
+        "in": "f_main_drain",
+        "text": "movq $1,%rdx\ncall rt_trap"
+      },
+      {
+        "in": "f_main_drain",
+        "text": "call rt_atb\n"
+      }
+    ],
+    "note": "facts on fields of a `&mut` record: `z.at < z.data.len` from the guard holds at `z.data[z.at]`; `z.out.push` lends `z.out` only, and `z.at += 1` writes `z.at` only, so the read is proved"
+  },
+  {
+    "name": "bce-field-mut-ref-pop-kept",
+    "source": "struct Z {\n    data: u8[],\n    at: u64,\n    out: u64[]\n}\nfn bad(z: &mut Z) -> u64 {\n    while z.at < z.data.len() {\n        z.data.pop()!;\n        z.out.push(u64(z.data[z.at]));\n        z.at += 1;\n    }\n    return z.out.len();\n}\nfn main() {\n    mut z = Z { data: u8[1, 2, 3, 4, 5], at: 2, out: u64[] };\n    println(bad(&mut z));\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "",
+    "stderr": [
+      "out of bounds"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "`z.data.pop()` lends `z.data`: its length fact ends, and the read keeps its check, which fires"
+  },
+  {
+    "name": "bce-field-mut-ref-call-kept",
+    "source": "struct Z {\n    data: u8[],\n    at: u64,\n    out: u64[]\n}\nfn shrink(z: &mut Z) {\n    z.data.pop()!;\n}\nfn bad(z: &mut Z) -> u64 {\n    while z.at < z.data.len() {\n        shrink(z);\n        z.out.push(u64(z.data[z.at]));\n        z.at += 1;\n    }\n    return z.out.len();\n}\nfn main() {\n    mut z = Z { data: u8[1, 2, 3, 4, 5], at: 2, out: u64[] };\n    println(bad(&mut z));\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "",
+    "stderr": [
+      "out of bounds"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "handing `z` itself to a call ends every fact about it: the read keeps its check, which fires"
+  },
+  {
+    "name": "bce-field-mut-ref-write-kept",
+    "source": "struct Z {\n    data: u8[],\n    at: u64,\n    out: u64[]\n}\nfn bad(z: &mut Z) -> u64 {\n    while z.at < z.data.len() {\n        z.at += 1;\n        z.out.push(u64(z.data[z.at]));\n    }\n    return z.out.len();\n}\nfn main() {\n    mut z = Z { data: u8[1, 2, 3], at: 0, out: u64[] };\n    println(bad(&mut z));\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "",
+    "stderr": [
+      "out of bounds"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "`z.at += 1` writes the path: the guard's `z.at < z.data.len` ends there, and the read after it in the same iteration keeps its check, which fires at z.at == 3"
+  },
+  {
+    "name": "truncated-extern-parameter-list",
+    "source": "extern \"C\" lib \"shim.o\" fn c_fadd(a: f64, b: f64) -> f64;\nextern \"C\" lib \"shim.o\" fn c_mix6(a: i32, b: i32, c:",
+    "note": "a file that ends inside an extern's parameter list is refused at the end of the file; the declaration pass's scan for `;` once spun past the end forever (fuzz-frontend hang 00053)",
+    "reject": true,
+    "diagnostic": "unexpected end of file"
+  },
+  {
+    "name": "f32-constant-op-is-binary32",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "an f32 operation with an f32 constant is the binary32 operation (`mulss` with the constant's bits), not widen, operate in f64 and round: exact for + - * / since both operands are binary32 (optimize::f32_const_ops); the checksum is the same bits",
+    "source": "// The parallel twin of bench/ecs.grl: the same million entities, the same hundred frames, the same\n// sum, with each frame's update run on the pool's workers through parallel_for_zip\n// (docs/design/simd-layout-parallel-loops.md 4.2). Every axis is one zip of its velocity and\n// position columns, cut into pieces of GRAIN entities - the same pieces on any number of workers,\n// and each entity is updated by exactly the arithmetic of ecs.grl, so the sum is the same bits.\n// GRAIL_WORKERS sets the worker count.\nconst GRAIN: u64 = 16384;\nconst DT: f32 = 0.016;\nconst DAMPING: f32 = 0.999;\nconst GRAVITY: f32 = 0.0981;\nfn main() {\n    n: u64 := 1000000;\n    mut px = f32[];\n    mut py = f32[];\n    mut pz = f32[];\n    mut vx = f32[];\n    mut vy = f32[];\n    mut vz = f32[];\n    mut x: u64 = 88172645463325252;\n    for i in n {\n        x = x ^ (x << 13);\n        x = x ^ (x >> 7);\n        x = x ^ (x << 17);\n        px.push(f32(i64(x % 1000)) * 0.5);\n        py.push(f32(i64((x >> 10) % 1000)) * 0.5);\n        pz.push(f32(i64((x >> 20) % 1000)) * 0.5);\n        vx.push(f32(i64((x >> 30) % 100)) * 0.01);\n        vy.push(f32(i64((x >> 40) % 100)) * 0.01);\n        vz.push(f32(i64((x >> 50) % 100)) * 0.01);\n    }\n    for frame in 100 {\n        // Each callback is a literal at the call, so its body knows `p.len == v.len` and indexes\n        // both without a check.\n        parallel_for_zip(GRAIN, |v: &mut [f32], p: &mut [f32]| -> unit {\n            for i in v.len() {\n                v[i] = v[i] * DAMPING;\n                p[i] = p[i] + v[i] * DT;\n            }\n        }, &mut vx[0: n], &mut px[0: n]);\n        parallel_for_zip(GRAIN, |v: &mut [f32], p: &mut [f32]| -> unit {\n            for i in v.len() {\n                v[i] = v[i] * DAMPING - GRAVITY * DT;\n                p[i] = p[i] + v[i] * DT;\n            }\n        }, &mut vy[0: n], &mut py[0: n]);\n        parallel_for_zip(GRAIN, |v: &mut [f32], p: &mut [f32]| -> unit {\n            for i in v.len() {\n                v[i] = v[i] * DAMPING;\n                p[i] = p[i] + v[i] * DT;\n            }\n        }, &mut vz[0: n], &mut pz[0: n]);\n    }\n    mut sum: f64 = 0.0;\n    for i in n {\n        sum = sum + f64(px[i]) + f64(py[i]) + f64(pz[i]);\n    }\n    println(\"{}\", sum);\n}\n",
+    "stdout": "751091934.7614092\n",
+    "asm": [
+      {
+        "in": "f_.closure_main_c0",
+        "text": "mulss %xmm1,%xmm0"
+      }
+    ],
+    "asmAbsent": [
+      {
+        "in": "f_.closure_main_c0",
+        "text": "mulsd"
+      }
+    ]
   }
 ]
