@@ -2428,16 +2428,20 @@ fn inline_candidate<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64) {
     mut used = 0;
     // rbx, rsp, rbp (outside slots) and r12..r15 must not appear.
     forbidden := 8 + 16 + 32 + 4096 + 8192 + 16384 + 32768;
+    dead := unreachable_lines(&o, prologue);
     for i in last {
-        if (prologue < i) & (o.del[i] == 0) {
+        if (prologue < i) & (o.del[i] == 0) & (dead[i] == 0) {
             op := o.op[i];
             if op == 101 {
-                if i + 1 != last {
+                if (i + 1 != last) && !site_directive(&o, view(s), i) {
                     return ();
                 }
             } else {
                 if op != 100 {
-                    count += 1;
+                    // A `leave` is not in the copy (the copy has no frame), so it is not counted.
+                    if op != 29 {
+                        count += 1;
+                    }
                     if 24 < count {
                         return ();
                     }
@@ -2540,7 +2544,7 @@ fn inline_candidate<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64) {
         }
     }
     for i in last {
-        if (prologue < i) & (o.del[i] == 0) & (i + 1 != last) {
+        if (prologue < i) & (o.del[i] == 0) & (dead[i] == 0) & (i + 1 != last) {
             op := o.op[i];
             if op == 30 {
                 app(&mut o.out, view("jmp .Lret\n"));
@@ -2573,6 +2577,39 @@ fn inline_candidate<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64) {
     exchange(&mut o.inl_rel, body);
     inl_file(&mut o, name, absolute, unit);
 }
+// The instructions after the prologue no path reaches: those after a `ret`, a `jmp` or a call that
+// does not return, up to the next label. A body's fall-off return (`xorq %rax,%rax; leave; ret` after
+// its last `return`) is the usual one. They are not part of an inlined copy, so they do not count
+// against its size either. 1 marks an unreachable instruction; directives are never marked.
+fn unreachable_lines<a>(o: (&a ir::Body), prologue: u64) -> u64[] {
+    last := o.op.len();
+    mut dead = u64[];
+    mut off = false;
+    for i in last {
+        op := o.op[i];
+        if op == 100 {
+            off = false;
+        }
+        if off && (op != 100) && (op != 101) && (o.del[i] == 0) {
+            dead.push(1);
+        } else {
+            dead.push(0);
+        }
+        if (prologue < i) && (o.del[i] == 0) && ((op == 30) || (op == 16)) {
+            off = true;
+        }
+    }
+    return dead;
+}
+// A statement's position or a failure's kind (`.gpos`, `.gposa`, `.gkind`): the site markers every
+// statement carries in a build with error locations. They do not keep a body from being inlined; any
+// other directive does. The copy keeps them - its positions made absolute when it is filed - so a
+// failure inside it reports the line it was written on, and inline_calls states the caller's
+// position again after the copy.
+fn site_directive<a, b>(o: (&a ir::Body), s: &b [u8], i: u64) -> bool {
+    a := o.ls[i];
+    return ir::at(view(s), a, view(".gpos ")) || ir::at(view(s), a, view(".gposa ")) || ir::at(view(s), a, view(".gkind "));
+}
 // Where the lines the inlining pass reads start, in `text[from..]`: a `call` and a unit marker.
 // Offsets are from the start of `text`.
 fn lines_of_interest<a, b>(text: &a [u8], from: u64, out: (&b mut u64[])) {
@@ -2588,6 +2625,8 @@ fn lines_of_interest<a, b>(text: &a [u8], from: u64, out: (&b mut u64[])) {
                 if (first == 99) && ir::at(view(text), a, view("call ")) {
                     out.push(a);
                 } else if (first == 46) && (i - a > 12) && ir::at(view(text), a, view(".grail_part ")) {
+                    out.push(a);
+                } else if (first == 46) && (ir::at(view(text), a, view(".gpos ")) || ir::at(view(text), a, view(".type "))) {
                     out.push(a);
                 }
             }
@@ -2609,6 +2648,10 @@ fn inline_calls<a, b>(o: (&a mut ir::Body), split: u64, marks: (&a mut u64[]), l
     mut next = 0;
     mut unit = u8[];
     mut uprefix = u8[];
+    mut position = u8[];
+    mut seen_units = u8[][];
+    mut seen_sites = u64[];
+    mut site_unit = u8[];
     // Only the lines that can matter are visited: the calls and the unit markers, whose offsets
     // were noted when the text was made (lines_of_interest). Everything between is copied.
     for at in lines.len() {
@@ -2643,11 +2686,26 @@ fn inline_calls<a, b>(o: (&a mut ir::Body), split: u64, marks: (&a mut u64[]), l
                             o.out.append(text[pend..a]);
                             pend = start;
                             emit_body(&mut o, k - 1, site, view(uprefix));
+                            // The caller's code after the copy is the caller's statement again.
+                            if position.len() != 0 {
+                                o.out.append(view(position));
+                                o.out.push(10);
+                            }
                             done = 1;
                             break;
                         }
                         k = o.inl_next[k - 1];
                     }
+                }
+            }
+            if (done == 0) && (text[a] == 46) {
+                // The position the copies in this function are followed by: the last statement
+                // marker of the function so far, none at a function's start.
+                if ir::at(view(text), a, view(".gpos ")) {
+                    position.clear();
+                    position.append(text[a..e]);
+                } else if ir::at(view(text), a, view(".type ")) {
+                    position.clear();
                 }
             }
             if done == 0 {
@@ -2666,9 +2724,12 @@ fn inline_calls<a, b>(o: (&a mut ir::Body), split: u64, marks: (&a mut u64[]), l
                         at += 1;
                     }
                     exchange(&mut uprefix, fresh_prefix);
-                    // A unit starts its own inline-site numbers, so one unit's text does not depend
-                    // on how many sites the units before it expanded.
-                    site = 0;
+                    // A unit has its own inline-site numbers, so one unit's text does not depend on
+                    // how many sites the units before it expanded. A unit can stand in the stream
+                    // more than once (a module's part, then its specialisations); its numbers carry
+                    // on where its previous part left them, or two copies would mint one label.
+                    site = unit_sites(&mut seen_units, &mut seen_sites, view(unit), site_unit.copy(), site);
+                    exchange(&mut site_unit, unit.copy());
                     o.out.append(text[pend..a]);
                     pend = a;
                     if split != 0 {
@@ -2687,6 +2748,33 @@ fn inline_calls<a, b>(o: (&a mut ir::Body), split: u64, marks: (&a mut u64[]), l
         }
     }
     o.out.append(text[pend..text.len()]);
+}
+// The inline-site count `unit` starts from: what its previous part reached, or 0. `left`/`count` is
+// the unit being left and the sites it reached, which is filed first.
+fn unit_sites<a, b>(units: (&a mut u8[][]), counts: (&a mut u64[]), unit: &b [u8], left: u8[], count: u64) -> u64 {
+    if left.len() != 0 {
+        at := unit_index(&units, view(left));
+        if at == units.len() {
+            units.push(left);
+            counts.push(count);
+        } else {
+            exchange(&mut counts[at], count);
+        }
+    }
+    at := unit_index(&units, unit);
+    if at == units.len() {
+        return 0;
+    }
+    return counts[at];
+}
+fn unit_index<a, b>(units: (&a u8[][]), unit: &b [u8]) -> u64 {
+    for i in units.len() {
+        u := &units[i];
+        if u.len() == unit.len() && ir::same_range(view(u), 0, unit.len(), unit) {
+            return i;
+        }
+    }
+    return units.len();
 }
 // `_i<unit prefix>_<site>` on every `.L` in the body: the site number disambiguates two copies of
 // one body, and the unit prefix keeps a body label without a prefix of its own (`.Lret`) apart from

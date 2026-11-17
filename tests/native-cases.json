@@ -1978,7 +1978,10 @@
     "name": "format-unprintable-value",
     "source": "enum E{A,B(u64)}fn main(){e:=E::B(1);println(\"{}\", e);}",
     "reject": true,
-    "diagnostic": ["`E` has no text form", "give the type a `show` method"]
+    "diagnostic": [
+      "`E` has no text form",
+      "give the type a `show` method"
+    ]
   },
   {
     "name": "method-calls-on-fields",
@@ -6836,7 +6839,7 @@
   },
   {
     "name": "runtime-error-backtrace",
-    "source": "fn get(v: &u64[], i: u64) -> u64 {\n    return v[i];\n}\nfn pick(v: &u64[], n: u64) -> u64 {\n    return get(v, n);\n}\nfn main() -> u64 {\n    v := u64[1, 2, 3];\n    println(pick(&v, 7));\n    return 0;\n}\n",
+    "source": "fn get(v: &u64[], i: u64) -> u64 {\n    return v[i] + quiet(i);\n}\nfn pick(v: &u64[], n: u64) -> u64 {\n    return get(v, n);\n}\nfn main() -> u64 {\n    v := u64[1, 2, 3];\n    println(pick(&v, 7));\n    return 0;\n}\nfn quiet(i: u64) -> u64 {\n    if i == 1000 {\n        println(i);\n    }\n    return 0;\n}\n",
     "signal": "SIGABRT",
     "stderr": [
       "error: index 7 out of bounds for length 3\n --> ",
@@ -6849,7 +6852,7 @@
       "aarch64",
       "riscv64"
     ],
-    "note": "a failed check names its callers' call sites too, innermost first (native Linux, every target)",
+    "note": "a failed check names its callers' call sites too, innermost first (native Linux, every target). `get` calls a function that is not a leaf, so it is not inlined: a small leaf inlined into its caller reports its own line in the caller's frame",
     "backends": [
       "native"
     ]
@@ -7625,8 +7628,8 @@
   },
   {
     "name": "refinement-proved-entry",
-    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\nfn untaken(x: u64) -> u64 {\n    return x;\n}\n\nfn main() -> u64 {\n    println(take(16));\n    println(untaken(3));\n    return 0;\n}\n",
-    "stdout": "16\n3\n",
+    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    println(align);\n    return align;\n}\n\nfn untaken(x: u64) -> u64 {\n    return x;\n}\n\nfn main() -> u64 {\n    println(take(16));\n    println(untaken(3));\n    return 0;\n}\n",
+    "stdout": "16\n16\n3\n",
     "targets": [
       "x86_64"
     ],
@@ -7641,12 +7644,12 @@
       "f_main_untaken.proved",
       "call f_main_take\n"
     ],
-    "note": "a function whose parameters are refined carries a second entry; the prover routes the constant call to it, a function with no predicate carries none, and an unproved call keeps the checked entry"
+    "note": "a function whose parameters are refined carries a second entry; the prover routes the constant call to it, a function with no predicate carries none, and an unproved call keeps the checked entry. `take` prints, so it is not a leaf the optimiser would inline and the call stays visible"
   },
   {
     "name": "refinement-param-proved-binding",
-    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\nfn main() -> u64 {\n    n := 32;\n    println(take(n));\n    return 0;\n}\n",
-    "stdout": "32\n",
+    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    println(align);\n    return align;\n}\n\nfn main() -> u64 {\n    n := 32;\n    println(take(n));\n    return 0;\n}\n",
+    "stdout": "32\n32\n",
     "targets": [
       "x86_64"
     ],
@@ -7656,7 +7659,7 @@
     "asm": [
       "call f_main_take.proved"
     ],
-    "note": "a binding of a constant settles `align % 16 == 0` by divisibility, so the call enters past the check",
+    "note": "a binding of a constant settles `align % 16 == 0` by divisibility, so the call enters past the check. `take` prints, so it is not a leaf the optimiser would inline and the call stays visible",
     "asmAbsent": [
       "call f_main_take\n"
     ]
@@ -8292,8 +8295,7 @@
     "signal": "SIGABRT",
     "stderr": [
       "error: index 3 out of bounds for length 1\n --> ",
-      ":3:5\n = called from ",
-      ":9:5\n"
+      ":3:5\n"
     ],
     "targets": [
       "x86_64",
@@ -8303,7 +8305,7 @@
     "backends": [
       "native"
     ],
-    "note": "a bounds failure inside a `@no_alloc` function still says what failed, where, and who called it, written from the static report block"
+    "note": "a bounds failure inside a `@no_alloc` function still says what failed and where, written from the static report block. `third` is a small leaf inlined into `main`, so the line is its own and `main`'s frame is the one it reports in"
   },
   {
     "name": "effects-no-alloc-push-refused",
@@ -8466,12 +8468,16 @@
   },
   {
     "name": "wild-pointer-dies-by-sigsegv-without-an-overflow-report",
-    "targets": ["x86_64"],
+    "targets": [
+      "x86_64"
+    ],
     "note": "The stack-fault handler must not swallow a real memory fault: a null dereference is far from the stack pointer, so the handler restores the default disposition and the process dies of SIGSEGV with nothing on stderr. Needs libc, so it runs on x86_64 only (the cross targets link without one).",
     "source": "// A genuine memory fault: libc's strlen dereferences a null pointer. The fault address is\n// nowhere near the stack pointer, so the stack-fault handler must put the default disposition\n// back and let the process die of SIGSEGV exactly as it does with no handler installed - a\n// handler that reported a wild pointer as a stack overflow would hide real bugs.\nextern \"C\" lib \"c\" as \"strlen\" fn c_strlen(s: CPtr) -> u64;\nfn main() {\n    println(\"before\");\n    mut n = 0;\n    unsafe {\n        n = c_strlen(cnull());\n    }\n    println(n);\n}\n",
     "stdout": "before\n",
     "signal": "SIGSEGV",
-    "stderrAbsent": ["stack overflow"]
+    "stderrAbsent": [
+      "stack overflow"
+    ]
   },
   {
     "name": "deep-recursion-that-ends-is-unaffected",
@@ -9451,7 +9457,7 @@
       "lib/core.grl",
       "lib/iter.grl"
     ],
-    "stdout": "5\n4\ng\u00e4ns\nab\nnot valid UTF-8 at byte 1\ng\nnot a character boundary at 2\ntrue\ngg\u00e4ns\nx\u00e4ns\ntrue\nHELLO\nhello\nno case mapping for code point 228 (ASCII only)\n4\n228\n5\ntrue\nsafe\ndone\n"
+    "stdout": "5\n4\ngäns\nab\nnot valid UTF-8 at byte 1\ng\nnot a character boundary at 2\ntrue\nggäns\nxäns\ntrue\nHELLO\nhello\nno case mapping for code point 228 (ASCII only)\n4\n228\n5\ntrue\nsafe\ndone\n"
   },
   {
     "name": "utf8-fuzz-construction-invariant",
