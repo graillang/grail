@@ -1,5 +1,15 @@
 ## Unreleased
 
+- **A fork wakes a worker only when none is searching.** Idle workers look for work a little longer
+  before they sleep, and a fork wakes a sleeping worker only when no worker is still looking. In a
+  join the forker usually takes its own fork back, so the old rule (a futex wake per fork whenever
+  any worker slept) cost two system calls per join. 100,000 joins on a worker now make 15 wakes.
+- **A task's sleep no longer hangs when woken early.** A sleep woken before its deadline waited
+  again on a one-shot timer that might already have fired; it now re-arms for the time left. The
+  I/O task of `bench/frame.grl` hung on this about one run in four.
+- A Background job's cap slot is taken with the job's claim, so a slot cannot leak to a job
+  another stack runs.
+
 - **A failure allocates nothing, on every route.** A failed check inside a parallel job used to build
   its failure record and texts on the heap where it failed, so every `@no_alloc` function that
   could index, cast or unwrap was refused once the job-failure path existed. The failing stack now
