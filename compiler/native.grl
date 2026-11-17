@@ -1202,6 +1202,10 @@ struct C {
     reg_types: u64[],
     // The bodies applied from units, for the optimiser (ir::Known).
     known: ir::Known,
+    // The stream's instruction records (asm_x86::Rec), when the optimiser hands them over beside
+    // its text (docs/design/in-memory-ir.md, S3): the x86-64 ELF object is encoded from them.
+    // Empty: the text is assembled as it is.
+    recs: asm_x86::Rec,
     // The module's body record (dr_load, dr_fast): what the last run of this module applied for each
     // body, so a body whose text did not move is applied again before its signature is read. `dr`
     // is the record read at the start of the bodies pass, `dw` the one this run writes.
@@ -1746,12 +1750,30 @@ fn assemble_object<a, b>(c: (&a mut C), image: &b [u8]) -> asm_x86::Result {
     if c.target == 3 {
         return asm_x86::assemble_for(3, copy_bytes(view(image)));
     }
+    // x86-64 ELF: from the stream's instruction records when it came with them. Rows read back
+    // from the text (asm_x86::records_of) are not taken instead: reading the text into rows costs
+    // more than encoding it as it is read (syn4000: +9.5% cold, +38% after an edit).
+    // GRAIL_ASM_BY_RECORDS=1 takes the rows the text reads as, so the record path (and its units)
+    // can be checked on any build before the optimiser hands its own over.
+    mut rows = exchange(&mut c.recs, asm_x86::rec_new());
+    if (rows.mn.len() == 0) && (host::env(view("GRAIL_ASM_BY_RECORDS")).len() != 0) {
+        rows = asm_x86::records_of(0, copy_bytes(view(image)));
+    }
+    by_rows := rows.mn.len() != 0;
     if c.fn_id.len() == 0 {
+        if by_rows {
+            return asm_x86::assemble_records(0, &rows);
+        }
         return asm_x86::assemble(copy_bytes(view(image)));
     }
     mut pack_path = copy_bytes(view(c.object));
     push_bytes(&mut pack_path, view(".units"));
+    // Units keyed by records (4) or by text (3), which never match each other: a pack of the other
+    // kind is not read.
     mut header = copy_bytes(view("grail-units 3 "));
+    if by_rows {
+        header = copy_bytes(view("grail-units 4 "));
+    }
     push_bytes(&mut header, view(c.fn_id));
     header.push(10);
     mut previous = u8[];
@@ -1761,7 +1783,12 @@ fn assemble_object<a, b>(c: (&a mut C), image: &b [u8]) -> asm_x86::Result {
             previous.append(pack[header.len(): pack.len()]);
         }
     }
-    r := asm_x86::assemble_units(copy_bytes(view(image)), previous);
+    mut r = asm_x86::Result { object: u8[], error: u8[], units: u8[], replayed: 0, encoded: 0 };
+    if by_rows {
+        r = asm_x86::assemble_units_records(0, &rows, previous);
+    } else {
+        r = asm_x86::assemble_units(copy_bytes(view(image)), previous);
+    }
     if r.error.len() != 0 {
         return r;
     }
@@ -60567,6 +60594,7 @@ pub fn main() -> u64 {
         reg_blobs: u8[][],
         reg_types: u64[],
         known: ir::no_known(),
+        recs: asm_x86::rec_new(),
         dr_on: 0,
         dr_at: 0,
         dr_file: u64[],
