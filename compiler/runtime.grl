@@ -2293,13 +2293,20 @@ fn rt_read_file_blocking(path: u64) -> u64 {
         rt_abort();
     }
     fd := rt_syscall(2, name, 524288, 0);
-    rt_free(name);
     if rt_error(fd) {
         rt_abort();
     }
-    // The bytes go straight into the result's storage, which doubles when a read fills it.
+    // The bytes go straight into the result's storage, sized from the file (one more byte, so the
+    // read that finds the end needs no growth) and doubled if the file grew meanwhile.
+    mut hint = 4096;
+    fields := rt_new();
+    if rt_stat(name, 1, fields) == 0 {
+        hint = rt_at(fields, 2) + 1;
+    }
+    rt_drop_seq(fields);
+    rt_free(name);
     out := rt_new();
-    rt_reserveb(out, 65536);
+    rt_reserveb(out, hint);
     while 1 {
         have := raw_load(out + 8);
         if have == raw_load(out + 16) {
