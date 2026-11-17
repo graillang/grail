@@ -11,7 +11,7 @@ pub fn main() !void {
         a[i] = @as(f32, @floatFromInt(i % 7)) * 0.25;
         b[i] = @as(f32, @floatFromInt(i % 11)) * 0.5;
     }
-    for (0..20) |_| {
+    for (0..20) |round| {
         for (0..n) |i| {
             for (0..n) |j| {
                 var s: f32 = 0;
@@ -19,6 +19,7 @@ pub fn main() !void {
                 c[i * n + j] = s;
             }
         }
+        a[round] = c[round];
     }
     var sum: f64 = 0;
     for (c) |value| sum += value;

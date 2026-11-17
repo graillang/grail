@@ -1,0 +1,41 @@
+use iter;
+use host;
+// map(x * 2) -> filter(% 3 == 0) -> sum over 10M u64, three ways; best of five rounds each.
+fn via_callbacks(v: (&u64[]), f: Fn(u64) -> u64, keep: Fn(u64) -> bool) -> u64 {
+    mut s: u64 = 0;
+    for i in v.len() {
+        y := f(v[i]);
+        if keep(y) { s = wrapping_add(s, y); }
+    }
+    return s;
+}
+fn main() {
+    n := 10000000;
+    mut v = u64[];
+    for i in n { v.push(i); }
+    mut best_iter = 1000000;
+    mut best_loop = 1000000;
+    mut best_cb = 1000000;
+    mut a: u64 = 0;
+    mut b: u64 = 0;
+    mut d: u64 = 0;
+    for round in 5 {
+        t0 := host::now_ms();
+        a = iter::of(v.copy()).map(|x: u64| -> u64 x * 2).filter(|x: &u64| -> bool *x % 3 == 0).fold(0, |s: u64, x: u64| -> u64 wrapping_add(s, x));
+        t1 := host::now_ms();
+        mut s: u64 = 0;
+        for i in v.len() {
+            y := v[i] * 2;
+            if y % 3 == 0 { s = wrapping_add(s, y); }
+        }
+        b = s;
+        t2 := host::now_ms();
+        d = via_callbacks(&v, |x: u64| -> u64 x * 2, |y: u64| -> bool y % 3 == 0);
+        t3 := host::now_ms();
+        if t1 - t0 < best_iter { best_iter = t1 - t0; }
+        if t2 - t1 < best_loop { best_loop = t2 - t1; }
+        if t3 - t2 < best_cb { best_cb = t3 - t2; }
+    }
+    println("{} {} {}", a, b, d);
+    println("iter chain {} ms, hand loop {} ms, callbacks {} ms", best_iter, best_loop, best_cb);
+}

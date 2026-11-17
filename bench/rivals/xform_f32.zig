@@ -20,8 +20,11 @@ pub fn main() !void {
         yv = yv + 0.25;
         if (1.0 < yv) yv = 0;
     }
-    const a: f32 = 0.999;
-    for (0..200) |_| scaleAdd(x, y, a);
+    var a: f32 = 0.999;
+    for (0..200) |pass| {
+        scaleAdd(x, y, a);
+        a = 0.999 - x[pass] * 0.000000001;
+    }
     var sum: f64 = 0;
     for (x) |value| sum += value;
     try std.io.getStdOut().writer().print("{d}\n", .{sum});

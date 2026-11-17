@@ -18,9 +18,10 @@ fn main() {
         yv = yv + 0.25;
         if 1.0 < yv { yv = 0.0; }
     }
-    let a: f64 = 0.999;
-    for _ in 0..200 {
+    let mut a: f64 = 0.999;
+    for pass in 0..200 {
         scale_add(&mut x, &y, a);
+        a = 0.999 - x[pass] * 0.000000001;
     }
     let mut sum = 0f64;
     for i in 0..n {
