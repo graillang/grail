@@ -4586,10 +4586,22 @@ fn rt_job_wait(j: u64) -> u64 {
 fn rt_parallel_with(f1: u64, env1: u64, f2: u64, env2: u64, combine: u64) -> u64 {
     rt_jobs_sched();
     r := rt_job_fork(rt_job_call0, f1, env1, 0);
-    rt_region_enter();
-    second := rt_job_call0(f2, env2, 0);
+    // A green stack counts its region through the stack list (the fork is on it); only a thread
+    // that is not running a task keeps a count of its own (rt_region_step).
+    plain := rt_current() == 0;
+    if plain {
+        rt_region_enter();
+    }
+    mut second = 0;
+    if env2 == 0 {
+        second = raw_call2(f2, 0, 0);
+    } else {
+        second = raw_call2(f2, env2, 0);
+    }
     first := rt_job_join(r);
-    rt_region_leave();
+    if plain {
+        rt_region_leave();
+    }
     return raw_call2(combine, first, second);
 }
 fn rt_job_call0(f: u64, env: u64, unused: u64) -> u64 {
@@ -5331,6 +5343,11 @@ fn rt_jobs_create(workers: u64) -> u64 {
 // The scheduler, with its workers running: what every parallel call asks for first. In
 // thread-per-task mode this is where the workers start, the first time a job is forked.
 fn rt_jobs_sched() -> u64 {
+    // The common case, once everything is running: one load (green mode never needs the second).
+    made := raw_atomic_load(raw_state() + 72);
+    if (made != 0) && (raw_load(raw_state() + 88) == 1) {
+        return made;
+    }
     s := rt_sched();
     if rt_task_threads() {
         j := raw_load(rt_state_jobs());
@@ -5362,7 +5379,9 @@ fn rt_job_carve(j: u64, list: u64, size: u64) -> u64 {
     return made;
 }
 fn rt_job_new() -> u64 {
-    w := rt_worker_self();
+    return rt_job_new_on(rt_worker_self());
+}
+fn rt_job_new_on(w: u64) -> u64 {
     mut r = 0;
     if w != 0 {
         r = raw_load(w + 240);
@@ -5409,7 +5428,8 @@ fn rt_job_stack() -> u64 {
     if t == 0 {
         return 0;
     }
-    if rt_task_threads() && (raw_load(t + 104) != 3) {
+    // The task mode is chosen before the first task exists (rt_sched), so a plain load is enough.
+    if (raw_load(raw_state() + 88) == 2) && (raw_load(t + 104) != 3) {
         return 0;
     }
     return t;
@@ -5442,7 +5462,8 @@ fn rt_job_make(f: u64, a: u64, b: u64, c: u64, listed: u64) -> u64 {
 }
 // `class` 3: inherit (the parent's class, else the stack's, else Normal).
 fn rt_job_make_class(f: u64, a: u64, b: u64, c: u64, listed: u64, class: u64) -> u64 {
-    r := rt_job_new();
+    w := rt_worker_self();
+    r := rt_job_new_on(w);
     raw_store(r, f);
     raw_store(r + 8, a);
     raw_store(r + 16, b);
@@ -5483,7 +5504,6 @@ fn rt_job_make_class(f: u64, a: u64, b: u64, c: u64, listed: u64, class: u64) ->
         raw_store(r + 104, rt_now_us());
     }
     raw_atomic_store(r + 32, 1);
-    w := rt_worker_self();
     mut placed = 0;
     if w != 0 {
         placed = rt_deque_push(rt_job_deque(w, k), r);
@@ -5619,6 +5639,12 @@ fn rt_job_steal(s: u64, w: u64, class: u64) -> u64 {
 // task had registered as the waiter: that task is woken and then told so, because it must not carry
 // a wake that arrives after it has moved on.
 fn rt_job_exec(r: u64) -> u64 {
+    return rt_job_exec_by(r, 0);
+}
+// `own` is 1 when the forker runs its own job (claimed by pointer at its join): then nobody else
+// can be waiting on the record - the only waiter a job has is its forker - so publishing is a
+// release store, not a swap that would look for a waiter to wake.
+fn rt_job_exec_by(r: u64, own: u64) -> u64 {
     // An address in this frame (word 96): frames above it are the job's forker's, when the forker
     // ran the job itself; a failure's join site is looked for there (rt_job_fail).
     mut mark = 0;
@@ -5641,6 +5667,10 @@ fn rt_job_exec(r: u64) -> u64 {
         // A slot of the cap came free: Background work that waited for one may be queued with every
         // worker parked (a worker that could not take it parked), so it needs a wake now.
         rt_notify(raw_atomic_load(raw_state() + 72));
+    }
+    if own != 0 {
+        raw_atomic_store_release(r + 32, 3);
+        return 0;
     }
     return rt_job_publish(r);
 }
@@ -5775,7 +5805,7 @@ fn rt_job_await(r: u64) -> u64 {
                         rt_deque_push(rt_job_deque(w, raw_load(r + 112)), k);
                     }
                 }
-                rt_job_exec(r);
+                rt_job_exec_by(r, 1);
                 return 0;
             }
         } else {
