@@ -1142,6 +1142,23 @@ fn out_number<a>(o: (&a mut ir::Body), n: u64) {
 // labels; a bounds check that fails calls `rt_abort`, as the accessor would have.
 // This is lowering, not optimisation: `lower_leaf_calls` runs it on a build the optimiser skips.
 pub fn leaf_expansion<a, b>(out: (&a mut u8[]), op: u64, label: &b [u8], n: u64, more: u64, trap: u64) {
+    if op == 55 {
+        // rt_write: a byte store into a u8[]. The front end has already checked that the value is a
+        // byte (a u8, or the `< 256` check it emits before the call), so only the index is checked,
+        // and it fails as rt_atb's does.
+        out.append(view("cmpq 8(%rdi),%rsi\njb .L"));
+        out.append(label);
+        put_num(&mut out, n);
+        if trap != 0 {
+            out.append(view("\nmovq $1,%rdx\ncall rt_trap\n.L"));
+        } else {
+            out.append(view("\ncall rt_abort\n.L"));
+        }
+        out.append(label);
+        put_num(&mut out, n);
+        out.append(view(":\nmovq (%rdi),%rax\nmovb %dl,(%rax,%rsi,1)\n"));
+        return ();
+    }
     if op == 54 {
         out.append(view("movq %rsi,%rax\nimulq %rdx,%rax\naddq %rdi,%rax\n"));
         return ();
@@ -1393,7 +1410,7 @@ fn leaf_op<a>(name: &a [u8]) -> u64 {
     names := u8[][copy_text(view("rt_slot")), copy_text(view("rt_at")), copy_text(view("rt_len")), copy_text(view("rt_xchg")),
         copy_text(view("rt_atb")), copy_text(view("rt_push")), copy_text(view("rt_pushb")), copy_text(view("rt_slotu")),
         copy_text(view("rt_atbu")), copy_text(view("rt_slot4")), copy_text(view("rt_slot4u")), copy_text(view("rt_at4")),
-        copy_text(view("rt_slotw")), copy_text(view("rt_aslot")), copy_text(view("rt_aslotu"))];
+        copy_text(view("rt_slotw")), copy_text(view("rt_aslot")), copy_text(view("rt_aslotu")), copy_text(view("rt_write"))];
     for i in names.len() {
         if names[i].len() == name.len() {
             mut same = true;
@@ -1415,7 +1432,7 @@ fn emit_line<a, b>(o: (&a mut ir::Body), s: &b [u8], i: u64) {
         desc_expansion(&mut o, i);
         return ();
     }
-    if (39 < op) & (op < 55) {
+    if (39 < op) & (op < 56) {
         mut label = u8[];
         label.append(view("opt"));
         prefix := o.uprefix.copy();
@@ -1424,7 +1441,7 @@ fn emit_line<a, b>(o: (&a mut ir::Body), s: &b [u8], i: u64) {
         // Only the forms with labels number them, as they always have.
         mut n = 0;
         mut more = 0;
-        if op == 40 || op == 41 || op == 44 || op == 49 || op == 51 || op == 52 || op == 53 || op == 45 || op == 46 {
+        if op == 40 || op == 41 || op == 44 || op == 49 || op == 51 || op == 52 || op == 53 || op == 55 || op == 45 || op == 46 {
             n = ir::uniq_take(&mut o);
         }
         if op == 45 || op == 46 {
@@ -2716,8 +2733,11 @@ fn xmm_narrow<a, b>(o: (&a mut ir::Body), s: &b [u8], lsrc: (&u64[]), ldst: (&u6
     }
 }
 // The 90..97 form of an element accessor: 40 rt_slot, 41 rt_at, 44 rt_atb, 49 rt_slot4, 51 rt_at4,
-// 47 rt_slotu, 48 rt_atbu, 50 rt_slot4u.
+// 47 rt_slotu, 48 rt_atbu, 50 rt_slot4u; 55 rt_write is 89.
 fn desc_form(op: u64) -> u64 {
+    if op == 55 {
+        return 89;
+    }
     if op == 40 {
         return 90;
     }
@@ -2761,6 +2781,14 @@ fn desc_expansion<a>(o: (&a mut ir::Body), i: u64) {
         opt_label(&mut o);
         out_number(&mut o, n);
         app(&mut o.out, view(":\n"));
+    }
+    if op == 89 {
+        // The byte store: the value is in rdx (a failed check above overwrote it on a path that
+        // does not come back).
+        app(&mut o.out, view("movb %dl,(%"));
+        reg_name(&mut o, data);
+        app(&mut o.out, view(",%rsi,1)\n"));
+        return ();
     }
     if (op == 90) || (op == 95) {
         app(&mut o.out, view("leaq (%"));
@@ -2820,7 +2848,7 @@ fn desc_scan<a, c>(o: (&a ir::Body), desc: (&u64[]), f: (&c F), prologue: u64, d
         dwline.push(w);
         for i in last {
             op := o.op[i];
-            if (o.del[i] != 0) || !((op == 40) || (op == 41) || (op == 42) || (op == 44) || ((46 < op) && (op < 52))) {
+            if (o.del[i] != 0) || !((op == 40) || (op == 41) || (op == 42) || (op == 44) || ((46 < op) && (op < 52)) || (op == 55)) {
                 continue;
             }
             // The last write of rdi before the accessor, in the same straight line.
