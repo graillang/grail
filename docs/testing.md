@@ -314,3 +314,14 @@ ld's "cannot open ...grail.pending.o" inside `command()`, which read like a brok
 a collision. The intermediates now carry the process id and the final name is claimed by `rename`,
 which is atomic, so a second caller either finds the finished binary or builds its own copy and
 loses the race harmlessly. That is what makes `GATE_JOBS > 1` safe for the tool legs.
+
+## Landing on main
+
+Every branch lands through one queue: `bash tools/land.sh BRANCH` (or `just land BRANCH`). The branch
+must already contain `origin/main`: merge main into it and resolve the conflicts on the branch, where
+the owner knows both sides. The queue runs one landing at a time on exactly that tree: the build, the
+self-host fixed point, the x86_64 corpus in three shards and the tool suites, retrying a failure once
+on its own. Green fast-forwards main; anything else leaves main unchanged and says why. The emulated
+aarch64/riscv64 legs then run on the build host and are fixed forward. `tools/land-known.txt` lists
+the failures that do not block, each with an owner; it only ever shrinks. `tools/land.sh --status`
+shows the queue and the last landings.

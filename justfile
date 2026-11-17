@@ -196,3 +196,7 @@ lsp:
 # Language-server session over real pipes: handshake, diagnostics, definition, bad input.
 lsp-test:
     bun tools/lsp-test.mjs
+
+# Land a branch on main through the queue (see docs/testing.md, "Landing on main").
+land BRANCH:
+    GRAIL_LAND_REMOTE=${GRAIL_LAND_REMOTE:-} bash tools/land.sh {{BRANCH}}
