@@ -1038,11 +1038,12 @@ struct C {
     reg_types: u64[],
     // The bodies applied from units, for the optimiser (ir::Known).
     known: ir::Known,
-    // Armed (par_start) but not forked yet: the walk forks when it has compiled `par_threshold`
-    // bodies the store did not have (par_fork), over the source still ahead of it.
+    // Armed (par_start) but not forked yet: the walk forks when par_decide finds the rest worth it,
+    // over the source still ahead of it (par_fork).
     par_armed: u64,
-    par_misses: u64,
-    par_threshold: u64,
+    // When and where in the source the walk's first body began (par_decide), 0 before it.
+    par_t0: u64,
+    par_p0: u64,
     par_sizes: u64[],
     fn_hits: u64,
     fn_filed: u64,
@@ -17488,7 +17489,9 @@ fn fn_flags_now<a>(c: (&a mut C)) -> u8[] {
         if (i == 1 + c.arg_offset) || (i == 0) {
             skip = 1;
         }
-        if same(view(w), view("--fn-cache")) || same(view(w), view("--fn-cache-id")) || same(view(w), view("--fn-cache-quiet")) {
+        // `--check` changes no body's text or registrations (a check stops after the bodies are
+        // emitted), so a check's units and a build's are the same units.
+        if same(view(w), view("--fn-cache")) || same(view(w), view("--fn-cache-id")) || same(view(w), view("--fn-cache-quiet")) || same(view(w), view("--check")) {
             skip = 1;
         }
         if 0 < i {
@@ -17590,9 +17593,6 @@ fn fn_facts_restore<a>(c: (&a mut C), data: &a [u8]) -> unit {
 // Anything a worker does not finish - an error in a body, a crash - sends the rest of the walk to
 // this process, which then reports what one process reports.
 //
-// The least source, in bytes, worth a worker of its own: below it a fork and a pipe cost more than
-// the bodies do.
-const PAR_MIN: u64 = 131072;
 fn par_debug<a>(msg: &a [u8]) -> unit {
     if host::env(view("GRAIL_DEBUG")).len() != 0 {
         host::print(view(msg));
@@ -17628,11 +17628,18 @@ fn par_start<a>(c: (&a mut C), files: u64) -> unit {
     if (jobs::count() < 2) & (host::env(view("GRAIL_BODY_SLICE")).len() == 0) {
         return ();
     }
+    // The size of each input, from the file system: reloading every file to measure it cost a
+    // tokenisation of the whole program per run.
     mut sizes = u64[];
     mut i = 2;
     while i < files {
-        load_file(&mut c, i);
-        sizes.push(c.src.len());
+        parts := host::stat(view(input_path(&c, i)), 1);
+        if 2 < parts.len() {
+            sizes.push(parts[2]);
+        } else {
+            load_file(&mut c, i);
+            sizes.push(c.src.len());
+        }
         i += 1;
     }
     if c.fn_surface.len() == 0 {
@@ -17644,25 +17651,106 @@ fn par_start<a>(c: (&a mut C), files: u64) -> unit {
     }
     exchange(&mut c.par_sizes, sizes);
     exchange(&mut c.par_armed, 1);
-    exchange(&mut c.par_misses, 0);
-    // With no store every body is compiled, so the first one is reason enough; with one, a rebuild
-    // after an edit compiles a handful and should not pay for workers.
-    mut threshold = 1;
-    if c.fn_dir.len() != 0 {
-        threshold = 16;
-    }
-    if host::env(view("GRAIL_BODY_SLICE")).len() != 0 {
-        threshold = 1;
-    }
-    exchange(&mut c.par_threshold, threshold);
+    exchange(&mut c.par_t0, 0);
     return ();
 }
 // The walk is at the body at byte `off` of file `file` and has compiled enough misses: fork workers
 // for the source from here on. 1 in a worker (which skips this body: it is the parent's), 0 here.
-fn par_fork<a>(c: (&a mut C), file: u64, off: u64) -> u64 {
+// Where the walk is, in bytes of the source counted over the files in order.
+fn par_pos<a>(c: (&a C), file: u64, off: u64) -> u64 {
+    mut at = 0;
+    for k in c.par_sizes.len() {
+        if k + 2 < file {
+            at += c.par_sizes[k];
+        }
+    }
+    return at + off;
+}
+// This process's CPU time in milliseconds - user and system ticks from /proc/self/stat, which a
+// loaded machine does not inflate the way it does the wall clock - or the monotonic clock where
+// there is no such file.
+fn par_cpu_ms() -> u64 {
+    stat := host::read_file(view("/proc/self/stat"));
+    mut close = stat.len();
+    for i in stat.len() {
+        if stat[i] == 41 {
+            close = i;
+        }
+    }
+    if stat.len() <= close {
+        return host::now_ms();
+    }
+    // After the command's closing parenthesis: state, then ten fields, then utime and stime.
+    mut field = 0;
+    mut value = 0;
+    mut ticks = 0;
+    mut i = close + 2;
+    while i < stat.len() {
+        ch := stat[i];
+        if ch == 32 {
+            if (field == 11) || (field == 12) {
+                ticks += value;
+            }
+            field += 1;
+            value = 0;
+            if 12 < field {
+                break;
+            }
+        } else if (48 <= ch) & (ch <= 57) {
+            value = value * 10 + u64(ch - 48);
+        }
+        i += 1;
+    }
+    return ticks * 10;
+}
+// How many processes the rest of the walk is worth, measured rather than guessed from sizes: the
+// walk compiles on its own for its first 50 ms of CPU, and from how far through the source that
+// took it estimates what the rest would take here. Under half a second it does not fork at all -
+// a small module, or a rebuild whose bodies are mostly hits, is cheaper in one process - and above
+// it, one process per 150 ms of the estimate, up to the job count. 0 means not yet, or never (the
+// walk is then disarmed). GRAIL_BODY_SLICE forces workers at the first body.
+fn par_decide<a>(c: (&a mut C), file: u64, off: u64) -> u64 {
+    if host::env(view("GRAIL_BODY_SLICE")).len() != 0 {
+        return jobs::count();
+    }
+    now := par_cpu_ms();
+    pos := par_pos(&c, file, off);
+    if c.par_t0 == 0 {
+        exchange(&mut c.par_t0, now + 1);
+        exchange(&mut c.par_p0, pos);
+        return 0;
+    }
+    elapsed := now + 1 - c.par_t0;
+    if elapsed < 50 {
+        return 0;
+    }
+    mut total = 0;
+    for k in c.par_sizes.len() {
+        total += c.par_sizes[k];
+    }
+    done := pos - c.par_p0;
+    if (done == 0) || (total <= pos) {
+        exchange(&mut c.par_armed, 0);
+        return 0;
+    }
+    estimate := (total - pos) * elapsed / done;
+    if estimate < 500 {
+        exchange(&mut c.par_armed, 0);
+        return 0;
+    }
+    mut want = estimate / 150;
+    if jobs::count() < want {
+        want = jobs::count();
+    }
+    if want < 2 {
+        exchange(&mut c.par_armed, 0);
+        return 0;
+    }
+    return want;
+}
+fn par_fork<a>(c: (&a mut C), file: u64, off: u64, want: u64) -> u64 {
     exchange(&mut c.par_armed, 0);
     slice := host::env(view("GRAIL_BODY_SLICE"));
-    forced := slice.len() != 0;
     // The bytes still ahead, over the files from this one on.
     mut ahead = u64[];
     mut total = 0;
@@ -17678,17 +17766,11 @@ fn par_fork<a>(c: (&a mut C), file: u64, off: u64) -> u64 {
         ahead.push(n);
         total += n;
     }
-    mut wanted = jobs::count();
-    if !forced {
-        while (1 < wanted) && (total / wanted < PAR_MIN) {
-            wanted -= 1;
-        }
-    }
-    if wanted < 2 {
+    if want < 2 {
         return 0;
     }
     mut js = jobs::open();
-    j := jobs::workers(&mut js, wanted);
+    j := jobs::workers(&mut js, want);
     if j < 2 {
         jobs::give_all(&mut js);
         return 0;
@@ -18340,13 +18422,6 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // The facts an obligation may read start at this body's entry (pv_begin).
     exchange(&mut c.body_lo, start);
     exchange(&mut c.body_hi, end);
-    for i in c.locals.len() {
-        mut l = &c.locals[i];
-        name := l.name.copy();
-        last := last_name(&mut c, view(name), start, end);
-        mut l = &mut c.locals[i];
-        exchange(&mut l.last, last);
-    }
     // On Win64 a C caller passes rcx/rdx/r8/r9 (then the stack after a 32-byte home area) and
     // expects rdi, rsi and xmm6-xmm15 preserved; the body uses Grail's SysV-shaped convention. A
     // callback is therefore a Win64 thunk under the C symbol that saves those registers, moves
@@ -18406,7 +18481,10 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             par_unit = par_take(&mut c, owner, c.file, at_off, &mut par_outcome);
         }
     }
-    if fn_open(&mut c, view(unit)) {
+    // With no store, a unit is only something a worker hands this process; for a body this process
+    // compiles itself there is nothing to key or to file.
+    own_only := (c.fn_dir.len() == 0) & (c.par_me == 0) & (par_unit.key.len() == 0);
+    if fn_open(&mut c, view(unit)) & !own_only {
         // The symbol the label will spell: `body_label` is the one spelling both `func_directive`
         // and the label use, so a unit's key names exactly the symbol its bytes define.
         fn_symbol := body_label(&c, view(m), view(name), view(export_symbol), export);
@@ -18460,11 +18538,11 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             c.fn_kept = c.fn_kept + 1;
         }
     }
-    // This body was not a hit: when the walk has compiled enough of those, the rest goes to workers.
+    // This body was not a hit: whether the rest is worth workers (par_decide).
     if (c.par_armed != 0) & (pass == 3) & (c.current_spec == 0) & (c.validating == 0) {
-        c.par_misses = c.par_misses + 1;
-        if c.par_threshold <= c.par_misses {
-            if par_fork(&mut c, c.file, at_off) != 0 {
+        want := par_decide(&mut c, c.file, at_off);
+        if want != 0 {
+            if par_fork(&mut c, c.file, at_off, want) != 0 {
                 // A worker: this body is the parent's.
                 exchange(&mut c.fn_rec, 0);
                 part(&mut c, view(unit));
@@ -18476,6 +18554,15 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                 return ();
             }
         }
+    }
+    // Where each parameter is last used: only a body that is compiled here needs it, so a hit, a
+    // body a worker skips and a body handed to a worker do not scan for it.
+    for i in c.locals.len() {
+        mut l = &c.locals[i];
+        name := l.name.copy();
+        last := last_name(&mut c, view(name), start, end);
+        mut l = &mut c.locals[i];
+        exchange(&mut l.last, last);
     }
     part(&mut c, view(unit));
     scope_begin(&mut c);
@@ -18722,9 +18809,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             c.lnext[part_lunit - 1] = part_label;
             c.rnext[part_lunit - 1] = part_ref;
         }
-        while out_mark < c.out.len() {
-            c.out.pop()!;
-        }
+        c.out.truncate(out_mark);
         // Facts describe the text just discarded, so they go with it.
         llvm::facts_truncate(&mut c.facts, fact_mark);
         edge_mark := c.fx_edge_mark;
@@ -18827,9 +18912,12 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                 par_record(&mut c, at_off, 1, &produced);
                 par_mine = 0;
             }
-            while apply_mark < c.out.len() {
-                c.out.pop()!;
+            // A worker's own output is thrown away: what it made is the unit just recorded, and
+            // taking the body back out to put it in again would be work for nothing.
+            if c.par_me != 0 {
+                return ();
             }
+            c.out.truncate(apply_mark);
             llvm::facts_truncate(&mut c.facts, fact_mark);
             while fn_drop_mark < c.drop_refs.len() {
                 c.drop_refs.pop()!;
@@ -28981,9 +29069,7 @@ fn emit_specializations<a>(c: (&a mut C)) -> unit {
             part_label := c.label;
             part_ref := c.ref_next;
             replay_function(&mut c, i);
-            while saved < c.out.len() {
-                c.out.pop()!;
-            }
+            c.out.truncate(saved);
             exchange(&mut c.part, part_mark);
             exchange(&mut c.lpart, part_lpart);
             exchange(&mut c.label, part_label);
@@ -35873,9 +35959,7 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
     v := expr(&mut c, 0);
     result := v.ty;
     exchange(&mut c.pos, enter);
-    while out_mark < c.out.len() {
-        c.out.pop()!;
-    }
+    c.out.truncate(out_mark);
     fx_edges_truncate(&mut c, fx_edge_trial);
     exchange(&mut c.fx_calls, fx_calls_trial);
     while closures_mark < c.closures.len() {
@@ -52024,8 +52108,8 @@ pub fn main() -> u64 {
         reg_types: u64[],
         known: ir::no_known(),
         par_armed: 0,
-        par_misses: 0,
-        par_threshold: 0,
+        par_t0: 0,
+        par_p0: 0,
         par_sizes: u64[],
         fn_hits: 0,
         fn_filed: 0,

@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **`grail check` is incremental.** It goes through the build store as `grail build` does: one
+  compiler run per module, a module whose inputs did not change is not checked again, and in a
+  module that is, the unchanged function bodies replay. A check after an edit to one module checks
+  that module. A module with errors reports them; the modules that read it print one line each
+  (`not checked: `c` depends on `a`, which has errors`) and the independent modules are still
+  checked. A check and a build share their records, so a build after a check reuses its units.
+
 - **Fixed: an LLVM-backend miscompile of a vector grown through its address.** A call handed `&mut v`
   receives the slot's address, not the header word, so the lifter did not count it as a call that
   can grow `v`, and the `len`/`data` it had read before the call were used after it: `pad(&mut out,
