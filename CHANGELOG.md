@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **Native backend: unchecked multiplies by a constant are cheap.** A multiply the prover bounded
+  (an array index `i * 3`) no longer loads the constant and uses `mulq`: it is
+  `leaq (%r12,%r12,2),%rax` for 3, 5 and 9, a shift for a power of two, else `imulq $c`. nbody
+  executes 13% fewer instructions.
+
 - **Native backend: a vector the loop cannot change is read once before the loop.** With the
   front end's loop-stability fact, the optimiser loads the vector's data pointer (and its length,
   when a check or `len()` in the loop needs it) into registers on the way into the loop, and the

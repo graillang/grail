@@ -9,7 +9,7 @@ instruction of ours is classified by `.work/gap/classify.py`-style tooling (call
 
 | program | start | now | Go | ratio now |
 |---|---|---|---|---|
-| nbody, 20k steps | 141.7M | 60.1M | ~22M | 2.7x |
+| nbody, 20k steps | 141.7M | 52.1M | ~22M | 2.4x |
 | sieve | 942M | 381M | - | - |
 | fnv | 827M | 538M | - | ~1.3x per hashed byte |
 | fib(32) | 155.1M | 105.8M | 102.9M | 1.03x |
@@ -23,15 +23,13 @@ addressed from their own registers; SSE liveness by register number; and (gaps15
 
 ## Next, by measured potential
 
-1. **Float results in their destination register** (front end, native.grl `float_text`). The front
-   end computes every float operation in the scratch pair - `movaps A,%xmm0; movaps B,%xmm1; OPsd
-   %xmm1,%xmm0` - and the optimiser folds that back only when the result goes straight to a
-   promoted register. In nbody 98 `movaps` remain because the result crosses an overflow check or
-   goes to a different register. Emitting `OPsd` on the destination's own register (or the left
-   operand's, when it is not used again) removes the copies at the source: about 2 instructions per
-   float operation, up to ~400 per nbody step (~15% of what remains).
+1. ~~Float results in their destination register~~: after SSE liveness by register number and the
+   interval proofs only 10 `movaps` remain in nbody (from 98); about 20 instructions per step, not
+   worth a front-end change now.
 2. ~~Owned-vector header hoisting~~ (item 6): done - the loop-stability fact (FACT_LOOP_STABLE)
    lets the data pointer (and length when needed) be loaded before the loop; fnv -11%.
-3. **CSE of index arithmetic within an iteration** (`i*3` computed once per body in nbody).
+3. **Index arithmetic**: unchecked constant multiplies are now `leaq`/shift/`imulq` (nbody -13%).
+   Next: CSE of `i*3` within an iteration - nbody computes it once per access (`leaq
+   (%r12,%r12,2),%rax; addq $k,%rax`), four to six times per pair; ~250 instructions per step.
 4. **Memory-operand arithmetic** where an element is used once: in place, rarely fires today
    because elements land in promoted registers; grows with 1.
