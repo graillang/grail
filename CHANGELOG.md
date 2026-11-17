@@ -1,5 +1,10 @@
 ## Unreleased
 
+- The front-end fuzzer's baseline check skips a fixture marked `fuzz: refused` on its first line:
+  the 21 inputs only rejection cases compile (`tests/interfaces/strictgen*.grl`, the visibility and
+  inherent-method refusals, ...) carry the marker, so a refusal they are written to produce is no
+  longer reported as a regression.
+
 - **The optimiser inlines small functions in ordinary builds again.** A small leaf (at most 24
   instructions, no call but a failure exit) was only inlined when it carried no statement-position
   marker, and every statement of a build with error locations carries one, so outside
