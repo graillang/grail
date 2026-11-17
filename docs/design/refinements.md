@@ -382,8 +382,11 @@ Done (index checks in each benchmark's own functions, `tools/checks-native.mjs`)
 - `--verify-facts` keeps proved checks without counting them as failures (edge kind 16 for a
   proved accessor, `call_verified_out` for a proved call through the checking wrapper).
 
+- `grail build --report checks` (the compiler's `--report-checks`): each residual check in the
+  program's own functions with location and kind, from the site-table pass (`report_check`).
+
 Next, in order: sort (the clamp `if hi > n { hi = n }`, `tmp := v.copy()` length equality,
-lengths equal across the v/tmp swap); sieve's `j += i` overflow (a loop-carried bound
-`j <= limit`, `i <= limit`); then `grail build --report checks` (per function, each residual
-check with its location and kind: index, overflow, divide).
+lengths equal across the v/tmp swap - this needs a loop invariant: the body reassigns both vectors,
+so today's loop kill drops their length facts at the head); sieve's `j += i` overflow (a
+loop-carried bound `j <= limit`, `i <= limit`).
 

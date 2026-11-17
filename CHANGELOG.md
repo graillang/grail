@@ -1,5 +1,11 @@
 ## Unreleased
 
+- `grail build --report checks` prints every runtime check left in the program's own functions,
+  one line each: the function, `file:line:col`, and the kind (index, overflow, divide, conversion,
+  refinement, ...). A check the prover removed is not listed, so what stays in a hot loop is
+  visible. The report run is uncached, so a module from the build store cannot hide its checks.
+  The compiler's own flag is `--report-checks`.
+
 - **`grail cache warm [--target T]`** checks and builds every standard module into the build store,
   as rustup ships libstd: a project's first check then compiles only its own modules. The installers
   run it (not under DESTDIR), and compile-perf's template store is now a warmed one. Dev compiler,
