@@ -3097,6 +3097,12 @@
     "signal": "SIGABRT"
   },
   {
+    "name": "f32-constant-wide-immediate-not-narrowed",
+    "source": "// f32 narrowing (optimize.grl `xmm_narrow`) holds a promoted slot as binary32 only when every store\n// into it is a widened f32 or zero. `two: f32 := 2.0` is stored from the immediate\n// $4611686018427387904 (19 digits), which the optimiser's immediate reader cannot read and reports\n// as 0 - once taken for zero, so the slot was narrowed and 2.0 read back as 0.0 (meshopt's\n// quadric_error_attr, which changed Abundance's abgeo mesh digests). 387 with the bug.\nstruct Q {\n    positions: f32[],\n    attributes: f32[],\n    gradients: f32[],\n    attribute: f32[],\n    count: u64\n}\nfn eval(q: (&f32[]), at: u64, x: f32, y: f32, z: f32) -> f32 {\n    return q[at] * x + q[at + 1] * y + q[at + 2] * z;\n}\nfn error_attr<a>(st: (&a Q), v: u64, t: u64) -> f32 {\n    acount := st.count;\n    qa := v * 11;\n    x := st.positions[t * 3];\n    y := st.positions[t * 3 + 1];\n    z := st.positions[t * 3 + 2];\n    mut r = eval(&st.attribute, qa, x, y, z);\n    two: f32 := 2.0;\n    for k in acount {\n        a := st.attributes[t * acount + k];\n        g0 := (v * acount + k) * 4;\n        gx := st.gradients[g0];\n        gy := st.gradients[g0 + 1];\n        gz := st.gradients[g0 + 2];\n        gw := st.gradients[g0 + 3];\n        g: f32 := x * gx + y * gy + z * gz + gw;\n        r = r + a * (a * st.attribute[qa + 10] - two * g);\n    }\n    return r.abs();\n}\nfn main() {\n    mut st = Q { positions: f32[], attributes: f32[], gradients: f32[], attribute: f32[], count: 3 };\n    for i in 24 {\n        st.positions.push(f32(i64(i)) * 0.25);\n        st.attributes.push(f32(i64(i)) * 0.5 + 1.0);\n        st.attribute.push(f32(i64(i)) * 0.125);\n    }\n    for i in 48 {\n        st.gradients.push(f32(i64(i % 7)) * 0.75 - 1.0);\n    }\n    mut total: f32 = 0.0;\n    for v in 2 {\n        for t in 3 {\n            total = total + error_attr(&st, v, t);\n        }\n    }\n    println(total);\n}\n",
+    "stdout": "178.1875\n",
+    "note": "a 19-digit f32 constant immediate is not zero: the narrowing pass took imm_value's 'cannot read' (0) for the value 0"
+  },
+  {
     "name": "raw-module-sized-integer-arithmetic",
     "targets": [
       "x86_64"
@@ -5443,6 +5449,7 @@
   },
   {
     "name": "pool-speedup-four-workers",
+    "timing": true,
     "note": "Wall clock: 3M CPU-bound elements as one job and as four jobs, twice each. Asserts the four-job run is at least 1.5x faster, and SKIPs honestly (stderr only, stdout still \"ok\") when /proc/cpuinfo reports fewer than four cores. stderr carries the measured times.",
     "files": [
       "tests/pool/speedup.grl"
@@ -14626,7 +14633,7 @@
       "lib/time.grl"
     ],
     "reject": true,
-    "diagnostic": "this closure captures a borrow, and an `Owned` closure is required here",
+    "diagnostic": "this closure captures a borrow its type does not name (a local of this function), and an `Owned` closure is required here",
     "targets": [
       "x86_64"
     ],

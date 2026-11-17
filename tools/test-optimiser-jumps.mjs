@@ -5,10 +5,11 @@
 //  - a function with a loop and a branch comes out with its loop state in registers and its
 //    comparisons fused with their branches, which needs liveness across the back edge;
 //  - an `f64` loop keeps its float temporaries in SSE registers (xmm8..xmm14), not frame slots;
+//  - a leaf that takes a slot's address is not inlined (its slot cannot become a register);
 //  - GRAIL_OPT_STATS=1 makes the optimiser write `# grail-jumps <known> <unknown>` before each
 //    body, and over the compiler's own sources nearly every direct jump has a known target.
 //   bun tools/test-optimiser-jumps.mjs
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { root, buildCompiler, command, compileProgram, compilerSources } from './native.mjs';
@@ -110,6 +111,39 @@ const floop = fback === -1 ? [] : fbody.slice(fbody.indexOf(`${fbody[fback].slic
 const fshown = `\n${floop.join('\n')}`;
 ok('the float loop holds its floats in xmm8..xmm14', floop.some(line => /%xmm(8|9|1[0-4])\b/.test(line)), fshown);
 ok('no float goes through the frame inside the float loop', floop.length !== 0 && !floop.some(line => /\(%rbp\)/.test(line) && !/^movq -\d+\(%rbp\),%r(cx|ax)$/.test(line)), fshown);
+
+// The inliner copies a small leaf with its slots in scratch registers, so a leaf that takes a slot's
+// address (runtime.grl's rt_frame) must stay a call: `leaq %r8,%rax` does not assemble. Inlining only
+// happens in a build with unit markers, hence --split; every part has to assemble.
+const frameSource = join(work, 'frame.grl');
+writeFileSync(frameSource, `unsafe module runtime;
+fn frame() -> u64 {
+    mut here = 0;
+    p := &mut here;
+    return p;
+}
+fn deeper(n: u64) -> u64 {
+    if n == 0 {
+        return frame();
+    }
+    return deeper(n - 1);
+}
+fn main() {
+    top := frame();
+    low := deeper(20);
+    println(low < top);
+}
+`);
+const frameOut = join(work, 'frame.s');
+command([compiler, '--split', '--target', 'x86_64', frameOut, frameSource, join(root, 'compiler/runtime.grl'), join(root, 'compiler/os-linux.grl')]);
+const parts = readdirSync(work).filter(name => name.startsWith('frame.') && name.endsWith('.s'));
+ok('the split build has parts', parts.length > 1, parts.join(' '));
+for (const part of parts) {
+  const text = readFileSync(join(work, part), 'utf8');
+  ok(`${part} takes no register's address`, !/^leaq %/m.test(text), text.split('\n').filter(line => /^leaq %/.test(line)).slice(0, 3).join(' '));
+  const as = spawnSync('clang', ['--target=x86_64-linux-gnu', '-c', join(work, part), '-o', join(work, `${part}.o`)], { encoding: 'utf8' });
+  ok(`${part} assembles`, as.status === 0, (as.stderr ?? '').split('\n').slice(0, 3).join(' '));
+}
 
 // The compiler's own sources: what the optimiser could follow.
 const self = join(work, 'self.s');
