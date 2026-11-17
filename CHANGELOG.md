@@ -1,5 +1,21 @@
 ## Unreleased
 
+- **Capture-free and named-function callbacks to generic functions cost no allocation, and named
+  functions are accepted.** A closure given for a lent `Fn(..)` parameter of a generic function was
+  boxed whenever the call's type arguments were not all fixed yet - `Condition::wait_with`'s two
+  callbacks were two heap records per channel send/receive; it is now a frame environment
+  (bench/chan ping: 810M to 502M instructions). A named function given for such a parameter
+  (`with(&mut m, x, grow<T>)`) was "generic argument shape mismatch"; it is accepted.
+- **Fixed: `grail build --release` failed for a whole-program build** (a single file with
+  `--no-cache`, `--whole-program`, a claimed effect): the run assembled its in-process object as the
+  unit object while the LLVM step looked for the native part beside it (`llvm-ar: X.o.s.o: No such
+  file or directory`). The run now writes the native part, as the per-module units do;
+  tools/test-cli.mjs builds every release shape and runs the program.
+
+- **`exchange` and `v[i] = x` are inline in release builds.** The LLVM lowering emits the runtime's
+  `rt_xchg` in place (tagged as element storage when the address is an element's), so a store loop
+  over a vector is a plain loop the optimiser sees: filling 10M words goes from 100M to 67M
+  instructions. bench/iterchain builds its vector at its final length, as its C and Rust twins do.
 - The orphan rule's diagnostic names the modules: an `impl I for T` written outside the modules that
   declare `I` and `T` now says where it was written, where the interface and the type are declared
   (or that no module declares the type, leaving only the interface's), and the fix - move the impl
@@ -108,6 +124,17 @@
   passes to `rt_f64_op` (tracked through registers and frame slots), refuses a fact naming another
   operation, and lowers a call without a fact to the one IEEE double operation the runtime
   performs, with one result word in %rax and nothing written to %rdx.
+- The build store no longer grows without bound. Every unit, body record and optimiser memo entry
+  has a last use (each compiler run writes one use list), `grail cache gc [--max BYTES]` evicts the
+  least recently used entries until the store is under the cap, and a build checks the cap itself
+  every 8th build (`GRAIL_CACHE_MAX`, 2 GiB by default; `GRAIL_CACHE_GC_EVERY`). An evicted entry is
+  only ever a miss. 25 one-body edits of a 40-function module grew the store from 7.1 to 22.9 MB;
+  with a cap of 1.3 times the cold build it ends at 6.9 MB.
+- **Constant promotion of literal vectors.** `table := u64[1, 0, 1, ...];` whose elements are integer
+  literals, bound to an immutable name the rest of its block only indexes or measures, is now one
+  read-only object emitted once instead of a vector built on the heap at every execution (meshopt's
+  `can_collapse`/`has_opposite` rebuilt a 36-entry table per call). A literal that is mutated,
+  moved, returned, borrowed out or captured by a closure still allocates fresh.
 
 - **`bench-rivals` no longer charts a build that printed the wrong answer.** It already failed the
   run when a build's output differed from C's, but still wrote that build's figures into the

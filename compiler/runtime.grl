@@ -1965,7 +1965,15 @@ fn rt_reserveb(s: u64, need: u64) -> u64 {
         rt_abort();
     }
     n := raw_load(wrapping_add(s, 8));
-    ptr := rt_grow(raw_load(s), n, capacity);
+    old := raw_load(s);
+    mut ptr = 0;
+    if old == wrapping_add(s, 24) {
+        // The bytes share the header's block (rt_copy): they move to a buffer of their own.
+        ptr = rt_alloc(capacity);
+        rt_copy_bytes(ptr, old, n);
+    } else {
+        ptr = rt_grow(old, n, capacity);
+    }
     raw_store(s, ptr);
     raw_store(wrapping_add(s, 16), capacity);
     return 0;
@@ -2331,9 +2339,20 @@ fn rt_append(dst: u64, src: u64) -> u64 {
     raw_store(dst + 8, have + n);
     return 0;
 }
+// A copy of a byte sequence: header and bytes in one block, the bytes right after the header
+// ({pointer = self + 24, length, capacity = length}). One allocation and one free per string instead
+// of two; a later append moves the bytes to a buffer of their own (rt_reserveb), and the drop frees
+// only the block (rt_drop_seq).
 fn rt_copy(src: u64) -> u64 {
-    dst := rt_new();
-    rt_append(dst, src);
+    n := raw_load(src + 8);
+    if n == 0 {
+        return rt_new();
+    }
+    dst := rt_alloc(24 + n);
+    raw_store(dst, dst + 24);
+    raw_store(dst + 8, n);
+    raw_store(dst + 16, n);
+    rt_copy_bytes(dst + 24, raw_load(src), n);
     return dst;
 }
 // A copy of a vector of plain words (elements that need no drop).
@@ -2403,7 +2422,10 @@ fn rt_drop_seq(s: u64) -> u64 {
         if raw_load(s - 8) == 2 {
             return 0;
         }
-        rt_free(raw_load(s));
+        // Bytes that share the header's block (rt_copy) go with it.
+        if raw_load(s) != s + 24 {
+            rt_free(raw_load(s));
+        }
         rt_free(s);
     }
     return 0;

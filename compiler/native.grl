@@ -1234,6 +1234,8 @@ struct C {
     dr_ct: u64,
     // Bodies applied from the record in this run (GRAIL_DEBUG reports it).
     dr_hits: u64,
+    // The unit-store entries this run read or filed (fncache::note_used), for the store's GC.
+    fn_used: u8[][],
     // Armed (par_start) but not forked yet: the walk forks when par_decide finds the rest worth it,
     // over the source still ahead of it (par_fork).
     par_armed: u64,
@@ -20885,6 +20887,7 @@ fn par_worker_finish<a>(c: (&a mut C)) -> unit {
         end = (end % 72057594037927936) * 256;
     }
     c.par_buf.append(view(tail));
+    fn_note_used(&mut c);
     host::write_fd(c.par_wfd, view(c.par_buf));
     host::close(c.par_wfd);
     host::exit(0);
@@ -20983,6 +20986,7 @@ fn dr_load<a>(c: (&a mut C), files: u64) -> unit {
         }
         i += 1;
     }
+    c.fn_used.push(name.copy());
     exchange(&mut c.dr_at, 0);
     exchange(&mut c.dr_on, 1);
     return ();
@@ -21044,6 +21048,17 @@ fn dr_save<a>(c: (&a mut C)) -> unit {
     push_bytes(&mut name, view(fncache::hash(view(c.dr_key))));
     u := fncache::Unit { key: c.dr_key.copy(), text: text, facts: u8[], regs: u8[] };
     fncache::save(view(c.fn_dir), view(name), &u);
+    c.fn_used.push(name);
+    return ();
+}
+// The entries this run used, written once (fncache::note_used): at the end of the bodies pass, and
+// by a body worker before it stops.
+fn fn_note_used<a>(c: (&a mut C)) -> unit {
+    if c.fn_dir.len() == 0 {
+        return ();
+    }
+    names := exchange(&mut c.fn_used, u8[][]);
+    fncache::note_used(view(c.fn_dir), &names);
     return ();
 }
 // The fast path: the body whose `fn` is token `position`, if the record has it unmoved. Returns
@@ -21115,6 +21130,7 @@ fn dr_fast<a>(c: (&a mut C), position: u64, claim_alloc: u64, claim_panic: u64, 
     c.fn_hits = c.fn_hits + 1;
     c.dr_hits = c.dr_hits + 1;
     name := c.dr_name[k].copy();
+    c.fn_used.push(name.copy());
     dr_note(&mut c, position, last, ord, view(unit), view(name), view(rbytes));
     exchange(&mut c.pos, last + 1);
     return true;
@@ -21687,6 +21703,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                         llvm::facts_truncate(&mut c.facts, fact_mark);
                         fn_apply(&mut c, &hit, &regs, fn_line, position, claimed_alloc, claimed_panic, claimed_block);
                         hit_name := fncache::hash(view(key));
+                        c.fn_used.push(hit_name.copy());
                         hit_regs := hit.regs.copy();
                         dr_note(&mut c, position, end, hit_ord, view(unit), view(hit_name), view(hit_regs));
                         if par_outcome == 1 {
@@ -22134,7 +22151,9 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             // The file's name is the key's hash; the key record itself travels inside the entry,
             // so two keys that collide make a miss and never a wrong hit.
             if c.fn_dir.len() != 0 {
-                fncache::save(view(c.fn_dir), view(fncache::hash(view(produced.key))), &produced);
+                filed_name := fncache::hash(view(produced.key));
+                fncache::save(view(c.fn_dir), view(filed_name), &produced);
+                c.fn_used.push(filed_name);
                 c.fn_filed = c.fn_filed + 1;
             }
             if par_mine != 0 {
@@ -33153,6 +33172,19 @@ fn infer_type<a, b>(c: (&a mut C), formal: u64, actual: u64, map: (&b mut u64[])
         infer_type(&mut c, formal, base_type(&mut c, actual), &mut map);
         return ();
     }
+    // A named function (kind 12) given for a closure type (kind 20): the types are inferred from its
+    // parameters and result as from a closure's; the conversion itself is require_type's.
+    if (k == 20) && (ak == 12) {
+        fp := type_args(&mut c, formal);
+        ap := type_args(&mut c, actual);
+        if fp.len() == ap.len() {
+            for i in fp.len() {
+                infer_type(&mut c, fp[i], ap[i], &mut map);
+            }
+            infer_type(&mut c, arg, ty_arg(&mut c, actual), &mut map);
+            return ();
+        }
+    }
     // A vector reference passed for a typed slice is the slice over the whole vector (coerce_view):
     // the element type is inferred from the vector's.
     if (k == 27) && (ak == 7) {
@@ -35540,7 +35572,10 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
             // checker still sees each call's loan.
             mut v = val(0, 0);
             reborrow := reborrow_argument(&mut c);
-            if (argi < count) && (context != NO_TYPE) && (c.raw == 0) && lent_parameter(&mut c, c.params[template_first + argi]) {
+            // Whether a parameter is lent depends on its declared closure type alone (no `Owned`, no
+            // region), not on the call's bindings: a closure for a generic callee whose type arguments
+            // are not all fixed yet (`wait_with<a, T, C, R>` before `then` fixes R) is lent too.
+            if (argi < count) && (c.raw == 0) && lent_parameter(&mut c, c.params[template_first + argi]) {
                 exchange(&mut c.lent_arg_at, astart + 1);
             }
             if reborrow != 0 {
@@ -35667,6 +35702,21 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                             v = widen_to_fnmut_formal(&mut c, v, formal);
                         }
                         infer_type(&mut c, formal, v.ty, &mut map);
+                        // A named function given for a closure-typed parameter: once its signature
+                        // has fixed the type arguments, it becomes the closure value the parameter
+                        // is (as adopt_value does when the parameter type is known up front).
+                        if (ty_kind(&mut c, v.ty) == 12) && (ty_kind(&mut c, formal) == 20) && (resolved == 0) {
+                            mut all = true;
+                            for q in map.len() {
+                                if map[q] == NO_TYPE {
+                                    all = false;
+                                }
+                            }
+                            if all {
+                                expected := bind_types(&mut c, formal, &map);
+                                v = function_as_closure(&mut c, v, expected);
+                            }
+                        }
                         // `F: FnMut(T) -> U` given a closure: its signature fixes T and U.
                         callable := callable_formal(&mut c, f - 1, formal);
                         if (callable != NO_TYPE) && ((ty_kind(&mut c, v.ty) == 20) || (ty_kind(&mut c, v.ty) == 12)) {
@@ -47137,6 +47187,182 @@ fn type_literal_ahead<a, b>(c: (&a mut C), name: &b [u8]) -> bool {
     m := module_copy(&mut c);
     return find_decl(&mut c, view(m), view(n)) != 0;
 }
+// ---- constant promotion of literal vectors -------------------------------------------------------
+//
+// `table := u64[1, 0, 1];` whose elements are integer literals, bound to an immutable name that the
+// rest of its block only indexes (`table[i]`) or measures (`table.len()`), is one read-only object
+// emitted once - the layout a baked static has (static_seq_object) - instead of a vector built on
+// the heap at every execution. Freeing it is a no-op (its blocks are in state 2), so the binding
+// keeps its owned type and every use reads as before. Anything else - a `mut` binding, a use that
+// could move, mutate or borrow it into something longer-lived, a closure in its scope, a shadowing
+// declaration - keeps the fresh vector.
+fn promote_literal_ok<a>(c: (&a mut C), cty: u64) -> bool {
+    if (c.raw != 0) || (c.probe_mode != 0) {
+        return false;
+    }
+    elem := ct_seq_elem(&mut c, cty);
+    if (elem == NO_TYPE) || !integer(&mut c, elem) || is_bool(&mut c, elem) {
+        return false;
+    }
+    // `NAME := ELEM[` at the start of a statement.
+    at := c.pos;
+    if at < 4 {
+        return false;
+    }
+    if !same(view(tok_text(&mut c, at - 2)), view(":=")) || (kind_at(&mut c, at - 3) != 1) {
+        return false;
+    }
+    before := tok_text(&mut c, at - 4);
+    if !(same(view(before), view(";")) || same(view(before), view("{")) || same(view(before), view("}"))) {
+        return false;
+    }
+    name := tok_text(&mut c, at - 3);
+    // The elements: integer literals, each optionally negated, then `]` and `;`.
+    mut i = at + 1;
+    mut count = 0;
+    while true {
+        if same(view(tok_text(&mut c, i)), view("-")) {
+            i += 1;
+        }
+        if kind_at(&mut c, i) != 2 {
+            return false;
+        }
+        i += 1;
+        count += 1;
+        t := tok_text(&mut c, i);
+        if same(view(t), view(",")) {
+            i += 1;
+            if same(view(tok_text(&mut c, i)), view("]")) {
+                break;
+            }
+            continue;
+        }
+        if same(view(t), view("]")) {
+            break;
+        }
+        return false;
+    }
+    if (count == 0) || !same(view(tok_text(&mut c, i + 1)), view(";")) {
+        return false;
+    }
+    // Every later mention of the name in its block.
+    mut j = i + 2;
+    mut depth = 0;
+    mut prev = u8[];
+    while j < c.toks.len() {
+        k := kind_at(&mut c, j);
+        if k == 0 {
+            break;
+        }
+        t := tok_text(&mut c, j);
+        if k == 123 {
+            depth += 1;
+        }
+        if k == 125 {
+            if depth == 0 {
+                break;
+            }
+            depth -= 1;
+        }
+        // A closure in scope could capture it by value.
+        if (same(view(t), view("|")) || same(view(t), view("||"))) && (same(view(prev), view("(")) || same(view(prev), view(",")) || same(view(prev), view("=")) || same(view(prev), view(":=")) || same(view(prev), view("return"))) {
+            return false;
+        }
+        if (k == 1) && same(view(t), view(name)) && !same(view(prev), view(".")) && !same(view(prev), view("::")) {
+            next := tok_text(&mut c, j + 1);
+            if same(view(next), view("[")) {
+                // A read: the index expression, then anything but an assignment.
+                mut d = 0;
+                mut m = j + 1;
+                while m < c.toks.len() {
+                    km := kind_at(&mut c, m);
+                    if km == 0 {
+                        return false;
+                    }
+                    tm := tok_text(&mut c, m);
+                    if same(view(tm), view("[")) {
+                        d += 1;
+                    }
+                    if same(view(tm), view("]")) {
+                        d -= 1;
+                        if d == 0 {
+                            break;
+                        }
+                    }
+                    m += 1;
+                }
+                after := tok_text(&mut c, m + 1);
+                if (after.len() != 0) && (after[after.len() - 1] == 61) && !same(view(after), view("==")) && !same(view(after), view("<=")) && !same(view(after), view(">=")) && !same(view(after), view("!=")) {
+                    return false;
+                }
+            } else if same(view(next), view(".")) {
+                if !same(view(tok_text(&mut c, j + 2)), view("len")) || !same(view(tok_text(&mut c, j + 3)), view("(")) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        prev = t;
+        j += 1;
+    }
+    return true;
+}
+fn promoted_literal<a>(c: (&a mut C), cty: u64) -> Val {
+    elem := ct_seq_elem(&mut c, cty);
+    mut width = 8;
+    if cty == 2 {
+        width = 1;
+    } else {
+        e := carray_elem_of(&mut c, elem);
+        if e[2] == 3 {
+            width = 1;
+        }
+        if e[2] == 4 {
+            width = 4;
+        }
+    }
+    expect(&mut c, view("["));
+    mut bytes = u8[];
+    mut n = 0;
+    while !is(&mut c, view("]")) {
+        mut neg = false;
+        if eat(&mut c, view("-")) {
+            neg = true;
+        }
+        lit_at := c.pos;
+        t := tok_text(&mut c, c.pos);
+        mut v = literal_value(&mut c, view(t));
+        if literal_fits(&mut c, elem, v, u64(neg)) == 0 {
+            exchange(&mut c.pos, lit_at);
+            fail(&mut c, view(literal_range_msg_v(&mut c, elem, v, u64(neg))));
+        }
+        advance(&mut c);
+        if neg {
+            v = wrapping_sub(0, v);
+        }
+        for b in width {
+            bytes.push((v >> (8 * b)) & 255);
+        }
+        n += 1;
+        if !eat(&mut c, view(",")) {
+            break;
+        }
+    }
+    expect(&mut c, view("]"));
+    if c.plat == 1 {
+        o(&mut c, view(".pushsection __DATA,__const\n"));
+    } else {
+        o(&mut c, view(".pushsection .rodata\n"));
+    }
+    obj := static_seq_object(&mut c, &bytes, n);
+    o(&mut c, view(".popsection\nleaq "));
+    lname(&mut c, obj);
+    o(&mut c, view("(%rip),%rax\n"));
+    slot := save(&mut c);
+    own(&mut c, slot, cty);
+    return val(slot, cty);
+}
 fn finish_type_literal<a>(c: (&a mut C), ty: u64) -> Val {
     mut out = ty;
     while is(&mut c, view("[")) {
@@ -47149,6 +47375,9 @@ fn finish_type_literal<a>(c: (&a mut C), ty: u64) -> Val {
     }
     if is(&mut c, view("[")) {
         mut cty = vec_of(&mut c, out);
+        if promote_literal_ok(&mut c, cty) {
+            return promoted_literal(&mut c, cty);
+        }
         return collection_literal(&mut c, cty, (cty == 2));
     }
     slot := apply(&mut c, view("rt_new"), u64[]);
@@ -61044,6 +61273,7 @@ pub fn main() -> u64 {
         dr_key: u8[],
         dr_ct: 0,
         dr_hits: 0,
+        fn_used: u8[][],
         par_armed: 0,
         par_t0: 0,
         par_p0: 0,
@@ -61688,6 +61918,7 @@ pub fn main() -> u64 {
             jobs::phase(view("bodies"));
             par_end(&mut c);
             dr_save(&mut c);
+            fn_note_used(&mut c);
             jobs::phase(view("bodies-workers-collected"));
         }
         // The definition sweep for the interfaces read above, once every module's names exist.
