@@ -33688,10 +33688,21 @@ fn format_brace_refuse<a, b>(c: (&a mut C), text: &b [u8], at: u64) -> unit {
 // format("x = {}", x) -> string, with the same compile-time placeholder checks as print.
 fn format_builtin<a>(c: (&a mut C)) -> Val {
     expect(&mut c, view("("));
+    acc := invoke(&mut c, view("rt_new"), u64[]);
+    // A fresh string is checked whole by rt_fmt_finish.
+    raw := format_pieces(&mut c, acc);
+    slot := invoke(&mut c, view("rt_fmt_finish"), one(acc));
+    return own(&mut c, slot, 3);
+}
+// The literal and its arguments up to the closing `)`, appended to the byte buffer `acc`: what
+// `format(...)` builds into a fresh buffer and `out.append_format(...)` into `out`. True when an
+// argument may have written bytes that are not UTF-8 (a byte vector, a view, a record or vector
+// shown through its fields, a padded spec); numbers, bools, chars and strings never do.
+fn format_pieces<a>(c: (&a mut C), acc: u64) -> bool {
+    mut raw = false;
     if kind(&mut c) != 3 {
         fail(&mut c, view("format needs a string literal"));
     }
-    acc := invoke(&mut c, view("rt_new"), u64[]);
     text := decode_literal(&mut c, c.pos);
     advance(&mut c);
     mut piece = u8[];
@@ -33718,6 +33729,7 @@ fn format_builtin<a>(c: (&a mut C)) -> Val {
             piece = u8[];
             end := sp.end;
             format_spec_arg(&mut c, acc, sp);
+            raw = true;
             i = end;
             continue;
         }
@@ -33728,6 +33740,10 @@ fn format_builtin<a>(c: (&a mut C)) -> Val {
                 fail(&mut c, view("missing argument for {} in format string"));
             }
             input := expr(&mut c, 0);
+            ak := ty_kind(&mut c, input.ty);
+            if !((input.ty == 0) || (ak == 1) || (ak == 4) || (ak == 18) || (ak == 19) || (ak == 21) || (ak == 22)) {
+                raw = true;
+            }
             format_arg(&mut c, acc, input);
             i += 2;
             continue;
@@ -33743,8 +33759,7 @@ fn format_builtin<a>(c: (&a mut C)) -> Val {
         fail(&mut c, view("more arguments than {} placeholders in format string"));
     }
     expect(&mut c, view(")"));
-    slot := invoke(&mut c, view("rt_fmt_finish"), one(acc));
-    return own(&mut c, slot, 3);
+    return raw;
 }
 fn format_raw<a, b>(c: (&a mut C), acc: u64, piece: &b [u8]) -> unit {
     if piece.len() == 0 {
@@ -39738,12 +39753,9 @@ fn text_method<a, b>(c: (&a mut C), xt: u64, k: u64, name: &b [u8]) -> Val {
         release_temporary(&mut c, arg.t);
         return val(r, bt);
     }
-    if same(view(name), view("to_upper")) || same(view(name), view("to_lower")) || same(view(name), view("trim")) {
+    if same(view(name), view("to_upper")) || same(view(name), view("to_lower")) {
         expect(&mut c, view(")"));
-        mut f = "rt_seq_trim";
-        if same(view(name), view("to_upper")) {
-            f = "rt_seq_upper";
-        }
+        mut f = "rt_seq_upper";
         if same(view(name), view("to_lower")) {
             f = "rt_seq_lower";
         }
@@ -39778,15 +39790,6 @@ fn text_method<a, b>(c: (&a mut C), xt: u64, k: u64, name: &b [u8]) -> Val {
         r := invoke(&mut c, view("rt_seq_chars"), one(xt));
         ch := char_type(&mut c);
         vt := intern(&mut c, 6, ch);
-        return own(&mut c, r, vt);
-    }
-    if same(view(name), view("split")) {
-        sep := expr(&mut c, 0);
-        require_type(&mut c, sep.ty, 0);
-        expect(&mut c, view(")"));
-        valid := imm(&mut c, k == 4);
-        r := invoke(&mut c, view("rt_seq_split"), three(xt, sep.t, valid));
-        vt := intern(&mut c, 6, result);
         return own(&mut c, r, vt);
     }
     return val(0, NO_TYPE);
@@ -40620,6 +40623,25 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         slot := apply(&mut c, view(f), one(xt));
         release_temporary(&mut c, input);
         return own(&mut c, slot, ty);
+    }
+    // `out.append_format("{}:{};", a, b)`: `format`'s text written onto the end of `out`, with no
+    // string of its own (Rust's `write!(out, ...)`). Onto a string, only the new tail is checked to
+    // be UTF-8.
+    if same(view(name), view("append_format")) {
+        if (c.raw == 0) & (k != 3) & (k != 4) {
+            fail(&mut c, view("append_format requires a string or a byte vector as its destination"));
+        }
+        require_write(&mut c, xt);
+        mut start = 0;
+        if k == 4 {
+            start = invoke(&mut c, view("rt_len"), one(xt));
+        }
+        raw := format_pieces(&mut c, xt);
+        if (k == 4) & raw {
+            invoke(&mut c, view("rt_utf8_from"), two(xt, start));
+        }
+        release_temporary(&mut c, input);
+        return val(imm(&mut c, 0), 1);
     }
     if same(view(name), view("is_empty")) {
         expect(&mut c, view(")"));
@@ -47113,8 +47135,15 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
                 if (k == 6) || (k == 27) {
                     a := ty_arg(&mut c, x.ty);
                     elemty = a;
-                    // Owners are moved out one at a time; plain scalar loops copy.
-                    if (!scalar(&mut c, a)) & (ty_kind(&mut c, v.ty) == 6) {
+                    // Owners are moved out one at a time; plain scalar loops copy. Shared views
+                    // and references (`text.split(10)` gives `(&[u8])[]`) are borrowed in place, as
+                    // `for x in &v` does: moving one out would drop the loan it carries.
+                    ak := ty_kind(&mut c, a);
+                    shared_elem := ((ak == 5) || (ak == 7)) & (ty_mode(&mut c, a) == 0);
+                    if shared_elem & (ty_kind(&mut c, v.ty) == 6) {
+                        byref = 1;
+                        refmode = 0;
+                    } else if (!scalar(&mut c, a)) & (ty_kind(&mut c, v.ty) == 6) {
                         owned := move_value(&mut c, v);
                         bind(&mut c, copy_bytes(view("__iterated")), owned.ty, owned.t, 0);
                         hidden_local = c.locals.len();

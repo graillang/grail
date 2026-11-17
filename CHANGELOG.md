@@ -1,5 +1,25 @@
 ## Unreleased
 
+- **Changed: `split`, `trim`, `lines` and `split_whitespace` return views, and live in `strings`.**
+  They were the compiler's own methods (and `strings` methods) returning owned copies; now they are
+  `strings` methods (`use strings;`) returning views of the text (`(&[u8])[]`, `&[u8]`), like
+  Rust's `&str` pieces, and `trim_start`/`trim_end` join them. A view keeps the text borrowed, so a
+  piece that must outlive it is `split_owned(sep)` or `piece.copy()`. `for x in v` over a vector of
+  views borrows each one in place, as `for x in &v` does. Views print and format as text.
+- **`parse_f64`** (`strings`): decimal text to the nearest double, ties to even, as Rust's and Go's
+  parsers: Clinger's exact path, then Eisel-Lemire over a 128-bit power-of-five table, then an exact
+  big-integer fallback; `inf`/`infinity`/`nan`, overflow to infinity (`"1e400"`) and underflow to
+  zero. It lives in the new module `float`, which `json` now uses too (its own bignum-only path is
+  gone).
+- **`out.append_format("{}:{};", a, b)`** writes `format`'s text onto the end of a `string` or byte
+  vector with no string of its own (Rust's `write!`); onto a string only the new tail is checked to
+  be UTF-8, and not at all when every argument is a number, bool, char or string.
+- Integers print without a buffer per number or a software division per digit (`rt_fmt_num` wrote
+  each number into a fresh allocation through a shift-and-subtract divide): two digits per division,
+  straight into the output. bench/strings.grl (now `split` views, `parse_f64`, `append_format`, as
+  its Rust twin): Grail-LLVM 11.65G -> 4.53G instructions (Rust 3.23G), Grail-native 35.7G -> 13.7G.
+- The LLVM backend no longer mistakes a static's storage between two functions for a function (a
+  module with a `static` and functions after it failed to assemble).
 - **The standard map is one open-addressed table** (`lib/hashmap.grl`). Keys, values and their
   hashes are stored densely in insertion order (iteration order and `key_at`/`value_at` are
   unchanged), indexed by one table of slot words (a 32-bit hash tag and the entry index) with

@@ -2353,7 +2353,7 @@ fn rt_print_number(n: u64, newline: u64) -> u64 {
     }
     while 1 {
         raw_putbyte(buf + pos, 48 + remaining % 10);
-        remaining = rt_div(remaining, 10);
+        remaining = remaining / 10;
         if remaining == 0 {
             break;
         }
@@ -2643,8 +2643,12 @@ fn rt_command_run(args: u64, env: u64) -> u64 {
 }
 // Text is UTF-8 even when its source is binary I/O or a byte view.
 fn rt_utf8(s: u64) -> u64 {
+    return rt_utf8_from(s, 0);
+}
+// Checks the bytes from `start` (a character boundary) to the end.
+fn rt_utf8_from(s: u64, start: u64) -> u64 {
     n := rt_len(s);
-    mut i = 0;
+    mut i = start;
     while i < n {
         b := rt_atb(s, i);
         mut count = 0;
@@ -7809,27 +7813,41 @@ fn rt_print_raw(p: u64, n: u64) -> u64 {
 
 // ---- format(...) helpers: append to a byte accumulator, then validate it as text ----
 fn rt_fmt_raw(acc: u64, p: u64, n: u64) -> u64 {
-    mut i = 0;
-    while i < n {
-        rt_pushb(acc, raw_byte(p + i));
-        i += 1;
-    }
+    have := raw_load(acc + 8);
+    rt_reserveb(acc, have + n);
+    rt_copy_bytes(raw_load(acc) + have, p, n);
+    raw_store(acc + 8, have + n);
     return 0;
 }
+// The decimal digits of v, written straight onto the end of acc: one reservation, no buffer, the
+// length found by comparison and two digits per division.
 fn rt_fmt_num(acc: u64, v: u64) -> u64 {
-    buf := rt_alloc(24);
-    mut pos = 24;
-    mut r = v;
-    while true {
-        pos = pos - 1;
-        raw_putbyte(buf + pos, 48 + r % 10);
-        r = rt_div(r, 10);
-        if r == 0 {
-            break;
+    mut n = 1;
+    mut p = 10;
+    while (n < 20) & (p - 1 < v) {
+        n += 1;
+        if n < 20 {
+            p = p * 10;
         }
     }
-    rt_fmt_raw(acc, buf + pos, 24 - pos);
-    rt_free(buf);
+    have := raw_load(acc + 8);
+    rt_reserveb(acc, have + n);
+    base := raw_load(acc) + have;
+    mut r = v;
+    mut k = n;
+    while 1 < k {
+        q := r / 100;
+        d := r - q * 100;
+        t := d / 10;
+        raw_putbyte(base + k - 1, 48 + d - t * 10);
+        raw_putbyte(base + k - 2, 48 + t);
+        r = q;
+        k -= 2;
+    }
+    if k == 1 {
+        raw_putbyte(base, 48 + r);
+    }
+    raw_store(acc + 8, have + n);
     return 0;
 }
 fn rt_fmt_int(acc: u64, v: u64, code: u64) -> u64 {
@@ -9471,29 +9489,6 @@ fn rt_seq_lower(a: u64) -> u64 {
 fn rt_space(b: u64) -> u64 {
     return (b == 32) + (b == 9) + (b == 10) + (b == 13);
 }
-fn rt_seq_trim(a: u64) -> u64 {
-    mut start = 0;
-    mut end = rt_len(a);
-    while start < end {
-        if rt_space(rt_atb(a, start)) == 0 {
-            break;
-        }
-        start += 1;
-    }
-    while start < end {
-        if rt_space(rt_atb(a, end - 1)) == 0 {
-            break;
-        }
-        end -= 1;
-    }
-    out := rt_new();
-    mut i = start;
-    while i < end {
-        rt_pushb(out, rt_atb(a, i));
-        i += 1;
-    }
-    return out;
-}
 fn rt_seq_replace(a: u64, from: u64, to: u64, valid: u64) -> u64 {
     out := rt_new();
     n := rt_len(a);
@@ -9533,30 +9528,6 @@ fn rt_seq_repeat(a: u64, count: u64) -> u64 {
     return out;
 }
 // Splits on one byte; every field is kept (empty ones too), like Rust's split(char).
-fn rt_seq_split(a: u64, sep: u64, valid: u64) -> u64 {
-    parts := rt_new();
-    mut cur = rt_new();
-    n := rt_len(a);
-    mut i = 0;
-    while i < n {
-        b := rt_atb(a, i);
-        if b == sep {
-            if valid {
-                rt_utf8(cur);
-            }
-            rt_push(parts, cur);
-            cur = rt_new();
-        } else {
-            rt_pushb(cur, b);
-        }
-        i += 1;
-    }
-    if valid {
-        rt_utf8(cur);
-    }
-    rt_push(parts, cur);
-    return parts;
-}
 
 // ---- narrow vectors: f32[], u32[], i32[] store 4-byte elements ----
 // Each element is one 32-bit little-endian unit, reached with a single raw_load32/raw_store32 (a

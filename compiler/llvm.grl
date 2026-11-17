@@ -594,8 +594,8 @@ fn is_local_label<a>(name: &a [u8]) -> bool {
 // ---- function splitting ----
 
 // The stream's text functions: a non-.L label in .text up to its `.set .Fn,SIZE` (or the next
-// label or section change for frameless functions). Inline constant pools (`.pushsection` ...
-// `.popsection`) are moved to the data lines.
+// label or section change for frameless functions). Pushed sections (`.pushsection` ...
+// `.popsection`: constant pools, statics) are moved to the data lines.
 fn split<a>(lines: (&a u8[][]), funcs: (&a mut Func[]), data: (&a mut u8[][])) -> unit {
     mut text = 1;
     mut open = 0;
@@ -613,7 +613,9 @@ fn split<a>(lines: (&a u8[][]), funcs: (&a mut Func[]), data: (&a mut u8[][])) -
                 open = 0;
             }
         }
-        if open != 0 && (pool || starts(line, view(".pushsection"))) {
+        // A pushed section is data wherever it appears: inside a function (a constant pool) or
+        // between two (a static's storage, whose label must not open a function).
+        if pool || starts(line, view(".pushsection")) {
             if starts(line, view(".pushsection")) {
                 pool = true;
                 mut d = u8[];
