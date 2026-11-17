@@ -101,9 +101,22 @@ numbers.
 - **C structs.** An `extern "C" record` field `[T; N]` is an array: `d.ids[3]` and `d.ids[3] = 7`
   work in place, `&d.name` is a `&[u8]`, `d.ids = [1, 2, 3, 4]` assigns it whole, and reading the
   whole field (`ids := d.ids`) copies it, as reading an embedded C struct does.
-- **Not yet.** An array cannot be a parameter or result by value, an enum payload or an option
-  (so `pop()` without `!` on a vector of arrays is refused), or a closure's capture, and its
-  elements cannot own anything (strings, vectors). Those come next (docs/design/fixed-arrays.md).
+- **By value.** A function can take and return arrays: `fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3]`.
+  An argument is a copy the callee owns (or the array itself, moved, when it is large or owns
+  data). Until results travel in registers, a returned array comes back through one short-lived
+  heap block, so a hot inner function fills a `&mut [T; N]` instead. `extern "C"` functions take
+  and return arrays only as pointers, as C does.
+- **Owned elements.** `[string; 3]`, `[u64[]; 4]`, `[T?; 2]` and arrays of records that own data
+  hold one owner per element. Such an array always moves, drops its elements when it ends,
+  replaces an element by dropping the old one, and reading `a[i]` borrows the element. A literal
+  gives every element; a repeat `[x; N]` of an owner is refused, as for vectors.
+- **Generic length.** A value parameter can be the length: `fn sum<@n: u64>(a: &[f32; n]) -> f32`
+  is inferred from the argument (`sum(&v)` with `v: [f32; 3]` is `sum<3>`), given explicitly
+  (`zeros<4>()`), or a record's own (`struct Mat<@R: u64, @C: u64> { m: [[f32; C]; R] }`). Each
+  length is a specialisation of its own, so `n` is a constant inside the body.
+- **Not yet.** An array cannot be an enum payload or an option (so `pop()` without `!` on a
+  vector of arrays is refused) or a closure's capture, and an array whose elements own data
+  cannot be a struct field or a vector element. Those come next (docs/design/fixed-arrays.md).
 - **Large arrays** live in the frame, as in C. A frame larger than a page is touched a page at a
   time from the top as the function starts, so running out of stack is always reported as
   `stack overflow` and never steps over the guard page; a frame larger than the 1 MiB stack a task

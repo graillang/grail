@@ -6536,14 +6536,15 @@
   {
     "name": "reject-array-by-value-parameter",
     "reject": true,
-    "source": "fn f(a: [f32; 4]) -> f32 {\n    return a[0];\n}\nfn main() {\n}\n",
-    "diagnostic": "an array as a parameter taken by value is not supported yet"
+    "source": "extern \"C\" fn take(a: [f32; 4]) -> f32 {\n    return a[0];\n}\nfn main() {\n}\n",
+    "diagnostic": "C cannot pass an array by value",
+    "note": "C takes an array parameter as a pointer: `&[T; N]`"
   },
   {
     "name": "reject-array-result",
     "reject": true,
-    "source": "fn f() -> [f32; 4] {\n    return [0.0; 4];\n}\nfn main() {\n}\n",
-    "diagnostic": "an array as a function result is not supported yet"
+    "source": "extern \"C\" fn make() -> [f32; 4] {\n    return [0.0; 4];\n}\nfn main() {\n}\n",
+    "diagnostic": "C cannot return an array by value"
   },
   {
     "name": "reject-array-enum-payload",
@@ -6565,9 +6566,9 @@
     "diagnostic": "an array as a type argument of an enum or an option is not supported yet"
   },
   {
-    "name": "reject-array-owned-element",
+    "name": "reject-array-reference-element",
     "reject": true,
-    "source": "fn main() {\n    a: [string; 2] = [\"a\".text(), \"b\".text()];\n}\n",
+    "source": "fn f<a>(x: &a u64) -> u64 {\n    v: [&a u64; 1] = [x];\n    return 0;\n}\nfn main() {\n}\n",
     "diagnostic": "an array element is a number, a C handle or pointer, a plain or extern record, or another array"
   },
   {
@@ -6726,6 +6727,69 @@
     "note": "arrays of plain records, of extern records and of C words, elements reached in place",
     "source": "extern \"C\" record Px { x: i32, w: f32 }\nstruct V2 {\n    x: f64,\n    y: f64\n}\nfn main() {\n    mut ps: [Px; 2] = [Px { x: 1, w: 0.5 }, Px { x: 2, w: 1.5 }];\n    ps[1].x = 7;\n    println(\"{} {} {}\", ps[0].w, ps[1].x, ps[1].w);\n    mut vs: [V2; 3] = [V2 { x: 1.0, y: 2.0 }, V2 { x: 3.0, y: 4.0 }, V2 { x: 5.0, y: 6.0 }];\n    vs[2] = V2 { x: 9.0, y: 9.5 };\n    println(\"{} {} {}\", vs[0].y, vs[2].x, vs[2].y);\n    mut sum = 0.0;\n    for v in &vs {\n        sum = sum + v.x;\n    }\n    println(sum);\n    mut p: CPtr;\n    ptrs: [CPtr; 2] = [p, p];\n    println(ptrs.len());\n}\n",
     "stdout": "0.5 7 1.5\n2 9 9.5\n13\n2\n"
+  },
+  {
+    "name": "array-by-value",
+    "note": "arrays as arguments and results by value (fixed-arrays.md, A3): an argument is a copy the callee owns, a result comes back boxed until results travel in registers (unboxed stage 3c) and the caller copies it into its own frame and frees the box",
+    "source": "fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {\n    return [a[0] + b[0], a[1] + b[1], a[2] + b[2]];\n}\nfn scaled(x: [f64; 4], k: f64) -> [f64; 4] {\n    mut a = x;\n    for i in 4 {\n        a[i] = a[i] * k;\n    }\n    return a;\n}\nfn sum8(a: [u64; 8]) -> u64 {\n    mut t = 0;\n    for i in 8 {\n        t += a[i];\n    }\n    return t;\n}\nfn squares() -> [u64; 8] {\n    mut out: [u64; 8] = [0; 8];\n    for i in 8 {\n        out[i] = i * i;\n    }\n    return out;\n}\nfn first<T>(x: T, y: T) -> T {\n    return x;\n}\nfn main() {\n    v := add([1.0, 2.0, 3.0], [0.5, 0.5, 0.5]);\n    println(v);\n    p: [f64; 4] = [1.0, 2.0, 3.0, 4.0];\n    q := scaled(p, 2.0);\n    println(\"{} {}\", p, q);\n    s := squares();\n    println(\"{} {}\", s, sum8(s));\n    big: [u64; 8] = [1; 8];\n    println(sum8(big));\n    mut acc: [f32; 3] = [0.0; 3];\n    for i in 3 {\n        acc = add(acc, [1.0, 2.0, 3.0]);\n    }\n    println(acc);\n    println(add(add(v, v), v));\n    println(first([1u8, 2u8], [3u8, 4u8]));\n}\n",
+    "stdout": "[1.5, 2.5, 3.5]\n[1.0, 2.0, 3.0, 4.0] [2.0, 4.0, 6.0, 8.0]\n[0, 1, 4, 9, 16, 25, 36, 49] 140\n8\n[3.0, 6.0, 9.0]\n[4.5, 7.5, 10.5]\n\u0001\u0002\n"
+  },
+  {
+    "name": "array-owned-elements",
+    "note": "arrays of owners - strings, vectors, records that own data, options - move, drop their elements at the end of their scope, replace an element by exchanging it (the old one dropped), and are returned and passed by value; the program ends with nothing allocated",
+    "source": "struct Item {\n    name: string,\n    tags: u64[]\n}\nfn names() -> [string; 3] {\n    return [\"red\".text(), \"green\".text(), \"blue\".text()];\n}\nfn longest(a: &[string; 3]) -> u64 {\n    mut best = 0;\n    for s in a {\n        if s.len() > best {\n            best = s.len();\n        }\n    }\n    return best;\n}\nfn take(a: [string; 3]) -> u64 {\n    return a[0].len() + a[2].len();\n}\nfn main() {\n    mut n = names();\n    println(n);\n    println(longest(&n));\n    n[1] = \"violet\".text();\n    println(\"{} {}\", n[1], n[1].len());\n    m := n;\n    println(take(m));\n    mut items: [Item; 2] = [Item { name: \"a\".text(), tags: u64[1] }, Item { name: \"b\".text(), tags: u64[2, 3] }];\n    items[0].tags.push(9);\n    println(\"{} {}\", items[0].tags, items[1].name);\n    items[1] = Item { name: \"c\".text(), tags: u64[] };\n    println(items[1].name);\n    mut v: [u64[]; 2] = [u64[1], u64[2]];\n    v = [u64[5, 6], u64[]];\n    println(\"{} {}\", v[0], v[1].len());\n    o: [u64?; 2] = [Some(1), None];\n    println(o.len());\n}\n",
+    "stdout": "[\"red\", \"green\", \"blue\"]\n5\nviolet 6\n7\n[1, 9] b\nc\n[5, 6] 0\n2\n"
+  },
+  {
+    "name": "array-owned-reassigned-in-a-loop",
+    "source": "fn main() {\n    mut a: [string; 2] = [\"x\".text(), \"y\".text()];\n    a = [\"p\".text(), \"q\".text()];\n    println(a);\n    for i in 2 {\n        a = [format(\"{}{}\", a[1], i), \"r\".text()];\n    }\n    println(a);\n}\n",
+    "stdout": "[\"p\", \"q\"]\n[\"r1\", \"r\"]\n",
+    "note": "assigning a whole array of owners drops the elements it held; the loop's literal reads the variable while it is built"
+  },
+  {
+    "name": "reject-array-owned-repeat",
+    "reject": true,
+    "source": "fn main() {\n    a: [string; 2] = [\"x\".text(); 2];\n}\n",
+    "diagnostic": "a repeated element must be a plain value"
+  },
+  {
+    "name": "reject-array-owned-copy",
+    "reject": true,
+    "source": "fn main() {\n    a: [string; 2] = [\"x\".text(), \"y\".text()];\n    b := a.copy();\n}\n",
+    "diagnostic": "copy requires an array of plain values"
+  },
+  {
+    "name": "reject-array-owned-moved",
+    "reject": true,
+    "note": "an array of owners moves, whatever its size",
+    "source": "fn main() {\n    a: [string; 1] = [\"x\".text()];\n    b := a;\n    println(a[0]);\n}\n",
+    "diagnostic": "`a` was moved"
+  },
+  {
+    "name": "reject-array-owned-field",
+    "reject": true,
+    "note": "an array of owners is not a field yet: records with drops are not inline until unboxed stage 4",
+    "source": "struct S {\n    names: [string; 2]\n}\nfn main() {\n}\n",
+    "diagnostic": "an array as a field, when its elements own data, is not supported yet"
+  },
+  {
+    "name": "reject-array-owned-vector-element",
+    "reject": true,
+    "source": "fn main() {\n    v: [string; 2][] = [];\n}\n",
+    "diagnostic": "an array as a vector's element, when its elements own data, is not supported yet"
+  },
+  {
+    "name": "array-generic-length",
+    "note": "a value parameter is an array's length (fixed-arrays.md, A4): inferred from the argument's array type, given explicitly, or a record's value parameter; each length is its own specialisation",
+    "source": "fn sum<@n: u64>(a: &[f32; n]) -> f32 {\n    mut t: f32 = 0.0;\n    for i in n {\n        t = t + a[i];\n    }\n    return t;\n}\nfn first<T, @n: u64>(a: &[T; n]) -> u64 {\n    return a.len();\n}\nfn zeros<@n: u64>() -> [u64; n] {\n    return [0; n];\n}\nstruct Mat<@R: u64, @C: u64> {\n    m: [[f32; C]; R]\n}\nfn trace<@k: u64>(m: &Mat<k, k>) -> f32 {\n    mut t: f32 = 0.0;\n    for i in k {\n        t = t + m.m[i][i];\n    }\n    return t;\n}\nfn main() {\n    a: [f32; 3] = [1.0, 2.0, 3.0];\n    b: [f32; 5] = [1.0; 5];\n    println(\"{} {}\", sum(&a), sum(&b));\n    u: [u8; 4] = [1, 2, 3, 4];\n    println(first(&u));\n    z := zeros<4>();\n    println(z);\n    m := Mat<2, 2> { m: [[1.0, 2.0], [3.0, 4.0]] };\n    println(trace(&m));\n}\n",
+    "stdout": "6 5\n4\n[0, 0, 0, 0]\n5\n"
+  },
+  {
+    "name": "reject-array-generic-length-mismatch",
+    "reject": true,
+    "note": "one value parameter fixes one length: two arrays of different lengths do not both fit it",
+    "source": "fn dot<@n: u64>(a: &[f32; n], b: &[f32; n]) -> f32 {\n    return a[0] * b[0];\n}\nfn main() {\n    a: [f32; 3] = [1.0; 3];\n    b: [f32; 4] = [1.0; 4];\n    println(dot(&a, &b));\n}\n",
+    "diagnostic": "one length parameter, two lengths"
   },
   {
     "name": "extern-lib-link-only",

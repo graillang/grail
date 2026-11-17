@@ -307,3 +307,37 @@ frame-limit and 64 KiB-task cases; every case on three targets and LLVM.
   abundance tests all pass but `abgeo_test`, which fails identically with the base compiler
   (`5dc07da`): a regression from the optimiser's f32 narrowing pass (2f6783c), bisected and being
   fixed by /root/optimiser_labels, not from arrays.
+
+## A3 as built
+
+- *By value.* `framed(ty)` is true for every array, so the merged stage-3a paths serve arrays:
+  `return` boxes the array (`frame_box`) and `save_result` copies the box into fresh frame storage
+  and frees it (`unbox_into_frame`), the copy then being adoptable by a binding. Arguments already
+  went through `move_value`, which copies, so a callee owns its copy. The interim box per returned
+  array goes when stage 3c returns small results in registers. `extern "C"` declarations and
+  callbacks refuse an array by value (C passes a pointer).
+- *Owners.* An element that needs a drop is one owning word (`array_elem_bytes`); such an array
+  needs a drop (`needs_drop` follows the element - but a plain or extern record element is bytes
+  that own nothing), always moves (`array_moves`), is not plain (`layout_bits`), and has a drop
+  helper that drops each element in place and frees no storage (`emit_drops`, kind 32; `drop_call`
+  no longer skips it as a framed value). `a[i]` borrows an owner (a boxed record through its own
+  address, `word_reference`), `a[i] = x` exchanges and drops the old element, whole assignment
+  relies on the release of the old value and re-arms the drop flag, a binding gets an owner
+  record of its own (`bind_value` no longer adopts storage for owners), repeats and `.copy()` of
+  owners are refused. Owned arrays are refused as struct fields, vector elements and type
+  arguments until records with drops are inline (stage 4).
+- *Verified.* Self-host fixed point; `array` x86_64 47/0; `array|c-array|cimp` aarch64 46/0,
+  riscv64 46/0, LLVM 42/0; regression filter x86_64 870/0; every owned-element case ends with the
+  end-of-main leak check passing.
+
+## A4 as built
+
+`[T; n]` with `n` a value parameter parses to the concrete array when the parameter is bound (a
+specialised body; a binding behind a kind-10 indirection is unwrapped) and otherwise to kind 32
+with `mode` 0 and the parameter's placeholder as its one type argument. `bind_types` substitutes the
+element (it did not before, so `fn f<T>(a: [T; 4])` would not have specialised) and normalises a
+bound length to the concrete form, so `[f32; 3]` is one type however it was reached; `infer_type`
+binds the parameter from the argument's length. In a template the compile-time checks that need
+`N` (literal count, literal index) wait for the specialisation (`array_parametric`). The interface
+spelling of kind 32 carries the length argument. `[T; 0]` stays refused: a specialisation that
+binds 0 is refused at the use, as a literal 0 is.

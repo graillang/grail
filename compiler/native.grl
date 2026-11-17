@@ -3337,6 +3337,10 @@ fn save_result<a>(c: (&a mut C), ret: u64) -> u64 {
         // Until results travel in registers (stage 3c) a framed result comes back boxed.
         slot := save(&mut c);
         unbox_into_frame(&mut c, slot, ret);
+        if is_array(&mut c, ret) {
+            // Nothing else holds the copy: a binding takes it as its own (bind_value).
+            c.array_fresh.push(slot);
+        }
         return slot;
     }
     if borrowed_object(&mut c, ret) == 0 {
@@ -4297,6 +4301,15 @@ fn invoke<a, b>(c: (&a mut C), name: &b [u8], args: u64[]) -> u64 {
 // Owned values have independent stack flags. Aliased field loads are not owners until moved.
 fn needs_drop<a>(c: (&a mut C), ty: u64) -> bool {
     k := ty_kind(&mut c, ty);
+    // An array owns what its elements own; its storage is never a box of its own.
+    if (k == 32) & (c.raw == 0) {
+        // A plain or extern record element is its bytes inline, owning nothing.
+        elem := ty_arg(&mut c, ty);
+        if array_record_elem(&mut c, elem) {
+            return false;
+        }
+        return needs_drop(&mut c, elem);
+    }
     // A record or enum always owns its fields' storage, and an `impl Drop` adds its call at the head
     // of that helper. The declaration's bit answers the question in one read: emit_drops asks it for
     // every type, and every drop site asks it for every value.
@@ -6421,7 +6434,8 @@ fn drop_ref_name<a>(c: (&a mut C), ty: u64) -> u8[] {
 // A call to a type's drop helper: the `Drop` reached through the compiler's glue is a real edge.
 fn drop_call_out<a>(c: (&a mut C), ty: u64) -> unit {
     // A framed record's words belong to a frame or to the place that holds them: nothing to free.
-    if framed(&mut c, ty) {
+    // An array that owns its elements still drops them, in place (its helper frees no storage).
+    if framed(&mut c, ty) && !array_owned(&mut c, ty) {
         return ();
     }
     name := drop_ref_name(&mut c, ty);
@@ -10422,6 +10436,11 @@ fn intern_env<a>(
     env: u64
 ) -> u64 {
     if (k == 8) & (c.raw == 0) {
+        for i in args.len() {
+            if array_owned(&mut c, args[i]) {
+                array_stage_fail(&mut c, view("a type argument, when its elements own data,"));
+            }
+        }
         // An enum's payload is one word until enums are inline (unboxed-values.md, stage 5).
         if c.decls[arg].is_enum != 0 {
             for i in args.len() {
@@ -12626,8 +12645,24 @@ fn bind_types<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> u64 {
         return project(&mut c, base, mode);
     }
     if (k == 6) || (k == 27) || (k == 28) || (k == 7) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) || (k == 29)
-        || (k == 34) || (k == 35) {
+        || (k == 32) || (k == 34) || (k == 35) {
         arg = bind_types(&mut c, arg, &map);
+    }
+    if k == 32 {
+        // An array whose length a value parameter gives: bound to a constant, it is the concrete
+        // array `[T; N]` - one type, however it was reached.
+        largs := type_args(&mut c, ty);
+        if largs.len() == 1 {
+            mut l = bind_types(&mut c, largs[0], &map);
+            while (l != NO_TYPE) && is_type_id(l) && (ty_kind(&mut c, l) == 10) {
+                l = ty_arg(&mut c, l);
+            }
+            if (l != NO_TYPE) && is_type_id(l) && (ty_kind(&mut c, l) == 31) {
+                return intern_args(&mut c, 32, arg, ty_arg(&mut c, l), u64[], u64[]);
+            }
+            return intern_args(&mut c, 32, arg, 0, u64[], u64[l]);
+        }
+        return intern_args(&mut c, 32, arg, mode, u64[], u64[]);
     }
     mut args = type_args(&mut c, ty);
     for i in args.len() {
@@ -12668,7 +12703,7 @@ fn concrete_type<a>(c: (&a mut C), ty: u64) -> bool {
     }
     arg := ty_arg(&mut c, ty);
     if (k == 6) || (k == 27) || (k == 7) || (k == 10) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) || (k == 29)
-        || (k == 34) || (k == 35) {
+        || (k == 32) || (k == 34) || (k == 35) {
         if !concrete_type(&mut c, arg) {
             return false;
         }
@@ -13048,7 +13083,11 @@ fn source_type_name<a>(c: (&a mut C), ty: u64) -> u8[] {
         inner := source_type_name(&mut c, arg);
         push_bytes(&mut out, view(inner));
         push_bytes(&mut out, view("; "));
-        decimal(&mut out, ty_mode(&mut c, ty));
+        if type_args(&mut c, ty).len() != 0 {
+            out.push(78);
+        } else {
+            decimal(&mut out, ty_mode(&mut c, ty));
+        }
         out.push(93);
         return out;
     }
@@ -13826,9 +13865,25 @@ fn parse_type<a>(c: (&a mut C)) -> u64 {
         advance(&mut c);
         k := parse_type(&mut c);
         if eat(&mut c, view(";")) {
-            // `[T; N]`: N elements of T back to back, in C layout (docs/design/fixed-arrays.md). As a
-            // field of an extern record it still reads and writes as a vector T[] of exactly N
-            // elements, until arrays are fields everywhere.
+            // `[T; N]`: N elements of T back to back, in C layout (docs/design/fixed-arrays.md).
+            // `N` may be a value parameter (`fn f<@n: u64>(a: &[f32; n])`): bound, it is the constant;
+            // in a template it is the parameter itself, carried as the array's one type argument
+            // until a specialisation binds it (bind_types, infer_type).
+            if (kind(&mut c) == 1) && (value_param(&mut c, view(tok_text(&mut c, c.pos))) != 0) && (kind_at(&mut c, c.pos + 1) == 93) {
+                mut lenty = type_level_value(&mut c);
+                // A binding may arrive behind an indirection (kind 10), as value_param_value says.
+                while (lenty != NO_TYPE) && is_type_id(lenty) && (ty_kind(&mut c, lenty) == 10) {
+                    lenty = ty_arg(&mut c, lenty);
+                }
+                expect(&mut c, view("]"));
+                if ty_kind(&mut c, lenty) == 31 {
+                    if ty_arg(&mut c, lenty) == 0 {
+                        fail(&mut c, view("an array length is a positive integer constant"));
+                    }
+                    return type_suffixes(&mut c, intern_args(&mut c, 32, k, ty_arg(&mut c, lenty), u64[], u64[]));
+                }
+                return type_suffixes(&mut c, intern_args(&mut c, 32, k, 0, u64[], u64[lenty]));
+            }
             n := ct_expr(&mut c, 0);
             if (n.ty != 0) || (n.value == 0) {
                 fail(&mut c, view("an array length is a positive integer constant"));
@@ -13900,6 +13955,9 @@ fn type_suffixes<a>(c: (&a mut C), base: u64) -> u64 {
     while is(&mut c, view("[")) {
         advance(&mut c);
         expect(&mut c, view("]"));
+        if array_owned(&mut c, out) {
+            array_stage_fail(&mut c, view("a vector's element, when its elements own data,"));
+        }
         out = vec_of(&mut c, out);
     }
     return out;
@@ -14911,6 +14969,9 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
             }
             if (is_enum != 0) && is_array(&mut c, ty) {
                 array_stage_fail(&mut c, view("a variant's payload"));
+            }
+            if array_owned(&mut c, ty) {
+                array_stage_fail(&mut c, view("a field, when its elements own data,"));
             }
             spots.push(at_field);
             pending.push(Field { name: f, ty: ty, pred: fp });
@@ -16615,10 +16676,6 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     mut ret = 1;
     if eat(&mut c, view("->")) {
         ret = parse_type(&mut c);
-        if is_array(&mut c, ret) {
-            diag_help(&mut c, view("take a `&mut [T; N]` parameter and fill it"));
-            array_stage_fail(&mut c, view("a function result"));
-        }
         ffi_direct_result(&mut c, ret, view("extern C results must be an integer, f32, f64, unit, CStr, handle or cfn"));
     }
     expect(&mut c, view(";"));
@@ -17936,9 +17993,9 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                 }
                 ty = parse_type(&mut c);
             }
-            if is_array(&mut c, ty) {
-                diag_help(&mut c, view("pass it by reference: `&[T; N]` to read it, `&mut [T; N]` to change it"));
-                array_stage_fail(&mut c, view("a parameter taken by value"));
+            if is_array(&mut c, ty) && (export != 0) {
+                diag_help(&mut c, view("C takes an array parameter as a pointer: declare it `&[T; N]` or `&mut [T; N]`"));
+                fail(&mut c, view("C cannot pass an array by value"));
             }
             // `p: T where P`: the parameter's refinement (docs/design/refinements.md).
             mut pp = no_pred();
@@ -18020,9 +18077,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     mut rpred = no_pred();
     if eat(&mut c, view("->")) {
         ret = parse_type(&mut c);
-        if is_array(&mut c, ret) {
-            diag_help(&mut c, view("take a `&mut [T; N]` parameter and fill it"));
-            array_stage_fail(&mut c, view("a function result"));
+        if is_array(&mut c, ret) && (export != 0) {
+            fail(&mut c, view("C cannot return an array by value: return a record that holds it, or fill a `&mut [T; N]`"));
         }
         // `-> T ensures P`: the result's refinement, with `result` naming the value.
         if is(&mut c, view("ensures")) {
@@ -24666,8 +24722,12 @@ fn container_record<a>(c: (&a mut C), ty: u64) -> bool {
 }
 fn layout_bits<a>(c: (&a mut C), alias: u64) -> u64 {
     ty := base_type(&mut c, alias);
-    // An array of plain data is plain: its bytes are stored inline wherever it is held.
+    // An array of plain data is plain: its bytes are stored inline wherever it is held. One that
+    // owns its elements is not (until records with drops are inline, unboxed-values.md stage 4).
     if is_array(&mut c, ty) {
+        if needs_drop(&mut c, ty_arg(&mut c, ty)) {
+            return 0;
+        }
         return 1;
     }
     while c.layout_memo.len() <= ty {
@@ -26479,6 +26539,32 @@ fn infer_type<a, b>(c: (&a mut C), formal: u64, actual: u64, map: (&b mut u64[])
         infer_type(&mut c, arg, aa, &mut map);
         return ();
     }
+    if k == 32 {
+        // The element type, and a value parameter giving the length from the argument's length.
+        infer_type(&mut c, arg, ty_arg(&mut c, actual), &mut map);
+        largs := type_args(&mut c, formal);
+        if largs.len() == 1 {
+            length := intern(&mut c, 31, ty_mode(&mut c, actual));
+            l := largs[0];
+            if (ty_kind(&mut c, l) == 9) && (ty_arg(&mut c, l) < map.len()) && (map[ty_arg(&mut c, l)] != NO_TYPE) {
+                mut old = map[ty_arg(&mut c, l)];
+                while ty_kind(&mut c, old) == 10 {
+                    old = ty_arg(&mut c, old);
+                }
+                if (ty_kind(&mut c, old) == 31) && (ty_arg(&mut c, old) != ty_mode(&mut c, actual)) {
+                    mut msg = copy_bytes(view("one length parameter, two lengths: this argument is `"));
+                    push_bytes(&mut msg, view(source_type_name(&mut c, actual)));
+                    push_bytes(&mut msg, view("` where an earlier one fixed the length at "));
+                    decimal(&mut msg, ty_arg(&mut c, old));
+                    fail(&mut c, view(msg));
+                }
+            }
+            infer_type(&mut c, l, length, &mut map);
+        } else if ty_mode(&mut c, formal) != ty_mode(&mut c, actual) {
+            require_type(&mut c, actual, formal);
+        }
+        return ();
+    }
     if (k == 12) || (k == 20) {
         result := ty_arg(&mut c, actual);
         infer_type(&mut c, arg, result, &mut map);
@@ -26873,6 +26959,11 @@ fn is_array<a>(c: (&a mut C), ty: u64) -> bool {
     }
     return ty_kind(&mut c, base_type(&mut c, ty)) == 32;
 }
+// An array whose length is a value parameter not bound yet (a generic template's): its length is
+// unknown, so nothing that depends on it is judged until the specialisation.
+fn array_parametric<a>(c: (&a mut C), ty: u64) -> bool {
+    return is_array(&mut c, ty) && (type_args(&mut c, base_type(&mut c, ty)).len() != 0);
+}
 fn array_len<a>(c: (&a mut C), ty: u64) -> u64 {
     return ty_mode(&mut c, base_type(&mut c, ty));
 }
@@ -26915,7 +27006,28 @@ fn array_elem_bytes<a>(c: (&a mut C), alias: u64) -> u64 {
     if plain(&mut c, ty) {
         return record_words(&mut c, ty) * 8;
     }
+    if (k == 19) || (k == 22) {
+        return 8;
+    }
+    // An owner - bytes, a string, a vector, a record that owns data, an enum or an option - is the
+    // one word that owns it.
+    if (k == 3) || (k == 4) || (k == 6) || (k == 8) {
+        return 8;
+    }
     return 0;
+}
+// Whether the array's elements own something: such an array moves, drops its elements, and holds
+// them as one word each.
+fn array_owned<a>(c: (&a mut C), ty: u64) -> bool {
+    return is_array(&mut c, ty) && needs_drop(&mut c, array_elem(&mut c, ty));
+}
+// An element `a[i]` reads as a value: a number, a bool, a char or a C word. Anything else -
+// an owner, a record, an array - is reached through its place.
+fn array_read_elem<a>(c: (&a mut C), elem: u64) -> bool {
+    if is_array(&mut c, elem) || array_record_elem(&mut c, elem) || needs_drop(&mut c, elem) {
+        return false;
+    }
+    return true;
 }
 // A record element (an extern record's C bytes or a plain record's words): stored and read as its
 // bytes, reached through its address.
@@ -26939,7 +27051,7 @@ fn array_moves<a>(c: (&a mut C), ty: u64) -> bool {
     if !is_array(&mut c, ty) {
         return false;
     }
-    return 32 < array_bytes(&mut c, ty);
+    return (32 < array_bytes(&mut c, ty)) || needs_drop(&mut c, array_elem(&mut c, ty));
 }
 // A value that is moved rather than copied but owns nothing to drop: an exclusive reference, or an
 // array larger than the copy rule's four words.
@@ -26947,7 +27059,7 @@ fn affine_nodrop<a>(c: (&a mut C), ty: u64) -> bool {
     if c.raw != 0 {
         return false;
     }
-    return (ty_kind(&mut c, ty) == 7) || array_moves(&mut c, ty);
+    return (ty_kind(&mut c, ty) == 7) || (array_moves(&mut c, ty) && !needs_drop(&mut c, ty));
 }
 // The frame of the function just compiled: larger than a page, the output gets stack probes, so the
 // frame is touched a page at a time from the top and can never step over a stack's guard page; larger
@@ -27045,7 +27157,9 @@ fn array_fresh_copy<a>(c: (&a mut C), src: u64, ty: u64) -> u64 {
 // than copying it: the binding's scope ends before the site that made the storage can run again.
 // Anything else (a binding, an element, an assignment's target) gets a copy (move_value).
 fn bind_value<a>(c: (&a mut C), v: Val, ty: u64) -> Val {
-    if is_array(&mut c, ty) {
+    // An array that owns its elements is bound as any owner is: the binding gets an owner record of
+    // its own (move_value), so its scope's end drops the elements.
+    if is_array(&mut c, ty) && !needs_drop(&mut c, ty) {
         for i in c.array_fresh.len() {
             if c.array_fresh[i] == v.t {
                 c.array_fresh[i] = 0;
@@ -27111,6 +27225,10 @@ fn array_store_elem<a>(c: (&a mut C), addr: u64, elem: u64, value: Val) -> unit 
         caddr_store(&mut c, addr, base_type(&mut c, elem), value.t);
         return ();
     }
+    if needs_drop(&mut c, elem) {
+        // The element's owner moves into the array.
+        move_out(&mut c, val(value.t, value.ty));
+    }
     get(&mut c, value.t, view("%rax"));
     get(&mut c, addr, view("%rcx"));
     o(&mut c, view("movq %rax,(%rcx)\n"));
@@ -27143,9 +27261,12 @@ fn array_literal<a>(c: (&a mut C), ty: u64) -> Val {
         v = adopt_value(&mut c, v, estart, c.pos, elem);
         require_type(&mut c, v.ty, elem);
         if (count == 0) & is(&mut c, view(";")) {
+            if needs_drop(&mut c, elem) {
+                fail(&mut c, view("a repeated element must be a plain value; give each owned element"));
+            }
             advance(&mut c);
             r := ct_expr(&mut c, 0);
-            if (r.ty != 0) || (r.value != n) {
+            if ((r.ty != 0) || (r.value != n)) && !array_parametric(&mut c, ty) && (c.ct_unbound == 0) {
                 mut msg = copy_bytes(view("this repeat makes "));
                 decimal(&mut msg, r.value);
                 push_bytes(&mut msg, view(" elements, and `"));
@@ -27178,7 +27299,7 @@ fn array_literal<a>(c: (&a mut C), ty: u64) -> Val {
         }
     }
     expect(&mut c, view("]"));
-    if count != n {
+    if (count != n) && !array_parametric(&mut c, ty) {
         mut msg = copy_bytes(view("this literal has "));
         decimal(&mut msg, count);
         push_bytes(&mut msg, view(" elements, and `"));
@@ -27229,7 +27350,7 @@ fn array_index<a>(c: (&a mut C), value: Val, x: Val, access: u64, base_name: u8[
     if (kind(&mut c) == 2) & (kind_at(&mut c, bstart + 1) == 93) {
         literal = 1;
         konst = literal_value(&mut c, view(tok_text(&mut c, bstart)));
-        if n <= konst {
+        if (n <= konst) && !array_parametric(&mut c, xty) {
             mut msg = copy_bytes(view("index "));
             decimal(&mut msg, konst);
             push_bytes(&mut msg, view(" is out of bounds for `"));
@@ -27258,13 +27379,17 @@ fn array_index<a>(c: (&a mut C), value: Val, x: Val, access: u64, base_name: u8[
         slot = array_element(&mut c, xt, bound.t, xty, proved);
     }
     array_mark(&mut c, slot, elem);
+    // A boxed record held as an owning word is reached by its own address, as in a vector.
+    if !array_record_elem(&mut c, elem) && !is_array(&mut c, elem) {
+        slot = word_reference(&mut c, slot, elem);
+    }
     ty := reference_type(&mut c, elem, access == 2);
     root := place_of(&mut c, xt);
     target := member_place(&mut c, root, 0, elem);
     own(&mut c, slot, ty);
     bind_loan(&mut c, slot, xt, root, access == 2);
     set_target(&mut c, slot, target, slot + 1);
-    if (access == 0) & array_scalar_elem(&mut c, elem) {
+    if (access == 0) & array_read_elem(&mut c, elem) {
         result := array_load_elem(&mut c, slot, elem);
         release_temporary(&mut c, slot);
         return val(result, elem);
@@ -27291,7 +27416,7 @@ fn array_eq<a>(c: (&a mut C), x: u64, y: u64, ty: u64, depth: u64) -> u64 {
     bx := invoke(&mut c, view("rt_aslotu"), three(y, i, imm(&mut c, w)));
     mut a = ax;
     mut b = bx;
-    if array_scalar_elem(&mut c, elem) {
+    if !is_array(&mut c, elem) && !array_record_elem(&mut c, elem) {
         a = array_load_elem(&mut c, ax, elem);
         b = array_load_elem(&mut c, bx, elem);
     }
@@ -27334,7 +27459,7 @@ fn array_text<a>(c: (&a mut C), acc: u64, x: u64, ty: u64, depth: u64) -> unit {
     at := invoke(&mut c, view("rt_aslotu"), three(x, i, imm(&mut c, w)));
     if is_array(&mut c, elem) {
         array_text(&mut c, acc, at, base_type(&mut c, elem), depth + 1);
-    } else if !array_scalar_elem(&mut c, elem) {
+    } else if array_record_elem(&mut c, elem) {
         record_text(&mut c, acc, at, base_type(&mut c, elem), depth + 1);
     } else {
         part := array_load_elem(&mut c, at, elem);
@@ -27503,6 +27628,9 @@ fn array_method<a, b>(c: (&a mut C), xt: u64, xty: u64, input: u64, inty: u64, n
     }
     if same(view(name), view("copy")) {
         expect(&mut c, view(")"));
+        if needs_drop(&mut c, array_elem(&mut c, xty)) {
+            fail(&mut c, view("copy requires an array of plain values; copying owners would duplicate ownership"));
+        }
         copy := array_fresh_copy(&mut c, xt, xty);
         release_temporary(&mut c, input);
         c.array_fresh.push(copy);
@@ -35036,10 +35164,6 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
     mut ret = 1;
     if eat(&mut c, view("->")) {
         ret = parse_type(&mut c);
-        if is_array(&mut c, ret) {
-            diag_help(&mut c, view("take a `&mut [T; N]` parameter and fill it"));
-            array_stage_fail(&mut c, view("a function result"));
-        }
     } else if hinted && (hint_ret != NO_TYPE) {
         ret = hint_ret;
     } else if !is(&mut c, view("{")) {
@@ -42036,7 +42160,12 @@ fn index_assignment<a>(c: (&a mut C)) -> unit {
         }
         require_type(&mut c, v.ty, elem);
         require_write(&mut c, r.t);
-        array_store_elem(&mut c, r.t, elem, v);
+        if needs_drop(&mut c, elem) {
+            // The new owner goes in and the old one comes out, to be dropped with the statement.
+            exchange_into(&mut c, r, v);
+        } else {
+            array_store_elem(&mut c, r.t, elem, v);
+        }
         exchange(&mut c.pos, after);
         return ();
     }
@@ -43839,8 +43968,8 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
                 if ty_kind(&mut c, v.ty) == 7 {
                     byref = 1;
                     refmode = ty_mode(&mut c, v.ty);
-                } else if !array_scalar_elem(&mut c, elemty) {
-                    fail(&mut c, view("for x in a over arrays or records needs &a (each element is borrowed)"));
+                } else if !array_read_elem(&mut c, elemty) {
+                    fail(&mut c, view("for x in a over arrays, records or owners needs &a (each element is borrowed)"));
                 }
             } else if (k == 3) || (k == 4) || (k == 5) {
                 iterable = 1;
@@ -43998,8 +44127,11 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         if arrty != 0 {
             // The loop runs i over 0..N, so the element address needs no check.
             observe(&mut c, seq);
-            at := array_element(&mut c, seq, i, arrty, true);
+            mut at = array_element(&mut c, seq, i, arrty, true);
             array_mark(&mut c, at, elemty);
+            if (byref != 0) && !array_record_elem(&mut c, elemty) && !is_array(&mut c, elemty) {
+                at = word_reference(&mut c, at, elemty);
+            }
             if byref != 0 {
                 rty := reference_type(&mut c, elemty, refmode);
                 root := place_of(&mut c, seq);
@@ -44643,13 +44775,20 @@ fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, t
         ref_store(&mut c, target, fieldty, v.t);
     } else if is_array(&mut c, ty) {
         // An array's bytes go into the storage the variable already has: the value's storage (a
-        // literal's, say) is made again by its own site, so the variable never shares it.
+        // literal's, say) is made again by its own site, so the variable never shares it. What it
+        // owned was dropped by the release above; its drop flag is set again for what it owns now.
         array_copy(&mut c, target, v.t, array_bytes(&mut c, ty));
         old := resource(&mut c, target);
         if old != 0 {
+            flag := c.resources[old - 1].flag;
             place := place_of(&mut c, target);
             if place != 0 {
                 ownership::initialize(&mut c.check, place);
+            }
+            if flag != 0 {
+                o(&mut c, view("movq $1,"));
+                stack_slot(&mut c, flag - 1);
+                c.out.push(10);
             }
         }
     } else {
@@ -45317,7 +45456,8 @@ fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
 }
 fn drop_call<a>(c: (&a mut C), ty: u64) -> unit {
     // A framed record's words belong to a frame or to the place that holds them: nothing to free.
-    if framed(&mut c, ty) {
+    // An array that owns its elements still drops them, in place (its helper frees no storage).
+    if framed(&mut c, ty) && !array_owned(&mut c, ty) {
         return ();
     }
     // A body emitted without its bindings (a template's validation replay) cannot name a helper: the
@@ -45459,6 +45599,32 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                     mark(&mut c, skip);
                     o(&mut c, view("movq %r12,%rdi\n"));
                     call_out(&mut c, view("rt_free"));
+                }
+                if kind == 32 {
+                    // An array drops each element in place; its storage is a frame's (or a box its
+                    // holder frees), never its own to free.
+                    mode := ty_mode(&mut c, ty);
+                    w := array_elem_bytes(&mut c, arg);
+                    head := label(&mut c);
+                    end := label(&mut c);
+                    o(&mut c, view("xorq %r13,%r13\n"));
+                    mark(&mut c, head);
+                    o(&mut c, view("cmpq $"));
+                    on(&mut c, mode);
+                    o(&mut c, view(",%r13\n"));
+                    jump(&mut c, view("jae"), end);
+                    o(&mut c, view("movq %r13,%rax\nimulq $"));
+                    on(&mut c, w);
+                    o(&mut c, view(",%rax\naddq %r12,%rax\n"));
+                    if is_array(&mut c, arg) {
+                        o(&mut c, view("movq %rax,%rdi\n"));
+                    } else {
+                        o(&mut c, view("movq (%rax),%rdi\n"));
+                    }
+                    drop_call(&mut c, arg);
+                    o(&mut c, view("incq %r13\n"));
+                    jump(&mut c, view("jmp"), head);
+                    mark(&mut c, end);
                 }
                 if kind == 6 {
                     // Inline elements (plain or C records) own nothing: only the buffer is freed.
@@ -46186,10 +46352,17 @@ fn iface_w_type<a>(c: (&a mut C), out: (&a mut u8[]), deps: (&a mut u64[]), ty: 
         iface_wv(&mut body, arg);
     } else if k == 5 {
         // A view: mode and slots are the whole type.
+    } else if k == 32 {
+        // An array: its element, then its length's type argument when a value parameter gives the
+        // length (none when the length is the constant in the mode).
+        iface_w_type(&mut c, &mut body, &mut deps, arg);
+        iface_wv(&mut body, args.len());
+        for i in args.len() {
+            iface_w_type(&mut c, &mut body, &mut deps, args[i]);
+        }
     } else if (k == 6) || (k == 7) || (k == 10) || (k == 11) || (k == 13) || (k == 14) || (k == 16) || (k == 26)
-        || (k == 27) || (k == 29) || (k == 32) || (k == 34) || (k == 35) {
-        // One nested type in the payload (for an array `[T; N]`, `T`; the mode is `N`; an `Atomic<T>`
-        // carries its element since format 8).
+        || (k == 27) || (k == 29) || (k == 34) || (k == 35) {
+        // One nested type in the payload (an `Atomic<T>` carries its element since format 8).
         iface_w_type(&mut c, &mut body, &mut deps, arg);
     } else if k == 8 {
         owner := c.decls[arg].module.copy();
@@ -46479,8 +46652,29 @@ fn iface_r_type<a>(p: (&a mut IR), c: (&a mut C)) -> u64 {
         } else {
             id = iface_intern_args(&mut p, &mut c, tag, inner, mode, rs, u64[]);
         }
+    } else if tag == 32 {
+        if p.phase == 0 {
+            p.rtext.push(40);
+            push_bytes(&mut p.rtext, view(iface_plain_word(tag)));
+            iface_spell_flags(&mut p, mode, &rs);
+            p.rtext.push(32);
+        }
+        inner := iface_r_type(&mut p, &mut c);
+        n := iface_rv(&mut p);
+        mut largs = u64[];
+        for i in n {
+            if p.phase == 0 {
+                p.rtext.push(32);
+            }
+            largs.push(iface_r_type(&mut p, &mut c));
+        }
+        if p.phase == 0 {
+            p.rtext.push(41);
+        } else {
+            id = iface_intern_args(&mut p, &mut c, tag, inner, mode, rs, largs);
+        }
     } else if (tag == 6) || (tag == 7) || (tag == 11) || (tag == 13) || (tag == 14) || (tag == 16)
-        || (tag == 26) || (tag == 27) || (tag == 29) || (tag == 32) || (tag == 34) || (tag == 35) {
+        || (tag == 26) || (tag == 27) || (tag == 29) || (tag == 34) || (tag == 35) {
         if (p.phase == 0) & (tag != 35) {
             p.rtext.push(40);
             push_bytes(&mut p.rtext, view(iface_plain_word(tag)));
