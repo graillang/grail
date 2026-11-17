@@ -110,7 +110,9 @@ and Zig, written the way each language is usually written:
 - **`strings`: every piece is a new string.** `split` returns owned copies of every line and every
   field, and `format` builds a new string per record, where Rust's and Zig's splits hand out slices
   of the input. The standard library also has no float parser (the JSON module carries one
-  privately), so the Grail twin parses a two-decimal number as hundredths over 100.0.
+  privately), so the Grail twin parses a two-decimal number as hundredths over 100.0. (Since
+  replaced: `split` hands out views, `parse_f64` is shared with `json`, and `append_format` writes
+  into the output; a view is still a small allocation of its own.)
 - **`json`**: behind by a similar margin to the dynamic-value parsers of the other languages; where
   its instructions go has not been profiled yet.
 - **`bintrees`** is where Grail does best: its allocator's fast path makes it execute fewer

@@ -1,13 +1,15 @@
 module strings;
 use core;
 use iter;
+use float;
 
 // Byte-oriented text helpers, as methods on `[u8]` (any byte text: a byte vector, a string, a view
 // or a slice reads the same way). A value receiver is viewed for the call, so `bytes.find(x)` and
 // `view(bytes).find(x)` are the same call.
 //
-// `starts_with`, `ends_with`, `trim`, `split`, `replace`, `repeat`, `chars`, `to_upper`, `to_lower`
-// and `contains` are the compiler's own methods on byte text; the rest live here.
+// `starts_with`, `ends_with`, `replace`, `repeat`, `chars`, `to_upper`, `to_lower` and `contains`
+// are the compiler's own methods on byte text; the rest live here, including `split`, `trim`,
+// `lines` and `split_whitespace`, which return views of the text rather than copies.
 
 impl [u8] {
     // Index of the first occurrence of `needle`, or None.
@@ -52,6 +54,76 @@ impl [u8] {
             value = next + (b - 48);
         }
         return Some(value);
+    }
+    // A decimal floating-point number, correctly rounded to the nearest double (ties to even), as
+    // Rust's `str::parse::<f64>` reads it: an optional sign, then digits with an optional `.` (at
+    // least one digit on one side of it), then an optional exponent `e`/`E` with an optional sign
+    // and digits; or `inf`, `infinity` or `nan` in any case. A value beyond the largest double is an
+    // infinity and one below the smallest subnormal is a zero, both with the sign. None for anything
+    // else, including surrounding whitespace.
+    pub fn parse_f64(&self) -> f64? {
+        n := self.len();
+        mut i: u64 = 0;
+        mut negative = false;
+        if (n != 0) && ((self[0] == 43) || (self[0] == 45)) {
+            negative = self[0] == 45;
+            i = 1;
+        }
+        if (i < n) && (((self[i] | 32) == 105) || ((self[i] | 32) == 110)) {
+            rest := self[i: n];
+            if strings::ascii_lower_is(rest, "inf") || strings::ascii_lower_is(rest, "infinity") {
+                return Some(float::from_bits_signed(float::INFINITY_BITS, negative));
+            }
+            if strings::ascii_lower_is(rest, "nan") {
+                return Some(float::from_bits_signed(9221120237041090560, negative));
+            }
+            return None;
+        }
+        int_start := i;
+        while (i < n) && (self[i] >= 48) && (self[i] <= 57) {
+            i += 1;
+        }
+        int_end := i;
+        mut frac_start = i;
+        mut frac_end = i;
+        if (i < n) && (self[i] == 46) {
+            i += 1;
+            frac_start = i;
+            while (i < n) && (self[i] >= 48) && (self[i] <= 57) {
+                i += 1;
+            }
+            frac_end = i;
+        }
+        if (int_end == int_start) && (frac_end == frac_start) {
+            return None;
+        }
+        mut exponent: i64 = 0;
+        if (i < n) && ((self[i] == 101) || (self[i] == 69)) {
+            i += 1;
+            mut exp_negative = false;
+            if (i < n) && ((self[i] == 43) || (self[i] == 45)) {
+                exp_negative = self[i] == 45;
+                i += 1;
+            }
+            if (i == n) || (self[i] < 48) || (self[i] > 57) {
+                return None;
+            }
+            // Saturate: anything this large is out of range or zero whatever the digits.
+            while (i < n) && (self[i] >= 48) && (self[i] <= 57) {
+                if exponent < 1000000000000i64 {
+                    exponent = exponent * 10 + i64(self[i] - 48);
+                }
+                i += 1;
+            }
+            if exp_negative {
+                exponent = -exponent;
+            }
+        }
+        if i != n {
+            return None;
+        }
+        magnitude := float::digits_to_bits(self[int_start: int_end], self[frac_start: frac_end], exponent);
+        return Some(float::from_bits_signed(magnitude, negative));
     }
     // An optional '-' or '+', then decimal digits; None for bad input or a value outside i64.
     pub fn parse_i64(&self) -> i64? {
@@ -191,50 +263,104 @@ impl [u8] {
         }
         return out.text();
     }
-    // The lines of the text, split at '\n' with a carriage return of a CRLF pair dropped. The last
-    // line has no trailing newline; text that ends in a newline does not produce a final empty line.
-    pub fn lines(&self) -> u8[][] {
-        mut parts = u8[][];
-        mut current = u8[];
-        mut saw = false;
-        for b in self {
-            if b == 10 {
-                mut line = current;
-                if (line.len() != 0) && (line[line.len() - 1] == 13) {
-                    line.truncate(line.len() - 1);
-                }
-                parts.push(line);
-                current = u8[];
-                saw = true;
-            } else {
-                current.push(b);
-                saw = false;
+
+    // ---- pieces of the text: views that borrow it, like Rust's `split`, `trim` and `lines` on
+    // `str`. Each piece is a view into the receiver (a `string`, a byte vector or a view), so the
+    // text must outlive the pieces and cannot change while they are live. `split_owned` copies
+    // the pieces, for one that has to outlive the text (`piece.copy()` copies one).
+    // The pieces between occurrences of the byte `sep`, in order: n separators give n + 1 pieces,
+    // empty ones included ("a,,b" gives "a", "", "b"; "" gives one empty piece).
+    pub fn split<a>(self: &a [u8], sep: u64) -> (&a [u8])[] {
+        mut out = (&a [u8])[];
+        n := self.len();
+        mut start: u64 = 0;
+        for i in n {
+            if self[i] == sep {
+                out.push(self[start: i]);
+                start = i + 1;
             }
         }
-        if current.len() != 0 {
-            parts.push(current);
-        }
-        return parts;
+        out.push(self[start: n]);
+        return out;
     }
-    // The words of the text, split at runs of spaces, tabs, newlines and carriage returns.
-    pub fn split_whitespace(&self) -> u8[][] {
-        mut parts = u8[][];
-        mut current = u8[];
-        for b in self {
-            skip := (b == 32) || (b == 9) || (b == 10) || (b == 13);
-            if skip {
-                if current.len() != 0 {
-                    parts.push(current);
-                    current = u8[];
-                }
-            } else {
-                current.push(b);
+    // `split` with each piece copied out.
+    pub fn split_owned(&self, sep: u64) -> u8[][] {
+        mut out = u8[][];
+        n := self.len();
+        mut start: u64 = 0;
+        for i in n {
+            if self[i] == sep {
+                out.push(self[start: i].copy());
+                start = i + 1;
             }
         }
-        if current.len() != 0 {
-            parts.push(current);
+        out.push(self[start: n].copy());
+        return out;
+    }
+    // Without leading and trailing spaces, tabs, newlines and carriage returns.
+    pub fn trim<a>(self: &a [u8]) -> (&a [u8]) {
+        mut start: u64 = 0;
+        mut end = self.len();
+        while (start < end) && strings::blank(self[start]) {
+            start += 1;
         }
-        return parts;
+        while (end > start) && strings::blank(self[end - 1]) {
+            end -= 1;
+        }
+        return self[start: end];
+    }
+    pub fn trim_start<a>(self: &a [u8]) -> (&a [u8]) {
+        mut start: u64 = 0;
+        while (start < self.len()) && strings::blank(self[start]) {
+            start += 1;
+        }
+        return self[start: self.len()];
+    }
+    pub fn trim_end<a>(self: &a [u8]) -> (&a [u8]) {
+        mut end = self.len();
+        while (end > 0) && strings::blank(self[end - 1]) {
+            end -= 1;
+        }
+        return self[0: end];
+    }
+    // The lines, split at '\n' with the carriage return of a CRLF pair dropped. The last line has
+    // no trailing newline; text that ends in a newline does not produce a final empty line.
+    pub fn lines<a>(self: &a [u8]) -> (&a [u8])[] {
+        mut out = (&a [u8])[];
+        n := self.len();
+        mut start: u64 = 0;
+        for i in n {
+            if self[i] == 10 {
+                mut end = i;
+                if (end > start) && (self[end - 1] == 13) {
+                    end -= 1;
+                }
+                out.push(self[start: end]);
+                start = i + 1;
+            }
+        }
+        if start < n {
+            out.push(self[start: n]);
+        }
+        return out;
+    }
+    // The words, split at runs of spaces, tabs, newlines and carriage returns.
+    pub fn split_whitespace<a>(self: &a [u8]) -> (&a [u8])[] {
+        mut out = (&a [u8])[];
+        n := self.len();
+        mut start: u64 = 0;
+        for i in n {
+            if strings::blank(self[i]) {
+                if i > start {
+                    out.push(self[start: i]);
+                }
+                start = i + 1;
+            }
+        }
+        if n > start {
+            out.push(self[start: n]);
+        }
+        return out;
     }
 }
 
@@ -291,6 +417,23 @@ impl u8[][] {
                 }
             }
             part := &self[i];
+            for b in part {
+                out.push(b);
+            }
+        }
+        return out;
+    }
+}
+
+// The same for pieces that are views (what `split`, `lines` and `split_whitespace` give).
+impl<a> (&a [u8])[] {
+    pub fn join_with(&self, separator: (&[u8])) -> u8[] {
+        mut out = u8[];
+        for i in self.len() {
+            if i > 0 {
+                out.append(separator);
+            }
+            part := self[i];
             for b in part {
                 out.push(b);
             }
@@ -493,4 +636,24 @@ pub fn chars<a>(text: (&a [u8])) -> iter::Iter<char> {
         at = at + step.1;
         return Some(step.0);
     });
+}
+// Whether `text` is `word` (lowercase ASCII) in any case.
+fn ascii_lower_is<a, b>(text: &a [u8], word: &b [u8]) -> bool {
+    if text.len() != word.len() {
+        return false;
+    }
+    for i in text.len() {
+        mut b = text[i];
+        if (b >= 65) && (b <= 90) {
+            b += 32;
+        }
+        if b != word[i] {
+            return false;
+        }
+    }
+    return true;
+}
+// The bytes `trim` removes: space, tab, newline, carriage return.
+fn blank(b: u64) -> bool {
+    return (b == 32) || (b == 9) || (b == 10) || (b == 13);
 }
