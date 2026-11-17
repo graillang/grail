@@ -2062,6 +2062,33 @@ pub fn command<a>(args: (&a u8[][])) -> u64 {
         }
         return 0;
     }
+    // `--records-units IN.s PACK -o OUT.o`: the record path with function units kept in PACK (read if
+    // present, rewritten), as a store build would use it.
+    if (args.len() == 5) && at_word(view(args[0]), 0, args[0].len(), view("--records-units")) {
+        text := host::read_file(view(args[1]));
+        recs := records_of(0, text);
+        mut previous = u8[];
+        if host::exists(view(args[2])) != 0 {
+            previous = host::read_file(view(args[2]));
+        }
+        r := assemble_units_records(0, &recs, previous);
+        if r.error.len() != 0 {
+            mut said = view("grail asm: ").copy();
+            said.append(view(r.error));
+            said.push(10);
+            host::print(view(said));
+            return 1;
+        }
+        host::write_file(view(args[2]), view(r.units));
+        mut said = view("units: ").copy();
+        num(&mut said, r.replayed);
+        said.append(view(" replayed, "));
+        num(&mut said, r.encoded);
+        said.append(view(" encoded"));
+        said.push(10);
+        host::print(view(said));
+        return host::write_file(view(args[4]), view(r.object));
+    }
     // `--units PACK`: replay the function units PACK holds and write this build's there (S5).
     mut pack = u8[];
     if (args.len() == 5) && at_word(view(args[3]), 0, args[3].len(), view("--units")) {
@@ -6107,17 +6134,145 @@ pub fn assemble_records<a>(target: u64, r: (&a Rec)) -> Result {
         if o.err.len() != 0 {
             break;
         }
+        rec_row_run(&mut o, r, j);
+    }
+    return finish(&mut o);
+}
+
+// Whether row j is a function's `.type NAME,@function` text row: where a unit starts.
+fn rec_unit_row<a, b>(o: (&a A), r: (&b Rec), j: u64) -> bool {
+    return (r.mn[j] == 0) && chunk_line(o, r.ls[j], r.le[j]);
+}
+
+// One object from instruction records with function units (as `assemble_units` for text): a unit
+// is the rows from one `.type NAME,@function` row to the next, keyed by its row count and two
+// hashes over every field of those rows and the names and text they refer to. `previous` is the
+// last build's `units`; an unchanged function's unit is replayed, not encoded.
+pub fn assemble_units_records<a>(target: u64, r: (&a Rec), previous: u8[]) -> Result {
+    mut o = new();
+    if target == 3 {
+        o.coff = 1;
+        named_text_coff(&mut o);
+    }
+    o.src = r.text.copy();
+    o.units_in = previous;
+    o.units_on = 1;
+    units_index(&mut o);
+    rows := r.mn.len();
+    mut j = 0;
+    while (j < rows) && (o.err.len() == 0) {
+        if rec_unit_row(&o, r, j) && boundary_ok(&o) {
+            chunk_finish(&mut o, j);
+            mut end = j + 1;
+            while (end < rows) && !rec_unit_row(&o, r, end) {
+                end += 1;
+            }
+            rec_hash(&mut o, r, j, end);
+            c1 := o.ex_h1;
+            c2 := o.ex_h2;
+            u := unit_find(&o, end - j, c1, c2);
+            if (u != 0) && unit_replay(&mut o, u) {
+                if o.err.len() != 0 {
+                    break;
+                }
+                mut at = o.ui_at[u - 1];
+                mut bad = 0;
+                start := rs(&o, &mut at, &mut bad);
+                wv(&mut o.units_out, end - j);
+                wv(&mut o.units_out, c1);
+                wv(&mut o.units_out, c2);
+                ws(&mut o.units_out, o.units_in[start: at]);
+                o.replayed += 1;
+                j = end;
+                continue;
+            }
+            chunk_begin(&mut o, j, end, c1, c2);
+        }
+        rec_row_run(&mut o, r, j);
+        j += 1;
+    }
+    if o.err.len() == 0 {
+        chunk_finish(&mut o, rows);
+    }
+    r2 := finish(&mut o);
+    if (r2.error.len() != 0) && (o.replayed != 0) {
+        // A replay that did not fit this build: encode everything, as assemble_units does.
+        return assemble_units_records(target, r, u8[]);
+    }
+    return r2;
+}
+
+fn mix<a>(o: (&a mut A), v: u64) {
+    o.ex_h1 = wrapping_mul(o.ex_h1 ^ v, 0x100000001b3);
+    o.ex_h2 = wrapping_add(wrapping_mul(o.ex_h2, 0x9e3779b97f4a7c15), wrapping_add(v, 1));
+}
+
+fn mix_bytes<a, b>(o: (&a mut A), bytes: &b [u8]) {
+    mix(&mut o, bytes.len());
+    for i in bytes.len() {
+        mix(&mut o, bytes[i]);
+    }
+}
+
+// The two unit hashes over rows j..end: every field, a text row's line, a symbol's name.
+fn rec_hash<a, b>(o: (&a mut A), r: (&b Rec), j: u64, end: u64) {
+    o.ex_h1 = 0xcbf29ce484222325;
+    o.ex_h2 = 0;
+    mut i = j;
+    while i < end {
+        mix(&mut o, r.mn[i]);
+        if r.mn[i] == 0 {
+            mix_bytes(&mut o, view(r.text[r.ls[i]: r.le[i]]));
+        } else {
+            mix(&mut o, r.pre[i]);
+            mix(&mut o, r.k0[i]);
+            mix(&mut o, r.k1[i]);
+            mix(&mut o, r.k2[i]);
+            mix(&mut o, r.r0[i]);
+            mix(&mut o, r.r1[i]);
+            mix(&mut o, r.r2[i]);
+            mix(&mut o, r.base[i]);
+            mix(&mut o, r.index[i]);
+            mix(&mut o, r.scale[i]);
+            mix(&mut o, r.seg[i]);
+            mix(&mut o, r.rip[i]);
+            mix(&mut o, r.dhas[i]);
+            mix(&mut o, r.dneg[i]);
+            mix(&mut o, r.ddiv[i]);
+            mix(&mut o, r.dadd[i]);
+            mix(&mut o, r.dmod[i]);
+            mix(&mut o, r.ineg[i]);
+            mix(&mut o, r.idiv[i]);
+            mix(&mut o, r.iadd[i]);
+            if r.dsym[i] != 0 {
+                mix_bytes(&mut o, view(r.pool[r.dsym[i] - 1: r.dsym[i] - 1 + r.dlen[i]]));
+            } else {
+                mix(&mut o, 0);
+            }
+            if r.isym[i] != 0 {
+                mix_bytes(&mut o, view(r.pool[r.isym[i] - 1: r.isym[i] - 1 + r.ilen[i]]));
+            } else {
+                mix(&mut o, 0);
+            }
+        }
+        i += 1;
+    }
+}
+
+// Row j of a record stream: a text row read as its line, an instruction row encoded from fields.
+fn rec_row_run<a, b>(o: (&a mut A), r: (&b Rec), j: u64) {
+    {
         if r.mn[j] == 0 {
             o.line += 1;
             o.at = r.ls[j];
             o.ls = r.ls[j];
             o.le = r.le[j];
             read_line(&mut o);
-            continue;
+            return ();
         }
         if o.cur != 0 {
             fail(&mut o, view("an instruction outside .text"));
-            break;
+            return ();
         }
         o.ls = 0;
         o.le = 0;
@@ -6160,5 +6315,4 @@ pub fn assemble_records<a>(target: u64, r: (&a Rec)) -> Result {
         o.im_add = r.iadd[j];
         execute(&mut o, r.mn[j]);
     }
-    return finish(&mut o);
 }

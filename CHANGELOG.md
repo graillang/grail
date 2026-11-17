@@ -3,6 +3,9 @@
 - macOS arm64 builds assemble in the compiler too: `compiler/macho.grl` writes Mach-O objects
   identical to clang's (`grail asm --target macos-aarch64`). Intel macOS still assembles with clang.
 
+- The SIMD benchmarks (`bench/simd_dot`, `simd_mat4`, `simd_aos`) take `check` for a three-round run that
+  prints only the result, and the corpus pins those results on every target and backend. A
+  benchmark run with no argument exits 2, as every `main(arg: &[u8])` program does.
 - **A closure copies a captured shared reference.** `r := &x` captured by two closures used to fail
   with "`r` was moved" at the second; a `&T` is now copied into each closure, which holds the shared
   loan, as in Rust (an exclusive `&mut`, and a shared slice value, which owns its header, still move).
