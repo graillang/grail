@@ -2,8 +2,8 @@
 
 - **Allocation costs half what it did.** The size class of a small request is a compare chain
   instead of a doubling loop, and the allocator's address arithmetic no longer checks for overflow:
-  about 50 instructions per allocation instead of 96, 25 per free instead of 43. `grail check` of a
-  104k-line program does 16% fewer instructions and uses 9% less CPU. And in a release build the
+  about 38 instructions per allocation instead of 96, 30 per free instead of 44. `grail check` of a
+  104k-line program does 21% fewer instructions and uses 10% less CPU. And in a release build the
   runtime functions that read the thread pointer - the allocator's threaded path, the current task,
   the mutex - are now optimised by LLVM like the rest; they were left in unoptimised code.
 
