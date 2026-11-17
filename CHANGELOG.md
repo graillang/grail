@@ -6,6 +6,10 @@
   2048x2048 image: Grail-LLVM 25.8G -> 6.9G instructions, Grail-native 128G -> 38.6G. A case pins
   division, remainder and multiplication at the edges of every width (checked and wrapping), and
   `MIN / -1`, `MIN * -1`, division and remainder by zero and products one past the maximum abort.
+- Fixed: the per-loop stability fact and the LLVM backend's indirect-call fact both used fact kind
+  7, so a stable vector whose slot number matched an indirect call's ordinal (with a loop head
+  label of 6 or less) could make the lifter pass that call too few arguments. The stability fact
+  is now kind 8.
 - Fixed (release builds): a function calling a blocking `extern "C"` function was left unoptimised
   since the foreign-call marker landed - the marker's locked counter, thread-pointer read and
   register save around `rt_foreign_lost` were text the LLVM lifter refused. It now lifts them
@@ -13,6 +17,9 @@
   and calls to Grail's own functions no longer trip the vector-register guard meant for C calls.
   tools/test-facts.mjs checks that a blocking-extern caller is lifted.
 
+- `grail check` no longer builds the list of SIMD type names for every identifier it reads: names
+  that cannot be one (wrong length, first letter or `x` position) are rejected first. This was 7% of
+  checking a large program since the SIMD types arrived.
 - The optimiser parses each distinct instruction line once per compile and replays the record for
   its repeats (a label operand is numbered again, the frame-slot bookkeeping redone): byte-identical
   output, 2.6% fewer instructions for a 4000-function file. The plan for taking the remaining text

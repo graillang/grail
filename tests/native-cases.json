@@ -18526,5 +18526,14 @@
     "source": "fn apply(f: Fn(u64) -> u64, x: u64) -> u64 {\n    return f(x) + f(x + 1);\n}\nfn each(n: u64, f: FnMut(u64) -> unit) -> unit {\n    mut call = f;\n    for i in n { call(i); }\n}\nfn main() -> u64 {\n    k := host::argc();\n    v := u64[10, 20, 30];\n    mut total = 0;\n    for i in 1000 {\n        owned := u64[i, i + 1];\n        r := &v;\n        total += apply(|x: u64| -> u64 x + r[0] + owned.len() + k, i);\n    }\n    mut seen = 0;\n    each(5, |i: u64| { seen += i * k; });\n    println(\"{} {} {}\", total, seen, v.len());\n    return 0;\n}\n",
     "stdout": "1026000 0 3\n",
     "note": "call ABI S6 (B): a closure literal passed to a plain non-Owned Fn(..) / FnMut(..) parameter gets its environment in the caller's frame (frame_alloc with an aggregate fact, an in-place drop as its drop word); it captures an owned vector made per iteration, a borrowed vector and a scalar, and is called twice; the FnMut closure mutates its own copy of a captured variable (captures are by value). valgrind-clean on both backends."
+  },
+  {
+    "name": "simd-every-type-name",
+    "source": "fn main() {\n    println(f32x4::splat(1.5).lane(0));\n    println(f32x8::splat(1.5).lane(7));\n    println(f64x2::splat(2.5).lane(1));\n    println(f64x4::splat(2.5).lane(3));\n    println(i32x4::splat(-3).lane(0));\n    println(i32x8::splat(-3).lane(7));\n    println(i64x2::splat(-4).lane(1));\n    println(i64x4::splat(-4).lane(3));\n    println(u8x16::splat(200).lane(15));\n    println(u8x32::splat(200).lane(31));\n    println(u32x4::splat(7).lane(3));\n    println(u32x8::splat(7).lane(7));\n    a: m8x16 := u8x16::splat(1).lt(u8x16::splat(2));\n    b: m8x32 := u8x32::splat(1).lt(u8x32::splat(2));\n    c: m32x4 := i32x4::splat(1).lt(i32x4::splat(2));\n    d: m32x8 := i32x8::splat(1).lt(i32x8::splat(2));\n    e: m64x2 := i64x2::splat(1).lt(i64x2::splat(2));\n    f: m64x4 := i64x4::splat(1).lt(i64x4::splat(2));\n    println(\"{} {} {} {} {} {}\", a.any(), b.any(), c.any(), d.any(), e.any(), f.any());\n}\n",
+    "stdout": "1.5\n1.5\n2.5\n2.5\n-3\n-3\n-4\n-4\n200\n200\n7\n7\ntrue true true true true true\n",
+    "targets": [
+      "x86_64"
+    ],
+    "note": "every SIMD type name (S1 and S2) is recognised as one: is_simd_name rejects by shape before it looks a name up in its table, and the table is the one list of names"
   }
 ]

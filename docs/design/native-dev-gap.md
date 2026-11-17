@@ -30,7 +30,7 @@ addressed from their own registers; SSE liveness by register number; and (gaps15
    goes to a different register. Emitting `OPsd` on the destination's own register (or the left
    operand's, when it is not used again) removes the copies at the source: about 2 instructions per
    float operation, up to ~400 per nbody step (~15% of what remains).
-2. **Owned-vector header hoisting** (item 6, the per-loop stability fact kind 7 from gaps15-bce):
+2. **Owned-vector header hoisting** (item 6, the per-loop stability fact, kind 8, from gaps15-bce):
    data and length of a vector the loop cannot change loaded once before the loop. fnv's hash loop
    reloads the header every byte (~3 instructions of 11), sieve's inner loop the same.
 3. **CSE of index arithmetic within an iteration** (`i*3` computed once per body in nbody).

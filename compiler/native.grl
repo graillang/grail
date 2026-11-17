@@ -41489,6 +41489,20 @@ fn simd_named<a, b>(c: (&a mut C), n: &b [u8]) -> u64 {
     return intern_full(&mut c, 36, int_type(&mut c, b, 1), l + 1024, u64[]);
 }
 fn is_simd_name<a>(n: &a [u8]) -> bool {
+    // Asked of every name a primary starts with, so the common answer comes first: every SIMD type
+    // name is a lane letter (f, i, u, m), a width and `x` at index 2 or 3, four to six bytes. Only a
+    // name of that shape is looked up in the list below, which stays the one table of SIMD names
+    // (building it for every identifier was a twelfth of a check).
+    if (n.len() < 4) || (6 < n.len()) {
+        return false;
+    }
+    k := n[0];
+    if (k != 102) && (k != 105) && (k != 117) && (k != 109) {
+        return false;
+    }
+    if (n[2] != 120) && (n[3] != 120) {
+        return false;
+    }
     names := u8[][copy_bytes(view("f32x4")), copy_bytes(view("f32x8")), copy_bytes(view("f64x2")), copy_bytes(view("f64x4")), copy_bytes(view("i32x4")), copy_bytes(view("i32x8")), copy_bytes(view("i64x2")), copy_bytes(view("i64x4")), copy_bytes(view("u8x16")), copy_bytes(view("u8x32")), copy_bytes(view("u32x4")), copy_bytes(view("u32x8")), copy_bytes(view("m8x16")), copy_bytes(view("m8x32")), copy_bytes(view("m32x4")), copy_bytes(view("m32x8")), copy_bytes(view("m64x2")), copy_bytes(view("m64x4"))];
     for i in names.len() {
         if same(view(n), view(names[i])) {
@@ -46596,7 +46610,7 @@ fn pv_loop_mark<a>(c: (&a C)) -> u64[] {
 }
 // After a loop's body: one fact per sequence the body indexed and nothing in it killed - no write, no
 // mutable loan, no call that could reach it - so its header's data and length are what they were at
-// the loop head on every iteration (kind 7, docs/design/native-range-facts.md). The optimiser's
+// the loop head on every iteration (kind 8, docs/design/native-range-facts.md). The optimiser's
 // descriptor hoisting reads it; the unchecked accessor carries the per-access proof itself.
 fn pv_loop_facts<a>(c: (&a mut C), at: (&a u64[]), head: u64) -> unit {
     if !pv_ir_live(&c) || (c.facts_fn.len() == 0) {
