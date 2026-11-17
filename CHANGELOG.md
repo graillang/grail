@@ -1,5 +1,9 @@
 ## Unreleased
 
+- **`grail build --release` no longer hangs on large programs.** The LLVM lifter's name table was
+  sized once from a guess and never grew; a program with more names than the guess (the Abundance
+  port's `abgeo` and `cache`) filled it, and the next lookup of a missing name probed for ever. The
+  table now doubles before it is half full.
 - **SIMD `.bits()` gives the same NaN bits on every target too.** A NaN lane of an `f32x*` or
   `f64x*` vector now reads as `0x7FC00000` or `0x7FF8000000000000`, as scalar `bits(x)` does;
   before, x86-64 gave negative NaNs (and a release build could mix the two), ARM and RISC-V

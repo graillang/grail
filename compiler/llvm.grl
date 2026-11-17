@@ -4713,7 +4713,8 @@ fn set_add<a, b>(s: (&a mut Set), key: &b [u8]) -> unit {
 struct Map {
     keys: u8[][],
     vals: u64[],
-    used: u64[]
+    used: u64[],
+    count: u64
 }
 fn map_new(capacity: u64) -> Map {
     mut size: u64 = 64;
@@ -4728,7 +4729,7 @@ fn map_new(capacity: u64) -> Map {
         vals.push(0);
         used.push(0);
     }
-    return Map { keys: keys, vals: vals, used: used };
+    return Map { keys: keys, vals: vals, used: used, count: 0 };
 }
 // The value stored under `key` plus one, or 0 when there is none.
 fn map_get<a, b>(m: (&a Map), key: &b [u8]) -> u64 {
@@ -4743,6 +4744,17 @@ fn map_get<a, b>(m: (&a Map), key: &b [u8]) -> u64 {
     return 0;
 }
 fn map_put<a, b>(m: (&a mut Map), key: &b [u8], value: u64) -> unit {
+    // A full table probes forever (a lookup of a missing key never meets an empty slot): double it
+    // before it is half used, whatever size its maker guessed.
+    if (m.count + 1) * 2 > m.used.len() {
+        mut bigger = map_new(m.used.len());
+        for j in m.used.len() {
+            if m.used[j] != 0 {
+                map_put(&mut bigger, view(m.keys[j]), m.vals[j]);
+            }
+        }
+        exchange(m, bigger);
+    }
     mask := m.used.len() - 1;
     mut i = fnv(key) & mask;
     while m.used[i] != 0 {
@@ -4755,6 +4767,7 @@ fn map_put<a, b>(m: (&a mut Map), key: &b [u8], value: u64) -> unit {
     m.keys[i] = copy(key);
     m.vals[i] = value;
     m.used[i] = 1;
+    m.count += 1;
     return ();
 }
 // The facts about one function, as a table of their own. Every per-function question the lowering
