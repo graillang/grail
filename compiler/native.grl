@@ -44023,9 +44023,17 @@ fn simd_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
         if simd_bits(&mut c, ty) == 64 {
             rty = simd_with_elem(&mut c, ty, int_type(&mut c, 64, 1));
         }
-        dst := frame_alloc(&mut c, simd_words(&mut c, ty));
-        simd_copy_op(&mut c, view("copy"), dst, value.t, ty);
-        return val(dst, rty);
+        // A NaN lane reads as the one quiet NaN (0x7FC00000, 0x7FF8000000000000), as scalar
+        // bits() does: hardware differs in the NaN an operation makes. A lane equals itself unless
+        // it is a NaN, so the lanes that fail the compare take a splat of the canonical NaN.
+        mty := simd_mask_of(&mut c, ty);
+        same_lane := simd_emit(&mut c, view("eq"), ty, mty, value.t, value.t, SIMD_NONE, SIMD_NONE, 0, false);
+        nan_word := imm(&mut c, 9221120237041090560);
+        get(&mut c, nan_word, view("%rax"));
+        nan_scalar := save(&mut c);
+        nans := simd_emit(&mut c, view("splat"), ty, ty, SIMD_NONE, SIMD_NONE, SIMD_NONE, nan_scalar, 0, false);
+        canonical := simd_emit(&mut c, view("select"), ty, ty, same_lane, value.t, nans, SIMD_NONE, 0, false);
+        return val(canonical, rty);
     }
     if same(view(name), view("mul_add")) && float {
         // `a.mul_add(b, c)`: a * b + c in each lane with one rounding (docs/design/simd.md, S4).
