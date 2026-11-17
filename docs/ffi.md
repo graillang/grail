@@ -774,8 +774,8 @@ blocking (the default), so its foreign-call marker is included. x86-64, 2026-11-
 | (c) `f64` arguments and result | 6 | 25 | 16 | the marker |
 | (c) `f32` | 8 | 27 | 13 | the marker |
 | (d) `&[u8]` (pointer, length) | 10 | 95 | 128 | a drop helper runs per call on the view's temporary |
-| (e) C calling a Grail callback, once per call | 9 | 60 | 60 | the callback entry (thread record, pin count, restore) |
-| (f) a Grail callback called 10 M times inside one C loop (qsort's shape) | 11 | ~42 | ~52 | the callback entry |
+| (e) C calling a Grail callback, once per call | 9 | 54 | 22 | the callback thunk (pin) and the body's checked add |
+| (f) a Grail callback called 10 M times inside one C loop (qsort's shape) | 11 | 26 | 22 | the thunk's pin (~6) and the body's checked add |
 
 Scalars and floats are within the marker's cost of C (about 5 instructions on LLVM; the
 `nonblocking` attribute removes it). Records passed by value and returned cost 25x C because an
