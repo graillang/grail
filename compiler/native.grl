@@ -1027,6 +1027,10 @@ struct C {
     drop_names_by_ty: u8[][],
     // framable's answer by type (0 not asked, 1 no, 2 yes), and layout_bits' nesting depth.
     framable_memo: u64[],
+    // A type's interface encoding by type id, and the dependency pairs encoding it adds: a type is
+    // spelled once per run and copied after that (iface_w_type). Empty bytes: not encoded yet.
+    wty_bytes: u8[][],
+    wty_deps: u64[][],
     layout_busy: u64,
     spec_emitted: u8[][],
     spell_lenient: u64,
@@ -55229,6 +55233,39 @@ fn iface_rt_num<a>(p: (&a mut IR), s: &a [u8], n: u64) -> unit {
 // type names) is gathered here, by the function that writes the bytes, so it cannot disagree with
 // what the record says.
 fn iface_w_type<a>(c: (&a mut C), out: (&a mut u8[]), deps: (&a mut u64[]), ty: u64) -> unit {
+    // A type's encoding is a function of the type alone (interned types and declarations do not
+    // change), and every declaration and unit key spells the same few types again and again.
+    if (ty < c.wty_bytes.len()) && (c.wty_bytes[ty].len() != 0) {
+        push_bytes(&mut out, view(c.wty_bytes[ty]));
+        for i in c.wty_deps[ty].len() {
+            deps.push(c.wty_deps[ty][i]);
+        }
+        return ();
+    }
+    out_at := out.len();
+    deps_at := deps.len();
+    failed_before := c.spell_failed;
+    iface_w_type_now(&mut c, &mut out, &mut deps, ty);
+    // A type with no spelling is not remembered: the refusal or the lenient flag happens again.
+    if (failed_before == 0) && (c.spell_failed == 0) && (ty < c.types.len()) {
+        while c.wty_bytes.len() <= ty {
+            c.wty_bytes.push(u8[]);
+            c.wty_deps.push(u64[]);
+        }
+        mut bytes = u8[];
+        for i in out.len() - out_at {
+            bytes.push(out[out_at + i]);
+        }
+        mut added = u64[];
+        for i in deps.len() - deps_at {
+            added.push(deps[deps_at + i]);
+        }
+        exchange(&mut c.wty_bytes[ty], bytes);
+        exchange(&mut c.wty_deps[ty], added);
+    }
+    return ();
+}
+fn iface_w_type_now<a>(c: (&a mut C), out: (&a mut u8[]), deps: (&a mut u64[]), ty: u64) -> unit {
     mut body = u8[];
     k := ty_kind(&mut c, ty);
     mode := ty_mode(&mut c, ty);
@@ -60461,6 +60498,8 @@ pub fn main() -> u64 {
         drop_walked: u64[],
         drop_names_by_ty: u8[][],
         framable_memo: u64[],
+        wty_bytes: u8[][],
+        wty_deps: u64[][],
         layout_busy: 0,
         spec_emitted: u8[][],
         spell_lenient: 0,
