@@ -18523,5 +18523,48 @@
     ],
     "stdout": "d7\nchar 1\nend 2\ntrue\nbad\n",
     "note": "`?` from an inline three-word `u64 | Bad` into a boxed `string | Bad` and into an inline `bool | Bad`: the failure is rebuilt in the result layout (borg json.grl:357 failed to compile without it)"
+  },
+  {
+    "name": "fx-no-block-accepted",
+    "note": "`@no_block` accepts indexing (a failure ends the frame, so the failure path's report and park are past the guarantee) and a C function declared `nonblocking` (docs/design/effects.md, \"Blocking\").",
+    "source": "extern \"C\" nonblocking lib \"c\" fn labs(x: i64) -> i64;\n@no_block\nfn pick(v: &u64[], i: u64) -> u64 {\n    return v[i] + v.len();\n}\n@no_block\nfn mag(x: i64) -> i64 {\n    mut r: i64 = 0;\n    unsafe {\n        r = labs(x);\n    }\n    return r;\n}\nfn main() {\n    v := u64[1, 2, 3];\n    println(pick(&v, 1));\n    println(mag(i64(0) - 4));\n}\n",
+    "stdout": "5\n4\n"
+  },
+  {
+    "name": "fx-no-block-try-acquire-accepted",
+    "note": "A non-parking operation - `try_acquire` - is accepted under `@no_block`.",
+    "source": "use sync;\n@no_block\nfn grab(s: &sync::Semaphore) -> u64 {\n    got := s.try_acquire(1);\n    if got.is_some() {\n        return 1;\n    }\n    return 0;\n}\nfn main() {\n    s := sync::semaphore(1);\n    println(grab(&s));\n}\n",
+    "modules": [
+      "lib/sync.grl",
+      "lib/thread.grl",
+      "lib/time.grl",
+      "lib/rc.grl"
+    ],
+    "stdout": "1\n"
+  },
+  {
+    "name": "fx-no-block-sleep-refused",
+    "note": "A sleep blocks: the refusal names the chain to the runtime's sleep.",
+    "source": "use time;\n@no_block\nfn nap() {\n    time::sleep_ms(1);\n    return ();\n}\nfn main() {\n    nap();\n}\n",
+    "modules": [
+      "lib/time.grl",
+      "lib/core.grl"
+    ],
+    "reject": true,
+    "diagnostic": "`@no_block` function `nap` can block: it calls nap -> sleep_ms -> f_host_sleep_ms -> rt_sleep_for"
+  },
+  {
+    "name": "fx-no-block-print-refused",
+    "note": "Printing writes to a file descriptor, which can block.",
+    "source": "@no_block\nfn say(x: u64) {\n    println(x);\n    return ();\n}\nfn main() {\n    say(1);\n}\n",
+    "reject": true,
+    "diagnostic": "`@no_block` function `say` can block: it calls say -> rt_print_number -> rt_write_all"
+  },
+  {
+    "name": "fx-no-block-c-call-refused",
+    "note": "A C function not declared `nonblocking` may block.",
+    "source": "extern \"C\" lib \"c\" fn labs(x: i64) -> i64;\n@no_block\nfn mag(x: i64) -> i64 {\n    mut r: i64 = 0;\n    unsafe {\n        r = labs(x);\n    }\n    return r;\n}\nfn main() {\n    println(mag(i64(0) - 4));\n}\n",
+    "reject": true,
+    "diagnostic": "the target is `labs`, a C function not declared `nonblocking`"
   }
 ]

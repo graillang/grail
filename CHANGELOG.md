@@ -1,5 +1,11 @@
 ## Unreleased
 
+- New: `@no_block`, a checked effect: a function and everything it calls makes no blocking call - no
+  park (locks, channels, conditions, joins), sleep, file or socket I/O, or C function not declared
+  `extern "C" nonblocking`. Refusals name the chain (`nap -> sleep_ms -> f_host_sleep_ms ->
+  rt_sleep_for`). A check that can fail does not block (the failure ends the frame). Interface
+  format 12: the `effects` row and the `facts` record carry it.
+
 - An effect refusal over a callee the run cannot see (compiling a program to assembly without the
   runtime's sources) names it - "the target is `rt_len`, whose body and effect summary this run does
   not have" - instead of calling it an indirect call.
