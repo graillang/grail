@@ -129,6 +129,7 @@ test('performance charts render from a results file: SVG, direction captions, ra
   expect(html).not.toContain('\n'); // one line: a raw HTML block markdown leaves alone
   expect(perfBlock('perf-results#release', join(root, 'tools/fixtures'))).toContain('<svg ');
   expect(() => perfBlock('perf-results#no-such-table', join(root, 'tools/fixtures'))).toThrow('no table');
+  expect(perfBlock('perf-results#no-such-table|numbers-only', join(root, 'tools/fixtures'))).toContain('A table without a chart'); // the first table present
   expect(() => renderResults({ schema: 2 })).toThrow('not a rivals result file');
 });
 test('the Performance chapter renders every committed result file', () => {
