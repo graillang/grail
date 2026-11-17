@@ -13,14 +13,12 @@ refinement that needs the callee's code, an inferred signature) puts a floor und
 parallel builds that no later work can remove. Effects already obey it (the `effects` row of an
 interface file); new features are reviewed against it.
 
-One place breaks the rule today, and it is written down so it is not mistaken for a design: **a
-program in which any function claims `@no_alloc` or `@no_panic` is built in one compiler run**
-(`effects_claimed` in `compiler/cli.grl`), because the proof walks every body the claim can reach,
-the runtime's included. Interface files already carry an `effects` row per claimed function, so
-the fix is for a per-module run to check a call against the callee's row and for the runtime's
-functions to have rows of their own. Until then an effect claim opts a whole program out of the
-build store, which is also why the standard library does not claim effects yet: one attribute in
-`lib/` would take every program that uses that module off the fast path.
+Effect claims used to break it: a program in which any function claimed `@no_alloc` or `@no_panic`
+was built in one compiler run, because the proof walked every body the claim could reach. Now each
+run proves its claims against the summaries of the functions it calls - computed facts carried in
+every interface, and `runtime.facts` for the runtime (`docs/design/effects.md`, *Summaries*) - so a
+claiming program builds per module and through the store like any other, and the standard library
+claims effects where its bodies earn them.
 
 ## The benchmark
 

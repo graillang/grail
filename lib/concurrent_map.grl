@@ -2,47 +2,43 @@ module concurrent_map;
 use hash;
 use hashmap;
 use core;
+use sync;
 
-// DashMap-style sharded map: each shard is a mutex-guarded checked hashmap. Operations
-// take a shared reference to the map, so many threads may use it concurrently; only keys
-// hashing to the same shard contend. Values never escape a shard lock as references.
-pub struct Map<K:hash::Hash+hash::Equal+Send,V:Send>{shards:Mutex<[K: V]>[],seed0:u64,seed1:u64}
+// DashMap-style sharded map: each shard is a checked hashmap behind a reader-writer lock.
+// Operations take a shared reference to the map, so many threads may use it concurrently; only
+// keys hashing to the same shard contend, and lookups of one shard run side by side (a writer
+// still has it alone). Values never escape a shard lock as references.
+//
+// Keys and values must be Share as well as Send - DashMap's rule (Send + Sync): readers on several
+// threads look at the same entries at once. A value is also Owned (holds no borrow): `insert` and
+// `remove` hand the old one back out of the shard lock. Moving the shards from Mutex to RwLock made lookups
+// about 1.6x faster under a read-mostly load (bench/shard_read.grl, docs/design/parking.md).
+pub struct Map<K:hash::Hash+hash::Equal+Send+Share,V:Send+Share+Owned>{shards:sync::RwLock<[K: V]>[],seed0:u64,seed1:u64}
+
 struct Insert<K,V>{key:K,value:V}
 
-pub fn with_seed<K:hash::Hash+hash::Equal+Send,V:Send>(seed0:u64,seed1:u64)->Map<K,V>{
-    mut shards=Mutex<[K: V]>[];
-    for i in 16{shards.push(Mutex::new(hashmap::with_seed<K,V>(seed0,seed1)));}
+pub fn with_seed<K:hash::Hash+hash::Equal+Send+Share,V:Send+Share+Owned>(seed0:u64,seed1:u64)->Map<K,V>{
+    mut shards: sync::RwLock<[K: V]>[] = [];
+    for i in 16{shards.push(sync::rwlock<[K: V]>(hashmap::with_seed<K,V>(seed0,seed1)));}
     return Map{shards:shards,seed0:seed0,seed1:seed1};
 }
 // Shard selection uses an independent key so it does not correlate with in-shard buckets.
-fn shard<a,b,K:hash::Hash+hash::Equal+Send,V:Send>(map:(&a Map<K,V>),key:(&b K))->u64{
+fn shard<a,b,K:hash::Hash+hash::Equal+Send+Share,V:Send+Share+Owned>(map:(&a Map<K,V>),key:(&b K))->u64{
     return hash::hash(key,map.seed0^6148914691236517205,map.seed1^3074457345618258602)%map.shards.len();
 }
-fn insert_locked<a,K:hash::Hash+hash::Equal+Send,V:Send>(m:(&a mut [K: V]),job:Insert<K,V>)->V?{
-    return hashmap::map_insert(m,job.key,job.value);
-}
-fn remove_locked<a,b,K:hash::Hash+hash::Equal+Send,V:Send>(m:(&a mut [K: V]),key:(&b K))->V?{
-    return hashmap::map_remove(m,key);
-}
-fn contains_locked<a,b,K:hash::Hash+hash::Equal+Send,V:Send>(m:(&a mut [K: V]),key:(&b K))->bool{
-    return hashmap::map_contains(&m,key);
-}
-fn len_locked<a,K:hash::Hash+hash::Equal+Send,V:Send>(m:(&a mut [K: V]),unused:u64)->u64{
-    return hashmap::map_len(&m);
-}
-pub fn insert<a,K:hash::Hash+hash::Equal+Send,V:Send>(map:(&a Map<K,V>),key:K,value:V)->V?{
+pub fn insert<a,K:hash::Hash+hash::Equal+Send+Share,V:Send+Share+Owned>(map:(&a Map<K,V>),key:K,value:V)->V?{
     index:=shard(&map,&key);target:=&map.shards[index];
-    return target.lock_with(Insert{key:key,value:value},insert_locked<K,V>);
+    return target.write_with(Insert{key:key,value:value},|m:(&mut [K: V]),job:Insert<K,V>|->V? hashmap::map_insert(m,job.key,job.value));
 }
-pub fn remove<a,b,K:hash::Hash+hash::Equal+Send,V:Send>(map:(&a Map<K,V>),key:(&b K))->V?{
-    index:=shard(&map,&key);target:=&map.shards[index];
-    return target.lock_with(key,remove_locked<K,V>);
+pub fn remove<a,b,K:hash::Hash+hash::Equal+Send+Share,V:Send+Share+Owned>(map:(&a Map<K,V>),key:(&b K))->V?{
+    index:=shard(&map,key);target:=&map.shards[index];
+    return target.write_with(0,|m:(&mut [K: V]),unused:u64|->V? hashmap::map_remove(m,key));
 }
-pub fn contains<a,b,K:hash::Hash+hash::Equal+Send,V:Send>(map:(&a Map<K,V>),key:(&b K))->bool{
-    index:=shard(&map,&key);target:=&map.shards[index];
-    return target.lock_with(key,contains_locked<K,V>);
+pub fn contains<a,b,K:hash::Hash+hash::Equal+Send+Share,V:Send+Share+Owned>(map:(&a Map<K,V>),key:(&b K))->bool{
+    index:=shard(&map,key);target:=&map.shards[index];
+    return target.read_with(0,|m:(&[K: V]),unused:u64|->bool hashmap::map_contains(m,key));
 }
 // Not a linearizable snapshot while other threads mutate: shards are counted one at a time.
-pub fn len<a,K:hash::Hash+hash::Equal+Send,V:Send>(map:(&a Map<K,V>))->u64{
-    mut total=0;for i in map.shards.len(){target:=&map.shards[i];total+=target.lock_with(0,len_locked<K,V>);}return total;
+pub fn len<a,K:hash::Hash+hash::Equal+Send+Share,V:Send+Share+Owned>(map:(&a Map<K,V>))->u64{
+    mut total=0;for i in map.shards.len(){target:=&map.shards[i];total+=target.read_with(0,|m:(&[K: V]),unused:u64|->u64 hashmap::map_len(m));}return total;
 }

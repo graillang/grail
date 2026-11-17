@@ -1,5 +1,3 @@
-# Changelog
-
 ## Unreleased
 
 - **Proved calls cost nothing again, on every target and on the LLVM backend.** A function with
@@ -13,14 +11,81 @@
 - A call whose constant arguments break the callee's predicate (`split(v, 0, f)` with
   `grain: u64 where grain > 0`) is a compile error in every mode; it used to compile and fail at
   run time. Only constants, and names the facts equate with one, are judged false.
+- **The atomics family.** `Atomic<T>` now holds `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`,
+  `i64` or `bool`. Each width wraps at its own size, and `fetch_min`/`fetch_max` are signed for
+  `i*` types.
+  - Every operation names its ordering:
+    - `load` with `_relaxed` or `_acquire`; `store` with `_relaxed` or `_release`.
+    - `swap` and `fetch_add`, `fetch_sub`, `fetch_and`, `fetch_or`, `fetch_xor`, `fetch_min`,
+      `fetch_max`, each with `_relaxed`, `_acquire`, `_release` or `_acqrel`.
+    - `compare_exchange` (returns the value it saw) and the new `compare_exchange_weak` (returns
+      whether it stored), each with the same suffixes.
+    - The bare name is sequentially consistent, and a pair that makes no sense (`load_release`) is
+      an error that lists the valid names.
+    - `fence()`, `fence_acquire()`, `fence_release()` and `spin_hint()` are new.
+  - The methods compile to instructions at the call site, not runtime calls, so they are allowed in
+    `@no_alloc @no_panic` code. Each ordering is lowered as itself: x86-64 SC loads lose their
+    `mfence`, `fetch_add` is one `lock xadd`, AArch64 uses `ldar`/`stlr` and exclusive pairs, RISC-V
+    uses AMOs, and the LLVM backend emits `load atomic ... acquire` and so on instead of
+    `fence seq_cst`.
+  - Measured on x86-64: an uncontended `load` went from 15.4 ns to 1.4 ns, `fetch_add` from 18.5
+    ns to 1.8 ns, and a Mutex round trip from 42.7 ns to 11.4 ns. The runtime's own atomics
+    (scheduler, jobs, mutex) use the same instructions.
+  - `Atomic<u64>` programs are unchanged.
+  - Interfaces are format 8: an `Atomic<T>` records its element (format 7, from the effects
+    work, added the summary rows of every listed function).
+  - `bun tools/test-atomics-litmus.mjs` runs the litmus suite on every target and both backends.
+    `bun tools/test-optimiser-atomics.mjs` checks that the optimiser moves nothing across an
+    atomic.
+- **`concurrent_map` lookups run side by side.** Its shards are `sync::RwLock`s now, so `contains`
+  and `len` on one shard no longer queue behind each other (about 1.6x faster under a read-mostly
+  load, `bench/shard_read.grl`). Keys and values must therefore be `Share` as well as `Send` -
+  DashMap's rule - and a value also `Owned`, since `insert` and `remove` hand the old one back. A
+  map of a type that is transferable but not shareable is refused with
+  `type does not satisfy Share`, naming the type.
 
 - **`thread::scope`: threads that borrow.** `thread::scope(|t| { a := t.spawn(|| ..); ..; a.join() })`
   starts OS threads whose closures may borrow from the caller - shared or exclusive - because the
   scope waits for every one of them before it returns. The compiler refuses two threads taking one
   `&mut`, the body touching what a thread borrowed, and a handle leaving the scope. A failure in
   one thread lets its siblings finish and is re-raised when the scope ends.
-- Fixed: a small leaf that takes the address of its own local (runtime.grl's `rt_frame`) was
-  inlined with that local turned into a scratch register, so split and cached builds of programs
+- **A function may return a reference to an element of a slice it was given.**
+  `fn first<a, K>(v: (&a [K])) -> (&a K) { return &v[0]; }` (and `&mut v[i]` from `(&a mut [K])`)
+  was "returned borrow escapes its declared input lifetime": the element reference was a borrow of
+  the slice variable. It is now a re-borrow through the slice's own loan, with the slice's region;
+  the slice is suspended while an exclusive element reference lives.
+- **`&v` of a vector is accepted where a typed slice `&[T]` is expected**, generic or not, and
+  `&mut v` for `&mut [T]`: the slice over the whole vector, as `&v[:]` is. A generic `&[K]`
+  parameter infers `K` from the vector's elements (it was `generic argument shape mismatch`; the
+  non-generic call was a type mismatch).
+- **A closure may take a reference where a type argument stands for one, and pass a captured
+  reference on.** `lock.read_with(key, |v: (&u64[]), k: (&a u64)| -> bool ..)` was a type mismatch
+  when the context parameter `C` was bound to a reference (a type argument carries no lifetime; a
+  closure parameter has a fresh one); it is accepted, and a parameter type left to inference there
+  asks for the annotation. A captured shared reference read as a value (`find(v, key)` inside a
+  closure) is re-borrowed instead of moved out of the closure, which was "move of unavailable or
+  borrowed value"; the borrow is kept as before.
+ Unreleased- Fixed: a small leaf that takes the address of its own local (runtime.grl's `rt_frame`) was
+- **An effect claim no longer makes a program one compiler run.** `@no_alloc` and `@no_panic` are
+  proved per module against per-function *summaries*: every run that emits code records every body,
+  and the facts it solves - whether a function can allocate, can fail, runs an entry check, and the
+  call each fact came through - travel in a `facts` record of every interface (format 7; interfaces
+  of format 6 are refused: re-emit them), in `runtime.facts` beside the interfaces for the runtime,
+  and in function units, which are filed and replayed in claiming programs again. A claiming program
+  builds through the module store like any other, and a refusal names the same chain across modules
+  that the whole-program build names (`loud -> push_one -> grow -> rt_push -> rt_grow`).
+  (`docs/design/effects.md`, *Summaries*.)
+  - **What changes:** dropping a `dyn I` value of a **public** interface is refused under `@no_alloc`
+    and `@no_panic` in every build shape ("the drop of a `dyn I` value, whose implementations this
+    module cannot see"): an implementation in another module may be the one dropped. Claim the
+    implementing types' `Drop` instead, or do the drop where `I` is private.
+  - Methods in `impl` blocks take `@no_alloc` and `@no_panic`.
+  - The standard library claims `@no_alloc` on `hash::write_byte`, `write_num` and `finish`,
+    `u64[].sum` and `[u8].is_char_boundary`, and `@no_alloc @no_panic` on `strings::utf8_width`.
+    Functions that return an option, a tuple or a record allocate it, so `find` and the parsers do
+    not claim.
+  - Fixed: a closure whose result type was inferred by a trial emission left that emission's calls
+    in the effect record.  inlined with that local turned into a scratch register, so split and cached builds of programs
   that reach it emitted `leaq %r8,%rax` and did not assemble. Such a leaf is no longer an inline
   candidate.
 

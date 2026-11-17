@@ -1412,7 +1412,13 @@ fn write_parts<a, b, d>(c: (&a mut C), path: &b [u8], text: &d [u8]) -> u64 {
         }
         if end > start {
             file := part_file(view(stem), files.len(), view(c.part_names[k]), view(".s"));
-            if host::write_file(view(file), view((text[start: end]))) != 0 {
+            mut wrote = 0;
+            if x86_atomics(&mut c, view(text[start: end])) {
+                wrote = host::write_file(view(file), view(machine::atomics_x86(view(text[start: end]))));
+            } else {
+                wrote = host::write_file(view(file), view((text[start: end])));
+            }
+            if wrote != 0 {
                 status = 1;
             }
             files.push(file);
@@ -1441,9 +1447,19 @@ fn write_parts<a, b, d>(c: (&a mut C), path: &b [u8], text: &d [u8]) -> u64 {
 }
 // The one assembly write point: the whole-program image when --split is off, one file per module
 // plus a manifest when it is on.
+// On x86-64 (ELF and PE) the `atom.*` lines are expanded here, the last step before the assembler
+// (machine.grl `atomics_x86`): after the parts are cut, because the optimizer's part offsets are
+// offsets into the unexpanded stream, and after the PE unwind and debug passes, which read the
+// stream as it was emitted. Other targets lowered them in `machine::lower` or in LLVM IR.
+fn x86_atomics<a, b>(c: (&a mut C), text: &b [u8]) -> bool {
+    return ((c.target == 0) || (c.target == 3)) && machine::has_atomics(view(text));
+}
 fn write_image<a, b, d>(c: (&a mut C), path: &b [u8], image: &d [u8]) -> u64 {
     if c.split != 0 {
         return write_parts(&mut c, view(path), view(image));
+    }
+    if x86_atomics(&mut c, view(image)) {
+        return host::write_file(view(path), view(with_link_notes(&c.libs, view(machine::atomics_x86(view(image))))));
     }
     return host::write_file(view(path), view(with_link_notes(&c.libs, view(image))));
 }
@@ -3144,7 +3160,7 @@ fn tls_thread_stubs<a>(c: (&a mut C)) -> unit {
     }
     // Load the TID word's address before releasing it: once it reads 0 the joiner may unmap the
     // block and the record.
-    o(&mut c, view("movq -8(%rbp),%rcx\nmovq -8(%rcx),%rdi\nmovq %rdi,-16(%rbp)\nxorl %eax,%eax\nsfence\nmovq %rax,(%rdi)\n"));
+    o(&mut c, view("movq -8(%rbp),%rcx\nmovq -8(%rcx),%rdi\nmovq %rdi,-16(%rbp)\nxorl %eax,%eax\natom.store release u64\n"));
     if c.target == 0 {
         o(&mut c, view("movl $202,%eax\n"));
     } else {
@@ -4581,6 +4597,22 @@ fn authority_of<a>(c: (&a mut C), slot: u64) -> u64 {
     mut r = &c.resources[n - 1];
     return r.authority;
 }
+// The place a slice's live loan borrows, or 0 (a slice with no tracked loan).
+fn slice_source<a>(c: (&a mut C), slot: u64) -> u64 {
+    holder := place_of(&mut c, slot);
+    if holder == 0 {
+        return 0;
+    }
+    for i in c.bonds.len() {
+        h := c.bonds[i].holder;
+        loan := c.bonds[i].loan;
+        guard := c.bonds[i].guard;
+        if (h == holder) & (guard == 0) && (loan_live(&mut c, loan) != 0) {
+            return c.check.loans[loan - 1].source;
+        }
+    }
+    return 0;
+}
 fn authority_loan<a>(c: (&a mut C), slot: u64, target: u64) -> u64 {
     holder := place_of(&mut c, slot - 1);
     for i in c.bonds.len() {
@@ -5598,6 +5630,14 @@ fn bind_loan<a>(c: (&a mut C), value: u64, source: u64, target: u64, mode: u64) 
         if ty_kind(&mut c, ty) == 7 {
             authority = source + 1;
         }
+        // A slice holds its loan the way a reference does: a borrow inside what it borrows is a
+        // re-borrow through it.
+        if ty_kind(&mut c, ty) == 27 {
+            borrowed := slice_source(&mut c, source);
+            if (borrowed != 0) && ownership::ancestor(&c.check, borrowed, target) {
+                authority = source + 1;
+            }
+        }
     }
     mut loan = 0;
     if authority != 0 {
@@ -6163,7 +6203,7 @@ fn type_key<a>(c: (&a mut C), out: (&a mut u8[]), ty: u64, depth: u64) -> unit {
         type_key(&mut c, &mut out, args[i], depth + 1);
     }
     arg := ty_arg(&mut c, ty);
-    if (k == 6) || (k == 7) || (k == 10) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20)
+    if (k == 6) || (k == 7) || (k == 10) || (k == 11) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20)
         || (k == 25) || (k == 26) || (k == 27) || (k == 32) {
         // The payload is a type.
         out.push(32);
@@ -6177,7 +6217,7 @@ fn type_key<a>(c: (&a mut C), out: (&a mut u8[]), ty: u64, depth: u64) -> unit {
         push_bytes(&mut out, view(module));
         push_bytes(&mut out, view("::"));
         push_bytes(&mut out, view(name));
-    } else if (k == 1) || (k == 2) || (k == 3) || (k == 4) || (k == 5) || (k == 11) || (k == 17) || (k == 19)
+    } else if (k == 1) || (k == 2) || (k == 3) || (k == 4) || (k == 5) || (k == 17) || (k == 19)
         || (k == 22) || (k == 24) {
         // No payload of its own: the kind, the mode and the regions are the whole type. A view is
         // here rather than with the payload kinds because the interface format spells it without an
@@ -11130,9 +11170,15 @@ fn type_name<a>(c: (&a mut C), ty: u64) -> u8[] {
         push_bytes(&mut out, view(name));
         return out;
     }
-    if (k == 1) || (k == 2) || (k == 3) || (k == 4) || (k == 11) || (k == 17) || (k == 19) || (k == 21) || (k == 22)
+    if (k == 1) || (k == 2) || (k == 3) || (k == 4) || (k == 17) || (k == 19) || (k == 21) || (k == 22)
         || (k == 24) {
         push_bytes(&mut out, view(iface_plain_word(k)));
+        return out;
+    }
+    if k == 11 {
+        push_bytes(&mut out, view("Atomic<"));
+        push_bytes(&mut out, view(type_name(&mut c, arg)));
+        push_bytes(&mut out, view(">"));
         return out;
     }
     if k == 8 {
@@ -12716,6 +12762,21 @@ fn callable_contract<a, b>(
     for i in ax.len() {
         left := ax[i];
         right := ex[i];
+        // A closure's reference parameter is a fresh input lifetime on every call, so an expected
+        // parameter that names no lifetime - a type argument bound to a reference (`C` of
+        // `Fn((&T), C)` given `&a K`), whose lifetime the binding does not carry - accepts any: only
+        // the referent and the mode must match. Result positions are not relaxed.
+        if (ak == 20) || (ak == 12) {
+            lk := ty_kind(&mut c, left);
+            if ((lk == 5) || (lk == 7) || (lk == 27)) && (ty_kind(&mut c, right) == lk)
+                && (type_regions(&mut c, right).len() == 0) && (type_regions(&mut c, left).len() == 1)
+                && (ty_mode(&mut c, left) == ty_mode(&mut c, right)) {
+                if (lk == 5) || callable_contract(&mut c, ty_arg(&mut c, left), ty_arg(&mut c, right), &mut map, depth + 1) {
+                    continue;
+                }
+                return false;
+            }
+        }
         if !callable_contract(&mut c, left, right, &mut map, depth + 1) {
             return false;
         }
@@ -12919,6 +12980,12 @@ fn source_type_name<a>(c: (&a mut C), ty: u64) -> u8[] {
     }
     k := ty_kind(&mut c, ty);
     arg := ty_arg(&mut c, ty);
+    if k == 11 {
+        push_bytes(&mut out, view("Atomic<"));
+        push_bytes(&mut out, view(source_type_name(&mut c, arg)));
+        out.push(62);
+        return out;
+    }
     if k == 18 {
         if ty_mode(&mut c, ty) != 0 {
             out.push(105);
@@ -14354,10 +14421,10 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
         expect(&mut c, view("<"));
         e := parse_type(&mut c);
         expect(&mut c, view(">"));
-        if e != 0 {
-            fail(&mut c, view("Atomic currently requires u64 (one aligned 64-bit word)"));
+        if !atomic_element(&mut c, e) {
+            fail(&mut c, view("Atomic<T> holds u8, u16, u32, u64, i8, i16, i32, i64 or bool"));
         }
-        return intern(&mut c, 11, 0);
+        return intern(&mut c, 11, e);
     }
     if (shadowed == false) & same(view(first), view("Scope")) {
         expect(&mut c, view("<"));
@@ -19581,6 +19648,12 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
         exchange(&mut c.self_type, ty);
         expect(&mut c, view("{"));
         while !eat(&mut c, view("}")) {
+            // A method carries effect claims the way a function does: `@no_alloc pub fn find(..)`.
+            while kind(&mut c) == 64 {
+                if fx_attr_form(&mut c) == 0 {
+                    fail(&mut c, view("a method in an impl block takes `@no_alloc` and `@no_panic` only"));
+                }
+            }
             public := u64(eat(&mut c, view("pub")));
             func(&mut c, pass, public);
         }
@@ -22895,6 +22968,30 @@ fn fx_vtable_drop<a>(c: (&a mut C), iface: u64) -> unit {
     }
     if found == 0 {
         fx_edge(&mut c, view(""), 0);
+        if (0 < iface) && (iface <= c.interfaces.len()) {
+            mut why = copy_bytes(view("the drop of a `dyn "));
+            push_bytes(&mut why, view(c.interfaces[iface - 1].name));
+            push_bytes(&mut why, view("` value, whose implementations this module cannot see"));
+            if c.interfaces[iface - 1].public != 0 {
+                push_bytes(&mut why, view(": `"));
+                push_bytes(&mut why, view(c.interfaces[iface - 1].name));
+                push_bytes(&mut why, view("` is public"));
+            }
+            fx_why(&mut c, view(why));
+        }
+    }
+    // A public interface may be implemented, and its values boxed, in a module this run cannot see:
+    // the value dropped here may hold any of those implementations. Only a private one's are all
+    // here (its module is the only one that can name it), so the answer is the same in every build
+    // shape (docs/design/effects.md, "The `dyn` drop").
+    if (found != 0) && (0 < iface) && (iface <= c.interfaces.len()) && (c.interfaces[iface - 1].public != 0) {
+        fx_edge(&mut c, view(""), 0);
+        mut why = copy_bytes(view("the drop of a `dyn "));
+        push_bytes(&mut why, view(c.interfaces[iface - 1].name));
+        push_bytes(&mut why, view("` value, whose implementations this module cannot see: `"));
+        push_bytes(&mut why, view(c.interfaces[iface - 1].name));
+        push_bytes(&mut why, view("` is public"));
+        fx_why(&mut c, view(why));
     }
     // One `call *%rax` line is what the site emits, however many helpers the slot may hold.
     fx_called(&mut c);
@@ -23313,6 +23410,43 @@ fn fx_unknown_why<a>(c: (&a mut C), k: u64) -> u8[] {
     }
     return u8[];
 }
+// Where a chain of witnesses ends (at most `spending` links): the record whose fact is its own, or
+// came through an edge nothing names. `panic` picks the failure chain.
+fn fx_chain_end<a>(c: (&a C), first: u64, spending: u64, panic: u64) -> u64 {
+    mut k = first;
+    mut n = 1;
+    while n < spending {
+        mut next = c.fx_alloc_thru[k];
+        if panic != 0 {
+            next = c.fx_panic_thru[k];
+        }
+        if next == 0 {
+            return k;
+        }
+        k = next - 1;
+        n += 1;
+    }
+    return k;
+}
+// The tail a refusal adds when its chain ends in an indirect call: what the call's target is.
+fn fx_chain_tail<a>(c: (&a mut C), first: u64, panic: u64) -> u8[] {
+    last := fx_chain_end(&c, first, 8, panic);
+    mut own = c.fx_own_alloc[last];
+    if panic != 0 {
+        own = c.fx_own_panic[last];
+    }
+    if (last == first) || (own != 0) {
+        return u8[];
+    }
+    why := fx_unknown_why(&mut c, last);
+    if why.len() == 0 {
+        return u8[];
+    }
+    mut out = copy_bytes(view(", which makes an indirect call the compiler cannot follow (the target is "));
+    push_bytes(&mut out, view(why));
+    out.push(41);
+    return out;
+}
 fn fx_report<a>(c: (&a mut C)) -> unit {
     if c.fx_any == 0 {
         return ();
@@ -23337,6 +23471,7 @@ fn fx_report<a>(c: (&a mut C)) -> unit {
             push_bytes(&mut msg, view("` performs a heap allocation: it calls "));
             chain := fx_chain(&mut c, k, 8);
             push_bytes(&mut msg, view(chain));
+            push_bytes(&mut msg, view(fx_chain_tail(&mut c, k, 0)));
             push_bytes(&mut msg, view("\n = the call chain above reaches something that allocates"));
             at_file = fx_edge_file_of(&mut c, k, thru);
             at_pos = fx_edge_pos_of(&mut c, k, thru);
@@ -23379,6 +23514,7 @@ fn fx_report<a>(c: (&a mut C)) -> unit {
             push_bytes(&mut msg, view("` can fail: it calls "));
             chain := fx_chain_panic(&mut c, k, 8);
             push_bytes(&mut msg, view(chain));
+            push_bytes(&mut msg, view(fx_chain_tail(&mut c, k, 1)));
             push_bytes(&mut msg, view("\n = a callee leaves a runtime check, so the whole chain has to be check-free"));
             at_file = fx_edge_file_of(&mut c, k, thru);
             at_pos = fx_edge_pos_of(&mut c, k, thru);
@@ -25914,6 +26050,15 @@ fn infer_type<a, b>(c: (&a mut C), formal: u64, actual: u64, map: (&b mut u64[])
         return ();
     }
     ak := ty_kind(&mut c, actual);
+    // A vector reference passed for a typed slice is the slice over the whole vector (coerce_view):
+    // the element type is inferred from the vector's.
+    if (k == 27) && (ak == 7) {
+        inner := ty_arg(&mut c, actual);
+        if ty_kind(&mut c, inner) == 6 {
+            infer_type(&mut c, arg, ty_arg(&mut c, inner), &mut map);
+            return ();
+        }
+    }
     if k != ak {
         fail(&mut c, view("generic argument shape mismatch"));
     }
@@ -26229,6 +26374,19 @@ fn structural_eq<a>(c: (&a mut C), x: u64, y: u64, ty: u64, depth: u64) -> u64 {
 // A reference to bytes/string passed where a view (&a [u8]) is expected becomes a view of the same
 // storage (like Rust's &String -> &str); the view keeps the reference's borrow alive.
 fn coerce_view<a>(c: (&a mut C), v: Val, formal: u64) -> Val {
+    // `&v` / `&mut v` of a vector passed for a typed slice `&[T]` / `&mut [T]`: the slice over the
+    // whole vector, borrowing it as `&v[:]` would (docs/design/typed-slices.md).
+    if (ty_kind(&mut c, formal) == 27) && (ty_kind(&mut c, v.ty) == 7) {
+        inner := ty_arg(&mut c, v.ty);
+        if ty_kind(&mut c, inner) == 6 {
+            write := ty_mode(&mut c, formal) != 0;
+            if write && (ty_mode(&mut c, v.ty) == 0) {
+                fail(&mut c, view("a mutable slice needs a mutable reference: write `&mut v`"));
+            }
+            x := deref(&mut c, v);
+            return whole_slice(&mut c, x, write);
+        }
+    }
     if ty_kind(&mut c, formal) != 5 {
         return v;
     }
@@ -28952,6 +29110,18 @@ fn builtin_id<a>(n: &a [u8]) -> u64 {
     if same(view(n), view("try_join")) {
         return 55;
     }
+    if same(view(n), view("fence")) {
+        return 63;
+    }
+    if same(view(n), view("fence_acquire")) {
+        return 64;
+    }
+    if same(view(n), view("fence_release")) {
+        return 65;
+    }
+    if same(view(n), view("spin_hint")) {
+        return 66;
+    }
     if same(view(n), view("task_fail")) {
         return 56;
     }
@@ -29089,6 +29259,21 @@ fn builtin_id<a>(n: &a [u8]) -> u64 {
     }
     if same(view(n), view("raw_atomic_store_release")) {
         return 116;
+    }
+    if same(view(n), view("raw_atomic_fetch_add")) {
+        return 138;
+    }
+    if same(view(n), view("raw_atomic_fetch_sub")) {
+        return 139;
+    }
+    if same(view(n), view("raw_atomic_swap")) {
+        return 140;
+    }
+    if same(view(n), view("raw_spin_hint")) {
+        return 141;
+    }
+    if same(view(n), view("raw_atomic_fence")) {
+        return 142;
     }
     if same(view(n), view("raw_thread_clone")) {
         return 117;
@@ -29239,8 +29424,11 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
     if id == 109 {
         arity = 5;
     }
-    if (id == 111) || (id == 115) || (id == 116) {
+    if (id == 111) || (id == 115) || (id == 116) || ((137 < id) & (id < 141)) {
         arity = 2;
+    }
+    if (id == 141) || (id == 142) {
+        arity = 0;
     }
     if id == 112 {
         arity = 3;
@@ -29534,28 +29722,52 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         get(&mut c, args[4], view("%r10"));
         o(&mut c, view("xorl %r8d,%r8d\nxorl %r9d,%r9d\nsyscall\n"));
     }
+    // The runtime's word atomics are the same `atom.*` ops the `Atomic<T>` methods emit
+    // (machine.grl, "atomics"), on a 64-bit word.
     if (id == 110) || (id == 113) || (id == 114) {
         get(&mut c, args[0], view("%rdi"));
-        o(&mut c, view("movq (%rdi),%rax\n"));
         if id == 110 {
-            o(&mut c, view("mfence\n"));
+            o(&mut c, view("atom.load seqcst u64\n"));
+        }
+        if id == 113 {
+            o(&mut c, view("atom.load relaxed u64\n"));
         }
         if id == 114 {
-            o(&mut c, view("lfence\n"));
+            o(&mut c, view("atom.load acquire u64\n"));
         }
     }
     if (id == 111) || (id == 115) || (id == 116) {
         get(&mut c, args[0], view("%rdi"));
         get(&mut c, args[1], view("%rax"));
         if id == 111 {
-            o(&mut c, view("xchgq %rax,(%rdi)\n"));
-        } else {
-            if id == 116 {
-                o(&mut c, view("sfence\n"));
-            }
-            o(&mut c, view("movq %rax,(%rdi)\n"));
+            o(&mut c, view("atom.store seqcst u64\n"));
+        }
+        if id == 115 {
+            o(&mut c, view("atom.store relaxed u64\n"));
+        }
+        if id == 116 {
+            o(&mut c, view("atom.store release u64\n"));
         }
         o(&mut c, view("xorq %rax,%rax\n"));
+    }
+    if (137 < id) & (id < 141) {
+        get(&mut c, args[0], view("%rdi"));
+        get(&mut c, args[1], view("%rax"));
+        if id == 138 {
+            o(&mut c, view("atom.rmw add seqcst u64\n"));
+        }
+        if id == 139 {
+            o(&mut c, view("atom.rmw sub seqcst u64\n"));
+        }
+        if id == 140 {
+            o(&mut c, view("atom.rmw xchg seqcst u64\n"));
+        }
+    }
+    if id == 141 {
+        o(&mut c, view("atom.spin\nxorq %rax,%rax\n"));
+    }
+    if id == 142 {
+        o(&mut c, view("atom.fence seqcst\nxorq %rax,%rax\n"));
     }
     // Thread start: the child takes its entry/argument from the new stack and exits only itself.
     if id == 117 {
@@ -29727,7 +29939,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         get(&mut c, args[0], view("%rdi"));
         get(&mut c, args[1], view("%rax"));
         get(&mut c, args[2], view("%rcx"));
-        o(&mut c, view("lock cmpxchgq %rcx,(%rdi)\n"));
+        o(&mut c, view("atom.cas seqcst u64\n"));
     }
     return val(save(&mut c), 0);
 }
@@ -31140,6 +31352,24 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
         return raw_builtin(&mut c, id);
     }
     expect(&mut c, view("("));
+    if (62 < id) & (id < 67) {
+        // `fence()`, `fence_acquire()`, `fence_release()` and `spin_hint()`: the `atom.fence` and
+        // `atom.spin` ops (machine.grl, "atomics").
+        expect(&mut c, view(")"));
+        if id == 63 {
+            o(&mut c, view("atom.fence seqcst\n"));
+        }
+        if id == 64 {
+            o(&mut c, view("atom.fence acquire\n"));
+        }
+        if id == 65 {
+            o(&mut c, view("atom.fence release\n"));
+        }
+        if id == 66 {
+            o(&mut c, view("atom.spin\n"));
+        }
+        return val(imm(&mut c, 0), intern(&mut c, 2, 0));
+    }
     if id == 42 {
         // `cnull()`: the null data pointer, for optional C pointer parameters.
         expect(&mut c, view(")"));
@@ -31441,10 +31671,16 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
     }
     if id == 30 {
         expect(&mut c, view(")"));
+        // The element is the argument's type: `Atomic::new(0)` is an `Atomic<u64>` as it always
+        // was, and a narrow cell is made from a value of its type (`Atomic::new(u8(0))`).
+        mut elem = 0;
         if c.raw == 0 {
-            require_type(&mut c, a.ty, 0);
+            elem = a.ty;
+            if !atomic_element(&mut c, elem) {
+                fail(&mut c, view("Atomic<T> holds u8, u16, u32, u64, i8, i16, i32, i64 or bool"));
+            }
         }
-        ty := intern(&mut c, 11, 0);
+        ty := intern(&mut c, 11, elem);
         slot := invoke(&mut c, view("rt_atomic_new"), one(a.t));
         return own(&mut c, slot, ty);
     }
@@ -33915,7 +34151,15 @@ fn bound_or_unknown<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> u64 {
     if mentions_unbound(&mut c, ty, &map) {
         return NO_TYPE;
     }
-    return bind_types(&mut c, ty, &map);
+    bound := bind_types(&mut c, ty, &map);
+    // A type argument bound to a reference carries no lifetime, and a closure's reference
+    // parameter needs one of its own: leave it to the closure to write (`|k: (&a K)|`), so the
+    // message is the one that asks for the annotation.
+    bk := ty_kind(&mut c, bound);
+    if ((bk == 5) || (bk == 7) || (bk == 27)) && (type_regions(&mut c, bound).len() == 0) {
+        return NO_TYPE;
+    }
+    return bound;
 }
 fn mentions_unbound<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> bool {
     k := ty_kind(&mut c, ty);
@@ -33997,6 +34241,9 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
         }
     }
     out_mark := c.out.len();
+    // The trial emission records calls like any other; they are discarded with its bytes.
+    fx_edge_trial := c.fx_edge_from.len();
+    fx_calls_trial := c.fx_calls;
     closures_mark := c.closures.len();
     specs_mark := c.specs.len();
     saved_locals := exchange(&mut c.locals, Local[]);
@@ -34051,6 +34298,8 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
     while out_mark < c.out.len() {
         c.out.pop()!;
     }
+    fx_edges_truncate(&mut c, fx_edge_trial);
+    exchange(&mut c.fx_calls, fx_calls_trial);
     while closures_mark < c.closures.len() {
         c.closures.pop()!;
     }
@@ -35112,8 +35361,136 @@ fn mutex_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
     close_loans(&mut c);
     return val(slot, result);
 }
+// The element types an `Atomic<T>` holds: what fits one aligned word and has no drop.
+fn atomic_element<a>(c: (&a mut C), ty: u64) -> bool {
+    if (ty == 0) || is_bool(&mut c, ty) {
+        return true;
+    }
+    if ty_kind(&mut c, ty) == 18 {
+        bits := ty_arg(&mut c, ty);
+        return (bits == 8) || (bits == 16) || (bits == 32) || (bits == 64);
+    }
+    return false;
+}
+// The width word of an `atom.*` line (machine.grl, "atomics") for an element type.
+fn atomic_width<a>(c: (&a mut C), ty: u64) -> u8[] {
+    mut out = u8[];
+    if ty == 0 {
+        push_bytes(&mut out, view("u64"));
+        return out;
+    }
+    if is_bool(&mut c, ty) {
+        push_bytes(&mut out, view("bool"));
+        return out;
+    }
+    if ty_mode(&mut c, ty) != 0 {
+        out.push(105);
+    } else {
+        out.push(117);
+    }
+    decimal(&mut out, ty_arg(&mut c, ty));
+    return out;
+}
+// `name` is `base` alone or `base` followed by one of the ordering suffixes; the order it names
+// (0 relaxed, 1 acquire, 2 release, 3 acqrel, 4 sequentially consistent), or 5 when it is not.
+fn atomic_suffix<a, b>(name: &a [u8], base: &b [u8]) -> u64 {
+    if name.len() < base.len() {
+        return 5;
+    }
+    if !same(view(name[: base.len()]), view(base)) {
+        return 5;
+    }
+    rest := name[base.len():];
+    if rest.len() == 0 {
+        return 4;
+    }
+    if same(view(rest), view("_relaxed")) {
+        return 0;
+    }
+    if same(view(rest), view("_acquire")) {
+        return 1;
+    }
+    if same(view(rest), view("_release")) {
+        return 2;
+    }
+    if same(view(rest), view("_acqrel")) {
+        return 3;
+    }
+    return 5;
+}
+fn atomic_no_method<a, b>(c: (&a mut C), ty: u64, name: &b [u8], valid: &b [u8]) -> unit {
+    mut msg = source_type_name(&mut c, ty);
+    push_bytes(&mut msg, view(" has no method `"));
+    push_bytes(&mut msg, view(name));
+    push_bytes(&mut msg, view("`; "));
+    push_bytes(&mut msg, view(valid));
+    fail(&mut c, view(msg));
+    return ();
+}
+// An `Atomic<T>` method is its `atom.*` op at the call site: no call, no allocation, no failure
+// (docs/design/concurrency-stages-5-7.md, "Stage 7"). The ordering is the name's suffix and only
+// the valid pairs have a name: loads take `_relaxed`/`_acquire`, stores `_relaxed`/`_release`,
+// read-modify-writes and compare-exchanges all four; the bare name is sequentially consistent.
+// `compare_exchange` returns the value it saw; `compare_exchange_weak` may fail spuriously and so
+// returns whether it stored. `fetch_min`/`fetch_max` compare as `T` does (signed for `i*`).
 fn atomic_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
     cell := value.t;
+    elem := ty_arg(&mut c, value.ty);
+    flag := is_bool(&mut c, elem);
+    // kind: 1 load, 2 store, 3 rmw (with `op`), 4 strong compare-exchange, 5 weak.
+    mut kind = 0;
+    mut op = u8[];
+    mut order = 5;
+    loads := atomic_suffix(view(name), view("load"));
+    if (loads == 0) || (loads == 1) || (loads == 4) {
+        kind = 1;
+        order = loads;
+    }
+    stores := atomic_suffix(view(name), view("store"));
+    if (stores == 0) || (stores == 2) || (stores == 4) {
+        kind = 2;
+        order = stores;
+    }
+    rmws := u8[][copy_bytes(view("swap")), copy_bytes(view("fetch_add")), copy_bytes(view("fetch_sub")), copy_bytes(view("fetch_and")), copy_bytes(view("fetch_or")), copy_bytes(view("fetch_xor")), copy_bytes(view("fetch_min")), copy_bytes(view("fetch_max"))];
+    ops := u8[][copy_bytes(view("xchg")), copy_bytes(view("add")), copy_bytes(view("sub")), copy_bytes(view("and")), copy_bytes(view("or")), copy_bytes(view("xor")), copy_bytes(view("min")), copy_bytes(view("max"))];
+    for i in rmws.len() {
+        r := atomic_suffix(view(name), view(rmws[i]));
+        if r < 5 {
+            kind = 3;
+            op = ops[i].copy();
+            order = r;
+        }
+    }
+    // `compare_exchange` is a prefix of `compare_exchange_weak`: the weak name is tried second.
+    strong := atomic_suffix(view(name), view("compare_exchange"));
+    if strong < 5 {
+        kind = 4;
+        order = strong;
+    }
+    weak := atomic_suffix(view(name), view("compare_exchange_weak"));
+    if weak < 5 {
+        kind = 5;
+        order = weak;
+    }
+    if kind == 0 {
+        if (loads < 5) || ((4 <= name.len()) && same(view(name[: 4]), view("load"))) {
+            atomic_no_method(&mut c, value.ty, view(name), view("the loads are load, load_relaxed and load_acquire"));
+        }
+        if (stores < 5) || ((5 <= name.len()) && same(view(name[: 5]), view("store"))) {
+            atomic_no_method(&mut c, value.ty, view(name), view("the stores are store, store_relaxed and store_release"));
+        }
+        atomic_no_method(
+            &mut c,
+            value.ty,
+            view(name),
+            view(
+                "its methods are load, store, swap, fetch_add, fetch_sub, fetch_and, fetch_or, fetch_xor, fetch_min, fetch_max, compare_exchange and compare_exchange_weak; read-modify-writes and compare-exchanges take _relaxed, _acquire, _release or _acqrel, loads _relaxed or _acquire, stores _relaxed or _release"
+            )
+        );
+    }
+    if flag & (kind == 3) & (same(view(op), view("add")) || same(view(op), view("sub")) || same(view(op), view("min")) || same(view(op), view("max"))) {
+        atomic_no_method(&mut c, value.ty, view(name), view("an Atomic<bool> has load, store, swap, fetch_and, fetch_or, fetch_xor, compare_exchange and compare_exchange_weak"));
+    }
     observe(&mut c, cell);
     mut keeper = 0;
     // Interior atomic mutation needs read authority, but its owner must remain
@@ -35127,60 +35504,28 @@ fn atomic_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
         keeper = save(&mut c);
         borrow_reference(&mut c, keeper, ty, cell, target, 0);
     }
-    mut args = one(cell);
-    mut unit = 0;
-    mut arity = 0;
-    mut f = "";
-    if same(view(name), view("load")) {
-        f = "rt_atomic_load";
+    mut arity = 1;
+    if kind == 1 {
+        arity = 0;
     }
-    if same(view(name), view("load_relaxed")) {
-        f = "rt_atomic_load_relaxed";
-    }
-    if same(view(name), view("load_acquire")) {
-        f = "rt_atomic_load_acquire";
-    }
-    if same(view(name), view("store")) {
-        f = "rt_atomic_store";
-        arity = 1;
-        unit = 1;
-    }
-    if same(view(name), view("store_relaxed")) {
-        f = "rt_atomic_store_relaxed";
-        arity = 1;
-        unit = 1;
-    }
-    if same(view(name), view("store_release")) {
-        f = "rt_atomic_store_release";
-        arity = 1;
-        unit = 1;
-    }
-    if same(view(name), view("fetch_add")) {
-        f = "rt_atomic_fetch_add";
-        arity = 1;
-    }
-    if same(view(name), view("fetch_sub")) {
-        f = "rt_atomic_fetch_sub";
-        arity = 1;
-    }
-    if same(view(name), view("swap")) {
-        f = "rt_atomic_swap";
-        arity = 1;
-    }
-    if same(view(name), view("compare_exchange")) {
-        f = "rt_atomic_compare_exchange";
+    if kind > 3 {
         arity = 2;
     }
-    if f.len() == 0 {
-        fail(&mut c, view("unknown Atomic method or invalid ordering"));
-    }
+    mut args = u64[];
     for i in arity {
         if i != 0 {
             expect(&mut c, view(","));
         }
-        argument := expr(&mut c, 0);
+        astart := c.pos;
+        mut argument = expr(&mut c, 0);
+        aend := c.pos;
         if c.raw == 0 {
-            require_type(&mut c, argument.ty, 0);
+            if (argument.ty != elem) && literal_target(&mut c, elem) {
+                if adopt_literal(&mut c, astart, aend, elem) {
+                    argument = val(argument.t, elem);
+                }
+            }
+            require_type(&mut c, argument.ty, elem);
         }
         get(&mut c, argument.t, view("%rax"));
         snapshot := save(&mut c);
@@ -35188,12 +35533,52 @@ fn atomic_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
     }
     expect(&mut c, view(")"));
     observe(&mut c, cell);
-    slot := invoke(&mut c, view(f), args);
+    if arity == 1 {
+        get(&mut c, args[0], view("%rax"));
+    }
+    if arity == 2 {
+        get(&mut c, args[0], view("%rax"));
+        get(&mut c, args[1], view("%rcx"));
+    }
+    get(&mut c, cell, view("%rdi"));
+    orders := u8[][copy_bytes(view("relaxed")), copy_bytes(view("acquire")), copy_bytes(view("release")), copy_bytes(view("acqrel")), copy_bytes(view("seqcst"))];
+    mut line = copy_bytes(view("atom."));
+    if kind == 1 {
+        push_bytes(&mut line, view("load "));
+    }
+    if kind == 2 {
+        push_bytes(&mut line, view("store "));
+    }
+    if kind == 3 {
+        push_bytes(&mut line, view("rmw "));
+        push_bytes(&mut line, view(op));
+        line.push(32);
+    }
+    if kind == 4 {
+        push_bytes(&mut line, view("cas "));
+    }
+    if kind == 5 {
+        push_bytes(&mut line, view("casw "));
+    }
+    push_bytes(&mut line, view(orders[order]));
+    line.push(32);
+    push_bytes(&mut line, view(atomic_width(&mut c, elem)));
+    line.push(10);
+    o(&mut c, view(line));
+    mut result = elem;
+    if kind == 2 {
+        result = 1;
+        o(&mut c, view("xorq %rax,%rax\n"));
+    }
+    if kind == 5 {
+        result = bool_type(&mut c);
+    }
+    slot := save(&mut c);
     if keeper != 0 {
         index := resource(&mut c, keeper);
         release(&mut c, index - 1);
     }
-    return val(slot, unit);
+    return val(slot, result);
 }
 fn method_receiver<a>(c: (&a mut C), input: u64, inty: u64, xty: u64, formal: u64) -> Val {
     mut rv = input;
@@ -38398,7 +38783,9 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
         // builtin shadows it, as predeclared identifiers are in Go.
         mut b = builtin_id(view(first));
         here := module_copy(&mut c);
-        if (b != 0) & (find_func(&mut c, view(here), view(first)) != 0) {
+        // A raw intrinsic (id above 100) is never shadowed: runtime.grl defines a function under the
+        // name of an intrinsic only as the seed compiler's fallback (raw_atomic_fetch_add).
+        if (b != 0) & (b <= 100) & (find_func(&mut c, view(here), view(first)) != 0) {
             b = 0;
         }
         shadow := find_local(&mut c, view(first));
@@ -38481,6 +38868,17 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
     }
     captured := capture_field(&mut c, view(first), 0, 0);
     if captured.ty != NO_TYPE {
+        // A captured shared reference, view or slice read as a value is re-borrowed - `load(&name)`,
+        // which keeps the loan it came from - so it can be passed on, bound or returned without
+        // moving the environment's own field (which the closure cannot give up).
+        ck := ty_kind(&mut c, captured.ty);
+        if ((ck == 5) || (ck == 7) || (ck == 27)) && (ty_mode(&mut c, captured.ty) == 0) && (c.validating == 0) {
+            nk := kind(&mut c);
+            if (nk != 91) && (nk != 46) {
+                field := capture_field(&mut c, view(first), 1, 0);
+                return deref_value(&mut c, field);
+            }
+        }
         return captured;
     }
     constant := constant_value(&mut c, view(m), view(first));
@@ -39491,7 +39889,16 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
             c.caddr.push(slot);
             c.caddr.push(elem);
         }
-        root := place_of(&mut c, xt);
+        mut root = place_of(&mut c, xt);
+        // A typed slice is a borrowed view: its element lives in what the slice borrows, so the
+        // element reference is a re-borrow through the slice's own loan (`&v[i]` of a slice
+        // parameter `(&a [K])` has region `a`, and the slice is suspended while it lives).
+        if (vk == 27) && (c.raw == 0) {
+            borrowed := slice_source(&mut c, xt);
+            if borrowed != 0 {
+                root = borrowed;
+            }
+        }
         target := member_place(&mut c, root, 0, elem);
         own(&mut c, slot, ty);
         bind_loan(&mut c, slot, xt, root, access == 2);
@@ -44760,7 +45167,9 @@ pub fn iface_digest<a>(data: &a [u8]) -> u8[] {
 // compiler reads is refused by length. Neither can be misread as something else, which is what makes
 // adding a field a version bump and not a silent reinterpretation. `grail iface dump` renders the
 // tree the reader read, so the format stays inspectable without a second parser.
-const IFACE_VERSION: u64 = 7;
+// Format 7 added the effect summary rows of every listed function; format 8 gives an `Atomic<T>`
+// its element type.
+const IFACE_VERSION: u64 = 8;
 const IFACE_TAG_MODULE: u64 = 1;
 const IFACE_TAG_TRAILER: u64 = 2;
 const IFACE_TAG_LINK: u64 = 3;
@@ -45157,7 +45566,7 @@ fn iface_w_type<a>(c: (&a mut C), out: (&a mut u8[]), deps: (&a mut u64[]), ty: 
     }
     iface_wv(&mut body, written_mode);
     iface_w_num_list(&mut body, &rs);
-    if (k == 1) || (k == 2) || (k == 3) || (k == 4) || (k == 11) || (k == 17) || (k == 19)
+    if (k == 1) || (k == 2) || (k == 3) || (k == 4) || (k == 17) || (k == 19)
         || (k == 22) || (k == 24) {
         // A plain kind: its mode, its slots and nothing else.
     } else if k == 21 {
@@ -45171,9 +45580,10 @@ fn iface_w_type<a>(c: (&a mut C), out: (&a mut u8[]), deps: (&a mut u64[]), ty: 
         iface_wv(&mut body, arg);
     } else if k == 5 {
         // A view: mode and slots are the whole type.
-    } else if (k == 6) || (k == 7) || (k == 10) || (k == 13) || (k == 14) || (k == 16) || (k == 26)
+    } else if (k == 6) || (k == 7) || (k == 10) || (k == 11) || (k == 13) || (k == 14) || (k == 16) || (k == 26)
         || (k == 27) || (k == 29) || (k == 32) || (k == 34) || (k == 35) {
-        // One nested type in the payload (for an array `[T; N]`, `T`; the mode is `N`).
+        // One nested type in the payload (for an array `[T; N]`, `T`; the mode is `N`; an `Atomic<T>`
+        // carries its element since format 8).
         iface_w_type(&mut c, &mut body, &mut deps, arg);
     } else if k == 8 {
         owner := c.decls[arg].module.copy();
@@ -45412,7 +45822,7 @@ fn iface_r_type<a>(p: (&a mut IR), c: (&a mut C)) -> u64 {
     mode := iface_rv(&mut p);
     rs := iface_r_num_list(&mut p);
     mut id = 0;
-    if tag == 1 || tag == 2 || tag == 3 || tag == 4 || tag == 11 || tag == 17 || tag == 19
+    if tag == 1 || tag == 2 || tag == 3 || tag == 4 || tag == 17 || tag == 19
         || tag == 22 || tag == 24 {
         if p.phase == 0 {
             push_bytes(&mut p.rtext, view(iface_plain_word(tag)));
@@ -45463,7 +45873,7 @@ fn iface_r_type<a>(p: (&a mut IR), c: (&a mut C)) -> u64 {
         } else {
             id = iface_intern_args(&mut p, &mut c, tag, inner, mode, rs, u64[]);
         }
-    } else if (tag == 6) || (tag == 7) || (tag == 13) || (tag == 14) || (tag == 16)
+    } else if (tag == 6) || (tag == 7) || (tag == 11) || (tag == 13) || (tag == 14) || (tag == 16)
         || (tag == 26) || (tag == 27) || (tag == 29) || (tag == 32) || (tag == 34) || (tag == 35) {
         if (p.phase == 0) & (tag != 35) {
             p.rtext.push(40);
@@ -48709,7 +49119,7 @@ fn iface_type_raw<a, b>(out: (&a mut u8[]), c: (&b mut C), ty: u64) -> unit {
         push_bytes(&mut out, view(")"));
         return ();
     }
-    if (k == 1) || (k == 2) || (k == 3) || (k == 4) || (k == 11) || (k == 17) || (k == 19) || (k == 22) || (k == 24) {
+    if (k == 1) || (k == 2) || (k == 3) || (k == 4) || (k == 17) || (k == 19) || (k == 22) || (k == 24) {
         push_bytes(&mut out, view(iface_plain_word(k)));
         return ();
     }
@@ -48729,7 +49139,7 @@ fn iface_type_raw<a, b>(out: (&a mut u8[]), c: (&b mut C), ty: u64) -> unit {
         }
         return ();
     }
-    if (k == 6) || (k == 13) || (k == 14) || (k == 16) || (k == 26) || (k == 27) || (k == 29) || (k == 32) || (k == 34) {
+    if (k == 6) || (k == 11) || (k == 13) || (k == 14) || (k == 16) || (k == 26) || (k == 27) || (k == 29) || (k == 32) || (k == 34) {
         push_bytes(&mut out, view("("));
         push_bytes(&mut out, view(iface_plain_word(k)));
         iface_extra(&mut out, mode, &rs);

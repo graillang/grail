@@ -873,6 +873,17 @@ pub fn parse<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) {
                     if op == 0 {
                         op = float_opcode(view(s), a, space);
                     }
+                    // An atomic op (`atom.*`, machine.grl "atomics") is an unknown instruction to
+                    // every pass, whatever its order, and that is the barrier: no slot or register
+                    // fact survives it (forward), every register is live across it and it is never
+                    // deleted (live_pass, dead_defs), a body holding one is not inlined, and no pass
+                    // moves an instruction past another. So nothing is forwarded, merged, hoisted or
+                    // dropped across an acquire, a release or a sequentially consistent op, and a
+                    // relaxed one is neither eliminated nor merged with its neighbour.
+                    // tools/test-optimiser-atomics.mjs holds this.
+                    if at(view(s), a, view("atom.")) {
+                        op = 0;
+                    }
                 }
             }
         } else {
