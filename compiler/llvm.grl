@@ -3119,6 +3119,18 @@ fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit
     }
     if starts(view(op), view("simd.")) {
         lift_simd(&mut l, view(line));
+        // The line consumes its address registers (the native expansion uses them as scratch, and
+        // native.grl loads all four again before the next line). Leaving the vectors' addresses in
+        // them would hand them to every later call the lifter writes - a check's cold `rt_trap` gets
+        // the registers as arguments - and an alloca whose address escapes is never promoted.
+        s := machine::simd_parse(view(line));
+        set_reg(&mut l, view("rdi"), view("0"));
+        set_reg(&mut l, view("rsi"), view("0"));
+        set_reg(&mut l, view("rdx"), view("0"));
+        set_reg(&mut l, view("rcx"), view("0"));
+        if (s.op != 19) & (s.op != 20) & (s.op != 22) & (s.op != 23) {
+            set_reg(&mut l, view("rax"), view("0"));
+        }
         return ();
     }
     o := operands(view(rest));

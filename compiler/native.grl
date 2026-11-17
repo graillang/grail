@@ -27533,6 +27533,9 @@ fn frame_result<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
 }
 // A copy of the framed record at the address in `src`, in fresh frame slots of this site.
 fn frame_copy<a>(c: (&a mut C), src: u64, ty: u64) -> u64 {
+    if is_simd(&mut c, ty) {
+        return simd_emit(&mut c, view("copy"), base_type(&mut c, ty), base_type(&mut c, ty), src, 0, 0, 0, 0, false);
+    }
     words := record_words(&mut c, base_type(&mut c, ty));
     dst := frame_alloc(&mut c, words);
     get(&mut c, src, view("%rcx"));
@@ -39281,6 +39284,19 @@ fn simd_emit<a, b>(c: (&a mut C), op: &b [u8], shape_ty: u64, rty: u64, a: u64, 
     }
     return save(&mut c);
 }
+// The vector at the address in `src` copied into the vector storage at the address in `dst`.
+fn simd_copy_to<a>(c: (&a mut C), dst: u64, src: u64, ty: u64) -> unit {
+    zero := imm(&mut c, 0);
+    get(&mut c, dst, view("%rdi"));
+    get(&mut c, src, view("%rsi"));
+    get(&mut c, zero, view("%rdx"));
+    get(&mut c, zero, view("%rcx"));
+    mut line = copy_bytes(view("simd.copy "));
+    push_bytes(&mut line, view(simd_shape(&mut c, ty)));
+    line.push(10);
+    o(&mut c, view(line));
+    return ();
+}
 // A scalar argument of the element type: a literal adopts it.
 fn simd_scalar_arg<a>(c: (&a mut C), elem: u64) -> u64 {
     astart := c.pos;
@@ -39438,16 +39454,8 @@ fn simd_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
         index := simd_scalar_arg(&mut c, int_type(&mut c, 64, 0));
         expect(&mut c, view(")"));
         at := simd_elements(&mut c, dst, index, ty, true);
-        // The copy's destination is the elements: rdi is the address, rsi the vector.
-        zero := imm(&mut c, 0);
-        get(&mut c, at, view("%rdi"));
-        get(&mut c, value.t, view("%rsi"));
-        get(&mut c, zero, view("%rdx"));
-        get(&mut c, zero, view("%rcx"));
-        mut line = copy_bytes(view("simd.copy "));
-        push_bytes(&mut line, view(simd_shape(&mut c, ty)));
-        line.push(10);
-        o(&mut c, view(line));
+        // The copy's destination is the elements.
+        simd_copy_to(&mut c, at, value.t, ty);
         return val(imm(&mut c, 0), intern(&mut c, 2, 0));
     }
     if (same(view(name), view("min")) || same(view(name), view("max"))) && !mask {
@@ -47350,7 +47358,12 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
             if is_c_record(&mut c, ty) != 0 {
                 return zero_record_binding(&mut c, name, ty, mutable);
             }
-            n := imm(&mut c, 0);
+            mut n = imm(&mut c, 0);
+            if is_simd(&mut c, ty) & (c.raw == 0) {
+                // Storage of its own from the start, which an assignment copies the lanes into
+                // (assignment_tail); it stays uninitialized to the checker until then.
+                n = frame_alloc(&mut c, simd_words(&mut c, ty));
+            }
             // A handle or bare pointer declared without an initializer is null, not uninitialized:
             // its slot already holds the zero `imm` above, and null is the value a C out-parameter
             // starts from (`mut instance: Instance; vkCreateInstance(..., &mut instance)`). Any other
@@ -48352,6 +48365,16 @@ fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, t
     }
     if through != 0 {
         ref_store(&mut c, target, fieldty, v.t);
+    } else if is_simd(&mut c, ty) & (c.raw == 0) {
+        // A vector's lanes go into the storage the variable already has, as an array's bytes do:
+        // one vector copy, so the variable's storage is one object every access types alike and
+        // LLVM keeps it in a register (a rebinding to fresh words made the variable's address a
+        // phi of two allocas, which SROA cannot split).
+        simd_copy_to(&mut c, target, v.t, ty);
+        place := place_of(&mut c, target);
+        if place != 0 {
+            ownership::initialize(&mut c.check, place);
+        }
     } else if is_array(&mut c, ty) {
         // An array's bytes go into the storage the variable already has: the value's storage (a
         // literal's, say) is made again by its own site, so the variable never shares it. What it
