@@ -37093,6 +37093,16 @@ fn pointer_method<a, d>(c: (&a mut C), value: Val, pty: u64, name: &d [u8]) -> V
 // `p.read()`: the pointee loaded at its natural width, the same instruction raw_load and friends
 // emit for the intrinsic of that width. A float pointee is refused rather than reinterpreted.
 fn ptr_load<a>(c: (&a mut C), address: u64, pointee: u64) -> u64 {
+    if framed(&mut c, pointee) {
+        // A raw pointer's storage is one word (ptr_width), and a framed value is not one: the word
+        // holds a box of it (ptr_store). Reading takes the value out: a copy in this frame, and the
+        // box is freed - `read` hands ownership over, so the word is not read as this value again.
+        get(&mut c, address, view("%rax"));
+        o(&mut c, view("movq (%rax),%rax\n"));
+        slot := save(&mut c);
+        unbox_into_frame(&mut c, slot, pointee);
+        return slot;
+    }
     width := ptr_width(&mut c, pointee);
     get(&mut c, address, view("%rax"));
     if width == 8 {
@@ -37113,8 +37123,12 @@ fn ptr_load<a>(c: (&a mut C), address: u64, pointee: u64) -> u64 {
 // contract as Rust's `ptr::write`.
 fn ptr_store<a>(c: (&a mut C), address: u64, v: u64, pointee: u64) -> unit {
     width := ptr_width(&mut c, pointee);
+    mut value = v;
+    if framed(&mut c, pointee) {
+        value = frame_box(&mut c, v, pointee);
+    }
     get(&mut c, address, view("%rcx"));
-    get(&mut c, v, view("%rax"));
+    get(&mut c, value, view("%rax"));
     if width == 8 {
         o(&mut c, view("movq %rax,(%rcx)\n"));
     }
