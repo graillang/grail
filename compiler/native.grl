@@ -49866,14 +49866,17 @@ fn iface_rv<a>(p: (&a mut IR)) -> u64 {
     mut done = 0;
     while done == 0 {
         b := iface_r1(&mut p);
+        // Ten bytes carry 64 bits: the tenth, at scale 2^63, holds bit 63 alone and ends the number.
+        // (Refusing at 2^56 refused every u64 from 2^63 up, and every negative signed constant.)
+        if (scale == 9223372036854775808) && (1 < b) {
+            iface_bad(&mut p, view("carries a number wider than 64 bits"));
+            return 0;
+        }
         n = n + (b & 127) * scale;
         if (b & 128) == 0 {
             done = 1;
         } else {
             scale = scale * 128;
-            if 72057594037927936 < scale {
-                iface_bad(&mut p, view("carries a number wider than 64 bits"));
-            }
         }
     }
     return n;

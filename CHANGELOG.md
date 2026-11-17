@@ -9,6 +9,13 @@
   `= called from` line is the next one shown. Measured (callgrind, one worker): a join 3406 -> 3355
   instructions, a spawn 2089 -> 1858; the compiler's own text +0.4%.
 
+- Fixed: a module exporting a `u64` constant at or above 2^63, or a negative signed constant, could
+  not be read back from its interface ("carries a number wider than 64 bits"), so `grail build` of a
+  program using such a module failed. The reader now accepts the tenth LEB128 byte that holds bit 63.
+- Fixed: builds sharing one store at once (the per-module runs of one `grail check`, or several
+  builds) wrote their `sha256sum` output to one file in the store, and one run could take another's
+  digest and file a module under another module's interface ("core.iface describes module `io`").
+  Each such command now writes to a directory it claims for itself.
 - **C calls with floats are optimised in release builds (call ABI S8a).** A function that called a
   C function with `f64`/`f32` arguments or a float result had to stay unoptimised on the LLVM
   backend (its floats travel in vector registers a lifted call did not carry). The front end now
