@@ -56,6 +56,15 @@ for (const [i, file] of sources.entries()) {
   formatted.set(file, copy);
 }
 checks += sources.length;
+// Wrapped output parses again: tests/fmt/wide.grl has expressions the formatter must break at a
+// binary operator, comparisons included, and a continuation line that opens with `<` reads as
+// generic brackets (asm_x86.grl once came out of `grail fmt` refused that way).
+{
+  const wide = formatted.get(join(root, 'tests/fmt/wide.grl'));
+  assert.ok(readFileSync(wide, 'utf8') !== readFileSync(join(root, 'tests/fmt/wide.grl'), 'utf8'), 'tests/fmt/wide.grl was expected to need wrapping');
+  const reparsed = run(['check', wide], undefined, false);
+  assert.equal(reparsed.status, 0, `formatted tests/fmt/wide.grl does not check:\n${reparsed.stdout ?? ''}${reparsed.stderr ?? ''}`); checks++;
+}
 const original = join(work, 'original.s'), reformatted = join(work, 'reformatted.s');
 // Both builds are given the same module root: `lib/xxhash.grl` is one of the compiler's own sources,
 // which makes `lib/` a module root by location, and the formatted copies live somewhere else - so
