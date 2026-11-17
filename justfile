@@ -27,6 +27,7 @@ bench-results:
     bun tools/bench-rivals.mjs --json bench/results/engine.json hashmap bintrees strings json dyncall iterchain ecs
     bun tools/sched-rivals.mjs --json bench/results/sched-rivals.json
     bun tools/compile-rivals.mjs --json bench/results/compile-rivals.json
+    bun tools/abundance-perf.mjs --json bench/results/abundance.json
 
 # Verify Grail examples without compiling the optional Rust comparisons.
 book-check-grail:
