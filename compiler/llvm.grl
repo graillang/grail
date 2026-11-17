@@ -90,8 +90,10 @@ pub fn fact_dyn_result<a>(facts: (&a mut Facts), name: u8[]) -> unit {
 // `slot` is word 0 of an aggregate of `words` words in `name`: a plain record kept in the frame
 // (docs/design/unboxed-values.md, stage 3a). Word i is slot `slot - i`, at `8*i` above word 0, the
 // same shape as a `DynPair`, which is the two-word case; both are one object to every pass.
-pub fn fact_aggregate<a>(facts: (&a mut Facts), name: u8[], slot: u64, words: u64) -> unit {
-    facts.items.push(Fact { kind: FACT_PAIR, fn: name, a: slot, b: 0, callee: u8[], what: 0, width: words });
+// `written` 1: the words are written before they are read and own nothing, so the frame's zeroing is
+// skipped for them.
+pub fn fact_aggregate<a>(facts: (&a mut Facts), name: u8[], slot: u64, words: u64, written: u64) -> unit {
+    facts.items.push(Fact { kind: FACT_PAIR, fn: name, a: slot, b: 0, callee: u8[], what: written, width: words });
     return ();
 }
 // The words of each multi-word frame value of `name`, in the order facts_dyn_pairs gives their slots:
@@ -105,6 +107,17 @@ pub fn facts_pair_widths<a, b, d>(facts: (&a Facts), name: &b [u8], out: (&d mut
             } else {
                 out.push(f.width);
             }
+        }
+    }
+    return ();
+}
+// Whether each multi-word frame value of `name` needs no zeroing (fact_aggregate's `written`), in the
+// order facts_dyn_pairs gives their slots.
+pub fn facts_pair_written<a, b, d>(facts: (&a Facts), name: &b [u8], out: (&d mut u64[])) -> unit {
+    for i in facts.items.len() {
+        f := &facts.items[i];
+        if (f.kind == FACT_PAIR) & eq(view(f.fn), name) {
+            out.push(f.what);
         }
     }
     return ();
@@ -391,6 +404,8 @@ struct L {
     pairs: u64[],
     // The word count of each entry of `pairs`.
     pair_widths: u64[],
+    // 1 per entry of `pairs` whose words need no zeroing (facts_pair_written).
+    pair_written: u64[],
     // Accepted f32 slot facts of the function being lowered: every slot in here is emitted as
     // `alloca float` and read and written with `load float`/`store float` (docs/design/typed-ir.md).
     fslots: u64[],
@@ -5738,8 +5753,10 @@ fn overreach_operand<a, b>(l: (&a L), regs: (&b u64[]), t: &[u8]) -> bool {
 fn function_pairs<a, b, d>(l: (&a mut L), facts: (&b Facts), name: &d [u8]) -> unit {
     exchange(&mut l.pairs, u64[]);
     exchange(&mut l.pair_widths, u64[]);
+    exchange(&mut l.pair_written, u64[]);
     facts_dyn_pairs(facts, name, &mut l.pairs);
     facts_pair_widths(facts, name, &mut l.pair_widths);
+    facts_pair_written(facts, name, &mut l.pair_written);
     return ();
 }
 // The two-word value slot k belongs to, +1: its first word's slot, or 0 when k is a plain slot.
@@ -5752,6 +5769,15 @@ fn pair_base<a>(l: (&a L), k: u64) -> u64 {
         }
     }
     return 0;
+}
+// Whether the multi-word value whose base (counted from one) is `base` needs no zeroing.
+fn pair_written_before_read<a>(l: (&a L), base: u64) -> bool {
+    for i in l.pairs.len() {
+        if (l.pairs[i] + 1 == base) & (i < l.pair_written.len()) {
+            return l.pair_written[i] != 0;
+        }
+    }
+    return false;
 }
 // The word count of the multi-word value whose base (counted from one) is `base`.
 fn pair_words<a>(l: (&a L), base: u64) -> u64 {
@@ -6195,6 +6221,9 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
                 mut count_text = u8[];
                 num(&mut count_text, words);
                 emit(&mut l, view("{} = alloca [{} x i64], align 8"), &u8[][copy(view(sn)), count_text]);
+                if pair_written_before_read(&l, b) {
+                    continue;
+                }
                 if (zero >= 0) && (k >= u64(zero)) && (k < slots) {
                     emit(&mut l, view("store i64 0, ptr {}"), &u8[][copy(view(sn))]);
                 }
@@ -9559,7 +9588,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
             set_add(&mut weak, view(sub(wl, 6, wl.len())));
         }
     }
-    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, ebase: u64[], eptrs: set_new(16), evals: set_new(16), eslot: u64[], dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, pvreg: u8[][], pvptr: u8[][], pvoff: i64[], asy: u8[][], asx: u8[][], rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0, argwritten: 0, ffis: set_new(16), ffimem: set_new(16), entryextra: u8[], outer: u8[][], outeropen: 0, why: host::env(view("GRAIL_LLVM_WHY")), refsigs: set_new(16), takenslots: u8[][], ownrefs: 0, argptrs: u8[][], grail_bodies: set_new(16), xpend: 0, xstale: 18446744073709551615 };
+    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], pair_written: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, ebase: u64[], eptrs: set_new(16), evals: set_new(16), eslot: u64[], dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, pvreg: u8[][], pvptr: u8[][], pvoff: i64[], asy: u8[][], asx: u8[][], rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0, argwritten: 0, ffis: set_new(16), ffimem: set_new(16), entryextra: u8[], outer: u8[][], outeropen: 0, why: host::env(view("GRAIL_LLVM_WHY")), refsigs: set_new(16), takenslots: u8[][], ownrefs: 0, argptrs: u8[][], grail_bodies: set_new(16), xpend: 0, xstale: 18446744073709551615 };
     // A function whose address is taken (`NAME(%rip)`, or named by data such as a vtable) is
     // called through a pointer by code that does not know its signature, so it keeps the six-word
     // form: an indirect call passes six words and reads rax:rdx, and LLVM must never see a call
