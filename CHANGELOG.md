@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **`bytes::copy_back(v, distance, length)`**: the LZ77 match copy, appending `length` bytes copied
+  from `distance` back (overlap allowed, as DEFLATE and zstd require), a word at a time when the
+  distance is at least eight. Inflate and zstd use it instead of a push per byte: the 20 MB zstd
+  archive Grail-LLVM 14.4G -> 11.9G instructions (1.43 -> 1.24 s), the 4K png 8.07G -> 7.47G
+  (0.91 -> 0.85 s).
 - Fixed: an interface whose methods carry default bodies could not be read back and written again
   unchanged ("does not round-trip"): the reader kept a default body only as the source it compiles,
   not as the method's text.
