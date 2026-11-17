@@ -52,7 +52,7 @@ export function perfBlock(spec, directory = resultsDirectory) {
   if (part === 'provenance') return provenance(data);
   const table = data.tables.find(t => t.id === part);
   if (!table) throw new Error(`bench/results/${name}.json has no table ${part}`);
-  return `${table.chart ? chart(table) : ''}${numbers(table)}`;
+  return `${table.chart ? chart(table, data) : ''}${numbers(table)}`;
 }
 export function expand(text, book, used = new Set()) {
   return text.replace(/\{\{(example|source|perf):([^}]+)\}\}/g, (_, kind, id) => {
