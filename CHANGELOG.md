@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **The optimiser's liveness is linear in a function's length.** The register and frame-slot
+  liveness behind dead-store removal, prologue zeroing and register colouring looked at every
+  candidate slot on every line of every round; each line's effect is now worked out once per pass
+  and read through a slot-to-candidate table. The output is byte-identical; compiling the compiler
+  takes 20% fewer instructions, and a cold `grail build` of a 1000-function file 5.7% fewer.
 - **`host::chmod(path, mode)`**: sets a file's permission bits, 0 or a positive errno (fchmodat on
   Linux, chmod on macOS, and 0 on Windows, which has no bits to set). The build store will use it to
   give a restored executable image its mode without a shell, once the bootstrap seed knows it.
