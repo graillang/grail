@@ -17,6 +17,12 @@
   (`grail asm --target windows-x86_64`). Debug builds keep clang until CodeView is written. Fixed:
   `movsd` encoded as `movdqu` (the two shared an internal id).
 
+- **Sized and signed arithmetic no longer divides in software.** The runtime's `rt_div` was a
+  shift-and-subtract loop, and every overflow check of a sized or signed multiply and every sized or
+  signed division and remainder went through it; it is now the hardware divide. jpeg decoding of a
+  2048x2048 image: Grail-LLVM 25.8G -> 6.9G instructions, Grail-native 128G -> 38.6G. A case pins
+  division, remainder and multiplication at the edges of every width (checked and wrapping), and
+  `MIN / -1`, `MIN * -1`, division and remainder by zero and products one past the maximum abort.
 - Fixed: the per-loop stability fact and the LLVM backend's indirect-call fact both used fact kind
   7, so a stable vector whose slot number matched an indirect call's ordinal (with a loop head
   label of 6 or less) could make the lifter pass that call too few arguments. The stability fact
