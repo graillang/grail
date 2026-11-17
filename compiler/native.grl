@@ -53,15 +53,6 @@ fn is_type_id(ty: u64) -> bool {
     return ty < CT_PENDING;
 }
 
-struct Tok {
-    kind: u64,
-    start: u64,
-    end: u64,
-    // Where the token starts, 1-based, worked out once when the file is read: every position a
-    // diagnostic, a debug row or a runtime-error site needs is a lookup, not a scan of the source.
-    line: u64,
-    col: u64
-}
 struct Ty {
     kind: u64,
     arg: u64,
@@ -464,7 +455,9 @@ struct Atom {
 }
 struct C {
     src: u8[],
-    toks: Tok[],
+    // The loaded file's tokens. Each knows where it starts (line, col), worked out once by the
+    // lexer: every position a diagnostic, a debug row or a runtime-error site needs is a lookup.
+    toks: lexer::Token[],
     pos: u64,
     out: u8[],
     // 1 (--split): mark module boundaries in `out` and write one assembly file per module.
@@ -598,7 +591,15 @@ struct C {
     file_loaded: u64,
     file_cache_index: u64[],
     file_cache_src: u8[][],
-    file_cache_toks: Tok[][],
+    file_cache_toks: lexer::Token[][],
+    // The functions by module, for the interface writer (iface_func_ids): an open-addressed table
+    // of groups (`fmod_slots` holds group + 1), each group's module, its key and its functions in
+    // table order; `fmod_n` functions are filed. Functions are only ever appended.
+    fmod_slots: u64[],
+    fmod_keys: u64[],
+    fmod_names: u8[][],
+    fmod_ids: u64[][],
+    fmod_n: u64,
     funcs: Func[],
     // The (module, name) index of `funcs` and of `decls` (see name_key).
     func_slots: u64[],
@@ -7098,7 +7099,13 @@ fn tok_text<a>(c: (&a mut C), i: u64) -> u8[] {
     t := &c.toks[i];
     st := t.start;
     en := t.end;
-    return (c.src[st: en]).copy();
+    // Filled in place: a slice of the source and a copy of it was a view record more per token.
+    n := en - st;
+    mut out = u8[0; n];
+    for k in n {
+        out[k] = c.src[st + k];
+    }
+    return out;
 }
 // Whether the current token is spelled `s`, read from the source in place. `is` is asked for every
 // keyword at every statement, and copying the token out to compare it was four allocations a
@@ -8559,6 +8566,10 @@ fn pv_literal<a>(t: &a [u8]) -> bool {
 }
 // A word the prover must not mistake for a variable.
 fn pv_keyword<a>(t: &a [u8]) -> bool {
+    // Every word below is two to eight bytes long.
+    if (t.len() < 2) || (8 < t.len()) {
+        return false;
+    }
     return same(view(t), view("true"))
         || same(view(t), view("false"))
         || same(view(t), view("if"))
@@ -8602,8 +8613,7 @@ fn pv_term<a>(c: (&a mut C), at: u64, used: (&a mut u64)) -> u8[] {
     }
     // `NAME.len()` is the length of the thing NAME names.
     if (kind_at(&mut c, at + 1) == 46) & (kind_at(&mut c, at + 2) == 1) & (kind_at(&mut c, at + 3) == 40) & (kind_at(&mut c, at + 4) == 41) {
-        m := tok_text(&mut c, at + 2);
-        if same(view(m), view("len")) {
+        if is_at(&mut c, at + 2, view("len")) {
             // A static string's or table's length is a known number (module-values stage 5).
             known := pv_known_literal(&mut c, view(t), true);
             exchange(used, 5);
@@ -8625,8 +8635,7 @@ fn pv_term<a>(c: (&a mut C), at: u64, used: (&a mut u64)) -> u8[] {
             push_bytes(&mut out, view(f));
             exchange(used, 3);
             if (kind_at(&mut c, at + 3) == 46) & (kind_at(&mut c, at + 4) == 1) & (kind_at(&mut c, at + 5) == 40) & (kind_at(&mut c, at + 6) == 41) {
-                m := tok_text(&mut c, at + 4);
-                if same(view(m), view("len")) {
+                if is_at(&mut c, at + 4, view("len")) {
                     push_bytes(&mut out, view(".len"));
                     exchange(used, 7);
                 }
@@ -9213,6 +9222,18 @@ fn pv_mentions<a, b>(term: &a [u8], name: &b [u8]) -> bool {
 // Drop every fact that mentions a name, its length or a field of it: a binding of the name shadows
 // what the facts said, and a write through it makes them false.
 fn pv_kill<a>(facts: (&a mut Atom[]), name: &a [u8]) -> unit {
+    // Most writes kill nothing: then the list stays as it is instead of being copied whole.
+    mut any = false;
+    for i in facts.len() {
+        x := &facts[i];
+        if pv_mentions(view(x.a), view(name)) || pv_mentions(view(x.b), view(name)) {
+            any = true;
+            break;
+        }
+    }
+    if !any {
+        return ();
+    }
     mut keep = Atom[];
     for i in facts.len() {
         x := &facts[i];
@@ -9512,8 +9533,7 @@ fn pv_span_term<a>(c: (&a mut C), lo: u64, hi: u64) -> u8[] {
     if (i < hi) & (kind_at(&mut c, i) == 38) {
         i += 1;
         if (i < hi) & (kind_at(&mut c, i) == 1) {
-            m := tok_text(&mut c, i);
-            if same(view(m), view("mut")) {
+            if is_at(&mut c, i, view("mut")) {
                 i += 1;
             }
         }
@@ -9575,8 +9595,7 @@ fn pv_span_mutates<a>(c: (&a mut C), lo: u64, hi: u64) -> bool {
         k := kind_at(&mut c, i);
         if k == 38 {
             if kind_at(&mut c, i + 1) == 1 {
-                m := tok_text(&mut c, i + 1);
-                if same(view(m), view("mut")) {
+                if is_at(&mut c, i + 1, view("mut")) {
                     return true;
                 }
             }
@@ -9789,8 +9808,7 @@ fn pv_span_calls<a>(c: (&a mut C), lo: u64, hi: u64) -> bool {
         k := kind_at(&mut c, i);
         if k == 38 {
             if kind_at(&mut c, i + 1) == 1 {
-                m := tok_text(&mut c, i + 1);
-                if same(view(m), view("mut")) {
+                if is_at(&mut c, i + 1, view("mut")) {
                     return true;
                 }
             }
@@ -9935,6 +9953,9 @@ fn pv_ir_atoms<a>(c: (&a mut C), lo: u64, hi: u64) -> Atom[] {
 }
 // A statement keyword whose own conditions and statements report what they do as they are compiled.
 fn pv_compound<a, b>(t: &b [u8]) -> bool {
+    if (t.len() < 2) || (6 < t.len()) {
+        return false;
+    }
     return same(view(t), view("if"))
         || same(view(t), view("match"))
         || same(view(t), view("while"))
@@ -9966,7 +9987,8 @@ fn pv_ir_statement<a>(c: (&a mut C), lo: u64, hi: u64) -> unit {
         return ();
     }
     mut i = lo;
-    while i < hi {
+    // A name written kills the facts that mention it; with none held there is nothing to kill.
+    while (i < hi) & (c.pv_facts.len() != 0) {
         if kind_at(&mut c, i) == 1 {
             n := tok_text(&mut c, i);
             pv_ir_wrote(&mut c, view(n));
@@ -10725,9 +10747,9 @@ fn load_file<a>(c: (&a mut C), index: u64) -> unit {
         if slot == c.file_cache_index.len() {
             c.file_cache_index.push(parked);
             c.file_cache_src.push(u8[]);
-            c.file_cache_toks.push(Tok[]);
+            c.file_cache_toks.push(lexer::Token[]);
         }
-        old_toks := exchange(&mut c.toks, Tok[]);
+        old_toks := exchange(&mut c.toks, lexer::Token[]);
         old_src := exchange(&mut c.src, u8[]);
         exchange(&mut c.file_cache_toks[slot], old_toks);
         exchange(&mut c.file_cache_src[slot], old_src);
@@ -10736,7 +10758,7 @@ fn load_file<a>(c: (&a mut C), index: u64) -> unit {
     for i in c.file_cache_index.len() {
         if c.file_cache_index[i] == index {
             // The entry stays in the list, empty, until this file is parked again.
-            back_toks := exchange(&mut c.file_cache_toks[i], Tok[]);
+            back_toks := exchange(&mut c.file_cache_toks[i], lexer::Token[]);
             back_src := exchange(&mut c.file_cache_src[i], u8[]);
             exchange(&mut c.toks, back_toks);
             exchange(&mut c.src, back_src);
@@ -10779,25 +10801,7 @@ fn load_file<a>(c: (&a mut C), index: u64) -> unit {
             src = host::read_file(view(path));
         }
     }
-    mut toks = Tok[];
-    lexed := lexer::tokenize(view(src));
-    mut line = 1;
-    mut col = 1;
-    mut at = 0;
-    for i in lexed.len() {
-        t := &lexed[i];
-        while at < t.start {
-            if src[at] == 10 {
-                line += 1;
-                col = 1;
-            } else {
-                col += 1;
-            }
-            at += 1;
-        }
-        toks.push(Tok { kind: t.kind, start: t.start, end: t.end, line: line, col: col });
-    }
-    drop(lexed);
+    toks := lexer::tokenize(view(src));
     exchange(&mut c.toks, toks);
     exchange(&mut c.src, src);
     exchange(&mut c.pos, 0);
@@ -25418,25 +25422,7 @@ fn dr_parse_tail<a>(c: (&a mut C), pass: u64) -> unit {
     } else {
         push_bytes(&mut c.file_text[here], view(text));
     }
-    lexed := lexer::tokenize(view(c.src));
-    mut toks = Tok[];
-    mut line = 1;
-    mut col = 1;
-    mut at = 0;
-    for i in lexed.len() {
-        t := &lexed[i];
-        while at < t.start {
-            if c.src[at] == 10 {
-                line += 1;
-                col = 1;
-            } else {
-                col += 1;
-            }
-            at += 1;
-        }
-        toks.push(Tok { kind: t.kind, start: t.start, end: t.end, line: line, col: col });
-    }
-    drop(lexed);
+    toks := lexer::tokenize(view(c.src));
     exchange(&mut c.toks, toks);
     exchange(&mut c.pos, before);
     while kind(&mut c) != 0 {
@@ -52588,26 +52574,50 @@ fn iface_before<a, b>(x: &a [u8], y: &b [u8]) -> bool {
 // Declarations are written in name order, so a review diff shows the declaration that changed
 // rather than a reshuffled file.
 fn iface_sorted<a>(names: (&a u8[][])) -> u64[] {
+    // A stable merge sort, bottom up: of two equal names the earlier comes first, which is the order
+    // the selection sort this replaces produced, at n log n comparisons instead of n squared.
+    n := names.len();
     mut order = u64[];
-    mut used = u64[];
-    for i in names.len() {
-        used.push(0);
+    for i in n {
+        order.push(i);
     }
-    while order.len() < names.len() {
-        mut best = names.len();
-        for i in names.len() {
-            if used[i] == 0 {
-                if best == names.len() {
-                    best = i;
-                } else {
-                    if iface_before(view(names[i]), view(names[best])) {
-                        best = i;
-                    }
-                }
+    mut merged = u64[0; n];
+    mut width = 1;
+    while width < n {
+        mut lo = 0;
+        while lo < n {
+            mut mid = lo + width;
+            if n < mid {
+                mid = n;
             }
+            mut hi = mid + width;
+            if n < hi {
+                hi = n;
+            }
+            mut i = lo;
+            mut j = mid;
+            mut k = lo;
+            while k < hi {
+                mut left = i < mid;
+                if left && (j < hi) {
+                    // The right one goes first only when it is strictly before the left one.
+                    left = !iface_before(view(names[order[j]]), view(names[order[i]]));
+                }
+                if left {
+                    merged[k] = order[i];
+                    i += 1;
+                } else {
+                    merged[k] = order[j];
+                    j += 1;
+                }
+                k += 1;
+            }
+            lo = hi;
         }
-        exchange(&mut used[best], 1);
-        order.push(best);
+        for k in n {
+            order[k] = merged[k];
+        }
+        width = width * 2;
     }
     return order;
 }
@@ -53013,13 +53023,71 @@ fn iface_decl_ids<a, b>(c: (&a mut C), m: &b [u8]) -> u64[] {
 }
 
 fn iface_func_ids<a, b>(c: (&a mut C), m: &b [u8]) -> u64[] {
-    mut ids = u64[];
-    for i in c.funcs.len() {
-        if same(view(c.funcs[i].module), view(m)) {
-            ids.push(i);
-        }
+    // Asked once per declaration (its `.inherent_` module) and per implementation: a scan of every
+    // function each time made the interface cost the product of the two (fmod_sync).
+    fmod_sync(&mut c);
+    g := fmod_group(&c, m);
+    if g == 0 {
+        return u64[];
     }
-    return ids;
+    return c.fmod_ids[g - 1].copy();
+}
+// The group of module `m` in the by-module table, + 1; 0 when no function is in it.
+fn fmod_group<a, b>(c: (&a C), m: &b [u8]) -> u64 {
+    if c.fmod_slots.len() == 0 {
+        return 0;
+    }
+    key := name_key(view(m), view(""));
+    mask := c.fmod_slots.len() - 1;
+    mut h = key & mask;
+    while c.fmod_slots[h] != 0 {
+        g := c.fmod_slots[h];
+        if (c.fmod_keys[g - 1] == key) && same(view(c.fmod_names[g - 1]), view(m)) {
+            return g;
+        }
+        h = (h + 1) & mask;
+    }
+    return 0;
+}
+// Files the functions added since the last call, each under its module, in table order.
+fn fmod_sync<a>(c: (&a mut C)) -> unit {
+    while c.fmod_n < c.funcs.len() {
+        i := c.fmod_n;
+        exchange(&mut c.fmod_n, i + 1);
+        m := c.funcs[i].module.copy();
+        mut g = fmod_group(&c, view(m));
+        if g == 0 {
+            // A new group; the table stays at most half full.
+            if c.fmod_slots.len() <= 2 * (c.fmod_names.len() + 1) {
+                mut size = 64;
+                while size <= 4 * (c.fmod_names.len() + 1) {
+                    size = size * 2;
+                }
+                mut slots = u64[0; size];
+                for k in c.fmod_names.len() {
+                    mut h = c.fmod_keys[k] & (size - 1);
+                    while slots[h] != 0 {
+                        h = (h + 1) & (size - 1);
+                    }
+                    slots[h] = k + 1;
+                }
+                exchange(&mut c.fmod_slots, slots);
+            }
+            key := name_key(view(m), view(""));
+            c.fmod_keys.push(key);
+            c.fmod_names.push(m.copy());
+            c.fmod_ids.push(u64[]);
+            g = c.fmod_names.len();
+            mask := c.fmod_slots.len() - 1;
+            mut h = key & mask;
+            while c.fmod_slots[h] != 0 {
+                h = (h + 1) & mask;
+            }
+            c.fmod_slots[h] = g;
+        }
+        c.fmod_ids[g - 1].push(i);
+    }
+    return ();
 }
 
 
@@ -53644,7 +53712,7 @@ fn iface_emit_all<a>(c: (&a mut C)) -> unit {
 pub fn main() -> u64 {
     mut c = C {
         src: u8[],
-        toks: Tok[],
+        toks: lexer::Token[],
         pos: 0,
         out: u8[],
         split: 0,
@@ -53724,7 +53792,12 @@ pub fn main() -> u64 {
         file_loaded: 0,
         file_cache_index: u64[],
         file_cache_src: u8[][],
-        file_cache_toks: Tok[][],
+        file_cache_toks: lexer::Token[][],
+        fmod_slots: u64[],
+        fmod_keys: u64[],
+        fmod_names: u8[][],
+        fmod_ids: u64[][],
+        fmod_n: 0,
         funcs: Func[],
         func_slots: u64[],
         func_keys: u64[],

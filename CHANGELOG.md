@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **Writing interfaces no longer costs the square of the declarations.** The interface writer put
+  each list of names in order with a selection sort, and looked up every type's inherent methods
+  by scanning every function of the program. A stable merge sort and a by-module index of the
+  functions give the same interface bytes: an edited build of the 104k-line syn4000 program (one
+  body changed, warm store) takes 36% fewer instructions.
 - The landing queue's build host runs the aarch64 legs under the patched qemu-aarch64:
   `tools/land-remote.sh` builds it there with `tools/qemu/build.sh` before starting the legs, and
   `tools/land.sh --remote-status` (`just land-status-remote`) prints each emulated leg's verdict for
