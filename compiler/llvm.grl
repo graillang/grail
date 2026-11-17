@@ -1,4 +1,5 @@
 module llvm;
+use machine;
 
 // LLVM lowering of the compiler's closed word-machine stream (docs/design/llvm-backend.md).
 // The raw x86-64-spelled stream (before optimize.grl) becomes LLVM IR for every function whose
@@ -59,6 +60,28 @@ pub fn fact_dyn_pair<a>(facts: (&a mut Facts), name: u8[], slot: u64) -> unit {
 // {ptr, ptr} aggregate, so the second result word is live at the `ret`.
 pub fn fact_dyn_result<a>(facts: (&a mut Facts), name: u8[]) -> unit {
     facts.items.push(Fact { kind: 4, fn: name, a: 0, b: 0, callee: u8[], what: 0, width: 0 });
+    return ();
+}
+// `slot` is word 0 of an aggregate of `words` words in `name`: a plain record kept in the frame
+// (docs/design/unboxed-values.md, stage 3a). Word i is slot `slot - i`, at `8*i` above word 0, the
+// same shape as a `DynPair`, which is the two-word case; both are one object to every pass.
+pub fn fact_aggregate<a>(facts: (&a mut Facts), name: u8[], slot: u64, words: u64) -> unit {
+    facts.items.push(Fact { kind: 3, fn: name, a: slot, b: 0, callee: u8[], what: 0, width: words });
+    return ();
+}
+// The words of each multi-word frame value of `name`, in the order facts_dyn_pairs gives their slots:
+// 2 for a `DynPair` (its fact leaves the width 0), the declared count for an aggregate.
+pub fn facts_pair_widths<a, b, d>(facts: (&a Facts), name: &b [u8], out: (&d mut u64[])) -> unit {
+    for i in facts.items.len() {
+        f := &facts.items[i];
+        if (f.kind == 3) & eq(view(f.fn), name) {
+            if f.width == 0 {
+                out.push(2);
+            } else {
+                out.push(f.width);
+            }
+        }
+    }
     return ();
 }
 // The `DynPair` slots of `name` (each the first word's slot), appended to `out`.
@@ -265,6 +288,8 @@ struct L {
     // facts (docs/design/fat-dyn.md), so what the front end built a pair for is not re-derived from
     // the shape of the stream.
     pairs: u64[],
+    // The word count of each entry of `pairs`.
+    pair_widths: u64[],
     // Accepted f32 slot facts of the function being lowered: every slot in here is emitted as
     // `alloca float` and read and written with `load float`/`store float` (docs/design/typed-ir.md).
     fslots: u64[],
@@ -929,7 +954,7 @@ fn address<a, b>(l: (&a mut L), op: &b [u8]) -> u8[] {
             mut off = within;
             if pair_second(&l, k) != 0 {
                 at = u64(pair_base(&l, k)) - 1;
-                off = within + 8;
+                off = within + i64(8 * (at - k));
             }
             mut slot = copy(view("%s."));
             num(&mut slot, at);
@@ -2305,6 +2330,37 @@ fn element_address(l: (&mut L), target: (&[u8]), k: u64, width: u64) -> unit {
     clear_args(&mut l);
     return ();
 }
+// The address of element `rsi` of a fixed-size array at `rdi` (docs/design/fixed-arrays.md):
+// `rt_aslot` first compares the index with the constant length in `rdx` and fails as the accessor
+// would; the address is a `getelementptr` on the array's own pointer, so it keeps the provenance
+// of the frame aggregate or record the array lives in and LLVM can keep elements in registers.
+fn array_element<a, b>(l: (&a mut L), target: &b [u8]) -> unit {
+    base := get_reg(&mut l, view("rdi"));
+    i := get_reg(&mut l, view("rsi"));
+    mut w = get_reg(&mut l, view("rdx"));
+    if eq(target, view("rt_aslot")) {
+        n := get_reg(&mut l, view("rdx"));
+        w = get_reg(&mut l, view("rcx"));
+        ok := def(&mut l, view("icmp ult i64 {}, {}"), &u8[][copy(view(i)), copy(view(n))]);
+        good := fresh_block(&mut l);
+        wrong := fresh_block(&mut l);
+        emit(&mut l, view("br i1 {}, label %{}, label %{}"), &u8[][ok, copy(view(good)), copy(view(wrong))]);
+        begin_block(&mut l, view(wrong));
+        l.calls.push(copy(view("rt_fail")));
+        emit(&mut l, view("call {i64, i64} @\"rt_fail\"(i64 1, i64 {}, i64 {}, i64 0, i64 0, i64 0)"), &u8[][copy(view(i)), copy(view(n))]);
+        emit(&mut l, view("unreachable"), &u8[][]);
+        begin_block(&mut l, view(good));
+    }
+    p := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][base]);
+    off := def(&mut l, view("mul i64 {}, {}"), &u8[][i, w]);
+    e := def(&mut l, view("getelementptr inbounds i8, ptr {}, i64 {}"), &u8[][p, off]);
+    r := def(&mut l, view("ptrtoint ptr {} to i64"), &u8[][e]);
+    set_reg(&mut l, view("rax"), view(r));
+    set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
+    set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
+    clear_args(&mut l);
+    return ();
+}
 fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> unit {
     if (target.len() == 0) || (target[0] == 42) {
         bad(&mut l);
@@ -2315,6 +2371,10 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
         emit(&mut l, view("call void @\"rt_abort.cold\"() #0"), &u8[][]);
         emit(&mut l, view("unreachable"), &u8[][]);
         ends_terminator(&mut l);
+        return ();
+    }
+    if eq(target, view("rt_aslot")) || eq(target, view("rt_aslotu")) {
+        array_element(&mut l, target);
         return ();
     }
     if eq(target, view("rt_f32_round")) {
@@ -2507,6 +2567,181 @@ fn wide<a, b>(l: (&a mut L), v: &b [u8]) -> u8[] {
 fn narrow<a, b>(l: (&a mut L), v: &b [u8]) -> u8[] {
     return def(&mut l, view("trunc i128 {} to i64"), &u8[][copy(v)]);
 }
+// ---- atomics -----------------------------------------------------------------------------------
+// The stream's `atom.*` ops (machine.grl, "atomics") with their real orderings: an acquire load is
+// `load atomic ... acquire`, not a plain load and a `fence seq_cst`. The cell is one i64 holding the
+// value extended to 64 bits, so every access is an i64; a narrow add/sub wraps at its width through
+// a `cmpxchg weak` loop that truncates and re-extends the sum.
+fn atom_order_name(order: u64) -> u8[] {
+    if order == 0 {
+        return copy(view("monotonic"));
+    }
+    if order == 1 {
+        return copy(view("acquire"));
+    }
+    if order == 2 {
+        return copy(view("release"));
+    }
+    if order == 3 {
+        return copy(view("acq_rel"));
+    }
+    return copy(view("seq_cst"));
+}
+// The C++ rule for a derived failure order: acquire for acquire/acqrel, relaxed for relaxed/release.
+fn atom_failure_name(order: u64) -> u8[] {
+    if order == 4 {
+        return copy(view("seq_cst"));
+    }
+    if (order == 1) || (order == 3) {
+        return copy(view("acquire"));
+    }
+    return copy(view("monotonic"));
+}
+fn atom_cas<a, b, c, d>(l: (&a mut L), weak: u64, p: &b [u8], expected: &c [u8], new: &d [u8], order: u64) -> u8[] {
+    mut t = u8[];
+    put(&mut t, view("cmpxchg "));
+    if weak != 0 {
+        put(&mut t, view("weak "));
+    }
+    put(&mut t, view("ptr {}, i64 {}, i64 {} "));
+    put(&mut t, view(atom_order_name(order)));
+    put(&mut t, view(" "));
+    put(&mut t, view(atom_failure_name(order)));
+    put(&mut t, view(", align 8"));
+    return def(&mut l, view(t), &u8[][copy(p), copy(expected), copy(new)]);
+}
+fn lift_atom<a, b>(l: (&a mut L), line: &b [u8]) -> unit {
+    a := machine::atom_parse(line);
+    ord := atom_order_name(a.order);
+    if a.kind == 7 {
+        if l.target == 0 {
+            emit(&mut l, view("call void asm sideeffect \"pause\", \"\"()"), &u8[][]);
+        }
+        if l.target == 1 {
+            emit(&mut l, view("call void asm sideeffect \"yield\", \"\"()"), &u8[][]);
+        }
+        if l.target == 2 {
+            emit(&mut l, view("call void asm sideeffect \".4byte 0x0100000f\", \"\"()"), &u8[][]);
+        }
+        return ();
+    }
+    if a.kind == 6 {
+        mut t = u8[];
+        put(&mut t, view("fence "));
+        put(&mut t, view(ord));
+        emit(&mut l, view(t), &u8[][]);
+        return ();
+    }
+    p := address(&mut l, view("(%rdi)"));
+    if a.kind == 1 {
+        mut t = u8[];
+        put(&mut t, view("load atomic i64, ptr {} "));
+        put(&mut t, view(ord));
+        put(&mut t, view(", align 8"));
+        v := def(&mut l, view(t), &u8[][p]);
+        set_reg(&mut l, view("rax"), view(v));
+        return ();
+    }
+    if a.kind == 2 {
+        v := get_reg(&mut l, view("rax"));
+        mut t = u8[];
+        put(&mut t, view("store atomic i64 {}, ptr {} "));
+        put(&mut t, view(ord));
+        put(&mut t, view(", align 8"));
+        emit(&mut l, view(t), &u8[][v, p]);
+        return ();
+    }
+    if (a.kind == 4) || (a.kind == 5) {
+        expected := get_reg(&mut l, view("rax"));
+        new := get_reg(&mut l, view("rcx"));
+        mut weak = 0;
+        if a.kind == 5 {
+            weak = 1;
+        }
+        r := atom_cas(&mut l, weak, view(p), view(expected), view(new), a.order);
+        if a.kind == 4 {
+            old := def(&mut l, view("extractvalue {i64, i1} {}, 0"), &u8[][r]);
+            set_reg(&mut l, view("rax"), view(old));
+        } else {
+            ok := def(&mut l, view("extractvalue {i64, i1} {}, 1"), &u8[][r]);
+            z := def(&mut l, view("zext i1 {} to i64"), &u8[][ok]);
+            set_reg(&mut l, view("rax"), view(z));
+        }
+        return ();
+    }
+    v := get_reg(&mut l, view("rax"));
+    if (a.bits != 64) & ((a.op == 2) || (a.op == 3)) {
+        again := fresh_block(&mut l);
+        done := fresh_block(&mut l);
+        emit(&mut l, view("br label %{}"), &u8[][copy(view(again))]);
+        begin_block(&mut l, view(again));
+        old := def(&mut l, view("load atomic i64, ptr {} monotonic, align 8"), &u8[][copy(view(p))]);
+        mut sum = u8[];
+        if a.op == 2 {
+            sum = def(&mut l, view("add i64 {}, {}"), &u8[][copy(view(old)), copy(view(v))]);
+        } else {
+            sum = def(&mut l, view("sub i64 {}, {}"), &u8[][copy(view(old)), copy(view(v))]);
+        }
+        mut t = u8[];
+        put(&mut t, view("trunc i64 {} to i"));
+        num(&mut t, a.bits);
+        cut := def(&mut l, view(t), &u8[][sum]);
+        mut e = u8[];
+        if a.signed != 0 {
+            put(&mut e, view("sext i"));
+        } else {
+            put(&mut e, view("zext i"));
+        }
+        num(&mut e, a.bits);
+        put(&mut e, view(" {} to i64"));
+        new := def(&mut l, view(e), &u8[][cut]);
+        r := atom_cas(&mut l, 1, view(p), view(old), view(new), a.order);
+        ok := def(&mut l, view("extractvalue {i64, i1} {}, 1"), &u8[][r]);
+        emit(&mut l, view("br i1 {}, label %{}, label %{}"), &u8[][ok, copy(view(done)), copy(view(again))]);
+        begin_block(&mut l, view(done));
+        set_reg(&mut l, view("rax"), view(old));
+        return ();
+    }
+    mut name = "xchg";
+    if a.op == 2 {
+        name = "add";
+    }
+    if a.op == 3 {
+        name = "sub";
+    }
+    if a.op == 4 {
+        name = "and";
+    }
+    if a.op == 5 {
+        name = "or";
+    }
+    if a.op == 6 {
+        name = "xor";
+    }
+    if a.op == 7 {
+        if a.signed != 0 {
+            name = "min";
+        } else {
+            name = "umin";
+        }
+    }
+    if a.op == 8 {
+        if a.signed != 0 {
+            name = "max";
+        } else {
+            name = "umax";
+        }
+    }
+    mut t = u8[];
+    put(&mut t, view("atomicrmw "));
+    put(&mut t, view(name));
+    put(&mut t, view(" ptr {}, i64 {} "));
+    put(&mut t, view(ord));
+    put(&mut t, view(", align 8"));
+    old := def(&mut l, view(t), &u8[][p, v]);
+    set_reg(&mut l, view("rax"), view(old));
+    return ();
+}
 fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit {
     mut space = line.len();
     for i in line.len() {
@@ -2516,21 +2751,8 @@ fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit
     }
     mut op = sub(line, 0, space);
     mut rest = trim(view(sub(line, space + 1, line.len())));
-    if eq(view(op), view("lock")) {
-        // lock cmpxchgq %new,(mem): compares with rax, sets ZF, leaves the old value in rax.
-        o := operands(view(sub(view(rest), 9, rest.len())));
-        if !starts(view(rest), view("cmpxchgq ")) || o.len() != 2 {
-            bad(&mut l);
-            return ();
-        }
-        p := address(&mut l, view(o[1]));
-        new := value(&mut l, view(o[0]), 64);
-        expected := get_reg(&mut l, view("rax"));
-        r := def(&mut l, view("cmpxchg ptr {}, i64 {}, i64 {} seq_cst seq_cst, align 8"), &u8[][p, expected, new]);
-        old := def(&mut l, view("extractvalue {i64, i1} {}, 0"), &u8[][copy(view(r))]);
-        ok := def(&mut l, view("extractvalue {i64, i1} {}, 1"), &u8[][r]);
-        set_reg(&mut l, view("rax"), view(old));
-        set_flag(&mut l, view("Z"), view(ok));
+    if starts(view(op), view("atom.")) {
+        lift_atom(&mut l, view(line));
         return ();
     }
     o := operands(view(rest));
@@ -2758,23 +2980,6 @@ fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit
         s2 := def(&mut l, view("insertvalue {i64, i64} {}, i64 {}, 1"), &u8[][s1, d]);
         emit(&mut l, view("ret {i64, i64} {}"), &u8[][s2]);
         ends_terminator(&mut l);
-        return ();
-    }
-    if eq(view(op), view("mfence")) || eq(view(op), view("sfence")) || eq(view(op), view("lfence")) {
-        emit(&mut l, view("fence seq_cst"), &u8[][]);
-        return ();
-    }
-    if eq(view(op), view("xchgq")) {
-        mut a = copy(view(o[0]));
-        mut b = copy(view(o[1]));
-        if a[0] != 37 {
-            a = copy(view(o[1]));
-            b = copy(view(o[0]));
-        }
-        p := address(&mut l, view(b));
-        v := value(&mut l, view(a), 64);
-        old := def(&mut l, view("atomicrmw xchg ptr {}, i64 {} seq_cst, align 8"), &u8[][p, v]);
-        store(&mut l, view(a), view(old), 64);
         return ();
     }
     if eq(view(op), view("syscall")) {
@@ -3102,7 +3307,9 @@ fn body_lines<a, b>(lines: (&a u8[][]), f: (&b Func)) -> u8[][] {
 // above it, lowered as one `[2 x i64]` alloca so the two words stay one addressable value.
 fn function_pairs<a, b, d>(l: (&a mut L), facts: (&b Facts), name: &d [u8]) -> unit {
     exchange(&mut l.pairs, u64[]);
+    exchange(&mut l.pair_widths, u64[]);
     facts_dyn_pairs(facts, name, &mut l.pairs);
+    facts_pair_widths(facts, name, &mut l.pair_widths);
     return ();
 }
 // The two-word value slot k belongs to, +1: its first word's slot, or 0 when k is a plain slot.
@@ -3110,11 +3317,20 @@ fn function_pairs<a, b, d>(l: (&a mut L), facts: (&b Facts), name: &d [u8]) -> u
 fn pair_base<a>(l: (&a L), k: u64) -> u64 {
     for i in l.pairs.len() {
         b := l.pairs[i];
-        if (b == k) | (b == k + 1) {
+        if (k <= b) & (b < k + l.pair_widths[i]) {
             return b + 1;
         }
     }
     return 0;
+}
+// The word count of the multi-word value whose base (counted from one) is `base`.
+fn pair_words<a>(l: (&a L), base: u64) -> u64 {
+    for i in l.pairs.len() {
+        if l.pairs[i] + 1 == base {
+            return l.pair_widths[i];
+        }
+    }
+    return 1;
 }
 // Whether slot k is the second word of a two-word value (the slot above its base).
 fn pair_second<a>(l: (&a L), k: u64) -> u64 {
@@ -3122,8 +3338,8 @@ fn pair_second<a>(l: (&a L), k: u64) -> u64 {
     if b == 0 {
         return 0;
     }
-    // `pair_base` counts the base slot from one, so the second word's slot is two below it.
-    if b == k + 2 {
+    // `pair_base` counts the base slot from one: any word below the base is a later word.
+    if b != k + 1 {
         return 1;
     }
     return 0;
@@ -3349,16 +3565,23 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
             if b != 0 {
                 // One object of two slots, so a write to either word is a write to an object whose
                 // address escapes: neither word can be dropped as dead.
-                emit(&mut l, view("{} = alloca [2 x i64], align 8"), &u8[][copy(view(sn))]);
+                words := pair_words(&l, b);
+                mut count_text = u8[];
+                num(&mut count_text, words);
+                emit(&mut l, view("{} = alloca [{} x i64], align 8"), &u8[][copy(view(sn)), count_text]);
                 if (zero >= 0) && (k >= u64(zero)) && (k < slots) {
                     emit(&mut l, view("store i64 0, ptr {}"), &u8[][copy(view(sn))]);
                 }
-                if (zero >= 0) && (k >= 1) {
-                    // The second word is only cleared when the first one is (a pair starts above
-                    // the parameters, so both words share the zeroing decision).
-                    if (k - 1 >= u64(zero)) && (k - 1 < slots) {
-                        wt := def(&mut l, view("getelementptr i8, ptr {}, i64 8"), &u8[][copy(view(sn))]);
-                        emit(&mut l, view("store i64 0, ptr {}"), &u8[][wt]);
+                // A later word is cleared when its own slot is in the cleared range (a value starts
+                // above the parameters, so all its words share the zeroing decision).
+                for j in 1..words {
+                    if (zero >= 0) && (k >= j) {
+                        if (k - j >= u64(zero)) && (k - j < slots) {
+                            mut at = u8[];
+                            num(&mut at, 8 * j);
+                            wt := def(&mut l, view("getelementptr i8, ptr {}, i64 {}"), &u8[][copy(view(sn)), at]);
+                            emit(&mut l, view("store i64 0, ptr {}"), &u8[][wt]);
+                        }
                     }
                 }
                 continue;
@@ -4097,7 +4320,7 @@ fn rg_width_of(op: (&[u8])) -> u64 {
 // 1 when a call is one of the read-only accessors: it reads the sequence it is given and writes
 // neither the sequence's header nor any storage the caller owns.
 fn rg_readonly(name: (&[u8])) -> bool {
-    if starts(name, view("rt_slot")) || starts(name, view("rt_at")) {
+    if starts(name, view("rt_slot")) || starts(name, view("rt_at")) || starts(name, view("rt_aslot")) {
         return true;
     }
     if eq(name, view("rt_len")) || eq(name, view("rt_view")) || eq(name, view("rt_write")) {
@@ -4416,6 +4639,15 @@ fn rg_step(rc: (&RC), st: (&mut u64[]), line: (&[u8]), seed: u64, trip: u64, at:
         rg_wrote(&rc, &mut st, view(o[0]));
         return ();
     }
+    if starts(view(op), view("atom.")) {
+        // An atomic op names no operands: it writes %rax (and uses %rcx/%rsi as scratch on
+        // x86-64), and writes memory through %rdi, which may be a frame slot whose address escaped.
+        rg_clear(&mut st, 0);
+        rg_clear(&mut st, 2);
+        rg_clear(&mut st, 4);
+        rg_clear_escaped(&rc, &mut st);
+        return ();
+    }
     if eq(view(op), view("retq")) || eq(view(op), view("jmp")) || eq(view(op), view("nop")) || eq(view(op), view("nopw")) || starts(line, view("j")) || eq(view(op), view("pushq")) {
         return ();
     }
@@ -4451,7 +4683,7 @@ fn rg_written(rc: (&RC), line: (&[u8])) -> u64 {
         }
     }
     op := view(sub(line, 0, space));
-    if eq(op, view("mulq")) || eq(op, view("divq")) || eq(op, view("idivq")) || eq(op, view("cqto")) {
+    if eq(op, view("mulq")) || eq(op, view("divq")) || eq(op, view("idivq")) || eq(op, view("cqto")) || starts(op, view("atom.")) {
         return 0;
     }
     mut writes = 0;
@@ -5845,9 +6077,19 @@ fn range_proofs(instrs: (&u8[][]), nslots: u64, split: u64, shared_names: (&u8[]
 
 // ---- the module ----
 
+// clang outlines AArch64 atomics into libgcc's `__aarch64_*` helpers by default, and a Grail
+// program links no libgcc: a lifted function keeps its atomics inline (the v8.0 exclusive-pair
+// loops machine.grl writes too).
+fn atomics_inline<a>(out: (&a mut u8[]), target: u64) -> unit {
+    if target == 1 {
+        put(&mut out, view(" #2"));
+    }
+    return ();
+}
 fn header<a>(out: (&a mut u8[])) -> unit {
     put(&mut out, view("attributes #0 = { noreturn cold nounwind }\n"));
     put(&mut out, view("attributes #1 = { nounwind \"no-builtins\" }\n"));
+    put(&mut out, view("attributes #2 = { \"target-features\"=\"-outline-atomics\" }\n"));
     put(&mut out, view("declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n"));
     put(&mut out, view("declare {i64, i1} @llvm.sadd.with.overflow.i64(i64, i64)\n"));
     put(&mut out, view("declare {i64, i1} @llvm.ssub.with.overflow.i64(i64, i64)\n"));
@@ -5984,7 +6226,7 @@ fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (
             set_add(&mut weak, view(sub(wl, 6, wl.len())));
         }
     }
-    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges };
+    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges };
     mut funcs = Func[];
     mut data = u8[][];
     split(&lines, &mut funcs, &mut data);
@@ -6067,7 +6309,10 @@ fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (
         if (pinned == 0) & (l.fail == 0) {
             put(&mut functions, view("define {i64, i64} @\""));
             put(&mut functions, view(f.name));
-            put(&mut functions, view("\"(i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5) {\n"));
+            // A frame over a page is probed as the native backend's is (optimize::probe_frames).
+            put(&mut functions, view("\"(i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5) \"probe-stack\"=\"inline-asm\""));
+            atomics_inline(&mut functions, l.target);
+            put(&mut functions, view(" {\n"));
             put(&mut functions, view(l.body));
             put(&mut functions, view("}\n"));
             l.lifted.push(copy(view(f.name)));
@@ -6126,7 +6371,9 @@ fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (
         num(&mut guard, i);
         put(&mut functions, view("define internal {i64, i64} @\""));
         put(&mut functions, view(l.sibnames[i]));
-        put(&mut functions, view("\"(ptr nocapture nofree dereferenceable(24) align 8 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5, i64 %d, i64 %l) {\n"));
+        put(&mut functions, view("\"(ptr nocapture nofree dereferenceable(24) align 8 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5, i64 %d, i64 %l)"));
+        atomics_inline(&mut functions, l.target);
+        put(&mut functions, view(" {\n"));
         put(&mut functions, view(l.sibbodies[i]));
         put(&mut functions, view("}\n"));
         l.lifted.push(copy(view(l.sibnames[i])));

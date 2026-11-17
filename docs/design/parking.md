@@ -135,8 +135,8 @@ Held-list entries other than a mutex are 48-byte nodes (kind 2 permits, 3 read, 
 being initialised); `rt_held_settle` handles each kind, frees the nodes, and still never allocates
 or parks.
 
-`concurrent_map`'s shards stay `Mutex`es. Measured (`bench/shard_read.grl`, 24 tasks, one
+`concurrent_map`'s shards are `RwLock`s. Measured first (`bench/shard_read.grl`, 24 tasks, one
 4096-entry map, one write in 64): an RwLock shard took 1684-1796 ms where a Mutex shard took
-2775-2932 ms. Faster - but an `RwLock<[K: V]>` is shareable only when `K` and `V` are, and
-`concurrent_map::Map` asks only `Send` of them today, so moving its read paths is an API change
-(`K, V: Share`), left for a decision.
+2775-2932 ms. The price is the bound: `K, V: Send + Share` (DashMap's Send + Sync), and `V: Owned`
+because `insert` and `remove` return the old value out of the shard lock. No caller in lib/, the
+corpus, abundance/ or borg/ had to change.

@@ -13,14 +13,12 @@ refinement that needs the callee's code, an inferred signature) puts a floor und
 parallel builds that no later work can remove. Effects already obey it (the `effects` row of an
 interface file); new features are reviewed against it.
 
-One place breaks the rule today, and it is written down so it is not mistaken for a design: **a
-program in which any function claims `@no_alloc` or `@no_panic` is built in one compiler run**
-(`effects_claimed` in `compiler/cli.grl`), because the proof walks every body the claim can reach,
-the runtime's included. Interface files already carry an `effects` row per claimed function, so
-the fix is for a per-module run to check a call against the callee's row and for the runtime's
-functions to have rows of their own. Until then an effect claim opts a whole program out of the
-build store, which is also why the standard library does not claim effects yet: one attribute in
-`lib/` would take every program that uses that module off the fast path.
+Effect claims used to break it: a program in which any function claimed `@no_alloc` or `@no_panic`
+was built in one compiler run, because the proof walked every body the claim could reach. Now each
+run proves its claims against the summaries of the functions it calls - computed facts carried in
+every interface, and `runtime.facts` for the runtime (`docs/design/effects.md`, *Summaries*) - so a
+claiming program builds per module and through the store like any other, and the standard library
+claims effects where its bodies earn them.
 
 ## The benchmark
 
@@ -263,6 +261,108 @@ over text whose every body is a memo hit, the inline pass's index, the site tabl
 assembler; the front end has left the profile's top ten. That is the argument for stages 4 and 5b
 below: units are already values that are produced and applied separately, which is what workers
 compiling the bodies that miss need.
+
+## Against Go, Zig and rustc
+
+The bar, since 2026-11-16: **the fastest of Go, Zig and rustc on equivalent programs**, checking
+and building, cold and after a one-function edit.
+
+`bun tools/compile-rivals.mjs [--runs N] [--sizes 1000,4000]` writes the same programs in all four
+languages: hello world, and the scaling trio of `tools/compile-bench.mjs` (N copies of a record,
+its constructor and a 15-line loop function, and a `main` calling each) at N = 1000 and 4000. All
+four print the same number. Each is timed four ways:
+
+| step | Grail | Go | Zig | Rust |
+| --- | --- | --- | --- | --- |
+| check | `grail check main.grl` | `go build -o /dev/null .` | `zig build-exe -fno-emit-bin main.zig` | `cargo check` |
+| build | `grail build main.grl` (the build store) | `go build -o syn .` | `zig build-exe -O Debug main.zig` | `cargo build` (the dev profile) |
+
+Go has no check. `go vet` runs analyses, not the type checker's verdict, so Go's check is a build
+whose output is thrown away. Zig 0.14's Debug build uses LLVM by default. Its own x86 backend
+(`-fno-llvm -fno-lld`, the default from 0.15) was no faster on syn4000 here (7.3 CPU s against
+6.9, single runs), so the table keeps the default.
+
+"Cold" is a project's first build on a machine whose toolchain caches are warm. Each cold run has
+new source text (a seed in `main`) and empty project caches: a new `target/` for cargo, and for
+Grail a new build store holding only what a hello-world build put there (the runtime, platform
+module and `core`, which the other toolchains ship precompiled). Go keeps its standard library in
+GOCACHE and Zig its compiler_rt in its global cache. "Edited" is the same step again after one
+function body changed (`% 1000` to `% 1001` in `work{N/2}`; hello world's string), reusing what the
+cold step left: cargo's incremental state, Grail's store, Go's and Zig's caches. The figure is CPU
+seconds (user + sys of the tool and every process it waited for, `tools/rivals/measure.c`), best of
+three, with wall seconds beside it.
+
+Measured 2026-11-16 on 24 cores, load average about 22. The compiler is the release compiler
+(`bun tools/native.mjs release`, `gaps13-int` db2d35e). Versions: go1.27.3, zig 0.14.1,
+rustc/cargo 1.98.0.
+
+| program, step | Grail | Go | Zig | Rust | Grail / fastest |
+| --- | --- | --- | --- | --- | --- |
+| hello check, cold | 0.045 (0.05) | 0.179 (0.10) | 0.176 (0.15) | 0.053 (0.05) | **0.85x** |
+| hello check, edited | 0.046 (0.05) | 0.168 (0.09) | 0.177 (0.15) | 0.032 (0.03) | 1.45x |
+| hello build, cold | 0.146 (0.15) | 0.156 (0.08) | 1.072 (1.03) | 0.098 (0.08) | 1.49x |
+| hello build, edited | 0.141 (0.14) | 0.176 (0.09) | 1.069 (1.03) | 0.068 (0.05) | 2.09x |
+| syn1000 check, cold | 0.198 (0.20) | 1.310 (0.40) | 0.234 (0.20) | 0.699 (0.70) | **0.84x** |
+| syn1000 check, edited | 0.204 (0.21) | 1.368 (0.44) | 0.227 (0.19) | 0.221 (0.22) | **0.93x** |
+| syn1000 build, cold | 1.541 (1.06) | 1.346 (0.41) | 1.905 (1.86) | 1.466 (1.33) | 1.15x |
+| syn1000 build, edited | 0.926 (0.76) | 1.366 (0.40) | 2.166 (2.24) | 0.850 (0.78) | 1.09x |
+| syn4000 check, cold | 0.733 (0.74) | 5.906 (1.75) | 0.424 (0.38) | 2.990 (3.00) | 1.73x |
+| syn4000 check, edited | 0.753 (0.76) | 5.940 (1.81) | 0.414 (0.38) | 0.964 (0.97) | 1.82x |
+| syn4000 build, cold | 8.204 (5.53) | 6.056 (2.12) | 5.572 (5.63) | 6.840 (6.91) | 1.47x |
+| syn4000 build, edited | 4.428 (3.34) | 5.720 (1.92) | 4.948 (4.90) | 4.052 (3.85) | 1.09x |
+
+Go spreads one package over every core, so its wall time is a third of its CPU time: by wall clock
+Go is the fastest builder of the large programs (2.1 s for syn4000, against Grail's 5.5 s).
+
+**Met**: a cold check of hello world, and both checks of syn1000.
+
+**Missed, and why:**
+
+- **A check after an edit checks everything again.** `cargo check` is incremental: hello 0.032 s,
+  syn4000 0.96 s against its own 2.99 s cold. Grail's check has no store and costs the same edited
+  as cold. It also still checks the runtime, the platform module and `core` from source every time
+  (the "Not done" of stage 2).
+- **syn4000 check, 1.7x Zig's.** Grail's front end is one process, single-threaded (0.73 CPU s in
+  0.74 s of wall time), and about a third of it is allocation (see "What a build still costs"). Zig
+  checks the same 104k lines in 0.42 s, also on one thread. Parallel body checking (5b below) and
+  the unboxed values (3) are the planned fixes. This run did not profile further.
+- **A build writes and re-reads assembly text.** A whole-program build of syn4000 (`grail OUT.s`
+  then clang, measured the same way): the compiler takes 4.8 CPU s (42 G instructions) and writes
+  35.6 MB of assembly, clang spends 2.0 CPU s (15.5 G instructions) parsing and assembling it, and
+  the link takes 0.04 s. A quarter of the build's CPU is the assembler, which is stage 4's case for
+  direct object emission. Through the store, `grail build` adds about 1.4 CPU s on top (8.2 against
+  6.8): hashing, filing units and per-module compiler runs.
+- **hello build, 1.5x to 2.1x cargo's.** What a small build has left is the assembler and the
+  linker over the program's module, plus the runtime objects linked from the store. cargo's 0.068 s
+  is rustc's incremental codegen of one changed function and a link.
+- **syn1000 and syn4000 builds after an edit, 1.09x cargo's.** The unit layer replays every
+  unchanged body, but the back end's whole-stream work and the assembler still run over the whole
+  module (see "An edit to one function compiles one function").
+### Bodies in parallel, and one jobserver for the build
+
+A module's function bodies are compiled by forked workers into units and applied in source order
+by the parent (`docs/design/incremental-compilation.md`, "Parallel bodies"); `grail check` the same
+way, its units carrying only registrations. One GNU-make-style jobserver per build bounds module
+runs, optimiser workers and body workers together. Integer conversions are in line: a widening is
+no code at all, on every target and backend, and a narrowing a compare and a branch.
+
+Best of three on a shared host (load average 20-40), before = 723c743, after = this pass:
+
+| | `GRAIL_JOBS=1` before | after | default before | after |
+| --- | --- | --- | --- | --- |
+| self-compile | 24.3 s | 24.8 s | 14.0 s | 11.4 s |
+| self `--check` | 10.7 s | 8.3 s | 7.5 s | 3.7 s |
+| syn4000 `grail check` | 7.4 s | 5.5 s | 5.9 s | 4.1 s |
+| syn4000 `grail build --no-cache` | 16.7 s | 14.1 s | 10.6 s | 11.0 s |
+| 24-module cold `grail build --cache` | | | 10.9-12.8 s | 10.0-12.9 s |
+
+At `GRAIL_JOBS=1` the gain is the in-line conversions alone (`rt_int_cast` was 8 % of the
+compiler's profile; 0.3 % now). At the default the self-check halves; the self-compile gains less
+because its back end - the optimiser's whole-stream passes and the assembler - is now most of it,
+and syn4000's build is one module whose optimiser workers already used the machine. The 24-module
+cold build is within noise: its modules are small enough that each runs in one process, and 24
+of them already fill 24 processors. FNV-1a over 64 MiB eight times (`bench/fnv.grl`): 3.71 s to
+0.84 s; the instructions of its 1 MiB variant, by valgrind, 1.11 G to 0.25 G.
 
 ## The order of the remaining work
 

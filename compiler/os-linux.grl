@@ -43,6 +43,9 @@ fn rt_syscall(n: u64, a: u64, b: u64, c: u64) -> u64 {
     if n == 204 {
         return raw_syscall(123, a, b, c);
     }
+    if n == 203 {
+        return raw_syscall(122, a, b, c);
+    }
     if n == 231 {
         return raw_syscall(94, a, b, c);
     }
@@ -93,6 +96,10 @@ fn rt_syscall(n: u64, a: u64, b: u64, c: u64) -> u64 {
     }
     if n == 258 {
         return raw_syscall(34, a, b, c);
+    }
+    if n == 259 {
+        // mknodat; the device number is ignored for a fifo.
+        return raw_syscall(33, a, b, c);
     }
     if n == 59 {
         return raw_syscall(221, a, b, c);
@@ -371,6 +378,27 @@ fn rt_os_workers() -> u64 {
     }
     return workers;
 }
+// Pin the calling thread to one CPU (sched::Config.pin_workers): 0, or a negative errno. `mask` is
+// 128 bytes of the caller's (a worker block's), not the heap: a worker pins itself as it starts,
+// and an allocation there could still be live when a short program's main thread exits.
+fn rt_os_pin(cpu: u64, mask: u64) -> u64 {
+    mut i = 0;
+    while i < 128 {
+        raw_store(mask + i, 0);
+        i += 8;
+    }
+    raw_putbyte(mask + cpu / 8, 1 << (cpu % 8));
+    return rt_syscall(203, 0, 128, mask);
+}
+// Map `count` task stacks for this worker now (sched::Config.warm_stacks), so a frame never maps one.
+fn rt_os_stack_warm(count: u64) -> u64 {
+    mut i = 0;
+    while i < count {
+        rt_os_stack_give(rt_os_stack_reserve());
+        i += 1;
+    }
+    return 0;
+}
 fn rt_os_sched_prepare() -> u64 {
     // Installs the process-wide task-stack fault handler and this worker's alternate signal stack.
     rt_os_stack_guard_install();
@@ -445,7 +473,7 @@ fn rt_os_reactor_loop(s: u64) -> u64 {
                 i += 1;
             }
         }
-        rt_atomic_fetch_add(s + 56, 1);
+        raw_atomic_fetch_add(s + 56, 1);
     }
     return 0;
 }

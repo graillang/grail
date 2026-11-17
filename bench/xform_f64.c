@@ -14,7 +14,10 @@ int main(void) {
         yv = yv + (double)0.25; if ((double)1.0 < yv) yv = 0;
     }
     double a = (double)0.999;
-    for (int pass = 0; pass < 200; pass++) scale_add(x, y, a, n);
+    for (int pass = 0; pass < 200; pass++) {
+        scale_add(x, y, a, n);
+        a = (double)0.999 - x[pass] * (double)0.000000001; // the next pass depends on this one
+    }
     double sum = 0;
     for (size_t i = 0; i < n; i++) sum += (double)x[i];
     printf("%.17g\n", sum);

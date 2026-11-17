@@ -4,9 +4,21 @@ import { readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync, copyFileSy
 import { join, basename } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
-import { root, compilerSources, hostTarget, buildCompiler, assemble, command, execute } from './native.mjs';
+import { root, compilerSources, hostTarget, buildCompiler, bootstrapCompiler, assemble, command, execute } from './native.mjs';
 
 const grail = buildCompiler();
+// 0. A second build with nothing changed does no work: the same compiler, not rebuilt, from a
+// bootstrap that is not assembled again. Its key once named the bootstrap's mtime, and the bootstrap
+// was re-assembled on every call, so every `build` rebuilt the compiler.
+{
+  const base = bootstrapCompiler();
+  const before = [fs.statSync(grail).mtimeMs, fs.statSync(base).mtimeMs];
+  const started = Date.now();
+  assert.equal(buildCompiler(), grail, 'a second build with nothing changed names another compiler');
+  assert.equal(bootstrapCompiler(), base);
+  assert.deepEqual([fs.statSync(grail).mtimeMs, fs.statSync(base).mtimeMs], before, 'a second build rewrote the compiler or its bootstrap');
+  assert.ok(Date.now() - started < 5000, `a second build with nothing changed took ${Date.now() - started} ms`);
+}
 const work = join(root, '.work/cli-tests');
 rmSync(work, { recursive: true, force: true }); mkdirSync(work, { recursive: true });
 const run = (args, cwd = work, ok = true) => {
@@ -396,19 +408,52 @@ const fast = ['--interval', '40', '--debounce', '60'];
   const passed = run(['run', 'args.grl', '--', '--bogus', 'x'], dir);
   assert.equal(passed.stdout.trim().split('\n').pop(), '3', 'the program sees its own name and both words'); checks++;
 }
-// An effect attribute's name in a comment or a string is not a claim: only a claim makes a build one
-// compiler run over the whole program, and the runtime is a source of every build.
+// An effect claim no longer makes a build one compiler run: each module's run proves the claims on
+// its own bodies against the summaries of the modules it reads (docs/design/effects.md,
+// "Summaries"). A mention in a comment or a string was never a claim, and still builds per module.
 {
   const dir = join(work, 'effect-words'); mkdirSync(dir, { recursive: true });
   const store = { ...process.env, GRAIL_CACHE_DIR: join(dir, 'store') };
-  const build = (file) => spawnSync(grail, ['build', file, '--cache', '-o', 'target/out'], { cwd: dir, encoding: 'utf8', env: store });
+  const build = (file, extra = []) => spawnSync(grail, ['build', file, '--cache', '--module-root', '.', ...extra, '-o', 'target/out'], { cwd: dir, encoding: 'utf8', env: store });
   writeFileSync(join(dir, 'words.grl'), '// @no_alloc is only mentioned here\nfn main() {\n    println("@no_panic in a string");\n}\n');
   const words = build('words.grl');
   assert.equal(words.status, 0, words.stdout + words.stderr);
   assert.match(words.stdout + words.stderr, /grail: cache: /, 'a mention in a comment or a string leaves the build per module'); checks++;
-  writeFileSync(join(dir, 'claim.grl'), '@no_alloc\nfn twice(n: u64) -> u64 {\n    return n + n;\n}\nfn main() {\n    println(twice(2));\n}\n');
+  // Three modules and a claim in the last: util <- mid <- main. The claim reaches util through mid,
+  // and the runtime through util (an overflow check), and is proved without one whole-program run.
+  writeFileSync(join(dir, 'util.grl'), 'module util;\npub fn add(a: u64, b: u64) -> u64 {\n    return a + b;\n}\npub fn grow(v: &mut u64[]) {\n    v.push(1);\n    return ();\n}\n');
+  writeFileSync(join(dir, 'mid.grl'), 'module mid;\nuse util;\npub fn sum3(a: u64, b: u64, c: u64) -> u64 {\n    return util::add(util::add(a, b), c);\n}\npub fn push_one(v: &mut u64[]) {\n    util::grow(v);\n    return ();\n}\n');
+  writeFileSync(join(dir, 'claim.grl'), 'use mid;\n@no_alloc\nfn quiet(x: u64) -> u64 {\n    return mid::sum3(x, 1, 2);\n}\nfn main() {\n    println(quiet(4));\n}\n');
   const claim = build('claim.grl');
   assert.equal(claim.status, 0, claim.stdout + claim.stderr);
-  assert.doesNotMatch(claim.stdout + claim.stderr, /grail: cache: /, 'a claimed effect is still proved over the whole program'); checks++;
+  // The store is the one the build above filled, so the runtime and the standard modules may be hits.
+  const runs = /grail: cache: (\d+) hit, (\d+) miss \(([^)]*)\)/.exec(claim.stdout + claim.stderr);
+  assert.ok(runs, `a claimed effect builds through the per-module store\n${claim.stdout}${claim.stderr}`); checks++;
+  const names = runs[3].split(', ');
+  for (const m of ['util', 'mid', 'main']) assert.ok(names.includes(m), `module \`${m}\` is a run of its own: ${runs[3]}`);
+  assert.ok(Number(runs[1]) + Number(runs[2]) >= 4, `one run per module, not one for the program: ${runs[0]}`); checks++;
+  const again = build('claim.grl');
+  assert.equal(again.status, 0, again.stdout + again.stderr);
+  assert.match(again.stdout + again.stderr, /grail: cache: \d+ hit, 0 miss/, 'the claiming program is up to date from the store'); checks++;
+  // The same claim over a callee that allocates two modules away: refused per module with the chain
+  // the whole-program build names.
+  writeFileSync(join(dir, 'loud.grl'), 'use mid;\n@no_alloc\nfn loud(v: &mut u64[]) {\n    mid::push_one(v);\n    return ();\n}\nfn main() {\n    mut v = u64[];\n    loud(&mut v);\n    println(v.len());\n}\n');
+  const per = build('loud.grl');
+  const whole = build('loud.grl', ['--whole-program']);
+  assert.equal(per.status, 1, 'an allocating callee in another module refuses the claim');
+  assert.equal(whole.status, 1, 'the whole-program build refuses it too');
+  const first = (r) => (r.stdout + r.stderr).split('\n').find((l) => l.startsWith('error:')) ?? '';
+  assert.match(first(per), /`@no_alloc` function `loud` performs a heap allocation: it calls loud -> push_one -> grow -> rt_push/, first(per)); checks++;
+  assert.equal(first(per), first(whole), 'the per-module refusal names the chain the whole-program one does'); checks++;
+  // A `dyn` value of an interface another module declares public: its implementations are not this
+  // run's to see, so a claim over its drop is refused with that reason, per module and whole-program.
+  writeFileSync(join(dir, 'speak.grl'), 'module speak;\npub interface Speak {\n    fn speak(self: &Self) -> u64;\n}\npub struct Quiet { tag: u64 }\nimpl Speak for Quiet {\n    fn speak(self: &Quiet) -> u64 {\n        return self.tag;\n    }\n}\npub fn quiet(t: u64) -> dyn Speak {\n    return Quiet { tag: t };\n}\n');
+  writeFileSync(join(dir, 'sink.grl'), 'use speak;\n@no_alloc\nfn sink(s: dyn speak::Speak) -> u64 {\n    return 0;\n}\nfn main() {\n    println(sink(speak::quiet(3)));\n}\n');
+  for (const extra of [[], ['--whole-program']]) {
+    const dyn = build('sink.grl', extra);
+    assert.equal(dyn.status, 1, `a dyn drop of a public interface refuses the claim (${extra.join(' ') || 'per module'})`);
+    assert.match(first(dyn), /`@no_alloc` function `sink` performs a heap allocation/, first(dyn));
+    assert.match(dyn.stdout + dyn.stderr, /the drop of a `dyn Speak` value, whose implementations this module cannot see: `Speak` is public/, dyn.stdout + dyn.stderr); checks++;
+  }
 }
 console.log(`cli: ${checks} formatter/tool checks passed`);

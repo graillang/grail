@@ -1,0 +1,87 @@
+// Priority classes: Frame work is not starved by Background work, and no more than the cap of
+// Background jobs are taken from the queues at once. A background task keeps 4x workers jobs of about 30 ms queued as
+// Background while the main thread runs Frame passes of 64 short leaves; each Frame pass must stay
+// close to its time with nothing in the background (the bound is loose: it is about a stalled frame,
+// not about a few hundred microseconds on a shared machine). Run with 8 workers, so the cap is 2.
+use host;
+use pool;
+
+struct Shared {
+    running: Atomic<u64>,
+    high: Atomic<u64>,
+    done: Atomic<u64>
+}
+fn spin(n: u64) -> u64 {
+    mut v = 1;
+    for i in n { v = (v * 31 + i) % 1000003; }
+    return v;
+}
+fn heavy(i: u64, sh: &Shared) -> u64 {
+    now := sh.running.fetch_add(1) + 1;
+    mut seen = sh.high.load();
+    while now > seen {
+        got := sh.high.compare_exchange(seen, now);
+        if got == seen { break; }
+        seen = got;
+    }
+    r := spin(3000000 + i);
+    sh.running.fetch_sub(1);
+    return r;
+}
+fn background(n: u64, sh: &Shared) -> u64 {
+    return pool::with_class<u64>(pool::Class::Background, || -> u64 {
+        mut total = 0;
+        while sh.done.load() == 0 {
+            mut items = u64[];
+            for i in 32 { items.push(i); }
+            parts := parallel_map(items, sh, heavy);
+            total += parts.len();
+        }
+        return total;
+    });
+}
+fn frame() -> u64 {
+    t0 := host::now_us();
+    parts := pool::with_class<u64[]>(pool::Class::Frame, || -> u64[] pool::run<u64>(64, |i: u64| -> u64 spin(20000 + i)));
+    return host::now_us() - t0 + parts.len() - 64;
+}
+fn worst_of(rounds: u64) -> u64 {
+    mut worst = 0;
+    for i in rounds {
+        t := frame();
+        if t > worst { worst = t; }
+    }
+    return worst;
+}
+fn body<s>(sc: (&s Scope<&Shared>), sh: &Shared) -> u64 {
+    solo := worst_of(20);
+    bg := spawn(sc, 0, background);
+    host::sleep_ms(50);
+    loaded := worst_of(40);
+    // With 32 Background jobs of ~30 ms queued and two taken at a time, the oldest has waited.
+    mut waited = 0;
+    for i in 40 {
+        w := host::background_wait_us();
+        if w > waited { waited = w; }
+        host::sleep_ms(5);
+    }
+    sh.done.store(1);
+    join(bg);
+    if loaded > solo * 3 + 10000 {
+        host::write_fd(2, format("frame worst {} us loaded against {} us alone\n", loaded, solo).text());
+        return 0;
+    }
+    if waited < 1000 {
+        host::write_fd(2, format("oldest background wait {} us\n", waited).text());
+        return 2;
+    }
+    return 1;
+}
+fn main() {
+    sh := Shared { running: Atomic::new(0), high: Atomic::new(0), done: Atomic::new(0) };
+    println(task_scope(&sh, body));
+    // The cap bounds the workers that *take* Background jobs from the queues (2 here). The stack that
+    // forked the Background work - the background task - runs some of its own leaves while it waits
+    // at its join, so one more can be running.
+    println(sh.high.load() <= 3);
+}

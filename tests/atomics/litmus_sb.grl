@@ -1,0 +1,79 @@
+// Store buffering with sequentially consistent stores and loads (docs/design/concurrency-stages-5-7.md,
+// "Stage 7"): two threads each store their own word and then load the other's; at least one of them
+// must see the other's store. On x86-64 this fails if a sequentially consistent store is a plain
+// `mov` (the store buffer reorders it with the later load), on any machine if the ops lose their
+// order.
+// The one exception is qemu-user emulating AArch64 (11.1.3 here): its translation puts a barrier
+// before an `stlr` and after an `ldar` but none between them, so on an x86 host the two pass each
+// other, which ARMv8 forbids (LLVM's own `stlr`/`ldar` lowering shows the same outcomes there). Under
+// qemu the count is reported and not asserted; the emulator is recognised by the CPU it reports,
+// implementer 0x00 (reserved for software use), never by the target, so a real AArch64 machine
+// asserts (docs/design/concurrency-stages-5-7.md, "Stage 7: as built").
+use host;
+struct Pair {
+    arrive: Atomic<u64>,
+    x: Atomic<u64>,
+    y: Atomic<u64>,
+    seen0: Atomic<u64>,
+    seen1: Atomic<u64>,
+    bad: Atomic<u64>
+}
+const ROUNDS: u64 = 20000;
+// Both sides of a two-thread round start together: each round is two arrivals.
+fn meet<a>(p: (&a Pair), target: u64) -> unit {
+    p.arrive.fetch_add(1);
+    while p.arrive.load() < target {
+        spin_hint();
+    }
+}
+// Store buffering with sequentially consistent stores and loads: in a round where both threads
+// store their own word and then load the other's, at least one of them sees the other's store.
+fn store_buffering<a>(role: u64, p: (&a Pair)) -> u64 {
+    for i in ROUNDS {
+        r := i + 1;
+        meet(&p, 4 * r - 2);
+        if role == 0 {
+            p.x.store(r);
+            p.seen0.store_relaxed(p.y.load());
+        } else {
+            p.y.store(r);
+            p.seen1.store_relaxed(p.x.load());
+        }
+        meet(&p, 4 * r);
+        if role == 0 {
+            if (p.seen0.load_relaxed() < r) & (p.seen1.load_relaxed() < r) {
+                p.bad.fetch_add(1);
+            }
+        }
+    }
+    return 0;
+}
+// Whether the CPU the kernel reports is qemu's: implementer 0x00, which no silicon vendor uses.
+fn emulated() -> bool {
+    info := host::read_file(view("/proc/cpuinfo"));
+    word := "CPU implementer\t: 0x00\n";
+    mut i = 0;
+    while i + word.len() <= info.len() {
+        mut j = 0;
+        while (j < word.len()) && (info[i + j] == word[j]) {
+            j += 1;
+        }
+        if j == word.len() {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+fn main() {
+    p := Pair { arrive: Atomic::new(0), x: Atomic::new(0), y: Atomic::new(0), seen0: Atomic::new(0), seen1: Atomic::new(0), bad: Atomic::new(0) };
+    parallel_map(u64[0, 1], &p, store_buffering);
+    bad := p.bad.load();
+    if emulated() {
+        print("store buffering: not asserted under an emulator that reports implementer 0x00; forbidden outcomes: ");
+        println(bad);
+    } else {
+        assert(bad == 0);
+        println("store buffering: no forbidden outcome");
+    }
+}
