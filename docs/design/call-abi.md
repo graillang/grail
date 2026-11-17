@@ -275,3 +275,15 @@ optimiser_labels, then S6 after unboxed 3a lands (it builds on 3a's frame aggreg
   %rax or %xmm0, and the symbol is declared with those types. Disagreeing call sites leave a symbol
   untyped. The stay-native rule remains for every other shape (it now fires only there).
   Fixture: compiler/tests/ffi_float_calls.grl in tools/test-facts.mjs.
+- **S8b (internal float parameters on LLVM): built, measured, dropped.** Bodies with float words
+  were defined as `NAME.d(double ...)` with a word-form shim `NAME`, and lifted direct calls went to
+  `.d`. Measured against main (user instructions): nbody 1,340,697,902 -> 1,340,697,610, xform_f64
+  716,595,875 -> 716,595,208, dot_f64 1,063,971,042 -> 1,063,970,836, matmul unchanged; outputs
+  identical. Direct calls to small float functions are inlined, so the GPR<->xmm moves vanish
+  either way. The cost measured in the microbenchmark (19 vs 12 instructions per call) comes from
+  calls through function values, which must keep the word form for native and dyn callers. Not
+  worth the second entry per float function. If it matters later, it belongs in the closure
+  convention (S6: `{code, env}` with a typed code pointer), not in direct calls.
+- **Dyn dispatch (record vtable adapters).** The adapter is a load and a tail jump instead of a
+  framed call (landed 3fe042c). dyncall: native 1,645 M -> 1,565 M, LLVM 779 M -> 719 M; Rust -O
+  648 M.
