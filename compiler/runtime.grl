@@ -1460,11 +1460,25 @@ fn rt_alloc_unlocked(n: u64) -> u64 {
         raw_store(wrapping_add(block, 8), 1);
         ptr := wrapping_add(block, 16);
         // Reuse is cleared as far as was asked for: no caller reads past its request (a vector's
-        // capacity is the request, never the class). Fresh blocks come from zeroed mappings.
-        mut i = 0;
-        while i < n {
-            raw_store(wrapping_add(ptr, i), 0);
-            i = wrapping_add(i, 8);
+        // capacity is the request, never the class). Fresh blocks come from zeroed mappings. The two
+        // smallest classes - most allocations - clear their whole payload with fixed stores (16 and
+        // 48 bytes: cheaper than a loop's setup); the others clear the request's words.
+        if bin == 0 {
+            raw_store(ptr, 0);
+            raw_store(wrapping_add(ptr, 8), 0);
+        } else if bin == 1 {
+            raw_store(ptr, 0);
+            raw_store(wrapping_add(ptr, 8), 0);
+            raw_store(wrapping_add(ptr, 16), 0);
+            raw_store(wrapping_add(ptr, 24), 0);
+            raw_store(wrapping_add(ptr, 32), 0);
+            raw_store(wrapping_add(ptr, 40), 0);
+        } else {
+            mut i = 0;
+            while i < n {
+                raw_store(wrapping_add(ptr, i), 0);
+                i = wrapping_add(i, 8);
+            }
         }
         raw_store(wrapping_add(state, 24), wrapping_add(raw_load(wrapping_add(state, 24)), 1));
         return ptr;
