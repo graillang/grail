@@ -20,6 +20,13 @@ book-run example *args:
 book-test:
     bun test tools/book.test.mjs
 
+# Re-run the benchmarks against other languages and refresh bench/results/, the files the book's
+# Performance chapter renders (one at a time, on a machine doing nothing else if you can).
+bench-results:
+    bun tools/bench-rivals.mjs --json bench/results/bench-rivals.json
+    bun tools/sched-rivals.mjs --json bench/results/sched-rivals.json
+    bun tools/compile-rivals.mjs --json bench/results/compile-rivals.json
+
 # Verify Grail examples without compiling the optional Rust comparisons.
 book-check-grail:
     bun tools/book.mjs check --grail-only
@@ -189,3 +196,7 @@ lsp:
 # Language-server session over real pipes: handshake, diagnostics, definition, bad input.
 lsp-test:
     bun tools/lsp-test.mjs
+
+# Land a branch on main through the queue (see docs/testing.md, "Landing on main").
+land BRANCH:
+    GRAIL_LAND_REMOTE=${GRAIL_LAND_REMOTE:-} bash tools/land.sh {{BRANCH}}

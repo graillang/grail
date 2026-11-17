@@ -22,6 +22,7 @@ func main() {
 				c[i*n+j] = s
 			}
 		}
+		a[round] = c[round]
 	}
 	sum := 0.0
 	for i := 0; i < n*n; i++ {

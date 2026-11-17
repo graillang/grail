@@ -36,6 +36,20 @@ fn in_task<s>(sc: (&s Scope<u64>), n: u64) -> u64 {
     t := spawn(sc, n, pfib_task);
     return join(t);
 }
+// Joins made by a stack that is itself a worker's: the number nested parallelism pays per level.
+fn joins_here(n: u64, c: u64) -> u64 {
+    mut acc = 0;
+    t0 := host::now_us();
+    for i in n {
+        p := pool::join<u64,u64>(|| -> u64 1, || -> u64 2);
+        acc += p.first;
+    }
+    return (host::now_us() - t0) * 1000 / n + acc - n;
+}
+fn join_on_worker<s>(sc: (&s Scope<u64>), n: u64) -> u64 {
+    t := spawn(sc, n, joins_here);
+    return join(t);
+}
 fn blocker(n: u64, c: u64) -> u64 {
     r := pool::run<u64>(1, |i: u64| -> u64 { host::sleep_ms(300); return i; });
     return r[0];
@@ -71,6 +85,7 @@ fn main() {
     for i in n { p := pool::join<u64,u64>(|| -> u64 1, || -> u64 2); acc += p.first; }
     t2 := host::now_us();
     println("join {} ns", (t2 - t1) * 1000 / n);
+    println("join_on_worker {} ns", task_scope(n, join_on_worker));
     acc += task_scope(n, seq);
     t3 := host::now_us();
     println("task_spawn_join {} ns", (t3 - t2) * 1000 / n);

@@ -10,6 +10,7 @@
 // form (two-space indent, non-ASCII as \u escapes). The tool this replaces let the incoming branch's
 // entry win whenever the two differed, which reverted edits the incoming branch had never made.
 //
+// MERGE_CASES_THEIRS=a,b (or MERGE_CASES_OURS) settles named cases both sides changed.
 // Prose (*.md) keeps both sides of each conflict, ours first, and a paragraph both sides already
 // carry once. A source conflict is refused: it needs a decision.
 import { execSync } from 'node:child_process';
@@ -43,15 +44,23 @@ function mergeCases(file) {
     }
     return [start, i];
   };
+  // A case both sides edited differently is left for a person, unless that person has named the
+  // side to keep: MERGE_CASES_THEIRS / MERGE_CASES_OURS, comma-separated case names.
+  const named = v => new Set((process.env[v] || '').split(',').map(x => x.trim()).filter(Boolean));
+  const takeTheirs = named('MERGE_CASES_THEIRS'), keepOurs = named('MERGE_CASES_OURS');
   const added = [], changed = [], problems = [];
+  const clash = (name, c, why) => {
+    if (takeTheirs.has(name)) changed.push(c);
+    else if (!keepOurs.has(name)) problems.push(why);
+  };
   for (const [name, c] of t) {
     if (!b.has(name)) {
       if (!o.has(name)) added.push(c);
-      else if (!same(o.get(name), c)) problems.push(`both sides added \`${name}\` differently`);
+      else if (!same(o.get(name), c)) clash(name, c, `both sides added \`${name}\` differently`);
     } else if (!same(b.get(name), c)) {
       if (!o.has(name)) problems.push(`theirs changed \`${name}\`, ours removed it`);
       else if (same(o.get(name), b.get(name))) changed.push(c);
-      else if (!same(o.get(name), c)) problems.push(`both sides changed \`${name}\``);
+      else if (!same(o.get(name), c)) clash(name, c, `both sides changed \`${name}\``);
     }
   }
   let removed = 0;

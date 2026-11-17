@@ -8,7 +8,7 @@ fn main() {
         a[i] = (i % 7) as f32 * 0.25;
         b[i] = (i % 11) as f32 * 0.5;
     }
-    for _ in 0..20 {
+    for round in 0..20 {
         for i in 0..N {
             for j in 0..N {
                 let mut s = 0f32;
@@ -18,6 +18,7 @@ fn main() {
                 c[i * N + j] = s;
             }
         }
+        a[round] = c[round];
     }
     let mut sum = 0f64;
     for i in 0..N * N {
