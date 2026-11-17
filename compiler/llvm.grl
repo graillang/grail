@@ -653,20 +653,7 @@ fn split<a>(lines: (&a u8[][]), funcs: (&a mut Func[]), data: (&a mut u8[][])) -
 fn emit<a, b, c>(l: (&a mut L), tmpl: &b [u8], args: (&c u8[][])) -> unit {
     l.body.push(32);
     l.body.push(32);
-    mut k: u64 = 0;
-    mut i: u64 = 0;
-    while i < tmpl.len() {
-        if (tmpl[i] == 123) & (i + 1 < tmpl.len()) {
-            if tmpl[i + 1] == 125 {
-                put(&mut l.body, view(args[k]));
-                k += 1;
-                i += 2;
-                continue;
-            }
-        }
-        l.body.push(tmpl[i]);
-        i += 1;
-    }
+    expand_into(&mut l.body, tmpl, &args);
     l.body.push(10);
     return ();
 }
@@ -685,12 +672,40 @@ fn tmp<a>(l: (&a mut L)) -> u8[] {
 // %v = <tmpl with args>; returns %v.
 fn def<a, b, c>(l: (&a mut L), tmpl: &b [u8], args: (&c u8[][])) -> u8[] {
     v := tmp(&mut l);
-    mut full = u8[];
-    put(&mut full, view(v));
-    put(&mut full, view(" = "));
-    put(&mut full, tmpl);
-    emit(&mut l, view(full), &args);
+    // `  %tN = <tmpl with args>`, written straight into the body: what `emit` of the joined template
+    // would write, without building the joined template first.
+    l.body.push(32);
+    l.body.push(32);
+    l.body.append(view(v));
+    l.body.append(view(" = "));
+    expand_into(&mut l.body, tmpl, &args);
+    l.body.push(10);
     return v;
+}
+// `tmpl` with each `{}` replaced by the next of `args`, appended to `out`.
+fn expand_into<a, b, c>(out: (&a mut u8[]), tmpl: &b [u8], args: (&c u8[][])) -> unit {
+    mut k: u64 = 0;
+    mut i: u64 = 0;
+    mut run: u64 = 0;
+    while i < tmpl.len() {
+        if (tmpl[i] == 123) & (i + 1 < tmpl.len()) {
+            if tmpl[i + 1] == 125 {
+                if run < i {
+                    out.append(tmpl[run: i]);
+                }
+                out.append(view(args[k]));
+                k += 1;
+                i += 2;
+                run = i;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    if run < tmpl.len() {
+        out.append(tmpl[run: tmpl.len()]);
+    }
+    return ();
 }
 fn bad<a>(l: (&a mut L)) -> unit {
     l.fail = 1;
@@ -6190,12 +6205,33 @@ fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (
         }
     }
     // Lifted functions native code does not name are internal (inlinable and removable).
-    fl := split_lines(view(functions));
     mut thunks = u8[];
-    for i in fl.len() {
-        mut renamed = copy(view(fl[i]));
+    // The function text line by line, trimmed as split_lines trims, without copying a line unless
+    // it has to change: almost every line goes straight to the module.
+    mut at: u64 = 0;
+    while at < functions.len() {
+        mut e0 = at;
+        while (e0 < functions.len()) && (functions[e0] != 10) {
+            e0 += 1;
+        }
+        mut a0 = at;
+        mut b0 = e0;
+        at = e0 + 1;
+        while a0 < b0 && (functions[a0] == 32 || functions[a0] == 9) {
+            a0 += 1;
+        }
+        while b0 > a0 && (functions[b0 - 1] == 32 || functions[b0 - 1] == 9 || functions[b0 - 1] == 13) {
+            b0 -= 1;
+        }
+        raw := functions[a0: b0];
+        if (target == 0) && !starts(raw, view("define ")) && ((exported.count == 0) || !has(raw, view(".L"))) {
+            put(&mut ir, raw);
+            ir.push(10);
+            continue;
+        }
+        mut renamed = copy(raw);
         if target != 0 {
-            renamed = rename_calls(view(fl[i]), &lifted);
+            renamed = rename_calls(raw, &lifted);
         }
         line := view(renamed);
         if starts(line, view("define {i64, i64} @\"")) {
