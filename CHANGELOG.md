@@ -1,5 +1,13 @@
 ## Unreleased
 
+- Fixed: **`grail check` (and a default build) of a program with a compile-time value needed a C
+  compiler, or failed.** A probe is now assembled in process and linked with the build's linker, and
+  a module of a separate build - which reads the runtime as an interface - gives its probe the
+  runtime's sources. A value the batch probe cannot compute is computed by its own probe before the
+  interfaces are written, so `check` and `build` report the same error for it (it was an internal
+  "no type" error in a separate build). Module-binding guards in a probe are defined once (the
+  internal assembler has no `.comm`).
+
 - A table static can be a vector literal of constant expressions - `static K: u64[] = u64[0x428a2f98,
   0x71374491];` - baked with no compile-time probe. The compiler's own sources hold only such
   constant-tier values (`ci.mjs lint` refuses a run-tier one there, which would compile the whole

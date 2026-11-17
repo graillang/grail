@@ -729,6 +729,8 @@ struct C {
     statics: Static[],
     ct_calls: CtCall[],
     ct_done: CtDone[],
+    // The module-binding guards a probe compile has defined (static_probe_init).
+    ct_guards: u8[][],
     // Where the batch probe writes the bodies each value reached (ct_write_deps), or empty.
     ct_deps_path: u8[],
     // Where a static read parks the result of a call it makes only for its effect.
@@ -21845,6 +21847,22 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
         push_bytes(&mut keyed, view(host::read_file(view(path))));
         fi += 1;
     }
+    // A module of a separate build reads the runtime as an interface; the probe links alone, so it
+    // compiles the runtime's sources (the ones the driver would).
+    mut has_runtime = false;
+    for i in files.len() {
+        if ct_list_has_sub(view(files[i]), view("runtime.grl")) {
+            has_runtime = true;
+        }
+    }
+    if !has_runtime {
+        extra := cli::probe_runtime_sources();
+        for i in extra.len() {
+            files.push(extra[i].copy());
+            push_bytes(&mut keyed, view(extra[i]));
+            push_bytes(&mut keyed, view(host::read_file(view(extra[i]))));
+        }
+    }
     // The files the module roots added are inputs of the value too: the probe is compiled with the
     // same roots, so a change to a resolved module changes what the call computes.
     for i in c.mod_files.len() {
@@ -21873,6 +21891,7 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
         probe_src := path_cat(view(path_cat(view(dir), view(tag))), view(".probe.grl"));
         probe_s := path_cat(view(path_cat(view(dir), view(tag))), view(".probe.s"));
         probe_exe := path_cat(view(path_cat(view(dir), view(tag))), view(".probe"));
+        probe_o := path_cat(view(path_cat(view(dir), view(tag))), view(".probe.o"));
         value_tmp := path_cat(view(path_cat(view(dir), view(tag))), view(".value"));
         host::write_file(view(probe_src), view(probe));
         self := host::exe_path();
@@ -21898,7 +21917,11 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
         // of a probe's compile and are the same in every probe (comptime-speed.md); a probe never
         // replays a normal compile's bodies, whose static reads are compiled differently.
         push_bytes(&mut cmd, view(" --fn-cache .work/comptime/fn --fn-cache-quiet"));
-        push_bytes(&mut cmd, view(" --target x86_64 --comptime-probe "));
+        // Assembled in process (`--object`), as a build is: a probe needs no C toolchain, only the
+        // linker a build uses.
+        push_bytes(&mut cmd, view(" --target x86_64 --object "));
+        push_bytes(&mut cmd, view(ct_shell_quote(view(probe_o))));
+        push_bytes(&mut cmd, view(" --comptime-probe "));
         push_bytes(&mut cmd, view(ct_shell_quote(view(probe_s))));
         cmd.push(32);
         push_bytes(&mut cmd, view(ct_shell_quote(view(probe_src))));
@@ -21958,17 +21981,19 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
             }
             fail(&mut c, view("compile-time code cannot call C: the call reaches an extern function"));
         }
-        mut cc = host::env(view("GRAIL_CC"));
-        if cc.len() == 0 {
-            cc = copy_bytes(view("cc"));
+        // Linked as a build links (cli.grl link_objects): the linker GRAIL_LINKER names, ld.lld by
+        // default; the probe is one static object with no libraries.
+        mut ld = host::env(view("GRAIL_LINKER"));
+        if ld.len() == 0 {
+            ld = copy_bytes(view("ld.lld"));
         }
-        mut link = u8[][cc, copy_bytes(view("-nostdlib")), copy_bytes(view("-static")), copy_bytes(view("-o")), probe_exe.copy(), probe_s.copy()];
+        mut link = u8[][ld, copy_bytes(view("-m")), copy_bytes(view("elf_x86_64")), copy_bytes(view("-static")), probe_o.copy(), copy_bytes(view("-o")), probe_exe.copy()];
         if host::command(link) != 0 {
             if soft != 0 {
                 exchange(status_out, 1);
                 return u8[];
             }
-            fail(&mut c, view("compile-time call: linking the probe failed (needs cc)"));
+            fail(&mut c, view("compile-time call: linking the probe failed (needs ld.lld, as a build does)"));
         }
         mut run = copy_bytes(view("GRAIL_COMPTIME=1 timeout 30 "));
         push_bytes(&mut run, view(ct_shell_quote(view(probe_exe))));
@@ -22022,7 +22047,7 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
         }
         mut mv = u8[][copy_bytes(view("mv")), copy_bytes(view("-f")), value_tmp.copy(), out_path.copy()];
         host::command(mv);
-        mut tidy = u8[][copy_bytes(view("rm")), copy_bytes(view("-f")), probe_src.copy(), probe_s.copy(), probe_exe.copy(), err_tmp.copy()];
+        mut tidy = u8[][copy_bytes(view("rm")), copy_bytes(view("-f")), probe_src.copy(), probe_s.copy(), probe_o.copy(), probe_exe.copy(), err_tmp.copy()];
         host::command(tidy);
     }
     if host::exists(view(out_path)) == 0 {
@@ -23133,6 +23158,14 @@ fn static_pending_here<a, b>(m: &a [u8], n: &b [u8]) -> bool {
     pending := host::env(view("GRAIL_COMPTIME_PENDING"));
     return ct_list_has(view(pending), view(key));
 }
+fn ct_list_contains<a, b>(list: (&a u8[][]), item: &b [u8]) -> bool {
+    for i in list.len() {
+        if same(view(list[i]), item) {
+            return true;
+        }
+    }
+    return false;
+}
 fn static_guard_symbol<a, b>(m: &a [u8], n: &b [u8]) -> u8[] {
     mut out = copy_bytes(view("g_"));
     push_bytes(&mut out, m);
@@ -23156,10 +23189,10 @@ fn static_probe_init<a, b, d, e>(c: (&a mut C), m: &b [u8], n: &d [u8], sym: &e 
     cycle_sym := mangle_name(&mut c, view("grail_probe"), view(cycle_fn));
     done := label(&mut c);
     start := label(&mut c);
-    if memo == 0 {
-        o(&mut c, view(".comm "));
-        o(&mut c, view(guard));
-        o(&mut c, view(",8,8\n"));
+    if (memo == 0) && !ct_list_contains(&c.ct_guards, view(guard)) {
+        // A module binding's guard: defined once, with the entry stub (the internal assembler has
+        // no `.comm`, and a data section in the middle of a body would cut it).
+        c.ct_guards.push(guard.copy());
     }
     o(&mut c, view("movq "));
     o(&mut c, view(guard));
@@ -53729,6 +53762,7 @@ pub fn main() -> u64 {
         statics: Static[],
         ct_calls: CtCall[],
         ct_done: CtDone[],
+        ct_guards: u8[][],
         ct_deps_path: u8[],
         static_scratch: 0,
         impl_params: ImplParams[],
@@ -54538,6 +54572,12 @@ pub fn main() -> u64 {
             // Every run-tier value of the build in one probe (comptime-speed R2), before anything
             // asks for one: the interfaces below, the function cache's surface, the bodies.
             ct_batch(&mut c);
+            // A value the batch could not give (it failed, or a cycle) is computed now by its own
+            // probe, which reports the failure at the value - before the interfaces and the
+            // function cache's surface, which need every value's type.
+            if c.probe_mode == 0 {
+                resolve_all_pending(&mut c);
+            }
             iface_emit_all(&mut c);
         }
         if (pass == 1) & (c.shift_decls != 0) {
@@ -54682,6 +54722,18 @@ pub fn main() -> u64 {
     // The entry stub and the process state (rt_state, the TLS bases, .note.GNU-stack) exist once per
     // program and belong to no module, so they get their own synthetic part.
     part(&mut c, view("__start"));
+    if c.ct_guards.len() != 0 {
+        o(&mut c, view(".pushsection .data\n.p2align 3\n"));
+        for g in c.ct_guards.len() {
+            gname := c.ct_guards[g].copy();
+            o(&mut c, view(".globl "));
+            o(&mut c, view(gname));
+            o(&mut c, view("\n"));
+            o(&mut c, view(gname));
+            o(&mut c, view(":\n.quad 0\n"));
+        }
+        o(&mut c, view(".popsection\n"));
+    }
     if (c.target == 3) {
         // A PE image starts without arguments: the loader leaves argv to the runtime, which reads
         // the Win32 command line. The process state words start empty and are filled by
