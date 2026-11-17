@@ -1,5 +1,8 @@
 ## Unreleased
 
+- The standard library claims `@no_block` where its bodies prove it: every `math` function, the
+  `hash` writers and `finish`, `u64[].sum`, `[u8].is_char_boundary` and `strings::utf8_width`.
+
 - New: `@no_block`, a checked effect: a function and everything it calls makes no blocking call - no
   park (locks, channels, conditions, joins), sleep, file or socket I/O, or C function not declared
   `extern "C" nonblocking`. Refusals name the chain (`nap -> sleep_ms -> f_host_sleep_ms ->
