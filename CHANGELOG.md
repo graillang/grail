@@ -1,5 +1,15 @@
 ## Unreleased
 
+- **SIMD S2.**
+  - New types: `u8x16`, `u8x32`, `u32x4`, `u32x8`, `i64x2`, `i64x4` and the masks `m8x16`, `m8x32`.
+    Unsigned lanes compare, order and widen as unsigned.
+  - `shuffle` and `shuffle2` take literal lane indices.
+  - `to_f32`, and `to_i32`, which truncates, saturates and turns NaN into 0.
+  - `bits` and `T::from_bits` reinterpret lanes.
+  - `load_aligned` and `store_aligned` check the address and stop with it if it is misaligned.
+  - With the LLVM backend, a 4x4 matrix product and an array-of-structs to struct-of-arrays
+    transpose run as the same loops as C with SSE2 intrinsics: 1.04x and 1.17x C's instructions,
+    the same time within the machine's noise.
 - **Text costs less to build and parse.** A string literal is checked to be UTF-8 while compiling,
   so making a `string` of it is a copy with no run-time check; appending a `string` onto a `string`
   no longer re-checks it; `format` hands its buffer over as the string instead of copying it, and
