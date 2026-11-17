@@ -497,12 +497,76 @@ function slug(signature, index) {
 // ---------------------------------------------------------------------------------------------
 // Entry
 // ---------------------------------------------------------------------------------------------
+// Where the first error of a refusal points (`-->` path), or '' when it names no place.
+function firstErrorFile(output) {
+  const lines = output.split('\n').map(line => line.trimEnd());
+  const at = lines.findIndex(line => /^error(\[[A-Z]\d+\])?: /.test(line));
+  if (at < 0) return '';
+  for (let i = at + 1; i < lines.length; i += 1) {
+    if (/^(error|note)(\[[A-Z]\d+\])?: /.test(lines[i])) break;
+    const location = /^\s*-->\s+(\S+):\d+:\d+$/.exec(lines[i]);
+    if (location) return location[1];
+  }
+  return '';
+}
+
+// A refusal is only evidence about a mutation if the source it came from checks. A mutation touches
+// one file, so a refused case whose first error points at another file (a library module, a sibling)
+// says that file fails as it is: the original is checked once, and if it is refused too the compiler
+// regressed or the harness is broken - a bug of kind `baseline`, never a fine refusal. (A library that
+// stopped checking made every mutated case that used it look like a fine refusal; nothing was loud.)
+async function baselines(results, options, compiler) {
+  const suspects = new Map();
+  for (const result of results) {
+    if (result.verdict !== 'fine' || result.status !== 1) continue;
+    const file = firstErrorFile(result.output);
+    if (file === '' || file === join('src', basename(result.path))) continue;
+    if (!suspects.has(result.path)) suspects.set(result.path, result);
+  }
+  const found = [];
+  for (const [path, sample] of suspects) {
+    const bytes = readFileSync(path);
+    // A fixture that is meant to be refused as it stands (a strict-mode refusal, a rejection case's
+    // input) says so on its first line - `// fuzz: refused`, or those words in the comment already
+    // there, so no pinned line number moves - and is not a baseline bug.
+    if (/fuzz: refused\b/.test(bytes.toString('utf8').split('\n', 1)[0])) continue;
+    const directory = join(workRoot, 'cases', `base-${sample.id}`);
+    const entry = layOutCase(directory, path, bytes);
+    const started = Date.now();
+    const result = await runCompiler(compiler, ['check', entry], directory, options.timeout);
+    const elapsed = Date.now() - started;
+    if (result.status === 0 && !result.timedOut && !result.signal) {
+      rmSync(directory, { recursive: true, force: true });
+      continue;
+    }
+    const lines = result.output.split('\n').map(line => line.trimEnd());
+    const first = normalize(lines.find(line => /^error(\[[A-Z]\d+\])?: /.test(line)) ?? lines.find(line => line.trim() !== '') ?? '');
+    found.push({
+      id: `base-${sample.id}`,
+      path,
+      source: sample.source,
+      mutations: [],
+      bytes,
+      verdict: 'bug',
+      kind: 'baseline',
+      why: `the unmutated source is refused: ${first} (at ${firstErrorFile(result.output) || 'no location'})`,
+      status: result.status ?? null,
+      signal: result.signal ?? null,
+      timedOut: result.timedOut,
+      elapsed,
+      output: result.output,
+    });
+  }
+  return found;
+}
+
 export async function fuzz(options) {
   const compiler = compilerPath(options);
   const sources = corpus(options);
   const cases = generateCases(options, sources);
   const started = Date.now();
   const results = await runCases(cases, options, compiler);
+  results.push(...(await baselines(results, options, compiler)));
   const elapsed = Date.now() - started;
 
   const counts = { cases: results.length, fine: 0, bugs: 0, hangs: 0, other: 0 };
@@ -514,7 +578,7 @@ export async function fuzz(options) {
       if (result.kind === 'hang') counts.hangs += 1;
       else counts.bugs += 1;
       byKind[result.kind] = (byKind[result.kind] ?? 0) + 1;
-      const signature = signatureOf(result);
+      const signature = result.kind === 'baseline' ? `baseline: ${result.why}` : signatureOf(result);
       if (!bySignature.has(signature)) bySignature.set(signature, []);
       bySignature.get(signature).push(result);
     } else if (result.verdict === 'fine') counts.fine += 1;
@@ -545,7 +609,7 @@ export async function fuzz(options) {
       repro: relative(root, join(directory, 'src', basename(hits[0].path))),
       output: join(directory, 'crash.txt'),
     };
-    if (options.shrink) {
+    if (options.shrink && hits[0].kind !== 'baseline') {
       const minimal = await shrink(hits[0].bytes, hits[0].path, options, compiler, hits[0].kind);
       writeFileSync(join(directory, 'minimal.grl'), minimal);
       entry.minimal = relative(root, join(directory, 'minimal.grl'));

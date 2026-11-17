@@ -70,6 +70,92 @@ code is:
 
 {{perf:bench-rivals#provenance}}
 
+## Engine-shaped programs
+
+Small kernels say what a loop costs; an engine is mostly other work. These seven programs are the
+shapes a game engine spends its frames on, each with the same algorithm and output in C, Rust, Go
+and Zig, written the way each language is usually written:
+
+- `hashmap`: a million `u64` keys inserted into the standard map, all looked up, half removed, all
+  looked up again (C has no standard map, so its twin is the open-addressing table a C program
+  writes for itself);
+- `bintrees`: the benchmarks game's binary trees at depth 16, allocation-heavy;
+- `strings`: a million `name,int,decimal` lines built, split, parsed and formatted again;
+- `json`: a 10 MB document built, parsed into each language's dynamic value, walked and serialised
+  (Rust with `serde_json`; C, which has no JSON library, with a compact hand-written one);
+- `dyncall`: a million shapes of three kinds behind an interface object, one indirect call each;
+- `iterchain`: ten million numbers through `map`, `filter` and a sum (Go and Zig have no iterator
+  adapters in their standard libraries, so their twins are the loop; Go's uses range-over-func);
+- `ecs`: a million entities as structure-of-arrays `f32` columns, a hundred frames of integration.
+
+{{perf:engine#release}}
+
+**Why Grail is behind**, read from the code of the commit charted:
+
+- **`iterchain`: the adapters are not types.** `Iter<T>` is the erased form: every element is a call
+  through a boxed closure returning an option, once per adapter, and nothing inlines through it.
+  Rust's chain compiles to the same loop as the hand-written one. Making the adapters types with
+  callable bounds is the plan in `docs/design/dyn-and-callable-bounds.md`.
+- **`hashmap`: a bucket is a vector.** The standard map chains collisions through a `u64[]` per
+  bucket and keeps its entries in insertion order in a second vector, so a lookup reads the
+  bucket's own header, then an index, then the entry; growing the table rebuilds every bucket
+  vector. Rust's, Go's and Zig's maps are one open-addressed table. (Since replaced: the map is
+  now dense entries under one open-addressed index, hashed with SipHash-1-3 as Rust's is.)
+- **`ecs`: owned vectors re-read their headers.** The update loop stores through six vectors made
+  in the same function, and after each store the next access reloads a length and a data pointer
+  and checks the index, so the loop stays scalar where C, Rust and Zig vectorise it.
+- **`dyncall`: two calls per dispatch.** Each slot of an interface object's table is a small thunk,
+  emitted outside the optimised module, that loads the boxed value and calls the method; neither
+  call can be inlined.
+- **`strings`: every piece is a new string.** `split` returns owned copies of every line and every
+  field, and `format` builds a new string per record, where Rust's and Zig's splits hand out slices
+  of the input. The standard library also has no float parser (the JSON module carries one
+  privately), so the Grail twin parses a two-decimal number as hundredths over 100.0.
+- **`json`**: behind by a similar margin to the dynamic-value parsers of the other languages; where
+  its instructions go has not been profiled yet.
+- **`bintrees`** is where Grail does best: its allocator's fast path makes it execute fewer
+  instructions than C with `malloc` and Rust with `Box`. Zig, with its general-purpose allocator for
+  release builds, executes the fewest.
+
+{{perf:engine#dev}}
+
+{{perf:engine#cpu|instructions}}
+
+{{perf:engine#provenance}}
+
+## Abundance: the engine itself
+
+The programs above are written for comparison; Abundance's port is the engine this language is
+being built beside. `bun tools/abundance-perf.mjs` builds every program of the port's parity suite
+(`abundance/tests/*_test.grl`) through the build store - cold, and after one statement is added to
+`main` - runs its development and release builds with the suite's own arguments, checks the output
+against the C++ reference, and profiles the slowest release run. `--branch REF` adds another
+compiler's columns, so a change is measured on the engine the same way.
+
+{{perf:abundance#abundance-compile}}
+
+{{perf:abundance#abundance-run}}
+
+**What it found.** On the commit charted, only two of the ten programs build through the store.
+Every program that imports the port's hash module stops at the same place: the interface file the
+store writes for that module carries `fnv1a64_offset`, a `u64` constant above 2^63, and reading the
+interface back refuses it as "a number wider than 64 bits". The ten-byte encoding is the correct one
+for such a value, so the reader's width check is one byte short. The same program builds as one
+compiler run, which is how the parity suite builds it, so this is a fault of the per-module build
+only; it is reported, with a three-line reproduction, to the owner of the build store. The table
+above has a dash wherever a program could not be built.
+
+Of the two that build, `abgeo` (the cluster builder and its reader) is the slowest release run, and
+its hot spots are in the program's printing and float handling rather than in the geometry: the
+runtime's number formatting and `f32` rounding sit beside meshoptimizer's own `simplify_group` at
+the top of the profile.
+
+{{perf:abundance#abundance-compile-cpu}}
+
+{{perf:abundance#abundance-run-cpu}}
+
+{{perf:abundance#provenance}}
+
 ## Compile speed
 
 The same programs in four languages: hello world, and N copies of a record, its constructor and a

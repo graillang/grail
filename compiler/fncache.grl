@@ -85,16 +85,17 @@ pub fn rv<a>(r: (&a mut Read)) -> u64 {
         }
         b := r.data[r.at];
         r.at = r.at + 1;
+        // Ten bytes carry 64 bits: the tenth, at scale 2^63, holds bit 63 alone and ends the number.
+        // Anything wider cannot have been written by us.
+        if (scale == 9223372036854775808) && (1 < b) {
+            exchange(&mut r.ok, 0);
+            return 0;
+        }
         n = n + (b & 127) * scale;
         if (b & 128) == 0 {
             done = 1;
         } else {
             scale = scale * 128;
-            // A number wider than 64 bits cannot have been written by us.
-            if 72057594037927936 < scale {
-                exchange(&mut r.ok, 0);
-                return 0;
-            }
         }
     }
     return n;
