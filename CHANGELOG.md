@@ -9,6 +9,9 @@
   growing moved out of `rt_push` into a cold `rt_push_slow`, so the call a release program makes
   into the runtime no longer saves five registers on every push. Abundance's slowest program
   (abgeo) runs 6% fewer instructions; `rt_push` went from 17% to 6-8% of its time.
+- **Native backend: a scaled array index is computed once per straight line.** nbody's `p[i*3+k]`
+  computed `3*i` again for every `k`; it is now computed once into a free scratch register and the
+  later accesses read `8k(%rdi,%r8,8)`. nbody executes 5% fewer instructions.
 
 - Fixed: an interface whose methods carry default bodies could not be read back and written again
   unchanged ("does not round-trip"): the reader kept a default body only as the source it compiles,
