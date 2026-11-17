@@ -1,5 +1,8 @@
 ## Unreleased
 
+- A per-function unit's key, and a module run's declaration record key, carry a digest of the run's
+  declaration surface instead of its bytes (key formats `grail-fnkey 5`, `grail-declrec 3`; units
+  filed before miss once). compile-perf build_syn1000_edited 6.379G -> 6.266G (-1.8%).
 - **A no-op build right after an edit is a no-op.** The build store records a source by its stamp
   only when it was read at least 10ms after its last write (one kernel time tick). It used to require
   the file to be 100ms old when the record was written, so an edited `main.grl`, read the moment the

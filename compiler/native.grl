@@ -20011,7 +20011,7 @@ fn fn_key<a, b, d>(c: (&a mut C), unit: &b [u8], symbol: &d [u8], from: u64, to:
     }
     place := fn_place(&mut c, at);
     mut key = u8[];
-    push_bytes(&mut key, view("grail-fnkey 4\nunit "));
+    push_bytes(&mut key, view("grail-fnkey 5\nunit "));
     push_bytes(&mut key, view(unit));
     push_bytes(&mut key, view("\nprefix "));
     push_bytes(&mut key, view(c.lpart));
@@ -20378,7 +20378,13 @@ fn par_start<a>(c: (&a mut C), files: u64) -> unit {
     }
     if c.fn_surface.len() == 0 {
         exchange(&mut c.fn_flags, fn_flags_now(&mut c));
-        exchange(&mut c.fn_surface, fn_surface_now(&mut c));
+        // Every key carries the surface, so it carries its digest: the bytes are every declaration
+        // of the run, and copying and hashing them once per body was most of what a unit that
+        // missed cost. Empty stays empty - a surface that cannot be spelled makes no units.
+        surface := fn_surface_now(&mut c);
+        if surface.len() != 0 {
+            exchange(&mut c.fn_surface, fast_hash(view(surface)));
+        }
     }
     if c.fn_surface.len() == 0 {
         return ();
@@ -20719,7 +20725,7 @@ fn par_end<a>(c: (&a mut C)) -> unit {
 // a missing unit, a record that does not read - takes the ordinary path.
 // (docs/design/incremental-compilation.md, "Reusing a module's run")
 fn dr_key_now<a>(c: (&a mut C), files: u64) -> u8[] {
-    mut key = copy_bytes(view("grail-declrec 2\ncompiler "));
+    mut key = copy_bytes(view("grail-declrec 3\ncompiler "));
     push_bytes(&mut key, view(c.fn_id));
     push_bytes(&mut key, view("\nflags "));
     push_bytes(&mut key, view(c.fn_flags));
