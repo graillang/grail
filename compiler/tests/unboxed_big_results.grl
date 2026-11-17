@@ -1,0 +1,95 @@
+use pool;
+// Plain results of more than two words, written to the caller's words through the hidden result
+// address (docs/design/unboxed-values.md, 3c): from a function, a generic, a method, a closure, a
+// function value, an interface method, recursion, seven arguments, and the runtime's own calls.
+interface Shape {
+    fn corner(self: &Self, k: f64) -> Vec3;
+}
+struct Vec3 {
+    x: f64,
+    y: f64,
+    z: f64
+}
+struct Box3 {
+    lo: Vec3,
+    hi: Vec3
+}
+impl Shape for Box3 {
+    fn corner(self: &Self, k: f64) -> Vec3 {
+        return Vec3 { x: self.hi.x * k, y: self.lo.y, z: self.hi.z };
+    }
+}
+impl Vec3 {
+    fn add(self: &Self, o: &Vec3) -> Vec3 {
+        return Vec3 { x: self.x + o.x, y: self.y + o.y, z: self.z + o.z };
+    }
+}
+fn make(i: f64) -> Vec3 {
+    v := Vec3 { x: i, y: i * 2.0, z: i * 3.0 };
+    return v;
+}
+fn pick<T>(a: T, b: T, first: bool) -> T {
+    if first {
+        return a;
+    }
+    return b;
+}
+fn sum_to(n: u64) -> Vec3 {
+    if n == 0 {
+        return Vec3 { x: 0.0, y: 0.0, z: 0.0 };
+    }
+    rest := sum_to(n - 1);
+    return Vec3 { x: rest.x + 1.0, y: rest.y + 2.0, z: rest.z + 3.0 };
+}
+fn many(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64) -> Vec3 {
+    return Vec3 { x: f64(a + b), y: f64(c + d + e), z: f64(f + g) };
+}
+fn scale(v: Vec3, k: f64) -> Vec3 {
+    return Vec3 { x: v.x * k, y: v.y * k, z: v.z * k };
+}
+fn task_vec(n: u64, k: u64) -> Vec3 {
+    return make(f64(n + k));
+}
+fn work<s>(scope: (&s Scope<u64>), unused: u64) -> f64 {
+    t := spawn(scope, 4, task_vec);
+    v := join(t);
+    return v.x + v.y + v.z;
+}
+fn show(v: Vec3) {
+    println("{} {} {}", v.x, v.y, v.z);
+}
+fn main() -> u64 {
+    show(make(1.0));
+    show(pick(make(1.0), make(2.0), false));
+    a := make(1.0);
+    show(a.add(&make(10.0)));
+    k := 4.0;
+    f := |i: f64| -> Vec3 Vec3 { x: i * k, y: i, z: k };
+    show(f(2.0));
+    g := make;
+    show(g(5.0));
+    b: dyn Shape = Box3 { lo: make(1.0), hi: make(2.0) };
+    show(b.corner(10.0));
+    show(sum_to(100));
+    show(many(1, 2, 3, 4, 5, 6, 7));
+    mut v = Vec3[];
+    for i in 100 {
+        v.push(make(f64(i)));
+    }
+    out := parallel_map(v, 0.5, scale);
+    mut t = 0.0;
+    for p in &out {
+        t = t + p.x + p.y + p.z;
+    }
+    println(t);
+    mut w = Vec3[];
+    for i in 10 {
+        w.push(make(f64(i)));
+    }
+    near := parallel_map(w, 2.0, |p: Vec3, m: f64| -> Vec3 Vec3 { x: p.x * m + k, y: 0.0, z: 0.0 });
+    println(near[9].x);
+    println(task_scope(3, work));
+    j := pool::spawn(|| -> Vec3 make(k));
+    show(pool::wait(j));
+    return 0;
+}

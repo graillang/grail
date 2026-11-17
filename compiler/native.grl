@@ -9,6 +9,7 @@ use machine;
 use optimize;
 use llvm;
 use cli;
+use asm_x86;
 
 // Direct Linux native compiler: one checked word stream, target instruction selection in machine.grl.
 // Usage: native OUT.s ENTRY.grl [MODULE.grl...]. The first public function of the
@@ -571,6 +572,8 @@ struct C {
     // unboxed-values.md, stage 1b): the value is that interior address, which no one may own, so
     // a move or an owner of it first copies the words into a box of its own (materialise).
     interior: u64[],
+    // 1 + the frame slot holding the hidden result address (needs_dest), or 0.
+    result_dest: u64,
     // The result adapters this object needs (box_result_thunk): closure * 4 + words.
     box_thunks: u64[],
     // Per type id: 0 not yet known, else 1 + (1 if the type is a plain record) + (2 if it is a
@@ -1021,6 +1024,9 @@ struct C {
     fn_id: u8[],
     // `--fn-cache-quiet`: use the store, print no report line.
     fn_quiet: u64,
+    // `--object PATH`: assemble in this process (compiler/asm_x86.grl) and write the object to PATH;
+    // the assembly file then carries only the `// grail-link:` notes the driver reads.
+    object: u8[],
     fn_flags: u8[],
     fn_surface: u8[],
     fn_at_file: u64,
@@ -1543,8 +1549,63 @@ fn write_image<a, b, d>(c: (&a mut C), path: &b [u8], image: &d [u8]) -> u64 {
     if c.split != 0 {
         return write_parts(&mut c, view(path), view(image));
     }
-    if x86_atomics(&mut c, view(image)) {
-        return host::write_file(view(path), view(with_link_notes(&c.libs, view(machine::atomics_x86(view(image))))));
+    // The in-process assembler lowers `atom.` lines as it reads them; text for clang is lowered here.
+    if (c.object.len() == 0) && x86_atomics(&mut c, view(image)) {
+        lowered := machine::atomics_x86(view(image));
+        return write_assembled(&mut c, view(path), view(lowered));
+    }
+    return write_assembled(&mut c, view(path), view(image));
+}
+// The object for `image`. A build that names its compiler (`--fn-cache-id`, the driver's builds)
+// keeps the function units of each object beside it (`OBJ.units`, headed by that identity) and
+// replays the ones whose text did not move (asm_x86, function units). `GRAIL_ASM_UNITS_VERIFY=1`
+// also assembles without them and refuses a difference.
+fn assemble_object<a, b>(c: (&a mut C), image: &b [u8]) -> asm_x86::Result {
+    if c.fn_id.len() == 0 {
+        return asm_x86::assemble(copy_bytes(view(image)));
+    }
+    mut pack_path = copy_bytes(view(c.object));
+    push_bytes(&mut pack_path, view(".units"));
+    mut header = copy_bytes(view("grail-units 1 "));
+    push_bytes(&mut header, view(c.fn_id));
+    header.push(10);
+    mut previous = u8[];
+    if host::exists(view(pack_path)) != 0 {
+        pack := host::read_file(view(pack_path));
+        if (pack.len() >= header.len()) && same(view(pack[0: header.len()]), view(header)) {
+            previous.append(pack[header.len(): pack.len()]);
+        }
+    }
+    r := asm_x86::assemble_units(copy_bytes(view(image)), previous);
+    if r.error.len() != 0 {
+        return r;
+    }
+    if host::env(view("GRAIL_ASM_UNITS_VERIFY")).len() != 0 {
+        plain := asm_x86::assemble(copy_bytes(view(image)));
+        if !same(view(plain.object), view(r.object)) {
+            return asm_x86::Result { object: u8[], error: copy_bytes(view("an object assembled from function units differs from the plain assembly")), units: u8[], replayed: 0, encoded: 0 };
+        }
+    }
+    mut out = header;
+    push_bytes(&mut out, view(r.units));
+    host::write_file(view(pack_path), view(out));
+    return r;
+}
+// The image, as the object `--object` names (in-process assembly; the assembly file then keeps the
+// link notes alone, which is all the driver reads of it), or as assembly text.
+fn write_assembled<a, b, d>(c: (&a mut C), path: &b [u8], image: &d [u8]) -> u64 {
+    if c.object.len() != 0 {
+        r := assemble_object(&mut c, view(image));
+        if r.error.len() != 0 {
+            mut said = copy_bytes(view("the internal assembler: "));
+            push_bytes(&mut said, view(r.error));
+            fail(&mut c, view(said));
+            return 1;
+        }
+        if host::write_file(view(c.object), view(r.object)) != 0 {
+            return 1;
+        }
+        return host::write_file(view(path), view(with_link_notes(&c.libs, view(""))));
     }
     return host::write_file(view(path), view(with_link_notes(&c.libs, view(image))));
 }
@@ -3442,10 +3503,8 @@ fn save_result<a>(c: (&a mut C), ret: u64) -> u64 {
             // into frame words of this call site.
             return frame_from_registers(&mut c, words);
         }
-        // A larger result comes back boxed until it has a destination pointer (3c, part 2).
-        slot := save(&mut c);
-        unbox_into_frame(&mut c, slot, ret);
-        return slot;
+        // A larger result was written to the destination the call passed (call_dest): rax is it.
+        return save(&mut c);
     }
     if borrowed_object(&mut c, ret) == 0 {
         return save(&mut c);
@@ -4264,7 +4323,13 @@ fn load_call_args<a, b>(c: (&a mut C), args: (&b u64[]), shift: u64) -> unit {
     return ();
 }
 // Prologue: parameter i of `count` into frame slot i (see load_call_args for more than six).
-fn store_params<a>(c: (&a mut C), count: u64) -> unit {
+fn store_params<a>(c: (&a mut C), declared: u64) -> unit {
+    // A function whose result is a plain record of more than two words also takes, after its
+    // declared parameters, the address the caller wants the result written to (result_dest).
+    mut count = declared;
+    if c.result_dest != 0 {
+        count = declared + 1;
+    }
     mut regs = count;
     if 6 < count {
         regs = 5;
@@ -4274,7 +4339,7 @@ fn store_params<a>(c: (&a mut C), count: u64) -> unit {
         o(&mut c, view("movq "));
         o(&mut c, view(reg));
         c.out.push(44);
-        stack_slot(&mut c, i);
+        stack_slot(&mut c, arg_slot(&c, declared, i));
         c.out.push(10);
     }
     if 6 < count {
@@ -4282,13 +4347,57 @@ fn store_params<a>(c: (&a mut C), count: u64) -> unit {
             o(&mut c, view("movq "));
             on(&mut c, k * 8);
             o(&mut c, view("(%r9),%rax\nmovq %rax,"));
-            stack_slot(&mut c, 5 + k);
+            stack_slot(&mut c, arg_slot(&c, declared, 5 + k));
             c.out.push(10);
         }
         o(&mut c, view("movq %r9,%rdi\n"));
     call_out(&mut c, view("rt_free"));
     }
     return ();
+}
+// The frame slot argument `i` lands in: declared parameter i is slot i, the hidden result address
+// after them is result_dest's slot.
+fn arg_slot<a>(c: (&a C), declared: u64, i: u64) -> u64 {
+    if i == declared {
+        return c.result_dest - 1;
+    }
+    return i;
+}
+// The hidden result address of a function whose result is a plain record of more than two words
+// (docs/design/unboxed-values.md, 3c): a frame slot of its own, from the prologue on.
+// It is the slot right after the parameters, so the frame zeroing that starts after them starts
+// after it (kept_slots).
+fn begin_result_dest<a>(c: (&a mut C), ret: u64, count: u64) -> unit {
+    exchange(&mut c.result_dest, 0);
+    if (c.raw == 0) & needs_dest(&mut c, ret) {
+        d := fresh(&mut c);
+        if d != count {
+            fail(&mut c, view("internal: the result address is not the slot after the parameters"));
+        }
+        exchange(&mut c.result_dest, d + 1);
+    }
+    return ();
+}
+// The slots the prologue fills and the frame zeroing leaves alone.
+fn kept_slots<a>(c: (&a C), count: u64) -> u64 {
+    if c.result_dest != 0 {
+        return count + 1;
+    }
+    return count;
+}
+// The caller's side of needs_dest: frame words of the call site the callee writes its result to,
+// passed after the declared arguments; 0 when the result needs none.
+fn call_dest<a>(c: (&a mut C), ret: u64) -> u64 {
+    if (c.raw != 0) || !needs_dest(&mut c, ret) {
+        return 0;
+    }
+    return frame_alloc(&mut c, record_words(&mut c, base_type(&mut c, ret)));
+}
+fn needs_dest<a>(c: (&a mut C), ret: u64) -> bool {
+    if !framed(&mut c, ret) {
+        return false;
+    }
+    return 2 < record_words(&mut c, base_type(&mut c, ret));
 }
 // An integer conversion of the value in slot `v`, from the type `from` codes to the type `to`
 // codes (int_code: bits, 256 signed, 512 wrapping). The native backend emits it in line: nothing at
@@ -6415,6 +6524,19 @@ fn type_key<a>(c: (&a mut C), out: (&a mut u8[]), ty: u64, depth: u64) -> unit {
             // An environment record is synthesised per program and named by registration order, so
             // its name is not a property of the type; its captures are.
             push_bytes(&mut out, view("(env"));
+            // ...and the literal it was written as: a specialisation calls a closure's body
+            // directly (a callable-bound `F`), so two closures with the same captures and signature
+            // are two specialisations. The source position is the same for a literal synthesised
+            // twice, so that still keys one.
+            for j in c.closures.len() {
+                if c.closures[j].decl == arg {
+                    out.push(64);
+                    decimal(&mut out, c.closures[j].file);
+                    out.push(58);
+                    decimal(&mut out, c.closures[j].start);
+                    break;
+                }
+            }
             for i in count {
                 field_ty := c.fields[first + i].ty;
                 out.push(32);
@@ -11002,6 +11124,113 @@ fn closure_stated_borrower<a>(c: (&a mut C), ty: u64) -> bool {
     mode := ty_mode(&mut c, ty);
     return ((mode & CLOSURE_BOUNDS) != 0) & ((mode & CLOSURE_OWNED) == 0);
 }
+// A callable bound on a type parameter (`F: FnMut(T) -> U`, docs/design/dyn-and-callable-bounds.md
+// 2b) travels in the parameter's requirement set beside its interface ids, as this tag plus the
+// bound's closure type, so every place that carries requirements carries it too.
+const CALLABLE_BOUND: u64 = 1099511627776;
+const CALLABLE_PENDING: u64 = 2199023255552;
+fn callable_in<a>(set: (&a u64[])) -> u64 {
+    for i in set.len() {
+        if (CALLABLE_BOUND <= set[i]) & (set[i] < CALLABLE_PENDING) {
+            return set[i] - CALLABLE_BOUND;
+        }
+    }
+    return NO_TYPE;
+}
+// Past a callable bound in a generic list: to the `,`, `>` or `+` that ends it at depth zero (the
+// `->` of its result is one token, so its `>` does not end it).
+fn skip_callable_bound<a>(c: (&a mut C)) -> unit {
+    mut depth = 0;
+    while true {
+        k := kind(&mut c);
+        if k == 0 {
+            return ();
+        }
+        if (depth == 0) && ((k == 44) || (k == 62) || (k == 43)) {
+            return ();
+        }
+        if (k == 40) || (k == 91) || (k == 60) {
+            depth += 1;
+        }
+        if (k == 41) || (k == 93) || (k == 62) {
+            depth -= 1;
+        }
+        advance(&mut c);
+    }
+    return ();
+}
+// The callable bounds the generic list recorded by position, read now that every type parameter
+// of the declaration (an impl's included) is in scope.
+fn resolve_callable_bounds<a>(c: (&a mut C)) -> unit {
+    for i in c.type_interfaces.len() {
+        for j in c.type_interfaces[i].len() {
+            entry := c.type_interfaces[i][j];
+            if CALLABLE_PENDING <= entry {
+                here := exchange(&mut c.pos, entry - CALLABLE_PENDING);
+                bound := parse_type(&mut c);
+                exchange(&mut c.pos, here);
+                c.type_interfaces[i][j] = CALLABLE_BOUND + bound;
+            }
+        }
+    }
+    return ();
+}
+// The callable bound a type parameter's own type carries (`F: FnMut(T) -> U`), or NO_TYPE.
+fn param_callable<a>(c: (&a mut C), ty: u64) -> u64 {
+    mut t = ty;
+    // A generic body checks with each parameter as an opaque binding of it (kind 10).
+    if ty_kind(&mut c, t) == 10 {
+        t = ty_arg(&mut c, t);
+    }
+    // A specialisation's binding: the closure (or function) type itself.
+    tk := ty_kind(&mut c, t);
+    if (ty_kind(&mut c, ty) == 10) && ((tk == 20) || (tk == 12) || (tk == 25)) {
+        return t;
+    }
+    if tk != 9 {
+        return NO_TYPE;
+    }
+    args := type_args(&mut c, t);
+    for i in args.len() {
+        if ty_kind(&mut c, args[i]) == 20 {
+            return args[i];
+        }
+    }
+    return NO_TYPE;
+}
+// For a specialisation's binding `alias` of a callable-bound parameter: the bound with the
+// specialisation's bindings substituted, or NO_TYPE.
+fn spec_callable_signature<a>(c: (&a mut C), alias: u64) -> u64 {
+    if (c.current_spec == 0) || (c.current_spec > c.specs.len()) {
+        return NO_TYPE;
+    }
+    template := c.specs[c.current_spec - 1].template;
+    for j in c.bindings.len() {
+        if c.bindings[j] == alias {
+            if j < c.funcs[template].constraints.len() {
+                set := copy_numbers(&c.funcs[template].constraints[j]);
+                bound := callable_in(&set);
+                if bound != NO_TYPE {
+                    bindings := copy_numbers(&c.bindings);
+                    return bind_types(&mut c, bound, &bindings);
+                }
+            }
+        }
+    }
+    return NO_TYPE;
+}
+// The callable bound of the type parameter `formal` of function `f` (index), or NO_TYPE.
+fn callable_formal<a>(c: (&a mut C), f: u64, formal: u64) -> u64 {
+    if ty_kind(&mut c, formal) != 9 {
+        return NO_TYPE;
+    }
+    i := ty_arg(&mut c, formal);
+    if i < c.funcs[f].constraints.len() {
+        set := copy_numbers(&c.funcs[f].constraints[i]);
+        return callable_in(&set);
+    }
+    return NO_TYPE;
+}
 // The environment record of a closure type, or 0 when it carries no captures.
 fn ty_env<a>(c: (&a mut C), ty: u64) -> u64 {
     if !is_type_id(ty) {
@@ -11894,8 +12123,10 @@ fn impl_param_types<a>(c: (&a mut C), id: u64) -> u64[] {
         mut proofs = u64[];
         if i < sets.len() {
             for k in sets[i].len() {
-                proof := intern(&mut c, 15, sets[i][k]);
-                proofs.push(proof);
+                if sets[i][k] < CALLABLE_BOUND {
+                    proof := intern(&mut c, 15, sets[i][k]);
+                    proofs.push(proof);
+                }
             }
         }
         mut bound = 0;
@@ -12020,6 +12251,25 @@ fn require_interfaces<a, b, d>(c: (&a mut C), arguments: (&b u64[]), sets: (&d u
         set := &sets[i];
         for j in set.len() {
             id := set[j];
+            if CALLABLE_PENDING <= id {
+                continue;
+            }
+            if CALLABLE_BOUND <= id {
+                // The argument is the closure (or function) a callable-bound parameter was given:
+                // its own type must convert to the bound, with the call's type arguments in it.
+                bound := bind_types(&mut c, id - CALLABLE_BOUND, &arguments);
+                if (same_type(&mut c, ty, bound) == 0) && (closure_converts(&mut c, ty, bound) == 0) {
+                    if !((ty_kind(&mut c, ty) == 12) && (ty_kind(&mut c, bound) == 20)) {
+                        mut msg = copy_bytes(view("this argument does not meet the callable bound `"));
+                        push_bytes(&mut msg, view(source_type_name(&mut c, bound)));
+                        push_bytes(&mut msg, view("`: it is `"));
+                        push_bytes(&mut msg, view(source_type_name(&mut c, ty)));
+                        push_bytes(&mut msg, view("`"));
+                        fail(&mut c, view(msg));
+                    }
+                }
+                continue;
+            }
             if !satisfies_interface(&mut c, ty, id) {
                 // Name the bound and the type that fails it: "does not satisfy interface bound" alone
                 // sends the reader looking for the wrong declaration.
@@ -12103,6 +12353,22 @@ fn lifetime_parameters<a>(c: (&a mut C)) -> unit {
                 mut requirements = u64[];
                 if eat(&mut c, view(":")) {
                     while true {
+                        // `F: FnMut(T) -> U`: a callable bound, the closure type it names.
+                        if (is(&mut c, view("Fn")) || is(&mut c, view("FnMut"))) && ((kind_at(&mut c, c.pos + 1) == 40) || (kind_at(&mut c, c.pos + 1) == 60)) {
+                            // Read once the whole parameter scope exists (an impl's `T` is added
+                            // after a method's own list): only its position is kept here.
+                            for q in requirements.len() {
+                                if CALLABLE_BOUND <= requirements[q] {
+                                    fail(&mut c, view("a type parameter has at most one callable bound"));
+                                }
+                            }
+                            requirements.push(CALLABLE_PENDING + c.pos);
+                            skip_callable_bound(&mut c);
+                            if !eat(&mut c, view("+")) {
+                                break;
+                            }
+                            continue;
+                        }
                         constraint := ident(&mut c);
                         mut bit = 0;
                         if same(view(constraint), view("Send")) & !is(&mut c, view("::")) {
@@ -14615,6 +14881,15 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
                 set := copy_numbers(&c.type_interfaces[i]);
                 for j in set.len() {
                     id := set[j];
+                    if CALLABLE_PENDING <= id {
+                        continue;
+                    }
+                    if CALLABLE_BOUND <= id {
+                        // The parameter carries its callable bound among its proofs, so a value of
+                        // type `F` can be called with the bound's signature (param_callable).
+                        proofs.push(id - CALLABLE_BOUND);
+                        continue;
+                    }
                     proof := intern(&mut c, 15, id);
                     proofs.push(proof);
                 }
@@ -17791,13 +18066,13 @@ fn fn_flags_now<a>(c: (&a mut C)) -> u8[] {
         }
         // `--check` changes no body's text or registrations (a check stops after the bodies are
         // emitted), so a check's units and a build's are the same units.
-        if same(view(w), view("--fn-cache")) || same(view(w), view("--fn-cache-id")) || same(view(w), view("--fn-cache-quiet")) || same(view(w), view("--check")) {
+        if same(view(w), view("--fn-cache")) || same(view(w), view("--fn-cache-id")) || same(view(w), view("--fn-cache-quiet")) || same(view(w), view("--check")) || same(view(w), view("--object")) {
             skip = 1;
         }
         if 0 < i {
             // `&` does not short-circuit, so the guard is its own branch: `i - 1` at 0 would wrap.
             prev := host::arg(i - 1);
-            if same(view(prev), view("--fn-cache")) || same(view(prev), view("--fn-cache-id")) {
+            if same(view(prev), view("--fn-cache")) || same(view(prev), view("--fn-cache-id")) || same(view(prev), view("--object")) {
                 skip = 1;
             }
         }
@@ -18319,6 +18594,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     if (c.inherent != 0) || (c.current_impl != 0) {
         prepend_impl_params(&mut c);
     }
+    resolve_callable_bounds(&mut c);
     if same(view(name), view("print")) || same(view(name), view("println")) {
         fail(&mut c, view("print and println are reserved prelude names"));
     }
@@ -18975,6 +19251,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         exchange(&mut c.export_fret, fret);
     } else {
         exchange(&mut c.export_fret, 0);
+        begin_result_dest(&mut c, ret, count);
         store_params(&mut c, count);
     }
     // The parameter refinements hold here, where the parameters are the arguments they were given.
@@ -18985,7 +19262,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     o(&mut c, view("(%rbp),%rdi\nmovq $"));
     fname(&mut c, frame);
     o(&mut c, view("/8-"));
-    on(&mut c, count);
+    on(&mut c, kept_slots(&c, count));
     o(&mut c, view(",%rcx\nxorl %eax,%eax\nrep stosq\n"));
     for i in count {
         mut l = &c.locals[i];
@@ -19394,6 +19671,7 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
                 c.type_interfaces.push(copy_numbers(&own_sets[k]));
             }
         }
+        resolve_callable_bounds(&mut c);
         module := private_module(view(".interface_"), id);
         if find_func(&mut c, view(module), view(name)) != 0 {
             fail(&mut c, view("duplicate interface method"));
@@ -22904,6 +23182,10 @@ fn static_probe_init<a, b, d, e>(c: (&a mut C), m: &b [u8], n: &d [u8], sym: &e 
     if framed(&mut c, ty) {
         // A plain record comes back as a result does (save_result); the static's word holds a box
         // of its own, which word_reference reads as the record.
+        dest := call_dest(&mut c, ty);
+        if dest != 0 {
+            get(&mut c, dest, view("%rdi"));
+        }
         call_out(&mut c, view(value_sym));
         t = save_result(&mut c, ty);
         if memo != 0 {
@@ -25518,6 +25800,22 @@ fn raw_call_is_sites_helper<a>(c: (&a mut C)) -> bool {
     sym := c.fx_syms[c.fx_cur - 1].copy();
     return same(view(sym), view("rt_sites_fill")) || same(view(sym), view("_rt_sites_fill"));
 }
+// A call through the import table to a named operating-system function. In the runtime (trusted code)
+// it is what a `syscall` instruction is on Linux: the OS does the work, so it neither allocates on the
+// Grail heap (whose roots are `rt_alloc` and `rt_grow`) nor reaches a Grail failure entry, and it
+// records no edge - only the `call` the IR check counts. Anywhere else an imported function is code
+// the compiler does not see, and stays an unknown edge (docs/design/effects.md).
+fn call_import_out<a, b>(c: (&a mut C), text: &b [u8]) -> unit {
+    if c.raw == 0 {
+        call_slot_out(&mut c, view(text), view("an imported function"));
+        return ();
+    }
+    if c.fx_cur != 0 {
+        fx_called(&mut c);
+    }
+    o(&mut c, text);
+    return ();
+}
 // The compiler's own dispatch inside trusted code (a closure's drop through the slot its own body
 // installed): every body it can reach is recorded itself, so it is not an unknown.
 fn call_dispatch_out<a, b>(c: (&a mut C), text: &b [u8]) -> unit {
@@ -27057,8 +27355,20 @@ fn return_value<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
 fn frame_result<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
     words := record_words(&mut c, base_type(&mut c, ty));
     if words > 2 {
-        boxed := frame_box(&mut c, slot, ty);
-        get(&mut c, boxed, view("%rax"));
+        if c.result_dest == 0 {
+            fail(&mut c, view("internal: a result of more than two words without a destination"));
+        }
+        // Into the caller's words, whose address is also the returned value.
+        get(&mut c, slot, view("%rcx"));
+        get(&mut c, c.result_dest - 1, view("%rdx"));
+        for k in words {
+            o(&mut c, view("movq "));
+            on(&mut c, k * 8);
+            o(&mut c, view("(%rcx),%rax\nmovq %rax,"));
+            on(&mut c, k * 8);
+            o(&mut c, view("(%rdx)\n"));
+        }
+        o(&mut c, view("movq %rdx,%rax\n"));
         return ();
     }
     if words == 2 {
@@ -28753,6 +29063,25 @@ fn string_from_bytes<a, b>(c: (&a mut C), bytes: (&b u8[])) -> Val {
     n := imm(&mut c, bytes.len());
     t := invoke(&mut c, view("rt_string_lit"), two(ptr, n));
     return own(&mut c, t, 3);
+}
+// A callable bound's parameters and result against the signature of the closure given for it: only
+// the unbound type parameters are fixed, and nothing is checked here (require_interfaces does).
+fn infer_callable<a, b>(c: (&a mut C), bound: u64, actual: u64, map: (&b mut u64[])) -> unit {
+    bp := type_args(&mut c, bound);
+    ap := type_args(&mut c, actual);
+    if bp.len() != ap.len() {
+        return ();
+    }
+    for i in bp.len() {
+        if (ty_kind(&mut c, bp[i]) == 9) && (ty_arg(&mut c, bp[i]) < map.len()) && (map[ty_arg(&mut c, bp[i])] == NO_TYPE) {
+            exchange(&mut map[ty_arg(&mut c, bp[i])], ap[i]);
+        }
+    }
+    br := ty_arg(&mut c, bound);
+    if (ty_kind(&mut c, br) == 9) && (ty_arg(&mut c, br) < map.len()) && (map[ty_arg(&mut c, br)] == NO_TYPE) {
+        exchange(&mut map[ty_arg(&mut c, br)], ty_arg(&mut c, actual));
+    }
+    return ();
 }
 fn infer_type<a, b>(c: (&a mut C), formal: u64, actual: u64, map: (&b mut u64[])) -> unit {
     k := ty_kind(&mut c, formal);
@@ -30715,8 +31044,14 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                     context = bind_types(&mut c, c.params[template_first + argi], &map);
                 } else if (kind(&mut c) == 124) || (kind(&mut c) == 274) {
                     // A closure argument of a generic call: the parameter types the call already
-                    // fixes type its parameters; its result is inferred from its body.
-                    closure_hint(&mut c, c.params[template_first + argi], &map);
+                    // fixes type its parameters; its result is inferred from its body. For a
+                    // callable-bound parameter the bound is the type that hints it.
+                    mut hinted = c.params[template_first + argi];
+                    callable := callable_formal(&mut c, f - 1, hinted);
+                    if callable != NO_TYPE {
+                        hinted = callable;
+                    }
+                    closure_hint(&mut c, hinted, &map);
                 }
             }
             // A reference or view binding passed by name is reborrowed, not moved: `f(r); g(r);`
@@ -30833,6 +31168,11 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                             v = widen_to_fnmut_formal(&mut c, v, formal);
                         }
                         infer_type(&mut c, formal, v.ty, &mut map);
+                        // `F: FnMut(T) -> U` given a closure: its signature fixes T and U.
+                        callable := callable_formal(&mut c, f - 1, formal);
+                        if (callable != NO_TYPE) && ((ty_kind(&mut c, v.ty) == 20) || (ty_kind(&mut c, v.ty) == 12)) {
+                            infer_callable(&mut c, callable, v.ty, &mut map);
+                        }
                     }
                 } else {
                     require_type(&mut c, v.ty, formal);
@@ -31233,7 +31573,12 @@ fn emit_resolved_call<a>(
         ty := argtypes[i];
         move_out(&mut c, val(slot, ty));
     }
-    load_call_args(&mut c, &args, 0);
+    mut sent = args.copy();
+    dest := call_dest(&mut c, ret);
+    if dest != 0 {
+        sent.push(dest);
+    }
+    load_call_args(&mut c, &sent, 0);
     if dyn_entry != 0 {
         if dyn_pair != 0 {
             // A borrowed object's receiver is the handle to its pair: word 0 is the value (the
@@ -31267,7 +31612,19 @@ fn emit_resolved_call<a>(
     shape_pair_result(&mut c, slot, ret);
     call_writebacks(&mut c, first, &sources, &argtypes);
     // Before call_bonds, whose close_loans ends the loans of arguments the call consumed.
-    captured_bonds(&mut c, val(slot, ret), &map, &sources, &argtypes);
+    // A closure given for a callable-bound parameter that is not `Owned` is lent for the call, as an
+    // `Fn(..)` parameter is (stage 3): the result cannot hold it.
+    mut lent = u64[];
+    for j in map.len() {
+        if j < c.funcs[f - 1].constraints.len() {
+            set := copy_numbers(&c.funcs[f - 1].constraints[j]);
+            bound := callable_in(&set);
+            if (bound != NO_TYPE) && ((ty_mode(&mut c, bound) & CLOSURE_OWNED) == 0) {
+                lent.push(map[j]);
+            }
+        }
+    }
+    captured_bonds(&mut c, val(slot, ret), &map, &sources, &argtypes, &lent);
     call_bonds(&mut c, val(slot, ret), first, &sources, signature_ret);
     return val(slot, ret);
 }
@@ -31275,16 +31632,23 @@ fn emit_resolved_call<a>(
 // returned `impl Trait`): `map(refs(&v), f)` returns an `Iter<u64>` whose closure still reads `v`.
 // So the result holds the loans of every argument whose actual type carries one of them, and `v`
 // stays borrowed while the result lives (validate_return allows the same lifetimes).
-fn captured_bonds<a, b, d, e>(c: (&a mut C), result: Val, map: (&b u64[]), sources: (&d u64[]), argtypes: (&e u64[])) -> unit {
+fn captured_bonds<a, b, d, e, g>(c: (&a mut C), result: Val, map: (&b u64[]), sources: (&d u64[]), argtypes: (&e u64[]), lent: (&g u64[])) -> unit {
     if (c.raw != 0) || (map.len() == 0) {
         return ();
     }
-    // Only when a type argument holds a borrow: otherwise the result can carry none.
+    // Only when a type argument holds a borrow: otherwise the result can carry none. A closure lent
+    // to a callable-bound parameter does not count.
     mut borrowed = false;
     for i in map.len() {
         if map[i] != NO_TYPE {
             t := map[i];
-            if contains_borrow(&mut c, t, 0) {
+            mut is_lent = false;
+            for q in lent.len() {
+                if lent[q] == t {
+                    is_lent = true;
+                }
+            }
+            if !is_lent && contains_borrow(&mut c, t, 0) {
                 borrowed = true;
             }
         }
@@ -31300,6 +31664,15 @@ fn captured_bonds<a, b, d, e>(c: (&a mut C), result: Val, map: (&b u64[]), sourc
     for i in sources.len() {
         if i < argtypes.len() {
             t := argtypes[i];
+            mut is_lent = false;
+            for q in lent.len() {
+                if lent[q] == t {
+                    is_lent = true;
+                }
+            }
+            if is_lent {
+                continue;
+            }
             // A reference argument is lent for the call only; what it points at is the caller's.
                     if (ty_kind(&mut c, t) != 7) && contains_borrow(&mut c, t, 0) {
                 source := place_of(&mut c, sources[i]);
@@ -31487,36 +31860,21 @@ fn fn_value_decl<a>(c: (&a mut C)) -> u64 {
 // The adapter every function-as-closure calls: %rdi addresses the slot holding the object; the
 // function's own arguments follow in %rsi.. (Fn types take at most five), so they shift down one
 // register and the target is called; its result returns unchanged.
-// The adapter the runtime calls in place of a function whose plain result (one or two words) comes
-// back in rax:rdx, where the runtime keeps one word: it calls the function and returns a box of the
-// words. `closure` 1: the environment word addresses the slot holding the closure object, whose word
-// 0 is the code, and the arguments pass unchanged; 0: it addresses a cell holding the function, and
-// the arguments shift down one register. One per shape, shared by every caller.
-fn box_result_thunk<a>(c: (&a mut C), closure: bool, words: u64) -> u8[] {
-    mut name = copy_bytes(view("grail_box_result_"));
-    if closure {
-        name.push(99);
-    } else {
-        name.push(102);
-    }
+// The adapter the runtime calls in place of a function whose plain result it cannot keep: the
+// runtime keeps one word, and the result is one or two words in rax:rdx or written to a destination
+// (needs_dest). The adapter calls the function and returns a box holding the result. `kind` 0: the
+// first argument addresses a cell holding the function, and the rest shift down one register; 1: a
+// closure, whose first argument addresses the slot holding the object (word 0 the code), passed
+// unchanged; 2: a task, whose first argument is a cell {function, item} replaced by the item and then
+// freed. `args` is how many arguments the function itself receives. One per shape, shared.
+fn result_adapter<a>(c: (&a mut C), kind: u64, args: u64, words: u64) -> u8[] {
+    mut name = copy_bytes(view("grail_result_adapter_"));
+    decimal(&mut name, kind);
+    name.push(95);
+    decimal(&mut name, args);
+    name.push(95);
     decimal(&mut name, words);
-    code := u64(closure) * 4 + words;
-    mut known = false;
-    for i in c.box_thunks.len() {
-        if c.box_thunks[i] == code {
-            known = true;
-        }
-    }
-    if !known {
-        c.box_thunks.push(code);
-    }
-    return name;
-}
-// The task form of box_result_thunk: the item is a cell {function, item}; it is freed once unpacked.
-fn task_result_thunk<a>(c: (&a mut C), words: u64) -> u8[] {
-    mut name = copy_bytes(view("grail_box_result_t"));
-    decimal(&mut name, words);
-    code := 8 + words;
+    code := (kind * 16 + args) * 65536 + words;
     mut known = false;
     for i in c.box_thunks.len() {
         if c.box_thunks[i] == code {
@@ -31535,35 +31893,50 @@ fn emit_box_thunks<a>(c: (&a mut C)) -> unit {
     o(&mut c, view(".text\n"));
     for i in c.box_thunks.len() {
         code := c.box_thunks[i];
-        if code >= 8 {
-            name := task_result_thunk(&mut c, code - 8);
-            weak_def(&mut c);
-            push_bytes(&mut c.out, view(name));
-            c.out.push(10);
-            push_bytes(&mut c.out, view(name));
-            o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\nsubq $32,%rsp\nmovq %rdi,-24(%rbp)\nmovq (%rdi),%rax\nmovq 8(%rdi),%rdi\n"));
-            o(&mut c, view("call *%rax\nmovq %rax,-16(%rbp)\nmovq %rdx,-8(%rbp)\nmovq -24(%rbp),%rdi\ncall rt_free\n"));
-            o(&mut c, view("leaq -16(%rbp),%rdi\nmovq $"));
-            on(&mut c, (code - 8) * 8);
-            o(&mut c, view(",%rsi\ncall rt_flat_box\nleave\nret\n"));
-            continue;
-        }
-        closure := code >= 4;
-        words := code % 4;
-        name := box_result_thunk(&mut c, closure, words);
+        words := code % 65536;
+        args := (code / 65536) % 16;
+        kind := code / 1048576;
+        name := result_adapter(&mut c, kind, args, words);
         weak_def(&mut c);
         push_bytes(&mut c.out, view(name));
         c.out.push(10);
         push_bytes(&mut c.out, view(name));
-        o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\nsubq $16,%rsp\nmovq (%rdi),%rax\n"));
-        if closure {
-            o(&mut c, view("movq (%rax),%rax\n"));
-        } else {
-            o(&mut c, view("movq %rsi,%rdi\nmovq %rdx,%rsi\nmovq %rcx,%rdx\n"));
+        // -8..-32 the incoming argument registers, -40 the result box, -48 the task cell.
+        o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\nsubq $48,%rsp\nmovq %rdi,-8(%rbp)\nmovq %rsi,-16(%rbp)\nmovq %rdx,-24(%rbp)\nmovq %rcx,-32(%rbp)\n"));
+        big := words > 2;
+        if big {
+            o(&mut c, view("movq $"));
+            on(&mut c, words * 8);
+            o(&mut c, view(",%rdi\ncall rt_alloc\nmovq %rax,-40(%rbp)\n"));
         }
-        o(&mut c, view("call *%rax\nmovq %rax,-16(%rbp)\nmovq %rdx,-8(%rbp)\nleaq -16(%rbp),%rdi\nmovq $"));
-        on(&mut c, words * 8);
-        o(&mut c, view(",%rsi\ncall rt_flat_box\nleave\nret\n"));
+        o(&mut c, view("movq -8(%rbp),%rdi\nmovq -16(%rbp),%rsi\nmovq -24(%rbp),%rdx\nmovq -32(%rbp),%rcx\n"));
+        if kind == 0 {
+            o(&mut c, view("movq (%rdi),%rax\nmovq %rsi,%rdi\nmovq %rdx,%rsi\nmovq %rcx,%rdx\n"));
+        } else if kind == 1 {
+            o(&mut c, view("movq (%rdi),%rax\nmovq (%rax),%rax\n"));
+        } else {
+            o(&mut c, view("movq %rdi,-48(%rbp)\nmovq (%rdi),%rax\nmovq 8(%rdi),%rdi\n"));
+        }
+        if big {
+            o(&mut c, view("movq -40(%rbp),"));
+            o(&mut c, view(argreg(args)));
+            c.out.push(10);
+        }
+        o(&mut c, view("call *%rax\n"));
+        if !big {
+            o(&mut c, view("movq %rax,-40(%rbp)\nmovq %rdx,-32(%rbp)\n"));
+        }
+        if kind == 2 {
+            o(&mut c, view("movq -48(%rbp),%rdi\ncall rt_free\n"));
+        }
+        if big {
+            o(&mut c, view("movq -40(%rbp),%rax\n"));
+        } else {
+            o(&mut c, view("leaq -40(%rbp),%rdi\nmovq $"));
+            on(&mut c, words * 8);
+            o(&mut c, view(",%rsi\ncall rt_flat_box\n"));
+        }
+        o(&mut c, view("leave\nret\n"));
     }
     return ();
 }
@@ -31647,6 +32020,25 @@ fn require_exclusive_call<a>(c: (&a mut C), slot: u64) -> unit {
     }
     require_mutable_binding(&mut c, slot, 0);
     return ();
+}
+// The symbol of the body of the closure expression whose own type `ty` is, or empty: a closure type
+// from a signature (no environment) could hold any closure.
+fn closure_body_symbol<a>(c: (&a mut C), ty: u64) -> u8[] {
+    if ty_kind(&mut c, ty) != 20 {
+        return u8[];
+    }
+    env := ty_env(&mut c, ty);
+    if env == 0 {
+        return u8[];
+    }
+    d := ty_arg(&mut c, env);
+    for i in c.closures.len() {
+        if (c.closures[i].decl == d) && (c.closures[i].symbol.len() != 0) {
+            symbol := c.closures[i].symbol.copy();
+            return mangle_name(&mut c, view(".closure"), view(symbol));
+        }
+    }
+    return u8[];
 }
 fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
     input := value.t;
@@ -31835,12 +32227,24 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
         release_temporary(&mut c, input);
         return val(rslot, resulttype);
     }
+    dest := call_dest(&mut c, resulttype);
+    if dest != 0 {
+        args.push(dest);
+    }
     load_call_args(&mut c, &args, shift);
     if shift != 0 {
         get(&mut c, envp, view("%rdi"));
     }
-    get(&mut c, target, view("%rax"));
-    call_slot_out(&mut c, view("call *%rax\n"), view("a function value"));
+    // A closure whose type is a closure expression's own (its environment record names it: a local
+    // closure, or a generic `F` bound to one) is called directly, so the optimiser can inline it:
+    // the code word would only ever hold this body (docs/design/dyn-and-callable-bounds.md, 2b).
+    body := closure_body_symbol(&mut c, ty);
+    if (kind == 20) && (body.len() != 0) && (c.raw == 0) {
+        call_out(&mut c, view(body));
+    } else {
+        get(&mut c, target, view("%rax"));
+        call_slot_out(&mut c, view("call *%rax\n"), view("a function value"));
+    }
     slot := save_result(&mut c, resulttype);
     own(&mut c, slot, resulttype);
     shape_pair_result(&mut c, slot, resulttype);
@@ -32399,7 +32803,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
             get(&mut c, args[3], view("%r9"));
         }
         win32_link(&mut c, view(api));
-        call_slot_out(&mut c, view("call *__imp_"), view("an imported function"));
+        call_import_out(&mut c, view("call *__imp_"));
         o(&mut c, view(api));
         o(&mut c, view("(%rip)\n"));
         o(&mut c, view("addq $"));
@@ -32476,7 +32880,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
                 &mut c,
                 view("subq $48,%rsp\nxorl %ecx,%ecx\nmovl $12288,%r8d\nmovl $4,%r9d\n")
             );
-            call_slot_out(&mut c, view("call *__imp_VirtualAlloc(%rip)\n"), view("an imported function"));
+            call_import_out(&mut c, view("call *__imp_VirtualAlloc(%rip)\n"));
             o(
                 &mut c,
                 view("addq $48,%rsp\n")
@@ -34768,7 +35172,7 @@ fn parallel_map_builtin<a>(c: (&a mut C), items: Val) -> Val {
     mut fn_env = env;
     if (c.raw == 0) & (flat_bytes(&mut c, result) != 0) {
         rw = flat_bytes(&mut c, result);
-        if framed(&mut c, result) && (record_words(&mut c, base_type(&mut c, result)) <= 2) {
+        if framed(&mut c, result) {
             words := record_words(&mut c, base_type(&mut c, result));
             if !closure {
                 // The adapter takes the target from a cell its environment word points at.
@@ -34778,7 +35182,12 @@ fn parallel_map_builtin<a>(c: (&a mut C), items: Val) -> Val {
                 o(&mut c, view("movq %rax,(%rcx)\n"));
             }
             o(&mut c, view("leaq "));
-            push_bytes(&mut c.out, view(box_result_thunk(&mut c, closure, words)));
+            mut kind = 0;
+            if closure {
+                kind = 1;
+            }
+            // Called as (item, context), after the closure's environment when there is one.
+            push_bytes(&mut c.out, view(result_adapter(&mut c, kind, 2 + u64(closure), words)));
             o(&mut c, view("(%rip),%rax\n"));
             fn_target = save(&mut c);
         }
@@ -35120,17 +35529,15 @@ fn parallel_spawn_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     }
     if (c.raw == 0) & framed(&mut c, result) {
         words := record_words(&mut c, base_type(&mut c, result));
-        if words <= 2 {
-            if !closure {
-                fail(&mut c, view("a pool job of a named function cannot return a plain record of one or two words yet: write the job as a closure"));
-            }
-            // The runtime keeps one word of a job's result: the job runs the adapter, which reads the
-            // closure's code from its box as the closure ABI does and returns the result boxed.
-            o(&mut c, view("leaq "));
-            push_bytes(&mut c.out, view(box_result_thunk(&mut c, true, words)));
-            o(&mut c, view("(%rip),%rax\n"));
-            target = save(&mut c);
+        if !closure {
+            fail(&mut c, view("a pool job of a named function cannot return a plain record yet: write the job as a closure"));
         }
+        // The runtime keeps one word of a job's result: the job runs the adapter, which reads the
+        // closure's code from its box as the closure ABI does and returns the result boxed.
+        o(&mut c, view("leaq "));
+        push_bytes(&mut c.out, view(result_adapter(&mut c, 1, 1, words)));
+        o(&mut c, view("(%rip),%rax\n"));
+        target = save(&mut c);
     }
     mut pargs = two(target, box);
     slot := invoke(&mut c, view("rt_parallel_spawn"), pargs);
@@ -35353,19 +35760,17 @@ fn spawn_builtin<a>(c: (&a mut C), scope: Val) -> Val {
     mut entry = f.t;
     if (c.raw == 0) & framed(&mut c, result) {
         words := record_words(&mut c, base_type(&mut c, result));
-        if words <= 2 {
-            // The runtime keeps one word of a task's result: the task runs an adapter, whose item is
-            // a cell {function, item} it unpacks, and which returns the result boxed.
-            sz := imm(&mut c, 2);
-            cell := invoke(&mut c, view("rt_rec"), one(sz));
-            rec_store(&mut c, cell, 0, f.t);
-            rec_store(&mut c, cell, 1, value);
-            value = cell;
-            o(&mut c, view("leaq "));
-            push_bytes(&mut c.out, view(task_result_thunk(&mut c, words)));
-            o(&mut c, view("(%rip),%rax\n"));
-            entry = save(&mut c);
-        }
+        // The runtime keeps one word of a task's result: the task runs an adapter, whose item is a
+        // cell {function, item} it unpacks, and which returns the result boxed.
+        sz := imm(&mut c, 2);
+        cell := invoke(&mut c, view("rt_rec"), one(sz));
+        rec_store(&mut c, cell, 0, f.t);
+        rec_store(&mut c, cell, 1, value);
+        value = cell;
+        o(&mut c, view("leaq "));
+        push_bytes(&mut c.out, view(result_adapter(&mut c, 2, count, words)));
+        o(&mut c, view("(%rip),%rax\n"));
+        entry = save(&mut c);
     }
     arity := imm(&mut c, count);
     mut dropper = imm(&mut c, 0);
@@ -37148,6 +37553,7 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
     saved_loop_end := exchange(&mut c.loop_end, 0);
     saved_terminated := exchange(&mut c.terminated, 0);
     saved_result := exchange(&mut c.result, NO_TYPE);
+    saved_dest := exchange(&mut c.result_dest, 0);
     saved_validating := exchange(&mut c.validating, 1);
     saved_cf_start := exchange(&mut c.cf_start, 0);
     saved_cf_end := exchange(&mut c.cf_end, 0);
@@ -37208,6 +37614,7 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
     exchange(&mut c.loop_end, saved_loop_end);
     exchange(&mut c.terminated, saved_terminated);
     exchange(&mut c.result, saved_result);
+    exchange(&mut c.result_dest, saved_dest);
     exchange(&mut c.validating, saved_validating);
     exchange(&mut c.cf_start, saved_cf_start);
     exchange(&mut c.cf_end, saved_cf_end);
@@ -38095,13 +38502,14 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
             fname(&mut c, frame);
             o(&mut c, view(",%rsp\n"));
         }
+        begin_result_dest(&mut c, c.result, count);
         store_params(&mut c, count);
         o(&mut c, view("leaq -"));
         fname(&mut c, frame);
         o(&mut c, view("(%rbp),%rdi\nmovq $"));
         fname(&mut c, frame);
         o(&mut c, view("/8-"));
-        on(&mut c, count);
+        on(&mut c, kept_slots(&c, count));
         o(&mut c, view(",%rcx\nxorl %eax,%eax\nrep stosq\n"));
         for j in count {
             mut l = &c.locals[j];
@@ -41753,6 +42161,32 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
             }
             if (ty_kind(&mut c, callable) == 12) || (ty_kind(&mut c, callable) == 20) || (ty_kind(&mut c, callable) == 25) {
                 return indirect_call(&mut c, val(slot, ty), 0);
+            }
+        }
+        // A value of a callable-bound type parameter (`f: F` with `F: FnMut(T) -> U`) in a generic
+        // body: called with the bound's signature. A specialisation binds `F` to the closure's own
+        // type and takes the branch above.
+        if local != 0 {
+            pty := local_ty(&mut c, local - 1);
+            bound := param_callable(&mut c, pty);
+            if bound != NO_TYPE {
+                slot := local_id(&mut c, local - 1);
+                // In a specialisation the call keeps the closure's own environment (so it is
+                // direct) and takes the bound's signature with the specialisation's bindings
+                // (`T`, `U` as the body sees them), so arguments and result line up with the body.
+                mut calltype = bound;
+                if ty_kind(&mut c, pty) == 10 {
+                    sig := spec_callable_signature(&mut c, pty);
+                    if (sig != NO_TYPE) && (ty_kind(&mut c, bound) == 20) {
+                        calltype = intern_env(&mut c, 20, ty_arg(&mut c, sig), ty_mode(&mut c, bound), type_regions(&mut c, bound), type_args(&mut c, sig), ty_env(&mut c, bound));
+                    }
+                    // A named function given for F: called through its pointer with the bound's
+                    // signature, as the body sees it.
+                    if (sig != NO_TYPE) && (ty_kind(&mut c, bound) == 12) {
+                        calltype = intern_args(&mut c, 12, ty_arg(&mut c, sig), 0, u64[], type_args(&mut c, sig));
+                    }
+                }
+                return indirect_call(&mut c, val(slot, calltype), 0);
             }
         }
         if local == 0 {
@@ -48243,7 +48677,15 @@ fn iface_w_reqs<a, b>(c: (&a mut C), out: (&a mut u8[]), reqs: (&b u64[][])) -> 
             iface_wv(&mut out, i);
             iface_wv(&mut out, reqs[i].len());
             for j in reqs[i].len() {
-                iface_w_iface_ref(&mut c, &mut out, reqs[i][j]);
+                if CALLABLE_BOUND <= reqs[i][j] {
+                    // A callable bound: an empty interface name, then the bound's type.
+                    iface_ws(&mut out, view(""));
+                    iface_ws(&mut out, view(""));
+                    mut deps = u64[];
+                    iface_type(&mut c, &mut out, &mut deps, reqs[i][j] - CALLABLE_BOUND);
+                } else {
+                    iface_w_iface_ref(&mut c, &mut out, reqs[i][j]);
+                }
             }
         }
     }
@@ -50455,6 +50897,16 @@ fn iface_r_reqs<a>(p: (&a mut IR), c: (&a mut C), n: u64) -> u64[][] {
         for j in m {
             module := iface_rs(&mut p);
             name := iface_rs(&mut p);
+            if (module.len() == 0) && (name.len() == 0) {
+                if p.phase == 0 {
+                    push_bytes(&mut p.rtext, view(" callable="));
+                }
+                bound := iface_r_type(&mut p, &mut c);
+                if p.phase == 2 {
+                    out[at].push(CALLABLE_BOUND + bound);
+                }
+                continue;
+            }
             if p.phase == 2 {
                 id := iface_find_iface(&mut c, &mut p, view(module), view(name));
                 out[at].push(id);
@@ -52744,7 +53196,9 @@ fn iface_impl_self<a>(c: (&a mut C), record: u64) -> unit {
         mut proofs = u64[];
         if i < reqs.len() {
             for j in reqs[i].len() {
-                proofs.push(intern_args(&mut c, 15, reqs[i][j], 0, u64[], u64[]));
+                if reqs[i][j] < CALLABLE_BOUND {
+                    proofs.push(intern_args(&mut c, 15, reqs[i][j], 0, u64[], u64[]));
+                }
             }
         }
         mut bits = 0;
@@ -53112,6 +53566,7 @@ pub fn main() -> u64 {
         caddr: u64[],
         interior: u64[],
         box_thunks: u64[],
+        result_dest: 0,
         layout_memo: u64[],
         layout_offsets: u64[][],
         export_fret: 0,
@@ -53381,6 +53836,7 @@ pub fn main() -> u64 {
         fx_body_calls: u64[],
         fn_dir: u8[],
         fn_id: u8[],
+        object: u8[],
         fn_quiet: 0,
         fn_flags: u8[],
         fn_surface: u8[],
@@ -53700,6 +54156,12 @@ pub fn main() -> u64 {
             // process state is defined once, by the run that holds the entry.
             exchange(&mut c.no_entry, 1);
             offset += 1;
+        } else if same(view(option), view("--object")) {
+            if argc < offset + 3 {
+                fail_option(&mut c, view("--object needs a file"));
+            }
+            exchange(&mut c.object, host::arg(offset + 2));
+            offset += 2;
         } else if same(view(option), view("--separate")) {
             // One object of a program (B1 stage 4): every definition global, so a part call binds
             // through the linker instead of staying a symbol of this stream.

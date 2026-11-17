@@ -1,5 +1,35 @@
 ## Unreleased
 
+- The landing queue's build host runs the aarch64 legs under the patched qemu-aarch64:
+  `tools/land-remote.sh` builds it there with `tools/qemu/build.sh` before starting the legs, and
+  `tools/land.sh --remote-status` (`just land-status-remote`) prints each emulated leg's verdict for
+  the newest landing. `build.sh` names any missing build dependency and the packages that provide it.
+  Beside the emulated legs the build host runs the front-end fuzzer at 2000 cases, seeded from the
+  landing, and `--remote-status` reports it with the shrunk input of anything it found.
+- **Grail assembles its own x86-64 code.** `grail build` and `grail run` on Linux x86-64 no longer
+  run clang to assemble. The compiler's own assembler (`grail asm IN.s -o OUT.o`,
+  `compiler/asm_x86.grl` and `compiler/elf.grl`) writes the ELF objects. It covers exactly the
+  subset the compiler emits and runs inside the compiler run, so the build no longer writes and
+  re-reads the module's assembly (`--object`), and its objects are byte-identical to clang's from the same text
+  (`tools/asm-oracle.mjs`; the gate's `asm-oracle` leg checks every corpus program). In the release
+  compiler it assembles the syn4000 program's 35 MB of assembly in 0.41 s against clang's 1.37 s,
+  and the self-compile's 119 MB in 1.1 s against 5.2 s. `--assembler=clang` (and `GRAIL_ASSEMBLER`)
+  still choose clang; the flag goes once the oracle has been green through one landing. Debug
+  builds go through it too (it writes `.debug_line` from `.file`/`.loc` as LLVM does); the other
+  targets still use clang. It lowers the portable atomic operations as it reads them, so an x86
+  build no longer rewrites the whole stream for them first. It keeps each object's function units
+  beside it (`OBJ.units`): a function whose text did not change is replayed, not assembled again
+  (`GRAIL_ASM_UNITS_VERIFY=1` checks the replayed object against a plain assembly).
+
+- **Callable bounds: `fn map<U, F: FnMut(T) -> U>(self, f: F)`.** A type parameter may be bound by a
+  closure type; a value of that type is callable in the generic body, the closure's own type is what
+  the specialisation is made for, and its parameters and result are inferred from it. A closure whose
+  type is known - a local closure, or one given for such a parameter - is now called directly, by its
+  body's symbol, instead of through its code word, so the optimiser can inline it. The `vecs`
+  callback methods (`map`, `filter`, `fold`, `any`, `all`, `find`, `position`, `sort_by`, ...) take
+  callable bounds. A closure given for a callable-bound parameter without `Owned` is lent for the call,
+  as an `Fn(..)` parameter is. Fixed with it: two capture-free closures with the same signature given
+  to one generic function were one specialisation; they are two.
 - **`grail check` is incremental.** It goes through the build store as `grail build` does: one
   compiler run per module, a module whose inputs did not change is not checked again, and in a
   module that is, the unchanged function bodies replay. A check after an edit to one module checks
@@ -110,6 +140,13 @@
   I/O task of `bench/frame.grl` hung on this about one run in four.
 - A Background job's cap slot is taken with the job's claim, so a slot cannot leak to a job
   another stack runs.
+- Fixed: on windows-x86_64 every `@no_alloc` function that indexes, casts or unwraps was refused
+  (`lib/strings.grl`'s `is_char_boundary` among them, so `bun tools/windows.mjs check` failed): the
+  runtime's calls through the import table were unknown edges, and the syscall dispatcher the
+  failure path calls reached `rt_alloc` through the pipe arm's heap-allocated SECURITY_ATTRIBUTES. An
+  import-table OS call in the runtime is now modelled as a syscall (no Grail heap, no failure), and
+  CreatePipe's attributes live in process state.
+
 - **Fixed: an LLVM-backend miscompile of a vector grown through its address.** A call handed `&mut v`
   receives the slot's address, not the header word, so the lifter did not count it as a call that
   can grow `v`, and the `len`/`data` it had read before the call were used after it: `pad(&mut out,
