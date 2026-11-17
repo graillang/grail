@@ -254,6 +254,17 @@ const fixtures = [
     hostOnly: true,
   },
   {
+    // A callback C called from a green task sleeps: the task is pinned to its thread while C's
+    // frames are on its stack, so C finds itself on the thread it left from (0 moved of 200).
+    name: 'callback_pins_task',
+    stdout: '0\n',
+    symbols: ['ts_same_thread_apply'],
+    linkNote: ['// grail-link: c', '// grail-link: thread_shim.o'],
+    modules: [],
+    env: { GRAIL_WORKERS: '4' },
+    hostOnly: true,
+  },
+  {
     // A callback entered on a pthread the shim creates (a thread the runtime never saw) adopts a
     // record for the outermost callback: it allocates, makes a foreign call whose errno is that
     // thread's (EBADF), and re-enters C for a nested callback. Three rounds, so each adoption is
@@ -327,7 +338,7 @@ for (const target of selected) {
     if (threadShim.status !== 0) throw new Error(`thread_shim.c for ${target} failed: ${threadShim.stderr}`);
   }
   for (const { name, stdout, symbols, defines = [], linkNote = '// grail-link: shim.o', hostOnly = false,
-    modules = [], signal = null, targets: onlyTargets = null } of fixtures) {
+    modules = [], signal = null, targets: onlyTargets = null, env = null } of fixtures) {
     // A fixture whose shape one target refuses is compiled and executed only where it is valid; the
     // refusal itself is asserted at the end of this file.
     if (onlyTargets && !onlyTargets.includes(target)) continue;
@@ -372,7 +383,7 @@ for (const target of selected) {
       linkedOnly++;
       continue;
     }
-    const result = execute(executable, [], target, { cwd: directory });
+    const result = execute(executable, [], target, { cwd: directory, ...(env ? { env: { ...process.env, ...env } } : {}) });
     if (signal) {
       // An aborting fixture pins the signal (SIGABRT, not the SIGSEGV a bad unwrap would produce)
       // and whatever ran before it.
