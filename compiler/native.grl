@@ -18520,6 +18520,10 @@ fn fn_reg_type<a, b>(p: (&a mut IR), c: (&b mut C)) -> u64 {
 // after the body's `.gbase` line; the facts are the ones recorded since `fact_mark`; the
 // registrations are the ones `fn_reg_drop` and `fn_reg_spec` wrote down.
 fn fn_unit_of<a>(c: (&a mut C), key: u8[], text_mark: u64, fact_mark: u64) -> fncache::Unit {
+    // A check's unit has no text and no facts: a check writes neither, and a build refuses it.
+    if c.check_only != 0 {
+        return fncache::Unit { key: key, text: u8[], facts: u8[], regs: c.fn_regs.copy() };
+    }
     mut text = u8[];
     text.append(c.out[text_mark..c.out.len()]);
     return fncache::Unit { key: key, text: text, facts: fn_facts_encode(&c, fact_mark), regs: c.fn_regs.copy() };
@@ -18596,8 +18600,11 @@ fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), l
             lines += 1;
         }
     }
-    c.out.append(view(u.text));
-    fn_facts_restore(&mut c, view(u.facts));
+    // A check keeps no text and runs no optimiser, so a unit's text and facts are not put back.
+    if c.check_only == 0 {
+        c.out.append(view(u.text));
+        fn_facts_restore(&mut c, view(u.facts));
+    }
     for i in regs.len() {
         kind := regs[i].kind;
         template := regs[i].template;
@@ -18749,7 +18756,7 @@ fn fn_key<a, b, d>(c: (&a mut C), unit: &b [u8], symbol: &d [u8], from: u64, to:
     }
     place := fn_place(&mut c, at);
     mut key = u8[];
-    push_bytes(&mut key, view("grail-fnkey 3\nunit "));
+    push_bytes(&mut key, view("grail-fnkey 4\nunit "));
     push_bytes(&mut key, view(unit));
     push_bytes(&mut key, view("\nprefix "));
     push_bytes(&mut key, view(c.lpart));
@@ -18761,10 +18768,16 @@ fn fn_key<a, b, d>(c: (&a mut C), unit: &b [u8], symbol: &d [u8], from: u64, to:
     push_bytes(&mut key, view(c.fn_id));
     push_bytes(&mut key, view("\nsurface "));
     push_bytes(&mut key, view(c.fn_surface));
+    // The declaration and the signature as they are, each after its length: the key is hashed once,
+    // for the file's name, rather than each piece being hashed into it first.
     push_bytes(&mut key, view("\ndecl "));
-    push_bytes(&mut key, view(fncache::hash(c.src[from: to])));
+    push_bytes(&mut key, view(decimal_bytes(to - from)));
+    key.push(32);
+    key.append(c.src[from: to]);
     push_bytes(&mut key, view("\nsig "));
-    push_bytes(&mut key, view(fncache::hash(view(sig))));
+    push_bytes(&mut key, view(decimal_bytes(sig.len())));
+    key.push(32);
+    key.append(view(sig));
     push_bytes(&mut key, view("\nfile "));
     push_bytes(&mut key, view(decimal_bytes(c.file)));
     push_bytes(&mut key, view("\ncolumn "));
@@ -19961,7 +19974,11 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             from_worker := par_unit.key.len() != 0;
             mut hit = par_unit;
             if (hit.key.len() == 0) & (c.fn_dir.len() != 0) {
-                hit = fncache::load(view(c.fn_dir), view(fncache::hash(view(key))));
+                if c.check_only != 0 {
+                    hit = fncache::load_checked(view(c.fn_dir), view(fncache::hash(view(key))));
+                } else {
+                    hit = fncache::load(view(c.fn_dir), view(fncache::hash(view(key))));
+                }
                 par_outcome = 2;
             }
             if hit.key.len() != 0 {
@@ -56527,8 +56544,9 @@ pub fn main() -> u64 {
         if pass == 2 {
             jobs::phase(view("declarations"));
             par_start(&mut c, n);
-            // From the bodies on, a check writes no text (`quiet`); a unit store would keep it.
-            if (c.check_only != 0) & (c.fn_dir.len() == 0) {
+            // From the bodies on, a check writes no text (`quiet`): its units are check units, with
+            // the registrations and no text (fn_unit_of), as cargo's metadata is to its rlib.
+            if c.check_only != 0 {
                 exchange(&mut c.quiet, 1);
             }
         }
