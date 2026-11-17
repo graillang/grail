@@ -1,8 +1,9 @@
 // The compile-speed guard of the landing gate (tools/landsvc/suites.txt): user-space instructions of
 // `grail check` on hello world and on the scaling program at N = 1000 and 4000 (compile-bench's
 // `scalingProgram`), single process (GRAIL_JOBS=1), with the tree's compiler. Each check starts from
-// a copy of a store that one hello-world check filled - the runtime, platform and core modules, which
-// a toolchain ships ready - so a figure is a project's first check, as compile-rivals measures it.
+// a copy of a store `grail cache warm` filled - the runtime, platform and every standard module, which
+// a toolchain ships ready (the installer runs it) - so a figure is a project's first check, as
+// compile-rivals measures it.
 // Instructions, not seconds: they do not move with the machine's load.
 //   bun tools/compile-perf.mjs            fail when a figure is more than 10% above the committed
 //                                         baseline (bench/results/compile-perf.json), or when
@@ -33,11 +34,12 @@ const programs = {
   syn1000: scalingProgram(1000),
   syn4000: scalingProgram(4000),
 };
-// The toolchain's own modules, checked once into a template store.
+// The toolchain's own modules - runtime, platform and standard library - checked and built once into
+// a template store.
 const template = join(work, 'template');
 mkdirSync(template, { recursive: true });
 writeFileSync(join(template, 'main.grl'), 'fn main() {\n    println("template");\n}\n');
-measure([compiler, 'check', 'main.grl'], { cwd: template, env: { ...process.env, GRAIL_JOBS: '1', GRAIL_CACHE_DIR: join(template, 'store') } });
+measure([compiler, 'cache', 'warm'], { cwd: template, env: { ...process.env, GRAIL_CACHE_DIR: join(template, 'store') } });
 const figures = {};
 for (const [name, text] of Object.entries(programs)) {
   const dir = join(work, name);

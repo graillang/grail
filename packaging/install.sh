@@ -38,6 +38,13 @@ if [ -d "$here/share/doc/grail" ]; then
     cp "$here"/share/doc/grail/* "$destdir$prefix/share/doc/grail/"
 fi
 
+# The standard library arrives checked and built in the build store, as rustup ships libstd: a
+# project's first check then compiles only its own modules. The store is per user, so a package
+# build (DESTDIR) leaves it to the first user's first build.
+if [ -z "$destdir" ]; then
+    "$bindir/grail" cache warm || echo "install.sh: 'grail cache warm' did not finish; the first build will check the standard library instead" >&2
+fi
+
 echo "installed $prefix/bin/grail"
 echo "runtime and standard library: $prefix/lib/grail"
 echo "building programs still needs clang (assembler) and ld.lld on PATH"

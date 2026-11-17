@@ -2260,6 +2260,10 @@ fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
             if !eq(view(name), view(base[0])) {
                 compile.push(copy(view("--use")));
                 compile.push(ifaces.copy());
+                // Every interface in that directory was written by a run of this build or restored
+                // from a store blob whose bytes hashed to its name: the run need not hash each one
+                // again to check its trailer.
+                compile.push(copy(view("--use-vouched")));
                 // A module with no interface file has no surface to read (the runtime's is the
                 // compiler's own knowledge of it).
                 compile.push(copy(view("--use-named")));
@@ -3313,10 +3317,13 @@ fn hex_byte(b: u8) -> bool {
 // `grail cache clear` empties the store. Both cover every target under the store (cache_base).
 fn cache_command<a>(args: (&a u8[][])) -> u64 {
     if args.len() == 0 {
-        say(view("usage: grail cache prune [--keep N] | grail cache clear"));
+        say(view("usage: grail cache prune [--keep N] | grail cache clear | grail cache warm [--target T]"));
         return 1;
     }
     sub := item(&args, 0);
+    if eq(view(sub), view("warm")) {
+        return cache_warm(&args);
+    }
     if eq(view(sub), view("clear")) {
         mut run = u8[][copy(view("rm")), copy(view("-rf")), cache_base()];
         host::command(run);
@@ -3324,7 +3331,7 @@ fn cache_command<a>(args: (&a u8[][])) -> u64 {
         return 0;
     }
     if !eq(view(sub), view("prune")) {
-        say(view("usage: grail cache prune [--keep N] | grail cache clear"));
+        say(view("usage: grail cache prune [--keep N] | grail cache clear | grail cache warm [--target T]"));
         return 1;
     }
     mut keep = 10;
@@ -3441,6 +3448,81 @@ fn cache_command<a>(args: (&a u8[][])) -> u64 {
     push_bytes(&mut line, view(" blobs\n"));
     host::print(view(line));
     return 0;
+}
+// `grail cache warm [--target T]`: check and build every standard module into the store, as a
+// toolchain ships its standard library ready (rustup's libstd, Go's std in GOCACHE): a project's
+// first check then compiles only its own modules. One program that `use`s every module of the
+// standard directory is checked and built in the store's stage, through the ordinary commands, so
+// the records it files are exactly the ones a project's build would look up. The install step runs
+// it; running it again is a no-op.
+fn cache_warm<a>(args: (&a u8[][])) -> u64 {
+    h := home();
+    if h.std.len() == 0 {
+        return 1;
+    }
+    mut target = u8[];
+    if (args.len() == 3) && eq(view(item(args, 1)), view("--target")) {
+        target = item(args, 2);
+    }
+    mut store = Cache { root: u8[], cwd: host::cwd(), hits: 0, misses: 0, names: u8[][], quiet: 1 };
+    mut program = u8[];
+    entries := host::list_dir(view(h.std));
+    mut count = 0;
+    for e in entries.len() {
+        name := item(&entries, e);
+        if !ends_with_grl(view(name)) {
+            continue;
+        }
+        info := cache_file_info(&mut store, view(path_join(view(h.std), view(name))), true);
+        if info.module.len() != 0 {
+            push_bytes(&mut program, view("use "));
+            push_bytes(&mut program, view(info.module));
+            push_bytes(&mut program, view(";\n"));
+            count += 1;
+        }
+    }
+    push_bytes(&mut program, view("fn main() {}\n"));
+    // The program lives in the target's stage, which `grail cache prune` empties.
+    mut named = target.copy();
+    if named.len() == 0 {
+        named = target_name(host::target());
+    }
+    stage := path_join(view(cache_root(view(named))), view("stage"));
+    cache_mkdirs(view(stage));
+    dir := path_join(view(stage), view(cat(view("warm."), view(decimal(host::now_us())))));
+    host::mkdir(view(dir));
+    entry := path_join(view(dir), view("main.grl"));
+    host::write_file(view(entry), view(program));
+    exe := host::exe_path();
+    mut failed = 0;
+    for step in 2 {
+        mut run = u8[][exe.copy()];
+        if step == 0 {
+            run.push(copy(view("check")));
+        } else {
+            run.push(copy(view("build")));
+        }
+        run.push(entry.copy());
+        run.push(copy(view("-o")));
+        run.push(path_join(view(dir), view("warm")));
+        if target.len() != 0 {
+            run.push(copy(view("--target")));
+            run.push(target.copy());
+        }
+        if host::command(run) != 0 {
+            failed = 1;
+        }
+    }
+    removal := u8[][copy(view("rm")), copy(view("-rf")), dir];
+    host::command(removal);
+    mut line = copy(view("cache: warm: "));
+    push_bytes(&mut line, view(decimal(count)));
+    push_bytes(&mut line, view(" standard modules checked and built"));
+    if failed != 0 {
+        push_bytes(&mut line, view(" (a step failed; what it filed stays)"));
+    }
+    say(view(line));
+    return failed;
 }
 // File an artifact under the digest of its bytes: one read, then a staging copy renamed into place.
 fn cache_blob_put<a, b>(c: (&a mut Cache), path: &b [u8]) -> u8[] {
@@ -6532,6 +6614,7 @@ fn help() {
         )
     );
     say(view("  grail cache clear                  empty the build cache"));
+    say(view("  grail cache warm [--target T]      check and build the standard library into the cache"));
     say(view("  grail explain CODE                 what an error code means (error[E0004])"));
     say(view("  grail doc [--out DIR] [FILES|DIRS] reference documentation: HTML per module + index.json"));
     say(view("  grail bindgen HEADER.h -o OUT.grl  import a C header as extern \"C\" declarations [-I DIR] [-l LIB]"));
