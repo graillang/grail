@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **The optimiser skips dead-code runs that cannot change anything.** It counts its edits to a
+  function, and a `dead_defs` run on a function unedited since a run that removed nothing is
+  skipped; the output is byte-identical. A cold build of the 4,000-function scaling program executes
+  3.0% fewer instructions (100.9G -> 97.8G).
+
 - **`bench-rivals` no longer charts a build that printed the wrong answer.** It already failed the
   run when a build's output differed from C's, but still wrote that build's figures into the
   results, so a miscompiled program could chart as the fastest. Such a figure is now left out and

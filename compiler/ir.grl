@@ -67,6 +67,10 @@ pub struct Body {
     // The loop-stability facts (llvm FACT_LOOP_STABLE) of this body, as pairs: the header's slot by
     // N/8 and the loop head's label number (filled by `build`).
     stable: u64[],
+    // Edits the optimiser has made to the body's lines (optimize.grl `bump`), and the count after the
+    // last `dead_defs` run that removed nothing, +1 (0: none): a run on an unedited body is skipped.
+    edits: u64,
+    dd_at: u64,
     // compact's renumbering of the frame, old N/8 to new (0: unchanged or not renumbered).
     slotmap: u64[],
     maxslot: u64,
@@ -1526,6 +1530,8 @@ pub fn new_body() -> Body {
         sfact: u64[],
         stable: u64[],
         slotmap: u64[],
+        edits: 0,
+        dd_at: 0,
         maxslot: 0,
         table: u64[],
         interest: u64[],
@@ -1803,6 +1809,7 @@ pub fn build<a, b, c, d>(o: (&a mut Body), s: &b [u8], facts: (&c llvm::Facts), 
     exchange(&mut o.pair_widths, u64[]);
     o.sfact.clear();
     o.stable.clear();
+    exchange(&mut o.dd_at, 0);
     o.slotmap.clear();
     for n in o.maxslot / 8 + 2 {
         o.sfact.push(0);
