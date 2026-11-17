@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **`extern "C" nonblocking fn`**: a foreign function promised never to block is called bare, with
+  no foreign-call marker - the cost of a C-to-C call. The monitor cannot hand such a call off, so a
+  wrong promise costs latency (a held worker), never safety. `blocking` and `nonblocking` now travel
+  in interface files, so a call from another module behaves as declared. `docs/ffi.md`, "Blocking
+  foreign calls", has the three forms and their costs.
+
 - **A foreign call that holds a worker for more than 10 ms is handed off.** Every `extern "C"`
   call on x86-64 Linux counts itself in and out on its worker (about 1.2 ns a call, measured on
   10M calls of `labs`), and a scheduler monitor thread looks every 5 ms: a worker inside one foreign

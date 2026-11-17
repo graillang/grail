@@ -944,6 +944,28 @@ report('stale interface refused', stale);
 const coverage = proveManifestCoverage();
 report('a source module missing from the manifest refused', coverage);
 
+// `extern "C" blocking` travels: a module declares it, another module calls it through the
+// interface, and the caller's call site still gives its worker away (rt_blocking_enter) - without
+// the mark in the interface it would be a plain call, silently holding a worker.
+function proveBlockingTravels() {
+  const directory = join(work, 'blocking');
+  mkdirSync(directory, { recursive: true });
+  const lib = join(directory, 'sleeper.grl');
+  writeFileSync(lib, 'module sleeper;\n\npub extern "C" blocking lib "c" fn usleep(us: u32) -> i32;\n');
+  const main = join(directory, 'main.grl');
+  writeFileSync(main, 'use sleeper;\n\nfn main() {\n    unsafe {\n        sleeper::usleep(1000);\n    }\n    println(1);\n}\n');
+  const ifaces = emit([main, lib, runtime, platform], join(directory, 'emit'));
+  const text = dump(join(ifaces, 'sleeper.iface'));
+  assert.match(text, /extern=1 blocking symbol=usleep/, `the blocking mark must travel in the interface\n${text}`);
+  // As every interface build here: the module's declarations come from its interface file.
+  const caller = compile([main, lib, runtime, platform], join(directory, 'caller'), ['--interface', ifaces]);
+  assert.equal(caller.status, 0, `the caller must build against the interface\n${caller.output}`);
+  const asm = readFileSync(caller.asm, 'utf8');
+  assert.match(asm, /call rt_blocking_enter/, 'a call through the interface must hand its worker off');
+  return true;
+}
+report('extern "C" blocking travels in an interface', proveBlockingTravels());
+
 const tamper = proveTampering();
 report('edited transfer refused (seal)', tamper.edited);
 report('re-digested transfer refused (manifest)', tamper.manifest);
