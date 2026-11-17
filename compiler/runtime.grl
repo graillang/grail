@@ -3681,8 +3681,9 @@ fn f_host_rw_lock(l: u64, mode: u64, until: u64, flags: u64) -> u64 {
         rt_rw_unlock_read(l);
         return rt_rw_poisoned(l);
     }
-    rt_held_node(l, 1, mode + 2);
-    return 0;
+    // The hold's node is the answer (an address, never 3 or 4): the release takes it back without
+    // looking for it (f_host_rw_release).
+    return rt_held_node(l, 1, mode + 2);
 }
 fn f_host_rw_try(l: u64, mode: u64) -> u64 {
     mut got = 0;
@@ -3702,8 +3703,7 @@ fn f_host_rw_try(l: u64, mode: u64) -> u64 {
         }
         return rt_rw_poisoned(l);
     }
-    rt_held_node(l, 1, mode + 2);
-    return 1;
+    return rt_held_node(l, 1, mode + 2);
 }
 fn rt_rw_unlock_read(l: u64) -> u64 {
     old := raw_atomic_fetch_sub(wrapping_add(l, 8), 4);
@@ -3724,6 +3724,21 @@ fn rt_rw_unlock_write(l: u64) -> u64 {
     rt_rw_dispatch(l);
     rt_q_unlock(l);
     return 0;
+}
+// Release the hold whose node f_host_rw_lock answered: mode 1 read, 2 write, 3 write that recovers.
+fn f_host_rw_release(e: u64, mode: u64) -> u64 {
+    l := raw_load(e);
+    b := rt_block_fast();
+    rt_held_unlink(b, e);
+    rt_held_free(b, e);
+    if mode == 1 {
+        return rt_rw_unlock_read(l);
+    }
+    if mode == 3 {
+        rt_q_flags(l, 4, 0);
+        raw_store(l + 24, 0);
+    }
+    return rt_rw_unlock_write(l);
 }
 // mode 1 read, 2 write, 3 write that recovers (clears the poison).
 fn f_host_rw_unlock(l: u64, mode: u64) -> u64 {
@@ -3819,8 +3834,8 @@ fn f_host_sem_acquire(m: u64, n: u64, until: u64, flags: u64) -> u64 {
             return rt_wait_answer(r, flags);
         }
     }
-    rt_held_node(m, n, 2);
-    return 0;
+    // The permits' node is the answer (an address, never 3 or 4).
+    return rt_held_node(m, n, 2);
 }
 // The node of the permits the last acquire on this execution took (a Permit keeps it).
 fn f_host_sem_node(m: u64) -> u64 {
