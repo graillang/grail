@@ -140,6 +140,15 @@ pub fn fact_op<a>(facts: (&a mut Facts), name: u8[], ordinal: u64, op: u64) -> u
 }
 // F1: slot `slot` of `name` holds a pointer to a sequence header (`what` 2/3/4 for a vector of
 // element width 8/4/1, 5 for a descriptor) whose elements are `width` bytes wide.
+// Kind 8 (7 is an indirect call's argument words, fact_indirect): the sequence header in frame slot
+// `slot` of `name` keeps its data and length across the loop
+// whose head is label `head` (`.L<unit>_<f>_<head>`) - nothing in the body writes it, lends it
+// mutably or hands it to a call that can - so the descriptor may be loaded once before the head.
+// `what` is the header's F1 kind (2/3/4/5). No fact means not known stable.
+pub fn fact_loop_stable<a>(facts: (&a mut Facts), name: u8[], slot: u64, head: u64, what: u64) -> unit {
+    facts.items.push(Fact { kind: 8, fn: name, a: slot, b: head, callee: u8[], what: what, width: 0 });
+    return ();
+}
 pub fn fact_header_slot<a>(facts: (&a mut Facts), name: u8[], slot: u64, what: u64, width: u64) -> unit {
     facts.items.push(Fact { kind: 0, fn: name, a: slot, b: 0, callee: u8[], what: what, width: width });
     return ();
@@ -252,6 +261,14 @@ fn dump_facts<a>(out: (&a mut u8[]), facts: (&a Facts)) -> unit {
         if f.kind == 5 {
             put(&mut out, view(" signature "));
             num(&mut out, f.a);
+            out.push(10);
+            continue;
+        }
+        if f.kind == 8 {
+            put(&mut out, view(" loop-stable slot "));
+            num(&mut out, f.a);
+            put(&mut out, view(" head "));
+            num(&mut out, f.b);
             out.push(10);
             continue;
         }
@@ -446,6 +463,10 @@ struct L {
     argwritten: u64,
     // The FFI facts (ffi_signatures).
     ffis: Set,
+    // GRAIL_LLVM_WHY: the function whose first refusal is printed (bad).
+    why: u8[],
+    // Every Grail body (a signature fact names it): calls to these pass no vector registers.
+    grail_bodies: Set,
     // Vector registers written and not read since (a pending float argument), and ones not written
     // since the entry or the last call (xmm_read).
     xpend: u64,
@@ -805,6 +826,15 @@ fn expand_into<a, b, c>(out: (&a mut u8[]), tmpl: &b [u8], args: (&c u8[][])) ->
     return ();
 }
 fn bad<a>(l: (&a mut L)) -> unit {
+    if (l.fail == 0) && (l.why.len() != 0) && eq(view(l.why), view(l.fname)) {
+        // GRAIL_LLVM_WHY=FUNCTION: say which instruction keeps FUNCTION native.
+        mut msg = copy(view("llvm: "));
+        put(&mut msg, view(l.fname));
+        put(&mut msg, view(" stays native at `"));
+        put(&mut msg, view(l.curline));
+        put(&mut msg, view("`\n"));
+        host::print(view(msg));
+    }
     l.fail = 1;
     return ();
 }
@@ -2535,10 +2565,20 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
     fcode := set_get(&l.ffis, target);
     typed_ffi := (fcode > 1) && (set_get(&l.sigs, target) == 0) && (l.target == 0) && (l.areaopen == 0);
     if !typed_ffi {
-        xmm_call(&mut l);
+        // Grail's own symbols are mangled (`f_...`, the runtime's `rt_...`); a C function, even one
+        // Grail defines with `extern "C"`, keeps its C name.
+        if set_has(&l.grail_bodies, target) || starts(target, view("f_")) || starts(target, view("rt_")) {
+            // A Grail body takes and returns words only: nothing is passed in a vector register,
+            // and every one of them is dead after it.
+            l.xpend = 0;
+            l.xstale = 18446744073709551615;
+        } else {
+            xmm_call(&mut l);
+        }
     }
-    if l.areaopen != 0 {
-        // Words on the stack: only a callee whose signature fact says it takes them.
+    if (l.areaopen != 0) && !eq(target, view("rt_foreign_lost")) {
+        // Words on the stack: only a callee whose signature fact says it takes them. The foreign-call
+        // marker's area is a save area: rt_foreign_lost takes nothing from it.
         code := set_get(&l.sigs, target);
         if (code == 0) || (code / 4 <= 6) || (code / 4 - 6 > l.area.len()) {
             bad(&mut l);
@@ -3495,6 +3535,41 @@ fn lift_atom<a, b>(l: (&a mut L), line: &b [u8]) -> unit {
     set_reg(&mut l, view("rax"), view(old));
     return ();
 }
+// `lock incq M` / `lock decq M` (the foreign-call marker's counter, native.grl ffi_marker_leave):
+// an atomic add of 1 or -1 to the word at M, sequentially consistent, whose flags are the new
+// value's (Z, S; O when it wrapped past the signed range; C is untouched by inc/dec - here left as
+// it was, which no Grail sequence reads after one).
+fn lift_locked<a, b>(l: (&a mut L), rest: &b [u8]) -> unit {
+    mut sp = 0;
+    while (sp < rest.len()) && (rest[sp] != 32) {
+        sp += 1;
+    }
+    inner := sub(rest, 0, sp);
+    if (sp >= rest.len()) || !(eq(view(inner), view("incq")) || eq(view(inner), view("decq"))) {
+        bad(&mut l);
+        return ();
+    }
+    operand := trim(view(sub(rest, sp + 1, rest.len())));
+    if (operand.len() == 0) || (operand[operand.len() - 1] != 41) {
+        bad(&mut l);
+        return ();
+    }
+    p := address(&mut l, view(operand));
+    mut rmw = copy(view("atomicrmw add ptr {}, i64 1 seq_cst, align 8"));
+    mut step = copy(view("add i64 {}, 1"));
+    mut edge = copy(view("icmp eq i64 {}, 9223372036854775807"));
+    if eq(view(inner), view("decq")) {
+        rmw = copy(view("atomicrmw sub ptr {}, i64 1 seq_cst, align 8"));
+        step = copy(view("sub i64 {}, 1"));
+        edge = copy(view("icmp eq i64 {}, 9223372036854775808"));
+    }
+    old := def(&mut l, view(rmw), &u8[][p]);
+    new := def(&mut l, view(step), &u8[][copy(view(old))]);
+    over := def(&mut l, view(edge), &u8[][old]);
+    set_flag(&mut l, view("O"), view(over));
+    zero_sign(&mut l, view(new));
+    return ();
+}
 fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit {
     mut space = line.len();
     for i in line.len() {
@@ -3532,11 +3607,25 @@ fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit
     if area_instruction(&mut l, view(op), view(rest)) {
         return ();
     }
+    if eq(view(op), view("lock")) {
+        lift_locked(&mut l, view(rest));
+        return ();
+    }
     // An argument load as load_call_args emits it - a frame slot into an argument register - for
     // lower_indirect_call's check of its word count. The arguments are loaded in one run of moves
     // right before the call, so any other instruction (a division's operand load is followed by its
     // `idivq`, a compare by its jump) starts the count again.
-    if !starts(view(op), view("mov")) && !starts(view(op), view("lea")) && !eq(view(op), view("call")) {
+    // A move into memory (a store through a register just loaded) ends the run too: the registers
+    // it used were the store's, not the call's.
+    mut into_memory = false;
+    if starts(view(op), view("mov")) {
+        mut lc = rest.len();
+        while (lc > 0) && (rest[lc - 1] != 44) {
+            lc -= 1;
+        }
+        into_memory = (lc < rest.len()) && (rest[lc] != 37);
+    }
+    if (!starts(view(op), view("mov")) && !starts(view(op), view("lea")) && !eq(view(op), view("call"))) || into_memory {
         l.argwritten = 0;
     }
     if eq(view(op), view("movq")) && has(view(rest), view("(%rbp),%")) {
@@ -4302,6 +4391,9 @@ fn lower_ffi_call<a, b>(l: (&a mut L), target: &b [u8], code: u64) -> unit {
             put(&mut args, view(def(&mut l, view("bitcast i64 {} to double"), &u8[][w])));
         }
     }
+    // The fact says which vector registers are arguments (just loaded above); any other written one
+    // (the marker's restore of %xmm1 after an earlier call) is not passed.
+    l.xpend = 0;
     xmm_call(&mut l);
     rt := ffi_ret_type(code);
     mut c = copy(view("call "));
@@ -4321,8 +4413,11 @@ fn lower_ffi_call<a, b>(l: (&a mut L), target: &b [u8], code: u64) -> unit {
             word = def(&mut l, view("zext i32 {} to i64"), &u8[][b]);
         }
         emit(&mut l, view("store i64 {}, ptr {}"), &u8[][word, slot_of(view("%x."), view("xmm0"))]);
-        l.xstale = l.xstale & (18446744073709551615 - 1);
     }
+    // The call's result is a scalar (a fact is only made for one), so the other vector registers
+    // hold nothing it returned: code that saves them across the foreign-call marker (rt_foreign_lost)
+    // reads a dead value, which their slots' old contents are as good as.
+    l.xstale = 0;
     set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
     clear_args(&mut l);
     refresh(&mut l);
@@ -4485,6 +4580,10 @@ fn area_line<a>(line: &a [u8]) -> bool {
     if (starts(line, view("subq $")) || starts(line, view("addq $"))) && ends(line, view(",%rsp")) {
         return parse_int(view(sub(line, 6, line.len() - 5))).ok != 0;
     }
+    // The foreign-call marker's save of the result registers around rt_foreign_lost reads them back.
+    if starts(line, view("movq ")) && has(line, view("(%rsp),%")) {
+        return true;
+    }
     if starts(line, view("movq %")) && ends(line, view("(%rsp)")) {
         mut comma = 0;
         for i in line.len() {
@@ -4492,7 +4591,8 @@ fn area_line<a>(line: &a [u8]) -> bool {
                 comma = i;
             }
         }
-        return (comma != 0) && (parse_int(view(sub(line, comma + 1, line.len() - 6))).ok != 0);
+        off := sub(line, comma + 1, line.len() - 6);
+        return (comma != 0) && ((off.len() == 0) || (parse_int(view(off)).ok != 0));
     }
     return false;
 }
@@ -4533,6 +4633,33 @@ fn area_instruction<a, b, c>(l: (&a mut L), op: &b [u8], rest: &c [u8]) -> bool 
         }
         return true;
     }
+    // A word read back from the area: the foreign-call marker (native.grl, blocking externs) saves
+    // the C result registers below %rsp across `call rt_foreign_lost` and restores them.
+    if eq(op, view("movq")) && has(rest, view("(%rsp),%")) && !ends(rest, view("(%rsp)")) {
+        o := operands(rest);
+        if (o.len() != 2) || (o[1][0] != 37) {
+            bad(&mut l);
+            return true;
+        }
+        at := sub(view(o[0]), 0, o[0].len() - 6);
+        mut k = 0;
+        mut ok = true;
+        if at.len() != 0 {
+            kk := parse_int(view(at));
+            ok = kk.ok != 0;
+            if ok {
+                k = u64(kk.v);
+            }
+        }
+        if (l.areaopen == 0) || !ok || (k % 8 != 0) || (k / 8 >= l.area.len()) {
+            bad(&mut l);
+            return true;
+        }
+        word := copy(view(l.area[k / 8]));
+        dreg := sub(view(o[1]), 1, o[1].len());
+        set_reg(&mut l, view(dreg), view(word));
+        return true;
+    }
     store := eq(op, view("cstarg")) || (eq(op, view("movq")) && ends(rest, view("(%rsp)")));
     if !store {
         return false;
@@ -4548,13 +4675,20 @@ fn area_instruction<a, b, c>(l: (&a mut L), op: &b [u8], rest: &c [u8]) -> bool 
         src = sub(view(o[0]), 1, o[0].len());
         at = sub(view(o[1]), 0, o[1].len() - 6);
     }
-    k := parse_int(view(at));
-    if (l.areaopen == 0) || (k.ok == 0) || (k.v < 0) || (k.v % 8 != 0) || (u64(k.v) / 8 >= l.area.len()) {
+    // `(%rsp)` with no displacement is word 0.
+    mut kv: i64 = 0;
+    mut kok = true;
+    if at.len() != 0 {
+        k := parse_int(view(at));
+        kok = k.ok != 0;
+        kv = k.v;
+    }
+    if (l.areaopen == 0) || !kok || (kv < 0) || (kv % 8 != 0) || (u64(kv) / 8 >= l.area.len()) {
         bad(&mut l);
         return true;
     }
     v := get_reg(&mut l, view(src));
-    l.area[u64(k.v) / 8] = v;
+    l.area[u64(kv) / 8] = v;
     return true;
 }
 // A load of `16 + 8k(%rbp)`, word 6 + k of the arguments (native.grl `stack_params`): the body's
@@ -5202,7 +5336,7 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
             begin_block(&mut l, view(next));
         }
         l.rline = m;
-        if l.verify != 0 {
+        if (l.verify != 0) || (l.why.len() != 0) {
             exchange(&mut l.curline, copy(line));
         }
         instruction(&mut l, line, &facts);
@@ -7748,6 +7882,321 @@ fn rename_calls<a, b>(line: &a [u8], lifted: (&b Set)) -> u8[] {
     }
     return out;
 }
+// A lifted module cut into `parts` modules that together define what it defines, for parallel
+// `clang -O2` (docs/design/release-builds-and-parity.md): every top-level line that is not a function
+// (declarations, external globals, attribute groups, the target line) goes to every part; each
+// function goes to one part, cut by size in order; a part declares the functions the others define.
+// An internal function becomes hidden, which other parts can call and nothing outside the program
+// can see. The parts link (`ld.lld -r`) into what the whole module compiles to, less the inlining
+// across a cut.
+pub fn split_module<a>(text: &a [u8], parts: u64) -> u8[][] {
+    plan := split_plan(text, parts);
+    mut out = u8[][];
+    for k in plan.count {
+        out.push(split_part(text, &plan, k, view("part")));
+    }
+    return out;
+}
+// Where the module's functions are and which part defines each, as byte offsets into the text: the
+// parts are then written one at a time, without a copy of the module per line or per part.
+pub struct SplitPlan {
+    count: u64,
+    starts: u64[],
+    ends: u64[],
+    part_of: u64[],
+    // The internal functions: hidden once cut, so each is renamed with the unit's suffix and two
+    // units' parts cannot both define the same name.
+    internal: Set,
+    internals: u64
+}
+pub fn split_plan<a>(text: &a [u8], parts: u64) -> SplitPlan {
+    mut starts = u64[];
+    mut ends = u64[];
+    mut at: u64 = 0;
+    mut open = text.len();
+    while at < text.len() {
+        mut e = at;
+        while (e < text.len()) && (text[e] != 10) {
+            e += 1;
+        }
+        if (open == text.len()) && occurs_at_safe(text, at, view("define ")) {
+            open = at;
+        } else if (open != text.len()) && (e == at + 1) && (text[at] == 125) {
+            starts.push(open);
+            ends.push(e + 1);
+            open = text.len();
+        }
+        at = e + 1;
+    }
+    mut internal = set_new(starts.len() * 2 + 64);
+    mut internals: u64 = 0;
+    for f in starts.len() {
+        if occurs_at_safe(text, starts[f], view("define internal ")) {
+            name := define_name_of(text, starts[f]);
+            if name.len() != 0 {
+                set_add(&mut internal, view(name));
+                internals += 1;
+            }
+        }
+    }
+    mut total: u64 = 0;
+    for f in starts.len() {
+        total += ends[f] - starts[f];
+    }
+    mut count = parts;
+    if starts.len() < count {
+        count = starts.len();
+    }
+    if count < 1 {
+        count = 1;
+    }
+    // A function's part is a hash of its name, so an edit to one function changes one part and
+    // the others are the same text as before - which is what lets a store keep their objects. The
+    // count moves only when the module crosses a size step.
+    mut part_of = u64[];
+    for f in starts.len() {
+        part_of.push(fnv(view(define_name_of(text, starts[f]))) % count);
+    }
+    return SplitPlan { count: count, starts: starts, ends: ends, part_of: part_of, internal: internal, internals: internals };
+}
+// Part k: every line outside a function, part k's functions (an internal one made hidden), and a
+// declaration of each function another part defines.
+pub fn split_part<a, b, c>(text: &a [u8], plan: (&b SplitPlan), k: u64, suffix: &c [u8]) -> u8[] {
+    // Part k's own functions first, then only the outside names they reach: a part's text is then
+    // a function of its functions and their callees' signatures, not of the whole module.
+    mut bodies = u8[];
+    for f in plan.starts.len() {
+        if plan.part_of[f] != k {
+            continue;
+        }
+        mut he = plan.starts[f];
+        while (he < text.len()) && (text[he] != 10) {
+            he += 1;
+        }
+        head := renamed(text[plan.starts[f]: he], &plan, suffix);
+        bodies.append(view(hidden_define(view(head))));
+        if he < plan.ends[f] {
+            renamed_into(&mut bodies, text[he: plan.ends[f]], &plan, suffix);
+        }
+    }
+    mut used = set_new(bodies.len() / 16 + 64);
+    note_names(&mut used, view(bodies));
+    mut m = u8[];
+    // The lines outside functions: those that name a global or declare a function are kept when the
+    // part uses that name; the rest (target, attribute groups, comments) always.
+    mut at: u64 = 0;
+    mut f: u64 = 0;
+    while at < text.len() {
+        if (f < plan.starts.len()) && (at == plan.starts[f]) {
+            at = plan.ends[f];
+            f += 1;
+            continue;
+        }
+        mut e = at;
+        while (e < text.len()) && (text[e] != 10) {
+            e += 1;
+        }
+        line := text[at: e];
+        name := line_name(line);
+        if (name.len() == 0) || set_has(&used, view(name)) {
+            renamed_into(&mut m, line, &plan, suffix);
+            m.push(10);
+        }
+        at = e + 1;
+    }
+    for g in plan.starts.len() {
+        if plan.part_of[g] == k {
+            continue;
+        }
+        mut name = define_name_of(text, plan.starts[g]);
+        if set_has(&plan.internal, view(name)) {
+            name.push(46);
+            name.append(suffix);
+        }
+        if !set_has(&used, view(name)) {
+            continue;
+        }
+        mut he = plan.starts[g];
+        while (he < text.len()) && (text[he] != 10) {
+            he += 1;
+        }
+        head := renamed(text[plan.starts[g]: he], &plan, suffix);
+        m.append(view(declare_of(view(head))));
+        m.push(10);
+    }
+    m.append(view(bodies));
+    return m;
+}
+// Every `@"NAME"` and `@NAME` the text mentions.
+fn note_names<a, b>(used: (&a mut Set), s: &b [u8]) -> unit {
+    mut i: u64 = 0;
+    while i + 1 < s.len() {
+        if s[i] == 64 {
+            if s[i + 1] == 34 {
+                mut e = i + 2;
+                while (e < s.len()) && (s[e] != 34) {
+                    e += 1;
+                }
+                if !set_has(&used, s[i + 2: e]) {
+                    set_add(&mut used, s[i + 2: e]);
+                }
+                i = e;
+                continue;
+            }
+            mut e = i + 1;
+            while (e < s.len()) && (ident_char(s[e]) || (s[e] == 46) || (s[e] == 36)) {
+                e += 1;
+            }
+            if (e > i + 1) && !set_has(&used, s[i + 1: e]) {
+                set_add(&mut used, s[i + 1: e]);
+            }
+            i = e;
+            continue;
+        }
+        i += 1;
+    }
+    return ();
+}
+// The global a top-level line defines or declares (`@X = ...`, `declare ... @X(`), else empty.
+fn line_name(line: (&[u8])) -> u8[] {
+    if starts(line, view("@")) || starts(line, view("declare ")) {
+        mut i: u64 = 0;
+        while i < line.len() {
+            if line[i] == 64 {
+                if (i + 1 < line.len()) && (line[i + 1] == 34) {
+                    mut e = i + 2;
+                    while (e < line.len()) && (line[e] != 34) {
+                        e += 1;
+                    }
+                    return sub(line, i + 2, e);
+                }
+                mut e = i + 1;
+                while (e < line.len()) && (ident_char(line[e]) || (line[e] == 46) || (line[e] == 36)) {
+                    e += 1;
+                }
+                return sub(line, i + 1, e);
+            }
+            i += 1;
+        }
+    }
+    return u8[];
+}
+fn renamed<a, b, c>(s: &a [u8], plan: (&b SplitPlan), suffix: &c [u8]) -> u8[] {
+    mut out = u8[];
+    renamed_into(&mut out, s, &plan, suffix);
+    return out;
+}
+// `s` appended with every `@"NAME"` of an internal function written `@"NAME.SUFFIX"`.
+fn renamed_into<a, b, c, d>(out: (&a mut u8[]), s: &b [u8], plan: (&c SplitPlan), suffix: &d [u8]) -> unit {
+    if plan.internals == 0 {
+        out.append(s);
+        return ();
+    }
+    mut run: u64 = 0;
+    mut i: u64 = 0;
+    while i + 1 < s.len() {
+        if (s[i] == 64) && (s[i + 1] == 34) {
+            mut e = i + 2;
+            while (e < s.len()) && (s[e] != 34) {
+                e += 1;
+            }
+            if (e < s.len()) && set_has(&plan.internal, s[i + 2: e]) {
+                out.append(s[run: e]);
+                out.push(46);
+                out.append(suffix);
+                run = e;
+            }
+            i = e;
+            continue;
+        }
+        i += 1;
+    }
+    if run < s.len() {
+        out.append(s[run: s.len()]);
+    }
+    return ();
+}
+// The name of the function whose `define` line starts at `at`: the text between `@"` and `"`.
+fn define_name_of<a>(text: &a [u8], at: u64) -> u8[] {
+    mut i = at;
+    while (i + 1 < text.len()) && (text[i] != 10) {
+        if (text[i] == 64) && (text[i + 1] == 34) {
+            mut e = i + 2;
+            while (e < text.len()) && (text[e] != 34) {
+                e += 1;
+            }
+            mut out = u8[];
+            out.append(text[i + 2: e]);
+            return out;
+        }
+        i += 1;
+    }
+    return u8[];
+}
+fn hidden_define(head: (&[u8])) -> u8[] {
+    if starts(head, view("define internal ")) {
+        return cat_text(view("define hidden "), view(sub(head, 16, head.len())));
+    }
+    return copy(head);
+}
+// `define [linkage] RESULT @NAME(PARAMS) ATTRS {` as `declare RESULT @NAME(PARAMS)`: the linkage
+// word dropped, the parameter list kept to its closing parenthesis.
+fn declare_of(head: (&[u8])) -> u8[] {
+    mut rest = sub(head, 7, head.len());
+    words := u8[][copy(view("internal ")), copy(view("private ")), copy(view("weak_odr ")), copy(view("weak ")), copy(view("linkonce_odr ")),
+        copy(view("linkonce ")), copy(view("available_externally ")), copy(view("external ")), copy(view("hidden ")), copy(view("protected ")),
+        copy(view("dso_local "))];
+    mut again = true;
+    while again {
+        again = false;
+        for w in words.len() {
+            if starts(view(rest), view(words[w])) {
+                rest = sub(view(rest), words[w].len(), rest.len());
+                again = true;
+            }
+        }
+    }
+    // The parameter list opens at the first `(` after the name and closes at its match.
+    at := first_at(view(rest));
+    mut open = at;
+    while (open < rest.len()) && (rest[open] != 40) {
+        if rest[open] == 34 {
+            open += 1;
+            while (open < rest.len()) && (rest[open] != 34) {
+                open += 1;
+            }
+        }
+        open += 1;
+    }
+    mut depth: u64 = 0;
+    mut close = open;
+    while close < rest.len() {
+        if rest[close] == 40 {
+            depth += 1;
+        }
+        if rest[close] == 41 {
+            depth -= 1;
+            if depth == 0 {
+                break;
+            }
+        }
+        close += 1;
+    }
+    return cat_text(view("declare "), view(sub(view(rest), 0, close + 1)));
+}
+fn cat_text<a, b>(x: &a [u8], y: &b [u8]) -> u8[] {
+    mut out = copy(x);
+    put(&mut out, y);
+    return out;
+}
+fn first_at(s: (&[u8])) -> u64 {
+    for i in s.len() {
+        if s[i] == 64 {
+            return i;
+        }
+    }
+    return s.len();
+}
 pub fn lower_for<a, b>(stream: &a [u8], target: u64, facts: (&b Facts), verify: u64, ranges: u64) -> Lowered {
     triple := target_triple(target);
     return lower_target(stream, view(triple), target, facts, verify, ranges);
@@ -7813,11 +8262,10 @@ fn lower_range<a, b, c, d, e, g, h>(l: (&a mut L), lines: (&b u8[][]), funcs: (&
             // A runtime fast path stays small only if what it falls back to stays out of it: a
             // `rt_..._slow` function is cold and never inlined, and the threaded allocator paths are
             // never inlined into the one-thread wrappers (rt_alloc, rt_free), whose frame would
-            // otherwise save every callee-saved register on every allocation.
+            // otherwise save every callee-saved register on every allocation. (The threaded paths'
+            // own fast paths are small too; their refills are `_slow`.)
             if starts(view(f.name), view("rt_")) && ends(view(f.name), view("_slow")) {
                 put(&mut p.functions, view(" noinline cold"));
-            } else if eq(view(f.name), view("rt_alloc_shared")) || eq(view(f.name), view("rt_free_shared")) {
-                put(&mut p.functions, view(" noinline"));
             }
             atomics_inline(&mut p.functions, l.target);
             put(&mut p.functions, view(" {\n"));
@@ -8125,7 +8573,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
             set_add(&mut weak, view(sub(wl, 6, wl.len())));
         }
     }
-    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0, argwritten: 0, ffis: set_new(16), xpend: 0, xstale: 18446744073709551615 };
+    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0, argwritten: 0, ffis: set_new(16), why: host::env(view("GRAIL_LLVM_WHY")), grail_bodies: set_new(16), xpend: 0, xstale: 18446744073709551615 };
     // A function whose address is taken (`NAME(%rip)`, or named by data such as a vtable) is
     // called through a pointer by code that does not know its signature, so it keeps the six-word
     // form: an indirect call passes six words and reads rax:rdx, and LLVM must never see a call
@@ -8144,6 +8592,19 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
     }
     l.sigs = signatures(facts, &taken);
     l.ffis = ffi_signatures(facts);
+    mut nb = 0;
+    for i in facts.items.len() {
+        if facts.items[i].kind == 5 {
+            nb += 1;
+        }
+    }
+    mut bodies = set_new(nb + 1);
+    for i in facts.items.len() {
+        if facts.items[i].kind == 5 {
+            set_add(&mut bodies, view(facts.items[i].fn));
+        }
+    }
+    l.grail_bodies = bodies;
     // A wrong signature fact under --verify-facts: the compile fails with these lines.
     mut sigerrors = u8[];
     mut funcs = Func[];

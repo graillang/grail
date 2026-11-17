@@ -10,9 +10,9 @@
 //   build edited    the same after the edit
 //   build no-op     the same again with nothing changed
 // "Cold" is a project's first build on a machine whose toolchain caches are warm: new source text
-// (a seed) and empty project caches - a new target/ for cargo, a Grail store holding only what a
-// hello-world build put there (the runtime, platform and core objects the other toolchains ship
-// precompiled) - while Go keeps its standard library in GOCACHE and Zig its compiler_rt. The edit
+// (a seed) and empty project caches - a new target/ for cargo, a Grail store holding only the
+// standard library (`grail cache warm`, as the installers run it) - while Go keeps its standard
+// library in GOCACHE and Zig its compiler_rt. The edit
 // changes one constant in one function body of a generated program, and adds one statement to a
 // twin's main.
 // Two passes: every toolchain in one process (GRAIL_JOBS=1, GOMAXPROCS=1 -p=1, cargo -j1) for the
@@ -24,6 +24,7 @@
 //   --compiler names the Grail compiler, --branch REF builds REF's release compiler
 //   (tools/rivals/common.mjs); default GRAIL_COMPILER, else this tree's release compiler (`bun
 //   tools/native.mjs release`), the one a user runs.
+import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { root } from './platforms.mjs';
@@ -168,6 +169,7 @@ function edit(text, n) {
 const goCache = join(work, 'gocache'), zigCache = join(work, 'zigcache');
 const baseEnv = { ...process.env, GOCACHE: goCache, ZIG_GLOBAL_CACHE_DIR: zigCache, CARGO_NET_OFFLINE: 'true' };
 const storeTemplate = join(work, 'grail-store-template');
+let templateFrom = '';
 // Two passes over everything. `single`: every toolchain in one process - GRAIL_JOBS=1, GOMAXPROCS=1
 // with -p=1, cargo with one job (Zig's build-exe has no job flag; its count includes its threads) -
 // for the instruction counts, the primary figure. `jobs4`: four jobs each, the load cap of this host,
@@ -252,7 +254,17 @@ function timed(lang, argv0, dir, passEnv) {
 // offline registry.
 for (const lang of names) {
   const dir = project(lang, languages[lang].hello('warm'));
-  if (lang === 'grail') { mkdirSync(storeTemplate, { recursive: true }); run([grail, 'build', 'main.grl'], { cwd: dir, env: { ...baseEnv, GRAIL_CACHE_DIR: storeTemplate } }); continue; }
+  if (lang === 'grail') {
+    // The template every cold Grail store starts from: the standard library checked and built by
+    // `grail cache warm` (what the installers run), as rustup ships libstd and Go keeps std in
+    // GOCACHE. A compiler without that command gets the runtime and core from a hello build.
+    mkdirSync(storeTemplate, { recursive: true });
+    const env = { ...baseEnv, GRAIL_CACHE_DIR: storeTemplate };
+    const warm = spawnSync(grail, ['cache', 'warm'], { cwd: dir, env, encoding: 'utf8' });
+    templateFrom = warm.status === 0 ? 'grail cache warm (every standard module)' : 'a hello-world build (the runtime, platform and core; this compiler has no `cache warm`)';
+    run([grail, 'build', 'main.grl'], { cwd: dir, env });
+    continue;
+  }
   run(languages[lang].build, { cwd: dir, env: { ...baseEnv, ...languages[lang].env(dir) } });
   rmSync(dir, { recursive: true, force: true });
 }
@@ -334,6 +346,7 @@ if (jsonPath) {
   writeResults(jsonPath, {
     tool: 'compile-rivals', title: 'Compile speed against Go, Zig and rustc', commit: measuredGrail.commit, versions: v, load,
     commands: [`bun tools/compile-rivals.mjs --runs ${runs} --sizes ${sizes.join(',')} --twins ${twins.join(',')}`,
+      `Grail's store before each cold run: ${templateFrom}; Go's GOCACHE holds its standard library, Zig's cache its compiler_rt, and cargo uses the offline registry, so the standard library is warm for every toolchain`,
       'one process: GRAIL_JOBS=1, GOMAXPROCS=1 GOFLAGS=-p=1, CARGO_BUILD_JOBS=1; four jobs: the same at 4',
       ...names.map(n => `${headOf[n]}: check \`${languages[n].check.join(' ').replace('__grail', 'grail')}\`, build \`${languages[n].build.join(' ').replace('__grail', 'grail')}\``),
       'edit: the generated programs change one constant in one function body; a twin gets one statement added to main'],
