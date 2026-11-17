@@ -1,5 +1,6 @@
 ## Unreleased
 
+- Landing on main goes through a service (`tools/landsvc/landd.py`, client `tools/land.sh`): it merges each queued branch onto current main itself, gates up to four together, retries a red train one branch at a time, and cannot be stopped by killing the process that queued a branch.
 - **Fixed: an LLVM-backend miscompile of a vector grown through its address.** A call handed `&mut v`
   receives the slot's address, not the header word, so the lifter did not count it as a call that
   can grow `v`, and the `len`/`data` it had read before the call were used after it: `pad(&mut out,
