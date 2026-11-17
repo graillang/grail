@@ -62,44 +62,59 @@ fn fbits<a>(data: &a [u8], pos: u64, n: u64) -> u64 {
     return v;
 }
 
-// A backward bitstream over data[start, start + len): reads take the highest unread bits first.
+// A backward bitstream over data[start, start + len): reads take the highest unread bits first, and
+// `pos` bits remain below the end marker. `word` holds the 64 stream bits
+// from bit `base` up (bytes past the input read as zero), so a peek inside that window is a shift
+// and a mask; it is reloaded about once per sequence, as libzstd's BIT_DStream refills.
 struct Rev {
     start: u64,
-    pos: i64
+    pos: i64,
+    base: i64,
+    word: u64
 }
 
 // Positions the reader below the end marker (the highest set bit of the last byte).
 fn rev_open<a, b>(data: &a [u8], start: u64, len: u64, d: (&b mut Dec)) -> Rev {
     if (len == 0) || (start + len > data.len()) {
         d.bad = true;
-        return Rev { start: start, pos: 0 };
+        return Rev { start: start, pos: 0, base: -128, word: 0 };
     }
     last := u64(data[start + len - 1]);
     if last == 0 {
         d.bad = true;
-        return Rev { start: start, pos: 0 };
+        return Rev { start: start, pos: 0, base: -128, word: 0 };
     }
-    return Rev { start: start, pos: i64((len - 1) * 8 + highbit(last)) };
+    return Rev { start: start, pos: i64((len - 1) * 8 + highbit(last)), base: -128, word: 0 };
 }
 
 // The next n bits (MSB-first order of the stream); bits below the stream start read as zero.
-fn rev_peek<a, b>(data: &a [u8], r: (&b Rev), n: u64) -> u64 {
+fn rev_peek<a, b>(data: &a [u8], r: (&b mut Rev), n: u64) -> u64 {
     if n == 0 {
         return 0;
     }
     lo := r.pos - i64(n);
-    // The common case: every bit is in the stream and the bytes holding them fit one word.
     if (lo >= 0) && (n <= 56) {
-        ulo := u64(lo);
-        first := r.start + ulo / 8;
-        last := r.start + (u64(r.pos) - 1) / 8;
-        mut w: u64 = 0;
-        mut k = last + 1;
-        while k > first {
-            k -= 1;
-            w = (w << 8) | u64(data[k]);
+        if (lo < r.base) || (r.base + 64 < r.pos) {
+            // Reload: the eight bytes ending at the one holding bit pos - 1.
+            top := (u64(r.pos) - 1) / 8;
+            mut first: u64 = 0;
+            if top >= 7 {
+                first = top - 7;
+            }
+            mut w: u64 = 0;
+            mut k = first + 8;
+            while k > first {
+                k -= 1;
+                at := r.start + k;
+                w = w << 8;
+                if at < data.len() {
+                    w = w | u64(data[at]);
+                }
+            }
+            r.word = w;
+            r.base = i64(first * 8);
         }
-        return (w >> (ulo % 8)) & ((1 << n) - 1);
+        return (r.word >> u64(lo - r.base)) & ((1 << n) - 1);
     }
     mut v: u64 = 0;
     for k in n {
@@ -113,7 +128,7 @@ fn rev_peek<a, b>(data: &a [u8], r: (&b Rev), n: u64) -> u64 {
 }
 
 fn rev_read<a, b>(data: &a [u8], r: (&b mut Rev), n: u64) -> u64 {
-    v := rev_peek(data, &r, n);
+    v := rev_peek(data, &mut r, n);
     r.pos = r.pos - i64(n);
     return v;
 }
@@ -372,7 +387,7 @@ fn huffman_stream<a, b, c>(data: &a [u8], start: u64, len: u64, count: u64, d: (
         return ();
     }
     for i in count {
-        index := rev_peek(data, &r, d.huf.max);
+        index := rev_peek(data, &mut r, d.huf.max);
         out.push(d.huf.symbol[index]);
         r.pos = r.pos - i64(d.huf.bits[index]);
     }

@@ -2831,8 +2831,23 @@ fn rt_utf8(s: u64) -> u64 {
 // Checks the bytes from `start` (a character boundary) to the end.
 fn rt_utf8_from(s: u64, start: u64) -> u64 {
     n := rt_len(s);
+    data := raw_load(s);
     mut i = start;
     while i < n {
+        // ASCII runs eight bytes per step, as Rust's from_utf8 does: an aligned word with no high
+        // bit set is eight ASCII bytes. Bytes before the next word boundary go one at a time, so no
+        // load is misaligned on any target.
+        while (i < n) && ((wrapping_add(data, i) & 7) != 0) && (raw_byte(wrapping_add(data, i)) < 128) {
+            i = i + 1;
+        }
+        if ((wrapping_add(data, i) & 7) == 0) {
+            while (i + 8 <= n) && ((raw_load(wrapping_add(data, i)) & 9259542123273814144) == 0) {
+                i = i + 8;
+            }
+        }
+        if n <= i {
+            return 0;
+        }
         b := rt_atb(s, i);
         mut count = 0;
         if b < 128 {
@@ -5961,7 +5976,7 @@ fn rt_worker_run_detached(t: u64) -> u64 {
         runner := raw_load(t + 104) == 3;
         rt_os_ctx_release(t);
         raw_atomic_store(t + 96, 1);
-        rt_syscall(202, t + 96, 129, 2147483647);
+        rt_syscall_low(202, t + 96, 129, 2147483647);
         joiner := raw_atomic_swap(t + 88, 1);
         if 1 < joiner {
             rt_wake(joiner);
@@ -7253,7 +7268,7 @@ fn rt_suspend(t: u64) -> u64 {
             return 0;
         }
         while raw_atomic_load(t + 24) == 5 {
-            rt_syscall(202, t + 24, 128, 5);
+            rt_syscall_low(202, t + 24, 128, 5);
         }
         raw_atomic_store(t + 24, 0);
         return 0;
@@ -7289,7 +7304,7 @@ fn rt_wake(t: u64) -> u64 {
         } else if s == 5 {
             // Parked pinned on its own thread (rt_suspend, inside a callback).
             if raw_atomic_cas(t + 24, 5, 3) == 5 {
-                rt_syscall(202, t + 24, 129, 1);
+                rt_syscall_low(202, t + 24, 129, 1);
                 return 0;
             }
         } else if s == 2 {
@@ -7877,7 +7892,7 @@ fn rt_block_give(w: u64) -> u64 {
     rt_spin_unlock(j + 432);
     raw_atomic_fetch_add(j + 464, 1);
     if raw_atomic_load(j + 448) != 0 {
-        rt_syscall(202, j + 464, 129, 1);
+        rt_syscall_low(202, j + 464, 129, 1);
         return 0;
     }
     // No idle spare: make one. There is no hard cap on how many - every blocked call holds a
@@ -11227,4 +11242,297 @@ fn rt_prof_dump() -> u64 {
     }
     rt_close_file(fd);
     return 0;
+}
+
+// ---- fused multiply-add in software (docs/design/simd.md, S4: `mul_add`) ------------------------
+// a * b + c with one rounding, on the bit patterns of IEEE binary64 (rt_fma64) or binary32 (rt_fma32)
+// values, for the targets with no fused instruction at the build's CPU level (baseline x86-64; C's
+// fma() does the same in software there). Integer arithmetic only: the exact product of the two
+// significands is 128 bits wide, `c` is aligned to it with a sticky bit, the sum is rounded once to
+// nearest-even, with subnormals and overflow. Exponents are kept offset by RT_FMA_OFF so that they
+// stay non-negative. A NaN result is the default quiet NaN (NaN payloads are not promised).
+const RT_FMA_OFF: u64 = 8192;
+
+// The position of the highest set bit of the 128-bit value hi:lo (not zero).
+fn rt_u128_top(hi: u64, lo: u64) -> u64 {
+    mut w = lo;
+    mut base = 0;
+    if hi != 0 {
+        w = hi;
+        base = 64;
+    }
+    mut p: u64 = 63;
+    while ((w >> p) & 1) == 0 {
+        p = p - 1;
+    }
+    return base + p;
+}
+fn rt_shl_hi(hi: u64, lo: u64, n: u64) -> u64 {
+    if n == 0 {
+        return hi;
+    }
+    if n >= 64 {
+        return lo << (n - 64);
+    }
+    return (hi << n) | (lo >> (64 - n));
+}
+fn rt_shl_lo(lo: u64, n: u64) -> u64 {
+    if n >= 64 {
+        return 0;
+    }
+    return lo << n;
+}
+// hi:lo shifted right by n; the low word ORs in a 1 if any set bit was shifted out (the sticky bit).
+fn rt_shr_hi(hi: u64, n: u64) -> u64 {
+    if n >= 64 {
+        return 0;
+    }
+    return hi >> n;
+}
+fn rt_shr_lo(hi: u64, lo: u64, n: u64) -> u64 {
+    if n == 0 {
+        return lo;
+    }
+    if n >= 128 {
+        return u64((hi | lo) != 0);
+    }
+    mut kept = 0;
+    mut lost = 0;
+    if n >= 64 {
+        kept = hi >> (n - 64);
+        lost = lo;
+        if n > 64 {
+            lost = lost | (hi << (128 - n));
+        }
+    } else {
+        kept = (lo >> n) | (hi << (64 - n));
+        lost = lo << (64 - n);
+    }
+    return kept | u64(lost != 0);
+}
+// The bits of sign * M * 2^(E - RT_FMA_OFF), M = hi:lo != 0, rounded to nearest-even in a format of
+// `prec` significand bits, the subnormal exponent `emin` (offset), the exponent field's all-ones
+// value `fmax`, and the sign at bit `sbit`.
+fn rt_fma_round(sign: u64, hi: u64, lo: u64, e: u64, prec: u64, emin: u64, fmax: u64, sbit: u64) -> u64 {
+    t := rt_u128_top(hi, lo);
+    mut l = e + t;
+    if l < emin + prec - 1 {
+        l = emin;
+    } else {
+        l = l - (prec - 1);
+    }
+    mut q = 0;
+    if l < e {
+        // Exact: the value has fewer bits than the format below its lowest one.
+        q = rt_shl_lo(lo, e - l);
+    } else {
+        sh := l - e;
+        mut round = 0;
+        mut sticky = 0;
+        q = lo;
+        if sh > 0 {
+            below := rt_fma_below(hi, lo, sh - 1);
+            exact := rt_fma_exact_shr(hi, lo, sh);
+            q = exact;
+            round = rt_fma_bit(hi, lo, sh - 1);
+            sticky = below;
+        }
+        if (round == 1) && ((sticky == 1) || ((q & 1) == 1)) {
+            q = q + 1;
+        }
+    }
+    if q == (1 << prec) {
+        q = q >> 1;
+        l = l + 1;
+    }
+    mut out = sign << sbit;
+    if q >= (1 << (prec - 1)) {
+        field := l - emin + 1;
+        if field >= fmax {
+            return out | (fmax << (prec - 1));
+        }
+        return out | (field << (prec - 1)) | (q - (1 << (prec - 1)));
+    }
+    return out | q;
+}
+// Bit n of hi:lo.
+fn rt_fma_bit(hi: u64, lo: u64, n: u64) -> u64 {
+    if n >= 128 {
+        return 0;
+    }
+    if n >= 64 {
+        return (hi >> (n - 64)) & 1;
+    }
+    return (lo >> n) & 1;
+}
+// 1 if any bit of hi:lo below bit n is set.
+fn rt_fma_below(hi: u64, lo: u64, n: u64) -> u64 {
+    if n == 0 {
+        return 0;
+    }
+    if n >= 128 {
+        return u64((hi | lo) != 0);
+    }
+    if n >= 64 {
+        if lo != 0 {
+            return 1;
+        }
+        if n == 64 {
+            return 0;
+        }
+        return u64((hi << (128 - n)) != 0);
+    }
+    return u64((lo << (64 - n)) != 0);
+}
+// hi:lo >> n, n >= 1, as one word (the caller knows it fits).
+fn rt_fma_exact_shr(hi: u64, lo: u64, n: u64) -> u64 {
+    if n >= 128 {
+        return 0;
+    }
+    if n >= 64 {
+        return hi >> (n - 64);
+    }
+    return (lo >> n) | (hi << (64 - n));
+}
+// The fused multiply-add on bit patterns of a format with `prec` significand bits, an exponent field
+// of all-ones value `fmax`, the subnormal lsb exponent `emin` (offset) and the sign at bit `sbit`.
+fn rt_fma_bits(a: u64, b: u64, c: u64, prec: u64, fmax: u64, emin: u64, sbit: u64) -> u64 {
+    fmask := (1 << (prec - 1)) - 1;
+    nan := (fmax << (prec - 1)) | (1 << (prec - 2));
+    inf := fmax << (prec - 1);
+    sa := (a >> sbit) & 1;
+    sb := (b >> sbit) & 1;
+    sc := (c >> sbit) & 1;
+    fa := (a >> (prec - 1)) & fmax;
+    fb := (b >> (prec - 1)) & fmax;
+    fc := (c >> (prec - 1)) & fmax;
+    ma0 := a & fmask;
+    mb0 := b & fmask;
+    mc0 := c & fmask;
+    sp := sa ^ sb;
+    // NaNs and infinities.
+    if ((fa == fmax) && (ma0 != 0)) || ((fb == fmax) && (mb0 != 0)) || ((fc == fmax) && (mc0 != 0)) {
+        return nan;
+    }
+    azero := (fa == 0) && (ma0 == 0);
+    bzero := (fb == 0) && (mb0 == 0);
+    czero := (fc == 0) && (mc0 == 0);
+    pinf := (fa == fmax) || (fb == fmax);
+    if pinf {
+        if azero || bzero {
+            return nan;
+        }
+        if (fc == fmax) && (sc != sp) {
+            return nan;
+        }
+        return (sp << sbit) | inf;
+    }
+    if fc == fmax {
+        return c;
+    }
+    if azero || bzero {
+        // An exact zero product: c, except that two zeros sum to -0 only when both are negative.
+        if czero {
+            return (sp & sc) << sbit;
+        }
+        return c;
+    }
+    // Significands with the implicit bit, and the exponent of their lowest bit (offset).
+    mut ma = ma0;
+    mut la = emin;
+    if fa != 0 {
+        ma = ma0 | (1 << (prec - 1));
+        la = emin + fa - 1;
+    }
+    mut mb = mb0;
+    mut lb = emin;
+    if fb != 0 {
+        mb = mb0 | (1 << (prec - 1));
+        lb = emin + fb - 1;
+    }
+    // The exact product ma * mb, 128 bits, from 32-bit halves.
+    a1 := ma >> 32;
+    a0 := ma & 4294967295;
+    b1 := mb >> 32;
+    b0 := mb & 4294967295;
+    p00 := a0 * b0;
+    mid := a0 * b1 + a1 * b0;
+    p11 := a1 * b1;
+    plo := wrapping_add(p00, mid << 32);
+    mut carry = 0;
+    if plo < p00 {
+        carry = 1;
+    }
+    phi := p11 + (mid >> 32) + carry;
+    lp := la + lb - RT_FMA_OFF;
+    if czero {
+        return rt_fma_round(sp, phi, plo, lp, prec, emin, fmax, sbit);
+    }
+    mut mc = mc0;
+    mut lc = emin;
+    if fc != 0 {
+        mc = mc0 | (1 << (prec - 1));
+        lc = emin + fc - 1;
+    }
+    // Both to the top bit at 125 (two bits of headroom for the carry).
+    tp := rt_u128_top(phi, plo);
+    tc := rt_u128_top(0, mc);
+    xh := rt_shl_hi(phi, plo, 125 - tp);
+    xl := rt_shl_lo(plo, 125 - tp);
+    xe := lp + tp - 125;
+    yh := rt_shl_hi(0, mc, 125 - tc);
+    yl := rt_shl_lo(mc, 125 - tc);
+    ye := lc + tc - 125;
+    // The one with the larger exponent is the larger in magnitude; on a tie, compare.
+    mut bigx = true;
+    if (ye > xe) || ((ye == xe) && ((yh > xh) || ((yh == xh) && (yl > xl)))) {
+        bigx = false;
+    }
+    mut gh = xh;
+    mut gl = xl;
+    mut ge = xe;
+    mut gs = sp;
+    mut sh_ = yh;
+    mut sl = yl;
+    mut se = ye;
+    if !bigx {
+        gh = yh;
+        gl = yl;
+        ge = ye;
+        gs = sc;
+        sh_ = xh;
+        sl = xl;
+        se = xe;
+    }
+    d := ge - se;
+    th := rt_shr_hi(sh_, d);
+    tl := rt_shr_lo(sh_, sl, d);
+    mut rh = 0;
+    mut rl = 0;
+    if sp == sc {
+        rl = wrapping_add(gl, tl);
+        mut cy = 0;
+        if rl < gl {
+            cy = 1;
+        }
+        rh = gh + th + cy;
+    } else {
+        rl = wrapping_sub(gl, tl);
+        mut bw = 0;
+        if gl < tl {
+            bw = 1;
+        }
+        rh = gh - th - bw;
+    }
+    if (rh == 0) && (rl == 0) {
+        // Exact cancellation: +0 when rounding to nearest.
+        return 0;
+    }
+    return rt_fma_round(gs, rh, rl, ge, prec, emin, fmax, sbit);
+}
+fn rt_fma64(a: u64, b: u64, c: u64) -> u64 {
+    return rt_fma_bits(a, b, c, 53, 2047, RT_FMA_OFF - 1074, 63);
+}
+fn rt_fma32(a: u64, b: u64, c: u64) -> u64 {
+    return rt_fma_bits(a & 4294967295, b & 4294967295, c & 4294967295, 24, 255, RT_FMA_OFF - 149, 31);
 }

@@ -105,6 +105,20 @@ fn build<a>(lengths: (&a u64[])) -> Huffman? {
 }
 
 fn need<a>(z: (&a mut Inflater), n: u64) -> bool {
+    if z.nbits >= n {
+        return true;
+    }
+    // Refill to 56 or more bits in one word load while eight input bytes remain (the bits above
+    // `nbits` are zero, so OR-ing the word in is exact).
+    if z.at + 8 <= z.data.len() {
+        w := bytes::load_u64(view(z.data), z.at);
+        z.bits = z.bits | (w << z.nbits);
+        take := (63 - z.nbits) >> 3;
+        z.at = z.at + take;
+        z.nbits = z.nbits + take * 8;
+        z.bits = z.bits & ((1 << z.nbits) - 1);
+        return true;
+    }
     while z.nbits < n {
         if z.at >= z.data.len() {
             return false;
