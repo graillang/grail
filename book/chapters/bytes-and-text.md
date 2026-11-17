@@ -37,21 +37,26 @@ A function that changes bytes takes `&mut [u8]`, and its caller writes `&mut dat
 ## Working with text
 
 Text values (`string`, `u8[]` and string literals) compare by content with `==` and `<`, join with
-`+`, and answer methods for everyday work: `trim`, `split`, `contains`, `starts_with`, `ends_with`,
-`replace`, `to_upper`, `to_lower`, `is_empty` and `chars`. The rest are `strings` methods on the same
-text: `find`, `parse_u64`, `parse_i64`, `is_utf8`, `utf8_error`, `char_count`, `is_char_boundary`,
-`slice_chars`, `char_indices`, `lines`, `split_whitespace`, `to_text_lossy`, with `chunks`, `windows`
-and `push_char` on a byte vector and `join_with` on a vector of parts. A byte vector, a `string` and a
+`+`, and answer methods for everyday work: `contains`, `starts_with`, `ends_with`, `replace`,
+`to_upper`, `to_lower`, `is_empty` and `chars`. The rest are `strings` methods on the same text (`use
+strings;`): `trim`, `trim_start`, `trim_end`, `split`, `split_owned`, `lines`, `split_whitespace`,
+`find`, `parse_u64`, `parse_i64`, `parse_f64`, `is_utf8`, `utf8_error`, `char_count`,
+`is_char_boundary`, `slice_chars`, `char_indices`, `to_text_lossy`, with `chunks`, `windows` and
+`push_char` on a byte vector and `join_with` on a vector of parts. A byte vector, a `string` and a
 view are all byte text, so `bytes.find(x)`, `text.find(x)` and `view(bytes).find(x)` are one method.
 
 {{example:text-methods}}
 
-Methods that change text return a new value and leave the original alone. `split('=')` returns a
-vector of borrowed byte views, so `fields[1]` is the text after the `=`. `part[:1]` is a view of the
-first byte.
+Methods that change text return a new value and leave the original alone. The ones that cut it -
+`trim`, `split`, `lines`, `split_whitespace` - copy nothing: they return views of the text (Rust's
+`&str` pieces), so `fields[1]` is the bytes after the `=` where they already are. The text has to
+outlive the views and cannot change while one is live; `split_owned` (or `piece.copy()`) is the
+copying form for a piece that must outlive it. `part[:1]` is a view of the first byte.
 
-A loop over views borrows them: bind the result first (`parts := name.split(' ')`) and loop over
-`&parts`.
+A loop over the pieces borrows them, whether it is `for part in name.split(' ')` or a loop over a
+bound `&parts`. `parse_f64` reads a decimal number correctly rounded, as Rust's and Go's parsers do,
+and `out.append_format("{}:{};", a, b)` writes `format`'s text onto the end of `out` without making a
+string of its own (Rust's `write!`).
 
 **Try it:** print `clean.len()` and `line.len()` to see what `trim` removed.
 

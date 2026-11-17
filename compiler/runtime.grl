@@ -486,6 +486,20 @@ fn rt_fail_body(kind: u64, a: u64, b: u64, buf: u64, n: u64) -> u64 {
         at = rt_fail_put(buf, at, view("mutex poisoned: its holder failed"));
     } else if kind == 18 {
         at = rt_fail_put(buf, at, view("a parallel split needs a grain of at least one element"));
+    } else if kind == 19 {
+        // parallel_for_zip: argument `a` (counting from 1) is `b` elements long, the first one is not.
+        at = rt_fail_put(buf, at, view("parallel_for_zip: slice argument "));
+        at = rt_fail_num(buf, at, a);
+        at = rt_fail_put(buf, at, view(" has length "));
+        at = rt_fail_num(buf, at, b);
+        at = rt_fail_put(buf, at, view(", which is not the first slice's"));
+    } else if kind == 20 {
+        // load_aligned/store_aligned (docs/design/simd.md): the checked contract on the address.
+        at = rt_fail_put(buf, at, view("address "));
+        at = rt_fail_num(buf, at, a);
+        at = rt_fail_put(buf, at, view(" is not "));
+        at = rt_fail_num(buf, at, b);
+        at = rt_fail_put(buf, at, view("-byte aligned (load_aligned/store_aligned)"));
     } else {
         at = rt_fail_put(buf, at, view("the program aborted"));
     }
@@ -1056,7 +1070,37 @@ fn rt_alloc(n: u64) -> u64 {
 }
 // rt_alloc in a process with more than one thread. It is a function of its own so that the
 // one-thread path above stays as small as it was: the compiler measures it.
+// rt_alloc with more than one thread: the fast path - this thread's cache, a block of the four small
+// classes on its list - is as small as the one-thread one (and is inlined into callers); the rest,
+// a refill, a larger request, the first allocation of a thread, is rt_alloc_shared_slow.
 fn rt_alloc_shared(n: u64) -> u64 {
+    if n < 241 {
+        tp := raw_tp_get();
+        if tp != 0 {
+            c := raw_load(wrapping_add(tp, 64));
+            if c != 0 {
+                bin := (4294945360 >> (((n + 15) >> 4) << 1)) & 3;
+                slot := wrapping_add(c, wrapping_add(64, wrapping_mul(bin, 48)));
+                block := raw_load(slot);
+                if block != 0 {
+                    raw_store(slot, raw_load(wrapping_add(block, 8)));
+                    raw_store(wrapping_add(slot, 8), wrapping_sub(raw_load(wrapping_add(slot, 8)), 1));
+                    raw_store(wrapping_add(block, 8), 1);
+                    ptr := wrapping_add(block, 16);
+                    mut i = 0;
+                    while i < n {
+                        raw_store(wrapping_add(ptr, i), 0);
+                        i = wrapping_add(i, 8);
+                    }
+                    raw_store(wrapping_add(c, 8), wrapping_add(raw_load(wrapping_add(c, 8)), 1));
+                    return ptr;
+                }
+            }
+        }
+    }
+    return rt_alloc_shared_slow(n);
+}
+fn rt_alloc_shared_slow(n: u64) -> u64 {
     if n < 262129 {
         tp := raw_tp_get();
         if tp != 0 {
@@ -1145,7 +1189,38 @@ fn rt_free(at: u64) -> u64 {
     return rt_free_shared(p);
 }
 // rt_free in a process with more than one thread; `p` is the payload address of a block.
+// rt_free with more than one thread: a small block onto this thread's cache list while the list
+// is under its bound; the rest - a static or bad block, a large one, a full list, a thread with no
+// cache yet - is rt_free_shared_slow.
 fn rt_free_shared(p: u64) -> u64 {
+    if p == 0 {
+        return 0;
+    }
+    block := wrapping_sub(p, 16);
+    if raw_load(wrapping_add(block, 8)) == 1 {
+        size := raw_load(block);
+        if size < 257 {
+            tp := raw_tp_get();
+            if tp != 0 {
+                c := raw_load(wrapping_add(tp, 64));
+                if c != 0 {
+                    bin := (197136 >> ((size >> 6) << 2)) & 15;
+                    slot := wrapping_add(c, wrapping_add(64, wrapping_mul(bin, 48)));
+                    count := wrapping_add(raw_load(wrapping_add(slot, 8)), 1);
+                    if (raw_load(wrapping_add(slot, 40)) < count) == false {
+                        raw_store(wrapping_add(block, 8), raw_load(slot));
+                        raw_store(slot, block);
+                        raw_store(wrapping_add(slot, 8), count);
+                        raw_store(wrapping_add(c, 8), wrapping_sub(raw_load(wrapping_add(c, 8)), 1));
+                        return 0;
+                    }
+                }
+            }
+        }
+    }
+    return rt_free_shared_slow(p);
+}
+fn rt_free_shared_slow(p: u64) -> u64 {
     if p == 0 {
         return 0;
     }
@@ -1453,8 +1528,12 @@ fn rt_alloc_bin(n: u64) -> u64 {
 }
 // The class of a block that has one: its size word is a power of two from 32.
 fn rt_block_bin(size: u64) -> u64 {
+    // No bool-to-integer cast here: in a checked build it is a runtime call (rt_int_cast).
     if size < 65 {
-        return u64(size == 64);
+        if size == 64 {
+            return 1;
+        }
+        return 0;
     }
     if size == 128 {
         return 2;
@@ -1473,7 +1552,33 @@ fn rt_block_bin(size: u64) -> u64 {
 // The one-thread allocator (and the shared lists' code under the lock). Every address below stays
 // inside process state or an arena the allocator mapped, so the arithmetic wraps rather than
 // checks: an overflow check per addition was a third of what an allocation cost.
+// The one-thread allocation of a request up to 240 bytes - nearly all of them - kept small enough
+// for call-site inlining (no callee-saved register, no call on the way): the class is a two-bit
+// field of one constant indexed by (n + 15) / 16 (classes 32, 64, 128, 256 bytes with the header),
+// the block is the head of that class's free list, and it is cleared for the words asked for.
+// Everything else - an empty list, a larger request - is rt_alloc_slow.
 fn rt_alloc_unlocked(n: u64) -> u64 {
+    if n < 241 {
+        bin := (4294945360 >> (((n + 15) >> 4) << 1)) & 3;
+        head := wrapping_add(raw_state(), wrapping_add(256, bin << 3));
+        block := raw_load(head);
+        if block != 0 {
+            raw_store(head, raw_load(wrapping_add(block, 8)));
+            raw_store(wrapping_add(block, 8), 1);
+            ptr := wrapping_add(block, 16);
+            mut i = 0;
+            while i < n {
+                raw_store(wrapping_add(ptr, i), 0);
+                i = wrapping_add(i, 8);
+            }
+            live := wrapping_add(raw_state(), 24);
+            raw_store(live, wrapping_add(raw_load(live), 1));
+            return ptr;
+        }
+    }
+    return rt_alloc_slow(n);
+}
+fn rt_alloc_slow(n: u64) -> u64 {
     state := raw_state();
     if 1152921504606846976 < n {
         rt_abort();
@@ -1546,7 +1651,28 @@ fn rt_free_own(ptr: u64) -> u64 {
     }
     return 0;
 }
+// The one-thread free of a block of the four small classes, as small as rt_alloc_unlocked's fast
+// path: the class from the size word by a nibble table (32 -> 0, 64 -> 1, 128 -> 2, 256 -> 3), a
+// push on its free list. A static block, a double free, a larger block: rt_free_slow.
 fn rt_free_unlocked(ptr: u64) -> u64 {
+    if ptr == 0 {
+        return 0;
+    }
+    block := wrapping_sub(ptr, 16);
+    if raw_load(wrapping_add(block, 8)) == 1 {
+        size := raw_load(block);
+        if size < 257 {
+            head := wrapping_add(raw_state(), wrapping_add(256, ((197136 >> ((size >> 6) << 2)) & 15) << 3));
+            raw_store(wrapping_add(block, 8), raw_load(head));
+            raw_store(head, block);
+            live := wrapping_add(raw_state(), 24);
+            raw_store(live, wrapping_sub(raw_load(live), 1));
+            return 0;
+        }
+    }
+    return rt_free_slow(ptr);
+}
+fn rt_free_slow(ptr: u64) -> u64 {
     if ptr == 0 {
         return 0;
     }
@@ -2235,14 +2361,27 @@ fn rt_read_file_blocking(path: u64) -> u64 {
         rt_abort();
     }
     fd := rt_syscall(2, name, 524288, 0);
-    rt_free(name);
     if rt_error(fd) {
         rt_abort();
     }
-    buf := rt_alloc(4096);
+    // The bytes go straight into the result's storage, sized from the file (one more byte, so the
+    // read that finds the end needs no growth) and doubled if the file grew meanwhile.
+    mut hint = 4096;
+    fields := rt_new();
+    if rt_stat(name, 1, fields) == 0 {
+        hint = rt_at(fields, 2) + 1;
+    }
+    rt_drop_seq(fields);
+    rt_free(name);
     out := rt_new();
+    rt_reserveb(out, hint);
     while 1 {
-        n := rt_syscall(0, fd, buf, 4096);
+        have := raw_load(out + 8);
+        if have == raw_load(out + 16) {
+            rt_reserveb(out, have + 1);
+        }
+        room := raw_load(out + 16) - have;
+        n := rt_syscall(0, fd, raw_load(out) + have, room);
         if n == 0 {
             break;
         }
@@ -2252,14 +2391,9 @@ fn rt_read_file_blocking(path: u64) -> u64 {
         if rt_error(n) {
             rt_abort();
         }
-        mut i = 0;
-        while i < n {
-            rt_pushb(out, raw_byte(buf + i));
-            i = i + 1;
-        }
+        raw_store(out + 8, have + n);
     }
     rt_syscall(3, fd, 0, 0);
-    rt_free(buf);
     return out;
 }
 fn rt_write_all(fd: u64, ptr: u64, n: u64) -> u64 {
@@ -2359,7 +2493,7 @@ fn rt_print_number(n: u64, newline: u64) -> u64 {
     }
     while 1 {
         raw_putbyte(buf + pos, 48 + remaining % 10);
-        remaining = rt_div(remaining, 10);
+        remaining = remaining / 10;
         if remaining == 0 {
             break;
         }
@@ -2649,8 +2783,12 @@ fn rt_command_run(args: u64, env: u64) -> u64 {
 }
 // Text is UTF-8 even when its source is binary I/O or a byte view.
 fn rt_utf8(s: u64) -> u64 {
+    return rt_utf8_from(s, 0);
+}
+// Checks the bytes from `start` (a character boundary) to the end.
+fn rt_utf8_from(s: u64, start: u64) -> u64 {
     n := rt_len(s);
-    mut i = 0;
+    mut i = start;
     while i < n {
         b := rt_atb(s, i);
         mut count = 0;
@@ -3681,8 +3819,9 @@ fn f_host_rw_lock(l: u64, mode: u64, until: u64, flags: u64) -> u64 {
         rt_rw_unlock_read(l);
         return rt_rw_poisoned(l);
     }
-    rt_held_node(l, 1, mode + 2);
-    return 0;
+    // The hold's node is the answer (an address, never 3 or 4): the release takes it back without
+    // looking for it (f_host_rw_release).
+    return rt_held_node(l, 1, mode + 2);
 }
 fn f_host_rw_try(l: u64, mode: u64) -> u64 {
     mut got = 0;
@@ -3702,8 +3841,7 @@ fn f_host_rw_try(l: u64, mode: u64) -> u64 {
         }
         return rt_rw_poisoned(l);
     }
-    rt_held_node(l, 1, mode + 2);
-    return 1;
+    return rt_held_node(l, 1, mode + 2);
 }
 fn rt_rw_unlock_read(l: u64) -> u64 {
     old := raw_atomic_fetch_sub(wrapping_add(l, 8), 4);
@@ -3724,6 +3862,21 @@ fn rt_rw_unlock_write(l: u64) -> u64 {
     rt_rw_dispatch(l);
     rt_q_unlock(l);
     return 0;
+}
+// Release the hold whose node f_host_rw_lock answered: mode 1 read, 2 write, 3 write that recovers.
+fn f_host_rw_release(e: u64, mode: u64) -> u64 {
+    l := raw_load(e);
+    b := rt_block_fast();
+    rt_held_unlink(b, e);
+    rt_held_free(b, e);
+    if mode == 1 {
+        return rt_rw_unlock_read(l);
+    }
+    if mode == 3 {
+        rt_q_flags(l, 4, 0);
+        raw_store(l + 24, 0);
+    }
+    return rt_rw_unlock_write(l);
 }
 // mode 1 read, 2 write, 3 write that recovers (clears the poison).
 fn f_host_rw_unlock(l: u64, mode: u64) -> u64 {
@@ -3819,8 +3972,8 @@ fn f_host_sem_acquire(m: u64, n: u64, until: u64, flags: u64) -> u64 {
             return rt_wait_answer(r, flags);
         }
     }
-    rt_held_node(m, n, 2);
-    return 0;
+    // The permits' node is the answer (an address, never 3 or 4).
+    return rt_held_node(m, n, 2);
 }
 // The node of the permits the last acquire on this execution took (a Permit keeps it).
 fn f_host_sem_node(m: u64) -> u64 {
@@ -4674,12 +4827,17 @@ fn rt_job_split(d: u64, lo: u64, hi: u64, kind: u64) -> u64 {
         if kind == 0 {
             return rt_job_map_leaf(d, lo);
         }
+        if kind == 2 {
+            return rt_job_zip_leaf(d, lo);
+        }
         return rt_job_chunk_leaf(d, lo);
     }
     mid := lo + (hi - lo) / 2;
     mut r = 0;
     if kind == 0 {
         r = rt_job_fork(rt_job_split_map, d, mid, hi);
+    } else if kind == 2 {
+        r = rt_job_fork(rt_job_split_zip, d, mid, hi);
     } else {
         r = rt_job_fork(rt_job_split_chunks, d, mid, hi);
     }
@@ -4691,6 +4849,87 @@ fn rt_job_split_map(d: u64, lo: u64, hi: u64) -> u64 {
 }
 fn rt_job_split_chunks(d: u64, lo: u64, hi: u64) -> u64 {
     return rt_job_split(d, lo, hi, 1);
+}
+fn rt_job_split_zip(d: u64, lo: u64, hi: u64) -> u64 {
+    return rt_job_split(d, lo, hi, 2);
+}
+// Zip descriptor (a job record used as storage, docs/design/simd-layout-parallel-loops.md 4.2):
+//   0 adapter   8 callback   16 environment   24 slices {view, width} pairs   40 count   48 grain
+//   56 number of slices
+// Leaf (d, k) covers [k * grain, min(count, k * grain + grain)) of every slice: one fresh view per
+// slice over the same index range, handed to the callback through the compiler's adapter
+// (zip_adapter), which takes one block {callback, environment, view 1 .. view n} and calls the
+// callback with the views as its arguments. The callback owns and frees each view, as a slice
+// parameter always is; the block is freed here.
+fn rt_job_zip_leaf(d: u64, k: u64) -> u64 {
+    n := raw_load(d + 40);
+    grain := raw_load(d + 48);
+    start := k * grain;
+    if n <= start {
+        return 0;
+    }
+    mut stop = start + grain;
+    if n < stop {
+        stop = n;
+    }
+    count := raw_load(d + 56);
+    pairs := raw_load(d + 24);
+    block := rt_alloc((2 + count) * 8);
+    raw_store(block, raw_load(d + 8));
+    raw_store(block + 8, raw_load(d + 16));
+    mut i = 0;
+    while i < count {
+        src := raw_load(pairs + i * 16);
+        width := raw_load(pairs + i * 16 + 8);
+        slot := rt_view_record();
+        raw_store(slot, raw_load(src) + start * width);
+        raw_store(slot + 8, stop - start);
+        raw_store(block + 16 + i * 8, slot);
+        i += 1;
+    }
+    raw_call2(raw_load(d), block, 0);
+    rt_free(block);
+    return stop - start;
+}
+// parallel_for_zip: `count` slices (an array of {view, width} pairs at `pairs`), all the same length
+// - checked here, once - cut into pieces of `grain` elements; piece k is the same index range of
+// every slice. As for rt_parallel_split the split is constructed from (n, grain) alone and the
+// pieces must cover n exactly. The caller holds every slice's loan until this returns.
+fn rt_parallel_zip(pairs: u64, count: u64, grain: u64, adapter: u64, f: u64, env: u64) -> u64 {
+    n := rt_len(raw_load(pairs));
+    mut i = 1;
+    while i < count {
+        m := rt_len(raw_load(pairs + i * 16));
+        if m != n {
+            rt_fail(19, i + 1, m);
+        }
+        i += 1;
+    }
+    if n == 0 {
+        return 0;
+    }
+    if grain == 0 {
+        rt_fail(18, 0, 0);
+    }
+    leaves := (n + grain - 1) / grain;
+    rt_jobs_sched();
+    d := rt_job_new();
+    raw_atomic_store(d + 32, 3);
+    raw_store(d, adapter);
+    raw_store(d + 8, f);
+    raw_store(d + 16, env);
+    raw_store(d + 24, pairs);
+    raw_store(d + 40, n);
+    raw_store(d + 48, grain);
+    raw_store(d + 56, count);
+    rt_region_enter();
+    covered := rt_job_split(d, 0, leaves, 2);
+    rt_region_leave();
+    if covered != n {
+        rt_abort();
+    }
+    rt_job_release(d);
+    return 0;
 }
 // Results land in their input slots, so the order of `out` is the input order whatever order the
 // leaves finish in. Every fork is joined before this returns, so no worker can still write into
@@ -5018,6 +5257,8 @@ fn rt_env_is(name: u64, value: u64) -> u64 {
 // 248 their count  264 help-depth high-water mark  272 steps taken (the fairness tick)
 // 280 1 while this worker is counted as searching (rt_worker_loop, rt_worker_run)
 // 296 link in the jobs block's list of blocks waiting for a thread (rt_block_give)
+// 304 the first foreign-call counter, 320 the counter the owner uses now (odd: inside a foreign
+// call), 328 the value the monitor saw last, 336 how many ticks it has stayed
 // 512..592 the Frame job deque, 640..720 the Background job deque (the Normal one is at 128)
 // 896..1024 the CPU mask a pinned worker hands the kernel
 //
@@ -5101,6 +5342,105 @@ fn rt_sched_start(s: u64) -> u64 {
     if raw_load(s + 40) != 0 {
         rt_thread_spawn_detached(rt_reactor, s);
     }
+    if rt_task_threads() == 0 {
+        rt_thread_spawn_detached(rt_sysmon, s);
+    }
+    return 0;
+}
+// The monitor: every 5 ms it looks at each worker's foreign-call counter. A worker whose counter
+// has stayed odd - inside one foreign call - for two looks (more than 10 ms) while work is queued
+// is given to a spare: the monitor marks the counter's top bit with a compare-and-swap (which fails
+// if the call returned meanwhile), gives the block a fresh counter and hands it to rt_block_give.
+// The thread in the call finds the bit when it counts out (ffi_marker_leave) and becomes
+// block-less (rt_foreign_lost). Declared `blocking` calls never get here; they hand off at once.
+fn rt_sysmon(s: u64) -> u64 {
+    j := raw_load(rt_state_jobs());
+    raw_store(j + 488, 0);
+    raw_store(j + 496, 5000000);
+    workers := raw_load(s + 32);
+    array := raw_load(s + 72);
+    while true {
+        rt_syscall(35, j + 488, 0, 0);
+        mut i = 0;
+        while i < workers {
+            w := raw_load(array + i * 8);
+            counter := raw_load(w + 320);
+            v := raw_atomic_load(counter);
+            if ((v & 1) == 1) & (v == raw_load(w + 328)) & ((v >> 63) == 0) {
+                raw_store(w + 336, raw_load(w + 336) + 1);
+            } else {
+                raw_store(w + 336, 0);
+            }
+            raw_store(w + 328, v);
+            if (2 <= raw_load(w + 336)) && (rt_work_queued(s) != 0) {
+                if raw_atomic_cas(counter, v, v | 9223372036854775808) == v {
+                    owner := raw_load(w + 48);
+                    if (owner != 0) && (raw_load(w + 224) == raw_load(owner + 16)) {
+                        raw_store(w + 224, 0);
+                    }
+                    rt_spin_lock(j + 24);
+                    fresh := rt_job_carve(j, 504, 64);
+                    rt_spin_unlock(j + 24);
+                    raw_store(fresh, 0);
+                    raw_store(w + 320, fresh);
+                    raw_store(w + 328, 0);
+                    raw_store(w + 336, 0);
+                    rt_block_give(w);
+                }
+            }
+            i += 1;
+        }
+    }
+    return 0;
+}
+fn rt_work_queued(s: u64) -> u64 {
+    workers := raw_load(s + 32);
+    array := raw_load(s + 72);
+    mut i = 0;
+    while i <= workers {
+        w := raw_load(array + i * 8);
+        if (raw_atomic_load(w + 8) < raw_atomic_load(w + 16)) | (raw_atomic_load(w + 136) < raw_atomic_load(w + 144)) | (raw_atomic_load(w + 520) < raw_atomic_load(w + 528)) {
+            return 1;
+        }
+        i += 1;
+    }
+    if raw_atomic_load(s + 8) != raw_atomic_load(s + 16) {
+        return 1;
+    }
+    jb := raw_load(rt_state_jobs());
+    mut c = 0;
+    while c < 3 {
+        ring := rt_job_ring_at(jb, c);
+        if raw_atomic_load(ring + 8) != raw_atomic_load(ring + 16) {
+            return 1;
+        }
+        c += 1;
+    }
+    return 0;
+}
+// A foreign call came back and found its worker given away (ffi_marker_leave): this thread holds no
+// block now, keeps running its task, and becomes a spare when the task stops. Said once per process,
+// naming the function, because declaring it `blocking` hands off at once instead of after 10 ms.
+fn rt_foreign_lost(symbol: u64) -> u64 {
+    tp := raw_tp_get();
+    raw_store(tp + 24, 0);
+    raw_store(tp + 32, 0);
+    j := raw_load(rt_state_jobs());
+    if raw_atomic_cas(j + 512, 0, 1) == 0 {
+        mut n = 0;
+        while raw_byte(symbol + n) != 0 {
+            n += 1;
+        }
+        head := view("grail: the foreign call `");
+        p := rt_pack(head);
+        rt_write_all(2, p, rt_len(head));
+        rt_free(p);
+        rt_write_all(2, symbol, n);
+        tail := view("` held a worker for more than 10 ms, so the worker was given to another thread; declare it `extern \"C\" blocking` to hand off at once\n");
+        q := rt_pack(tail);
+        rt_write_all(2, q, rt_len(tail));
+        rt_free(q);
+    }
     return 0;
 }
 // The decimal value of the environment entry that starts with `name` (which ends in `=`), or 0.
@@ -5159,6 +5499,9 @@ fn rt_sched_worker_new(s: u64, index: u64) -> u64 {
         // A fixed seed fixes every worker's victim order (sched::Config.seed).
         raw_store(w + 72, wrapping_add(wrapping_mul(seed, index + 1), 2654435761) | 1);
     }
+    // The foreign-call counter this block's owner counts in and out (word 320 names it; ffi_marker_*
+    // in native.grl, rt_sysmon). It starts as word 304.
+    raw_store(w + 320, w + 304);
     jobs := raw_map(rt_job_deque_capacity() * 8);
     if rt_error(jobs) {
         rt_abort();
@@ -7438,7 +7781,9 @@ fn f_host_close(fd: u64) -> u64 {
 //
 // Jobs block words: 432 lock of the list of blocks waiting for a thread (linked through block word
 // 296), 440 its head, 448 idle spares, 456 threads made beyond the workers, 464 the spares' futex
-// sequence, 472..480 a timespec of one second (how long an idle spare waits).
+// sequence, 472..480 a timespec of one second (how long an idle spare waits), 488..496 the
+// monitor's 5 ms tick, 504 free list of retired foreign-call counters (rt_job_carve), 512 "the
+// monitor's warning was printed".
 fn rt_blocking_enter() -> u64 {
     tp := raw_tp_get();
     if tp == 0 {
@@ -7484,7 +7829,14 @@ fn rt_block_give(w: u64) -> u64 {
     // program whose blocked calls wait for a task that cannot run (100 FIFO readers and their
     // writer: colourless-io-suspension-cancel-blocking). Idle spares are what is bounded: one idle
     // for a second exits when more than the worker count of them are waiting (rt_worker_thread).
-    raw_atomic_fetch_add(j + 456, 1);
+    // One safety limit, as Go has: a program with this many threads blocked in foreign calls is
+    // stuck, and making more would only exhaust the machine. It fails loudly instead.
+    if 10000 <= raw_atomic_fetch_add(j + 456, 1) {
+        text := view("error: 10000 threads are blocked in foreign calls; making more would exhaust the machine (does a blocking call wait for something that cannot run?)\n");
+        packed := rt_pack(text);
+        rt_write_all(2, packed, rt_len(text));
+        rt_abort();
+    }
     rt_thread_spawn_detached(rt_worker_thread, 0);
     return 0;
 }
@@ -8126,27 +8478,41 @@ fn rt_print_raw(p: u64, n: u64) -> u64 {
 
 // ---- format(...) helpers: append to a byte accumulator, then validate it as text ----
 fn rt_fmt_raw(acc: u64, p: u64, n: u64) -> u64 {
-    mut i = 0;
-    while i < n {
-        rt_pushb(acc, raw_byte(p + i));
-        i += 1;
-    }
+    have := raw_load(acc + 8);
+    rt_reserveb(acc, have + n);
+    rt_copy_bytes(raw_load(acc) + have, p, n);
+    raw_store(acc + 8, have + n);
     return 0;
 }
+// The decimal digits of v, written straight onto the end of acc: one reservation, no buffer, the
+// length found by comparison and two digits per division.
 fn rt_fmt_num(acc: u64, v: u64) -> u64 {
-    buf := rt_alloc(24);
-    mut pos = 24;
-    mut r = v;
-    while true {
-        pos = pos - 1;
-        raw_putbyte(buf + pos, 48 + r % 10);
-        r = rt_div(r, 10);
-        if r == 0 {
-            break;
+    mut n = 1;
+    mut p = 10;
+    while (n < 20) & (p - 1 < v) {
+        n += 1;
+        if n < 20 {
+            p = p * 10;
         }
     }
-    rt_fmt_raw(acc, buf + pos, 24 - pos);
-    rt_free(buf);
+    have := raw_load(acc + 8);
+    rt_reserveb(acc, have + n);
+    base := raw_load(acc) + have;
+    mut r = v;
+    mut k = n;
+    while 1 < k {
+        q := r / 100;
+        d := r - q * 100;
+        t := d / 10;
+        raw_putbyte(base + k - 1, 48 + d - t * 10);
+        raw_putbyte(base + k - 2, 48 + t);
+        r = q;
+        k -= 2;
+    }
+    if k == 1 {
+        raw_putbyte(base, 48 + r);
+    }
+    raw_store(acc + 8, have + n);
     return 0;
 }
 fn rt_fmt_int(acc: u64, v: u64, code: u64) -> u64 {
@@ -8179,11 +8545,6 @@ fn rt_fmt_seq(acc: u64, s: u64) -> u64 {
         i += 1;
     }
     return 0;
-}
-fn rt_fmt_finish(acc: u64) -> u64 {
-    out := rt_text(acc);
-    rt_drop_seq(acc);
-    return out;
 }
 
 // ---- f64: IEEE binary64 values carried as their bit pattern in one word ----
@@ -8532,10 +8893,175 @@ fn rt_fmt_f64(acc: u64, v: u64) -> u64 {
             e = exponent - 1075;
         }
     }
+    if rt_fmt_short_fast(acc, v & 9223372036854775807) {
+        return 0;
+    }
     return rt_fmt_shortest(acc, f, e, eneg, (fraction == 0) & (1 < exponent));
 }
 // Burger & Dybvig digit generation for value = f * 2^(+/-e); `boundary` marks a power of two
 // whose lower neighbour is closer (the gap below is half the gap above).
+// Digits d1..dn of the value 0.d1..dn * 10^(+/-k), written positionally (kneg: the exponent is -k).
+fn rt_fmt_place(acc: u64, digits: u64, k: u64, kneg: u64) -> u64 {
+    n := rt_len(digits);
+    if kneg + (k == 0) {
+        rt_pushb(acc, 48);
+        rt_pushb(acc, 46);
+        mut z = 0;
+        if kneg {
+            z = k;
+        }
+        mut i = 0;
+        while i < z {
+            rt_pushb(acc, 48);
+            i += 1;
+        }
+        i = 0;
+        while i < n {
+            rt_pushb(acc, 48 + rt_at(digits, i));
+            i += 1;
+        }
+    } else {
+        mut i = 0;
+        while i < n {
+            if i == k {
+                rt_pushb(acc, 46);
+            }
+            rt_pushb(acc, 48 + rt_at(digits, i));
+            i += 1;
+        }
+        while i < k {
+            rt_pushb(acc, 48);
+            i += 1;
+        }
+    }
+    return 0;
+}
+// The shortest digits of a positive finite double without big integers, when there are at most 15
+// of them and the value lies in [1e-7, 1e22): a candidate D * 10^q with D < 2^53 and |q| <= 22 is
+// converted back in one correctly rounded operation (Clinger), so it is checked exactly; it is used
+// only when neither D - 1 nor D + 1 also reads back as the value, so it is the one Burger & Dybvig
+// would produce. Returns 0 when it did not decide (the caller runs the exact algorithm).
+fn rt_fmt_short_fast(acc: u64, a: u64) -> u64 {
+    one := rt_f64_pow2(0);
+    ten := raw_f64_from_i64(10);
+    if raw_flt(a, raw_fdiv(one, raw_f64_from_i64(10000000))) {
+        return 0;
+    }
+    // e = floor(log10(a)), never below the truth (it may be one above for a < 1).
+    mut e = 0;
+    mut eneg = 0;
+    if raw_flt(a, one) {
+        eneg = 1;
+        e = 1;
+        mut p = ten;
+        while raw_flt(raw_fmul(a, p), one) {
+            e += 1;
+            p = raw_fmul(p, ten);
+        }
+    } else {
+        mut t = one;
+        while (e < 22) & (raw_flt(raw_fmul(t, ten), a) + raw_feq(raw_fmul(t, ten), a)) {
+            t = raw_fmul(t, ten);
+            e += 1;
+        }
+        if e >= 22 {
+            return 0;
+        }
+    }
+    mut digits = 1;
+    while digits < 16 {
+        // q = e - digits + 1, the power of ten of the last digit.
+        mut q = 0;
+        mut qneg = 0;
+        if eneg {
+            q = e + digits - 1;
+            qneg = 1;
+        } else {
+            if e + 1 < digits {
+                q = digits - 1 - e;
+                qneg = 1;
+            } else {
+                q = e + 1 - digits;
+            }
+        }
+        if 22 < q {
+            if qneg {
+                return 0;
+            }
+            digits += 1;
+            continue;
+        }
+        mut pq = one;
+        mut j = 0;
+        while j < q {
+            pq = raw_fmul(pq, ten);
+            j += 1;
+        }
+        mut scaled = 0;
+        if qneg {
+            scaled = raw_fmul(a, pq);
+        } else {
+            scaled = raw_fdiv(a, pq);
+        }
+        d := raw_i64_from_f64(raw_fadd(scaled, rt_f64_pow2_neg1()));
+        if (d != 0) & (d < 9007199254740992) {
+            if rt_fmt_back(d, pq, qneg) == a {
+                if (rt_fmt_back(d - 1, pq, qneg) != a) & (rt_fmt_back(d + 1, pq, qneg) != a) {
+                    // The digits of d, most significant first, and the place of the point.
+                    list := rt_new();
+                    mut n = 0;
+                    mut r = d;
+                    while r != 0 {
+                        n += 1;
+                        r = r / 10;
+                    }
+                    mut i = 0;
+                    while i < n {
+                        rt_push(list, 0);
+                        i += 1;
+                    }
+                    r = d;
+                    i = n;
+                    while 0 < i {
+                        i -= 1;
+                        raw_store(raw_load(list) + i * 8, r % 10);
+                        r = r / 10;
+                    }
+                    // value = 0.digits * 10^(n + q) with q signed by qneg.
+                    mut k = 0;
+                    mut kneg = 0;
+                    if qneg {
+                        if q < n {
+                            k = n - q;
+                        } else {
+                            k = q - n;
+                            kneg = k != 0;
+                        }
+                    } else {
+                        k = n + q;
+                    }
+                    rt_fmt_place(acc, list, k, kneg);
+                    rt_drop_seq(list);
+                    return 1;
+                }
+                return 0;
+            }
+        }
+        digits += 1;
+    }
+    return 0;
+}
+// d * 10^q (qneg: d / 10^q), one correctly rounded operation, as bits.
+fn rt_fmt_back(d: u64, pq: u64, qneg: u64) -> u64 {
+    x := raw_f64_from_i64(d);
+    if qneg {
+        return raw_fdiv(x, pq);
+    }
+    return raw_fmul(x, pq);
+}
+fn rt_f64_pow2_neg1() -> u64 {
+    return 4602678819172646912;
+}
 fn rt_fmt_shortest(acc: u64, f: u64, e: u64, eneg: u64, boundary: u64) -> u64 {
     even := (f & 1) == 0;
     r := rt_big(f);
@@ -8634,38 +9160,7 @@ fn rt_fmt_shortest(acc: u64, f: u64, e: u64, eneg: u64, boundary: u64) -> u64 {
         }
         break;
     }
-    n := rt_len(digits);
-    if kneg + (k == 0) {
-        rt_pushb(acc, 48);
-        rt_pushb(acc, 46);
-        mut z = 0;
-        if kneg {
-            z = k;
-        }
-        mut i = 0;
-        while i < z {
-            rt_pushb(acc, 48);
-            i += 1;
-        }
-        i = 0;
-        while i < n {
-            rt_pushb(acc, 48 + rt_at(digits, i));
-            i += 1;
-        }
-    } else {
-        mut i = 0;
-        while i < n {
-            if i == k {
-                rt_pushb(acc, 46);
-            }
-            rt_pushb(acc, 48 + rt_at(digits, i));
-            i += 1;
-        }
-        while i < k {
-            rt_pushb(acc, 48);
-            i += 1;
-        }
-    }
+    rt_fmt_place(acc, digits, k, kneg);
     rt_drop_seq(digits);
     rt_free(r);
     rt_free(s);
@@ -9352,6 +9847,18 @@ fn f_host_symlink(target: u64, link: u64) -> u64 {
     }
     return code;
 }
+// Sets the permission bits of `path` to `mode`; 0 or a positive errno. The view belongs to this
+// function, as with every other host operation.
+fn f_host_chmod(path: u64, mode: u64) -> u64 {
+    a := rt_cstr(path);
+    rt_view_free(path);
+    if a == 0 {
+        return 22;
+    }
+    code := rt_chmod(a, mode);
+    rt_free(a);
+    return code;
+}
 // Waits for `pid` and reaps it: the status word wait4(2) reports (`code << 8` for an exit, the
 // signal number in the low bits when one ended the child) or a wrapped negative errno.
 fn f_host_wait(pid: u64) -> u64 {
@@ -9788,29 +10295,6 @@ fn rt_seq_lower(a: u64) -> u64 {
 fn rt_space(b: u64) -> u64 {
     return (b == 32) + (b == 9) + (b == 10) + (b == 13);
 }
-fn rt_seq_trim(a: u64) -> u64 {
-    mut start = 0;
-    mut end = rt_len(a);
-    while start < end {
-        if rt_space(rt_atb(a, start)) == 0 {
-            break;
-        }
-        start += 1;
-    }
-    while start < end {
-        if rt_space(rt_atb(a, end - 1)) == 0 {
-            break;
-        }
-        end -= 1;
-    }
-    out := rt_new();
-    mut i = start;
-    while i < end {
-        rt_pushb(out, rt_atb(a, i));
-        i += 1;
-    }
-    return out;
-}
 fn rt_seq_replace(a: u64, from: u64, to: u64, valid: u64) -> u64 {
     out := rt_new();
     n := rt_len(a);
@@ -9850,30 +10334,6 @@ fn rt_seq_repeat(a: u64, count: u64) -> u64 {
     return out;
 }
 // Splits on one byte; every field is kept (empty ones too), like Rust's split(char).
-fn rt_seq_split(a: u64, sep: u64, valid: u64) -> u64 {
-    parts := rt_new();
-    mut cur = rt_new();
-    n := rt_len(a);
-    mut i = 0;
-    while i < n {
-        b := rt_atb(a, i);
-        if b == sep {
-            if valid {
-                rt_utf8(cur);
-            }
-            rt_push(parts, cur);
-            cur = rt_new();
-        } else {
-            rt_pushb(cur, b);
-        }
-        i += 1;
-    }
-    if valid {
-        rt_utf8(cur);
-    }
-    rt_push(parts, cur);
-    return parts;
-}
 
 // ---- narrow vectors: f32[], u32[], i32[] store 4-byte elements ----
 // Each element is one 32-bit little-endian unit, reached with a single raw_load32/raw_store32 (a

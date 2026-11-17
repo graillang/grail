@@ -13,6 +13,7 @@ module json;
 // `parse` collects each object's keys in a concise map, so the module that declares it is a
 // dependency like any other and says so (docs/design/module-resolution.md).
 use hashmap;
+use float;
 
 pub enum Value {
     Null,
@@ -69,7 +70,9 @@ pub fn parse_with<a>(text: &a [u8], options: Options) -> Value |? Error {
         allow_duplicate_keys: options.allow_duplicate_keys,
     };
     value := parse_value(&text, &mut cur)?;
-    skip_ws(&text, &mut cur);
+    if (cur.pos < text.len()) && (text[cur.pos] <= 32) {
+        skip_ws(&text, &mut cur);
+    }
     if cur.pos < text.len() {
         return Error { kind: ErrorKind::TrailingData, offset: cur.pos };
     }
@@ -131,6 +134,8 @@ fn wrong<a>(text: &a [u8], at: u64) -> Error {
     }
     return error(ErrorKind::UnexpectedByte, at);
 }
+// Callers test the next byte first (whitespace is <= 32), so a document without spaces costs no
+// call per token.
 fn skip_ws<a, b>(text: &a [u8], cur: (&b mut Cursor)) {
     n := text.len();
     while cur.pos < n {
@@ -155,7 +160,9 @@ fn literal<a, b, d>(text: &a [u8], cur: (&b mut Cursor), word: &d [u8]) -> unit 
     return ();
 }
 fn parse_value<a, b>(text: &a [u8], cur: (&b mut Cursor)) -> Value |? Error {
-    skip_ws(&text, &mut cur);
+    if (cur.pos < text.len()) && (text[cur.pos] <= 32) {
+        skip_ws(&text, &mut cur);
+    }
     if cur.pos >= text.len() {
         return error(ErrorKind::UnexpectedEnd, cur.pos);
     }
@@ -198,7 +205,9 @@ fn enter<b>(cur: (&b mut Cursor)) -> unit |? Error {
 fn parse_array<a, b>(text: &a [u8], cur: (&b mut Cursor)) -> Value |? Error {
     enter(&mut cur)?;
     mut items = Value[];
-    skip_ws(&text, &mut cur);
+    if (cur.pos < text.len()) && (text[cur.pos] <= 32) {
+        skip_ws(&text, &mut cur);
+    }
     if (cur.pos < text.len()) && (text[cur.pos] == ']') {
         cur.pos += 1;
         cur.depth -= 1;
@@ -207,7 +216,9 @@ fn parse_array<a, b>(text: &a [u8], cur: (&b mut Cursor)) -> Value |? Error {
     while true {
         item := parse_value(&text, &mut cur)?;
         items.push(item);
-        skip_ws(&text, &mut cur);
+        if (cur.pos < text.len()) && (text[cur.pos] <= 32) {
+            skip_ws(&text, &mut cur);
+        }
         if cur.pos >= text.len() {
             return error(ErrorKind::UnexpectedEnd, cur.pos);
         }
@@ -225,12 +236,16 @@ fn parse_array<a, b>(text: &a [u8], cur: (&b mut Cursor)) -> Value |? Error {
 }
 // Parses `"key" : value` after optional whitespace; the key's offset is returned for errors.
 fn parse_member<a, b>(text: &a [u8], cur: (&b mut Cursor)) -> Member |? Error {
-    skip_ws(&text, &mut cur);
+    if (cur.pos < text.len()) && (text[cur.pos] <= 32) {
+        skip_ws(&text, &mut cur);
+    }
     if (cur.pos >= text.len()) || (text[cur.pos] != '"') {
         return wrong(&text, cur.pos);
     }
     key := parse_string(&text, &mut cur)?;
-    skip_ws(&text, &mut cur);
+    if (cur.pos < text.len()) && (text[cur.pos] <= 32) {
+        skip_ws(&text, &mut cur);
+    }
     if (cur.pos >= text.len()) || (text[cur.pos] != ':') {
         return wrong(&text, cur.pos);
     }
@@ -240,7 +255,9 @@ fn parse_member<a, b>(text: &a [u8], cur: (&b mut Cursor)) -> Member |? Error {
 }
 // After a member: true when another follows (`,`), false at `}`.
 fn member_separator<a, b>(text: &a [u8], cur: (&b mut Cursor)) -> bool |? Error {
-    skip_ws(&text, &mut cur);
+    if (cur.pos < text.len()) && (text[cur.pos] <= 32) {
+        skip_ws(&text, &mut cur);
+    }
     if cur.pos >= text.len() {
         return error(ErrorKind::UnexpectedEnd, cur.pos);
     }
@@ -288,14 +305,18 @@ fn add_member<a, b, d>(
 fn parse_object<a, b>(text: &a [u8], cur: (&b mut Cursor)) -> Value |? Error {
     enter(&mut cur)?;
     mut members = Member[];
-    skip_ws(&text, &mut cur);
+    if (cur.pos < text.len()) && (text[cur.pos] <= 32) {
+        skip_ws(&text, &mut cur);
+    }
     if (cur.pos < text.len()) && (text[cur.pos] == '}') {
         cur.pos += 1;
         cur.depth -= 1;
         return Value::Object(members);
     }
     while true {
-        skip_ws(&text, &mut cur);
+        if (cur.pos < text.len()) && (text[cur.pos] <= 32) {
+            skip_ws(&text, &mut cur);
+        }
         at := cur.pos;
         member := parse_member(&text, &mut cur)?;
         index := find_key(&members, &member.key);
@@ -316,7 +337,9 @@ fn parse_object<a, b>(text: &a [u8], cur: (&b mut Cursor)) -> Value |? Error {
         keys.insert(m.key.text(), i);
     }
     while true {
-        skip_ws(&text, &mut cur);
+        if (cur.pos < text.len()) && (text[cur.pos] <= 32) {
+            skip_ws(&text, &mut cur);
+        }
         at := cur.pos;
         member := parse_member(&text, &mut cur)?;
         mut index = members.len();
@@ -460,7 +483,17 @@ fn simple_escape(e: u64) -> u64 {
 fn parse_string<a, b>(text: &a [u8], cur: (&b mut Cursor)) -> string |? Error {
     n := text.len();
     mut i = cur.pos + 1;
+    // Most strings are plain ASCII with no escape: copy the run in one step.
+    start := i;
+    while (i < n) && (text[i] != '"') && (text[i] != '\\') && (text[i] >= 32) && (text[i] < 128) {
+        i += 1;
+    }
+    if (i < n) && (text[i] == '"') {
+        cur.pos = i + 1;
+        return text[start: i].text();
+    }
     mut out = u8[];
+    out.append(text[start: i]);
     while true {
         if i >= n {
             return error(ErrorKind::UnexpectedEnd, n);
@@ -611,30 +644,14 @@ fn parse_number<a, b>(text: &a [u8], cur: (&b mut Cursor)) -> Value |? Error {
             }
         }
     }
-    // Significant digits without leading/trailing zeros; value = digits * 10^scale.
-    mut digits = u8[];
-    mut scale = exponent;
-    for k in int_start..int_end {
-        d := text[k] - '0';
-        if (digits.len() != 0) | (d != 0) {
-            digits.push(d);
-        }
-    }
+    mut frac_start = int_end;
     if frac_end > int_end {
-        for k in int_end + 1..frac_end {
-            d := text[k] - '0';
-            if (digits.len() != 0) | (d != 0) {
-                digits.push(d);
-            }
-            scale -= 1;
-        }
+        frac_start = int_end + 1;
+    } else {
+        frac_end = int_end;
     }
-    while (digits.len() != 0) && (digits[digits.len() - 1] == 0) {
-        digits.pop()!;
-        scale += 1;
-    }
-    bits := decimal_to_f64(&digits, scale);
-    if bits == INFINITY_BITS {
+    bits := float::digits_to_bits(text[int_start: int_end], text[frac_start: frac_end], exponent);
+    if bits == float::INFINITY_BITS {
         return error(ErrorKind::NumberOutOfRange, start);
     }
     mut sign: u64 = 0;
@@ -642,231 +659,6 @@ fn parse_number<a, b>(text: &a [u8], cur: (&b mut Cursor)) -> Value |? Error {
         sign = 9223372036854775808;
     }
     return Value::Float(f64_from_bits(bits | sign));
-}
-
-// Correctly rounded decimal -> binary64 conversion (round half to even).
-const INFINITY_BITS: u64 = 9218868437227405312;
-const MAX_DIGITS: u64 = 800;
-fn decimal_to_f64<a>(input: &a [u8], scale_in: i64) -> u64 {
-    if input.len() == 0 {
-        return 0;
-    }
-    // Beyond 800 digits only "something nonzero follows" matters: a halfway point between two
-    // doubles has at most 767 significant digits, so a sticky 1 keeps the rounding direction.
-    mut digits = u8[];
-    mut scale = scale_in;
-    if input.len() > MAX_DIGITS {
-        for k in MAX_DIGITS - 1 {
-            digits.push(input[k]);
-        }
-        digits.push(1u64);
-        scale += i64(input.len() - MAX_DIGITS);
-    } else {
-        for d in input {
-            digits.push(d);
-        }
-    }
-    n := i64(digits.len());
-    // value is in [10^(n+scale-1), 10^(n+scale))
-    if n + scale > 310 {
-        return INFINITY_BITS;
-    }
-    if n + scale < -324 {
-        return 0;
-    }
-    if (n <= 15) & (scale >= -22) & (scale <= 22) {
-        mut m: u64 = 0;
-        for d in digits {
-            m = m * 10 + d;
-        }
-        mut x = f64(m);
-        if scale >= 0 {
-            x = x * pow10(u64(scale));
-        } else {
-            x = x / pow10(u64(-scale));
-        }
-        return bits(x);
-    }
-    mut num = big_from_digits(&digits);
-    mut den = u64[1];
-    if scale >= 0 {
-        big_mul_pow10(&mut num, u64(scale));
-    } else {
-        big_mul_pow10(&mut den, u64(-scale));
-    }
-    // Scale so that q = floor(num*2^s/den) lies in [2^53, 2^55).
-    s := 54 - (i64(big_bits(&num)) - i64(big_bits(&den)));
-    if s > 0 {
-        num = big_shl(&num, u64(s));
-    }
-    if s < 0 {
-        den = big_shl(&den, u64(-s));
-    }
-    mut shifted = big_shl(&den, 55);
-    mut q: u64 = 0;
-    for step in 56 {
-        q = q * 2;
-        if big_cmp(&num, &shifted) != 0 {
-            big_sub(&mut num, &shifted);
-            q += 1;
-        }
-        big_shr1(&mut shifted);
-    }
-    sticky := num.len() != 0;
-    mut length: i64 = 0;
-    mut probe = q;
-    while probe != 0 {
-        probe = probe >> 1;
-        length += 1;
-    }
-    // The kept significand has unit 2^unit; subnormals fix the unit at 2^-1074.
-    mut unit = length - 1 - s - 52;
-    if unit < -1074 {
-        unit = -1074;
-    }
-    drop := unit + s;
-    if drop > 56 {
-        return 0;
-    }
-    mut m = q >> u64(drop);
-    rest := q & ((1 << u64(drop)) - 1);
-    half := 1 << u64(drop - 1);
-    if (rest > half) | ((rest == half) & (sticky | ((m & 1) == 1))) {
-        m += 1;
-    }
-    if m == 9007199254740992 {
-        m = 4503599627370496;
-        unit += 1;
-    }
-    if m < 4503599627370496 {
-        return m;
-    }
-    if unit + 52 > 1023 {
-        return INFINITY_BITS;
-    }
-    return u64(unit + 52 + 1023) * 4503599627370496 + (m - 4503599627370496);
-}
-fn pow10(k: u64) -> f64 {
-    mut x = 1.0;
-    for i in k {
-        x = x * 10.0;
-    }
-    return x;
-}
-// Little-endian base-2^32 naturals, trimmed (no high zero limbs; zero is empty).
-fn big_mul_add<a>(x: (&a mut u64[]), m: u64, add: u64) {
-    mut carry = add;
-    for i in x.len() {
-        v := x[i] * m + carry;
-        x[i] = v & 4294967295;
-        carry = v >> 32;
-    }
-    if carry != 0 {
-        x.push(carry);
-    }
-}
-fn big_from_digits<a>(digits: &a [u8]) -> u64[] {
-    mut x = u64[];
-    for d in digits {
-        big_mul_add(&mut x, 10, d);
-    }
-    big_trim(&mut x);
-    return x;
-}
-fn big_mul_pow10<a>(x: (&a mut u64[]), k: u64) {
-    mut left = k;
-    while left >= 9 {
-        big_mul_add(&mut x, 1000000000, 0);
-        left -= 9;
-    }
-    while left > 0 {
-        big_mul_add(&mut x, 10, 0);
-        left -= 1;
-    }
-}
-fn big_trim<a>(x: (&a mut u64[])) {
-    while (x.len() != 0) && (x[x.len() - 1] == 0) {
-        x.pop()!;
-    }
-}
-fn big_bits<a>(x: (&a u64[])) -> u64 {
-    if x.len() == 0 {
-        return 0;
-    }
-    mut top = x[x.len() - 1];
-    mut b: u64 = 0;
-    while top != 0 {
-        top = top >> 1;
-        b += 1;
-    }
-    return (x.len() - 1) * 32 + b;
-}
-fn big_shl<a>(x: (&a u64[]), n: u64) -> u64[] {
-    mut out = u64[];
-    for i in n / 32 {
-        out.push(0u64);
-    }
-    bit := n % 32;
-    mut carry: u64 = 0;
-    for i in x.len() {
-        v := (x[i] << bit) | carry;
-        out.push(v & 4294967295);
-        carry = v >> 32;
-    }
-    if carry != 0 {
-        out.push(carry);
-    }
-    big_trim(&mut out);
-    return out;
-}
-// 0 less, 1 equal, 2 greater.
-fn big_cmp<a, b>(x: (&a u64[]), y: (&b u64[])) -> u64 {
-    if x.len() < y.len() {
-        return 0;
-    }
-    if y.len() < x.len() {
-        return 2;
-    }
-    mut i = x.len();
-    while i > 0 {
-        i -= 1;
-        if x[i] < y[i] {
-            return 0;
-        }
-        if y[i] < x[i] {
-            return 2;
-        }
-    }
-    return 1;
-}
-fn big_sub<a, b>(x: (&a mut u64[]), y: (&b u64[])) {
-    mut borrow: u64 = 0;
-    for i in x.len() {
-        mut sub = borrow;
-        if i < y.len() {
-            sub += y[i];
-        }
-        v := x[i];
-        if v < sub {
-            x[i] = v + 4294967296 - sub;
-            borrow = 1;
-        } else {
-            x[i] = v - sub;
-            borrow = 0;
-        }
-    }
-    big_trim(&mut x);
-}
-fn big_shr1<a>(x: (&a mut u64[])) {
-    mut carry: u64 = 0;
-    mut i = x.len();
-    while i > 0 {
-        i -= 1;
-        v := x[i];
-        x[i] = (v >> 1) | (carry << 31);
-        carry = v & 1;
-    }
-    big_trim(&mut x);
 }
 
 // Serialization. `to_text` is compact; `to_pretty` indents by two spaces. Floats use the
@@ -883,9 +675,7 @@ pub fn to_pretty<a>(value: (&a Value)) -> string {
     return out.text();
 }
 fn push_all<a, b>(out: (&a mut u8[]), bytes: &b [u8]) {
-    for b in bytes {
-        out.push(b);
-    }
+    out.append(bytes);
 }
 fn newline<a>(out: (&a mut u8[]), indent: u64, level: u64) {
     if indent == 0 {
@@ -955,46 +745,51 @@ fn write_value<a, b>(out: (&a mut u8[]), value: (&b Value), indent: u64, level: 
     }
 }
 fn write_string<a, b>(out: (&a mut u8[]), text: &b [u8]) {
-    hex := "0123456789abcdef";
     out.push('"');
+    // Most strings need no escape: one scan, then one copy.
+    mut plain = true;
+    for b in text {
+        if (b == '"') || (b == '\\') || (b < 32) {
+            plain = false;
+            break;
+        }
+    }
+    if plain {
+        out.append(text);
+        out.push('"');
+        return ();
+    }
     for b in text {
         if b == '"' {
-            push_all(&mut out, "\\\"");
+            out.append("\\\"");
+        } else if b == '\\' {
+            out.append("\\\\");
+        } else if b == 10 {
+            out.append("\\n");
+        } else if b == 13 {
+            out.append("\\r");
+        } else if b == 9 {
+            out.append("\\t");
+        } else if b == 8 {
+            out.append("\\b");
+        } else if b == 12 {
+            out.append("\\f");
+        } else if b < 32 {
+            out.append("\\u00");
+            out.push(hex_char(b >> 4));
+            out.push(hex_char(b & 15));
         } else {
-            if b == '\\' {
-                push_all(&mut out, "\\\\");
-            } else {
-                if b == 10 {
-                    push_all(&mut out, "\\n");
-                } else {
-                    if b == 13 {
-                        push_all(&mut out, "\\r");
-                    } else {
-                        if b == 9 {
-                            push_all(&mut out, "\\t");
-                        } else {
-                            if b == 8 {
-                                push_all(&mut out, "\\b");
-                            } else {
-                                if b == 12 {
-                                    push_all(&mut out, "\\f");
-                                } else {
-                                    if b < 32 {
-                                        push_all(&mut out, "\\u00");
-                                        out.push(hex[b >> 4]);
-                                        out.push(hex[b & 15]);
-                                    } else {
-                                        out.push(b);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            out.push(b);
         }
     }
     out.push('"');
+}
+// The lowercase hex digit for 0..15.
+fn hex_char(d: u64) -> u64 {
+    if d < 10 {
+        return 48 + d;
+    }
+    return 87 + d;
 }
 fn write_float<a>(out: (&a mut u8[]), x: f64) {
     if x.is_nan() | (x - x != 0.0) {

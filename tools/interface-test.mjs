@@ -661,17 +661,17 @@ pub fn twice(x: u64) -> u64 {
   const version = compile(files, join(directory, 'version'), ['--interface', ifaces]);
   assert.equal(version.status, 1, 'an interface written by another compiler must be refused');
   assert.match(version.output, /was written in interface format 3/, `the version refusal must name the version it found: ${version.output}`);
-  assert.match(version.output, /this compiler reads format 9/, 'the version refusal must name the version this compiler reads');
+  assert.match(version.output, /this compiler reads format 10/, 'the version refusal must name the version this compiler reads');
 
   // ... and a file from a *newer* compiler is refused by name as well: a version this compiler
   // does not know is never half-read.
   const future = Buffer.from(original);
-  future[4] = 10;
+  future[4] = 11;
   repin(future);
   const ahead = compile(files, join(directory, 'future'), ['--interface', ifaces]);
   assert.equal(ahead.status, 1, 'an interface written by a newer compiler must be refused');
-  assert.match(ahead.output, /was written in interface format 10 by a newer compiler/, `the future-version refusal must name the version it found: ${ahead.output}`);
-  assert.match(ahead.output, /this one reads format 9/, 'the future-version refusal must name the version this compiler reads');
+  assert.match(ahead.output, /was written in interface format 11 by a newer compiler/, `the future-version refusal must name the version it found: ${ahead.output}`);
+  assert.match(ahead.output, /this one reads format 10/, 'the future-version refusal must name the version this compiler reads');
 
   // ... a truncated file is refused as truncated.
   repin(Buffer.from(original.subarray(0, Math.floor(original.length * 0.6))));
@@ -944,6 +944,28 @@ report('stale interface refused', stale);
 const coverage = proveManifestCoverage();
 report('a source module missing from the manifest refused', coverage);
 
+// `extern "C" blocking` travels: a module declares it, another module calls it through the
+// interface, and the caller's call site still gives its worker away (rt_blocking_enter) - without
+// the mark in the interface it would be a plain call, silently holding a worker.
+function proveBlockingTravels() {
+  const directory = join(work, 'blocking');
+  mkdirSync(directory, { recursive: true });
+  const lib = join(directory, 'sleeper.grl');
+  writeFileSync(lib, 'module sleeper;\n\npub extern "C" blocking lib "c" fn usleep(us: u32) -> i32;\n');
+  const main = join(directory, 'main.grl');
+  writeFileSync(main, 'use sleeper;\n\nfn main() {\n    unsafe {\n        sleeper::usleep(1000);\n    }\n    println(1);\n}\n');
+  const ifaces = emit([main, lib, runtime, platform], join(directory, 'emit'));
+  const text = dump(join(ifaces, 'sleeper.iface'));
+  assert.match(text, /extern=1 blocking symbol=usleep/, `the blocking mark must travel in the interface\n${text}`);
+  // As every interface build here: the module's declarations come from its interface file.
+  const caller = compile([main, lib, runtime, platform], join(directory, 'caller'), ['--interface', ifaces]);
+  assert.equal(caller.status, 0, `the caller must build against the interface\n${caller.output}`);
+  const asm = readFileSync(caller.asm, 'utf8');
+  assert.match(asm, /call rt_blocking_enter/, 'a call through the interface must hand its worker off');
+  return true;
+}
+report('extern "C" blocking travels in an interface', proveBlockingTravels());
+
 const tamper = proveTampering();
 report('edited transfer refused (seal)', tamper.edited);
 report('re-digested transfer refused (manifest)', tamper.manifest);
@@ -1025,7 +1047,7 @@ function proveGenericBodies() {
   const ifaces = emit(all, directory);
   const generic = join(ifaces, 'generic.iface');
   const text = dump(generic);
-  assert.match(text, /^grail-interface 9$/m, 'generics: the interface does not carry the current format version');
+  assert.match(text, /^grail-interface 10$/m, 'generics: the interface does not carry the current format version');
   assert.match(text, /^fn generic::twice <1> /m, 'generics: generic.iface does not declare the template');
   assert.match(text, /^\s*body$/m, 'generics: generic.iface carries no body section');
   // The body is the template's own source text, one `|` row per line, readable in a diff.

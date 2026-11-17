@@ -1,0 +1,76 @@
+// Array of structs to struct of arrays with f32x4 (docs/design/simd.md, S2): `xyzw` records in one
+// flat f32 slice split into four slices, four records at a time - a 4x4 transpose made of
+// two-vector shuffles, the unpack and move steps of C's _MM_TRANSPOSE4_PS. The C twin is
+// bench/simd_aos.c; `bun tools/bench-simd.mjs` builds and times both.
+//   simd_aos ROUNDS
+use host;
+
+fn split<a>(src: (&a [f32]), x: (&a mut [f32]), y: (&a mut [f32]), z: (&a mut [f32]), w: (&a mut [f32])) -> unit {
+    mut n = x.len();
+    if y.len() < n {
+        n = y.len();
+    }
+    if z.len() < n {
+        n = z.len();
+    }
+    if w.len() < n {
+        n = w.len();
+    }
+    // Both bounds in the loop's condition, each in the form its accesses index by: the records at
+    // `j` (`j + 16 <= src.len()`), the columns at `i` (`i + 4 <= n`).
+    m := src.len();
+    mut i = 0;
+    mut j = 0;
+    while (i + 4 <= n) && (j + 16 <= m) {
+        r0 := f32x4::load(src, j);
+        r1 := f32x4::load(src, j + 4);
+        r2 := f32x4::load(src, j + 8);
+        r3 := f32x4::load(src, j + 12);
+        t0 := r0.shuffle2(r1, 0, 4, 1, 5);
+        t1 := r0.shuffle2(r1, 2, 6, 3, 7);
+        t2 := r2.shuffle2(r3, 0, 4, 1, 5);
+        t3 := r2.shuffle2(r3, 2, 6, 3, 7);
+        t0.shuffle2(t2, 0, 1, 4, 5).store(x, i);
+        t0.shuffle2(t2, 2, 3, 6, 7).store(y, i);
+        t1.shuffle2(t3, 0, 1, 4, 5).store(z, i);
+        t1.shuffle2(t3, 2, 3, 6, 7).store(w, i);
+        i += 4;
+        j += 16;
+    }
+}
+fn main(arg: &[u8]) {
+    mut rounds = 0;
+    for i in arg.len() {
+        rounds = rounds * 10 + arg[i] - 48;
+    }
+    if rounds == 0 {
+        rounds = 1000;
+    }
+    count := 4096;
+    mut src = f32[];
+    mut x = f32[];
+    mut y = f32[];
+    mut z = f32[];
+    mut w = f32[];
+    for i in count * 4 {
+        src.push(f32(i % 11) * 0.5);
+    }
+    for i in count {
+        x.push(0.0);
+        y.push(0.0);
+        z.push(0.0);
+        w.push(0.0);
+    }
+    t0 := host::now_us();
+    for r in rounds {
+        split(&src[:], &mut x[:], &mut y[:], &mut z[:], &mut w[:]);
+    }
+    t1 := host::now_us();
+    mut check: f64 = 0.0;
+    for i in count {
+        check = check + f64(x[i]) + 2.0 * f64(y[i]) + 3.0 * f64(z[i]) + 4.0 * f64(w[i]);
+    }
+    println(check);
+    print("ns/record ");
+    println(f64(t1 - t0) * 1000.0 / (f64(rounds) * f64(count)));
+}

@@ -268,6 +268,11 @@ compiling the bodies that miss need.
 
 ## Against Go, Zig and rustc
 
+The current figures - instructions in one process and wall time at four jobs, for a check, an
+edited check, a cold build, an edited build and a no-op rebuild, on the generated programs and the
+rival twins - are `bench/results/compile.json`, drawn in the book's Performance chapter with the cause
+of every gap. The tables below are the first measurement, kept for the record.
+
 The bar, since 2026-11-16: **the fastest of Go, Zig and rustc on equivalent programs**, checking
 and building, cold and after a one-function edit.
 
@@ -423,6 +428,32 @@ build replays the functions whose text did not change. An edited syn4000 module 
 instructions with units, 111.0 G without (dev compiler). The units cannot remove more than the
 assembler's own share: an edited build still regenerates and optimises the whole module's text,
 and spends a quarter of its time writing the interface (`iface_sorted`, routed to the front end).
+
+### Windows (COFF), in progress
+
+The in-process assembler covers Linux ELF on x86-64, AArch64 and RISC-V. Windows x86-64 still
+assembles with clang. The work to change that, in order, each step landable on its own:
+
+1. **Directive survey** (done). The Windows stream (hello, `--target windows-x86_64`) uses, besides
+   the ELF subset: `.def NAME` / `.scl 2` / `.type 32` / `.endef` (a function symbol's storage class
+   and type); `.seh_proc`, `.seh_pushreg %rbp`, `.seh_setframe %rbp, 0`, `.seh_stackalloc N`,
+   `.seh_endprologue`, `.seh_endproc` on every function; sections `NAME$a/$b/$z,"dr"` (grail_sites
+   and grail_funcs, bracketed by `__start_`/`__stop_` labels) and `.rdata`. Debug builds add CodeView:
+   `.cv_file`, `.cv_func_id`, `.cv_loc`, `.cv_linetable`, `.cv_filechecksums`, `.cv_stringtable`,
+   `.secrel32`, `.secidx`, label differences in `.short`/`.long`, in `.debug$S`.
+2. **COFF writer** (`compiler/coff.grl`): the file header, section table (names longer than 8
+   bytes as `/offset` into the string table), raw data, relocations (`ADDR64`, `REL32` with LLVM's
+   addend folding, `ADDR32NB` for .pdata, `SECREL`/`SECTION` for CodeView), the symbol table
+   with each section's static symbol and its aux record (length, relocation count, JamCRC checksum
+   of the contents, number), external/static functions with type 0x20. Oracle: `asm-oracle
+   --target windows-x86_64` against `clang --target=x86_64-pc-windows-msvc -c`.
+3. **Unwind**: `.xdata` UNWIND_INFO per function from the `.seh_*` directives (version 1, prologue
+   size, codes for PUSH_NONVOL rbp, SET_FPREG, ALLOC_SMALL/LARGE, frame register rbp) and `.pdata`
+   RUNTIME_FUNCTION triples (begin, end, unwind info; `ADDR32NB` relocations), in LLVM's order.
+4. **CodeView**: the `.cv_*` directives' `.debug$S` subsections (file checksums, string table,
+   line tables per function) as LLVM's CodeViewContext writes them.
+5. In-process path for the Windows target in `assemble_object` and the driver, the windows leg
+   (tools/windows.mjs under wine) on it, then delete the clang requirement as for Linux.
 
 ## The order of the remaining work
 
