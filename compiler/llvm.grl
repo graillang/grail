@@ -1,5 +1,7 @@
 module llvm;
 use machine;
+use jobs;
+use host;
 
 // LLVM lowering of the compiler's closed word-machine stream (docs/design/llvm-backend.md).
 // The raw x86-64-spelled stream (before optimize.grl) becomes LLVM IR for every function whose
@@ -3403,6 +3405,10 @@ fn frame_split<a>(instrs: (&a u8[][]), deepest: (&a mut u64)) -> u64 {
 // Lowers one function into l.body; l.fail is set when any line is not understood.
 fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), facts: (&c Facts)) -> unit {
     l.body = u8[];
+    // A function's temporaries and fresh blocks are named within it, so a function lowers to the
+    // same text whatever was lowered before it (in this process or a forked one).
+    l.t = 0;
+    l.dead = 0;
     l.fail = 0;
     l.term = 0;
     l.fordinal = 0;
@@ -6224,6 +6230,316 @@ pub fn lower_for<a, b>(stream: &a [u8], target: u64, facts: (&b Facts), verify: 
 pub fn lower<a, b, c>(stream: &a [u8], triple: &b [u8], facts: (&c Facts), verify: u64, ranges: u64) -> Lowered {
     return lower_target(stream, triple, 0, facts, verify, ranges);
 }
+// What lowering the functions [lo, hi) adds to the module: the lifted bodies, the native lines (and
+// which of them are a function's own body, whose tokens are its references), and the names it adds
+// to the lifted, call, reference and address lists. The lists in `l` are put back as they were, so
+// a range lowered in a forked copy and one lowered here give the same piece.
+struct Piece {
+    functions: u8[],
+    native: u8[][],
+    kept: u64[],
+    lifted: u8[][],
+    calls: u8[][],
+    refs: u8[][],
+    addrs: u8[][]
+}
+fn lower_range<a, b, c, d, e, g, h>(l: (&a mut L), lines: (&b u8[][]), funcs: (&c Func[]), lo: u64, hi: u64, facts: (&d Facts), fheads: (&e Map), fnext: (&e u64[]), ranges: u64, data_tokens: (&g Set), weak: (&h Set)) -> Piece {
+    mut p = Piece { functions: u8[], native: u8[][], kept: u64[], lifted: u8[][], calls: u8[][], refs: u8[][], addrs: u8[][] };
+    base_lifted := l.lifted.len();
+    base_calls := l.calls.len();
+    base_refs := l.refs.len();
+    base_addrs := l.addrs.len();
+    mut fi = lo;
+    while fi < hi {
+        at_fi := fi;
+        fi += 1;
+        f := &funcs[at_fi];
+        mut pinned = 0;
+        own := body_lines(&lines, &f);
+        for q in own.len() {
+            name := label_of(view(own[q]));
+            if (name.len() != 0) & (name.len() + 1 == own[q].len()) & set_has(&data_tokens, view(name)) {
+                pinned = 1;
+            }
+        }
+        saved_calls := l.calls.len();
+        saved_refs := l.refs.len();
+        saved_addrs := l.addrs.len();
+        if pinned == 0 {
+            ffacts := facts_of(&facts, &fheads, &fnext, view(f.name), ranges);
+            lower_function(&mut l, &lines, &f, &ffacts);
+        }
+        if (pinned == 0) & (l.fail == 0) {
+            put(&mut p.functions, view("define {i64, i64} @\""));
+            put(&mut p.functions, view(f.name));
+            // A frame over a page is probed as the native backend's is (optimize::probe_frames).
+            put(&mut p.functions, view("\"(i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5) \"probe-stack\"=\"inline-asm\""));
+            atomics_inline(&mut p.functions, l.target);
+            put(&mut p.functions, view(" {\n"));
+            put(&mut p.functions, view(l.body));
+            put(&mut p.functions, view("}\n"));
+            l.lifted.push(copy(view(f.name)));
+            continue;
+        }
+        // Native: drop what this function added to the call and reference lists.
+        while l.calls.len() > saved_calls {
+            l.calls.pop()!;
+        }
+        while l.refs.len() > saved_refs {
+            l.refs.pop()!;
+        }
+        while l.addrs.len() > saved_addrs {
+            l.addrs.pop()!;
+        }
+        mut g = copy(view(".globl "));
+        if set_has(&weak, view(f.name)) {
+            g = copy(view(".weak "));
+        }
+        put(&mut g, view(f.name));
+        p.native.push(g);
+        mut h = copy(view(".hidden "));
+        put(&mut h, view(f.name));
+        p.native.push(h);
+        mut lab = copy(view(f.name));
+        lab.push(58);
+        p.native.push(lab);
+        kept := body_lines(&lines, &f);
+        for k in kept.len() {
+            p.native.push(copy(view(kept[k])));
+            p.kept.push(p.native.len() - 1);
+        }
+        if f.framed != 0 {
+            // The frame symbol is the one the prologue's `subq $.Fn,%rsp` names.
+            mut sym = u8[];
+            for k in kept.len() {
+                line := view(kept[k]);
+                if starts(line, view("subq $.F")) & (sym.len() == 0) {
+                    sym = sub(line, 6, line.len() - 5);
+                }
+            }
+            mut set = copy(view(".set "));
+            put(&mut set, view(sym));
+            set.push(44);
+            num(&mut set, f.frame);
+            p.native.push(set);
+        }
+    }
+    while l.lifted.len() > base_lifted {
+        p.lifted.push(l.lifted.pop()!);
+    }
+    while l.calls.len() > base_calls {
+        p.calls.push(l.calls.pop()!);
+    }
+    while l.refs.len() > base_refs {
+        p.refs.push(l.refs.pop()!);
+    }
+    while l.addrs.len() > base_addrs {
+        p.addrs.push(l.addrs.pop()!);
+    }
+    // Popped newest first: put each list back in the order it was made.
+    reverse_texts(&mut p.lifted);
+    reverse_texts(&mut p.calls);
+    reverse_texts(&mut p.refs);
+    reverse_texts(&mut p.addrs);
+    return p;
+}
+fn reverse_texts<a>(v: (&a mut u8[][])) -> unit {
+    mut i = 0;
+    mut j = v.len();
+    while i + 1 < j {
+        j -= 1;
+        a := exchange(&mut v[i], u8[]);
+        b := exchange(&mut v[j], u8[]);
+        v[i] = b;
+        v[j] = a;
+        i += 1;
+    }
+    return ();
+}
+fn lp_word<a>(out: (&a mut u8[]), n: u64) -> unit {
+    mut v = n;
+    for i in 8 {
+        out.push(u8(v & 255));
+        v = v >> 8;
+    }
+    return ();
+}
+fn lp_text<a, b>(out: (&a mut u8[]), text: &b [u8]) -> unit {
+    lp_word(&mut out, text.len());
+    out.append(text);
+    return ();
+}
+fn lp_texts<a>(out: (&a mut u8[]), list: (&a u8[][])) -> unit {
+    lp_word(&mut out, list.len());
+    for i in list.len() {
+        lp_text(&mut out, view(list[i]));
+    }
+    return ();
+}
+fn lp_take<a, b>(from: &a [u8], at: (&b mut u64)) -> u64 {
+    mut v: u64 = 0;
+    mut shift: u64 = 0;
+    for i in 8 {
+        v = v | (u64(from[*at + i]) << shift);
+        shift += 8;
+    }
+    exchange(at, *at + 8);
+    return v;
+}
+fn lp_take_text<a, b>(from: &a [u8], at: (&b mut u64)) -> u8[] {
+    n := lp_take(from, at);
+    mut out = u8[];
+    if n != 0 {
+        out.append(from[*at..*at + n]);
+    }
+    exchange(at, *at + n);
+    return out;
+}
+fn lp_take_texts<a, b>(from: &a [u8], at: (&b mut u64)) -> u8[][] {
+    n := lp_take(from, at);
+    mut out = u8[][];
+    for i in n {
+        out.push(lp_take_text(from, at));
+    }
+    return out;
+}
+fn pack_piece<a>(p: (&a Piece)) -> u8[] {
+    mut out = u8[];
+    lp_text(&mut out, view(p.functions));
+    lp_texts(&mut out, &p.native);
+    lp_word(&mut out, p.kept.len());
+    for i in p.kept.len() {
+        lp_word(&mut out, p.kept[i]);
+    }
+    lp_texts(&mut out, &p.lifted);
+    lp_texts(&mut out, &p.calls);
+    lp_texts(&mut out, &p.refs);
+    lp_texts(&mut out, &p.addrs);
+    // The last word says the piece is whole: a copy that died leaves a short stream.
+    lp_word(&mut out, 6072411188134084935);
+    return out;
+}
+fn unpack_piece<a>(b: &a [u8]) -> Piece {
+    mut at: u64 = 0;
+    functions := lp_take_text(b, &mut at);
+    native := lp_take_texts(b, &mut at);
+    nk := lp_take(b, &mut at);
+    mut kept = u64[];
+    for i in nk {
+        kept.push(lp_take(b, &mut at));
+    }
+    lifted := lp_take_texts(b, &mut at);
+    calls := lp_take_texts(b, &mut at);
+    refs := lp_take_texts(b, &mut at);
+    addrs := lp_take_texts(b, &mut at);
+    return Piece { functions: functions, native: native, kept: kept, lifted: lifted, calls: calls, refs: refs, addrs: addrs };
+}
+// The pieces the module's functions are lowered in: as many as the jobserver grants (at most one per
+// half-megabyte of stream, `GRAIL_JOBS=1` for one process), cut at function boundaries so each holds
+// about the same number of lines, each lowered in a forked copy of this process that shares its
+// memory until it writes. One piece is lowered here.
+fn lift_pieces<a, b, c, d, e, g, h>(l: (&a mut L), lines: (&b u8[][]), funcs: (&c Func[]), facts: (&d Facts), fheads: (&e Map), fnext: (&e u64[]), ranges: u64, data_tokens: (&g Set), weak: (&h Set)) -> Piece[] {
+    mut size: u64 = 0;
+    for i in lines.len() {
+        size += lines[i].len() + 1;
+    }
+    mut wanted = host::cpus();
+    asked := host::env(view("GRAIL_JOBS"));
+    if asked.len() != 0 {
+        wanted = 0;
+        for i in asked.len() {
+            if (47 < asked[i]) && (asked[i] < 58) {
+                wanted = wanted * 10 + u64(asked[i] - 48);
+            }
+        }
+    }
+    if 32 < wanted {
+        wanted = 32;
+    }
+    while (1 < wanted) && (size / wanted < 524288) {
+        wanted -= 1;
+    }
+    if funcs.len() < wanted {
+        wanted = funcs.len();
+    }
+    if wanted < 2 {
+        return Piece[lower_range(&mut l, &lines, &funcs, 0, funcs.len(), &facts, &fheads, &fnext, ranges, &data_tokens, &weak)];
+    }
+    mut js = jobs::open();
+    count := jobs::workers(&mut js, wanted);
+    if count < 2 {
+        jobs::give_all(&mut js);
+        return Piece[lower_range(&mut l, &lines, &funcs, 0, funcs.len(), &facts, &fheads, &fnext, ranges, &data_tokens, &weak)];
+    }
+    // Cuts at function boundaries, by lines.
+    mut total: u64 = 0;
+    for i in funcs.len() {
+        total += funcs[i].end - funcs[i].first;
+    }
+    mut cuts = u64[0];
+    mut acc: u64 = 0;
+    for i in funcs.len() {
+        acc += funcs[i].end - funcs[i].first;
+        if (cuts.len() < count) && (acc * count >= total * cuts.len()) && (i + 1 < funcs.len()) {
+            cuts.push(i + 1);
+        }
+    }
+    cuts.push(funcs.len());
+    mut readers = u64[];
+    mut children = u64[];
+    for k in cuts.len() - 1 {
+        pair := host::pipe();
+        child := host::fork();
+        if child == 0 {
+            host::close(pair[0]);
+            for r in readers.len() {
+                host::close(readers[r]);
+            }
+            p := lower_range(&mut l, &lines, &funcs, cuts[k], cuts[k + 1], &facts, &fheads, &fnext, ranges, &data_tokens, &weak);
+            host::write_fd(pair[1], view(pack_piece(&p)));
+            host::close(pair[1]);
+            host::exit(0);
+        }
+        host::close(pair[1]);
+        if 9223372036854775807 < child {
+            host::close(pair[0]);
+            for r in readers.len() {
+                host::close(readers[r]);
+                host::wait(children[r]);
+            }
+            jobs::give_all(&mut js);
+            return Piece[lower_range(&mut l, &lines, &funcs, 0, funcs.len(), &facts, &fheads, &fnext, ranges, &data_tokens, &weak)];
+        }
+        readers.push(pair[0]);
+        children.push(child);
+    }
+    mut out = Piece[];
+    for k in readers.len() {
+        mut packed = u8[];
+        while true {
+            chunk := host::read_fd(readers[k], 1048576);
+            if chunk.len() == 0 {
+                break;
+            }
+            packed.append(view(chunk));
+        }
+        host::close(readers[k]);
+        status := host::wait(children[k]);
+        mut whole = (status == 0) && (16 <= packed.len());
+        if whole {
+            mut tail = packed.len() - 8;
+            whole = lp_take(view(packed), &mut tail) == 6072411188134084935;
+        }
+        if !whole {
+            jobs::give_all(&mut js);
+            host::print(view("grail: an LLVM lowering worker did not finish (GRAIL_JOBS=1 lowers in one process)\n"));
+            host::exit(1);
+        }
+        out.push(unpack_piece(view(packed)));
+    }
+    jobs::give_all(&mut js);
+    return out;
+}
 fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (&c Facts), verify: u64, ranges: u64) -> Lowered {
     lines := split_lines(stream);
     // Names the stream declared `.weak` (content-addressed drop helpers, which two objects may
@@ -6307,76 +6623,32 @@ fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (
     mut native_lines = u8[][];
     native_lines.push(copy(view(".text")));
     mut native_tokens = set_new(funcs.len() * 64 + 64);
-    for fi in funcs.len() {
-        f := &funcs[fi];
-        mut pinned = 0;
-        own := body_lines(&lines, &f);
-        for q in own.len() {
-            name := label_of(view(own[q]));
-            if (name.len() != 0) & (name.len() + 1 == own[q].len()) & set_has(&data_tokens, view(name)) {
-                pinned = 1;
+    // The functions are lowered in pieces, one forked copy each when the build's jobserver has
+    // tokens free (compiler/jobs.grl), and the pieces are put back in order: the module text is the
+    // same whatever the count, because every name a function's lowering makes is its own.
+    mut pieces = lift_pieces(&mut l, &lines, &funcs, &facts, &fheads, &fnext, ranges, &data_tokens, &weak);
+    for q in pieces.len() {
+        pc := &pieces[q];
+        functions.append(view(pc.functions));
+        mut kq = 0;
+        for i in pc.native.len() {
+            native_lines.push(copy(view(pc.native[i])));
+            if (kq < pc.kept.len()) && (pc.kept[kq] == i) {
+                add_tokens(&mut native_tokens, view(pc.native[i]));
+                kq += 1;
             }
         }
-        saved_calls := l.calls.len();
-        saved_refs := l.refs.len();
-        saved_addrs := l.addrs.len();
-        if pinned == 0 {
-            ffacts := facts_of(&facts, &fheads, &fnext, view(f.name), ranges);
-            lower_function(&mut l, &lines, &f, &ffacts);
+        for i in pc.lifted.len() {
+            l.lifted.push(copy(view(pc.lifted[i])));
         }
-        if (pinned == 0) & (l.fail == 0) {
-            put(&mut functions, view("define {i64, i64} @\""));
-            put(&mut functions, view(f.name));
-            // A frame over a page is probed as the native backend's is (optimize::probe_frames).
-            put(&mut functions, view("\"(i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5) \"probe-stack\"=\"inline-asm\""));
-            atomics_inline(&mut functions, l.target);
-            put(&mut functions, view(" {\n"));
-            put(&mut functions, view(l.body));
-            put(&mut functions, view("}\n"));
-            l.lifted.push(copy(view(f.name)));
-            continue;
+        for i in pc.calls.len() {
+            l.calls.push(copy(view(pc.calls[i])));
         }
-        // Native: drop what this function added to the call and reference lists.
-        while l.calls.len() > saved_calls {
-            l.calls.pop()!;
+        for i in pc.refs.len() {
+            l.refs.push(copy(view(pc.refs[i])));
         }
-        while l.refs.len() > saved_refs {
-            l.refs.pop()!;
-        }
-        while l.addrs.len() > saved_addrs {
-            l.addrs.pop()!;
-        }
-        mut g = copy(view(".globl "));
-        if set_has(&weak, view(f.name)) {
-            g = copy(view(".weak "));
-        }
-        put(&mut g, view(f.name));
-        native_lines.push(g);
-        mut h = copy(view(".hidden "));
-        put(&mut h, view(f.name));
-        native_lines.push(h);
-        mut lab = copy(view(f.name));
-        lab.push(58);
-        native_lines.push(lab);
-        kept := body_lines(&lines, &f);
-        for k in kept.len() {
-            native_lines.push(copy(view(kept[k])));
-            add_tokens(&mut native_tokens, view(kept[k]));
-        }
-        if f.framed != 0 {
-            // The frame symbol is the one the prologue's `subq $.Fn,%rsp` names.
-            mut sym = u8[];
-            for k in kept.len() {
-                line := view(kept[k]);
-                if starts(line, view("subq $.F")) & (sym.len() == 0) {
-                    sym = sub(line, 6, line.len() - 5);
-                }
-            }
-            mut set = copy(view(".set "));
-            put(&mut set, view(sym));
-            set.push(44);
-            num(&mut set, f.frame);
-            native_lines.push(set);
+        for i in pc.addrs.len() {
+            l.addrs.push(copy(view(pc.addrs[i])));
         }
     }
     for i in data.len() {
