@@ -206,8 +206,9 @@ three places, with their causes from profiles of the compiler on these programs:
   checked again, at about half the cold cost, where `cargo check` re-checks only what changed.
 - **A cold build** (1.6x Go). The optimiser is a third of the build and re-reads the front end's
   instruction text (about 18 %), and the assembler reads the optimiser's text again. A cold build of
-  the 104,000-line program also grew from 38 to 53 billion instructions between two recent commits
-  of the compiler; that regression is being traced.
+  the 104,000-line program grew from 38 to 53 billion instructions when the release compiler was
+  first built in parts (the runtime's small accessors stopped being inlined across them), and fell
+  to 35 billion once the parts were built with ThinLTO; the chart is that compiler.
 
 {{perf:compile#compile-go-check}}
 

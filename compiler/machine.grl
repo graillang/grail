@@ -1383,7 +1383,8 @@ fn simd_ops() -> u8[][] {
         copy_text(view("not")), copy_text(view("splat")), copy_text(view("lane")), copy_text(view("sum")),
         copy_text(view("copy")), copy_text(view("any")), copy_text(view("all")), copy_text(view("insert")),
         copy_text(view("topair")), copy_text(view("frompair")), copy_text(view("shuffle")),
-        copy_text(view("tof32")), copy_text(view("toi32")), copy_text(view("copya")), copy_text(view("copyd"))
+        copy_text(view("tof32")), copy_text(view("toi32")), copy_text(view("copya")), copy_text(view("copyd")),
+        copy_text(view("fma"))
     ];
 }
 fn simd_number<a>(s: &a [u8]) -> u64 {
@@ -1544,6 +1545,9 @@ fn simd_f<a>(o: (&a Out), f: u64, bits: u64) -> string {
     if o.target == 2 {
         if f == 0 {
             return "ft0";
+        }
+        if f == 2 {
+            return "ft2";
         }
         return "ft1";
     }
@@ -2638,6 +2642,20 @@ fn simd_x86_packed<a>(o: (&a mut Out), s: (&Simd)) -> bool {
         simd_movups(&mut o, view("%rdi"), 0, view("%xmm0"), false);
         return true;
     }
+    if op == 32 {
+        // fma, at --cpu=x86-64-v3 and above (the front end sends it only there): vfmadd231 adds the
+        // product into the accumulator with one rounding.
+        for c in chunks {
+            simd_movups(&mut o, view("%rsi"), 16 * c, view("%xmm0"), true);
+            simd_movups(&mut o, view("%rdx"), 16 * c, view("%xmm1"), true);
+            simd_movups(&mut o, view("%rcx"), 16 * c, view("%xmm2"), true);
+            put(&mut o, view("vfmadd231"));
+            put(&mut o, view(ps));
+            put(&mut o, view(" %xmm1,%xmm0,%xmm2\n"));
+            simd_movups(&mut o, view("%rdi"), 16 * c, view("%xmm2"), false);
+        }
+        return true;
+    }
     if op == 28 {
         for c in chunks {
             simd_movups(&mut o, view("%rsi"), 16 * c, view("%xmm0"), true);
@@ -2863,6 +2881,17 @@ fn simd_a64_packed<a>(o: (&a mut Out), s: (&Simd)) -> bool {
             }
         }
         put(&mut o, view("cmp x9,#0\ncset x9,ne\n"));
+        return true;
+    }
+    if op == 32 {
+        // fma: fmla accumulates into its destination with one rounding.
+        for c in chunks {
+            a64_ldq(&mut o, 0, view("x1"), 16 * c);
+            a64_ldq(&mut o, 1, view("x2"), 16 * c);
+            a64_ldq(&mut o, 2, view("x3"), 16 * c);
+            a64_v3(&mut o, view("fmla"), view(t), 2, 0, 1);
+            a64_stq(&mut o, 2, 16 * c);
+        }
         return true;
     }
     if op == 28 {
@@ -3232,6 +3261,22 @@ pub fn simd_expand<a>(o: (&a mut Out), s: (&Simd)) -> unit {
             simd_iconst(&mut o, 0);
             simd_mark(&mut o, done);
             simd_sti(&mut o, 0, off, 32);
+        }
+        return ();
+    }
+    if (op == 32) && (o.target == 2) {
+        // fma: one fused fmadd per lane (RV64GC has it in F and D).
+        for i in n {
+            off := i * eb;
+            simd_ldf(&mut o, 0, 1, off, bits);
+            simd_ldf(&mut o, 1, 2, off, bits);
+            simd_ldf(&mut o, 2, 3, off, bits);
+            if bits == 32 {
+                put(&mut o, view("fmadd.s ft0,ft0,ft1,ft2\n"));
+            } else {
+                put(&mut o, view("fmadd.d ft0,ft0,ft1,ft2\n"));
+            }
+            simd_stf(&mut o, 0, off, bits);
         }
         return ();
     }

@@ -39,4 +39,8 @@ pmaxub %xmm1,%xmm0
 pmovmskb %xmm0,%eax
 cvtdq2ps %xmm0,%xmm0
 addps %xmm9,%xmm12
+vfmadd231ps %xmm1,%xmm0,%xmm2
+vfmadd231pd %xmm9,%xmm12,%xmm10
+vfmadd231ps %xmm15,%xmm8,%xmm3
+vfmadd231pd %xmm2,%xmm13,%xmm14
 ret
