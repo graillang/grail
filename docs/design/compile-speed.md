@@ -93,6 +93,10 @@ allocation and a free per hop. The compiler is written in that idiom throughout
 (`same(view(a), view(b))`), and the optimiser reads assembly text line by line through views. No
 index removes that; the value representation does. That is stage 3.
 
+**An index that is itself a field read allocates.** `o.src[o.at]` (through `o: &mut A`) builds and
+drops a view record on every access; `i := o.at; o.src[i]` is a plain load. A code-generation bug to
+fix, found in the internal assembler (stage 4), where it was a fifth of the instructions.
+
 The optimiser is the other half of a small build (48 % of hello world): it parses the assembly text
 the front end wrote, and then clang parses what it writes. That is stage 4.
 

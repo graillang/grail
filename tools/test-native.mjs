@@ -14,7 +14,7 @@ import { readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync, existsSync
 import { join, basename, resolve, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
-import { root, compilerSources, hostTarget, targetName, buildCompiler, compileProgram, execute } from './native.mjs';
+import { root, compilerSources, hostTarget, targetName, buildCompiler, compileProgram, execute, useAssemblerOf } from './native.mjs';
 
 const legacyReferenceSyntax = /\b(?:borrow|borrow_mut)\s*\(|\b(?:read|mut)\s*</;
 const targetNames = ['x86_64', 'aarch64', 'riscv64', 'macos-x86_64', 'macos-aarch64'];
@@ -718,6 +718,7 @@ if (!isChild && options.jobs > 1) {
 }
 
 const compiler = process.env.GRAIL_TEST_COMPILER ?? buildCompiler();
+useAssemblerOf(compiler);
 // Key by the compiler's content-addressed directory, not its file name: every build is named
 // `grail`. The markers are shared by every stripe: a pass is a property of the compiler, not of the
 // process that observed it.

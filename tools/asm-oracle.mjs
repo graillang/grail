@@ -4,9 +4,11 @@
 // alignment, the relocation lists (section, offset, type, symbol, addend) and the symbol tables as
 // sets. A difference prints the first differing section and, for code, objdump's view of where.
 //
-//   bun tools/asm-oracle.mjs FILE.s...            compare the two objects of each file
-//   bun tools/asm-oracle.mjs --corpus [--filter RE] [--shard i/n]   compile corpus programs, compare
-//   GRAIL_ASM selects the assembler binary (default: the tree's compiler, `grail asm IN -o OUT`)
+//   bun tools/asm-oracle.mjs FILE.s...   compare the two objects of each file
+//   GRAIL_ASM selects the assembler command (default: the tree's compiler, `grail asm`)
+// Over the corpus, the same comparison runs inside every x86-64 assembly when GRAIL_ASM_ORACLE=1
+// (tools/native.mjs `assemble`): `GRAIL_ASM_ORACLE=1 bun tools/test-native.mjs x86_64` checks each
+// program's object and then runs the program, which is the gate's `asm-oracle` leg.
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
@@ -113,11 +115,7 @@ export function checkFile(source, work, assembler) {
 
 if (import.meta.main) {
   const args = process.argv.slice(2);
-  const assembler = process.env.GRAIL_ASM ? process.env.GRAIL_ASM.split(' ') : null;
-  if (!assembler) {
-    console.error('asm-oracle: set GRAIL_ASM to the internal assembler command');
-    process.exit(2);
-  }
+  const assembler = process.env.GRAIL_ASM ? process.env.GRAIL_ASM.split(' ') : [(await import('./native.mjs')).buildCompiler(), 'asm'];
   const work = join(import.meta.dir, '..', '.work/asm-oracle');
   mkdirSync(work, { recursive: true });
   let failed = 0;

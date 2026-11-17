@@ -1,4 +1,5 @@
 // Build/test orchestration only. Language checking and instruction selection live in Grail.
+import { compareObjects } from './asm-oracle.mjs';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, renameSync, rmSync, statSync, accessSync, linkSync, constants as fsConstants } from 'node:fs';
@@ -15,7 +16,7 @@ export const allTargets = [...targets, ...machoTargets];
 export const hostTarget = ({ x64: 'x86_64', arm64: 'aarch64', riscv64: 'riscv64' })[process.arch];
 // The compiler itself is a Linux host binary: its platform module is os-linux. darwin.grl (and
 // os-windows.grl) are per-target platform modules selected when building for those targets.
-export const compilerSources = ['native', 'lexer', 'ownership', 'machine', 'optimize', 'llvm', 'ir', 'fncache', 'fmt', 'explain', 'bindgen', 'pkg', 'docgen', 'cli', 'runtime', 'os-linux'].map(n => join(root, 'compiler', `${n}.grl`));
+export const compilerSources = ['native', 'lexer', 'ownership', 'machine', 'optimize', 'llvm', 'ir', 'fncache', 'asm_x86', 'elf', 'fmt', 'explain', 'bindgen', 'pkg', 'docgen', 'cli', 'runtime', 'os-linux'].map(n => join(root, 'compiler', `${n}.grl`));
 // A standard module the compiler itself uses: `grail build --watch` hashes its inputs with XXH64
 // (lib/xxhash.grl), so the compiler is built with that module in its source list.
 // Every tool builds through a store of its own run, inside this worktree: a test run must neither
@@ -190,7 +191,7 @@ export function moduleFlags(target) {
   if (target === 'aarch64') return ['-mno-outline-atomics'];
   return [];
 }
-export function assemble(source, executable, target = hostTarget, linkArgs = [], { frameworkArgs = [], sign = false, sdk = undefined } = {}) {
+export function assemble(source, executable, target = hostTarget, linkArgs = [], { frameworkArgs = [], sign = false, sdk = undefined, debug = false } = {}) {
   targetName(target);
   // Unique per process: two concurrent builds of the same target otherwise truncate each
   // other's object file mid-assembly, which clang reports as SIGBUS. `object` is this process's
@@ -199,7 +200,20 @@ export function assemble(source, executable, target = hostTarget, linkArgs = [],
   const object = `${executable}.${process.pid}.o`;
   const stable = `${executable}.o`;
   const flags = target === 'riscv64' ? ['-march=rv64imafd', '-mabi=lp64d'] : [];
-  command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[target]}`, ...flags, '-c', source, '-o', object]);
+  // Debug builds keep clang until the internal assembler writes .debug_line (stage 4, S3).
+  if (target === 'x86_64' && !debug && internalAssembler && !process.env.GRAIL_ASSEMBLER && process.env.GRAIL_ASSEMBLER_INTERNAL !== '0') {
+    command([internalAssembler, 'asm', source, '-o', object]);
+    if (process.env.GRAIL_ASM_ORACLE === '1') {
+      // The oracle (tools/asm-oracle.mjs): clang's object from the same text must be the same.
+      const reference = `${object}.clang.o`;
+      command(['clang', `--target=${triples[target]}`, '-c', source, '-o', reference]);
+      const diff = compareObjects(readFileSync(reference), readFileSync(object));
+      rmSync(reference);
+      if (diff) throw new Error(`internal assembler differs from clang on ${source}: ${typeof diff === 'string' ? diff : diff.message}`);
+    }
+  } else {
+    command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[target]}`, ...flags, '-c', source, '-o', object]);
+  }
   if (machoTargets.includes(target)) {
     // An SDK supplies the real libSystem.tbd; a cross-build without one links against a stub
     // exported from this object's own imports.
@@ -416,7 +430,21 @@ function claimExecutable(pending, executable) {
   }
   rmSync(pending, { force: true });
 }
+// The internal assembler (`grail asm`, compiler/asm_x86.grl) assembles x86-64 objects once the tree's
+// compiler exists, as `grail build` does; the compiler's own build, `GRAIL_ASSEMBLER` and
+// `GRAIL_ASSEMBLER_INTERNAL=0` use clang (the fallback kept until the internal assembler's oracle,
+// tools/asm-oracle.mjs, has been green through one landing).
+let internalAssembler = null;
+// A tool that runs a compiler it was handed (a test stripe) assembles with that compiler.
+export function useAssemblerOf(compiler) {
+  internalAssembler = compiler;
+}
 export function buildCompiler() {
+  const executable = buildTreeCompiler();
+  internalAssembler ??= executable;
+  return executable;
+}
+function buildTreeCompiler() {
   const base = bootstrapCompiler();
   const hash = createHash('sha256');
   hash.update(readFileSync(fileURLToPath(import.meta.url)));
@@ -548,7 +576,7 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
     linkArgs.unshift(object);
   }
   const framework = machoTargets.includes(target) ? frameworkArguments(frameworks, { directory, sdk }) : { args: [] };
-  return assemble(assembly, join(directory, name), target, linkArgs, { frameworkArgs: framework.args, sign, sdk });
+  return assemble(assembly, join(directory, name), target, linkArgs, { frameworkArgs: framework.args, sign, sdk, debug: extra.includes('--debug') });
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const mode = process.argv[2] ?? 'build';
