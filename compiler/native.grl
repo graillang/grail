@@ -2879,6 +2879,9 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
             }
             absolute := site_at(text, a, e, view(".gposa "));
             if absolute || site_at(text, a, e, view(".gpos ")) {
+                // A new statement: a kind its predecessor stated for an abort that is not there any
+                // more is not this statement's.
+                pending = 0;
                 w := site_words(text[a..e]);
                 if w.len() == 4 {
                     internal := w[3] != 0;
@@ -2996,8 +2999,11 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
         // Only a check in program code is rewritten: the runtime's own aborts (rt_fail ends in one)
         // stay plain, or a failing check would report itself forever.
         if (e - a == 13) && seen_own && !own_internal && site_at(text, a, e, view("call rt_abort")) {
+            // An inlined accessor's bounds check is recognised by its shape before any pending
+            // kind: a `.gkind` whose own abort the optimiser removed (a divisor it proved non-zero)
+            // must not name the next check in the statement.
             mut kind = pending;
-            if (kind == 0) && site_at(text, p1a, p1e, view("jb ")) && site_in(text, p2a, p2e, view("cmpq 8(%rdi),%rsi")) {
+            if site_at(text, p1a, p1e, view("jb ")) && site_in(text, p2a, p2e, view("cmpq 8(%rdi),%rsi")) {
                 kind = 1;
             }
             out.append(text[pend..a]);
@@ -32911,6 +32917,26 @@ fn emit_resolved_call<a>(
         ty := argtypes[i];
         move_out(&mut c, val(slot, ty));
     }
+    // `Some(x)` and `None` of an inline option are written in place, not called: the tag and the
+    // payload words into frame words of this site (core::some / core::none, stage 5).
+    if (c.raw == 0) & same(view(m), view("core")) & (same(view(name), view("some")) || same(view(name), view("none"))) && framed(&mut c, ret) {
+        od := ty_arg(&mut c, base_type(&mut c, ret));
+        some := success_variant(&mut c, od);
+        mut slot = 0;
+        if same(view(name), view("some")) {
+            tag := imm(&mut c, some);
+            slot = enum_frame(&mut c, tag, args[0], ret, argtypes[0]);
+        } else {
+            tag := imm(&mut c, 1 - some);
+            zero := imm(&mut c, 0);
+            slot = enum_frame(&mut c, tag, zero, ret, 1);
+        }
+        own(&mut c, slot, ret);
+        mut none_lent = u64[];
+        captured_bonds(&mut c, val(slot, ret), &map, &sources, &argtypes, &none_lent);
+        call_bonds(&mut c, val(slot, ret), first, &sources, signature_ret);
+        return val(slot, ret);
+    }
     mut sent = args.copy();
     dest := call_dest(&mut c, ret);
     if dest != 0 {
@@ -49563,6 +49589,7 @@ fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
     if same(view(name), view("mutex_lock_until"))
         || same(view(name), view("rw_try"))
         || same(view(name), view("rw_unlock"))
+        || same(view(name), view("rw_release"))
         || same(view(name), view("sem_try"))
         || same(view(name), view("cond_notify"))
         || same(view(name), view("latch_wait"))
@@ -49609,6 +49636,7 @@ fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
         || same(view(name), view("mutex_lock_until"))
         || same(view(name), view("rw_try"))
         || same(view(name), view("rw_unlock"))
+        || same(view(name), view("rw_release"))
         || same(view(name), view("sem_try"))
         || same(view(name), view("cond_notify"))
         || same(view(name), view("latch_wait"))
@@ -55894,6 +55922,7 @@ pub fn main() -> u64 {
     host_fn_unsafe(&mut c, view("mutex_lock_until"), 0);
     host_fn_unsafe(&mut c, view("rw_try"), 0);
     host_fn_unsafe(&mut c, view("rw_unlock"), 0);
+    host_fn_unsafe(&mut c, view("rw_release"), 0);
     host_fn_unsafe(&mut c, view("sem_try"), 0);
     host_fn_unsafe(&mut c, view("cond_notify"), 0);
     host_fn_unsafe(&mut c, view("latch_wait"), 0);
