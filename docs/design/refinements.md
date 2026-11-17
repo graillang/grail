@@ -367,3 +367,37 @@ corpus runs at the same speed.
 
 Refinements on generic `T`, on vector elements (`u64[] where all < 10`), quantifiers, and
 user-defined predicate functions. Each fits the design later.
+
+## Bounds-check facts: working state (prover_wrap, 2026-11-17)
+
+Branch `gaps15-bce` (shared with /root/remove_forwarders; rebase before pushing, never force-push).
+Submitted to the landing service; head at the time of writing `be799a1` plus this note.
+
+Done (index checks in each benchmark's own functions, `tools/checks-native.mjs`):
+- push-loop length (`for i in n { v.push(x) }` from empty gives `v.len == n`): ecs 18 -> 0;
+- interval reading of `t * L + ... + c` against a constant or known length: nbody 24 -> 0;
+- literal equalities and constant loop counts (`n := 256`, `for i in n * n`): matmul 6 -> 0;
+- an inline byte store when the index is proved: sieve 1 -> 0;
+- `*` and `+` proved by the interval reading carry no overflow check (nbody traps 44 -> 2);
+- `--verify-facts` keeps proved checks without counting them as failures (edge kind 16 for a
+  proved accessor, `call_verified_out` for a proved call through the checking wrapper).
+
+- `grail build --report checks` (the compiler's `--report-checks`): each residual check in the
+  program's own functions with location and kind, from the site-table pass (`report_check`).
+
+- The loop-invariant pass (`pv_loop_kill_spec`, `pv_spec_check`): a `while` body is compiled under
+  the facts its writes would kill, checked at the body's end (in `block()`); a fact that fails is
+  dropped for that loop and the function is compiled again (`c.retry`). No `continue` in the body;
+  facts are put back after the loop only when it has no `break`. Sort 12 -> 7 checks in `main`.
+
+- Facts on `&mut` record fields (`pv_field_tracked`, `pv_path_kills`, the path kill in
+  `pv_lent` and at field assignments); a byte read through a field's view consults the facts.
+
+Next (not started; the wrap-up order stopped work here): `--report checks` for release builds
+(count rt_fail/rt_trap sites per function in the LLVM-optimised module); sieve's loop-carried
+bound for `j += i`; sort's remaining checks (facts in the right operand of `||`, and the merge step's
+`else` branch); sieve (the clamp `if hi > n { hi = n }`, `tmp := v.copy()` length equality,
+lengths equal across the v/tmp swap - this needs a loop invariant: the body reassigns both vectors,
+so today's loop kill drops their length facts at the head); sieve's `j += i` overflow (a
+loop-carried bound `j <= limit`, `i <= limit`).
+

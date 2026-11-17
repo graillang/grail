@@ -284,6 +284,17 @@ fn rt_win_write(handle: u64, buf: u64, len: u64) -> u64 {
         }
         return wrapping_sub(0, 9);
     }
+    return rt_win_write_handle(handle, buf, len);
+}
+// A write to a file or console handle (no descriptor-table entry): what the failure path's report and
+// the profile dump write to, through rt_syscall_low.
+fn rt_win_write_handle(handle: u64, buf: u64, len: u64) -> u64 {
+    if handle == 0 {
+        return wrapping_sub(0, 9);
+    }
+    if rt_win_entry(handle) != 0 {
+        return wrapping_sub(0, 9);
+    }
     scratch := rt_win_scratch();
     raw_store(scratch, 0);
     if raw_win32(WriteFile, handle, buf, len, scratch, 0) == 0 {
@@ -1157,6 +1168,74 @@ fn rt_hard_exit(code: u64) -> u64 {
     raw_win32(TerminateProcess, wrapping_sub(0, 1), code);
     return 0;
 }
+// The runtime's own syscalls (see rt_syscall_low in os-linux.grl): the arms of rt_syscall the
+// failure path and the scheduler use, and none of the file, pipe, directory or socket ones, so what
+// reaches it reaches no Winsock pointer, no heap and no failure through them.
+// Create (or truncate) a regular file to write, and close it: the profile dump's two calls on the
+// failure path. A create never opens a directory, so this is rt_win_open without the enumeration
+// branch (which enrols a descriptor and allocates), and the handle is closed directly.
+fn rt_create_file(path: u64, flags: u64, mode: u64) -> u64 {
+    units := rt_win_wide(0, path);
+    if rt_error(units) {
+        return units;
+    }
+    wide := rt_win_wslot(0);
+    mut access = 1073741824; // GENERIC_WRITE
+    if (flags & 3) == 2 {
+        access = 3221225472; // GENERIC_READ|GENERIC_WRITE
+    }
+    handle := raw_win32(CreateFileW, wide, access, 3, 0, 2, 128, 0); // CREATE_ALWAYS
+    if handle == wrapping_sub(0, 1) {
+        return rt_win_errno();
+    }
+    return handle;
+}
+fn rt_close_file(fd: u64) -> u64 {
+    raw_win32(CloseHandle, fd);
+    return 0;
+}
+fn rt_syscall_low(n: u64, a: u64, b: u64, c: u64) -> u64 {
+    if n == 1 {
+        return rt_win_write_handle(rt_win_handle(a), b, c);
+    }
+    if n == 11 {
+        rt_win_reap(a);
+        return rt_win_unmap(a);
+    }
+    if n == 24 {
+        raw_win32(SwitchToThread);
+        return 0;
+    }
+    if n == 35 {
+        return rt_win_sleep(a);
+    }
+    if n == 39 {
+        return raw_win32(GetCurrentProcessId);
+    }
+    if n == 60 {
+        return raw_win32(ExitProcess, a);
+    }
+    if n == 231 {
+        return raw_win32(ExitProcess, a & 255);
+    }
+    if n == 62 {
+        return 0;
+    }
+    if n == 202 {
+        // Linux futex encoding: FUTEX_WAKE is op bit 0, FUTEX_PRIVATE_FLAG is bit 7.
+        if (b & 128) == 0 {
+            return rt_win_join_wait(a);
+        }
+        if (b & 1) != 0 {
+            return rt_win_wake(a, c);
+        }
+        return rt_win_wait(a, c);
+    }
+    if n == 228 {
+        return rt_win_clock(b);
+    }
+    return wrapping_sub(0, 38);
+}
 fn rt_syscall(n: u64, a: u64, b: u64, c: u64) -> u64 {
     if n == 0 {
         return rt_win_read(rt_win_handle(a), b, c);
@@ -1345,6 +1424,10 @@ fn rt_symlink(target: u64, link: u64) -> u64 {
     }
     return 0;
 }
+// A Windows file has no permission bits to set: whether it runs is its name's business.
+fn rt_chmod(path: u64, mode: u64) -> u64 {
+    return 0;
+}
 // MoveFileExW with MOVEFILE_REPLACE_EXISTING: the destination file is replaced, a directory is only
 // renamed when it is absent, and 0 or a positive errno comes back.
 fn rt_rename(from: u64, to: u64) -> u64 {
@@ -1449,6 +1532,9 @@ fn rt_spawn_redirect(paths: u64, argv: u64, envp: u64, out_fd: u64, err_fd: u64)
     if started == 0 {
         result = wrapping_sub(0, rt_win_errno());
     } else {
+        if rt_win_env_has_parent(envp) {
+            rt_win_kill_with_us(raw_load(info));
+        }
         raw_win32(CloseHandle, raw_load(info + 8)); // the thread handle is not needed
         result = raw_load(info); // the process handle: the child's id
     }
@@ -1459,6 +1545,46 @@ fn rt_spawn_redirect(paths: u64, argv: u64, envp: u64, out_fd: u64, err_fd: u64)
         rt_free(block);
     }
     return result;
+}
+// A child started with GRAIL_PARENT=<pid> in its environment - a `grail build` driver's module run
+// (os-linux.grl, rt_parent_watch) - dies with this process. Windows has no parent-death signal: the
+// child joins a job object marked JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, whose handle is never closed
+// here, so the system closes it - and kills what is in it - when this process ends, however it ends.
+fn rt_win_kill_with_us(process: u64) -> u64 {
+    job := raw_win32(CreateJobObjectW, 0, 0);
+    if job == 0 {
+        return 0;
+    }
+    // JOBOBJECT_EXTENDED_LIMIT_INFORMATION (144 bytes): BasicLimitInformation.LimitFlags at 16.
+    limits := rt_alloc(144);
+    mut i = 0;
+    while i < 144 {
+        raw_store(limits + i, 0);
+        i += 8;
+    }
+    raw_store(limits + 16, 8192); // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    raw_win32(SetInformationJobObject, job, 9, limits, 144); // JobObjectExtendedLimitInformation
+    rt_free(limits);
+    raw_win32(AssignProcessToJobObject, job, process);
+    return 0;
+}
+// Whether a NUL-terminated UTF-8 environment table holds `GRAIL_PARENT=`.
+fn rt_win_env_has_parent(envp: u64) -> bool {
+    if envp == 0 {
+        return false;
+    }
+    mut ep = envp;
+    while raw_load(ep) != 0 {
+        p := raw_load(ep);
+        if (raw_byte(p) == 71) & (raw_byte(p + 1) == 82) & (raw_byte(p + 2) == 65) & (raw_byte(p + 3) == 73)
+            & (raw_byte(p + 4) == 76) & (raw_byte(p + 5) == 95) & (raw_byte(p + 6) == 80) & (raw_byte(p + 7) == 65)
+            & (raw_byte(p + 8) == 82) & (raw_byte(p + 9) == 69) & (raw_byte(p + 10) == 78) & (raw_byte(p + 11) == 84)
+            & (raw_byte(p + 12) == 61) {
+            return true;
+        }
+        ep = ep + 8;
+    }
+    return false;
 }
 // CreatePipe: two inheritable handles, because a child only inherits what its STARTUPINFO names when
 // the handle itself allows it. Fills the caller's two-word pair with the read and the write end.

@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildCompiler, command, compilerSources, root } from './native.mjs';
+import { compareCoff } from './asm-oracle.mjs';
 
 export const windowsTarget = 'windows-x86_64';
 export const windowsAarch64 = 'windows-aarch64';
@@ -38,6 +39,9 @@ export const imports = {
     'GetFileAttributesW',
     'GetFileAttributesExW',
     'MoveFileExW',
+    'CreateJobObjectW',
+    'SetInformationJobObject',
+    'AssignProcessToJobObject',
     'CreatePipe',
     'CreateSymbolicLinkW',
     'GetLastError',
@@ -164,7 +168,22 @@ export function writeImportLibrary(directory = join(workDirectory, 'lib'), machi
   return library;
 }
 
+// x86-64 objects come from the compiler's own assembler (`grail asm --target windows-x86_64`,
+// compiler/coff.grl), CodeView debug text included.
+// GRAIL_ASM_ORACLE=1 also holds each internal object to clang's (tools/asm-oracle.mjs).
 export function assemble(source, object, target = windowsTarget) {
+  // (C sources - the FFI shims - are compiled by clang.)
+  const internal = target === 'windows-x86_64' && /\.s$/.test(source);
+  if (internal) {
+    command([buildCompiler(), 'asm', '--target', 'windows-x86_64', source, '-o', object]);
+    if (process.env.GRAIL_ASM_ORACLE === '1') {
+      const reference = `${object}.clang.o`;
+      command(['clang', `--target=${targets[target].triple}`, '-c', source, '-o', reference]);
+      const diff = compareCoff(reference, object);
+      if (diff) throw new Error(`internal assembler differs from clang on ${source}: ${diff}`);
+    }
+    return object;
+  }
   command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${targets[target].triple}`, '-c', source, '-o', object]);
   return object;
 }

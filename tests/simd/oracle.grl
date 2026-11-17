@@ -1,0 +1,356 @@
+// The SIMD oracle (docs/design/simd.md): every S1 operation on every S1 type, lane by lane against
+// the scalar operation it is defined as, on the edge values - signed zeros, infinities, NaN,
+// subnormals, the largest finite values, i32 wraparound. It prints the number of lanes that
+// differ from the scalar result (bit for bit) and a checksum of every lane's bits, which the corpus
+// holds identical on x86_64, aarch64 and riscv64 with both backends.
+struct Tally {
+    bad: u64,
+    sum: u64
+}
+fn note<a>(t: (&a mut Tally), got: u64, want: u64) -> unit {
+    if got != want {
+        t.bad += 1;
+    }
+    t.sum = wrapping_add(wrapping_mul(t.sum, 1099511628211), got);
+}
+fn same_f32(x: f32, y: f32) -> bool {
+    // NaN payloads are not promised: every NaN is one NaN here.
+    if (x != x) && (y != y) {
+        return true;
+    }
+    return bits(x) == bits(y);
+}
+fn check_f32<a>(t: (&a mut Tally), got: f32, want: f32) -> unit {
+    if same_f32(got, want) {
+        note(&mut t, 0, 0);
+    } else {
+        note(&mut t, 1, 0);
+    }
+    if got == got {
+        t.sum = wrapping_add(wrapping_mul(t.sum, 31), bits(got));
+    }
+}
+fn check_f64<a>(t: (&a mut Tally), got: f64, want: f64) -> unit {
+    if ((got != got) && (want != want)) || (bits(got) == bits(want)) {
+        note(&mut t, 0, 0);
+    } else {
+        note(&mut t, 1, 0);
+    }
+    if got == got {
+        t.sum = wrapping_add(wrapping_mul(t.sum, 31), bits(got));
+    }
+}
+fn flag(b: bool) -> f32 {
+    if b {
+        return 1.0;
+    }
+    return 0.0;
+}
+fn flag64(b: bool) -> f64 {
+    if b {
+        return 1.0;
+    }
+    return 0.0;
+}
+fn f32_lanes<a>(t: (&a mut Tally), xs: (&a [f32; 8]), ys: (&a [f32; 8])) -> unit {
+    a := f32x8::load(xs, 0);
+    b := f32x8::load(ys, 0);
+    mut out: [f32; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    one := f32x8::splat(1.0);
+    zero := f32x8::splat(0.0);
+    for op in 13 {
+        mut v = a + b;
+        if op == 1 {
+            v = a - b;
+        }
+        if op == 2 {
+            v = a * b;
+        }
+        if op == 3 {
+            v = a / b;
+        }
+        if op == 4 {
+            v = a.min(b);
+        }
+        if op == 5 {
+            v = a.max(b);
+        }
+        if op == 6 {
+            v = a.eq(b).select(one, zero);
+        }
+        if op == 7 {
+            v = a.ne(b).select(one, zero);
+        }
+        if op == 8 {
+            v = a.lt(b).select(one, zero);
+        }
+        if op == 9 {
+            v = a.le(b).select(one, zero);
+        }
+        if op == 10 {
+            v = a.gt(b).select(one, zero);
+        }
+        if op == 11 {
+            v = a.ge(b).select(one, zero);
+        }
+        if op == 12 {
+            v = f32x8::splat(xs[3]);
+        }
+        v.store(&mut out, 0);
+        for i in 8 {
+            x := xs[i];
+            y := ys[i];
+            mut want = x + y;
+            if op == 1 {
+                want = x - y;
+            }
+            if op == 2 {
+                want = x * y;
+            }
+            if op == 3 {
+                want = x / y;
+            }
+            if op == 4 {
+                want = x.min(y);
+            }
+            if op == 5 {
+                want = x.max(y);
+            }
+            if op == 6 {
+                want = flag(x == y);
+            }
+            if op == 7 {
+                want = flag(x != y);
+            }
+            if op == 8 {
+                want = flag(x < y);
+            }
+            if op == 9 {
+                want = flag(x <= y);
+            }
+            if op == 10 {
+                want = flag(x > y);
+            }
+            if op == 11 {
+                want = flag(x >= y);
+            }
+            if op == 12 {
+                want = xs[3];
+            }
+            check_f32(&mut t, out[i], want);
+        }
+    }
+    // The halving tree: lane i of a level is l[i] + l[i + n/2].
+    t0 := (xs[0] + xs[4]) + (xs[2] + xs[6]);
+    t1 := (xs[1] + xs[5]) + (xs[3] + xs[7]);
+    check_f32(&mut t, a.sum(), t0 + t1);
+    h := f32x4::load(xs, 2);
+    check_f32(&mut t, h.sum(), (xs[2] + xs[4]) + (xs[3] + xs[5]));
+    check_f32(&mut t, h.lane(1), xs[3]);
+    n := f32x4::new(xs[0], ys[1], xs[2], ys[3]);
+    check_f32(&mut t, n.lane(3), ys[3]);
+}
+fn f64_lanes<a>(t: (&a mut Tally), xs: (&a [f64; 4]), ys: (&a [f64; 4])) -> unit {
+    a := f64x4::load(xs, 0);
+    b := f64x4::load(ys, 0);
+    mut out: [f64; 4] = [0.0, 0.0, 0.0, 0.0];
+    one := f64x4::splat(1.0);
+    zero := f64x4::splat(0.0);
+    for op in 9 {
+        mut v = a + b;
+        if op == 1 {
+            v = a - b;
+        }
+        if op == 2 {
+            v = a * b;
+        }
+        if op == 3 {
+            v = a / b;
+        }
+        if op == 4 {
+            v = a.min(b);
+        }
+        if op == 5 {
+            v = a.max(b);
+        }
+        if op == 6 {
+            v = a.lt(b).select(one, zero);
+        }
+        if op == 7 {
+            v = a.ne(b).select(one, zero);
+        }
+        if op == 8 {
+            v = a.ge(b).select(one, zero);
+        }
+        v.store(&mut out, 0);
+        for i in 4 {
+            x := xs[i];
+            y := ys[i];
+            mut want = x + y;
+            if op == 1 {
+                want = x - y;
+            }
+            if op == 2 {
+                want = x * y;
+            }
+            if op == 3 {
+                want = x / y;
+            }
+            if op == 4 {
+                want = x.min(y);
+            }
+            if op == 5 {
+                want = x.max(y);
+            }
+            if op == 6 {
+                want = flag64(x < y);
+            }
+            if op == 7 {
+                want = flag64(x != y);
+            }
+            if op == 8 {
+                want = flag64(x >= y);
+            }
+            check_f64(&mut t, out[i], want);
+        }
+    }
+    check_f64(&mut t, a.sum(), (xs[0] + xs[2]) + (xs[1] + xs[3]));
+    p := f64x2::load(ys, 2);
+    check_f64(&mut t, p.sum(), ys[2] + ys[3]);
+}
+fn i32_lanes<a>(t: (&a mut Tally), xs: (&a [i32; 8]), ys: (&a [i32; 8])) -> unit {
+    a := i32x8::load(xs, 0);
+    b := i32x8::load(ys, 0);
+    mut out: [i32; 8] = [0, 0, 0, 0, 0, 0, 0, 0];
+    one := i32x8::splat(1);
+    zero := i32x8::splat(0);
+    for op in 12 {
+        mut v = a + b;
+        if op == 1 {
+            v = a - b;
+        }
+        if op == 2 {
+            v = a * b;
+        }
+        if op == 3 {
+            v = a & b;
+        }
+        if op == 4 {
+            v = a | b;
+        }
+        if op == 5 {
+            v = a ^ b;
+        }
+        if op == 6 {
+            v = a.min(b);
+        }
+        if op == 7 {
+            v = a.max(b);
+        }
+        if op == 8 {
+            v = a.lt(b).select(one, zero);
+        }
+        if op == 9 {
+            v = a.eq(b).select(one, zero);
+        }
+        if op == 10 {
+            v = a.ge(b).select(one, zero);
+        }
+        if op == 11 {
+            v = a.gt(b).not().select(one, zero);
+        }
+        v.store(&mut out, 0);
+        for i in 8 {
+            x := xs[i];
+            y := ys[i];
+            mut want = wrapping_i32(i64(x) + i64(y));
+            if op == 1 {
+                want = wrapping_i32(i64(x) - i64(y));
+            }
+            if op == 2 {
+                want = wrapping_i32(i64(x) * i64(y));
+            }
+            if op == 3 {
+                want = x & y;
+            }
+            if op == 4 {
+                want = x | y;
+            }
+            if op == 5 {
+                want = x ^ y;
+            }
+            if op == 6 {
+                want = x;
+                if y < x {
+                    want = y;
+                }
+            }
+            if op == 7 {
+                want = x;
+                if x < y {
+                    want = y;
+                }
+            }
+            if op == 8 {
+                want = i32(x < y);
+            }
+            if op == 9 {
+                want = i32(x == y);
+            }
+            if op == 10 {
+                want = i32(x >= y);
+            }
+            if op == 11 {
+                want = i32(x <= y);
+            }
+            note(&mut t, bits(out[i]), bits(want));
+        }
+    }
+    mut total: i64 = 0;
+    for i in 8 {
+        total = total + i64(xs[i]);
+    }
+    note(&mut t, bits(a.sum()), bits(wrapping_i32(total)));
+    m := a.lt(b);
+    note(&mut t, u64(m.any()), u64((xs[0] < ys[0]) || (xs[1] < ys[1]) || (xs[2] < ys[2]) || (xs[3] < ys[3]) || (xs[4] < ys[4]) || (xs[5] < ys[5]) || (xs[6] < ys[6]) || (xs[7] < ys[7])));
+    note(&mut t, u64(m.all()), u64((xs[0] < ys[0]) && (xs[1] < ys[1]) && (xs[2] < ys[2]) && (xs[3] < ys[3]) && (xs[4] < ys[4]) && (xs[5] < ys[5]) && (xs[6] < ys[6]) && (xs[7] < ys[7])));
+}
+fn main() {
+    mut t = Tally { bad: 0, sum: 0 };
+    zero: f32 = 0.0;
+    inf := 1.0 / zero;
+    nan := zero / zero;
+    edges := f32[0.0, -0.0, 1.0, -1.5, inf, -inf, nan, 0.000000000000000000000000000000000000000000001, 340000000000000000000000000000000000000.0, -0.0000000000000000000000000000000000000025, 3.0, 0.1];
+    for s in 12 {
+        mut xs: [f32; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        mut ys: [f32; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        for i in 8 {
+            xs[i] = edges[(s + i) % 12];
+            ys[i] = edges[(s * 5 + i * 7 + 3) % 12];
+        }
+        f32_lanes(&mut t, &xs, &ys);
+    }
+    dzero: f64 = 0.0;
+    dedges := f64[0.0, -0.0, 1.0 / dzero, -1.0 / dzero, dzero / dzero, 0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005, 1.5, -2.25];
+    for s in 8 {
+        mut xs: [f64; 4] = [0.0, 0.0, 0.0, 0.0];
+        mut ys: [f64; 4] = [0.0, 0.0, 0.0, 0.0];
+        for i in 4 {
+            xs[i] = dedges[(s + i) % 8];
+            ys[i] = dedges[(s * 3 + i * 5 + 1) % 8];
+        }
+        f64_lanes(&mut t, &xs, &ys);
+    }
+    iedges := i32[0, -1, 1, 2147483647, -2147483648, 65536, -7, 12345678, 3, -2147483647];
+    for s in 10 {
+        mut xs: [i32; 8] = [0, 0, 0, 0, 0, 0, 0, 0];
+        mut ys: [i32; 8] = [0, 0, 0, 0, 0, 0, 0, 0];
+        for i in 8 {
+            xs[i] = iedges[(s + i) % 10];
+            ys[i] = iedges[(s * 3 + i * 7 + 2) % 10];
+        }
+        i32_lanes(&mut t, &xs, &ys);
+    }
+    println(t.bad);
+    println(t.sum);
+}

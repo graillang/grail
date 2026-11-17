@@ -56,6 +56,15 @@ for (const [i, file] of sources.entries()) {
   formatted.set(file, copy);
 }
 checks += sources.length;
+// Wrapped output parses again: tests/fmt/wide.grl has expressions the formatter must break at a
+// binary operator, comparisons included, and a continuation line that opens with `<` reads as
+// generic brackets (asm_x86.grl once came out of `grail fmt` refused that way).
+{
+  const wide = formatted.get(join(root, 'tests/fmt/wide.grl'));
+  assert.ok(readFileSync(wide, 'utf8') !== readFileSync(join(root, 'tests/fmt/wide.grl'), 'utf8'), 'tests/fmt/wide.grl was expected to need wrapping');
+  const reparsed = run(['check', wide], undefined, false);
+  assert.equal(reparsed.status, 0, `formatted tests/fmt/wide.grl does not check:\n${reparsed.stdout ?? ''}${reparsed.stderr ?? ''}`); checks++;
+}
 const original = join(work, 'original.s'), reformatted = join(work, 'reformatted.s');
 // Both builds are given the same module root: `lib/xxhash.grl` is one of the compiler's own sources,
 // which makes `lib/` a module root by location, and the formatted copies live somewhere else - so
@@ -135,7 +144,7 @@ checks += 10;
   assert.match(bytes?.members.find(member => member.name === 'find')?.type ?? '', /^pub fn find\(&self, needle: \(&\[u8\]\)\) -> u64\?$/, 'a method\'s signature is the text up to its body');
   assert.equal(bytes?.doc, '', 'the module block is not also the first declaration\'s doc');
   const fields = item('hashmap', 'struct', 'Map')?.members ?? [];
-  assert.ok(fields.some(field => field.name === 'entries' && field.type === 'Slot<K, V>[]'), `a record lists its fields: ${JSON.stringify(fields)}`);
+  assert.ok(fields.some(field => field.name === 'keys' && field.type === 'K[]'), `a record lists its fields: ${JSON.stringify(fields)}`);
   assert.ok((item('io', 'enum', 'Error')?.members ?? []).some(variant => variant.name === 'Other' && variant.type === 'u64'), 'an enum lists its variants and payloads');
   assert.ok(module('hashmap')?.items.some(entry => entry.kind === 'impl' && entry.name.startsWith('Map')), 'an implementation is listed');
   assert.ok(fs.readdirSync(outA).filter(name => name.endsWith('.html')).length >= 25, 'one page per module');
@@ -144,6 +153,19 @@ checks += 10;
   assert.match(fs.readFileSync(join(outA, 'hashmap.html'), 'utf8'), /href="hashmap\.html#struct-Entry"/, 'a doc body links a uniquely named declaration');
   assert.match(fs.readFileSync(join(outA, 'index.html'), 'utf8'), /data-name="hashmap Map"/, 'the index carries the search data');
   checks += 7;
+}
+// `grail build --report checks`: every check left in the program's own functions, with its location
+// and kind; an index the prover settled is not among them.
+{
+  writeFileSync(join(work, 'checks.grl'), 'fn total(v: &u64[], k: u64) -> u64 {\n    mut s: u64 = 0;\n    for i in v.len() {\n        s = s + v[i];\n    }\n    return s / k + v[k];\n}\nfn main() {\n    v := u64[1, 2, 3];\n    println(total(&v, 1));\n}\n');
+  const r = spawnSync(grail, ['build', 'checks.grl', '-o', join(work, 'checks'), '--report', 'checks'], { cwd: work, encoding: 'utf8', timeout: 300_000 });
+  assert.equal(r.status, 0, `--report checks builds: ${r.stdout}${r.stderr}`);
+  const rows = r.stdout.split('\n').filter(line => line.includes('f_main_total'));
+  assert.deepEqual(rows.map(line => line.split('\t').slice(1).join(' ').replace(/^.*checks\.grl/, 'checks.grl')),
+    ['checks.grl:4:9 overflow', 'checks.grl:6:5 divide', 'checks.grl:6:5 index', 'checks.grl:6:5 overflow'], `the report of total: ${r.stdout}`);
+  const bad = spawnSync(grail, ['build', 'checks.grl', '--report', 'nope'], { cwd: work, encoding: 'utf8' });
+  assert.notEqual(bad.status, 0, '--report takes only `checks`');
+  checks += 3;
 }
 // 4. Cross targets: the grail tool itself (formatter) and programs it builds.
 writeFileSync(join(work, 'hello.grl'), 'fn main() {\n    println(42);\n}\n');
@@ -455,5 +477,56 @@ const fast = ['--interval', '40', '--debounce', '60'];
     assert.match(first(dyn), /`@no_alloc` function `sink` performs a heap allocation/, first(dyn));
     assert.match(dyn.stdout + dyn.stderr, /the drop of a `dyn Speak` value, whose implementations this module cannot see: `Speak` is public/, dyn.stdout + dyn.stderr); checks++;
   }
+}
+// `grail check` proves effect claims as a build does: every module of lib/ that claims one must check
+// (each module's run reads the runtime's summary, which the runtime's own check run writes), and so
+// must a program that uses one.
+{
+  const dir = join(work, 'check-claims'); mkdirSync(dir, { recursive: true });
+  const store = { ...process.env, GRAIL_CACHE_DIR: join(dir, 'store') };
+  const check = (file) => spawnSync(grail, ['check', file], { cwd: dir, encoding: 'utf8', env: store });
+  for (const entry of readdirSync(join(root, 'lib')).filter((f) => f.endsWith('.grl')).sort()) {
+    const name = entry.slice(0, -4);
+    writeFileSync(join(dir, `use_${name}.grl`), `use ${name};\nfn main() {\n    println(1);\n}\n`);
+    const r = check(`use_${name}.grl`);
+    assert.equal(r.status, 0, `grail check of a program using \`${name}\` failed\n${r.stdout}${r.stderr}`);
+  }
+  checks++;
+  writeFileSync(join(dir, 'claim_loop.grl'), '@no_alloc\nfn total(v: &u64[]) -> u64 {\n    mut t = 0;\n    for x in v {\n        t = wrapping_add(t, *x);\n    }\n    return t;\n}\nfn main() {\n    v := u64[1, 2];\n    println(total(&v));\n}\n');
+  const loop = check('claim_loop.grl');
+  assert.equal(loop.status, 0, `grail check of a claimed loop over a borrowed vector failed\n${loop.stdout}${loop.stderr}`); checks++;
+}
+
+// A killed driver leaves no compiler behind: a module run started by `grail check` dies with it
+// (os-linux.grl, rt_parent_watch: PR_SET_PDEATHSIG through GRAIL_PARENT). A timeout, an editor or
+// the OOM killer that SIGKILLs the driver used to leave the runs going as orphans.
+if (process.platform === 'linux') {
+  const dir = join(work, 'orphans');
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  let big = 'module big;\n';
+  for (let i = 0; i < 3000; i++) big += `pub fn f${i}(x: u64) -> u64 {\n    mut t = x;\n    for k in 10 {\n        t = wrapping_add(t, k * ${i});\n    }\n    return t;\n}\n`;
+  mkdirSync(join(dir, 'src'));
+  writeFileSync(join(dir, 'grail.toml'), '[package]\nname = "orphans"\nversion = "0.1.0"\n');
+  writeFileSync(join(dir, 'src/big.grl'), big);
+  writeFileSync(join(dir, 'src/main.grl'), 'use big;\nfn main() {\n    println(big::f1(1));\n}\n');
+  const pause = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  // The module runs of this build: compiler processes working in `dir`.
+  const moduleRuns = () => readdirSync('/proc').filter(name => /^\d+$/.test(name)).filter(pid => {
+    try {
+      return fs.readlinkSync(`/proc/${pid}/cwd`) === dir && readFileSync(`/proc/${pid}/comm`, 'utf8').trim() === 'grail'
+        && readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes('--separate');
+    } catch { return false; }
+  });
+  const driver = spawn(grail, ['check'], { cwd: dir, stdio: 'ignore', env: { ...process.env, GRAIL_JOBS: '1', GRAIL_CACHE_DIR: join(dir, 'store') } });
+  let seen = [];
+  for (let waited = 0; waited < 60_000 && seen.length === 0; waited += 20) { pause(20); seen = moduleRuns(); }
+  assert.ok(seen.length !== 0, 'orphans: no module run of the build was seen');
+  process.kill(driver.pid, 'SIGKILL');
+  let left = seen;
+  for (let waited = 0; waited < 5_000 && left.length !== 0; waited += 20) { pause(20); left = moduleRuns(); }
+  for (const pid of left) { try { process.kill(Number(pid), 'SIGKILL'); } catch {} }
+  assert.deepEqual(left, [], 'orphans: a module run outlived its killed driver');
+  checks++;
 }
 console.log(`cli: ${checks} formatter/tool checks passed`);

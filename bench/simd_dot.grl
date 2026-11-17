@@ -1,0 +1,47 @@
+// The SIMD dot product (docs/design/simd.md, S1): `f32x4` loads from two slices, a multiply and an
+// add per four elements into one accumulator, and the fixed halving-tree sum at the end. Its twin
+// in C with SSE2 intrinsics is bench/simd_dot.c; `bun tools/bench-simd.mjs` builds both (Grail
+// with --backend=llvm and the native backend, C with clang -O2) and reports ns per element.
+//   simd_dot ROUNDS     dot of two 4096-element vectors, ROUNDS times; prints the sum and time
+use host;
+
+fn dot<a>(x: (&a [f32]), y: (&a [f32])) -> f32 {
+    mut acc = f32x4::splat(0.0);
+    mut i = 0;
+    // The shorter of the two: a dot product of unequal lengths covers the common prefix, and the
+    // bound is what lets the optimiser drop both slices' checks.
+    mut n = x.len();
+    if y.len() < n {
+        n = y.len();
+    }
+    while i + 4 <= n {
+        acc = acc + f32x4::load(x, i) * f32x4::load(y, i);
+        i += 4;
+    }
+    return acc.sum();
+}
+fn main(arg: &[u8]) {
+    mut rounds = 0;
+    for i in arg.len() {
+        rounds = rounds * 10 + arg[i] - 48;
+    }
+    if rounds == 0 {
+        rounds = 100000;
+    }
+    n := 4096;
+    mut xs = f32[];
+    mut ys = f32[];
+    for i in n {
+        xs.push(f32(i % 17) * 0.25);
+        ys.push(f32(i % 13) * 0.5 - 2.0);
+    }
+    mut total: f64 = 0.0;
+    t0 := host::now_us();
+    for r in rounds {
+        total = total + f64(dot(&xs[:], &ys[:]));
+    }
+    t1 := host::now_us();
+    println(total);
+    print("ns/element ");
+    println(f64(t1 - t0) * 1000.0 / (f64(rounds) * f64(n)));
+}

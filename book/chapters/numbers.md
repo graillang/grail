@@ -54,3 +54,50 @@ checked `char(n)`, and offer `is_alphabetic`, `is_whitespace`, `to_uppercase` an
 {{example:chars-f32}}
 
 **Try it:** in the sized-integer example, change `small + 55` to `small + 56` and run it again.
+
+## SIMD vectors
+
+`f32x4`, `f32x8`, `f64x2`, `f64x4`, `i32x4` and `i32x8` hold four or eight lanes of one number type,
+and `+`, `-`, `*`, `/` (on floats), `&`, `|`, `^` (on integers) work lane by lane. A vector is an
+ordinary value: it is copied like a number and needs no cleanup. It comes from `splat` (every lane
+the same), `new` (each lane given), or `load` from a slice or array at an index, and goes back with
+`store`:
+
+```grail
+fn dot<a>(x: (&a [f32]), y: (&a [f32])) -> f32 {
+    mut n = x.len();
+    if y.len() < n {
+        n = y.len();
+    }
+    mut acc = f32x4::splat(0.0);
+    mut i = 0;
+    while i + 4 <= n {
+        acc = acc + f32x4::load(x, i) * f32x4::load(y, i);
+        i += 4;
+    }
+    return acc.sum();
+}
+```
+
+A `load` or `store` is checked once per vector, like an index: `f32x4::load(s, i)` needs
+`i + 3 < s.len()`. `v.sum()` adds the lanes in a fixed order (pairs of halves, down to one lane),
+so the result is the same on every machine; `v.lane(2)` reads one lane; `v.min(w)` and `v.max(w)`
+follow the scalar rule (a NaN gives the other operand, and a tie gives the first).
+
+Comparisons are lane-wise too, so they are methods that give a mask (`m32x4` for an `f32x4`), not
+a `bool`: `a.lt(b)`, `a.eq(b)` and so on. A mask chooses lanes with `m.select(a, b)` (lane from `a`
+where the mask is set, else from `b`), and `m.any()`, `m.all()` and `m.not()` read or flip it;
+`m32x4::splat(true)` makes one directly. `a < b` on vectors is an error that says to use the method.
+
+`u8x16`, `u8x32`, `u32x4` and `i64x2` hold bytes, unsigned words and 64-bit integers; unsigned lanes
+compare and order as unsigned. `v.shuffle(3, 2, 1, 0)` rearranges lanes, and `v.shuffle2(w, 0, 4, 1,
+5)` picks from `v` followed by `w` (which is how a 4x4 transpose is written); the indices are
+literals. `to_f32()` and `to_i32()` convert lanes (`to_i32` truncates, saturates and turns NaN into
+0), and `bits()`/`T::from_bits` reinterpret them. `load_aligned` and `store_aligned` promise an
+address aligned to the vector's size, and a program that breaks the promise stops with the address
+rather than reading the wrong bytes.
+
+With `--release` (the LLVM backend) the vectors are SSE2 or NEON registers and a loop like the one
+above runs as fast as the same loop written in C with intrinsics. The development backend computes
+the same results one lane at a time for now. Every target and both backends give bit-identical
+results (docs/design/simd.md).

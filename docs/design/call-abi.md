@@ -288,3 +288,67 @@ optimiser_labels, then S6 after unboxed 3a lands (it builds on 3a's frame aggreg
 - **Dyn dispatch (record vtable adapters).** The adapter is a load and a tail jump instead of a
   framed call (landed 3fe042c). dyncall: native 1,645 M -> 1,565 M, LLVM 779 M -> 719 M; Rust -O
   648 M.
+- **Indirect calls pass only their words (LLVM).** native.grl `indirect_fact`: a `call *%rax` set up
+  by load_call_args with no call in between records its word count (fact kind 7, keyed by its ordinal
+  among the function's `call *%rax` lines); lower_indirect_call passes `poison` past it. The check:
+  the frame-slot loads into argument registers in the run of moves just before the call must not
+  reach past the count. dyncall LLVM 719 M -> 679 M.
+- **S6 (B), lent frame environments.** native.grl `lent_parameter` is init_parameter's call-scope
+  condition exactly (kind 20, no env, not Owned or unbuilt, no lifetime: `Fn<s>()` may be stored in
+  a value of `s`). `call` marks such an argument's start; a closure literal that is the whole
+  argument takes `frame_alloc(2 + captures)` (aggregate fact, so the escaped-slot check covers it)
+  and the in-place drop as its drop word. Generic `F` is S6 (A), closure_bounds_design's. Closure
+  loop (10 M calls): native 1,400 M -> 930 M, LLVM 1,400 M -> 450 M; callabi-lent-closure-frame-env
+  is valgrind-clean on both backends.
+- **SysV byval records lifted (LLVM).** ffi_signature_fact counts a byval record by its
+  ffi_byval_mode decision: each INTEGER eightbyte one integer word, each SSE eightbyte one vector
+  register passed as `double` (its bits: one f64 or two f32), a MEMORY record as `ptr byval([N x
+  i64]) align 8` filled from the outgoing area's words (an entry-block buffer). A call whose area
+  holds anything else keeps the native call. The foreign-call marker's save area may now open inside
+  a call's outgoing area (one level of nesting). test-ffi runs its fixtures on both backends.
+
+## S6 design: closures without a heap environment
+
+**Superseded.** The per-parameter escape-summary scheme below was rejected: a use-after-free must
+not rest on an inference carried in interface text. What was built instead: S6 (B) - a closure
+literal passed to a call-scoped, non-`Owned` `Fn(..)` parameter (init_parameter's rule, no lifetime)
+gets a frame environment (landed); S6 (A) - closures for a generic `F` held inline as their
+environment record (stage 4 representation), owned by /root/closure_bounds_design as part of 2c.
+The original proposal is kept for the record.
+
+Today a closure literal is `rt_rec(2 + captures)` holding `{code, drop, captures...}`, the closure
+value is that record's address, and a call passes the address of the word holding it (`direct()`
+says a `.closure` record is not direct). Every literal allocates; every owner frees.
+
+**What decides escape.** The front end emits code in one pass, so at the literal it cannot see the
+closure's future. The closure escapes when it is moved into a heap place: returned, stored in a
+field, vector, map or task, captured by an escaping closure, or passed by value to a callee that
+does any of those with its parameter. The callees that matter (`pool::join`, `parallel_map`,
+`with_class`, iterator adaptors) take `F` by value, and some move it into a task. So:
+
+1. **Escape summary per function and `Fn` parameter (new fact, front end).** A parameter of
+   closure type is *contained* when the body only calls it, borrows it, or passes it on to a
+   contained parameter. Computed bottom-up like the effect summaries (interfaces carry it as an ABI
+   line `fn-params contained = i,j`). Unknown callees (function values, dyn) are not contained.
+2. **Frame environment at the literal** when the literal is (a) bound to a local that the
+   ownership pass shows is never moved, only called or borrowed, or (b) an argument in a contained
+   position. The decision is made after the statement is parsed, so the literal emits its
+   environment through a placeholder that is either `frame_alloc(2 + n)` (3a's aggregate, with its
+   aggregate fact) or `rt_rec`. The value stays an address, so calls, `&Fn` borrows and the
+   `{code, drop}` header are unchanged and no ABI line changes for callers.
+3. **Drop.** A frame environment's owner calls the drop word's in-place form (stage 4's helper)
+   and never `rt_free`. A move of a frame closure into a heap place (only possible if the
+   analysis is wrong) is a compile error (`internal: frame closure escapes`), not a silent box.
+4. **LLVM.** The environment is an escaped frame slot of 2 + n words. It depends on
+   /root/thread_alloc's fix: an alloca as wide as the aggregate fact says, and the verify check that
+   no access through an escaped slot exceeds it.
+
+**Effect on join.** The caller's two closure literals become frame environments, since `join`'s
+`a` and `b` are contained once its body passes them only to `rt_parallel_with`, a runtime
+entry declared contained. Join's own inner closure (pool.grl:146) is a literal passed to
+`rt_parallel_with` and becomes framed too. Left: the two Options (pool's, forwarded) and the
+`Pair` (3c, landed). So join drops from 6 allocations to 2, then 0 after the scheduler change.
+
+**Size.** The escape summary (front end, about 400 lines, with interface support), the
+placeholder emission and drop changes (about 200), tests: a corpus of escaping and non-escaping
+shapes, plus a forged-summary verify test. It is the largest step of the plan.

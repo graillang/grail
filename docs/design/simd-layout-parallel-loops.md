@@ -389,6 +389,23 @@ pool::zip2(&mut pos[0: n], &vel[0: n], 4096,
 - Runtime: `rt_parallel_for_chunks` (`runtime.grl:2992`) already takes a width; it becomes an array
   of `{data, width}` pairs. A grain is rounded up to whole cache lines where the element size divides 64 (3.1).
 
+*As built (2026-11-17, /root/fixed_arrays).* `parallel_zip_builtin` (native.grl, builtin id 67)
+takes the grain, the callback and one to four slices, checks each slice's mode and element
+(`require_capability_named`: transferable for `&mut`, shareable for `&`), the callback's arity and
+that each parameter is the argument's slice (kind, mode, element; lifetimes not compared - a callable
+bound is higher-ranked in them), and looks through a generic callable (`param_callable`). The frame
+holds the `{view, width}` pairs; `rt_parallel_zip` checks the lengths (failure kind 19 names the
+argument) and splits as `rt_parallel_split` does, from (n, grain) alone (`rt_job_split` kind 2,
+`rt_job_zip_leaf`). The runtime cannot call with more than three arguments (it is compiled by the
+seed too), so the leaf calls a compiler-emitted adapter `grail_zip_adapter_<closure>_<n>` with one
+block {callback, environment, views}, which loads the views into argument registers. The
+`v.len == p.len` entry fact (as /root/prover_wrap advised): `parallel_zip_builtin` marks the
+`Closure` record of a literal written as its argument (`entry_eq`), and `emit_closures` queues
+`pk.len == p0.len` as pending facts for the body's first block. Closure bodies were not proved at all
+before; `emit_closures` now runs `pv_begin`/`pv_end` around the body (no refined parameters, so no
+seeded facts). A closure value passed through a variable gets no fact. Cases: `parallel-for-zip-*`, `pool-zip-*`,
+`reject-parallel-for-zip-*`.
+
 Two smaller additions with the same construction:
 
 ```grl
@@ -413,6 +430,15 @@ The two results are loans whose parent is the argument's loan (`reborrow` in `ow
 already has a parent link), with a new flag meaning *sibling halves do not conflict with each other*.
 That is the only change to `ownership.grl`: about 20 lines in `conflict`/`access_loan`, no index
 arithmetic. It covers divide-and-conquer (parallel sort, tree builds) and hand-written chunkers.
+
+*As built (2026-11-17, /root/fixed_arrays).* `Loan.group`; `open_group`/`close_group` around the two
+reborrows the statement `left, right := split_at_mut(s, mid)` makes (`split_at_mut_statement`, both
+halves `rt_vslice` views of `s` through `view_bonds`). `split_apart(other, through, extra)` - some
+ancestor-or-self of each is a distinct loan of one group, and `other` is not below `through` - exempts
+a loan in `reborrow`, `access_loan` and (for the second half) `use_loan`'s live-child test. A
+temporary argument (`&mut xs[0: n]`) is bound under a hidden name so its loan lives as long as the
+halves. Cases: `split-at-mut-*`, `reject-split-at-mut-*` (vector used, parent slice used, overlapping
+re-split, overlap inside one half, shared argument), `mid` past the end aborts.
 
 ### 4.4 ECS-style systems
 

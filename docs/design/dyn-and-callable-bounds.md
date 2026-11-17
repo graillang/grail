@@ -173,3 +173,61 @@ about ten calls - three nested `next`s, two closure bodies, the out-of-line `cor
 drop helpers - none inlined, because the native optimiser inlines leaves only; the LLVM build
 inlines part of it (7.5x). The remaining work is in the optimiser (inline small non-leaf direct
 calls, drop the empty drop helpers, make `Some` an intrinsic), not in the library or the type system.
+
+### 5.1 The inherent hop removed
+
+Each adapter's `next` was written once (`vec_next`, `map_next`, `filter_next`) and reached from both
+the `Iterator` impl and the inherent `next` a `for` loop uses: one forwarding call per adapter per
+element. The body now sits in both. Same benchmark: native 374 ms (was 432-529), `--release`
+72 ms (was 158) against a 17 ms hand loop - 4.2x. Still to do: VecIter as an index walk (needs a
+"move element i out" primitive and a remainder drop; `rt_pop` is a call per element today), and
+S6(A) (the closure held inline).
+
+## 6. S6(A) work in progress (branch gaps12-s6a, not landed)
+
+A closure value whose type names its environment record is held as that record's frame words
+(`closure_record` maps every layout question about a kind-20 type with an environment to the record;
+`container_record` no longer excludes `.closure`; `closure_literal` uses `frame_alloc`). The body
+ABI is unchanged: the slot of a framed record holds the address of its words, so `leaq slot,%rdi`
+is still "the address of a word holding the env address" (agreed with /root/call_abi). Working:
+local closures, generic `F` (b1/b2: direct call, inline env), return to an erased `Fn(..)` result,
+alias, push into a vector of `Fn(..)` (`closure_erase` in `adopt_value`: bounds checked, words boxed
+with `frame_box`, loans moved to the box).
+
+Remaining (34 of 397 selected corpus cases fail, all one class): every other path where a framed
+closure's value meets an erased closure type still stores the frame address, so the erased drop
+later frees a frame word (SIGABRT) or the holder outlives the frame (SIGSEGV). Paths to route
+through `closure_erase`: `widen_to_fnmut_formal` and generic argument inference (`iter::from_fn`,
+`Iter.map`), record field initialisers and field stores, `move_as`, capture of a closure into another
+closure, parallel/thread payloads (`parallel_map`, `thread::spawn`, scopes), `Mutex`/`dyn` cells.
+Then the tail drop and `rt_vec_take` for `VecIter`.
+
+### 6.1 S6(A): one funnel, one backstop
+
+Every conversion of a framed closure (its environment's frame words) to an erased closure type goes
+through `move_as`, which boxes it (`frame_box`) and moves its loans: `adopt_value` (via
+`closure_erase`, which checks the bounds first), `widen_to_fnmut_formal`, and `closure_object` (job and
+thread payloads). The backstop is in `own`: a slot holding a framed closure that is re-owned under an
+erased closure type without having been boxed is an internal compiler error, so a missed path fails
+at compile time instead of freeing or keeping a frame address. Checked by reintroducing one miss
+(`widen_to_fnmut_formal` skipping the box): the compile stops with "internal: a closure held in the
+frame was retyped as a boxed closure without being boxed". A closure body of a specialisation sees
+that specialisation's bindings and bounds (`Closure.spec`, restored as `closure_spec` while the body is
+emitted). The `CLOSURES_FRAMED` switch is gone.
+
+### 6.2 S6(A) measured (on main 75050fb1)
+
+`typed_chain.grl` (10M `u64`, map `x*2` -> filter `%3 == 0` -> fold, best of five, load about 55),
+main before S6(A) against main with it, same machine state:
+
+| | before | S6(A) | hand loop | Rust chain |
+|---|---|---|---|---|
+| `--release` (LLVM) | 126 ms | **63 ms** | 16-17 ms | 6.9 ms |
+| native | 260 ms | 261 ms | 20-30 ms | - |
+
+With the closures held inline, LLVM inlines more of the chain: 7.4x down to 3.9x of the hand loop.
+The native backend is unchanged because it inlines leaf calls only: a chain element still costs
+about ten non-leaf direct calls (nested `next`s, the closure bodies, `rt_pop`, whose empty path calls
+`rt_fail`, so it is never a leaf). The 1.2x target needs /root/xinline's S3 (non-leaf inlining) on
+native and the remaining inlining on LLVM; the library and type side is done. `strings` has no
+callback parameters to move (2d is empty).

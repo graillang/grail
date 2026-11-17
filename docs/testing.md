@@ -91,6 +91,57 @@ statically by default, which needs no libc. Without a sysroot, a case that decla
 `GRAIL_SYSROOT_AARCH64` at a tree that only holds QEMU binaries *causes* the `-lc` failure, because
 it switches the link to dynamic.
 
+## Reseeding: how and when
+
+**When.** Reseed after a landing that changes what the compiler's own sources may use - a new syntax
+form (`static`), a new builtin or `raw_` intrinsic, a runtime layout the compiler itself depends
+on - and whenever `bun tools/ci.mjs preflight` (with `GRAIL_COMPILER` unset) reports the published
+bootstrap stale for a while: an old seed means every branch has to be built from somebody's
+compiler instead of from the clone. Reseed from **main**, on a branch of its own, and land it alone;
+never fold a reseed into a feature branch.
+
+**How.** The seed is the compiler's own output for each target, proved by self-hosting: the
+compiler built from main compiles the sources (`first`), that output is assembled and run to compile
+the sources again (`second`), and `first` must equal `second` byte for byte (`bootstrap.mjs`).
+
+```sh
+git checkout -b gaps-reseed origin/main
+G=$(GRAIL_COMPILER=$PWD/.work/base/grail-c6 bun tools/native.mjs build | tail -1)   # main's compiler
+GRAIL_JOBS=1 GRAIL_COMPILER=$G bun tools/bootstrap.mjs stage x86_64     # here, one job, ~5 min
+# aarch64 and riscv64 run under QEMU (up to an hour each): on the build host, not here
+git push root@borg.ml:/srv/grail/repo.git HEAD:refs/heads/gaps-reseed
+ssh root@borg.ml 'git -C /srv/grail/agents/NAME fetch -q && git -C /srv/grail/agents/NAME checkout -qf origin/gaps-reseed'
+rsync -az $G root@borg.ml:/srv/grail/agents/NAME.grail
+ssh root@borg.ml 'GRAIL_LEG_TREE=/srv/grail/agents/NAME GRAIL_LEG_COMPILER=/srv/grail/agents/NAME.grail \
+  nohup setsid /srv/grail/run-leg.sh NAME/stage-riscv64 env GRAIL_JOBS=1 bun tools/bootstrap.mjs stage riscv64 >/dev/null 2>&1 &'
+#   GRAIL_JOBS=1: under a loaded host the emulated compiler's parallel optimiser workers can time out
+#   ("an optimiser worker did not finish") after an hour of work; one process is slower but finishes
+#   aarch64 the same, with the patched QEMU first on PATH:
+#   sh -c "PATH=/srv/grail/w/.work/architectures/toolchain/usr/bin:\$PATH exec bun tools/bootstrap.mjs stage aarch64"
+# when /srv/grail/logs/NAME/stage-*.log end in exit=0, bring the staged seeds home
+rsync -az 'root@borg.ml:/srv/grail/agents/NAME/.work/bootstrap/staged/*' .work/bootstrap/staged/
+bun tools/bootstrap.mjs publish                # installs all three and the manifest, or refuses
+git add compiler/bootstrap && git commit -m "Reseed the bootstrap"
+GRAIL_COMPILER= bun tools/bootstrap.mjs verify x86_64   # the clone's view: the seed builds the tree
+```
+
+`stage` parks each target's seed under `.work/bootstrap/staged/<target>.<sources key>.seed`;
+`publish` refuses unless all three were staged from the same compiler sources, so seeds from
+different trees cannot be mixed. Do not edit `compiler/*.grl` while a stage runs: it hashes the
+sources at the start and refuses at the end if they changed. Use your own tree on the build host
+(`/srv/grail/agents/NAME`), never `/srv/grail/w` (the post-landing legs run there), and at most two
+stages at a time there. `tools/gate.sh --reseed` runs the same `stage`/`publish` steps on one machine.
+
+**A new intrinsic lands one reseed before its first use.** The runtime and the compiler's own sources
+are compiled by the seed, so they may use only what the seed knows. A new `raw_` intrinsic, builtin or
+syntax form therefore lands in two steps: first the compiler learns it (and nothing in
+`compiler/*.grl` uses it yet), then a routine reseed, then the runtime or the compiler switches to it.
+`raw_sites` (the site-table helper called by name) is in that state: it landed before its first use;
+`rt_sites_fill` moves to it from its `raw_call2` at the next reseed, deleting the named-edge special
+case for that call. For the same reason the compiler's own sources use only constant-tier statics
+and constants (`ci.mjs lint` checks it): a run-tier value would run a compile-time probe, a compile of
+the whole compiler, on every cold build of it.
+
 **The bootstrap reseed needs QEMU on `PATH` too.** `bun tools/bootstrap.mjs update all` compiles the
 compiler for every target and *runs* the aarch64/riscv64 results to check self-hosting, so without
 `$HOME/.local/qemu-static/usr/bin` on `PATH` it fails with `compiler execution failed (null)` and a
@@ -360,7 +411,11 @@ lint's seed) against the compiler that landed, seeded from the landing's stamp s
 new inputs and a front-end hang is found within hours. Logs are in `/srv/grail/logs/STAMP/`, where
 STAMP also names the landing's local log directory; the fuzzer's `report.json` and the shrunk input
 of every bug it finds are kept in `STAMP/fuzz/`, and `bun tools/fuzz-frontend.mjs --seed SEED
---cases 2000` reproduces a run. `tools/land.sh --remote-status` (`just land-status-remote`; the
+--cases 2000` reproduces a run. Its baseline check compiles a source unmutated when a mutated case of
+it is refused at another file, and counts a refusal of the original as a bug; a fixture meant to be
+refused as it stands (a rejection case's own input, a strict-mode refusal) says `fuzz: refused` on
+its first line - a trailing `// fuzz: refused`, or the words inside the comment already there, so no
+pinned line number moves - and the check skips it. `tools/land.sh --remote-status` (`just land-status-remote`; the
 service's client, `tools/landsvc/land.sh`) prints the newest landing's emulator version, each leg's
 verdict - running, ok with its pass count, or FAIL with the failing cases - and the fuzzer's seed
 and summary, and exits 0 when all passed, 1 when one failed, 3 while any is running. Once every leg

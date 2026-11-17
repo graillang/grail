@@ -3,6 +3,23 @@ unsafe module runtime;
 // Linux syscall boundary. The portable runtime calls these operation IDs; `os-windows.grl` is the
 // PE counterpart with the same signatures. Operation IDs are stable runtime identifiers, not the
 // target's syscall ABI.
+// The syscalls the runtime's own machinery needs - writing a report, exiting, parking and waking a
+// thread, yielding, the clock, unmapping - through a dispatcher that offers nothing else. On Linux it is
+// rt_syscall itself. On a platform whose rt_syscall emulates every call (os-windows.grl), the failure
+// path calling the full dispatcher "reached" every arm, sockets included, and every effect claim that
+// can fail went with it (docs/design/effects.md).
+// Create (or truncate) a regular file to write, and close what it returned: the two calls the
+// failure path's profile dump makes. They are not the general dispatcher so that the failure path
+// reaches no directory or socket code through them (see rt_syscall_low).
+fn rt_create_file(path: u64, flags: u64, mode: u64) -> u64 {
+    return rt_syscall(2, path, flags, mode);
+}
+fn rt_close_file(fd: u64) -> u64 {
+    return rt_syscall(3, fd, 0, 0);
+}
+fn rt_syscall_low(n: u64, a: u64, b: u64, c: u64) -> u64 {
+    return rt_syscall(n, a, b, c);
+}
 fn rt_syscall(n: u64, a: u64, b: u64, c: u64) -> u64 {
     if raw_target() == 0 {
         if rt_comptime_on() {
@@ -117,6 +134,9 @@ fn rt_syscall(n: u64, a: u64, b: u64, c: u64) -> u64 {
     if n == 157 {
         return raw_syscall(167, a, b, c);
     }
+    if n == 110 {
+        return raw_syscall(173, a, b, c); // getppid
+    }
     if n == 203 {
         return raw_syscall(122, a, b, c);
     }
@@ -166,6 +186,9 @@ fn rt_syscall4(n: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
     }
     if n == 266 {
         return raw_syscall4(36, a, b, c, d); // symlinkat
+    }
+    if n == 268 {
+        return raw_syscall4(53, a, b, c, d); // fchmodat
     }
     if n == 271 {
         return raw_syscall4(73, a, b, c, d); // ppoll
@@ -274,7 +297,44 @@ fn rt_spawn_wait(paths: u64, argv: u64, envp: u64) -> u64 {
 // worker starts (rt_os_sched_prepare).
 fn rt_os_init() -> u64 {
     rt_os_stack_guard_install_main();
+    rt_parent_watch();
     return 0;
+}
+// A process started by a `grail build`/`grail check` driver for one module (GRAIL_PARENT=<pid> in
+// its environment) dies with the driver: PR_SET_PDEATHSIG asks the kernel for SIGKILL when the
+// parent goes, and getppid() closes the race of a driver killed between the fork and this line. The
+// variable is renamed in place (`_RAIL_PARENT`), so a process this one starts is not taken for the
+// driver's own child. Without the variable nothing happens: a program's children are its business.
+fn rt_parent_watch() -> u64 {
+    mut ep = raw_load(raw_state() + 16);
+    while raw_load(ep) != 0 {
+        p := raw_load(ep);
+        if rt_is_parent_var(p) {
+            mut pid = 0;
+            mut i = 13;
+            while (47 < raw_byte(p + i)) & (raw_byte(p + i) < 58) {
+                pid = pid * 10 + (raw_byte(p + i) - 48);
+                i = i + 1;
+            }
+            raw_putbyte(p, 95);
+            if pid != 0 {
+                rt_syscall(157, 1, 9, 0); // prctl(PR_SET_PDEATHSIG, SIGKILL)
+                if rt_syscall(110, 0, 0, 0) != pid {
+                    rt_hard_exit(137); // getppid: the driver is gone already
+                }
+            }
+            return 0;
+        }
+        ep = ep + 8;
+    }
+    return 0;
+}
+// Whether the environment entry at `p` is `GRAIL_PARENT=`.
+fn rt_is_parent_var(p: u64) -> bool {
+    return (raw_byte(p) == 71) & (raw_byte(p + 1) == 82) & (raw_byte(p + 2) == 65) & (raw_byte(p + 3) == 73)
+        & (raw_byte(p + 4) == 76) & (raw_byte(p + 5) == 95) & (raw_byte(p + 6) == 80) & (raw_byte(p + 7) == 65)
+        & (raw_byte(p + 8) == 82) & (raw_byte(p + 9) == 69) & (raw_byte(p + 10) == 78) & (raw_byte(p + 11) == 84)
+        & (raw_byte(p + 12) == 61);
 }
 
 // ---- compile-time evaluation (docs/design/comptime.md, C3) ----
@@ -1032,6 +1092,16 @@ fn rt_rename(from: u64, to: u64) -> u64 {
 // symlinkat(2): `target` is the text the link holds. 0 or a positive errno.
 fn rt_symlink(target: u64, link: u64) -> u64 {
     r := rt_syscall4(266, target, wrapping_sub(0, 100), link, 0);
+    if rt_error(r) {
+        return wrapping_sub(0, r);
+    }
+    return 0;
+}
+
+// fchmodat(2) relative to the working directory: the permission bits of `path`. 0 or a positive
+// errno.
+fn rt_chmod(path: u64, mode: u64) -> u64 {
+    r := rt_syscall4(268, wrapping_sub(0, 100), path, mode, 0);
     if rt_error(r) {
         return wrapping_sub(0, r);
     }
