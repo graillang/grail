@@ -70,6 +70,12 @@
   table's own numbering (`-8(k+1)(%rbp)` is slot k), which the typed IR had off by one.
   Instructions per element against scalar C: xform_f32 8.7x -> 6.9x, xform_f64 7.1x -> 5.6x,
   dot_f32 10.8x -> 8.9x, dot_f64 8.6x -> 6.7x, matmul 12.4x -> 11.4x.
+- **Allocation costs half what it did.** The size class of a small request is a compare chain
+  instead of a doubling loop, and the allocator's address arithmetic no longer checks for overflow:
+  about 38 instructions per allocation instead of 96, 30 per free instead of 44. `grail check` of a
+  104k-line program does 21% fewer instructions and uses 10% less CPU. And in a release build the
+  runtime functions that read the thread pointer - the allocator's threaded path, the current task,
+  the mutex - are now optimised by LLVM like the rest; they were left in unoptimised code.
 
 - **Fixed: an LLVM-backend miscompile of a vector grown through its address.** A call handed `&mut v`
   receives the slot's address, not the header word, so the lifter did not count it as a call that

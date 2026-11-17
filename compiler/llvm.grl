@@ -931,13 +931,26 @@ fn address<a, b>(l: (&a mut L), op: &b [u8]) -> u8[] {
             bad(&mut l);
             return copy(view("null"));
         }
-        l.refs.push(copy(view(disp)));
-        l.addrs.push(copy(view(disp)));
+        // `SYM+N(%rip)`: a word inside a data symbol (rt_state+184, the host TLS base, is the one the
+        // thread-pointer read tests).
+        mut plus = disp.len();
+        for i in disp.len() {
+            if (disp[i] == 43) & (plus == disp.len()) {
+                plus = i;
+            }
+        }
+        name := sub(view(disp), 0, plus);
+        l.refs.push(copy(view(name)));
+        l.addrs.push(copy(view(name)));
         mut sym = u8[];
         put(&mut sym, view("@\""));
-        put(&mut sym, view(disp));
+        put(&mut sym, view(name));
         sym.push(34);
-        return sym;
+        if plus == disp.len() {
+            return sym;
+        }
+        off := sub(view(disp), plus + 1, disp.len());
+        return def(&mut l, view("getelementptr i8, ptr {}, i64 {}"), &u8[][sym, copy(view(off))]);
     }
     mut d: i64 = 0;
     if disp.len() != 0 {
@@ -2767,6 +2780,19 @@ fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit
     }
     o := operands(view(rest));
     n := o.len();
+    if eq(view(op), view("movq")) && (n == 2) && (l.target == 0) && starts(view(o[0]), view("%fs:")) {
+        // The thread pointer (raw_tp_get): `%fs:0` is the Grail record, `%fs:SYM@tpoff` a TLS word.
+        // It is inline assembly with a side effect so LLVM never merges two reads: a green task
+        // can resume on another OS thread between them. Without this the whole function stayed in
+        // the unoptimised native stream - rt_current, the mutex fast path, the allocator's threaded
+        // path among them.
+        mut asm = copy(view("call i64 asm sideeffect \"movq "));
+        put(&mut asm, view(o[0]));
+        put(&mut asm, view(", $0\", \"=r\"()"));
+        v := def(&mut l, view(asm), &u8[][]);
+        store(&mut l, view(o[1]), view(v), 64);
+        return ();
+    }
     if eq(view(op), view("movq")) || eq(view(op), view("movabsq")) {
         if n != 2 {
             bad(&mut l);

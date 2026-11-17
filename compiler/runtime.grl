@@ -1422,94 +1422,148 @@ fn rt_arena_new(bump: u64, left: u64, size: u64) -> u64 {
     raw_store(left, rt_div(mapsize - first, size));
     return 0;
 }
+// The size class of a request: classes are 32 * 2^bin bytes, header included. The four smallest
+// (requests up to 240 bytes - most of them) are a compare chain; the rest double up to the request.
+fn rt_alloc_bin(n: u64) -> u64 {
+    if n < 17 {
+        return 0;
+    }
+    if n < 49 {
+        return 1;
+    }
+    if n < 113 {
+        return 2;
+    }
+    if n < 241 {
+        return 3;
+    }
+    mut size = 512;
+    mut bin = 4;
+    while size < wrapping_add(n, 16) {
+        size = wrapping_add(size, size);
+        bin = wrapping_add(bin, 1);
+    }
+    return bin;
+}
+// The class of a block that has one: its size word is a power of two from 32.
+fn rt_block_bin(size: u64) -> u64 {
+    if size < 65 {
+        return u64(size == 64);
+    }
+    if size == 128 {
+        return 2;
+    }
+    if size == 256 {
+        return 3;
+    }
+    mut n = 512;
+    mut bin = 4;
+    while n < size {
+        n = wrapping_add(n, n);
+        bin = wrapping_add(bin, 1);
+    }
+    return bin;
+}
+// The one-thread allocator (and the shared lists' code under the lock). Every address below stays
+// inside process state or an arena the allocator mapped, so the arithmetic wraps rather than
+// checks: an overflow check per addition was a third of what an allocation cost.
 fn rt_alloc_unlocked(n: u64) -> u64 {
     state := raw_state();
     if 1152921504606846976 < n {
         rt_abort();
     }
-    mut size = 32;
-    mut bin = 0;
-    while size < n + 16 {
-        size = size * 2;
-        bin = bin + 1;
-    }
-    head := state + 256 + bin * 8;
-    mut block = raw_load(head);
-    mut reused = 0;
+    bin := rt_alloc_bin(n);
+    bin8 := wrapping_mul(bin, 8);
+    head := wrapping_add(wrapping_add(state, 256), bin8);
+    block := raw_load(head);
     if block != 0 {
-        raw_store(head, raw_load(block + 8));
-        reused = 1;
-    } else {
-        bump := state + 768 + bin * 8;
-        left := state + 1280 + bin * 8;
-        if raw_load(left) == 0 {
-            rt_arena_new(bump, left, size);
+        raw_store(head, raw_load(wrapping_add(block, 8)));
+        raw_store(wrapping_add(block, 8), 1);
+        ptr := wrapping_add(block, 16);
+        // Reuse is cleared as far as was asked for: no caller reads past its request (a vector's
+        // capacity is the request, never the class). Fresh blocks come from zeroed mappings. The two
+        // smallest classes - most allocations - clear their whole payload with fixed stores (16 and
+        // 48 bytes: cheaper than a loop's setup); the others clear the request's words.
+        if bin == 0 {
+            raw_store(ptr, 0);
+            raw_store(wrapping_add(ptr, 8), 0);
+        } else if bin == 1 {
+            raw_store(ptr, 0);
+            raw_store(wrapping_add(ptr, 8), 0);
+            raw_store(wrapping_add(ptr, 16), 0);
+            raw_store(wrapping_add(ptr, 24), 0);
+            raw_store(wrapping_add(ptr, 32), 0);
+            raw_store(wrapping_add(ptr, 40), 0);
+        } else {
+            mut i = 0;
+            while i < n {
+                raw_store(wrapping_add(ptr, i), 0);
+                i = wrapping_add(i, 8);
+            }
         }
-        block = raw_load(bump);
-        raw_store(bump, block + size);
-        raw_store(left, raw_load(left) - 1);
-        raw_store(block, size);
+        raw_store(wrapping_add(state, 24), wrapping_add(raw_load(wrapping_add(state, 24)), 1));
+        return ptr;
     }
-    raw_store(block + 8, 1);
-    ptr := block + 16;
-    // Bump allocations come from freshly mapped (already zero) memory; only reuse is cleared, and
-    // only as far as was asked for: no caller reads past its request (a vector's capacity is the
-    // request, never the class).
-    if reused {
-        mut i = 0;
-        while i < n {
-            raw_store(ptr + i, 0);
-            i = i + 8;
+    size := 32 << bin;
+    bump := wrapping_add(wrapping_add(state, 768), bin8);
+    left := wrapping_add(wrapping_add(state, 1280), bin8);
+    if raw_load(left) == 0 {
+        rt_arena_new(bump, left, size);
+    }
+    fresh := raw_load(bump);
+    raw_store(bump, wrapping_add(fresh, size));
+    raw_store(left, wrapping_sub(raw_load(left), 1));
+    raw_store(fresh, size);
+    raw_store(wrapping_add(fresh, 8), 1);
+    raw_store(wrapping_add(state, 24), wrapping_add(raw_load(wrapping_add(state, 24)), 1));
+    return wrapping_add(fresh, 16);
+}
+// A block with a mapping of its own goes back to the OS. Out of line, so the small-block path
+// above needs no saved registers.
+fn rt_free_own(ptr: u64) -> u64 {
+    state := raw_state();
+    arena := rt_own_arena(ptr);
+    mut link = state + 32;
+    while raw_load(link) != arena {
+        next := raw_load(link);
+        if next == 0 {
+            rt_abort();
         }
+        link = next;
     }
-    raw_store(state + 24, wrapping_add(raw_load(state + 24), 1));
-    return ptr;
+    length := raw_load(arena + 8);
+    raw_store(link, raw_load(arena));
+    raw_store(state + 24, wrapping_sub(raw_load(state + 24), 1));
+    err := rt_syscall(11, arena, length, 0);
+    if rt_error(err) {
+        rt_abort();
+    }
+    return 0;
 }
 fn rt_free_unlocked(ptr: u64) -> u64 {
     if ptr == 0 {
         return 0;
     }
     state := raw_state();
-    block := ptr - 16;
+    block := wrapping_sub(ptr, 16);
+    st := raw_load(wrapping_add(block, 8));
     // State 2 marks a static block (a string literal's view descriptor): never freed.
-    if raw_load(block + 8) == 2 {
+    if st == 2 {
         return 0;
     }
-    if raw_load(block + 8) != 1 {
+    if st != 1 {
         rt_abort();
     }
     size := raw_load(block);
     // Classes of at least 512 KiB occupy their own arena. Return those mappings to the OS
     // immediately; smaller freed objects remain reusable in the segregated slab caches.
     if (size < 524288) == 0 {
-        arena := rt_own_arena(ptr);
-        mut link = state + 32;
-        while raw_load(link) != arena {
-            next := raw_load(link);
-            if next == 0 {
-                rt_abort();
-            }
-            link = next;
-        }
-        length := raw_load(arena + 8);
-        raw_store(link, raw_load(arena));
-        raw_store(state + 24, wrapping_sub(raw_load(state + 24), 1));
-        err := rt_syscall(11, arena, length, 0);
-        if rt_error(err) {
-            rt_abort();
-        }
-        return 0;
+        return rt_free_own(ptr);
     }
-    mut n = 32;
-    mut bin = 0;
-    while n < size {
-        n = n * 2;
-        bin = bin + 1;
-    }
-    head := state + 256 + bin * 8;
-    raw_store(block + 8, raw_load(head));
+    head := wrapping_add(wrapping_add(state, 256), wrapping_mul(rt_block_bin(size), 8));
+    raw_store(wrapping_add(block, 8), raw_load(head));
     raw_store(head, block);
-    raw_store(state + 24, wrapping_sub(raw_load(state + 24), 1));
+    raw_store(wrapping_add(state, 24), wrapping_sub(raw_load(wrapping_add(state, 24)), 1));
     return 0;
 }
 // Resizes an allocation to hold at least `need` bytes, keeping the first `used`. A block in its own
@@ -3316,6 +3370,29 @@ fn rt_mutex_poisoned(p: u64) -> u64 {
     return rt_fail_message(17, s);
 }
 fn rt_mutex_lock(p: u64) -> u64 {
+    // The uncontended path, inline: one compare-and-swap from 0 (free, not poisoned, nobody queued)
+    // and the held-list push on the waiter block the thread pointer leads to. Everything else -
+    // a held lock, a poisoned one, a thread with no block yet - takes the general path.
+    tp := raw_tp_get();
+    if tp != 0 {
+        t := raw_load(wrapping_add(tp, 16));
+        mut b = 0;
+        if t != 0 {
+            b = wrapping_add(t, 240);
+        } else {
+            b = raw_load(wrapping_add(tp, 96));
+        }
+        if b != 0 {
+            if raw_atomic_cas(p, 0, 1) == 0 {
+                raw_store(wrapping_add(p, 16), raw_load(wrapping_add(b, 32)));
+                raw_store(wrapping_add(b, 32), p);
+                return 0;
+            }
+        }
+    }
+    return rt_mutex_lock_slow(p);
+}
+fn rt_mutex_lock_slow(p: u64) -> u64 {
     rt_mutex_acquire(p);
     if (raw_atomic_load(p) & 4) != 0 {
         rt_mutex_release(p);
@@ -3324,6 +3401,27 @@ fn rt_mutex_lock(p: u64) -> u64 {
     return rt_held_push(p);
 }
 fn rt_mutex_unlock(p: u64) -> u64 {
+    // Inline: a callback-scoped lock is the newest entry of its holder's list, and with nobody
+    // queued and nothing flagged the word goes from 1 back to 0 in one compare-and-swap.
+    tp := raw_tp_get();
+    if tp != 0 {
+        t := raw_load(wrapping_add(tp, 16));
+        mut b = 0;
+        if t != 0 {
+            b = wrapping_add(t, 240);
+        } else {
+            b = raw_load(wrapping_add(tp, 96));
+        }
+        if b != 0 {
+            if raw_load(wrapping_add(b, 32)) == p {
+                raw_store(wrapping_add(b, 32), raw_load(wrapping_add(p, 16)));
+                if raw_atomic_cas(p, 1, 0) != 1 {
+                    rt_mutex_release(p);
+                }
+                return 0;
+            }
+        }
+    }
     rt_held_pop(p);
     return rt_mutex_release(p);
 }
