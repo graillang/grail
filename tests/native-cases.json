@@ -17967,6 +17967,62 @@
     "stdout": "18 32\n"
   },
   {
+    "name": "simd-s2-surface",
+    "note": "S2 SIMD (docs/design/simd.md): u8x16/u32x4/i64x2 arithmetic and wraparound, unsigned compares and min/max, shuffle and shuffle2, saturating to_i32, to_f32, bits/from_bits, array loads and stores; the same on every target and backend.",
+    "files": [
+      "tests/simd/s2.grl"
+    ],
+    "stdout": "4\n240\n250\n10\ntrue\n2\n0\n2147483648\n-9223372036854775808\n-5\n4\n5\n6\n-1\n2\n2147483647\n0\n16777216\n2147483648\n1\n14\n2\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "simd-oracle-s2",
+    "note": "The S2 oracle: u8x16, u32x4 and i64x2 lane by lane against the scalar operation on edge values, shuffles against their index tables, to_i32 against truncate-saturate-NaN-to-0 and to_f32 against the scalar conversion, bits/from_bits round trips: 0 lanes differ, one checksum everywhere.",
+    "files": [
+      "tests/simd/oracle2.grl"
+    ],
+    "stdout": "0\n5801089873860374798\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "simd-load-aligned-checks-the-address",
+    "source": "fn main() {\n    arr: [f32; 8] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];\n    // Elements 1 and 2 are four bytes apart: at most one of them starts a 16-byte boundary.\n    a := f32x4::load_aligned(&arr, 1);\n    b := f32x4::load_aligned(&arr, 2);\n    println(a.sum() + b.sum());\n}\n",
+    "signal": "SIGABRT",
+    "stderr": "-byte aligned (load_aligned/store_aligned)",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "load_aligned/store_aligned are a checked contract: a misaligned address fails with the address, never undefined behaviour."
+  },
+  {
+    "name": "simd-shuffle-index-past-the-end",
+    "source": "fn main() {\n    v := f32x4::splat(1.0);\n    println(v.shuffle(0, 1, 2, 4).sum());\n}\n",
+    "reject": true,
+    "diagnostic": "the lane index is past the last lane it can name"
+  },
+  {
+    "name": "simd-to-f32-needs-i32-lanes",
+    "source": "fn main() {\n    v := f32x4::splat(1.0);\n    println(v.to_f32().sum());\n}\n",
+    "reject": true,
+    "diagnostic": "`f32x4` has no method `to_f32`"
+  },
+  {
+    "name": "simd-bits-needs-float-lanes",
+    "source": "fn main() {\n    v := u32x4::splat(1);\n    println(v.bits().sum());\n}\n",
+    "reject": true,
+    "diagnostic": "`u32x4` has no method `bits`"
+  },
+  {
     "name": "closure-literals-are-distinct-types",
     "note": "each closure expression is a type of its own: a `Keep<F>` built from one cannot be assigned one built from another (found by /root/call_abi; it was accepted, and the call through it ran the first closure's body - a miscompile, and with a borrowing second closure a use after free)",
     "source": "struct Keep<F> { f: F }\nfn keep<F: Fn() -> u64>(f: F) -> Keep<F> { return Keep { f: f }; }\nfn main() { v := u64[1, 2, 3, 4, 5]; mut k = keep(|| -> u64 0); k = keep(|| -> u64 v.len()); g := &k.f; println(g()); }\n",

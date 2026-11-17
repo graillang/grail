@@ -40823,7 +40823,7 @@ fn mutex_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
 // `simd.` stream line (machine.grl "SIMD"), which LLVM lifts to vector IR and the native backend
 // expands lane by lane.
 fn simd_named<a, b>(c: (&a mut C), n: &b [u8]) -> u64 {
-    if (n.len() < 5) || (6 < n.len()) {
+    if !is_simd_name(view(n)) {
         return 0;
     }
     mut x = 0;
@@ -40832,31 +40832,14 @@ fn simd_named<a, b>(c: (&a mut C), n: &b [u8]) -> u64 {
             x = i;
         }
     }
-    if x != 3 {
-        return 0;
-    }
     head := n[0];
-    bits := n[1: 3].copy();
-    lanes := n[4:].copy();
     mut b = 0;
-    if same(view(bits), view("32")) {
-        b = 32;
-    }
-    if same(view(bits), view("64")) {
-        b = 64;
+    for i in x - 1 {
+        b = b * 10 + n[1 + i] - 48;
     }
     mut l = 0;
-    if same(view(lanes), view("2")) {
-        l = 2;
-    }
-    if same(view(lanes), view("4")) {
-        l = 4;
-    }
-    if same(view(lanes), view("8")) {
-        l = 8;
-    }
-    if (b == 0) || (l == 0) || (b * l < 128) || (256 < b * l) {
-        return 0;
+    for i in n.len() - x - 1 {
+        l = l * 10 + n[x + 1 + i] - 48;
     }
     if head == 102 {
         if b == 32 {
@@ -40864,16 +40847,16 @@ fn simd_named<a, b>(c: (&a mut C), n: &b [u8]) -> u64 {
         }
         return intern_full(&mut c, 36, float_type(&mut c), l, u64[]);
     }
-    if (head == 105) & (b == 32) {
-        return intern_full(&mut c, 36, int_type(&mut c, 32, 1), l, u64[]);
+    if head == 105 {
+        return intern_full(&mut c, 36, int_type(&mut c, b, 1), l, u64[]);
     }
-    if head == 109 {
-        return intern_full(&mut c, 36, int_type(&mut c, b, 1), l + 1024, u64[]);
+    if head == 117 {
+        return intern_full(&mut c, 36, int_type(&mut c, b, 0), l, u64[]);
     }
-    return 0;
+    return intern_full(&mut c, 36, int_type(&mut c, b, 1), l + 1024, u64[]);
 }
 fn is_simd_name<a>(n: &a [u8]) -> bool {
-    names := u8[][copy_bytes(view("f32x4")), copy_bytes(view("f32x8")), copy_bytes(view("f64x2")), copy_bytes(view("f64x4")), copy_bytes(view("i32x4")), copy_bytes(view("i32x8")), copy_bytes(view("m32x4")), copy_bytes(view("m32x8")), copy_bytes(view("m64x2")), copy_bytes(view("m64x4"))];
+    names := u8[][copy_bytes(view("f32x4")), copy_bytes(view("f32x8")), copy_bytes(view("f64x2")), copy_bytes(view("f64x4")), copy_bytes(view("i32x4")), copy_bytes(view("i32x8")), copy_bytes(view("i64x2")), copy_bytes(view("i64x4")), copy_bytes(view("u8x16")), copy_bytes(view("u8x32")), copy_bytes(view("u32x4")), copy_bytes(view("u32x8")), copy_bytes(view("m8x16")), copy_bytes(view("m8x32")), copy_bytes(view("m32x4")), copy_bytes(view("m32x8")), copy_bytes(view("m64x2")), copy_bytes(view("m64x4"))];
     for i in names.len() {
         if same(view(n), view(names[i])) {
             return true;
@@ -40919,6 +40902,8 @@ fn simd_shape<a>(c: (&a mut C), ty: u64) -> u8[] {
         out.push(109);
     } else if simd_float(&mut c, ty) {
         out.push(102);
+    } else if ty_mode(&mut c, simd_elem(&mut c, ty)) == 0 {
+        out.push(117);
     } else {
         out.push(105);
     }
@@ -40982,16 +40967,60 @@ fn simd_emit<a, b>(c: (&a mut C), op: &b [u8], shape_ty: u64, rty: u64, a: u64, 
 }
 // The vector at the address in `src` copied into the vector storage at the address in `dst`.
 fn simd_copy_to<a>(c: (&a mut C), dst: u64, src: u64, ty: u64) -> unit {
+    simd_copy_op(&mut c, view("copy"), dst, src, ty);
+    return ();
+}
+// `simd.OP SHAPE` with the destination address in `dst` and the source's in `src`: copy, or the
+// aligned copies copya (source aligned) and copyd (destination aligned).
+fn simd_copy_op<a, b>(c: (&a mut C), op: &b [u8], dst: u64, src: u64, ty: u64) -> unit {
     zero := imm(&mut c, 0);
     get(&mut c, dst, view("%rdi"));
     get(&mut c, src, view("%rsi"));
     get(&mut c, zero, view("%rdx"));
     get(&mut c, zero, view("%rcx"));
-    mut line = copy_bytes(view("simd.copy "));
+    mut line = copy_bytes(view("simd."));
+    push_bytes(&mut line, op);
+    line.push(32);
     push_bytes(&mut line, view(simd_shape(&mut c, ty)));
     line.push(10);
     o(&mut c, view(line));
     return ();
+}
+// The address in `at` checked to be a multiple of `align`, as load_aligned/store_aligned promise:
+// one test and branch, and a failure that names the address (never undefined behaviour).
+fn simd_check_aligned<a>(c: (&a mut C), at: u64, align: u64) -> unit {
+    get(&mut c, at, view("%rax"));
+    o(&mut c, view("andq $"));
+    on(&mut c, align - 1);
+    o(&mut c, view(",%rax\ncmpq $0,%rax\n"));
+    ok := label(&mut c);
+    jump(&mut c, view("je"), ok);
+    invoke(&mut c, view("rt_fail"), three(imm(&mut c, 20), at, imm(&mut c, align)));
+    mark(&mut c, ok);
+    return ();
+}
+// A literal lane index below `limit` at the cursor, read past.
+fn simd_index_literal<a>(c: (&a mut C), limit: u64) -> u64 {
+    if kind(&mut c) != 2 {
+        fail(&mut c, view("a lane index is an integer literal"));
+    }
+    text := tok_text(&mut c, c.pos);
+    mut k = 0;
+    for i in text.len() {
+        if (text[i] < 48) || (57 < text[i]) {
+            fail(&mut c, view("a lane index is an integer literal"));
+        }
+        k = k * 10 + text[i] - 48;
+    }
+    if limit <= k {
+        fail(&mut c, view("the lane index is past the last lane it can name"));
+    }
+    advance(&mut c);
+    return k;
+}
+// The vector of the same lanes and width with another element: bits()/from_bits and conversions.
+fn simd_with_elem<a>(c: (&a mut C), ty: u64, elem: u64) -> u64 {
+    return intern_full(&mut c, 36, elem, simd_lanes(&mut c, ty), u64[]);
 }
 // A scalar argument of the element type: a literal adopts it.
 fn simd_scalar_arg<a>(c: (&a mut C), elem: u64) -> u64 {
@@ -41109,19 +41138,37 @@ fn simd_static<a, b>(c: (&a mut C), ty: u64, name: &b [u8]) -> Val {
         expect(&mut c, view(")"));
         return val(dst, ty);
     }
-    if same(view(name), view("load")) && !mask {
+    if (same(view(name), view("load")) || same(view(name), view("load_aligned"))) && !mask {
         src := expr(&mut c, 0);
         expect(&mut c, view(","));
         index := simd_scalar_arg(&mut c, int_type(&mut c, 64, 0));
         expect(&mut c, view(")"));
         at := simd_elements(&mut c, src, index, ty, false);
+        if same(view(name), view("load_aligned")) {
+            simd_check_aligned(&mut c, at, simd_words(&mut c, ty) * 8);
+            dst := frame_alloc(&mut c, simd_words(&mut c, ty));
+            simd_copy_op(&mut c, view("copya"), dst, at, ty);
+            return val(dst, ty);
+        }
         return val(simd_emit(&mut c, view("copy"), ty, ty, at, SIMD_NONE, SIMD_NONE, SIMD_NONE, 0, false), ty);
+    }
+    if same(view(name), view("from_bits")) && simd_float(&mut c, ty) {
+        // The lanes' bits as floats: `f32x4::from_bits(u32x4)`, `f64x2::from_bits(i64x2)`.
+        mut bty = simd_with_elem(&mut c, ty, int_type(&mut c, 32, 0));
+        if simd_bits(&mut c, ty) == 64 {
+            bty = simd_with_elem(&mut c, ty, int_type(&mut c, 64, 1));
+        }
+        v := simd_vector_arg(&mut c, bty);
+        expect(&mut c, view(")"));
+        dst := frame_alloc(&mut c, simd_words(&mut c, ty));
+        simd_copy_op(&mut c, view("copy"), dst, v, ty);
+        return val(dst, ty);
     }
     mut msg = copy_bytes(view("`"));
     push_bytes(&mut msg, view(simd_shape(&mut c, ty)));
     push_bytes(&mut msg, view("` has no constructor `"));
     push_bytes(&mut msg, name);
-    push_bytes(&mut msg, view("`; its constructors are splat, new and load (a mask has splat)"));
+    push_bytes(&mut msg, view("`; its constructors are splat, new, load and load_aligned, and from_bits for a float vector (a mask has splat)"));
     fail(&mut c, view(msg));
     return val(0, 0);
 }
@@ -41155,15 +41202,81 @@ fn simd_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
         expect(&mut c, view(")"));
         return val(simd_emit(&mut c, view("lane"), ty, elem, value.t, SIMD_NONE, SIMD_NONE, SIMD_NONE, k, false), elem);
     }
-    if same(view(name), view("store")) && !mask {
+    if (same(view(name), view("store")) || same(view(name), view("store_aligned"))) && !mask {
         dst := expr(&mut c, 0);
         expect(&mut c, view(","));
         index := simd_scalar_arg(&mut c, int_type(&mut c, 64, 0));
         expect(&mut c, view(")"));
         at := simd_elements(&mut c, dst, index, ty, true);
         // The copy's destination is the elements.
-        simd_copy_to(&mut c, at, value.t, ty);
+        if same(view(name), view("store_aligned")) {
+            simd_check_aligned(&mut c, at, simd_words(&mut c, ty) * 8);
+            simd_copy_op(&mut c, view("copyd"), at, value.t, ty);
+        } else {
+            simd_copy_to(&mut c, at, value.t, ty);
+        }
         return val(imm(&mut c, 0), intern(&mut c, 2, 0));
+    }
+    if (same(view(name), view("shuffle")) || same(view(name), view("shuffle2"))) && !mask {
+        // `v.shuffle(i0, .., iN-1)`: lane j is v's lane i_j. `v.shuffle2(w, i0, ..)`: lane j is lane
+        // i_j of v followed by w (indices below 2N). The indices are literals, checked here.
+        lanes := simd_lanes(&mut c, ty);
+        mut other = value.t;
+        mut limit = lanes;
+        if same(view(name), view("shuffle2")) {
+            other = simd_vector_arg(&mut c, ty);
+            expect(&mut c, view(","));
+            limit = 2 * lanes;
+        }
+        mut idx = u64[];
+        for i in lanes {
+            if i != 0 {
+                expect(&mut c, view(","));
+            }
+            idx.push(simd_index_literal(&mut c, limit));
+        }
+        expect(&mut c, view(")"));
+        dst := frame_alloc(&mut c, simd_words(&mut c, ty));
+        zero := imm(&mut c, 0);
+        get(&mut c, dst, view("%rdi"));
+        get(&mut c, value.t, view("%rsi"));
+        get(&mut c, other, view("%rdx"));
+        get(&mut c, zero, view("%rcx"));
+        mut line = copy_bytes(view("simd.shuffle "));
+        push_bytes(&mut line, view(simd_shape(&mut c, ty)));
+        line.push(32);
+        for i in idx.len() {
+            if i != 0 {
+                line.push(44);
+            }
+            decimal(&mut line, idx[i]);
+        }
+        line.push(10);
+        o(&mut c, view(line));
+        return val(dst, ty);
+    }
+    if same(view(name), view("to_f32")) && !mask && !float && (simd_bits(&mut c, ty) == 32) && (ty_mode(&mut c, elem) != 0) {
+        // Each i32 lane to the nearest f32.
+        expect(&mut c, view(")"));
+        rty := simd_with_elem(&mut c, ty, f32_type(&mut c));
+        return val(simd_emit(&mut c, view("tof32"), ty, rty, value.t, SIMD_NONE, SIMD_NONE, SIMD_NONE, 0, false), rty);
+    }
+    if same(view(name), view("to_i32")) && float && (simd_bits(&mut c, ty) == 32) {
+        // Each f32 lane truncated toward zero and saturated to the i32 range; a NaN lane is 0.
+        expect(&mut c, view(")"));
+        rty := simd_with_elem(&mut c, ty, int_type(&mut c, 32, 1));
+        return val(simd_emit(&mut c, view("toi32"), ty, rty, value.t, SIMD_NONE, SIMD_NONE, SIMD_NONE, 0, false), rty);
+    }
+    if same(view(name), view("bits")) && float {
+        // The lanes' bit patterns: f32 lanes as u32, f64 lanes as i64.
+        expect(&mut c, view(")"));
+        mut rty = simd_with_elem(&mut c, ty, int_type(&mut c, 32, 0));
+        if simd_bits(&mut c, ty) == 64 {
+            rty = simd_with_elem(&mut c, ty, int_type(&mut c, 64, 1));
+        }
+        dst := frame_alloc(&mut c, simd_words(&mut c, ty));
+        simd_copy_op(&mut c, view("copy"), dst, value.t, ty);
+        return val(dst, rty);
     }
     if (same(view(name), view("min")) || same(view(name), view("max"))) && !mask {
         other := simd_vector_arg(&mut c, ty);
@@ -41207,7 +41320,7 @@ fn simd_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
     if mask {
         push_bytes(&mut msg, view("`; a mask's methods are select, any, all and not"));
     } else {
-        push_bytes(&mut msg, view("`; its methods are sum, lane, store, min, max, eq, ne, lt, le, gt and ge"));
+        push_bytes(&mut msg, view("`; its methods are sum, lane, store, store_aligned, shuffle, shuffle2, min, max, eq, ne, lt, le, gt and ge, with bits and to_i32 on a float vector and to_f32 on i32 lanes"));
     }
     fail(&mut c, view(msg));
     return val(0, 0);
