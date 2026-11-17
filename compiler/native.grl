@@ -1497,11 +1497,46 @@ fn write_image<a, b, d>(c: (&a mut C), path: &b [u8], image: &d [u8]) -> u64 {
     }
     return write_assembled(&mut c, view(path), view(image));
 }
+// The object for `image`. A build that names its compiler (`--fn-cache-id`, the driver's builds)
+// keeps the function units of each object beside it (`OBJ.units`, headed by that identity) and
+// replays the ones whose text did not move (asm_x86, function units). `GRAIL_ASM_UNITS_VERIFY=1`
+// also assembles without them and refuses a difference.
+fn assemble_object<a, b>(c: (&a mut C), image: &b [u8]) -> asm_x86::Result {
+    if c.fn_id.len() == 0 {
+        return asm_x86::assemble(copy_bytes(view(image)));
+    }
+    mut pack_path = copy_bytes(view(c.object));
+    push_bytes(&mut pack_path, view(".units"));
+    mut header = copy_bytes(view("grail-units 1 "));
+    push_bytes(&mut header, view(c.fn_id));
+    header.push(10);
+    mut previous = u8[];
+    if host::exists(view(pack_path)) != 0 {
+        pack := host::read_file(view(pack_path));
+        if (pack.len() >= header.len()) && same(view(pack[0: header.len()]), view(header)) {
+            previous.append(pack[header.len(): pack.len()]);
+        }
+    }
+    r := asm_x86::assemble_units(copy_bytes(view(image)), previous);
+    if r.error.len() != 0 {
+        return r;
+    }
+    if host::env(view("GRAIL_ASM_UNITS_VERIFY")).len() != 0 {
+        plain := asm_x86::assemble(copy_bytes(view(image)));
+        if !same(view(plain.object), view(r.object)) {
+            return asm_x86::Result { object: u8[], error: copy_bytes(view("an object assembled from function units differs from the plain assembly")), units: u8[], replayed: 0, encoded: 0 };
+        }
+    }
+    mut out = header;
+    push_bytes(&mut out, view(r.units));
+    host::write_file(view(pack_path), view(out));
+    return r;
+}
 // The image, as the object `--object` names (in-process assembly; the assembly file then keeps the
 // link notes alone, which is all the driver reads of it), or as assembly text.
 fn write_assembled<a, b, d>(c: (&a mut C), path: &b [u8], image: &d [u8]) -> u64 {
     if c.object.len() != 0 {
-        r := asm_x86::assemble(copy_bytes(view(image)));
+        r := assemble_object(&mut c, view(image));
         if r.error.len() != 0 {
             mut said = copy_bytes(view("the internal assembler: "));
             push_bytes(&mut said, view(r.error));

@@ -368,6 +368,24 @@ cold build is within noise: its modules are small enough that each runs in one p
 of them already fill 24 processors. FNV-1a over 64 MiB eight times (`bench/fnv.grl`): 3.71 s to
 0.84 s; the instructions of its 1 MiB variant, by valgrind, 1.11 G to 0.25 G.
 
+## Stage 4: the compiler assembles its own code
+
+`compiler/asm_x86.grl` and `compiler/elf.grl` assemble the Linux x86-64 stream inside the compiler
+run (`--object`): the module's assembly text is no longer written, re-read and parsed by clang. The
+objects are byte-identical to clang's from the same text (`tools/asm-oracle.mjs`; the gate's
+`asm-oracle` leg holds every corpus program to it), debug builds included (DWARF 5 line tables as
+LLVM writes them). Measured on syn4000's 35 MB of text: clang 15.5 G instructions; the internal
+assembler 3.8 G in the release compiler, 8.2 G natively built. The self-compile's 119 MB: clang
+50.8 G, internal 11.4 G (release).
+
+**Function units.** A function's text encodes to the same bytes wherever it stands (no jump leaves a
+function; every other reference is a fixup by name), so each object keeps its functions' encodings
+beside it (`OBJ.units`, keyed by each chunk's text hash and headed by the compiler's identity) and a
+build replays the functions whose text did not change. An edited syn4000 module run: 106.0 G
+instructions with units, 111.0 G without (dev compiler). The units cannot remove more than the
+assembler's own share: an edited build still regenerates and optimises the whole module's text,
+and spends a quarter of its time writing the interface (`iface_sorted`, routed to the front end).
+
 ## The order of the remaining work
 
 2. *(done: see above.)* What is left of it is `grail check` reading interfaces from the store.

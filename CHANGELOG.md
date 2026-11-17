@@ -11,7 +11,9 @@
   still choose clang; the flag goes once the oracle has been green through one landing. Debug
   builds go through it too (it writes `.debug_line` from `.file`/`.loc` as LLVM does); the other
   targets still use clang. It lowers the portable atomic operations as it reads them, so an x86
-  build no longer rewrites the whole stream for them first.
+  build no longer rewrites the whole stream for them first. It keeps each object's function units
+  beside it (`OBJ.units`): a function whose text did not change is replayed, not assembled again
+  (`GRAIL_ASM_UNITS_VERIFY=1` checks the replayed object against a plain assembly).
 
 - **Fixed: an LLVM-backend miscompile of a vector grown through its address.** A call handed `&mut v`
   receives the slot's address, not the header word, so the lifter did not count it as a call that
