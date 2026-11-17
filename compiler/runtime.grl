@@ -5887,11 +5887,23 @@ fn rt_worker_loop(worker: u64) -> u64 {
                 rt_syscall_low(24, 0, 0, 0);
             }
         }
+        if raw_load(tp + 32) != worker {
+            // What this thread found and ran made a blocking call, and the block went to another
+            // thread meanwhile: its searching flag (word 280) is that thread's now - this thread's
+            // own count was cleared by rt_worker_run before the work ran - so it is not touched.
+            // Clearing it here took the other thread's count away too, the counter went below
+            // zero, and with "someone is searching" for ever no fork woke a parked worker again
+            // (bench/frame.grl's I/O task sat in the injection ring with every worker asleep).
+            return 0;
+        }
         if (found == 0) & (spin != 0) {
             // sched::Config.idle_spin_us: keep looking for that long before sleeping.
             until := rt_now_us() + spin;
             while (found == 0) & (rt_now_us() < until) {
                 found = rt_worker_step(s, worker);
+            }
+            if raw_load(tp + 32) != worker {
+                return 0;
             }
         }
         if raw_load(worker + 280) != 0 {
