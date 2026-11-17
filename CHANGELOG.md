@@ -11,6 +11,12 @@
   instructions (GRAIL_JOBS=1). The stack-probe check reads the assembly once with no per-line
   copies, and the inlining pass's call lines travel with each remembered body instead of being found
   by a scan of the whole output.
+- Fixed: `grail check` refused every program using a module that claims an effect (`use strings;`
+  alone: "`is_char_boundary` ... makes an indirect call the compiler cannot follow"). Check runs go
+  per module, and a check-only run recorded no effect facts, so the runtime's run wrote no
+  `runtime.facts` and every claim that reaches the runtime met an unknown callee. A check run that
+  writes interfaces records its bodies now; `tools/test-cli.mjs` checks a program using each lib/
+  module.
 - The internal assembler takes `.previous`.
 
 - **Integer map keys hash in registers.** `hash::Hash` has a defaulted `table_hash`, the SipHash-1-3

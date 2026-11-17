@@ -26708,9 +26708,11 @@ fn fx_instance_name<a, b>(c: (&a mut C), name: &b [u8], spec: u64) -> u8[] {
 // apart. A specialisation inherits the template's claim - that is the obligation - and its own body
 // is what proves or refuses it.
 fn fx_begin<a, b, d>(c: (&a mut C), sym: &b [u8], name: &d [u8], file: u64, pos: u64, no_alloc: u64, no_panic: u64) -> unit {
-    // Every run that emits code records every body: its facts are the summary its interface carries.
-    // A check-only run carries none, so it records only when it has a claim to check.
-    if (c.check_only != 0) && (c.fx_any == 0) {
+    // Every run records every body: its facts are the summary its interface carries. A check-only run
+    // that writes no interface carries none, so it records only when it has a claim to check; one that
+    // writes interfaces (a module of `grail check`) records too, or the runs after it would find no
+    // summary - the runtime's least of all - and refuse every claim that calls it.
+    if (c.check_only != 0) && (c.fx_any == 0) && (c.iface_emit.len() == 0) {
         return ();
     }
     if c.validating != 0 {
@@ -27045,7 +27047,7 @@ fn fx_vtable_drop<a>(c: (&a mut C), iface: u64) -> unit {
 // A drop helper's body starts: trusted code, recorded like a function so a caller's claim is followed
 // through it to the user `Drop` it calls.
 fn fx_helper<a, b>(c: (&a mut C), sym: &b [u8]) -> unit {
-    if (c.check_only != 0) && (c.fx_any == 0) {
+    if (c.check_only != 0) && (c.fx_any == 0) && (c.iface_emit.len() == 0) {
         return ();
     }
     k := fx_sym(&mut c, view(sym)) - 1;
