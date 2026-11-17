@@ -49,7 +49,7 @@ fn payload<a, T>(m: (&a Mutex<T>), at: u64) -> (&a mut T) {
     }
 }
 
-pub fn try_lock_with<a, T, C, R: Owned, F: FnMut((&mut T), C) -> R>(m: (&a Mutex<T>), ctx: C, f: F) -> R? {
+pub fn try_lock_with<a, T, C, R: Owned>(m: (&a Mutex<T>), ctx: C, f: FnMut((&mut T), C) -> R) -> R? {
     mut call = f;
     at := block<T>(m);
     unsafe {
@@ -64,7 +64,7 @@ pub fn try_lock_with<a, T, C, R: Owned, F: FnMut((&mut T), C) -> R>(m: (&a Mutex
     return Some(r);
 }
 
-pub fn recover_with<a, T, C, R: Owned, F: FnMut((&mut T), C) -> R>(m: (&a Mutex<T>), ctx: C, f: F) -> R {
+pub fn recover_with<a, T, C, R: Owned>(m: (&a Mutex<T>), ctx: C, f: FnMut((&mut T), C) -> R) -> R {
     mut call = f;
     at := block<T>(m);
     unsafe {
@@ -99,7 +99,7 @@ fn plain() -> u64 {
     return 3;
 }
 
-pub fn lock_until<a, T, C, R: Owned, F: FnMut((&mut T), C) -> R>(m: (&a Mutex<T>), deadline: time::Instant, ctx: C, f: F) -> R |? time::WaitError {
+pub fn lock_until<a, T, C, R: Owned>(m: (&a Mutex<T>), deadline: time::Instant, ctx: C, f: FnMut((&mut T), C) -> R) -> R |? time::WaitError {
     mut call = f;
     at := block<T>(m);
     mut code = 0;
@@ -155,7 +155,7 @@ impl<T> RwLock<T> {
             return ptr_from_addr(T, address(self.cell) + 32).as_mut();
         }
     }
-    pub fn read_with<C, R: Owned, F: Fn((&T), C) -> R>(self: (&RwLock<T>), ctx: C, f: F) -> R {
+    pub fn read_with<C, R: Owned>(self: (&RwLock<T>), ctx: C, f: Fn((&T), C) -> R) -> R {
         at := address(self.cell);
         mut node = 0;
         unsafe {
@@ -167,7 +167,7 @@ impl<T> RwLock<T> {
         }
         return r;
     }
-    pub fn write_with<C, R: Owned, F: FnMut((&mut T), C) -> R>(self: (&RwLock<T>), ctx: C, f: F) -> R {
+    pub fn write_with<C, R: Owned>(self: (&RwLock<T>), ctx: C, f: FnMut((&mut T), C) -> R) -> R {
         mut call = f;
         at := address(self.cell);
         mut node = 0;
@@ -180,7 +180,7 @@ impl<T> RwLock<T> {
         }
         return r;
     }
-    pub fn try_read_with<C, R: Owned, F: Fn((&T), C) -> R>(self: (&RwLock<T>), ctx: C, f: F) -> R? {
+    pub fn try_read_with<C, R: Owned>(self: (&RwLock<T>), ctx: C, f: Fn((&T), C) -> R) -> R? {
         at := address(self.cell);
         mut node = 0;
         unsafe {
@@ -195,7 +195,7 @@ impl<T> RwLock<T> {
         }
         return Some(r);
     }
-    pub fn try_write_with<C, R: Owned, F: FnMut((&mut T), C) -> R>(self: (&RwLock<T>), ctx: C, f: F) -> R? {
+    pub fn try_write_with<C, R: Owned>(self: (&RwLock<T>), ctx: C, f: FnMut((&mut T), C) -> R) -> R? {
         mut call = f;
         at := address(self.cell);
         mut node = 0;
@@ -211,7 +211,7 @@ impl<T> RwLock<T> {
         }
         return Some(r);
     }
-    pub fn read_until<C, R: Owned, F: Fn((&T), C) -> R>(self: (&RwLock<T>), deadline: time::Instant, ctx: C, f: F) -> R |? time::WaitError {
+    pub fn read_until<C, R: Owned>(self: (&RwLock<T>), deadline: time::Instant, ctx: C, f: Fn((&T), C) -> R) -> R |? time::WaitError {
         at := address(self.cell);
         mut code = 0;
         unsafe {
@@ -230,7 +230,7 @@ impl<T> RwLock<T> {
         }
         return r;
     }
-    pub fn write_until<C, R: Owned, F: FnMut((&mut T), C) -> R>(self: (&RwLock<T>), deadline: time::Instant, ctx: C, f: F) -> R |? time::WaitError {
+    pub fn write_until<C, R: Owned>(self: (&RwLock<T>), deadline: time::Instant, ctx: C, f: FnMut((&mut T), C) -> R) -> R |? time::WaitError {
         mut call = f;
         at := address(self.cell);
         mut code = 0;
@@ -251,7 +251,7 @@ impl<T> RwLock<T> {
         return r;
     }
     // Write access whether or not a failed writer poisoned it; clean again when `f` returns.
-    pub fn recover_with<C, R: Owned, F: FnMut((&mut T), C) -> R>(self: (&RwLock<T>), ctx: C, f: F) -> R {
+    pub fn recover_with<C, R: Owned>(self: (&RwLock<T>), ctx: C, f: FnMut((&mut T), C) -> R) -> R {
         mut call = f;
         at := address(self.cell);
         mut node = 0;
@@ -292,7 +292,7 @@ pub fn condition() -> Condition {
     }
 }
 impl Condition {
-    pub fn wait_with<a, T, C, R: Owned, P: Fn((&T), (&C)) -> bool, G: FnMut((&mut T), C) -> R>(self: (&Condition), m: (&a Mutex<T>), ctx: C, ready: P, then: G) -> R {
+    pub fn wait_with<a, T, C, R: Owned>(self: (&Condition), m: (&a Mutex<T>), ctx: C, ready: Fn((&T), (&C)) -> bool, then: FnMut((&mut T), C) -> R) -> R {
         mut call = then;
         at := block<T>(m);
         unsafe {
@@ -314,7 +314,7 @@ impl Condition {
         }
         return r;
     }
-    pub fn wait_until<a, T, C, R: Owned, P: Fn((&T), (&C)) -> bool, G: FnMut((&mut T), C) -> R>(self: (&Condition), m: (&a Mutex<T>), deadline: time::Instant, ctx: C, ready: P, then: G) -> R |? time::WaitError {
+    pub fn wait_until<a, T, C, R: Owned>(self: (&Condition), m: (&a Mutex<T>), deadline: time::Instant, ctx: C, ready: Fn((&T), (&C)) -> bool, then: FnMut((&mut T), C) -> R) -> R |? time::WaitError {
         mut call = then;
         at := block<T>(m);
         unsafe {
@@ -473,7 +473,7 @@ impl Drop for Permit {
     }
 }
 impl Semaphore {
-    pub fn acquire_with<C, R: Owned, F: FnMut(C) -> R>(self: (&Semaphore), permits: u64, ctx: C, f: F) -> R {
+    pub fn acquire_with<C, R: Owned>(self: (&Semaphore), permits: u64, ctx: C, f: FnMut(C) -> R) -> R {
         mut call = f;
         at := address(self.cell);
         mut node = 0;
@@ -486,7 +486,7 @@ impl Semaphore {
         }
         return r;
     }
-    pub fn acquire_until<C, R: Owned, F: FnMut(C) -> R>(self: (&Semaphore), permits: u64, deadline: time::Instant, ctx: C, f: F) -> R |? time::WaitError {
+    pub fn acquire_until<C, R: Owned>(self: (&Semaphore), permits: u64, deadline: time::Instant, ctx: C, f: FnMut(C) -> R) -> R |? time::WaitError {
         mut call = f;
         at := address(self.cell);
         mut node = 0;
@@ -543,7 +543,7 @@ pub fn once<T>() -> Once<T> {
     }
 }
 impl<T> Once<T> {
-    pub fn get_or_init<a, F: Fn() -> T>(self: (&a Once<T>), make: F) -> (&a T) {
+    pub fn get_or_init<a>(self: (&a Once<T>), make: Fn() -> T) -> (&a T) {
         at := address(self.cell);
         unsafe {
             if host::once_begin(at) == 1 {
