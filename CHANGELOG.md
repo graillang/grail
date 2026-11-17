@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **Fixed: a release build of a program that calls C's `memcpy` failed to compile.** The LLVM
+  module defines `memcpy`/`memset`/`memmove` itself, and an `extern "C"` declaration of the same
+  name added a second, conflicting one ("invalid redefinition of function 'memcpy'"); the stdmap DNS
+  and IPv6 cases failed under `GRAIL_BACKEND=llvm`. Those names are no longer declared again.
+
 - **Typed iterator adapters: `iter::over(v).map(..).filter(..).fold(..)`.** `iter::VecIter<T>`,
   `iter::Map<I, U, F>` and `iter::Filter<I, F>` implement `Iterator` with each callback held by its
   own closure type, so a chain is one nested type, specialised and called directly, with no
