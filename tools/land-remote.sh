@@ -86,7 +86,7 @@ seed=$((10#$(echo "$stamp" | tr -dc 0-9 | tail -c 9)))
 cases=${GRAIL_FUZZ_CASES:-2000}
 (
   echo "seed $seed cases $cases" > "$base/$stamp/fuzz.log"
-  cd /srv/grail/w && PATH=/root/.bun/bin:$PATH nice -n 15 bun tools/fuzz-frontend.mjs --cases "$cases" --seed "$seed" \
+  cd /srv/grail/w && GRAIL_HOME=/srv/grail/w PATH=/root/.bun/bin:$PATH nice -n 15 bun tools/fuzz-frontend.mjs --cases "$cases" --seed "$seed" \
     --jobs 2 --timeout 60000 --shrink --quiet --compiler "$compiler" >> "$base/$stamp/fuzz.log" 2>&1
   status=$?
   mkdir -p "$base/$stamp/fuzz"
@@ -98,7 +98,7 @@ cases=${GRAIL_FUZZ_CASES:-2000}
 ccases=${GRAIL_FUZZ_CLOSURE_CASES:-400}
 (
   echo "seed $seed cases $ccases" > "$base/$stamp/fuzz-closures.log"
-  cd /srv/grail/w && PATH=/root/.bun/bin:$PATH nice -n 15 bun tools/fuzz-closures.mjs --cases "$ccases" --seed "$seed" \
+  cd /srv/grail/w && GRAIL_HOME=/srv/grail/w PATH=/root/.bun/bin:$PATH nice -n 15 bun tools/fuzz-closures.mjs --cases "$ccases" --seed "$seed" \
     --jobs 2 --keep --compiler "$compiler" >> "$base/$stamp/fuzz-closures.log" 2>&1
   status=$?
   mkdir -p "$base/$stamp/fuzz-closures"
