@@ -7,6 +7,22 @@
   step, writes one with no escapes in one append, and skips the whitespace call when the next byte
   is not whitespace. bench/json.grl: Grail-LLVM 4.48G -> 3.15G instructions (Rust 1.64G),
   Grail-native 14.3G -> 9.8G.
+- **Raw address offsets.** In an `unsafe module`, the address operand of `raw_load`/`raw_store`
+  and their narrow forms written as `p + k` with a literal `k` has no overflow check and is folded
+  into the load's addressing (`movq 16(%rax),%rax`); other integer arithmetic there still follows
+  the build's overflow mode. The runtime loses about 950 of its 2,664 overflow checks
+  (docs/ffi.md; decision record "Raw address offsets").
+- **Soundness: a callable bound's reference parameters are fresh on every call.** In
+  `F: FnMut((&mut T), C) -> R` the `&mut T` has a lifetime the bound names nowhere else, so - as in
+  Rust's `for<'a>` elision - the closure or function given for `F` must accept any lifetime there. One
+  whose signature ties it to another parameter, its result or a capture (`fn leak<a, b>(v: &a mut T,
+  out: &b mut Out<a>)`) could keep the reference past the call and is now refused: "its parameter N
+  is a reference the bound gives it fresh on every call". It was accepted since callable bounds
+  landed (through `vecs` callbacks and the typed iterator adapters too).
+- **Fix: default interface methods work across modules.** An interface's default method bodies were
+  not carried in its `.iface`, so an implementation in another module failed with
+  "missing interface method (it has no default body)" under separate compilation (a single run was
+  fine). The default's text now travels with the method record, as a generic template's does.
 - **Changed: `split`, `trim`, `lines` and `split_whitespace` return views, and live in `strings`.**
   They were the compiler's own methods (and `strings` methods) returning owned copies; now they are
   `strings` methods (`use strings;`) returning views of the text (`(&[u8])[]`, `&[u8]`), like
@@ -27,6 +43,11 @@
   its Rust twin): Grail-LLVM 11.65G -> 4.53G instructions (Rust 3.23G), Grail-native 35.7G -> 13.7G.
 - The LLVM backend no longer mistakes a static's storage between two functions for a function (a
   module with a `static` and functions after it failed to assemble).
+- `grail check` is about a fifth cheaper again: a check files *check units* - what a function asks
+  of the build, without its assembly - and writes no assembly at all; a build does not take a check
+  unit for its own and compiles that function. The compiler is no longer hashed on every command
+  (its digest is kept in the store by path, size and time).
+
 - **The standard map is one open-addressed table** (`lib/hashmap.grl`). Keys, values and their
   hashes are stored densely in insertion order (iteration order and `key_at`/`value_at` are
   unchanged), indexed by one table of slot words (a 32-bit hash tag and the entry index) with
@@ -38,6 +59,41 @@
   Grail-native 28.3G -> 4.6G (best development rival 8.1G). The LLVM backend emits generic
   specialisations `weak_odr` instead of `weak`, so LLVM may inline them, and pushing a record of
   whole words copies words rather than calling the byte copier.
+- Fixed: a failed index check could be reported as `division by zero`. A `%` or `/` states its
+  failure kind before its own check; when the optimiser removed that check (a divisor it proved
+  non-zero), the kind stayed pending and named the next check in the function. A pending kind now
+  ends with its statement, and an inlined bounds check is recognised by its shape first.
+- **A foreign call that holds a worker for more than 10 ms is handed off.** Every `extern "C"`
+  call on x86-64 Linux counts itself in and out on its worker (about 1.2 ns a call, measured on
+  10M calls of `labs`), and a scheduler monitor thread looks every 5 ms: a worker inside one foreign
+  call for two looks while work is queued is given to a spare, as a `blocking` call would have
+  been at once. The runtime says so once, naming the function, so it can be declared `blocking`.
+  At most 10,000 threads may be blocked in foreign calls; the next one ends the program with a
+  message instead of exhausting the machine.
+
+- **SIMD vector types (S1).** `f32x4`, `f32x8`, `f64x2`, `f64x4`, `i32x4` and `i32x8`, with masks
+  `m32x4`, `m32x8`, `m64x2` and `m64x4`.
+  - They are plain values. Lane-wise `+ - * /` work on floats; wrapping `+ - *` and `& | ^` on
+    integers; `& | ^` on masks.
+  - Constructors are `splat`, `new` and `load` (from a slice or an array, one bounds check per
+    vector). Methods are `store`, `sum` (a fixed halving tree, bit-identical everywhere), `lane`,
+    `min`/`max` (the scalar NaN and tie rule) and the compares `eq ne lt le gt ge`, which give masks.
+    A mask has `select`, `any`, `all` and `not`.
+  - The LLVM backend lowers them to vector IR. A dot product runs within 5% of the same loop in C
+    with SSE2 intrinsics, its loop entirely in registers. The native backend computes the same
+    results lane by lane; packed SSE2 and NEON come later.
+  - Interfaces are format 10.
+- Fixed: an `Atomic<T>`'s element was not part of its type, so an `Atomic<u8>` could be passed where
+  an `Atomic<u64>` was expected.
+- Stack probes have a backstop: after the probe pass, any frame line (`subq $.F<n>[+K],%rsp`,
+  `framesub`, or a literal `subq`) whose frame is larger than a page without its probe is an
+  internal compiler error naming the function, so a new spelling of the frame line cannot drop the
+  probe silently again. Frames within 128 bytes of a page are probed when the saved-register area
+  carries them over it.
+
+- Fixed: `grail fmt` could break a long expression inside `<<` or `>>` (each is two `<`/`>` tokens),
+  or start a continuation line with `<`, and the output then read as a generic argument list and no
+  longer parsed. A wrapped line now never starts with `<` or `>`.
 - **Small runtime functions are inlined into every module.** A small runtime body (the scheduler's
   `rt_current`, `rt_list_set`, `rt_list_head`, ...) is now inlined where another module calls it,
   in every build shape: a per-module build carries the bodies in `runtime.facts`. A failure inside
@@ -91,6 +147,10 @@
 - Fix: stack probes were skipped for every frame since frames also save callee-saved registers
   (`subq $.F<n>+K,%rsp`); a frame over a page could step over the guard page again. The probe
   matches that form, covers the K bytes, and the pinned case checks it on every target.
+- `bun tools/compile-rivals.mjs` measures a no-op rebuild beside the cold build, the edited build and
+  both checks, runs the rival twins as well as the generated programs, and reports instructions in one
+  process (the primary figure) and wall time at four jobs; the results are `bench/results/compile.json`
+  and the Performance chapter names the cause of every row where Grail is behind.
 
 - **C calls with floats are optimised in release builds (call ABI S8a).** A function that called a
   C function with `f64`/`f32` arguments or a float result had to stay unoptimised on the LLVM
@@ -368,6 +428,15 @@
   comparison of two constants) is decided at compile time; an accumulator worked on in %rax
   (`movq %r12,%rax; xorq ...,%rax; imulq ...,%rax; movq %rax,%r12`) is worked on in its own
   register. fnv executes 15% fewer instructions, sieve 3%.
+- **Native backend: callee-saved registers are shared by variables whose lives do not overlap.** The
+  optimiser kept one register per promoted local for the whole function, so the variables of a
+  function's first loop held the registers its later loops needed. Locals are now coloured by
+  interference, as float locals already were. fnv executes 4% fewer instructions, nbody 3%.
+- **Native backend: a call to a Grail function keeps alive only the registers it takes.** The
+  signature fact (the argument words LLVM's `define` uses) is now recorded for native builds too,
+  and a direct call to a body with one reads only that many argument registers instead of all six,
+  so a value left in, say, `%rcx` before a one-argument call is no longer kept for it. fib(32):
+  112.8M -> 105.8M instructions (Go 102.9M).
 
 - **Native backend: a slice's `data` and `len` live in registers.** The type facts are recorded on
   the native path too, and the optimiser reads F1's slice-descriptor fact: a slice written once at

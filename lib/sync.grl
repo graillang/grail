@@ -157,51 +157,57 @@ impl<T> RwLock<T> {
     }
     pub fn read_with<C, R: Owned>(self: (&RwLock<T>), ctx: C, f: Fn((&T), C) -> R) -> R {
         at := address(self.cell);
+        mut node = 0;
         unsafe {
-            host::rw_lock(at, 1, 0, 0);
+            node = host::rw_lock(at, 1, 0, 0);
         }
         r := f(self.shared(), ctx);
         unsafe {
-            host::rw_unlock(at, 1);
+            host::rw_release(node, 1);
         }
         return r;
     }
     pub fn write_with<C, R: Owned>(self: (&RwLock<T>), ctx: C, f: FnMut((&mut T), C) -> R) -> R {
         mut call = f;
         at := address(self.cell);
+        mut node = 0;
         unsafe {
-            host::rw_lock(at, 2, 0, 0);
+            node = host::rw_lock(at, 2, 0, 0);
         }
         r := call(self.exclusive(), ctx);
         unsafe {
-            host::rw_unlock(at, 2);
+            host::rw_release(node, 2);
         }
         return r;
     }
     pub fn try_read_with<C, R: Owned>(self: (&RwLock<T>), ctx: C, f: Fn((&T), C) -> R) -> R? {
         at := address(self.cell);
+        mut node = 0;
         unsafe {
-            if host::rw_try(at, 1) == 0 {
+            node = host::rw_try(at, 1);
+            if node == 0 {
                 return None;
             }
         }
         r := f(self.shared(), ctx);
         unsafe {
-            host::rw_unlock(at, 1);
+            host::rw_release(node, 1);
         }
         return Some(r);
     }
     pub fn try_write_with<C, R: Owned>(self: (&RwLock<T>), ctx: C, f: FnMut((&mut T), C) -> R) -> R? {
         mut call = f;
         at := address(self.cell);
+        mut node = 0;
         unsafe {
-            if host::rw_try(at, 2) == 0 {
+            node = host::rw_try(at, 2);
+            if node == 0 {
                 return None;
             }
         }
         r := call(self.exclusive(), ctx);
         unsafe {
-            host::rw_unlock(at, 2);
+            host::rw_release(node, 2);
         }
         return Some(r);
     }
@@ -217,9 +223,10 @@ impl<T> RwLock<T> {
         if code == 4 {
             return time::WaitError::Cancelled;
         }
+        node := code;
         r := f(self.shared(), ctx);
         unsafe {
-            host::rw_unlock(at, 1);
+            host::rw_release(node, 1);
         }
         return r;
     }
@@ -236,9 +243,10 @@ impl<T> RwLock<T> {
         if code == 4 {
             return time::WaitError::Cancelled;
         }
+        node := code;
         r := call(self.exclusive(), ctx);
         unsafe {
-            host::rw_unlock(at, 2);
+            host::rw_release(node, 2);
         }
         return r;
     }
@@ -246,12 +254,13 @@ impl<T> RwLock<T> {
     pub fn recover_with<C, R: Owned>(self: (&RwLock<T>), ctx: C, f: FnMut((&mut T), C) -> R) -> R {
         mut call = f;
         at := address(self.cell);
+        mut node = 0;
         unsafe {
-            host::rw_lock(at, 2, 0, 4);
+            node = host::rw_lock(at, 2, 0, 4);
         }
         r := call(self.exclusive(), ctx);
         unsafe {
-            host::rw_unlock(at, 3);
+            host::rw_release(node, 3);
         }
         return r;
     }
@@ -469,8 +478,7 @@ impl Semaphore {
         at := address(self.cell);
         mut node = 0;
         unsafe {
-            host::sem_acquire(at, permits, 0, plain());
-            node = host::sem_node(at);
+            node = host::sem_acquire(at, permits, 0, plain());
         }
         r := call(ctx);
         unsafe {
@@ -490,7 +498,7 @@ impl Semaphore {
             if code == 4 {
                 return time::WaitError::Cancelled;
             }
-            node = host::sem_node(at);
+            node = code;
         }
         r := call(ctx);
         unsafe {
