@@ -1,5 +1,10 @@
 ## Unreleased
 
+- Fixed (release builds): a C call passing a record `byval` from an optimised function passed only
+  its first word (the record was counted as one argument word); such calls are placed by the
+  native C classification again. A typed C call whose loaded argument registers exceed its fact is
+  now refused (an error under `--verify-facts`).
+
 - Fixed (release builds): a function calling a blocking `extern "C"` function was left unoptimised
   since the foreign-call marker landed - the marker's locked counter, thread-pointer read and
   register save around `rt_foreign_lost` were text the LLVM lifter refused. It now lifts them
