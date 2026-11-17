@@ -1425,7 +1425,9 @@ pub fn probe_frames<a>(s: &a [u8], after: u64) -> u8[] {
                     n = n * 10 + u64(s[x] - 48);
                 }
             }
-            if 4096 < n {
+            // Every frame: the saved-register area a frame line adds (`+K`) can carry one just under
+            // a page over it.
+            if 4096 < n + 128 {
                 names.push(s[a + 5: comma].copy());
                 sizes.push(n);
             }
@@ -1433,6 +1435,7 @@ pub fn probe_frames<a>(s: &a [u8], after: u64) -> u8[] {
         a = e + 1;
     }
     if names.len() == 0 {
+        probe_backstop(view(s));
         return s.copy();
     }
     mut out = u8[];
@@ -1489,7 +1492,7 @@ pub fn probe_frames<a>(s: &a [u8], after: u64) -> u8[] {
                             same = false;
                         }
                     }
-                    if same {
+                    if same && (4096 < sizes[i] + extra) {
                         pages := (sizes[i] + extra + 4095) / 4096;
                         if after != 0 {
                             out.append(view("movq %rbp,%rax\nmovq $"));
@@ -1522,7 +1525,122 @@ pub fn probe_frames<a>(s: &a [u8], after: u64) -> u8[] {
         }
         a = e + 1;
     }
+    probe_backstop(view(out));
     return out;
+}
+// The backstop for the probes (the stack's guard page is a safety property, so it must not rest on
+// one spelling of the frame line): every frame line - a line that moves %rsp down by a `.F`
+// constant (`subq $.F<n>...,%rsp`, `framesub .F<n>...`) or by a literal - whose frame, with what the
+// line adds (`+K`), is larger than a page must be followed by its probe (`.Lgrail_probe_<n>`), or
+// the compiler stops with an internal error naming the function. One pass over the text.
+pub fn probe_backstop<a>(s: &a [u8]) {
+    mut names = u8[][];
+    mut sizes = u64[];
+    mut probed = u8[][];
+    mut a = 0;
+    while a < s.len() {
+        mut e = a;
+        while (e < s.len()) && (s[e] != 10) {
+            e += 1;
+        }
+        if (e - a > 8) && ir::at(view(s), a, view(".set .F")) {
+            mut comma = a;
+            while (comma < e) && (s[comma] != 44) {
+                comma += 1;
+            }
+            mut n: u64 = 0;
+            for x in comma + 1..e {
+                if (48 <= s[x]) & (s[x] <= 57) {
+                    n = n * 10 + u64(s[x] - 48);
+                }
+            }
+            // Only a frame that can reach a page with its saved-register area (well under 128 bytes).
+            if 4096 < n + 128 {
+                names.push(s[a + 5: comma].copy());
+                sizes.push(n);
+            }
+        }
+        if (e - a > 15) && ir::at(view(s), a, view(".Lgrail_probe_")) && (s[e - 1] == 58) {
+            mut p = u8[];
+            p.push(46);
+            p.append(s[a + 14: e - 1]);
+            probed.push(p);
+        }
+        a = e + 1;
+    }
+    mut function = u8[];
+    a = 0;
+    while a < s.len() {
+        mut e = a;
+        while (e < s.len()) && (s[e] != 10) {
+            e += 1;
+        }
+        if (e > a) && (s[e - 1] == 58) && (s[a] != 46) {
+            function = s[a: e - 1].copy();
+        }
+        line := s[a: e].copy();
+        mut down = ir::at(view(s), a, view("framesub "));
+        if ir::at(view(s), a, view("subq $")) && (6 < e - a) && ir::at(view(s), e - 5, view(",%rsp")) {
+            down = true;
+        }
+        if down {
+            // The constant the line names, and the bytes it adds.
+            mut at = 0;
+            while (at + 1 < line.len()) && !((line[at] == 46) && (line[at + 1] == 70)) {
+                at += 1;
+            }
+            mut bytes: u64 = 0;
+            mut name = u8[];
+            if at + 1 < line.len() {
+                mut stop = at;
+                while (stop < line.len()) && (line[stop] != 43) && (line[stop] != 44) && (line[stop] != 32) {
+                    stop += 1;
+                }
+                name = line[at: stop].copy();
+                for i in names.len() {
+                    if ir::same_range(view(names[i]), 0, names[i].len(), view(name)) {
+                        bytes = sizes[i];
+                    }
+                }
+                if (stop < line.len()) && (line[stop] == 43) {
+                    mut k: u64 = 0;
+                    mut x = stop + 1;
+                    while (x < line.len()) && (48 <= line[x]) & (line[x] <= 57) {
+                        k = k * 10 + u64(line[x] - 48);
+                        x += 1;
+                    }
+                    bytes = bytes + k;
+                }
+            } else {
+                // A literal frame: the immediate itself.
+                mut x = 6;
+                while (x < line.len()) && (48 <= line[x]) & (line[x] <= 57) {
+                    bytes = bytes * 10 + u64(line[x] - 48);
+                    x += 1;
+                }
+            }
+            if 4096 < bytes {
+                mut ok = false;
+                if name.len() != 0 {
+                    for i in probed.len() {
+                        if ir::same_range(view(probed[i]), 0, probed[i].len(), view(name)) {
+                            ok = true;
+                        }
+                    }
+                }
+                if !ok {
+                    host::print(view("grail: internal compiler error: "));
+                    host::print(view(function));
+                    host::print(view("'s frame is larger than a page and has no stack probe ("));
+                    host::print(view(line));
+                    host::print(view(")\n"));
+                    host::exit(70);
+                }
+            }
+        }
+        a = e + 1;
+    }
+    return ();
 }
 pub fn lower_leaf_calls<a>(s: &a [u8]) -> u8[] {
     mut out = u8[];
