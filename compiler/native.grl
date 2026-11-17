@@ -626,6 +626,9 @@ struct C {
     layout_offsets: u64[][],
     // An exported callback's float result: 0 none, 1 f64, 2 f32 (returned in xmm0/d0/fa0).
     export_fret: u64,
+    // 1 while the callback being emitted is entered through callback_thunk (it pins; the body does
+    // not bridge the thread record again).
+    cb_thunked: u64,
     // Set for one cfield_load: another `.field` projection follows this one.
     cfield_more: u64,
     alias_next: u64,
@@ -864,6 +867,10 @@ struct C {
     // `pv_spec_failed`/`pv_spec_dropped` pair each body with a kept fact it broke: the function is
     // compiled again without keeping that one.
     pv_spec_open: u64,
+    // 1 inside a body `func()` compiles, which recompiles itself when a kept fact fails (c.retry):
+    // only there may a loop be compiled under kept facts. `pv_begin` clears it, so a body started
+    // elsewhere (a closure's) never speculates.
+    pv_spec_ok: u64,
     pv_spec_cands: Atom[],
     pv_spec_failed: u64[],
     pv_spec_dropped: Atom[],
@@ -3751,6 +3758,84 @@ fn callback_pin<a, b>(c: (&a mut C), op: &b [u8]) -> unit {
 // Leave a callback: restore the caller's thread pointer, then, if this entry adopted the thread,
 // clear `rt_tls_record` (now on the caller's TCB, so the TLS word is addressable) and unmap the
 // record. Runs before the return value is loaded, so it may clobber any register.
+// Whether callback_thunk can stand in front of this callback: every parameter is a register word
+// or a float (none on the stack: the thunk's own return address and saved word sit between C's
+// stack arguments and the body), none is a C record by value or by `&mut`, and the result is not
+// a record.
+fn callback_thunkable<a>(c: (&a mut C), count: u64, ret: u64) -> bool {
+    mut ints = 0;
+    mut floats = 0;
+    for i in count {
+        ty := c.locals[i].ty;
+        if (is_c_record(&mut c, ty) != 0) || (ffi_record_out_param(&mut c, ty) != 0) || ffi_byval(&mut c, ty) {
+            return false;
+        }
+        if is_float(&mut c, ty) {
+            floats += 1;
+        } else {
+            if ffi_words(&mut c, ty) != 1 {
+                return false;
+            }
+            ints += 1;
+        }
+    }
+    if (6 < ints) || (8 < floats) {
+        return false;
+    }
+    if (ret != 1) && (ty_kind(&mut c, ret) == 8) {
+        return false;
+    }
+    return true;
+}
+// The frameless entry of a C callback (x86-64): the body is entered with the registers C called
+// with. The fast path is the thread's record found (threaded process) or the thread pointer
+// (static program); pinned through it, the body called with the record saved on the stack (which
+// also keeps the call 16-byte aligned), unpinned. A thread C created has no record: the framed
+// path saves the argument registers, adopts one (rt_adopt_record) and publishes it in
+// rt_tls_record, calls the body pinned, then unpublishes and releases it.
+fn callback_thunk<a, b, d>(c: (&a mut C), symbol: &b [u8], body: &d [u8]) -> unit {
+    stat := label(&mut c);
+    pin := label(&mut c);
+    slow := label(&mut c);
+    o(&mut c, view(symbol));
+    o(&mut c, view(":\ncmpq $0,rt_state+184(%rip)\n"));
+    jump(&mut c, view("je"), stat);
+    o(&mut c, view("movq %fs:rt_tls_record@tpoff,%rax\ntestq %rax,%rax\n"));
+    jump(&mut c, view("je"), slow);
+    jump(&mut c, view("jmp"), pin);
+    mark(&mut c, stat);
+    o(&mut c, view("movq %fs:0,%rax\n"));
+    mark(&mut c, pin);
+    o(&mut c, view("addq $1,120(%rax)\npushq %rax\ncall "));
+    o(&mut c, view(body));
+    o(&mut c, view("\npopq %rcx\nsubq $1,120(%rcx)\nret\n"));
+    mark(&mut c, slow);
+    o(&mut c, view("pushq %rbp\nmovq %rsp,%rbp\nsubq $128,%rsp\nmovq %rdi,(%rsp)\nmovq %rsi,8(%rsp)\nmovq %rdx,16(%rsp)\nmovq %rcx,24(%rsp)\nmovq %r8,32(%rsp)\nmovq %r9,40(%rsp)\n"));
+    for x in 8 {
+        o(&mut c, view("movq %xmm"));
+        on(&mut c, x);
+        o(&mut c, view(","));
+        on(&mut c, 56 + x * 8);
+        o(&mut c, view("(%rsp)\n"));
+    }
+    o(&mut c, view("call rt_adopt_record\nmovq %rax,48(%rsp)\nmovq %rax,%rsi\n"));
+    tls_record_address(&mut c);
+    o(&mut c, view("movq %rsi,(%rax)\naddq $1,120(%rsi)\nmovq (%rsp),%rdi\nmovq 8(%rsp),%rsi\nmovq 16(%rsp),%rdx\nmovq 24(%rsp),%rcx\nmovq 32(%rsp),%r8\nmovq 40(%rsp),%r9\n"));
+    for x in 8 {
+        o(&mut c, view("movq "));
+        on(&mut c, 56 + x * 8);
+        o(&mut c, view("(%rsp),%xmm"));
+        on(&mut c, x);
+        c.out.push(10);
+    }
+    o(&mut c, view("call "));
+    o(&mut c, view(body));
+    // The result (rax, rdx, xmm0) survives the unpin and the release.
+    o(&mut c, view("\nmovq %rax,(%rsp)\nmovq %rdx,8(%rsp)\nmovq %xmm0,16(%rsp)\nmovq 48(%rsp),%rdi\nsubq $1,120(%rdi)\n"));
+    tls_record_address(&mut c);
+    o(&mut c, view("xorl %ecx,%ecx\nmovq %rcx,(%rax)\nmovq 48(%rsp),%rdi\ncall rt_release_record\nmovq (%rsp),%rax\nmovq 8(%rsp),%rdx\nmovq 16(%rsp),%xmm0\nleave\nret\n"));
+    return ();
+}
 fn tls_leave_callback<a>(c: (&a mut C), slot: u64, adopt: u64, pin: u64) -> unit {
     if c.target == 0 {
         o(&mut c, view("movq "));
@@ -10962,7 +11047,7 @@ fn pv_loop_kill_spec<a>(c: (&a mut C), open: u64, end: u64) -> unit {
     if !pv_ir_live(&c) {
         return ();
     }
-    if pv_has_continue(&mut c, open, end) {
+    if (c.pv_spec_ok == 0) || pv_has_continue(&mut c, open, end) {
         pv_loop_kill(&mut c, open, end);
         return ();
     }
@@ -11356,6 +11441,7 @@ fn pv_ir_range<a, b>(c: (&a mut C), out: (&a mut Atom[]), name: &b [u8], lo: u64
 // caller proved it, which is what a proved call means), and nothing of this body is left behind for
 // the next one the compile emits.
 fn pv_begin<a>(c: (&a mut C)) -> unit {
+    exchange(&mut c.pv_spec_ok, 0);
     exchange(&mut c.pv_on, 0);
     exchange(&mut c.pv_kill_log, u8[][]);
     exchange(&mut c.pv_indexed, u8[][]);
@@ -19323,10 +19409,10 @@ fn fn_regs_decode<a, b, d>(c: (&a mut C), data: &b [u8], ok: (&d mut u64)) -> Fn
         } else if kind == 3 {
             data := iface_rs(&mut p);
             out.push(FnReg { kind: 3, template: 0, types: u64[], data: data });
-        } else if kind == 4 {
-            // A result adapter the body names (result_adapter): its shape code.
+        } else if (kind == 4) || (kind == 5) {
+            // A result adapter (4) or a zip adapter (5) the body names: its shape code.
             code := iface_rv(&mut p);
-            out.push(FnReg { kind: 4, template: code, types: u64[], data: u8[] });
+            out.push(FnReg { kind: kind, template: code, types: u64[], data: u8[] });
         } else {
             exchange(ok, 0);
             return out;
@@ -19471,6 +19557,8 @@ fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), l
             fx_unit_replay(&mut c, view(regs[i].data), text_at, at, claim_alloc, claim_panic);
         } else if kind == 4 {
             box_thunk_add(&mut c, template);
+        } else if kind == 5 {
+            zip_adapter_add(&mut c, template);
         } else {
             specialize(&mut c, template, &types);
         }
@@ -21161,6 +21249,19 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             c.out.push(10);
         }
         o(&mut c, view("addq $168,%rsp\npopq %rsi\npopq %rdi\nret\n"));
+    } else if (export == 2) && (c.target == 0) && tls_bridge(&mut c) && callback_thunkable(&mut c, count, ret) {
+        // A callback whose arguments all arrive in registers gets a frameless entry (call ABI, the
+        // callback thunk): it pins the thread's record, calls the body - the same function under
+        // `<symbol>_grail_body`, entered with C's registers untouched - and unpins. Only a thread
+        // C created (no record yet) takes the framed path that adopts one around the call.
+        push_bytes(&mut body_symbol, view("_grail_body"));
+        if exported(&mut c, view(name)) != 0 {
+            o(&mut c, view(".globl "));
+            o(&mut c, view(export_symbol));
+            c.out.push(10);
+        }
+        callback_thunk(&mut c, view(export_symbol), view(body_symbol));
+        exchange(&mut c.cb_thunked, 1);
     } else {
         if exported(&mut c, view(name)) != 0 {
             o(&mut c, view(".globl "));
@@ -21227,7 +21328,27 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         o(&mut c, view(",%rsp\n"));
     }
     if export == 2 {
-        callback_params(&mut c, count);
+        // A thunked body whose parameters are all full words (no float, nothing C passes narrow)
+        // takes them exactly as a Grail function does, so it is stored like one and carries a
+        // signature fact: the LLVM backend lifts it (call ABI, the callback thunk).
+        // (Not in a raw `unsafe module`, whose bodies keep multi-word values the facts do not
+        // describe: those keep the callback text, which the lifter leaves native as before.)
+        mut words_only = (c.cb_thunked != 0) && (c.raw == 0);
+        for i in count {
+            pty := c.locals[i].ty;
+            if is_float(&mut c, pty) || (ffi_narrow(&mut c, pty).len() != 0) {
+                words_only = false;
+            }
+        }
+        if (ret != 1) && is_float(&mut c, ret) {
+            words_only = false;
+        }
+        if words_only {
+            store_params(&mut c, count);
+            signature_fact(&mut c, count);
+        } else {
+            callback_params(&mut c, count);
+        }
         mut fret = 0;
         if ret != 1 {
             if is_float(&mut c, ret) {
@@ -21317,7 +21438,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     mut tls_slot = 0;
     mut adopt_slot = 0;
     mut pin_slot = 0;
-    if (export == 2) & tls_bridge(&mut c) {
+    if (export == 2) & tls_bridge(&mut c) & (exchange(&mut c.cb_thunked, 0) == 0) {
         tls_slot = fresh(&mut c);
         adopt_slot = fresh(&mut c);
         pin_slot = fresh(&mut c);
@@ -21335,7 +21456,9 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // The facts of this body start at its entry, where a refined parameter holds because the entry
     // checked it or the caller proved it (what a proved call means), and they are this body's alone.
     pv_begin(&mut c);
+    exchange(&mut c.pv_spec_ok, 1);
     block(&mut c);
+    exchange(&mut c.pv_spec_ok, 0);
     pv_end(&mut c);
     if unsafe_fn != 0 {
         exchange(&mut c.unsafe_depth, depth);
@@ -32943,10 +33066,18 @@ fn pv_span_bound<a>(c: (&a mut C), facts: (&a Atom[]), lo: u64, hi: u64, exact: 
             return -1;
         }
         mut m = pv_span_term_bound(&facts, view(t), exact);
+        i = i + used;
+        // `t & L`: a mask is at most its literal, whatever `t` is (a table lookup `next[s & 511]`).
+        if !exact && (i + 1 < hi) && (kind_at(&mut c, i) == 38) && pv_digits(view(tok_text(&mut c, i + 1))) {
+            mask := pv_number(view(tok_text(&mut c, i + 1)));
+            if (m < 0) || (mask < m) {
+                m = mask;
+            }
+            i = i + 2;
+        }
         if (m < 0) || !pv_u64_term(&mut c, view(t)) {
             return -1;
         }
-        i = i + used;
         // `t / L`: at most the bound of `t` divided by the literal.
         if (i + 1 < hi) && (kind_at(&mut c, i) == 47) {
             d := tok_text(&mut c, i + 1);
@@ -35313,16 +35444,22 @@ fn zip_adapter<a>(c: (&a mut C), closure: bool, slices: u64) -> u8[] {
     name.push(95);
     decimal(&mut name, slices);
     code := u64(closure) * 16 + slices;
-    mut known = false;
+    // A registration of the body's unit, as for result adapters: a replay names it again.
+    if c.fn_rec != 0 {
+        c.fn_regs.push(5);
+        iface_wv(&mut c.fn_regs, code);
+    }
+    zip_adapter_add(&mut c, code);
+    return name;
+}
+fn zip_adapter_add<a>(c: (&a mut C), code: u64) -> unit {
     for i in c.zip_adapters.len() {
         if c.zip_adapters[i] == code {
-            known = true;
+            return ();
         }
     }
-    if !known {
-        c.zip_adapters.push(code);
-    }
-    return name;
+    c.zip_adapters.push(code);
+    return ();
 }
 fn emit_zip_adapters<a>(c: (&a mut C)) -> unit {
     if c.zip_adapters.len() == 0 {
@@ -59021,6 +59158,7 @@ pub fn main() -> u64 {
         layout_memo: u64[],
         layout_offsets: u64[][],
         export_fret: 0,
+        cb_thunked: 0,
         cfield_more: 0,
         alias_next: 1,
         types: Ty[],
@@ -59161,6 +59299,7 @@ pub fn main() -> u64 {
         addr_arg: 0,
         ref_assign_target: 0,
         pv_spec_open: 0,
+        pv_spec_ok: 0,
         pv_spec_cands: Atom[],
         pv_spec_failed: u64[],
         pv_spec_dropped: Atom[],
