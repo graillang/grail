@@ -16,7 +16,7 @@ export const allTargets = [...targets, ...machoTargets];
 export const hostTarget = ({ x64: 'x86_64', arm64: 'aarch64', riscv64: 'riscv64' })[process.arch];
 // The compiler itself is a Linux host binary: its platform module is os-linux. darwin.grl (and
 // os-windows.grl) are per-target platform modules selected when building for those targets.
-export const compilerSources = ['native', 'lexer', 'ownership', 'machine', 'optimize', 'llvm', 'ir', 'fncache', 'jobs', 'asm_x86', 'asm_a64', 'asm_rv64', 'elf', 'fmt', 'explain', 'bindgen', 'pkg', 'docgen', 'cli', 'runtime', 'os-linux'].map(n => join(root, 'compiler', `${n}.grl`));
+export const compilerSources = ['native', 'lexer', 'ownership', 'machine', 'optimize', 'llvm', 'ir', 'fncache', 'jobs', 'asm_x86', 'asm_a64', 'asm_rv64', 'elf', 'coff', 'fmt', 'explain', 'bindgen', 'pkg', 'docgen', 'cli', 'runtime', 'os-linux'].map(n => join(root, 'compiler', `${n}.grl`));
 // A standard module the compiler itself uses: `grail build --watch` hashes its inputs with XXH64
 // (lib/xxhash.grl), so the compiler is built with that module in its source list.
 // Every tool builds through a store of its own run, inside this worktree: a test run must neither
@@ -482,7 +482,8 @@ function buildTreeCompiler() {
 //
 // The native compiler of these sources lowers them (never an older release binary, whose older
 // LLVM backend could carry a miscompile in), and the result is accepted only if it compiles the
-// compiler to the same text and objects and its programs pass a corpus slice.
+// compiler to the same text and objects and its programs pass a corpus slice. The LLVM module is
+// compiled in parallel parts (`grail llvm-compile`).
 export function buildReleaseCompiler({ log = () => {} } = {}) {
   if (hostTarget !== 'x86_64') throw new Error('the release compiler is built on x86_64 Linux for now');
   const native = buildCompiler();
@@ -498,11 +499,14 @@ export function buildReleaseCompiler({ log = () => {} } = {}) {
   const run = spawnSync(native, [...flags, '--backend=llvm', `${stem}.s`, ...compilerSources], { encoding: 'utf8', env: compilerEnvironment(), maxBuffer: 1 << 26 });
   if (run.status !== 0) throw new Error(`lowering the compiler through the LLVM backend failed (${run.signal ?? run.status}): ${(run.stderr ?? '').trim().split('\n')[0]}`);
   log('clang -O2');
-  command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[hostTarget]}`, ...moduleFlags(hostTarget), '-O2', '-c', `${stem}.s.ll`, '-o', `${stem}.ll.o`]);
+  // Cut in parts and compiled in parallel (`grail llvm-compile`): one clang -O2 over the whole
+  // compiler's module is serial and takes most of the build.
+  command([native, 'llvm-compile', `${stem}.s.ll`, `${stem}.ll.o`, emulations[hostTarget], process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[hostTarget]}`, ...moduleFlags(hostTarget), '-c']);
   command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[hostTarget]}`, '-c', `${stem}.s`, '-o', `${stem}.o`]);
   const pending = `${stem}.pending`;
   command([process.env.GRAIL_LINKER ?? 'ld.lld', '-m', emulations[hostTarget], `${stem}.o`, `${stem}.ll.o`, '-o', pending]);
   for (const leftover of [`${stem}.s`, `${stem}.s.ll`, `${stem}.o`, `${stem}.ll.o`]) if (existsSync(leftover)) rmSync(leftover);
+  for (const part of readdirSync(directory).filter(name => name.startsWith(`${basename(stem)}.s.ll.`))) rmSync(join(directory, part));
   // The acceptance test, before the binary is accepted:
   // (1) both compilers compile the compiler to one assembly file, and (2) each one's own assembler
   // (`grail asm`, which every release build runs and the text alone does not exercise) makes one

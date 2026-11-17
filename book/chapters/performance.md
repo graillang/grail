@@ -138,19 +138,17 @@ compiler's columns, so a change is measured on the engine the same way.
 
 {{perf:abundance#abundance-run}}
 
-**What it found.** On the commit charted, only two of the ten programs build through the store.
-Every program that imports the port's hash module stops at the same place: the interface file the
-store writes for that module carries `fnv1a64_offset`, a `u64` constant above 2^63, and reading the
-interface back refuses it as "a number wider than 64 bits". The ten-byte encoding is the correct one
-for such a value, so the reader's width check is one byte short. The same program builds as one
-compiler run, which is how the parity suite builds it, so this is a fault of the per-module build
-only; it is reported, with a three-line reproduction, to the owner of the build store. The table
-above has a dash wherever a program could not be built.
+**What it found.** Every program of the port builds through the store and matches its reference
+(the ImGui program is left out where its library is not built). A cold build of a test program is
+3 to 12 G instructions, most of it the port modules it imports; after a one-statement edit to
+`main` it is 0.17 to 0.37 G, a twentieth or less, because the store replays every unchanged module
+and function. The first measurement found a store fault that stopped eight programs building - a
+module's `u64` constant above 2^63 could not be read back from its interface - and its fix is on
+main.
 
-Of the two that build, `abgeo` (the cluster builder and its reader) is the slowest release run, and
-its hot spots are in the program's printing and float handling rather than in the geometry: the
-runtime's number formatting and `f32` rounding sit beside meshoptimizer's own `simplify_group` at
-the top of the profile.
+`abgeo` (the cluster builder and its reader) is the slowest release run, and its time goes to
+building vectors rather than to geometry: growing them (`rt_grow`) and pushing onto them
+(`rt_push`) lead the profile, with integer conversion (`rt_int`) third.
 
 {{perf:abundance#abundance-compile-cpu}}
 
