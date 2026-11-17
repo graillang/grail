@@ -1070,7 +1070,37 @@ fn rt_alloc(n: u64) -> u64 {
 }
 // rt_alloc in a process with more than one thread. It is a function of its own so that the
 // one-thread path above stays as small as it was: the compiler measures it.
+// rt_alloc with more than one thread: the fast path - this thread's cache, a block of the four small
+// classes on its list - is as small as the one-thread one (and is inlined into callers); the rest,
+// a refill, a larger request, the first allocation of a thread, is rt_alloc_shared_slow.
 fn rt_alloc_shared(n: u64) -> u64 {
+    if n < 241 {
+        tp := raw_tp_get();
+        if tp != 0 {
+            c := raw_load(wrapping_add(tp, 64));
+            if c != 0 {
+                bin := (4294945360 >> (((n + 15) >> 4) << 1)) & 3;
+                slot := wrapping_add(c, wrapping_add(64, wrapping_mul(bin, 48)));
+                block := raw_load(slot);
+                if block != 0 {
+                    raw_store(slot, raw_load(wrapping_add(block, 8)));
+                    raw_store(wrapping_add(slot, 8), wrapping_sub(raw_load(wrapping_add(slot, 8)), 1));
+                    raw_store(wrapping_add(block, 8), 1);
+                    ptr := wrapping_add(block, 16);
+                    mut i = 0;
+                    while i < n {
+                        raw_store(wrapping_add(ptr, i), 0);
+                        i = wrapping_add(i, 8);
+                    }
+                    raw_store(wrapping_add(c, 8), wrapping_add(raw_load(wrapping_add(c, 8)), 1));
+                    return ptr;
+                }
+            }
+        }
+    }
+    return rt_alloc_shared_slow(n);
+}
+fn rt_alloc_shared_slow(n: u64) -> u64 {
     if n < 262129 {
         tp := raw_tp_get();
         if tp != 0 {
@@ -1159,7 +1189,38 @@ fn rt_free(at: u64) -> u64 {
     return rt_free_shared(p);
 }
 // rt_free in a process with more than one thread; `p` is the payload address of a block.
+// rt_free with more than one thread: a small block onto this thread's cache list while the list
+// is under its bound; the rest - a static or bad block, a large one, a full list, a thread with no
+// cache yet - is rt_free_shared_slow.
 fn rt_free_shared(p: u64) -> u64 {
+    if p == 0 {
+        return 0;
+    }
+    block := wrapping_sub(p, 16);
+    if raw_load(wrapping_add(block, 8)) == 1 {
+        size := raw_load(block);
+        if size < 257 {
+            tp := raw_tp_get();
+            if tp != 0 {
+                c := raw_load(wrapping_add(tp, 64));
+                if c != 0 {
+                    bin := (197136 >> ((size >> 6) << 2)) & 15;
+                    slot := wrapping_add(c, wrapping_add(64, wrapping_mul(bin, 48)));
+                    count := wrapping_add(raw_load(wrapping_add(slot, 8)), 1);
+                    if (raw_load(wrapping_add(slot, 40)) < count) == false {
+                        raw_store(wrapping_add(block, 8), raw_load(slot));
+                        raw_store(slot, block);
+                        raw_store(wrapping_add(slot, 8), count);
+                        raw_store(wrapping_add(c, 8), wrapping_sub(raw_load(wrapping_add(c, 8)), 1));
+                        return 0;
+                    }
+                }
+            }
+        }
+    }
+    return rt_free_shared_slow(p);
+}
+fn rt_free_shared_slow(p: u64) -> u64 {
     if p == 0 {
         return 0;
     }
@@ -2300,13 +2361,20 @@ fn rt_read_file_blocking(path: u64) -> u64 {
         rt_abort();
     }
     fd := rt_syscall(2, name, 524288, 0);
-    rt_free(name);
     if rt_error(fd) {
         rt_abort();
     }
-    // The bytes go straight into the result's storage, which doubles when a read fills it.
+    // The bytes go straight into the result's storage, sized from the file (one more byte, so the
+    // read that finds the end needs no growth) and doubled if the file grew meanwhile.
+    mut hint = 4096;
+    fields := rt_new();
+    if rt_stat(name, 1, fields) == 0 {
+        hint = rt_at(fields, 2) + 1;
+    }
+    rt_drop_seq(fields);
+    rt_free(name);
     out := rt_new();
-    rt_reserveb(out, 65536);
+    rt_reserveb(out, hint);
     while 1 {
         have := raw_load(out + 8);
         if have == raw_load(out + 16) {
