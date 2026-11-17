@@ -1,0 +1,59 @@
+// 4x4 matrix products with f32x4 (docs/design/simd.md, S2): column-major matrices in flat f32
+// slices, each column of the product the sum of A's columns scaled by the broadcast lanes of B's
+// column. The C twin is bench/simd_mat4.c (SSE2 intrinsics, the same operations in the same order);
+// `bun tools/bench-simd.mjs` builds and times both.
+//   simd_mat4 ROUNDS
+use host;
+
+fn mul_all<a>(a: (&a [f32]), b: (&a [f32]), out: (&a mut [f32])) -> unit {
+    mut n = a.len();
+    if b.len() < n {
+        n = b.len();
+    }
+    if out.len() < n {
+        n = out.len();
+    }
+    mut base = 0;
+    while base + 16 <= n {
+        a0 := f32x4::load(a, base);
+        a1 := f32x4::load(a, base + 4);
+        a2 := f32x4::load(a, base + 8);
+        a3 := f32x4::load(a, base + 12);
+        for j in 4 {
+            bj := f32x4::load(b, base + 4 * j);
+            col := a0 * bj.shuffle(0, 0, 0, 0) + a1 * bj.shuffle(1, 1, 1, 1) + a2 * bj.shuffle(2, 2, 2, 2) + a3 * bj.shuffle(3, 3, 3, 3);
+            col.store(out, base + 4 * j);
+        }
+        base += 16;
+    }
+}
+fn main(arg: &[u8]) {
+    mut rounds = 0;
+    for i in arg.len() {
+        rounds = rounds * 10 + arg[i] - 48;
+    }
+    if rounds == 0 {
+        rounds = 1000;
+    }
+    count := 1024;
+    mut a = f32[];
+    mut b = f32[];
+    mut out = f32[];
+    for i in count * 16 {
+        a.push(f32(i % 7) * 0.5 - 1.0);
+        b.push(f32(i % 5) * 0.25);
+        out.push(0.0);
+    }
+    t0 := host::now_us();
+    for r in rounds {
+        mul_all(&a[:], &b[:], &mut out[:]);
+    }
+    t1 := host::now_us();
+    mut check: f64 = 0.0;
+    for i in count * 16 {
+        check = check + f64(out[i]);
+    }
+    println(check);
+    print("ns/matrix ");
+    println(f64(t1 - t0) * 1000.0 / (f64(rounds) * f64(count)));
+}
