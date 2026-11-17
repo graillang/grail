@@ -5,6 +5,14 @@
   `leaq (%r12,%r12,2),%rax` for 3, 5 and 9, a shift for a power of two, else `imulq $c`. nbody
   executes 13% fewer instructions.
 
+- An effect refusal over a callee the run cannot see (compiling a program to assembly without the
+  runtime's sources) names it - "the target is `rt_len`, whose body and effect summary this run does
+  not have" - instead of calling it an indirect call.
+
+- Fixed (windows-x86_64): the failure path reached the socket arms of the Windows syscall emulation,
+  so every `@no_alloc` function that indexes was refused there. The failure path and the scheduler
+  use `rt_syscall_low` (write to a handle, exit, park, wake, yield, sleep, clock, unmap), and the
+  profile dump creates and closes its file with `rt_create_file`/`rt_close_file`.
 - **Native backend: a vector the loop cannot change is read once before the loop.** With the
   front end's loop-stability fact, the optimiser loads the vector's data pointer (and its length,
   when a check or `len()` in the loop needs it) into registers on the way into the loop, and the
@@ -15,6 +23,25 @@
   under four seeds, the build store's digest) instead of SHA-256. It guards against corruption, which
   is all a digest in the file itself can do; the source digest stays SHA-256. Interfaces written by
   an older compiler are refused by version and regenerated.
+- Windows x86-64 builds (non-debug) assemble in the compiler too: `compiler/coff.grl` writes COFF
+  objects byte-identical to clang's, `.pdata`/`.xdata` unwind for every function included
+  (`grail asm --target windows-x86_64`). Debug builds keep clang until CodeView is written. Fixed:
+  `movsd` encoded as `movdqu` (the two shared an internal id).
+
+- **Sized and signed arithmetic no longer divides in software.** The runtime's `rt_div` was a
+  shift-and-subtract loop, and every overflow check of a sized or signed multiply and every sized or
+  signed division and remainder went through it; it is now the hardware divide. jpeg decoding of a
+  2048x2048 image: Grail-LLVM 25.8G -> 6.9G instructions, Grail-native 128G -> 38.6G. A case pins
+  division, remainder and multiplication at the edges of every width (checked and wrapping), and
+  `MIN / -1`, `MIN * -1`, division and remainder by zero and products one past the maximum abort.
+- **The linux-x86_64 release package ships the release-built compiler.** `tools/ci.mjs` builds the
+  compiler with the native backend as before (the bootstrap and fixed point) and then the release
+  compiler from it (`tools/native.mjs release`: LLVM backend and clang -O2, accepted on identical
+  text, objects and a corpus slice), and packages the release one - several times faster at
+  compiling (`check` of a 104 000-line program: 11.2 G against 25.8 G instructions).
+  `GRAIL_SHIP_NATIVE=1` ships the native build. `tools/compile-perf.mjs` measures
+  `GRAIL_RELEASE_COMPILER` beside the dev compiler when it is set.
+
 - Fixed: the per-loop stability fact and the LLVM backend's indirect-call fact both used fact kind
   7, so a stable vector whose slot number matched an indirect call's ordinal (with a loop head
   label of 6 or less) could make the lifter pass that call too few arguments. The stability fact
