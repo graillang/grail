@@ -79,6 +79,10 @@ verdict), so its check is a build whose output is thrown away.
 
 {{perf:compile-rivals#compile}}
 
+When the chart counts instructions rather than time, work that Grail spreads over forked workers
+counts in full: a check of the largest program at four workers executes about a third more
+instructions than the same check in one process, though it finishes sooner.
+
 **Why it is behind.**
 
 - **An edited check checks everything again.** `cargo check` is incremental; `grail check` is not
