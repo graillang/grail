@@ -1,5 +1,40 @@
 ## Unreleased
 
+- Fixed: the per-loop stability fact and the LLVM backend's indirect-call fact both used fact kind
+  7, so a stable vector whose slot number matched an indirect call's ordinal (with a loop head
+  label of 6 or less) could make the lifter pass that call too few arguments. The stability fact
+  is now kind 8.
+- docs: `docs/design/ctfe.md` - an in-compiler evaluator over checked IR for compile-time values (design only).
+
+- **R4: a compile-time probe compiles only what its values reach.** Before the bodies, a probe walks
+  the bodies its value functions reach, name by name (a call, a method, a generic's template), and
+  compiles only those; one that makes a closure or names `dyn` compiles the whole program, and a link
+  that finds a function left out recompiles with everything. A recomputed value in a 1600-function
+  program now costs +0.0-0.2 s instead of +1.1 s. The probes' base objects live in the build store
+  (`<store>/probe-base`), which `grail cache clear` and `prune` cover.
+
+- Fixed (release builds): a function calling a blocking `extern "C"` function was left unoptimised
+  since the foreign-call marker landed - the marker's locked counter, thread-pointer read and
+  register save around `rt_foreign_lost` were text the LLVM lifter refused. It now lifts them
+  (`lock incq`/`decq` as `atomicrmw` with the flags of the new value, the save area as words),
+  and calls to Grail's own functions no longer trip the vector-register guard meant for C calls.
+  tools/test-facts.mjs checks that a blocking-extern caller is lifted.
+
+- `grail check` no longer builds the list of SIMD type names for every identifier it reads: names
+  that cannot be one (wrong length, first letter or `x` position) are rejected first. This was 7% of
+  checking a large program since the SIMD types arrived.
+- The optimiser parses each distinct instruction line once per compile and replays the record for
+  its repeats (a label operand is numbered again, the frame-slot bookkeeping redone): byte-identical
+  output, 2.6% fewer instructions for a 4000-function file. The plan for taking the remaining text
+  hops out of the dev backend is docs/design/in-memory-ir.md.
+- **The inliner reaches further: copies inside copies, promoted registers, a 32-line cap.** A copy
+  of a small wrapper keeps the call it makes last (`rt_new` calling `rt_alloc`); that call is now
+  expanded too, three levels deep, since nothing of the copy is live across it. A small leaf whose
+  values the optimiser put in callee-saved registers (`rt_block_bin`, `rt_job_deque`) is no longer
+  refused: its copy keeps them in free scratch registers. The size cap is 32 lines, up from 24.
+  Measured (callgrind, one worker, minimum of five), against main: a join 2742 -> 2652 instructions,
+  a spawn 1631 -> 1583, fib(20) by nested join -1.7%. The compiler's own text is 4.0% larger and
+  it compiles 0.85% faster.
 - **The optimiser's liveness is linear in a function's length.** The register and frame-slot
   liveness behind dead-store removal, prologue zeroing and register colouring looked at every
   candidate slot on every line of every round; each line's effect is now worked out once per pass
@@ -14,6 +49,17 @@
   its text changes only when its own functions do; each part's object is kept in the build store
   (`llvm-parts/`) under the digest of its text and command, and a rebuild after an edit compiles
   only the parts holding changed functions.
+- **A compile-time probe no longer compiles the runtime and the standard library.** They are
+  compiled once into a cached base object with their interfaces (`.work/comptime/base/<key>`, keyed
+  by the compiler, the options and their sources), and each probe compiles only itself and the
+  program's own sources against them, then links with the base. The fixed cost of recomputing a
+  value fell from +1.1 s to +0.07-0.11 s of CPU (the probe's function cache was invalidated by any
+  change to the program's declarations, so the runtime was recompiled after every edit).
+- `grail build --report checks` prints every runtime check left in the program's own functions,
+  one line each: the function, `file:line:col`, and the kind (index, overflow, divide, conversion,
+  refinement, ...). A check the prover removed is not listed, so what stays in a hot loop is
+  visible. The report run is uncached, so a module from the build store cannot hide its checks.
+  The compiler's own flag is `--report-checks`.
 
 - **`grail cache warm [--target T]`** checks and builds every standard module into the build store,
   as rustup ships libstd: a project's first check then compiles only its own modules. The installers
@@ -92,11 +138,6 @@
   writes interfaces records its bodies now; `tools/test-cli.mjs` checks a program using each lib/
   module.
 - The internal assembler takes `.previous`.
-- **Integer map keys hash in registers.** `hash::Hash` has a defaulted `table_hash`, the SipHash-1-3
-  value a map uses (the default streams through `hash`, as before); the integer types give it as
-  `hash::word_hash`, the same value computed straight-line with no hasher state in memory. User
-  `Hash` impls need no change. bench/hashmap.grl: Grail-LLVM 0.88G -> 0.77G instructions and 0.30
-  -> 0.27 s user (Rust 0.64G, 0.21 s), Grail-native 3.21G -> 2.69G.
 - **Fix: every closure expression is a type of its own.** Two closure literals with the same
   signature and environment shape compared equal inside a generic type, so `k = keep(|| ..)` could
   replace a `Keep<F>` built from another literal; calls through it then ran the first literal's body
@@ -131,6 +172,11 @@
   base and index from the registers that hold them instead of copies in `%rdi`/`%rsi`, and a load
   of the element takes the scaled address as its operand (`movsd (%r12,%rbx,8),%xmm9`) instead of
   computing it with `leaq` first. nbody executes another 10% fewer instructions.
+- **Native backend: SSE register liveness by register number.** Whether a float register is still
+  needed is now decided by its number, for promoted registers as for scratch ones, and through a
+  chain of overflow checks; so more float operations work on their registers directly, and a float
+  element loaded only to be an operand is read by the arithmetic itself (`subsd (%rdi,%rsi,8),%xmm8`).
+  nbody executes 3% fewer instructions.
 
 - **Raw address offsets.** In an `unsafe module`, the address operand of `raw_load`/`raw_store`
   and their narrow forms written as `p + k` with a literal `k` has no overflow check and is folded

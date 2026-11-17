@@ -24,7 +24,7 @@ import { measurer } from './rivals/common.mjs';
 
 const update = process.argv.includes('--update');
 const baselinePath = join(root, 'bench/results/compile-perf.json');
-const tolerance = 1.10;
+const tolerance = 1.03;
 const buildTolerance = 1.03;
 const maxRatio = 4.4;
 const work = join(root, '.work/compile-perf', `run-${process.pid}`);
