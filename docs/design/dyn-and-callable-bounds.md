@@ -173,3 +173,12 @@ about ten calls - three nested `next`s, two closure bodies, the out-of-line `cor
 drop helpers - none inlined, because the native optimiser inlines leaves only; the LLVM build
 inlines part of it (7.5x). The remaining work is in the optimiser (inline small non-leaf direct
 calls, drop the empty drop helpers, make `Some` an intrinsic), not in the library or the type system.
+
+### 5.1 The inherent hop removed
+
+Each adapter's `next` was written once (`vec_next`, `map_next`, `filter_next`) and reached from both
+the `Iterator` impl and the inherent `next` a `for` loop uses: one forwarding call per adapter per
+element. The body now sits in both. Same benchmark: native 374 ms (was 432-529), `--release`
+72 ms (was 158) against a 17 ms hand loop - 4.2x. Still to do: VecIter as an index walk (needs a
+"move element i out" primitive and a remainder drop; `rt_pop` is a call per element today), and
+S6(A) (the closure held inline).
