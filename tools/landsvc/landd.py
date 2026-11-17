@@ -92,12 +92,20 @@ def gate(out, stamp):
         e = dict(env, GRAIL_CACHE_DIR=d)
         f = open(f'{out}/{name}.log', 'w')
         return name, subprocess.Popen(cmd, cwd=Q, env=e, stdout=f, stderr=subprocess.STDOUT, shell=True), f
+    # The suites come from the tree being gated (tools/landsvc/suites.txt: one `name command...` per
+    # line), so a branch that adds a suite lands its fix and its gate leg together.
+    suites = []
+    sp = os.path.join(Q, 'tools/landsvc/suites.txt')
+    if os.path.exists(sp):
+        for l in open(sp):
+            l = l.split('#')[0].strip()
+            if l: n, _, c = l.partition(' '); suites.append((n, c.strip() or f'bun tools/{n}.mjs'))
+    else:
+        suites = [(t, f'bun tools/{t}.mjs') for t in SUITES] + [('book', 'bun tools/book.mjs check'), ('lint', 'bun tools/ci.mjs lint')]
     legs = [start(f'x86_{i}', f'GRAIL_TEST_SHARD={i}/3 bun tools/test-native.mjs x86_64') for i in (1, 2, 3)]
     legs.append(start('selfhost', 'bun tools/test-selfhost.mjs'))
     # The suites run alongside the corpus: agents' processes are at nice 10 while a landing runs.
-    for t in SUITES: legs.append(start(t, f'bun tools/{t}.mjs'))
-    legs.append(start('book', 'bun tools/book.mjs check'))
-    legs.append(start('lint', 'bun tools/ci.mjs lint'))
+    for n, c in suites: legs.append(start(n, c))
     codes = {}
     for name, p, f in legs:
         codes[name] = p.wait(); f.write(f'exit={codes[name]}\n'); f.close()
@@ -119,10 +127,10 @@ def gate(out, stamp):
                 if known(c): notes.append(f'known failure: {c}')
                 else: notes.append(f'FAIL (twice): {c}'); ok = False
             else: notes.append(f'flake (passed alone): {c}')
-    retry_cmd = {'selfhost': 'bun tools/test-selfhost.mjs', 'book': 'bun tools/book.mjs check', 'lint': 'bun tools/ci.mjs lint'}
-    for n in ['selfhost'] + SUITES + ['book', 'lint']:
+    retry_cmd = dict(suites); retry_cmd['selfhost'] = 'bun tools/test-selfhost.mjs'
+    for n in ['selfhost'] + [n for n, _ in suites]:
         if codes[n] == 0: continue
-        cmd = retry_cmd.get(n, f'bun tools/{n}.mjs')
+        cmd = retry_cmd[n]
         r = sh(f'GRAIL_CACHE_DIR=$(mktemp -d) {cmd} > {out}/{n}.retry.log 2>&1', env=env)
         if r.returncode == 0: notes.append(f'flake (passed alone): {n}'); continue
         lines = [l for l in open(f'{out}/{n}.retry.log') if re.match(r'^(FAIL|error)', l)][:20]
