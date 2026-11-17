@@ -19097,6 +19097,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                     && public != 0
                     && count < 2
                     && typecount == 0
+                    && entry_shaped(&mut c, count, first)
             );
         file := c.file;
         raw := c.raw;
@@ -19704,6 +19705,21 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         par_record(&mut c, at_off, 0, &none);
     }
     return ();
+}
+// Whether a function with `count` parameters starting at `first` can be the program's entry when it
+// was picked rather than written as `main`: no parameter, or the one readonly byte view argv is.
+// A library's first public function is usually neither, and picking it made the build fail at the
+// entry check - located wherever the compiler had last read, often an imported interface - instead
+// of saying the program has no `main`.
+fn entry_shaped<a>(c: (&a mut C), count: u64, first: u64) -> bool {
+    if count == 0 {
+        return true;
+    }
+    if first >= c.params.len() {
+        return false;
+    }
+    param := c.params[first];
+    return (ty_kind(&mut c, param) == 5) && (ty_mode(&mut c, param) == 0);
 }
 fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     if c.raw != 0 {
@@ -55272,7 +55288,10 @@ pub fn main() -> u64 {
             exchange(&mut c.file, at);
             exchange(&mut c.pos, 0);
         }
-        fail(&mut c, view("no `main` and no public function with at most one parameter to use as the entry: add `pub fn main()`"));
+        mut said = copy_bytes(view("no `main` in "));
+        push_bytes(&mut said, view(input_path(&c, at)));
+        push_bytes(&mut said, view(": a program needs `pub fn main()` (or a public function taking nothing or the argument view); a module without one is a library, used from a program"));
+        fail(&mut c, view(said));
     }
     f := &c.funcs[e - 1];
     m := f.module.copy();

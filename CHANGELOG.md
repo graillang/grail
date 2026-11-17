@@ -1,5 +1,11 @@
 ## Unreleased
 
+- Fixed: `grail check` of a library file (no `main`) failed with "executable entry requires readonly
+  argv view", located in an imported module's interface (`result.iface`). A module with no `main`
+  makes its first public function the entry, and that rule picked a function no entry can be (one
+  taking a `u64` or a `&dyn Shape`). It now picks only a public function taking nothing or the
+  argument view; a module with neither is told `no `main` in FILE`, located in the file.
+
 - Fixed two compiler aborts on malformed input found by the front-end fuzzer: an unmatched `)` or
   `>` in an `extern` signature (an arithmetic overflow), and a file ending in a `//` comment or a `/`
   with no newline (an out-of-bounds read). Both are ordinary diagnostics now.
