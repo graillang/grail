@@ -16,8 +16,11 @@ Every program has a twin in each language: the same algorithm and the same outpu
 that language is usually written, not hand-vectorised, and built the way its users build it. Every
 output is checked against the C twin's. All of them target baseline x86-64 (SSE2), which is what
 clang, rustc, Go and Grail emit by default, so no column gets a newer instruction set than the
-others. Times are CPU time from `getrusage`, the best of several runs, because the machine they run
-on is shared.
+others. The machine is shared, so wall time is never the figure: each chart says whether it
+shows CPU time from `getrusage` (the best of several runs) or, when the machine was heavily loaded,
+the user-space instructions executed (from `perf_event_open`, which load does not move). The
+scheduler's figures are wall time by nature, the median of several rounds, with the load beside
+them.
 
 ## Release builds
 
@@ -26,21 +29,22 @@ with `clang -O2`, with integer overflow wrapping, as Rust's release profile does
 
 {{perf:bench-rivals#release}}
 
-**Where Grail is behind, and why.** In every row it misses, the cause read from the generated code
-is the same. Each iteration re-reads a vector's length and data pointer from its header and keeps
-the bounds check inside the loop, because the IR given to LLVM does not say that a store through
-the data cannot change the header. A loop whose checks cannot be hoisted cannot be vectorised
-either, which is why `xform` stays scalar where C, Rust and Zig emit packed SSE.
+**Where Grail is behind, and why**, read from the generated code of the commit charted:
 
-- `nbody` is also missing a language feature: Grail has no fixed-size array type, so "15 doubles"
-  cannot be stated in a type, and nothing can unroll on it the way Zig does. C with its arrays moved
-  to the heap is as fast as with fixed arrays, so the heap itself is not the cost.
-- The `xform` rows have a fix on the float branch: with `gaps12-float` (descriptor fields read once,
-  element addresses as `getelementptr`), `xform_f32` goes from 5.6x to 1.19x and `xform_f64` to
-  1.07x. The chart shows the commit it measured.
-- Where the time is at parity (`fnv`, `dot`), Grail still executes 1.2x to 1.9x the instructions
-  of C. The serial multiply or add chain sets the pace and hides them; a loop with more independent
-  work would not.
+- **A vector owned by the function re-reads its header on every store.** `sieve` and `sort` keep
+  their data in vectors created in the same function, and each store through one is followed by a
+  reload of its length and data pointer and a bounds check, because the IR given to LLVM does not
+  say that a store into the data cannot change the header. Release builds now read a *slice's*
+  descriptor once (which is what brought `xform` from about 7x to within
+  1.3x of C), but it does not yet cover vectors.
+- **Bounds checks that stay in the loop stop it being unrolled.** `matmul`'s inner product no longer
+  reloads anything, but both index checks remain, so its loop is about 11 instructions an iteration
+  where C's unrolled loop is about 4.
+- **`nbody` now uses fixed-size arrays** (`[f64; 15]`) and executes the same
+  number of instructions as C; the remaining distance is to Zig, which unrolls the whole pair loop
+  over its arrays.
+- Where the time is at parity (`fnv`, `dot`), Grail still executes 1.2x to 1.5x the instructions of
+  C: the serial multiply or add chain sets the pace and hides them.
 
 ## Development builds
 
@@ -50,16 +54,17 @@ quickly, as Go's compiler and Zig's debug backend do. Go has one build mode and 
 {{perf:bench-rivals#dev}}
 
 **Why it is behind.** Grail's development build beats Rust's dev profile on every program and
-loses to Zig Debug and Go on all of them except the foreign call. The native backend's code shows
-three causes:
+loses to Zig Debug and Go on most. Its integer widenings are now free (in `fnv` that took it from
+about 107 instructions per byte to 17, against Go's 11), and what remains in the native backend's
+code is:
 
-- a widening integer conversion is a call into the runtime (in `fnv`, once per byte: about 107
-  instructions per byte against Go's 11);
-- `f32` arithmetic goes through `f64` and back on every operation;
-- loop variables live in stack slots, and every access is checked against a length read again
-  from memory.
+- every element access is checked against a length read again from memory, with the vector's data
+  pointer loaded again beside it;
+- loops test at the top and jump back unconditionally, and values move between registers on every
+  step, where Go's loops are laid out tight;
+- `f32` arithmetic goes through `f64` and back on every operation (`xform_f32`, `dot_f32`, `matmul`).
 
-{{perf:bench-rivals#instructions}}
+{{perf:bench-rivals#instructions|cpu}}
 
 {{perf:bench-rivals#native-cpu}}
 
@@ -74,6 +79,10 @@ verdict), so its check is a build whose output is thrown away.
 
 {{perf:compile-rivals#compile}}
 
+When the chart counts instructions rather than time, work that Grail spreads over forked workers
+counts in full: a check of the largest program at four workers executes about a third more
+instructions than the same check in one process, though it finishes sooner.
+
 **Why it is behind.**
 
 - **An edited check checks everything again.** `cargo check` is incremental; `grail check` is not
@@ -85,6 +94,8 @@ verdict), so its check is a build whose output is thrown away.
   object code directly is planned.
 - After an edit, every unchanged function body is replayed from the build store, but the back end
   and the assembler still go over the whole module.
+
+{{perf:compile-rivals#compile-instructions|compile-cpu}}
 
 {{perf:compile-rivals#compile-wall}}
 

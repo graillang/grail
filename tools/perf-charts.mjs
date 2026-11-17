@@ -33,7 +33,7 @@ export function rowRatio(table, row, key = table.primary) {
   return (row.direction ?? table.direction) === 'higher' ? Math.max(...rivals) / mine : mine / Math.min(...rivals);
 }
 
-export function chart(table) {
+export function chart(table, data = undefined) {
   const cols = table.columns;
   const grailOrder = new Map(cols.filter(c => c.grail).map((c, i) => [c.key, i]));
   // Each bar: how far it is from the row's best, as a multiple: value / best where lower is better,
@@ -48,7 +48,7 @@ export function chart(table) {
   const log = spread > 8;
   const left = 230, width = 430, right = 190, bar = 11, gap = 2, groupGap = 14;
   const groupHeight = cols.length * (bar + gap) + groupGap;
-  const top = 48, legend = 26, height = top + table.rows.length * groupHeight + legend + 18;
+  const top = data ? 62 : 48, legend = 26, height = top + table.rows.length * groupHeight + legend + 18;
   const x = r => {
     if (!Number.isFinite(r)) return 0;
     const room = width - 44; // the bar's own value label goes after it, before the ratio column
@@ -62,6 +62,9 @@ export function chart(table) {
   const direction = `${table.direction === 'higher' ? 'Higher is better' : 'Lower is better'}${mixed ? ' (rows marked ↑: higher is better)' : ''}.`;
   const scale = `Bars normalised per row: a multiple of the row's best (1x), longer is worse; ${log ? 'logarithmic' : 'linear'} axis.`;
   parts.push(`<text x="0" y="13" class="perf-axis perf-direction">${escape(direction)}</text><text x="0" y="27" class="perf-axis">${escape(scale)}</text>`);
+  // The provenance in the chart itself, so a picture of one chart still says what it measured.
+  const source = data ? `Grail ${data.commit}; measured ${String(data.date).slice(0, 10)}, load average ${Array.isArray(data.load) ? [...new Set(data.load.map(l => l.split(' ')[0]))].join(' to ') : data.load} on ${data.machine?.cpus ?? '?'} CPUs.` : '';
+  if (source) parts.push(`<text x="0" y="41" class="perf-axis perf-source">${escape(source)}</text>`);
   // Axis ticks.
   const ticks = log ? [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000].filter(t => t <= spread) : [0, 0.25, 0.5, 0.75, 1].map(f => f * spread);
   for (const t of ticks) {
@@ -95,7 +98,7 @@ export function chart(table) {
     lx += 22 + c.label.length * 6.6;
   });
   const total = left + width + right;
-  return `<figure class="perf-chart" id="chart-${escape(table.id)}"><svg viewBox="0 0 ${total} ${height}" width="100%" role="img" aria-label="${escape(`${table.title}. ${caption}`)}" xmlns="http://www.w3.org/2000/svg">${parts.join('')}</svg><figcaption>${escape(table.title)}. ${escape(caption)}</figcaption></figure>`;
+  return `<figure class="perf-chart" id="chart-${escape(table.id)}"><svg viewBox="0 0 ${total} ${height}" width="100%" role="img" aria-label="${escape(`${table.title}. ${caption}`)}" xmlns="http://www.w3.org/2000/svg">${parts.join('')}</svg><figcaption>${escape(table.title)}. ${escape(caption)}${source ? ` ${escape(source)}` : ''}</figcaption></figure>`;
 }
 
 export function numbers(table) {
@@ -124,6 +127,6 @@ export function provenance(data) {
 // The whole result file: every charted table as a chart then its numbers, the rest as numbers.
 export function renderResults(data) {
   if (data?.schema !== 1 || !Array.isArray(data.tables)) throw new Error(`not a rivals result file (schema ${data?.schema})`);
-  const html = data.tables.map(t => `${t.chart ? chart(t) : ''}${numbers(t)}`).join('') + provenance(data);
+  const html = data.tables.map(t => `${t.chart ? chart(t, data) : ''}${numbers(t)}`).join('') + provenance(data);
   return `<section class="perf-results" data-tool="${escape(data.tool)}">${html}</section>`.replace(/\n/g, ' ');
 }
