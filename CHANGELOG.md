@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **Sized and signed arithmetic no longer divides in software.** The runtime's `rt_div` was a
+  shift-and-subtract loop, and every overflow check of a sized or signed multiply and every sized or
+  signed division and remainder went through it; it is now the hardware divide. jpeg decoding of a
+  2048x2048 image: Grail-LLVM 25.8G -> 6.9G instructions, Grail-native 128G -> 38.6G. A case pins
+  division, remainder and multiplication at the edges of every width (checked and wrapping), and
+  `MIN / -1`, `MIN * -1`, division and remainder by zero and products one past the maximum abort.
 - Fixed (release builds): a function calling a blocking `extern "C"` function was left unoptimised
   since the foreign-call marker landed - the marker's locked counter, thread-pointer read and
   register save around `rt_foreign_lost` were text the LLVM lifter refused. It now lifts them
