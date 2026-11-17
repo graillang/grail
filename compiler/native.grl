@@ -275,6 +275,16 @@ struct Constant {
     value: u64,
     text: u8[]
 }
+// A run-tier value of the program: a module binding `NAME := f(...);` or a static `@f(...)`. Every
+// probe defines a wrapper for each (ct_probe_wrappers), so code the probe compiles reads a value by
+// calling its initialiser instead of starting another probe (docs/design/comptime-speed.md, R1).
+struct CtCall {
+    module: u8[],
+    name: u8[],
+    // The call's source text, unqualified, as written.
+    text: u8[],
+    is_static: u64
+}
 // A module static (docs/design/module-values.md): one object at one address, in the declaring
 // module's object. Stage 1 is the baked tier only - the value is computed while compiling (a
 // constant expression or `@f(...)`) and emitted as read-only data, so a read is an address and
@@ -687,6 +697,7 @@ struct C {
     inherent_types: u64[],
     constants: Constant[],
     statics: Static[],
+    ct_calls: CtCall[],
     // Where a static read parks the result of a call it makes only for its effect.
     static_scratch: u64,
     impl_params: ImplParams[],
@@ -748,6 +759,9 @@ struct C {
     // 1 while an assignment's target path is read: its last field is written directly (and its
     // predicate owed there), not lent out, so `field_path` records it instead of refusing the loan.
     ref_assign_target: u64,
+    // 1 while a refined function's body labels and declares itself: its symbol is `<name>.proved`,
+    // and `<name>` is the checking wrapper emitted after it (ref_wrapper).
+    proved_label: u64,
     // That field, one-based record declaration and zero-based index (0 when none was read).
     ref_assign_d: u64,
     ref_assign_k: u64,
@@ -951,25 +965,19 @@ struct C {
     fx_pending_panic: u64,
     fx_bounded: u64,
     // Where the body being recorded starts in `c.out`, whether it is trusted code (the runtime, a drop
-    // helper), how many calls it has recorded, and the byte range of its `.proved` entry's replayed
-    // prologue: bytes `fx_end`'s consistency check skips, because the checked entry already counted
-    // them.
+    // helper) and how many calls it has recorded.
     fx_out_start: u64,
     fx_trusted: u64,
     fx_calls: u64,
-    fx_skip_lo: u64,
-    fx_skip_hi: u64,
     // A refined parameter's check in the checked entry: the caller's obligation, not a body edge.
     fx_entry_panic: u64[],
     // Where the body's edge list started, so a retried body's discarded edges go with its bytes.
     fx_edge_mark: u64,
     // Per body that claimed an effect, in emission order: its symbol, the `call` instructions it
-    // emitted, and the byte range of a replayed `.proved` prologue (0, 0 when it has none).
+    // emitted.
     // `compile_end` holds the count against the calls the typed IR parses out of the same body.
     fx_body_sym: u8[][],
     fx_body_calls: u64[],
-    fx_body_lo: u64[],
-    fx_body_hi: u64[],
     // ---- the per-function codegen cache (`--fn-cache DIR`) ----------------------------------
     // The directory units are filed in, the two hashes every unit's key is built from (the option
     // vector and the declaration surface), where the cursor for a declaration's line has got to,
@@ -7772,6 +7780,82 @@ fn ref_pred_count<a>(c: (&a mut C)) -> u64 {
     }
     return n;
 }
+// The checking entry of a function with refined parameters, emitted after its body: an ordinary
+// function `<name>` that stores the arguments, checks each parameter predicate (an entry fact of
+// this record: the caller's obligation), puts the arguments back and calls `<name>.proved`, whose
+// result it returns in `%rax`. Every unproved caller, a function value and a vtable reach it; a
+// proved call skips it. More than six parameters arrive as a record behind `%r9`, which the body
+// frees: the wrapper reads the rest from it for the checks and passes `%r9` through untouched.
+fn ref_wrapper<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &d [u8], export: u64, count: u64, position: u64, claimed_alloc: u64, claimed_panic: u64, entry_state: ownership::State) -> unit {
+    after := exchange(&mut c.check, entry_state);
+    func_directive(&mut c, view(m), view(name), view(body_symbol), export);
+    label_at := c.out.len();
+    export_name(&mut c, view(m), view(name), view(body_symbol), export);
+    mut sym = u8[];
+    for i in c.out.len() - label_at {
+        sym.push(c.out[label_at + i]);
+    }
+    o(&mut c, view(":\n"));
+    fx_begin(&mut c, view(sym), view(name), c.file, position, claimed_alloc, claimed_panic);
+    o(&mut c, view("pushq %rbp\nmovq %rsp,%rbp\n"));
+    frame := label(&mut c);
+    if c.target == 4 {
+        o(&mut c, view("framesub "));
+        fname(&mut c, frame);
+        c.out.push(10);
+    } else {
+        o(&mut c, view("subq $"));
+        fname(&mut c, frame);
+        o(&mut c, view(",%rsp\n"));
+    }
+    mut regs = count;
+    if 6 < count {
+        regs = 5;
+    }
+    for i in regs {
+        o(&mut c, view("movq "));
+        o(&mut c, view(argreg(i)));
+        c.out.push(44);
+        stack_slot(&mut c, i);
+        c.out.push(10);
+    }
+    mut spill = 0;
+    if 6 < count {
+        spill = fresh(&mut c);
+        o(&mut c, view("movq %r9,"));
+        stack_slot(&mut c, spill);
+        c.out.push(10);
+        for k in count - 5 {
+            o(&mut c, view("movq "));
+            on(&mut c, k * 8);
+            o(&mut c, view("(%r9),%rax\nmovq %rax,"));
+            stack_slot(&mut c, 5 + k);
+            c.out.push(10);
+        }
+    }
+    ref_params(&mut c);
+    for i in regs {
+        o(&mut c, view("movq "));
+        stack_slot(&mut c, i);
+        c.out.push(44);
+        o(&mut c, view(argreg(i)));
+        c.out.push(10);
+    }
+    if spill != 0 {
+        o(&mut c, view("movq "));
+        stack_slot(&mut c, spill);
+        o(&mut c, view(",%r9\n"));
+    }
+    call_proved_out(&mut c, view(sym));
+    o(&mut c, view("leave\nret\n.set "));
+    fname(&mut c, frame);
+    c.out.push(44);
+    on(&mut c, (c.next + 1) / 2 * 16);
+    c.out.push(10);
+    fx_end(&mut c);
+    exchange(&mut c.check, after);
+    return ();
+}
 // Whether field `k` of record `d` carries a predicate. Such a field is written only where the
 // predicate is owed - a literal, `r.f = v` and `r.f op= v` - so no `&mut` to it may exist: through
 // one, a write would reach the field with nothing to check it (docs/design/refinements.md, "Field
@@ -9602,6 +9686,55 @@ fn pv_proved<a, b>(c: (&a mut C), pred: Pred, names: (&a u8[][]), terms: (&a u8[
     }
     return 1;
 }
+// Whether an obligation is false outright: its sides are integer literals, or names the facts equate
+// with one (`n := 0`), and the comparison or the divisibility does not hold of them. Nothing else is
+// judged false - an unproved obligation stays a check.
+fn pv_false_literal<a, b>(facts: (&a Atom[]), rel: u64, x: &b [u8], y: &b [u8], k: i64) -> bool {
+    a := pv_resolve(&facts, view(x));
+    if !pv_digits(view(a)) {
+        return false;
+    }
+    av := pv_number(view(a));
+    if rel == 3 {
+        return (0 < k) & (av % k != 0);
+    }
+    if rel > 2 {
+        return false;
+    }
+    mut bv: i64 = 0;
+    if y.len() != 0 {
+        b := pv_resolve(&facts, view(y));
+        if !pv_digits(view(b)) {
+            return false;
+        }
+        bv = pv_number(view(b));
+    }
+    mut bad = 0;
+    rhs := pv_k_sum(bv, k, &mut bad);
+    if bad != 0 {
+        return false;
+    }
+    if rel == 0 {
+        return !(av < rhs);
+    }
+    if rel == 1 {
+        return !(av <= rhs);
+    }
+    return av != rhs;
+}
+fn pv_false_fail<a, b>(c: (&a mut C), pred: Pred, pos: u64, need: &b [u8]) -> unit {
+    text := pred_text(&mut c, pred);
+    mut msg = copy_bytes(view("the refinement `"));
+    push_bytes(&mut msg, view(text));
+    push_bytes(&mut msg, view("` is false at this call: the arguments are constants that break it"));
+    if need.len() != 0 {
+        push_bytes(&mut msg, view("\n = "));
+        push_bytes(&mut msg, view(need));
+    }
+    exchange(&mut c.pos, pos);
+    fail(&mut c, view(msg));
+    return ();
+}
 // A call the prover cannot discharge. Strict mode reports it here, at the call, with the predicate
 // and the reason; otherwise the check stays and the call keeps the checked entry.
 fn pv_call_give_up<a, b, d>(c: (&a mut C), report: u64, pred: Pred, at: u64, need: &b [u8], why: &d [u8]) -> u64 {
@@ -9777,6 +9910,11 @@ fn pv_call_proved<a>(c: (&a mut C), f: u64, count: u64, spans: (&a u64[]), at: u
                     ok = pv_holds(&facts, rel, view(x), view(y), k);
                 }
             }
+            if !ok & (x.len() != 0) & pv_false_literal(&facts, rel, view(x), view(y), k) {
+                // Not unproved but disproved: the arguments are constants that break the predicate,
+                // so the call can only fail. That is a wrong program in every mode.
+                pv_false_fail(&mut c, Pred { file: pf, lo: plo, hi: phi }, at, view(need));
+            }
             if !ok {
                 return pv_call_give_up(&mut c, report, Pred { file: pf, lo: plo, hi: phi }, at, view(need), view("the facts at the call do not settle it"));
             }
@@ -9937,6 +10075,11 @@ fn pv_strict_fail<a, b>(c: (&a mut C), pred: Pred, pos: u64, need: &b [u8]) -> u
     return ();
 }
 fn pv_strict_fail_why<a, b, d>(c: (&a mut C), pred: Pred, pos: u64, need: &b [u8], why: &d [u8]) -> unit {
+    // In a probe a static's value is not known while compiling (it is computed by the probe), so a
+    // proof that needed it is missing there; the check stays, which is all the probe needs.
+    if c.probe_mode != 0 {
+        return ();
+    }
     text := pred_text(&mut c, pred);
     mut facts = Atom[];
     pv_ir_read(&mut c, &mut facts);
@@ -16330,6 +16473,9 @@ fn export_name<a, b, d, e>(c: (&a mut C), m: &b [u8], n: &d [u8], symbol: &e [u8
         return ();
     }
     mangle(&mut c, view(m), view(n));
+    if c.proved_label != 0 {
+        o(&mut c, view(".proved"));
+    }
     return ();
 }
 // Does the declaration at `start` (the `fn` keyword) have a body? Scans to the first
@@ -16960,8 +17106,8 @@ fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), l
 
 // A unit's effect record: what the body's emission recorded (its own facts, its entry checks, its
 // call edges and the count the IR check holds them to), so a replay hands the solver exactly what
-// compiling the body would. Positions are kept relative - an edge's token to the `fn` token, the
-// replayed prologue to the unit's text - because the unit is reused where lines above it moved. The
+// compiling the body would. Positions are kept relative - an edge's token to the `fn` token -
+// because the unit is reused where lines above it moved. The
 // claim is not kept: it is an attribute outside the unit's key text, so a replay takes it from the
 // declaration as this run parsed it.
 fn fx_unit_record<a, b>(c: (&a mut C), sym: &b [u8], text_mark: u64, at: u64, edge_at: u64) -> u8[] {
@@ -16970,8 +17116,18 @@ fn fx_unit_record<a, b>(c: (&a mut C), sym: &b [u8], text_mark: u64, at: u64, ed
         return u8[];
     }
     kk := k - 1;
-    last := c.fx_body_sym.len() - 1;
-    if !same(view(c.fx_body_sym[last]), view(sym)) {
+    // The body's own entry, the latest one under its symbol: a refined function's unit holds two
+    // bodies, `<sym>.proved` and its wrapper `<sym>`, each with its own record.
+    mut last = c.fx_body_sym.len();
+    mut i = c.fx_body_sym.len();
+    while 0 < i {
+        i -= 1;
+        if same(view(c.fx_body_sym[i]), view(sym)) {
+            last = i;
+            break;
+        }
+    }
+    if last == c.fx_body_sym.len() {
         return u8[];
     }
     mut out = u8[];
@@ -16981,14 +17137,6 @@ fn fx_unit_record<a, b>(c: (&a mut C), sym: &b [u8], text_mark: u64, at: u64, ed
     iface_w1(&mut out, c.fx_own_panic[kk]);
     iface_w1(&mut out, c.fx_entry_panic[kk]);
     iface_wv(&mut out, c.fx_body_calls[last]);
-    mut lo = 0;
-    mut hi = 0;
-    if (c.fx_body_hi[last] != 0) && (text_mark <= c.fx_body_lo[last]) {
-        lo = c.fx_body_lo[last] - text_mark + 1;
-        hi = c.fx_body_hi[last] - text_mark;
-    }
-    iface_wv(&mut out, lo);
-    iface_wv(&mut out, hi);
     mut n = 0;
     mut edges = u8[];
     for e in edge_at..c.fx_edge_from.len() {
@@ -17018,8 +17166,6 @@ fn fx_unit_replay<a, b>(c: (&a mut C), data: &b [u8], text_at: u64, at: u64, cla
     own_p := iface_r1(&mut p);
     entry := iface_r1(&mut p);
     calls := iface_rv(&mut p);
-    lo := iface_rv(&mut p);
-    hi := iface_rv(&mut p);
     k := fx_sym(&mut c, view(sym)) - 1;
     c.fx_body[k] = 1;
     c.fx_row[k] = 0;
@@ -17053,13 +17199,6 @@ fn fx_unit_replay<a, b>(c: (&a mut C), data: &b [u8], text_at: u64, at: u64, cla
     }
     c.fx_body_sym.push(sym.copy());
     c.fx_body_calls.push(calls);
-    if lo != 0 {
-        c.fx_body_lo.push(text_at + lo - 1);
-        c.fx_body_hi.push(text_at + hi);
-    } else {
-        c.fx_body_lo.push(0);
-        c.fx_body_hi.push(0);
-    }
     return ();
 }
 // The key of one unit: a text record naming every input its bytes are a function of.
@@ -18340,6 +18479,11 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     exchange(&mut c.caddr, u64[]);
     exchange(&mut c.interior, u64[]);
     exchange(&mut c.boxed, u64[]);
+    // A function with refined parameters is two: the body, `<name>.proved`, which a proved call
+    // enters and which checks nothing, and `<name>`, a wrapper emitted after it that checks the
+    // parameters and calls the body (ref_wrapper). Both are ordinary functions to every later pass.
+    wrapped := (export == 0) & (c.raw == 0) & (ref_pred_count(&mut c) != 0);
+    exchange(&mut c.proved_label, u64(wrapped));
     func_directive(&mut c, view(m), view(name), view(body_symbol), export);
     if (c.debug != 0) & (c.validating == 0) {
         dstart = label(&mut c);
@@ -18355,6 +18499,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     label_at := c.out.len();
     export_name(&mut c, view(m), view(name), view(body_symbol), export);
     label_end := c.out.len();
+    exchange(&mut c.proved_label, 0);
     // The body's own label, exactly as a `call` to it spells it: the effect facts are keyed by it.
     mut fx_label = u8[];
     for i in label_end - label_at {
@@ -18453,7 +18598,13 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // The parameter refinements hold here: the parameters are the arguments they were given and
     // their bookkeeping is done (a view's target is tracked), and the first statement has not been
     // reached, so a failure inside the check reports the call site rather than a line of this body.
-    ref_params(&mut c);
+    // The wrapper checks the parameters as they are here, before the body moved any of them.
+    mut entry_state = ownership::new();
+    if wrapped {
+        entry_state = ownership::snapshot(&c.check);
+    } else {
+        ref_params(&mut c);
+    }
     // A refined parameter can state what the body's bounds checks need (pv_bce), for this body only.
     old_bce_index := exchange(&mut c.bce_index, u8[]);
     old_bce_base := exchange(&mut c.bce_base, u8[]);
@@ -18553,6 +18704,9 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         record_debug_func(&mut c, view(name), view(m), &site);
     }
     fx_end(&mut c);
+    if wrapped {
+        ref_wrapper(&mut c, view(m), view(name), view(body_symbol), export, count, position, claimed_alloc, claimed_panic, entry_state);
+    }
     exchange(&mut c.hints, u64[]);
     scope_end(&mut c);
     // ---- take this body as a unit, if the run got nothing from it a unit does not record ------
@@ -18601,6 +18755,18 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             if effect.len() != 0 {
                 produced.regs.push(3);
                 iface_ws(&mut produced.regs, view(effect));
+            }
+            if wrapped {
+                // The wrapper's record: its symbol is the body's without `.proved`.
+                mut wsym = fx_label.copy();
+                for i in 7 {
+                    wsym.pop()!;
+                }
+                wrapper_effect := fx_unit_record(&mut c, view(wsym), text_mark, position, fx_edge_at);
+                if wrapper_effect.len() != 0 {
+                    produced.regs.push(3);
+                    iface_ws(&mut produced.regs, view(wrapper_effect));
+                }
             }
             // The file's name is the key's hash; the key record itself travels inside the entry,
             // so two keys that collide make a miss and never a wrong hit.
@@ -20612,7 +20778,7 @@ fn ct_pending_type<a>(c: (&a mut C), i: u64) -> u64 {
         return NO_TYPE;
     }
     ret := c.funcs[f - 1].ret;
-    if is_bool(&mut c, ret) || (ret == 3) || (ct_seq_elem(&mut c, ret) != NO_TYPE) || integer(&mut c, ret) {
+    if is_bool(&mut c, ret) || (ret == 3) || (ct_seq_elem(&mut c, ret) != NO_TYPE) || integer(&mut c, ret) || static_structured(&mut c, ret) {
         return ret;
     }
     return 0;
@@ -20678,6 +20844,264 @@ fn ct_shell_quote<a>(text: &a [u8]) -> u8[] {
     out.push(39);
     return out;
 }
+// `text` (a call) with `module`'s own names qualified, so the probe module can say it.
+fn ct_qualify<a, b>(c: (&a mut C), module: &b [u8], text: &b [u8]) -> u8[] {
+    toks := lexer::tokenize(text);
+    mut qualified = u8[];
+    mut last_end = 0;
+    for i in toks.len() {
+        tstart := toks[i].start;
+        tend := toks[i].end;
+        tkind := toks[i].kind;
+        for j in last_end..tstart {
+            qualified.push(text[j]);
+        }
+        word := slice_bytes(text, tstart, tend);
+        prev_scope := (i >= 1) && (toks[i - 1].kind == 260);
+        prev_dot := (i >= 1) && (toks[i - 1].kind == 46);
+        next_scope := (i + 1 < toks.len()) && (toks[i + 1].kind == 260);
+        if (tkind == 1) && !prev_scope && !prev_dot && !next_scope && (ct_module_names(&mut c, module, view(word)) != 0) {
+            push_bytes(&mut qualified, module);
+            push_bytes(&mut qualified, view("::"));
+        }
+        push_bytes(&mut qualified, view(word));
+        last_end = tend;
+    }
+    for j in last_end..text.len() {
+        qualified.push(text[j]);
+    }
+    return qualified;
+}
+fn ct_add_use<a>(uses: (&a mut u8[][]), m: &a [u8]) -> unit {
+    for i in uses.len() {
+        if same(view(uses[i]), m) {
+            return ();
+        }
+    }
+    uses.push(copy_bytes(m));
+    return ();
+}
+// A run-tier type spelled so the probe module can write it: records by `module::Name`.
+fn ct_type_src<a>(c: (&a mut C), ty: u64, uses: (&a mut u8[][])) -> u8[] {
+    if (ty == 3) || (ty == 2) || integer(&mut c, ty) || is_bool(&mut c, ty) {
+        return source_type_name(&mut c, ty);
+    }
+    k := ty_kind(&mut c, ty);
+    if k == 6 {
+        mut out = ct_type_src(&mut c, ty_arg(&mut c, ty), &mut uses);
+        push_bytes(&mut out, view("[]"));
+        return out;
+    }
+    if k == 8 {
+        d := ty_arg(&mut c, ty);
+        m := c.decls[d].module.copy();
+        ct_add_use(&mut uses, view(m));
+        mut out = m.copy();
+        push_bytes(&mut out, view("::"));
+        push_bytes(&mut out, view(c.decls[d].name));
+        return out;
+    }
+    return source_type_name(&mut c, ty);
+}
+// The type a run-tier value has: a static's declared type, a binding's call's result type.
+fn ct_call_type<a>(c: (&a mut C), k: u64) -> u64 {
+    m := c.ct_calls[k].module.copy();
+    n := c.ct_calls[k].name.copy();
+    if c.ct_calls[k].is_static != 0 {
+        st := find_static(&mut c, view(m), view(n));
+        if st != 0 {
+            return c.statics[st - 1].ty;
+        }
+        return NO_TYPE;
+    }
+    kc := find_constant(&mut c, view(m), view(n));
+    if kc == 0 {
+        return NO_TYPE;
+    }
+    ty := c.constants[kc - 1].ty;
+    if ty == CT_PENDING {
+        return ct_pending_type(&mut c, kc - 1);
+    }
+    return ty;
+}
+// The result type of the function a run-tier call names (`f(...)` or `m::f(...)` read in `module`),
+// or NO_TYPE when no such function is known.
+fn ct_call_result<a, b>(c: (&a mut C), module: &b [u8], text: &b [u8]) -> u64 {
+    toks := lexer::tokenize(text);
+    if toks.len() == 0 {
+        return NO_TYPE;
+    }
+    mut fmod = copy_bytes(module);
+    mut fname = slice_bytes(text, toks[0].start, toks[0].end);
+    if (toks.len() > 2) && (toks[1].kind == 260) {
+        fmod = fname.copy();
+        fname = slice_bytes(text, toks[2].start, toks[2].end);
+    }
+    f := ct_module_names(&mut c, view(fmod), view(fname));
+    if f == 0 {
+        return NO_TYPE;
+    }
+    return c.funcs[f - 1].ret;
+}
+// The symbol suffix of a run-tier value's probe functions.
+fn ct_value_tag<a>(m: &a [u8], n: &a [u8]) -> u8[] {
+    mut out = copy_bytes(m);
+    push_bytes(&mut out, view("__"));
+    push_bytes(&mut out, n);
+    return out;
+}
+// For every run-tier value of the program, two probe functions: `grail_value__M__N()`, which
+// computes it (announcing itself on stderr, so a cycle can be traced back), and
+// `grail_cycle__M__N()`, which a read reaching it while it is being computed calls before the
+// probe stops. Reads inside a probe call these instead of starting another probe.
+fn ct_probe_wrappers<a>(c: (&a mut C), uses: (&a mut u8[][])) -> u8[] {
+    mut out = u8[];
+    for k in c.ct_calls.len() {
+        ty := ct_call_type(&mut c, k);
+        if !is_type_id(ty) {
+            continue;
+        }
+        m := c.ct_calls[k].module.copy();
+        n := c.ct_calls[k].name.copy();
+        ct_add_use(&mut uses, view(m));
+        tag := ct_value_tag(view(m), view(n));
+        mut key = m.copy();
+        push_bytes(&mut key, view("::"));
+        push_bytes(&mut key, view(n));
+        ctext := c.ct_calls[k].text.copy();
+        if c.ct_calls[k].is_static != 0 {
+            // The wrapper returns the static's declared type, so the call must give exactly it; a
+            // mismatch is the static's own error, reported at it before any probe is written.
+            got := ct_call_result(&mut c, view(m), view(ctext));
+            if is_type_id(got) && (got != ty) {
+                st := find_static(&mut c, view(m), view(n)) - 1;
+                mut msg = copy_bytes(view("static `"));
+                push_bytes(&mut msg, view(n));
+                push_bytes(&mut msg, view("` is declared `"));
+                push_bytes(&mut msg, view(source_type_name(&mut c, ty)));
+                push_bytes(&mut msg, view("`, and `@"));
+                push_bytes(&mut msg, view(ctext));
+                push_bytes(&mut msg, view("` gives `"));
+                push_bytes(&mut msg, view(source_type_name(&mut c, got)));
+                push_bytes(&mut msg, view("`"));
+                sfile := c.statics[st].file;
+                sat := c.statics[st].init_at;
+                fail_in_file(&mut c, sfile, sat, view(msg));
+            }
+        }
+        call := ct_qualify(&mut c, view(m), view(ctext));
+        tsrc := ct_type_src(&mut c, ty, &mut uses);
+        push_bytes(&mut out, view("pub fn grail_value__"));
+        push_bytes(&mut out, view(tag));
+        push_bytes(&mut out, view("() -> "));
+        push_bytes(&mut out, view(tsrc));
+        push_bytes(&mut out, view(" {\n    host::write_fd(2, view(\"@enter "));
+        push_bytes(&mut out, view(key));
+        push_bytes(&mut out, view("\\n\"));\n    v := "));
+        push_bytes(&mut out, view(call));
+        push_bytes(&mut out, view(";\n    host::write_fd(2, view(\"@leave "));
+        push_bytes(&mut out, view(key));
+        push_bytes(&mut out, view("\\n\"));\n    return v;\n}\npub fn grail_cycle__"));
+        push_bytes(&mut out, view(tag));
+        push_bytes(&mut out, view("() -> u64 {\n    host::write_fd(2, view(\"@cycle "));
+        push_bytes(&mut out, view(key));
+        push_bytes(&mut out, view("\\n\"));\n    return 0;\n}\n"));
+    }
+    return out;
+}
+// The probe's stderr without its trace lines: what the runtime itself reported.
+fn ct_trace_report<a>(trace: &a [u8]) -> u8[] {
+    mut out = u8[];
+    mut start = 0;
+    for i in trace.len() + 1 {
+        if (i == trace.len()) || (trace[i] == 10) {
+            if (i > start) && (trace[start] != 64) {
+                for j in start..i {
+                    out.push(trace[j]);
+                }
+                out.push(10);
+            }
+            start = i + 1;
+        }
+    }
+    return out;
+}
+// "`A` and `B` depend on each other while compiling: A -> B -> A", from the trace: the values
+// entered and not yet left, from the one the cycle reached back to.
+fn ct_trace_cycle<a>(trace: &a [u8]) -> u8[] {
+    mut stack = u8[][];
+    mut target = u8[];
+    mut start = 0;
+    for i in trace.len() + 1 {
+        if (i == trace.len()) || (trace[i] == 10) {
+            line := slice_bytes(trace, start, i);
+            if ct_list_has_prefix(view(line), view("@enter ")) {
+                stack.push(slice_bytes(view(line), 7, line.len()));
+            } else if ct_list_has_prefix(view(line), view("@leave ")) {
+                if stack.len() != 0 {
+                    stack.pop()!;
+                }
+            } else if ct_list_has_prefix(view(line), view("@cycle ")) {
+                target = slice_bytes(view(line), 7, line.len());
+            }
+            start = i + 1;
+        }
+    }
+    if target.len() == 0 {
+        return u8[];
+    }
+    mut from = stack.len();
+    for i in stack.len() {
+        if same(view(stack[i]), view(target)) {
+            from = i;
+            break;
+        }
+    }
+    if from == stack.len() {
+        return u8[];
+    }
+    mut path = u8[];
+    mut names = u8[][];
+    for i in from..stack.len() {
+        push_bytes(&mut path, view(stack[i]));
+        push_bytes(&mut path, view(" -> "));
+        ct_add_use(&mut names, view(stack[i]));
+    }
+    push_bytes(&mut path, view(target));
+    mut msg = u8[];
+    if names.len() == 1 {
+        push_bytes(&mut msg, view("`"));
+        push_bytes(&mut msg, view(names[0]));
+        push_bytes(&mut msg, view("` depends on itself while compiling: "));
+    } else {
+        for i in names.len() {
+            if i != 0 {
+                if i + 1 == names.len() {
+                    push_bytes(&mut msg, view(" and "));
+                } else {
+                    push_bytes(&mut msg, view(", "));
+                }
+            }
+            push_bytes(&mut msg, view("`"));
+            push_bytes(&mut msg, view(names[i]));
+            push_bytes(&mut msg, view("`"));
+        }
+        push_bytes(&mut msg, view(" depend on each other while compiling: "));
+    }
+    push_bytes(&mut msg, view(path));
+    return msg;
+}
+fn ct_list_has_prefix<a, b>(text: &a [u8], prefix: &b [u8]) -> bool {
+    if text.len() < prefix.len() {
+        return false;
+    }
+    for i in prefix.len() {
+        if text[i] != prefix[i] {
+            return false;
+        }
+    }
+    return true;
+}
 fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [u8]) -> CTRes {
     // The call's function, for its result type.
     toks := lexer::tokenize(text);
@@ -20726,33 +21150,25 @@ fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [
         se := ct_seq_elem(&mut c, rty);
         elem_signed = (ty_kind(&mut c, se) == 18) && (ty_mode(&mut c, se) != 0);
     }
-    // The probe: this module's names qualified, the value printed.
-    mut qualified = u8[];
-    mut last_end = 0;
-    for i in toks.len() {
-        tstart := toks[i].start;
-        tend := toks[i].end;
-        tkind := toks[i].kind;
-        for j in last_end..tstart {
-            qualified.push(text[j]);
-        }
-        word := slice_bytes(text, tstart, tend);
-        prev_scope := (i >= 1) && (toks[i - 1].kind == 260);
-        prev_dot := (i >= 1) && (toks[i - 1].kind == 46);
-        next_scope := (i + 1 < toks.len()) && (toks[i + 1].kind == 260);
-        if (tkind == 1) && !prev_scope && !prev_dot && !next_scope && (ct_module_names(&mut c, module, view(word)) != 0) {
-            push_bytes(&mut qualified, module);
-            push_bytes(&mut qualified, view("::"));
-        }
-        push_bytes(&mut qualified, view(word));
-        last_end = tend;
+    // The probe: this module's names qualified, the value printed. A named value is read by its
+    // name, so the probe reaches it through the same guarded initialisation every other read does
+    // and a cycle back to it is seen; an `@f()` in an expression is the call itself.
+    mut qualified = ct_qualify(&mut c, module, text);
+    if key.len() != 0 {
+        qualified = copy_bytes(key);
     }
-    for j in last_end..text.len() {
-        qualified.push(text[j]);
+    mut uses = u8[][];
+    uses.push(copy_bytes(module));
+    wrappers := ct_probe_wrappers(&mut c, &mut uses);
+    mut probe = copy_bytes(view("module grail_probe;\n\n"));
+    for u in uses.len() {
+        push_bytes(&mut probe, view("use "));
+        push_bytes(&mut probe, view(uses[u]));
+        push_bytes(&mut probe, view(";\n"));
     }
-    mut probe = copy_bytes(view("module grail_probe;\n\nuse "));
-    push_bytes(&mut probe, module);
-    push_bytes(&mut probe, view(";\n\nfn main() -> u64 {\n    v := "));
+    push_bytes(&mut probe, view("use host;\n\n"));
+    push_bytes(&mut probe, view(wrappers));
+    push_bytes(&mut probe, view("fn main() -> u64 {\n    v := "));
     push_bytes(&mut probe, view(qualified));
     if rty == 3 {
         push_bytes(&mut probe, view(";\n    print(v);\n    return 0;\n}\n"));
@@ -20887,15 +21303,30 @@ fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [
         push_bytes(&mut run, view(ct_shell_quote(view(probe_exe))));
         push_bytes(&mut run, view(" > "));
         push_bytes(&mut run, view(ct_shell_quote(view(value_tmp))));
+        // The probe's stderr carries its trace (`@enter`/`@leave`/`@cycle` lines from the value
+        // functions) and, on a failure, the runtime's report; both are read back below.
+        err_tmp := path_cat(view(path_cat(view(dir), view(tag))), view(".err"));
+        push_bytes(&mut run, view(" 2> "));
+        push_bytes(&mut run, view(ct_shell_quote(view(err_tmp))));
         mut sh2 = u8[][copy_bytes(view("sh")), copy_bytes(view("-c")), run];
         status := host::command(sh2);
         if status != 0 {
+            trace := host::read_file(view(err_tmp));
+            report := ct_trace_report(view(trace));
+            if report.len() != 0 {
+                host::write_fd(2, view(report));
+            }
             mut msg = copy_bytes(view("compile-time call `"));
             push_bytes(&mut msg, text);
             if status == 124 {
                 push_bytes(&mut msg, view("` ran past the 30 s limit"));
             } else if status == 4 {
-                push_bytes(&mut msg, view("` reads a constant that is still being computed: the constants depend on each other in a cycle"));
+                cycle := ct_trace_cycle(view(trace));
+                if cycle.len() != 0 {
+                    msg = cycle;
+                } else {
+                    push_bytes(&mut msg, view("` reads a constant that is still being computed: the constants depend on each other in a cycle"));
+                }
             } else {
                 push_bytes(&mut msg, view("` aborted (exit "));
                 decimal(&mut msg, status);
@@ -20905,7 +21336,7 @@ fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [
         }
         mut mv = u8[][copy_bytes(view("mv")), copy_bytes(view("-f")), value_tmp.copy(), out_path.copy()];
         host::command(mv);
-        mut tidy = u8[][copy_bytes(view("rm")), copy_bytes(view("-f")), probe_src.copy(), probe_s.copy(), probe_exe.copy()];
+        mut tidy = u8[][copy_bytes(view("rm")), copy_bytes(view("-f")), probe_src.copy(), probe_s.copy(), probe_exe.copy(), err_tmp.copy()];
         host::command(tidy);
     }
     printed := host::read_file(view(out_path));
@@ -21105,6 +21536,7 @@ fn module_binding<a>(c: (&a mut C), pass: u64) -> unit {
         // used - by then every function's signature is known - by compiling and running a probe.
         text = ct_take_call_text(&mut c);
         expect(&mut c, view(";"));
+        c.ct_calls.push(CtCall { module: module.copy(), name: name.copy(), text: text.copy(), is_static: 0 });
         constant_public := c.decl_public;
         c.constants.push(Constant { module: module, name: name, declared_at: declared, file: c.file, at: at_name,  public: constant_public, ty: CT_PENDING, value: 0, text: text });
         return ();
@@ -21253,33 +21685,28 @@ fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
 }
 fn constant_value<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> Val {
     if c.probe_mode != 0 {
-        // In a probe, a constant still being evaluated cannot be known; reading it is a cycle only
-        // if the probed call gets there, so the read becomes a run-time stop the runner reports.
-        mut key = copy_bytes(module);
-        push_bytes(&mut key, view("::"));
-        push_bytes(&mut key, name);
-        pending := host::env(view("GRAIL_COMPTIME_PENDING"));
-        if ct_list_has(view(pending), view(key)) {
-            for i in c.constants.len() {
-                if same(view(c.constants[i].module), module) && same(view(c.constants[i].name), name) {
-                    slot := invoke(&mut c, view("rt_comptime_cycle"), u64[]);
-                    pty := ct_pending_type(&mut c, i);
-                    if pty == 3 {
-                        // Never reached at run time (the call above exits); a real string keeps the
-                        // ownership checker's view of the program whole.
-                        empty := u8[];
-                        return string_from_bytes(&mut c, &empty);
+        // In a probe a module binding the probe has not been told is computed where it is read,
+        // by the value function the probe defines - never by another probe.
+        for i in c.constants.len() {
+            if same(view(c.constants[i].module), module) && same(view(c.constants[i].name), name) && (c.constants[i].ty == CT_PENDING) {
+                pty := ct_pending_type(&mut c, i);
+                if is_type_id(pty) {
+                    if c.constants[i].public == 0 {
+                        home := c.constants[i].module.copy();
+                        require_visible(&mut c, view(home), name);
                     }
-                    if (pty != 0) && (ct_seq_elem(&mut c, pty) != NO_TYPE) {
-                        fresh := invoke(&mut c, view("rt_new"), u64[]);
-                        return own(&mut c, fresh, pty);
+                    t := static_probe_init(&mut c, module, name, view(""), 0);
+                    if (pty == 3) || (pty == 2) || ((pty != 0) && (ct_seq_elem(&mut c, pty) != NO_TYPE)) || static_structured(&mut c, pty) {
+                        return own(&mut c, t, pty);
                     }
-                    return val(slot, pty);
+                    return val(t, pty);
                 }
             }
         }
     }
-    resolve_pending_named(&mut c, module, name);
+    if c.probe_mode == 0 {
+        resolve_pending_named(&mut c, module, name);
+    }
     for i in c.constants.len() {
         k := &c.constants[i];
         if same(view(k.module), view(module)) & same(view(k.name), view(name)) {
@@ -21365,6 +21792,65 @@ fn static_pending_here<a, b>(m: &a [u8], n: &b [u8]) -> bool {
     pending := host::env(view("GRAIL_COMPTIME_PENDING"));
     return ct_list_has(view(pending), view(key));
 }
+fn static_guard_symbol<a, b>(m: &a [u8], n: &b [u8]) -> u8[] {
+    mut out = copy_bytes(view("g_"));
+    push_bytes(&mut out, m);
+    out.push(95);
+    push_bytes(&mut out, n);
+    return out;
+}
+// Inside a probe, the code a read of run-tier value `m::n` runs first: for a static (`memo` 1) its
+// guard says whether it is done; if not, the value function the probe defines computes it into
+// the static's word. For a module binding (`memo` 0) the value is computed at every read, as a
+// constant is a value at every use, and the guard only marks "being computed". A read that finds
+// it being computed is a cycle: the probe says which (grail_cycle__) and stops.
+fn static_probe_init<a, b, d, e>(c: (&a mut C), m: &b [u8], n: &d [u8], sym: &e [u8], memo: u64) -> u64 {
+    guard := static_guard_symbol(m, n);
+    tag := ct_value_tag(m, n);
+    mut value_fn = copy_bytes(view("grail_value__"));
+    push_bytes(&mut value_fn, view(tag));
+    mut cycle_fn = copy_bytes(view("grail_cycle__"));
+    push_bytes(&mut cycle_fn, view(tag));
+    value_sym := mangle_name(&mut c, view("grail_probe"), view(value_fn));
+    cycle_sym := mangle_name(&mut c, view("grail_probe"), view(cycle_fn));
+    done := label(&mut c);
+    start := label(&mut c);
+    if memo == 0 {
+        o(&mut c, view(".comm "));
+        o(&mut c, view(guard));
+        o(&mut c, view(",8,8\n"));
+    }
+    o(&mut c, view("movq "));
+    o(&mut c, view(guard));
+    o(&mut c, view("(%rip),%rax\n"));
+    if memo != 0 {
+        o(&mut c, view("cmpq $2,%rax\n"));
+        jump(&mut c, view("je"), done);
+    }
+    o(&mut c, view("cmpq $1,%rax\n"));
+    jump(&mut c, view("jne"), start);
+    said := invoke(&mut c, view(cycle_sym), u64[]);
+    exchange(&mut c.static_scratch, said);
+    stop := invoke(&mut c, view("rt_comptime_cycle"), u64[]);
+    exchange(&mut c.static_scratch, stop);
+    mark(&mut c, start);
+    o(&mut c, view("movq $1,"));
+    o(&mut c, view(guard));
+    o(&mut c, view("(%rip)\n"));
+    t := invoke(&mut c, view(value_sym), u64[]);
+    if memo != 0 {
+        get(&mut c, t, view("%rax"));
+        o(&mut c, view("movq %rax,"));
+        o(&mut c, view(sym));
+        o(&mut c, view("(%rip)\nmovq $2,"));
+    } else {
+        o(&mut c, view("movq $0,"));
+    }
+    o(&mut c, view(guard));
+    o(&mut c, view("(%rip)\n"));
+    mark(&mut c, done);
+    return t;
+}
 // A read of `m::n`, or a value with type NO_TYPE when no static has that name. A scalar is loaded
 // (a copy of the word); anything else is a shared borrow of the object, whose target is storage
 // outside every frame - the same external place a borrowed parameter's referent is.
@@ -21381,12 +21867,13 @@ fn static_value<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> Val {
     if !is_type_id(ty) {
         fail(&mut c, view("internal: a static is read before its type is known"));
     }
-    if (c.probe_mode != 0) && static_pending_here(module, name) {
-        // The probe computing this static reached a read of it: a cycle, reported by the runner.
-        stop := invoke(&mut c, view("rt_comptime_cycle"), u64[]);
-        exchange(&mut c.static_scratch, stop);
-    }
     sym := static_symbol(&mut c, module, name);
+    if c.probe_mode != 0 {
+        static_resolve(&mut c, k - 1);
+        if (c.statics[k - 1].state == 2) && (c.statics[k - 1].ready == 0) {
+            static_probe_init(&mut c, module, name, view(sym), 1);
+        }
+    }
     o(&mut c, view("leaq "));
     o(&mut c, view(sym));
     o(&mut c, view("(%rip),%rax\n"));
@@ -21395,7 +21882,9 @@ fn static_value<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> Val {
         word := save(&mut c);
         return val(word, ty);
     }
-    slot := save(&mut c);
+    // The word's address; a record's reference is the record's own address (word_reference).
+    mut slot = save(&mut c);
+    slot = word_reference(&mut c, slot, ty);
     rty := reference_type(&mut c, ty, 0);
     own(&mut c, slot, rty);
     if c.raw == 0 {
@@ -21613,20 +22102,26 @@ fn static_bake<a>(c: (&a mut C), ty: u64, text: &a [u8], at: (&a mut u64), is_la
             }
             return static_seq_object(&mut c, &bytes, n);
         }
-        // Elements that are objects themselves: each is emitted first, then the word table.
+        // Elements that are objects themselves: each is emitted first, then the word table. A
+        // vector of plain records holds its elements' words inline instead (flat_bytes).
         mut words = u64[];
         mut kinds = u64[];
+        flat := (ty_kind(&mut c, base_type(&mut c, elem)) == 8) && plain(&mut c, elem);
         for j in n {
-            mut flag = 0;
-            w := static_bake(&mut c, elem, text, &mut at, &mut flag);
-            words.push(w);
-            kinds.push(flag);
+            if flat {
+                static_bake_fields(&mut c, base_type(&mut c, elem), text, &mut at, &mut words, &mut kinds);
+            } else {
+                mut flag = 0;
+                w := static_bake(&mut c, elem, text, &mut at, &mut flag);
+                words.push(w);
+                kinds.push(flag);
+            }
         }
         data := label(&mut c);
         obj := label(&mut c);
         o(&mut c, view(".p2align 4\n.quad 0\n.quad 2\n"));
         mark(&mut c, data);
-        for j in n {
+        for j in words.len() {
             static_quad_label(&mut c, words[j], kinds[j]);
         }
         o(&mut c, view(".quad 0\n.p2align 4\n.quad 0\n.quad 2\n"));
@@ -21640,29 +22135,40 @@ fn static_bake<a>(c: (&a mut C), ty: u64, text: &a [u8], at: (&a mut u64), is_la
         c.out.push(10);
         return obj;
     }
-    // A record: one word per field, as rt_rec lays it out.
-    d := ty_arg(&mut c, ty);
-    first := c.decls[d].first;
-    count := c.decls[d].count;
+    // A record: its words as the record's layout has them (field_layout) - a word per field, and a
+    // plain record held in a field laid inline in its parent's words.
     mut words = u64[];
     mut kinds = u64[];
-    for j in count {
-        mut flag = 0;
-        fty := c.fields[first + j].ty;
-        w := static_bake(&mut c, fty, text, &mut at, &mut flag);
-        words.push(w);
-        kinds.push(flag);
-    }
+    static_bake_fields(&mut c, ty, text, &mut at, &mut words, &mut kinds);
     rec := label(&mut c);
     o(&mut c, view(".p2align 4\n.quad 0\n.quad 2\n"));
     mark(&mut c, rec);
-    for j in count {
+    for j in words.len() {
         static_quad_label(&mut c, words[j], kinds[j]);
     }
-    if count == 0 {
+    if words.len() == 0 {
         o(&mut c, view(".quad 0\n"));
     }
     return rec;
+}
+// The words of record `ty`, read from the flat form, appended to `words` (with `kinds` saying
+// which are labels): a plain record held in a field contributes its own words in place.
+fn static_bake_fields<a>(c: (&a mut C), ty: u64, text: &a [u8], at: (&a mut u64), words: (&a mut u64[]), kinds: (&a mut u64[])) -> unit {
+    d := ty_arg(&mut c, ty);
+    first := c.decls[d].first;
+    count := c.decls[d].count;
+    for j in count {
+        fty := c.fields[first + j].ty;
+        if inline_field(&mut c, ty, j) {
+            static_bake_fields(&mut c, base_type(&mut c, fty), text, &mut at, &mut words, &mut kinds);
+        } else {
+            mut flag = 0;
+            w := static_bake(&mut c, fty, text, &mut at, &mut flag);
+            words.push(w);
+            kinds.push(flag);
+        }
+    }
+    return ();
 }
 
 fn static_refuse<a, b>(c: (&a mut C), at: u64, msg: &b [u8]) -> unit {
@@ -21727,6 +22233,22 @@ fn static_emit<a, b>(c: (&a mut C), i: u64, ready: u64, value: u64, text: &b [u8
     unit := unit_module(&mut c, view(module));
     part(&mut c, view(unit));
     sym := static_symbol(&mut c, view(module), view(name));
+    if ready == 0 {
+        // A probe's run-tier static: a writable word the first read fills, and its guard
+        // (0 not started, 1 being computed, 2 done).
+        o(&mut c, view(".pushsection .data\n.p2align 3\n.globl "));
+        o(&mut c, view(sym));
+        o(&mut c, view("\n"));
+        o(&mut c, view(sym));
+        o(&mut c, view(":\n.quad 0\n"));
+        guard := static_guard_symbol(view(module), view(name));
+        o(&mut c, view(".globl "));
+        o(&mut c, view(guard));
+        o(&mut c, view("\n"));
+        o(&mut c, view(guard));
+        o(&mut c, view(":\n.quad 0\n.popsection\n"));
+        return ();
+    }
     if c.plat == 1 {
         o(&mut c, view(".pushsection __DATA,__const\n"));
     } else {
@@ -21959,6 +22481,14 @@ fn static_declaration<a>(c: (&a mut C), pass: u64) -> unit {
             fail(&mut c, view("a static needs an initialiser: `static NAME: T = value;`"));
         }
         exchange(&mut c.statics[i].init_at, c.pos + 1);
+        if kind_at(&mut c, c.pos + 1) == 64 {
+            advance(&mut c);
+            advance(&mut c);
+            if ct_call_ahead(&mut c) {
+                call := ct_take_call_text(&mut c);
+                c.ct_calls.push(CtCall { module: module.copy(), name: name.copy(), text: call, is_static: 1 });
+            }
+        }
         static_skip_item(&mut c);
         return ();
     }
@@ -21986,6 +22516,10 @@ fn static_resolve<a>(c: (&a mut C), i: u64) -> unit {
         exchange(&mut c.file, file);
     }
     module := c.statics[i].module.copy();
+    // The initialiser's names are its module's: a constant it reads (`PAGE - 1`) is looked up in
+    // the static's module, whoever asks for the value - the interface writer runs after the last
+    // module has been read, so the current module is then someone else's.
+    saved_module := exchange(&mut c.module, module.copy());
     name := c.statics[i].name.copy();
     ty := c.statics[i].ty;
     at_name := c.statics[i].at;
@@ -22006,7 +22540,9 @@ fn static_resolve<a>(c: (&a mut C), i: u64) -> unit {
         mut key = module.copy();
         push_bytes(&mut key, view("::"));
         push_bytes(&mut key, view(name));
-        if (c.probe_mode != 0) && static_pending_here(view(module), view(name)) {
+        if c.probe_mode != 0 {
+            // Inside a probe a run-tier static is computed by the probe itself, on first read
+            // (static_value): no probe starts another.
             ready = 0;
         } else {
             exchange(&mut c.pos, init);
@@ -22083,6 +22619,7 @@ fn static_resolve<a>(c: (&a mut C), i: u64) -> unit {
     exchange(&mut c.statics[i].text, text);
     exchange(&mut c.statics[i].ready, ready);
     exchange(&mut c.statics[i].state, 2);
+    exchange(&mut c.module, saved_module);
     if file != saved_file {
         load_file(&mut c, saved_file);
         exchange(&mut c.file, saved_file);
@@ -22725,8 +23262,6 @@ fn fx_begin<a, b, d>(c: (&a mut C), sym: &b [u8], name: &d [u8], file: u64, pos:
     edges := c.fx_edge_from.len();
     exchange(&mut c.fx_edge_mark, edges);
     exchange(&mut c.fx_calls, 0);
-    exchange(&mut c.fx_skip_lo, 0);
-    exchange(&mut c.fx_skip_hi, 0);
     if trusted != 0 {
         fx_root(&mut c, k, view(sym));
     }
@@ -22829,15 +23364,18 @@ fn fx_would_trap<a, b>(c: (&a mut C), callee: &b [u8]) -> unit {
     fx_edge(&mut c, view(callee), 0);
     return ();
 }
-// A direct call whose arguments proved every refinement of the callee's parameters. It enters the
-// callee at its one entry, whose checks then hold by the proof: they are not this body's to answer
-// for (edge kind 8). A second entry past the checks was a byte copy of the prologue taken before the
-// optimiser rewrote it, and restored callee-saved registers it had never saved.
+// A direct call whose arguments proved every refinement of the callee's parameters: it calls the
+// body, `<callee>.proved`, which checks nothing, so it costs what a call to a function with no
+// predicate costs. (An earlier second entry was a byte copy of the prologue taken before the
+// optimiser rewrote it, and restored callee-saved registers it had never saved; the body is now a
+// function of its own and the checks live in the wrapper, ref_wrapper.)
 fn call_proved_out<a, b>(c: (&a mut C), callee: &b [u8]) -> unit {
-    fx_edge(&mut c, view(callee), 8);
+    mut target = copy_bytes(view(callee));
+    push_bytes(&mut target, view(".proved"));
+    fx_edge(&mut c, view(target), 8);
     fx_called(&mut c);
     o(&mut c, view("call "));
-    o(&mut c, callee);
+    o(&mut c, view(target));
     c.out.push(10);
     return ();
 }
@@ -22964,16 +23502,13 @@ fn fx_helper<a, b>(c: (&a mut C), sym: &b [u8]) -> unit {
     exchange(&mut c.fx_trusted, 1);
     exchange(&mut c.fx_out_start, c.out.len());
     exchange(&mut c.fx_calls, 0);
-    exchange(&mut c.fx_skip_lo, 0);
-    exchange(&mut c.fx_skip_hi, 0);
     exchange(&mut c.fx_cur, k + 1);
     return ();
 }
 // The body ends, and the one thing that is still read from the bytes is checked: the number of `call`
 // lines the body emitted has to be the number of calls it recorded. A disagreement means a call site
 // exists that does not go through the recording helpers - a compiler bug that would otherwise be a
-// silently weaker proof. The replayed prologue of the `.proved` entry is skipped: those are bytes
-// already accounted for, copied to the second entry.
+// silently weaker proof.
 fn fx_end<a>(c: (&a mut C)) -> unit {
     cur := c.fx_cur;
     if cur == 0 {
@@ -22981,18 +23516,16 @@ fn fx_end<a>(c: (&a mut C)) -> unit {
     }
     exchange(&mut c.fx_cur, 0);
     from := cur - 1;
-    // The calls this body emitted, with the range of a replayed `.proved` prologue: the comparison
+    // The calls this body emitted: the comparison
     // that used to scan these bytes for `call` lines happens once, against the typed IR's call list
     // (`fx_check_calls`, called where the optimizer has parsed every body).
     c.fx_body_sym.push(c.fx_syms[from].copy());
     c.fx_body_calls.push(c.fx_calls);
-    c.fx_body_lo.push(c.fx_skip_lo);
-    c.fx_body_hi.push(c.fx_skip_hi);
     exchange(&mut c.fx_calls, 0);
     return ();
 }
 // The check the byte scan used to make: every body that claimed an effect recorded exactly as many
-// calls as the typed IR parsed out of its bytes (outside any replayed prologue). A call site that
+// calls as the typed IR parsed out of its bytes. A call site that
 // bypasses `call_out`, `call_slot_out`, `call_dispatch_out` or `call_entry_out` would leave the IR
 // with a call the recorder never saw - a silently weaker proof - so it is refused here.
 fn fx_check_calls<a, b, d>(c: (&a mut C), syms: (&b u8[][]), counts: (&d u64[])) {
@@ -28340,10 +28873,9 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
     // discharged here. A method call, an interface method solved to an implementation, and a foreign
     // call proved nothing about the code they reach, and keep the checked entry.
     mut proved = 0;
-    // `ref_entry` emits no second entry for the LLVM backend (its prologue is written in frame-symbol
-    // arithmetic the lifter does not model), so nothing is proved here either: an effect that a proof
-    // would have discharged is refused by name instead of being discharged and then left checked.
-    if (c.raw == 0) & (c.validating == 0) & (method == 0) & (c.funcs[f - 1].ext == 0) & (c.funcs[f - 1].contract == 0) & (c.backend == 0) {
+    // Every backend lifts the body and its checking wrapper as two ordinary functions (ref_wrapper),
+    // so a proof is used wherever it is found.
+    if (c.raw == 0) & (c.validating == 0) & (method == 0) & (c.funcs[f - 1].ext == 0) & (c.funcs[f - 1].contract == 0) {
         strict := u64(ref_strict(&c));
         proved = pv_call_proved(&mut c, f, count, &spans, call_at, strict);
     }
@@ -50177,6 +50709,7 @@ pub fn main() -> u64 {
         inherent_types: u64[],
         constants: Constant[],
         statics: Static[],
+        ct_calls: CtCall[],
         static_scratch: 0,
         impl_params: ImplParams[],
         receiver: 0,
@@ -50213,6 +50746,7 @@ pub fn main() -> u64 {
         pv_pred_mode: 0,
         pv_arith_ok: 0,
         ref_assign_target: 0,
+        proved_label: 0,
         ref_assign_d: 0,
         ref_assign_k: 0,
         strict_refinements: 0,
@@ -50345,14 +50879,10 @@ pub fn main() -> u64 {
         fx_out_start: 0,
         fx_trusted: 0,
         fx_calls: 0,
-        fx_skip_lo: 0,
-        fx_skip_hi: 0,
         fx_entry_panic: u64[],
         fx_edge_mark: 0,
         fx_body_sym: u8[][],
         fx_body_calls: u64[],
-        fx_body_lo: u64[],
-        fx_body_hi: u64[],
         fn_dir: u8[],
         fn_id: u8[],
         fn_quiet: 0,
@@ -51037,7 +51567,11 @@ pub fn main() -> u64 {
     // Every body is emitted: the effect claims are settled over the whole call graph.
     jobs::phase(view("drops-vtables"));
     fx_solve(&mut c);
-    fx_report(&mut c);
+    // A probe is not the program: its job is to run initialisers, and a body it compiles may read a
+    // value through a lazy initialiser the program itself never calls. Claims are the program's.
+    if c.probe_mode == 0 {
+        fx_report(&mut c);
+    }
     iface_emit_facts(&mut c);
     if c.skip_bodies.len() != 0 {
         // Every error this compile has is reported; the program is still rejected, and nothing it
@@ -51182,7 +51716,10 @@ pub fn main() -> u64 {
     }
     // The leak check: balanced -> return, a leak -> abort, a leak after a contained task failure ->
     // a note on fd 2 and a normal exit (rt_leak_exit; see task-failure-containment.md).
-    o(&mut c, view("call rt_leak_exit\n"));
+    if c.probe_mode == 0 {
+        // A probe keeps the values it built on purpose (statics initialised lazily inside it).
+        o(&mut c, view("call rt_leak_exit\n"));
+    }
     o(&mut c, view("call rt_shutdown\n"));
     emit_exit(&mut c, view("movq %r14,%rdi\n"));
     if c.target == 3 {
@@ -51268,21 +51805,6 @@ pub fn main() -> u64 {
     mut out = u8[];
     // The typed IR of each body, as the optimizer parsed it, when --emit-ir asked for it.
     mut ir_text = u8[];
-    // Where each body's replayed `.proved` prologue sits, so the optimizer can count the calls the
-    // body really emits and this end can hold that count against what the effect checker recorded.
-    // Only bodies with such a prologue are listed: the rest have no range, and the optimizer looks
-    // every body up here.
-    mut rsym = u8[][];
-    mut rlo = u64[];
-    mut rhi = u64[];
-    for i in c.fx_body_sym.len() {
-        if c.fx_body_hi[i] != 0 {
-            rsym.push(c.fx_body_sym[i].copy());
-            rlo.push(c.fx_body_lo[i]);
-            rhi.push(c.fx_body_hi[i]);
-        }
-    }
-    replay := ir::Replay { sym: rsym, lo: rlo, hi: rhi };
     mut call_syms = u8[][];
     mut call_counts = u64[];
     if (c.debug != 0) || (c.backend != 0) {
@@ -51295,9 +51817,9 @@ pub fn main() -> u64 {
         }
     } else {
         if c.split != 0 {
-            out = optimize::optimize_parts(view(c.out), 1, &mut c.marks, &mut c.part_names, &c.facts, c.emit_ir, &mut ir_text, &replay, &mut call_syms, &mut call_counts, view(c.fn_dir), view(c.fn_id), &c.plan_at, &c.known);
+            out = optimize::optimize_parts(view(c.out), 1, &mut c.marks, &mut c.part_names, &c.facts, c.emit_ir, &mut ir_text, &mut call_syms, &mut call_counts, view(c.fn_dir), view(c.fn_id), &c.plan_at, &c.known);
         } else {
-            out = optimize::optimize(view(c.out), &c.facts, c.emit_ir, &mut ir_text, &replay, &mut call_syms, &mut call_counts, view(c.fn_dir), view(c.fn_id), &c.plan_at, &c.known);
+            out = optimize::optimize(view(c.out), &c.facts, c.emit_ir, &mut ir_text, &mut call_syms, &mut call_counts, view(c.fn_dir), view(c.fn_id), &c.plan_at, &c.known);
         }
         // The check the byte scan used to make, now from the IR: a call site that bypasses the
         // recording helpers is a compiler bug, and a bug here is a silently weaker proof.
