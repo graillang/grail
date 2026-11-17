@@ -30975,12 +30975,6 @@ fn unbox_into_frame<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
 // The drop of a holder's word that holds `ty`: for a framed record it is the holder's box, freed;
 // for anything else the type's drop.
 fn holder_drop<a>(c: (&a mut C), ty: u64) -> unit {
-    t := base_type(&mut c, ty);
-    if (ty_kind(&mut c, t) == 5) || (ty_kind(&mut c, t) == 27) {
-        // A view a holder keeps is a reference it borrowed (a captured `&[T]` stores the pair's
-        // address): there is nothing of its own to free.
-        return ();
-    }
     if array_owned(&mut c, ty) {
         // An array has no boxed helper: its elements dropped in place, then the holder's box freed.
         o(&mut c, view("pushq %rdi\npushq %rdi\n"));
@@ -37993,6 +37987,11 @@ fn element_code<a>(c: (&a mut C), ty: u64) -> u64 {
             // 4-byte elements (f32[], u32[], i32[]).
             return 4096 * sub + 8;
         }
+        ik := ty_kind(&mut c, base_type(&mut c, inner));
+        if (ik == 5) || (ik == 27) {
+            // Views are inline {pointer, length} pairs, 16 bytes each.
+            return 4096 * sub + 9;
+        }
         return 4096 * sub + 5;
     }
     return 0;
@@ -42859,8 +42858,17 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
             root := place_of(&mut c, obj);
             field_place := member_place(&mut c, root, 2 + j, ty);
             source := place_of(&mut c, slot);
-            get(&mut c, slot, view("%rax"));
-            pointer := save(&mut c);
+            vk := ty_kind(&mut c, base_type(&mut c, ty));
+            mut pointer = 0;
+            if (vk == 5) || (vk == 27) {
+                // A view's value is the address of its pair, which may be a copy in this frame that
+                // is gone when the closure runs: the environment keeps a box of the pair, which its
+                // drop frees (holder_drop).
+                pointer = frame_box(&mut c, slot, ty);
+            } else {
+                get(&mut c, slot, view("%rax"));
+                pointer = save(&mut c);
+            }
             rec_store(&mut c, obj, 2 + j, pointer);
             // A shared reference is copied, as Rust's `&T` is: the field holds the same shared
             // loans and the binding stays usable - two closures may capture one `r := &x`. An
