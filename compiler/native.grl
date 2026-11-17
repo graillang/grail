@@ -10901,10 +10901,25 @@ fn transfer_capability<a, b>(
         }
         return true;
     }
-    // An associated type of a parameter has no capability bounds to rely on; nor does an interface
-    // object, whose concrete type is unknown.
-    if (k == 30) || (k == 33) {
+    // An associated type of a parameter has no capability bounds to rely on.
+    if k == 30 {
         return deny(&mut c, 8);
+    }
+    // An interface object is what its type says (`dyn<Send> I`): its concrete type is checked when
+    // it is boxed, and a bare `dyn I` says nothing.
+    if k == 33 {
+        mut need = CLOSURE_SEND;
+        if shared != 0 {
+            need = CLOSURE_SHARE;
+        }
+        if (ty_mode(&mut c, ty) & need) != 0 {
+            return true;
+        }
+        return deny(&mut c, 14);
+    }
+    // The referent of a `&dyn I`.
+    if k == 35 {
+        return transfer_capability(&mut c, arg, shared, &mut trail, depth + 1);
     }
     // A capability proof (kind 9) carries its own bits: 1 transferable, 2 shareable.
     if k == 9 {
@@ -11105,6 +11120,7 @@ fn transfer_capability<a, b>(
 //  11 a job handle, which cannot be shared
 //  12 a closure type from a signature that does not state the bound
 //  13 an FnMut closure, which cannot be shared
+//  14 an interface object whose dyn type states no Send / Share bound
 fn deny<a>(c: (&a mut C), code: u64) -> u64 {
     if c.cap_denial == 0 {
         exchange(&mut c.cap_denial, code);
@@ -11166,6 +11182,8 @@ fn cap_denial_text<a, b>(c: (&a mut C), out: (&b mut u8[])) -> unit {
                                             dput(&mut out, view("a closure whose type does not say what it captured (write `Fn<Send>(..)` or `Fn<Share>(..)` where the type is written)"));
                                         } else if code == 13 {
                                             dput(&mut out, view("an FnMut closure, which cannot be shared"));
+                                        } else if code == 14 {
+                                            dput(&mut out, view("an interface object whose type does not say what the value behind it may do (write `dyn<Send> I` or `dyn<Share> I`)"));
                                         } else {
                                             dput(&mut out, view("a type that nests too deeply to classify"));
                                         }
@@ -12140,11 +12158,22 @@ fn dyn_box<a>(c: (&a mut C), v: Val, expected: u64) -> Val {
         fail(&mut c, view("this type does not implement the interface the dyn type names"));
     }
     // The type, or - for a value whose type cannot show a borrow it holds (a record with a closure
-    // field) - the value itself: a `dyn` erases both.
-    if contains_borrow(&mut c, concrete, 0)
-        || (may_hide_borrow(&mut c, concrete) && holds_live_loan(&mut c, place_of(&mut c, v.t))) {
-        fail(&mut c, view("a dyn value cannot hold borrowed data: its lifetime would be lost"));
+    // field) - the value itself: a `dyn` erases both. `dyn<s> I` may hold borrows: the cell keeps
+    // the value's loans and carries `s`, so the region checks follow it.
+    borrowing := type_regions(&mut c, expected).len() != 0;
+    if !borrowing && (contains_borrow(&mut c, concrete, 0)
+        || (may_hide_borrow(&mut c, concrete) && holds_live_loan(&mut c, place_of(&mut c, v.t)))) {
+        fail(&mut c, view("a dyn value cannot hold borrowed data: its lifetime would be lost; write `dyn<s> I` to keep the borrow"));
     }
+    // The bounds the dyn type states are met by the concrete type, checked here where it is known.
+    dyn_bits := ty_mode(&mut c, expected);
+    if (dyn_bits & CLOSURE_SEND) != 0 {
+        require_capability_named(&mut c, concrete, 0, view("value boxed as `dyn<Send>`"));
+    }
+    if (dyn_bits & CLOSURE_SHARE) != 0 {
+        require_capability_named(&mut c, concrete, 1, view("value boxed as `dyn<Share>`"));
+    }
+    source_place := place_of(&mut c, v.t);
     fixed := type_args(&mut c, expected);
     for j in fixed.len() {
         given := project(&mut c, concrete, id * 1024 + j);
@@ -12169,7 +12198,27 @@ fn dyn_box<a>(c: (&a mut C), v: Val, expected: u64) -> Val {
     rec_store(&mut c, cell, 1, table);
     move_out(&mut c, val(v.t, v.ty));
     own(&mut c, cell, expected);
+    if borrowing {
+        return_bonds(&mut c, source_place, place_of(&mut c, cell), 1);
+    }
     return val(cell, expected);
+}
+// A `dyn<B> I` value used as `dyn<B'> I` with fewer bounds: the same cell and vtable, so nothing is
+// converted. 1 when it may be.
+fn dyn_converts<a>(c: (&a mut C), actual: u64, expected: u64) -> u64 {
+    if (ty_kind(&mut c, actual) != 33) || (ty_kind(&mut c, expected) != 33) {
+        return 0;
+    }
+    have := ty_mode(&mut c, actual);
+    want := ty_mode(&mut c, expected);
+    if (want & have) != want {
+        return 0;
+    }
+    if (type_regions(&mut c, actual).len() != 0) && (type_regions(&mut c, expected).len() == 0) {
+        return 0;
+    }
+    plain := intern_args(&mut c, 33, ty_arg(&mut c, actual), want, type_regions(&mut c, expected), type_args(&mut c, actual));
+    return same_type(&mut c, plain, expected);
 }
 // Record the (interface, concrete type) pair whose vtable this program builds; both an owned `dyn I`
 // and a `&dyn I` need one.
@@ -12920,6 +12969,12 @@ fn same_type<a>(c: (&a mut C), x: u64, y: u64) -> u64 {
         if aa != bb {
             return 0;
         }
+        if ty_mode(&mut c, x) != ty_mode(&mut c, y) {
+            return 0;
+        }
+        if type_regions(&mut c, x).len() != type_regions(&mut c, y).len() {
+            return 0;
+        }
         xa := type_args(&mut c, x);
         ya := type_args(&mut c, y);
         if xa.len() != ya.len() {
@@ -12968,6 +13023,10 @@ fn contains_borrow<a>(c: (&a mut C), ty: u64, depth: u64) -> bool {
 fn borrow_walk<a, b>(c: (&a mut C), ty: u64, trail: (&b mut u64[])) -> bool {
     k := ty_kind(&mut c, ty);
     arg := ty_arg(&mut c, ty);
+    // `dyn<s> I` holds borrows from `s`.
+    if (k == 33) && (type_regions(&mut c, ty).len() != 0) {
+        return true;
+    }
     if k == 5 || k == 7 || k == 27 {
         return true;
     }
@@ -13163,6 +13222,19 @@ fn source_type_name<a>(c: (&a mut C), ty: u64) -> u8[] {
         push_bytes(&mut out, view(inner));
         return out;
     }
+    if k == 33 {
+        // `dyn<Send> Peek`, `dyn Iterator<Item = u64>`.
+        push_bytes(&mut out, view("dyn"));
+        drs := type_regions(&mut c, ty);
+        mut rname = u8[];
+        if (drs.len() == 1) && (drs[0] != 0) && (drs[0] <= c.rnames.len()) {
+            rname = c.rnames[drs[0] - 1].copy();
+        }
+        closure_bounds_text_named(&mut out, ty_mode(&mut c, ty), view(rname));
+        out.push(32);
+        push_bytes(&mut out, view(c.interfaces[arg - 1].name));
+        return out;
+    }
     if k == 35 {
         // The referent of a borrowed interface object prints as the dyn type it names, so
         // `&dyn Shape` reads back as it was written.
@@ -13236,6 +13308,24 @@ fn require_type<a>(c: (&a mut C), actual: u64, expected: u64) -> unit {
         // one whose bounds its captures meet): the same record, so nothing is converted.
         if closure_converts(&mut c, actual, want) != 0 {
             return ();
+        }
+        if dyn_converts(&mut c, actual, want) != 0 {
+            return ();
+        }
+        if (ty_kind(&mut c, actual) == 33) && (ty_kind(&mut c, want) == 33) && (ty_arg(&mut c, actual) == ty_arg(&mut c, want)) {
+            have := ty_mode(&mut c, actual);
+            need := ty_mode(&mut c, want);
+            if (need & have) != need {
+                mut msg = copy_bytes(view("`"));
+                push_bytes(&mut msg, view(source_type_name(&mut c, actual)));
+                push_bytes(&mut msg, view("` does not say what the value behind it may do, so it cannot be used as `"));
+                push_bytes(&mut msg, view(source_type_name(&mut c, want)));
+                push_bytes(&mut msg, view("`: a bound is checked where the value is boxed, so state it there"));
+                fail(&mut c, view(msg));
+            }
+            if (type_regions(&mut c, actual).len() != 0) && (type_regions(&mut c, want).len() == 0) {
+                fail(&mut c, view("this `dyn` holds a borrow - it is `dyn<s> I` - and a bare `dyn I` holds none: keep the lifetime in the type"));
+            }
         }
         // `Fn` and `FnMut` have the same signature and differ only in whether a call needs
         // exclusive access: say so instead of reporting a shape mismatch.
@@ -14022,7 +14112,7 @@ fn lifetime_candidate<a>(c: (&a mut C), p: u64) -> bool {
         return false;
     }
     // `&dyn I` is a reference to an interface object, not lifetime `dyn`.
-    if same(view(n), view("dyn")) && (kind_at(&mut c, p + 1) == 1) {
+    if same(view(n), view("dyn")) && ((kind_at(&mut c, p + 1) == 1) || (kind_at(&mut c, p + 1) == 60)) {
         return false;
     }
     return token_starts_type(&mut c, p + 1) || is_at(&mut c, p + 1, view("mut"));
@@ -14181,7 +14271,7 @@ fn parse_reference<a>(c: (&a mut C)) -> u64 {
 }
 // Whether the type before the parser is `dyn I`: what `&dyn I` in a body borrows.
 fn dyn_type_ahead<a>(c: (&a mut C)) -> bool {
-    return is(&mut c, view("dyn")) && (kind_at(&mut c, c.pos + 1) == 1);
+    return is(&mut c, view("dyn")) && ((kind_at(&mut c, c.pos + 1) == 1) || (kind_at(&mut c, c.pos + 1) == 60));
 }
 // `*T` / `*mut T`: a raw pointer (kind 34, argument T, mode 1 when mutable). It is one word, Copy
 // and has no drop; every operation on it needs an `unsafe` block (docs/design/unsafe.md).
@@ -14206,8 +14296,20 @@ fn parse_type_base<a>(c: (&a mut C)) -> u64 {
         return parse_raw_pointer(&mut c);
     }
     // `dyn I` / `dyn module::I`: a value of any type implementing I, chosen at run time.
-    if is(&mut c, view("dyn")) && (kind_at(&mut c, c.pos + 1) == 1) {
+    if is(&mut c, view("dyn")) && ((kind_at(&mut c, c.pos + 1) == 1) || (kind_at(&mut c, c.pos + 1) == 60)) {
         advance(&mut c);
+        // `dyn<Send> I`, `dyn<Send, Share> I`, `dyn<s> I` (docs/design/dyn-and-callable-bounds.md):
+        // the bounds an interface object states about the value behind it, read by the same list
+        // as a closure type's. `Owned` is never written: a bare `dyn I` already holds no borrow,
+        // and `dyn<s> I` is the form that may.
+        mut dyn_regions = u64[];
+        mut dyn_bits = 0;
+        if is(&mut c, view("<")) {
+            dyn_bits = closure_bounds_list(&mut c, false, &mut dyn_regions);
+            if (dyn_bits & CLOSURE_OWNED) != 0 {
+                fail(&mut c, view("`Owned` is not written on `dyn`: a `dyn I` holds no borrow already; `dyn<s> I` is the one that may"));
+            }
+        }
         first := ident(&mut c);
         mut m = module_copy(&mut c);
         mut n = first.copy();
@@ -14263,7 +14365,7 @@ fn parse_type_base<a>(c: (&a mut C)) -> u64 {
         if !known {
             c.dyn_ifaces.push(id);
         }
-        return intern_args(&mut c, 33, id, 0, u64[], fixed);
+        return intern_args(&mut c, 33, id, dyn_bits, dyn_regions, fixed);
     }
     // `&&T`, which the lexer reads as one `&&` token: a shared reference to `&T`, elided lifetime.
     if eat(&mut c, view("&&")) {
@@ -41833,7 +41935,7 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
         first = map_expression(&mut c, expected);
     } else {
         after_open := c.pos + 1;
-        if is(&mut c, view("(")) & is_at(&mut c, after_open, view("dyn")) & (kind_at(&mut c, after_open + 1) == 1) {
+        if is(&mut c, view("(")) & is_at(&mut c, after_open, view("dyn")) & ((kind_at(&mut c, after_open + 1) == 1) || (kind_at(&mut c, after_open + 1) == 60)) {
             // `(dyn I)[...]`: the parenthesised spelling of the same literal.
             ty := parse_type_base(&mut c);
             first = finish_type_literal(&mut c, ty);
@@ -46837,7 +46939,7 @@ pub fn iface_digest<a>(data: &a [u8]) -> u8[] {
 // tree the reader read, so the format stays inspectable without a second parser.
 // Format 7 added the effect summary rows of every listed function; format 8 gives an `Atomic<T>`
 // its element type.
-const IFACE_VERSION: u64 = 8;
+const IFACE_VERSION: u64 = 9;
 const IFACE_TAG_MODULE: u64 = 1;
 const IFACE_TAG_TRAILER: u64 = 2;
 const IFACE_TAG_LINK: u64 = 3;

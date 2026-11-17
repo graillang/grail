@@ -8,6 +8,18 @@
   checked. A check and a build share their records, so a build after a check reuses its units.
 - Added: TLS over the operating system's own implementation. `lib/tls.grl` gives `TlsConfig`, `TlsClient`, `TlsStream` and a `tls::Error` that keeps four classes apart - `Verify` (the chain or name was rejected, never retried), `Protocol`, `Io` and `Closed` (already closed, or the peer's connection ended without a `close_notify`; `read` returns 0 only for a clean one). Peer verification has no switch: a client refuses to exist while its trust store is empty (`NoTrustStore`) instead of verifying nothing, the store is checked for content on Linux rather than assumed, `SSL_CERT_FILE`/`SSL_CERT_DIR` are honoured, and the name or address handed to `connect` is always checked against the certificate (`SSL_set1_host`, `X509_VERIFY_PARAM_set1_ip_asc`). The socket is never given to the C library: memory BIOs plus `WANT_READ`/`WANT_WRITE` mapped onto `host::read_fd`/`host::write_fd`, so a TLS stream suspends its task on the reactor exactly like `net::TcpStream`. One `TlsClient` is one context (and therefore one session cache), `connect_over` consumes a `net::TcpStream` so the descriptor cannot be closed twice, `shutdown` sends `close_notify` and keeps reading, `close` sends it and releases both. The Linux binding is executed: the local `openssl s_server` pair in the corpus proves the handshake is REFUSED for an untrusted self-signed certificate and ACCEPTED once it is the anchor, then 3000 bytes are echoed byte for byte; a real handshake against `example.com:443` pins the version, ALPN and subject; a missing CA and an empty system store are both refusals. The link-note rule is pinned both ways: `tls-link-notes-absent-without-import` fails if a program that never imports `tls` emits `// grail-link: ssl`/`crypto`, and `tls-trust-store-empty-refuses` pins that one which does import it emits both. macOS and Windows are refused: a build of a `tls` program for either stops with a compile-time message naming what is missing (a SecureTransport layer was written but never run, and SChannel is not implemented) - docs/design/tls.md records the plans. Book: *TLS over the system stack* in *The standard library*, and *Link inputs, and per-target bindings* in *Calling C*.
 
+- **`dyn<Send> I`, `dyn<Share> I` and `dyn<s> I`.** An interface object can now say what the value
+  behind it may do: `dyn<Send> I` may cross to another thread (a `parallel_map` item, a task item,
+  `T: Send`), `&dyn<Share> I` may be shared by workers, and `dyn<s> I` may hold borrowed data from
+  `s` (its loans are kept). The bound is checked where a value is boxed, against its concrete type;
+  bounds may be dropped (`dyn<Send> I` to `dyn I`) but not added. A bare `dyn I` is unchanged - it
+  holds no borrow and is neither Send nor Share - and its refusal now says to write `dyn<Send> I`.
+  `Owned` is never written on `dyn`. Interface format 9.
+- **Faster iteration over owned vectors.** `iter::of(v)` and the consuming `vecs` methods (`map`,
+  `fold`, `filter`, `filter_map`, `flat_map`, `for_each`, `reduce`, ...) no longer copy the vector
+  into a reversed one by popping and pushing every element (an option allocated per element, twice):
+  they reverse it in place and take elements with `pop()!`. `v.reverse()` itself is a two-pointer
+  loop instead of a bounds-checked swap call per pair (about 10x).
 - **Fixed: an LLVM-backend miscompile of a vector grown through its address.** A call handed `&mut v`
   receives the slot's address, not the header word, so the lifter did not count it as a call that
   can grow `v`, and the `len`/`data` it had read before the call were used after it: `pad(&mut out,

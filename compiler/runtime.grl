@@ -9735,11 +9735,20 @@ fn rt_vec_swap(s: u64, i: u64, j: u64) -> u64 {
     return 0;
 }
 fn rt_vec_reverse(s: u64) -> u64 {
-    n := rt_len(s);
-    mut i = 0;
-    while i < rt_div(n, 2) {
-        rt_vec_swap(s, i, n - 1 - i);
-        i += 1;
+    // Two pointers meeting in the middle: one load and one store per word, no per-element call or
+    // bounds check (both ends are inside the vector by construction).
+    n := raw_load(wrapping_add(s, 8));
+    if n < 2 {
+        return 0;
+    }
+    mut lo = raw_load(s);
+    mut hi = wrapping_add(lo, wrapping_mul(n - 1, 8));
+    while lo < hi {
+        w := raw_load(lo);
+        raw_store(lo, raw_load(hi));
+        raw_store(hi, w);
+        lo = wrapping_add(lo, 8);
+        hi = wrapping_sub(hi, 8);
     }
     return 0;
 }

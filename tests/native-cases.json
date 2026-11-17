@@ -8964,7 +8964,7 @@
     "reject": true,
     "source": "use rc;\ninterface Shape {\n    fn area(self: &Self) -> u64;\n}\nstruct Rect {\n    w: u64,\n    h: u64\n}\nimpl Shape for Rect {\n    fn area(self: &Self) -> u64 {\n        return self.w * self.h;\n    }\n}\nfn work(item: u64, shape: &rc::Arc<dyn Shape>) -> u64 {\n    return item + shape.get().area();\n}\nfn main() {\n    o: dyn Shape = Rect { w: 3, h: 3 };\n    a: rc::Arc<dyn Shape> = rc::arc_new(o);\n    results := parallel_map(u64[1, 2], &a, work);\n    println(\"{}\", results[0]);\n}\n",
     "diagnostic": [
-      "no capability proof for the type parameter"
+      "an interface object whose type does not say what the value behind it may do"
     ]
   },
   {
@@ -16428,6 +16428,91 @@
       "x86_64"
     ],
     "note": "concurrent_map's shards are RwLocks, so readers on several threads share entries: a value that may move between threads but not be shared (DashMap's Send + Sync rule) is refused with the bound and the type named"
+  },
+  {
+    "name": "dyn-send-parallel-map-item",
+    "note": "`dyn<Send> I` (docs/design/dyn-and-callable-bounds.md): an interface object whose concrete type was checked Send when boxed may cross to a worker",
+    "source": "interface Peek { fn peek(self: &Self) -> u64; }\nstruct N { n: u64 }\nimpl Peek for N { fn peek(self: &Self) -> u64 { return self.n; } }\nhandle Hd;\nstruct HH { h: Hd }\nimpl Peek for HH { fn peek(self: &Self) -> u64 { return 1; } }\nstruct View<d> { r: (&d u64[]) }\nimpl<d> Peek for View<d> { fn peek(self: &Self) -> u64 { return self.r[0]; } }\nfn go(p: dyn<Send> Peek, u: u64) -> u64 { return p.peek(); }\nfn main() { mut v = (dyn<Send> Peek)[]; v.push(N { n: 4 }); v.push(N { n: 5 }); out := parallel_map(v, 0, go); println(out[0] + out[1]); }\n",
+    "stdout": "9\n"
+  },
+  {
+    "name": "dyn-send-satisfies-send-bound",
+    "note": "...and satisfies `T: Send`",
+    "source": "interface Peek { fn peek(self: &Self) -> u64; }\nstruct N { n: u64 }\nimpl Peek for N { fn peek(self: &Self) -> u64 { return self.n; } }\nhandle Hd;\nstruct HH { h: Hd }\nimpl Peek for HH { fn peek(self: &Self) -> u64 { return 1; } }\nstruct View<d> { r: (&d u64[]) }\nimpl<d> Peek for View<d> { fn peek(self: &Self) -> u64 { return self.r[0]; } }\nfn keep<T: Send>(t: T) -> u64 { return 1; }\nfn main() { p: dyn<Send> Peek = N { n: 4 }; println(keep(p)); }\n",
+    "stdout": "1\n"
+  },
+  {
+    "name": "dyn-send-task-item",
+    "note": "...and may be a task's item",
+    "source": "interface Peek { fn peek(self: &Self) -> u64; }\nstruct N { n: u64 }\nimpl Peek for N { fn peek(self: &Self) -> u64 { return self.n; } }\nhandle Hd;\nstruct HH { h: Hd }\nimpl Peek for HH { fn peek(self: &Self) -> u64 { return 1; } }\nstruct View<d> { r: (&d u64[]) }\nimpl<d> Peek for View<d> { fn peek(self: &Self) -> u64 { return self.r[0]; } }\nfn total(p: dyn<Send> Peek, c: u64) -> u64 { return p.peek(); }\nfn b2<s>(sc: (&s Scope<u64>), base: u64) -> u64 { p: dyn<Send> Peek = N { n: 3 }; t := spawn(sc, p, total); return join(t); }\nfn main() { println(task_scope(1, b2)); }\n",
+    "stdout": "3\n"
+  },
+  {
+    "name": "dyn-share-shared-by-workers",
+    "note": "`&dyn<Share> I` may be the shared context of parallel workers",
+    "source": "interface Peek { fn peek(self: &Self) -> u64; }\nstruct N { n: u64 }\nimpl Peek for N { fn peek(self: &Self) -> u64 { return self.n; } }\nhandle Hd;\nstruct HH { h: Hd }\nimpl Peek for HH { fn peek(self: &Self) -> u64 { return 1; } }\nstruct View<d> { r: (&d u64[]) }\nimpl<d> Peek for View<d> { fn peek(self: &Self) -> u64 { return self.r[0]; } }\nfn look(p: (&dyn<Share> Peek), u: u64) -> u64 { return p.peek() + u; }\nfn main() { n := N { n: 2 }; r: &dyn<Share> Peek = &n; out := parallel_map(u64[1, 2], r, |u: u64, q: (&dyn<Share> Peek)| -> u64 q.peek() + u); println(out[1]); }\n",
+    "stdout": "4\n"
+  },
+  {
+    "name": "dyn-region-holds-borrow",
+    "note": "`dyn<s> I` may hold borrowed data from `s`",
+    "source": "interface Peek { fn peek(self: &Self) -> u64; }\nstruct N { n: u64 }\nimpl Peek for N { fn peek(self: &Self) -> u64 { return self.n; } }\nhandle Hd;\nstruct HH { h: Hd }\nimpl Peek for HH { fn peek(self: &Self) -> u64 { return 1; } }\nstruct View<d> { r: (&d u64[]) }\nimpl<d> Peek for View<d> { fn peek(self: &Self) -> u64 { return self.r[0]; } }\nfn hold<s>(r: (&s u64[])) -> dyn<s> Peek { return View { r: r }; }\nfn main() { x := u64[7, 8]; p := hold(&x); println(p.peek()); }\n",
+    "stdout": "7\n"
+  },
+  {
+    "name": "dyn-region-keeps-loan",
+    "note": "...and keeps the loan: the borrowed vector cannot move while it lives",
+    "source": "interface Peek { fn peek(self: &Self) -> u64; }\nstruct N { n: u64 }\nimpl Peek for N { fn peek(self: &Self) -> u64 { return self.n; } }\nhandle Hd;\nstruct HH { h: Hd }\nimpl Peek for HH { fn peek(self: &Self) -> u64 { return 1; } }\nstruct View<d> { r: (&d u64[]) }\nimpl<d> Peek for View<d> { fn peek(self: &Self) -> u64 { return self.r[0]; } }\nfn hold<s>(r: (&s u64[])) -> dyn<s> Peek { return View { r: r }; }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() { x := u64[7]; p := hold(&x); println(eat(x)); println(p.peek()); }\n",
+    "reject": true,
+    "diagnostic": "move of unavailable or borrowed value"
+  },
+  {
+    "name": "dyn-region-not-bare",
+    "note": "...and cannot become a bare `dyn I`, which holds no borrow (so it cannot leave past `s`)",
+    "source": "interface Peek { fn peek(self: &Self) -> u64; }\nstruct N { n: u64 }\nimpl Peek for N { fn peek(self: &Self) -> u64 { return self.n; } }\nhandle Hd;\nstruct HH { h: Hd }\nimpl Peek for HH { fn peek(self: &Self) -> u64 { return 1; } }\nstruct View<d> { r: (&d u64[]) }\nimpl<d> Peek for View<d> { fn peek(self: &Self) -> u64 { return self.r[0]; } }\nfn hold<s>(r: (&s u64[])) -> dyn<s> Peek { return View { r: r }; }\nfn leak() -> dyn Peek { x := u64[7]; return hold(&x); }\nfn main() { println(leak().peek()); }\n",
+    "reject": true,
+    "diagnostic": "this `dyn` holds a borrow - it is `dyn<s> I`"
+  },
+  {
+    "name": "dyn-send-refuses-handle",
+    "note": "boxing a thread-affine value as `dyn<Send>` is refused where the concrete type is known",
+    "source": "interface Peek { fn peek(self: &Self) -> u64; }\nstruct N { n: u64 }\nimpl Peek for N { fn peek(self: &Self) -> u64 { return self.n; } }\nhandle Hd;\nstruct HH { h: Hd }\nimpl Peek for HH { fn peek(self: &Self) -> u64 { return 1; } }\nstruct View<d> { r: (&d u64[]) }\nimpl<d> Peek for View<d> { fn peek(self: &Self) -> u64 { return self.r[0]; } }\nfn main() { mut h: Hd; p: dyn<Send> Peek = HH { h: h }; println(p.peek()); }\n",
+    "reject": true,
+    "diagnostic": "cannot transfer value boxed as `dyn<Send>`: h is thread-affine"
+  },
+  {
+    "name": "dyn-bare-refuses-borrow",
+    "note": "a bare `dyn` still refuses borrowed data, and says how to keep it",
+    "source": "interface Peek { fn peek(self: &Self) -> u64; }\nstruct N { n: u64 }\nimpl Peek for N { fn peek(self: &Self) -> u64 { return self.n; } }\nhandle Hd;\nstruct HH { h: Hd }\nimpl Peek for HH { fn peek(self: &Self) -> u64 { return 1; } }\nstruct View<d> { r: (&d u64[]) }\nimpl<d> Peek for View<d> { fn peek(self: &Self) -> u64 { return self.r[0]; } }\nfn main() { x := u64[7]; p: dyn Peek = View { r: &x }; println(p.peek()); }\n",
+    "reject": true,
+    "diagnostic": "write `dyn<s> I` to keep the borrow"
+  },
+  {
+    "name": "dyn-bare-not-dyn-send",
+    "note": "a bound cannot be added to an existing `dyn` value",
+    "source": "interface Peek { fn peek(self: &Self) -> u64; }\nstruct N { n: u64 }\nimpl Peek for N { fn peek(self: &Self) -> u64 { return self.n; } }\nhandle Hd;\nstruct HH { h: Hd }\nimpl Peek for HH { fn peek(self: &Self) -> u64 { return 1; } }\nstruct View<d> { r: (&d u64[]) }\nimpl<d> Peek for View<d> { fn peek(self: &Self) -> u64 { return self.r[0]; } }\nfn need(p: dyn<Send> Peek) -> u64 { return p.peek(); }\nfn main() { p: dyn Peek = N { n: 4 }; println(need(p)); }\n",
+    "reject": true,
+    "diagnostic": "`dyn Peek` does not say what the value behind it may do, so it cannot be used as `dyn<Send> Peek`"
+  },
+  {
+    "name": "dyn-bare-not-send",
+    "note": "a bare `dyn I` is neither Send nor Share, with a dyn-specific message",
+    "source": "interface Peek { fn peek(self: &Self) -> u64; }\nstruct N { n: u64 }\nimpl Peek for N { fn peek(self: &Self) -> u64 { return self.n; } }\nhandle Hd;\nstruct HH { h: Hd }\nimpl Peek for HH { fn peek(self: &Self) -> u64 { return 1; } }\nstruct View<d> { r: (&d u64[]) }\nimpl<d> Peek for View<d> { fn peek(self: &Self) -> u64 { return self.r[0]; } }\nfn keep<T: Send>(t: T) -> u64 { return 1; }\nfn main() { p: dyn Peek = N { n: 4 }; println(keep(p)); }\n",
+    "reject": true,
+    "diagnostic": "is an interface object whose type does not say what the value behind it may do (write `dyn<Send> I` or `dyn<Share> I`)"
+  },
+  {
+    "name": "dyn-owned-not-written",
+    "note": "`Owned` is never written on `dyn`",
+    "source": "interface Peek { fn peek(self: &Self) -> u64; }\nstruct N { n: u64 }\nimpl Peek for N { fn peek(self: &Self) -> u64 { return self.n; } }\nhandle Hd;\nstruct HH { h: Hd }\nimpl Peek for HH { fn peek(self: &Self) -> u64 { return 1; } }\nstruct View<d> { r: (&d u64[]) }\nimpl<d> Peek for View<d> { fn peek(self: &Self) -> u64 { return self.r[0]; } }\nfn f(p: dyn<Owned> Peek) -> u64 { return 1; }\nfn main() { }\n",
+    "reject": true,
+    "diagnostic": "`Owned` is not written on `dyn`"
+  },
+  {
+    "name": "dyn-drop-bounds",
+    "note": "a `dyn<Send, Share> I` may be used as a bare `dyn I` (same cell and vtable)",
+    "source": "interface Peek { fn peek(self: &Self) -> u64; }\nstruct N { n: u64 }\nimpl Peek for N { fn peek(self: &Self) -> u64 { return self.n; } }\nhandle Hd;\nstruct HH { h: Hd }\nimpl Peek for HH { fn peek(self: &Self) -> u64 { return 1; } }\nstruct View<d> { r: (&d u64[]) }\nimpl<d> Peek for View<d> { fn peek(self: &Self) -> u64 { return self.r[0]; } }\nfn need(p: dyn Peek) -> u64 { return p.peek(); }\nfn main() { p: dyn<Send, Share> Peek = N { n: 4 }; println(need(p)); }\n",
+    "stdout": "4\n"
   },
   {
     "name": "refinement-proved-false-constant",
