@@ -27903,15 +27903,68 @@ fn small_enum<a>(c: (&a mut C), ty: u64) -> bool {
     for i in count {
         ft := base_type(&mut c, field_type(&mut c, ty, i));
         k := ty_kind(&mut c, ft);
-        if !((k == 1) || (k == 2) || (k == 7) || (k == 12) || (k == 18) || (k == 19) || (k == 21) || (k == 22) || (k == 25) || (k == 26)) {
-            return false;
-        }
         if (k == 7) && (ty_kind(&mut c, ty_arg(&mut c, ft)) == 35) {
             // `&dyn I` is a handle to a pair in the frame that built it.
             return false;
         }
+        if (k == 1) || (k == 2) || (k == 7) || (k == 12) || (k == 18) || (k == 19) || (k == 21) || (k == 22) || (k == 25) || (k == 26) {
+            continue;
+        }
+        // A payload that is itself plain (a plain record, a small enum) is stored inline (stage 5b).
+        if (k == 8) && (ft != ty) && plain(&mut c, ft) {
+            continue;
+        }
+        return false;
     }
     return true;
+}
+// The words of a small enum: the tag, then the largest payload.
+fn enum_words<a>(c: (&a mut C), ty: u64) -> u64 {
+    d := ty_arg(&mut c, ty);
+    count := c.decls[d].count;
+    mut most = 1;
+    for i in count {
+        ft := base_type(&mut c, field_type(&mut c, ty, i));
+        if (ty_kind(&mut c, ft) == 8) && framed(&mut c, ft) {
+            n := record_words(&mut c, ft);
+            if most < n {
+                most = n;
+            }
+        }
+    }
+    return 1 + most;
+}
+// The payload of the enum at `xt` (of type `ety`) whose variant's payload type is `pty`: a plain
+// payload of a small enum is its words inline at word 1, so the value is their address (an interior
+// value: owning it copies it out); any other payload is the word there.
+fn payload_load<a>(c: (&a mut C), xt: u64, ety: u64, pty: u64) -> u64 {
+    if inline_payload(&mut c, ety, pty) {
+        get(&mut c, xt, view("%rax"));
+        o(&mut c, view("leaq 8(%rax),%rax\n"));
+        slot := save(&mut c);
+        c.interior.push(slot);
+        return slot;
+    }
+    return rec_load(&mut c, xt, 1, 0);
+}
+// For a reference to a payload: the address of the word (rec_load address form), or for an inline
+// plain payload the address of its words, which is already the reference (payload_reference).
+fn payload_ref_word<a>(c: (&a mut C), xt: u64, ety: u64, pty: u64) -> u64 {
+    return rec_load(&mut c, xt, 1, 1);
+}
+fn payload_reference<a>(c: (&a mut C), at: u64, ety: u64, pty: u64) -> u64 {
+    if inline_payload(&mut c, ety, pty) {
+        return at;
+    }
+    return word_reference(&mut c, at, pty);
+}
+fn inline_payload<a>(c: (&a mut C), ety: u64, pty: u64) -> bool {
+    e := base_type(&mut c, ety);
+    if !small_enum(&mut c, e) {
+        return false;
+    }
+    p := base_type(&mut c, pty);
+    return (ty_kind(&mut c, p) == 8) && framed(&mut c, p);
 }
 fn container_record<a>(c: (&a mut C), ty: u64) -> bool {
     if ty_kind(&mut c, ty) != 8 {
@@ -27944,7 +27997,8 @@ fn layout_bits<a>(c: (&a mut C), alias: u64) -> u64 {
     c.layout_memo[ty] = 1;
     mut bits = 0;
     if small_enum(&mut c, ty) {
-        bits = 1;
+        // Plain, and held as its words (5a): a small enum is frame words wherever it is held.
+        bits = 5;
     }
     if container_record(&mut c, ty) {
         d := ty_arg(&mut c, ty);
@@ -28027,16 +28081,59 @@ fn retag_enum<a>(c: (&a mut C), xt: u64, tag: u64, ty: u64, from: u64) -> u64 {
     small := framed(&mut c, from);
     if !framed(&mut c, ty) {
         if small {
+            // Into a boxed enum: a plain payload becomes a box of its own, chosen by the source's
+            // variant at run time; a word payload is the word.
             payload := word_load(&mut c, xt, 1, 0);
+            src := base_type(&mut c, from);
+            d := ty_arg(&mut c, src);
+            count := c.decls[d].count;
+            done := label(&mut c);
+            for j in count {
+                pj := field_type(&mut c, src, j);
+                if inline_payload(&mut c, src, pj) {
+                    next := label(&mut c);
+                    get(&mut c, xt, view("%rax"));
+                    o(&mut c, view("cmpq $"));
+                    on(&mut c, j);
+                    o(&mut c, view(",(%rax)\n"));
+                    jump(&mut c, view("jne"), next);
+                    get(&mut c, xt, view("%rax"));
+                    o(&mut c, view("leaq 8(%rax),%rax\n"));
+                    at := save(&mut c);
+                    boxed := frame_box(&mut c, at, pj);
+                    get(&mut c, boxed, view("%rax"));
+                    o(&mut c, view("movq %rax,"));
+                    stack_slot(&mut c, payload);
+                    c.out.push(10);
+                    jump(&mut c, view("jmp"), done);
+                    mark(&mut c, next);
+                }
+            }
+            mark(&mut c, done);
             return invoke(&mut c, view("rt_enum"), two(tag, payload));
         }
         return invoke(&mut c, view("rt_enum_retag"), two(xt, tag));
     }
-    payload := word_load(&mut c, xt, 1, 0);
-    n := enum_frame(&mut c, tag, payload);
-    if !small {
-        invoke(&mut c, view("rt_free"), one(xt));
+    if small {
+        // Same payload words, new tag: a copy of the whole value.
+        words := enum_words(&mut c, base_type(&mut c, from));
+        n := frame_alloc(&mut c, enum_words(&mut c, base_type(&mut c, ty)));
+        get(&mut c, xt, view("%rdx"));
+        get(&mut c, n, view("%rcx"));
+        for k in words {
+            o(&mut c, view("movq "));
+            on(&mut c, k * 8);
+            o(&mut c, view("(%rdx),%rax\nmovq %rax,"));
+            on(&mut c, k * 8);
+            o(&mut c, view("(%rcx)\n"));
+        }
+        get(&mut c, tag, view("%rax"));
+        o(&mut c, view("movq %rax,(%rcx)\n"));
+        return n;
     }
+    payload := word_load(&mut c, xt, 1, 0);
+    n := enum_frame(&mut c, tag, payload, ty, 1);
+    invoke(&mut c, view("rt_free"), one(xt));
     return n;
 }
 fn free_enum_shell<a>(c: (&a mut C), xt: u64, ty: u64) -> unit {
@@ -28046,11 +28143,24 @@ fn free_enum_shell<a>(c: (&a mut C), xt: u64, ty: u64) -> unit {
     return ();
 }
 // A small enum's value in frame words of this site: word 0 the tag, word 1 the payload word.
-fn enum_frame<a>(c: (&a mut C), tag: u64, payload: u64) -> u64 {
-    n := frame_alloc(&mut c, 2);
+// `ety` is the enum's type and `pty` the payload's (1 for none): a plain payload is copied in.
+fn enum_frame<a>(c: (&a mut C), tag: u64, payload: u64, ety: u64, pty: u64) -> u64 {
+    n := frame_alloc(&mut c, enum_words(&mut c, base_type(&mut c, ety)));
     get(&mut c, n, view("%rcx"));
     get(&mut c, tag, view("%rax"));
     o(&mut c, view("movq %rax,(%rcx)\n"));
+    if inline_payload(&mut c, ety, pty) {
+        words := record_words(&mut c, base_type(&mut c, pty));
+        get(&mut c, payload, view("%rdx"));
+        for k in words {
+            o(&mut c, view("movq "));
+            on(&mut c, k * 8);
+            o(&mut c, view("(%rdx),%rax\nmovq %rax,"));
+            on(&mut c, 8 + k * 8);
+            o(&mut c, view("(%rcx)\n"));
+        }
+        return n;
+    }
     get(&mut c, payload, view("%rax"));
     o(&mut c, view("movq %rax,8(%rcx)\n"));
     return n;
@@ -28282,7 +28392,7 @@ fn record_words<a>(c: (&a mut C), ty: u64) -> u64 {
         return (array_bytes(&mut c, ty) + 7) / 8;
     }
     if small_enum(&mut c, ty) {
-        return 2;
+        return enum_words(&mut c, ty);
     }
     d := ty_arg(&mut c, ty);
     if c.decls[d].c_layout != 0 {
@@ -30225,10 +30335,10 @@ fn structural_eq<a>(c: (&a mut C), x: u64, y: u64, ty: u64, depth: u64) -> u64 {
             if pty == 1 {
                 sub = imm(&mut c, 1);
             } else {
-                a := rec_load(&mut c, x, 1, 0);
+                a := payload_load(&mut c, x, ty, pty);
                 alias_field(&mut c, a, pty, x, 1, 1);
                 observe(&mut c, a);
-                b := rec_load(&mut c, y, 1, 0);
+                b := payload_load(&mut c, y, ty, pty);
                 alias_field(&mut c, b, pty, y, 1, 1);
                 observe(&mut c, b);
                 sub = structural_eq(&mut c, a, b, pty, depth + 1);
@@ -31311,15 +31421,16 @@ fn variant<a, b>(c: (&a mut C), d: u64, name: &b [u8], explicit: u64) -> Val {
     }
     tag := imm(&mut c, k);
     ty := constructed_type(&mut c, d, hint, map);
+    mut pty = 1;
     if has != 0 {
-        pty := field_type(&mut c, ty, k);
-        if framed(&mut c, pty) {
+        pty = field_type(&mut c, ty, k);
+        if framed(&mut c, pty) && !framed(&mut c, ty) {
             payload = frame_box(&mut c, payload, pty);
         }
     }
     mut n = 0;
     if framed(&mut c, ty) {
-        n = enum_frame(&mut c, tag, payload);
+        n = enum_frame(&mut c, tag, payload, ty, pty);
     } else {
         n = invoke(&mut c, view("rt_enum"), two(tag, payload));
     }
@@ -37920,7 +38031,7 @@ fn adopt_value<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) ->
         payload := imm(&mut c, 0);
         mut slot = 0;
         if framed(&mut c, expected) {
-            slot = enum_frame(&mut c, tag, payload);
+            slot = enum_frame(&mut c, tag, payload, expected, 1);
         } else {
             slot = invoke(&mut c, view("rt_enum"), two(tag, payload));
         }
@@ -38047,13 +38158,13 @@ fn adopt_value<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) ->
             source := place_of(&mut c, v.t);
             tag := imm(&mut c, which);
             mut payload = v.t;
-            if framed(&mut c, v.ty) {
+            if framed(&mut c, v.ty) && !framed(&mut c, expected) {
                 // An enum is a holder: the record it carries is its box.
                 payload = frame_box(&mut c, v.t, v.ty);
             }
             mut slot = 0;
             if framed(&mut c, expected) {
-                slot = enum_frame(&mut c, tag, payload);
+                slot = enum_frame(&mut c, tag, payload, expected, v.ty);
             } else {
                 slot = invoke(&mut c, view("rt_enum"), two(tag, payload));
             }
@@ -40350,7 +40461,7 @@ fn pattern_loop<a, b>(
         jump(&mut c, view("jne"), nomatch);
         patmark = c.locals.len();
         payloads = c.resources.len();
-        payload := rec_load(&mut c, xt, 1, 0);
+        payload := payload_load(&mut c, xt, xty, pty);
         own(&mut c, payload, pty);
         source := place_of(&mut c, xt);
         dest := place_of(&mut c, payload);
@@ -42403,7 +42514,31 @@ fn pop_option<a>(c: (&a mut C), had: u64, element: u64, ty: u64) -> Val {
         stack_slot(&mut c, tag);
         c.out.push(10);
         mark(&mut c, empty);
-        slot := enum_frame(&mut c, tag, element);
+        if inline_payload(&mut c, opt, ty) {
+            // The element came out of an inline vector as a box (or 0 when it was empty): its words
+            // are copied in only when there was one, and the box freed.
+            zero := imm(&mut c, 0);
+            slot := enum_frame(&mut c, tag, zero, opt, 1);
+            skip := label(&mut c);
+            get(&mut c, had, view("%rax"));
+            o(&mut c, view("testq %rax,%rax\n"));
+            jump(&mut c, view("jz"), skip);
+            words := record_words(&mut c, base_type(&mut c, ty));
+            get(&mut c, element, view("%rdx"));
+            get(&mut c, slot, view("%rcx"));
+            for k in words {
+                o(&mut c, view("movq "));
+                on(&mut c, k * 8);
+                o(&mut c, view("(%rdx),%rax\nmovq %rax,"));
+                on(&mut c, 8 + k * 8);
+                o(&mut c, view("(%rcx)\n"));
+            }
+            invoke(&mut c, view("rt_free"), one(element));
+            mark(&mut c, skip);
+            own(&mut c, slot, opt);
+            return val(slot, opt);
+        }
+        slot := enum_frame(&mut c, tag, element, opt, ty);
         own(&mut c, slot, opt);
         return val(slot, opt);
     }
@@ -43655,7 +43790,7 @@ fn propagate_result_union<a>(c: (&a mut C), x: Val, unwrap: u64) -> Val {
     mark(&mut c, success);
     sty := success_members(&mut c, ty);
     if s == 1 {
-        payload := rec_load(&mut c, xt, 1, 0);
+        payload := payload_load(&mut c, xt, ty, sty);
         move_out(&mut c, val(xt, ty));
         free_enum_shell(&mut c, xt, ty);
         source := place_of(&mut c, xt);
@@ -43739,7 +43874,7 @@ fn propagate_union<a>(c: (&a mut C), x: Val, unwrap: u64) -> Val {
     }
     mark(&mut c, ok);
     ownership::restore(&mut c.check, &before);
-    n := rec_load(&mut c, xt, 1, 0);
+    n := payload_load(&mut c, xt, x.ty, args[0]);
     move_out(&mut c, val(xt, x.ty));
     free_enum_shell(&mut c, xt, x.ty);
     ty := args[0];
@@ -43890,7 +44025,7 @@ fn propagate<a>(c: (&a mut C), v: Val, unwrap: u64) -> Val {
             payload := imm(&mut c, 0);
             mut returned = 0;
             if framed(&mut c, result) {
-                returned = enum_frame(&mut c, tag, payload);
+                returned = enum_frame(&mut c, tag, payload, result, 1);
             } else {
                 returned = invoke(&mut c, view("rt_enum"), two(tag, payload));
             }
@@ -43925,7 +44060,7 @@ fn propagate<a>(c: (&a mut C), v: Val, unwrap: u64) -> Val {
     }
     mark(&mut c, ok);
     ownership::restore(&mut c.check, &before);
-    n := rec_load(&mut c, xt, 1, 0);
+    n := payload_load(&mut c, xt, x.ty, field_type(&mut c, x.ty, k));
     move_out(&mut c, val(xt, x.ty));
     free_enum_shell(&mut c, xt, x.ty);
     ty := field_type(&mut c, x.ty, k);
@@ -46272,7 +46407,7 @@ fn if_let<a>(c: (&a mut C)) -> unit {
     jump(&mut c, view("jne"), no);
     mark := c.locals.len();
     payloads := c.resources.len();
-    payload := rec_load(&mut c, xt, 1, 0);
+    payload := payload_load(&mut c, xt, xty, pty);
     own(&mut c, payload, pty);
     source := place_of(&mut c, xt);
     dest := place_of(&mut c, payload);
@@ -49095,8 +49230,8 @@ fn match_statement<a>(c: (&a mut C)) -> unit {
                     value := rec_load(&mut c, xt, 1, 0);
                     bind(&mut c, b, pty, value, 0);
                 } else {
-                    at := rec_load(&mut c, xt, 1, 1);
-                    n := word_reference(&mut c, at, pty);
+                    at := payload_ref_word(&mut c, xt, x.ty, pty);
+                    n := payload_reference(&mut c, at, x.ty, pty);
                     refty := reference_type(&mut c, pty, refmode);
                     root := place_of(&mut c, xt);
                     target := member_place(&mut c, root, 1, pty);
@@ -49121,7 +49256,7 @@ fn match_statement<a>(c: (&a mut C)) -> unit {
                 }
             }
         } else {
-            payload := rec_load(&mut c, xt, 1, 0);
+            payload := payload_load(&mut c, xt, x.ty, pty);
             own(&mut c, payload, pty);
             source := place_of(&mut c, xt);
             dest := place_of(&mut c, payload);
