@@ -798,6 +798,10 @@ struct C {
     // That field, one-based record declaration and zero-based index (0 when none was read).
     ref_assign_d: u64,
     ref_assign_k: u64,
+    // The record the assignment's path ends in, and its type: a predicate across fields reads the
+    // other fields from it when one of them is written.
+    ref_assign_base: u64,
+    ref_assign_rty: u64,
     // Strict refinements (docs/design/refinements.md): `--strict-refinements` for the whole program,
     // `@strict;` for a module (it stays with the module's name, so a replayed body keeps it), and
     // `@strict` on a declaration for the function that follows.
@@ -7786,17 +7790,24 @@ fn pred_check<a, b, d>(c: (&a mut C), lo: u64, hi: u64, what: &b [u8], stop_a: &
     }
     return ();
 }
-// What a field predicate may say today (docs/design/refinements.md, "Field predicates"): it names
-// its own field and nothing else - another field, a parameter or a global would be read in the
-// scope of whoever builds the record - and the field is a number or an owned vector (its `len()`).
-// A predicate across fields is the named follow-up; until then it is refused here, at the struct.
-fn ref_field_pred_rules<a, b>(c: (&a mut C), field: &b [u8], ty: u64, lo: u64, hi: u64, at: u64) -> unit {
+// What a field predicate may say (docs/design/refinements.md, "Field predicates"): fields of its own
+// record and nothing else - a parameter or a global would be read in the scope of whoever builds the
+// record - each of them a number or an owned vector (its `len()`). The field's own type is checked
+// here; the names, once the record's fields are all known (ref_field_pred_names).
+fn ref_pred_type_ok<a>(c: (&a mut C), ty: u64) -> bool {
     t := base_type(&mut c, ty);
     k := ty_kind(&mut c, t);
-    if !((t == 0) || (k == 18) || (k == 21) || (k == 6)) {
+    return (t == 0) || (k == 18) || (k == 21) || (k == 6);
+}
+fn ref_field_pred_rules<a, b>(c: (&a mut C), field: &b [u8], ty: u64, lo: u64, hi: u64, at: u64) -> unit {
+    if !ref_pred_type_ok(&mut c, ty) {
         diag_label(&mut c, at, view("this field's type has no predicate the compiler checks"));
         fail(&mut c, view("a field predicate applies to an integer, a float or an owned vector (through `len()`)"));
     }
+    return ();
+}
+// Every name a field predicate reads must be a field of the record, of a type a predicate checks.
+fn ref_field_pred_names<a, b>(c: (&a mut C), record: &b [u8], fields: (&a Field[]), lo: u64, hi: u64) -> unit {
     mut i = lo;
     while i < hi {
         if kind_at(&mut c, i) == 1 {
@@ -7804,14 +7815,31 @@ fn ref_field_pred_rules<a, b>(c: (&a mut C), field: &b [u8], ty: u64, lo: u64, h
             after_dot := (i > lo) && (kind_at(&mut c, i - 1) == 46);
             call := kind_at(&mut c, i + 1) == 40;
             word := same(view(t2), view("true")) || same(view(t2), view("false"));
-            if !after_dot & !call & !word & !same(view(t2), view(field)) {
-                mut msg = copy_bytes(view("a field predicate may name only its own field: `"));
-                push_bytes(&mut msg, view(t2));
-                push_bytes(&mut msg, view("` is not `"));
-                push_bytes(&mut msg, view(field));
-                push_bytes(&mut msg, view("` (a predicate across fields is not supported yet)"));
-                exchange(&mut c.pos, i);
-                fail(&mut c, view(msg));
+            if !after_dot & !call & !word {
+                mut found = 0;
+                mut ty = 0;
+                for j in fields.len() {
+                    if same(view(fields[j].name), view(t2)) {
+                        found = 1;
+                        ty = fields[j].ty;
+                    }
+                }
+                if found == 0 {
+                    mut msg = copy_bytes(view("a field predicate may name only fields of its record: `"));
+                    push_bytes(&mut msg, view(t2));
+                    push_bytes(&mut msg, view("` is not a field of `"));
+                    push_bytes(&mut msg, view(record));
+                    push_bytes(&mut msg, view("`"));
+                    exchange(&mut c.pos, i);
+                    fail(&mut c, view(msg));
+                }
+                if !ref_pred_type_ok(&mut c, ty) {
+                    mut msg = copy_bytes(view("a field predicate may read only integer, float and vector fields: `"));
+                    push_bytes(&mut msg, view(t2));
+                    push_bytes(&mut msg, view("` is not one"));
+                    exchange(&mut c.pos, i);
+                    fail(&mut c, view(msg));
+                }
             }
         }
         i += 1;
@@ -8218,11 +8246,129 @@ fn ref_field_refined<a>(c: (&a mut C), d: u64, k: u64) -> bool {
     if k >= c.decls[d].count {
         return false;
     }
-    f := c.decls[d].first + k;
-    if f >= c.fields.len() {
-        return false;
+    // Its own predicate, or any predicate of the record that reads it: a write through a loan would
+    // skip either.
+    count := c.decls[d].count;
+    for j in count {
+        if ref_pred_reads(&mut c, d, j, k) {
+            return true;
+        }
     }
-    return c.fields[f].pred.hi != 0;
+    return false;
+}
+// The fields field `j`'s predicate reads, as field indices (its own included when it names itself).
+// Empty when the field has no predicate.
+fn ref_pred_fields<a>(c: (&a mut C), d: u64, j: u64) -> u64[] {
+    mut out = u64[];
+    f := c.decls[d].first + j;
+    if f >= c.fields.len() {
+        return out;
+    }
+    pf := c.fields[f].pred.file;
+    plo := c.fields[f].pred.lo;
+    phi := c.fields[f].pred.hi;
+    if phi == 0 {
+        return out;
+    }
+    text := pred_text(&mut c, Pred { file: pf, lo: plo, hi: phi });
+    mut i = 0;
+    while i < text.len() {
+        ch := text[i];
+        start_word := ((96 < ch) & (ch < 123)) || ((64 < ch) & (ch < 91)) || (ch == 95);
+        if !start_word {
+            i += 1;
+            continue;
+        }
+        mut word = u8[];
+        mut e = i;
+        while e < text.len() {
+            x := text[e];
+            if ((96 < x) & (x < 123)) || ((64 < x) & (x < 91)) || (x == 95) || ((47 < x) & (x < 58)) {
+                word.push(x);
+                e += 1;
+            } else {
+                break;
+            }
+        }
+        after_dot := (i > 0) && (text[i - 1] == 46);
+        if !after_dot {
+            idx := field_index(&mut c, d, view(word));
+            if idx != 0 {
+                mut seen = 0;
+                for q in out.len() {
+                    if out[q] == idx - 1 {
+                        seen = 1;
+                    }
+                }
+                if seen == 0 {
+                    out.push(idx - 1);
+                }
+            }
+        }
+        i = e;
+    }
+    return out;
+}
+fn ref_pred_reads<a>(c: (&a mut C), d: u64, j: u64, k: u64) -> bool {
+    fs := ref_pred_fields(&mut c, d, j);
+    for q in fs.len() {
+        if fs[q] == k {
+            return true;
+        }
+    }
+    return false;
+}
+// Whether field `j`'s predicate reads a field other than `j`: such a predicate is owed where every
+// field it reads has its value (ref_field_cross), not where `j` alone is stored.
+fn ref_pred_cross<a>(c: (&a mut C), d: u64, j: u64) -> bool {
+    fs := ref_pred_fields(&mut c, d, j);
+    for q in fs.len() {
+        if fs[q] != j {
+            return true;
+        }
+    }
+    return false;
+}
+// Field `j`'s predicate across fields, over the values in `slots` (one per field of the record,
+// indexed by field) with their terms. A field without a term makes the obligation unprovable: plain
+// code checks it, strict mode refuses it.
+fn ref_field_cross<a, b, e>(c: (&a mut C), d: u64, j: u64, rty: u64, slots_by_field: (&b u64[]), terms_by_field: (&e u8[][]), pos: u64, why: &b [u8]) -> unit {
+    f := c.decls[d].first + j;
+    pf := c.fields[f].pred.file;
+    plo := c.fields[f].pred.lo;
+    phi := c.fields[f].pred.hi;
+    owner := c.decls[d].name.copy();
+    mut who = owner.copy();
+    who.push(46);
+    push_bytes(&mut who, view(c.fields[f].name));
+    fs := ref_pred_fields(&mut c, d, j);
+    mut names = u8[][];
+    mut slots = u64[];
+    mut tys = u64[];
+    mut terms = u8[][];
+    mut all_terms = 1;
+    for q in fs.len() {
+        m := fs[q];
+        names.push(c.fields[c.decls[d].first + m].name.copy());
+        slots.push(slots_by_field[m]);
+        tys.push(field_type(&mut c, rty, m));
+        t := terms_by_field[m].copy();
+        if t.len() == 0 {
+            all_terms = 0;
+        }
+        terms.push(t);
+    }
+    mut proved = 0;
+    report := u64(ref_strict(&c));
+    need := pv_need(&mut c, view(who), pf, plo);
+    if all_terms != 0 {
+        proved = pv_proved(&mut c, Pred { file: pf, lo: plo, hi: phi }, &names, &terms, pos, report, view(need));
+    }
+    if (report != 0) & (proved == 0) {
+        pv_strict_fail_why(&mut c, Pred { file: pf, lo: plo, hi: phi }, pos, view(need), view(why));
+    }
+    ref_check(&mut c, Pred { file: pf, lo: plo, hi: phi }, &names, &slots, &tys, who, pf, plo, proved, 0);
+    return ();
 }
 // The refusal of a mutable borrow of a refined field, wherever the borrow is made.
 fn ref_field_loan_fail<a>(c: (&a mut C), d: u64, k: u64) -> unit {
@@ -8309,6 +8455,9 @@ fn ref_field<a, b>(c: (&a mut C), d: u64, k: u64, slot: u64, term: &b [u8], pos:
         owner = c.decls[d].name.copy();
     }
     if phi == 0 {
+        return ();
+    }
+    if ref_pred_cross(&mut c, d, k) {
         return ();
     }
     mut who = u8[];
@@ -8655,34 +8804,79 @@ fn pv_field_facts<a, b>(c: (&a mut C), term: &b [u8], facts: (&a mut Atom[])) ->
     if (dots == 0) || (field.len() == 0) {
         return ();
     }
-    pred := pv_field_pred(&mut c, view(root), view(field));
-    if pred.hi == 0 {
-        return ();
-    }
-    mut atoms = Atom[];
-    if !pv_read_pred(&mut c, pred, &mut atoms) {
-        return ();
-    }
-    mut path = root.copy();
-    path.push(46);
-    push_bytes(&mut path, view(field));
-    names := u8[][field];
-    paths := u8[][path];
-    mut renamed = Atom[];
-    for j in atoms.len() {
-        x := &atoms[j];
-        a := pv_rename(view(x.a), &names, &paths);
-        mut b = u8[];
-        if x.b.len() != 0 {
-            b = pv_rename(view(x.b), &names, &paths);
-            if b.len() == 0 {
-                return ();
-            }
-        }
-        if a.len() == 0 {
+    // The record `root` holds, when the path is one the field-path rule trusts.
+    if pv_field_pred(&mut c, view(root), view(field)).hi == 0 {
+        // The field has no predicate of its own; another field's may still read it.
+        if !pv_field_stable(&mut c, view(root), view(field)) {
             return ();
         }
-        renamed.push(Atom { rel: x.rel, a: a, b: b, k: x.k, ao: x.ao, bo: x.bo });
+    }
+    l := find_local(&mut c, view(root));
+    if l == 0 {
+        return ();
+    }
+    d := slot_record_decl(&mut c, local_ty(&mut c, l - 1));
+    if d == 18446744073709551615 {
+        return ();
+    }
+    k0 := field_index(&mut c, d, view(field));
+    if k0 == 0 {
+        return ();
+    }
+    // Every predicate of the record that reads this field, with each field it reads renamed to its
+    // path under `root` - and only when every one of those paths is one value too.
+    mut renamed = Atom[];
+    for j in c.decls[d].count {
+        if !ref_pred_reads(&mut c, d, j, k0 - 1) {
+            continue;
+        }
+        fs := ref_pred_fields(&mut c, d, j);
+        mut names = u8[][];
+        mut paths = u8[][];
+        mut stable = 1;
+        for q in fs.len() {
+            m := fs[q];
+            mname := c.fields[c.decls[d].first + m].name.copy();
+            if !pv_field_stable(&mut c, view(root), view(mname)) {
+                stable = 0;
+            }
+            mut path = root.copy();
+            path.push(46);
+            push_bytes(&mut path, view(mname));
+            names.push(mname);
+            paths.push(path);
+        }
+        if stable == 0 {
+            continue;
+        }
+        f := c.decls[d].first + j;
+        pred := Pred { file: c.fields[f].pred.file, lo: c.fields[f].pred.lo, hi: c.fields[f].pred.hi };
+        mut atoms = Atom[];
+        if !pv_read_pred(&mut c, pred, &mut atoms) {
+            continue;
+        }
+        mut ok = 1;
+        mut these = Atom[];
+        for i in atoms.len() {
+            x := &atoms[i];
+            a := pv_rename(view(x.a), &names, &paths);
+            mut b = u8[];
+            if x.b.len() != 0 {
+                b = pv_rename(view(x.b), &names, &paths);
+                if b.len() == 0 {
+                    ok = 0;
+                }
+            }
+            if a.len() == 0 {
+                ok = 0;
+            }
+            these.push(Atom { rel: x.rel, a: a, b: b, k: x.k, ao: x.ao, bo: x.bo });
+        }
+        if ok != 0 {
+            for i in these.len() {
+                renamed.push(copy_atom_value(&these[i]));
+            }
+        }
     }
     mut settled = Atom[];
     if pv_settle_all(&mut c, &renamed, &mut facts, &mut settled) {
@@ -15575,6 +15769,13 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
         }
     }
     eat(&mut c, view(";"));
+    for i in pending.len() {
+        plo := pending[i].pred.lo;
+        phi := pending[i].pred.hi;
+        if phi != 0 {
+            ref_field_pred_names(&mut c, view(name), &pending, plo, phi);
+        }
+    }
     // A record that needs itself before it can exist has no value anyone can write: the field that
     // names it would need one first, so the type is uninhabited and the user is holding something
     // they can never build. This was accepted in silence (docs/design/frontend-robustness.md).
@@ -28690,6 +28891,8 @@ fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
                 if c.ref_assign_target != 0 {
                     exchange(&mut c.ref_assign_d, d + 1);
                     exchange(&mut c.ref_assign_k, k);
+                    exchange(&mut c.ref_assign_base, b);
+                    exchange(&mut c.ref_assign_rty, base.ty);
                 } else {
                     if ref_field_refined(&mut c, d, k) {
                         ref_field_loan_fail(&mut c, d, k);
@@ -30026,6 +30229,10 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
     mut map = constructor_map(&mut c, d, hint);
     mut seen = u64[];
     mut sources = u64[];
+    // Each field value's term, in the order `sources` holds them: a predicate across fields reads
+    // them once the record is complete.
+    mut lit_terms = u8[][];
+    lit_at := c.pos;
     mut deferred = u64[];
     mut index = 0;
     if !eat_kind(&mut c, close) {
@@ -30125,7 +30332,10 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
             sources.push(held.t);
             if c.decls[d].c_layout == 0 {
                 fterm := pv_span_term(&mut c, astart, aend);
+                lit_terms.push(fterm.copy());
                 ref_field(&mut c, d, k, held.t, view(fterm), astart);
+            } else {
+                lit_terms.push(u8[]);
             }
             if eat_kind(&mut c, close) {
                 break;
@@ -30162,6 +30372,7 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
         require_type(&mut c, v.ty, expected);
         if c.decls[d].c_layout == 0 {
             fterm := pv_span_term(&mut c, start, end);
+            exchange(&mut lit_terms[index], fterm.copy());
             ref_field(&mut c, d, k, newslot, view(fterm), start);
         }
         exchange(&mut sources[index], newslot);
@@ -30180,6 +30391,26 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
             cfield_store(&mut c, n, d, seen[i], sources[i]);
         } else {
             field_store(&mut c, n, ty, seen[i], sources[i]);
+        }
+    }
+    // A predicate across fields is owed once every field it reads has its value.
+    if c.decls[d].c_layout == 0 {
+        mut by_slot = u64[];
+        mut by_term = u8[][];
+        for i in c.decls[d].count {
+            by_slot.push(0);
+            by_term.push(u8[]);
+        }
+        for i in seen.len() {
+            exchange(&mut by_slot[seen[i]], sources[i]);
+            if i < lit_terms.len() {
+                exchange(&mut by_term[seen[i]], lit_terms[i].copy());
+            }
+        }
+        for j in c.decls[d].count {
+            if ref_pred_cross(&mut c, d, j) {
+                ref_field_cross(&mut c, d, j, ty, &by_slot, &by_term, lit_at, view("a value is not a name or a constant"));
+            }
         }
     }
     own(&mut c, n, ty);
@@ -44675,7 +44906,7 @@ fn chained_field_assignment<a>(c: (&a mut C)) -> unit {
     a := assign_field_path(&mut c, base.t, base.ty);
     target := a.t;
     fieldty := ty_arg(&mut c, a.ty);
-    assignment_tail(&mut c, 0, base.t, base.ty, target, u64[1, fieldty, c.ref_assign_d, c.ref_assign_k], view(fname), record_ty);
+    assignment_tail(&mut c, 0, base.t, base.ty, target, u64[1, fieldty, c.ref_assign_d, c.ref_assign_k, c.ref_assign_base, c.ref_assign_rty], view(fname), record_ty);
     return ();
 }
 // Writing or mutably borrowing a string's bytes. A string literal is a `string` (read-only,
@@ -47073,7 +47304,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
                     target := a.t;
                     fieldty := ty_arg(&mut c, a.ty);
                     mut none = u8[];
-                    assignment_tail(&mut c, 0, head.t, head.ty, target, u64[1, fieldty, c.ref_assign_d, c.ref_assign_k], view(none), 0);
+                    assignment_tail(&mut c, 0, head.t, head.ty, target, u64[1, fieldty, c.ref_assign_d, c.ref_assign_k, c.ref_assign_base, c.ref_assign_rty], view(none), 0);
                     return ();
                 }
                 capture_assignment(&mut c, view(name));
@@ -47115,6 +47346,8 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         mut fname = u8[];
         mut assigned_d = 0;
         mut assigned_k = 0;
+        mut assigned_base = 0;
+        mut assigned_rty = 0;
         here_at := c.pos;
         if (kind(&mut c) == 46) & (kind_at(&mut c, here_at + 1) == 1) {
             fname = tok_text(&mut c, here_at + 1);
@@ -47126,6 +47359,8 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
             fieldty = ty_arg(&mut c, a.ty);
             assigned_d = c.ref_assign_d;
             assigned_k = c.ref_assign_k;
+            assigned_base = c.ref_assign_base;
+            assigned_rty = c.ref_assign_rty;
         }
         mut field_name = u8[];
         mut record_ty = 0;
@@ -47137,7 +47372,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
             }
             record_ty = shape;
         }
-        assignment_tail(&mut c, l, id, ty, target, u64[through, fieldty, assigned_d, assigned_k], view(field_name), record_ty);
+        assignment_tail(&mut c, l, id, ty, target, u64[through, fieldty, assigned_d, assigned_k, assigned_base, assigned_rty], view(field_name), record_ty);
         // `x = e` writes the binding; `x.f = e` writes a field of what `x` owns, which is not a fact
         // about `x`'s own value.
         if through == 0 {
@@ -47222,9 +47457,15 @@ fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, t
     // The field the path ends at, when the target was read by `assign_field_path`.
     mut assigned_d = 0;
     mut assigned_k = 0;
+    mut assigned_base = 0;
+    mut assigned_rty = 0;
     if through_fieldty.len() > 3 {
         assigned_d = through_fieldty[2];
         assigned_k = through_fieldty[3];
+    }
+    if through_fieldty.len() > 5 {
+        assigned_base = through_fieldty[4];
+        assigned_rty = through_fieldty[5];
     }
     if through != 0 {
         pin_assignment(&mut c, target);
@@ -47339,6 +47580,32 @@ fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, t
         }
         if assigned_d != 0 {
             ref_field(&mut c, assigned_d - 1, assigned_k, v.t, view(rterm), vstart);
+            // Every predicate across fields that reads this field is owed too, over the new value
+            // and the other fields as the record holds them now. Those have no term (the root is
+            // `mut`), so strict mode cannot prove such a write: it rebuilds the record instead.
+            ad := assigned_d - 1;
+            for j in c.decls[ad].count {
+                if ref_pred_cross(&mut c, ad, j) && ref_pred_reads(&mut c, ad, j, assigned_k) {
+                    fs := ref_pred_fields(&mut c, ad, j);
+                    mut by_slot = u64[];
+                    mut by_term = u8[][];
+                    for m in c.decls[ad].count {
+                        by_slot.push(0);
+                        by_term.push(u8[]);
+                    }
+                    for q in fs.len() {
+                        m := fs[q];
+                        if m == assigned_k {
+                            exchange(&mut by_slot[m], v.t);
+                            exchange(&mut by_term[m], rterm.copy());
+                        } else {
+                            loaded := field_load(&mut c, assigned_base, assigned_rty, m, 0);
+                            exchange(&mut by_slot[m], loaded);
+                        }
+                    }
+                    ref_field_cross(&mut c, ad, j, assigned_rty, &by_slot, &by_term, vstart, view("a write of one field leaves the others without a term: rebuild the record with a literal"));
+                }
+            }
         } else {
             if fname.len() != 0 {
                 ref_field_named(&mut c, rtype, view(fname), v.t, view(rterm), vstart);
@@ -53700,6 +53967,8 @@ pub fn main() -> u64 {
         proved_label: 0,
         ref_assign_d: 0,
         ref_assign_k: 0,
+        ref_assign_base: 0,
+        ref_assign_rty: 0,
         strict_refinements: 0,
         strict_modules: u8[][],
         strict_next: 0,
