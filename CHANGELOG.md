@@ -1,5 +1,10 @@
 ## Unreleased
 
+- Engine-shaped benchmarks against C, Rust, Go and Zig (`bench/hashmap`, `bintrees`, `strings`, `json`,
+  `dyncall`, `iterchain`, `ecs`, each with matched outputs in all five languages), with a section of
+  their own in the book's Performance chapter naming why Grail is behind on each
+  (`bench/results/engine.json`, refreshed by `just bench-results` and the gate).
+
 - **`grail check` is incremental.** It goes through the build store as `grail build` does: one
   compiler run per module, a module whose inputs did not change is not checked again, and in a
   module that is, the unchanged function bodies replay. A check after an edit to one module checks
