@@ -28131,7 +28131,27 @@ fn fx_unknown_why<a>(c: (&a mut C), k: u64) -> u8[] {
             return c.fx_edge_why[e].copy();
         }
     }
+    // A named callee with neither a body in this run nor a summary it read: a run given part of a
+    // program (`grail OUT.s main.grl` without the runtime's sources) cannot see what it does.
+    for e in c.fx_edge_from.len() {
+        if (c.fx_edge_from[e] == k) & (c.fx_edge_name[e].len() != 0) & (c.fx_edge_to[e] == 0) & ((c.fx_edge_kind[e] & 1) != 0) {
+            mut out = copy_bytes(view("`"));
+            push_bytes(&mut out, view(c.fx_edge_name[e]));
+            push_bytes(&mut out, view("`, whose body and effect summary this run does not have: compile it with the program (the runtime's sources for an `rt_` function), or use `grail build`"));
+            return out;
+        }
+    }
     return u8[];
+}
+// Whether the unknown edge of record `k` is a call by name (a callee this run cannot see) rather than
+// through a function value or a vtable.
+fn fx_unknown_named<a>(c: (&a C), k: u64) -> bool {
+    for e in c.fx_edge_from.len() {
+        if (c.fx_edge_from[e] == k) & (c.fx_edge_to[e] == 0) & ((c.fx_edge_kind[e] & 1) != 0) {
+            return c.fx_edge_name[e].len() != 0;
+        }
+    }
+    return false;
 }
 // Where a chain of witnesses ends (at most `spending` links): the record whose fact is its own, or
 // came through an edge nothing names. `panic` picks the failure chain.
@@ -28203,14 +28223,22 @@ fn fx_report<a>(c: (&a mut C)) -> unit {
                 push_bytes(&mut msg, view("` performs a heap allocation"));
                 push_bytes(&mut msg, view("\n = move the allocation out of the function, or keep the attribute off it"));
             } else {
-                push_bytes(&mut msg, view("` performs a heap allocation: it makes an indirect call the compiler cannot follow"));
+                if fx_unknown_named(&c, k) {
+                    push_bytes(&mut msg, view("` performs a heap allocation: it makes a call the compiler cannot follow"));
+                } else {
+                    push_bytes(&mut msg, view("` performs a heap allocation: it makes an indirect call the compiler cannot follow"));
+                }
                 why := fx_unknown_why(&mut c, k);
                 if why.len() != 0 {
                     push_bytes(&mut msg, view(" (the target is "));
                     push_bytes(&mut msg, view(why));
                     push_bytes(&mut msg, view(")"));
                 }
-                push_bytes(&mut msg, view("\n = a call through a function value or a vtable may allocate; name the callee, or keep the attribute off"));
+                if fx_unknown_named(&c, k) {
+                    push_bytes(&mut msg, view("\n = this run sees the call but not the callee; give it the callee's source or summary"));
+                } else {
+                    push_bytes(&mut msg, view("\n = a call through a function value or a vtable may allocate; name the callee, or keep the attribute off"));
+                }
                 at_file = fx_unknown_file_of(&mut c, k);
                 at_pos = fx_unknown_pos_of(&mut c, k);
             }
@@ -28246,14 +28274,22 @@ fn fx_report<a>(c: (&a mut C)) -> unit {
                 push_bytes(&mut msg, view("` can fail"));
                 push_bytes(&mut msg, view("\n = prove the check away, or keep the attribute off the function"));
             } else {
-                push_bytes(&mut msg, view("` can fail: it makes an indirect call the compiler cannot follow"));
+                if fx_unknown_named(&c, k) {
+                    push_bytes(&mut msg, view("` can fail: it makes a call the compiler cannot follow"));
+                } else {
+                    push_bytes(&mut msg, view("` can fail: it makes an indirect call the compiler cannot follow"));
+                }
                 why := fx_unknown_why(&mut c, k);
                 if why.len() != 0 {
                     push_bytes(&mut msg, view(" (the target is "));
                     push_bytes(&mut msg, view(why));
                     push_bytes(&mut msg, view(")"));
                 }
-                push_bytes(&mut msg, view("\n = a call through a function value or a vtable may fail; name the callee, or keep the attribute off"));
+                if fx_unknown_named(&c, k) {
+                    push_bytes(&mut msg, view("\n = this run sees the call but not the callee; give it the callee's source or summary"));
+                } else {
+                    push_bytes(&mut msg, view("\n = a call through a function value or a vtable may fail; name the callee, or keep the attribute off"));
+                }
                 at_file = fx_unknown_file_of(&mut c, k);
                 at_pos = fx_unknown_pos_of(&mut c, k);
             }

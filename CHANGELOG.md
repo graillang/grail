@@ -1,5 +1,13 @@
 ## Unreleased
 
+- An effect refusal over a callee the run cannot see (compiling a program to assembly without the
+  runtime's sources) names it - "the target is `rt_len`, whose body and effect summary this run does
+  not have" - instead of calling it an indirect call.
+
+- Fixed (windows-x86_64): the failure path reached the socket arms of the Windows syscall emulation,
+  so every `@no_alloc` function that indexes was refused there. The failure path and the scheduler
+  use `rt_syscall_low` (write to a handle, exit, park, wake, yield, sleep, clock, unmap), and the
+  profile dump creates and closes its file with `rt_create_file`/`rt_close_file`.
 - **Interface format 11:** an interface's trailer ends with `fast_hash` of the bytes before it (XXH64
   under four seeds, the build store's digest) instead of SHA-256. It guards against corruption, which
   is all a digest in the file itself can do; the source digest stays SHA-256. Interfaces written by
