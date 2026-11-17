@@ -273,3 +273,36 @@ frame-limit and 64 KiB-task cases; every case on three targets and LLVM.
   aarch64 29/0, riscv64 29/0, LLVM 27/0; regression filter
   `c-array|literal|repeat|narrow|unboxed|slice|exchange|equal|stack|overflow|dyn|struct|record|tuple|closure|print|format|refine|deref|vector`
   x86_64 656/0; book tests 12/0.
+
+## A2 as built
+
+- *Records.* An array is plain data (`layout_bits` answers 1), so a struct or tuple holding one keeps
+  it inline at a word offset (`field_layout`, `record_words` = whole words of its bytes); a field
+  read is its interior address, which a binding copies (`move_value`); `copy_into` copies an
+  array's bytes and frees nothing; `materialise` leaves arrays to the binding. Generic records take
+  arrays as type arguments; enums and options do not (their payload is one word until stage 5).
+- *Vectors.* `[T; N][]` is flat with element width `array_bytes` (`flat_bytes`); `rt_pushwk` and
+  `rt_vec_insertwk` copy from frame storage without freeing it; `remove` and `pop()!` copy the boxed
+  element into frame storage and free the box (`array_unbox`); `pop()`'s option is refused.
+  `push`/`insert` arguments and the right side of `v[i] = ...` take the element type as their
+  expected type (`index_target_array`), so a bracket literal there is an array.
+- *Slices.* `array_to_slice` (from `coerce_view` for call arguments and from typed bindings) and
+  `a[lo: hi]` (`array_subslice`) make a view record with `rt_aslice`; any method other than
+  `len`/`copy`/`copy_from` views the array (exclusively for `&mut` or a `mut` binding) and continues
+  as the slice's method. **This is where arrays still allocate: one 32-byte view record per slice
+  made from an array, freed when the slice is dropped. Nothing in lib/ takes arrays yet; a read API
+  that wants to avoid it takes `&[T; N]`.** `copy_from` copies bytes when the vector stores the
+  element as the array does (bytes, 4-byte narrow, words, flat records) and checks the length at
+  run time (`rt_array_copy_from`, failure kind 10, now "array length mismatch").
+- *C structs.* `field_type` no longer surfaces `[T; N]` as `T[]`; `cfield_load` gives the interior
+  address for a reference, an index, a method or an assignment, and a copy for a whole read;
+  `cfield_store` and `caddr_store` copy bytes. Deleted: `carray_surface`, `surface_field_ty`,
+  `carray_elem`, `carray_assign`, the vector branches of `cfield_load`/`cfield_store`, and
+  `rt_carray_store`. `rt_carray_load` stays: it serves compile-time tables and `cslice`. A
+  reference to an array is never a tagged narrow reference (`tag_narrow_borrow`). Migrated:
+  abundance `rhi_vulkan.grl`, `tests/ffi/c_arrays.grl`, the bindgen fixture program and test.
+- *Statics* wait for `gaps12-statics-impl` to land in this base.
+- *Verified.* Self-host fixed point; filter `array`: x86_64 39/0; `array|c-array|cimp`: aarch64
+  38/0, riscv64 38/0, LLVM 34/0; test-ffi 81 linked and executed; bindgen-test 68 checks;
+  abundance tests all pass but `abgeo_test`, which fails identically with the base compiler
+  (`5dc07da`: the geometry hashes differ from the reference on this host).

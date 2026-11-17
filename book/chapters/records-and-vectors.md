@@ -87,12 +87,23 @@ numbers.
   `*r = b`, copies the elements into `a`'s own storage.
 - **`==`** compares element by element (floats as IEEE, so `-0.0 == 0.0`), and an array prints as
   a vector does: `[1, 2, 3]`.
-- **References.** A function takes an array as `&[T; N]` to read it and `&mut [T; N]` to change it;
-  that is one word, the address of the elements.
-- **Not yet.** In this release an array lives in a local: it cannot be a parameter or result by
-  value, a field of a struct, an element of a vector, a type argument or a closure's capture, and
-  its elements are numbers or other arrays. Those come next (docs/design/fixed-arrays.md). An
-  `extern "C" record` field written `[T; N]` still reads as a vector copied out of it.
+- **References and slices.** A function takes an array as `&[T; N]` to read it and `&mut [T; N]`
+  to change it; that is one word, the address of the elements, and the fastest way in. Where a
+  slice is expected, `&a` is one: `&[T]`, `&mut [T]` (for `&mut a`), or `&[u8]` for a `[u8; N]`, and
+  `a[lo: hi]` is a sub-slice. Every slice method works on an array, and `a.copy_from(&v)` copies a
+  vector or slice of exactly `N` elements in (the length is checked as it runs). Until views are
+  pairs in the frame, making a slice from an array allocates its `{pointer, length}` record, so a
+  hot path takes `&[T; N]`.
+- **Where arrays live.** In locals, as fields of structs, tuples and generic records (inline, as a
+  plain record's fields are), and as the elements of a vector: `[f32; 4][]` stores its elements
+  back to back, a C `float[n][4]`, with `push`, `insert`, `remove`, `pop()!`, indexing and
+  iteration. Elements are numbers, C handles and pointers, plain or extern records, or arrays.
+- **C structs.** An `extern "C" record` field `[T; N]` is an array: `d.ids[3]` and `d.ids[3] = 7`
+  work in place, `&d.name` is a `&[u8]`, `d.ids = [1, 2, 3, 4]` assigns it whole, and reading the
+  whole field (`ids := d.ids`) copies it, as reading an embedded C struct does.
+- **Not yet.** An array cannot be a parameter or result by value, an enum payload or an option
+  (so `pop()` without `!` on a vector of arrays is refused), or a closure's capture, and its
+  elements cannot own anything (strings, vectors). Those come next (docs/design/fixed-arrays.md).
 - **Large arrays** live in the frame, as in C. A frame larger than a page is touched a page at a
   time from the top as the function starts, so running out of stack is always reported as
   `stack overflow` and never steps over the guard page; a frame larger than the 1 MiB stack a task
