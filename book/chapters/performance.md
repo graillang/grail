@@ -150,16 +150,15 @@ compiler's columns, so a change is measured on the engine the same way.
 {{perf:abundance#abundance-run}}
 
 **What it found.** Every program of the port builds through the store and matches its reference
-(the ImGui program is left out where its library is not built). A cold build of a test program is
-3 to 12 G instructions, most of it the port modules it imports; after a one-statement edit to
-`main` it is 0.17 to 0.37 G, a twentieth or less, because the store replays every unchanged module
-and function. The first measurement found a store fault that stopped eight programs building - a
-module's `u64` constant above 2^63 could not be read back from its interface - and its fix is on
-main.
+(the ImGui program is left out where its library is not built). The figures charted were taken with
+the native-built compiler of the commit named, the one `grail` is during development, because no
+release build of that commit could be made on the shared machine; a release compiler compiles about
+three times faster. After a one-statement edit to `main` a rebuild costs a twentieth or less of a
+cold build, because the store replays every unchanged module and function.
 
 `abgeo` (the cluster builder and its reader) is the slowest release run, and its time goes to
-building vectors rather than to geometry: growing them (`rt_grow`) and pushing onto them
-(`rt_push`) lead the profile, with integer conversion (`rt_int`) third.
+building vectors rather than to geometry: growing them (`rt_grow`) and taking memory for them
+(`rt_alloc_take`) lead the profile, with meshoptimizer's own `simplify` third.
 
 {{perf:abundance#abundance-compile-cpu}}
 
