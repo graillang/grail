@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **A standard generic is checked once per surface, not once per run.** The check
+  `emit_specializations` owes every template a run instantiates (a replay of its body with its own
+  parameters opaque, its text thrown away) is now a unit of the per-function store: what it asked of
+  the run - specialisations, drop helpers, effect records - is recorded and asked again on a hit,
+  under the unit key the store already uses. Dev compiler, an edited check: bench/iterchain.grl
+  0.234G -> 0.154G, hashmap 0.203G -> 0.158G, json 0.188G -> 0.133G. `GRAIL_TEMPLATE_MEMO=0` turns it
+  off; the fn-cache report counts template checks apart from bodies. Fixed on the way: a body that
+  asked for a `parallel_for_zip` adapter could be a unit whose replay did not ask again (the adapter
+  went missing from a warm build); it is no longer a unit.
 - After each landing the build host also runs the closure-passing fuzzer (`tools/fuzz-closures.mjs`, 400
   cases, compile and run) next to the front-end fuzzer. `tools/land.sh --remote-status` reports both.
 - Fixed: when two or more sequences proved stable across one loop had their data pointers hoisted
