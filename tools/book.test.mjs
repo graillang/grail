@@ -125,6 +125,8 @@ test('performance charts render from a results file: SVG, direction captions, ra
   expect(html).toContain('0123456789ab (fixture)');
   expect(html).toContain('<text x="0" y="41" class="perf-axis perf-source">Grail 0123456789ab (fixture); measured 2026-11-16, load average 1.00 on 4 CPUs.</text>'); // provenance inside each chart
   expect(html).toContain('bun tools/bench-rivals.mjs --runs 3');
+  expect(html).toContain('world, the slowest release run: <code>f_world_generate</code> 61.5 %'); // abundance-perf's hot spots
+  expect(html).toContain('Did not build or run</dt><dd>asset (current): grail: an interface carries a number wider than 64 bits');
   expect(html).not.toMatch(/<script|https?:\/\/(?!www\.w3\.org\/2000\/svg)/);
   expect(html).not.toContain('\n'); // one line: a raw HTML block markdown leaves alone
   expect(perfBlock('perf-results#release', join(root, 'tools/fixtures'))).toContain('<svg ');
