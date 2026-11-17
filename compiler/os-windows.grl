@@ -1482,16 +1482,22 @@ fn rt_pipe_push(pair: u64, out: u64) -> u64 {
     rt_push(out, raw_load(pair + 8));
     return 0;
 }
+// CreatePipe's SECURITY_ATTRIBUTES, which only ever reads it and is always handed the same three
+// words: nLength 24, no security descriptor, handles inherited. It lives in process state (words
+// 96..120, see the word map in runtime.grl) rather than on the heap, so a pipe allocates nothing and
+// the syscall dispatcher - which the failure path calls to write its report and to park - reaches no
+// allocation through it. Every caller stores the same values, so concurrent callers agree.
+fn rt_win_pipe_attributes() -> u64 {
+    at := raw_state() + 96;
+    raw_store(at, 24); // nLength
+    raw_store(at + 8, 0); // lpSecurityDescriptor
+    raw_store(at + 16, 1); // bInheritHandle
+    return at;
+}
 fn rt_win_pipe(pair: u64) -> u64 {
-    attributes := rt_alloc(32);
-    raw_store(attributes, 24); // nLength
-    raw_store(attributes + 8, 1); // bInheritHandle
-    if raw_win32(CreatePipe, pair, pair + 8, attributes, 0) == 0 {
-        errno := rt_win_errno();
-        rt_free(attributes);
-        return wrapping_sub(0, errno);
+    if raw_win32(CreatePipe, pair, pair + 8, rt_win_pipe_attributes(), 0) == 0 {
+        return wrapping_sub(0, rt_win_errno());
     }
-    rt_free(attributes);
     return 0;
 }
 // Splits a copy of the Win32 command line into a NUL-terminated argv array. Backslash and quote

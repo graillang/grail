@@ -200,3 +200,7 @@ lsp-test:
 # Land a branch on main through the queue (see docs/testing.md, "Landing on main").
 land BRANCH:
     GRAIL_LAND_REMOTE=${GRAIL_LAND_REMOTE:-} bash tools/land.sh {{BRANCH}}
+
+# The emulated legs of the newest landing on the build host: emulator version and each leg's verdict.
+land-status-remote:
+    GRAIL_LAND_REMOTE=${GRAIL_LAND_REMOTE:-} bash tools/land.sh --remote-status
