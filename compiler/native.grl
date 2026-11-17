@@ -3497,6 +3497,24 @@ fn shape_pair_result<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
 // builds the pair in its own frame and holds the handle: a handle into the callee's frame would not
 // outlive the return.
 fn save_result<a>(c: (&a mut C), ret: u64) -> u64 {
+    if (c.raw == 0) && is_simd(&mut c, ret) && (record_words(&mut c, base_type(&mut c, ret)) == 2) {
+        // The two result words back into a vector through `simd.frompair` (see frame_result).
+        lo := save(&mut c);
+        o(&mut c, view("movq %rdx,%rax\n"));
+        hi := save(&mut c);
+        dst := frame_alloc(&mut c, 2);
+        zero := imm(&mut c, 0);
+        get(&mut c, zero, view("%rsi"));
+        get(&mut c, zero, view("%rcx"));
+        get(&mut c, dst, view("%rdi"));
+        get(&mut c, hi, view("%rdx"));
+        get(&mut c, lo, view("%rax"));
+        mut line = copy_bytes(view("simd.frompair "));
+        push_bytes(&mut line, view(simd_shape(&mut c, base_type(&mut c, ret))));
+        line.push(10);
+        o(&mut c, view(line));
+        return dst;
+    }
     if framed(&mut c, ret) {
         words := record_words(&mut c, base_type(&mut c, ret));
         if words <= 2 {
@@ -27521,6 +27539,20 @@ fn frame_result<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
         o(&mut c, view("movq %rdx,%rax\n"));
         return ();
     }
+    if (words == 2) && is_simd(&mut c, ty) {
+        // A 16-byte vector leaves as the two result words through `simd.topair`, so its storage is
+        // only ever accessed as a vector (llvm.grl, `lift_simd`).
+        dyn_result(&mut c);
+        zero := imm(&mut c, 0);
+        get(&mut c, zero, view("%rdi"));
+        get(&mut c, slot, view("%rsi"));
+        get(&mut c, zero, view("%rcx"));
+        mut line = copy_bytes(view("simd.topair "));
+        push_bytes(&mut line, view(simd_shape(&mut c, ty)));
+        line.push(10);
+        o(&mut c, view(line));
+        return ();
+    }
     if words == 2 {
         dyn_result(&mut c);
         get(&mut c, slot, view("%rcx"));
@@ -39353,8 +39385,19 @@ fn simd_elements<a>(c: (&a mut C), src: Val, index: u64, ty: u64, write: bool) -
         if write & (ty_mode(&mut c, st) == 0) {
             fail(&mut c, view("a SIMD store needs a mutable place: `&mut [T]` or `&mut [T; N]`"));
         }
-        invoke(&mut c, view("rt_slotw"), three(src.t, last, imm(&mut c, width)));
-        return flat_element(&mut c, src.t, index, width, true);
+        // The typed accessors, with the header fact the LLVM lifter reads `data` and `len` from
+        // once (F1): one check of the last lane against `len`, and the first lane's address.
+        mut checked = "rt_slot";
+        mut unchecked = "rt_slotu";
+        if width == 4 {
+            checked = "rt_slot4";
+            unchecked = "rt_slot4u";
+        }
+        apply(&mut c, view(checked), two(src.t, last));
+        fact_seq_arg(&mut c, view(checked), src.t, st);
+        at := apply(&mut c, view(unchecked), two(src.t, index));
+        fact_seq_arg(&mut c, view(unchecked), src.t, st);
+        return at;
     }
     fail(&mut c, view("a SIMD load or store reads a slice (`&[T]`) or an array reference (`&[T; N]`); for a vector `v` write `&v[:]`"));
     return 0;

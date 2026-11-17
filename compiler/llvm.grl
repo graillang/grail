@@ -2946,6 +2946,33 @@ fn lift_simd<a, b>(l: (&a mut L), line: &b [u8]) -> unit {
         simd_store(&mut l, view(vt), view(v), view(pd), &s);
         return ();
     }
+    if op == 25 {
+        // The vector as the two words of a result, by a bitcast: every access to the vector's
+        // storage stays `<N x T>`, which is what lets SROA keep it in a register across an inlined
+        // call.
+        pa := address(&mut l, view("(%rsi)"));
+        v := simd_load(&mut l, view(vt), view(pa), &s);
+        mut t = copy(view("bitcast "));
+        put(&mut t, view(vt));
+        put(&mut t, view(" {} to <2 x i64>"));
+        w := def(&mut l, view(t), &u8[][v]);
+        lo := def(&mut l, view("extractelement <2 x i64> {}, i32 0"), &u8[][copy(view(w))]);
+        hi := def(&mut l, view("extractelement <2 x i64> {}, i32 1"), &u8[][w]);
+        set_reg(&mut l, view("rax"), view(lo));
+        set_reg(&mut l, view("rdx"), view(hi));
+        return ();
+    }
+    if op == 26 {
+        lo := get_reg(&mut l, view("rax"));
+        hi := get_reg(&mut l, view("rdx"));
+        w0 := def(&mut l, view("insertelement <2 x i64> poison, i64 {}, i32 0"), &u8[][lo]);
+        w := def(&mut l, view("insertelement <2 x i64> {}, i64 {}, i32 1"), &u8[][w0, hi]);
+        mut t = copy(view("bitcast <2 x i64> {} to "));
+        put(&mut t, view(vt));
+        v := def(&mut l, view(t), &u8[][w]);
+        simd_store(&mut l, view(vt), view(v), view(pd), &s);
+        return ();
+    }
     pa := address(&mut l, view("(%rsi)"));
     m := simd_load(&mut l, view(vi), view(pa), &s);
     c := simd_op2(&mut l, view("icmp ne"), view(vi), view(m), view("zeroinitializer"));
@@ -3126,9 +3153,11 @@ fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit
         s := machine::simd_parse(view(line));
         set_reg(&mut l, view("rdi"), view("0"));
         set_reg(&mut l, view("rsi"), view("0"));
-        set_reg(&mut l, view("rdx"), view("0"));
+        if s.op != 25 {
+            set_reg(&mut l, view("rdx"), view("0"));
+        }
         set_reg(&mut l, view("rcx"), view("0"));
-        if (s.op != 19) & (s.op != 20) & (s.op != 22) & (s.op != 23) {
+        if (s.op != 19) & (s.op != 20) & (s.op != 22) & (s.op != 23) & (s.op != 25) {
             set_reg(&mut l, view("rax"), view("0"));
         }
         return ();
@@ -5044,8 +5073,19 @@ fn rg_step(rc: (&RC), st: (&mut u64[]), line: (&[u8]), seed: u64, trip: u64, at:
         rg_wrote(&rc, &mut st, view(o[0]));
         return ();
     }
-    if starts(view(op), view("atom.")) || starts(view(op), view("simd.")) {
-        // An atomic or SIMD op names no operands: it writes %rax (and uses %rcx/%rsi as scratch on
+    if starts(view(op), view("simd.")) {
+        // A SIMD op names no operands: it may write %rax and %rdx (a result word, `topair`), uses
+        // %rcx and the address registers, and writes memory through %rdi.
+        rg_clear(&mut st, 0);
+        rg_clear(&mut st, 2);
+        rg_clear(&mut st, 3);
+        rg_clear(&mut st, 4);
+        rg_clear(&mut st, 5);
+        rg_clear_escaped(&rc, &mut st);
+        return ();
+    }
+    if starts(view(op), view("atom.")) {
+        // An atomic op names no operands: it writes %rax (and uses %rcx/%rsi as scratch on
         // x86-64), and writes memory through %rdi, which may be a frame slot whose address escaped.
         rg_clear(&mut st, 0);
         rg_clear(&mut st, 2);

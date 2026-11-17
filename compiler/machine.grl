@@ -1355,8 +1355,10 @@ fn atom_x86<a>(o: (&a mut Out), a: (&Atom)) -> unit {
 //   simd.OP SHAPE [K]
 // SHAPE is the operands' shape: f32x4 f32x8 f64x2 f64x4 i32x4 i32x8 m32x4 m32x8 m64x2 m64x4. A
 // compare writes the mask of the same lane width. OP is add sub mul div and or xor min max eq ne lt
-// le gt ge select not splat lane sum copy any all insert; K is a lane index (lane, insert: the
-// scalar in %rax becomes lane K of the vector at %rdi, the other lanes kept).
+// le gt ge select not splat lane sum copy any all insert topair frompair; K is a lane index (lane,
+// insert: the scalar in %rax becomes lane K of the vector at %rdi, the other lanes kept). topair and
+// frompair move a 16-byte vector between memory and the %rax:%rdx pair a two-word result travels in
+// (topair reads %rsi, frompair writes %rdi from %rax and %rdx).
 // The lowering here is the S1 one on every native target: one scalar lane at a time with the
 // instructions scalar code already uses - the x86-64 subset the internal assembler encodes, and
 // the AArch64 and RV64 forms machine.grl writes for scalars - so a lane computes exactly what the
@@ -1377,7 +1379,8 @@ fn simd_ops() -> u8[][] {
         copy_text(view("max")), copy_text(view("eq")), copy_text(view("ne")), copy_text(view("lt")),
         copy_text(view("le")), copy_text(view("gt")), copy_text(view("ge")), copy_text(view("select")),
         copy_text(view("not")), copy_text(view("splat")), copy_text(view("lane")), copy_text(view("sum")),
-        copy_text(view("copy")), copy_text(view("any")), copy_text(view("all")), copy_text(view("insert"))
+        copy_text(view("copy")), copy_text(view("any")), copy_text(view("all")), copy_text(view("insert")),
+        copy_text(view("topair")), copy_text(view("frompair"))
     ];
 }
 fn simd_number<a>(s: &a [u8]) -> u64 {
@@ -2336,6 +2339,26 @@ pub fn simd_expand<a>(o: (&a mut Out), s: (&Simd)) -> unit {
             } else {
                 put(&mut o, view("cmpq $-1,%rax\nsete %al\nmovzbq %al,%rax\n"));
             }
+        }
+        return ();
+    }
+    if op == 25 {
+        if o.target == 1 {
+            put(&mut o, view("ldr x2,[x1,#8]\nldr x9,[x1,#0]\n"));
+        } else if o.target == 2 {
+            put(&mut o, view("ld a2,8(a1)\nld t0,0(a1)\n"));
+        } else {
+            put(&mut o, view("movq 8(%rsi),%rdx\nmovq 0(%rsi),%rax\n"));
+        }
+        return ();
+    }
+    if op == 26 {
+        if o.target == 1 {
+            put(&mut o, view("str x9,[x0,#0]\nstr x2,[x0,#8]\n"));
+        } else if o.target == 2 {
+            put(&mut o, view("sd t0,0(a0)\nsd a2,8(a0)\n"));
+        } else {
+            put(&mut o, view("movq %rax,0(%rdi)\nmovq %rdx,8(%rdi)\n"));
         }
         return ();
     }
