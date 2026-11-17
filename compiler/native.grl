@@ -2001,7 +2001,7 @@ fn debug_type_of<a>(c: (&a mut C), ty: u64, c_layout: u64) -> u64 {
             if inline_field(&mut c, ty, i) {
                 mt = c.debug_types[mt].pointee;
             }
-            members.push(DebugMember { name: c.fields[c.decls[d].first + i].name.copy(), ty: mt, offset: 8 * field_word(&mut c, ty, i) });
+            members.push(DebugMember { name: c.fields[c.decls[d].first + i].name.copy(), ty: mt, offset: field_offset(&mut c, ty, i) });
         }
         exchange(&mut c.debug_types[s].members, members);
         return debug_pointer(&mut c, s);
@@ -24234,7 +24234,7 @@ fn static_bake<a>(c: (&a mut C), ty: u64, text: &a [u8], at: (&a mut u64), is_la
         o(&mut c, view(".p2align 4\n.quad 0\n.quad 2\n"));
         mark(&mut c, data);
         for j in words.len() {
-            static_quad_label(&mut c, words[j], kinds[j]);
+            static_item(&mut c, words[j], kinds[j]);
         }
         o(&mut c, view(".quad 0\n.p2align 4\n.quad 0\n.quad 2\n"));
         mark(&mut c, obj);
@@ -24256,7 +24256,7 @@ fn static_bake<a>(c: (&a mut C), ty: u64, text: &a [u8], at: (&a mut u64), is_la
     o(&mut c, view(".p2align 4\n.quad 0\n.quad 2\n"));
     mark(&mut c, rec);
     for j in words.len() {
-        static_quad_label(&mut c, words[j], kinds[j]);
+        static_item(&mut c, words[j], kinds[j]);
     }
     if words.len() == 0 {
         o(&mut c, view(".quad 0\n"));
@@ -24265,21 +24265,72 @@ fn static_bake<a>(c: (&a mut C), ty: u64, text: &a [u8], at: (&a mut u64), is_la
 }
 // The words of record `ty`, read from the flat form, appended to `words` (with `kinds` saying
 // which are labels): a plain record held in a field contributes its own words in place.
+// Items are laid out as the record is (field_offset, stage 7): a kind is 0 or 1 for a word (a number
+// or a label), 2 * width for a narrow number, and 16 + 32 * n for n bytes of padding.
 fn static_bake_fields<a>(c: (&a mut C), ty: u64, text: &a [u8], at: (&a mut u64), words: (&a mut u64[]), kinds: (&a mut u64[])) -> unit {
     d := ty_arg(&mut c, ty);
     first := c.decls[d].first;
     count := c.decls[d].count;
+    mut pos = 0;
     for j in count {
         fty := c.fields[first + j].ty;
+        off := field_offset(&mut c, ty, j);
+        if pos < off {
+            words.push(0);
+            kinds.push(16 + 32 * (off - pos));
+        }
         if inline_field(&mut c, ty, j) {
             static_bake_fields(&mut c, base_type(&mut c, fty), text, &mut at, &mut words, &mut kinds);
+            pos = off + value_bytes(&mut c, base_type(&mut c, fty));
         } else {
             mut flag = 0;
             w := static_bake(&mut c, fty, text, &mut at, &mut flag);
+            width := narrow_width(&mut c, base_type(&mut c, fty));
             words.push(w);
-            kinds.push(flag);
+            if (width < 8) && (flag == 0) {
+                kinds.push(2 * width);
+                pos = off + width;
+            } else {
+                kinds.push(flag);
+                pos = off + 8;
+            }
         }
     }
+    total := value_bytes(&mut c, ty);
+    if pos < total {
+        words.push(0);
+        kinds.push(16 + 32 * (total - pos));
+    }
+    return ();
+}
+fn static_item<a>(c: (&a mut C), word: u64, kind: u64) -> unit {
+    if kind >= 16 {
+        o(&mut c, view(".zero "));
+        on(&mut c, (kind - 16) / 32);
+        c.out.push(10);
+        return ();
+    }
+    if kind <= 1 {
+        static_quad_label(&mut c, word, kind);
+        return ();
+    }
+    width := kind / 2;
+    if width == 1 {
+        o(&mut c, view(".byte "));
+    } else if width == 2 {
+        o(&mut c, view(".short "));
+    } else {
+        o(&mut c, view(".long "));
+    }
+    mut mask = 4294967295;
+    if width == 1 {
+        mask = 255;
+    }
+    if width == 2 {
+        mask = 65535;
+    }
+    on(&mut c, word & mask);
+    c.out.push(10);
     return ();
 }
 
@@ -27824,12 +27875,74 @@ fn rec_store<a>(c: (&a mut C), base: u64, k: u64, value: u64) -> unit {
 // (docs/design/unboxed-values.md, stage 1b) changes this answer and not the sites that read, bind,
 // compare, print or drop a field. Enum tags and payloads, closure objects and `dyn` cells are words
 // by position and keep calling rec_load/rec_store directly.
-fn field_word<a>(c: (&a mut C), ty: u64, k: u64) -> u64 {
-    if (layout_bits(&mut c, ty) & 2) == 0 {
-        return k;
+// The byte offset field `k` of the record `ty` starts at (stage 7: C layout - declared order, each
+// field at its natural alignment). A record that is not held as its words (a closure environment,
+// a C record, an enum's block) keeps a word per field.
+fn field_offset<a>(c: (&a mut C), ty: u64, k: u64) -> u64 {
+    if !framable(&mut c, ty) || is_array(&mut c, ty) {
+        return k * 8;
     }
     at := field_layout(&mut c, ty);
     return c.layout_offsets[at][k] / 2;
+}
+// The (bytes, alignment) a field of type `ft` takes in a record: a held-inline value its own, a
+// sized integer narrower than a word or an f32 its width, anything else a word.
+fn member_bytes<a>(c: (&a mut C), ft: u64) -> u64 {
+    t := base_type(&mut c, ft);
+    if framable(&mut c, t) {
+        return value_bytes(&mut c, t);
+    }
+    return narrow_width(&mut c, t);
+}
+fn member_align<a>(c: (&a mut C), ft: u64) -> u64 {
+    t := base_type(&mut c, ft);
+    if is_array(&mut c, t) {
+        return member_align(&mut c, ty_arg(&mut c, t));
+    }
+    if small_enum(&mut c, t) {
+        return 8;
+    }
+    if framable(&mut c, t) {
+        at := field_layout(&mut c, t);
+        n := c.layout_offsets[at].len();
+        return c.layout_offsets[at][n - 1];
+    }
+    return narrow_width(&mut c, t);
+}
+// 1, 2 or 4 for a sized integer of that width or an f32, 8 for every other scalar or handle.
+fn narrow_width<a>(c: (&a mut C), t: u64) -> u64 {
+    k := ty_kind(&mut c, t);
+    if k == 18 {
+        bits := ty_arg(&mut c, t);
+        if (bits == 8) || (bits == 16) || (bits == 32) {
+            return bits / 8;
+        }
+    }
+    if (k == 21) && is_f32(&mut c, t) {
+        return 4;
+    }
+    return 8;
+}
+fn round_up(n: u64, align: u64) -> u64 {
+    return (n + align - 1) / align * align;
+}
+// The bytes a value held as its words takes: a record's fields laid out and rounded up to its
+// alignment, then its live word (stage 4) if it has one.
+fn value_bytes<a>(c: (&a mut C), ty: u64) -> u64 {
+    if is_array(&mut c, ty) {
+        return array_bytes(&mut c, ty);
+    }
+    if small_enum(&mut c, ty) {
+        return enum_words(&mut c, ty) * 8;
+    }
+    at := field_layout(&mut c, ty);
+    n := c.layout_offsets[at].len();
+    align := c.layout_offsets[at][n - 1];
+    mut bytes = round_up(c.layout_offsets[at][n - 2] / 2, align);
+    if live_word(&mut c, ty) {
+        bytes = round_up(bytes, 8) + 8;
+    }
+    return bytes;
 }
 // The offsets table of a record that holds plain records inline, worked out once per type.
 fn field_layout<a>(c: (&a mut C), alias: u64) -> u64 {
@@ -27842,19 +27955,30 @@ fn field_layout<a>(c: (&a mut C), alias: u64) -> u64 {
     }
     d := ty_arg(&mut c, ty);
     count := c.decls[d].count;
+    // Entries: each field's byte offset * 2 + 1 when it is held inline, then the end of the last
+    // field * 2, then the record's alignment.
     mut table = u64[];
-    mut word = 0;
+    mut at = 0;
+    mut align = 1;
     for i in count {
         ft := field_type(&mut c, ty, i);
-        if framable(&mut c, ft) {
-            table.push(word * 2 + 1);
-            word = word + record_words(&mut c, base_type(&mut c, ft));
-        } else {
-            table.push(word * 2);
-            word = word + 1;
+        a := member_align(&mut c, ft);
+        if align < a {
+            align = a;
         }
+        at = round_up(at, a);
+        if framable(&mut c, ft) {
+            table.push(at * 2 + 1);
+        } else {
+            table.push(at * 2);
+        }
+        at = at + member_bytes(&mut c, ft);
     }
-    table.push(word * 2);
+    if live_word(&mut c, ty) && (align < 8) {
+        align = 8;
+    }
+    table.push(at * 2);
+    table.push(align);
     c.layout_offsets[ty] = table;
     return ty;
 }
@@ -27876,7 +28000,7 @@ fn flat_bytes<a>(c: (&a mut C), elem: u64) -> u64 {
         return array_bytes(&mut c, ty);
     }
     if framable(&mut c, ty) {
-        return record_words(&mut c, ty) * 8;
+        return value_bytes(&mut c, ty);
     }
     if is_c_record(&mut c, ty) != 0 {
         return ffi_record_size(&mut c, ty_arg(&mut c, ty));
@@ -27900,7 +28024,7 @@ fn flat_element<a>(c: (&a mut C), seq: u64, index: u64, width: u64, unchecked: b
 // Whether field `k` of the record `ty` is a plain record stored inline: only Grail structs and
 // tuples hold them so (an enum's payload, a closure's captures and a C record keep their words).
 fn inline_field<a>(c: (&a mut C), ty: u64, k: u64) -> bool {
-    if (layout_bits(&mut c, ty) & 2) == 0 {
+    if (layout_bits(&mut c, ty) & 2) == 0 || !framable(&mut c, ty) || is_array(&mut c, ty) {
         return false;
     }
     at := field_layout(&mut c, ty);
@@ -28077,7 +28201,7 @@ fn frame_drops<a>(c: (&a mut C), ty: u64) -> bool {
 fn inline_address<a>(c: (&a mut C), base: u64, ty: u64, k: u64) -> u64 {
     get(&mut c, base, view("%rax"));
     o(&mut c, view("leaq "));
-    on(&mut c, field_word(&mut c, ty, k) * 8);
+    on(&mut c, field_offset(&mut c, ty, k));
     o(&mut c, view("(%rax),%rax\n"));
     slot := save(&mut c);
     c.interior.push(slot);
@@ -28402,8 +28526,8 @@ fn copy_into<a>(c: (&a mut C), dst: u64, value: u64, ty: u64) -> unit {
         array_copy(&mut c, dst, value, array_bytes(&mut c, ty));
         return ();
     }
-    words := record_words(&mut c, base_type(&mut c, ty));
-    bytes := imm(&mut c, words * 8);
+    // Exactly the value's bytes: the place may be an inline field with another right after it.
+    bytes := imm(&mut c, record_bytes(&mut c, ty));
     invoke(&mut c, view("rt_copy_bytes"), three(dst, value, bytes));
     if !framed(&mut c, ty) {
         invoke(&mut c, view("rt_free"), one(value));
@@ -28434,13 +28558,11 @@ fn record_words<a>(c: (&a mut C), ty: u64) -> u64 {
     if c.decls[d].c_layout != 0 {
         return ffi_record_words(&mut c, d);
     }
-    live := u64(live_word(&mut c, ty));
-    if (layout_bits(&mut c, ty) & 2) == 0 {
+    if !framable(&mut c, ty) {
+        live := u64(live_word(&mut c, ty));
         return c.decls[d].count + live;
     }
-    at := field_layout(&mut c, ty);
-    count := c.layout_offsets[at].len() - 1;
-    return c.layout_offsets[at][count] / 2 + live;
+    return (value_bytes(&mut c, ty) + 7) / 8;
 }
 // Whether the struct `ty` carries a live word after its fields (unboxed-values.md, stage 4): one
 // with its own `Drop`. Its constructor sets the word to 1; moving it out of the place that holds it
@@ -28459,14 +28581,26 @@ fn field_store<a>(c: (&a mut C), base: u64, ty: u64, k: u64, value: u64) -> unit
     if inline_field(&mut c, ty, k) {
         get(&mut c, base, view("%rax"));
         o(&mut c, view("leaq "));
-        on(&mut c, field_word(&mut c, ty, k) * 8);
+        on(&mut c, field_offset(&mut c, ty, k));
         o(&mut c, view("(%rax),%rax\n"));
         dst := save(&mut c);
         copy_into(&mut c, dst, value, field_type(&mut c, ty, k));
         return ();
     }
-    word := field_word(&mut c, ty, k);
-    rec_store(&mut c, base, word, value);
+    off := field_offset(&mut c, ty, k);
+    ft := field_type(&mut c, ty, k);
+    width := narrow_width(&mut c, base_type(&mut c, ft));
+    if framable(&mut c, ty) && (width < 8) {
+        // A narrow field is written at its width (stage 7).
+        get(&mut c, base, view("%rax"));
+        o(&mut c, view("leaq "));
+        on(&mut c, off);
+        o(&mut c, view("(%rax),%rax\n"));
+        addr := save(&mut c);
+        sized_store(&mut c, addr, value, width, u64(is_f32(&mut c, ft)));
+        return ();
+    }
+    rec_store(&mut c, base, off / 8, value);
     return ();
 }
 // The record type of the value a slot holds, for the two places that reach a field through a slot
@@ -28486,8 +28620,29 @@ fn field_load<a>(c: (&a mut C), base: u64, ty: u64, k: u64, address: u64) -> u64
     if inline_field(&mut c, ty, k) {
         return inline_address(&mut c, base, ty, k);
     }
-    word := field_word(&mut c, ty, k);
-    return word_load(&mut c, base, word, address);
+    off := field_offset(&mut c, ty, k);
+    ft := field_type(&mut c, ty, k);
+    width := narrow_width(&mut c, base_type(&mut c, ft));
+    if framable(&mut c, ty) && (width < 8) {
+        // A narrow field is read at its width; its address is an exact narrow address, which
+        // references read and write as C record fields' are (c.caddr).
+        get(&mut c, base, view("%rax"));
+        o(&mut c, view("leaq "));
+        on(&mut c, off);
+        o(&mut c, view("(%rax),%rax\n"));
+        addr := save(&mut c);
+        if address != 0 {
+            c.caddr.push(addr);
+            c.caddr.push(base_type(&mut c, ft));
+            return addr;
+        }
+        mut signed = 0;
+        if ty_kind(&mut c, ft) == 18 {
+            signed = ty_mode(&mut c, ft);
+        }
+        return sized_load(&mut c, addr, width, signed, u64(is_f32(&mut c, ft)));
+    }
+    return word_load(&mut c, base, off / 8, address);
 }
 // C-layout field access: exact byte offset, exact field width. Fields narrower than
 // eight bytes use portable byte-wise helpers so every target stays correct without
@@ -29626,8 +29781,9 @@ fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
             } else {
                 n = field_load(&mut c, b, base.ty, k, last);
             }
-            if last & subword(&mut c, fty) {
-                // Every field of a Grail record is at least a word: the address is untagged.
+            if last & subword(&mut c, fty) & (narrow_width(&mut c, base_type(&mut c, fty)) == 8) {
+                // A sub-word value held in a word field (a bool, a char): the address is untagged
+                // and the field is the word. A narrow field's address is in c.caddr (field_load).
                 c.word_refs.push(n);
             }
         }
@@ -42277,6 +42433,9 @@ fn record_bytes<a>(c: (&a mut C), alias: u64) -> u64 {
     if c.decls[d].c_layout != 0 {
         return ffi_record_size(&mut c, d);
     }
+    if framable(&mut c, ty) {
+        return value_bytes(&mut c, ty);
+    }
     return record_words(&mut c, ty) * 8;
 }
 // Exchanges the contents of the two `ty` records whose addresses are in `x` and `y`. Up to four
@@ -49894,7 +50053,7 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                                 mark(&mut c, skip);
                             } else if !inline_field(&mut c, ty, i) {
                                 o(&mut c, view("movq "));
-                                on(&mut c, field_word(&mut c, ty, i) * 8);
+                                on(&mut c, field_offset(&mut c, ty, i));
                                 o(&mut c, view("(%r12),%rdi\n"));
                                 holder_drop(&mut c, t);
                             }
@@ -49948,12 +50107,12 @@ fn emit_drop_in_place<a, b>(c: (&a mut C), ty: u64, hook: &b [u8]) -> unit {
                     continue;
                 }
                 o(&mut c, view("leaq "));
-                on(&mut c, field_word(&mut c, ty, i) * 8);
+                on(&mut c, field_offset(&mut c, ty, i));
                 o(&mut c, view("(%r12),%rdi\n"));
                 call_out(&mut c, view(drop_in_place_ref(&mut c, t)));
             } else {
                 o(&mut c, view("movq "));
-                on(&mut c, field_word(&mut c, ty, i) * 8);
+                on(&mut c, field_offset(&mut c, ty, i));
                 o(&mut c, view("(%r12),%rdi\n"));
                 holder_drop(&mut c, t);
             }
@@ -50266,7 +50425,7 @@ const IFACE_TAG_INLINE: u64 = 21;
 // the module header record and rendered back verbatim by `grail iface dump`, so the single-source
 // rule survives the encoding: nothing else in this compiler knows how the ABI is written.
 fn iface_dyn_abi() -> string {
-    return "abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame args = 6 registers then stack";
+    return "abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame args = 6 registers then stack layout = c";
 }
 
 // ---- writing ----
