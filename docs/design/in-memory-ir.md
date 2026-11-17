@@ -80,6 +80,21 @@ removes, and the assembler's share no longer pays for S4's encoder on its own. T
 under all of them is a runtime byte search (`rt_find_byte`, SSE2 on x86-64) that every line scanner
 - these passes, `ir::parse`'s operand split, the assembler's reader - would call.
 
+## S3 plan against asm_x86::Rec (object emit's S4 landed)
+
+The assembler side exists: `asm_x86::Rec` (SoA rows; `mn` 0 is a text row), `assemble_records(target,
+&recs)`, and `records_of(target, text)`, the reference for what a decoded line must be. Steps, each
+landed alone and byte-identical (objects compared with `grail asm --records` and the oracle):
+1. assemble_object takes a `Rec` when the stream comes with one, `records_of` otherwise - one entry,
+   no behaviour change.
+2. optimize.grl's `emit_line` fills a Rec row beside the text for the lines it prints from a parsed
+   instruction (mn from opcode_key; registers and frame slots from k/v; kind 3/4 operands through
+   the same operand reader records_of uses, until the parse carries them decoded); every other line
+   is a text row. A memo hit replays its rows from the entry (format bumped).
+3. The whole-stream passes after the optimiser (inline_calls, probe_frames, site_table) splice rows
+   as they splice text; then a build hands the Rec to assemble_object and stops printing the text,
+   which is made only for `-S` and the dumps.
+
 ## Interfaces
 
 - Optimiser to assembler: per body, `ir::Body`'s record columns for the surviving lines plus its
