@@ -12,7 +12,7 @@ import {
   detectToolchain, findRunner, gitCommit, hostPlatformId, inspectBinary, platformById,
   readVersion, root,
 } from './platforms.mjs';
-import { buildCompiler, command, compilerSources, assemble, compileProgram, digest, seedDirectory, seedFile, seedAssemblyPath, readSeedManifest } from './native.mjs';
+import { buildCompiler, buildReleaseCompiler, command, compilerSources, assemble, compileProgram, digest, seedDirectory, seedFile, seedAssemblyPath, readSeedManifest } from './native.mjs';
 import { compileProgram as compileWindowsProgram, headers as windowsHeaders, inspectImage as inspectPeImage, inspectObject as inspectPeObject } from './windows.mjs';
 import { createPackage, sha256, verifyPackage, writeChecksums } from './package.mjs';
 import { buildObjectBundle, verifyObjectBundle } from './objects.mjs';
@@ -201,12 +201,23 @@ export function buildTarget(platformId, options = {}) {
   if (binary.format !== 'elf' || binary.arch !== target.arch) {
     throw new Error(`built compiler is ${binary.format}/${binary.arch}, expected elf/${target.arch}`);
   }
+  // The shipped compiler on linux-x86_64 is the release build: the compiler lowered through the
+  // LLVM backend and clang -O2, about four times faster than the native-backend build, and
+  // accepted only when it compiles the compiler to the same text and objects as that build and
+  // passes a corpus slice (tools/native.mjs buildReleaseCompiler). The native-backend build stays
+  // the bootstrap and the fixed point; GRAIL_SHIP_NATIVE=1 ships it instead.
+  let shipped = executable;
+  let flavor = 'native';
+  if (target.id === 'linux-x86_64' && host === 'linux-x86_64' && process.env.GRAIL_SHIP_NATIVE !== '1') {
+    shipped = buildReleaseCompiler({ log: line => console.log(`release compiler: ${line}`) });
+    flavor = 'release';
+  }
   const outDir = resolve(root, options.out ?? 'dist');
   mkdirSync(outDir, { recursive: true });
   const version = options.version ?? readVersion();
   const name = artifactName(target.id, version, 'compiler');
   const artifact = join(outDir, name);
-  writeFileSync(artifact, readFileSync(executable));
+  writeFileSync(artifact, readFileSync(shipped));
   chmodSync(artifact, 0o755);
   const assemblyArtifact = join(outDir, artifactName(target.id, version, 'assembly'));
   writeFileSync(assemblyArtifact, gzipSync(readFileSync(assembly), { level: 9 }));
@@ -220,6 +231,8 @@ export function buildTarget(platformId, options = {}) {
     commit: gitCommit(),
     stage0: { kind: options.stage0 ? 'explicit' : process.env.GRAIL_COMPILER ? 'env' : 'bootstrap', path: stage0, sha256: sha256(readFileSync(stage0)), ...stage0Binary },
     binary,
+    flavor,
+    native: { sha256: sha256(readFileSync(executable)) },
     sources: sourceDigests(),
     assembly: assemblyArtifact,
   };
