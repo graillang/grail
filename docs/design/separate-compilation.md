@@ -1266,6 +1266,17 @@ part of the compiler's own module), so `llvm-compile` admits parts against three
 `MemAvailable` as well as the jobserver: a build fits a 16 GB machine by running fewer parts at
 once rather than being killed. The ThinLTO link stays under 0.9 GB at 8 backend jobs.
 
+### Early inlining: measured, not landed
+
+Splicing a small callee's raw text into its caller *before* the per-body optimiser runs (so the
+optimiser works across the seam) was built and measured twice (branch `gaps15-xinline-early-main`,
+on main 77810c06 with B1, TBAA and late_slots). Development builds, callgrind, against main: at a
+40-line cap the typed chain went 279.3 -> 294.6 instructions per element, a fork-join 1523 -> 1575,
+fib(20) by nested join +25%, and the probe's text +76%; at a 12-line cap the chain gained 1.0%, join
+0.5%, spawn 0.8%, for +0.5% text. The optimiser does not yet clean a merged body enough for bigger
+copies to pay, and a second inliner is not worth carrying for 1%: the post-optimisation inliner
+(copies inside copies, tail-call wrappers) is the one in the tree.
+
 ### Cross-module calls are declared with the callee's own signature
 
 The LLVM lifter types a body by its signature fact (its argument words, and two result words when
