@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **Text costs less to build and parse.** A string literal is checked to be UTF-8 while compiling,
+  so making a `string` of it is a copy with no run-time check; appending a `string` onto a `string`
+  no longer re-checks it; `format` hands its buffer over as the string instead of copying it, and
+  checks it only when an argument may carry non-UTF-8 bytes. `json` copies a plain string in one
+  step, writes one with no escapes in one append, and skips the whitespace call when the next byte
+  is not whitespace. bench/json.grl: Grail-LLVM 4.48G -> 3.15G instructions (Rust 1.64G),
+  Grail-native 14.3G -> 9.8G.
 - **Changed: `split`, `trim`, `lines` and `split_whitespace` return views, and live in `strings`.**
   They were the compiler's own methods (and `strings` methods) returning owned copies; now they are
   `strings` methods (`use strings;`) returning views of the text (`(&[u8])[]`, `&[u8]`), like

@@ -23855,7 +23855,11 @@ fn constant_value<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> Val
                 o(&mut c, view("(%rip),%rax\n"));
                 ptr := save(&mut c);
                 n := imm(&mut c, text.len());
-                t := invoke(&mut c, view("rt_string_lit"), two(ptr, n));
+                mut f = "rt_string_lit";
+                if utf8_well_formed(&text) {
+                    f = "rt_lit";
+                }
+                t := invoke(&mut c, view(f), two(ptr, n));
                 return own(&mut c, t, 3);
             }
             return val(imm(&mut c, value), ty);
@@ -30007,10 +30011,55 @@ fn rodata_bytes<a, b>(c: (&a mut C), bytes: (&b u8[])) -> u64 {
     o(&mut c, view("(%rip),%rax\n"));
     return save(&mut c);
 }
+// Whether `bytes` is well-formed UTF-8, by the rules rt_utf8 checks at run time: a literal that
+// passes needs no check when the program makes a string of it.
+fn utf8_well_formed<a>(bytes: (&a u8[])) -> bool {
+    n := bytes.len();
+    mut i: u64 = 0;
+    while i < n {
+        b := u64(bytes[i]);
+        if b < 128 {
+            i += 1;
+            continue;
+        }
+        mut count: u64 = 0;
+        if (193 < b) & (b < 224) {
+            count = 2;
+        }
+        if (223 < b) & (b < 240) {
+            count = 3;
+        }
+        if (239 < b) & (b < 245) {
+            count = 4;
+        }
+        if (count == 0) || (n < i + count) {
+            return false;
+        }
+        second := u64(bytes[i + 1]);
+        if (second < 128) || (191 < second) {
+            return false;
+        }
+        if ((b == 224) & (second < 160)) || ((b == 237) & (159 < second)) || ((b == 240) & (second < 144)) || ((b == 244) & (143 < second)) {
+            return false;
+        }
+        for k in count - 2 {
+            next := u64(bytes[i + 2 + k]);
+            if (next < 128) || (191 < next) {
+                return false;
+            }
+        }
+        i += count;
+    }
+    return true;
+}
 fn string_from_bytes<a, b>(c: (&a mut C), bytes: (&b u8[])) -> Val {
     ptr := rodata_bytes(&mut c, bytes);
     n := imm(&mut c, bytes.len());
-    t := invoke(&mut c, view("rt_string_lit"), two(ptr, n));
+    mut f = "rt_string_lit";
+    if utf8_well_formed(&bytes) {
+        f = "rt_lit";
+    }
+    t := invoke(&mut c, view(f), two(ptr, n));
     return own(&mut c, t, 3);
 }
 // A callable bound's parameters and result against the signature of the closure given for it: only
@@ -34558,10 +34607,13 @@ fn format_brace_refuse<a, b>(c: (&a mut C), text: &b [u8], at: u64) -> unit {
 fn format_builtin<a>(c: (&a mut C)) -> Val {
     expect(&mut c, view("("));
     acc := invoke(&mut c, view("rt_new"), u64[]);
-    // A fresh string is checked whole by rt_fmt_finish.
+    // The buffer becomes the string itself; it is checked to be UTF-8 only when an argument may
+    // have written bytes that are not.
     raw := format_pieces(&mut c, acc);
-    slot := invoke(&mut c, view("rt_fmt_finish"), one(acc));
-    return own(&mut c, slot, 3);
+    if raw {
+        invoke(&mut c, view("rt_utf8"), one(acc));
+    }
+    return own(&mut c, acc, 3);
 }
 // The literal and its arguments up to the closing `)`, appended to the byte buffer `acc`: what
 // `format(...)` builds into a fresh buffer and `out.append_format(...)` into `out`. True when an
@@ -41906,9 +41958,9 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             }
         }
         require_write(&mut c, xt);
-        if k == 3 {
-            // Bytes onto a byte vector: one reservation and one copy, where a loop of `push` is a
-            // call and a capacity test per byte.
+        if (k == 3) || ((c.raw == 0) && (ty_kind(&mut c, b.ty) == 4)) {
+            // Bytes onto a byte vector, or a string (already UTF-8) onto a string: one reservation
+            // and one copy, where a loop of `push` is a call and a capacity test per byte.
             invoke(&mut c, view("rt_append"), two(xt, bt));
         } else {
             invoke(&mut c, view("rt_append_text"), two(xt, bt));
