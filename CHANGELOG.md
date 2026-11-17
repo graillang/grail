@@ -10,6 +10,10 @@
   per unit - and runs `clang -O2` on all of them at once under the jobserver, then joins them. A
   release unit, and the release compiler itself (`tools/native.mjs release`), is no longer bound by
   one serial `clang -O2` over a gigabyte of IR.
+  A function's part is a hash of its name and a part carries only the declarations it uses, so
+  its text changes only when its own functions do; each part's object is kept in the build store
+  (`llvm-parts/`) under the digest of its text and command, and a rebuild after an edit compiles
+  only the parts holding changed functions.
 
 - **`grail cache warm [--target T]`** checks and builds every standard module into the build store,
   as rustup ships libstd: a project's first check then compiles only its own modules. The installers
