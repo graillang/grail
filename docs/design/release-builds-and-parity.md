@@ -285,3 +285,19 @@ more, delete it with its tests and docs.
 
 P2 is the smallest change that gets the transform to vectorise; P0 and P1 are what makes it reach a
 `grail build` user. Each ships alone.
+
+## State (owner /root/simd_layout_design, updated 2026-11-17)
+
+Landed on main: P0 `--release` driver, P1 one overflow mode per build, P2 SEQ-STABLE slices (xform at
+parity), release check messages (`rt_trap` kinds), the stale-length miscompile fix, lifter table
+lookups and forked lift, rt_f32_from_int -> sitofp/uitofp, raw code follows the overflow mode, the
+memcpy redeclaration fix, the thread-pointer lift reverted (pool crash; owner /root/thread_alloc).
+
+In the landing queue: `gaps12-llvm-parts` (dcdb1b2): `grail llvm-compile`, parallel `clang -O2` over
+a lifted module cut in parts, used by every release unit and by the release-compiler build.
+
+Next, in order: ThinLTO on top (owner /root/xinline); per-part store caching and the shipped
+`grail` = release build (accepted by tools/native.mjs release; native build kept as bootstrap);
+release compile speed against cargo/Go/Zig on syn1000/syn4000; P3 owned-vector loop hoists with
+TBAA (parked branch gaps12-p3-wip); P5 prover slice lengths; P7 release error locations.
+Release-compiler builds run under `flock /home/shulgin/grail-release.lock`.

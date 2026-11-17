@@ -1,5 +1,6 @@
 module asm_x86;
 use elf;
+use coff;
 use host;
 use machine;
 use asm_a64;
@@ -37,6 +38,32 @@ const IT_ALU: u64 = 3;
 pub struct A {
     // 0 x86-64, 1 AArch64, 2 RISC-V 64.
     target: u64,
+    // 1 for a Windows (COFF) object: x86-64 code, COFF sections, symbols and relocations.
+    coff: u64,
+    // `.def NAME` ... `.endef`: the symbol being described (index + 1), and each symbol's COFF
+    // storage class (0: from its binding) and type.
+    def_sym: u64,
+    // Windows unwind (`.seh_*`): per function its symbol, start, prologue end and end (text
+    // positions with the item counts before them), the frame register and offset, and its codes
+    // (offset in the prologue, operation, info, extra slot value, extra slots), plus .xdata.
+    seh_sym: u64[],
+    seh_pos: u64[],
+    seh_k: u64[],
+    seh_pro_pos: u64[],
+    seh_pro_k: u64[],
+    seh_end_pos: u64[],
+    seh_end_k: u64[],
+    seh_frame: u64[],
+    seh_first: u64[],
+    sc_pos: u64[],
+    sc_k: u64[],
+    sc_op: u64[],
+    sc_info: u64[],
+    sc_extra: u64[],
+    sc_slots: u64[],
+    xdata_sec: u64,
+    sym_class: u64[],
+    sym_ctype: u64[],
     // RISC-V: how many `.Lpcrel_hiN` labels `lla` has made, the current section's mapping state
     // (`map_state` holds the others' as LLVM's RISC-V streamer files them), and whether the
     // switch under way is a `.popsection`.
@@ -355,6 +382,15 @@ fn directives<a>(o: (&a mut A)) {
     def(&mut o, view(".comm"), 28);
     def(&mut o, view(".4byte"), 29);
     def(&mut o, view(".previous"), 31);
+    def(&mut o, view(".def"), 32);
+    def(&mut o, view(".scl"), 33);
+    def(&mut o, view(".endef"), 34);
+    def(&mut o, view(".seh_proc"), 35);
+    def(&mut o, view(".seh_pushreg"), 36);
+    def(&mut o, view(".seh_setframe"), 37);
+    def(&mut o, view(".seh_stackalloc"), 38);
+    def(&mut o, view(".seh_endprologue"), 39);
+    def(&mut o, view(".seh_endproc"), 40);
     def(&mut o, view(".8byte"), 30);
 }
 
@@ -379,6 +415,26 @@ pub fn new() -> A {
     }
     mut o = A {
         target: 0,
+        coff: 0,
+        def_sym: 0,
+        seh_sym: u64[],
+        seh_pos: u64[],
+        seh_k: u64[],
+        seh_pro_pos: u64[],
+        seh_pro_k: u64[],
+        seh_end_pos: u64[],
+        seh_end_k: u64[],
+        seh_frame: u64[],
+        seh_first: u64[],
+        sc_pos: u64[],
+        sc_k: u64[],
+        sc_op: u64[],
+        sc_info: u64[],
+        sc_extra: u64[],
+        sc_slots: u64[],
+        xdata_sec: 0,
+        sym_class: u64[],
+        sym_ctype: u64[],
         pcrel_count: 0,
         map_live: 0,
         map_pop: 0,
@@ -599,6 +655,8 @@ fn new_symbol<a>(o: (&a mut A), a0: u64, e: u64, h: u64) -> u64 {
     o.sym_k.push(0);
     o.sym_bind.push(0);
     o.sym_vis.push(0);
+    o.sym_class.push(0);
+    o.sym_ctype.push(0);
     o.sym_size.push(0);
     o.sym_type.push(0);
     o.sym_ref.push(0);
@@ -720,6 +778,8 @@ fn section<a, b>(o: (&a mut A), s: &b [u8], a0: u64, e: u64, ty: u64, flags: u64
     o.sym_k.push(0);
     o.sym_bind.push(0);
     o.sym_vis.push(0);
+    o.sym_class.push(0);
+    o.sym_ctype.push(0);
     o.sym_size.push(0);
     o.sym_type.push(3);
     o.sym_ref.push(0);
@@ -754,7 +814,19 @@ fn named_section<a, b>(o: (&a mut A), s: &b [u8], a0: u64, e: u64) {
     if at_word(s, a0, e, view(".text")) {
         flags = 6;
     }
-    section(&mut o, s, a0, e, ty, flags, 1);
+    mut align = 1;
+    if o.coff != 0 {
+        // COFF: a section named without flags is writable data; .data and .bss start 4-aligned.
+        if flags == 2 {
+            flags = 3;
+        } else if flags == 0 {
+            flags = 3;
+        }
+        if at_word(s, a0, e, view(".data")) || at_word(s, a0, e, view(".bss")) {
+            align = 4;
+        }
+    }
+    section(&mut o, s, a0, e, ty, flags, align);
 }
 
 fn at_word<b, c>(s: &b [u8], a0: u64, e: u64, w: &c [u8]) -> bool {
@@ -1180,6 +1252,9 @@ fn section_line<a>(o: (&a mut A)) {
             flags = flags | 4;
         } else if c == 'T' {
             flags = flags | 0x400;
+        } else if (o.coff != 0) && ((c == 'd') || (c == 'r')) {
+            // COFF: initialized data, read-only (no `w`).
+            flags = flags | 2;
         } else {
             fail(&mut o, view("unsupported section flag"));
         }
@@ -1220,6 +1295,8 @@ fn directive<a>(o: (&a mut A), id: u64) {
         data(&mut o, 8);
     } else if id == 2 {
         data(&mut o, 1);
+    } else if (id == 3) && (o.def_sym != 0) {
+        o.sym_ctype[o.def_sym - 1] = number(&mut o);
     } else if id == 3 {
         sym := sym_operand(&mut o);
         expect(&mut o, ',');
@@ -1342,6 +1419,15 @@ fn directive<a>(o: (&a mut A), id: u64) {
             fail(&mut o, view("unsupported `.option`"));
         }
         o.at = e;
+    } else if id == 32 {
+        o.def_sym = sym_operand(&mut o) + 1;
+    } else if (id == 33) && (o.def_sym != 0) {
+        o.sym_class[o.def_sym - 1] = number(&mut o);
+        note_attr(&mut o, o.def_sym - 1);
+    } else if id == 34 {
+        o.def_sym = 0;
+    } else if (id >= 35) && (id <= 40) {
+        seh_directive(&mut o, id);
     } else if id == 31 {
         // `.previous`: back to the section before the last change (MCStreamer's previous
         // section; a `.pushsection` entry's own after a pop).
@@ -1553,7 +1639,7 @@ fn read_line<a>(o: (&a mut A)) {
     }
     id := lookup(&o, o.at, i);
     if peek(&o) == '.' {
-        if (id == 0) || (id > 40) {
+        if (id == 0) || (id > 60) {
             fail(&mut o, view("unsupported directive"));
             return ();
         }
@@ -1753,6 +1839,8 @@ pub fn command<a>(args: (&a u8[][])) -> u64 {
             tgt = 1;
         } else if at_word(view(args[1]), 0, args[1].len(), view("riscv64")) {
             tgt = 2;
+        } else if at_word(view(args[1]), 0, args[1].len(), view("windows-x86_64")) {
+            tgt = 3;
         }
         if tgt != 0 {
             if rest.len() != 3 {
@@ -1776,7 +1864,7 @@ pub fn command<a>(args: (&a u8[][])) -> u64 {
             return 0;
         }
         if !at_word(view(args[1]), 0, args[1].len(), view("x86_64")) {
-            host::print(view("grail asm: --target is x86_64, aarch64 or riscv64\n"));
+            host::print(view("grail asm: --target is x86_64, aarch64, riscv64 or windows-x86_64\n"));
             return 2;
         }
         return command(&rest);
@@ -1986,6 +2074,10 @@ fn run<a>(o: (&a mut A)) -> Result {
             rv_fixup(&mut o, i, &mut r_sec, &mut r_off, &mut r_type, &mut r_sym, &mut r_add);
             continue;
         }
+        if o.coff != 0 {
+            coff_fixup(&mut o, &pre, i, &mut r_sec, &mut r_off, &mut r_type, &mut r_sym, &mut r_add);
+            continue;
+        }
         sec := o.fx_sec[i];
         mut at = o.fx_pos[i];
         if sec == 0 {
@@ -2068,11 +2160,17 @@ fn run<a>(o: (&a mut A)) -> Result {
             r_add.push(add);
         }
     }
+    if o.coff != 0 {
+        seh_tables(&mut o, &pre, &mut r_sec, &mut r_off, &mut r_type, &mut r_sym, &mut r_add);
+    }
     if o.files_seen != 0 {
         line_table(&mut o, &pre, &mut r_sec, &mut r_off, &mut r_type, &mut r_sym, &mut r_add);
     }
     for i in r_sym.len() {
-        o.sym_ref[r_sym[i]] = 1;
+        // (A COFF relocation against a section is marked, not a symbol.)
+        if r_sym[i] < 0x80000000 {
+            o.sym_ref[r_sym[i]] = 1;
+        }
     }
     if o.err.len() != 0 {
         return Result { object: u8[], error: o.err.copy(), units: u8[], replayed: 0, encoded: 0 };
@@ -2381,6 +2479,9 @@ fn line_table<a, b, c>(o: (&a mut A), pre: (&b u64[]), r_sec: (&c mut u64[]), r_
 }
 
 fn object<a, b, c>(o: (&a mut A), pre: (&b u64[]), r_sec: (&c u64[]), r_off: (&c u64[]), r_type: (&c u64[]), r_sym: (&c u64[]), r_add: (&c u64[])) -> u8[] {
+    if o.coff != 0 {
+        return coff_object(&mut o, pre, r_sec, r_off, r_type, r_sym);
+    }
     mut machine = 62;
     if o.target == 1 {
         machine = 183;
@@ -2541,10 +2642,13 @@ fn mnemonics<a>(o: (&a mut A)) {
     def(&mut o, view("cvttss2si"), 226);
     def(&mut o, view("cvtsi2ssq"), 227);
     def(&mut o, view("xaddq"), 240);
+    // A float element loaded into or stored from an SSE register (optimize.grl xmm_loads/xmm_stores).
+    def(&mut o, view("movsd"), 245);
     def(&mut o, view("movzbl"), 241);
     def(&mut o, view("movzwl"), 242);
     def(&mut o, view("pause"), 243);
     def(&mut o, view("xorps"), 244);
+    def(&mut o, view("movdqu"), 245);
     // Conditions: 160 + cc for jumps, 180 + cc for set.
     cc := u8[][view("o").copy(), view("no").copy(), view("b").copy(), view("ae").copy(), view("e").copy(), view("ne").copy(), view("be").copy(), view("a").copy(), view("s").copy(), view("ns").copy(), view("p").copy(), view("np").copy(), view("l").copy(), view("ge").copy(), view("le").copy(), view("g").copy()];
     alias := u8[][view("c").copy(), view("nae").copy(), view("nb").copy(), view("nc").copy(), view("z").copy(), view("nz").copy(), view("na").copy(), view("nbe").copy(), view("pe").copy(), view("po").copy(), view("nge").copy(), view("nl").copy(), view("ng").copy(), view("nle").copy()];
@@ -2618,7 +2722,10 @@ fn operand<a>(o: (&a mut A), n: u64) {
         o.ok[n] = 2;
         return ();
     }
-    if c == '*' {
+    if (c == '*') && (peek1(&o) != '%') {
+        // `*mem`: an indirect call or jump through memory - the memory operand below.
+        o.at += 1;
+    } else if c == '*' {
         o.at += 1;
         id := reg_at(&mut o);
         o.ok[n] = 5;
@@ -3046,6 +3153,8 @@ fn instruction<a>(o: (&a mut A), first: u64) {
         } else if (o.nops == 1) && (o.ok[0] == 5) {
             o.ok[0] = 1;
             enc(&mut o, 0, 0, 0xff, 1, 2, 0, 0);
+        } else if (o.nops == 1) && (o.ok[0] == 3) {
+            enc(&mut o, 0, 0, 0xff, 1, 2, 0, 0);
         } else {
             shape(&mut o);
         }
@@ -3054,7 +3163,9 @@ fn instruction<a>(o: (&a mut A), first: u64) {
     } else if (id >= 120) && (id < 126) {
         alu(&mut o, id);
     } else if id == 151 {
-        if (o.nops == 1) && (o.ok[0] == 5) {
+        if (o.nops == 1) && (o.ok[0] == 3) {
+            enc(&mut o, 0, 0, 0xff, 1, 4, 0, 0);
+        } else if (o.nops == 1) && (o.ok[0] == 5) {
             o.ok[0] = 1;
             enc(&mut o, 0, 0, 0xff, 1, 4, 0, 0);
         } else {
@@ -3231,6 +3342,13 @@ fn instruction<a>(o: (&a mut A), first: u64) {
     } else if id == 243 {
         o.buf.push(0xf3);
         o.buf.push(0x90);
+    } else if id == 245 {
+        // Windows saves the callee-saved xmm6..15: movdqu to and from memory.
+        if want(&mut o, 2, 1, 3) {
+            enc(&mut o, 4, 0, 0x7f0f, 2, rn(&o, 0), 1, 0);
+        } else {
+            rm2(&mut o, 4, 0, 0x6f0f, 2, 1, 0);
+        }
     } else if id == 244 {
         rm2(&mut o, 0, 0, 0x570f, 2, 1, 0);
     } else if (id >= 250) && (id < 266) {
@@ -3239,6 +3357,12 @@ fn instruction<a>(o: (&a mut A), first: u64) {
         rm2(&mut o, 2, 0, 0x5a0f, 2, 1, 0);
     } else if id == 219 {
         rm2(&mut o, 4, 0, 0x5a0f, 2, 1, 0);
+    } else if id == 245 {
+        if (o.nops == 2) && (o.ok[1] == 1) && (cls(&o, 1) == 16) {
+            rm2(&mut o, 2, 0, 0x100f, 2, 1, 0);
+        } else {
+            rm2(&mut o, 2, 0, 0x110f, 2, 0, 1);
+        }
     } else {
         fail(&mut o, view("unsupported instruction"));
     }
@@ -3607,6 +3731,8 @@ fn symbol_in<a>(o: (&a mut A), start: u64, end: u64) -> u64 {
     o.sym_k.push(0);
     o.sym_bind.push(0);
     o.sym_vis.push(0);
+    o.sym_class.push(0);
+    o.sym_ctype.push(0);
     o.sym_size.push(0);
     o.sym_type.push(0);
     o.sym_ref.push(0);
@@ -3960,6 +4086,8 @@ pub fn map_to<a>(o: (&a mut A), kind: u64) {
     o.sym_k.push(o.it_pos.len());
     o.sym_bind.push(0);
     o.sym_vis.push(0);
+    o.sym_class.push(0);
+    o.sym_ctype.push(0);
     o.sym_size.push(0);
     o.sym_type.push(0);
     o.sym_ref.push(0);
@@ -3995,6 +4123,14 @@ pub fn new_target(target: u64) -> A {
 }
 
 pub fn assemble_for(target: u64, text: u8[]) -> Result {
+    // 3: Windows x86-64 - the x86 encoder with a COFF object.
+    if target == 3 {
+        mut w = new();
+        w.coff = 1;
+        named_text_coff(&mut w);
+        w.src = text;
+        return run(&mut w);
+    }
     mut o = new_target(target);
     o.src = text;
     return run(&mut o);
@@ -4259,4 +4395,386 @@ fn rv_attributes<a>(o: (&a mut A)) {
     switch_to(&mut o, keep);
     back := exchange(&mut o.buf, u8[]);
     exchange(&mut o.sec_data[keep], back);
+}
+
+// ---- Windows (COFF) -----------------------------------------------------------------------------
+
+// A section symbol in a COFF relocation: the section's index, marked.
+fn coff_secsym(k: u64) -> u64 {
+    return 0x80000000 + k;
+}
+
+// A fixup as LLVM's COFF writer resolves it: in place for a local label of the same section, else a
+// relocation with the addend stored in the field (REL32 counts from the field's end), against the
+// section for a temporary label and the symbol otherwise.
+fn coff_fixup<a, b, c>(o: (&a mut A), pre: (&b u64[]), i: u64, r_sec: (&c mut u64[]), r_off: (&c mut u64[]), r_type: (&c mut u64[]), r_sym: (&c mut u64[]), r_add: (&c mut u64[])) {
+    sec := o.fx_sec[i];
+    mut at = o.fx_pos[i];
+    if sec == 0 {
+        at = final_text(pre, at, o.fx_k[i]);
+    }
+    sym := o.fx_sym[i];
+    kind := o.fx_kind[i];
+    add := o.fx_add[i];
+    width := o.fx_width[i];
+    if kind == FX_DIFF {
+        other := o.fx_sym2[i];
+        v := wrapping_add(wrapping_sub(sym_final(&o, pre, sym), sym_final(&o, pre, other)), add);
+        put_le(&mut o.sec_data[sec], at, v, width);
+        return ();
+    }
+    if o.sym_sec[sym] == ABS {
+        v := wrapping_add(o.sym_pos[sym], add);
+        put_le(&mut o.sec_data[sec], at, v, width);
+        return ();
+    }
+    defined := o.sym_sec[sym] != 0;
+    // `.scl 2` makes a symbol external, like `.globl`; a weak definition here is resolved here.
+    local := (o.sym_bind[sym] != 1) && (o.sym_class[sym] != 2);
+    pc := (kind == FX_PC) || (kind == FX_CALL);
+    if pc && defined && local && (o.sym_sec[sym] == sec + 1) {
+        v := wrapping_sub(wrapping_add(sym_final(&o, pre, sym), add), at);
+        put_le(&mut o.sec_data[sec], at, v, 4);
+        return ();
+    }
+    mut field = add;
+    if pc {
+        field = wrapping_add(add, 4);
+    }
+    r_sec.push(sec);
+    r_off.push(at);
+    if pc {
+        r_type.push(4);
+    } else if kind == FX_ABS64 {
+        r_type.push(1);
+    } else {
+        r_type.push(2);
+    }
+    if defined && local && temporary(&o, sym) {
+        r_sym.push(coff_secsym(o.sym_sec[sym] - 1));
+        field = wrapping_add(field, sym_final(&o, pre, sym));
+    } else {
+        r_sym.push(sym);
+        o.sym_ref[sym] = 1;
+    }
+    r_add.push(0);
+    if kind == FX_ABS64 {
+        put_le(&mut o.sec_data[sec], at, field, 8);
+    } else {
+        put_le(&mut o.sec_data[sec], at, field, 4);
+    }
+}
+
+fn coff_characteristics<a>(o: (&a A), k: u64) -> u64 {
+    flags := o.sec_flags[k];
+    mut c = 0;
+    if o.sec_type[k] == 8 {
+        c = 0xc0000080;
+    } else if (flags & 4) != 0 {
+        c = 0x60000020;
+    } else if (flags & 1) != 0 {
+        c = 0xc0000040;
+    } else {
+        c = 0x40000040;
+    }
+    mut log = 0;
+    mut a = o.sec_align[k];
+    while a > 1 {
+        a = a >> 1;
+        log += 1;
+    }
+    return c | ((log + 1) << 20);
+}
+
+fn coff_object<a, b, c>(o: (&a mut A), pre: (&b u64[]), r_sec: (&c u64[]), r_off: (&c u64[]), r_type: (&c u64[]), r_sym: (&c u64[])) -> u8[] {
+    mut out = coff::new();
+    for k in o.sec_name.len() {
+        out.sec_name.push(o.sec_name[k].copy());
+        out.sec_flags.push(coff_characteristics(&o, k));
+        out.sec_data.push(exchange(&mut o.sec_data[k], u8[]));
+        out.sec_size.push(o.sec_size[k]);
+        if o.sec_type[k] == 8 {
+            out.sec_nobits.push(1);
+        } else {
+            out.sec_nobits.push(0);
+        }
+    }
+    mut index = u64[];
+    for id in o.sym_name.len() {
+        index.push(0);
+    }
+    // LLVM names a weak symbol's default `.weak.NAME.default.FIRST`, FIRST the first external
+    // symbol this object defines (none: no suffix), so defaults from two objects cannot clash.
+    mut first_ext = u8[];
+    for id in o.sym_name.len() {
+        sec := o.sym_sec[id];
+        if (sec != 0) && (sec != ABS) && !temporary(&o, id) && (o.sym_type[id] != 3) && (o.sym_bind[id] != 2) && ((o.sym_bind[id] == 1) || (o.sym_class[id] == 2)) {
+            first_ext = o.sym_name[id].copy();
+            break;
+        }
+    }
+    for id in o.sym_name.len() {
+        if temporary(&o, id) || (o.sym_type[id] == 3) {
+            continue;
+        }
+        undefined := o.sym_sec[id] == 0;
+        if undefined && (o.sym_ref[id] == 0) && (o.sym_bind[id] == 0) {
+            continue;
+        }
+        sec := o.sym_sec[id];
+        mut number = 0;
+        mut value = 0;
+        if sec == ABS {
+            number = 0xffff;
+            value = o.sym_pos[id];
+        } else if sec != 0 {
+            number = sec;
+            value = sym_final(&o, pre, id);
+        }
+        mut class = o.sym_class[id];
+        if class == 0 {
+            if (o.sym_bind[id] != 0) || undefined {
+                class = 2;
+            } else {
+                class = 3;
+            }
+        }
+        mut ty = o.sym_ctype[id];
+        if (ty == 0) && (o.sym_type[id] == 2) {
+            ty = 0x20;
+        }
+        index[id] = out.sym_name.len() + 1;
+        if o.sym_bind[id] == 2 {
+            // A weak symbol: a weak external, aliasing `.weak.NAME.default` (defined where the
+            // symbol is, or absolute 0 when it is not defined here).
+            out.sym_name.push(o.sym_name[id].copy());
+            out.sym_value.push(0);
+            out.sym_sec.push(0);
+            out.sym_class.push(0x69);
+            out.sym_type.push(ty);
+            out.sym_weak.push(out.sym_name.len() + 1);
+            mut dname = view(".weak.").copy();
+            dname.append(view(o.sym_name[id]));
+            dname.append(view(".default"));
+            if first_ext.len() != 0 {
+                dname.push('.');
+                dname.append(view(first_ext));
+            }
+            out.sym_name.push(dname);
+            if number == 0 {
+                number = 0xffff;
+            }
+            out.sym_value.push(value);
+            out.sym_sec.push(number);
+            out.sym_class.push(2);
+            out.sym_type.push(ty);
+            out.sym_weak.push(0);
+            continue;
+        }
+        out.sym_name.push(o.sym_name[id].copy());
+        out.sym_value.push(value);
+        out.sym_sec.push(number);
+        out.sym_class.push(class);
+        out.sym_type.push(ty);
+        out.sym_weak.push(0);
+    }
+    for i in r_sec.len() {
+        out.r_sec.push(r_sec[i]);
+        out.r_off.push(r_off[i]);
+        out.r_type.push(r_type[i]);
+        s := r_sym[i];
+        if s >= 0x80000000 {
+            out.r_sym.push(s);
+        } else {
+            out.r_sym.push(index[s] - 1);
+        }
+    }
+    return coff::write(&out);
+}
+
+// COFF objects start with .text, .data and .bss, in that order (LLVM's initial sections).
+fn named_text_coff<a>(o: (&a mut A)) {
+    d := view(".data");
+    named_section(&mut o, d, 0, d.len());
+    b := view(".bss");
+    named_section(&mut o, b, 0, b.len());
+    switch_to(&mut o, 0);
+}
+
+// `.seh_*`: the unwind description of the function being read, kept until the layout is known.
+fn seh_directive<a>(o: (&a mut A), id: u64) {
+    o.cacheable = 0;
+    o.chunk_ok = 0;
+    if id == 35 {
+        sym := sym_operand(&mut o);
+        if o.xdata_sec == 0 {
+            keep := o.cur;
+            x := view(".xdata");
+            section(&mut o, x, 0, x.len(), 1, 2, 4);
+            o.xdata_sec = o.cur + 1;
+            switch_to(&mut o, keep);
+        }
+        o.seh_sym.push(sym);
+        o.seh_pos.push(o.buf.len());
+        o.seh_k.push(o.it_pos.len());
+        o.seh_pro_pos.push(o.buf.len());
+        o.seh_pro_k.push(o.it_pos.len());
+        o.seh_end_pos.push(o.buf.len());
+        o.seh_end_k.push(o.it_pos.len());
+        o.seh_frame.push(0);
+        o.seh_first.push(o.sc_op.len());
+        return ();
+    }
+    if o.seh_sym.len() == 0 {
+        fail(&mut o, view("a `.seh_` directive outside `.seh_proc`"));
+        return ();
+    }
+    f := o.seh_sym.len() - 1;
+    if id == 39 {
+        o.seh_pro_pos[f] = o.buf.len();
+        o.seh_pro_k[f] = o.it_pos.len();
+        return ();
+    }
+    if id == 40 {
+        o.seh_end_pos[f] = o.buf.len();
+        o.seh_end_k[f] = o.it_pos.len();
+        return ();
+    }
+    mut op = 0;
+    mut info = 0;
+    mut extra = 0;
+    mut slots = 1;
+    if id == 36 {
+        skip(&mut o);
+        o.at += 1;
+        r := reg_at_coff(&mut o);
+        op = 0;
+        info = r;
+    } else if id == 37 {
+        skip(&mut o);
+        o.at += 1;
+        r := reg_at_coff(&mut o);
+        expect(&mut o, ',');
+        off := number(&mut o);
+        o.seh_frame[f] = r | ((off / 16) << 4);
+        op = 3;
+    } else {
+        n := number(&mut o);
+        if n <= 128 {
+            op = 2;
+            info = (n - 8) / 8;
+        } else if n <= 524280 {
+            op = 1;
+            extra = n / 8;
+            slots = 2;
+        } else {
+            op = 1;
+            info = 1;
+            extra = n;
+            slots = 3;
+        }
+    }
+    o.sc_pos.push(o.buf.len());
+    o.sc_k.push(o.it_pos.len());
+    o.sc_op.push(op);
+    o.sc_info.push(info);
+    o.sc_extra.push(extra);
+    o.sc_slots.push(slots);
+}
+
+fn reg_at_coff<a>(o: (&a mut A)) -> u64 {
+    mut e = o.at;
+    while e < o.le {
+        c := o.src[e];
+        if o.nc[c] == 0 {
+            break;
+        }
+        e += 1;
+    }
+    id := lookup(&o, o.at, e);
+    o.at = e;
+    if id < 1000 {
+        fail(&mut o, view("unknown register"));
+        return 0;
+    }
+    return (id - 1000) & 31;
+}
+
+// .xdata's UNWIND_INFO records and .pdata's RUNTIME_FUNCTION entries, once text positions are final.
+fn seh_tables<a, b, c>(o: (&a mut A), pre: (&b u64[]), r_sec: (&c mut u64[]), r_off: (&c mut u64[]), r_type: (&c mut u64[]), r_sym: (&c mut u64[]), r_add: (&c mut u64[])) {
+    if o.seh_sym.len() == 0 {
+        return ();
+    }
+    xk := o.xdata_sec - 1;
+    mut x = u8[];
+    mut at = u64[];
+    for f in o.seh_sym.len() {
+        start := final_text(pre, o.seh_pos[f], o.seh_k[f]);
+        pro := final_text(pre, o.seh_pro_pos[f], o.seh_pro_k[f]) - start;
+        first := o.seh_first[f];
+        mut last = o.sc_op.len();
+        if f + 1 < o.seh_sym.len() {
+            last = o.seh_first[f + 1];
+        }
+        mut count = 0;
+        mut i = first;
+        while i < last {
+            count += o.sc_slots[i];
+            i += 1;
+        }
+        at.push(x.len());
+        x.push(1);
+        x.push(pro);
+        x.push(count);
+        x.push(o.seh_frame[f]);
+        // The codes, last first.
+        mut j = last;
+        while j > first {
+            j -= 1;
+            x.push(final_text(pre, o.sc_pos[j], o.sc_k[j]) - start);
+            x.push((o.sc_info[j] << 4) | o.sc_op[j]);
+            if o.sc_slots[j] == 2 {
+                x.push(o.sc_extra[j] & 255);
+                x.push((o.sc_extra[j] >> 8) & 255);
+            } else if o.sc_slots[j] == 3 {
+                for b in 4 {
+                    x.push((o.sc_extra[j] >> (8 * b)) & 255);
+                }
+            }
+        }
+        if (count % 2) != 0 {
+            x.push(0);
+            x.push(0);
+        }
+    }
+    o.sec_data[xk] = x;
+    keep := o.cur;
+    o.buf = exchange(&mut o.sec_data[keep], u8[]);
+    p := view(".pdata");
+    section(&mut o, p, 0, p.len(), 1, 2, 4);
+    pk := o.cur;
+    switch_to(&mut o, keep);
+    back := exchange(&mut o.buf, u8[]);
+    exchange(&mut o.sec_data[keep], back);
+    mut d = u8[];
+    for f in o.seh_sym.len() {
+        start := final_text(pre, o.seh_pos[f], o.seh_k[f]);
+        end := final_text(pre, o.seh_end_pos[f], o.seh_end_k[f]);
+        values := u64[start, end, at[f]];
+        for v in 3 {
+            r_sec.push(pk);
+            r_off.push(d.len());
+            r_type.push(3);
+            if v == 2 {
+                r_sym.push(coff_secsym(xk));
+            } else {
+                r_sym.push(coff_secsym(0));
+            }
+            r_add.push(0);
+            for b in 4 {
+                d.push((values[v] >> (8 * b)) & 255);
+            }
+        }
+    }
+    o.sec_data[pk] = d;
 }
