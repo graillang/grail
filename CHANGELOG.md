@@ -1,5 +1,13 @@
 ## Unreleased
 
+- **Release builds compile a module's LLVM code in parallel.** `grail llvm-compile` cuts a lifted
+  module into parts - shared declarations, each function in one part, internal functions renamed
+  per unit - and runs `clang -O2` on all of them at once under the jobserver, then joins them. A
+  release unit, and the release compiler itself (`tools/native.mjs release`), is no longer bound by
+  one serial `clang -O2` over a gigabyte of IR. The release compiler is now always lowered by the
+  native compiler of the same sources, and accepted only if it compiles the compiler to the same
+  assembly and the same in-process object and its builds pass a corpus slice.
+
 - The internal assembler takes `.previous`.
 
 - **Text costs less to build and parse.** A string literal is checked to be UTF-8 while compiling,

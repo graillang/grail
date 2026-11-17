@@ -480,10 +480,10 @@ function buildTreeCompiler() {
 // writing it (docs/design/compile-speed.md). `buildCompiler()` stays what the tests build with: it
 // is the product of the native backend, and so the thing they exist to test.
 //
-// The lowering is the slow step (the LLVM text of the compiler is about a gigabyte), so a release
-// compiler from an earlier build of these sources' ancestors does it when it can read them:
-// GRAIL_RELEASE_BASE names one, else the last one this worktree built. The identity check below is
-// what makes that safe - a base that miscompiles produces a compiler whose output differs.
+// The native compiler of these sources lowers it, never an older release binary, and the result is
+// accepted only when it compiles the compiler to the same assembly and the same object as the native
+// one and its builds pass a slice of the corpus (GRAIL_RELEASE_SLICE, a test filter; 0 skips it).
+// The LLVM module is compiled in parallel parts (`grail llvm-compile`).
 export function buildReleaseCompiler({ log = () => {} } = {}) {
   if (hostTarget !== 'x86_64') throw new Error('the release compiler is built on x86_64 Linux for now');
   const native = buildCompiler();
@@ -491,19 +491,15 @@ export function buildReleaseCompiler({ log = () => {} } = {}) {
   const executable = join(directory, 'grail-release');
   if (existsSync(executable)) return executable;
   const latest = join(root, '.work/native/release-latest');
-  const candidates = [process.env.GRAIL_RELEASE_BASE, existsSync(latest) ? readFileSync(latest, 'utf8').trim() : null]
-    .filter(path => path && existsSync(path));
   const stem = join(directory, `release.${process.pid}`);
   // A release build wraps on overflow, as every `grail build --release` does.
   const flags = ['--default-u64', '--typed-refs', '--overflow=wrap'];
-  let lowered = false;
-  for (const base of [...candidates, native]) {
-    log(`lowering with ${base}`);
-    const run = spawnSync(base, [...flags, '--backend=llvm', `${stem}.s`, ...compilerSources], { encoding: 'utf8', env: compilerEnvironment(), maxBuffer: 1 << 26 });
-    if (run.status === 0) { lowered = true; break; }
-    log(`  that compiler cannot read these sources (${(run.stderr ?? '').trim().split('\n')[0]}); trying the next`);
-  }
-  if (!lowered) throw new Error('no compiler could lower the compiler through the LLVM backend');
+  // Lowered by the native compiler built from these sources and nothing else: an older release
+  // binary lowers with whatever lifter bugs it was built with (one miscompiled the in-process
+  // assembler and still passed a text-only acceptance).
+  log(`lowering with ${native}`);
+  const run = spawnSync(native, [...flags, '--backend=llvm', `${stem}.s`, ...compilerSources], { encoding: 'utf8', env: compilerEnvironment(), maxBuffer: 1 << 26 });
+  if (run.status !== 0) throw new Error(`the native compiler could not lower the compiler through the LLVM backend\n${run.stderr ?? ''}`);
   log('clang -O2');
   // Cut in parts and compiled in parallel (`grail llvm-compile`): one clang -O2 over the whole
   // compiler's module is serial and takes most of the build.
@@ -511,15 +507,30 @@ export function buildReleaseCompiler({ log = () => {} } = {}) {
   command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[hostTarget]}`, '-c', `${stem}.s`, '-o', `${stem}.o`]);
   const pending = `${stem}.pending`;
   command([process.env.GRAIL_LINKER ?? 'ld.lld', '-m', emulations[hostTarget], `${stem}.o`, `${stem}.ll.o`, '-o', pending]);
-  // The acceptance test: both compilers compile the compiler, and the two outputs are one file.
+  // The acceptance test, three parts. (1) Both compilers compile the compiler and the two outputs
+  // are one file; (2) both assemble it in process to the same object; (3) the release compiler's own
+  // builds of a runtime slice of the corpus run correctly.
   log('checking that it emits what the native build emits');
   const outputs = [native, pending].map((compiler, index) => {
     const out = `${stem}.check${index}.s`;
-    command([compiler, ...flags, out, ...compilerSources], { env: compilerEnvironment() });
-    const digest = createHash('sha256').update(readFileSync(out)).digest('hex');
+    const object = `${stem}.check${index}.o`;
+    command([compiler, ...flags, '--object', object, out, ...compilerSources], { env: compilerEnvironment() });
+    const digest = createHash('sha256').update(readFileSync(out)).update(readFileSync(object)).digest('hex');
     rmSync(out);
+    rmSync(object);
     return digest;
   });
+  if (outputs[0] === outputs[1] && process.env.GRAIL_RELEASE_SLICE !== '0') {
+    log('running a corpus slice through its builds');
+    const slice = spawnSync('bun', [join(root, 'tools/test-native.mjs'), hostTarget, '--jobs', '4'], {
+      cwd: root, encoding: 'utf8', maxBuffer: 1 << 26,
+      env: { ...process.env, GRAIL_COMPILER: pending, GRAIL_BACKEND: 'native', GRAIL_TEST_FILTER: process.env.GRAIL_RELEASE_SLICE ?? '^(vec|f32|f64|str|hash|fmt|float|pool-chunks|unboxed)' },
+    });
+    if (slice.status !== 0) {
+      rmSync(pending);
+      throw new Error(`the release compiler's builds fail the corpus slice: not accepted\n${(slice.stdout ?? '').split('\n').filter(l => l.startsWith('FAIL')).slice(0, 10).join('\n')}`);
+    }
+  }
   for (const leftover of [`${stem}.s`, `${stem}.s.ll`, `${stem}.o`, `${stem}.ll.o`]) if (existsSync(leftover)) rmSync(leftover);
   for (const part of readdirSync(directory).filter(name => name.startsWith(`${basename(stem)}.s.ll.`))) rmSync(join(directory, part));
   if (outputs[0] !== outputs[1]) {
