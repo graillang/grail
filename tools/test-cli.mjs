@@ -135,7 +135,7 @@ checks += 10;
   assert.match(bytes?.members.find(member => member.name === 'find')?.type ?? '', /^pub fn find\(&self, needle: \(&\[u8\]\)\) -> u64\?$/, 'a method\'s signature is the text up to its body');
   assert.equal(bytes?.doc, '', 'the module block is not also the first declaration\'s doc');
   const fields = item('hashmap', 'struct', 'Map')?.members ?? [];
-  assert.ok(fields.some(field => field.name === 'entries' && field.type === 'Slot<K, V>[]'), `a record lists its fields: ${JSON.stringify(fields)}`);
+  assert.ok(fields.some(field => field.name === 'keys' && field.type === 'K[]'), `a record lists its fields: ${JSON.stringify(fields)}`);
   assert.ok((item('io', 'enum', 'Error')?.members ?? []).some(variant => variant.name === 'Other' && variant.type === 'u64'), 'an enum lists its variants and payloads');
   assert.ok(module('hashmap')?.items.some(entry => entry.kind === 'impl' && entry.name.startsWith('Map')), 'an implementation is listed');
   assert.ok(fs.readdirSync(outA).filter(name => name.endsWith('.html')).length >= 25, 'one page per module');

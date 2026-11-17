@@ -9771,7 +9771,17 @@ fn rt_pushwk(s: u64, src: u64, w: u64) -> u64 {
         raw_store(s, ptr);
         raw_store(wrapping_add(s, 16), capacity);
     }
-    rt_copy_bytes(wrapping_add(raw_load(s), wrapping_mul(n, w)), src, w);
+    dst := wrapping_add(raw_load(s), wrapping_mul(n, w));
+    // Records are whole words: copy them as such, without the byte copier's call and tail loop.
+    if (w & 7) == 0 {
+        mut i = 0;
+        while i < w {
+            raw_store(wrapping_add(dst, i), raw_load(wrapping_add(src, i)));
+            i = i + 8;
+        }
+    } else {
+        rt_copy_bytes(dst, src, w);
+    }
     raw_store(wrapping_add(s, 8), n + 1);
     return 0;
 }
