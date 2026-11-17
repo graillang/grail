@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **Short floats print without big integers.** A double whose shortest form has at most 15 digits
+  and lies in [1e-7, 1e22) (`0.25`, `1.037`, `123.5`) is printed from a candidate checked exactly
+  with one correctly rounded operation (Clinger), with the same text as before; longer ones still
+  go through Burger & Dybvig. Decimal-shaped values print about twice as fast (LLVM 729M -> 384M
+  instructions for 6,000 of them).
 - **Integer map keys hash in registers.** `hash::Hash` has a defaulted `table_hash`, the SipHash-1-3
   value a map uses (the default streams through `hash`, as before); the integer types give it as
   `hash::word_hash`, the same value computed straight-line with no hasher state in memory. User
