@@ -29221,8 +29221,11 @@ fn retag_enum<a>(c: (&a mut C), xt: u64, tag: u64, ty: u64, from: u64) -> u64 {
         return invoke(&mut c, view("rt_enum_retag"), two(xt, tag));
     }
     if small {
-        // Same payload words, new tag: a copy of the whole value.
-        words := enum_words(&mut c, base_type(&mut c, from));
+        // Same payload words, new tag: a copy of the value, as many words as both layouts have.
+        mut words = enum_words(&mut c, base_type(&mut c, from));
+        if enum_words(&mut c, base_type(&mut c, ty)) < words {
+            words = enum_words(&mut c, base_type(&mut c, ty));
+        }
         n := frame_alloc(&mut c, enum_words(&mut c, base_type(&mut c, ty)));
         get(&mut c, xt, view("%rdx"));
         get(&mut c, n, view("%rcx"));
@@ -46150,8 +46153,16 @@ fn propagate_union<a>(c: (&a mut C), x: Val, unwrap: u64) -> Val {
         mark(&mut c, endmap);
         validate_return(&mut c, val(xt, x.ty));
         move_out(&mut c, val(xt, x.ty));
+        // The object now carries the result's tag; when the two unions are laid out differently (an
+        // inline `u64 | E` propagated into a boxed `string | E`, or inline ones of different sizes)
+        // it is rebuilt in the result's layout.
+        mut out = xt;
+        if (framed(&mut c, x.ty) || framed(&mut c, result)) && (same_type(&mut c, x.ty, result) == 0) {
+            tag := word_load(&mut c, xt, 0, 0);
+            out = retag_enum(&mut c, xt, tag, result, x.ty);
+        }
         cleanup(&mut c, 0);
-        return_value(&mut c, xt, x.ty);
+        return_value(&mut c, out, result);
         o(&mut c, view("leave\nret\n"));
     }
     mark(&mut c, ok);
