@@ -9,6 +9,7 @@ use machine;
 use optimize;
 use llvm;
 use cli;
+use asm_x86;
 
 // Direct Linux native compiler: one checked word stream, target instruction selection in machine.grl.
 // Usage: native OUT.s ENTRY.grl [MODULE.grl...]. The first public function of the
@@ -1023,6 +1024,9 @@ struct C {
     fn_id: u8[],
     // `--fn-cache-quiet`: use the store, print no report line.
     fn_quiet: u64,
+    // `--object PATH`: assemble in this process (compiler/asm_x86.grl) and write the object to PATH;
+    // the assembly file then carries only the `// grail-link:` notes the driver reads.
+    object: u8[],
     fn_flags: u8[],
     fn_surface: u8[],
     fn_at_file: u64,
@@ -1545,8 +1549,63 @@ fn write_image<a, b, d>(c: (&a mut C), path: &b [u8], image: &d [u8]) -> u64 {
     if c.split != 0 {
         return write_parts(&mut c, view(path), view(image));
     }
-    if x86_atomics(&mut c, view(image)) {
-        return host::write_file(view(path), view(with_link_notes(&c.libs, view(machine::atomics_x86(view(image))))));
+    // The in-process assembler lowers `atom.` lines as it reads them; text for clang is lowered here.
+    if (c.object.len() == 0) && x86_atomics(&mut c, view(image)) {
+        lowered := machine::atomics_x86(view(image));
+        return write_assembled(&mut c, view(path), view(lowered));
+    }
+    return write_assembled(&mut c, view(path), view(image));
+}
+// The object for `image`. A build that names its compiler (`--fn-cache-id`, the driver's builds)
+// keeps the function units of each object beside it (`OBJ.units`, headed by that identity) and
+// replays the ones whose text did not move (asm_x86, function units). `GRAIL_ASM_UNITS_VERIFY=1`
+// also assembles without them and refuses a difference.
+fn assemble_object<a, b>(c: (&a mut C), image: &b [u8]) -> asm_x86::Result {
+    if c.fn_id.len() == 0 {
+        return asm_x86::assemble(copy_bytes(view(image)));
+    }
+    mut pack_path = copy_bytes(view(c.object));
+    push_bytes(&mut pack_path, view(".units"));
+    mut header = copy_bytes(view("grail-units 1 "));
+    push_bytes(&mut header, view(c.fn_id));
+    header.push(10);
+    mut previous = u8[];
+    if host::exists(view(pack_path)) != 0 {
+        pack := host::read_file(view(pack_path));
+        if (pack.len() >= header.len()) && same(view(pack[0: header.len()]), view(header)) {
+            previous.append(pack[header.len(): pack.len()]);
+        }
+    }
+    r := asm_x86::assemble_units(copy_bytes(view(image)), previous);
+    if r.error.len() != 0 {
+        return r;
+    }
+    if host::env(view("GRAIL_ASM_UNITS_VERIFY")).len() != 0 {
+        plain := asm_x86::assemble(copy_bytes(view(image)));
+        if !same(view(plain.object), view(r.object)) {
+            return asm_x86::Result { object: u8[], error: copy_bytes(view("an object assembled from function units differs from the plain assembly")), units: u8[], replayed: 0, encoded: 0 };
+        }
+    }
+    mut out = header;
+    push_bytes(&mut out, view(r.units));
+    host::write_file(view(pack_path), view(out));
+    return r;
+}
+// The image, as the object `--object` names (in-process assembly; the assembly file then keeps the
+// link notes alone, which is all the driver reads of it), or as assembly text.
+fn write_assembled<a, b, d>(c: (&a mut C), path: &b [u8], image: &d [u8]) -> u64 {
+    if c.object.len() != 0 {
+        r := assemble_object(&mut c, view(image));
+        if r.error.len() != 0 {
+            mut said = copy_bytes(view("the internal assembler: "));
+            push_bytes(&mut said, view(r.error));
+            fail(&mut c, view(said));
+            return 1;
+        }
+        if host::write_file(view(c.object), view(r.object)) != 0 {
+            return 1;
+        }
+        return host::write_file(view(path), view(with_link_notes(&c.libs, view(""))));
     }
     return host::write_file(view(path), view(with_link_notes(&c.libs, view(image))));
 }
@@ -17841,13 +17900,13 @@ fn fn_flags_now<a>(c: (&a mut C)) -> u8[] {
         }
         // `--check` changes no body's text or registrations (a check stops after the bodies are
         // emitted), so a check's units and a build's are the same units.
-        if same(view(w), view("--fn-cache")) || same(view(w), view("--fn-cache-id")) || same(view(w), view("--fn-cache-quiet")) || same(view(w), view("--check")) {
+        if same(view(w), view("--fn-cache")) || same(view(w), view("--fn-cache-id")) || same(view(w), view("--fn-cache-quiet")) || same(view(w), view("--check")) || same(view(w), view("--object")) {
             skip = 1;
         }
         if 0 < i {
             // `&` does not short-circuit, so the guard is its own branch: `i - 1` at 0 would wrap.
             prev := host::arg(i - 1);
-            if same(view(prev), view("--fn-cache")) || same(view(prev), view("--fn-cache-id")) {
+            if same(view(prev), view("--fn-cache")) || same(view(prev), view("--fn-cache-id")) || same(view(prev), view("--object")) {
                 skip = 1;
             }
         }
@@ -53478,6 +53537,7 @@ pub fn main() -> u64 {
         fx_body_calls: u64[],
         fn_dir: u8[],
         fn_id: u8[],
+        object: u8[],
         fn_quiet: 0,
         fn_flags: u8[],
         fn_surface: u8[],
@@ -53797,6 +53857,12 @@ pub fn main() -> u64 {
             // process state is defined once, by the run that holds the entry.
             exchange(&mut c.no_entry, 1);
             offset += 1;
+        } else if same(view(option), view("--object")) {
+            if argc < offset + 3 {
+                fail_option(&mut c, view("--object needs a file"));
+            }
+            exchange(&mut c.object, host::arg(offset + 2));
+            offset += 2;
         } else if same(view(option), view("--separate")) {
             // One object of a program (B1 stage 4): every definition global, so a part call binds
             // through the linker instead of staying a symbol of this stream.
