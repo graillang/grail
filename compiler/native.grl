@@ -7598,8 +7598,12 @@ fn in_place_record<a>(c: (&a mut C), ty: u64) -> bool {
         return false;
     }
     index := ty_arg(&mut c, ty);
+    if c.decls[index].is_enum != 0 {
+        // An inline enum that owns its active payload drops it in place too (owned_enum).
+        return owned_enum(&mut c, ty);
+    }
     d := &c.decls[index];
-    return (d.is_enum == 0) && (d.c_layout == 0);
+    return d.c_layout == 0;
 }
 fn drop_symbol<a>(c: (&a mut C), ty: u64) -> u8[] {
     while c.drop_names.len() <= ty {
@@ -30504,15 +30508,82 @@ fn owned_enum<a>(c: (&a mut C), ty: u64) -> bool {
         if (k == 3) || (k == 4) || (k == 6) {
             continue;
         }
-        if (k == 8) && (ft != ty) && framable(&mut c, ft) {
+        // A record payload that holds this enum again (`Node { next: Node? }`) would make it infinitely
+        // large: such an enum stays boxed, whichever of the two is laid out first.
+        if (k == 8) && (ft != ty) && !reaches(&mut c, ft, ty, 0) && framable(&mut c, ft) {
             continue;
         }
         return false;
     }
     return true;
 }
+// Whether the record or enum `from` holds `target` by value, directly or through records and enums it
+// holds by value (a vector, a string or a reference is a pointer and ends the walk).
+fn reaches<a>(c: (&a mut C), from: u64, target: u64, depth: u64) -> bool {
+    t := base_type(&mut c, from);
+    if t == target {
+        return true;
+    }
+    if (depth > 12) || (ty_kind(&mut c, t) != 8) {
+        return depth > 12;
+    }
+    index := ty_arg(&mut c, t);
+    if c.decls[index].c_layout != 0 {
+        return false;
+    }
+    count := c.decls[index].count;
+    for i in count {
+        ft := base_type(&mut c, field_type(&mut c, t, i));
+        if (ty_kind(&mut c, ft) == 8) && reaches(&mut c, ft, target, depth + 1) {
+            return true;
+        }
+    }
+    return false;
+}
 fn inline_enum<a>(c: (&a mut C), ty: u64) -> bool {
     return small_enum(&mut c, ty) || owned_enum(&mut c, ty);
+}
+// An enum the runtime built as a heap block {tag, payload word} (a task's outcome), as the type's own
+// representation: a boxed enum stays the block; an inline one is copied into frame words - a record
+// payload, which the block holds as a box of its own, is copied in and that box freed - and the
+// block is freed.
+fn enum_from_block<a>(c: (&a mut C), block: u64, ty: u64) -> u64 {
+    if !framed(&mut c, ty) {
+        return block;
+    }
+    ety := base_type(&mut c, ty);
+    words := enum_words(&mut c, ety);
+    n := frame_alloc(&mut c, words);
+    get(&mut c, block, view("%rcx"));
+    get(&mut c, n, view("%rdx"));
+    o(&mut c, view("movq (%rcx),%rax\nmovq %rax,(%rdx)\nmovq 8(%rcx),%rax\nmovq %rax,8(%rdx)\n"));
+    d := ty_arg(&mut c, ety);
+    count := c.decls[d].count;
+    done := label(&mut c);
+    for j in count {
+        pj := field_type(&mut c, ety, j);
+        if inline_payload(&mut c, ety, pj) {
+            next := label(&mut c);
+            get(&mut c, block, view("%rax"));
+            o(&mut c, view("cmpq $"));
+            on(&mut c, j);
+            o(&mut c, view(",(%rax)\n"));
+            jump(&mut c, view("jne"), next);
+            // word 1 of the block is the payload's box: its bytes go to words 1.. of the value.
+            get(&mut c, n, view("%rax"));
+            o(&mut c, view("leaq 8(%rax),%rax\n"));
+            at := save(&mut c);
+            boxw := word_load(&mut c, block, 1, 0);
+            bytes := imm(&mut c, value_bytes(&mut c, base_type(&mut c, pj)));
+            invoke(&mut c, view("rt_copy_bytes"), three(at, boxw, bytes));
+            invoke(&mut c, view("rt_free"), one(boxw));
+            jump(&mut c, view("jmp"), done);
+            mark(&mut c, next);
+        }
+    }
+    mark(&mut c, done);
+    invoke(&mut c, view("rt_free"), one(block));
+    return n;
 }
 // The words of a small enum: the tag, then the largest payload.
 fn enum_words<a>(c: (&a mut C), ty: u64) -> u64 {
@@ -30822,10 +30893,8 @@ fn retag_enum<a>(c: (&a mut C), xt: u64, tag: u64, ty: u64, from: u64) -> u64 {
         o(&mut c, view("movq %rax,(%rcx)\n"));
         return n;
     }
-    payload := word_load(&mut c, xt, 1, 0);
-    n := enum_frame(&mut c, tag, payload, ty, 1);
-    invoke(&mut c, view("rt_free"), one(xt));
-    return n;
+    retagged := invoke(&mut c, view("rt_enum_retag"), two(xt, tag));
+    return enum_from_block(&mut c, retagged, ty);
 }
 fn free_enum_shell<a>(c: (&a mut C), xt: u64, ty: u64) -> unit {
     if !framed(&mut c, ty) {
@@ -40468,8 +40537,9 @@ fn try_join_builtin<a>(c: (&a mut C), handle: Val) -> Val {
     if c.raw == 0 {
         move_out(&mut c, handle);
     }
-    slot := invoke(&mut c, view("rt_task_outcome"), one(value));
+    boxed := invoke(&mut c, view("rt_task_outcome"), one(value));
     ty := task_outcome_type(&mut c, result);
+    slot := enum_from_block(&mut c, boxed, ty);
     return own(&mut c, slot, ty);
 }
 // `task_fail(text)`: fail the running task explicitly. Contained like a failed check - a value at

@@ -1,0 +1,94 @@
+// Enums whose payloads own memory (a string, a vector of themselves) held inline as {tag, payload
+// words}: built, returned (`T |? E`), stored in records and vectors, matched by value and by
+// reference, moved out, replaced, and every owned payload dropped exactly once (leak check).
+enum Node {
+    Leaf(u64),
+    Name(string),
+    List(Node[])
+}
+struct Bad {
+    at: u64,
+    why: u64
+}
+struct Entry {
+    key: string,
+    node: Node
+}
+fn weight(n: &Node) -> u64 {
+    match n {
+        Leaf(v) => { return v; },
+        Name(s) => { return s.len(); },
+        List(items) => {
+            mut t = 0;
+            for i in items.len() {
+                t += weight(&items[i]);
+            }
+            return t;
+        },
+    }
+}
+fn build(depth: u64) -> Node {
+    if depth == 0 {
+        return Node::Name("leaf");
+    }
+    mut items = Node[];
+    items.push(Node::Leaf(depth));
+    items.push(build(depth - 1));
+    items.push(Node::Name("x"));
+    return Node::List(items);
+}
+fn parse(text: &[u8]) -> Node |? Bad {
+    if text.len() == 0 {
+        return Bad { at: 0, why: 1 };
+    }
+    if text[0] == 35 {
+        return Node::Leaf(text.len());
+    }
+    mut s = "";
+    for i in text.len() {
+        s.append(format("{}", text[i] - 48));
+    }
+    return Node::Name(s);
+}
+fn twice(text: &[u8]) -> u64 |? Bad {
+    n := parse(text)?;
+    return weight(&n) * 2;
+}
+fn main() {
+    tree := build(4);
+    println(weight(&tree));
+    mut entries = Entry[];
+    for i in 3 {
+        entries.push(Entry { key: format("k{}", i), node: build(i) });
+    }
+    mut total = 0;
+    for e in &entries {
+        total += weight(&e.node) + e.key.len();
+    }
+    println(total);
+    removed := entries.remove(1);
+    println("{} {}", removed.key, weight(&removed.node));
+    entries[0].node = Node::Name("replaced");
+    println(weight(&entries[0].node));
+    mut nodes = Node[];
+    nodes.push(Node::Name("a"));
+    nodes.push(build(2));
+    while let Some(n) = nodes.pop() {
+        println(weight(&n));
+    }
+    for t in 3 {
+        mut input = u8[];
+        if t == 1 {
+            input.push(35);
+            input.push(35);
+        }
+        if t == 2 {
+            input.push(49);
+            input.push(50);
+        }
+        match twice(&input) {
+            u64(v) => { println("ok {}", v); },
+            Bad(b) => { println("bad {} {}", b.at, b.why); },
+        }
+    }
+}
