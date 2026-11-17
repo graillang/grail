@@ -30,6 +30,14 @@ length and the grain only, never on the number of cores, so a floating-point `re
 same bits on a laptop and on a 64-core server. See
 `docs/design/parallelism.md`.
 
+### Parallel loops
+
+A parallel loop in Grail never asks the compiler to prove that two workers touch different
+elements. The library *constructs* the split instead - from the length and a grain alone, the same
+pieces on any machine - and hands each worker exclusive slices of its own piece, so the ordinary
+borrow rules do the rest: nothing else in the program can reach the data while the loop runs, and
+an index past a piece is a bounds check, never a write into a neighbour's.
+
 `parallel_split(&mut data[a: b], grain, f)` is the in-place form of the owned one: the compiler
 splits an exclusive slice into disjoint exclusive pieces of at most `grain` elements and hands each
 job `&mut [T]` over its own elements, so nothing is moved or copied - the same 3M-element pass that
@@ -61,6 +69,11 @@ pool::zip3(&mut pos[0: n], &vel[0: n], &mut life[0: n], 4096,
         }
     });
 ```
+
+`pool::chunks_mut_at(&mut xs[0: n], grain, |base: u64, s: &mut [T]| -> unit { .. })` is `split_mut`
+with each piece's first index, so `s[i]` is `xs[base + i]`. `pool::reduce_chunks(&xs[0: n], grain,
+zero, leaf, merge)` is the read-only reduction: `leaf` per piece, the results folded in index order,
+so a floating-point sum has the same bits on one worker and on sixteen.
 
 `left, right := split_at_mut(s, mid)` cuts one exclusive slice into its two halves, `s[0: mid]` and
 `s[mid: len]`, and checks `mid <= s.len()` as it runs. Both halves can be used, written and passed on

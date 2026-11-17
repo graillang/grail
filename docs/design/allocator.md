@@ -150,3 +150,12 @@ the two smallest classes is cleared with fixed stores, and the own-mapping free 
 38 per allocation - the pop or bump is about 20, the rest clearing a reused block for the bytes asked
 for, which callers depend on - and about 30 per free, wrapper included. The process went from
 4.88 G to 3.86 G instructions (-21%), the whole check's CPU time from 3.21 s to 2.89 s.
+
+## Not done: a remote-free queue
+
+mimalloc returns a block freed on another thread to its owner through a per-thread MPSC queue.
+Measured here first (LLVM backend, callgrind, `bench/alloc_handoff.grl`, where the main thread
+frees every block the workers allocated): a remote free costs about 43 instructions, the freeing
+thread's cache spilling a whole chain under the lock once per ~128 blocks (~2 instructions per free
+amortised); an allocation 66. A queue would change where blocks end up (locality), not the
+instruction count, so it waits for a contention case measured on a quiet machine.

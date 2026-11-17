@@ -1,0 +1,89 @@
+// mul_add is fused and exact on every target and backend (docs/design/simd.md, S4): f32x4 and f64x2
+// lanes of pseudo-random triples - raw bit patterns, edge values (zeros, infinities, NaN,
+// subnormals, the largest finite values) and c = -(a * b), which makes the result the product's
+// rounding error - against C's fmaf/fma. tests/simd/fma_reference.c computes the same checksum on
+// the host; every target and backend must print it. NaN results count as one NaN.
+fn next<a>(s: (&a mut u64)) -> u64 {
+    mut x = load(s);
+    x = x ^ (x >> 12);
+    x = x ^ (x << 25);
+    x = x ^ (x >> 27);
+    exchange(s, x);
+    return wrapping_mul(x, 2685821657736338717);
+}
+fn pick32<a>(s: (&a mut u64)) -> u32 {
+    r := next(&mut s);
+    edges := u32[0, 2147483648, 2139095040, 4286578688, 2143289344, 1, 2155872256, 2139095039, 1065353216, 8388608, 3212836864, 1073741824];
+    if r % 8 == 0 {
+        return edges[(r >> 8) % 12];
+    }
+    if r % 8 == 1 {
+        // A small exponent range, so that sums cancel and products land near the subnormals.
+        return u32(((r >> 8) & 2155872255) | (((r >> 40) % 40 + 100) << 23));
+    }
+    return u32(r >> 32);
+}
+fn pick64<a>(s: (&a mut u64)) -> u64 {
+    r := next(&mut s);
+    edges := u64[0, 9223372036854775808, 9218868437227405312, 18442240474082181120, 9221120237041090560, 1, 9223372036854775809, 9218868437227405311, 4607182418800017408, 4503599627370496, 13830554455654793216, 4611686018427387904];
+    if r % 8 == 0 {
+        return edges[(r >> 8) % 12];
+    }
+    if r % 8 == 1 {
+        return (r & 9227875636482146303) | (((r >> 40) % 80 + 500) << 52);
+    }
+    return next(&mut s);
+}
+fn mix(h: u64, v: u64) -> u64 {
+    return wrapping_mul(h ^ v, 1099511628211);
+}
+fn nan32(b: u32) -> u64 {
+    if ((b & 2139095040) == 2139095040) && ((b & 8388607) != 0) {
+        return 2143289344;
+    }
+    return u64(b);
+}
+fn nan64(b: u64) -> u64 {
+    if ((b & 9218868437227405312) == 9218868437227405312) && ((b & 4503599627370495) != 0) {
+        return 9221120237041090560;
+    }
+    return b;
+}
+fn main() {
+    mut s: u64 = 88172645463325252;
+    mut h: u64 = 14695981039346656037;
+    for i in 50000 {
+        mut a: [u32; 4] = [0, 0, 0, 0];
+        mut b: [u32; 4] = [0, 0, 0, 0];
+        mut c: [u32; 4] = [0, 0, 0, 0];
+        for k in 4 {
+            a[k] = pick32(&mut s);
+            b[k] = pick32(&mut s);
+            c[k] = pick32(&mut s);
+        }
+        va := f32x4::from_bits(u32x4::load(&a, 0));
+        vb := f32x4::from_bits(u32x4::load(&b, 0));
+        mut vc = f32x4::from_bits(u32x4::load(&c, 0));
+        if i % 4 == 3 {
+            // c = -(a * b): the fused result is the product's rounding error.
+            vc = f32x4::splat(0.0) - va * vb;
+        }
+        mut r: [u32; 4] = [0, 0, 0, 0];
+        va.mul_add(vb, vc).bits().store(&mut r, 0);
+        for k in 4 {
+            h = mix(h, nan32(r[k]));
+        }
+        wa := f64x2::new(f64_from_bits(pick64(&mut s)), f64_from_bits(pick64(&mut s)));
+        wb := f64x2::new(f64_from_bits(pick64(&mut s)), f64_from_bits(pick64(&mut s)));
+        mut wc = f64x2::new(f64_from_bits(pick64(&mut s)), f64_from_bits(pick64(&mut s)));
+        if i % 4 == 1 {
+            wc = f64x2::splat(0.0) - wa * wb;
+        }
+        mut q: [i64; 2] = [0, 0];
+        wa.mul_add(wb, wc).bits().store(&mut q, 0);
+        for k in 2 {
+            h = mix(h, nan64(bits(q[k])));
+        }
+    }
+    println(h);
+}
