@@ -1234,6 +1234,8 @@ struct C {
     dr_ct: u64,
     // Bodies applied from the record in this run (GRAIL_DEBUG reports it).
     dr_hits: u64,
+    // The unit-store entries this run read or filed (fncache::note_used), for the store's GC.
+    fn_used: u8[][],
     // Armed (par_start) but not forked yet: the walk forks when par_decide finds the rest worth it,
     // over the source still ahead of it (par_fork).
     par_armed: u64,
@@ -20881,6 +20883,7 @@ fn par_worker_finish<a>(c: (&a mut C)) -> unit {
         end = (end % 72057594037927936) * 256;
     }
     c.par_buf.append(view(tail));
+    fn_note_used(&mut c);
     host::write_fd(c.par_wfd, view(c.par_buf));
     host::close(c.par_wfd);
     host::exit(0);
@@ -20979,6 +20982,7 @@ fn dr_load<a>(c: (&a mut C), files: u64) -> unit {
         }
         i += 1;
     }
+    c.fn_used.push(name.copy());
     exchange(&mut c.dr_at, 0);
     exchange(&mut c.dr_on, 1);
     return ();
@@ -21040,6 +21044,17 @@ fn dr_save<a>(c: (&a mut C)) -> unit {
     push_bytes(&mut name, view(fncache::hash(view(c.dr_key))));
     u := fncache::Unit { key: c.dr_key.copy(), text: text, facts: u8[], regs: u8[] };
     fncache::save(view(c.fn_dir), view(name), &u);
+    c.fn_used.push(name);
+    return ();
+}
+// The entries this run used, written once (fncache::note_used): at the end of the bodies pass, and
+// by a body worker before it stops.
+fn fn_note_used<a>(c: (&a mut C)) -> unit {
+    if c.fn_dir.len() == 0 {
+        return ();
+    }
+    names := exchange(&mut c.fn_used, u8[][]);
+    fncache::note_used(view(c.fn_dir), &names);
     return ();
 }
 // The fast path: the body whose `fn` is token `position`, if the record has it unmoved. Returns
@@ -21111,6 +21126,7 @@ fn dr_fast<a>(c: (&a mut C), position: u64, claim_alloc: u64, claim_panic: u64, 
     c.fn_hits = c.fn_hits + 1;
     c.dr_hits = c.dr_hits + 1;
     name := c.dr_name[k].copy();
+    c.fn_used.push(name.copy());
     dr_note(&mut c, position, last, ord, view(unit), view(name), view(rbytes));
     exchange(&mut c.pos, last + 1);
     return true;
@@ -21683,6 +21699,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                         llvm::facts_truncate(&mut c.facts, fact_mark);
                         fn_apply(&mut c, &hit, &regs, fn_line, position, claimed_alloc, claimed_panic, claimed_block);
                         hit_name := fncache::hash(view(key));
+                        c.fn_used.push(hit_name.copy());
                         hit_regs := hit.regs.copy();
                         dr_note(&mut c, position, end, hit_ord, view(unit), view(hit_name), view(hit_regs));
                         if par_outcome == 1 {
@@ -22130,7 +22147,9 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             // The file's name is the key's hash; the key record itself travels inside the entry,
             // so two keys that collide make a miss and never a wrong hit.
             if c.fn_dir.len() != 0 {
-                fncache::save(view(c.fn_dir), view(fncache::hash(view(produced.key))), &produced);
+                filed_name := fncache::hash(view(produced.key));
+                fncache::save(view(c.fn_dir), view(filed_name), &produced);
+                c.fn_used.push(filed_name);
                 c.fn_filed = c.fn_filed + 1;
             }
             if par_mine != 0 {
@@ -61040,6 +61059,7 @@ pub fn main() -> u64 {
         dr_key: u8[],
         dr_ct: 0,
         dr_hits: 0,
+        fn_used: u8[][],
         par_armed: 0,
         par_t0: 0,
         par_p0: 0,
@@ -61684,6 +61704,7 @@ pub fn main() -> u64 {
             jobs::phase(view("bodies"));
             par_end(&mut c);
             dr_save(&mut c);
+            fn_note_used(&mut c);
             jobs::phase(view("bodies-workers-collected"));
         }
         // The definition sweep for the interfaces read above, once every module's names exist.

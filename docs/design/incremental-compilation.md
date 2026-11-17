@@ -424,6 +424,18 @@ modules that read it are not run and print one line each; the modules that do no
 still checked. There is no whole-program fallback: an edit with a type error is the commonest
 check, and it must not be the slowest. `tools/cache-test.mjs` (m) is the proof.
 
+### The store's GC
+
+Each compiler run (and each optimiser piece) writes one use list into `fn/used/`, of `GENERATION
+NAME` lines for every unit, `dr-` record and `opt-` memo entry it read or filed
+(fncache::note_used); `map/` records keep their `.used` stamps. `cache_gc` (cli.grl) measures the
+store and, over the cap, evicts whole generations oldest first - never the newest - until it is
+under three quarters of the cap, then the blobs no remaining record names, and folds the use lists
+into one. `grail cache gc [--max BYTES]` runs it by hand; a build runs it every
+`GRAIL_CACHE_GC_EVERY` (8) builds against `GRAIL_CACHE_MAX` (2 GiB). An eviction is only ever a
+miss. `tools/cache-test.mjs` (p): 25 edits under a cap of 1.3 times a cold build stay under it, and
+a warm build after `grail cache gc` is the image an empty store gives.
+
 ### Not yet: effects
 
 Any effect claim (`@no_alloc`, `@no_panic`) turns units off for the whole run, so a program with

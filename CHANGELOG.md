@@ -108,6 +108,12 @@
   passes to `rt_f64_op` (tracked through registers and frame slots), refuses a fact naming another
   operation, and lowers a call without a fact to the one IEEE double operation the runtime
   performs, with one result word in %rax and nothing written to %rdx.
+- The build store no longer grows without bound. Every unit, body record and optimiser memo entry
+  has a last use (each compiler run writes one use list), `grail cache gc [--max BYTES]` evicts the
+  least recently used entries until the store is under the cap, and a build checks the cap itself
+  every 8th build (`GRAIL_CACHE_MAX`, 2 GiB by default; `GRAIL_CACHE_GC_EVERY`). An evicted entry is
+  only ever a miss. 25 one-body edits of a 40-function module grew the store from 7.1 to 22.9 MB;
+  with a cap of 1.3 times the cold build it ends at 6.9 MB.
 
 - **`bench-rivals` no longer charts a build that printed the wrong answer.** It already failed the
   run when a build's output differed from C's, but still wrote that build's figures into the

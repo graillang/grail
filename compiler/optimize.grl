@@ -1,4 +1,5 @@
 module optimize;
+use fncache;
 use ir;
 use jobs;
 use xxhash;
@@ -6519,6 +6520,16 @@ fn copy_texts<a>(v: (&a u8[][])) -> u8[][] {
 // Optimise the whole lines of `s[lo..hi]` into `o.out`. Returns where the last whole line ended.
 // The bodies the front end noted (o.known) are taken as they are noted; the text between them -
 // part markers, `.gbase` lines, bodies that are not units, data - is scanned line by line.
+// The memo entry's name in its directory: what follows the last `/`.
+fn memo_name<a>(file: &a [u8]) -> u8[] {
+    mut at = file.len();
+    while (0 < at) && (file[at - 1] != 47) {
+        at -= 1;
+    }
+    mut out = u8[];
+    out.append(file[at..file.len()]);
+    return out;
+}
 fn run_range<a, b, c, e, x>(o: (&a mut ir::Body), s: &b [u8], lo: u64, hi: u64, split: u64, marks: (&mut u64[]), names: (&mut u8[][]), facts: (&c llvm::Facts), ix: (&x ir::FactIndex), want_ir: u64, ir_text: (&mut u8[]), call_syms: (&mut u8[][]), call_counts: (&mut u64[])) -> u64 {
     mut cursor = lo;
     // The first noted body at or after `lo`.
@@ -6550,7 +6561,11 @@ fn run_range<a, b, c, e, x>(o: (&a mut ir::Body), s: &b [u8], lo: u64, hi: u64, 
         cursor = e;
         k += 1;
     }
-    return scan_range(&mut o, view(s), cursor, hi, split, marks, names, facts, ix, want_ir, ir_text, call_syms, call_counts);
+    done := scan_range(&mut o, view(s), cursor, hi, split, marks, names, facts, ix, want_ir, ir_text, call_syms, call_counts);
+    // What this piece used, once (the store's GC reads it).
+    used := exchange(&mut o.memo_used, u8[][]);
+    fncache::note_used(view(o.memo_dir), &used);
+    return done;
 }
 fn scan_range<a, b, c, e, x>(o: (&a mut ir::Body), s: &b [u8], lo: u64, hi: u64, split: u64, marks: (&mut u64[]), names: (&mut u8[][]), facts: (&c llvm::Facts), ix: (&x ir::FactIndex), want_ir: u64, ir_text: (&mut u8[]), call_syms: (&mut u8[][]), call_counts: (&mut u64[])) -> u64 {
     mut start = lo;
@@ -6669,6 +6684,7 @@ fn one_body<a, b, c, e, x, y>(o: (&a mut ir::Body), s: &b [u8], from: u64, to: u
                     }
                     call_syms.push(o.name.copy());
                     call_counts.push(count);
+                    o.memo_used.push(memo_name(view(file)));
                     return ();
                 }
             }
@@ -6720,6 +6736,7 @@ fn one_body<a, b, c, e, x, y>(o: (&a mut ir::Body), s: &b [u8], from: u64, to: u
             host::exit(1);
         }
         host::write_file(view(file), view(kept));
+        o.memo_used.push(memo_name(view(file)));
     }
     ir::reset(&mut o);
 }
