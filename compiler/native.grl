@@ -763,6 +763,8 @@ struct C {
     statics: Static[],
     ct_calls: CtCall[],
     ct_done: CtDone[],
+    // The module-binding guards a probe compile has defined (static_probe_init).
+    ct_guards: u8[][],
     // Where the batch probe writes the bodies each value reached (ct_write_deps), or empty.
     ct_deps_path: u8[],
     // Where a static read parks the result of a call it makes only for its effect.
@@ -932,6 +934,11 @@ struct C {
     // trusting either side. Nothing here changes the whole-program path when all three are off.
     iface_dir: u8[],
     iface_use: u8[],
+    // `--use-vouched`: the interfaces in the `--use` directory were written by this build's own runs
+    // or restored from store blobs whose bytes matched their content digest, so a load does not
+    // hash each one again to check its trailer (iface_seal). A user's `--use DIR` has no such
+    // promise and keeps the check.
+    iface_vouched: u64,
     // `--use-named` and `--use-module NAME` (repeatable): the modules whose interfaces this run
     // reads from the `--use` directory, in this order, and no others. A build that compiles modules at the same time names
     // them (the modules this one uses, and theirs), so a run neither depends on nor opens an
@@ -22967,6 +22974,22 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
         push_bytes(&mut keyed, view(host::read_file(view(path))));
         fi += 1;
     }
+    // A module of a separate build reads the runtime as an interface; the probe links alone, so it
+    // compiles the runtime's sources (the ones the driver would).
+    mut has_runtime = false;
+    for i in files.len() {
+        if ct_list_has_sub(view(files[i]), view("runtime.grl")) {
+            has_runtime = true;
+        }
+    }
+    if !has_runtime {
+        extra := cli::probe_runtime_sources();
+        for i in extra.len() {
+            files.push(extra[i].copy());
+            push_bytes(&mut keyed, view(extra[i]));
+            push_bytes(&mut keyed, view(host::read_file(view(extra[i]))));
+        }
+    }
     // The files the module roots added are inputs of the value too: the probe is compiled with the
     // same roots, so a change to a resolved module changes what the call computes.
     for i in c.mod_files.len() {
@@ -22995,6 +23018,7 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
         probe_src := path_cat(view(path_cat(view(dir), view(tag))), view(".probe.grl"));
         probe_s := path_cat(view(path_cat(view(dir), view(tag))), view(".probe.s"));
         probe_exe := path_cat(view(path_cat(view(dir), view(tag))), view(".probe"));
+        probe_o := path_cat(view(path_cat(view(dir), view(tag))), view(".probe.o"));
         value_tmp := path_cat(view(path_cat(view(dir), view(tag))), view(".value"));
         host::write_file(view(probe_src), view(probe));
         self := host::exe_path();
@@ -23020,7 +23044,11 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
         // of a probe's compile and are the same in every probe (comptime-speed.md); a probe never
         // replays a normal compile's bodies, whose static reads are compiled differently.
         push_bytes(&mut cmd, view(" --fn-cache .work/comptime/fn --fn-cache-quiet"));
-        push_bytes(&mut cmd, view(" --target x86_64 --comptime-probe "));
+        // Assembled in process (`--object`), as a build is: a probe needs no C toolchain, only the
+        // linker a build uses.
+        push_bytes(&mut cmd, view(" --target x86_64 --object "));
+        push_bytes(&mut cmd, view(ct_shell_quote(view(probe_o))));
+        push_bytes(&mut cmd, view(" --comptime-probe "));
         push_bytes(&mut cmd, view(ct_shell_quote(view(probe_s))));
         cmd.push(32);
         push_bytes(&mut cmd, view(ct_shell_quote(view(probe_src))));
@@ -23080,17 +23108,19 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
             }
             fail(&mut c, view("compile-time code cannot call C: the call reaches an extern function"));
         }
-        mut cc = host::env(view("GRAIL_CC"));
-        if cc.len() == 0 {
-            cc = copy_bytes(view("cc"));
+        // Linked as a build links (cli.grl link_objects): the linker GRAIL_LINKER names, ld.lld by
+        // default; the probe is one static object with no libraries.
+        mut ld = host::env(view("GRAIL_LINKER"));
+        if ld.len() == 0 {
+            ld = copy_bytes(view("ld.lld"));
         }
-        mut link = u8[][cc, copy_bytes(view("-nostdlib")), copy_bytes(view("-static")), copy_bytes(view("-o")), probe_exe.copy(), probe_s.copy()];
+        mut link = u8[][ld, copy_bytes(view("-m")), copy_bytes(view("elf_x86_64")), copy_bytes(view("-static")), probe_o.copy(), copy_bytes(view("-o")), probe_exe.copy()];
         if host::command(link) != 0 {
             if soft != 0 {
                 exchange(status_out, 1);
                 return u8[];
             }
-            fail(&mut c, view("compile-time call: linking the probe failed (needs cc)"));
+            fail(&mut c, view("compile-time call: linking the probe failed (needs ld.lld, as a build does)"));
         }
         mut run = copy_bytes(view("GRAIL_COMPTIME=1 timeout 30 "));
         push_bytes(&mut run, view(ct_shell_quote(view(probe_exe))));
@@ -23144,7 +23174,7 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
         }
         mut mv = u8[][copy_bytes(view("mv")), copy_bytes(view("-f")), value_tmp.copy(), out_path.copy()];
         host::command(mv);
-        mut tidy = u8[][copy_bytes(view("rm")), copy_bytes(view("-f")), probe_src.copy(), probe_s.copy(), probe_exe.copy(), err_tmp.copy()];
+        mut tidy = u8[][copy_bytes(view("rm")), copy_bytes(view("-f")), probe_src.copy(), probe_s.copy(), probe_o.copy(), probe_exe.copy(), err_tmp.copy()];
         host::command(tidy);
     }
     if host::exists(view(out_path)) == 0 {
@@ -24259,6 +24289,14 @@ fn static_pending_here<a, b>(m: &a [u8], n: &b [u8]) -> bool {
     pending := host::env(view("GRAIL_COMPTIME_PENDING"));
     return ct_list_has(view(pending), view(key));
 }
+fn ct_list_contains<a, b>(list: (&a u8[][]), item: &b [u8]) -> bool {
+    for i in list.len() {
+        if same(view(list[i]), item) {
+            return true;
+        }
+    }
+    return false;
+}
 fn static_guard_symbol<a, b>(m: &a [u8], n: &b [u8]) -> u8[] {
     mut out = copy_bytes(view("g_"));
     push_bytes(&mut out, m);
@@ -24282,10 +24320,10 @@ fn static_probe_init<a, b, d, e>(c: (&a mut C), m: &b [u8], n: &d [u8], sym: &e 
     cycle_sym := mangle_name(&mut c, view("grail_probe"), view(cycle_fn));
     done := label(&mut c);
     start := label(&mut c);
-    if memo == 0 {
-        o(&mut c, view(".comm "));
-        o(&mut c, view(guard));
-        o(&mut c, view(",8,8\n"));
+    if (memo == 0) && !ct_list_contains(&c.ct_guards, view(guard)) {
+        // A module binding's guard: defined once, with the entry stub (the internal assembler has
+        // no `.comm`, and a data section in the middle of a body would cut it).
+        c.ct_guards.push(guard.copy());
     }
     o(&mut c, view("movq "));
     o(&mut c, view(guard));
@@ -24826,6 +24864,10 @@ fn static_emit<a, b>(c: (&a mut C), i: u64, ready: u64, value: u64, text: &b [u8
     o(&mut c, view("\n.popsection\n"));
     return ();
 }
+// Whether the initialiser is a vector literal: `u64[` (an element type, then the bracket).
+fn static_vector_literal_ahead<a>(c: (&a mut C)) -> bool {
+    return (kind(&mut c) == 1) && (kind_at(&mut c, c.pos + 1) == 91);
+}
 fn static_skip_item<a>(c: (&a mut C)) -> unit {
     while !is(&mut c, view(";")) {
         if kind(&mut c) == 0 {
@@ -25058,6 +25100,51 @@ fn static_resolve<a>(c: (&a mut C), i: u64) -> unit {
         fail(&mut c, view("a float static is not built yet; use `const NAME: f64 = ...;`"));
     } else if ct_call_ahead(&mut c) {
         fail(&mut c, view("this call would run when the program runs: a static with a run-time initialiser is the lazy tier, which is not built yet; write `@f(...)` to compute it while compiling"));
+    } else if (ct_seq_elem(&mut c, ty) != NO_TYPE) && static_vector_literal_ahead(&mut c) {
+        // `u64[1, 2, -3]`: a table of constant expressions, laid out as the run tier lays a table
+        // out (the element's C width), with no probe - the form the compiler's own sources use.
+        elem := ct_seq_elem(&mut c, ty);
+        width := ffi_field_size(&mut c, elem);
+        while !is(&mut c, view("[")) {
+            advance(&mut c);
+        }
+        expect(&mut c, view("["));
+        mut n = 0;
+        while !is(&mut c, view("]")) {
+            mut v = 0;
+            if eat(&mut c, view("-")) {
+                if kind(&mut c) != 2 {
+                    fail(&mut c, view("only an integer literal can be negated in a static's initialiser"));
+                }
+                t := tok_text(&mut c, c.pos);
+                lit := literal_value(&mut c, view(t));
+                if literal_fits(&mut c, elem, lit, 1) == 0 {
+                    fail(&mut c, view(literal_range_msg_v(&mut c, elem, lit, 1)));
+                }
+                advance(&mut c);
+                v = wrapping_sub(0, lit);
+            } else {
+                at := c.pos;
+                cv := ct_expr(&mut c, 0);
+                if is_bool(&mut c, cv.ty) || (cv.ty == ct_tag_ty()) {
+                    static_refuse(&mut c, at, view("a table static's elements are integers"));
+                }
+                if literal_fits(&mut c, elem, cv.value, 0) == 0 {
+                    exchange(&mut c.pos, at);
+                    fail(&mut c, view(literal_range_msg_v(&mut c, elem, cv.value, 0)));
+                }
+                v = cv.value;
+            }
+            for b in width {
+                text.push(u8((v >> (8 * b)) & 255));
+            }
+            n += 1;
+            if !eat(&mut c, view(",")) {
+                break;
+            }
+        }
+        expect(&mut c, view("]"));
+        value = n;
     } else {
         if !(integer(&mut c, ty) || is_bool(&mut c, ty)) {
             mut msg = copy_bytes(view("a `"));
@@ -34480,6 +34567,9 @@ fn builtin_id<a>(n: &a [u8]) -> u64 {
     if same(view(n), view("raw_import")) {
         return 133;
     }
+    if same(view(n), view("raw_sites")) {
+        return 143;
+    }
     return 0;
 }
 // Calls use the target word ABI (up to six words; machine.grl selects physical registers).
@@ -34588,6 +34678,9 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
     }
     if (id == 141) || (id == 142) {
         arity = 0;
+    }
+    if id == 143 {
+        arity = 2;
     }
     if id == 112 {
         arity = 3;
@@ -35101,6 +35194,20 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         get(&mut c, args[3], view("%rdx"));
         get(&mut c, args[0], view("%rax"));
         call_slot_out(&mut c, view("call *%rax\n"), view("a call through a value the compiler did not name"));
+    }
+    if id == 143 {
+        // raw_sites(out, capacity): the site-table helper this compiler emits beside the tables
+        // (site_table), called by name - a leaf, so the effect walk follows a named edge. A build
+        // with no table has no helper and answers 0 words. The runtime moves to it from its
+        // raw_call2 through state word 3400 at the next reseed (a new intrinsic lands one reseed
+        // before its first use in the runtime: docs/testing.md).
+        if site_table_on(&c) {
+            get(&mut c, args[0], view("%rdi"));
+            get(&mut c, args[1], view("%rsi"));
+            call_out(&mut c, view("rt_sites"));
+        } else {
+            o(&mut c, view("xorl %eax,%eax\n"));
+        }
     }
     if id == 118 {
         get(&mut c, args[1], view("%rdi"));
@@ -40716,7 +40823,7 @@ fn mutex_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
 // `simd.` stream line (machine.grl "SIMD"), which LLVM lifts to vector IR and the native backend
 // expands lane by lane.
 fn simd_named<a, b>(c: (&a mut C), n: &b [u8]) -> u64 {
-    if (n.len() < 5) || (6 < n.len()) {
+    if !is_simd_name(view(n)) {
         return 0;
     }
     mut x = 0;
@@ -40725,31 +40832,14 @@ fn simd_named<a, b>(c: (&a mut C), n: &b [u8]) -> u64 {
             x = i;
         }
     }
-    if x != 3 {
-        return 0;
-    }
     head := n[0];
-    bits := n[1: 3].copy();
-    lanes := n[4:].copy();
     mut b = 0;
-    if same(view(bits), view("32")) {
-        b = 32;
-    }
-    if same(view(bits), view("64")) {
-        b = 64;
+    for i in x - 1 {
+        b = b * 10 + n[1 + i] - 48;
     }
     mut l = 0;
-    if same(view(lanes), view("2")) {
-        l = 2;
-    }
-    if same(view(lanes), view("4")) {
-        l = 4;
-    }
-    if same(view(lanes), view("8")) {
-        l = 8;
-    }
-    if (b == 0) || (l == 0) || (b * l < 128) || (256 < b * l) {
-        return 0;
+    for i in n.len() - x - 1 {
+        l = l * 10 + n[x + 1 + i] - 48;
     }
     if head == 102 {
         if b == 32 {
@@ -40757,16 +40847,16 @@ fn simd_named<a, b>(c: (&a mut C), n: &b [u8]) -> u64 {
         }
         return intern_full(&mut c, 36, float_type(&mut c), l, u64[]);
     }
-    if (head == 105) & (b == 32) {
-        return intern_full(&mut c, 36, int_type(&mut c, 32, 1), l, u64[]);
+    if head == 105 {
+        return intern_full(&mut c, 36, int_type(&mut c, b, 1), l, u64[]);
     }
-    if head == 109 {
-        return intern_full(&mut c, 36, int_type(&mut c, b, 1), l + 1024, u64[]);
+    if head == 117 {
+        return intern_full(&mut c, 36, int_type(&mut c, b, 0), l, u64[]);
     }
-    return 0;
+    return intern_full(&mut c, 36, int_type(&mut c, b, 1), l + 1024, u64[]);
 }
 fn is_simd_name<a>(n: &a [u8]) -> bool {
-    names := u8[][copy_bytes(view("f32x4")), copy_bytes(view("f32x8")), copy_bytes(view("f64x2")), copy_bytes(view("f64x4")), copy_bytes(view("i32x4")), copy_bytes(view("i32x8")), copy_bytes(view("m32x4")), copy_bytes(view("m32x8")), copy_bytes(view("m64x2")), copy_bytes(view("m64x4"))];
+    names := u8[][copy_bytes(view("f32x4")), copy_bytes(view("f32x8")), copy_bytes(view("f64x2")), copy_bytes(view("f64x4")), copy_bytes(view("i32x4")), copy_bytes(view("i32x8")), copy_bytes(view("i64x2")), copy_bytes(view("i64x4")), copy_bytes(view("u8x16")), copy_bytes(view("u8x32")), copy_bytes(view("u32x4")), copy_bytes(view("u32x8")), copy_bytes(view("m8x16")), copy_bytes(view("m8x32")), copy_bytes(view("m32x4")), copy_bytes(view("m32x8")), copy_bytes(view("m64x2")), copy_bytes(view("m64x4"))];
     for i in names.len() {
         if same(view(n), view(names[i])) {
             return true;
@@ -40812,6 +40902,8 @@ fn simd_shape<a>(c: (&a mut C), ty: u64) -> u8[] {
         out.push(109);
     } else if simd_float(&mut c, ty) {
         out.push(102);
+    } else if ty_mode(&mut c, simd_elem(&mut c, ty)) == 0 {
+        out.push(117);
     } else {
         out.push(105);
     }
@@ -40875,16 +40967,60 @@ fn simd_emit<a, b>(c: (&a mut C), op: &b [u8], shape_ty: u64, rty: u64, a: u64, 
 }
 // The vector at the address in `src` copied into the vector storage at the address in `dst`.
 fn simd_copy_to<a>(c: (&a mut C), dst: u64, src: u64, ty: u64) -> unit {
+    simd_copy_op(&mut c, view("copy"), dst, src, ty);
+    return ();
+}
+// `simd.OP SHAPE` with the destination address in `dst` and the source's in `src`: copy, or the
+// aligned copies copya (source aligned) and copyd (destination aligned).
+fn simd_copy_op<a, b>(c: (&a mut C), op: &b [u8], dst: u64, src: u64, ty: u64) -> unit {
     zero := imm(&mut c, 0);
     get(&mut c, dst, view("%rdi"));
     get(&mut c, src, view("%rsi"));
     get(&mut c, zero, view("%rdx"));
     get(&mut c, zero, view("%rcx"));
-    mut line = copy_bytes(view("simd.copy "));
+    mut line = copy_bytes(view("simd."));
+    push_bytes(&mut line, op);
+    line.push(32);
     push_bytes(&mut line, view(simd_shape(&mut c, ty)));
     line.push(10);
     o(&mut c, view(line));
     return ();
+}
+// The address in `at` checked to be a multiple of `align`, as load_aligned/store_aligned promise:
+// one test and branch, and a failure that names the address (never undefined behaviour).
+fn simd_check_aligned<a>(c: (&a mut C), at: u64, align: u64) -> unit {
+    get(&mut c, at, view("%rax"));
+    o(&mut c, view("andq $"));
+    on(&mut c, align - 1);
+    o(&mut c, view(",%rax\ncmpq $0,%rax\n"));
+    ok := label(&mut c);
+    jump(&mut c, view("je"), ok);
+    invoke(&mut c, view("rt_fail"), three(imm(&mut c, 20), at, imm(&mut c, align)));
+    mark(&mut c, ok);
+    return ();
+}
+// A literal lane index below `limit` at the cursor, read past.
+fn simd_index_literal<a>(c: (&a mut C), limit: u64) -> u64 {
+    if kind(&mut c) != 2 {
+        fail(&mut c, view("a lane index is an integer literal"));
+    }
+    text := tok_text(&mut c, c.pos);
+    mut k = 0;
+    for i in text.len() {
+        if (text[i] < 48) || (57 < text[i]) {
+            fail(&mut c, view("a lane index is an integer literal"));
+        }
+        k = k * 10 + text[i] - 48;
+    }
+    if limit <= k {
+        fail(&mut c, view("the lane index is past the last lane it can name"));
+    }
+    advance(&mut c);
+    return k;
+}
+// The vector of the same lanes and width with another element: bits()/from_bits and conversions.
+fn simd_with_elem<a>(c: (&a mut C), ty: u64, elem: u64) -> u64 {
+    return intern_full(&mut c, 36, elem, simd_lanes(&mut c, ty), u64[]);
 }
 // A scalar argument of the element type: a literal adopts it.
 fn simd_scalar_arg<a>(c: (&a mut C), elem: u64) -> u64 {
@@ -41002,19 +41138,37 @@ fn simd_static<a, b>(c: (&a mut C), ty: u64, name: &b [u8]) -> Val {
         expect(&mut c, view(")"));
         return val(dst, ty);
     }
-    if same(view(name), view("load")) && !mask {
+    if (same(view(name), view("load")) || same(view(name), view("load_aligned"))) && !mask {
         src := expr(&mut c, 0);
         expect(&mut c, view(","));
         index := simd_scalar_arg(&mut c, int_type(&mut c, 64, 0));
         expect(&mut c, view(")"));
         at := simd_elements(&mut c, src, index, ty, false);
+        if same(view(name), view("load_aligned")) {
+            simd_check_aligned(&mut c, at, simd_words(&mut c, ty) * 8);
+            dst := frame_alloc(&mut c, simd_words(&mut c, ty));
+            simd_copy_op(&mut c, view("copya"), dst, at, ty);
+            return val(dst, ty);
+        }
         return val(simd_emit(&mut c, view("copy"), ty, ty, at, SIMD_NONE, SIMD_NONE, SIMD_NONE, 0, false), ty);
+    }
+    if same(view(name), view("from_bits")) && simd_float(&mut c, ty) {
+        // The lanes' bits as floats: `f32x4::from_bits(u32x4)`, `f64x2::from_bits(i64x2)`.
+        mut bty = simd_with_elem(&mut c, ty, int_type(&mut c, 32, 0));
+        if simd_bits(&mut c, ty) == 64 {
+            bty = simd_with_elem(&mut c, ty, int_type(&mut c, 64, 1));
+        }
+        v := simd_vector_arg(&mut c, bty);
+        expect(&mut c, view(")"));
+        dst := frame_alloc(&mut c, simd_words(&mut c, ty));
+        simd_copy_op(&mut c, view("copy"), dst, v, ty);
+        return val(dst, ty);
     }
     mut msg = copy_bytes(view("`"));
     push_bytes(&mut msg, view(simd_shape(&mut c, ty)));
     push_bytes(&mut msg, view("` has no constructor `"));
     push_bytes(&mut msg, name);
-    push_bytes(&mut msg, view("`; its constructors are splat, new and load (a mask has splat)"));
+    push_bytes(&mut msg, view("`; its constructors are splat, new, load and load_aligned, and from_bits for a float vector (a mask has splat)"));
     fail(&mut c, view(msg));
     return val(0, 0);
 }
@@ -41048,15 +41202,81 @@ fn simd_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
         expect(&mut c, view(")"));
         return val(simd_emit(&mut c, view("lane"), ty, elem, value.t, SIMD_NONE, SIMD_NONE, SIMD_NONE, k, false), elem);
     }
-    if same(view(name), view("store")) && !mask {
+    if (same(view(name), view("store")) || same(view(name), view("store_aligned"))) && !mask {
         dst := expr(&mut c, 0);
         expect(&mut c, view(","));
         index := simd_scalar_arg(&mut c, int_type(&mut c, 64, 0));
         expect(&mut c, view(")"));
         at := simd_elements(&mut c, dst, index, ty, true);
         // The copy's destination is the elements.
-        simd_copy_to(&mut c, at, value.t, ty);
+        if same(view(name), view("store_aligned")) {
+            simd_check_aligned(&mut c, at, simd_words(&mut c, ty) * 8);
+            simd_copy_op(&mut c, view("copyd"), at, value.t, ty);
+        } else {
+            simd_copy_to(&mut c, at, value.t, ty);
+        }
         return val(imm(&mut c, 0), intern(&mut c, 2, 0));
+    }
+    if (same(view(name), view("shuffle")) || same(view(name), view("shuffle2"))) && !mask {
+        // `v.shuffle(i0, .., iN-1)`: lane j is v's lane i_j. `v.shuffle2(w, i0, ..)`: lane j is lane
+        // i_j of v followed by w (indices below 2N). The indices are literals, checked here.
+        lanes := simd_lanes(&mut c, ty);
+        mut other = value.t;
+        mut limit = lanes;
+        if same(view(name), view("shuffle2")) {
+            other = simd_vector_arg(&mut c, ty);
+            expect(&mut c, view(","));
+            limit = 2 * lanes;
+        }
+        mut idx = u64[];
+        for i in lanes {
+            if i != 0 {
+                expect(&mut c, view(","));
+            }
+            idx.push(simd_index_literal(&mut c, limit));
+        }
+        expect(&mut c, view(")"));
+        dst := frame_alloc(&mut c, simd_words(&mut c, ty));
+        zero := imm(&mut c, 0);
+        get(&mut c, dst, view("%rdi"));
+        get(&mut c, value.t, view("%rsi"));
+        get(&mut c, other, view("%rdx"));
+        get(&mut c, zero, view("%rcx"));
+        mut line = copy_bytes(view("simd.shuffle "));
+        push_bytes(&mut line, view(simd_shape(&mut c, ty)));
+        line.push(32);
+        for i in idx.len() {
+            if i != 0 {
+                line.push(44);
+            }
+            decimal(&mut line, idx[i]);
+        }
+        line.push(10);
+        o(&mut c, view(line));
+        return val(dst, ty);
+    }
+    if same(view(name), view("to_f32")) && !mask && !float && (simd_bits(&mut c, ty) == 32) && (ty_mode(&mut c, elem) != 0) {
+        // Each i32 lane to the nearest f32.
+        expect(&mut c, view(")"));
+        rty := simd_with_elem(&mut c, ty, f32_type(&mut c));
+        return val(simd_emit(&mut c, view("tof32"), ty, rty, value.t, SIMD_NONE, SIMD_NONE, SIMD_NONE, 0, false), rty);
+    }
+    if same(view(name), view("to_i32")) && float && (simd_bits(&mut c, ty) == 32) {
+        // Each f32 lane truncated toward zero and saturated to the i32 range; a NaN lane is 0.
+        expect(&mut c, view(")"));
+        rty := simd_with_elem(&mut c, ty, int_type(&mut c, 32, 1));
+        return val(simd_emit(&mut c, view("toi32"), ty, rty, value.t, SIMD_NONE, SIMD_NONE, SIMD_NONE, 0, false), rty);
+    }
+    if same(view(name), view("bits")) && float {
+        // The lanes' bit patterns: f32 lanes as u32, f64 lanes as i64.
+        expect(&mut c, view(")"));
+        mut rty = simd_with_elem(&mut c, ty, int_type(&mut c, 32, 0));
+        if simd_bits(&mut c, ty) == 64 {
+            rty = simd_with_elem(&mut c, ty, int_type(&mut c, 64, 1));
+        }
+        dst := frame_alloc(&mut c, simd_words(&mut c, ty));
+        simd_copy_op(&mut c, view("copy"), dst, value.t, ty);
+        return val(dst, rty);
     }
     if (same(view(name), view("min")) || same(view(name), view("max"))) && !mask {
         other := simd_vector_arg(&mut c, ty);
@@ -41100,7 +41320,7 @@ fn simd_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
     if mask {
         push_bytes(&mut msg, view("`; a mask's methods are select, any, all and not"));
     } else {
-        push_bytes(&mut msg, view("`; its methods are sum, lane, store, min, max, eq, ne, lt, le, gt and ge"));
+        push_bytes(&mut msg, view("`; its methods are sum, lane, store, store_aligned, shuffle, shuffle2, min, max, eq, ne, lt, le, gt and ge, with bits and to_i32 on a float vector and to_f32 on i32 lanes"));
     }
     fail(&mut c, view(msg));
     return val(0, 0);
@@ -53613,7 +53833,7 @@ fn iface_with_facts<a, b>(c: (&a mut C), text: &a [u8], m: &b [u8]) -> u8[] {
 // The trailer's offset, validated: the magic, the version, every record's framing and the file's own
 // digest. Returns the source digest the file records. A bad version, a truncated file, an unknown
 // record or an edited byte is refused here, by name, before one declaration is installed.
-fn iface_seal<a>(path: &a [u8], data: &a [u8]) -> u8[] {
+fn iface_seal<a>(path: &a [u8], data: &a [u8], vouched: bool) -> u8[] {
     if data.len() < 5 {
         iface_refuse(view(path), view("is not an interface file: it is too short to carry a `GRIF` header"));
     }
@@ -53686,6 +53906,15 @@ fn iface_seal<a>(path: &a [u8], data: &a [u8]) -> u8[] {
             source_digest = iface_rs(&mut p);
             iface_need(&mut p, 32);
             cover := p.at;
+            if vouched {
+                p.at = p.at + 32;
+                iface_rend(&mut p, start);
+                p.stop = saved;
+                if p.at != p.stop {
+                    iface_bad(&mut p, view("carries records after its trailer"));
+                }
+                return source_digest;
+            }
             mut prefix = u8[];
             for i in cover {
                 prefix.push(data[i]);
@@ -53736,8 +53965,8 @@ struct IHead {
     digest: u8[],
     next: u64
 }
-fn iface_r_head<a>(path: &a [u8], data: &a [u8]) -> IHead {
-    digest := iface_seal(view(path), view(data));
+fn iface_r_head<a>(path: &a [u8], data: &a [u8], vouched: bool = false) -> IHead {
+    digest := iface_seal(view(path), view(data), vouched);
     mut p = IR {
         data: data.copy(),
         at: 5,
@@ -54951,7 +55180,7 @@ fn iface_rec_facts<a>(c: (&a mut C), p: (&a mut IR)) -> unit {
 // Reads one interface, checks it, and installs (phase 1 names, phase 2 definitions) or describes
 // (phase 0). Returns the module it declares; `rtext` receives the dump in phase 0.
 fn iface_decode<a, b>(c: (&a mut C), path: &a [u8], bytes: &a [u8], source_path: &b [u8], phase: u64, rtext: (&a mut u8[])) -> u8[] {
-    head := iface_r_head(view(path), view(bytes));
+    head := iface_r_head(view(path), view(bytes), c.iface_vouched != 0);
     module := head.module.copy();
     mut p = IR {
         data: bytes.copy(),
@@ -55215,7 +55444,7 @@ fn iface_roundtrip<a>(c: (&a mut C), path: &a [u8]) -> unit {
     if bytes.len() == 0 {
         iface_refuse(view(path), view("cannot read interface file"));
     }
-    head := iface_r_head(view(path), view(bytes));
+    head := iface_r_head(view(path), view(bytes), c.iface_vouched != 0);
     dir := iface_dirname(view(path));
     base := iface_basename(view(path));
     mut rtext = u8[];
@@ -56784,6 +57013,7 @@ pub fn main() -> u64 {
         statics: Static[],
         ct_calls: CtCall[],
         ct_done: CtDone[],
+        ct_guards: u8[][],
         ct_deps_path: u8[],
         static_scratch: 0,
         impl_params: ImplParams[],
@@ -56890,6 +57120,7 @@ pub fn main() -> u64 {
         cap_segs: u8[][],
         iface_dir: u8[],
         iface_use: u8[],
+        iface_vouched: 0,
         iface_only: u8[][],
         iface_only_on: 0,
         no_entry: 0,
@@ -57235,6 +57466,9 @@ pub fn main() -> u64 {
             }
             exchange(&mut c.shift_decls, n);
             offset += 2;
+        } else if same(view(option), view("--use-vouched")) {
+            exchange(&mut c.iface_vouched, 1);
+            offset += 1;
         } else if same(view(option), view("--use-named")) {
             // Only the modules `--use-module` names are read, even when it names none.
             exchange(&mut c.iface_only_on, 1);
@@ -57646,6 +57880,12 @@ pub fn main() -> u64 {
             // Every run-tier value of the build in one probe (comptime-speed R2), before anything
             // asks for one: the interfaces below, the function cache's surface, the bodies.
             ct_batch(&mut c);
+            // A value the batch could not give (it failed, or a cycle) is computed now by its own
+            // probe, which reports the failure at the value - before the interfaces and the
+            // function cache's surface, which need every value's type.
+            if c.probe_mode == 0 {
+                resolve_all_pending(&mut c);
+            }
             iface_emit_all(&mut c);
         }
         if (pass == 1) & (c.shift_decls != 0) {
@@ -57794,6 +58034,18 @@ pub fn main() -> u64 {
     // The entry stub and the process state (rt_state, the TLS bases, .note.GNU-stack) exist once per
     // program and belong to no module, so they get their own synthetic part.
     part(&mut c, view("__start"));
+    if c.ct_guards.len() != 0 {
+        o(&mut c, view(".pushsection .data\n.p2align 3\n"));
+        for g in c.ct_guards.len() {
+            gname := c.ct_guards[g].copy();
+            o(&mut c, view(".globl "));
+            o(&mut c, view(gname));
+            o(&mut c, view("\n"));
+            o(&mut c, view(gname));
+            o(&mut c, view(":\n.quad 0\n"));
+        }
+        o(&mut c, view(".popsection\n"));
+    }
     if (c.target == 3) {
         // A PE image starts without arguments: the loader leaves argv to the runtime, which reads
         // the Win32 command line. The process state words start empty and are filled by
