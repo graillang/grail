@@ -44,9 +44,17 @@ impl<T> Drop for Rc<T> {
     }
 }
 
+// The words a `T` takes where a raw pointer holds it: a pointer's step over one `T`.
+fn value_words<T>() -> u64 {
+    unsafe {
+        return (ptr_from_addr(T, 0).add(1).addr() + 7) / 8;
+    }
+}
+
 pub fn new<T>(v: T) -> Rc<T> {
     unsafe {
-        p := alloc(u64, 3);
+        // Two count words, then the value: as many words as a `T` takes (a struct's are its own).
+        p := alloc(u64, 2 + value_words<T>());
         p.write(1);
         p.add(1).write(1);
         slot := p.add(2).cast(T);
@@ -181,7 +189,7 @@ impl<T> Drop for Arc<T> {
 
 pub fn arc_new<T>(v: T) -> Arc<T> {
     unsafe {
-        p := alloc(u64, 3);
+        p := alloc(u64, 2 + value_words<T>());
         p.cast(Atomic<u64>).write(Atomic::new(1));
         p.add(1).cast(Atomic<u64>).write(Atomic::new(1));
         slot := p.add(2).cast(T);

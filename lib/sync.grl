@@ -25,6 +25,13 @@ use time;
 // callback by its result, and a callback that stores it in the context does not type-check.
 
 // The address a block pointer holds.
+// The words a `T` takes where a raw pointer holds it: a pointer's step over one `T` (a struct's are
+// its own words, unboxed-values.md stage 4).
+fn value_words<T>() -> u64 {
+    unsafe {
+        return (ptr_from_addr(T, 0).add(1).addr() + 7) / 8;
+    }
+}
 fn address(p: *mut u64) -> u64 {
     unsafe {
         return p.addr();
@@ -39,15 +46,15 @@ fn block<a, T>(m: (&a Mutex<T>)) -> u64 {
 // The payload read-only, for a Condition's predicate (the lock is held).
 fn payload_ref<a, T>(m: (&a Mutex<T>), at: u64) -> (&a T) {
     unsafe {
-        return ptr_from_addr(T, at + 8).as_ref();
+        return ptr_from_addr(T, at + 48).as_ref();
+    }
+}
+fn payload<a, T>(m: (&a Mutex<T>), at: u64) -> (&a mut T) {
+    unsafe {
+        return ptr_from_addr(T, at + 48).as_mut();
     }
 }
 // The payload, borrowed for as long as the mutex reference; every caller holds the lock.
-fn payload<a, T>(m: (&a Mutex<T>), at: u64) -> (&a mut T) {
-    unsafe {
-        return ptr_from_addr(T, at + 8).as_mut();
-    }
-}
 
 pub fn try_lock_with<a, T, C, R: Owned>(m: (&a Mutex<T>), ctx: C, f: FnMut((&mut T), C) -> R) -> R? {
     mut call = f;
@@ -139,7 +146,7 @@ impl<T> Drop for RwLock<T> {
 }
 pub fn rwlock<T>(value: T) -> RwLock<T> {
     unsafe {
-        cell := alloc(u64, 5);
+        cell := alloc(u64, 4 + value_words<T>());
         ptr_from_addr(T, cell.addr() + 32).write(value);
         return RwLock { cell: cell };
     }
@@ -531,7 +538,7 @@ impl<T> Drop for Once<T> {
 }
 pub fn once<T>() -> Once<T> {
     unsafe {
-        return Once { cell: alloc(u64, 3) };
+        return Once { cell: alloc(u64, 2 + value_words<T>()) };
     }
 }
 impl<T> Once<T> {
