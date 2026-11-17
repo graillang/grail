@@ -8298,6 +8298,10 @@ fn pv_literal<a>(t: &a [u8]) -> bool {
 }
 // A word the prover must not mistake for a variable.
 fn pv_keyword<a>(t: &a [u8]) -> bool {
+    // Every word below is two to eight bytes long.
+    if (t.len() < 2) || (8 < t.len()) {
+        return false;
+    }
     return same(view(t), view("true"))
         || same(view(t), view("false"))
         || same(view(t), view("if"))
@@ -8341,8 +8345,7 @@ fn pv_term<a>(c: (&a mut C), at: u64, used: (&a mut u64)) -> u8[] {
     }
     // `NAME.len()` is the length of the thing NAME names.
     if (kind_at(&mut c, at + 1) == 46) & (kind_at(&mut c, at + 2) == 1) & (kind_at(&mut c, at + 3) == 40) & (kind_at(&mut c, at + 4) == 41) {
-        m := tok_text(&mut c, at + 2);
-        if same(view(m), view("len")) {
+        if is_at(&mut c, at + 2, view("len")) {
             // A static string's or table's length is a known number (module-values stage 5).
             known := pv_known_literal(&mut c, view(t), true);
             exchange(used, 5);
@@ -8364,8 +8367,7 @@ fn pv_term<a>(c: (&a mut C), at: u64, used: (&a mut u64)) -> u8[] {
             push_bytes(&mut out, view(f));
             exchange(used, 3);
             if (kind_at(&mut c, at + 3) == 46) & (kind_at(&mut c, at + 4) == 1) & (kind_at(&mut c, at + 5) == 40) & (kind_at(&mut c, at + 6) == 41) {
-                m := tok_text(&mut c, at + 4);
-                if same(view(m), view("len")) {
+                if is_at(&mut c, at + 4, view("len")) {
                     push_bytes(&mut out, view(".len"));
                     exchange(used, 7);
                 }
@@ -8952,6 +8954,18 @@ fn pv_mentions<a, b>(term: &a [u8], name: &b [u8]) -> bool {
 // Drop every fact that mentions a name, its length or a field of it: a binding of the name shadows
 // what the facts said, and a write through it makes them false.
 fn pv_kill<a>(facts: (&a mut Atom[]), name: &a [u8]) -> unit {
+    // Most writes kill nothing: then the list stays as it is instead of being copied whole.
+    mut any = false;
+    for i in facts.len() {
+        x := &facts[i];
+        if pv_mentions(view(x.a), view(name)) || pv_mentions(view(x.b), view(name)) {
+            any = true;
+            break;
+        }
+    }
+    if !any {
+        return ();
+    }
     mut keep = Atom[];
     for i in facts.len() {
         x := &facts[i];
@@ -9251,8 +9265,7 @@ fn pv_span_term<a>(c: (&a mut C), lo: u64, hi: u64) -> u8[] {
     if (i < hi) & (kind_at(&mut c, i) == 38) {
         i += 1;
         if (i < hi) & (kind_at(&mut c, i) == 1) {
-            m := tok_text(&mut c, i);
-            if same(view(m), view("mut")) {
+            if is_at(&mut c, i, view("mut")) {
                 i += 1;
             }
         }
@@ -9314,8 +9327,7 @@ fn pv_span_mutates<a>(c: (&a mut C), lo: u64, hi: u64) -> bool {
         k := kind_at(&mut c, i);
         if k == 38 {
             if kind_at(&mut c, i + 1) == 1 {
-                m := tok_text(&mut c, i + 1);
-                if same(view(m), view("mut")) {
+                if is_at(&mut c, i + 1, view("mut")) {
                     return true;
                 }
             }
@@ -9528,8 +9540,7 @@ fn pv_span_calls<a>(c: (&a mut C), lo: u64, hi: u64) -> bool {
         k := kind_at(&mut c, i);
         if k == 38 {
             if kind_at(&mut c, i + 1) == 1 {
-                m := tok_text(&mut c, i + 1);
-                if same(view(m), view("mut")) {
+                if is_at(&mut c, i + 1, view("mut")) {
                     return true;
                 }
             }
@@ -9674,6 +9685,9 @@ fn pv_ir_atoms<a>(c: (&a mut C), lo: u64, hi: u64) -> Atom[] {
 }
 // A statement keyword whose own conditions and statements report what they do as they are compiled.
 fn pv_compound<a, b>(t: &b [u8]) -> bool {
+    if (t.len() < 2) || (6 < t.len()) {
+        return false;
+    }
     return same(view(t), view("if"))
         || same(view(t), view("match"))
         || same(view(t), view("while"))
@@ -9705,7 +9719,8 @@ fn pv_ir_statement<a>(c: (&a mut C), lo: u64, hi: u64) -> unit {
         return ();
     }
     mut i = lo;
-    while i < hi {
+    // A name written kills the facts that mention it; with none held there is nothing to kill.
+    while (i < hi) & (c.pv_facts.len() != 0) {
         if kind_at(&mut c, i) == 1 {
             n := tok_text(&mut c, i);
             pv_ir_wrote(&mut c, view(n));
