@@ -288,3 +288,8 @@ optimiser_labels, then S6 after unboxed 3a lands (it builds on 3a's frame aggreg
 - **Dyn dispatch (record vtable adapters).** The adapter is a load and a tail jump instead of a
   framed call (landed 3fe042c). dyncall: native 1,645 M -> 1,565 M, LLVM 779 M -> 719 M; Rust -O
   648 M.
+- **Indirect calls pass only their words (LLVM).** native.grl `indirect_fact`: a `call *%rax` set up
+  by load_call_args with no call in between records its word count (fact kind 7, keyed by its ordinal
+  among the function's `call *%rax` lines); lower_indirect_call passes `poison` past it. The check:
+  the frame-slot loads into argument registers in the run of moves just before the call must not
+  reach past the count. dyncall LLVM 719 M -> 679 M.
