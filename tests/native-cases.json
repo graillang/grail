@@ -12032,11 +12032,10 @@
     ]
   },
   {
-    "name": "closure-bounds-p17-no-callable-bound",
-    "note": "P17: callable bounds on a type parameter are deferred (Q5)",
+    "name": "closure-bounds-p17-callable-bound",
+    "note": "P17: a callable bound on a type parameter (`F: Fn() -> R`) - it was a parse error; built in 2b",
     "source": "fn apply<R, F: Fn()->R>(f: F) -> R { return f(); }\nfn main() { n := 3; println(apply(|| -> u64 n + 1)); }\n",
-    "reject": true,
-    "diagnostic": "expected `,`, found `(`"
+    "stdout": "4\n"
   },
   {
     "name": "closure-bounds-p18-generic-record-send",
@@ -16600,5 +16599,45 @@
       "^^^^^^ no module root holds this module"
     ],
     "note": "An unresolvable `use` is a diagnostic about the program: an `error:` line, the location of the `use` and the name underlined, not a bare `grail:` line from the driver."
+  },
+  {
+    "name": "callable-bound-call",
+    "note": "`F: Fn(u64) -> u64` (docs/design/dyn-and-callable-bounds.md 2b): a value of type F is callable in the generic body; closures with and without written parameter types",
+    "source": "fn apply<F: Fn(u64) -> u64>(f: F, x: u64) -> u64 { return f(x); }\nfn main() { k := 3; println(apply(|x: u64| -> u64 x + k, 4)); println(apply(|x| x * 2, 21)); }\n",
+    "stdout": "7\n42\n"
+  },
+  {
+    "name": "callable-bound-infers-result",
+    "note": "the bound's parameters and result are inferred from the closure given for F (`U` from `|x| -> bool ..`); one specialisation per closure",
+    "source": "fn mapv<T, U, F: FnMut(T) -> U>(v: T[], f: F) -> U[] {\n    mut g = f;\n    mut out = U[];\n    mut src = v;\n    src.reverse();\n    while src.len() != 0 { out.push(g(src.pop()!)); }\n    return out;\n}\nfn main() { k := 10; r := mapv(u64[1, 2, 3], |x: u64| -> u64 x + k); println(r[0] + r[1] + r[2]); s := mapv(u64[1, 2], |x: u64| -> bool x > 1); println(s[1]); }\n",
+    "stdout": "36\ntrue\n"
+  },
+  {
+    "name": "callable-bound-mismatch-refused",
+    "note": "a closure whose signature does not meet the bound is refused at the call, naming the bound",
+    "source": "fn apply<F: Fn(u64) -> u64>(f: F, x: u64) -> u64 { return f(x); }\nfn main() { println(apply(|x: u64| -> bool x > 1, 4)); }\n",
+    "reject": true,
+    "diagnostic": "this argument does not meet the callable bound `Fn(u64) -> u64`"
+  },
+  {
+    "name": "callable-bound-named-function",
+    "note": "a named function may be given for F",
+    "source": "fn twice(x: u64) -> u64 { return x * 2; }\nfn apply<F: Fn(u64) -> u64>(f: F, x: u64) -> u64 { return f(x); }\nfn main() { println(apply(twice, 4)); }\n",
+    "stdout": "8\n"
+  },
+  {
+    "name": "callable-bound-direct-call",
+    "note": "in a callable-bound specialisation the closure is called directly, by its body's symbol, not through its code word (`call *%rax`), so the optimiser may inline it",
+    "source": "fn apply<F: Fn(u64) -> u64>(f: F, x: u64) -> u64 { return f(x); }\nfn main() { k := 3; println(apply(|x: u64| -> u64 x * k + 1, 4)); }\n",
+    "stdout": "13\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asm": [
+      "call f_.closure_main_c0"
+    ]
   }
 ]
