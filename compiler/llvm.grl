@@ -367,7 +367,10 @@ struct L {
     // Why a signature fact was found wrong in this function (empty when none was).
     sigerr: u8[],
     // Every body whose signature fact was found wrong in this lowering.
-    wrong: u8[][]
+    wrong: u8[][],
+    // The outgoing argument area of the call being set up (area_instruction).
+    area: u8[][],
+    areaopen: u64
 }
 
 fn eq<a, b>(a: &a [u8], b: &b [u8]) -> bool {
@@ -983,6 +986,14 @@ fn value<a, b>(l: (&a mut L), op: &b [u8], width: u64) -> u8[] {
         return get_reg(&mut l, view(name));
     }
     if has(op, view("(")) {
+        sp := stack_param(&mut l, op);
+        if sp.len() != 0 {
+            if width != 64 {
+                bad(&mut l);
+                return copy(view("0"));
+            }
+            return sp;
+        }
         k := slot_operand(&l, op);
         if k != 0 {
             if width != 64 {
@@ -1960,8 +1971,14 @@ fn call_args_n<a>(l: (&a mut L), n: u64) -> u8[] {
             put(&mut out, view(", "));
         }
         put(&mut out, view("i64 "));
-        v := get_reg(&mut l, view(names[i]));
-        put(&mut out, view(v));
+        if i < 6 {
+            v := get_reg(&mut l, view(names[i]));
+            put(&mut out, view(v));
+        } else {
+            // Past the registers: the outgoing area's words (lower_call checked it is open and
+            // large enough).
+            put(&mut out, view(l.area[i - 6]));
+        }
     }
     return out;
 }
@@ -1978,6 +1995,14 @@ fn never_returns<a>(target: &a [u8]) -> bool {
 fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> unit {
     // A call hands the argument registers on; passing a stale %rdx is not reading a result.
     l.rdxdead = 0;
+    if l.areaopen != 0 {
+        // Words on the stack: only a callee whose signature fact says it takes them.
+        code := set_get(&l.sigs, target);
+        if (code == 0) || (code / 4 <= 6) || (code / 4 - 6 > l.area.len()) {
+            bad(&mut l);
+            return ();
+        }
+    }
     // `call *%rax` is a Grail-convention call through a code pointer; a C call through a `cfn`
     // value is spelled `call *%r11` (native.grl) and, like an import thunk's, stays native.
     if eq(target, view("*%rax")) && (l.target == 0) {
@@ -2057,7 +2082,8 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
         }
     }
     hf := call_header(&facts, view(l.fname), view(target), ord);
-    if hf.width != 0 {
+    // A sibling takes six words: a call with words on the stack keeps the plain form.
+    if (hf.width != 0) & (l.areaopen == 0) {
         kid := reg_index(view("rdi")) + 1;
         k := chain_slot(&l, kid);
         sn := sibling_name(view(target), hf.what, hf.width);
@@ -2156,6 +2182,10 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
 // AArch64 and RV64 a code pointer names the native-convention entry, which an IR call cannot reach
 // without a thunk, so those bodies stay native.
 fn lower_indirect_call<a, b>(l: (&a mut L), reg: &b [u8]) -> unit {
+    if l.areaopen != 0 {
+        bad(&mut l);
+        return ();
+    }
     invalidate_args(&mut l, view("*"));
     fp := get_reg(&mut l, reg);
     p := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][fp]);
@@ -2232,6 +2262,9 @@ fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit
     }
     mut op = sub(line, 0, space);
     mut rest = trim(view(sub(line, space + 1, line.len())));
+    if area_instruction(&mut l, view(op), view(rest)) {
+        return ();
+    }
     if eq(view(op), view("lock")) {
         // lock cmpxchgq %new,(mem): compares with rax, sets ZF, leaves the old value in rax.
         o := operands(view(sub(view(rest), 9, rest.len())));
@@ -2764,7 +2797,7 @@ fn signatures<a, b>(facts: (&a Facts), taken: (&b Set)) -> Set {
     mut out = set_new(n + 1);
     for i in facts.items.len() {
         f := &facts.items[i];
-        if (f.kind == 5) && !eq(view(f.fn), view("rt_abort")) && (f.a <= 6) && !set_has(&taken, view(f.fn)) {
+        if (f.kind == 5) && !eq(view(f.fn), view("rt_abort")) && !set_has(&taken, view(f.fn)) {
             set_put(&mut out, view(f.fn), f.a * 4 + 1);
         }
     }
@@ -2972,6 +3005,114 @@ fn sig_wrong<a, b, d>(l: (&a mut L), subject: &b [u8], why: &d [u8]) -> unit {
     bad(&mut l);
     return ();
 }
+// A line of the outgoing argument area of a call with more than six words (native.grl
+// `load_call_args`): `subq $N,%rsp` / `addq $N,%rsp` around the call and `movq %reg,K(%rsp)` for
+// each stack word. Any other use of %rsp keeps the body native.
+fn area_line<a>(line: &a [u8]) -> bool {
+    if (starts(line, view("subq $")) || starts(line, view("addq $"))) && ends(line, view(",%rsp")) {
+        return parse_int(view(sub(line, 6, line.len() - 5))).ok != 0;
+    }
+    if starts(line, view("movq %")) && ends(line, view("(%rsp)")) {
+        mut comma = 0;
+        for i in line.len() {
+            if line[i] == 44 {
+                comma = i;
+            }
+        }
+        return (comma != 0) && (parse_int(view(sub(line, comma + 1, line.len() - 6))).ok != 0);
+    }
+    return false;
+}
+// The outgoing area: `subq $N,%rsp` (or `cstack N`) opens N/8 words, `movq %reg,K(%rsp)` (or
+// `cstarg K`, which stores %rax) fills word K/8, and `addq $N,%rsp` (`cunstack N`) closes it. The
+// words become the call's arguments past the sixth (`call_args_n`). True when `line` was one.
+fn area_instruction<a, b, c>(l: (&a mut L), op: &b [u8], rest: &c [u8]) -> bool {
+    open := eq(op, view("cstack")) || (eq(op, view("subq")) && ends(rest, view(",%rsp")));
+    close := eq(op, view("cunstack")) || (eq(op, view("addq")) && ends(rest, view(",%rsp")));
+    if open || close {
+        mut text = copy(rest);
+        if starts(rest, view("$")) {
+            text = sub(rest, 1, rest.len() - 5);
+        }
+        n := parse_int(view(text));
+        if (n.ok == 0) || (n.v <= 0) || (n.v % 8 != 0) {
+            bad(&mut l);
+            return true;
+        }
+        if open {
+            if l.areaopen != 0 {
+                bad(&mut l);
+                return true;
+            }
+            mut words = u8[][];
+            for i in u64(n.v) / 8 {
+                words.push(copy(view("undef")));
+            }
+            exchange(&mut l.area, words);
+            l.areaopen = 1;
+        } else {
+            if (l.areaopen == 0) || (l.area.len() * 8 != u64(n.v)) {
+                bad(&mut l);
+                return true;
+            }
+            exchange(&mut l.area, u8[][]);
+            l.areaopen = 0;
+        }
+        return true;
+    }
+    store := eq(op, view("cstarg")) || (eq(op, view("movq")) && ends(rest, view("(%rsp)")));
+    if !store {
+        return false;
+    }
+    mut src = copy(view("rax"));
+    mut at = copy(rest);
+    if eq(op, view("movq")) {
+        o := operands(rest);
+        if (o.len() != 2) || (o[0][0] != 37) {
+            bad(&mut l);
+            return true;
+        }
+        src = sub(view(o[0]), 1, o[0].len());
+        at = sub(view(o[1]), 0, o[1].len() - 6);
+    }
+    k := parse_int(view(at));
+    if (l.areaopen == 0) || (k.ok == 0) || (k.v < 0) || (k.v % 8 != 0) || (u64(k.v) / 8 >= l.area.len()) {
+        bad(&mut l);
+        return true;
+    }
+    v := get_reg(&mut l, view(src));
+    l.area[u64(k.v) / 8] = v;
+    return true;
+}
+// A load of `16 + 8k(%rbp)`, word 6 + k of the arguments (native.grl `stack_params`): the body's
+// parameter %a(6 + k), which the signature fact must cover. Empty for any other operand.
+fn stack_param<a, b>(l: (&a mut L), op: &b [u8]) -> u8[] {
+    if !ends(op, view("(%rbp)")) || (op.len() < 7) || (op[0] == 45) {
+        return u8[];
+    }
+    d := parse_int(view(sub(op, 0, op.len() - 6)));
+    if (d.ok == 0) || (d.v < 16) || (d.v % 8 != 0) {
+        return u8[];
+    }
+    index := 6 + (u64(d.v) - 16) / 8;
+    if (l.sibwidth != 0) || (set_get(&l.sigs, view(l.fname)) == 0) {
+        bad(&mut l);
+        return copy(view("0"));
+    }
+    if index >= l.nargs {
+        mut why = copy(view("it gives "));
+        num(&mut why, l.nargs);
+        put(&mut why, view(" argument words and the body reads word "));
+        num(&mut why, index);
+        put(&mut why, view(" from the caller's stack"));
+        fname := copy(view(l.fname));
+        sig_wrong(&mut l, view(fname), view(why));
+        return copy(view("0"));
+    }
+    mut a = copy(view("%a"));
+    num(&mut a, index);
+    return a;
+}
 // NAME in `.type NAME,@function`.
 fn type_name<a>(line: &a [u8]) -> u8[] {
     mut e = 6;
@@ -3107,6 +3248,8 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
     exchange(&mut l.fname, copy(view(f.name)));
     exchange(&mut l.sigerr, u8[]);
     exchange(&mut l.curline, u8[]);
+    exchange(&mut l.area, u8[][]);
+    l.areaopen = 0;
     l.rdxdead = 0;
     l.nargs = 6;
     l.retw = 2;
@@ -3186,7 +3329,7 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
     }
     for m in instrs.len() {
         line := view(instrs[m]);
-        if has(line, view("%rsp")) || has(line, view(".F")) {
+        if (has(line, view("%rsp")) && !area_line(line)) || has(line, view(".F")) {
             bad(&mut l);
             return ();
         }
@@ -3311,7 +3454,12 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
         }
     }
     args := u8[][copy(view("rdi")), copy(view("rsi")), copy(view("rdx")), copy(view("rcx")), copy(view("r8")), copy(view("r9"))];
-    for a in l.nargs {
+    // Words past the sixth are not in registers: stack_param reads them as %a6.. directly.
+    mut inregs = l.nargs;
+    if 6 < inregs {
+        inregs = 6;
+    }
+    for a in inregs {
         mut an = copy(view("%a"));
         num(&mut an, a);
         mut av = copy(view(an));
@@ -5925,7 +6073,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
             set_add(&mut weak, view(sub(wl, 6, wl.len())));
         }
     }
-    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, dnames: u8[][], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][] };
+    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, dnames: u8[][], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0 };
     // A function whose address is taken (`NAME(%rip)`, or named by data such as a vtable) is
     // called through a pointer by code that does not know its signature, so it keeps the six-word
     // form: an indirect call passes six words and reads rax:rdx, and LLVM must never see a call

@@ -1,7 +1,7 @@
 # The cost of a call in Grail: the convention as it was, the approved one, and where it stands
 
 Status: report approved by the director 2026-11-16; plan S1-S7 approved in the order S1, S2, S3,
-S4/S5, S6 (after unboxed stage 3a), S7. Done: S1, S2 (see "Progress" at the end).
+S4/S5, S6 (after unboxed stage 3a), S7. Done: S1, S2, S3 (see "Progress" at the end).
 
 Tree: gaps12-callabi = origin/gaps13-int-b at 5dc07da. Measurements: perf_event user-mode instruction
 and cycle counters (own wrapper, `.work/probe/icount`; no `perf` binary on this host), load 20-30.
@@ -236,3 +236,11 @@ optimiser_labels, then S6 after unboxed 3a lands (it builds on 3a's frame aggreg
 - **S2 (indirect calls lifted, x86-64).** `call *%rax` becomes a six-word IR call through the
   pointer; a `cfn` call is spelled `call *%r11` and stays native. `apply(&g, x)` loop (10 M): 430 M ->
   120 M instructions on LLVM.
+- **S3 (more than six words on the stack, all targets).** `load_call_args` reserves an outgoing
+  area (`subq $N,%rsp`; `cstack` on AArch64/RV64), stores words 6.. at 8k(%rsp), and
+  `release_call_args` frees it after the call; `stack_params` copies 16 + 8k(%rbp) into the
+  parameter slots after the frame is cleared. The optimiser accepts that load (`ir::incoming_arg`;
+  the body keeps its rbp mention, so it is never inlined into another frame). The lifter lifts both
+  sides: the area becomes the call's arguments past the sixth, the load becomes `%a6..`, and a
+  read past the signature fact is a wrong fact. ABI line: `args = 6 registers then stack`. 7-arg call
+  loop (10 M): native 3,670 M -> 430 M instructions (6-arg: 350 M), LLVM 1,990 M -> 17.5 M.

@@ -1,5 +1,13 @@
 ## Unreleased
 
+- **A call with more than six arguments no longer allocates (call ABI S3).** Words past the sixth
+  went in a heap record behind the sixth register, which the callee copied and freed: an
+  `rt_rec` and an `rt_free` per call. They now travel on the stack in the platform's layout (word
+  6 + k at 8k(%rsp) at the call, 16 + 8k(%rbp) in the callee) on x86-64, AArch64 and RV64, and the
+  LLVM backend lifts both sides. A 7-argument call loop (10 M calls): native 3,670 M -> 430 M
+  instructions, LLVM 1,990 M -> 17.5 M. The interface ABI line gains `args = 6 registers then
+  stack`, so an interface written for the old convention is refused.
+
 - **Release builds call like C (LLVM backend, call ABI S1-S2).** A lifted function used to take and
   pass all six argument registers and return two words, and was almost never internal, so LLVM
   kept unused words alive across every call: fib(32) ran 112.8 M instructions against clang's 67.1 M.

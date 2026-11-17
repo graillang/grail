@@ -498,6 +498,22 @@ pub fn mentions<b>(s: &b [u8], a: u64, e: u64) -> u64 {
     return m;
 }
 
+// `N(%rbp)` with decimal N >= 16: a word of the caller's outgoing area, an argument past the sixth
+// (native.grl `stack_params`). It is only ever read, by a `movq` into a register.
+pub fn incoming_arg<b>(s: &b [u8], a: u64, e: u64) -> bool {
+    if (e < a + 8) || !same_range(view(s), e - 6, e, view("(%rbp)")) {
+        return false;
+    }
+    mut n = 0;
+    for i in e - 6 - a {
+        d := s[a + i];
+        if (d < 48) || (57 < d) {
+            return false;
+        }
+        n = n * 10 + d - 48;
+    }
+    return 16 <= n;
+}
 // Classifies one operand: returns kind and fills value/mask through the pair encoding.
 pub fn classify<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64, second: u64) {
     mut k = 4;

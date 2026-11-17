@@ -3962,58 +3962,82 @@ fn imm<a>(c: (&a mut C), n: u64) -> u64 {
     o(&mut c, view(",%rax\n"));
     return save(&mut c);
 }
-// Grail's own calling convention passes six words in registers. A call with more arguments keeps
-// the first five in registers and passes the rest in a heap record whose address is the sixth
-// register; the callee copies them into its frame and frees the record. ABI-neutral: only
-// register moves and loads/stores through a pointer, which every target lowers.
-fn load_call_args<a, b>(c: (&a mut C), args: (&b u64[]), shift: u64) -> unit {
+// Grail's own calling convention passes six words in registers and the rest on the stack: word
+// 6 + k at 8k(%rsp) when the call is made, in an outgoing area of a multiple of 16 bytes that the
+// caller reserves here and releases after the call (`release_call_args`). The callee finds word
+// 6 + k at 16 + 8k(%rbp) on every target (`stack_params`). The returned size is the area's.
+// AArch64 and RV64 spell the area with the pseudo-instructions the C-ABI calls use (`cstack`,
+// `cstarg`, `cunstack`), which machine.grl lowers.
+fn load_call_args<a, b>(c: (&a mut C), args: (&b u64[]), shift: u64) -> u64 {
     total := args.len() + shift;
     if total <= 6 {
         for i in args.len() {
             r := argreg(i + shift);
             get(&mut c, args[i], view(r));
         }
-        return ();
+        return 0;
     }
-    extra := total - 5;
-    n := imm(&mut c, extra);
-    record := invoke(&mut c, view("rt_rec"), one(n));
+    extra := total - 6;
+    area := 16 * ((extra + 1) / 2);
+    x86 := (c.target == 0) || (c.target == 3);
+    if x86 {
+        o(&mut c, view("subq $"));
+        on(&mut c, area);
+        o(&mut c, view(",%rsp\n"));
+    } else {
+        o(&mut c, view("cstack "));
+        on(&mut c, area);
+        c.out.push(10);
+    }
     for k in extra {
-        get(&mut c, record, view("%rcx"));
-        get(&mut c, args[5 - shift + k], view("%rax"));
-        o(&mut c, view("movq %rax,"));
-        on(&mut c, k * 8);
-        o(&mut c, view("(%rcx)\n"));
+        get(&mut c, args[6 - shift + k], view("%rax"));
+        if x86 {
+            ffi_store_stack(&mut c, 1, k * 8);
+        } else {
+            ffi_store_stack(&mut c, 0, k * 8);
+        }
     }
-    for i in 5 - shift {
+    for i in 6 - shift {
         r := argreg(i + shift);
         get(&mut c, args[i], view(r));
     }
-    get(&mut c, record, view("%r9"));
+    return area;
+}
+// After the call: the outgoing area `load_call_args` reserved, if any, is released.
+fn release_call_args<a>(c: (&a mut C), area: u64) -> unit {
+    if area == 0 {
+        return ();
+    }
+    if (c.target == 0) || (c.target == 3) {
+        o(&mut c, view("addq $"));
+        on(&mut c, area);
+        o(&mut c, view(",%rsp\n"));
+    } else {
+        o(&mut c, view("cunstack "));
+        on(&mut c, area);
+        c.out.push(10);
+    }
     return ();
 }
-// The LLVM backend's signature fact for the body being emitted: its argument words, the registers
-// store_params reads (six at most: past six the sixth carries the record). The lifter defines the
-// body and its calls with exactly these words (llvm.grl `signatures`).
+// The LLVM backend's signature fact for the body being emitted: its argument words, six in
+// registers and the rest on the stack. The lifter defines the body and its calls with exactly
+// these words (llvm.grl `signatures`).
 fn signature_fact<a>(c: (&a mut C), count: u64) -> unit {
     if (c.backend == 0) || (c.validating != 0) || (c.facts_fn.len() == 0) {
         return ();
     }
     mut words = count;
-    if 6 < count {
-        words = 6;
-    }
     if (c.forge_sig.len() != 0) && same(view(c.forge_sig), view(c.facts_fn)) {
         words = c.forge_words;
     }
     llvm::fact_signature(&mut c.facts, copy_bytes(view(c.facts_fn)), words);
     return ();
 }
-// Prologue: parameter i of `count` into frame slot i (see load_call_args for more than six).
+// Prologue: the register parameters (the first six of `count`) into frame slots 0-5.
 fn store_params<a>(c: (&a mut C), count: u64) -> unit {
     mut regs = count;
     if 6 < count {
-        regs = 5;
+        regs = 6;
     }
     for i in regs {
         reg := argreg(i);
@@ -4023,16 +4047,22 @@ fn store_params<a>(c: (&a mut C), count: u64) -> unit {
         stack_slot(&mut c, i);
         c.out.push(10);
     }
-    if 6 < count {
-        for k in count - 5 {
-            o(&mut c, view("movq "));
-            on(&mut c, k * 8);
-            o(&mut c, view("(%r9),%rax\nmovq %rax,"));
-            stack_slot(&mut c, 5 + k);
-            c.out.push(10);
-        }
-        o(&mut c, view("movq %r9,%rdi\n"));
-    call_out(&mut c, view("rt_free"));
+    return ();
+}
+// After the frame is cleared: parameter 6 + k from the caller's outgoing area, 16 + 8k(%rbp), into
+// frame slot 6 + k (see load_call_args). The cleared range excludes the parameter slots, so the
+// order is free, and keeping these loads past the clearing leaves the prologue the shape the
+// lifter reads.
+fn stack_params<a>(c: (&a mut C), count: u64) -> unit {
+    if count <= 6 {
+        return ();
+    }
+    for k in count - 6 {
+        o(&mut c, view("movq "));
+        on(&mut c, 16 + k * 8);
+        o(&mut c, view("(%rbp),%rax\nmovq %rax,"));
+        stack_slot(&mut c, 6 + k);
+        c.out.push(10);
     }
     return ();
 }
@@ -17323,6 +17353,9 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     o(&mut c, view("/8-"));
     on(&mut c, count);
     o(&mut c, view(",%rcx\nxorl %eax,%eax\nrep stosq\n"));
+    if export != 2 {
+        stack_params(&mut c, count);
+    }
     for i in count {
         mut l = &c.locals[i];
         slot := l.id;
@@ -26136,7 +26169,7 @@ fn emit_resolved_call<a>(
         ty := argtypes[i];
         move_out(&mut c, val(slot, ty));
     }
-    load_call_args(&mut c, &args, 0);
+    area := load_call_args(&mut c, &args, 0);
     if dyn_entry != 0 {
         if dyn_pair != 0 {
             // A borrowed object's receiver is the handle to its pair: word 0 is the value (the
@@ -26165,6 +26198,7 @@ fn emit_resolved_call<a>(
             call_out(&mut c, view(callee));
         }
     }
+    release_call_args(&mut c, area);
     slot := save_result(&mut c, ret);
     own(&mut c, slot, ret);
     shape_pair_result(&mut c, slot, ret);
@@ -26658,12 +26692,13 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
         release_temporary(&mut c, input);
         return val(rslot, resulttype);
     }
-    load_call_args(&mut c, &args, shift);
+    area := load_call_args(&mut c, &args, shift);
     if shift != 0 {
         get(&mut c, envp, view("%rdi"));
     }
     get(&mut c, target, view("%rax"));
     call_slot_out(&mut c, view("call *%rax\n"), view("a function value"));
+    release_call_args(&mut c, area);
     slot := save_result(&mut c, resulttype);
     own(&mut c, slot, resulttype);
     shape_pair_result(&mut c, slot, resulttype);
@@ -32567,6 +32602,7 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         o(&mut c, view("/8-"));
         on(&mut c, count);
         o(&mut c, view(",%rcx\nxorl %eax,%eax\nrep stosq\n"));
+        stack_params(&mut c, count);
         for j in count {
             mut l = &c.locals[j];
             slot := l.id;
@@ -42274,14 +42310,16 @@ const IFACE_TAG_STATIC: u64 = 19;
 // `{data, vtable}` pair - and what a reference to a record is (`ref record = address`: the record's
 // own address, docs/design/unboxed-values.md stage 1a; before it, the address of a word holding
 // that), and that a plain record held by a record or a vector is stored inline (`record plain =
-// inline`, stage 1b). A module that was compiled for another layout cannot be linked into the same program by
+// inline`, stage 1b), and that a call passes six words in registers and the rest on the stack
+// (`args = 6 registers then stack`, docs/design/call-abi.md S3; before it, the rest in a heap record
+// behind the sixth register). A module that was compiled for another layout cannot be linked into the same program by
 // accident: the writer writes this line and the reader refuses a file whose line differs.
 //
 // The string is the whole spelling, `abi ` included. It is carried as one length-counted field of
 // the module header record and rendered back verbatim by `grail iface dump`, so the single-source
 // rule survives the encoding: nothing else in this compiler knows how the ABI is written.
 fn iface_dyn_abi() -> string {
-    return "abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline";
+    return "abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline args = 6 registers then stack";
 }
 
 // ---- writing ----
