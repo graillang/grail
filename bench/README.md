@@ -30,6 +30,7 @@ pairs the runs on a busy machine. See the header of `tools/bench.mjs`.
 | `nbody` | `f64` arithmetic with eight element accesses per inner iteration |
 | `matmul` | an `f32` inner product with a loop-carried sum |
 | `xform_f32`, `xform_f64` | `x[i] = x[i] * a + y[i]` over one million elements: the simple loop C vectorises, so the ratio is the distance to vectorised C |
+| `hashmap`, `bintrees`, `strings`, `json`, `dyncall`, `iterchain`, `ecs` | engine-shaped work: a million-key hash map, allocation-heavy binary trees, split/parse/format of a million lines, a 10 MB JSON parse and serialise, a `dyn` call per element, an iterator chain over ten million elements, and a structure-of-arrays entity update; each has C, Rust, Go and Zig twins and its own section in the book's Performance chapter |
 | `dot_f32`, `dot_f64` | a strict-IEEE dot product over one million elements: a serial sum C does not vectorise, so the ratio is the distance to scalar C |
 
 `bench/rivals/` holds a Rust, a Go and a Zig twin of each program (and of `ffi_call`, which is on

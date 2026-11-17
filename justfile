@@ -23,7 +23,8 @@ book-test:
 # Re-run the benchmarks against other languages and refresh bench/results/, the files the book's
 # Performance chapter renders (one at a time, on a machine doing nothing else if you can).
 bench-results:
-    bun tools/bench-rivals.mjs --json bench/results/bench-rivals.json
+    bun tools/bench-rivals.mjs --json bench/results/bench-rivals.json dot_f32 dot_f64 ffi_call fnv matmul nbody sieve sort xform_f32 xform_f64
+    bun tools/bench-rivals.mjs --json bench/results/engine.json hashmap bintrees strings json dyncall iterchain ecs
     bun tools/sched-rivals.mjs --json bench/results/sched-rivals.json
     bun tools/compile-rivals.mjs --json bench/results/compile-rivals.json
 
