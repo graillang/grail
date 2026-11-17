@@ -9782,6 +9782,112 @@ fn pv_call_give_up<a, b, d>(c: (&a mut C), report: u64, pred: Pred, at: u64, nee
     }
     return 0;
 }
+// The largest value the term `t` can have by the facts, or -1 when they bound it by nothing: a
+// literal is itself; `t < b + k`, `t <= b + k` and `t == b + k` bound it by `b`'s own largest value
+// (a literal, or a term the facts bound in turn, a few levels deep).
+fn pv_term_max<a, b>(facts: (&a Atom[]), t: &b [u8], depth: u64) -> i64 {
+    if pv_digits(t) {
+        if 18 < t.len() {
+            return -1;
+        }
+        return pv_number(t);
+    }
+    if 4 < depth {
+        return -1;
+    }
+    mut best: i64 = -1;
+    for i in facts.len() {
+        f := &facts[i];
+        if (f.rel <= 2) && (f.b.len() != 0) && same(view(f.a), t) {
+            bmax := pv_term_max(&facts, view(f.b), depth + 1);
+            if bmax >= 0 {
+                mut m = bmax + f.k;
+                if f.rel == 0 {
+                    m = m - 1;
+                }
+                if (m >= 0) && ((best < 0) || (m < best)) {
+                    best = m;
+                }
+            }
+        }
+    }
+    return best;
+}
+// The largest value of the u64 expression in tokens `lo..hi` - sums and products of literals, of
+// names the facts bound, and of parenthesised such expressions - or -1 when any part is unknown or
+// the bound reaches 2^62. What `i * 3 + k` can be with `i < 5` and `k < 3` is 14.
+fn pv_span_max<a>(c: (&a mut C), facts: (&a Atom[]), lo: u64, hi: u64) -> i64 {
+    cap: i64 = 4611686018427387904;
+    mut total: i64 = 0;
+    mut prod: i64 = 1;
+    mut operand = true;
+    mut i = lo;
+    if hi <= lo {
+        return -1;
+    }
+    while i < hi {
+        k := kind_at(&mut c, i);
+        if operand {
+            mut v: i64 = -1;
+            if k == 2 {
+                v = pv_term_max(&facts, view(tok_text(&mut c, i)), 0);
+            } else if k == 1 {
+                v = pv_term_max(&facts, view(tok_text(&mut c, i)), 0);
+            } else if k == 40 {
+                mut depth = 0;
+                mut j = i;
+                while j < hi {
+                    kj := kind_at(&mut c, j);
+                    if kj == 40 {
+                        depth += 1;
+                    }
+                    if kj == 41 {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    j += 1;
+                }
+                if j >= hi {
+                    return -1;
+                }
+                v = pv_span_max(&mut c, &facts, i + 1, j);
+                i = j;
+            }
+            if v < 0 {
+                return -1;
+            }
+            if (prod != 0) && (v > cap / prod) {
+                return -1;
+            }
+            prod = prod * v;
+            operand = false;
+        } else {
+            if k == 42 {
+                operand = true;
+            } else if k == 43 {
+                total = total + prod;
+                if total >= cap {
+                    return -1;
+                }
+                prod = 1;
+                operand = true;
+            } else {
+                return -1;
+            }
+        }
+        i += 1;
+    }
+    if operand {
+        return -1;
+    }
+    total = total + prod;
+    if total >= cap {
+        return -1;
+    }
+    return total;
+}
 // An addition or a subtraction the facts show cannot overflow: `hi - lo` with `lo <= hi` (which is
 // also `i - 1` with `1 <= i`), and `t + c` with a literal `c` under `NW+` (pv_nw). Both operands must
 // be single terms - the whole left side of the operator and the whole right side - so a chain
@@ -9792,18 +9898,15 @@ fn pv_arith_proof<a>(c: (&a mut C), k: u64, lstart: u64, rstart: u64, rend: u64)
     if !pv_ir_live(&c) || (rstart == 0) || (rstart <= lstart) {
         return ();
     }
-    left := pv_span_term(&mut c, lstart, rstart - 1);
-    right := pv_span_term(&mut c, rstart, rend);
-    if (left.len() == 0) || (right.len() == 0) {
-        return ();
-    }
-    if !pv_u64_term(&mut c, view(left)) || !pv_u64_term(&mut c, view(right)) {
-        return ();
-    }
     mut facts = Atom[];
     pv_ir_read(&mut c, &mut facts);
     mut ok = false;
-    if k == 45 {
+    left := pv_span_term(&mut c, lstart, rstart - 1);
+    right := pv_span_term(&mut c, rstart, rend);
+    terms := (left.len() != 0) && (right.len() != 0) && pv_u64_term(&mut c, view(left)) && pv_u64_term(&mut c, view(right));
+    if !terms {
+        // Not two single terms: only the bound below can prove it.
+    } else if k == 45 {
         ok = pv_holds(&facts, 1, view(right), view(left), 0);
     } else {
         if pv_digits(view(right)) & !pv_digits(view(left)) {
@@ -9811,6 +9914,18 @@ fn pv_arith_proof<a>(c: (&a mut C), k: u64, lstart: u64, rstart: u64, rend: u64)
         }
         if pv_digits(view(left)) & !pv_digits(view(right)) {
             ok = pv_nw(&mut c, &facts, view(right), pv_number(view(left)));
+        }
+    }
+    // A sum or a product of bounded operands - `i * 3 + k` in a loop - stays far below 2^64.
+    if !ok && ((k == 43) || (k == 42)) {
+        lm := pv_span_max(&mut c, &facts, lstart, rstart - 1);
+        rm := pv_span_max(&mut c, &facts, rstart, rend);
+        if (lm >= 0) && (rm >= 0) {
+            if k == 43 {
+                ok = true;
+            } else {
+                ok = (lm == 0) || (rm <= 4611686018427387904 / lm);
+            }
         }
     }
     if ok {
@@ -27460,12 +27575,13 @@ fn array_index_proved<a, b>(c: (&a mut C), lo: u64, hi: u64, n: u64, base: &b [u
     if !pv_ir_live(&c) || (hi <= lo) {
         return false;
     }
-    term := pv_span_term(&mut c, lo, hi);
-    if term.len() == 0 {
-        return false;
-    }
     mut facts = Atom[];
     pv_ir_read(&mut c, &mut facts);
+    term := pv_span_term(&mut c, lo, hi);
+    if term.len() == 0 {
+        m := pv_span_max(&mut c, &facts, lo, hi);
+        return (m >= 0) && (u64(m) < n);
+    }
     mut bound = u8[];
     decimal(&mut bound, n);
     if pv_holds(&facts, 0, view(term), view(bound), 0) {
@@ -27474,9 +27590,13 @@ fn array_index_proved<a, b>(c: (&a mut C), lo: u64, hi: u64, n: u64, base: &b [u
     if base.len() != 0 {
         mut len_term = copy_bytes(base);
         push_bytes(&mut len_term, view(".len"));
-        return pv_holds(&facts, 0, view(term), view(len_term), 0);
+        if pv_holds(&facts, 0, view(term), view(len_term), 0) {
+            return true;
+        }
     }
-    return false;
+    // An index built of bounded parts: `i * 3 + k` with `i < 5` and `k < 3` is at most 14.
+    m := pv_span_max(&mut c, &facts, lo, hi);
+    return (m >= 0) && (u64(m) < n);
 }
 // `a[i]` on an array (or through `&[T; N]`), after its `[`: the element's place, borrowed from the
 // array as an element of a vector is. A scalar read is its value.
@@ -40230,7 +40350,7 @@ fn binary<a>(c: (&a mut C), k: u64, left: u64, right: u64) -> u64 {
     // build traps, and the effect is recorded either way, unless the facts proved that this
     // operation cannot overflow (pv_arith_proof). `--verify-facts` checks that proof at run time,
     // in either mode, without making it a failure the function answers for.
-    proved := ((k == 43) || (k == 45)) && (c.pv_arith_ok != 0);
+    proved := ((k == 43) || (k == 45) || (k == 42)) && (c.pv_arith_ok != 0);
     exchange(&mut c.pv_arith_ok, 0);
     if (k == 43) || (k == 45) || (k == 42) {
         if proved {
@@ -41461,7 +41581,7 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
                                                 }
                                                 both := is_bool(&mut c, ty)
                                                     && is_bool(&mut c, rty);
-                                                if ((k == 45) || (k == 43)) & (c.raw == 0) {
+                                                if ((k == 45) || (k == 43) || (k == 42)) & (c.raw == 0) {
                                                     pv_arith_proof(&mut c, k, lstart, rstart, rend);
                                                 }
                                                 t = binary(&mut c, k, snap, right.t);
