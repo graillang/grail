@@ -24991,27 +24991,6 @@ fn frame_drops<a>(c: (&a mut C), ty: u64) -> bool {
     }
     return framed(&mut c, ty) && !plain(&mut c, ty);
 }
-// Whether moving a value of `ty` out of a place that keeps its words would leave a user `drop` to run
-// on the zeroed words left behind: a framed type with a `Drop` implementation anywhere inside.
-fn frame_hooked<a>(c: (&a mut C), ty: u64, depth: u64) -> bool {
-    if (depth > 8) || !framed(&mut c, ty) {
-        return false;
-    }
-    if is_array(&mut c, ty) {
-        return frame_hooked(&mut c, array_elem(&mut c, ty), depth + 1);
-    }
-    if drop_hook_symbol(&mut c, ty).len() != 0 {
-        return true;
-    }
-    index := ty_arg(&mut c, base_type(&mut c, ty));
-    for i in c.decls[index].count {
-        ft := field_type(&mut c, ty, i);
-        if inline_field(&mut c, ty, i) && frame_hooked(&mut c, ft, depth + 1) {
-            return true;
-        }
-    }
-    return false;
-}
 // A plain record field read as a value: the address of its words inside the container.
 fn inline_address<a>(c: (&a mut C), base: u64, ty: u64, k: u64) -> u64 {
     get(&mut c, base, view("%rax"));
@@ -25180,10 +25159,7 @@ fn materialise<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
         copy := frame_copy(&mut c, slot, ty);
         if frame_drops(&mut c, ty) {
             // The words moved: the place they came from (a field held inline, an element) is left
-            // all zero, which its holder's in-place drop reads as nothing to drop.
-            if frame_hooked(&mut c, ty, 0) {
-                fail(&mut c, view("cannot move a value whose type implements Drop out of the place that holds it; use exchange"));
-            }
+            // all zero, which its holder's in-place drop reads as nothing to drop (a live word of 0).
             words := record_words(&mut c, base_type(&mut c, ty));
             get(&mut c, slot, view("%rcx"));
             for j in words {
@@ -25242,12 +25218,26 @@ fn record_words<a>(c: (&a mut C), ty: u64) -> u64 {
     if c.decls[d].c_layout != 0 {
         return ffi_record_words(&mut c, d);
     }
+    live := u64(live_word(&mut c, ty));
     if (layout_bits(&mut c, ty) & 2) == 0 {
-        return c.decls[d].count;
+        return c.decls[d].count + live;
     }
     at := field_layout(&mut c, ty);
     count := c.layout_offsets[at].len() - 1;
-    return c.layout_offsets[at][count] / 2;
+    return c.layout_offsets[at][count] / 2 + live;
+}
+// Whether the struct `ty` carries a live word after its fields (unboxed-values.md, stage 4): one
+// with its own `Drop`. Its constructor sets the word to 1; moving it out of the place that holds it
+// leaves every word 0, and its in-place drop does nothing - its `drop` included - when the word is 0.
+// A struct without its own `Drop` needs none: its owners' words are 0 when absent.
+fn live_word<a>(c: (&a mut C), alias: u64) -> bool {
+    ty := base_type(&mut c, alias);
+    if (ty == 0) || (ty_kind(&mut c, ty) != 8) || (c.raw != 0) {
+        return false;
+    }
+    index := ty_arg(&mut c, ty);
+    d := &c.decls[index];
+    return (d.drop != 0) && (d.is_enum == 0) && (d.c_layout == 0);
 }
 fn field_store<a>(c: (&a mut C), base: u64, ty: u64, k: u64, value: u64) -> unit {
     if inline_field(&mut c, ty, k) {
@@ -28136,6 +28126,12 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
         } else {
             field_store(&mut c, n, ty, seen[i], sources[i]);
         }
+    }
+    if live_word(&mut c, ty) {
+        get(&mut c, n, view("%rax"));
+        o(&mut c, view("movq $1,"));
+        on(&mut c, (record_words(&mut c, ty) - 1) * 8);
+        o(&mut c, view("(%rax)\n"));
     }
     own(&mut c, n, ty);
     root := place_of(&mut c, n);
@@ -46274,6 +46270,14 @@ fn emit_drop_in_place<a, b>(c: (&a mut C), ty: u64, hook: &b [u8]) -> unit {
     c.out.push(10);
     push_bytes(&mut c.out, view(sym));
     o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\npushq %r12\npushq %r13\nmovq %rdi,%r12\n"));
+    done := label(&mut c);
+    if live_word(&mut c, ty) {
+        // Moved out of the place that held it: nothing is here to drop.
+        o(&mut c, view("cmpq $0,"));
+        on(&mut c, (record_words(&mut c, ty) - 1) * 8);
+        o(&mut c, view("(%r12)\n"));
+        jump(&mut c, view("je"), done);
+    }
     if hook.len() != 0 {
         o(&mut c, view("movq %r12,%rdi\n"));
         call_out(&mut c, hook);
@@ -46301,6 +46305,7 @@ fn emit_drop_in_place<a, b>(c: (&a mut C), ty: u64, hook: &b [u8]) -> unit {
             }
         }
     }
+    mark(&mut c, done);
     o(&mut c, view("popq %r13\npopq %r12\nleave\nret\n"));
     return ();
 }
