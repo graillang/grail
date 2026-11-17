@@ -968,17 +968,19 @@ fn release_optimise<a, b>(assemble: (&a u8[][]), asm: &b [u8], object: &b [u8], 
     for i in assemble.len() {
         clang.push(item(&assemble, i));
     }
+    // ThinLTO across units (docs/design/separate-compilation.md, "Release builds: ThinLTO across
+    // modules"): the parts are bitcode, and the unit object is one flat archive of the native part
+    // and every part (`L` takes the members of the parts' archive; lld reads no nested archives).
+    clang.push(copy(view("-flto=thin")));
+    clear := u8[][copy(view("rm")), copy(view("-f")), copy(view(object))];
     merge := u8[][
-        tool(view("GRAIL_LINKER"), view("ld.lld")),
-        copy(view("-m")),
-        copy(view(emulation)),
-        copy(view("-r")),
+        tool(view("GRAIL_AR"), view("llvm-ar")),
+        copy(view("qcsDL")),
+        copy(view(object)),
         native_part.copy(),
-        optimised.copy(),
-        copy(view("-o")),
-        copy(view(object))
+        optimised.copy()
     ];
-    return u8[][][clang, merge];
+    return u8[][][clang, clear, merge];
 }
 fn compile_mode<a, b, d, e, g, k>(
     h: (&a Home),
@@ -2115,6 +2117,14 @@ fn llvm_compile_command<a>(args: (&a u8[][])) -> u64 {
         clang.push(item(&args, i));
         i += 1;
     }
+    // With `-flto=thin` the parts are ThinLTO bitcode and OUT is an archive of them: a relocatable
+    // link of bitcode would run full LTO over this unit alone and close it to the other units.
+    mut thin = false;
+    for c in clang.len() {
+        if eq(view(item(&clang, c)), view("-flto=thin")) {
+            thin = true;
+        }
+    }
     text := host::read_file(view(input));
     mut wanted = text.len() / 4194304 + 1;
     mut cap = host::cpus();
@@ -2142,8 +2152,16 @@ fn llvm_compile_command<a>(args: (&a u8[][])) -> u64 {
         run.push(copy(view("-O2")));
         run.push(copy(view(input)));
         run.push(copy(view("-o")));
-        run.push(copy(view(output)));
-        return host::command(run);
+        if !thin {
+            run.push(copy(view(output)));
+            return host::command(run);
+        }
+        bitcode := cat(view(input), view(".bc"));
+        run.push(bitcode.copy());
+        if host::command(run) != 0 {
+            return 1;
+        }
+        return thin_archive(view(output), &u8[][bitcode]);
     }
     plan := llvm::split_plan(view(text), wanted);
     // Unique to this unit's module: internal functions keep their own names in every part of it.
@@ -2207,6 +2225,9 @@ fn llvm_compile_command<a>(args: (&a u8[][])) -> u64 {
         host::write_file(view(pending), view(bytes));
         host::rename(view(pending), view(item(&destinations, q)));
     }
+    if thin {
+        return thin_archive(view(output), &objects);
+    }
     mut link = u8[][tool(view("GRAIL_LINKER"), view("ld.lld")), copy(view("-m")), copy(view(emulation)), copy(view("-r"))];
     for k in objects.len() {
         link.push(item(&objects, k));
@@ -2214,6 +2235,16 @@ fn llvm_compile_command<a>(args: (&a u8[][])) -> u64 {
     link.push(copy(view("-o")));
     link.push(copy(view(output)));
     return host::command(link);
+}
+// `output` as a fresh archive of `members` (ThinLTO bitcode parts): `r` would update an archive left
+// by an earlier build in place, so it is removed first.
+fn thin_archive<a, b>(output: &a [u8], members: (&b u8[][])) -> u64 {
+    host::remove(output, 0);
+    mut ar = u8[][tool(view("GRAIL_AR"), view("llvm-ar")), copy(view("rcsD")), copy(output)];
+    for k in members.len() {
+        ar.push(item(&members, k));
+    }
+    return host::command(ar);
 }
 fn unit_build_command<a>(args: (&a u8[][])) -> u64 {
     if args.len() == 0 {
@@ -2642,7 +2673,11 @@ fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
         }
         return u64(failed != 0);
     }
-    if link_objects(view(output), view(target), view(emulation), &objects, &link) != 0 {
+    mut thin_cache = u8[];
+    if cache != 0 {
+        thin_cache = path_join(view(cache_base()), view("thinlto"));
+    }
+    if link_objects(view(output), view(target), view(emulation), &objects, &link, view(thin_cache)) != 0 {
         return 1;
     }
     if cache != 0 {
@@ -2703,6 +2738,31 @@ fn unit_links<a>(stem: &a [u8]) -> u8[][] {
     }
     return out;
 }
+// Whether `path` is an archive (`!<arch>`), which is what a release unit is.
+fn is_archive<a>(path: &a [u8]) -> bool {
+    head := host::read_file(path);
+    return (head.len() >= 8) && eq(view(head[0..8]), view("!<arch>\n"));
+}
+// How many ThinLTO backends the link runs: GRAIL_JOBS when it is set, else the processors, at most 8.
+fn thin_jobs() -> u64 {
+    asked := host::env(view("GRAIL_JOBS"));
+    mut n: u64 = 0;
+    for i in asked.len() {
+        if (48 <= asked[i]) && (asked[i] <= 57) {
+            n = n * 10 + u64(asked[i] - 48);
+        }
+    }
+    if n == 0 {
+        n = host::cpus();
+        if 8 < n {
+            n = 8;
+        }
+    }
+    if n == 0 {
+        n = 1;
+    }
+    return n;
+}
 // Add a link input once: two modules may ask for the same library, and the link needs it once.
 fn add_link<a, b>(link: (&a mut u8[][]), input: &b [u8]) -> unit {
     for i in link.len() {
@@ -2717,20 +2777,39 @@ fn add_link<a, b>(link: (&a mut u8[][]), input: &b [u8]) -> unit {
 }
 // One link, from objects already on disk: the cache reuses exactly this, so a cached image and an
 // uncached one are the same link of the same objects.
-fn link_objects<a, b, d, e, g>(
+fn link_objects<a, b, d, e, g, k>(
     output: &a [u8],
     target: &b [u8],
     emulation: &d [u8],
     objects: (&e u8[][]),
-    inputs: (&g u8[][])
+    inputs: (&g u8[][]),
+    thin_cache: &k [u8] = view("")
 ) -> u64 {
     mut link = u8[][
         tool(view("GRAIL_LINKER"), view("ld.lld")),
         copy(view("-m")),
         copy(view(emulation))
     ];
+    // Release units are archives of a native part and ThinLTO bitcode (release_optimise): every
+    // member is part of the program, and the bitcode is optimised across units here.
+    mut thin = false;
+    for i in objects.len() {
+        if is_archive(view(item(&objects, i))) {
+            thin = true;
+        }
+    }
+    if thin {
+        link.push(copy(view("--whole-archive")));
+    }
     for i in objects.len() {
         link.push(item(&objects, i));
+    }
+    if thin {
+        link.push(copy(view("--no-whole-archive")));
+        link.push(cat(view("--thinlto-jobs="), view(decimal(thin_jobs()))));
+        if thin_cache.len() != 0 {
+            link.push(cat(view("--thinlto-cache-dir="), thin_cache));
+        }
     }
     for i in inputs.len() {
         link.push(item(&inputs, i));
