@@ -1243,6 +1243,8 @@ fn put_num<a>(out: (&a mut u8[]), n: u64) {
 // the stack's end that is touched is its guard page, within a page of the stack pointer - where the
 // overflow handler reports `stack overflow` - and never a mapping beyond it. The frame sizes are the
 // final ones, the `.set .F<n>,SIZE` lines; the probe goes before the `subq $.F<n>,%rsp` that uses one.
+// Its loop label is named after the frame constant (`.Lgrail_probe_F<n>`), so a part probed on its own
+// (--split) spells it as the whole stream does.
 // Windows (`after` = 1) describes its prologue to the unwinder as exactly `pushq %rbp`, `movq
 // %rsp,%rbp` and the frame line, so there the probe follows the frame line: the frame is already
 // allocated and its pages are touched from the top down, which is what Windows' guard-page growth
@@ -1278,7 +1280,6 @@ pub fn probe_frames<a>(s: &a [u8], after: u64) -> u8[] {
         return s.copy();
     }
     mut out = u8[];
-    mut k: u64 = 0;
     a = 0;
     while a < s.len() {
         mut e = a;
@@ -1308,23 +1309,22 @@ pub fn probe_frames<a>(s: &a [u8], after: u64) -> u8[] {
                         }
                     }
                     if same {
-                        k += 1;
                         pages := (sizes[i] + 4095) / 4096;
                         if after != 0 {
                             out.append(view("movq %rbp,%rax\nmovq $"));
                             put_num(&mut out, pages);
                             out.append(view(",%r11\n.Lgrail_probe_"));
-                            put_num(&mut out, k);
+                            out.append(name[1..name.len()]);
                             out.append(view(":\nsubq $4096,%rax\nmovq (%rax),%r10\nsubq $1,%r11\njnz .Lgrail_probe_"));
-                            put_num(&mut out, k);
+                            out.append(name[1..name.len()]);
                             out.append(view("\n"));
                         } else {
                             out.append(view("movq $"));
                             put_num(&mut out, pages);
                             out.append(view(",%rax\n.Lgrail_probe_"));
-                            put_num(&mut out, k);
+                            out.append(name[1..name.len()]);
                             out.append(view(":\nsubq $4096,%rsp\nmovq $0,(%rsp)\nsubq $1,%rax\njnz .Lgrail_probe_"));
-                            put_num(&mut out, k);
+                            out.append(name[1..name.len()]);
                             out.append(view("\nmovq %rbp,%rsp\n"));
                         }
                     }
@@ -2251,7 +2251,9 @@ fn xmm_narrow<a, b>(o: (&a mut ir::Body), s: &b [u8], lsrc: (&u64[]), ldst: (&u6
                 good = true;
             }
             if (op == 1) && (o.k0[i] == 1) && (p < i) && (o.k1[p] == 1) && (o.v1[p] == o.v0[i]) {
-                if ((o.op[p] == 1) || (o.op[p] == 2)) && (o.k0[p] == 3) && (imm_value(&o, view(s), p) == 0) {
+                // imm_value is the value + 1, and 0 for an immediate it cannot read (wider than 18
+                // digits, as 2.0's bits are): only a 1 is a zero.
+                if ((o.op[p] == 1) || (o.op[p] == 2)) && (o.k0[p] == 3) && (imm_value(&o, view(s), p) == 1) {
                     good = true;
                 }
                 if (o.op[p] == 10) && (o.k0[p] == 1) && (o.v0[p] == o.v0[i]) {

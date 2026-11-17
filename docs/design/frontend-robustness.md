@@ -66,8 +66,9 @@ hash); `--compiler PATH` or `GRAIL_COMPILER` names another. The run ends with on
 fuzz: 200 cases, 186 fine, 0 bugs, 0 hangs, 14 other (seed 1, 218 sources, 6 jobs, 25.2s)
 ```
 
-`other` cases are `grail: cannot resolve module ...` - a mutation that renamed a `use` target is
-refused by the driver before the front end runs, so it is neither a diagnostic nor a crash. The full
+`other` is anything else the compiler printed: a diagnostic without a location, a driver failure.
+There are none at seed 1 since an unresolvable `use` became an ordinary diagnostic (see "A mutated
+`use`" below). The full
 classification is in `.work/fuzz/report.json`; exit status is 1 when any case was a `bug` or a hang.
 
 Before the fixes below: `fuzz: 200 cases, 184 fine, 2 bugs, 0 hangs, 14 other (seed 1, 218 sources,
@@ -260,9 +261,22 @@ is completed second (`record-contains-itself-indirectly`).
   because `cli.grl` calls `native::...` without a `use native;` and the real build passes every
   module on the command line. That is a refusal of a program the build accepts, i.e. a diagnostic
   disagreement, not a crash; it is on this list rather than fixed here.
-- **A mutated `use`.** `grail: cannot resolve module `sys_grail` ...` exits 1 with no `error:` line.
-  It is the driver refusing before the front end runs, which is why the fuzzer counts it as `other`
-  and names it in the report. A driver refusal in diagnostic form is a separate change.
+- **A mutated `use`.** `cannot resolve module ...` used to be a bare `grail:` line with no location.
+  It is now an `error:` with the `use` line's location and the name underlined
+  (`useres-unresolved-points-at-the-use`), so a renamed `use` target is a `fine` refusal - and so are
+  the eight cases at seed 1 whose source `use`s a module a test generates (`sys_grail`, `fixture`,
+  bindgen's output), which no copy of the tree holds. Seed 1 is now `200 cases, 200 fine, 0 bugs,
+  0 hangs`, slowest case 5.4 s.
+- **Two "hangs" were a re-run chain.** At seed 1 two book examples with an error inside a closure
+  (`threads.grl` lost a `return`, `fnmut.grl` got `retur`) took 21-26 s against 0.6 s unmutated,
+  which under the lint's load crossed the 20 s timeout. The compiler re-runs itself, skipping the
+  body that failed, to report the next error; a closure's body is emitted after every function, and
+  the re-run skipped whichever body had been checked last instead of the closure's, met the same
+  error again, and chained to the cap of 20 compiles. A closure now remembers the body it was
+  written in (`Closure.body_pos`), so the re-run skips that function: 1.9 s, the same diagnostics.
+  `closure-error-then-the-next-error` pins the diagnostics and `ci.mjs lint` the time (an error in a
+  closure must cost less than five clean compiles). The fuzzer's summary now names its five slowest
+  cases, so a hang that is only slowness shows where it is.
 
 ## The lint seed
 

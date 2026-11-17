@@ -6853,7 +6853,16 @@ fn f_host_read_fd(fd: u64, asked: u64) -> u64 {
     if max == 0 {
         return out;
     }
-    buf := rt_alloc(max);
+    // A large read lands in the result's own buffer; a small one in a scratch buffer, so a vector
+    // holding a few bytes does not keep a megabyte of capacity.
+    direct := 65535 < max;
+    mut buf = 0;
+    if direct {
+        rt_reserveb(out, max);
+        buf = raw_load(out);
+    } else {
+        buf = rt_alloc(max);
+    }
     while true {
         n := rt_io(rt_read_now, fd, buf, max);
         if n == wrapping_sub(0, 11) {
@@ -6864,17 +6873,23 @@ fn f_host_read_fd(fd: u64, asked: u64) -> u64 {
                 break;
             }
         } else {
-            if rt_error(n) == 0 {
-                mut i = 0;
-                while i < n {
-                    rt_pushb(out, raw_byte(buf + i));
-                    i += 1;
+            if (rt_error(n) == 0) & (n != 0) {
+                // One copy of what arrived at most, not a push per byte: the compiler reads its
+                // workers' output through here, a hundred megabytes of it.
+                if direct {
+                    raw_store(out + 8, n);
+                } else {
+                    rt_reserveb(out, n);
+                    rt_copy_bytes(raw_load(out), buf, n);
+                    raw_store(out + 8, n);
                 }
             }
             break;
         }
     }
-    rt_free(buf);
+    if !direct {
+        rt_free(buf);
+    }
     return out;
 }
 // Writes everything (suspending while the pipe is full); returns bytes written.

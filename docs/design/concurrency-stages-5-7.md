@@ -237,6 +237,14 @@ reserved for software, and reports instead of asserting there; real AArch64 hard
 book's concurrency chapter, "Litmus tests", lists which tests can catch a fault under qemu and which
 only on hardware.
 
+The director then had qemu fixed rather than lived with. `tools/qemu/stlr-rcsc.patch` adds a full
+barrier after each store-release form (`trans_STLR`, `trans_STLR_i`), and `tools/qemu/build.sh`
+builds QEMU 11.1.3 statically with it into `.work/architectures/toolchain`, where `runner()` looks.
+`tools/gate.sh` builds it and prints its `--version`, which ends in `(grail-stlr-rcsc)`. Under it
+store buffering shows 0 forbidden outcomes over 200,000 rounds on both backends; stock qemu shows
+31-704 (native) and 2,469-7,458 (LLVM). The litmus tool asserts the count under it. The filtered
+aarch64 corpus took the same time (stock 81 s, patched 70 s; load noise).
+
 **Measured** (x86-64, `bench/atomics.grl`, same source built by the compiler before and after).
 Instructions per iteration come from callgrind, as the slope between 100,000 and 200,000
 iterations; an empty loop iteration is 10.1. Wall time is the median of five runs on a heavily
