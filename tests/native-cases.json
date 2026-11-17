@@ -7521,7 +7521,7 @@
   },
   {
     "name": "refinement-param-violated",
-    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\nfn main() -> u64 {\n    println(take(16));\n    println(take(17));\n    return 0;\n}\n",
+    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\nfn main() -> u64 {\n    println(take(16));\n    println(take(seventeen()));\n    return 0;\n}\nfn seventeen() -> u64 {\n    return 17;\n}\n",
     "signal": "SIGABRT",
     "stderr": [
       "error: refinement violated: align % 16 == 0\n --> ",
@@ -7621,13 +7621,14 @@
       "native"
     ],
     "asm": [
-      "f_main_take:",
-      "call f_main_take\n"
+      "f_main_take.proved:",
+      "call f_main_take.proved"
     ],
     "asmAbsent": [
-      ".proved"
+      "f_main_untaken.proved",
+      "call f_main_take\n"
     ],
-    "note": "a proved call is a plain call to the one entry, whose checks hold by the proof; a function with no predicate is unchanged"
+    "note": "a function whose parameters are refined carries a second entry; the prover routes the constant call to it, a function with no predicate carries none, and an unproved call keeps the checked entry"
   },
   {
     "name": "refinement-param-proved-binding",
@@ -7640,11 +7641,11 @@
       "native"
     ],
     "asm": [
-      "call f_main_take\n"
+      "call f_main_take.proved"
     ],
     "note": "a binding of a constant settles `align % 16 == 0` by divisibility, so the call enters past the check",
     "asmAbsent": [
-      ".proved"
+      "call f_main_take\n"
     ]
   },
   {
@@ -7659,9 +7660,6 @@
     ],
     "asm": [
       "call f_main_take\n"
-    ],
-    "asmAbsent": [
-      ".proved"
     ],
     "note": "a write kills the facts that name the target: the check stays, and passes because 48 is a multiple of 16"
   },
@@ -7777,11 +7775,7 @@
     "backends": [
       "native"
     ],
-    "asmAbsent": [
-      ".proved"
-    ],
-    "note": "an indirect call proved nothing: a function value always takes the checked entry",
-    "asm": []
+    "note": "an indirect call proved nothing: a function value always takes the checked entry"
   },
   {
     "name": "refinement-loop-fact-proves-call",
@@ -7828,11 +7822,11 @@
       "native"
     ],
     "asm": [
-      "call f_refined_take\n"
+      "call f_refined_take.proved"
     ],
     "note": "a refinement carried by an interface is owed by a caller in another module, and its constant argument proves it there too",
     "asmAbsent": [
-      ".proved"
+      "call f_refined_take\n"
     ]
   },
   {
@@ -7904,7 +7898,7 @@
   },
   {
     "name": "refinement-strict-unproved",
-    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\nfn main() -> u64 {\n    println(take(17));\n    return 0;\n}\n",
+    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\nfn main() -> u64 {\n    n := seventeen();\n    println(take(n));\n    return 0;\n}\nfn seventeen() -> u64 {\n    return 17;\n}\n",
     "reject": true,
     "flags": [
       "--strict-refinements"
@@ -7913,7 +7907,7 @@
       "cannot prove the refinement `align % 16 == 0`",
       "= the facts at the call do not settle it",
       "= the facts in scope were:",
-      "input.grl:6:"
+      "input.grl:7:"
     ],
     "targets": [
       "x86_64",
@@ -7927,7 +7921,7 @@
   },
   {
     "name": "refinement-strict-attribute-fn",
-    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\n@strict\nfn caller() -> u64 {\n    return take(17);\n}\n\nfn main() -> u64 {\n    println(caller());\n    return 0;\n}\n",
+    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\n@strict\nfn caller() -> u64 {\n    return take(seventeen());\n}\n\nfn main() -> u64 {\n    println(caller());\n    return 0;\n}\nfn seventeen() -> u64 {\n    return 17;\n}\n",
     "reject": true,
     "diagnostic": [
       "cannot prove the refinement `align % 16 == 0`",
@@ -8077,7 +8071,7 @@
   },
   {
     "name": "refinement-strict-generic-unproved",
-    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\n@strict\nfn pick<T>(x: T) -> u64 {\n    return take(17);\n}\n\nfn main() -> u64 {\n    println(pick<u64>(3));\n    return 0;\n}\n",
+    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\n@strict\nfn pick<T>(x: T) -> u64 {\n    return take(seventeen());\n}\n\nfn main() -> u64 {\n    println(pick<u64>(3));\n    return 0;\n}\nfn seventeen() -> u64 {\n    return 17;\n}\n",
     "reject": true,
     "diagnostic": [
       "cannot prove the refinement `align % 16 == 0`",
@@ -8127,10 +8121,10 @@
       "native"
     ],
     "asm": [
-      "call f_main_take\n"
+      "call f_main_take.proved"
     ],
     "asmAbsent": [
-      ".proved"
+      "call f_main_take\n"
     ],
     "note": "an arm whose pattern is one literal states `n == 16` in that arm: the call's `align % 16 == 0` is settled there and enters the proved entry"
   },
@@ -8164,10 +8158,10 @@
       "native"
     ],
     "asm": [
-      "call f_main_take\n"
+      "call f_main_take.proved"
     ],
     "asmAbsent": [
-      ".proved"
+      "call f_main_take\n"
     ],
     "note": "a guard is what reaching the arm's body means: `_ if n % 16 == 0` states it there, and the call enters the proved entry"
   },
@@ -8182,10 +8176,10 @@
       "native"
     ],
     "asm": [
-      "call f_main_get\n"
+      "call f_main_get.proved"
     ],
     "asmAbsent": [
-      ".proved"
+      "call f_main_get\n"
     ],
     "note": "a shadowing binding kills the facts about the name it shadows for its own block only: after the block the refined parameter's `i < v.len()` is back, and the call needs no check"
   },
@@ -8219,10 +8213,10 @@
       "native"
     ],
     "asm": [
-      "call f_main_at\n"
+      "call f_main_at.proved"
     ],
     "asmAbsent": [
-      ".proved"
+      "call f_main_at\n"
     ],
     "note": "`for k in 0..n` states `0 <= k < n` inside the body, which is exactly at's `k < n`: the call enters the proved entry"
   },
@@ -8256,10 +8250,10 @@
       "native"
     ],
     "asm": [
-      "call f_main_take_second\n"
+      "call f_main_take_second.proved"
     ],
     "asmAbsent": [
-      ".proved"
+      "call f_main_take_second\n"
     ],
     "note": "an arm binds `x`, not `i` or `v`: the facts that held before the match are still about the names the arm uses, so the call enters the proved entry (the token walk dropped every fact at a `match`)"
   },
@@ -8270,10 +8264,6 @@
     "note": "@no_alloc over a slice loop, @no_panic with a refined index and with for-len indexing, a @no_panic caller that proves the callee's refinement, @bounded(16) while Native only: the case is accepted because the refinement prover's `<sym>.proved` entry discharges the refined callee inside an `@no_panic` function, and that entry is native-only (its prologue is frame-symbol arithmetic the LLVM lifter does not model), so an LLVM build refuses the effect by name instead of discharging it and then leaving the check in.",
     "backends": [
       "native"
-    ],
-    "asm": [],
-    "asmAbsent": [
-      ".proved"
     ]
   },
   {
@@ -10976,8 +10966,7 @@
       "--strict-refinements"
     ],
     "diagnostic": [
-      "cannot prove the refinement `i == 0`",
-      "input.grl:11:"
+      "the refinement `i == 0` is false at this call"
     ],
     "targets": [
       "x86_64",
@@ -10987,7 +10976,7 @@
     "backends": [
       "native"
     ],
-    "note": "a fact about an inner binding ends with its block: the outer name is a different value"
+    "note": "a fact about an inner binding ends with its block: the outer name is a different value - after the block `i` is the outer 4 again, so the call is not only unproved but false, a compile error in every mode"
   },
   {
     "name": "refinement-loop-invariant-name-still-proved",
@@ -16423,5 +16412,69 @@
       "x86_64"
     ],
     "note": "concurrent_map's shards are RwLocks, so readers on several threads share entries: a value that may move between threads but not be shared (DashMap's Send + Sync rule) is refused with the bound and the type named"
+  },
+  {
+    "name": "refinement-proved-false-constant",
+    "source": "fn split(v: &u64[], grain: u64 where grain > 0) -> u64 {\n    return v.len() / grain;\n}\nfn main() {\n    v := u64[1, 2, 3, 4];\n    println(split(&v, 2));\n    println(split(&v, 0));\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "the refinement `grain > 0` is false at this call: the arguments are constants that break it"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a constant argument that breaks the predicate is a compile error without @strict: the call could only fail"
+  },
+  {
+    "name": "refinement-proved-false-constant-wrap",
+    "source": "fn split(v: &u64[], grain: u64 where grain > 0) -> u64 {\n    return v.len() / grain;\n}\nfn main() {\n    v := u64[1, 2, 3, 4];\n    println(split(&v, 2));\n    println(split(&v, 0));\n}\n",
+    "reject": true,
+    "flags": [
+      "--overflow=wrap"
+    ],
+    "diagnostic": [
+      "the refinement `grain > 0` is false at this call: the arguments are constants that break it"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a constant argument that breaks the predicate is a compile error without @strict: the call could only fail"
+  },
+  {
+    "name": "refinement-proved-false-bound-constant",
+    "source": "fn split(v: &u64[], grain: u64 where grain > 0) -> u64 {\n    return v.len() / grain;\n}\nfn main() {\n    v := u64[1, 2, 3, 4];\n    g := 0;\n    println(split(&v, g));\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "the refinement `grain > 0` is false at this call"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a name the facts equate with a constant (`g := 0`) is read as that constant"
+  },
+  {
+    "name": "refinement-wrapper-many-params",
+    "source": "fn f(v: u64[], a: u64, b: u64, c: u64, d: u64, e: u64, k: u64 where k > 0, w: string) -> u64 {\n    mut s = v;\n    mut n = 0;\n    while s.len() > 0 {\n        n += s.pop()!;\n    }\n    return n + a + b + c + d + e + k + w.len();\n}\nfn seven() -> u64 {\n    return 7;\n}\nfn main() {\n    keep := u64[7, 8, 9];\n    v := u64[1, 2, 3];\n    println(f(v, 1, 2, 3, 4, 5, 6, \"ab\"));\n    u := u64[1, 2, 3];\n    m := seven();\n    println(f(u, 1, 2, 3, 4, 5, m, \"ab\"));\n    x := u64[1];\n    z := m - 7;\n    println(f(x, 1, 2, 3, 4, 5, z, \"ab\"));\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "29\n30\n",
+    "stderr": [
+      "error: refinement violated: k > 0\n --> ",
+      "input.grl:21:"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "eight parameters, the extra ones behind %r9: a proved call reaches the body directly, an unproved one goes through the wrapper, which checks `k` from the record and passes it on; a failing check aborts before the body frees anything",
+    "backends": [
+      "native"
+    ]
   }
 ]

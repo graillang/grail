@@ -1483,16 +1483,14 @@ fn build_pairs<a>(o: (&a mut ir::Body), ns: u64) {
 // then the passes. The layer is built before the passes because the front end's type facts are
 // keyed by the frame slot numbers the passes go on to compact
 // (docs/design/typed-ir.md, "The serializer").
-fn body<a, b, c, d, e>(o: (&a mut ir::Body), s: &b [u8], facts: (&c llvm::Facts), ix: (&d ir::FactIndex), want_ir: u64, ir_text: (&mut u8[]), replay: (&e ir::Replay), call_syms: (&mut u8[][]), call_counts: (&mut u64[])) {
+fn body<a, b, c, d, e>(o: (&a mut ir::Body), s: &b [u8], facts: (&c llvm::Facts), ix: (&d ir::FactIndex), want_ir: u64, ir_text: (&mut u8[]), call_syms: (&mut u8[][]), call_counts: (&mut u64[])) {
     ir::build(&mut o, view(s), facts, ix);
     if want_ir != 0 {
         ir::write_body(&o, view(s), &mut ir_text);
     }
-    // What the effect recorder's count is held against: the calls this body parses to, minus the
-    // ones in a replayed `.proved` prologue, which the recorder counted where they were emitted.
-    range := ir::replay_of(replay, view(o.name));
+    // What the effect recorder's count is held against: the calls this body parses to.
     call_syms.push(o.name.copy());
-    call_counts.push(ir::count_calls(&o, range[0], range[1]));
+    call_counts.push(ir::count_calls(&o));
     function(&mut o, view(s));
 }
 fn function<a, b>(o: (&a mut ir::Body), s: &b [u8]) {
@@ -2854,10 +2852,10 @@ fn compact<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64, ns: u64) -> u6
     }
     return (used * 8 + 15) / 16 * 16;
 }
-pub fn optimize<b, c, d, m, q, r>(s: &b [u8], facts: (&c llvm::Facts), want_ir: u64, ir_text: (&mut u8[]), replay: (&d ir::Replay), call_syms: (&mut u8[][]), call_counts: (&mut u64[]), memo_dir: &m [u8], memo_id: &m [u8], starts: (&q u64[]), known: (&r ir::Known)) -> u8[] {
+pub fn optimize<b, c, d, m, q, r>(s: &b [u8], facts: (&c llvm::Facts), want_ir: u64, ir_text: (&mut u8[]), call_syms: (&mut u8[][]), call_counts: (&mut u64[]), memo_dir: &m [u8], memo_id: &m [u8], starts: (&q u64[]), known: (&r ir::Known)) -> u8[] {
     mut marks = u64[];
     mut names = u8[][];
-    return optimize_parts(view(s), 0, &mut marks, &mut names, facts, want_ir, ir_text, replay, call_syms, call_counts, memo_dir, memo_id, starts, known);
+    return optimize_parts(view(s), 0, &mut marks, &mut names, facts, want_ir, ir_text, call_syms, call_counts, memo_dir, memo_id, starts, known);
 }
 // `optimize` plus the positions of the `--split` module markers it kept: for each marker line, the
 // output offset of the line and the module name it carries. A single-file build passes `split` 0 and
@@ -2865,7 +2863,7 @@ pub fn optimize<b, c, d, m, q, r>(s: &b [u8], facts: (&c llvm::Facts), want_ir: 
 // `starts`: where the emitter wrote the lines the cut planning reads (plan_from) - a body's `.type`
 // line, a part's marker, a function's `.gbase` - so it does not scan the stream for them. Possibly
 // stale (the emitter takes text back on a retry) and in no particular order; empty means scan.
-pub fn optimize_parts<b, c, d, e, m, q, r>(s: &b [u8], split: u64, marks: (&mut u64[]), names: (&mut u8[][]), facts: (&c llvm::Facts), want_ir: u64, ir_text: (&mut u8[]), replay: (&e ir::Replay), call_syms: (&mut u8[][]), call_counts: (&mut u64[]), memo_dir: &m [u8], memo_id: &m [u8], starts: (&q u64[]), known: (&r ir::Known)) -> u8[] {
+pub fn optimize_parts<b, c, d, e, m, q, r>(s: &b [u8], split: u64, marks: (&mut u64[]), names: (&mut u8[][]), facts: (&c llvm::Facts), want_ir: u64, ir_text: (&mut u8[]), call_syms: (&mut u8[][]), call_counts: (&mut u64[]), memo_dir: &m [u8], memo_id: &m [u8], starts: (&q u64[]), known: (&r ir::Known)) -> u8[] {
     // The type facts, indexed by body symbol once: the table is complete before any body is walked.
     ix := ir::index_facts(facts);
     mut o = ir::new_body();
@@ -2895,7 +2893,7 @@ pub fn optimize_parts<b, c, d, e, m, q, r>(s: &b [u8], split: u64, marks: (&mut 
     mut rest = 0;
     mut parallel = false;
     if cuts.len() > 2 {
-        parallel = run_forked(&mut o, view(s), &cuts, split, marks, names, facts, &ix, want_ir, ir_text, replay, call_syms, call_counts, &mut js);
+        parallel = run_forked(&mut o, view(s), &cuts, split, marks, names, facts, &ix, want_ir, ir_text, call_syms, call_counts, &mut js);
     }
     jobs::give_all(&mut js);
     // The lines the inlining pass will read. The workers noted theirs as they went; a single
@@ -2905,7 +2903,7 @@ pub fn optimize_parts<b, c, d, e, m, q, r>(s: &b [u8], split: u64, marks: (&mut 
         rest = cuts[cuts.len() - 1].at;
         lines = exchange(&mut o.table, u64[]);
     } else {
-        rest = run_range(&mut o, view(s), 0, s.len(), split, marks, names, facts, &ix, want_ir, ir_text, replay, call_syms, call_counts);
+        rest = run_range(&mut o, view(s), 0, s.len(), split, marks, names, facts, &ix, want_ir, ir_text, call_syms, call_counts);
         lines_of_interest(view(o.out), 0, &mut lines);
     }
     tail := o.out.len();
@@ -3134,7 +3132,7 @@ fn copy_texts<a>(v: (&a u8[][])) -> u8[][] {
 // Optimise the whole lines of `s[lo..hi]` into `o.out`. Returns where the last whole line ended.
 // The bodies the front end noted (o.known) are taken as they are noted; the text between them -
 // part markers, `.gbase` lines, bodies that are not units, data - is scanned line by line.
-fn run_range<a, b, c, e, x>(o: (&a mut ir::Body), s: &b [u8], lo: u64, hi: u64, split: u64, marks: (&mut u64[]), names: (&mut u8[][]), facts: (&c llvm::Facts), ix: (&x ir::FactIndex), want_ir: u64, ir_text: (&mut u8[]), replay: (&e ir::Replay), call_syms: (&mut u8[][]), call_counts: (&mut u64[])) -> u64 {
+fn run_range<a, b, c, e, x>(o: (&a mut ir::Body), s: &b [u8], lo: u64, hi: u64, split: u64, marks: (&mut u64[]), names: (&mut u8[][]), facts: (&c llvm::Facts), ix: (&x ir::FactIndex), want_ir: u64, ir_text: (&mut u8[]), call_syms: (&mut u8[][]), call_counts: (&mut u64[])) -> u64 {
     mut cursor = lo;
     // The first noted body at or after `lo`.
     mut k = 0;
@@ -3153,7 +3151,7 @@ fn run_range<a, b, c, e, x>(o: (&a mut ir::Body), s: &b [u8], lo: u64, hi: u64, 
         if hi < e {
             break;
         }
-        cursor = scan_range(&mut o, view(s), cursor, a, split, marks, names, facts, ix, want_ir, ir_text, replay, call_syms, call_counts);
+        cursor = scan_range(&mut o, view(s), cursor, a, split, marks, names, facts, ix, want_ir, ir_text, call_syms, call_counts);
         mut ae = a;
         while s[ae] != 10 {
             ae += 1;
@@ -3161,13 +3159,13 @@ fn run_range<a, b, c, e, x>(o: (&a mut ir::Body), s: &b [u8], lo: u64, hi: u64, 
         o.name = ir::type_symbol(view(s), a, ae);
         ir::function_begin(&mut o);
         key := o.known.key[k].copy();
-        one_body(&mut o, view(s), a, e, true, view(key), facts, ix, want_ir, ir_text, replay, call_syms, call_counts);
+        one_body(&mut o, view(s), a, e, true, view(key), facts, ix, want_ir, ir_text, call_syms, call_counts);
         cursor = e;
         k += 1;
     }
-    return scan_range(&mut o, view(s), cursor, hi, split, marks, names, facts, ix, want_ir, ir_text, replay, call_syms, call_counts);
+    return scan_range(&mut o, view(s), cursor, hi, split, marks, names, facts, ix, want_ir, ir_text, call_syms, call_counts);
 }
-fn scan_range<a, b, c, e, x>(o: (&a mut ir::Body), s: &b [u8], lo: u64, hi: u64, split: u64, marks: (&mut u64[]), names: (&mut u8[][]), facts: (&c llvm::Facts), ix: (&x ir::FactIndex), want_ir: u64, ir_text: (&mut u8[]), replay: (&e ir::Replay), call_syms: (&mut u8[][]), call_counts: (&mut u64[])) -> u64 {
+fn scan_range<a, b, c, e, x>(o: (&a mut ir::Body), s: &b [u8], lo: u64, hi: u64, split: u64, marks: (&mut u64[]), names: (&mut u8[][]), facts: (&c llvm::Facts), ix: (&x ir::FactIndex), want_ir: u64, ir_text: (&mut u8[]), call_syms: (&mut u8[][]), call_counts: (&mut u64[])) -> u64 {
     mut start = lo;
     mut inside = 0;
     mut opened = lo;
@@ -3196,14 +3194,14 @@ fn scan_range<a, b, c, e, x>(o: (&a mut ir::Body), s: &b [u8], lo: u64, hi: u64,
                     o.out.append(s[a..e + 1]);
                 }
             } else if closes_body(view(s), a, e) {
-                one_body(&mut o, view(s), opened, start, true, view(""), facts, ix, want_ir, ir_text, replay, call_syms, call_counts);
+                one_body(&mut o, view(s), opened, start, true, view(""), facts, ix, want_ir, ir_text, call_syms, call_counts);
                 inside = 0;
             }
         }
         i += 1;
     }
     if inside != 0 {
-        one_body(&mut o, view(s), opened, start, false, view(""), facts, ix, want_ir, ir_text, replay, call_syms, call_counts);
+        one_body(&mut o, view(s), opened, start, false, view(""), facts, ix, want_ir, ir_text, call_syms, call_counts);
     }
     return start;
 }
@@ -3215,8 +3213,7 @@ fn scan_range<a, b, c, e, x>(o: (&a mut ir::Body), s: &b [u8], lo: u64, hi: u64,
 // lines have not changed since some earlier build is not parsed or optimised again: its text, its
 // inlinable copy, its typed IR and its call count are read back. This is what an edit to one
 // function of a large module costs the back end - that function.
-fn one_body<a, b, c, e, x, y>(o: (&a mut ir::Body), s: &b [u8], from: u64, to: u64, whole: bool, unit_key: &y [u8], facts: (&c llvm::Facts), ix: (&x ir::FactIndex), want_ir: u64, ir_text: (&mut u8[]), replay: (&e ir::Replay), call_syms: (&mut u8[][]), call_counts: (&mut u64[])) {
-    range := ir::replay_of(replay, view(o.name));
+fn one_body<a, b, c, e, x, y>(o: (&a mut ir::Body), s: &b [u8], from: u64, to: u64, whole: bool, unit_key: &y [u8], facts: (&c llvm::Facts), ix: (&x ir::FactIndex), want_ir: u64, ir_text: (&mut u8[]), call_syms: (&mut u8[][]), call_counts: (&mut u64[])) {
     mut file = u8[];
     // GRAIL_MEMO_VERIFY=1: a memo entry found under a unit's key is not used but kept here, and the
     // body is optimised again and must come out as those bytes.
@@ -3224,7 +3221,7 @@ fn one_body<a, b, c, e, x, y>(o: (&a mut ir::Body), s: &b [u8], from: u64, to: u
     verify := verify_memo(unit_key);
     if whole && (o.memo_dir.len() != 0) {
         // The key: the compiler, the unit and its label prefix, the body's ordinal in the unit
-        // (its labels are numbered from it), its facts, the replayed prologue's place in it, and
+        // (its labels are numbered from it), its facts, and
         // whether the typed IR is wanted - and then the lines themselves, hashed twice.
         mut meta = copy_text(view("grail-opt 2 "));
         meta.append(view(o.memo_id));
@@ -3235,10 +3232,6 @@ fn one_body<a, b, c, e, x, y>(o: (&a mut ir::Body), s: &b [u8], from: u64, to: u
         meta.push(10);
         put_word(&mut meta, o.uniq);
         put_word(&mut meta, ir::facts_digest(ix, facts, view(o.name)));
-        if range[1] != 0 {
-            put_word(&mut meta, range[0] - from);
-            put_word(&mut meta, range[1] - from);
-        }
         put_word(&mut meta, want_ir);
         // A body the front end applied from its unit store is keyed by that unit's key instead of its
         // lines: its text is a function of the key, and hashing 100 MB of text that did not change
@@ -3295,7 +3288,7 @@ fn one_body<a, b, c, e, x, y>(o: (&a mut ir::Body), s: &b [u8], from: u64, to: u
     out_mark := o.out.len();
     ir_mark := ir_text.len();
     inl_mark := o.inl_names.len();
-    body(&mut o, view(s), facts, ix, want_ir, ir_text, replay, call_syms, call_counts);
+    body(&mut o, view(s), facts, ix, want_ir, ir_text, call_syms, call_counts);
     if file.len() != 0 {
         mut kept = u8[];
         out_end := o.out.len();
@@ -3385,7 +3378,7 @@ fn inl_file<a>(o: (&a mut ir::Body), name: u8[], body: u8[], unit: u8[]) {
 // text, the unit markers it kept, the inlinable bodies it found, the typed IR and the call counts.
 // This process reads the pipes in order, which is the order one process would have produced.
 // False when the platform cannot fork: the caller then does the work itself.
-fn run_forked<a, b, c, e, x, g, h>(o: (&a mut ir::Body), s: &b [u8], cuts: (&g Cut[]), split: u64, marks: (&mut u64[]), names: (&mut u8[][]), facts: (&c llvm::Facts), ix: (&x ir::FactIndex), want_ir: u64, ir_text: (&mut u8[]), replay: (&e ir::Replay), call_syms: (&mut u8[][]), call_counts: (&mut u64[]), js: (&h mut jobs::Jobs)) -> bool {
+fn run_forked<a, b, c, e, x, g, h>(o: (&a mut ir::Body), s: &b [u8], cuts: (&g Cut[]), split: u64, marks: (&mut u64[]), names: (&mut u8[][]), facts: (&c llvm::Facts), ix: (&x ir::FactIndex), want_ir: u64, ir_text: (&mut u8[]), call_syms: (&mut u8[][]), call_counts: (&mut u64[]), js: (&h mut jobs::Jobs)) -> bool {
     pieces := cuts.len() - 1;
     mut readers = u64[];
     mut children = u64[];
@@ -3420,7 +3413,7 @@ fn run_forked<a, b, c, e, x, g, h>(o: (&a mut ir::Body), s: &b [u8], cuts: (&g C
             mut wir = u8[];
             mut wsyms = u8[][];
             mut wcounts = u64[];
-            run_range(&mut w, view(s), cut.at, cuts[k + 1].at, split, &mut wmarks, &mut wnames, facts, ix, want_ir, &mut wir, replay, &mut wsyms, &mut wcounts);
+            run_range(&mut w, view(s), cut.at, cuts[k + 1].at, split, &mut wmarks, &mut wnames, facts, ix, want_ir, &mut wir, &mut wsyms, &mut wcounts);
             mut packed = u8[];
             mut wlines = u64[];
             lines_of_interest(view(w.out), 0, &mut wlines);
