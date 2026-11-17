@@ -12,6 +12,13 @@
   replace a `Keep<F>` built from another literal; calls through it then ran the first literal's body
   (callable-bound calls are direct), and a borrowing closure could outlive what it borrowed. It is now
   a type mismatch, as in Rust.
+- `left, right := split_at_mut(s, mid)`: two exclusive halves of one slice, usable at once
+  (simd-layout-parallel-loops.md 4.3). The borrow checker gains sibling loan groups - halves of one
+  split never conflict with each other or with what is reborrowed from them - and nothing about
+  indices; `mid <= len` is checked as it runs.
+- Fix: a bare `return;` in a function that takes a borrow no longer reports "returned borrow escapes
+  its declared input lifetime" (its unit value was read from the first parameter's slot).
+
 - **Text costs less to build and parse.** A string literal is checked to be UTF-8 while compiling,
   so making a `string` of it is a copy with no run-time check; appending a `string` onto a `string`
   no longer re-checks it; `format` hands its buffer over as the string instead of copying it, and

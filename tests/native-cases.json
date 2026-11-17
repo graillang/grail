@@ -17979,5 +17979,66 @@
     "note": "plain use of a Keep<F>",
     "source": "struct Keep<F> { f: F }\nfn keep<F: Fn() -> u64>(f: F) -> Keep<F> { return Keep { f: f }; }\nfn main() { v := u64[1, 2]; k := keep(|| -> u64 v.len()); g := &k.f; println(g()); }\n",
     "stdout": "2\n"
+  },
+  {
+    "name": "split-at-mut-halves",
+    "note": "split_at_mut (simd-layout-parallel-loops.md 4.3): two exclusive halves of one slice, used at once and passed on, split again; the vector is whole again when they end",
+    "source": "fn fill(s: &mut [u64], v: u64) {\n    for i in s.len() {\n        s[i] = v + i;\n    }\n}\nfn main() {\n    mut xs = u64[0; 10];\n    {\n        left, right := split_at_mut(&mut xs[0: 10], 4);\n        fill(&mut left[:], 100);\n        fill(&mut right[:], 200);\n        left[0] = right[0];\n        println(\"{} {}\", left.len(), right.len());\n        a, b := split_at_mut(right, 3);\n        a[0] = 7;\n        b[0] = 8;\n    }\n    println(xs);\n}\n",
+    "stdout": "4 6\n[200, 101, 102, 103, 7, 201, 202, 8, 204, 205]\n"
+  },
+  {
+    "name": "split-at-mut-divide-and-conquer",
+    "note": "a recursive divide and conquer over exclusive halves: no index reasoning in the checker",
+    "source": "fn bump(s: &mut [u64], depth: u64) {\n    if (s.len() < 2) || (depth == 0) {\n        for i in s.len() {\n            s[i] += depth + 1;\n        }\n        return;\n    }\n    mid := s.len() / 2;\n    l, r := split_at_mut(s, mid);\n    bump(l, depth - 1);\n    bump(r, depth - 1);\n}\nfn main() {\n    mut xs = u64[0; 8];\n    bump(&mut xs[0: 8], 2);\n    println(xs);\n}\n",
+    "stdout": "[1, 1, 1, 1, 1, 1, 1, 1]\n"
+  },
+  {
+    "name": "reject-split-at-mut-parent-vector-used",
+    "reject": true,
+    "note": "the vector is out of reach while a half lives",
+    "source": "fn main() {\n    mut xs = u64[0; 10];\n    left, right := split_at_mut(&mut xs[0: 10], 4);\n    xs[0] = 1;\n    left[0] = 2;\n}\n",
+    "diagnostic": "borrow conflicts with active access"
+  },
+  {
+    "name": "reject-split-at-mut-parent-slice-used",
+    "reject": true,
+    "note": "the slice that was split is suspended while its halves live",
+    "source": "fn main() {\n    mut xs = u64[0; 10];\n    s := &mut xs[0: 10];\n    left, right := split_at_mut(s, 4);\n    s[0] = 1;\n    left[0] = 2;\n}\n",
+    "diagnostic": "reference is suspended or expired"
+  },
+  {
+    "name": "reject-split-at-mut-overlapping-resplit",
+    "reject": true,
+    "note": "a second split of the same storage while the first halves live overlaps them",
+    "source": "fn main() {\n    mut xs = u64[0; 10];\n    left, right := split_at_mut(&mut xs[0: 10], 4);\n    l2, r2 := split_at_mut(&mut xs[0: 10], 2);\n    left[0] = 2;\n}\n",
+    "diagnostic": "borrow conflicts with active access"
+  },
+  {
+    "name": "reject-split-at-mut-overlap-inside-half",
+    "reject": true,
+    "note": "the sibling rule is between the two halves only: two overlapping borrows inside one half still conflict",
+    "source": "fn main() {\n    mut xs = u64[0; 10];\n    left, right := split_at_mut(&mut xs[0: 10], 4);\n    x := &mut left[0: 2];\n    y := &mut left[1: 3];\n    x[0] = 3;\n}\n",
+    "diagnostic": ""
+  },
+  {
+    "name": "reject-split-at-mut-shared",
+    "reject": true,
+    "source": "fn main() {\n    xs := u64[0; 10];\n    left, right := split_at_mut(&xs[0: 10], 4);\n}\n",
+    "diagnostic": "split_at_mut takes an exclusive slice"
+  },
+  {
+    "name": "split-at-mut-mid-past-end-aborts",
+    "backends": [
+      "native"
+    ],
+    "source": "fn main() {\n    mut xs = u64[0; 10];\n    k: u64 = 11;\n    left, right := split_at_mut(&mut xs[0: 10], k);\n    println(left.len());\n}\n",
+    "signal": "SIGABRT",
+    "stderr": "error: range 0..11 out of bounds\n"
+  },
+  {
+    "name": "bare-return-with-borrowed-parameter",
+    "note": "a bare `return;` in a function that takes a borrow is not a returned borrow (the unit value was read from slot 0, the first parameter)",
+    "source": "fn bump(s: &mut [u64], depth: u64) {\n    if depth == 0 {\n        return;\n    }\n    s[0] += 1;\n}\nfn main() {\n    mut xs = u64[0; 8];\n    bump(&mut xs[0: 8], 2);\n    println(xs);\n}\n",
+    "stdout": "[1, 0, 0, 0, 0, 0, 0, 0]\n"
   }
 ]
