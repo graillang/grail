@@ -1,5 +1,18 @@
 ## Unreleased
 
+- **`grail build` and `grail check` start no helper process to hash or file the build store**, and an
+  unchanged program is decided from file stamps. Every `sha256sum`, `sh -c`, `mv` and `cp` the store
+  ran (about 70 per small build) is now in-process: the store's digest is `store_hash` (XXH64 under
+  four seeds, still 64 hex digits; store keys change once), and writes go to a staging file renamed
+  into place. A new `fp/` record per file holds its digest plus the module, `use` lines and `@embed`
+  flag the driver reads sources for, keyed by size, nanosecond mtime, inode and device. So a no-op
+  build reads no source, the compiler's `--print-inputs` answer is remembered under the stamps of
+  what it read (`inputs/`), and a tool's `--version` is asked once per binary (`tool-id/`). A module
+  run with in-process assembly is one process, not a `grail unit-build` wrapper and the compiler.
+  `host::read_file` reads straight into its result instead of pushing byte by byte. With the dev
+  compiler and GRAIL_JOBS=1, in user-space instructions: hello no-op build 0.235G -> 0.008G, hello
+  check 0.310G -> 0.058G, hello build 0.453G -> 0.140G. `grail cache prune` drops `fp/`, `inputs/`
+  and `tool-id/` whole.
 - Fixed: `grail fmt` could break a long expression inside `<<` or `>>` (each is two `<`/`>` tokens),
   or start a continuation line with `<`, and the output then read as a generic argument list and no
   longer parsed. A wrapped line now never starts with `<` or `>`.

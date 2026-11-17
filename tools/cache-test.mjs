@@ -122,6 +122,32 @@ function run(binary) {
 }
 const bytes = path => readFileSync(path);
 const digest = data => createHash('sha256').update(data).digest('hex');
+// The store's own content digest (compiler/cli.grl, store_hash): XXH64 under the seeds 0..3, each
+// as 16 hex digits - what a blob's file name is.
+const M64 = (1n << 64n) - 1n;
+const XP = [11400714785074694791n, 14029467366897019727n, 1609587929392839161n, 9650029242287828579n, 2870177450012600261n];
+const rotl = (x, r) => ((x << r) | (x >> (64n - r))) & M64;
+const xround = (acc, lane) => (rotl((acc + lane * XP[1]) & M64, 31n) * XP[0]) & M64;
+const xmerge = (acc, lane) => (((acc ^ xround(0n, lane)) * XP[0]) & M64) + XP[3] & M64;
+function xxh64(data, seed) {
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  const n = data.length;
+  let at = 0, h;
+  if (n >= 32) {
+    const v = [(seed + XP[0] + XP[1]) & M64, (seed + XP[1]) & M64, seed, (seed - XP[0]) & M64];
+    for (; at + 32 <= n; at += 32) for (let k = 0; k < 4; k++) v[k] = xround(v[k], view.getBigUint64(at + 8 * k, true));
+    h = (rotl(v[0], 1n) + rotl(v[1], 7n) + rotl(v[2], 12n) + rotl(v[3], 18n)) & M64;
+    for (let k = 0; k < 4; k++) h = xmerge(h, v[k]);
+  } else h = (seed + XP[4]) & M64;
+  h = (h + BigInt(n)) & M64;
+  for (; at + 8 <= n; at += 8) h = ((rotl(h ^ xround(0n, view.getBigUint64(at, true)), 27n) * XP[0]) & M64) + XP[3] & M64;
+  if (at + 4 <= n) { h = ((rotl(h ^ ((BigInt(view.getUint32(at, true)) * XP[0]) & M64), 23n) * XP[1]) & M64) + XP[2] & M64; at += 4; }
+  for (; at < n; at++) h = (rotl(h ^ ((BigInt(data[at]) * XP[4]) & M64), 11n) * XP[0]) & M64;
+  h = ((h ^ (h >> 33n)) * XP[1]) & M64;
+  h = ((h ^ (h >> 29n)) * XP[2]) & M64;
+  return h ^ (h >> 32n);
+}
+const storeDigest = data => [0n, 1n, 2n, 3n].map(seed => xxh64(data, seed).toString(16).padStart(16, '0')).join('');
 // Interfaces are the typed record stream docs/design/separate-compilation.md describes: `GRIF`, a
 // version byte, then `tag, len, payload` records, then a trailer whose last 32 bytes are the digest
 // of everything before them. These read that framing only, so this test can change one byte of one
@@ -256,7 +282,7 @@ function proveStore() {
       assert.ok(named.length > 0, `${kind}/${name}: a record must name a blob`);
       for (const blob of named) {
         assert.ok(blobs.includes(blob), `${kind}/${name}: names a blob that is not in the store`);
-        assert.equal(digest(readFileSync(join(blobDirectory, blob))), blob, `${kind}/${name}: names a blob that does not hash to it`);
+        assert.equal(storeDigest(readFileSync(join(blobDirectory, blob))), blob, `${kind}/${name}: names a blob that does not hash to it`);
         records += 1;
       }
     }
@@ -403,7 +429,7 @@ function programRecords(output) {
 // The blob a program entry for `output` names, which is the image the next build would reuse.
 function imageBlob(output) {
   const programDirectory = join(store, 'map', 'prog');
-  const image = digest(readFileSync(output));
+  const image = storeDigest(readFileSync(output));
   for (const name of readdirSync(programDirectory)) {
     const body = readFileSync(join(programDirectory, name), 'utf8');
     if (body.includes(`output ${output}\n`) && body.includes(`blob ${image}\n`)) return image;
@@ -439,7 +465,7 @@ function proveCorruption() {
   assert.ok(rebuilt.line.hits > 0, `only the damaged entry must miss: ${rebuilt.output}`);
   assert.equal(run(output), '25', 'a corrupted entry must not produce a wrong program');
   assert.deepEqual(bytes(output), bytes(reference), 'a build after corruption is not the uncached build');
-  assert.equal(digest(readFileSync(join(store, 'blob', object))), object, 'the corrupted entry must be repaired');
+  assert.equal(storeDigest(readFileSync(join(store, 'blob', object))), object, 'the corrupted entry must be repaired');
   const healed = build(['--whole-program', '--cache', '-o', output]);
   assert.equal(healed.line.misses, 0, `a repaired store must hit again\n${healed.output}`);
 
@@ -453,7 +479,7 @@ function proveCorruption() {
   assert.equal(afterImage.line.what, 'image linked', 'a corrupted image must be linked again, not reused');
   assert.equal(run(output), '25', 'a corrupted image must not produce a wrong program');
   assert.deepEqual(bytes(output), bytes(reference), 'a rebuilt image is not the uncached build');
-  assert.equal(digest(readFileSync(join(store, 'blob', image))), image, 'the corrupted image must be repaired');
+  assert.equal(storeDigest(readFileSync(join(store, 'blob', image))), image, 'the corrupted image must be repaired');
   return { rebuilt: rebuilt.line, healed: healed.line, afterImage: afterImage.line };
 }
 
@@ -544,14 +570,14 @@ function proveModules() {
   // A damaged object is a miss, a rebuild and a repaired entry - never a wrong program. The record to
   // damage is the one that answers for this build: the blob whose bytes are the object on disk now.
   const directory = join(store, 'map', 'unit');
-  const object = digest(readFileSync(join(project, 'target/mods.modules/helper.o')));
+  const object = storeDigest(readFileSync(join(project, 'target/mods.modules/helper.o')));
   const unit = readdirSync(directory).filter(name => !name.endsWith('.used')).map(name => readFileSync(join(directory, name), 'utf8'))
     .find(text => text.includes('module helper') && text.includes(`obj ${object}`));
   assert.ok(unit, 'no module run record for the object helper has now');
   corrupt(join(store, 'blob', object));
   // The image entry that would answer for this build has to go too, or the program shortcut hands the
   // image back and the module level is never consulted.
-  const image = digest(readFileSync(output));
+  const image = storeDigest(readFileSync(output));
   let cleared = 0;
   for (const entry of programRecords(output)) {
     if (readFileSync(entry, 'utf8').includes(`blob ${image}\n`)) { writeFileSync(entry, ''); cleared += 1; }
@@ -562,7 +588,7 @@ function proveModules() {
   assert.ok(rebuilt.line.names.includes('helper'), `a corrupted object must be a miss: ${rebuilt.output}`);
   assert.equal(run(output), '17', 'a corrupted object must not produce a wrong program');
   assert.deepEqual(bytes(output), surfaceImage, 'a build after corruption is not the uncached build');
-  assert.equal(digest(readFileSync(join(store, 'blob', object))), object, 'the corrupted object must be repaired');
+  assert.equal(storeDigest(readFileSync(join(store, 'blob', object))), object, 'the corrupted object must be repaired');
   write();
   return { cold, warm, body, surface, rebuilt };
 }

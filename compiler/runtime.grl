@@ -2290,10 +2290,16 @@ fn rt_read_file_blocking(path: u64) -> u64 {
     if rt_error(fd) {
         rt_abort();
     }
-    buf := rt_alloc(4096);
+    // The bytes go straight into the result's storage, which doubles when a read fills it.
     out := rt_new();
+    rt_reserveb(out, 65536);
     while 1 {
-        n := rt_syscall(0, fd, buf, 4096);
+        have := raw_load(out + 8);
+        if have == raw_load(out + 16) {
+            rt_reserveb(out, have + 1);
+        }
+        room := raw_load(out + 16) - have;
+        n := rt_syscall(0, fd, raw_load(out) + have, room);
         if n == 0 {
             break;
         }
@@ -2303,14 +2309,9 @@ fn rt_read_file_blocking(path: u64) -> u64 {
         if rt_error(n) {
             rt_abort();
         }
-        mut i = 0;
-        while i < n {
-            rt_pushb(out, raw_byte(buf + i));
-            i = i + 1;
-        }
+        raw_store(out + 8, have + n);
     }
     rt_syscall(3, fd, 0, 0);
-    rt_free(buf);
     return out;
 }
 fn rt_write_all(fd: u64, ptr: u64, n: u64) -> u64 {
