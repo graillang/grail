@@ -6,6 +6,10 @@
   Grail-native 17.7G -> 16.8G.
 - zstd's backward bit reader keeps a 64-bit window and reloads it about once per sequence instead
   of assembling a word on every read: the 20 MB archive 11.9G -> 11.75G instructions on Grail-LLVM.
+- Closure bodies are proved like function bodies: a loop bound or a condition in a closure now
+  removes the bounds checks it covers. A closure literal written as `parallel_for_zip`'s argument
+  also starts knowing that every piece is as long as the first, so `v[i]` under `for i in p.len()`
+  has no check (a closure passed through a variable keeps it).
 - **Inflate refills its bit buffer a word at a time** (`bytes::load_u64`, a new unaligned
   little-endian word read), instead of a byte per loop step, while eight input bytes remain. The 4K
   png: Grail-LLVM 7.47G -> 6.44G instructions (0.85 -> 0.71 s; libpng 0.41 s, stb_image 0.41 s),

@@ -18851,5 +18851,63 @@
       "riscv64"
     ],
     "note": "a mask of 1023 against a table of 512 proves nothing: the check stays and fires for 1000"
+  },
+  {
+    "name": "parallel-for-zip-literal-proves-every-index",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a closure literal written as parallel_for_zip's argument starts knowing every piece is as long as the first (vv.len == pp.len), so neither pp[i] nor vv[i] is checked under `for i in pp.len()`; closure bodies are proved like function bodies",
+    "source": "fn main() {\n    n := 4096;\n    mut p = f32[0.0; n];\n    v := f32[1.0; n];\n    parallel_for_zip(512, |pp: &mut [f32], vv: &[f32]| -> unit {\n        for i in pp.len() {\n            pp[i] = pp[i] + vv[i];\n        }\n    }, &mut p[0: n], &v[0: n]);\n    println(p[100]);\n}\n",
+    "stdout": "1\n",
+    "asmAbsent": [
+      {
+        "in": "f_.closure_main_c0",
+        "text": "call rt_fail"
+      },
+      {
+        "in": "f_.closure_main_c0",
+        "text": "call rt_trap"
+      }
+    ]
+  },
+  {
+    "name": "parallel-for-zip-closure-value-keeps-check",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a closure passed through a variable could be called elsewhere, so it gets no entry fact: vv[i] keeps its check (pp[i] is proved by its own loop)",
+    "source": "fn main() {\n    n := 4096;\n    mut p = f32[0.0; n];\n    v := f32[1.0; n];\n    step := |pp: &mut [f32], vv: &[f32]| -> unit {\n        for i in pp.len() {\n            pp[i] = pp[i] + vv[i];\n        }\n    };\n    parallel_for_zip(512, step, &mut p[0: n], &v[0: n]);\n    println(p[100]);\n}\n",
+    "stdout": "1\n",
+    "asm": [
+      {
+        "in": "f_.closure_main_c0",
+        "text": "call rt_trap"
+      }
+    ]
+  },
+  {
+    "name": "closure-body-keeps-enclosing-facts",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a closure literal inside a loop is compiled with the prover's state of its own; the enclosing loop's facts survive it, so `v[i]` after the literal is still proved",
+    "source": "fn main() {\n    v := u64[1, 2, 3, 4];\n    mut t = 0;\n    for i in v.len() {\n        f := |x: u64| -> u64 x;\n        t = f(v[i]);\n    }\n    println(t);\n}\n",
+    "stdout": "4\n",
+    "asmAbsent": [
+      {
+        "in": "f_main_main",
+        "text": "call rt_trap"
+      }
+    ]
   }
 ]
