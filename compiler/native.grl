@@ -763,6 +763,8 @@ struct C {
     statics: Static[],
     ct_calls: CtCall[],
     ct_done: CtDone[],
+    // The module-binding guards a probe compile has defined (static_probe_init).
+    ct_guards: u8[][],
     // Where the batch probe writes the bodies each value reached (ct_write_deps), or empty.
     ct_deps_path: u8[],
     // Where a static read parks the result of a call it makes only for its effect.
@@ -22967,6 +22969,22 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
         push_bytes(&mut keyed, view(host::read_file(view(path))));
         fi += 1;
     }
+    // A module of a separate build reads the runtime as an interface; the probe links alone, so it
+    // compiles the runtime's sources (the ones the driver would).
+    mut has_runtime = false;
+    for i in files.len() {
+        if ct_list_has_sub(view(files[i]), view("runtime.grl")) {
+            has_runtime = true;
+        }
+    }
+    if !has_runtime {
+        extra := cli::probe_runtime_sources();
+        for i in extra.len() {
+            files.push(extra[i].copy());
+            push_bytes(&mut keyed, view(extra[i]));
+            push_bytes(&mut keyed, view(host::read_file(view(extra[i]))));
+        }
+    }
     // The files the module roots added are inputs of the value too: the probe is compiled with the
     // same roots, so a change to a resolved module changes what the call computes.
     for i in c.mod_files.len() {
@@ -22995,6 +23013,7 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
         probe_src := path_cat(view(path_cat(view(dir), view(tag))), view(".probe.grl"));
         probe_s := path_cat(view(path_cat(view(dir), view(tag))), view(".probe.s"));
         probe_exe := path_cat(view(path_cat(view(dir), view(tag))), view(".probe"));
+        probe_o := path_cat(view(path_cat(view(dir), view(tag))), view(".probe.o"));
         value_tmp := path_cat(view(path_cat(view(dir), view(tag))), view(".value"));
         host::write_file(view(probe_src), view(probe));
         self := host::exe_path();
@@ -23020,7 +23039,11 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
         // of a probe's compile and are the same in every probe (comptime-speed.md); a probe never
         // replays a normal compile's bodies, whose static reads are compiled differently.
         push_bytes(&mut cmd, view(" --fn-cache .work/comptime/fn --fn-cache-quiet"));
-        push_bytes(&mut cmd, view(" --target x86_64 --comptime-probe "));
+        // Assembled in process (`--object`), as a build is: a probe needs no C toolchain, only the
+        // linker a build uses.
+        push_bytes(&mut cmd, view(" --target x86_64 --object "));
+        push_bytes(&mut cmd, view(ct_shell_quote(view(probe_o))));
+        push_bytes(&mut cmd, view(" --comptime-probe "));
         push_bytes(&mut cmd, view(ct_shell_quote(view(probe_s))));
         cmd.push(32);
         push_bytes(&mut cmd, view(ct_shell_quote(view(probe_src))));
@@ -23080,17 +23103,19 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
             }
             fail(&mut c, view("compile-time code cannot call C: the call reaches an extern function"));
         }
-        mut cc = host::env(view("GRAIL_CC"));
-        if cc.len() == 0 {
-            cc = copy_bytes(view("cc"));
+        // Linked as a build links (cli.grl link_objects): the linker GRAIL_LINKER names, ld.lld by
+        // default; the probe is one static object with no libraries.
+        mut ld = host::env(view("GRAIL_LINKER"));
+        if ld.len() == 0 {
+            ld = copy_bytes(view("ld.lld"));
         }
-        mut link = u8[][cc, copy_bytes(view("-nostdlib")), copy_bytes(view("-static")), copy_bytes(view("-o")), probe_exe.copy(), probe_s.copy()];
+        mut link = u8[][ld, copy_bytes(view("-m")), copy_bytes(view("elf_x86_64")), copy_bytes(view("-static")), probe_o.copy(), copy_bytes(view("-o")), probe_exe.copy()];
         if host::command(link) != 0 {
             if soft != 0 {
                 exchange(status_out, 1);
                 return u8[];
             }
-            fail(&mut c, view("compile-time call: linking the probe failed (needs cc)"));
+            fail(&mut c, view("compile-time call: linking the probe failed (needs ld.lld, as a build does)"));
         }
         mut run = copy_bytes(view("GRAIL_COMPTIME=1 timeout 30 "));
         push_bytes(&mut run, view(ct_shell_quote(view(probe_exe))));
@@ -23144,7 +23169,7 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
         }
         mut mv = u8[][copy_bytes(view("mv")), copy_bytes(view("-f")), value_tmp.copy(), out_path.copy()];
         host::command(mv);
-        mut tidy = u8[][copy_bytes(view("rm")), copy_bytes(view("-f")), probe_src.copy(), probe_s.copy(), probe_exe.copy(), err_tmp.copy()];
+        mut tidy = u8[][copy_bytes(view("rm")), copy_bytes(view("-f")), probe_src.copy(), probe_s.copy(), probe_o.copy(), probe_exe.copy(), err_tmp.copy()];
         host::command(tidy);
     }
     if host::exists(view(out_path)) == 0 {
@@ -24259,6 +24284,14 @@ fn static_pending_here<a, b>(m: &a [u8], n: &b [u8]) -> bool {
     pending := host::env(view("GRAIL_COMPTIME_PENDING"));
     return ct_list_has(view(pending), view(key));
 }
+fn ct_list_contains<a, b>(list: (&a u8[][]), item: &b [u8]) -> bool {
+    for i in list.len() {
+        if same(view(list[i]), item) {
+            return true;
+        }
+    }
+    return false;
+}
 fn static_guard_symbol<a, b>(m: &a [u8], n: &b [u8]) -> u8[] {
     mut out = copy_bytes(view("g_"));
     push_bytes(&mut out, m);
@@ -24282,10 +24315,10 @@ fn static_probe_init<a, b, d, e>(c: (&a mut C), m: &b [u8], n: &d [u8], sym: &e 
     cycle_sym := mangle_name(&mut c, view("grail_probe"), view(cycle_fn));
     done := label(&mut c);
     start := label(&mut c);
-    if memo == 0 {
-        o(&mut c, view(".comm "));
-        o(&mut c, view(guard));
-        o(&mut c, view(",8,8\n"));
+    if (memo == 0) && !ct_list_contains(&c.ct_guards, view(guard)) {
+        // A module binding's guard: defined once, with the entry stub (the internal assembler has
+        // no `.comm`, and a data section in the middle of a body would cut it).
+        c.ct_guards.push(guard.copy());
     }
     o(&mut c, view("movq "));
     o(&mut c, view(guard));
@@ -24826,6 +24859,10 @@ fn static_emit<a, b>(c: (&a mut C), i: u64, ready: u64, value: u64, text: &b [u8
     o(&mut c, view("\n.popsection\n"));
     return ();
 }
+// Whether the initialiser is a vector literal: `u64[` (an element type, then the bracket).
+fn static_vector_literal_ahead<a>(c: (&a mut C)) -> bool {
+    return (kind(&mut c) == 1) && (kind_at(&mut c, c.pos + 1) == 91);
+}
 fn static_skip_item<a>(c: (&a mut C)) -> unit {
     while !is(&mut c, view(";")) {
         if kind(&mut c) == 0 {
@@ -25058,6 +25095,51 @@ fn static_resolve<a>(c: (&a mut C), i: u64) -> unit {
         fail(&mut c, view("a float static is not built yet; use `const NAME: f64 = ...;`"));
     } else if ct_call_ahead(&mut c) {
         fail(&mut c, view("this call would run when the program runs: a static with a run-time initialiser is the lazy tier, which is not built yet; write `@f(...)` to compute it while compiling"));
+    } else if (ct_seq_elem(&mut c, ty) != NO_TYPE) && static_vector_literal_ahead(&mut c) {
+        // `u64[1, 2, -3]`: a table of constant expressions, laid out as the run tier lays a table
+        // out (the element's C width), with no probe - the form the compiler's own sources use.
+        elem := ct_seq_elem(&mut c, ty);
+        width := ffi_field_size(&mut c, elem);
+        while !is(&mut c, view("[")) {
+            advance(&mut c);
+        }
+        expect(&mut c, view("["));
+        mut n = 0;
+        while !is(&mut c, view("]")) {
+            mut v = 0;
+            if eat(&mut c, view("-")) {
+                if kind(&mut c) != 2 {
+                    fail(&mut c, view("only an integer literal can be negated in a static's initialiser"));
+                }
+                t := tok_text(&mut c, c.pos);
+                lit := literal_value(&mut c, view(t));
+                if literal_fits(&mut c, elem, lit, 1) == 0 {
+                    fail(&mut c, view(literal_range_msg_v(&mut c, elem, lit, 1)));
+                }
+                advance(&mut c);
+                v = wrapping_sub(0, lit);
+            } else {
+                at := c.pos;
+                cv := ct_expr(&mut c, 0);
+                if is_bool(&mut c, cv.ty) || (cv.ty == ct_tag_ty()) {
+                    static_refuse(&mut c, at, view("a table static's elements are integers"));
+                }
+                if literal_fits(&mut c, elem, cv.value, 0) == 0 {
+                    exchange(&mut c.pos, at);
+                    fail(&mut c, view(literal_range_msg_v(&mut c, elem, cv.value, 0)));
+                }
+                v = cv.value;
+            }
+            for b in width {
+                text.push(u8((v >> (8 * b)) & 255));
+            }
+            n += 1;
+            if !eat(&mut c, view(",")) {
+                break;
+            }
+        }
+        expect(&mut c, view("]"));
+        value = n;
     } else {
         if !(integer(&mut c, ty) || is_bool(&mut c, ty)) {
             mut msg = copy_bytes(view("a `"));
@@ -34480,6 +34562,9 @@ fn builtin_id<a>(n: &a [u8]) -> u64 {
     if same(view(n), view("raw_import")) {
         return 133;
     }
+    if same(view(n), view("raw_sites")) {
+        return 143;
+    }
     return 0;
 }
 // Calls use the target word ABI (up to six words; machine.grl selects physical registers).
@@ -34588,6 +34673,9 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
     }
     if (id == 141) || (id == 142) {
         arity = 0;
+    }
+    if id == 143 {
+        arity = 2;
     }
     if id == 112 {
         arity = 3;
@@ -35101,6 +35189,20 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         get(&mut c, args[3], view("%rdx"));
         get(&mut c, args[0], view("%rax"));
         call_slot_out(&mut c, view("call *%rax\n"), view("a call through a value the compiler did not name"));
+    }
+    if id == 143 {
+        // raw_sites(out, capacity): the site-table helper this compiler emits beside the tables
+        // (site_table), called by name - a leaf, so the effect walk follows a named edge. A build
+        // with no table has no helper and answers 0 words. The runtime moves to it from its
+        // raw_call2 through state word 3400 at the next reseed (a new intrinsic lands one reseed
+        // before its first use in the runtime: docs/testing.md).
+        if site_table_on(&c) {
+            get(&mut c, args[0], view("%rdi"));
+            get(&mut c, args[1], view("%rsi"));
+            call_out(&mut c, view("rt_sites"));
+        } else {
+            o(&mut c, view("xorl %eax,%eax\n"));
+        }
     }
     if id == 118 {
         get(&mut c, args[1], view("%rdi"));
@@ -56784,6 +56886,7 @@ pub fn main() -> u64 {
         statics: Static[],
         ct_calls: CtCall[],
         ct_done: CtDone[],
+        ct_guards: u8[][],
         ct_deps_path: u8[],
         static_scratch: 0,
         impl_params: ImplParams[],
@@ -57646,6 +57749,12 @@ pub fn main() -> u64 {
             // Every run-tier value of the build in one probe (comptime-speed R2), before anything
             // asks for one: the interfaces below, the function cache's surface, the bodies.
             ct_batch(&mut c);
+            // A value the batch could not give (it failed, or a cycle) is computed now by its own
+            // probe, which reports the failure at the value - before the interfaces and the
+            // function cache's surface, which need every value's type.
+            if c.probe_mode == 0 {
+                resolve_all_pending(&mut c);
+            }
             iface_emit_all(&mut c);
         }
         if (pass == 1) & (c.shift_decls != 0) {
@@ -57794,6 +57903,18 @@ pub fn main() -> u64 {
     // The entry stub and the process state (rt_state, the TLS bases, .note.GNU-stack) exist once per
     // program and belong to no module, so they get their own synthetic part.
     part(&mut c, view("__start"));
+    if c.ct_guards.len() != 0 {
+        o(&mut c, view(".pushsection .data\n.p2align 3\n"));
+        for g in c.ct_guards.len() {
+            gname := c.ct_guards[g].copy();
+            o(&mut c, view(".globl "));
+            o(&mut c, view(gname));
+            o(&mut c, view("\n"));
+            o(&mut c, view(gname));
+            o(&mut c, view(":\n.quad 0\n"));
+        }
+        o(&mut c, view(".popsection\n"));
+    }
     if (c.target == 3) {
         // A PE image starts without arguments: the loader leaves argv to the runtime, which reads
         // the Win32 command line. The process state words start empty and are filled by
