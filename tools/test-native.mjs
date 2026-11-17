@@ -502,8 +502,11 @@ function runCase(test, position, context) {
     // removed, so that build is not what they describe.
     if ((test.asm || test.asmAbsent) && process.env.GRAIL_VERIFY_FACTS !== '1') {
       const text = readFileSync(join(directory, 'program.s'), 'utf8');
-      for (const pin of test.asm ?? []) assert.ok(pinnedAssembly(text, pin).includes(pinText(pin)), `${test.name}: expected assembly to contain ${JSON.stringify(pin)}`);
-      for (const pin of test.asmAbsent ?? []) assert.ok(!pinnedAssembly(text, pin).includes(pinText(pin)), `${test.name}: expected assembly not to contain ${JSON.stringify(pin)}`);
+      // Under the LLVM backend a lifted function leaves the `.s` (its code is in `program.s.ll`), so a
+      // pin naming one describes nothing there: the pins describe the native backend's assembly.
+      const lifted = pin => (process.env.GRAIL_BACKEND ?? 'native') === 'llvm' && typeof pin !== 'string' && !text.includes(`\n${pin.in}:`);
+      for (const pin of test.asm ?? []) if (!lifted(pin)) assert.ok(pinnedAssembly(text, pin).includes(pinText(pin)), `${test.name}: expected assembly to contain ${JSON.stringify(pin)}`);
+      for (const pin of test.asmAbsent ?? []) if (!lifted(pin)) assert.ok(!pinnedAssembly(text, pin).includes(pinText(pin)), `${test.name}: expected assembly not to contain ${JSON.stringify(pin)}`);
     }
     // The interface build is a second program from the same sources; it has to behave the same.
     const interfaceExecutable = viaInterface ? compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', runtime, osRuntime, name: 'program-interface', interfaces: viaInterface.ifaces, extra: caseRoots }) : null;

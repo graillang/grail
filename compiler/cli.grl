@@ -1266,7 +1266,13 @@ fn compile_mode<a, b, d, e, g, k>(
         run.push(item(&command, k));
         if inproc && (k == 0) {
             run.push(copy(view("--object")));
-            run.push(object.copy());
+            // A release build's run writes the native part; llvm-compile archives it with the
+            // optimised LLVM module as `object`.
+            if release != 0 {
+                run.push(release_part(view(object)));
+            } else {
+                run.push(object.copy());
+            }
         }
     }
     if host::command(run) != 0 {
@@ -2821,6 +2827,7 @@ fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
     if checking {
         if cache != 0 {
             cache_report(&mut store, 2);
+            cache_auto_gc(&mut store);
         }
         return u64(failed != 0);
     }
@@ -2872,6 +2879,10 @@ fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
             }
             cache_record_put(&mut store, view("prog"), view(program), view(record));
         }
+    }
+    // Last, after everything this build files: the store is measured with it in.
+    if cache != 0 {
+        cache_auto_gc(&mut store);
     }
     return 0;
 }
@@ -3616,14 +3627,328 @@ fn hex_byte(b: u8) -> bool {
 // `grail cache prune [--keep N]`: drop every record no build used in the last N (default 10), then
 // every blob no remaining record names, and whatever a killed build left in `stage/`.
 // `grail cache clear` empties the store. Both cover every target under the store (cache_base).
+// ---- the store's GC ------------------------------------------------------------------------
+//
+// Every entry of the store has a last use, in builds (the store's generation counter): a `map/`
+// record has its `.used` stamp (cache_touch), and a per-function entry - a unit, a body record
+// (`dr-`), an optimiser memo entry (`opt-`) - the newest generation any run's use list in
+// `fn/used/` names it under (fncache::note_used). `cache_gc` measures the store and, when it is over
+// `cap` bytes, evicts entries oldest-use first, a whole generation at a time and never the newest
+// one, until it is under three quarters of the cap; then the blobs no remaining record names. An
+// evicted entry is only ever a miss for the build that would have used it. The use lists are folded
+// into one file. Returns [bytes before, bytes after, entries evicted].
+struct GcEntry {
+    path: u8[],
+    used: u8[],
+    size: u64,
+    generation: u64
+}
+fn gc_size<a>(path: &a [u8]) -> u64 {
+    st := host::stat(view(path), 0);
+    if (3 <= st.len()) && (st[0] == 0) && (st[1] == 1) {
+        return st[2];
+    }
+    return 0;
+}
+// A small table from an entry's name to its newest generation.
+fn gc_slot<a, b>(slots: (&a u64[]), names: (&b u8[][]), name: &b [u8]) -> u64 {
+    mut h: u64 = 14695981039346656037;
+    for i in name.len() {
+        h = wrapping_mul(h ^ u64(name[i]), 1099511628211);
+    }
+    mask := slots.len() - 1;
+    mut at = h & mask;
+    while slots[at] != 0 {
+        if eq(view(names[slots[at] - 1]), view(name)) {
+            return at;
+        }
+        at = (at + 1) & mask;
+    }
+    return at;
+}
+fn cache_gc<a>(root: &a [u8], cap: u64) -> u64[] {
+    now := cache_generation(view(root));
+    fn_dir := fn_store(view(root));
+    used_dir := path_join(view(fn_dir), view("used"));
+    // The newest use of every per-function entry.
+    mut slots = u64[];
+    for i in 65536 {
+        slots.push(0);
+    }
+    mut names = u8[][];
+    mut gens = u64[];
+    if host::exists(view(used_dir)) != 0 {
+        lists := host::list_dir(view(used_dir));
+        for l in lists.len() {
+            text := host::read_file(view(path_join(view(used_dir), view(item(&lists, l)))));
+            rows := lines(view(text));
+            for r in rows.len() {
+                w := words(view(item(&rows, r)));
+                if w.len() != 2 {
+                    continue;
+                }
+                g := number_of(view(item(&w, 0)));
+                name := item(&w, 1);
+                if slots.len() < names.len() * 2 {
+                    break;
+                }
+                at := gc_slot(&slots, &names, view(name));
+                if slots[at] == 0 {
+                    names.push(name);
+                    gens.push(g);
+                    slots[at] = names.len();
+                } else if gens[slots[at] - 1] < g {
+                    gens[slots[at] - 1] = g;
+                }
+            }
+        }
+    }
+    mut entries = GcEntry[];
+    mut total = 0;
+    if host::exists(view(fn_dir)) != 0 {
+        files := host::list_dir(view(fn_dir));
+        for f in files.len() {
+            name := item(&files, f);
+            path := path_join(view(fn_dir), view(name));
+            size := gc_size(view(path));
+            if size == 0 {
+                continue;
+            }
+            mut g = 0;
+            at := gc_slot(&slots, &names, view(name));
+            if slots[at] != 0 {
+                g = gens[slots[at] - 1];
+            }
+            entries.push(GcEntry { path: path, used: u8[], size: size, generation: g });
+            total += size;
+        }
+    }
+    kinds := u8[][copy(view("prog")), copy(view("lnk")), copy(view("mod")), copy(view("unit")), copy(view("check"))];
+    for k in kinds.len() {
+        dir := path_join(view(path_join(view(root), view("map"))), view(item(&kinds, k)));
+        if host::exists(view(dir)) == 0 {
+            continue;
+        }
+        records := host::list_dir(view(dir));
+        for e in records.len() {
+            name := item(&records, e);
+            if ends(view(name), view(".used")) {
+                continue;
+            }
+            path := path_join(view(dir), view(name));
+            used := cat(view(path), view(".used"));
+            mut g = 0;
+            if host::exists(view(used)) != 0 {
+                g = number_of(view(host::read_file(view(used))));
+            }
+            size := gc_size(view(path));
+            entries.push(GcEntry { path: path, used: used, size: size, generation: g });
+            total += size;
+        }
+    }
+    blobs := path_join(view(root), view("blob"));
+    mut blob_names = u8[][];
+    mut blob_sizes = u64[];
+    if host::exists(view(blobs)) != 0 {
+        list := host::list_dir(view(blobs));
+        for b in list.len() {
+            size := gc_size(view(path_join(view(blobs), view(item(&list, b)))));
+            blob_names.push(item(&list, b));
+            blob_sizes.push(size);
+            total += size;
+        }
+    }
+    before := total;
+    mut evicted = 0;
+    if cap < total {
+        target := cap / 4 * 3;
+        // The generations in use, oldest first; the newest is the build that just ran.
+        mut order = u64[];
+        for i in entries.len() {
+            g := entries[i].generation;
+            mut seen = false;
+            for j in order.len() {
+                if order[j] == g {
+                    seen = true;
+                }
+            }
+            if !seen {
+                order.insert(gc_place(&order, g), g);
+            }
+        }
+        mut live = entries.len();
+        mut gone = u64[];
+        for i in entries.len() {
+            gone.push(0);
+        }
+        for o in order.len() {
+            if (total <= target) || (now <= order[o]) {
+                break;
+            }
+            for i in entries.len() {
+                if (gone[i] == 0) && (entries[i].generation == order[o]) {
+                    host::remove(view(entries[i].path), 0);
+                    if entries[i].used.len() != 0 {
+                        host::remove(view(entries[i].used), 0);
+                    }
+                    gone[i] = 1;
+                    total -= entries[i].size;
+                    evicted += 1;
+                    live -= 1;
+                }
+            }
+            // The blobs no remaining record names go too.
+            mut referenced = u8[];
+            for i in entries.len() {
+                if (gone[i] == 0) && (entries[i].used.len() != 0) {
+                    text := host::read_file(view(entries[i].path));
+                    mut run = 0;
+                    for x in text.len() {
+                        if hex_byte(text[x]) {
+                            run += 1;
+                        } else {
+                            run = 0;
+                        }
+                        if run == 64 {
+                            for y in 64 {
+                                referenced.push(text[x + 1 - 64 + y]);
+                            }
+                            referenced.push(10);
+                        }
+                    }
+                }
+            }
+            for b in blob_names.len() {
+                if (blob_sizes[b] != 0) && !cache_contains(view(referenced), view(blob_names[b])) {
+                    host::remove(view(path_join(view(blobs), view(blob_names[b]))), 0);
+                    total -= blob_sizes[b];
+                    blob_sizes[b] = 0;
+                    evicted += 1;
+                }
+            }
+        }
+    }
+    // One use list in place of many: the newest generation of every entry still in the store.
+    if host::exists(view(used_dir)) != 0 {
+        mut folded = u8[];
+        for i in names.len() {
+            if host::exists(view(path_join(view(fn_dir), view(names[i])))) != 0 {
+                folded = cat(view(folded), view(decimal(gens[i])));
+                folded.push(32);
+                folded = cat(view(folded), view(names[i]));
+                folded.push(10);
+            }
+        }
+        old := host::list_dir(view(used_dir));
+        if 1 < old.len() {
+            dest := path_join(view(used_dir), view("folded"));
+            staged := path_join(view(cache_stage_dir(view(root))), view("used.folded"));
+            if host::write_file(view(staged), view(folded)) == 0 {
+                for l in old.len() {
+                    if !eq(view(item(&old, l)), view("folded")) {
+                        host::remove(view(path_join(view(used_dir), view(item(&old, l)))), 0);
+                    }
+                }
+                host::rename(view(staged), view(dest));
+            }
+        }
+    }
+    return u64[before, total, evicted];
+}
+fn cache_stage_dir<a>(root: &a [u8]) -> u8[] {
+    dir := path_join(view(root), view("stage"));
+    host::mkdir(view(dir));
+    return dir;
+}
+// Where `g` goes in the ascending list `order`.
+fn gc_place<a>(order: (&a u64[]), g: u64) -> u64 {
+    mut at = 0;
+    while (at < order.len()) && (order[at] < g) {
+        at += 1;
+    }
+    return at;
+}
+// The cap a build keeps the store under: GRAIL_CACHE_MAX bytes, 2 GiB by default.
+fn cache_cap() -> u64 {
+    asked := host::env(view("GRAIL_CACHE_MAX"));
+    if asked.len() != 0 {
+        return number_of(view(asked));
+    }
+    return 2147483648;
+}
+// After a build: every GRAIL_CACHE_GC_EVERY-th generation (8 by default) the store is measured and,
+// over the cap, collected - measuring is a walk of the store, so not every build pays it.
+fn cache_auto_gc<a>(c: (&a mut Cache)) -> unit {
+    mut every = 8;
+    asked := host::env(view("GRAIL_CACHE_GC_EVERY"));
+    if asked.len() != 0 {
+        every = number_of(view(asked));
+    }
+    if every == 0 {
+        return ();
+    }
+    if cache_generation(view(c.root)) % every != 0 {
+        return ();
+    }
+    r := cache_gc(view(c.root), cache_cap());
+    if (r[2] != 0) & (c.quiet == 0) {
+        mut line = copy(view("grail: cache: over its cap, "));
+        push_bytes(&mut line, view(decimal(r[2])));
+        push_bytes(&mut line, view(" least recently used entries evicted ("));
+        push_bytes(&mut line, view(decimal(r[0] / 1048576)));
+        push_bytes(&mut line, view(" MiB -> "));
+        push_bytes(&mut line, view(decimal(r[1] / 1048576)));
+        push_bytes(&mut line, view(" MiB)"));
+        say(view(line));
+    }
+    return ();
+}
 fn cache_command<a>(args: (&a u8[][])) -> u64 {
     if args.len() == 0 {
-        say(view("usage: grail cache prune [--keep N] | grail cache clear | grail cache warm [--target T]"));
+        say(view("usage: grail cache gc [--max BYTES] | grail cache prune [--keep N] | grail cache clear | grail cache warm [--target T]"));
         return 1;
     }
     sub := item(&args, 0);
     if eq(view(sub), view("warm")) {
         return cache_warm(&args);
+    }
+    if eq(view(sub), view("gc")) {
+        // `grail cache gc [--max BYTES]`: every target's store down to the cap, least recently
+        // used first (cache_gc).
+        mut cap = cache_cap();
+        if (args.len() == 3) && eq(view(item(&args, 1)), view("--max")) {
+            cap = number_of(view(item(&args, 2)));
+        }
+        base := cache_base();
+        if host::exists(view(base)) == 0 {
+            host::print(view("cache: empty\n"));
+            return 0;
+        }
+        targets := host::list_dir(view(base));
+        mut before = 0;
+        mut after = 0;
+        mut evicted = 0;
+        for t in targets.len() {
+            root := path_join(view(base), view(item(&targets, t)));
+            if host::exists(view(path_join(view(root), view("generation")))) == 0 {
+                continue;
+            }
+            r := cache_gc(view(root), cap);
+            before += r[0];
+            after += r[1];
+            evicted += r[2];
+        }
+        mut line = copy(view("cache: gc evicted "));
+        push_bytes(&mut line, view(decimal(evicted)));
+        push_bytes(&mut line, view(" entries; "));
+        push_bytes(&mut line, view(decimal(before)));
+        push_bytes(&mut line, view(" bytes -> "));
+        push_bytes(&mut line, view(decimal(after)));
+        push_bytes(&mut line, view(" bytes (cap "));
+        push_bytes(&mut line, view(decimal(cap)));
+        push_bytes(&mut line, view(")\n"));
+        host::print(view(line));
+        return 0;
     }
     if eq(view(sub), view("clear")) {
         mut run = u8[][copy(view("rm")), copy(view("-rf")), cache_base()];
@@ -3632,7 +3957,7 @@ fn cache_command<a>(args: (&a u8[][])) -> u64 {
         return 0;
     }
     if !eq(view(sub), view("prune")) {
-        say(view("usage: grail cache prune [--keep N] | grail cache clear | grail cache warm [--target T]"));
+        say(view("usage: grail cache gc [--max BYTES] | grail cache prune [--keep N] | grail cache clear | grail cache warm [--target T]"));
         return 1;
     }
     mut keep = 10;

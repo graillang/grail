@@ -437,6 +437,19 @@ struct L {
     // The id of the `body` block: the first block of the function's own code, which dominates
     // every block of it.
     body_blk: u64,
+    // The integer constant the stream last put in %rdi in this block, or empty: a runtime helper's
+    // selector (`rt_f64_op`'s opcode) is written there just before the call.
+    rdiconst: u8[],
+    // Integer constants stored to frame slots in this block (by slot index), and the last value
+    // loaded from such a slot with its constant: how a constant reaches %rdi through `imm`'s slot.
+    slotconst: u8[][],
+    lastload: u8[],
+    lastconst: u8[],
+    // Per register (reg_index order), the integer constant it holds in this block, or empty; and
+    // the SSA values known to be such a constant (kmap: value -> index into kvals).
+    regconst: u8[][],
+    kmap: Map,
+    kvals: u8[][],
     // Type-based alias information (docs/design/release-builds-and-parity.md, P3): which registers
     // hold an address into a vector's element storage (set by the in-place accessors below, cleared
     // when the register is written or a block begins), and the `ptr` values made from them. A load or
@@ -1130,6 +1143,10 @@ fn get_reg<a, b>(l: (&a mut L), name: &b [u8]) -> u8[] {
     v := def(&mut l, view("load i64, ptr {}"), &u8[][slot_of(view("%r."), view(r))]);
     w := reg_width(name);
     ri := reg_index(view(r));
+    if (w == 64) && (ri < l.regconst.len()) && (l.regconst[ri].len() != 0) {
+        rk := copy(view(l.regconst[ri]));
+        note_const(&mut l, view(v), view(rk));
+    }
     if (w == 64) && (ri < l.ebase.len()) && (l.ebase[ri] != 0) {
         set_add(&mut l.evals, view(v));
     }
@@ -1221,6 +1238,23 @@ fn set_reg<a, b, c>(l: (&a mut L), name: &b [u8], value: &c [u8]) -> unit {
     prov_clear(&mut l, view(r));
     if eq(view(r), view("rdx")) {
         l.rdxdead = 0;
+    }
+    mut known = u8[];
+    if reg_width(name) == 64 {
+        known = const_of(&l, value);
+        if (known.len() == 0) && (l.lastload.len() != 0) && eq(value, view(l.lastload)) {
+            known = copy(view(l.lastconst));
+        }
+    }
+    rci := reg_index(view(r));
+    if rci < 14 {
+        while l.regconst.len() <= rci {
+            l.regconst.push(u8[]);
+        }
+        exchange(&mut l.regconst[rci], copy(view(known)));
+    }
+    if eq(view(r), view("rdi")) {
+        exchange(&mut l.rdiconst, known);
     }
     ri := reg_index(view(r));
     if ri < l.ebase.len() {
@@ -1465,6 +1499,60 @@ fn frame_slot_holds(l: (&L), op: (&[u8])) -> bool {
     k := frame_slot_of(op);
     return (k != 0) && (k < l.eslot.len()) && (l.eslot[k] != 0);
 }
+// A store to a frame slot: the slot holds the integer constant `v` when `v` is one (a decimal
+// literal) and the store is a whole word, else nothing known.
+fn note_slot_const(l: (&mut L), op: (&[u8]), v: (&[u8]), width: u64) -> unit {
+    k := frame_slot_of(op);
+    if k == 0 {
+        return ();
+    }
+    while l.slotconst.len() <= k {
+        l.slotconst.push(u8[]);
+    }
+    mut known = u8[];
+    if width == 64 {
+        known = const_of(&l, v);
+    }
+    exchange(&mut l.slotconst[k], known);
+    return ();
+}
+// The integer constant a value is: a decimal literal, or an SSA value recorded as one; else empty.
+fn const_of<a>(l: (&a L), v: (&[u8])) -> u8[] {
+    mut digits = v.len() != 0;
+    for i in v.len() {
+        if (v[i] < 48) || (57 < v[i]) {
+            digits = false;
+        }
+    }
+    if digits {
+        return copy(v);
+    }
+    if l.kvals.len() == 0 {
+        return u8[];
+    }
+    hit := map_get(&l.kmap, v);
+    if hit == 0 {
+        return u8[];
+    }
+    return copy(view(l.kvals[hit - 1]));
+}
+fn note_const(l: (&mut L), v: (&[u8]), k: (&[u8])) -> unit {
+    if k.len() == 0 {
+        return ();
+    }
+    if (l.kvals.len() + 1) * 2 >= l.kmap.used.len() {
+        mut bigger = map_new(l.kmap.used.len());
+        for i in l.kmap.used.len() {
+            if l.kmap.used[i] != 0 {
+                map_put(&mut bigger, view(l.kmap.keys[i]), l.kmap.vals[i]);
+            }
+        }
+        exchange(&mut l.kmap, bigger);
+    }
+    l.kvals.push(copy(k));
+    map_put(&mut l.kmap, v, l.kvals.len() - 1);
+    return ();
+}
 fn width_type(width: u64) -> u8[] {
     if width == 32 {
         return copy(view("i32"));
@@ -1527,6 +1615,11 @@ fn value<a, b>(l: (&a mut L), op: &b [u8], width: u64) -> u8[] {
         p := address(&mut l, op);
         if width == 64 {
             loaded := def(&mut l, view("load i64, ptr {}, align 1"), &u8[][p]);
+            sk := frame_slot_of(op);
+            if (sk != 0) && (sk < l.slotconst.len()) && (l.slotconst[sk].len() != 0) {
+                exchange(&mut l.lastload, copy(view(loaded)));
+                exchange(&mut l.lastconst, copy(view(l.slotconst[sk])));
+            }
             if frame_slot_holds(&l, op) {
                 set_add(&mut l.evals, view(loaded));
             }
@@ -1572,6 +1665,7 @@ fn store<a, b, c>(l: (&a mut L), op: &b [u8], v: &c [u8], width: u64) -> unit {
         emit(&mut l, view("store float {}, ptr {}, align 4"), &u8[][f, sn]);
         return ();
     }
+    note_slot_const(&mut l, op, v, width);
     p := address(&mut l, op);
     if width == 64 {
         frame_slot_note(&mut l, op, view(v));
@@ -2596,6 +2690,13 @@ fn sibling_name(callee: (&[u8]), what: u64, width: u64) -> u8[] {
 
 // The opcode of the f32-arithmetic fact for the `rt_f64_op` call at `ordinal`, or 0 when the call
 // has no fact and must keep the word lowering.
+fn number_of_text(s: (&[u8])) -> u64 {
+    mut n: u64 = 0;
+    for i in s.len() {
+        n = n * 10 + u64(s[i] - 48);
+    }
+    return n;
+}
 fn call_op<a>(l: (&a L), ordinal: u64) -> u64 {
     if ordinal < l.fops.len() {
         return l.fops[ordinal];
@@ -2696,6 +2797,9 @@ fn begin_block<a, b>(l: (&a mut L), name: &b [u8]) -> unit {
     // A pointer value is only known to dominate the block it was made in.
     prov_reset(&mut l);
     l.blk = block_id(&mut l, name);
+    exchange(&mut l.rdiconst, u8[]);
+    exchange(&mut l.slotconst, u8[][]);
+    exchange(&mut l.regconst, u8[][]);
     for i in l.ebase.len() {
         l.ebase[i] = 0;
     }
@@ -2849,6 +2953,28 @@ fn generic_element(l: (&mut L), target: (&[u8])) -> bool {
     // loaded and written back as `!tbaa !1`, the element read as `!tbaa !3`. A pop loop's length then
     // lives in a register, since no element load can alias it (B2,
     // docs/design/dyn-and-callable-bounds.md).
+    // `exchange(&mut slot, v)` (also behind `v[i] = x`): the old word read and the new one stored in
+    // place, so a store loop is visible to the vectoriser. Tagged as element storage only when the
+    // address is one the element accessors produced (l.evals), so it is known not to be a header.
+    if eq(target, view("rt_xchg")) && (l.verify == 0) && (l.proof.len() == 0) {
+        pv := get_reg(&mut l, view("rdi"));
+        nv := get_reg(&mut l, view("rsi"));
+        tagged := (l.evals.count != 0) && set_has(&l.evals, view(pv));
+        p := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][pv]);
+        mut old = u8[];
+        if tagged {
+            old = def(&mut l, view("load i64, ptr {}, align 8, !tbaa !3"), &u8[][copy(view(p))]);
+            emit(&mut l, view("store i64 {}, ptr {}, align 8, !tbaa !3"), &u8[][nv, p]);
+        } else {
+            old = def(&mut l, view("load i64, ptr {}, align 8"), &u8[][copy(view(p))]);
+            emit(&mut l, view("store i64 {}, ptr {}, align 8"), &u8[][nv, p]);
+        }
+        set_reg(&mut l, view("rax"), view(old));
+        set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
+        set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
+        clear_args(&mut l);
+        return true;
+    }
     // `v.len()`: the header's length word, tagged as a header load.
     if eq(target, view("rt_len")) && (l.verify == 0) && (l.proof.len() == 0) {
         s := get_reg(&mut l, view("rdi"));
@@ -3131,7 +3257,40 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
         // narrowing of `fptrunc (fmul (fpext a), (fpext b))` in stage 2a uses.
         ordinal := l.fordinal;
         l.fordinal += 1;
-        op := call_op(&l, ordinal);
+        mut op = call_op(&l, ordinal);
+        // The opcode the stream passes, when it is a constant: a fact naming another operation is
+        // about another call, and is not used.
+        mut seen: u64 = 0;
+        if l.rdiconst.len() != 0 {
+            seen = number_of_text(view(l.rdiconst));
+        }
+        if (op != 0) && (seen != 0) && (seen != op) {
+            op = 0;
+        }
+        if (op == 0) && ((seen == 42) || (seen == 43) || (seen == 45) || (seen == 47)) {
+            // No fact: the operation on the two binary64 words it is given, exactly as the
+            // runtime's body computes it (one IEEE double operation), with its one result word in
+            // %rax and %rdx left alone - not a six-word call that stores a second word into %rdx.
+            lhs := get_reg(&mut l, view("rsi"));
+            rhs := get_reg(&mut l, view("rdx"));
+            mut kind = copy(view("fadd"));
+            if seen == 42 {
+                kind = copy(view("fmul"));
+            }
+            if seen == 45 {
+                kind = copy(view("fsub"));
+            }
+            if seen == 47 {
+                kind = copy(view("fdiv"));
+            }
+            put(&mut kind, view(" double {}, {}"));
+            da := as_double(&mut l, view(lhs));
+            db := as_double(&mut l, view(rhs));
+            r := def(&mut l, view(kind), &u8[][da, db]);
+            w := as_word(&mut l, view(r));
+            set_reg(&mut l, view("rax"), view(w));
+            return ();
+        }
         if op != 0 {
             lhs := get_reg(&mut l, view("rsi"));
             rhs := get_reg(&mut l, view("rdx"));
@@ -3156,6 +3315,10 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
             return ();
         }
     }
+    // A call may write a frame slot whose address it was given: the constants known in slots end.
+    exchange(&mut l.slotconst, u8[][]);
+    exchange(&mut l.lastload, u8[]);
+    exchange(&mut l.regconst, u8[][]);
     // The ordinal this call has among the calls to the same callee in this function: the key an
     // F1 call fact carries, counted in emission order on both sides of the table.
     ord := callee_ordinal(&mut l, view(target));
@@ -5977,6 +6140,8 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
     l.body = u8[];
     exchange(&mut l.ebase, u64[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     exchange(&mut l.eptrs, set_new((f.end - f.first) * 2 + 64));
+    exchange(&mut l.kmap, map_new(16));
+    exchange(&mut l.kvals, u8[][]);
     exchange(&mut l.evals, set_new((f.end - f.first) * 2 + 64));
     exchange(&mut l.eslot, u64[]);
     // A function's temporaries and fresh blocks are named within it, so a function lowers to the
@@ -9588,7 +9753,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
             set_add(&mut weak, view(sub(wl, 6, wl.len())));
         }
     }
-    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], pair_written: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, ebase: u64[], eptrs: set_new(16), evals: set_new(16), eslot: u64[], dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, pvreg: u8[][], pvptr: u8[][], pvoff: i64[], asy: u8[][], asx: u8[][], rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0, argwritten: 0, ffis: set_new(16), ffimem: set_new(16), entryextra: u8[], outer: u8[][], outeropen: 0, why: host::env(view("GRAIL_LLVM_WHY")), refsigs: set_new(16), takenslots: u8[][], ownrefs: 0, argptrs: u8[][], grail_bodies: set_new(16), xpend: 0, xstale: 18446744073709551615 };
+    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], pair_written: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, rdiconst: u8[], slotconst: u8[][], lastload: u8[], lastconst: u8[], regconst: u8[][], kmap: map_new(16), kvals: u8[][], ebase: u64[], eptrs: set_new(16), evals: set_new(16), eslot: u64[], dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, pvreg: u8[][], pvptr: u8[][], pvoff: i64[], asy: u8[][], asx: u8[][], rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0, argwritten: 0, ffis: set_new(16), ffimem: set_new(16), entryextra: u8[], outer: u8[][], outeropen: 0, why: host::env(view("GRAIL_LLVM_WHY")), refsigs: set_new(16), takenslots: u8[][], ownrefs: 0, argptrs: u8[][], grail_bodies: set_new(16), xpend: 0, xstale: 18446744073709551615 };
     // A function whose address is taken (`NAME(%rip)`, or named by data such as a vtable) is
     // called through a pointer by code that does not know its signature, so it keeps the six-word
     // form: an indirect call passes six words and reads rax:rdx, and LLVM must never see a call

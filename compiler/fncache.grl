@@ -210,6 +210,69 @@ fn path<a, b>(dir: &a [u8], name: &b [u8]) -> u8[] {
     return out;
 }
 
+// ---- last use ----------------------------------------------------------------------------------
+//
+// Which entries a run used is written once per run, not once per entry: `used/` holds files of
+// `GENERATION NAME` lines, one file per compiler run (or optimiser piece), named by the hash of what
+// it holds. The generation is the store's build counter (the `generation` file one level above this
+// directory, which every build that opens the store raises). `grail cache gc` reads them to find
+// each entry's last use and evicts the least recently used first (compiler/cli.grl, cache_gc).
+pub fn note_used<a, b>(dir: &a [u8], names: (&b u8[][])) -> unit {
+    if (dir.len() == 0) || (names.len() == 0) {
+        return ();
+    }
+    // `dir` is `<store root>/fn`: the generation lives in the root.
+    mut root_end = dir.len();
+    while (0 < root_end) && (dir[root_end - 1] != 47) {
+        root_end -= 1;
+    }
+    mut gen_text = u8[];
+    if 0 < root_end {
+        gen_file := path(dir[0..root_end - 1], view("generation"));
+        if host::exists(view(gen_file)) != 0 {
+            gen_text = host::read_file(view(gen_file));
+        }
+    }
+    mut gen = u8[];
+    for i in gen_text.len() {
+        if (47 < gen_text[i]) && (gen_text[i] < 58) {
+            gen.push(gen_text[i]);
+        }
+    }
+    if gen.len() == 0 {
+        gen.push(48);
+    }
+    mut text = u8[];
+    for i in names.len() {
+        text.append(view(gen));
+        text.push(32);
+        text.append(view(names[i]));
+        text.push(10);
+    }
+    ensure(view(dir));
+    used := path(view(dir), view("used"));
+    if host::exists(view(used)) == 0 {
+        host::mkdir(view(used));
+    }
+    name := hash(view(text));
+    staged := path(path(view(dir), view("stage")), view(cat_used(view(name))));
+    if host::write_file(view(staged), view(text)) != 0 {
+        host::remove(view(staged), 0);
+        return ();
+    }
+    if host::rename(view(staged), view(path(view(used), view(name)))) != 0 {
+        host::remove(view(staged), 0);
+    }
+    return ();
+}
+
+fn cat_used<a>(name: &a [u8]) -> u8[] {
+    mut out = u8[];
+    out.append(view("used."));
+    out.append(name);
+    return out;
+}
+
 pub fn ensure<a>(dir: &a [u8]) -> unit {
     if host::exists(view(dir)) == 0 {
         host::mkdir(view(dir));

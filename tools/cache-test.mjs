@@ -30,7 +30,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fastDigest, storeDigest } from './store-hash.mjs';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { buildCompiler, compilerSources, hostTarget, root, targetName } from './native.mjs';
@@ -1063,6 +1063,64 @@ function proveAdapter() {
   return 'a replayed body names its result adapter again';
 }
 
+// ---- (p) the store's GC ----------------------------------------------------------------------
+// A store capped at a little over a cold build's footprint, collected after every build: 25 edits,
+// each re-emitting one body (a unit, an optimiser memo entry and a module record per edit), keep it
+// under the cap, and something is evicted. Then `grail cache gc` and a warm build, whose image has
+// to be the image a build from an empty store writes - an eviction is only ever a miss.
+function storeBytes(dir) {
+  let total = 0;
+  for (const name of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, name.name);
+    if (name.isDirectory()) total += storeBytes(path);
+    else if (name.isFile()) total += statSync(path).size;
+  }
+  return total;
+}
+function proveGc() {
+  const dir = join(work, 'gc');
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, 'grail.toml'), '[package]\nname = "gc"\nversion = "0.1.0"\n');
+  const lib = k => {
+    const fns = [];
+    for (let i = 0; i < 40; i += 1) fns.push(`pub fn f${i}(x: u64) -> u64 {\n    mut y = x + ${i === 7 ? k : i};\n    while y > 100 {\n        y = y / 3;\n    }\n    return y;\n}\n`);
+    return `module work;\n\n${fns.join('\n')}`;
+  };
+  writeFileSync(join(dir, 'src/work.grl'), lib(0));
+  writeFileSync(join(dir, 'src/main.grl'), 'use work;\n\nfn main() {\n    println(work::f7(500) + work::f3(9));\n}\n');
+  const store = join(dir, 'store');
+  const buildIt = env => spawnSync(compiler, ['build', '--cache', '-o', 'target/gc'], { cwd: dir, encoding: 'utf8', env: { ...process.env, GRAIL_CACHE_DIR: store, ...env }, timeout: 900_000 });
+  const cold = buildIt({ GRAIL_CACHE_GC_EVERY: '0' });
+  assert.equal(cold.status, 0, `the cold build failed\n${cold.stdout}${cold.stderr}`);
+  const coldBytes = storeBytes(store);
+  const cap = Math.floor(coldBytes * 1.3);
+  let evictions = 0;
+  let largest = 0;
+  for (let k = 1; k <= 25; k += 1) {
+    writeFileSync(join(dir, 'src/work.grl'), lib(k));
+    const edit = buildIt({ GRAIL_CACHE_GC_EVERY: '1', GRAIL_CACHE_MAX: String(cap) });
+    assert.equal(edit.status, 0, `edit ${k}: the build failed\n${edit.stdout}${edit.stderr}`);
+    if (/least recently used entries evicted/.test(`${edit.stdout}${edit.stderr}`)) evictions += 1;
+    const now = storeBytes(store);
+    largest = Math.max(largest, now);
+    assert.ok(now <= cap, `edit ${k}: the store is ${now} bytes, over its cap of ${cap}`);
+  }
+  assert.ok(evictions > 0, 'twenty-five edits under a cap 1.3 times a cold build must evict something');
+  const gc = spawnSync(compiler, ['cache', 'gc', '--max', String(cap)], { cwd: dir, encoding: 'utf8', env: { ...process.env, GRAIL_CACHE_DIR: store } });
+  assert.equal(gc.status, 0, `grail cache gc failed\n${gc.stdout}${gc.stderr}`);
+  assert.match(gc.stdout, /^cache: gc evicted \d+ entries; \d+ bytes -> \d+ bytes/m, `grail cache gc must report\n${gc.stdout}`);
+  const warm = buildIt({ GRAIL_CACHE_GC_EVERY: '0' });
+  assert.equal(warm.status, 0, `the warm build after GC failed\n${warm.stdout}${warm.stderr}`);
+  const image = readFileSync(join(dir, 'target/gc'));
+  const reference = buildIt({ GRAIL_CACHE_DIR: join(dir, 'reference-store'), GRAIL_FN_CACHE: '0', GRAIL_CACHE_GC_EVERY: '0' });
+  assert.equal(reference.status, 0, `the reference build failed\n${reference.stdout}${reference.stderr}`);
+  assert.ok(readFileSync(join(dir, 'target/gc')).equals(image), 'the warm build after GC is not the image a build from an empty store writes');
+  // f7(500) with the last edit: 525 / 3 / 3 = 58; f3(9) = 12.
+  assert.equal(spawnSync(join(dir, 'target/gc'), [], { encoding: 'utf8' }).stdout, '70\n', 'the warm build after GC prints the wrong answer');
+  return { coldBytes, cap, largest, evictions };
+}
+
 function reportIndependent(independent, registrations) {
   const t = value => `${value.toFixed(1)}ms`;
   console.log(`(j) one body   ${independent.bodies} bodies with drop helpers and specialisations, all units; after each edit one is emitted and the rest replay, byte-identical`);
@@ -1075,6 +1133,11 @@ function reportIndependent(independent, registrations) {
 // ---- run --------------------------------------------------------------------------------------
 // The timings come first, from an empty store, so "cold" means cold.
 // `--units` runs only the per-function sections (j) and (k), for work on that layer.
+if (flags.includes('--gc')) {
+  const g = proveGc();
+  console.log(`(p) gc         cold store ${g.coldBytes} bytes, cap ${g.cap}: 25 edits peaked at ${g.largest}, ${g.evictions} builds evicted`);
+  process.exit(0);
+}
 if (flags.includes('--adapter')) {
   console.log(`(n) adapter    ${proveAdapter()}`);
   process.exit(0);
@@ -1192,6 +1255,7 @@ const memoKeys = proveMemoKeys();
 const memoEdit = proveMemoEdit();
 const checks = proveCheck();
 const adapter = proveAdapter();
+const gcStore = proveGc();
 const finalStore = proveStore();
 
 const ms = value => `${value.toFixed(1)}ms`;
@@ -1227,6 +1291,7 @@ reportIndependent(independent, registrations);
 console.log(`(m) check      a check after an edit to one module checks it alone (${checks.edited.line.hits} modules reused); errors in two modules are both reported and their readers are not checked`);
 console.log(`(l) memo edit  an edit to one of ${memoEdit.cold} optimised bodies re-optimises it alone`);
 console.log(`(n) adapter    ${adapter}`);
+console.log(`(p) gc         cold store ${gcStore.coldBytes} bytes, cap ${gcStore.cap}: 25 edits peaked at ${gcStore.largest}, ${gcStore.evictions} builds evicted; after cache gc a warm build is the empty-store image`);
 console.log(`(l) memo keys  a warm rebuild of the compiler: ${memoKeys.hits} bodies replayed, every remembered optimisation checked against a fresh one`);
 console.log(`(f) pruning    --keep 0 after an edit dropped ${pruning.pruned.records} records and ${pruning.pruned.blobs} blobs; next build ${pruning.again.hits} hit, ${pruning.again.misses} miss`);
 console.log(`(o) comptime   probes: cold ${comptimeValues.cold.probes}, unchanged ${comptimeValues.warm.probes}, an edit elsewhere ${comptimeValues.elsewhere.probes}, an edit to a reached body ${comptimeValues.reached.probes}, then elsewhere again ${comptimeValues.again.probes}`);

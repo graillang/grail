@@ -1,4 +1,5 @@
 module optimize;
+use fncache;
 use ir;
 use jobs;
 use xxhash;
@@ -1654,6 +1655,19 @@ fn reg_read_later<a, b>(s: &a [u8], from: u64, reg: &b [u8], low: &b [u8]) -> bo
     return false;
 }
 pub fn f32_const_ops<a>(s: &a [u8]) -> u8[] {
+    // Every rewrite below starts at a `cvtss2sd` line: a stream with none - any program without f32
+    // arithmetic - is returned as it is, without walking it line by line.
+    mut any = false;
+    mut x = 0;
+    while (x + 8 <= s.len()) && !any {
+        if (s[x] == 99) && ir::at(view(s), x, view("cvtss2sd")) {
+            any = true;
+        }
+        x += 1;
+    }
+    if !any {
+        return s.copy();
+    }
     mut out = u8[];
     mut a = 0;
     while a < s.len() {
@@ -1732,11 +1746,12 @@ pub fn f32_const_ops<a>(s: &a [u8]) -> u8[] {
 pub fn probe_frames<a>(s: &a [u8], after: u64) -> u8[] {
     // The scan the backstop reads is the one that finds the frames: a stream with no frame over a
     // page - nearly every one - is read once, checked, and returned as it is.
-    scan := frame_scan(view(s));
+    mut scan = frame_scan(view(s));
     if scan.names.len() == 0 {
         frame_check(view(s), &scan);
         return s.copy();
     }
+    mut added = u8[][];
     names := &scan.names;
     sizes := &scan.sizes;
     // Only the lines that move %rsp down can take a probe, and the scan has them: the text between
@@ -1805,6 +1820,8 @@ pub fn probe_frames<a>(s: &a [u8], after: u64) -> u8[] {
             }
         }
         if probe.len() != 0 {
+            // The probe's loop label, as the check reads a probed frame.
+            added.push(name.copy());
             if after == 0 {
                 // Before the frame line.
                 out.append(s[pend..a]);
@@ -1827,7 +1844,13 @@ pub fn probe_frames<a>(s: &a [u8], after: u64) -> u8[] {
     if (after != 0) && (pend < n) && (s[n - 1] != 10) {
         out.push(10);
     }
-    probe_backstop(view(out));
+    // The check, on the stream as it was read: the output's frame lines are the input's, in the
+    // same functions (a probe adds only `.L` lines and moves of 4096), and its probes are the input's
+    // and the ones just added - so reading the output again would find exactly this.
+    for i in added.len() {
+        scan.probed.push(added[i].copy());
+    }
+    frame_check(view(s), &scan);
     return out;
 }
 // What one pass over a stream finds for the probes: the frame constants that can reach a page
@@ -6519,6 +6542,16 @@ fn copy_texts<a>(v: (&a u8[][])) -> u8[][] {
 // Optimise the whole lines of `s[lo..hi]` into `o.out`. Returns where the last whole line ended.
 // The bodies the front end noted (o.known) are taken as they are noted; the text between them -
 // part markers, `.gbase` lines, bodies that are not units, data - is scanned line by line.
+// The memo entry's name in its directory: what follows the last `/`.
+fn memo_name<a>(file: &a [u8]) -> u8[] {
+    mut at = file.len();
+    while (0 < at) && (file[at - 1] != 47) {
+        at -= 1;
+    }
+    mut out = u8[];
+    out.append(file[at..file.len()]);
+    return out;
+}
 fn run_range<a, b, c, e, x>(o: (&a mut ir::Body), s: &b [u8], lo: u64, hi: u64, split: u64, marks: (&mut u64[]), names: (&mut u8[][]), facts: (&c llvm::Facts), ix: (&x ir::FactIndex), want_ir: u64, ir_text: (&mut u8[]), call_syms: (&mut u8[][]), call_counts: (&mut u64[])) -> u64 {
     mut cursor = lo;
     // The first noted body at or after `lo`.
@@ -6550,7 +6583,11 @@ fn run_range<a, b, c, e, x>(o: (&a mut ir::Body), s: &b [u8], lo: u64, hi: u64, 
         cursor = e;
         k += 1;
     }
-    return scan_range(&mut o, view(s), cursor, hi, split, marks, names, facts, ix, want_ir, ir_text, call_syms, call_counts);
+    done := scan_range(&mut o, view(s), cursor, hi, split, marks, names, facts, ix, want_ir, ir_text, call_syms, call_counts);
+    // What this piece used, once (the store's GC reads it).
+    used := exchange(&mut o.memo_used, u8[][]);
+    fncache::note_used(view(o.memo_dir), &used);
+    return done;
 }
 fn scan_range<a, b, c, e, x>(o: (&a mut ir::Body), s: &b [u8], lo: u64, hi: u64, split: u64, marks: (&mut u64[]), names: (&mut u8[][]), facts: (&c llvm::Facts), ix: (&x ir::FactIndex), want_ir: u64, ir_text: (&mut u8[]), call_syms: (&mut u8[][]), call_counts: (&mut u64[])) -> u64 {
     mut start = lo;
@@ -6669,6 +6706,7 @@ fn one_body<a, b, c, e, x, y>(o: (&a mut ir::Body), s: &b [u8], from: u64, to: u
                     }
                     call_syms.push(o.name.copy());
                     call_counts.push(count);
+                    o.memo_used.push(memo_name(view(file)));
                     return ();
                 }
             }
@@ -6720,6 +6758,7 @@ fn one_body<a, b, c, e, x, y>(o: (&a mut ir::Body), s: &b [u8], from: u64, to: u
             host::exit(1);
         }
         host::write_file(view(file), view(kept));
+        o.memo_used.push(memo_name(view(file)));
     }
     ir::reset(&mut o);
 }
