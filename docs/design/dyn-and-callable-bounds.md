@@ -200,5 +200,4 @@ later frees a frame word (SIGABRT) or the holder outlives the frame (SIGSEGV). P
 through `closure_erase`: `widen_to_fnmut_formal` and generic argument inference (`iter::from_fn`,
 `Iter.map`), record field initialisers and field stores, `move_as`, capture of a closure into another
 closure, parallel/thread payloads (`parallel_map`, `thread::spawn`, scopes), `Mutex`/`dyn` cells.
-Then the tail drop and `rt_vec_take` for `VecIter`. `CLOSURES_FRAMED` switches the whole
-representation off for bisecting.
+Then the tail drop and `rt_vec_take` for `VecIter`.
