@@ -1,5 +1,10 @@
 ## Unreleased
 
+- Fixed: a release (LLVM-backend) build of a program with a probe-tier static failed at
+  `grail asm` with "`.popsection` without `.pushsection`": the LLVM path's splitter took the
+  static's label inside `.pushsection` for a function and separated it from its section switch.
+  The internal assembler also takes `.previous` now.
+
 - **Small runtime functions are inlined into every module.** A small runtime body (the scheduler's
   `rt_current`, `rt_list_set`, `rt_list_head`, ...) is now inlined where another module calls it,
   in every build shape: a per-module build carries the bodies in `runtime.facts`. A failure inside

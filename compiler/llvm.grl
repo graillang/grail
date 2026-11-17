@@ -652,6 +652,7 @@ fn split<a>(lines: (&a u8[][]), funcs: (&a mut Func[]), data: (&a mut u8[][])) -
     mut text = 1;
     mut open = 0;
     mut pool = false;
+    mut pushed = u64[];
     for i in lines.len() {
         line := view(lines[i]);
         if eq(line, view(".text")) {
@@ -664,6 +665,19 @@ fn split<a>(lines: (&a u8[][]), funcs: (&a mut Func[]), data: (&a mut u8[][])) -
                 funcs[last].end = i;
                 open = 0;
             }
+        }
+        // A `.pushsection` outside a function (a static's data) leaves .text until its
+        // `.popsection`: the labels inside are data, not functions.
+        if (open == 0) && starts(line, view(".pushsection")) {
+            pushed.push(text);
+            text = 0;
+            data.push(copy(line));
+            continue;
+        }
+        if (open == 0) && starts(line, view(".popsection")) && (pushed.len() != 0) {
+            text = pushed.pop()!;
+            data.push(copy(line));
+            continue;
         }
         if open != 0 && (pool || starts(line, view(".pushsection"))) {
             if starts(line, view(".pushsection")) {
