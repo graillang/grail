@@ -1497,6 +1497,28 @@ fn rt_alloc_unlocked(n: u64) -> u64 {
     raw_store(wrapping_add(state, 24), wrapping_add(raw_load(wrapping_add(state, 24)), 1));
     return wrapping_add(fresh, 16);
 }
+// A block with a mapping of its own goes back to the OS. Out of line, so the small-block path
+// above needs no saved registers.
+fn rt_free_own(ptr: u64) -> u64 {
+    state := raw_state();
+    arena := rt_own_arena(ptr);
+    mut link = state + 32;
+    while raw_load(link) != arena {
+        next := raw_load(link);
+        if next == 0 {
+            rt_abort();
+        }
+        link = next;
+    }
+    length := raw_load(arena + 8);
+    raw_store(link, raw_load(arena));
+    raw_store(state + 24, wrapping_sub(raw_load(state + 24), 1));
+    err := rt_syscall(11, arena, length, 0);
+    if rt_error(err) {
+        rt_abort();
+    }
+    return 0;
+}
 fn rt_free_unlocked(ptr: u64) -> u64 {
     if ptr == 0 {
         return 0;
@@ -1515,23 +1537,7 @@ fn rt_free_unlocked(ptr: u64) -> u64 {
     // Classes of at least 512 KiB occupy their own arena. Return those mappings to the OS
     // immediately; smaller freed objects remain reusable in the segregated slab caches.
     if (size < 524288) == 0 {
-        arena := rt_own_arena(ptr);
-        mut link = state + 32;
-        while raw_load(link) != arena {
-            next := raw_load(link);
-            if next == 0 {
-                rt_abort();
-            }
-            link = next;
-        }
-        length := raw_load(arena + 8);
-        raw_store(link, raw_load(arena));
-        raw_store(state + 24, wrapping_sub(raw_load(state + 24), 1));
-        err := rt_syscall(11, arena, length, 0);
-        if rt_error(err) {
-            rt_abort();
-        }
-        return 0;
+        return rt_free_own(ptr);
     }
     head := wrapping_add(wrapping_add(state, 256), wrapping_mul(rt_block_bin(size), 8));
     raw_store(wrapping_add(block, 8), raw_load(head));
