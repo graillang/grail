@@ -10647,7 +10647,7 @@
     "name": "entry-missing-names-the-file",
     "source": "fn hidden() { }",
     "reject": true,
-    "diagnostic": "no `main` and no public function with at most one parameter",
+    "diagnostic": "no `main` in ",
     "note": "The refusal points at the file the caller named; it used to point at the standard module the last pass had read."
   },
   {
@@ -17320,5 +17320,45 @@
       "riscv64"
     ],
     "note": "call ABI S3: words past the sixth travel on the stack (the caller's outgoing area, 16 + 8k(%rbp) in the callee), position-weighted so a word read from the wrong slot changes the sum; a 10-argument recursion rotates them"
+  },
+  {
+    "name": "entry-library-u64-params-no-main",
+    "source": "module bulk;\n\npub fn f0(x: u64) -> u64 {\n    return x + 1;\n}\npub fn f1(x: u64) -> u64 {\n    return f0(x) * 2;\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "no `main` in ",
+      "input.grl:1:1"
+    ],
+    "note": "a library whose public functions take a u64: none can be the entry, so the file is told it has no `main` (the first one used to be picked and refused at the entry check, located in an imported interface)"
+  },
+  {
+    "name": "entry-library-dyn-no-main",
+    "source": "module shape;\n\npub interface Shape {\n    fn area(self: &Self) -> u64;\n}\npub struct Square {\n    side: u64\n}\nimpl Shape for Square {\n    fn area(self: &Self) -> u64 {\n        return self.side * self.side;\n    }\n}\npub fn area_of(s: &dyn Shape) -> u64 {\n    return s.area();\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "no `main` in ",
+      "input.grl:1:1"
+    ],
+    "note": "a library whose public function takes `&dyn Shape`: not an entry, so no `main`, located in the file"
+  },
+  {
+    "name": "entry-library-using-result-no-main",
+    "source": "module chained;\nuse result;\nuse core;\n\nfn half(x: u64) -> result::Result<u64, string> {\n    return result::Result::Ok(x / 2);\n}\npub fn halve(x: u64) -> u64 {\n    return half(x).unwrap_or(0);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "no `main` in "
+    ],
+    "note": "a library that uses `result`: the interface's generic methods are never entry candidates, and the refusal names the file, not result.iface"
+  },
+  {
+    "name": "entry-picked-no-params-still-runs",
+    "source": "pub fn run() -> u64 {\n    println(7);\n    return 0;\n}\nfn helper(x: u64) -> u64 {\n    return x;\n}\n",
+    "stdout": "7\n0\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a module with no `main` still runs its first public function that takes nothing, and prints what it returns"
   }
 ]
