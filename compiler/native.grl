@@ -1196,6 +1196,8 @@ struct C {
     dw_n: u64,
     dr_key: u8[],
     dr_ct: u64,
+    // Bodies applied from the record in this run (GRAIL_DEBUG reports it).
+    dr_hits: u64,
     // Armed (par_start) but not forked yet: the walk forks when par_decide finds the rest worth it,
     // over the source still ahead of it (par_fork).
     par_armed: u64,
@@ -20512,6 +20514,14 @@ fn dr_note<a, b, d>(c: (&a mut C), position: u64, end: u64, ord: u64, unit: &b [
 // File this run's record. Not when a compile-time call ran: a declaration whose value came from a
 // function body could change with that body while the surface reads the same.
 fn dr_save<a>(c: (&a mut C)) -> unit {
+    if (host::env(view("GRAIL_DEBUG")).len() != 0) & (c.par_me == 0) {
+        mut line = copy_bytes(view("grail: body record: "));
+        decimal(&mut line, c.dr_hits);
+        push_bytes(&mut line, view(" bodies applied from it, "));
+        decimal(&mut line, c.dw_n);
+        push_bytes(&mut line, view(" noted\n"));
+        host::print(view(line));
+    }
     if (c.dr_key.len() == 0) || (c.dw_n == 0) || (c.dr_ct != 0) || (c.par_me != 0) {
         return ();
     }
@@ -20531,33 +20541,42 @@ fn dr_fast<a>(c: (&a mut C), position: u64, claim_alloc: u64, claim_panic: u64) 
         return false;
     }
     from := c.toks[position].start;
+    // Entries are in source order. The next entry of this file whose text is this body's text, in this
+    // context, at this column and ordinal, is this body - wherever the file put it: an edit above it
+    // moves its bytes, not its text. Entries passed over belong to bodies that are gone or changed.
     mut k = c.dr_at;
-    // Entries are in source order; the next one is usually the one.
-    while (k < c.dr_off.len()) && ((c.dr_file[k] < c.file) || ((c.dr_file[k] == c.file) && (c.dr_off[k] < from))) {
+    while (k < c.dr_off.len()) && (c.dr_file[k] < c.file) {
         k += 1;
     }
-    if (k == c.dr_off.len()) || (c.dr_file[k] != c.file) || (c.dr_off[k] != from) {
-        return false;
-    }
-    exchange(&mut c.dr_at, k);
-    // Among the entries at this place, the one compiled in this context.
-    while (k < c.dr_off.len()) && (c.dr_file[k] == c.file) && (c.dr_off[k] == from) && !same(view(c.dr_ctx[k]), view(c.module)) {
+    mut found = c.dr_off.len();
+    mut text_hash = u8[];
+    mut last = 0;
+    mut tried_count = 0;
+    while (k < c.dr_off.len()) && (c.dr_file[k] == c.file) {
+        count := c.dr_count[k];
+        if (count != 0) && (position + count - 1 < c.toks.len()) && (c.toks[position].col == c.dr_col[k]) && same(view(c.dr_ctx[k]), view(c.module)) {
+            if (tried_count != count) || (text_hash.len() == 0) {
+                end_at := c.toks[position + count - 1].end;
+                text_hash = fncache::hash(c.src[from: end_at]);
+                tried_count = count;
+            }
+            if same(view(text_hash), view(c.dr_hash[k])) {
+                found = k;
+                last = position + count - 1;
+                break;
+            }
+        }
         k += 1;
     }
-    if (k == c.dr_off.len()) || (c.dr_file[k] != c.file) || (c.dr_off[k] != from) {
+    if found == c.dr_off.len() {
         return false;
     }
-    count := c.dr_count[k];
-    last := position + count - 1;
-    if (count == 0) || (c.toks.len() <= last) || (c.toks[last].end != c.dr_end[k]) {
+    k = found;
+    // The function's labels spell its ordinal, which the unit's text was made with.
+    if scope_next(&c) != c.dr_ord[k] {
         return false;
     }
-    if (c.toks[position].col != c.dr_col[k]) || (scope_next(&c) != c.dr_ord[k]) {
-        return false;
-    }
-    if !same(view(fncache::hash(c.src[from: c.dr_end[k]])), view(c.dr_hash[k])) {
-        return false;
-    }
+    exchange(&mut c.dr_at, k + 1);
     mut readable = 1;
     rbytes := c.dr_regs[k].copy();
     regs := fn_regs_read(&mut c, view(rbytes), &mut readable);
@@ -20582,6 +20601,7 @@ fn dr_fast<a>(c: (&a mut C), position: u64, claim_alloc: u64, claim_panic: u64) 
     ord := scope_next(&c);
     fn_apply(&mut c, &u, &regs, line, position, claim_alloc, claim_panic);
     c.fn_hits = c.fn_hits + 1;
+    c.dr_hits = c.dr_hits + 1;
     name := c.dr_name[k].copy();
     dr_note(&mut c, position, last, ord, view(unit), view(name), view(rbytes));
     exchange(&mut c.pos, last + 1);
@@ -59500,6 +59520,7 @@ pub fn main() -> u64 {
         dw_n: 0,
         dr_key: u8[],
         dr_ct: 0,
+        dr_hits: 0,
         par_armed: 0,
         par_t0: 0,
         par_p0: 0,
