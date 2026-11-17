@@ -935,6 +935,9 @@ struct C {
     spell_lenient: u64,
     spell_failed: u64,
     drop_emitted: u8[][],
+    // Runtime bodies to inline across units: read from runtime.facts, or exported by the run that
+    // emitted them (optimize::Shared).
+    xinl: optimize::Shared,
     iface_emit: u8[],
     iface_verify: u64,
     // `--iface-dump FILE` renders a written interface's record tree and `--iface-roundtrip FILE`
@@ -50132,6 +50135,10 @@ const IFACE_TAG_STATIC: u64 = 19;
 // The effect summary of every function the module emitted (docs/design/effects.md, "Summaries"):
 // computed facts, not claims, so a run that calls one without its body knows what it does.
 const IFACE_TAG_FACTS: u64 = 20;
+// The small runtime bodies another unit may inline (docs/design/separate-compilation.md, "Inlining
+// across a module boundary"): the symbol and its crossing form, carried in `runtime.facts` after the
+// summary, so the readers' keys (the file's digest) move when a body does.
+const IFACE_TAG_INLINE: u64 = 21;
 
 // The ABI this compiler builds objects for, as the one line every interface carries: the `dyn`
 // layout (docs/design/fat-dyn.md) - a `&dyn I` is an 8-byte pointer to a 16-byte, 8-aligned
@@ -50330,6 +50337,9 @@ fn iface_tag_name(tag: u64) -> string {
     if tag == IFACE_TAG_FACTS {
         return "facts";
     }
+    if tag == IFACE_TAG_INLINE {
+        return "inline";
+    }
     return "unknown";
 }
 fn iface_known_tag(tag: u64) -> bool {
@@ -50337,7 +50347,7 @@ fn iface_known_tag(tag: u64) -> bool {
         || (tag == IFACE_TAG_TYPE) || (tag == IFACE_TAG_ALIAS) || (tag == IFACE_TAG_CONST)
         || (tag == IFACE_TAG_FN) || (tag == IFACE_TAG_INHERENT) || (tag == IFACE_TAG_IFACE)
         || (tag == IFACE_TAG_IMPL) || (tag == IFACE_TAG_ENV) || (tag == IFACE_TAG_INHERENT_TYPE)
-        || (tag == IFACE_TAG_STATIC) || (tag == IFACE_TAG_FACTS);
+        || (tag == IFACE_TAG_STATIC) || (tag == IFACE_TAG_FACTS) || (tag == IFACE_TAG_INLINE);
 }
 // Where a refusal happened, so no diagnostic says only "malformed".
 fn iface_where<a>(p: (&a IR)) -> u8[] {
@@ -55023,6 +55033,15 @@ fn fx_write_runtime_facts<a>(c: (&a mut C)) -> unit {
     out.push(70);
     out.push(IFACE_VERSION);
     iface_wrec(&mut out, IFACE_TAG_FACTS, view(facts));
+    if c.xinl.names.len() != 0 {
+        mut bodies = u8[];
+        iface_wv(&mut bodies, c.xinl.names.len());
+        for i in c.xinl.names.len() {
+            iface_ws(&mut bodies, view(c.xinl.names[i]));
+            iface_ws(&mut bodies, view(c.xinl.bodies[i]));
+        }
+        iface_wrec(&mut out, IFACE_TAG_INLINE, view(bodies));
+    }
     iface_seal_out(&mut out, view(""));
     host::mkdir(view(c.iface_emit));
     file := iface_join(view(c.iface_emit), view("runtime"), view(".facts"));
@@ -55057,6 +55076,20 @@ fn fx_read_runtime_facts<a>(c: (&a mut C)) -> unit {
     len := iface_rv(&mut p);
     p.stop = p.at + len;
     iface_rec_facts(&mut c, &mut p);
+    // The inlinable bodies, when the run that wrote it exported any.
+    p.at = p.stop;
+    p.stop = data.len();
+    if (p.at < p.stop) && (data[p.at] == IFACE_TAG_INLINE) {
+        start := iface_rec(&mut p, IFACE_TAG_INLINE);
+        n := iface_rv(&mut p);
+        for i in n {
+            name := iface_rs(&mut p);
+            body := iface_rs(&mut p);
+            c.xinl.names.push(name);
+            c.xinl.bodies.push(body);
+        }
+        iface_rend(&mut p, start);
+    }
     return ();
 }
 // The interfaces this run wrote, again, now with the summaries its solved bodies give them, and the
@@ -55454,6 +55487,7 @@ pub fn main() -> u64 {
         spell_lenient: 0,
         spell_failed: 0,
         drop_emitted: u8[][],
+        xinl: optimize::new_shared(),
         iface_emit: u8[],
         iface_verify: 0,
         iface_dump: u8[],
@@ -56504,13 +56538,18 @@ pub fn main() -> u64 {
         }
     } else {
         if c.split != 0 {
-            out = optimize::optimize_parts(view(c.out), 1, &mut c.marks, &mut c.part_names, &c.facts, c.emit_ir, &mut ir_text, &mut call_syms, &mut call_counts, view(c.fn_dir), view(c.fn_id), &c.plan_at, &c.known);
+            out = optimize::optimize_parts(view(c.out), 1, &mut c.marks, &mut c.part_names, &c.facts, c.emit_ir, &mut ir_text, &mut call_syms, &mut call_counts, view(c.fn_dir), view(c.fn_id), &c.plan_at, &c.known, &mut c.xinl);
         } else {
-            out = optimize::optimize(view(c.out), &c.facts, c.emit_ir, &mut ir_text, &mut call_syms, &mut call_counts, view(c.fn_dir), view(c.fn_id), &c.plan_at, &c.known);
+            out = optimize::optimize(view(c.out), &c.facts, c.emit_ir, &mut ir_text, &mut call_syms, &mut call_counts, view(c.fn_dir), view(c.fn_id), &c.plan_at, &c.known, &mut c.xinl);
         }
         // The check the byte scan used to make, now from the IR: a call site that bypasses the
         // recording helpers is a compiler bug, and a bug here is a silently weaker proof.
         fx_check_calls(&mut c, &call_syms, &call_counts);
+        // The runtime's summary again, now with the bodies the optimiser exported (only the run
+        // that emitted the runtime writes it).
+        if c.xinl.names.len() != 0 {
+            fx_write_runtime_facts(&mut c);
+        }
     }
     if c.emit_ir != 0 {
         mut ir_path = copy_bytes(view(host::arg(1 + offset)));

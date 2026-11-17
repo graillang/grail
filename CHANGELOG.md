@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **Small runtime functions are inlined into every module.** A small runtime body (the scheduler's
+  `rt_current`, `rt_list_set`, `rt_list_head`, ...) is now inlined where another module calls it,
+  in every build shape: a per-module build carries the bodies in `runtime.facts`. A failure inside
+  such a copy reports the calling statement. Measured with callgrind on one worker, against main:
+  a join 3102 -> 3059 instructions, a spawn 1845 -> 1810.
 - **Typed iterator adapters: `iter::over(v).map(..).filter(..).fold(..)`.** `iter::VecIter<T>`,
   `iter::Map<I, U, F>` and `iter::Filter<I, F>` implement `Iterator` with each callback held by its
   own closure type, so a chain is one nested type, specialised and called directly, with no
