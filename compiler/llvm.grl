@@ -399,6 +399,18 @@ struct L {
     // The id of the `body` block: the first block of the function's own code, which dominates
     // every block of it.
     body_blk: u64,
+    // Type-based alias information (docs/design/release-builds-and-parity.md, P3): which registers
+    // hold an address into a vector's element storage (set by the in-place accessors below, cleared
+    // when the register is written or a block begins), and the `ptr` values made from them. A load or
+    // store through such a pointer is tagged `element`, a vector header field load `header`: safe
+    // Grail cannot make one point into the other, so LLVM may keep `len` and `data` in registers
+    // across the element stores of a loop.
+    ebase: u64[],
+    eptrs: Set,
+    // The SSA values that are element addresses, and the frame slots that hold one (by slot index,
+    // valid within the current block): an address saved to a slot and read back is still one.
+    evals: Set,
+    eslot: u64[],
     // Block names in the order `begin_block` first saw them. A hoisted `data`/`len` is reused only
     // in the block that established it: that is the one placement the lifter can prove, and the
     // cross-block hoist needs the region fact docs/design/typed-ir.md describes.
@@ -797,8 +809,40 @@ fn split<a>(lines: (&a u8[][]), funcs: (&a mut Func[]), data: (&a mut u8[][])) -
 fn emit<a, b, c>(l: (&a mut L), tmpl: &b [u8], args: (&c u8[][])) -> unit {
     l.body.push(32);
     l.body.push(32);
+    from := l.body.len();
     expand_into(&mut l.body, tmpl, &args);
+    tag_element(&mut l, from);
     l.body.push(10);
+    return ();
+}
+// A load or store whose pointer is an element pointer (`eptrs`) gets the `element` TBAA tag.
+fn tag_element(l: (&mut L), from: u64) -> unit {
+    if l.eptrs.count == 0 {
+        return ();
+    }
+    line := l.body[from: l.body.len()];
+    if !(starts(line, view("store ")) || starts(line, view("load ")) || has(line, view(" = load "))) || has(line, view("!tbaa")) {
+        return ();
+    }
+    // The pointer is the operand after the last `ptr `.
+    mut at = line.len();
+    mut i = 0;
+    while i + 4 <= line.len() {
+        if occurs_at(line, i, view("ptr ")) {
+            at = i + 4;
+        }
+        i += 1;
+    }
+    if at >= line.len() {
+        return ();
+    }
+    mut e = at;
+    while (e < line.len()) && (line[e] != 44) && (line[e] != 32) {
+        e += 1;
+    }
+    if set_has(&l.eptrs, line[at: e]) {
+        l.body.append(view(", !tbaa !3"));
+    }
     return ();
 }
 fn raw_line<a, b>(l: (&a mut L), s: &b [u8]) -> unit {
@@ -822,7 +866,9 @@ fn def<a, b, c>(l: (&a mut L), tmpl: &b [u8], args: (&c u8[][])) -> u8[] {
     l.body.push(32);
     l.body.append(view(v));
     l.body.append(view(" = "));
+    from := l.body.len();
     expand_into(&mut l.body, tmpl, &args);
+    tag_element(&mut l, from);
     l.body.push(10);
     return v;
 }
@@ -1000,6 +1046,10 @@ fn get_reg<a, b>(l: (&a mut L), name: &b [u8]) -> u8[] {
     }
     v := def(&mut l, view("load i64, ptr {}"), &u8[][slot_of(view("%r."), view(r))]);
     w := reg_width(name);
+    ri := reg_index(view(r));
+    if (w == 64) && (ri < l.ebase.len()) && (l.ebase[ri] != 0) {
+        set_add(&mut l.evals, view(v));
+    }
     if w == 32 {
         return def(&mut l, view("and i64 {}, 4294967295"), &u8[][v]);
     }
@@ -1016,6 +1066,10 @@ fn set_reg<a, b, c>(l: (&a mut L), name: &b [u8], value: &c [u8]) -> unit {
     }
     if eq(view(r), view("rdx")) {
         l.rdxdead = 0;
+    }
+    ri := reg_index(view(r));
+    if ri < l.ebase.len() {
+        l.ebase[ri] = u64((reg_width(name) == 64) && (l.evals.count != 0) && set_has(&l.evals, value));
     }
     w := reg_width(name);
     mut v = copy(value);
@@ -1182,7 +1236,50 @@ fn address<a, b>(l: (&a mut L), op: &b [u8]) -> u8[] {
     if d != 0 {
         acc = def(&mut l, view("add i64 {}, {}"), &u8[][acc, dt]);
     }
-    return def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][acc]);
+    p := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][acc]);
+    // `(%reg)` with no index or offset, where reg holds an element address: the access is to
+    // element storage.
+    if (inner.len() == 1) & (d == 0) & !eq(view(base), view("rbp")) {
+        bi := reg_index(view(base));
+        if (bi < l.ebase.len()) && (l.ebase[bi] != 0) {
+            set_add(&mut l.eptrs, view(p));
+        }
+    }
+    return p;
+}
+// The slot index of a `-N(%rbp)` operand plus one, else 0.
+fn frame_slot_of(op: (&[u8])) -> u64 {
+    if (op.len() < 8) || (op[0] != 45) || !ends(op, view("(%rbp)")) {
+        return 0;
+    }
+    mut n: u64 = 0;
+    for i in op.len() - 7 {
+        ch := op[1 + i];
+        if (ch < 48) || (57 < ch) {
+            return 0;
+        }
+        n = n * 10 + u64(ch - 48);
+    }
+    if (n < 8) || (n % 8 != 0) {
+        return 0;
+    }
+    return n / 8;
+}
+// A store to a frame slot: the slot holds an element address now exactly when `v` is one.
+fn frame_slot_note(l: (&mut L), op: (&[u8]), v: (&[u8])) -> unit {
+    k := frame_slot_of(op);
+    if k == 0 {
+        return ();
+    }
+    while l.eslot.len() <= k {
+        l.eslot.push(0);
+    }
+    l.eslot[k] = u64((v.len() != 0) && (l.evals.count != 0) && set_has(&l.evals, v));
+    return ();
+}
+fn frame_slot_holds(l: (&L), op: (&[u8])) -> bool {
+    k := frame_slot_of(op);
+    return (k != 0) && (k < l.eslot.len()) && (l.eslot[k] != 0);
 }
 fn width_type(width: u64) -> u8[] {
     if width == 32 {
@@ -1245,7 +1342,11 @@ fn value<a, b>(l: (&a mut L), op: &b [u8], width: u64) -> u8[] {
         }
         p := address(&mut l, op);
         if width == 64 {
-            return def(&mut l, view("load i64, ptr {}, align 1"), &u8[][p]);
+            loaded := def(&mut l, view("load i64, ptr {}, align 1"), &u8[][p]);
+            if frame_slot_holds(&l, op) {
+                set_add(&mut l.evals, view(loaded));
+            }
+            return loaded;
         }
         ty := width_type(width);
         v := def(&mut l, view("load {}, ptr {}, align 1"), &u8[][copy(view(ty)), p]);
@@ -1289,9 +1390,11 @@ fn store<a, b, c>(l: (&a mut L), op: &b [u8], v: &c [u8], width: u64) -> unit {
     }
     p := address(&mut l, op);
     if width == 64 {
+        frame_slot_note(&mut l, op, view(v));
         emit(&mut l, view("store i64 {}, ptr {}, align 1"), &u8[][copy(v), p]);
         return ();
     }
+    frame_slot_note(&mut l, op, view(""));
     ty := width_type(width);
     tv := def(&mut l, view("trunc i64 {} to {}"), &u8[][copy(v), copy(view(ty))]);
     emit(&mut l, view("store {} {}, ptr {}, align 1"), &u8[][ty, tv, p]);
@@ -2407,6 +2510,12 @@ fn fresh_block<a>(l: (&a mut L)) -> u8[] {
 }
 fn begin_block<a, b>(l: (&a mut L), name: &b [u8]) -> unit {
     l.blk = block_id(&mut l, name);
+    for i in l.ebase.len() {
+        l.ebase[i] = 0;
+    }
+    for i in l.eslot.len() {
+        l.eslot[i] = 0;
+    }
     l.rdxdead = 0;
     put(&mut l.body, name);
     put(&mut l.body, view(":\n"));
@@ -2502,6 +2611,78 @@ fn address_accessor(name: (&[u8])) -> bool {
 // (failing exactly as the accessor would - `rt_slot` reports the index, `rt_slot4` aborts), then a
 // `getelementptr` on the hoisted `data` pointer. The address keeps the allocation's provenance, so
 // LLVM can reason about it: the loop that does no more than this is one it can vectorise.
+// The word and 4-byte element accessors written in place, with or without an F1 fact (the byte
+// ones keep their calls, which --range-facts proves and removes): the header's `data` (and
+// for a checked one `len`) read with the `header` tag, the check and its failure as the runtime
+// body has them, the element address as a `getelementptr` on `data` - recorded as an element
+// address in %rax - or, for the value accessors, the element loaded with the `element` tag.
+fn generic_element(l: (&mut L), target: (&[u8])) -> bool {
+    mut width: u64 = 0;
+    mut checked = false;
+    mut value: u64 = 0;
+    // A word vector's elements are words (a boxed value's element is the pointer to it), never a
+    // header, so its element storage is as distinct from headers as a narrow vector's.
+    if eq(target, view("rt_slot")) {
+        width = 8;
+        checked = true;
+    }
+    if eq(target, view("rt_slotu")) {
+        width = 8;
+    }
+    if eq(target, view("rt_slot4")) {
+        width = 4;
+        checked = true;
+    }
+    if eq(target, view("rt_slot4u")) {
+        width = 4;
+    }
+    if eq(target, view("rt_at4")) {
+        width = 4;
+        checked = true;
+        value = 32;
+    }
+    // Under --verify-facts and --range-facts the accessor calls are what those modes check and count.
+    if (width == 0) || (l.verify != 0) || (l.proof.len() != 0) {
+        return false;
+    }
+    s := get_reg(&mut l, view("rdi"));
+    i := get_reg(&mut l, view("rsi"));
+    h := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][s]);
+    if checked {
+        lp := def(&mut l, view("getelementptr i8, ptr {}, i64 8"), &u8[][copy(view(h))]);
+        len := def(&mut l, view("load i64, ptr {}, align 8, !tbaa !1"), &u8[][lp]);
+        ok := def(&mut l, view("icmp ult i64 {}, {}"), &u8[][copy(view(i)), copy(view(len))]);
+        good := fresh_block(&mut l);
+        wrong := fresh_block(&mut l);
+        emit(&mut l, view("br i1 {}, label %{}, label %{}"), &u8[][ok, copy(view(good)), copy(view(wrong))]);
+        begin_block(&mut l, view(wrong));
+        l.calls.push(copy(view("rt_fail")));
+        emit(
+            &mut l,
+            view("call {i64, i64} @\"rt_fail\"(i64 1, i64 {}, i64 {}, i64 0, i64 0, i64 0)"),
+            &u8[][copy(view(i)), len]
+        );
+        emit(&mut l, view("unreachable"), &u8[][]);
+        begin_block(&mut l, view(good));
+    }
+    d := def(&mut l, view("load ptr, ptr {}, align 8, !tbaa !1"), &u8[][h]);
+    off := def(&mut l, view("mul i64 {}, {}"), &u8[][copy(view(i)), copy_width(width)]);
+    p := def(&mut l, view("getelementptr i8, ptr {}, i64 {}"), &u8[][d, off]);
+    if value != 0 {
+        ty := width_type(value);
+        v := def(&mut l, view("load {}, ptr {}, align 1, !tbaa !3"), &u8[][copy(view(ty)), p]);
+        z := def(&mut l, view("zext {} {} to i64"), &u8[][ty, v]);
+        set_reg(&mut l, view("rax"), view(z));
+    } else {
+        r := def(&mut l, view("ptrtoint ptr {} to i64"), &u8[][p]);
+        set_add(&mut l.evals, view(r));
+        set_reg(&mut l, view("rax"), view(r));
+    }
+    set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
+    set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
+    clear_args(&mut l);
+    return true;
+}
 fn element_address(l: (&mut L), target: (&[u8]), k: u64, width: u64) -> unit {
     i := get_reg(&mut l, view("rsi"));
     if l.verify != 0 {
@@ -2765,6 +2946,9 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
             refresh(&mut l);
             return ();
         }
+    }
+    if (l.areaopen == 0) && generic_element(&mut l, target) {
+        return ();
     }
     // A callee with a signature fact gets exactly its argument words and gives back its result
     // words; any other gets the six argument registers and gives back rax:rdx.
@@ -5146,6 +5330,10 @@ fn frame_split<a>(instrs: (&a u8[][]), deepest: (&a mut u64)) -> u64 {
 // Lowers one function into l.body; l.fail is set when any line is not understood.
 fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), facts: (&c Facts)) -> unit {
     l.body = u8[];
+    exchange(&mut l.ebase, u64[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    exchange(&mut l.eptrs, set_new((f.end - f.first) * 2 + 64));
+    exchange(&mut l.evals, set_new((f.end - f.first) * 2 + 64));
+    exchange(&mut l.eslot, u64[]);
     // A function's temporaries and fresh blocks are named within it, so a function lowers to the
     // same text whatever was lowered before it (in this process or a forked one).
     l.t = 0;
@@ -7918,6 +8106,8 @@ fn atomics_inline<a>(out: (&a mut u8[]), target: u64) -> unit {
 }
 fn header<a>(out: (&a mut u8[])) -> unit {
     put(&mut out, view("attributes #0 = { noreturn cold nounwind }\n"));
+    // TBAA (P3): vector header fields and element storage are distinct types under one root.
+    put(&mut out, view("!0 = !{!\"grail\"}\n!1 = !{!2, !2, i64 0}\n!2 = !{!\"grail header\", !0, i64 0}\n!3 = !{!4, !4, i64 0}\n!4 = !{!\"grail element\", !0, i64 0}\n"));
     put(&mut out, view("attributes #1 = { nounwind \"no-builtins\" }\n"));
     put(&mut out, view("attributes #2 = { \"target-features\"=\"-outline-atomics\" }\n"));
     put(&mut out, view("declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n"));
@@ -8733,7 +8923,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
             set_add(&mut weak, view(sub(wl, 6, wl.len())));
         }
     }
-    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0, argwritten: 0, ffis: set_new(16), ffimem: set_new(16), entryextra: u8[], outer: u8[][], outeropen: 0, why: host::env(view("GRAIL_LLVM_WHY")), grail_bodies: set_new(16), xpend: 0, xstale: 18446744073709551615 };
+    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, ebase: u64[], eptrs: set_new(16), evals: set_new(16), eslot: u64[], dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0, argwritten: 0, ffis: set_new(16), ffimem: set_new(16), entryextra: u8[], outer: u8[][], outeropen: 0, why: host::env(view("GRAIL_LLVM_WHY")), grail_bodies: set_new(16), xpend: 0, xstale: 18446744073709551615 };
     // A function whose address is taken (`NAME(%rip)`, or named by data such as a vtable) is
     // called through a pointer by code that does not know its signature, so it keeps the six-word
     // form: an indirect call passes six words and reads rax:rdx, and LLVM must never see a call

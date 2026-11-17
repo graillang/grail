@@ -1,5 +1,13 @@
 ## Unreleased
 
+- **Release builds keep vector headers in registers across element stores (TBAA).** The LLVM lifter
+  writes the word and 4-byte element accessors (`rt_slot`, `rt_slot4`, `rt_at4` and their unchecked
+  forms) in place: the header's `data`/`len` loads carry a `header` type tag, and every load or store
+  through the element address - followed through registers and frame slots within a block - carries
+  an `element` tag. Safe Grail cannot point one into the other, so LLVM hoists the header loads out of
+  loops and vectorises them: bench/ecs goes from 3.45 G to 0.94 G instructions, sort from 7.53 G to
+  7.24 G.
+
 - **Closures given for a generic `F` live in the frame (S6(A)).** A closure whose type is its own
   literal's - a local closure, or one passed for a callable-bound parameter - is now held as its
   environment's words in the caller's frame, copied on a move and dropped in place, and called
