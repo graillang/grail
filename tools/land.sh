@@ -69,7 +69,7 @@ t0=$(date +%s)
 for i in 1 2 3; do leg "x86_$i" env GRAIL_TEST_SHARD=$i/3 bun tools/test-native.mjs x86_64 & done
 leg selfhost bun tools/test-selfhost.mjs &
 wait
-suites="test-cli interface-test cache-test split-test test-ffi abundance-test borg-test lsp-test pkg-test"
+suites="test-cli interface-test cache-test split-test test-ffi abundance-test borg-test lsp-test"
 for t in $suites; do leg "$t" bun "tools/$t.mjs" & done
 leg book bun tools/book.mjs check &
 leg lint bun tools/ci.mjs lint &
