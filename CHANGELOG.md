@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **Allocation costs half what it did.** The size class of a small request is a compare chain
+  instead of a doubling loop, and the allocator's address arithmetic no longer checks for overflow:
+  about 50 instructions per allocation instead of 96, 25 per free instead of 43. `grail check` of a
+  104k-line program does 16% fewer instructions and uses 9% less CPU. And in a release build the
+  runtime functions that read the thread pointer - the allocator's threaded path, the current task,
+  the mutex - are now optimised by LLVM like the rest; they were left in unoptimised code.
+
 - **Fixed: an LLVM-backend miscompile of a vector grown through its address.** A call handed `&mut v`
   receives the slot's address, not the header word, so the lifter did not count it as a call that
   can grow `v`, and the `len`/`data` it had read before the call were used after it: `pad(&mut out,
