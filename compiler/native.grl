@@ -37259,10 +37259,15 @@ fn parallel_split_builtin<a>(c: (&a mut C), data: Val) -> Val {
         fail(&mut c, view("parallel_split requires a callable"));
     }
     signature := type_args(&mut c, fty);
-    if signature.len() != 1 {
-        fail(&mut c, view("parallel_split callback takes (&mut [T])"));
+    // (&mut [T]), or (u64, &mut [T]) for each piece's first index too (pool::chunks_mut_at).
+    with_at := signature.len() == 2;
+    if (signature.len() != 1) && !with_at {
+        fail(&mut c, view("parallel_split callback takes (&mut [T]) or (u64, &mut [T])"));
     }
-    require_type(&mut c, slice, signature[0]);
+    if with_at {
+        require_type(&mut c, signature[0], 0);
+    }
+    require_type(&mut c, slice, signature[signature.len() - 1]);
     result := ty_arg(&mut c, fty);
     if ty_kind(&mut c, result) != 2 {
         fail(&mut c, view("parallel_split callback returns unit: write the elements"));
@@ -37288,7 +37293,8 @@ fn parallel_split_builtin<a>(c: (&a mut C), data: Val) -> Val {
     mut pargs = three(data.t, chunks.t, target);
     pargs.push(env);
     pargs.push(width);
-    slot := invoke(&mut c, view("rt_parallel_split"), pargs);
+    pargs.push(imm(&mut c, u64(with_at)));
+    slot := invoke(&mut c, view("rt_parallel_split_at"), pargs);
     release_temporary(&mut c, data.t);
     release_temporary(&mut c, input);
     close_loans(&mut c);

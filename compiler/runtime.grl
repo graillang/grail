@@ -4943,7 +4943,14 @@ fn rt_job_chunk_leaf(d: u64, k: u64) -> u64 {
     // function and the environment pointer for a closure (the environment comes first).
     f := raw_load(d);
     env := raw_load(d + 8);
-    if env == 0 {
+    if raw_load(d + 56) != 0 {
+        // chunks_mut_at: the piece's first index comes before the piece.
+        if env == 0 {
+            raw_call2(f, start, slot);
+        } else {
+            raw_call3(f, env, start, slot);
+        }
+    } else if env == 0 {
         raw_call2(f, slot, 0);
     } else {
         raw_call2(f, env, slot);
@@ -4958,6 +4965,10 @@ fn rt_job_chunk_leaf(d: u64, k: u64) -> u64 {
 // The caller holds the loan on the data until this returns, so no job can outlive the slice and no
 // other code in the frame can address it while the jobs run.
 fn rt_parallel_split(s: u64, grain: u64, f: u64, env: u64, width: u64) -> u64 {
+    return rt_parallel_split_at(s, grain, f, env, width, 0);
+}
+// The same split; with `at` set the callback also gets each piece's first index (pool::chunks_mut_at).
+fn rt_parallel_split_at(s: u64, grain: u64, f: u64, env: u64, width: u64, at: u64) -> u64 {
     n := rt_len(s);
     if n == 0 {
         return 0;
@@ -4976,6 +4987,7 @@ fn rt_parallel_split(s: u64, grain: u64, f: u64, env: u64, width: u64) -> u64 {
     raw_store(d + 24, width);
     raw_store(d + 40, n);
     raw_store(d + 48, size);
+    raw_store(d + 56, at);
     rt_region_enter();
     covered := rt_job_split(d, 0, leaves, 1);
     rt_region_leave();

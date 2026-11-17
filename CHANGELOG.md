@@ -1,5 +1,8 @@
 ## Unreleased
 
+- `pool::chunks_mut_at` (exclusive pieces with their first index) and `pool::reduce_chunks` (a
+  read-only reduction folded in index order, the same bits on any number of workers).
+
 - Parallel loops over several columns: `parallel_for_zip(grain, f, s1, .., s4)` and
   `pool::zip2/zip3/zip4` with generic callable bounds (simd-layout-parallel-loops.md 4.2). One split,
   the same index range of every slice per piece, equal lengths checked once, a piece per worker;
