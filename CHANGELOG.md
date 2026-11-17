@@ -14,6 +14,11 @@
 - Small allocations clear their block with two fixed stores instead of the general loop: every
   request up to 16 bytes (a tree node, a box) is served from the smallest bin, whose blocks hold at
   least 16. bench/bintrees.grl: Grail-LLVM 4.89G -> 4.15G instructions, Grail-native 14.2G -> 13.7G.
+- **`Iterator::fold`, with internal iteration.** The `Iterator` interface has a default `fold`, and
+  the typed adapters `Map` and `Filter` override it to hand a composed callback to the iterator they
+  wrap, so a chain runs as its source's single loop rather than a `next` call per item that loops
+  inside each filter. The adapters' inherent `fold` methods are gone (they are the interface's
+  now); `iter::fold_all(it, init, f)` calls it.
 - `grail build --release --report checks` reports the checks that survived LLVM's optimisation and
   the thin-LTO link: it reads the linked image (llvm-objdump; `GRAIL_OBJDUMP` overrides it) and
   counts each branch from a program function to rt_fail, rt_trap, rt_abort (with its `.cold` parts)

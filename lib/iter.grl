@@ -13,6 +13,19 @@ pub struct Iter<T> { step: FnMut() -> T? }
 pub interface Iterator {
     type Item;
     fn next(self: &mut Self) -> Self::Item?;
+    // Every item combined into one value, starting from `init`. Adapters override it to pass a
+    // composed callback down to the iterator they wrap (internal iteration, as Rust's `fold`): the
+    // whole chain then runs as the innermost iterator's one loop, which the optimiser can vectorise,
+    // instead of a `next` call per item that loops inside each filter.
+    fn fold<A, G: FnMut(A, Self::Item) -> A>(self: Self, init: A, g: G) -> A {
+        mut it = self;
+        mut acc = init;
+        mut f = g;
+        while let Some(x) = it.next() {
+            acc = f(acc, x);
+        }
+        return acc;
+    }
 }
 
 impl<T> Iterator for Iter<T> {
@@ -390,6 +403,11 @@ impl<I: Iterator, U, F: FnMut(I::Item) -> U> Iterator for Map<I, U, F> {
             }
         }
     }
+    fn fold<A, G: FnMut(A, U) -> A>(self: Self, init: A, g: G) -> A {
+        mut h = g;
+        mut m = self.f;
+        return self.it.fold(init, |a: A, x: I::Item| -> A h(a, m(x)));
+    }
 }
 pub struct Filter<I, F> { it: I, keep: F }
 impl<I: Iterator, F: FnMut((&I::Item)) -> bool> Iterator for Filter<I, F> {
@@ -403,13 +421,24 @@ impl<I: Iterator, F: FnMut((&I::Item)) -> bool> Iterator for Filter<I, F> {
         }
         return None;
     }
+    fn fold<A, G: FnMut(A, I::Item) -> A>(self: Self, init: A, g: G) -> A {
+        mut h = g;
+        mut k = self.keep;
+        return self.it.fold(init, |a: A, x: I::Item| -> A {
+            if k(&x) {
+                return h(a, x);
+            }
+            return a;
+        });
+    }
 }
 // Each adapter's step is written twice - in its `Iterator` impl and in the inherent `next` a `for`
 // loop calls - so neither path forwards through the other: the native optimiser does not inline a
 // non-leaf call yet. When /root/xinline's early inlining lands, keep one body, make the other
 // forward to it, and check in the asm that the hop is inlined away (docs/design/
 // dyn-and-callable-bounds.md 5.1).
-// The adapters chain as methods on each other, ending in `fold` or a `while let` loop.
+// The adapters chain as methods on each other, ending in `fold` (the Iterator interface's, which
+// each adapter overrides) or a `while let` loop.
 impl<T> VecIter<T> {
     pub fn next(self: &mut Self) -> T? {
         if self.rev.len() == 0 {
@@ -422,9 +451,6 @@ impl<T> VecIter<T> {
     }
     pub fn filter<F: FnMut((&T)) -> bool>(self: Self, keep: F) -> Filter<VecIter<T>, F> {
         return Filter { it: self, keep: keep };
-    }
-    pub fn fold<A, F: FnMut(A, T) -> A>(self: Self, init: A, f: F) -> A {
-        return fold_all(self, init, f);
     }
 }
 // (An inherent block over an adapter states the same parameters and bounds as its Iterator impl.)
@@ -446,9 +472,6 @@ impl<I: Iterator, U, F: FnMut(I::Item) -> U> Map<I, U, F> {
     pub fn filter<G: FnMut((&U)) -> bool>(self: Self, keep: G) -> Filter<Map<I, U, F>, G> {
         return Filter { it: self, keep: keep };
     }
-    pub fn fold<A, G: FnMut(A, U) -> A>(self: Self, init: A, g: G) -> A {
-        return fold_all(self, init, g);
-    }
 }
 impl<I: Iterator, F: FnMut((&I::Item)) -> bool> Filter<I, F> {
     pub fn next(self: &mut Self) -> I::Item? {
@@ -466,17 +489,8 @@ impl<I: Iterator, F: FnMut((&I::Item)) -> bool> Filter<I, F> {
     pub fn filter<G: FnMut((&I::Item)) -> bool>(self: Self, keep: G) -> Filter<Filter<I, F>, G> {
         return Filter { it: self, keep: keep };
     }
-    pub fn fold<A, G: FnMut(A, I::Item) -> A>(self: Self, init: A, g: G) -> A {
-        return fold_all(self, init, g);
-    }
 }
 // Combine every item of a typed iterator into one value, starting from `init`.
 pub fn fold_all<I: Iterator, A, F: FnMut(A, I::Item) -> A>(it: I, init: A, f: F) -> A {
-    mut src = it;
-    mut acc = init;
-    mut g = f;
-    while let Some(x) = src.next() {
-        acc = g(acc, x);
-    }
-    return acc;
+    return it.fold(init, f);
 }
