@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **The optimiser's liveness is linear in a function's length.** The register and frame-slot
+  liveness behind dead-store removal, prologue zeroing and register colouring looked at every
+  candidate slot on every line of every round; each line's effect is now worked out once per pass
+  and read through a slot-to-candidate table. The output is byte-identical; compiling the compiler
+  takes 20% fewer instructions, and a cold `grail build` of a 1000-function file 5.7% fewer.
 - **`grail cache warm [--target T]`** checks and builds every standard module into the build store,
   as rustup ships libstd: a project's first check then compiles only its own modules. The installers
   run it (not under DESTDIR), and compile-perf's template store is now a warmed one. Dev compiler,
