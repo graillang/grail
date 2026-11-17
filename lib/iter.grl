@@ -388,6 +388,51 @@ impl<T> Iterator for VecIter<T> {
         return Some(self.rev.pop()!);
     }
 }
+// The elements of a vector by reference, in order (`v.iter()`). Its `fold` is a counted index loop,
+// so a chain of adapters folded over it is one loop the optimiser can unroll and vectorise.
+pub struct SliceIter<a, T> { v: (&a T[]), at: u64 }
+pub fn slice_iter<a, T>(v: (&a T[])) -> SliceIter<a, T> {
+    return SliceIter { v: v, at: 0 };
+}
+impl<a, T> Iterator for SliceIter<a, T> {
+    type Item = (&a T);
+    fn next(self: &mut Self) -> (&a T)? {
+        if self.at < self.v.len() {
+            p := self.at;
+            self.at = p + 1;
+            return Some(&self.v[p]);
+        }
+        return None;
+    }
+    fn fold<A, G: FnMut(A, (&a T)) -> A>(self: Self, init: A, g: G) -> A {
+        mut acc = init;
+        mut f = g;
+        v := self.v;
+        mut i = self.at;
+        n := v.len();
+        while i < n {
+            acc = f(acc, &v[i]);
+            i += 1;
+        }
+        return acc;
+    }
+}
+impl<a, T> SliceIter<a, T> {
+    pub fn next(self: &mut Self) -> (&a T)? {
+        if self.at < self.v.len() {
+            p := self.at;
+            self.at = p + 1;
+            return Some(&self.v[p]);
+        }
+        return None;
+    }
+    pub fn map<U, F: FnMut((&a T)) -> U>(self: Self, f: F) -> Map<SliceIter<a, T>, U, F> {
+        return Map { it: self, f: f };
+    }
+    pub fn filter<F: FnMut((&(&a T))) -> bool>(self: Self, keep: F) -> Filter<SliceIter<a, T>, F> {
+        return Filter { it: self, keep: keep };
+    }
+}
 // Each adapter names its item type (`U`, `T`), so the next adapter's callback is typed by it.
 pub struct Map<I, U, F> { it: I, f: F }
 impl<I: Iterator, U, F: FnMut(I::Item) -> U> Iterator for Map<I, U, F> {
