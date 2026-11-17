@@ -9597,7 +9597,8 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
         line := view(native_lines[i]);
         // A lifted function's `.type` line would name, in the native object, a symbol that is
         // defined (and usually internal) in the IR one.
-        if starts(line, view(".type ")) && set_has(&lifted, view(type_name(line))) {
+        // Its `.size` likewise (the IR object sizes it), and would sit in no function here.
+        if (starts(line, view(".type ")) || starts(line, view(".size "))) && set_has(&lifted, view(type_name(line))) {
             continue;
         }
         put(&mut native, view(rename_line(line, &exported)));
@@ -9606,6 +9607,11 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
     for i in data.len() {
         line := view(data[i]);
         if starts(line, view(".type ")) && set_has(&lifted, view(type_name(line))) {
+            continue;
+        }
+        // A function's `.size` that reached the data is measured from another section, which no
+        // assembler accepts ("size expression must be absolute").
+        if starts(line, view(".size ")) {
             continue;
         }
         name := label_of(line);
