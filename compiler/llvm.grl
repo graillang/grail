@@ -878,27 +878,40 @@ fn zero_sign<a, b>(l: (&a mut L), r: &b [u8]) -> unit {
 
 // Operands of an instruction, split at top-level commas.
 fn operands<a>(rest: &a [u8]) -> u8[][] {
+    // The top-level comma-separated operands, each trimmed: found by position and copied once.
     mut out = u8[][];
-    mut cur = u8[];
     mut depth: u64 = 0;
-    for i in rest.len() {
-        ch := rest[i];
-        if ch == 40 {
-            depth += 1;
+    mut from: u64 = 0;
+    for i in rest.len() + 1 {
+        if i < rest.len() {
+            ch := rest[i];
+            if ch == 40 {
+                depth += 1;
+            }
+            if ch == 41 {
+                depth -= 1;
+            }
+            if (ch != 44) || (depth != 0) {
+                continue;
+            }
         }
-        if ch == 41 {
-            depth -= 1;
+        mut a = from;
+        mut b = i;
+        while a < b && (rest[a] == 32 || rest[a] == 9) {
+            a += 1;
         }
-        if (ch == 44) & (depth == 0) {
-            out.push(trim(view(cur)));
-            cur = u8[];
-            continue;
+        while b > a && (rest[b - 1] == 32 || rest[b - 1] == 9 || rest[b - 1] == 13) {
+            b -= 1;
         }
-        cur.push(ch);
-    }
-    t := trim(view(cur));
-    if t.len() != 0 {
-        out.push(t);
+        // The last operand is kept only when it is not empty, as before; an inner one always is.
+        if (i < rest.len()) || (a < b) {
+            mut t = u8[];
+            if a < b {
+                t.append(rest[a: b]);
+            }
+            out.push(t);
+        }
+        from = i + 1;
     }
     return out;
 }
@@ -2752,7 +2765,10 @@ fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit
         }
     }
     mut op = sub(line, 0, space);
-    mut rest = trim(view(sub(line, space + 1, line.len())));
+    mut rest = u8[];
+    if space + 1 < line.len() {
+        rest = trim(line[space + 1: line.len()]);
+    }
     if starts(view(op), view("atom.")) {
         lift_atom(&mut l, view(line));
         return ();
