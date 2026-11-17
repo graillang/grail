@@ -135,7 +135,7 @@ for an `Atomic<u64>` (`atomic-element-is-part-of-the-type`).
     defined for out-of-range lanes because the poison lane is never the chosen operand.
   - `bits()` reinterprets f32 lanes as u32 and f64 lanes as i64. `T::from_bits` goes back.
 - **`load_aligned`/`store_aligned`** (decision 1 above). One `and`/`cmp`/`je` on the address, and a
-  misaligned address fails with `address A is not N-byte aligned` (`rt_fail` kind 19). Only then is
+  misaligned address fails with `address A is not N-byte aligned` (`rt_fail` kind 20). Only then is
   the access an aligned one to LLVM (`copya`, `copyd`: the source, respectively the destination,
   aligned to the vector's size; the frame side keeps the element's alignment).
 - **Arrays.** Agreed with /root/fixed_arrays: an array keeps its element's alignment. An

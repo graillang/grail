@@ -10,6 +10,27 @@
   - With the LLVM backend, a 4x4 matrix product and an array-of-structs to struct-of-arrays
     transpose run as the same loops as C with SSE2 intrinsics: 1.04x and 1.17x C's instructions,
     the same time within the machine's noise.
+- **`host::chmod(path, mode)`**: sets a file's permission bits, 0 or a positive errno (fchmodat on
+  Linux, chmod on macOS, and 0 on Windows, which has no bits to set). The build store will use it to
+  give a restored executable image its mode without a shell, once the bootstrap seed knows it.
+- **`grail build` and `grail check` start no helper process to hash or file the build store**, and an
+  unchanged program is decided from file stamps. Every `sha256sum`, `sh -c`, `mv` and `cp` the store
+  ran (about 70 per small build) is now in-process: the store's digest is `store_hash` (XXH64 under
+  four seeds, still 64 hex digits; store keys change once), and writes go to a staging file renamed
+  into place. A new `fp/` record per file holds its digest plus the module, `use` lines and `@embed`
+  flag the driver reads sources for, keyed by size, nanosecond mtime, inode and device. So a no-op
+  build reads no source, the compiler's `--print-inputs` answer is remembered under the stamps of
+  what it read (`inputs/`), and a tool's `--version` is asked once per binary (`tool-id/`). A module
+  run with in-process assembly is one process, not a `grail unit-build` wrapper and the compiler.
+  `host::read_file` reads straight into its result instead of pushing byte by byte. With the dev
+  compiler and GRAIL_JOBS=1, in user-space instructions: hello no-op build 0.235G -> 0.008G, hello
+  check 0.310G -> 0.058G, hello build 0.453G -> 0.140G. `grail cache prune` drops `fp/`, `inputs/`
+  and `tool-id/` whole.
+- **Short floats print without big integers.** A double whose shortest form has at most 15 digits
+  and lies in [1e-7, 1e22) (`0.25`, `1.037`, `123.5`) is printed from a candidate checked exactly
+  with one correctly rounded operation (Clinger), with the same text as before; longer ones still
+  go through Burger & Dybvig. Decimal-shaped values print about twice as fast (LLVM 729M -> 384M
+  instructions for 6,000 of them).
 - Fixed: `grail fmt` could break a long expression inside `<<` or `>>` (each is two `<`/`>` tokens),
   or start a continuation line with `<`, and the output then read as a generic argument list and no
   longer parsed. A wrapped line now never starts with `<` or `>`.
@@ -21,8 +42,13 @@
   instructions (GRAIL_JOBS=1). The stack-probe check reads the assembly once with no per-line
   copies, and the inlining pass's call lines travel with each remembered body instead of being found
   by a scan of the whole output.
+- Fixed: `grail check` refused every program using a module that claims an effect (`use strings;`
+  alone: "`is_char_boundary` ... makes an indirect call the compiler cannot follow"). Check runs go
+  per module, and a check-only run recorded no effect facts, so the runtime's run wrote no
+  `runtime.facts` and every claim that reaches the runtime met an unknown callee. A check run that
+  writes interfaces records its bodies now; `tools/test-cli.mjs` checks a program using each lib/
+  module.
 - The internal assembler takes `.previous`.
-
 - **Integer map keys hash in registers.** `hash::Hash` has a defaulted `table_hash`, the SipHash-1-3
   value a map uses (the default streams through `hash`, as before); the integer types give it as
   `hash::word_hash`, the same value computed straight-line with no hasher state in memory. User

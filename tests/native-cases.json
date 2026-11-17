@@ -2099,6 +2099,14 @@
     "diagnostic": "borrow"
   },
   {
+    "name": "float-print-shortest-fast-and-exact",
+    "files": [
+      "compiler/tests/float_print.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "0\n0\n0\n0.037\n0.25\n144.14285714285714\n0.074\n0.5\n288.2857142857143\n0.111\n0.75\n432.42857142857144\n0.148\n1\n576.5714285714286\n0.185\n1.25\n720.7142857142857\n0.222\n1.5\n864.8571428571429\n0.259\n1.75\n1009\n0.296\n2\n1153.142857142857\n0.333\n2.25\n1297.2857142857142\n0.37\n2.5\n1441.4285714285713\n0.407\n2.75\n1585.5714285714287\n0.444\n3\n1729.7142857142858\n0.481\n3.25\n1873.857142857143\n0.518\n3.5\n2018\n0.555\n3.75\n2162.1428571428573\n0.592\n4\n2306.285714285714\n0.629\n4.25\n2450.4285714285716\n0.666\n4.5\n2594.5714285714284\n0.703\n4.75\n2738.714285714286\n0.74\n5\n2882.8571428571427\n0.777\n5.25\n3027\n0.814\n5.5\n3171.1428571428573\n0.851\n5.75\n3315.285714285714\n0.888\n6\n3459.4285714285716\n0.925\n6.25\n3603.5714285714284\n0.962\n6.5\n3747.714285714286\n0.999\n6.75\n3891.8571428571427\n1.036\n7\n4036\n1.073\n7.25\n4180.142857142857\n1.11\n7.5\n4324.285714285715\n1.147\n7.75\n4468.428571428572\n1.184\n8\n4612.571428571428\n1.221\n8.25\n4756.714285714285\n1.258\n8.5\n4900.857142857143\n1.295\n8.75\n5045\n1.332\n9\n5189.142857142857\n1.369\n9.25\n5333.285714285715\n1.406\n9.5\n5477.428571428572\n1.443\n9.75\n5621.571428571428\n0.30000000000000004\n0.0000001\n0.00000009999999\n1000000000000000000000\n10000000000000000000000\n123456789012345\n1234567890123456\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000022250738585072014\n179769313486231570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n-2.5\n0.5\n100\n0.000123\n"
+  },
+  {
     "name": "strings-library",
     "files": [
       "compiler/tests/strings.grl",
@@ -17524,7 +17532,7 @@
     "note": "...a closure that names the outer lifetime for that parameter and captures storage labelled with it is refused the same way",
     "source": "struct Box1<T> { v: T }\nfn with_lock<a, T, C, R: Owned, F: FnMut((&mut T), C) -> R>(m: (&a mut Box1<T>), ctx: C, f: F) -> R { mut g = f; return g(&mut m.v, ctx); }\nstruct Out<a> { slot: (&a mut u64[])[] }\nfn stash<a, b>(m: (&a mut Box1<u64[]>), out: (&b mut Out<a>)) -> u64 {\n    return with_lock(&mut m, 0, |v: (&a mut u64[]), k: u64| -> u64 { out.slot.push(v); return 0; });\n}\nfn main() { mut m = Box1 { v: u64[1] }; mut out = Out { slot: [] }; println(stash(&mut m, &mut out)); }\n",
     "reject": true,
-    "diagnostic": "its parameter 1 is a reference the bound gives it fresh on every call"
+    "diagnostic": "mutation through readonly frame"
   },
   {
     "name": "callable-bound-fresh-ref-function-independent",
@@ -17543,14 +17551,14 @@
     "note": "the same hole through a vecs callback on main: `any`'s `FnMut((&T)) -> bool` given a closure that keeps each element reference in captured storage",
     "source": "use vecs;\nfn keep_refs<a, b>(v: (&a u64[]), out: (&b mut (&a u64)[])) -> bool { return v.any(|x: (&a u64)| -> bool { out.push(x); return false; }); }\nfn main() { v := u64[1, 2]; mut out = (&u64)[]; println(keep_refs(&v, &mut out)); }\n",
     "reject": true,
-    "diagnostic": "is a reference the bound gives it fresh on every call"
+    "diagnostic": "elided output reference needs one input lifetime"
   },
   {
     "name": "callable-bound-fresh-ref-filter-adapter-refused",
     "note": "...through the typed Filter adapter",
     "source": "use iter;\nfn keep_refs<a, b>(v: (&a u64[]), out: (&b mut (&a u64)[])) -> u64 {\n    return iter::over(v.copy()).filter(|x: (&a u64)| -> bool { out.push(x); return true; }).fold(0, |s: u64, x: u64| -> u64 s + x);\n}\nfn main() { v := u64[1, 2]; mut out = (&u64)[]; println(keep_refs(&v, &mut out)); }\n",
     "reject": true,
-    "diagnostic": "is a reference the bound gives it fresh on every call"
+    "diagnostic": "elided output reference needs one input lifetime"
   },
   {
     "name": "callable-bound-fresh-ref-returned-refused",
@@ -18113,5 +18121,22 @@
     "targets": [
       "x86_64"
     ]
+  },
+  {
+    "name": "callable-bound-fresh-ref-closure-capture-independent",
+    "note": "a closure with an elided `&mut` parameter that also captures a borrowed key is accepted: its parameters are typed in its own lifetime namespace, so nothing ties the fresh parameter to the capture (was a false refusal when the enclosing function named lifetimes; concurrent_map's remove on RwLock::write_with, /root/thread_alloc)",
+    "source": "struct Box1<T> { v: T }\nfn with_lock<a, T, C, R: Owned, F: FnMut((&mut T), C) -> R>(m: (&a mut Box1<T>), ctx: C, f: F) -> R { mut g = f; return g(&mut m.v, ctx); }\nfn rem<a, b>(v: (&a mut u64[]), k: (&b u64)) -> u64 { return v.len(); }\nfn go<a, b>(m: (&a mut Box1<u64[]>), key: (&b u64)) -> u64 { return with_lock(&mut m, 0, |v: (&mut u64[]), unused: u64| -> u64 rem(v, key)); }\nfn main() { mut m = Box1 { v: u64[1] }; k := 5; println(go(&mut m, &k)); }\n",
+    "stdout": "1\n"
+  },
+  {
+    "name": "callable-bound-fresh-ref-closure-capture-generic",
+    "note": "...the same in a generic function",
+    "source": "struct Box1<T> { v: T }\nfn with_lock<a, T, C, R: Owned, F: FnMut((&mut T), C) -> R>(m: (&a mut Box1<T>), ctx: C, f: F) -> R { mut g = f; return g(&mut m.v, ctx); }\nfn rem<a, b, K>(v: (&a mut K[]), k: (&b K)) -> u64 { return v.len(); }\nfn go<a, b, K>(m: (&a mut Box1<K[]>), key: (&b K)) -> u64 { return with_lock(&mut m, 0, |v: (&mut K[]), unused: u64| -> u64 rem(v, key)); }\nfn main() { mut m = Box1 { v: u64[1] }; k := 5; println(go(&mut m, &k)); }\n",
+    "stdout": "1\n"
+  },
+  {
+    "name": "host-chmod-sets-permission-bits",
+    "source": "// host::chmod sets a file's permission bits (0 or a positive errno), which is how the build store\n// gives an image it restores its execute bits.\nfn main() {\n    host::write_file(view(\"chmod.bin\"), view(\"x\"));\n    println(host::chmod(view(\"chmod.bin\"), 493));\n    st := host::stat(view(\"chmod.bin\"), 1);\n    println(st[3] & 511);\n    println(host::chmod(view(\"chmod.bin\"), 420));\n    again := host::stat(view(\"chmod.bin\"), 1);\n    println(again[3] & 511);\n    println(host::chmod(view(\"no-such-file.bin\"), 493));\n    host::remove(view(\"chmod.bin\"), 0);\n}\n",
+    "stdout": "0\n493\n0\n420\n2\n"
   }
 ]

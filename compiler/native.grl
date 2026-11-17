@@ -11879,12 +11879,10 @@ fn callable_tied_param<a>(c: (&a mut C), actual: u64, bound: u64) -> u64 {
         for q in ares.len() {
             add_region(&mut reach, ares[q]);
         }
-        if ak == 20 {
-            captured := type_regions(&mut c, actual);
-            for q in captured.len() {
-                add_region(&mut reach, captured[q]);
-            }
-        }
+        // A closure's parameters are typed in its own lifetime namespace (`env` is 1, each elided
+        // reference a fresh one), and its captures in the enclosing function's: the two are not
+        // comparable. A closure that stores its fresh parameter into captured storage is refused
+        // inside its body (captured writeback), so only its own parameters and result are checked.
         for q in theirs.len() {
             for r in reach.len() {
                 if (theirs[q] != 0) && (theirs[q] == reach[r]) {
@@ -26708,9 +26706,11 @@ fn fx_instance_name<a, b>(c: (&a mut C), name: &b [u8], spec: u64) -> u8[] {
 // apart. A specialisation inherits the template's claim - that is the obligation - and its own body
 // is what proves or refuses it.
 fn fx_begin<a, b, d>(c: (&a mut C), sym: &b [u8], name: &d [u8], file: u64, pos: u64, no_alloc: u64, no_panic: u64) -> unit {
-    // Every run that emits code records every body: its facts are the summary its interface carries.
-    // A check-only run carries none, so it records only when it has a claim to check.
-    if (c.check_only != 0) && (c.fx_any == 0) {
+    // Every run records every body: its facts are the summary its interface carries. A check-only run
+    // that writes no interface carries none, so it records only when it has a claim to check; one that
+    // writes interfaces (a module of `grail check`) records too, or the runs after it would find no
+    // summary - the runtime's least of all - and refuse every claim that calls it.
+    if (c.check_only != 0) && (c.fx_any == 0) && (c.iface_emit.len() == 0) {
         return ();
     }
     if c.validating != 0 {
@@ -27045,7 +27045,7 @@ fn fx_vtable_drop<a>(c: (&a mut C), iface: u64) -> unit {
 // A drop helper's body starts: trusted code, recorded like a function so a caller's claim is followed
 // through it to the user `Drop` it calls.
 fn fx_helper<a, b>(c: (&a mut C), sym: &b [u8]) -> unit {
-    if (c.check_only != 0) && (c.fx_any == 0) {
+    if (c.check_only != 0) && (c.fx_any == 0) && (c.iface_emit.len() == 0) {
         return ();
     }
     k := fx_sym(&mut c, view(sym)) - 1;
@@ -40692,7 +40692,7 @@ fn simd_check_aligned<a>(c: (&a mut C), at: u64, align: u64) -> unit {
     o(&mut c, view(",%rax\ncmpq $0,%rax\n"));
     ok := label(&mut c);
     jump(&mut c, view("je"), ok);
-    invoke(&mut c, view("rt_fail"), three(imm(&mut c, 19), at, imm(&mut c, align)));
+    invoke(&mut c, view("rt_fail"), three(imm(&mut c, 20), at, imm(&mut c, align)));
     mark(&mut c, ok);
     return ();
 }
@@ -50692,7 +50692,7 @@ fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
         c.params.push(4);
         c.params.push(4);
     }
-    if same(view(name), view("stat")) {
+    if same(view(name), view("stat")) || same(view(name), view("chmod")) {
         c.params.push(4);
         c.params.push(0);
     }
@@ -57020,6 +57020,9 @@ pub fn main() -> u64 {
     host_fn(&mut c, view("stat"), numbers_array);
     host_fn(&mut c, view("rename"), 0);
     host_fn(&mut c, view("symlink"), 0);
+    // `host::chmod(path, mode)`: the permission bits of a file, 0 or a positive errno (Windows has
+    // none to set and answers 0). The build store gives a restored image its execute bits with it.
+    host_fn(&mut c, view("chmod"), 0);
     host_fn(&mut c, view("spawn"), 0);
     host_fn(&mut c, view("wait"), 0);
     // `host::fork()`: 0 in the child, the child's id in the parent, a wrapped negative errno where
