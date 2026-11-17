@@ -19130,5 +19130,38 @@
         "text": "mulsd"
       }
     ]
+  },
+  {
+    "name": "closure-shared-ref-captured-twice",
+    "note": "a shared reference binding captured by two closures: it is copied, as Rust's `&T` is, and both closures hold the shared loan (the first used to move it: `r` was moved)",
+    "source": "struct Holder { n: u64 }\nfn main() { holder := Holder { n: 4 }; r := &holder; a := || -> u64 r.n; b := || -> u64 r.n + 1; println(a() + b()); }\n",
+    "stdout": "9\n"
+  },
+  {
+    "name": "closure-shared-ref-captured-twice-generic-join",
+    "note": "...the same through a generic `F: Fn<Send>` join and an erased second branch (/root/concurrency_design's pool::join shape)",
+    "source": "struct Holder { n: u64 }\nstruct Pair<A, B> { first: A, second: B }\nfn join<A: Send + Owned, B: Owned, F: Fn<Send>() -> A>(first: F, second: FnMut() -> B) -> Pair<A, B> { mut g = second; return Pair { first: first(), second: g() }; }\nfn main() { holder := Holder { n: 4 }; r := &holder; p := join(|| -> u64 r.n, || -> u64 r.n + 1); println(p.first + p.second); }\n",
+    "stdout": "9\n"
+  },
+  {
+    "name": "closure-shared-ref-capture-keeps-loan",
+    "note": "...the copy keeps the loan: the vector cannot move while the closure lives",
+    "source": "fn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() { x := u64[1, 2]; r := &x; a := || -> u64 r.len(); println(eat(x)); println(a()); }\n",
+    "reject": true,
+    "diagnostic": "move of unavailable or borrowed value"
+  },
+  {
+    "name": "closure-exclusive-ref-capture-moves",
+    "note": "an exclusive reference still moves into the closure",
+    "source": "fn main() { mut x = u64[1, 2]; r := &mut x; a := || -> u64 r.len(); println(r.len()); println(a()); }\n",
+    "reject": true,
+    "diagnostic": "`r` was moved"
+  },
+  {
+    "name": "callable-bound-transfer-checked-per-argument",
+    "note": "a capture that cannot cross a thread is reported for the closure given for a generic `F: Fn<Send>`, before a later argument's errors (blocker 3 of gaps12-genericF)",
+    "source": "handle H: transferable;\nstruct Holder { h: H, n: u64 }\nstruct Pair<A, B> { first: A, second: B }\nfn join<A: Send + Owned, B: Owned, F: Fn<Send>() -> A>(first: F, second: FnMut() -> B) -> Pair<A, B> { mut g = second; return Pair { first: first(), second: g() }; }\nfn main() {\n    mut raw: H;\n    holder := Holder { h: raw, n: 4 };\n    r := &holder;\n    pair := join(|| -> u64 r.n, || -> u64 r.n + 1);\n    println(pair.first + pair.second);\n}\n",
+    "reject": true,
+    "diagnostic": "cannot transfer closure capture `r`: r.h is thread-affine"
   }
 ]

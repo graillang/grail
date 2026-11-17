@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **A closure copies a captured shared reference.** `r := &x` captured by two closures used to fail
+  with "`r` was moved" at the second; a `&T` is now copied into each closure, which holds the shared
+  loan, as in Rust (an exclusive `&mut`, and a shared slice value, which owns its header, still move).
+  A closure given for a generic `F: Fn<Send>` now reports a capture that cannot cross a thread as
+  soon as it is read.
 - **Release builds keep vector headers in registers across element stores (TBAA).** The LLVM lifter
   writes the word and 4-byte element accessors (`rt_slot`, `rt_slot4`, `rt_at4` and their unchecked
   forms) in place: the header's `data`/`len` loads carry a `header` type tag, and every load or store
