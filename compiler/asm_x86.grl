@@ -1295,6 +1295,14 @@ fn align_to<a>(o: (&a mut A), n: u64) {
         }
         return ();
     }
+    // AArch64 code: every instruction is 4 bytes, so the position is exact and the gap is NOPs, as
+    // LLVM pads it (a stub after a function's last instruction, macOS's `_main`).
+    if (o.cur == 0) && (o.target == 1) && (n >= 4) {
+        while pos(&o) % n != 0 {
+            emit_le(&mut o, 0xd503201f, 4);
+        }
+        return ();
+    }
     if (o.cur == 0) && (o.buf.len() % n != 0) {
         fail(&mut o, view("alignment inside code is not supported"));
         return ();
@@ -5660,7 +5668,9 @@ fn macho_fixup<a, c>(o: (&a mut A), i: u64, r_sec: (&c mut u64[]), r_off: (&c mu
         return ();
     }
     defined := o.sym_sec[sym] != 0;
-    local := (o.sym_bind[sym] == 0) && (o.sym_class[sym] != 0x80);
+    // A `.weak_definition` that is not `.globl` is still local to the object: LLVM resolves a
+    // branch to it in place.
+    local := o.sym_bind[sym] == 0;
     branch := (kind == asm_a64::fx_call26()) || (kind == asm_a64::fx_jump26()) || (kind == asm_a64::fx_cond19()) || (kind == asm_a64::fx_adr21());
     if branch && defined && local && (o.sym_sec[sym] == sec + 1) {
         delta := wrapping_sub(wrapping_add(o.sym_pos[sym], add), at);

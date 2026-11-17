@@ -199,9 +199,9 @@ export function moduleFlags(target) {
 // internal ELF object to clang's from the same text (tools/asm-oracle.mjs).
 export function assembleObject(source, object, target = hostTarget) {
   const flags = target === 'riscv64' ? ['-march=rv64imafd', '-mabi=lp64d'] : [];
-  if ((target === 'x86_64' || target === 'aarch64' || target === 'riscv64' || target === 'windows-x86_64') && internalAssembler) {
+  if ((target === 'x86_64' || target === 'aarch64' || target === 'riscv64' || target === 'windows-x86_64' || target === 'macos-aarch64') && internalAssembler) {
     command([internalAssembler, 'asm', ...(target === 'x86_64' ? [] : ['--target', target]), source, '-o', object]);
-    if (process.env.GRAIL_ASM_ORACLE === '1' && target !== 'windows-x86_64') {
+    if (process.env.GRAIL_ASM_ORACLE === '1' && target !== 'windows-x86_64' && target !== 'macos-aarch64') {
       const reference = `${object}.clang.o`;
       command(['clang', `--target=${triples[target]}`, ...flags, '-c', source, '-o', reference]);
       const diff = compareObjects(readFileSync(reference), readFileSync(object));
