@@ -9,6 +9,50 @@
   `rt_blocking_enter` warning ("a blocking foreign call is running on a green task's scheduler
   thread") is gone with the unsafe hook that produced it.
 
+- Fixed: the internal assembler refused `.hidden` (the runtime's `rt_sites_fill`), so every LLVM
+  release build failed at `grail asm`. It now takes `.hidden`, `.protected`, `.internal` and
+  `.comm`, and `.word` is 32 bits on AArch64. `tests/asm/` holds every ELF directive the
+  compiler, runtime and LLVM backend write, checked byte-for-byte against clang by the landing
+  suite `asm-oracle` (`bun tools/asm-oracle.mjs --suite`).
+
+- Fixed two compiler aborts on malformed input found by the front-end fuzzer: an unmatched `)` or
+  `>` in an `extern` signature (an arithmetic overflow), and a file ending in a `//` comment or a `/`
+  with no newline (an out-of-bounds read). Both are ordinary diagnostics now.
+- `tools/fuzz-frontend.mjs` checks the unmutated source of any refused case whose first error points
+  outside the mutated file, and reports a source that fails as it is as a `baseline` bug: a library
+  that stops checking can no longer pass as a stream of fine refusals.
+- **Fixed: a small record returned from a function with a refined parameter came back wrong.** Since
+  the body became `<name>.proved` beside a checking wrapper, the typed-IR facts were still keyed by
+  `<name>`: the optimiser did not see that a two-word result is returned in `rax:rdx` and dropped the
+  second word (`mk(2, 5).hi` read 0), and the wrapper did not pass on the destination address a
+  result of more than two words is written to. The body's facts now carry its own symbol, the wrapper
+  states its two-word result too, and it forwards the hidden destination argument (also past six
+  arguments). `refinement-wrapper-two-word-result`, `refinement-wrapper-dest-result`.
+
+- **Writing interfaces no longer costs the square of the declarations.** The interface writer put
+  each list of names in order with a selection sort, and looked up every type's inherent methods
+  by scanning every function of the program. A stable merge sort and a by-module index of the
+  functions give the same interface bytes: an edited build of the 104k-line syn4000 program (one
+  body changed, warm store) takes 36% fewer instructions.
+- **Arrays by value and arrays of owners** (fixed-arrays.md, A3). Functions take and return
+  `[T; N]` by value (a result travels in a short-lived box until results are in registers);
+  `extern "C"` signatures refuse an array by value with a message naming the pointer form.
+  Arrays may hold strings, vectors, options and records that own data: they move, drop their
+  elements at the end of their scope, and replace an element by dropping the old one.
+- **Generic array lengths** (A4): `fn sum<@n: u64>(a: &[f32; n])`, inferred from the argument's
+  array type or given (`zeros<4>()`), and record value parameters as lengths
+  (`struct Mat<@R: u64, @C: u64> { m: [[f32; C]; R] }`).
+
+- **Arrays in records, vectors and C structs; arrays as slices** (fixed-arrays.md, A2). `[T; N]`
+  is a field of structs, tuples and generic records (inline) and the element of a flat vector
+  (`[f32; 4][]` is a C `float[n][4]`). Elements may be plain or extern records and C handles. `&a`
+  is a `&[T]` / `&mut [T]` / `&[u8]` where one is expected, `a[lo: hi]` a sub-slice, every slice
+  method works on an array, and `a.copy_from(&v)` copies a vector of exactly N in.
+- **Changed: an `extern "C" record` field `[T; N]` is now an array, not a vector.** `ids := d.ids`
+  is a `[u32; 4]`; `d.ids[3]` reads and writes in place and `&d.name` is a `&[u8]`. Initialise and
+  assign it with an array literal (`name: [0; 16]` where `u8[0; 16]` was written); a vector is
+  copied in with `d.ids.copy_from(&v)`, which checks the length. The copy-as-vector surface
+  (`rt_carray_store`, the field-assignment special case) is gone.
 - **A callback from C keeps its task on its thread.** A Grail function that C called from a green
   task could wait (sleep, lock, join) and the task then resumed on another worker, so it returned
   into C's frames on a different OS thread - with C's thread-locals and locks belonging to the old
@@ -47,6 +91,11 @@
   callable bounds. A closure given for a callable-bound parameter without `Owned` is lent for the call,
   as an `Fn(..)` parameter is. Fixed with it: two capture-free closures with the same signature given
   to one generic function were one specialisation; they are two.
+- Engine-shaped benchmarks against C, Rust, Go and Zig (`bench/hashmap`, `bintrees`, `strings`, `json`,
+  `dyncall`, `iterchain`, `ecs`, each with matched outputs in all five languages), with a section of
+  their own in the book's Performance chapter naming why Grail is behind on each
+  (`bench/results/engine.json`, refreshed by `just bench-results` and the gate).
+
 - **`grail check` is incremental.** It goes through the build store as `grail build` does: one
   compiler run per module, a module whose inputs did not change is not checked again, and in a
   module that is, the unchanged function bodies replay. A check after an edit to one module checks
