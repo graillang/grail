@@ -3827,10 +3827,12 @@ fn ffi_marker_enter<a>(c: (&a mut C), slot: u64) -> unit {
     c.out.push(10);
     return ();
 }
-// After the call, with its result in memory: count the marker out - atomically, because the monitor
-// may set the word's top bit with a compare-and-swap at the same moment - and if the bit was set the
-// worker was given away during the call, so this thread becomes block-less (rt_foreign_lost, which
-// names the function once). A `blocking` call has its own leave hook.
+// After the call, with its result in memory: count the marker out and look at the pair's `retaken`
+// word (8 bytes on). x86-64 Linux does both with plain instructions - the monitor pays for the
+// ordering with membarrier (docs/design/concurrency-model.md, 2.4.1); Windows x64 keeps a locked
+// increment, and AArch64/RV64 a sequentially consistent one, as their full barrier until theirs is
+// wired in. A non-zero `retaken` goes to rt_foreign_return, which settles the retake with one
+// compare-and-swap. A `blocking` call has its own leave hook.
 fn ffi_hooks_leave<a, b>(c: (&a mut C), slot: u64, block_here: bool, symbol: &b [u8]) -> unit {
     if block_here {
         call_out(&mut c, view("rt_blocking_leave"));
@@ -3844,15 +3846,22 @@ fn ffi_hooks_leave<a, b>(c: (&a mut C), slot: u64, block_here: bool, symbol: &b 
         stack_slot(&mut c, slot);
         o(&mut c, view(",%r11\ntestq %r11,%r11\n"));
         jump(&mut c, view("je"), done);
-        o(&mut c, view("lock incq (%r11)\n"));
-        jump(&mut c, view("jns"), done);
+        if c.target == 0 {
+            o(&mut c, view("incq (%r11)\n"));
+        } else {
+            o(&mut c, view("lock incq (%r11)\n"));
+        }
+        o(&mut c, view("cmpq $0,8(%r11)\n"));
+        jump(&mut c, view("je"), done);
+        o(&mut c, view("movq %r11,%rsi\n"));
     } else {
         o(&mut c, view("movq "));
         stack_slot(&mut c, slot);
         o(&mut c, view(",%rdi\ntestq %rdi,%rdi\n"));
         jump(&mut c, view("je"), done);
-        o(&mut c, view("movl $1,%eax\natom.rmw add seqcst u64\nshrq $63,%rax\ntestq %rax,%rax\n"));
+        o(&mut c, view("movl $1,%eax\natom.rmw add seqcst u64\nmovq 8(%rdi),%rax\ntestq %rax,%rax\n"));
         jump(&mut c, view("je"), done);
+        o(&mut c, view("movq %rdi,%rsi\n"));
     }
     // The symbol's name, NUL-ended, as read-only data (as a `cstr` literal is emitted).
     name := label(&mut c);
@@ -3866,7 +3875,7 @@ fn ffi_hooks_leave<a, b>(c: (&a mut C), slot: u64, block_here: bool, symbol: &b 
     o(&mut c, view(".byte 0\n.popsection\nleaq "));
     lname(&mut c, name);
     o(&mut c, view("(%rip),%rdi\n"));
-    call_out(&mut c, view("rt_foreign_lost"));
+    call_out(&mut c, view("rt_foreign_return"));
     mark(&mut c, done);
     return ();
 }

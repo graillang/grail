@@ -435,6 +435,67 @@ seed })` must run before anything starts the scheduler; later it is an error val
   declarations without `transferable` already keep its values off workers
   [V lib/pool.grl:13-22].
 
+### 2.4.1 The foreign-call marker: asymmetric fences
+
+A default `extern "C"` call (neither `blocking` nor `nonblocking`) marks its worker as "inside a
+foreign call", so the scheduler's monitor (`rt_sysmon`) can give the worker's queues to another
+thread when one call holds them for more than 10 ms while work is waiting. The marker runs on every
+call; the hand-off almost never happens. So the cost goes to the monitor, not to the call.
+
+**The words.** Each worker block names a *pair* (block word 320): `seq` and, 8 bytes on, `retaken`.
+Only the thread running the block writes `seq`; it is odd while that thread is inside a foreign
+call. `retaken` is 0 normally; the monitor sets it to 1 when it wants the block back, and it ends as
+0 (cancelled) or 2 (taken).
+
+**The call (x86-64 Linux).**
+
+    enter:  incq seq            ; plain: only this thread writes it
+            <the call>
+    leave:  incq seq            ; plain store, no lock prefix
+            cmpq $0, retaken    ; one plain load
+            jne  slow
+
+`slow` (`rt_foreign_return`) settles the word with one compare-and-swap: `retaken` 1 -> 0 means the
+thread cancelled the retake and keeps its block; finding 2 means the block was taken and the thread
+becomes block-less (`rt_foreign_lost`, which names the function once); finding 0 means the monitor
+cancelled first. Before, the leave was `lock incq` plus a sign test: a locked read-modify-write, about
+20 cycles, on every call.
+
+**The monitor.** When it has seen the same odd `seq` value `v` on two looks 5 ms apart with work
+queued:
+
+    retaken := 1
+    full fence; membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED)
+    v' := seq
+    v' == v:  CAS(retaken, 1 -> 2) succeeds  -> give the block a fresh pair and hand it to a spare
+                                  fails      -> the thread cancelled; nothing happens
+    v' != v:  CAS(retaken, 1 -> 0)           -> the call ended; cancel
+
+**Why it is correct.** Each side does a store and then a load of the other's word: the thread
+stores `seq` then loads `retaken`, and the monitor stores `retaken` then loads `seq`. Without fences,
+x86's store buffer lets both loads see the old values: the thread would miss the retake and the
+monitor would take a block whose thread is already back in Grail code. `membarrier` with
+`PRIVATE_EXPEDITED` makes every thread of the process that is running pass a full memory barrier
+before the call returns, and a thread that is not running has passed one at its last context switch.
+So the thread's plain store and plain load behave as if a full fence stood between them, and the
+pair is ordered like Dekker's: **the monitor reads `seq == v` only if the thread's later load of
+`retaken` sees 1 (or 2)**. Then the two compare-and-swaps on `retaken` decide the race between "I am
+back" and "I took it": exactly one wins, so a block is never run by two threads, and a thread that
+returns never keeps a block the monitor gave away. If instead the monitor reads `seq != v`, the call
+it watched has ended; it cancels, and whatever the thread saw (0, or 1 it cancels itself) it keeps
+its block. A stale 1 can at worst send one later return through the slow path, which cancels.
+
+A retake gives the block a fresh pair, so a late `incq` by the old owner never touches the counter
+the new owner uses.
+
+**Where the barrier comes from on each target.** x86-64 Linux: the thread side is plain, and the
+monitor pays with `membarrier` (registered once with `MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED`;
+without it - kernels before 4.14 - undeclared calls are never handed off; declared `blocking` calls
+still are). Windows x64: `FlushProcessWriteBuffers` is the same tool. AArch64 and RV64: the
+thread side's increment is still a sequentially consistent read-modify-write, which is its own full
+barrier (a signal to the owner thread is the fallback where neither exists). The instruction-count
+win is on x86-64 Linux first; the other targets keep a fenced leave until their barrier is wired in.
+
 ### 2.5 Coordination
 
 One runtime operation underlies all of it: **park the current execution on a wait node**. The

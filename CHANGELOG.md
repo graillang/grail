@@ -82,6 +82,13 @@
   stack instead of falling back to integer registers, and a 16-byte record with only `a7` left was
   not split between `a7` and the stack. New fixture `tests/ffi/abi_edges.grl` (all three ELF
   targets, both backends, and Windows x86-64 under Wine).
+- **A default `extern "C"` call no longer executes a locked instruction (x86-64 Linux).** The
+  foreign-call marker counts out with a plain increment and one load of a "retaken" word; the
+  scheduler's monitor, which takes a worker back from a call stuck for 10 ms, pays for the ordering
+  with `membarrier` instead. User cycles per call on LLVM: `f64` 14.5 -> 8.8, `f32` 8.2 -> 6.8
+  (C: 6.4-6.6). Windows x64 keeps a locked increment and AArch64/RV64 a sequentially consistent one,
+  each its own barrier. Without `membarrier` (a kernel before 4.14) undeclared calls are not handed
+  off. The protocol and its race argument: docs/design/concurrency-model.md, 2.4.1.
 
 - **`bench-rivals` no longer charts a build that printed the wrong answer.** It already failed the
   run when a build's output differed from C's, but still wrote that build's figures into the
