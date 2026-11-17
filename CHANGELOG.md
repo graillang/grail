@@ -1,5 +1,10 @@
 ## Unreleased
 
+- A `dyn` call on a record now costs one call: the vtable adapter that loads the record out of
+  its cell was a function with its own frame calling the method; it is a load and a tail jump.
+  dyncall (20 M dispatches): native 1,645 M -> 1,565 M instructions, LLVM 779 M -> 719 M (Rust -O:
+  648 M).
+
 - AArch64 and RV64 native code drops moves that move nothing (call ABI S7): the word machine's
   result register is x9 (t0) and its first argument x0 (a0), and moves go through the scratch x10
   (t1), so calls and returns were full of `mov x0,x9` after `mov x9,x10; mov x10,x0`. A value number
