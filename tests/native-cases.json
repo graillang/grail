@@ -15346,5 +15346,48 @@
       "native"
     ],
     "note": "P4: a slice's data and len in registers; the failed check still names the index and the length (rt_trap kind 64)"
+  },
+  {
+    "name": "callabi-shrink-wrap-guard",
+    "source": "fn fib(n: u64) -> u64 {\n    if n < 2 { return n; }\n    return fib(n - 1) + fib(n - 2);\n}\nfn main() -> u64 {\n    println(fib(20));\n    return 0;\n}\n",
+    "stdout": "6765\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asm": [
+      "cmpq $2,%rdi\njae .Lsw_f_main_fib\n",
+      "movq %rdi,%rax\nret\n.Lsw_f_main_fib:\npushq %rbp\n"
+    ],
+    "note": "call ABI S5: a first statement that returns without a call is tested on the argument registers before the prologue, which moves behind it (optimize.grl shrink_wrap)"
+  },
+  {
+    "name": "callabi-one-frame-adjustment",
+    "source": "fn fib(n: u64) -> u64 {\n    if n < 2 { return n; }\n    return fib(n - 1) + fib(n - 2);\n}\nfn main() -> u64 {\n    println(fib(20));\n    return 0;\n}\n",
+    "stdout": "6765\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asm": [
+      "+16,%rsp\nmovq %rbx,-",
+      "(%rbp)\nmovq %rdi,%rbx\njmp "
+    ],
+    "note": "call ABI S4: the callee-saved save area is part of the one frame adjustment, and a promoted register written before it is read is not cleared"
+  },
+  {
+    "name": "callabi-stack-arguments",
+    "source": "fn nine(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64, i: u64) -> u64 {\n    return a + 2 * b + 3 * c + 4 * d + 5 * e + 6 * f + 7 * g + 8 * h + 9 * i;\n}\nfn deep(n: u64, a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64, i: u64) -> u64 {\n    if n == 0 { return nine(a, b, c, d, e, f, g, h, i); }\n    return deep(n - 1, b, c, d, e, f, g, h, i, a) + n;\n}\nfn main() -> u64 {\n    x := host::argc();\n    s := nine(x, 2, 3, 4, 5, 6, 7, 8, 9);\n    t := deep(4, 1, 2, 3, 4, 5, 6, 7, 8, 9);\n    mut acc = 0;\n    for k in 100 { acc += nine(k, k + 1, k + 2, k + 3, k + 4, k + 5, k + 6, k + 7, k + 8) % 1000; }\n    println(\"{} {} {}\", s, t, acc);\n    return 0;\n}\n",
+    "stdout": "285 205 49750\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "call ABI S3: words past the sixth travel on the stack (the caller's outgoing area, 16 + 8k(%rbp) in the callee), position-weighted so a word read from the wrong slot changes the sum; a 10-argument recursion rotates them"
   }
 ]

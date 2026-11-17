@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Cheaper prologues on the native backend (call ABI S4-S5).** The callee-saved save area is
+  part of the one frame adjustment (`subq $.Fn+16,%rsp`, where there were two), a promoted register
+  or a cleared frame slot is zeroed only when the body may read it before writing it, and a first
+  statement that returns without a call (`if n < 2 { return n; }`) is tested on the argument
+  registers before the prologue, which moves behind it (shrink-wrapping). fib(32) on a dev build:
+  155.1 M -> 112.8 M instructions (Go: 102.9 M); its base case is now four instructions.
+
 - **A call with more than six arguments no longer allocates (call ABI S3).** Words past the sixth
   went in a heap record behind the sixth register, which the callee copied and freed: an
   `rt_rec` and an `rt_free` per call. They now travel on the stack in the platform's layout (word

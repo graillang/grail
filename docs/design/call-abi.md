@@ -1,7 +1,7 @@
 # The cost of a call in Grail: the convention as it was, the approved one, and where it stands
 
 Status: report approved by the director 2026-11-16; plan S1-S7 approved in the order S1, S2, S3,
-S4/S5, S6 (after unboxed stage 3a), S7. Done: S1, S2, S3 (see "Progress" at the end).
+S4/S5, S6 (after unboxed stage 3a), S7. Done: S1, S2, S3, S4, S5 (see "Progress" at the end).
 
 Tree: gaps12-callabi = origin/gaps13-int-b at 5dc07da. Measurements: perf_event user-mode instruction
 and cycle counters (own wrapper, `.work/probe/icount`; no `perf` binary on this host), load 20-30.
@@ -245,3 +245,15 @@ optimiser_labels, then S6 after unboxed 3a lands (it builds on 3a's frame aggreg
   sides: the area becomes the call's arguments past the sixth, the load becomes `%a6..`, and a
   read past the signature fact is a wrong fact. ABI line: `args = 6 registers then stack`. 7-arg call
   loop (10 M): native 3,670 M -> 430 M instructions (6-arg: 350 M), LLVM 1,990 M -> 17.5 M.
+- **S4 (save policy, native).** optimize.grl `function`: the promotion pass's save area is folded
+  into the prologue's `subq $.Fn+16k,%rsp` (the Win64 SEH writer adds the `+N` to
+  `.seh_stackalloc`); `slots_live_in` (a backward slot liveness over the label graph; any slot whose
+  address is taken counts as read) decides which promoted registers get `movq $0` after the saves
+  and which slots of the cleared range are zeroed. fib(32): 155.1 M -> 134.0 M.
+- **S5 (shrink-wrapping, native).** `shrink_wrap`, a pass over the function's emitted text: the
+  prologue, saves and argument copies, then `cmpq; jCC L` and a guard of moves into %rax, restores,
+  `leave; ret` with no call, becomes the compare and the return on the argument registers before
+  `pushq %rbp`, with the prologue behind `.Lsw_NAME` jumping to `L`. fib(32): 134.0 M -> 112.8 M
+  (Go 102.9 M); base case `cmpq $2,%rdi; jae; movq %rdi,%rax; ret`. Corpus: callabi-shrink-wrap-guard,
+  callabi-one-frame-adjustment. What is left of fib's gap is the optimiser's: two dead trap-operand
+  `movabs` (block-local dead_defs), the first result spilled to the frame, `mov; sub; mov` for `lea`.
