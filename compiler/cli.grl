@@ -2196,6 +2196,9 @@ fn llvm_compile_command<a>(args: (&a u8[][])) -> u64 {
     // Unique to this unit's module: internal functions keep their own names in every part of it.
     suffix := cat(view("u"), view(decimal(xxhash::hash64(view(input), 0))));
     mut pids = u64[];
+    mut needs = u64[];
+    mut held: u64 = 0;
+    budget := memory_budget();
     mut waited = 0;
     mut bad = 0;
     mut objects = u8[][];
@@ -2237,13 +2240,19 @@ fn llvm_compile_command<a>(args: (&a u8[][])) -> u64 {
         run.push(part.copy());
         run.push(copy(view("-o")));
         run.push(object.copy());
-        // At most `running` at once: the jobserver granted that many.
-        if pids.len() - waited >= running {
+        // At most `running` at once (the jobserver granted that many), and only as many as the
+        // memory available holds: a part's clang peaks at about PART_MEMORY times its text
+        // (measured on the compiler's own module: up to 2.5 GB for a 134 MB part).
+        need := part_text.len() * PART_MEMORY;
+        while (pids.len() - waited >= running) || ((waited < pids.len()) && (held + need > budget)) {
             if (9223372036854775807 < pids[waited]) || (host::wait(pids[waited]) != 0) {
                 bad = 1;
             }
+            held -= needs[waited];
             waited += 1;
         }
+        held += need;
+        needs.push(need);
         pids.push(host::spawn(run, host::environment(), 2, 2));
         objects.push(object);
     }
@@ -2276,6 +2285,32 @@ fn llvm_compile_command<a>(args: (&a u8[][])) -> u64 {
     link.push(copy(view("-o")));
     link.push(copy(view(output)));
     return host::command(link);
+}
+// Bytes of peak memory a clang -O2 run takes per byte of LLVM text it is given (measured: 18.6x on
+// the compiler's largest part, rounded up).
+const PART_MEMORY: u64 = 20;
+// Three quarters of the memory the kernel says is available now (`MemAvailable`), so parallel part
+// compiles fit a developer machine; unbounded when it cannot be read.
+fn memory_budget() -> u64 {
+    info := host::read_file(view("/proc/meminfo"));
+    mut i = 0;
+    while i + 13 < info.len() {
+        if ((i == 0) || (info[i - 1] == 10)) && eq(view(info[i..i + 13]), view("MemAvailable:")) {
+            mut j = i + 13;
+            mut kb: u64 = 0;
+            while (j < info.len()) && (info[j] != 10) {
+                if (48 <= info[j]) && (info[j] <= 57) {
+                    kb = kb * 10 + u64(info[j] - 48);
+                }
+                j += 1;
+            }
+            if kb != 0 {
+                return kb * 1024 / 4 * 3;
+            }
+        }
+        i += 1;
+    }
+    return 18446744073709551615;
 }
 // `output` as a fresh archive of `members` (ThinLTO bitcode parts): `r` would update an archive left
 // by an earlier build in place, so it is removed first.

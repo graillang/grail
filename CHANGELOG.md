@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **Faster release rebuilds, within a machine's memory.** After an edit to one function, a release
+  build re-optimises only the ~128 KB LLVM part that holds it and re-runs the ThinLTO backend for
+  that part alone; the unit archive is written in one step and the native part is assembled by the
+  compiler itself. `bench/hashmap.grl`, one function edited: 0.82 s -> 0.56 s median (cargo
+  --release on the Rust twin, measured alongside: 0.74 s). Part compiles are admitted against the
+  memory available, so a release build of the compiler fits a 16 GB machine instead of being
+  killed for memory.
 - The native backend computes SIMD operations with packed SSE2 on x86-64 (lane arithmetic, compares,
   select, splat, sums, 4-lane shuffles, `any`/`all`, `to_f32`), with exactly the same results as
   before. A dot product, a 4x4 matrix product and an AoS-to-SoA transpose run 2-5x faster natively.
