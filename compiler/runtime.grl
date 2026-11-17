@@ -5790,6 +5790,10 @@ fn rt_worker_loop(worker: u64) -> u64 {
         // the wait compares.
         seq := raw_atomic_load(s + 24);
         raw_atomic_fetch_add(s + 96, 1);
+        // A full barrier between the count and the last look: a sequentially consistent RMW is not
+        // one on AArch64 or RV64 (LL/SC with acquire/release lets a later plain load pass the store),
+        // and on those targets the Dekker pair needs it on both sides (rt_notify has the other).
+        rt_full_fence();
         if rt_worker_step(s, worker) == 0 {
             rt_syscall_low(202, s + 24, 128, seq);
         }
@@ -5924,7 +5928,7 @@ fn rt_worker_run_detached(t: u64) -> u64 {
         runner := raw_load(t + 104) == 3;
         rt_os_ctx_release(t);
         raw_atomic_store(t + 96, 1);
-        rt_syscall(202, t + 96, 129, 2147483647);
+        rt_syscall_low(202, t + 96, 129, 2147483647);
         joiner := raw_atomic_swap(t + 88, 1);
         if 1 < joiner {
             rt_wake(joiner);
@@ -7216,7 +7220,7 @@ fn rt_suspend(t: u64) -> u64 {
             return 0;
         }
         while raw_atomic_load(t + 24) == 5 {
-            rt_syscall(202, t + 24, 128, 5);
+            rt_syscall_low(202, t + 24, 128, 5);
         }
         raw_atomic_store(t + 24, 0);
         return 0;
@@ -7252,7 +7256,7 @@ fn rt_wake(t: u64) -> u64 {
         } else if s == 5 {
             // Parked pinned on its own thread (rt_suspend, inside a callback).
             if raw_atomic_cas(t + 24, 5, 3) == 5 {
-                rt_syscall(202, t + 24, 129, 1);
+                rt_syscall_low(202, t + 24, 129, 1);
                 return 0;
             }
         } else if s == 2 {
@@ -7840,7 +7844,7 @@ fn rt_block_give(w: u64) -> u64 {
     rt_spin_unlock(j + 432);
     raw_atomic_fetch_add(j + 464, 1);
     if raw_atomic_load(j + 448) != 0 {
-        rt_syscall(202, j + 464, 129, 1);
+        rt_syscall_low(202, j + 464, 129, 1);
         return 0;
     }
     // No idle spare: make one. There is no hard cap on how many - every blocked call holds a
@@ -7893,7 +7897,11 @@ fn rt_worker_thread(first: u64) -> u64 {
             }
             raw_atomic_fetch_add(j + 448, 1);
             // Jobs words 472/480: a timespec of one second, written once (rt_jobs_create).
-            r := rt_syscall4(202, j + 464, 128, seq, j + 472);
+            mut r = rt_syscall4(202, j + 464, 128, seq, j + 472);
+            if r == wrapping_sub(0, 38) {
+                // No timed wait on this platform (Windows): wait without one; spares do not retire.
+                r = rt_syscall(202, j + 464, 128, seq);
+            }
             raw_atomic_fetch_sub(j + 448, 1);
             w = rt_block_take();
             if (w == 0) & (r == wrapping_sub(0, 110)) {

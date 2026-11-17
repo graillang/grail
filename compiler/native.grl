@@ -3596,43 +3596,77 @@ fn tls_enter_callback<a>(c: (&a mut C), slot: u64, adopt: u64) -> unit {
     callback_pin(&mut c, view("addq"));
     return ();
 }
-// The foreign-call marker (rt_sysmon): %r11 = this thread's record, then the block's counter word.
+// The foreign-call marker (rt_sysmon): find this thread's record, and if it is a worker's, count the
+// block's foreign-call word in (a plain increment: only the owner writes it while it is even) and
+// keep the word's address in `slot`.
 fn ffi_marker_enter<a>(c: (&a mut C), slot: u64) -> unit {
-    other := label(&mut c);
-    have := label(&mut c);
     none := label(&mut c);
     done := label(&mut c);
-    o(&mut c, view("cmpq $0,rt_state+184(%rip)\n"));
-    jump(&mut c, view("je"), other);
-    o(&mut c, view("movq %fs:rt_tls_record@tpoff,%r11\n"));
-    jump(&mut c, view("jmp"), have);
-    mark(&mut c, other);
-    o(&mut c, view("movq %fs:0,%r11\n"));
-    mark(&mut c, have);
-    o(&mut c, view("cmpq $2,24(%r11)\n"));
-    jump(&mut c, view("jne"), none);
-    o(&mut c, view("movq 32(%r11),%r11\nmovq 320(%r11),%r11\nincq (%r11)\n"));
-    jump(&mut c, view("jmp"), done);
-    mark(&mut c, none);
-    o(&mut c, view("xorl %r11d,%r11d\n"));
-    mark(&mut c, done);
-    o(&mut c, view("movq %r11,"));
+    if (c.target == 0) || (c.target == 3) {
+        if c.target == 3 {
+            o(&mut c, view("movq %fs:40,%r11\n")); // the TEB's user pointer (raw_tp_get)
+        } else {
+            other := label(&mut c);
+            have := label(&mut c);
+            o(&mut c, view("cmpq $0,rt_state+184(%rip)\n"));
+            jump(&mut c, view("je"), other);
+            o(&mut c, view("movq %fs:rt_tls_record@tpoff,%r11\n"));
+            jump(&mut c, view("jmp"), have);
+            mark(&mut c, other);
+            o(&mut c, view("movq %fs:0,%r11\n"));
+            mark(&mut c, have);
+        }
+        o(&mut c, view("cmpq $2,24(%r11)\n"));
+        jump(&mut c, view("jne"), none);
+        o(&mut c, view("movq 32(%r11),%r11\nmovq 320(%r11),%r11\nincq (%r11)\n"));
+        jump(&mut c, view("jmp"), done);
+        mark(&mut c, none);
+        o(&mut c, view("xorl %r11d,%r11d\n"));
+        mark(&mut c, done);
+        o(&mut c, view("movq %r11,"));
+    } else {
+        // AArch64 and RV64 run Grail code on the record (the thread pointer is switched only for the
+        // call itself), and %rax is free before the arguments are loaded.
+        o(&mut c, view("tpget\ncmpq $2,24(%rax)\n"));
+        jump(&mut c, view("jne"), none);
+        o(&mut c, view("movq 32(%rax),%rax\nmovq 320(%rax),%rax\nincq (%rax)\n"));
+        jump(&mut c, view("jmp"), done);
+        mark(&mut c, none);
+        o(&mut c, view("xorl %eax,%eax\n"));
+        mark(&mut c, done);
+        o(&mut c, view("movq %rax,"));
+    }
     stack_slot(&mut c, slot);
     c.out.push(10);
     return ();
 }
-// The call's end: count out (a locked increment, because the monitor may have marked the word with
-// its top bit at the same moment); a set top bit says the worker was given away during the call, and
-// rt_foreign_lost makes this thread block-less and names the symbol once.
-fn ffi_marker_leave<a, b>(c: (&a mut C), slot: u64, symbol: &b [u8]) -> unit {
+// After the call, with its result in memory: count the marker out - atomically, because the monitor
+// may set the word's top bit with a compare-and-swap at the same moment - and if the bit was set the
+// worker was given away during the call, so this thread becomes block-less (rt_foreign_lost, which
+// names the function once). A `blocking` call has its own leave hook.
+fn ffi_hooks_leave<a, b>(c: (&a mut C), slot: u64, block_here: bool, symbol: &b [u8]) -> unit {
+    if block_here {
+        call_out(&mut c, view("rt_blocking_leave"));
+    }
+    if slot == 0 {
+        return ();
+    }
     done := label(&mut c);
-    o(&mut c, view("movq "));
-    stack_slot(&mut c, slot);
-    o(&mut c, view(",%r11\ntestq %r11,%r11\n"));
-    jump(&mut c, view("je"), done);
-    o(&mut c, view("lock incq (%r11)\n"));
-    jump(&mut c, view("jns"), done);
-    o(&mut c, view("subq $32,%rsp\nmovq %rax,(%rsp)\nmovq %rdx,8(%rsp)\nmovq %xmm0,%r10\nmovq %r10,16(%rsp)\nmovq %xmm1,%r10\nmovq %r10,24(%rsp)\n"));
+    if (c.target == 0) || (c.target == 3) {
+        o(&mut c, view("movq "));
+        stack_slot(&mut c, slot);
+        o(&mut c, view(",%r11\ntestq %r11,%r11\n"));
+        jump(&mut c, view("je"), done);
+        o(&mut c, view("lock incq (%r11)\n"));
+        jump(&mut c, view("jns"), done);
+    } else {
+        o(&mut c, view("movq "));
+        stack_slot(&mut c, slot);
+        o(&mut c, view(",%rdi\ntestq %rdi,%rdi\n"));
+        jump(&mut c, view("je"), done);
+        o(&mut c, view("movl $1,%eax\natom.rmw add seqcst u64\nshrq $63,%rax\ntestq %rax,%rax\n"));
+        jump(&mut c, view("je"), done);
+    }
     // The symbol's name, NUL-ended, as read-only data (as a `cstr` literal is emitted).
     name := label(&mut c);
     o(&mut c, view(".pushsection .rodata\n"));
@@ -3646,7 +3680,6 @@ fn ffi_marker_leave<a, b>(c: (&a mut C), slot: u64, symbol: &b [u8]) -> unit {
     lname(&mut c, name);
     o(&mut c, view("(%rip),%rdi\n"));
     call_out(&mut c, view("rt_foreign_lost"));
-    o(&mut c, view("movq 16(%rsp),%r10\nmovq %r10,%xmm0\nmovq 24(%rsp),%r10\nmovq %r10,%xmm1\nmovq (%rsp),%rax\nmovq 8(%rsp),%rdx\naddq $32,%rsp\n"));
     mark(&mut c, done);
     return ();
 }
@@ -17710,6 +17743,32 @@ fn ffi_emit_call<a, b, d, e, f>(
     if 2048 < area {
         fail(&mut c, view("extern C call needs more than 2 KiB of stack arguments"));
     }
+    // The scheduler's hooks around a foreign call (Linux x86-64, AArch64, RV64 and Windows x64; not
+    // macOS or Windows on ARM64 yet). They run while this code still runs on the Grail record -
+    // before the thread pointer is switched for the call and after it is switched back - and
+    // before any argument register is loaded.
+    // The runtime's own foreign calls (SwitchToFiber, WaitOnAddress, ...) are the scheduler's
+    // machinery, not user calls: they are never marked or handed off.
+    sched_hooks := (c.plat == 0) & (c.target < 4) & (c.raw == 0);
+    // A `blocking` call gives this thread's worker (if it is one) to a spare thread for the call
+    // (rt_blocking_enter); the thread takes no worker back after (rt_blocking_leave).
+    block_here := blocking & sched_hooks;
+    if block_here {
+        call_out(&mut c, view("rt_blocking_enter"));
+    }
+    // Every other foreign call marks the worker as inside a foreign call (an odd count in the word
+    // block word 320 names), so the scheduler's monitor can give the worker away if the call holds
+    // it for more than 10 ms (rt_sysmon). The word's address is kept in a slot of its own for the
+    // exit; 0 there means "not on a worker".
+    marked := (!blocking) & (!nonblocking) & sched_hooks;
+    mut mk = 0;
+    if marked {
+        mk = fresh(&mut c);
+        if mk == 0 {
+            mk = fresh(&mut c);
+        }
+        ffi_marker_enter(&mut c, mk);
+    }
     mut tls = 0;
     if tls_bridge(&mut c) {
         tls = fresh(&mut c);
@@ -17720,22 +17779,6 @@ fn ffi_emit_call<a, b, d, e, f>(
             tls = fresh(&mut c);
         }
         tls_enter_foreign(&mut c, tls);
-    }
-    // A `blocking` call on x86-64 Linux gives this thread's worker (if it is one) to a spare thread
-    // before the arguments are loaded - the runtime call clobbers the argument registers - and takes
-    // a worker back after (rt_blocking_enter / rt_blocking_leave). Elsewhere it is a plain call.
-    block_here := blocking & (c.target == 0) & (c.plat == 0);
-    if block_here {
-        call_out(&mut c, view("rt_blocking_enter"));
-    }
-    // Every other foreign call on x86-64 Linux marks the worker as inside a foreign call (an odd
-    // count in the word block word 320 names), so the scheduler's monitor can give the worker away
-    // if the call holds it for more than 10 ms (rt_sysmon). The word's address is kept in the call's
-    // `tls` slot for the exit; 0 there means "not on a worker". Clobbers %rax and %r11 only, before
-    // any argument register is loaded.
-    marked := (!blocking) & (!nonblocking) & (c.target == 0) & (c.plat == 0) & (tls != 0);
-    if marked {
-        ffi_marker_enter(&mut c, tls);
     }
     if area != 0 {
         if x86 {
@@ -17929,16 +17972,6 @@ fn ffi_emit_call<a, b, d, e, f>(
     } else {
         call_out(&mut c, view(symbol));
     }
-    if marked {
-        ffi_marker_leave(&mut c, tls, view(symbol));
-    }
-    if block_here {
-        // The result registers survive the runtime call: rax, rdx, xmm0 and xmm1, in 32 bytes of
-        // stack (the call's argument area is still allocated; 16-byte alignment is kept).
-        o(&mut c, view("subq $32,%rsp\nmovq %rax,(%rsp)\nmovq %rdx,8(%rsp)\nmovq %xmm0,%r10\nmovq %r10,16(%rsp)\nmovq %xmm1,%r10\nmovq %r10,24(%rsp)\n"));
-        call_out(&mut c, view("rt_blocking_leave"));
-        o(&mut c, view("movq 16(%rsp),%r10\nmovq %r10,%xmm0\nmovq 24(%rsp),%r10\nmovq %r10,%xmm1\nmovq (%rsp),%rax\nmovq 8(%rsp),%rdx\naddq $32,%rsp\n"));
-    }
     if (ret != 1) & (rmode == 0) {
         if is_float(&mut c, ret) {
             single := is_f32(&mut c, ret);
@@ -17998,6 +18031,7 @@ fn ffi_emit_call<a, b, d, e, f>(
         if tls != 0 {
             tls_leave(&mut c, tls);
         }
+        ffi_hooks_leave(&mut c, mk, block_here, view(symbol));
         own(&mut c, rslot, ret);
         return val(rslot, ret);
     }
@@ -18005,6 +18039,8 @@ fn ffi_emit_call<a, b, d, e, f>(
     if tls != 0 {
         tls_leave(&mut c, tls);
     }
+    // The result is in a frame slot by now, so the hooks may clobber every register.
+    ffi_hooks_leave(&mut c, mk, block_here, view(symbol));
     if ret != 1 {
         own(&mut c, slot, ret);
     }
