@@ -15257,7 +15257,7 @@
   },
   {
     "name": "thread-join-parks-without-helper-threads",
-    "source": "use thread;\nuse host;\nfn threads_now() -> u64 {\n    text := host::read_file(\"/proc/self/status\");\n    mut i = 0;\n    // \"Threads:\\t\" then the count.\n    while i + 8 < text.len() {\n        if (text[i] == 84) && (text[i + 1] == 104) && (text[i + 2] == 114) && (text[i + 7] == 58) {\n            mut n = 0;\n            mut j = i + 8;\n            while (j < text.len()) && (text[j] != 10) {\n                if (text[j] >= 48) && (text[j] <= 57) {\n                    n = n * 10 + u64(text[j] - 48);\n                }\n                j += 1;\n            }\n            return n;\n        }\n        i += 1;\n    }\n    return 0;\n}\nfn joiner(n: u64, unused: u64) -> u64 {\n    t := thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 { host::sleep_ms(300); return 1; })!;\n    return thread::join(t);\n}\nfn body<s>(sc: (&s Scope<u64>), unused: u64) -> u64 {\n    mut many = Task<u64>[];\n    for i in 16 {\n        many.push(spawn(sc, 0, joiner));\n    }\n    mut total = 0;\n    while let Some(t) = many.pop() {\n        total += join(t);\n    }\n    return total;\n}\nfn main() {\n    // Counted from a thread of its own: a task's host::read_file would itself start a helper.\n    probe := thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 { host::sleep_ms(150); return threads_now(); })!;\n    println(task_scope(0, body));\n    seen := thread::join(probe);\n    // Sixteen joins in flight: the joiners park, so the process holds the workers, the reactor and\n    // the sixteen threads - not a helper thread per join on top.\n    // main, the workers, the reactor, the probe and the sixteen threads.\n    println(seen <= 1 + host::workers() + 1 + 1 + 16);\n}\n",
+    "source": "use thread;\nuse host;\nfn threads_now() -> u64 {\n    text := host::read_file(\"/proc/self/status\");\n    mut i = 0;\n    // \"Threads:\\t\" then the count.\n    while i + 8 < text.len() {\n        if (text[i] == 84) && (text[i + 1] == 104) && (text[i + 2] == 114) && (text[i + 7] == 58) {\n            mut n = 0;\n            mut j = i + 8;\n            while (j < text.len()) && (text[j] != 10) {\n                if (text[j] >= 48) && (text[j] <= 57) {\n                    n = n * 10 + u64(text[j] - 48);\n                }\n                j += 1;\n            }\n            return n;\n        }\n        i += 1;\n    }\n    return 0;\n}\nfn joiner(n: u64, unused: u64) -> u64 {\n    t := thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 { host::sleep_ms(300); return 1; })!;\n    return thread::join(t);\n}\nfn body<s>(sc: (&s Scope<u64>), unused: u64) -> u64 {\n    mut many = Task<u64>[];\n    for i in 16 {\n        many.push(spawn(sc, 0, joiner));\n    }\n    mut total = 0;\n    while let Some(t) = many.pop() {\n        total += join(t);\n    }\n    return total;\n}\nfn main() {\n    // Counted from a thread of its own: a task's host::read_file would itself start a helper.\n    probe := thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 { host::sleep_ms(150); return threads_now(); })!;\n    println(task_scope(0, body));\n    seen := thread::join(probe);\n    // Sixteen joins in flight: the joiners park, so the process holds the workers, the reactor and\n    // the sixteen threads - not a helper thread per join on top.\n    // main, the workers, the reactor, the scheduler's monitor, the probe and the sixteen threads.\n    println(seen <= 1 + host::workers() + 1 + 1 + 1 + 16);\n}\n",
     "modules": [
       "lib/thread.grl",
       "lib/time.grl"
@@ -17593,5 +17593,21 @@
       "llvm"
     ],
     "note": "address-taken two- and three-word frame values (an Option from pop(), a record built in a loop) inside lifted functions at different frame layouts: a lifter that gave such a value one-word allocas would write into a neighbour (18e6943's pool::split SIGSEGV); llvm.grl escaped_overreach keeps any body that would, native"
+  },
+  {
+    "name": "foreign-call-stuck-is-handed-off",
+    "note": "One worker: an undeclared 120 ms usleep holds it, and a second task queued behind it still runs - the monitor gave the worker to a spare after 10 ms - and stderr names `usleep` once.",
+    "files": [
+      "tests/concurrency/blocking_undeclared.grl"
+    ],
+    "env": {
+      "GRAIL_WORKERS": "1"
+    },
+    "stdout": "42\n",
+    "stderr": "the foreign call `usleep` held a worker for more than 10 ms",
+    "stderrCount": 1,
+    "targets": [
+      "x86_64"
+    ]
   }
 ]

@@ -813,3 +813,13 @@ below the number of blocked calls, every thread is blocked and the block that wo
 waits for a thread for ever. One safety limit remains, like Go's 10,000-thread default: the
 10,000th thread blocked in foreign calls ends the program with a message instead of exhausting the
 machine.
+
+The per-call marker: `ffi_marker_enter` finds the thread's block and increments the block's current
+counter (odd: inside a foreign call); `ffi_marker_leave` increments it again with a locked add,
+because the monitor may set the counter's top bit with a compare-and-swap at the same moment. If
+the top bit is set, the worker was given away during the call and `rt_foreign_lost` makes the
+thread block-less. On a handoff the monitor gives the block a fresh counter, so a late count-out
+by the old owner never touches the counter the new owner uses. Cost on 10M calls of `labs`, load
+average 56-60: 4.6-5.8 ns per loop iteration before and 5.7-6.5 ns after, about 1.2 ns per call
+(the bar is 2 ns). The loop itself is still about 2x C's 2.5-2.9 ns; that is the loop's own code
+(checked arithmetic), not the call.

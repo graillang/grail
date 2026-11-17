@@ -1,5 +1,13 @@
 ## Unreleased
 
+- **A foreign call that holds a worker for more than 10 ms is handed off.** Every `extern "C"`
+  call on x86-64 Linux counts itself in and out on its worker (about 1.2 ns a call, measured on
+  10M calls of `labs`), and a scheduler monitor thread looks every 5 ms: a worker inside one foreign
+  call for two looks while work is queued is given to a spare, as a `blocking` call would have
+  been at once. The runtime says so once, naming the function, so it can be declared `blocking`.
+  At most 10,000 threads may be blocked in foreign calls; the next one ends the program with a
+  message instead of exhausting the machine.
+
 - **Small runtime functions are inlined into every module.** A small runtime body (the scheduler's
   `rt_current`, `rt_list_set`, `rt_list_head`, ...) is now inlined where another module calls it,
   in every build shape: a per-module build carries the bodies in `runtime.facts`. A failure inside
