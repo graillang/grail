@@ -370,7 +370,11 @@ struct L {
     wrong: u8[][],
     // The outgoing argument area of the call being set up (area_instruction).
     area: u8[][],
-    areaopen: u64
+    areaopen: u64,
+    // Vector registers written and not read since (a pending float argument), and ones not written
+    // since the entry or the last call (xmm_read).
+    xpend: u64,
+    xstale: u64
 }
 
 fn eq<a, b>(a: &a [u8], b: &b [u8]) -> bool {
@@ -768,6 +772,42 @@ fn reg_width<a>(name: &a [u8]) -> u64 {
     }
     return 64;
 }
+// Lifted calls carry integer words only, so a C call that passes or returns a float in a vector
+// register cannot be lifted (cbstk-callback-stack-arguments: `caller`'s f64 result in %xmm0 was
+// read from a register no call had written). Grail's own float code moves every vector value back
+// to an integer register before a call. So: a vector register written and not read again before a
+// call is a float argument, and one read before it is written - after a call, or at the entry - is a
+// float result or parameter; either keeps the body native.
+fn xmm_bit<a>(name: &a [u8]) -> u64 {
+    mut n = 0;
+    for i in name.len() - 3 {
+        n = n * 10 + u64(name[3 + i]) - 48;
+    }
+    return 1 << (n & 31);
+}
+fn xmm_read<a, b>(l: (&a mut L), name: &b [u8]) -> unit {
+    b := xmm_bit(name);
+    if (l.xstale & b) != 0 {
+        bad(&mut l);
+    }
+    l.xpend = l.xpend & (18446744073709551615 - b);
+    return ();
+}
+fn xmm_written<a, b>(l: (&a mut L), name: &b [u8]) -> unit {
+    b := xmm_bit(name);
+    l.xstale = l.xstale & (18446744073709551615 - b);
+    l.xpend = l.xpend | b;
+    return ();
+}
+// At a call: no float argument may be pending, and after it every vector register is stale.
+fn xmm_call<a>(l: (&a mut L)) -> unit {
+    if l.xpend != 0 {
+        bad(&mut l);
+    }
+    l.xpend = 0;
+    l.xstale = 18446744073709551615;
+    return ();
+}
 fn is_xmm<a>(name: &a [u8]) -> bool {
     return starts(name, view("xmm"));
 }
@@ -981,6 +1021,7 @@ fn value<a, b>(l: (&a mut L), op: &b [u8], width: u64) -> u8[] {
     if op[0] == 37 {
         name := sub(op, 1, op.len());
         if is_xmm(view(name)) {
+            xmm_read(&mut l, view(name));
             return def(&mut l, view("load i64, ptr {}"), &u8[][slot_of(view("%x."), view(name))]);
         }
         return get_reg(&mut l, view(name));
@@ -1028,6 +1069,7 @@ fn store<a, b, c>(l: (&a mut L), op: &b [u8], v: &c [u8], width: u64) -> unit {
     if op[0] == 37 {
         name := sub(op, 1, op.len());
         if is_xmm(view(name)) {
+            xmm_written(&mut l, view(name));
             emit(&mut l, view("store i64 {}, ptr {}"), &u8[][copy(v), slot_of(view("%x."), view(name))]);
             return ();
         }
@@ -1995,6 +2037,7 @@ fn never_returns<a>(target: &a [u8]) -> bool {
 fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> unit {
     // A call hands the argument registers on; passing a stale %rdx is not reading a result.
     l.rdxdead = 0;
+    xmm_call(&mut l);
     if l.areaopen != 0 {
         // Words on the stack: only a callee whose signature fact says it takes them.
         code := set_get(&l.sigs, target);
@@ -3257,6 +3300,8 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
     exchange(&mut l.curline, u8[]);
     exchange(&mut l.area, u8[][]);
     l.areaopen = 0;
+    l.xpend = 0;
+    l.xstale = 18446744073709551615;
     l.rdxdead = 0;
     l.nargs = 6;
     l.retw = 2;
@@ -6080,7 +6125,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
             set_add(&mut weak, view(sub(wl, 6, wl.len())));
         }
     }
-    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, dnames: u8[][], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0 };
+    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, dnames: u8[][], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0, xpend: 0, xstale: 18446744073709551615 };
     // A function whose address is taken (`NAME(%rip)`, or named by data such as a vtable) is
     // called through a pointer by code that does not know its signature, so it keeps the six-word
     // form: an indirect call passes six words and reads rax:rdx, and LLVM must never see a call

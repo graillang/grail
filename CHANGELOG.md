@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Fixed (LLVM backend): a function that called a C function with a float argument or read a float
+  result kept that value in a vector register the lifted call never passed or returned, so
+  `cbstk-callback-stack-arguments` printed NaN (0 on older builds). Such a body now stays native.
+
 - **A call with more than six arguments no longer allocates (call ABI S3).** Words past the sixth
   went in a heap record behind the sixth register, which the callee copied and freed: an
   `rt_rec` and an `rt_free` per call. They now travel on the stack in the platform's layout (word
