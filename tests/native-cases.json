@@ -18214,5 +18214,31 @@
     "source": "fn step(p: &mut [f32], v: &[f32]) {\n    p[0] = v[0];\n}\nfn main() {\n    mut a = f32[0.0; 8];\n    mut b = f32[0.0; 8];\n    c := f32[0.0; 4];\n    parallel_for_zip(2, step, &mut a[0: 8], &c[0: 4]);\n}\n",
     "signal": "SIGABRT",
     "stderr": "error: parallel_for_zip: slice argument 2 has length 4, which is not the first slice's\n"
+  },
+  {
+    "name": "callable-bound-captured-f-called-in-closure",
+    "note": "a closure written inside a generic function calls a captured callable-bound `f` (pool::run/map/join's adapters, /root/concurrency_design): its body is compiled with the specialisation's bindings, so `f()`'s result is the body's `A`",
+    "source": "fn twice<A, F: Fn() -> A>(f: F) -> A { g := || -> A f(); return g(); }\nfn main() { k := 21; println(twice(|| -> u64 k * 2)); }\n",
+    "stdout": "42\n"
+  },
+  {
+    "name": "callable-bound-captured-f-passed-on",
+    "note": "...and the adapting closure is itself given to another callable-bound parameter",
+    "source": "fn run<A, G: Fn(u64) -> A>(n: u64, g: G) -> A[] { mut out = A[]; for i in n { out.push(g(i)); } return out; }\nfn twice<A, F: Fn() -> A>(f: F) -> A[] { return run(2, |i: u64| -> A f()); }\nfn main() { k := 21; r := twice(|| -> u64 k * 2); println(r[0] + r[1]); }\n",
+    "stdout": "84\n"
+  },
+  {
+    "name": "callable-bound-fnmut-for-fn-message",
+    "note": "a bound violation through a callable bound gives the erased form's precise message",
+    "source": "fn join1<A: Send, F: Fn<Send>() -> A>(f: F) -> A { return f(); }\nfn main() { mut n = 0; println(join1(|| -> u64 { n += 1; return n; })); }\n",
+    "reject": true,
+    "diagnostic": "a closure that mutates a captured value is FnMut, not Fn"
+  },
+  {
+    "name": "callable-bound-capture-transfer-message",
+    "note": "...and a capture that cannot cross a thread is named",
+    "source": "handle H;\nfn keep(h: (&H), x: u64) -> u64 { return x; }\nstruct R { h: H }\nfn join1<A: Send, F: Fn<Send>() -> A>(f: F) -> A { return f(); }\nfn main() { mut hh: H; rr := R { h: hh }; r := &rr; println(join1(|| -> u64 keep(&r.h, 1))); println(keep(&r.h, 2)); }\n",
+    "reject": true,
+    "diagnostic": "cannot transfer closure capture `r`: r.h is thread-affine"
   }
 ]
