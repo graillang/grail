@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **Writing interfaces no longer costs the square of the declarations.** The interface writer put
+  each list of names in order with a selection sort, and looked up every type's inherent methods
+  by scanning every function of the program. A stable merge sort and a by-module index of the
+  functions give the same interface bytes: an edited build of the 104k-line syn4000 program (one
+  body changed, warm store) takes 36% fewer instructions.
 - **`grail check` grows linearly with function length.** The borrow checker answered "is any
   bond held under this place?", "which bonds does this reference rest on?" and "is this bond new?"
   by scanning every bond the function had made, after every statement and every use, so one long

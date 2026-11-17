@@ -585,6 +585,14 @@ struct C {
     file_cache_index: u64[],
     file_cache_src: u8[][],
     file_cache_toks: lexer::Token[][],
+    // The functions by module, for the interface writer (iface_func_ids): an open-addressed table
+    // of groups (`fmod_slots` holds group + 1), each group's module, its key and its functions in
+    // table order; `fmod_n` functions are filed. Functions are only ever appended.
+    fmod_slots: u64[],
+    fmod_keys: u64[],
+    fmod_names: u8[][],
+    fmod_ids: u64[][],
+    fmod_n: u64,
     funcs: Func[],
     // The (module, name) index of `funcs` and of `decls` (see name_key).
     func_slots: u64[],
@@ -49735,26 +49743,50 @@ fn iface_before<a, b>(x: &a [u8], y: &b [u8]) -> bool {
 // Declarations are written in name order, so a review diff shows the declaration that changed
 // rather than a reshuffled file.
 fn iface_sorted<a>(names: (&a u8[][])) -> u64[] {
+    // A stable merge sort, bottom up: of two equal names the earlier comes first, which is the order
+    // the selection sort this replaces produced, at n log n comparisons instead of n squared.
+    n := names.len();
     mut order = u64[];
-    mut used = u64[];
-    for i in names.len() {
-        used.push(0);
+    for i in n {
+        order.push(i);
     }
-    while order.len() < names.len() {
-        mut best = names.len();
-        for i in names.len() {
-            if used[i] == 0 {
-                if best == names.len() {
-                    best = i;
-                } else {
-                    if iface_before(view(names[i]), view(names[best])) {
-                        best = i;
-                    }
-                }
+    mut merged = u64[0; n];
+    mut width = 1;
+    while width < n {
+        mut lo = 0;
+        while lo < n {
+            mut mid = lo + width;
+            if n < mid {
+                mid = n;
             }
+            mut hi = mid + width;
+            if n < hi {
+                hi = n;
+            }
+            mut i = lo;
+            mut j = mid;
+            mut k = lo;
+            while k < hi {
+                mut left = i < mid;
+                if left && (j < hi) {
+                    // The right one goes first only when it is strictly before the left one.
+                    left = !iface_before(view(names[order[j]]), view(names[order[i]]));
+                }
+                if left {
+                    merged[k] = order[i];
+                    i += 1;
+                } else {
+                    merged[k] = order[j];
+                    j += 1;
+                }
+                k += 1;
+            }
+            lo = hi;
         }
-        exchange(&mut used[best], 1);
-        order.push(best);
+        for k in n {
+            order[k] = merged[k];
+        }
+        width = width * 2;
     }
     return order;
 }
@@ -50160,13 +50192,71 @@ fn iface_decl_ids<a, b>(c: (&a mut C), m: &b [u8]) -> u64[] {
 }
 
 fn iface_func_ids<a, b>(c: (&a mut C), m: &b [u8]) -> u64[] {
-    mut ids = u64[];
-    for i in c.funcs.len() {
-        if same(view(c.funcs[i].module), view(m)) {
-            ids.push(i);
-        }
+    // Asked once per declaration (its `.inherent_` module) and per implementation: a scan of every
+    // function each time made the interface cost the product of the two (fmod_sync).
+    fmod_sync(&mut c);
+    g := fmod_group(&c, m);
+    if g == 0 {
+        return u64[];
     }
-    return ids;
+    return c.fmod_ids[g - 1].copy();
+}
+// The group of module `m` in the by-module table, + 1; 0 when no function is in it.
+fn fmod_group<a, b>(c: (&a C), m: &b [u8]) -> u64 {
+    if c.fmod_slots.len() == 0 {
+        return 0;
+    }
+    key := name_key(view(m), view(""));
+    mask := c.fmod_slots.len() - 1;
+    mut h = key & mask;
+    while c.fmod_slots[h] != 0 {
+        g := c.fmod_slots[h];
+        if (c.fmod_keys[g - 1] == key) && same(view(c.fmod_names[g - 1]), view(m)) {
+            return g;
+        }
+        h = (h + 1) & mask;
+    }
+    return 0;
+}
+// Files the functions added since the last call, each under its module, in table order.
+fn fmod_sync<a>(c: (&a mut C)) -> unit {
+    while c.fmod_n < c.funcs.len() {
+        i := c.fmod_n;
+        exchange(&mut c.fmod_n, i + 1);
+        m := c.funcs[i].module.copy();
+        mut g = fmod_group(&c, view(m));
+        if g == 0 {
+            // A new group; the table stays at most half full.
+            if c.fmod_slots.len() <= 2 * (c.fmod_names.len() + 1) {
+                mut size = 64;
+                while size <= 4 * (c.fmod_names.len() + 1) {
+                    size = size * 2;
+                }
+                mut slots = u64[0; size];
+                for k in c.fmod_names.len() {
+                    mut h = c.fmod_keys[k] & (size - 1);
+                    while slots[h] != 0 {
+                        h = (h + 1) & (size - 1);
+                    }
+                    slots[h] = k + 1;
+                }
+                exchange(&mut c.fmod_slots, slots);
+            }
+            key := name_key(view(m), view(""));
+            c.fmod_keys.push(key);
+            c.fmod_names.push(m.copy());
+            c.fmod_ids.push(u64[]);
+            g = c.fmod_names.len();
+            mask := c.fmod_slots.len() - 1;
+            mut h = key & mask;
+            while c.fmod_slots[h] != 0 {
+                h = (h + 1) & mask;
+            }
+            c.fmod_slots[h] = g;
+        }
+        c.fmod_ids[g - 1].push(i);
+    }
+    return ();
 }
 
 
@@ -50857,6 +50947,11 @@ pub fn main() -> u64 {
         file_cache_index: u64[],
         file_cache_src: u8[][],
         file_cache_toks: lexer::Token[][],
+        fmod_slots: u64[],
+        fmod_keys: u64[],
+        fmod_names: u8[][],
+        fmod_ids: u64[][],
+        fmod_n: 0,
         funcs: Func[],
         func_slots: u64[],
         func_keys: u64[],
