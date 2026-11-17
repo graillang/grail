@@ -1,5 +1,10 @@
 ## Unreleased
 
+- Fixed: a single-run build of a program whose module's text comes in two parts (its generic
+  specialisations are emitted after the rest) could give two inlined copies of one body the same
+  return label, and the output did not assemble. Each unit now numbers its inline sites across all
+  its parts; `split-test` checks that no assembly it builds defines a label twice.
+
 - Fixed: the internal assembler refused `.hidden` (the runtime's `rt_sites_fill`), so every LLVM
   release build failed at `grail asm`. It now takes `.hidden`, `.protected`, `.internal` and
   `.comm`, and `.word` is 32 bits on AArch64. `tests/asm/` holds every ELF directive the
