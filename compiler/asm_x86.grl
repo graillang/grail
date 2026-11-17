@@ -2387,9 +2387,15 @@ fn finish<a>(o: (&a mut A)) -> Result {
     for i in o.sz_sym.len() {
         sym := o.sz_sym[i];
         end := o.sz_end[i];
-        if o.sym_sec[sym] == o.sym_sec[end] {
-            o.sym_size[sym] = sym_final(&o, &pre, end) - sym_final(&o, &pre, sym);
+        // As LLVM: the two ends must be in one section ("size expression must be absolute").
+        if o.sym_sec[sym] != o.sym_sec[end] {
+            mut said = view("size expression must be absolute: `.size ").copy();
+            said.append(view(o.sym_name[sym]));
+            said.append(view("` is measured from another section"));
+            fail(&mut o, view(said));
+            return Result { object: u8[], error: o.err.copy(), units: u8[], replayed: 0, encoded: 0 };
         }
+        o.sym_size[sym] = sym_final(&o, &pre, end) - sym_final(&o, &pre, sym);
     }
     obj := object(&mut o, &pre, &r_sec, &r_off, &r_type, &r_sym, &r_add);
     return Result { object: obj, error: u8[], units: exchange(&mut o.units_out, u8[]), replayed: o.replayed, encoded: o.encoded };
