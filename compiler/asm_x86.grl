@@ -261,6 +261,14 @@ pub struct A {
     units_on: u64,
     replayed: u64,
     encoded: u64,
+    // Instruction records (`Rec`): `capture` turns instruction lines into records (and every other
+    // line into a text row) instead of encoding them; the capture's prefix byte and label span.
+    capture: u64,
+    cap: Rec,
+    cap_pre: u64,
+    cap_instr: u64,
+    cap_label_a: u64,
+    cap_label_e: u64,
     // Whether the line just read may be remembered: an instruction or numeric data, no label.
     cacheable: u64,
     err: u8[]
@@ -577,6 +585,12 @@ pub fn new() -> A {
         lc_count: 0,
         lc_pool: u8[],
         cacheable: 0,
+        capture: 0,
+        cap: rec_new(),
+        cap_pre: 0,
+        cap_instr: 0,
+        cap_label_a: 0,
+        cap_label_e: 0,
         atoms: 0,
         def_log: u64[],
         attr_log: u64[],
@@ -1661,6 +1675,7 @@ fn atom_line<a>(o: (&a mut A)) {
     o.src = outer;
     o.at = le;
     o.le = le;
+    o.cap_instr = 1;
 }
 
 fn label<a>(o: (&a mut A), a0: u64, e: u64) {
@@ -1683,6 +1698,26 @@ fn label<a>(o: (&a mut A), a0: u64, e: u64) {
 }
 
 fn read_line<a>(o: (&a mut A)) {
+    if o.capture == 0 {
+        read_line_body(&mut o);
+        return ();
+    }
+    // Capture: an instruction line becomes a record (its label, if any, a text row before it);
+    // any other line a text row as it stands.
+    saved := o.cap_instr;
+    o.cap_instr = 0;
+    o.cap_label_a = 0;
+    o.cap_label_e = 0;
+    start := o.at;
+    end := o.le;
+    read_line_body(&mut o);
+    if (o.cap_instr == 0) && (o.err.len() == 0) {
+        rec_text(&mut o, start, end);
+    }
+    o.cap_instr = saved;
+}
+
+fn read_line_body<a>(o: (&a mut A)) {
     skip(&mut o);
     if o.at >= o.le {
         return ();
@@ -1700,6 +1735,8 @@ fn read_line<a>(o: (&a mut A)) {
         i += 1;
     }
     if (i < o.le) && (o.src[i] == ':') && (i > o.at) {
+        o.cap_label_a = o.at;
+        o.cap_label_e = i + 1;
         o.cacheable = 0;
         label(&mut o, o.at, i);
         o.at = i + 1;
@@ -1958,6 +1995,24 @@ pub fn command<a>(args: (&a u8[][])) -> u64 {
         }
         return command(&rest);
     }
+    // `--records IN.s -o OUT.o`: the instruction-record path (in-memory-ir S4) - the text's lines
+    // turned into records, the object assembled from those (x86-64 ELF).
+    if (args.len() == 4) && at_word(view(args[0]), 0, args[0].len(), view("--records")) {
+        text := host::read_file(view(args[1]));
+        recs := records_of(0, text);
+        r := assemble_records(0, &recs);
+        if r.error.len() != 0 {
+            mut said = view("grail asm: ").copy();
+            said.append(view(r.error));
+            said.push(10);
+            host::print(view(said));
+            return 1;
+        }
+        if host::write_file(view(args[3]), view(r.object)) != 0 {
+            return 1;
+        }
+        return 0;
+    }
     // `--units PACK`: replay the function units PACK holds and write this build's there (S5).
     mut pack = u8[];
     if (args.len() == 5) && at_word(view(args[3]), 0, args[3].len(), view("--units")) {
@@ -2050,6 +2105,14 @@ fn run<a>(o: (&a mut A)) -> Result {
             e += 1;
         }
         o.line += 1;
+        if o.capture != 0 {
+            o.at = a0;
+            o.ls = a0;
+            o.le = e;
+            read_line(&mut o);
+            a0 = e + 1;
+            continue;
+        }
         if (o.units_on != 0) && chunk_line(&o, a0, e) && boundary_ok(&o) {
             chunk_finish(&mut o, a0);
             end := chunk_extent(&mut o, a0);
@@ -2124,6 +2187,12 @@ fn run<a>(o: (&a mut A)) -> Result {
         }
         a0 = e + 1;
     }
+    return finish(&mut o);
+}
+
+// After the last line: sections, constants, layout, fixups, the object.
+fn finish<a>(o: (&a mut A)) -> Result {
+    n := o.src.len();
     chunk_finish(&mut o, n);
     // Every section's bytes back in its slot.
     last := exchange(&mut o.buf, u8[]);
@@ -3424,12 +3493,16 @@ fn instruction<a>(o: (&a mut A), first: u64) {
     take_loc(&mut o);
     cv_take(&mut o);
     mut id = first;
+    o.cap_pre = 0;
     if (id == I_LOCK) || (id == I_REP) {
         // `lock` and `rep` are prefixes of the instruction that follows on the line.
         if id == I_LOCK {
-            o.buf.push(0xf0);
+            o.cap_pre = 0xf0;
         } else {
-            o.buf.push(0xf3);
+            o.cap_pre = 0xf3;
+        }
+        if o.capture == 0 {
+            o.buf.push(o.cap_pre);
         }
         skip(&mut o);
         e := name_end(&mut o);
@@ -3463,6 +3536,16 @@ fn instruction<a>(o: (&a mut A), first: u64) {
     if o.err.len() != 0 {
         return ();
     }
+    if o.capture != 0 {
+        capture_instruction(&mut o, id);
+        return ();
+    }
+    execute(&mut o, id);
+}
+
+// The encoding of instruction `id` from the operand state (`nops`, `ok`, `oreg`, `m_*`, `d_*`,
+// `im_*`) - filled by the text reader above or from an instruction record (`Rec`).
+fn execute<a>(o: (&a mut A), id: u64) {
     if id == I_MOVQ {
         mov(&mut o);
     } else if id == I_CALL {
@@ -5711,4 +5794,269 @@ fn macho_object<a, c>(o: (&a mut A), r_sec: (&c u64[]), r_off: (&c u64[]), r_typ
         }
     }
     return macho::write(&out);
+}
+
+// ---- instruction records (docs/design/in-memory-ir.md, S4) ----------------------------------------
+// An x86 instruction as the optimiser holds it, encoded without text: one row per line of a stream.
+// A row with `mn` 0 is a text line (`ls..le` in the text buffer: labels, directives, `.loc`);
+// otherwise `mn` is the instruction's I_ id, `pre` a lock/rep prefix byte, and per operand j `kj`
+// (1 register, 2 immediate, 3 memory, 4 symbol - a call or jump target, 5 `*%reg`) with `rj` the
+// register (number + 32 * class: 1 byte, 2 word, 4 dword, 8 qword, 16 xmm). The one memory
+// operand: base/index (register numbers, 99 none), scale (log2), seg (0x64 for %fs, else 0), rip;
+// its displacement `dhas` (present), a symbol `dsym` (offset + 1 in the pool, 0 none) of length
+// `dlen` with `dneg` (negated), `ddiv` (divisor, 1 none), `dadd` (the constant) and `dmod`
+// (1 @tpoff). The immediate likewise: `isym`/`ilen`/`ineg`/`idiv`/`iadd`.
+pub struct Rec {
+    mn: u64[],
+    pre: u64[],
+    k0: u64[],
+    k1: u64[],
+    k2: u64[],
+    r0: u64[],
+    r1: u64[],
+    r2: u64[],
+    base: u64[],
+    index: u64[],
+    scale: u64[],
+    seg: u64[],
+    rip: u64[],
+    dhas: u64[],
+    dsym: u64[],
+    dlen: u64[],
+    dneg: u64[],
+    ddiv: u64[],
+    dadd: u64[],
+    dmod: u64[],
+    isym: u64[],
+    ilen: u64[],
+    ineg: u64[],
+    idiv: u64[],
+    iadd: u64[],
+    ls: u64[],
+    le: u64[],
+    // The symbol names the rows name, and the text rows' lines (each ending in a newline).
+    pool: u8[],
+    text: u8[]
+}
+
+pub fn rec_new() -> Rec {
+    return Rec {
+        mn: u64[],
+        pre: u64[],
+        k0: u64[],
+        k1: u64[],
+        k2: u64[],
+        r0: u64[],
+        r1: u64[],
+        r2: u64[],
+        base: u64[],
+        index: u64[],
+        scale: u64[],
+        seg: u64[],
+        rip: u64[],
+        dhas: u64[],
+        dsym: u64[],
+        dlen: u64[],
+        dneg: u64[],
+        ddiv: u64[],
+        dadd: u64[],
+        dmod: u64[],
+        isym: u64[],
+        ilen: u64[],
+        ineg: u64[],
+        idiv: u64[],
+        iadd: u64[],
+        ls: u64[],
+        le: u64[],
+        pool: u8[],
+        text: u8[]
+    };
+}
+
+fn rec_row<a>(r: (&a mut Rec), mn: u64) {
+    r.mn.push(mn);
+    r.pre.push(0);
+    r.k0.push(0);
+    r.k1.push(0);
+    r.k2.push(0);
+    r.r0.push(0);
+    r.r1.push(0);
+    r.r2.push(0);
+    r.base.push(NONE);
+    r.index.push(NONE);
+    r.scale.push(0);
+    r.seg.push(0);
+    r.rip.push(0);
+    r.dhas.push(0);
+    r.dsym.push(0);
+    r.dlen.push(0);
+    r.dneg.push(0);
+    r.ddiv.push(1);
+    r.dadd.push(0);
+    r.dmod.push(0);
+    r.isym.push(0);
+    r.ilen.push(0);
+    r.ineg.push(0);
+    r.idiv.push(1);
+    r.iadd.push(0);
+    r.ls.push(0);
+    r.le.push(0);
+}
+
+fn rec_text<a>(o: (&a mut A), a0: u64, e: u64) {
+    rec_row(&mut o.cap, 0);
+    j := o.cap.mn.len() - 1;
+    o.cap.ls[j] = o.cap.text.len();
+    o.cap.text.append(o.src[a0: e]);
+    o.cap.le[j] = o.cap.text.len();
+    o.cap.text.push(10);
+}
+
+// A symbol's name into the pool: its offset + 1.
+fn pool_name<a>(o: (&a mut A), sym1: u64) -> u64 {
+    if sym1 == 0 {
+        return 0;
+    }
+    at := o.cap.pool.len();
+    o.cap.pool.append(view(o.sym_name[sym1 - 1]));
+    return at + 1;
+}
+
+fn capture_instruction<a>(o: (&a mut A), id: u64) {
+    if o.cap_label_e != 0 {
+        rec_text(&mut o, o.cap_label_a, o.cap_label_e);
+    }
+    o.cap_instr = 1;
+    rec_row(&mut o.cap, id);
+    j := o.cap.mn.len() - 1;
+    o.cap.pre[j] = o.cap_pre;
+    o.cap.k0[j] = o.ok[0];
+    o.cap.k1[j] = o.ok[1];
+    o.cap.k2[j] = o.ok[2];
+    o.cap.r0[j] = o.oreg[0];
+    o.cap.r1[j] = o.oreg[1];
+    o.cap.r2[j] = o.oreg[2];
+    if (o.ok[0] == 3) || (o.ok[1] == 3) || (o.ok[2] == 3) || (o.ok[0] == 4) || (o.ok[1] == 4) || (o.ok[2] == 4) {
+        o.cap.base[j] = o.m_base;
+        o.cap.index[j] = o.m_index;
+        o.cap.scale[j] = o.m_scale;
+        o.cap.seg[j] = o.m_seg;
+        o.cap.rip[j] = o.m_rip;
+        o.cap.dhas[j] = o.d_has;
+        if o.d_sym != 0 {
+            o.cap.dlen[j] = o.sym_name[o.d_sym - 1].len();
+        }
+        o.cap.dsym[j] = pool_name(&mut o, o.d_sym);
+        o.cap.dneg[j] = o.d_neg;
+        o.cap.ddiv[j] = o.d_div;
+        o.cap.dadd[j] = o.d_add;
+        o.cap.dmod[j] = o.d_mod;
+    }
+    if (o.ok[0] == 2) || (o.ok[1] == 2) || (o.ok[2] == 2) {
+        if o.im_sym != 0 {
+            o.cap.ilen[j] = o.sym_name[o.im_sym - 1].len();
+        }
+        o.cap.isym[j] = pool_name(&mut o, o.im_sym);
+        o.cap.ineg[j] = o.im_neg;
+        o.cap.idiv[j] = o.im_div;
+        o.cap.iadd[j] = o.im_add;
+    }
+}
+
+// The rows a text's lines make (the self-test's input, and what the optimiser fills directly).
+pub fn records_of(target: u64, text: u8[]) -> Rec {
+    mut o = new();
+    if target == 3 {
+        o.coff = 1;
+        named_text_coff(&mut o);
+    }
+    o.capture = 1;
+    o.src = text;
+    run(&mut o);
+    return exchange(&mut o.cap, rec_new());
+}
+
+fn pool_symbol<a, b>(o: (&a mut A), pool: &b [u8], at1: u64, len: u64) -> u64 {
+    if at1 == 0 {
+        return 0;
+    }
+    name := pool[at1 - 1: at1 - 1 + len].copy();
+    outer := exchange(&mut o.src, name);
+    o.nh_a = 1;
+    o.nh_e = 0;
+    id := symbol(&mut o, 0, len);
+    o.src = outer;
+    o.nh_a = 1;
+    o.nh_e = 0;
+    return id + 1;
+}
+
+// One object from instruction records: text rows read as lines, instruction rows encoded from
+// their fields - the same encoder the text reader feeds (`execute`). Target 0 (x86-64 ELF) or 3
+// (Windows x86-64 COFF).
+pub fn assemble_records<a>(target: u64, r: (&a Rec)) -> Result {
+    mut o = new();
+    if target == 3 {
+        o.coff = 1;
+        named_text_coff(&mut o);
+    }
+    o.src = r.text.copy();
+    for j in r.mn.len() {
+        if o.err.len() != 0 {
+            break;
+        }
+        if r.mn[j] == 0 {
+            o.line += 1;
+            o.at = r.ls[j];
+            o.ls = r.ls[j];
+            o.le = r.le[j];
+            read_line(&mut o);
+            continue;
+        }
+        if o.cur != 0 {
+            fail(&mut o, view("an instruction outside .text"));
+            break;
+        }
+        o.ls = 0;
+        o.le = 0;
+        take_loc(&mut o);
+        cv_take(&mut o);
+        if r.pre[j] != 0 {
+            o.buf.push(r.pre[j]);
+        }
+        o.ok[0] = r.k0[j];
+        o.ok[1] = r.k1[j];
+        o.ok[2] = r.k2[j];
+        o.oreg[0] = r.r0[j];
+        o.oreg[1] = r.r1[j];
+        o.oreg[2] = r.r2[j];
+        mut n = 0;
+        if r.k0[j] != 0 {
+            n = 1;
+        }
+        if r.k1[j] != 0 {
+            n = 2;
+        }
+        if r.k2[j] != 0 {
+            n = 3;
+        }
+        o.nops = n;
+        o.m_base = r.base[j];
+        o.m_index = r.index[j];
+        o.m_scale = r.scale[j];
+        o.m_seg = r.seg[j];
+        o.m_rip = r.rip[j];
+        o.d_has = r.dhas[j];
+        o.d_sym = pool_symbol(&mut o, view(r.pool), r.dsym[j], r.dlen[j]);
+        o.d_neg = r.dneg[j];
+        o.d_div = r.ddiv[j];
+        o.d_add = r.dadd[j];
+        o.d_mod = r.dmod[j];
+        o.im_sym = pool_symbol(&mut o, view(r.pool), r.isym[j], r.ilen[j]);
+        o.im_neg = r.ineg[j];
+        o.im_div = r.idiv[j];
+        o.im_add = r.iadd[j];
+        execute(&mut o, r.mn[j]);
+    }
+    return finish(&mut o);
 }

@@ -197,6 +197,17 @@ if (import.meta.main) {
       console.log(result ? `FAIL ${name}: ${result}` : `ok ${name}`);
       if (result) bad++;
     }
+    // The instruction-record path (in-memory-ir S4): every x86-64 ELF file's lines turned into
+    // records and assembled from those must give the text path's object byte for byte.
+    for (const name of readdirSync(dir).filter(f => /(^|-)x86_64\.s$/.test(f) && !/windows/.test(f)).sort()) {
+      const plain = join(work, `${name}.plain.o`);
+      const recs = join(work, `${name}.records.o`);
+      const a = run([...assembler, join(dir, name), '-o', plain]);
+      const b = run([...assembler, '--records', join(dir, name), '-o', recs]);
+      const same = a.status === 0 && b.status === 0 && readFileSync(plain).equals(readFileSync(recs));
+      console.log(same ? `ok ${name} (records)` : `FAIL ${name} (records): ${b.stdout}${b.stderr}`);
+      if (!same) bad++;
+    }
     process.exit(bad ? 1 : 0);
   }
   let failed = 0;
