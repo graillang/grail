@@ -206,3 +206,30 @@ What still has no expression: pointer arithmetic (an array of dynamic length is 
 record with its count checked afterwards). A C callback writes into the struct C hands it by taking
 `p: &mut R`, and `byval` records work on every ABI, Windows included. `docs/ffi.md` states each
 remaining limit with the diagnostic it produces.
+
+## Link inputs, and per-target bindings
+
+`lib "name"` is the compiler's statement of what the image needs: a bare name becomes `-lNAME`, a
+relative `.o`/`.a`/`.so` resolves beside the declaring source, and a flag passes through. The
+request is made when the declaration is **parsed**, not when it is called, and an unreferenced
+function is still emitted - so a binding placed in a module that is compiled into every program puts
+its library on every link line, whether the program uses it or not. A binding that should be
+optional belongs in a module the program imports only when it wants it (`lib/tls.grl` is the worked
+example: `use tls;` is what puts OpenSSL on the link line).
+
+One program is built for one target, but a module is compiled for every target the program is
+built for, so a binding that names a platform library needs a static branch:
+
+```grl
+@if target.os == .linux {
+    extern "C" lib "ssl" fn SSL_CTX_new(method: u64) -> u64;
+} else @if target.os == .windows {
+    extern "C" lib "secur32" fn AcquireCredentialsHandleA(/* ... */) -> i32;
+}
+```
+
+The branch not taken is parsed but neither type-checked nor emitted, so it asks the linker for
+nothing. On Windows the pair in the note is what the driver needs (`// grail-link: import secur32
+AcquireCredentialsHandleA`); on Mach-O targets a `lib` request is dropped rather than resolved
+against a framework, which is one reason `lib/tls.grl` refuses macOS for now: its plan, in the design
+note, needs `-framework Security`.

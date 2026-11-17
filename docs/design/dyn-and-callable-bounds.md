@@ -100,3 +100,25 @@ bounds alone fix the 2x; the 114x needs the adapters to be types. Both are propo
   type does not match the bound (refused); `F: Send` with a handle capture (refused, as P06);
   `Map<I, F>` over `refs(&v)` moved into a job (refused, Q8 rule); an `asm` check that `vecs::map` with
   a literal closure has no indirect call.
+
+## 3. Step 2a, built: no per-element waste outside the `T?`
+
+`parts.grl`, 10M `u64`, load average about 45 (numbers are noisy; ratios hold):
+
+| | before | after |
+|---|---|---|
+| `iter::of(mk(n))` (building the vector included) | 633 ms (2142 ms with the first in-place reverse) | 114 ms |
+| `.fold(..)` alone | 709 ms | 973 ms (noise: the pop loop itself went 543 -> 601) |
+| plain `while let Some(x) = v.pop()` | 543 ms | 601 ms |
+
+- `of` reversed the vector by popping and pushing every element: one `T?` allocated per element on
+  top of the one `next` returns. It now reverses in place. The `vecs` methods had the same loop twice
+  over (two options per element); they now reverse in place and take with `pop()!`, which builds no
+  option.
+- `v.reverse()` was a call to the bounds-checked `rt_vec_swap` and an `rt_div` per pair; it is a
+  two-pointer loop.
+- What remains is **the `T?` itself**: `v.pop()` and every `Iter.next` build `Some(x)` with
+  `rt_enum`, a 16-byte heap record allocated and freed per element. A plain pop loop costs about 55 ns
+  per element, and `fold` over an `Iter` is that plus one closure call. No library change removes
+  it; an unboxed `T?` for word-sized `T` (tag and payload in two registers, unboxed stage 3) does.
+  Until then the erased `Iter` cannot get near the hand loop, which is the case for 2b/2c.
