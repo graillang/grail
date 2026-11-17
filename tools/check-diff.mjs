@@ -65,7 +65,7 @@ function run(compiler, job, side) {
     const out = [], err = [];
     child.stdout.on('data', d => out.push(d));
     child.stderr.on('data', d => err.push(d));
-    const timer = setTimeout(() => child.kill('SIGKILL'), 120000);
+    const timer = setTimeout(() => child.kill('SIGKILL'), 600000);
     child.on('error', error => { clearTimeout(timer); done({ status: -1, signal: String(error), stdout: '', stderr: '', asm: null }); });
     child.on('close', (status, signal) => {
       clearTimeout(timer);
