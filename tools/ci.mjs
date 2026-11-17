@@ -621,6 +621,7 @@ function lint() {
   check('LSP server exists', existsSync(join(root, 'tools/lsp/main.grl')));
   check('LSP stdio test exists', existsSync(join(root, 'tools/lsp-test.mjs')));
   check('CI runs the LSP stdio test', readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8').includes('tools/lsp-test.mjs'));
+  check('the gate runs the package manager suite', /^for t in [^;\n]*\bpkg-test\b[^;\n]*; do$/m.test(readFileSync(join(root, 'tools/gate.sh'), 'utf8')));
   check('the gate runs the LSP stdio test', /^for t in [^;\n]*\blsp-test\b[^;\n]*; do$/m.test(readFileSync(join(root, 'tools/gate.sh'), 'utf8')));
   check('VS Code extension manifest exists', existsSync(join(root, 'editors/vscode/package.json')));
   check('TextMate grammar for .grl exists', existsSync(join(root, 'editors/vscode/syntaxes/grail.tmLanguage.json')));
