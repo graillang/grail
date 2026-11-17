@@ -2076,6 +2076,29 @@
     "stdout": "parse_f64: 2068 cases, 0 wrong\n"
   },
   {
+    "name": "strings-views-split-trim-lines-append-format",
+    "files": [
+      "compiler/tests/text_views.grl",
+      "lib/strings.grl",
+      "lib/float.grl",
+      "lib/core.grl",
+      "lib/iter.grl"
+    ],
+    "stdout": "4 [x] [] [y] []\n1\n<7><8>\n[hi] [hi ] [  hi]\n4 [one] [two] [] [three]\n3 a+bc+d\n3 [a] [b]\ns:2+3=5;étrue\n4 [42]\n"
+  },
+  {
+    "name": "strings-reject-view-outlives-text",
+    "source": "use strings;\nfn first() -> u64 {\n    text := \"a,b\".copy();\n    parts := text.split(44);\n    drop(text);\n    return parts[0].len();\n}\nfn main() { println(first()); }\n",
+    "reject": true,
+    "diagnostic": "drop of moved or unavailable value"
+  },
+  {
+    "name": "strings-reject-mutate-text-under-view",
+    "source": "use strings;\nfn main() {\n    mut text = \"a,b\".copy();\n    parts := text.split(44);\n    text.push(99);\n    println(parts.len());\n}\n",
+    "reject": true,
+    "diagnostic": "borrow"
+  },
+  {
     "name": "strings-library",
     "files": [
       "compiler/tests/strings.grl",
@@ -3116,6 +3139,51 @@
     "source": "// f32 narrowing (optimize.grl `xmm_narrow`) holds a promoted slot as binary32 only when every store\n// into it is a widened f32 or zero. `two: f32 := 2.0` is stored from the immediate\n// $4611686018427387904 (19 digits), which the optimiser's immediate reader cannot read and reports\n// as 0 - once taken for zero, so the slot was narrowed and 2.0 read back as 0.0 (meshopt's\n// quadric_error_attr, which changed Abundance's abgeo mesh digests). 387 with the bug.\nstruct Q {\n    positions: f32[],\n    attributes: f32[],\n    gradients: f32[],\n    attribute: f32[],\n    count: u64\n}\nfn eval(q: (&f32[]), at: u64, x: f32, y: f32, z: f32) -> f32 {\n    return q[at] * x + q[at + 1] * y + q[at + 2] * z;\n}\nfn error_attr<a>(st: (&a Q), v: u64, t: u64) -> f32 {\n    acount := st.count;\n    qa := v * 11;\n    x := st.positions[t * 3];\n    y := st.positions[t * 3 + 1];\n    z := st.positions[t * 3 + 2];\n    mut r = eval(&st.attribute, qa, x, y, z);\n    two: f32 := 2.0;\n    for k in acount {\n        a := st.attributes[t * acount + k];\n        g0 := (v * acount + k) * 4;\n        gx := st.gradients[g0];\n        gy := st.gradients[g0 + 1];\n        gz := st.gradients[g0 + 2];\n        gw := st.gradients[g0 + 3];\n        g: f32 := x * gx + y * gy + z * gz + gw;\n        r = r + a * (a * st.attribute[qa + 10] - two * g);\n    }\n    return r.abs();\n}\nfn main() {\n    mut st = Q { positions: f32[], attributes: f32[], gradients: f32[], attribute: f32[], count: 3 };\n    for i in 24 {\n        st.positions.push(f32(i64(i)) * 0.25);\n        st.attributes.push(f32(i64(i)) * 0.5 + 1.0);\n        st.attribute.push(f32(i64(i)) * 0.125);\n    }\n    for i in 48 {\n        st.gradients.push(f32(i64(i % 7)) * 0.75 - 1.0);\n    }\n    mut total: f32 = 0.0;\n    for v in 2 {\n        for t in 3 {\n            total = total + error_attr(&st, v, t);\n        }\n    }\n    println(total);\n}\n",
     "stdout": "178.1875\n",
     "note": "a 19-digit f32 constant immediate is not zero: the narrowing pass took imm_value's 'cannot read' (0) for the value 0"
+  },
+  {
+    "name": "raw-address-offset-folded-size-checked",
+    "source": "unsafe module runtime;\n// The address operand of a raw load or store written as `p + k` with a literal k is address\n// formation: no overflow check, and a field load is one instruction (`movq 16(%rax),%rax`). Integer\n// arithmetic in the same unsafe module still follows the build's overflow mode: the size `n * 8`\n// overflows and aborts in a checked build.\nfn field(p: u64) -> u64 {\n    return raw_load(p + 16);\n}\nfn size(n: u64) -> u64 {\n    return n * 8;\n}\nfn main() {\n    p := raw_map(4096);\n    raw_store(p + 16, 42);\n    println(field(p));\n    println(size(3));\n    println(size(4611686018427387904));\n}\n",
+    "stdout": "42\n24\n",
+    "signal": "SIGABRT",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asm": [
+      {
+        "in": "field",
+        "text": "movq 16(%rax),%rax"
+      },
+      {
+        "in": "size",
+        "text": "jnc"
+      }
+    ],
+    "asmAbsent": [
+      {
+        "in": "field",
+        "text": "rt_abort"
+      },
+      {
+        "in": "field",
+        "text": "addq"
+      }
+    ],
+    "note": "docs/design/decisions 'raw address offsets': raw_load(p + 16) is address formation (no check, folded); n * 8 in the same unsafe module is checked"
+  },
+  {
+    "name": "raw-address-offset-behaviour",
+    "source": "unsafe module runtime;\n// The address operand of a raw load or store written as `p + k` with a literal k is address\n// formation: no overflow check, and a field load is one instruction (`movq 16(%rax),%rax`). Integer\n// arithmetic in the same unsafe module still follows the build's overflow mode: the size `n * 8`\n// overflows and aborts in a checked build.\nfn field(p: u64) -> u64 {\n    return raw_load(p + 16);\n}\nfn size(n: u64) -> u64 {\n    return n * 8;\n}\nfn main() {\n    p := raw_map(4096);\n    raw_store(p + 16, 42);\n    println(field(p));\n    println(size(3));\n    println(size(4611686018427387904));\n}\n",
+    "stdout": "42\n24\n",
+    "signal": "SIGABRT",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "the raw address offset rule on every target and backend: the field reads 42, the overflowing size aborts"
   },
   {
     "name": "raw-module-sized-integer-arithmetic",
@@ -17871,5 +17939,106 @@
       "aarch64",
       "riscv64"
     ]
+  },
+  {
+    "name": "array-simd-loads-from-fields",
+    "note": "f32x4::load takes a fixed-size array reference: a `[f32; 16]` field and the `[f32; 4]` rows of a `[[f32; 4]; 4]` field are loaded in place, no copy (fixed-arrays.md section 6; simd.md); an out-of-range lane is the load's one bounds check",
+    "source": "struct Mat {\n    m: [f32; 16],\n    rows: [[f32; 4]; 4]\n}\nfn total(x: &Mat) -> f32 {\n    mut acc = f32x4::splat(0.0);\n    for i in 4 {\n        acc = acc + f32x4::load(&x.m, i * 4);\n    }\n    return acc.sum();\n}\nfn rowsum(x: &Mat) -> f32 {\n    mut acc = f32x4::splat(0.0);\n    for r in 4 {\n        acc = acc + f32x4::load(&x.rows[r], 0);\n    }\n    return acc.sum();\n}\nfn main() {\n    mut m = Mat { m: [1.0; 16], rows: [[2.0; 4]; 4] };\n    m.m[5] = 3.0;\n    println(\"{} {}\", total(&m), rowsum(&m));\n}\n",
+    "stdout": "18 32\n"
+  },
+  {
+    "name": "closure-literals-are-distinct-types",
+    "note": "each closure expression is a type of its own: a `Keep<F>` built from one cannot be assigned one built from another (found by /root/call_abi; it was accepted, and the call through it ran the first closure's body - a miscompile, and with a borrowing second closure a use after free)",
+    "source": "struct Keep<F> { f: F }\nfn keep<F: Fn() -> u64>(f: F) -> Keep<F> { return Keep { f: f }; }\nfn main() { v := u64[1, 2, 3, 4, 5]; mut k = keep(|| -> u64 0); k = keep(|| -> u64 v.len()); g := &k.f; println(g()); }\n",
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "closure-literals-are-distinct-types-borrow",
+    "note": "...the borrow-escape shape of the same bug: the second closure borrowed a vector dropped before the call",
+    "source": "struct Keep<F> { f: F }\nfn keep<F: Fn() -> u64>(f: F) -> Keep<F> { return Keep { f: f }; }\nfn main() { mut k = keep(|| -> u64 7); { v := u64[1, 2, 3]; k = keep(|| -> u64 v.len()); } g := &k.f; println(g()); }\n",
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "callable-struct-result-keeps-loans",
+    "note": "a closure for F stored in a returned `Keep<F>` keeps its loans: the borrowed vector cannot move while the Keep lives",
+    "source": "struct Keep<F> { f: F }\nfn keep<F: Fn() -> u64>(f: F) -> Keep<F> { return Keep { f: f }; }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() { v := u64[1, 2]; r := &v; k := keep(|| -> u64 r.len()); println(eat(v)); g := &k.f; println(g()); }\n",
+    "reject": true,
+    "diagnostic": "move of unavailable or borrowed value"
+  },
+  {
+    "name": "callable-returned-f-keeps-loans",
+    "note": "...and returned as F itself",
+    "source": "fn twice<F: Fn() -> u64>(f: F) -> F { return f; }\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() { v := u64[1, 2]; r := &v; g := twice(|| -> u64 r.len()); println(eat(v)); println(g()); }\n",
+    "reject": true,
+    "diagnostic": "move of unavailable or borrowed value"
+  },
+  {
+    "name": "callable-struct-result-plain",
+    "note": "plain use of a Keep<F>",
+    "source": "struct Keep<F> { f: F }\nfn keep<F: Fn() -> u64>(f: F) -> Keep<F> { return Keep { f: f }; }\nfn main() { v := u64[1, 2]; k := keep(|| -> u64 v.len()); g := &k.f; println(g()); }\n",
+    "stdout": "2\n"
+  },
+  {
+    "name": "split-at-mut-halves",
+    "note": "split_at_mut (simd-layout-parallel-loops.md 4.3): two exclusive halves of one slice, used at once and passed on, split again; the vector is whole again when they end",
+    "source": "fn fill(s: &mut [u64], v: u64) {\n    for i in s.len() {\n        s[i] = v + i;\n    }\n}\nfn main() {\n    mut xs = u64[0; 10];\n    {\n        left, right := split_at_mut(&mut xs[0: 10], 4);\n        fill(&mut left[:], 100);\n        fill(&mut right[:], 200);\n        left[0] = right[0];\n        println(\"{} {}\", left.len(), right.len());\n        a, b := split_at_mut(right, 3);\n        a[0] = 7;\n        b[0] = 8;\n    }\n    println(xs);\n}\n",
+    "stdout": "4 6\n[200, 101, 102, 103, 7, 201, 202, 8, 204, 205]\n"
+  },
+  {
+    "name": "split-at-mut-divide-and-conquer",
+    "note": "a recursive divide and conquer over exclusive halves: no index reasoning in the checker",
+    "source": "fn bump(s: &mut [u64], depth: u64) {\n    if (s.len() < 2) || (depth == 0) {\n        for i in s.len() {\n            s[i] += depth + 1;\n        }\n        return;\n    }\n    mid := s.len() / 2;\n    l, r := split_at_mut(s, mid);\n    bump(l, depth - 1);\n    bump(r, depth - 1);\n}\nfn main() {\n    mut xs = u64[0; 8];\n    bump(&mut xs[0: 8], 2);\n    println(xs);\n}\n",
+    "stdout": "[1, 1, 1, 1, 1, 1, 1, 1]\n"
+  },
+  {
+    "name": "reject-split-at-mut-parent-vector-used",
+    "reject": true,
+    "note": "the vector is out of reach while a half lives",
+    "source": "fn main() {\n    mut xs = u64[0; 10];\n    left, right := split_at_mut(&mut xs[0: 10], 4);\n    xs[0] = 1;\n    left[0] = 2;\n}\n",
+    "diagnostic": "borrow conflicts with active access"
+  },
+  {
+    "name": "reject-split-at-mut-parent-slice-used",
+    "reject": true,
+    "note": "the slice that was split is suspended while its halves live",
+    "source": "fn main() {\n    mut xs = u64[0; 10];\n    s := &mut xs[0: 10];\n    left, right := split_at_mut(s, 4);\n    s[0] = 1;\n    left[0] = 2;\n}\n",
+    "diagnostic": "reference is suspended or expired"
+  },
+  {
+    "name": "reject-split-at-mut-overlapping-resplit",
+    "reject": true,
+    "note": "a second split of the same storage while the first halves live overlaps them",
+    "source": "fn main() {\n    mut xs = u64[0; 10];\n    left, right := split_at_mut(&mut xs[0: 10], 4);\n    l2, r2 := split_at_mut(&mut xs[0: 10], 2);\n    left[0] = 2;\n}\n",
+    "diagnostic": "borrow conflicts with active access"
+  },
+  {
+    "name": "reject-split-at-mut-overlap-inside-half",
+    "reject": true,
+    "note": "the sibling rule is between the two halves only: two overlapping borrows inside one half still conflict",
+    "source": "fn main() {\n    mut xs = u64[0; 10];\n    left, right := split_at_mut(&mut xs[0: 10], 4);\n    x := &mut left[0: 2];\n    y := &mut left[1: 3];\n    x[0] = 3;\n}\n",
+    "diagnostic": ""
+  },
+  {
+    "name": "reject-split-at-mut-shared",
+    "reject": true,
+    "source": "fn main() {\n    xs := u64[0; 10];\n    left, right := split_at_mut(&xs[0: 10], 4);\n}\n",
+    "diagnostic": "split_at_mut takes an exclusive slice"
+  },
+  {
+    "name": "split-at-mut-mid-past-end-aborts",
+    "backends": [
+      "native"
+    ],
+    "source": "fn main() {\n    mut xs = u64[0; 10];\n    k: u64 = 11;\n    left, right := split_at_mut(&mut xs[0: 10], k);\n    println(left.len());\n}\n",
+    "signal": "SIGABRT",
+    "stderr": "error: range 0..11 out of bounds\n"
+  },
+  {
+    "name": "bare-return-with-borrowed-parameter",
+    "note": "a bare `return;` in a function that takes a borrow is not a returned borrow (the unit value was read from slot 0, the first parameter)",
+    "source": "fn bump(s: &mut [u64], depth: u64) {\n    if depth == 0 {\n        return;\n    }\n    s[0] += 1;\n}\nfn main() {\n    mut xs = u64[0; 8];\n    bump(&mut xs[0: 8], 2);\n    println(xs);\n}\n",
+    "stdout": "[1, 0, 0, 0, 0, 0, 0, 0]\n"
   }
 ]
