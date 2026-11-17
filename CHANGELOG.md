@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **`v.iter()` returns a typed `iter::SliceIter`.** Its `fold` is a counted index loop, so
+  `v.iter().map(..).filter(..).fold(..)` runs as one loop over the vector: bench/iterchain goes from
+  1130M to 250M instructions (C 106M), 109 ms to 42 ms. **What changes:** code that named the result
+  type as `iter::Iter<(&T)>` must name `iter::SliceIter<a, T>` (or call `iter::refs(&v)` for the erased
+  form); `for`, `next`, `map`, `filter` and `fold` work as before.
 - **`Iterator::fold`, with internal iteration.** The `Iterator` interface has a default `fold`, and
   the typed adapters `Map` and `Filter` override it to hand a composed callback to the iterator they
   wrap, so a chain runs as its source's single loop rather than a `next` call per item that loops
